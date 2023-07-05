@@ -247,6 +247,8 @@ var (
 
 	// env is the mode we are running in, Mainnet, Testnet or UnsafeDevnet.
 	env common.Environment
+
+	processorWorkerFactor *float64
 )
 
 func init() {
@@ -443,6 +445,8 @@ func init() {
 	gatewayRelayerContract = NodeCmd.Flags().String("gatewayRelayerContract", "", "Address of the smart contract on wormchain to receive relayed VAAs")
 	gatewayRelayerKeyPath = NodeCmd.Flags().String("gatewayRelayerKeyPath", "", "Path to gateway relayer private key for signing transactions")
 	gatewayRelayerKeyPassPhrase = NodeCmd.Flags().String("gatewayRelayerKeyPassPhrase", "", "Pass phrase used to unarmor the gateway relayer key file")
+	
+	processorWorkerFactor = NodeCmd.Flags().Float64("processorWorkerFactor", 0.0, "Multiplier used to compute number of processor workers, 0.0 means single threaded")
 }
 
 var (
@@ -1565,7 +1569,7 @@ func runNode(cmd *cobra.Command, args []string) {
 		node.GuardianOptionAdminService(*adminSocketPath, ethRPC, ethContract, rpcMap),
 		node.GuardianOptionP2P(p2pKey, *p2pNetworkID, *p2pBootstrap, *nodeName, *disableHeartbeatVerify, *p2pPort, *ccqP2pBootstrap, *ccqP2pPort, *ccqAllowedPeers, *gossipAdvertiseAddress, ibc.GetFeatures),
 		node.GuardianOptionStatusServer(*statusAddr),
-		node.GuardianOptionProcessor(),
+		node.GuardianOptionProcessor(*processorWorkerFactor),
 	}
 
 	if shouldStart(publicGRPCSocketPath) {
