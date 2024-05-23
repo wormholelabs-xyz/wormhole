@@ -23,7 +23,7 @@ import {
   contracts,
   Network,
 } from "@wormhole-foundation/sdk-base";
-import { chains } from "@wormhole-foundation/sdk/dist/cjs";
+import { chains } from "@wormhole-foundation/sdk";
 
 export async function execute_injective(
   payload: Payload,
