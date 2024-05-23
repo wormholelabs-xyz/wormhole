@@ -4,7 +4,7 @@ set -euo pipefail
 
 if [ $# == 0 ]
   then
-    chain=ethereum
+    chain=Ethereum
 else
     chain=$1
 fi
