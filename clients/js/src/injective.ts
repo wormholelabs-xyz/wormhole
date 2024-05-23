@@ -17,7 +17,13 @@ import { NETWORKS } from "./consts";
 import { impossible, Payload } from "./vaa";
 import { transferFromInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { tryNativeToUint8Array } from "@certusone/wormhole-sdk/lib/esm/utils";
-import { Chain, contracts, Network } from "@wormhole-foundation/sdk-base";
+import {
+  Chain,
+  chainToChainId,
+  contracts,
+  Network,
+} from "@wormhole-foundation/sdk-base";
+import { chains } from "@wormhole-foundation/sdk/dist/cjs";
 
 export async function execute_injective(
   payload: Payload,
@@ -188,8 +194,8 @@ export async function transferInjective(
     token_bridge,
     tokenAddress,
     amount,
-    dstChain,
-    tryNativeToUint8Array(dstAddress, dstChain)
+    chainToChainId(dstChain),
+    tryNativeToUint8Array(dstAddress, chainToChainId(dstChain))
   );
 
   await signAndSendTx(walletPK, network, msgs);
@@ -291,14 +297,14 @@ export async function queryRegistrationsInjective(
 
   // Query the bridge registration for all the chains in parallel.
   const registrations: (any | null)[][] = await Promise.all(
-    Object.entries(CHAINS)
-      .filter(([cname, _]) => cname !== chain && cname !== "unset")
-      .map(async ([cname, cid]) => [
+    chains
+      .filter((cname) => cname !== chain)
+      .map(async (cname) => [
         cname,
         await (async () => {
           let query_msg = {
             chain_registration: {
-              chain: cid,
+              chain: chainToChainId(cname),
             },
           };
 

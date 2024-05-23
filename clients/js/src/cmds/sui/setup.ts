@@ -196,7 +196,7 @@ export const addSetupCommands: YargsAddCommandsFn = (y: typeof yargs) =>
       dotenv.config({ path: envPath });
 
       const tx = new TransactionBlock();
-      setMaxGasBudgetDevnet("DEVNET", tx);
+      setMaxGasBudgetDevnet("Devnet", tx);
       const registrations: { chain: Chain; module: string }[] = [];
       for (const key in process.env) {
         if (/^REGISTER_(.+)_TOKEN_BRIDGE_VAA$/.test(key)) {
