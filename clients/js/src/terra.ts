@@ -12,7 +12,13 @@ import { NETWORKS } from "./consts";
 import { Payload, impossible } from "./vaa";
 import { transferFromTerra } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
 import { tryNativeToUint8Array } from "@certusone/wormhole-sdk/lib/esm/utils";
-import { Chain, Network, contracts } from "@wormhole-foundation/sdk-base";
+import {
+  Chain,
+  Network,
+  chains,
+  contracts,
+  toChainId,
+} from "@wormhole-foundation/sdk-base";
 
 export async function execute_terra(
   payload: Payload,
@@ -190,8 +196,8 @@ export async function transferTerra(
     token_bridge,
     tokenAddress,
     amount,
-    dstChain,
-    tryNativeToUint8Array(dstAddress, dstChain)
+    toChainId(dstChain),
+    tryNativeToUint8Array(dstAddress, toChainId(dstChain))
   );
   await signAndSendTx(terra, wallet, msgs);
 }
@@ -276,14 +282,14 @@ export async function queryRegistrationsTerra(
 
   // Query the bridge registration for all the chains in parallel.
   const registrations: (string | null)[][] = await Promise.all(
-    Object.entries(CHAINS)
-      .filter(([cname, _]) => cname !== chain && cname !== "unset")
-      .map(async ([cname, cid]) => [
+    chains
+      .filter((cname) => cname !== chain)
+      .map(async (cname) => [
         cname,
         await (async () => {
           let query_msg = {
             chain_registration: {
-              chain: cid,
+              chain: toChainId(cname),
             },
           };
 

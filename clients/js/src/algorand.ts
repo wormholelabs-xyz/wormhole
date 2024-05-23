@@ -2,11 +2,17 @@ import {
   _submitVAAAlgorand,
   signSendAndConfirmAlgorand,
 } from "@certusone/wormhole-sdk/lib/esm/algorand";
-import { Account, Algodv2, mnemonicToSecretKey } from "algosdk";
+import {
+  Account,
+  Algodv2,
+  decodeAddress,
+  encodeAddress,
+  mnemonicToSecretKey,
+} from "algosdk";
 import { NETWORKS } from "./consts";
 import { Payload, impossible } from "./vaa";
 import { transferFromAlgorand } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
-// import { tryNativeToHexString } from "./array";
+import { tryNativeToHexString } from "./array";
 import {
   Chain,
   chainToChainId,
@@ -14,7 +20,7 @@ import {
   Network,
   toChainId,
 } from "@wormhole-foundation/sdk-base";
-import { tryNativeToHexString } from "@certusone/wormhole-sdk";
+import { encoding } from "@wormhole-foundation/sdk";
 
 export async function execute_algorand(
   payload: Payload,
@@ -201,4 +207,16 @@ function getClient(network: Network, rpc: string) {
     ALGORAND_HOST.algodPort
   );
   return client;
+}
+
+export function uint8ArrayToNativeStringAlgorand(a: Uint8Array): string {
+  return encodeAddress(a);
+}
+
+export function hexToNativeStringAlgorand(s: string): string {
+  return uint8ArrayToNativeStringAlgorand(encoding.hex.decode(s));
+}
+
+export function nativeStringToHexAlgorand(s: string): string {
+  return encoding.hex.encode(decodeAddress(s).publicKey);
 }

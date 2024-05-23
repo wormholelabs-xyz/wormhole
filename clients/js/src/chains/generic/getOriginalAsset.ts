@@ -1,18 +1,18 @@
-// import {
-//   WormholeWrappedInfo,
-//   getOriginalAssetAlgorand,
-//   getOriginalAssetAptos,
-//   getOriginalAssetEth,
-//   getOriginalAssetNear,
-//   getOriginalAssetSolana,
-//   getOriginalAssetSui,
-//   getOriginalAssetTerra,
-//   getOriginalAssetXpla,
-// } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
-// import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
-// import { impossible } from "../../vaa";
-// import { getOriginalAssetSei } from "../sei/sdk";
-// import { getProviderForChain } from "./provider";
+import {
+  WormholeWrappedInfo,
+  getOriginalAssetAlgorand,
+  getOriginalAssetAptos,
+  getOriginalAssetEth,
+  getOriginalAssetNear,
+  getOriginalAssetSolana,
+  getOriginalAssetSui,
+  getOriginalAssetTerra,
+  getOriginalAssetXpla,
+} from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
+import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
+import { impossible } from "../../vaa";
+import { getOriginalAssetSei } from "../sei/sdk";
+import { getProviderForChain } from "./provider";
 import {
   Chain,
   ChainId,
@@ -22,14 +22,19 @@ import {
   contracts,
   toChain,
 } from "@wormhole-foundation/sdk-base";
-import { TokenId, Wormhole, wormhole } from "@wormhole-foundation/sdk";
+import {
+  TokenId,
+  Wormhole,
+  toChainId,
+  wormhole,
+} from "@wormhole-foundation/sdk";
 import evm from "@wormhole-foundation/sdk/evm";
 import solana from "@wormhole-foundation/sdk/solana";
 import algorand from "@wormhole-foundation/sdk/algorand";
 import aptos from "@wormhole-foundation/sdk/aptos";
 import cosmwasm from "@wormhole-foundation/sdk/cosmwasm";
 import sui from "@wormhole-foundation/sdk/sui";
-import { WormholeWrappedInfo } from "@certusone/wormhole-sdk";
+// import { WormholeWrappedInfo } from "@certusone/wormhole-sdk";
 
 export const getOriginalAsset_old = async (
   chain: ChainId | Chain,
@@ -80,13 +85,20 @@ export const getOriginalAsset_old = async (
     case "OptimismSepolia":
     case "PolygonSepolia":
     case "Holesky": {
-      const wh = await wormhole(network, [evm]);
-      const asset = Wormhole.tokenId(chainName, assetAddress);
-      const tokenId = await wh.getOriginalAsset(asset);
-      let wwi: WormholeWrappedInfo = {
-        chainId: chainToChainId(chainName),
-        tokenId: tokenId,
-      };
+      const provider = getProviderForChain(chainName, network, { rpc });
+      return getOriginalAssetEth(
+        tokenBridgeAddress,
+        provider,
+        assetAddress,
+        toChainId(chain)
+      );
+      // const wh = await wormhole(network, [evm]);
+      // const asset = Wormhole.tokenId(chainName, assetAddress);
+      // const tokenId = await wh.getOriginalAsset(asset);
+      // let wwi: WormholeWrappedInfo = {
+      //   chainId: chainToChainId(chainName),
+      //   tokenId: tokenId,
+      // };
     }
     case "Terra":
     case "Terra2": {
