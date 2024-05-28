@@ -181,7 +181,8 @@ jobs:
           SOLANA_VERSION: ${{ steps.solana.outputs.version }}
         run: |
           sh -c "$(curl -sSfL https://release.solana.com/v${SOLANA_VERSION}/install)"
-          ~/.local/share/solana/install/active_release/bin/sdk/bpf/scripts/install.sh
+          #~/.local/share/solana/install/active_release/bin/sdk/bpf/scripts/install.sh
+          ~/.local/share/solana/install/active_release/bin/sdk/sbf/scripts/install.sh
 
       - name: Run unit tests
         env:
