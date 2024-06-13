@@ -104,6 +104,15 @@ func NewGuardianNode(
 	return &g
 }
 
+func NewAggregatorNode(
+	env common.Environment,
+) *G {
+	g := G{
+		env: env,
+	}
+	return &g
+}
+
 // initializeBasic sets up everything that every GuardianNode needs before any options can be applied.
 func (g *G) initializeBasic(rootCtxCancel context.CancelFunc) {
 	g.rootCtxCancel = rootCtxCancel
@@ -209,6 +218,40 @@ func (g *G) Run(rootCtxCancel context.CancelFunc, options ...*GuardianOption) su
 			logger.Info("Starting query handler", zap.String("component", "ccq"))
 			if err := g.queryHandler.Start(ctx); err != nil {
 				logger.Fatal("failed to create query handler", zap.Error(err), zap.String("component", "ccq"))
+			}
+		}
+
+		// Start any other runnables
+		for name, runnable := range g.runnables {
+			if err := supervisor.Run(ctx, name, runnable); err != nil {
+				logger.Fatal("failed to start other runnable", zap.Error(err))
+			}
+		}
+
+		logger.Info("Started internal services")
+		supervisor.Signal(ctx, supervisor.SignalHealthy)
+
+		<-ctx.Done()
+
+		return nil
+	}
+}
+
+func (g *G) RunAggregator(rootCtxCancel context.CancelFunc, options ...*GuardianOption) supervisor.Runnable {
+	return func(ctx context.Context) error {
+		logger := supervisor.Logger(ctx)
+
+		g.initializeBasic(rootCtxCancel)
+		if err := g.applyOptions(ctx, logger, options); err != nil {
+			logger.Fatal("failed to initialize AggregatorNode", zap.Error(err))
+		}
+		logger.Info("AggregatorNode initialization done.") // Do not modify this message, node_test.go relies on it.
+
+		// Start the watchers
+		for runnableName, runnable := range g.runnablesWithScissors {
+			logger.Info("Starting runnablesWithScissors: " + runnableName)
+			if err := supervisor.Run(ctx, runnableName, common.WrapWithScissors(runnable, runnableName)); err != nil {
+				logger.Fatal("error starting runnablesWithScissors", zap.Error(err))
 			}
 		}
 

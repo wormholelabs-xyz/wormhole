@@ -196,6 +196,30 @@ func NewProcessor(
 	}
 }
 
+func NewAggregator(
+	ctx context.Context,
+	db *db.Database,
+	setC <-chan *common.GuardianSet,
+	gossipSendC chan<- []byte,
+	obsvC chan *common.MsgWithTimeStamp[gossipv1.SignedObservation],
+	signedInC <-chan *gossipv1.SignedVAAWithQuorum,
+	gst *common.GuardianSetState,
+) *Processor {
+
+	return &Processor{
+		setC:         setC,
+		gossipSendC:  gossipSendC,
+		obsvC:        obsvC,
+		signedInC:    signedInC,
+		gst:          gst,
+		db:           db,
+
+		logger:         supervisor.Logger(ctx),
+		state:          &aggregationState{observationMap{}},
+		pythnetVaas:    make(map[string]PythNetVaaEntry),
+	}
+}
+
 func (p *Processor) Run(ctx context.Context) error {
 	cleanup := time.NewTicker(CleanupInterval)
 
@@ -254,7 +278,7 @@ func (p *Processor) Run(ctx context.Context) error {
 			p.handleMessage(k)
 		case m := <-p.obsvC:
 			observationChanDelay.Observe(float64(time.Since(m.Timestamp).Microseconds()))
-			p.handleObservation(ctx, m)
+			p.handleObservation(ctx, m, false)
 		case m := <-p.signedInC:
 			p.handleInboundSignedVAAWithQuorum(ctx, m)
 		case <-cleanup.C:
@@ -289,6 +313,40 @@ func (p *Processor) Run(ctx context.Context) error {
 			if (p.governor != nil) || (p.acct != nil) {
 				govTimer.Reset(GovInterval)
 			}
+		}
+	}
+}
+
+func (p *Processor) RunAggregator(ctx context.Context) error {
+	cleanup := time.NewTicker(CleanupInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			// Log these as warnings so they show up in the benchmark logs.
+			metric := &dto.Metric{}
+			_ = observationChanDelay.Write(metric)
+			p.logger.Warn("PROCESSOR_METRICS", zap.Any("observationChannelDelay", metric.String()))
+
+			metric = &dto.Metric{}
+			_ = observationTotalDelay.Write(metric)
+			p.logger.Warn("PROCESSOR_METRICS", zap.Any("observationProcessingDelay", metric.String()))
+
+			return ctx.Err()
+		case p.gs = <-p.setC:
+			p.logger.Info("guardian set updated",
+				zap.Strings("set", p.gs.KeysAsHexStrings()),
+				zap.Uint32("index", p.gs.Index),
+				zap.Int("quorum", p.gs.Quorum()),
+			)
+			p.gst.Set(p.gs)
+		case m := <-p.obsvC:
+			observationChanDelay.Observe(float64(time.Since(m.Timestamp).Microseconds()))
+			p.handleObservation(ctx, m, true)
+		case m := <-p.signedInC:
+			p.handleInboundSignedVAAWithQuorum(ctx, m)
+		case <-cleanup.C:
+			p.handleCleanup(ctx)
 		}
 	}
 }

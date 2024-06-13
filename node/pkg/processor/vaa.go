@@ -40,7 +40,7 @@ func (v *VAA) HandleQuorum(sigs []*vaa.Signature, hash string, p *Processor) {
 		)
 	}
 
-	p.broadcastSignedVAA(signed)
+	// p.broadcastSignedVAA(signed)
 	p.state.signatures[hash].submitted = true
 }
 

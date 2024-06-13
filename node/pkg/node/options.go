@@ -569,3 +569,94 @@ func GuardianOptionProcessor() *GuardianOption {
 			return nil
 		}}
 }
+
+
+
+// AggregatorOptionP2P configures p2p networking.
+// Dependencies: None
+func AggregatorOptionFetchGuardianSet(rpcUrl string, coreBridgeAddr string) *GuardianOption {
+	return &GuardianOption{
+		name: "fetchGuardianSet",
+		f: func(ctx context.Context, logger *zap.Logger, g *G) error {
+			// Bootstrap guardian set, otherwise heartbeats would be skipped
+			idx, sgs, err := fetchCurrentGuardianSet(rpcUrl, coreBridgeAddr)
+			if err != nil {
+				return fmt.Errorf("failed to fetch guardian set from %s: %w", rpcUrl, err)
+			}
+			g.setC.writeC <- common.NewGuardianSet(sgs.Keys, idx)
+			return nil
+		},
+	}
+}
+
+// AggregatorOptionP2P configures p2p networking.
+// Dependencies: None
+func AggregatorOptionP2P(p2pKey libp2p_crypto.PrivKey, networkId, bootstrapPeers string, port uint, gossipAdvertiseAddress string) *GuardianOption {
+	return &GuardianOption{
+		name:         "p2p",
+		f: func(ctx context.Context, logger *zap.Logger, g *G) error {
+			components := p2p.DefaultComponents()
+			components.Port = port
+
+			if g.env == common.GoTest {
+				components.WarnChannelOverflow = true
+				components.SignedHeartbeatLogLevel = zapcore.InfoLevel
+			}
+
+			// Add the gossip advertisement address
+			components.GossipAdvertiseAddress = gossipAdvertiseAddress
+
+			g.runnables["p2p"] = p2p.Run(
+				g.obsvC,
+				nil,
+				nil,
+				g.gossipSendC,
+				g.signedInC.writeC,
+				p2pKey,
+				nil,
+				g.gst,
+				networkId,
+				bootstrapPeers,
+				"",
+				false,
+				g.rootCtxCancel,
+				nil,
+				nil,
+				nil,
+				nil,
+				components,
+				nil,
+				false,
+				false,
+				nil,
+				nil,
+				"",
+				0,
+				"",
+			)
+
+			return nil
+		}}
+}
+
+// AggregatorOptionProcessor enables the aggregate-only processor, which is required to make consensus on messages.
+// Dependencies: db
+func AggregatorOptionProcessor() *GuardianOption {
+	return &GuardianOption{
+		name: "processor",
+		dependencies: []string{"db"},
+
+		f: func(ctx context.Context, logger *zap.Logger, g *G) error {
+
+			g.runnables["processor"] = processor.NewAggregator(ctx,
+				g.db,
+				g.setC.readC,
+				g.gossipSendC,
+				g.obsvC,
+				g.signedInC.readC,
+				g.gst,
+			).RunAggregator
+
+			return nil
+		}}
+}

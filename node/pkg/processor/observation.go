@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	node_common "github.com/certusone/wormhole/node/pkg/common"
@@ -74,7 +76,7 @@ func signaturesToVaaFormat(signatures map[common.Address][]byte, gsKeys []common
 
 // handleObservation processes a remote VAA observation, verifies it, checks whether the VAA has met quorum,
 // and assembles and submits a valid VAA if possible.
-func (p *Processor) handleObservation(ctx context.Context, obs *node_common.MsgWithTimeStamp[gossipv1.SignedObservation]) {
+func (p *Processor) handleObservation(ctx context.Context, obs *node_common.MsgWithTimeStamp[gossipv1.SignedObservation], isAggregator bool) {
 	// SECURITY: at this point, observations received from the p2p network are fully untrusted (all fields!)
 	//
 	// Note that observations are never tied to the (verified) p2p identity key - the p2p network
@@ -220,7 +222,7 @@ func (p *Processor) handleObservation(ctx context.Context, obs *node_common.MsgW
 				zap.String("digest", hash),
 			)
 		}
-	} else if s.ourObservation != nil {
+	} else if (s.ourObservation != nil || isAggregator) {
 		// We have made this observation on chain!
 
 		// Check if we have more signatures than required for quorum.
@@ -258,7 +260,43 @@ func (p *Processor) handleObservation(ctx context.Context, obs *node_common.MsgW
 
 		if len(sigsVaaFormat) >= gs.Quorum() {
 			// we have reached quorum *with the active guardian set*
-			s.ourObservation.HandleQuorum(sigsVaaFormat, hash, p)
+			if (s.ourObservation != nil) {
+				s.ourObservation.HandleQuorum(sigsVaaFormat, hash, p)
+			} else {
+				parts := strings.Split(m.MessageId, "/");
+				if len(parts) != 3 {
+					p.logger.Warn("invalid MessageID format", zap.String("messageId", m.MessageId))
+					return
+				}
+				emitterChain, err := strconv.ParseUint(parts[0], 10, 16)
+				if err != nil {
+					p.logger.Warn("failed to parse emitter chain from MessageID", zap.String("messageId", m.MessageId), zap.Error(err))
+					return
+				}
+				chainId := vaa.ChainID(emitterChain)
+				emitterAddress, err := vaa.StringToAddress(parts[1])
+				if err != nil {
+					p.logger.Warn("failed to parse emitter address from MessageID", zap.String("messageId", m.MessageId), zap.Error(err))
+					return
+				}
+				sequence, err := strconv.ParseUint(parts[2], 10, 64)
+				if err != nil {
+					p.logger.Warn("failed to parse sequence from MessageID", zap.String("messageId", m.MessageId), zap.Error(err))
+					return
+				}
+
+				s.ourObservation = &VAA{
+					VAA: vaa.VAA{
+						Version:          vaa.SupportedVAAVersion,
+						GuardianSetIndex: p.gs.Index,
+						Signatures:       nil,
+						EmitterChain:     chainId,
+						EmitterAddress:   emitterAddress,
+						Sequence:         sequence,
+					},
+				}
+				s.ourObservation.HandleQuorum(sigsVaaFormat, hash, p)
+			}
 		} else {
 			if p.logger.Level().Enabled(zapcore.DebugLevel) {
 				p.logger.Debug("quorum not met, doing nothing",
