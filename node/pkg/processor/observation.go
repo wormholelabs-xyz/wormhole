@@ -327,12 +327,16 @@ func (p *Processor) handleInboundSignedVAAWithQuorum(ctx context.Context, m *gos
 
 	// Check if we already store this VAA
 	if p.haveSignedVAA(*db.VaaIDFromVAA(v)) {
-		if p.logger.Level().Enabled(zapcore.DebugLevel) {
-			p.logger.Debug("ignored SignedVAAWithQuorum message for VAA we already stored",
+		// if p.logger.Level().Enabled(zapcore.DebugLevel) {
+			p.logger.Info("ignored SignedVAAWithQuorum message for VAA we already stored",
 				zap.String("message_id", v.MessageID()),
 			)
-		}
+		// }
 		return
+	} else {
+		p.logger.Info("SignedVAAWithQuorum message for a VAA we have not stored!",
+			zap.String("message_id", v.MessageID()),
+		)
 	}
 
 	if p.gs == nil {

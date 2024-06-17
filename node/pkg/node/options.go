@@ -611,7 +611,7 @@ func AggregatorOptionP2P(p2pKey libp2p_crypto.PrivKey, networkId, bootstrapPeers
 				nil,
 				nil,
 				g.gossipSendC,
-				g.signedInC.writeC,
+				nil,
 				p2pKey,
 				nil,
 				g.gst,
