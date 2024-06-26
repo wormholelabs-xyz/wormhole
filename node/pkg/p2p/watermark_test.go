@@ -32,7 +32,7 @@ type G struct {
 	obsvReqC               chan *gossipv1.ObservationRequest
 	obsvReqSendC           chan *gossipv1.ObservationRequest
 	controlSendC           chan []byte
-	attestationSendC       chan []byte
+	attestationSendC       chan GossipAttestationMsg
 	vaaSendC               chan []byte
 	signedInC              chan *gossipv1.SignedVAAWithQuorum
 	priv                   p2pcrypto.PrivKey
@@ -70,7 +70,7 @@ func NewG(t *testing.T, nodeName string) *G {
 		obsvReqC:               make(chan *gossipv1.ObservationRequest, cs),
 		obsvReqSendC:           make(chan *gossipv1.ObservationRequest, cs),
 		controlSendC:           make(chan []byte, cs),
-		attestationSendC:       make(chan []byte, cs),
+		attestationSendC:       make(chan GossipAttestationMsg, cs),
 		vaaSendC:               make(chan []byte, cs),
 		signedInC:              make(chan *gossipv1.SignedVAAWithQuorum, cs),
 		priv:                   p2ppriv,
