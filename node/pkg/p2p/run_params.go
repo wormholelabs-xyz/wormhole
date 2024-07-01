@@ -45,21 +45,23 @@ type (
 		disableHeartbeatVerify bool
 
 		// The following options are guardian specific. Set with `WithGuardianOptions`.
-		nodeName              string
-		gk                    *ecdsa.PrivateKey
-		gossipSendC           chan []byte
-		obsvReqSendC          <-chan *gossipv1.ObservationRequest
-		acct                  *accountant.Accountant
-		gov                   *governor.ChainGovernor
-		components            *Components
-		ibcFeaturesFunc       func() string
-		gatewayRelayerEnabled bool
-		ccqEnabled            bool
-		signedQueryReqC       chan<- *gossipv1.SignedQueryRequest
-		queryResponseReadC    <-chan *query.QueryResponsePublication
-		ccqBootstrapPeers     string
-		ccqPort               uint
-		ccqAllowedPeers       string
+		nodeName               string
+		gk                     *ecdsa.PrivateKey
+		gossipControlSendC     chan []byte
+		gossipAttestationSendC chan GossipAttestationMsg
+		gossipVaaSendC         chan []byte
+		obsvReqSendC           <-chan *gossipv1.ObservationRequest
+		acct                   *accountant.Accountant
+		gov                    *governor.ChainGovernor
+		components             *Components
+		ibcFeaturesFunc        func() string
+		gatewayRelayerEnabled  bool
+		ccqEnabled             bool
+		signedQueryReqC        chan<- *gossipv1.SignedQueryRequest
+		queryResponseReadC     <-chan *query.QueryResponsePublication
+		ccqBootstrapPeers      string
+		ccqPort                uint
+		ccqAllowedPeers        string
 	}
 
 	// RunOpt is used to specify optional parameters.
@@ -162,7 +164,9 @@ func WithGuardianOptions(
 	batchObsvC chan<- *common.MsgWithTimeStamp[gossipv1.SignedObservationBatch],
 	signedInC chan<- *gossipv1.SignedVAAWithQuorum,
 	obsvReqC chan<- *gossipv1.ObservationRequest,
-	gossipSendC chan []byte,
+	gossipControlSendC chan []byte,
+	gossipAttestationSendC chan GossipAttestationMsg,
+	gossipVaaSendC chan []byte,
 	obsvReqSendC <-chan *gossipv1.ObservationRequest,
 	acct *accountant.Accountant,
 	gov *governor.ChainGovernor,
@@ -184,7 +188,9 @@ func WithGuardianOptions(
 		p.batchObsvC = batchObsvC
 		p.signedInC = signedInC
 		p.obsvReqC = obsvReqC
-		p.gossipSendC = gossipSendC
+		p.gossipControlSendC = gossipControlSendC
+		p.gossipAttestationSendC = gossipAttestationSendC
+		p.gossipVaaSendC = gossipVaaSendC
 		p.obsvReqSendC = obsvReqSendC
 		p.acct = acct
 		p.gov = gov
