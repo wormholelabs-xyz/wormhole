@@ -65,6 +65,8 @@ export const getOriginalAsset = async (
     case "Linea":
     case "Berachain":
     case "Snaxchain":
+    case "Unichain":
+    case "Worldchain":
     case "Seievm":
     case "Sepolia":
     case "ArbitrumSepolia":
