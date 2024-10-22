@@ -202,6 +202,16 @@ const Mainnet = {
     key: getEnvVar("ETH_KEY"),
     chain_id: 2192,
   },
+  Unichain: {
+    rpc: undefined,
+    key: undefined,
+    chain_id: undefined,
+  },
+  Worldchain: {
+    rpc: undefined,
+    key: undefined,
+    chain_id: undefined,
+  },
   Seievm: {
     rpc: undefined,
     key: undefined,
@@ -423,6 +433,16 @@ const Testnet = {
     rpc: "https://testnet.snaxchain.io",
     key: getEnvVar("ETH_KEY_TESTNET"),
     chain_id: 13001,
+  },
+  Unichain: {
+    rpc: "https://sepolia.unichain.org",
+    key: getEnvVar("ETH_KEY_TESTNET"),
+    chain_id: 1301,
+  },
+  Worldchain: {
+    rpc: "https://worldchain-sepolia.g.alchemy.com/public",
+    key: getEnvVar("ETH_KEY_TESTNET"),
+    chain_id: 4801,
   },
   Seievm: {
     rpc: "https://evm-rpc-arctic-1.sei-apis.com/",
@@ -673,6 +693,16 @@ const Devnet = {
     chain_id: undefined,
   },
   Snaxchain: {
+    rpc: undefined,
+    key: undefined,
+    chain_id: undefined,
+  },
+  Unichain: {
+    rpc: undefined,
+    key: undefined,
+    chain_id: undefined,
+  },
+  Worldchain: {
     rpc: undefined,
     key: undefined,
     chain_id: undefined,
