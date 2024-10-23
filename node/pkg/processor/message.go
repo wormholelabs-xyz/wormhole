@@ -9,7 +9,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 
-	ethCommon "github.com/ethereum/go-ethereum/common"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -32,7 +31,8 @@ var (
 // handleMessage processes a message received from a chain and instantiates our deterministic copy of the VAA. An
 // event may be received multiple times and must be handled in an idempotent fashion.
 func (p *Processor) handleMessage(k *common.MessagePublication) {
-	if p.gs == nil {
+	gs := p.gst.Get()
+	if gs == nil {
 		p.logger.Warn("dropping observation since we haven't initialized our guardian set yet",
 			zap.String("message_id", k.MessageIDString()),
 			zap.Uint32("nonce", k.Nonce),
@@ -50,7 +50,7 @@ func (p *Processor) handleMessage(k *common.MessagePublication) {
 	v := &VAA{
 		VAA: vaa.VAA{
 			Version:          vaa.SupportedVAAVersion,
-			GuardianSetIndex: p.gs.Index,
+			GuardianSetIndex: gs.Index,
 			Signatures:       nil,
 			Timestamp:        k.Timestamp,
 			Nonce:            k.Nonce,
@@ -99,23 +99,19 @@ func (p *Processor) handleMessage(k *common.MessagePublication) {
 	observationsReceivedByGuardianAddressTotal.WithLabelValues(p.ourAddr.Hex()).Inc()
 
 	// Get / create our state entry.
-	s := p.state.signatures[hash]
-	if s == nil {
-		s = &state{
-			firstObserved: time.Now(),
-			nextRetry:     time.Now().Add(nextRetryDuration(0)),
-			signatures:    map[ethCommon.Address][]byte{},
-			source:        "loopback",
-		}
+	s, created := p.state.getOrCreateState(hash)
+	s.lock.Lock()
+	defer s.lock.Unlock()
 
-		p.state.signatures[hash] = s
+	if created {
+		s.source = "loopback"
 	}
 
 	// Update our state.
 	s.ourObservation = v
 	s.txHash = k.TxHash.Bytes()
 	s.source = v.GetEmitterChain().String()
-	s.gs = p.gs // guaranteed to match ourObservation - there's no concurrent access to p.gs
+	s.gs = p.gst.Get() // guaranteed to match ourObservation - there's no concurrent access to p.gs
 	s.signatures[p.ourAddr] = signature
 	s.ourObs = ourObs
 	s.ourMsg = msg
@@ -123,7 +119,7 @@ func (p *Processor) handleMessage(k *common.MessagePublication) {
 	// Fast path for our own signature.
 	if !s.submitted {
 		start := time.Now()
-		p.checkForQuorum(ourObs, s, s.gs, hash)
+		p.checkForQuorumAlreadyLocked(ourObs, s, hash)
 		timeToHandleObservation.Observe(float64(time.Since(start).Microseconds()))
 	}
 }

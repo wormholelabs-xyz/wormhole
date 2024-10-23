@@ -45,7 +45,7 @@ func TestHandleInboundSignedVAAWithQuorum_NilGuardianSet(t *testing.T) {
 	observedLogger := zap.New(observedZapCore)
 
 	signedVAAWithQuorum := &gossipv1.SignedVAAWithQuorum{Vaa: marshalVAA}
-	processor := Processor{}
+	processor := Processor{gst: common.NewGuardianSetState(nil)}
 	processor.logger = observedLogger
 
 	processor.handleInboundSignedVAAWithQuorum(signedVAAWithQuorum)
@@ -107,8 +107,8 @@ func TestHandleInboundSignedVAAWithQuorum(t *testing.T) {
 			observedLogger := zap.New(observedZapCore)
 
 			signedVAAWithQuorum := &gossipv1.SignedVAAWithQuorum{Vaa: marshalVAA}
-			processor := Processor{}
-			processor.gs = &guardianSet
+			processor := Processor{gst: common.NewGuardianSetState(nil)}
+			processor.gst.Set(&guardianSet)
 			processor.logger = observedLogger
 
 			processor.handleInboundSignedVAAWithQuorum(signedVAAWithQuorum)
