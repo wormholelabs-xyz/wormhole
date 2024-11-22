@@ -246,6 +246,8 @@ var (
 	chainGovernorEnabled      *bool
 	governorFlowCancelEnabled *bool
 
+	processorWorkerFactor *float64
+
 	ccqEnabled           *bool
 	ccqAllowedRequesters *string
 	ccqP2pPort           *uint
@@ -462,6 +464,7 @@ func init() {
 
 	chainGovernorEnabled = NodeCmd.Flags().Bool("chainGovernorEnabled", false, "Run the chain governor")
 	governorFlowCancelEnabled = NodeCmd.Flags().Bool("governorFlowCancelEnabled", false, "Enable flow cancel on the governor")
+	processorWorkerFactor = NodeCmd.Flags().Float64("processorWorkerFactor", 0.0, "Multiplied by the number of available CPUs on the system to determine the number of workers that the processor uses. 0.0 means single worker")
 
 	ccqEnabled = NodeCmd.Flags().Bool("ccqEnabled", false, "Enable cross chain query support")
 	ccqAllowedRequesters = NodeCmd.Flags().String("ccqAllowedRequesters", "", "Comma separated list of signers allowed to submit cross chain queries")
@@ -1679,7 +1682,7 @@ func runNode(cmd *cobra.Command, args []string) {
 		node.GuardianOptionAdminService(*adminSocketPath, ethRPC, ethContract, rpcMap),
 		node.GuardianOptionP2P(p2pKey, *p2pNetworkID, *p2pBootstrap, *nodeName, *subscribeToVAAs, *disableHeartbeatVerify, *p2pPort, *ccqP2pBootstrap, *ccqP2pPort, *ccqAllowedPeers, *gossipAdvertiseAddress, ibc.GetFeatures),
 		node.GuardianOptionStatusServer(*statusAddr),
-		node.GuardianOptionProcessor(*p2pNetworkID),
+		node.GuardianOptionProcessor(*p2pNetworkID, *processorWorkerFactor),
 	}
 
 	if shouldStart(publicGRPCSocketPath) {

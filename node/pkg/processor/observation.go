@@ -99,11 +99,19 @@ func (p *Processor) handleSingleObservation(addr []byte, m *gossipv1.Observation
 
 	their_addr := common.BytesToAddress(addr)
 	hash := hex.EncodeToString(m.Hash)
-	s := p.state.signatures[hash]
-	if s != nil && s.submitted {
-		// already submitted; ignoring additional signatures for it.
-		timeToHandleObservation.Observe(float64(time.Since(start).Microseconds()))
-		return
+
+	s, created := p.state.getOrCreateState(hash)
+	s.lock.Lock()
+	defer s.lock.Unlock()
+
+	if !created {
+		if s.submitted {
+			// already submitted; ignoring additional signatures for it.
+			timeToHandleObservation.Observe(float64(time.Since(start).Microseconds()))
+			return
+		}
+	} else {
+		s.source = "unknown"
 	}
 
 	if p.logger.Core().Enabled(zapcore.DebugLevel) {
@@ -133,35 +141,35 @@ func (p *Processor) handleSingleObservation(addr []byte, m *gossipv1.Observation
 	//
 	// During an update, vaaState.signatures can contain signatures from *both* guardian sets.
 	//
-	var gs *node_common.GuardianSet
-	if s != nil && s.gs != nil {
-		gs = s.gs
-	} else {
-		gs = p.gs
+	if s.gs == nil {
+		s.gs = p.gst.Get()
 	}
 
 	// We haven't yet observed the trusted guardian set on Ethereum, and therefore, it's impossible to verify it.
 	// May as well not have received it/been offline - drop it and wait for the guardian set.
-	if gs == nil {
+	if s.gs == nil {
 		p.logger.Warn("dropping observations since we haven't initialized our guardian set yet",
 			zap.String("messageId", m.MessageId),
 			zap.String("digest", hash),
 			zap.String("their_addr", their_addr.Hex()),
 		)
 		observationsFailedTotal.WithLabelValues("uninitialized_guardian_set").Inc()
+		if created {
+			p.state.delete(hash)
+		}
 		return
 	}
 
 	// Verify that addr is included in the guardian set. If it's not, drop the message. In case it's us
 	// who have the outdated guardian set, we'll just wait for the message to be retransmitted eventually.
-	_, ok := gs.KeyIndex(their_addr)
+	_, ok := s.gs.KeyIndex(their_addr)
 	if !ok {
 		if p.logger.Level().Enabled(zapcore.DebugLevel) {
 			p.logger.Debug("received observation by unknown guardian - is our guardian set outdated?",
 				zap.String("messageId", m.MessageId),
 				zap.String("digest", hash),
 				zap.String("their_addr", their_addr.Hex()),
-				zap.Uint32("index", gs.Index),
+				zap.Uint32("index", s.gs.Index),
 				//zap.Any("keys", gs.KeysAsHexStrings()),
 			)
 		}
@@ -205,7 +213,7 @@ func (p *Processor) handleSingleObservation(addr []byte, m *gossipv1.Observation
 	observationsReceivedByGuardianAddressTotal.WithLabelValues(their_addr.Hex()).Inc()
 
 	// []byte isn't hashable in a map. Paying a small extra cost for encoding for easier debugging.
-	if s == nil {
+	if created {
 		// We haven't yet seen this event ourselves, and therefore do not know what the VAA looks like.
 		// However, we have established that a valid guardian has signed it, and therefore we can
 		// already start aggregating signatures for it.
@@ -215,21 +223,12 @@ func (p *Processor) handleSingleObservation(addr []byte, m *gossipv1.Observation
 		// signatures - such byzantine behavior would be plainly visible and would be dealt with by kicking them.
 
 		observationsUnknownTotal.Inc()
-
-		s = &state{
-			firstObserved: time.Now(),
-			nextRetry:     time.Now().Add(nextRetryDuration(0)),
-			signatures:    map[common.Address][]byte{},
-			source:        "unknown",
-		}
-
-		p.state.signatures[hash] = s
 	}
 
 	s.signatures[their_addr] = m.Signature
 
 	if s.ourObservation != nil {
-		p.checkForQuorum(m, s, gs, hash)
+		p.checkForQuorumAlreadyLocked(m, s, hash)
 	} else {
 		if p.logger.Level().Enabled(zapcore.DebugLevel) {
 			p.logger.Debug("we have not yet seen this observation yet",
@@ -243,14 +242,16 @@ func (p *Processor) handleSingleObservation(addr []byte, m *gossipv1.Observation
 	timeToHandleObservation.Observe(float64(time.Since(start).Microseconds()))
 }
 
-// checkForQuorum checks for quorum after a valid signature has been added to the observation state. If quorum is met, it broadcasts the signed VAA. This function
+// checkForQuorumAlreadyLocked checks for quorum after a valid signature has been added to the observation state. If quorum is met, it broadcasts the signed VAA. This function
 // is called both for local and external observations. It assumes we that we have made the observation ourselves but have not already submitted the VAA.
-func (p *Processor) checkForQuorum(m *gossipv1.Observation, s *state, gs *node_common.GuardianSet, hash string) {
+// NOTE: This function assumes the caller holds the state lock for this observation.
+func (p *Processor) checkForQuorumAlreadyLocked(m *gossipv1.Observation, s *state, hash string) {
 	// Check if we have more signatures than required for quorum.
 	// s.signatures may contain signatures from multiple guardian sets during guardian set updates
 	// Hence, if len(s.signatures) < quorum, then there is definitely no quorum and we can return early to save additional computation,
 	// but if len(s.signatures) >= quorum, there is not necessarily quorum for the active guardian set.
 	// We will later check for quorum again after assembling the VAA for a particular guardian set.
+	gs := s.gs
 	if len(s.signatures) < gs.Quorum() {
 		// no quorum yet, we're done here
 		if p.logger.Level().Enabled(zapcore.DebugLevel) {
@@ -314,7 +315,8 @@ func (p *Processor) handleInboundSignedVAAWithQuorum(m *gossipv1.SignedVAAWithQu
 		return
 	}
 
-	if p.gs == nil {
+	gs := p.gst.Get()
+	if gs == nil {
 		p.logger.Warn("dropping SignedVAAWithQuorum message since we haven't initialized our guardian set yet",
 			zap.String("message_id", v.MessageID()),
 			zap.String("digest", hex.EncodeToString(v.SigningDigest().Bytes())),
@@ -324,7 +326,7 @@ func (p *Processor) handleInboundSignedVAAWithQuorum(m *gossipv1.SignedVAAWithQu
 	}
 
 	// Check if guardianSet doesn't have any keys
-	if len(p.gs.Keys) == 0 {
+	if len(gs.Keys) == 0 {
 		p.logger.Warn("dropping SignedVAAWithQuorum message since we have a guardian set without keys",
 			zap.String("message_id", v.MessageID()),
 			zap.String("digest", hex.EncodeToString(v.SigningDigest().Bytes())),
@@ -333,8 +335,7 @@ func (p *Processor) handleInboundSignedVAAWithQuorum(m *gossipv1.SignedVAAWithQu
 		return
 	}
 
-	if err := v.Verify(p.gs.Keys); err != nil {
-		// We format the error as part of the message so the tests can check for it.
+	if err := v.Verify(gs.Keys); err != nil {
 		p.logger.Warn("dropping SignedVAAWithQuorum message because it failed verification: "+err.Error(), zap.String("message_id", v.MessageID()))
 		return
 	}

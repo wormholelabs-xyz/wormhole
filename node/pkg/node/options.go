@@ -575,7 +575,7 @@ func GuardianOptionDatabase(db *db.Database) *GuardianOption {
 
 // GuardianOptionProcessor enables the default processor, which is required to make consensus on messages.
 // Dependencies: db, governor, accountant
-func GuardianOptionProcessor(networkId string) *GuardianOption {
+func GuardianOptionProcessor(networkId string, workerFactor float64) *GuardianOption {
 	return &GuardianOption{
 		name: "processor",
 		// governor and accountant may be set to nil, but that choice needs to be made before the processor is configured
@@ -600,6 +600,7 @@ func GuardianOptionProcessor(networkId string) *GuardianOption {
 				g.acctC.readC,
 				g.gatewayRelayer,
 				networkId,
+				workerFactor,
 			).Run
 
 			return nil
