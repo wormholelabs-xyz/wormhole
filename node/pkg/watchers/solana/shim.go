@@ -46,8 +46,9 @@ const (
 	shimMessageEventDiscriminatorStr = "e445a52e51cb9a1d441b8f004d4c8970"
 )
 
-// ShimPostMessageData defines the shim PostMessage payload following the eight byte discriminator (shimPostMessageDiscriminatorStr)
 type (
+
+	// ShimPostMessageData defines the shim PostMessage payload following the eight byte discriminator (shimPostMessageDiscriminatorStr)
 	ShimPostMessageData struct {
 		Nonce            uint32
 		ConsistencyLevel ConsistencyLevel
@@ -62,7 +63,7 @@ type (
 	}
 
 	// ShimAlreadyProcessed is a map that tracks the inner index identifier pairs already processed as part of shim transactions.
-	// This allows us to double processing instructions.
+	// This allows us to avoid double processing instructions.
 	ShimAlreadyProcessed map[ShimInnerIdx]struct{}
 
 	// InnerIdx is the key to the set of instructions already processed as part of shim transactions
@@ -109,7 +110,7 @@ func shimMatchPrefix(discriminator []byte, buf []byte) bool {
 
 // shimParsePostMessage parses a shim PostMessage and returns the results.
 func shimParsePostMessage(shimPostMessageDiscriminator []byte, buf []byte) (*ShimPostMessageData, error) {
-	if len(buf) <= 8 {
+	if len(buf) <= len(shimPostMessageDiscriminator) {
 		return nil, errors.New("payload too short")
 	}
 
@@ -149,12 +150,12 @@ func shimVerifyCoreMessage(buf []byte) (bool, error) {
 }
 
 // shimParseMessageEvent parses a shim MessageEvent and returns the results.
-func shimParseMessageEvent(shimMessageEvent []byte, buf []byte) (*ShimMessageEventData, error) {
-	if len(buf) <= 16 {
+func shimParseMessageEvent(shimMessageEventDiscriminator []byte, buf []byte) (*ShimMessageEventData, error) {
+	if len(buf) <= len(shimMessageEventDiscriminator) {
 		return nil, errors.New("payload too short")
 	}
 
-	if !shimMatchPrefix(shimMessageEvent, buf) {
+	if !shimMatchPrefix(shimMessageEventDiscriminator, buf) {
 		return nil, nil
 	}
 
@@ -254,6 +255,9 @@ func (s *SolanaWatcher) shimProcessInnerInstruction(
 	return true, nil
 }
 
+// shimProcessRest performs the processing of the inner instructions that is common to both the direct and integrator case. It looks for the PostMessage from
+// the core and the MessageEvent from the shim. Note that the startIdx parameter tells us where to start looking for these events. In the direct case, this
+// will be zero. In the integrator case, it is one after the shim PostMessage event.
 func (s *SolanaWatcher) shimProcessRest(
 	logger *zap.Logger,
 	whProgramIndex uint16,
@@ -266,9 +270,10 @@ func (s *SolanaWatcher) shimProcessRest(
 	alreadyProcessed ShimAlreadyProcessed,
 	isReobservation bool,
 ) error {
-	// Loop through the inner instructions after the shim PostMessage and do two things:
+	// Loop through the inner instructions after the shim PostMessage and do the following:
 	// 1) Find the core event and verify it is unreliable with an empty payload.
 	// 2) Find the shim MessageEvent to get the rest of the fields we need for the observation.
+	// 3) Verify that the shim MessageEvent comes after the core event.
 
 	var verifiedCoreEvent bool
 	var messageEvent *ShimMessageEventData
@@ -278,7 +283,7 @@ func (s *SolanaWatcher) shimProcessRest(
 		inst := innerInstructions[idx]
 		if inst.ProgramIDIndex == whProgramIndex {
 			if verifiedCoreEvent, err = shimVerifyCoreMessage(inst.Data); err != nil {
-				return fmt.Errorf("failed to verify inner core instruction for top-level shim instruction %d: %w", outerIdx, err)
+				return fmt.Errorf("failed to verify inner core instruction for shim instruction %d: %w", outerIdx, err)
 			}
 			alreadyProcessed.add(outerIdx, idx)
 			coreEventFound = true
@@ -333,7 +338,7 @@ func (s *SolanaWatcher) shimProcessRest(
 		EmitterAddress:   messageEvent.EmitterAddress,
 		Payload:          postMessage.Payload,
 		ConsistencyLevel: uint8(postMessage.ConsistencyLevel),
-		IsReobservation:  false,
+		IsReobservation:  isReobservation,
 		Unreliable:       false,
 	}
 

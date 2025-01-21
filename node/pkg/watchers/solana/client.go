@@ -1048,6 +1048,8 @@ func (s *SolanaWatcher) processMessageAccount(logger *zap.Logger, data []byte, a
 		Unreliable:       !reliable,
 	}
 
+	// SECURITY: An unreliable message with an empty payload is most like a PostMessage generated as part
+	// of a shim event where this guardian is not watching the shim contract. Those events should be ignored.
 	if !reliable && len(observation.Payload) == 0 {
 		logger.Debug("ignoring an observation because it is marked unreliable and has a zero length payload, probably from the shim",
 			zap.Stringer("account", acc),
