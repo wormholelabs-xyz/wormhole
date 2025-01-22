@@ -65,7 +65,6 @@ var (
 
 	guardianKeyPath   *string
 	guardianSignerUri *string
-	solanaContract    *string
 
 	ethRPC      *string
 	ethContract *string
@@ -153,7 +152,9 @@ var (
 	suiRPC           *string
 	suiMoveEventType *string
 
-	solanaRPC *string
+	solanaRPC          *string
+	solanaContract     *string
+	solanaShimContract *string
 
 	pythnetContract *string
 	pythnetRPC      *string
@@ -292,7 +293,8 @@ func init() {
 
 	guardianKeyPath = NodeCmd.Flags().String("guardianKey", "", "Path to guardian key")
 	guardianSignerUri = NodeCmd.Flags().String("guardianSignerUri", "", "Guardian signer URI")
-	solanaContract = NodeCmd.Flags().String("solanaContract", "", "Address of the Solana program (required)")
+	solanaContract = NodeCmd.Flags().String("solanaContract", "", "Address of the Solana program (required if solanaRpc is specified)")
+	solanaShimContract = NodeCmd.Flags().String("solanaShimContract", "", "Address of the Solana shim program")
 
 	ethRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "ethRPC", "Ethereum RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
 	ethContract = NodeCmd.Flags().String("ethContract", "", "Ethereum contract address")
@@ -845,6 +847,10 @@ func runNode(cmd *cobra.Command, args []string) {
 
 	if !argsConsistent([]string{*solanaContract, *solanaRPC}) {
 		logger.Fatal("Both --solanaContract and --solanaRPC must be set or both unset")
+	}
+
+	if *solanaShimContract != "" && *solanaContract == "" {
+		logger.Fatal("--solanaShimContract may only be specified if --solanaContract is specified")
 	}
 
 	if !argsConsistent([]string{*pythnetContract, *pythnetRPC, *pythnetWS}) {
@@ -1589,6 +1595,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			Rpc:           *solanaRPC,
 			Websocket:     "",
 			Contract:      *solanaContract,
+			ShimContract:  *solanaShimContract,
 			ReceiveObsReq: false,
 			Commitment:    rpc.CommitmentConfirmed,
 		}
@@ -1602,6 +1609,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			Rpc:           *solanaRPC,
 			Websocket:     "",
 			Contract:      *solanaContract,
+			ShimContract:  *solanaShimContract,
 			ReceiveObsReq: true,
 			Commitment:    rpc.CommitmentFinalized,
 		}
