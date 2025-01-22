@@ -29,7 +29,6 @@ package solana
 import (
 	"bytes"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -110,16 +109,12 @@ func shimMatchPrefix(discriminator []byte, buf []byte) bool {
 
 // shimParsePostMessage parses a shim PostMessage and returns the results.
 func shimParsePostMessage(shimPostMessageDiscriminator []byte, buf []byte) (*ShimPostMessageData, error) {
-	if len(buf) <= len(shimPostMessageDiscriminator) {
-		return nil, errors.New("payload too short")
-	}
-
 	if !shimMatchPrefix(shimPostMessageDiscriminator, buf) {
 		return nil, nil
 	}
 
 	data := new(ShimPostMessageData)
-	if err := borsh.Deserialize(data, buf[8:]); err != nil {
+	if err := borsh.Deserialize(data, buf[len(shimPostMessageDiscriminator):]); err != nil {
 		return nil, fmt.Errorf("failed to deserialize shim post message: %w", err)
 	}
 
@@ -151,16 +146,12 @@ func shimVerifyCoreMessage(buf []byte) (bool, error) {
 
 // shimParseMessageEvent parses a shim MessageEvent and returns the results.
 func shimParseMessageEvent(shimMessageEventDiscriminator []byte, buf []byte) (*ShimMessageEventData, error) {
-	if len(buf) <= len(shimMessageEventDiscriminator) {
-		return nil, errors.New("payload too short")
-	}
-
 	if !shimMatchPrefix(shimMessageEventDiscriminator, buf) {
 		return nil, nil
 	}
 
 	data := new(ShimMessageEventData)
-	if err := borsh.Deserialize(data, buf[16:]); err != nil {
+	if err := borsh.Deserialize(data, buf[len(shimMessageEventDiscriminator):]); err != nil {
 		return nil, fmt.Errorf("failed to deserialize shim message event: %w", err)
 	}
 
@@ -249,7 +240,7 @@ func (s *SolanaWatcher) shimProcessInnerInstruction(
 
 	err = s.shimProcessRest(logger, whProgramIndex, shimProgramIndex, tx, innerInstructions, outerIdx, startIdx+1, postMessage, alreadyProcessed, isReobservation)
 	if err != nil {
-		return false, fmt.Errorf("failed to process inner instructions for top-level shim instruction %d: %w", outerIdx, err)
+		return false, fmt.Errorf("failed to process inner instructions for inner shim instruction %d: %w", outerIdx, err)
 	}
 
 	return true, nil
@@ -283,17 +274,17 @@ func (s *SolanaWatcher) shimProcessRest(
 		inst := innerInstructions[idx]
 		if inst.ProgramIDIndex == whProgramIndex {
 			if verifiedCoreEvent, err = shimVerifyCoreMessage(inst.Data); err != nil {
-				return fmt.Errorf("failed to verify inner core instruction for shim instruction %d: %w", outerIdx, err)
+				return fmt.Errorf("failed to verify inner core instruction for shim instruction %d, %d: %w", outerIdx, idx, err)
 			}
 			alreadyProcessed.add(outerIdx, idx)
 			coreEventFound = true
 		} else if inst.ProgramIDIndex == shimProgramIndex {
 			if !coreEventFound {
-				return fmt.Errorf("detected an inner shim message event instruction before the core event for top-level shim instruction %d: %w", outerIdx, err)
+				return fmt.Errorf("detected an inner shim message event instruction before the core event for shim instruction %d, %d: %w", outerIdx, idx, err)
 			}
 			messageEvent, err = shimParseMessageEvent(s.shimMessageEventDiscriminator, inst.Data)
 			if err != nil {
-				return fmt.Errorf("failed to parse inner shim message event instruction for top-level shim instruction %d: %w", outerIdx, err)
+				return fmt.Errorf("failed to parse inner shim message event instruction for shim instruction %d, %d: %w", outerIdx, idx, err)
 			}
 			alreadyProcessed.add(outerIdx, idx)
 		}
@@ -304,16 +295,16 @@ func (s *SolanaWatcher) shimProcessRest(
 	}
 
 	if !verifiedCoreEvent {
-		return fmt.Errorf("failed to find inner core instruction for top-level shim instruction %d", outerIdx)
+		return fmt.Errorf("failed to find inner core instruction for shim instruction %d", outerIdx)
 	}
 
 	if messageEvent == nil {
-		return fmt.Errorf("failed to find inner shim message event instruction for top-level shim instruction %d", outerIdx)
+		return fmt.Errorf("failed to find inner shim message event instruction for shim instruction %d", outerIdx)
 	}
 
 	commitment, err := postMessage.ConsistencyLevel.Commitment()
 	if err != nil {
-		return fmt.Errorf("failed to determine commitment: %w", err)
+		return fmt.Errorf("failed to determine commitment for shim instruction %d: %w", outerIdx, err)
 	}
 
 	if !s.checkCommitment(commitment, isReobservation) {
