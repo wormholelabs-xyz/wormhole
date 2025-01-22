@@ -34,11 +34,11 @@ import (
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/common"
-	eth_common "github.com/ethereum/go-ethereum/common"
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/near/borsh-go"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 const (
@@ -316,21 +316,19 @@ func (s *SolanaWatcher) shimProcessRest(
 		return fmt.Errorf("failed to determine commitment: %w", err)
 	}
 
-	if commitment != s.commitment && (!isReobservation || s.commitment != rpc.CommitmentFinalized) {
-		logger.Debug("skipping shim message which does not match the watcher commitment",
-			zap.Stringer("signature", tx.Signatures[0]),
-			zap.String("message commitment", string(commitment)),
-			zap.String("watcher commitment", string(s.commitment)),
-		)
+	if !s.checkCommitment(commitment, isReobservation) {
+		if logger.Level().Enabled(zapcore.DebugLevel) {
+			logger.Debug("skipping shim message which does not match the watcher commitment",
+				zap.Stringer("signature", tx.Signatures[0]),
+				zap.String("message commitment", string(commitment)),
+				zap.String("watcher commitment", string(s.commitment)),
+			)
+		}
 		return nil
 	}
 
-	// TODO: This needs to change once PR 4219 is merged.
-	var txHash eth_common.Hash
-	copy(txHash[:], tx.Signatures[0][:])
-
 	observation := &common.MessagePublication{
-		TxHash:           txHash,
+		TxID:             tx.Signatures[0][:],
 		Timestamp:        time.Unix(int64(messageEvent.Timestamp), 0),
 		Nonce:            postMessage.Nonce,
 		Sequence:         messageEvent.Sequence,
