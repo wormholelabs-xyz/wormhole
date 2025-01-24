@@ -1,0 +1,278 @@
+{
+  "address": "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at",
+  "metadata": {
+    "name": "wormhole_verify_vaa_shim",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Created with Anchor"
+  },
+  "instructions": [
+    {
+      "name": "close_signatures",
+      "docs": [
+        "Allows the initial payer to close the signature account, reclaiming the rent taken by `post_signatures`."
+      ],
+      "discriminator": [192, 65, 63, 117, 213, 138, 179, 190],
+      "accounts": [
+        {
+          "name": "guardian_signatures",
+          "writable": true
+        },
+        {
+          "name": "refund_recipient",
+          "writable": true,
+          "signer": true,
+          "relations": ["guardian_signatures"]
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "post_signatures",
+      "docs": [
+        "Creates or appends to a GuardianSignatures account for subsequent use by verify_vaa.",
+        "This is necessary as the Wormhole VAA body, which has an arbitrary size,",
+        "and 13 guardian signatures (a quorum of the current 19 mainnet guardians, 66 bytes each)",
+        "alongside the required accounts is likely larger than the transaction size limit on Solana (1232 bytes).",
+        "This will also allow for the verification of other messages which guardians sign, such as QueryResults.",
+        "",
+        "This instruction allows for the initial payer to append additional signatures to the account by calling the instruction again.",
+        "This may be necessary if a quorum of signatures from the current guardian set grows larger than can fit into a single transaction.",
+        "",
+        "The GuardianSignatures account can be closed by the initial payer via close_signatures, which will refund the initial payer."
+      ],
+      "discriminator": [138, 2, 53, 166, 45, 77, 137, 51],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "guardian_signatures",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "guardian_set_index",
+          "type": "u32"
+        },
+        {
+          "name": "total_signatures",
+          "type": "u8"
+        },
+        {
+          "name": "guardian_signatures",
+          "type": {
+            "vec": {
+              "array": ["u8", 66]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "verify_vaa",
+      "docs": [
+        "This instruction is intended to be invoked via CPI call. It verifies a digest against a GuardianSignatures account",
+        "and a core bridge GuardianSet.",
+        "Prior to this call, and likely in a separate transaction, `post_signatures` must be called to create the account.",
+        "Immediately after this call, `close_signatures` should be called to reclaim the lamports.",
+        "",
+        "A v1 VAA digest can be computed as follows:",
+        "```rust",
+        "let message_hash = &solana_program::keccak::hashv(&[&vaa_body]).to_bytes();",
+        "let digest = keccak::hash(message_hash.as_slice()).to_bytes();",
+        "```",
+        "",
+        "A QueryResponse digest can be computed as follows:",
+        "```rust",
+        "use wormhole_query_sdk::MESSAGE_PREFIX;",
+        "let message_hash = [",
+        "MESSAGE_PREFIX,",
+        "&solana_program::keccak::hashv(&[&bytes]).to_bytes(),",
+        "]",
+        ".concat();",
+        "let digest = keccak::hash(message_hash.as_slice()).to_bytes();",
+        "```"
+      ],
+      "discriminator": [147, 254, 88, 41, 24, 223, 219, 29],
+      "accounts": [
+        {
+          "name": "guardian_set",
+          "docs": ["Guardian set used for signature verification."],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [71, 117, 97, 114, 100, 105, 97, 110, 83, 101, 116]
+              },
+              {
+                "kind": "account",
+                "path": "guardian_signatures.guardian_set_index_be",
+                "account": "GuardianSignatures"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                43, 18, 70, 201, 238, 250, 60, 70, 103, 146, 37, 49, 17, 243,
+                95, 236, 30, 232, 238, 94, 157, 235, 196, 18, 210, 233, 173,
+                173, 254, 205, 204, 114
+              ]
+            }
+          }
+        },
+        {
+          "name": "guardian_signatures",
+          "docs": [
+            "Stores unverified guardian signatures as they are too large to fit in the instruction data."
+          ]
+        }
+      ],
+      "args": [
+        {
+          "name": "digest",
+          "type": {
+            "array": ["u8", 32]
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "GuardianSignatures",
+      "discriminator": [203, 184, 130, 157, 113, 14, 184, 83]
+    },
+    {
+      "name": "WormholeGuardianSet",
+      "discriminator": [0, 0, 0, 0, 0, 0, 0, 0]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "EmptyGuardianSignatures",
+      "msg": "EmptyGuardianSignatures"
+    },
+    {
+      "code": 6001,
+      "name": "WriteAuthorityMismatch",
+      "msg": "WriteAuthorityMismatch"
+    },
+    {
+      "code": 6002,
+      "name": "GuardianSetExpired",
+      "msg": "GuardianSetExpired"
+    },
+    {
+      "code": 6003,
+      "name": "NoQuorum",
+      "msg": "NoQuorum"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidSignature",
+      "msg": "InvalidSignature"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidGuardianIndexNonIncreasing",
+      "msg": "InvalidGuardianIndexNonIncreasing"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidGuardianIndexOutOfRange",
+      "msg": "InvalidGuardianIndexOutOfRange"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidGuardianKeyRecovery",
+      "msg": "InvalidGuardianKeyRecovery"
+    }
+  ],
+  "types": [
+    {
+      "name": "GuardianSignatures",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "refund_recipient",
+            "docs": [
+              "Payer of this guardian signatures account.",
+              "Only they may amend signatures.",
+              "Used for reimbursements upon cleanup."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "guardian_set_index_be",
+            "docs": [
+              "Guardian set index that these signatures correspond to.",
+              "Storing this simplifies the integrator data.",
+              "Using big-endian to match the derivation used by the core bridge."
+            ],
+            "type": {
+              "array": ["u8", 4]
+            }
+          },
+          {
+            "name": "guardian_signatures",
+            "docs": ["Unverified guardian signatures."],
+            "type": {
+              "vec": {
+                "array": ["u8", 66]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "WormholeGuardianSet",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "index",
+            "docs": [
+              "Index representing an incrementing version number for this guardian set."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "keys",
+            "docs": ["Ethereum-style public keys."],
+            "type": {
+              "vec": {
+                "array": ["u8", 20]
+              }
+            }
+          },
+          {
+            "name": "creation_time",
+            "docs": [
+              "Timestamp representing the time this guardian became active."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "expiration_time",
+            "docs": [
+              "Expiration time when VAAs issued by this set are no longer valid."
+            ],
+            "type": "u32"
+          }
+        ]
+      }
+    }
+  ]
+}
