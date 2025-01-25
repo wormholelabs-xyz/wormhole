@@ -146,7 +146,7 @@ impl<'ix, F: EncodeFinality> PostMessageData<'ix, F> {
             return None;
         }
 
-        let payload = &data[9..9 + payload_len];
+        let payload = &data[9..(9 + payload_len)];
 
         // NOTE: We do not care about trailing bytes.
 
