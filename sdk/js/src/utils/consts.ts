@@ -39,6 +39,8 @@ export const CHAINS = {
   berachain: 39,
   seievm: 40,
   snaxchain: 43,
+  unichain: 44,
+  worldchain: 45,
   wormchain: 3104,
   cosmoshub: 4000,
   evmos: 4001,
@@ -91,6 +93,8 @@ export const EVMChainNames = [
   "berachain",
   "seievm",
   "snaxchain",
+  "unichain",
+  "worldchain",
   "sepolia",
   "arbitrum_sepolia",
   "base_sepolia",
@@ -348,6 +352,16 @@ const MAINNET = {
   snaxchain: {
     core: "0xc1BA3CC4bFE724A08FbbFbF64F8db196738665f4",
     token_bridge: "0x8B94bfE456B48a6025b92E11Be393BAa86e68410",
+    nft_bridge: undefined,
+  },
+  unichain: {
+    core: undefined,
+    token_bridge: undefined,
+    nft_bridge: undefined,
+  },
+  worldchain: {
+    core: undefined,
+    token_bridge: undefined,
     nft_bridge: undefined,
   },
   wormchain: {
@@ -646,6 +660,16 @@ const TESTNET = {
     token_bridge: "0xa10f2eF61dE1f19f586ab8B6F2EbA89bACE63F7a",
     nft_bridge: undefined,
   },
+  unichain: {
+    core: "0xBB73cB66C26740F31d1FabDC6b7A46a038A300dd",
+    token_bridge: "0xa10f2eF61dE1f19f586ab8B6F2EbA89bACE63F7a",
+    nft_bridge: undefined,
+  },
+  worldchain: {
+    core: "0xe5E02cD12B6FcA153b0d7fF4bF55730AE7B3C93A",
+    token_bridge: "0x376428e7f26D5867e69201b275553C45B09EE090",
+    nft_bridge: undefined,
+  },
   wormchain: {
     core: "wormhole16jzpxp0e8550c9aht6q9svcux30vtyyyyxv5w2l2djjra46580wsazcjwp",
     token_bridge:
@@ -935,6 +959,16 @@ const DEVNET = {
     token_bridge: undefined,
     nft_bridge: undefined,
   },
+  unichain: {
+    core: undefined,
+    token_bridge: undefined,
+    nft_bridge: undefined,
+  },
+  worldchain: {
+    core: undefined,
+    token_bridge: undefined,
+    nft_bridge: undefined,
+  },
   wormchain: {
     core: "wormhole1ghd753shjuwexxywmgs4xz7x2q732vcnkm6h2pyv9s6ah3hylvrqtm7t3h",
     token_bridge:
@@ -1096,6 +1130,8 @@ export const CHAIN_ID_LINEA = CHAINS["linea"];
 export const CHAIN_ID_BERACHAIN = CHAINS["berachain"];
 export const CHAIN_ID_SEIEVM = CHAINS["seievm"];
 export const CHAIN_ID_SNAXCHAIN = CHAINS["snaxchain"];
+export const CHAIN_ID_UNICHAIN = CHAINS["unichain"];
+export const CHAIN_ID_WORLDCHAIN = CHAINS["worldchain"];
 export const CHAIN_ID_WORMCHAIN = CHAINS["wormchain"];
 export const CHAIN_ID_GATEWAY = CHAIN_ID_WORMCHAIN;
 export const CHAIN_ID_COSMOSHUB = CHAINS["cosmoshub"];
