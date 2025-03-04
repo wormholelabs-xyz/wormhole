@@ -419,7 +419,7 @@ fn create_account_reliably(
         unsafe {
             let cpi_data = &mut cpi_ix.data;
 
-            core::ptr::write_bytes(cpi_data.as_mut_ptr(), 0, 4);
+            core::ptr::write_bytes(cpi_data.as_mut_ptr(), 0, 12);
             cpi_data.set_len(12);
         }
 
@@ -467,6 +467,7 @@ fn create_account_reliably(
             // Safety: The capacity of this vector is 36. This data will be
             // overwritten for the next CPI call.
             unsafe {
+                core::ptr::write_bytes(cpi_data.as_mut_ptr(), 0, MAX_CPI_DATA_LEN);
                 cpi_data.set_len(MAX_CPI_DATA_LEN);
             }
 
