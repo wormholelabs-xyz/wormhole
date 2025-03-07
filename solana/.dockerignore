@@ -3,5 +3,6 @@ bin
 **/bundler
 **/nodejs
 artifacts-*
+scripts
 **/Makefile
 *.md

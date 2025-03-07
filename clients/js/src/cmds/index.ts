@@ -1,5 +1,6 @@
 // https://github.com/yargs/yargs/blob/main/docs/advanced.md#example-command-hierarchy-using-indexmjs
 import * as aptos from "./aptos";
+import * as solana from "./solana";
 import * as chains from "./chains";
 import * as editVaa from "./editVaa";
 import * as evm from "./evm";
@@ -18,6 +19,7 @@ import * as status from "./status";
 // Documentation about command hierarchy can be found here: https://github.com/yargs/yargs/blob/main/docs/advanced.md#example-command-hierarchy-using-indexmjs
 export const CLI_COMMAND_MODULES = [
   aptos,
+  solana,
   chains,
   editVaa,
   evm,
