@@ -19,6 +19,7 @@ no-entrypoint = []
 ### Network types
 testnet = ["wormhole-svm-definitions/testnet"]
 localnet = ["wormhole-svm-definitions/localnet"]
+from-env = ["wormhole-svm-definitions/from-env"]
 
 ### Specific networks
 solana = ["wormhole-svm-definitions/solana"]

@@ -18,6 +18,7 @@ borsh = ["dep:borsh"]
 ### Network types
 testnet = []
 localnet = []
+from-env = []
 
 ### Specific networks
 solana = []

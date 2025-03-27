@@ -7,11 +7,23 @@ use const_crypto::{bs58, ed25519};
 use solana_program::pubkey::Pubkey;
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "testnet")] {
+    if #[cfg(feature = "from-env")] {
         /// Core Bridge program ID on Solana devnet.
-        pub const CORE_BRIDGE_PROGRAM_ID_ARRAY: [u8; 32]
-            bs58::decode_pubkey("3u8hJUVTA4jH1wYAyUur7FFZVQ8H635K3tSHHF4ssjQ5");
         pub const CORE_BRIDGE_PROGRAM_ID_ARRAY: [u8; 32] =
+            bs58::decode_pubkey(env!("CORE_BRIDGE_PROGRAM_ID"));
+
+        /// Post message shim program ID on Solana devnet.
+        pub const POST_MESSAGE_SHIM_PROGRAM_ID_ARRAY: [u8; 32] =
+            bs58::decode_pubkey(env!("POST_MESSAGE_SHIM_PROGRAM_ID"));
+
+        /// Verify VAA shim program ID on Solana devnet.
+        pub const VERIFY_VAA_SHIM_PROGRAM_ID_ARRAY: [u8;32] =
+            bs58::decode_pubkey(env!("VERIFY_VAA_SHIM_PROGRAM_ID"));
+
+    } else if #[cfg(feature = "testnet")] {
+        /// Core Bridge program ID on Solana devnet.
+        pub const CORE_BRIDGE_PROGRAM_ID_ARRAY: [u8; 32] =
+            bs58::decode_pubkey("3u8hJUVTA4jH1wYAyUur7FFZVQ8H635K3tSHHF4ssjQ5");
 
         /// Post message shim program ID on Solana devnet.
         pub const POST_MESSAGE_SHIM_PROGRAM_ID_ARRAY: [u8; 32] =
@@ -20,7 +32,6 @@ cfg_if::cfg_if! {
         /// Verify VAA shim program ID on Solana devnet.
         pub const VERIFY_VAA_SHIM_PROGRAM_ID_ARRAY: [u8;32] =
             bs58::decode_pubkey("EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at");
-
 
     } else if #[cfg(feature = "localnet")] {
         /// Core Bridge program ID on Wormhole's Tilt (dev) network.
