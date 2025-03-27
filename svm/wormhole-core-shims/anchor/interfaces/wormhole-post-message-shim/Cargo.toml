@@ -1,5 +1,5 @@
 [package]
-name = "wormhole-post-message-shim"
+name = "wormhole-post-message-shim-interface"
 description = "Anchor Interface for Wormhole Post Message Shim"
 
 edition.workspace = true
