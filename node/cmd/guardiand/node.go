@@ -161,10 +161,12 @@ var (
 	suiMoveEventType *string
 
 	solanaRPC          *string
+	solanaWS           *string
 	solanaContract     *string
 	solanaShimContract *string
 
 	fogoRPC          *string
+	fogoWS           *string
 	fogoContract     *string
 	fogoShimContract *string
 
@@ -413,7 +415,9 @@ func init() {
 	suiMoveEventType = NodeCmd.Flags().String("suiMoveEventType", "", "Sui move event type for publish_message")
 
 	solanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaRPC", "Solana RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
+	solanaWS = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaWS", "Solana WS URL (required)", "ws://solana-devnet:8899", []string{"ws", "wss"})
 	fogoRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoRPC", "Fogo RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
+	fogoWS = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoWS", "Fogo WS URL (required)", "ws://solana-devnet:8899", []string{"ws", "wss"})
 
 	pythnetContract = NodeCmd.Flags().String("pythnetContract", "", "Address of the PythNet program (required)")
 	pythnetRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "pythnetRPC", "PythNet RPC URL (required)", "http://pythnet.rpcpool.com", []string{"http", "https"})
@@ -887,12 +891,20 @@ func runNode(cmd *cobra.Command, args []string) {
 		logger.Fatal("Both --solanaContract and --solanaRPC must be set or both unset")
 	}
 
+	if *solanaWS != "" && *solanaRPC == "" {
+		logger.Fatal("If --solanaWS is specified, --solanaRPC must be specified")
+	}
+
 	if *solanaShimContract != "" && *solanaContract == "" {
 		logger.Fatal("--solanaShimContract may only be specified if --solanaContract is specified")
 	}
 
 	if !argsConsistent([]string{*fogoContract, *fogoRPC}) {
 		logger.Fatal("Both --fogoContract and --fogoRPC must be set or both unset")
+	}
+
+	if *fogoWS != "" && *fogoRPC == "" {
+		logger.Fatal("If --fogoWS is specified, --fogoRPC must be specified")
 	}
 
 	if *fogoShimContract != "" && *fogoContract == "" {
@@ -1005,7 +1017,9 @@ func runNode(cmd *cobra.Command, args []string) {
 	// NOTE: Please keep these in numerical order by chain ID.
 	rpcMap := make(map[string]string)
 	rpcMap["solanaRPC"] = *solanaRPC
+	rpcMap["solanaWS"] = *solanaWS
 	rpcMap["fogoRPC"] = *fogoRPC
+	rpcMap["fogoWS"] = *fogoWS
 	rpcMap["ethRPC"] = *ethRPC
 	rpcMap["terraWS"] = *terraWS
 	rpcMap["terraLCD"] = *terraLCD
@@ -1721,7 +1735,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			NetworkID:     "solana-confirmed",
 			ChainID:       vaa.ChainIDSolana,
 			Rpc:           *solanaRPC,
-			Websocket:     "",
+			Websocket:     *solanaWS,
 			Contract:      *solanaContract,
 			ShimContract:  *solanaShimContract,
 			ReceiveObsReq: false,
@@ -1735,7 +1749,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			NetworkID:     "solana-finalized",
 			ChainID:       vaa.ChainIDSolana,
 			Rpc:           *solanaRPC,
-			Websocket:     "",
+			Websocket:     *solanaWS,
 			Contract:      *solanaContract,
 			ShimContract:  *solanaShimContract,
 			ReceiveObsReq: true,
@@ -1754,7 +1768,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			NetworkID:     "fogo-confirmed",
 			ChainID:       vaa.ChainIDFogo,
 			Rpc:           *fogoRPC,
-			Websocket:     "",
+			Websocket:     *fogoWS,
 			Contract:      *fogoContract,
 			ShimContract:  *fogoShimContract,
 			ReceiveObsReq: false,
@@ -1768,7 +1782,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			NetworkID:     "fogo-finalized",
 			ChainID:       vaa.ChainIDFogo,
 			Rpc:           *fogoRPC,
-			Websocket:     "",
+			Websocket:     *fogoWS,
 			Contract:      *fogoContract,
 			ShimContract:  *fogoShimContract,
 			ReceiveObsReq: true,

@@ -87,6 +87,10 @@ type (
 		shimEnabled                   bool
 		shimPostMessageDiscriminator  []byte
 		shimMessageEventDiscriminator []byte
+
+		// logsDataPump is used to publish log events when we are using the logs websocket.
+		logsDataPump chan []byte
+		observations map[solana.Signature]struct{}
 	}
 
 	EventSubscriptionError struct {
@@ -113,7 +117,7 @@ type (
 						Data       []string `json:"data"`
 						Owner      string   `json:"owner"`
 						Executable bool     `json:"executable"`
-						RentEpoch  int64    `json:"rentEpoch"`
+						RentEpoch  uint64   `json:"rentEpoch"`
 					} `json:"account"`
 				} `json:"value"`
 			} `json:"result"`
@@ -274,6 +278,8 @@ func NewSolanaWatcher(
 		ccqConfig:           query.GetPerChainConfig(chainID),
 		shimContractStr:     shimContractStr,
 		shimContractAddr:    shimContractAddr,
+		logsDataPump:        make(chan []byte),
+		observations:        make(map[solana.Signature]struct{}),
 	}
 }
 
@@ -315,6 +321,7 @@ func (s *SolanaWatcher) setupWebSocket(ctx context.Context) error {
 	}
 
 	common.RunWithScissors(ctx, s.errC, "SolanaDataPump", func(ctx context.Context) error {
+		logger.Info("TEST: entering SolanaDataPump")
 		defer ws.Close(websocket.StatusNormalClosure, "")
 
 		for {
@@ -364,7 +371,7 @@ func (s *SolanaWatcher) Run(ctx context.Context) error {
 	}
 
 	pollInterval := DefaultPollDelay
-	if s.chainID == vaa.ChainIDFogo {
+	if s.chainID == vaa.ChainIDFogo && s.wsUrl == "" {
 		pollInterval = FogoPollDelay
 	}
 
@@ -386,7 +393,15 @@ func (s *SolanaWatcher) Run(ctx context.Context) error {
 	useWs := false
 	if s.wsUrl != "" {
 		useWs = true
-		err := s.setupWebSocket(ctx)
+		var err error
+		if s.chainID == vaa.ChainIDPythNet {
+			err = s.setupWebSocket(s.ctx)
+		} else {
+			err = s.setUpLogsWebSocket(s.ctx)
+			if err == nil {
+				err = s.setupWebSocket(s.ctx)
+			}
+		}
 		if err != nil {
 			return err
 		}
@@ -401,10 +416,19 @@ func (s *SolanaWatcher) Run(ctx context.Context) error {
 			case <-ctx.Done():
 				return nil
 			case msg := <-s.pumpData:
+				logger.Info("TEST: account event received", zap.String("msg", string(msg)))
 				err := s.processAccountSubscriptionData(ctx, logger, msg, false)
 				if err != nil {
 					p2p.DefaultRegistry.AddErrorCount(s.chainID, 1)
 					solanaConnectionErrors.WithLabelValues(s.networkName, string(s.commitment), "account_subscription_data").Inc()
+					s.errC <- err
+					return err
+				}
+			case msg := <-s.logsDataPump:
+				err := s.processLogsSubscriptionData(ctx, logger, msg)
+				if err != nil {
+					p2p.DefaultRegistry.AddErrorCount(s.chainID, 1)
+					solanaConnectionErrors.WithLabelValues(s.networkName, string(s.commitment), "logs_subscription_data").Inc()
 					s.errC <- err
 					return err
 				}
