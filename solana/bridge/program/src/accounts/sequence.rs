@@ -4,7 +4,7 @@ use borsh::{
 };
 use solana_program::pubkey::Pubkey;
 use solitaire::{
-    processors::seeded::Seeded,
+    processors::seeded::{Seeded, SingleOwned},
     AccountOwner,
     AccountState,
     Data,
@@ -35,4 +35,7 @@ impl Owned for SequenceTracker {
     fn owner(&self) -> AccountOwner {
         AccountOwner::This
     }
+}
+
+impl SingleOwned for SequenceTracker {
 }

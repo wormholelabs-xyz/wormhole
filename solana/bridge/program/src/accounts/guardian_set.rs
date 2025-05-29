@@ -11,7 +11,7 @@ use serde::{
     Serialize,
 };
 use solitaire::{
-    processors::seeded::Seeded,
+    processors::seeded::{Seeded, SingleOwned},
     AccountOwner,
     AccountState,
     Data,
@@ -62,4 +62,7 @@ impl Owned for GuardianSetData {
     fn owner(&self) -> AccountOwner {
         AccountOwner::This
     }
+}
+
+impl SingleOwned for GuardianSetData {
 }
