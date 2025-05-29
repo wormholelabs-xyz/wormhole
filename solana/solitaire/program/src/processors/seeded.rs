@@ -25,6 +25,7 @@ pub trait AccountSize {
 pub enum AccountOwner {
     This,
     Other(Pubkey),
+    OneOf(Vec<Pubkey>),
     Any,
 }
 
@@ -35,6 +36,7 @@ pub trait Owned {
         match self.owner() {
             AccountOwner::This => Ok(*program_id),
             AccountOwner::Other(v) => Ok(v),
+            AccountOwner::OneOf(_) => Err(SolitaireError::AmbiguousOwner),
             AccountOwner::Any => Err(SolitaireError::AmbiguousOwner),
         }
     }

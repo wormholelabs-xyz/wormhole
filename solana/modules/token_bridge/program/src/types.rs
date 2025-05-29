@@ -85,5 +85,14 @@ impl Owned for WrappedMeta {
     }
 }
 
-pack_type!(SplMint, Mint, AccountOwner::Other(spl_token::id()));
-pack_type!(SplAccount, Account, AccountOwner::Other(spl_token::id()));
+pub mod spl_token_2022 {
+    use solana_program::pubkey::Pubkey;
+    use std::str::FromStr;
+
+    pub fn id() -> Pubkey {
+        Pubkey::from_str("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb").unwrap()
+    }
+}
+
+pack_type!(SplMint, Mint, AccountOwner::OneOf(vec![spl_token::id(), spl_token_2022::id()]));
+pack_type!(SplAccount, Account, AccountOwner::OneOf(vec![spl_token::id(), spl_token_2022::id()]));
