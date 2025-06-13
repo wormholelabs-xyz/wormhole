@@ -44,8 +44,7 @@ use solana_program::{
 };
 use solitaire::{
     processors::seeded::{
-        invoke_seeded,
-        Seeded,
+        invoke_seeded, CreatableWithOwner, Seeded
     },
     CreationLamports::Exempt,
     *,
@@ -203,10 +202,10 @@ pub fn verify_and_execute_native_transfers(
         }
     }
 
-    if !custody.is_initialized() {
-        custody.create(derivation_data, ctx, payer.key, Exempt)?;
+    let token_program = mint.info().owner;
 
-        let token_program = mint.info().owner;
+    if !custody.is_initialized() {
+        custody.create_with_owner(&token_program, derivation_data, ctx, payer.key, Exempt)?;
 
         let init_ix = spl_token::instruction::initialize_account(
             &token_program,

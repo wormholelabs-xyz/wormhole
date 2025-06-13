@@ -11,7 +11,7 @@ use solitaire::{
     pack_type,
     processors::seeded::{
         AccountOwner,
-        Owned,
+        Owned, SingleOwned,
     },
 };
 use spl_token::state::{
@@ -55,6 +55,9 @@ impl Owned for EndpointRegistration {
     }
 }
 
+impl SingleOwned for EndpointRegistration {
+}
+
 #[cfg(feature = "cpi")]
 impl Owned for EndpointRegistration {
     fn owner(&self) -> AccountOwner {
@@ -68,6 +71,9 @@ pub struct WrappedMeta {
     pub chain: ChainID,
     pub token_address: Address,
     pub original_decimals: u8,
+}
+
+impl SingleOwned for WrappedMeta {
 }
 
 #[cfg(not(feature = "cpi"))]
