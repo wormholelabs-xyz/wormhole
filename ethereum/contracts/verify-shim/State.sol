@@ -3,24 +3,23 @@
 
 pragma solidity ^0.8.0;
 
-import "./Structs.sol";
+import "../interfaces/IWormhole.sol";
 
-contract Storage {
-    struct WormholeState {
-
-        Structs.Provider provider;
-
-        // Mapping of guardian_set_index => guardian set
-        mapping(uint32 => Structs.GuardianSet) guardianSets;
-
-        // Current active guardian set index
-        uint32 guardianSetIndex;
-
-        // Period for which a guardian set stays active after it has been replaced
-        uint32 guardianSetExpiry;
+abstract contract State {
+    constructor(
+        IWormhole _wormhole
+    ) {
+        wormhole = _wormhole;
+        chainId = _wormhole.chainId();
     }
-}
 
-contract State {
-    Storage.WormholeState _state;
+    IWormhole immutable wormhole;
+
+    uint16 immutable chainId;
+
+    // Mapping of guardian_set_index => guardian set
+    mapping(uint32 => IWormhole.GuardianSet) guardianSets;
+
+    // Current active guardian set index
+    uint32 guardianSetIndex;
 }

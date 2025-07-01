@@ -7,26 +7,19 @@ import "./State.sol";
 
 abstract contract Setters is State {
     function updateGuardianSetIndex(uint32 newIndex) internal {
-        _state.guardianSetIndex = newIndex;
+        State.guardianSetIndex = newIndex;
     }
 
     function expireGuardianSet(uint32 index) internal {
-        _state.guardianSets[index].expirationTime = uint32(block.timestamp) + 86400;
+        State.guardianSets[index].expirationTime = uint32(block.timestamp) + 86400;
     }
 
-    function storeGuardianSet(Structs.GuardianSet memory set, uint32 index) internal {
+    function storeGuardianSet(IWormhole.GuardianSet memory set, uint32 index) internal {
         uint setLength = set.keys.length;
         for (uint i = 0; i < setLength; i++) {
             require(set.keys[i] != address(0), "Invalid key");
         }
-        _state.guardianSets[index] = set;
+        State.guardianSets[index] = set;
     }
 
-    function setChainId(uint16 chainId) internal {
-        _state.provider.chainId = chainId;
-    }
-
-    function setGovernanceContract(bytes32 governanceContract) internal {
-        _state.provider.governanceContract = governanceContract;
-    }
 }

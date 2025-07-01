@@ -5,15 +5,14 @@ pragma solidity ^0.8.0;
 pragma experimental ABIEncoderV2;
 
 import "./Getters.sol";
-import "./Structs.sol";
 import "../libraries/external/BytesLib.sol";
 
 
-contract Messages is Getters {
+abstract contract Messages is Getters {
     using BytesLib for bytes;
 
     /// @dev parseAndVerifyVM serves to parse an encodedVM and wholy validate it for consumption
-    function parseAndVerifyVM(bytes calldata encodedVM) public view returns (Structs.VM memory vm, bool valid, string memory reason) {
+    function parseAndVerifyVM(bytes calldata encodedVM) public view returns (IWormhole.VM memory vm, bool valid, string memory reason) {
         vm = parseVM(encodedVM);
         /// setting checkHash to false as we can trust the hash field in this case given that parseVM computes and then sets the hash field above
         (valid, reason) = verifyVMInternal(vm, false);
@@ -27,7 +26,7 @@ contract Messages is Getters {
     *  - it aims to verify the signatures provided against the guardianSet
     *  - it aims to verify the hash field provided against the contents of the vm
     */
-    function verifyVM(Structs.VM memory vm) public view returns (bool valid, string memory reason) {
+    function verifyVM(IWormhole.VM memory vm) public view returns (bool valid, string memory reason) {
         (valid, reason) = verifyVMInternal(vm, true);
     }
 
@@ -37,9 +36,9 @@ contract Messages is Getters {
     * in the case that the vm is securely parsed and the hash field can be trusted, checkHash can be set to false
     * as the check would be redundant
     */
-    function verifyVMInternal(Structs.VM memory vm, bool checkHash) internal view returns (bool valid, string memory reason) {
+    function verifyVMInternal(IWormhole.VM memory vm, bool checkHash) internal view returns (bool valid, string memory reason) {
         /// @dev Obtain the current guardianSet for the guardianSetIndex provided
-        Structs.GuardianSet memory guardianSet = getGuardianSet(vm.guardianSetIndex);
+        IWormhole.GuardianSet memory guardianSet = getGuardianSet(vm.guardianSetIndex);
 
         /**
          * Verify that the hash field in the vm matches with the hash of the contents of the vm if checkHash is set
@@ -108,11 +107,11 @@ contract Messages is Getters {
      *  - it intentioanlly does not solve for quorum (you should use verifyVM if you need these protections)
      *  - it intentionally returns true when signatures is an empty set (you should use verifyVM if you need these protections)
      */
-    function verifySignatures(bytes32 hash, Structs.Signature[] memory signatures, Structs.GuardianSet memory guardianSet) public pure returns (bool valid, string memory reason) {
+    function verifySignatures(bytes32 hash, IWormhole.Signature[] memory signatures, IWormhole.GuardianSet memory guardianSet) internal pure returns (bool valid, string memory reason) {
         uint8 lastIndex = 0;
         uint256 guardianCount = guardianSet.keys.length;
         for (uint i = 0; i < signatures.length; i++) {
-            Structs.Signature memory sig = signatures[i];
+            IWormhole.Signature memory sig = signatures[i];
             address signatory = ecrecover(hash, sig.v, sig.r, sig.s);
             // ecrecover returns 0 for invalid signatures. We explicitly require valid signatures to avoid unexpected
             // behaviour due to the default storage slot value also being 0.
@@ -144,7 +143,7 @@ contract Messages is Getters {
      * @dev parseVM serves to parse an encodedVM into a vm struct
      *  - it intentionally performs no validation functions, it simply parses raw into a struct
      */
-    function parseVM(bytes memory encodedVM) public pure virtual returns (Structs.VM memory vm) {
+    function parseVM(bytes memory encodedVM) public pure virtual returns (IWormhole.VM memory vm) {
         uint index = 0;
 
         vm.version = encodedVM.toUint8(index);
@@ -162,7 +161,7 @@ contract Messages is Getters {
         // Parse Signatures
         uint256 signersLen = encodedVM.toUint8(index);
         index += 1;
-        vm.signatures = new Structs.Signature[](signersLen);
+        vm.signatures = new IWormhole.Signature[](signersLen);
         for (uint i = 0; i < signersLen; i++) {
             vm.signatures[i].guardianIndex = encodedVM.toUint8(index);
             index += 1;

@@ -9,6 +9,10 @@ import "./Messages.sol";
 import "./Setters.sol";
 
 contract Implementation is Messages, Setters {
+    constructor(
+        IWormhole _wormhole
+    ) State(_wormhole) {}
+
     fallback() external payable {revert("unsupported");}
 
     receive() external payable {revert("the Wormhole contract does not accept assets");}
