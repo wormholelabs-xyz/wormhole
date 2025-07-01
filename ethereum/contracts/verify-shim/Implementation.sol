@@ -4,11 +4,13 @@
 pragma solidity ^0.8.0;
 pragma experimental ABIEncoderV2;
 
-import "./Governance.sol";
+import "./State.sol";
+import "./Messages.sol";
+import "./Setters.sol";
 
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Upgrade.sol";
 
-contract Implementation is Governance {
+contract Implementation is Messages, Setters, ERC1967Upgrade {
     event LogMessagePublished(address indexed sender, uint64 sequence, uint32 nonce, bytes payload, uint8 consistencyLevel);
 
     // Publish a message to be attested by the Wormhole network
