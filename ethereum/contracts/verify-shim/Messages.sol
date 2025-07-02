@@ -39,8 +39,13 @@ abstract contract Messages is Getters {
     function verifyVMInternal(IWormhole.VM memory vm, uint8 quorum, bool checkHash) internal view returns (bool valid, string memory reason) {
         require(quorum > 0, "quorum must be greater than 0");
 
+        uint8[] memory signatureIndices = new uint8[](vm.signatures.length);
+        for (uint i = 0; i < vm.signatures.length; i++) {
+            signatureIndices[i] = vm.signatures[i].guardianIndex;
+        }
+
         /// @dev Obtain the current guardianSet for the guardianSetIndex provided
-        IWormhole.GuardianSet memory guardianSet = getGuardianSet(vm.guardianSetIndex);
+        IWormhole.GuardianSet memory guardianSet = getGuardianSetSparse(vm.guardianSetIndex, signatureIndices);
 
         /**
          * Verify that the hash field in the vm matches with the hash of the contents of the vm if checkHash is set
@@ -77,9 +82,24 @@ abstract contract Messages is Getters {
             return (false, "invalid guardian set");
         }
 
-        /// @dev Checks if VM guardian set index matches the current index (unless the current set is expired).
-        if(vm.guardianSetIndex != getCurrentGuardianSetIndex() && guardianSet.expirationTime < block.timestamp){
-            return (false, "guardian set has expired");
+        // NOTE: in the original wormhole contract, this checks that either:
+        // - the vm.guardianSetIndex is the current guardian set index
+        // - the guardian set's expiratiom time is in the future
+        //
+        // Here we modify this such that the guardianSetIndex on the VAA is
+        // *either* the current guardian set index *or* the cached current
+        // guardian set index.
+        //
+        // Why? If we have an up to date cache, then this makes no difference, it's equivalent to the original check.
+        // However, if we have an outdated cache, i.e. there is a newer guardian
+        // set that has not been cached yet, we still want to allow the VAA to be verified, until the cache is updated.
+        // Technically this means that if we never update the cache, we will
+        // always the latest cached guardian set index, even if it has expired in the underlying wormhole contract.
+        // We make this tradeoff to guarantee liveness, and allow some time to update the cache.
+        if(guardianSet.expirationTime < block.timestamp) {
+            if (vm.guardianSetIndex != getCachedCurrentGuardianSetIndex() && vm.guardianSetIndex != getCurrentGuardianSetIndex()) {
+                return (false, "guardian set has expired");
+            }
         }
 
        /**
