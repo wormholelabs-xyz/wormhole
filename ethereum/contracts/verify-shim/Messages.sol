@@ -12,10 +12,10 @@ abstract contract Messages is Getters {
     using BytesLib for bytes;
 
     /// @dev parseAndVerifyVM serves to parse an encodedVM and wholy validate it for consumption
-    function parseAndVerifyVM(bytes calldata encodedVM) public view returns (IWormhole.VM memory vm, bool valid, string memory reason) {
+    function parseAndVerifyVM(bytes calldata encodedVM, uint8 quorum) public view returns (IWormhole.VM memory vm, bool valid, string memory reason) {
         vm = parseVM(encodedVM);
         /// setting checkHash to false as we can trust the hash field in this case given that parseVM computes and then sets the hash field above
-        (valid, reason) = verifyVMInternal(vm, false);
+        (valid, reason) = verifyVMInternal(vm, quorum, false);
     }
 
    /**
@@ -26,8 +26,8 @@ abstract contract Messages is Getters {
     *  - it aims to verify the signatures provided against the guardianSet
     *  - it aims to verify the hash field provided against the contents of the vm
     */
-    function verifyVM(IWormhole.VM memory vm) public view returns (bool valid, string memory reason) {
-        (valid, reason) = verifyVMInternal(vm, true);
+    function verifyVM(IWormhole.VM memory vm, uint8 quorum) public view returns (bool valid, string memory reason) {
+        (valid, reason) = verifyVMInternal(vm, quorum, true);
     }
 
     /**
@@ -36,7 +36,9 @@ abstract contract Messages is Getters {
     * in the case that the vm is securely parsed and the hash field can be trusted, checkHash can be set to false
     * as the check would be redundant
     */
-    function verifyVMInternal(IWormhole.VM memory vm, bool checkHash) internal view returns (bool valid, string memory reason) {
+    function verifyVMInternal(IWormhole.VM memory vm, uint8 quorum, bool checkHash) internal view returns (bool valid, string memory reason) {
+        require(quorum > 0, "quorum must be greater than 0");
+
         /// @dev Obtain the current guardianSet for the guardianSetIndex provided
         IWormhole.GuardianSet memory guardianSet = getGuardianSet(vm.guardianSetIndex);
 
@@ -86,7 +88,7 @@ abstract contract Messages is Getters {
         *   if making any changes to this, obtain additional peer review. If guardianSet key length is 0 and
         *   vm.signatures length is 0, this could compromise the integrity of both vm and signature verification.
         */
-        if (vm.signatures.length < quorum(guardianSet.keys.length)){
+        if (vm.signatures.length < quorum) {
             return (false, "no quorum");
         }
 
@@ -204,14 +206,5 @@ abstract contract Messages is Getters {
         index += 1;
 
         vm.payload = encodedVM.slice(index, encodedVM.length - index);
-    }
-
-    /**
-     * @dev quorum serves solely to determine the number of signatures required to acheive quorum
-     */
-    function quorum(uint numGuardians) public pure virtual returns (uint numSignaturesRequiredForQuorum) {
-        // The max number of guardians is 255
-        require(numGuardians < 256, "too many guardians");
-        return ((numGuardians * 2) / 3) + 1;
     }
 }
