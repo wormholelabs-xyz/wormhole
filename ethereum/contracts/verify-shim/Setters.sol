@@ -38,6 +38,9 @@ abstract contract Setters is State {
                 if (guardianSet.keys.length == 0) {
                     revert("Guardian set not found");
                 }
+                if (guardianSet.expirationTime == 0) {
+                    return false; // no update needed, still not expired
+                }
                 guardianSets[index].expirationTime = guardianSet.expirationTime;
                 return true; // updated expiration time
             }
