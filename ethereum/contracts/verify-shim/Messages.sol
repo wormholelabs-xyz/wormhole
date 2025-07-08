@@ -37,7 +37,7 @@ abstract contract Messages is Getters {
     * as the check would be redundant
     */
     function verifyVMInternal(IWormhole.VM memory vm, uint8 quorum, bool checkHash) internal view returns (bool valid, string memory reason) {
-        require(quorum > 0, "quorum must be greater than 0");
+        require(quorum > 1, "quorum must be greater than 1");
 
         uint8[] memory signatureIndices = new uint8[](vm.signatures.length);
         for (uint i = 0; i < vm.signatures.length; i++) {
