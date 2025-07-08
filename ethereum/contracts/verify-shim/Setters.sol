@@ -35,9 +35,6 @@ abstract contract Setters is State {
                 return false; // no update needed, already cached
             } else {
                 IWormhole.GuardianSet memory guardianSet = wormhole.getGuardianSet(index);
-                if (guardianSet.keys.length == 0) {
-                    revert("Guardian set not found");
-                }
                 if (guardianSet.expirationTime == 0) {
                     return false; // no update needed, still not expired
                 }
