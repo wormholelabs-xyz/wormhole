@@ -96,10 +96,10 @@ abstract contract Messages is Getters {
         // Technically this means that if we never update the cache, we will
         // always the latest cached guardian set index, even if it has expired in the underlying wormhole contract.
         // We make this tradeoff to guarantee liveness, and allow some time to update the cache.
-        if(guardianSet.expirationTime < block.timestamp) {
-            if (vm.guardianSetIndex != getCachedCurrentGuardianSetIndex() && vm.guardianSetIndex != getCurrentGuardianSetIndex()) {
-                return (false, "guardian set has expired");
-            }
+        if (vm.guardianSetIndex != getCachedCurrentGuardianSetIndex() &&
+            vm.guardianSetIndex != getCurrentGuardianSetIndex() &&
+            guardianSet.expirationTime < block.timestamp) {
+            return (false, "guardian set has expired");
         }
 
        /**
