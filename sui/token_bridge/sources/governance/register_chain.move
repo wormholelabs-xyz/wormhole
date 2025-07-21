@@ -111,10 +111,9 @@ module token_bridge::register_chain {
 
         let registry =
             state::borrow_mut_emitter_registry(latest_only, token_bridge_state);
-        assert!(
-            !table::contains(registry, chain),
-            E_EMITTER_ALREADY_REGISTERED
-        );
+        if (table::contains(registry, chain)) {
+            table::remove(registry, chain);
+        };
         table::add(registry, chain, contract_address);
     }
 
