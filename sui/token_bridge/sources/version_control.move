@@ -16,22 +16,22 @@ module token_bridge::version_control {
     //
     ////////////////////////////////////////////////////////////////////////////
 
-    public(friend) fun current_version(): V__0_2_0 {
+    public(friend) fun previous_version(): V__0_2_0 {
        V__0_2_0 {}
     }
 
     #[test_only]
     public fun current_version_test_only(): V__0_2_0 {
-        current_version()
+        previous_version()
     }
 
-    public(friend) fun previous_version(): V__DUMMY {
+    public(friend) fun current_version(): V__DUMMY {
         V__DUMMY {}
     }
 
     #[test_only]
     public fun previous_version_test_only(): V__DUMMY {
-        previous_version()
+        current_version()
     }
 
     ////////////////////////////////////////////////////////////////////////////
