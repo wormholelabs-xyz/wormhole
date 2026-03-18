@@ -79,6 +79,8 @@ func init() {
 	NotaryListDelayedMessages.Flags().AddFlagSet(pf)
 	NotaryListBlackholedMessages.Flags().AddFlagSet(pf)
 	PurgePythNetVaasCmd.Flags().AddFlagSet(pf)
+	PurgeVaasCmd.Flags().AddFlagSet(pf)
+	PurgeVaaCmd.Flags().AddFlagSet(pf)
 	SignExistingVaaCmd.Flags().AddFlagSet(pf)
 	SignExistingVaasFromCSVCmd.Flags().AddFlagSet(pf)
 	GetAndObserveMissingVAAs.Flags().AddFlagSet(pf)
@@ -115,6 +117,8 @@ func init() {
 	AdminCmd.AddCommand(NotaryListBlackholedMessages)
 	// Other commands
 	AdminCmd.AddCommand(PurgePythNetVaasCmd)
+	AdminCmd.AddCommand(PurgeVaasCmd)
+	AdminCmd.AddCommand(PurgeVaaCmd)
 	AdminCmd.AddCommand(SignExistingVaaCmd)
 	AdminCmd.AddCommand(SignExistingVaasFromCSVCmd)
 	AdminCmd.AddCommand(Keccak256Hash)
@@ -208,6 +212,20 @@ var PurgePythNetVaasCmd = &cobra.Command{
 	Short: "Deletes PythNet VAAs from the database that are more than [DAYS_OLD] days only (if logonly is specified, doesn't delete anything)",
 	Run:   runPurgePythNetVaas,
 	Args:  cobra.RangeArgs(1, 2),
+}
+
+var PurgeVaasCmd = &cobra.Command{
+	Use:   "purge-vaas [PREFIX] [DAYS_OLD] <logonly>",
+	Short: "Deletes VAAs matching [PREFIX] from the database that are more than [DAYS_OLD] days old (prefix format: '<chain_id>' or '<chain_id>/<emitter_address>')",
+	Run:   runPurgeVaas,
+	Args:  cobra.RangeArgs(2, 3),
+}
+
+var PurgeVaaCmd = &cobra.Command{
+	Use:   "purge-vaa [MESSAGE_ID] [DAYS_OLD] <logonly>",
+	Short: "Deletes a single VAA from the database if it is more than [DAYS_OLD] days old (message id format: '<chain_id>/<emitter_address>/<sequence>')",
+	Run:   runPurgeVaa,
+	Args:  cobra.RangeArgs(2, 3),
 }
 
 var SignExistingVaaCmd = &cobra.Command{
@@ -776,6 +794,92 @@ func runPurgePythNetVaas(cmd *cobra.Command, args []string) {
 	resp, err := c.PurgePythNetVaas(ctx, &msg)
 	if err != nil {
 		log.Fatalf("failed to run PurgePythNetVaas RPC: %s", err)
+	}
+
+	fmt.Println(resp.Response)
+}
+
+func runPurgeVaas(cmd *cobra.Command, args []string) {
+	prefix := args[0]
+
+	daysOld, err := strconv.Atoi(args[1])
+	if err != nil {
+		log.Fatalf("invalid DAYS_OLD: %v", err)
+	}
+
+	if daysOld < 0 {
+		log.Fatalf("DAYS_OLD may not be negative")
+	}
+
+	logOnly := false
+	if len(args) > 2 {
+		if args[2] != "logonly" {
+			log.Fatalf("invalid option, only \"logonly\" is supported")
+		}
+
+		logOnly = true
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn, c, err := getAdminClient(ctx, *clientSocketPath)
+	if err != nil {
+		log.Fatalf("failed to get admin client: %v", err)
+	}
+	defer conn.Close()
+
+	msg := nodev1.PurgeVaasRequest{
+		Prefix:  prefix,
+		DaysOld: uint64(daysOld),
+		LogOnly: logOnly,
+	}
+	resp, err := c.PurgeVaas(ctx, &msg)
+	if err != nil {
+		log.Fatalf("failed to run PurgeVaas RPC: %s", err)
+	}
+
+	fmt.Println(resp.Response)
+}
+
+func runPurgeVaa(cmd *cobra.Command, args []string) {
+	messageID := args[0]
+
+	daysOld, err := strconv.Atoi(args[1])
+	if err != nil {
+		log.Fatalf("invalid DAYS_OLD: %v", err)
+	}
+
+	if daysOld < 0 {
+		log.Fatalf("DAYS_OLD may not be negative")
+	}
+
+	logOnly := false
+	if len(args) > 2 {
+		if args[2] != "logonly" {
+			log.Fatalf("invalid option, only \"logonly\" is supported")
+		}
+
+		logOnly = true
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conn, c, err := getAdminClient(ctx, *clientSocketPath)
+	if err != nil {
+		log.Fatalf("failed to get admin client: %v", err)
+	}
+	defer conn.Close()
+
+	msg := nodev1.PurgeVaaRequest{
+		MessageId: messageID,
+		DaysOld:   uint64(daysOld),
+		LogOnly:   logOnly,
+	}
+	resp, err := c.PurgeVaa(ctx, &msg)
+	if err != nil {
+		log.Fatalf("failed to run PurgeVaa RPC: %s", err)
 	}
 
 	fmt.Println(resp.Response)

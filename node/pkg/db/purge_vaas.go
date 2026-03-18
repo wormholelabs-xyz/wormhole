@@ -79,3 +79,56 @@ func (d *Database) PurgeVaas(prefix VAAID, oldestTime time.Time, logOnly bool) (
 
 	return ret, nil
 }
+
+func (d *Database) PurgeSingleVaa(id VAAID, oldestTime time.Time, logOnly bool) (string, error) {
+	key := id.Bytes()
+	idStr := fmt.Sprintf("%d/%s/%d", id.EmitterChain, id.EmitterAddress, id.Sequence)
+
+	var found bool
+	var deleted bool
+	if err := d.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("failed to look up VAA for %s: %w", string(key), err)
+		}
+
+		found = true
+		return item.Value(func(val []byte) error {
+			v, err := vaa.Unmarshal(val)
+			if err != nil {
+				return fmt.Errorf("failed to unmarshal VAA for %s: %v", string(key), err)
+			}
+
+			if v.Timestamp.Before(oldestTime) {
+				if !logOnly {
+					if err := d.db.Update(func(txn *badger.Txn) error {
+						return txn.Delete(key)
+					}); err != nil {
+						return fmt.Errorf("failed to delete vaa for key [%v]: %w", key, err)
+					}
+				}
+				deleted = true
+			}
+			return nil
+		})
+	}); err != nil {
+		return "", err
+	}
+
+	if !found {
+		return fmt.Sprintf("VAA %s not found in database.", idStr), nil
+	}
+	if logOnly {
+		if deleted {
+			return fmt.Sprintf("Would delete VAA %s (older than %v).", idStr, oldestTime.String()), nil
+		}
+		return fmt.Sprintf("Would not delete VAA %s (not old enough, must be older than %v).", idStr, oldestTime.String()), nil
+	}
+	if deleted {
+		return fmt.Sprintf("Deleted VAA %s.", idStr), nil
+	}
+	return fmt.Sprintf("Did not delete VAA %s (not old enough, must be older than %v).", idStr, oldestTime.String()), nil
+}

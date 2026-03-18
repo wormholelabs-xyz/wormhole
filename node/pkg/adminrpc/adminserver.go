@@ -1417,6 +1417,55 @@ func (s *nodePrivilegedService) PurgePythNetVaas(ctx context.Context, req *nodev
 	}, nil
 }
 
+func (s *nodePrivilegedService) PurgeVaas(ctx context.Context, req *nodev1.PurgeVaasRequest) (*nodev1.PurgeVaasResponse, error) {
+	parts := strings.Split(req.Prefix, "/")
+	if len(parts) < 1 || len(parts) > 2 {
+		return nil, fmt.Errorf("invalid prefix format, expected '<chain_id>' or '<chain_id>/<emitter_address>'")
+	}
+
+	chainID, err := strconv.ParseUint(parts[0], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid chain id: %w", err)
+	}
+
+	prefix := guardianDB.VAAID{EmitterChain: vaa.ChainID(chainID)} // #nosec G115
+
+	if len(parts) == 2 {
+		emitterAddress, err := vaa.StringToAddress(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("invalid emitter address: %w", err)
+		}
+		prefix.EmitterAddress = emitterAddress
+	}
+
+	oldestTime := time.Now().Add(-time.Hour * 24 * time.Duration(req.DaysOld)) // #nosec G115 -- This conversion is safe indefinitely
+	resp, err := s.db.PurgeVaas(prefix, oldestTime, req.LogOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	return &nodev1.PurgeVaasResponse{
+		Response: resp,
+	}, nil
+}
+
+func (s *nodePrivilegedService) PurgeVaa(ctx context.Context, req *nodev1.PurgeVaaRequest) (*nodev1.PurgeVaaResponse, error) {
+	vaaID, err := guardianDB.VaaIDFromString(req.MessageId)
+	if err != nil {
+		return nil, fmt.Errorf("invalid message id: %w", err)
+	}
+
+	oldestTime := time.Now().Add(-time.Hour * 24 * time.Duration(req.DaysOld)) // #nosec G115 -- This conversion is safe indefinitely
+	resp, err := s.db.PurgeSingleVaa(*vaaID, oldestTime, req.LogOnly)
+	if err != nil {
+		return nil, err
+	}
+
+	return &nodev1.PurgeVaaResponse{
+		Response: resp,
+	}, nil
+}
+
 func (s *nodePrivilegedService) SignExistingVAA(ctx context.Context, req *nodev1.SignExistingVAARequest) (*nodev1.SignExistingVAAResponse, error) {
 	v, err := vaa.Unmarshal(req.Vaa)
 	if err != nil {

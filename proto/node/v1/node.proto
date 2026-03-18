@@ -80,6 +80,12 @@ service NodePrivilegedService {
   // PurgePythNetVaas deletes PythNet VAAs from the database that are more than the specified number of days old.
   rpc PurgePythNetVaas (PurgePythNetVaasRequest) returns (PurgePythNetVaasResponse);
 
+  // PurgeVaas deletes VAAs matching an arbitrary prefix from the database that are more than the specified number of days old.
+  rpc PurgeVaas (PurgeVaasRequest) returns (PurgeVaasResponse);
+
+  // PurgeVaa deletes a single VAA from the database if it is more than the specified number of days old.
+  rpc PurgeVaa (PurgeVaaRequest) returns (PurgeVaaResponse);
+
   // SignExistingVAA signs an existing VAA for a new guardian set using the local guardian key.
   rpc SignExistingVAA (SignExistingVAARequest) returns (SignExistingVAAResponse);
 
@@ -542,6 +548,28 @@ message PurgePythNetVaasRequest {
 }
 
 message PurgePythNetVaasResponse {
+  string response = 1;
+}
+
+message PurgeVaasRequest {
+  // prefix is the VAA prefix to purge, in the format "<chain_id>" or "<chain_id>/<emitter_address>".
+  string prefix = 1;
+  uint64 days_old = 2;
+  bool log_only = 3;
+}
+
+message PurgeVaasResponse {
+  string response = 1;
+}
+
+message PurgeVaaRequest {
+  // message_id is the VAA to purge, in the format "<chain_id>/<emitter_address>/<sequence>".
+  string message_id = 1;
+  uint64 days_old = 2;
+  bool log_only = 3;
+}
+
+message PurgeVaaResponse {
   string response = 1;
 }
 
