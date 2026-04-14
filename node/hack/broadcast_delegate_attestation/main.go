@@ -225,7 +225,7 @@ func main() {
 	// Wait for peers.
 	logger.Info("waiting for peers...", zap.String("peer_id", h.ID().String()))
 	timeout := time.After(60 * time.Second)
-	for len(th.ListPeers()) < 1 {
+	for len(th.ListPeers()) < 3 {
 		select {
 		case <-timeout:
 			logger.Fatal("timed out waiting for peers")
