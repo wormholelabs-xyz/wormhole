@@ -872,6 +872,193 @@ func suiCallToVaa(suiCall *nodev1.SuiCall, timestamp time.Time, guardianSetIndex
 	return v, nil
 }
 
+// delegatedPauserSetConfigEvmToVaa builds the SetConfigEvm governance VAA for the WormholePauser contract.
+// See whitepapers/0018_pauser.md.
+func delegatedPauserSetConfigEvmToVaa(req *nodev1.DelegatedPauserSetConfigEvm, timestamp time.Time, guardianSetIndex uint32, nonce uint32, sequence uint64) (*vaa.VAA, error) {
+	if req.ChainId == 0 || req.ChainId > math.MaxUint16 {
+		return nil, errors.New("invalid chain_id (must be > 0 and <= uint16 max)")
+	}
+	chainID := vaa.ChainID(req.ChainId)
+
+	if req.Index == 0 || req.Index > math.MaxUint16 {
+		return nil, errors.New("invalid index (must be > 0 and <= uint16 max)")
+	}
+	index := uint16(req.Index)
+
+	if req.Threshold == 0 || req.Threshold > math.MaxUint8 {
+		return nil, errors.New("invalid threshold (must be > 0 and <= uint8 max)")
+	}
+	threshold := uint8(req.Threshold)
+
+	if req.ExpiryDuration == 0 {
+		return nil, errors.New("invalid expiry_duration (must be > 0)")
+	}
+	if len(req.Signers) == 0 {
+		return nil, errors.New("at least one signer is required")
+	}
+	if int(req.Threshold) > len(req.Signers) {
+		return nil, errors.New("threshold exceeds number of signers")
+	}
+
+	signers := make([]ethcommon.Address, len(req.Signers))
+	seen := make(map[ethcommon.Address]bool, len(req.Signers))
+	for i, s := range req.Signers {
+		if !ethcommon.IsHexAddress(s) {
+			return nil, fmt.Errorf("invalid EVM signer at index %d: not a 20-byte hex address", i)
+		}
+		addr := ethcommon.HexToAddress(s)
+		if addr == (ethcommon.Address{}) {
+			return nil, fmt.Errorf("invalid EVM signer at index %d: zero address", i)
+		}
+		if seen[addr] {
+			return nil, fmt.Errorf("duplicate EVM signer at index %d", i)
+		}
+		seen[addr] = true
+		signers[i] = addr
+	}
+
+	body, err := vaa.BodyDelegatedPauserSetConfigEvm{
+		ChainID:        chainID,
+		Index:          index,
+		Threshold:      threshold,
+		ExpiryDuration: req.ExpiryDuration,
+		Signers:        signers,
+	}.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize governance body: %w", err)
+	}
+	return vaa.CreateGovernanceVAA(timestamp, nonce, sequence, guardianSetIndex, body), nil
+}
+
+// delegatedPauserSetConfigSolanaToVaa builds the SetConfigSolana governance VAA.
+func delegatedPauserSetConfigSolanaToVaa(req *nodev1.DelegatedPauserSetConfigSolana, timestamp time.Time, guardianSetIndex uint32, nonce uint32, sequence uint64) (*vaa.VAA, error) {
+	if req.ChainId == 0 || req.ChainId > math.MaxUint16 {
+		return nil, errors.New("invalid chain_id (must be > 0 and <= uint16 max)")
+	}
+	chainID := vaa.ChainID(req.ChainId)
+
+	if req.Index == 0 || req.Index > math.MaxUint16 {
+		return nil, errors.New("invalid index (must be > 0 and <= uint16 max)")
+	}
+	index := uint16(req.Index)
+
+	if req.Threshold == 0 || req.Threshold > math.MaxUint8 {
+		return nil, errors.New("invalid threshold (must be > 0 and <= uint8 max)")
+	}
+	threshold := uint8(req.Threshold)
+
+	if req.ExpiryDuration == 0 {
+		return nil, errors.New("invalid expiry_duration (must be > 0)")
+	}
+	if len(req.Signers) == 0 {
+		return nil, errors.New("at least one signer is required")
+	}
+	if int(req.Threshold) > len(req.Signers) {
+		return nil, errors.New("threshold exceeds number of signers")
+	}
+
+	zero := vaa.Address{}
+	signers := make([]vaa.Address, len(req.Signers))
+	seen := make(map[vaa.Address]bool, len(req.Signers))
+	for i, s := range req.Signers {
+		b, err := hex.DecodeString(s)
+		if err != nil || len(b) != 32 {
+			return nil, fmt.Errorf("invalid Solana signer at index %d: expected 32-byte hex pubkey", i)
+		}
+		var addr vaa.Address
+		copy(addr[:], b)
+		if addr == zero {
+			return nil, fmt.Errorf("invalid Solana signer at index %d: zero pubkey", i)
+		}
+		if seen[addr] {
+			return nil, fmt.Errorf("duplicate Solana signer at index %d", i)
+		}
+		seen[addr] = true
+		signers[i] = addr
+	}
+
+	body, err := vaa.BodyDelegatedPauserSetConfigSolana{
+		ChainID:        chainID,
+		Index:          index,
+		Threshold:      threshold,
+		ExpiryDuration: req.ExpiryDuration,
+		Signers:        signers,
+	}.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize governance body: %w", err)
+	}
+	return vaa.CreateGovernanceVAA(timestamp, nonce, sequence, guardianSetIndex, body), nil
+}
+
+// bridgeSetPauserAddressesEvmToVaa builds the TokenBridge SetPauserAddressesEvm governance VAA.
+func bridgeSetPauserAddressesEvmToVaa(req *nodev1.BridgeSetPauserAddressesEvm, timestamp time.Time, guardianSetIndex uint32, nonce uint32, sequence uint64) (*vaa.VAA, error) {
+	if req.Module == "" {
+		return nil, errors.New("module is required")
+	}
+	if req.TargetChainId == 0 || req.TargetChainId > math.MaxUint16 {
+		return nil, errors.New("invalid target_chain_id (must be > 0 and <= uint16 max)")
+	}
+	targetChainID := vaa.ChainID(req.TargetChainId)
+
+	if !ethcommon.IsHexAddress(req.Pauser) {
+		return nil, errors.New("invalid pauser (expected 20-byte hex address)")
+	}
+	if !ethcommon.IsHexAddress(req.Unpauser) {
+		return nil, errors.New("invalid unpauser (expected 20-byte hex address)")
+	}
+
+	body, err := vaa.BodyTokenBridgeSetPauserAddressesEvm{
+		Module:        req.Module,
+		TargetChainID: targetChainID,
+		Pauser:        ethcommon.HexToAddress(req.Pauser),
+		Unpauser:      ethcommon.HexToAddress(req.Unpauser),
+	}.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize governance body: %w", err)
+	}
+	return vaa.CreateGovernanceVAA(timestamp, nonce, sequence, guardianSetIndex, body), nil
+}
+
+// bridgeSetPauserAddressesSolanaToVaa builds the TokenBridge SetPauserAddressesSolana governance VAA.
+func bridgeSetPauserAddressesSolanaToVaa(req *nodev1.BridgeSetPauserAddressesSolana, timestamp time.Time, guardianSetIndex uint32, nonce uint32, sequence uint64) (*vaa.VAA, error) {
+	if req.Module == "" {
+		return nil, errors.New("module is required")
+	}
+	if req.TargetChainId == 0 || req.TargetChainId > math.MaxUint16 {
+		return nil, errors.New("invalid target_chain_id (must be > 0 and <= uint16 max)")
+	}
+	targetChainID := vaa.ChainID(req.TargetChainId)
+
+	parse := func(name, raw string) (vaa.Address, error) {
+		b, err := hex.DecodeString(raw)
+		if err != nil || len(b) != 32 {
+			return vaa.Address{}, fmt.Errorf("invalid %s (expected 32-byte hex pubkey)", name)
+		}
+		var a vaa.Address
+		copy(a[:], b)
+		return a, nil
+	}
+	pauser, err := parse("pauser", req.Pauser)
+	if err != nil {
+		return nil, err
+	}
+	unpauser, err := parse("unpauser", req.Unpauser)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err := vaa.BodyTokenBridgeSetPauserAddressesSolana{
+		Module:        req.Module,
+		TargetChainID: targetChainID,
+		Pauser:        pauser,
+		Unpauser:      unpauser,
+	}.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize governance body: %w", err)
+	}
+	return vaa.CreateGovernanceVAA(timestamp, nonce, sequence, guardianSetIndex, body), nil
+}
+
 func GovMsgToVaa(message *nodev1.GovernanceMessage, currentSetIndex uint32, timestamp time.Time) (*vaa.VAA, error) {
 	var (
 		v   *vaa.VAA
@@ -927,6 +1114,14 @@ func GovMsgToVaa(message *nodev1.GovernanceMessage, currentSetIndex uint32, time
 		v, err = delegatedGuardiansConfigToVaa(payload.DelegatedGuardiansConfig, timestamp, currentSetIndex, message.Nonce, message.Sequence)
 	case *nodev1.GovernanceMessage_DelegatedManagerSetUpdate:
 		v, err = delegatedManagerSetUpdateToVaa(payload.DelegatedManagerSetUpdate, timestamp, currentSetIndex, message.Nonce, message.Sequence)
+	case *nodev1.GovernanceMessage_DelegatedPauserSetConfigEvm:
+		v, err = delegatedPauserSetConfigEvmToVaa(payload.DelegatedPauserSetConfigEvm, timestamp, currentSetIndex, message.Nonce, message.Sequence)
+	case *nodev1.GovernanceMessage_DelegatedPauserSetConfigSolana:
+		v, err = delegatedPauserSetConfigSolanaToVaa(payload.DelegatedPauserSetConfigSolana, timestamp, currentSetIndex, message.Nonce, message.Sequence)
+	case *nodev1.GovernanceMessage_BridgeSetPauserAddressesEvm:
+		v, err = bridgeSetPauserAddressesEvmToVaa(payload.BridgeSetPauserAddressesEvm, timestamp, currentSetIndex, message.Nonce, message.Sequence)
+	case *nodev1.GovernanceMessage_BridgeSetPauserAddressesSolana:
+		v, err = bridgeSetPauserAddressesSolanaToVaa(payload.BridgeSetPauserAddressesSolana, timestamp, currentSetIndex, message.Nonce, message.Sequence)
 	default:
 		err = fmt.Errorf("unsupported VAA type: %T", payload)
 	}

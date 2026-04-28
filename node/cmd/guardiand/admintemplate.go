@@ -90,6 +90,17 @@ var delegatedManagerThreshold *string
 var delegatedManagerNumKeys *string
 var delegatedManagerPublicKeys *string
 
+var delegatedPauserChainId *string
+var delegatedPauserIndex *string
+var delegatedPauserThreshold *string
+var delegatedPauserExpiryDuration *string
+var delegatedPauserSigners *string
+
+var bridgeSetPauserAddressesModule *string
+var bridgeSetPauserAddressesChainId *string
+var bridgeSetPauserAddressesPauser *string
+var bridgeSetPauserAddressesUnpauser *string
+
 func init() {
 	governanceFlagSet := pflag.NewFlagSet("governance", pflag.ExitOnError)
 	chainID = governanceFlagSet.String("chain-id", "", "Chain ID")
@@ -257,6 +268,29 @@ func init() {
 	delegatedManagerPublicKeys = delegatedManagerFlagSet.String("public-keys", "", "Comma-separated list of compressed secp256k1 public keys (33 bytes each, hex-encoded)")
 	AdminClientDelegatedManagerSetUpdateCmd.Flags().AddFlagSet(delegatedManagerFlagSet)
 	TemplateCmd.AddCommand(AdminClientDelegatedManagerSetUpdateCmd)
+
+	// flags for delegated-pauser-set-config-{evm,solana}
+	delegatedPauserFlagSet := pflag.NewFlagSet("delegated-pauser", pflag.ExitOnError)
+	delegatedPauserChainId = delegatedPauserFlagSet.String("chain-id", "", "Target Wormhole chain ID for the WormholePauser deployment being configured")
+	delegatedPauserIndex = delegatedPauserFlagSet.String("config-index", "", "Monotonic config index (must be on-chain index + 1; first valid is 1)")
+	delegatedPauserThreshold = delegatedPauserFlagSet.String("threshold", "", "Approval threshold (must be > 0 and <= number of signers)")
+	delegatedPauserExpiryDuration = delegatedPauserFlagSet.String("expiry-duration", "", "Proposal expiry duration in seconds (must be > 0)")
+	delegatedPauserSigners = delegatedPauserFlagSet.String("signers", "", "Comma-separated list of signer addresses (hex; 20 bytes for EVM, 32 bytes for Solana)")
+	AdminClientDelegatedPauserSetConfigEvmCmd.Flags().AddFlagSet(delegatedPauserFlagSet)
+	TemplateCmd.AddCommand(AdminClientDelegatedPauserSetConfigEvmCmd)
+	AdminClientDelegatedPauserSetConfigSolanaCmd.Flags().AddFlagSet(delegatedPauserFlagSet)
+	TemplateCmd.AddCommand(AdminClientDelegatedPauserSetConfigSolanaCmd)
+
+	// flags for bridge-set-pauser-addresses-{evm,solana}
+	bridgeSetPauserFlagSet := pflag.NewFlagSet("bridge-set-pauser", pflag.ExitOnError)
+	bridgeSetPauserAddressesModule = bridgeSetPauserFlagSet.String("module", "TokenBridge", "Module name (typically TokenBridge)")
+	bridgeSetPauserAddressesChainId = bridgeSetPauserFlagSet.String("chain-id", "", "Target Wormhole chain ID")
+	bridgeSetPauserAddressesPauser = bridgeSetPauserFlagSet.String("pauser", "", "Pauser address (hex; 20 bytes for EVM, 32 bytes for Solana)")
+	bridgeSetPauserAddressesUnpauser = bridgeSetPauserFlagSet.String("unpauser", "", "Unpauser address (hex; 20 bytes for EVM, 32 bytes for Solana)")
+	AdminClientBridgeSetPauserAddressesEvmCmd.Flags().AddFlagSet(bridgeSetPauserFlagSet)
+	TemplateCmd.AddCommand(AdminClientBridgeSetPauserAddressesEvmCmd)
+	AdminClientBridgeSetPauserAddressesSolanaCmd.Flags().AddFlagSet(bridgeSetPauserFlagSet)
+	TemplateCmd.AddCommand(AdminClientBridgeSetPauserAddressesSolanaCmd)
 }
 
 var TemplateCmd = &cobra.Command{
@@ -412,6 +446,30 @@ var AdminClientGeneralPurposeGovernanceSuiCallCmd = &cobra.Command{
 	Use:   "governance-sui-call",
 	Short: "Generate a 'general purpose sui governance call' template for specified chain and address",
 	Run:   runGeneralPurposeGovernanceSuiCallTemplate,
+}
+
+var AdminClientDelegatedPauserSetConfigEvmCmd = &cobra.Command{
+	Use:   "delegated-pauser-set-config-evm",
+	Short: "Generate a DelegatedPauser SetConfigEvm governance VAA template (whitepaper 0018)",
+	Run:   runDelegatedPauserSetConfigEvmTemplate,
+}
+
+var AdminClientDelegatedPauserSetConfigSolanaCmd = &cobra.Command{
+	Use:   "delegated-pauser-set-config-solana",
+	Short: "Generate a DelegatedPauser SetConfigSolana governance VAA template (whitepaper 0018)",
+	Run:   runDelegatedPauserSetConfigSolanaTemplate,
+}
+
+var AdminClientBridgeSetPauserAddressesEvmCmd = &cobra.Command{
+	Use:   "bridge-set-pauser-addresses-evm",
+	Short: "Generate a TokenBridge SetPauserAddressesEvm governance VAA template (whitepaper 0018)",
+	Run:   runBridgeSetPauserAddressesEvmTemplate,
+}
+
+var AdminClientBridgeSetPauserAddressesSolanaCmd = &cobra.Command{
+	Use:   "bridge-set-pauser-addresses-solana",
+	Short: "Generate a TokenBridge SetPauserAddressesSolana governance VAA template (whitepaper 0018)",
+	Run:   runBridgeSetPauserAddressesSolanaTemplate,
 }
 
 var AdminClientDelegatedManagerSetUpdateCmd = &cobra.Command{
@@ -1559,4 +1617,212 @@ func randSeqNonce() (uint64, uint32) {
 		log.Fatal("random number: ", err)
 	}
 	return seq, nonce
+}
+
+// parseDelegatedPauserCommonFlags validates and parses the flags shared by both EVM and Solana
+// SetConfig templates. Signers are returned as a comma-trimmed list of hex strings (without 0x).
+func parseDelegatedPauserCommonFlags() (chainId uint32, index uint32, threshold uint32, expiryDuration uint64, signers []string) {
+	if *delegatedPauserChainId == "" {
+		log.Fatal("--chain-id is required")
+	}
+	c, err := parseChainID(*delegatedPauserChainId)
+	if err != nil {
+		log.Fatal("failed to parse chain-id: ", err)
+	}
+	chainId = uint32(c)
+
+	if *delegatedPauserIndex == "" {
+		log.Fatal("--config-index is required")
+	}
+	idx, err := strconv.ParseUint(*delegatedPauserIndex, 10, 16)
+	if err != nil {
+		log.Fatal("failed to parse config-index: ", err)
+	}
+	index = uint32(idx)
+
+	if *delegatedPauserThreshold == "" {
+		log.Fatal("--threshold is required")
+	}
+	t, err := strconv.ParseUint(*delegatedPauserThreshold, 10, 8)
+	if err != nil {
+		log.Fatal("failed to parse threshold: ", err)
+	}
+	threshold = uint32(t)
+
+	if *delegatedPauserExpiryDuration == "" {
+		log.Fatal("--expiry-duration is required")
+	}
+	expiryDuration, err = strconv.ParseUint(*delegatedPauserExpiryDuration, 10, 64)
+	if err != nil {
+		log.Fatal("failed to parse expiry-duration: ", err)
+	}
+
+	if *delegatedPauserSigners == "" {
+		log.Fatal("--signers is required")
+	}
+	for _, s := range strings.Split(*delegatedPauserSigners, ",") {
+		s = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(s, "0x"), "0X"))
+		if s == "" {
+			continue
+		}
+		signers = append(signers, s)
+	}
+	if len(signers) == 0 {
+		log.Fatal("at least one signer is required")
+	}
+	return
+}
+
+func runDelegatedPauserSetConfigEvmTemplate(cmd *cobra.Command, args []string) {
+	chainId, index, threshold, expiryDuration, signers := parseDelegatedPauserCommonFlags()
+	for i, s := range signers {
+		b, err := hex.DecodeString(s)
+		if err != nil || len(b) != 20 {
+			log.Fatalf("EVM signer at index %d must be a 20-byte hex address: %v", i, err)
+		}
+	}
+
+	seq, nonce := randSeqNonce()
+	m := &nodev1.InjectGovernanceVAARequest{
+		CurrentSetIndex: uint32(*templateGuardianIndex), // #nosec G115 -- This will never overflow
+		Messages: []*nodev1.GovernanceMessage{
+			{
+				Sequence: seq,
+				Nonce:    nonce,
+				Payload: &nodev1.GovernanceMessage_DelegatedPauserSetConfigEvm{
+					DelegatedPauserSetConfigEvm: &nodev1.DelegatedPauserSetConfigEvm{
+						ChainId:        chainId,
+						Index:          index,
+						Threshold:      threshold,
+						ExpiryDuration: expiryDuration,
+						Signers:        signers,
+					},
+				},
+			},
+		},
+	}
+	b, err := prototext.MarshalOptions{Multiline: true}.Marshal(m)
+	if err != nil {
+		log.Fatal("failed to marshal request: ", err)
+	}
+	fmt.Print(string(b))
+}
+
+func runDelegatedPauserSetConfigSolanaTemplate(cmd *cobra.Command, args []string) {
+	chainId, index, threshold, expiryDuration, signers := parseDelegatedPauserCommonFlags()
+	for i, s := range signers {
+		b, err := hex.DecodeString(s)
+		if err != nil || len(b) != 32 {
+			log.Fatalf("Solana signer at index %d must be a 32-byte hex pubkey: %v", i, err)
+		}
+	}
+
+	seq, nonce := randSeqNonce()
+	m := &nodev1.InjectGovernanceVAARequest{
+		CurrentSetIndex: uint32(*templateGuardianIndex), // #nosec G115 -- This will never overflow
+		Messages: []*nodev1.GovernanceMessage{
+			{
+				Sequence: seq,
+				Nonce:    nonce,
+				Payload: &nodev1.GovernanceMessage_DelegatedPauserSetConfigSolana{
+					DelegatedPauserSetConfigSolana: &nodev1.DelegatedPauserSetConfigSolana{
+						ChainId:        chainId,
+						Index:          index,
+						Threshold:      threshold,
+						ExpiryDuration: expiryDuration,
+						Signers:        signers,
+					},
+				},
+			},
+		},
+	}
+	b, err := prototext.MarshalOptions{Multiline: true}.Marshal(m)
+	if err != nil {
+		log.Fatal("failed to marshal request: ", err)
+	}
+	fmt.Print(string(b))
+}
+
+func parseBridgeSetPauserCommonFlags(addrLen int) (module string, chainId uint32, pauser, unpauser string) {
+	module = *bridgeSetPauserAddressesModule
+	if module == "" {
+		log.Fatal("--module is required")
+	}
+	if *bridgeSetPauserAddressesChainId == "" {
+		log.Fatal("--chain-id is required")
+	}
+	c, err := parseChainID(*bridgeSetPauserAddressesChainId)
+	if err != nil {
+		log.Fatal("failed to parse chain-id: ", err)
+	}
+	chainId = uint32(c)
+
+	parseAddr := func(name, raw string) string {
+		if raw == "" {
+			log.Fatalf("--%s is required", name)
+		}
+		raw = strings.TrimPrefix(strings.TrimPrefix(raw, "0x"), "0X")
+		b, err := hex.DecodeString(raw)
+		if err != nil || len(b) != addrLen {
+			log.Fatalf("--%s must be a %d-byte hex address: %v", name, addrLen, err)
+		}
+		return raw
+	}
+	pauser = parseAddr("pauser", *bridgeSetPauserAddressesPauser)
+	unpauser = parseAddr("unpauser", *bridgeSetPauserAddressesUnpauser)
+	return
+}
+
+func runBridgeSetPauserAddressesEvmTemplate(cmd *cobra.Command, args []string) {
+	module, chainId, pauser, unpauser := parseBridgeSetPauserCommonFlags(20)
+	seq, nonce := randSeqNonce()
+	m := &nodev1.InjectGovernanceVAARequest{
+		CurrentSetIndex: uint32(*templateGuardianIndex), // #nosec G115 -- This will never overflow
+		Messages: []*nodev1.GovernanceMessage{
+			{
+				Sequence: seq,
+				Nonce:    nonce,
+				Payload: &nodev1.GovernanceMessage_BridgeSetPauserAddressesEvm{
+					BridgeSetPauserAddressesEvm: &nodev1.BridgeSetPauserAddressesEvm{
+						Module:        module,
+						TargetChainId: chainId,
+						Pauser:        pauser,
+						Unpauser:      unpauser,
+					},
+				},
+			},
+		},
+	}
+	b, err := prototext.MarshalOptions{Multiline: true}.Marshal(m)
+	if err != nil {
+		log.Fatal("failed to marshal request: ", err)
+	}
+	fmt.Print(string(b))
+}
+
+func runBridgeSetPauserAddressesSolanaTemplate(cmd *cobra.Command, args []string) {
+	module, chainId, pauser, unpauser := parseBridgeSetPauserCommonFlags(32)
+	seq, nonce := randSeqNonce()
+	m := &nodev1.InjectGovernanceVAARequest{
+		CurrentSetIndex: uint32(*templateGuardianIndex), // #nosec G115 -- This will never overflow
+		Messages: []*nodev1.GovernanceMessage{
+			{
+				Sequence: seq,
+				Nonce:    nonce,
+				Payload: &nodev1.GovernanceMessage_BridgeSetPauserAddressesSolana{
+					BridgeSetPauserAddressesSolana: &nodev1.BridgeSetPauserAddressesSolana{
+						Module:        module,
+						TargetChainId: chainId,
+						Pauser:        pauser,
+						Unpauser:      unpauser,
+					},
+				},
+			},
+		},
+	}
+	b, err := prototext.MarshalOptions{Multiline: true}.Marshal(m)
+	if err != nil {
+		log.Fatal("failed to marshal request: ", err)
+	}
+	fmt.Print(string(b))
 }
