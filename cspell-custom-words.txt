@@ -104,6 +104,8 @@ Keccak
 kevm
 KEVM
 keymap
+keypair
+keypairs
 keytool
 klaytn
 Klaytn
@@ -126,6 +128,7 @@ megaETH
 MegaETH
 merkle
 Metaplex
+metas
 mezo
 Mezo
 mindshare
