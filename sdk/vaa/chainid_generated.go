@@ -26,8 +26,6 @@ func (c ChainID) String() string {
 		return "avalanche"
 	case ChainIDAlgorand:
 		return "algorand"
-	case ChainIDFantom:
-		return "fantom"
 	case ChainIDKlaytn:
 		return "klaytn"
 	case ChainIDCelo:
@@ -64,12 +62,6 @@ func (c ChainID) String() string {
 		return "sei"
 	case ChainIDRootstock:
 		return "rootstock"
-	case ChainIDScroll:
-		return "scroll"
-	case ChainIDMantle:
-		return "mantle"
-	case ChainIDXLayer:
-		return "xlayer"
 	case ChainIDLinea:
 		return "linea"
 	case ChainIDBerachain:
@@ -196,8 +188,6 @@ func ChainIDFromString(s string) (ChainID, error) {
 		return ChainIDAvalanche, nil
 	case "algorand":
 		return ChainIDAlgorand, nil
-	case "fantom":
-		return ChainIDFantom, nil
 	case "klaytn":
 		return ChainIDKlaytn, nil
 	case "celo":
@@ -234,12 +224,6 @@ func ChainIDFromString(s string) (ChainID, error) {
 		return ChainIDSei, nil
 	case "rootstock":
 		return ChainIDRootstock, nil
-	case "scroll":
-		return ChainIDScroll, nil
-	case "mantle":
-		return ChainIDMantle, nil
-	case "xlayer":
-		return ChainIDXLayer, nil
 	case "linea":
 		return ChainIDLinea, nil
 	case "berachain":
@@ -357,7 +341,6 @@ func GetAllNetworkIDs() []ChainID {
 		ChainIDPolygon,
 		ChainIDAvalanche,
 		ChainIDAlgorand,
-		ChainIDFantom,
 		ChainIDKlaytn,
 		ChainIDCelo,
 		ChainIDNear,
@@ -376,9 +359,6 @@ func GetAllNetworkIDs() []ChainID {
 		ChainIDFileCoin,
 		ChainIDSei,
 		ChainIDRootstock,
-		ChainIDScroll,
-		ChainIDMantle,
-		ChainIDXLayer,
 		ChainIDLinea,
 		ChainIDBerachain,
 		ChainIDSeiEVM,

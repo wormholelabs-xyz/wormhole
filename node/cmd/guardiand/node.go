@@ -83,9 +83,6 @@ var (
 	polygonRPC      *string
 	polygonContract *string
 
-	fantomRPC      *string
-	fantomContract *string
-
 	avalancheRPC      *string
 	avalancheContract *string
 
@@ -171,15 +168,6 @@ var (
 
 	baseRPC      *string
 	baseContract *string
-
-	scrollRPC      *string
-	scrollContract *string
-
-	mantleRPC      *string
-	mantleContract *string
-
-	xlayerRPC      *string
-	xlayerContract *string
 
 	lineaRPC      *string
 	lineaContract *string
@@ -357,9 +345,6 @@ func init() {
 	avalancheRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "avalancheRPC", "Avalanche RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
 	avalancheContract = NodeCmd.Flags().String("avalancheContract", "", "Avalanche contract address")
 
-	fantomRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fantomRPC", "Fantom Websocket RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
-	fantomContract = NodeCmd.Flags().String("fantomContract", "", "Fantom contract address")
-
 	klaytnRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "klaytnRPC", "Klaytn RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
 	klaytnContract = NodeCmd.Flags().String("klaytnContract", "", "Klaytn contract address")
 
@@ -440,15 +425,6 @@ func init() {
 
 	optimismRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "optimismRPC", "Optimism RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
 	optimismContract = NodeCmd.Flags().String("optimismContract", "", "Optimism contract address")
-
-	scrollRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "scrollRPC", "Scroll RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
-	scrollContract = NodeCmd.Flags().String("scrollContract", "", "Scroll contract address")
-
-	mantleRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "mantleRPC", "Mantle RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
-	mantleContract = NodeCmd.Flags().String("mantleContract", "", "Mantle contract address")
-
-	xlayerRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "xlayerRPC", "XLayer RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
-	xlayerContract = NodeCmd.Flags().String("xlayerContract", "", "XLayer contract address")
 
 	lineaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "lineaRPC", "Linea RPC URL", "ws://eth-devnet:8545", []string{"ws", "wss"})
 	lineaContract = NodeCmd.Flags().String("lineaContract", "", "Linea contract address")
@@ -893,16 +869,12 @@ func runNode(cmd *cobra.Command, args []string) {
 	*bscContract = checkEvmArgs(logger, *bscRPC, *bscContract, vaa.ChainIDBSC)
 	*polygonContract = checkEvmArgs(logger, *polygonRPC, *polygonContract, vaa.ChainIDPolygon)
 	*avalancheContract = checkEvmArgs(logger, *avalancheRPC, *avalancheContract, vaa.ChainIDAvalanche)
-	*fantomContract = checkEvmArgs(logger, *fantomRPC, *fantomContract, vaa.ChainIDFantom)
 	*klaytnContract = checkEvmArgs(logger, *klaytnRPC, *klaytnContract, vaa.ChainIDKlaytn)
 	*celoContract = checkEvmArgs(logger, *celoRPC, *celoContract, vaa.ChainIDCelo)
 	*moonbeamContract = checkEvmArgs(logger, *moonbeamRPC, *moonbeamContract, vaa.ChainIDMoonbeam)
 	*arbitrumContract = checkEvmArgs(logger, *arbitrumRPC, *arbitrumContract, vaa.ChainIDArbitrum)
 	*optimismContract = checkEvmArgs(logger, *optimismRPC, *optimismContract, vaa.ChainIDOptimism)
 	*baseContract = checkEvmArgs(logger, *baseRPC, *baseContract, vaa.ChainIDBase)
-	*scrollContract = checkEvmArgs(logger, *scrollRPC, *scrollContract, vaa.ChainIDScroll)
-	*mantleContract = checkEvmArgs(logger, *mantleRPC, *mantleContract, vaa.ChainIDMantle)
-	*xlayerContract = checkEvmArgs(logger, *xlayerRPC, *xlayerContract, vaa.ChainIDXLayer)
 	*lineaContract = checkEvmArgs(logger, *lineaRPC, *lineaContract, vaa.ChainIDLinea)
 	*berachainContract = checkEvmArgs(logger, *berachainRPC, *berachainContract, vaa.ChainIDBerachain)
 	*unichainContract = checkEvmArgs(logger, *unichainRPC, *unichainContract, vaa.ChainIDUnichain)
@@ -1064,7 +1036,6 @@ func runNode(cmd *cobra.Command, args []string) {
 	rpcMap["avalancheRPC"] = *avalancheRPC
 	rpcMap["algorandIndexerRPC"] = *algorandIndexerRPC
 	rpcMap["algorandAlgodRPC"] = *algorandAlgodRPC
-	rpcMap["fantomRPC"] = *fantomRPC
 	rpcMap["klaytnRPC"] = *klaytnRPC
 	rpcMap["celoRPC"] = *celoRPC
 	rpcMap["nearRPC"] = *nearRPC
@@ -1083,9 +1054,6 @@ func runNode(cmd *cobra.Command, args []string) {
 	rpcMap["baseRPC"] = *baseRPC
 	// ChainIDSei is supported over IBC, so it's not listed here.
 	// ChainIDRootstock is not supported in the guardian.
-	rpcMap["scrollRPC"] = *scrollRPC
-	rpcMap["mantleRPC"] = *mantleRPC
-	rpcMap["xlayerRPC"] = *xlayerRPC
 	rpcMap["lineaRPC"] = *lineaRPC
 	rpcMap["berachainRPC"] = *berachainRPC
 	rpcMap["seiEvmRPC"] = *seiEvmRPC
@@ -1354,19 +1322,6 @@ func runNode(cmd *cobra.Command, args []string) {
 		watcherConfigs = append(watcherConfigs, wc)
 	}
 
-	if shouldStart(fantomRPC) {
-		wc := &evm.WatcherConfig{
-			NetworkID:         "fantom",
-			ChainID:           vaa.ChainIDFantom,
-			Rpc:               *fantomRPC,
-			Contract:          *fantomContract,
-			CcqBackfillCache:  *ccqBackfillCache,
-			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDFantom),
-		}
-
-		watcherConfigs = append(watcherConfigs, wc)
-	}
-
 	if shouldStart(klaytnRPC) {
 		wc := &evm.WatcherConfig{
 			NetworkID:         "klaytn",
@@ -1440,45 +1395,6 @@ func runNode(cmd *cobra.Command, args []string) {
 			Contract:          *baseContract,
 			CcqBackfillCache:  *ccqBackfillCache,
 			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDBase),
-		}
-
-		watcherConfigs = append(watcherConfigs, wc)
-	}
-
-	if shouldStart(scrollRPC) {
-		wc := &evm.WatcherConfig{
-			NetworkID:         "scroll",
-			ChainID:           vaa.ChainIDScroll,
-			Rpc:               *scrollRPC,
-			Contract:          *scrollContract,
-			CcqBackfillCache:  *ccqBackfillCache,
-			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDScroll),
-		}
-
-		watcherConfigs = append(watcherConfigs, wc)
-	}
-
-	if shouldStart(mantleRPC) {
-		wc := &evm.WatcherConfig{
-			NetworkID:         "mantle",
-			ChainID:           vaa.ChainIDMantle,
-			Rpc:               *mantleRPC,
-			Contract:          *mantleContract,
-			CcqBackfillCache:  *ccqBackfillCache,
-			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDMantle),
-		}
-
-		watcherConfigs = append(watcherConfigs, wc)
-	}
-
-	if shouldStart(xlayerRPC) {
-		wc := &evm.WatcherConfig{
-			NetworkID:         "xlayer",
-			ChainID:           vaa.ChainIDXLayer,
-			Rpc:               *xlayerRPC,
-			Contract:          *xlayerContract,
-			CcqBackfillCache:  *ccqBackfillCache,
-			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDXLayer),
 		}
 
 		watcherConfigs = append(watcherConfigs, wc)
