@@ -1,0 +1,47 @@
+[package]
+name = "global-accountant"
+description = "Wormhole Global Accountant Solana program (Pinocchio)."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Build the BPF entrypoint. Disabled when consumed as a library (e.g. by tests
+# or client tooling).
+default = []
+bpf-entrypoint = []
+# Enable the mock VAA path in `close_digest`. Production builds must NOT set
+# this feature — the real `Verify VAA Shim` CPI integration lands in a later
+# slice. The non-mock branch in `close_digest.rs` issues a `compile_error!`
+# so production builds without the real path refuse to compile.
+mock-vaa = []
+
+[dependencies]
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+pinocchio.workspace = true
+pinocchio-system.workspace = true
+
+[dev-dependencies]
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+# Pull `curve25519` into the unified feature set so the host build of this
+# crate can resolve `Address::find_program_address` (which is gated on
+# `target_os = "solana"` OR the `curve25519` feature). On-chain the syscall
+# path is unconditionally available; this is purely for `cargo test`.
+solana-address = { version = "2.6", features = ["curve25519"] }
+# Tests drive the mock VAA path. The non-mock build is intentionally
+# uncompilable until the Verify VAA Shim CPI integration lands.
+global-accountant = { path = ".", features = ["mock-vaa"] }
+
+[lints]
+workspace = true
