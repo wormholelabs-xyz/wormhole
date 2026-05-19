@@ -22,9 +22,18 @@ pub fn process_instruction(
         .ok_or_else(|| err(GlobalAccountantError::InvalidInstructionData))?;
 
     match Instruction::from_u8(*discriminator) {
+        // `open_digest` is publicly callable in this Phase 1 slice; in
+        // production it will only be invoked from inside `submit_observations`
+        // after the NoReplay check. Until that lands, a public `open_digest`
+        // entrypoint lets any caller squat the PDA for any
+        // `(chain, emitter, sequence)`. The `test-only-open-digest` feature
+        // gate keeps the symbol out of production builds.
+        #[cfg(feature = "test-only-open-digest")]
         Some(Instruction::OpenDigest) => {
             instructions::open_digest::process(program_id, accounts, rest)
         }
+        #[cfg(not(feature = "test-only-open-digest"))]
+        Some(Instruction::OpenDigest) => Err(err(GlobalAccountantError::NotEnabled)),
         Some(Instruction::CloseDigest) => {
             instructions::close_digest::process(program_id, accounts, rest)
         }

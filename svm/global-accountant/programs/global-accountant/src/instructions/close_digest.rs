@@ -5,6 +5,16 @@
 //! Production builds without `mock-vaa` refuse to compile — they will only
 //! compile once the real Verify VAA Shim CPI is wired in.
 
+// Hard compile-time fence at the file root. The mock-vaa path is the only
+// `extract_candidate_digest` implementation that exists today; without it the
+// crate is intentionally uncompilable so a production `cargo build-sbf`
+// without the feature flag fails loudly rather than shipping the mock.
+#[cfg(not(feature = "mock-vaa"))]
+compile_error!(
+    "close_digest mock path requires the `mock-vaa` feature; production builds \
+     must wire in Verify VAA Shim CPI before removing this gate"
+);
+
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use crate::definitions::GlobalAccountantError;
@@ -70,18 +80,14 @@ pub fn process(
 /// `mock-vaa` feature this is the first 32 bytes verbatim; in production this
 /// branch must invoke the Verify VAA Shim CPI and assert recovered signatures
 /// against the recorded guardian set before returning the embedded digest.
+///
+/// Only the mock implementation exists today. A non-mock build is fenced off
+/// by the top-of-file `compile_error!`, so the bare `#[cfg]` here is enough —
+/// no `cfg(not(...))` stub is needed.
 #[cfg(feature = "mock-vaa")]
 fn extract_candidate_digest(data: &[u8]) -> Result<&[u8; 32], ProgramError> {
     if data.len() < 32 {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     Ok(data[..32].try_into().unwrap())
-}
-
-#[cfg(not(feature = "mock-vaa"))]
-fn extract_candidate_digest(_data: &[u8]) -> Result<&[u8; 32], ProgramError> {
-    compile_error!(
-        "close_digest mock path requires the `mock-vaa` feature; \
-         production builds must wire in Verify VAA Shim CPI"
-    );
 }

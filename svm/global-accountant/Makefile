@@ -5,21 +5,38 @@
 
 SBF_OUT_DIR := $(CURDIR)/target/deploy
 
-# The mock-vaa feature gates the placeholder VAA verification path used by
-# tests. Production cuts must NOT enable this — the real Verify VAA Shim CPI
-# integration is tracked in a later slice. The non-mock branch in close_digest
-# issues a compile_error! so a `cargo build` without `mock-vaa` will fail loudly.
+# Two build targets. Keep the split unambiguous:
+#
+#   * build-dev   — test/dev build with the mock-vaa close path and
+#                   `test-only-open-digest` exposed. This is what `make test`
+#                   depends on; the resulting `.so` is for mollusk only.
+#   * build-prod  — production build with both features OFF. Today this
+#                   target is *expected to fail* at the `compile_error!` in
+#                   `close_digest.rs` because the real Verify VAA Shim CPI is
+#                   not yet wired in. Successful completion will only be
+#                   possible after that integration lands; until then this
+#                   target acts as a tripwire — if it ever compiles silently,
+#                   something has stripped the gate.
+.PHONY: build-dev
+build-dev:
+	cargo build-sbf --features bpf-entrypoint,mock-vaa,test-only-open-digest
+
+.PHONY: build-prod
+build-prod:
+	cargo build-sbf --features bpf-entrypoint
+
+# `make build` defaults to the dev build. Explicit targets above are preferred
+# in CI; this alias is a convenience for local iteration.
 .PHONY: build
-build:
-	cargo build-sbf --features bpf-entrypoint,mock-vaa
+build: build-dev
 
 .PHONY: test
-test: build
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa
+test: build-dev
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all-targets --features mock-vaa -- -D warnings
+	cargo clippy --all-targets --features mock-vaa,test-only-open-digest -- -D warnings
 
 .PHONY: clean
 clean:

@@ -81,7 +81,9 @@ fn lifecycle_inputs() -> (u16, [u8; 32], u64, [u8; 32], u32) {
     (chain, emitter, sequence, digest, guardian_set_index)
 }
 
-fn payer_account(lamports: u64) -> Account {
+/// Build a system-owned account with the given lamports and zero data. Used
+/// both for the regular payer and for dust-prefunded PDAs.
+fn system_owned_account(lamports: u64) -> Account {
     Account {
         lamports,
         data: vec![],
@@ -91,24 +93,38 @@ fn payer_account(lamports: u64) -> Account {
     }
 }
 
-fn uninitialised_pda_account() -> Account {
-    Account {
-        lamports: 0,
-        data: vec![],
-        owner: system_program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
+fn payer_account(lamports: u64) -> Account {
+    system_owned_account(lamports)
 }
 
-#[test]
-fn open_then_close_round_trip() {
-    let mollusk = mollusk();
+fn uninitialised_pda_account() -> Account {
+    system_owned_account(0)
+}
+
+/// Post-open state. Used by every negative test that starts from an
+/// already-opened PDA so each test body begins from a single line.
+struct OpenState {
+    pda: Pubkey,
+    pda_after_open: Account,
+    payer_after_open: Account,
+    payer_starting_lamports: u64,
+}
+
+/// Drive `open_digest` end-to-end and return the post-open state. Asserts
+/// success internally so callers can focus on the negative path under test.
+///
+/// `pda_initial_lamports` lets the dust-DoS test pre-fund the PDA at the
+/// canonical address with non-zero lamports while keeping it system-owned and
+/// data-empty (mimicking the `system_program::transfer` grief attack).
+fn open_lifecycle_setup(
+    mollusk: &Mollusk,
+    payer: Pubkey,
+    payer_starting_lamports: u64,
+    pda_initial_lamports: u64,
+) -> OpenState {
     let (chain, emitter, sequence, digest, guardian_set_index) = lifecycle_inputs();
-    let payer = Pubkey::new_from_array([1u8; 32]);
     let (pda, bump) = derive_digest_pda(chain, &emitter, sequence);
 
-    // -- Open ---------------------------------------------------------------
     let open_ix = Instruction::new_with_bytes(
         program_id(),
         &open_digest_ix_data(chain, &emitter, sequence, &digest, guardian_set_index, bump),
@@ -119,9 +135,15 @@ fn open_then_close_round_trip() {
         ],
     );
 
+    let pda_account = if pda_initial_lamports == 0 {
+        uninitialised_pda_account()
+    } else {
+        system_owned_account(pda_initial_lamports)
+    };
+
     let open_accounts = vec![
-        (payer, payer_account(10_000_000_000)),
-        (pda, uninitialised_pda_account()),
+        (payer, payer_account(payer_starting_lamports)),
+        (pda, pda_account),
         keyed_account_for_system_program(),
     ];
 
@@ -132,19 +154,47 @@ fn open_then_close_round_trip() {
         open_result.program_result
     );
 
-    let (_, pda_after_open) = open_result
+    let pda_after_open = open_result
         .resulting_accounts
         .iter()
         .find(|(k, _)| *k == pda)
-        .expect("PDA in resulting accounts");
-    assert_eq!(pda_after_open.owner, program_id(), "PDA owner");
+        .expect("PDA in resulting accounts")
+        .1
+        .clone();
+    let payer_after_open = open_result
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == payer)
+        .expect("payer in resulting accounts")
+        .1
+        .clone();
+
+    OpenState {
+        pda,
+        pda_after_open,
+        payer_after_open,
+        payer_starting_lamports,
+    }
+}
+
+#[test]
+fn open_then_close_round_trip() {
+    let mollusk = mollusk();
+    let (_chain, _emitter, _sequence, digest, guardian_set_index) = lifecycle_inputs();
+    let payer = Pubkey::new_from_array([1u8; 32]);
+
+    let state = open_lifecycle_setup(&mollusk, payer, 10_000_000_000, 0);
+
+    // -- Open assertions ----------------------------------------------------
+    assert_eq!(state.pda_after_open.owner, program_id(), "PDA owner");
     assert_eq!(
-        pda_after_open.data.len(),
+        state.pda_after_open.data.len(),
         DigestAccountLayout::LEN,
         "PDA data length"
     );
 
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&pda_after_open.data);
+    let stored: &DigestAccountLayout = bytemuck::from_bytes(&state.pda_after_open.data);
+    let (chain, emitter, sequence, _digest, _gsi) = lifecycle_inputs();
     assert_eq!(stored.chain, chain);
     assert_eq!(stored.emitter, emitter);
     assert_eq!(stored.sequence, sequence);
@@ -154,15 +204,12 @@ fn open_then_close_round_trip() {
     // Slot is set by the runtime; just assert it was written.
     assert_ne!(stored.quorum_at_slot, u64::MAX);
 
-    let (_, payer_after_open) = open_result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| *k == payer)
-        .expect("payer in resulting accounts");
-    let payer_paid = 10_000_000_000_u64.saturating_sub(payer_after_open.lamports);
+    let payer_paid = state
+        .payer_starting_lamports
+        .saturating_sub(state.payer_after_open.lamports);
     assert!(payer_paid > 0, "payer should have funded rent");
     assert_eq!(
-        payer_paid, pda_after_open.lamports,
+        payer_paid, state.pda_after_open.lamports,
         "rent debit must equal PDA balance"
     );
 
@@ -173,14 +220,14 @@ fn open_then_close_round_trip() {
         &close_digest_ix_data(&mock_vaa_first_32),
         vec![
             AccountMeta::new_readonly(payer, true), // payer can also be the closer
-            AccountMeta::new(pda, false),
+            AccountMeta::new(state.pda, false),
             AccountMeta::new(payer, false),         // rent recipient
         ],
     );
 
     let close_accounts = vec![
-        (payer, payer_after_open.clone()),
-        (pda, pda_after_open.clone()),
+        (payer, state.payer_after_open.clone()),
+        (state.pda, state.pda_after_open.clone()),
     ];
 
     let close_result = mollusk.process_instruction(&close_ix, &close_accounts);
@@ -193,7 +240,7 @@ fn open_then_close_round_trip() {
     let (_, pda_after_close) = close_result
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == pda)
+        .find(|(k, _)| *k == state.pda)
         .expect("PDA in resulting accounts after close");
     assert_eq!(pda_after_close.lamports, 0, "PDA lamports drained");
     assert_eq!(
@@ -214,51 +261,100 @@ fn open_then_close_round_trip() {
         .expect("payer in resulting accounts after close");
     assert_eq!(
         payer_after_close.lamports,
-        payer_after_open.lamports + pda_after_open.lamports,
+        state.payer_after_open.lamports + state.pda_after_open.lamports,
         "payer refunded full rent"
+    );
+}
+
+#[test]
+fn open_digest_with_dust_in_pda_succeeds() {
+    // Dust-DoS regression: anyone can `system_program::transfer(1)` to the
+    // canonical PDA address before the legitimate open. With a naive
+    // `CreateAccount` CPI the open then fails ("account already in use" — the
+    // system program refuses to CreateAccount over a non-zero-lamport account)
+    // and the (chain, emitter, sequence) is effectively bricked. The fix is to
+    // fall back to Transfer + Allocate + Assign when the PDA already holds
+    // lamports but is otherwise system-owned and data-empty.
+    let mollusk = mollusk();
+    let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
+    let payer = Pubkey::new_from_array([0xC1u8; 32]);
+    let payer_starting = 10_000_000_000_u64;
+    let dust: u64 = 1;
+
+    let state = open_lifecycle_setup(&mollusk, payer, payer_starting, dust);
+
+    assert_eq!(state.pda_after_open.owner, program_id(), "PDA owner");
+    assert_eq!(
+        state.pda_after_open.data.len(),
+        DigestAccountLayout::LEN,
+        "PDA allocated to full layout length"
+    );
+
+    let stored: &DigestAccountLayout = bytemuck::from_bytes(&state.pda_after_open.data);
+    assert_eq!(stored.payer, payer.to_bytes(), "legitimate caller recorded");
+    assert_eq!(stored.digest, digest);
+
+    let payer_paid = state
+        .payer_starting_lamports
+        .saturating_sub(state.payer_after_open.lamports);
+    let rent_exempt_minimum = state.pda_after_open.lamports;
+    assert!(rent_exempt_minimum > dust, "PDA topped up past dust");
+    assert_eq!(
+        payer_paid,
+        rent_exempt_minimum.saturating_sub(dust),
+        "payer funded only the rent-exempt-minimum-minus-dust delta, not the full minimum"
+    );
+}
+
+#[test]
+fn open_digest_with_overshoot_lamports_succeeds() {
+    // Pre-funded-PDA accept-as-gift branch: an attacker (or an over-eager
+    // funder) drops more than the rent-exempt minimum onto the canonical PDA
+    // address. `open_digest` must still succeed — the Transfer top-up is
+    // skipped (saturating_sub goes to 0) but Allocate + Assign still run.
+    // The resulting PDA balance is the pre-funded amount; nothing is debited
+    // from the payer for rent because the PDA was already past rent-exempt.
+    //
+    // 1 SOL is well above the rent-exempt minimum for a 120-byte account
+    // (~0.0009 SOL).
+    let mollusk = mollusk();
+    let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
+    let payer = Pubkey::new_from_array([0xD1u8; 32]);
+    let payer_starting = 10_000_000_000_u64;
+    let overshoot: u64 = 1_000_000_000; // 1 SOL — well above rent-exempt minimum.
+
+    let state = open_lifecycle_setup(&mollusk, payer, payer_starting, overshoot);
+
+    assert_eq!(state.pda_after_open.owner, program_id(), "PDA owner");
+    assert_eq!(
+        state.pda_after_open.data.len(),
+        DigestAccountLayout::LEN,
+        "PDA allocated to full layout length"
+    );
+    assert_eq!(
+        state.pda_after_open.lamports, overshoot,
+        "no Transfer fired; pre-funded balance retained as-is"
+    );
+
+    let stored: &DigestAccountLayout = bytemuck::from_bytes(&state.pda_after_open.data);
+    assert_eq!(stored.payer, payer.to_bytes(), "legitimate caller recorded");
+    assert_eq!(stored.digest, digest);
+
+    // Payer pays nothing toward rent; the only debit (if any) is the tx fee,
+    // which mollusk does not charge. Assert exact equality.
+    assert_eq!(
+        state.payer_after_open.lamports, payer_starting,
+        "payer did not fund rent: the over-funded PDA is accepted as a gift"
     );
 }
 
 #[test]
 fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     let mollusk = mollusk();
-    let (chain, emitter, sequence, digest, guardian_set_index) = lifecycle_inputs();
+    let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
     let payer = Pubkey::new_from_array([2u8; 32]);
-    let (pda, bump) = derive_digest_pda(chain, &emitter, sequence);
 
-    let open_ix = Instruction::new_with_bytes(
-        program_id(),
-        &open_digest_ix_data(chain, &emitter, sequence, &digest, guardian_set_index, bump),
-        vec![
-            AccountMeta::new(payer, true),
-            AccountMeta::new(pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-        ],
-    );
-
-    let open_accounts = vec![
-        (payer, payer_account(10_000_000_000)),
-        (pda, uninitialised_pda_account()),
-        keyed_account_for_system_program(),
-    ];
-
-    let open_result = mollusk.process_instruction(&open_ix, &open_accounts);
-    assert!(matches!(open_result.program_result, ProgramResult::Success));
-
-    let pda_after_open = open_result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| *k == pda)
-        .expect("PDA exists")
-        .1
-        .clone();
-    let payer_after_open = open_result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| *k == payer)
-        .expect("payer exists")
-        .1
-        .clone();
+    let state = open_lifecycle_setup(&mollusk, payer, 10_000_000_000, 0);
 
     let mut bad_vaa_digest = digest;
     bad_vaa_digest[0] ^= 0xff; // flip a bit so the digests no longer match.
@@ -268,14 +364,14 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
         &close_digest_ix_data(&bad_vaa_digest),
         vec![
             AccountMeta::new_readonly(payer, true),
-            AccountMeta::new(pda, false),
+            AccountMeta::new(state.pda, false),
             AccountMeta::new(payer, false),
         ],
     );
 
     let close_accounts = vec![
-        (payer, payer_after_open.clone()),
-        (pda, pda_after_open.clone()),
+        (payer, state.payer_after_open.clone()),
+        (state.pda, state.pda_after_open.clone()),
     ];
 
     let close_result = mollusk.process_instruction(&close_ix, &close_accounts);
@@ -296,13 +392,13 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     let pda_after_close = close_result
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == pda)
+        .find(|(k, _)| *k == state.pda)
         .expect("PDA still in accounts list")
         .1
         .clone();
     assert_eq!(pda_after_close.owner, program_id());
-    assert_eq!(pda_after_close.lamports, pda_after_open.lamports);
-    assert_eq!(pda_after_close.data, pda_after_open.data);
+    assert_eq!(pda_after_close.lamports, state.pda_after_open.lamports);
+    assert_eq!(pda_after_close.data, state.pda_after_open.data);
 }
 
 /// Find a non-canonical (lower) bump that still derives a valid off-curve PDA
@@ -423,16 +519,7 @@ fn close_with_spoofed_system_owned_pda_fails() {
     );
 
     let close_accounts = vec![
-        (
-            attacker,
-            Account {
-                lamports: attacker_starting_lamports,
-                data: vec![],
-                owner: system_program_id(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        ),
+        (attacker, system_owned_account(attacker_starting_lamports)),
         (pda, spoofed_pda_account.clone()),
     ];
 
@@ -465,36 +552,10 @@ fn close_with_spoofed_system_owned_pda_fails() {
 #[test]
 fn close_with_wrong_rent_recipient_fails() {
     let mollusk = mollusk();
-    let (chain, emitter, sequence, digest, guardian_set_index) = lifecycle_inputs();
+    let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
     let payer = Pubkey::new_from_array([3u8; 32]);
-    let (pda, bump) = derive_digest_pda(chain, &emitter, sequence);
 
-    let open_ix = Instruction::new_with_bytes(
-        program_id(),
-        &open_digest_ix_data(chain, &emitter, sequence, &digest, guardian_set_index, bump),
-        vec![
-            AccountMeta::new(payer, true),
-            AccountMeta::new(pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-        ],
-    );
-
-    let open_accounts = vec![
-        (payer, payer_account(10_000_000_000)),
-        (pda, uninitialised_pda_account()),
-        keyed_account_for_system_program(),
-    ];
-
-    let open_result = mollusk.process_instruction(&open_ix, &open_accounts);
-    assert!(matches!(open_result.program_result, ProgramResult::Success));
-
-    let pda_after_open = open_result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| *k == pda)
-        .expect("PDA exists")
-        .1
-        .clone();
+    let state = open_lifecycle_setup(&mollusk, payer, 10_000_000_000, 0);
 
     // A different pubkey is supplied as rent recipient.
     let wrong_recipient = Pubkey::new_from_array([0xBBu8; 32]);
@@ -505,32 +566,17 @@ fn close_with_wrong_rent_recipient_fails() {
         &close_digest_ix_data(&digest),
         vec![
             AccountMeta::new_readonly(payer, true),
-            AccountMeta::new(pda, false),
+            AccountMeta::new(state.pda, false),
             AccountMeta::new(wrong_recipient, false),
         ],
     );
 
     let close_accounts = vec![
-        (
-            payer,
-            Account {
-                lamports: 0,
-                data: vec![],
-                owner: system_program_id(),
-                executable: false,
-                rent_epoch: 0,
-            },
-        ),
-        (pda, pda_after_open.clone()),
+        (payer, system_owned_account(0)),
+        (state.pda, state.pda_after_open.clone()),
         (
             wrong_recipient,
-            Account {
-                lamports: wrong_recipient_starting,
-                data: vec![],
-                owner: system_program_id(),
-                executable: false,
-                rent_epoch: 0,
-            },
+            system_owned_account(wrong_recipient_starting),
         ),
     ];
 
@@ -551,13 +597,13 @@ fn close_with_wrong_rent_recipient_fails() {
     let pda_after = close_result
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == pda)
+        .find(|(k, _)| *k == state.pda)
         .expect("PDA in resulting accounts")
         .1
         .clone();
     assert_eq!(pda_after.owner, program_id());
-    assert_eq!(pda_after.lamports, pda_after_open.lamports);
-    assert_eq!(pda_after.data, pda_after_open.data);
+    assert_eq!(pda_after.lamports, state.pda_after_open.lamports);
+    assert_eq!(pda_after.data, state.pda_after_open.data);
 
     // Wrong recipient received no lamports.
     let wrong_after = close_result
@@ -584,4 +630,32 @@ fn digest_layout_offsets_pinned() {
     assert_eq!(offset_of!(DigestAccountLayout, guardian_set_index), 112);
     assert_eq!(offset_of!(DigestAccountLayout, chain), 116);
     assert_eq!(DigestAccountLayout::LEN, 120);
+}
+
+/// Production builds gate `open_digest` behind the `test-only-open-digest`
+/// Cargo feature. The dispatch site short-circuits the `Instruction::OpenDigest`
+/// arm to `NotEnabled` when the feature is off; the on-chain `.so` shipped to
+/// mainnet must be built with the feature off, while the `.so` mollusk loads
+/// for these tests must be built with it on.
+///
+/// We pin both sides by reading a `pub const` exported from the program crate
+/// that mirrors `cfg!(feature = "test-only-open-digest")` from inside the
+/// program. A negative test ("OpenDigest discriminator returns NotEnabled in a
+/// prod build") would need a second `.so` and lives in the `make build-prod`
+/// pipeline instead — that target additionally fails on `close_digest`'s
+/// mock-vaa `compile_error!`, so a successful prod build is unreachable until
+/// the real VAA Shim CPI lands.
+#[test]
+fn open_digest_gated_on_for_test_build() {
+    // `TEST_ONLY_OPEN_DIGEST_ENABLED` is `pub const bool` exported by the
+    // program crate, so this assertion resolves at compile time — that's the
+    // point. Clippy's `assertions-on-constants` lint flags `assert!(true)`,
+    // so wrap the check in a conditional panic to preserve the test
+    // semantics (the build will fail if the const is false).
+    if !global_accountant::TEST_ONLY_OPEN_DIGEST_ENABLED {
+        panic!(
+            "test build must enable test-only-open-digest; \
+             see programs/global-accountant/Cargo.toml dev-dependencies"
+        );
+    }
 }

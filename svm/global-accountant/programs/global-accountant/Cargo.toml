@@ -22,6 +22,13 @@ bpf-entrypoint = []
 # slice. The non-mock branch in `close_digest.rs` issues a `compile_error!`
 # so production builds without the real path refuse to compile.
 mock-vaa = []
+# Expose `Instruction::OpenDigest` in the dispatch table. In production
+# `open_digest` is only reachable from inside `submit_observations` after the
+# NoReplay check; until that lands, a public `open_digest` entrypoint lets any
+# caller squat the PDA for any `(chain, emitter, sequence)`. The feature gate
+# keeps the symbol out of production builds. Tests turn it on; `make build-prod`
+# leaves it off.
+test-only-open-digest = []
 
 [dependencies]
 bytemuck.workspace = true
@@ -39,9 +46,11 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 # `target_os = "solana"` OR the `curve25519` feature). On-chain the syscall
 # path is unconditionally available; this is purely for `cargo test`.
 solana-address = { version = "2.6", features = ["curve25519"] }
-# Tests drive the mock VAA path. The non-mock build is intentionally
-# uncompilable until the Verify VAA Shim CPI integration lands.
-global-accountant = { path = ".", features = ["mock-vaa"] }
+# Tests drive the mock VAA path and exercise `open_digest` directly. The
+# non-mock build is intentionally uncompilable until the Verify VAA Shim CPI
+# integration lands; `test-only-open-digest` is intentionally off in production
+# (see the program crate `[features]` block for rationale).
+global-accountant = { path = ".", features = ["mock-vaa", "test-only-open-digest"] }
 
 [lints]
 workspace = true

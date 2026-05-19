@@ -1,17 +1,7 @@
 use pinocchio::{account::Ref, error::ProgramError, AccountView};
 
-use crate::definitions::{DigestAccountLayout, GlobalAccountantError, DIGEST_SEED_PREFIX};
+use crate::definitions::{DigestAccountLayout, GlobalAccountantError};
 use crate::err;
-
-/// Build the seeds (without bump) for a digest PDA. Returned as an array
-/// suitable for `Address::find_program_address` / `derive_address`.
-pub fn digest_seeds<'a>(
-    chain_be: &'a [u8; 2],
-    emitter: &'a [u8; 32],
-    sequence_be: &'a [u8; 8],
-) -> [&'a [u8]; 4] {
-    [DIGEST_SEED_PREFIX, chain_be, emitter, sequence_be]
-}
 
 /// Read a `DigestAccountLayout` out of an account's data. The layout is `Pod`,
 /// so the cheapest correct thing is to copy it out by value — that releases

@@ -22,7 +22,8 @@ pub enum Instruction {
 }
 
 impl Instruction {
-    pub fn from_u8(value: u8) -> Option<Self> {
+    // `const`-callable so future compile-time dispatch tables can use it.
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::OpenDigest),
             1 => Some(Self::CloseDigest),
@@ -43,6 +44,11 @@ pub enum GlobalAccountantError {
     DigestMismatch = 3,
     PayerMismatch = 4,
     NotImplemented = 5,
+    /// The instruction exists in the dispatch table but the build it was
+    /// compiled into intentionally disabled it (Cargo-feature-gated). Used to
+    /// keep `open_digest` out of production builds until `submit_observations`
+    /// is the only legitimate caller.
+    NotEnabled = 6,
 }
 
 impl From<GlobalAccountantError> for u32 {
