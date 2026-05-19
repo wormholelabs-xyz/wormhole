@@ -1,0 +1,242 @@
+# CI for the Global Accountant Solana program.
+#
+# Three layers, two jobs:
+#
+#   * fast-tests — mollusk integration tests, production-shape build, clippy.
+#     No network beyond crates.io. Required check.
+#   * e2e-tests  — surfpool-driven E2E (Phase 0 spike, Phase 1b mainnet-fork,
+#                  Phase 2 VAA-replay corpus). Boots a real surfpool subprocess
+#                  and lazy-fetches mainnet accounts, so it needs egress and is
+#                  flakier. Allowed to fail without blocking merge until the
+#                  story stabilises (see `continue-on-error` below).
+#
+# Style mirrors `.github/workflows/build.yml`'s `rust-lint-and-tests` and
+# `solana` jobs: SHA-pinned third-party actions (`dtolnay/rust-toolchain`,
+# `Swatinem/rust-cache`), first-party `actions/*` pinned by major tag,
+# `RUSTFLAGS: -Dwarnings`, and rust toolchain version read from the workspace's
+# `rust-toolchain.toml`.
+
+name: SVM Global Accountant
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'svm/global-accountant/**'
+      - '.github/workflows/svm-global-accountant.yml'
+  pull_request:
+    paths:
+      - 'svm/global-accountant/**'
+      - '.github/workflows/svm-global-accountant.yml'
+
+permissions:
+  contents: read
+
+env:
+  # Deny warnings across the workspace, mirroring build.yml's `rust-lint-and-tests`.
+  RUSTFLAGS: -Dwarnings
+  # Pin the Solana / agave CLI used by `cargo build-sbf`. Matches the version
+  # `svm/wormhole-core-shims` already pins in its Makefile, so the two SVM
+  # workspaces stay aligned.
+  SOLANA_VERSION: 2.1.11
+  # Pinned surfpool release. Bump in lockstep with SURFPOOL_LINUX_SHA256. The
+  # release is published at:
+  #   https://github.com/txtx/surfpool/releases/download/v${SURFPOOL_VERSION}/
+  # Redirects to the solana-foundation org under the same path.
+  SURFPOOL_VERSION: v1.2.1
+  SURFPOOL_LINUX_SHA256: abb1451e2df8da71dbcb389d0bd591939e848af9f5237926348b55c886896640
+
+jobs:
+  # Layer 1 (mollusk) + Layer 3 (production build smoke) + clippy.
+  # Combined into one job because they share the same Rust toolchain, the same
+  # cargo registry cache, and the same target dir, so a single warm cache wins.
+  fast-tests:
+    name: fast-tests (mollusk + build-prod + clippy)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+        working-directory: svm/global-accountant
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve rust toolchain version
+        id: toolchain
+        run: |
+          # Mirrors the awk used in build.yml's solana job. Avoids hard-coding
+          # the version twice.
+          RUST_VERSION="$(awk '/channel =/ { print substr($3, 2, length($3)-2) }' rust-toolchain.toml)"
+          echo "version=${RUST_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@55c7845fad90d0ae8b2e83715cb900e5e861e8cb
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+          components: clippy,rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: svm/global-accountant -> target
+          # Distinguish the dev (mock-vaa) target dir from the prod target dir.
+          # rust-cache keys by Cargo.lock content + this prefix.
+          prefix-key: ga-fast
+
+      - name: Cache solana / agave toolchain
+        id: solana-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: ${{ runner.os }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install solana / agave toolchain
+        if: steps.solana-cache.outputs.cache-hit != 'true'
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+
+      - name: Add solana / agave to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "${GITHUB_PATH}"
+
+      - name: Run `cargo fmt`
+        run: cargo fmt --check --all
+
+      - name: Run `make clippy`
+        run: make clippy
+
+      - name: Run `make test` (mollusk integration + unit tests)
+        run: make test
+
+      - name: Run `make build-prod` (production-shape compile smoke)
+        # Layer 3: ensures the real Verify VAA Shim CPI path still compiles
+        # with `mock-vaa` and `test-only-open-digest` off. Catches regressions
+        # in the no-mock build before they reach mainnet.
+        run: make build-prod
+
+  # Layer 2: surfpool-driven E2E.
+  #
+  # Allowed to fail without blocking merge while the layer stabilises. Public
+  # mainnet RPC and lazy-fetch behaviour are the dominant flakiness sources;
+  # branch protection should keep this off the required-checks list until the
+  # rate of flakes is understood. `continue-on-error` makes the job visible
+  # (red X on the PR) but non-blocking.
+  e2e-tests:
+    name: e2e-tests (surfpool spike + mainnet-fork + VAA corpus)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+        working-directory: svm/global-accountant
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Resolve rust toolchain version
+        id: toolchain
+        run: |
+          RUST_VERSION="$(awk '/channel =/ { print substr($3, 2, length($3)-2) }' rust-toolchain.toml)"
+          echo "version=${RUST_VERSION}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install rust toolchain
+        uses: dtolnay/rust-toolchain@55c7845fad90d0ae8b2e83715cb900e5e861e8cb
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+          components: clippy,rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          workspaces: svm/global-accountant -> target
+          # Separate prefix from fast-tests because the prod-shape `.so`
+          # (`make build-prod`) uses different features and therefore a
+          # different fingerprint.
+          prefix-key: ga-e2e
+
+      - name: Cache solana / agave toolchain
+        id: solana-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: ${{ runner.os }}-solana-${{ env.SOLANA_VERSION }}
+
+      - name: Install solana / agave toolchain
+        if: steps.solana-cache.outputs.cache-hit != 'true'
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+
+      - name: Add solana / agave to PATH
+        run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "${GITHUB_PATH}"
+
+      # Surfpool install. Direct binary download from GitHub releases for
+      # reproducibility — the official `curl … | bash` installer resolves to
+      # whatever `latest` is at fetch time, which would break determinism.
+      # SHA256 is verified against the release asset's digest (see env block).
+      - name: Cache surfpool binary
+        id: surfpool-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/bin/surfpool
+          key: surfpool-${{ runner.os }}-${{ env.SURFPOOL_VERSION }}-${{ env.SURFPOOL_LINUX_SHA256 }}
+
+      - name: Install surfpool ${{ env.SURFPOOL_VERSION }}
+        if: steps.surfpool-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          url="https://github.com/txtx/surfpool/releases/download/${SURFPOOL_VERSION}/surfpool-linux-x64.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL "${url}" -o "${tmp}/surfpool.tar.gz"
+          echo "${SURFPOOL_LINUX_SHA256}  ${tmp}/surfpool.tar.gz" | sha256sum -c -
+          tar -xzf "${tmp}/surfpool.tar.gz" -C "${tmp}"
+          # Release tarball lays out as `surfpool` at the archive root.
+          install -m 0755 "${tmp}/surfpool" "$HOME/.local/bin/surfpool"
+          rm -rf "${tmp}"
+
+      - name: Add surfpool to PATH
+        run: echo "$HOME/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Verify surfpool
+        run: surfpool --version
+
+      # Mainnet account cache. surfpool persists lazy-fetched accounts under
+      # `.surfpool/` in each test's CWD (the tests use per-test scratch dirs
+      # under TMPDIR, but surfpool also writes a user-level cache at
+      # `~/.cache/surfpool`). Caching the user-level cache gives a warm hit on
+      # repeat runs without trying to coordinate per-test scratch dirs.
+      #
+      # Key intentionally pins the workflow file hash so a workflow tweak that
+      # changes the fixture set invalidates the cache. Restore-keys allow
+      # incremental warm-up across surfpool versions.
+      - name: Cache surfpool mainnet account fetches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/surfpool
+            ~/.surfpool
+          key: surfpool-mainnet-cache-${{ env.SURFPOOL_VERSION }}-${{ hashFiles('.github/workflows/svm-global-accountant.yml', 'svm/global-accountant/programs/global-accountant/tests/fixtures/**') }}
+          restore-keys: |
+            surfpool-mainnet-cache-${{ env.SURFPOOL_VERSION }}-
+            surfpool-mainnet-cache-
+
+      - name: Run `make test-e2e` (spike + mainnet-fork + VAA corpus)
+        # Network egress required: surfpool fetches mainnet accounts (Verify VAA
+        # Shim program, Core Bridge, active GuardianSet PDA) from the public
+        # mainnet RPC. surfpool v1.2.1 cannot inject the `Origin` header that
+        # the labsapis proxy requires, so the default datasource is the public
+        # endpoint — override per-run with `GA_E2E_DATASOURCE_RPC` if needed.
+        #
+        # `RUST_TEST_THREADS=1` keeps surfpool boots strictly serial. Per-test
+        # subprocesses + bound port allocation were flaky under load on the
+        # GHA ubuntu-24.04 runner; serial wins are predictability + lower
+        # public-RPC fan-out at the cost of ~minute of wall-clock vs. parallel.
+        env:
+          RUST_BACKTRACE: "1"
+          RUST_TEST_THREADS: "1"
+        run: make test-e2e

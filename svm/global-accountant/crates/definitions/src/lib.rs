@@ -60,6 +60,31 @@ impl From<GlobalAccountantError> for u32 {
 /// PDA seed prefix for [`DigestAccountLayout`].
 pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
 
+/// Verify VAA Shim program ID (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`).
+///
+/// The Shim deploys to the same address on mainnet, devnet, and Wormhole's Tilt
+/// localnet; see `svm/wormhole-core-shims/crates/definitions/src/solana.rs`.
+///
+/// Vendored as a raw byte array so this crate stays free of Solana SDK
+/// dependencies (the canonical definition pulls in `solana-program` 1.18..=2.x,
+/// which would conflict with the program crate's Pinocchio + `solana-*` 3.x
+/// dev-deps). The bytes are the base58 decoding of the program ID.
+pub const VERIFY_VAA_SHIM_PROGRAM_ID: Pubkey = [
+    196, 227, 203, 55, 17, 156, 166, 124, 168, 35, 28, 170, 3, 131, 164, 140, 195, 254, 137, 233,
+    101, 80, 83, 225, 249, 25, 254, 66, 226, 131, 254, 161,
+];
+
+/// Anchor discriminator for the Verify VAA Shim's `verify_hash` instruction.
+///
+/// Equal to the first 8 bytes of `sha256("global:verify_hash")`. Mirrors the
+/// constant computed at compile time in
+/// `svm/wormhole-core-shims/crates/shim/src/verify_vaa/mod.rs::VerifyVaaShimInstruction::VERIFY_HASH_SELECTOR`.
+pub const VERIFY_HASH_SELECTOR: [u8; 8] = [22, 152, 160, 69, 241, 148, 14, 124];
+
+/// Wire-format size of the `verify_hash` instruction data: 8-byte selector +
+/// 1-byte guardian-set bump + 32-byte digest.
+pub const VERIFY_HASH_DATA_LEN: usize = 8 + 1 + 32;
+
 /// Zero-copy layout for a `DigestAccount` PDA. See
 /// `accountant-migration-digest-design.md` §3 for design rationale.
 ///

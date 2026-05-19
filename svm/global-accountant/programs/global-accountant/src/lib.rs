@@ -10,15 +10,18 @@
 #![allow(unexpected_cfgs)]
 
 // Paired-feature fence: `mock-vaa` and `test-only-open-digest` are both
-// "this is a test build" signals (one gates the mock VAA verification path in
-// `close_digest`, the other re-exposes `open_digest` outside of
-// `submit_observations`). They are not independently meaningful: shipping
-// `mock-vaa` without `test-only-open-digest` would emit the mock VAA path to a
-// production-shape caller, and shipping `test-only-open-digest` without
-// `mock-vaa` would expose the test-only entrypoint against a build that does
-// not even compile (`close_digest`'s file-top `compile_error!` already fires
-// for any non-`mock-vaa` build). Force them to travel together so the only
-// reachable shapes are "both on" (test) and "both off" (prod).
+// "this is a test build" signals (one swaps the real Verify VAA Shim CPI in
+// `close_digest` for an instruction-data shortcut, the other re-exposes
+// `open_digest` outside of `submit_observations`). They are not independently
+// meaningful: shipping `mock-vaa` without `test-only-open-digest` gives a
+// build that mocks the VAA verification but offers no way to populate a
+// digest PDA from a test, and shipping `test-only-open-digest` without
+// `mock-vaa` exposes the test-only `open_digest` entrypoint against a
+// production-shape close path that demands a real VAA quorum to ever close
+// the PDA again — both shapes are stuck states for a real deployment. Force
+// the features to travel together so the only reachable shapes are
+// "both on" (mollusk / surfpool spike) and "both off" (production: real CPI
+// in `close_digest`, no public `open_digest`).
 #[cfg(any(
     all(feature = "mock-vaa", not(feature = "test-only-open-digest")),
     all(feature = "test-only-open-digest", not(feature = "mock-vaa")),

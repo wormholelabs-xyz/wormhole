@@ -1,0 +1,479 @@
+//! Shared helpers for surfpool-driven integration tests.
+//!
+//! Extracted from the Phase 0 spike (`surfpool_e2e_spike.rs`) so the Phase 1b
+//! mainnet-fork e2e test can reuse subprocess management, cheatcode plumbing,
+//! and port allocation without duplicating any logic. Each test crate that
+//! pulls this module in via `mod common;` gets the full helper set.
+//!
+//! The module is intentionally not `pub` outside the `tests/` tree — it is
+//! compiled into every integration-test binary that declares it, which is
+//! fine for a small surface like this.
+
+#![allow(dead_code)] // Different integration tests use different subsets.
+
+use std::{
+    io::{BufRead, BufReader, Read},
+    net::TcpListener,
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
+};
+
+use solana_client::rpc_client::RpcClient;
+use solana_commitment_config::CommitmentConfig;
+use solana_pubkey::Pubkey;
+
+const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
+const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Options for starting surfpool. Datasource defaults to `--offline`; set
+/// `datasource_rpc_url` to fork from mainnet.
+pub struct SurfpoolOptions {
+    /// When `Some`, surfpool boots with `--rpc-url <url>` (mainnet fork).
+    /// When `None`, surfpool boots `--offline` (in-memory simnet).
+    pub datasource_rpc_url: Option<String>,
+    /// Per-test scratch dir prefix; surfpool drops `.surfpool/` artefacts here.
+    pub scratch_prefix: &'static str,
+}
+
+impl SurfpoolOptions {
+    pub fn offline(scratch_prefix: &'static str) -> Self {
+        Self {
+            datasource_rpc_url: None,
+            scratch_prefix,
+        }
+    }
+
+    pub fn mainnet_fork(scratch_prefix: &'static str, rpc_url: impl Into<String>) -> Self {
+        Self {
+            datasource_rpc_url: Some(rpc_url.into()),
+            scratch_prefix,
+        }
+    }
+}
+
+/// Owns the surfpool child process plus its piped stdout/stderr drain threads.
+/// `Drop` ensures the child is killed even if a test panics.
+pub struct SurfpoolGuard {
+    child: Child,
+    rpc_port: u16,
+    _stdout_pump: Option<thread::JoinHandle<()>>,
+    _stderr_pump: Option<thread::JoinHandle<()>>,
+}
+
+impl SurfpoolGuard {
+    pub fn rpc_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.rpc_port)
+    }
+
+    pub fn rpc_client(&self) -> RpcClient {
+        RpcClient::new_with_commitment(self.rpc_url(), CommitmentConfig::confirmed())
+    }
+}
+
+impl Drop for SurfpoolGuard {
+    fn drop(&mut self) {
+        // Best-effort SIGKILL; `wait` reaps the zombie. Even on panic the guard
+        // unwinds and frees the child — that's the whole point of the type.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Pick a free TCP port by binding to 0 and reading the assigned port. Brief
+/// race window between the listener drop and surfpool bind — acceptable for
+/// integration tests.
+pub fn free_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    listener.local_addr().expect("local_addr").port()
+}
+
+/// Resolve the `surfpool` binary. Falls back to `~/.local/bin/surfpool` since
+/// the official installer puts it there and that directory is not always on
+/// `$PATH` for `cargo test` invocations.
+pub fn surfpool_binary() -> PathBuf {
+    if let Ok(found) = which_global("surfpool") {
+        return found;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let candidate = PathBuf::from(home).join(".local/bin/surfpool");
+    if candidate.exists() {
+        return candidate;
+    }
+    panic!(
+        "`surfpool` not on PATH and not at ~/.local/bin/surfpool. \
+         Install with: curl -sL https://run.surfpool.run/ | bash"
+    );
+}
+
+fn which_global(name: &str) -> Result<PathBuf, ()> {
+    let path = std::env::var_os("PATH").ok_or(())?;
+    for entry in std::env::split_paths(&path) {
+        let candidate = entry.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(())
+}
+
+/// Boot surfpool with the supplied options and block until JSON-RPC is healthy.
+pub fn start_surfpool(opts: SurfpoolOptions) -> SurfpoolGuard {
+    let bin = surfpool_binary();
+    let rpc_port = free_port();
+    let ws_port = free_port();
+    let studio_port = free_port();
+
+    let scratch = std::env::temp_dir().join(format!("{}-{}", opts.scratch_prefix, rpc_port));
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(&scratch).expect("create scratch dir");
+
+    eprintln!(
+        "[surfpool] starting: bin={} rpc={} ws={} studio={} cwd={} datasource={:?}",
+        bin.display(),
+        rpc_port,
+        ws_port,
+        studio_port,
+        scratch.display(),
+        opts.datasource_rpc_url,
+    );
+
+    let mut cmd = Command::new(&bin);
+    cmd.arg("start")
+        .arg("--no-tui")
+        .arg("--no-studio")
+        .arg("--no-deploy")
+        .arg("-y")
+        .arg("--port")
+        .arg(rpc_port.to_string())
+        .arg("--ws-port")
+        .arg(ws_port.to_string())
+        .arg("--studio-port")
+        .arg(studio_port.to_string())
+        .arg("--slot-time")
+        .arg("100")
+        .arg("--log-level")
+        .arg("warn");
+
+    match &opts.datasource_rpc_url {
+        Some(url) => {
+            cmd.arg("--rpc-url").arg(url);
+        }
+        None => {
+            cmd.arg("--offline");
+        }
+    }
+
+    cmd.current_dir(&scratch)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().expect("spawn surfpool");
+
+    // Drain stdout/stderr into the test's stderr so `--nocapture` surfaces any
+    // panic context. Without these pumps the pipes can fill and surfpool blocks
+    // on writes.
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_pump = stdout.map(|s| {
+        thread::spawn(move || {
+            let reader = BufReader::new(s);
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("[surfpool stdout] {line}");
+            }
+        })
+    });
+    let stderr_pump = stderr.map(|s| {
+        thread::spawn(move || {
+            let reader = BufReader::new(s);
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("[surfpool stderr] {line}");
+            }
+        })
+    });
+
+    let guard = SurfpoolGuard {
+        child,
+        rpc_port,
+        _stdout_pump: stdout_pump,
+        _stderr_pump: stderr_pump,
+    };
+
+    wait_for_rpc_ready(&guard);
+    guard
+}
+
+fn wait_for_rpc_ready(guard: &SurfpoolGuard) {
+    let client = guard.rpc_client();
+    let deadline = Instant::now() + SURFPOOL_BOOT_TIMEOUT;
+    let mut last_err: Option<String> = None;
+    while Instant::now() < deadline {
+        match client.get_health() {
+            Ok(_) => {
+                eprintln!("[surfpool] RPC ready at {}", guard.rpc_url());
+                return;
+            }
+            Err(e) => last_err = Some(e.to_string()),
+        }
+        thread::sleep(RPC_READY_POLL_INTERVAL);
+    }
+    panic!(
+        "surfpool RPC at {} did not become healthy within {:?}: {:?}",
+        guard.rpc_url(),
+        SURFPOOL_BOOT_TIMEOUT,
+        last_err
+    );
+}
+
+/// Path to the SBF `.so` for the named program crate. The Makefile target
+/// invoking the test must run the appropriate `build-dev` or `build-prod`
+/// recipe first so the artefact exists.
+pub fn so_path(name: &str) -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root from CARGO_MANIFEST_DIR")
+        .to_path_buf();
+    workspace_root
+        .join("target/deploy")
+        .join(format!("{name}.so"))
+}
+
+/// Hex-encode a byte slice. Avoids a dev-dep on `hex`.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// POST a JSON-RPC request to surfpool. `solana-client` does not expose
+/// `surfnet_*` cheatcodes, so we hand-roll a tiny HTTP/1.1 POST. Localhost
+/// only; no TLS, no chunking, no keep-alive.
+pub fn rpc_call(url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    let parsed = parse_url(url).expect("parse RPC URL");
+    let host = parsed.host;
+    let port = parsed.port.unwrap_or(80);
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    })
+    .to_string();
+
+    let mut stream = TcpStream::connect((host.as_str(), port)).expect("connect RPC");
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        len = body.len()
+    );
+    stream.write_all(request.as_bytes()).expect("write HTTP");
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).expect("read HTTP");
+    let response = String::from_utf8_lossy(&response);
+    let body_start = response.find("\r\n\r\n").expect("HTTP body separator") + 4;
+    let raw_body = &response[body_start..];
+
+    if let Ok(v) = serde_json::from_str(raw_body) {
+        return v;
+    }
+    // Permissive chunked-decode fallback for completeness.
+    if let Some(nl) = raw_body.find("\r\n") {
+        let rest = &raw_body[nl + 2..];
+        let end = rest.find("\r\n").unwrap_or(rest.len());
+        if let Ok(v) = serde_json::from_str(&rest[..end]) {
+            return v;
+        }
+    }
+    panic!("non-JSON RPC response from {method}: {raw_body}");
+}
+
+struct ParsedUrl {
+    host: String,
+    port: Option<u16>,
+}
+
+fn parse_url(input: &str) -> Result<ParsedUrl, &'static str> {
+    let s = input
+        .strip_prefix("http://")
+        .ok_or("only http:// supported")?;
+    let s = s.split('/').next().unwrap_or(s);
+    let (host, port) = match s.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().ok()),
+        None => (s.to_string(), None),
+    };
+    Ok(ParsedUrl { host, port })
+}
+
+/// Deploy a `.so` at `program_id` via the `surfnet_writeProgram` cheatcode.
+pub fn deploy_program(rpc_url: &str, program_id: &Pubkey, so_bytes: &[u8]) {
+    let hex = hex_encode(so_bytes);
+    let resp = rpc_call(
+        rpc_url,
+        "surfnet_writeProgram",
+        // Args: (program_id_b58, hex_data, slot). Slot 0 = "current".
+        serde_json::json!([program_id.to_string(), hex, 0]),
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "surfnet_writeProgram failed: {resp}"
+    );
+    eprintln!("[surfpool] writeProgram OK for {program_id}");
+}
+
+/// Parsed view of a Wormhole VAA fixture. Fields are computed once at load
+/// time so each test can read them as constants rather than re-parsing the
+/// blob in every assertion.
+///
+/// The wire format (per VAA v1, the only version Wormhole ships today):
+///
+/// | offset | size  | field                                      |
+/// |--------|-------|--------------------------------------------|
+/// | 0      | 1     | version (always 1)                         |
+/// | 1      | 4     | guardian_set_index (big-endian)            |
+/// | 5      | 1     | num_signatures                             |
+/// | 6      | 66*N  | signatures (1-byte index + 64-byte r\|\|s + 1-byte recovery_id), strictly increasing by index |
+/// | 6+66N  | 4     | timestamp                                  |
+/// | ...    | 4     | nonce                                      |
+/// | ...    | 2     | emitter_chain                              |
+/// | ...    | 32    | emitter_address                            |
+/// | ...    | 8     | sequence                                   |
+/// | ...    | 1     | consistency_level                          |
+/// | ...    | rest  | payload                                    |
+///
+/// The `digest` field is `keccak256(keccak256(body))` — the double-keccak
+/// Wormhole convention. The Shim recovers signer pubkeys against this digest
+/// during `VerifyHash`, so it is also what our `close_digest` instruction
+/// stores in the `DigestAccountLayout`.
+#[derive(Clone)]
+pub struct ParsedVaa {
+    /// Raw VAA bytes as stored in the fixture file. Kept around so callers can
+    /// re-extract slices without copying.
+    pub bytes: Vec<u8>,
+    /// `keccak256(keccak256(body))` — the digest the guardians signed.
+    pub digest: [u8; 32],
+    pub guardian_set_index: u32,
+    pub num_signatures: u8,
+    /// Byte offset where the signature block starts (always 6 for v1 VAAs).
+    pub signatures_offset: usize,
+    /// Byte offset where the body starts (= `6 + 66 * num_signatures`).
+    pub body_offset: usize,
+    pub emitter_chain: u16,
+    pub emitter_address: [u8; 32],
+    pub sequence: u64,
+    pub payload_len: usize,
+}
+
+impl ParsedVaa {
+    /// Wire-format length of one guardian signature record on the VAA blob:
+    /// 1-byte index + 64-byte r||s + 1-byte recovery_id. Mirrors
+    /// `wormhole_svm_definitions::GUARDIAN_SIGNATURE_LENGTH`.
+    pub const GUARDIAN_SIGNATURE_LENGTH: usize = 66;
+
+    /// Slice of the contiguous signature block (length = `num_signatures * 66`),
+    /// ready to drop into a `PostSignatures` instruction data buffer.
+    pub fn signatures_slice(&self) -> &[u8] {
+        let start = self.signatures_offset;
+        let end = start + (self.num_signatures as usize) * Self::GUARDIAN_SIGNATURE_LENGTH;
+        &self.bytes[start..end]
+    }
+}
+
+/// Load and parse a VAA fixture from `tests/fixtures/<name>`. Panics if the
+/// file is missing or the wire format is invalid — fixture corruption should
+/// surface immediately, not in a downstream CPI.
+pub fn load_vaa_fixture(name: &str) -> ParsedVaa {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("read VAA fixture {}: {e}", path.display()));
+    parse_vaa(&bytes)
+        .unwrap_or_else(|e| panic!("parse VAA fixture {}: {e}", path.display()))
+}
+
+/// Pure parser kept separate from the fixture-loader so unit tests can drive
+/// it against in-memory blobs without hitting the filesystem.
+pub fn parse_vaa(bytes: &[u8]) -> Result<ParsedVaa, String> {
+    if bytes.len() < 6 {
+        return Err(format!("VAA too short: {} bytes", bytes.len()));
+    }
+    let version = bytes[0];
+    if version != 1 {
+        return Err(format!("unsupported VAA version: {version}"));
+    }
+    let guardian_set_index = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+    let num_signatures = bytes[5];
+    let signatures_offset: usize = 6;
+    let body_offset =
+        signatures_offset + (num_signatures as usize) * ParsedVaa::GUARDIAN_SIGNATURE_LENGTH;
+    if bytes.len() < body_offset + 4 + 4 + 2 + 32 + 8 + 1 {
+        return Err(format!(
+            "VAA truncated before body end: total={}, body_offset={}",
+            bytes.len(),
+            body_offset
+        ));
+    }
+    let body = &bytes[body_offset..];
+    // body layout: timestamp(4) nonce(4) emitter_chain(2) emitter(32) sequence(8) consistency(1) payload
+    let emitter_chain = u16::from_be_bytes([body[8], body[9]]);
+    let mut emitter_address = [0u8; 32];
+    emitter_address.copy_from_slice(&body[10..42]);
+    let sequence = u64::from_be_bytes([
+        body[42], body[43], body[44], body[45], body[46], body[47], body[48], body[49],
+    ]);
+    let payload_len = body.len().saturating_sub(51);
+    let digest = double_keccak(body);
+    Ok(ParsedVaa {
+        bytes: bytes.to_vec(),
+        digest,
+        guardian_set_index,
+        num_signatures,
+        signatures_offset,
+        body_offset,
+        emitter_chain,
+        emitter_address,
+        sequence,
+        payload_len,
+    })
+}
+
+/// `keccak256(keccak256(body))` — the Wormhole digest convention used by both
+/// guardian signing and the Shim's `VerifyHash`. Off-chain implementation only;
+/// the on-chain Pinocchio program would call `sol_keccak256` directly.
+fn double_keccak(body: &[u8]) -> [u8; 32] {
+    let inner = solana_keccak_hasher::hash(body);
+    let outer = solana_keccak_hasher::hashv(&[&inner.to_bytes()]);
+    outer.to_bytes()
+}
+
+/// Poll `confirm_transaction` until it returns `Ok(true)` or the deadline
+/// expires. Bounded wait so a stalled validator surfaces immediately.
+pub fn await_confirmed<F: Fn() -> Result<bool, solana_client::client_error::ClientError>>(
+    label: &str,
+    timeout: Duration,
+    poll: F,
+) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match poll() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(e) => eprintln!("[surfpool] {label} confirm wait: {e}"),
+        }
+        if Instant::now() > deadline {
+            panic!("{label} did not confirm in {timeout:?}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}

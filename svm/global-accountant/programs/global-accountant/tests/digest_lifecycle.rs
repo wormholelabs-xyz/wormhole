@@ -9,7 +9,7 @@
 use {
     global_accountant_definitions::{
         DigestAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        DIGEST_SEED_PREFIX,
+        DIGEST_SEED_PREFIX, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -62,10 +62,54 @@ fn open_digest_ix_data(
 }
 
 fn close_digest_ix_data(mock_vaa_digest: &[u8; 32]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 32);
+    // Same wire format under both feature configurations: 32-byte digest +
+    // 1-byte guardian_set_bump. The mock branch ignores the trailing byte; the
+    // real branch passes it through to the Shim's `VerifyHash` CPI so it can
+    // derive the Core Bridge's `GuardianSet` PDA without re-running
+    // `find_program_address`.
+    let mut data = Vec::with_capacity(1 + 32 + 1);
     data.push(IxDiscriminator::CloseDigest as u8);
     data.extend_from_slice(mock_vaa_digest);
+    data.push(0);
     data
+}
+
+/// Placeholder pubkey for the Shim accounts the mock branch ignores. The real
+/// branch (Phase 1b) populates these via `surfnet_setAccount` cheatcodes; under
+/// `mock-vaa` they round-trip through the runtime as inert system-owned
+/// accounts.
+fn shim_placeholder_account(seed: u8) -> (Pubkey, Account) {
+    (Pubkey::new_from_array([seed; 32]), system_owned_account(0))
+}
+
+/// Three trailing accounts every `close_digest` invocation now carries:
+/// guardian-signatures PDA, guardian-set PDA, and the Verify VAA Shim program
+/// itself. The mock-vaa branch ignores their contents but still expects them
+/// to be present so the wire shape matches the production-shape build.
+///
+/// The shim-program AccountMeta uses the canonical program ID so the
+/// defence-in-depth equality check in the production branch still passes when
+/// the same instruction shape is replayed by surfpool against the real Shim.
+fn close_digest_extra_metas() -> (Vec<AccountMeta>, Vec<(Pubkey, Account)>) {
+    // Pubkey seeds chosen to avoid collisions with any test-local actor
+    // (payers use 0x01..0x09, 0xC1, 0xD1; attacker = 0xAA, wrong_recipient =
+    // 0xBB).
+    let (gs_pubkey, gs_account) = shim_placeholder_account(0xE1);
+    let (gset_pubkey, gset_account) = shim_placeholder_account(0xE2);
+    let shim_program_pubkey = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
+    let shim_program_account = system_owned_account(0);
+    (
+        vec![
+            AccountMeta::new_readonly(gs_pubkey, false),
+            AccountMeta::new_readonly(gset_pubkey, false),
+            AccountMeta::new_readonly(shim_program_pubkey, false),
+        ],
+        vec![
+            (gs_pubkey, gs_account),
+            (gset_pubkey, gset_account),
+            (shim_program_pubkey, shim_program_account),
+        ],
+    )
 }
 
 fn lifecycle_inputs() -> (u16, [u8; 32], u64, [u8; 32], u32) {
@@ -215,20 +259,24 @@ fn open_then_close_round_trip() {
 
     // -- Close --------------------------------------------------------------
     let mock_vaa_first_32 = digest; // matches the stored digest
+    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let mut metas = vec![
+        AccountMeta::new_readonly(payer, true), // payer can also be the closer
+        AccountMeta::new(state.pda, false),
+        AccountMeta::new(payer, false),         // rent recipient
+    ];
+    metas.extend(extra_metas);
     let close_ix = Instruction::new_with_bytes(
         program_id(),
         &close_digest_ix_data(&mock_vaa_first_32),
-        vec![
-            AccountMeta::new_readonly(payer, true), // payer can also be the closer
-            AccountMeta::new(state.pda, false),
-            AccountMeta::new(payer, false),         // rent recipient
-        ],
+        metas,
     );
 
-    let close_accounts = vec![
+    let mut close_accounts = vec![
         (payer, state.payer_after_open.clone()),
         (state.pda, state.pda_after_open.clone()),
     ];
+    close_accounts.extend(extra_accounts);
 
     let close_result = mollusk.process_instruction(&close_ix, &close_accounts);
     assert!(
@@ -359,20 +407,24 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     let mut bad_vaa_digest = digest;
     bad_vaa_digest[0] ^= 0xff; // flip a bit so the digests no longer match.
 
+    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let mut metas = vec![
+        AccountMeta::new_readonly(payer, true),
+        AccountMeta::new(state.pda, false),
+        AccountMeta::new(payer, false),
+    ];
+    metas.extend(extra_metas);
     let close_ix = Instruction::new_with_bytes(
         program_id(),
         &close_digest_ix_data(&bad_vaa_digest),
-        vec![
-            AccountMeta::new_readonly(payer, true),
-            AccountMeta::new(state.pda, false),
-            AccountMeta::new(payer, false),
-        ],
+        metas,
     );
 
-    let close_accounts = vec![
+    let mut close_accounts = vec![
         (payer, state.payer_after_open.clone()),
         (state.pda, state.pda_after_open.clone()),
     ];
+    close_accounts.extend(extra_accounts);
 
     let close_result = mollusk.process_instruction(&close_ix, &close_accounts);
     match close_result.program_result {
@@ -508,20 +560,24 @@ fn close_with_spoofed_system_owned_pda_fails() {
     };
 
     let attacker_starting_lamports = 1_000_000;
+    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let mut metas = vec![
+        AccountMeta::new_readonly(attacker, true),
+        AccountMeta::new(pda, false),
+        AccountMeta::new(attacker, false),
+    ];
+    metas.extend(extra_metas);
     let close_ix = Instruction::new_with_bytes(
         program_id(),
         &close_digest_ix_data(&digest),
-        vec![
-            AccountMeta::new_readonly(attacker, true),
-            AccountMeta::new(pda, false),
-            AccountMeta::new(attacker, false),
-        ],
+        metas,
     );
 
-    let close_accounts = vec![
+    let mut close_accounts = vec![
         (attacker, system_owned_account(attacker_starting_lamports)),
         (pda, spoofed_pda_account.clone()),
     ];
+    close_accounts.extend(extra_accounts);
 
     let close_result = mollusk.process_instruction(&close_ix, &close_accounts);
     match close_result.program_result {
@@ -561,17 +617,20 @@ fn close_with_wrong_rent_recipient_fails() {
     let wrong_recipient = Pubkey::new_from_array([0xBBu8; 32]);
     let wrong_recipient_starting = 7_777_777u64;
 
+    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let mut metas = vec![
+        AccountMeta::new_readonly(payer, true),
+        AccountMeta::new(state.pda, false),
+        AccountMeta::new(wrong_recipient, false),
+    ];
+    metas.extend(extra_metas);
     let close_ix = Instruction::new_with_bytes(
         program_id(),
         &close_digest_ix_data(&digest),
-        vec![
-            AccountMeta::new_readonly(payer, true),
-            AccountMeta::new(state.pda, false),
-            AccountMeta::new(wrong_recipient, false),
-        ],
+        metas,
     );
 
-    let close_accounts = vec![
+    let mut close_accounts = vec![
         (payer, system_owned_account(0)),
         (state.pda, state.pda_after_open.clone()),
         (
@@ -579,6 +638,7 @@ fn close_with_wrong_rent_recipient_fails() {
             system_owned_account(wrong_recipient_starting),
         ),
     ];
+    close_accounts.extend(extra_accounts);
 
     let close_result = mollusk.process_instruction(&close_ix, &close_accounts);
     match close_result.program_result {

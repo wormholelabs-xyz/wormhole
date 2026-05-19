@@ -17,10 +17,14 @@ crate-type = ["cdylib", "lib"]
 # or client tooling).
 default = []
 bpf-entrypoint = []
-# Enable the mock VAA path in `close_digest`. Production builds must NOT set
-# this feature — the real `Verify VAA Shim` CPI integration lands in a later
-# slice. The non-mock branch in `close_digest.rs` issues a `compile_error!`
-# so production builds without the real path refuse to compile.
+# Enable the mock VAA path in `close_digest`. The default (no features) branch
+# CPIs into the Verify VAA Shim (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`)
+# to validate guardian-quorum signatures against the candidate digest. The mock
+# branch skips that CPI and accepts the digest from instruction data verbatim,
+# which is essential for the in-process mollusk tests (no Shim + guardian-set
+# fixtures to stand up) but unsafe in production. The paired `compile_error!`
+# in `src/lib.rs` keeps `mock-vaa` from leaking into a build that is otherwise
+# production-shape.
 mock-vaa = []
 # Expose `Instruction::OpenDigest` in the dispatch table. In production
 # `open_digest` is only reachable from inside `submit_observations` after the
@@ -51,6 +55,16 @@ solana-address = { version = "2.6", features = ["curve25519"] }
 # integration lands; `test-only-open-digest` is intentionally off in production
 # (see the program crate `[features]` block for rationale).
 global-accountant = { path = ".", features = ["mock-vaa", "test-only-open-digest"] }
+# Surfpool E2E spike — talks to a subprocess `surfpool start` over JSON-RPC.
+# See `tests/surfpool_e2e_spike.rs`.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+solana-keccak-hasher.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
