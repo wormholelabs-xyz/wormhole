@@ -94,6 +94,12 @@ pub fn process(
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
 
+    // Design note: `layout.guardian_set_index` is metadata only and intentionally
+    // NOT compared against `guardian_signatures.guardian_set_index`. Close accepts
+    // a quorum from any currently-active set; the Shim's `is_active(timestamp)`
+    // check rejects retired sets, and pinning close to the original set would
+    // create permanent stuck accounts after rotation without improving safety.
+    // See `accountant-migration-digest-design.md` §3 step 3 for the full rationale.
     verify_vaa(
         verify_vaa_shim_program,
         guardian_set,
