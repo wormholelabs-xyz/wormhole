@@ -1,0 +1,30 @@
+[package]
+name = "uint256-cu-spike"
+description = "One-off Pinocchio program that measures the CU cost of Uint256::checked_add / checked_sub. Not part of the production build set."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+bpf-entrypoint = []
+
+[dependencies]
+global-accountant-definitions.workspace = true
+pinocchio.workspace = true
+
+[dev-dependencies]
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+
+[lints]
+workspace = true

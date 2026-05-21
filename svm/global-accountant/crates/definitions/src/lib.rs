@@ -85,6 +85,103 @@ pub const VERIFY_HASH_SELECTOR: [u8; 8] = [22, 152, 160, 69, 241, 148, 14, 124];
 /// 1-byte guardian-set bump + 32-byte digest.
 pub const VERIFY_HASH_DATA_LEN: usize = 8 + 1 + 32;
 
+/// 256-bit unsigned integer stored on-disk as 32 **big-endian** bytes.
+///
+/// Width matches both the CosmWasm `accountant::state::account::Balance(Uint256)`
+/// baseline (see `cosmwasm/packages/accountant/src/state/account.rs:101`) and
+/// the Wormhole VAA wire format — Token Bridge transfer payloads encode the
+/// `amount` field as a 32-byte big-endian unsigned integer (whitepaper
+/// `0003_token_bridge.md`). Storing big-endian on-chain means a VAA's bytes can
+/// be copied directly into the balance account without re-ordering.
+///
+/// `#[repr(transparent)]` over `[u8; 32]` keeps the type `Pod`-compatible so it
+/// can sit inside a zero-copy account layout. Arithmetic round-trips through
+/// `ruint::aliases::U256` (limb-based, little-endian internally) at the
+/// boundary; the on-disk representation never changes.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
+pub struct Uint256(pub [u8; 32]);
+
+impl Uint256 {
+    /// All-zero value.
+    pub const ZERO: Self = Self([0u8; 32]);
+
+    /// All-ones value (`2^256 - 1`).
+    pub const MAX: Self = Self([0xffu8; 32]);
+
+    /// Build a `Uint256` from a `u128`, big-endian. The low 16 bytes carry the
+    /// value; the high 16 bytes are zero. Mirrors `cosmwasm_std::Uint256::from`
+    /// for u128 inputs.
+    pub const fn from_u128(v: u128) -> Self {
+        let v_be = v.to_be_bytes();
+        let mut bytes = [0u8; 32];
+        let mut i = 0;
+        while i < 16 {
+            bytes[16 + i] = v_be[i];
+            i += 1;
+        }
+        Self(bytes)
+    }
+
+    /// Down-cast to a `u128` if the value fits; otherwise `None`. The check is
+    /// "are the high 16 bytes all zero?".
+    pub fn to_u128(self) -> Option<u128> {
+        let (hi, lo) = self.0.split_at(16);
+        for byte in hi {
+            if *byte != 0 {
+                return None;
+            }
+        }
+        let mut lo_array = [0u8; 16];
+        lo_array.copy_from_slice(lo);
+        Some(u128::from_be_bytes(lo_array))
+    }
+
+    /// Saturating-free add. Returns `None` on overflow, matching the CosmWasm
+    /// `Uint256::checked_add` semantic that propagates as an `Err` to the
+    /// caller (we convert to `ProgramError::Custom` at the program boundary).
+    #[inline]
+    pub fn checked_add(self, other: Self) -> Option<Self> {
+        let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
+        let b = ruint::aliases::U256::from_be_bytes::<32>(other.0);
+        a.checked_add(b).map(|r| Self(r.to_be_bytes::<32>()))
+    }
+
+    /// Subtract, returning `None` on underflow.
+    #[inline]
+    pub fn checked_sub(self, other: Self) -> Option<Self> {
+        let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
+        let b = ruint::aliases::U256::from_be_bytes::<32>(other.0);
+        a.checked_sub(b).map(|r| Self(r.to_be_bytes::<32>()))
+    }
+
+    /// Borrow the big-endian byte representation. Suitable for direct copy
+    /// into / out of a VAA transfer payload's `amount` field.
+    pub const fn as_be_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Construct from 32 big-endian bytes (e.g. the `amount` slice of a
+    /// Token Bridge transfer payload).
+    pub const fn from_be_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl PartialOrd for Uint256 {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Uint256 {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        // Lexicographic over big-endian bytes is numerical order for unsigned
+        // big-endian representations.
+        self.0.cmp(&other.0)
+    }
+}
+
 /// Zero-copy layout for a `DigestAccount` PDA. See
 /// `accountant-migration-digest-design.md` §3 for design rationale.
 ///
@@ -127,30 +224,54 @@ const _: () = {
 };
 
 /// Zero-copy layout for the per-(chain, token_chain, token_address) balance
-/// account ported from the CosmWasm `accountant::state::account::Account`.
+/// account ported from the CosmWasm `accountant::state::account::Account`
+/// (`cosmwasm/packages/accountant/src/state/account.rs`).
 ///
-/// Not used in this slice — included so the on-chain layout is fixed before
-/// any logic is written against it. 80 bytes total with natural alignment.
+/// Total on-disk size is **76 bytes**, matching the CosmWasm baseline byte
+/// budget for an `Account` record. Field ordering keeps natural alignment for
+/// the `u16`s up front (every field has alignment 1 or 2; `Uint256` is
+/// `repr(transparent)` over `[u8; 32]` so it inherits alignment 1).
+///
+/// | offset | size | field         |
+/// |--------|------|---------------|
+/// | 0      | 2    | chain         |
+/// | 2      | 2    | token_chain   |
+/// | 4      | 32   | token_address |
+/// | 36     | 32   | balance       |
+/// | 68     | 8    | _reserved     |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct BalanceAccountLayout {
-    /// Native chain of the token (CW: `key.token_chain`).
-    pub token_chain: u16,
     /// Chain on which this balance is held (CW: `key.chain_id`).
     pub chain: u16,
-    pub(crate) _padding: [u8; 12],
+    /// Native chain of the token (CW: `key.token_chain`).
+    pub token_chain: u16,
     /// Token address on its native chain (CW: `key.token_address`, 32 bytes).
     pub token_address: [u8; 32],
-    /// Current balance. CosmWasm uses `Uint256`; for this layout we follow the
-    /// migration plan's 16-byte (`u128`) width. Stored little-endian per
-    /// `bytemuck` conventions.
-    pub balance: u128,
-    pub(crate) _reserved: [u8; 16],
+    /// Current balance. 32-byte big-endian unsigned integer to match the
+    /// CosmWasm `Balance(Uint256)` baseline and the Wormhole VAA wire format
+    /// (Token Bridge transfer payloads encode `amount` as big-endian u256).
+    pub balance: Uint256,
+    /// Reserved for forward compatibility (e.g. a version byte plus padding).
+    /// Crate-private so callers go through `Zeroable` for new instances.
+    pub(crate) _reserved: [u8; 8],
 }
 
 impl BalanceAccountLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 }
+
+// Compile-time pins for the balance layout. Mirrors the DigestAccount pattern
+// so a stray reorder fails the build instead of silently corrupting state.
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(BalanceAccountLayout, chain) == 0);
+    assert!(offset_of!(BalanceAccountLayout, token_chain) == 2);
+    assert!(offset_of!(BalanceAccountLayout, token_address) == 4);
+    assert!(offset_of!(BalanceAccountLayout, balance) == 36);
+    assert!(offset_of!(BalanceAccountLayout, _reserved) == 68);
+    assert!(BalanceAccountLayout::LEN == 76);
+};
 
 #[cfg(test)]
 mod tests {
@@ -175,9 +296,163 @@ mod tests {
         assert_eq!(DigestAccountLayout::LEN, bytes.len());
     }
 
+    // ---- Uint256 unit tests (port of CosmWasm account.rs:152-323 cases) ----
+
     #[test]
-    fn balance_layout_is_80_bytes() {
-        // Pin the width so downstream PDA seeders and migrations agree.
-        assert_eq!(BalanceAccountLayout::LEN, 80);
+    fn uint256_add_basic() {
+        let a = Uint256::from_u128(500);
+        let b = Uint256::from_u128(200);
+        assert_eq!(a.checked_add(b), Some(Uint256::from_u128(700)));
+    }
+
+    #[test]
+    fn uint256_add_overflow() {
+        // CosmWasm `native_lock_overflow` / `wrapped_mint_overflow` analogue.
+        assert_eq!(Uint256::MAX.checked_add(Uint256::from_u128(200)), None);
+    }
+
+    #[test]
+    fn uint256_sub_basic() {
+        let a = Uint256::from_u128(500);
+        let b = Uint256::from_u128(200);
+        assert_eq!(a.checked_sub(b), Some(Uint256::from_u128(300)));
+    }
+
+    #[test]
+    fn uint256_sub_underflow() {
+        // CosmWasm `native_unlock_underflow` / `wrapped_burn_underflow` analogue.
+        assert_eq!(
+            Uint256::ZERO.checked_sub(Uint256::from_u128(200)),
+            None,
+            "subtracting from zero must return None, not wrap"
+        );
+    }
+
+    #[test]
+    fn uint256_round_trip_bytes() {
+        // Pack/unpack through the `[u8; 32]` representation preserves the value
+        // bit-for-bit.
+        let original = Uint256::from_u128(0xdead_beef_cafe_babe_u128);
+        let bytes: [u8; 32] = *original.as_be_bytes();
+        let restored = Uint256::from_be_bytes(bytes);
+        assert_eq!(original, restored);
+    }
+
+    #[test]
+    fn uint256_big_endian_wire_order() {
+        // `0x1234` packs with the most-significant byte at offset 30 — i.e.
+        // network byte order. Matches Token Bridge transfer payload `amount`
+        // encoding (whitepaper 0003).
+        let v = Uint256::from_u128(0x1234);
+        let bytes = v.as_be_bytes();
+        let mut expected = [0u8; 32];
+        expected[30] = 0x12;
+        expected[31] = 0x34;
+        assert_eq!(bytes, &expected);
+    }
+
+    #[test]
+    fn uint256_ordering() {
+        assert!(Uint256::from_u128(1) < Uint256::from_u128(2));
+        assert!(Uint256::MAX > Uint256::from_u128(u128::MAX));
+        assert!(Uint256::ZERO < Uint256::from_u128(1));
+        // Lexicographic-over-big-endian == numerical order: a value with a
+        // higher MSB sorts higher even if the LSBs are smaller.
+        let mut a_bytes = [0u8; 32];
+        a_bytes[0] = 0x01;
+        let a = Uint256::from_be_bytes(a_bytes);
+        let b = Uint256::from_u128(u128::MAX);
+        assert!(a > b);
+    }
+
+    #[test]
+    fn uint256_to_u128_in_range() {
+        let v = Uint256::from_u128(0xdead_beef);
+        assert_eq!(v.to_u128(), Some(0xdead_beef));
+    }
+
+    #[test]
+    fn uint256_to_u128_out_of_range() {
+        // Any non-zero byte in the high 16 bytes pushes the value above
+        // u128::MAX.
+        let mut bytes = [0u8; 32];
+        bytes[15] = 0x01;
+        let v = Uint256::from_be_bytes(bytes);
+        assert_eq!(v.to_u128(), None);
+    }
+
+    #[test]
+    fn uint256_add_then_sub_round_trips() {
+        // CosmWasm `native_lock` (500 + 200 = 700) then unwind back to 500.
+        let start = Uint256::from_u128(500);
+        let added = start.checked_add(Uint256::from_u128(200)).unwrap();
+        assert_eq!(added, Uint256::from_u128(700));
+        let restored = added.checked_sub(Uint256::from_u128(200)).unwrap();
+        assert_eq!(restored, start);
+    }
+
+    // ---- BalanceAccountLayout tests ----
+
+    #[test]
+    fn balance_layout_size_matches_cosmwasm() {
+        // CosmWasm `Balance(Uint256)` + `Key { chain_id: u16, token_chain: u16,
+        // token_address: [u8; 32] }` ≈ 76 bytes on disk. Pin exactly so the
+        // backfill program and migration tooling agree on the rent budget.
+        assert_eq!(BalanceAccountLayout::LEN, 76);
+    }
+
+    #[test]
+    fn balance_layout_uint256_offsets_pinned() {
+        // Runtime mirror of the const-assert block above. A reviewer reads this
+        // test rather than tracing through `offset_of!` macros.
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(BalanceAccountLayout, chain), 0);
+        assert_eq!(offset_of!(BalanceAccountLayout, token_chain), 2);
+        assert_eq!(offset_of!(BalanceAccountLayout, token_address), 4);
+        assert_eq!(offset_of!(BalanceAccountLayout, balance), 36);
+        assert_eq!(offset_of!(BalanceAccountLayout, _reserved), 68);
+    }
+
+    #[test]
+    fn balance_layout_is_pod_friendly() {
+        // Round-trip through bytes preserves every field.
+        let mut token_address = [0u8; 32];
+        for (i, b) in token_address.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let original = BalanceAccountLayout {
+            chain: 1,
+            token_chain: 2,
+            token_address,
+            balance: Uint256::from_u128(0xcafe_babe),
+            _reserved: [0u8; 8],
+        };
+        let bytes = bytemuck::bytes_of(&original);
+        assert_eq!(bytes.len(), BalanceAccountLayout::LEN);
+        let copy: &BalanceAccountLayout = bytemuck::from_bytes(bytes);
+        assert_eq!(&original, copy);
+    }
+
+    #[test]
+    fn balance_layout_balance_encodes_big_endian_on_disk() {
+        // The balance field's bytes inside the packed account must be exactly
+        // the big-endian encoding of the value. This is the property that lets
+        // a VAA transfer payload's `amount` slice be copied directly without
+        // any byte-order conversion.
+        let original = BalanceAccountLayout {
+            chain: 0,
+            token_chain: 0,
+            token_address: [0u8; 32],
+            balance: Uint256::from_u128(0x1234_5678),
+            _reserved: [0u8; 8],
+        };
+        let bytes = bytemuck::bytes_of(&original);
+        let balance_slice = &bytes[36..68];
+        let mut expected = [0u8; 32];
+        expected[28] = 0x12;
+        expected[29] = 0x34;
+        expected[30] = 0x56;
+        expected[31] = 0x78;
+        assert_eq!(balance_slice, &expected);
     }
 }

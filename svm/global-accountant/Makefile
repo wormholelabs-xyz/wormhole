@@ -110,6 +110,19 @@ test-e2e-vaa-corpus: build-prod
 test-e2e: test-e2e-spike test-e2e-mainnet-fork test-e2e-vaa-corpus
 	@echo "All surfpool E2E layers green."
 
+# Compute-unit spike for the new `Uint256` type (Phase 2.1). Builds the
+# minimal Pinocchio program in `programs/uint256-cu-spike/` and runs the
+# `#[ignore]`-gated tests that log `compute_units_consumed`. Not part of the
+# default `cargo test` set — re-run when the underlying 256-bit math crate
+# changes (e.g. swap from `ruint` to a vendored Orca implementation) to
+# confirm the CU baseline does not regress.
+.PHONY: test-cu-spike
+test-cu-spike:
+	cargo build-sbf --manifest-path programs/uint256-cu-spike/Cargo.toml \
+		--features bpf-entrypoint
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test -p uint256-cu-spike --test cu_spike \
+		-- --ignored --nocapture
+
 .PHONY: clippy
 clippy:
 	cargo clippy --all-targets --features mock-vaa,test-only-open-digest -- -D warnings

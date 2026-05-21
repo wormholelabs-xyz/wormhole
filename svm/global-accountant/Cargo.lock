@@ -1816,6 +1816,7 @@ name = "global-accountant-definitions"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "ruint",
 ]
 
 [[package]]
@@ -3345,6 +3346,21 @@ dependencies = [
  "untrusted",
  "windows-sys 0.52.0",
 ]
+
+[[package]]
+name = "ruint"
+version = "1.17.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c141e807189ad38a07276942c6623032d3753c8859c146104ac2e4d68865945a"
+dependencies = [
+ "ruint-macro",
+]
+
+[[package]]
+name = "ruint-macro"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "48fd7bd8a6377e15ad9d42a8ec25371b94ddc67abe7c8b9127bec79bebaaae18"
 
 [[package]]
 name = "rustc-demangle"
@@ -6273,6 +6289,18 @@ name = "typenum"
 version = "1.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40ce102ab67701b8526c123c1bab5cbe42d7040ccfd0f64af1a385808d2f43de"
+
+[[package]]
+name = "uint256-cu-spike"
+version = "0.1.0"
+dependencies = [
+ "global-accountant-definitions",
+ "mollusk-svm",
+ "pinocchio",
+ "solana-account",
+ "solana-instruction",
+ "solana-pubkey 4.2.0",
+]
 
 [[package]]
 name = "unicode-ident"
