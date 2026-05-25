@@ -33,6 +33,15 @@ mock-vaa = []
 # keeps the symbol out of production builds. Tests turn it on; `make build-prod`
 # leaves it off.
 test-only-open-digest = []
+# Enable the mock NoReplay path in `submit_observations` / `close_pending`. The
+# default (no features) branch CPIs into `solana-noreplay`
+# (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`); the mock branch substitutes
+# a single-byte sentinel in a caller-provided PDA. Mirrors `mock-vaa` in
+# `close_digest`. The paired `compile_error!` in `src/lib.rs` keeps this from
+# leaking into a build that is otherwise production-shape; the three test-build
+# features (`mock-vaa`, `test-only-open-digest`, `mock-noreplay`) must travel
+# together.
+mock-noreplay = []
 
 [dependencies]
 bytemuck.workspace = true
@@ -52,9 +61,15 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 solana-address = { version = "2.6", features = ["curve25519"] }
 # Tests drive the mock VAA path and exercise `open_digest` directly. The
 # non-mock build is intentionally uncompilable until the Verify VAA Shim CPI
-# integration lands; `test-only-open-digest` is intentionally off in production
-# (see the program crate `[features]` block for rationale).
-global-accountant = { path = ".", features = ["mock-vaa", "test-only-open-digest"] }
+# integration lands; `test-only-open-digest` and `mock-noreplay` are
+# intentionally off in production (see the program crate `[features]` block
+# for rationale).
+global-accountant = { path = ".", features = ["mock-vaa", "test-only-open-digest", "mock-noreplay"] }
+# Pure-Rust secp256k1. Tests sign synthetic guardian observations to populate
+# the pending bitmap and exercise the on-chain `sol_secp256k1_recover` path.
+# Already in the workspace lock via mollusk's transitive deps; pinning the
+# major version keeps the host-side test build aligned.
+libsecp256k1 = "0.6"
 # Surfpool E2E spike — talks to a subprocess `surfpool start` over JSON-RPC.
 # See `tests/surfpool_e2e_spike.rs`.
 solana-client.workspace = true

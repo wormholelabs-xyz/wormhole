@@ -6,6 +6,7 @@
 //! instructions touch it yet.
 
 pub mod digest;
+pub mod pending;
 
 // Re-exported from `definitions` for ergonomic access from Phase 2 balance
 // accounting; unused this slice.

@@ -19,6 +19,7 @@ pub enum Instruction {
     OpenDigest = 0,
     CloseDigest = 1,
     SubmitObservations = 2,
+    ClosePending = 3,
 }
 
 impl Instruction {
@@ -28,6 +29,7 @@ impl Instruction {
             0 => Some(Self::OpenDigest),
             1 => Some(Self::CloseDigest),
             2 => Some(Self::SubmitObservations),
+            3 => Some(Self::ClosePending),
             _ => None,
         }
     }
@@ -49,6 +51,40 @@ pub enum GlobalAccountantError {
     /// keep `open_digest` out of production builds until `submit_observations`
     /// is the only legitimate caller.
     NotEnabled = 6,
+    /// The (chain, emitter, sequence) is already marked as accounted-for in
+    /// NoReplay; observations are rejected as replays before any signature
+    /// verification or PDA work. See
+    /// `accountant-migration-noreplay-integration.md` §3.
+    AlreadyAccounted = 7,
+    /// The NoReplay `MarkUsed` CPI returned an error after our pre-check passed
+    /// — a defence-in-depth backstop for any racing tx that flipped the slot
+    /// in the same block.
+    NoReplayCpiFailed = 8,
+    /// The submitted signature failed `secp256k1_recover` or the recovered
+    /// pubkey did not match the supplied `guardian_index`'s public key in the
+    /// Core Bridge GuardianSet PDA. See
+    /// `accountant-migration-pending-quorum-design.md` §3.4.
+    InvalidSignature = 9,
+    /// The supplied `guardian_index` is out of bounds for the supplied
+    /// guardian set.
+    InvalidGuardianIndex = 10,
+    /// The corresponding bit in the pending-PDA's signature bitmap is already
+    /// set — the submitter has already counted this guardian.
+    AlreadySigned = 11,
+    /// The observation references a guardian set strictly older than the one
+    /// the existing pending PDA is accumulating against (i.e., a stale
+    /// observation arrived after rotation). See §3.3 rule "Older than the
+    /// active set".
+    StaleGuardianSet = 12,
+    /// The observation's digest does not match the digest the pending PDA was
+    /// opened with, while the `guardian_set_index` is identical. Distinct from
+    /// the rotation case (which wipes-and-recreates) — same set, different
+    /// digest is a forgery attempt.
+    DigestForgery = 13,
+    /// `close_pending` was called but neither of the two acceptable triggers
+    /// holds: the recorded guardian set is still active AND NoReplay does not
+    /// mark the entry as accounted-for. See §3.6.
+    CannotCleanup = 14,
 }
 
 impl From<GlobalAccountantError> for u32 {
@@ -59,6 +95,15 @@ impl From<GlobalAccountantError> for u32 {
 
 /// PDA seed prefix for [`DigestAccountLayout`].
 pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
+
+/// PDA seed prefix for [`PendingObservationsLayout`]. The full seed tuple is
+/// `(b"pending", chain.to_be_bytes(), emitter, sequence.to_be_bytes(), digest)`
+/// — the digest suffix is what lets fork/reorg observations (same chain /
+/// emitter / sequence but a different body-hash) accumulate in parallel
+/// sibling buckets rather than colliding on a single bucket and getting stuck
+/// on a `DigestForgery` rejection. See
+/// `accountant-migration-pending-quorum-design.md` §3.1.
+pub const PENDING_SEED_PREFIX: &[u8] = b"pending";
 
 /// Verify VAA Shim program ID (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`).
 ///
@@ -221,6 +266,78 @@ const _: () = {
     assert!(offset_of!(DigestAccountLayout, guardian_set_index) == 112);
     assert!(offset_of!(DigestAccountLayout, chain) == 116);
     assert!(DigestAccountLayout::LEN == 120);
+};
+
+/// Zero-copy layout for a per-`(chain, emitter, sequence)` pending-quorum PDA.
+/// See [`accountant-migration-pending-quorum-design.md`] §4 for the design
+/// rationale and lifecycle diagram.
+///
+/// Design doc lists 84 bytes payload. The actual on-disk layout is **88
+/// bytes** because the `created_at_slot: u64` field forces 8-byte alignment
+/// on the whole struct, and Rust pads the size out to the alignment. We move
+/// `created_at_slot` to the front of the integer block so the padding sits at
+/// the tail (where it is named explicitly via `_tail_padding`) and `bytemuck`
+/// can derive `Pod` cleanly. The visible field order stays: digest, payer,
+/// guardian_set_index, signatures, created_at_slot, chain — matching the
+/// design doc — and the byte layout is pinned by the const-asserts below.
+///
+/// | offset | size | field              |
+/// |--------|------|--------------------|
+/// | 0      | 32   | digest             |
+/// | 32     | 32   | payer              |
+/// | 64     | 8    | created_at_slot    |
+/// | 72     | 4    | guardian_set_index |
+/// | 76     | 4    | signatures (u32 bitmap; bit N == guardian-index N signed) |
+/// | 80     | 2    | chain              |
+/// | 82     | 6    | _padding (explicit; required by `Pod` derive) |
+///
+/// 88-byte total. The 32-bit bitmap covers 32 guardian indices; today's
+/// mainnet set is 19. If the protocol ever requires >32 guardians the field
+/// must widen (and the PDA layout version bumped) — pinned in §10 risks.
+///
+/// [`accountant-migration-pending-quorum-design.md`]: ../../../../.claude/tasks/accountant-migration-pending-quorum-design.md
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct PendingObservationsLayout {
+    pub digest: [u8; 32],
+    pub payer: Pubkey,
+    pub created_at_slot: u64,
+    pub guardian_set_index: u32,
+    pub signatures: u32,
+    pub chain: u16,
+    /// Explicit tail padding — required because `created_at_slot: u64`
+    /// forces 8-byte struct alignment and the trailing `u16 + reserved`
+    /// would otherwise be silent compiler-emitted padding (which trips
+    /// `bytemuck::Pod`'s "no implicit padding" check). Zero-initialised on
+    /// open. Crate-private so external callers cannot inject garbage via
+    /// struct literals — go through `Zeroable` for new instances. Mirrors
+    /// the `DigestAccountLayout._padding` privacy pattern.
+    pub(crate) _padding: [u8; 6],
+}
+
+impl PendingObservationsLayout {
+    /// Byte length of the layout (also the rent-paying allocation size).
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Quorum threshold: 13 of 19 guardians. Matches the Core Bridge's
+    /// `(keys.len() * 2) / 3 + 1` formula for `keys.len() == 19` and is the
+    /// CosmWasm Global Accountant's hard-coded threshold today. Re-deriving
+    /// from the live GuardianSet would couple this constant to the set's
+    /// runtime size; keep it pinned and refuse to commit if the set ever
+    /// shrinks below 13 guardians (which would itself be a protocol-level
+    /// emergency).
+    pub const QUORUM_THRESHOLD: u32 = 13;
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(PendingObservationsLayout, digest) == 0);
+    assert!(offset_of!(PendingObservationsLayout, payer) == 32);
+    assert!(offset_of!(PendingObservationsLayout, created_at_slot) == 64);
+    assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 72);
+    assert!(offset_of!(PendingObservationsLayout, signatures) == 76);
+    assert!(offset_of!(PendingObservationsLayout, chain) == 80);
+    assert!(PendingObservationsLayout::LEN == 88);
 };
 
 /// Zero-copy layout for the per-(chain, token_chain, token_address) balance
@@ -431,6 +548,50 @@ mod tests {
         assert_eq!(bytes.len(), BalanceAccountLayout::LEN);
         let copy: &BalanceAccountLayout = bytemuck::from_bytes(bytes);
         assert_eq!(&original, copy);
+    }
+
+    // ---- PendingObservationsLayout tests ----
+
+    #[test]
+    fn pending_layout_size_pinned() {
+        // The const-assert above is the primary defence; this is the
+        // human-readable runtime mirror a reviewer can scan against the design
+        // doc §4 byte map. Design doc lists 84 bytes payload; the realised
+        // layout is 88 bytes after the explicit tail padding required for
+        // `Pod`-derive cleanliness — see the type-doc for the rationale.
+        assert_eq!(PendingObservationsLayout::LEN, 88);
+    }
+
+    #[test]
+    fn pending_layout_offsets_pinned() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(PendingObservationsLayout, digest), 0);
+        assert_eq!(offset_of!(PendingObservationsLayout, payer), 32);
+        assert_eq!(offset_of!(PendingObservationsLayout, created_at_slot), 64);
+        assert_eq!(offset_of!(PendingObservationsLayout, guardian_set_index), 72);
+        assert_eq!(offset_of!(PendingObservationsLayout, signatures), 76);
+        assert_eq!(offset_of!(PendingObservationsLayout, chain), 80);
+    }
+
+    #[test]
+    fn pending_layout_is_pod_friendly() {
+        let mut digest = [0u8; 32];
+        for (i, b) in digest.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let original = PendingObservationsLayout {
+            digest,
+            payer: [0xAA; 32],
+            created_at_slot: 0xdead_beef_cafe_babe,
+            guardian_set_index: 0x0BAD_CAFE,
+            signatures: 0x0000_1FFFu32, // 13 low bits set
+            chain: 1,
+            _padding: [0; 6],
+        };
+        let bytes = bytemuck::bytes_of(&original);
+        let copy: &PendingObservationsLayout = bytemuck::from_bytes(bytes);
+        assert_eq!(&original, copy);
+        assert_eq!(PendingObservationsLayout::LEN, bytes.len());
     }
 
     #[test]

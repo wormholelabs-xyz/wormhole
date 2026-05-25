@@ -40,6 +40,9 @@ pub fn process_instruction(
         Some(Instruction::SubmitObservations) => {
             instructions::submit_observations::process(program_id, accounts, rest)
         }
+        Some(Instruction::ClosePending) => {
+            instructions::close_pending::process(program_id, accounts, rest)
+        }
         None => Err(err(GlobalAccountantError::InvalidInstruction)),
     }
 }

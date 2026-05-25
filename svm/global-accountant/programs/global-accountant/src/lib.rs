@@ -9,26 +9,40 @@
 // flags it as an unexpected cfg value.
 #![allow(unexpected_cfgs)]
 
-// Paired-feature fence: `mock-vaa` and `test-only-open-digest` are both
-// "this is a test build" signals (one swaps the real Verify VAA Shim CPI in
-// `close_digest` for an instruction-data shortcut, the other re-exposes
-// `open_digest` outside of `submit_observations`). They are not independently
-// meaningful: shipping `mock-vaa` without `test-only-open-digest` gives a
-// build that mocks the VAA verification but offers no way to populate a
-// digest PDA from a test, and shipping `test-only-open-digest` without
-// `mock-vaa` exposes the test-only `open_digest` entrypoint against a
-// production-shape close path that demands a real VAA quorum to ever close
-// the PDA again — both shapes are stuck states for a real deployment. Force
-// the features to travel together so the only reachable shapes are
-// "both on" (mollusk / surfpool spike) and "both off" (production: real CPI
-// in `close_digest`, no public `open_digest`).
+// Paired-feature fence: `mock-vaa`, `test-only-open-digest`, and
+// `mock-noreplay` are all "this is a test build" signals. They swap the real
+// Verify VAA Shim CPI in `close_digest`, re-expose `open_digest` outside of
+// `submit_observations`, and substitute the real `solana-noreplay` CPI for an
+// in-memory sentinel respectively. None of them is independently meaningful:
+// shipping any subset gives a build that mocks one piece of the quorum
+// pipeline while exposing the production-shape pieces of the others — a stuck
+// state for any real deployment. Force all three to travel together so the
+// only reachable shapes are "all three on" (mollusk / surfpool spike) and
+// "all three off" (production: real CPIs everywhere, no public
+// `open_digest`).
 #[cfg(any(
-    all(feature = "mock-vaa", not(feature = "test-only-open-digest")),
-    all(feature = "test-only-open-digest", not(feature = "mock-vaa")),
+    all(
+        feature = "mock-vaa",
+        any(
+            not(feature = "test-only-open-digest"),
+            not(feature = "mock-noreplay"),
+        )
+    ),
+    all(
+        feature = "test-only-open-digest",
+        any(not(feature = "mock-vaa"), not(feature = "mock-noreplay"))
+    ),
+    all(
+        feature = "mock-noreplay",
+        any(
+            not(feature = "mock-vaa"),
+            not(feature = "test-only-open-digest"),
+        )
+    ),
 ))]
 compile_error!(
-    "`mock-vaa` and `test-only-open-digest` are paired test-build features; \
-     enable both or neither"
+    "`mock-vaa`, `test-only-open-digest`, and `mock-noreplay` are paired \
+     test-build features; enable all three or none"
 );
 
 pub mod entrypoint;

@@ -18,7 +18,7 @@ SBF_OUT_DIR := $(CURDIR)/target/deploy
 #                   table. This is the shape that will ship to mainnet.
 .PHONY: build-dev
 build-dev:
-	cargo build-sbf --features bpf-entrypoint,mock-vaa,test-only-open-digest
+	cargo build-sbf --features bpf-entrypoint,mock-vaa,test-only-open-digest,mock-noreplay
 
 .PHONY: build-prod
 build-prod:
@@ -31,7 +31,7 @@ build: build-dev
 
 .PHONY: test
 test: build-dev
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay
 
 # Phase 0 surfpool E2E spike. Spawns a real `surfpool start` subprocess,
 # deploys the dev `.so` via the `surfnet_writeProgram` cheatcode, and drives
@@ -42,7 +42,7 @@ test: build-dev
 # `curl -sL https://run.surfpool.run/ | bash`).
 .PHONY: test-e2e-spike
 test-e2e-spike: build-dev
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
 		--test surfpool_e2e_spike -- --ignored --nocapture
 
 # Phase 1b surfpool E2E test against a Solana mainnet fork. Same subprocess
@@ -61,13 +61,13 @@ test-e2e-spike: build-dev
 # for an endpoint that does not enforce CORS.
 #
 # Build features: the test crate is configured with the workspace default of
-# `mock-vaa,test-only-open-digest` enabled — these affect only the program
+# `mock-vaa,test-only-open-digest,mock-noreplay` enabled — these affect only the program
 # binary, not the host-side test code, so the test compiles fine either way.
 # The deployed `.so` comes from `build-prod`, i.e. *neither* feature on, so
 # the real `close_digest` CPI is what executes inside the simnet.
 .PHONY: test-e2e-mainnet-fork
 test-e2e-mainnet-fork: build-prod
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
 		--test surfpool_e2e_mainnet_fork -- --ignored --nocapture
 
 # Phase 2 VAA-replay corpus. Replays a curated set of historical mainnet VAAs
@@ -82,7 +82,7 @@ test-e2e-mainnet-fork: build-prod
 # self-reference; the deployed `.so` is the prod build with no features.
 .PHONY: test-e2e-vaa-corpus
 test-e2e-vaa-corpus: build-prod
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
 		--test surfpool_e2e_vaa_corpus -- --ignored --nocapture
 
 # Unified surfpool E2E target. Runs the Phase 0 spike + Phase 1b mainnet-fork
@@ -125,7 +125,7 @@ test-cu-spike:
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all-targets --features mock-vaa,test-only-open-digest -- -D warnings
+	cargo clippy --all-targets --features mock-vaa,test-only-open-digest,mock-noreplay -- -D warnings
 
 .PHONY: clean
 clean:

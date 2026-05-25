@@ -1,14 +1,550 @@
-//! Stub. Full quorum logic + NoReplay integration land in the next slice.
+//! `submit_observations` — quorum tracker.
+//!
+//! Implements the critical-path slice of Phase 2 per
+//! `accountant-migration-pending-quorum-design.md`. A
+//! `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA
+//! accumulates guardian signatures; the 13th observation in any one bucket
+//! atomically
+//!
+//! 1. flips the NoReplay slot (shared across sibling buckets at the same
+//!    `(chain, emitter, sequence)`),
+//! 2. opens the `DigestAccount` PDA via `super::open_digest_inner`, and
+//! 3. closes the winning pending PDA, refunding rent to its recorded payer.
+//!
+//! Sibling buckets at the same `(chain, emitter, sequence)` but different
+//! digests (the source-chain reorg case) coexist and race independently; the
+//! losing buckets are reclaimed via `close_pending` trigger (b)
+//! (NoReplay-marked) per §3.6.
+//!
+//! Signature verification is inline via the Solana-native `secp256k1_recover`
+//! syscall (`pinocchio::syscalls::sol_secp256k1_recover`). No raw signatures
+//! are persisted — only the popcount-counted bitmap survives in the pending
+//! PDA, matching the CosmWasm baseline.
+//!
+//! NoReplay integration is gated behind the `mock-noreplay` Cargo feature
+//! mirroring `mock-vaa`'s shape (`noreplay::is_marked` / `noreplay::mark_used`
+//! below). The real CPI swap is Phase 2.3 — see the `compile_error!` fence in
+//! the `cfg(not(feature = "mock-noreplay"))` branch.
 
-use pinocchio::{AccountView, Address, ProgramResult};
+use pinocchio::{
+    cpi::{Seed, Signer},
+    error::ProgramError,
+    sysvars::{clock::Clock, Sysvar},
+    AccountView, Address, ProgramResult,
+};
 
-use crate::definitions::GlobalAccountantError;
+use crate::definitions::{
+    GlobalAccountantError, PendingObservationsLayout, PENDING_SEED_PREFIX,
+};
 use crate::err;
+// NoReplay integration lives in the sibling `noreplay` module so
+// `close_pending` can re-use `is_marked` for its trigger-(b) check without
+// re-importing this module's private items.
+use crate::instructions::{noreplay, open_digest_inner, pda_init::init_or_upgrade_pda};
+use crate::state::pending;
+
+/// Wire format for the `submit_observations` instruction data (after the
+/// 1-byte dispatch discriminator):
+///
+/// | offset | size | field                              |
+/// |--------|------|------------------------------------|
+/// | 0      | 2    | chain (big-endian)                 |
+/// | 2      | 32   | emitter                            |
+/// | 34     | 8    | sequence (big-endian)              |
+/// | 42     | 32   | digest                             |
+/// | 74     | 4    | guardian_set_index (little-endian) |
+/// | 78     | 1    | guardian_index                     |
+/// | 79     | 65   | signature (r||s||recovery_id)      |
+/// | 144    | 1    | pending_pda_bump                   |
+/// | 145    | 1    | digest_pda_bump                    |
+pub const SUBMIT_DATA_LEN: usize = 2 + 32 + 8 + 32 + 4 + 1 + 65 + 1 + 1;
+
+/// Length of an ECDSA recoverable signature: 32-byte r + 32-byte s + 1-byte
+/// recovery id. The on-chain `sol_secp256k1_recover` syscall takes the 64-byte
+/// `r||s` prefix and the recovery id separately.
+const SECP256K1_SIGNATURE_LEN: usize = 65;
+
+/// Length of an Ethereum-style guardian pubkey (`keccak256(uncompressed_pk)[12..]`).
+const GUARDIAN_PUBKEY_LEN: usize = 20;
+
+/// Byte layout of `pinocchio::syscalls::sol_secp256k1_recover`'s `result`
+/// buffer: a 64-byte uncompressed-without-prefix secp256k1 public key
+/// (`X || Y`).
+const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
 
 pub fn process(
-    _program_id: &Address,
-    _accounts: &mut [AccountView],
-    _data: &[u8],
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
 ) -> ProgramResult {
-    Err(err(GlobalAccountantError::NotImplemented))
+    let data: &[u8; SUBMIT_DATA_LEN] = data
+        .try_into()
+        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+
+    let parsed = ParsedObservation::from_data(data)?;
+
+    // Accounts:
+    //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs)
+    //   1. `[WRITE]`         pending PDA (derived from §3.1)
+    //   2. `[]`              GuardianSet PDA (Core Bridge)
+    //   3. `[WRITE]`         NoReplay bucket PDA (mock or real)
+    //   4. `[WRITE]`         DigestAccount PDA (opens on quorum)
+    //   5. `[]`              system program
+    //   6. `[]`              NoReplay program (only used by the real CPI path)
+    let [
+        submitter,
+        pending_pda,
+        guardian_set,
+        noreplay_bucket,
+        digest_pda,
+        _system_program,
+        _noreplay_program,
+    ] = accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    if !submitter.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // (1) NoReplay pre-check — reject replays before any signature verification
+    // or PDA work.
+    if noreplay::is_marked(noreplay_bucket, parsed.chain, &parsed.emitter, parsed.sequence)? {
+        return Err(err(GlobalAccountantError::AlreadyAccounted));
+    }
+
+    // (2) Inline signature verification via `secp256k1_recover`. The recovered
+    // pubkey is compared to `GuardianSet.keys[guardian_index]`.
+    verify_signature(
+        guardian_set,
+        parsed.guardian_set_index,
+        parsed.guardian_index,
+        &parsed.digest,
+        &parsed.signature,
+    )?;
+
+    // (3) Load or initialise the pending PDA per the §3.3 decision table.
+    let pending_action = decide_pending_action(pending_pda, &parsed)?;
+
+    match pending_action {
+        PendingAction::Create => {
+            create_pending_pda(program_id, submitter, pending_pda, &parsed)?;
+        }
+        PendingAction::WipeAndRecreate => {
+            wipe_pending_pda(pending_pda, submitter)?;
+            create_pending_pda(program_id, submitter, pending_pda, &parsed)?;
+        }
+        PendingAction::Continue => {}
+    }
+
+    // (4) Set the bitmap bit; reject duplicate submissions.
+    let mut layout = pending::load(pending_pda)?;
+    let bit = 1u32
+        .checked_shl(parsed.guardian_index as u32)
+        .ok_or_else(|| err(GlobalAccountantError::InvalidGuardianIndex))?;
+    if layout.signatures & bit != 0 {
+        return Err(err(GlobalAccountantError::AlreadySigned));
+    }
+    layout.signatures |= bit;
+    pending::store(pending_pda, &layout)?;
+
+    // (5) Popcount → quorum check.
+    let popcount = layout.signatures.count_ones();
+    if popcount < PendingObservationsLayout::QUORUM_THRESHOLD {
+        return Ok(());
+    }
+
+    // (6) Quorum reached. Commit atomically: NoReplay flip, DigestAccount
+    // open, pending PDA close.
+    noreplay::mark_used(
+        submitter,
+        noreplay_bucket,
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+    )?;
+
+    open_digest_inner(
+        program_id,
+        submitter,
+        digest_pda,
+        parsed.chain.to_be_bytes(),
+        parsed.emitter,
+        parsed.sequence.to_be_bytes(),
+        parsed.digest,
+        parsed.guardian_set_index,
+        parsed.digest_pda_bump,
+    )?;
+
+    let recorded_payer = layout.payer;
+    close_pending_pda(pending_pda, submitter, &recorded_payer)?;
+    Ok(())
 }
+
+#[derive(Clone, Copy)]
+struct ParsedObservation {
+    chain: u16,
+    emitter: [u8; 32],
+    sequence: u64,
+    digest: [u8; 32],
+    guardian_set_index: u32,
+    guardian_index: u8,
+    signature: [u8; SECP256K1_SIGNATURE_LEN],
+    pending_pda_bump: u8,
+    digest_pda_bump: u8,
+}
+
+impl ParsedObservation {
+    fn from_data(data: &[u8; SUBMIT_DATA_LEN]) -> Result<Self, ProgramError> {
+        let (chain_bytes, rest) = data.split_at(2);
+        let (emitter, rest) = rest.split_at(32);
+        let (sequence_bytes, rest) = rest.split_at(8);
+        let (digest_bytes, rest) = rest.split_at(32);
+        let (gsi_bytes, rest) = rest.split_at(4);
+        let guardian_index = rest[0];
+        let signature_bytes = &rest[1..1 + SECP256K1_SIGNATURE_LEN];
+        let pending_pda_bump = rest[1 + SECP256K1_SIGNATURE_LEN];
+        let digest_pda_bump = rest[1 + SECP256K1_SIGNATURE_LEN + 1];
+
+        let chain_be: [u8; 2] = chain_bytes
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+        let emitter_arr: [u8; 32] = emitter
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+        let sequence_be: [u8; 8] = sequence_bytes
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+        let digest_arr: [u8; 32] = digest_bytes
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+        let gsi: [u8; 4] = gsi_bytes
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+        let signature: [u8; SECP256K1_SIGNATURE_LEN] = signature_bytes
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+
+        Ok(Self {
+            chain: u16::from_be_bytes(chain_be),
+            emitter: emitter_arr,
+            sequence: u64::from_be_bytes(sequence_be),
+            digest: digest_arr,
+            guardian_set_index: u32::from_le_bytes(gsi),
+            guardian_index,
+            signature,
+            pending_pda_bump,
+            digest_pda_bump,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingAction {
+    /// PDA does not exist yet — allocate, assign, and write a fresh layout.
+    Create,
+    /// PDA exists but for an older guardian set — refund the recorded payer,
+    /// wipe, and re-create under the new index.
+    WipeAndRecreate,
+    /// PDA exists for the same guardian set and same digest — just toggle the
+    /// bitmap bit.
+    Continue,
+}
+
+/// §3.3 of the pending-quorum design doc, in one table-driven function.
+///
+/// "System-owned with zero data" means "fresh slot — create". "Non-system
+/// owner with data" means "ours, already accumulating — compare". The runtime
+/// guarantees no other program can write `PendingObservationsLayout::LEN`
+/// bytes at the canonical address; we accept that invariant rather than
+/// importing the program ID for equality (Pinocchio determines program ID at
+/// deploy-time, not as a `const`).
+///
+/// Per-digest PDA seeds (§3.1) mean the digest-mismatch case never lands in
+/// this function: a different digest produces a different canonical address,
+/// and that address is either uninitialised (`Create`) or already filled by
+/// some prior observation under the *same* digest (`Continue` / rotation).
+/// `DigestForgery` is therefore retired — every PDA loaded here was opened
+/// under exactly the digest we are accumulating against.
+fn decide_pending_action(
+    pending_pda: &AccountView,
+    parsed: &ParsedObservation,
+) -> Result<PendingAction, ProgramError> {
+    let owner_is_system = pending_pda.owner() == &pinocchio_system::ID;
+    let data_len = pending_pda.data_len();
+
+    if owner_is_system && data_len == 0 {
+        return Ok(PendingAction::Create);
+    }
+    if owner_is_system {
+        // System-owned but pre-funded (e.g., dust-DoS attempt). Treat as
+        // fresh; `init_or_upgrade_pda` will Allocate + Assign over it.
+        return Ok(PendingAction::Create);
+    }
+
+    // Non-system owner: must be us. Load and compare.
+    let existing = pending::load(pending_pda)?;
+    if existing.guardian_set_index < parsed.guardian_set_index {
+        return Ok(PendingAction::WipeAndRecreate);
+    }
+    if existing.guardian_set_index > parsed.guardian_set_index {
+        return Err(err(GlobalAccountantError::StaleGuardianSet));
+    }
+    // Digest equality is guaranteed by construction: the PDA's seeds include
+    // the digest, and `create_pending_pda` rejects any non-canonical bump.
+    // Belt-and-braces: if somehow a layout's recorded digest disagrees with
+    // the observation's (e.g., a buggy upgrade path), refuse the submission.
+    // This branch is unreachable in normal operation.
+    if existing.digest != parsed.digest {
+        return Err(err(GlobalAccountantError::DigestForgery));
+    }
+    Ok(PendingAction::Continue)
+}
+
+/// Allocate the pending PDA under
+/// `(b"pending", chain, emitter, sequence, digest)` and stamp the freshly-zeroed
+/// layout. Including the digest in the seed tuple is what lets fork/reorg
+/// observations (same chain/emitter/sequence, different digest) accumulate in
+/// parallel sibling buckets rather than getting stuck on a `DigestForgery`
+/// rejection — see `accountant-migration-pending-quorum-design.md` §3.1.
+fn create_pending_pda(
+    program_id: &Address,
+    submitter: &AccountView,
+    pending_pda: &mut AccountView,
+    parsed: &ParsedObservation,
+) -> ProgramResult {
+    // Canonical-bump enforcement, mirroring `open_digest_inner`. A
+    // non-canonical bump that still produces a valid off-curve PDA would let
+    // an attacker mint sibling pending PDAs for the same logical key.
+    let chain_be = parsed.chain.to_be_bytes();
+    let sequence_be = parsed.sequence.to_be_bytes();
+    let (_expected, canonical_bump) = Address::find_program_address(
+        &[
+            PENDING_SEED_PREFIX,
+            &chain_be,
+            &parsed.emitter,
+            &sequence_be,
+            &parsed.digest,
+        ],
+        program_id,
+    );
+    if parsed.pending_pda_bump != canonical_bump {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+
+    let bump_seed = [parsed.pending_pda_bump];
+    let seeds = [
+        Seed::from(PENDING_SEED_PREFIX),
+        Seed::from(chain_be.as_slice()),
+        Seed::from(parsed.emitter.as_slice()),
+        Seed::from(sequence_be.as_slice()),
+        Seed::from(parsed.digest.as_slice()),
+        Seed::from(bump_seed.as_slice()),
+    ];
+    let signer = Signer::from(&seeds);
+
+    init_or_upgrade_pda(
+        submitter,
+        pending_pda,
+        program_id,
+        signer,
+        PendingObservationsLayout::LEN as u64,
+    )?;
+
+    let slot = Clock::get()?.slot;
+    let mut layout: PendingObservationsLayout = bytemuck::Zeroable::zeroed();
+    layout.digest = parsed.digest;
+    layout.payer = *submitter.address().as_array();
+    layout.guardian_set_index = parsed.guardian_set_index;
+    layout.signatures = 0;
+    layout.created_at_slot = slot;
+    layout.chain = parsed.chain;
+    pending::store(pending_pda, &layout)
+}
+
+/// Refund the recorded payer and zero the account. Used by the quorum-commit
+/// branch (§3.5). The caller has already loaded the layout to read `payer`
+/// and `guardian_set_index`; re-loading here would borrow twice, so we pass
+/// the recorded payer in.
+pub(crate) fn close_pending_pda(
+    pending_pda: &mut AccountView,
+    rent_recipient: &mut AccountView,
+    recorded_payer: &[u8; 32],
+) -> ProgramResult {
+    if rent_recipient.address().as_array() != recorded_payer {
+        return Err(err(GlobalAccountantError::PayerMismatch));
+    }
+    let lamports = pending_pda.lamports();
+    let recipient_lamports = rent_recipient.lamports();
+    rent_recipient.set_lamports(
+        recipient_lamports
+            .checked_add(lamports)
+            .ok_or(ProgramError::ArithmeticOverflow)?,
+    );
+    pending_pda.close()
+}
+
+/// Rotation-wipe variant: the `submitter` is *not* the recorded payer
+/// (rotation means a new submitter is opening a fresh bucket under the new
+/// set), so we cannot use `close_pending_pda` (it would error with
+/// `PayerMismatch`).
+///
+/// We refund by directly debiting the PDA's lamports and crediting the
+/// submitter's account that the runtime supplied. The rotation case does not
+/// pass the original payer as an explicit account (the wire shape carries
+/// only the new submitter), so the original payer's rent is forfeit to the
+/// new submitter as a small reward for paying the rotation cost.
+///
+/// This is a deliberate simplification of §3.3's text: passing the original
+/// payer account every time would balloon the account list for the
+/// uncommon-but-not-rare rotation case. The forfeit is bounded (~$0.10) and
+/// the alternative — gas-sponsored rent recovery via the explicit
+/// `close_pending` ix — remains available for any payer who notices ahead of
+/// rotation.
+fn wipe_pending_pda(
+    pending_pda: &mut AccountView,
+    new_submitter: &mut AccountView,
+) -> ProgramResult {
+    let lamports = pending_pda.lamports();
+    let submitter_lamports = new_submitter.lamports();
+    new_submitter.set_lamports(
+        submitter_lamports
+            .checked_add(lamports)
+            .ok_or(ProgramError::ArithmeticOverflow)?,
+    );
+    pending_pda.close()
+}
+
+/// Inline signature verification per §3.4 of the design doc.
+fn verify_signature(
+    guardian_set: &AccountView,
+    expected_guardian_set_index: u32,
+    guardian_index: u8,
+    digest: &[u8; 32],
+    signature: &[u8; SECP256K1_SIGNATURE_LEN],
+) -> ProgramResult {
+    let data = guardian_set.try_borrow()?;
+    let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
+    drop(data);
+
+    // `signature[64]` is the 1-byte recovery id; the syscall takes it as a
+    // `u64`. recovery id ∈ {0, 1, 2, 3} — values >= 4 indicate a malformed
+    // signature.
+    let recovery_id = signature[64];
+    if recovery_id >= 4 {
+        return Err(err(GlobalAccountantError::InvalidSignature));
+    }
+
+    let mut recovered = [0u8; SECP256K1_PUBKEY_RAW_LEN];
+    let rc = secp256k1_recover(digest, recovery_id as u64, &signature[..64], &mut recovered);
+    if rc != 0 {
+        return Err(err(GlobalAccountantError::InvalidSignature));
+    }
+
+    // Ethereum-style guardian pubkey: `keccak256(uncompressed_pk)[12..]`.
+    let mut hash = [0u8; 32];
+    keccak256(&recovered, &mut hash);
+    if hash[12..] != expected_key[..] {
+        return Err(err(GlobalAccountantError::InvalidSignature));
+    }
+    Ok(())
+}
+
+/// Read the 20-byte guardian pubkey at `guardian_index` from a Core Bridge
+/// `GuardianSet` account.
+///
+/// On-disk layout (see
+/// `svm/wormhole-core-shims/crates/definitions/src/zero_copy/guardian_set.rs`):
+///
+/// | offset | size | field              |
+/// |--------|------|--------------------|
+/// | 0      | 4    | guardian_set_index |
+/// | 4      | 4    | keys_len           |
+/// | 8      | 20*N | keys (Ethereum-style 20-byte pubkeys) |
+/// | 8+20N  | 4    | creation_time      |
+/// | 12+20N | 4    | expiration_time    |
+fn read_guardian_key(
+    data: &[u8],
+    expected_index: u32,
+    guardian_index: u8,
+) -> Result<[u8; GUARDIAN_PUBKEY_LEN], ProgramError> {
+    if data.len() < 8 {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    let on_chain_index = u32::from_le_bytes(
+        data[..4]
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
+    );
+    if on_chain_index != expected_index {
+        return Err(err(GlobalAccountantError::InvalidGuardianIndex));
+    }
+    let keys_len = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
+    );
+    if (guardian_index as u32) >= keys_len {
+        return Err(err(GlobalAccountantError::InvalidGuardianIndex));
+    }
+    let start = 8 + (guardian_index as usize) * GUARDIAN_PUBKEY_LEN;
+    let end = start + GUARDIAN_PUBKEY_LEN;
+    if data.len() < end {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    let mut key = [0u8; GUARDIAN_PUBKEY_LEN];
+    key.copy_from_slice(&data[start..end]);
+    Ok(key)
+}
+
+// `sol_secp256k1_recover` / `sol_keccak256` are re-exported by Pinocchio for
+// the SBF target only. The host-cfg variants below let the program crate
+// build on `cargo check` outside of `cargo build-sbf`; they are not reached
+// from any mollusk test (mollusk loads the SBF `.so`, which uses the syscall
+// path).
+#[cfg(any(target_os = "solana", target_arch = "bpf"))]
+fn secp256k1_recover(hash: &[u8; 32], recovery_id: u64, signature: &[u8], result: &mut [u8]) -> u64 {
+    // SAFETY: pinocchio re-exports the Solana syscall ABI. The buffers match
+    // the syscall's documented layout: 32-byte hash, 64-byte signature
+    // (`r||s`), 64-byte result.
+    unsafe {
+        pinocchio::syscalls::sol_secp256k1_recover(
+            hash.as_ptr(),
+            recovery_id,
+            signature.as_ptr(),
+            result.as_mut_ptr(),
+        )
+    }
+}
+
+#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+fn secp256k1_recover(
+    _hash: &[u8; 32],
+    _recovery_id: u64,
+    _signature: &[u8],
+    _result: &mut [u8],
+) -> u64 {
+    1
+}
+
+#[cfg(any(target_os = "solana", target_arch = "bpf"))]
+fn keccak256(data: &[u8], result: &mut [u8; 32]) {
+    // `sol_keccak256`'s ABI: `vals: *const u8` is actually a pointer to an
+    // array of `&[u8]` fat-pointers, and `val_len` is the number of slices.
+    // Building a one-element slice-of-slices on the stack matches the
+    // `solana_keccak_hasher::hashv(&[data])` convention.
+    let vals: [&[u8]; 1] = [data];
+    // SAFETY: pinocchio re-exports the Solana syscall ABI; the runtime reads
+    // exactly `val_len` `&[u8]` fat pointers starting at `vals_ptr`.
+    unsafe {
+        pinocchio::syscalls::sol_keccak256(
+            vals.as_ptr() as *const u8,
+            vals.len() as u64,
+            result.as_mut_ptr(),
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {}
