@@ -267,3 +267,83 @@ func Test_Restart_SetsCheckpointToHead(t *testing.T) {
 		"on (re)start the watcher must anchor latestProcessedCheckpoint to the current Sui head")
 }
 
+// Test_GetEvents_PrunedTxOnPageOne_GetCheckpointForDigest probes the hypothesis that page 1
+// of suix_queryEvents can reference a transaction whose body has been pruned from the upstream
+// RPC's transaction store while still appearing in the event index. The watcher calls
+// getCheckpointForDigest (sui_getTransactionBlock) against the oldest tx in each page to
+// decide whether to paginate further; if that tx has been pruned, QuickNode returns a JSON-RPC
+// error -32602 ("Could not find the referenced transaction..."). GetCheckpointResponse has no
+// Error field today (sibling defect to the SuiEventResponse fix), so json.Unmarshal silently
+// drops the error, Result.Checkpoint stays empty, and the watcher reports an opaque
+// ParseInt("") failure instead of the actionable upstream pruning message.
+//
+// This is the alternative failure path the 2026-05-25 incident could have taken — distinct from
+// the "pagination walks into the prune zone" path, since here even page 1 alone is enough.
+func Test_GetEvents_PrunedTxOnPageOne_GetCheckpointForDigest(t *testing.T) {
+	mock := newMockSuiRPC(t, func(method string) string {
+		switch method {
+		case "suix_queryEvents":
+			// Page 1: a single event referencing a tx that exists in the event index but
+			// not in the transaction store. HasNextPage=true so we reach the
+			// getCheckpointForDigest call before any break-condition shortcut fires.
+			return `{"jsonrpc":"2.0","id":1,"result":{"data":[{"id":{"txDigest":"PRUNED_TX_ON_PAGE_ONE","eventSeq":"0"},"packageId":"0xabc","transactionModule":"publish_message","sender":"0xdead","type":"0xabc::publish_message::WormholeMessage","parsedJson":{},"bcs":"","timestampMs":"0"}],"nextCursor":{"txDigest":"PRUNED_TX_ON_PAGE_ONE","eventSeq":"0"},"hasNextPage":true}}`
+		case "sui_getTransactionBlock":
+			// Real shape observed from QuickNode for tx 9XqKQPYvfAk... on 2026-05-26.
+			return `{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"Could not find the referenced transaction [TransactionDigest(PRUNED_TX_ON_PAGE_ONE)]."}}`
+		}
+		return `{"jsonrpc":"2.0","id":1,"result":null}`
+	})
+
+	w := newTestWatcher(mock.server.URL, "0xabc::publish_message::WormholeMessage")
+	_, err := w.getEvents(context.Background())
+
+	require.Error(t, err)
+	// Current behavior demonstrates the sibling silent-coercion defect: the upstream
+	// -32602 / "Could not find the referenced transaction" message is lost, and the caller
+	// sees a generic ParseInt failure that gives no hint about the actual cause (upstream
+	// pruning). Once GetCheckpointResponse grows an Error field analogous to
+	// SuiEventResponse.Error, this assertion should flip to check for "-32602" and
+	// "Could not find the referenced transaction" in the surfaced error.
+	require.Contains(t, err.Error(), "getCheckpointForDigest failed to ParseInt",
+		"sibling defect: GetCheckpointResponse silently coerces JSON-RPC errors to ParseInt failure")
+}
+
+// Test_GetEvents_PrunedTxInBatch_MultiGetTransactionBlocks documents the analogous defect on the
+// batched checkpoint lookup. When the watcher gets past the per-tx checkpoint check and calls
+// getMultipleBlocks (sui_multiGetTransactionBlocks), QuickNode returns one entry per requested
+// digest, but pruned entries are degraded to digest-only (no `checkpoint` field). The watcher
+// then ParseInt("")s on the missing field at watcher.go:606. MultipleBlockResult / TxBlockResult
+// also have no Error field, so a JSON-RPC error from this method would similarly be coerced to
+// an empty-shape response and produce the same ParseInt failure.
+//
+// Observed shape from QuickNode on 2026-05-26:
+//
+//	sui_multiGetTransactionBlocks(["9XqKQPYvfAk..."])
+//	→ {"result": [{"digest": "9XqKQPYvfAk..."}]}   ← no checkpoint field
+func Test_GetEvents_PrunedTxInBatch_MultiGetTransactionBlocks(t *testing.T) {
+	mock := newMockSuiRPC(t, func(method string) string {
+		switch method {
+		case "suix_queryEvents":
+			// Page 1 with one event; HasNextPage=false so we break out of pagination and
+			// reach the getMultipleBlocks call directly.
+			return `{"jsonrpc":"2.0","id":1,"result":{"data":[{"id":{"txDigest":"PRUNED_BATCH_TX","eventSeq":"0"},"packageId":"0xabc","transactionModule":"publish_message","sender":"0xdead","type":"0xabc::publish_message::WormholeMessage","parsedJson":{},"bcs":"","timestampMs":"0"}],"nextCursor":null,"hasNextPage":false}}`
+		case "sui_getTransactionBlock":
+			// Allow the per-tx checkpoint lookup to succeed so we reach getMultipleBlocks
+			// with a tx the watcher believes is fresh.
+			return `{"jsonrpc":"2.0","id":1,"result":{"digest":"PRUNED_BATCH_TX","checkpoint":"99999999"}}`
+		case "sui_multiGetTransactionBlocks":
+			// Real shape observed from QuickNode: one entry per digest, but pruned txs
+			// come back with only the digest field populated — no checkpoint.
+			return `{"jsonrpc":"2.0","id":1,"result":[{"digest":"PRUNED_BATCH_TX"}]}`
+		}
+		return `{"jsonrpc":"2.0","id":1,"result":null}`
+	})
+
+	w := newTestWatcher(mock.server.URL, "0xabc::publish_message::WormholeMessage")
+	_, err := w.getEvents(context.Background())
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "getEvents failed to ParseInt",
+		"missing checkpoint field on a batched response is surfaced as opaque ParseInt failure")
+}
+
