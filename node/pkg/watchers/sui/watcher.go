@@ -59,6 +59,7 @@ type (
 		Jsonrpc string               `json:"jsonrpc"`
 		Result  SuiEventResponseData `json:"result"`
 		ID      int                  `json:"id"`
+		Error   *SuiEventError       `json:"error,omitempty"`
 	}
 	SuiEventResponseData struct {
 		Data       []SuiResult `json:"data"`
@@ -421,34 +422,54 @@ func (e *Watcher) Run(ctx context.Context) error {
 	readiness.SetReady(e.readinessSync)
 
 	common.RunWithScissors(ctx, errC, "sui_data_pump", func(ctx context.Context) error {
+		// Backoff bounds the retry rate when getEvents fails (e.g. RPC degraded,
+		// upstream pruning index gaps). Without this, errors trigger a tight retry
+		// loop that floods logs and drives heap allocation toward GOMEMLIMIT.
+		backoff := e.loopDelay
+		const maxBackoff = 30 * time.Second
+
 		for {
 			select {
 			case <-ctx.Done():
-				logger.Error("sui_data_pump context done")
+				logger.Info("sui_data_pump shutting down", zap.Error(ctx.Err()))
 				return ctx.Err()
-
 			default:
-				dataWithEvents, err := e.getEvents(ctx)
-				if err != nil {
-					logger.Error("sui_data_pump Error", zap.Error(err))
-					continue
+			}
+
+			dataWithEvents, err := e.getEvents(ctx)
+			if err != nil {
+				logger.Warn("sui_data_pump getEvents failed",
+					zap.Error(err),
+					zap.Duration("backoff", backoff))
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(backoff):
 				}
-				// dataWithEvents is in descending order, so we need to process it in reverse order.
-				if len(dataWithEvents) > 0 {
-					for idx := len(dataWithEvents) - 1; idx >= 0; idx-- {
-						event := dataWithEvents[idx]
-						err = e.inspectBody(ctx, logger, event.result, false)
-						if err != nil {
-							logger.Error("inspectBody Error", zap.Error(err))
-							continue
-						}
-						if event.checkpoint > e.latestProcessedCheckpoint {
-							e.latestProcessedCheckpoint = event.checkpoint
-						}
+				if backoff < maxBackoff {
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
 					}
 				}
-				time.Sleep(e.loopDelay) //nolint:forbidigo // TODO: This code should be refactored to not use time.Sleep
+				continue
 			}
+			backoff = e.loopDelay
+
+			// dataWithEvents is in descending order, so we need to process it in reverse order.
+			if len(dataWithEvents) > 0 {
+				for idx := len(dataWithEvents) - 1; idx >= 0; idx-- {
+					event := dataWithEvents[idx]
+					if err := e.inspectBody(ctx, logger, event.result, false); err != nil {
+						logger.Error("inspectBody Error", zap.Error(err))
+						continue
+					}
+					if event.checkpoint > e.latestProcessedCheckpoint {
+						e.latestProcessedCheckpoint = event.checkpoint
+					}
+				}
+			}
+			time.Sleep(e.loopDelay) //nolint:forbidigo // TODO: This code should be refactored to not use time.Sleep
 		}
 	})
 
@@ -575,11 +596,16 @@ func (w *Watcher) getEvents(ctx context.Context) ([]SuiResultInfo, error) {
 			results = append(results, datum)
 		}
 		if (len(res.Result.Data) == 0) || (len(txs) == 0) {
-			// In devnet (tilt) the core contract may not have any events and we don't want to flood the logs.
+			// On mainnet and testnet the core bridge has emitted events, so an
+			// empty result here points to upstream RPC pruning and must be
+			// surfaced so operators can rotate the endpoint. The pump loop's
+			// backoff bounds the retry rate. Devnet is exempt because a fresh
+			// local core bridge legitimately has no events until the first
+			// wormhole message is published.
 			if w.unsafeDevMode {
 				return retVal, nil
 			}
-			return retVal, errors.New("getEvents was unable to get any events")
+			return retVal, errors.New("getEvents: suix_queryEvents returned no results, suspect upstream pruning")
 		}
 		// Get and check the checkpoint for the last event against the lastProcessedHeight to see if we are done.
 		height, hErr := w.getCheckpointForDigest(ctx, txs[len(txs)-1])
@@ -712,6 +738,9 @@ func (w *Watcher) suiQueryEvents(ctx context.Context, payload string) (SuiEventR
 	err = json.Unmarshal(body, &retVal)
 	if err != nil {
 		return retVal, fmt.Errorf("suix_queryEvents failed to unmarshal body: %s, error: %w", string(body), err)
+	}
+	if retVal.Error != nil {
+		return retVal, fmt.Errorf("suix_queryEvents RPC error %d: %s", retVal.Error.Code, retVal.Error.Message)
 	}
 	return retVal, nil
 }
