@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -293,4 +295,43 @@ func TestVerifyAndPublish_Samples(t *testing.T) {
 		})
 
 	}
+}
+
+// Test_SuiEventResponse_DecodesRPCError ensures that a JSON-RPC error response
+// (as returned by upstream Sui RPC servers when, e.g., a referenced transaction
+// has been pruned) populates the Error field. Without the Error field on
+// SuiEventResponse, the response decodes to an empty Result and is
+// indistinguishable from a legitimate empty page, which masks real upstream
+// failures behind a generic "no events" log message.
+func Test_SuiEventResponse_DecodesRPCError(t *testing.T) {
+	body := []byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Could not find the referenced transaction events [TransactionDigest(9XqKQPYvfAkEWSxrYX4tyTuD6BhG6togMxeHjNKDAdTD)]."}}`)
+
+	var resp SuiEventResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	require.NotNil(t, resp.Error, "Error field should be populated from JSON-RPC error response")
+	require.Equal(t, int64(-32603), resp.Error.Code)
+	require.Contains(t, resp.Error.Message, "9XqKQPYvfAkEWSxrYX4tyTuD6BhG6togMxeHjNKDAdTD")
+	require.Empty(t, resp.Result.Data, "Result.Data should be empty when an error is returned")
+}
+
+// Test_suiQueryEvents_PropagatesRPCError ensures that when the upstream Sui RPC
+// returns a JSON-RPC error, suiQueryEvents surfaces that error to its caller
+// rather than swallowing it and returning a SuiEventResponse with empty data.
+func Test_suiQueryEvents_PropagatesRPCError(t *testing.T) {
+	rpcBody := `{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"Could not find the referenced transaction events [TransactionDigest(abc)]."}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(rpcBody))
+	}))
+	defer srv.Close()
+
+	w := &Watcher{
+		suiRPC:      srv.URL,
+		postTimeout: 5 * time.Second,
+	}
+
+	_, err := w.suiQueryEvents(context.Background(), `{"jsonrpc":"2.0","id":1,"method":"suix_queryEvents","params":[]}`)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "-32603")
+	require.Contains(t, err.Error(), "Could not find the referenced transaction events")
 }
