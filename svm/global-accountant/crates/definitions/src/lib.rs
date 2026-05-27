@@ -105,6 +105,60 @@ pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
 /// `accountant-migration-pending-quorum-design.md` §3.1.
 pub const PENDING_SEED_PREFIX: &[u8] = b"pending";
 
+/// PDA seed prefix for the global-accountant-owned authority that signs all
+/// `solana-noreplay` CPIs. The full seed tuple is just `[b"noreplay-authority"]`
+/// — one global authority is sufficient because the noreplay namespace
+/// (`chain_be ‖ emitter`) already segregates per-emitter sequence spaces, and
+/// the authority itself only needs to be unique-per-program so a different
+/// global-accountant deployment cannot stomp on this one's bitmap namespace.
+///
+/// Only global-accountant can sign for this PDA via `invoke_signed`. The
+/// resulting bitmap buckets are therefore exclusively write-controlled by this
+/// program; the noreplay processor enforces that constraint by deriving the
+/// bitmap PDA from the supplied authority pubkey and rejecting any caller
+/// whose `is_signer` bit is not set on the authority slot.
+pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay-authority";
+
+/// Canonical mainnet/devnet program ID for `solana-noreplay`
+/// (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`). Pinned as a raw byte array
+/// so this crate stays Solana-SDK-free (the canonical `Pubkey::from_str_const`
+/// path would drag in `solana-program`). Verified against the `NOREPLAY_PROGRAM_ID`
+/// env var baked into the upstream `solana-noreplay` binary at compile time
+/// (see `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/client.rs::PROGRAM_ID`).
+///
+/// Deferred: deploying this program at a stable mainnet ID and locking its
+/// upgrade authority is a separate workstream — see
+/// `accountant-migration.md` §15.
+pub const NOREPLAY_PROGRAM_ID: Pubkey = [
+    0x0c, 0xb8, 0x38, 0x00, 0x73, 0xdf, 0x36, 0x25, 0xa1, 0x32, 0x11, 0x1f, 0xee, 0x67, 0x8d, 0xd0,
+    0x6b, 0x7e, 0x3d, 0xf2, 0x90, 0xa2, 0xb1, 0xd5, 0x4a, 0x48, 0x5b, 0xdb, 0x72, 0x61, 0x82, 0x91,
+];
+
+/// Discriminator for `solana-noreplay`'s `MarkUsed` instruction. Single-byte
+/// prefix on the wire (the noreplay wire format is documented in
+/// `accountant-migration-noreplay-integration.md` §2):
+///
+/// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][sequence: u64 LE]`
+pub const NOREPLAY_MARK_USED_DISCRIMINATOR: u8 = 1;
+
+/// Bits per bitmap bucket. Mirrors `solana_noreplay::state::BITS_PER_BUCKET`.
+/// Used to derive both the bucket index (`sequence / BITS_PER_BUCKET`) and the
+/// bit offset within the bucket (`sequence % BITS_PER_BUCKET`).
+pub const NOREPLAY_BITS_PER_BUCKET: u64 = 1024;
+
+/// Byte size of the bitmap payload inside a noreplay PDA. The full account is
+/// 129 bytes (1-byte stored bump + 128-byte bitmap). Mirrors
+/// `solana_noreplay::state::BITMAP_BYTES`.
+pub const NOREPLAY_BITMAP_BYTES: usize = 128;
+
+/// Byte offset where the bitmap payload starts inside a noreplay account.
+/// Byte 0 is the stored canonical bump; bytes 1..=128 are the bitmap.
+pub const NOREPLAY_BITMAP_OFFSET: usize = 1;
+
+/// Maximum namespace length accepted by the noreplay program. Mirrors
+/// `solana_noreplay::MAX_NAMESPACE_LEN`.
+pub const NOREPLAY_MAX_NAMESPACE_LEN: usize = 64;
+
 /// Verify VAA Shim program ID (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`).
 ///
 /// The Shim deploys to the same address on mainnet, devnet, and Wormhole's Tilt

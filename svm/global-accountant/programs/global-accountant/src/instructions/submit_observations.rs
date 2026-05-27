@@ -84,21 +84,31 @@ pub fn process(
     let parsed = ParsedObservation::from_data(data)?;
 
     // Accounts:
-    //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs)
-    //   1. `[WRITE]`         pending PDA (derived from §3.1)
-    //   2. `[]`              GuardianSet PDA (Core Bridge)
-    //   3. `[WRITE]`         NoReplay bucket PDA (mock or real)
-    //   4. `[WRITE]`         DigestAccount PDA (opens on quorum)
-    //   5. `[]`              system program
-    //   6. `[]`              NoReplay program (only used by the real CPI path)
+    //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs;
+    //                       also payer for any lazy noreplay bitmap create).
+    //   1. `[WRITE]`         pending PDA (derived from §3.1).
+    //   2. `[]`              GuardianSet PDA (Core Bridge).
+    //   3. `[WRITE]`         NoReplay bitmap PDA. Read-only at pre-check
+    //                       time, writable at commit time — the runtime
+    //                       requires writability to be declared up-front, so
+    //                       this slot is always WRITE.
+    //   4. `[WRITE]`         DigestAccount PDA (opens on quorum).
+    //   5. `[]`              system program (for `CreateAccount` / `Allocate`
+    //                       / `Assign` across the pending PDA init AND the
+    //                       noreplay bitmap lazy-init).
+    //   6. `[]`              NoReplay program (CPI target on quorum reach).
+    //   7. `[]`              NoReplay authority PDA owned by this program;
+    //                       signed via `invoke_signed` with seeds
+    //                       `[NOREPLAY_AUTHORITY_SEED_PREFIX, authority_bump]`.
     let [
         submitter,
         pending_pda,
         guardian_set,
         noreplay_bucket,
         digest_pda,
-        _system_program,
-        _noreplay_program,
+        system_program_acc,
+        noreplay_program,
+        noreplay_authority,
     ] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -160,6 +170,10 @@ pub fn process(
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
+        noreplay_program,
+        noreplay_authority,
+        system_program_acc,
+        program_id,
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,

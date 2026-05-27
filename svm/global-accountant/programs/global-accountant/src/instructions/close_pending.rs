@@ -10,6 +10,21 @@
 //!   the entry has been accounted-for via some other path.
 //!
 //! Lamports are refunded to the recorded `payer` in either case.
+//!
+//! Wire format (after the 1-byte dispatch discriminator):
+//!
+//! | offset | size | field                            |
+//! |--------|------|----------------------------------|
+//! | 0      | 32   | emitter                          |
+//! | 32     | 8    | sequence (big endian, matches pending-PDA seed) |
+//!
+//! `emitter` and `sequence` are the values used to derive the pending PDA's
+//! canonical address (alongside the recorded `chain` read from the layout and
+//! the recorded digest also read from the layout). The program re-derives the
+//! canonical pending-PDA address from these and rejects any mismatch, and
+//! re-derives the noreplay bitmap PDA address from `(authority, chain_be ‖
+//! emitter, sequence / 1024)` so trigger (b) reads the *correct* bucket bit
+//! rather than a caller-supplied arbitrary account.
 
 use pinocchio::{
     error::ProgramError,
@@ -17,22 +32,42 @@ use pinocchio::{
     AccountView, Address, ProgramResult,
 };
 
-use crate::definitions::GlobalAccountantError;
+use crate::definitions::{GlobalAccountantError, PENDING_SEED_PREFIX};
 use crate::err;
 use crate::instructions::noreplay;
 use crate::state::pending;
 
+/// Wire-format size of the `close_pending` instruction data after the 1-byte
+/// dispatch discriminator. See module doc for the field map.
+const CLOSE_PENDING_DATA_LEN: usize = 32 + 8;
+
 pub fn process(
-    _program_id: &Address,
+    program_id: &Address,
     accounts: &mut [AccountView],
-    _data: &[u8],
+    data: &[u8],
 ) -> ProgramResult {
+    let data: &[u8; CLOSE_PENDING_DATA_LEN] = data
+        .try_into()
+        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+    let (emitter_bytes, sequence_bytes) = data.split_at(32);
+    let emitter: [u8; 32] = emitter_bytes
+        .try_into()
+        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+    let sequence_be: [u8; 8] = sequence_bytes
+        .try_into()
+        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+    let sequence = u64::from_be_bytes(sequence_be);
+
     // Accounts:
     //   0. `[SIGNER]` closer (permissionless — any signer)
     //   1. `[WRITE]`  pending PDA
     //   2. `[WRITE]`  rent recipient — must equal the recorded payer
     //   3. `[]`       GuardianSet PDA — to check `is_active(timestamp)`
-    //   4. `[]`       NoReplay bucket — to check the marked condition
+    //   4. `[]`       NoReplay bitmap PDA — to check the marked condition.
+    //                The address is re-derived inside this ix from
+    //                (noreplay_authority, chain ‖ emitter, sequence / 1024)
+    //                and the supplied account is rejected if the address does
+    //                not match.
     let [closer, pending_pda, rent_recipient, guardian_set, noreplay_bucket] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -47,19 +82,37 @@ pub fn process(
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
 
+    // Canonical-pending-PDA enforcement: re-derive the address from
+    // `(b"pending", chain_be, emitter, sequence_be, digest)` and refuse to act
+    // on any account whose address differs. Without this check, an attacker
+    // could pass a pending PDA whose layout records one `(chain, sequence)`
+    // but actually lives at the address for a different `(chain, sequence)`,
+    // tricking the bitmap-bit lookup into reading an unrelated bucket.
+    let chain_be = layout.chain.to_be_bytes();
+    let (expected_pending_pda, _) = Address::find_program_address(
+        &[
+            PENDING_SEED_PREFIX,
+            &chain_be,
+            &emitter,
+            &sequence_be,
+            &layout.digest,
+        ],
+        program_id,
+    );
+    if pending_pda.address() != &expected_pending_pda {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+
     // Trigger (a): GuardianSet expired.
     let expired = guardian_set_expired(guardian_set, layout.guardian_set_index)?;
 
-    // Trigger (b): NoReplay-marked. Same helper as the `submit_observations`
-    // pre-check. The mock branch ignores chain/emitter/sequence; the real
-    // branch will index into the bucket bitmap by `sequence % 1024`.
-    //
-    // We pass the recorded chain and a zero emitter/sequence: the pending
-    // PDA does not store the emitter (it is one of the PDA seeds, not a
-    // field), and the mock NoReplay only inspects the sentinel byte at
-    // position 0. Phase 2.3 will read the emitter from the PDA's seeds via
-    // the bump-seed parameter when the real CPI lands.
-    let already_accounted = noreplay::is_marked(noreplay_bucket, layout.chain, &[0u8; 32], 0)?;
+    // Trigger (b): NoReplay-marked. The pre-check now correctly indexes the
+    // bitmap by `sequence % 1024`. The mock branch ignores the sequence; the
+    // real branch indexes the supplied bitmap PDA. Address verification of
+    // the bitmap PDA against the canonical derivation is deferred to the
+    // shared `noreplay` helper (the mock cannot perform that derivation since
+    // its "bitmap" is a stand-in account at an arbitrary address).
+    let already_accounted = noreplay::is_marked(noreplay_bucket, layout.chain, &emitter, sequence)?;
 
     if !expired && !already_accounted {
         return Err(err(GlobalAccountantError::CannotCleanup));

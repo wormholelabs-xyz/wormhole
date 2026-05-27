@@ -102,6 +102,27 @@ test-e2e-vaa-corpus: build-prod
 # lands the real CPI and this test becomes a true regression guard.
 NOREPLAY_SO := $(HOME)/WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so
 
+# Phase 2.3 surfpool e2e for `submit_observations` driven against the real
+# `solana-noreplay` program. Deploys both `global_accountant.so` (production
+# shape — no mock-noreplay) and `solana_noreplay.so`, drives 13 distinct
+# guardian observations end-to-end, and asserts the bitmap bit gets set in the
+# real noreplay PDA. A 14th submission must fail with `AlreadyAccounted` via
+# the direct-read pre-check.
+#
+# Build target is `build-prod` (no mock features) so the real CPI is exercised.
+# The host-side test binary still needs the mock features enabled in its
+# workspace dev-dep self-reference to satisfy crate-feature unification — they
+# affect only the on-chain program binary, not the test harness.
+.PHONY: test-e2e-submit-obs
+test-e2e-submit-obs: build-prod
+	@test -f "$(NOREPLAY_SO)" || { \
+		echo "ERROR: $(NOREPLAY_SO) not found."; \
+		echo "Rebuild via: cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build"; \
+		exit 1; \
+	}
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+		--test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
+
 .PHONY: test-e2e-noreplay-smoke
 test-e2e-noreplay-smoke: build-dev
 	@test -f "$(NOREPLAY_SO)" || { \
@@ -141,7 +162,7 @@ test-e2e-noreplay-smoke: build-dev
 # here to keep CI deterministic. Bump locally with `RUST_TEST_THREADS=N` if
 # your network can take more.
 .PHONY: test-e2e
-test-e2e: test-e2e-spike test-e2e-mainnet-fork test-e2e-vaa-corpus
+test-e2e: test-e2e-spike test-e2e-mainnet-fork test-e2e-vaa-corpus test-e2e-submit-obs
 	@echo "All surfpool E2E layers green."
 
 # Compute-unit spike for the new `Uint256` type (Phase 2.1). Builds the

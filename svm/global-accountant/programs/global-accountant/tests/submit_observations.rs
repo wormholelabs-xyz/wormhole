@@ -101,8 +101,16 @@ fn submit_ix_data(
     data
 }
 
-fn close_pending_ix_data() -> Vec<u8> {
-    vec![IxDiscriminator::ClosePending as u8]
+fn close_pending_ix_data(emitter: &[u8; 32], sequence: u64) -> Vec<u8> {
+    // Wire shape: 1-byte discriminator + 32-byte emitter + 8-byte big-endian
+    // sequence. Mirrors `close_pending.rs::CLOSE_PENDING_DATA_LEN`. The
+    // emitter / sequence drive both the canonical pending-PDA address check
+    // and the (real-CPI branch's) bitmap-bit index.
+    let mut data = Vec::with_capacity(1 + 32 + 8);
+    data.push(IxDiscriminator::ClosePending as u8);
+    data.extend_from_slice(emitter);
+    data.extend_from_slice(&sequence.to_be_bytes());
+    data
 }
 
 // ============================================================================
@@ -256,6 +264,13 @@ struct Scenario {
     guardian_set_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
     noreplay_program_pubkey: Pubkey,
+    /// Stand-in for the global-accountant-owned `noreplay-authority` PDA. In
+    /// mollusk runs we never reach the real CPI (gated behind `mock-noreplay`),
+    /// so the address only needs to be a stable distinct pubkey the runtime
+    /// can include in the account list. Phase 2.3's e2e test
+    /// (`surfpool_e2e_submit_observations_real_noreplay.rs`) exercises the
+    /// real derivation and the CPI together.
+    noreplay_authority_pubkey: Pubkey,
 }
 
 impl Scenario {
@@ -292,6 +307,7 @@ impl Scenario {
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
             noreplay_bucket_pubkey: Pubkey::new_from_array([0xC2u8; 32]),
             noreplay_program_pubkey: Pubkey::new_from_array([0xC3u8; 32]),
+            noreplay_authority_pubkey: Pubkey::new_from_array([0xC4u8; 32]),
         }
     }
 
@@ -331,12 +347,13 @@ impl Scenario {
                 AccountMeta::new(self.digest_pda, false),
                 AccountMeta::new_readonly(system_program_id(), false),
                 AccountMeta::new_readonly(self.noreplay_program_pubkey, false),
+                AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
             ],
         );
         mollusk.process_instruction(&ix, &starting_accounts)
     }
 
-    /// Build the initial 7-account list with all PDAs uninitialised.
+    /// Build the initial 8-account list with all PDAs uninitialised.
     fn initial_accounts(&self) -> Vec<(Pubkey, Account)> {
         vec![
             (self.submitter, system_owned_account(50_000_000_000)),
@@ -350,6 +367,10 @@ impl Scenario {
             keyed_account_for_system_program(),
             (
                 self.noreplay_program_pubkey,
+                system_owned_account(0),
+            ),
+            (
+                self.noreplay_authority_pubkey,
                 system_owned_account(0),
             ),
         ]
@@ -536,6 +557,7 @@ fn submit_with_invalid_signature_fails() {
             AccountMeta::new(scenario.digest_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
+            AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
         ],
     );
     let result = mollusk.process_instruction(&ix, &scenario.initial_accounts());
@@ -628,6 +650,7 @@ fn submit_with_stale_old_set_observation_fails() {
             AccountMeta::new(new_scenario.digest_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(new_scenario.noreplay_program_pubkey, false),
+            AccountMeta::new_readonly(new_scenario.noreplay_authority_pubkey, false),
         ],
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -693,6 +716,7 @@ fn submit_with_new_set_observation_wipes_old_pending() {
             AccountMeta::new(old_scenario.digest_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(old_scenario.noreplay_program_pubkey, false),
+            AccountMeta::new_readonly(old_scenario.noreplay_authority_pubkey, false),
         ],
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -772,6 +796,7 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
             AccountMeta::new(scenario.digest_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
+            AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
         ],
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -803,6 +828,33 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     );
 }
 
+/// Fork-recovery test. Documents the digest-in-seeds choice that substitutes
+/// for CosmWasm's `tx_hash` bucket discriminator.
+///
+/// CosmWasm's pending state keys buckets by `(guardian_set_index, digest,
+/// tx_hash)`. The Solana port omits `tx_hash` entirely and seeds the pending
+/// PDA with `(b"pending", chain_be, emitter, sequence_be, digest)`. The digest
+/// alone is a sufficient substitute because:
+///
+/// - Source-chain reorgs that change the body timestamp produce a different
+///   digest. This test demonstrates that the two digests accumulate in
+///   separate sibling PDAs and race to quorum, with the loser cleaned up
+///   permissionlessly via `close_pending` trigger (b) once NoReplay marks
+///   the shared `(chain, emitter, sequence)`.
+/// - Reorgs that preserve the timestamp produce the same digest. Guardians
+///   sign the digest, not the tx_hash, so their signatures merge cleanly
+///   into one bucket — accelerating rather than blocking quorum. Accounting
+///   commits the correct digest in either case.
+/// - NoReplay is keyed by `(chain, emitter, sequence)` only. Including
+///   tx_hash in that namespace would break replay protection (per-tx_hash
+///   bits would never collide and a replay could land at a different bit).
+///   The accountant operates on message identity, not on the source-chain
+///   transaction that emitted it.
+///
+/// The CosmWasm `tx_hash` split was an audit-trail aid (recording which
+/// source-chain tx contributed each signature). The Solana port treats that
+/// as out of scope for the on-chain accountant — downstream indexers can
+/// reconstruct it from emission events if required.
 #[test]
 fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     // Source-chain reorg recovery scenario.
@@ -876,6 +928,7 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
                 AccountMeta::new(scenario.digest_pda, false),
                 AccountMeta::new_readonly(system_program_id(), false),
                 AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
+                AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
             ],
         );
         let r = mollusk.process_instruction(&ix, &accounts);
@@ -961,7 +1014,7 @@ fn close_pending_stranded_digest_bucket_after_sibling_committed() {
     // to the recorded payer (= submitter).
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &close_pending_ix_data(),
+        &close_pending_ix_data(&scenario.emitter, scenario.sequence),
         vec![
             AccountMeta::new_readonly(scenario.submitter, true),
             AccountMeta::new(scenario.pending_pda, false),
@@ -1053,7 +1106,7 @@ fn close_pending_with_expired_set_succeeds() {
     let closer = scenario.submitter; // recorded payer = submitter
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &close_pending_ix_data(),
+        &close_pending_ix_data(&scenario.emitter, scenario.sequence),
         vec![
             AccountMeta::new_readonly(closer, true),
             AccountMeta::new(scenario.pending_pda, false),
@@ -1093,7 +1146,7 @@ fn close_pending_with_noreplay_marked_succeeds() {
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &close_pending_ix_data(),
+        &close_pending_ix_data(&scenario.emitter, scenario.sequence),
         vec![
             AccountMeta::new_readonly(scenario.submitter, true),
             AccountMeta::new(scenario.pending_pda, false),
@@ -1124,7 +1177,7 @@ fn close_pending_with_active_set_and_no_noreplay_fails() {
     // with CannotCleanup.
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &close_pending_ix_data(),
+        &close_pending_ix_data(&scenario.emitter, scenario.sequence),
         vec![
             AccountMeta::new_readonly(scenario.submitter, true),
             AccountMeta::new(scenario.pending_pda, false),
