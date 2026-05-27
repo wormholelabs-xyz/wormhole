@@ -85,6 +85,40 @@ test-e2e-vaa-corpus: build-prod
 	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
 		--test surfpool_e2e_vaa_corpus -- --ignored --nocapture
 
+# Phase 2.2.2 noreplay co-deployment smoke test. Boots surfpool offline,
+# deploys both `global_accountant.so` AND the upstream `solana_noreplay.so` at
+# its canonical devnet program ID (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`),
+# then drives `CreateBitmap` + `MarkUsed` directly against noreplay to confirm
+# the wire format and account layout match `solana-noreplay`'s on-chain
+# expectations. This is the groundwork for Phase 2.3, which will replace the
+# Keypair-signed authority used here with a PDA owned by global-accountant
+# invoked via `invoke_signed` from inside `submit_observations`'s
+# quorum-completion branch.
+#
+# NOT included in the unified `test-e2e` aggregator below: this target
+# exercises a one-off deployment invariant rather than a regression-prone code
+# path inside our own program. Adding it to every CI run would burn ~10 seconds
+# on a property that does not depend on our diff. Re-enable here once Phase 2.3
+# lands the real CPI and this test becomes a true regression guard.
+NOREPLAY_SO := $(HOME)/WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so
+
+.PHONY: test-e2e-noreplay-smoke
+test-e2e-noreplay-smoke: build-dev
+	@test -f "$(NOREPLAY_SO)" || { \
+		echo "ERROR: $(NOREPLAY_SO) not found."; \
+		echo "Rebuild via: cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build"; \
+		echo "(runs: cargo build-sbf --manifest-path program/Cargo.toml --no-default-features)"; \
+		exit 1; \
+	}
+	@# Pre-Phase-2.3 note: stale `.so` builds (older than the noreplay source
+	@# tree itself) have historically produced spurious "missing required
+	@# signature" failures inside the program's signer check — likely due to a
+	@# pinocchio AccountView wire-format skew between the .so and surfpool's
+	@# loader. If you see that error after upgrading either dep, rebuild the
+	@# .so from `~/WormholeLabs/CoreTeam/solana-noreplay` first.
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+		--test surfpool_e2e_noreplay_smoke -- --ignored --nocapture
+
 # Unified surfpool E2E target. Runs the Phase 0 spike + Phase 1b mainnet-fork
 # test + Phase 2 VAA-replay corpus. CI uses this target so the three layers
 # are exercised in one job with a single warm cargo cache and a single warm

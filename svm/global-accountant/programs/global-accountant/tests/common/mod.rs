@@ -241,6 +241,61 @@ pub fn so_path(name: &str) -> PathBuf {
         .join(format!("{name}.so"))
 }
 
+/// Canonical devnet program ID for `solana-noreplay`
+/// (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`). Pinned as a raw byte array
+/// to avoid pulling a base58 dev-dep; verified against `solana_noreplay::PROGRAM_ID`
+/// at `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/client.rs:34`.
+pub const NOREPLAY_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    0x0c, 0xb8, 0x38, 0x00, 0x73, 0xdf, 0x36, 0x25, 0xa1, 0x32, 0x11, 0x1f, 0xee, 0x67, 0x8d, 0xd0,
+    0x6b, 0x7e, 0x3d, 0xf2, 0x90, 0xa2, 0xb1, 0xd5, 0x4a, 0x48, 0x5b, 0xdb, 0x72, 0x61, 0x82, 0x91,
+]);
+
+/// Derive the solana-noreplay bitmap PDA for `(authority, namespace, sequence)`.
+/// Mirrors `solana_noreplay::pda::BitmapPdaSeeds::new(...).find_pda(...)` in
+/// `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/pda.rs`:
+///
+///   seeds = [authority, namespace[..min(len, 32)], namespace[min(len, 32)..],
+///            (sequence / 1024).to_le_bytes()]
+///
+/// For a 34-byte namespace `(chain_id_le ‖ emitter)` the split is:
+///   chunk_0 = [chain_id_le (2B), emitter[0..30] (30B)] -> 32B
+///   chunk_1 = emitter[30..32] (2B)
+pub fn derive_noreplay_bitmap_pda(
+    authority: &Pubkey,
+    namespace: &[u8],
+    sequence: u64,
+) -> (Pubkey, u8) {
+    // `BITS_PER_BUCKET` is `BITMAP_BYTES * 8 = 128 * 8 = 1024`.
+    const BITS_PER_BUCKET: u64 = 1024;
+    const SEED_CHUNK_SIZE: usize = 32;
+    let bucket_index = sequence / BITS_PER_BUCKET;
+    let bucket_bytes = bucket_index.to_le_bytes();
+    let mid = namespace.len().min(SEED_CHUNK_SIZE);
+    let seeds: [&[u8]; 4] = [
+        authority.as_ref(),
+        &namespace[..mid],
+        &namespace[mid..],
+        &bucket_bytes,
+    ];
+    Pubkey::find_program_address(&seeds, &NOREPLAY_PROGRAM_ID)
+}
+
+/// Build the solana-noreplay instruction data for the `CreateBitmap` (disc 0),
+/// `MarkUsed` (disc 1), or `UnmarkUsed` (disc 2) instructions. Wire format:
+///
+///   [discriminator: u8][namespace_len: u16 LE][namespace bytes][sequence: u64 LE]
+///
+/// Verified against `solana_noreplay::instruction::InstructionData::try_from`
+/// at `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/instruction.rs`.
+pub fn noreplay_ix_data(discriminator: u8, namespace: &[u8], sequence: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(1 + 2 + namespace.len() + 8);
+    data.push(discriminator);
+    data.extend_from_slice(&(namespace.len() as u16).to_le_bytes());
+    data.extend_from_slice(namespace);
+    data.extend_from_slice(&sequence.to_le_bytes());
+    data
+}
+
 /// Hex-encode a byte slice. Avoids a dev-dep on `hex`.
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
