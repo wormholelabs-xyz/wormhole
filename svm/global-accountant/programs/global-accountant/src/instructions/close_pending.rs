@@ -32,7 +32,7 @@ use pinocchio::{
     AccountView, Address, ProgramResult,
 };
 
-use crate::definitions::{GlobalAccountantError, PENDING_SEED_PREFIX};
+use crate::definitions::{GlobalAccountantError, NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_SEED_PREFIX};
 use crate::err;
 use crate::instructions::noreplay;
 use crate::state::pending;
@@ -106,13 +106,21 @@ pub fn process(
     // Trigger (a): GuardianSet expired.
     let expired = guardian_set_expired(guardian_set, layout.guardian_set_index)?;
 
-    // Trigger (b): NoReplay-marked. The pre-check now correctly indexes the
-    // bitmap by `sequence % 1024`. The mock branch ignores the sequence; the
-    // real branch indexes the supplied bitmap PDA. Address verification of
-    // the bitmap PDA against the canonical derivation is deferred to the
-    // shared `noreplay` helper (the mock cannot perform that derivation since
-    // its "bitmap" is a stand-in account at an arbitrary address).
-    let already_accounted = noreplay::is_marked(noreplay_bucket, layout.chain, &emitter, sequence)?;
+    // Trigger (b): NoReplay-marked. The shared `noreplay::is_marked` helper
+    // re-derives the canonical bitmap PDA from
+    // `(noreplay_authority, chain ‖ emitter, sequence / 1024)` and rejects any
+    // caller-supplied bucket at a non-canonical address. close_pending is the
+    // cold path — re-deriving the noreplay-authority PDA inline (one extra
+    // `find_program_address`, ~1.5K CU) keeps the account list small.
+    let (noreplay_authority_addr, _) =
+        Address::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
+    let already_accounted = noreplay::is_marked(
+        noreplay_bucket,
+        &noreplay_authority_addr,
+        layout.chain,
+        &emitter,
+        sequence,
+    )?;
 
     if !expired && !already_accounted {
         return Err(err(GlobalAccountantError::CannotCleanup));

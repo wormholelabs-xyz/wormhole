@@ -224,7 +224,13 @@ pub fn process(
     // check into NoReplay: any `(chain, emitter, seq)` that already passed
     // through either path (observations-quorum OR a prior `submit_vaas`) is
     // marked, so a replay reaches this branch.
-    if noreplay::is_marked(noreplay_bucket, chain, &emitter, sequence)? {
+    if noreplay::is_marked(
+        noreplay_bucket,
+        noreplay_authority.address(),
+        chain,
+        &emitter,
+        sequence,
+    )? {
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 

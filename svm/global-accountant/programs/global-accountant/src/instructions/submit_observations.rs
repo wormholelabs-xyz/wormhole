@@ -175,7 +175,13 @@ pub fn process(
 
     // (1) NoReplay pre-check — reject replays before any signature verification
     // or PDA work.
-    if noreplay::is_marked(noreplay_bucket, parsed.chain, &parsed.emitter, parsed.sequence)? {
+    if noreplay::is_marked(
+        noreplay_bucket,
+        noreplay_authority.address(),
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+    )? {
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 

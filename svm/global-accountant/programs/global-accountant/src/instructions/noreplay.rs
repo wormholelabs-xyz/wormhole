@@ -32,12 +32,57 @@
 //! `[NOREPLAY_AUTHORITY_SEED_PREFIX]` — so the bitmap is exclusively
 //! write-controlled by this program.
 
-use pinocchio::{AccountView, ProgramResult};
+use pinocchio::{AccountView, Address, ProgramResult};
+
+use crate::definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID};
 
 #[cfg(not(feature = "mock-noreplay"))]
 use crate::definitions::GlobalAccountantError;
 #[cfg(not(feature = "mock-noreplay"))]
 use crate::err;
+
+/// Length of the noreplay namespace used by global-accountant: `chain_be (2 B)
+/// ‖ emitter (32 B)`. The noreplay program splits namespaces > 32 bytes into
+/// two seed chunks of 32 + remainder, so this constant pins the split point.
+const NAMESPACE_TOTAL_LEN: usize = 2 + 32;
+const NAMESPACE_CHUNK_BOUNDARY: usize = 32;
+
+/// Re-derive the canonical noreplay bitmap PDA for
+/// `(authority, chain, emitter, sequence)` under the `solana-noreplay`
+/// program. Mirrors `solana_noreplay::pda::BitmapPdaSeeds`:
+///
+/// ```text
+/// seeds = [authority, namespace[..32], namespace[32..], (sequence / 1024) LE]
+/// ```
+///
+/// where `namespace = chain.to_be_bytes() ‖ emitter`. Used by the production
+/// [`is_marked`] to reject any caller-supplied bucket account that does not
+/// live at the canonical address. Returns `(address, bump)`.
+///
+/// `pub` so client tooling and tests can re-derive bucket addresses without
+/// re-encoding the seed scheme by hand.
+pub fn derive_bucket_pda(
+    noreplay_authority: &Address,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> (Address, u8) {
+    let mut namespace = [0u8; NAMESPACE_TOTAL_LEN];
+    namespace[..2].copy_from_slice(&chain.to_be_bytes());
+    namespace[2..].copy_from_slice(emitter);
+    let bucket_index_bytes = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
+    let noreplay_program_id_addr = Address::from(NOREPLAY_PROGRAM_ID);
+    let authority_bytes: &[u8] = noreplay_authority.as_array();
+    Address::find_program_address(
+        &[
+            authority_bytes,
+            &namespace[..NAMESPACE_CHUNK_BOUNDARY],
+            &namespace[NAMESPACE_CHUNK_BOUNDARY..],
+            &bucket_index_bytes,
+        ],
+        &noreplay_program_id_addr,
+    )
+}
 
 // ============================================================================
 // Pre-check (direct account read; both feature configurations).
@@ -57,20 +102,31 @@ const MOCK_NOREPLAY_MARKED: u8 = 0x01;
 ///     the relevant bit is clear — proceed with the submission.
 ///   - `Ok(true)` if the bit at `sequence % 1024` of the bitmap is already
 ///     set — the submission must short-circuit as `AlreadyAccounted`.
-///   - `Err(...)` only on a structurally invalid account (wrong size).
+///   - `Err(InvalidPda)` if the bucket address does not match the canonical
+///     derivation, or the account data is structurally malformed.
 ///
-/// No CPI; cost is dominated by the data borrow + bit test (~hundreds of CU).
-/// The PDA may be passed as read-only here; `MarkUsed` later passes it as
-/// writable, but a single `AccountView` cannot be both at the same time, so
-/// the caller must pass it as writable up front (per the account-list
-/// documentation in `submit_observations.rs`).
+/// The bucket address is re-derived from `(noreplay_authority, chain, emitter,
+/// sequence)` and any caller-supplied account at a non-canonical address is
+/// rejected. Without that check, a caller could pass an arbitrary bucket and
+/// trick the bit lookup into reading an unrelated namespace.
+///
+/// No CPI; cost is dominated by one `find_program_address` (~1.5K CU) plus the
+/// data borrow + bit test. The PDA may be passed as read-only here; `MarkUsed`
+/// later passes it as writable, but a single `AccountView` cannot be both at
+/// the same time, so the caller must pass it as writable up front (per the
+/// account-list documentation in `submit_observations.rs`).
 #[cfg(not(feature = "mock-noreplay"))]
 pub fn is_marked(
     bucket: &AccountView,
-    _chain: u16,
-    _emitter: &[u8; 32],
+    noreplay_authority: &Address,
+    chain: u16,
+    emitter: &[u8; 32],
     sequence: u64,
 ) -> Result<bool, pinocchio::error::ProgramError> {
+    let (expected_bucket, _) = derive_bucket_pda(noreplay_authority, chain, emitter, sequence);
+    if bucket.address() != &expected_bucket {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
     // Uninitialised bucket -> system-owned, zero data, no bit set yet. This is
     // the normal case for the first message in a sequence bucket; do NOT
     // error.
@@ -86,14 +142,18 @@ pub fn is_marked(
     {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    let bit = (sequence % crate::definitions::NOREPLAY_BITS_PER_BUCKET) as usize;
+    let bit = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
     let byte = data[crate::definitions::NOREPLAY_BITMAP_OFFSET + bit / 8];
     Ok(byte & (1 << (bit % 8)) != 0)
 }
 
+/// Mock branch — the caller-supplied bucket is a stand-in account at an
+/// arbitrary test pubkey, so the canonical-address check is skipped here.
+/// Production callers always go through the `not(mock-noreplay)` arm above.
 #[cfg(feature = "mock-noreplay")]
 pub fn is_marked(
     bucket: &AccountView,
+    _noreplay_authority: &Address,
     _chain: u16,
     _emitter: &[u8; 32],
     _sequence: u64,
@@ -136,19 +196,14 @@ pub fn mark_used(
     Ok(())
 }
 
-/// Build a 34-byte `(chain_be ‖ emitter)` namespace on the stack and feed it
-/// into the noreplay `MarkUsed` CPI. The big-endian chain byte order mirrors
-/// the VAA wire format and the `DIGEST_SEED_PREFIX` derivation in
-/// `open_digest`, so on-chain and off-chain derivations agree.
-#[cfg(not(feature = "mock-noreplay"))]
-const NAMESPACE_LEN: usize = 2 + 32;
-
 /// Length of the `MarkUsed` instruction-data buffer assembled on-chain:
 /// `[disc=1u8][ns_len: u16 LE][ns: 34 B][seq: u64 LE]`. Pinned here so the
 /// CPI builder can use a fixed-size array on the stack rather than an
-/// allocation-bearing `Vec`.
+/// allocation-bearing `Vec`. The 34-byte namespace mirrors the VAA wire
+/// format (`chain_be ‖ emitter`) and the `DIGEST_SEED_PREFIX` derivation in
+/// `open_digest`, so on-chain and off-chain derivations agree.
 #[cfg(not(feature = "mock-noreplay"))]
-const MARK_USED_DATA_LEN: usize = 1 + 2 + NAMESPACE_LEN + 8;
+const MARK_USED_DATA_LEN: usize = 1 + 2 + NAMESPACE_TOTAL_LEN + 8;
 
 #[cfg(not(feature = "mock-noreplay"))]
 #[allow(clippy::too_many_arguments)]
@@ -165,11 +220,8 @@ pub fn mark_used(
 ) -> ProgramResult {
     use pinocchio::cpi::{Seed, Signer};
     use pinocchio::instruction::{InstructionAccount, InstructionView};
-    use pinocchio::Address;
 
-    use crate::definitions::{
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_MARK_USED_DISCRIMINATOR, NOREPLAY_PROGRAM_ID,
-    };
+    use crate::definitions::{NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_MARK_USED_DISCRIMINATOR};
 
     // Defence-in-depth: refuse to CPI to anything other than the canonical
     // noreplay program ID. The runtime's `IncorrectProgramId` would surface
@@ -192,16 +244,16 @@ pub fn mark_used(
     }
 
     // Build the 34-byte namespace on the stack: chain_be (2 B) ‖ emitter (32 B).
-    let mut namespace = [0u8; NAMESPACE_LEN];
+    let mut namespace = [0u8; NAMESPACE_TOTAL_LEN];
     namespace[..2].copy_from_slice(&chain.to_be_bytes());
     namespace[2..].copy_from_slice(emitter);
 
     // Build the `MarkUsed` instruction data on the stack.
     let mut ix_data = [0u8; MARK_USED_DATA_LEN];
     ix_data[0] = NOREPLAY_MARK_USED_DISCRIMINATOR;
-    ix_data[1..3].copy_from_slice(&(NAMESPACE_LEN as u16).to_le_bytes());
-    ix_data[3..3 + NAMESPACE_LEN].copy_from_slice(&namespace);
-    ix_data[3 + NAMESPACE_LEN..].copy_from_slice(&sequence.to_le_bytes());
+    ix_data[1..3].copy_from_slice(&(NAMESPACE_TOTAL_LEN as u16).to_le_bytes());
+    ix_data[3..3 + NAMESPACE_TOTAL_LEN].copy_from_slice(&namespace);
+    ix_data[3 + NAMESPACE_TOTAL_LEN..].copy_from_slice(&sequence.to_le_bytes());
 
     // `MarkUsed` account list (verified against `solana_noreplay::instruction::MarkUsedAccounts`):
     //   0. [signer, writable] payer
