@@ -1,18 +1,12 @@
 //! Balance-mutation helpers shared between the quorum-completing branch of
 //! `submit_observations` and the signed-VAA backfill path in `submit_vaas`.
 //!
-//! Phase 2.4 originally placed [`apply_transfer`] inside `submit_observations`
-//! because it was the only caller. Phase 2.5's `submit_vaas` needs the same
-//! routine — the CosmWasm reference (`handle_tokenbridge_vaa`) drives
-//! `accountant::commit_transfer` for both the observation-quorum path and the
-//! signed-VAA path. Lifting the helper into a sibling module keeps both
-//! callers honest (same canonical-bump enforcement, same same-PDA-collapse,
-//! same overflow semantics) without forcing one instruction module to depend
-//! on another's private items.
-//!
-//! No behaviour change versus the pre-extraction state — this file is a pure
-//! relocation. The mollusk regression suite (`tests/submit_observations.rs`)
-//! is the canonical guard.
+//! Both callers need the same routine — the CosmWasm reference
+//! (`handle_tokenbridge_vaa`) drives `accountant::commit_transfer` for both
+//! the observation-quorum path and the signed-VAA path. Living in a sibling
+//! module keeps both callers honest (same canonical-bump enforcement, same
+//! same-PDA-collapse, same overflow semantics) without forcing one instruction
+//! module to depend on another's private items.
 
 use pinocchio::{AccountView, Address, ProgramResult};
 

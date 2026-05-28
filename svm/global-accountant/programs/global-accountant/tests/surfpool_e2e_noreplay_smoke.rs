@@ -1,7 +1,6 @@
-//! Phase 2.2.2 surfpool smoke test for `solana-noreplay` co-deployment.
+//! Surfpool smoke test for `solana-noreplay` co-deployment.
 //!
-//! This is the deployment-and-wire-format groundwork for the Phase 2.3 NoReplay
-//! CPI from `submit_observations`. It proves we can:
+//! Proves we can:
 //!
 //!   1. Spin up surfpool's in-memory simnet (no mainnet datasource).
 //!   2. Deploy our `global-accountant.so` at a fresh program ID.
@@ -10,9 +9,9 @@
 //!      compile-time `NOREPLAY_PROGRAM_ID` env var bakes into the binary).
 //!   4. Drive `CreateBitmap` + `MarkUsed` (and a replay-rejection MarkUsed)
 //!      directly against the noreplay program over JSON-RPC, with a fresh
-//!      Keypair acting as the authority. Phase 2.3 will replace that
-//!      Keypair-signed authority with a PDA owned by global-accountant invoked
-//!      via `invoke_signed`.
+//!      Keypair acting as the authority. The production `submit_observations`
+//!      flow replaces that Keypair-signed authority with a PDA owned by
+//!      global-accountant invoked via `invoke_signed`.
 //!
 //! # Run
 //!
@@ -33,7 +32,8 @@
 //! invariant — not a regression-prone code path inside our own program — so
 //! adding it to the per-PR CI rotation would burn ~10 seconds on every run for
 //! a property that does not depend on our diff. Keep it gated behind its own
-//! make target; revisit if Phase 2.3 turns it into a true regression test.
+//! make target; revisit if a later integration turns it into a true regression
+//! test.
 
 use std::time::Duration;
 
@@ -115,7 +115,7 @@ fn noreplay_instruction(
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `make test-e2e-noreplay-smoke` or `cargo test -- --ignored`"]
 fn surfpool_noreplay_smoke() {
-    // ----- Phase 1: locate both .so artifacts before we spend boot time. -----
+    // ----- Step 1: locate both .so artifacts before we spend boot time. -----
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
@@ -135,7 +135,7 @@ fn surfpool_noreplay_smoke() {
         noreplay_bytes.len()
     );
 
-    // ----- Phase 2: boot surfpool offline (no mainnet fork needed). -----
+    // ----- Step 2: boot surfpool offline (no mainnet fork needed). -----
     let guard = start_surfpool(SurfpoolOptions::offline("ga-surfpool-noreplay-smoke"));
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
@@ -150,7 +150,7 @@ fn surfpool_noreplay_smoke() {
          solana_noreplay program_id={NOREPLAY_PROGRAM_ID} (pinned canonical)"
     );
 
-    // ----- Phase 3: payer + authority funding. Both must be airdropped before
+    // ----- Step 3: payer + authority funding. Both must be airdropped before
     // any tx that consumes lamports.
     let payer = Keypair::new();
     let authority = Keypair::new();
@@ -169,7 +169,7 @@ fn surfpool_noreplay_smoke() {
         .expect("payer balance after airdrop");
     assert!(payer_starting >= 10_000_000_000, "payer funded");
 
-    // ----- Phase 4: deploy both .so's via the surfnet_writeProgram cheatcode.
+    // ----- Step 4: deploy both .so's via the surfnet_writeProgram cheatcode.
     // Order does not matter — surfpool's writeProgram path is independent per
     // address. Both are pinocchio binaries so they share the same SBF loader.
     deploy_program(&rpc_url, &ga_program_id, &ga_bytes);
@@ -184,7 +184,7 @@ fn surfpool_noreplay_smoke() {
         .expect("solana_noreplay program account after deploy");
     assert!(nr_acct.executable, "solana_noreplay is executable");
 
-    // ----- Phase 5: build the namespace and derive the bitmap PDA for sequence 100.
+    // ----- Step 5: build the namespace and derive the bitmap PDA for sequence 100.
     let chain: u16 = 2;
     let mut emitter = [0u8; 32];
     emitter[0] = 0xab;
@@ -205,7 +205,7 @@ fn surfpool_noreplay_smoke() {
          bit={expected_bit}"
     );
 
-    // ----- Phase 6: CreateBitmap. Authority does NOT need to sign here.
+    // ----- Step 6: CreateBitmap. Authority does NOT need to sign here.
     let create_ix = noreplay_instruction(
         DISC_CREATE_BITMAP,
         &payer.pubkey(),
@@ -239,7 +239,7 @@ fn surfpool_noreplay_smoke() {
         "bitmap is all-zero immediately after CreateBitmap"
     );
 
-    // ----- Phase 7: MarkUsed for sequence 100. Authority signs.
+    // ----- Step 7: MarkUsed for sequence 100. Authority signs.
     let mark_a_ix = noreplay_instruction(
         DISC_MARK_USED,
         &payer.pubkey(),
@@ -264,7 +264,7 @@ fn surfpool_noreplay_smoke() {
         "bit at offset {expected_bit} is set after MarkUsed[100]"
     );
 
-    // ----- Phase 8: Replay — MarkUsed[100] again. Must fail with the noreplay
+    // ----- Step 8: Replay — MarkUsed[100] again. Must fail with the noreplay
     // program's replay error (`ProgramError::AccountAlreadyInitialized`).
     let replay_ix = noreplay_instruction(
         DISC_MARK_USED,
@@ -291,7 +291,7 @@ fn surfpool_noreplay_smoke() {
     );
     eprintln!("[smoke] replay rejected as expected: {replay_err}");
 
-    // ----- Phase 9: MarkUsed[200] — same bucket (200 / 1024 = 0), different bit.
+    // ----- Step 9: MarkUsed[200] — same bucket (200 / 1024 = 0), different bit.
     // Both bits must be set in the same PDA.
     let seq_b: u64 = 200;
     let (bitmap_pda_b, _) = derive_noreplay_bitmap_pda(&authority.pubkey(), &namespace, seq_b);

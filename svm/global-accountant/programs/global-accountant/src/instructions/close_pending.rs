@@ -1,8 +1,8 @@
 //! `close_pending` — permissionless cleanup of stranded `PendingObservationsLayout`
 //! PDAs.
 //!
-//! Per `accountant-migration-pending-quorum-design.md` §3.6, anyone may close
-//! a pending PDA when **either** of the following on-chain conditions holds:
+//! Anyone may close a pending PDA when **either** of the following on-chain
+//! conditions holds:
 //!
 //! - (a) The pending PDA's `guardian_set_index` references a guardian set
 //!   whose `is_active(timestamp)` returns false (i.e., the set has expired).

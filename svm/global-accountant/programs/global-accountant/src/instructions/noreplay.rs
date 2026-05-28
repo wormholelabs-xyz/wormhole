@@ -7,8 +7,7 @@
 //!     before any signature verification or PDA work, then CPI `MarkUsed` on
 //!     quorum reach to claim the slot.
 //!   - `close_pending::process` — pre-check only, as trigger (b) of the
-//!     permissionless cleanup ix (per `accountant-migration-pending-quorum-design.md`
-//!     §3.6).
+//!     permissionless cleanup ix.
 //!
 //! Both branches share the same direct-read pre-check (`is_marked`). The CPI
 //! itself only fires from `submit_observations`; `close_pending` never holds
@@ -139,10 +138,8 @@ pub fn mark_used(
 
 /// Build a 34-byte `(chain_be ‖ emitter)` namespace on the stack and feed it
 /// into the noreplay `MarkUsed` CPI. The big-endian chain byte order mirrors
-/// the VAA wire format (and the `DIGEST_SEED_PREFIX` derivation in
-/// `open_digest`); the off-chain Phase 2.2.2 smoke test used LE but that was
-/// pre-production-lock — we standardise on BE here so on-chain and off-chain
-/// derivations agree forever.
+/// the VAA wire format and the `DIGEST_SEED_PREFIX` derivation in
+/// `open_digest`, so on-chain and off-chain derivations agree.
 #[cfg(not(feature = "mock-noreplay"))]
 const NAMESPACE_LEN: usize = 2 + 32;
 

@@ -20,11 +20,9 @@ pub enum Instruction {
     CloseDigest = 1,
     SubmitObservations = 2,
     ClosePending = 3,
-    /// Phase 2.5: permissionless signed-VAA backfill. Consumes a fully-signed
-    /// VAA via the Verify VAA Shim CPI and applies its balance effects
-    /// directly, bypassing the quorum tracker. See
-    /// `accountant-migration-cosmwasm-deep-dive.md` §4 and the Phase 2.5
-    /// design note in `accountant-migration.md` §13.
+    /// Permissionless signed-VAA backfill. Consumes a fully-signed VAA via
+    /// the Verify VAA Shim CPI and applies its balance effects directly,
+    /// bypassing the quorum tracker.
     SubmitVaas = 4,
 }
 
@@ -60,8 +58,7 @@ pub enum GlobalAccountantError {
     NotEnabled = 6,
     /// The (chain, emitter, sequence) is already marked as accounted-for in
     /// NoReplay; observations are rejected as replays before any signature
-    /// verification or PDA work. See
-    /// `accountant-migration-noreplay-integration.md` §3.
+    /// verification or PDA work.
     AlreadyAccounted = 7,
     /// The NoReplay `MarkUsed` CPI returned an error after our pre-check passed
     /// — a defence-in-depth backstop for any racing tx that flipped the slot
@@ -69,8 +66,7 @@ pub enum GlobalAccountantError {
     NoReplayCpiFailed = 8,
     /// The submitted signature failed `secp256k1_recover` or the recovered
     /// pubkey did not match the supplied `guardian_index`'s public key in the
-    /// Core Bridge GuardianSet PDA. See
-    /// `accountant-migration-pending-quorum-design.md` §3.4.
+    /// Core Bridge GuardianSet PDA.
     InvalidSignature = 9,
     /// The supplied `guardian_index` is out of bounds for the supplied
     /// guardian set.
@@ -80,8 +76,7 @@ pub enum GlobalAccountantError {
     AlreadySigned = 11,
     /// The observation references a guardian set strictly older than the one
     /// the existing pending PDA is accumulating against (i.e., a stale
-    /// observation arrived after rotation). See §3.3 rule "Older than the
-    /// active set".
+    /// observation arrived after rotation).
     StaleGuardianSet = 12,
     /// The observation's digest does not match the digest the pending PDA was
     /// opened with, while the `guardian_set_index` is identical. Distinct from
@@ -90,7 +85,7 @@ pub enum GlobalAccountantError {
     DigestForgery = 13,
     /// `close_pending` was called but neither of the two acceptable triggers
     /// holds: the recorded guardian set is still active AND NoReplay does not
-    /// mark the entry as accounted-for. See §3.6.
+    /// mark the entry as accounted-for.
     CannotCleanup = 14,
     /// The 256-bit `BalanceAccountLayout::balance` would overflow when applying
     /// a `lock_or_burn` (native-chain credit) or `unlock_or_mint` (wrapped-chain
@@ -133,8 +128,7 @@ pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
 /// — the digest suffix is what lets fork/reorg observations (same chain /
 /// emitter / sequence but a different body-hash) accumulate in parallel
 /// sibling buckets rather than colliding on a single bucket and getting stuck
-/// on a `DigestForgery` rejection. See
-/// `accountant-migration-pending-quorum-design.md` §3.1.
+/// on a `DigestForgery` rejection.
 pub const PENDING_SEED_PREFIX: &[u8] = b"pending";
 
 /// PDA seed prefix for [`BalanceAccountLayout`]. The full seed tuple is
@@ -168,16 +162,14 @@ pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay-authority";
 /// (see `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/client.rs::PROGRAM_ID`).
 ///
 /// Deferred: deploying this program at a stable mainnet ID and locking its
-/// upgrade authority is a separate workstream — see
-/// `accountant-migration.md` §15.
+/// upgrade authority is a separate workstream.
 pub const NOREPLAY_PROGRAM_ID: Pubkey = [
     0x0c, 0xb8, 0x38, 0x00, 0x73, 0xdf, 0x36, 0x25, 0xa1, 0x32, 0x11, 0x1f, 0xee, 0x67, 0x8d, 0xd0,
     0x6b, 0x7e, 0x3d, 0xf2, 0x90, 0xa2, 0xb1, 0xd5, 0x4a, 0x48, 0x5b, 0xdb, 0x72, 0x61, 0x82, 0x91,
 ];
 
 /// Discriminator for `solana-noreplay`'s `MarkUsed` instruction. Single-byte
-/// prefix on the wire (the noreplay wire format is documented in
-/// `accountant-migration-noreplay-integration.md` §2):
+/// prefix on the wire:
 ///
 /// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][sequence: u64 LE]`
 pub const NOREPLAY_MARK_USED_DISCRIMINATOR: u8 = 1;
@@ -322,8 +314,7 @@ impl Ord for Uint256 {
     }
 }
 
-/// Zero-copy layout for a `DigestAccount` PDA. See
-/// `accountant-migration-digest-design.md` §3 for design rationale.
+/// Zero-copy layout for a `DigestAccount` PDA.
 ///
 /// Field ordering keeps natural alignment without padding (`u64`s on 8-byte
 /// boundaries, `u32` after the `u64`s, `u16` last).
@@ -364,17 +355,12 @@ const _: () = {
 };
 
 /// Zero-copy layout for a per-`(chain, emitter, sequence)` pending-quorum PDA.
-/// See [`accountant-migration-pending-quorum-design.md`] §4 for the design
-/// rationale and lifecycle diagram.
 ///
-/// Design doc lists 84 bytes payload. The actual on-disk layout is **88
-/// bytes** because the `created_at_slot: u64` field forces 8-byte alignment
-/// on the whole struct, and Rust pads the size out to the alignment. We move
-/// `created_at_slot` to the front of the integer block so the padding sits at
-/// the tail (where it is named explicitly via `_tail_padding`) and `bytemuck`
-/// can derive `Pod` cleanly. The visible field order stays: digest, payer,
-/// guardian_set_index, signatures, created_at_slot, chain — matching the
-/// design doc — and the byte layout is pinned by the const-asserts below.
+/// The on-disk layout is **88 bytes**: the `created_at_slot: u64` field forces
+/// 8-byte alignment on the whole struct, and Rust pads the size out to the
+/// alignment. `created_at_slot` is placed at the front of the integer block so
+/// the padding sits at the tail (named explicitly via `_padding`) and
+/// `bytemuck` can derive `Pod` cleanly.
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
@@ -386,11 +372,9 @@ const _: () = {
 /// | 80     | 2    | chain              |
 /// | 82     | 6    | _padding (explicit; required by `Pod` derive) |
 ///
-/// 88-byte total. The 32-bit bitmap covers 32 guardian indices; today's
-/// mainnet set is 19. If the protocol ever requires >32 guardians the field
-/// must widen (and the PDA layout version bumped) — pinned in §10 risks.
-///
-/// [`accountant-migration-pending-quorum-design.md`]: ../../../../.claude/tasks/accountant-migration-pending-quorum-design.md
+/// The 32-bit bitmap covers 32 guardian indices; today's mainnet set is 19.
+/// If the protocol ever requires >32 guardians the field must widen and the
+/// PDA layout version must be bumped.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct PendingObservationsLayout {
@@ -815,10 +799,9 @@ mod tests {
     #[test]
     fn pending_layout_size_pinned() {
         // The const-assert above is the primary defence; this is the
-        // human-readable runtime mirror a reviewer can scan against the design
-        // doc §4 byte map. Design doc lists 84 bytes payload; the realised
-        // layout is 88 bytes after the explicit tail padding required for
-        // `Pod`-derive cleanliness — see the type-doc for the rationale.
+        // human-readable runtime mirror. The 88-byte total includes 6 bytes of
+        // explicit tail padding required for `Pod`-derive cleanliness — see
+        // the type-doc for the rationale.
         assert_eq!(PendingObservationsLayout::LEN, 88);
     }
 

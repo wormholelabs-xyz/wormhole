@@ -1,11 +1,9 @@
 //! `open_digest` — initialise a DigestAccount PDA on quorum-reach.
 //!
 //! In production this instruction is only reachable through
-//! `submit_observations`'s commit path (see
-//! `accountant-migration-pending-quorum-design.md` §3.5). The standalone
-//! entrypoint is kept behind `test-only-open-digest` so the existing mollusk
-//! tests can drive the PDA lifecycle without standing up a full
-//! 13-of-19 quorum.
+//! `submit_observations`'s commit path. The standalone entrypoint is kept
+//! behind `test-only-open-digest` so the existing mollusk tests can drive the
+//! PDA lifecycle without standing up a full 13-of-19 quorum.
 //!
 //! The work of allocating + writing the layout lives in `open_digest_inner`,
 //! which `submit_observations::process` calls directly on quorum reach.

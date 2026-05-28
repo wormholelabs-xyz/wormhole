@@ -5,8 +5,8 @@
 //! a fully-signed VAA via the Verify VAA Shim CPI and applies its balance
 //! effects directly, **bypassing the per-`(chain, emitter, sequence, digest)`
 //! quorum tracker entirely**. The instruction is the operational escape
-//! hatch for stuck pending buckets and the unblock path for Phase 3
-//! (migration backfill).
+//! hatch for stuck pending buckets and the unblock path for migration
+//! backfill.
 //!
 //! ## Why this exists alongside `submit_observations`
 //!
@@ -23,9 +23,8 @@
 //! signatures, so the only on-chain state we touch is NoReplay + the
 //! DigestAccount + the source / destination Account PDAs.
 //!
-//! Orthogonality with the quorum tracker is per
-//! `accountant-migration-pending-quorum-design.md` §7: NoReplay is the only
-//! shared state, and it is set the same way by both paths.
+//! Orthogonality with the quorum tracker: NoReplay is the only shared state,
+//! and it is set the same way by both paths.
 //!
 //! ## Flow
 //!
@@ -58,13 +57,13 @@
 //!   alone (no digest), so a different-digest replay reaches the same bit
 //!   and is rejected without needing the digest comparison.
 //! - CosmWasm dispatches Token Bridge governance VAAs through this same
-//!   `submit_vaas` entrypoint. The Solana port punts those to a future
-//!   Phase 2.6 slice (`handle_tokenbridge_governance` + `modify_balance`); the
-//!   payload parser already treats action 0x02 (Attest) and unknown actions
-//!   as no-op-balance-work, so a governance VAA submitted today will
-//!   commit the DigestAccount + flip NoReplay without applying any state
-//!   change. That's safe — governance VAAs are idempotent by design and
-//!   Phase 2.6 will replay them once it lands.
+//!   `submit_vaas` entrypoint. The Solana port leaves those to a follow-on
+//!   slice (`handle_tokenbridge_governance` + `modify_balance`); the payload
+//!   parser already treats action 0x02 (Attest) and unknown actions as
+//!   no-op-balance-work, so a governance VAA submitted today will commit the
+//!   DigestAccount + flip NoReplay without applying any state change. That's
+//!   safe — governance VAAs are idempotent by design and the follow-on slice
+//!   will replay them once it lands.
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
@@ -235,8 +234,7 @@ pub fn process(
     // `wormhole_sdk::token::Message::{Transfer, TransferWithPayload}` and
     // calls `accountant::commit_transfer`. The Solana port routes through
     // the same helper as `submit_observations`' quorum-completing branch —
-    // shared via `instructions::transfer::apply_transfer` (Phase 2.5
-    // extraction).
+    // shared via `instructions::transfer::apply_transfer`.
     //
     // Attest / Other payloads: no balance work, but the rest of the commit
     // (NoReplay flip + DigestAccount open) still runs. This matches
@@ -292,8 +290,8 @@ pub fn process(
     // `close_digest` / `close_pending` ecosystem consistent across both
     // commit paths. The DigestAccount records `guardian_set_index = 0` as a
     // sentinel since `submit_vaas` does not pin a single set (the Shim
-    // accepts any currently-active one per Phase 1's design); the
-    // `quorum_at_slot` is the current slot, same as the observations path.
+    // accepts any currently-active one); the `quorum_at_slot` is the current
+    // slot, same as the observations path.
     //
     // Bump is recomputed inline rather than threaded through the wire
     // format. `submit_vaas` is the cold path (one tx per backfill, not

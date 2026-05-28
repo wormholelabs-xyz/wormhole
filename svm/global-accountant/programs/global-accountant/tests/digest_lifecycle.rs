@@ -1,6 +1,5 @@
 //! Integration tests for the DigestAccount lifecycle (open + close).
 //!
-//! Written test-first per `.claude/tasks/accountant-migration.md` §14.
 //! Each test drives the on-chain program through mollusk-svm; the program
 //! itself must be built via `cargo build-sbf` before `cargo test` runs.
 //! The companion script `scripts/build-and-test.sh` (or `make test`) handles
@@ -75,9 +74,9 @@ fn close_digest_ix_data(mock_vaa_digest: &[u8; 32]) -> Vec<u8> {
 }
 
 /// Placeholder pubkey for the Shim accounts the mock branch ignores. The real
-/// branch (Phase 1b) populates these via `surfnet_setAccount` cheatcodes; under
-/// `mock-vaa` they round-trip through the runtime as inert system-owned
-/// accounts.
+/// branch populates these via `surfnet_setAccount` cheatcodes in the surfpool
+/// e2e tests; under `mock-vaa` they round-trip through the runtime as inert
+/// system-owned accounts.
 fn shim_placeholder_account(seed: u8) -> (Pubkey, Account) {
     (Pubkey::new_from_array([seed; 32]), system_owned_account(0))
 }
@@ -680,7 +679,7 @@ fn close_with_wrong_rent_recipient_fails() {
 fn digest_layout_offsets_pinned() {
     // Belt-and-braces runtime pin against accidental layout drift. The
     // const-asserts in `definitions/src/lib.rs` are the compile-time pin;
-    // this is the readable form a reviewer can scan against the design doc.
+    // this is the human-readable form.
     use core::mem::offset_of;
     assert_eq!(offset_of!(DigestAccountLayout, emitter), 0);
     assert_eq!(offset_of!(DigestAccountLayout, digest), 32);

@@ -1,17 +1,18 @@
-//! Phase 2 surfpool VAA-replay corpus.
+//! Surfpool VAA-replay corpus.
 //!
 //! Each test in this file replays one historical mainnet VAA end-to-end
 //! against the production-shape `.so` (no `mock-vaa`, real Verify VAA Shim
-//! CPI). The corpus widens the Phase 1b single-VAA spot check into a small
-//! catalogue covering different emitter shapes, payload sizes, and guardian
-//! sets so a future regression in our digest-handling, account-encoding, or
-//! Shim-CPI path surfaces against more than one fixture.
+//! CPI). The corpus widens the single-VAA spot check in
+//! `surfpool_e2e_mainnet_fork.rs` into a small catalogue covering different
+//! emitter shapes, payload sizes, and guardian sets so a future regression
+//! in our digest-handling, account-encoding, or Shim-CPI path surfaces
+//! against more than one fixture.
 //!
 //! # Corpus coverage matrix
 //!
 //! | filename                                          | gs | chain | emitter kind            | payload | rationale                                       |
 //! |---------------------------------------------------|----|-------|-------------------------|---------|-------------------------------------------------|
-//! | `mainnet_solana_token_bridge_seq2211.vaa`         |  6 |  1    | Solana NTT manager      |     217 | active GS6 baseline (mirrors Phase 1b)          |
+//! | `mainnet_solana_token_bridge_seq2211.vaa`         |  6 |  1    | Solana NTT manager      |     217 | active GS6 baseline                             |
 //! | `mainnet_solana_token_bridge_transfer_seq1395207` |  6 |  1    | Solana Token Bridge     |     133 | textbook TB transfer (PayloadID=1)              |
 //! | `mainnet_solana_pyth_short_seq175120.vaa`         |  6 |  1    | Solana Pyth-like        |      32 | short payload, active GS6                       |
 //! | `mainnet_xlayer_ntt_long_seq2695.vaa`             |  6 | 48    | XLayer NTT manager      |     388 | non-Solana NTT emitter shape                    |
@@ -44,13 +45,13 @@
 //!
 //! # Retired guardian sets
 //!
-//! Three corpus entries (GS1, GS4, GS5) test the §7 master-plan concern that
-//! historical guardian-set PDAs may be unreachable from surfpool's mainnet
-//! fork. The Shim's `VerifyHash` enforces `GuardianSet::is_active(timestamp)`,
-//! which fails for retired sets even when the PDA is fetchable. These cases
-//! are therefore expected to fail at the Shim CPI; the test asserts the
-//! failure mode rather than success, and the assertion message documents the
-//! pinned behaviour.
+//! Three corpus entries (GS1, GS4, GS5) test the historical guardian-set
+//! concern: historical guardian-set PDAs may be unreachable from surfpool's
+//! mainnet fork, and the Shim's `VerifyHash` enforces
+//! `GuardianSet::is_active(timestamp)`, which fails for retired sets even
+//! when the PDA is fetchable. These cases are therefore expected to fail at
+//! the Shim CPI; the test asserts the failure mode rather than success, and
+//! the assertion message documents the pinned behaviour.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -91,7 +92,7 @@ const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0xbc, 0x8c, 0xe5, 0xbb, 0xc5, 0xf7, 0x12, 0x6b, 0x2c, 0x43, 0x9b, 0x3a, 0x40, 0x00, 0x00, 0x00,
 ]);
 
-/// CU ceiling for the close tx. 400k is what Phase 1b empirically needed for
+/// CU ceiling for the close tx. 400k is empirically sufficient for the
 /// 13-sig VerifyHash (~199k CU) plus our pre/post-CPI bookkeeping.
 const CLOSE_DIGEST_CU_LIMIT: u32 = 400_000;
 
@@ -99,7 +100,8 @@ const CLOSE_DIGEST_CU_LIMIT: u32 = 400_000;
 /// `Rent::default().minimum_balance(120)` = 1_572_960.
 const DIGEST_PDA_RENT_LAMPORTS: u64 = 1_572_960;
 
-/// Datasource URL for surfpool's mainnet fork. Matches the Phase 1b override.
+/// Datasource URL for surfpool's mainnet fork. Matches the override used by
+/// `surfpool_e2e_mainnet_fork.rs`.
 fn datasource_rpc_url() -> String {
     std::env::var("GA_E2E_DATASOURCE_RPC")
         .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string())
@@ -148,7 +150,7 @@ fn close_digest_ix_data(digest: &[u8; 32], guardian_set_bump: u8) -> Vec<u8> {
     data
 }
 
-/// Encode `PostSignatures` instruction data. Same shape as Phase 1b's helper.
+/// Encode `PostSignatures` instruction data.
 fn post_signatures_ix_data(
     guardian_set_index: u32,
     total_signatures: u8,
@@ -204,9 +206,9 @@ fn post_signatures(
     eprintln!("[corpus] PostSignatures tx={sig}");
 }
 
-/// Write a `DigestAccount` PDA via the `surfnet_setAccount` cheatcode. Same
-/// approach as Phase 1b — the production-shape `.so` does not expose
-/// `open_digest`, so the PDA bytes are injected directly.
+/// Write a `DigestAccount` PDA via the `surfnet_setAccount` cheatcode. The
+/// production-shape `.so` does not expose `open_digest`, so the PDA bytes
+/// are injected directly.
 fn write_digest_pda(
     rpc_url: &str,
     program_id: &Pubkey,
@@ -246,8 +248,8 @@ fn write_digest_pda(
 }
 
 /// Expected outcome for a corpus case. `Succeeds` is the common case — the
-/// close tx should land. `FailsAtCpi` is the §7 retired-GS scenario: the
-/// close tx is expected to reach the Shim CPI and bounce there.
+/// close tx should land. `FailsAtCpi` is the retired-GS scenario: the close
+/// tx is expected to reach the Shim CPI and bounce there.
 enum Expectation {
     Succeeds,
     FailsAtCpi { reason: &'static str },
@@ -440,9 +442,9 @@ fn dump_logs_on_failure(_rpc_url: &str, err: &solana_client::client_error::Clien
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
             `make test-e2e-vaa-corpus`"]
 fn corpus_active_gs6_solana_ntt_baseline() {
-    // Mirror of Phase 1b: the same fixture, exercised through the corpus
-    // helper. If this regresses, the corpus scaffolding is wrong rather than
-    // any one VAA being malformed.
+    // Mirrors the same fixture exercised by `surfpool_e2e_mainnet_fork.rs`,
+    // here run through the corpus helper. If this regresses, the corpus
+    // scaffolding is wrong rather than any one VAA being malformed.
     run_corpus_case(CorpusCase {
         fixture_name: "mainnet_solana_token_bridge_seq2211.vaa",
         category: "active GS6 / Solana NTT (baseline)",
@@ -494,11 +496,11 @@ fn corpus_active_gs6_xlayer_ntt_emitter() {
             `make test-e2e-vaa-corpus`"]
 fn corpus_retired_gs1_token_bridge_register_chain() {
     // Token Bridge governance VAA (`RegisterChain`, action=2) signed by
-    // guardian set 1. Pins the master plan §7 "historical guardian-set
-    // ceiling" concern: the Shim's `is_active(timestamp)` check fails for
-    // long-expired sets, so this test asserts the failure rather than
-    // success. If the Shim ever changes its expiry policy, this case will
-    // flip to `Succeeds` and we'll know.
+    // guardian set 1. Pins the historical guardian-set ceiling concern:
+    // the Shim's `is_active(timestamp)` check fails for long-expired sets,
+    // so this test asserts the failure rather than success. If the Shim
+    // ever changes its expiry policy, this case will flip to `Succeeds`
+    // and we'll know.
     run_corpus_case(CorpusCase {
         fixture_name: "mainnet_gs1_token_bridge_register_chain.vaa",
         category: "retired GS1 / Token Bridge governance (short)",

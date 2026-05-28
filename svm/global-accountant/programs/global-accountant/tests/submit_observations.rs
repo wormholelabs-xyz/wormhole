@@ -1,21 +1,18 @@
 //! Integration tests for `submit_observations` + `close_pending`.
 //!
-//! Written test-first per `.claude/tasks/accountant-migration.md`'s TDD rule.
 //! Gated on the paired (`mock-vaa`, `test-only-open-digest`, `mock-noreplay`)
 //! feature trio so the in-process mollusk runs can sidestep the Verify VAA
 //! Shim, expose the test-only `open_digest` for cross-verification, and use a
 //! single-byte NoReplay sentinel in place of the real CPI.
 //!
-//! Test surface covered, mapping to the design doc
-//! (`accountant-migration-pending-quorum-design.md`):
+//! Test surface covered:
 //!
-//! - §3.1 — single pending PDA per `(chain, emitter, sequence)`.
-//! - §3.2 — bitmap-only signature storage.
-//! - §3.3 — wipe-on-rotation decision table (stale / rotation / forgery).
-//! - §3.4 — inline `secp256k1_recover` verification (good + bad signatures).
-//! - §3.5 — quorum commit flow (NoReplay flip + DigestAccount open + pending
-//!   close).
-//! - §3.6 — `close_pending` triggers (expired set + NoReplay-marked).
+//! - Single pending PDA per `(chain, emitter, sequence, digest)`.
+//! - Bitmap-only signature storage.
+//! - Wipe-on-rotation decision table (stale / rotation / forgery).
+//! - Inline `secp256k1_recover` verification (good + bad signatures).
+//! - Quorum commit flow (NoReplay flip + DigestAccount open + pending close).
+//! - `close_pending` triggers (expired set + NoReplay-marked).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -339,7 +336,7 @@ struct Scenario {
     /// Stand-in for the global-accountant-owned `noreplay-authority` PDA. In
     /// mollusk runs we never reach the real CPI (gated behind `mock-noreplay`),
     /// so the address only needs to be a stable distinct pubkey the runtime
-    /// can include in the account list. Phase 2.3's e2e test
+    /// can include in the account list. The surfpool e2e test
     /// (`surfpool_e2e_submit_observations_real_noreplay.rs`) exercises the
     /// real derivation and the CPI together.
     noreplay_authority_pubkey: Pubkey,
@@ -359,9 +356,9 @@ impl Scenario {
         emitter[31] = 0x77;
         let sequence: u64 = 0x0000_0000_0000_0042;
 
-        // Default scenario: an attest-payload body. The digest is now derived
-        // from the body rather than supplied as an arbitrary 32 bytes — this
-        // matches the Phase 2.4 wire contract where the program verifies
+        // Default scenario: an attest-payload body. The digest is derived
+        // from the body rather than supplied as an arbitrary 32 bytes —
+        // matches the wire contract where the program verifies
         // `keccak256(keccak256(body)) == digest` before any state work.
         let body = build_attest_body(chain, &emitter, sequence);
         let digest = double_keccak256_host(&body);
@@ -866,12 +863,12 @@ fn submit_with_new_set_observation_wipes_old_pending() {
 
 #[test]
 fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
-    // §3.1 (per-digest PDA seeds) and §3.3 (digest-mismatch under the same
-    // guardian set creates a sibling bucket, not a rejection). Source-chain
-    // reorgs that change the VAA body's `timestamp` produce a different digest
-    // for the same `(chain, emitter, sequence)`; the new design routes those
-    // observations into a distinct pending PDA whose seeds include the digest,
-    // letting both digests race to quorum independently.
+    // Per-digest PDA seeds + digest-mismatch under the same guardian set
+    // creates a sibling bucket, not a rejection. Source-chain reorgs that
+    // change the VAA body's `timestamp` produce a different digest for the
+    // same `(chain, emitter, sequence)`; the design routes those observations
+    // into a distinct pending PDA whose seeds include the digest, letting
+    // both digests race to quorum independently.
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x4C);
 
@@ -880,7 +877,7 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
 
     // Second observation under digest D2 with same GSI. Must SUCCEED into a
     // sibling PDA at a different canonical address (derived from the new
-    // digest). The Phase 2.4 wire shape requires a body whose
+    // digest). The wire shape requires a body whose
     // `keccak256(keccak256(body))` matches the digest, so we mutate one byte
     // of the original body (the consistency_level field at offset 50) and
     // recompute the digest from there.
@@ -1015,9 +1012,9 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     );
 
     // (2 + 3) Switch to D2; first D2 observation must create a fresh PDA
-    // (different address) under the same GSI. The Phase 2.4 wire shape
-    // requires a real body whose double-keccak matches the digest, so we
-    // mutate two bytes of the original body and recompute.
+    // (different address) under the same GSI. The wire shape requires a real
+    // body whose double-keccak matches the digest, so we mutate two bytes of
+    // the original body and recompute.
     let mut alternate_body = scenario.body.clone();
     alternate_body[50] = 0xA5;
     alternate_body[49] = 0x5A;
@@ -1117,9 +1114,7 @@ fn close_pending_stranded_digest_bucket_after_sibling_committed() {
     // After the fork-recovery scenario, the D1 pending PDA is unreachable: a
     // sibling D2 bucket reached quorum and flipped NoReplay for the shared
     // `(chain, emitter, sequence)`. Trigger (b) of `close_pending` —
-    // "NoReplay-marked" — must reclaim the D1 rent. Mirrors the source-chain
-    // reorg cleanup story described in
-    // `accountant-migration-pending-quorum-design.md` §3.6.
+    // "NoReplay-marked" — must reclaim the D1 rent.
 
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 6, 0x5B);
@@ -1327,7 +1322,7 @@ fn close_pending_with_active_set_and_no_noreplay_fails() {
 }
 
 // ============================================================================
-// Phase 2.4 — balance-accounting tests.
+// Balance-accounting tests.
 //
 // The quorum-completing observation parses the body's Token Bridge payload
 // and routes balance updates through `BalanceAccountLayout::lock_or_burn` /
@@ -1338,8 +1333,8 @@ fn close_pending_with_active_set_and_no_noreplay_fails() {
 
 /// Helper: stamp out 13 distinct guardian observations against a Token
 /// Bridge transfer scenario and return the post-tx account list. Used by all
-/// of the Phase 2.4 happy-path tests so each scenario doesn't repeat the
-/// 13-iteration accumulator loop.
+/// of the balance-accounting happy-path tests so each scenario doesn't repeat
+/// the 13-iteration accumulator loop.
 fn drive_transfer_to_quorum(
     mollusk: &Mollusk,
     scenario: &Scenario,

@@ -1,13 +1,12 @@
-//! Integration tests for `submit_vaas` (Phase 2.5).
+//! Integration tests for `submit_vaas`.
 //!
-//! Written TDD-first per `.claude/tasks/accountant-migration.md`'s rule. Gated
-//! on the paired `(mock-vaa, test-only-open-digest, mock-noreplay)` feature
-//! trio so the in-process mollusk runs skip the Verify VAA Shim CPI, expose
-//! the `open_digest` cross-check entrypoint, and substitute a single-byte
-//! NoReplay sentinel for the real CPI. The Phase 2.5 surfpool e2e test
+//! Gated on the paired `(mock-vaa, test-only-open-digest, mock-noreplay)`
+//! feature trio so the in-process mollusk runs skip the Verify VAA Shim CPI,
+//! expose the `open_digest` cross-check entrypoint, and substitute a
+//! single-byte NoReplay sentinel for the real CPI. The surfpool e2e test
 //! (`surfpool_e2e_submit_vaas.rs`) drives the real CPI path.
 //!
-//! Test surface, mapping to `accountant-migration-cosmwasm-deep-dive.md` §4:
+//! Test surface:
 //!
 //! - happy-path transfer: balances credited / debited, NoReplay flipped,
 //!   DigestAccount opened.
@@ -499,8 +498,7 @@ fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
     //
     // This is the documented behaviour parallel to CosmWasm's
     // `DuplicateMessage` short-circuit when the same `(chain, emitter,
-    // sequence)` has already been committed via any path
-    // (`accountant-migration-cosmwasm-deep-dive.md` §4.2).
+    // sequence)` has already been committed via any path.
     let mollusk = mollusk();
     let scenario = Scenario::new(0xA3);
 

@@ -18,8 +18,8 @@
 //! instruction-data shape: the mock branch accepts (and ignores) the three
 //! Shim-CPI accounts and the trailing `guardian_set_bump` byte. This keeps a
 //! single client-side instruction builder valid across both feature
-//! configurations, so the surfpool e2e tests (Phase 1b) and the mollusk tests
-//! (Phase 1a) construct transactions the same way.
+//! configurations, so the surfpool e2e tests and the mollusk tests construct
+//! transactions the same way.
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
@@ -99,7 +99,6 @@ pub fn process(
     // a quorum from any currently-active set; the Shim's `is_active(timestamp)`
     // check rejects retired sets, and pinning close to the original set would
     // create permanent stuck accounts after rotation without improving safety.
-    // See `accountant-migration-digest-design.md` §3 step 3 for the full rationale.
     verify_vaa(
         verify_vaa_shim_program,
         guardian_set,

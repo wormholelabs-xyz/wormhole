@@ -1,10 +1,8 @@
 //! `submit_observations` — quorum tracker.
 //!
-//! Implements the critical-path slice of Phase 2 per
-//! `accountant-migration-pending-quorum-design.md`. A
-//! `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA
-//! accumulates guardian signatures; the 13th observation in any one bucket
-//! atomically
+//! A `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout`
+//! PDA accumulates guardian signatures; the 13th observation in any one
+//! bucket atomically
 //!
 //! 1. flips the NoReplay slot (shared across sibling buckets at the same
 //!    `(chain, emitter, sequence)`),
@@ -13,8 +11,8 @@
 //!
 //! Sibling buckets at the same `(chain, emitter, sequence)` but different
 //! digests (the source-chain reorg case) coexist and race independently; the
-//! losing buckets are reclaimed via `close_pending` trigger (b)
-//! (NoReplay-marked) per §3.6.
+//! losing buckets are reclaimed via `close_pending`'s NoReplay-marked
+//! trigger.
 //!
 //! Signature verification is inline via the Solana-native `secp256k1_recover`
 //! syscall (`pinocchio::syscalls::sol_secp256k1_recover`). No raw signatures
@@ -23,8 +21,7 @@
 //!
 //! NoReplay integration is gated behind the `mock-noreplay` Cargo feature
 //! mirroring `mock-vaa`'s shape (`noreplay::is_marked` / `noreplay::mark_used`
-//! below). The real CPI swap is Phase 2.3 — see the `compile_error!` fence in
-//! the `cfg(not(feature = "mock-noreplay"))` branch.
+//! below).
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -41,8 +38,8 @@ use crate::err;
 // NoReplay integration lives in the sibling `noreplay` module so
 // `close_pending` can re-use `is_marked` for its trigger-(b) check without
 // re-importing this module's private items. The balance-mutation helper
-// (`apply_transfer`) was lifted into a sibling `transfer` module in Phase 2.5
-// so `submit_vaas` can re-use it without depending on this module's internals.
+// (`apply_transfer`) lives in a sibling `transfer` module so `submit_vaas`
+// can re-use it without depending on this module's internals.
 use crate::instructions::{
     noreplay, open_digest_inner, pda_init::init_or_upgrade_pda, transfer::apply_transfer,
 };
@@ -129,7 +126,7 @@ pub fn process(
     //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs;
     //                       also payer for any lazy noreplay bitmap create AND
     //                       for any lazy Account PDA create on the quorum branch).
-    //   1. `[WRITE]`         pending PDA (derived from §3.1).
+    //   1. `[WRITE]`         pending PDA.
     //   2. `[]`              GuardianSet PDA (Core Bridge).
     //   3. `[WRITE]`         NoReplay bitmap PDA. Read-only at pre-check
     //                       time, writable at commit time — the runtime
@@ -192,7 +189,8 @@ pub fn process(
         &parsed.signature,
     )?;
 
-    // (3) Load or initialise the pending PDA per the §3.3 decision table.
+    // (3) Load or initialise the pending PDA per the decision table in
+    // `decide_pending_action`.
     let pending_action = decide_pending_action(pending_pda, &parsed)?;
 
     match pending_action {
@@ -365,7 +363,7 @@ enum PendingAction {
     Continue,
 }
 
-/// §3.3 of the pending-quorum design doc, in one table-driven function.
+/// Decide what to do with the pending PDA for this observation.
 ///
 /// "System-owned with zero data" means "fresh slot — create". "Non-system
 /// owner with data" means "ours, already accumulating — compare". The runtime
@@ -374,10 +372,10 @@ enum PendingAction {
 /// importing the program ID for equality (Pinocchio determines program ID at
 /// deploy-time, not as a `const`).
 ///
-/// Per-digest PDA seeds (§3.1) mean the digest-mismatch case never lands in
-/// this function: a different digest produces a different canonical address,
-/// and that address is either uninitialised (`Create`) or already filled by
-/// some prior observation under the *same* digest (`Continue` / rotation).
+/// Per-digest PDA seeds mean the digest-mismatch case never lands in this
+/// function: a different digest produces a different canonical address, and
+/// that address is either uninitialised (`Create`) or already filled by some
+/// prior observation under the *same* digest (`Continue` / rotation).
 /// `DigestForgery` is therefore retired — every PDA loaded here was opened
 /// under exactly the digest we are accumulating against.
 fn decide_pending_action(
@@ -420,7 +418,7 @@ fn decide_pending_action(
 /// layout. Including the digest in the seed tuple is what lets fork/reorg
 /// observations (same chain/emitter/sequence, different digest) accumulate in
 /// parallel sibling buckets rather than getting stuck on a `DigestForgery`
-/// rejection — see `accountant-migration-pending-quorum-design.md` §3.1.
+/// rejection.
 fn create_pending_pda(
     program_id: &Address,
     submitter: &AccountView,
@@ -477,9 +475,9 @@ fn create_pending_pda(
 }
 
 /// Refund the recorded payer and zero the account. Used by the quorum-commit
-/// branch (§3.5). The caller has already loaded the layout to read `payer`
-/// and `guardian_set_index`; re-loading here would borrow twice, so we pass
-/// the recorded payer in.
+/// branch. The caller has already loaded the layout to read `payer` and
+/// `guardian_set_index`; re-loading here would borrow twice, so we pass the
+/// recorded payer in.
 pub(crate) fn close_pending_pda(
     pending_pda: &mut AccountView,
     rent_recipient: &mut AccountView,
@@ -509,12 +507,11 @@ pub(crate) fn close_pending_pda(
 /// only the new submitter), so the original payer's rent is forfeit to the
 /// new submitter as a small reward for paying the rotation cost.
 ///
-/// This is a deliberate simplification of §3.3's text: passing the original
-/// payer account every time would balloon the account list for the
-/// uncommon-but-not-rare rotation case. The forfeit is bounded (~$0.10) and
-/// the alternative — gas-sponsored rent recovery via the explicit
-/// `close_pending` ix — remains available for any payer who notices ahead of
-/// rotation.
+/// This is a deliberate simplification: passing the original payer account
+/// every time would balloon the account list for the uncommon-but-not-rare
+/// rotation case. The forfeit is bounded (~$0.10) and the alternative —
+/// gas-sponsored rent recovery via the explicit `close_pending` ix — remains
+/// available for any payer who notices ahead of rotation.
 fn wipe_pending_pda(
     pending_pda: &mut AccountView,
     new_submitter: &mut AccountView,
@@ -529,7 +526,9 @@ fn wipe_pending_pda(
     pending_pda.close()
 }
 
-/// Inline signature verification per §3.4 of the design doc.
+/// Inline signature verification via `secp256k1_recover`. The recovered
+/// pubkey is keccak-hashed and compared to the 20-byte Ethereum-style guardian
+/// key stored in the Core Bridge GuardianSet PDA.
 fn verify_signature(
     guardian_set: &AccountView,
     expected_guardian_set_index: u32,

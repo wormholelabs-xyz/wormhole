@@ -1,5 +1,5 @@
-//! Phase 2.5 surfpool E2E — `submit_vaas` against the real Verify VAA Shim
-//! and the real `solana-noreplay` program.
+//! Surfpool E2E — `submit_vaas` against the real Verify VAA Shim and the
+//! real `solana-noreplay` program.
 //!
 //! Mirrors the shape of `surfpool_e2e_submit_observations_real_noreplay.rs`
 //! but drives the signed-VAA backfill path (`submit_vaas`) instead of the
@@ -283,7 +283,7 @@ fn seed_account_pda(
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `make test-e2e-submit-vaas` or `cargo test -- --ignored`"]
 fn surfpool_submit_vaas_token_bridge_transfer() {
-    // ----- Phase 1: locate both .so artefacts. -----
+    // ----- Step 1: locate both .so artefacts. -----
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
@@ -303,7 +303,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         noreplay_bytes.len()
     );
 
-    // ----- Phase 2: load + parse the historical Token Bridge transfer VAA. -----
+    // ----- Step 2: load + parse the historical Token Bridge transfer VAA. -----
     let vaa =
         load_vaa_fixture("mainnet_solana_token_bridge_transfer_seq1395207.vaa");
     eprintln!(
@@ -337,7 +337,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         hex_encode(&token_address),
     );
 
-    // ----- Phase 3: boot surfpool with mainnet fork. -----
+    // ----- Step 3: boot surfpool with mainnet fork. -----
     let guard = start_surfpool(SurfpoolOptions::mainnet_fork(
         "ga-surfpool-submit-vaas",
         datasource_rpc_url(),
@@ -345,7 +345,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    // ----- Phase 4: deploy programs and fund payer. -----
+    // ----- Step 4: deploy programs and fund payer. -----
     let ga_program_kp = Keypair::new();
     let ga_program_id = ga_program_kp.pubkey();
     let payer = Keypair::new();
@@ -387,7 +387,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         gs_account.data.len()
     );
 
-    // ----- Phase 5: pre-post the VAA signatures via the real Shim. -----
+    // ----- Step 5: pre-post the VAA signatures via the real Shim. -----
     let post_start = Instant::now();
     post_signatures(&rpc, &payer, &guardian_signatures_kp, &vaa);
     eprintln!(
@@ -395,7 +395,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         post_start.elapsed()
     );
 
-    // ----- Phase 6: derive PDAs for the submit_vaas accounts. -----
+    // ----- Step 6: derive PDAs for the submit_vaas accounts. -----
     let (digest_pda, _digest_bump) = derive_digest_pda(
         &ga_program_id,
         vaa.emitter_chain,
@@ -420,7 +420,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
          dst_pda={dest_account_pda}"
     );
 
-    // ----- Phase 7: pre-seed the Account PDAs with sufficient balances.
+    // ----- Step 7: pre-seed the Account PDAs with sufficient balances.
     // Source = (Solana, Ethereum-native) ⇒ wrapped burn ⇒ debit. We need
     // at least `amount` on the source PDA.
     // Dest = (Ethereum, Ethereum-native) ⇒ native unlock ⇒ debit. Same
@@ -447,7 +447,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         seed_amount,
     );
 
-    // ----- Phase 8: build + send the submit_vaas tx. -----
+    // ----- Step 8: build + send the submit_vaas tx. -----
     let body = vaa.bytes[vaa.body_offset..].to_vec();
     let ix = Instruction {
         program_id: ga_program_id,
@@ -478,7 +478,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         .expect("submit_vaas send_and_confirm");
     eprintln!("[submit-vaas-e2e] submit_vaas tx={sig}");
 
-    // ----- Phase 9: assert post-conditions. -----
+    // ----- Step 9: assert post-conditions. -----
     // NoReplay bit set.
     let bitmap_after = rpc
         .get_account_with_commitment(&bitmap_pda, CommitmentConfig::confirmed())

@@ -1,11 +1,10 @@
-//! Phase 2.3 surfpool E2E — `submit_observations` driven against the **real**
+//! Surfpool E2E — `submit_observations` driven against the **real**
 //! `solana-noreplay` program co-deployed alongside global-accountant.
 //!
-//! This test is the regression guard for the Phase 2.3 slice that retired the
-//! `mock-noreplay` sentinel byte in favour of a real CPI to `solana-noreplay`'s
-//! `MarkUsed` from inside the quorum-completing branch of `submit_observations`.
-//! It deploys the **production-shape** `.so` (built with `make build-prod`, no
-//! mock features), wires a fresh `noreplay-authority` PDA owned by
+//! Regression guard for the real CPI to `solana-noreplay`'s `MarkUsed` from
+//! inside the quorum-completing branch of `submit_observations`. Deploys the
+//! **production-shape** `.so` (built with `make build-prod`, no mock
+//! features), wires a fresh `noreplay-authority` PDA owned by
 //! global-accountant, and drives 13 distinct guardian observations until the
 //! 13th triggers the CPI and flips the real bitmap bit.
 //!
@@ -18,7 +17,7 @@
 //!
 //! Requires `solana_noreplay.so` at
 //! `~/WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so`
-//! (same source as the Phase 2.2.2 smoke test) and an up-to-date production
+//! (same source as the noreplay-smoke test) and an up-to-date production
 //! build of `global_accountant.so`. The Makefile target ensures both before
 //! invoking `cargo test`.
 
@@ -154,7 +153,7 @@ fn derive_digest_pda(
 }
 
 /// Derive the noreplay-authority PDA owned by global-accountant. Mirrors the
-/// on-chain `derive_noreplay_authority` helper added in Phase 2.3.
+/// on-chain `derive_noreplay_authority` helper.
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
 }
@@ -188,9 +187,9 @@ fn submit_observations_ix_data(
     body: &[u8],
 ) -> Vec<u8> {
     // Wire shape: 1-byte discriminator + 146-byte fixed prefix + 2-byte body
-    // length (LE) + body bytes. Phase 2.4 added the body bytes so the program
-    // can re-derive `keccak256(keccak256(body)) == digest` and parse the
-    // Token Bridge payload for balance work.
+    // length (LE) + body bytes. The program re-derives
+    // `keccak256(keccak256(body)) == digest` and parses the Token Bridge
+    // payload for balance work.
     let mut data = Vec::with_capacity(1 + 146 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(&chain.to_be_bytes());
@@ -240,12 +239,11 @@ fn build_submit_observations_ix(
     digest_bump: u8,
     body: &[u8],
 ) -> Instruction {
-    // The Phase 2.4 account list grows by two trailing slots: source-chain
-    // Account PDA and destination-chain Account PDA. For Attest / Other
-    // payloads (no balance work) the program never touches these slots, so
-    // re-using the noreplay-authority PDA as a sentinel satisfies the
-    // runtime's account-meta declaration without standing up real Account
-    // PDAs.
+    // The account list carries two trailing slots: source-chain Account PDA
+    // and destination-chain Account PDA. For Attest / Other payloads (no
+    // balance work) the program never touches these slots, so re-using the
+    // noreplay-authority PDA as a sentinel satisfies the runtime's
+    // account-meta declaration without standing up real Account PDAs.
     Instruction {
         program_id: *program_id,
         accounts: vec![
@@ -282,7 +280,7 @@ fn build_submit_observations_ix(
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `make test-e2e-submit-obs` or `cargo test -- --ignored`"]
 fn surfpool_submit_observations_real_noreplay() {
-    // ----- Phase 1: locate both .so artifacts before spending boot time. -----
+    // ----- Step 1: locate both .so artifacts before spending boot time. -----
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
@@ -302,7 +300,7 @@ fn surfpool_submit_observations_real_noreplay() {
         noreplay_bytes.len()
     );
 
-    // ----- Phase 2: boot surfpool offline. -----
+    // ----- Step 2: boot surfpool offline. -----
     let guard =
         start_surfpool(SurfpoolOptions::offline("ga-surfpool-submit-real-noreplay"));
     let rpc_url = guard.rpc_url();
@@ -316,7 +314,7 @@ fn surfpool_submit_observations_real_noreplay() {
          noreplay program_id={NOREPLAY_PROGRAM_ID} (canonical)"
     );
 
-    // ----- Phase 3: airdrop the submitter. The noreplay-authority PDA is
+    // ----- Step 3: airdrop the submitter. The noreplay-authority PDA is
     // signed via invoke_signed and never holds lamports itself.
     let submitter = Keypair::new();
     let sig = rpc
@@ -326,19 +324,19 @@ fn surfpool_submit_observations_real_noreplay() {
         rpc.confirm_transaction(&sig)
     });
 
-    // ----- Phase 4: deploy both programs. -----
+    // ----- Step 4: deploy both programs. -----
     deploy_program(&rpc_url, &ga_program_id, &ga_bytes);
     deploy_program(&rpc_url, &NOREPLAY_PROGRAM_ID, &noreplay_bytes);
 
-    // ----- Phase 5: derive PDAs. -----
+    // ----- Step 5: derive PDAs. -----
     let chain: u16 = 2;
     let mut emitter = [0u8; 32];
     emitter[31] = 0x77;
     let sequence: u64 = 0x42;
-    // Phase 2.4: build an Attest body and derive the digest from it via
+    // Build an Attest body and derive the digest from it via
     // `keccak256(keccak256(body))`. The program re-verifies this relationship
     // before any state mutation, so a synthetic digest unrelated to the body
-    // would now reject with `BodyDigestMismatch`.
+    // rejects with `BodyDigestMismatch`.
     let body = build_attest_body(chain, &emitter, sequence);
     let digest = double_keccak256_host(&body);
 
@@ -355,7 +353,7 @@ fn surfpool_submit_observations_real_noreplay() {
          noreplay_authority={noreplay_authority} bitmap_pda={bitmap_pda} bump={bitmap_bump}"
     );
 
-    // ----- Phase 6: synthesise a 19-guardian set under index 4 and inject the
+    // ----- Step 6: synthesise a 19-guardian set under index 4 and inject the
     // GuardianSet account at a fixed pubkey via the `surfnet_setAccount`
     // cheatcode. No Core Bridge ownership check exists today in our program,
     // so any owner works.
@@ -387,7 +385,7 @@ fn surfpool_submit_observations_real_noreplay() {
         .expect("GS account after setAccount");
     assert_eq!(gs_after.data.len(), gs_data.len(), "GS data round-trips");
 
-    // ----- Phase 7: drive 13 observations. -----
+    // ----- Step 7: drive 13 observations. -----
     for i in 0..13u8 {
         let g = &guardians[i as usize];
         let signature = sign_digest(g, &digest);
@@ -418,7 +416,7 @@ fn surfpool_submit_observations_real_noreplay() {
         );
     }
 
-    // ----- Phase 8: assert the bitmap bit got set in the real noreplay PDA.
+    // ----- Step 8: assert the bitmap bit got set in the real noreplay PDA.
     let bitmap_after = rpc
         .get_account(&bitmap_pda)
         .expect("bitmap PDA exists post-quorum");
@@ -434,7 +432,7 @@ fn surfpool_submit_observations_real_noreplay() {
         "bit {bit_index} set in the bitmap post-quorum"
     );
 
-    // ----- Phase 9: a 14th submission for the same sequence must hit the
+    // ----- Step 9: a 14th submission for the same sequence must hit the
     // pre-check and fail with AlreadyAccounted (custom error 7).
     let extra_signature = sign_digest(&guardians[13], &digest);
     let extra_ix = build_submit_observations_ix(
@@ -467,12 +465,12 @@ fn surfpool_submit_observations_real_noreplay() {
         "expected AlreadyAccounted (custom 0x7); got: {err}"
     );
 
-    // ----- Phase 10: close_pending with NoReplay-marked trigger.
+    // ----- Step 10: close_pending with NoReplay-marked trigger.
     // Recreate a stranded D2 sibling pending PDA, then close it via trigger
     // (b). The pending PDA from above is already closed by the quorum-commit
     // path; we need a fresh sibling at a different digest seed.
-    // Phase 2.4: build a tampered body with a different consistency_level so
-    // its double-keccak yields a distinct digest. The program verifies the
+    // Build a tampered body with a different consistency_level so its
+    // double-keccak yields a distinct digest. The program verifies the
     // body/digest relationship before reaching the NoReplay pre-check.
     let mut alt_body = body.clone();
     alt_body[50] = 0xA5;

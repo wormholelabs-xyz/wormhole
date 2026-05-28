@@ -1,4 +1,4 @@
-//! Phase 0 surfpool E2E spike. Drives a real `surfpool start` subprocess over
+//! Surfpool E2E spike. Drives a real `surfpool start` subprocess over
 //! JSON-RPC through the same DigestAccount open/close lifecycle the mollusk
 //! tests already cover. Not part of the default `cargo test` set; gated behind
 //! `#[ignore]`.
@@ -87,7 +87,7 @@ impl Drop for SurfpoolGuard {
 
 /// Pick a free TCP port by binding to 0 and reading the assigned port. Brief
 /// race window between the listener drop and surfpool bind — acceptable for
-/// a Phase 0 spike.
+/// a spike test.
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     listener.local_addr().expect("local_addr").port()
@@ -389,8 +389,8 @@ fn open_digest_ix_data(
 
 fn close_digest_ix_data(mock_vaa_digest: &[u8; 32]) -> Vec<u8> {
     // 32-byte digest + 1-byte guardian_set_bump. The bump is irrelevant for
-    // the mock-vaa branch; surfpool's Phase 1b e2e test will populate the
-    // canonical Shim guardian-set bump here.
+    // the mock-vaa branch; the mainnet-fork e2e test populates the canonical
+    // Shim guardian-set bump here.
     let mut data = Vec::with_capacity(1 + 32 + 1);
     data.push(IxDiscriminator::CloseDigest as u8);
     data.extend_from_slice(mock_vaa_digest);
@@ -532,8 +532,8 @@ fn surfpool_open_close_round_trip_spike() {
     // equal the stored digest. Under `mock-vaa` the three trailing accounts
     // (guardian-signatures PDA, guardian-set PDA, Verify VAA Shim program) are
     // accepted but ignored; the wire shape mirrors the production-shape build
-    // so Phase 1b can drop in real Shim accounts without changing the
-    // instruction builder.
+    // so the mainnet-fork e2e test can drop in real Shim accounts without
+    // changing the instruction builder.
     let close_data = close_digest_ix_data(&digest);
     let guardian_signatures_placeholder = Pubkey::new_from_array([0xE1; 32]);
     let guardian_set_placeholder = Pubkey::new_from_array([0xE2; 32]);

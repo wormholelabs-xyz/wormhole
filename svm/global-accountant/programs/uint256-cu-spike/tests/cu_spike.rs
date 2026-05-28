@@ -10,9 +10,9 @@
 //!     cargo test -p uint256-cu-spike -- --ignored --nocapture
 //! ```
 //!
-//! The test logs `compute_units_consumed` so the value can be lifted into the
-//! migration plan §13. A regression on either crate (`ruint`, or a future
-//! switch to Orca's u256) flips the number and gets caught in code review.
+//! The test logs `compute_units_consumed` so the value can be tracked. A
+//! regression on either crate (`ruint`, or a future switch to Orca's u256)
+//! flips the number and gets caught in code review.
 
 use mollusk_svm::Mollusk;
 use solana_instruction::Instruction;
@@ -56,8 +56,8 @@ fn cu_spike_checked_add_no_overflow() {
         "uint256-cu-spike: checked_add(500, 200) consumed {} CU",
         result.compute_units_consumed
     );
-    // No assertion on the CU number — we report it for the migration plan.
-    // Assert only that the program ran to completion.
+    // No assertion on the CU number — we report it for tracking. Assert only
+    // that the program ran to completion.
     assert!(
         matches!(result.program_result, mollusk_svm::result::ProgramResult::Success),
         "spike program failed: {:?}",

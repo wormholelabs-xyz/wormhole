@@ -1,9 +1,8 @@
 //! Shared helpers for surfpool-driven integration tests.
 //!
-//! Extracted from the Phase 0 spike (`surfpool_e2e_spike.rs`) so the Phase 1b
-//! mainnet-fork e2e test can reuse subprocess management, cheatcode plumbing,
-//! and port allocation without duplicating any logic. Each test crate that
-//! pulls this module in via `mod common;` gets the full helper set.
+//! Subprocess management, cheatcode plumbing, and port allocation reused
+//! across every surfpool e2e test. Each test crate that pulls this module
+//! in via `mod common;` gets the full helper set.
 //!
 //! The module is intentionally not `pub` outside the `tests/` tree — it is
 //! compiled into every integration-test binary that declares it, which is

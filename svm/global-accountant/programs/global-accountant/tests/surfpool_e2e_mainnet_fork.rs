@@ -1,4 +1,4 @@
-//! Phase 1b surfpool E2E test against the Solana mainnet fork.
+//! Surfpool E2E test against the Solana mainnet fork.
 //!
 //! Drives the full DigestAccount lifecycle through the real Verify VAA Shim
 //! CPI. surfpool boots with a mainnet datasource so the Shim program, the
@@ -35,7 +35,7 @@
 //! The program's paired-feature fence (`src/lib.rs`) makes `mock-vaa` and
 //! `test-only-open-digest` mutually inclusive: a build either has both (mock
 //! VAA + dispatchable `open_digest`) or neither (real CPI + no `open_digest`).
-//! This Phase 1b test exercises the **real CPI** path, so the deployed `.so`
+//! This test exercises the **real CPI** path, so the deployed `.so`
 //! has both features off — which means `open_digest` is not in the program's
 //! dispatch table and we cannot use it to materialise the DigestAccount PDA.
 //!
@@ -507,8 +507,8 @@ fn build_close_ix(
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
             `make test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
 fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
-    // Phase 1b happy path. Open the PDA with the digest the VAA was signed
-    // over, then close it. The Shim's CPI must succeed end-to-end against the
+    // Happy path. Open the PDA with the digest the VAA was signed over,
+    // then close it. The Shim's CPI must succeed end-to-end against the
     // real on-chain guardian set.
     let fx = boot_and_seed(EXPECTED_DIGEST);
 
@@ -599,7 +599,7 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
             `make test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
 fn close_digest_with_tampered_digest_fails_at_cpi() {
-    // Phase 1b negative path. Open the PDA with a tampered digest — single
+    // Negative path. Open the PDA with a tampered digest — single
     // last-byte flip is enough to break signature recovery — then call
     // `close_digest` with the same tampered digest in the instruction data.
     //

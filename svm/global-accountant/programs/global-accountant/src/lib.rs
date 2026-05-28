@@ -1,8 +1,4 @@
 //! Wormhole Global Accountant — Solana port (Pinocchio).
-//!
-//! Scope: digest-account open/close lifecycle. Balance accounting,
-//! quorum logic, NoReplay, and Verify VAA Shim CPI live in later slices.
-//! See `.claude/tasks/accountant-migration.md`.
 
 #![cfg_attr(target_os = "solana", no_std)]
 // `target_os = "solana"` is provided by the SBF toolchain; the host toolchain
