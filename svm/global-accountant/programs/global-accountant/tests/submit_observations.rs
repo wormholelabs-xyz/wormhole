@@ -21,8 +21,9 @@
 
 use {
     global_accountant_definitions::{
-        DigestAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        PendingObservationsLayout, DIGEST_SEED_PREFIX, PENDING_SEED_PREFIX,
+        BalanceAccountLayout, DigestAccountLayout, GlobalAccountantError,
+        Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
+        DIGEST_SEED_PREFIX, PENDING_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -74,6 +75,68 @@ fn derive_digest_pda(chain: u16, emitter: &[u8; 32], sequence: u64) -> (Pubkey, 
     )
 }
 
+fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    let token_chain_be = token_chain.to_be_bytes();
+    Pubkey::find_program_address(
+        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        &program_id(),
+    )
+}
+
+/// Host-side `keccak256(keccak256(body))` — the Wormhole VAA digest
+/// convention. Mirrors the on-chain `double_keccak256` in
+/// `submit_observations.rs`.
+fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
+    let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
+    solana_keccak_hasher::hashv(&[&inner]).to_bytes()
+}
+
+/// Build a VAA body whose `keccak256(keccak256(...))` equals the supplied
+/// digest. Since we don't have a digest preimage from the original test
+/// fixtures (the digest was made-up), we build the body and then compute the
+/// digest from it — the scenario fixture's `digest` field becomes a function
+/// of the body, not the other way around.
+fn build_attest_body(emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> Vec<u8> {
+    // 51-byte header + 1-byte action (0x02). Attest payloads carry more on
+    // the wire but the parser only reads the action byte, so 52 bytes is
+    // sufficient for our tests.
+    let mut body = vec![0u8; 52];
+    body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
+    body[10..42].copy_from_slice(emitter_address);
+    body[42..50].copy_from_slice(&sequence.to_be_bytes());
+    body[51] = 0x02;
+    body
+}
+
+/// Build a VAA body carrying a Token Bridge transfer (action 0x01) with the
+/// supplied fields.
+fn build_transfer_body(
+    emitter_chain: u16,
+    emitter_address: &[u8; 32],
+    sequence: u64,
+    amount: u128,
+    token_chain: u16,
+    token_address: &[u8; 32],
+    recipient_chain: u16,
+) -> Vec<u8> {
+    let mut body = vec![0u8; 51 + 133];
+    body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
+    body[10..42].copy_from_slice(emitter_address);
+    body[42..50].copy_from_slice(&sequence.to_be_bytes());
+    // Token Bridge transfer payload starts at offset 51.
+    body[51] = 0x01;
+    // amount: 32-byte BE, low 16 bytes hold the u128.
+    body[52 + 16..52 + 32].copy_from_slice(&amount.to_be_bytes());
+    body[84..116].copy_from_slice(token_address);
+    body[116..118].copy_from_slice(&token_chain.to_be_bytes());
+    body[118] = 0xAB; // recipient: opaque to the accountant
+    body[149] = 0xCD;
+    body[150..152].copy_from_slice(&recipient_chain.to_be_bytes());
+    // fee at 152..184 stays zero.
+    body
+}
+
 fn submit_ix_data(
     chain: u16,
     emitter: &[u8; 32],
@@ -84,10 +147,11 @@ fn submit_ix_data(
     signature: &[u8; 65],
     pending_bump: u8,
     digest_bump: u8,
+    body: &[u8],
 ) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 145-byte body (see
-    // submit_observations.rs SUBMIT_DATA_LEN).
-    let mut data = Vec::with_capacity(1 + 145);
+    // Wire shape: 1-byte discriminator + 146-byte fixed prefix + 2-byte body
+    // length (LE) + body bytes. Mirrors `submit_observations.rs::SUBMIT_FIXED_LEN`.
+    let mut data = Vec::with_capacity(1 + 146 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(&chain.to_be_bytes());
     data.extend_from_slice(emitter);
@@ -98,6 +162,8 @@ fn submit_ix_data(
     data.extend_from_slice(signature);
     data.push(pending_bump);
     data.push(digest_bump);
+    data.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    data.extend_from_slice(body);
     data
 }
 
@@ -253,6 +319,12 @@ struct Scenario {
     chain: u16,
     emitter: [u8; 32],
     sequence: u64,
+    /// VAA body bytes — the source of truth. `digest` is derived from this
+    /// via `double_keccak256_host`. The default scenario uses an Attest
+    /// payload (action 0x02) so the existing pre-Phase-2.4 tests don't
+    /// accidentally trigger balance work; transfer-payload tests build their
+    /// own scenario with `Self::with_transfer_body`.
+    body: Vec<u8>,
     digest: [u8; 32],
     guardian_set_index: u32,
     guardians: Vec<Guardian>,
@@ -271,6 +343,13 @@ struct Scenario {
     /// (`surfpool_e2e_submit_observations_real_noreplay.rs`) exercises the
     /// real derivation and the CPI together.
     noreplay_authority_pubkey: Pubkey,
+    /// Source-chain Account PDA. Required on every submission (slot 8 of the
+    /// account list). For Attest payloads the program never touches it; the
+    /// default scenario uses the noreplay-authority pubkey as a sentinel so
+    /// the slot is satisfied without standing up a real Account PDA.
+    source_account_pubkey: Pubkey,
+    /// Destination-chain Account PDA (slot 9). Same semantics as `source`.
+    dest_account_pubkey: Pubkey,
 }
 
 impl Scenario {
@@ -280,22 +359,24 @@ impl Scenario {
         emitter[31] = 0x77;
         let sequence: u64 = 0x0000_0000_0000_0042;
 
-        // Distinct digest from `lifecycle_inputs()` to avoid any cross-test
-        // confusion when both fixtures coexist.
-        let mut digest = [0u8; 32];
-        for (i, byte) in digest.iter_mut().enumerate() {
-            *byte = (i as u8).wrapping_add(0x10);
-        }
+        // Default scenario: an attest-payload body. The digest is now derived
+        // from the body rather than supplied as an arbitrary 32 bytes — this
+        // matches the Phase 2.4 wire contract where the program verifies
+        // `keccak256(keccak256(body)) == digest` before any state work.
+        let body = build_attest_body(chain, &emitter, sequence);
+        let digest = double_keccak256_host(&body);
 
         let guardians = make_guardians(guardian_count, seed);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let (pending_pda, pending_bump) = derive_pending_pda(chain, &emitter, sequence, &digest);
         let (digest_pda, digest_bump) = derive_digest_pda(chain, &emitter, sequence);
+        let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
 
         Self {
             chain,
             emitter,
             sequence,
+            body,
             digest,
             guardian_set_index: gsi,
             guardians,
@@ -307,8 +388,52 @@ impl Scenario {
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
             noreplay_bucket_pubkey: Pubkey::new_from_array([0xC2u8; 32]),
             noreplay_program_pubkey: Pubkey::new_from_array([0xC3u8; 32]),
-            noreplay_authority_pubkey: Pubkey::new_from_array([0xC4u8; 32]),
+            noreplay_authority_pubkey,
+            // Attest payload ⇒ slots 8/9 never touched. Use a sentinel pubkey
+            // so the runtime account-meta is satisfied without needing the
+            // canonical seeds. Re-using noreplay-authority is the cheapest
+            // option and matches the documented "sentinel" pattern.
+            source_account_pubkey: noreplay_authority_pubkey,
+            dest_account_pubkey: noreplay_authority_pubkey,
         }
+    }
+
+    /// Variant that swaps the default Attest body for a Token Bridge
+    /// Transfer body and updates `digest`, `pending_pda`, and `digest_pda`
+    /// accordingly. `source_account_pubkey` / `dest_account_pubkey` are also
+    /// re-derived from the canonical seeds so the Transfer commit branch's
+    /// `verify_account_pda` passes.
+    fn with_transfer_body(
+        guardian_count: usize,
+        gsi: u32,
+        seed: u8,
+        amount: u128,
+        token_chain: u16,
+        token_address: [u8; 32],
+        recipient_chain: u16,
+    ) -> Self {
+        let mut base = Self::new(guardian_count, gsi, seed);
+        base.body = build_transfer_body(
+            base.chain,
+            &base.emitter,
+            base.sequence,
+            amount,
+            token_chain,
+            &token_address,
+            recipient_chain,
+        );
+        base.digest = double_keccak256_host(&base.body);
+        let (pending_pda, pending_bump) =
+            derive_pending_pda(base.chain, &base.emitter, base.sequence, &base.digest);
+        base.pending_pda = pending_pda;
+        base.pending_bump = pending_bump;
+        // Account PDAs: source uses VAA emitter chain (== base.chain) for
+        // chain; dest uses recipient_chain.
+        let (src, _) = derive_account_pda(base.chain, token_chain, &token_address);
+        let (dst, _) = derive_account_pda(recipient_chain, token_chain, &token_address);
+        base.source_account_pubkey = src;
+        base.dest_account_pubkey = dst;
+        base
     }
 
     fn guardian_keys(&self) -> Vec<[u8; 20]> {
@@ -338,24 +463,36 @@ impl Scenario {
                 &signature,
                 self.pending_bump,
                 self.digest_bump,
+                &self.body,
             ),
-            vec![
-                AccountMeta::new(self.submitter, true),
-                AccountMeta::new(self.pending_pda, false),
-                AccountMeta::new_readonly(self.guardian_set_pubkey, false),
-                AccountMeta::new(self.noreplay_bucket_pubkey, false),
-                AccountMeta::new(self.digest_pda, false),
-                AccountMeta::new_readonly(system_program_id(), false),
-                AccountMeta::new_readonly(self.noreplay_program_pubkey, false),
-                AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
-            ],
+            self.account_metas(),
         );
         mollusk.process_instruction(&ix, &starting_accounts)
     }
 
-    /// Build the initial 8-account list with all PDAs uninitialised.
-    fn initial_accounts(&self) -> Vec<(Pubkey, Account)> {
+    /// Account-meta list (10 entries) matching the wire shape documented in
+    /// `submit_observations.rs::process`.
+    fn account_metas(&self) -> Vec<AccountMeta> {
         vec![
+            AccountMeta::new(self.submitter, true),
+            AccountMeta::new(self.pending_pda, false),
+            AccountMeta::new_readonly(self.guardian_set_pubkey, false),
+            AccountMeta::new(self.noreplay_bucket_pubkey, false),
+            AccountMeta::new(self.digest_pda, false),
+            AccountMeta::new_readonly(system_program_id(), false),
+            AccountMeta::new_readonly(self.noreplay_program_pubkey, false),
+            AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
+            AccountMeta::new(self.source_account_pubkey, false),
+            AccountMeta::new(self.dest_account_pubkey, false),
+        ]
+    }
+
+    /// Build the initial 10-account list with all PDAs uninitialised. Slots
+    /// 8 and 9 (source / destination Account PDA) are intentionally
+    /// system-owned + empty so the program's lazy-init path kicks in when a
+    /// Transfer payload reaches quorum.
+    fn initial_accounts(&self) -> Vec<(Pubkey, Account)> {
+        let mut accounts = vec![
             (self.submitter, system_owned_account(50_000_000_000)),
             (self.pending_pda, uninitialised_pda_account()),
             (
@@ -373,7 +510,19 @@ impl Scenario {
                 self.noreplay_authority_pubkey,
                 system_owned_account(0),
             ),
-        ]
+        ];
+        // Slots 8 and 9. Re-use existing entries when the sentinel collapses
+        // them onto the noreplay-authority pubkey (Attest scenario); otherwise
+        // append fresh uninit slots.
+        if self.source_account_pubkey != self.noreplay_authority_pubkey {
+            accounts.push((self.source_account_pubkey, uninitialised_pda_account()));
+        }
+        if self.dest_account_pubkey != self.noreplay_authority_pubkey
+            && self.dest_account_pubkey != self.source_account_pubkey
+        {
+            accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
+        }
+        accounts
     }
 
     /// Run `n` observations sequentially from guardian indices `0..n`. Returns
@@ -548,17 +697,9 @@ fn submit_with_invalid_signature_fails() {
             &signature,
             scenario.pending_bump,
             scenario.digest_bump,
+            &scenario.body,
         ),
-        vec![
-            AccountMeta::new(scenario.submitter, true),
-            AccountMeta::new(scenario.pending_pda, false),
-            AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
-            AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
-            AccountMeta::new(scenario.digest_pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-            AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
-            AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
-        ],
+        scenario.account_metas(),
     );
     let result = mollusk.process_instruction(&ix, &scenario.initial_accounts());
     match result.program_result {
@@ -641,17 +782,9 @@ fn submit_with_stale_old_set_observation_fails() {
             &stale_signature,
             new_scenario.pending_bump,
             new_scenario.digest_bump,
+            &new_scenario.body,
         ),
-        vec![
-            AccountMeta::new(new_scenario.submitter, true),
-            AccountMeta::new(new_scenario.pending_pda, false),
-            AccountMeta::new_readonly(new_scenario.guardian_set_pubkey, false),
-            AccountMeta::new(new_scenario.noreplay_bucket_pubkey, false),
-            AccountMeta::new(new_scenario.digest_pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-            AccountMeta::new_readonly(new_scenario.noreplay_program_pubkey, false),
-            AccountMeta::new_readonly(new_scenario.noreplay_authority_pubkey, false),
-        ],
+        new_scenario.account_metas(),
     );
     let r = mollusk.process_instruction(&ix, &accounts);
     match r.program_result {
@@ -707,17 +840,9 @@ fn submit_with_new_set_observation_wipes_old_pending() {
             &signature,
             old_scenario.pending_bump,
             old_scenario.digest_bump,
+            &old_scenario.body,
         ),
-        vec![
-            AccountMeta::new(old_scenario.submitter, true),
-            AccountMeta::new(old_scenario.pending_pda, false),
-            AccountMeta::new_readonly(old_scenario.guardian_set_pubkey, false),
-            AccountMeta::new(old_scenario.noreplay_bucket_pubkey, false),
-            AccountMeta::new(old_scenario.digest_pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-            AccountMeta::new_readonly(old_scenario.noreplay_program_pubkey, false),
-            AccountMeta::new_readonly(old_scenario.noreplay_authority_pubkey, false),
-        ],
+        old_scenario.account_metas(),
     );
     let r = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -755,9 +880,17 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
 
     // Second observation under digest D2 with same GSI. Must SUCCEED into a
     // sibling PDA at a different canonical address (derived from the new
-    // digest).
-    let mut alternate_digest = scenario.digest;
-    alternate_digest[0] ^= 0xff;
+    // digest). The Phase 2.4 wire shape requires a body whose
+    // `keccak256(keccak256(body))` matches the digest, so we mutate one byte
+    // of the original body (the consistency_level field at offset 50) and
+    // recompute the digest from there.
+    let mut alternate_body = scenario.body.clone();
+    alternate_body[50] = 0xAA;
+    let alternate_digest = double_keccak256_host(&alternate_body);
+    assert_ne!(
+        alternate_digest, scenario.digest,
+        "one-byte body change must yield a different digest"
+    );
     let signature = sign_digest(&scenario.guardians[1], &alternate_digest);
 
     let (d2_pending_pda, d2_pending_bump) = derive_pending_pda(
@@ -775,6 +908,9 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     let mut accounts = accounts_after_first.clone();
     accounts.push((d2_pending_pda, uninitialised_pda_account()));
 
+    let mut metas = scenario.account_metas();
+    // Slot 1 is the pending PDA. Replace it with the D2 sibling.
+    metas[1] = AccountMeta::new(d2_pending_pda, false);
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
@@ -787,17 +923,9 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
             &signature,
             d2_pending_bump,
             scenario.digest_bump,
+            &alternate_body,
         ),
-        vec![
-            AccountMeta::new(scenario.submitter, true),
-            AccountMeta::new(d2_pending_pda, false),
-            AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
-            AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
-            AccountMeta::new(scenario.digest_pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-            AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
-            AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
-        ],
+        metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -887,10 +1015,14 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     );
 
     // (2 + 3) Switch to D2; first D2 observation must create a fresh PDA
-    // (different address) under the same GSI.
-    let mut alternate_digest = scenario.digest;
-    alternate_digest[0] ^= 0xa5;
-    alternate_digest[31] ^= 0x5a;
+    // (different address) under the same GSI. The Phase 2.4 wire shape
+    // requires a real body whose double-keccak matches the digest, so we
+    // mutate two bytes of the original body and recompute.
+    let mut alternate_body = scenario.body.clone();
+    alternate_body[50] = 0xA5;
+    alternate_body[49] = 0x5A;
+    let alternate_digest = double_keccak256_host(&alternate_body);
+    assert_ne!(alternate_digest, scenario.digest);
 
     let (d2_pending_pda, d2_pending_bump) = derive_pending_pda(
         scenario.chain,
@@ -907,6 +1039,8 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     // set 6 guardian fixture, just signing D2 instead of D1.
     for i in 0..13u8 {
         let signature = sign_digest(&scenario.guardians[i as usize], &alternate_digest);
+        let mut metas = scenario.account_metas();
+        metas[1] = AccountMeta::new(d2_pending_pda, false);
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_ix_data(
@@ -919,17 +1053,9 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
                 &signature,
                 d2_pending_bump,
                 scenario.digest_bump,
+                &alternate_body,
             ),
-            vec![
-                AccountMeta::new(scenario.submitter, true),
-                AccountMeta::new(d2_pending_pda, false),
-                AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
-                AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
-                AccountMeta::new(scenario.digest_pda, false),
-                AccountMeta::new_readonly(system_program_id(), false),
-                AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
-                AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
-            ],
+            metas,
         );
         let r = mollusk.process_instruction(&ix, &accounts);
         assert!(
@@ -1197,5 +1323,326 @@ fn close_pending_with_active_set_and_no_noreplay_fails() {
             );
         }
         other => panic!("expected Failure(CannotCleanup), got {other:?}"),
+    }
+}
+
+// ============================================================================
+// Phase 2.4 — balance-accounting tests.
+//
+// The quorum-completing observation parses the body's Token Bridge payload
+// and routes balance updates through `BalanceAccountLayout::lock_or_burn` /
+// `unlock_or_mint` against the source-chain and destination-chain Account
+// PDAs. Mirrors CosmWasm `commit_transfer`
+// (`cosmwasm/packages/accountant/src/contract.rs:109-126`).
+// ============================================================================
+
+/// Helper: stamp out 13 distinct guardian observations against a Token
+/// Bridge transfer scenario and return the post-tx account list. Used by all
+/// of the Phase 2.4 happy-path tests so each scenario doesn't repeat the
+/// 13-iteration accumulator loop.
+fn drive_transfer_to_quorum(
+    mollusk: &Mollusk,
+    scenario: &Scenario,
+) -> mollusk_svm::result::InstructionResult {
+    let mut accounts = scenario.initial_accounts();
+    for i in 0..PendingObservationsLayout::QUORUM_THRESHOLD as u8 {
+        let result = scenario.submit_once(mollusk, accounts.clone(), i);
+        assert!(
+            matches!(result.program_result, ProgramResult::Success),
+            "submit #{i} expected success, got {:?}",
+            result.program_result
+        );
+        accounts = result.resulting_accounts.clone();
+        // After the 13th the program returns success but PDA mutations are
+        // applied; we want the final InstructionResult, not just the account
+        // list, so the caller can inspect program_result + CU consumption.
+        if i + 1 == PendingObservationsLayout::QUORUM_THRESHOLD as u8 {
+            return result;
+        }
+    }
+    unreachable!("loop above always returns on the final iteration")
+}
+
+#[test]
+fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
+    // Scenario: Ethereum (chain=2) emits a transfer of USDC (token_chain=2,
+    // i.e. Ethereum-native) to Solana (chain=1). The accountant must
+    //   - lock_or_burn on the source (Ethereum, USDC) Account: native ⇒ CREDIT,
+    //   - unlock_or_mint on the dest (Solana, USDC) Account: wrapped ⇒ CREDIT.
+    // Both Account PDAs lazy-init on this tx since they don't exist yet.
+    let mollusk = mollusk();
+    let token_address = [0x77u8; 32];
+    let scenario = Scenario::with_transfer_body(
+        19, 4, 0x60,
+        500_000u128,
+        2,             // token_chain = source-native (Ethereum)
+        token_address,
+        1,             // recipient_chain = Solana (wrapped destination)
+    );
+    let result = drive_transfer_to_quorum(&mollusk, &scenario);
+    assert!(
+        matches!(result.program_result, ProgramResult::Success),
+        "quorum tx must succeed, got {:?}",
+        result.program_result
+    );
+
+    // Source-chain Account: chain == token_chain == 2 ⇒ native lock ⇒ credited.
+    let src = find_account(&result.resulting_accounts, &scenario.source_account_pubkey);
+    assert_eq!(src.owner, program_id(), "source Account PDA owned by program");
+    assert_eq!(src.data.len(), BalanceAccountLayout::LEN);
+    let src_layout: &BalanceAccountLayout = bytemuck::from_bytes(&src.data);
+    assert_eq!(src_layout.chain, 2);
+    assert_eq!(src_layout.token_chain, 2);
+    assert_eq!(src_layout.token_address, token_address);
+    assert_eq!(src_layout.balance, Uint256::from_u128(500_000));
+
+    // Destination-chain Account: chain (1) != token_chain (2) ⇒ wrapped mint ⇒ credited.
+    let dst = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
+    assert_eq!(dst.owner, program_id(), "dest Account PDA owned by program");
+    let dst_layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst.data);
+    assert_eq!(dst_layout.chain, 1);
+    assert_eq!(dst_layout.token_chain, 2);
+    assert_eq!(dst_layout.balance, Uint256::from_u128(500_000));
+}
+
+#[test]
+fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance() {
+    // Reverse direction: Solana (chain=1) sends wUSDC back to Ethereum.
+    //   - Source = (Solana, chain != token_chain) ⇒ lock_or_burn DEBITs.
+    //   - Source starts at zero (no prior mint observed) ⇒ underflow.
+    // The whole tx must revert: NoReplay must not flip, DigestAccount must
+    // not open, pending PDA must not close.
+    let mollusk = mollusk();
+    let token_address = [0x88u8; 32];
+    let mut scenario = Scenario::with_transfer_body(
+        19, 4, 0x61,
+        1_000u128,
+        2,             // token_chain = Ethereum (token-native)
+        token_address,
+        2,             // recipient_chain = Ethereum
+    );
+    // Re-seed `chain` so the VAA emitter is Solana, not Ethereum.
+    scenario.chain = 1;
+    scenario.body = build_transfer_body(
+        scenario.chain,
+        &scenario.emitter,
+        scenario.sequence,
+        1_000,
+        2,
+        &token_address,
+        2,
+    );
+    scenario.digest = double_keccak256_host(&scenario.body);
+    let (pending_pda, pending_bump) = derive_pending_pda(
+        scenario.chain,
+        &scenario.emitter,
+        scenario.sequence,
+        &scenario.digest,
+    );
+    scenario.pending_pda = pending_pda;
+    scenario.pending_bump = pending_bump;
+    let (digest_pda, digest_bump) =
+        derive_digest_pda(scenario.chain, &scenario.emitter, scenario.sequence);
+    scenario.digest_pda = digest_pda;
+    scenario.digest_bump = digest_bump;
+    let (src, _) = derive_account_pda(1, 2, &token_address);
+    let (dst, _) = derive_account_pda(2, 2, &token_address);
+    scenario.source_account_pubkey = src;
+    scenario.dest_account_pubkey = dst;
+
+    // Drive 12 observations through (pending PDA accumulates, no balance work
+    // yet).
+    let mut accounts = scenario.initial_accounts();
+    for i in 0..12u8 {
+        let r = scenario.submit_once(&mollusk, accounts.clone(), i);
+        assert!(matches!(r.program_result, ProgramResult::Success));
+        accounts = r.resulting_accounts;
+    }
+    // 13th observation: quorum reach + balance work → underflow.
+    let r = scenario.submit_once(&mollusk, accounts, 12);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::BalanceUnderflow as u32,
+                "expected BalanceUnderflow, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(BalanceUnderflow), got {other:?}"),
+    }
+    // Transactional integrity: the failed quorum tx must NOT have committed
+    // partial state. The NoReplay bit, DigestAccount, and pending PDA stay
+    // untouched (Solana txs are all-or-nothing).
+    let bucket = find_account(&r.resulting_accounts, &scenario.noreplay_bucket_pubkey);
+    assert_eq!(bucket.data[0], 0u8, "NoReplay must not flip on failed quorum");
+    let digest = find_account(&r.resulting_accounts, &scenario.digest_pda);
+    assert!(
+        digest.data.is_empty(),
+        "DigestAccount must not open on failed quorum"
+    );
+}
+
+#[test]
+fn quorum_with_lazy_init_destination_account_succeeds() {
+    // Destination Account PDA doesn't exist yet — `init_or_upgrade_pda` lazy
+    // creates it under the program. Same expectations as the happy-path test,
+    // verified explicitly: pre-tx slot is system-owned with zero data; post-tx
+    // slot is program-owned with `BalanceAccountLayout::LEN` bytes.
+    let mollusk = mollusk();
+    let token_address = [0x42u8; 32];
+    let scenario = Scenario::with_transfer_body(
+        19, 4, 0x62,
+        9_999u128,
+        2,
+        token_address,
+        1,
+    );
+
+    let initial = scenario.initial_accounts();
+    let dst_pre = find_account(&initial, &scenario.dest_account_pubkey);
+    assert_eq!(
+        dst_pre.owner,
+        system_program_id(),
+        "dest Account PDA must start system-owned"
+    );
+    assert_eq!(dst_pre.data.len(), 0, "dest Account PDA must start with zero data");
+
+    let result = drive_transfer_to_quorum(&mollusk, &scenario);
+    assert!(matches!(result.program_result, ProgramResult::Success));
+
+    let dst_post = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
+    assert_eq!(dst_post.owner, program_id(), "dest lazy-init flips owner to program");
+    assert_eq!(
+        dst_post.data.len(),
+        BalanceAccountLayout::LEN,
+        "dest data sized to full layout"
+    );
+    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst_post.data);
+    assert_eq!(layout.balance, Uint256::from_u128(9_999));
+}
+
+#[test]
+fn quorum_with_attest_payload_skips_balance_work_but_finishes_commit() {
+    // Action 0x02 (Attest) carries no transfer data — the program must run
+    // every other step of the commit branch (NoReplay flip, DigestAccount
+    // open, pending close) but touch neither Account PDA. We re-use the
+    // default `Scenario::new` which builds an Attest body.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x63);
+    let result = drive_transfer_to_quorum(&mollusk, &scenario);
+    assert!(
+        matches!(result.program_result, ProgramResult::Success),
+        "attest quorum tx must succeed, got {:?}",
+        result.program_result
+    );
+
+    // NoReplay flipped, DigestAccount opened — same as the existing quorum-
+    // completing test. We don't re-assert all of that here; we just confirm
+    // the sentinel Account PDA slots (== noreplay-authority) were not
+    // touched (they remain system-owned with the dummy 0 lamports they
+    // started with).
+    assert_eq!(scenario.source_account_pubkey, scenario.noreplay_authority_pubkey);
+    let sentinel = find_account(
+        &result.resulting_accounts,
+        &scenario.noreplay_authority_pubkey,
+    );
+    assert_eq!(
+        sentinel.owner,
+        system_program_id(),
+        "sentinel slot stays system-owned across attest commit"
+    );
+    assert!(
+        sentinel.data.is_empty(),
+        "sentinel slot data untouched across attest commit"
+    );
+}
+
+#[test]
+fn quorum_with_body_digest_mismatch_rejects() {
+    // Caller supplies the right digest in the fixed prefix but a body that
+    // hashes to a different value. The pre-balance-work keccak check must
+    // refuse the submission with `BodyDigestMismatch` and leave all state
+    // untouched.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x64);
+
+    let mut tampered_body = scenario.body.clone();
+    tampered_body[0] ^= 0xAA; // mutate the timestamp byte
+    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            scenario.chain,
+            &scenario.emitter,
+            scenario.sequence,
+            &scenario.digest,
+            scenario.guardian_set_index,
+            0,
+            &signature,
+            scenario.pending_bump,
+            scenario.digest_bump,
+            &tampered_body, // body doesn't double-keccak to `digest`
+        ),
+        scenario.account_metas(),
+    );
+    let r = mollusk.process_instruction(&ix, &scenario.initial_accounts());
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::BodyDigestMismatch as u32,
+                "expected BodyDigestMismatch, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(BodyDigestMismatch), got {other:?}"),
+    }
+    // Pending PDA must remain uninitialised (the check fires before any PDA
+    // work).
+    let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending.owner, system_program_id());
+    assert!(pending.data.is_empty());
+}
+
+#[test]
+fn quorum_with_invalid_source_account_pda_rejects() {
+    // Caller supplies a wrong-seed Account PDA in slot 8. The
+    // `derive_account_pda` recompute inside the Transfer commit branch
+    // catches the mismatch and rejects with `InvalidAccountPda`. The whole
+    // tx unwinds (Solana atomicity).
+    let mollusk = mollusk();
+    let token_address = [0x99u8; 32];
+    let mut scenario = Scenario::with_transfer_body(
+        19, 4, 0x65,
+        100u128,
+        2,
+        token_address,
+        1,
+    );
+    // Replace source_account_pubkey with a spoofed address (same seeds but
+    // wrong token chain). The verify check must reject.
+    let (spoofed, _) = derive_account_pda(2, 99, &token_address);
+    scenario.source_account_pubkey = spoofed;
+
+    // Drive 12 observations. The submitter slot doesn't write through to
+    // slot 8 in the non-quorum branch, so those submissions succeed.
+    let mut accounts = scenario.initial_accounts();
+    for i in 0..12u8 {
+        let r = scenario.submit_once(&mollusk, accounts.clone(), i);
+        assert!(matches!(r.program_result, ProgramResult::Success));
+        accounts = r.resulting_accounts;
+    }
+    let r = scenario.submit_once(&mollusk, accounts, 12);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidAccountPda as u32,
+                "expected InvalidAccountPda, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidAccountPda), got {other:?}"),
     }
 }

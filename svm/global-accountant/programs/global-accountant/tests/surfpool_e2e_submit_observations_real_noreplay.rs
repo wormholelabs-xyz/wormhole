@@ -185,8 +185,13 @@ fn submit_observations_ix_data(
     signature: &[u8; 65],
     pending_bump: u8,
     digest_bump: u8,
+    body: &[u8],
 ) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 145);
+    // Wire shape: 1-byte discriminator + 146-byte fixed prefix + 2-byte body
+    // length (LE) + body bytes. Phase 2.4 added the body bytes so the program
+    // can re-derive `keccak256(keccak256(body)) == digest` and parse the
+    // Token Bridge payload for balance work.
+    let mut data = Vec::with_capacity(1 + 146 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(&chain.to_be_bytes());
     data.extend_from_slice(emitter);
@@ -197,6 +202,8 @@ fn submit_observations_ix_data(
     data.extend_from_slice(signature);
     data.push(pending_bump);
     data.push(digest_bump);
+    data.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    data.extend_from_slice(body);
     data
 }
 
@@ -231,7 +238,14 @@ fn build_submit_observations_ix(
     signature: &[u8; 65],
     pending_bump: u8,
     digest_bump: u8,
+    body: &[u8],
 ) -> Instruction {
+    // The Phase 2.4 account list grows by two trailing slots: source-chain
+    // Account PDA and destination-chain Account PDA. For Attest / Other
+    // payloads (no balance work) the program never touches these slots, so
+    // re-using the noreplay-authority PDA as a sentinel satisfies the
+    // runtime's account-meta declaration without standing up real Account
+    // PDAs.
     Instruction {
         program_id: *program_id,
         accounts: vec![
@@ -243,6 +257,8 @@ fn build_submit_observations_ix(
             AccountMeta::new_readonly(system_program::ID, false),
             AccountMeta::new_readonly(NOREPLAY_PROGRAM_ID, false),
             AccountMeta::new_readonly(*noreplay_authority, false),
+            AccountMeta::new(*noreplay_authority, false), // sentinel source slot
+            AccountMeta::new(*noreplay_authority, false), // sentinel dest slot
         ],
         data: submit_observations_ix_data(
             chain,
@@ -254,6 +270,7 @@ fn build_submit_observations_ix(
             signature,
             pending_bump,
             digest_bump,
+            body,
         ),
     }
 }
@@ -318,10 +335,12 @@ fn surfpool_submit_observations_real_noreplay() {
     let mut emitter = [0u8; 32];
     emitter[31] = 0x77;
     let sequence: u64 = 0x42;
-    let mut digest = [0u8; 32];
-    for (i, byte) in digest.iter_mut().enumerate() {
-        *byte = (i as u8).wrapping_add(0x10);
-    }
+    // Phase 2.4: build an Attest body and derive the digest from it via
+    // `keccak256(keccak256(body))`. The program re-verifies this relationship
+    // before any state mutation, so a synthetic digest unrelated to the body
+    // would now reject with `BodyDigestMismatch`.
+    let body = build_attest_body(chain, &emitter, sequence);
+    let digest = double_keccak256_host(&body);
 
     let (pending_pda, pending_bump) =
         derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &digest);
@@ -389,6 +408,7 @@ fn surfpool_submit_observations_real_noreplay() {
             &signature,
             pending_bump,
             digest_bump,
+            &body,
         );
         send_and_confirm(
             &rpc,
@@ -434,6 +454,7 @@ fn surfpool_submit_observations_real_noreplay() {
         &extra_signature,
         pending_bump,
         digest_bump,
+        &body,
     );
     let err = send_expect_failure(
         &rpc,
@@ -450,8 +471,12 @@ fn surfpool_submit_observations_real_noreplay() {
     // Recreate a stranded D2 sibling pending PDA, then close it via trigger
     // (b). The pending PDA from above is already closed by the quorum-commit
     // path; we need a fresh sibling at a different digest seed.
-    let mut alt_digest = digest;
-    alt_digest[0] ^= 0xa5;
+    // Phase 2.4: build a tampered body with a different consistency_level so
+    // its double-keccak yields a distinct digest. The program verifies the
+    // body/digest relationship before reaching the NoReplay pre-check.
+    let mut alt_body = body.clone();
+    alt_body[50] = 0xA5;
+    let alt_digest = double_keccak256_host(&alt_body);
     let (d2_pending_pda, d2_pending_bump) =
         derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &alt_digest);
     let signature = sign_digest(&guardians[0], &alt_digest);
@@ -472,6 +497,7 @@ fn surfpool_submit_observations_real_noreplay() {
         &signature,
         d2_pending_bump,
         digest_bump,
+        &alt_body,
     );
     let err = send_expect_failure(
         &rpc,
@@ -543,3 +569,22 @@ const _: () = assert!(
     DigestAccountLayout::LEN == 120,
     "DigestAccountLayout::LEN drift — update the lifecycle assertions"
 );
+
+/// `keccak256(keccak256(body))` — Wormhole VAA digest convention. Host-side
+/// mirror of the on-chain `submit_observations::double_keccak256`.
+fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
+    let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
+    solana_keccak_hasher::hashv(&[&inner]).to_bytes()
+}
+
+/// Build a 52-byte VAA body (51-byte header + 1-byte action 0x02 attest).
+/// Attest payloads carry more on the wire but the accountant parser only
+/// reads the action byte, so 52 bytes is sufficient.
+fn build_attest_body(emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> Vec<u8> {
+    let mut body = vec![0u8; 52];
+    body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
+    body[10..42].copy_from_slice(emitter_address);
+    body[42..50].copy_from_slice(&sequence.to_be_bytes());
+    body[51] = 0x02;
+    body
+}

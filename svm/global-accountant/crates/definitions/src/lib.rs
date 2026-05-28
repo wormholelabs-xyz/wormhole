@@ -85,6 +85,31 @@ pub enum GlobalAccountantError {
     /// holds: the recorded guardian set is still active AND NoReplay does not
     /// mark the entry as accounted-for. See §3.6.
     CannotCleanup = 14,
+    /// The 256-bit `BalanceAccountLayout::balance` would overflow when applying
+    /// a `lock_or_burn` (native-chain credit) or `unlock_or_mint` (wrapped-chain
+    /// credit). Surfaces as a hard tx revert from the quorum-completing branch
+    /// of `submit_observations`; mirrors CosmWasm's
+    /// `Account::lock_or_burn` / `Account::unlock_or_mint` returning
+    /// `StdError::Overflow` (`cosmwasm/packages/accountant/src/state/account.rs`).
+    BalanceOverflow = 15,
+    /// The 256-bit `BalanceAccountLayout::balance` would underflow when applying
+    /// a `lock_or_burn` (wrapped-chain debit) or `unlock_or_mint` (native-chain
+    /// debit). The same hard-revert behaviour as `BalanceOverflow`; CosmWasm
+    /// also folds this into `StdError::Overflow` because cosmwasm's `Uint256`
+    /// returns a single `OverflowError` for both directions.
+    BalanceUnderflow = 16,
+    /// `submit_observations`'s body bytes did not hash to the supplied digest
+    /// (`keccak256(keccak256(body)) != digest`). Refuses the submission before
+    /// any state mutation — the body is what carries the Token Bridge transfer
+    /// payload that the quorum-commit branch reads, so an unverified body
+    /// could route credits/debits at the wrong amount, chain, or token.
+    BodyDigestMismatch = 17,
+    /// `submit_observations`'s account list passed an Account PDA whose
+    /// `(chain, token_chain, token_address)` triple does not match the
+    /// canonical seeds for the source-chain or destination-chain side of the
+    /// transfer. Re-derives via `find_program_address` and rejects any
+    /// mismatch; mirrors the canonical-bump pattern used for the pending PDA.
+    InvalidAccountPda = 18,
 }
 
 impl From<GlobalAccountantError> for u32 {
@@ -104,6 +129,15 @@ pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
 /// on a `DigestForgery` rejection. See
 /// `accountant-migration-pending-quorum-design.md` §3.1.
 pub const PENDING_SEED_PREFIX: &[u8] = b"pending";
+
+/// PDA seed prefix for [`BalanceAccountLayout`]. The full seed tuple is
+/// `(b"account", chain.to_be_bytes(), token_chain.to_be_bytes(), token_address)`.
+/// Each unique `(chain, token_chain, token_address)` triple has exactly one
+/// canonical PDA under the global-accountant program ID — the on-disk record
+/// the CosmWasm contract calls `Account`. Big-endian byte order on `chain` /
+/// `token_chain` matches the VAA wire format and the `DIGEST_SEED_PREFIX` /
+/// `PENDING_SEED_PREFIX` derivations so all three keying schemes agree.
+pub const ACCOUNT_SEED_PREFIX: &[u8] = b"account";
 
 /// PDA seed prefix for the global-accountant-owned authority that signs all
 /// `solana-noreplay` CPIs. The full seed tuple is just `[b"noreplay-authority"]`
@@ -430,6 +464,171 @@ pub struct BalanceAccountLayout {
 
 impl BalanceAccountLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Port of CosmWasm `Account::lock_or_burn`
+    /// (`cosmwasm/packages/accountant/src/state/account.rs:17-26`).
+    ///
+    /// Semantics, by chain identity:
+    /// - `chain == token_chain` (this Account tracks the token on its native
+    ///   chain): the message LOCKs tokens into the bridge, so the source-side
+    ///   ledger credits — `balance += amount`. Overflow surfaces as
+    ///   `BalanceOverflow`.
+    /// - `chain != token_chain` (this Account tracks a wrapped representation
+    ///   of a foreign token): the message BURNs wrapped tokens, so the
+    ///   wrapped-chain ledger debits — `balance -= amount`. Underflow surfaces
+    ///   as `BalanceUnderflow` (insufficient source balance — a transfer larger
+    ///   than what was ever bridged in).
+    ///
+    /// The CosmWasm reference returns `StdError::Overflow` for both directions
+    /// because `cosmwasm_std::Uint256` collapses overflow / underflow into a
+    /// single error. We keep them distinct so on-chain logs disambiguate the
+    /// two failure modes without re-decoding the payload.
+    pub fn lock_or_burn(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
+        if self.chain == self.token_chain {
+            self.balance = self
+                .balance
+                .checked_add(amount)
+                .ok_or(GlobalAccountantError::BalanceOverflow)?;
+        } else {
+            self.balance = self
+                .balance
+                .checked_sub(amount)
+                .ok_or(GlobalAccountantError::BalanceUnderflow)?;
+        }
+        Ok(())
+    }
+
+    /// Port of CosmWasm `Account::unlock_or_mint`
+    /// (`cosmwasm/packages/accountant/src/state/account.rs:28-36`).
+    ///
+    /// Symmetric to [`lock_or_burn`]:
+    /// - `chain == token_chain` (native side, destination of an inbound
+    ///   transfer): UNLOCKs the locked balance — `balance -= amount`. Underflow
+    ///   surfaces as `BalanceUnderflow` (would unlock more native than the
+    ///   bridge ever locked — a global-conservation violation).
+    /// - `chain != token_chain` (wrapped side, destination of an outbound
+    ///   transfer): MINTs new wrapped supply — `balance += amount`. Overflow
+    ///   surfaces as `BalanceOverflow`.
+    pub fn unlock_or_mint(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
+        if self.chain == self.token_chain {
+            self.balance = self
+                .balance
+                .checked_sub(amount)
+                .ok_or(GlobalAccountantError::BalanceUnderflow)?;
+        } else {
+            self.balance = self
+                .balance
+                .checked_add(amount)
+                .ok_or(GlobalAccountantError::BalanceOverflow)?;
+        }
+        Ok(())
+    }
+}
+
+/// Decoded Token Bridge VAA body payload. Carries only the fields the
+/// accountant needs at quorum commit; the recipient and fee fields are present
+/// in the wire format but irrelevant here. Mirrors what CosmWasm extracts via
+/// `wormhole_sdk::token::Message` in
+/// `cosmwasm/contracts/global-accountant/src/contract.rs:217-240` (the SVM
+/// port does its own byte-slice parse to stay free of `serde_wormhole`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenBridgeAction {
+    /// Action 0x01 (`Transfer`) and 0x03 (`TransferWithPayload`) collapse to
+    /// the same accountant logic — only `amount`, `token_chain`,
+    /// `token_address`, and `recipient_chain` matter for balance updates. The
+    /// CosmWasm reference handles both by destructuring the same fields.
+    Transfer {
+        amount: Uint256,
+        token_chain: u16,
+        token_address: [u8; 32],
+        recipient_chain: u16,
+    },
+    /// Action 0x02 (`Attest`) — Token Bridge attestation metadata. Does not
+    /// move value; the commit branch must still finish (NoReplay flip,
+    /// DigestAccount open, pending close) but skips both balance updates.
+    Attest,
+    /// Any payload byte that is not `0x01`, `0x02`, or `0x03`. CosmWasm
+    /// `bail!`s with "Unknown tokenbridge payload"; we treat the same way as
+    /// `Attest` from the accountant's perspective — finish the commit, do not
+    /// mutate balances. Callers can match on `Other` if they need to log.
+    Other,
+}
+
+/// Parse a VAA body's payload — i.e. the bytes at `body[51..]` — into a
+/// [`TokenBridgeAction`].
+///
+/// The VAA body layout (whitepaper `0001_generic_message_passing.md`):
+///
+/// | offset | size | field              |
+/// |--------|------|--------------------|
+/// | 0      | 4    | timestamp (u32 BE) |
+/// | 4      | 4    | nonce (u32 BE)     |
+/// | 8      | 2    | emitter_chain      |
+/// | 10     | 32   | emitter_address    |
+/// | 42     | 8    | sequence (u64 BE)  |
+/// | 50     | 1    | consistency_level  |
+/// | 51..   | rest | payload            |
+///
+/// Token Bridge transfer payload (whitepaper `0003_token_bridge.md`), starting
+/// at offset 51 of the body:
+///
+/// | offset | size | field            |
+/// |--------|------|------------------|
+/// | 0      | 1    | action           |
+/// | 1      | 32   | amount (Uint256) |
+/// | 33     | 32   | token_address    |
+/// | 65     | 2    | token_chain      |
+/// | 67     | 32   | recipient        |
+/// | 99     | 2    | recipient_chain  |
+/// | 101    | 32   | fee (action 1)   |
+/// | 133..  | rest | extra (action 3) |
+///
+/// On action 0x02 (attest) or any unknown byte, returns the corresponding
+/// `Attest` / `Other` variant — the caller skips balance work and finishes the
+/// commit.
+///
+/// `body` must be at least 52 bytes (one byte beyond the 51-byte header so we
+/// can read the action byte). For transfer actions the slice must be ≥ 184
+/// bytes (51 + 133). Both bounds are checked; the function returns
+/// `InvalidInstructionData` on any short slice.
+pub fn parse_token_bridge_payload(
+    body: &[u8],
+) -> Result<TokenBridgeAction, GlobalAccountantError> {
+    const HEADER_LEN: usize = 51;
+    const ACTION_TRANSFER: u8 = 0x01;
+    const ACTION_ATTEST: u8 = 0x02;
+    const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
+    const TRANSFER_PAYLOAD_MIN: usize = 1 + 32 + 32 + 2 + 32 + 2 + 32; // 133
+
+    if body.len() <= HEADER_LEN {
+        return Err(GlobalAccountantError::InvalidInstructionData);
+    }
+    let payload = &body[HEADER_LEN..];
+    let action = payload[0];
+    match action {
+        ACTION_TRANSFER | ACTION_TRANSFER_WITH_PAYLOAD => {
+            if payload.len() < TRANSFER_PAYLOAD_MIN {
+                return Err(GlobalAccountantError::InvalidInstructionData);
+            }
+            // Slice each field by offset; copy into stack arrays so the caller
+            // owns the values without re-borrowing the body.
+            let mut amount = [0u8; 32];
+            amount.copy_from_slice(&payload[1..33]);
+            let mut token_address = [0u8; 32];
+            token_address.copy_from_slice(&payload[33..65]);
+            let token_chain = u16::from_be_bytes([payload[65], payload[66]]);
+            // payload[67..99] is recipient — ignored for accountant.
+            let recipient_chain = u16::from_be_bytes([payload[99], payload[100]]);
+            Ok(TokenBridgeAction::Transfer {
+                amount: Uint256::from_be_bytes(amount),
+                token_chain,
+                token_address,
+                recipient_chain,
+            })
+        }
+        ACTION_ATTEST => Ok(TokenBridgeAction::Attest),
+        _ => Ok(TokenBridgeAction::Other),
+    }
 }
 
 // Compile-time pins for the balance layout. Mirrors the DigestAccount pattern
@@ -669,5 +868,219 @@ mod tests {
         expected[30] = 0x56;
         expected[31] = 0x78;
         assert_eq!(balance_slice, &expected);
+    }
+
+    // ---- BalanceAccountLayout::lock_or_burn / unlock_or_mint tests ----
+    //
+    // These are direct ports of the CosmWasm cases in
+    // `cosmwasm/packages/accountant/src/state/account.rs:152-323`. The
+    // semantic is identical (chain == token_chain ⇒ credit on lock_or_burn,
+    // debit on unlock_or_mint; chain != token_chain ⇒ reversed); the only
+    // observable difference is that we surface overflow and underflow as
+    // distinct error codes so on-chain logs disambiguate without re-decoding
+    // the payload.
+
+    fn balance_with(chain: u16, token_chain: u16, balance: Uint256) -> BalanceAccountLayout {
+        // Token address is irrelevant for the lock/unlock arithmetic; pin a
+        // recognisable byte pattern so a stray off-by-one in a later test
+        // surfaces clearly in the diff.
+        let mut token_address = [0u8; 32];
+        token_address[0] = 0x62;
+        token_address[31] = 0x61;
+        BalanceAccountLayout {
+            chain,
+            token_chain,
+            token_address,
+            balance,
+            _reserved: [0u8; 8],
+        }
+    }
+
+    #[test]
+    fn lock_or_burn_native_chain_credits() {
+        // chain == token_chain ⇒ lock_or_burn is the native-side credit.
+        // Port of CosmWasm `native_lock` (500 + 200 = 700).
+        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::from_u128(500));
+        acc.lock_or_burn(Uint256::from_u128(200)).unwrap();
+        assert_eq!(acc.balance, Uint256::from_u128(700));
+    }
+
+    #[test]
+    fn lock_or_burn_wrapped_chain_debits() {
+        // chain != token_chain ⇒ lock_or_burn is the wrapped-side debit.
+        // Port of CosmWasm `wrapped_burn` (500 - 200 = 300).
+        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::from_u128(500));
+        acc.lock_or_burn(Uint256::from_u128(200)).unwrap();
+        assert_eq!(acc.balance, Uint256::from_u128(300));
+    }
+
+    #[test]
+    fn lock_or_burn_wrapped_chain_underflow_rejects() {
+        // Port of CosmWasm `wrapped_burn_underflow`. Underflow ⇒ BalanceUnderflow.
+        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::ZERO);
+        let err = acc.lock_or_burn(Uint256::from_u128(200)).unwrap_err();
+        assert_eq!(err, GlobalAccountantError::BalanceUnderflow);
+        assert_eq!(acc.balance, Uint256::ZERO, "balance unchanged on error");
+    }
+
+    #[test]
+    fn lock_or_burn_native_chain_overflow_rejects() {
+        // Port of CosmWasm `native_lock_overflow`. Overflow ⇒ BalanceOverflow.
+        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::MAX);
+        let err = acc.lock_or_burn(Uint256::from_u128(200)).unwrap_err();
+        assert_eq!(err, GlobalAccountantError::BalanceOverflow);
+        assert_eq!(acc.balance, Uint256::MAX, "balance unchanged on error");
+    }
+
+    #[test]
+    fn unlock_or_mint_native_chain_debits() {
+        // chain == token_chain ⇒ unlock_or_mint is the native-side debit.
+        // Port of CosmWasm `native_unlock` (500 - 200 = 300).
+        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::from_u128(500));
+        acc.unlock_or_mint(Uint256::from_u128(200)).unwrap();
+        assert_eq!(acc.balance, Uint256::from_u128(300));
+    }
+
+    #[test]
+    fn unlock_or_mint_native_chain_underflow_rejects() {
+        // Port of CosmWasm `native_unlock_underflow`. Underflow ⇒ BalanceUnderflow.
+        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::ZERO);
+        let err = acc.unlock_or_mint(Uint256::from_u128(200)).unwrap_err();
+        assert_eq!(err, GlobalAccountantError::BalanceUnderflow);
+        assert_eq!(acc.balance, Uint256::ZERO);
+    }
+
+    #[test]
+    fn unlock_or_mint_wrapped_chain_credits() {
+        // chain != token_chain ⇒ unlock_or_mint is the wrapped-side credit.
+        // Port of CosmWasm `wrapped_mint` (500 + 200 = 700).
+        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::from_u128(500));
+        acc.unlock_or_mint(Uint256::from_u128(200)).unwrap();
+        assert_eq!(acc.balance, Uint256::from_u128(700));
+    }
+
+    #[test]
+    fn unlock_or_mint_wrapped_chain_overflow_rejects() {
+        // Port of CosmWasm `wrapped_mint_overflow`. Overflow ⇒ BalanceOverflow.
+        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::MAX);
+        let err = acc.unlock_or_mint(Uint256::from_u128(200)).unwrap_err();
+        assert_eq!(err, GlobalAccountantError::BalanceOverflow);
+        assert_eq!(acc.balance, Uint256::MAX);
+    }
+
+    // ---- parse_token_bridge_payload tests ----
+    //
+    // The body wire format is laid out in the function's doc comment. These
+    // tests pin every branch of the parser at the byte level so a stray
+    // offset shift or endian flip surfaces immediately.
+
+    /// Build a fully-formed 184-byte VAA body (51-byte header + 133-byte
+    /// Token Bridge transfer payload) in a stack array. Avoids dragging
+    /// `alloc::vec` into this `no_std` crate just for tests.
+    fn transfer_body(
+        action: u8,
+        amount: u128,
+        token_address: [u8; 32],
+        token_chain: u16,
+        recipient_chain: u16,
+    ) -> [u8; 184] {
+        let mut body = [0u8; 184];
+        // Header is zeroed; emitter_chain at offset 8..10 left at 0 since
+        // the parser only reads it from the higher-level submit_observations
+        // caller. The transfer payload starts at offset 51.
+        body[51] = action;
+        // amount: 32-byte BE Uint256, low 16 bytes hold the u128.
+        body[52 + 16..52 + 32].copy_from_slice(&amount.to_be_bytes());
+        body[84..116].copy_from_slice(&token_address);
+        body[116..118].copy_from_slice(&token_chain.to_be_bytes());
+        // recipient: 32 bytes, recognisable (118..150). Zero is fine; we set
+        // a couple of bytes to catch off-by-one in case parser ever reads.
+        body[118] = 0xAB;
+        body[149] = 0xCD;
+        body[150..152].copy_from_slice(&recipient_chain.to_be_bytes());
+        // fee at 152..184 stays zero.
+        body
+    }
+
+    #[test]
+    fn parse_token_bridge_payload_transfer_decodes_amount_token_recipient() {
+        let mut token_address = [0u8; 32];
+        token_address[0] = 0x11;
+        token_address[31] = 0x99;
+        let body = transfer_body(
+            0x01,
+            1_000_000_u128,
+            token_address,
+            2,  // token_chain = Ethereum (placeholder)
+            10, // recipient_chain = Solana (placeholder)
+        );
+        let action = parse_token_bridge_payload(&body).expect("transfer parses");
+        match action {
+            TokenBridgeAction::Transfer {
+                amount,
+                token_chain,
+                token_address: ta,
+                recipient_chain,
+            } => {
+                assert_eq!(amount, Uint256::from_u128(1_000_000));
+                assert_eq!(token_chain, 2);
+                assert_eq!(ta, token_address);
+                assert_eq!(recipient_chain, 10);
+            }
+            other => panic!("expected Transfer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_token_bridge_payload_transfer_with_payload_same_as_transfer() {
+        // Action 0x03 must collapse to the same Transfer variant — accountant
+        // logic is identical, only the on-the-wire `extra` bytes differ.
+        let token_address = [0x42u8; 32];
+        let body_01 = transfer_body(0x01, 99, token_address, 5, 7);
+        let body_03 = transfer_body(0x03, 99, token_address, 5, 7);
+        let a = parse_token_bridge_payload(&body_01).unwrap();
+        let b = parse_token_bridge_payload(&body_03).unwrap();
+        assert_eq!(a, b, "action 0x01 and 0x03 must decode identically");
+    }
+
+    #[test]
+    fn parse_token_bridge_payload_attest() {
+        // Action 0x02 — the body need only carry the one-byte action past the
+        // 51-byte header; CosmWasm does the same (attestations carry
+        // symbol/name/decimals which the accountant ignores).
+        let mut body = [0u8; 52];
+        body[51] = 0x02;
+        let action = parse_token_bridge_payload(&body).expect("attest parses");
+        assert_eq!(action, TokenBridgeAction::Attest);
+    }
+
+    #[test]
+    fn parse_token_bridge_payload_unknown_action() {
+        // Any byte that is not 0x01, 0x02, or 0x03 collapses to Other —
+        // CosmWasm `bail!`s; the accountant on Solana finishes the commit
+        // without balance work to keep the NoReplay flip atomic.
+        let mut body = [0u8; 52];
+        body[51] = 0x77;
+        let action = parse_token_bridge_payload(&body).expect("unknown action parses");
+        assert_eq!(action, TokenBridgeAction::Other);
+    }
+
+    #[test]
+    fn parse_token_bridge_payload_short_body_rejects() {
+        // Body exactly the 51-byte header length (no action byte) must reject
+        // — the parser cannot read the action byte.
+        let body = [0u8; 51];
+        let err = parse_token_bridge_payload(&body).unwrap_err();
+        assert_eq!(err, GlobalAccountantError::InvalidInstructionData);
+    }
+
+    #[test]
+    fn parse_token_bridge_payload_short_transfer_payload_rejects() {
+        // Body has the 51-byte header + action 0x01 + 10 trailing bytes —
+        // far short of the 133-byte transfer payload minimum.
+        let mut body = [0u8; 62];
+        body[51] = 0x01;
+        let err = parse_token_bridge_payload(&body).unwrap_err();
+        assert_eq!(err, GlobalAccountantError::InvalidInstructionData);
     }
 }

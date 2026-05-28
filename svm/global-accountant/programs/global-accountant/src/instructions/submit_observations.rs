@@ -34,17 +34,18 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    GlobalAccountantError, PendingObservationsLayout, PENDING_SEED_PREFIX,
+    parse_token_bridge_payload, GlobalAccountantError, PendingObservationsLayout, TokenBridgeAction,
+    ACCOUNT_SEED_PREFIX, PENDING_SEED_PREFIX,
 };
 use crate::err;
 // NoReplay integration lives in the sibling `noreplay` module so
 // `close_pending` can re-use `is_marked` for its trigger-(b) check without
 // re-importing this module's private items.
 use crate::instructions::{noreplay, open_digest_inner, pda_init::init_or_upgrade_pda};
-use crate::state::pending;
+use crate::state::{account as account_state, pending};
 
-/// Wire format for the `submit_observations` instruction data (after the
-/// 1-byte dispatch discriminator):
+/// Wire format for the fixed-size portion of `submit_observations`
+/// instruction data (after the 1-byte dispatch discriminator):
 ///
 /// | offset | size | field                              |
 /// |--------|------|------------------------------------|
@@ -57,7 +58,19 @@ use crate::state::pending;
 /// | 79     | 65   | signature (r||s||recovery_id)      |
 /// | 144    | 1    | pending_pda_bump                   |
 /// | 145    | 1    | digest_pda_bump                    |
-pub const SUBMIT_DATA_LEN: usize = 2 + 32 + 8 + 32 + 4 + 1 + 65 + 1 + 1;
+///
+/// Trailing the fixed-size portion is `body_len: u16 LE` followed by exactly
+/// `body_len` bytes of VAA body. The body is verified against the supplied
+/// `digest` via `keccak256(keccak256(body)) == digest` before any state
+/// mutation, then parsed for Token Bridge fields on the quorum-completing
+/// branch.
+pub const SUBMIT_FIXED_LEN: usize = 2 + 32 + 8 + 32 + 4 + 1 + 65 + 1 + 1;
+/// Maximum supported VAA body size on the wire. 4 KiB is well above the
+/// observed mainnet ceiling (`max(payload) ≈ 1 KiB`) and keeps the
+/// instruction data within Solana's 1232-byte tx-data limit when combined
+/// with the fixed-size prefix and the account list. The bound exists only to
+/// reject malformed wire data early; the parser itself doesn't care.
+pub const SUBMIT_BODY_MAX: usize = 4096;
 
 /// Length of an ECDSA recoverable signature: 32-byte r + 32-byte s + 1-byte
 /// recovery id. The on-chain `sol_secp256k1_recover` syscall takes the 64-byte
@@ -77,15 +90,41 @@ pub fn process(
     accounts: &mut [AccountView],
     data: &[u8],
 ) -> ProgramResult {
-    let data: &[u8; SUBMIT_DATA_LEN] = data
+    // Split the instruction data into fixed prefix + length-prefixed body.
+    // Body is required on every submission so the program can re-verify the
+    // digest against the bytes the caller is claiming the observation
+    // covers; otherwise an attacker could land an arbitrary digest and
+    // route balance updates to the wrong `(amount, token, recipient_chain)`.
+    if data.len() < SUBMIT_FIXED_LEN + 2 {
+        return Err(err(GlobalAccountantError::InvalidInstructionData));
+    }
+    let (fixed_bytes, rest) = data.split_at(SUBMIT_FIXED_LEN);
+    let fixed_bytes: &[u8; SUBMIT_FIXED_LEN] = fixed_bytes
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+    let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+    if body_len > SUBMIT_BODY_MAX || rest.len() < 2 + body_len {
+        return Err(err(GlobalAccountantError::InvalidInstructionData));
+    }
+    let body_bytes = &rest[2..2 + body_len];
 
-    let parsed = ParsedObservation::from_data(data)?;
+    let parsed = ParsedObservation::from_data(fixed_bytes)?;
+
+    // Verify the body the caller claims this observation is about. The
+    // double-keccak convention matches the Wormhole VAA digest (the same
+    // function guardians sign and the Verify VAA Shim recomputes). Doing
+    // this *before* any state mutation means a body/digest mismatch costs
+    // one keccak roundtrip (~5k CU) and changes no PDAs — the cheapest
+    // place to reject forged or truncated bodies.
+    let computed = double_keccak256(body_bytes);
+    if computed != parsed.digest {
+        return Err(err(GlobalAccountantError::BodyDigestMismatch));
+    }
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs;
-    //                       also payer for any lazy noreplay bitmap create).
+    //                       also payer for any lazy noreplay bitmap create AND
+    //                       for any lazy Account PDA create on the quorum branch).
     //   1. `[WRITE]`         pending PDA (derived from §3.1).
     //   2. `[]`              GuardianSet PDA (Core Bridge).
     //   3. `[WRITE]`         NoReplay bitmap PDA. Read-only at pre-check
@@ -95,11 +134,24 @@ pub fn process(
     //   4. `[WRITE]`         DigestAccount PDA (opens on quorum).
     //   5. `[]`              system program (for `CreateAccount` / `Allocate`
     //                       / `Assign` across the pending PDA init AND the
-    //                       noreplay bitmap lazy-init).
+    //                       noreplay bitmap lazy-init AND the Account PDA
+    //                       lazy-inits).
     //   6. `[]`              NoReplay program (CPI target on quorum reach).
     //   7. `[]`              NoReplay authority PDA owned by this program;
     //                       signed via `invoke_signed` with seeds
     //                       `[NOREPLAY_AUTHORITY_SEED_PREFIX, authority_bump]`.
+    //   8. `[WRITE]`         source-chain Account PDA at
+    //                       `(b"account", source_chain, token_chain, token_address)`.
+    //                       Required on every submission (the Solana runtime
+    //                       requires writability up front), but only read /
+    //                       written on the quorum-completing branch with a
+    //                       Transfer payload. For non-Transfer payloads
+    //                       (Attest / Other / non-quorum-completing
+    //                       observations) the caller still supplies the slot
+    //                       and the program never touches it.
+    //   9. `[WRITE]`         destination-chain Account PDA at
+    //                       `(b"account", recipient_chain, token_chain, token_address)`.
+    //                       Same semantics as slot 8.
     let [
         submitter,
         pending_pda,
@@ -109,6 +161,8 @@ pub fn process(
         system_program_acc,
         noreplay_program,
         noreplay_authority,
+        source_account_pda,
+        dest_account_pda,
     ] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -166,7 +220,9 @@ pub fn process(
     }
 
     // (6) Quorum reached. Commit atomically: NoReplay flip, DigestAccount
-    // open, pending PDA close.
+    // open, balance accounting, pending PDA close. Solana txs are
+    // all-or-nothing — any error from this point unwinds every mutation,
+    // including the NoReplay bit and the freshly-opened DigestAccount.
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
@@ -191,9 +247,149 @@ pub fn process(
         parsed.digest_pda_bump,
     )?;
 
+    // (7) Balance accounting — port of CosmWasm `commit_transfer`
+    // (`cosmwasm/packages/accountant/src/contract.rs:109-126`). Transfer
+    // payloads mutate two Account PDAs (source and destination); attest /
+    // other payloads skip balance work but the rest of the commit (steps
+    // 6 and 8) still runs.
+    match parse_token_bridge_payload(body_bytes).map_err(err)? {
+        TokenBridgeAction::Transfer {
+            amount,
+            token_chain,
+            token_address,
+            recipient_chain,
+        } => {
+            // Source chain is the VAA emitter chain (== `parsed.chain`,
+            // which the caller has already authenticated against the
+            // signature). CosmWasm reads `t.key.emitter_chain()` for the
+            // same purpose.
+            let source_chain = parsed.chain;
+            apply_transfer(
+                program_id,
+                submitter,
+                source_account_pda,
+                dest_account_pda,
+                source_chain,
+                recipient_chain,
+                token_chain,
+                &token_address,
+                amount,
+            )?;
+        }
+        TokenBridgeAction::Attest | TokenBridgeAction::Other => {
+            // No balance work. Slots 8 and 9 are required for the runtime
+            // account-meta declaration but the caller is expected to pass
+            // sentinel addresses (e.g., the noreplay-authority PDA) — the
+            // program intentionally does not touch them, so any account
+            // shape is fine here.
+        }
+    }
+
+    // (8) Refund the recorded payer and close the pending PDA.
     let recorded_payer = layout.payer;
     close_pending_pda(pending_pda, submitter, &recorded_payer)?;
     Ok(())
+}
+
+/// Mutate the source and destination Account PDAs to reflect a Token Bridge
+/// transfer. Port of CosmWasm `commit_transfer`
+/// (`cosmwasm/packages/accountant/src/contract.rs:109-126`):
+///
+/// 1. Source-side `lock_or_burn` — chain == token_chain ⇒ credit (native
+///    lock), chain != token_chain ⇒ debit (wrapped burn).
+/// 2. Destination-side `unlock_or_mint` — chain == token_chain ⇒ debit
+///    (native unlock), chain != token_chain ⇒ credit (wrapped mint).
+///
+/// Same-chain self-transfers (source == destination PDA) are collapsed onto
+/// one in-memory layout so the second mutation observes the first — matching
+/// CosmWasm's `if src.key == dst.key { src.unlock_or_mint(...) }` path.
+#[allow(clippy::too_many_arguments)]
+fn apply_transfer(
+    program_id: &Address,
+    payer: &AccountView,
+    source_account: &mut AccountView,
+    dest_account: &mut AccountView,
+    source_chain: u16,
+    recipient_chain: u16,
+    token_chain: u16,
+    token_address: &[u8; 32],
+    amount: crate::definitions::Uint256,
+) -> ProgramResult {
+    // ----- Source side -----
+    let (src_expected, src_bump) = derive_account_pda(
+        program_id,
+        source_chain,
+        token_chain,
+        token_address,
+    );
+    if source_account.address() != &src_expected {
+        return Err(err(GlobalAccountantError::InvalidAccountPda));
+    }
+    account_state::init_if_needed(
+        program_id,
+        payer,
+        source_account,
+        source_chain,
+        token_chain,
+        token_address,
+        src_bump,
+    )?;
+    let mut src = account_state::load(source_account)?;
+    src.lock_or_burn(amount).map_err(err)?;
+
+    // Same-chain self-transfer detection — see CosmWasm
+    // `cosmwasm/packages/accountant/src/contract.rs:158-161`. When source ==
+    // destination, apply both ops to the same in-memory layout before
+    // storing once, so the second op observes the first.
+    let same_pda = source_account.address() == dest_account.address();
+    if same_pda {
+        src.unlock_or_mint(amount).map_err(err)?;
+        account_state::store(source_account, &src)?;
+        return Ok(());
+    }
+
+    // Distinct destination: flush source, then operate on the destination.
+    account_state::store(source_account, &src)?;
+
+    // ----- Destination side -----
+    let (dst_expected, dst_bump) = derive_account_pda(
+        program_id,
+        recipient_chain,
+        token_chain,
+        token_address,
+    );
+    if dest_account.address() != &dst_expected {
+        return Err(err(GlobalAccountantError::InvalidAccountPda));
+    }
+    account_state::init_if_needed(
+        program_id,
+        payer,
+        dest_account,
+        recipient_chain,
+        token_chain,
+        token_address,
+        dst_bump,
+    )?;
+    let mut dst = account_state::load(dest_account)?;
+    dst.unlock_or_mint(amount).map_err(err)?;
+    account_state::store(dest_account, &dst)
+}
+
+/// Re-derive the canonical Account PDA address + bump from `(chain,
+/// token_chain, token_address)`. Mirrors the canonical-bump pattern used in
+/// `open_digest_inner` and `close_pending`'s pending-PDA check.
+fn derive_account_pda(
+    program_id: &Address,
+    chain: u16,
+    token_chain: u16,
+    token_address: &[u8; 32],
+) -> (Address, u8) {
+    let chain_be = chain.to_be_bytes();
+    let token_chain_be = token_chain.to_be_bytes();
+    Address::find_program_address(
+        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        program_id,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -210,7 +406,7 @@ struct ParsedObservation {
 }
 
 impl ParsedObservation {
-    fn from_data(data: &[u8; SUBMIT_DATA_LEN]) -> Result<Self, ProgramError> {
+    fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> Result<Self, ProgramError> {
         let (chain_bytes, rest) = data.split_at(2);
         let (emitter, rest) = rest.split_at(32);
         let (sequence_bytes, rest) = rest.split_at(8);
@@ -562,3 +758,18 @@ fn keccak256(data: &[u8], result: &mut [u8; 32]) {
 
 #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
 fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {}
+
+/// `keccak256(keccak256(body))` — the Wormhole VAA digest convention. The
+/// guardians sign this digest and the Verify VAA Shim recomputes it; here we
+/// re-derive it on the submitter's behalf so the program can verify the
+/// caller's claimed digest matches the body the submission carries. The
+/// slice-of-slices ABI quirk (pinocchio's `sol_keccak256` takes a pointer to
+/// `&[u8]` fat pointers, not raw bytes) is captured in the inner `keccak256`
+/// helper.
+fn double_keccak256(body: &[u8]) -> [u8; 32] {
+    let mut inner = [0u8; 32];
+    keccak256(body, &mut inner);
+    let mut outer = [0u8; 32];
+    keccak256(&inner, &mut outer);
+    outer
+}
