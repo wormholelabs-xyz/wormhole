@@ -289,6 +289,14 @@ func (w *Watcher) Run(parentCtx context.Context) error {
 		return fmt.Errorf("failed to verify evm chain id: %w", verifyErr)
 	}
 
+	// Reset Run-scoped state. The watcher value persists across supervisor
+	// restarts (see config.go), so any map filled by a prior Run must be
+	// re-initialised here. Without this, pending observations stranded by an
+	// upstream RPC failure accumulate indefinitely.
+	w.pendingMu.Lock()
+	w.pending = make(map[pendingKey]*pendingMessage)
+	w.pendingMu.Unlock()
+
 	// Connect to the node using the appropriate type of connector.
 	{
 		var finalizedPollingSupported, safePollingSupported bool
@@ -300,6 +308,19 @@ func (w *Watcher) Run(parentCtx context.Context) error {
 			p2p.DefaultRegistry.AddErrorCount(w.chainID, 1)
 			return fmt.Errorf(`failed to create connection to url "%s": %w`, w.url, err)
 		}
+
+		// Release the JSON-RPC client when Run returns. The supervisor restarts
+		// Run on error (mezo testnet exhibits this every ~30 min during RPC
+		// flaps); without this defer each restart strands the prior
+		// *rpc.Client plus its dispatch goroutines. Captured by value so the
+		// defer keeps a reference to this particular connector even if a
+		// later branch replaces w.ethConn.
+		ethConnToClose := w.ethConn
+		defer func() {
+			if ethConnToClose != nil {
+				_ = ethConnToClose.Close()
+			}
+		}()
 
 		// Log the connector details for troubleshooting purposes.
 		if finalizedPollingSupported {

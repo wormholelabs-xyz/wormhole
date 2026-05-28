@@ -203,6 +203,10 @@ func (e *mockConnectorForBatchPoller) SubscribeNewHead(ctx context.Context, ch c
 	return mockSubscription{}, nil
 }
 
+func (e *mockConnectorForBatchPoller) Close() error {
+	return nil
+}
+
 func batchShouldHaveAllThree(t *testing.T, block []*NewBlock, blockNum uint64, expectedHash ethCommon.Hash) {
 	require.Equal(t, 3, len(block))
 	hasFinalized := false

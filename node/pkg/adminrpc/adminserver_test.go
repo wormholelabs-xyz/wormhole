@@ -97,6 +97,10 @@ func (c mockEVMConnector) SubscribeNewHead(ctx context.Context, ch chan<- *types
 	panic("unimplemented")
 }
 
+func (c mockEVMConnector) Close() error {
+	return nil
+}
+
 func generateGuardianSigners(num int) (signers []guardiansigner.GuardianSigner, addrs []common.Address) {
 	for i := 0; i < num; i++ {
 		signer, err := guardiansigner.GenerateSignerWithPrivatekeyUnsafe(nil)

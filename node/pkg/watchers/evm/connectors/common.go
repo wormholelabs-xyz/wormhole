@@ -63,6 +63,11 @@ type Connector interface {
 	RawBatchCallContext(ctx context.Context, b []rpc.BatchElem) error
 	Client() *ethClient.Client
 	SubscribeNewHead(ctx context.Context, ch chan<- *types.Header) (ethereum.Subscription, error)
+	// Close releases the underlying JSON-RPC client. Must be called when the
+	// watcher tears down a connector — go-ethereum's *rpc.Client retains a
+	// dispatch goroutine that is reclaimed only by Close(), so omitting this
+	// on supervisor restart leaks one client (and ~3 goroutines) per restart.
+	Close() error
 }
 
 type PollSubscription struct {
