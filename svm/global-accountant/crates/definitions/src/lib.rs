@@ -192,6 +192,23 @@ pub const NOREPLAY_BITMAP_OFFSET: usize = 1;
 /// `solana_noreplay::MAX_NAMESPACE_LEN`.
 pub const NOREPLAY_MAX_NAMESPACE_LEN: usize = 64;
 
+/// Wormhole Core Bridge program ID on Solana mainnet
+/// (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`).
+///
+/// Used by `close_pending` to verify the supplied `GuardianSet` account is
+/// genuinely owned by the Core Bridge before reading any bytes from it.
+/// Without that check, a caller could pass an arbitrary account with bytes
+/// claiming the set is expired and force a permanent DoS of any pending PDA
+/// (see the regression test in `tests/submit_observations.rs`).
+///
+/// Vendored as raw bytes so this crate stays Solana-SDK-free. Mirrors the
+/// canonical definition at
+/// `svm/wormhole-core-shims/crates/definitions/src/solana.rs::mainnet::CORE_BRIDGE_PROGRAM_ID_ARRAY`.
+pub const CORE_BRIDGE_PROGRAM_ID: Pubkey = [
+    0x0e, 0x0a, 0x58, 0x9a, 0x41, 0xa5, 0x5f, 0xbd, 0x66, 0xc5, 0x2a, 0x47, 0x5f, 0x2d, 0x92, 0xa6,
+    0xd3, 0xdc, 0x9b, 0x47, 0x47, 0x11, 0x4c, 0xb9, 0xaf, 0x82, 0x5a, 0x98, 0xb5, 0x45, 0xd3, 0xce,
+];
+
 /// Verify VAA Shim program ID (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`).
 ///
 /// The Shim deploys to the same address on mainnet, devnet, and Wormhole's Tilt

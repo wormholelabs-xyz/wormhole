@@ -20,6 +20,7 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, DigestAccountLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
+        CORE_BRIDGE_PROGRAM_ID,
         DIGEST_SEED_PREFIX, PENDING_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
@@ -240,7 +241,7 @@ fn guardian_set_account(
     Account {
         lamports: 1_000_000,
         data,
-        owner: Pubkey::new_from_array([0xCC; 32]), // Core Bridge placeholder
+        owner: Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID),
         executable: false,
         rent_epoch: 0,
     }
@@ -1286,6 +1287,83 @@ fn close_pending_with_noreplay_marked_succeeds() {
     let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
     assert_eq!(pending.lamports, 0);
     assert!(pending.data.is_empty());
+}
+
+#[test]
+fn close_pending_rejects_spoofed_guardian_set_owner() {
+    // Regression test for a permanent-DoS vector: without verifying the
+    // `guardian_set` account is owned by the Core Bridge, an attacker can
+    // construct an account at an arbitrary address with bytes claiming the
+    // set is "expired" (e.g. recording an index different from the pending
+    // PDA's recorded index — the strict-superset branch of trigger (a)).
+    // The current code would return `expired=true`, close the pending PDA,
+    // and force defenders to re-submit every signature gathered so far.
+    // Repeated indefinitely, this DoSes a `(chain, emitter, sequence, digest)`
+    // bucket from ever reaching quorum.
+    //
+    // After the fix, `guardian_set_expired` checks the account owner against
+    // the Core Bridge program ID up front and rejects with `InvalidPda` before
+    // reading any bytes.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x6A);
+    let accounts_after_first = scenario.submit_n(&mollusk, 1);
+
+    // Spoofed gs account: bytes encode index=99 (which mismatches recorded
+    // index=4), owner = attacker pubkey (NOT the Core Bridge).
+    let spoofed_gs = {
+        let mut data = Vec::with_capacity(8 + scenario.guardian_keys().len() * 20 + 8);
+        data.extend_from_slice(&99u32.to_le_bytes()); // index ≠ recorded
+        data.extend_from_slice(&(scenario.guardian_keys().len() as u32).to_le_bytes());
+        for key in scenario.guardian_keys() {
+            data.extend_from_slice(&key);
+        }
+        data.extend_from_slice(&0u32.to_le_bytes()); // creation_time
+        data.extend_from_slice(&0u32.to_le_bytes()); // expiration_time
+        Account {
+            lamports: 1_000_000,
+            data,
+            owner: Pubkey::new_from_array([0xDE; 32]), // attacker-controlled
+            executable: false,
+            rent_epoch: 0,
+        }
+    };
+    let mut accounts = accounts_after_first.clone();
+    if let Some(entry) = accounts
+        .iter_mut()
+        .find(|(k, _)| *k == scenario.guardian_set_pubkey)
+    {
+        entry.1 = spoofed_gs;
+    }
+
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &close_pending_ix_data(&scenario.emitter, scenario.sequence),
+        vec![
+            AccountMeta::new_readonly(scenario.submitter, true),
+            AccountMeta::new(scenario.pending_pda, false),
+            AccountMeta::new(scenario.submitter, false),
+            AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
+            AccountMeta::new_readonly(scenario.noreplay_bucket_pubkey, false),
+        ],
+    );
+    let r = mollusk.process_instruction(&ix, &accounts);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "spoofed-owner guardian_set must reject with InvalidPda, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
+    }
+
+    // Pending PDA must be untouched — the close path never reached the
+    // lamport drain.
+    let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending.owner, program_id(), "pending PDA still owned by program");
+    assert!(!pending.data.is_empty(), "pending PDA data preserved");
 }
 
 #[test]

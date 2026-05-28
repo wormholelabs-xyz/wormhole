@@ -32,7 +32,10 @@ use pinocchio::{
     AccountView, Address, ProgramResult,
 };
 
-use crate::definitions::{GlobalAccountantError, NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_SEED_PREFIX};
+use crate::definitions::{
+    GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    PENDING_SEED_PREFIX,
+};
 use crate::err;
 use crate::instructions::noreplay;
 use crate::state::pending;
@@ -141,17 +144,19 @@ pub fn process(
 /// the expected index (a wrong-set account is treated as "no longer the
 /// active set" — the closer can pass any expired set to prove the trigger).
 ///
-/// Note: we deliberately do NOT verify the account is owned by the Core Bridge
-/// here. The caller-supplied account is read-only and the only datum we care
-/// about is `(index, expiration_time)`. A spoofed account claiming a different
-/// expiration would only let the spoofer close *their own* pending bucket
-/// earlier than legitimate — which is fine, since they are the recorded payer
-/// and would have received the rent regardless. The hard guarantee is that
-/// **two** triggers exist and **either** is sufficient.
+/// The account owner is checked against [`CORE_BRIDGE_PROGRAM_ID`] up front:
+/// without this check, an attacker could construct an account at an arbitrary
+/// address with bytes claiming the set is expired and repeatedly DoS any
+/// pending PDA from reaching quorum. The mismatch-index sub-case of trigger
+/// (a) made the attack costless (no clock manipulation needed), so the owner
+/// check is load-bearing for liveness.
 fn guardian_set_expired(
     guardian_set: &AccountView,
     expected_index: u32,
 ) -> Result<bool, ProgramError> {
+    if guardian_set.owner().as_array() != &CORE_BRIDGE_PROGRAM_ID {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
     let data = guardian_set.try_borrow()?;
     if data.len() < 8 {
         return Err(err(GlobalAccountantError::InvalidPda));

@@ -57,12 +57,16 @@ pub(crate) fn open_digest_inner(
     guardian_set_index: u32,
     bump: u8,
 ) -> ProgramResult {
-    // Canonical-bump enforcement: until NoReplay lands, the only thing
-    // preventing an attacker from opening multiple sibling PDAs for the same
-    // `(chain, emitter, sequence)` is rejecting non-canonical bumps. We accept
-    // the bump in instruction data for CU savings on the hot path, but
-    // recompute the canonical bump via `find_program_address` and reject any
-    // mismatch. This costs one syscall (~1.5K CU on Solana) — acceptable.
+    // Canonical-bump enforcement. NoReplay reserves the `(chain, emitter,
+    // sequence)` slot atomically with the commit branch, but that does not
+    // pin the DigestAccount to its canonical address. A caller passing a
+    // non-canonical bump would mint a valid DigestAccount at a non-canonical
+    // PDA address — `close_digest` only ever derives the canonical address,
+    // so the rent would be locked forever and relayer-side lookups would
+    // miss the on-chain breadcrumb. We accept the bump in instruction data
+    // for CU savings on the hot path, but recompute the canonical bump via
+    // `find_program_address` and reject any mismatch. One syscall
+    // (~1.5K CU) — acceptable.
     //
     // No separate `digest_pda.address() == &expected` check: canonical-bump
     // equality already implies the PDA address is the unique one derivable
