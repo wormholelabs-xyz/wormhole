@@ -123,6 +123,25 @@ test-e2e-submit-obs: build-prod
 	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
 		--test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
 
+# Phase 2.5 surfpool e2e for `submit_vaas` driven against the real Verify VAA
+# Shim and real `solana-noreplay` programs. Deploys both
+# `global_accountant.so` (production shape) and `solana_noreplay.so`,
+# pre-posts the signatures of a historical Token Bridge transfer VAA via the
+# Shim's `PostSignatures`, and calls `submit_vaas` to apply the transfer.
+#
+# Build target is `build-prod` so the real Shim CPI is exercised. The
+# host-side test binary still needs the mock features enabled in its
+# workspace dev-dep self-reference; they affect only the on-chain `.so`.
+.PHONY: test-e2e-submit-vaas
+test-e2e-submit-vaas: build-prod
+	@test -f "$(NOREPLAY_SO)" || { \
+		echo "ERROR: $(NOREPLAY_SO) not found."; \
+		echo "Rebuild via: cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build"; \
+		exit 1; \
+	}
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+		--test surfpool_e2e_submit_vaas -- --ignored --nocapture
+
 .PHONY: test-e2e-noreplay-smoke
 test-e2e-noreplay-smoke: build-dev
 	@test -f "$(NOREPLAY_SO)" || { \
@@ -162,7 +181,7 @@ test-e2e-noreplay-smoke: build-dev
 # here to keep CI deterministic. Bump locally with `RUST_TEST_THREADS=N` if
 # your network can take more.
 .PHONY: test-e2e
-test-e2e: test-e2e-spike test-e2e-mainnet-fork test-e2e-vaa-corpus test-e2e-submit-obs
+test-e2e: test-e2e-spike test-e2e-mainnet-fork test-e2e-vaa-corpus test-e2e-submit-obs test-e2e-submit-vaas
 	@echo "All surfpool E2E layers green."
 
 # Compute-unit spike for the new `Uint256` type (Phase 2.1). Builds the

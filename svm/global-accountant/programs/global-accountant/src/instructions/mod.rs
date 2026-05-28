@@ -21,6 +21,8 @@ pub mod pda_init;
 #[cfg(feature = "test-only-open-digest")]
 pub mod open_digest;
 pub mod submit_observations;
+pub mod submit_vaas;
+pub mod transfer;
 
 use pinocchio::{
     cpi::{Seed, Signer},

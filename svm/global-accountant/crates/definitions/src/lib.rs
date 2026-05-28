@@ -20,6 +20,12 @@ pub enum Instruction {
     CloseDigest = 1,
     SubmitObservations = 2,
     ClosePending = 3,
+    /// Phase 2.5: permissionless signed-VAA backfill. Consumes a fully-signed
+    /// VAA via the Verify VAA Shim CPI and applies its balance effects
+    /// directly, bypassing the quorum tracker. See
+    /// `accountant-migration-cosmwasm-deep-dive.md` §4 and the Phase 2.5
+    /// design note in `accountant-migration.md` §13.
+    SubmitVaas = 4,
 }
 
 impl Instruction {
@@ -30,6 +36,7 @@ impl Instruction {
             1 => Some(Self::CloseDigest),
             2 => Some(Self::SubmitObservations),
             3 => Some(Self::ClosePending),
+            4 => Some(Self::SubmitVaas),
             _ => None,
         }
     }
