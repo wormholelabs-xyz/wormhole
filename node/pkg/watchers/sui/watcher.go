@@ -424,7 +424,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	common.RunWithScissors(ctx, errC, "sui_data_pump", func(ctx context.Context) error {
 		// Backoff bounds the retry rate when getEvents fails (e.g. RPC degraded,
 		// upstream pruning index gaps). Without this, errors trigger a tight retry
-		// loop that floods logs and drives heap allocation toward GOMEMLIMIT.
+		// loop that floods logs and allocates without bound.
 		backoff := e.loopDelay
 		const maxBackoff = 30 * time.Second
 
@@ -596,9 +596,9 @@ func (w *Watcher) getEvents(ctx context.Context) ([]SuiResultInfo, error) {
 			results = append(results, datum)
 		}
 		if (len(res.Result.Data) == 0) || (len(txs) == 0) {
-			// On mainnet and testnet the core bridge has emitted events, so an
-			// empty result here points to upstream RPC pruning and must be
-			// surfaced so operators can rotate the endpoint. The pump loop's
+			// A non-devnet core bridge has emitted events, so an empty result
+			// here points to an upstream data gap (e.g. RPC pruning) and is
+			// surfaced as an error rather than silently skipped; the pump loop's
 			// backoff bounds the retry rate. Devnet is exempt because a fresh
 			// local core bridge legitimately has no events until the first
 			// wormhole message is published.
