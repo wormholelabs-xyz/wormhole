@@ -136,9 +136,6 @@ fn build_transfer_body(
 }
 
 fn submit_ix_data(
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
     digest: &[u8; 32],
     guardian_set_index: u32,
     guardian_index: u8,
@@ -147,13 +144,13 @@ fn submit_ix_data(
     digest_bump: u8,
     body: &[u8],
 ) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 146-byte fixed prefix + 2-byte body
+    // Wire shape: 1-byte discriminator + 104-byte fixed prefix + 2-byte body
     // length (LE) + body bytes. Mirrors `submit_observations.rs::SUBMIT_FIXED_LEN`.
-    let mut data = Vec::with_capacity(1 + 146 + 2 + body.len());
+    // The routing tuple (chain, emitter, sequence) is sourced exclusively from
+    // the body header (offsets [8..50]); no caller-controlled prefix carries
+    // them.
+    let mut data = Vec::with_capacity(1 + 104 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
-    data.extend_from_slice(&chain.to_be_bytes());
-    data.extend_from_slice(emitter);
-    data.extend_from_slice(&sequence.to_be_bytes());
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
@@ -452,9 +449,6 @@ impl Scenario {
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_ix_data(
-                self.chain,
-                &self.emitter,
-                self.sequence,
                 &self.digest,
                 self.guardian_set_index,
                 guardian_index,
@@ -715,9 +709,6 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
 
     let signature = sign_digest(&scenario.guardians[12], &scenario.digest);
     let ix_data = submit_ix_data(
-        scenario.chain,
-        &scenario.emitter,
-        scenario.sequence,
         &scenario.digest,
         scenario.guardian_set_index,
         12,
@@ -809,6 +800,139 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
 }
 
 #[test]
+fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
+    // Critical security regression. Demonstrates that the bucket key
+    // (chain, emitter, sequence) is sourced exclusively from the signed
+    // body's header at offsets [8..50] — NEVER from caller-supplied wire
+    // prefix bytes.
+    //
+    // The CosmWasm reference (`cosmwasm/packages/accountant/src/msg.rs` —
+    // `Observation::digest`) inlines these fields inside the signed
+    // Observation struct; the bucket key and the digest preimage are the
+    // same bytes. Pre-fix the Solana port carried (chain, emitter, sequence)
+    // in a separate caller-controlled prefix; an attacker could sign body B
+    // with header (chainA, emitter_a, seq_a) and submit with prefix
+    // (chainB, emitter_b, seq_b). Signatures verify (digest is a function of
+    // body bytes), NoReplay slot for chainB is unmarked (different
+    // namespace), quorum reaches, and apply_transfer routes the source-side
+    // debit/credit at chainB's Account PDA — corrupting the balance ledger.
+    //
+    // Pre-fix this test fails: the program creates a pending PDA at the
+    // attacker-supplied address. Post-fix the wire shape no longer carries
+    // routing fields, so the attack cannot be expressed; the program reads
+    // (chain, emitter, sequence) from body[8..50].
+    let mollusk = mollusk();
+
+    // Body with header (chain=2, emitter_a, seq_a). The body's bytes [8..50]
+    // are the authoritative routing tuple; the program must read from there.
+    let body_chain = 2u16;
+    let mut body_emitter = [0u8; 32];
+    body_emitter[31] = 0x77;
+    let body_sequence = 0x42u64;
+    let body = build_attest_body(body_chain, &body_emitter, body_sequence);
+    let digest = double_keccak256_host(&body);
+
+    let guardians = make_guardians(19, 0x80);
+    let signature = sign_digest(&guardians[0], &digest);
+
+    // Attempt the attack: feed the program an attacker-derived pending PDA in
+    // slot 1, with a bump that matches *that* namespace, not the body's. The
+    // wire no longer carries (chain, emitter, sequence) — the program reads
+    // them from body[8..50] — so it recomputes the canonical bump for the
+    // body-derived seeds and rejects any mismatch in create_pending_pda. The
+    // attacker's spoofed bump cannot collide with the body-derived canonical
+    // bump under our seed scheme.
+    let attacker_chain = 99u16;
+    let attacker_emitter = [0xFFu8; 32];
+    let attacker_sequence = 0x9999u64;
+    let (attacker_pending_pda, attacker_pending_bump) =
+        derive_pending_pda(attacker_chain, &attacker_emitter, attacker_sequence, &digest);
+    let (body_pending_pda, body_pending_bump) =
+        derive_pending_pda(body_chain, &body_emitter, body_sequence, &digest);
+    assert_ne!(
+        body_pending_pda, attacker_pending_pda,
+        "test fixture must drive distinct pending PDA addresses"
+    );
+    assert_ne!(
+        body_pending_bump, attacker_pending_bump,
+        "test fixture must drive distinct canonical bumps (probabilistically \
+         true for non-colliding seeds; re-seed the fixture if this ever flips)"
+    );
+    let (body_digest_pda, body_digest_bump) =
+        derive_digest_pda(body_chain, &body_emitter, body_sequence);
+
+    let submitter = Pubkey::new_from_array([0x11u8; 32]);
+    let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
+    let noreplay_bucket_pubkey = Pubkey::new_from_array([0xC2u8; 32]);
+    let noreplay_program_pubkey = Pubkey::new_from_array([0xC3u8; 32]);
+    let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+
+    let ix_data = submit_ix_data(
+        &digest,
+        4,
+        0,
+        &signature,
+        attacker_pending_bump,
+        body_digest_bump,
+        &body,
+    );
+
+    let guardian_keys: Vec<[u8; 20]> = guardians.iter().map(|g| g.eth_address).collect();
+    let accounts = vec![
+        (submitter, system_owned_account(50_000_000_000)),
+        (attacker_pending_pda, uninitialised_pda_account()),
+        (
+            guardian_set_pubkey,
+            guardian_set_account(4, &guardian_keys, 0, 0),
+        ),
+        (noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
+        (body_digest_pda, uninitialised_pda_account()),
+        keyed_account_for_system_program(),
+        (noreplay_program_pubkey, system_owned_account(0)),
+        (noreplay_authority_pubkey, system_owned_account(0)),
+    ];
+
+    let metas = vec![
+        AccountMeta::new(submitter, true),
+        AccountMeta::new(attacker_pending_pda, false),
+        AccountMeta::new_readonly(guardian_set_pubkey, false),
+        AccountMeta::new(noreplay_bucket_pubkey, false),
+        AccountMeta::new(body_digest_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new_readonly(noreplay_program_pubkey, false),
+        AccountMeta::new_readonly(noreplay_authority_pubkey, false),
+        AccountMeta::new(noreplay_authority_pubkey, false),
+        AccountMeta::new(noreplay_authority_pubkey, false),
+        AccountMeta::new(submitter, false),
+    ];
+    let ix = Instruction::new_with_bytes(program_id(), &ix_data, metas);
+    let r = mollusk.process_instruction(&ix, &accounts);
+
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "spoofed pending PDA must reject with InvalidPda — program \
+                 recomputes canonical bump from body-derived seeds and rejects \
+                 any mismatch, got code {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
+    }
+
+    // Belt-and-braces: the attacker's pending PDA must still be uninitialised
+    // after the rejection (the failed tx unwinds atomically).
+    let attacker_after = find_account(&r.resulting_accounts, &attacker_pending_pda);
+    assert_eq!(
+        attacker_after.owner,
+        system_program_id(),
+        "attacker-supplied pending PDA must NOT be initialised after rejection"
+    );
+}
+
+#[test]
 fn submit_with_invalid_signature_fails() {
     // Take a valid signature, flip a byte, expect InvalidSignature.
     let mollusk = mollusk();
@@ -820,9 +944,6 @@ fn submit_with_invalid_signature_fails() {
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
-            scenario.chain,
-            &scenario.emitter,
-            scenario.sequence,
             &scenario.digest,
             scenario.guardian_set_index,
             0,
@@ -905,9 +1026,6 @@ fn submit_with_stale_old_set_observation_fails() {
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
-            new_scenario.chain,
-            &new_scenario.emitter,
-            new_scenario.sequence,
             &new_scenario.digest,
             4, // stale index
             1,
@@ -963,9 +1081,6 @@ fn submit_with_new_set_observation_wipes_old_pending() {
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
-            old_scenario.chain,
-            &old_scenario.emitter,
-            old_scenario.sequence,
             &old_scenario.digest,
             5,
             0,
@@ -1046,9 +1161,6 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
-            scenario.chain,
-            &scenario.emitter,
-            scenario.sequence,
             &alternate_digest,
             scenario.guardian_set_index,
             1,
@@ -1151,8 +1263,12 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     // body whose double-keccak matches the digest, so we mutate two bytes of
     // the original body and recompute.
     let mut alternate_body = scenario.body.clone();
+    // Mutate only consistency_level at byte 50 — bytes [42..50] hold the
+    // sequence in the body header, and post-routing-fix the program reads the
+    // bucket key directly from body[8..50]. Touching those bytes would change
+    // the on-chain sequence to a value different from `scenario.sequence`,
+    // mis-routing the pending PDA away from the seeds the test derives below.
     alternate_body[50] = 0xA5;
-    alternate_body[49] = 0x5A;
     let alternate_digest = double_keccak256_host(&alternate_body);
     assert_ne!(alternate_digest, scenario.digest);
 
@@ -1176,9 +1292,6 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_ix_data(
-                scenario.chain,
-                &scenario.emitter,
-                scenario.sequence,
                 &alternate_digest,
                 scenario.guardian_set_index,
                 i,
@@ -1780,9 +1893,6 @@ fn quorum_with_body_digest_mismatch_rejects() {
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
-            scenario.chain,
-            &scenario.emitter,
-            scenario.sequence,
             &scenario.digest,
             scenario.guardian_set_index,
             0,

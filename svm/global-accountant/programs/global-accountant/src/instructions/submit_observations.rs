@@ -50,22 +50,28 @@ use crate::state::pending;
 ///
 /// | offset | size | field                              |
 /// |--------|------|------------------------------------|
-/// | 0      | 2    | chain (big-endian)                 |
-/// | 2      | 32   | emitter                            |
-/// | 34     | 8    | sequence (big-endian)              |
-/// | 42     | 32   | digest                             |
-/// | 74     | 4    | guardian_set_index (little-endian) |
-/// | 78     | 1    | guardian_index                     |
-/// | 79     | 65   | signature (r||s||recovery_id)      |
-/// | 144    | 1    | pending_pda_bump                   |
-/// | 145    | 1    | digest_pda_bump                    |
+/// | 0      | 32   | digest                             |
+/// | 32     | 4    | guardian_set_index (little-endian) |
+/// | 36     | 1    | guardian_index                     |
+/// | 37     | 65   | signature (r||s||recovery_id)      |
+/// | 102    | 1    | pending_pda_bump                   |
+/// | 103    | 1    | digest_pda_bump                    |
 ///
 /// Trailing the fixed-size portion is `body_len: u16 LE` followed by exactly
 /// `body_len` bytes of VAA body. The body is verified against the supplied
 /// `digest` via `keccak256(keccak256(body)) == digest` before any state
 /// mutation, then parsed for Token Bridge fields on the quorum-completing
 /// branch.
-pub const SUBMIT_FIXED_LEN: usize = 2 + 32 + 8 + 32 + 4 + 1 + 65 + 1 + 1;
+///
+/// The routing tuple `(chain, emitter, sequence)` is sourced exclusively from
+/// the body's own header at byte offsets `[8..50]`, matching the CosmWasm
+/// `Observation::digest` precedent in `cosmwasm/packages/accountant/src/msg.rs`
+/// where the bucket key and the digest preimage are the same bytes. Carrying
+/// a separate caller-controlled prefix would let an attacker replay a signed
+/// body under arbitrary `(chain, emitter, sequence)` triples, corrupting the
+/// balance ledger; sourcing them from the body makes that attack structurally
+/// impossible.
+pub const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65 + 1 + 1;
 /// Maximum supported VAA body size on the wire. 4 KiB is well above the
 /// observed mainnet ceiling (`max(payload) ≈ 1 KiB`) and keeps the
 /// instruction data within Solana's 1232-byte tx-data limit when combined
@@ -109,7 +115,7 @@ pub fn process(
     }
     let body_bytes = &rest[2..2 + body_len];
 
-    let parsed = ParsedObservation::from_data(fixed_bytes)?;
+    let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
 
     // Verify the body the caller claims this observation is about. The
     // double-keccak convention matches the Wormhole VAA digest (the same
@@ -121,6 +127,14 @@ pub fn process(
     if computed != parsed.digest {
         return Err(err(GlobalAccountantError::BodyDigestMismatch));
     }
+
+    // Source the routing tuple from the body header now that the body is
+    // proven authentic. Sourcing (chain, emitter, sequence) from caller-
+    // controlled instruction data would let an attacker replay a signed body
+    // under arbitrary namespaces — see the module-level wire-format doc and
+    // the `submit_observations_routes_by_body_header_not_caller_supplied_prefix`
+    // regression test in `programs/global-accountant/tests/submit_observations.rs`.
+    parsed.populate_routing_from_body(body_bytes)?;
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs;
@@ -322,10 +336,18 @@ pub fn process(
 
 #[derive(Clone, Copy)]
 struct ParsedObservation {
-    chain: u16,
-    emitter: [u8; 32],
-    sequence: u64,
+    /// Source: body's `keccak256(keccak256(body_bytes))` (signed by the guardian).
+    /// Verified against the body bytes before any state work — the `digest` field
+    /// in instruction data is what the guardian signature was generated against,
+    /// and the body cross-check ensures it matches the supplied body.
     digest: [u8; 32],
+    /// Source: body's header at byte offsets `[8..10]`, populated by `from_body`
+    /// after the digest cross-check. Caller cannot lie about this.
+    chain: u16,
+    /// Source: body's header at byte offsets `[10..42]`. Caller cannot lie.
+    emitter: [u8; 32],
+    /// Source: body's header at byte offsets `[42..50]`. Caller cannot lie.
+    sequence: u64,
     guardian_set_index: u32,
     guardian_index: u8,
     signature: [u8; SECP256K1_SIGNATURE_LEN],
@@ -334,26 +356,18 @@ struct ParsedObservation {
 }
 
 impl ParsedObservation {
+    /// Parse the non-routing fields from the fixed-size prefix. The routing
+    /// tuple (chain, emitter, sequence) is left zeroed here and populated
+    /// from `body[8..50]` once the body→digest cross-check has confirmed the
+    /// body bytes match what the guardian signed.
     fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> Result<Self, ProgramError> {
-        let (chain_bytes, rest) = data.split_at(2);
-        let (emitter, rest) = rest.split_at(32);
-        let (sequence_bytes, rest) = rest.split_at(8);
-        let (digest_bytes, rest) = rest.split_at(32);
+        let (digest_bytes, rest) = data.split_at(32);
         let (gsi_bytes, rest) = rest.split_at(4);
         let guardian_index = rest[0];
         let signature_bytes = &rest[1..1 + SECP256K1_SIGNATURE_LEN];
         let pending_pda_bump = rest[1 + SECP256K1_SIGNATURE_LEN];
         let digest_pda_bump = rest[1 + SECP256K1_SIGNATURE_LEN + 1];
 
-        let chain_be: [u8; 2] = chain_bytes
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-        let emitter_arr: [u8; 32] = emitter
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-        let sequence_be: [u8; 8] = sequence_bytes
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
         let digest_arr: [u8; 32] = digest_bytes
             .try_into()
             .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
@@ -365,16 +379,36 @@ impl ParsedObservation {
             .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
 
         Ok(Self {
-            chain: u16::from_be_bytes(chain_be),
-            emitter: emitter_arr,
-            sequence: u64::from_be_bytes(sequence_be),
             digest: digest_arr,
+            chain: 0,
+            emitter: [0u8; 32],
+            sequence: 0,
             guardian_set_index: u32::from_le_bytes(gsi),
             guardian_index,
             signature,
             pending_pda_bump,
             digest_pda_bump,
         })
+    }
+
+    /// Populate the routing tuple from the body header. The Wormhole body
+    /// layout has `emitter_chain` at `[8..10]` (BE u16), `emitter_address` at
+    /// `[10..42]`, and `sequence` at `[42..50]` (BE u64). Caller must have
+    /// already proven `body` matches `self.digest` before calling this.
+    fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
+        if body.len() < 50 {
+            return Err(err(GlobalAccountantError::InvalidInstructionData));
+        }
+        self.chain = u16::from_be_bytes([body[8], body[9]]);
+        self.emitter = body[10..42]
+            .try_into()
+            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+        self.sequence = u64::from_be_bytes(
+            body[42..50]
+                .try_into()
+                .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?,
+        );
+        Ok(())
     }
 }
 
