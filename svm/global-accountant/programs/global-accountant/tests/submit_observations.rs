@@ -468,8 +468,11 @@ impl Scenario {
         mollusk.process_instruction(&ix, &starting_accounts)
     }
 
-    /// Account-meta list (10 entries) matching the wire shape documented in
-    /// `submit_observations.rs::process`.
+    /// Account-meta list (11 entries) matching the wire shape documented in
+    /// `submit_observations.rs::process`. Slot 10 is the rent_recipient: the
+    /// default scenario uses `submitter` (the bucket opener and the only
+    /// observer) so single-submitter tests cover the all-same-wallet case.
+    /// Multi-submitter tests build their own meta vec inline.
     fn account_metas(&self) -> Vec<AccountMeta> {
         vec![
             AccountMeta::new(self.submitter, true),
@@ -482,6 +485,7 @@ impl Scenario {
             AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
             AccountMeta::new(self.source_account_pubkey, false),
             AccountMeta::new(self.dest_account_pubkey, false),
+            AccountMeta::new(self.submitter, false),
         ]
     }
 
@@ -672,6 +676,136 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
         bucket.data[0], 0x01,
         "NoReplay bucket flipped to marked on quorum reach"
     );
+}
+
+#[test]
+fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() {
+    // Multi-submitter quorum regression.
+    //
+    // Wormchain reference (`node/pkg/accountant/submit_obs.go:373-378`): each
+    // guardian runs its own node, signs with its own key, and broadcasts using
+    // its own `SenderAddress()` on Wormchain. CosmWasm has no rent concept, so
+    // the contract does not care who completes quorum. The Solana port has to
+    // preserve that operational model because the network does not know in
+    // advance which guardian's submission will be the 13th — yet rent for the
+    // pending PDA must refund to whoever opened it.
+    //
+    // The wire shape carries a dedicated `rent_recipient` account (slot 10)
+    // that must equal the layout's recorded payer; the submitter (slot 0) may
+    // be any signer. Without this separation, the `close_pending_pda` payer
+    // check would block any 13th submitter that is not the original bucket
+    // creator — structurally unreachable for honest multi-guardian operation.
+
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x70);
+
+    // Alice opens and accumulates the first 12 signatures (default scenario
+    // uses scenario.submitter == alice for every submission).
+    let accounts_after_12 = scenario.submit_n(&mollusk, 12);
+    let alice = scenario.submitter;
+    let alice_lamports_pre = find_account(&accounts_after_12, &alice).lamports;
+    let pending_lamports = find_account(&accounts_after_12, &scenario.pending_pda).lamports;
+    assert!(pending_lamports > 0, "pending PDA must be rent-funded at 12/19");
+
+    // Bob arrives with the 13th signature from a freshly-funded wallet.
+    let bob = Pubkey::new_from_array([0xB0u8; 32]);
+    let bob_starting_lamports = 50_000_000_000u64;
+    let mut accounts = accounts_after_12.clone();
+    accounts.push((bob, system_owned_account(bob_starting_lamports)));
+
+    let signature = sign_digest(&scenario.guardians[12], &scenario.digest);
+    let ix_data = submit_ix_data(
+        scenario.chain,
+        &scenario.emitter,
+        scenario.sequence,
+        &scenario.digest,
+        scenario.guardian_set_index,
+        12,
+        &signature,
+        scenario.pending_bump,
+        scenario.digest_bump,
+        &scenario.body,
+    );
+
+    // (1) Wrong rent_recipient (bob points at his own wallet): must fail with
+    // PayerMismatch before any state mutation.
+    let wrong_metas = vec![
+        AccountMeta::new(bob, true),
+        AccountMeta::new(scenario.pending_pda, false),
+        AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
+        AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
+        AccountMeta::new(scenario.digest_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
+        AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
+        AccountMeta::new(scenario.source_account_pubkey, false),
+        AccountMeta::new(scenario.dest_account_pubkey, false),
+        AccountMeta::new(bob, false), // rent_recipient = bob (wrong)
+    ];
+    let ix_wrong = Instruction::new_with_bytes(program_id(), &ix_data, wrong_metas);
+    let r_wrong = mollusk.process_instruction(&ix_wrong, &accounts);
+    match r_wrong.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::PayerMismatch as u32,
+                "wrong rent_recipient must fail with PayerMismatch, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(PayerMismatch), got {other:?}"),
+    }
+
+    // (2) Correct rent_recipient (alice): must succeed and refund alice.
+    let correct_metas = vec![
+        AccountMeta::new(bob, true),
+        AccountMeta::new(scenario.pending_pda, false),
+        AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
+        AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
+        AccountMeta::new(scenario.digest_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
+        AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
+        AccountMeta::new(scenario.source_account_pubkey, false),
+        AccountMeta::new(scenario.dest_account_pubkey, false),
+        AccountMeta::new(alice, false), // rent_recipient = alice (correct)
+    ];
+    let ix_correct = Instruction::new_with_bytes(program_id(), &ix_data, correct_metas);
+    let r_correct = mollusk.process_instruction(&ix_correct, &accounts);
+    assert!(
+        matches!(r_correct.program_result, ProgramResult::Success),
+        "13th submission from a different submitter with correct rent_recipient \
+         must succeed, got {:?}",
+        r_correct.program_result
+    );
+
+    // Rent refund flowed to alice (recorded payer), not bob (submitter).
+    let alice_post = find_account(&r_correct.resulting_accounts, &alice);
+    assert_eq!(
+        alice_post.lamports,
+        alice_lamports_pre + pending_lamports,
+        "alice (recorded payer) received the pending-PDA rent refund"
+    );
+
+    // Pending PDA closed.
+    let pending_post = find_account(&r_correct.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending_post.lamports, 0, "pending PDA drained on commit");
+    assert!(pending_post.data.is_empty(), "pending PDA data dropped");
+    assert_eq!(pending_post.owner, system_program_id());
+
+    // DigestAccount opened by the new submitter (bob pays its rent).
+    let digest = find_account(&r_correct.resulting_accounts, &scenario.digest_pda);
+    assert_eq!(digest.owner, program_id(), "digest PDA opened on quorum");
+    let digest_layout: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
+    assert_eq!(
+        digest_layout.payer,
+        bob.to_bytes(),
+        "digest_pda recorded the quorum-completing submitter (bob) as its payer"
+    );
+
+    // NoReplay flipped.
+    let bucket = find_account(&r_correct.resulting_accounts, &scenario.noreplay_bucket_pubkey);
+    assert_eq!(bucket.data[0], 0x01, "NoReplay flipped on quorum reach");
 }
 
 #[test]

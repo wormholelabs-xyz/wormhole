@@ -153,6 +153,22 @@ pub fn process(
     //   9. `[WRITE]`         destination-chain Account PDA at
     //                       `(b"account", recipient_chain, token_chain, token_address)`.
     //                       Same semantics as slot 8.
+    //  10. `[WRITE]`         rent recipient for the pending PDA close on the
+    //                       quorum-completing branch. Must equal the bucket's
+    //                       recorded payer (the wallet that originally opened
+    //                       the pending PDA); the program verifies the address
+    //                       against `layout.payer` and rejects with
+    //                       `PayerMismatch` otherwise. Decoupling submitter
+    //                       from rent_recipient is what lets *any* guardian
+    //                       (or relayer) close out quorum on behalf of the
+    //                       original opener — the network does not know in
+    //                       advance which submission will be the 13th, but
+    //                       rent must always refund to whoever paid it. The
+    //                       slot is required on every submission for runtime
+    //                       account-meta declaration, but only credited on the
+    //                       quorum-completing branch. Callers on non-quorum
+    //                       submissions can pass any pubkey (the slot is not
+    //                       read).
     let [
         submitter,
         pending_pda,
@@ -164,6 +180,7 @@ pub fn process(
         noreplay_authority,
         source_account_pda,
         dest_account_pda,
+        rent_recipient,
     ] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -293,9 +310,13 @@ pub fn process(
         }
     }
 
-    // (8) Refund the recorded payer and close the pending PDA.
+    // (8) Refund the recorded payer and close the pending PDA. The caller
+    // supplies `rent_recipient` separately from `submitter` so any guardian or
+    // relayer can complete quorum on behalf of the original bucket opener;
+    // close_pending_pda verifies the supplied account's address matches
+    // `layout.payer`.
     let recorded_payer = layout.payer;
-    close_pending_pda(pending_pda, submitter, &recorded_payer)?;
+    close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;
     Ok(())
 }
 
@@ -395,9 +416,13 @@ fn decide_pending_action(
         return Ok(PendingAction::Create);
     }
     if owner_is_system {
-        // System-owned but pre-funded (e.g., dust-DoS attempt). Treat as
-        // fresh; `init_or_upgrade_pda` will Allocate + Assign over it.
-        return Ok(PendingAction::Create);
+        // System-owned with non-zero data is unreachable on Solana: the system
+        // program cannot Allocate space at a PDA address without us first
+        // signing an Assign via invoke_signed. Reject loudly rather than
+        // routing to init_or_upgrade_pda, which would error on the data_len
+        // guard anyway — surfacing the impossibility here makes the intent
+        // explicit instead of relying on a downstream defence.
+        return Err(err(GlobalAccountantError::InvalidPda));
     }
 
     // Non-system owner: must be us. Load and compare.
