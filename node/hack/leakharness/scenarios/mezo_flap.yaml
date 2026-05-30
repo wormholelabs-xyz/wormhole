@@ -1,0 +1,42 @@
+name: mezo_flap
+description: |
+  Reproduces the mezo testnet flap observed on 2026-05-27.
+  The single configured chain disconnects all its WebSocket clients
+  every 30 seconds and heals 1 second later, forcing the watcher's
+  supervisor to restart the connector roughly every 30 seconds.
+
+  On the pre-fix code (parent commit 9401d4df) this scenario produced
+  ~75-160 MB/h RSS slope on the testnet guardian. With 6813f4aa the
+  slope should drop to near zero. This is the regression-detection
+  scenario.
+
+defaults: _defaults.yaml
+
+# 5 minutes captures roughly 10 restart cycles, enough for the slope
+# to stabilise above noise.
+duration: 5m
+sample_interval: 15s
+
+chains:
+  sepolia:
+    fake: evm
+    behaviour: flapping
+    fault_schedule:
+      - { at: 30s,   action: close_websockets }
+      - { at: 31s,   action: heal }
+      - { at: 60s,   action: close_websockets }
+      - { at: 61s,   action: heal }
+      - { at: 90s,   action: close_websockets }
+      - { at: 91s,   action: heal }
+      - { at: 120s,  action: close_websockets }
+      - { at: 121s,  action: heal }
+      - { at: 150s,  action: close_websockets }
+      - { at: 151s,  action: heal }
+      - { at: 180s,  action: close_websockets }
+      - { at: 181s,  action: heal }
+      - { at: 210s,  action: close_websockets }
+      - { at: 211s,  action: heal }
+      - { at: 240s,  action: close_websockets }
+      - { at: 241s,  action: heal }
+      - { at: 270s,  action: close_websockets }
+      - { at: 271s,  action: heal }

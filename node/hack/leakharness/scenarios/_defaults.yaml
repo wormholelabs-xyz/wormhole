@@ -1,0 +1,27 @@
+# Shared scenario defaults. Individual scenario files reference this via
+# `defaults: _defaults.yaml` and override only the fields they need to.
+
+sample_interval: 30s
+
+guardian:
+  unsafe_dev_mode: true
+  # Minimum set of chains needed to exercise the EVM watcher restart
+  # path. Phase 3 will extend this once the sui / cosmwasm / xrpl fakes
+  # land.
+  enabled_chains:
+    - sepolia
+  signer: file:devkeys/01.priv
+  extra_flags: []
+
+# 6 GiB matches the production GOMEMLIMIT on vm-guardian-01. Exceeding
+# this is the only hard failure mode of the harness; everything else is
+# reported, not gated.
+oom_cap_bytes: 6442450944
+
+# Per decision #6: report all slopes, gate on none. Operator reads
+# summary.json.
+slope_report:
+  rss_mb_per_hour: true
+  heap_inuse_mb_per_hour: true
+  goroutines_per_hour: true
+  fds_per_hour: true
