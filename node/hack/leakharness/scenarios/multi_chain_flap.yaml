@@ -1,0 +1,32 @@
+name: multi_chain_flap
+description: |
+  Mixed-family scenario: an EVM chain and a Sui chain both flapping out
+  of phase. Exercises the harness's family-registry dispatch and
+  surfaces any per-family leak shape.
+
+defaults: _defaults.yaml
+
+duration: 3m
+sample_interval: 15s
+
+chains:
+  sepolia:
+    fake: evm
+    behaviour: flapping
+    fault_schedule:
+      - { at: 20s,  action: close_websockets }
+      - { at: 21s,  action: heal }
+      - { at: 60s,  action: close_websockets }
+      - { at: 61s,  action: heal }
+      - { at: 120s, action: close_websockets }
+      - { at: 121s, action: heal }
+  sui:
+    fake: sui
+    behaviour: flapping
+    fault_schedule:
+      - { at: 40s,  action: close_websockets }
+      - { at: 41s,  action: heal }
+      - { at: 80s,  action: close_websockets }
+      - { at: 81s,  action: heal }
+      - { at: 140s, action: close_websockets }
+      - { at: 141s, action: heal }
