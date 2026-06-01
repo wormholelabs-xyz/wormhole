@@ -18,10 +18,7 @@ use crate::err;
 /// Write a [`ModificationLogLayout`] into the account's data buffer. Caller
 /// is responsible for verifying the account's canonical address and having
 /// already allocated the account to `LEN` bytes via `init_or_upgrade_pda`.
-pub fn store(
-    account: &mut AccountView,
-    value: &ModificationLogLayout,
-) -> Result<(), ProgramError> {
+pub fn store(account: &mut AccountView, value: &ModificationLogLayout) -> Result<(), ProgramError> {
     let mut data = account.try_borrow_mut()?;
     if data.len() != ModificationLogLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));

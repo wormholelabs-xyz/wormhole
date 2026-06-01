@@ -26,8 +26,8 @@ use pinocchio::instruction::{InstructionAccount, InstructionView};
 
 use crate::definitions::{
     BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLogLayout, Uint256,
-    ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
-    MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
+    ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
+    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
 };
 #[cfg(not(feature = "mock-vaa"))]
 use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR};
@@ -89,11 +89,7 @@ const PAYLOAD_REASON_OFFSET: usize = BODY_HEADER_LEN + 112;
 const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 8 + 2 + 2 + 32 + 1 + 32 + 32;
 const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < MODIFY_BALANCE_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -125,15 +121,8 @@ pub fn process(
     //                       `(b"modification", payload_sequence_be)`.
     //                       Lazy-inited every call; existence ⇒
     //                       `DuplicateModification`.
-    let [
-        payer,
-        verify_vaa_shim_program,
-        guardian_set,
-        guardian_signatures,
-        balance_pda,
-        _system_program_acc,
-        modification_pda,
-    ] = accounts
+    let [payer, verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
+        accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -164,8 +153,7 @@ pub fn process(
     }
 
     // ----- (5) Payload validation -----
-    if body_bytes[PAYLOAD_MODULE_OFFSET..PAYLOAD_MODULE_OFFSET + 32]
-        != ACCOUNTANT_GOVERNANCE_MODULE
+    if body_bytes[PAYLOAD_MODULE_OFFSET..PAYLOAD_MODULE_OFFSET + 32] != ACCOUNTANT_GOVERNANCE_MODULE
     {
         return Err(err(GlobalAccountantError::InvalidGovernanceModule));
     }
@@ -213,7 +201,12 @@ pub fn process(
     let chain_id_be = chain_id.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     let (expected_balance_pda, canonical_balance_bump) = Address::find_program_address(
-        &[ACCOUNT_SEED_PREFIX, &chain_id_be, &token_chain_be, &token_address],
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_id_be,
+            &token_chain_be,
+            &token_address,
+        ],
         program_id,
     );
     if balance_pda.address() != &expected_balance_pda || balance_pda_bump != canonical_balance_bump

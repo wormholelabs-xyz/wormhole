@@ -45,11 +45,7 @@ use crate::state::digest;
 /// The mock branch ignores it.
 const CLOSE_DIGEST_DATA_LEN: usize = 32 + 1;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // Accounts:
     //   0. `[SIGNER]` closer (permissionless — any signer is fine)
     //   1. `[WRITE]`  digest PDA (this program's account)

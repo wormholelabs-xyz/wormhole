@@ -39,12 +39,8 @@ pub fn apply_transfer(
     amount: Uint256,
 ) -> ProgramResult {
     // ----- Source side -----
-    let (src_expected, src_bump) = derive_account_pda(
-        program_id,
-        source_chain,
-        token_chain,
-        token_address,
-    );
+    let (src_expected, src_bump) =
+        derive_account_pda(program_id, source_chain, token_chain, token_address);
     if source_account.address() != &src_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
@@ -75,12 +71,8 @@ pub fn apply_transfer(
     account_state::store(source_account, &src)?;
 
     // ----- Destination side -----
-    let (dst_expected, dst_bump) = derive_account_pda(
-        program_id,
-        recipient_chain,
-        token_chain,
-        token_address,
-    );
+    let (dst_expected, dst_bump) =
+        derive_account_pda(program_id, recipient_chain, token_chain, token_address);
     if dest_account.address() != &dst_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
@@ -110,7 +102,12 @@ pub fn derive_account_pda(
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Address::find_program_address(
-        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_be,
+            &token_chain_be,
+            token_address,
+        ],
         program_id,
     )
 }

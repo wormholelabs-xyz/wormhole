@@ -78,11 +78,7 @@ const PAYLOAD_EMITTER_OFFSET: usize = BODY_HEADER_LEN + 37;
 const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 2 + 32;
 const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < REGISTER_CHAIN_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -122,17 +118,8 @@ pub fn process(
     //   8. `[]`              system program (for `CreateAccount` / `Allocate`
     //                       / `Assign` on first registration AND for any lazy
     //                       noreplay bitmap create).
-    let [
-        payer,
-        verify_vaa_shim_program,
-        guardian_set,
-        guardian_signatures,
-        registration_pda,
-        noreplay_bucket,
-        noreplay_program,
-        noreplay_authority,
-        system_program_acc,
-    ] = accounts
+    let [payer, verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, noreplay_program, noreplay_authority, system_program_acc] =
+        accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -168,8 +155,7 @@ pub fn process(
     }
 
     // Extract sequence for NoReplay keying.
-    let sequence_bytes: [u8; 8] = body_bytes
-        [BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]
+    let sequence_bytes: [u8; 8] = body_bytes[BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let sequence = u64::from_be_bytes(sequence_bytes);
@@ -228,10 +214,8 @@ pub fn process(
     // below, so a non-canonical bump would fail at the runtime layer anyway —
     // catching it here surfaces our own error code.
     let chain_be = chain_to_register.to_be_bytes();
-    let (expected_pda, canonical_bump) = Address::find_program_address(
-        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
-        program_id,
-    );
+    let (expected_pda, canonical_bump) =
+        Address::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
     if registration_pda.address() != &expected_pda || registration_bump != canonical_bump {
         return Err(err(GlobalAccountantError::InvalidPda));
     }

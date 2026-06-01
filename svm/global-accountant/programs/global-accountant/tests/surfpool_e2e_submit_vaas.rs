@@ -67,7 +67,7 @@ use solana_transaction::Transaction;
 
 mod common;
 use common::{
-    await_confirmed, derive_noreplay_bitmap_pda, deploy_program, hex_encode, load_vaa_fixture,
+    await_confirmed, deploy_program, derive_noreplay_bitmap_pda, hex_encode, load_vaa_fixture,
     noreplay_so_path, rpc_call, so_path, start_surfpool, ParsedVaa, SurfpoolOptions,
     NOREPLAY_PROGRAM_ID,
 };
@@ -81,8 +81,7 @@ const CORE_BRIDGE_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 
 /// Anchor discriminator for `post_signatures`
 /// (`sha256("global:post_signatures")[..8]`).
-const POST_SIGNATURES_SELECTOR: [u8; 8] =
-    [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
+const POST_SIGNATURES_SELECTOR: [u8; 8] = [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
 
 /// Compute Budget program ID.
 const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
@@ -141,7 +140,12 @@ fn derive_account_pda(
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
-        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_be,
+            &token_chain_be,
+            token_address,
+        ],
         program_id,
     )
 }
@@ -303,8 +307,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     );
 
     // ----- Step 2: load + parse the historical Token Bridge transfer VAA. -----
-    let vaa =
-        load_vaa_fixture("mainnet_solana_token_bridge_transfer_seq1395207.vaa");
+    let vaa = load_vaa_fixture("mainnet_solana_token_bridge_transfer_seq1395207.vaa");
     eprintln!(
         "[submit-vaas-e2e] VAA gsi={} chain={} sequence={} digest={}",
         vaa.guardian_set_index,
@@ -320,7 +323,10 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     // Decode the Token Bridge transfer payload up-front so we can pre-seed
     // the Account PDAs with sufficient balances.
     let body = &vaa.bytes[vaa.body_offset..];
-    assert_eq!(body[51], 0x01, "fixture must carry a Transfer action (0x01)");
+    assert_eq!(
+        body[51], 0x01,
+        "fixture must carry a Transfer action (0x01)"
+    );
     let mut amount_bytes = [0u8; 32];
     amount_bytes.copy_from_slice(&body[52..84]);
     let amount = Uint256::from_be_bytes(amount_bytes);
@@ -367,9 +373,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
 
     // Lazy-fetch Shim + Core Bridge + GuardianSet PDA.
     let shim_program_id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
-    let _shim = rpc
-        .get_account(&shim_program_id)
-        .expect("Shim lazy-fetch");
+    let _shim = rpc.get_account(&shim_program_id).expect("Shim lazy-fetch");
     let _core = rpc
         .get_account(&CORE_BRIDGE_PROGRAM_ID)
         .expect("Core Bridge lazy-fetch");

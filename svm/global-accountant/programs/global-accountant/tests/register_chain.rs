@@ -47,10 +47,7 @@ fn system_program_id() -> Pubkey {
 
 fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
-    Pubkey::find_program_address(
-        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
-        &program_id(),
-    )
+    Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
 /// Host-side derivation of the canonical NoReplay bitmap PDA.
@@ -283,7 +280,11 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
         .iter()
         .find(|(k, _)| *k == registration_pda)
         .expect("registration PDA missing from result");
-    assert_eq!(post.1.owner, program_id(), "registration PDA owned by program");
+    assert_eq!(
+        post.1.owner,
+        program_id(),
+        "registration PDA owned by program"
+    );
     assert_eq!(
         post.1.data.len(),
         ChainRegistrationLayout::LEN,
@@ -449,7 +450,8 @@ fn register_chain_governance_header_violations_reject() {
             ProgramResult::Failure(err) => {
                 let code = u64::from(err) as u32;
                 assert_eq!(
-                    code, case.expected,
+                    code,
+                    case.expected,
                     "[{label}] expected {expected:?}, got {code:?}",
                     label = case.label,
                     expected = case.expected,

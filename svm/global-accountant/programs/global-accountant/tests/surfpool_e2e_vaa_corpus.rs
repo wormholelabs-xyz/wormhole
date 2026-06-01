@@ -20,7 +20,10 @@ fn corpus_fixtures_parse_and_digest_consistently() {
         0x41, 0x16,
     ];
     let baseline = load_vaa_fixture("mainnet_solana_token_bridge_seq2211.vaa");
-    assert_eq!(baseline.digest, SEQ_2211_EXPECTED_DIGEST, "seq 2211 digest pinned");
+    assert_eq!(
+        baseline.digest, SEQ_2211_EXPECTED_DIGEST,
+        "seq 2211 digest pinned"
+    );
     assert_eq!(baseline.guardian_set_index, 6);
     assert_eq!(baseline.emitter_chain, 1);
     assert_eq!(baseline.sequence, 2211);

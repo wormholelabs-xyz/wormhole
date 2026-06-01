@@ -9,9 +9,7 @@
 
 use {
     global_accountant::instructions::noreplay::derive_bucket_pda,
-    global_accountant_definitions::{
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
-    },
+    global_accountant_definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID},
     pinocchio::Address,
     solana_pubkey::Pubkey,
 };
@@ -63,4 +61,3 @@ fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
     );
     assert_eq!(ours_bump, ref_bump, "canonical bumps must agree");
 }
-

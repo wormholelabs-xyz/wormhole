@@ -262,7 +262,7 @@ fn open_then_close_round_trip() {
     let mut metas = vec![
         AccountMeta::new_readonly(payer, true), // payer can also be the closer
         AccountMeta::new(state.pda, false),
-        AccountMeta::new(payer, false),         // rent recipient
+        AccountMeta::new(payer, false), // rent recipient
     ];
     metas.extend(extra_metas);
     let close_ix = Instruction::new_with_bytes(
@@ -327,8 +327,10 @@ fn open_digest_with_prefunded_pda_succeeds() {
     //   * overshoot (1 SOL, well above the ~0.0009 SOL minimum for a
     //     120-byte account) -> Transfer is skipped (saturating_sub == 0); the
     //     pre-funded balance is accepted as a gift.
-    let cases: [(&str, u64, u8); 2] =
-        [("dust", 1, 0xC1), ("overshoot (1 SOL)", 1_000_000_000, 0xD1)];
+    let cases: [(&str, u64, u8); 2] = [
+        ("dust", 1, 0xC1),
+        ("overshoot (1 SOL)", 1_000_000_000, 0xD1),
+    ];
 
     for (label, prefunded, payer_seed) in cases {
         let mollusk = mollusk();
@@ -338,7 +340,11 @@ fn open_digest_with_prefunded_pda_succeeds() {
 
         let state = open_lifecycle_setup(&mollusk, payer, payer_starting, prefunded);
 
-        assert_eq!(state.pda_after_open.owner, program_id(), "[{label}] PDA owner");
+        assert_eq!(
+            state.pda_after_open.owner,
+            program_id(),
+            "[{label}] PDA owner"
+        );
         assert_eq!(
             state.pda_after_open.data.len(),
             DigestAccountLayout::LEN,
@@ -384,11 +390,8 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
         AccountMeta::new(payer, false),
     ];
     metas.extend(extra_metas);
-    let close_ix = Instruction::new_with_bytes(
-        program_id(),
-        &close_digest_ix_data(&bad_vaa_digest),
-        metas,
-    );
+    let close_ix =
+        Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&bad_vaa_digest), metas);
 
     let mut close_accounts = vec![
         (payer, state.payer_after_open.clone()),
@@ -442,7 +445,13 @@ fn find_non_canonical_bump(
     let mut bump = canonical_bump;
     while bump > 0 {
         bump -= 1;
-        let seeds: &[&[u8]] = &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be, &[bump]];
+        let seeds: &[&[u8]] = &[
+            DIGEST_SEED_PREFIX,
+            &chain_be,
+            emitter,
+            &sequence_be,
+            &[bump],
+        ];
         if let Ok(pda) = Pubkey::create_program_address(seeds, &program_id()) {
             return (bump, pda);
         }
@@ -462,14 +471,20 @@ fn open_with_non_canonical_bump_fails() {
     let mollusk = mollusk();
     let (chain, emitter, sequence, digest, guardian_set_index) = lifecycle_inputs();
     let (_canonical_pda, canonical_bump) = derive_digest_pda(chain, &emitter, sequence);
-    let (bad_bump, bad_pda) =
-        find_non_canonical_bump(chain, &emitter, sequence, canonical_bump);
+    let (bad_bump, bad_pda) = find_non_canonical_bump(chain, &emitter, sequence, canonical_bump);
     assert_ne!(bad_bump, canonical_bump);
 
     let payer = Pubkey::new_from_array([9u8; 32]);
     let open_ix = Instruction::new_with_bytes(
         program_id(),
-        &open_digest_ix_data(chain, &emitter, sequence, &digest, guardian_set_index, bad_bump),
+        &open_digest_ix_data(
+            chain,
+            &emitter,
+            sequence,
+            &digest,
+            guardian_set_index,
+            bad_bump,
+        ),
         vec![
             AccountMeta::new(payer, true),
             AccountMeta::new(bad_pda, false),
@@ -537,11 +552,7 @@ fn close_with_spoofed_system_owned_pda_fails() {
         AccountMeta::new(attacker, false),
     ];
     metas.extend(extra_metas);
-    let close_ix = Instruction::new_with_bytes(
-        program_id(),
-        &close_digest_ix_data(&digest),
-        metas,
-    );
+    let close_ix = Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&digest), metas);
 
     let mut close_accounts = vec![
         (attacker, system_owned_account(attacker_starting_lamports)),
@@ -594,11 +605,7 @@ fn close_with_wrong_rent_recipient_fails() {
         AccountMeta::new(wrong_recipient, false),
     ];
     metas.extend(extra_metas);
-    let close_ix = Instruction::new_with_bytes(
-        program_id(),
-        &close_digest_ix_data(&digest),
-        metas,
-    );
+    let close_ix = Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&digest), metas);
 
     let mut close_accounts = vec![
         (payer, system_owned_account(0)),

@@ -44,11 +44,7 @@ use crate::state::pending;
 /// dispatch discriminator. See module doc for the field map.
 const CLOSE_PENDING_DATA_LEN: usize = 32 + 8;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let data: &[u8; CLOSE_PENDING_DATA_LEN] = data
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;

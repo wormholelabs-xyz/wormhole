@@ -60,7 +60,13 @@ fn derive_pending_pda(
     let chain_be = chain.to_be_bytes();
     let sequence_be = sequence.to_be_bytes();
     Pubkey::find_program_address(
-        &[PENDING_SEED_PREFIX, &chain_be, emitter, &sequence_be, digest],
+        &[
+            PENDING_SEED_PREFIX,
+            &chain_be,
+            emitter,
+            &sequence_be,
+            digest,
+        ],
         &program_id(),
     )
 }
@@ -78,17 +84,19 @@ fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
-        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_be,
+            &token_chain_be,
+            token_address,
+        ],
         &program_id(),
     )
 }
 
 fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
-    Pubkey::find_program_address(
-        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
-        &program_id(),
-    )
+    Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
 /// Host-side derivation of the canonical NoReplay bitmap PDA for
@@ -335,7 +343,10 @@ fn make_guardians(count: usize, seed: u8) -> Vec<Guardian> {
         let hash = keccak256_host(raw);
         let mut eth_address = [0u8; 20];
         eth_address.copy_from_slice(&hash[12..]);
-        out.push(Guardian { secret, eth_address });
+        out.push(Guardian {
+            secret,
+            eth_address,
+        });
     }
     out
 }
@@ -432,12 +443,8 @@ impl Scenario {
         let (noreplay_authority_pubkey, _) =
             Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
-        let noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
-            &noreplay_authority_pubkey,
-            chain,
-            &emitter,
-            sequence,
-        );
+        let noreplay_bucket_pubkey =
+            derive_canonical_noreplay_bucket(&noreplay_authority_pubkey, chain, &emitter, sequence);
 
         Self {
             chain,
@@ -576,14 +583,8 @@ impl Scenario {
             (self.noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
             (self.digest_pda, uninitialised_pda_account()),
             keyed_account_for_system_program(),
-            (
-                self.noreplay_program_pubkey,
-                system_owned_account(0),
-            ),
-            (
-                self.noreplay_authority_pubkey,
-                system_owned_account(0),
-            ),
+            (self.noreplay_program_pubkey, system_owned_account(0)),
+            (self.noreplay_authority_pubkey, system_owned_account(0)),
         ];
         // Slots 8 and 9. Re-use existing entries when the sentinel collapses
         // them onto the noreplay-authority pubkey (Attest scenario); otherwise
@@ -609,11 +610,7 @@ impl Scenario {
 
     /// Run `n` observations sequentially from guardian indices `0..n`. Returns
     /// the resulting accounts after the last submission.
-    fn submit_n(
-        &self,
-        mollusk: &Mollusk,
-        n: u8,
-    ) -> Vec<(Pubkey, Account)> {
+    fn submit_n(&self, mollusk: &Mollusk, n: u8) -> Vec<(Pubkey, Account)> {
         let mut accounts = self.initial_accounts();
         for i in 0..n {
             let result = self.submit_once(mollusk, accounts.clone(), i);
@@ -628,10 +625,7 @@ impl Scenario {
     }
 }
 
-fn find_account<'a>(
-    accounts: &'a [(Pubkey, Account)],
-    key: &Pubkey,
-) -> &'a Account {
+fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Account {
     &accounts
         .iter()
         .find(|(k, _)| k == key)
@@ -665,7 +659,11 @@ fn submit_first_observation_creates_pending_pda() {
     );
     assert_eq!(layout.signatures, 0b1, "bit 0 set after first observation");
     assert_eq!(layout.chain, scenario.chain, "chain persisted");
-    assert_eq!(layout.payer, scenario.submitter.to_bytes(), "submitter is the recorded payer");
+    assert_eq!(
+        layout.payer,
+        scenario.submitter.to_bytes(),
+        "submitter is the recorded payer"
+    );
 
     // No quorum yet -> digest PDA is untouched.
     let digest = find_account(&accounts, &scenario.digest_pda);
@@ -702,7 +700,10 @@ fn submit_12_observations_accumulates_without_commit() {
     let digest = find_account(&accounts, &scenario.digest_pda);
     assert!(digest.data.is_empty(), "digest PDA untouched at 12/19");
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0u8, "NoReplay bucket still unmarked at 12/19");
+    assert_eq!(
+        bucket.data[0], 0u8,
+        "NoReplay bucket still unmarked at 12/19"
+    );
 }
 
 #[test]
@@ -714,7 +715,10 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
 
     // Pending PDA must be closed (lamports drained, owner reverted to system).
     let pending = find_account(&accounts, &scenario.pending_pda);
-    assert_eq!(pending.lamports, 0, "pending PDA lamports drained on commit");
+    assert_eq!(
+        pending.lamports, 0,
+        "pending PDA lamports drained on commit"
+    );
     assert_eq!(
         pending.owner,
         system_program_id(),
@@ -785,7 +789,10 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
     let alice = scenario.submitter;
     let alice_lamports_pre = find_account(&accounts_after_12, &alice).lamports;
     let pending_lamports = find_account(&accounts_after_12, &scenario.pending_pda).lamports;
-    assert!(pending_lamports > 0, "pending PDA must be rent-funded at 12/19");
+    assert!(
+        pending_lamports > 0,
+        "pending PDA must be rent-funded at 12/19"
+    );
 
     // Bob arrives with the 13th signature from a freshly-funded wallet.
     let bob = Pubkey::new_from_array([0xB0u8; 32]);
@@ -924,8 +931,12 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let attacker_chain = 99u16;
     let attacker_emitter = [0xFFu8; 32];
     let attacker_sequence = 0x9999u64;
-    let (attacker_pending_pda, attacker_pending_bump) =
-        derive_pending_pda(attacker_chain, &attacker_emitter, attacker_sequence, &digest);
+    let (attacker_pending_pda, attacker_pending_bump) = derive_pending_pda(
+        attacker_chain,
+        &attacker_emitter,
+        attacker_sequence,
+        &digest,
+    );
     let (body_pending_pda, body_pending_bump) =
         derive_pending_pda(body_chain, &body_emitter, body_sequence, &digest);
     assert_ne!(
@@ -1169,10 +1180,7 @@ fn submit_observations_rejects_spoofed_registration_pda() {
     let mut accounts = scenario.initial_accounts();
     // Add the spoofed PDA fixture (mollusk requires every meta-referenced
     // account to appear in the account list).
-    accounts.push((
-        spoofed_pda,
-        chain_registration_account(99, &[0xAA; 32]),
-    ));
+    accounts.push((spoofed_pda, chain_registration_account(99, &[0xAA; 32])));
 
     let mut metas = scenario.account_metas();
     let last_idx = metas.len() - 1;
@@ -1440,7 +1448,10 @@ fn submit_with_stale_old_set_observation_fails() {
     // reads the matching index from the supplied account.
     let old_gs_account = guardian_set_account(
         4,
-        &old_guardians.iter().map(|g| g.eth_address).collect::<Vec<_>>(),
+        &old_guardians
+            .iter()
+            .map(|g| g.eth_address)
+            .collect::<Vec<_>>(),
         0,
         0,
     );
@@ -1495,7 +1506,10 @@ fn submit_with_new_set_observation_wipes_old_pending() {
     let new_guardians = make_guardians(19, 0x4B);
     let new_gs_account = guardian_set_account(
         5,
-        &new_guardians.iter().map(|g| g.eth_address).collect::<Vec<_>>(),
+        &new_guardians
+            .iter()
+            .map(|g| g.eth_address)
+            .collect::<Vec<_>>(),
         0,
         0,
     );
@@ -1529,7 +1543,11 @@ fn submit_with_new_set_observation_wipes_old_pending() {
     );
 
     let pending = find_account(&r.resulting_accounts, &old_scenario.pending_pda);
-    assert_eq!(pending.owner, program_id(), "pending PDA still owned by program after rotation");
+    assert_eq!(
+        pending.owner,
+        program_id(),
+        "pending PDA still owned by program after rotation"
+    );
     let layout: &PendingObservationsLayout = bytemuck::from_bytes(&pending.data);
     assert_eq!(
         layout.guardian_set_index, 5,
@@ -1613,7 +1631,10 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     let d1 = find_account(&r.resulting_accounts, &scenario.pending_pda);
     let d1_layout: &PendingObservationsLayout = bytemuck::from_bytes(&d1.data);
     assert_eq!(d1_layout.digest, scenario.digest);
-    assert_eq!(d1_layout.signatures, 0b1, "D1 bucket still at one signature");
+    assert_eq!(
+        d1_layout.signatures, 0b1,
+        "D1 bucket still at one signature"
+    );
 
     // D2 bucket has one sig at guardian-index 1.
     let d2 = find_account(&r.resulting_accounts, &d2_pending_pda);
@@ -1831,7 +1852,10 @@ fn close_pending_stranded_digest_bucket_after_sibling_committed() {
     );
 
     let d1 = find_account(&r.resulting_accounts, &scenario.pending_pda);
-    assert_eq!(d1.lamports, 0, "stranded D1 lamports drained to recorded payer");
+    assert_eq!(
+        d1.lamports, 0,
+        "stranded D1 lamports drained to recorded payer"
+    );
     assert!(d1.data.is_empty(), "stranded D1 data dropped");
     assert_eq!(d1.owner, system_program_id());
 }
@@ -2008,7 +2032,11 @@ fn close_pending_with_overflowing_rent_recipient_rejects() {
 
     // Pending PDA must be untouched.
     let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
-    assert_eq!(pending.owner, program_id(), "pending PDA still owned by program");
+    assert_eq!(
+        pending.owner,
+        program_id(),
+        "pending PDA still owned by program"
+    );
     assert!(!pending.data.is_empty(), "pending PDA data preserved");
 }
 
@@ -2085,7 +2113,11 @@ fn close_pending_rejects_spoofed_guardian_set_owner() {
     // Pending PDA must be untouched — the close path never reached the
     // lamport drain.
     let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
-    assert_eq!(pending.owner, program_id(), "pending PDA still owned by program");
+    assert_eq!(
+        pending.owner,
+        program_id(),
+        "pending PDA still owned by program"
+    );
     assert!(!pending.data.is_empty(), "pending PDA data preserved");
 }
 
@@ -2169,11 +2201,13 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
     let mollusk = mollusk();
     let token_address = [0x77u8; 32];
     let scenario = Scenario::with_transfer_body(
-        19, 4, 0x60,
+        19,
+        4,
+        0x60,
         500_000u128,
-        2,             // token_chain = source-native (Ethereum)
+        2, // token_chain = source-native (Ethereum)
         token_address,
-        1,             // recipient_chain = Solana (wrapped destination)
+        1, // recipient_chain = Solana (wrapped destination)
     );
     let result = drive_transfer_to_quorum(&mollusk, &scenario);
     assert!(
@@ -2184,7 +2218,11 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
 
     // Source-chain Account: chain == token_chain == 2 ⇒ native lock ⇒ credited.
     let src = find_account(&result.resulting_accounts, &scenario.source_account_pubkey);
-    assert_eq!(src.owner, program_id(), "source Account PDA owned by program");
+    assert_eq!(
+        src.owner,
+        program_id(),
+        "source Account PDA owned by program"
+    );
     assert_eq!(src.data.len(), BalanceAccountLayout::LEN);
     let src_layout: &BalanceAccountLayout = bytemuck::from_bytes(&src.data);
     assert_eq!(src_layout.chain, 2);
@@ -2211,11 +2249,13 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     let mollusk = mollusk();
     let token_address = [0x88u8; 32];
     let mut scenario = Scenario::with_transfer_body(
-        19, 4, 0x61,
+        19,
+        4,
+        0x61,
         1_000u128,
-        2,             // token_chain = Ethereum (token-native)
+        2, // token_chain = Ethereum (token-native)
         token_address,
-        2,             // recipient_chain = Ethereum
+        2, // recipient_chain = Ethereum
     );
     // Re-seed `chain` so the VAA emitter is Solana, not Ethereum.
     scenario.chain = 1;
@@ -2283,7 +2323,10 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     // partial state. The NoReplay bit, DigestAccount, and pending PDA stay
     // untouched (Solana txs are all-or-nothing).
     let bucket = find_account(&r.resulting_accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0u8, "NoReplay must not flip on failed quorum");
+    assert_eq!(
+        bucket.data[0], 0u8,
+        "NoReplay must not flip on failed quorum"
+    );
     let digest = find_account(&r.resulting_accounts, &scenario.digest_pda);
     assert!(
         digest.data.is_empty(),
@@ -2299,13 +2342,7 @@ fn quorum_with_lazy_init_destination_account_succeeds() {
     // slot is program-owned with `BalanceAccountLayout::LEN` bytes.
     let mollusk = mollusk();
     let token_address = [0x42u8; 32];
-    let scenario = Scenario::with_transfer_body(
-        19, 4, 0x62,
-        9_999u128,
-        2,
-        token_address,
-        1,
-    );
+    let scenario = Scenario::with_transfer_body(19, 4, 0x62, 9_999u128, 2, token_address, 1);
 
     let initial = scenario.initial_accounts();
     let dst_pre = find_account(&initial, &scenario.dest_account_pubkey);
@@ -2314,13 +2351,21 @@ fn quorum_with_lazy_init_destination_account_succeeds() {
         system_program_id(),
         "dest Account PDA must start system-owned"
     );
-    assert_eq!(dst_pre.data.len(), 0, "dest Account PDA must start with zero data");
+    assert_eq!(
+        dst_pre.data.len(),
+        0,
+        "dest Account PDA must start with zero data"
+    );
 
     let result = drive_transfer_to_quorum(&mollusk, &scenario);
     assert!(matches!(result.program_result, ProgramResult::Success));
 
     let dst_post = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
-    assert_eq!(dst_post.owner, program_id(), "dest lazy-init flips owner to program");
+    assert_eq!(
+        dst_post.owner,
+        program_id(),
+        "dest lazy-init flips owner to program"
+    );
     assert_eq!(
         dst_post.data.len(),
         BalanceAccountLayout::LEN,
@@ -2344,7 +2389,9 @@ fn quorum_branch_cu_stays_below_ceiling() {
     let mollusk = mollusk();
     let token_address = [0xCFu8; 32];
     let scenario = Scenario::with_transfer_body(
-        19, 4, 0xCF,
+        19,
+        4,
+        0xCF,
         12_345u128,
         2,
         token_address,
@@ -2400,7 +2447,10 @@ fn quorum_with_attest_payload_skips_balance_work_but_finishes_commit() {
     // the sentinel Account PDA slots (== noreplay-authority) were not
     // touched (they remain system-owned with the dummy 0 lamports they
     // started with).
-    assert_eq!(scenario.source_account_pubkey, scenario.noreplay_authority_pubkey);
+    assert_eq!(
+        scenario.source_account_pubkey,
+        scenario.noreplay_authority_pubkey
+    );
     let sentinel = find_account(
         &result.resulting_accounts,
         &scenario.noreplay_authority_pubkey,
@@ -2468,13 +2518,7 @@ fn quorum_with_invalid_source_account_pda_rejects() {
     // tx unwinds (Solana atomicity).
     let mollusk = mollusk();
     let token_address = [0x99u8; 32];
-    let mut scenario = Scenario::with_transfer_body(
-        19, 4, 0x65,
-        100u128,
-        2,
-        token_address,
-        1,
-    );
+    let mut scenario = Scenario::with_transfer_body(19, 4, 0x65, 100u128, 2, token_address, 1);
     // Replace source_account_pubkey with a spoofed address (same seeds but
     // wrong token chain). The verify check must reject.
     let (spoofed, _) = derive_account_pda(2, 99, &token_address);

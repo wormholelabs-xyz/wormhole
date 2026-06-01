@@ -26,8 +26,8 @@
 use std::time::Duration;
 
 use global_accountant_definitions::{
-    Instruction as IxDiscriminator, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    DIGEST_SEED_PREFIX, PENDING_SEED_PREFIX,
+    Instruction as IxDiscriminator, DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    PENDING_SEED_PREFIX,
 };
 use libsecp256k1::{sign, Message, PublicKey, SecretKey};
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -78,7 +78,10 @@ fn make_guardians(count: usize, seed: u8) -> Vec<Guardian> {
         let hash = solana_keccak_hasher::hashv(&[raw]).to_bytes();
         let mut eth_address = [0u8; 20];
         eth_address.copy_from_slice(&hash[12..]);
-        out.push(Guardian { secret, eth_address });
+        out.push(Guardian {
+            secret,
+            eth_address,
+        });
     }
     out
 }
@@ -127,7 +130,13 @@ fn derive_pending_pda(
     let chain_be = chain.to_be_bytes();
     let sequence_be = sequence.to_be_bytes();
     Pubkey::find_program_address(
-        &[PENDING_SEED_PREFIX, &chain_be, emitter, &sequence_be, digest],
+        &[
+            PENDING_SEED_PREFIX,
+            &chain_be,
+            emitter,
+            &sequence_be,
+            digest,
+        ],
         program_id,
     )
 }
@@ -298,8 +307,7 @@ fn surfpool_submit_observations_real_noreplay() {
     );
 
     // ----- Step 2: boot surfpool offline. -----
-    let guard =
-        start_surfpool(SurfpoolOptions::offline("ga-surfpool-submit-real-noreplay"));
+    let guard = start_surfpool(SurfpoolOptions::offline("ga-surfpool-submit-real-noreplay"));
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 

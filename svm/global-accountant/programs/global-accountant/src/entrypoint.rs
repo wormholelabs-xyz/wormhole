@@ -1,6 +1,6 @@
-use pinocchio::{AccountView, Address, ProgramResult};
 #[cfg(feature = "bpf-entrypoint")]
 use pinocchio::program_entrypoint;
+use pinocchio::{AccountView, Address, ProgramResult};
 
 use crate::definitions::{GlobalAccountantError, Instruction};
 use crate::{err, instructions};

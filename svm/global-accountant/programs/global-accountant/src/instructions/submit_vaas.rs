@@ -75,11 +75,7 @@ const BODY_EMITTER_ADDRESS_OFFSET: usize = 10;
 const BODY_SEQUENCE_OFFSET: usize = 42;
 const BODY_HEADER_LEN: usize = 51;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < SUBMIT_VAAS_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -129,20 +125,8 @@ pub fn process(
     //                       `submit_observations` path and CosmWasm
     //                       `handle_tokenbridge_vaa` at
     //                       `contract.rs:446-454`.
-    let [
-        submitter,
-        verify_vaa_shim_program,
-        guardian_set,
-        guardian_signatures,
-        digest_pda,
-        noreplay_bucket,
-        noreplay_program,
-        noreplay_authority,
-        source_account_pda,
-        dest_account_pda,
-        _system_program,
-        chain_registration_pda,
-    ] = accounts
+    let [submitter, verify_vaa_shim_program, guardian_set, guardian_signatures, digest_pda, noreplay_bucket, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
+        accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -178,8 +162,7 @@ pub fn process(
         &body_bytes[BODY_EMITTER_ADDRESS_OFFSET..BODY_EMITTER_ADDRESS_OFFSET + 32],
     );
     let mut sequence_bytes = [0u8; 8];
-    sequence_bytes
-        .copy_from_slice(&body_bytes[BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]);
+    sequence_bytes.copy_from_slice(&body_bytes[BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]);
     let sequence = u64::from_be_bytes(sequence_bytes);
 
     // ----- (5) NoReplay pre-check -----

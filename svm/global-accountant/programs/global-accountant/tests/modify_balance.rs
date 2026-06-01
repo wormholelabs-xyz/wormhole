@@ -20,7 +20,7 @@
 use {
     global_accountant_definitions::{
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        ModificationLogLayout, Uint256, ACCOUNT_SEED_PREFIX, ACCOUNTANT_GOVERNANCE_MODULE,
+        ModificationLogLayout, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
         GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -47,7 +47,12 @@ fn derive_balance_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
-        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_be,
+            &token_chain_be,
+            token_address,
+        ],
         &program_id(),
     )
 }
@@ -375,7 +380,8 @@ fn modify_balance_body_header_violations_reject() {
             ProgramResult::Failure(err) => {
                 let code = u64::from(err) as u32;
                 assert_eq!(
-                    code, case.expected,
+                    code,
+                    case.expected,
                     "[{label}] expected {expected:?}, got {code:?}",
                     label = case.label,
                     expected = case.expected,
@@ -422,7 +428,11 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
         .iter()
         .find(|(k, _)| *k == balance_pda)
         .expect("balance PDA missing from result");
-    assert_eq!(post_balance.1.owner, program_id(), "balance PDA owned by program");
+    assert_eq!(
+        post_balance.1.owner,
+        program_id(),
+        "balance PDA owned by program"
+    );
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&post_balance.1.data);
     assert_eq!(layout.chain, 2);
     assert_eq!(layout.token_chain, 2);
@@ -435,14 +445,21 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
         .iter()
         .find(|(k, _)| *k == modification_pda)
         .expect("modification PDA missing from result");
-    assert_eq!(post_log.1.owner, program_id(), "modification PDA owned by program");
+    assert_eq!(
+        post_log.1.owner,
+        program_id(),
+        "modification PDA owned by program"
+    );
     let log: &ModificationLogLayout = bytemuck::from_bytes(&post_log.1.data);
     assert_eq!(log.sequence, 200);
     assert_eq!(log.chain_id, 2);
     assert_eq!(log.token_chain, 2);
     assert_eq!(log.kind, 1); // Add
     assert_eq!(log.amount, Uint256::from_u128(1_000_000));
-    assert_eq!(log.reason, reason, "reason persisted to the modification log");
+    assert_eq!(
+        log.reason, reason,
+        "reason persisted to the modification log"
+    );
 }
 
 #[test]
@@ -491,7 +508,11 @@ fn modify_balance_sub_on_existing_pda_debits() {
         .find(|(k, _)| *k == balance_pda)
         .expect("balance PDA missing from result");
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&post.1.data);
-    assert_eq!(layout.balance, Uint256::from_u128(3_500), "5000 - 1500 = 3500");
+    assert_eq!(
+        layout.balance,
+        Uint256::from_u128(3_500),
+        "5000 - 1500 = 3500"
+    );
 }
 
 #[test]
@@ -728,7 +749,11 @@ fn modify_balance_rejects_wrong_balance_pda_bump() {
     // this happens to equal the canonical bump for a given fixture; bias
     // toward an unlikely high byte and assert distinct below.
     let (_, canonical_bump) = derive_balance_pda(2, 2, &token_address);
-    let wrong_bump = if canonical_bump == 0 { 1 } else { canonical_bump - 1 };
+    let wrong_bump = if canonical_bump == 0 {
+        1
+    } else {
+        canonical_bump - 1
+    };
     assert_ne!(canonical_bump, wrong_bump);
 
     let r = run_modify_balance(
@@ -780,7 +805,17 @@ fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
         Uint256::from_u128(100),
         &[0u8; 32],
     );
-    let r1 = run_modify_balance(&mollusk, &add_body, 2, 2, &token_address, 300, None, None, None);
+    let r1 = run_modify_balance(
+        &mollusk,
+        &add_body,
+        2,
+        2,
+        &token_address,
+        300,
+        None,
+        None,
+        None,
+    );
     assert!(
         matches!(r1.program_result, ProgramResult::Success),
         "first Add must succeed, got {:?}",

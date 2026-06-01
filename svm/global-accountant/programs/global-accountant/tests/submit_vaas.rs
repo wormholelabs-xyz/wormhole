@@ -67,17 +67,19 @@ fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
-        &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_be,
+            &token_chain_be,
+            token_address,
+        ],
         &program_id(),
     )
 }
 
 fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
-    Pubkey::find_program_address(
-        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
-        &program_id(),
-    )
+    Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
 fn derive_canonical_noreplay_bucket(
@@ -220,9 +222,7 @@ fn fabricated_guardian_signatures_account() -> Account {
     Account {
         lamports: 1_572_960, // rent-exempt-ish, irrelevant
         data: vec![0u8; 16],
-        owner: Pubkey::new_from_array(
-            global_accountant_definitions::VERIFY_VAA_SHIM_PROGRAM_ID,
-        ),
+        owner: Pubkey::new_from_array(global_accountant_definitions::VERIFY_VAA_SHIM_PROGRAM_ID),
         executable: false,
         rent_epoch: 0,
     }
@@ -453,7 +453,10 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
 
     // NoReplay flipped to marked.
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0x01, "NoReplay flipped on submit_vaas commit");
+    assert_eq!(
+        bucket.data[0], 0x01,
+        "NoReplay flipped on submit_vaas commit"
+    );
 
     // DigestAccount opened with the expected digest.
     let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
@@ -475,7 +478,11 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
 
     // Source-chain Account: chain == token_chain == 2 ⇒ native lock ⇒ credit.
     let src = find_account(&result.resulting_accounts, &scenario.source_account_pubkey);
-    assert_eq!(src.owner, program_id(), "source Account PDA owned by program");
+    assert_eq!(
+        src.owner,
+        program_id(),
+        "source Account PDA owned by program"
+    );
     let src_layout: &BalanceAccountLayout = bytemuck::from_bytes(&src.data);
     assert_eq!(src_layout.balance, Uint256::from_u128(500_000));
 
@@ -538,7 +545,10 @@ fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
     assert_eq!(stored.digest, scenario.digest);
 
     // Sentinel slots stay system-owned (program never touched them).
-    assert_eq!(scenario.source_account_pubkey, scenario.noreplay_authority_pubkey);
+    assert_eq!(
+        scenario.source_account_pubkey,
+        scenario.noreplay_authority_pubkey
+    );
     let sentinel = find_account(
         &result.resulting_accounts,
         &scenario.noreplay_authority_pubkey,

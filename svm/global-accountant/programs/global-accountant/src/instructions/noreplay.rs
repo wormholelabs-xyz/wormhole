@@ -137,8 +137,8 @@ pub fn is_marked(
     // which we treat as "untrusted, but we can still inspect the bit"). The
     // bitmap PDA must be exactly 129 bytes per `solana_noreplay::state`.
     let data = bucket.try_borrow()?;
-    if data.len() != crate::definitions::NOREPLAY_BITMAP_OFFSET
-        + crate::definitions::NOREPLAY_BITMAP_BYTES
+    if data.len()
+        != crate::definitions::NOREPLAY_BITMAP_OFFSET + crate::definitions::NOREPLAY_BITMAP_BYTES
     {
         return Err(err(GlobalAccountantError::InvalidPda));
     }

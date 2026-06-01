@@ -96,9 +96,7 @@ use solana_system_interface::program as system_program;
 use solana_transaction::Transaction;
 
 mod common;
-use common::{
-    await_confirmed, deploy_program, so_path, start_surfpool, SurfpoolOptions,
-};
+use common::{await_confirmed, deploy_program, so_path, start_surfpool, SurfpoolOptions};
 
 /// Wormhole Core Bridge program ID on Solana mainnet
 /// (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`). Source: w7-registry
@@ -112,8 +110,7 @@ const CORE_BRIDGE_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 /// Anchor discriminator for the Verify VAA Shim's `post_signatures` instruction
 /// (`sha256("global:post_signatures")[..8]`). Equal to the constant produced by
 /// `make_anchor_discriminator(b"global:post_signatures")` in the shim source.
-const POST_SIGNATURES_SELECTOR: [u8; 8] =
-    [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
+const POST_SIGNATURES_SELECTOR: [u8; 8] = [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
 
 /// Compute Budget program ID (`ComputeBudget111111111111111111111111111111`).
 /// Native program, address is the same on every cluster.
@@ -360,7 +357,11 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
             so.display()
         )
     });
-    eprintln!("[e2e] loaded {} bytes from {}", so_bytes.len(), so.display());
+    eprintln!(
+        "[e2e] loaded {} bytes from {}",
+        so_bytes.len(),
+        so.display()
+    );
 
     let guard = start_surfpool(SurfpoolOptions::mainnet_fork(
         "ga-surfpool-e2e-mfork",
@@ -425,14 +426,16 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
     );
 
     // Post the 13 historical signatures into a fresh GuardianSignatures PDA.
-    let sigs_slice =
-        &VAA_BYTES[6..6 + NUM_SIGNATURES * GUARDIAN_SIGNATURE_LENGTH];
+    let sigs_slice = &VAA_BYTES[6..6 + NUM_SIGNATURES * GUARDIAN_SIGNATURE_LENGTH];
     let post_start = Instant::now();
     post_signatures(&rpc, &payer, &guardian_signatures_kp, sigs_slice);
     eprintln!("[e2e] PostSignatures elapsed: {:?}", post_start.elapsed());
 
     let gs_acct = rpc
-        .get_account_with_commitment(&guardian_signatures_kp.pubkey(), CommitmentConfig::confirmed())
+        .get_account_with_commitment(
+            &guardian_signatures_kp.pubkey(),
+            CommitmentConfig::confirmed(),
+        )
         .expect("GuardianSignatures lookup")
         .value
         .expect("GuardianSignatures account materialised");
@@ -450,7 +453,13 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
     // same byte image the real `open_digest` would have produced.
     let (digest_pda, _bump) =
         derive_digest_pda(&program_id, EMITTER_CHAIN, &EMITTER_ADDRESS, SEQUENCE);
-    write_digest_pda(&rpc_url, &program_id, &digest_pda, stored_digest, payer.pubkey());
+    write_digest_pda(
+        &rpc_url,
+        &program_id,
+        &digest_pda,
+        stored_digest,
+        payer.pubkey(),
+    );
 
     // Spot-check the stored layout we just injected.
     let pda_acct = rpc.get_account(&digest_pda).expect("digest pda");
@@ -492,12 +501,12 @@ fn build_close_ix(
     Instruction {
         program_id,
         accounts: vec![
-            AccountMeta::new_readonly(payer, true),                     // closer
+            AccountMeta::new_readonly(payer, true), // closer
             AccountMeta::new(digest_pda, false),
-            AccountMeta::new(payer, false),                             // rent recipient
-            AccountMeta::new_readonly(guardian_signatures_pda, false),  // GS PDA
-            AccountMeta::new_readonly(GUARDIAN_SET_PDA, false),         // GuardianSet PDA
-            AccountMeta::new_readonly(shim_program_id, false),          // CPI target
+            AccountMeta::new(payer, false), // rent recipient
+            AccountMeta::new_readonly(guardian_signatures_pda, false), // GS PDA
+            AccountMeta::new_readonly(GUARDIAN_SET_PDA, false), // GuardianSet PDA
+            AccountMeta::new_readonly(shim_program_id, false), // CPI target
         ],
         data: close_digest_ix_data(&digest_in_data, GUARDIAN_SET_BUMP),
     }
@@ -570,7 +579,10 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
     }
 
     // PDA must be gone (or zeroed).
-    match fx.rpc.get_account_with_commitment(&fx.digest_pda, CommitmentConfig::confirmed()) {
+    match fx
+        .rpc
+        .get_account_with_commitment(&fx.digest_pda, CommitmentConfig::confirmed())
+    {
         Ok(resp) => match resp.value {
             None => eprintln!("[e2e] DigestAccount fully closed (account does not exist)"),
             Some(acct) => {
@@ -590,9 +602,7 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
         payer_after_close > payer_after_open,
         "rent flowed back to payer: before={payer_after_open} after={payer_after_close}"
     );
-    eprintln!(
-        "[e2e] payer balance: after_open={payer_after_open} after_close={payer_after_close}",
-    );
+    eprintln!("[e2e] payer balance: after_open={payer_after_open} after_close={payer_after_close}",);
 }
 
 #[test]

@@ -41,11 +41,7 @@ use crate::instructions::open_digest_inner;
 /// | 78     | 1    | bump                               |
 const OPEN_DIGEST_DATA_LEN: usize = 2 + 32 + 8 + 32 + 4 + 1;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let data: &[u8; OPEN_DIGEST_DATA_LEN] = data
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
@@ -98,4 +94,3 @@ pub fn process(
         bump,
     )
 }
-

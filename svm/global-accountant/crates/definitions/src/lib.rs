@@ -773,9 +773,7 @@ pub enum TokenBridgeAction {
 /// can read the action byte). For transfer actions the slice must be ≥ 184
 /// bytes (51 + 133). Both bounds are checked; the function returns
 /// `InvalidInstructionData` on any short slice.
-pub fn parse_token_bridge_payload(
-    body: &[u8],
-) -> Result<TokenBridgeAction, GlobalAccountantError> {
+pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
     const HEADER_LEN: usize = 51;
     const ACTION_TRANSFER: u8 = 0x01;
     const ACTION_ATTEST: u8 = 0x02;
@@ -1110,7 +1108,10 @@ mod tests {
         assert_eq!(offset_of!(PendingObservationsLayout, digest), 0);
         assert_eq!(offset_of!(PendingObservationsLayout, payer), 32);
         assert_eq!(offset_of!(PendingObservationsLayout, created_at_slot), 64);
-        assert_eq!(offset_of!(PendingObservationsLayout, guardian_set_index), 72);
+        assert_eq!(
+            offset_of!(PendingObservationsLayout, guardian_set_index),
+            72
+        );
         assert_eq!(offset_of!(PendingObservationsLayout, signatures), 76);
         assert_eq!(offset_of!(PendingObservationsLayout, chain), 80);
     }

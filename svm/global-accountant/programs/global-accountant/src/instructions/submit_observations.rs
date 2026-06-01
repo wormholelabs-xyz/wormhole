@@ -31,8 +31,8 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    parse_token_bridge_payload, GlobalAccountantError, PendingObservationsLayout, TokenBridgeAction,
-    PENDING_SEED_PREFIX,
+    parse_token_bridge_payload, GlobalAccountantError, PendingObservationsLayout,
+    TokenBridgeAction, PENDING_SEED_PREFIX,
 };
 use crate::err;
 // NoReplay integration lives in the sibling `noreplay` module so
@@ -92,11 +92,7 @@ const GUARDIAN_PUBKEY_LEN: usize = 20;
 /// (`X || Y`).
 const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
 
-pub fn process(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-) -> ProgramResult {
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // Split the instruction data into fixed prefix + length-prefixed body.
     // Body is required on every submission so the program can re-verify the
     // digest against the bytes the caller is claiming the observation
@@ -199,20 +195,8 @@ pub fn process(
     //                       `contract.rs:158-166`. A system-owned account at
     //                       this slot signals "no registration" and the
     //                       program returns `MissingChainRegistration`.
-    let [
-        submitter,
-        pending_pda,
-        guardian_set,
-        noreplay_bucket,
-        digest_pda,
-        system_program_acc,
-        noreplay_program,
-        noreplay_authority,
-        source_account_pda,
-        dest_account_pda,
-        rent_recipient,
-        chain_registration_pda,
-    ] = accounts
+    let [submitter, pending_pda, guardian_set, noreplay_bucket, digest_pda, system_program_acc, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
+        accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -697,7 +681,12 @@ fn read_guardian_key(
 // from any mollusk test (mollusk loads the SBF `.so`, which uses the syscall
 // path).
 #[cfg(any(target_os = "solana", target_arch = "bpf"))]
-fn secp256k1_recover(hash: &[u8; 32], recovery_id: u64, signature: &[u8], result: &mut [u8]) -> u64 {
+fn secp256k1_recover(
+    hash: &[u8; 32],
+    recovery_id: u64,
+    signature: &[u8],
+    result: &mut [u8],
+) -> u64 {
     // SAFETY: pinocchio re-exports the Solana syscall ABI. The buffers match
     // the syscall's documented layout: 32-byte hash, 64-byte signature
     // (`r||s`), 64-byte result.

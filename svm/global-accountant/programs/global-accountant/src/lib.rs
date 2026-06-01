@@ -19,10 +19,7 @@
 #[cfg(any(
     all(
         feature = "mock-vaa",
-        any(
-            not(feature = "test-only-open-digest"),
-            not(feature = "mock-noreplay"),
-        )
+        any(not(feature = "test-only-open-digest"), not(feature = "mock-noreplay"),)
     ),
     all(
         feature = "test-only-open-digest",
@@ -30,10 +27,7 @@
     ),
     all(
         feature = "mock-noreplay",
-        any(
-            not(feature = "mock-vaa"),
-            not(feature = "test-only-open-digest"),
-        )
+        any(not(feature = "mock-vaa"), not(feature = "test-only-open-digest"),)
     ),
 ))]
 compile_error!(

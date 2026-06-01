@@ -447,10 +447,9 @@ pub fn load_vaa_fixture(name: &str) -> ParsedVaa {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name);
-    let bytes = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("read VAA fixture {}: {e}", path.display()));
-    parse_vaa(&bytes)
-        .unwrap_or_else(|e| panic!("parse VAA fixture {}: {e}", path.display()))
+    let bytes =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("read VAA fixture {}: {e}", path.display()));
+    parse_vaa(&bytes).unwrap_or_else(|e| panic!("parse VAA fixture {}: {e}", path.display()))
 }
 
 /// Pure parser kept separate from the fixture-loader so unit tests can drive
