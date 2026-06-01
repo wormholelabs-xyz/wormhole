@@ -103,7 +103,7 @@ const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
 /// `submit_observations::SUBMIT_BODY_MAX` — far above the observed mainnet
 /// payload size (~1 KiB) and keeps the instruction data inside the Solana
 /// 1232-byte tx envelope when combined with the account list.
-pub const SUBMIT_VAAS_BODY_MAX: usize = 4096;
+const SUBMIT_VAAS_BODY_MAX: usize = 4096;
 
 /// Byte offsets within a VAA body (51-byte header per
 /// `whitepapers/0001_generic_message_passing.md`):
@@ -417,33 +417,4 @@ fn verify_vaa(
     Ok(())
 }
 
-// ============================================================================
-// keccak256 helpers — same shape as `submit_observations` (the on-chain
-// `sol_keccak256` ABI takes a pointer to `&[u8]` fat pointers, not raw bytes).
-// ============================================================================
-
-#[cfg(any(target_os = "solana", target_arch = "bpf"))]
-fn keccak256(data: &[u8], result: &mut [u8; 32]) {
-    let vals: [&[u8]; 1] = [data];
-    // SAFETY: pinocchio re-exports the Solana syscall ABI; the runtime reads
-    // exactly `val_len` `&[u8]` fat pointers starting at `vals_ptr`.
-    unsafe {
-        pinocchio::syscalls::sol_keccak256(
-            vals.as_ptr() as *const u8,
-            vals.len() as u64,
-            result.as_mut_ptr(),
-        );
-    }
-}
-
-#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {}
-
-/// `keccak256(keccak256(body))` — the Wormhole VAA digest convention.
-fn double_keccak256(body: &[u8]) -> [u8; 32] {
-    let mut inner = [0u8; 32];
-    keccak256(body, &mut inner);
-    let mut outer = [0u8; 32];
-    keccak256(&inner, &mut outer);
-    outer
-}
+use crate::hash::double_keccak256;

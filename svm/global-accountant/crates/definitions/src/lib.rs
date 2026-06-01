@@ -67,6 +67,8 @@ pub enum GlobalAccountantError {
     InvalidPda = 2,
     DigestMismatch = 3,
     PayerMismatch = 4,
+    /// Reserved discriminator slot; never raised by current handlers but
+    /// kept to preserve the ABI numbering against the CosmWasm reference.
     NotImplemented = 5,
     /// The instruction exists in the dispatch table but the build it was
     /// compiled into intentionally disabled it (Cargo-feature-gated). Used to
@@ -354,10 +356,6 @@ pub const NOREPLAY_BITMAP_BYTES: usize = 128;
 /// Byte 0 is the stored canonical bump; bytes 1..=128 are the bitmap.
 pub const NOREPLAY_BITMAP_OFFSET: usize = 1;
 
-/// Maximum namespace length accepted by the noreplay program. Mirrors
-/// `solana_noreplay::MAX_NAMESPACE_LEN`.
-pub const NOREPLAY_MAX_NAMESPACE_LEN: usize = 64;
-
 /// Wormhole Core Bridge program ID on Solana mainnet
 /// (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`).
 ///
@@ -438,20 +436,6 @@ impl Uint256 {
         Self(bytes)
     }
 
-    /// Down-cast to a `u128` if the value fits; otherwise `None`. The check is
-    /// "are the high 16 bytes all zero?".
-    pub fn to_u128(self) -> Option<u128> {
-        let (hi, lo) = self.0.split_at(16);
-        for byte in hi {
-            if *byte != 0 {
-                return None;
-            }
-        }
-        let mut lo_array = [0u8; 16];
-        lo_array.copy_from_slice(lo);
-        Some(u128::from_be_bytes(lo_array))
-    }
-
     /// Saturating-free add. Returns `None` on overflow, matching the CosmWasm
     /// `Uint256::checked_add` semantic that propagates as an `Err` to the
     /// caller (we convert to `ProgramError::Custom` at the program boundary).
@@ -468,12 +452,6 @@ impl Uint256 {
         let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
         let b = ruint::aliases::U256::from_be_bytes::<32>(other.0);
         a.checked_sub(b).map(|r| Self(r.to_be_bytes::<32>()))
-    }
-
-    /// Borrow the big-endian byte representation. Suitable for direct copy
-    /// into / out of a VAA transfer payload's `amount` field.
-    pub const fn as_be_bytes(&self) -> &[u8; 32] {
-        &self.0
     }
 
     /// Construct from 32 big-endian bytes (e.g. the `amount` slice of a
@@ -1033,8 +1011,7 @@ mod tests {
         // Pack/unpack through the `[u8; 32]` representation preserves the value
         // bit-for-bit.
         let original = Uint256::from_u128(0xdead_beef_cafe_babe_u128);
-        let bytes: [u8; 32] = *original.as_be_bytes();
-        let restored = Uint256::from_be_bytes(bytes);
+        let restored = Uint256::from_be_bytes(original.0);
         assert_eq!(original, restored);
     }
 
@@ -1044,11 +1021,10 @@ mod tests {
         // network byte order. Matches Token Bridge transfer payload `amount`
         // encoding (whitepaper 0003).
         let v = Uint256::from_u128(0x1234);
-        let bytes = v.as_be_bytes();
         let mut expected = [0u8; 32];
         expected[30] = 0x12;
         expected[31] = 0x34;
-        assert_eq!(bytes, &expected);
+        assert_eq!(v.0, expected);
     }
 
     #[test]
@@ -1063,22 +1039,6 @@ mod tests {
         let a = Uint256::from_be_bytes(a_bytes);
         let b = Uint256::from_u128(u128::MAX);
         assert!(a > b);
-    }
-
-    #[test]
-    fn uint256_to_u128_in_range() {
-        let v = Uint256::from_u128(0xdead_beef);
-        assert_eq!(v.to_u128(), Some(0xdead_beef));
-    }
-
-    #[test]
-    fn uint256_to_u128_out_of_range() {
-        // Any non-zero byte in the high 16 bytes pushes the value above
-        // u128::MAX.
-        let mut bytes = [0u8; 32];
-        bytes[15] = 0x01;
-        let v = Uint256::from_be_bytes(bytes);
-        assert_eq!(v.to_u128(), None);
     }
 
     #[test]

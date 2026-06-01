@@ -42,6 +42,7 @@ compile_error!(
 );
 
 pub mod entrypoint;
+pub(crate) mod hash;
 pub mod instructions;
 pub mod state;
 

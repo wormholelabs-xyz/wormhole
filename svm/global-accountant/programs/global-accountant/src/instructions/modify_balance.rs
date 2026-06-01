@@ -80,7 +80,7 @@ const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 1 + 1 + 2;
 /// bytes (51-byte header + 32-byte module + 1-byte action + 2-byte target
 /// chain + 109-byte payload); 256 leaves headroom for any future field while
 /// staying well inside Solana's 1232-byte tx envelope.
-pub const MODIFY_BALANCE_BODY_MAX: usize = 256;
+const MODIFY_BALANCE_BODY_MAX: usize = 256;
 
 /// Body header offsets (canonical Wormhole VAA layout, 51-byte header).
 const BODY_EMITTER_CHAIN_OFFSET: usize = 8;
@@ -439,34 +439,7 @@ fn verify_vaa(
     Ok(())
 }
 
-// ============================================================================
-// keccak256 helpers — same shape as `register_chain` / `submit_vaas`.
-// ============================================================================
-
-#[cfg(any(target_os = "solana", target_arch = "bpf"))]
-fn keccak256(data: &[u8], result: &mut [u8; 32]) {
-    let vals: [&[u8]; 1] = [data];
-    // SAFETY: pinocchio re-exports the Solana syscall ABI; the runtime reads
-    // exactly `val_len` `&[u8]` fat pointers starting at `vals_ptr`.
-    unsafe {
-        pinocchio::syscalls::sol_keccak256(
-            vals.as_ptr() as *const u8,
-            vals.len() as u64,
-            result.as_mut_ptr(),
-        );
-    }
-}
-
-#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {}
-
-fn double_keccak256(body: &[u8]) -> [u8; 32] {
-    let mut inner = [0u8; 32];
-    keccak256(body, &mut inner);
-    let mut outer = [0u8; 32];
-    keccak256(&inner, &mut outer);
-    outer
-}
+use crate::hash::double_keccak256;
 
 // ============================================================================
 // Logging — emits the modification record to the SBF program log so

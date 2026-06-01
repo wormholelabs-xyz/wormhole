@@ -25,18 +25,6 @@ use crate::definitions::{
 use crate::err;
 use crate::instructions::pda_init::init_or_upgrade_pda;
 
-/// Canonical PDA seed slice for a `BalanceAccountLayout` keyed by
-/// `(chain, token_chain, token_address)`. Lifetimes are tied to the
-/// caller-provided arrays so the returned `[&[u8]; 4]` borrows them directly
-/// — no copying or `Cow`.
-pub fn seeds<'a>(
-    chain_be: &'a [u8; 2],
-    token_chain_be: &'a [u8; 2],
-    token_address: &'a [u8; 32],
-) -> [&'a [u8]; 4] {
-    [ACCOUNT_SEED_PREFIX, chain_be, token_chain_be, token_address]
-}
-
 /// Read a [`BalanceAccountLayout`] out of an account's data. Returns
 /// `InvalidPda` if the buffer is not exactly `LEN` bytes.
 pub fn load(account: &AccountView) -> Result<BalanceAccountLayout, ProgramError> {

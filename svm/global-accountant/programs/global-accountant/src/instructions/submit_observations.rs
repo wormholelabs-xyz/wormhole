@@ -71,13 +71,13 @@ use crate::state::{chain_registration, pending};
 /// body under arbitrary `(chain, emitter, sequence)` triples, corrupting the
 /// balance ledger; sourcing them from the body makes that attack structurally
 /// impossible.
-pub const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65 + 1 + 1;
+const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65 + 1 + 1;
 /// Maximum supported VAA body size on the wire. 4 KiB is well above the
 /// observed mainnet ceiling (`max(payload) ≈ 1 KiB`) and keeps the
 /// instruction data within Solana's 1232-byte tx-data limit when combined
 /// with the fixed-size prefix and the account list. The bound exists only to
 /// reject malformed wire data early; the parser itself doesn't care.
-pub const SUBMIT_BODY_MAX: usize = 4096;
+const SUBMIT_BODY_MAX: usize = 4096;
 
 /// Length of an ECDSA recoverable signature: 32-byte r + 32-byte s + 1-byte
 /// recovery id. The on-chain `sol_secp256k1_recover` syscall takes the 64-byte
@@ -736,38 +736,4 @@ fn secp256k1_recover(
     1
 }
 
-#[cfg(any(target_os = "solana", target_arch = "bpf"))]
-fn keccak256(data: &[u8], result: &mut [u8; 32]) {
-    // `sol_keccak256`'s ABI: `vals: *const u8` is actually a pointer to an
-    // array of `&[u8]` fat-pointers, and `val_len` is the number of slices.
-    // Building a one-element slice-of-slices on the stack matches the
-    // `solana_keccak_hasher::hashv(&[data])` convention.
-    let vals: [&[u8]; 1] = [data];
-    // SAFETY: pinocchio re-exports the Solana syscall ABI; the runtime reads
-    // exactly `val_len` `&[u8]` fat pointers starting at `vals_ptr`.
-    unsafe {
-        pinocchio::syscalls::sol_keccak256(
-            vals.as_ptr() as *const u8,
-            vals.len() as u64,
-            result.as_mut_ptr(),
-        );
-    }
-}
-
-#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {}
-
-/// `keccak256(keccak256(body))` — the Wormhole VAA digest convention. The
-/// guardians sign this digest and the Verify VAA Shim recomputes it; here we
-/// re-derive it on the submitter's behalf so the program can verify the
-/// caller's claimed digest matches the body the submission carries. The
-/// slice-of-slices ABI quirk (pinocchio's `sol_keccak256` takes a pointer to
-/// `&[u8]` fat pointers, not raw bytes) is captured in the inner `keccak256`
-/// helper.
-fn double_keccak256(body: &[u8]) -> [u8; 32] {
-    let mut inner = [0u8; 32];
-    keccak256(body, &mut inner);
-    let mut outer = [0u8; 32];
-    keccak256(&inner, &mut outer);
-    outer
-}
+use crate::hash::{double_keccak256, keccak256};

@@ -12,8 +12,3 @@ pub mod chain_registration;
 pub mod digest;
 pub mod modification;
 pub mod pending;
-
-// Re-exported from `definitions` for ergonomic access; the canonical
-// layout/type lives in the SDK-free `definitions` crate so client tooling can
-// re-use it without pulling in pinocchio.
-pub use crate::definitions::BalanceAccountLayout;
