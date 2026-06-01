@@ -279,22 +279,6 @@ pub fn derive_noreplay_bitmap_pda(
     Pubkey::find_program_address(&seeds, &NOREPLAY_PROGRAM_ID)
 }
 
-/// Build the solana-noreplay instruction data for the `CreateBitmap` (disc 0),
-/// `MarkUsed` (disc 1), or `UnmarkUsed` (disc 2) instructions. Wire format:
-///
-///   [discriminator: u8][namespace_len: u16 LE][namespace bytes][sequence: u64 LE]
-///
-/// Verified against `solana_noreplay::instruction::InstructionData::try_from`
-/// at `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/instruction.rs`.
-pub fn noreplay_ix_data(discriminator: u8, namespace: &[u8], sequence: u64) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 2 + namespace.len() + 8);
-    data.push(discriminator);
-    data.extend_from_slice(&(namespace.len() as u16).to_le_bytes());
-    data.extend_from_slice(namespace);
-    data.extend_from_slice(&sequence.to_le_bytes());
-    data
-}
-
 /// Hex-encode a byte slice. Avoids a dev-dep on `hex`.
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
