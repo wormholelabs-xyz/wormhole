@@ -18,10 +18,10 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, DigestAccountLayout, GlobalAccountantError,
+        BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CORE_BRIDGE_PROGRAM_ID,
-        DIGEST_SEED_PREFIX, PENDING_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX,
+        PENDING_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -80,6 +80,30 @@ fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
         &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
         &program_id(),
     )
+}
+
+fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    Pubkey::find_program_address(
+        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
+        &program_id(),
+    )
+}
+
+/// Build a program-owned chain-registration PDA account fixture containing
+/// the given canonical emitter address. Used by tests to pre-populate the
+/// registry without going through the `register_chain` governance path.
+fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account {
+    let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    layout.chain = chain;
+    layout.emitter_address = *emitter_address;
+    Account {
+        lamports: 1_000_000,
+        data: bytemuck::bytes_of(&layout).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    }
 }
 
 /// Host-side `keccak256(keccak256(body))` — the Wormhole VAA digest
@@ -345,6 +369,13 @@ struct Scenario {
     source_account_pubkey: Pubkey,
     /// Destination-chain Account PDA (slot 9). Same semantics as `source`.
     dest_account_pubkey: Pubkey,
+    /// Chain-registration PDA at slot 11. Default scenario registers
+    /// `chain -> emitter` (mirroring what the on-chain registry would hold
+    /// after a `register_chain` governance VAA lands) so existing tests do
+    /// not need to pre-populate registrations. Negative tests override the
+    /// account fixture to drive `MissingChainRegistration` or
+    /// `UnregisteredEmitter`.
+    chain_registration_pubkey: Pubkey,
 }
 
 impl Scenario {
@@ -366,6 +397,7 @@ impl Scenario {
         let (pending_pda, pending_bump) = derive_pending_pda(chain, &emitter, sequence, &digest);
         let (digest_pda, digest_bump) = derive_digest_pda(chain, &emitter, sequence);
         let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+        let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
 
         Self {
             chain,
@@ -390,6 +422,7 @@ impl Scenario {
             // option and matches the documented "sentinel" pattern.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
+            chain_registration_pubkey,
         }
     }
 
@@ -462,11 +495,15 @@ impl Scenario {
         mollusk.process_instruction(&ix, &starting_accounts)
     }
 
-    /// Account-meta list (11 entries) matching the wire shape documented in
-    /// `submit_observations.rs::process`. Slot 10 is the rent_recipient: the
-    /// default scenario uses `submitter` (the bucket opener and the only
-    /// observer) so single-submitter tests cover the all-same-wallet case.
-    /// Multi-submitter tests build their own meta vec inline.
+    /// Account-meta list (12 entries) matching the wire shape documented in
+    /// `submit_observations.rs::process`. Slot 10 is the rent_recipient and
+    /// slot 11 is the chain-registration PDA. The default scenario uses
+    /// `submitter` for rent_recipient (the bucket opener and the only
+    /// observer in single-submitter tests) and the canonical chain-
+    /// registration PDA address; `initial_accounts` pre-populates that PDA
+    /// with `(chain, emitter) -> emitter` so happy-path tests don't have to
+    /// register manually. Multi-submitter and registration-negative tests
+    /// build their own meta vec inline.
     fn account_metas(&self) -> Vec<AccountMeta> {
         vec![
             AccountMeta::new(self.submitter, true),
@@ -480,6 +517,7 @@ impl Scenario {
             AccountMeta::new(self.source_account_pubkey, false),
             AccountMeta::new(self.dest_account_pubkey, false),
             AccountMeta::new(self.submitter, false),
+            AccountMeta::new_readonly(self.chain_registration_pubkey, false),
         ]
     }
 
@@ -518,6 +556,14 @@ impl Scenario {
         {
             accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
         }
+        // Slot 11: chain-registration PDA pre-populated with the scenario's
+        // emitter so happy-path tests don't have to register manually.
+        // Negative tests override this account in the resulting list to
+        // drive `MissingChainRegistration` / `UnregisteredEmitter`.
+        accounts.push((
+            self.chain_registration_pubkey,
+            chain_registration_account(self.chain, &self.emitter),
+        ));
         accounts
     }
 
@@ -732,6 +778,7 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         AccountMeta::new(scenario.source_account_pubkey, false),
         AccountMeta::new(scenario.dest_account_pubkey, false),
         AccountMeta::new(bob, false), // rent_recipient = bob (wrong)
+        AccountMeta::new_readonly(scenario.chain_registration_pubkey, false),
     ];
     let ix_wrong = Instruction::new_with_bytes(program_id(), &ix_data, wrong_metas);
     let r_wrong = mollusk.process_instruction(&ix_wrong, &accounts);
@@ -760,6 +807,7 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         AccountMeta::new(scenario.source_account_pubkey, false),
         AccountMeta::new(scenario.dest_account_pubkey, false),
         AccountMeta::new(alice, false), // rent_recipient = alice (correct)
+        AccountMeta::new_readonly(scenario.chain_registration_pubkey, false),
     ];
     let ix_correct = Instruction::new_with_bytes(program_id(), &ix_data, correct_metas);
     let r_correct = mollusk.process_instruction(&ix_correct, &accounts);
@@ -877,6 +925,11 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         &body,
     );
 
+    // Pre-populate the registration PDA for the body chain so the new
+    // registration check passes — this test exercises the pending-PDA
+    // canonical-bump rejection, not the registration path.
+    let (registration_pda, _) = derive_chain_registration_pda(body_chain);
+
     let guardian_keys: Vec<[u8; 20]> = guardians.iter().map(|g| g.eth_address).collect();
     let accounts = vec![
         (submitter, system_owned_account(50_000_000_000)),
@@ -890,6 +943,10 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         keyed_account_for_system_program(),
         (noreplay_program_pubkey, system_owned_account(0)),
         (noreplay_authority_pubkey, system_owned_account(0)),
+        (
+            registration_pda,
+            chain_registration_account(body_chain, &body_emitter),
+        ),
     ];
 
     let metas = vec![
@@ -904,6 +961,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         AccountMeta::new(noreplay_authority_pubkey, false),
         AccountMeta::new(noreplay_authority_pubkey, false),
         AccountMeta::new(submitter, false),
+        AccountMeta::new_readonly(registration_pda, false),
     ];
     let ix = Instruction::new_with_bytes(program_id(), &ix_data, metas);
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -930,6 +988,185 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         system_program_id(),
         "attacker-supplied pending PDA must NOT be initialised after rejection"
     );
+}
+
+#[test]
+fn submit_observations_rejects_unregistered_chain() {
+    // Chain-registration parity with CosmWasm
+    // (`cosmwasm/contracts/global-accountant/src/contract.rs:158-166`):
+    // an observation whose body-header `emitter_chain` has no registration
+    // PDA must be refused with `MissingChainRegistration`. Only an explicit
+    // Token Bridge `RegisterChain` governance VAA can populate a
+    // `ChainRegistration` PDA — otherwise we have no way to distinguish a
+    // real Token Bridge emitter from a spoof at the same chain.
+    //
+    // Pre-impl this test fails because the program does not yet take a
+    // chain-registration account slot. Post-impl the program inspects slot
+    // 11 (a system-owned, zero-data account in this test) and rejects.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0xA0);
+
+    // Construct the meta list inline to add the chain-registration slot at
+    // position 11. Mirrors `Scenario::account_metas` but routes the new
+    // slot through an uninitialised PDA at the canonical seed for the body
+    // chain.
+    let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
+    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+
+    // Replace the default scenario registration (pre-populated by
+    // `initial_accounts`) with an uninitialised system-owned account at the
+    // canonical PDA address. This drives the
+    // `MissingChainRegistration` path in `chain_registration::load`.
+    let mut accounts = scenario.initial_accounts();
+    for entry in accounts.iter_mut() {
+        if entry.0 == registration_pda {
+            entry.1 = uninitialised_pda_account();
+            break;
+        }
+    }
+
+    let metas = vec![
+        AccountMeta::new(scenario.submitter, true),
+        AccountMeta::new(scenario.pending_pda, false),
+        AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
+        AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
+        AccountMeta::new(scenario.digest_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
+        AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
+        AccountMeta::new(scenario.source_account_pubkey, false),
+        AccountMeta::new(scenario.dest_account_pubkey, false),
+        AccountMeta::new(scenario.submitter, false),
+        AccountMeta::new_readonly(registration_pda, false),
+    ];
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            &scenario.digest,
+            scenario.guardian_set_index,
+            0,
+            &signature,
+            scenario.pending_bump,
+            scenario.digest_bump,
+            &scenario.body,
+        ),
+        metas,
+    );
+    let r = mollusk.process_instruction(&ix, &accounts);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::MissingChainRegistration as u32,
+                "expected MissingChainRegistration, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(MissingChainRegistration), got {other:?}"),
+    }
+}
+
+#[test]
+fn submit_observations_rejects_wrong_emitter_for_registered_chain() {
+    // The registration PDA exists and is canonical, but its recorded
+    // `emitter_address` doesn't match the body header's. Mirrors CosmWasm
+    // `contract.rs:163-166` "unknown emitter address" ensure check.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0xA1);
+
+    let registration_pubkey = scenario.chain_registration_pubkey;
+    // Overwrite the default scenario registration with a different emitter
+    // (everything-0xCC) so the on-disk emitter mismatches the body header
+    // (scenario.emitter with byte 31 = 0x77).
+    let wrong_emitter = [0xCCu8; 32];
+    let mut accounts = scenario.initial_accounts();
+    for entry in accounts.iter_mut() {
+        if entry.0 == registration_pubkey {
+            entry.1 = chain_registration_account(scenario.chain, &wrong_emitter);
+            break;
+        }
+    }
+
+    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            &scenario.digest,
+            scenario.guardian_set_index,
+            0,
+            &signature,
+            scenario.pending_bump,
+            scenario.digest_bump,
+            &scenario.body,
+        ),
+        scenario.account_metas(),
+    );
+    let r = mollusk.process_instruction(&ix, &accounts);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::UnregisteredEmitter as u32,
+                "expected UnregisteredEmitter, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(UnregisteredEmitter), got {other:?}"),
+    }
+}
+
+#[test]
+fn submit_observations_rejects_spoofed_registration_pda() {
+    // Caller supplies a wrong-seed PDA in the registration slot. The
+    // canonical-address check inside `verify_chain_registration` rejects
+    // before any data read. Mirrors the bump/address pattern used for the
+    // pending PDA and the noreplay bucket.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0xA2);
+
+    // Spoofed registration PDA: derived from a different chain ID so the
+    // address mismatches the canonical for body chain.
+    let (spoofed_pda, _) = derive_chain_registration_pda(99);
+    assert_ne!(spoofed_pda, scenario.chain_registration_pubkey);
+
+    let mut accounts = scenario.initial_accounts();
+    // Add the spoofed PDA fixture (mollusk requires every meta-referenced
+    // account to appear in the account list).
+    accounts.push((
+        spoofed_pda,
+        chain_registration_account(99, &[0xAA; 32]),
+    ));
+
+    let mut metas = scenario.account_metas();
+    let last_idx = metas.len() - 1;
+    metas[last_idx] = AccountMeta::new_readonly(spoofed_pda, false);
+
+    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            &scenario.digest,
+            scenario.guardian_set_index,
+            0,
+            &signature,
+            scenario.pending_bump,
+            scenario.digest_bump,
+            &scenario.body,
+        ),
+        metas,
+    );
+    let r = mollusk.process_instruction(&ix, &accounts);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "expected InvalidPda from canonical-address check, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
+    }
 }
 
 #[test]
@@ -1767,6 +2004,10 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     scenario.digest_bump = digest_bump;
     let (src, _) = derive_account_pda(1, 2, &token_address);
     let (dst, _) = derive_account_pda(2, 2, &token_address);
+    // Re-derive the registration PDA for the new body chain — the default
+    // scenario registered chain=2; this test's body is chain=1.
+    let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
+    scenario.chain_registration_pubkey = registration_pda;
     scenario.source_account_pubkey = src;
     scenario.dest_account_pubkey = dst;
 

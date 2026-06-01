@@ -112,6 +112,34 @@ pub enum GlobalAccountantError {
     /// transfer. Re-derives via `find_program_address` and rejects any
     /// mismatch; mirrors the canonical-bump pattern used for the pending PDA.
     InvalidAccountPda = 18,
+    /// No `ChainRegistration` PDA exists for the body header's `emitter_chain`.
+    /// Mirrors CosmWasm `ContractError::MissingChainRegistration` at
+    /// `cosmwasm/contracts/global-accountant/src/contract.rs:158-166`. Caller
+    /// must wait for the Token Bridge `RegisterChain` governance VAA to land
+    /// (via `register_chain`) before this chain's observations are accepted.
+    MissingChainRegistration = 19,
+    /// `ChainRegistration` PDA exists and is canonical, but its recorded
+    /// `emitter_address` does not match the body header's `emitter_address`.
+    /// Mirrors CosmWasm's "unknown emitter address" ensure check at
+    /// `contract.rs:163-166`. An attempt to claim a transfer from a non-Token-
+    /// Bridge emitter on a registered chain.
+    UnregisteredEmitter = 20,
+    /// `register_chain` body header did not come from the Solana governance
+    /// emitter `(chain=1, GOVERNANCE_EMITTER)`. Refuses any governance VAA
+    /// claiming to originate from a non-governance source.
+    InvalidGovernanceEmitter = 21,
+    /// `register_chain` payload's first 32 bytes do not match the Token Bridge
+    /// governance module (`TOKEN_BRIDGE_GOVERNANCE_MODULE`). Rejects accountant
+    /// governance, NTT governance, or unknown-module VAAs from this entrypoint.
+    InvalidGovernanceModule = 22,
+    /// `register_chain` payload action byte is not `0x01` (RegisterChain). The
+    /// instruction does not handle other Token Bridge governance actions
+    /// (`UpgradeContract`, etc.) — those would require their own dispatch.
+    InvalidGovernanceAction = 23,
+    /// `register_chain` payload's target chain is neither `0x0000` (Any) nor
+    /// `0x0c20` (Wormchain). Matches CosmWasm `contract.rs:374-377`. Solana-
+    /// specific governance targeting would require a spec change.
+    GovernanceChainMismatch = 24,
 }
 
 impl From<GlobalAccountantError> for u32 {
@@ -139,6 +167,48 @@ pub const PENDING_SEED_PREFIX: &[u8] = b"pending";
 /// `token_chain` matches the VAA wire format and the `DIGEST_SEED_PREFIX` /
 /// `PENDING_SEED_PREFIX` derivations so all three keying schemes agree.
 pub const ACCOUNT_SEED_PREFIX: &[u8] = b"account";
+
+/// PDA seed prefix for [`ChainRegistrationLayout`]. The full seed tuple is
+/// `(b"chain_registration", chain.to_be_bytes())`. Each registered Token
+/// Bridge chain has exactly one canonical PDA under the global-accountant
+/// program ID, holding the chain's canonical emitter address. Mirrors the
+/// CosmWasm `CHAIN_REGISTRATIONS: Map<u16, Binary>` storage at
+/// `cosmwasm/contracts/global-accountant/src/state.rs`.
+pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
+
+/// Wormhole governance emitter — `chain = 1 (Solana)`, `address = [0; 31] ||
+/// 0x04`. Source of truth: `wormhole-sdk` (vaas-serde) `GOVERNANCE_EMITTER`
+/// constant. Governance VAAs targeting this program must be signed against
+/// this emitter for the `register_chain` entrypoint to accept them.
+pub const GOVERNANCE_EMITTER: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04,
+];
+
+/// Wormhole chain ID for Solana — also the chain ID stamped on the governance
+/// emitter pair. Used to verify the body header's `emitter_chain` field on
+/// the governance path.
+pub const SOLANA_CHAIN_ID: u16 = 1;
+
+/// Wormhole chain ID for Wormchain. Token Bridge governance VAAs that
+/// `register_chain` accepts must target either chain `0x0000` (Any) or
+/// `WORMCHAIN_CHAIN_ID`. Matches CosmWasm `handle_token_governance_vaa`
+/// (`contract.rs:374-377`).
+pub const WORMCHAIN_CHAIN_ID: u16 = 3104;
+
+/// Token Bridge governance module identifier — first 32 bytes of any Token
+/// Bridge governance VAA payload. ASCII string "TokenBridge" right-aligned
+/// in 32 bytes (21 leading zero bytes). Source of truth: `wormhole-sdk`
+/// `token::MODULE`.
+pub const TOKEN_BRIDGE_GOVERNANCE_MODULE: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, b'T', b'o', b'k', b'e', b'n', b'B', b'r', b'i', b'd', b'g', b'e',
+];
+
+/// Token Bridge governance `RegisterChain` action byte. The `register_chain`
+/// entrypoint rejects any other action byte; other governance actions (such
+/// as `UpgradeContract`) require their own dispatch.
+pub const REGISTER_CHAIN_ACTION: u8 = 0x01;
 
 /// PDA seed prefix for the global-accountant-owned authority that signs all
 /// `solana-noreplay` CPIs. The full seed tuple is just `[b"noreplay-authority"]`
@@ -649,6 +719,56 @@ const _: () = {
     assert!(offset_of!(BalanceAccountLayout, balance) == 36);
     assert!(offset_of!(BalanceAccountLayout, _reserved) == 68);
     assert!(BalanceAccountLayout::LEN == 76);
+};
+
+/// Zero-copy layout for the per-chain Token Bridge emitter registration,
+/// ported from the CosmWasm `CHAIN_REGISTRATIONS: Map<u16, Binary>` storage
+/// (`cosmwasm/contracts/global-accountant/src/state.rs`). Each registered
+/// chain has exactly one PDA at
+/// `(b"chain_registration", chain.to_be_bytes())`, holding the canonical
+/// Token Bridge emitter address for that chain.
+///
+/// Populated only via the `register_chain` instruction, which validates a
+/// Token Bridge `RegisterChain` governance VAA through the Verify VAA Shim.
+/// Re-registration with a fresh governance VAA (higher sequence) overwrites
+/// the emitter — intentional, supports emitter rotation on a chain's Token
+/// Bridge contract.
+///
+/// | offset | size | field           |
+/// |--------|------|-----------------|
+/// | 0      | 2    | chain           |
+/// | 2      | 30   | _padding        |
+/// | 32     | 32   | emitter_address |
+///
+/// `chain` is redundant with the seed but stored on-disk so the layout is
+/// self-describing for off-chain inspection. `_padding` keeps
+/// `emitter_address` 32-byte aligned and reserves headroom for forward
+/// compatibility (e.g., a future version byte without breaking on-disk
+/// layout).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct ChainRegistrationLayout {
+    /// Wormhole chain ID this PDA registers. Mirrors the seed bytes.
+    pub chain: u16,
+    /// Reserved for forward compatibility — `pub(crate)` so external callers
+    /// construct via `Zeroable` and cannot accidentally desynchronise the
+    /// padding from the canonical zero pattern.
+    pub(crate) _padding: [u8; 30],
+    /// Canonical Token Bridge emitter address on `chain`. Mirrors the
+    /// `Binary` value in CosmWasm's `CHAIN_REGISTRATIONS` map.
+    pub emitter_address: [u8; 32],
+}
+
+impl ChainRegistrationLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(ChainRegistrationLayout, chain) == 0);
+    assert!(offset_of!(ChainRegistrationLayout, _padding) == 2);
+    assert!(offset_of!(ChainRegistrationLayout, emitter_address) == 32);
+    assert!(ChainRegistrationLayout::LEN == 64);
 };
 
 #[cfg(test)]

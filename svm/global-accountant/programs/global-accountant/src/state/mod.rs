@@ -8,6 +8,7 @@
 //! `submit_observations`.
 
 pub mod account;
+pub mod chain_registration;
 pub mod digest;
 pub mod pending;
 
