@@ -76,10 +76,12 @@ func TestEthereumBaseConnector_CloseReleasesGoroutines(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, warmup.Close(), "Close() must succeed on a freshly-dialed connector")
 
-	// IgnoreCurrent snapshots all goroutines that exist at this point —
-	// platform init (rjeczalik/notify CFRunLoop on macOS), httptest serve
-	// loops, and the warm-up's TLS singletons — so the verification at the
-	// end of the test only flags goroutines spawned by the loop below.
+	// IgnoreCurrent snapshots the goroutines that already exist here so the
+	// check at the end only flags goroutines spawned by the dial/close loop
+	// below. This baseline is required on every platform: the httptest server's
+	// serve loops are still running (t.Cleanup tears them down only after this
+	// deferred check), and the warm-up dial above leaves net/http's shared
+	// transport connection pool active. Neither is a leak.
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 
 	baseline := func() int {
