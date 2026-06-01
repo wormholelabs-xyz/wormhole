@@ -77,6 +77,7 @@ use crate::definitions::{
 use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR};
 use crate::err;
 use crate::instructions::{noreplay, open_digest_inner, transfer::apply_transfer};
+use crate::state::chain_registration;
 
 // ============================================================================
 // Wire format
@@ -164,6 +165,16 @@ pub fn process(
     //                       Same semantics as slot 8.
     //  10. `[]`              system program — `CreateAccount` / `Allocate` /
     //                       `Assign` for lazy-inits.
+    //  11. `[]`              Chain registration PDA at
+    //                       `(b"chain_registration", body_chain.to_be_bytes())`.
+    //                       Populated by the `register_chain` governance
+    //                       instruction. Read here to cross-check the body
+    //                       header's `(emitter_chain, emitter_address)`
+    //                       against a Token-Bridge-governance-registered
+    //                       emitter. Mirrors the same check on the
+    //                       `submit_observations` path and CosmWasm
+    //                       `handle_tokenbridge_vaa` at
+    //                       `contract.rs:446-454`.
     let [
         submitter,
         verify_vaa_shim_program,
@@ -176,6 +187,7 @@ pub fn process(
         source_account_pda,
         dest_account_pda,
         _system_program,
+        chain_registration_pda,
     ] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -233,6 +245,16 @@ pub fn process(
     )? {
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
+
+    // ----- (5b) Chain registration cross-check -----
+    //
+    // Mirrors CosmWasm `handle_tokenbridge_vaa` at `contract.rs:446-454`. The
+    // body's (emitter_chain, emitter_address) pair must correspond to a Token
+    // Bridge emitter previously registered via the `register_chain`
+    // governance instruction; otherwise an attacker with valid guardian sigs
+    // for some non-Token-Bridge VAA could route accounting against a fake
+    // emitter on a real chain.
+    chain_registration::verify(program_id, chain_registration_pda, chain, &emitter)?;
 
     // ----- (6) Parse Token Bridge payload + apply balance work -----
     //

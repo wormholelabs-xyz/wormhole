@@ -32,7 +32,7 @@ use pinocchio::{
 
 use crate::definitions::{
     parse_token_bridge_payload, GlobalAccountantError, PendingObservationsLayout, TokenBridgeAction,
-    CHAIN_REGISTRATION_SEED_PREFIX, PENDING_SEED_PREFIX,
+    PENDING_SEED_PREFIX,
 };
 use crate::err;
 // NoReplay integration lives in the sibling `noreplay` module so
@@ -235,7 +235,12 @@ pub fn process(
     // for some non-Token-Bridge VAA could route accounting against a fake
     // emitter on a real chain. The supplied PDA's address is verified
     // against the canonical seed before any data read.
-    verify_chain_registration(program_id, chain_registration_pda, parsed.chain, &parsed.emitter)?;
+    chain_registration::verify(
+        program_id,
+        chain_registration_pda,
+        parsed.chain,
+        &parsed.emitter,
+    )?;
 
     // (2) Inline signature verification via `secp256k1_recover`. The recovered
     // pubkey is compared to `GuardianSet.keys[guardian_index]`.
@@ -454,46 +459,6 @@ enum PendingAction {
 /// importing the program ID for equality (Pinocchio determines program ID at
 /// deploy-time, not as a `const`).
 ///
-/// Verify the caller's chain-registration PDA matches the body-derived
-/// `(emitter_chain, emitter_address)` pair. Mirrors the CosmWasm
-/// `CHAIN_REGISTRATIONS` lookup at
-/// `cosmwasm/contracts/global-accountant/src/contract.rs:158-166`.
-///
-/// Two-stage check:
-/// 1. Canonical-address enforcement: the supplied account must live at
-///    `(b"chain_registration", chain.to_be_bytes())`. Without this guard a
-///    caller could pass a foreign account masquerading as the registration
-///    PDA and route the data-read past `chain_registration::load`'s
-///    layout-length check.
-/// 2. Emitter cross-check: the on-disk `emitter_address` must equal the
-///    body header's emitter. Mirrors CosmWasm's "unknown emitter address"
-///    `ensure!` at `contract.rs:163-166`.
-///
-/// `chain_registration::load` returns `MissingChainRegistration` if the
-/// supplied account is system-owned (no registration VAA has landed yet);
-/// surfaces through the `?` operator as the documented error code.
-///
-/// Total cost: one `find_program_address` (~1.5K CU) + one 64-byte data
-/// read + one 32-byte memcmp. Acceptable on the hot path.
-fn verify_chain_registration(
-    program_id: &Address,
-    registration_pda: &AccountView,
-    body_chain: u16,
-    body_emitter: &[u8; 32],
-) -> ProgramResult {
-    let chain_be = body_chain.to_be_bytes();
-    let (expected, _bump) =
-        Address::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
-    if registration_pda.address() != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let layout = chain_registration::load(registration_pda)?;
-    if layout.emitter_address != *body_emitter {
-        return Err(err(GlobalAccountantError::UnregisteredEmitter));
-    }
-    Ok(())
-}
-
 /// Per-digest PDA seeds mean the digest-mismatch case never lands in this
 /// function: a different digest produces a different canonical address, and
 /// that address is either uninitialised (`Create`) or already filled by some

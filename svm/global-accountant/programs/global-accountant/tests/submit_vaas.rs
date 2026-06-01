@@ -24,8 +24,9 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, DigestAccountLayout, GlobalAccountantError,
-        Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX, DIGEST_SEED_PREFIX,
+        BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
+        Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, DIGEST_SEED_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -68,6 +69,27 @@ fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
         &[ACCOUNT_SEED_PREFIX, &chain_be, &token_chain_be, token_address],
         &program_id(),
     )
+}
+
+fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    Pubkey::find_program_address(
+        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
+        &program_id(),
+    )
+}
+
+fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account {
+    let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    layout.chain = chain;
+    layout.emitter_address = *emitter_address;
+    Account {
+        lamports: 1_000_000,
+        data: bytemuck::bytes_of(&layout).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    }
 }
 
 /// Host-side `keccak256(keccak256(body))` — the Wormhole digest convention.
@@ -217,6 +239,7 @@ struct Scenario {
     noreplay_authority_pubkey: Pubkey,
     source_account_pubkey: Pubkey,
     dest_account_pubkey: Pubkey,
+    chain_registration_pubkey: Pubkey,
 }
 
 impl Scenario {
@@ -235,6 +258,7 @@ impl Scenario {
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let (digest_pda, _digest_bump) = derive_digest_pda(chain, &emitter, sequence);
         let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+        let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
 
         Self {
             chain,
@@ -259,6 +283,7 @@ impl Scenario {
             // Sentinel: Attest payloads never touch slots 8/9.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
+            chain_registration_pubkey,
         }
     }
 
@@ -302,6 +327,7 @@ impl Scenario {
             AccountMeta::new(self.source_account_pubkey, false),
             AccountMeta::new(self.dest_account_pubkey, false),
             AccountMeta::new_readonly(system_program_id(), false),
+            AccountMeta::new_readonly(self.chain_registration_pubkey, false),
         ]
     }
 
@@ -337,6 +363,13 @@ impl Scenario {
             accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
         }
         accounts.push(keyed_account_for_system_program());
+        // Slot 11: chain-registration PDA pre-populated with the scenario's
+        // (chain, emitter). Mirrors the same default in the submit_observations
+        // test scaffolding.
+        accounts.push((
+            self.chain_registration_pubkey,
+            chain_registration_account(self.chain, &self.emitter),
+        ));
         accounts
     }
 
@@ -583,6 +616,9 @@ fn submit_vaas_with_balance_underflow_reverts() {
     scenario.digest_pda = digest_pda;
     let (src, _) = derive_account_pda(1, 2, &token_address);
     let (dst, _) = derive_account_pda(2, 2, &token_address);
+    // Re-derive registration PDA for the new body chain.
+    let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
+    scenario.chain_registration_pubkey = registration_pda;
     scenario.source_account_pubkey = src;
     scenario.dest_account_pubkey = dst;
 
@@ -605,6 +641,68 @@ fn submit_vaas_with_balance_underflow_reverts() {
     assert_eq!(bucket.data[0], 0u8);
     let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
     assert!(digest.data.is_empty());
+}
+
+#[test]
+fn submit_vaas_rejects_unregistered_chain() {
+    // Chain-registration parity check on the backfill path. Mirrors CosmWasm
+    // `handle_tokenbridge_vaa` at `contract.rs:446-454`. Body-header
+    // emitter_chain that has no registration PDA must be refused.
+    let mollusk = mollusk();
+    let token_address = [0x99u8; 32];
+    let scenario = Scenario::with_transfer_body(0xA7, 100u128, 2, token_address, 1);
+
+    // Replace the default scenario registration with an uninitialised
+    // system-owned PDA to drive the MissingChainRegistration path.
+    let mut accounts = scenario.initial_accounts();
+    for entry in accounts.iter_mut() {
+        if entry.0 == scenario.chain_registration_pubkey {
+            entry.1 = uninitialised_pda_account();
+            break;
+        }
+    }
+    let result = scenario.submit(&mollusk, accounts);
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::MissingChainRegistration as u32,
+                "expected MissingChainRegistration, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(MissingChainRegistration), got {other:?}"),
+    }
+}
+
+#[test]
+fn submit_vaas_rejects_wrong_emitter_for_registered_chain() {
+    // Registration exists at the canonical PDA but holds a different emitter
+    // than the body header carries. Mirrors CosmWasm
+    // `contract.rs:451-454`'s "unknown emitter address" ensure.
+    let mollusk = mollusk();
+    let token_address = [0x99u8; 32];
+    let scenario = Scenario::with_transfer_body(0xA8, 100u128, 2, token_address, 1);
+
+    let mut accounts = scenario.initial_accounts();
+    for entry in accounts.iter_mut() {
+        if entry.0 == scenario.chain_registration_pubkey {
+            entry.1 = chain_registration_account(scenario.chain, &[0xCC; 32]);
+            break;
+        }
+    }
+    let result = scenario.submit(&mollusk, accounts);
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::UnregisteredEmitter as u32,
+                "expected UnregisteredEmitter, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(UnregisteredEmitter), got {other:?}"),
+    }
 }
 
 #[test]
