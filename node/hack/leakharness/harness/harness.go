@@ -64,6 +64,19 @@ type Summary struct {
 	PeakRSSBytes   uint64    `json:"peak_rss_bytes"`
 	PeakGoroutines int       `json:"peak_goroutines"`
 	Slopes         Slopes    `json:"slopes"`
+	// Profiles, when present, holds the relative paths to pprof
+	// profiles captured at scenario start and end. Empty when the
+	// harness was constructed without a ProfileDir.
+	Profiles ProfilePaths `json:"profiles,omitempty"`
+}
+
+// ProfilePaths records the relative paths of pprof profiles captured
+// during a Run.
+type ProfilePaths struct {
+	HeapStart      string `json:"heap_start,omitempty"`
+	HeapEnd        string `json:"heap_end,omitempty"`
+	GoroutineStart string `json:"goroutine_start,omitempty"`
+	GoroutineEnd   string `json:"goroutine_end,omitempty"`
 }
 
 // Harness is one configured run, reusable across multiple Run() calls
@@ -71,6 +84,13 @@ type Summary struct {
 type Harness struct {
 	scenario Scenario
 	logger   *zap.Logger
+
+	// ProfileDir, when non-empty, causes Run() to write heap and
+	// goroutine pprof profiles at scenario start and end. The
+	// resulting `heap-start.pprof` / `heap-end.pprof` pair is the
+	// fastest way to localise an allocation regression:
+	//   go tool pprof -base heap-start.pprof heap-end.pprof
+	ProfileDir string
 }
 
 // New constructs a Harness for the given scenario. It does not start
@@ -89,6 +109,28 @@ func (h *Harness) Run(ctx context.Context) (Summary, error) {
 	startedAt := time.Now()
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Capture a baseline heap+goroutine profile before any workers
+	// start. The operator diffs this against the end-of-run profile to
+	// localise allocation sites.
+	var profiles ProfilePaths
+	if h.ProfileDir != "" {
+		if err := os.MkdirAll(h.ProfileDir, 0o755); err != nil {
+			return Summary{}, fmt.Errorf("mkdir profile dir: %w", err)
+		}
+		heapStart := filepath.Join(h.ProfileDir, "heap-start.pprof")
+		grStart := filepath.Join(h.ProfileDir, "goroutine-start.pprof")
+		if err := CaptureHeap(heapStart); err != nil {
+			h.logger.Warn("failed to capture start heap profile", zap.Error(err))
+		} else {
+			profiles.HeapStart = "heap-start.pprof"
+		}
+		if err := CaptureGoroutine(grStart); err != nil {
+			h.logger.Warn("failed to capture start goroutine profile", zap.Error(err))
+		} else {
+			profiles.GoroutineStart = "goroutine-start.pprof"
+		}
+	}
 
 	// Start fakes for each chain in the scenario using the family registry.
 	fakes := make(map[string]common.FaultableServer)
@@ -182,6 +224,24 @@ samplingLoop:
 		h.logger.Warn("workers did not exit within 30s of cancel; continuing teardown")
 	}
 
+	// End-of-run profiles. Captured after workers exit so the snapshot
+	// reflects steady-state allocations attributable to the workload,
+	// not in-flight ones.
+	if h.ProfileDir != "" {
+		heapEnd := filepath.Join(h.ProfileDir, "heap-end.pprof")
+		grEnd := filepath.Join(h.ProfileDir, "goroutine-end.pprof")
+		if err := CaptureHeap(heapEnd); err != nil {
+			h.logger.Warn("failed to capture end heap profile", zap.Error(err))
+		} else {
+			profiles.HeapEnd = "heap-end.pprof"
+		}
+		if err := CaptureGoroutine(grEnd); err != nil {
+			h.logger.Warn("failed to capture end goroutine profile", zap.Error(err))
+		} else {
+			profiles.GoroutineEnd = "goroutine-end.pprof"
+		}
+	}
+
 	summary := Summary{
 		Scenario:       h.scenario.Name,
 		Description:    h.scenario.Description,
@@ -193,6 +253,7 @@ samplingLoop:
 		PeakRSSBytes:   peakRSS,
 		PeakGoroutines: peakGoroutines,
 		Slopes:         ComputeSlopes(samples),
+		Profiles:       profiles,
 	}
 	return summary, nil
 }
