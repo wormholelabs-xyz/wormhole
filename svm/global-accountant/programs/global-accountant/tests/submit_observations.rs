@@ -21,7 +21,8 @@ use {
         BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX,
-        PENDING_SEED_PREFIX,
+        MAX_QUORUM_BRANCH_CU, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
+        NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -88,6 +89,35 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
         &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
         &program_id(),
     )
+}
+
+/// Host-side derivation of the canonical NoReplay bitmap PDA for
+/// `(authority, chain, emitter, sequence)`. Mirrors the on-chain
+/// `instructions::noreplay::derive_bucket_pda` and the upstream
+/// `solana_noreplay::pda::BitmapPdaSeeds` scheme. Both mock and production
+/// noreplay branches now enforce the canonical address (since the
+/// mock-noreplay belt-and-braces hardening), so every test fixture that
+/// supplies a noreplay bucket account must place it here.
+fn derive_canonical_noreplay_bucket(
+    authority: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> Pubkey {
+    let mut namespace = [0u8; 34];
+    namespace[..2].copy_from_slice(&chain.to_be_bytes());
+    namespace[2..].copy_from_slice(emitter);
+    let bucket_index = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
+    let (pda, _) = Pubkey::find_program_address(
+        &[
+            authority.as_ref(),
+            &namespace[..32],
+            &namespace[32..],
+            &bucket_index,
+        ],
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+    );
+    pda
 }
 
 /// Build a program-owned chain-registration PDA account fixture containing
@@ -396,8 +426,18 @@ impl Scenario {
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let (pending_pda, pending_bump) = derive_pending_pda(chain, &emitter, sequence, &digest);
         let (digest_pda, digest_bump) = derive_digest_pda(chain, &emitter, sequence);
-        let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+        // Use the canonical program-derived noreplay authority so the bucket
+        // address agrees with close_pending's internal re-derivation (which
+        // does not consult the account list — see close_pending.rs).
+        let (noreplay_authority_pubkey, _) =
+            Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
+        let noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
+            &noreplay_authority_pubkey,
+            chain,
+            &emitter,
+            sequence,
+        );
 
         Self {
             chain,
@@ -413,7 +453,7 @@ impl Scenario {
             digest_pda,
             digest_bump,
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
-            noreplay_bucket_pubkey: Pubkey::new_from_array([0xC2u8; 32]),
+            noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array([0xC3u8; 32]),
             noreplay_authority_pubkey,
             // Attest payload ⇒ slots 8/9 never touched. Use a sentinel pubkey
@@ -911,9 +951,15 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
 
     let submitter = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
-    let noreplay_bucket_pubkey = Pubkey::new_from_array([0xC2u8; 32]);
+    let (noreplay_authority_pubkey, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
+    let noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
+        &noreplay_authority_pubkey,
+        body_chain,
+        &body_emitter,
+        body_sequence,
+    );
     let noreplay_program_pubkey = Pubkey::new_from_array([0xC3u8; 32]);
-    let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
 
     let ix_data = submit_ix_data(
         &digest,
@@ -2008,6 +2054,14 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     // scenario registered chain=2; this test's body is chain=1.
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
     scenario.chain_registration_pubkey = registration_pda;
+    // Re-derive the noreplay bucket for the new chain (sequence/1024 bucket
+    // also changes if scenario.chain shifts the namespace).
+    scenario.noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
+        &scenario.noreplay_authority_pubkey,
+        scenario.chain,
+        &scenario.emitter,
+        scenario.sequence,
+    );
     scenario.source_account_pubkey = src;
     scenario.dest_account_pubkey = dst;
 
@@ -2081,6 +2135,56 @@ fn quorum_with_lazy_init_destination_account_succeeds() {
     );
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst_post.data);
     assert_eq!(layout.balance, Uint256::from_u128(9_999));
+}
+
+#[test]
+fn quorum_branch_cu_stays_below_ceiling() {
+    // CU regression guard. The 13th observation commit branch with a Transfer
+    // payload that lazy-inits both source and destination Account PDAs is the
+    // most expensive hot-path tx in the program. Pinned against
+    // `MAX_QUORUM_BRANCH_CU` so any future fat addition trips CI loudly.
+    //
+    // The const includes ~55% headroom over today's observed peak (~51K CU
+    // under mock-noreplay) plus an estimated ~5K delta for the real NoReplay
+    // CPI. If a regression appears, investigate before bumping the constant —
+    // the budget is intentionally tight enough to catch unintended growth.
+    let mollusk = mollusk();
+    let token_address = [0xCFu8; 32];
+    let scenario = Scenario::with_transfer_body(
+        19, 4, 0xCF,
+        12_345u128,
+        2,
+        token_address,
+        1, // recipient_chain = Solana so both Account PDAs lazy-init
+    );
+
+    // Drive the first 12 observations without checking CU — those are the
+    // accumulator-only path (~30K CU each, no commit-branch fat).
+    let mut accounts = scenario.initial_accounts();
+    for i in 0..(PendingObservationsLayout::QUORUM_THRESHOLD as u8 - 1) {
+        let r = scenario.submit_once(&mollusk, accounts.clone(), i);
+        assert!(matches!(r.program_result, ProgramResult::Success));
+        accounts = r.resulting_accounts;
+    }
+
+    // 13th observation — quorum reach, full commit branch.
+    let result = scenario.submit_once(
+        &mollusk,
+        accounts,
+        PendingObservationsLayout::QUORUM_THRESHOLD as u8 - 1,
+    );
+    assert!(
+        matches!(result.program_result, ProgramResult::Success),
+        "quorum tx must succeed for the CU measurement to be meaningful, got {:?}",
+        result.program_result
+    );
+
+    assert!(
+        result.compute_units_consumed <= MAX_QUORUM_BRANCH_CU,
+        "quorum-branch CU ({}) exceeded ceiling ({}); investigate before raising the constant",
+        result.compute_units_consumed,
+        MAX_QUORUM_BRANCH_CU
+    );
 }
 
 #[test]

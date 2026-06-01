@@ -274,6 +274,17 @@ pub const ACCOUNTANT_GOVERNANCE_MODULE: [u8; 32] = [
 /// this one variant.
 pub const MODIFY_BALANCE_ACTION: u8 = 0x01;
 
+/// Compute-unit ceiling for the most expensive `submit_observations` /
+/// `submit_vaas` path: the 13th signature commit branch with a Transfer
+/// payload plus lazy-init of both source and destination Account PDAs.
+/// Observed mock-noreplay peak today is ~51K CU; the 80K budget gives
+/// ~55% headroom for future small additions and the ~5K production CPI
+/// delta against the in-process noreplay sentinel. A regression test in
+/// `tests/submit_observations.rs` pins the actual quorum-branch CU
+/// against this constant — any fat addition that pushes the hot path past
+/// the ceiling trips CI loudly.
+pub const MAX_QUORUM_BRANCH_CU: u64 = 80_000;
+
 /// `ModifyBalance` payload `kind` byte values. Mirrors
 /// `wormhole-sdk::accountant_modification::ModificationKind`. The `Unknown(0)`
 /// variant in the SDK is intentionally not represented here; on-chain we

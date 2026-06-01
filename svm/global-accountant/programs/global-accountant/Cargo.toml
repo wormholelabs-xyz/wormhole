@@ -48,6 +48,16 @@ bytemuck.workspace = true
 global-accountant-definitions.workspace = true
 pinocchio.workspace = true
 pinocchio-system.workspace = true
+# Force-enable the `curve25519` feature on solana-address so production-shape
+# host builds (cargo clippy without test features) can resolve
+# `Address::find_program_address`. The function is feature-gated to
+# `curve25519` on the host path; pinocchio's transitive dep only enables
+# `syscalls`, which exposes it on the BPF target but not on the host. On the
+# SBF target the syscall path is unconditionally available, so the dev-dep
+# curve25519-dalek that this brings in via solana-address's host-only branch
+# is dead code on-chain and adds no SBF binary cost. Already in the workspace
+# graph via solana-pubkey's dev-deps; no new supply-chain surface.
+solana-address = { version = "2.6", features = ["curve25519"] }
 
 [dev-dependencies]
 mollusk-svm.workspace = true

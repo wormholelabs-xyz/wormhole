@@ -26,7 +26,8 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, DIGEST_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -77,6 +78,28 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
         &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
         &program_id(),
     )
+}
+
+fn derive_canonical_noreplay_bucket(
+    authority: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> Pubkey {
+    let mut namespace = [0u8; 34];
+    namespace[..2].copy_from_slice(&chain.to_be_bytes());
+    namespace[2..].copy_from_slice(emitter);
+    let bucket_index = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
+    let (pda, _) = Pubkey::find_program_address(
+        &[
+            authority.as_ref(),
+            &namespace[..32],
+            &namespace[32..],
+            &bucket_index,
+        ],
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+    );
+    pda
 }
 
 fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account {
@@ -257,8 +280,13 @@ impl Scenario {
 
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let (digest_pda, _digest_bump) = derive_digest_pda(chain, &emitter, sequence);
-        let noreplay_authority_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+        // Canonical program-derived noreplay authority — matches what
+        // close_pending and the production CPI path use.
+        let (noreplay_authority_pubkey, _) =
+            Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
+        let noreplay_bucket_pubkey =
+            derive_canonical_noreplay_bucket(&noreplay_authority_pubkey, chain, &emitter, sequence);
 
         Self {
             chain,
@@ -277,7 +305,7 @@ impl Scenario {
             ),
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
             guardian_signatures_pubkey: Pubkey::new_from_array([0xC5u8; 32]),
-            noreplay_bucket_pubkey: Pubkey::new_from_array([0xC2u8; 32]),
+            noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array([0xC3u8; 32]),
             noreplay_authority_pubkey,
             // Sentinel: Attest payloads never touch slots 8/9.
@@ -619,6 +647,14 @@ fn submit_vaas_with_balance_underflow_reverts() {
     // Re-derive registration PDA for the new body chain.
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
     scenario.chain_registration_pubkey = registration_pda;
+    // Noreplay bucket also shifts when the chain changes (chain is part of
+    // the namespace seed).
+    scenario.noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
+        &scenario.noreplay_authority_pubkey,
+        scenario.chain,
+        &scenario.emitter,
+        scenario.sequence,
+    );
     scenario.source_account_pubkey = src;
     scenario.dest_account_pubkey = dst;
 

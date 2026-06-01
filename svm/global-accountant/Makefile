@@ -200,6 +200,16 @@ test-cu-spike:
 clippy:
 	cargo clippy --all-targets --features mock-vaa,test-only-open-digest,mock-noreplay -- -D warnings
 
+# Production-shape clippy. Mirrors `build-prod` — no test features enabled,
+# so this catches lint regressions that the default `clippy` target would
+# miss because it always exercises the dev feature combo. CI should run both
+# targets; a regression that only trips here means the production build is
+# affected.
+.PHONY: clippy-prod
+clippy-prod:
+	cargo clippy -p global-accountant -- -D warnings
+	cargo clippy -p global-accountant-definitions -- -D warnings
+
 .PHONY: clean
 clean:
 	cargo clean

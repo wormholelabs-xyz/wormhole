@@ -21,8 +21,9 @@
 use {
     global_accountant_definitions::{
         ChainRegistrationLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION,
-        SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER, NOREPLAY_AUTHORITY_SEED_PREFIX,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
+        TOKEN_BRIDGE_GOVERNANCE_MODULE,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -50,6 +51,29 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
         &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
         &program_id(),
     )
+}
+
+/// Host-side derivation of the canonical NoReplay bitmap PDA.
+fn derive_canonical_noreplay_bucket(
+    authority: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> Pubkey {
+    let mut namespace = [0u8; 34];
+    namespace[..2].copy_from_slice(&chain.to_be_bytes());
+    namespace[2..].copy_from_slice(emitter);
+    let bucket_index = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
+    let (pda, _) = Pubkey::find_program_address(
+        &[
+            authority.as_ref(),
+            &namespace[..32],
+            &namespace[32..],
+            &bucket_index,
+        ],
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+    );
+    pda
 }
 
 fn system_owned_account(lamports: u64) -> Account {
@@ -209,9 +233,17 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
     let shim_program = Pubkey::new_from_array([0xC1u8; 32]);
     let guardian_set = Pubkey::new_from_array([0xC2u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
-    let noreplay_bucket = Pubkey::new_from_array([0xC4u8; 32]);
     let noreplay_program = Pubkey::new_from_array([0xC5u8; 32]);
-    let noreplay_authority = Pubkey::new_from_array([0xC6u8; 32]);
+    // Canonical program-derived noreplay authority. Matches what
+    // close_pending re-derives internally and what the production CPI signs.
+    let (noreplay_authority, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
+    let noreplay_bucket = derive_canonical_noreplay_bucket(
+        &noreplay_authority,
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x01, // vaa_sequence used in this body
+    );
 
     let accounts = build_initial_accounts(
         payer,
@@ -280,9 +312,25 @@ fn run_register_chain(
     let shim_program = Pubkey::new_from_array([0xC1u8; 32]);
     let guardian_set = Pubkey::new_from_array([0xC2u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
-    let noreplay_bucket = Pubkey::new_from_array([0xC4u8; 32]);
     let noreplay_program = Pubkey::new_from_array([0xC5u8; 32]);
-    let noreplay_authority = Pubkey::new_from_array([0xC6u8; 32]);
+    // Canonical program-derived noreplay authority. Matches what
+    // close_pending re-derives internally and what the production CPI signs.
+    let (noreplay_authority, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
+    // The body's vaa_sequence determines which canonical noreplay bucket the
+    // program will derive. Read it directly from body[42..50] so the test
+    // helper doesn't have to be told twice.
+    let vaa_sequence = {
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&body[42..50]);
+        u64::from_be_bytes(buf)
+    };
+    let noreplay_bucket = derive_canonical_noreplay_bucket(
+        &noreplay_authority,
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        vaa_sequence,
+    );
 
     let mut accounts = build_initial_accounts(
         payer,
@@ -473,7 +521,10 @@ fn register_chain_rejects_replay() {
     // Carry the NoReplay-flipped bucket and the freshly-initialised
     // registration PDA into the second call.
     let (registration_pda, _) = derive_chain_registration_pda(2);
-    let noreplay_bucket_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+    // Authority pubkey must match what `run_register_chain` uses for the
+    // canonical bucket derivation.
+    let (noreplay_authority_pubkey, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
     let post_registration = r1
         .resulting_accounts
         .iter()
@@ -483,7 +534,14 @@ fn register_chain_rejects_replay() {
     let post_bucket = r1
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == noreplay_bucket_pubkey)
+        .find(|(k, _)| {
+            *k == derive_canonical_noreplay_bucket(
+                &noreplay_authority_pubkey,
+                SOLANA_CHAIN_ID,
+                &GOVERNANCE_EMITTER,
+                0x06, // vaa_sequence from this test's body
+            )
+        })
         .map(|(_, a)| a.clone())
         .expect("noreplay bucket missing from first result");
 
@@ -532,7 +590,10 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
 
     // Carry the freshly-initialised PDA + flipped bucket into the second call.
     let (registration_pda, _) = derive_chain_registration_pda(2);
-    let noreplay_bucket_pubkey = Pubkey::new_from_array([0xC4u8; 32]);
+    // Authority pubkey must match what `run_register_chain` uses for the
+    // canonical bucket derivation.
+    let (noreplay_authority_pubkey, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
     let post_registration = r1
         .resulting_accounts
         .iter()
@@ -542,7 +603,14 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
     let post_bucket = r1
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == noreplay_bucket_pubkey)
+        .find(|(k, _)| {
+            *k == derive_canonical_noreplay_bucket(
+                &noreplay_authority_pubkey,
+                SOLANA_CHAIN_ID,
+                &GOVERNANCE_EMITTER,
+                0x07, // body_a's vaa_sequence
+            )
+        })
         .map(|(_, a)| a.clone())
         .expect("noreplay bucket missing from first result");
 

@@ -150,14 +150,28 @@ pub fn is_marked(
 /// Mock branch — the caller-supplied bucket is a stand-in account at an
 /// arbitrary test pubkey, so the canonical-address check is skipped here.
 /// Production callers always go through the `not(mock-noreplay)` arm above.
+///
+/// Belt-and-braces: the mock branch runs the *same* canonical-bucket-address
+/// check as production before consulting the sentinel byte. This way the
+/// in-process mollusk suite catches any future regression to `derive_bucket_pda`
+/// (seed ordering, namespace split, sequence/1024 bucketisation) even though
+/// the actual bit lookup is sentinel-based rather than bitmap-based. Without
+/// this guard, only the surfpool e2e tests would surface a derivation drift,
+/// and those are slow / not in the default `make test` path.
 #[cfg(feature = "mock-noreplay")]
 pub fn is_marked(
     bucket: &AccountView,
-    _noreplay_authority: &Address,
-    _chain: u16,
-    _emitter: &[u8; 32],
-    _sequence: u64,
+    noreplay_authority: &Address,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
 ) -> Result<bool, pinocchio::error::ProgramError> {
+    let (expected_bucket, _) = derive_bucket_pda(noreplay_authority, chain, emitter, sequence);
+    if bucket.address() != &expected_bucket {
+        return Err(crate::err(
+            crate::definitions::GlobalAccountantError::InvalidPda,
+        ));
+    }
     let data = bucket.try_borrow()?;
     if data.is_empty() {
         return Ok(false);
@@ -179,13 +193,23 @@ pub fn mark_used(
     _payer: &AccountView,
     bucket: &mut AccountView,
     _noreplay_program: &AccountView,
-    _noreplay_authority: &AccountView,
+    noreplay_authority: &AccountView,
     _system_program: &AccountView,
     _program_id: &pinocchio::Address,
-    _chain: u16,
-    _emitter: &[u8; 32],
-    _sequence: u64,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
 ) -> ProgramResult {
+    // Belt-and-braces canonical-address check mirroring `is_marked`. Without
+    // this the mollusk suite cannot catch a `derive_bucket_pda` regression on
+    // the write path either.
+    let (expected_bucket, _) =
+        derive_bucket_pda(noreplay_authority.address(), chain, emitter, sequence);
+    if bucket.address() != &expected_bucket {
+        return Err(crate::err(
+            crate::definitions::GlobalAccountantError::InvalidPda,
+        ));
+    }
     let mut data = bucket.try_borrow_mut()?;
     if data.is_empty() {
         return Err(crate::err(

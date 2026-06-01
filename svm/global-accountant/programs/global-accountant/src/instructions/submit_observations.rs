@@ -110,7 +110,12 @@ pub fn process(
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    if body_len > SUBMIT_BODY_MAX || rest.len() < 2 + body_len {
+    // Lower bound `BODY_MIN_LEN` (51-byte VAA header + 1-byte action) mirrors
+    // `submit_vaas.rs`'s tighter check and surfaces malformed-body submissions
+    // ~5K CU earlier — before the body→digest keccak roundtrip and before
+    // `populate_routing_from_body`'s own 50-byte guard.
+    const BODY_MIN_LEN: usize = 52;
+    if !(BODY_MIN_LEN..=SUBMIT_BODY_MAX).contains(&body_len) || rest.len() < 2 + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let body_bytes = &rest[2..2 + body_len];
