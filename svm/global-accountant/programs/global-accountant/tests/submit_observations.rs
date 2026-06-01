@@ -1252,6 +1252,42 @@ fn submit_with_invalid_signature_fails() {
 }
 
 #[test]
+fn submit_with_recovery_id_4_rejects() {
+    // Recovery id must be in {0, 1, 2, 3}; byte 64 set to 4 trips the
+    // short-circuit before `secp256k1_recover` is called.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x52);
+    let mut signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    signature[64] = 4;
+
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            &scenario.digest,
+            scenario.guardian_set_index,
+            0,
+            &signature,
+            scenario.pending_bump,
+            scenario.digest_bump,
+            &scenario.body,
+        ),
+        scenario.account_metas(),
+    );
+    let result = mollusk.process_instruction(&ix, &scenario.initial_accounts());
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidSignature as u32,
+                "expected InvalidSignature, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidSignature), got {other:?}"),
+    }
+}
+
+#[test]
 fn submit_with_duplicate_guardian_index_fails() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x46);
@@ -1275,6 +1311,126 @@ fn submit_with_duplicate_guardian_index_fails() {
             );
         }
         other => panic!("expected Failure(AlreadySigned), got {other:?}"),
+    }
+}
+
+#[test]
+fn submit_with_malformed_guardian_set_rejects() {
+    // Drives each branch of `read_guardian_key`:
+    //   (a) data shorter than the 8-byte header        -> InvalidPda
+    //   (b) on_chain_index != wire-supplied index      -> InvalidGuardianIndex
+    //   (c) guardian_index >= declared keys_len        -> InvalidGuardianIndex
+    //   (d) keys array truncated before guardian_index -> InvalidPda
+    let mollusk = mollusk();
+    let core_bridge = Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID);
+
+    let truncated_header = Account {
+        lamports: 1_000_000,
+        data: vec![0u8; 4], // < 8 bytes
+        owner: core_bridge,
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let mismatched_index = {
+        let scenario = Scenario::new(19, 4, 0x53);
+        // Same keys as the scenario, but the header encodes a different index.
+        guardian_set_account(99, &scenario.guardian_keys(), 0, 0)
+    };
+
+    let short_keys_array = {
+        // Declared keys_len = 3 but the wire-supplied guardian_index will be 5.
+        let scenario = Scenario::new(19, 4, 0x53);
+        let truncated: Vec<[u8; 20]> = scenario.guardians[..3]
+            .iter()
+            .map(|g| g.eth_address)
+            .collect();
+        guardian_set_account(4, &truncated, 0, 0)
+    };
+
+    let truncated_keys_buffer = {
+        // Declared keys_len = 19 but the buffer only holds 5 keys, so an
+        // 18th-key read overruns the slice.
+        let mut data = Vec::with_capacity(8 + 5 * 20);
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&19u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 5 * 20]);
+        Account {
+            lamports: 1_000_000,
+            data,
+            owner: core_bridge,
+            executable: false,
+            rent_epoch: 0,
+        }
+    };
+
+    let cases: [(&str, Account, u8, u32); 4] = [
+        (
+            "truncated header",
+            truncated_header,
+            0,
+            GlobalAccountantError::InvalidPda as u32,
+        ),
+        (
+            "on-chain index mismatch",
+            mismatched_index,
+            0,
+            GlobalAccountantError::InvalidGuardianIndex as u32,
+        ),
+        (
+            "guardian_index >= keys_len",
+            short_keys_array,
+            5,
+            GlobalAccountantError::InvalidGuardianIndex as u32,
+        ),
+        (
+            "keys buffer truncated",
+            truncated_keys_buffer,
+            18,
+            GlobalAccountantError::InvalidPda as u32,
+        ),
+    ];
+
+    for (label, gs_account, guardian_index, expected_code) in cases {
+        let scenario = Scenario::new(19, 4, 0x53);
+        let mut accounts = scenario.initial_accounts();
+        if let Some(entry) = accounts
+            .iter_mut()
+            .find(|(k, _)| *k == scenario.guardian_set_pubkey)
+        {
+            entry.1 = gs_account;
+        }
+
+        // Signature is valid for the chosen guardian — handler must short-circuit
+        // before secp256k1_recover runs.
+        let signature = sign_digest(
+            &scenario.guardians[guardian_index as usize],
+            &scenario.digest,
+        );
+        let ix = Instruction::new_with_bytes(
+            program_id(),
+            &submit_ix_data(
+                &scenario.digest,
+                scenario.guardian_set_index,
+                guardian_index,
+                &signature,
+                scenario.pending_bump,
+                scenario.digest_bump,
+                &scenario.body,
+            ),
+            scenario.account_metas(),
+        );
+        let result = mollusk.process_instruction(&ix, &accounts);
+        match result.program_result {
+            ProgramResult::Failure(err) => {
+                let code = u64::from(err) as u32;
+                assert_eq!(
+                    code, expected_code,
+                    "[{label}] expected code {expected_code}, got {code}"
+                );
+            }
+            other => panic!("[{label}] expected Failure, got {other:?}"),
+        }
     }
 }
 
@@ -1817,6 +1973,52 @@ fn close_pending_with_noreplay_marked_succeeds() {
     let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
     assert_eq!(pending.lamports, 0);
     assert!(pending.data.is_empty());
+}
+
+#[test]
+fn close_pending_with_overflowing_rent_recipient_rejects() {
+    // checked_add: rent_recipient at u64::MAX cannot accept any refund without
+    // overflowing. Mirrors the analogous guard in submit_observations'
+    // commit-close path; the close_pending entrypoint is the only place this
+    // branch is host-testable.
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x60);
+    let accounts_after_first = scenario.submit_n(&mollusk, 1);
+
+    // Saturate the rent recipient and pre-mark noreplay so trigger (b) fires.
+    let mut accounts = accounts_after_first.clone();
+    if let Some(entry) = accounts
+        .iter_mut()
+        .find(|(k, _)| *k == scenario.noreplay_bucket_pubkey)
+    {
+        entry.1 = noreplay_bucket_marked();
+    }
+    if let Some(entry) = accounts.iter_mut().find(|(k, _)| *k == scenario.submitter) {
+        entry.1.lamports = u64::MAX;
+    }
+
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &close_pending_ix_data(&scenario.emitter, scenario.sequence),
+        vec![
+            AccountMeta::new_readonly(scenario.submitter, true),
+            AccountMeta::new(scenario.pending_pda, false),
+            AccountMeta::new(scenario.submitter, false),
+            AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
+            AccountMeta::new_readonly(scenario.noreplay_bucket_pubkey, false),
+        ],
+    );
+    let r = mollusk.process_instruction(&ix, &accounts);
+    let debug = format!("{:?}", r.program_result);
+    assert!(
+        debug.contains("ArithmeticOverflow"),
+        "expected ArithmeticOverflow, got {debug}"
+    );
+
+    // Pending PDA must be untouched.
+    let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending.owner, program_id(), "pending PDA still owned by program");
+    assert!(!pending.data.is_empty(), "pending PDA data preserved");
 }
 
 #[test]

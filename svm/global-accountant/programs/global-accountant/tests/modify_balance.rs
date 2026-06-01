@@ -809,3 +809,109 @@ fn modify_balance_rejects_wrong_balance_pda_bump() {
         other => panic!("expected Failure(InvalidPda), got {other:?}"),
     }
 }
+
+#[test]
+fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
+    // Two governance VAAs that touch the same (chain, token_chain, token_address)
+    // triple must both succeed AND land at distinct ModificationLog PDAs — i.e.
+    // the modification PDA seeds key on `sequence`, not on the balance PDA.
+    // Mirrors CosmWasm `MODIFICATIONS.update` keyed on sequence at
+    // `cosmwasm/packages/accountant/src/contract.rs:248`.
+    let mollusk = mollusk();
+    let token_address = [0xE7u8; 32];
+
+    let add_body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x20,
+        &ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        3104,
+        300,
+        2,
+        2,
+        &token_address,
+        1, // Add
+        Uint256::from_u128(100),
+        &[0u8; 32],
+    );
+    let r1 = run_modify_balance(&mollusk, &add_body, 2, 2, &token_address, 300, None, None, None);
+    assert!(
+        matches!(r1.program_result, ProgramResult::Success),
+        "first Add must succeed, got {:?}",
+        r1.program_result
+    );
+
+    let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
+    let (mod_pda_300, _) = derive_modification_pda(300);
+    let (mod_pda_301, _) = derive_modification_pda(301);
+    assert_ne!(
+        mod_pda_300, mod_pda_301,
+        "distinct sequences must derive to distinct modification PDAs"
+    );
+
+    let post_balance = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == balance_pda)
+        .map(|(_, a)| a.clone())
+        .expect("balance PDA missing after first call");
+
+    let sub_body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x21,
+        &ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        3104,
+        301,
+        2,
+        2,
+        &token_address,
+        2, // Subtract
+        Uint256::from_u128(100),
+        &[0u8; 32],
+    );
+    let r2 = run_modify_balance(
+        &mollusk,
+        &sub_body,
+        2,
+        2,
+        &token_address,
+        301,
+        None,
+        Some(post_balance),
+        None,
+    );
+    assert!(
+        matches!(r2.program_result, ProgramResult::Success),
+        "second Sub at distinct sequence must succeed, got {:?}",
+        r2.program_result
+    );
+
+    let final_balance = r2
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == balance_pda)
+        .map(|(_, a)| a.clone())
+        .expect("balance PDA missing after second call");
+    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&final_balance.data);
+    assert_eq!(
+        layout.balance,
+        Uint256::from_u128(0),
+        "Add 100 then Sub 100 leaves balance at zero"
+    );
+
+    let mod_300_post = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == mod_pda_300)
+        .expect("modification PDA seq=300 missing");
+    assert_eq!(mod_300_post.1.owner, program_id());
+    let mod_301_post = r2
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == mod_pda_301)
+        .expect("modification PDA seq=301 missing");
+    assert_eq!(mod_301_post.1.owner, program_id());
+}
