@@ -15,10 +15,10 @@ type Sample struct {
 // derived by ordinary-least-squares linear regression of each metric
 // against time.
 type Slopes struct {
-	RSSMBPerHour       float64
-	HeapInuseMBPerHour float64
-	GoroutinesPerHour  float64
-	FDsPerHour         float64
+	RSSMBPerHour       float64 `json:"rss_mb_per_hour"`
+	HeapInuseMBPerHour float64 `json:"heap_inuse_mb_per_hour"`
+	GoroutinesPerHour  float64 `json:"goroutines_per_hour"`
+	FDsPerHour         float64 `json:"fds_per_hour"`
 }
 
 // ComputeSlopes returns the per-hour slope for each metric. If fewer

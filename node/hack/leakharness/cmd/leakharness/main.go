@@ -35,8 +35,10 @@ func main() {
 func runCmd(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	out := fs.String("out", "", "output directory (default: runs/<scenario>-<ts>/)")
+	pprofAddr := fs.String("pprof-addr", "127.0.0.1:6061",
+		"address for live net/http/pprof server (set to empty string to disable; bind only to loopback because heap dumps may contain sensitive state)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: leakharness run [--out <dir>] <scenario.yaml>")
+		fmt.Fprintln(os.Stderr, "usage: leakharness run [--out <dir>] [--pprof-addr <host:port>] <scenario.yaml>")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -69,12 +71,23 @@ func runCmd(args []string) int {
 		fmt.Fprintln(os.Stderr, "new harness:", err)
 		return 1
 	}
+	h.ProfileDir = outDir
+
+	stopPprof, pprofAddrActual, err := harness.StartPprofServer(*pprofAddr)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pprof server:", err)
+		return 1
+	}
+	defer func() { _ = stopPprof() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), scenario.Duration+2*time.Minute)
 	defer cancel()
 
 	fmt.Printf("running scenario %q for %s, sample interval %s, OOM cap %d MiB\n",
 		scenario.Name, scenario.Duration, scenario.SampleInterval, scenario.OOMCapBytes>>20)
+	if pprofAddrActual != "" {
+		fmt.Printf("live pprof: http://%s/debug/pprof/ (heap, goroutine, profile, allocs)\n", pprofAddrActual)
+	}
 
 	summary, err := h.Run(ctx)
 	if err != nil {
@@ -98,6 +111,15 @@ func runCmd(args []string) int {
 	fmt.Printf("  goroutines_per_hour:    %.2f\n", summary.Slopes.GoroutinesPerHour)
 	fmt.Printf("  fds_per_hour:           %.2f\n", summary.Slopes.FDsPerHour)
 	fmt.Printf("\nsummary written to %s\n", summaryPath)
+	if summary.Profiles.HeapStart != "" && summary.Profiles.HeapEnd != "" {
+		fmt.Printf("heap diff:    go tool pprof -base %s %s\n",
+			filepath.Join(outDir, summary.Profiles.HeapStart),
+			filepath.Join(outDir, summary.Profiles.HeapEnd))
+	}
+	if summary.Profiles.GoroutineEnd != "" {
+		fmt.Printf("goroutines:   go tool pprof %s\n",
+			filepath.Join(outDir, summary.Profiles.GoroutineEnd))
+	}
 
 	if summary.Verdict == harness.VerdictKilledOOM {
 		return 1
