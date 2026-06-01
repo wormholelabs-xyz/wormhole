@@ -1,69 +1,23 @@
 //! `submit_vaas` — permissionless signed-VAA backfill.
 //!
-//! Port of the CosmWasm `handle_tokenbridge_vaa` path
-//! (`cosmwasm/contracts/global-accountant/src/contract.rs:442-495`). Consumes
-//! a fully-signed VAA via the Verify VAA Shim CPI and applies its balance
-//! effects directly, **bypassing the per-`(chain, emitter, sequence, digest)`
-//! quorum tracker entirely**. The instruction is the operational escape
-//! hatch for stuck pending buckets and the unblock path for migration
-//! backfill.
+//! Port of CosmWasm's `handle_tokenbridge_vaa`
+//! (`cosmwasm/contracts/global-accountant/src/contract.rs:442-495`).
+//! Consumes a fully-signed VAA via the Verify VAA Shim CPI and applies its
+//! balance effects directly, bypassing the per-`(chain, emitter, sequence,
+//! digest)` quorum tracker. The escape hatch for stuck pending buckets and
+//! the unblock path for migration backfill.
 //!
-//! ## Why this exists alongside `submit_observations`
+//! Orthogonality with `submit_observations`: NoReplay is the only shared
+//! state, and both paths set it the same way. Once NoReplay marks
+//! `(chain, emitter, seq)`, any subsequent caller — observation or VAA —
+//! is rejected as `AlreadyAccounted` (CosmWasm's `DIGESTS DuplicateMessage`
+//! short-circuit; the digest-mismatch sub-case is subsumed because the
+//! namespace omits digest).
 //!
-//! `submit_observations` accumulates per-guardian observations into a pending
-//! PDA until 13/19 quorum, at which point it CPIs `MarkUsed` + opens the
-//! DigestAccount + applies balance work. That path is the primary one in
-//! steady state.
-//!
-//! `submit_vaas` is the secondary path: the caller already holds a real
-//! 13-signature VAA (because it was committed previously on Wormchain, came
-//! out of the migration snapshot, or was reconstructed off-chain) and wants
-//! to apply its effects without re-running the per-observation accumulator.
-//! The Shim verifies the quorum cryptographically against caller-posted
-//! signatures, so the only on-chain state we touch is NoReplay + the
-//! DigestAccount + the source / destination Account PDAs.
-//!
-//! Orthogonality with the quorum tracker: NoReplay is the only shared state,
-//! and it is set the same way by both paths.
-//!
-//! ## Flow
-//!
-//! 1. Parse wire data: `guardian_set_bump` + `body_len` + body bytes.
-//! 2. Compute `digest = keccak256(keccak256(body))`.
-//! 3. CPI to Verify VAA Shim's `VerifyHash` — proves a 13-guardian quorum
-//!    signed `digest`. Reuses the same helper shape as `close_digest`.
-//! 4. Parse VAA body header → `(emitter_chain, emitter_address, sequence)`.
-//! 5. NoReplay pre-check via `noreplay::is_marked`. Already-marked ⇒
-//!    `AlreadyAccounted` (CosmWasm's `DIGESTS DuplicateMessage` short-circuit).
-//! 6. Decode payload via `parse_token_bridge_payload`. Transfer ⇒
-//!    `apply_transfer`; Attest / Other ⇒ no balance work.
-//! 7. Flip NoReplay via `noreplay::mark_used` (real CPI in prod, sentinel
-//!    write under `mock-noreplay`).
-//! 8. Open the DigestAccount PDA via `open_digest_inner` so subsequent
-//!    observations for the same `(chain, emitter, sequence)` see "already
-//!    committed" via the same on-chain breadcrumb as the quorum path.
-//!
-//! All eight steps execute atomically — Solana txs are all-or-nothing — so a
-//! balance overflow / underflow / Shim rejection unwinds every mutation,
-//! including any lazy-init of the destination Account PDA.
-//!
-//! ## Deliberate divergence from CosmWasm
-//!
-//! - CosmWasm checks `DIGESTS[(chain, emitter, seq)]` for a pre-existing
-//!   entry that *matches* (idempotent) or *differs* (`DigestMismatch`). The
-//!   Solana port uses NoReplay for the same purpose: once NoReplay marks
-//!   `(chain, emitter, seq)`, any caller — observations or VAA — is rejected
-//!   as `AlreadyAccounted`. NoReplay is keyed on `(chain, emitter, seq)`
-//!   alone (no digest), so a different-digest replay reaches the same bit
-//!   and is rejected without needing the digest comparison.
-//! - CosmWasm dispatches Token Bridge governance VAAs through this same
-//!   `submit_vaas` entrypoint. The Solana port leaves those to a follow-on
-//!   slice (`handle_tokenbridge_governance` + `modify_balance`); the payload
-//!   parser already treats action 0x02 (Attest) and unknown actions as
-//!   no-op-balance-work, so a governance VAA submitted today will commit the
-//!   DigestAccount + flip NoReplay without applying any state change. That's
-//!   safe — governance VAAs are idempotent by design and the follow-on slice
-//!   will replay them once it lands.
+//! Token Bridge governance VAAs land at action != 0x01 — Attest / Unknown
+//! both no-op the balance work, so a governance VAA submitted today commits
+//! the DigestAccount + flips NoReplay without state change. The follow-on
+//! `modify_balance` path replays them when it lands.
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 

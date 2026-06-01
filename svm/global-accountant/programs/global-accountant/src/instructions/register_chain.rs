@@ -1,37 +1,17 @@
 //! `register_chain` — Token Bridge governance handler.
 //!
-//! Port of CosmWasm `handle_token_governance_vaa` at
-//! `cosmwasm/contracts/global-accountant/src/contract.rs:370-397`. Consumes a
-//! Wormhole governance-emitter-signed VAA, validates the Token Bridge
-//! `RegisterChain` payload, and initialises or updates the canonical
-//! `ChainRegistration` PDA so subsequent `submit_observations` / `submit_vaas`
-//! calls can cross-check incoming Token Bridge VAAs against the registered
-//! emitter.
+//! Port of CosmWasm `handle_token_governance_vaa`
+//! (`cosmwasm/contracts/global-accountant/src/contract.rs:370-397`).
+//! Validates a Token Bridge `RegisterChain` governance VAA and writes (or
+//! upgrades) the canonical `ChainRegistration` PDA so subsequent
+//! `submit_observations` / `submit_vaas` calls can cross-check incoming
+//! Token Bridge VAAs against the registered emitter.
 //!
-//! ## Flow
-//!
-//! 1. Parse wire data: `guardian_set_bump`, `registration_bump`, body bytes.
-//! 2. Compute `digest = keccak256(keccak256(body))`.
-//! 3. Verify digest+quorum via the Verify VAA Shim CPI (no-op under `mock-vaa`).
-//! 4. Body header must come from the Solana governance emitter
-//!    `(chain = 1, address = GOVERNANCE_EMITTER)` — refuses any other origin.
-//! 5. NoReplay pre-check on `(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER, sequence)`
-//!    so the same governance VAA can't be replayed for repeated registration.
-//! 6. Payload checks:
-//!    - first 32 bytes match `TOKEN_BRIDGE_GOVERNANCE_MODULE`,
-//!    - action byte equals `REGISTER_CHAIN_ACTION` (`0x01`),
-//!    - target chain is `0x0000` (Any) or `WORMCHAIN_CHAIN_ID` (matches CosmWasm
-//!      `contract.rs:374-377`).
-//! 7. Extract `(chain_to_register, emitter_to_register)` from the payload.
-//! 8. Canonical-PDA enforcement on the supplied registration account.
-//! 9. Initialise the PDA (system-owned -> Allocate + Assign) or upgrade in
-//!    place (already program-owned with correct length).
-//! 10. Write the new `ChainRegistrationLayout`.
-//! 11. Mark NoReplay so step 5 fails on the same governance VAA next time.
-//!
-//! All steps execute atomically — any error unwinds every mutation. Re-
-//! registration uses a fresh governance VAA with a higher sequence; the
-//! NoReplay bit prevents reuse of an old sequence to undo a rotation.
+//! Re-registration uses a fresh governance VAA at a higher sequence; the
+//! NoReplay bit on `(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER, sequence)`
+//! prevents reuse of an old sequence to undo a rotation. CosmWasm accepts
+//! both `Any (0)` and `WORMCHAIN_CHAIN_ID` as the target_chain
+//! (`contract.rs:374-377`).
 
 use pinocchio::{
     cpi::{Seed, Signer},

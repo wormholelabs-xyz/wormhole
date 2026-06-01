@@ -1,44 +1,19 @@
 //! `modify_balance` — Accountant governance handler.
 //!
-//! Port of CosmWasm `handle_accountant_governance_vaa` at
-//! `cosmwasm/contracts/global-accountant/src/contract.rs:399-440` plus the
-//! `modify_balance` helper at
-//! `cosmwasm/packages/accountant/src/contract.rs:244-278`. Consumes a
-//! Wormhole governance-emitter-signed VAA carrying an
-//! `accountant::Action::ModifyBalance` payload and applies a manual Add /
-//! Subtract delta to the canonical `BalanceAccount` PDA. Used for post-
-//! incident ledger reconciliation when an off-chain event (exploit, manual
-//! mint, chain rollback) requires the on-chain balance to be corrected.
+//! Port of CosmWasm `handle_accountant_governance_vaa`
+//! (`cosmwasm/contracts/global-accountant/src/contract.rs:399-440`) plus
+//! the `modify_balance` helper at
+//! `cosmwasm/packages/accountant/src/contract.rs:244-278`. Applies a
+//! manual Add / Subtract delta to the canonical `BalanceAccount` PDA via a
+//! Wormchain-emitted governance VAA. Used for post-incident ledger
+//! reconciliation when an off-chain event (exploit, manual mint, chain
+//! rollback) requires the on-chain balance to be corrected.
 //!
-//! ## Flow
-//!
-//! 1. Parse wire data: `guardian_set_bump`, `balance_pda_bump`,
-//!    `modification_bump`, body bytes.
-//! 2. Compute `digest = keccak256(keccak256(body))`.
-//! 3. Verify digest+quorum via the Verify VAA Shim CPI (no-op under `mock-vaa`).
-//! 4. Body header must come from `(chain = 1, address = GOVERNANCE_EMITTER)`.
-//! 5. Payload validation:
-//!    - module bytes == `ACCOUNTANT_GOVERNANCE_MODULE`,
-//!    - action byte == `MODIFY_BALANCE_ACTION` (`0x01`),
-//!    - target chain == `WORMCHAIN_CHAIN_ID` (CosmWasm rejects `Any` on this
-//!      path — `contract.rs:404-407`),
-//!    - kind byte ∈ {`1`, `2`}.
-//! 6. Parse modification fields from the payload.
-//! 7. Canonical-PDA enforcement on the supplied `BalanceAccount` and
-//!    `ModificationLog` PDAs.
-//! 8. Replay protection: `ModificationLog` PDA must be system-owned
-//!    (uninitialised); existence ⇒ `DuplicateModification`. Mirrors CosmWasm
-//!    `MODIFICATIONS.has` short-circuit.
-//! 9. Apply the delta:
-//!    - Sub on uninit `BalanceAccount` rejects with `ModifyBalanceUnderflow`
-//!      before any allocation.
-//!    - Add on uninit `BalanceAccount` lazy-inits and credits.
-//!    - Sub / Add on existing `BalanceAccount` mutates via `raw_sub` /
-//!      `raw_add` (overflow → `ModifyBalanceOverflow`).
-//! 10. Lazy-init the `ModificationLog` PDA and store the full
-//!     modification record.
-//! 11. Log the reason field via `msg!` so off-chain indexers can capture it
-//!     from tx logs without walking the VAA archive. Audit-trail only.
+//! Replay protection keys on the payload `sequence`: the `ModificationLog`
+//! PDA is per-sequence (not per-balance), so two distinct governance VAAs
+//! targeting the same `(chain, token_chain, token_address)` triple cannot
+//! collide. CosmWasm rejects `Any (0)` as `target_chain` on this path —
+//! only `WORMCHAIN_CHAIN_ID` (`contract.rs:404-407`).
 
 use pinocchio::{
     cpi::{Seed, Signer},
