@@ -46,6 +46,9 @@ pub fn process_instruction(
         Some(Instruction::SubmitVaas) => {
             instructions::submit_vaas::process(program_id, accounts, rest)
         }
+        Some(Instruction::RegisterChain) => {
+            instructions::register_chain::process(program_id, accounts, rest)
+        }
         None => Err(err(GlobalAccountantError::InvalidInstruction)),
     }
 }

@@ -24,6 +24,13 @@ pub enum Instruction {
     /// the Verify VAA Shim CPI and applies its balance effects directly,
     /// bypassing the quorum tracker.
     SubmitVaas = 4,
+    /// Governance handler for Token Bridge `RegisterChain` VAAs. Verifies a
+    /// governance-emitter-signed VAA via the Verify VAA Shim, parses the
+    /// `(chain, emitter_address)` registration payload, and initialises or
+    /// updates the canonical `ChainRegistration` PDA. Mirrors CosmWasm
+    /// `handle_token_governance_vaa` at
+    /// `cosmwasm/contracts/global-accountant/src/contract.rs:370-397`.
+    RegisterChain = 5,
 }
 
 impl Instruction {
@@ -35,6 +42,7 @@ impl Instruction {
             2 => Some(Self::SubmitObservations),
             3 => Some(Self::ClosePending),
             4 => Some(Self::SubmitVaas),
+            5 => Some(Self::RegisterChain),
             _ => None,
         }
     }

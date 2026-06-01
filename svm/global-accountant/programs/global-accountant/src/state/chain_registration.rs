@@ -28,3 +28,18 @@ pub fn load(account: &AccountView) -> Result<ChainRegistrationLayout, ProgramErr
     }
     Ok(*bytemuck::from_bytes::<ChainRegistrationLayout>(&data))
 }
+
+/// Write a [`ChainRegistrationLayout`] into the account's data buffer. Used
+/// by the `register_chain` governance instruction after the PDA has been
+/// allocated (or upgraded in place over a stale registration).
+pub fn store(
+    account: &mut AccountView,
+    value: &ChainRegistrationLayout,
+) -> Result<(), ProgramError> {
+    let mut data = account.try_borrow_mut()?;
+    if data.len() != ChainRegistrationLayout::LEN {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    data.copy_from_slice(bytemuck::bytes_of(value));
+    Ok(())
+}
