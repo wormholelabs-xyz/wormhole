@@ -273,171 +273,116 @@ fn run_modify_balance(
 // ============================================================================
 
 #[test]
-fn modify_balance_rejects_wrong_governance_emitter() {
-    // Body header carries a non-governance emitter. Even with the Shim mock
-    // CPI accepting any digest, the body-header check rejects.
-    let mollusk = mollusk();
-    let token_address = [0x77u8; 32];
-    let body = build_modify_balance_body(
-        SOLANA_CHAIN_ID,
-        &[0xDEu8; 32], // non-governance emitter
-        0x01,
-        &ACCOUNTANT_GOVERNANCE_MODULE,
-        MODIFY_BALANCE_ACTION,
-        3104, // Wormchain
-        100,
-        2,
-        2,
-        &token_address,
-        1, // Add
-        Uint256::from_u128(1_000),
-        &[0u8; 32],
-    );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 100, None, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidGovernanceEmitter as u32,
-                "expected InvalidGovernanceEmitter, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidGovernanceEmitter), got {other:?}"),
+fn modify_balance_body_header_violations_reject() {
+    // Each case mutates exactly one field of an otherwise-canonical body to
+    // pin which program-side validator trips. Mock-vaa is on, so the Shim
+    // CPI is not the gate here.
+    struct Case {
+        label: &'static str,
+        emitter: [u8; 32],
+        module: [u8; 32],
+        action: u8,
+        target_chain: u16,
+        kind: u8,
+        sequence: u64,
+        payload_seq: u64,
+        expected: u32,
     }
-}
+    let canonical = Case {
+        label: "(canonical baseline — not run)",
+        emitter: GOVERNANCE_EMITTER,
+        module: ACCOUNTANT_GOVERNANCE_MODULE,
+        action: MODIFY_BALANCE_ACTION,
+        target_chain: 3104,
+        kind: 1,
+        sequence: 0,
+        payload_seq: 0,
+        expected: 0,
+    };
+    let cases = [
+        Case {
+            label: "non-governance emitter",
+            emitter: [0xDEu8; 32],
+            sequence: 0x01,
+            payload_seq: 100,
+            expected: GlobalAccountantError::InvalidGovernanceEmitter as u32,
+            ..canonical
+        },
+        Case {
+            label: "wrong governance module",
+            module: [0xAAu8; 32],
+            sequence: 0x02,
+            payload_seq: 101,
+            expected: GlobalAccountantError::InvalidGovernanceModule as u32,
+            ..canonical
+        },
+        Case {
+            label: "wrong action byte",
+            action: 0x02,
+            sequence: 0x03,
+            payload_seq: 102,
+            expected: GlobalAccountantError::InvalidGovernanceAction as u32,
+            ..canonical
+        },
+        Case {
+            label: "target_chain != Wormchain",
+            target_chain: 0, // Any — modify_balance refuses
+            sequence: 0x04,
+            payload_seq: 103,
+            expected: GlobalAccountantError::GovernanceChainMismatch as u32,
+            ..canonical
+        },
+        Case {
+            label: "invalid modification kind",
+            kind: 0, // Unknown(0)
+            sequence: 0x05,
+            payload_seq: 104,
+            expected: GlobalAccountantError::InvalidModificationKind as u32,
+            ..canonical
+        },
+    ];
 
-#[test]
-fn modify_balance_rejects_wrong_module() {
     let mollusk = mollusk();
     let token_address = [0x77u8; 32];
-    let body = build_modify_balance_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x02,
-        &[0xAAu8; 32], // wrong module
-        MODIFY_BALANCE_ACTION,
-        3104,
-        101,
-        2,
-        2,
-        &token_address,
-        1,
-        Uint256::from_u128(1_000),
-        &[0u8; 32],
-    );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 101, None, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidGovernanceModule as u32,
-                "expected InvalidGovernanceModule, got {code:?}"
-            );
+    for case in cases {
+        let body = build_modify_balance_body(
+            SOLANA_CHAIN_ID,
+            &case.emitter,
+            case.sequence,
+            &case.module,
+            case.action,
+            case.target_chain,
+            case.payload_seq,
+            2,
+            2,
+            &token_address,
+            case.kind,
+            Uint256::from_u128(1_000),
+            &[0u8; 32],
+        );
+        let r = run_modify_balance(
+            &mollusk,
+            &body,
+            2,
+            2,
+            &token_address,
+            case.payload_seq,
+            None,
+            None,
+            None,
+        );
+        match r.program_result {
+            ProgramResult::Failure(err) => {
+                let code = u64::from(err) as u32;
+                assert_eq!(
+                    code, case.expected,
+                    "[{label}] expected {expected:?}, got {code:?}",
+                    label = case.label,
+                    expected = case.expected,
+                );
+            }
+            other => panic!("[{}] expected Failure, got {other:?}", case.label),
         }
-        other => panic!("expected Failure(InvalidGovernanceModule), got {other:?}"),
-    }
-}
-
-#[test]
-fn modify_balance_rejects_wrong_action() {
-    let mollusk = mollusk();
-    let token_address = [0x77u8; 32];
-    let body = build_modify_balance_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x03,
-        &ACCOUNTANT_GOVERNANCE_MODULE,
-        0x02, // wrong action
-        3104,
-        102,
-        2,
-        2,
-        &token_address,
-        1,
-        Uint256::from_u128(1_000),
-        &[0u8; 32],
-    );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 102, None, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidGovernanceAction as u32,
-                "expected InvalidGovernanceAction, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidGovernanceAction), got {other:?}"),
-    }
-}
-
-#[test]
-fn modify_balance_rejects_wrong_target_chain() {
-    // CosmWasm `handle_accountant_governance_vaa` accepts *only* Wormchain
-    // (not Any). `Any (0)` here must reject.
-    let mollusk = mollusk();
-    let token_address = [0x77u8; 32];
-    let body = build_modify_balance_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x04,
-        &ACCOUNTANT_GOVERNANCE_MODULE,
-        MODIFY_BALANCE_ACTION,
-        0, // Any — rejected on this path
-        103,
-        2,
-        2,
-        &token_address,
-        1,
-        Uint256::from_u128(1_000),
-        &[0u8; 32],
-    );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 103, None, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::GovernanceChainMismatch as u32,
-                "expected GovernanceChainMismatch, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(GovernanceChainMismatch), got {other:?}"),
-    }
-}
-
-#[test]
-fn modify_balance_rejects_invalid_kind() {
-    let mollusk = mollusk();
-    let token_address = [0x77u8; 32];
-    let body = build_modify_balance_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x05,
-        &ACCOUNTANT_GOVERNANCE_MODULE,
-        MODIFY_BALANCE_ACTION,
-        3104,
-        104,
-        2,
-        2,
-        &token_address,
-        0, // invalid kind byte (Unknown(0) in SDK)
-        Uint256::from_u128(1_000),
-        &[0u8; 32],
-    );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 104, None, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidModificationKind as u32,
-                "expected InvalidModificationKind, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidModificationKind), got {other:?}"),
     }
 }
 

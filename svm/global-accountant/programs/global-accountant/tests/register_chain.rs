@@ -378,119 +378,85 @@ fn run_register_chain(
 }
 
 #[test]
-fn register_chain_rejects_wrong_governance_emitter() {
-    // Body claims a non-governance emitter — should refuse with
-    // InvalidGovernanceEmitter. Even if the Shim CPI signed off (mock under
-    // mock-vaa), the body-header check rejects.
-    let mollusk = mollusk();
-    let body = build_register_chain_body(
-        SOLANA_CHAIN_ID,
-        &[0xDEu8; 32], // non-governance emitter
-        0x02,
-        &TOKEN_BRIDGE_GOVERNANCE_MODULE,
-        REGISTER_CHAIN_ACTION,
-        0,
-        2,
-        &[0x77u8; 32],
-    );
-    let r = run_register_chain(&mollusk, &body, 2, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidGovernanceEmitter as u32,
-                "expected InvalidGovernanceEmitter, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidGovernanceEmitter), got {other:?}"),
+fn register_chain_governance_header_violations_reject() {
+    // Each case mutates exactly one field of the canonical-looking body so
+    // the expected error is unambiguous. Mock-vaa is on, so the Shim CPI
+    // accepts any digest — these checks are the program's own body-header
+    // validators.
+    struct Case {
+        label: &'static str,
+        emitter: [u8; 32],
+        module: [u8; 32],
+        action: u8,
+        target_chain: u16,
+        sequence: u64,
+        expected: u32,
     }
-}
+    let canonical = Case {
+        label: "(canonical baseline — not run)",
+        emitter: GOVERNANCE_EMITTER,
+        module: TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        action: REGISTER_CHAIN_ACTION,
+        target_chain: 0,
+        sequence: 0,
+        expected: 0,
+    };
+    let cases = [
+        Case {
+            label: "non-governance emitter",
+            emitter: [0xDEu8; 32],
+            sequence: 0x02,
+            expected: GlobalAccountantError::InvalidGovernanceEmitter as u32,
+            ..canonical
+        },
+        Case {
+            label: "wrong governance module",
+            module: [0xAAu8; 32],
+            sequence: 0x03,
+            expected: GlobalAccountantError::InvalidGovernanceModule as u32,
+            ..canonical
+        },
+        Case {
+            label: "wrong action byte",
+            action: 0x02,
+            sequence: 0x04,
+            expected: GlobalAccountantError::InvalidGovernanceAction as u32,
+            ..canonical
+        },
+        Case {
+            label: "target_chain neither Any nor Wormchain",
+            target_chain: 99,
+            sequence: 0x05,
+            expected: GlobalAccountantError::GovernanceChainMismatch as u32,
+            ..canonical
+        },
+    ];
 
-#[test]
-fn register_chain_rejects_wrong_module() {
-    // Body's payload module bytes do not match TOKEN_BRIDGE_GOVERNANCE_MODULE.
     let mollusk = mollusk();
-    let wrong_module = [0xAAu8; 32];
-    let body = build_register_chain_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x03,
-        &wrong_module,
-        REGISTER_CHAIN_ACTION,
-        0,
-        2,
-        &[0x77u8; 32],
-    );
-    let r = run_register_chain(&mollusk, &body, 2, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidGovernanceModule as u32,
-                "expected InvalidGovernanceModule, got {code:?}"
-            );
+    for case in cases {
+        let body = build_register_chain_body(
+            SOLANA_CHAIN_ID,
+            &case.emitter,
+            case.sequence,
+            &case.module,
+            case.action,
+            case.target_chain,
+            2,
+            &[0x77u8; 32],
+        );
+        let r = run_register_chain(&mollusk, &body, 2, None, None);
+        match r.program_result {
+            ProgramResult::Failure(err) => {
+                let code = u64::from(err) as u32;
+                assert_eq!(
+                    code, case.expected,
+                    "[{label}] expected {expected:?}, got {code:?}",
+                    label = case.label,
+                    expected = case.expected,
+                );
+            }
+            other => panic!("[{}] expected Failure, got {other:?}", case.label),
         }
-        other => panic!("expected Failure(InvalidGovernanceModule), got {other:?}"),
-    }
-}
-
-#[test]
-fn register_chain_rejects_wrong_action() {
-    // Action byte is not REGISTER_CHAIN_ACTION (0x01). Other actions
-    // (UpgradeContract, etc.) require their own dispatch.
-    let mollusk = mollusk();
-    let body = build_register_chain_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x04,
-        &TOKEN_BRIDGE_GOVERNANCE_MODULE,
-        0x02, // wrong action
-        0,
-        2,
-        &[0x77u8; 32],
-    );
-    let r = run_register_chain(&mollusk, &body, 2, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidGovernanceAction as u32,
-                "expected InvalidGovernanceAction, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidGovernanceAction), got {other:?}"),
-    }
-}
-
-#[test]
-fn register_chain_rejects_wrong_target_chain() {
-    // Target chain is neither 0 (Any) nor Wormchain (3104). Matches CosmWasm
-    // `contract.rs:374-377`.
-    let mollusk = mollusk();
-    let body = build_register_chain_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x05,
-        &TOKEN_BRIDGE_GOVERNANCE_MODULE,
-        REGISTER_CHAIN_ACTION,
-        99, // neither Any nor Wormchain
-        2,
-        &[0x77u8; 32],
-    );
-    let r = run_register_chain(&mollusk, &body, 2, None, None);
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::GovernanceChainMismatch as u32,
-                "expected GovernanceChainMismatch, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(GovernanceChainMismatch), got {other:?}"),
     }
 }
 

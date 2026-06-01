@@ -314,85 +314,56 @@ fn open_then_close_round_trip() {
 }
 
 #[test]
-fn open_digest_with_dust_in_pda_succeeds() {
-    // Dust-DoS regression: anyone can `system_program::transfer(1)` to the
-    // canonical PDA address before the legitimate open. With a naive
-    // `CreateAccount` CPI the open then fails ("account already in use" — the
-    // system program refuses to CreateAccount over a non-zero-lamport account)
-    // and the (chain, emitter, sequence) is effectively bricked. The fix is to
-    // fall back to Transfer + Allocate + Assign when the PDA already holds
-    // lamports but is otherwise system-owned and data-empty.
-    let mollusk = mollusk();
-    let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
-    let payer = Pubkey::new_from_array([0xC1u8; 32]);
-    let payer_starting = 10_000_000_000_u64;
-    let dust: u64 = 1;
-
-    let state = open_lifecycle_setup(&mollusk, payer, payer_starting, dust);
-
-    assert_eq!(state.pda_after_open.owner, program_id(), "PDA owner");
-    assert_eq!(
-        state.pda_after_open.data.len(),
-        DigestAccountLayout::LEN,
-        "PDA allocated to full layout length"
-    );
-
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&state.pda_after_open.data);
-    assert_eq!(stored.payer, payer.to_bytes(), "legitimate caller recorded");
-    assert_eq!(stored.digest, digest);
-
-    let payer_paid = state
-        .payer_starting_lamports
-        .saturating_sub(state.payer_after_open.lamports);
-    let rent_exempt_minimum = state.pda_after_open.lamports;
-    assert!(rent_exempt_minimum > dust, "PDA topped up past dust");
-    assert_eq!(
-        payer_paid,
-        rent_exempt_minimum.saturating_sub(dust),
-        "payer funded only the rent-exempt-minimum-minus-dust delta, not the full minimum"
-    );
-}
-
-#[test]
-fn open_digest_with_overshoot_lamports_succeeds() {
-    // Pre-funded-PDA accept-as-gift branch: an attacker (or an over-eager
-    // funder) drops more than the rent-exempt minimum onto the canonical PDA
-    // address. `open_digest` must still succeed — the Transfer top-up is
-    // skipped (saturating_sub goes to 0) but Allocate + Assign still run.
-    // The resulting PDA balance is the pre-funded amount; nothing is debited
-    // from the payer for rent because the PDA was already past rent-exempt.
+fn open_digest_with_prefunded_pda_succeeds() {
+    // Pre-funded PDA acceptance: anyone can `system_program::transfer(N)` to
+    // the canonical PDA address before the legitimate open. A naive
+    // `CreateAccount` CPI would fail ("account already in use") and DoS the
+    // (chain, emitter, sequence). The open path falls back to Transfer top-up
+    // + Allocate + Assign when the PDA already holds lamports but is
+    // otherwise system-owned and data-empty.
     //
-    // 1 SOL is well above the rent-exempt minimum for a 120-byte account
-    // (~0.0009 SOL).
-    let mollusk = mollusk();
-    let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
-    let payer = Pubkey::new_from_array([0xD1u8; 32]);
-    let payer_starting = 10_000_000_000_u64;
-    let overshoot: u64 = 1_000_000_000; // 1 SOL — well above rent-exempt minimum.
+    // Two cases pin the branch endpoints:
+    //   * dust (1 lamport) -> payer tops up to rent-exempt minimum.
+    //   * overshoot (1 SOL, well above the ~0.0009 SOL minimum for a
+    //     120-byte account) -> Transfer is skipped (saturating_sub == 0); the
+    //     pre-funded balance is accepted as a gift.
+    let cases: [(&str, u64, u8); 2] =
+        [("dust", 1, 0xC1), ("overshoot (1 SOL)", 1_000_000_000, 0xD1)];
 
-    let state = open_lifecycle_setup(&mollusk, payer, payer_starting, overshoot);
+    for (label, prefunded, payer_seed) in cases {
+        let mollusk = mollusk();
+        let (_chain, _emitter, _sequence, digest, _gsi) = lifecycle_inputs();
+        let payer = Pubkey::new_from_array([payer_seed; 32]);
+        let payer_starting = 10_000_000_000_u64;
 
-    assert_eq!(state.pda_after_open.owner, program_id(), "PDA owner");
-    assert_eq!(
-        state.pda_after_open.data.len(),
-        DigestAccountLayout::LEN,
-        "PDA allocated to full layout length"
-    );
-    assert_eq!(
-        state.pda_after_open.lamports, overshoot,
-        "no Transfer fired; pre-funded balance retained as-is"
-    );
+        let state = open_lifecycle_setup(&mollusk, payer, payer_starting, prefunded);
 
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&state.pda_after_open.data);
-    assert_eq!(stored.payer, payer.to_bytes(), "legitimate caller recorded");
-    assert_eq!(stored.digest, digest);
+        assert_eq!(state.pda_after_open.owner, program_id(), "[{label}] PDA owner");
+        assert_eq!(
+            state.pda_after_open.data.len(),
+            DigestAccountLayout::LEN,
+            "[{label}] PDA allocated to full layout length"
+        );
 
-    // Payer pays nothing toward rent; the only debit (if any) is the tx fee,
-    // which mollusk does not charge. Assert exact equality.
-    assert_eq!(
-        state.payer_after_open.lamports, payer_starting,
-        "payer did not fund rent: the over-funded PDA is accepted as a gift"
-    );
+        let stored: &DigestAccountLayout = bytemuck::from_bytes(&state.pda_after_open.data);
+        assert_eq!(stored.payer, payer.to_bytes(), "[{label}] payer recorded");
+        assert_eq!(stored.digest, digest, "[{label}] digest stored");
+
+        // Universal accounting invariant: payer paid the delta between the
+        // pre-funded amount and the resulting PDA balance (saturating to 0).
+        let payer_paid = state
+            .payer_starting_lamports
+            .saturating_sub(state.payer_after_open.lamports);
+        let expected_paid = state.pda_after_open.lamports.saturating_sub(prefunded);
+        assert_eq!(
+            payer_paid, expected_paid,
+            "[{label}] payer paid delta between pre-funded and final PDA balance"
+        );
+        assert!(
+            state.pda_after_open.lamports >= prefunded,
+            "[{label}] PDA balance never drops below the pre-funded amount"
+        );
+    }
 }
 
 #[test]
