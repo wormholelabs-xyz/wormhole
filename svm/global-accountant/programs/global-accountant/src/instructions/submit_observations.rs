@@ -221,8 +221,7 @@ pub fn process(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // (1) NoReplay pre-check — reject replays before any signature verification
-    // or PDA work.
+    // NoReplay pre-check rejects replays before any signature work.
     if noreplay::is_marked(
         noreplay_bucket,
         noreplay_authority.address(),
@@ -233,13 +232,10 @@ pub fn process(
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
-    // (1b) Chain registration cross-check — mirrors CosmWasm
-    // `handle_observation` at `contract.rs:158-166`. The body's
-    // (emitter_chain, emitter_address) pair must correspond to a registered
-    // Token Bridge emitter; otherwise an attacker with valid guardian sigs
-    // for some non-Token-Bridge VAA could route accounting against a fake
-    // emitter on a real chain. The supplied PDA's address is verified
-    // against the canonical seed before any data read.
+    // Chain-registration cross-check mirrors CosmWasm `handle_observation`
+    // (`contract.rs:158-166`). Without it an attacker with valid sigs for a
+    // non-Token-Bridge VAA could route accounting against a fake emitter on
+    // a real chain. PDA address verified against canonical seeds first.
     chain_registration::verify(
         program_id,
         chain_registration_pda,
@@ -247,8 +243,6 @@ pub fn process(
         &parsed.emitter,
     )?;
 
-    // (2) Inline signature verification via `secp256k1_recover`. The recovered
-    // pubkey is compared to `GuardianSet.keys[guardian_index]`.
     verify_signature(
         guardian_set,
         parsed.guardian_set_index,
@@ -257,8 +251,6 @@ pub fn process(
         &parsed.signature,
     )?;
 
-    // (3) Load or initialise the pending PDA per the decision table in
-    // `decide_pending_action`.
     let pending_action = decide_pending_action(pending_pda, &parsed)?;
 
     match pending_action {
@@ -272,7 +264,6 @@ pub fn process(
         PendingAction::Continue => {}
     }
 
-    // (4) Set the bitmap bit; reject duplicate submissions.
     let mut layout = pending::load(pending_pda)?;
     let bit = 1u32
         .checked_shl(parsed.guardian_index as u32)
@@ -283,16 +274,14 @@ pub fn process(
     layout.signatures |= bit;
     pending::store(pending_pda, &layout)?;
 
-    // (5) Popcount → quorum check.
     let popcount = layout.signatures.count_ones();
     if popcount < PendingObservationsLayout::QUORUM_THRESHOLD {
         return Ok(());
     }
 
-    // (6) Quorum reached. Commit atomically: NoReplay flip, DigestAccount
-    // open, balance accounting, pending PDA close. Solana txs are
-    // all-or-nothing — any error from this point unwinds every mutation,
-    // including the NoReplay bit and the freshly-opened DigestAccount.
+    // Quorum reached. Commit atomically: NoReplay flip, DigestAccount open,
+    // balance accounting, pending close. Solana txs unwind everything if
+    // any of these errors out, including the NoReplay bit.
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
@@ -317,11 +306,10 @@ pub fn process(
         parsed.digest_pda_bump,
     )?;
 
-    // (7) Balance accounting — port of CosmWasm `commit_transfer`
+    // Port of CosmWasm `commit_transfer`
     // (`cosmwasm/packages/accountant/src/contract.rs:109-126`). Transfer
-    // payloads mutate two Account PDAs (source and destination); attest /
-    // other payloads skip balance work but the rest of the commit (steps
-    // 6 and 8) still runs.
+    // payloads mutate two Account PDAs; Attest / Other skip balance work
+    // but the rest of the commit still runs.
     match parse_token_bridge_payload(body_bytes).map_err(err)? {
         TokenBridgeAction::Transfer {
             amount,
@@ -355,11 +343,8 @@ pub fn process(
         }
     }
 
-    // (8) Refund the recorded payer and close the pending PDA. The caller
-    // supplies `rent_recipient` separately from `submitter` so any guardian or
-    // relayer can complete quorum on behalf of the original bucket opener;
-    // close_pending_pda verifies the supplied account's address matches
-    // `layout.payer`.
+    // Refund the recorded payer (separate from submitter so any guardian
+    // can complete quorum on behalf of the bucket opener).
     let recorded_payer = layout.payer;
     close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;
     Ok(())

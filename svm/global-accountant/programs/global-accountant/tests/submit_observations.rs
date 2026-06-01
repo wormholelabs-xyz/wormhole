@@ -858,33 +858,24 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         r_correct.program_result
     );
 
-    // Rent refund flowed to alice (recorded payer), not bob (submitter).
+    // The multi-submitter invariants: rent refund routes to the recorded
+    // payer (alice), not the quorum-completing submitter (bob); the
+    // DigestAccount records bob as its own (newly-opened) payer. Generic
+    // quorum-commit assertions (pending closed, NoReplay flipped, digest
+    // PDA opened) are covered by submit_13th_observation_reaches_quorum_and_commits.
     let alice_post = find_account(&r_correct.resulting_accounts, &alice);
     assert_eq!(
         alice_post.lamports,
         alice_lamports_pre + pending_lamports,
         "alice (recorded payer) received the pending-PDA rent refund"
     );
-
-    // Pending PDA closed.
-    let pending_post = find_account(&r_correct.resulting_accounts, &scenario.pending_pda);
-    assert_eq!(pending_post.lamports, 0, "pending PDA drained on commit");
-    assert!(pending_post.data.is_empty(), "pending PDA data dropped");
-    assert_eq!(pending_post.owner, system_program_id());
-
-    // DigestAccount opened by the new submitter (bob pays its rent).
     let digest = find_account(&r_correct.resulting_accounts, &scenario.digest_pda);
-    assert_eq!(digest.owner, program_id(), "digest PDA opened on quorum");
     let digest_layout: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
     assert_eq!(
         digest_layout.payer,
         bob.to_bytes(),
         "digest_pda recorded the quorum-completing submitter (bob) as its payer"
     );
-
-    // NoReplay flipped.
-    let bucket = find_account(&r_correct.resulting_accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0x01, "NoReplay flipped on quorum reach");
 }
 
 #[test]
