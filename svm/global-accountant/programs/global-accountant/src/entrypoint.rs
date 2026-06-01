@@ -49,6 +49,9 @@ pub fn process_instruction(
         Some(Instruction::RegisterChain) => {
             instructions::register_chain::process(program_id, accounts, rest)
         }
+        Some(Instruction::ModifyBalance) => {
+            instructions::modify_balance::process(program_id, accounts, rest)
+        }
         None => Err(err(GlobalAccountantError::InvalidInstruction)),
     }
 }

@@ -10,6 +10,7 @@
 pub mod account;
 pub mod chain_registration;
 pub mod digest;
+pub mod modification;
 pub mod pending;
 
 // Re-exported from `definitions` for ergonomic access; the canonical

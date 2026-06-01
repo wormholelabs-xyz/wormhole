@@ -31,6 +31,14 @@ pub enum Instruction {
     /// `handle_token_governance_vaa` at
     /// `cosmwasm/contracts/global-accountant/src/contract.rs:370-397`.
     RegisterChain = 5,
+    /// Governance handler for Accountant `ModifyBalance` VAAs. Verifies a
+    /// governance-emitter-signed VAA via the Verify VAA Shim, parses the
+    /// `(chain_id, token_chain, token_address, kind, amount, reason)`
+    /// modification payload, and applies an Add or Subtract delta to the
+    /// canonical `BalanceAccount` PDA. Mirrors CosmWasm
+    /// `handle_accountant_governance_vaa` (`contract.rs:399-440`) +
+    /// `modify_balance` (`packages/accountant/src/contract.rs:244-278`).
+    ModifyBalance = 6,
 }
 
 impl Instruction {
@@ -43,6 +51,7 @@ impl Instruction {
             3 => Some(Self::ClosePending),
             4 => Some(Self::SubmitVaas),
             5 => Some(Self::RegisterChain),
+            6 => Some(Self::ModifyBalance),
             _ => None,
         }
     }
@@ -148,6 +157,27 @@ pub enum GlobalAccountantError {
     /// `0x0c20` (Wormchain). Matches CosmWasm `contract.rs:374-377`. Solana-
     /// specific governance targeting would require a spec change.
     GovernanceChainMismatch = 24,
+    /// `modify_balance` payload's `kind` byte is neither `1` (Add) nor `2`
+    /// (Subtract). Mirrors CosmWasm `accountant_modification::ModificationKind`
+    /// variants; we refuse the `Unknown(0)` and any out-of-band byte values.
+    InvalidModificationKind = 25,
+    /// `modify_balance`'s `Add` arithmetic would overflow the 256-bit balance.
+    /// Distinct from `BalanceOverflow` (which is reserved for the transfer-
+    /// path `lock_or_burn` / `unlock_or_mint` semantics) so log readers can
+    /// distinguish the failing entrypoint.
+    ModifyBalanceOverflow = 26,
+    /// `modify_balance`'s `Subtract` arithmetic would underflow the balance.
+    /// Also raised when `Subtract` is applied against an uninitialised
+    /// `BalanceAccount` PDA (zero balance) — rejected before allocation so the
+    /// payer does not pay rent on a guaranteed-failed mutation.
+    ModifyBalanceUnderflow = 27,
+    /// A `ModificationLog` PDA already exists at
+    /// `(b"modification", payload_sequence)`. Mirrors CosmWasm
+    /// `ModifyBalanceError::DuplicateModification` at
+    /// `packages/accountant/src/contract.rs:248-250`. Replay protection for
+    /// governance VAAs is keyed on the payload's own modification sequence
+    /// (not the VAA emitter sequence), matching CosmWasm semantics.
+    DuplicateModification = 28,
 }
 
 impl From<GlobalAccountantError> for u32 {
@@ -184,6 +214,15 @@ pub const ACCOUNT_SEED_PREFIX: &[u8] = b"account";
 /// `cosmwasm/contracts/global-accountant/src/state.rs`.
 pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
 
+/// PDA seed prefix for [`ModificationLogLayout`]. The full seed tuple is
+/// `(b"modification", sequence.to_be_bytes())`. Each `modify_balance`
+/// governance VAA spawns exactly one canonical `ModificationLog` PDA under
+/// the global-accountant program ID, indexed by the payload's modification
+/// sequence. Mirrors the CosmWasm `MODIFICATIONS: Map<u64, Modification>`
+/// storage; existence of this PDA at the canonical seed is what enforces
+/// replay protection on the governance path.
+pub const MODIFICATION_SEED_PREFIX: &[u8] = b"modification";
+
 /// Wormhole governance emitter — `chain = 1 (Solana)`, `address = [0; 31] ||
 /// 0x04`. Source of truth: `wormhole-sdk` (vaas-serde) `GOVERNANCE_EMITTER`
 /// constant. Governance VAAs targeting this program must be signed against
@@ -217,6 +256,44 @@ pub const TOKEN_BRIDGE_GOVERNANCE_MODULE: [u8; 32] = [
 /// entrypoint rejects any other action byte; other governance actions (such
 /// as `UpgradeContract`) require their own dispatch.
 pub const REGISTER_CHAIN_ACTION: u8 = 0x01;
+
+/// Accountant governance module identifier — first 32 bytes of any
+/// `ModifyBalance` governance VAA payload. ASCII string "GlobalAccountant"
+/// right-aligned in 32 bytes (16 leading zero bytes). Source of truth:
+/// `wormhole-sdk` `accountant::MODULE`. Distinct from
+/// [`TOKEN_BRIDGE_GOVERNANCE_MODULE`] — the action byte `0x01` overlaps with
+/// RegisterChain, so the module identifier is what disambiguates the
+/// governance flows.
+pub const ACCOUNTANT_GOVERNANCE_MODULE: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    b'G', b'l', b'o', b'b', b'a', b'l', b'A', b'c', b'c', b'o', b'u', b'n', b't', b'a', b'n', b't',
+];
+
+/// Accountant governance `ModifyBalance` action byte. The `modify_balance`
+/// entrypoint rejects any other action — the action enum currently has only
+/// this one variant.
+pub const MODIFY_BALANCE_ACTION: u8 = 0x01;
+
+/// `ModifyBalance` payload `kind` byte values. Mirrors
+/// `wormhole-sdk::accountant_modification::ModificationKind`. The `Unknown(0)`
+/// variant in the SDK is intentionally not represented here; on-chain we
+/// treat any byte other than `Add` or `Subtract` as `InvalidModificationKind`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModificationKind {
+    Add = 1,
+    Subtract = 2,
+}
+
+impl ModificationKind {
+    pub const fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            1 => Some(Self::Add),
+            2 => Some(Self::Subtract),
+            _ => None,
+        }
+    }
+}
 
 /// PDA seed prefix for the global-accountant-owned authority that signs all
 /// `solana-noreplay` CPIs. The full seed tuple is just `[b"noreplay-authority"]`
@@ -609,6 +686,36 @@ impl BalanceAccountLayout {
         }
         Ok(())
     }
+
+    /// Raw `balance += amount` for the governance `modify_balance` path. Does
+    /// NOT consult the native/wrapped dispatch baked into
+    /// [`Self::lock_or_burn`] / [`Self::unlock_or_mint`] — governance VAAs
+    /// describe absolute deltas to a specific `(chain, token_chain,
+    /// token_address)` triple and the dispatch table is the wrong abstraction
+    /// for them. Surfaces overflow as `ModifyBalanceOverflow` so log readers
+    /// can distinguish the governance path from the transfer-path
+    /// `BalanceOverflow`. Mirrors CosmWasm `Balance::checked_add` in
+    /// `modify_balance` at `packages/accountant/src/contract.rs:264`.
+    pub fn raw_add(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
+        self.balance = self
+            .balance
+            .checked_add(amount)
+            .ok_or(GlobalAccountantError::ModifyBalanceOverflow)?;
+        Ok(())
+    }
+
+    /// Raw `balance -= amount` for the governance `modify_balance` path. See
+    /// [`Self::raw_add`] for the rationale on keeping this separate from
+    /// `lock_or_burn` / `unlock_or_mint`. Surfaces underflow as
+    /// `ModifyBalanceUnderflow`. Mirrors CosmWasm `Balance::checked_sub` in
+    /// `modify_balance` at `packages/accountant/src/contract.rs:265`.
+    pub fn raw_sub(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
+        self.balance = self
+            .balance
+            .checked_sub(amount)
+            .ok_or(GlobalAccountantError::ModifyBalanceUnderflow)?;
+        Ok(())
+    }
 }
 
 /// Decoded Token Bridge VAA body payload. Carries only the fields the
@@ -777,6 +884,82 @@ const _: () = {
     assert!(offset_of!(ChainRegistrationLayout, _padding) == 2);
     assert!(offset_of!(ChainRegistrationLayout, emitter_address) == 32);
     assert!(ChainRegistrationLayout::LEN == 64);
+};
+
+/// Zero-copy layout for a per-modification audit-log PDA, ported from the
+/// CosmWasm `MODIFICATIONS: Map<u64, Modification>` storage
+/// (`cosmwasm/packages/accountant/src/contract.rs`). Each successful
+/// `modify_balance` call lazy-inits exactly one PDA at
+/// `(b"modification", payload_sequence.to_be_bytes())`, recording the full
+/// modification fields for on-chain queryability and replay protection.
+///
+/// Replay protection: a second governance VAA carrying the same payload
+/// `sequence` collides on the canonical PDA address, and the init step
+/// rejects with `DuplicateModification`. Matches CosmWasm's
+/// `MODIFICATIONS.has(deps.storage, msg.sequence)` early-bail check.
+///
+/// `reason` is stored as a fixed 32-byte right-padded ASCII buffer matching
+/// the on-the-wire encoding from `wormhole-sdk` `arraystring`. No on-chain
+/// logic reads `reason`; it exists purely for off-chain audit recovery
+/// without having to walk the VAA archive.
+///
+/// | offset | size | field         |
+/// |--------|------|---------------|
+/// | 0      | 8    | sequence      |
+/// | 8      | 2    | chain_id      |
+/// | 10     | 2    | token_chain   |
+/// | 12     | 1    | kind          |
+/// | 13     | 32   | token_address |
+/// | 45     | 32   | amount        |
+/// | 77     | 32   | reason        |
+/// | 109    | 3    | _reserved     |
+///
+/// Total: 112 bytes (multiple of 8 for `Pod` natural-alignment compliance).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct ModificationLogLayout {
+    /// Modification's own sequence — distinct from the VAA emitter sequence
+    /// and from any per-chain Token Bridge transfer sequence. Issued by the
+    /// guardian network as part of the governance payload.
+    pub sequence: u64,
+    /// Chain whose balance was modified.
+    pub chain_id: u16,
+    /// Native chain of the modified token.
+    pub token_chain: u16,
+    /// `1` for `Add`, `2` for `Subtract`. Matches
+    /// [`ModificationKind`]. On-chain validation ensures the byte is one of
+    /// those two values before this struct is written.
+    pub kind: u8,
+    /// Token address on its native chain (32 bytes, left-zero-padded if
+    /// shorter on the source chain).
+    pub token_address: [u8; 32],
+    /// Modification amount, big-endian 256-bit unsigned integer (matches the
+    /// on-the-wire encoding and the CosmWasm `Uint256` baseline).
+    pub amount: Uint256,
+    /// Free-form reason, 32-byte right-padded ASCII. Audit-trail only — no
+    /// on-chain logic reads this field.
+    pub reason: [u8; 32],
+    /// Reserved padding to bring the struct to a `Pod`-friendly 112 bytes
+    /// (multiple of the max field alignment of 8). Crate-private so external
+    /// callers construct via `Zeroable` and cannot desynchronise the bytes.
+    pub(crate) _reserved: [u8; 3],
+}
+
+impl ModificationLogLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(ModificationLogLayout, sequence) == 0);
+    assert!(offset_of!(ModificationLogLayout, chain_id) == 8);
+    assert!(offset_of!(ModificationLogLayout, token_chain) == 10);
+    assert!(offset_of!(ModificationLogLayout, kind) == 12);
+    assert!(offset_of!(ModificationLogLayout, token_address) == 13);
+    assert!(offset_of!(ModificationLogLayout, amount) == 45);
+    assert!(offset_of!(ModificationLogLayout, reason) == 77);
+    assert!(offset_of!(ModificationLogLayout, _reserved) == 109);
+    assert!(ModificationLogLayout::LEN == 112);
 };
 
 #[cfg(test)]

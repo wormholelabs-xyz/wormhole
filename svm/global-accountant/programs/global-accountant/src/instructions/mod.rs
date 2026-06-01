@@ -10,6 +10,7 @@
 
 pub mod close_digest;
 pub mod close_pending;
+pub mod modify_balance;
 pub mod noreplay;
 pub mod pda_init;
 pub mod register_chain;
