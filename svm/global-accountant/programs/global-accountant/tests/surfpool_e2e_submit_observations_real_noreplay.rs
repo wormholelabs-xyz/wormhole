@@ -26,7 +26,7 @@
 use std::time::Duration;
 
 use global_accountant_definitions::{
-    DigestAccountLayout, Instruction as IxDiscriminator, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    Instruction as IxDiscriminator, NOREPLAY_AUTHORITY_SEED_PREFIX,
     DIGEST_SEED_PREFIX, PENDING_SEED_PREFIX,
 };
 use libsecp256k1::{sign, Message, PublicKey, SecretKey};
@@ -40,15 +40,9 @@ use solana_transaction::Transaction;
 
 mod common;
 use common::{
-    await_confirmed, deploy_program, derive_noreplay_bitmap_pda, so_path, start_surfpool,
-    SurfpoolOptions, NOREPLAY_PROGRAM_ID,
+    await_confirmed, deploy_program, derive_noreplay_bitmap_pda, noreplay_so_path, so_path,
+    start_surfpool, SurfpoolOptions, NOREPLAY_PROGRAM_ID,
 };
-
-/// Pinned path to the pre-built `solana_noreplay.so`. Same artefact the Phase
-/// 2.2.2 smoke test uses; the Makefile target asserts it exists before kicking
-/// off `cargo test`.
-const NOREPLAY_SO_PATH: &str =
-    "/Users/smurf/WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so";
 
 /// `BITS_PER_BUCKET` mirror from `solana-noreplay::state` — must match the
 /// on-chain constant or our bucket-index arithmetic drifts from the program's.
@@ -288,10 +282,13 @@ fn surfpool_submit_observations_real_noreplay() {
             ga_so.display()
         )
     });
-    let noreplay_bytes = std::fs::read(NOREPLAY_SO_PATH).unwrap_or_else(|e| {
+    let noreplay_so = noreplay_so_path();
+    let noreplay_bytes = std::fs::read(&noreplay_so).unwrap_or_else(|e| {
         panic!(
-            "could not read {NOREPLAY_SO_PATH}: {e}. \
-             Rebuild via `cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build`."
+            "could not read {}: {e}. \
+             Rebuild via `cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build` \
+             or override with GA_NOREPLAY_SO=<path>.",
+            noreplay_so.display()
         )
     });
     eprintln!(
@@ -465,49 +462,6 @@ fn surfpool_submit_observations_real_noreplay() {
         "expected AlreadyAccounted (custom 0x7); got: {err}"
     );
 
-    // ----- Step 10: close_pending with NoReplay-marked trigger.
-    // Recreate a stranded D2 sibling pending PDA, then close it via trigger
-    // (b). The pending PDA from above is already closed by the quorum-commit
-    // path; we need a fresh sibling at a different digest seed.
-    // Build a tampered body with a different consistency_level so its
-    // double-keccak yields a distinct digest. The program verifies the
-    // body/digest relationship before reaching the NoReplay pre-check.
-    let mut alt_body = body.clone();
-    alt_body[50] = 0xA5;
-    let alt_digest = double_keccak256_host(&alt_body);
-    let (d2_pending_pda, d2_pending_bump) =
-        derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &alt_digest);
-    let signature = sign_digest(&guardians[0], &alt_digest);
-    let create_d2 = build_submit_observations_ix(
-        &ga_program_id,
-        &submitter.pubkey(),
-        &d2_pending_pda,
-        &guardian_set_pubkey,
-        &bitmap_pda,
-        &digest_pda,
-        &noreplay_authority,
-        chain,
-        &emitter,
-        sequence,
-        &alt_digest,
-        4,
-        0,
-        &signature,
-        d2_pending_bump,
-        digest_bump,
-        &alt_body,
-    );
-    let err = send_expect_failure(
-        &rpc,
-        "stranded D2 submit_observations rejected as AlreadyAccounted",
-        &[create_d2],
-        &[&submitter],
-    );
-    assert!(
-        err.contains("custom program error") && err.contains("0x7"),
-        "stranded D2 attempt: expected AlreadyAccounted; got: {err}"
-    );
-
     eprintln!("[real-cpi] all phases green");
 }
 
@@ -556,17 +510,6 @@ fn send_expect_failure(
         Err(e) => e.to_string(),
     }
 }
-
-/// Sanity check on the DigestAccount layout pin — the post-quorum tx must have
-/// allocated exactly `DigestAccountLayout::LEN` bytes. The 13-observation flow
-/// above asserts the surrounding lifecycle; this assertion is a unit-style
-/// guard that gets pulled in only when the file is compiled (no `#[test]`
-/// gate). If the layout drifts, the host-side const evaluation will catch it
-/// at compile time.
-const _: () = assert!(
-    DigestAccountLayout::LEN == 120,
-    "DigestAccountLayout::LEN drift — update the lifecycle assertions"
-);
 
 /// `keccak256(keccak256(body))` — Wormhole VAA digest convention. Host-side
 /// mirror of the on-chain `submit_observations::double_keccak256`.

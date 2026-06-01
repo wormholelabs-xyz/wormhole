@@ -240,6 +240,19 @@ pub fn so_path(name: &str) -> PathBuf {
         .join(format!("{name}.so"))
 }
 
+/// Resolve the pre-built `solana_noreplay.so` path. Honours `GA_NOREPLAY_SO`
+/// for explicit overrides (CI, alternate checkouts); otherwise falls back to
+/// the canonical sibling-repo path under `$HOME` — same default the Makefile
+/// uses.
+pub fn noreplay_so_path() -> PathBuf {
+    if let Ok(p) = std::env::var("GA_NOREPLAY_SO") {
+        return PathBuf::from(p);
+    }
+    let home = std::env::var("HOME").expect("HOME must be set to resolve solana_noreplay.so");
+    PathBuf::from(home)
+        .join("WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so")
+}
+
 /// Canonical devnet program ID for `solana-noreplay`
 /// (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`). Pinned as a raw byte array
 /// to avoid pulling a base58 dev-dep; verified against `solana_noreplay::PROGRAM_ID`

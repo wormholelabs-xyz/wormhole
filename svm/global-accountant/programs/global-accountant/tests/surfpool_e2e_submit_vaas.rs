@@ -68,7 +68,8 @@ use solana_transaction::Transaction;
 mod common;
 use common::{
     await_confirmed, derive_noreplay_bitmap_pda, deploy_program, hex_encode, load_vaa_fixture,
-    rpc_call, so_path, start_surfpool, ParsedVaa, SurfpoolOptions, NOREPLAY_PROGRAM_ID,
+    noreplay_so_path, rpc_call, so_path, start_surfpool, ParsedVaa, SurfpoolOptions,
+    NOREPLAY_PROGRAM_ID,
 };
 
 /// Wormhole Core Bridge program ID on Solana mainnet. Same as in
@@ -95,11 +96,6 @@ const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 /// DigestAccount open plenty of headroom without inflating past Solana's
 /// per-block reservation ceiling.
 const SUBMIT_VAAS_CU_LIMIT: u32 = 400_000;
-
-/// Pinned path to the pre-built `solana_noreplay.so` (same as in the
-/// observations-real-noreplay test).
-const NOREPLAY_SO_PATH: &str =
-    "/Users/smurf/WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so";
 
 /// Lamport balance for a freshly allocated `BalanceAccountLayout` (76 bytes).
 /// Rent-exempt minimum at the default rent config; pinned so the seed-account
@@ -291,10 +287,13 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
             ga_so.display()
         )
     });
-    let noreplay_bytes = std::fs::read(NOREPLAY_SO_PATH).unwrap_or_else(|e| {
+    let noreplay_so = noreplay_so_path();
+    let noreplay_bytes = std::fs::read(&noreplay_so).unwrap_or_else(|e| {
         panic!(
-            "could not read {NOREPLAY_SO_PATH}: {e}. \
-             Rebuild via `cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build`."
+            "could not read {}: {e}. \
+             Rebuild via `cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build` \
+             or override with GA_NOREPLAY_SO=<path>.",
+            noreplay_so.display()
         )
     });
     eprintln!(
