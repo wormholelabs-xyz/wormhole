@@ -1,34 +1,20 @@
 //! `close_digest` — permissionless close gated by a VAA whose digest equals
 //! the one stored in the PDA. Refunds rent to the recorded payer.
 //!
-//! Two verification branches:
-//!
-//! - **Default (production)**: CPI to the Wormhole Verify VAA Shim
-//!   (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`). The Shim's `VerifyHash`
-//!   instruction reads a `GuardianSignatures` PDA (posted in a prior
-//!   `PostSignatures` tx) and the Core Bridge's `GuardianSet` PDA, then verifies
-//!   guardian-quorum signatures against the supplied 32-byte digest. The Shim
-//!   writes no state; on success it simply returns `Ok(())`.
-//!
-//! - **`mock-vaa` feature**: skip the CPI and accept the digest from instruction
-//!   data verbatim. Exists only to keep the mollusk fast-path green; production
-//!   builds must leave the feature off.
-//!
-//! The two branches are mutually exclusive but share the same account list and
-//! instruction-data shape: the mock branch accepts (and ignores) the three
-//! Shim-CPI accounts and the trailing `guardian_set_bump` byte. This keeps a
-//! single client-side instruction builder valid across both feature
-//! configurations, so the surfpool e2e tests and the mollusk tests construct
-//! transactions the same way.
+//! CPIs into the Wormhole Verify VAA Shim
+//! (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`). The Shim's `VerifyHash`
+//! instruction reads a `GuardianSignatures` PDA (posted in a prior
+//! `PostSignatures` tx) and the Core Bridge's `GuardianSet` PDA, then verifies
+//! guardian-quorum signatures against the supplied 32-byte digest. The Shim
+//! writes no state; on success it simply returns `Ok(())`.
 
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use pinocchio::{
+    error::ProgramError,
+    instruction::{InstructionAccount, InstructionView},
+    AccountView, Address, ProgramResult,
+};
 
-#[cfg(not(feature = "mock-vaa"))]
-use pinocchio::instruction::{InstructionAccount, InstructionView};
-
-use crate::definitions::GlobalAccountantError;
-#[cfg(not(feature = "mock-vaa"))]
-use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR};
+use crate::definitions::{GlobalAccountantError, VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR};
 use crate::err;
 use crate::state::digest;
 
@@ -42,7 +28,6 @@ use crate::state::digest;
 ///
 /// `guardian_set_bump` lets the Shim's `VerifyHash` derive the Core Bridge's
 /// `GuardianSet` PDA without paying the `find_program_address` cost on-chain.
-/// The mock branch ignores it.
 const CLOSE_DIGEST_DATA_LEN: usize = 32 + 1;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
@@ -119,9 +104,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     digest_pda.close()
 }
 
-/// Parse `(digest, guardian_set_bump)` out of the instruction data. The shape
-/// is identical under both feature configurations; the mock branch simply
-/// ignores `guardian_set_bump`.
+/// Parse `(digest, guardian_set_bump)` out of the instruction data.
 fn parse_instruction_data(data: &[u8]) -> Result<(&[u8; 32], u8), ProgramError> {
     let data: &[u8; CLOSE_DIGEST_DATA_LEN] = data
         .try_into()
@@ -138,9 +121,7 @@ fn parse_instruction_data(data: &[u8]) -> Result<(&[u8; 32], u8), ProgramError> 
 }
 
 /// Verify the candidate digest via CPI to the Wormhole Verify VAA Shim
-/// (`VerifyHash`). Real-CPI by default; replaced by a no-op under
-/// `feature = "mock-vaa"` so the mollusk fast-path can drive close-digest
-/// without standing up the Shim and its guardian-set fixtures.
+/// (`VerifyHash`).
 ///
 /// The Shim's checks (see `programs/verify-vaa/src/lib.rs::process_verify_hash`):
 ///   1. `guardian_signatures` is owned by the Shim program.
@@ -150,7 +131,6 @@ fn parse_instruction_data(data: &[u8]) -> Result<(&[u8; 32], u8), ProgramError> 
 ///   4. The recovered Ethereum pubkeys reach quorum against the stored digest.
 ///
 /// All four checks live inside the Shim — we just pass the accounts through.
-#[cfg(not(feature = "mock-vaa"))]
 fn verify_vaa(
     verify_vaa_shim_program: &AccountView,
     guardian_set: &AccountView,
@@ -198,19 +178,4 @@ fn verify_vaa(
     // value and drops the borrow before this point) are irrelevant. No signer
     // seeds: the Shim's `VerifyHash` requires no signature.
     pinocchio::cpi::invoke(&instruction, &[guardian_set, guardian_signatures])
-}
-
-/// Mock branch — accepts the digest from instruction data verbatim. The
-/// signature is unchanged from the real branch so the dispatch site does not
-/// need a feature gate of its own; the `_`-prefixed parameters silence the
-/// "unused variable" lint without confusing the reader.
-#[cfg(feature = "mock-vaa")]
-fn verify_vaa(
-    _verify_vaa_shim_program: &AccountView,
-    _guardian_set: &AccountView,
-    _guardian_signatures: &AccountView,
-    _digest: &[u8; 32],
-    _guardian_set_bump: u8,
-) -> ProgramResult {
-    Ok(())
 }

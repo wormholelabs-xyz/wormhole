@@ -5,35 +5,13 @@
 // flags it as an unexpected cfg value.
 #![allow(unexpected_cfgs)]
 
-// Paired-feature fence: `mock-vaa`, `test-only-open-digest`, and
-// `mock-noreplay` are all "this is a test build" signals. They swap the real
-// Verify VAA Shim CPI in `close_digest`, re-expose `open_digest` outside of
-// `submit_observations`, and substitute the real `solana-noreplay` CPI for an
-// in-memory sentinel respectively. None of them is independently meaningful:
-// shipping any subset gives a build that mocks one piece of the quorum
-// pipeline while exposing the production-shape pieces of the others — a stuck
-// state for any real deployment. Force all three to travel together so the
-// only reachable shapes are "all three on" (mollusk / surfpool spike) and
-// "all three off" (production: real CPIs everywhere, no public
-// `open_digest`).
-#[cfg(any(
-    all(
-        feature = "mock-vaa",
-        any(not(feature = "test-only-open-digest"), not(feature = "mock-noreplay"),)
-    ),
-    all(
-        feature = "test-only-open-digest",
-        any(not(feature = "mock-vaa"), not(feature = "mock-noreplay"))
-    ),
-    all(
-        feature = "mock-noreplay",
-        any(not(feature = "mock-vaa"), not(feature = "test-only-open-digest"),)
-    ),
-))]
-compile_error!(
-    "`mock-vaa`, `test-only-open-digest`, and `mock-noreplay` are paired \
-     test-build features; enable all three or none"
-);
+// `test-only-open-digest` exposes the `OpenDigest` arm in the dispatch table
+// for mollusk tests that drive it directly. The default (no features) build
+// keeps `open_digest` reachable only from inside `submit_observations` after
+// the NoReplay check. This is the only remaining test-build feature; the
+// historic `mock-vaa` / `mock-noreplay` pair has been replaced by sibling
+// fixture programs loaded into mollusk at the canonical IDs (see
+// `tests/common/mollusk_fixtures.rs`).
 
 pub mod entrypoint;
 pub(crate) mod hash;

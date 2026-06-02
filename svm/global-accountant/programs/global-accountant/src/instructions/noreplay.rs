@@ -11,9 +11,7 @@
 //!
 //! Both branches share the same direct-read pre-check (`is_marked`). The CPI
 //! itself only fires from `submit_observations`; `close_pending` never holds
-//! the authority PDA. The production default branch (no `mock-noreplay`) speaks
-//! the real solana-noreplay wire format; `mock-noreplay` keeps a single-byte
-//! sentinel in a caller-owned PDA so mollusk tests can skip the CPI plumbing.
+//! the authority PDA.
 //!
 //! Wire format for the noreplay program (verified against
 //! `~/WormholeLabs/CoreTeam/solana-noreplay/program/src/instruction.rs` and
@@ -34,11 +32,7 @@
 
 use pinocchio::{AccountView, Address, ProgramResult};
 
-use crate::definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID};
-
-#[cfg(not(feature = "mock-noreplay"))]
-use crate::definitions::GlobalAccountantError;
-#[cfg(not(feature = "mock-noreplay"))]
+use crate::definitions::{GlobalAccountantError, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID};
 use crate::err;
 
 /// Length of the noreplay namespace used by global-accountant: `chain_be (2 B)
@@ -85,15 +79,8 @@ pub fn derive_bucket_pda(
 }
 
 // ============================================================================
-// Pre-check (direct account read; both feature configurations).
+// Pre-check (direct account read).
 // ============================================================================
-
-/// In-memory replay-protection sentinel byte for the mock branch. `0x01` means
-/// "this `(chain, emitter, sequence)` is already accounted-for", anything else
-/// means "free to commit". Tests create the account at the canonical bucket
-/// address and toggle this byte to verify the pre-check fires.
-#[cfg(feature = "mock-noreplay")]
-const MOCK_NOREPLAY_MARKED: u8 = 0x01;
 
 /// Direct-read pre-check against the noreplay bitmap PDA.
 ///
@@ -115,7 +102,6 @@ const MOCK_NOREPLAY_MARKED: u8 = 0x01;
 /// later passes it as writable, but a single `AccountView` cannot be both at
 /// the same time, so the caller must pass it as writable up front (per the
 /// account-list documentation in `submit_observations.rs`).
-#[cfg(not(feature = "mock-noreplay"))]
 pub fn is_marked(
     bucket: &AccountView,
     noreplay_authority: &Address,
@@ -147,78 +133,12 @@ pub fn is_marked(
     Ok(byte & (1 << (bit % 8)) != 0)
 }
 
-/// Mock branch — the caller-supplied bucket is a stand-in account at an
-/// arbitrary test pubkey, so the canonical-address check is skipped here.
-/// Production callers always go through the `not(mock-noreplay)` arm above.
-///
-/// Belt-and-braces: the mock branch runs the *same* canonical-bucket-address
-/// check as production before consulting the sentinel byte. This way the
-/// in-process mollusk suite catches any future regression to `derive_bucket_pda`
-/// (seed ordering, namespace split, sequence/1024 bucketisation) even though
-/// the actual bit lookup is sentinel-based rather than bitmap-based. Without
-/// this guard, only the surfpool e2e tests would surface a derivation drift,
-/// and those are slow / not in the default `make test` path.
-#[cfg(feature = "mock-noreplay")]
-pub fn is_marked(
-    bucket: &AccountView,
-    noreplay_authority: &Address,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-) -> Result<bool, pinocchio::error::ProgramError> {
-    let (expected_bucket, _) = derive_bucket_pda(noreplay_authority, chain, emitter, sequence);
-    if bucket.address() != &expected_bucket {
-        return Err(crate::err(
-            crate::definitions::GlobalAccountantError::InvalidPda,
-        ));
-    }
-    let data = bucket.try_borrow()?;
-    if data.is_empty() {
-        return Ok(false);
-    }
-    Ok(data[0] == MOCK_NOREPLAY_MARKED)
-}
-
 // ============================================================================
 // Mark-used (write).
 //
-// The mock branch flips the sentinel byte in a caller-owned PDA. The real
-// branch CPIs `MarkUsed` with `invoke_signed`-derived authority. Both are
-// reached only from `submit_observations`'s quorum-completion branch.
+// CPIs `MarkUsed` into solana-noreplay with `invoke_signed`-derived authority.
+// Reached only from `submit_observations`'s quorum-completion branch.
 // ============================================================================
-
-#[cfg(feature = "mock-noreplay")]
-#[allow(clippy::too_many_arguments)]
-pub fn mark_used(
-    _payer: &AccountView,
-    bucket: &mut AccountView,
-    _noreplay_program: &AccountView,
-    noreplay_authority: &AccountView,
-    _system_program: &AccountView,
-    _program_id: &pinocchio::Address,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-) -> ProgramResult {
-    // Belt-and-braces canonical-address check mirroring `is_marked`. Without
-    // this the mollusk suite cannot catch a `derive_bucket_pda` regression on
-    // the write path either.
-    let (expected_bucket, _) =
-        derive_bucket_pda(noreplay_authority.address(), chain, emitter, sequence);
-    if bucket.address() != &expected_bucket {
-        return Err(crate::err(
-            crate::definitions::GlobalAccountantError::InvalidPda,
-        ));
-    }
-    let mut data = bucket.try_borrow_mut()?;
-    if data.is_empty() {
-        return Err(crate::err(
-            crate::definitions::GlobalAccountantError::NoReplayCpiFailed,
-        ));
-    }
-    data[0] = MOCK_NOREPLAY_MARKED;
-    Ok(())
-}
 
 /// Length of the `MarkUsed` instruction-data buffer assembled on-chain:
 /// `[disc=1u8][ns_len: u16 LE][ns: 34 B][seq: u64 LE]`. Pinned here so the
@@ -226,10 +146,8 @@ pub fn mark_used(
 /// allocation-bearing `Vec`. The 34-byte namespace mirrors the VAA wire
 /// format (`chain_be ‖ emitter`) and the `DIGEST_SEED_PREFIX` derivation in
 /// `open_digest`, so on-chain and off-chain derivations agree.
-#[cfg(not(feature = "mock-noreplay"))]
 const MARK_USED_DATA_LEN: usize = 1 + 2 + NAMESPACE_TOTAL_LEN + 8;
 
-#[cfg(not(feature = "mock-noreplay"))]
 #[allow(clippy::too_many_arguments)]
 pub fn mark_used(
     payer: &AccountView,

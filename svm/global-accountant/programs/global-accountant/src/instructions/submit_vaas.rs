@@ -19,16 +19,16 @@
 //! the DigestAccount + flips NoReplay without state change. The follow-on
 //! `modify_balance` path replays them when it lands.
 
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
-
-#[cfg(not(feature = "mock-vaa"))]
-use pinocchio::instruction::{InstructionAccount, InstructionView};
+use pinocchio::{
+    error::ProgramError,
+    instruction::{InstructionAccount, InstructionView},
+    AccountView, Address, ProgramResult,
+};
 
 use crate::definitions::{
     parse_token_bridge_payload, GlobalAccountantError, TokenBridgeAction, DIGEST_SEED_PREFIX,
+    VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR,
 };
-#[cfg(not(feature = "mock-vaa"))]
-use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR};
 use crate::err;
 use crate::instructions::{noreplay, open_digest_inner, transfer::apply_transfer};
 use crate::state::chain_registration;
@@ -293,9 +293,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 // ============================================================================
 
 /// Verify the candidate digest via CPI to the Wormhole Verify VAA Shim
-/// (`VerifyHash`). Real-CPI by default; replaced by a no-op under
-/// `feature = "mock-vaa"` so the mollusk fast-path can drive `submit_vaas`
-/// without standing up the Shim and its guardian-set fixtures.
+/// (`VerifyHash`).
 ///
 /// The Shim's checks (see `programs/verify-vaa/src/lib.rs::process_verify_hash`):
 ///   1. `guardian_signatures` is owned by the Shim program.
@@ -303,7 +301,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 ///      guardian_index_be, guardian_set_bump)` under the Core Bridge program.
 ///   3. The guardian set is not expired.
 ///   4. The recovered Ethereum pubkeys reach quorum against the stored digest.
-#[cfg(not(feature = "mock-vaa"))]
 fn verify_vaa(
     verify_vaa_shim_program: &AccountView,
     guardian_set: &AccountView,
@@ -341,17 +338,6 @@ fn verify_vaa(
     };
 
     pinocchio::cpi::invoke(&instruction, &[guardian_set, guardian_signatures])
-}
-
-#[cfg(feature = "mock-vaa")]
-fn verify_vaa(
-    _verify_vaa_shim_program: &AccountView,
-    _guardian_set: &AccountView,
-    _guardian_signatures: &AccountView,
-    _digest: &[u8; 32],
-    _guardian_set_bump: u8,
-) -> ProgramResult {
-    Ok(())
 }
 
 use crate::hash::double_keccak256;

@@ -18,19 +18,16 @@
 use pinocchio::{
     cpi::{Seed, Signer},
     error::ProgramError,
+    instruction::{InstructionAccount, InstructionView},
     AccountView, Address, ProgramResult,
 };
-
-#[cfg(not(feature = "mock-vaa"))]
-use pinocchio::instruction::{InstructionAccount, InstructionView};
 
 use crate::definitions::{
     BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLogLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
-    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
+    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, VERIFY_HASH_DATA_LEN,
+    VERIFY_HASH_SELECTOR, WORMCHAIN_CHAIN_ID,
 };
-#[cfg(not(feature = "mock-vaa"))]
-use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR};
 use crate::err;
 use crate::instructions::pda_init::init_or_upgrade_pda;
 use crate::state::{account as balance_account, modification};
@@ -363,7 +360,6 @@ fn init_balance_account(
 // Verify VAA Shim CPI — shape mirrored from `register_chain::verify_vaa`.
 // ============================================================================
 
-#[cfg(not(feature = "mock-vaa"))]
 fn verify_vaa(
     verify_vaa_shim_program: &AccountView,
     guardian_set: &AccountView,
@@ -394,17 +390,6 @@ fn verify_vaa(
     };
 
     pinocchio::cpi::invoke(&instruction, &[guardian_set, guardian_signatures])
-}
-
-#[cfg(feature = "mock-vaa")]
-fn verify_vaa(
-    _verify_vaa_shim_program: &AccountView,
-    _guardian_set: &AccountView,
-    _guardian_signatures: &AccountView,
-    _digest: &[u8; 32],
-    _guardian_set_bump: u8,
-) -> ProgramResult {
-    Ok(())
 }
 
 use crate::hash::double_keccak256;
