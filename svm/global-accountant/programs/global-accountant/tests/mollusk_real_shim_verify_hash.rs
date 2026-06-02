@@ -1,0 +1,290 @@
+//! TDD anchor for the real Verify VAA Shim `VerifyHash` CPI.
+//!
+//! Drives `close_digest` against a Mollusk instance with the real
+//! `wormhole_verify_vaa_shim.so` loaded at the canonical Shim program ID and
+//! asserts that:
+//!
+//! 1. **Happy path**: close succeeds when the Shim's `VerifyHash` validates
+//!    a quorum-strength `GuardianSignatures` account against the stored
+//!    digest.
+//! 2. **Sub-quorum fails**: close fails when the same accounts carry only
+//!    `quorum - 1` signatures, surfacing the Shim's quorum check rather
+//!    than passing the close (which the mock-vaa branch would do because
+//!    it short-circuits to `Ok(())`).
+//!
+//! The sub-quorum assertion is the TDD anchor: under mock-vaa it passes
+//! (mock returns Ok without inspecting sigs), under the real Shim CPI it
+//! fails (Shim returns `InvalidAccountData`).
+
+#![allow(clippy::too_many_arguments)]
+
+use {
+    global_accountant_definitions::{
+        DigestAccountLayout, Instruction as IxDiscriminator, DIGEST_SEED_PREFIX,
+        VERIFY_VAA_SHIM_PROGRAM_ID,
+    },
+    mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
+    solana_account::Account,
+    solana_instruction::{AccountMeta, Instruction},
+    solana_pubkey::Pubkey,
+};
+
+mod common;
+use common::guardian_fixtures::{
+    derive_guardian_set_pda, guardian_set_account, guardian_signatures_account, make_guardians,
+    sign_digest, GUARDIAN_PUBKEY_LENGTH,
+};
+use common::mollusk_fixtures::{keyed_account_for_verify_vaa_shim_program, mollusk_with_fixtures};
+
+const PROGRAM_NAME: &str = "global_accountant";
+const CHAIN: u16 = 2;
+const SEQUENCE: u64 = 99;
+const GUARDIAN_SET_INDEX: u32 = 4;
+const GUARDIAN_COUNT: usize = 19;
+const QUORUM: u8 = 13;
+
+fn program_id() -> Pubkey {
+    Pubkey::new_from_array([7u8; 32])
+}
+
+fn system_program_id() -> Pubkey {
+    keyed_account_for_system_program().0
+}
+
+fn core_bridge_program_id() -> Pubkey {
+    Pubkey::new_from_array(global_accountant_definitions::CORE_BRIDGE_PROGRAM_ID)
+}
+
+fn shim_program_id() -> Pubkey {
+    Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
+}
+
+fn derive_digest_pda(chain: u16, emitter: &[u8; 32], sequence: u64) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    let sequence_be = sequence.to_be_bytes();
+    Pubkey::find_program_address(
+        &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be],
+        &program_id(),
+    )
+}
+
+fn open_digest_ix_data(
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+    digest: &[u8; 32],
+    guardian_set_index: u32,
+    bump: u8,
+) -> Vec<u8> {
+    let mut data = Vec::with_capacity(1 + 79);
+    data.push(IxDiscriminator::OpenDigest as u8);
+    data.extend_from_slice(&chain.to_be_bytes());
+    data.extend_from_slice(emitter);
+    data.extend_from_slice(&sequence.to_be_bytes());
+    data.extend_from_slice(digest);
+    data.extend_from_slice(&guardian_set_index.to_le_bytes());
+    data.push(bump);
+    data
+}
+
+fn close_digest_ix_data(digest: &[u8; 32], guardian_set_bump: u8) -> Vec<u8> {
+    let mut data = Vec::with_capacity(1 + 32 + 1);
+    data.push(IxDiscriminator::CloseDigest as u8);
+    data.extend_from_slice(digest);
+    data.push(guardian_set_bump);
+    data
+}
+
+fn system_owned_account(lamports: u64) -> Account {
+    Account {
+        lamports,
+        data: vec![],
+        owner: system_program_id(),
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+fn payer_account(lamports: u64) -> Account {
+    system_owned_account(lamports)
+}
+
+fn uninit_pda_account() -> Account {
+    system_owned_account(0)
+}
+
+/// Common setup shared by happy-path and sub-quorum tests. Returns the
+/// post-open Mollusk + accounts so each test can dispatch its own
+/// `close_digest`.
+struct CloseFixture {
+    mollusk: Mollusk,
+    digest: [u8; 32],
+    digest_pda: Pubkey,
+    digest_pda_account: Account,
+    payer: Pubkey,
+    payer_account: Account,
+    guardian_set_pubkey: Pubkey,
+    guardian_set_bump: u8,
+    guardians: Vec<common::guardian_fixtures::Guardian>,
+}
+
+impl CloseFixture {
+    fn open() -> Self {
+        let mollusk = mollusk_with_fixtures(&program_id(), PROGRAM_NAME);
+
+        // Deterministic digest — any 32 bytes work; the Shim signs whatever
+        // bytes we hand it.
+        let mut digest = [0u8; 32];
+        for (i, b) in digest.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0x5A;
+        }
+        let mut emitter = [0u8; 32];
+        emitter[31] = 0x77;
+        let (digest_pda, bump) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
+        let payer = Pubkey::new_from_array([1u8; 32]);
+
+        // Drive `open_digest` directly so the test owns the stored digest.
+        let open_ix = Instruction::new_with_bytes(
+            program_id(),
+            &open_digest_ix_data(CHAIN, &emitter, SEQUENCE, &digest, GUARDIAN_SET_INDEX, bump),
+            vec![
+                AccountMeta::new(payer, true),
+                AccountMeta::new(digest_pda, false),
+                AccountMeta::new_readonly(system_program_id(), false),
+            ],
+        );
+        let open_accounts = vec![
+            (payer, payer_account(10_000_000_000)),
+            (digest_pda, uninit_pda_account()),
+            keyed_account_for_system_program(),
+        ];
+        let open_result = mollusk.process_instruction(&open_ix, &open_accounts);
+        assert!(
+            matches!(open_result.program_result, ProgramResult::Success),
+            "open_digest failed: {:?}",
+            open_result.program_result
+        );
+
+        let digest_pda_account = open_result
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| *k == digest_pda)
+            .expect("digest PDA in open result")
+            .1
+            .clone();
+        let payer_account_after = open_result
+            .resulting_accounts
+            .iter()
+            .find(|(k, _)| *k == payer)
+            .expect("payer in open result")
+            .1
+            .clone();
+
+        // Sanity: stored digest matches what we passed in.
+        let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest_pda_account.data);
+        assert_eq!(stored.digest, digest, "stored digest matches input");
+
+        let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
+        let (guardian_set_pubkey, guardian_set_bump) =
+            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+
+        Self {
+            mollusk,
+            digest,
+            digest_pda,
+            digest_pda_account,
+            payer,
+            payer_account: payer_account_after,
+            guardian_set_pubkey,
+            guardian_set_bump,
+            guardians,
+        }
+    }
+
+    fn guardian_set_account(&self) -> Account {
+        let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> =
+            self.guardians.iter().map(|g| g.eth_address).collect();
+        // `expiration_time = 0` ⇒ the set never expires (Shim treats 0 as
+        // "active forever").
+        guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id())
+    }
+
+    /// Build a GuardianSignatures account fixture with `num_signatures`
+    /// guardians signing the stored digest, in strictly increasing index
+    /// order (the Shim rejects non-increasing indices).
+    fn guardian_signatures_account(&self, num_signatures: u8) -> (Pubkey, Account) {
+        let pubkey = Pubkey::new_from_array([0xE1u8; 32]);
+        let sigs: Vec<(u8, [u8; 65])> = (0..num_signatures)
+            .map(|i| (i, sign_digest(&self.guardians[i as usize], &self.digest)))
+            .collect();
+        let account =
+            guardian_signatures_account(GUARDIAN_SET_INDEX, &self.payer, &sigs, &shim_program_id());
+        (pubkey, account)
+    }
+
+    fn close_with(
+        &self,
+        sigs_pubkey: Pubkey,
+        sigs_account: Account,
+    ) -> mollusk_svm::result::InstructionResult {
+        // Account-meta order matches the production close_digest layout:
+        // closer, digest_pda, rent_recipient, guardian_signatures (slot 3),
+        // guardian_set (slot 4), shim_program (slot 5). The Shim itself
+        // reads guardian_set first then guardian_signatures internally;
+        // close_digest::verify_vaa reorders them in the CPI account list.
+        let metas = vec![
+            AccountMeta::new_readonly(self.payer, true),
+            AccountMeta::new(self.digest_pda, false),
+            AccountMeta::new(self.payer, false),
+            AccountMeta::new_readonly(sigs_pubkey, false),
+            AccountMeta::new_readonly(self.guardian_set_pubkey, false),
+            AccountMeta::new_readonly(shim_program_id(), false),
+        ];
+        let close_ix = Instruction::new_with_bytes(
+            program_id(),
+            &close_digest_ix_data(&self.digest, self.guardian_set_bump),
+            metas,
+        );
+        let close_accounts = vec![
+            (self.payer, self.payer_account.clone()),
+            (self.digest_pda, self.digest_pda_account.clone()),
+            (sigs_pubkey, sigs_account),
+            (self.guardian_set_pubkey, self.guardian_set_account()),
+            keyed_account_for_verify_vaa_shim_program(),
+        ];
+        self.mollusk.process_instruction(&close_ix, &close_accounts)
+    }
+}
+
+#[test]
+fn close_digest_with_quorum_signatures_succeeds() {
+    // Sanity / happy-path: the real Shim verifies quorum signatures and
+    // close succeeds. Also passes under mock-vaa (mock returns Ok regardless),
+    // so this test is not the TDD anchor by itself — it pins the wire shape
+    // so a regression in the fixture builder is caught visibly.
+    let fixture = CloseFixture::open();
+    let (sigs_pubkey, sigs_account) = fixture.guardian_signatures_account(QUORUM);
+    let result = fixture.close_with(sigs_pubkey, sigs_account);
+    assert!(
+        matches!(result.program_result, ProgramResult::Success),
+        "close_digest with quorum sigs expected success, got {:?}",
+        result.program_result
+    );
+}
+
+#[test]
+fn close_digest_with_sub_quorum_signatures_fails_via_shim() {
+    // TDD anchor: the Shim rejects a GuardianSignatures account below quorum.
+    // Under mock-vaa this case incorrectly passes (mock returns Ok(())); the
+    // real Shim's quorum check rejects it. The assertion only requires
+    // failure — the precise error code lives inside the Shim and we treat it
+    // as a black box (the public surface is "ix returns failure").
+    let fixture = CloseFixture::open();
+    let (sigs_pubkey, sigs_account) = fixture.guardian_signatures_account(QUORUM - 1);
+    let result = fixture.close_with(sigs_pubkey, sigs_account);
+    assert!(
+        matches!(result.program_result, ProgramResult::Failure(_)),
+        "close_digest with sub-quorum sigs must fail, got {:?}",
+        result.program_result
+    );
+}

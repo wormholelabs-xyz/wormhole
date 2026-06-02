@@ -1,14 +1,22 @@
-//! Shared helpers for surfpool-driven integration tests.
+//! Shared helpers for integration tests.
 //!
-//! Subprocess management, cheatcode plumbing, and port allocation reused
-//! across every surfpool e2e test. Each test crate that pulls this module
-//! in via `mod common;` gets the full helper set.
+//! Two flavours of helper live under this module:
+//!
+//! - **Surfpool helpers** (subprocess management, cheatcode plumbing, port
+//!   allocation) used by every surfpool e2e test.
+//! - **Mollusk fixture helpers** (`guardian_fixtures`, `mollusk_fixtures`)
+//!   used by the in-process mollusk suite to drive the real
+//!   `solana_noreplay` and `verify_vaa_shim` CPIs without standing up
+//!   surfpool.
 //!
 //! The module is intentionally not `pub` outside the `tests/` tree — it is
 //! compiled into every integration-test binary that declares it, which is
 //! fine for a small surface like this.
 
 #![allow(dead_code)] // Different integration tests use different subsets.
+
+pub mod guardian_fixtures;
+pub mod mollusk_fixtures;
 
 use std::{
     io::{BufRead, BufReader, Read},
@@ -240,17 +248,27 @@ pub fn so_path(name: &str) -> PathBuf {
         .join(format!("{name}.so"))
 }
 
-/// Resolve the pre-built `solana_noreplay.so` path. Honours `GA_NOREPLAY_SO`
-/// for explicit overrides (CI, alternate checkouts); otherwise falls back to
-/// the canonical sibling-repo path under `$HOME` — same default the Makefile
-/// uses.
+/// Resolve `solana_noreplay.so`. Default points at the hash-pinned fixture
+/// under `tests/fixtures/`; `GA_NOREPLAY_SO` overrides for local
+/// rebuild-and-iterate cycles (the override bypasses the pinned-hash check
+/// since the developer is intentionally swapping the binary). For surfpool
+/// tests the same env override applies.
 pub fn noreplay_so_path() -> PathBuf {
     if let Ok(p) = std::env::var("GA_NOREPLAY_SO") {
         return PathBuf::from(p);
     }
-    let home = std::env::var("HOME").expect("HOME must be set to resolve solana_noreplay.so");
-    PathBuf::from(home)
-        .join("WormholeLabs/CoreTeam/solana-noreplay/target/deploy/solana_noreplay.so")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/solana_noreplay.so")
+}
+
+/// Resolve `wormhole_verify_vaa_shim.so`. Default points at the hash-pinned
+/// fixture under `tests/fixtures/`; `GA_VERIFY_VAA_SHIM_SO` overrides for
+/// local rebuild-and-iterate cycles (the override bypasses the pinned-hash
+/// check since the developer is intentionally swapping the binary).
+pub fn verify_vaa_shim_so_path() -> PathBuf {
+    if let Ok(p) = std::env::var("GA_VERIFY_VAA_SHIM_SO") {
+        return PathBuf::from(p);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wormhole_verify_vaa_shim.so")
 }
 
 /// Canonical devnet program ID for `solana-noreplay`
