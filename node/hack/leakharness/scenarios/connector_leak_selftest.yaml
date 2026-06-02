@@ -1,0 +1,20 @@
+name: connector_leak_selftest
+description: |
+  Negative control / harness self-test. The evm_leak worker dials
+  EthereumBaseConnectors and abandons them WITHOUT Close, reproducing the
+  pre-fix supervisor-restart leak (the live socket keeps each connector's
+  rpc.Client goroutines alive). A correct harness must report a large
+  goroutine_delta and name the leaked rpc.Client stacks in
+  top_goroutine_growth.
+
+  max_goroutine_growth makes this a hard gate: this run is EXPECTED to end
+  with verdict=leak_detected. If it ever passes, the harness has stopped
+  detecting the leak class it exists for.
+defaults: _defaults.yaml
+duration: 30s
+sample_interval: 5s
+max_goroutine_growth: 50
+chains:
+  sepolia:
+    fake: evm_leak
+    behaviour: healthy

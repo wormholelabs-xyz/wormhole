@@ -105,23 +105,41 @@ func runCmd(args []string) int {
 	fmt.Printf("samples: %d\n", summary.SampleCount)
 	fmt.Printf("peak RSS: %d MiB\n", summary.PeakRSSBytes>>20)
 	fmt.Printf("peak goroutines: %d\n", summary.PeakGoroutines)
-	fmt.Printf("slopes:\n")
+
+	// Primary, deterministic leak signal: GC-settled start-vs-end census.
+	c := summary.Counts
+	fmt.Printf("counts (GC-settled, start -> end):\n")
+	fmt.Printf("  goroutines:   %d -> %d  (delta %+d)\n", c.GoroutinesStart, c.GoroutinesEnd, c.GoroutineDelta)
+	fmt.Printf("  heap_objects: %d -> %d  (delta %+d)\n", c.HeapObjectsStart, c.HeapObjectsEnd, c.HeapObjectsDelta)
+	fmt.Printf("  heap_alloc:   %d -> %d MiB  (delta %+d MiB)\n",
+		c.HeapAllocStart>>20, c.HeapAllocEnd>>20, c.HeapAllocDelta>>20)
+	if len(summary.TopGoroutineGrowth) > 0 {
+		fmt.Printf("top goroutine growth (the culprit):\n")
+		for _, g := range summary.TopGoroutineGrowth {
+			fmt.Printf("  %+d  (%d -> %d)  %s\n", g.Delta, g.StartCount, g.EndCount, g.Stack)
+		}
+	}
+
+	// Slopes are report-only trend context; do NOT gate on them (RSS slope
+	// variance swamps the signal at short durations — see README).
+	fmt.Printf("slopes (report-only):\n")
 	fmt.Printf("  rss_mb_per_hour:        %.2f\n", summary.Slopes.RSSMBPerHour)
 	fmt.Printf("  heap_inuse_mb_per_hour: %.2f\n", summary.Slopes.HeapInuseMBPerHour)
 	fmt.Printf("  goroutines_per_hour:    %.2f\n", summary.Slopes.GoroutinesPerHour)
 	fmt.Printf("  fds_per_hour:           %.2f\n", summary.Slopes.FDsPerHour)
 	fmt.Printf("\nsummary written to %s\n", summaryPath)
 	if summary.Profiles.HeapStart != "" && summary.Profiles.HeapEnd != "" {
-		fmt.Printf("heap diff:    go tool pprof -base %s %s\n",
+		fmt.Printf("heap diff:      go tool pprof -base %s %s\n",
 			filepath.Join(outDir, summary.Profiles.HeapStart),
 			filepath.Join(outDir, summary.Profiles.HeapEnd))
 	}
-	if summary.Profiles.GoroutineEnd != "" {
-		fmt.Printf("goroutines:   go tool pprof %s\n",
+	if summary.Profiles.GoroutineStart != "" && summary.Profiles.GoroutineEnd != "" {
+		fmt.Printf("goroutine diff: go tool pprof -base %s %s\n",
+			filepath.Join(outDir, summary.Profiles.GoroutineStart),
 			filepath.Join(outDir, summary.Profiles.GoroutineEnd))
 	}
 
-	if summary.Verdict == harness.VerdictKilledOOM {
+	if summary.Verdict == harness.VerdictKilledOOM || summary.Verdict == harness.VerdictLeak {
 		return 1
 	}
 	return 0

@@ -1,6 +1,6 @@
 // Package harness orchestrates leak-detection scenarios against the
-// guardian watcher code in-process. See `.claude/tasks/guardian-leak-harness.md`
-// for the design.
+// guardian watcher code in-process. See the package README for the design
+// and for how to read the count-based leak signal vs the report-only slopes.
 //
 // The harness exercises the lifecycle that production leaks live in:
 //
@@ -38,6 +38,7 @@ import (
 // needs. New chain families register themselves here.
 var familyRegistry = map[FakeKind]common.Family{
 	FakeEVM:      evm.Family,
+	FakeEVMLeak:  evm.LeakFamily,
 	FakeSui:      sui.Family,
 	FakeCosmwasm: cosmwasm.Family,
 	FakeXRPL:     xrpl.Family,
@@ -47,9 +48,13 @@ var familyRegistry = map[FakeKind]common.Family{
 type Verdict string
 
 const (
-	VerdictOK         Verdict = "ok"
-	VerdictKilledOOM  Verdict = "killed_oom"
-	VerdictAborted    Verdict = "aborted"
+	VerdictOK        Verdict = "ok"
+	VerdictKilledOOM Verdict = "killed_oom"
+	VerdictAborted   Verdict = "aborted"
+	// VerdictLeak is returned when a scenario sets max_goroutine_growth
+	// and the GC-settled goroutine delta exceeds it. This is the
+	// deterministic gate; the per-hour Slopes are report-only.
+	VerdictLeak Verdict = "leak_detected"
 )
 
 // Summary is the JSON-serialisable record of a single scenario run.
@@ -63,7 +68,18 @@ type Summary struct {
 	OOMCapBytes    uint64    `json:"oom_cap_bytes"`
 	PeakRSSBytes   uint64    `json:"peak_rss_bytes"`
 	PeakGoroutines int       `json:"peak_goroutines"`
-	Slopes         Slopes    `json:"slopes"`
+	// Counts is the primary, deterministic leak signal: a GC-settled
+	// census of reachable heap objects and goroutines at scenario start
+	// vs end. Prefer this over Slopes — RSS slope is OS-level noise.
+	Counts CountDeltas `json:"counts"`
+	// TopGoroutineGrowth names the goroutine stacks that accumulated the
+	// most over the run. For an unclosed-connector leak this points
+	// straight at the leaked rpc.Client dispatch/read/write goroutines.
+	TopGoroutineGrowth []StackGrowth `json:"top_goroutine_growth,omitempty"`
+	// Slopes are retained for trend context but are report-only: at short
+	// durations and small footprints the RSS slope variance swamps any
+	// leak signal (see README). Do not gate on them.
+	Slopes Slopes `json:"slopes"`
 	// Profiles, when present, holds the relative paths to pprof
 	// profiles captured at scenario start and end. Empty when the
 	// harness was constructed without a ProfileDir.
@@ -131,6 +147,11 @@ func (h *Harness) Run(ctx context.Context) (Summary, error) {
 			profiles.GoroutineStart = "goroutine-start.pprof"
 		}
 	}
+
+	// Deterministic baseline census (GC-settled) taken before any worker
+	// starts. Diffed against the end-of-run census to detect leaks by
+	// reachable-object/goroutine count rather than noisy RSS slope.
+	startCounts := captureCounts()
 
 	// Start fakes for each chain in the scenario using the family registry.
 	fakes := make(map[string]common.FaultableServer)
@@ -242,18 +263,37 @@ samplingLoop:
 		}
 	}
 
+	// End-of-run census, taken after workers have exited so leaked
+	// goroutines/objects are isolated from in-flight work.
+	endCounts := captureCounts()
+	counts := computeCountDeltas(startCounts, endCounts)
+	growth := topGoroutineGrowth(startCounts, endCounts, 5)
+
+	// Deterministic gate: if the scenario declares a goroutine-growth
+	// ceiling and we exceeded it, flag the leak. Only downgrades a
+	// healthy verdict — OOM/abort take precedence.
+	if verdict == VerdictOK && h.scenario.MaxGoroutineGrowth > 0 &&
+		counts.GoroutineDelta > h.scenario.MaxGoroutineGrowth {
+		h.logger.Warn("goroutine growth exceeded scenario ceiling",
+			zap.Int("delta", counts.GoroutineDelta),
+			zap.Int("max", h.scenario.MaxGoroutineGrowth))
+		verdict = VerdictLeak
+	}
+
 	summary := Summary{
-		Scenario:       h.scenario.Name,
-		Description:    h.scenario.Description,
-		StartedAt:      startedAt,
-		CompletedAt:    time.Now(),
-		SampleCount:    len(samples),
-		Verdict:        verdict,
-		OOMCapBytes:    h.scenario.OOMCapBytes,
-		PeakRSSBytes:   peakRSS,
-		PeakGoroutines: peakGoroutines,
-		Slopes:         ComputeSlopes(samples),
-		Profiles:       profiles,
+		Scenario:           h.scenario.Name,
+		Description:        h.scenario.Description,
+		StartedAt:          startedAt,
+		CompletedAt:        time.Now(),
+		SampleCount:        len(samples),
+		Verdict:            verdict,
+		OOMCapBytes:        h.scenario.OOMCapBytes,
+		PeakRSSBytes:       peakRSS,
+		PeakGoroutines:     peakGoroutines,
+		Counts:             counts,
+		TopGoroutineGrowth: growth,
+		Slopes:             ComputeSlopes(samples),
+		Profiles:           profiles,
 	}
 	return summary, nil
 }

@@ -25,7 +25,12 @@ const (
 type FakeKind string
 
 const (
-	FakeEVM      FakeKind = "evm"
+	FakeEVM FakeKind = "evm"
+	// FakeEVMLeak is the EVM family with a deliberately leaking worker:
+	// it dials connectors and abandons them WITHOUT Close, modelling the
+	// pre-fix supervisor restart. Used by the self-test scenario to prove
+	// the harness actually detects the leak it was built for.
+	FakeEVMLeak  FakeKind = "evm_leak"
 	FakeSui      FakeKind = "sui"
 	FakeCosmwasm FakeKind = "cosmwasm"
 	FakeXRPL     FakeKind = "xrpl"
@@ -79,9 +84,13 @@ type Scenario struct {
 	SampleInterval time.Duration        `yaml:"sample_interval"`
 	Guardian       GuardianSpec         `yaml:"guardian"`
 	OOMCapBytes    uint64               `yaml:"oom_cap_bytes"`
-	SlopeReport    SlopeReport          `yaml:"slope_report"`
-	Defaults       string               `yaml:"defaults"`
-	Chains         map[string]ChainSpec `yaml:"chains"`
+	// MaxGoroutineGrowth, when > 0, turns the run into a hard gate: if the
+	// GC-settled goroutine delta (end - start) exceeds it, the verdict is
+	// leak_detected. Zero (default) means report-only.
+	MaxGoroutineGrowth int                  `yaml:"max_goroutine_growth"`
+	SlopeReport        SlopeReport          `yaml:"slope_report"`
+	Defaults           string               `yaml:"defaults"`
+	Chains             map[string]ChainSpec `yaml:"chains"`
 }
 
 // LoadScenario reads `path` and, if it declares a `defaults:` field,
@@ -146,6 +155,9 @@ func mergeScenarios(defaults, primary Scenario) Scenario {
 	}
 	if primary.OOMCapBytes != 0 {
 		out.OOMCapBytes = primary.OOMCapBytes
+	}
+	if primary.MaxGoroutineGrowth != 0 {
+		out.MaxGoroutineGrowth = primary.MaxGoroutineGrowth
 	}
 	// Guardian: any non-zero field on primary wins.
 	if primary.Guardian.UnsafeDevMode {
