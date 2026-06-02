@@ -1,10 +1,8 @@
 //! Integration tests for `register_chain`.
 //!
-//! Gated on the paired `(mock-vaa, test-only-open-digest, mock-noreplay)`
-//! feature trio so the in-process mollusk runs skip the Verify VAA Shim CPI
-//! and substitute a single-byte NoReplay sentinel for the real CPI. Production
-//! builds CPI into the Shim against real guardian signatures; the surfpool
-//! e2e suite exercises the real-CPI path.
+//! Driven against a Mollusk instance with the real `solana_noreplay.so` and
+//! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
+//! `common::mollusk_fixtures`).
 //!
 //! Coverage:
 //!   - happy path: governance VAA initialises the canonical
@@ -21,9 +19,10 @@
 use {
     global_accountant_definitions::{
         ChainRegistrationLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER, NOREPLAY_AUTHORITY_SEED_PREFIX,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
-        TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -31,18 +30,45 @@ use {
     solana_pubkey::Pubkey,
 };
 
+mod common;
+use common::guardian_fixtures::{
+    derive_guardian_set_pda, guardian_set_account, guardian_signatures_account, make_guardians,
+    sign_digest, Guardian, GUARDIAN_PUBKEY_LENGTH,
+};
+use common::mollusk_fixtures::{
+    keyed_account_for_noreplay_program, keyed_account_for_verify_vaa_shim_program,
+    mollusk_with_fixtures,
+};
+
 const PROGRAM_NAME: &str = "global_accountant";
+const GUARDIAN_COUNT: usize = 19;
+const QUORUM: u8 = 13;
+const GUARDIAN_SET_INDEX: u32 = 4;
 
 fn program_id() -> Pubkey {
     Pubkey::new_from_array([7u8; 32])
 }
 
 fn mollusk() -> Mollusk {
-    Mollusk::new(&program_id(), PROGRAM_NAME)
+    mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
 }
 
 fn system_program_id() -> Pubkey {
     keyed_account_for_system_program().0
+}
+
+fn core_bridge_program_id() -> Pubkey {
+    Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID)
+}
+
+fn shim_program_id() -> Pubkey {
+    Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
+}
+
+/// Host-side `keccak256(keccak256(body))` — the Wormhole digest convention.
+fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
+    let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
+    solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
 fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
@@ -88,13 +114,9 @@ fn uninitialised_pda_account() -> Account {
 }
 
 fn noreplay_bucket_unmarked() -> Account {
-    Account {
-        lamports: 1_000_000,
-        data: vec![0u8; 1],
-        owner: program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
+    // Lazy-create entry state for the real noreplay program: system-owned,
+    // empty data. The CPI from register_chain allocates+assigns on commit.
+    system_owned_account(0)
 }
 
 /// Build a Token Bridge `RegisterChain` governance VAA body. Layout:
@@ -150,32 +172,30 @@ fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[
 
 /// Build the minimal account list for a `register_chain` call. Slot order:
 ///   0. payer (SIGNER, WRITE)
-///   1. Verify VAA Shim program (sentinel under mock-vaa)
-///   2. Core Bridge GuardianSet (sentinel under mock-vaa)
-///   3. GuardianSignatures (sentinel under mock-vaa)
+///   1. Verify VAA Shim program
+///   2. Core Bridge GuardianSet
+///   3. GuardianSignatures
 ///   4. chain_registration PDA (WRITE)
 ///   5. NoReplay bitmap PDA (WRITE)
-///   6. NoReplay program (sentinel under mock-noreplay)
+///   6. NoReplay program
 ///   7. NoReplay authority PDA owned by this program
 ///   8. system program
 fn build_metas(
     payer: Pubkey,
-    shim_program: Pubkey,
     guardian_set: Pubkey,
     guardian_signatures: Pubkey,
     registration_pda: Pubkey,
     noreplay_bucket: Pubkey,
-    noreplay_program: Pubkey,
     noreplay_authority: Pubkey,
 ) -> Vec<AccountMeta> {
     vec![
         AccountMeta::new(payer, true),
-        AccountMeta::new_readonly(shim_program, false),
+        AccountMeta::new_readonly(shim_program_id(), false),
         AccountMeta::new_readonly(guardian_set, false),
         AccountMeta::new_readonly(guardian_signatures, false),
         AccountMeta::new(registration_pda, false),
         AccountMeta::new(noreplay_bucket, false),
-        AccountMeta::new_readonly(noreplay_program, false),
+        AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
         AccountMeta::new_readonly(noreplay_authority, false),
         AccountMeta::new_readonly(system_program_id(), false),
     ]
@@ -183,22 +203,34 @@ fn build_metas(
 
 fn build_initial_accounts(
     payer: Pubkey,
-    shim_program: Pubkey,
-    guardian_set: Pubkey,
-    guardian_signatures: Pubkey,
+    digest: &[u8; 32],
+    guardian_set_pubkey: Pubkey,
+    guardian_signatures_pubkey: Pubkey,
+    guardians: &[Guardian],
     registration_pda: Pubkey,
+    registration_state: Account,
     noreplay_bucket: Pubkey,
-    noreplay_program: Pubkey,
+    noreplay_bucket_state: Account,
     noreplay_authority: Pubkey,
 ) -> Vec<(Pubkey, Account)> {
+    let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
+        .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
+        .collect();
+    let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
     vec![
         (payer, system_owned_account(50_000_000_000)),
-        (shim_program, system_owned_account(0)),
-        (guardian_set, system_owned_account(0)),
-        (guardian_signatures, system_owned_account(0)),
-        (registration_pda, uninitialised_pda_account()),
-        (noreplay_bucket, noreplay_bucket_unmarked()),
-        (noreplay_program, system_owned_account(0)),
+        keyed_account_for_verify_vaa_shim_program(),
+        (
+            guardian_set_pubkey,
+            guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id()),
+        ),
+        (
+            guardian_signatures_pubkey,
+            guardian_signatures_account(GUARDIAN_SET_INDEX, &payer, &sigs, &shim_program_id()),
+        ),
+        (registration_pda, registration_state),
+        (noreplay_bucket, noreplay_bucket_state),
+        keyed_account_for_noreplay_program(),
         (noreplay_authority, system_owned_account(0)),
         keyed_account_for_system_program(),
     ]
@@ -227,10 +259,11 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
 
     let (registration_pda, registration_bump) = derive_chain_registration_pda(chain_to_register);
     let payer = Pubkey::new_from_array([0x11u8; 32]);
-    let shim_program = Pubkey::new_from_array([0xC1u8; 32]);
-    let guardian_set = Pubkey::new_from_array([0xC2u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
-    let noreplay_program = Pubkey::new_from_array([0xC5u8; 32]);
+    let (guardian_set, guardian_set_bump) =
+        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+    let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
+    let digest = double_keccak256_host(&body);
     // Canonical program-derived noreplay authority. Matches what
     // close_pending re-derives internally and what the production CPI signs.
     let (noreplay_authority, _) =
@@ -244,28 +277,28 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
 
     let accounts = build_initial_accounts(
         payer,
-        shim_program,
+        &digest,
         guardian_set,
         guardian_signatures,
+        &guardians,
         registration_pda,
+        uninitialised_pda_account(),
         noreplay_bucket,
-        noreplay_program,
+        noreplay_bucket_unmarked(),
         noreplay_authority,
     );
     let metas = build_metas(
         payer,
-        shim_program,
         guardian_set,
         guardian_signatures,
         registration_pda,
         noreplay_bucket,
-        noreplay_program,
         noreplay_authority,
     );
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &register_chain_ix_data(/* guardian_set_bump */ 0, registration_bump, &body),
+        &register_chain_ix_data(guardian_set_bump, registration_bump, &body),
         metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -310,10 +343,11 @@ fn run_register_chain(
 ) -> mollusk_svm::result::InstructionResult {
     let (registration_pda, registration_bump) = derive_chain_registration_pda(chain_to_register);
     let payer = Pubkey::new_from_array([0x11u8; 32]);
-    let shim_program = Pubkey::new_from_array([0xC1u8; 32]);
-    let guardian_set = Pubkey::new_from_array([0xC2u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
-    let noreplay_program = Pubkey::new_from_array([0xC5u8; 32]);
+    let (guardian_set, guardian_set_bump) =
+        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+    let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
+    let digest = double_keccak256_host(body);
     // Canonical program-derived noreplay authority. Matches what
     // close_pending re-derives internally and what the production CPI signs.
     let (noreplay_authority, _) =
@@ -333,46 +367,30 @@ fn run_register_chain(
         vaa_sequence,
     );
 
-    let mut accounts = build_initial_accounts(
+    let accounts = build_initial_accounts(
         payer,
-        shim_program,
+        &digest,
         guardian_set,
         guardian_signatures,
+        &guardians,
         registration_pda,
+        initial_registration.unwrap_or_else(uninitialised_pda_account),
         noreplay_bucket,
-        noreplay_program,
+        initial_noreplay_bucket.unwrap_or_else(noreplay_bucket_unmarked),
         noreplay_authority,
     );
-    if let Some(existing) = initial_registration {
-        for entry in accounts.iter_mut() {
-            if entry.0 == registration_pda {
-                entry.1 = existing;
-                break;
-            }
-        }
-    }
-    if let Some(bucket) = initial_noreplay_bucket {
-        for entry in accounts.iter_mut() {
-            if entry.0 == noreplay_bucket {
-                entry.1 = bucket;
-                break;
-            }
-        }
-    }
     let metas = build_metas(
         payer,
-        shim_program,
         guardian_set,
         guardian_signatures,
         registration_pda,
         noreplay_bucket,
-        noreplay_program,
         noreplay_authority,
     );
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &register_chain_ix_data(0, registration_bump, body),
+        &register_chain_ix_data(guardian_set_bump, registration_bump, body),
         metas,
     );
     mollusk.process_instruction(&ix, &accounts)

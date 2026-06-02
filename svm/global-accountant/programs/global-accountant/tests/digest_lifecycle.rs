@@ -8,7 +8,7 @@
 use {
     global_accountant_definitions::{
         DigestAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        DIGEST_SEED_PREFIX, VERIFY_VAA_SHIM_PROGRAM_ID,
+        CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -16,7 +16,16 @@ use {
     solana_pubkey::Pubkey,
 };
 
+mod common;
+use common::guardian_fixtures::{
+    derive_guardian_set_pda, guardian_set_account, guardian_signatures_account, make_guardians,
+    sign_digest, GUARDIAN_PUBKEY_LENGTH,
+};
+use common::mollusk_fixtures::{keyed_account_for_verify_vaa_shim_program, mollusk_with_fixtures};
+
 const PROGRAM_NAME: &str = "global_accountant";
+const GUARDIAN_COUNT: usize = 19;
+const QUORUM: u8 = 13;
 
 fn program_id() -> Pubkey {
     // Fixed program id so PDA derivation in the test matches the program's
@@ -25,7 +34,15 @@ fn program_id() -> Pubkey {
 }
 
 fn mollusk() -> Mollusk {
-    Mollusk::new(&program_id(), PROGRAM_NAME)
+    mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
+}
+
+fn core_bridge_program_id() -> Pubkey {
+    Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID)
+}
+
+fn shim_program_id() -> Pubkey {
+    Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
 }
 
 fn system_program_id() -> Pubkey {
@@ -60,54 +77,80 @@ fn open_digest_ix_data(
     data
 }
 
-fn close_digest_ix_data(mock_vaa_digest: &[u8; 32]) -> Vec<u8> {
-    // Same wire format under both feature configurations: 32-byte digest +
-    // 1-byte guardian_set_bump. The mock branch ignores the trailing byte; the
-    // real branch passes it through to the Shim's `VerifyHash` CPI so it can
-    // derive the Core Bridge's `GuardianSet` PDA without re-running
-    // `find_program_address`.
+fn close_digest_ix_data(vaa_digest: &[u8; 32], guardian_set_bump: u8) -> Vec<u8> {
+    // 32-byte digest + 1-byte guardian_set_bump. The bump is consumed by the
+    // Shim's `VerifyHash` to re-derive the Core Bridge's `GuardianSet` PDA
+    // without re-running `find_program_address`.
     let mut data = Vec::with_capacity(1 + 32 + 1);
     data.push(IxDiscriminator::CloseDigest as u8);
-    data.extend_from_slice(mock_vaa_digest);
-    data.push(0);
+    data.extend_from_slice(vaa_digest);
+    data.push(guardian_set_bump);
     data
 }
 
-/// Placeholder pubkey for the Shim accounts the mock branch ignores. The real
-/// branch populates these via `surfnet_setAccount` cheatcodes in the surfpool
-/// e2e tests; under `mock-vaa` they round-trip through the runtime as inert
-/// system-owned accounts.
-fn shim_placeholder_account(seed: u8) -> (Pubkey, Account) {
-    (Pubkey::new_from_array([seed; 32]), system_owned_account(0))
-}
-
-/// Three trailing accounts every `close_digest` invocation now carries:
-/// guardian-signatures PDA, guardian-set PDA, and the Verify VAA Shim program
-/// itself. The mock-vaa branch ignores their contents but still expects them
-/// to be present so the wire shape matches the production-shape build.
-///
-/// The shim-program AccountMeta uses the canonical program ID so the
-/// defence-in-depth equality check in the production branch still passes when
-/// the same instruction shape is replayed by surfpool against the real Shim.
-fn close_digest_extra_metas() -> (Vec<AccountMeta>, Vec<(Pubkey, Account)>) {
-    // Pubkey seeds chosen to avoid collisions with any test-local actor
-    // (payers use 0x01..0x09, 0xC1, 0xD1; attacker = 0xAA, wrong_recipient =
-    // 0xBB).
-    let (gs_pubkey, gs_account) = shim_placeholder_account(0xE1);
-    let (gset_pubkey, gset_account) = shim_placeholder_account(0xE2);
-    let shim_program_pubkey = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
-    let shim_program_account = system_owned_account(0);
+/// Three trailing accounts every `close_digest` invocation carries:
+/// guardian-signatures PDA, guardian-set PDA, and the Verify VAA Shim
+/// program itself. Negative-path tests that fail before reaching the Shim
+/// CPI (digest mismatch, payer mismatch, ownership spoof) can pass
+/// uninitialised sentinel accounts here; the happy-path test populates
+/// them with real fixtures via `close_digest_quorum_extras`.
+fn close_digest_extras_sentinel() -> (Vec<AccountMeta>, Vec<(Pubkey, Account)>) {
+    let gs_pubkey = Pubkey::new_from_array([0xE1u8; 32]);
+    let gset_pubkey = Pubkey::new_from_array([0xE2u8; 32]);
     (
         vec![
             AccountMeta::new_readonly(gs_pubkey, false),
             AccountMeta::new_readonly(gset_pubkey, false),
-            AccountMeta::new_readonly(shim_program_pubkey, false),
+            AccountMeta::new_readonly(shim_program_id(), false),
         ],
         vec![
-            (gs_pubkey, gs_account),
-            (gset_pubkey, gset_account),
-            (shim_program_pubkey, shim_program_account),
+            (gs_pubkey, system_owned_account(0)),
+            (gset_pubkey, system_owned_account(0)),
+            keyed_account_for_verify_vaa_shim_program(),
         ],
+    )
+}
+
+/// Build the three trailing Shim accounts with real GuardianSignatures +
+/// GuardianSet fixtures so the Shim's `VerifyHash` CPI succeeds. Returns the
+/// guardian_set_bump alongside the metas/accounts pair so the caller can pin
+/// the close_digest ix data to the canonical Shim derivation.
+fn close_digest_extras_quorum(
+    digest: &[u8; 32],
+    guardian_set_index: u32,
+    refund_recipient: &Pubkey,
+) -> (Vec<AccountMeta>, Vec<(Pubkey, Account)>, u8) {
+    let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
+    let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
+    let (guardian_set_pubkey, guardian_set_bump) =
+        derive_guardian_set_pda(guardian_set_index, &core_bridge_program_id());
+    let gs_pubkey = Pubkey::new_from_array([0xE1u8; 32]);
+    let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
+        .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
+        .collect();
+    (
+        vec![
+            AccountMeta::new_readonly(gs_pubkey, false),
+            AccountMeta::new_readonly(guardian_set_pubkey, false),
+            AccountMeta::new_readonly(shim_program_id(), false),
+        ],
+        vec![
+            (
+                gs_pubkey,
+                guardian_signatures_account(
+                    guardian_set_index,
+                    refund_recipient,
+                    &sigs,
+                    &shim_program_id(),
+                ),
+            ),
+            (
+                guardian_set_pubkey,
+                guardian_set_account(guardian_set_index, &keys, 0, 0, &core_bridge_program_id()),
+            ),
+            keyed_account_for_verify_vaa_shim_program(),
+        ],
+        guardian_set_bump,
     )
 }
 
@@ -257,8 +300,12 @@ fn open_then_close_round_trip() {
     );
 
     // -- Close --------------------------------------------------------------
-    let mock_vaa_first_32 = digest; // matches the stored digest
-    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    // Happy-path: build real GuardianSignatures + GuardianSet fixtures so the
+    // Shim's VerifyHash CPI succeeds. The refund recipient encoded in the
+    // GuardianSignatures account is the payer — irrelevant for close_digest
+    // itself, but the Shim requires the field to be present.
+    let (extra_metas, extra_accounts, guardian_set_bump) =
+        close_digest_extras_quorum(&digest, guardian_set_index, &payer);
     let mut metas = vec![
         AccountMeta::new_readonly(payer, true), // payer can also be the closer
         AccountMeta::new(state.pda, false),
@@ -267,7 +314,7 @@ fn open_then_close_round_trip() {
     metas.extend(extra_metas);
     let close_ix = Instruction::new_with_bytes(
         program_id(),
-        &close_digest_ix_data(&mock_vaa_first_32),
+        &close_digest_ix_data(&digest, guardian_set_bump),
         metas,
     );
 
@@ -383,15 +430,18 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     let mut bad_vaa_digest = digest;
     bad_vaa_digest[0] ^= 0xff; // flip a bit so the digests no longer match.
 
-    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let (extra_metas, extra_accounts) = close_digest_extras_sentinel();
     let mut metas = vec![
         AccountMeta::new_readonly(payer, true),
         AccountMeta::new(state.pda, false),
         AccountMeta::new(payer, false),
     ];
     metas.extend(extra_metas);
-    let close_ix =
-        Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&bad_vaa_digest), metas);
+    let close_ix = Instruction::new_with_bytes(
+        program_id(),
+        &close_digest_ix_data(&bad_vaa_digest, 0),
+        metas,
+    );
 
     let mut close_accounts = vec![
         (payer, state.payer_after_open.clone()),
@@ -545,14 +595,15 @@ fn close_with_spoofed_system_owned_pda_fails() {
     };
 
     let attacker_starting_lamports = 1_000_000;
-    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let (extra_metas, extra_accounts) = close_digest_extras_sentinel();
     let mut metas = vec![
         AccountMeta::new_readonly(attacker, true),
         AccountMeta::new(pda, false),
         AccountMeta::new(attacker, false),
     ];
     metas.extend(extra_metas);
-    let close_ix = Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&digest), metas);
+    let close_ix =
+        Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&digest, 0), metas);
 
     let mut close_accounts = vec![
         (attacker, system_owned_account(attacker_starting_lamports)),
@@ -598,14 +649,15 @@ fn close_with_wrong_rent_recipient_fails() {
     let wrong_recipient = Pubkey::new_from_array([0xBBu8; 32]);
     let wrong_recipient_starting = 7_777_777u64;
 
-    let (extra_metas, extra_accounts) = close_digest_extra_metas();
+    let (extra_metas, extra_accounts) = close_digest_extras_sentinel();
     let mut metas = vec![
         AccountMeta::new_readonly(payer, true),
         AccountMeta::new(state.pda, false),
         AccountMeta::new(wrong_recipient, false),
     ];
     metas.extend(extra_metas);
-    let close_ix = Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&digest), metas);
+    let close_ix =
+        Instruction::new_with_bytes(program_id(), &close_digest_ix_data(&digest, 0), metas);
 
     let mut close_accounts = vec![
         (payer, system_owned_account(0)),

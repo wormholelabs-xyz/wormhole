@@ -1,10 +1,9 @@
 //! Integration tests for `submit_vaas`.
 //!
-//! Gated on the paired `(mock-vaa, test-only-open-digest, mock-noreplay)`
-//! feature trio so the in-process mollusk runs skip the Verify VAA Shim CPI,
-//! expose the `open_digest` cross-check entrypoint, and substitute a
-//! single-byte NoReplay sentinel for the real CPI. The surfpool e2e test
-//! (`surfpool_e2e_submit_vaas.rs`) drives the real CPI path.
+//! Driven against a Mollusk instance with the real `solana_noreplay.so` and
+//! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
+//! `common::mollusk_fixtures`). The `test-only-open-digest` feature exposes
+//! the `OpenDigest` arm so digest-PDA cross-checks can short-circuit setup.
 //!
 //! Test surface:
 //!
@@ -13,9 +12,8 @@
 //! - duplicate replay: second `submit_vaas` for the same `(chain, emitter,
 //!   sequence)` rejects via the NoReplay pre-check.
 //! - attest payload (action 0x02): no balance work but commit completes.
-//! - body / Shim digest mismatch: real CPI would reject; we exercise the
-//!   surrounding plumbing under the mock branch and pin the digest path
-//!   shape (the e2e test is the canonical real-CPI guard).
+//! - body / Shim digest mismatch: real Shim CPI rejects under sub-quorum or
+//!   unrelated digest.
 //! - lazy-init of destination Account PDA.
 //! - balance underflow: whole tx reverts (NoReplay stays unset, DigestAccount
 //!   stays unopened) — Solana atomicity.
@@ -26,8 +24,9 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -35,7 +34,24 @@ use {
     solana_pubkey::Pubkey,
 };
 
+mod common;
+use common::guardian_fixtures::{
+    derive_guardian_set_pda, guardian_set_account, guardian_signatures_account, make_guardians,
+    sign_digest, Guardian, GUARDIAN_PUBKEY_LENGTH,
+};
+use common::mollusk_fixtures::{
+    keyed_account_for_noreplay_program, keyed_account_for_verify_vaa_shim_program,
+    mollusk_with_fixtures,
+};
+
 const PROGRAM_NAME: &str = "global_accountant";
+const GUARDIAN_COUNT: usize = 19;
+const QUORUM: u8 = 13;
+/// Fixed guardian set index every scenario signs against. `submit_vaas`
+/// records `0` in the `DigestAccountLayout::guardian_set_index` field as a
+/// "from-Shim" sentinel (the Shim itself validates against the current set);
+/// this is the index baked into the GuardianSet+GuardianSignatures fixtures.
+const GUARDIAN_SET_INDEX: u32 = 4;
 
 fn program_id() -> Pubkey {
     // Fixed program id so PDA derivations match the on-chain program's view.
@@ -43,11 +59,19 @@ fn program_id() -> Pubkey {
 }
 
 fn mollusk() -> Mollusk {
-    Mollusk::new(&program_id(), PROGRAM_NAME)
+    mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
 }
 
 fn system_program_id() -> Pubkey {
     keyed_account_for_system_program().0
+}
+
+fn core_bridge_program_id() -> Pubkey {
+    Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID)
+}
+
+fn shim_program_id() -> Pubkey {
+    Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
 }
 
 // ============================================================================
@@ -193,51 +217,53 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
+/// Fresh (uninitialised) NoReplay bucket: system-owned, zero data. The real
+/// `solana_noreplay` CPI allocates the 129-byte bitmap, assigns ownership to
+/// itself, and flips the bit on first `MarkUsed`.
 fn noreplay_bucket_unmarked() -> Account {
+    system_owned_account(0)
+}
+
+/// Pre-marked NoReplay bucket for replay-rejection tests: 129-byte bitmap
+/// owned by `solana_noreplay` with the bit at `sequence % 1024` set.
+fn noreplay_bucket_marked(sequence: u64) -> Account {
+    let mut data = vec![0u8; NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES];
+    let bit_index = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
+    data[NOREPLAY_BITMAP_OFFSET + bit_index / 8] |= 1u8 << (bit_index % 8);
     Account {
-        lamports: 1_000_000,
-        data: vec![0u8; 1],
-        owner: program_id(),
+        lamports: 1_500_000_000,
+        data,
+        owner: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         executable: false,
         rent_epoch: 0,
     }
 }
 
-fn noreplay_bucket_marked() -> Account {
-    Account {
-        lamports: 1_000_000,
-        data: vec![0x01u8; 1],
-        owner: program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
+/// Build a real-fixture `GuardianSignatures` account: quorum guardians sign
+/// the supplied digest, packed into the Shim's layout with the canonical
+/// owner. The Shim's `VerifyHash` will recover each pubkey and match against
+/// the `GuardianSet` fixture below.
+fn real_guardian_signatures_account(
+    digest: &[u8; 32],
+    refund_recipient: &Pubkey,
+    guardians: &[Guardian],
+) -> Account {
+    let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
+        .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
+        .collect();
+    guardian_signatures_account(
+        GUARDIAN_SET_INDEX,
+        refund_recipient,
+        &sigs,
+        &shim_program_id(),
+    )
 }
 
-/// Stand-in for a posted `GuardianSignatures` PDA. Under `mock-vaa` the Shim
-/// CPI is a no-op so the account data is irrelevant — any read-only slot
-/// satisfies the runtime account-meta. Using a Shim-program-owned account
-/// keeps the address shape consistent with what production observes; the
-/// owner choice is documentary, the mock branch never reads it.
-fn fabricated_guardian_signatures_account() -> Account {
-    Account {
-        lamports: 1_572_960, // rent-exempt-ish, irrelevant
-        data: vec![0u8; 16],
-        owner: Pubkey::new_from_array(global_accountant_definitions::VERIFY_VAA_SHIM_PROGRAM_ID),
-        executable: false,
-        rent_epoch: 0,
-    }
-}
-
-fn fabricated_guardian_set_account() -> Account {
-    // The mock-vaa branch doesn't read the guardian-set bytes; provide a
-    // minimal placeholder so the account meta is satisfied.
-    Account {
-        lamports: 1_000_000,
-        data: vec![0u8; 8],
-        owner: Pubkey::new_from_array([0xCCu8; 32]),
-        executable: false,
-        rent_epoch: 0,
-    }
+/// Build a real-fixture `GuardianSet` account: 19 synthetic guardian eth
+/// addresses, never-expires (`expiration_time = 0`), owned by Core Bridge.
+fn real_guardian_set_account(guardians: &[Guardian]) -> Account {
+    let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
+    guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id())
 }
 
 // ============================================================================
@@ -254,15 +280,14 @@ struct Scenario {
     guardian_set_bump: u8,
     submitter: Pubkey,
     digest_pda: Pubkey,
-    verify_vaa_shim_program: Pubkey,
     guardian_set_pubkey: Pubkey,
     guardian_signatures_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
-    noreplay_program_pubkey: Pubkey,
     noreplay_authority_pubkey: Pubkey,
     source_account_pubkey: Pubkey,
     dest_account_pubkey: Pubkey,
     chain_registration_pubkey: Pubkey,
+    guardians: Vec<Guardian>,
 }
 
 impl Scenario {
@@ -287,6 +312,9 @@ impl Scenario {
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
         let noreplay_bucket_pubkey =
             derive_canonical_noreplay_bucket(&noreplay_authority_pubkey, chain, &emitter, sequence);
+        let (guardian_set_pubkey, guardian_set_bump) =
+            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+        let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
 
         Self {
             chain,
@@ -294,24 +322,18 @@ impl Scenario {
             sequence,
             body,
             digest,
-            // Bump under `mock-vaa` is documentary; the mock branch never
-            // reads it. Pin a recognisable value rather than 0/255 so a
-            // future mistake reading the byte surfaces as a logged "255".
-            guardian_set_bump: 254,
+            guardian_set_bump,
             submitter,
             digest_pda,
-            verify_vaa_shim_program: Pubkey::new_from_array(
-                global_accountant_definitions::VERIFY_VAA_SHIM_PROGRAM_ID,
-            ),
-            guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
+            guardian_set_pubkey,
             guardian_signatures_pubkey: Pubkey::new_from_array([0xC5u8; 32]),
             noreplay_bucket_pubkey,
-            noreplay_program_pubkey: Pubkey::new_from_array([0xC3u8; 32]),
             noreplay_authority_pubkey,
             // Sentinel: Attest payloads never touch slots 8/9.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
             chain_registration_pubkey,
+            guardians,
         }
     }
 
@@ -345,12 +367,12 @@ impl Scenario {
     fn account_metas(&self) -> Vec<AccountMeta> {
         vec![
             AccountMeta::new(self.submitter, true),
-            AccountMeta::new_readonly(self.verify_vaa_shim_program, false),
+            AccountMeta::new_readonly(shim_program_id(), false),
             AccountMeta::new_readonly(self.guardian_set_pubkey, false),
             AccountMeta::new_readonly(self.guardian_signatures_pubkey, false),
             AccountMeta::new(self.digest_pda, false),
             AccountMeta::new(self.noreplay_bucket_pubkey, false),
-            AccountMeta::new_readonly(self.noreplay_program_pubkey, false),
+            AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
             AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
             AccountMeta::new(self.source_account_pubkey, false),
             AccountMeta::new(self.dest_account_pubkey, false),
@@ -362,24 +384,18 @@ impl Scenario {
     fn initial_accounts(&self) -> Vec<(Pubkey, Account)> {
         let mut accounts = vec![
             (self.submitter, system_owned_account(50_000_000_000)),
+            keyed_account_for_verify_vaa_shim_program(),
             (
-                self.verify_vaa_shim_program,
-                Account {
-                    lamports: 1,
-                    data: vec![],
-                    owner: Pubkey::new_from_array([0xAAu8; 32]),
-                    executable: true,
-                    rent_epoch: 0,
-                },
+                self.guardian_set_pubkey,
+                real_guardian_set_account(&self.guardians),
             ),
-            (self.guardian_set_pubkey, fabricated_guardian_set_account()),
             (
                 self.guardian_signatures_pubkey,
-                fabricated_guardian_signatures_account(),
+                real_guardian_signatures_account(&self.digest, &self.submitter, &self.guardians),
             ),
             (self.digest_pda, uninitialised_pda_account()),
             (self.noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
-            (self.noreplay_program_pubkey, system_owned_account(0)),
+            keyed_account_for_noreplay_program(),
             (self.noreplay_authority_pubkey, system_owned_account(0)),
         ];
         if self.source_account_pubkey != self.noreplay_authority_pubkey {
@@ -423,6 +439,38 @@ fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Acco
         .1
 }
 
+/// Assert the supplied noreplay bucket account has been transferred to the
+/// noreplay program, allocated to 129 bytes, and has the bit at
+/// `sequence % 1024` set. Used by happy-path assertions.
+fn assert_bucket_marked(bucket: &Account, sequence: u64) {
+    assert_eq!(
+        bucket.owner,
+        Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        "bucket owned by solana_noreplay after MarkUsed"
+    );
+    assert_eq!(
+        bucket.data.len(),
+        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES,
+        "bucket sized to bitmap layout"
+    );
+    let bit = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
+    let byte = NOREPLAY_BITMAP_OFFSET + bit / 8;
+    let mask = 1u8 << (bit % 8);
+    assert_eq!(bucket.data[byte] & mask, mask, "bitmap bit set");
+}
+
+/// Assert the supplied noreplay bucket is still in its lazy-create entry
+/// state (system-owned, empty). Used by negative-path assertions to confirm
+/// the tx rolled back cleanly.
+fn assert_bucket_unmarked(bucket: &Account) {
+    assert_eq!(
+        bucket.owner,
+        system_program_id(),
+        "bucket still system-owned"
+    );
+    assert!(bucket.data.is_empty(), "bucket still uninitialised");
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -451,12 +499,10 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
         result.program_result
     );
 
-    // NoReplay flipped to marked.
+    // NoReplay flipped: real CPI lazily allocates 129-byte bitmap, assigns
+    // ownership, sets bit at `sequence % 1024`.
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(
-        bucket.data[0], 0x01,
-        "NoReplay flipped on submit_vaas commit"
-    );
+    assert_bucket_marked(bucket, scenario.sequence);
 
     // DigestAccount opened with the expected digest.
     let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
@@ -538,7 +584,7 @@ fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
 
     // NoReplay flipped, DigestAccount opened.
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0x01);
+    assert_bucket_marked(bucket, scenario.sequence);
     let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
     assert_eq!(digest.owner, program_id());
     let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
@@ -576,7 +622,7 @@ fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
     let mut accounts = scenario.initial_accounts();
     for (key, acct) in accounts.iter_mut() {
         if *key == scenario.noreplay_bucket_pubkey {
-            *acct = noreplay_bucket_marked();
+            *acct = noreplay_bucket_marked(scenario.sequence);
         }
     }
 
@@ -684,7 +730,7 @@ fn submit_vaas_with_balance_underflow_reverts() {
     // not open. Solana atomicity guarantees this; the assertion is
     // belt-and-braces.
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0u8);
+    assert_bucket_unmarked(bucket);
     let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
     assert!(digest.data.is_empty());
 }

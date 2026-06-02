@@ -1,9 +1,9 @@
 //! Integration tests for `submit_observations` + `close_pending`.
 //!
-//! Gated on the paired (`mock-vaa`, `test-only-open-digest`, `mock-noreplay`)
-//! feature trio so the in-process mollusk runs can sidestep the Verify VAA
-//! Shim, expose the test-only `open_digest` for cross-verification, and use a
-//! single-byte NoReplay sentinel in place of the real CPI.
+//! Driven against a Mollusk instance with the real `solana_noreplay.so`
+//! loaded at the canonical program ID (see `common::mollusk_fixtures`). The
+//! `test-only-open-digest` feature exposes the `OpenDigest` arm for the
+//! direct-drive close-side tests.
 //!
 //! Test surface covered:
 //!
@@ -21,8 +21,8 @@ use {
         BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX,
-        MAX_QUORUM_BRANCH_CU, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
-        NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
+        MAX_QUORUM_BRANCH_CU, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
+        NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -30,6 +30,9 @@ use {
     solana_instruction::{AccountMeta, Instruction},
     solana_pubkey::Pubkey,
 };
+
+mod common;
+use common::mollusk_fixtures::{keyed_account_for_noreplay_program, mollusk_with_fixtures};
 
 const PROGRAM_NAME: &str = "global_accountant";
 
@@ -40,7 +43,7 @@ fn program_id() -> Pubkey {
 }
 
 fn mollusk() -> Mollusk {
-    Mollusk::new(&program_id(), PROGRAM_NAME)
+    mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
 }
 
 fn system_program_id() -> Pubkey {
@@ -254,27 +257,26 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// 1-byte NoReplay bucket: `0x00` = unmarked, `0x01` = marked.
-///
-/// Owned by our program ID so the mock's `mark_used` path can write to the
-/// data buffer (the runtime forbids writes to accounts the program does not
-/// own). The real CPI path will use the actual NoReplay program ID; the mock
-/// is just a stand-in.
+/// Fresh (uninitialised) NoReplay bucket: the canonical lazy-create entry
+/// state — system-owned, zero data. The real `solana_noreplay` CPI allocates
+/// the 129-byte bitmap, assigns ownership to itself, and flips the bit on
+/// first `MarkUsed`.
 fn noreplay_bucket_unmarked() -> Account {
-    Account {
-        lamports: 1_000_000,
-        data: vec![0u8; 1],
-        owner: program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
+    system_owned_account(0)
 }
 
-fn noreplay_bucket_marked() -> Account {
+/// Pre-marked NoReplay bucket for replay-rejection tests: 129-byte bitmap
+/// owned by `solana_noreplay` with the bit at `sequence % 1024` already set.
+/// Caller passes the sequence value so the bit lookup matches the bucket
+/// the production `is_marked` pre-check will perform.
+fn noreplay_bucket_marked(sequence: u64) -> Account {
+    let mut data = vec![0u8; NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES];
+    let bit_index = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
+    data[NOREPLAY_BITMAP_OFFSET + bit_index / 8] |= 1u8 << (bit_index % 8);
     Account {
-        lamports: 1_000_000,
-        data: vec![0x01u8; 1],
-        owner: program_id(),
+        lamports: 1_500_000_000,
+        data,
+        owner: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         executable: false,
         rent_epoch: 0,
     }
@@ -461,7 +463,7 @@ impl Scenario {
             digest_bump,
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
             noreplay_bucket_pubkey,
-            noreplay_program_pubkey: Pubkey::new_from_array([0xC3u8; 32]),
+            noreplay_program_pubkey: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
             noreplay_authority_pubkey,
             // Attest payload ⇒ slots 8/9 never touched. Use a sentinel pubkey
             // so the runtime account-meta is satisfied without needing the
@@ -583,7 +585,7 @@ impl Scenario {
             (self.noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
             (self.digest_pda, uninitialised_pda_account()),
             keyed_account_for_system_program(),
-            (self.noreplay_program_pubkey, system_owned_account(0)),
+            keyed_account_for_noreplay_program(),
             (self.noreplay_authority_pubkey, system_owned_account(0)),
         ];
         // Slots 8 and 9. Re-use existing entries when the sentinel collapses
@@ -672,9 +674,16 @@ fn submit_first_observation_creates_pending_pda() {
         "digest PDA must not be opened before quorum reach"
     );
 
-    // No quorum yet -> NoReplay bucket is unmarked.
+    // No quorum yet -> NoReplay bucket stays in its lazy-create entry state
+    // (system-owned, zero data). The real CPI only fires on the quorum
+    // branch.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
-    assert_eq!(bucket.data[0], 0u8, "NoReplay bucket still unmarked");
+    assert_eq!(
+        bucket.owner,
+        system_program_id(),
+        "bucket still system-owned"
+    );
+    assert!(bucket.data.is_empty(), "bucket still uninitialised");
 }
 
 #[test]
@@ -699,10 +708,16 @@ fn submit_12_observations_accumulates_without_commit() {
     // Quorum not yet reached: digest PDA still uninit, NoReplay still unmarked.
     let digest = find_account(&accounts, &scenario.digest_pda);
     assert!(digest.data.is_empty(), "digest PDA untouched at 12/19");
+    // Quorum not reached: bucket still in lazy-create entry state.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
-        bucket.data[0], 0u8,
-        "NoReplay bucket still unmarked at 12/19"
+        bucket.owner,
+        system_program_id(),
+        "bucket still system-owned"
+    );
+    assert!(
+        bucket.data.is_empty(),
+        "bucket still uninitialised at 12/19"
     );
 }
 
@@ -754,11 +769,27 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
         "digest payer = submitter of the quorum-completing tx"
     );
 
-    // NoReplay must be flipped to marked.
+    // NoReplay must be flipped: real solana_noreplay CPI lazily allocates
+    // the 129-byte bitmap, assigns ownership to itself, and sets the bit at
+    // `sequence % 1024`.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
-        bucket.data[0], 0x01,
-        "NoReplay bucket flipped to marked on quorum reach"
+        bucket.owner,
+        Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        "bucket owned by solana_noreplay after MarkUsed"
+    );
+    assert_eq!(
+        bucket.data.len(),
+        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES,
+        "bucket data sized to bitmap layout"
+    );
+    let bit = (scenario.sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
+    let byte = NOREPLAY_BITMAP_OFFSET + bit / 8;
+    let mask = 1u8 << (bit % 8);
+    assert_eq!(
+        bucket.data[byte] & mask,
+        mask,
+        "bitmap bit set on quorum reach"
     );
 }
 
@@ -961,7 +992,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         &body_emitter,
         body_sequence,
     );
-    let noreplay_program_pubkey = Pubkey::new_from_array([0xC3u8; 32]);
+    let noreplay_program_pubkey = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
 
     let ix_data = submit_ix_data(
         &digest,
@@ -989,7 +1020,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         (noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
         (body_digest_pda, uninitialised_pda_account()),
         keyed_account_for_system_program(),
-        (noreplay_program_pubkey, system_owned_account(0)),
+        keyed_account_for_noreplay_program(),
         (noreplay_authority_pubkey, system_owned_account(0)),
         (
             registration_pda,
@@ -1769,8 +1800,13 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     //   - D1 pending PDA still exists with its 7 sigs.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
-        bucket.data[0], 0x01,
+        bucket.owner,
+        Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         "NoReplay flipped on D2 quorum reach (shared bucket across siblings)"
+    );
+    assert_eq!(
+        bucket.data.len(),
+        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES
     );
 
     let digest_acc = find_account(&accounts, &scenario.digest_pda);
@@ -1827,7 +1863,7 @@ fn close_pending_stranded_digest_bucket_after_sibling_committed() {
         .iter_mut()
         .find(|(k, _)| *k == scenario.noreplay_bucket_pubkey)
     {
-        entry.1 = noreplay_bucket_marked();
+        entry.1 = noreplay_bucket_marked(scenario.sequence);
     }
 
     // Trigger (b): NoReplay-marked. The D1 pending PDA is closed; rent goes
@@ -1873,7 +1909,7 @@ fn submit_rejected_when_noreplay_already_marked() {
         .iter_mut()
         .find(|(k, _)| *k == scenario.noreplay_bucket_pubkey)
     {
-        entry.1 = noreplay_bucket_marked();
+        entry.1 = noreplay_bucket_marked(scenario.sequence);
     }
 
     let r = scenario.submit_once(&mollusk, accounts, 0);
@@ -1964,7 +2000,7 @@ fn close_pending_with_noreplay_marked_succeeds() {
         .iter_mut()
         .find(|(k, _)| *k == scenario.noreplay_bucket_pubkey)
     {
-        entry.1 = noreplay_bucket_marked();
+        entry.1 = noreplay_bucket_marked(scenario.sequence);
     }
 
     let ix = Instruction::new_with_bytes(
@@ -2006,7 +2042,7 @@ fn close_pending_with_overflowing_rent_recipient_rejects() {
         .iter_mut()
         .find(|(k, _)| *k == scenario.noreplay_bucket_pubkey)
     {
-        entry.1 = noreplay_bucket_marked();
+        entry.1 = noreplay_bucket_marked(scenario.sequence);
     }
     if let Some(entry) = accounts.iter_mut().find(|(k, _)| *k == scenario.submitter) {
         entry.1.lamports = u64::MAX;
@@ -2322,9 +2358,15 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     // Transactional integrity: the failed quorum tx must NOT have committed
     // partial state. The NoReplay bit, DigestAccount, and pending PDA stay
     // untouched (Solana txs are all-or-nothing).
+    // Tx rolled back: bucket stays in lazy-create entry state.
     let bucket = find_account(&r.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
-        bucket.data[0], 0u8,
+        bucket.owner,
+        system_program_id(),
+        "bucket still system-owned"
+    );
+    assert!(
+        bucket.data.is_empty(),
         "NoReplay must not flip on failed quorum"
     );
     let digest = find_account(&r.resulting_accounts, &scenario.digest_pda);

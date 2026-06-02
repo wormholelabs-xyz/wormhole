@@ -1,9 +1,9 @@
 //! Integration tests for `modify_balance`.
 //!
-//! Gated on the paired `(mock-vaa, test-only-open-digest, mock-noreplay)`
-//! feature trio so the in-process mollusk runs skip the Verify VAA Shim CPI.
-//! Production builds CPI into the Shim against real guardian signatures; the
-//! surfpool e2e suite is the canonical real-CPI guard.
+//! Driven against a Mollusk instance with the real `wormhole_verify_vaa_shim.so`
+//! loaded at the canonical Shim program ID (see `common::mollusk_fixtures`).
+//! The `test-only-open-digest` feature exposes the auxiliary direct-drive
+//! entrypoints unrelated to this ix.
 //!
 //! Coverage:
 //!   - happy path Add on uninit BalanceAccount: lazy-inits + credits.
@@ -21,7 +21,8 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
         ModificationLogLayout, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
-        GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
+        CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
+        MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -29,18 +30,42 @@ use {
     solana_pubkey::Pubkey,
 };
 
+mod common;
+use common::guardian_fixtures::{
+    derive_guardian_set_pda, guardian_set_account, guardian_signatures_account, make_guardians,
+    sign_digest, Guardian, GUARDIAN_PUBKEY_LENGTH,
+};
+use common::mollusk_fixtures::{keyed_account_for_verify_vaa_shim_program, mollusk_with_fixtures};
+
 const PROGRAM_NAME: &str = "global_accountant";
+const GUARDIAN_COUNT: usize = 19;
+const QUORUM: u8 = 13;
+const GUARDIAN_SET_INDEX: u32 = 4;
 
 fn program_id() -> Pubkey {
     Pubkey::new_from_array([7u8; 32])
 }
 
 fn mollusk() -> Mollusk {
-    Mollusk::new(&program_id(), PROGRAM_NAME)
+    mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
 }
 
 fn system_program_id() -> Pubkey {
     keyed_account_for_system_program().0
+}
+
+fn core_bridge_program_id() -> Pubkey {
+    Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID)
+}
+
+fn shim_program_id() -> Pubkey {
+    Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
+}
+
+/// Host-side `keccak256(keccak256(body))` — the Wormhole digest convention.
+fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
+    let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
+    solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
 fn derive_balance_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
@@ -168,15 +193,14 @@ fn modify_balance_ix_data(
 
 /// Account fixtures + meta vec for the `modify_balance` ix. Slot order:
 ///   0. payer (SIGNER, WRITE)
-///   1. Verify VAA Shim program (sentinel under mock-vaa)
-///   2. Core Bridge GuardianSet (sentinel under mock-vaa)
-///   3. GuardianSignatures (sentinel under mock-vaa)
+///   1. Verify VAA Shim program
+///   2. Core Bridge GuardianSet
+///   3. GuardianSignatures
 ///   4. BalanceAccount PDA (WRITE)
 ///   5. system program
 ///   6. ModificationLog PDA (WRITE)
 fn build_metas(
     payer: Pubkey,
-    shim_program: Pubkey,
     guardian_set: Pubkey,
     guardian_signatures: Pubkey,
     balance_pda: Pubkey,
@@ -184,7 +208,7 @@ fn build_metas(
 ) -> Vec<AccountMeta> {
     vec![
         AccountMeta::new(payer, true),
-        AccountMeta::new_readonly(shim_program, false),
+        AccountMeta::new_readonly(shim_program_id(), false),
         AccountMeta::new_readonly(guardian_set, false),
         AccountMeta::new_readonly(guardian_signatures, false),
         AccountMeta::new(balance_pda, false),
@@ -195,19 +219,30 @@ fn build_metas(
 
 fn build_initial_accounts(
     payer: Pubkey,
-    shim_program: Pubkey,
-    guardian_set: Pubkey,
-    guardian_signatures: Pubkey,
+    digest: &[u8; 32],
+    guardian_set_pubkey: Pubkey,
+    guardian_signatures_pubkey: Pubkey,
+    guardians: &[Guardian],
     balance_pda: Pubkey,
     balance_pda_state: Account,
     modification_pda: Pubkey,
     modification_pda_state: Account,
 ) -> Vec<(Pubkey, Account)> {
+    let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
+        .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
+        .collect();
+    let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
     vec![
         (payer, system_owned_account(50_000_000_000)),
-        (shim_program, system_owned_account(0)),
-        (guardian_set, system_owned_account(0)),
-        (guardian_signatures, system_owned_account(0)),
+        keyed_account_for_verify_vaa_shim_program(),
+        (
+            guardian_set_pubkey,
+            guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id()),
+        ),
+        (
+            guardian_signatures_pubkey,
+            guardian_signatures_account(GUARDIAN_SET_INDEX, &payer, &sigs, &shim_program_id()),
+        ),
         (balance_pda, balance_pda_state),
         keyed_account_for_system_program(),
         (modification_pda, modification_pda_state),
@@ -234,17 +269,20 @@ fn run_modify_balance(
     let (modification_pda, modification_bump) = derive_modification_pda(payload_sequence);
 
     let payer = Pubkey::new_from_array([0x11u8; 32]);
-    let shim_program = Pubkey::new_from_array([0xC1u8; 32]);
-    let guardian_set = Pubkey::new_from_array([0xC2u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
+    let (guardian_set, guardian_set_bump) =
+        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+    let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
+    let digest = double_keccak256_host(body);
 
     let balance_pda_bump = balance_pda_bump_override.unwrap_or(canonical_balance_bump);
 
     let accounts = build_initial_accounts(
         payer,
-        shim_program,
+        &digest,
         guardian_set,
         guardian_signatures,
+        &guardians,
         balance_pda,
         balance_initial.unwrap_or_else(uninitialised_pda_account),
         modification_pda,
@@ -252,7 +290,6 @@ fn run_modify_balance(
     );
     let metas = build_metas(
         payer,
-        shim_program,
         guardian_set,
         guardian_signatures,
         balance_pda,
@@ -261,12 +298,7 @@ fn run_modify_balance(
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &modify_balance_ix_data(
-            /* guardian_set_bump */ 0,
-            balance_pda_bump,
-            modification_bump,
-            body,
-        ),
+        &modify_balance_ix_data(guardian_set_bump, balance_pda_bump, modification_bump, body),
         metas,
     );
     mollusk.process_instruction(&ix, &accounts)
