@@ -7,18 +7,18 @@ SBF_OUT_DIR := $(CURDIR)/target/deploy
 
 # Two build targets. Keep the split unambiguous:
 #
-#   * build-dev   — test/dev build with the mock-vaa close path and
-#                   `test-only-open-digest` exposed. This is what `make test`
-#                   depends on; the resulting `.so` is for mollusk and the
-#                   surfpool spike only.
-#   * build-prod  — production build with both features OFF. The default
-#                   `close_digest` branch CPIs into the Verify VAA Shim
-#                   (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`) and the
+#   * build-dev   — test/dev build with `test-only-open-digest` exposed. This
+#                   is what `make test` depends on; the resulting `.so` exposes
+#                   the `OpenDigest` arm for direct mollusk test drives. The
+#                   noreplay and Shim CPIs are real in both builds — mocks were
+#                   retired in favour of sibling-program fixtures loaded by
+#                   mollusk.
+#   * build-prod  — production build with `test-only-open-digest` OFF. The
 #                   `open_digest` direct entrypoint is not in the dispatch
-#                   table. This is the shape that will ship to mainnet.
+#                   table. Shape that will ship to mainnet.
 .PHONY: build-dev
-build-dev:
-	cargo build-sbf --features bpf-entrypoint,mock-vaa,test-only-open-digest,mock-noreplay
+build-dev: build-test-fixtures
+	cargo build-sbf --features bpf-entrypoint,test-only-open-digest
 
 .PHONY: build-prod
 build-prod:
@@ -29,9 +29,39 @@ build-prod:
 .PHONY: build
 build: build-dev
 
+# The mollusk suite CPIs into two sibling programs:
+#   * solana_noreplay.so       (real replay-protection bitmap program)
+#   * wormhole_verify_vaa_shim.so (real Verify VAA Shim)
+# The canonical `.so` files are hash-pinned under
+# `programs/global-accountant/tests/fixtures/`. The mollusk test harness
+# verifies each fixture's SHA-256 against a hard-coded constant in
+# `tests/common/mollusk_fixtures.rs` before loading; drift panics with the
+# recompute-and-update recipe inline in the failure message.
+#
+# To intentionally regenerate a fixture:
+#   1. Build the upstream program (cd <sibling-repo> && cargo build-sbf).
+#   2. Copy the resulting .so over tests/fixtures/<name>.so.
+#   3. Recompute the digest:
+#        shasum -a 256 programs/global-accountant/tests/fixtures/<name>.so
+#   4. Update the corresponding *_SO_SHA256 constant in mollusk_fixtures.rs.
+#   5. Commit both the .so and the const update in the same change.
+#
+# For local iteration without rebaking the fixture, point an env override at
+# your locally-built .so:
+#   GA_NOREPLAY_SO=/path/to/solana_noreplay.so cargo test ...
+#   GA_VERIFY_VAA_SHIM_SO=/path/to/wormhole_verify_vaa_shim.so cargo test ...
+# The override skips the SHA-256 check (active-development escape hatch).
+#
+# The `build-test-fixtures` target is retained as a no-op for compatibility
+# with the previous workflow; nothing depends on it anymore.
+.PHONY: build-test-fixtures
+build-test-fixtures:
+	@echo "test fixtures are hash-pinned under tests/fixtures/ — no rebuild needed"
+	@echo "to regenerate, see the comment block above the target in this Makefile"
+
 .PHONY: test
 test: build-dev
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features test-only-open-digest
 
 # Surfpool E2E test against a Solana mainnet fork. surfpool boots with
 # `--rpc-url` pointing at mainnet so the Verify VAA Shim, the Core Bridge,
@@ -55,7 +85,7 @@ test: build-dev
 # the real `close_digest` CPI is what executes inside the simnet.
 .PHONY: test-e2e-mainnet-fork
 test-e2e-mainnet-fork: build-prod
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features test-only-open-digest \
 		--test surfpool_e2e_mainnet_fork -- --ignored --nocapture
 
 # VAA-replay corpus. Replays a curated set of historical mainnet VAAs
@@ -70,7 +100,7 @@ test-e2e-mainnet-fork: build-prod
 # self-reference; the deployed `.so` is the prod build with no features.
 .PHONY: test-e2e-vaa-corpus
 test-e2e-vaa-corpus: build-prod
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features test-only-open-digest \
 		--test surfpool_e2e_vaa_corpus -- --ignored --nocapture
 
 # Pre-built `solana-noreplay` artefact required by the real-CPI e2e targets
@@ -95,7 +125,7 @@ test-e2e-submit-obs: build-prod
 		echo "Rebuild via: cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build"; \
 		exit 1; \
 	}
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features test-only-open-digest \
 		--test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
 
 # Surfpool e2e for `submit_vaas` driven against the real Verify VAA Shim and
@@ -114,7 +144,7 @@ test-e2e-submit-vaas: build-prod
 		echo "Rebuild via: cd ~/WormholeLabs/CoreTeam/solana-noreplay && just build"; \
 		exit 1; \
 	}
-	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features mock-vaa,test-only-open-digest,mock-noreplay \
+	SBF_OUT_DIR=$(SBF_OUT_DIR) cargo test --features test-only-open-digest \
 		--test surfpool_e2e_submit_vaas -- --ignored --nocapture
 
 # Unified surfpool E2E target. Each test binary owns its own surfpool
@@ -132,7 +162,7 @@ test-e2e: test-e2e-mainnet-fork test-e2e-vaa-corpus test-e2e-submit-obs test-e2e
 
 .PHONY: clippy
 clippy:
-	cargo clippy --all-targets --features mock-vaa,test-only-open-digest,mock-noreplay -- -D warnings
+	cargo clippy --all-targets --features test-only-open-digest -- -D warnings
 
 # Production-shape clippy. Mirrors `build-prod` — no test features enabled,
 # so this catches lint regressions that the default `clippy` target would

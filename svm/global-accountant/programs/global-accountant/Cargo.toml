@@ -17,15 +17,6 @@ crate-type = ["cdylib", "lib"]
 # or client tooling).
 default = []
 bpf-entrypoint = []
-# Enable the mock VAA path in `close_digest`. The default (no features) branch
-# CPIs into the Verify VAA Shim (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`)
-# to validate guardian-quorum signatures against the candidate digest. The mock
-# branch skips that CPI and accepts the digest from instruction data verbatim,
-# which is essential for the in-process mollusk tests (no Shim + guardian-set
-# fixtures to stand up) but unsafe in production. The paired `compile_error!`
-# in `src/lib.rs` keeps `mock-vaa` from leaking into a build that is otherwise
-# production-shape.
-mock-vaa = []
 # Expose `Instruction::OpenDigest` in the dispatch table. In production
 # `open_digest` is only reachable from inside `submit_observations` after the
 # NoReplay check; until that lands, a public `open_digest` entrypoint lets any
@@ -33,15 +24,6 @@ mock-vaa = []
 # keeps the symbol out of production builds. Tests turn it on; `make build-prod`
 # leaves it off.
 test-only-open-digest = []
-# Enable the mock NoReplay path in `submit_observations` / `close_pending`. The
-# default (no features) branch CPIs into `solana-noreplay`
-# (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`); the mock branch substitutes
-# a single-byte sentinel in a caller-provided PDA. Mirrors `mock-vaa` in
-# `close_digest`. The paired `compile_error!` in `src/lib.rs` keeps this from
-# leaking into a build that is otherwise production-shape; the three test-build
-# features (`mock-vaa`, `test-only-open-digest`, `mock-noreplay`) must travel
-# together.
-mock-noreplay = []
 
 [dependencies]
 bytemuck.workspace = true
@@ -69,12 +51,10 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 # `target_os = "solana"` OR the `curve25519` feature). On-chain the syscall
 # path is unconditionally available; this is purely for `cargo test`.
 solana-address = { version = "2.6", features = ["curve25519"] }
-# Tests drive the mock VAA path and exercise `open_digest` directly. The
-# non-mock build is intentionally uncompilable until the Verify VAA Shim CPI
-# integration lands; `test-only-open-digest` and `mock-noreplay` are
-# intentionally off in production (see the program crate `[features]` block
-# for rationale).
-global-accountant = { path = ".", features = ["mock-vaa", "test-only-open-digest", "mock-noreplay"] }
+# Tests load the program library to expose the `TEST_ONLY_OPEN_DIGEST_ENABLED`
+# const and drive `OpenDigest` directly. `test-only-open-digest` is intentionally
+# off in production (see the program crate `[features]` block for rationale).
+global-accountant = { path = ".", features = ["test-only-open-digest"] }
 # Pure-Rust secp256k1. Tests sign synthetic guardian observations to populate
 # the pending bitmap and exercise the on-chain `sol_secp256k1_recover` path.
 # Already in the workspace lock via mollusk's transitive deps; pinning the
@@ -90,6 +70,14 @@ solana-commitment-config.workspace = true
 solana-system-interface.workspace = true
 solana-keccak-hasher.workspace = true
 serde_json.workspace = true
+# Hash-pinned `.so` fixtures live under `tests/fixtures/`. The mollusk-side
+# test harness verifies each fixture's SHA-256 against a hard-coded constant
+# before passing the bytes to mollusk; drift (an unintended rebuild of a
+# sibling program ending up in the fixtures dir) surfaces as a panic with
+# the recompute-and-update recipe in the failure message. Already in the
+# workspace lock graph via solana-program transitively; pinned to the
+# resolved version per the supply-chain rule in CLAUDE.md.
+sha2 = "=0.10.9"
 
 [lints]
 workspace = true

@@ -1809,6 +1809,7 @@ dependencies = [
  "pinocchio",
  "pinocchio-system",
  "serde_json",
+ "sha2 0.10.9",
  "solana-account",
  "solana-address 2.6.0",
  "solana-client",
