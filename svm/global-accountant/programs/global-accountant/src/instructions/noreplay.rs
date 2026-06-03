@@ -152,7 +152,7 @@ const MARK_USED_DATA_LEN: usize = 1 + 2 + NAMESPACE_TOTAL_LEN + 8;
 pub fn mark_used(
     payer: &AccountView,
     bucket: &mut AccountView,
-    noreplay_program: &AccountView,
+    _noreplay_program: &AccountView,
     noreplay_authority: &AccountView,
     system_program: &AccountView,
     program_id: &pinocchio::Address,
@@ -165,12 +165,16 @@ pub fn mark_used(
 
     use crate::definitions::{NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_MARK_USED_DISCRIMINATOR};
 
-    // Defence-in-depth: refuse to CPI to anything other than the canonical
-    // noreplay program ID. The runtime's `IncorrectProgramId` would surface
-    // otherwise; failing here yields our own error code in the program logs.
-    if noreplay_program.address().as_array() != &NOREPLAY_PROGRAM_ID {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
+    // No program-ID check on `_noreplay_program`: the CPI target below is
+    // built from the hardcoded `NOREPLAY_PROGRAM_ID` constant, never from the
+    // caller-supplied account, so a forged account cannot redirect the CPI —
+    // if the real program is absent from the instruction context the
+    // `invoke_signed` fails (mapped to `NoReplayCpiFailed`). The account must
+    // still be passed so the runtime can resolve the callee, but it is never
+    // trusted or dereferenced. Do NOT "simplify" the `InstructionView` to use
+    // `_noreplay_program.address()` as the target: that would make the CPI
+    // destination caller-controlled and let an attacker fake `MarkUsed`
+    // success, bypassing replay protection entirely.
 
     // Derive the canonical noreplay-authority PDA and verify the caller
     // supplied the right account. `find_program_address` is ~1.5K CU on the

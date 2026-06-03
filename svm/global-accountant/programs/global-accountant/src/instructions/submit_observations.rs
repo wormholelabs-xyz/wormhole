@@ -26,7 +26,6 @@
 use pinocchio::{
     cpi::{Seed, Signer},
     error::ProgramError,
-    sysvars::{clock::Clock, Sysvar},
     AccountView, Address, ProgramResult,
 };
 
@@ -462,14 +461,10 @@ fn decide_pending_action(
     if existing.guardian_set_index > parsed.guardian_set_index {
         return Err(err(GlobalAccountantError::StaleGuardianSet));
     }
-    // Digest equality is guaranteed by construction: the PDA's seeds include
-    // the digest, and `create_pending_pda` rejects any non-canonical bump.
-    // Belt-and-braces: if somehow a layout's recorded digest disagrees with
-    // the observation's (e.g., a buggy upgrade path), refuse the submission.
-    // This branch is unreachable in normal operation.
-    if existing.digest != parsed.digest {
-        return Err(err(GlobalAccountantError::DigestForgery));
-    }
+    // No digest-equality check: it is guaranteed by construction. The PDA's
+    // seeds include the digest and `create_pending_pda` rejects any
+    // non-canonical bump, so a layout at the canonical address can only have
+    // been stamped with this observation's digest.
     Ok(PendingAction::Continue)
 }
 
@@ -477,8 +472,9 @@ fn decide_pending_action(
 /// `(b"pending", chain, emitter, sequence, digest)` and stamp the freshly-zeroed
 /// layout. Including the digest in the seed tuple is what lets fork/reorg
 /// observations (same chain/emitter/sequence, different digest) accumulate in
-/// parallel sibling buckets rather than getting stuck on a `DigestForgery`
-/// rejection.
+/// parallel sibling buckets rather than colliding on a single bucket — and is
+/// what makes a recorded-digest mismatch structurally impossible on the
+/// accumulate path.
 fn create_pending_pda(
     program_id: &Address,
     submitter: &AccountView,
@@ -523,13 +519,11 @@ fn create_pending_pda(
         PendingObservationsLayout::LEN as u64,
     )?;
 
-    let slot = Clock::get()?.slot;
     let mut layout: PendingObservationsLayout = bytemuck::Zeroable::zeroed();
     layout.digest = parsed.digest;
     layout.payer = *submitter.address().as_array();
     layout.guardian_set_index = parsed.guardian_set_index;
     layout.signatures = 0;
-    layout.created_at_slot = slot;
     layout.chain = parsed.chain;
     pending::store(pending_pda, &layout)
 }

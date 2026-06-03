@@ -97,10 +97,10 @@ pub enum GlobalAccountantError {
     /// the existing pending PDA is accumulating against (i.e., a stale
     /// observation arrived after rotation).
     StaleGuardianSet = 12,
-    /// The observation's digest does not match the digest the pending PDA was
-    /// opened with, while the `guardian_set_index` is identical. Distinct from
-    /// the rotation case (which wipes-and-recreates) — same set, different
-    /// digest is a forgery attempt.
+    /// Retired — no longer emitted. The pending-PDA seeds include the digest,
+    /// so a recorded-digest mismatch at a canonical address is structurally
+    /// impossible and the runtime check was removed. The variant is retained
+    /// so the error-code numbering stays stable for clients and logs.
     DigestForgery = 13,
     /// `close_pending` was called but neither of the two acceptable triggers
     /// holds: the recorded guardian set is still active AND NoReplay does not
@@ -195,8 +195,9 @@ pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
 /// `(b"pending", chain.to_be_bytes(), emitter, sequence.to_be_bytes(), digest)`
 /// — the digest suffix is what lets fork/reorg observations (same chain /
 /// emitter / sequence but a different body-hash) accumulate in parallel
-/// sibling buckets rather than colliding on a single bucket and getting stuck
-/// on a `DigestForgery` rejection.
+/// sibling buckets rather than colliding on a single bucket. It also binds
+/// each bucket's address to its recorded digest, which is why no runtime
+/// digest-equality check is needed on the accumulate path.
 pub const PENDING_SEED_PREFIX: &[u8] = b"pending";
 
 /// PDA seed prefix for [`BalanceAccountLayout`]. The full seed tuple is
@@ -517,21 +518,19 @@ const _: () = {
 
 /// Zero-copy layout for a per-`(chain, emitter, sequence)` pending-quorum PDA.
 ///
-/// The on-disk layout is **88 bytes**: the `created_at_slot: u64` field forces
-/// 8-byte alignment on the whole struct, and Rust pads the size out to the
-/// alignment. `created_at_slot` is placed at the front of the integer block so
-/// the padding sits at the tail (named explicitly via `_padding`) and
-/// `bytemuck` can derive `Pod` cleanly.
+/// The on-disk layout is **76 bytes** (4-byte alignment from the `u32`
+/// fields, tail padded explicitly via `_padding`). Matches the CosmWasm
+/// pending `Data` fields (`cosmwasm/packages/accountant/src/state.rs`) minus
+/// `tx_hash`, which the SVM port does not persist.
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
 /// | 0      | 32   | digest             |
 /// | 32     | 32   | payer              |
-/// | 64     | 8    | created_at_slot    |
-/// | 72     | 4    | guardian_set_index |
-/// | 76     | 4    | signatures (u32 bitmap; bit N == guardian-index N signed) |
-/// | 80     | 2    | chain              |
-/// | 82     | 6    | _padding (explicit; required by `Pod` derive) |
+/// | 64     | 4    | guardian_set_index |
+/// | 68     | 4    | signatures (u32 bitmap; bit N == guardian-index N signed) |
+/// | 72     | 2    | chain              |
+/// | 74     | 2    | _padding (explicit; required by `Pod` derive) |
 ///
 /// The 32-bit bitmap covers 32 guardian indices; today's mainnet set is 19.
 /// If the protocol ever requires >32 guardians the field must widen and the
@@ -541,18 +540,17 @@ const _: () = {
 pub struct PendingObservationsLayout {
     pub digest: [u8; 32],
     pub payer: Pubkey,
-    pub created_at_slot: u64,
     pub guardian_set_index: u32,
     pub signatures: u32,
     pub chain: u16,
-    /// Explicit tail padding — required because `created_at_slot: u64`
-    /// forces 8-byte struct alignment and the trailing `u16 + reserved`
-    /// would otherwise be silent compiler-emitted padding (which trips
-    /// `bytemuck::Pod`'s "no implicit padding" check). Zero-initialised on
-    /// open. Crate-private so external callers cannot inject garbage via
-    /// struct literals — go through `Zeroable` for new instances. Mirrors
-    /// the `DigestAccountLayout._padding` privacy pattern.
-    pub(crate) _padding: [u8; 6],
+    /// Explicit tail padding — the `u32` fields force 4-byte struct
+    /// alignment and the trailing `u16` would otherwise be silent
+    /// compiler-emitted padding (which trips `bytemuck::Pod`'s "no implicit
+    /// padding" check). Zero-initialised on open. Crate-private so external
+    /// callers cannot inject garbage via struct literals — go through
+    /// `Zeroable` for new instances. Mirrors the
+    /// `DigestAccountLayout._padding` privacy pattern.
+    pub(crate) _padding: [u8; 2],
 }
 
 impl PendingObservationsLayout {
@@ -573,11 +571,10 @@ const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(PendingObservationsLayout, digest) == 0);
     assert!(offset_of!(PendingObservationsLayout, payer) == 32);
-    assert!(offset_of!(PendingObservationsLayout, created_at_slot) == 64);
-    assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 72);
-    assert!(offset_of!(PendingObservationsLayout, signatures) == 76);
-    assert!(offset_of!(PendingObservationsLayout, chain) == 80);
-    assert!(PendingObservationsLayout::LEN == 88);
+    assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 64);
+    assert!(offset_of!(PendingObservationsLayout, signatures) == 68);
+    assert!(offset_of!(PendingObservationsLayout, chain) == 72);
+    assert!(PendingObservationsLayout::LEN == 76);
 };
 
 /// Zero-copy layout for the per-(chain, token_chain, token_address) balance
@@ -1136,10 +1133,10 @@ mod tests {
     #[test]
     fn pending_layout_size_pinned() {
         // The const-assert above is the primary defence; this is the
-        // human-readable runtime mirror. The 88-byte total includes 6 bytes of
+        // human-readable runtime mirror. The 76-byte total includes 2 bytes of
         // explicit tail padding required for `Pod`-derive cleanliness — see
         // the type-doc for the rationale.
-        assert_eq!(PendingObservationsLayout::LEN, 88);
+        assert_eq!(PendingObservationsLayout::LEN, 76);
     }
 
     #[test]
@@ -1147,13 +1144,12 @@ mod tests {
         use core::mem::offset_of;
         assert_eq!(offset_of!(PendingObservationsLayout, digest), 0);
         assert_eq!(offset_of!(PendingObservationsLayout, payer), 32);
-        assert_eq!(offset_of!(PendingObservationsLayout, created_at_slot), 64);
         assert_eq!(
             offset_of!(PendingObservationsLayout, guardian_set_index),
-            72
+            64
         );
-        assert_eq!(offset_of!(PendingObservationsLayout, signatures), 76);
-        assert_eq!(offset_of!(PendingObservationsLayout, chain), 80);
+        assert_eq!(offset_of!(PendingObservationsLayout, signatures), 68);
+        assert_eq!(offset_of!(PendingObservationsLayout, chain), 72);
     }
 
     #[test]
@@ -1165,11 +1161,10 @@ mod tests {
         let original = PendingObservationsLayout {
             digest,
             payer: [0xAA; 32],
-            created_at_slot: 0xdead_beef_cafe_babe,
             guardian_set_index: 0x0BAD_CAFE,
             signatures: 0x0000_1FFFu32, // 13 low bits set
             chain: 1,
-            _padding: [0; 6],
+            _padding: [0; 2],
         };
         let bytes = bytemuck::bytes_of(&original);
         let copy: &PendingObservationsLayout = bytemuck::from_bytes(bytes);
