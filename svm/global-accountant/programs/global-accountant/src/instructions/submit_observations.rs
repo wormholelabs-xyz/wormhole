@@ -31,8 +31,8 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    parse_token_bridge_payload, GlobalAccountantError, PendingObservationsLayout,
-    TokenBridgeAction, PENDING_SEED_PREFIX,
+    parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError,
+    PendingObservationsLayout, TokenBridgeAction, PENDING_SEED_PREFIX,
 };
 use crate::err;
 // NoReplay integration lives in the sibling `noreplay` module so
@@ -71,13 +71,15 @@ use crate::state::{chain_registration, pending};
 /// body under arbitrary `(chain, emitter, sequence)` triples, corrupting the
 /// balance ledger; sourcing them from the body makes that attack structurally
 /// impossible.
+///
+/// No upper bound is imposed on `body_len` beyond the `u16` wire width.
+/// Every transport that can reach this instruction is far tighter than
+/// `u16::MAX` — 1232-byte tx packets for direct submission, 10 KiB
+/// (`MAX_CPI_INSTRUCTION_DATA_LEN`) via CPI — so any program-side ceiling
+/// would either be unreachable or an arbitrary restriction the CosmWasm
+/// accountant baseline does not have. The `rest.len()` check below already
+/// rejects length claims exceeding the data actually present.
 const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65 + 1 + 1;
-/// Maximum supported VAA body size on the wire. 4 KiB is well above the
-/// observed mainnet ceiling (`max(payload) ≈ 1 KiB`) and keeps the
-/// instruction data within Solana's 1232-byte tx-data limit when combined
-/// with the fixed-size prefix and the account list. The bound exists only to
-/// reject malformed wire data early; the parser itself doesn't care.
-const SUBMIT_BODY_MAX: usize = 4096;
 
 /// Length of an ECDSA recoverable signature: 32-byte r + 32-byte s + 1-byte
 /// recovery id. The on-chain `sol_secp256k1_recover` syscall takes the 64-byte
@@ -111,7 +113,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // ~5K CU earlier — before the body→digest keccak roundtrip and before
     // `populate_routing_from_body`'s own 50-byte guard.
     const BODY_MIN_LEN: usize = 52;
-    if !(BODY_MIN_LEN..=SUBMIT_BODY_MAX).contains(&body_len) || rest.len() < 2 + body_len {
+    if body_len < BODY_MIN_LEN || rest.len() < 2 + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let body_bytes = &rest[2..2 + body_len];
@@ -391,23 +393,16 @@ impl ParsedObservation {
         })
     }
 
-    /// Populate the routing tuple from the body header. The Wormhole body
-    /// layout has `emitter_chain` at `[8..10]` (BE u16), `emitter_address` at
-    /// `[10..42]`, and `sequence` at `[42..50]` (BE u64). Caller must have
-    /// already proven `body` matches `self.digest` before calling this.
+    /// Populate the routing tuple from the body header via the shared
+    /// `definitions::parse_vaa_body_header` — the single authority for the
+    /// header offsets, so this path and `submit_vaas` can never drift apart.
+    /// Caller must have already proven `body` matches `self.digest` before
+    /// calling this.
     fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
-        if body.len() < 50 {
-            return Err(err(GlobalAccountantError::InvalidInstructionData));
-        }
-        self.chain = u16::from_be_bytes([body[8], body[9]]);
-        self.emitter = body[10..42]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-        self.sequence = u64::from_be_bytes(
-            body[42..50]
-                .try_into()
-                .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?,
-        );
+        let header = parse_vaa_body_header(body).map_err(err)?;
+        self.chain = header.chain;
+        self.emitter = header.emitter;
+        self.sequence = header.sequence;
         Ok(())
     }
 }

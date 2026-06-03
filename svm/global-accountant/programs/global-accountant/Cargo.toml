@@ -21,7 +21,7 @@ bpf-entrypoint = []
 # `open_digest` is only reachable from inside `submit_observations` after the
 # NoReplay check; until that lands, a public `open_digest` entrypoint lets any
 # caller squat the PDA for any `(chain, emitter, sequence)`. The feature gate
-# keeps the symbol out of production builds. Tests turn it on; `make build-prod`
+# keeps the symbol out of production builds. Tests turn it on; `just build-prod`
 # leaves it off.
 test-only-open-digest = []
 

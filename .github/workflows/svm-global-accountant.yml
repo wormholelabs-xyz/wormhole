@@ -45,6 +45,9 @@ env:
   # Redirects to the solana-foundation org under the same path.
   SURFPOOL_VERSION: v1.2.1
   SURFPOOL_LINUX_SHA256: abb1451e2df8da71dbcb389d0bd591939e848af9f5237926348b55c886896640
+  # Pinned `just` version. Installed via `cargo install --locked` so we lean on
+  # the rust toolchain already present, avoiding a third-party install action.
+  JUST_VERSION: 1.51.0
 
 jobs:
   # Layer 1 (mollusk) + Layer 3 (production build smoke) + clippy.
@@ -101,20 +104,23 @@ jobs:
       - name: Add solana / agave to PATH
         run: echo "$HOME/.local/share/solana/install/active_release/bin" >> "${GITHUB_PATH}"
 
+      - name: Install just
+        run: cargo install just --version ${{ env.JUST_VERSION }} --locked
+
       - name: Run `cargo fmt`
         run: cargo fmt --check --all
 
-      - name: Run `make clippy`
-        run: make clippy
+      - name: Run `just clippy`
+        run: just clippy
 
-      - name: Run `make test` (mollusk integration + unit tests)
-        run: make test
+      - name: Run `just test` (mollusk integration + unit tests)
+        run: just test
 
-      - name: Run `make build-prod` (production-shape compile smoke)
+      - name: Run `just build-prod` (production-shape compile smoke)
         # Layer 3: ensures the real Verify VAA Shim CPI path still compiles
         # with `mock-vaa` and `test-only-open-digest` off. Catches regressions
         # in the no-mock build before they reach mainnet.
-        run: make build-prod
+        run: just build-prod
 
   # Layer 2: surfpool-driven E2E.
   #
@@ -153,7 +159,7 @@ jobs:
         with:
           workspaces: svm/global-accountant -> target
           # Separate prefix from fast-tests because the prod-shape `.so`
-          # (`make build-prod`) uses different features and therefore a
+          # (`just build-prod`) uses different features and therefore a
           # different fingerprint.
           prefix-key: ga-e2e
 
@@ -205,6 +211,9 @@ jobs:
       - name: Verify surfpool
         run: surfpool --version
 
+      - name: Install just
+        run: cargo install just --version ${{ env.JUST_VERSION }} --locked
+
       # Mainnet account cache. surfpool persists lazy-fetched accounts under
       # `.surfpool/` in each test's CWD (the tests use per-test scratch dirs
       # under TMPDIR, but surfpool also writes a user-level cache at
@@ -225,7 +234,7 @@ jobs:
             surfpool-mainnet-cache-${{ env.SURFPOOL_VERSION }}-
             surfpool-mainnet-cache-
 
-      - name: Run `make test-e2e` (spike + mainnet-fork + VAA corpus)
+      - name: Run `just test-e2e` (spike + mainnet-fork + VAA corpus)
         # Network egress required: surfpool fetches mainnet accounts (Verify VAA
         # Shim program, Core Bridge, active GuardianSet PDA) from the public
         # mainnet RPC. surfpool v1.2.1 cannot inject the `Origin` header that
@@ -239,4 +248,4 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
           RUST_TEST_THREADS: "1"
-        run: make test-e2e
+        run: just test-e2e

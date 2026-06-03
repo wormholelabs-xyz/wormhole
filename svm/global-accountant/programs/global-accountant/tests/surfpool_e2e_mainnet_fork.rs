@@ -10,7 +10,7 @@
 //!
 //! ```sh
 //! # From svm/global-accountant/
-//! make test-e2e-mainnet-fork
+//! just test-e2e-mainnet-fork
 //! # Or manually:
 //! cargo build-sbf --features bpf-entrypoint                  # prod-shape .so
 //! cargo build-sbf --features bpf-entrypoint,mock-vaa,test-only-open-digest
@@ -352,7 +352,7 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
     let so = so_path("global_accountant");
     let so_bytes = std::fs::read(&so).unwrap_or_else(|e| {
         panic!(
-            "could not read {}: {e}. Run `make build-prod` first (this test \
+            "could not read {}: {e}. Run `just build-prod` first (this test \
              deploys the production-shape `.so` with the real Verify VAA Shim CPI).",
             so.display()
         )
@@ -514,7 +514,7 @@ fn build_close_ix(
 
 #[test]
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
-            `make test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
+            `just test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
 fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
     // Happy path. Open the PDA with the digest the VAA was signed over,
     // then close it. The Shim's CPI must succeed end-to-end against the
@@ -607,7 +607,7 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
 
 #[test]
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
-            `make test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
+            `just test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
 fn close_digest_with_tampered_digest_fails_at_cpi() {
     // Negative path. Open the PDA with a tampered digest — single
     // last-byte flip is enough to break signature recovery — then call

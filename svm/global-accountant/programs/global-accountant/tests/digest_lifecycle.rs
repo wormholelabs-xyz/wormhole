@@ -2,8 +2,7 @@
 //!
 //! Each test drives the on-chain program through mollusk-svm; the program
 //! itself must be built via `cargo build-sbf` before `cargo test` runs.
-//! The companion script `scripts/build-and-test.sh` (or `make test`) handles
-//! this end-to-end.
+//! The `just test` recipe handles this end-to-end.
 
 use {
     global_accountant_definitions::{
@@ -730,7 +729,7 @@ fn digest_layout_offsets_pinned() {
 /// We pin both sides by reading a `pub const` exported from the program crate
 /// that mirrors `cfg!(feature = "test-only-open-digest")` from inside the
 /// program. A negative test ("OpenDigest discriminator returns NotEnabled in a
-/// prod build") would need a second `.so` and lives in the `make build-prod`
+/// prod build") would need a second `.so` and lives in the `just build-prod`
 /// pipeline instead — that target additionally fails on `close_digest`'s
 /// mock-vaa `compile_error!`, so a successful prod build is unreachable until
 /// the real VAA Shim CPI lands.

@@ -20,7 +20,7 @@
 //! # Run
 //!
 //! ```sh
-//! make test-e2e-submit-vaas
+//! just test-e2e-submit-vaas
 //! ```
 //!
 //! Requires `solana_noreplay.so` at the canonical path and an up-to-date
@@ -281,13 +281,13 @@ fn seed_account_pda(
 }
 
 #[test]
-#[ignore = "spawns surfpool subprocess; run via `make test-e2e-submit-vaas` or `cargo test -- --ignored`"]
+#[ignore = "spawns surfpool subprocess; run via `just test-e2e-submit-vaas` or `cargo test -- --ignored`"]
 fn surfpool_submit_vaas_token_bridge_transfer() {
     // ----- Step 1: locate both .so artefacts. -----
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
-            "could not read {}: {e}. Run `make build-prod` first.",
+            "could not read {}: {e}. Run `just build-prod` first.",
             ga_so.display()
         )
     });

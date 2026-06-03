@@ -26,8 +26,8 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    parse_token_bridge_payload, GlobalAccountantError, TokenBridgeAction, DIGEST_SEED_PREFIX,
-    VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR,
+    parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError, TokenBridgeAction,
+    DIGEST_SEED_PREFIX, VAA_BODY_HEADER_LEN, VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR,
 };
 use crate::err;
 use crate::instructions::{noreplay, open_digest_inner, transfer::apply_transfer};
@@ -51,29 +51,12 @@ use crate::state::chain_registration;
 /// paying the `find_program_address` cost. The Shim doc-string treats it as
 /// trusted client input — the runtime verifies the supplied account address
 /// matches the bump-derived expectation.
-const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
-
-/// Maximum VAA body size accepted on the wire. Same 4 KiB ceiling as
-/// `submit_observations::SUBMIT_BODY_MAX` — far above the observed mainnet
-/// payload size (~1 KiB) and keeps the instruction data inside the Solana
-/// 1232-byte tx envelope when combined with the account list.
-const SUBMIT_VAAS_BODY_MAX: usize = 4096;
-
-/// Byte offsets within a VAA body (51-byte header per
-/// `whitepapers/0001_generic_message_passing.md`):
 ///
-/// | offset | size | field             |
-/// |--------|------|-------------------|
-/// | 0      | 4    | timestamp (u32 BE)|
-/// | 4      | 4    | nonce (u32 BE)    |
-/// | 8      | 2    | emitter_chain     |
-/// | 10     | 32   | emitter_address   |
-/// | 42     | 8    | sequence (u64 BE) |
-/// | 50     | 1    | consistency_level |
-const BODY_EMITTER_CHAIN_OFFSET: usize = 8;
-const BODY_EMITTER_ADDRESS_OFFSET: usize = 10;
-const BODY_SEQUENCE_OFFSET: usize = 42;
-const BODY_HEADER_LEN: usize = 51;
+/// No upper bound is imposed on `body_len` beyond the `u16` wire width —
+/// the transports themselves (1232-byte tx packets, 10 KiB CPI instruction
+/// data) are far tighter, and the CosmWasm accountant baseline imposes no
+/// cap. See the matching rationale in `submit_observations`.
+const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
@@ -82,9 +65,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
     let guardian_set_bump = data[0];
     let body_len = u16::from_le_bytes([data[1], data[2]]) as usize;
-    if !(BODY_HEADER_LEN + 1..=SUBMIT_VAAS_BODY_MAX).contains(&body_len)
-        || data.len() != SUBMIT_VAAS_FIXED_LEN + body_len
-    {
+    if body_len <= VAA_BODY_HEADER_LEN || data.len() != SUBMIT_VAAS_FIXED_LEN + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let body_bytes = &data[SUBMIT_VAAS_FIXED_LEN..SUBMIT_VAAS_FIXED_LEN + body_len];
@@ -152,18 +133,11 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (4) Parse the body header -----
     //
-    // body_len ≥ 52 was already enforced above, so all three slices are safe.
-    let chain = u16::from_be_bytes([
-        body_bytes[BODY_EMITTER_CHAIN_OFFSET],
-        body_bytes[BODY_EMITTER_CHAIN_OFFSET + 1],
-    ]);
-    let mut emitter = [0u8; 32];
-    emitter.copy_from_slice(
-        &body_bytes[BODY_EMITTER_ADDRESS_OFFSET..BODY_EMITTER_ADDRESS_OFFSET + 32],
-    );
-    let mut sequence_bytes = [0u8; 8];
-    sequence_bytes.copy_from_slice(&body_bytes[BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]);
-    let sequence = u64::from_be_bytes(sequence_bytes);
+    // Shared with `submit_observations` via `definitions::parse_vaa_body_header`
+    // — the single authority for the header offsets, so the two paths can
+    // never route the same VAA to different `(chain, emitter, sequence)` keys.
+    let header = parse_vaa_body_header(body_bytes).map_err(err)?;
+    let (chain, emitter, sequence) = (header.chain, header.emitter, header.sequence);
 
     // ----- (5) NoReplay pre-check -----
     //

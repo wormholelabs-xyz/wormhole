@@ -3,7 +3,7 @@
 //!
 //! Regression guard for the real CPI to `solana-noreplay`'s `MarkUsed` from
 //! inside the quorum-completing branch of `submit_observations`. Deploys the
-//! **production-shape** `.so` (built with `make build-prod`, no mock
+//! **production-shape** `.so` (built with `just build-prod`, no mock
 //! features), wires a fresh `noreplay-authority` PDA owned by
 //! global-accountant, and drives 13 distinct guardian observations until the
 //! 13th triggers the CPI and flips the real bitmap bit.
@@ -12,7 +12,7 @@
 //!
 //! ```sh
 //! # From svm/global-accountant/
-//! make test-e2e-submit-obs
+//! just test-e2e-submit-obs
 //! ```
 //!
 //! Requires `solana_noreplay.so` at
@@ -281,13 +281,13 @@ fn build_submit_observations_ix(
 // ============================================================================
 
 #[test]
-#[ignore = "spawns surfpool subprocess; run via `make test-e2e-submit-obs` or `cargo test -- --ignored`"]
+#[ignore = "spawns surfpool subprocess; run via `just test-e2e-submit-obs` or `cargo test -- --ignored`"]
 fn surfpool_submit_observations_real_noreplay() {
     // ----- Step 1: locate both .so artifacts before spending boot time. -----
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
-            "could not read {}: {e}. Run `make build-prod` first.",
+            "could not read {}: {e}. Run `just build-prod` first.",
             ga_so.display()
         )
     });

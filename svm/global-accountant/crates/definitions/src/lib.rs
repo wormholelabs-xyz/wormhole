@@ -736,6 +736,47 @@ pub enum TokenBridgeAction {
     Other,
 }
 
+/// Length of the fixed VAA body header (whitepaper
+/// `0001_generic_message_passing.md`): timestamp (4) + nonce (4) +
+/// emitter_chain (2) + emitter_address (32) + sequence (8) +
+/// consistency_level (1).
+pub const VAA_BODY_HEADER_LEN: usize = 51;
+
+/// Routing fields of a VAA body header. The `(chain, emitter, sequence)`
+/// tuple keys every piece of accountant state — pending buckets, the
+/// NoReplay namespace, and chain-registration cross-checks — so both
+/// `submit_observations` and `submit_vaas` must decode it identically.
+/// This struct and [`parse_vaa_body_header`] are the single authority for
+/// those offsets; instruction modules must not re-derive them locally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VaaBodyHeader {
+    /// `emitter_chain`, body bytes `[8..10]` (u16 BE).
+    pub chain: u16,
+    /// `emitter_address`, body bytes `[10..42]`.
+    pub emitter: [u8; 32],
+    /// `sequence`, body bytes `[42..50]` (u64 BE).
+    pub sequence: u64,
+}
+
+/// Parse the routing tuple from a VAA body header (layout table on
+/// [`parse_token_bridge_payload`]). Rejects bodies shorter than the full
+/// 51-byte header with `InvalidInstructionData`.
+pub fn parse_vaa_body_header(body: &[u8]) -> Result<VaaBodyHeader, GlobalAccountantError> {
+    if body.len() < VAA_BODY_HEADER_LEN {
+        return Err(GlobalAccountantError::InvalidInstructionData);
+    }
+    let chain = u16::from_be_bytes([body[8], body[9]]);
+    let mut emitter = [0u8; 32];
+    emitter.copy_from_slice(&body[10..42]);
+    let mut sequence_bytes = [0u8; 8];
+    sequence_bytes.copy_from_slice(&body[42..50]);
+    Ok(VaaBodyHeader {
+        chain,
+        emitter,
+        sequence: u64::from_be_bytes(sequence_bytes),
+    })
+}
+
 /// Parse a VAA body's payload — i.e. the bytes at `body[51..]` — into a
 /// [`TokenBridgeAction`].
 ///
@@ -774,16 +815,15 @@ pub enum TokenBridgeAction {
 /// bytes (51 + 133). Both bounds are checked; the function returns
 /// `InvalidInstructionData` on any short slice.
 pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
-    const HEADER_LEN: usize = 51;
     const ACTION_TRANSFER: u8 = 0x01;
     const ACTION_ATTEST: u8 = 0x02;
     const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
     const TRANSFER_PAYLOAD_MIN: usize = 1 + 32 + 32 + 2 + 32 + 2 + 32; // 133
 
-    if body.len() <= HEADER_LEN {
+    if body.len() <= VAA_BODY_HEADER_LEN {
         return Err(GlobalAccountantError::InvalidInstructionData);
     }
-    let payload = &body[HEADER_LEN..];
+    let payload = &body[VAA_BODY_HEADER_LEN..];
     let action = payload[0];
     match action {
         ACTION_TRANSFER | ACTION_TRANSFER_WITH_PAYLOAD => {
@@ -1290,6 +1330,34 @@ mod tests {
         body[150..152].copy_from_slice(&recipient_chain.to_be_bytes());
         // fee at 152..184 stays zero.
         body
+    }
+
+    #[test]
+    fn parse_vaa_body_header_decodes_routing_tuple() {
+        let mut body = [0u8; VAA_BODY_HEADER_LEN];
+        body[8..10].copy_from_slice(&2u16.to_be_bytes());
+        body[10] = 0xAA;
+        body[41] = 0xBB;
+        body[42..50].copy_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+
+        let header = parse_vaa_body_header(&body).unwrap();
+        assert_eq!(header.chain, 2);
+        assert_eq!(header.emitter[0], 0xAA);
+        assert_eq!(header.emitter[31], 0xBB);
+        assert_eq!(header.sequence, 0x0102_0304_0506_0708);
+    }
+
+    #[test]
+    fn parse_vaa_body_header_accepts_exact_header_len() {
+        assert!(parse_vaa_body_header(&[0u8; VAA_BODY_HEADER_LEN]).is_ok());
+    }
+
+    #[test]
+    fn parse_vaa_body_header_short_body_rejects() {
+        assert_eq!(
+            parse_vaa_body_header(&[0u8; VAA_BODY_HEADER_LEN - 1]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
     }
 
     #[test]
