@@ -32,8 +32,7 @@ use pinocchio::{
     AccountView, Address, ProgramResult,
 };
 
-use crate::definitions::{DigestAccountLayout, GlobalAccountantError, DIGEST_SEED_PREFIX};
-use crate::err;
+use crate::definitions::{DigestAccountLayout, DIGEST_SEED_PREFIX};
 use crate::state::digest;
 
 use self::pda_init::init_or_upgrade_pda;
@@ -57,32 +56,22 @@ pub(crate) fn open_digest_inner(
     sequence_be: [u8; 8],
     digest_bytes: [u8; 32],
     guardian_set_index: u32,
-    bump: u8,
 ) -> ProgramResult {
-    // Canonical-bump enforcement. NoReplay reserves the `(chain, emitter,
-    // sequence)` slot atomically with the commit branch, but that does not
-    // pin the DigestAccount to its canonical address. A caller passing a
-    // non-canonical bump would mint a valid DigestAccount at a non-canonical
-    // PDA address — `close_digest` only ever derives the canonical address,
-    // so the rent would be locked forever and relayer-side lookups would
-    // miss the on-chain breadcrumb. We accept the bump in instruction data
-    // for CU savings on the hot path, but recompute the canonical bump via
-    // `find_program_address` and reject any mismatch. One syscall
-    // (~1.5K CU) — acceptable.
-    //
-    // No separate `digest_pda.address() == &expected` check: canonical-bump
-    // equality already implies the PDA address is the unique one derivable
-    // from `(seeds, program_id, canonical_bump)`. A passing bump check with a
-    // different account address is impossible.
+    // The canonical bump is derived on-chain — callers never supply it.
+    // NoReplay reserves the `(chain, emitter, sequence)` slot atomically with
+    // the commit branch, but that does not pin the DigestAccount to its
+    // canonical address; deriving the bump here does. A DigestAccount at a
+    // non-canonical address would strand its rent forever (`close_digest`
+    // only ever derives the canonical address) and relayer-side lookups would
+    // miss the on-chain breadcrumb. `invoke_signed` below only signs for the
+    // canonical address, so a caller-supplied account anywhere else fails the
+    // init CPI. One `find_program_address` syscall (~1.5K CU) — acceptable.
     let (_expected, canonical_bump) = Address::find_program_address(
         &[DIGEST_SEED_PREFIX, &chain_be, &emitter, &sequence_be],
         program_id,
     );
-    if bump != canonical_bump {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
 
-    let bump_seed = [bump];
+    let bump_seed = [canonical_bump];
     let seeds = [
         Seed::from(DIGEST_SEED_PREFIX),
         Seed::from(chain_be.as_slice()),

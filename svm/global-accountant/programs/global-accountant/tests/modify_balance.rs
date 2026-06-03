@@ -10,7 +10,7 @@
 //!   - happy path Add on existing BalanceAccount: credits without re-init.
 //!   - happy path Sub on existing BalanceAccount with sufficient balance: debits.
 //!   - rejection: wrong governance emitter / module / action / target chain /
-//!     kind byte / balance_pda_bump.
+//!     kind byte.
 //!   - rejection: Sub on uninit BalanceAccount underflows before allocation.
 //!   - rejection: Add overflow against a near-max balance.
 //!   - rejection: duplicate modification sequence (PDA already exists).
@@ -172,20 +172,13 @@ fn build_modify_balance_body(
     body
 }
 
-fn modify_balance_ix_data(
-    guardian_set_bump: u8,
-    balance_pda_bump: u8,
-    modification_bump: u8,
-    body: &[u8],
-) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 1-byte guardian_set_bump + 1-byte
-    // balance_pda_bump + 1-byte modification_bump + 2-byte body length LE +
-    // body bytes.
-    let mut data = Vec::with_capacity(1 + 1 + 1 + 1 + 2 + body.len());
+fn modify_balance_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
+    // Wire shape: 1-byte discriminator + 1-byte guardian_set_bump (Shim API)
+    // + 2-byte body length LE + body bytes. No PDA bumps travel in the wire:
+    // the program derives the canonical bumps on-chain.
+    let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::ModifyBalance as u8);
     data.push(guardian_set_bump);
-    data.push(balance_pda_bump);
-    data.push(modification_bump);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -260,13 +253,11 @@ fn run_modify_balance(
     token_chain: u16,
     token_address: &[u8; 32],
     payload_sequence: u64,
-    balance_pda_bump_override: Option<u8>,
     balance_initial: Option<Account>,
     modification_initial: Option<Account>,
 ) -> mollusk_svm::result::InstructionResult {
-    let (balance_pda, canonical_balance_bump) =
-        derive_balance_pda(chain_id, token_chain, token_address);
-    let (modification_pda, modification_bump) = derive_modification_pda(payload_sequence);
+    let (balance_pda, _) = derive_balance_pda(chain_id, token_chain, token_address);
+    let (modification_pda, _) = derive_modification_pda(payload_sequence);
 
     let payer = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
@@ -274,8 +265,6 @@ fn run_modify_balance(
         derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let digest = double_keccak256_host(body);
-
-    let balance_pda_bump = balance_pda_bump_override.unwrap_or(canonical_balance_bump);
 
     let accounts = build_initial_accounts(
         payer,
@@ -298,7 +287,7 @@ fn run_modify_balance(
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &modify_balance_ix_data(guardian_set_bump, balance_pda_bump, modification_bump, body),
+        &modify_balance_ix_data(guardian_set_bump, body),
         metas,
     );
     mollusk.process_instruction(&ix, &accounts)
@@ -406,7 +395,6 @@ fn modify_balance_body_header_violations_reject() {
             case.payload_seq,
             None,
             None,
-            None,
         );
         match r.program_result {
             ProgramResult::Failure(err) => {
@@ -447,7 +435,7 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
         Uint256::from_u128(1_000_000),
         &reason,
     );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 200, None, None, None);
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 200, None, None);
     assert!(
         matches!(r.program_result, ProgramResult::Success),
         "happy-path Add on uninit must succeed, got {:?}",
@@ -523,7 +511,6 @@ fn modify_balance_sub_on_existing_pda_debits() {
         2,
         &token_address,
         201,
-        None,
         Some(pre_balance),
         None,
     );
@@ -576,7 +563,6 @@ fn modify_balance_add_on_existing_pda_credits() {
         2,
         &token_address,
         202,
-        None,
         Some(pre_balance),
         None,
     );
@@ -614,7 +600,7 @@ fn modify_balance_sub_on_uninit_pda_rejects_underflow() {
         Uint256::from_u128(1),
         &[0u8; 32],
     );
-    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 203, None, None, None);
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 203, None, None);
     match r.program_result {
         ProgramResult::Failure(err) => {
             let code = u64::from(err) as u32;
@@ -671,7 +657,6 @@ fn modify_balance_add_overflow_rejects() {
         2,
         &token_address,
         204,
-        None,
         Some(pre_balance),
         None,
     );
@@ -713,7 +698,7 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
     );
 
     // First call lands a fresh modification.
-    let r1 = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 205, None, None, None);
+    let r1 = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 205, None, None);
     assert!(matches!(r1.program_result, ProgramResult::Success));
 
     // Carry the post-state forward and replay.
@@ -739,7 +724,6 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
         2,
         &token_address,
         205,
-        None,
         Some(post_balance),
         Some(post_modification),
     );
@@ -753,62 +737,6 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
             );
         }
         other => panic!("expected Failure(DuplicateModification), got {other:?}"),
-    }
-}
-
-#[test]
-fn modify_balance_rejects_wrong_balance_pda_bump() {
-    // Caller supplies a non-canonical balance_pda_bump. The program recomputes
-    // and rejects.
-    let mollusk = mollusk();
-    let token_address = [0x77u8; 32];
-    let body = build_modify_balance_body(
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        0x06,
-        &ACCOUNTANT_GOVERNANCE_MODULE,
-        MODIFY_BALANCE_ACTION,
-        3104,
-        105,
-        2,
-        2,
-        &token_address,
-        1,
-        Uint256::from_u128(1_000),
-        &[0u8; 32],
-    );
-    // Override bump with a deliberately-wrong value. There's a small chance
-    // this happens to equal the canonical bump for a given fixture; bias
-    // toward an unlikely high byte and assert distinct below.
-    let (_, canonical_bump) = derive_balance_pda(2, 2, &token_address);
-    let wrong_bump = if canonical_bump == 0 {
-        1
-    } else {
-        canonical_bump - 1
-    };
-    assert_ne!(canonical_bump, wrong_bump);
-
-    let r = run_modify_balance(
-        &mollusk,
-        &body,
-        2,
-        2,
-        &token_address,
-        105,
-        Some(wrong_bump),
-        None,
-        None,
-    );
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidPda as u32,
-                "expected InvalidPda from canonical-bump check, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidPda), got {other:?}"),
     }
 }
 
@@ -837,17 +765,7 @@ fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
         Uint256::from_u128(100),
         &[0u8; 32],
     );
-    let r1 = run_modify_balance(
-        &mollusk,
-        &add_body,
-        2,
-        2,
-        &token_address,
-        300,
-        None,
-        None,
-        None,
-    );
+    let r1 = run_modify_balance(&mollusk, &add_body, 2, 2, &token_address, 300, None, None);
     assert!(
         matches!(r1.program_result, ProgramResult::Success),
         "first Add must succeed, got {:?}",
@@ -891,7 +809,6 @@ fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
         2,
         &token_address,
         301,
-        None,
         Some(post_balance),
         None,
     );

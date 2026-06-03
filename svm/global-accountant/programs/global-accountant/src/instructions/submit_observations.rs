@@ -53,8 +53,11 @@ use crate::state::{chain_registration, pending};
 /// | 32     | 4    | guardian_set_index (little-endian) |
 /// | 36     | 1    | guardian_index                     |
 /// | 37     | 65   | signature (r||s||recovery_id)      |
-/// | 102    | 1    | pending_pda_bump                   |
-/// | 103    | 1    | digest_pda_bump                    |
+///
+/// No PDA bumps travel in the instruction data: the pending and digest PDA
+/// bumps are derived on-chain via `find_program_address` (which canonical-bump
+/// enforcement requires anyway), so a caller-supplied copy would be redundant
+/// wire bytes and an extra client-side failure mode.
 ///
 /// Trailing the fixed-size portion is `body_len: u16 LE` followed by exactly
 /// `body_len` bytes of VAA body. The body is verified against the supplied
@@ -78,7 +81,7 @@ use crate::state::{chain_registration, pending};
 /// would either be unreachable or an arbitrary restriction the CosmWasm
 /// accountant baseline does not have. The `rest.len()` check below already
 /// rejects length claims exceeding the data actually present.
-const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65 + 1 + 1;
+const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65;
 
 /// Length of an ECDSA recoverable signature: 32-byte r + 32-byte s + 1-byte
 /// recovery id. The on-chain `sol_secp256k1_recover` syscall takes the 64-byte
@@ -288,7 +291,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         parsed.sequence.to_be_bytes(),
         parsed.digest,
         parsed.guardian_set_index,
-        parsed.digest_pda_bump,
     )?;
 
     // Port of CosmWasm `commit_transfer`
@@ -319,12 +321,21 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
                 amount,
             )?;
         }
-        TokenBridgeAction::Attest | TokenBridgeAction::Other => {
-            // No balance work. Slots 8 and 9 are required for the runtime
-            // account-meta declaration but the caller is expected to pass
-            // sentinel addresses (e.g., the noreplay-authority PDA) — the
-            // program intentionally does not touch them, so any account
-            // shape is fine here.
+        TokenBridgeAction::Attest => {
+            // No balance work; the rest of the commit still runs. Slots 8 and
+            // 9 are required for the runtime account-meta declaration but the
+            // caller is expected to pass sentinel addresses (e.g., the
+            // noreplay-authority PDA) — the program intentionally does not
+            // touch them, so any account shape is fine here.
+        }
+        TokenBridgeAction::Other => {
+            // Unknown action byte: reject, mirroring CosmWasm's
+            // `bail!("Unknown tokenbridge payload")`. The NoReplay mark above
+            // rolls back with the rest of the transaction, so the
+            // `(chain, emitter, sequence)` slot stays unconsumed and a future
+            // upgrade that understands the action can still account the VAA.
+            // Committing instead would burn the slot irreversibly.
+            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
         }
     }
 
@@ -352,8 +363,6 @@ struct ParsedObservation {
     guardian_set_index: u32,
     guardian_index: u8,
     signature: [u8; SECP256K1_SIGNATURE_LEN],
-    pending_pda_bump: u8,
-    digest_pda_bump: u8,
 }
 
 impl ParsedObservation {
@@ -366,8 +375,6 @@ impl ParsedObservation {
         let (gsi_bytes, rest) = rest.split_at(4);
         let guardian_index = rest[0];
         let signature_bytes = &rest[1..1 + SECP256K1_SIGNATURE_LEN];
-        let pending_pda_bump = rest[1 + SECP256K1_SIGNATURE_LEN];
-        let digest_pda_bump = rest[1 + SECP256K1_SIGNATURE_LEN + 1];
 
         let digest_arr: [u8; 32] = digest_bytes
             .try_into()
@@ -387,8 +394,6 @@ impl ParsedObservation {
             guardian_set_index: u32::from_le_bytes(gsi),
             guardian_index,
             signature,
-            pending_pda_bump,
-            digest_pda_bump,
         })
     }
 
@@ -481,9 +486,11 @@ fn create_pending_pda(
     pending_pda: &mut AccountView,
     parsed: &ParsedObservation,
 ) -> ProgramResult {
-    // Canonical-bump enforcement, mirroring `open_digest_inner`. A
-    // non-canonical bump that still produces a valid off-curve PDA would let
-    // an attacker mint sibling pending PDAs for the same logical key.
+    // The canonical bump is derived on-chain, mirroring `open_digest_inner` —
+    // callers never supply it, so a non-canonical bump minting sibling
+    // pending PDAs for the same logical key is impossible by construction.
+    // `invoke_signed` below only signs for the canonical address; a
+    // caller-supplied account at any other address fails the init CPI.
     let chain_be = parsed.chain.to_be_bytes();
     let sequence_be = parsed.sequence.to_be_bytes();
     let (_expected, canonical_bump) = Address::find_program_address(
@@ -496,11 +503,8 @@ fn create_pending_pda(
         ],
         program_id,
     );
-    if parsed.pending_pda_bump != canonical_bump {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
 
-    let bump_seed = [parsed.pending_pda_bump];
+    let bump_seed = [canonical_bump];
     let seeds = [
         Seed::from(PENDING_SEED_PREFIX),
         Seed::from(chain_be.as_slice()),

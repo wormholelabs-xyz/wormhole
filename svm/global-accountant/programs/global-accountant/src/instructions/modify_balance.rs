@@ -42,11 +42,14 @@ use crate::state::{account as balance_account, modification};
 /// | offset | size     | field             |
 /// |--------|----------|-------------------|
 /// | 0      | 1        | guardian_set_bump |
-/// | 1      | 1        | balance_pda_bump  |
-/// | 2      | 1        | modification_bump |
-/// | 3      | 2        | body_len (LE)     |
-/// | 5      | body_len | body              |
-const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 1 + 1 + 2;
+/// | 1      | 2        | body_len (LE)     |
+/// | 3      | body_len | body              |
+///
+/// `guardian_set_bump` is forwarded verbatim to the Shim's `VerifyHash` (its
+/// API). No PDA bumps travel in the wire for the balance / modification PDAs:
+/// the canonical bumps are derived on-chain via `find_program_address`, which
+/// canonical-address enforcement requires anyway.
+const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 2;
 
 /// Maximum VAA body size accepted. The canonical ModifyBalance body is 195
 /// bytes (51-byte header + 32-byte module + 1-byte action + 2-byte target
@@ -92,9 +95,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let guardian_set_bump = data[0];
-    let balance_pda_bump = data[1];
-    let modification_bump = data[2];
-    let body_len = u16::from_le_bytes([data[3], data[4]]) as usize;
+    let body_len = u16::from_le_bytes([data[1], data[2]]) as usize;
     if !(BODY_MIN_LEN..=MODIFY_BALANCE_BODY_MAX).contains(&body_len)
         || data.len() != MODIFY_BALANCE_FIXED_LEN + body_len
     {
@@ -206,8 +207,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         ],
         program_id,
     );
-    if balance_pda.address() != &expected_balance_pda || balance_pda_bump != canonical_balance_bump
-    {
+    if balance_pda.address() != &expected_balance_pda {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
@@ -216,9 +216,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         &[MODIFICATION_SEED_PREFIX, &payload_sequence_be],
         program_id,
     );
-    if modification_pda.address() != &expected_modification_pda
-        || modification_bump != canonical_modification_bump
-    {
+    if modification_pda.address() != &expected_modification_pda {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 

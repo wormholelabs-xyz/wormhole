@@ -143,18 +143,16 @@ fn submit_ix_data(
     guardian_set_index: u32,
     guardian_index: u8,
     signature: &[u8; 65],
-    pending_bump: u8,
-    digest_bump: u8,
     body: &[u8],
 ) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 104 + 2 + body.len());
+    // No bump bytes travel in the wire: the program derives both canonical PDA
+    // bumps on-chain via `find_program_address`.
+    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
-    data.push(pending_bump);
-    data.push(digest_bump);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -192,9 +190,7 @@ struct Scenario {
     body: Vec<u8>,
     digest: [u8; 32],
     pending_pda: Pubkey,
-    pending_bump: u8,
     digest_pda: Pubkey,
-    digest_bump: u8,
     noreplay_authority: Pubkey,
     noreplay_bucket: Pubkey,
     guardian_set_pubkey: Pubkey,
@@ -209,8 +205,10 @@ impl Scenario {
         emitter[31] = 0x77;
         let body = build_attest_body(CHAIN, &emitter, SEQUENCE);
         let digest = double_keccak256_host(&body);
-        let (pending_pda, pending_bump) = derive_pending_pda(CHAIN, &emitter, SEQUENCE, &digest);
-        let (digest_pda, digest_bump) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
+        // Only the PDA addresses feed the account metas; the program derives
+        // the canonical bumps on-chain.
+        let (pending_pda, _) = derive_pending_pda(CHAIN, &emitter, SEQUENCE, &digest);
+        let (digest_pda, _) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
         let (noreplay_authority, _) =
             Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let noreplay_bucket =
@@ -228,9 +226,7 @@ impl Scenario {
             body,
             digest,
             pending_pda,
-            pending_bump,
             digest_pda,
-            digest_bump,
             noreplay_authority,
             noreplay_bucket,
             guardian_set_pubkey,
@@ -308,8 +304,6 @@ impl Scenario {
                 GUARDIAN_SET_INDEX,
                 guardian_index,
                 &signature,
-                self.pending_bump,
-                self.digest_bump,
                 &self.body,
             ),
             self.account_metas(),

@@ -38,8 +38,10 @@ use crate::instructions::open_digest_inner;
 /// | 34     | 8    | sequence (big endian)              |
 /// | 42     | 32   | digest                             |
 /// | 74     | 4    | guardian_set_index (little endian) |
-/// | 78     | 1    | bump                               |
-const OPEN_DIGEST_DATA_LEN: usize = 2 + 32 + 8 + 32 + 4 + 1;
+///
+/// No bump travels in the wire: `open_digest_inner` derives the canonical
+/// bump on-chain via `find_program_address`.
+const OPEN_DIGEST_DATA_LEN: usize = 2 + 32 + 8 + 32 + 4;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     let data: &[u8; OPEN_DIGEST_DATA_LEN] = data
@@ -49,8 +51,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     let (chain_bytes, rest) = data.split_at(2);
     let (emitter, rest) = rest.split_at(32);
     let (sequence_bytes, rest) = rest.split_at(8);
-    let (digest_bytes, rest) = rest.split_at(32);
-    let (gsi_bytes, bump_byte) = rest.split_at(4);
+    let (digest_bytes, gsi_bytes) = rest.split_at(32);
 
     let chain_be: [u8; 2] = chain_bytes
         .try_into()
@@ -68,7 +69,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let guardian_set_index = u32::from_le_bytes(gsi_bytes);
-    let bump = bump_byte[0];
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` payer (rent funder)
@@ -91,6 +91,5 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         sequence_be,
         digest_arr,
         guardian_set_index,
-        bump,
     )
 }

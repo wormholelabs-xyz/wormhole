@@ -74,16 +74,16 @@ fn open_digest_ix_data(
     sequence: u64,
     digest: &[u8; 32],
     guardian_set_index: u32,
-    bump: u8,
 ) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 79);
+    // No bump byte travels in the wire: `open_digest_inner` derives the
+    // canonical bump on-chain via `find_program_address`.
+    let mut data = Vec::with_capacity(1 + 78);
     data.push(IxDiscriminator::OpenDigest as u8);
     data.extend_from_slice(&chain.to_be_bytes());
     data.extend_from_slice(emitter);
     data.extend_from_slice(&sequence.to_be_bytes());
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
-    data.push(bump);
     data
 }
 
@@ -140,13 +140,13 @@ impl CloseFixture {
         }
         let mut emitter = [0u8; 32];
         emitter[31] = 0x77;
-        let (digest_pda, bump) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
+        let (digest_pda, _) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
         let payer = Pubkey::new_from_array([1u8; 32]);
 
         // Drive `open_digest` directly so the test owns the stored digest.
         let open_ix = Instruction::new_with_bytes(
             program_id(),
-            &open_digest_ix_data(CHAIN, &emitter, SEQUENCE, &digest, GUARDIAN_SET_INDEX, bump),
+            &open_digest_ix_data(CHAIN, &emitter, SEQUENCE, &digest, GUARDIAN_SET_INDEX),
             vec![
                 AccountMeta::new(payer, true),
                 AccountMeta::new(digest_pda, false),

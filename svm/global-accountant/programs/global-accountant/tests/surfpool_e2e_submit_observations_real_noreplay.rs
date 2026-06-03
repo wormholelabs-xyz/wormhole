@@ -26,8 +26,8 @@
 use std::time::Duration;
 
 use global_accountant_definitions::{
-    Instruction as IxDiscriminator, DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    PENDING_SEED_PREFIX,
+    ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
+    DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_SEED_PREFIX,
 };
 use libsecp256k1::{sign, Message, PublicKey, SecretKey};
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -161,6 +161,13 @@ fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
 }
 
+/// Derive the canonical chain-registration PDA for `chain`. Mirrors the
+/// on-chain `state::chain_registration::verify` derivation.
+fn derive_chain_registration_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id)
+}
+
 /// Build the 34-byte noreplay namespace `(chain_be ‖ emitter)` matching the
 /// on-chain derivation. The big-endian chain choice mirrors the VAA wire
 /// format (and the `DIGEST_SEED_PREFIX` layout in `open_digest`); the Phase
@@ -178,32 +185,22 @@ fn build_namespace(chain: u16, emitter: &[u8; 32]) -> [u8; 34] {
 // ============================================================================
 
 fn submit_observations_ix_data(
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
     digest: &[u8; 32],
     guardian_set_index: u32,
     guardian_index: u8,
     signature: &[u8; 65],
-    pending_bump: u8,
-    digest_bump: u8,
     body: &[u8],
 ) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 146-byte fixed prefix + 2-byte body
-    // length (LE) + body bytes. The program re-derives
-    // `keccak256(keccak256(body)) == digest` and parses the Token Bridge
-    // payload for balance work.
-    let mut data = Vec::with_capacity(1 + 146 + 2 + body.len());
+    // Mirrors the production wire format: no routing prefix (the program
+    // sources `(chain, emitter, sequence)` from the body header after the
+    // digest cross-check) and no bump bytes (canonical PDA bumps derive
+    // on-chain via `find_program_address`).
+    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
-    data.extend_from_slice(&chain.to_be_bytes());
-    data.extend_from_slice(emitter);
-    data.extend_from_slice(&sequence.to_be_bytes());
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
-    data.push(pending_bump);
-    data.push(digest_bump);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -231,22 +228,20 @@ fn build_submit_observations_ix(
     bitmap_pda: &Pubkey,
     digest_pda: &Pubkey,
     noreplay_authority: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
+    chain_registration: &Pubkey,
     digest: &[u8; 32],
     gsi: u32,
     guardian_index: u8,
     signature: &[u8; 65],
-    pending_bump: u8,
-    digest_bump: u8,
     body: &[u8],
 ) -> Instruction {
-    // The account list carries two trailing slots: source-chain Account PDA
-    // and destination-chain Account PDA. For Attest / Other payloads (no
-    // balance work) the program never touches these slots, so re-using the
-    // noreplay-authority PDA as a sentinel satisfies the runtime's
-    // account-meta declaration without standing up real Account PDAs.
+    // Mirrors the production 12-slot account list in
+    // `submit_observations::process`. Slots 8 and 9 (source / dest Account
+    // PDAs) are only touched on the quorum-completing Transfer branch — for
+    // Attest payloads the noreplay-authority PDA serves as a sentinel that
+    // satisfies the runtime's account-meta declaration. Slot 10 (rent
+    // recipient) must equal the bucket's recorded payer, which is the
+    // submitter throughout this test.
     Instruction {
         program_id: *program_id,
         accounts: vec![
@@ -260,19 +255,10 @@ fn build_submit_observations_ix(
             AccountMeta::new_readonly(*noreplay_authority, false),
             AccountMeta::new(*noreplay_authority, false), // sentinel source slot
             AccountMeta::new(*noreplay_authority, false), // sentinel dest slot
+            AccountMeta::new(*submitter, false),          // rent recipient
+            AccountMeta::new_readonly(*chain_registration, false),
         ],
-        data: submit_observations_ix_data(
-            chain,
-            emitter,
-            sequence,
-            digest,
-            gsi,
-            guardian_index,
-            signature,
-            pending_bump,
-            digest_bump,
-            body,
-        ),
+        data: submit_observations_ix_data(digest, gsi, guardian_index, signature, body),
     }
 }
 
@@ -345,11 +331,13 @@ fn surfpool_submit_observations_real_noreplay() {
     let body = build_attest_body(chain, &emitter, sequence);
     let digest = double_keccak256_host(&body);
 
-    let (pending_pda, pending_bump) =
-        derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &digest);
-    let (digest_pda, digest_bump) = derive_digest_pda(&ga_program_id, chain, &emitter, sequence);
+    // Only the PDA addresses are needed for the account metas; the program
+    // derives the canonical bumps on-chain.
+    let (pending_pda, _) = derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &digest);
+    let (digest_pda, _) = derive_digest_pda(&ga_program_id, chain, &emitter, sequence);
     let (noreplay_authority, _noreplay_authority_bump) =
         derive_noreplay_authority_pda(&ga_program_id);
+    let (chain_registration_pda, _) = derive_chain_registration_pda(&ga_program_id, chain);
     let namespace = build_namespace(chain, &emitter);
     let (bitmap_pda, bitmap_bump) =
         derive_noreplay_bitmap_pda(&noreplay_authority, &namespace, sequence);
@@ -390,6 +378,35 @@ fn surfpool_submit_observations_real_noreplay() {
         .expect("GS account after setAccount");
     assert_eq!(gs_after.data.len(), gs_data.len(), "GS data round-trips");
 
+    // ----- Step 6b: inject the chain-registration PDA. The program
+    // cross-checks the body header's (emitter_chain, emitter_address) against
+    // a Token-Bridge-governance-registered emitter on every submission, so the
+    // canonical registration PDA must exist with our synthetic emitter
+    // recorded. Injected via the same `surfnet_setAccount` cheatcode as the
+    // guardian set (the prod-shape build only writes this PDA through the
+    // `register_chain` governance path).
+    let mut registration: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    registration.chain = chain;
+    registration.emitter_address = emitter;
+    let resp = common::rpc_call(
+        &rpc_url,
+        "surfnet_setAccount",
+        serde_json::json!([
+            chain_registration_pda.to_string(),
+            {
+                "lamports": 1_000_000_000u64,
+                "owner": ga_program_id.to_string(),
+                "executable": false,
+                "rent_epoch": 0u64,
+                "data": common::hex_encode(bytemuck::bytes_of(&registration)),
+            }
+        ]),
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "surfnet_setAccount failed for chain registration: {resp}"
+    );
+
     // ----- Step 7: drive 13 observations. -----
     for i in 0..13u8 {
         let g = &guardians[i as usize];
@@ -402,15 +419,11 @@ fn surfpool_submit_observations_real_noreplay() {
             &bitmap_pda,
             &digest_pda,
             &noreplay_authority,
-            chain,
-            &emitter,
-            sequence,
+            &chain_registration_pda,
             &digest,
             4,
             i,
             &signature,
-            pending_bump,
-            digest_bump,
             &body,
         );
         send_and_confirm(
@@ -448,15 +461,11 @@ fn surfpool_submit_observations_real_noreplay() {
         &bitmap_pda,
         &digest_pda,
         &noreplay_authority,
-        chain,
-        &emitter,
-        sequence,
+        &chain_registration_pda,
         &digest,
         4,
         13,
         &extra_signature,
-        pending_bump,
-        digest_bump,
         &body,
     );
     let err = send_expect_failure(

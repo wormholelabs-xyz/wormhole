@@ -63,16 +63,16 @@ fn open_digest_ix_data(
     sequence: u64,
     digest: &[u8; 32],
     guardian_set_index: u32,
-    bump: u8,
 ) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 79);
+    // No bump byte travels in the wire: `open_digest_inner` derives the
+    // canonical bump on-chain via `find_program_address`.
+    let mut data = Vec::with_capacity(1 + 78);
     data.push(IxDiscriminator::OpenDigest as u8);
     data.extend_from_slice(&chain.to_be_bytes());
     data.extend_from_slice(emitter);
     data.extend_from_slice(&sequence.to_be_bytes());
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
-    data.push(bump);
     data
 }
 
@@ -208,11 +208,11 @@ fn open_lifecycle_setup(
     pda_initial_lamports: u64,
 ) -> OpenState {
     let (chain, emitter, sequence, digest, guardian_set_index) = lifecycle_inputs();
-    let (pda, bump) = derive_digest_pda(chain, &emitter, sequence);
+    let (pda, _) = derive_digest_pda(chain, &emitter, sequence);
 
     let open_ix = Instruction::new_with_bytes(
         program_id(),
-        &open_digest_ix_data(chain, &emitter, sequence, &digest, guardian_set_index, bump),
+        &open_digest_ix_data(chain, &emitter, sequence, &digest, guardian_set_index),
         vec![
             AccountMeta::new(payer, true),
             AccountMeta::new(pda, false),
@@ -473,92 +473,6 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     assert_eq!(pda_after_close.owner, program_id());
     assert_eq!(pda_after_close.lamports, state.pda_after_open.lamports);
     assert_eq!(pda_after_close.data, state.pda_after_open.data);
-}
-
-/// Find a non-canonical (lower) bump that still derives a valid off-curve PDA
-/// for the given seeds. Returns the bump and its PDA address.
-///
-/// `find_program_address` returns the highest bump (counting down from 255) that
-/// produces an off-curve point. There are usually additional lower bumps that
-/// also produce off-curve points; an attacker who controls the bump in
-/// instruction data can use one of those to mint a sibling PDA for the same
-/// logical seeds. This helper locates one such sibling for the test.
-fn find_non_canonical_bump(
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-    canonical_bump: u8,
-) -> (u8, Pubkey) {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    let mut bump = canonical_bump;
-    while bump > 0 {
-        bump -= 1;
-        let seeds: &[&[u8]] = &[
-            DIGEST_SEED_PREFIX,
-            &chain_be,
-            emitter,
-            &sequence_be,
-            &[bump],
-        ];
-        if let Ok(pda) = Pubkey::create_program_address(seeds, &program_id()) {
-            return (bump, pda);
-        }
-    }
-    panic!(
-        "no non-canonical bump found for chain={chain} sequence={sequence}; \
-         pick different test inputs"
-    );
-}
-
-#[test]
-fn open_with_non_canonical_bump_fails() {
-    // Canonical-bump enforcement: an attacker who supplies a lower bump that
-    // also produces a valid off-curve PDA must be rejected. Otherwise multiple
-    // sibling PDAs can be opened for the same `(chain, emitter, sequence)`,
-    // which is the only same-key protection we have until NoReplay lands.
-    let mollusk = mollusk();
-    let (chain, emitter, sequence, digest, guardian_set_index) = lifecycle_inputs();
-    let (_canonical_pda, canonical_bump) = derive_digest_pda(chain, &emitter, sequence);
-    let (bad_bump, bad_pda) = find_non_canonical_bump(chain, &emitter, sequence, canonical_bump);
-    assert_ne!(bad_bump, canonical_bump);
-
-    let payer = Pubkey::new_from_array([9u8; 32]);
-    let open_ix = Instruction::new_with_bytes(
-        program_id(),
-        &open_digest_ix_data(
-            chain,
-            &emitter,
-            sequence,
-            &digest,
-            guardian_set_index,
-            bad_bump,
-        ),
-        vec![
-            AccountMeta::new(payer, true),
-            AccountMeta::new(bad_pda, false),
-            AccountMeta::new_readonly(system_program_id(), false),
-        ],
-    );
-
-    let open_accounts = vec![
-        (payer, payer_account(10_000_000_000)),
-        (bad_pda, uninitialised_pda_account()),
-        keyed_account_for_system_program(),
-    ];
-
-    let result = mollusk.process_instruction(&open_ix, &open_accounts);
-    match result.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidPda as u32,
-                "expected InvalidPda for non-canonical bump, got {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidPda), got {:?}", other),
-    }
 }
 
 #[test]

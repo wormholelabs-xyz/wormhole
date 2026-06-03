@@ -608,6 +608,43 @@ fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
 }
 
 #[test]
+fn submit_vaas_with_unknown_payload_rejects_and_preserves_replay_slot() {
+    // An action byte outside {0x01, 0x02, 0x03} must reject with
+    // `UnknownTokenBridgePayload`, mirroring CosmWasm's
+    // `bail!("Unknown tokenbridge payload")`. Rejecting before the NoReplay
+    // mark leaves the `(chain, emitter, sequence)` slot unconsumed, so a
+    // future program upgrade that understands the action can still account
+    // the VAA via backfill.
+    let mollusk = mollusk();
+    let mut scenario = Scenario::new(0xA7);
+    scenario.body[51] = 0x05; // unknown Token Bridge action byte
+    scenario.digest = double_keccak256_host(&scenario.body);
+
+    let result = scenario.submit(&mollusk, scenario.initial_accounts());
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::UnknownTokenBridgePayload as u32,
+                "expected UnknownTokenBridgePayload, got code {code}"
+            );
+        }
+        other => panic!("expected Failure(UnknownTokenBridgePayload), got {other:?}"),
+    }
+
+    // Replay slot unconsumed, no DigestAccount breadcrumb.
+    let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
+    assert_bucket_unmarked(bucket);
+    let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
+    assert_eq!(
+        digest.owner,
+        system_program_id(),
+        "digest PDA must stay uninitialised after rejection"
+    );
+}
+
+#[test]
 fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
     // The NoReplay pre-check fires before the Shim CPI's mock-branch return.
     // We pre-flip the bucket and submit: the program must reject with

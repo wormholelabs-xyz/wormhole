@@ -56,10 +56,23 @@ pub fn apply_transfer(
     let mut src = account_state::load(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
 
-    // Same-chain self-transfer detection — see CosmWasm
-    // `cosmwasm/packages/accountant/src/contract.rs:158-161`. When source ==
-    // destination, apply both ops to the same in-memory layout before storing
-    // once, so the second op observes the first.
+    // Same-chain self-transfer collapse — see CosmWasm
+    // `cosmwasm/packages/accountant/src/contract.rs:158-161`. Not a
+    // visibility fix: the runtime deduplicates a repeated pubkey onto one
+    // buffer, so a store-through-source / load-through-dest round trip would
+    // observe the mutation anyway. The branch exists because
+    //
+    // 1. it makes the lost-update hazard structural rather than ordering-
+    //    dependent — the CosmWasm reference loads both accounts before
+    //    mutating either, where a same-key save-last would silently clobber
+    //    the lock/burn; a refactor of this function toward that symmetric
+    //    shape would reintroduce the bug if this branch were absent,
+    // 2. the early return skips the destination-side `find_program_address`
+    //    (~1.5K CU), address check, and `init_if_needed`, and
+    // 3. applying both ops to one in-memory layout in the reference's exact
+    //    order pins the transient arithmetic: burn-then-mint must underflow
+    //    when the wrapped balance is below `amount`, even though the net is
+    //    zero — parity with CosmWasm down to the error code.
     let same_pda = source_account.address() == dest_account.address();
     if same_pda {
         src.unlock_or_mint(amount).map_err(err)?;

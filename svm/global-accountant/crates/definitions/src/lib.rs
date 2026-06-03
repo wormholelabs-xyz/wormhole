@@ -180,6 +180,15 @@ pub enum GlobalAccountantError {
     /// governance VAAs is keyed on the payload's own modification sequence
     /// (not the VAA emitter sequence), matching CosmWasm semantics.
     DuplicateModification = 28,
+    /// The Token Bridge payload's action byte is not `0x01` (Transfer), `0x02`
+    /// (Attest), or `0x03` (TransferWithPayload). Mirrors CosmWasm's
+    /// `bail!("Unknown tokenbridge payload")` in `handle_tokenbridge_vaa` —
+    /// rejecting (rather than committing with no balance work) keeps the
+    /// NoReplay slot unconsumed, so a future program upgrade that understands
+    /// the new action can still process the VAA. Committing would burn the
+    /// `(chain, emitter, sequence)` slot irreversibly for a payload whose
+    /// semantics this build does not know.
+    UnknownTokenBridgePayload = 29,
 }
 
 impl From<GlobalAccountantError> for u32 {
@@ -726,10 +735,11 @@ pub enum TokenBridgeAction {
     /// move value; the commit branch must still finish (NoReplay flip,
     /// DigestAccount open, pending close) but skips both balance updates.
     Attest,
-    /// Any payload byte that is not `0x01`, `0x02`, or `0x03`. CosmWasm
-    /// `bail!`s with "Unknown tokenbridge payload"; we treat the same way as
-    /// `Attest` from the accountant's perspective — finish the commit, do not
-    /// mutate balances. Callers can match on `Other` if they need to log.
+    /// Any payload byte that is not `0x01`, `0x02`, or `0x03`. The parser
+    /// stays total (returns `Other` rather than erroring) but both commit
+    /// paths reject it with [`GlobalAccountantError::UnknownTokenBridgePayload`],
+    /// matching CosmWasm's `bail!("Unknown tokenbridge payload")` — the
+    /// NoReplay slot stays unconsumed so a future upgrade can process the VAA.
     Other,
 }
 

@@ -205,23 +205,20 @@ fn submit_ix_data(
     guardian_set_index: u32,
     guardian_index: u8,
     signature: &[u8; 65],
-    pending_bump: u8,
-    digest_bump: u8,
     body: &[u8],
 ) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 104-byte fixed prefix + 2-byte body
+    // Wire shape: 1-byte discriminator + 102-byte fixed prefix + 2-byte body
     // length (LE) + body bytes. Mirrors `submit_observations.rs::SUBMIT_FIXED_LEN`.
-    // The routing tuple (chain, emitter, sequence) is sourced exclusively from
-    // the body header (offsets [8..50]); no caller-controlled prefix carries
-    // them.
-    let mut data = Vec::with_capacity(1 + 104 + 2 + body.len());
+    // No bump bytes travel in the wire: the program derives both the pending
+    // and digest PDA canonical bumps on-chain via `find_program_address`. The
+    // routing tuple (chain, emitter, sequence) is sourced exclusively from the
+    // body header (offsets [8..50]); no caller-controlled prefix carries them.
+    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
-    data.push(pending_bump);
-    data.push(digest_bump);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -392,9 +389,7 @@ struct Scenario {
     guardians: Vec<Guardian>,
     submitter: Pubkey,
     pending_pda: Pubkey,
-    pending_bump: u8,
     digest_pda: Pubkey,
-    digest_bump: u8,
     guardian_set_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
     noreplay_program_pubkey: Pubkey,
@@ -437,8 +432,10 @@ impl Scenario {
 
         let guardians = make_guardians(guardian_count, seed);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
-        let (pending_pda, pending_bump) = derive_pending_pda(chain, &emitter, sequence, &digest);
-        let (digest_pda, digest_bump) = derive_digest_pda(chain, &emitter, sequence);
+        // Only the PDA addresses are needed for the account metas; the program
+        // derives the canonical bumps on-chain, so the bump component is dropped.
+        let (pending_pda, _) = derive_pending_pda(chain, &emitter, sequence, &digest);
+        let (digest_pda, _) = derive_digest_pda(chain, &emitter, sequence);
         // Use the canonical program-derived noreplay authority so the bucket
         // address agrees with close_pending's internal re-derivation (which
         // does not consult the account list — see close_pending.rs).
@@ -458,9 +455,7 @@ impl Scenario {
             guardians,
             submitter,
             pending_pda,
-            pending_bump,
             digest_pda,
-            digest_bump,
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
             noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
@@ -500,10 +495,9 @@ impl Scenario {
             recipient_chain,
         );
         base.digest = double_keccak256_host(&base.body);
-        let (pending_pda, pending_bump) =
+        let (pending_pda, _) =
             derive_pending_pda(base.chain, &base.emitter, base.sequence, &base.digest);
         base.pending_pda = pending_pda;
-        base.pending_bump = pending_bump;
         // Account PDAs: source uses VAA emitter chain (== base.chain) for
         // chain; dest uses recipient_chain.
         let (src, _) = derive_account_pda(base.chain, token_chain, &token_address);
@@ -535,8 +529,6 @@ impl Scenario {
                 self.guardian_set_index,
                 guardian_index,
                 &signature,
-                self.pending_bump,
-                self.digest_bump,
                 &self.body,
             ),
             self.account_metas(),
@@ -837,8 +829,6 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         scenario.guardian_set_index,
         12,
         &signature,
-        scenario.pending_bump,
-        scenario.digest_bump,
         &scenario.body,
     );
 
@@ -953,34 +943,28 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let signature = sign_digest(&guardians[0], &digest);
 
     // Attempt the attack: feed the program an attacker-derived pending PDA in
-    // slot 1, with a bump that matches *that* namespace, not the body's. The
-    // wire no longer carries (chain, emitter, sequence) — the program reads
-    // them from body[8..50] — so it recomputes the canonical bump for the
+    // slot 1, canonical for *that* namespace, not the body's. The wire no
+    // longer carries (chain, emitter, sequence) — the program reads them from
+    // body[8..50] — so it recomputes the canonical pending PDA address for the
     // body-derived seeds and rejects any mismatch in create_pending_pda. The
-    // attacker's spoofed bump cannot collide with the body-derived canonical
-    // bump under our seed scheme.
+    // attacker's pending PDA address cannot collide with the body-derived
+    // canonical address under our seed scheme.
     let attacker_chain = 99u16;
     let attacker_emitter = [0xFFu8; 32];
     let attacker_sequence = 0x9999u64;
-    let (attacker_pending_pda, attacker_pending_bump) = derive_pending_pda(
+    let (attacker_pending_pda, _) = derive_pending_pda(
         attacker_chain,
         &attacker_emitter,
         attacker_sequence,
         &digest,
     );
-    let (body_pending_pda, body_pending_bump) =
+    let (body_pending_pda, _) =
         derive_pending_pda(body_chain, &body_emitter, body_sequence, &digest);
     assert_ne!(
         body_pending_pda, attacker_pending_pda,
         "test fixture must drive distinct pending PDA addresses"
     );
-    assert_ne!(
-        body_pending_bump, attacker_pending_bump,
-        "test fixture must drive distinct canonical bumps (probabilistically \
-         true for non-colliding seeds; re-seed the fixture if this ever flips)"
-    );
-    let (body_digest_pda, body_digest_bump) =
-        derive_digest_pda(body_chain, &body_emitter, body_sequence);
+    let (body_digest_pda, _) = derive_digest_pda(body_chain, &body_emitter, body_sequence);
 
     let submitter = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
@@ -994,15 +978,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     );
     let noreplay_program_pubkey = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
 
-    let ix_data = submit_ix_data(
-        &digest,
-        4,
-        0,
-        &signature,
-        attacker_pending_bump,
-        body_digest_bump,
-        &body,
-    );
+    let ix_data = submit_ix_data(&digest, 4, 0, &signature, &body);
 
     // Pre-populate the registration PDA for the body chain so the new
     // registration check passes — this test exercises the pending-PDA
@@ -1045,19 +1021,25 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let ix = Instruction::new_with_bytes(program_id(), &ix_data, metas);
     let r = mollusk.process_instruction(&ix, &accounts);
 
-    match r.program_result {
-        ProgramResult::Failure(err) => {
-            let code = u64::from(err) as u32;
-            assert_eq!(
-                code,
-                GlobalAccountantError::InvalidPda as u32,
-                "spoofed pending PDA must reject with InvalidPda — program \
-                 recomputes canonical bump from body-derived seeds and rejects \
-                 any mismatch, got code {code:?}"
-            );
-        }
-        other => panic!("expected Failure(InvalidPda), got {other:?}"),
-    }
+    // The wire no longer carries a caller-supplied bump: `create_pending_pda`
+    // derives the canonical bump from the body-routed seeds and `invoke_signed`
+    // only signs for that canonical address. A pending PDA at any other address
+    // therefore cannot be created — the init CPI fails the signer-privilege
+    // check and the runtime aborts with `PrivilegeEscalation` before any state
+    // mutation. (Pre-fix, the attacker's prefix-supplied routing tuple let the
+    // program sign for the spoofed address; that path no longer exists.)
+    assert!(
+        !matches!(r.program_result, ProgramResult::Success),
+        "spoofed pending PDA must be rejected, got {:?}",
+        r.program_result
+    );
+    let result_debug = format!("{:?}", r.program_result);
+    assert!(
+        result_debug.contains("PrivilegeEscalation"),
+        "spoofed pending PDA must reject with PrivilegeEscalation — \
+         create_pending_pda signs only for the body-derived canonical address, \
+         so the init CPI cannot sign for the attacker's address; got {result_debug}"
+    );
 
     // Belt-and-braces: the attacker's pending PDA must still be uninitialised
     // after the rejection (the failed tx unwinds atomically).
@@ -1125,8 +1107,6 @@ fn submit_observations_rejects_unregistered_chain() {
             scenario.guardian_set_index,
             0,
             &signature,
-            scenario.pending_bump,
-            scenario.digest_bump,
             &scenario.body,
         ),
         metas,
@@ -1174,8 +1154,6 @@ fn submit_observations_rejects_wrong_emitter_for_registered_chain() {
             scenario.guardian_set_index,
             0,
             &signature,
-            scenario.pending_bump,
-            scenario.digest_bump,
             &scenario.body,
         ),
         scenario.account_metas(),
@@ -1225,8 +1203,6 @@ fn submit_observations_rejects_spoofed_registration_pda() {
             scenario.guardian_set_index,
             0,
             &signature,
-            scenario.pending_bump,
-            scenario.digest_bump,
             &scenario.body,
         ),
         metas,
@@ -1261,8 +1237,6 @@ fn submit_with_invalid_signature_fails() {
             scenario.guardian_set_index,
             0,
             &signature,
-            scenario.pending_bump,
-            scenario.digest_bump,
             &scenario.body,
         ),
         scenario.account_metas(),
@@ -1297,8 +1271,6 @@ fn submit_with_recovery_id_4_rejects() {
             scenario.guardian_set_index,
             0,
             &signature,
-            scenario.pending_bump,
-            scenario.digest_bump,
             &scenario.body,
         ),
         scenario.account_metas(),
@@ -1444,8 +1416,6 @@ fn submit_with_malformed_guardian_set_rejects() {
                 scenario.guardian_set_index,
                 guardian_index,
                 &signature,
-                scenario.pending_bump,
-                scenario.digest_bump,
                 &scenario.body,
             ),
             scenario.account_metas(),
@@ -1502,8 +1472,6 @@ fn submit_with_stale_old_set_observation_fails() {
             4, // stale index
             1,
             &stale_signature,
-            new_scenario.pending_bump,
-            new_scenario.digest_bump,
             &new_scenario.body,
         ),
         new_scenario.account_metas(),
@@ -1555,15 +1523,7 @@ fn submit_with_new_set_observation_wipes_old_pending() {
     let signature = sign_digest(&new_guardians[0], &old_scenario.digest);
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            &old_scenario.digest,
-            5,
-            0,
-            &signature,
-            old_scenario.pending_bump,
-            old_scenario.digest_bump,
-            &old_scenario.body,
-        ),
+        &submit_ix_data(&old_scenario.digest, 5, 0, &signature, &old_scenario.body),
         old_scenario.account_metas(),
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -1619,7 +1579,7 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     );
     let signature = sign_digest(&scenario.guardians[1], &alternate_digest);
 
-    let (d2_pending_pda, d2_pending_bump) = derive_pending_pda(
+    let (d2_pending_pda, _) = derive_pending_pda(
         scenario.chain,
         &scenario.emitter,
         scenario.sequence,
@@ -1644,8 +1604,6 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
             scenario.guardian_set_index,
             1,
             &signature,
-            d2_pending_bump,
-            scenario.digest_bump,
             &alternate_body,
         ),
         metas,
@@ -1754,7 +1712,7 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     let alternate_digest = double_keccak256_host(&alternate_body);
     assert_ne!(alternate_digest, scenario.digest);
 
-    let (d2_pending_pda, d2_pending_bump) = derive_pending_pda(
+    let (d2_pending_pda, _) = derive_pending_pda(
         scenario.chain,
         &scenario.emitter,
         scenario.sequence,
@@ -1778,8 +1736,6 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
                 scenario.guardian_set_index,
                 i,
                 &signature,
-                d2_pending_bump,
-                scenario.digest_bump,
                 &alternate_body,
             ),
             metas,
@@ -2305,18 +2261,15 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         2,
     );
     scenario.digest = double_keccak256_host(&scenario.body);
-    let (pending_pda, pending_bump) = derive_pending_pda(
+    let (pending_pda, _) = derive_pending_pda(
         scenario.chain,
         &scenario.emitter,
         scenario.sequence,
         &scenario.digest,
     );
     scenario.pending_pda = pending_pda;
-    scenario.pending_bump = pending_bump;
-    let (digest_pda, digest_bump) =
-        derive_digest_pda(scenario.chain, &scenario.emitter, scenario.sequence);
+    let (digest_pda, _) = derive_digest_pda(scenario.chain, &scenario.emitter, scenario.sequence);
     scenario.digest_pda = digest_pda;
-    scenario.digest_bump = digest_bump;
     let (src, _) = derive_account_pda(1, 2, &token_address);
     let (dst, _) = derive_account_pda(2, 2, &token_address);
     // Re-derive the registration PDA for the new body chain — the default
@@ -2509,6 +2462,69 @@ fn quorum_with_attest_payload_skips_balance_work_but_finishes_commit() {
 }
 
 #[test]
+fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
+    // An action byte outside {0x01, 0x02, 0x03} must reject the
+    // quorum-completing submission with `UnknownTokenBridgePayload`,
+    // mirroring CosmWasm's `bail!("Unknown tokenbridge payload")`. The
+    // failure rolls back the in-tx NoReplay mark, so the
+    // `(chain, emitter, sequence)` slot stays unconsumed and a future
+    // program upgrade that understands the action can still account the VAA.
+    let mollusk = mollusk();
+    let mut scenario = Scenario::new(19, 4, 0x65);
+    scenario.body[51] = 0x05; // unknown Token Bridge action byte
+    scenario.digest = double_keccak256_host(&scenario.body);
+    let (pending_pda, _) = derive_pending_pda(
+        scenario.chain,
+        &scenario.emitter,
+        scenario.sequence,
+        &scenario.digest,
+    );
+    scenario.pending_pda = pending_pda;
+
+    // The payload parse only happens on the quorum-completing branch, so the
+    // first 12 observations accumulate normally.
+    let accounts = scenario.submit_n(&mollusk, 12);
+
+    // The 13th submission trips the commit branch and must reject.
+    let result = scenario.submit_once(&mollusk, accounts, 12);
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::UnknownTokenBridgePayload as u32,
+                "expected UnknownTokenBridgePayload, got code {code}"
+            );
+        }
+        other => panic!("expected Failure(UnknownTokenBridgePayload), got {other:?}"),
+    }
+
+    // The rejection reverts the NoReplay mark: the bucket stays uninitialised
+    // (system-owned, no data), i.e. the replay slot is not consumed.
+    let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
+    assert_eq!(
+        bucket.owner,
+        system_program_id(),
+        "noreplay bucket must stay system-owned after rejection"
+    );
+    assert!(
+        bucket.data.is_empty(),
+        "noreplay bucket data untouched after rejection"
+    );
+
+    // The pending bucket survives with its 12 accumulated signatures, ready
+    // for `close_pending` cleanup once the guardian set expires.
+    let pending = find_account(&result.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending.owner, program_id(), "pending PDA still live");
+    let layout: &PendingObservationsLayout = bytemuck::from_bytes(&pending.data);
+    assert_eq!(
+        layout.signatures.count_ones(),
+        12,
+        "12 signatures still recorded in the surviving bucket"
+    );
+}
+
+#[test]
 fn quorum_with_body_digest_mismatch_rejects() {
     // Caller supplies the right digest in the fixed prefix but a body that
     // hashes to a different value. The pre-balance-work keccak check must
@@ -2527,8 +2543,6 @@ fn quorum_with_body_digest_mismatch_rejects() {
             scenario.guardian_set_index,
             0,
             &signature,
-            scenario.pending_bump,
-            scenario.digest_bump,
             &tampered_body, // body doesn't double-keccak to `digest`
         ),
         scenario.account_metas(),

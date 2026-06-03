@@ -14,10 +14,11 @@
 //! short-circuit; the digest-mismatch sub-case is subsumed because the
 //! namespace omits digest).
 //!
-//! Token Bridge governance VAAs land at action != 0x01 — Attest / Unknown
-//! both no-op the balance work, so a governance VAA submitted today commits
-//! the DigestAccount + flips NoReplay without state change. The follow-on
-//! `modify_balance` path replays them when it lands.
+//! Attest payloads (action 0x02) no-op the balance work but still commit the
+//! DigestAccount + flip NoReplay. Unknown action bytes are rejected with
+//! `UnknownTokenBridgePayload` (mirroring CosmWasm's bail), leaving the
+//! NoReplay slot unconsumed so a future upgrade that understands the action
+//! can still process the VAA.
 
 use pinocchio::{
     error::ProgramError,
@@ -27,7 +28,7 @@ use pinocchio::{
 
 use crate::definitions::{
     parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError, TokenBridgeAction,
-    DIGEST_SEED_PREFIX, VAA_BODY_HEADER_LEN, VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR,
+    VAA_BODY_HEADER_LEN, VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR,
 };
 use crate::err;
 use crate::instructions::{noreplay, open_digest_inner, transfer::apply_transfer};
@@ -199,9 +200,18 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
                 amount,
             )?;
         }
-        TokenBridgeAction::Attest | TokenBridgeAction::Other => {
-            // Same sentinel-slot convention as `submit_observations` —
-            // callers may pass the noreplay-authority PDA in slots 8 and 9.
+        TokenBridgeAction::Attest => {
+            // No balance work; the commit below still runs. Same sentinel-slot
+            // convention as `submit_observations` — callers may pass the
+            // noreplay-authority PDA in slots 8 and 9.
+        }
+        TokenBridgeAction::Other => {
+            // Unknown action byte: reject BEFORE the NoReplay mark, mirroring
+            // CosmWasm's `bail!("Unknown tokenbridge payload")`. Committing
+            // here would burn the `(chain, emitter, sequence)` slot for a
+            // payload this build cannot account, making the VAA permanently
+            // unprocessable even after an upgrade that understands it.
+            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
         }
     }
 
@@ -230,25 +240,15 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // commit paths. The DigestAccount records `guardian_set_index = 0` as a
     // sentinel since `submit_vaas` does not pin a single set (the Shim
     // accepts any currently-active one); the `quorum_at_slot` is the current
-    // slot, same as the observations path.
-    //
-    // Bump is recomputed inline rather than threaded through the wire
-    // format. `submit_vaas` is the cold path (one tx per backfill, not
-    // per-observation), so the ~1.5K CU cost of the `find_program_address`
-    // call is irrelevant.
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    let (_expected_digest_pda, digest_bump) = Address::find_program_address(
-        &[DIGEST_SEED_PREFIX, &chain_be, &emitter, &sequence_be],
-        program_id,
-    );
+    // slot, same as the observations path. The canonical digest-PDA bump is
+    // derived inside `open_digest_inner`.
     open_digest_inner(
         program_id,
         submitter,
         digest_pda,
-        chain_be,
+        chain.to_be_bytes(),
         emitter,
-        sequence_be,
+        sequence.to_be_bytes(),
         digest,
         // `submit_vaas` does not track a guardian-set index. The Shim
         // accepts any currently-active set, so recording one here is
@@ -256,7 +256,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         // from the observations path which records the set that reached
         // quorum.
         0,
-        digest_bump,
     )?;
 
     Ok(())
