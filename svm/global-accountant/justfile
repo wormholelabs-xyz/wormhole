@@ -160,6 +160,39 @@ _require-noreplay-so:
         exit 1
     fi
 
+# SBF-target type-check. There is no upstream `cargo check-sbf`, but
+# `cargo build-sbf` registers the platform-tools compiler with rustup (e.g.
+# `1.89.0-sbpf-solana-v1.52`), which can drive a plain `cargo check` against
+# the real `sbpf-solana-solana` target. This checks the exact cfg shape that
+# ships (`target_os = "solana"` arms, real syscall declarations) without the
+# cost of a full `build-sbf`, and without the host-side cfg fallbacks that
+# `cargo check` on the host exercises. Both feature shapes are covered,
+# mirroring the clippy/clippy-prod split. The toolchain name embeds the
+# platform-tools version, so it is discovered rather than hard-coded.
+#
+# Note: clippy cannot run on this toolchain (Anza ships no cargo-clippy for
+# platform-tools, and rustup cannot add components to custom toolchains), so
+# the host `clippy` targets below remain the only lint coverage. As partial
+# compensation, RUSTFLAGS=-Dwarnings promotes the compiler's own lints to
+# errors on the SBF target — the strictest gate the toolchain permits.
+
+[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied.")]
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    toolchain=$(rustup toolchain list | awk '/sbpf-solana/ {print $1; exit}')
+    if [ -z "${toolchain}" ]; then
+        echo "ERROR: no sbpf-solana platform-tools toolchain found in rustup." >&2
+        echo "Run 'cargo build-sbf' once to install it." >&2
+        exit 1
+    fi
+    echo "Using toolchain: ${toolchain}"
+    export RUSTFLAGS="-Dwarnings"
+    cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
+        -p global-accountant --features bpf-entrypoint,test-only-open-digest
+    cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
+        -p global-accountant --features bpf-entrypoint
+
 [doc("Clippy with the dev feature combo (matches build-dev).")]
 clippy:
     cargo clippy --all-targets --features test-only-open-digest -- -D warnings

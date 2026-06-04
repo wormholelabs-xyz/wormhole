@@ -2,12 +2,19 @@
 //!
 //! The on-chain `sol_keccak256` ABI takes a pointer to `&[u8]` fat pointers
 //! rather than raw bytes, so callers cannot use the syscall directly without
-//! reproducing the slice-of-slices dance. Host-side builds (cargo check
-//! outside `cargo build-sbf`) substitute a no-op so the program crate
-//! compiles for clippy / type-check; the SBF target is the only path that
-//! actually exercises these helpers.
+//! reproducing the slice-of-slices dance.
+//!
+//! The cfg split exists because pinocchio gates its `syscalls` re-export
+//! behind `#[cfg(any(target_os = "solana", target_arch = "bpf"))]` — on the
+//! host target the module does not exist at all, so the crate would fail to
+//! resolve. Host compilation is required regardless: the mollusk/surfpool
+//! integration tests link this crate into host test binaries, and clippy is
+//! host-only (the platform-tools toolchain ships no cargo-clippy). The host
+//! arm panics rather than silently mis-hashing if ever reached; only the SBF
+//! target exercises these helpers for real. `just check` type-checks the SBF
+//! arm without a full `cargo build-sbf`.
 
-/// `keccak256(data)` into `result`. No-op on the host target.
+/// `keccak256(data)` into `result`. Panics on the host target.
 #[cfg(any(target_os = "solana", target_arch = "bpf"))]
 pub(crate) fn keccak256(data: &[u8], result: &mut [u8; 32]) {
     let vals: [&[u8]; 1] = [data];
@@ -23,7 +30,9 @@ pub(crate) fn keccak256(data: &[u8], result: &mut [u8; 32]) {
 }
 
 #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-pub(crate) fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {}
+pub(crate) fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {
+    unreachable!("keccak256 is only available on the SBF target");
+}
 
 /// `keccak256(keccak256(body))` — the Wormhole VAA digest convention used by
 /// guardian signing and the Verify VAA Shim's `VerifyHash`.
