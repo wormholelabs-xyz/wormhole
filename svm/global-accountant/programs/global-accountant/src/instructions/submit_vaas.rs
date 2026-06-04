@@ -20,18 +20,14 @@
 //! NoReplay slot unconsumed so a future upgrade that understands the action
 //! can still process the VAA.
 
-use pinocchio::{
-    error::ProgramError,
-    instruction::{InstructionAccount, InstructionView},
-    AccountView, Address, ProgramResult,
-};
+use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use crate::definitions::{
     parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError, TokenBridgeAction,
-    VAA_BODY_HEADER_LEN, VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR,
+    VAA_BODY_HEADER_LEN,
 };
 use crate::err;
-use crate::instructions::{noreplay, open_digest_inner, transfer::apply_transfer};
+use crate::instructions::{noreplay, open_digest_inner, shim, transfer::apply_transfer};
 use crate::state::chain_registration;
 
 // ============================================================================
@@ -107,7 +103,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //                       `submit_observations` path and CosmWasm
     //                       `handle_tokenbridge_vaa` at
     //                       `contract.rs:446-454`.
-    let [submitter, verify_vaa_shim_program, guardian_set, guardian_signatures, digest_pda, noreplay_bucket, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
+    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, digest_pda, noreplay_bucket, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -124,8 +120,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // (`EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at`) which recovers the
     // guardian pubkeys from the supplied `GuardianSignatures` PDA and asserts
     // they reach quorum against the supplied `GuardianSet`.
-    verify_vaa(
-        verify_vaa_shim_program,
+    shim::verify_vaa(
         guardian_set,
         guardian_signatures,
         &digest,
@@ -259,58 +254,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     )?;
 
     Ok(())
-}
-
-// ============================================================================
-// Verify VAA Shim CPI — shape mirrored from `close_digest::verify_vaa`.
-// ============================================================================
-
-/// Verify the candidate digest via CPI to the Wormhole Verify VAA Shim
-/// (`VerifyHash`).
-///
-/// The Shim's checks (see `programs/verify-vaa/src/lib.rs::process_verify_hash`):
-///   1. `guardian_signatures` is owned by the Shim program.
-///   2. `guardian_set`'s address matches `(GUARDIAN_SET_SEED,
-///      guardian_index_be, guardian_set_bump)` under the Core Bridge program.
-///   3. The guardian set is not expired.
-///   4. The recovered Ethereum pubkeys reach quorum against the stored digest.
-fn verify_vaa(
-    verify_vaa_shim_program: &AccountView,
-    guardian_set: &AccountView,
-    guardian_signatures: &AccountView,
-    digest: &[u8; 32],
-    guardian_set_bump: u8,
-) -> ProgramResult {
-    // Defence-in-depth: refuse to CPI to anything other than the Shim. The
-    // runtime would still reject a wrong program ID; failing here yields our
-    // own error code in the program logs.
-    if verify_vaa_shim_program.address().as_array()
-        != &crate::definitions::VERIFY_VAA_SHIM_PROGRAM_ID
-    {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-
-    // Build the Shim's `VerifyHash` instruction data on the stack:
-    //   [0..8]  = VERIFY_HASH_SELECTOR (Anchor discriminator)
-    //   [8]     = guardian_set_bump
-    //   [9..41] = digest
-    let mut ix_data = [0u8; VERIFY_HASH_DATA_LEN];
-    ix_data[..8].copy_from_slice(&VERIFY_HASH_SELECTOR);
-    ix_data[8] = guardian_set_bump;
-    ix_data[9..].copy_from_slice(digest);
-
-    let ix_accounts = [
-        InstructionAccount::readonly(guardian_set.address()),
-        InstructionAccount::readonly(guardian_signatures.address()),
-    ];
-
-    let instruction = InstructionView {
-        program_id: verify_vaa_shim_program.address(),
-        data: &ix_data,
-        accounts: &ix_accounts,
-    };
-
-    pinocchio::cpi::invoke(&instruction, &[guardian_set, guardian_signatures])
 }
 
 use crate::hash::double_keccak256;

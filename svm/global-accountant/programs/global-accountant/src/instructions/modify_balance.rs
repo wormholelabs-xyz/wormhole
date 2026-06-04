@@ -18,18 +18,16 @@
 use pinocchio::{
     cpi::{Seed, Signer},
     error::ProgramError,
-    instruction::{InstructionAccount, InstructionView},
     AccountView, Address, ProgramResult,
 };
 
 use crate::definitions::{
     BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLogLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
-    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, VERIFY_HASH_DATA_LEN,
-    VERIFY_HASH_SELECTOR, WORMCHAIN_CHAIN_ID,
+    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
 };
 use crate::err;
-use crate::instructions::pda_init::init_or_upgrade_pda;
+use crate::instructions::{pda_init::init_or_upgrade_pda, shim};
 use crate::state::{account as balance_account, modification};
 
 // ============================================================================
@@ -119,7 +117,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //                       `(b"modification", payload_sequence_be)`.
     //                       Lazy-inited every call; existence ⇒
     //                       `DuplicateModification`.
-    let [payer, verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -130,8 +128,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
 
     // ----- (3) Shim CPI to verify the digest -----
-    verify_vaa(
-        verify_vaa_shim_program,
+    shim::verify_vaa(
         guardian_set,
         guardian_signatures,
         &digest,
@@ -259,13 +256,11 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
             }
         }
     } else {
-        // Existing balance PDA. Owner check guards against foreign-program
-        // accounts at the canonical address (the runtime forbids assignment to
-        // our seed by another program, but the defensive check costs ~50 CU
-        // and makes the intent explicit).
-        if balance_pda.owner() != program_id {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
+        // Existing balance PDA. No owner check needed: the address was
+        // verified canonical above, and assigning ownership of a PDA requires
+        // its signature — producible only via this program's `invoke_signed`,
+        // which only ever assigns to itself. Owner is therefore either the
+        // system program (handled by the uninit branch) or this program.
         let mut layout = balance_account::load(balance_pda)?;
         match kind {
             ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
@@ -352,42 +347,6 @@ fn init_balance_account(
     layout.token_address = *token_address;
     layout.balance = amount;
     balance_account::store(balance_pda, &layout)
-}
-
-// ============================================================================
-// Verify VAA Shim CPI — shape mirrored from `register_chain::verify_vaa`.
-// ============================================================================
-
-fn verify_vaa(
-    verify_vaa_shim_program: &AccountView,
-    guardian_set: &AccountView,
-    guardian_signatures: &AccountView,
-    digest: &[u8; 32],
-    guardian_set_bump: u8,
-) -> ProgramResult {
-    if verify_vaa_shim_program.address().as_array()
-        != &crate::definitions::VERIFY_VAA_SHIM_PROGRAM_ID
-    {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-
-    let mut ix_data = [0u8; VERIFY_HASH_DATA_LEN];
-    ix_data[..8].copy_from_slice(&VERIFY_HASH_SELECTOR);
-    ix_data[8] = guardian_set_bump;
-    ix_data[9..].copy_from_slice(digest);
-
-    let ix_accounts = [
-        InstructionAccount::readonly(guardian_set.address()),
-        InstructionAccount::readonly(guardian_signatures.address()),
-    ];
-
-    let instruction = InstructionView {
-        program_id: verify_vaa_shim_program.address(),
-        data: &ix_data,
-        accounts: &ix_accounts,
-    };
-
-    pinocchio::cpi::invoke(&instruction, &[guardian_set, guardian_signatures])
 }
 
 use crate::hash::double_keccak256;

@@ -14,6 +14,7 @@ pub mod modify_balance;
 pub mod noreplay;
 pub mod pda_init;
 pub mod register_chain;
+pub(crate) mod shim;
 // `open_digest` is the public quorum-init entrypoint exposed only in test
 // builds; in prod it is only reachable from `submit_observations` after the
 // NoReplay check. The module body itself refuses to compile without

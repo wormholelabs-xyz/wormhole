@@ -16,17 +16,16 @@
 use pinocchio::{
     cpi::{Seed, Signer},
     error::ProgramError,
-    instruction::{InstructionAccount, InstructionView},
     AccountView, Address, ProgramResult,
 };
 
 use crate::definitions::{
     ChainRegistrationLayout, GlobalAccountantError, CHAIN_REGISTRATION_SEED_PREFIX,
     GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
-    VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR, WORMCHAIN_CHAIN_ID,
+    WORMCHAIN_CHAIN_ID,
 };
 use crate::err;
-use crate::instructions::{noreplay, pda_init::init_or_upgrade_pda};
+use crate::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
 use crate::state::chain_registration;
 
 // ============================================================================
@@ -114,7 +113,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //   8. `[]`              system program (for `CreateAccount` / `Allocate`
     //                       / `Assign` on first registration AND for any lazy
     //                       noreplay bitmap create).
-    let [payer, verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, noreplay_program, noreplay_authority, system_program_acc] =
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, noreplay_program, noreplay_authority, system_program_acc] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -125,8 +124,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
 
     // ----- (3) Shim CPI to verify the digest -----
-    verify_vaa(
-        verify_vaa_shim_program,
+    shim::verify_vaa(
         guardian_set,
         guardian_signatures,
         &digest,
@@ -276,42 +274,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     )?;
 
     Ok(())
-}
-
-// ============================================================================
-// Verify VAA Shim CPI — shape mirrored from `submit_vaas::verify_vaa`.
-// ============================================================================
-
-fn verify_vaa(
-    verify_vaa_shim_program: &AccountView,
-    guardian_set: &AccountView,
-    guardian_signatures: &AccountView,
-    digest: &[u8; 32],
-    guardian_set_bump: u8,
-) -> ProgramResult {
-    if verify_vaa_shim_program.address().as_array()
-        != &crate::definitions::VERIFY_VAA_SHIM_PROGRAM_ID
-    {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-
-    let mut ix_data = [0u8; VERIFY_HASH_DATA_LEN];
-    ix_data[..8].copy_from_slice(&VERIFY_HASH_SELECTOR);
-    ix_data[8] = guardian_set_bump;
-    ix_data[9..].copy_from_slice(digest);
-
-    let ix_accounts = [
-        InstructionAccount::readonly(guardian_set.address()),
-        InstructionAccount::readonly(guardian_signatures.address()),
-    ];
-
-    let instruction = InstructionView {
-        program_id: verify_vaa_shim_program.address(),
-        data: &ix_data,
-        accounts: &ix_accounts,
-    };
-
-    pinocchio::cpi::invoke(&instruction, &[guardian_set, guardian_signatures])
 }
 
 use crate::hash::double_keccak256;
