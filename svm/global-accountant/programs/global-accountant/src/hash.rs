@@ -15,23 +15,25 @@
 //! arm without a full `cargo build-sbf`.
 
 /// `keccak256(data)` into `result`. Panics on the host target.
-#[cfg(any(target_os = "solana", target_arch = "bpf"))]
 pub(crate) fn keccak256(data: &[u8], result: &mut [u8; 32]) {
-    let vals: [&[u8]; 1] = [data];
-    // SAFETY: pinocchio re-exports the Solana syscall ABI; the runtime reads
-    // exactly `val_len` `&[u8]` fat pointers starting at `vals_ptr`.
-    unsafe {
-        pinocchio::syscalls::sol_keccak256(
-            vals.as_ptr() as *const u8,
-            vals.len() as u64,
-            result.as_mut_ptr(),
-        );
+    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
+    {
+        let vals: [&[u8]; 1] = [data];
+        // SAFETY: pinocchio re-exports the Solana syscall ABI; the runtime
+        // reads exactly `val_len` `&[u8]` fat pointers starting at `vals_ptr`.
+        unsafe {
+            pinocchio::syscalls::sol_keccak256(
+                vals.as_ptr() as *const u8,
+                vals.len() as u64,
+                result.as_mut_ptr(),
+            );
+        }
     }
-}
-
-#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-pub(crate) fn keccak256(_data: &[u8], _result: &mut [u8; 32]) {
-    unreachable!("keccak256 is only available on the SBF target");
+    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+    {
+        let _ = (data, result);
+        unreachable!("keccak256 is only available on the SBF target");
+    }
 }
 
 /// `keccak256(keccak256(body))` — the Wormhole VAA digest convention used by

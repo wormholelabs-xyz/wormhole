@@ -357,17 +357,18 @@ use crate::hash::double_keccak256;
 // archive. No-op on host builds.
 // ============================================================================
 
-#[cfg(any(target_os = "solana", target_arch = "bpf"))]
 fn log_modification(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {
-    // sol_log_64_ captures the structured fields; sol_log_ on the reason
-    // bytes captures the audit string. Both are constant-cost syscalls.
-    // SAFETY: pinocchio re-exports the canonical Solana syscall ABIs;
-    // sol_log_64_ takes five u64 params, sol_log_ takes (ptr, len).
-    unsafe {
-        pinocchio::syscalls::sol_log_64_(sequence, chain_id as u64, kind as u64, 0, 0);
-        pinocchio::syscalls::sol_log_(reason.as_ptr(), reason.len() as u64);
+    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
+    {
+        // sol_log_64_ captures the structured fields; sol_log_ on the reason
+        // bytes captures the audit string. Both are constant-cost syscalls.
+        // SAFETY: pinocchio re-exports the canonical Solana syscall ABIs;
+        // sol_log_64_ takes five u64 params, sol_log_ takes (ptr, len).
+        unsafe {
+            pinocchio::syscalls::sol_log_64_(sequence, chain_id as u64, kind as u64, 0, 0);
+            pinocchio::syscalls::sol_log_(reason.as_ptr(), reason.len() as u64);
+        }
     }
+    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+    let _ = (sequence, chain_id, kind, reason);
 }
-
-#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-fn log_modification(_sequence: u64, _chain_id: u16, _kind: u8, _reason: &[u8; 32]) {}

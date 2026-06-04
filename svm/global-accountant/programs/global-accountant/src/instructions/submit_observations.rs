@@ -670,11 +670,10 @@ fn read_guardian_key(
 }
 
 // `sol_secp256k1_recover` / `sol_keccak256` are re-exported by Pinocchio for
-// the SBF target only. The host-cfg variants below let the program crate
-// build on `cargo check` outside of `cargo build-sbf`; they are not reached
-// from any mollusk test (mollusk loads the SBF `.so`, which uses the syscall
-// path).
-#[cfg(any(target_os = "solana", target_arch = "bpf"))]
+// the SBF target only. The host-cfg arm lets the program crate build on
+// `cargo check` outside of `cargo build-sbf`; it is not reached from any
+// mollusk test (mollusk loads the SBF `.so`, which uses the syscall path) and
+// returns 1 (failure) if ever hit.
 fn secp256k1_recover(
     hash: &[u8; 32],
     recovery_id: u64,
@@ -684,24 +683,21 @@ fn secp256k1_recover(
     // SAFETY: pinocchio re-exports the Solana syscall ABI. The buffers match
     // the syscall's documented layout: 32-byte hash, 64-byte signature
     // (`r||s`), 64-byte result.
-    unsafe {
+    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
+    let code = unsafe {
         pinocchio::syscalls::sol_secp256k1_recover(
             hash.as_ptr(),
             recovery_id,
             signature.as_ptr(),
             result.as_mut_ptr(),
         )
-    }
-}
-
-#[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-fn secp256k1_recover(
-    _hash: &[u8; 32],
-    _recovery_id: u64,
-    _signature: &[u8],
-    _result: &mut [u8],
-) -> u64 {
-    1
+    };
+    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
+    let code = {
+        let _ = (hash, recovery_id, signature, result);
+        1
+    };
+    code
 }
 
 use crate::hash::{double_keccak256, keccak256};
