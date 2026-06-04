@@ -1,15 +1,12 @@
-//! Zero-copy load/store helpers for `PendingObservationsLayout`.
-//!
-//! Mirrors `state::digest` — both layouts are `Pod`, so the cheapest correct
-//! thing is to copy out by value, drop the borrow, then mutate.
+//! Zero-copy load/store helpers for `PendingObservationsLayout`. The layout is
+//! `Pod`, so load/store copy by value to release the borrow before mutating.
 
 use pinocchio::{account::Ref, error::ProgramError, AccountView};
 
 use crate::definitions::{GlobalAccountantError, PendingObservationsLayout};
 use crate::err;
 
-/// Read a [`PendingObservationsLayout`] out of an account's data. Returns
-/// `InvalidPda` if the buffer is not exactly `LEN` bytes.
+/// Read a [`PendingObservationsLayout`]. `InvalidPda` if the buffer is not `LEN`.
 pub fn load(account: &AccountView) -> Result<PendingObservationsLayout, ProgramError> {
     let data: Ref<'_, [u8]> = account.try_borrow()?;
     if data.len() != PendingObservationsLayout::LEN {

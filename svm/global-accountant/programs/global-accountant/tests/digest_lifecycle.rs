@@ -1,8 +1,5 @@
-//! Integration tests for the DigestAccount lifecycle (open + close).
-//!
-//! Each test drives the on-chain program through mollusk-svm; the program
-//! itself must be built via `cargo build-sbf` before `cargo test` runs.
-//! The `just test` recipe handles this end-to-end.
+//! DigestAccount lifecycle (open + close) tests, driven through mollusk-svm.
+//! Requires `cargo build-sbf` first; `just test` handles this.
 
 use {
     global_accountant_definitions::{
@@ -27,8 +24,7 @@ const GUARDIAN_COUNT: usize = 19;
 const QUORUM: u8 = 13;
 
 fn program_id() -> Pubkey {
-    // Fixed program id so PDA derivation in the test matches the program's
-    // on-chain view. The actual bytes are irrelevant for mollusk's purposes.
+    // Fixed so test-side PDA derivation matches the program's view.
     Pubkey::new_from_array([7u8; 32])
 }
 
@@ -64,8 +60,7 @@ fn open_digest_ix_data(
     digest: &[u8; 32],
     guardian_set_index: u32,
 ) -> Vec<u8> {
-    // No bump byte travels in the wire: `open_digest_inner` derives the
-    // canonical bump on-chain via `find_program_address`.
+    // No bump on the wire; the program derives it on-chain.
     let mut data = Vec::with_capacity(1 + 78);
     data.push(IxDiscriminator::TestOnlyOpenDigest as u8);
     data.extend_from_slice(&chain.to_be_bytes());
@@ -77,9 +72,8 @@ fn open_digest_ix_data(
 }
 
 fn close_digest_ix_data(vaa_digest: &[u8; 32], guardian_set_bump: u8) -> Vec<u8> {
-    // 32-byte digest + 1-byte guardian_set_bump. The bump is consumed by the
-    // Shim's `VerifyHash` to re-derive the Core Bridge's `GuardianSet` PDA
-    // without re-running `find_program_address`.
+    // 32-byte digest + 1-byte guardian_set_bump (the Shim re-derives the
+    // GuardianSet PDA from the bump).
     let mut data = Vec::with_capacity(1 + 32 + 1);
     data.push(IxDiscriminator::CloseDigest as u8);
     data.extend_from_slice(vaa_digest);
@@ -87,12 +81,10 @@ fn close_digest_ix_data(vaa_digest: &[u8; 32], guardian_set_bump: u8) -> Vec<u8>
     data
 }
 
-/// Three trailing accounts every `close_digest` invocation carries:
-/// guardian-signatures PDA, guardian-set PDA, and the Verify VAA Shim
-/// program itself. Negative-path tests that fail before reaching the Shim
-/// CPI (digest mismatch, payer mismatch, ownership spoof) can pass
-/// uninitialised sentinel accounts here; the happy-path test populates
-/// them with real fixtures via `close_digest_quorum_extras`.
+/// Sentinel versions of the three trailing close_digest accounts
+/// (guardian-signatures PDA, guardian-set PDA, Shim program). For negative
+/// tests that fail before the Shim CPI; the happy path uses
+/// `close_digest_extras_quorum` instead.
 fn close_digest_extras_sentinel() -> (Vec<AccountMeta>, Vec<(Pubkey, Account)>) {
     let gs_pubkey = Pubkey::new_from_array([0xE1u8; 32]);
     let gset_pubkey = Pubkey::new_from_array([0xE2u8; 32]);
@@ -110,10 +102,9 @@ fn close_digest_extras_sentinel() -> (Vec<AccountMeta>, Vec<(Pubkey, Account)>) 
     )
 }
 
-/// Build the three trailing Shim accounts with real GuardianSignatures +
-/// GuardianSet fixtures so the Shim's `VerifyHash` CPI succeeds. Returns the
-/// guardian_set_bump alongside the metas/accounts pair so the caller can pin
-/// the close_digest ix data to the canonical Shim derivation.
+/// Real GuardianSignatures + GuardianSet fixtures for the three trailing close
+/// accounts so the Shim's `VerifyHash` CPI succeeds. Returns the
+/// guardian_set_bump for the close_digest ix data.
 fn close_digest_extras_quorum(
     digest: &[u8; 32],
     guardian_set_index: u32,
@@ -166,8 +157,7 @@ fn lifecycle_inputs() -> (u16, [u8; 32], u64, [u8; 32], u32) {
     (chain, emitter, sequence, digest, guardian_set_index)
 }
 
-/// Build a system-owned account with the given lamports and zero data. Used
-/// both for the regular payer and for dust-prefunded PDAs.
+/// System-owned account with the given lamports and zero data.
 fn system_owned_account(lamports: u64) -> Account {
     Account {
         lamports,
@@ -186,8 +176,7 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// Post-open state. Used by every negative test that starts from an
-/// already-opened PDA so each test body begins from a single line.
+/// Post-open state shared by negative tests that start from an opened PDA.
 struct OpenState {
     pda: Pubkey,
     pda_after_open: Account,
@@ -195,12 +184,9 @@ struct OpenState {
     payer_starting_lamports: u64,
 }
 
-/// Drive `open_digest` end-to-end and return the post-open state. Asserts
-/// success internally so callers can focus on the negative path under test.
-///
-/// `pda_initial_lamports` lets the dust-DoS test pre-fund the PDA at the
-/// canonical address with non-zero lamports while keeping it system-owned and
-/// data-empty (mimicking the `system_program::transfer` grief attack).
+/// Drive `open_digest` and return the post-open state, asserting success
+/// internally. `pda_initial_lamports > 0` pre-funds the PDA (system-owned,
+/// data-empty) to exercise the prefunded-PDA path.
 fn open_lifecycle_setup(
     mollusk: &Mollusk,
     payer: Pubkey,
@@ -262,6 +248,7 @@ fn open_lifecycle_setup(
     }
 }
 
+/// open_digest then close_digest succeed, refunding rent to the payer.
 #[test]
 fn open_then_close_round_trip() {
     let mollusk = mollusk();
@@ -270,7 +257,7 @@ fn open_then_close_round_trip() {
 
     let state = open_lifecycle_setup(&mollusk, payer, 10_000_000_000, 0);
 
-    // -- Open assertions ----------------------------------------------------
+    // Open assertions.
     assert_eq!(state.pda_after_open.owner, program_id(), "PDA owner");
     assert_eq!(
         state.pda_after_open.data.len(),
@@ -298,11 +285,7 @@ fn open_then_close_round_trip() {
         "rent debit must equal PDA balance"
     );
 
-    // -- Close --------------------------------------------------------------
-    // Happy-path: build real GuardianSignatures + GuardianSet fixtures so the
-    // Shim's VerifyHash CPI succeeds. The refund recipient encoded in the
-    // GuardianSignatures account is the payer — irrelevant for close_digest
-    // itself, but the Shim requires the field to be present.
+    // Close with real Shim fixtures so VerifyHash succeeds.
     let (extra_metas, extra_accounts, guardian_set_bump) =
         close_digest_extras_quorum(&digest, guardian_set_index, &payer);
     let mut metas = vec![
@@ -359,20 +342,10 @@ fn open_then_close_round_trip() {
     );
 }
 
+/// open_digest accepts a PDA pre-funded via `system_program::transfer` (a DoS
+/// vector against naive CreateAccount), topping up dust and accepting overshoot.
 #[test]
 fn open_digest_with_prefunded_pda_succeeds() {
-    // Pre-funded PDA acceptance: anyone can `system_program::transfer(N)` to
-    // the canonical PDA address before the legitimate open. A naive
-    // `CreateAccount` CPI would fail ("account already in use") and DoS the
-    // (chain, emitter, sequence). The open path falls back to Transfer top-up
-    // + Allocate + Assign when the PDA already holds lamports but is
-    // otherwise system-owned and data-empty.
-    //
-    // Two cases pin the branch endpoints:
-    //   * dust (1 lamport) -> payer tops up to rent-exempt minimum.
-    //   * overshoot (1 SOL, well above the ~0.0009 SOL minimum for a
-    //     120-byte account) -> Transfer is skipped (saturating_sub == 0); the
-    //     pre-funded balance is accepted as a gift.
     let cases: [(&str, u64, u8); 2] = [
         ("dust", 1, 0xC1),
         ("overshoot (1 SOL)", 1_000_000_000, 0xD1),
@@ -401,8 +374,7 @@ fn open_digest_with_prefunded_pda_succeeds() {
         assert_eq!(stored.payer, payer.to_bytes(), "[{label}] payer recorded");
         assert_eq!(stored.digest, digest, "[{label}] digest stored");
 
-        // Universal accounting invariant: payer paid the delta between the
-        // pre-funded amount and the resulting PDA balance (saturating to 0).
+        // Payer paid the delta between pre-funded and final PDA balance.
         let payer_paid = state
             .payer_starting_lamports
             .saturating_sub(state.payer_after_open.lamports);
@@ -418,6 +390,8 @@ fn open_digest_with_prefunded_pda_succeeds() {
     }
 }
 
+/// close_digest with a digest that differs from the stored one fails with
+/// DigestMismatch and leaves the PDA intact.
 #[test]
 fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     let mollusk = mollusk();
@@ -427,7 +401,7 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     let state = open_lifecycle_setup(&mollusk, payer, 10_000_000_000, 0);
 
     let mut bad_vaa_digest = digest;
-    bad_vaa_digest[0] ^= 0xff; // flip a bit so the digests no longer match.
+    bad_vaa_digest[0] ^= 0xff;
 
     let (extra_metas, extra_accounts) = close_digest_extras_sentinel();
     let mut metas = vec![
@@ -462,7 +436,7 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
         other => panic!("expected Failure(DigestMismatch), got {:?}", other),
     }
 
-    // PDA should still be intact after the failed close.
+    // PDA intact after the failed close.
     let pda_after_close = close_result
         .resulting_accounts
         .iter()
@@ -475,21 +449,17 @@ fn close_with_wrong_vaa_digest_fails_and_preserves_pda() {
     assert_eq!(pda_after_close.data, state.pda_after_open.data);
 }
 
+/// close_digest rejects a system-owned PDA carrying a hand-crafted layout that
+/// names the attacker as payer (InvalidPda), so no lamports move.
 #[test]
 fn close_with_spoofed_system_owned_pda_fails() {
-    // Without an owner check on close, an attacker can fabricate a "pre-account"
-    // at the canonical PDA address whose data is a hand-crafted DigestAccount
-    // layout naming the attacker as payer, then sweep lamports. The program
-    // must reject any close where the PDA is not owned by program_id.
     let mollusk = mollusk();
     let (chain, emitter, sequence, digest, _gsi) = lifecycle_inputs();
     let (pda, _bump) = derive_digest_pda(chain, &emitter, sequence);
 
     let attacker = Pubkey::new_from_array([0xAAu8; 32]);
 
-    // Hand-craft a DigestAccountLayout with attacker as payer, matching digest.
-    // `_padding` is `pub(crate)`, so we go through `Zeroable` + field assignment
-    // instead of a struct literal.
+    // `_padding` is `pub(crate)`, so build via Zeroable + field assignment.
     let mut spoof_layout: DigestAccountLayout = bytemuck::Zeroable::zeroed();
     spoof_layout.emitter = emitter;
     spoof_layout.digest = digest;
@@ -500,9 +470,9 @@ fn close_with_spoofed_system_owned_pda_fails() {
     spoof_data.copy_from_slice(bytemuck::bytes_of(&spoof_layout));
 
     let spoofed_pda_account = Account {
-        lamports: 5_000_000, // some lamports the attacker hopes to drain
+        lamports: 5_000_000,
         data: spoof_data,
-        owner: system_program_id(), // <-- the spoof: owned by system, not program
+        owner: system_program_id(), // the spoof: system-owned, not program-owned
         executable: false,
         rent_epoch: 0,
     };
@@ -550,6 +520,8 @@ fn close_with_spoofed_system_owned_pda_fails() {
     );
 }
 
+/// close_digest with a rent recipient other than the recorded payer fails with
+/// PayerMismatch; no lamports move.
 #[test]
 fn close_with_wrong_rent_recipient_fails() {
     let mollusk = mollusk();
@@ -558,7 +530,6 @@ fn close_with_wrong_rent_recipient_fails() {
 
     let state = open_lifecycle_setup(&mollusk, payer, 10_000_000_000, 0);
 
-    // A different pubkey is supplied as rent recipient.
     let wrong_recipient = Pubkey::new_from_array([0xBBu8; 32]);
     let wrong_recipient_starting = 7_777_777u64;
 
@@ -618,11 +589,10 @@ fn close_with_wrong_rent_recipient_fails() {
     assert_eq!(wrong_after.lamports, wrong_recipient_starting);
 }
 
+/// Runtime pin of DigestAccountLayout field offsets against drift (the
+/// compile-time pin lives in `definitions/src/lib.rs`).
 #[test]
 fn digest_layout_offsets_pinned() {
-    // Belt-and-braces runtime pin against accidental layout drift. The
-    // const-asserts in `definitions/src/lib.rs` are the compile-time pin;
-    // this is the human-readable form.
     use core::mem::offset_of;
     assert_eq!(offset_of!(DigestAccountLayout, emitter), 0);
     assert_eq!(offset_of!(DigestAccountLayout, digest), 32);
@@ -634,26 +604,13 @@ fn digest_layout_offsets_pinned() {
     assert_eq!(DigestAccountLayout::LEN, 120);
 }
 
-/// Production builds gate `test_only_open_digest` behind the `test-only-open-digest`
-/// Cargo feature. The dispatch site short-circuits the
-/// `Instruction::TestOnlyOpenDigest` arm to `NotEnabled` when the feature is
-/// off; the on-chain `.so` shipped to mainnet must be built with the feature
-/// off, while the `.so` mollusk loads for these tests must be built with it on.
-///
-/// We pin both sides by reading a `pub const` exported from the program crate
-/// that mirrors `cfg!(feature = "test-only-open-digest")` from inside the
-/// program. A negative test ("TestOnlyOpenDigest discriminator returns NotEnabled in a
-/// prod build") would need a second `.so` and lives in the `just build-prod`
-/// pipeline instead — that target additionally fails on `close_digest`'s
-/// mock-vaa `compile_error!`, so a successful prod build is unreachable until
-/// the real VAA Shim CPI lands.
+/// This test binary must be built with `test-only-open-digest` on (the mainnet
+/// `.so` ships with it off). Pinned via the `TEST_ONLY_OPEN_DIGEST_ENABLED`
+/// const the program exports.
 #[test]
 fn open_digest_gated_on_for_test_build() {
-    // `TEST_ONLY_OPEN_DIGEST_ENABLED` is `pub const bool` exported by the
-    // program crate, so this assertion resolves at compile time — that's the
-    // point. Clippy's `assertions-on-constants` lint flags `assert!(true)`,
-    // so wrap the check in a conditional panic to preserve the test
-    // semantics (the build will fail if the const is false).
+    // Conditional panic rather than `assert!` to dodge clippy's
+    // `assertions-on-constants` lint on the compile-time const.
     if !global_accountant::TEST_ONLY_OPEN_DIGEST_ENABLED {
         panic!(
             "test build must enable test-only-open-digest; \

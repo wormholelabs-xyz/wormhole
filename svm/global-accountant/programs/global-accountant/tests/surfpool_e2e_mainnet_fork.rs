@@ -1,66 +1,25 @@
-//! Surfpool E2E test against the Solana mainnet fork.
-//!
-//! Drives the full DigestAccount lifecycle through the real Verify VAA Shim
-//! CPI. surfpool boots with a mainnet datasource so the Shim program, the
-//! Core Bridge, and the active `GuardianSet` PDA are lazy-fetched from
-//! upstream; the test only has to (a) deploy our `.so` and (b) build a
-//! `GuardianSignatures` PDA via a `PostSignatures` tx for the historical VAA.
+//! Surfpool E2E against the Solana mainnet fork: drives the DigestAccount
+//! close path through the real Verify VAA Shim CPI. The Shim, Core Bridge, and
+//! active `GuardianSet` PDA lazy-fetch from the mainnet datasource; the test
+//! deploys our `.so` and posts the historical VAA's signatures.
 //!
 //! # Run
 //!
 //! ```sh
-//! # From svm/global-accountant/
 //! just test-e2e-mainnet-fork
-//! # Or manually:
-//! cargo build-sbf --features bpf-entrypoint                  # prod-shape .so
-//! cargo build-sbf --features bpf-entrypoint,mock-vaa,test-only-open-digest
-//! SBF_OUT_DIR=$(pwd)/target/deploy \
-//!   cargo test --features mock-vaa,test-only-open-digest \
-//!   --test surfpool_e2e_mainnet_fork -- --ignored --nocapture
 //! ```
 //!
-//! ## Datasource selection
+//! Spawns a surfpool subprocess and lazy-fetches mainnet, so both tests are
+//! `#[ignore]`. Datasource defaults to `https://api.mainnet-beta.solana.com`;
+//! override with `GA_E2E_DATASOURCE_RPC=<url>` (the labsapis proxy needs an
+//! `Origin` header surfpool v1.2.1 cannot inject).
 //!
-//! Default is `https://api.mainnet-beta.solana.com` (the canonical entry from
-//! `w7-registry/chains/mainnet/solana.yaml`). The labsapis proxy
-//! (`https://rpc.labsapis.com/mainnet/solana`) requires an `Origin:
-//! https://portalbridge.com` header that surfpool v1.2.1 cannot inject on
-//! datasource requests — there is no header flag on `surfpool start`, and the
-//! `SURFPOOL_DATASOURCE_RPC_URL` env var carries only the URL. Override the
-//! datasource by exporting `GA_E2E_DATASOURCE_RPC=<url>` before running, e.g.
-//! a private endpoint that does not enforce CORS.
+//! The production-shape `.so` has `mock-vaa`/`test-only-open-digest` off (paired
+//! feature fence in `src/lib.rs`), so `open_digest` is undispatched here; the
+//! DigestAccount PDA is materialised via `surfnet_setAccount` with the exact
+//! byte image `open_digest` would have produced.
 //!
-//! # Why we use `surfnet_setAccount` instead of `open_digest`
-//!
-//! The program's paired-feature fence (`src/lib.rs`) makes `mock-vaa` and
-//! `test-only-open-digest` mutually inclusive: a build either has both (mock
-//! VAA + dispatchable `open_digest`) or neither (real CPI + no `open_digest`).
-//! This test exercises the **real CPI** path, so the deployed `.so`
-//! has both features off — which means `open_digest` is not in the program's
-//! dispatch table and we cannot use it to materialise the DigestAccount PDA.
-//!
-//! Instead we use surfpool's `surfnet_setAccount` cheatcode to write the PDA
-//! bytes (a `DigestAccountLayout`) directly into the simnet's account DB. The
-//! production close path treats the result identically: same owner, same
-//! `data_len`, same rent-exempt lamport balance, and (in the happy path) the
-//! same digest the historical guardians signed.
-//!
-//! # What this test proves end-to-end
-//!
-//! 1. surfpool boots with mainnet fork; the Verify VAA Shim, the Core Bridge,
-//!    and the active `GuardianSet` PDA all lazy-fetch cleanly.
-//! 2. A `PostSignatures` tx writes the historical VAA's signatures into a
-//!    fresh `GuardianSignatures` PDA owned by the Shim.
-//! 3. `surfnet_setAccount` materialises a `DigestAccount` PDA seeded with the
-//!    historical VAA's digest, payer pubkey, and metadata.
-//! 4. `close_digest`'s real CPI (no `mock-vaa` feature) reaches the Shim's
-//!    `VerifyHash`, the Shim recovers 13 guardian pubkeys against the digest,
-//!    the recovered keys match the on-chain `GuardianSet`, and the close
-//!    succeeds — rent flowing to the recorded payer.
-//! 5. A tampered-digest variant: `close_digest` fails at the CPI step because
-//!    the recovered pubkeys do not match the guardian set.
-//!
-//! # VAA fixture
+//! # Fixture
 //!
 //! `tests/fixtures/mainnet_solana_token_bridge_seq2211.vaa` (1132 bytes).
 //!
@@ -73,13 +32,10 @@
 //! | guardian_set_index    | 6 (currently active)                                               |
 //! | signatures            | 13 (quorum exactly)                                                |
 //! | body digest (keccak²) | `e4cac284656ac74ad4ef1b0ec7c2be76289705458071c7ddbef805499a054116` |
-//! | Wormholescan URL      | https://wormholescan.io/#/tx/1/.../2211 (per emitter+seq)          |
 //!
-//! Source: pulled from `https://api.wormholescan.io/api/v1/vaas?page=0&pageSize=3`
-//! on 2026-05-19. Chosen because guardian set 6 is the live set today, so the
-//! Core Bridge `GuardianSet` PDA at index 6
+//! Chosen because guardian set 6 is live, so its `GuardianSet` PDA
 //! (`qHpgKQfi2166hrKgLPBJxdJwTzwq4D14g3D4i4eU5TK`, bump 254) is unexpired and
-//! lazy-fetches cleanly from mainnet.
+//! lazy-fetches cleanly.
 
 use std::time::{Duration, Instant};
 
@@ -99,45 +55,33 @@ mod common;
 use common::{await_confirmed, deploy_program, so_path, start_surfpool, SurfpoolOptions};
 
 /// Wormhole Core Bridge program ID on Solana mainnet
-/// (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`). Source: w7-registry
-/// `deployments/mainnet/wormhole/core-bridge.yaml`. Vendored as a `Pubkey`
-/// rather than a base58 string so the test does not pull in a base58 dev-dep.
+/// (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`), pinned as raw bytes.
 const CORE_BRIDGE_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0x0e, 0x0a, 0x58, 0x9a, 0x41, 0xa5, 0x5f, 0xbd, 0x66, 0xc5, 0x2a, 0x47, 0x5f, 0x2d, 0x92, 0xa6,
     0xd3, 0xdc, 0x9b, 0x47, 0x47, 0x11, 0x4c, 0xb9, 0xaf, 0x82, 0x5a, 0x98, 0xb5, 0x45, 0xd3, 0xce,
 ]);
 
-/// Anchor discriminator for the Verify VAA Shim's `post_signatures` instruction
-/// (`sha256("global:post_signatures")[..8]`). Equal to the constant produced by
-/// `make_anchor_discriminator(b"global:post_signatures")` in the shim source.
+/// Anchor discriminator for the Shim's `post_signatures` instruction
+/// (`sha256("global:post_signatures")[..8]`).
 const POST_SIGNATURES_SELECTOR: [u8; 8] = [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
 
 /// Compute Budget program ID (`ComputeBudget111111111111111111111111111111`).
-/// Native program, address is the same on every cluster.
 const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0x03, 0x06, 0x46, 0x6f, 0xe5, 0x21, 0x17, 0x32, 0xff, 0xec, 0xad, 0xba, 0x72, 0xc3, 0x9b, 0xe7,
     0xbc, 0x8c, 0xe5, 0xbb, 0xc5, 0xf7, 0x12, 0x6b, 0x2c, 0x43, 0x9b, 0x3a, 0x40, 0x00, 0x00, 0x00,
 ]);
 
-/// Compute-unit ceiling for the `close_digest` tx. The Shim's `VerifyHash`
-/// burns ~198_787 CU recovering 13 secp256k1 pubkeys; bumping to 400_000 gives
-/// our own pre/post-CPI bookkeeping plenty of headroom without inflating the
-/// reservation past Solana's per-block ceiling.
+/// CU ceiling for `close_digest`. The Shim's 13-sig `VerifyHash` burns
+/// ~198_787 CU; 400_000 leaves headroom without exceeding the per-block cap.
 const CLOSE_DIGEST_CU_LIMIT: u32 = 400_000;
 
-/// Byte length of one guardian signature record on the wire (1-byte index +
-/// 64-byte r||s + 1-byte recovery id). Mirrors
-/// `wormhole_svm_definitions::GUARDIAN_SIGNATURE_LENGTH`.
+/// One guardian signature record: 1-byte index + 64-byte r||s + 1-byte rec id.
 const GUARDIAN_SIGNATURE_LENGTH: usize = 66;
 
-/// Embedded VAA bytes. Including the file inline keeps the test single-binary
-/// and avoids a runtime path lookup that would break under `cargo test`'s
-/// per-binary cwd handling.
+/// Embedded VAA bytes (inline to keep the test single-binary).
 const VAA_BYTES: &[u8] = include_bytes!("fixtures/mainnet_solana_token_bridge_seq2211.vaa");
 
-/// Pre-decoded VAA metadata. Hardcoded rather than re-parsed at runtime so the
-/// test surfaces fixture corruption immediately rather than at the first
-/// `PostSignatures` CU explosion.
+/// Pre-decoded VAA metadata (hardcoded so fixture corruption surfaces early).
 const EMITTER_CHAIN: u16 = 1;
 const SEQUENCE: u64 = 2211;
 const GUARDIAN_SET_INDEX: u32 = 6;
@@ -151,19 +95,15 @@ const EXPECTED_DIGEST: [u8; 32] = [
     0x28, 0x97, 0x05, 0x45, 0x80, 0x71, 0xc7, 0xdd, 0xbe, 0xf8, 0x05, 0x49, 0x9a, 0x05, 0x41, 0x16,
 ];
 
-/// Active mainnet `GuardianSet` PDA for index 6, derived from
-/// `("GuardianSet", 6_u32_be)` under `CORE_BRIDGE_PROGRAM_ID`.
-/// `qHpgKQfi2166hrKgLPBJxdJwTzwq4D14g3D4i4eU5TK`, bump 254.
+/// Active mainnet `GuardianSet` PDA for index 6
+/// (`qHpgKQfi2166hrKgLPBJxdJwTzwq4D14g3D4i4eU5TK`, bump 254).
 const GUARDIAN_SET_PDA: Pubkey = Pubkey::new_from_array([
     0x0c, 0x5e, 0xe6, 0x4a, 0x1d, 0x73, 0x0f, 0xc8, 0xfc, 0x2b, 0xe7, 0x1f, 0xea, 0xa6, 0x34, 0x78,
     0xee, 0xc5, 0x1d, 0xf3, 0x82, 0x08, 0x20, 0x6e, 0x6c, 0x96, 0xa1, 0xc3, 0xcf, 0xef, 0x94, 0xae,
 ]);
 const GUARDIAN_SET_BUMP: u8 = 254;
 
-/// Datasource URL for surfpool's mainnet fork. Defaults to the public RPC from
-/// `w7-registry/chains/mainnet/solana.yaml` because surfpool v1.2.1 has no way
-/// to inject the `Origin` header the labsapis proxy requires. Override via
-/// `GA_E2E_DATASOURCE_RPC` for endpoints that do not need custom headers.
+/// Datasource URL for surfpool's mainnet fork; `GA_E2E_DATASOURCE_RPC` overrides.
 fn datasource_rpc_url() -> String {
     std::env::var("GA_E2E_DATASOURCE_RPC")
         .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string())
@@ -183,9 +123,7 @@ fn derive_digest_pda(
     )
 }
 
-/// Compute Budget program instruction discriminator for
-/// `SetComputeUnitLimit`. Wire format: `[0x02, u32_le_units]`. Source:
-/// `solana-sdk` `ComputeBudgetInstruction::SetComputeUnitLimit`.
+/// `SetComputeUnitLimit` instruction. Wire format: `[0x02, u32_le_units]`.
 fn set_compute_unit_limit_ix(units: u32) -> Instruction {
     let mut data = Vec::with_capacity(5);
     data.push(0x02);
@@ -205,18 +143,14 @@ fn close_digest_ix_data(digest: &[u8; 32], guardian_set_bump: u8) -> Vec<u8> {
     data
 }
 
-/// Build the `post_signatures` instruction data for the Verify VAA Shim. Wire
-/// format (after the 8-byte selector):
+/// `post_signatures` instruction data. Wire format after the 8-byte selector:
 ///
-/// | offset | size  | field                       |
-/// |--------|-------|-----------------------------|
-/// | 0      | 4     | guardian_set_index (LE)     |
-/// | 4      | 1     | total_signatures (u8)       |
-/// | 5      | 4     | guardian_signatures_len (LE) |
-/// | 9..    | 66*N  | guardian_signatures (contiguous)|
-///
-/// Mirrors `wormhole_svm_shim::verify_vaa::PostSignaturesData::to_vec` in
-/// `svm/wormhole-core-shims/crates/shim/src/verify_vaa/mod.rs`.
+/// | offset | size  | field                            |
+/// |--------|-------|----------------------------------|
+/// | 0      | 4     | guardian_set_index (LE)          |
+/// | 4      | 1     | total_signatures (u8)            |
+/// | 5      | 4     | guardian_signatures_len (LE)     |
+/// | 9..    | 66*N  | guardian_signatures (contiguous) |
 fn post_signatures_ix_data(
     guardian_set_index: u32,
     total_signatures: u8,
@@ -236,10 +170,8 @@ fn post_signatures_ix_data(
     data
 }
 
-/// Post all 13 historical signatures to a fresh `GuardianSignatures` PDA in one
-/// transaction. The historical VAA fits inside one 1232-byte tx because the
-/// quorum size is small enough (13 sigs × 66 bytes = 858 bytes) to clear the
-/// envelope after instruction-data overhead.
+/// Post all 13 signatures to a fresh `GuardianSignatures` PDA in one tx
+/// (13 × 66 = 858 bytes fits the 1232-byte envelope).
 fn post_signatures(
     rpc: &solana_client::rpc_client::RpcClient,
     payer: &Keypair,
@@ -275,16 +207,12 @@ fn post_signatures(
     eprintln!("[e2e] PostSignatures tx={sig}");
 }
 
-/// Rent-exempt lamport balance for a 120-byte `DigestAccountLayout`. Computed
-/// once via `Rent::default().minimum_balance(120)` (= `1_572_960`); pinned as
-/// a const so the test does not need a `solana-rent` dev-dep.
+/// Rent-exempt balance for a 120-byte `DigestAccountLayout`
+/// (`Rent::default().minimum_balance(120)`).
 const DIGEST_PDA_RENT_LAMPORTS: u64 = 1_572_960;
 
-/// Common setup: boot surfpool with mainnet fork, deploy our program, fund
-/// payer, post signatures, hand-craft the `DigestAccount` PDA via the
-/// `surfnet_setAccount` cheatcode. Returns the live RPC client, payer,
-/// program id, PDA, and the guardian-signatures keypair so the calling test
-/// can drive the `close_digest` step.
+/// Live state after `boot_and_seed`: surfpool booted, program deployed, payer
+/// funded, signatures posted, DigestAccount PDA seeded.
 struct Fixture {
     _guard: common::SurfpoolGuard,
     rpc: solana_client::rpc_client::RpcClient,
@@ -295,15 +223,10 @@ struct Fixture {
     guardian_signatures_pda: Pubkey,
 }
 
-/// Hand-build a `DigestAccountLayout` and inject it as a PDA owned by our
-/// program via `surfnet_setAccount`. Replaces `open_digest` (which the
-/// production-shape `.so` does not expose — see the module doc).
-///
-/// surfpool's `surfnet_setAccount` cheatcode shape (verified by experiment on
-/// v1.2.1): a tuple `[<pubkey_b58>, <override-object>]`. The object carries
-/// `lamports`, `owner`, `executable`, `rent_epoch`, and `data`. `data` is a
-/// **bare hex string**, not the `[base64_str, "base64"]` tuple the standard
-/// `getAccountInfo` response uses.
+/// Inject a `DigestAccountLayout` PDA via `surfnet_setAccount`, replacing the
+/// undispatched `open_digest`. Cheatcode shape (surfpool v1.2.1):
+/// `[<pubkey_b58>, {lamports, owner, executable, rent_epoch, data}]` where
+/// `data` is a bare hex string (not the `getAccountInfo` base64 tuple).
 fn write_digest_pda(
     rpc_url: &str,
     program_id: &Pubkey,
@@ -311,11 +234,8 @@ fn write_digest_pda(
     digest: [u8; 32],
     payer: Pubkey,
 ) {
-    // Construct via `Zeroable` + bytemuck mutation rather than a struct
-    // literal because `_padding` is `pub(crate)` and inaccessible to test
-    // code. The zero-initialised value is exactly the layout `open_digest`
-    // would have produced for these inputs (modulo `quorum_at_slot`, which is
-    // immaterial to `close_digest`'s checks).
+    // Zeroable + field assignment since `_padding` is `pub(crate)`. Matches
+    // open_digest's output (bar `quorum_at_slot`, which close_digest ignores).
     let mut layout: DigestAccountLayout = bytemuck::Zeroable::zeroed();
     layout.emitter = EMITTER_ADDRESS;
     layout.digest = digest;
@@ -380,8 +300,7 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
         guardian_signatures_kp.pubkey(),
     );
 
-    // Fund payer. The simnet's airdrop facility credits the account in the
-    // next slot tick.
+    // Fund payer.
     let airdrop_sig = rpc
         .request_airdrop(&payer.pubkey(), 10_000_000_000)
         .expect("request_airdrop");
@@ -395,13 +314,12 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
         "payer funded"
     );
 
-    // Deploy our program (production-shape — real CPI in `close_digest`).
+    // Deploy our production-shape program.
     deploy_program(&rpc_url, &program_id, &so_bytes);
     let acct = rpc.get_account(&program_id).expect("program account");
     assert!(acct.executable, "deployed program is executable");
 
-    // Lazy-fetch the Shim, Core Bridge, and the GuardianSet PDA so the
-    // first-touch happens before the CPI logs land.
+    // Lazy-fetch the Shim, Core Bridge, and GuardianSet PDA up front.
     let shim_program_id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
     let shim_acct = rpc
         .get_account(&shim_program_id)
@@ -425,7 +343,7 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
         "GuardianSet owner == Core Bridge"
     );
 
-    // Post the 13 historical signatures into a fresh GuardianSignatures PDA.
+    // Post the 13 signatures into a fresh GuardianSignatures PDA.
     let sigs_slice = &VAA_BYTES[6..6 + NUM_SIGNATURES * GUARDIAN_SIGNATURE_LENGTH];
     let post_start = Instant::now();
     post_signatures(&rpc, &payer, &guardian_signatures_kp, sigs_slice);
@@ -446,11 +364,7 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
         gs_acct.data.len()
     );
 
-    // Seed the DigestAccount PDA. Production-shape `.so` has no public
-    // `open_digest` entrypoint (it lives behind the `test-only-open-digest`
-    // feature, which is forced off whenever `mock-vaa` is off — see the
-    // paired-feature fence in `src/lib.rs`). The cheatcode writes the exact
-    // same byte image the real `open_digest` would have produced.
+    // Seed the DigestAccount PDA via cheatcode (open_digest is undispatched).
     let (digest_pda, _bump) =
         derive_digest_pda(&program_id, EMITTER_CHAIN, &EMITTER_ADDRESS, SEQUENCE);
     write_digest_pda(
@@ -461,7 +375,7 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
         payer.pubkey(),
     );
 
-    // Spot-check the stored layout we just injected.
+    // Spot-check the injected layout.
     let pda_acct = rpc.get_account(&digest_pda).expect("digest pda");
     assert_eq!(pda_acct.owner, program_id, "PDA owner == program_id");
     assert_eq!(
@@ -487,9 +401,7 @@ fn boot_and_seed(stored_digest: [u8; 32]) -> Fixture {
     }
 }
 
-/// Build the `close_digest` Instruction shared by both happy- and unhappy-path
-/// tests. Caller chooses which digest to put in the instruction data — the
-/// happy path uses the stored one, the negative path tampers with it.
+/// Build the `close_digest` Instruction; caller supplies the digest in the data.
 fn build_close_ix(
     program_id: Pubkey,
     payer: Pubkey,
@@ -512,13 +424,11 @@ fn build_close_ix(
     }
 }
 
+/// Happy path: close_digest's real CPI verifies against the live guardian set.
 #[test]
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
             `just test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
 fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
-    // Happy path. Open the PDA with the digest the VAA was signed over,
-    // then close it. The Shim's CPI must succeed end-to-end against the
-    // real on-chain guardian set.
     let fx = boot_and_seed(EXPECTED_DIGEST);
 
     let payer_after_open = fx
@@ -535,27 +445,21 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
     );
     let blockhash = fx.rpc.get_latest_blockhash().expect("blockhash close");
     let close_tx = Transaction::new_signed_with_payer(
-        // CU limit first; the Shim's 13-sig VerifyHash blows past the 200k
-        // default CU reservation. The CU-limit instruction itself costs 150 CU.
+        // CU limit first; VerifyHash exceeds the 200k default.
         &[set_compute_unit_limit_ix(CLOSE_DIGEST_CU_LIMIT), close_ix],
         Some(&fx.payer.pubkey()),
         &[&fx.payer],
         blockhash,
     );
 
-    // Use `send_and_confirm` for the close — if the CPI rejects we want the
-    // panic to surface the on-chain log lines directly.
     let close_sig = fx
         .rpc
         .send_and_confirm_transaction(&close_tx)
         .expect("close_digest with real CPI must succeed");
     eprintln!("[e2e] close_digest tx={close_sig}");
 
-    // Pull the tx back via raw RPC so program logs and CU consumption land in
-    // the test output. Going through `RpcClient::get_transaction` would pull
-    // in `solana-transaction-status-client-types` as a dev-dep for the sake of
-    // one struct shape; the JSON path is plenty and lets us keep the dep set
-    // tight.
+    // Raw RPC for the tx so logs + CU land in test output without a
+    // transaction-status dev-dep.
     let resp = common::rpc_call(
         &fx.rpc_url,
         "getTransaction",
@@ -578,7 +482,7 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
         }
     }
 
-    // PDA must be gone (or zeroed).
+    // PDA gone or zeroed.
     match fx
         .rpc
         .get_account_with_commitment(&fx.digest_pda, CommitmentConfig::confirmed())
@@ -605,18 +509,12 @@ fn close_digest_with_real_cpi_against_mainnet_fork_succeeds() {
     eprintln!("[e2e] payer balance: after_open={payer_after_open} after_close={payer_after_close}",);
 }
 
+/// Negative path: a tampered stored digest passes close_digest's equality check
+/// but the Shim CPI rejects it at signature recovery; PDA is left intact.
 #[test]
 #[ignore = "spawns surfpool subprocess + lazy-fetches mainnet; run via \
             `just test-e2e-mainnet-fork` or `cargo test -- --ignored`"]
 fn close_digest_with_tampered_digest_fails_at_cpi() {
-    // Negative path. Open the PDA with a tampered digest — single
-    // last-byte flip is enough to break signature recovery — then call
-    // `close_digest` with the same tampered digest in the instruction data.
-    //
-    // The digest-equality check inside `close_digest` will pass (tampered ==
-    // tampered), so failure must come from the Shim CPI's signature recovery
-    // step. That's the protection we care about: even a payload-equal opener
-    // cannot close without a real quorum signing the digest it stored.
     let mut tampered = EXPECTED_DIGEST;
     tampered[31] ^= 0x01;
 
@@ -630,8 +528,7 @@ fn close_digest_with_tampered_digest_fails_at_cpi() {
     );
     let blockhash = fx.rpc.get_latest_blockhash().expect("blockhash close-bad");
     let close_tx = Transaction::new_signed_with_payer(
-        // Same CU bump as the happy path so the rejection comes from the
-        // Shim's signature-mismatch check, not a budget-exceeded error.
+        // Same CU bump so the rejection is the signature mismatch, not a budget error.
         &[set_compute_unit_limit_ix(CLOSE_DIGEST_CU_LIMIT), close_ix],
         Some(&fx.payer.pubkey()),
         &[&fx.payer],
@@ -644,7 +541,7 @@ fn close_digest_with_tampered_digest_fails_at_cpi() {
         .expect_err("close_digest with tampered digest must be rejected by the Shim CPI");
     eprintln!("[e2e] close_digest rejected as expected: {err}");
 
-    // PDA must still exist — failed tx leaves state untouched.
+    // PDA still exists — failed tx leaves state untouched.
     let pda_acct = fx
         .rpc
         .get_account_with_commitment(&fx.digest_pda, CommitmentConfig::confirmed())
@@ -658,7 +555,6 @@ fn close_digest_with_tampered_digest_fails_at_cpi() {
         "PDA size preserved"
     );
 
-    // Defensive: keep the var alive so the compiler does not warn about
-    // unused fields in the fixture struct under future refactors.
+    // Keep the field live to silence unused-field warnings.
     let _ = &fx.rpc_url;
 }

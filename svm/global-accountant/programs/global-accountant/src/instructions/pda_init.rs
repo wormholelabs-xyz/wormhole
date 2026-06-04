@@ -1,19 +1,12 @@
-//! Shared PDA initialisation helper used by `open_digest::open_digest_inner`
-//! (and therefore every DigestAccount-open path) and by
-//! `submit_observations`'s pending-PDA allocation.
+//! Shared PDA initialisation helper.
 //!
-//! Defends against the dust-DoS grief vector: an attacker can
-//! `system_program::transfer(1)` to the canonical PDA address before the
-//! legitimate open. A naive `CreateAccount` CPI then fails ("account already
-//! in use") and the key is effectively bricked. Three branches:
+//! Defends against the dust-DoS grief vector (an attacker pre-funds the PDA
+//! address so a naive `CreateAccount` would fail). Three branches:
 //!
-//! 1. Empty + zero-lamport + system-owned -> `CreateAccount` (fast path).
-//! 2. Pre-funded (lamports > 0) + system-owned + data-empty -> Transfer (top
-//!    up to rent-exempt minimum if short) + Allocate + Assign. Equivalent to
-//!    `pinocchio_system::create_account_with_minimum_balance_signed` but with
-//!    an explicit owner check so we return our own `InvalidPda` instead of
-//!    letting the system program error surface.
-//! 3. Anything else (already-initialised, foreign owner) -> `InvalidPda`.
+//! 1. Empty + zero-lamport + system-owned -> `CreateAccount`.
+//! 2. Pre-funded + system-owned + data-empty -> Transfer (top up if short) +
+//!    Allocate + Assign, with an explicit owner check surfacing `InvalidPda`.
+//! 3. Anything else -> `InvalidPda`.
 
 use pinocchio::{
     cpi::Signer,
@@ -51,8 +44,7 @@ pub fn init_or_upgrade_pda(
         }
         .invoke_signed(core::slice::from_ref(&signer))?;
     } else {
-        // Over-funded PDA is accepted as a gift to the protocol; `saturating_sub`
-        // keeps `top_up` at 0 rather than aborting on the negative delta.
+        // Over-funded PDA is accepted; `saturating_sub` keeps `top_up` at 0.
         let top_up = rent_exempt_minimum.saturating_sub(initial_lamports);
         if top_up > 0 {
             Transfer {

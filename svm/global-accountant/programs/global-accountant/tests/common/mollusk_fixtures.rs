@@ -1,31 +1,18 @@
-//! Mollusk-with-fixture-programs builder.
-//!
-//! Bundles the global-accountant `.so` together with the real
+//! Builds a `Mollusk` with the global-accountant `.so` plus the real
 //! `solana_noreplay.so` and `wormhole_verify_vaa_shim.so` at their canonical
-//! program IDs so mollusk tests can exercise the production CPI paths
-//! without a stub or feature-gated mock branch.
-//!
-//! The two sibling `.so` files are checked into `tests/fixtures/` and
-//! verified against pinned SHA-256 digests before mollusk loads them. Drift
-//! (an unintended rebuild ending up in the fixtures dir; a developer's
-//! local override leaking into a commit) surfaces as a panic with the
-//! recompute-and-update recipe inline in the failure message.
+//! IDs, so tests exercise the production CPI paths with no mock branch. The
+//! sibling `.so` files live in `tests/fixtures/` and are verified against
+//! pinned SHA-256 digests before loading.
 //!
 //! ## Regenerating a fixture
 //!
-//! 1. Build the upstream program (`cd <sibling-repo> && cargo build-sbf`).
-//! 2. Copy the resulting `.so` over `tests/fixtures/<name>.so`.
-//! 3. Recompute the digest: `shasum -a 256 tests/fixtures/<name>.so`.
-//! 4. Update the corresponding `*_SO_SHA256` constant below.
-//! 5. Run `cargo test` to confirm the new hash + behaviour both line up.
+//! 1. `cd <sibling-repo> && cargo build-sbf`.
+//! 2. Copy the `.so` over `tests/fixtures/<name>.so`.
+//! 3. `shasum -a 256 tests/fixtures/<name>.so` and update the matching
+//!    `*_SO_SHA256` constant below.
 //!
-//! ## Local iteration without rebuilding the fixture
-//!
-//! `GA_NOREPLAY_SO=/path/to/your.so cargo test ...` (or
-//! `GA_VERIFY_VAA_SHIM_SO=...`) redirects the resolver to an arbitrary
-//! path and **skips** the SHA-256 check — the env override is the
-//! escape hatch for active development against an unstable upstream
-//! binary.
+//! Local iteration: `GA_NOREPLAY_SO=<path>` / `GA_VERIFY_VAA_SHIM_SO=<path>`
+//! redirect the resolver and skip the SHA-256 check.
 
 use {
     global_accountant_definitions::{NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID},
@@ -53,13 +40,9 @@ const VERIFY_VAA_SHIM_SO_SHA256: [u8; 32] = [
     0x77, 0x96, 0xc9, 0xf6, 0x04, 0x68, 0xa4, 0x4d, 0xa0, 0x3d, 0x16, 0x9c, 0x42, 0xaf, 0xaa, 0x40,
 ];
 
-/// Build a `Mollusk` with the global-accountant program loaded at
-/// `program_id` and both sibling fixture programs preloaded at their
-/// canonical IDs.
-///
-/// `program_name` is the global-accountant `.so` filename (without the
-/// extension) — typically `"global_accountant"`. Mollusk's default search
-/// paths (`tests/fixtures`, `BPF_OUT_DIR`, `SBF_OUT_DIR`, cwd) apply.
+/// Build a `Mollusk` with the global-accountant program at `program_id` and
+/// both sibling fixtures preloaded at their canonical IDs. `program_name` is
+/// the `.so` stem (typically `"global_accountant"`).
 pub fn mollusk_with_fixtures(program_id: &Pubkey, program_name: &str) -> Mollusk {
     let mut mollusk = Mollusk::new(program_id, program_name);
 
@@ -90,12 +73,9 @@ pub fn mollusk_with_fixtures(program_id: &Pubkey, program_name: &str) -> Mollusk
     mollusk
 }
 
-/// Build an executable `(program_id, Account)` entry suitable for the
-/// account list passed to `Mollusk::process_instruction`. Uses Loader V3
-/// (upgradeable) to match `mollusk_with_fixtures`'s loader choice. Needed
-/// because the simple `process_instruction` path consumes the caller's
-/// account list verbatim — system-owned stand-ins at program IDs surface
-/// as `UnsupportedProgramId` at CPI time.
+/// Loader-V3 executable `(program_id, Account)` for the noreplay program,
+/// required because `process_instruction` consumes the account list verbatim;
+/// a system-owned stand-in would fail as `UnsupportedProgramId` at CPI time.
 pub fn keyed_account_for_noreplay_program() -> (Pubkey, Account) {
     let id = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
     let account = create_program_account_loader_v3(&id);
@@ -109,18 +89,9 @@ pub fn keyed_account_for_verify_vaa_shim_program() -> (Pubkey, Account) {
     (id, account)
 }
 
-/// Read a fixture `.so` file and verify it matches the pinned SHA-256.
-/// Panics with an actionable message on either branch:
-///
-/// - missing file → point at `tests/fixtures/` and the regen procedure.
-/// - hash drift → emit both the expected and actual digests and the
-///   regen procedure, so a developer who accidentally clobbered the
-///   fixture (or who upgraded an upstream program intentionally) sees
-///   exactly what to update.
-///
-/// When the path was resolved from an env override (`env_override`), the
-/// hash check is skipped — the override is the documented escape hatch
-/// for active development against an unstable upstream binary.
+/// Read a fixture `.so` and verify its SHA-256, panicking with the regen recipe
+/// on a missing file or hash drift. Skips the check when the path came from
+/// `env_override`.
 fn read_so(path: &Path, label: &str, env_override: &str, expected_sha256: &[u8; 32]) -> Vec<u8> {
     let bytes = fs::read(path).unwrap_or_else(|e| {
         panic!(
@@ -131,9 +102,7 @@ fn read_so(path: &Path, label: &str, env_override: &str, expected_sha256: &[u8; 
         )
     });
     if std::env::var(env_override).is_ok() {
-        // Caller is intentionally swapping the binary; respect their choice
-        // and skip the hash assertion. The override path is documented in
-        // the module-level doc-comment.
+        // Override is the documented escape hatch; skip the hash check.
         return bytes;
     }
     let actual = Sha256::digest(&bytes);
@@ -150,8 +119,7 @@ fn read_so(path: &Path, label: &str, env_override: &str, expected_sha256: &[u8; 
     bytes
 }
 
-/// Lowercase hex-encode a byte slice. Avoids a dev-dep on `hex`; only used
-/// in the SHA-256 drift panic message.
+/// Lowercase hex-encode a byte slice (for the drift panic message).
 fn hex_lower(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

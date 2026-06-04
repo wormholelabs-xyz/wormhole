@@ -1,9 +1,6 @@
-//! Zero-copy load helper for `ChainRegistrationLayout`.
+//! Zero-copy load/store/verify helpers for `ChainRegistrationLayout`.
 //!
-//! Mirrors `state::pending` and `state::digest`. The chain-registration PDA
-//! is read-only on the submit paths (`submit_observations`, `submit_vaas`)
-//! and only written by the `register_chain` governance instruction, so a
-//! `store` companion lives there rather than here.
+//! Read-only on the submit paths; written only by `register_chain`.
 
 use pinocchio::{account::Ref, error::ProgramError, AccountView, Address, ProgramResult};
 
@@ -12,14 +9,9 @@ use crate::definitions::{
 };
 use crate::err;
 
-/// Read a [`ChainRegistrationLayout`] out of an account's data. Returns
-/// `MissingChainRegistration` if the supplied account is system-owned (a
-/// signal that no `register_chain` governance VAA has landed for this chain)
-/// or `InvalidPda` if the buffer length is wrong for our layout.
-///
-/// Caller is responsible for verifying the account address against the
-/// canonical PDA derivation BEFORE calling — this helper checks the on-disk
-/// data shape only.
+/// Read a [`ChainRegistrationLayout`]. Returns `MissingChainRegistration` if
+/// the account is system-owned (no registration VAA landed) or `InvalidPda` on
+/// wrong length. Caller must verify the canonical address first.
 pub fn load(account: &AccountView) -> Result<ChainRegistrationLayout, ProgramError> {
     if account.owner() == &pinocchio_system::ID {
         return Err(err(GlobalAccountantError::MissingChainRegistration));
@@ -31,9 +23,8 @@ pub fn load(account: &AccountView) -> Result<ChainRegistrationLayout, ProgramErr
     Ok(*bytemuck::from_bytes::<ChainRegistrationLayout>(&data))
 }
 
-/// Write a [`ChainRegistrationLayout`] into the account's data buffer. Used
-/// by the `register_chain` governance instruction after the PDA has been
-/// allocated (or upgraded in place over a stale registration).
+/// Write a [`ChainRegistrationLayout`] into the account's data buffer (used by
+/// `register_chain` after allocation).
 pub fn store(
     account: &mut AccountView,
     value: &ChainRegistrationLayout,
@@ -46,26 +37,10 @@ pub fn store(
     Ok(())
 }
 
-/// Two-stage chain-registration cross-check used by both `submit_observations`
-/// and `submit_vaas` after parsing a body header.
-///
-/// Mirrors the CosmWasm `CHAIN_REGISTRATIONS` lookup at
-/// `cosmwasm/contracts/global-accountant/src/contract.rs:158-166`
-/// (observations path) and `:446-454` (VAA backfill path):
-///
-/// 1. The supplied account must live at the canonical address
-///    `(b"chain_registration", body_chain.to_be_bytes())`. Without this
-///    check a caller could pass a foreign account masquerading as the
-///    registration PDA and route the data-read past `load`'s length check.
+/// Chain-registration cross-check used by both submit paths:
+/// 1. The account must live at the canonical address (rejecting a foreign
+///    account masquerading as the registration PDA).
 /// 2. The on-disk `emitter_address` must equal the body header's emitter.
-///    Mirrors CosmWasm's "unknown emitter address" `ensure!` assertion.
-///
-/// [`load`] returns `MissingChainRegistration` if the supplied account is
-/// system-owned (no registration VAA has landed yet); surfaces through the
-/// `?` operator as the documented error code.
-///
-/// Cost: one `find_program_address` (~1.5K CU) + one 64-byte data read +
-/// one 32-byte memcmp. Acceptable on the hot path.
 pub fn verify(
     program_id: &Address,
     registration_pda: &AccountView,

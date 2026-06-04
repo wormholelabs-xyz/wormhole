@@ -1,19 +1,9 @@
 //! `modify_balance` — Accountant governance handler.
 //!
-//! Port of CosmWasm `handle_accountant_governance_vaa`
-//! (`cosmwasm/contracts/global-accountant/src/contract.rs:399-440`) plus
-//! the `modify_balance` helper at
-//! `cosmwasm/packages/accountant/src/contract.rs:244-278`. Applies a
-//! manual Add / Subtract delta to the canonical `BalanceAccount` PDA via a
-//! Wormchain-emitted governance VAA. Used for post-incident ledger
-//! reconciliation when an off-chain event (exploit, manual mint, chain
-//! rollback) requires the on-chain balance to be corrected.
-//!
-//! Replay protection keys on the payload `sequence`: the `ModificationLog`
-//! PDA is per-sequence (not per-balance), so two distinct governance VAAs
-//! targeting the same `(chain, token_chain, token_address)` triple cannot
-//! collide. CosmWasm rejects `Any (0)` as `target_chain` on this path —
-//! only `WORMCHAIN_CHAIN_ID` (`contract.rs:404-407`).
+//! Applies a manual Add / Subtract delta to a `BalanceAccount` PDA via a
+//! Wormchain-emitted governance VAA, for post-incident ledger reconciliation.
+//! Replay protection keys on the payload `sequence` via a per-sequence
+//! `ModificationLog` PDA. Only `WORMCHAIN_CHAIN_ID` is accepted as target_chain.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -30,10 +20,6 @@ use crate::err;
 use crate::instructions::{pda_init::init_or_upgrade_pda, shim};
 use crate::state::{account as balance_account, modification};
 
-// ============================================================================
-// Wire format
-// ============================================================================
-
 /// Wire format for the `modify_balance` instruction data (after the 1-byte
 /// dispatch discriminator):
 ///
@@ -43,16 +29,12 @@ use crate::state::{account as balance_account, modification};
 /// | 1      | 2        | body_len (LE)     |
 /// | 3      | body_len | body              |
 ///
-/// `guardian_set_bump` is forwarded verbatim to the Shim's `VerifyHash` (its
-/// API). No PDA bumps travel in the wire for the balance / modification PDAs:
-/// the canonical bumps are derived on-chain via `find_program_address`, which
-/// canonical-address enforcement requires anyway.
+/// `guardian_set_bump` is forwarded to the Shim's `VerifyHash`. PDA bumps are
+/// derived on-chain, not supplied.
 const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 2;
 
-/// Maximum VAA body size accepted. The canonical ModifyBalance body is 195
-/// bytes (51-byte header + 32-byte module + 1-byte action + 2-byte target
-/// chain + 109-byte payload); 256 leaves headroom for any future field while
-/// staying well inside Solana's 1232-byte tx envelope.
+/// Maximum VAA body size. Canonical ModifyBalance body is 195 bytes; 256 leaves
+/// headroom inside Solana's 1232-byte tx envelope.
 const MODIFY_BALANCE_BODY_MAX: usize = 256;
 
 /// Body header offsets (canonical Wormhole VAA layout, 51-byte header).
@@ -109,14 +91,12 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //   1. `[]`              Verify VAA Shim program (CPI target).
     //   2. `[]`              Core Bridge `GuardianSet` PDA.
     //   3. `[]`              `GuardianSignatures` PDA.
-    //   4. `[WRITE]`         `BalanceAccount` PDA — lazy-init on first Add for
-    //                       a fresh (chain, token_chain, token_address);
-    //                       required to exist for Sub.
+    //   4. `[WRITE]`         `BalanceAccount` PDA — lazy-init on first Add;
+    //                       must exist for Sub.
     //   5. `[]`              system program.
     //   6. `[WRITE]`         `ModificationLog` PDA at
-    //                       `(b"modification", payload_sequence_be)`.
-    //                       Lazy-inited every call; existence ⇒
-    //                       `DuplicateModification`.
+    //                       `(b"modification", payload_sequence_be)`. Existence
+    //                       ⇒ `DuplicateModification`.
     let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
         accounts
     else {
@@ -159,8 +139,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
     ]);
-    // CosmWasm `handle_accountant_governance_vaa` rejects target chains other
-    // than `Wormchain` (no `Any` acceptance, unlike Token Bridge governance).
+    // Only Wormchain accepted (no `Any`, unlike Token Bridge governance).
     if target_chain != WORMCHAIN_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
@@ -219,27 +198,19 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (8) Replay protection -----
     //
-    // `ModificationLog` PDA must be system-owned (uninitialised). Existence
-    // signals a prior `modify_balance` call already consumed this payload
-    // sequence — surface `DuplicateModification`. Mirrors CosmWasm
-    // `MODIFICATIONS.has(deps.storage, msg.sequence)` early-bail check at
-    // `packages/accountant/src/contract.rs:248-250`.
+    // An initialised `ModificationLog` PDA means this sequence was already used.
     if modification_pda.owner() != &pinocchio_system::ID {
         return Err(err(GlobalAccountantError::DuplicateModification));
     }
 
     // ----- (9) Apply the delta -----
     //
-    // Sub on uninit must reject BEFORE allocation so the payer doesn't pay
-    // rent on a guaranteed-failed mutation. Add on uninit lazy-inits + writes
-    // a fresh layout with `balance = amount`. Existing PDAs go through
-    // `raw_add` / `raw_sub` and persist back via `balance_account::store`.
+    // Sub on uninit rejects before allocation so the payer doesn't pay rent on a
+    // guaranteed failure. Add on uninit lazy-inits with `balance = amount`.
     let balance_is_uninit = balance_pda.owner() == &pinocchio_system::ID;
     if balance_is_uninit {
         match kind {
             ModificationKind::Subtract => {
-                // 0 - amount underflows for any amount > 0. amount == 0 is a
-                // no-op but still pointless on uninit; reject either way.
                 return Err(err(GlobalAccountantError::ModifyBalanceUnderflow));
             }
             ModificationKind::Add => {
@@ -256,11 +227,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
             }
         }
     } else {
-        // Existing balance PDA. No owner check needed: the address was
-        // verified canonical above, and assigning ownership of a PDA requires
-        // its signature — producible only via this program's `invoke_signed`,
-        // which only ever assigns to itself. Owner is therefore either the
-        // system program (handled by the uninit branch) or this program.
+        // Existing balance PDA. No owner check needed: the canonical address was
+        // verified above, and only this program can ever assign ownership of it.
         let mut layout = balance_account::load(balance_pda)?;
         match kind {
             ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
@@ -295,21 +263,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     log.reason = reason;
     modification::store(modification_pda, &log)?;
 
-    // ----- (11) Log the modification for off-chain consumers -----
-    //
-    // Solana's `sol_log` ABI is the cheapest way to surface the reason field
-    // without paying for additional on-chain storage. Off-chain indexers
-    // already scrape program logs; this gives them parity with CosmWasm's
-    // event-attribute audit channel. Logging the reason via the unsafe
-    // syscall keeps the no_std target build clean (no formatting infra).
+    // ----- (11) Emit the modification to the program log for indexers -----
     log_modification(payload_sequence, chain_id, kind_byte, &reason);
 
     Ok(())
 }
 
-/// Lazy-init the `BalanceAccount` PDA with the `Add`-on-uninit shape:
-/// allocate via `init_or_upgrade_pda`, then stamp a freshly-zeroed layout
-/// with `balance = amount`.
+/// Lazy-init the `BalanceAccount` PDA with `balance = amount` (Add on uninit).
 #[allow(clippy::too_many_arguments)]
 fn init_balance_account(
     program_id: &Address,
@@ -351,19 +311,12 @@ fn init_balance_account(
 
 use crate::hash::double_keccak256;
 
-// ============================================================================
-// Logging — emits the modification record to the SBF program log so
-// off-chain indexers can replay the audit trail without walking the VAA
-// archive. No-op on host builds.
-// ============================================================================
-
+/// Emit the modification record to the SBF program log. No-op on host builds.
 fn log_modification(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {
     #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     {
-        // sol_log_64_ captures the structured fields; sol_log_ on the reason
-        // bytes captures the audit string. Both are constant-cost syscalls.
-        // SAFETY: pinocchio re-exports the canonical Solana syscall ABIs;
-        // sol_log_64_ takes five u64 params, sol_log_ takes (ptr, len).
+        // SAFETY: syscall ABIs — sol_log_64_ takes five u64s, sol_log_ takes
+        // (ptr, len).
         unsafe {
             pinocchio::syscalls::sol_log_64_(sequence, chain_id as u64, kind as u64, 0, 0);
             pinocchio::syscalls::sol_log_(reason.as_ptr(), reason.len() as u64);

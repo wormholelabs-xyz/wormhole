@@ -1,12 +1,5 @@
-//! Balance-mutation helpers shared between the quorum-completing branch of
-//! `submit_observations` and the signed-VAA backfill path in `submit_vaas`.
-//!
-//! Both callers need the same routine — the CosmWasm reference
-//! (`handle_tokenbridge_vaa`) drives `accountant::commit_transfer` for both
-//! the observation-quorum path and the signed-VAA path. Living in a sibling
-//! module keeps both callers honest (same canonical-bump enforcement, same
-//! same-PDA-collapse, same overflow semantics) without forcing one instruction
-//! module to depend on another's private items.
+//! Balance-mutation helpers shared by the quorum-completing branch of
+//! `submit_observations` and the signed-VAA backfill in `submit_vaas`.
 
 use pinocchio::{AccountView, Address, ProgramResult};
 
@@ -14,18 +7,10 @@ use crate::definitions::{GlobalAccountantError, Uint256, ACCOUNT_SEED_PREFIX};
 use crate::err;
 use crate::state::account as account_state;
 
-/// Mutate the source and destination Account PDAs to reflect a Token Bridge
-/// transfer. Port of CosmWasm `commit_transfer`
-/// (`cosmwasm/packages/accountant/src/contract.rs:109-126`):
-///
-/// 1. Source-side `lock_or_burn` — chain == token_chain ⇒ credit (native
-///    lock), chain != token_chain ⇒ debit (wrapped burn).
-/// 2. Destination-side `unlock_or_mint` — chain == token_chain ⇒ debit
-///    (native unlock), chain != token_chain ⇒ credit (wrapped mint).
-///
-/// Same-chain self-transfers (source == destination PDA) are collapsed onto
-/// one in-memory layout so the second mutation observes the first — matching
-/// CosmWasm's `if src.key == dst.key { src.unlock_or_mint(...) }` path.
+/// Mutate the source and destination Account PDAs for a Token Bridge transfer:
+/// source-side `lock_or_burn`, then destination-side `unlock_or_mint`.
+/// Same-chain self-transfers (source == dest PDA) are collapsed onto one
+/// in-memory layout so the second mutation observes the first.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_transfer(
     program_id: &Address,
@@ -56,23 +41,11 @@ pub fn apply_transfer(
     let mut src = account_state::load(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
 
-    // Same-chain self-transfer collapse — see CosmWasm
-    // `cosmwasm/packages/accountant/src/contract.rs:158-161`. Not a
-    // visibility fix: the runtime deduplicates a repeated pubkey onto one
-    // buffer, so a store-through-source / load-through-dest round trip would
-    // observe the mutation anyway. The branch exists because
-    //
-    // 1. it makes the lost-update hazard structural rather than ordering-
-    //    dependent — the CosmWasm reference loads both accounts before
-    //    mutating either, where a same-key save-last would silently clobber
-    //    the lock/burn; a refactor of this function toward that symmetric
-    //    shape would reintroduce the bug if this branch were absent,
-    // 2. the early return skips the destination-side `find_program_address`
-    //    (~1.5K CU), address check, and `init_if_needed`, and
-    // 3. applying both ops to one in-memory layout in the reference's exact
-    //    order pins the transient arithmetic: burn-then-mint must underflow
-    //    when the wrapped balance is below `amount`, even though the net is
-    //    zero — parity with CosmWasm down to the error code.
+    // Same-chain self-transfer collapse: apply both ops to one in-memory layout
+    // in order. This pins the transient arithmetic (burn-then-mint must underflow
+    // when the wrapped balance is below `amount`, even though the net is zero) and
+    // guards against a lost-update if this function is ever refactored to a
+    // load-both-then-mutate shape.
     let same_pda = source_account.address() == dest_account.address();
     if same_pda {
         src.unlock_or_mint(amount).map_err(err)?;
@@ -103,9 +76,8 @@ pub fn apply_transfer(
     account_state::store(dest_account, &dst)
 }
 
-/// Re-derive the canonical Account PDA address + bump from `(chain,
-/// token_chain, token_address)`. Mirrors the canonical-bump pattern used in
-/// `open_digest_inner` and `close_pending`'s pending-PDA check.
+/// Re-derive the canonical Account PDA address + bump from `(chain, token_chain,
+/// token_address)`.
 pub fn derive_account_pda(
     program_id: &Address,
     chain: u16,

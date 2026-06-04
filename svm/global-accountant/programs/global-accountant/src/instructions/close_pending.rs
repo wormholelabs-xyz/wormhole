@@ -1,30 +1,22 @@
-//! `close_pending` — permissionless cleanup of stranded `PendingObservationsLayout`
-//! PDAs.
+//! `close_pending` — permissionless cleanup of stranded
+//! `PendingObservationsLayout` PDAs.
 //!
-//! Anyone may close a pending PDA when **either** of the following on-chain
-//! conditions holds:
+//! Anyone may close a pending PDA when either trigger holds, refunding lamports
+//! to the recorded `payer`:
 //!
-//! - (a) The pending PDA's `guardian_set_index` references a guardian set
-//!   whose `is_active(timestamp)` returns false (i.e., the set has expired).
-//! - (b) NoReplay is already marked for `(chain, emitter, sequence)` — proving
-//!   the entry has been accounted-for via some other path.
-//!
-//! Lamports are refunded to the recorded `payer` in either case.
+//! - (a) The recorded guardian set has expired.
+//! - (b) NoReplay is already marked for `(chain, emitter, sequence)` — the entry
+//!   was accounted via another path.
 //!
 //! Wire format (after the 1-byte dispatch discriminator):
 //!
-//! | offset | size | field                            |
-//! |--------|------|----------------------------------|
-//! | 0      | 32   | emitter                          |
-//! | 32     | 8    | sequence (big endian, matches pending-PDA seed) |
+//! | offset | size | field                  |
+//! |--------|------|------------------------|
+//! | 0      | 32   | emitter                |
+//! | 32     | 8    | sequence (big endian)  |
 //!
-//! `emitter` and `sequence` are the values used to derive the pending PDA's
-//! canonical address (alongside the recorded `chain` read from the layout and
-//! the recorded digest also read from the layout). The program re-derives the
-//! canonical pending-PDA address from these and rejects any mismatch, and
-//! re-derives the noreplay bitmap PDA address from `(authority, chain_be ‖
-//! emitter, sequence / 1024)` so trigger (b) reads the *correct* bucket bit
-//! rather than a caller-supplied arbitrary account.
+//! The canonical pending-PDA and noreplay-bucket addresses are re-derived from
+//! these (plus the layout's `chain` / `digest`) and any mismatch is rejected.
 
 use pinocchio::{
     error::ProgramError,
@@ -40,8 +32,8 @@ use crate::err;
 use crate::instructions::noreplay;
 use crate::state::pending;
 
-/// Wire-format size of the `close_pending` instruction data after the 1-byte
-/// dispatch discriminator. See module doc for the field map.
+/// `close_pending` instruction-data size (after the discriminator). See module
+/// doc for the field map.
 const CLOSE_PENDING_DATA_LEN: usize = 32 + 8;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
@@ -58,15 +50,11 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     let sequence = u64::from_be_bytes(sequence_be);
 
     // Accounts:
-    //   0. `[SIGNER]` closer (permissionless — any signer)
+    //   0. `[SIGNER]` closer (permissionless)
     //   1. `[WRITE]`  pending PDA
     //   2. `[WRITE]`  rent recipient — must equal the recorded payer
-    //   3. `[]`       GuardianSet PDA — to check `is_active(timestamp)`
-    //   4. `[]`       NoReplay bitmap PDA — to check the marked condition.
-    //                The address is re-derived inside this ix from
-    //                (noreplay_authority, chain ‖ emitter, sequence / 1024)
-    //                and the supplied account is rejected if the address does
-    //                not match.
+    //   3. `[]`       GuardianSet PDA — checks expiry (trigger a)
+    //   4. `[]`       NoReplay bitmap PDA — checks the marked condition (trigger b)
     let [closer, pending_pda, rent_recipient, guardian_set, noreplay_bucket] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -81,12 +69,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
 
-    // Canonical-pending-PDA enforcement: re-derive the address from
-    // `(b"pending", chain_be, emitter, sequence_be, digest)` and refuse to act
-    // on any account whose address differs. Without this check, an attacker
-    // could pass a pending PDA whose layout records one `(chain, sequence)`
-    // but actually lives at the address for a different `(chain, sequence)`,
-    // tricking the bitmap-bit lookup into reading an unrelated bucket.
+    // Canonical-pending-PDA enforcement: re-derive from `(b"pending", chain_be,
+    // emitter, sequence_be, digest)` and reject mismatches — otherwise a spoofed
+    // layout could trick the bitmap lookup into reading an unrelated bucket.
     let chain_be = layout.chain.to_be_bytes();
     let (expected_pending_pda, _) = Address::find_program_address(
         &[
@@ -105,12 +90,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // Trigger (a): GuardianSet expired.
     let expired = guardian_set_expired(guardian_set, layout.guardian_set_index)?;
 
-    // Trigger (b): NoReplay-marked. The shared `noreplay::is_marked` helper
-    // re-derives the canonical bitmap PDA from
-    // `(noreplay_authority, chain ‖ emitter, sequence / 1024)` and rejects any
-    // caller-supplied bucket at a non-canonical address. close_pending is the
-    // cold path — re-deriving the noreplay-authority PDA inline (one extra
-    // `find_program_address`, ~1.5K CU) keeps the account list small.
+    // Trigger (b): NoReplay-marked. Re-derive the authority PDA inline rather
+    // than passing it in (cold path; keeps the account list small).
     let (noreplay_authority_addr, _) =
         Address::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
     let already_accounted = noreplay::is_marked(
@@ -135,17 +116,11 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     pending_pda.close()
 }
 
-/// Returns `Ok(true)` if the supplied `GuardianSet` PDA is expired at the
-/// current Solana clock timestamp, OR if the supplied account does not match
-/// the expected index (a wrong-set account is treated as "no longer the
-/// active set" — the closer can pass any expired set to prove the trigger).
+/// Returns `Ok(true)` if the supplied `GuardianSet` is expired, or if its index
+/// does not match the recorded one (a non-current set is a superset of expired).
 ///
-/// The account owner is checked against [`CORE_BRIDGE_PROGRAM_ID`] up front:
-/// without this check, an attacker could construct an account at an arbitrary
-/// address with bytes claiming the set is expired and repeatedly DoS any
-/// pending PDA from reaching quorum. The mismatch-index sub-case of trigger
-/// (a) made the attack costless (no clock manipulation needed), so the owner
-/// check is load-bearing for liveness.
+/// The owner is checked against [`CORE_BRIDGE_PROGRAM_ID`] first: without it, a
+/// forged account claiming expiry could DoS any pending PDA from reaching quorum.
 fn guardian_set_expired(
     guardian_set: &AccountView,
     expected_index: u32,
@@ -163,8 +138,7 @@ fn guardian_set_expired(
             .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
     );
     if on_chain_index != expected_index {
-        // The supplied account is not the recorded set — treat as "not the
-        // currently-active set", which is a strict superset of "expired".
+        // Not the recorded set — treat as non-current (superset of expired).
         return Ok(true);
     }
     let keys_len = u32::from_le_bytes(
@@ -185,9 +159,7 @@ fn guardian_set_expired(
         return Ok(false); // never-expiring set (the active one)
     }
     let timestamp = Clock::get()?.unix_timestamp;
-    // `unix_timestamp` is an `i64`; cast to u32 safely. Values beyond
-    // u32::MAX (~year 2106) get clamped to MAX, which is treated as "expired
-    // a long time ago" — the right answer for any 2026-era set.
+    // Clamp the i64 timestamp into u32 (negatives -> 0, overflow -> MAX).
     let timestamp_u32 = if timestamp < 0 {
         0
     } else if (timestamp as u64) > (u32::MAX as u64) {

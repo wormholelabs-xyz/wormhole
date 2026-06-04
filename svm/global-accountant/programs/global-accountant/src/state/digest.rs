@@ -3,9 +3,8 @@ use pinocchio::{account::Ref, error::ProgramError, AccountView};
 use crate::definitions::{DigestAccountLayout, GlobalAccountantError};
 use crate::err;
 
-/// Read a `DigestAccountLayout` out of an account's data. The layout is `Pod`,
-/// so the cheapest correct thing is to copy it out by value — that releases
-/// the underlying borrow before the caller mutates anything else.
+/// Read a `DigestAccountLayout`. The layout is `Pod`, so copy out by value to
+/// release the borrow before the caller mutates.
 pub fn load(account: &AccountView) -> Result<DigestAccountLayout, ProgramError> {
     let data: Ref<'_, [u8]> = account.try_borrow()?;
     if data.len() != DigestAccountLayout::LEN {

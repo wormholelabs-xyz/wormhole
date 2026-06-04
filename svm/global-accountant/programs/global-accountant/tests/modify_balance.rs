@@ -2,18 +2,6 @@
 //!
 //! Driven against a Mollusk instance with the real `wormhole_verify_vaa_shim.so`
 //! loaded at the canonical Shim program ID (see `common::mollusk_fixtures`).
-//! The `test-only-open-digest` feature exposes the auxiliary direct-drive
-//! entrypoints unrelated to this ix.
-//!
-//! Coverage:
-//!   - happy path Add on uninit BalanceAccount: lazy-inits + credits.
-//!   - happy path Add on existing BalanceAccount: credits without re-init.
-//!   - happy path Sub on existing BalanceAccount with sufficient balance: debits.
-//!   - rejection: wrong governance emitter / module / action / target chain /
-//!     kind byte.
-//!   - rejection: Sub on uninit BalanceAccount underflows before allocation.
-//!   - rejection: Add overflow against a near-max balance.
-//!   - rejection: duplicate modification sequence (PDA already exists).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -101,8 +89,7 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// Build a `BalanceAccount` PDA fixture pre-funded with `balance`. Used by
-/// the Sub-on-existing-balance and overflow-edge tests.
+/// `BalanceAccount` PDA fixture pre-funded with `balance`.
 fn balance_account(
     chain: u16,
     token_chain: u16,
@@ -173,9 +160,7 @@ fn build_modify_balance_body(
 }
 
 fn modify_balance_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 1-byte guardian_set_bump (Shim API)
-    // + 2-byte body length LE + body bytes. No PDA bumps travel in the wire:
-    // the program derives the canonical bumps on-chain.
+    // Wire: discriminator + guardian_set_bump + 2-byte body len (LE) + body.
     let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::ModifyBalance as u8);
     data.push(guardian_set_bump);
@@ -242,9 +227,8 @@ fn build_initial_accounts(
     ]
 }
 
-/// Single driver covering the standard fixture set. Negative tests override
-/// individual fields via the closure-free arguments to keep the call sites
-/// readable.
+/// Single driver over the standard fixture set; tests override individual
+/// fields via the arguments.
 #[allow(clippy::too_many_arguments)]
 fn run_modify_balance(
     mollusk: &Mollusk,
@@ -293,16 +277,10 @@ fn run_modify_balance(
     mollusk.process_instruction(&ix, &accounts)
 }
 
-// ============================================================================
-// Rejection tests (red first — pre-impl these fail to compile until
-// `Instruction::ModifyBalance` dispatches to a real handler).
-// ============================================================================
-
+/// Each case mutates one field of an otherwise-canonical body to pin which
+/// body-header validator trips. Mock-vaa is on, so the Shim CPI is not the gate.
 #[test]
 fn modify_balance_body_header_violations_reject() {
-    // Each case mutates exactly one field of an otherwise-canonical body to
-    // pin which program-side validator trips. Mock-vaa is on, so the Shim
-    // CPI is not the gate here.
     struct Case {
         label: &'static str,
         emitter: [u8; 32],
@@ -412,11 +390,10 @@ fn modify_balance_body_header_violations_reject() {
     }
 }
 
+/// Add on a fresh triple lazy-inits the BalanceAccount and creates the
+/// ModificationLog.
 #[test]
 fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
-    // Happy path: governance Add on a fresh (chain, token_chain, token_address)
-    // triple lazy-inits the BalanceAccount PDA, stamps the layout, and writes
-    // `balance = amount`. ModificationLog PDA is created alongside.
     let mollusk = mollusk();
     let token_address = [0x77u8; 32];
     let reason = *b"audit-log: post-incident credit ";
@@ -482,10 +459,9 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
     );
 }
 
+/// Sub against a pre-funded BalanceAccount debits (5000 - 1500 = 3500).
 #[test]
 fn modify_balance_sub_on_existing_pda_debits() {
-    // Happy path: Sub against a pre-funded BalanceAccount. balance 5000,
-    // Sub 1500 → balance 3500.
     let mollusk = mollusk();
     let token_address = [0x88u8; 32];
     let body = build_modify_balance_body(
@@ -534,10 +510,9 @@ fn modify_balance_sub_on_existing_pda_debits() {
     );
 }
 
+/// Add against an existing BalanceAccount credits (100 + 50 = 150).
 #[test]
 fn modify_balance_add_on_existing_pda_credits() {
-    // Happy path: Add against an existing BalanceAccount. balance 100,
-    // Add 50 → balance 150.
     let mollusk = mollusk();
     let token_address = [0x99u8; 32];
     let body = build_modify_balance_body(
@@ -578,11 +553,10 @@ fn modify_balance_add_on_existing_pda_credits() {
     assert_eq!(layout.balance, Uint256::from_u128(150));
 }
 
+/// Sub on an uninitialised BalanceAccount underflows from zero and is rejected
+/// before allocation.
 #[test]
 fn modify_balance_sub_on_uninit_pda_rejects_underflow() {
-    // Sub on an uninitialised BalanceAccount underflows from zero balance.
-    // Rejected BEFORE allocation so the payer doesn't pay rent on a guaranteed-
-    // failed mutation.
     let mollusk = mollusk();
     let token_address = [0xAAu8; 32];
     let body = build_modify_balance_body(
@@ -613,8 +587,7 @@ fn modify_balance_sub_on_uninit_pda_rejects_underflow() {
         other => panic!("expected Failure(ModifyBalanceUnderflow), got {other:?}"),
     }
 
-    // BalanceAccount and ModificationLog must remain uninitialised after the
-    // pre-allocation rejection.
+    // BalanceAccount stays uninitialised after the pre-allocation rejection.
     let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
     let post_balance = r
         .resulting_accounts
@@ -625,10 +598,10 @@ fn modify_balance_sub_on_uninit_pda_rejects_underflow() {
     assert!(post_balance.1.data.is_empty());
 }
 
+/// Add against a near-MAX balance overflows and rejects with
+/// `ModifyBalanceOverflow`.
 #[test]
 fn modify_balance_add_overflow_rejects() {
-    // Add against a near-MAX balance overflows the Uint256. Rejected with
-    // ModifyBalanceOverflow.
     let mollusk = mollusk();
     let token_address = [0xBBu8; 32];
     let body = build_modify_balance_body(
@@ -673,12 +646,10 @@ fn modify_balance_add_overflow_rejects() {
     }
 }
 
+/// A second VAA with the same payload sequence collides on the ModificationLog
+/// PDA and rejects with `DuplicateModification`.
 #[test]
 fn modify_balance_rejects_duplicate_modification_sequence() {
-    // Replay protection: a second governance VAA with the same payload
-    // sequence collides on the ModificationLog PDA address. Mirrors CosmWasm
-    // `MODIFICATIONS.has` short-circuit at
-    // `packages/accountant/src/contract.rs:248-250`.
     let mollusk = mollusk();
     let token_address = [0xCCu8; 32];
     let body = build_modify_balance_body(
@@ -697,7 +668,6 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
         &[0u8; 32],
     );
 
-    // First call lands a fresh modification.
     let r1 = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 205, None, None);
     assert!(matches!(r1.program_result, ProgramResult::Success));
 
@@ -740,13 +710,10 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
     }
 }
 
+/// Two VAAs touching the same balance triple both succeed and land at distinct
+/// ModificationLog PDAs (logs key on `sequence`, not the balance PDA).
 #[test]
 fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
-    // Two governance VAAs that touch the same (chain, token_chain, token_address)
-    // triple must both succeed AND land at distinct ModificationLog PDAs — i.e.
-    // the modification PDA seeds key on `sequence`, not on the balance PDA.
-    // Mirrors CosmWasm `MODIFICATIONS.update` keyed on sequence at
-    // `cosmwasm/packages/accountant/src/contract.rs:248`.
     let mollusk = mollusk();
     let token_address = [0xE7u8; 32];
 

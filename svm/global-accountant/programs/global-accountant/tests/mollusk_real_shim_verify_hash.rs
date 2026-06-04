@@ -1,20 +1,7 @@
-//! TDD anchor for the real Verify VAA Shim `VerifyHash` CPI.
-//!
-//! Drives `close_digest` against a Mollusk instance with the real
-//! `wormhole_verify_vaa_shim.so` loaded at the canonical Shim program ID and
-//! asserts that:
-//!
-//! 1. **Happy path**: close succeeds when the Shim's `VerifyHash` validates
-//!    a quorum-strength `GuardianSignatures` account against the stored
-//!    digest.
-//! 2. **Sub-quorum fails**: close fails when the same accounts carry only
-//!    `quorum - 1` signatures, surfacing the Shim's quorum check rather
-//!    than passing the close (which the mock-vaa branch would do because
-//!    it short-circuits to `Ok(())`).
-//!
-//! The sub-quorum assertion is the TDD anchor: under mock-vaa it passes
-//! (mock returns Ok without inspecting sigs), under the real Shim CPI it
-//! fails (Shim returns `InvalidAccountData`).
+//! Real Verify VAA Shim `VerifyHash` CPI anchor: drives `close_digest` against
+//! a Mollusk with the real `wormhole_verify_vaa_shim.so`. The sub-quorum case
+//! is the anchor — it passes under mock-vaa (short-circuits to Ok) but must
+//! fail under the real Shim.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -75,8 +62,7 @@ fn open_digest_ix_data(
     digest: &[u8; 32],
     guardian_set_index: u32,
 ) -> Vec<u8> {
-    // No bump byte travels in the wire: `open_digest_inner` derives the
-    // canonical bump on-chain via `find_program_address`.
+    // No bump on the wire; the program derives it on-chain.
     let mut data = Vec::with_capacity(1 + 78);
     data.push(IxDiscriminator::TestOnlyOpenDigest as u8);
     data.extend_from_slice(&chain.to_be_bytes());
@@ -113,9 +99,7 @@ fn uninit_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// Common setup shared by happy-path and sub-quorum tests. Returns the
-/// post-open Mollusk + accounts so each test can dispatch its own
-/// `close_digest`.
+/// Post-open Mollusk + accounts shared by the happy-path and sub-quorum tests.
 struct CloseFixture {
     mollusk: Mollusk,
     digest: [u8; 32],
@@ -132,8 +116,7 @@ impl CloseFixture {
     fn open() -> Self {
         let mollusk = mollusk_with_fixtures(&program_id(), PROGRAM_NAME);
 
-        // Deterministic digest — any 32 bytes work; the Shim signs whatever
-        // bytes we hand it.
+        // Any 32 bytes work; the Shim signs whatever digest we hand it.
         let mut digest = [0u8; 32];
         for (i, b) in digest.iter_mut().enumerate() {
             *b = (i as u8) ^ 0x5A;
@@ -143,7 +126,6 @@ impl CloseFixture {
         let (digest_pda, _) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
         let payer = Pubkey::new_from_array([1u8; 32]);
 
-        // Drive `open_digest` directly so the test owns the stored digest.
         let open_ix = Instruction::new_with_bytes(
             program_id(),
             &open_digest_ix_data(CHAIN, &emitter, SEQUENCE, &digest, GUARDIAN_SET_INDEX),
@@ -180,7 +162,6 @@ impl CloseFixture {
             .1
             .clone();
 
-        // Sanity: stored digest matches what we passed in.
         let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest_pda_account.data);
         assert_eq!(stored.digest, digest, "stored digest matches input");
 
@@ -204,14 +185,12 @@ impl CloseFixture {
     fn guardian_set_account(&self) -> Account {
         let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> =
             self.guardians.iter().map(|g| g.eth_address).collect();
-        // `expiration_time = 0` ⇒ the set never expires (Shim treats 0 as
-        // "active forever").
+        // `expiration_time = 0` ⇒ never expires.
         guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id())
     }
 
-    /// Build a GuardianSignatures account fixture with `num_signatures`
-    /// guardians signing the stored digest, in strictly increasing index
-    /// order (the Shim rejects non-increasing indices).
+    /// GuardianSignatures fixture: `num_signatures` guardians signing the stored
+    /// digest in strictly increasing index order (the Shim requires it).
     fn guardian_signatures_account(&self, num_signatures: u8) -> (Pubkey, Account) {
         let pubkey = Pubkey::new_from_array([0xE1u8; 32]);
         let sigs: Vec<(u8, [u8; 65])> = (0..num_signatures)
@@ -227,11 +206,9 @@ impl CloseFixture {
         sigs_pubkey: Pubkey,
         sigs_account: Account,
     ) -> mollusk_svm::result::InstructionResult {
-        // Account-meta order matches the production close_digest layout:
-        // closer, digest_pda, rent_recipient, guardian_signatures (slot 3),
-        // guardian_set (slot 4), shim_program (slot 5). The Shim itself
-        // reads guardian_set first then guardian_signatures internally;
-        // close_digest::verify_vaa reorders them in the CPI account list.
+        // Production close_digest meta order: closer, digest_pda, rent_recipient,
+        // guardian_signatures, guardian_set, shim_program. close_digest::verify_vaa
+        // reorders for the Shim (which reads guardian_set first) in the CPI list.
         let metas = vec![
             AccountMeta::new_readonly(self.payer, true),
             AccountMeta::new(self.digest_pda, false),
@@ -256,12 +233,10 @@ impl CloseFixture {
     }
 }
 
+/// Happy path: close succeeds with a quorum of valid signatures. Pins the wire
+/// shape; not the anchor (also passes under mock-vaa).
 #[test]
 fn close_digest_with_quorum_signatures_succeeds() {
-    // Sanity / happy-path: the real Shim verifies quorum signatures and
-    // close succeeds. Also passes under mock-vaa (mock returns Ok regardless),
-    // so this test is not the TDD anchor by itself — it pins the wire shape
-    // so a regression in the fixture builder is caught visibly.
     let fixture = CloseFixture::open();
     let (sigs_pubkey, sigs_account) = fixture.guardian_signatures_account(QUORUM);
     let result = fixture.close_with(sigs_pubkey, sigs_account);
@@ -272,13 +247,10 @@ fn close_digest_with_quorum_signatures_succeeds() {
     );
 }
 
+/// Anchor: a sub-quorum GuardianSignatures account must make close fail via the
+/// Shim's quorum check (mock-vaa would wrongly pass it).
 #[test]
 fn close_digest_with_sub_quorum_signatures_fails_via_shim() {
-    // TDD anchor: the Shim rejects a GuardianSignatures account below quorum.
-    // Under mock-vaa this case incorrectly passes (mock returns Ok(())); the
-    // real Shim's quorum check rejects it. The assertion only requires
-    // failure — the precise error code lives inside the Shim and we treat it
-    // as a black box (the public surface is "ix returns failure").
     let fixture = CloseFixture::open();
     let (sigs_pubkey, sigs_account) = fixture.guardian_signatures_account(QUORUM - 1);
     let result = fixture.close_with(sigs_pubkey, sigs_account);

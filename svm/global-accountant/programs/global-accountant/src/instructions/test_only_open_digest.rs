@@ -1,19 +1,12 @@
 //! `test_only_open_digest` — test-only entrypoint to initialise a DigestAccount
 //! PDA directly.
 //!
-//! Nothing in this module is reachable from production code. It is a thin
-//! wire-format wrapper around the shared `super::open_digest::open_digest_inner`
-//! helper, which the two production commit paths (`submit_observations` on
-//! quorum reach, `submit_vaas` after Shim verification) call themselves. The
-//! standalone entrypoint is kept behind `test-only-open-digest` so the
-//! existing mollusk tests can drive the PDA lifecycle without standing up a
-//! full 13-of-19 quorum or a verified VAA.
+//! A thin wire-format wrapper around `super::open_digest::open_digest_inner`,
+//! gated behind `test-only-open-digest` so mollusk tests can drive the PDA
+//! lifecycle without a full quorum or verified VAA. Unreachable in production.
 
-// Hard compile-time fence at the file root. `test_only_open_digest` is a test-build
-// entrypoint; any production `cargo build-sbf` without `test-only-open-digest`
-// must refuse to compile this file at all rather than rely on dead-code
-// stripping. Mirrors the `mock-vaa` fence in `close_digest.rs`. The shared
-// inner helper lives in `super::open_digest` so it is unaffected by this gate.
+// Compile-time fence: production builds must refuse to compile this file rather
+// than rely on dead-code stripping.
 #[cfg(not(feature = "test-only-open-digest"))]
 compile_error!(
     "test_only_open_digest is a test-only entrypoint; production opens go through \
@@ -27,9 +20,7 @@ use crate::definitions::GlobalAccountantError;
 use crate::err;
 use crate::instructions::open_digest::open_digest_inner;
 
-/// Layout of the open_digest instruction data (after the 1-byte discriminator).
-/// Distinct from the account layout — see `DigestAccountLayout` in
-/// `global-accountant-definitions` for that.
+/// open_digest instruction-data layout (after the 1-byte discriminator):
 ///
 /// | offset | size | field                              |
 /// |--------|------|------------------------------------|
@@ -39,8 +30,7 @@ use crate::instructions::open_digest::open_digest_inner;
 /// | 42     | 32   | digest                             |
 /// | 74     | 4    | guardian_set_index (little endian) |
 ///
-/// No bump travels in the wire: `open_digest_inner` derives the canonical
-/// bump on-chain via `find_program_address`.
+/// The bump is derived on-chain, not supplied.
 const OPEN_DIGEST_DATA_LEN: usize = 2 + 32 + 8 + 32 + 4;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {

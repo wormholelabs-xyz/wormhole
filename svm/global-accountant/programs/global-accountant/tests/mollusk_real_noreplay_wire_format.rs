@@ -1,26 +1,12 @@
-//! TDD anchor for the real `solana_noreplay` CPI wire format.
+//! Real `solana_noreplay` CPI wire-format anchor: drives `submit_observations`
+//! to quorum against a Mollusk with the real `solana_noreplay.so` and asserts
+//! the bucket account is 129 bytes, noreplay-owned, with the bit for
+//! `sequence % 1024` set.
 //!
-//! Drives `submit_observations` to quorum against a Mollusk instance that
-//! has the real `solana_noreplay.so` loaded at `NOREPLAY_PROGRAM_ID` and
-//! asserts the resulting noreplay bucket account matches the program's
-//! 129-byte bitmap layout with the correct bit set for the observation's
-//! `(sequence % 1024)`.
-//!
-//! # Why a sequence of 9
-//!
-//! The mock-noreplay branch writes a single sentinel byte (`0x01`) into the
-//! first byte of a 1-byte caller-supplied buffer. By picking a sequence whose
-//! bitmap bit lives outside byte 0 (`bit_index = 9 → byte_index = 1`), this
-//! test cannot be satisfied by the mock's sentinel write: the assertion
-//! checks byte 1 (= bitmap offset 0 + 1) for the value `0x02`. Under the
-//! real CPI the bucket account is 129 bytes (`[bump: u8][bitmap: 128 B]`),
-//! owned by `NOREPLAY_PROGRAM_ID`, and the relevant bit is set; under the
-//! mock the account is 1 byte, owned by global-accountant, and only byte 0
-//! is touched.
-//!
-//! This test is therefore expected to **fail** on a build where
-//! `mock-noreplay` is enabled — which is the current dev-dep default — and
-//! is the TDD anchor for Phase 2 (mock-feature removal).
+//! `SEQUENCE = 9` puts the bitmap bit outside byte 0 so the mock-noreplay
+//! branch (which only writes byte 0 of a 1-byte buffer) cannot satisfy the
+//! assertion; this test fails under `mock-noreplay` and passes under the real
+//! CPI.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -43,8 +29,7 @@ use common::guardian_fixtures::{
 use common::mollusk_fixtures::{keyed_account_for_noreplay_program, mollusk_with_fixtures};
 
 const PROGRAM_NAME: &str = "global_accountant";
-/// Sequence chosen so the bitmap bit lives outside byte 0 — see the
-/// module-level rationale.
+/// Bitmap bit lands outside byte 0 — see the module doc.
 const SEQUENCE: u64 = 9;
 const CHAIN: u16 = 2;
 const GUARDIAN_SET_INDEX: u32 = 4;
@@ -97,8 +82,7 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
-/// Derive the canonical `solana_noreplay` bitmap PDA under the supplied
-/// authority. Mirrors `instructions::noreplay::derive_bucket_pda`.
+/// Derive the `solana_noreplay` bitmap PDA under `authority`.
 fn derive_noreplay_bucket_pda(
     authority: &Pubkey,
     chain: u16,
@@ -126,9 +110,8 @@ fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
-/// Minimal 52-byte attest body. Action byte (0x02) keeps the program out of
-/// the transfer-payload branch so Account PDAs at slots 8 and 9 can remain
-/// sentinel addresses.
+/// Minimal 52-byte attest body. Action 0x02 keeps the program off the transfer
+/// branch so the slot 8/9 Account PDAs can stay sentinels.
 fn build_attest_body(chain: u16, emitter: &[u8; 32], sequence: u64) -> Vec<u8> {
     let mut body = vec![0u8; 52];
     body[8..10].copy_from_slice(&chain.to_be_bytes());
@@ -145,8 +128,7 @@ fn submit_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // No bump bytes travel in the wire: the program derives both canonical PDA
-    // bumps on-chain via `find_program_address`.
+    // No bump bytes on the wire; the program derives them on-chain.
     let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
@@ -205,8 +187,7 @@ impl Scenario {
         emitter[31] = 0x77;
         let body = build_attest_body(CHAIN, &emitter, SEQUENCE);
         let digest = double_keccak256_host(&body);
-        // Only the PDA addresses feed the account metas; the program derives
-        // the canonical bumps on-chain.
+        // Only PDA addresses feed the metas; the program derives bumps on-chain.
         let (pending_pda, _) = derive_pending_pda(CHAIN, &emitter, SEQUENCE, &digest);
         let (digest_pda, _) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
         let (noreplay_authority, _) =
@@ -214,10 +195,8 @@ impl Scenario {
         let noreplay_bucket =
             derive_noreplay_bucket_pda(&noreplay_authority, CHAIN, &emitter, SEQUENCE);
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(CHAIN);
-        // The on-chain guardian_set PDA is unused by the inline
-        // secp256k1_recover path other than as the source of guardian
-        // pubkeys; any deterministic pubkey suffices for the account-meta
-        // declaration and the test populates the account itself.
+        // The inline secp256k1_recover path only reads guardian pubkeys from
+        // this account, so any deterministic address works.
         let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
@@ -269,16 +248,12 @@ impl Scenario {
                     &core_bridge_program_id(),
                 ),
             ),
-            // Noreplay bucket starts system-owned with zero data; the real
-            // CPI will allocate and assign on first MarkUsed.
+            // Bucket starts system-owned + empty; the CPI allocates on MarkUsed.
             (self.noreplay_bucket, uninit_pda_account()),
             (self.digest_pda, uninit_pda_account()),
             keyed_account_for_system_program(),
-            // Slot 6 is the noreplay program. The runtime requires an
-            // executable account at this address; mollusk's simple
-            // process_instruction path consumes the supplied accounts list
-            // verbatim, so the helper builds a Loader V3 executable entry
-            // matching the program-cache registration.
+            // Slot 6: noreplay program, needs a Loader-V3 executable entry since
+            // process_instruction takes the account list verbatim.
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority, system_owned_account(0)),
             // Slots 8/9: attest payload ⇒ never touched.
@@ -312,6 +287,7 @@ impl Scenario {
     }
 }
 
+/// Driving submit_observations to quorum flips the real noreplay bitmap bit.
 #[test]
 fn submit_observations_quorum_marks_real_noreplay_bitmap() {
     let mollusk = mollusk_with_fixtures(&program_id(), PROGRAM_NAME);
@@ -334,9 +310,7 @@ fn submit_observations_quorum_marks_real_noreplay_bitmap() {
         .map(|(_, a)| a.clone())
         .expect("noreplay bucket in resulting accounts");
 
-    // Production-shape assertions: the real CPI hands ownership to the
-    // noreplay program, allocates the 129-byte layout, and flips the bit at
-    // `sequence % 1024`. None of these holds under the mock-noreplay branch.
+    // Real CPI: noreplay-owned, 129-byte layout, bit at `sequence % 1024` set.
     assert_eq!(
         bucket.owner,
         Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),

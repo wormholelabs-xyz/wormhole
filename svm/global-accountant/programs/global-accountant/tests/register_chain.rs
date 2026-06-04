@@ -3,16 +3,6 @@
 //! Driven against a Mollusk instance with the real `solana_noreplay.so` and
 //! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
 //! `common::mollusk_fixtures`).
-//!
-//! Coverage:
-//!   - happy path: governance VAA initialises the canonical
-//!     `ChainRegistration` PDA with `(chain, emitter_address)`.
-//!   - wrong governance emitter rejects.
-//!   - wrong governance module rejects.
-//!   - wrong action byte rejects.
-//!   - wrong target chain rejects.
-//!   - replay rejects (NoReplay marks the governance VAA's sequence).
-//!   - overwrite via a new governance VAA succeeds (emitter rotation).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -114,8 +104,7 @@ fn uninitialised_pda_account() -> Account {
 }
 
 fn noreplay_bucket_unmarked() -> Account {
-    // Lazy-create entry state for the real noreplay program: system-owned,
-    // empty data. The CPI from register_chain allocates+assigns on commit.
+    // Lazy-create entry state: system-owned, empty.
     system_owned_account(0)
 }
 
@@ -159,8 +148,8 @@ fn build_register_chain_body(
 }
 
 fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[u8]) -> Vec<u8> {
-    // Wire shape: 1-byte discriminator + 1-byte guardian_set_bump + 1-byte
-    // registration_bump + 2-byte body length LE + body bytes.
+    // Wire: discriminator + guardian_set_bump + registration_bump + 2-byte body
+    // len (LE) + body.
     let mut data = Vec::with_capacity(1 + 1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::RegisterChain as u8);
     data.push(guardian_set_bump);
@@ -236,12 +225,10 @@ fn build_initial_accounts(
     ]
 }
 
+/// Happy path: a RegisterChain governance VAA targeting "Any" initialises the
+/// canonical ChainRegistration PDA with the supplied `(chain, emitter)`.
 #[test]
 fn register_chain_via_governance_vaa_initialises_registration_pda() {
-    // Happy path: a Token Bridge governance RegisterChain VAA targeting "Any"
-    // initialises the canonical ChainRegistration PDA for the supplied chain
-    // with the supplied emitter_address. Mirrors CosmWasm
-    // `handle_token_governance_vaa` at `contract.rs:370-397`.
     let mollusk = mollusk();
     let chain_to_register: u16 = 2;
     let emitter_to_register = [0x77u8; 32];
@@ -264,15 +251,13 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
         derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let digest = double_keccak256_host(&body);
-    // Canonical program-derived noreplay authority. Matches what
-    // close_pending re-derives internally and what the production CPI signs.
     let (noreplay_authority, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
     let noreplay_bucket = derive_canonical_noreplay_bucket(
         &noreplay_authority,
         SOLANA_CHAIN_ID,
         &GOVERNANCE_EMITTER,
-        0x01, // vaa_sequence used in this body
+        0x01, // vaa_sequence
     );
 
     let accounts = build_initial_accounts(
@@ -331,9 +316,8 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
     );
 }
 
-/// Single-call test driver. Builds the standard fixture set, optionally
-/// overrides the initial registration PDA account (used by the overwrite +
-/// replay tests), runs the instruction, and returns the result.
+/// Single-call test driver over the standard fixture set, with optional
+/// overrides for the initial registration and noreplay-bucket accounts.
 fn run_register_chain(
     mollusk: &Mollusk,
     body: &[u8],
@@ -348,13 +332,9 @@ fn run_register_chain(
         derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let digest = double_keccak256_host(body);
-    // Canonical program-derived noreplay authority. Matches what
-    // close_pending re-derives internally and what the production CPI signs.
     let (noreplay_authority, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
-    // The body's vaa_sequence determines which canonical noreplay bucket the
-    // program will derive. Read it directly from body[42..50] so the test
-    // helper doesn't have to be told twice.
+    // vaa_sequence (body[42..50]) drives the canonical noreplay bucket.
     let vaa_sequence = {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&body[42..50]);
@@ -396,12 +376,10 @@ fn run_register_chain(
     mollusk.process_instruction(&ix, &accounts)
 }
 
+/// Each case mutates one body field to pin which body-header validator trips.
+/// Mock-vaa is on, so the Shim CPI is not the gate.
 #[test]
 fn register_chain_governance_header_violations_reject() {
-    // Each case mutates exactly one field of the canonical-looking body so
-    // the expected error is unambiguous. Mock-vaa is on, so the Shim CPI
-    // accepts any digest — these checks are the program's own body-header
-    // validators.
     struct Case {
         label: &'static str,
         emitter: [u8; 32],
@@ -480,10 +458,10 @@ fn register_chain_governance_header_violations_reject() {
     }
 }
 
+/// The same governance VAA submitted twice: the second rejects via the
+/// NoReplay pre-check.
 #[test]
 fn register_chain_rejects_replay() {
-    // Submit the same governance VAA twice. The first succeeds, the second
-    // rejects via the NoReplay pre-check at (1, GOVERNANCE_EMITTER, sequence).
     let mollusk = mollusk();
     let body = build_register_chain_body(
         SOLANA_CHAIN_ID,
@@ -496,7 +474,6 @@ fn register_chain_rejects_replay() {
         &[0x77u8; 32],
     );
 
-    // First call — happy path success.
     let r1 = run_register_chain(&mollusk, &body, 2, None, None);
     assert!(
         matches!(r1.program_result, ProgramResult::Success),
@@ -504,11 +481,8 @@ fn register_chain_rejects_replay() {
         r1.program_result
     );
 
-    // Carry the NoReplay-flipped bucket and the freshly-initialised
-    // registration PDA into the second call.
+    // Carry the flipped bucket and initialised registration into the replay.
     let (registration_pda, _) = derive_chain_registration_pda(2);
-    // Authority pubkey must match what `run_register_chain` uses for the
-    // canonical bucket derivation.
     let (noreplay_authority_pubkey, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
     let post_registration = r1
@@ -551,12 +525,10 @@ fn register_chain_rejects_replay() {
     }
 }
 
+/// Emitter rotation: a later governance VAA overwrites the registration so the
+/// PDA ends up holding the new emitter.
 #[test]
 fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
-    // Emitter rotation: register chain 2 -> emitter A via VAA at sequence 1,
-    // then register chain 2 -> emitter B via VAA at sequence 2. The
-    // registration PDA must end up holding emitter B (the latest
-    // governance VAA wins).
     let mollusk = mollusk();
     let emitter_a = [0x77u8; 32];
     let emitter_b = [0xBBu8; 32];
@@ -574,10 +546,8 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
     let r1 = run_register_chain(&mollusk, &body_a, 2, None, None);
     assert!(matches!(r1.program_result, ProgramResult::Success));
 
-    // Carry the freshly-initialised PDA + flipped bucket into the second call.
+    // Carry the initialised PDA + flipped bucket into the second call.
     let (registration_pda, _) = derive_chain_registration_pda(2);
-    // Authority pubkey must match what `run_register_chain` uses for the
-    // canonical bucket derivation.
     let (noreplay_authority_pubkey, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
     let post_registration = r1
@@ -600,13 +570,9 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
         .map(|(_, a)| a.clone())
         .expect("noreplay bucket missing from first result");
 
-    // Second governance VAA uses a sequence in a different NoReplay bucket
-    // (sequence / 1024 differs). Under real noreplay each bucket has its own
-    // PDA address; under `mock-noreplay` the `is_marked` short-circuit checks
-    // only `bucket[0] != 0`, so the test must hand the program a *fresh*
-    // unmarked bucket fixture to stand in for the new bucket address. The
-    // production path would have routed the second call to a different
-    // bucket PDA naturally.
+    // Second VAA uses a sequence in a different bucket (sequence / 1024
+    // differs). Under mock-noreplay `is_marked` only checks `bucket[0] != 0`,
+    // so hand the program a fresh unmarked bucket for the new address.
     let _ = post_bucket;
     let fresh_bucket = noreplay_bucket_unmarked();
     let body_b = build_register_chain_body(

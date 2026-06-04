@@ -1,27 +1,14 @@
 //! `submit_observations` — quorum tracker.
 //!
-//! A `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout`
-//! PDA accumulates guardian signatures; the 13th observation in any one
-//! bucket atomically
+//! A `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA
+//! accumulates guardian signatures. The quorum-completing observation atomically
+//! flips the NoReplay slot, opens the `DigestAccount` PDA, applies balance
+//! effects, and closes the pending PDA, refunding rent to its recorded payer.
 //!
-//! 1. flips the NoReplay slot (shared across sibling buckets at the same
-//!    `(chain, emitter, sequence)`),
-//! 2. opens the `DigestAccount` PDA via `super::open_digest::open_digest_inner`, and
-//! 3. closes the winning pending PDA, refunding rent to its recorded payer.
-//!
-//! Sibling buckets at the same `(chain, emitter, sequence)` but different
-//! digests (the source-chain reorg case) coexist and race independently; the
-//! losing buckets are reclaimed via `close_pending`'s NoReplay-marked
-//! trigger.
-//!
-//! Signature verification is inline via the Solana-native `secp256k1_recover`
-//! syscall (`pinocchio::syscalls::sol_secp256k1_recover`). No raw signatures
-//! are persisted — only the popcount-counted bitmap survives in the pending
-//! PDA, matching the CosmWasm baseline.
-//!
-//! NoReplay integration is gated behind the `mock-noreplay` Cargo feature
-//! mirroring `mock-vaa`'s shape (`noreplay::is_marked` / `noreplay::mark_used`
-//! below).
+//! Sibling buckets at the same `(chain, emitter, sequence)` but different digests
+//! (source-chain reorg) race independently; losers are reclaimed via
+//! `close_pending`. Signatures are verified inline via the `secp256k1_recover`
+//! syscall; only the bitmap is persisted.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -34,19 +21,14 @@ use crate::definitions::{
     PendingObservationsLayout, TokenBridgeAction, PENDING_SEED_PREFIX,
 };
 use crate::err;
-// NoReplay integration lives in the sibling `noreplay` module so
-// `close_pending` can re-use `is_marked` for its trigger-(b) check without
-// re-importing this module's private items. The balance-mutation helper
-// (`apply_transfer`) lives in a sibling `transfer` module so `submit_vaas`
-// can re-use it without depending on this module's internals.
 use crate::instructions::{
     noreplay, open_digest::open_digest_inner, pda_init::init_or_upgrade_pda,
     transfer::apply_transfer,
 };
 use crate::state::{chain_registration, pending};
 
-/// Wire format for the fixed-size portion of `submit_observations`
-/// instruction data (after the 1-byte dispatch discriminator):
+/// Fixed-size prefix of `submit_observations` instruction data (after the
+/// 1-byte dispatch discriminator):
 ///
 /// | offset | size | field                              |
 /// |--------|------|------------------------------------|
@@ -55,54 +37,27 @@ use crate::state::{chain_registration, pending};
 /// | 36     | 1    | guardian_index                     |
 /// | 37     | 65   | signature (r||s||recovery_id)      |
 ///
-/// No PDA bumps travel in the instruction data: the pending and digest PDA
-/// bumps are derived on-chain via `find_program_address` (which canonical-bump
-/// enforcement requires anyway), so a caller-supplied copy would be redundant
-/// wire bytes and an extra client-side failure mode.
-///
-/// Trailing the fixed-size portion is `body_len: u16 LE` followed by exactly
-/// `body_len` bytes of VAA body. The body is verified against the supplied
-/// `digest` via `keccak256(keccak256(body)) == digest` before any state
-/// mutation, then parsed for Token Bridge fields on the quorum-completing
-/// branch.
+/// Trailing the prefix is `body_len: u16 LE` then `body_len` VAA body bytes.
+/// The body is verified against `digest` via `keccak256(keccak256(body))`
+/// before any state mutation. PDA bumps are derived on-chain, not supplied.
 ///
 /// The routing tuple `(chain, emitter, sequence)` is sourced exclusively from
-/// the body's own header at byte offsets `[8..50]`, matching the CosmWasm
-/// `Observation::digest` precedent in `cosmwasm/packages/accountant/src/msg.rs`
-/// where the bucket key and the digest preimage are the same bytes. Carrying
-/// a separate caller-controlled prefix would let an attacker replay a signed
-/// body under arbitrary `(chain, emitter, sequence)` triples, corrupting the
-/// balance ledger; sourcing them from the body makes that attack structurally
-/// impossible.
-///
-/// No upper bound is imposed on `body_len` beyond the `u16` wire width.
-/// Every transport that can reach this instruction is far tighter than
-/// `u16::MAX` — 1232-byte tx packets for direct submission, 10 KiB
-/// (`MAX_CPI_INSTRUCTION_DATA_LEN`) via CPI — so any program-side ceiling
-/// would either be unreachable or an arbitrary restriction the CosmWasm
-/// accountant baseline does not have. The `rest.len()` check below already
-/// rejects length claims exceeding the data actually present.
+/// the body header `[8..50]`, never caller-supplied data — otherwise an attacker
+/// could replay a signed body under an arbitrary triple and corrupt the ledger.
 const SUBMIT_FIXED_LEN: usize = 32 + 4 + 1 + 65;
 
-/// Length of an ECDSA recoverable signature: 32-byte r + 32-byte s + 1-byte
-/// recovery id. The on-chain `sol_secp256k1_recover` syscall takes the 64-byte
-/// `r||s` prefix and the recovery id separately.
+/// ECDSA recoverable signature length: 32-byte r + 32-byte s + 1-byte recovery id.
 const SECP256K1_SIGNATURE_LEN: usize = 65;
 
-/// Length of an Ethereum-style guardian pubkey (`keccak256(uncompressed_pk)[12..]`).
+/// Ethereum-style guardian pubkey length (`keccak256(uncompressed_pk)[12..]`).
 const GUARDIAN_PUBKEY_LEN: usize = 20;
 
-/// Byte layout of `pinocchio::syscalls::sol_secp256k1_recover`'s `result`
-/// buffer: a 64-byte uncompressed-without-prefix secp256k1 public key
-/// (`X || Y`).
+/// `sol_secp256k1_recover` result buffer: 64-byte uncompressed pubkey (`X || Y`).
 const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    // Split the instruction data into fixed prefix + length-prefixed body.
-    // Body is required on every submission so the program can re-verify the
-    // digest against the bytes the caller is claiming the observation
-    // covers; otherwise an attacker could land an arbitrary digest and
-    // route balance updates to the wrong `(amount, token, recipient_chain)`.
+    // Split into fixed prefix + length-prefixed body. The body is required so
+    // the digest can be re-verified against the bytes the observation covers.
     if data.len() < SUBMIT_FIXED_LEN + 2 {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
@@ -111,10 +66,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    // Lower bound `BODY_MIN_LEN` (51-byte VAA header + 1-byte action) mirrors
-    // `submit_vaas.rs`'s tighter check and surfaces malformed-body submissions
-    // ~5K CU earlier — before the body→digest keccak roundtrip and before
-    // `populate_routing_from_body`'s own 50-byte guard.
+    // 51-byte VAA header + 1-byte action.
     const BODY_MIN_LEN: usize = 52;
     if body_len < BODY_MIN_LEN || rest.len() < 2 + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -123,83 +75,36 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
 
-    // Verify the body the caller claims this observation is about. The
-    // double-keccak convention matches the Wormhole VAA digest (the same
-    // function guardians sign and the Verify VAA Shim recomputes). Doing
-    // this *before* any state mutation means a body/digest mismatch costs
-    // one keccak roundtrip (~5k CU) and changes no PDAs — the cheapest
-    // place to reject forged or truncated bodies.
+    // Verify the body matches the signed digest before any state mutation.
     let computed = double_keccak256(body_bytes);
     if computed != parsed.digest {
         return Err(err(GlobalAccountantError::BodyDigestMismatch));
     }
 
-    // Source the routing tuple from the body header now that the body is
-    // proven authentic. Sourcing (chain, emitter, sequence) from caller-
-    // controlled instruction data would let an attacker replay a signed body
-    // under arbitrary namespaces — see the module-level wire-format doc and
-    // the `submit_observations_routes_by_body_header_not_caller_supplied_prefix`
-    // regression test in `programs/global-accountant/tests/submit_observations.rs`.
+    // Routing tuple is sourced from the now-authenticated body header, never
+    // caller-supplied data — see the module-level wire-format doc.
     parsed.populate_routing_from_body(body_bytes)?;
 
     // Accounts:
-    //   0. `[WRITE, SIGNER]` submitter (fee payer; rent payer for fresh PDAs;
-    //                       also payer for any lazy noreplay bitmap create AND
-    //                       for any lazy Account PDA create on the quorum branch).
+    //   0. `[WRITE, SIGNER]` submitter (fee + rent payer for all lazy PDAs).
     //   1. `[WRITE]`         pending PDA.
     //   2. `[]`              GuardianSet PDA (Core Bridge).
-    //   3. `[WRITE]`         NoReplay bitmap PDA. Read-only at pre-check
-    //                       time, writable at commit time — the runtime
-    //                       requires writability to be declared up-front, so
-    //                       this slot is always WRITE.
+    //   3. `[WRITE]`         NoReplay bitmap PDA (read at pre-check, written at
+    //                       commit; always WRITE per runtime declaration rules).
     //   4. `[WRITE]`         DigestAccount PDA (opens on quorum).
-    //   5. `[]`              system program (for `CreateAccount` / `Allocate`
-    //                       / `Assign` across the pending PDA init AND the
-    //                       noreplay bitmap lazy-init AND the Account PDA
-    //                       lazy-inits).
-    //   6. `[]`              NoReplay program (CPI target on quorum reach).
-    //   7. `[]`              NoReplay authority PDA owned by this program;
-    //                       signed via `invoke_signed` with seeds
-    //                       `[NOREPLAY_AUTHORITY_SEED_PREFIX, authority_bump]`.
-    //   8. `[WRITE]`         source-chain Account PDA at
-    //                       `(b"account", source_chain, token_chain, token_address)`.
-    //                       Required on every submission (the Solana runtime
-    //                       requires writability up front), but only read /
-    //                       written on the quorum-completing branch with a
-    //                       Transfer payload. For non-Transfer payloads
-    //                       (Attest / Other / non-quorum-completing
-    //                       observations) the caller still supplies the slot
-    //                       and the program never touches it.
-    //   9. `[WRITE]`         destination-chain Account PDA at
-    //                       `(b"account", recipient_chain, token_chain, token_address)`.
-    //                       Same semantics as slot 8.
-    //  10. `[WRITE]`         rent recipient for the pending PDA close on the
-    //                       quorum-completing branch. Must equal the bucket's
-    //                       recorded payer (the wallet that originally opened
-    //                       the pending PDA); the program verifies the address
-    //                       against `layout.payer` and rejects with
-    //                       `PayerMismatch` otherwise. Decoupling submitter
-    //                       from rent_recipient is what lets *any* guardian
-    //                       (or relayer) close out quorum on behalf of the
-    //                       original opener — the network does not know in
-    //                       advance which submission will be the 13th, but
-    //                       rent must always refund to whoever paid it. The
-    //                       slot is required on every submission for runtime
-    //                       account-meta declaration, but only credited on the
-    //                       quorum-completing branch. Callers on non-quorum
-    //                       submissions can pass any pubkey (the slot is not
-    //                       read).
-    //  11. `[]`              chain registration PDA at
-    //                       `(b"chain_registration", body_chain.to_be_bytes())`.
-    //                       Populated by the `register_chain` governance
-    //                       instruction. Read on every submission to verify
-    //                       the body header's `(emitter_chain, emitter_address)`
-    //                       pair corresponds to a Token-Bridge-governance-
-    //                       registered emitter. Mirrors CosmWasm's
-    //                       `CHAIN_REGISTRATIONS` lookup at
-    //                       `contract.rs:158-166`. A system-owned account at
-    //                       this slot signals "no registration" and the
-    //                       program returns `MissingChainRegistration`.
+    //   5. `[]`              system program.
+    //   6. `[]`              NoReplay program (CPI target).
+    //   7. `[]`              NoReplay authority PDA owned by this program.
+    //   8. `[WRITE]`         source-chain Account PDA. Only touched on the
+    //                       quorum-completing Transfer branch; sentinel otherwise.
+    //   9. `[WRITE]`         destination-chain Account PDA. Same semantics as slot 8.
+    //  10. `[WRITE]`         rent recipient for the pending PDA close. Must equal
+    //                       the bucket's recorded payer (rejected as `PayerMismatch`
+    //                       otherwise); decoupled from submitter so any guardian
+    //                       can complete quorum on the opener's behalf.
+    //  11. `[]`              chain registration PDA. Read to verify the body's
+    //                       `(emitter_chain, emitter_address)` is a registered
+    //                       emitter; system-owned ⇒ `MissingChainRegistration`.
     let [submitter, pending_pda, guardian_set, noreplay_bucket, digest_pda, system_program_acc, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
         accounts
     else {
@@ -221,10 +126,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
-    // Chain-registration cross-check mirrors CosmWasm `handle_observation`
-    // (`contract.rs:158-166`). Without it an attacker with valid sigs for a
-    // non-Token-Bridge VAA could route accounting against a fake emitter on
-    // a real chain. PDA address verified against canonical seeds first.
+    // Chain-registration cross-check: reject valid sigs for an unregistered
+    // (and therefore potentially fake) emitter. PDA address verified first.
     chain_registration::verify(
         program_id,
         chain_registration_pda,
@@ -269,8 +172,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
 
     // Quorum reached. Commit atomically: NoReplay flip, DigestAccount open,
-    // balance accounting, pending close. Solana txs unwind everything if
-    // any of these errors out, including the NoReplay bit.
+    // balance accounting, pending close (tx-level rollback covers failures).
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
@@ -294,10 +196,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         parsed.guardian_set_index,
     )?;
 
-    // Port of CosmWasm `commit_transfer`
-    // (`cosmwasm/packages/accountant/src/contract.rs:109-126`). Transfer
-    // payloads mutate two Account PDAs; Attest / Other skip balance work
-    // but the rest of the commit still runs.
+    // Transfer payloads mutate two Account PDAs; Attest skips balance work.
     match parse_token_bridge_payload(body_bytes).map_err(err)? {
         TokenBridgeAction::Transfer {
             amount,
@@ -305,10 +204,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
             token_address,
             recipient_chain,
         } => {
-            // Source chain is the VAA emitter chain (== `parsed.chain`,
-            // which the caller has already authenticated against the
-            // signature). CosmWasm reads `t.key.emitter_chain()` for the
-            // same purpose.
+            // Source chain is the authenticated VAA emitter chain.
             let source_chain = parsed.chain;
             apply_transfer(
                 program_id,
@@ -323,25 +219,15 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
             )?;
         }
         TokenBridgeAction::Attest => {
-            // No balance work; the rest of the commit still runs. Slots 8 and
-            // 9 are required for the runtime account-meta declaration but the
-            // caller is expected to pass sentinel addresses (e.g., the
-            // noreplay-authority PDA) — the program intentionally does not
-            // touch them, so any account shape is fine here.
+            // No balance work; slots 8 and 9 are untouched (sentinels OK).
         }
         TokenBridgeAction::Other => {
-            // Unknown action byte: reject, mirroring CosmWasm's
-            // `bail!("Unknown tokenbridge payload")`. The NoReplay mark above
-            // rolls back with the rest of the transaction, so the
-            // `(chain, emitter, sequence)` slot stays unconsumed and a future
-            // upgrade that understands the action can still account the VAA.
-            // Committing instead would burn the slot irreversibly.
+            // Unknown action: reject. The NoReplay mark rolls back with the tx,
+            // leaving the slot unconsumed for a future upgrade.
             return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
         }
     }
 
-    // Refund the recorded payer (separate from submitter so any guardian
-    // can complete quorum on behalf of the bucket opener).
     let recorded_payer = layout.payer;
     close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;
     Ok(())
@@ -349,17 +235,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
 #[derive(Clone, Copy)]
 struct ParsedObservation {
-    /// Source: body's `keccak256(keccak256(body_bytes))` (signed by the guardian).
-    /// Verified against the body bytes before any state work — the `digest` field
-    /// in instruction data is what the guardian signature was generated against,
-    /// and the body cross-check ensures it matches the supplied body.
+    /// Signed digest; verified against the body before any state work.
     digest: [u8; 32],
-    /// Source: body's header at byte offsets `[8..10]`, populated by `from_body`
-    /// after the digest cross-check. Caller cannot lie about this.
+    /// Body header `[8..10]`, populated after the digest cross-check.
     chain: u16,
-    /// Source: body's header at byte offsets `[10..42]`. Caller cannot lie.
+    /// Body header `[10..42]`, populated after the digest cross-check.
     emitter: [u8; 32],
-    /// Source: body's header at byte offsets `[42..50]`. Caller cannot lie.
+    /// Body header `[42..50]`, populated after the digest cross-check.
     sequence: u64,
     guardian_set_index: u32,
     guardian_index: u8,
@@ -367,10 +249,8 @@ struct ParsedObservation {
 }
 
 impl ParsedObservation {
-    /// Parse the non-routing fields from the fixed-size prefix. The routing
-    /// tuple (chain, emitter, sequence) is left zeroed here and populated
-    /// from `body[8..50]` once the body→digest cross-check has confirmed the
-    /// body bytes match what the guardian signed.
+    /// Parse non-routing fields from the fixed prefix; the routing tuple is left
+    /// zeroed for `populate_routing_from_body` after the digest cross-check.
     fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> Result<Self, ProgramError> {
         let (digest_bytes, rest) = data.split_at(32);
         let (gsi_bytes, rest) = rest.split_at(4);
@@ -398,11 +278,8 @@ impl ParsedObservation {
         })
     }
 
-    /// Populate the routing tuple from the body header via the shared
-    /// `definitions::parse_vaa_body_header` — the single authority for the
-    /// header offsets, so this path and `submit_vaas` can never drift apart.
-    /// Caller must have already proven `body` matches `self.digest` before
-    /// calling this.
+    /// Populate the routing tuple from the body header. Caller must have already
+    /// proven `body` matches `self.digest`.
     fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
         let header = parse_vaa_body_header(body).map_err(err)?;
         self.chain = header.chain;
@@ -414,31 +291,17 @@ impl ParsedObservation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingAction {
-    /// PDA does not exist yet — allocate, assign, and write a fresh layout.
+    /// PDA does not exist yet — allocate, assign, write a fresh layout.
     Create,
-    /// PDA exists but for an older guardian set — refund the recorded payer,
-    /// wipe, and re-create under the new index.
+    /// PDA exists for an older guardian set — refund payer, wipe, re-create.
     WipeAndRecreate,
-    /// PDA exists for the same guardian set and same digest — just toggle the
-    /// bitmap bit.
+    /// PDA exists for the same guardian set — toggle the bitmap bit.
     Continue,
 }
 
-/// Decide what to do with the pending PDA for this observation.
-///
-/// "System-owned with zero data" means "fresh slot — create". "Non-system
-/// owner with data" means "ours, already accumulating — compare". The runtime
-/// guarantees no other program can write `PendingObservationsLayout::LEN`
-/// bytes at the canonical address; we accept that invariant rather than
-/// importing the program ID for equality (Pinocchio determines program ID at
-/// deploy-time, not as a `const`).
-///
-/// Per-digest PDA seeds mean the digest-mismatch case never lands in this
-/// function: a different digest produces a different canonical address, and
-/// that address is either uninitialised (`Create`) or already filled by some
-/// prior observation under the *same* digest (`Continue` / rotation).
-/// `DigestForgery` is therefore retired — every PDA loaded here was opened
-/// under exactly the digest we are accumulating against.
+/// Decide what to do with the pending PDA for this observation. Per-digest PDA
+/// seeds make a digest mismatch unreachable here: any loaded PDA was opened
+/// under exactly this digest.
 fn decide_pending_action(
     pending_pda: &AccountView,
     parsed: &ParsedObservation,
@@ -450,12 +313,7 @@ fn decide_pending_action(
         return Ok(PendingAction::Create);
     }
     if owner_is_system {
-        // System-owned with non-zero data is unreachable on Solana: the system
-        // program cannot Allocate space at a PDA address without us first
-        // signing an Assign via invoke_signed. Reject loudly rather than
-        // routing to init_or_upgrade_pda, which would error on the data_len
-        // guard anyway — surfacing the impossibility here makes the intent
-        // explicit instead of relying on a downstream defence.
+        // System-owned with non-zero data is unreachable on Solana; reject loudly.
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
@@ -467,31 +325,21 @@ fn decide_pending_action(
     if existing.guardian_set_index > parsed.guardian_set_index {
         return Err(err(GlobalAccountantError::StaleGuardianSet));
     }
-    // No digest-equality check: it is guaranteed by construction. The PDA's
-    // seeds include the digest and `create_pending_pda` rejects any
-    // non-canonical bump, so a layout at the canonical address can only have
-    // been stamped with this observation's digest.
+    // Digest equality is guaranteed by the per-digest PDA seeds.
     Ok(PendingAction::Continue)
 }
 
-/// Allocate the pending PDA under
-/// `(b"pending", chain, emitter, sequence, digest)` and stamp the freshly-zeroed
-/// layout. Including the digest in the seed tuple is what lets fork/reorg
-/// observations (same chain/emitter/sequence, different digest) accumulate in
-/// parallel sibling buckets rather than colliding on a single bucket — and is
-/// what makes a recorded-digest mismatch structurally impossible on the
-/// accumulate path.
+/// Allocate the pending PDA under `(b"pending", chain, emitter, sequence,
+/// digest)` and stamp a freshly-zeroed layout. The digest in the seeds lets
+/// reorg siblings accumulate in parallel buckets.
 fn create_pending_pda(
     program_id: &Address,
     submitter: &AccountView,
     pending_pda: &mut AccountView,
     parsed: &ParsedObservation,
 ) -> ProgramResult {
-    // The canonical bump is derived on-chain, mirroring `open_digest_inner` —
-    // callers never supply it, so a non-canonical bump minting sibling
-    // pending PDAs for the same logical key is impossible by construction.
-    // `invoke_signed` below only signs for the canonical address; a
-    // caller-supplied account at any other address fails the init CPI.
+    // Canonical bump derived on-chain; `invoke_signed` below only signs for the
+    // canonical address, so a non-canonical sibling PDA is impossible.
     let chain_be = parsed.chain.to_be_bytes();
     let sequence_be = parsed.sequence.to_be_bytes();
     let (_expected, canonical_bump) = Address::find_program_address(
@@ -533,10 +381,8 @@ fn create_pending_pda(
     pending::store(pending_pda, &layout)
 }
 
-/// Refund the recorded payer and zero the account. Used by the quorum-commit
-/// branch. The caller has already loaded the layout to read `payer` and
-/// `guardian_set_index`; re-loading here would borrow twice, so we pass the
-/// recorded payer in.
+/// Refund the recorded payer and close the account. `recorded_payer` is passed
+/// in to avoid re-borrowing the already-loaded layout.
 pub(crate) fn close_pending_pda(
     pending_pda: &mut AccountView,
     rent_recipient: &mut AccountView,
@@ -555,22 +401,11 @@ pub(crate) fn close_pending_pda(
     pending_pda.close()
 }
 
-/// Rotation-wipe variant: the `submitter` is *not* the recorded payer
-/// (rotation means a new submitter is opening a fresh bucket under the new
-/// set), so we cannot use `close_pending_pda` (it would error with
-/// `PayerMismatch`).
-///
-/// We refund by directly debiting the PDA's lamports and crediting the
-/// submitter's account that the runtime supplied. The rotation case does not
-/// pass the original payer as an explicit account (the wire shape carries
-/// only the new submitter), so the original payer's rent is forfeit to the
-/// new submitter as a small reward for paying the rotation cost.
-///
-/// This is a deliberate simplification: passing the original payer account
-/// every time would balloon the account list for the uncommon-but-not-rare
-/// rotation case. The forfeit is bounded (~$0.10) and the alternative —
-/// gas-sponsored rent recovery via the explicit `close_pending` ix — remains
-/// available for any payer who notices ahead of rotation.
+/// Rotation-wipe variant: credits the PDA's lamports to the new submitter
+/// rather than the recorded payer. The wire shape carries no original-payer
+/// account on rotation, so that payer's (bounded, ~$0.10) rent is forfeit to
+/// whoever pays the rotation cost; `close_pending` remains available to recover
+/// it ahead of rotation.
 fn wipe_pending_pda(
     pending_pda: &mut AccountView,
     new_submitter: &mut AccountView,
@@ -585,9 +420,8 @@ fn wipe_pending_pda(
     pending_pda.close()
 }
 
-/// Inline signature verification via `secp256k1_recover`. The recovered
-/// pubkey is keccak-hashed and compared to the 20-byte Ethereum-style guardian
-/// key stored in the Core Bridge GuardianSet PDA.
+/// Verify a guardian signature: recover the pubkey via `secp256k1_recover` and
+/// compare its keccak hash to the key in the Core Bridge GuardianSet PDA.
 fn verify_signature(
     guardian_set: &AccountView,
     expected_guardian_set_index: u32,
@@ -599,9 +433,7 @@ fn verify_signature(
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
     drop(data);
 
-    // `signature[64]` is the 1-byte recovery id; the syscall takes it as a
-    // `u64`. recovery id ∈ {0, 1, 2, 3} — values >= 4 indicate a malformed
-    // signature.
+    // Recovery id ∈ {0,1,2,3}; values >= 4 are malformed.
     let recovery_id = signature[64];
     if recovery_id >= 4 {
         return Err(err(GlobalAccountantError::InvalidSignature));
@@ -613,7 +445,7 @@ fn verify_signature(
         return Err(err(GlobalAccountantError::InvalidSignature));
     }
 
-    // Ethereum-style guardian pubkey: `keccak256(uncompressed_pk)[12..]`.
+    // Compare `keccak256(recovered_pk)[12..]` to the stored guardian key.
     let mut hash = [0u8; 32];
     keccak256(&recovered, &mut hash);
     if hash[12..] != expected_key[..] {
@@ -625,14 +457,13 @@ fn verify_signature(
 /// Read the 20-byte guardian pubkey at `guardian_index` from a Core Bridge
 /// `GuardianSet` account.
 ///
-/// On-disk layout (see
-/// `svm/wormhole-core-shims/crates/definitions/src/zero_copy/guardian_set.rs`):
+/// On-disk layout:
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
 /// | 0      | 4    | guardian_set_index |
 /// | 4      | 4    | keys_len           |
-/// | 8      | 20*N | keys (Ethereum-style 20-byte pubkeys) |
+/// | 8      | 20*N | keys               |
 /// | 8+20N  | 4    | creation_time      |
 /// | 12+20N | 4    | expiration_time    |
 fn read_guardian_key(
@@ -669,19 +500,15 @@ fn read_guardian_key(
     Ok(key)
 }
 
-// `sol_secp256k1_recover` / `sol_keccak256` are re-exported by Pinocchio for
-// the SBF target only. The host-cfg arm lets the program crate build on
-// `cargo check` outside of `cargo build-sbf`; it is not reached from any
-// mollusk test (mollusk loads the SBF `.so`, which uses the syscall path) and
-// returns 1 (failure) if ever hit.
+// SBF uses the syscall; the host arm is a build-only stub (returns 1) so the
+// crate compiles under `cargo check` outside `cargo build-sbf`.
 fn secp256k1_recover(
     hash: &[u8; 32],
     recovery_id: u64,
     signature: &[u8],
     result: &mut [u8],
 ) -> u64 {
-    // SAFETY: pinocchio re-exports the Solana syscall ABI. The buffers match
-    // the syscall's documented layout: 32-byte hash, 64-byte signature
+    // SAFETY: buffers match the syscall ABI: 32-byte hash, 64-byte signature
     // (`r||s`), 64-byte result.
     #[cfg(any(target_os = "solana", target_arch = "bpf"))]
     let code = unsafe {

@@ -12,24 +12,11 @@ use pinocchio::{
 use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR, VERIFY_VAA_SHIM_PROGRAM_ID};
 
 /// Verify the candidate digest via CPI to the Wormhole Verify VAA Shim
-/// (`VerifyHash`).
+/// (`VerifyHash`), which checks signature ownership, the guardian-set address
+/// and expiry, and quorum against the digest.
 ///
-/// The Shim's checks (see `programs/verify-vaa/src/lib.rs::process_verify_hash`):
-///   1. `guardian_signatures` is owned by the Shim program.
-///   2. `guardian_set`'s address matches `(GUARDIAN_SET_SEED,
-///      guardian_index_be, guardian_set_bump)` under the Core Bridge program.
-///   3. The guardian set is not expired.
-///   4. The recovered Ethereum pubkeys reach quorum against the stored digest.
-///
-/// All four checks live inside the Shim — we just pass the accounts through.
-///
-/// The CPI target is built from the hardcoded `VERIFY_VAA_SHIM_PROGRAM_ID`
-/// constant, never from a caller-supplied account, so a forged shim-program
-/// account cannot redirect the CPI — if the real Shim is absent from the
-/// instruction context the `invoke` fails at the runtime. The Shim program
-/// account must still appear in the caller's account list for the runtime to
-/// resolve the callee, but it is never read or trusted, and no program-ID
-/// pre-check is needed here.
+/// SECURITY: the CPI target is the hardcoded `VERIFY_VAA_SHIM_PROGRAM_ID`, never
+/// a caller-supplied account, so a forged shim account cannot redirect the CPI.
 pub(crate) fn verify_vaa(
     guardian_set: &AccountView,
     guardian_signatures: &AccountView,
@@ -47,9 +34,7 @@ pub(crate) fn verify_vaa(
     ix_data[8] = guardian_set_bump;
     ix_data[9..].copy_from_slice(digest);
 
-    // The Shim's `VerifyHash` is read-only — neither account is `is_signer`
-    // and neither is `is_writable`. See the AccountMeta block in
-    // `crates/shim/src/verify_vaa/verify_hash.rs::VerifyHash::instruction`.
+    // `VerifyHash` is read-only — neither account is signer or writable.
     let ix_accounts = [
         InstructionAccount::readonly(guardian_set.address()),
         InstructionAccount::readonly(guardian_signatures.address()),
