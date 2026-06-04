@@ -24,7 +24,3 @@ use crate::definitions::GlobalAccountantError;
 pub(crate) fn err(e: GlobalAccountantError) -> ProgramError {
     ProgramError::Custom(e as u32)
 }
-
-/// Compile-time pin on the `test-only-open-digest` feature, read by the
-/// integration test crate (on for tests, off for production).
-pub const TEST_ONLY_OPEN_DIGEST_ENABLED: bool = cfg!(feature = "test-only-open-digest");

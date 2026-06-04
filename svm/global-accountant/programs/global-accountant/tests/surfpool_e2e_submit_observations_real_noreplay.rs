@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use global_accountant_definitions::{
     ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
-    DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_SEED_PREFIX,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_SEED_PREFIX,
 };
 use libsecp256k1::{sign, Message, PublicKey, SecretKey};
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -122,20 +122,6 @@ fn derive_pending_pda(
     )
 }
 
-fn derive_digest_pda(
-    program_id: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-) -> (Pubkey, u8) {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(
-        &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be],
-        program_id,
-    )
-}
-
 /// Derive the global-accountant noreplay-authority PDA.
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
@@ -192,7 +178,6 @@ fn build_submit_observations_ix(
     pending_pda: &Pubkey,
     guardian_set: &Pubkey,
     bitmap_pda: &Pubkey,
-    digest_pda: &Pubkey,
     noreplay_authority: &Pubkey,
     chain_registration: &Pubkey,
     digest: &[u8; 32],
@@ -201,9 +186,9 @@ fn build_submit_observations_ix(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Instruction {
-    // Production 12-slot account list. Slots 8/9 (source/dest Account PDAs) are
+    // Production 11-slot account list. Slots 7/8 (source/dest Account PDAs) are
     // only touched on the Transfer branch; for Attest the noreplay-authority PDA
-    // is a sentinel. Slot 10 (rent recipient) must equal the recorded payer.
+    // is a sentinel. Slot 9 (rent recipient) must equal the recorded payer.
     Instruction {
         program_id: *program_id,
         accounts: vec![
@@ -211,7 +196,6 @@ fn build_submit_observations_ix(
             AccountMeta::new(*pending_pda, false),
             AccountMeta::new_readonly(*guardian_set, false),
             AccountMeta::new(*bitmap_pda, false),
-            AccountMeta::new(*digest_pda, false),
             AccountMeta::new_readonly(system_program::ID, false),
             AccountMeta::new_readonly(NOREPLAY_PROGRAM_ID, false),
             AccountMeta::new_readonly(*noreplay_authority, false),
@@ -289,7 +273,6 @@ fn surfpool_submit_observations_real_noreplay() {
 
     // Only PDA addresses feed the metas; bumps derive on-chain.
     let (pending_pda, _) = derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &digest);
-    let (digest_pda, _) = derive_digest_pda(&ga_program_id, chain, &emitter, sequence);
     let (noreplay_authority, _noreplay_authority_bump) =
         derive_noreplay_authority_pda(&ga_program_id);
     let (chain_registration_pda, _) = derive_chain_registration_pda(&ga_program_id, chain);
@@ -297,7 +280,7 @@ fn surfpool_submit_observations_real_noreplay() {
     let (bitmap_pda, bitmap_bump) =
         derive_noreplay_bitmap_pda(&noreplay_authority, &namespace, sequence);
     eprintln!(
-        "[real-cpi] pending_pda={pending_pda} digest_pda={digest_pda} \
+        "[real-cpi] pending_pda={pending_pda} \
          noreplay_authority={noreplay_authority} bitmap_pda={bitmap_pda} bump={bitmap_bump}"
     );
 
@@ -356,7 +339,13 @@ fn surfpool_submit_observations_real_noreplay() {
         "surfnet_setAccount failed for chain registration: {resp}"
     );
 
-    // Drive 13 observations.
+    // Drive 13 observations. The 13th submission emits the canonical commit
+    // log via `sol_log_data`; the bitmap-bit assertion below verifies the
+    // commit branch ran. Asserting log payload bytes directly requires
+    // `getTransaction(..., {encoding: "json", commitment: "confirmed"})` and a
+    // `meta.logMessages` walk — left as a follow-up (the on-chain emission is
+    // already covered by the program's unit-level `commit_log` invocation).
+    let mut quorum_tx_sig: Option<String> = None;
     for i in 0..13u8 {
         let g = &guardians[i as usize];
         let signature = sign_digest(g, &digest);
@@ -366,7 +355,6 @@ fn surfpool_submit_observations_real_noreplay() {
             &pending_pda,
             &guardian_set_pubkey,
             &bitmap_pda,
-            &digest_pda,
             &noreplay_authority,
             &chain_registration_pda,
             &digest,
@@ -375,13 +363,20 @@ fn surfpool_submit_observations_real_noreplay() {
             &signature,
             &body,
         );
-        send_and_confirm(
+        let sig = send_and_confirm(
             &rpc,
             &format!("submit_observations[gi={i}]"),
             &[ix],
             &[&submitter],
         );
+        if i == 12 {
+            quorum_tx_sig = Some(sig);
+        }
     }
+    eprintln!(
+        "[real-cpi] quorum-completing tx sig={} (commit-log assertion deferred)",
+        quorum_tx_sig.unwrap_or_default()
+    );
 
     // Assert the bitmap bit got set in the real noreplay PDA.
     let bitmap_after = rpc
@@ -407,7 +402,6 @@ fn surfpool_submit_observations_real_noreplay() {
         &pending_pda,
         &guardian_set_pubkey,
         &bitmap_pda,
-        &digest_pda,
         &noreplay_authority,
         &chain_registration_pda,
         &digest,
@@ -435,7 +429,7 @@ fn send_and_confirm(
     label: &str,
     ixs: &[Instruction],
     signers: &[&Keypair],
-) {
+) -> String {
     let blockhash = rpc
         .get_latest_blockhash()
         .unwrap_or_else(|e| panic!("blockhash for {label}: {e}"));
@@ -457,6 +451,7 @@ fn send_and_confirm(
         rpc.confirm_transaction(&sig)
     });
     eprintln!("[real-cpi] {label} tx={sig}");
+    sig.to_string()
 }
 
 fn send_expect_failure(

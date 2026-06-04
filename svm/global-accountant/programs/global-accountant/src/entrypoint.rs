@@ -22,17 +22,6 @@ pub fn process_instruction(
         .ok_or_else(|| err(GlobalAccountantError::InvalidInstructionData))?;
 
     match Instruction::from_u8(*discriminator) {
-        // Test-only: a public open entrypoint would let any caller squat the
-        // DigestAccount PDA, so the feature gate keeps it out of production.
-        #[cfg(feature = "test-only-open-digest")]
-        Some(Instruction::TestOnlyOpenDigest) => {
-            instructions::test_only_open_digest::process(program_id, accounts, rest)
-        }
-        #[cfg(not(feature = "test-only-open-digest"))]
-        Some(Instruction::TestOnlyOpenDigest) => Err(err(GlobalAccountantError::NotEnabled)),
-        Some(Instruction::CloseDigest) => {
-            instructions::close_digest::process(program_id, accounts, rest)
-        }
         Some(Instruction::SubmitObservations) => {
             instructions::submit_observations::process(program_id, accounts, rest)
         }

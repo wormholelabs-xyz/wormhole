@@ -2,8 +2,9 @@
 //!
 //! A `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA
 //! accumulates guardian signatures. The quorum-completing observation atomically
-//! flips the NoReplay slot, opens the `DigestAccount` PDA, applies balance
-//! effects, and closes the pending PDA, refunding rent to its recorded payer.
+//! flips the NoReplay slot, emits the canonical digest record via
+//! `commit_log::emit`, applies balance effects, and closes the pending PDA,
+//! refunding rent to its recorded payer.
 //!
 //! Sibling buckets at the same `(chain, emitter, sequence)` but different digests
 //! (source-chain reorg) race independently; losers are reclaimed via
@@ -22,8 +23,7 @@ use crate::definitions::{
 };
 use crate::err;
 use crate::instructions::{
-    noreplay, open_digest::open_digest_inner, pda_init::init_or_upgrade_pda,
-    transfer::apply_transfer,
+    commit_log, noreplay, pda_init::init_or_upgrade_pda, transfer::apply_transfer,
 };
 use crate::state::{chain_registration, pending};
 
@@ -91,21 +91,24 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //   2. `[]`              GuardianSet PDA (Core Bridge).
     //   3. `[WRITE]`         NoReplay bitmap PDA (read at pre-check, written at
     //                       commit; always WRITE per runtime declaration rules).
-    //   4. `[WRITE]`         DigestAccount PDA (opens on quorum).
-    //   5. `[]`              system program.
-    //   6. `[]`              NoReplay program (CPI target).
-    //   7. `[]`              NoReplay authority PDA owned by this program.
-    //   8. `[WRITE]`         source-chain Account PDA. Only touched on the
+    //   4. `[]`              system program.
+    //   5. `[]`              NoReplay program (CPI target).
+    //   6. `[]`              NoReplay authority PDA owned by this program.
+    //   7. `[WRITE]`         source-chain Account PDA. Only touched on the
     //                       quorum-completing Transfer branch; sentinel otherwise.
-    //   9. `[WRITE]`         destination-chain Account PDA. Same semantics as slot 8.
-    //  10. `[WRITE]`         rent recipient for the pending PDA close. Must equal
+    //   8. `[WRITE]`         destination-chain Account PDA. Same semantics as slot 7.
+    //   9. `[WRITE]`         rent recipient for the pending PDA close. Must equal
     //                       the bucket's recorded payer (rejected as `PayerMismatch`
     //                       otherwise); decoupled from submitter so any guardian
     //                       can complete quorum on the opener's behalf.
-    //  11. `[]`              chain registration PDA. Read to verify the body's
+    //  10. `[]`              chain registration PDA. Read to verify the body's
     //                       `(emitter_chain, emitter_address)` is a registered
     //                       emitter; system-owned ⇒ `MissingChainRegistration`.
-    let [submitter, pending_pda, guardian_set, noreplay_bucket, digest_pda, system_program_acc, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
+    //
+    // The canonical digest record is emitted via `sol_log_data` rather than
+    // stored in a PDA; off-chain indexers consume the program-log line carrying
+    // the `ACCOUNTANT_DIGEST_LOG_TAG` prefix.
+    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -171,7 +174,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Ok(());
     }
 
-    // Quorum reached. Commit atomically: NoReplay flip, DigestAccount open,
+    // Quorum reached. Commit atomically: NoReplay flip, canonical log emit,
     // balance accounting, pending close (tx-level rollback covers failures).
     noreplay::mark_used(
         submitter,
@@ -185,16 +188,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         parsed.sequence,
     )?;
 
-    open_digest_inner(
-        program_id,
-        submitter,
-        digest_pda,
-        parsed.chain.to_be_bytes(),
-        parsed.emitter,
-        parsed.sequence.to_be_bytes(),
-        parsed.digest,
+    commit_log::emit(
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+        &parsed.digest,
         parsed.guardian_set_index,
-    )?;
+    );
 
     // Transfer payloads mutate two Account PDAs; Attest skips balance work.
     match parse_token_bridge_payload(body_bytes).map_err(err)? {

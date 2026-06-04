@@ -3,8 +3,10 @@
 //! `.so`, pre-posts the VAA's signatures via the Shim's `PostSignatures`, and
 //! submits a real historical Token Bridge transfer VAA.
 //!
-//! Asserts the NoReplay bit is set, the DigestAccount PDA carries the VAA
-//! metadata, and both source and destination ledgers are debited.
+//! Asserts the NoReplay bit is set and both source and destination ledgers
+//! are debited. The canonical digest record is emitted via `sol_log_data` (see
+//! `instructions/commit_log.rs`); log-payload inspection is deferred to a
+//! follow-up that walks `meta.logMessages`.
 //!
 //! # Run
 //!
@@ -25,9 +27,8 @@
 use std::time::{Duration, Instant};
 
 use global_accountant_definitions::{
-    BalanceAccountLayout, DigestAccountLayout, Instruction as IxDiscriminator, Uint256,
-    ACCOUNT_SEED_PREFIX, DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    VERIFY_VAA_SHIM_PROGRAM_ID,
+    BalanceAccountLayout, Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, VERIFY_VAA_SHIM_PROGRAM_ID,
 };
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};
@@ -61,7 +62,7 @@ const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 ]);
 
 /// CU ceiling for `submit_vaas` (VerifyHash ~200k CU plus the NoReplay CPI,
-/// balance lazy-init, and DigestAccount open).
+/// balance lazy-init, and the `sol_log_data` commit-log emit).
 const SUBMIT_VAAS_CU_LIMIT: u32 = 400_000;
 
 /// Rent-exempt balance for a 76-byte `BalanceAccountLayout`.
@@ -78,20 +79,6 @@ fn datasource_rpc_url() -> String {
 fn derive_guardian_set_pda(index: u32) -> (Pubkey, u8) {
     let idx_be = index.to_be_bytes();
     Pubkey::find_program_address(&[b"GuardianSet", &idx_be], &CORE_BRIDGE_PROGRAM_ID)
-}
-
-fn derive_digest_pda(
-    program_id: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-) -> (Pubkey, u8) {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(
-        &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be],
-        program_id,
-    )
 }
 
 fn derive_account_pda(
@@ -360,12 +347,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     );
 
     // Derive the submit_vaas account PDAs.
-    let (digest_pda, _digest_bump) = derive_digest_pda(
-        &ga_program_id,
-        vaa.emitter_chain,
-        &vaa.emitter_address,
-        vaa.sequence,
-    );
     let (noreplay_authority, _na_bump) = derive_noreplay_authority_pda(&ga_program_id);
     let namespace = build_namespace(vaa.emitter_chain, &vaa.emitter_address);
     let (bitmap_pda, bitmap_bump) =
@@ -379,7 +360,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     let (dest_account_pda, _dst_bump) =
         derive_account_pda(&ga_program_id, recipient_chain, token_chain, &token_address);
     eprintln!(
-        "[submit-vaas-e2e] digest_pda={digest_pda} noreplay_authority={noreplay_authority} \
+        "[submit-vaas-e2e] noreplay_authority={noreplay_authority} \
          bitmap_pda={bitmap_pda} bitmap_bump={bitmap_bump} src_pda={source_account_pda} \
          dst_pda={dest_account_pda}"
     );
@@ -416,7 +397,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
             AccountMeta::new_readonly(shim_program_id, false),
             AccountMeta::new_readonly(gs_pda, false),
             AccountMeta::new_readonly(guardian_signatures_kp.pubkey(), false),
-            AccountMeta::new(digest_pda, false),
             AccountMeta::new(bitmap_pda, false),
             AccountMeta::new_readonly(NOREPLAY_PROGRAM_ID, false),
             AccountMeta::new_readonly(noreplay_authority, false),
@@ -456,21 +436,9 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         "bit {bit_index} set in noreplay bitmap after submit_vaas"
     );
 
-    // DigestAccount opened with the VAA's metadata.
-    let digest_after = rpc
-        .get_account(&digest_pda)
-        .expect("digest PDA exists after submit_vaas");
-    assert_eq!(digest_after.owner, ga_program_id);
-    assert_eq!(digest_after.data.len(), DigestAccountLayout::LEN);
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest_after.data);
-    assert_eq!(stored.digest, vaa.digest);
-    assert_eq!(stored.chain, vaa.emitter_chain);
-    assert_eq!(stored.emitter, vaa.emitter_address);
-    assert_eq!(stored.sequence, vaa.sequence);
-    assert_eq!(
-        stored.guardian_set_index, 0,
-        "submit_vaas records guardian_set_index=0 sentinel"
-    );
+    // The canonical digest record is emitted via `sol_log_data`; log-payload
+    // inspection over `meta.logMessages` is a follow-up (the program-level
+    // emission is unit-covered in `instructions/commit_log.rs`).
 
     // Source Account: debited by `amount` (chain != token_chain ⇒ wrapped burn).
     let src_after = rpc

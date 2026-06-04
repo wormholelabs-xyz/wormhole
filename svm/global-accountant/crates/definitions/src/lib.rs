@@ -15,33 +15,27 @@ pub type Pubkey = [u8; 32];
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
-    /// Test-only direct DigestAccount open, gated behind the
-    /// `test-only-open-digest` feature; production rejects it with `NotEnabled`.
-    TestOnlyOpenDigest = 0,
-    CloseDigest = 1,
-    SubmitObservations = 2,
-    ClosePending = 3,
+    SubmitObservations = 0,
+    ClosePending = 1,
     /// Permissionless signed-VAA backfill via the Verify VAA Shim CPI; applies
     /// balance effects directly, bypassing the quorum tracker.
-    SubmitVaas = 4,
+    SubmitVaas = 2,
     /// Token Bridge `RegisterChain` governance handler: verifies the VAA and
     /// initialises/updates the canonical `ChainRegistration` PDA.
-    RegisterChain = 5,
+    RegisterChain = 3,
     /// Accountant `ModifyBalance` governance handler: verifies the VAA and
     /// applies an Add/Subtract delta to the canonical `BalanceAccount` PDA.
-    ModifyBalance = 6,
+    ModifyBalance = 4,
 }
 
 impl Instruction {
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => Some(Self::TestOnlyOpenDigest),
-            1 => Some(Self::CloseDigest),
-            2 => Some(Self::SubmitObservations),
-            3 => Some(Self::ClosePending),
-            4 => Some(Self::SubmitVaas),
-            5 => Some(Self::RegisterChain),
-            6 => Some(Self::ModifyBalance),
+            0 => Some(Self::SubmitObservations),
+            1 => Some(Self::ClosePending),
+            2 => Some(Self::SubmitVaas),
+            3 => Some(Self::RegisterChain),
+            4 => Some(Self::ModifyBalance),
             _ => None,
         }
     }
@@ -130,8 +124,31 @@ impl From<GlobalAccountantError> for u32 {
     }
 }
 
-/// PDA seed prefix for [`DigestAccountLayout`].
-pub const DIGEST_SEED_PREFIX: &[u8] = b"digest";
+/// 8-byte tag prefixing every accountant commit log entry. Off-chain indexers
+/// filter program logs for this prefix to find the canonical
+/// `(chain, emitter, sequence, digest, guardian_set_index)` record emitted on
+/// the quorum-completing branch of `submit_observations` and on every
+/// successful `submit_vaas`.
+///
+/// The log payload layout (86 bytes total) is:
+///
+/// | offset | size | field                              |
+/// |--------|------|------------------------------------|
+/// | 0      | 8    | `ACCOUNTANT_DIGEST_LOG_TAG`        |
+/// | 8      | 2    | chain (big endian)                 |
+/// | 10     | 32   | emitter                            |
+/// | 42     | 8    | sequence (big endian)              |
+/// | 50     | 32   | digest                             |
+/// | 82     | 4    | guardian_set_index (little endian) |
+///
+/// `guardian_set_index` is the set that reached quorum on the observations
+/// path; `submit_vaas` records the sentinel `0` (the Shim accepts any
+/// currently-active set, so no single index meaningfully describes the
+/// authorisation).
+pub const ACCOUNTANT_DIGEST_LOG_TAG: [u8; 8] = *b"ACCDGST\0";
+
+/// Total byte length of an emitted commit log entry (tag + payload).
+pub const ACCOUNTANT_DIGEST_LOG_LEN: usize = 8 + 2 + 32 + 8 + 32 + 4;
 
 /// PDA seed prefix for [`PendingObservationsLayout`]. Full tuple:
 /// `(b"pending", chain_be, emitter, sequence_be, digest)`. The digest suffix
@@ -328,41 +345,6 @@ impl Ord for Uint256 {
         self.0.cmp(&other.0)
     }
 }
-
-/// Zero-copy layout for a `DigestAccount` PDA. Field ordering keeps natural
-/// alignment without padding.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct DigestAccountLayout {
-    pub emitter: Pubkey,
-    pub digest: [u8; 32],
-    pub payer: Pubkey,
-    pub sequence: u64,
-    pub quorum_at_slot: u64,
-    pub guardian_set_index: u32,
-    pub chain: u16,
-    /// Reserved; zero-initialised on open. Crate-private so callers go through
-    /// `Zeroable`.
-    pub(crate) _padding: [u8; 2],
-}
-
-impl DigestAccountLayout {
-    /// Byte length of the layout (also the rent-paying allocation size).
-    pub const LEN: usize = core::mem::size_of::<Self>();
-}
-
-// Compile-time pins against layout drift.
-const _: () = {
-    use core::mem::offset_of;
-    assert!(offset_of!(DigestAccountLayout, emitter) == 0);
-    assert!(offset_of!(DigestAccountLayout, digest) == 32);
-    assert!(offset_of!(DigestAccountLayout, payer) == 64);
-    assert!(offset_of!(DigestAccountLayout, sequence) == 96);
-    assert!(offset_of!(DigestAccountLayout, quorum_at_slot) == 104);
-    assert!(offset_of!(DigestAccountLayout, guardian_set_index) == 112);
-    assert!(offset_of!(DigestAccountLayout, chain) == 116);
-    assert!(DigestAccountLayout::LEN == 120);
-};
 
 /// Zero-copy layout for a per-`(chain, emitter, sequence)` pending-quorum PDA.
 /// On-disk size is **76 bytes** (4-byte alignment, explicit tail padding).
@@ -719,25 +701,6 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn digest_layout_is_pod_friendly() {
-        // Round-trip through bytes.
-        let original = DigestAccountLayout {
-            emitter: [1u8; 32],
-            digest: [2u8; 32],
-            payer: [3u8; 32],
-            sequence: 0xdead_beef_cafe_babe,
-            quorum_at_slot: 42,
-            guardian_set_index: 7,
-            chain: 1,
-            _padding: [0; 2],
-        };
-        let bytes = bytemuck::bytes_of(&original);
-        let copy: &DigestAccountLayout = bytemuck::from_bytes(bytes);
-        assert_eq!(&original, copy);
-        assert_eq!(DigestAccountLayout::LEN, bytes.len());
-    }
 
     // ---- Uint256 unit tests ----
 

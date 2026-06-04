@@ -2,18 +2,17 @@
 //!
 //! Driven against a Mollusk instance with the real `solana_noreplay.so` and
 //! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
-//! `common::mollusk_fixtures`). The `test-only-open-digest` feature exposes the
-//! `TestOnlyOpenDigest` arm.
+//! `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
+        BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX,
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, NOREPLAY_AUTHORITY_SEED_PREFIX,
+        NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
+        NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -34,8 +33,10 @@ use common::mollusk_fixtures::{
 const PROGRAM_NAME: &str = "global_accountant";
 const GUARDIAN_COUNT: usize = 19;
 const QUORUM: u8 = 13;
-/// Guardian set index baked into the fixtures. `submit_vaas` records `0` in
-/// `DigestAccountLayout::guardian_set_index` as a "from-Shim" sentinel.
+/// Guardian set index baked into the fixtures. `submit_vaas` records the
+/// sentinel `0` in the commit log's `guardian_set_index` slot (the Shim
+/// accepts any currently-active set, so no single index meaningfully
+/// describes the authorisation).
 const GUARDIAN_SET_INDEX: u32 = 4;
 
 fn program_id() -> Pubkey {
@@ -62,15 +63,6 @@ fn shim_program_id() -> Pubkey {
 // ============================================================================
 // PDA derivation helpers
 // ============================================================================
-
-fn derive_digest_pda(chain: u16, emitter: &[u8; 32], sequence: u64) -> (Pubkey, u8) {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(
-        &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be],
-        &program_id(),
-    )
-}
 
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
@@ -257,7 +249,6 @@ struct Scenario {
     digest: [u8; 32],
     guardian_set_bump: u8,
     submitter: Pubkey,
-    digest_pda: Pubkey,
     guardian_set_pubkey: Pubkey,
     guardian_signatures_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
@@ -281,7 +272,6 @@ impl Scenario {
         let digest = double_keccak256_host(&body);
 
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
-        let (digest_pda, _digest_bump) = derive_digest_pda(chain, &emitter, sequence);
         let (noreplay_authority_pubkey, _) =
             Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
@@ -299,12 +289,11 @@ impl Scenario {
             digest,
             guardian_set_bump,
             submitter,
-            digest_pda,
             guardian_set_pubkey,
             guardian_signatures_pubkey: Pubkey::new_from_array([0xC5u8; 32]),
             noreplay_bucket_pubkey,
             noreplay_authority_pubkey,
-            // Sentinel: Attest payloads never touch slots 8/9.
+            // Sentinel: Attest payloads never touch slots 7/8.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
             chain_registration_pubkey,
@@ -330,8 +319,6 @@ impl Scenario {
             recipient_chain,
         );
         base.digest = double_keccak256_host(&base.body);
-        let (digest_pda, _) = derive_digest_pda(base.chain, &base.emitter, base.sequence);
-        base.digest_pda = digest_pda;
         let (src, _) = derive_account_pda(base.chain, token_chain, &token_address);
         let (dst, _) = derive_account_pda(recipient_chain, token_chain, &token_address);
         base.source_account_pubkey = src;
@@ -345,7 +332,6 @@ impl Scenario {
             AccountMeta::new_readonly(shim_program_id(), false),
             AccountMeta::new_readonly(self.guardian_set_pubkey, false),
             AccountMeta::new_readonly(self.guardian_signatures_pubkey, false),
-            AccountMeta::new(self.digest_pda, false),
             AccountMeta::new(self.noreplay_bucket_pubkey, false),
             AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
             AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
@@ -368,7 +354,6 @@ impl Scenario {
                 self.guardian_signatures_pubkey,
                 real_guardian_signatures_account(&self.digest, &self.submitter, &self.guardians),
             ),
-            (self.digest_pda, uninitialised_pda_account()),
             (self.noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority_pubkey, system_owned_account(0)),
@@ -382,7 +367,7 @@ impl Scenario {
             accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
         }
         accounts.push(keyed_account_for_system_program());
-        // Slot 11: chain-registration PDA pre-populated with (chain, emitter).
+        // Slot 10: chain-registration PDA pre-populated with (chain, emitter).
         accounts.push((
             self.chain_registration_pubkey,
             chain_registration_account(self.chain, &self.emitter),
@@ -470,23 +455,9 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_marked(bucket, scenario.sequence);
 
-    // DigestAccount opened with the expected digest.
-    let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
-    assert_eq!(
-        digest.owner,
-        program_id(),
-        "digest PDA owned by program after submit_vaas"
-    );
-    assert_eq!(digest.data.len(), DigestAccountLayout::LEN);
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
-    assert_eq!(stored.digest, scenario.digest);
-    assert_eq!(stored.chain, scenario.chain);
-    assert_eq!(stored.emitter, scenario.emitter);
-    assert_eq!(stored.sequence, scenario.sequence);
-    assert_eq!(
-        stored.guardian_set_index, 0,
-        "submit_vaas records gsi=0 sentinel"
-    );
+    // The canonical digest record is emitted via `sol_log_data` rather than a
+    // PDA. Mollusk's `InstructionResult` does not expose program logs, so log
+    // content is verified in the surfpool e2e suite.
 
     // Source (native): credit.
     let src = find_account(&result.resulting_accounts, &scenario.source_account_pubkey);
@@ -530,7 +501,7 @@ fn submit_vaas_rejects_duplicate_after_noreplay_set() {
     }
 }
 
-/// Attest payload commits (NoReplay + DigestAccount) but touches neither
+/// Attest payload commits (NoReplay + canonical log emit) but touches neither
 /// Account PDA.
 #[test]
 fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
@@ -544,13 +515,10 @@ fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
         result.program_result
     );
 
-    // NoReplay flipped, DigestAccount opened.
+    // NoReplay flipped. Commit log emission is covered by the surfpool e2e
+    // suite (mollusk does not expose program logs).
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_marked(bucket, scenario.sequence);
-    let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
-    assert_eq!(digest.owner, program_id());
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
-    assert_eq!(stored.digest, scenario.digest);
 
     // Sentinel slots stay system-owned (program never touched them).
     assert_eq!(
@@ -591,15 +559,10 @@ fn submit_vaas_with_unknown_payload_rejects_and_preserves_replay_slot() {
         other => panic!("expected Failure(UnknownTokenBridgePayload), got {other:?}"),
     }
 
-    // Replay slot unconsumed, no DigestAccount breadcrumb.
+    // Replay slot unconsumed (the commit-log emit is similarly rolled back by
+    // tx-level atomicity; mollusk does not expose program logs for inspection).
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_unmarked(bucket);
-    let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
-    assert_eq!(
-        digest.owner,
-        system_program_id(),
-        "digest PDA must stay uninitialised after rejection"
-    );
 }
 
 /// A pre-marked NoReplay bucket rejects with `AlreadyAccounted` before any
@@ -628,12 +591,7 @@ fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
         }
         other => panic!("expected Failure(AlreadyAccounted), got {other:?}"),
     }
-    // DigestAccount must not have opened.
-    let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
-    assert!(
-        digest.data.is_empty(),
-        "DigestAccount must not open when NoReplay short-circuits"
-    );
+    // The commit-log emit never runs once the NoReplay pre-check short-circuits.
 }
 
 /// A fresh destination Account PDA lazy-inits under the program.
@@ -663,7 +621,7 @@ fn submit_vaas_lazy_inits_destination_account() {
 }
 
 /// A wrapped-source debit exceeding the balance surfaces `BalanceUnderflow`
-/// and reverts the whole tx (NoReplay unset, DigestAccount unopened).
+/// and reverts the whole tx (NoReplay unset).
 #[test]
 fn submit_vaas_with_balance_underflow_reverts() {
     let mollusk = mollusk();
@@ -682,8 +640,6 @@ fn submit_vaas_with_balance_underflow_reverts() {
         2,
     );
     scenario.digest = double_keccak256_host(&scenario.body);
-    let (digest_pda, _) = derive_digest_pda(scenario.chain, &scenario.emitter, scenario.sequence);
-    scenario.digest_pda = digest_pda;
     let (src, _) = derive_account_pda(1, 2, &token_address);
     let (dst, _) = derive_account_pda(2, 2, &token_address);
     // Re-derive registration PDA and noreplay bucket for the new chain.
@@ -710,11 +666,9 @@ fn submit_vaas_with_balance_underflow_reverts() {
         }
         other => panic!("expected Failure(BalanceUnderflow), got {other:?}"),
     }
-    // NoReplay unset, DigestAccount unopened.
+    // NoReplay unset (the commit-log emit is similarly rolled back).
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_unmarked(bucket);
-    let digest = find_account(&result.resulting_accounts, &scenario.digest_pda);
-    assert!(digest.data.is_empty());
 }
 
 /// A VAA whose emitter_chain has no registration PDA is refused with

@@ -1,18 +1,17 @@
 //! Integration tests for `submit_observations` + `close_pending`.
 //!
 //! Driven against a Mollusk instance with the real `solana_noreplay.so` loaded
-//! at the canonical program ID (see `common::mollusk_fixtures`). The
-//! `test-only-open-digest` feature exposes the `TestOnlyOpenDigest` arm.
+//! at the canonical program ID (see `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, ChainRegistrationLayout, DigestAccountLayout, GlobalAccountantError,
+        BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DIGEST_SEED_PREFIX,
-        MAX_QUORUM_BRANCH_CU, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
-        NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, MAX_QUORUM_BRANCH_CU,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -59,15 +58,6 @@ fn derive_pending_pda(
             &sequence_be,
             digest,
         ],
-        &program_id(),
-    )
-}
-
-fn derive_digest_pda(chain: u16, emitter: &[u8; 32], sequence: u64) -> (Pubkey, u8) {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(
-        &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be],
         &program_id(),
     )
 }
@@ -337,18 +327,17 @@ struct Scenario {
     guardians: Vec<Guardian>,
     submitter: Pubkey,
     pending_pda: Pubkey,
-    digest_pda: Pubkey,
     guardian_set_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
     noreplay_program_pubkey: Pubkey,
     /// Canonical `noreplay-authority` PDA.
     noreplay_authority_pubkey: Pubkey,
-    /// Source-chain Account PDA (slot 8). Attest scenarios use the
+    /// Source-chain Account PDA (slot 7). Attest scenarios use the
     /// noreplay-authority pubkey as a sentinel since the slot is untouched.
     source_account_pubkey: Pubkey,
-    /// Destination-chain Account PDA (slot 9). Same semantics as `source`.
+    /// Destination-chain Account PDA (slot 8). Same semantics as `source`.
     dest_account_pubkey: Pubkey,
-    /// Chain-registration PDA (slot 11), default pre-populated `chain -> emitter`.
+    /// Chain-registration PDA (slot 10), default pre-populated `chain -> emitter`.
     /// Negative tests override it to drive `MissingChainRegistration` /
     /// `UnregisteredEmitter`.
     chain_registration_pubkey: Pubkey,
@@ -367,7 +356,6 @@ impl Scenario {
         let guardians = make_guardians(guardian_count, seed);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let (pending_pda, _) = derive_pending_pda(chain, &emitter, sequence, &digest);
-        let (digest_pda, _) = derive_digest_pda(chain, &emitter, sequence);
         let (noreplay_authority_pubkey, _) =
             Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
@@ -384,7 +372,6 @@ impl Scenario {
             guardians,
             submitter,
             pending_pda,
-            digest_pda,
             guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
             noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
@@ -398,7 +385,7 @@ impl Scenario {
     }
 
     /// Swap the Attest body for a Transfer body and re-derive the digest,
-    /// pending/digest PDAs, and source/dest Account PDAs.
+    /// pending PDA, and source/dest Account PDAs.
     fn with_transfer_body(
         guardian_count: usize,
         gsi: u32,
@@ -458,8 +445,8 @@ impl Scenario {
         mollusk.process_instruction(&ix, &starting_accounts)
     }
 
-    /// 12-entry account-meta list. Slot 10 is rent_recipient (= submitter),
-    /// slot 11 the chain-registration PDA. Multi-submitter and
+    /// 11-entry account-meta list. Slot 9 is rent_recipient (= submitter),
+    /// slot 10 the chain-registration PDA. Multi-submitter and
     /// registration-negative tests build their own meta vec inline.
     fn account_metas(&self) -> Vec<AccountMeta> {
         vec![
@@ -467,7 +454,6 @@ impl Scenario {
             AccountMeta::new(self.pending_pda, false),
             AccountMeta::new_readonly(self.guardian_set_pubkey, false),
             AccountMeta::new(self.noreplay_bucket_pubkey, false),
-            AccountMeta::new(self.digest_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(self.noreplay_program_pubkey, false),
             AccountMeta::new_readonly(self.noreplay_authority_pubkey, false),
@@ -478,7 +464,7 @@ impl Scenario {
         ]
     }
 
-    /// Initial account list with all PDAs uninitialised. Slots 8/9 are
+    /// Initial account list with all PDAs uninitialised. Slots 7/8 are
     /// system-owned + empty so the lazy-init path fires on Transfer quorum.
     fn initial_accounts(&self) -> Vec<(Pubkey, Account)> {
         let mut accounts = vec![
@@ -489,12 +475,11 @@ impl Scenario {
                 guardian_set_account(self.guardian_set_index, &self.guardian_keys(), 0, 0),
             ),
             (self.noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
-            (self.digest_pda, uninitialised_pda_account()),
             keyed_account_for_system_program(),
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority_pubkey, system_owned_account(0)),
         ];
-        // Slots 8/9: append only when the sentinel hasn't collapsed them onto
+        // Slots 7/8: append only when the sentinel hasn't collapsed them onto
         // the noreplay-authority pubkey (Attest scenario).
         if self.source_account_pubkey != self.noreplay_authority_pubkey {
             accounts.push((self.source_account_pubkey, uninitialised_pda_account()));
@@ -504,7 +489,7 @@ impl Scenario {
         {
             accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
         }
-        // Slot 11: chain-registration PDA pre-populated with the scenario emitter.
+        // Slot 10: chain-registration PDA pre-populated with the scenario emitter.
         accounts.push((
             self.chain_registration_pubkey,
             chain_registration_account(self.chain, &self.emitter),
@@ -570,13 +555,6 @@ fn submit_first_observation_creates_pending_pda() {
         "submitter is the recorded payer"
     );
 
-    // No quorum: digest PDA untouched.
-    let digest = find_account(&accounts, &scenario.digest_pda);
-    assert!(
-        digest.owner == system_program_id() && digest.data.is_empty(),
-        "digest PDA must not be opened before quorum reach"
-    );
-
     // No quorum: NoReplay bucket stays in lazy-create entry state.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
@@ -607,9 +585,7 @@ fn submit_12_observations_accumulates_without_commit() {
         "bits 0..12 set in low-to-high order"
     );
 
-    // Sub-quorum: digest PDA uninit, NoReplay unmarked.
-    let digest = find_account(&accounts, &scenario.digest_pda);
-    assert!(digest.data.is_empty(), "digest PDA untouched at 12/19");
+    // Sub-quorum: NoReplay unmarked.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -622,7 +598,7 @@ fn submit_12_observations_accumulates_without_commit() {
     );
 }
 
-/// 13th observation reaches quorum: pending closes, digest opens, NoReplay flips.
+/// 13th observation reaches quorum: pending closes, commit-log emitted, NoReplay flips.
 #[test]
 fn submit_13th_observation_reaches_quorum_and_commits() {
     let mollusk = mollusk();
@@ -647,29 +623,10 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
         pending.data.len()
     );
 
-    // DigestAccount opened with the expected fields.
-    let digest = find_account(&accounts, &scenario.digest_pda);
-    assert_eq!(
-        digest.owner,
-        program_id(),
-        "digest PDA owned by program after quorum"
-    );
-    assert_eq!(
-        digest.data.len(),
-        DigestAccountLayout::LEN,
-        "digest PDA allocated to full layout length"
-    );
-    let stored: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
-    assert_eq!(stored.digest, scenario.digest);
-    assert_eq!(stored.chain, scenario.chain);
-    assert_eq!(stored.emitter, scenario.emitter);
-    assert_eq!(stored.sequence, scenario.sequence);
-    assert_eq!(stored.guardian_set_index, scenario.guardian_set_index);
-    assert_eq!(
-        stored.payer,
-        scenario.submitter.to_bytes(),
-        "digest payer = submitter of the quorum-completing tx"
-    );
+    // The canonical commit log is emitted on the quorum-completing branch via
+    // `sol_log_data` (see `instructions/commit_log.rs`). Mollusk's
+    // `InstructionResult` does not expose program logs, so log content is
+    // verified in the surfpool e2e suite (`tx.meta.logMessages`).
 
     // NoReplay flipped: bitmap allocated, owned by noreplay, bit at
     // `sequence % 1024` set.
@@ -733,7 +690,6 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         AccountMeta::new(scenario.pending_pda, false),
         AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
         AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
-        AccountMeta::new(scenario.digest_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
         AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
         AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
@@ -762,7 +718,6 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         AccountMeta::new(scenario.pending_pda, false),
         AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
         AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
-        AccountMeta::new(scenario.digest_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
         AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
         AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
@@ -780,19 +735,16 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         r_correct.program_result
     );
 
-    // Refund routes to alice (recorded payer); digest records bob as its payer.
+    // Refund routes to alice (recorded payer). The commit log emit's
+    // payer-of-record is now implicit in the submitting tx's fee payer rather
+    // than a field on the (removed) DigestAccount PDA; the log content itself
+    // is verified by the surfpool e2e suite, which has access to
+    // `tx.meta.logMessages` (mollusk's `InstructionResult` does not expose them).
     let alice_post = find_account(&r_correct.resulting_accounts, &alice);
     assert_eq!(
         alice_post.lamports,
         alice_lamports_pre + pending_lamports,
         "alice (recorded payer) received the pending-PDA rent refund"
-    );
-    let digest = find_account(&r_correct.resulting_accounts, &scenario.digest_pda);
-    let digest_layout: &DigestAccountLayout = bytemuck::from_bytes(&digest.data);
-    assert_eq!(
-        digest_layout.payer,
-        bob.to_bytes(),
-        "digest_pda recorded the quorum-completing submitter (bob) as its payer"
     );
 }
 
@@ -832,7 +784,6 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         body_pending_pda, attacker_pending_pda,
         "test fixture must drive distinct pending PDA addresses"
     );
-    let (body_digest_pda, _) = derive_digest_pda(body_chain, &body_emitter, body_sequence);
 
     let submitter = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
@@ -861,7 +812,6 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
             guardian_set_account(4, &guardian_keys, 0, 0),
         ),
         (noreplay_bucket_pubkey, noreplay_bucket_unmarked()),
-        (body_digest_pda, uninitialised_pda_account()),
         keyed_account_for_system_program(),
         keyed_account_for_noreplay_program(),
         (noreplay_authority_pubkey, system_owned_account(0)),
@@ -876,7 +826,6 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
         AccountMeta::new(attacker_pending_pda, false),
         AccountMeta::new_readonly(guardian_set_pubkey, false),
         AccountMeta::new(noreplay_bucket_pubkey, false),
-        AccountMeta::new(body_digest_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
         AccountMeta::new_readonly(noreplay_program_pubkey, false),
         AccountMeta::new_readonly(noreplay_authority_pubkey, false),
@@ -936,7 +885,6 @@ fn submit_observations_rejects_unregistered_chain() {
         AccountMeta::new(scenario.pending_pda, false),
         AccountMeta::new_readonly(scenario.guardian_set_pubkey, false),
         AccountMeta::new(scenario.noreplay_bucket_pubkey, false),
-        AccountMeta::new(scenario.digest_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
         AccountMeta::new_readonly(scenario.noreplay_program_pubkey, false),
         AccountMeta::new_readonly(scenario.noreplay_authority_pubkey, false),
@@ -1539,17 +1487,9 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
         NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES
     );
 
-    let digest_acc = find_account(&accounts, &scenario.digest_pda);
-    assert_eq!(
-        digest_acc.owner,
-        program_id(),
-        "DigestAccount opened after D2 quorum reach"
-    );
-    let digest_layout: &DigestAccountLayout = bytemuck::from_bytes(&digest_acc.data);
-    assert_eq!(
-        digest_layout.digest, alternate_digest,
-        "DigestAccount records the winning digest D2 (not D1)"
-    );
+    // The winning digest (D2) is emitted via `sol_log_data` on the
+    // quorum-completing branch; log content is verified by the surfpool e2e
+    // suite (mollusk does not expose `program_logs`).
 
     let d2_post = find_account(&accounts, &d2_pending_pda);
     assert_eq!(d2_post.lamports, 0, "D2 pending PDA drained on commit");
@@ -1995,8 +1935,6 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         &scenario.digest,
     );
     scenario.pending_pda = pending_pda;
-    let (digest_pda, _) = derive_digest_pda(scenario.chain, &scenario.emitter, scenario.sequence);
-    scenario.digest_pda = digest_pda;
     let (src, _) = derive_account_pda(1, 2, &token_address);
     let (dst, _) = derive_account_pda(2, 2, &token_address);
     // Re-derive registration PDA and noreplay bucket for the new chain.
@@ -2030,7 +1968,9 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         }
         other => panic!("expected Failure(BalanceUnderflow), got {other:?}"),
     }
-    // Tx rolled back: bucket and DigestAccount stay untouched.
+    // Tx rolled back: bucket stays untouched (the commit log is similarly
+    // unwound by tx-level atomicity, but mollusk does not expose program logs
+    // for inspection here — surfpool e2e covers the positive log assertion).
     let bucket = find_account(&r.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -2040,11 +1980,6 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     assert!(
         bucket.data.is_empty(),
         "NoReplay must not flip on failed quorum"
-    );
-    let digest = find_account(&r.resulting_accounts, &scenario.digest_pda);
-    assert!(
-        digest.data.is_empty(),
-        "DigestAccount must not open on failed quorum"
     );
 }
 

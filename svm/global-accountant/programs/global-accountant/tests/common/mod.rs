@@ -388,7 +388,8 @@ pub fn deploy_program(rpc_url: &str, program_id: &Pubkey, so_bytes: &[u8]) {
 /// | ...    | rest  | payload                                    |
 ///
 /// `digest` is `keccak256(keccak256(body))` — what the Shim's `VerifyHash`
-/// recovers against and what `close_digest` stores in `DigestAccountLayout`.
+/// recovers against and what the canonical commit log records on the
+/// quorum-completing branch.
 #[derive(Clone)]
 pub struct ParsedVaa {
     /// Raw VAA bytes, kept so callers can re-slice without copying.

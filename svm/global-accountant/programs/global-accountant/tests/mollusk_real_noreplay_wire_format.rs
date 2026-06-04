@@ -13,8 +13,8 @@
 use {
     global_accountant_definitions::{
         ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
-        DIGEST_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
+        NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -64,15 +64,6 @@ fn derive_pending_pda(
             &sequence_be,
             digest,
         ],
-        &program_id(),
-    )
-}
-
-fn derive_digest_pda(chain: u16, emitter: &[u8; 32], sequence: u64) -> (Pubkey, u8) {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(
-        &[DIGEST_SEED_PREFIX, &chain_be, emitter, &sequence_be],
         &program_id(),
     )
 }
@@ -172,7 +163,6 @@ struct Scenario {
     body: Vec<u8>,
     digest: [u8; 32],
     pending_pda: Pubkey,
-    digest_pda: Pubkey,
     noreplay_authority: Pubkey,
     noreplay_bucket: Pubkey,
     guardian_set_pubkey: Pubkey,
@@ -189,7 +179,6 @@ impl Scenario {
         let digest = double_keccak256_host(&body);
         // Only PDA addresses feed the metas; the program derives bumps on-chain.
         let (pending_pda, _) = derive_pending_pda(CHAIN, &emitter, SEQUENCE, &digest);
-        let (digest_pda, _) = derive_digest_pda(CHAIN, &emitter, SEQUENCE);
         let (noreplay_authority, _) =
             Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let noreplay_bucket =
@@ -205,7 +194,6 @@ impl Scenario {
             body,
             digest,
             pending_pda,
-            digest_pda,
             noreplay_authority,
             noreplay_bucket,
             guardian_set_pubkey,
@@ -221,7 +209,6 @@ impl Scenario {
             AccountMeta::new(self.pending_pda, false),
             AccountMeta::new_readonly(self.guardian_set_pubkey, false),
             AccountMeta::new(self.noreplay_bucket, false),
-            AccountMeta::new(self.digest_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
             AccountMeta::new_readonly(self.noreplay_authority, false),
@@ -250,13 +237,12 @@ impl Scenario {
             ),
             // Bucket starts system-owned + empty; the CPI allocates on MarkUsed.
             (self.noreplay_bucket, uninit_pda_account()),
-            (self.digest_pda, uninit_pda_account()),
             keyed_account_for_system_program(),
-            // Slot 6: noreplay program, needs a Loader-V3 executable entry since
+            // Slot 5: noreplay program, needs a Loader-V3 executable entry since
             // process_instruction takes the account list verbatim.
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority, system_owned_account(0)),
-            // Slots 8/9: attest payload ⇒ never touched.
+            // Slots 7/8: attest payload ⇒ never touched.
             (
                 self.chain_registration_pubkey,
                 chain_registration_account(CHAIN, &self.emitter),

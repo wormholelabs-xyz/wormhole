@@ -17,13 +17,6 @@ crate-type = ["cdylib", "lib"]
 # or client tooling).
 default = []
 bpf-entrypoint = []
-# Expose `Instruction::OpenDigest` in the dispatch table. In production
-# `open_digest` is only reachable from inside `submit_observations` after the
-# NoReplay check; until that lands, a public `open_digest` entrypoint lets any
-# caller squat the PDA for any `(chain, emitter, sequence)`. The feature gate
-# keeps the symbol out of production builds. Tests turn it on; `just build-prod`
-# leaves it off.
-test-only-open-digest = []
 
 [dependencies]
 bytemuck.workspace = true
@@ -51,10 +44,7 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 # `target_os = "solana"` OR the `curve25519` feature). On-chain the syscall
 # path is unconditionally available; this is purely for `cargo test`.
 solana-address = { version = "2.6", features = ["curve25519"] }
-# Tests load the program library to expose the `TEST_ONLY_OPEN_DIGEST_ENABLED`
-# const and drive `OpenDigest` directly. `test-only-open-digest` is intentionally
-# off in production (see the program crate `[features]` block for rationale).
-global-accountant = { path = ".", features = ["test-only-open-digest"] }
+global-accountant = { path = "." }
 # Pure-Rust secp256k1. Tests sign synthetic guardian observations to populate
 # the pending bitmap and exercise the on-chain `sol_secp256k1_recover` path.
 # Already in the workspace lock via mollusk's transitive deps; pinning the

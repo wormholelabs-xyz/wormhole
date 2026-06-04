@@ -17,9 +17,7 @@ use crate::definitions::{
     VAA_BODY_HEADER_LEN,
 };
 use crate::err;
-use crate::instructions::{
-    noreplay, open_digest::open_digest_inner, shim, transfer::apply_transfer,
-};
+use crate::instructions::{commit_log, noreplay, shim, transfer::apply_transfer};
 use crate::state::chain_registration;
 
 /// Wire format for the `submit_vaas` instruction data (after the 1-byte
@@ -55,17 +53,20 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //   1. `[]`              Verify VAA Shim program (CPI target).
     //   2. `[]`              Core Bridge `GuardianSet` PDA.
     //   3. `[]`              `GuardianSignatures` PDA (posted via the Shim's `PostSignatures`).
-    //   4. `[WRITE]`         DigestAccount PDA — opens on commit.
-    //   5. `[WRITE]`         NoReplay bitmap PDA — pre-check then CPI on commit.
-    //   6. `[]`              NoReplay program (CPI target).
-    //   7. `[]`              NoReplay authority PDA owned by this program.
-    //   8. `[WRITE]`         source-chain Account PDA. Untouched for non-Transfer
+    //   4. `[WRITE]`         NoReplay bitmap PDA — pre-check then CPI on commit.
+    //   5. `[]`              NoReplay program (CPI target).
+    //   6. `[]`              NoReplay authority PDA owned by this program.
+    //   7. `[WRITE]`         source-chain Account PDA. Untouched for non-Transfer
     //                       payloads; sentinel acceptable.
-    //   9. `[WRITE]`         dest-chain Account PDA. Same semantics as slot 8.
-    //  10. `[]`              system program.
-    //  11. `[]`              Chain registration PDA — cross-check the body's
+    //   8. `[WRITE]`         dest-chain Account PDA. Same semantics as slot 7.
+    //   9. `[]`              system program.
+    //  10. `[]`              Chain registration PDA — cross-check the body's
     //                       `(emitter_chain, emitter_address)`.
-    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, digest_pda, noreplay_bucket, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
+    //
+    // The canonical digest record is emitted via `sol_log_data` rather than
+    // stored in a PDA; off-chain indexers consume the program-log line carrying
+    // the `ACCOUNTANT_DIGEST_LOG_TAG` prefix.
+    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -122,20 +123,12 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         sequence,
     )?;
 
-    // ----- (7) Open the DigestAccount PDA -----
+    // ----- (7) Emit canonical commit log -----
     //
-    // Same breadcrumb the quorum path leaves. `guardian_set_index = 0` is a
-    // sentinel — `submit_vaas` does not pin a single set.
-    open_digest_inner(
-        program_id,
-        submitter,
-        digest_pda,
-        chain.to_be_bytes(),
-        emitter,
-        sequence.to_be_bytes(),
-        digest,
-        0,
-    )?;
+    // Same breadcrumb the quorum path leaves, now via `sol_log_data` rather
+    // than a PDA. `guardian_set_index = 0` is a sentinel — `submit_vaas` does
+    // not pin a single set (the Shim accepts any currently-active one).
+    commit_log::emit(chain, &emitter, sequence, &digest, 0);
 
     // ----- (8) Parse Token Bridge payload + apply balance work -----
     //
