@@ -67,7 +67,7 @@ fn open_digest_ix_data(
     // No bump byte travels in the wire: `open_digest_inner` derives the
     // canonical bump on-chain via `find_program_address`.
     let mut data = Vec::with_capacity(1 + 78);
-    data.push(IxDiscriminator::OpenDigest as u8);
+    data.push(IxDiscriminator::TestOnlyOpenDigest as u8);
     data.extend_from_slice(&chain.to_be_bytes());
     data.extend_from_slice(emitter);
     data.extend_from_slice(&sequence.to_be_bytes());
@@ -634,15 +634,15 @@ fn digest_layout_offsets_pinned() {
     assert_eq!(DigestAccountLayout::LEN, 120);
 }
 
-/// Production builds gate `open_digest` behind the `test-only-open-digest`
-/// Cargo feature. The dispatch site short-circuits the `Instruction::OpenDigest`
-/// arm to `NotEnabled` when the feature is off; the on-chain `.so` shipped to
-/// mainnet must be built with the feature off, while the `.so` mollusk loads
-/// for these tests must be built with it on.
+/// Production builds gate `test_only_open_digest` behind the `test-only-open-digest`
+/// Cargo feature. The dispatch site short-circuits the
+/// `Instruction::TestOnlyOpenDigest` arm to `NotEnabled` when the feature is
+/// off; the on-chain `.so` shipped to mainnet must be built with the feature
+/// off, while the `.so` mollusk loads for these tests must be built with it on.
 ///
 /// We pin both sides by reading a `pub const` exported from the program crate
 /// that mirrors `cfg!(feature = "test-only-open-digest")` from inside the
-/// program. A negative test ("OpenDigest discriminator returns NotEnabled in a
+/// program. A negative test ("TestOnlyOpenDigest discriminator returns NotEnabled in a
 /// prod build") would need a second `.so` and lives in the `just build-prod`
 /// pipeline instead — that target additionally fails on `close_digest`'s
 /// mock-vaa `compile_error!`, so a successful prod build is unreachable until

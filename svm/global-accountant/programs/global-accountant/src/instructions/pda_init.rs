@@ -1,5 +1,6 @@
-//! Shared PDA initialisation helper used by both the test-only `open_digest`
-//! and production `submit_observations` flows.
+//! Shared PDA initialisation helper used by `open_digest::open_digest_inner`
+//! (and therefore every DigestAccount-open path) and by
+//! `submit_observations`'s pending-PDA allocation.
 //!
 //! Defends against the dust-DoS grief vector: an attacker can
 //! `system_program::transfer(1)` to the canonical PDA address before the

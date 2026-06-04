@@ -78,7 +78,7 @@ fn open_digest_ix_data(
     // No bump byte travels in the wire: `open_digest_inner` derives the
     // canonical bump on-chain via `find_program_address`.
     let mut data = Vec::with_capacity(1 + 78);
-    data.push(IxDiscriminator::OpenDigest as u8);
+    data.push(IxDiscriminator::TestOnlyOpenDigest as u8);
     data.extend_from_slice(&chain.to_be_bytes());
     data.extend_from_slice(emitter);
     data.extend_from_slice(&sequence.to_be_bytes());

@@ -22,18 +22,19 @@ pub fn process_instruction(
         .ok_or_else(|| err(GlobalAccountantError::InvalidInstructionData))?;
 
     match Instruction::from_u8(*discriminator) {
-        // `open_digest` is publicly callable only under
-        // `test-only-open-digest`; in production it is reachable only from
-        // inside `submit_observations` after the NoReplay check. A public
-        // `open_digest` entrypoint would let any caller squat the PDA for any
+        // `TestOnlyOpenDigest` is publicly callable only under
+        // `test-only-open-digest` (via `test_only_open_digest`); in production
+        // DigestAccounts are opened only from inside `submit_observations`
+        // and `submit_vaas`, both after the NoReplay check. A public open
+        // entrypoint would let any caller squat the PDA for any
         // `(chain, emitter, sequence)`, so the feature gate keeps the symbol
         // out of production builds.
         #[cfg(feature = "test-only-open-digest")]
-        Some(Instruction::OpenDigest) => {
-            instructions::open_digest::process(program_id, accounts, rest)
+        Some(Instruction::TestOnlyOpenDigest) => {
+            instructions::test_only_open_digest::process(program_id, accounts, rest)
         }
         #[cfg(not(feature = "test-only-open-digest"))]
-        Some(Instruction::OpenDigest) => Err(err(GlobalAccountantError::NotEnabled)),
+        Some(Instruction::TestOnlyOpenDigest) => Err(err(GlobalAccountantError::NotEnabled)),
         Some(Instruction::CloseDigest) => {
             instructions::close_digest::process(program_id, accounts, rest)
         }

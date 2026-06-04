@@ -3,7 +3,8 @@
 //! Driven against a Mollusk instance with the real `solana_noreplay.so` and
 //! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
 //! `common::mollusk_fixtures`). The `test-only-open-digest` feature exposes
-//! the `OpenDigest` arm so digest-PDA cross-checks can short-circuit setup.
+//! the `TestOnlyOpenDigest` arm so digest-PDA cross-checks can short-circuit
+//! setup.
 //!
 //! Test surface:
 //!

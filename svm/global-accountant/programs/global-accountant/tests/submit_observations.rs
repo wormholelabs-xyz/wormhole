@@ -2,8 +2,8 @@
 //!
 //! Driven against a Mollusk instance with the real `solana_noreplay.so`
 //! loaded at the canonical program ID (see `common::mollusk_fixtures`). The
-//! `test-only-open-digest` feature exposes the `OpenDigest` arm for the
-//! direct-drive close-side tests.
+//! `test-only-open-digest` feature exposes the `TestOnlyOpenDigest` arm for
+//! the direct-drive close-side tests.
 //!
 //! Test surface covered:
 //!

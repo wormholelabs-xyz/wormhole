@@ -5,10 +5,10 @@
 // flags it as an unexpected cfg value.
 #![allow(unexpected_cfgs)]
 
-// `test-only-open-digest` exposes the `OpenDigest` arm in the dispatch table
-// for mollusk tests that drive it directly. The default (no features) build
-// keeps `open_digest` reachable only from inside `submit_observations` after
-// the NoReplay check. This is the only remaining test-build feature; the
+// `test-only-open-digest` exposes the `TestOnlyOpenDigest` arm in the dispatch table
+// (handled by `test_only_open_digest`) for mollusk tests that drive it directly.
+// The default (no features) build keeps the open path reachable only from
+// inside `submit_observations` and `submit_vaas`, after the NoReplay check. This is the only remaining test-build feature; the
 // historic `mock-vaa` / `mock-noreplay` pair has been replaced by sibling
 // fixture programs loaded into mollusk at the canonical IDs (see
 // `tests/common/mollusk_fixtures.rs`).
@@ -41,7 +41,7 @@ pub(crate) fn err(e: GlobalAccountantError) -> ProgramError {
 
 /// Compile-time pin on the `test-only-open-digest` Cargo feature. Read by the
 /// integration test crate via `cargo test`; the feature must be **on** for the
-/// test build (mollusk drives `open_digest` directly) and **off** for the
-/// production build (`open_digest` is only reachable from inside
-/// `submit_observations` after the NoReplay check).
+/// test build (mollusk drives `test_only_open_digest` directly) and **off** for the
+/// production build (the open path is only reachable from inside
+/// `submit_observations` and `submit_vaas`, after the NoReplay check).
 pub const TEST_ONLY_OPEN_DIGEST_ENABLED: bool = cfg!(feature = "test-only-open-digest");

@@ -6,7 +6,7 @@
 //!
 //! 1. flips the NoReplay slot (shared across sibling buckets at the same
 //!    `(chain, emitter, sequence)`),
-//! 2. opens the `DigestAccount` PDA via `super::open_digest_inner`, and
+//! 2. opens the `DigestAccount` PDA via `super::open_digest::open_digest_inner`, and
 //! 3. closes the winning pending PDA, refunding rent to its recorded payer.
 //!
 //! Sibling buckets at the same `(chain, emitter, sequence)` but different
@@ -40,7 +40,8 @@ use crate::err;
 // (`apply_transfer`) lives in a sibling `transfer` module so `submit_vaas`
 // can re-use it without depending on this module's internals.
 use crate::instructions::{
-    noreplay, open_digest_inner, pda_init::init_or_upgrade_pda, transfer::apply_transfer,
+    noreplay, open_digest::open_digest_inner, pda_init::init_or_upgrade_pda,
+    transfer::apply_transfer,
 };
 use crate::state::{chain_registration, pending};
 

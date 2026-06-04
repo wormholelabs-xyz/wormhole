@@ -27,7 +27,9 @@ use crate::definitions::{
     VAA_BODY_HEADER_LEN,
 };
 use crate::err;
-use crate::instructions::{noreplay, open_digest_inner, shim, transfer::apply_transfer};
+use crate::instructions::{
+    noreplay, open_digest::open_digest_inner, shim, transfer::apply_transfer,
+};
 use crate::state::chain_registration;
 
 // ============================================================================
@@ -163,59 +165,23 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // emitter on a real chain.
     chain_registration::verify(program_id, chain_registration_pda, chain, &emitter)?;
 
-    // ----- (6) Parse Token Bridge payload + apply balance work -----
+    // ----- (6) NoReplay mark-used CPI -----
     //
-    // CosmWasm `handle_tokenbridge_vaa` parses the payload as
-    // `wormhole_sdk::token::Message::{Transfer, TransferWithPayload}` and
-    // calls `accountant::commit_transfer`. The Solana port routes through
-    // the same helper as `submit_observations`' quorum-completing branch —
-    // shared via `instructions::transfer::apply_transfer`.
+    // Burn the `(chain, emitter, seq)` slot BEFORE any accountant state
+    // change. Ethos: stop replays first, mutate balances last. Mirrors
+    // `submit_observations`' commit-branch ordering. Tx-level atomicity
+    // covers the failure path — any subsequent error (`apply_transfer`
+    // overflow/underflow, `UnknownTokenBridgePayload`) rolls back the mark
+    // with everything else, leaving the slot unconsumed.
     //
-    // Attest / Other payloads: no balance work, but the rest of the commit
-    // (NoReplay flip + DigestAccount open) still runs. This matches
-    // CosmWasm's behaviour for any payload other than 0x01 / 0x03 — those
-    // come through this function but `handle_tokenbridge_vaa` short-circuits
-    // before the `commit_transfer` call.
-    match parse_token_bridge_payload(body_bytes).map_err(err)? {
-        TokenBridgeAction::Transfer {
-            amount,
-            token_chain,
-            token_address,
-            recipient_chain,
-        } => {
-            apply_transfer(
-                program_id,
-                submitter,
-                source_account_pda,
-                dest_account_pda,
-                chain,
-                recipient_chain,
-                token_chain,
-                &token_address,
-                amount,
-            )?;
-        }
-        TokenBridgeAction::Attest => {
-            // No balance work; the commit below still runs. Same sentinel-slot
-            // convention as `submit_observations` — callers may pass the
-            // noreplay-authority PDA in slots 8 and 9.
-        }
-        TokenBridgeAction::Other => {
-            // Unknown action byte: reject BEFORE the NoReplay mark, mirroring
-            // CosmWasm's `bail!("Unknown tokenbridge payload")`. Committing
-            // here would burn the `(chain, emitter, sequence)` slot for a
-            // payload this build cannot account, making the VAA permanently
-            // unprocessable even after an upgrade that understands it.
-            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
-        }
-    }
-
-    // ----- (7) NoReplay mark-used CPI -----
+    // CosmWasm `handle_vaa` cross-checks `DIGESTS[(chain, emitter, seq)]`
+    // and short-circuits on a match (`DuplicateMessage` — see
+    // `contract.rs:324-333`). The Solana port collapses the digest-table
+    // check into NoReplay.
     //
-    // After the (potentially failing) balance work succeeds, claim the
-    // `(chain, emitter, seq)` slot in NoReplay. A racing tx that flipped the
-    // same bit between our pre-check and this CPI surfaces as
-    // `NoReplayCpiFailed`, which is the runtime's escape valve.
+    // A racing tx that flipped the same bit between our pre-check and this
+    // CPI surfaces as `NoReplayCpiFailed`, which is the runtime's escape
+    // valve.
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
@@ -228,7 +194,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         sequence,
     )?;
 
-    // ----- (8) Open the DigestAccount PDA -----
+    // ----- (7) Open the DigestAccount PDA -----
     //
     // Same on-chain breadcrumb the quorum path leaves — keeps the
     // `close_digest` / `close_pending` ecosystem consistent across both
@@ -252,6 +218,58 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         // quorum.
         0,
     )?;
+
+    // ----- (8) Parse Token Bridge payload + apply balance work -----
+    //
+    // Last step in the commit branch, mirroring `submit_observations`. The
+    // payload mutation runs *after* the replay slot is claimed and the
+    // DigestAccount breadcrumb is laid down — the NoReplay mark is the
+    // gate, the balance mutation is the consequence.
+    //
+    // CosmWasm `handle_tokenbridge_vaa` parses the payload as
+    // `wormhole_sdk::token::Message::{Transfer, TransferWithPayload}` and
+    // calls `accountant::commit_transfer`. The Solana port routes through
+    // the same helper as `submit_observations`' quorum-completing branch —
+    // shared via `instructions::transfer::apply_transfer`.
+    //
+    // Attest payloads: no balance work, but the prior NoReplay flip +
+    // DigestAccount open still commit on the success path. Matches
+    // CosmWasm's behaviour for any payload other than 0x01 / 0x03.
+    //
+    // Unknown action bytes: reject. Tx-level atomicity rolls back the
+    // NoReplay mark and the DigestAccount open, leaving the slot unconsumed
+    // so a future upgrade that understands the action can still process the
+    // VAA. (If we later decide that overflow/underflow should *consume* the
+    // slot — a VAA that authenticated past the Shim but cannot be accounted
+    // would then still count as "seen" — the policy lives here.)
+    match parse_token_bridge_payload(body_bytes).map_err(err)? {
+        TokenBridgeAction::Transfer {
+            amount,
+            token_chain,
+            token_address,
+            recipient_chain,
+        } => {
+            apply_transfer(
+                program_id,
+                submitter,
+                source_account_pda,
+                dest_account_pda,
+                chain,
+                recipient_chain,
+                token_chain,
+                &token_address,
+                amount,
+            )?;
+        }
+        TokenBridgeAction::Attest => {
+            // No balance work. Same sentinel-slot convention as
+            // `submit_observations` — callers may pass the noreplay-authority
+            // PDA in slots 8 and 9.
+        }
+        TokenBridgeAction::Other => {
+            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
+        }
+    }
 
     Ok(())
 }

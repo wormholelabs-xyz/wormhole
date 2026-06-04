@@ -16,7 +16,11 @@ pub type Pubkey = [u8; 32];
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
-    OpenDigest = 0,
+    /// Test-only direct DigestAccount open, handled by `test_only_open_digest`
+    /// behind the `test-only-open-digest` Cargo feature. Production builds
+    /// reject this discriminator with `NotEnabled`; production opens happen
+    /// inside `SubmitObservations` and `SubmitVaas`.
+    TestOnlyOpenDigest = 0,
     CloseDigest = 1,
     SubmitObservations = 2,
     ClosePending = 3,
@@ -45,7 +49,7 @@ impl Instruction {
     // `const`-callable so future compile-time dispatch tables can use it.
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
-            0 => Some(Self::OpenDigest),
+            0 => Some(Self::TestOnlyOpenDigest),
             1 => Some(Self::CloseDigest),
             2 => Some(Self::SubmitObservations),
             3 => Some(Self::ClosePending),
@@ -72,8 +76,8 @@ pub enum GlobalAccountantError {
     NotImplemented = 5,
     /// The instruction exists in the dispatch table but the build it was
     /// compiled into intentionally disabled it (Cargo-feature-gated). Used to
-    /// keep `open_digest` out of production builds until `submit_observations`
-    /// is the only legitimate caller.
+    /// keep `test_only_open_digest` out of production builds, where DigestAccounts
+    /// are opened only via `submit_observations` and `submit_vaas`.
     NotEnabled = 6,
     /// The (chain, emitter, sequence) is already marked as accounted-for in
     /// NoReplay; observations are rejected as replays before any signature
