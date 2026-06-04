@@ -484,6 +484,97 @@ fn double_keccak(body: &[u8]) -> [u8; 32] {
     outer.to_bytes()
 }
 
+/// Fetch the on-chain logs for `tx_sig` via JSON-RPC and assert that exactly
+/// one `Program data: …` line decodes to the canonical commit-log payload
+/// emitted by `instructions::commit_log::emit` on the quorum-completing
+/// branch of `submit_observations` (and on every successful `submit_vaas`).
+///
+/// The expected payload layout is the single source of truth in
+/// `global_accountant_definitions::ACCOUNTANT_DIGEST_LOG_TAG` / `_LEN`.
+pub fn assert_canonical_log_in_tx(
+    rpc_url: &str,
+    tx_sig: &str,
+    expected_chain: u16,
+    expected_emitter: &[u8; 32],
+    expected_sequence: u64,
+    expected_digest: &[u8; 32],
+    expected_guardian_set_index: u32,
+) {
+    use base64::Engine;
+    use global_accountant_definitions::{ACCOUNTANT_DIGEST_LOG_LEN, ACCOUNTANT_DIGEST_LOG_TAG};
+
+    // Poll briefly; the tx is already confirmed but indexing can lag a slot.
+    let mut last_resp = serde_json::Value::Null;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        last_resp = rpc_call(
+            rpc_url,
+            "getTransaction",
+            serde_json::json!([
+                tx_sig,
+                {
+                    "encoding": "json",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0,
+                }
+            ]),
+        );
+        if last_resp.get("result").is_some_and(|v| !v.is_null()) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+
+    let logs = last_resp
+        .get("result")
+        .and_then(|r| r.get("meta"))
+        .and_then(|m| m.get("logMessages"))
+        .and_then(|l| l.as_array())
+        .unwrap_or_else(|| panic!("getTransaction returned no meta.logMessages: {last_resp}"));
+
+    let mut matched = 0usize;
+    for entry in logs {
+        let line = entry.as_str().unwrap_or("");
+        let Some(b64) = line.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        if bytes.len() < 8 || bytes[..8] != ACCOUNTANT_DIGEST_LOG_TAG {
+            continue;
+        }
+        assert_eq!(
+            bytes.len(),
+            ACCOUNTANT_DIGEST_LOG_LEN,
+            "commit-log payload size mismatch"
+        );
+        let chain = u16::from_be_bytes([bytes[8], bytes[9]]);
+        let mut emitter = [0u8; 32];
+        emitter.copy_from_slice(&bytes[10..42]);
+        let sequence = u64::from_be_bytes(bytes[42..50].try_into().unwrap());
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&bytes[50..82]);
+        let gsi = u32::from_le_bytes(bytes[82..86].try_into().unwrap());
+
+        assert_eq!(chain, expected_chain, "commit-log chain mismatch");
+        assert_eq!(&emitter, expected_emitter, "commit-log emitter mismatch");
+        assert_eq!(sequence, expected_sequence, "commit-log sequence mismatch");
+        assert_eq!(&digest, expected_digest, "commit-log digest mismatch");
+        assert_eq!(
+            gsi, expected_guardian_set_index,
+            "commit-log guardian_set_index mismatch"
+        );
+        matched += 1;
+    }
+
+    assert_eq!(
+        matched, 1,
+        "expected exactly one canonical commit-log entry, found {matched}"
+    );
+}
+
 /// Poll `confirm_transaction` until `Ok(true)` or the timeout.
 pub fn await_confirmed<F: Fn() -> Result<bool, solana_client::client_error::ClientError>>(
     label: &str,

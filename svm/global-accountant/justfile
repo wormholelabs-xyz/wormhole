@@ -14,28 +14,17 @@ NOREPLAY_SO := env_var_or_default("NOREPLAY_SO", env_var("HOME") / "WormholeLabs
 default:
     @just --list
 
-# Two build targets. Keep the split unambiguous:
-#
-#   * build-dev   — test/dev build with `test-only-open-digest` exposed. This
-#                   is what `test` depends on; the resulting `.so` exposes
-#                   the `OpenDigest` arm for direct mollusk test drives. The
-#                   noreplay and Shim CPIs are real in both builds — mocks were
-#                   retired in favour of sibling-program fixtures loaded by
-#                   mollusk.
-#   * build-prod  — production build with `test-only-open-digest` OFF. The
-#                   `open_digest` direct entrypoint is not in the dispatch
-#                   table. Shape that will ship to mainnet.
+# One build target. The historical dev/prod split existed to gate the
+# `test-only-open-digest` feature on/off; with `open_digest` removed
+# entirely (canonical digest record now emitted via `sol_log_data`), there
+# is no longer any dev-vs-prod feature difference.
 
-[doc("Dev build with `test-only-open-digest` exposed for mollusk tests.")]
-build-dev: build-test-fixtures
-    cargo build-sbf --features bpf-entrypoint,test-only-open-digest
-
-[doc("Production-shape SBF build — no test-only features.")]
-build-prod:
+[doc("SBF build of the production-shape .so.")]
+build:
     cargo build-sbf --features bpf-entrypoint
 
-[doc("Alias for `build-dev`; CI should call build-dev/build-prod explicitly.")]
-build: build-dev
+[doc("Alias preserved for backwards-compatibility with existing scripts.")]
+build-prod: build
 
 # The mollusk suite CPIs into two sibling programs:
 #   * solana_noreplay.so       (real replay-protection bitmap program)
@@ -59,93 +48,43 @@ build: build-dev
 #   GA_NOREPLAY_SO=/path/to/solana_noreplay.so cargo test ...
 #   GA_VERIFY_VAA_SHIM_SO=/path/to/wormhole_verify_vaa_shim.so cargo test ...
 # The override skips the SHA-256 check (active-development escape hatch).
-#
-# Retained as a no-op for compatibility with the previous workflow; nothing
-# depends on it anymore beyond `build-dev`'s vestigial wire-up.
 
-[doc("No-op kept for compatibility — test fixtures are hash-pinned, see comment block.")]
-build-test-fixtures:
-    @echo "test fixtures are hash-pinned under tests/fixtures/ — no rebuild needed"
-    @echo "to regenerate, see the comment block above this recipe in the justfile"
+[doc("Mollusk integration tests.")]
+test: build
+    cargo test
 
-[doc("Mollusk integration tests (builds dev-shape .so for OpenDigest direct entry).")]
-test: build-dev
-    cargo test --features test-only-open-digest
-
-# Surfpool E2E test against a Solana mainnet fork. surfpool boots with
-# `--rpc-url` pointing at mainnet so the Verify VAA Shim, the Core Bridge,
-# and the active `GuardianSet` PDA lazy-fetch from upstream. The test deploys
-# the production-shape `.so` (no `mock-vaa`) so the real Shim CPI is exercised
-# end-to-end against a real historical VAA. The DigestAccount PDA the test
-# closes is hand-crafted via the `surfnet_setAccount` cheatcode (the prod-shape
-# build does not expose `open_digest`).
-#
-# Default datasource: the public RPC from
-# `~/WormholeLabs/CoreTeam/w7-registry/chains/mainnet/solana.yaml`. surfpool
-# v1.2.1 cannot inject the `Origin` header that the labsapis proxy requires,
-# so the proxy is not the default — override with `GA_E2E_DATASOURCE_RPC=<url>`
-# for an endpoint that does not enforce CORS.
-#
-# Build features: the test crate is configured with the workspace default of
-# `mock-vaa,test-only-open-digest,mock-noreplay` enabled — these affect only
-# the program binary, not the host-side test code, so the test compiles fine
-# either way. The deployed `.so` comes from `build-prod`, i.e. *neither*
-# feature on, so the real `close_digest` CPI is what executes inside the simnet.
-
-[doc("Surfpool E2E: close_digest against a real historical VAA on mainnet fork.")]
-test-e2e-mainnet-fork: build-prod
-    cargo test --features test-only-open-digest \
-        --test surfpool_e2e_mainnet_fork -- --ignored --nocapture
-
-# VAA-replay corpus. Replays a curated set of historical mainnet VAAs
-# (~7 fixtures in `tests/fixtures/`) against the production-shape `.so`. Each
-# test owns its own surfpool subprocess for isolation. Three corpus entries
-# (GS1, GS4, GS5) target the historical guardian-set ceiling concern and are
-# expected to fail at the Shim CPI — they assert the failure rather than
-# success, so a Shim policy change will flip them and surface a regression.
-#
-# Same build/datasource story as `test-e2e-mainnet-fork`.
-
-[doc("Surfpool E2E: replay ~7 historical VAAs (GS1/GS4/GS5 are expected-fail).")]
-test-e2e-vaa-corpus: build-prod
-    cargo test --features test-only-open-digest \
-        --test surfpool_e2e_vaa_corpus -- --ignored --nocapture
-
-# Surfpool e2e for `submit_observations` driven against the real
-# `solana-noreplay` program. Deploys both `global_accountant.so` (production
-# shape — no mock-noreplay) and `solana_noreplay.so`, drives 13 distinct
-# guardian observations end-to-end, and asserts the bitmap bit gets set in
-# the real noreplay PDA. A 14th submission must fail with `AlreadyAccounted`
-# via the direct-read pre-check.
+# Surfpool E2E test for `submit_observations` driven against the real
+# `solana-noreplay` program. Deploys both `global_accountant.so` and
+# `solana_noreplay.so`, drives 13 distinct guardian observations end-to-end,
+# and asserts the bitmap bit gets set in the real noreplay PDA. A 14th
+# submission must fail with `AlreadyAccounted` via the direct-read pre-check.
 
 [doc("Surfpool E2E: submit_observations driven against the real solana-noreplay.")]
-test-e2e-submit-obs: _require-noreplay-so build-prod
-    cargo test --features test-only-open-digest \
-        --test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
+test-e2e-submit-obs: _require-noreplay-so build
+    cargo test --test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
 
 # Surfpool e2e for `submit_vaas` driven against the real Verify VAA Shim and
-# real `solana-noreplay` programs. Deploys both `global_accountant.so`
-# (production shape) and `solana_noreplay.so`, pre-posts the signatures of a
-# historical Token Bridge transfer VAA via the Shim's `PostSignatures`, and
-# calls `submit_vaas` to apply the transfer.
+# real `solana-noreplay` programs. Deploys both `global_accountant.so` and
+# `solana_noreplay.so`, pre-posts the signatures of a historical Token Bridge
+# transfer VAA via the Shim's `PostSignatures`, and calls `submit_vaas`.
 
 [doc("Surfpool E2E: submit_vaas against real Verify VAA Shim + real noreplay.")]
-test-e2e-submit-vaas: _require-noreplay-so build-prod
-    cargo test --features test-only-open-digest \
-        --test surfpool_e2e_submit_vaas -- --ignored --nocapture
+test-e2e-submit-vaas: _require-noreplay-so build
+    cargo test --test surfpool_e2e_submit_vaas -- --ignored --nocapture
+
+# VAA-replay corpus. Replays a curated set of historical mainnet VAAs against
+# the production-shape `.so`. Each test owns its own surfpool subprocess for
+# isolation.
+
+[doc("Surfpool E2E: replay ~7 historical VAAs.")]
+test-e2e-vaa-corpus: build
+    cargo test --test surfpool_e2e_vaa_corpus -- --ignored --nocapture
 
 # Unified surfpool E2E target. Each test binary owns its own surfpool
-# subprocess for PDA isolation and per-test failure scoping. CI runs this
-# target so every layer is exercised in one job with a single warm cargo
-# cache and a single warm surfpool mainnet-account cache.
-#
-# `--test-threads=1` is honoured by every leaf target to keep CI
-# deterministic — bound port allocation under load was flaky with parallel
-# surfpool boots. Bump locally with `RUST_TEST_THREADS=N` if your network
-# can take more.
+# subprocess for PDA isolation and per-test failure scoping.
 
-[doc("All four surfpool E2E layers. CI runs this for one-job, one-cache coverage.")]
-test-e2e: test-e2e-mainnet-fork test-e2e-vaa-corpus test-e2e-submit-obs test-e2e-submit-vaas
+[doc("All surfpool E2E layers.")]
+test-e2e: test-e2e-vaa-corpus test-e2e-submit-obs test-e2e-submit-vaas
     @echo "All surfpool E2E layers green."
 
 # Private prerequisite: fail fast with a helpful message if the noreplay .so
@@ -165,10 +104,8 @@ _require-noreplay-so:
 # `1.89.0-sbpf-solana-v1.52`), which can drive a plain `cargo check` against
 # the real `sbpf-solana-solana` target. This checks the exact cfg shape that
 # ships (`target_os = "solana"` arms, real syscall declarations) without the
-# cost of a full `build-sbf`, and without the host-side cfg fallbacks that
-# `cargo check` on the host exercises. Both feature shapes are covered,
-# mirroring the clippy/clippy-prod split. The toolchain name embeds the
-# platform-tools version, so it is discovered rather than hard-coded.
+# cost of a full `build-sbf`. The toolchain name embeds the platform-tools
+# version, so it is discovered rather than hard-coded.
 #
 # Note: clippy cannot run on this toolchain (Anza ships no cargo-clippy for
 # platform-tools, and rustup cannot add components to custom toolchains).
@@ -188,8 +125,6 @@ check:
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
     cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant --features bpf-entrypoint,test-only-open-digest
-    cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
         -p global-accountant --features bpf-entrypoint
 
 # SBF-arm clippy. The platform-tools toolchain ships no clippy, but upstream
@@ -205,7 +140,7 @@ check:
 #     keeps coverage effectively total — maintain that convention.
 #   * Nightly: clippy lint names drift (e.g. workspace lint tables may emit
 #     `renamed_and_removed_lints` warnings). Supplementary gate only; the
-#     stable host `clippy`/`clippy-prod` targets remain authoritative.
+#     stable host `clippy` target remains authoritative.
 
 [doc("Nightly clippy of the SBF-shaped code via bpfel-unknown-none.")]
 clippy-sbf:
@@ -223,25 +158,11 @@ clippy-sbf:
     fi
     cargo +nightly clippy --locked -Zbuild-std=core,alloc --target bpfel-unknown-none \
         -p global-accountant -p global-accountant-definitions \
-        --features bpf-entrypoint,test-only-open-digest -- -D warnings
-    cargo +nightly clippy --locked -Zbuild-std=core,alloc --target bpfel-unknown-none \
-        -p global-accountant -p global-accountant-definitions \
         --features bpf-entrypoint -- -D warnings
 
-[doc("Clippy with the dev feature combo (matches build-dev).")]
+[doc("Clippy against the host build.")]
 clippy:
-    cargo clippy --all-targets --features test-only-open-digest -- -D warnings
-
-# Production-shape clippy. Mirrors `build-prod` — no test features enabled,
-# so this catches lint regressions that the default `clippy` target would
-# miss because it always exercises the dev feature combo. CI should run both
-# targets; a regression that only trips here means the production build is
-# affected.
-
-[doc("Production-shape clippy — no test features, catches regressions clippy misses.")]
-clippy-prod:
-    cargo clippy -p global-accountant -- -D warnings
-    cargo clippy -p global-accountant-definitions -- -D warnings
+    cargo clippy --all-targets -- -D warnings
 
 [doc("cargo clean.")]
 clean:

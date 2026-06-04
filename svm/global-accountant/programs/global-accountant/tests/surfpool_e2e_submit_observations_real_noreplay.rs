@@ -30,8 +30,8 @@ use solana_transaction::Transaction;
 
 mod common;
 use common::{
-    await_confirmed, deploy_program, derive_noreplay_bitmap_pda, noreplay_so_path, so_path,
-    start_surfpool, SurfpoolOptions, NOREPLAY_PROGRAM_ID,
+    assert_canonical_log_in_tx, await_confirmed, deploy_program, derive_noreplay_bitmap_pda,
+    noreplay_so_path, so_path, start_surfpool, SurfpoolOptions, NOREPLAY_PROGRAM_ID,
 };
 
 /// `BITS_PER_BUCKET` mirror from `solana-noreplay::state`.
@@ -340,11 +340,9 @@ fn surfpool_submit_observations_real_noreplay() {
     );
 
     // Drive 13 observations. The 13th submission emits the canonical commit
-    // log via `sol_log_data`; the bitmap-bit assertion below verifies the
-    // commit branch ran. Asserting log payload bytes directly requires
-    // `getTransaction(..., {encoding: "json", commitment: "confirmed"})` and a
-    // `meta.logMessages` walk — left as a follow-up (the on-chain emission is
-    // already covered by the program's unit-level `commit_log` invocation).
+    // log via `sol_log_data`; we capture its tx signature and walk
+    // `meta.logMessages` after quorum to verify the on-chain emission shape
+    // against [`assert_canonical_log_in_tx`].
     let mut quorum_tx_sig: Option<String> = None;
     for i in 0..13u8 {
         let g = &guardians[i as usize];
@@ -373,9 +371,21 @@ fn surfpool_submit_observations_real_noreplay() {
             quorum_tx_sig = Some(sig);
         }
     }
-    eprintln!(
-        "[real-cpi] quorum-completing tx sig={} (commit-log assertion deferred)",
-        quorum_tx_sig.unwrap_or_default()
+    let quorum_sig = quorum_tx_sig.expect("13th submission captured a tx signature");
+    eprintln!("[real-cpi] quorum-completing tx sig={quorum_sig}");
+
+    // Assert the canonical commit-log payload was emitted on the
+    // quorum-completing tx. Off-chain consumers reading `meta.logMessages`
+    // and filtering on `ACCOUNTANT_DIGEST_LOG_TAG` is the on-chain breadcrumb
+    // that replaced the (removed) DigestAccount PDA.
+    assert_canonical_log_in_tx(
+        &rpc_url,
+        &quorum_sig,
+        chain,
+        &emitter,
+        sequence,
+        &digest,
+        4, // guardian_set_index used by the quorum-completing observation
     );
 
     // Assert the bitmap bit got set in the real noreplay PDA.

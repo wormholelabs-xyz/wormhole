@@ -40,9 +40,9 @@ use solana_transaction::Transaction;
 
 mod common;
 use common::{
-    await_confirmed, deploy_program, derive_noreplay_bitmap_pda, hex_encode, load_vaa_fixture,
-    noreplay_so_path, rpc_call, so_path, start_surfpool, ParsedVaa, SurfpoolOptions,
-    NOREPLAY_PROGRAM_ID,
+    assert_canonical_log_in_tx, await_confirmed, deploy_program, derive_noreplay_bitmap_pda,
+    hex_encode, load_vaa_fixture, noreplay_so_path, rpc_call, so_path, start_surfpool, ParsedVaa,
+    SurfpoolOptions, NOREPLAY_PROGRAM_ID,
 };
 
 /// Wormhole Core Bridge program ID on Solana mainnet.
@@ -436,9 +436,20 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         "bit {bit_index} set in noreplay bitmap after submit_vaas"
     );
 
-    // The canonical digest record is emitted via `sol_log_data`; log-payload
-    // inspection over `meta.logMessages` is a follow-up (the program-level
-    // emission is unit-covered in `instructions/commit_log.rs`).
+    // Assert the canonical commit-log payload was emitted on the submit_vaas
+    // tx. `guardian_set_index = 0` is the sentinel value `submit_vaas` records
+    // (the Shim accepts any currently-active set, so no single index
+    // meaningfully describes the authorisation — see `commit_log::emit`
+    // call-site in `submit_vaas.rs`).
+    assert_canonical_log_in_tx(
+        &rpc_url,
+        &sig.to_string(),
+        vaa.emitter_chain,
+        &vaa.emitter_address,
+        vaa.sequence,
+        &vaa.digest,
+        0,
+    );
 
     // Source Account: debited by `amount` (chain != token_chain ⇒ wrapped burn).
     let src_after = rpc

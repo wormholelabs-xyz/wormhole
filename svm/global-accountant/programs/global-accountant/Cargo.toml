@@ -68,6 +68,11 @@ serde_json.workspace = true
 # workspace lock graph via solana-program transitively; pinned to the
 # resolved version per the supply-chain rule in CLAUDE.md.
 sha2 = "=0.10.9"
+# Base64 decoder for the surfpool e2e `meta.logMessages` walk that asserts
+# the canonical commit log emitted by `instructions::commit_log`. Already in
+# the workspace lock graph via solana-client transitively; pinned per the
+# supply-chain rule.
+base64 = "=0.22.1"
 
 [lints]
 workspace = true
