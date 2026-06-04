@@ -1,6 +1,10 @@
 //! Wormhole Global Accountant — Solana port (Pinocchio).
 
-#![cfg_attr(target_os = "solana", no_std)]
+// The `target_arch = "bpf"` arm keeps the crate `no_std` under upstream
+// rustc's `bpfel-unknown-none` target, which is what lets nightly clippy lint
+// the SBF-shaped code (`just clippy-sbf`) — the platform-tools toolchain
+// ships no clippy of its own.
+#![cfg_attr(any(target_os = "solana", target_arch = "bpf"), no_std)]
 // `target_os = "solana"` is provided by the SBF toolchain; the host toolchain
 // flags it as an unexpected cfg value.
 #![allow(unexpected_cfgs)]

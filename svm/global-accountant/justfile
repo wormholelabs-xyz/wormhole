@@ -171,10 +171,9 @@ _require-noreplay-so:
 # platform-tools version, so it is discovered rather than hard-coded.
 #
 # Note: clippy cannot run on this toolchain (Anza ships no cargo-clippy for
-# platform-tools, and rustup cannot add components to custom toolchains), so
-# the host `clippy` targets below remain the only lint coverage. As partial
-# compensation, RUSTFLAGS=-Dwarnings promotes the compiler's own lints to
-# errors on the SBF target — the strictest gate the toolchain permits.
+# platform-tools, and rustup cannot add components to custom toolchains).
+# RUSTFLAGS=-Dwarnings promotes the compiler's own lints to errors on the SBF
+# target; `clippy-sbf` below approximates clippy coverage of the SBF arms.
 
 [doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied.")]
 check:
@@ -192,6 +191,42 @@ check:
         -p global-accountant --features bpf-entrypoint,test-only-open-digest
     cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
         -p global-accountant --features bpf-entrypoint
+
+# SBF-arm clippy. The platform-tools toolchain ships no clippy, but upstream
+# nightly clippy knows the tier-3 `bpfel-unknown-none` target, which sets
+# `target_arch = "bpf"` — the second arm of the crate's cfg pattern
+# (`any(target_os = "solana", target_arch = "bpf")`), kept precisely so this
+# recipe can lint the SBF-shaped code (syscalls, entrypoint, no_std). Tier 3
+# ships no prebuilt core/alloc, hence nightly + rust-src + `-Zbuild-std`.
+#
+# Caveats, recorded so nobody is surprised later:
+#   * Approximation: code gated *exclusively* on `target_os = "solana"` is
+#     invisible here. The crate's convention is the `any(...)` pattern, which
+#     keeps coverage effectively total — maintain that convention.
+#   * Nightly: clippy lint names drift (e.g. workspace lint tables may emit
+#     `renamed_and_removed_lints` warnings). Supplementary gate only; the
+#     stable host `clippy`/`clippy-prod` targets remain authoritative.
+
+[doc("Nightly clippy of the SBF-shaped code via bpfel-unknown-none.")]
+clippy-sbf:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! cargo +nightly clippy --version >/dev/null 2>&1; then
+        echo "ERROR: nightly clippy not available." >&2
+        echo "Run 'rustup component add clippy --toolchain nightly'." >&2
+        exit 1
+    fi
+    if ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -q rust-src; then
+        echo "ERROR: rust-src not installed for nightly (required by -Zbuild-std)." >&2
+        echo "Run 'rustup component add rust-src --toolchain nightly'." >&2
+        exit 1
+    fi
+    cargo +nightly clippy --locked -Zbuild-std=core,alloc --target bpfel-unknown-none \
+        -p global-accountant -p global-accountant-definitions \
+        --features bpf-entrypoint,test-only-open-digest -- -D warnings
+    cargo +nightly clippy --locked -Zbuild-std=core,alloc --target bpfel-unknown-none \
+        -p global-accountant -p global-accountant-definitions \
+        --features bpf-entrypoint -- -D warnings
 
 [doc("Clippy with the dev feature combo (matches build-dev).")]
 clippy:
