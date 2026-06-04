@@ -42,7 +42,7 @@ endif
 artifacts-$(NETWORK): $(SOURCE_FILES)
 	echo $@
 	@echo "Building artifacts for ${NETWORK} (${bridge_ADDRESS_${NETWORK}})"
-	DOCKER_BUILDKIT=1 docker build -f Dockerfile --build-arg BRIDGE_ADDRESS=${bridge_ADDRESS_${NETWORK}} -o $@ .
+	DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -f Dockerfile --build-arg BRIDGE_ADDRESS=${bridge_ADDRESS_${NETWORK}} -o $@ .
 	cd $@ && ls | xargs sha256sum > checksums.txt
 
 payer-$(NETWORK).json:

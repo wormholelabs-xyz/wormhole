@@ -1,8 +1,14 @@
 #syntax=docker/dockerfile:1.2@sha256:e2a8561e419ab1ba6b2fe6cbdf49fd92b95912df1cf7d313c3e2230a333fdbcc
 FROM docker.io/library/rust:1.49@sha256:a50165ea96983c21832578afb1c8c028674c965bc1ed43b607871b1f362e06a5 AS solana
 
-RUN apt-get update && \
+RUN sed -i \
+      -e 's|deb.debian.org/debian|archive.debian.org/debian|g' \
+      -e 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' \
+      -e '/buster-updates/d' \
+      /etc/apt/sources.list && \
+    apt-get -o Acquire::Check-Valid-Until=false update && \
     apt-get install -y \
+    bzip2 \
     clang \
     libssl-dev \
     libudev-dev \
@@ -19,7 +25,14 @@ COPY devnet_setup.sh cert.pem* /certs/
 # Debian
 RUN if [ -e /certs/cert.pem ]; then cp /certs/cert.pem /etc/ssl/certs/ca-certificates.crt; fi
 
-RUN sh -c "$(curl -sSfL https://release.solana.com/v1.9.4/install)"
+# release.solana.com is decommissioned; install the same official v1.9.4 release
+# directly from the GitHub release asset and lay it out where the installer would
+# have (active_release), so PATH and the strip.sh reference below keep working.
+RUN mkdir -p /root/.local/share/solana/install /tmp/sol && \
+    curl -sSfL https://github.com/solana-labs/solana/releases/download/v1.9.4/solana-release-x86_64-unknown-linux-gnu.tar.bz2 -o /tmp/sol.tar.bz2 && \
+    tar -xjf /tmp/sol.tar.bz2 -C /tmp/sol && \
+    mv /tmp/sol/solana-release /root/.local/share/solana/install/active_release && \
+    rm -rf /tmp/sol /tmp/sol.tar.bz2
 
 ENV PATH="/root/.local/share/solana/install/active_release/bin:$PATH"
 
