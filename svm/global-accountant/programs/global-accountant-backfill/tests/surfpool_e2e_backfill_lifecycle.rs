@@ -1,0 +1,399 @@
+//! Surfpool E2E — full backfill program lifecycle against a real subprocess
+//! validator, with the production `solana_noreplay.so` co-deployed.
+//!
+//! Phases the test exercises in order:
+//!
+//! 1. `BackfillNoReplay` for three entries spanning two buckets — assert the
+//!    NoReplay bitmap bits flip and the canonical `ACCDGST\0` commit-log
+//!    entries appear via `meta.logMessages` over real RPC.
+//! 2. `BackfillBalance` for two accounts — assert both `BalanceAccountLayout`
+//!    PDAs are written at canonical seeds via `getAccountInfo`.
+//! 3. `Retire` — assert the authority PDA's `retired` flag flips to 1.
+//! 4. Replay `BackfillNoReplay` — assert it fails with `AuthorityRetired`.
+
+#![allow(clippy::too_many_arguments)]
+
+use std::{
+    str::FromStr,
+    time::{Duration, Instant},
+};
+
+use solana_client::{client_error::ClientError, rpc_client::RpcClient};
+use solana_instruction::{AccountMeta, Instruction};
+use solana_keypair::Keypair;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use solana_transaction::Transaction;
+
+use global_accountant_backfill::{
+    state::{BackfillAuthorityLayout, BACKFILL_AUTHORITY_SEED_PREFIX},
+    Instruction as IxDiscriminator,
+};
+use global_accountant_definitions::{
+    BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+};
+
+mod common;
+use common::surfpool::{
+    await_confirmed, deploy_program, fetch_accdgst_logs, so_path, start_surfpool, SurfpoolOptions,
+};
+
+const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
+
+fn noreplay_so_path() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root from CARGO_MANIFEST_DIR");
+    workspace_root.join("programs/global-accountant/tests/fixtures/solana_noreplay.so")
+}
+
+// ============================================================================
+// PDA derivations
+// ============================================================================
+
+fn derive_backfill_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[BACKFILL_AUTHORITY_SEED_PREFIX], program_id)
+}
+
+fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
+}
+
+fn derive_noreplay_bucket(
+    authority: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> Pubkey {
+    let mut namespace = [0u8; 34];
+    namespace[..2].copy_from_slice(&chain.to_be_bytes());
+    namespace[2..].copy_from_slice(emitter);
+    let bucket_index = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
+    let (pda, _) = Pubkey::find_program_address(
+        &[
+            authority.as_ref(),
+            &namespace[..32],
+            &namespace[32..],
+            &bucket_index,
+        ],
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+    );
+    pda
+}
+
+fn derive_balance_pda(
+    program_id: &Pubkey,
+    chain: u16,
+    token_chain: u16,
+    token_address: &[u8; 32],
+) -> Pubkey {
+    let chain_be = chain.to_be_bytes();
+    let token_chain_be = token_chain.to_be_bytes();
+    let (pda, _) = Pubkey::find_program_address(
+        &[
+            ACCOUNT_SEED_PREFIX,
+            &chain_be,
+            &token_chain_be,
+            token_address,
+        ],
+        program_id,
+    );
+    pda
+}
+
+// ============================================================================
+// Ix data builders
+// ============================================================================
+
+#[derive(Clone, Copy)]
+struct NoReplayEntry {
+    chain: u16,
+    emitter: [u8; 32],
+    sequence: u64,
+    digest: [u8; 32],
+}
+
+fn build_backfill_noreplay_data(entries: &[NoReplayEntry]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(2 + entries.len() * 74);
+    data.push(IxDiscriminator::BackfillNoReplay as u8);
+    data.push(entries.len() as u8);
+    for e in entries {
+        data.extend_from_slice(&e.chain.to_be_bytes());
+        data.extend_from_slice(&e.emitter);
+        data.extend_from_slice(&e.sequence.to_be_bytes());
+        data.extend_from_slice(&e.digest);
+    }
+    data
+}
+
+#[derive(Clone, Copy)]
+struct BalanceEntry {
+    chain: u16,
+    token_chain: u16,
+    token_address: [u8; 32],
+    balance: [u8; 32],
+}
+
+fn build_backfill_balance_data(entries: &[BalanceEntry]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(2 + entries.len() * 68);
+    data.push(IxDiscriminator::BackfillBalance as u8);
+    data.push(entries.len() as u8);
+    for e in entries {
+        data.extend_from_slice(&e.chain.to_be_bytes());
+        data.extend_from_slice(&e.token_chain.to_be_bytes());
+        data.extend_from_slice(&e.token_address);
+        data.extend_from_slice(&e.balance);
+    }
+    data
+}
+
+fn system_program_id() -> Pubkey {
+    Pubkey::from_str("11111111111111111111111111111111").unwrap()
+}
+
+fn send_ix(rpc: &RpcClient, payer: &Keypair, ix: Instruction) -> Result<String, ClientError> {
+    let blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(
+        &[ix],
+        Some(&payer.pubkey()),
+        &[payer],
+        blockhash,
+    );
+    rpc.send_and_confirm_transaction(&tx).map(|s| s.to_string())
+}
+
+// ============================================================================
+// The test
+// ============================================================================
+
+#[test]
+#[ignore = "spawns surfpool subprocess; run via `just test-e2e-backfill` or `cargo test -- --ignored`"]
+fn surfpool_backfill_full_lifecycle() {
+    // ---------- Load .so artefacts ----------
+    let backfill_so = so_path(BACKFILL_PROGRAM_NAME);
+    let backfill_bytes = std::fs::read(&backfill_so).unwrap_or_else(|e| {
+        panic!(
+            "could not read {}: {e}. Run `just build` first.",
+            backfill_so.display()
+        )
+    });
+    let noreplay_bytes = std::fs::read(noreplay_so_path()).expect("solana_noreplay.so fixture");
+    eprintln!(
+        "[backfill-e2e] backfill={} bytes, noreplay={} bytes",
+        backfill_bytes.len(),
+        noreplay_bytes.len()
+    );
+
+    // ---------- Boot surfpool offline ----------
+    let guard = start_surfpool(SurfpoolOptions::offline("ga-backfill-e2e"));
+    let rpc_url = guard.rpc_url();
+    let rpc = guard.rpc_client();
+
+    // ---------- Fresh program keypair + payer airdrop ----------
+    let program_kp = Keypair::new();
+    let program_id = program_kp.pubkey();
+    let payer = Keypair::new();
+    eprintln!(
+        "[backfill-e2e] program_id={program_id} payer={}",
+        payer.pubkey()
+    );
+
+    let airdrop = rpc
+        .request_airdrop(&payer.pubkey(), 20_000_000_000)
+        .expect("airdrop payer");
+    await_confirmed("airdrop", Duration::from_secs(10), || {
+        rpc.confirm_transaction(&airdrop)
+    });
+
+    deploy_program(&rpc_url, &program_id, &backfill_bytes);
+    deploy_program(
+        &rpc_url,
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        &noreplay_bytes,
+    );
+
+    // ---------- Derive PDAs ----------
+    let (backfill_auth_pda, _) = derive_backfill_authority_pda(&program_id);
+    let (noreplay_auth_pda, _) = derive_noreplay_authority_pda(&program_id);
+
+    // ---------- Phase 1: BackfillNoReplay (3 entries, 2 buckets) ----------
+    let emitter = [0x42u8; 32];
+    let entries = [
+        NoReplayEntry {
+            chain: 2,
+            emitter,
+            sequence: 10,
+            digest: [0xa1u8; 32],
+        },
+        NoReplayEntry {
+            chain: 2,
+            emitter,
+            sequence: 500,
+            digest: [0xa2u8; 32],
+        },
+        NoReplayEntry {
+            chain: 2,
+            emitter,
+            sequence: 1500,
+            digest: [0xa3u8; 32],
+        },
+    ];
+    let bucket_0 = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 0);
+    let bucket_1 = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 1500);
+
+    let metas_no_replay = vec![
+        AccountMeta::new(payer.pubkey(), true),
+        AccountMeta::new(backfill_auth_pda, false),
+        AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
+        AccountMeta::new_readonly(noreplay_auth_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new(bucket_0, false),
+        AccountMeta::new(bucket_1, false),
+    ];
+    let ix = Instruction {
+        program_id,
+        accounts: metas_no_replay,
+        data: build_backfill_noreplay_data(&entries),
+    };
+    let sig = send_ix(&rpc, &payer, ix).expect("BackfillNoReplay tx");
+    eprintln!("[backfill-e2e] BackfillNoReplay tx={sig}");
+
+    // Three ACCDGST\0 log entries in original order.
+    let logs = fetch_accdgst_logs(&rpc_url, &sig);
+    assert_eq!(logs.len(), 3, "expected 3 commit-log entries");
+    for (i, e) in entries.iter().enumerate() {
+        let (chain, em, seq, dig, gsi) = &logs[i];
+        assert_eq!(*chain, e.chain);
+        assert_eq!(em, &e.emitter);
+        assert_eq!(*seq, e.sequence);
+        assert_eq!(dig, &e.digest);
+        assert_eq!(*gsi, 0, "guardian_set_index sentinel");
+    }
+
+    // Bitmap bits set in both buckets.
+    let b0 = rpc.get_account(&bucket_0).expect("bucket_0 account");
+    let b1 = rpc.get_account(&bucket_1).expect("bucket_1 account");
+    for seq in [10u64, 500] {
+        let bit = (seq % NOREPLAY_BITS_PER_BUCKET) as usize;
+        let byte = b0.data[NOREPLAY_BITMAP_OFFSET + bit / 8];
+        assert_eq!(byte & (1 << (bit % 8)), 1 << (bit % 8));
+    }
+    let bit = (1500u64 % NOREPLAY_BITS_PER_BUCKET) as usize;
+    let byte = b1.data[NOREPLAY_BITMAP_OFFSET + bit / 8];
+    assert_eq!(byte & (1 << (bit % 8)), 1 << (bit % 8));
+
+    // Backfill authority lazy-initialised with payer's pubkey.
+    let auth_acc = rpc
+        .get_account(&backfill_auth_pda)
+        .expect("backfill auth PDA");
+    assert_eq!(auth_acc.owner, program_id);
+    assert_eq!(auth_acc.data.len(), BackfillAuthorityLayout::LEN);
+    assert_eq!(&auth_acc.data[..32], payer.pubkey().as_array());
+    assert_eq!(auth_acc.data[32], 0, "not retired");
+
+    // ---------- Phase 2: BackfillBalance (2 accounts) ----------
+    let balances = [
+        BalanceEntry {
+            chain: 2,
+            token_chain: 2,
+            token_address: [0x11u8; 32],
+            balance: {
+                let mut b = [0u8; 32];
+                b[24..32].copy_from_slice(&1_000_000u64.to_be_bytes());
+                b
+            },
+        },
+        BalanceEntry {
+            chain: 4,
+            token_chain: 4,
+            token_address: [0x22u8; 32],
+            balance: {
+                let mut b = [0u8; 32];
+                b[24..32].copy_from_slice(&2_500_000u64.to_be_bytes());
+                b
+            },
+        },
+    ];
+    let bal_pda_0 = derive_balance_pda(&program_id, 2, 2, &[0x11u8; 32]);
+    let bal_pda_1 = derive_balance_pda(&program_id, 4, 4, &[0x22u8; 32]);
+    let metas_balance = vec![
+        AccountMeta::new(payer.pubkey(), true),
+        AccountMeta::new(backfill_auth_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new(bal_pda_0, false),
+        AccountMeta::new(bal_pda_1, false),
+    ];
+    let ix = Instruction {
+        program_id,
+        accounts: metas_balance,
+        data: build_backfill_balance_data(&balances),
+    };
+    let sig = send_ix(&rpc, &payer, ix).expect("BackfillBalance tx");
+    eprintln!("[backfill-e2e] BackfillBalance tx={sig}");
+
+    for (entry, pda) in balances.iter().zip([bal_pda_0, bal_pda_1]) {
+        let acc = rpc.get_account(&pda).expect("balance PDA");
+        assert_eq!(acc.owner, program_id);
+        assert_eq!(acc.data.len(), BalanceAccountLayout::LEN);
+        let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
+        assert_eq!(layout.chain, entry.chain);
+        assert_eq!(layout.token_chain, entry.token_chain);
+        assert_eq!(layout.token_address, entry.token_address);
+        assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
+    }
+
+    // ---------- Phase 3: Retire ----------
+    let metas_retire = vec![
+        AccountMeta::new(payer.pubkey(), true),
+        AccountMeta::new(backfill_auth_pda, false),
+    ];
+    let ix = Instruction {
+        program_id,
+        accounts: metas_retire,
+        data: vec![IxDiscriminator::Retire as u8],
+    };
+    let sig = send_ix(&rpc, &payer, ix).expect("Retire tx");
+    eprintln!("[backfill-e2e] Retire tx={sig}");
+
+    let auth_acc = rpc
+        .get_account(&backfill_auth_pda)
+        .expect("backfill auth PDA");
+    assert_eq!(auth_acc.data[32], 1, "retired flag set");
+
+    // ---------- Phase 4: BackfillNoReplay after retire → must fail ----------
+    let post_retire_entry = NoReplayEntry {
+        chain: 2,
+        emitter,
+        sequence: 9999,
+        digest: [0xb0u8; 32],
+    };
+    let bucket_post = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 9999);
+    let metas_post = vec![
+        AccountMeta::new(payer.pubkey(), true),
+        AccountMeta::new(backfill_auth_pda, false),
+        AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
+        AccountMeta::new_readonly(noreplay_auth_pda, false),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new(bucket_post, false),
+    ];
+    let ix = Instruction {
+        program_id,
+        accounts: metas_post,
+        data: build_backfill_noreplay_data(&[post_retire_entry]),
+    };
+    let err = send_ix(&rpc, &payer, ix).expect_err("post-retire ix must fail");
+    let msg = err.to_string();
+    eprintln!("[backfill-e2e] post-retire error: {msg}");
+    // Custom(4) = AuthorityRetired. The RPC client surfaces this as
+    // "custom program error: 0x4" in the error string.
+    assert!(
+        msg.contains("custom program error: 0x4") || msg.contains("Custom(4)"),
+        "expected AuthorityRetired (Custom(4)) in post-retire error, got: {msg}"
+    );
+
+    // Belt-and-braces: timeline check.
+    let _ = Instant::now();
+}

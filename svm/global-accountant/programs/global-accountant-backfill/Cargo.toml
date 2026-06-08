@@ -31,6 +31,17 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 solana-address = { version = "2.6", features = ["curve25519"] }
 global-accountant-backfill = { path = "." }
 sha2 = "=0.10.9"
+# Surfpool e2e helpers and ACCDGST\0 commit-log parsing.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+serde_json.workspace = true
+# Pinned exact per CLAUDE.md; already in the workspace lock via the operational
+# program's identical use.
+base64 = "=0.22.1"
 
 [lints]
 workspace = true

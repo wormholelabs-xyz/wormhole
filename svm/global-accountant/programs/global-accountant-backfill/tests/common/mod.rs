@@ -5,6 +5,8 @@
 
 #![allow(dead_code)] // Different test files use different subsets.
 
+pub mod surfpool;
+
 use {
     global_accountant_definitions::NOREPLAY_PROGRAM_ID,
     mollusk_svm::{
