@@ -247,6 +247,16 @@ pub const NOREPLAY_PROGRAM_ID: Pubkey = [
 /// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][sequence: u64 LE]`.
 pub const NOREPLAY_MARK_USED_DISCRIMINATOR: u8 = 1;
 
+/// Discriminator for `solana-noreplay`'s `MarkUsedBulk`. Wire format:
+/// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][bucket_index: u64 LE]
+///  [or_mask: 128 B]`. Semantics: `bitmap |= or_mask` (OR-only; never clears
+/// bits). Used by the backfill program to flip many bits per CPI, dropping
+/// per-entry CU from ~3,000 to ~80 in the dense-bucket case.
+///
+/// Allocated as the next free byte in the noreplay program's dispatch table
+/// after `CreateBitmap=0`, `MarkUsed=1`, `UnmarkUsed=2`.
+pub const NOREPLAY_MARK_USED_BULK_DISCRIMINATOR: u8 = 3;
+
 /// Bits per bitmap bucket. Bucket index is `sequence / BITS_PER_BUCKET`, bit
 /// offset is `sequence % BITS_PER_BUCKET`.
 pub const NOREPLAY_BITS_PER_BUCKET: u64 = 1024;

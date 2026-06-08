@@ -1,15 +1,22 @@
 //! Integration tests for `BackfillNoReplay` driven against the real
 //! `solana_noreplay.so` co-deployed in mollusk.
+//!
+//! Contract under test (post-`MarkUsedBulk` refactor):
+//! - Entries strictly ascending by `(chain, emitter, sequence)`.
+//! - Caller passes one bucket account per unique
+//!   `(chain, emitter, sequence / 1024)` in entry order.
+//! - Handler CPIs `MarkUsedBulk` once per bucket (not once per entry).
+//! - Each entry emits one canonical `ACCDGST\0` commit-log payload.
 
 #![allow(clippy::too_many_arguments)]
 
 use {
-    global_accountant_backfill::{Instruction as IxDiscriminator, BackfillError},
+    global_accountant_backfill::{BackfillError, Instruction as IxDiscriminator},
+    global_accountant_backfill::state::{BackfillAuthorityLayout, BACKFILL_AUTHORITY_SEED_PREFIX},
     global_accountant_definitions::{
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
         NOREPLAY_PROGRAM_ID,
     },
-    global_accountant_backfill::state::{BackfillAuthorityLayout, BACKFILL_AUTHORITY_SEED_PREFIX},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
     solana_instruction::{error::InstructionError, AccountMeta, Instruction},
@@ -19,10 +26,6 @@ use {
 mod common;
 use common::{keyed_account_for_noreplay_program, mollusk_with_noreplay};
 
-// ============================================================================
-// Fixed test program ID. Distinct from the operational program's [7u8; 32] so
-// PDA derivations don't collide across the two test suites.
-// ============================================================================
 fn program_id() -> Pubkey {
     Pubkey::new_from_array([8u8; 32])
 }
@@ -95,170 +98,330 @@ fn uninitialised_pda_account() -> Account {
 // Wire format builder
 // ============================================================================
 
-/// Wire shape (post-discriminator):
-///
-/// | offset | size  | field            |
-/// |--------|-------|------------------|
-/// | 0      | 1     | count (u8)       |
-/// | 1+i*74 | 2     | chain (u16 BE)   |
-/// | 3+i*74 | 32    | emitter          |
-/// | 35+i*74| 8     | sequence (u64 BE)|
-/// | 43+i*74| 32    | digest           |
-fn build_ix_data(entries: &[(u16, [u8; 32], u64, [u8; 32])]) -> Vec<u8> {
+#[derive(Clone, Copy)]
+struct Entry {
+    chain: u16,
+    emitter: [u8; 32],
+    sequence: u64,
+    digest: [u8; 32],
+}
+
+fn build_ix_data(entries: &[Entry]) -> Vec<u8> {
     let mut data = Vec::with_capacity(1 + 1 + entries.len() * 74);
     data.push(IxDiscriminator::BackfillNoReplay as u8);
     data.push(entries.len() as u8);
-    for (chain, emitter, sequence, digest) in entries {
-        data.extend_from_slice(&chain.to_be_bytes());
-        data.extend_from_slice(emitter);
-        data.extend_from_slice(&sequence.to_be_bytes());
-        data.extend_from_slice(digest);
+    for e in entries {
+        data.extend_from_slice(&e.chain.to_be_bytes());
+        data.extend_from_slice(&e.emitter);
+        data.extend_from_slice(&e.sequence.to_be_bytes());
+        data.extend_from_slice(&e.digest);
     }
     data
+}
+
+/// Derive the unique buckets for `entries`, preserving entry order. Each
+/// returned `Pubkey` corresponds to one CPI `MarkUsedBulk` the handler will
+/// perform.
+fn unique_buckets_in_order(noreplay_authority: &Pubkey, entries: &[Entry]) -> Vec<Pubkey> {
+    let mut out: Vec<Pubkey> = Vec::new();
+    let mut prev_key: Option<(u16, [u8; 32], u64)> = None;
+    for e in entries {
+        let cur_key = (e.chain, e.emitter, e.sequence / NOREPLAY_BITS_PER_BUCKET);
+        if prev_key != Some(cur_key) {
+            out.push(derive_noreplay_bucket(
+                noreplay_authority,
+                e.chain,
+                &e.emitter,
+                e.sequence,
+            ));
+            prev_key = Some(cur_key);
+        }
+    }
+    out
+}
+
+/// Build the full `(accounts, metas)` pair for an N-entry `BackfillNoReplay`
+/// invocation. Caller responsibility: entries are strictly ascending by
+/// `(chain, emitter, sequence)`; `unique_buckets_in_order` derives the bucket
+/// list in matching order.
+fn build_invocation(
+    signer: Pubkey,
+    entries: &[Entry],
+) -> (Vec<(Pubkey, Account)>, Vec<AccountMeta>) {
+    let (backfill_auth_pda, _) = derive_backfill_authority_pda();
+    let (noreplay_auth_pda, _) = derive_noreplay_authority_pda();
+    let buckets = unique_buckets_in_order(&noreplay_auth_pda, entries);
+
+    let (np_id, np_acc) = keyed_account_for_noreplay_program();
+    let (sys_id, sys_acc) = keyed_account_for_system_program();
+
+    let mut accounts: Vec<(Pubkey, Account)> = vec![
+        (signer, signer_account(10_000_000_000)),
+        (backfill_auth_pda, uninitialised_pda_account()),
+        (np_id, np_acc),
+        (noreplay_auth_pda, uninitialised_pda_account()),
+        (sys_id, sys_acc),
+    ];
+    let mut metas: Vec<AccountMeta> = vec![
+        AccountMeta::new(signer, true),
+        AccountMeta::new(backfill_auth_pda, false),
+        AccountMeta::new_readonly(np_id, false),
+        AccountMeta::new_readonly(noreplay_auth_pda, false),
+        AccountMeta::new_readonly(sys_id, false),
+    ];
+    for bucket in &buckets {
+        accounts.push((*bucket, uninitialised_pda_account()));
+        metas.push(AccountMeta::new(*bucket, false));
+    }
+    (accounts, metas)
+}
+
+fn assert_bit_set(account: &Account, sequence: u64) {
+    let bit = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
+    let byte_idx = NOREPLAY_BITMAP_OFFSET + bit / 8;
+    let mask = 1u8 << (bit % 8);
+    assert_eq!(
+        account.data[byte_idx] & mask,
+        mask,
+        "expected bit {bit} set in bitmap byte {byte_idx}; got {:02x}",
+        account.data[byte_idx]
+    );
 }
 
 // ============================================================================
 // Tests
 // ============================================================================
 
-/// Happy path: a single-entry `BackfillNoReplay` from a fresh state lazy-inits
-/// the backfill authority PDA with the signer's pubkey, flips the canonical
-/// NoReplay bit, and emits one canonical `ACCDGST\0` commit-log payload
-/// indexer-identical to the operational program's emission.
+/// Happy path: single entry. Lazy-inits the backfill authority PDA, flips one
+/// bit via `MarkUsedBulk`, emits one commit-log.
 #[test]
-fn backfill_noreplay_single_entry_flips_bit_and_emits_canonical_log() {
+fn backfill_noreplay_single_entry_flips_bit() {
     let mollusk = mollusk();
     let signer = Pubkey::new_from_array([42u8; 32]);
-
-    let (backfill_auth_pda, _backfill_bump) = derive_backfill_authority_pda();
-    let (noreplay_auth_pda, _noreplay_bump) = derive_noreplay_authority_pda();
-
-    let chain = 2u16;
-    let emitter = [0x11u8; 32];
-    let sequence = 42u64;
-    let digest = [0x77u8; 32];
-
-    let bucket = derive_noreplay_bucket(&noreplay_auth_pda, chain, &emitter, sequence);
-
-    let (np_id, np_acc) = keyed_account_for_noreplay_program();
-    let (sys_id, sys_acc) = keyed_account_for_system_program();
-
-    let accounts = vec![
-        (signer, signer_account(10_000_000_000)),
-        (backfill_auth_pda, uninitialised_pda_account()),
-        (np_id, np_acc),
-        (noreplay_auth_pda, uninitialised_pda_account()),
-        (sys_id, sys_acc),
-        (bucket, uninitialised_pda_account()),
-    ];
-
-    let metas = vec![
-        AccountMeta::new(signer, true),
-        AccountMeta::new(backfill_auth_pda, false),
-        AccountMeta::new_readonly(np_id, false),
-        AccountMeta::new_readonly(noreplay_auth_pda, false),
-        AccountMeta::new_readonly(sys_id, false),
-        AccountMeta::new(bucket, false),
-    ];
+    let entries = [Entry {
+        chain: 2,
+        emitter: [0x11u8; 32],
+        sequence: 42,
+        digest: [0x77u8; 32],
+    }];
+    let (accounts, metas) = build_invocation(signer, &entries);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[(chain, emitter, sequence, digest)]),
+        data: build_ix_data(&entries),
     };
-
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
         result.program_result,
         ProgramResult::Success,
-        "BackfillNoReplay should succeed; raw_result={:?}",
+        "raw_result={:?}",
         result.raw_result
     );
 
-    // Backfill authority PDA must hold the signer's pubkey, retired=0.
-    let auth_acc = result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &backfill_auth_pda)
-        .map(|(_, a)| a)
-        .expect("backfill auth PDA in resulting accounts");
-    assert_eq!(
-        auth_acc.data.len(),
-        BackfillAuthorityLayout::LEN,
-        "backfill auth PDA size"
-    );
-    assert_eq!(
-        &auth_acc.data[..32],
-        signer.as_array(),
-        "backfill auth PDA authority field"
-    );
-    assert_eq!(auth_acc.data[32], 0, "backfill auth PDA not retired");
-    assert_eq!(auth_acc.owner, program_id(), "backfill auth PDA owner");
+    let (auth_pda, _) = derive_backfill_authority_pda();
+    let auth = result.resulting_accounts.iter().find(|(k, _)| k == &auth_pda).unwrap().1.clone();
+    assert_eq!(auth.data.len(), BackfillAuthorityLayout::LEN);
+    assert_eq!(&auth.data[..32], signer.as_array());
+    assert_eq!(auth.data[32], 0);
+    assert_eq!(auth.owner, program_id());
 
-    // NoReplay bucket must be initialised and the canonical bit set. Log
-    // emission is asserted in the surfpool e2e test (mollusk does not expose
-    // program logs in `InstructionResult`).
-    let bucket_acc = result
-        .resulting_accounts
-        .iter()
-        .find(|(k, _)| k == &bucket)
-        .map(|(_, a)| a)
-        .expect("bucket PDA in resulting accounts");
-    let expected_len = NOREPLAY_BITMAP_OFFSET + global_accountant_definitions::NOREPLAY_BITMAP_BYTES;
-    assert_eq!(bucket_acc.data.len(), expected_len, "bucket PDA size");
-    let bit = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
-    let byte_idx = NOREPLAY_BITMAP_OFFSET + bit / 8;
-    let bitmask = 1u8 << (bit % 8);
+    let (np_auth, _) = derive_noreplay_authority_pda();
+    let bucket = derive_noreplay_bucket(&np_auth, 2, &[0x11u8; 32], 42);
+    let bucket_acc = result.resulting_accounts.iter().find(|(k, _)| k == &bucket).unwrap().1.clone();
+    assert_bit_set(&bucket_acc, 42);
+}
+
+/// Three entries in the same bucket (all sequences in `[0, 1024)` for the
+/// same `(chain, emitter)`). Handler must batch into one CPI; the test
+/// asserts all three bits are set in the single bucket account.
+#[test]
+fn backfill_noreplay_multiple_entries_same_bucket_one_cpi() {
+    let mollusk = mollusk();
+    let signer = Pubkey::new_from_array([43u8; 32]);
+    let emitter = [0x22u8; 32];
+    let entries = [
+        Entry { chain: 2, emitter, sequence: 10, digest: [0xaau8; 32] },
+        Entry { chain: 2, emitter, sequence: 200, digest: [0xbbu8; 32] },
+        Entry { chain: 2, emitter, sequence: 800, digest: [0xccu8; 32] },
+    ];
+    let (accounts, metas) = build_invocation(signer, &entries);
+    // Sanity: one bucket only.
+    assert_eq!(metas.len(), 5 + 1);
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&entries),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
-        bucket_acc.data[byte_idx] & bitmask,
-        bitmask,
-        "expected bit {bit} set in noreplay bitmap byte {byte_idx}"
+        result.program_result,
+        ProgramResult::Success,
+        "raw_result={:?}",
+        result.raw_result
+    );
+
+    let (np_auth, _) = derive_noreplay_authority_pda();
+    let bucket = derive_noreplay_bucket(&np_auth, 2, &emitter, 0);
+    let bucket_acc = result.resulting_accounts.iter().find(|(k, _)| k == &bucket).unwrap().1.clone();
+    assert_bit_set(&bucket_acc, 10);
+    assert_bit_set(&bucket_acc, 200);
+    assert_bit_set(&bucket_acc, 800);
+}
+
+/// Three entries spanning two buckets — first two in bucket 0, third in
+/// bucket 1. Handler must emit two `MarkUsedBulk` CPIs.
+#[test]
+fn backfill_noreplay_multiple_entries_different_buckets() {
+    let mollusk = mollusk();
+    let signer = Pubkey::new_from_array([44u8; 32]);
+    let emitter = [0x33u8; 32];
+    let entries = [
+        Entry { chain: 2, emitter, sequence: 10, digest: [0xaau8; 32] },
+        Entry { chain: 2, emitter, sequence: 500, digest: [0xbbu8; 32] },
+        Entry { chain: 2, emitter, sequence: 1500, digest: [0xccu8; 32] },
+    ];
+    let (accounts, metas) = build_invocation(signer, &entries);
+    assert_eq!(metas.len(), 5 + 2, "expected two unique buckets");
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&entries),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
+    assert_eq!(
+        result.program_result,
+        ProgramResult::Success,
+        "raw_result={:?}",
+        result.raw_result
+    );
+
+    let (np_auth, _) = derive_noreplay_authority_pda();
+    let bucket_0 = derive_noreplay_bucket(&np_auth, 2, &emitter, 0);
+    let bucket_1 = derive_noreplay_bucket(&np_auth, 2, &emitter, 1500);
+
+    let b0 = result.resulting_accounts.iter().find(|(k, _)| k == &bucket_0).unwrap().1.clone();
+    assert_bit_set(&b0, 10);
+    assert_bit_set(&b0, 500);
+
+    let b1 = result.resulting_accounts.iter().find(|(k, _)| k == &bucket_1).unwrap().1.clone();
+    assert_bit_set(&b1, 1500);
+}
+
+/// Entries with the wrong sort order are rejected before any CPI.
+#[test]
+fn backfill_noreplay_out_of_order_rejects() {
+    let mollusk = mollusk();
+    let signer = Pubkey::new_from_array([45u8; 32]);
+    let emitter = [0x44u8; 32];
+    let entries = [
+        Entry { chain: 2, emitter, sequence: 100, digest: [0xaau8; 32] },
+        Entry { chain: 2, emitter, sequence: 50, digest: [0xbbu8; 32] }, // out of order
+    ];
+    // Hand-build the invocation with one bucket account; the data describes
+    // two entries in the same bucket, so the test expects an in-order failure.
+    let (accounts, metas) = build_invocation(signer, &entries);
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&entries),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        matches!(
+            &result.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::InvalidInstructionData as u32
+        ),
+        "expected InvalidInstructionData on out-of-order entries, got {:?}",
+        result.raw_result
     );
 }
 
-/// `BackfillError::InvalidInstructionData` if no entries are encoded.
+/// Duplicate entries (same `(chain, emitter, sequence)` twice) are rejected
+/// — strict-ascending forbids `==` as well as `<`.
+#[test]
+fn backfill_noreplay_duplicate_entries_reject() {
+    let mollusk = mollusk();
+    let signer = Pubkey::new_from_array([46u8; 32]);
+    let emitter = [0x55u8; 32];
+    let dup = Entry { chain: 2, emitter, sequence: 42, digest: [0xaau8; 32] };
+    let entries = [dup, dup];
+    let (accounts, metas) = build_invocation(signer, &entries);
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&entries),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        matches!(
+            &result.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::InvalidInstructionData as u32
+        ),
+        "expected InvalidInstructionData on duplicate entries, got {:?}",
+        result.raw_result
+    );
+}
+
+/// Caller passes more bucket accounts than the handler will consume — must
+/// reject so a buggy/malicious caller cannot grief us with stray accounts.
+#[test]
+fn backfill_noreplay_extra_bucket_account_rejects() {
+    let mollusk = mollusk();
+    let signer = Pubkey::new_from_array([47u8; 32]);
+    let emitter = [0x66u8; 32];
+    let entries = [Entry { chain: 2, emitter, sequence: 7, digest: [0xaau8; 32] }];
+
+    let (mut accounts, mut metas) = build_invocation(signer, &entries);
+    // Append one unused bucket account.
+    let (np_auth, _) = derive_noreplay_authority_pda();
+    let stray = derive_noreplay_bucket(&np_auth, 999, &[0x99u8; 32], 0);
+    accounts.push((stray, uninitialised_pda_account()));
+    metas.push(AccountMeta::new(stray, false));
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&entries),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        matches!(
+            &result.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::InvalidInstructionData as u32
+        ),
+        "expected InvalidInstructionData on extra bucket account, got {:?}",
+        result.raw_result
+    );
+}
+
+/// Zero-entry call rejects before any account touch.
 #[test]
 fn backfill_noreplay_zero_entries_rejects() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([42u8; 32]);
-    let (backfill_auth_pda, _) = derive_backfill_authority_pda();
-    let (noreplay_auth_pda, _) = derive_noreplay_authority_pda();
-
-    let (np_id, np_acc) = keyed_account_for_noreplay_program();
-    let (sys_id, sys_acc) = keyed_account_for_system_program();
-
-    let accounts = vec![
-        (signer, signer_account(10_000_000_000)),
-        (backfill_auth_pda, uninitialised_pda_account()),
-        (np_id, np_acc),
-        (noreplay_auth_pda, uninitialised_pda_account()),
-        (sys_id, sys_acc),
-    ];
-    let metas = vec![
-        AccountMeta::new(signer, true),
-        AccountMeta::new(backfill_auth_pda, false),
-        AccountMeta::new_readonly(np_id, false),
-        AccountMeta::new_readonly(noreplay_auth_pda, false),
-        AccountMeta::new_readonly(sys_id, false),
-    ];
+    let signer = Pubkey::new_from_array([48u8; 32]);
+    let (accounts, metas) = build_invocation(signer, &[]);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
         data: build_ix_data(&[]),
     };
-
     let result = mollusk.process_instruction(&ix, &accounts);
-    // `raw_result` carries the `InstructionError`; mollusk only converts
-    // `Custom(u32)` to `ProgramError::Custom` when the variant fits. Either is
-    // fine to match on — `raw_result` keeps us off the `solana-program-error`
-    // dev-dep surface.
     assert!(
         matches!(
             &result.raw_result,
-            Err(InstructionError::Custom(code)) if *code == BackfillError::InvalidInstructionData as u32
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::InvalidInstructionData as u32
         ),
-        "expected InvalidInstructionData on empty entry list, got {:?}",
+        "expected InvalidInstructionData on zero entries, got {:?}",
         result.raw_result
     );
 }
