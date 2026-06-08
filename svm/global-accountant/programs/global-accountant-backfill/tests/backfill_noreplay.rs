@@ -402,6 +402,124 @@ fn backfill_noreplay_extra_bucket_account_rejects() {
     );
 }
 
+/// First call lazy-inits the authority PDA with the signer's pubkey. A
+/// subsequent call from a DIFFERENT signer must be rejected as
+/// `AuthorityMismatch` — the backfill operator pubkey is single-use post-init.
+#[test]
+fn backfill_noreplay_second_call_with_different_signer_rejects() {
+    let mollusk = mollusk();
+    let signer_a = Pubkey::new_from_array([42u8; 32]);
+    let signer_b = Pubkey::new_from_array([99u8; 32]);
+
+    // First call: signer_a inits the authority PDA.
+    let entry_a = Entry {
+        chain: 2,
+        emitter: [0x11u8; 32],
+        sequence: 42,
+        digest: [0x77u8; 32],
+    };
+    let (accounts_a, metas_a) = build_invocation(signer_a, &[entry_a]);
+    let ix_a = Instruction {
+        program_id: program_id(),
+        accounts: metas_a,
+        data: build_ix_data(&[entry_a]),
+    };
+    let result_a = mollusk.process_instruction(&ix_a, &accounts_a);
+    assert_eq!(
+        result_a.program_result,
+        ProgramResult::Success,
+        "first call should succeed; raw_result={:?}",
+        result_a.raw_result
+    );
+
+    // Second call: signer_b, but the auth PDA is already stamped with signer_a.
+    let entry_b = Entry {
+        chain: 3,
+        emitter: [0x22u8; 32],
+        sequence: 7,
+        digest: [0x88u8; 32],
+    };
+    let (mut accounts_b, metas_b) = build_invocation(signer_b, &[entry_b]);
+
+    // Carry forward the initialised auth PDA so the second call sees it.
+    let (auth_pda, _) = derive_backfill_authority_pda();
+    let auth_post = result_a.get_account(&auth_pda).unwrap().clone();
+    for (k, acc) in accounts_b.iter_mut() {
+        if *k == auth_pda {
+            *acc = auth_post.clone();
+            break;
+        }
+    }
+
+    let ix_b = Instruction {
+        program_id: program_id(),
+        accounts: metas_b,
+        data: build_ix_data(&[entry_b]),
+    };
+    let result_b = mollusk.process_instruction(&ix_b, &accounts_b);
+    assert!(
+        matches!(
+            &result_b.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::AuthorityMismatch as u32
+        ),
+        "expected AuthorityMismatch on second-signer call, got {:?}",
+        result_b.raw_result
+    );
+}
+
+/// A pre-retired authority PDA (`retired = 1`) rejects all subsequent
+/// invocations — even from the original signer. Simulates the post-`Retire`
+/// kill-switch state ahead of `RetireAuthority`'s landing.
+#[test]
+fn backfill_noreplay_retired_authority_rejects() {
+    let mollusk = mollusk();
+    let signer = Pubkey::new_from_array([42u8; 32]);
+
+    // Pre-populate the auth PDA with retired=1.
+    let mut layout: BackfillAuthorityLayout = bytemuck::Zeroable::zeroed();
+    layout.authority = *signer.as_array();
+    layout.retired = 1;
+    let (auth_pda, _) = derive_backfill_authority_pda();
+    let retired_auth = Account {
+        lamports: 1_000_000,
+        data: bytemuck::bytes_of(&layout).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let entry = Entry {
+        chain: 2,
+        emitter: [0x11u8; 32],
+        sequence: 42,
+        digest: [0x77u8; 32],
+    };
+    let (mut accounts, metas) = build_invocation(signer, &[entry]);
+    for (k, acc) in accounts.iter_mut() {
+        if *k == auth_pda {
+            *acc = retired_auth.clone();
+            break;
+        }
+    }
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&[entry]),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        matches!(
+            &result.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::AuthorityRetired as u32
+        ),
+        "expected AuthorityRetired, got {:?}",
+        result.raw_result
+    );
+}
+
 /// Zero-entry call rejects before any account touch.
 #[test]
 fn backfill_noreplay_zero_entries_rejects() {
