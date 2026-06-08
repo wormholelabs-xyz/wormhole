@@ -1825,6 +1825,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "global-accountant-backfill"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "global-accountant-backfill",
+ "global-accountant-definitions",
+ "mollusk-svm",
+ "pinocchio",
+ "pinocchio-system",
+ "sha2 0.10.9",
+ "solana-account",
+ "solana-address 2.6.0",
+ "solana-instruction",
+ "solana-pubkey 4.2.0",
+]
+
+[[package]]
 name = "global-accountant-definitions"
 version = "0.1.0"
 dependencies = [

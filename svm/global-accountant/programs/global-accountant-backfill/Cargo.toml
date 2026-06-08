@@ -1,0 +1,36 @@
+[package]
+name = "global-accountant-backfill"
+description = "Wormhole Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits and Balance PDAs from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+bpf-entrypoint = []
+
+[dependencies]
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+pinocchio.workspace = true
+pinocchio-system.workspace = true
+solana-address = { version = "2.6", features = ["curve25519"] }
+
+[dev-dependencies]
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-address = { version = "2.6", features = ["curve25519"] }
+global-accountant-backfill = { path = "." }
+sha2 = "=0.10.9"
+
+[lints]
+workspace = true
