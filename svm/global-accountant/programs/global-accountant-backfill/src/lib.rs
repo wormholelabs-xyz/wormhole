@@ -54,7 +54,10 @@ pub enum BackfillError {
     AuthorityMismatch = 3,
     /// Authority has been retired via the `Retire` ix; further calls reject.
     AuthorityRetired = 4,
-    /// `solana-noreplay` `MarkUsed` CPI returned an error.
+    /// Retired — never raised. `pinocchio::cpi::invoke_signed` only surfaces
+    /// pre-CPI validation errors via `Result`; an inner-program failure aborts
+    /// THIS program directly via the SBF runtime, bypassing any `map_err`.
+    /// Kept so error-code numbering stays stable.
     NoReplayCpiFailed = 5,
 }
 

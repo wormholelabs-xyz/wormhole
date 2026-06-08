@@ -58,7 +58,11 @@ pub enum GlobalAccountantError {
     NotEnabled = 6,
     /// `(chain, emitter, sequence)` already marked accounted-for in NoReplay.
     AlreadyAccounted = 7,
-    /// NoReplay `MarkUsed` CPI failed after the pre-check passed (race backstop).
+    /// Retired — never raised. `pinocchio::cpi::invoke_signed` only surfaces
+    /// pre-CPI validation errors via `Result`; an inner-program failure aborts
+    /// THIS program directly via the SBF runtime, bypassing any `map_err`.
+    /// Race-loss `AccountAlreadyInitialized` from `MarkUsed` propagates as
+    /// itself, not as this code. Kept so error-code numbering stays stable.
     NoReplayCpiFailed = 8,
     /// Signature failed `secp256k1_recover`, or the recovered pubkey did not
     /// match the `guardian_index` in the GuardianSet PDA.

@@ -217,7 +217,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (11) NoReplay mark-used -----
     //
-    // Claim the sequence slot; a racing tx surfaces as `NoReplayCpiFailed`.
+    // Claim the sequence slot; a racing tx surfaces as the inner noreplay
+    // program's `AccountAlreadyInitialized` — the SBF runtime propagates it
+    // directly (see `noreplay::mark_used` comment).
     noreplay::mark_used(
         payer,
         noreplay_bucket,

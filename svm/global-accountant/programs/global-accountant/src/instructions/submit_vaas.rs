@@ -110,7 +110,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // ----- (6) NoReplay mark-used CPI -----
     //
     // Burn the slot before any balance change; tx-level rollback covers later
-    // failures. A racing tx surfaces as `NoReplayCpiFailed`.
+    // failures. A racing tx surfaces as the inner noreplay program's
+    // `AccountAlreadyInitialized` — the SBF runtime propagates it directly
+    // (see `noreplay::mark_used` comment).
     noreplay::mark_used(
         submitter,
         noreplay_bucket,

@@ -79,10 +79,17 @@ pub fn mark_used_bulk(
     ];
     let signers = [Signer::from(&signer_seeds)];
 
+    // `invoke_signed` itself only returns `Err(...)` for *pre-CPI validation*
+    // failures — `NotEnoughAccountKeys`, `InvalidArgument` (address mismatch),
+    // borrow-check conflicts. If the inner noreplay program returns a
+    // `ProgramError`, the SBF runtime aborts THIS program with the inner
+    // exit code directly; pinocchio's `invoke_signed` never sees that error.
+    // So mapping the returned `Result` to a custom "CPI failed" code would
+    // only ever fire on caller bugs in this helper, which are better surfaced
+    // as their natural variant for debuggability. Pass through unchanged.
     pinocchio::cpi::invoke_signed(
         &instruction,
         &[payer, noreplay_authority, bucket, system_program],
         &signers,
     )
-    .map_err(|_| err(BackfillError::NoReplayCpiFailed))
 }
