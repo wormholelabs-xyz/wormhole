@@ -29,7 +29,6 @@ pub fn process_instruction(
         Some(Instruction::BackfillBalance) => {
             instructions::backfill_balance::process(program_id, accounts, rest)
         }
-        Some(Instruction::Retire) => instructions::retire::process(program_id, accounts, rest),
         None => Err(err(BackfillError::InvalidInstruction)),
     }
 }

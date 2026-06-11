@@ -1,4 +1,4 @@
-//! Surfpool E2E — full backfill program lifecycle against a real subprocess
+//! Surfpool E2E — backfill program lifecycle against a real subprocess
 //! validator, with the production `solana_noreplay.so` co-deployed.
 //!
 //! Phases the test exercises in order:
@@ -8,15 +8,13 @@
 //!    entries appear via `meta.logMessages` over real RPC.
 //! 2. `BackfillBalance` for two accounts — assert both `BalanceAccountLayout`
 //!    PDAs are written at canonical seeds via `getAccountInfo`.
-//! 3. `Retire` — assert the authority PDA's `retired` flag flips to 1.
-//! 4. Replay `BackfillNoReplay` — assert it fails with `AuthorityRetired`.
+//! 3. `BackfillNoReplay` signed by a non-authority keypair — assert the
+//!    tx fails with `UnauthorizedCaller` (Custom(3)). Establishes that the
+//!    compile-time `BACKFILL_AUTHORITY` const gate is enforced on-chain.
 
 #![allow(clippy::too_many_arguments)]
 
-use std::{
-    str::FromStr,
-    time::{Duration, Instant},
-};
+use std::{str::FromStr, time::Duration};
 
 use solana_client::{client_error::ClientError, rpc_client::RpcClient};
 use solana_instruction::{AccountMeta, Instruction};
@@ -25,10 +23,7 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use global_accountant_backfill::{
-    state::{BackfillAuthorityLayout, BACKFILL_AUTHORITY_SEED_PREFIX},
-    Instruction as IxDiscriminator,
-};
+use global_accountant_backfill::Instruction as IxDiscriminator;
 use global_accountant_definitions::{
     BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
     NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
@@ -53,10 +48,6 @@ fn noreplay_so_path() -> std::path::PathBuf {
 // ============================================================================
 // PDA derivations
 // ============================================================================
-
-fn derive_backfill_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[BACKFILL_AUTHORITY_SEED_PREFIX], program_id)
-}
 
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
@@ -194,7 +185,7 @@ fn send_ix(rpc: &RpcClient, payer: &Keypair, ix: Instruction) -> Result<String, 
 
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `just test-e2e-backfill` or `cargo test -- --ignored`"]
-fn surfpool_backfill_full_lifecycle() {
+fn surfpool_backfill_lifecycle() {
     // ---------- Load .so artefacts ----------
     let backfill_so = so_path(BACKFILL_PROGRAM_NAME);
     let backfill_bytes = std::fs::read(&backfill_so).unwrap_or_else(|e| {
@@ -215,20 +206,30 @@ fn surfpool_backfill_full_lifecycle() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    // ---------- Fresh program keypair + payer airdrop ----------
+    // ---------- Fresh program keypair + authority/payer airdrop ----------
     let program_kp = Keypair::new();
     let program_id = program_kp.pubkey();
-    let payer = Keypair::new();
+    // Payer must equal `BACKFILL_AUTHORITY` — deterministic test keypair
+    // (seed `[1u8; 32]`) keeps fixtures reproducible.
+    let authority = Keypair::new_from_array([1u8; 32]);
+    let stranger = Keypair::new();
     eprintln!(
-        "[backfill-e2e] program_id={program_id} payer={}",
-        payer.pubkey()
+        "[backfill-e2e] program_id={program_id} authority={} stranger={}",
+        authority.pubkey(),
+        stranger.pubkey()
     );
 
     let airdrop = rpc
-        .request_airdrop(&payer.pubkey(), 20_000_000_000)
-        .expect("airdrop payer");
+        .request_airdrop(&authority.pubkey(), 20_000_000_000)
+        .expect("airdrop authority");
     await_confirmed("airdrop", Duration::from_secs(10), || {
         rpc.confirm_transaction(&airdrop)
+    });
+    let stranger_drop = rpc
+        .request_airdrop(&stranger.pubkey(), 2_000_000_000)
+        .expect("airdrop stranger");
+    await_confirmed("airdrop-stranger", Duration::from_secs(10), || {
+        rpc.confirm_transaction(&stranger_drop)
     });
 
     deploy_program(&rpc_url, &program_id, &backfill_bytes);
@@ -239,7 +240,6 @@ fn surfpool_backfill_full_lifecycle() {
     );
 
     // ---------- Derive PDAs ----------
-    let (backfill_auth_pda, _) = derive_backfill_authority_pda(&program_id);
     let (noreplay_auth_pda, _) = derive_noreplay_authority_pda(&program_id);
 
     // ---------- Phase 1: BackfillNoReplay (3 entries, 2 buckets) ----------
@@ -268,8 +268,7 @@ fn surfpool_backfill_full_lifecycle() {
     let bucket_1 = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 1500);
 
     let metas_no_replay = vec![
-        AccountMeta::new(payer.pubkey(), true),
-        AccountMeta::new(backfill_auth_pda, false),
+        AccountMeta::new(authority.pubkey(), true),
         AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
         AccountMeta::new_readonly(noreplay_auth_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
@@ -281,7 +280,7 @@ fn surfpool_backfill_full_lifecycle() {
         accounts: metas_no_replay,
         data: build_backfill_noreplay_data(&entries),
     };
-    let sig = send_ix(&rpc, &payer, ix).expect("BackfillNoReplay tx");
+    let sig = send_ix(&rpc, &authority, ix).expect("BackfillNoReplay tx");
     eprintln!("[backfill-e2e] BackfillNoReplay tx={sig}");
 
     // Three ACCDGST\0 log entries in original order.
@@ -307,15 +306,6 @@ fn surfpool_backfill_full_lifecycle() {
     let bit = (1500u64 % NOREPLAY_BITS_PER_BUCKET) as usize;
     let byte = b1.data[NOREPLAY_BITMAP_OFFSET + bit / 8];
     assert_eq!(byte & (1 << (bit % 8)), 1 << (bit % 8));
-
-    // Backfill authority lazy-initialised with payer's pubkey.
-    let auth_acc = rpc
-        .get_account(&backfill_auth_pda)
-        .expect("backfill auth PDA");
-    assert_eq!(auth_acc.owner, program_id);
-    assert_eq!(auth_acc.data.len(), BackfillAuthorityLayout::LEN);
-    assert_eq!(&auth_acc.data[..32], payer.pubkey().as_array());
-    assert_eq!(auth_acc.data[32], 0, "not retired");
 
     // ---------- Phase 2: BackfillBalance (2 accounts) ----------
     let balances = [
@@ -343,8 +333,7 @@ fn surfpool_backfill_full_lifecycle() {
     let bal_pda_0 = derive_balance_pda(&program_id, 2, 2, &[0x11u8; 32]);
     let bal_pda_1 = derive_balance_pda(&program_id, 4, 4, &[0x22u8; 32]);
     let metas_balance = vec![
-        AccountMeta::new(payer.pubkey(), true),
-        AccountMeta::new(backfill_auth_pda, false),
+        AccountMeta::new(authority.pubkey(), true),
         AccountMeta::new_readonly(system_program_id(), false),
         AccountMeta::new(bal_pda_0, false),
         AccountMeta::new(bal_pda_1, false),
@@ -354,7 +343,7 @@ fn surfpool_backfill_full_lifecycle() {
         accounts: metas_balance,
         data: build_backfill_balance_data(&balances),
     };
-    let sig = send_ix(&rpc, &payer, ix).expect("BackfillBalance tx");
+    let sig = send_ix(&rpc, &authority, ix).expect("BackfillBalance tx");
     eprintln!("[backfill-e2e] BackfillBalance tx={sig}");
 
     for (entry, pda) in balances.iter().zip([bal_pda_0, bal_pda_1]) {
@@ -368,55 +357,37 @@ fn surfpool_backfill_full_lifecycle() {
         assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
     }
 
-    // ---------- Phase 3: Retire ----------
-    let metas_retire = vec![
-        AccountMeta::new(payer.pubkey(), true),
-        AccountMeta::new(backfill_auth_pda, false),
-    ];
-    let ix = Instruction {
-        program_id,
-        accounts: metas_retire,
-        data: vec![IxDiscriminator::Retire as u8],
-    };
-    let sig = send_ix(&rpc, &payer, ix).expect("Retire tx");
-    eprintln!("[backfill-e2e] Retire tx={sig}");
-
-    let auth_acc = rpc
-        .get_account(&backfill_auth_pda)
-        .expect("backfill auth PDA");
-    assert_eq!(auth_acc.data[32], 1, "retired flag set");
-
-    // ---------- Phase 4: BackfillNoReplay after retire → must fail ----------
-    let post_retire_entry = NoReplayEntry {
+    // ---------- Phase 3: wrong-signer BackfillNoReplay → must fail ----------
+    //
+    // The compile-time `BACKFILL_AUTHORITY` const is the only thing standing
+    // between an attacker and arbitrary state writes. Run a control tx signed
+    // by a stranger and assert `UnauthorizedCaller` (Custom(3)).
+    let stranger_entry = NoReplayEntry {
         chain: 2,
         emitter,
         sequence: 9999,
         digest: [0xb0u8; 32],
     };
-    let bucket_post = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 9999);
-    let metas_post = vec![
-        AccountMeta::new(payer.pubkey(), true),
-        AccountMeta::new(backfill_auth_pda, false),
+    let stranger_bucket = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 9999);
+    let metas_stranger = vec![
+        AccountMeta::new(stranger.pubkey(), true),
         AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
         AccountMeta::new_readonly(noreplay_auth_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(bucket_post, false),
+        AccountMeta::new(stranger_bucket, false),
     ];
     let ix = Instruction {
         program_id,
-        accounts: metas_post,
-        data: build_backfill_noreplay_data(&[post_retire_entry]),
+        accounts: metas_stranger,
+        data: build_backfill_noreplay_data(&[stranger_entry]),
     };
-    let err = send_ix(&rpc, &payer, ix).expect_err("post-retire ix must fail");
+    let err = send_ix(&rpc, &stranger, ix).expect_err("stranger ix must fail");
     let msg = err.to_string();
-    eprintln!("[backfill-e2e] post-retire error: {msg}");
-    // Custom(4) = AuthorityRetired. The RPC client surfaces this as
-    // "custom program error: 0x4" in the error string.
+    eprintln!("[backfill-e2e] wrong-signer error: {msg}");
+    // Custom(3) = UnauthorizedCaller. The RPC client surfaces this as
+    // "custom program error: 0x3" in the error string.
     assert!(
-        msg.contains("custom program error: 0x4") || msg.contains("Custom(4)"),
-        "expected AuthorityRetired (Custom(4)) in post-retire error, got: {msg}"
+        msg.contains("custom program error: 0x3") || msg.contains("Custom(3)"),
+        "expected UnauthorizedCaller (Custom(3)) in wrong-signer error, got: {msg}"
     );
-
-    // Belt-and-braces: timeline check.
-    let _ = Instant::now();
 }

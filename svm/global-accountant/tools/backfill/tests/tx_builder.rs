@@ -2,17 +2,23 @@
 
 use ga_backfill::catalogue::{AccountRecord, TransferRecord};
 use ga_backfill::tx_builder::{
-    build_backfill_balance_ix, build_backfill_noreplay_ix, build_retire_ix,
-    derive_backfill_authority_pda, derive_balance_pda, derive_noreplay_authority_pda,
-    derive_noreplay_bucket, BackfillCtx, BACKFILL_NOREPLAY_DISC, BACKFILL_BALANCE_DISC,
-    RETIRE_DISC,
+    backfill_authority_pubkey, build_backfill_balance_ix, build_backfill_noreplay_ix,
+    derive_balance_pda, derive_noreplay_authority_pda, derive_noreplay_bucket, BackfillCtx,
+    BACKFILL_BALANCE_DISC, BACKFILL_NOREPLAY_DISC,
 };
 use solana_pubkey::Pubkey;
+
+/// The orchestrator's signer must match the program's compile-time
+/// `BACKFILL_AUTHORITY` const. `BackfillCtx::new` asserts this; the tests use
+/// the same pubkey throughout.
+fn payer() -> Pubkey {
+    backfill_authority_pubkey()
+}
 
 fn ctx() -> BackfillCtx {
     BackfillCtx::new(
         Pubkey::new_from_array([7u8; 32]), // program_id
-        Pubkey::new_from_array([42u8; 32]), // payer
+        payer(),
     )
 }
 
@@ -53,10 +59,6 @@ fn make_account(chain: u16, token_chain: u16, addr_seed: u8, balance_low: u8) ->
 #[test]
 fn pda_derivations_are_deterministic() {
     let c = ctx();
-    let auth = derive_backfill_authority_pda(&c.program_id);
-    let auth2 = derive_backfill_authority_pda(&c.program_id);
-    assert_eq!(auth, auth2);
-
     let np_auth = derive_noreplay_authority_pda(&c.program_id);
     let np_auth2 = derive_noreplay_authority_pda(&c.program_id);
     assert_eq!(np_auth, np_auth2);
@@ -86,6 +88,18 @@ fn balance_pda_depends_on_full_triple() {
     assert_ne!(pda_a, pda_b);
     assert_ne!(pda_a, pda_c);
     assert_ne!(pda_a, pda_d);
+}
+
+#[test]
+#[should_panic(expected = "does not match BACKFILL_AUTHORITY")]
+fn ctx_new_rejects_wrong_payer() {
+    // Any pubkey other than `BACKFILL_AUTHORITY` must trip the assertion;
+    // otherwise the orchestrator would silently send txs that get rejected
+    // on-chain with `UnauthorizedCaller`.
+    BackfillCtx::new(
+        Pubkey::new_from_array([7u8; 32]),
+        Pubkey::new_from_array([0xDEu8; 32]),
+    );
 }
 
 // ============================================================================
@@ -141,7 +155,7 @@ fn backfill_noreplay_groups_by_emitter() {
 
 #[test]
 fn backfill_noreplay_account_list_shape() {
-    // 3 transfers in 1 bucket → fixed 5 + 1 bucket pda = 6 accounts
+    // 3 transfers in 1 bucket → fixed 4 + 1 bucket pda = 5 accounts
     let c = ctx();
     let transfers = vec![
         make_transfer(1, 0xAA, 5),
@@ -149,32 +163,25 @@ fn backfill_noreplay_account_list_shape() {
         make_transfer(1, 0xAA, 7),
     ];
     let ix = build_backfill_noreplay_ix(&c, &transfers);
-    assert_eq!(ix.accounts.len(), 6);
+    assert_eq!(ix.accounts.len(), 5);
 
     // [0] payer — signer + writable
     assert_eq!(ix.accounts[0].pubkey, c.payer);
     assert!(ix.accounts[0].is_signer);
     assert!(ix.accounts[0].is_writable);
-    // [1] backfill_authority — writable, not signer
+    // [1] noreplay_program — readonly
+    assert_eq!(ix.accounts[1].pubkey, c.noreplay_program);
+    assert!(!ix.accounts[1].is_writable);
+    // [2] noreplay_authority — readonly
     assert_eq!(
-        ix.accounts[1].pubkey,
-        derive_backfill_authority_pda(&c.program_id)
-    );
-    assert!(!ix.accounts[1].is_signer);
-    assert!(ix.accounts[1].is_writable);
-    // [2] noreplay_program — readonly
-    assert_eq!(ix.accounts[2].pubkey, c.noreplay_program);
-    assert!(!ix.accounts[2].is_writable);
-    // [3] noreplay_authority — readonly
-    assert_eq!(
-        ix.accounts[3].pubkey,
+        ix.accounts[2].pubkey,
         derive_noreplay_authority_pda(&c.program_id)
     );
-    assert!(!ix.accounts[3].is_writable);
-    // [4] system_program
-    assert_eq!(ix.accounts[4].pubkey, c.system_program);
-    // [5] bucket pda — writable
-    assert!(ix.accounts[5].is_writable);
+    assert!(!ix.accounts[2].is_writable);
+    // [3] system_program
+    assert_eq!(ix.accounts[3].pubkey, c.system_program);
+    // [4] bucket pda — writable
+    assert!(ix.accounts[4].is_writable);
 }
 
 #[test]
@@ -188,8 +195,8 @@ fn backfill_noreplay_buckets_span_1024_boundary() {
         make_transfer(1, 0xAA, 1025),
     ];
     let ix = build_backfill_noreplay_ix(&c, &transfers);
-    // 5 fixed + 2 buckets = 7 accounts
-    assert_eq!(ix.accounts.len(), 7);
+    // 4 fixed + 2 buckets = 6 accounts
+    assert_eq!(ix.accounts.len(), 6);
 }
 
 // ============================================================================
@@ -238,51 +245,22 @@ fn backfill_balance_account_list_shape() {
     ];
     let ix = build_backfill_balance_ix(&c, &accounts);
 
-    // Fixed 3 + N PDAs = 5
-    assert_eq!(ix.accounts.len(), 5);
+    // Fixed 2 + N PDAs = 4
+    assert_eq!(ix.accounts.len(), 4);
     assert_eq!(ix.accounts[0].pubkey, c.payer);
     assert!(ix.accounts[0].is_signer);
-    assert_eq!(
-        ix.accounts[1].pubkey,
-        derive_backfill_authority_pda(&c.program_id)
-    );
-    assert_eq!(ix.accounts[2].pubkey, c.system_program);
+    assert_eq!(ix.accounts[1].pubkey, c.system_program);
     // PDAs: writable, in entry order
+    assert!(ix.accounts[2].is_writable);
     assert!(ix.accounts[3].is_writable);
-    assert!(ix.accounts[4].is_writable);
     assert_eq!(
-        ix.accounts[3].pubkey,
+        ix.accounts[2].pubkey,
         derive_balance_pda(&c.program_id, 1, 2, &accounts[0].token_address)
     );
     assert_eq!(
-        ix.accounts[4].pubkey,
+        ix.accounts[3].pubkey,
         derive_balance_pda(&c.program_id, 1, 2, &accounts[1].token_address)
     );
-}
-
-// ============================================================================
-// Retire ix
-// ============================================================================
-
-#[test]
-fn retire_ix_has_only_discriminator() {
-    let c = ctx();
-    let ix = build_retire_ix(&c);
-    assert_eq!(ix.data, vec![RETIRE_DISC]);
-}
-
-#[test]
-fn retire_ix_account_list_is_payer_then_authority() {
-    let c = ctx();
-    let ix = build_retire_ix(&c);
-    assert_eq!(ix.accounts.len(), 2);
-    assert_eq!(ix.accounts[0].pubkey, c.payer);
-    assert!(ix.accounts[0].is_signer);
-    assert_eq!(
-        ix.accounts[1].pubkey,
-        derive_backfill_authority_pda(&c.program_id)
-    );
-    assert!(ix.accounts[1].is_writable);
 }
 
 // ============================================================================
@@ -297,5 +275,13 @@ fn discriminators_match_program_enum() {
     use global_accountant_backfill::Instruction as PI;
     assert_eq!(BACKFILL_NOREPLAY_DISC, PI::BackfillNoReplay as u8);
     assert_eq!(BACKFILL_BALANCE_DISC, PI::BackfillBalance as u8);
-    assert_eq!(RETIRE_DISC, PI::Retire as u8);
+}
+
+#[test]
+fn backfill_authority_pubkey_matches_program_const() {
+    // Sanity: the orchestrator's view of `BACKFILL_AUTHORITY` matches the
+    // program crate's compile-time const. If you bumped the const but forgot
+    // to bump the test-suite default keypair, this fails first.
+    use global_accountant_backfill::BACKFILL_AUTHORITY;
+    assert_eq!(backfill_authority_pubkey().to_bytes(), BACKFILL_AUTHORITY);
 }

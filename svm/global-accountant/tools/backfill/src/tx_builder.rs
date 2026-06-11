@@ -13,8 +13,7 @@ use solana_pubkey::Pubkey;
 
 use crate::catalogue::{AccountRecord, TransferRecord};
 
-use global_accountant_backfill::state::BACKFILL_AUTHORITY_SEED_PREFIX;
-use global_accountant_backfill::Instruction as ProgramIx;
+use global_accountant_backfill::{Instruction as ProgramIx, BACKFILL_AUTHORITY};
 use global_accountant_definitions::{
     ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
     NOREPLAY_PROGRAM_ID,
@@ -25,11 +24,21 @@ use global_accountant_definitions::{
 pub const BACKFILL_NOREPLAY_DISC: u8 = ProgramIx::BackfillNoReplay as u8;
 /// Instruction discriminator for `BackfillBalance`.
 pub const BACKFILL_BALANCE_DISC: u8 = ProgramIx::BackfillBalance as u8;
-/// Instruction discriminator for `Retire`.
-pub const RETIRE_DISC: u8 = ProgramIx::Retire as u8;
+
+/// Pubkey baked into the program's `.so` as `BACKFILL_AUTHORITY`. Re-exported
+/// so the orchestrator can sanity-check the configured signer matches at
+/// startup — otherwise every tx would hit `UnauthorizedCaller` on-chain.
+pub fn backfill_authority_pubkey() -> Pubkey {
+    Pubkey::new_from_array(BACKFILL_AUTHORITY)
+}
 
 /// Common context for every backfill ix: program id, payer, and the two
 /// program-id constants the orchestrator needs to thread through.
+///
+/// **Invariant**: `payer` MUST equal [`backfill_authority_pubkey`] — the
+/// program's `require_authority` check rejects every other signer with
+/// `UnauthorizedCaller`. Callers construct `BackfillCtx` via [`BackfillCtx::new`]
+/// which enforces this at construction time.
 #[derive(Debug, Clone)]
 pub struct BackfillCtx {
     pub program_id: Pubkey,
@@ -39,7 +48,17 @@ pub struct BackfillCtx {
 }
 
 impl BackfillCtx {
+    /// Construct a context. Panics if `payer` does not match the program's
+    /// compile-time `BACKFILL_AUTHORITY` const — sending txs with any other
+    /// signer is guaranteed to fail on-chain, so we surface the misconfig as
+    /// soon as it can be detected.
     pub fn new(program_id: Pubkey, payer: Pubkey) -> Self {
+        assert_eq!(
+            payer,
+            backfill_authority_pubkey(),
+            "payer {payer} does not match BACKFILL_AUTHORITY {}; the on-chain program will reject every tx",
+            backfill_authority_pubkey()
+        );
         Self {
             program_id,
             payer,
@@ -53,10 +72,6 @@ impl BackfillCtx {
 // ============================================================================
 // PDA derivations
 // ============================================================================
-
-pub fn derive_backfill_authority_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[BACKFILL_AUTHORITY_SEED_PREFIX], program_id).0
-}
 
 pub fn derive_noreplay_authority_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id).0
@@ -152,12 +167,10 @@ pub fn build_backfill_noreplay_ix(ctx: &BackfillCtx, transfers: &[TransferRecord
         }
     }
 
-    // ----- Accounts: 5 fixed + N unique bucket PDAs -----
-    let backfill_auth = derive_backfill_authority_pda(&ctx.program_id);
+    // ----- Accounts: 4 fixed + N unique bucket PDAs -----
     let noreplay_auth = derive_noreplay_authority_pda(&ctx.program_id);
     let mut accounts = vec![
         AccountMeta::new(ctx.payer, true),
-        AccountMeta::new(backfill_auth, false),
         AccountMeta::new_readonly(ctx.noreplay_program, false),
         AccountMeta::new_readonly(noreplay_auth, false),
         AccountMeta::new_readonly(ctx.system_program, false),
@@ -194,10 +207,8 @@ pub fn build_backfill_balance_ix(ctx: &BackfillCtx, accounts: &[AccountRecord]) 
         data.extend_from_slice(&a.balance);
     }
 
-    let backfill_auth = derive_backfill_authority_pda(&ctx.program_id);
     let mut metas = vec![
         AccountMeta::new(ctx.payer, true),
-        AccountMeta::new(backfill_auth, false),
         AccountMeta::new_readonly(ctx.system_program, false),
     ];
     for a in accounts {
@@ -209,18 +220,5 @@ pub fn build_backfill_balance_ix(ctx: &BackfillCtx, accounts: &[AccountRecord]) 
         program_id: ctx.program_id,
         accounts: metas,
         data,
-    }
-}
-
-/// Build the `Retire` ix. Trivial: just the discriminator, two accounts
-/// (signer + authority PDA).
-pub fn build_retire_ix(ctx: &BackfillCtx) -> Instruction {
-    Instruction {
-        program_id: ctx.program_id,
-        accounts: vec![
-            AccountMeta::new(ctx.payer, true),
-            AccountMeta::new(derive_backfill_authority_pda(&ctx.program_id), false),
-        ],
-        data: vec![RETIRE_DISC],
     }
 }

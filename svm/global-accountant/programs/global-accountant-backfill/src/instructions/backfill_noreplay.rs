@@ -69,23 +69,21 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (2) Accounts layout -----
     //
-    //   0. [WRITE, SIGNER] payer
-    //   1. [WRITE]         backfill authority PDA (lazy-init on first call)
-    //   2. [ ]             solana-noreplay program (CPI target)
-    //   3. [ ]             noreplay-authority PDA (signs MarkUsedBulk via invoke_signed)
-    //   4. [ ]             system program
-    //   5..5+M.            bucket PDAs, one per UNIQUE
+    //   0. [WRITE, SIGNER] payer — must equal `BACKFILL_AUTHORITY`
+    //   1. [ ]             solana-noreplay program (CPI target)
+    //   2. [ ]             noreplay-authority PDA (signs MarkUsedBulk via invoke_signed)
+    //   3. [ ]             system program
+    //   4..4+M.            bucket PDAs, one per UNIQUE
     //                      (chain, emitter, sequence/1024) in the order the
     //                      handler walks them. M is implicit; the handler
     //                      verifies it consumes exactly all bucket slots.
-    let [payer, backfill_auth, noreplay_program, noreplay_authority, system_program, buckets @ ..] =
-        accounts
+    let [payer, noreplay_program, noreplay_authority, system_program, buckets @ ..] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
     // ----- (3) Authority gate -----
-    authority::require_authority_or_init(program_id, payer, backfill_auth, system_program)?;
+    authority::require_authority(payer)?;
     let payer: &AccountView = payer;
 
     // ----- (4) Walk groups → entries, OR-mask per bucket, flush on transition -----

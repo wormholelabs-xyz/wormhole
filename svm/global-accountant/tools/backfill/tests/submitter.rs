@@ -5,7 +5,7 @@
 //! deployment. These tests cover the pure parsing/classification logic.
 
 use ga_backfill::submitter::{
-    extract_custom_program_error, ALREADY_ACCOUNTED_CUSTOM, AUTHORITY_RETIRED_CUSTOM,
+    extract_custom_program_error, ALREADY_ACCOUNTED_CUSTOM, UNAUTHORIZED_CALLER_CUSTOM,
 };
 
 #[test]
@@ -17,10 +17,11 @@ fn extracts_already_accounted_hex_code() {
 }
 
 #[test]
-fn extracts_authority_retired_hex_code() {
-    let msg = "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x4";
-    assert_eq!(extract_custom_program_error(msg), Some(4));
-    assert_eq!(extract_custom_program_error(msg), Some(AUTHORITY_RETIRED_CUSTOM));
+fn extracts_unauthorized_caller_hex_code() {
+    // UNAUTHORIZED_CALLER = 3 → 0x3
+    let msg = "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x3";
+    assert_eq!(extract_custom_program_error(msg), Some(3));
+    assert_eq!(extract_custom_program_error(msg), Some(UNAUTHORIZED_CALLER_CUSTOM));
 }
 
 #[test]

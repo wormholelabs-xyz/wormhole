@@ -51,11 +51,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (2) Accounts layout -----
     //
-    //   0. [WRITE, SIGNER] payer
-    //   1. [WRITE]         backfill authority PDA (lazy-init on first call)
-    //   2. [ ]             system program
-    //   3..3+count.        balance PDAs at canonical seeds, in entry order
-    let [payer, backfill_auth, system_program, balance_pdas @ ..] = accounts else {
+    //   0. [WRITE, SIGNER] payer — must equal `BACKFILL_AUTHORITY`
+    //   1. [ ]             system program
+    //   2..2+count.        balance PDAs at canonical seeds, in entry order
+    // `_system_program` slot is required at the tx wire level for
+    // `init_or_upgrade_pda`'s `CreateAccount` CPI; pinocchio finds it via
+    // the loader. We don't reference it explicitly in this scope.
+    let [payer, _system_program, balance_pdas @ ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
     if balance_pdas.len() != count {
@@ -63,7 +65,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
 
     // ----- (3) Authority gate -----
-    authority::require_authority_or_init(program_id, payer, backfill_auth, system_program)?;
+    authority::require_authority(payer)?;
     let payer: &AccountView = payer;
 
     // ----- (4) Write each entry, verifying sort order and PDA canonicality -----
@@ -88,6 +90,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         // Derive + verify canonical PDA.
         let chain_be = chain.to_be_bytes();
         let token_chain_be = token_chain.to_be_bytes();
+        // Since authority is fully trusted, we could use create_program_address and pass the bump 
+        // but probably not worth the complexity and minute cost saving
         let (expected, canonical_bump) = Address::find_program_address(
             &[
                 ACCOUNT_SEED_PREFIX,

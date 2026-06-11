@@ -30,9 +30,7 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use global_accountant_backfill::{
-    state::BACKFILL_AUTHORITY_SEED_PREFIX, Instruction as IxDiscriminator,
-};
+use global_accountant_backfill::Instruction as IxDiscriminator;
 use global_accountant_definitions::{
     ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
     NOREPLAY_PROGRAM_ID,
@@ -157,10 +155,6 @@ fn system_program_id() -> Pubkey {
     Pubkey::from_str("11111111111111111111111111111111").unwrap()
 }
 
-fn derive_backfill_authority_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[BACKFILL_AUTHORITY_SEED_PREFIX], program_id).0
-}
-
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id).0
 }
@@ -203,7 +197,6 @@ fn derive_balance_pda(program_id: &Pubkey, chain: u16, token_chain: u16, token_a
 fn build_backfill_noreplay_ix(
     program_id: &Pubkey,
     payer: &Pubkey,
-    backfill_auth: Pubkey,
     noreplay_auth: Pubkey,
     chunk: &[TransferEntry],
 ) -> Instruction {
@@ -255,7 +248,6 @@ fn build_backfill_noreplay_ix(
 
     let mut metas = vec![
         AccountMeta::new(*payer, true),
-        AccountMeta::new(backfill_auth, false),
         AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
         AccountMeta::new_readonly(noreplay_auth, false),
         AccountMeta::new_readonly(system_program_id(), false),
@@ -271,7 +263,6 @@ fn build_backfill_noreplay_ix(
 fn build_backfill_balance_ix(
     program_id: &Pubkey,
     payer: &Pubkey,
-    backfill_auth: Pubkey,
     chunk: &[AccountEntry],
 ) -> Instruction {
     let mut data = Vec::with_capacity(2 + chunk.len() * 68);
@@ -285,7 +276,6 @@ fn build_backfill_balance_ix(
     }
     let mut metas = vec![
         AccountMeta::new(*payer, true),
-        AccountMeta::new(backfill_auth, false),
         AccountMeta::new_readonly(system_program_id(), false),
     ];
     for e in chunk {
@@ -408,7 +398,8 @@ fn surfpool_cost_probe() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    let payer = Keypair::new();
+    // Payer must equal `BACKFILL_AUTHORITY` (test default: `Keypair::new_from_array([1u8; 32])`).
+    let payer = Keypair::new_from_array([1u8; 32]);
     rpc.request_airdrop(&payer.pubkey(), 1_000_000_000_000)
         .expect("airdrop");
     // Brief wait for airdrop to land.
@@ -422,7 +413,6 @@ fn surfpool_cost_probe() {
         &noreplay_bytes,
     );
 
-    let backfill_auth = derive_backfill_authority_pda(&program_id);
     let noreplay_auth = derive_noreplay_authority_pda(&program_id);
 
     // -------- Drive transfer batches --------
@@ -431,7 +421,6 @@ fn surfpool_cost_probe() {
         let ix = build_backfill_noreplay_ix(
             &program_id,
             &payer.pubkey(),
-            backfill_auth,
             noreplay_auth,
             chunk,
         );
@@ -452,7 +441,7 @@ fn surfpool_cost_probe() {
     // -------- Drive account batches --------
     let mut balance_agg = Aggregate::default();
     for chunk in accounts.chunks(ACCOUNT_BATCH) {
-        let ix = build_backfill_balance_ix(&program_id, &payer.pubkey(), backfill_auth, chunk);
+        let ix = build_backfill_balance_ix(&program_id, &payer.pubkey(), chunk);
         let sig = send_ix(&rpc, &payer, ix).expect("send BackfillBalance");
         let mut m = fetch_meta(&rpc_url, &sig);
         m.entry_count = chunk.len();

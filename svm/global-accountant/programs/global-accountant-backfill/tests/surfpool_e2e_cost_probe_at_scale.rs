@@ -38,9 +38,7 @@ use solana_signer::Signer;
 use solana_transaction::Transaction;
 use tokio::sync::Semaphore;
 
-use global_accountant_backfill::{
-    state::BACKFILL_AUTHORITY_SEED_PREFIX, Instruction as IxDiscriminator,
-};
+use global_accountant_backfill::Instruction as IxDiscriminator;
 use global_accountant_definitions::{
     NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
 };
@@ -144,10 +142,6 @@ fn system_program_id() -> Pubkey {
     Pubkey::from_str("11111111111111111111111111111111").unwrap()
 }
 
-fn derive_backfill_authority_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[BACKFILL_AUTHORITY_SEED_PREFIX], program_id).0
-}
-
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id).0
 }
@@ -177,7 +171,6 @@ fn derive_noreplay_bucket(
 fn build_backfill_noreplay_ix(
     program_id: &Pubkey,
     payer: &Pubkey,
-    backfill_auth: Pubkey,
     noreplay_auth: Pubkey,
     chunk: &[TransferEntry],
 ) -> Instruction {
@@ -224,7 +217,6 @@ fn build_backfill_noreplay_ix(
     }
     let mut metas = vec![
         AccountMeta::new(*payer, true),
-        AccountMeta::new(backfill_auth, false),
         AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
         AccountMeta::new_readonly(noreplay_auth, false),
         AccountMeta::new_readonly(system_program_id(), false),
@@ -350,7 +342,8 @@ fn surfpool_cost_probe_at_scale() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    let payer = Keypair::new();
+    // Payer must equal `BACKFILL_AUTHORITY` (test default: `Keypair::new_from_array([1u8; 32])`).
+    let payer = Keypair::new_from_array([1u8; 32]);
     // Airdrop generously: ~3 SOL of base fees + ~15 SOL of bucket rent + headroom.
     rpc.request_airdrop(&payer.pubkey(), 50_000_000_000_000)
         .expect("airdrop");
@@ -364,7 +357,6 @@ fn surfpool_cost_probe_at_scale() {
         &noreplay_bytes,
     );
 
-    let backfill_auth = derive_backfill_authority_pda(&program_id);
     let noreplay_auth = derive_noreplay_authority_pda(&program_id);
 
     // -------- Drive batches with bounded concurrency --------
@@ -433,7 +425,6 @@ fn surfpool_cost_probe_at_scale() {
                 let ix = build_backfill_noreplay_ix(
                     &program_id,
                     &payer.pubkey(),
-                    backfill_auth,
                     noreplay_auth,
                     &chunk,
                 );

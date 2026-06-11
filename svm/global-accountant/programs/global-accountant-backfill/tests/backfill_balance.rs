@@ -5,12 +5,13 @@
 
 use {
     global_accountant_backfill::{BackfillError, Instruction as IxDiscriminator},
-    global_accountant_backfill::state::{BackfillAuthorityLayout, BACKFILL_AUTHORITY_SEED_PREFIX},
     global_accountant_definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
     solana_instruction::{error::InstructionError, AccountMeta, Instruction},
+    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
+    solana_signer::Signer,
 };
 
 mod common;
@@ -30,8 +31,14 @@ fn system_program_id() -> Pubkey {
     keyed_account_for_system_program().0
 }
 
-fn derive_backfill_authority_pda() -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[BACKFILL_AUTHORITY_SEED_PREFIX], &program_id())
+/// Deterministic test keypair whose pubkey matches the compile-time
+/// `BACKFILL_AUTHORITY` const. Mirror of `tests/backfill_noreplay.rs`.
+fn test_authority_keypair() -> Keypair {
+    Keypair::new_from_array([1u8; 32])
+}
+
+fn test_authority_pubkey() -> Pubkey {
+    test_authority_keypair().pubkey()
 }
 
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> Pubkey {
@@ -99,21 +106,20 @@ fn build_ix_data(entries: &[BalanceEntry]) -> Vec<u8> {
     data
 }
 
+/// Build `(accounts, metas)` for a BackfillBalance invocation.
+/// `signer` parameterised so individual tests can probe wrong-pubkey paths.
 fn build_invocation(
     signer: Pubkey,
     entries: &[BalanceEntry],
 ) -> (Vec<(Pubkey, Account)>, Vec<AccountMeta>) {
-    let (backfill_auth_pda, _) = derive_backfill_authority_pda();
     let (sys_id, sys_acc) = keyed_account_for_system_program();
 
     let mut accounts: Vec<(Pubkey, Account)> = vec![
         (signer, signer_account(10_000_000_000)),
-        (backfill_auth_pda, uninitialised_pda_account()),
         (sys_id, sys_acc),
     ];
     let mut metas: Vec<AccountMeta> = vec![
         AccountMeta::new(signer, true),
-        AccountMeta::new(backfill_auth_pda, false),
         AccountMeta::new_readonly(sys_id, false),
     ];
     for e in entries {
@@ -128,12 +134,11 @@ fn build_invocation(
 // Tests
 // ============================================================================
 
-/// Single entry: authority PDA lazy-init, balance PDA created at canonical
-/// seeds with the supplied fields.
+/// Single entry: balance PDA created at canonical seeds with the supplied fields.
 #[test]
 fn backfill_balance_single_entry_writes_pda() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([42u8; 32]);
+    let signer = test_authority_pubkey();
     let entry = BalanceEntry {
         chain: 2,
         token_chain: 2,
@@ -174,20 +179,13 @@ fn backfill_balance_single_entry_writes_pda() {
     assert_eq!(layout.token_chain, entry.token_chain);
     assert_eq!(layout.token_address, entry.token_address);
     assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
-
-    // Backfill authority PDA initialised with signer's pubkey, retired=0.
-    let (auth_pda, _) = derive_backfill_authority_pda();
-    let auth = result.get_account(&auth_pda).unwrap();
-    assert_eq!(auth.data.len(), BackfillAuthorityLayout::LEN);
-    assert_eq!(&auth.data[..32], signer.as_array());
-    assert_eq!(auth.data[32], 0);
 }
 
 /// Three distinct balances in one ix.
 #[test]
 fn backfill_balance_bulk_writes_multiple_pdas() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([43u8; 32]);
+    let signer = test_authority_pubkey();
     let entries = [
         BalanceEntry {
             chain: 2,
@@ -238,7 +236,7 @@ fn backfill_balance_bulk_writes_multiple_pdas() {
 #[test]
 fn backfill_balance_out_of_order_rejects() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([44u8; 32]);
+    let signer = test_authority_pubkey();
     let entries = [
         BalanceEntry {
             chain: 5,
@@ -276,7 +274,7 @@ fn backfill_balance_out_of_order_rejects() {
 #[test]
 fn backfill_balance_duplicate_entries_reject() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([45u8; 32]);
+    let signer = test_authority_pubkey();
     let dup = BalanceEntry {
         chain: 2,
         token_chain: 2,
@@ -303,26 +301,23 @@ fn backfill_balance_duplicate_entries_reject() {
 #[test]
 fn backfill_balance_non_canonical_pda_rejects() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([46u8; 32]);
+    let signer = test_authority_pubkey();
     let entry = BalanceEntry {
         chain: 2,
         token_chain: 2,
         token_address: [0x11u8; 32],
         balance: [0xaau8; 32],
     };
-    let (backfill_auth_pda, _) = derive_backfill_authority_pda();
     let (sys_id, sys_acc) = keyed_account_for_system_program();
     let stray = Pubkey::new_from_array([0x99u8; 32]); // not the canonical balance PDA
 
     let accounts: Vec<(Pubkey, Account)> = vec![
         (signer, signer_account(10_000_000_000)),
-        (backfill_auth_pda, uninitialised_pda_account()),
         (sys_id, sys_acc),
         (stray, uninitialised_pda_account()),
     ];
     let metas = vec![
         AccountMeta::new(signer, true),
-        AccountMeta::new(backfill_auth_pda, false),
         AccountMeta::new_readonly(sys_id, false),
         AccountMeta::new(stray, false),
     ];
@@ -347,7 +342,7 @@ fn backfill_balance_non_canonical_pda_rejects() {
 #[test]
 fn backfill_balance_extra_pda_account_rejects() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([47u8; 32]);
+    let signer = test_authority_pubkey();
     let entry = BalanceEntry {
         chain: 2,
         token_chain: 2,
@@ -377,7 +372,7 @@ fn backfill_balance_extra_pda_account_rejects() {
 #[test]
 fn backfill_balance_zero_entries_rejects() {
     let mollusk = mollusk();
-    let signer = Pubkey::new_from_array([48u8; 32]);
+    let signer = test_authority_pubkey();
     let (accounts, metas) = build_invocation(signer, &[]);
 
     let ix = Instruction {
@@ -391,4 +386,34 @@ fn backfill_balance_zero_entries_rejects() {
         Err(InstructionError::Custom(code))
             if *code == BackfillError::InvalidInstructionData as u32
     ));
+}
+
+/// Caller signs with a pubkey other than `BACKFILL_AUTHORITY` → `UnauthorizedCaller`.
+#[test]
+fn backfill_balance_wrong_signer_rejects() {
+    let mollusk = mollusk();
+    let wrong_signer = Pubkey::new_from_array([0xDEu8; 32]); // not the test authority
+    let entry = BalanceEntry {
+        chain: 2,
+        token_chain: 2,
+        token_address: [0x11u8; 32],
+        balance: [0xaau8; 32],
+    };
+    let (accounts, metas) = build_invocation(wrong_signer, &[entry]);
+
+    let ix = Instruction {
+        program_id: program_id(),
+        accounts: metas,
+        data: build_ix_data(&[entry]),
+    };
+    let result = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        matches!(
+            &result.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == BackfillError::UnauthorizedCaller as u32
+        ),
+        "expected UnauthorizedCaller, got {:?}",
+        result.raw_result
+    );
 }

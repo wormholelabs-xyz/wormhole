@@ -6,8 +6,9 @@
 //!   idempotency lets us safely re-send a tx that's already landed; the
 //!   second submission rejects with this code and the orchestrator counts
 //!   it as "already done, advance cursor".
-//! - **AuthorityRetired (custom 4)** → halt. The kill switch has been pulled
-//!   server-side; no further backfill ix can land. Surface to operator.
+//! - **UnauthorizedCaller (custom 3)** → halt. The configured signer does
+//!   not match the program's compile-time `BACKFILL_AUTHORITY` — operator
+//!   misconfig, no point retrying.
 //! - **Other custom program errors** → halt. Logic errors are unrecoverable
 //!   in the orchestrator's frame — the operator needs to inspect.
 //! - **RPC / I/O / blockhash-expired / transient errors** → retry with
@@ -34,11 +35,12 @@ use tracing::{debug, warn};
 use crate::chunker::ChunkPlan;
 use crate::tx_builder::{build_backfill_balance_ix, build_backfill_noreplay_ix, BackfillCtx};
 
-/// `BackfillError::AlreadyAccounted = 7` — re-submitted entry, treat as
-/// success.
+/// `NoReplayError::AlreadyAccounted = 7` (solana-noreplay) — re-submitted
+/// entry, treat as success.
 pub const ALREADY_ACCOUNTED_CUSTOM: u32 = 7;
-/// `BackfillError::AuthorityRetired = 4` — kill switch pulled, halt.
-pub const AUTHORITY_RETIRED_CUSTOM: u32 = 4;
+/// `BackfillError::UnauthorizedCaller = 3` — signer mismatch vs the program's
+/// compile-time `BACKFILL_AUTHORITY` const; halt for operator inspection.
+pub const UNAUTHORIZED_CALLER_CUSTOM: u32 = 3;
 
 #[derive(Debug, Clone)]
 pub struct SubmitterConfig {
@@ -105,7 +107,7 @@ pub fn classify(err: &ClientError) -> ErrorDecision {
     if let Some(code) = extract_custom_program_error(&msg) {
         return match code {
             ALREADY_ACCOUNTED_CUSTOM => ErrorDecision::AlreadyAccounted,
-            AUTHORITY_RETIRED_CUSTOM => ErrorDecision::Halt("AuthorityRetired"),
+            UNAUTHORIZED_CALLER_CUSTOM => ErrorDecision::Halt("UnauthorizedCaller"),
             _ => ErrorDecision::Halt("custom program error (logic)"),
         };
     }

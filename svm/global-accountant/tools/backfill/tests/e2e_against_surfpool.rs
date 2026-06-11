@@ -3,8 +3,8 @@
 //! Spins up surfpool, deploys the backfill program + noreplay, writes a tiny
 //! handcrafted catalogue file, then drives the full orchestrator path:
 //! catalogue read → chunker → tx_builder → submitter → cursor → reconcile.
-//! Asserts on-chain state matches the catalogue, then submits Retire and
-//! confirms a post-retire backfill ix is rejected with `AuthorityRetired`.
+//! Asserts on-chain state matches the catalogue and the `BACKFILL_AUTHORITY`
+//! const-check rejects a tx signed by a stranger.
 //!
 //! `#[ignore]` by default — heavy and requires the backfill `.so` to be
 //! built first. Run with:
@@ -27,7 +27,7 @@ use ga_backfill::chunker::Chunker;
 use ga_backfill::cursor::Cursor;
 use ga_backfill::reconcile::reconcile_balances;
 use ga_backfill::submitter::{submit_chunks, SubmitterConfig};
-use ga_backfill::tx_builder::{build_backfill_noreplay_ix, build_retire_ix, BackfillCtx};
+use ga_backfill::tx_builder::{build_backfill_noreplay_ix, BackfillCtx};
 use global_accountant_definitions::NOREPLAY_PROGRAM_ID;
 
 mod common;
@@ -86,8 +86,8 @@ async fn e2e_orchestrator_full_lifecycle() {
     );
     eprintln!("[e2e] program_id={program_id}");
 
-    // ---------- Fund payer ----------
-    let payer = Keypair::new();
+    // ---------- Fund payer (must equal `BACKFILL_AUTHORITY`) ----------
+    let payer = Keypair::new_from_array([1u8; 32]);
     let async_rpc = AsyncRpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::confirmed());
     async_rpc
         .request_airdrop(&payer.pubkey(), 10_000_000_000_000)
@@ -153,22 +153,19 @@ async fn e2e_orchestrator_full_lifecycle() {
     assert!(report.is_clean(), "reconcile diffs: {report:#?}");
     assert_eq!(report.matched, 2);
 
-    // ---------- Retire ----------
-    let retire_ix = build_retire_ix(&ctx);
-    let blockhash = async_rpc.get_latest_blockhash().await.expect("blockhash");
-    let retire_tx = Transaction::new_signed_with_payer(
-        std::slice::from_ref(&retire_ix),
-        Some(&payer.pubkey()),
-        &[&payer],
-        blockhash,
-    );
-    let retire_sig = async_rpc
-        .send_and_confirm_transaction(&retire_tx)
+    // ---------- Wrong-signer control: stranger must be rejected ----------
+    //
+    // Builds the same `BackfillNoReplay` ix the authority sends, but signs
+    // with a fresh keypair. The program's `require_authority` check must
+    // reject with `UnauthorizedCaller` (Custom(3)) — that's the only thing
+    // standing between an attacker and arbitrary state writes.
+    let stranger = Keypair::new();
+    async_rpc
+        .request_airdrop(&stranger.pubkey(), 1_000_000_000)
         .await
-        .expect("retire");
-    eprintln!("[e2e] retire tx={retire_sig}");
+        .expect("airdrop stranger");
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // ---------- Post-retire replay → must reject with AuthorityRetired ----------
     let replay_chunk = vec![ga_backfill::catalogue::TransferRecord {
         chain: 1,
         emitter: {
@@ -187,21 +184,29 @@ async fn e2e_orchestrator_full_lifecycle() {
         },
         recipient_chain: 2,
     }];
-    let replay_ix = build_backfill_noreplay_ix(&ctx, &replay_chunk);
+    // Bypass `BackfillCtx::new`'s assertion — we deliberately want a ctx
+    // whose payer != BACKFILL_AUTHORITY so we can hit the on-chain check.
+    let stranger_ctx = BackfillCtx {
+        program_id,
+        payer: stranger.pubkey(),
+        system_program: ctx.system_program,
+        noreplay_program: ctx.noreplay_program,
+    };
+    let stranger_ix = build_backfill_noreplay_ix(&stranger_ctx, &replay_chunk);
     let blockhash = async_rpc.get_latest_blockhash().await.expect("blockhash");
-    let replay_tx = Transaction::new_signed_with_payer(
-        std::slice::from_ref(&replay_ix),
-        Some(&payer.pubkey()),
-        &[&payer],
+    let stranger_tx = Transaction::new_signed_with_payer(
+        std::slice::from_ref(&stranger_ix),
+        Some(&stranger.pubkey()),
+        &[&stranger],
         blockhash,
     );
-    let post_retire = async_rpc.send_and_confirm_transaction(&replay_tx).await;
-    eprintln!("[e2e] post-retire result: {post_retire:?}");
-    assert!(post_retire.is_err(), "post-retire submission must fail");
-    let err_msg = format!("{:?}", post_retire.unwrap_err());
+    let result = async_rpc.send_and_confirm_transaction(&stranger_tx).await;
+    eprintln!("[e2e] wrong-signer result: {result:?}");
+    assert!(result.is_err(), "wrong-signer submission must fail");
+    let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
-        err_msg.contains("0x4"),
-        "expected AuthorityRetired (custom error 4) in error message; got: {err_msg}"
+        err_msg.contains("0x3"),
+        "expected UnauthorizedCaller (custom error 3) in error message; got: {err_msg}"
     );
 
     eprintln!("[e2e] all phases green");
