@@ -1,0 +1,29 @@
+# Build & test the Wormhole Global Accountant SVM workspace.
+#
+# Programs are loaded by mollusk-svm in integration tests, so the SBF binaries
+# must exist before `cargo test` runs. Recipes are workspace-wide and program
+# agnostic; per-program e2e suites are `#[ignore]` and run via
+# `cargo test --test <name> -- --ignored`.
+
+# Exported into every recipe so `cargo test` finds the freshly-built `.so`s.
+export SBF_OUT_DIR := justfile_directory() / "target/deploy"
+
+# Default recipe: list available targets with their docstrings.
+default:
+    @just --list
+
+[doc("SBF build of every program in the workspace.")]
+build:
+    cargo build-sbf --features bpf-entrypoint
+
+[doc("Mollusk integration tests.")]
+test: build
+    cargo test
+
+[doc("Clippy against the host build.")]
+clippy:
+    cargo clippy --all-targets -- -D warnings
+
+[doc("cargo clean.")]
+clean:
+    cargo clean
