@@ -1,20 +1,32 @@
-//! Surfpool at-scale cost probe — drives 100,000 catalogue transfers across
-//! diverse `(chain, emitter)` pairs through `BackfillNoReplay` to validate:
+//! **This is an operator cost-measurement tool, NOT a regression test.**
+//!
+//! Lives under `tests/` for the `#[ignore]` + `cargo test --ignored` workflow,
+//! but makes no behavioural assertions worth gating CI on. The only asserts
+//! (`total_failures_v == 0`, `rent_per_bucket > 0`) are sanity-checks against
+//! the probe itself, not against the program. The headline cost figure in the
+//! master plan (~35 SOL / ~$8K) comes from this probe.
+//!
+//! What it does: drives 100,000 catalogue transfers across diverse
+//! `(chain, emitter)` pairs through `BackfillNoReplay` against a real surfpool
+//! subprocess to empirically pin three properties:
 //!
 //!   1. **Per-bucket rent is stable** — every newly-created NoReplay bucket
-//!      PDA debits the same lamport amount. The earlier 100-entry probe only
-//!      observed ONE bucket creation; this probe creates hundreds-to-thousands
+//!      PDA debits the same lamport amount. The smaller `_cost_probe` only
+//!      observes one bucket creation; this probe creates hundreds-to-thousands
 //!      so the rent figure is statistically confirmed.
 //!   2. **Tx fees scale linearly** — base fee is deterministic at 5,000 L per
 //!      tx regardless of CU; the at-scale run pins this end-to-end.
-//!   3. **The program survives mainnet-scale workload** — dry-run of the
+//!   3. **The program survives mainnet-scale workload** — full dry-run of the
 //!      eventual workstream-C orchestrator against the same `.so`.
 //!
-//! Diverse-emitter sampling: walks the catalogue with a stride so the sample
-//! draws from many `(chain, emitter)` pairs, not just the first emitter's
-//! tightly-packed sequences.
+//! Diverse-emitter sampling: walks the catalogue with a per-emitter rotation
+//! so the sample draws from many `(chain, emitter)` pairs, not just the first
+//! emitter's tightly-packed sequences.
 //!
-//! Skipped by default. Run via:
+//! Requires `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl` to exist — not
+//! present on CI or a reviewer's machine. Wall-clock ~5-10 min.
+//!
+//! Run via:
 //!   `cargo test --test surfpool_e2e_cost_probe_at_scale -- --ignored --nocapture`
 
 #![allow(clippy::too_many_arguments)]

@@ -5,6 +5,7 @@
 
 #![allow(dead_code)] // Different test files use different subsets.
 
+pub mod mollusk;
 pub mod surfpool;
 
 use {

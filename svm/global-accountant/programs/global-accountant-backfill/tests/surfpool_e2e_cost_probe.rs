@@ -1,15 +1,26 @@
-//! Surfpool cost probe — measures actual SOL spend per backfill batch against
-//! real validator-shaped semantics, then extrapolates to the full mainnet
-//! catalogue counts (5.5M transfers + 17K accounts + 40 registrations + 6
-//! modifications).
+//! **This is an operator cost-measurement tool, NOT a regression test.**
 //!
-//! Drives a sample of `TRANSFER_SAMPLE` transfer entries and `ACCOUNT_SAMPLE`
+//! It lives under `tests/` because the `#[ignore]` + `cargo test --ignored`
+//! workflow is the cheapest way to run it, but it makes no behavioural
+//! assertions worth gating CI on. The asserts at the end (`total_failures_v
+//! == 0`, `rent_per_bucket > 0`) are sanity-checks against the probe itself,
+//! not against the program.
+//!
+//! What it does: drives `TRANSFER_SAMPLE` transfer entries and `ACCOUNT_SAMPLE`
 //! account entries from `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl`
-//! through the backfill program. Captures per-tx `fee`, `computeUnitsConsumed`,
-//! and `(preBalance - postBalance - fee)` (the rent debit) via
-//! `getTransaction`; averages per-entry, multiplies up.
+//! through the backfill program against a real surfpool subprocess. Captures
+//! per-tx `fee`, `computeUnitsConsumed`, and `(preBalance - postBalance - fee)`
+//! (the rent debit) via `getTransaction`; averages per-entry, extrapolates to
+//! the full mainnet catalogue (5.5M transfers + 17K accounts + 40
+//! registrations + 6 modifications), and prints a SOL / USD breakdown.
 //!
-//! Skipped by default. Run via:
+//! Requires `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl` to exist — not
+//! present on CI or a reviewer's machine. The `_at_scale` sibling runs a
+//! larger sample (100k transfers, parallelised) and is what the master plan's
+//! cost projection is anchored on; this smaller probe is the quick-feedback
+//! version for iterating on the orchestrator.
+//!
+//! Run via:
 //!   `cargo test --test surfpool_e2e_cost_probe -- --ignored --nocapture`
 
 #![allow(clippy::too_many_arguments)]

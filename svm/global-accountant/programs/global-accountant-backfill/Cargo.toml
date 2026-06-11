@@ -38,6 +38,7 @@ solana-signer.workspace = true
 solana-transaction.workspace = true
 solana-commitment-config.workspace = true
 solana-system-interface.workspace = true
+solana-rent.workspace = true
 serde_json.workspace = true
 # Pinned exact per CLAUDE.md; already in the workspace lock via the operational
 # program's identical use.

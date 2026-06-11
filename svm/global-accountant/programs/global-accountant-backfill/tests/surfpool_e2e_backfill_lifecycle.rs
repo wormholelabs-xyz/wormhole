@@ -20,6 +20,7 @@ use solana_client::{client_error::ClientError, rpc_client::RpcClient};
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
+use solana_rent::Rent;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
@@ -346,10 +347,19 @@ fn surfpool_backfill_lifecycle() {
     let sig = send_ix(&rpc, &authority, ix).expect("BackfillBalance tx");
     eprintln!("[backfill-e2e] BackfillBalance tx={sig}");
 
+    // Pin the rent-exempt minimum the runtime debits per balance PDA. A
+    // regression in `BalanceAccountLayout` size (adding a field, restoring
+    // `_reserved`) would shift this number and trip the assert before any
+    // mainnet rent estimate goes stale.
+    let expected_rent = Rent::default().minimum_balance(BalanceAccountLayout::LEN);
     for (entry, pda) in balances.iter().zip([bal_pda_0, bal_pda_1]) {
         let acc = rpc.get_account(&pda).expect("balance PDA");
         assert_eq!(acc.owner, program_id);
         assert_eq!(acc.data.len(), BalanceAccountLayout::LEN);
+        assert_eq!(
+            acc.lamports, expected_rent,
+            "balance PDA rent should equal `Rent::default().minimum_balance(BalanceAccountLayout::LEN)` ({expected_rent})"
+        );
         let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
         assert_eq!(layout.chain, entry.chain);
         assert_eq!(layout.token_chain, entry.token_chain);
