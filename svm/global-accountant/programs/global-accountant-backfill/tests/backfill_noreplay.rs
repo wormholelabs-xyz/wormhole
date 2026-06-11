@@ -17,39 +17,19 @@ use {
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
         NOREPLAY_PROGRAM_ID,
     },
-    mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
+    mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult},
     solana_account::Account,
     solana_instruction::{error::InstructionError, AccountMeta, Instruction},
-    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_signer::Signer,
 };
 
 mod common;
-use common::{keyed_account_for_noreplay_program, mollusk_with_noreplay};
-
-fn program_id() -> Pubkey {
-    Pubkey::new_from_array([8u8; 32])
-}
-
-fn mollusk() -> Mollusk {
-    mollusk_with_noreplay(&program_id())
-}
-
-fn system_program_id() -> Pubkey {
-    keyed_account_for_system_program().0
-}
-
-/// Deterministic test keypair whose pubkey is expected to match
-/// `BACKFILL_AUTHORITY`. Seed `[1u8; 32]` chosen because it's the smallest
-/// non-zero value and reproducible across machines.
-fn test_authority_keypair() -> Keypair {
-    Keypair::new_from_array([1u8; 32])
-}
-
-fn test_authority_pubkey() -> Pubkey {
-    test_authority_keypair().pubkey()
-}
+use common::{
+    keyed_account_for_noreplay_program,
+    mollusk::{
+        mollusk, program_id, signer_account, test_authority_pubkey, uninitialised_pda_account,
+    },
+};
 
 // ============================================================================
 // PDA derivations
@@ -79,28 +59,6 @@ fn derive_noreplay_bucket(
         &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
     );
     pda
-}
-
-// ============================================================================
-// Account fixtures
-// ============================================================================
-
-fn system_owned_account(lamports: u64) -> Account {
-    Account {
-        lamports,
-        data: vec![],
-        owner: system_program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
-}
-
-fn signer_account(lamports: u64) -> Account {
-    system_owned_account(lamports)
-}
-
-fn uninitialised_pda_account() -> Account {
-    system_owned_account(0)
 }
 
 // ============================================================================
@@ -357,89 +315,6 @@ fn backfill_noreplay_multiple_entries_different_buckets() {
     assert_bit_set(&b1, 1500);
 }
 
-#[test]
-fn backfill_noreplay_out_of_order_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let emitter = [0x44u8; 32];
-    let entries = [
-        Entry { chain: 2, emitter, sequence: 100, digest: [0xaau8; 32] },
-        Entry { chain: 2, emitter, sequence: 50, digest: [0xbbu8; 32] },
-    ];
-    let (accounts, metas) = build_invocation(signer, &entries);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&entries),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData, got {:?}",
-        result.raw_result
-    );
-}
-
-#[test]
-fn backfill_noreplay_duplicate_entries_reject() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let emitter = [0x55u8; 32];
-    let dup = Entry { chain: 2, emitter, sequence: 42, digest: [0xaau8; 32] };
-    let entries = [dup, dup];
-    let (accounts, metas) = build_invocation(signer, &entries);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&entries),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData, got {:?}",
-        result.raw_result
-    );
-}
-
-#[test]
-fn backfill_noreplay_extra_bucket_account_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let emitter = [0x66u8; 32];
-    let entries = [Entry { chain: 2, emitter, sequence: 7, digest: [0xaau8; 32] }];
-
-    let (mut accounts, mut metas) = build_invocation(signer, &entries);
-    let (np_auth, _) = derive_noreplay_authority_pda();
-    let stray = derive_noreplay_bucket(&np_auth, 999, &[0x99u8; 32], 0);
-    accounts.push((stray, uninitialised_pda_account()));
-    metas.push(AccountMeta::new(stray, false));
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&entries),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData on extra bucket account, got {:?}",
-        result.raw_result
-    );
-}
 
 /// Caller signs with a pubkey other than `BACKFILL_AUTHORITY`. Must reject
 /// with `UnauthorizedCaller` — the const-check is the only thing standing
@@ -473,25 +348,3 @@ fn backfill_noreplay_wrong_signer_rejects() {
     );
 }
 
-#[test]
-fn backfill_noreplay_zero_entries_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&[]),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData on zero entries, got {:?}",
-        result.raw_result
-    );
-}

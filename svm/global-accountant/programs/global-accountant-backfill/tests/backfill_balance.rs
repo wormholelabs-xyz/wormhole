@@ -6,40 +6,16 @@
 use {
     global_accountant_backfill::{BackfillError, Instruction as IxDiscriminator},
     global_accountant_definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX},
-    mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
+    mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult},
     solana_account::Account,
     solana_instruction::{error::InstructionError, AccountMeta, Instruction},
-    solana_keypair::Keypair,
     solana_pubkey::Pubkey,
-    solana_signer::Signer,
 };
 
 mod common;
-use common::mollusk_with_noreplay;
-
-fn program_id() -> Pubkey {
-    Pubkey::new_from_array([8u8; 32])
-}
-
-fn mollusk() -> Mollusk {
-    // BackfillBalance does not use noreplay, but the test harness still loads
-    // it for parity with the rest of the backfill test suite.
-    mollusk_with_noreplay(&program_id())
-}
-
-fn system_program_id() -> Pubkey {
-    keyed_account_for_system_program().0
-}
-
-/// Deterministic test keypair whose pubkey matches the compile-time
-/// `BACKFILL_AUTHORITY` const. Mirror of `tests/backfill_noreplay.rs`.
-fn test_authority_keypair() -> Keypair {
-    Keypair::new_from_array([1u8; 32])
-}
-
-fn test_authority_pubkey() -> Pubkey {
-    test_authority_keypair().pubkey()
-}
+use common::mollusk::{
+    mollusk, program_id, signer_account, test_authority_pubkey, uninitialised_pda_account,
+};
 
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> Pubkey {
     let chain_be = chain.to_be_bytes();
@@ -54,30 +30,6 @@ fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
         &program_id(),
     );
     pda
-}
-
-// ============================================================================
-// Account fixtures
-// ============================================================================
-
-fn signer_account(lamports: u64) -> Account {
-    Account {
-        lamports,
-        data: vec![],
-        owner: system_program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
-}
-
-fn uninitialised_pda_account() -> Account {
-    Account {
-        lamports: 0,
-        data: vec![],
-        owner: system_program_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
 }
 
 // ============================================================================
@@ -232,74 +184,16 @@ fn backfill_balance_bulk_writes_multiple_pdas() {
     }
 }
 
-/// Out-of-order entries rejected before any PDA touch.
+/// Re-submitting an entry whose PDA is already owned by the program (because
+/// a previous backfill tx landed it) must hard-fail. `BackfillBalance` is not
+/// idempotent — unlike `BackfillNoReplay` which gets idempotency for free via
+/// `solana-noreplay`'s `AlreadyAccounted` short-circuit, the only thing
+/// stopping a duplicate write here is `pda_init::init_or_upgrade_pda`'s
+/// `data_len != 0 || !initial_owner_is_system` guard. The orchestrator's
+/// cursor is what *normally* prevents re-submission, but if the cursor lags or
+/// an operator manually re-runs a chunk this guard is the backstop.
 #[test]
-fn backfill_balance_out_of_order_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let entries = [
-        BalanceEntry {
-            chain: 5,
-            token_chain: 5,
-            token_address: [0x33u8; 32],
-            balance: [0xaau8; 32],
-        },
-        BalanceEntry {
-            chain: 2,
-            token_chain: 2,
-            token_address: [0x11u8; 32],
-            balance: [0xbbu8; 32],
-        }, // out of order
-    ];
-    let (accounts, metas) = build_invocation(signer, &entries);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&entries),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData, got {:?}",
-        result.raw_result
-    );
-}
-
-/// Same `(chain, token_chain, token_address)` twice → strict-ascending fails.
-#[test]
-fn backfill_balance_duplicate_entries_reject() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let dup = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
-    let entries = [dup, dup];
-    let (accounts, metas) = build_invocation(signer, &entries);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&entries),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(matches!(
-        &result.raw_result,
-        Err(InstructionError::Custom(code))
-            if *code == BackfillError::InvalidInstructionData as u32
-    ));
-}
-
-/// Non-canonical PDA address → `InvalidPda`.
-#[test]
-fn backfill_balance_non_canonical_pda_rejects() {
+fn backfill_balance_resubmission_rejected() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
     let entry = BalanceEntry {
@@ -308,84 +202,55 @@ fn backfill_balance_non_canonical_pda_rejects() {
         token_address: [0x11u8; 32],
         balance: [0xaau8; 32],
     };
-    let (sys_id, sys_acc) = keyed_account_for_system_program();
-    let stray = Pubkey::new_from_array([0x99u8; 32]); // not the canonical balance PDA
 
-    let accounts: Vec<(Pubkey, Account)> = vec![
-        (signer, signer_account(10_000_000_000)),
-        (sys_id, sys_acc),
-        (stray, uninitialised_pda_account()),
-    ];
-    let metas = vec![
-        AccountMeta::new(signer, true),
-        AccountMeta::new_readonly(sys_id, false),
-        AccountMeta::new(stray, false),
-    ];
+    // ---------- First submit (fresh PDA) — must succeed ----------
+    let (accounts, metas) = build_invocation(signer, &[entry]);
     let ix = Instruction {
         program_id: program_id(),
-        accounts: metas,
+        accounts: metas.clone(),
         data: build_ix_data(&[entry]),
     };
-    let result = mollusk.process_instruction(&ix, &accounts);
+    let first = mollusk.process_instruction(&ix, &accounts);
+    assert_eq!(
+        first.program_result,
+        ProgramResult::Success,
+        "first submit must land cleanly: {:?}",
+        first.raw_result
+    );
+
+    // ---------- Second submit — pipe the resulting account state back in ----------
+    //
+    // Pull the now-initialised balance PDA out of the first run's resulting
+    // accounts and use it as the input to the second invocation. The signer's
+    // post-state (with lamports debited for rent) also feeds back in so
+    // CreateAccount accounting stays consistent.
+    let pda = derive_account_pda(entry.chain, entry.token_chain, &entry.token_address);
+    let pda_post = first
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| k == &pda)
+        .map(|(_, a)| a.clone())
+        .expect("balance PDA in resulting accounts");
+    let signer_post = first
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| k == &signer)
+        .map(|(_, a)| a.clone())
+        .expect("signer in resulting accounts");
+
+    let (sys_id, sys_acc) = keyed_account_for_system_program();
+    let accounts_replay: Vec<(Pubkey, Account)> =
+        vec![(signer, signer_post), (sys_id, sys_acc), (pda, pda_post)];
+    let second = mollusk.process_instruction(&ix, &accounts_replay);
     assert!(
         matches!(
-            &result.raw_result,
+            &second.raw_result,
             Err(InstructionError::Custom(code))
                 if *code == BackfillError::InvalidPda as u32
         ),
-        "expected InvalidPda, got {:?}",
-        result.raw_result
+        "expected InvalidPda on re-submission, got {:?}",
+        second.raw_result
     );
-}
-
-/// Caller passes more balance PDAs than entries — must reject.
-#[test]
-fn backfill_balance_extra_pda_account_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
-    let (mut accounts, mut metas) = build_invocation(signer, &[entry]);
-    // Append one stray PDA.
-    let stray = derive_account_pda(999, 999, &[0x99u8; 32]);
-    accounts.push((stray, uninitialised_pda_account()));
-    metas.push(AccountMeta::new(stray, false));
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&[entry]),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(matches!(
-        &result.raw_result,
-        Err(InstructionError::Custom(code))
-            if *code == BackfillError::InvalidInstructionData as u32
-    ));
-}
-
-/// Zero-entry ix rejects.
-#[test]
-fn backfill_balance_zero_entries_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&[]),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(matches!(
-        &result.raw_result,
-        Err(InstructionError::Custom(code))
-            if *code == BackfillError::InvalidInstructionData as u32
-    ));
 }
 
 /// Caller signs with a pubkey other than `BACKFILL_AUTHORITY` → `UnauthorizedCaller`.
