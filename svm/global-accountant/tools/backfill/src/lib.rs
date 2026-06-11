@@ -6,3 +6,4 @@
 //! `.claude/tasks/accountant-migration-orchestrator.md`.
 
 pub mod catalogue;
+pub mod chunker;
