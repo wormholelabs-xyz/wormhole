@@ -7,3 +7,4 @@
 
 pub mod catalogue;
 pub mod chunker;
+pub mod tx_builder;

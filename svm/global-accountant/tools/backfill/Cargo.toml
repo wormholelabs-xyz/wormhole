@@ -20,10 +20,23 @@ path = "src/main.rs"
 # Per CLAUDE.md: every dependency pinned exact. Versions chosen to match the
 # snapshot tool's already-audited dep set where overlap exists.
 [dependencies]
-serde = { version = "=1.0.219", features = ["derive"] }
+serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.140"
 hex = "=0.4.3"
 thiserror = "=1.0.69"
+
+# Solana SDK pieces for tx building. Versions match what the operational
+# program's Cargo.lock resolves to, pinned exact per CLAUDE.md.
+solana-pubkey = { version = "=4.2.0", features = ["curve25519"] }
+solana-instruction = "=3.4.0"
+solana-address = { version = "=2.6.0", features = ["curve25519"] }
+
+# Path deps to share program-level constants (instruction discriminators,
+# PDA seed prefixes, layout sizes). Host-buildable — both the program and
+# definitions crates have working host targets used by their own mollusk
+# tests.
+global-accountant-definitions = { path = "../../crates/definitions" }
+global-accountant-backfill = { path = "../../programs/global-accountant-backfill", default-features = false }
 
 [dev-dependencies]
 # (Future phases will add tokio, reqwest, solana-client, mock RPC libs etc.)
