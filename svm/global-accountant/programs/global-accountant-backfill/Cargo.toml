@@ -42,6 +42,9 @@ serde_json.workspace = true
 # Pinned exact per CLAUDE.md; already in the workspace lock via the operational
 # program's identical use.
 base64 = "=0.22.1"
+# Parallel-send the at-scale cost probe; already in the workspace lock graph
+# via solana-client.
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
 
 [lints]
 workspace = true
