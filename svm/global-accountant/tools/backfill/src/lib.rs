@@ -7,6 +7,7 @@
 
 pub mod catalogue;
 pub mod chunker;
+pub mod cursor;
 pub mod stats;
 pub mod submitter;
 pub mod tx_builder;

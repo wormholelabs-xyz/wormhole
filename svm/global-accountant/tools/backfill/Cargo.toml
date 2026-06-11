@@ -53,4 +53,4 @@ global-accountant-definitions = { path = "../../crates/definitions" }
 global-accountant-backfill = { path = "../../programs/global-accountant-backfill", default-features = false }
 
 [dev-dependencies]
-# (Future phases will add tokio, reqwest, solana-client, mock RPC libs etc.)
+tempfile = "=3.14.0"
