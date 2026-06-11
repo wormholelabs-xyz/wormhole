@@ -481,6 +481,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
 
 /// Pin `BalanceAccountLayout::LEN` against drift in the e2e assertions.
 const _: () = assert!(
-    BalanceAccountLayout::LEN == 76,
+    BalanceAccountLayout::LEN == 68,
     "BalanceAccountLayout::LEN drift — update the e2e assertions"
 );

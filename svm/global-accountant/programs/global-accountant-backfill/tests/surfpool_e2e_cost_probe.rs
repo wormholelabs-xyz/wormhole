@@ -3,11 +3,11 @@
 //! catalogue counts (5.5M transfers + 17K accounts + 40 registrations + 6
 //! modifications).
 //!
-//! Drives a sample of `TRANSFER_SAMPLE` transfer entries + `ACCOUNT_SAMPLE`
+//! Drives a sample of `TRANSFER_SAMPLE` transfer entries and `ACCOUNT_SAMPLE`
 //! account entries from `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl`
-//! through the backfill program. Captures per-tx `fee` + `computeUnitsConsumed`
-//! + `(preBalance - postBalance - fee)` (the rent debit) via `getTransaction`,
-//! averages per-entry, multiplies up.
+//! through the backfill program. Captures per-tx `fee`, `computeUnitsConsumed`,
+//! and `(preBalance - postBalance - fee)` (the rent debit) via
+//! `getTransaction`; averages per-entry, multiplies up.
 //!
 //! Skipped by default. Run via:
 //!   `cargo test --test surfpool_e2e_cost_probe -- --ignored --nocapture`

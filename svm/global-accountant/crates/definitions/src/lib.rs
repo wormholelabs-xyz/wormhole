@@ -407,7 +407,7 @@ const _: () = {
 };
 
 /// Zero-copy balance account for a `(chain, token_chain, token_address)`
-/// triple. On-disk size is **76 bytes**.
+/// triple. On-disk size is **68 bytes**.
 ///
 /// | offset | size | field         |
 /// |--------|------|---------------|
@@ -415,7 +415,6 @@ const _: () = {
 /// | 2      | 2    | token_chain   |
 /// | 4      | 32   | token_address |
 /// | 36     | 32   | balance       |
-/// | 68     | 8    | _reserved     |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct BalanceAccountLayout {
@@ -427,8 +426,6 @@ pub struct BalanceAccountLayout {
     pub token_address: [u8; 32],
     /// Current balance, 32-byte big-endian (matches the VAA `amount` encoding).
     pub balance: Uint256,
-    /// Reserved; crate-private so callers go through `Zeroable`.
-    pub(crate) _reserved: [u8; 8],
 }
 
 impl BalanceAccountLayout {
@@ -619,8 +616,7 @@ const _: () = {
     assert!(offset_of!(BalanceAccountLayout, token_chain) == 2);
     assert!(offset_of!(BalanceAccountLayout, token_address) == 4);
     assert!(offset_of!(BalanceAccountLayout, balance) == 36);
-    assert!(offset_of!(BalanceAccountLayout, _reserved) == 68);
-    assert!(BalanceAccountLayout::LEN == 76);
+    assert!(BalanceAccountLayout::LEN == 68);
 };
 
 /// Zero-copy per-chain Token Bridge emitter registration. One PDA per chain at
@@ -789,8 +785,12 @@ mod tests {
     // ---- BalanceAccountLayout tests ----
 
     #[test]
-    fn balance_layout_size_matches_cosmwasm() {
-        assert_eq!(BalanceAccountLayout::LEN, 76);
+    fn balance_layout_size_pinned() {
+        // 68 bytes — chain (2) + token_chain (2) + token_address (32) +
+        // balance (32). The 8-byte _reserved field was dropped on
+        // 2026-06-11 since nothing read or wrote it; saves ~0.97 SOL of
+        // rent across the 17,367 mainnet balance PDAs.
+        assert_eq!(BalanceAccountLayout::LEN, 68);
     }
 
     #[test]
@@ -801,7 +801,6 @@ mod tests {
         assert_eq!(offset_of!(BalanceAccountLayout, token_chain), 2);
         assert_eq!(offset_of!(BalanceAccountLayout, token_address), 4);
         assert_eq!(offset_of!(BalanceAccountLayout, balance), 36);
-        assert_eq!(offset_of!(BalanceAccountLayout, _reserved), 68);
     }
 
     #[test]
@@ -815,7 +814,6 @@ mod tests {
             token_chain: 2,
             token_address,
             balance: Uint256::from_u128(0xcafe_babe),
-            _reserved: [0u8; 8],
         };
         let bytes = bytemuck::bytes_of(&original);
         assert_eq!(bytes.len(), BalanceAccountLayout::LEN);
@@ -873,7 +871,6 @@ mod tests {
             token_chain: 0,
             token_address: [0u8; 32],
             balance: Uint256::from_u128(0x1234_5678),
-            _reserved: [0u8; 8],
         };
         let bytes = bytemuck::bytes_of(&original);
         let balance_slice = &bytes[36..68];
@@ -897,7 +894,6 @@ mod tests {
             token_chain,
             token_address,
             balance,
-            _reserved: [0u8; 8],
         }
     }
 

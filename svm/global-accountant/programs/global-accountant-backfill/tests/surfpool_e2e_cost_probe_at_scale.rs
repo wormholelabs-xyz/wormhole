@@ -240,6 +240,7 @@ fn build_backfill_noreplay_ix(
 #[derive(Default, Clone, Copy, Debug)]
 struct TxSample {
     fee_lamports: u64,
+    #[allow(dead_code)] // captured for telemetry; aggregate sums don't read it
     cu_consumed: u64,
     rent_lamports: u64,
     new_buckets: usize,
