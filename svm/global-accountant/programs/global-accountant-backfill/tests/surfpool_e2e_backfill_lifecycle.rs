@@ -116,15 +116,38 @@ struct NoReplayEntry {
     digest: [u8; 32],
 }
 
+/// Compact emitter-grouped wire format:
+/// `[disc][group_count] [chain emitter entry_count [seq digest]...]...`
+/// Caller must pre-sort entries by `(chain, emitter, sequence)`.
 fn build_backfill_noreplay_data(entries: &[NoReplayEntry]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(2 + entries.len() * 74);
-    data.push(IxDiscriminator::BackfillNoReplay as u8);
-    data.push(entries.len() as u8);
+    let mut groups: Vec<Vec<NoReplayEntry>> = Vec::new();
+    let mut current: Vec<NoReplayEntry> = Vec::new();
+    let mut current_key: Option<(u16, [u8; 32])> = None;
     for e in entries {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.emitter);
-        data.extend_from_slice(&e.sequence.to_be_bytes());
-        data.extend_from_slice(&e.digest);
+        let key = (e.chain, e.emitter);
+        if current_key != Some(key) {
+            if !current.is_empty() {
+                groups.push(std::mem::take(&mut current));
+            }
+            current_key = Some(key);
+        }
+        current.push(*e);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    let mut data = Vec::new();
+    data.push(IxDiscriminator::BackfillNoReplay as u8);
+    data.push(groups.len() as u8);
+    for group in &groups {
+        let first = &group[0];
+        data.extend_from_slice(&first.chain.to_be_bytes());
+        data.extend_from_slice(&first.emitter);
+        data.push(group.len() as u8);
+        for e in group {
+            data.extend_from_slice(&e.sequence.to_be_bytes());
+            data.extend_from_slice(&e.digest);
+        }
     }
     data
 }
