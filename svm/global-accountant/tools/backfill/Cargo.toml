@@ -1,0 +1,29 @@
+[workspace]
+# Standalone workspace — keeps deps isolated from the parent SBF workspace
+# (mirrors `tools/wormchain-snapshot/`).
+
+[package]
+name = "ga-backfill"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Off-chain orchestrator for the wormchain → SVM Global Accountant migration: reads the snapshot catalogue and drives the backfill program at scale."
+
+[lib]
+name = "ga_backfill"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ga-backfill"
+path = "src/main.rs"
+
+# Per CLAUDE.md: every dependency pinned exact. Versions chosen to match the
+# snapshot tool's already-audited dep set where overlap exists.
+[dependencies]
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.140"
+hex = "=0.4.3"
+thiserror = "=1.0.69"
+
+[dev-dependencies]
+# (Future phases will add tokio, reqwest, solana-client, mock RPC libs etc.)
