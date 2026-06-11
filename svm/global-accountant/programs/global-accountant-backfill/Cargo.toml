@@ -1,0 +1,51 @@
+[package]
+name = "global-accountant-backfill"
+description = "Wormhole Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits and Balance PDAs from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+bpf-entrypoint = []
+
+[dependencies]
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+pinocchio.workspace = true
+pinocchio-system.workspace = true
+solana-address = { version = "2.6", features = ["curve25519"] }
+
+[dev-dependencies]
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-address = { version = "2.6", features = ["curve25519"] }
+global-accountant-backfill = { path = "." }
+sha2 = "=0.10.9"
+# Surfpool e2e helpers and ACCDGST\0 commit-log parsing.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+solana-rent.workspace = true
+serde_json.workspace = true
+# Pinned exact per CLAUDE.md; already in the workspace lock via the operational
+# program's identical use.
+base64 = "=0.22.1"
+# Parallel-send the at-scale cost probe; already in the workspace lock graph
+# via solana-client.
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
+
+[lints]
+workspace = true
