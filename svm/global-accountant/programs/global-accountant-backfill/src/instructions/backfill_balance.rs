@@ -90,7 +90,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         // Derive + verify canonical PDA.
         let chain_be = chain.to_be_bytes();
         let token_chain_be = token_chain.to_be_bytes();
-        // Since authority is fully trusted, we could use create_program_address and pass the bump 
+        // Since authority is fully trusted, we could use create_program_address and pass the bump
         // but probably not worth the complexity and minute cost saving
         let (expected, canonical_bump) = Address::find_program_address(
             &[
@@ -128,11 +128,12 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         )?;
 
         let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
+        layout.tag = BalanceAccountLayout::TAG;
         layout.chain = chain;
         layout.token_chain = token_chain;
         layout.token_address = token_address;
         layout.balance = Uint256::from_be_bytes(balance_bytes);
-        // `_reserved` left zero — the field is crate-private to definitions.
+        // `_pad0` left zero — the field is crate-private to definitions.
 
         let mut data_mut = balance_pda.try_borrow_mut()?;
         if data_mut.len() != BalanceAccountLayout::LEN {
