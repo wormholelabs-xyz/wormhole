@@ -27,8 +27,9 @@
 use std::time::{Duration, Instant};
 
 use global_accountant_definitions::{
-    BalanceAccountLayout, Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, VERIFY_VAA_SHIM_PROGRAM_ID,
+    BalanceAccountLayout, ChainRegistrationLayout, Instruction as IxDiscriminator, Uint256,
+    ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    VERIFY_VAA_SHIM_PROGRAM_ID,
 };
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};
@@ -65,7 +66,9 @@ const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
 /// balance lazy-init, and the `sol_log_data` commit-log emit).
 const SUBMIT_VAAS_CU_LIMIT: u32 = 400_000;
 
-/// Rent-exempt balance for a 76-byte `BalanceAccountLayout`.
+/// Lamports funded into a cheatcode-seeded `BalanceAccountLayout` PDA (70 bytes
+/// after the offset-0 tag retrofit). `surfnet_setAccount` does not enforce
+/// rent-exemption, so this is a sufficient fixed balance, not the exact minimum.
 const BALANCE_PDA_RENT_LAMPORTS: u64 = 1_169_280;
 
 /// Datasource URL for surfpool's mainnet fork; `GA_E2E_DATASOURCE_RPC` overrides.
@@ -102,6 +105,11 @@ fn derive_account_pda(
 
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
+}
+
+fn derive_chain_registration_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id)
 }
 
 fn build_namespace(chain: u16, emitter: &[u8; 32]) -> [u8; 34] {
@@ -389,6 +397,37 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         seed_amount,
     );
 
+    // Inject the chain-registration PDA for the VAA's emitter; submit_vaas
+    // cross-checks (emitter_chain, emitter) against it on every submission.
+    // Cheatcode-written since the prod-shape build only creates it via
+    // `register_chain` governance.
+    let (chain_registration_pda, _cr_bump) =
+        derive_chain_registration_pda(&ga_program_id, vaa.emitter_chain);
+    {
+        let mut registration: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+        registration.tag = ChainRegistrationLayout::TAG;
+        registration.chain = vaa.emitter_chain;
+        registration.emitter_address = vaa.emitter_address;
+        let resp = rpc_call(
+            &rpc_url,
+            "surfnet_setAccount",
+            serde_json::json!([
+                chain_registration_pda.to_string(),
+                {
+                    "lamports": 1_000_000_000u64,
+                    "owner": ga_program_id.to_string(),
+                    "executable": false,
+                    "rent_epoch": 0u64,
+                    "data": hex_encode(bytemuck::bytes_of(&registration)),
+                }
+            ]),
+        );
+        assert!(
+            resp.get("error").is_none(),
+            "surfnet_setAccount failed for chain registration: {resp}"
+        );
+    }
+
     // Build + send the submit_vaas tx.
     let body = vaa.bytes[vaa.body_offset..].to_vec();
     let ix = Instruction {
@@ -404,6 +443,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
             AccountMeta::new(source_account_pda, false),
             AccountMeta::new(dest_account_pda, false),
             AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new_readonly(chain_registration_pda, false),
         ],
         data: submit_vaas_ix_data(gs_bump, &body),
     };
