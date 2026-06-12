@@ -24,7 +24,13 @@ pub fn load(account: &AccountView) -> Result<BalanceAccountLayout, ProgramError>
     if data.len() != BalanceAccountLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    Ok(*bytemuck::from_bytes::<BalanceAccountLayout>(&data))
+    let layout = bytemuck::from_bytes::<BalanceAccountLayout>(&data);
+    // Defense-in-depth: the offset-0 tag must match, else this is corrupted or
+    // foreign data at a correctly-sized address (tag 0 = uninitialised).
+    if layout.tag != BalanceAccountLayout::TAG {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    Ok(*layout)
 }
 
 /// Write a [`BalanceAccountLayout`] into an account's data buffer.
@@ -80,6 +86,7 @@ pub fn init_if_needed(
     // Stamp the keying triple into the freshly-zeroed layout (self-describing
     // record); balance starts at zero, credited/debited by the caller.
     let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = BalanceAccountLayout::TAG;
     layout.chain = chain;
     layout.token_chain = token_chain;
     layout.token_address = *token_address;

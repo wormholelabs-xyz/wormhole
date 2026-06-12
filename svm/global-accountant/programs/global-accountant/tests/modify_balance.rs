@@ -97,6 +97,7 @@ fn balance_account(
     balance: Uint256,
 ) -> Account {
     let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = BalanceAccountLayout::TAG;
     layout.chain = chain;
     layout.token_chain = token_chain;
     layout.token_address = *token_address;

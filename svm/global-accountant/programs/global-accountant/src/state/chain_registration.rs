@@ -20,7 +20,12 @@ pub fn load(account: &AccountView) -> Result<ChainRegistrationLayout, ProgramErr
     if data.len() != ChainRegistrationLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    Ok(*bytemuck::from_bytes::<ChainRegistrationLayout>(&data))
+    let layout = bytemuck::from_bytes::<ChainRegistrationLayout>(&data);
+    // Defense-in-depth: offset-0 tag must match (tag 0 = uninitialised).
+    if layout.tag != ChainRegistrationLayout::TAG {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    Ok(*layout)
 }
 
 /// Write a [`ChainRegistrationLayout`] into the account's data buffer (used by

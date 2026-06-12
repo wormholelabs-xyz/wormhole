@@ -318,6 +318,7 @@ fn surfpool_submit_observations_real_noreplay() {
     // (emitter_chain, emitter) against it on every submission. Cheatcode-written
     // since the prod-shape build only creates it via `register_chain` governance.
     let mut registration: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    registration.tag = ChainRegistrationLayout::TAG;
     registration.chain = chain;
     registration.emitter_address = emitter;
     let resp = common::rpc_call(

@@ -147,6 +147,7 @@ fn uninit_pda_account() -> Account {
 
 fn chain_registration_account(chain: u16, emitter: &[u8; 32]) -> Account {
     let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = ChainRegistrationLayout::TAG;
     layout.chain = chain;
     layout.emitter_address = *emitter;
     Account {

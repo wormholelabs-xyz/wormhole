@@ -12,7 +12,12 @@ pub fn load(account: &AccountView) -> Result<PendingObservationsLayout, ProgramE
     if data.len() != PendingObservationsLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    Ok(*bytemuck::from_bytes::<PendingObservationsLayout>(&data))
+    let layout = bytemuck::from_bytes::<PendingObservationsLayout>(&data);
+    // Defense-in-depth: offset-0 tag must match (tag 0 = uninitialised).
+    if layout.tag != PendingObservationsLayout::TAG {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    Ok(*layout)
 }
 
 /// Write a [`PendingObservationsLayout`] into an account's data buffer.

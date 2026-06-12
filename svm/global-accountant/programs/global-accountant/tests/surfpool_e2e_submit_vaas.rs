@@ -200,6 +200,7 @@ fn seed_account_pda(
     balance: Uint256,
 ) {
     let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = BalanceAccountLayout::TAG;
     layout.chain = chain;
     layout.token_chain = token_chain;
     layout.token_address = *token_address;
@@ -481,6 +482,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
 
 /// Pin `BalanceAccountLayout::LEN` against drift in the e2e assertions.
 const _: () = assert!(
-    BalanceAccountLayout::LEN == 68,
+    BalanceAccountLayout::LEN == 70,
     "BalanceAccountLayout::LEN drift — update the e2e assertions"
 );

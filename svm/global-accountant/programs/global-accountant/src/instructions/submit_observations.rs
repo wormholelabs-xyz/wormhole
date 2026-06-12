@@ -373,6 +373,7 @@ fn create_pending_pda(
     )?;
 
     let mut layout: PendingObservationsLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = PendingObservationsLayout::TAG;
     layout.digest = parsed.digest;
     layout.payer = *submitter.address().as_array();
     layout.guardian_set_index = parsed.guardian_set_index;

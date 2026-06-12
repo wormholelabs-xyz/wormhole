@@ -254,6 +254,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     )?;
 
     let mut log: ModificationLogLayout = bytemuck::Zeroable::zeroed();
+    log.tag = ModificationLogLayout::TAG;
     log.sequence = payload_sequence;
     log.chain_id = chain_id;
     log.token_chain = token_chain;
@@ -302,6 +303,7 @@ fn init_balance_account(
     )?;
 
     let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = BalanceAccountLayout::TAG;
     layout.chain = chain_id;
     layout.token_chain = token_chain;
     layout.token_address = *token_address;

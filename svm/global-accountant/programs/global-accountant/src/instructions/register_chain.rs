@@ -211,6 +211,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (10) Write the new registration layout -----
     let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = ChainRegistrationLayout::TAG;
     layout.chain = chain_to_register;
     layout.emitter_address = emitter_to_register;
     chain_registration::store(registration_pda, &layout)?;

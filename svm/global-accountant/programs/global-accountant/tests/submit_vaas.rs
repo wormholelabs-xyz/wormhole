@@ -107,6 +107,7 @@ fn derive_canonical_noreplay_bucket(
 
 fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account {
     let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = ChainRegistrationLayout::TAG;
     layout.chain = chain;
     layout.emitter_address = *emitter_address;
     Account {

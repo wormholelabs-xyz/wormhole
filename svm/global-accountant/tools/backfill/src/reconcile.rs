@@ -12,17 +12,18 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{anyhow, Context, Result};
+use global_accountant_definitions::{AccountTag, BalanceAccountLayout};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
-use solana_client::rpc_filter::RpcFilterType;
+use solana_client::rpc_filter::{Memcmp, RpcFilterType};
 use solana_pubkey::Pubkey;
 
 use crate::catalogue::{CatalogueReader, Record};
 
-/// Balance layout size on disk after the `_reserved` field was dropped
-/// (commit `20d90325`). chain (2) + token_chain (2) + token_address (32) +
-/// balance (32) = 68 bytes.
-pub const BALANCE_LAYOUT_LEN: u64 = 68;
+/// Balance layout size on disk. Sourced from the shared definitions crate so it
+/// can never drift from the on-chain layout (currently 70 bytes: tag (1) +
+/// _pad0 (1) + chain (2) + token_chain (2) + token_address (32) + balance (32)).
+pub const BALANCE_LAYOUT_LEN: u64 = BalanceAccountLayout::LEN as u64;
 
 /// Identity of one Balance entry — `(chain, token_chain, token_address)`.
 pub type BalanceKey = (u16, u16, [u8; 32]);
@@ -96,14 +97,17 @@ pub fn load_expected_balances(path: &Path) -> Result<HashMap<BalanceKey, Balance
 }
 
 /// Fetch every Balance PDA from the backfill program via `getProgramAccounts`.
-/// Filtered on `dataSize == BALANCE_LAYOUT_LEN` so the response only contains
-/// Balance accounts (NoReplay buckets are 129 bytes, ChainRegistration is 64).
+/// Discriminated by the offset-0 account tag (`AccountTag::Balance`) — the
+/// canonical filter every consumer uses — plus a `dataSize` belt-and-suspenders.
 pub async fn fetch_on_chain_balances(
     rpc: &RpcClient,
     program_id: &Pubkey,
 ) -> Result<HashMap<BalanceKey, BalanceValue>> {
     let config = RpcProgramAccountsConfig {
-        filters: Some(vec![RpcFilterType::DataSize(BALANCE_LAYOUT_LEN)]),
+        filters: Some(vec![
+            RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, vec![AccountTag::Balance as u8])),
+            RpcFilterType::DataSize(BALANCE_LAYOUT_LEN),
+        ]),
         ..Default::default()
     };
     #[allow(deprecated)] // get_program_ui_accounts returns UiAccount which is harder to byte-parse
@@ -120,12 +124,13 @@ pub async fn fetch_on_chain_balances(
                 BALANCE_LAYOUT_LEN
             ));
         }
-        let chain = u16::from_le_bytes([acc.data[0], acc.data[1]]);
-        let token_chain = u16::from_le_bytes([acc.data[2], acc.data[3]]);
+        // Layout: tag@0, _pad0@1, chain@2, token_chain@4, token_address@6, balance@38.
+        let chain = u16::from_le_bytes([acc.data[2], acc.data[3]]);
+        let token_chain = u16::from_le_bytes([acc.data[4], acc.data[5]]);
         let mut token_address = [0u8; 32];
-        token_address.copy_from_slice(&acc.data[4..36]);
+        token_address.copy_from_slice(&acc.data[6..38]);
         let mut balance = [0u8; 32];
-        balance.copy_from_slice(&acc.data[36..68]);
+        balance.copy_from_slice(&acc.data[38..70]);
         out.insert((chain, token_chain, token_address), balance);
     }
     Ok(out)
