@@ -84,9 +84,8 @@ pub enum GlobalAccountantError {
     BalanceOverflow = 15,
     /// Balance underflow on the transfer path (insufficient source balance).
     BalanceUnderflow = 16,
-    /// `keccak256(keccak256(body)) != digest`. Rejected before any mutation
-    /// since the body carries the transfer payload the commit branch reads.
-    BodyDigestMismatch = 17,
+    // 17 reserved (previously `BodyDigestMismatch`; the digest is now derived
+    // from the body in `submit_observations`, so a mismatch is unrepresentable).
     /// Supplied Account PDA does not match the canonical seeds for the
     /// source/destination side of the transfer.
     InvalidAccountPda = 18,
@@ -233,6 +232,26 @@ impl ModificationKind {
     }
 }
 
+/// Account-type tag stored at offset 0 of every program-owned PDA layout.
+///
+/// Seeds namespace writes on-chain but are not recoverable from
+/// `getProgramAccounts`, so off-chain consumers discriminate account types with
+/// a single `memcmp(offset 0, [tag])` filter. On-chain, the load helpers compare
+/// the tag as defense-in-depth against a handler that forgets to re-derive a PDA.
+///
+/// Values are append-only (same discipline as [`GlobalAccountantError`]); never
+/// renumber once shipped. `0` is reserved: a freshly allocated account is all
+/// zeroes, so zeroed data must never parse as a valid tag. The NTT accountant
+/// port extends this space (4+).
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccountTag {
+    Pending = 1,
+    Balance = 2,
+    ChainRegistration = 3,
+    ModificationLog = 4,
+}
+
 /// PDA seed prefix for the global-accountant authority that signs all
 /// `solana-noreplay` CPIs. Full tuple: `[b"noreplay-authority"]`. One global
 /// authority suffices because the noreplay namespace (`chain_be ‖ emitter`)
@@ -361,35 +380,40 @@ impl Ord for Uint256 {
 }
 
 /// Zero-copy layout for a per-`(chain, emitter, sequence)` pending-quorum PDA.
-/// On-disk size is **76 bytes** (4-byte alignment, explicit tail padding).
+/// On-disk size is **76 bytes** (4-byte alignment, tag at offset 0).
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
-/// | 0      | 32   | digest             |
-/// | 32     | 32   | payer              |
-/// | 64     | 4    | guardian_set_index |
-/// | 68     | 4    | signatures (u32 bitmap; bit N == guardian-index N signed) |
-/// | 72     | 2    | chain              |
-/// | 74     | 2    | _padding           |
+/// | 0      | 1    | tag ([`AccountTag::Pending`]) |
+/// | 1      | 1    | _pad0              |
+/// | 2      | 2    | chain              |
+/// | 4      | 4    | guardian_set_index |
+/// | 8      | 4    | signatures (u32 bitmap; bit N == guardian-index N signed) |
+/// | 12     | 32   | digest             |
+/// | 44     | 32   | payer              |
 ///
 /// The 32-bit bitmap covers 32 guardian indices. A protocol move to >32
 /// guardians requires widening the field and bumping the layout version.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct PendingObservationsLayout {
-    pub digest: [u8; 32],
-    pub payer: Pubkey,
+    /// Account-type tag; always [`AccountTag::Pending`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// Alignment padding; crate-private so callers go through `Zeroable`.
+    pub(crate) _pad0: u8,
+    pub chain: u16,
     pub guardian_set_index: u32,
     pub signatures: u32,
-    pub chain: u16,
-    /// Explicit tail padding required by `Pod` (no implicit padding allowed).
-    /// Crate-private so callers go through `Zeroable`.
-    pub(crate) _padding: [u8; 2],
+    pub digest: [u8; 32],
+    pub payer: Pubkey,
 }
 
 impl PendingObservationsLayout {
     /// Byte length of the layout (also the rent-paying allocation size).
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::Pending as u8;
 
     /// Quorum threshold: 13 of 19 guardians — the Core Bridge
     /// `(len * 2) / 3 + 1` for len 19. Pinned, not derived from the live set.
@@ -398,26 +422,33 @@ impl PendingObservationsLayout {
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(PendingObservationsLayout, digest) == 0);
-    assert!(offset_of!(PendingObservationsLayout, payer) == 32);
-    assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 64);
-    assert!(offset_of!(PendingObservationsLayout, signatures) == 68);
-    assert!(offset_of!(PendingObservationsLayout, chain) == 72);
+    assert!(offset_of!(PendingObservationsLayout, tag) == 0);
+    assert!(offset_of!(PendingObservationsLayout, chain) == 2);
+    assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 4);
+    assert!(offset_of!(PendingObservationsLayout, signatures) == 8);
+    assert!(offset_of!(PendingObservationsLayout, digest) == 12);
+    assert!(offset_of!(PendingObservationsLayout, payer) == 44);
     assert!(PendingObservationsLayout::LEN == 76);
 };
 
 /// Zero-copy balance account for a `(chain, token_chain, token_address)`
-/// triple. On-disk size is **68 bytes**.
+/// triple. On-disk size is **70 bytes** (tag at offset 0).
 ///
 /// | offset | size | field         |
 /// |--------|------|---------------|
-/// | 0      | 2    | chain         |
-/// | 2      | 2    | token_chain   |
-/// | 4      | 32   | token_address |
-/// | 36     | 32   | balance       |
+/// | 0      | 1    | tag ([`AccountTag::Balance`]) |
+/// | 1      | 1    | _pad0         |
+/// | 2      | 2    | chain         |
+/// | 4      | 2    | token_chain   |
+/// | 6      | 32   | token_address |
+/// | 38     | 32   | balance       |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct BalanceAccountLayout {
+    /// Account-type tag; always [`AccountTag::Balance`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// Alignment padding; crate-private so callers go through `Zeroable`.
+    pub(crate) _pad0: u8,
     /// Chain on which this balance is held.
     pub chain: u16,
     /// Native chain of the token.
@@ -430,6 +461,9 @@ pub struct BalanceAccountLayout {
 
 impl BalanceAccountLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::Balance as u8;
 
     /// Apply a `lock_or_burn`: credits when `chain == token_chain` (native
     /// lock), debits otherwise (wrapped burn). Overflow/underflow surface as
@@ -612,11 +646,12 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
 // Compile-time pins for the balance layout.
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(BalanceAccountLayout, chain) == 0);
-    assert!(offset_of!(BalanceAccountLayout, token_chain) == 2);
-    assert!(offset_of!(BalanceAccountLayout, token_address) == 4);
-    assert!(offset_of!(BalanceAccountLayout, balance) == 36);
-    assert!(BalanceAccountLayout::LEN == 68);
+    assert!(offset_of!(BalanceAccountLayout, tag) == 0);
+    assert!(offset_of!(BalanceAccountLayout, chain) == 2);
+    assert!(offset_of!(BalanceAccountLayout, token_chain) == 4);
+    assert!(offset_of!(BalanceAccountLayout, token_address) == 6);
+    assert!(offset_of!(BalanceAccountLayout, balance) == 38);
+    assert!(BalanceAccountLayout::LEN == 70);
 };
 
 /// Zero-copy per-chain Token Bridge emitter registration. One PDA per chain at
@@ -626,28 +661,38 @@ const _: () = {
 ///
 /// | offset | size | field           |
 /// |--------|------|-----------------|
-/// | 0      | 2    | chain           |
-/// | 2      | 30   | _padding        |
+/// | 0      | 1    | tag ([`AccountTag::ChainRegistration`]) |
+/// | 1      | 1    | _pad0           |
+/// | 2      | 2    | chain           |
+/// | 4      | 28   | _padding        |
 /// | 32     | 32   | emitter_address |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct ChainRegistrationLayout {
+    /// Account-type tag; always [`AccountTag::ChainRegistration`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// Alignment padding; crate-private so callers go through `Zeroable`.
+    pub(crate) _pad0: u8,
     /// Wormhole chain ID this PDA registers (mirrors the seed bytes).
     pub chain: u16,
     /// Reserved; crate-private so callers go through `Zeroable`.
-    pub(crate) _padding: [u8; 30],
+    pub(crate) _padding: [u8; 28],
     /// Canonical Token Bridge emitter address on `chain`.
     pub emitter_address: [u8; 32],
 }
 
 impl ChainRegistrationLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::ChainRegistration as u8;
 }
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(ChainRegistrationLayout, chain) == 0);
-    assert!(offset_of!(ChainRegistrationLayout, _padding) == 2);
+    assert!(offset_of!(ChainRegistrationLayout, tag) == 0);
+    assert!(offset_of!(ChainRegistrationLayout, chain) == 2);
+    assert!(offset_of!(ChainRegistrationLayout, _padding) == 4);
     assert!(offset_of!(ChainRegistrationLayout, emitter_address) == 32);
     assert!(ChainRegistrationLayout::LEN == 64);
 };
@@ -659,58 +704,114 @@ const _: () = {
 ///
 /// | offset | size | field         |
 /// |--------|------|---------------|
-/// | 0      | 8    | sequence      |
-/// | 8      | 2    | chain_id      |
-/// | 10     | 2    | token_chain   |
-/// | 12     | 1    | kind          |
-/// | 13     | 32   | token_address |
-/// | 45     | 32   | amount        |
-/// | 77     | 32   | reason        |
-/// | 109    | 3    | _reserved     |
+/// | 0      | 1    | tag ([`AccountTag::ModificationLog`]) |
+/// | 1      | 1    | kind          |
+/// | 2      | 2    | chain_id      |
+/// | 4      | 2    | token_chain   |
+/// | 6      | 2    | _pad0         |
+/// | 8      | 8    | sequence      |
+/// | 16     | 32   | token_address |
+/// | 48     | 32   | amount        |
+/// | 80     | 32   | reason        |
 ///
-/// Total: 112 bytes (multiple of 8 for `Pod` alignment).
+/// Total: 112 bytes (multiple of 8 for `Pod` alignment). Small fields are
+/// clustered ahead of the 8-aligned `sequence` so the tag sits at offset 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct ModificationLogLayout {
-    /// Modification's own sequence (distinct from the VAA emitter sequence).
-    pub sequence: u64,
+    /// Account-type tag; always [`AccountTag::ModificationLog`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// `1` for `Add`, `2` for `Subtract` (see [`ModificationKind`]).
+    pub kind: u8,
     /// Chain whose balance was modified.
     pub chain_id: u16,
     /// Native chain of the modified token.
     pub token_chain: u16,
-    /// `1` for `Add`, `2` for `Subtract` (see [`ModificationKind`]).
-    pub kind: u8,
+    /// Alignment padding ahead of `sequence`; crate-private so callers go
+    /// through `Zeroable`.
+    pub(crate) _pad0: [u8; 2],
+    /// Modification's own sequence (distinct from the VAA emitter sequence).
+    pub sequence: u64,
     /// Token address on its native chain.
     pub token_address: [u8; 32],
     /// Modification amount, big-endian 256-bit unsigned integer.
     pub amount: Uint256,
     /// Free-form reason, 32-byte right-padded ASCII. Audit-trail only.
     pub reason: [u8; 32],
-    /// Reserved padding to 112 bytes; crate-private so callers go through
-    /// `Zeroable`.
-    pub(crate) _reserved: [u8; 3],
 }
 
 impl ModificationLogLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::ModificationLog as u8;
 }
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(ModificationLogLayout, sequence) == 0);
-    assert!(offset_of!(ModificationLogLayout, chain_id) == 8);
-    assert!(offset_of!(ModificationLogLayout, token_chain) == 10);
-    assert!(offset_of!(ModificationLogLayout, kind) == 12);
-    assert!(offset_of!(ModificationLogLayout, token_address) == 13);
-    assert!(offset_of!(ModificationLogLayout, amount) == 45);
-    assert!(offset_of!(ModificationLogLayout, reason) == 77);
-    assert!(offset_of!(ModificationLogLayout, _reserved) == 109);
+    assert!(offset_of!(ModificationLogLayout, tag) == 0);
+    assert!(offset_of!(ModificationLogLayout, kind) == 1);
+    assert!(offset_of!(ModificationLogLayout, chain_id) == 2);
+    assert!(offset_of!(ModificationLogLayout, token_chain) == 4);
+    assert!(offset_of!(ModificationLogLayout, sequence) == 8);
+    assert!(offset_of!(ModificationLogLayout, token_address) == 16);
+    assert!(offset_of!(ModificationLogLayout, amount) == 48);
+    assert!(offset_of!(ModificationLogLayout, reason) == 80);
     assert!(ModificationLogLayout::LEN == 112);
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- AccountTag retrofit tests ----
+
+    #[test]
+    fn account_tag_values_pinned() {
+        // Append-only: never renumber once shipped.
+        assert_eq!(AccountTag::Pending as u8, 1);
+        assert_eq!(AccountTag::Balance as u8, 2);
+        assert_eq!(AccountTag::ChainRegistration as u8, 3);
+        assert_eq!(AccountTag::ModificationLog as u8, 4);
+        // Each layout's TAG const mirrors its AccountTag value.
+        assert_eq!(PendingObservationsLayout::TAG, AccountTag::Pending as u8);
+        assert_eq!(BalanceAccountLayout::TAG, AccountTag::Balance as u8);
+        assert_eq!(
+            ChainRegistrationLayout::TAG,
+            AccountTag::ChainRegistration as u8
+        );
+        assert_eq!(
+            ModificationLogLayout::TAG,
+            AccountTag::ModificationLog as u8
+        );
+    }
+
+    #[test]
+    fn tag_at_offset_zero_for_all_layouts() {
+        use core::mem::offset_of;
+        assert_eq!(offset_of!(PendingObservationsLayout, tag), 0);
+        assert_eq!(offset_of!(BalanceAccountLayout, tag), 0);
+        assert_eq!(offset_of!(ChainRegistrationLayout, tag), 0);
+        assert_eq!(offset_of!(ModificationLogLayout, tag), 0);
+    }
+
+    #[test]
+    fn zeroed_layout_is_not_a_valid_tag() {
+        // A freshly allocated (all-zero) account must not parse as any type:
+        // tag 0 is reserved, distinct from every AccountTag value.
+        assert_eq!(<PendingObservationsLayout as Zeroable>::zeroed().tag, 0);
+        assert_eq!(<BalanceAccountLayout as Zeroable>::zeroed().tag, 0);
+        assert_eq!(<ChainRegistrationLayout as Zeroable>::zeroed().tag, 0);
+        assert_eq!(<ModificationLogLayout as Zeroable>::zeroed().tag, 0);
+        for tag in [
+            AccountTag::Pending,
+            AccountTag::Balance,
+            AccountTag::ChainRegistration,
+            AccountTag::ModificationLog,
+        ] {
+            assert_ne!(tag as u8, 0);
+        }
+    }
 
     // ---- Uint256 unit tests ----
 
@@ -786,21 +887,21 @@ mod tests {
 
     #[test]
     fn balance_layout_size_pinned() {
-        // 68 bytes — chain (2) + token_chain (2) + token_address (32) +
-        // balance (32). The 8-byte _reserved field was dropped on
-        // 2026-06-11 since nothing read or wrote it; saves ~0.97 SOL of
-        // rent across the 17,367 mainnet balance PDAs.
-        assert_eq!(BalanceAccountLayout::LEN, 68);
+        // 70 bytes — tag (1) + _pad0 (1) + chain (2) + token_chain (2) +
+        // token_address (32) + balance (32). Grew from 68 to 70 when the
+        // offset-0 account tag was retrofitted.
+        assert_eq!(BalanceAccountLayout::LEN, 70);
     }
 
     #[test]
     fn balance_layout_uint256_offsets_pinned() {
         // Runtime mirror of the const-assert block above.
         use core::mem::offset_of;
-        assert_eq!(offset_of!(BalanceAccountLayout, chain), 0);
-        assert_eq!(offset_of!(BalanceAccountLayout, token_chain), 2);
-        assert_eq!(offset_of!(BalanceAccountLayout, token_address), 4);
-        assert_eq!(offset_of!(BalanceAccountLayout, balance), 36);
+        assert_eq!(offset_of!(BalanceAccountLayout, tag), 0);
+        assert_eq!(offset_of!(BalanceAccountLayout, chain), 2);
+        assert_eq!(offset_of!(BalanceAccountLayout, token_chain), 4);
+        assert_eq!(offset_of!(BalanceAccountLayout, token_address), 6);
+        assert_eq!(offset_of!(BalanceAccountLayout, balance), 38);
     }
 
     #[test]
@@ -810,6 +911,8 @@ mod tests {
             *b = i as u8;
         }
         let original = BalanceAccountLayout {
+            tag: BalanceAccountLayout::TAG,
+            _pad0: 0,
             chain: 1,
             token_chain: 2,
             token_address,
@@ -832,14 +935,12 @@ mod tests {
     #[test]
     fn pending_layout_offsets_pinned() {
         use core::mem::offset_of;
-        assert_eq!(offset_of!(PendingObservationsLayout, digest), 0);
-        assert_eq!(offset_of!(PendingObservationsLayout, payer), 32);
-        assert_eq!(
-            offset_of!(PendingObservationsLayout, guardian_set_index),
-            64
-        );
-        assert_eq!(offset_of!(PendingObservationsLayout, signatures), 68);
-        assert_eq!(offset_of!(PendingObservationsLayout, chain), 72);
+        assert_eq!(offset_of!(PendingObservationsLayout, tag), 0);
+        assert_eq!(offset_of!(PendingObservationsLayout, chain), 2);
+        assert_eq!(offset_of!(PendingObservationsLayout, guardian_set_index), 4);
+        assert_eq!(offset_of!(PendingObservationsLayout, signatures), 8);
+        assert_eq!(offset_of!(PendingObservationsLayout, digest), 12);
+        assert_eq!(offset_of!(PendingObservationsLayout, payer), 44);
     }
 
     #[test]
@@ -849,12 +950,13 @@ mod tests {
             *b = i as u8;
         }
         let original = PendingObservationsLayout {
-            digest,
-            payer: [0xAA; 32],
+            tag: PendingObservationsLayout::TAG,
+            _pad0: 0,
+            chain: 1,
             guardian_set_index: 0x0BAD_CAFE,
             signatures: 0x0000_1FFFu32, // 13 low bits set
-            chain: 1,
-            _padding: [0; 2],
+            digest,
+            payer: [0xAA; 32],
         };
         let bytes = bytemuck::bytes_of(&original);
         let copy: &PendingObservationsLayout = bytemuck::from_bytes(bytes);
@@ -867,13 +969,15 @@ mod tests {
         // The on-disk balance bytes must be the big-endian encoding, so a VAA
         // `amount` slice copies in without byte-order conversion.
         let original = BalanceAccountLayout {
+            tag: BalanceAccountLayout::TAG,
+            _pad0: 0,
             chain: 0,
             token_chain: 0,
             token_address: [0u8; 32],
             balance: Uint256::from_u128(0x1234_5678),
         };
         let bytes = bytemuck::bytes_of(&original);
-        let balance_slice = &bytes[36..68];
+        let balance_slice = &bytes[38..70];
         let mut expected = [0u8; 32];
         expected[28] = 0x12;
         expected[29] = 0x34;
@@ -890,6 +994,8 @@ mod tests {
         token_address[0] = 0x62;
         token_address[31] = 0x61;
         BalanceAccountLayout {
+            tag: BalanceAccountLayout::TAG,
+            _pad0: 0,
             chain,
             token_chain,
             token_address,
