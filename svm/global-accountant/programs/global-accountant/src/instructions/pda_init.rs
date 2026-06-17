@@ -1,19 +1,20 @@
 //! Shared PDA initialisation helper.
 //!
-//! Defends against the dust-DoS grief vector (an attacker pre-funds the PDA
-//! address so a naive `CreateAccount` would fail). Three branches:
+//! Defends against the dust-DoS grief vector: a not-yet-created PDA is off the
+//! ed25519 curve, so the only thing an attacker can do to its address is send
+//! lamports. A naive `CreateAccount` fails on any prefunded balance, so this
+//! uses the system program's `CreateAccountAllowPrefund` (SIMD-0312) instead,
+//! which allocates + assigns + (optionally) tops up in a single CPI regardless
+//! of the starting balance. `with_minimum_balance` computes the top-up as
+//! `rent_minimum.saturating_sub(pda.lamports())`, so an under-, exactly-, or
+//! over-funded address all converge on a correctly rent-exempt program account.
 //!
-//! 1. Empty + zero-lamport + system-owned -> `CreateAccount`.
-//! 2. Pre-funded + system-owned + data-empty -> Transfer (top up if short) +
-//!    Allocate + Assign, with an explicit owner check surfacing `InvalidPda`.
-//! 3. Anything else -> `InvalidPda`.
+//! The caller (`account::init_if_needed`) short-circuits an already-initialised
+//! PDA; the explicit guard here surfaces a clean `InvalidPda` for the remaining
+//! "not system-owned / not empty" cases rather than a downstream system error.
 
-use pinocchio::{
-    cpi::Signer,
-    sysvars::{rent::Rent, Sysvar},
-    AccountView, Address, ProgramResult,
-};
-use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
+use pinocchio::{cpi::Signer, AccountView, Address, ProgramResult};
+use pinocchio_system::instructions::CreateAccountAllowPrefund;
 
 use crate::definitions::GlobalAccountantError;
 use crate::err;
@@ -25,46 +26,14 @@ pub fn init_or_upgrade_pda(
     signer: Signer,
     space: u64,
 ) -> ProgramResult {
-    let rent_exempt_minimum = Rent::get()?.try_minimum_balance(space as usize)?;
-    let initial_lamports = pda.lamports();
-    let initial_data_len = pda.data_len();
-    let initial_owner_is_system = pda.owner() == &pinocchio_system::ID;
-
-    if initial_data_len != 0 || !initial_owner_is_system {
+    if pda.data_len() != 0 || pda.owner() != &pinocchio_system::ID {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    if initial_lamports == 0 {
-        CreateAccount {
-            from: payer,
-            to: pda,
-            lamports: rent_exempt_minimum,
-            space,
-            owner: program_id,
-        }
+    // `None` rent sysvar => the helper fetches `Rent` via syscall and derives
+    // the funding top-up itself; passing 0-topup when already prefunded.
+    CreateAccountAllowPrefund::with_minimum_balance(payer, pda, space, program_id, None)?
         .invoke_signed(core::slice::from_ref(&signer))?;
-    } else {
-        // Over-funded PDA is accepted; `saturating_sub` keeps `top_up` at 0.
-        let top_up = rent_exempt_minimum.saturating_sub(initial_lamports);
-        if top_up > 0 {
-            Transfer {
-                from: payer,
-                to: pda,
-                lamports: top_up,
-            }
-            .invoke()?;
-        }
-        Allocate {
-            account: pda,
-            space,
-        }
-        .invoke_signed(core::slice::from_ref(&signer))?;
-        Assign {
-            account: pda,
-            owner: program_id,
-        }
-        .invoke_signed(core::slice::from_ref(&signer))?;
-    }
 
     Ok(())
 }

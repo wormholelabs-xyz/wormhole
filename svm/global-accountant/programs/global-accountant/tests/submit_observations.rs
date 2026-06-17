@@ -2027,6 +2027,56 @@ fn quorum_with_lazy_init_destination_account_succeeds() {
     assert_eq!(layout.balance, Uint256::from_u128(9_999));
 }
 
+/// Dust-DoS defense: an attacker pre-funds the destination Account PDA address
+/// with lamports below the rent-exempt minimum (the only griefing possible
+/// against an off-curve PDA). A naive `CreateAccount` would fail on the
+/// non-zero balance; `CreateAccountAllowPrefund` (SIMD-0312) must still
+/// lazy-init it, topping up the shortfall in a single CPI.
+#[test]
+fn quorum_with_dusted_destination_account_succeeds() {
+    let mollusk = mollusk();
+    let token_address = [0x4Du8; 32];
+    let scenario = Scenario::with_transfer_body(19, 4, 0x63, 7_777u128, 2, token_address, 1);
+
+    // Inject dust into the destination PDA: system-owned, non-zero balance,
+    // zero data — the exact shape a griefer can create permissionlessly.
+    const DUST: u64 = 1;
+    let mut accounts = scenario.initial_accounts();
+    accounts
+        .iter_mut()
+        .find(|(k, _)| *k == scenario.dest_account_pubkey)
+        .expect("dest PDA in account list")
+        .1 = system_owned_account(DUST);
+
+    // Drive to quorum from the dusted starting state.
+    let mut result = None;
+    for i in 0..PendingObservationsLayout::QUORUM_THRESHOLD as u8 {
+        let r = scenario.submit_once(&mollusk, accounts.clone(), i);
+        assert!(
+            matches!(r.program_result, ProgramResult::Success),
+            "submit #{i} expected success, got {:?}",
+            r.program_result
+        );
+        accounts = r.resulting_accounts.clone();
+        result = Some(r);
+    }
+    let result = result.unwrap();
+
+    let dst_post = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
+    assert_eq!(
+        dst_post.owner,
+        program_id(),
+        "dusted dest PDA still lazy-inits under the program"
+    );
+    assert_eq!(dst_post.data.len(), BalanceAccountLayout::LEN);
+    assert!(
+        dst_post.lamports > DUST,
+        "rent shortfall must be topped up over the injected dust"
+    );
+    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst_post.data);
+    assert_eq!(layout.balance, Uint256::from_u128(7_777));
+}
+
 /// CU regression guard: the quorum-commit branch (lazy-init of both Account
 /// PDAs — the program's most expensive tx) must stay below `MAX_QUORUM_BRANCH_CU`.
 #[test]
