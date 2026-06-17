@@ -22,6 +22,7 @@ use crate::definitions::{
     PendingObservationsLayout, TokenBridgeAction, PENDING_OBSERVATIONS_SEED_PREFIX, VAA_BODY_HEADER_LEN,
 };
 use crate::err;
+use crate::hash::{double_keccak256, keccak256};
 use crate::instructions::{
     commit_log, noreplay, pda_init::init_or_upgrade_pda, transfer::apply_transfer,
 };
@@ -527,5 +528,3 @@ fn secp256k1_recover(
     };
     code
 }
-
-use crate::hash::{double_keccak256, keccak256};
