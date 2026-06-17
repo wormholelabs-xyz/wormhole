@@ -51,13 +51,15 @@ global-accountant = { path = "." }
 # Already in the workspace lock via mollusk's transitive deps; pinning the
 # major version keeps the host-side test build aligned.
 libsecp256k1 = "0.6"
+# `ProgramResult::Failure` carries a `solana_program_error::ProgramError`; tests
+# name it to assert builtin error codes (e.g. `InvalidAccountData`) via the full
+# `u64` encoding.
+solana-program-error = "=3.0.1"
 # Hash-pinned `.so` fixtures live under `tests/fixtures/`. The mollusk-side
 # test harness verifies each fixture's SHA-256 against a hard-coded constant
 # before passing the bytes to mollusk; drift (an unintended rebuild of a
 # sibling program ending up in the fixtures dir) surfaces as a panic with
-# the recompute-and-update recipe in the failure message. Already in the
-# workspace lock graph via solana-program transitively; pinned to the
-# resolved version per the supply-chain rule in CLAUDE.md.
+# the recompute-and-update recipe in the failure message.
 sha2 = "=0.10.9"
 
 [lints]

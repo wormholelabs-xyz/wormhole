@@ -17,6 +17,7 @@ use {
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
     solana_instruction::{AccountMeta, Instruction},
+    solana_program_error::ProgramError,
     solana_pubkey::Pubkey,
 };
 
@@ -1130,30 +1131,33 @@ fn submit_with_malformed_guardian_set_rejects() {
         }
     };
 
-    let cases: [(&str, Account, u8, u32); 4] = [
+    // Length/shape failures map to the builtin `InvalidAccountData`; identity
+    // mismatches map to the custom `InvalidGuardianIndex`. Codes compared as the
+    // full `u64` encoding so builtin errors (high 32 bits) aren't truncated.
+    let cases: [(&str, Account, u8, u64); 4] = [
         (
             "truncated header",
             truncated_header,
             0,
-            GlobalAccountantError::InvalidPda as u32,
+            u64::from(ProgramError::InvalidAccountData),
         ),
         (
             "on-chain index mismatch",
             mismatched_index,
             0,
-            GlobalAccountantError::InvalidGuardianIndex as u32,
+            GlobalAccountantError::InvalidGuardianIndex as u64,
         ),
         (
             "guardian_index >= keys_len",
             short_keys_array,
             5,
-            GlobalAccountantError::InvalidGuardianIndex as u32,
+            GlobalAccountantError::InvalidGuardianIndex as u64,
         ),
         (
             "keys buffer truncated",
             truncated_keys_buffer,
             18,
-            GlobalAccountantError::InvalidPda as u32,
+            u64::from(ProgramError::InvalidAccountData),
         ),
     ];
 
@@ -1185,7 +1189,7 @@ fn submit_with_malformed_guardian_set_rejects() {
         let result = mollusk.process_instruction(&ix, &accounts);
         match result.program_result {
             ProgramResult::Failure(err) => {
-                let code = u64::from(err) as u32;
+                let code = u64::from(err);
                 assert_eq!(
                     code, expected_code,
                     "[{label}] expected code {expected_code}, got {code}"

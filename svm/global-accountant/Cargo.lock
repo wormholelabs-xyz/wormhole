@@ -1117,6 +1117,7 @@ dependencies = [
  "solana-address 2.6.0",
  "solana-instruction",
  "solana-keccak-hasher",
+ "solana-program-error",
  "solana-pubkey 4.2.0",
 ]
 
