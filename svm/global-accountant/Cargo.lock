@@ -1818,6 +1818,7 @@ dependencies = [
  "solana-instruction",
  "solana-keccak-hasher",
  "solana-keypair",
+ "solana-program-error",
  "solana-pubkey 4.2.0",
  "solana-signer",
  "solana-system-interface 3.2.0",

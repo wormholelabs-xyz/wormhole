@@ -433,7 +433,6 @@ fn verify_signature(
 ) -> ProgramResult {
     let data = guardian_set.try_borrow()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
-    drop(data);
 
     // Recovery id ∈ {0,1,2,3}; values >= 4 are malformed.
     let recovery_id = signature[64];
@@ -474,28 +473,21 @@ fn read_guardian_key(
     guardian_index: u8,
 ) -> Result<[u8; GUARDIAN_PUBKEY_LEN], ProgramError> {
     if data.len() < 8 {
-        return Err(err(GlobalAccountantError::InvalidPda));
+        return Err(ProgramError::InvalidAccountData);
     }
-    let on_chain_index = u32::from_le_bytes(
-        data[..4]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
-    );
+    // `data.len() >= 8` is guaranteed above, so these reads are infallible.
+    let on_chain_index = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     if on_chain_index != expected_index {
         return Err(err(GlobalAccountantError::InvalidGuardianIndex));
     }
-    let keys_len = u32::from_le_bytes(
-        data[4..8]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
-    );
+    let keys_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     if (guardian_index as u32) >= keys_len {
         return Err(err(GlobalAccountantError::InvalidGuardianIndex));
     }
     let start = 8 + (guardian_index as usize) * GUARDIAN_PUBKEY_LEN;
     let end = start + GUARDIAN_PUBKEY_LEN;
     if data.len() < end {
-        return Err(err(GlobalAccountantError::InvalidPda));
+        return Err(ProgramError::InvalidAccountData);
     }
     let mut key = [0u8; GUARDIAN_PUBKEY_LEN];
     key.copy_from_slice(&data[start..end]);
