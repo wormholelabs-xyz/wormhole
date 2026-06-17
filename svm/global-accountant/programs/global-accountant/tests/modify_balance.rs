@@ -8,7 +8,7 @@
 use {
     global_accountant_definitions::{
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        ModificationLogLayout, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
+        ModificationLayout, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
         CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
         MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
@@ -177,7 +177,7 @@ fn modify_balance_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
 ///   3. GuardianSignatures
 ///   4. BalanceAccount PDA (WRITE)
 ///   5. system program
-///   6. ModificationLog PDA (WRITE)
+///   6. Modification PDA (WRITE)
 fn build_metas(
     payer: Pubkey,
     guardian_set: Pubkey,
@@ -392,7 +392,7 @@ fn modify_balance_body_header_violations_reject() {
 }
 
 /// Add on a fresh triple lazy-inits the BalanceAccount and creates the
-/// ModificationLog.
+/// Modification.
 #[test]
 fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
     let mollusk = mollusk();
@@ -448,7 +448,7 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
         program_id(),
         "modification PDA owned by program"
     );
-    let log: &ModificationLogLayout = bytemuck::from_bytes(&post_log.1.data);
+    let log: &ModificationLayout = bytemuck::from_bytes(&post_log.1.data);
     assert_eq!(log.sequence, 200);
     assert_eq!(log.chain_id, 2);
     assert_eq!(log.token_chain, 2);
@@ -647,7 +647,7 @@ fn modify_balance_add_overflow_rejects() {
     }
 }
 
-/// A second VAA with the same payload sequence collides on the ModificationLog
+/// A second VAA with the same payload sequence collides on the Modification
 /// PDA and rejects with `DuplicateModification`.
 #[test]
 fn modify_balance_rejects_duplicate_modification_sequence() {
@@ -712,7 +712,7 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
 }
 
 /// Two VAAs touching the same balance triple both succeed and land at distinct
-/// ModificationLog PDAs (logs key on `sequence`, not the balance PDA).
+/// Modification PDAs (logs key on `sequence`, not the balance PDA).
 #[test]
 fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
     let mollusk = mollusk();

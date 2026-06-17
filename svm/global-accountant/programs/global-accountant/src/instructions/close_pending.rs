@@ -26,7 +26,7 @@ use pinocchio::{
 
 use crate::definitions::{
     GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    PENDING_SEED_PREFIX,
+    PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::noreplay;
@@ -75,7 +75,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     let chain_be = layout.chain.to_be_bytes();
     let (expected_pending_pda, _) = Address::find_program_address(
         &[
-            PENDING_SEED_PREFIX,
+            PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             &emitter,
             &sequence_be,

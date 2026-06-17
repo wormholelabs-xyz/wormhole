@@ -19,7 +19,7 @@ use pinocchio::{
 
 use crate::definitions::{
     parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError,
-    PendingObservationsLayout, TokenBridgeAction, PENDING_SEED_PREFIX,
+    PendingObservationsLayout, TokenBridgeAction, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::{
@@ -344,7 +344,7 @@ fn create_pending_pda(
     let sequence_be = parsed.sequence.to_be_bytes();
     let (_expected, canonical_bump) = Address::find_program_address(
         &[
-            PENDING_SEED_PREFIX,
+            PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             &parsed.emitter,
             &sequence_be,
@@ -355,7 +355,7 @@ fn create_pending_pda(
 
     let bump_seed = [canonical_bump];
     let seeds = [
-        Seed::from(PENDING_SEED_PREFIX),
+        Seed::from(PENDING_OBSERVATIONS_SEED_PREFIX),
         Seed::from(chain_be.as_slice()),
         Seed::from(parsed.emitter.as_slice()),
         Seed::from(sequence_be.as_slice()),

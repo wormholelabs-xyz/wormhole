@@ -3,7 +3,7 @@
 //! Applies a manual Add / Subtract delta to a `BalanceAccount` PDA via a
 //! Wormchain-emitted governance VAA, for post-incident ledger reconciliation.
 //! Replay protection keys on the payload `sequence` via a per-sequence
-//! `ModificationLog` PDA. Only `WORMCHAIN_CHAIN_ID` is accepted as target_chain.
+//! `Modification` PDA. Only `WORMCHAIN_CHAIN_ID` is accepted as target_chain.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -12,7 +12,7 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLogLayout, Uint256,
+    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
     MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
 };
@@ -94,7 +94,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //   4. `[WRITE]`         `BalanceAccount` PDA — lazy-init on first Add;
     //                       must exist for Sub.
     //   5. `[]`              system program.
-    //   6. `[WRITE]`         `ModificationLog` PDA at
+    //   6. `[WRITE]`         `Modification` PDA at
     //                       `(b"modification", payload_sequence_be)`. Existence
     //                       ⇒ `DuplicateModification`.
     let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
@@ -198,7 +198,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (8) Replay protection -----
     //
-    // An initialised `ModificationLog` PDA means this sequence was already used.
+    // An initialised `Modification` PDA means this sequence was already used.
     if modification_pda.owner() != &pinocchio_system::ID {
         return Err(err(GlobalAccountantError::DuplicateModification));
     }
@@ -237,7 +237,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         balance_account::store(balance_pda, &layout)?;
     }
 
-    // ----- (10) Lazy-init the ModificationLog PDA + store -----
+    // ----- (10) Lazy-init the Modification PDA + store -----
     let bump_seed = [canonical_modification_bump];
     let seeds = [
         Seed::from(MODIFICATION_SEED_PREFIX),
@@ -250,11 +250,11 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         modification_pda,
         program_id,
         signer,
-        ModificationLogLayout::LEN as u64,
+        ModificationLayout::LEN as u64,
     )?;
 
-    let mut log: ModificationLogLayout = bytemuck::Zeroable::zeroed();
-    log.tag = ModificationLogLayout::TAG;
+    let mut log: ModificationLayout = bytemuck::Zeroable::zeroed();
+    log.tag = ModificationLayout::TAG;
     log.sequence = payload_sequence;
     log.chain_id = chain_id;
     log.token_chain = token_chain;

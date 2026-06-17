@@ -14,7 +14,7 @@ use {
     global_accountant_definitions::{
         ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
-        NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
+        NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -58,7 +58,7 @@ fn derive_pending_pda(
     let sequence_be = sequence.to_be_bytes();
     Pubkey::find_program_address(
         &[
-            PENDING_SEED_PREFIX,
+            PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             emitter,
             &sequence_be,

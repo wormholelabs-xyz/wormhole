@@ -43,8 +43,9 @@ pub enum GlobalAccountantError {
     BalanceOverflow = 15,
     /// Balance underflow on the transfer path (insufficient source balance).
     BalanceUnderflow = 16,
-    // 17 reserved (previously `BodyDigestMismatch`; the digest is now derived
-    // from the body in `submit_observations`, so a mismatch is unrepresentable).
+    /// `keccak256(keccak256(body)) != digest`. Rejected before any mutation
+    /// since the body carries the transfer payload the commit branch reads.
+    BodyDigestMismatch = 17,
     /// Supplied Account PDA does not match the canonical seeds for the
     /// source/destination side of the transfer.
     InvalidAccountPda = 18,

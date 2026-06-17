@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use global_accountant_definitions::{
     ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_SEED_PREFIX,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use libsecp256k1::{sign, Message, PublicKey, SecretKey};
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -112,7 +112,7 @@ fn derive_pending_pda(
     let sequence_be = sequence.to_be_bytes();
     Pubkey::find_program_address(
         &[
-            PENDING_SEED_PREFIX,
+            PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             emitter,
             &sequence_be,
