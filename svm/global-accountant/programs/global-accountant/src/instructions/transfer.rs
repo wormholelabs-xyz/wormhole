@@ -7,7 +7,7 @@ use crate::definitions::{GlobalAccountantError, Uint256, ACCOUNT_SEED_PREFIX};
 use crate::err;
 use crate::state::account as account_state;
 
-/// Mutate the source and destination Account PDAs for a Token Bridge transfer:
+/// Mutate the source and destination balance account PDAs for a Token Bridge transfer:
 /// source-side `lock_or_burn`, then destination-side `unlock_or_mint`.
 /// Same-chain self-transfers (source == dest PDA) are collapsed onto one
 /// in-memory layout so the second mutation observes the first.
@@ -25,7 +25,7 @@ pub fn apply_transfer(
 ) -> ProgramResult {
     // ----- Source side -----
     let (src_expected, src_bump) =
-        derive_account_pda(program_id, source_chain, token_chain, token_address);
+        derive_balance_account_pda(program_id, source_chain, token_chain, token_address);
     if source_account.address() != &src_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
@@ -58,7 +58,7 @@ pub fn apply_transfer(
 
     // ----- Destination side -----
     let (dst_expected, dst_bump) =
-        derive_account_pda(program_id, recipient_chain, token_chain, token_address);
+        derive_balance_account_pda(program_id, recipient_chain, token_chain, token_address);
     if dest_account.address() != &dst_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
@@ -76,9 +76,9 @@ pub fn apply_transfer(
     account_state::store(dest_account, &dst)
 }
 
-/// Re-derive the canonical Account PDA address + bump from `(chain, token_chain,
-/// token_address)`.
-pub fn derive_account_pda(
+/// Re-derive the canonical balance account PDA address + bump from `(chain,
+/// token_chain, token_address)`.
+pub fn derive_balance_account_pda(
     program_id: &Address,
     chain: u16,
     token_chain: u16,

@@ -2,7 +2,7 @@
 //!
 //! Canonical PDA at `(b"account", chain_be, token_chain_be, token_address)`.
 //! The layout is `Pod`, so load/store copy by value to release the borrow
-//! before the caller mutates. Lazy init lets the destination Account PDA come
+//! before the caller mutates. Lazy init lets the destination balance account PDA come
 //! into existence on the quorum-completing tx (payer pays rent).
 
 use pinocchio::{
@@ -43,7 +43,7 @@ pub fn store(account: &mut AccountView, value: &BalanceAccountLayout) -> Result<
     Ok(())
 }
 
-/// Lazy-init the canonical Account PDA. Idempotent: a no-op if the PDA already
+/// Lazy-init the canonical balance account PDA. Idempotent: a no-op if the PDA already
 /// exists and is program-owned. Caller must enforce the canonical bump first
 /// (see `verify_account_pda` in `submit_observations`).
 pub fn init_if_needed(

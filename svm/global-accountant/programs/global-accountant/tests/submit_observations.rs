@@ -63,7 +63,7 @@ fn derive_pending_pda(
     )
 }
 
-fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
+fn derive_balance_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
@@ -412,8 +412,8 @@ impl Scenario {
             derive_pending_pda(base.chain, &base.emitter, base.sequence, &base.digest);
         base.pending_pda = pending_pda;
         // Source keys on the emitter chain; dest keys on recipient_chain.
-        let (src, _) = derive_account_pda(base.chain, token_chain, &token_address);
-        let (dst, _) = derive_account_pda(recipient_chain, token_chain, &token_address);
+        let (src, _) = derive_balance_account_pda(base.chain, token_chain, &token_address);
+        let (dst, _) = derive_balance_account_pda(recipient_chain, token_chain, &token_address);
         base.source_account_pubkey = src;
         base.dest_account_pubkey = dst;
         base
@@ -1940,8 +1940,8 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         &scenario.digest,
     );
     scenario.pending_pda = pending_pda;
-    let (src, _) = derive_account_pda(1, 2, &token_address);
-    let (dst, _) = derive_account_pda(2, 2, &token_address);
+    let (src, _) = derive_balance_account_pda(1, 2, &token_address);
+    let (dst, _) = derive_balance_account_pda(2, 2, &token_address);
     // Re-derive registration PDA and noreplay bucket for the new chain.
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
     scenario.chain_registration_pubkey = registration_pda;
@@ -2205,7 +2205,7 @@ fn quorum_with_invalid_source_account_pda_rejects() {
     let token_address = [0x99u8; 32];
     let mut scenario = Scenario::with_transfer_body(19, 4, 0x65, 100u128, 2, token_address, 1);
     // Spoofed source PDA (wrong token chain).
-    let (spoofed, _) = derive_account_pda(2, 99, &token_address);
+    let (spoofed, _) = derive_balance_account_pda(2, 99, &token_address);
     scenario.source_account_pubkey = spoofed;
 
     let mut accounts = scenario.initial_accounts();
