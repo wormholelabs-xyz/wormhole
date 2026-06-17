@@ -1,4 +1,4 @@
-//! VAA body parsing: the routing-tuple header and the Token Bridge payload.
+//! VAA body parsing: the noreplay namespace key and the Token Bridge payload.
 
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
@@ -7,11 +7,20 @@ use crate::primitives::Uint256;
 /// + emitter_address (32) + sequence (8) + consistency_level (1).
 pub const VAA_BODY_HEADER_LEN: usize = 51;
 
-/// Routing fields of a VAA body header. `(chain, emitter, sequence)` keys all
-/// accountant state, so this struct and [`parse_vaa_body_header`] are the sole
+// Byte offsets of the namespace-key fields within the VAA body header. These are
+// `const`, so they inline at every use site and cost no extra compute units or
+// binary size versus literal slice bounds.
+const EMITTER_CHAIN_OFFSET: usize = 8;
+const EMITTER_ADDRESS_OFFSET: usize = 10;
+const SEQUENCE_OFFSET: usize = 42;
+
+/// Replay-protection key parsed from the VAA body header. `chain` and `emitter`
+/// form the noreplay namespace; `sequence` indexes the bitmap within it. The
+/// triple keys all accountant state (the pending PDA, the noreplay slot, and the
+/// commit log), so this struct and [`parse_vaa_namespace_key`] are the sole
 /// authority for these offsets — do not re-derive them in instruction modules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VaaBodyHeader {
+pub struct VaaNamespaceKey {
     /// `emitter_chain`, body bytes `[8..10]` (u16 BE).
     pub chain: u16,
     /// `emitter_address`, body bytes `[10..42]`.
@@ -20,18 +29,18 @@ pub struct VaaBodyHeader {
     pub sequence: u64,
 }
 
-/// Parse the routing tuple from a VAA body header. Rejects bodies shorter than
-/// the 51-byte header with `InvalidInstructionData`.
-pub fn parse_vaa_body_header(body: &[u8]) -> Result<VaaBodyHeader, GlobalAccountantError> {
+/// Parse the noreplay namespace key from a VAA body header. Rejects bodies
+/// shorter than the 51-byte header with `InvalidInstructionData`.
+pub fn parse_vaa_namespace_key(body: &[u8]) -> Result<VaaNamespaceKey, GlobalAccountantError> {
     if body.len() < VAA_BODY_HEADER_LEN {
         return Err(GlobalAccountantError::InvalidInstructionData);
     }
-    let chain = u16::from_be_bytes([body[8], body[9]]);
+    let chain = u16::from_be_bytes([body[EMITTER_CHAIN_OFFSET], body[EMITTER_CHAIN_OFFSET + 1]]);
     let mut emitter = [0u8; 32];
-    emitter.copy_from_slice(&body[10..42]);
+    emitter.copy_from_slice(&body[EMITTER_ADDRESS_OFFSET..EMITTER_ADDRESS_OFFSET + 32]);
     let mut sequence_bytes = [0u8; 8];
-    sequence_bytes.copy_from_slice(&body[42..50]);
-    Ok(VaaBodyHeader {
+    sequence_bytes.copy_from_slice(&body[SEQUENCE_OFFSET..SEQUENCE_OFFSET + 8]);
+    Ok(VaaNamespaceKey {
         chain,
         emitter,
         sequence: u64::from_be_bytes(sequence_bytes),
@@ -152,14 +161,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_vaa_body_header_decodes_routing_tuple() {
+    fn parse_vaa_namespace_key_decodes_routing_tuple() {
         let mut body = [0u8; VAA_BODY_HEADER_LEN];
         body[8..10].copy_from_slice(&2u16.to_be_bytes());
         body[10] = 0xAA;
         body[41] = 0xBB;
         body[42..50].copy_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
 
-        let header = parse_vaa_body_header(&body).unwrap();
+        let header = parse_vaa_namespace_key(&body).unwrap();
         assert_eq!(header.chain, 2);
         assert_eq!(header.emitter[0], 0xAA);
         assert_eq!(header.emitter[31], 0xBB);
@@ -167,14 +176,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_vaa_body_header_accepts_exact_header_len() {
-        assert!(parse_vaa_body_header(&[0u8; VAA_BODY_HEADER_LEN]).is_ok());
+    fn parse_vaa_namespace_key_accepts_exact_header_len() {
+        assert!(parse_vaa_namespace_key(&[0u8; VAA_BODY_HEADER_LEN]).is_ok());
     }
 
     #[test]
-    fn parse_vaa_body_header_short_body_rejects() {
+    fn parse_vaa_namespace_key_short_body_rejects() {
         assert_eq!(
-            parse_vaa_body_header(&[0u8; VAA_BODY_HEADER_LEN - 1]),
+            parse_vaa_namespace_key(&[0u8; VAA_BODY_HEADER_LEN - 1]),
             Err(GlobalAccountantError::InvalidInstructionData)
         );
     }
