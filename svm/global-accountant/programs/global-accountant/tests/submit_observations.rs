@@ -11,7 +11,7 @@ use {
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, MAX_QUORUM_BRANCH_CU,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_SEED_PREFIX,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -52,7 +52,7 @@ fn derive_pending_pda(
     let sequence_be = sequence.to_be_bytes();
     Pubkey::find_program_address(
         &[
-            PENDING_SEED_PREFIX,
+            PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             emitter,
             &sequence_be,

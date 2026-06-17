@@ -19,7 +19,7 @@ use pinocchio::{
 
 use crate::definitions::{
     parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError,
-    PendingObservationsLayout, TokenBridgeAction, PENDING_SEED_PREFIX,
+    PendingObservationsLayout, TokenBridgeAction, PENDING_OBSERVATIONS_SEED_PREFIX, VAA_BODY_HEADER_LEN,
 };
 use crate::err;
 use crate::instructions::{
@@ -45,16 +45,19 @@ use crate::state::{chain_registration, pending};
 /// The routing tuple `(chain, emitter, sequence)` is sourced exclusively from
 /// the body header `[8..50]`, never caller-supplied data — otherwise an attacker
 /// could replay a signed body under an arbitrary triple and corrupt the ledger.
-const SUBMIT_FIXED_LEN: usize = 4 + 1 + 65;
+const SUBMIT_FIXED_LEN: usize = 4 + 1 + SECP256K1_SIGNATURE_LEN;
 
 /// ECDSA recoverable signature length: 32-byte r + 32-byte s + 1-byte recovery id.
-const SECP256K1_SIGNATURE_LEN: usize = 65;
+const SECP256K1_SIGNATURE_LEN: usize = 32 + 32 + 1;
 
 /// Ethereum-style guardian pubkey length (`keccak256(uncompressed_pk)[12..]`).
 const GUARDIAN_PUBKEY_LEN: usize = 20;
 
 /// `sol_secp256k1_recover` result buffer: 64-byte uncompressed pubkey (`X || Y`).
-const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
+const SECP256K1_PUBKEY_RAW_LEN: usize = 32 + 32;
+
+/// Minimum VAA body length: the fixed body header plus a 1-byte action.
+const BODY_MIN_LEN: usize = VAA_BODY_HEADER_LEN + 1;
 
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // Split into fixed prefix + length-prefixed body. The body is required: the
@@ -67,8 +70,6 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    // 51-byte VAA header + 1-byte action.
-    const BODY_MIN_LEN: usize = 52;
     if body_len < BODY_MIN_LEN || rest.len() < 2 + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
@@ -343,7 +344,7 @@ fn create_pending_pda(
     let sequence_be = parsed.sequence.to_be_bytes();
     let (_expected, canonical_bump) = Address::find_program_address(
         &[
-            PENDING_SEED_PREFIX,
+            PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             &parsed.emitter,
             &sequence_be,
@@ -354,7 +355,7 @@ fn create_pending_pda(
 
     let bump_seed = [canonical_bump];
     let seeds = [
-        Seed::from(PENDING_SEED_PREFIX),
+        Seed::from(PENDING_OBSERVATIONS_SEED_PREFIX),
         Seed::from(chain_be.as_slice()),
         Seed::from(parsed.emitter.as_slice()),
         Seed::from(sequence_be.as_slice()),

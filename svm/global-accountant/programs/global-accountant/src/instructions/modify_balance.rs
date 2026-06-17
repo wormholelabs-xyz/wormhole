@@ -4,7 +4,7 @@
 //! returns `NotImplemented` until a dedicated PR ports the handler. Planned
 //! behavior: apply a manual Add / Subtract delta to a `BalanceAccount` PDA via a
 //! Wormchain-emitted governance VAA, with per-sequence replay protection via a
-//! `ModificationLog` PDA.
+//! `Modification` PDA.
 
 use pinocchio::{AccountView, Address, ProgramResult};
 
