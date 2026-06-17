@@ -95,9 +95,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //   4. `[]`              system program.
     //   5. `[]`              NoReplay program (CPI target).
     //   6. `[]`              NoReplay authority PDA owned by this program.
-    //   7. `[WRITE]`         source-chain Account PDA. Only touched on the
+    //   7. `[WRITE]`         source-chain balance account PDA. Only touched on the
     //                       quorum-completing Transfer branch; sentinel otherwise.
-    //   8. `[WRITE]`         destination-chain Account PDA. Same semantics as slot 7.
+    //   8. `[WRITE]`         destination-chain balance account PDA. Same semantics as slot 7.
     //   9. `[WRITE]`         rent recipient for the pending PDA close. Must equal
     //                       the bucket's recorded payer (rejected as `PayerMismatch`
     //                       otherwise); decoupled from submitter so any guardian
@@ -200,7 +200,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         parsed.guardian_set_index,
     );
 
-    // Transfer payloads mutate two Account PDAs; Attest skips balance work.
+    // Transfer payloads mutate two balance account PDAs; Attest skips balance work.
     match parse_token_bridge_payload(body_bytes).map_err(err)? {
         TokenBridgeAction::Transfer {
             amount,
