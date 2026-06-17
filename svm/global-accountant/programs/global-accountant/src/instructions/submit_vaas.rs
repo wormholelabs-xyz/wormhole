@@ -13,7 +13,7 @@
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
 use crate::definitions::{
-    parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError, TokenBridgeAction,
+    parse_token_bridge_payload, parse_vaa_namespace_key, GlobalAccountantError, TokenBridgeAction,
     VAA_BODY_HEADER_LEN,
 };
 use crate::err;
@@ -85,7 +85,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     )?;
 
     // ----- (4) Parse the body header -----
-    let header = parse_vaa_body_header(body_bytes).map_err(err)?;
+    let header = parse_vaa_namespace_key(body_bytes).map_err(err)?;
     let (chain, emitter, sequence) = (header.chain, header.emitter, header.sequence);
 
     // ----- (5) NoReplay pre-check -----

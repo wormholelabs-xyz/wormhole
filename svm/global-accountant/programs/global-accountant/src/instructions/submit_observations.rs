@@ -18,7 +18,7 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    parse_token_bridge_payload, parse_vaa_body_header, GlobalAccountantError,
+    parse_token_bridge_payload, parse_vaa_namespace_key, GlobalAccountantError,
     PendingObservationsLayout, TokenBridgeAction, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
@@ -281,7 +281,7 @@ impl ParsedObservation {
     /// Populate the routing tuple from the body header. Caller must have already
     /// proven `body` matches `self.digest`.
     fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
-        let header = parse_vaa_body_header(body).map_err(err)?;
+        let header = parse_vaa_namespace_key(body).map_err(err)?;
         self.chain = header.chain;
         self.emitter = header.emitter;
         self.sequence = header.sequence;
