@@ -36,11 +36,9 @@
 #![allow(unexpected_cfgs)]
 
 pub mod entrypoint;
-pub mod instructions;
 
+pub use accountant_backfill_core::BackfillError;
 pub use global_accountant_definitions as definitions;
-
-use pinocchio::error::ProgramError;
 
 use crate::definitions::Pubkey;
 
@@ -63,7 +61,8 @@ pub const BACKFILL_AUTHORITY: Pubkey = [
     // Test default: pubkey of Keypair::new_from_array([1u8; 32]).
     // Verified by `tests/backfill_noreplay.rs::backfill_authority_const_matches_test_keypair`.
     0x8a, 0x88, 0xe3, 0xdd, 0x74, 0x09, 0xf1, 0x95, 0xfd, 0x52, 0xdb, 0x2d, 0x3c, 0xba, 0x5d, 0x72,
-    0xca, 0x67, 0x09, 0xbf, 0x1d, 0x94, 0x12, 0x1b, 0xf3, 0x74, 0x88, 0x01, 0xb4, 0x0f, 0x6f, 0x5c,
+    0xca, 0x67, 0x09, 0xbf, 0x1d, 0x94, 0x12, 0x1b, 0xf3, 0x74, 0x88, 0x01, 0xb4, 0x0f, 0x6f,
+    0x5c,
     // ===============================
 ];
 
@@ -83,31 +82,4 @@ impl Instruction {
             _ => None,
         }
     }
-}
-
-/// Custom error codes returned via `ProgramError::Custom(u32)`. Distinct from
-/// the operational program's `GlobalAccountantError` numbering so log
-/// inspection unambiguously identifies which program raised the error.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BackfillError {
-    InvalidInstruction = 0,
-    InvalidInstructionData = 1,
-    InvalidPda = 2,
-    /// Signer does not match the compile-time [`BACKFILL_AUTHORITY`] pubkey.
-    UnauthorizedCaller = 3,
-}
-
-impl From<BackfillError> for u32 {
-    fn from(e: BackfillError) -> Self {
-        e as u32
-    }
-}
-
-/// Convert a `BackfillError` into a `ProgramError::Custom`. Free function
-/// rather than a `From` impl: orphan rules forbid the impl across foreign
-/// types.
-#[inline]
-pub(crate) fn err(e: BackfillError) -> ProgramError {
-    ProgramError::Custom(e as u32)
 }

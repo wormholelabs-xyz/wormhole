@@ -17,8 +17,9 @@ use pinocchio::{
     AccountView, Address, ProgramResult,
 };
 
-use crate::definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX};
-use crate::instructions::{authority, pda_init::init_or_upgrade_pda};
+use crate::authority::require_authority;
+use crate::definitions::{BalanceAccountLayout, Pubkey, Uint256, ACCOUNT_SEED_PREFIX};
+use crate::pda_init::init_or_upgrade_pda;
 use crate::{err, BackfillError};
 
 /// Wire format (after the 1-byte dispatch discriminator):
@@ -35,7 +36,12 @@ use crate::{err, BackfillError};
 const ENTRY_BYTES: usize = 2 + 2 + 32 + 32;
 const FIXED_HEAD: usize = 1;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+    authority: &Pubkey,
+) -> ProgramResult {
     // ----- (1) Parse + validate wire data -----
     if data.len() < FIXED_HEAD {
         return Err(err(BackfillError::InvalidInstructionData));
@@ -65,7 +71,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
 
     // ----- (3) Authority gate -----
-    authority::require_authority(payer)?;
+    require_authority(payer, authority)?;
     let payer: &AccountView = payer;
 
     // ----- (4) Write each entry, verifying sort order and PDA canonicality -----

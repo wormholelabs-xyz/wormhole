@@ -17,13 +17,13 @@ default = []
 bpf-entrypoint = []
 
 [dependencies]
-bytemuck.workspace = true
+accountant-backfill-core.workspace = true
 global-accountant-definitions.workspace = true
 pinocchio.workspace = true
-pinocchio-system.workspace = true
 solana-address = { version = "2.6", features = ["curve25519"] }
 
 [dev-dependencies]
+bytemuck.workspace = true
 mollusk-svm.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true

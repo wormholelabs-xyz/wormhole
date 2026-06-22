@@ -4,7 +4,9 @@
 use pinocchio::program_entrypoint;
 use pinocchio::{AccountView, Address, ProgramResult};
 
-use crate::{err, instructions, BackfillError, Instruction};
+use accountant_backfill_core::{backfill_balance, backfill_noreplay, err, BackfillError};
+
+use crate::{Instruction, BACKFILL_AUTHORITY};
 
 #[cfg(feature = "bpf-entrypoint")]
 program_entrypoint!(process_instruction);
@@ -24,10 +26,10 @@ pub fn process_instruction(
 
     match Instruction::from_u8(*discriminator) {
         Some(Instruction::BackfillNoReplay) => {
-            instructions::backfill_noreplay::process(program_id, accounts, rest)
+            backfill_noreplay::process(program_id, accounts, rest, &BACKFILL_AUTHORITY)
         }
         Some(Instruction::BackfillBalance) => {
-            instructions::backfill_balance::process(program_id, accounts, rest)
+            backfill_balance::process(program_id, accounts, rest, &BACKFILL_AUTHORITY)
         }
         None => Err(err(BackfillError::InvalidInstruction)),
     }

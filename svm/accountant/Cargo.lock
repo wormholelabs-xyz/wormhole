@@ -13,6 +13,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "accountant-backfill-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "global-accountant-definitions",
+ "pinocchio",
+ "pinocchio-system",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1829,13 +1839,13 @@ dependencies = [
 name = "global-accountant-backfill"
 version = "0.1.0"
 dependencies = [
+ "accountant-backfill-core",
  "base64 0.22.1",
  "bytemuck",
  "global-accountant-backfill",
  "global-accountant-definitions",
  "mollusk-svm",
  "pinocchio",
- "pinocchio-system",
  "serde_json",
  "sha2 0.10.9",
  "solana-account",

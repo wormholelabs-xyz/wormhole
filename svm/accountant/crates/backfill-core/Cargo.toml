@@ -1,0 +1,19 @@
+[package]
+name = "accountant-backfill-core"
+description = "Shared, program-ID-agnostic backfill handlers (NoReplay + Balance) and helpers, parameterised by operator authority. Consumed by the global-accountant and ntt-global-accountant backfill programs."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+pinocchio.workspace = true
+pinocchio-system.workspace = true
+
+[lints]
+workspace = true

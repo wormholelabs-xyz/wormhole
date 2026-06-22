@@ -17,6 +17,7 @@ bytemuck = { version = "1.21", features = ["derive", "min_const_generics"] }
 pinocchio = { version = "0.11", features = ["cpi"] }
 pinocchio-system = "0.6"
 global-accountant-definitions = { path = "crates/definitions" }
+accountant-backfill-core = { path = "crates/backfill-core" }
 # 256-bit unsigned integer primitive backing `Uint256`. Pinned exact per the
 # supply-chain rule in CLAUDE.md; `default-features = false` is required so
 # the crate compiles on the SBF target (no `std`). We only consume
