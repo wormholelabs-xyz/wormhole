@@ -19,7 +19,8 @@ use pinocchio::{
 
 use crate::definitions::{
     parse_token_bridge_payload, parse_vaa_namespace_key, GlobalAccountantError,
-    PendingObservationsLayout, TokenBridgeAction, PENDING_OBSERVATIONS_SEED_PREFIX, VAA_BODY_HEADER_LEN,
+    PendingObservationsLayout, TokenBridgeAction, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
+    PENDING_OBSERVATIONS_SEED_PREFIX, VAA_BODY_HEADER_LEN,
 };
 use crate::err;
 use crate::hash::{double_keccak256, keccak256};
@@ -147,7 +148,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         &parsed.signature,
     )?;
 
-    let pending_action = decide_pending_action(pending_pda, &parsed)?;
+    let pending_action = decide_pending_action(program_id, pending_pda, &parsed)?;
 
     match pending_action {
         // 1st observation out of 13
@@ -300,10 +301,40 @@ enum PendingAction {
     Continue,
 }
 
+/// Verify a pending PDA lives at its canonical address derived from
+/// `(chain, emitter, sequence, digest)`. Follows the same pattern as
+/// `chain_registration::verify`.
+fn verify_pending_pda_address(
+    program_id: &Address,
+    pending_pda: &AccountView,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+    digest: &[u8; 32],
+) -> ProgramResult {
+    let chain_be = chain.to_be_bytes();
+    let sequence_be = sequence.to_be_bytes();
+    let (expected, _bump) = Address::find_program_address(
+        &[
+            PENDING_OBSERVATIONS_SEED_PREFIX,
+            &chain_be,
+            emitter,
+            &sequence_be,
+            digest,
+        ],
+        program_id,
+    );
+    if pending_pda.address() != &expected {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    Ok(())
+}
+
 /// Decide what to do with the pending PDA for this observation. Per-digest PDA
-/// seeds make a digest mismatch unreachable here: any loaded PDA was opened
-/// under exactly this digest.
+/// seeds and canonical address verification ensure a digest mismatch is
+/// unreachable: any loaded PDA was opened under exactly this digest.
 fn decide_pending_action(
+    program_id: &Address,
     pending_pda: &AccountView,
     parsed: &ParsedObservation,
 ) -> Result<PendingAction, ProgramError> {
@@ -318,7 +349,17 @@ fn decide_pending_action(
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Non-system owner: must be us. Load and compare.
+    // Non-system owner: must be us. Verify the canonical address first.
+    verify_pending_pda_address(
+        program_id,
+        pending_pda,
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+        &parsed.digest,
+    )?;
+
+    // Load and compare guardian set indices.
     let existing = pending::load(pending_pda)?;
     if existing.guardian_set_index < parsed.guardian_set_index {
         return Ok(PendingAction::WipeAndRecreate);
@@ -326,7 +367,7 @@ fn decide_pending_action(
     if existing.guardian_set_index > parsed.guardian_set_index {
         return Err(err(GlobalAccountantError::StaleGuardianSet));
     }
-    // Digest equality is guaranteed by the per-digest PDA seeds.
+    // Digest equality is guaranteed by the per-digest PDA seeds AND canonical address.
     Ok(PendingAction::Continue)
 }
 
@@ -431,6 +472,20 @@ fn verify_signature(
     digest: &[u8; 32],
     signature: &[u8; SECP256K1_SIGNATURE_LEN],
 ) -> ProgramResult {
+    // Verify the account is owned by Core Bridge.
+    if guardian_set.owner().as_array() != &CORE_BRIDGE_PROGRAM_ID {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+
+    // Verify the account is at the canonical Guardian Set PDA address.
+    let index_be = expected_guardian_set_index.to_be_bytes();
+    let core_bridge_addr = Address::from(CORE_BRIDGE_PROGRAM_ID);
+    let (expected_address, _) =
+        Address::find_program_address(&[GUARDIAN_SET_SEED, &index_be], &core_bridge_addr);
+    if guardian_set.address() != &expected_address {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+
     let data = guardian_set.try_borrow()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
 

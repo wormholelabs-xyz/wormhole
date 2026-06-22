@@ -9,9 +9,10 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, MAX_QUORUM_BRANCH_CU,
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
+        MAX_QUORUM_BRANCH_CU, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
+        NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        PENDING_OBSERVATIONS_SEED_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -353,6 +354,12 @@ impl Scenario {
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
         let noreplay_bucket_pubkey =
             derive_canonical_noreplay_bucket(&noreplay_authority_pubkey, chain, &emitter, sequence);
+        // Derive the canonical Guardian Set PDA address (Core Bridge program).
+        let gsi_be = gsi.to_be_bytes();
+        let (guardian_set_pubkey, _) = Pubkey::find_program_address(
+            &[GUARDIAN_SET_SEED, &gsi_be],
+            &Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID),
+        );
 
         Self {
             chain,
@@ -364,7 +371,7 @@ impl Scenario {
             guardians,
             submitter,
             pending_pda,
-            guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
+            guardian_set_pubkey,
             noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
             noreplay_authority_pubkey,
@@ -776,7 +783,12 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     );
 
     let submitter = Pubkey::new_from_array([0x11u8; 32]);
-    let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
+    let guardian_set_index = 4u32;
+    let gsi_be = guardian_set_index.to_be_bytes();
+    let (guardian_set_pubkey, _) = Pubkey::find_program_address(
+        &[GUARDIAN_SET_SEED, &gsi_be],
+        &Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID),
+    );
     let (noreplay_authority_pubkey, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
     let noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
@@ -787,7 +799,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     );
     let noreplay_program_pubkey = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
 
-    let ix_data = submit_ix_data(4, 0, &signature, &body);
+    let ix_data = submit_ix_data(guardian_set_index, 0, &signature, &body);
 
     // Pre-populate the body-chain registration so the registration check
     // passes; this test targets the pending-PDA rejection.
@@ -1210,7 +1222,12 @@ fn submit_with_stale_old_set_observation_fails() {
     let old_guardians = make_guardians(19, 0x48); // distinct keys for GSI=4
     let stale_signature = sign_digest(&old_guardians[1], &new_scenario.digest);
 
-    // GSI=4 set at the same pubkey so the program reads index 4.
+    // Derive canonical Guardian Set PDA for GSI=4.
+    let gsi_4_be = 4u32.to_be_bytes();
+    let (guardian_set_4_pubkey, _) = Pubkey::find_program_address(
+        &[b"GuardianSet", &gsi_4_be],
+        &Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID),
+    );
     let old_gs_account = guardian_set_account(
         4,
         &old_guardians
@@ -1221,12 +1238,12 @@ fn submit_with_stale_old_set_observation_fails() {
         0,
     );
     let mut accounts = accounts_after_first.clone();
-    if let Some(entry) = accounts
-        .iter_mut()
-        .find(|(k, _)| *k == new_scenario.guardian_set_pubkey)
-    {
-        entry.1 = old_gs_account;
-    }
+    // Add the GSI=4 guardian set at its canonical address.
+    accounts.push((guardian_set_4_pubkey, old_gs_account));
+
+    let mut metas = new_scenario.account_metas().clone();
+    // Update guardian set account meta to point to GSI=4.
+    metas[2] = AccountMeta::new_readonly(guardian_set_4_pubkey, false);
 
     let ix = Instruction::new_with_bytes(
         program_id(),
@@ -1236,7 +1253,7 @@ fn submit_with_stale_old_set_observation_fails() {
             &stale_signature,
             &new_scenario.body,
         ),
-        new_scenario.account_metas(),
+        metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
     match r.program_result {
@@ -1271,19 +1288,24 @@ fn submit_with_new_set_observation_wipes_old_pending() {
         0,
         0,
     );
+    // Derive canonical Guardian Set PDA for GSI=5.
+    let gsi_5_be = 5u32.to_be_bytes();
+    let (guardian_set_5_pubkey, _) = Pubkey::find_program_address(
+        &[b"GuardianSet", &gsi_5_be],
+        &Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID),
+    );
     let mut accounts = accounts_after_first.clone();
-    if let Some(entry) = accounts
-        .iter_mut()
-        .find(|(k, _)| *k == old_scenario.guardian_set_pubkey)
-    {
-        entry.1 = new_gs_account;
-    }
+    // Add the GSI=5 guardian set at its canonical address.
+    accounts.push((guardian_set_5_pubkey, new_gs_account));
 
     let signature = sign_digest(&new_guardians[0], &old_scenario.digest);
+    let mut metas = old_scenario.account_metas().clone();
+    // Update guardian set account meta to point to GSI=5.
+    metas[2] = AccountMeta::new_readonly(guardian_set_5_pubkey, false);
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(5, 0, &signature, &old_scenario.body),
-        old_scenario.account_metas(),
+        metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -1969,5 +1991,106 @@ fn quorum_with_invalid_source_account_pda_rejects() {
             );
         }
         other => panic!("expected Failure(InvalidAccountPda), got {other:?}"),
+    }
+}
+
+/// Spoofed GuardianSet account (not owned by Core Bridge) is rejected as
+/// `InvalidPda` before any signature work. This blocks an attacker from passing
+/// an arbitrary account with 13 controlled guardian keys, signing with them, and
+/// reaching quorum.
+#[test]
+fn spoofed_guardian_set_not_owned_by_core_bridge_rejects() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x66);
+
+    // Create a spoofed GuardianSet account owned by system program instead of Core Bridge.
+    let spoofed_guardian_set = {
+        let mut data = Vec::with_capacity(8 + 13 * 20 + 8);
+        data.extend_from_slice(&scenario.guardian_set_index.to_le_bytes());
+        data.extend_from_slice(&13u32.to_le_bytes()); // keys_len = 13
+        // Add 13 attacker-controlled guardian keys.
+        for i in 0..13 {
+            data.extend_from_slice(&[i as u8; 20]);
+        }
+        data.extend_from_slice(&0u32.to_le_bytes()); // creation_time
+        data.extend_from_slice(&u32::MAX.to_le_bytes()); // expiration_time
+        Account {
+            lamports: 1_000_000,
+            data,
+            owner: system_program_id(), // NOT CORE_BRIDGE_PROGRAM_ID
+            executable: false,
+            rent_epoch: 0,
+        }
+    };
+
+    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let mut accounts = scenario.initial_accounts();
+    accounts[2] = (scenario.guardian_set_pubkey, spoofed_guardian_set);
+
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(scenario.guardian_set_index, 0, &signature, &scenario.body),
+        scenario.account_metas(),
+    );
+    let r = mollusk.process_instruction(&ix, &accounts);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "spoofed guardian set should fail with InvalidPda, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
+    }
+}
+
+/// Non-canonical Pending PDA address is rejected as `InvalidPda` on the
+/// Continue path. This blocks an attacker from creating a spoofed pending PDA
+/// at a random address, funneling guardian signatures from different VAA bodies
+/// into it, and committing a target VAA with fabricated quorum.
+#[test]
+fn non_canonical_pending_pda_address_rejects_on_continue() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x67);
+
+    // First signature: create the canonical pending PDA.
+    let mut accounts = scenario.initial_accounts();
+    let r1 = scenario.submit_once(&mollusk, accounts.clone(), 0);
+    assert!(matches!(r1.program_result, ProgramResult::Success));
+    accounts = r1.resulting_accounts;
+
+    // Second signature: spoof the pending PDA by replacing it with a non-canonical address.
+    let spoofed_pending_pubkey = Pubkey::new_unique();
+    let pending_layout = *bytemuck::from_bytes::<PendingObservationsLayout>(&accounts[1].1.data);
+    let spoofed_pending_account = Account {
+        lamports: 1_000_000,
+        data: bytemuck::bytes_of(&pending_layout).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+    accounts[1] = (spoofed_pending_pubkey, spoofed_pending_account);
+
+    let signature = sign_digest(&scenario.guardians[1], &scenario.digest);
+    let mut metas = scenario.account_metas();
+    metas[1] = AccountMeta::new(spoofed_pending_pubkey, false);
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(scenario.guardian_set_index, 1, &signature, &scenario.body),
+        metas,
+    );
+    let r2 = mollusk.process_instruction(&ix, &accounts);
+    match r2.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "non-canonical pending PDA should fail with InvalidPda, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
     }
 }

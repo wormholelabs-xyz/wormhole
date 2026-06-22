@@ -59,6 +59,10 @@ pub const MODIFICATION_SEED_PREFIX: &[u8] = b"modification";
 /// already segregates per-emitter sequence spaces.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay-authority";
 
+/// PDA seed prefix for Core Bridge's GuardianSet accounts. Full tuple:
+/// `(b"GuardianSet", guardian_set_index_be)`. Owned by CORE_BRIDGE_PROGRAM_ID.
+pub const GUARDIAN_SET_SEED: &[u8] = b"GuardianSet";
+
 // ---- Governance ----
 
 /// Wormhole governance emitter — `chain = 1 (Solana)`, `address = [0; 31] ||
