@@ -332,10 +332,10 @@ struct Scenario {
     guardian_set_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
     noreplay_program_pubkey: Pubkey,
-    /// Canonical `noreplay-authority` PDA.
+    /// Canonical `noreplay_authority` PDA.
     noreplay_authority_pubkey: Pubkey,
     /// Source-chain Account PDA (slot 7). Attest scenarios use the
-    /// noreplay-authority pubkey as a sentinel since the slot is untouched.
+    /// noreplay_authority pubkey as a sentinel since the slot is untouched.
     source_account_pubkey: Pubkey,
     /// Destination-chain Account PDA (slot 8). Same semantics as `source`.
     dest_account_pubkey: Pubkey,
@@ -378,7 +378,7 @@ impl Scenario {
             noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
             noreplay_authority_pubkey,
-            // Attest payload ⇒ slots 8/9 untouched; reuse noreplay-authority as
+            // Attest payload ⇒ slots 8/9 untouched; reuse noreplay_authority as
             // a sentinel.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
@@ -482,7 +482,7 @@ impl Scenario {
             (self.noreplay_authority_pubkey, system_owned_account(0)),
         ];
         // Slots 7/8: append only when the sentinel hasn't collapsed them onto
-        // the noreplay-authority pubkey (Attest scenario).
+        // the noreplay_authority pubkey (Attest scenario).
         if self.source_account_pubkey != self.noreplay_authority_pubkey {
             accounts.push((self.source_account_pubkey, uninitialised_pda_account()));
         }

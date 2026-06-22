@@ -35,7 +35,7 @@ pub const TRANSCEIVER_HUB_SEED_PREFIX: &[u8] = b"transceiver_hub";
 pub const TRANSCEIVER_PEER_SEED_PREFIX: &[u8] = b"transceiver_peer";
 
 /// PDA seed prefix for the global-accountant authority that signs all
-/// `solana-noreplay` CPIs. Full tuple: `[b"noreplay-authority"]`. One global
+/// `solana-noreplay` CPIs. Full tuple: `[b"noreplay_authority"]`. One global
 /// authority suffices because the noreplay namespace (`chain_be ‖ emitter`)
 /// already segregates per-emitter sequence spaces.
-pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay-authority";
+pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";

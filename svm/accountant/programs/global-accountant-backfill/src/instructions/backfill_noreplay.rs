@@ -71,7 +71,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //
     //   0. [WRITE, SIGNER] payer — must equal `BACKFILL_AUTHORITY`
     //   1. [ ]             solana-noreplay program (CPI target)
-    //   2. [ ]             noreplay-authority PDA (signs MarkUsedBulk via invoke_signed)
+    //   2. [ ]             noreplay_authority PDA (signs MarkUsedBulk via invoke_signed)
     //   3. [ ]             system program
     //   4..4+M.            bucket PDAs, one per UNIQUE
     //                      (chain, emitter, sequence/1024) in the order the

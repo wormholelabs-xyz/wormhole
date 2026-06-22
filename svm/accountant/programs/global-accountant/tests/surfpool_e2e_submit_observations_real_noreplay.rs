@@ -122,7 +122,7 @@ fn derive_pending_pda(
     )
 }
 
-/// Derive the global-accountant noreplay-authority PDA.
+/// Derive the global-accountant noreplay_authority PDA.
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
 }
@@ -187,7 +187,7 @@ fn build_submit_observations_ix(
     body: &[u8],
 ) -> Instruction {
     // Production 11-slot account list. Slots 7/8 (source/dest Account PDAs) are
-    // only touched on the Transfer branch; for Attest the noreplay-authority PDA
+    // only touched on the Transfer branch; for Attest the noreplay_authority PDA
     // is a sentinel. Slot 9 (rent recipient) must equal the recorded payer.
     Instruction {
         program_id: *program_id,
@@ -249,7 +249,7 @@ fn surfpool_submit_observations_real_noreplay() {
          noreplay program_id={NOREPLAY_PROGRAM_ID} (canonical)"
     );
 
-    // Airdrop the submitter (the noreplay-authority PDA never holds lamports).
+    // Airdrop the submitter (the noreplay_authority PDA never holds lamports).
     let submitter = Keypair::new();
     let sig = rpc
         .request_airdrop(&submitter.pubkey(), 20_000_000_000)
