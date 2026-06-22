@@ -1,4 +1,4 @@
-# CI for the Global Accountant Solana program.
+# CI for the Accountant Solana workspace (global-accountant + ntt-global-accountant).
 #
 # Three layers, two jobs:
 #
@@ -16,18 +16,18 @@
 # `RUSTFLAGS: -Dwarnings`, and rust toolchain version read from the workspace's
 # `rust-toolchain.toml`.
 
-name: SVM Global Accountant
+name: SVM Accountant
 
 on:
   push:
     branches: [main]
     paths:
-      - 'svm/global-accountant/**'
-      - '.github/workflows/svm-global-accountant.yml'
+      - 'svm/accountant/**'
+      - '.github/workflows/svm-accountant.yml'
   pull_request:
     paths:
-      - 'svm/global-accountant/**'
-      - '.github/workflows/svm-global-accountant.yml'
+      - 'svm/accountant/**'
+      - '.github/workflows/svm-accountant.yml'
 
 permissions:
   contents: read
@@ -59,7 +59,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: svm/global-accountant
+        working-directory: svm/accountant
 
     steps:
       - name: Check out source
@@ -82,7 +82,7 @@ jobs:
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
-          workspaces: svm/global-accountant -> target
+          workspaces: svm/accountant -> target
           # Distinguish the dev (mock-vaa) target dir from the prod target dir.
           # rust-cache keys by Cargo.lock content + this prefix.
           prefix-key: ga-fast
@@ -136,7 +136,7 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: svm/global-accountant
+        working-directory: svm/accountant
 
     steps:
       - name: Check out source
@@ -157,7 +157,7 @@ jobs:
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
-          workspaces: svm/global-accountant -> target
+          workspaces: svm/accountant -> target
           # Separate prefix from fast-tests because the prod-shape `.so`
           # (`just build-prod`) uses different features and therefore a
           # different fingerprint.
@@ -229,7 +229,7 @@ jobs:
           path: |
             ~/.cache/surfpool
             ~/.surfpool
-          key: surfpool-mainnet-cache-${{ env.SURFPOOL_VERSION }}-${{ hashFiles('.github/workflows/svm-global-accountant.yml', 'svm/global-accountant/programs/global-accountant/tests/fixtures/**') }}
+          key: surfpool-mainnet-cache-${{ env.SURFPOOL_VERSION }}-${{ hashFiles('.github/workflows/svm-accountant.yml', 'svm/accountant/programs/global-accountant/tests/fixtures/**') }}
           restore-keys: |
             surfpool-mainnet-cache-${{ env.SURFPOOL_VERSION }}-
             surfpool-mainnet-cache-

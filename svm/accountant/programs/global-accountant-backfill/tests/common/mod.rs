@@ -37,8 +37,8 @@ pub fn noreplay_so_path() -> PathBuf {
     if let Ok(p) = std::env::var("GA_NOREPLAY_SO") {
         return PathBuf::from(p);
     }
-    // CARGO_MANIFEST_DIR = .../svm/global-accountant/programs/global-accountant-backfill
-    // Workspace root = .../svm/global-accountant
+    // CARGO_MANIFEST_DIR = .../svm/accountant/programs/global-accountant-backfill
+    // Workspace root = .../svm/accountant
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()

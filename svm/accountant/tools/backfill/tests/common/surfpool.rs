@@ -233,10 +233,10 @@ pub fn deploy_program(rpc_url: &str, program_id: &Pubkey, so_bytes: &[u8]) {
 /// Path to the parent workspace's SBF build output for the named program.
 /// The orchestrator crate is a standalone workspace, so its own
 /// `target/` is not the right place — the .so lives in the parent
-/// `svm/global-accountant/target/deploy/`.
+/// `svm/accountant/target/deploy/`.
 pub fn parent_so_path(name: &str) -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // .../svm/global-accountant/tools/backfill → .../svm/global-accountant
+    // .../svm/accountant/tools/backfill → .../svm/accountant
     let parent_workspace = manifest
         .parent()
         .and_then(|p| p.parent())
