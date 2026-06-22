@@ -2691,6 +2691,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
+name = "ntt-global-accountant-backfill"
+version = "0.1.0"
+dependencies = [
+ "accountant-backfill-core",
+ "bytemuck",
+ "global-accountant-definitions",
+ "mollusk-svm",
+ "ntt-global-accountant-backfill",
+ "pinocchio",
+ "solana-account",
+ "solana-address 2.6.0",
+ "solana-instruction",
+ "solana-keypair",
+ "solana-pubkey 4.2.0",
+ "solana-signer",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

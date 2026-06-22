@@ -16,12 +16,12 @@
 #![cfg_attr(any(target_os = "solana", target_arch = "bpf"), no_std)]
 #![allow(unexpected_cfgs)]
 
-pub(crate) mod authority;
+pub mod authority;
 pub mod backfill_balance;
 pub mod backfill_noreplay;
 pub(crate) mod commit_log;
 pub(crate) mod noreplay;
-pub(crate) mod pda_init;
+pub mod pda_init;
 
 pub use global_accountant_definitions as definitions;
 
