@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "comment": "NTT accounting-parity corpus. See REAL_VECTORS.md for the schema, the synthetic-vs-real distinction, and the procedure to add real ground-truth vectors. The harness (tests/parity.rs) builds a VAA body from each vector, drives 13 guardian observations through the program, asserts the program-computed digest == keccak256(keccak256(body)), and asserts the resulting balance accounts match `expected.balances` EXACTLY (token identity = hub, amount = normalized). All hex fields are 0x-prefixed; 32-byte address fields may be given short (right-aligned is NOT applied: a short hex is left-aligned and zero-padded on the right to 32 bytes, matching how the byte arrays are written on-wire).",
+  "vectors": [
+    {
+      "name": "native_transfer_lock_unlock",
+      "description": "Native transfer: hub native chain == source (emitter) chain. Source side is a native LOCK (credit); dest side is a wrapped UNLOCK/MINT (credit). Token identity is the HUB (chain 2, 0x33..), never the NTT source_token (0xEE..). Amount normalizes 3->8 decimals: 1000 * 10^5 = 100_000_000.",
+      "source": "synthetic",
+      "emitter_chain": 2,
+      "emitter_address": "0x0000000000000000000000000000000000000000000000000000000000000077",
+      "sequence": 66,
+      "relayer": null,
+      "ntt": { "decimals": 3, "raw_amount": 1000, "to_chain": 10 },
+      "hub": { "chain": 2, "address": "0x3333333333333333333333333333333333333333333333333333333333333333" },
+      "peers": {
+        "src_to_dst": "0x8888888888888888888888888888888888888888888888888888888888888888",
+        "dst_to_src": "0x0000000000000000000000000000000000000000000000000000000000000077"
+      },
+      "pre_balances": [],
+      "expected": {
+        "balances": [
+          { "chain": 2,  "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" },
+          { "chain": 10, "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" }
+        ]
+      }
+    },
+    {
+      "name": "wrapped_transfer_burn_mint",
+      "description": "Wrapped transfer: hub native chain (5) is a THIRD chain, distinct from source (2) and dest (10). Source side is a wrapped BURN (debit) so it must be pre-seeded; dest side is a wrapped MINT (credit). Amount normalizes 3->8: 100_000_000.",
+      "source": "synthetic",
+      "emitter_chain": 2,
+      "emitter_address": "0x0000000000000000000000000000000000000000000000000000000000000077",
+      "sequence": 67,
+      "relayer": null,
+      "ntt": { "decimals": 3, "raw_amount": 1000, "to_chain": 10 },
+      "hub": { "chain": 5, "address": "0x3333333333333333333333333333333333333333333333333333333333333333" },
+      "peers": {
+        "src_to_dst": "0x8888888888888888888888888888888888888888888888888888888888888888",
+        "dst_to_src": "0x0000000000000000000000000000000000000000000000000000000000000077"
+      },
+      "pre_balances": [
+        { "chain": 2, "token_chain": 5, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "500000000" }
+      ],
+      "expected": {
+        "balances": [
+          { "chain": 2,  "token_chain": 5, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "400000000" },
+          { "chain": 10, "token_chain": 5, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" }
+        ]
+      }
+    },
+    {
+      "name": "normalize_scale_up_identity_at_eight",
+      "description": "Normalization identity at 8 decimals: raw 12345 @ 8 decimals -> 12345 (no scaling). Native lock/unlock so both sides credit 12345.",
+      "source": "synthetic",
+      "emitter_chain": 2,
+      "emitter_address": "0x0000000000000000000000000000000000000000000000000000000000000077",
+      "sequence": 68,
+      "relayer": null,
+      "ntt": { "decimals": 8, "raw_amount": 12345, "to_chain": 10 },
+      "hub": { "chain": 2, "address": "0x3333333333333333333333333333333333333333333333333333333333333333" },
+      "peers": {
+        "src_to_dst": "0x8888888888888888888888888888888888888888888888888888888888888888",
+        "dst_to_src": "0x0000000000000000000000000000000000000000000000000000000000000077"
+      },
+      "pre_balances": [],
+      "expected": {
+        "balances": [
+          { "chain": 2,  "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "12345" },
+          { "chain": 10, "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "12345" }
+        ]
+      }
+    },
+    {
+      "name": "normalize_scale_down_truncation_18_decimals",
+      "description": "Scale-down with truncation: 18 decimals -> 8 divides by 10^10 (integer, truncating). raw_amount = 1_000_000_001_999_999_999 (~1.000000001999999999e18) -> floor(.../10^10) = 100_000_000 (the sub-1e10 remainder is LOST). Proves precision loss is truncation, not rounding. Native lock/unlock so both sides credit the truncated 100_000_000.",
+      "source": "synthetic",
+      "emitter_chain": 2,
+      "emitter_address": "0x0000000000000000000000000000000000000000000000000000000000000077",
+      "sequence": 69,
+      "relayer": null,
+      "ntt": { "decimals": 18, "raw_amount": 1000000001999999999, "to_chain": 10 },
+      "hub": { "chain": 2, "address": "0x3333333333333333333333333333333333333333333333333333333333333333" },
+      "peers": {
+        "src_to_dst": "0x8888888888888888888888888888888888888888888888888888888888888888",
+        "dst_to_src": "0x0000000000000000000000000000000000000000000000000000000000000077"
+      },
+      "pre_balances": [],
+      "expected": {
+        "balances": [
+          { "chain": 2,  "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" },
+          { "chain": 10, "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" }
+        ]
+      }
+    },
+    {
+      "name": "relayer_unwrapped_delivery_instruction",
+      "description": "CLOSES THE RELAYER GAP. The VAA emitter is a registered standard relayer; the body payload is a DeliveryInstruction WRAPPING the NTT TransceiverMessage. The hub/peer routing must use the unwrapped DeliveryInstruction.sender_address (0x..0099, distinct from the emitter), while the transfer/digest KEY uses the VAA emitter_address (0x..00AA). The hub is keyed by (emitter_chain, sender) = (2, 0x..0099). Native lock/unlock, amount 3->8 = 100_000_000.",
+      "source": "synthetic",
+      "emitter_chain": 2,
+      "emitter_address": "0x00000000000000000000000000000000000000000000000000000000000000aa",
+      "sequence": 70,
+      "relayer": {
+        "registered_emitter": "0x00000000000000000000000000000000000000000000000000000000000000aa",
+        "sender": "0x0000000000000000000000000000000000000000000000000000000000000099"
+      },
+      "ntt": { "decimals": 3, "raw_amount": 1000, "to_chain": 10 },
+      "hub": { "chain": 2, "address": "0x3333333333333333333333333333333333333333333333333333333333333333" },
+      "peers": {
+        "src_to_dst": "0x8888888888888888888888888888888888888888888888888888888888888888",
+        "dst_to_src": "0x0000000000000000000000000000000000000000000000000000000000000099"
+      },
+      "pre_balances": [],
+      "expected": {
+        "balances": [
+          { "chain": 2,  "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" },
+          { "chain": 10, "token_chain": 2, "token_address": "0x3333333333333333333333333333333333333333333333333333333333333333", "amount": "100000000" }
+        ]
+      }
+    }
+  ]
+}
