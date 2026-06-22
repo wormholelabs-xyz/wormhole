@@ -1,17 +1,11 @@
-//! Instruction handlers.
+//! WTT-specific instruction handlers.
 //!
-//! The canonical digest record is emitted via `commit_log::emit` on the
-//! quorum-completing branch of `submit_observations` and on every successful
-//! `submit_vaas`. Off-chain indexers consume the program-log line carrying
-//! the [`crate::definitions::ACCOUNTANT_DIGEST_LOG_TAG`] prefix.
+//! `register_chain` and `modify_balance` are the Token Bridge / Accountant
+//! governance paths; `transfer` is the Token Bridge balance applicator the
+//! entrypoint injects into the core `submit_observations` / `submit_vaas`
+//! handlers. All product-neutral handlers live in
+//! `accountant-operational-core`.
 
-pub mod close_pending;
-pub(crate) mod commit_log;
 pub mod modify_balance;
-pub mod noreplay;
-pub mod pda_init;
 pub mod register_chain;
-pub(crate) mod shim;
-pub mod submit_observations;
-pub mod submit_vaas;
 pub mod transfer;

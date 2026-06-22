@@ -19,6 +19,7 @@ default = []
 bpf-entrypoint = []
 
 [dependencies]
+accountant-operational-core.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
 pinocchio.workspace = true

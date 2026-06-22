@@ -17,7 +17,7 @@ use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR, VERIFY_VAA_
 ///
 /// SECURITY: the CPI target is the hardcoded `VERIFY_VAA_SHIM_PROGRAM_ID`, never
 /// a caller-supplied account, so a forged shim account cannot redirect the CPI.
-pub(crate) fn verify_vaa(
+pub fn verify_vaa(
     guardian_set: &AccountView,
     guardian_signatures: &AccountView,
     digest: &[u8; 32],

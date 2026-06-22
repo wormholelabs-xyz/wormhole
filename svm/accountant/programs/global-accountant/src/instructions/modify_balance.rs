@@ -17,8 +17,8 @@ use crate::definitions::{
     MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
 };
 use crate::err;
-use crate::instructions::{pda_init::init_or_upgrade_pda, shim};
-use crate::state::{account as balance_account, modification};
+use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::state::{account as balance_account, modification};
 
 /// Wire format for the `modify_balance` instruction data (after the 1-byte
 /// dispatch discriminator):
@@ -311,7 +311,7 @@ fn init_balance_account(
     balance_account::store(balance_pda, &layout)
 }
 
-use crate::hash::double_keccak256;
+use accountant_operational_core::hash::double_keccak256;
 
 /// Emit the modification record to the SBF program log. No-op on host builds.
 fn log_modification(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {

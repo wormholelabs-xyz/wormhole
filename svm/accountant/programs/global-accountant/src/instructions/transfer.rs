@@ -5,7 +5,7 @@ use pinocchio::{AccountView, Address, ProgramResult};
 
 use crate::definitions::{GlobalAccountantError, Uint256, ACCOUNT_SEED_PREFIX};
 use crate::err;
-use crate::state::account as account_state;
+use accountant_operational_core::state::account as account_state;
 
 /// Mutate the source and destination balance account PDAs for a Token Bridge transfer:
 /// source-side `lock_or_burn`, then destination-side `unlock_or_mint`.

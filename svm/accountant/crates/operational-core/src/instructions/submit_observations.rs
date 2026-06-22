@@ -18,14 +18,12 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    parse_token_bridge_payload, parse_vaa_namespace_key, GlobalAccountantError,
-    PendingObservationsLayout, TokenBridgeAction, PENDING_OBSERVATIONS_SEED_PREFIX,
+    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
+    PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::hash::{double_keccak256, keccak256};
-use crate::instructions::{
-    commit_log, noreplay, pda_init::init_or_upgrade_pda, transfer::apply_transfer,
-};
+use crate::instructions::{commit_log, noreplay, pda_init::init_or_upgrade_pda};
 use crate::state::{chain_registration, pending};
 
 /// Fixed-size prefix of `submit_observations` instruction data (after the
@@ -56,7 +54,30 @@ const GUARDIAN_PUBKEY_LEN: usize = 20;
 /// `sol_secp256k1_recover` result buffer: 64-byte uncompressed pubkey (`X || Y`).
 const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+/// Quorum tracker. The product-specific token-payload parse + balance mutation
+/// is injected via `apply`, invoked once on the quorum-completing branch after
+/// the NoReplay flip and commit-log emit. `apply` receives
+/// `(program_id, submitter, source_account_pda, dest_account_pda, source_chain,
+/// body_bytes)` where `source_chain` is the authenticated VAA emitter chain and
+/// `body_bytes` are the digest-verified VAA body bytes; it parses the token
+/// payload and mutates the two balance-account PDAs. A non-quorum-completing
+/// submission returns before `apply` is reached.
+pub fn process<F>(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+    apply: F,
+) -> ProgramResult
+where
+    F: Fn(
+        &Address,
+        &mut AccountView,
+        &mut AccountView,
+        &mut AccountView,
+        u16,
+        &[u8],
+    ) -> ProgramResult,
+{
     // Split into fixed prefix + length-prefixed body. The body is required so
     // the digest can be re-verified against the bytes the observation covers.
     if data.len() < SUBMIT_FIXED_LEN + 2 {
@@ -197,37 +218,19 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         parsed.guardian_set_index,
     );
 
-    // Transfer payloads mutate two balance account PDAs; Attest skips balance work.
-    match parse_token_bridge_payload(body_bytes).map_err(err)? {
-        TokenBridgeAction::Transfer {
-            amount,
-            token_chain,
-            token_address,
-            recipient_chain,
-        } => {
-            // Source chain is the authenticated VAA emitter chain.
-            let source_chain = parsed.chain;
-            apply_transfer(
-                program_id,
-                submitter,
-                source_account_pda,
-                dest_account_pda,
-                source_chain,
-                recipient_chain,
-                token_chain,
-                &token_address,
-                amount,
-            )?;
-        }
-        TokenBridgeAction::Attest => {
-            // No balance work; slots 8 and 9 are untouched (sentinels OK).
-        }
-        TokenBridgeAction::Other => {
-            // Unknown action: reject. The NoReplay mark rolls back with the tx,
-            // leaving the slot unconsumed for a future upgrade.
-            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
-        }
-    }
+    // Product-specific balance work behind the injected callback. `apply` parses
+    // the token payload and mutates the two balance-account PDAs; the
+    // authenticated emitter chain is the transfer source chain. Any error
+    // (including an unknown payload) rolls back the NoReplay mark with the tx,
+    // leaving the slot unconsumed for a future upgrade.
+    apply(
+        program_id,
+        submitter,
+        source_account_pda,
+        dest_account_pda,
+        parsed.chain,
+        body_bytes,
+    )?;
 
     let recorded_payer = layout.payer;
     close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;

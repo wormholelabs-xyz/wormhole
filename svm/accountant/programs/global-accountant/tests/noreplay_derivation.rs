@@ -3,7 +3,7 @@
 //! `solana_noreplay::pda::BitmapPdaSeeds`.
 
 use {
-    global_accountant::instructions::noreplay::derive_bucket_pda,
+    accountant_operational_core::instructions::noreplay::derive_bucket_pda,
     global_accountant_definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID},
     pinocchio::Address,
     solana_pubkey::Pubkey,

@@ -12,12 +12,9 @@
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
-use crate::definitions::{
-    parse_token_bridge_payload, parse_vaa_namespace_key, GlobalAccountantError, TokenBridgeAction,
-    VAA_BODY_HEADER_LEN,
-};
+use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VAA_BODY_HEADER_LEN};
 use crate::err;
-use crate::instructions::{commit_log, noreplay, shim, transfer::apply_transfer};
+use crate::instructions::{commit_log, noreplay, shim};
 use crate::state::chain_registration;
 
 /// Wire format for the `submit_vaas` instruction data (after the 1-byte
@@ -33,7 +30,29 @@ use crate::state::chain_registration;
 /// bounded only by the `u16` width; the transports are far tighter.
 const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+/// Signed-VAA backfill. The product-specific token-payload parse + balance
+/// mutation is injected via `apply`, invoked after the Shim verification,
+/// NoReplay mark, and commit-log emit. `apply` receives
+/// `(program_id, submitter, source_account_pda, dest_account_pda, source_chain,
+/// body_bytes)` where `source_chain` is the VAA emitter chain and `body_bytes`
+/// are the verified VAA body bytes; it parses the token payload and mutates the
+/// two balance-account PDAs.
+pub fn process<F>(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+    apply: F,
+) -> ProgramResult
+where
+    F: Fn(
+        &Address,
+        &mut AccountView,
+        &mut AccountView,
+        &mut AccountView,
+        u16,
+        &[u8],
+    ) -> ProgramResult,
+{
     // ----- (1) Parse wire data -----
     if data.len() < SUBMIT_VAAS_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -132,37 +151,20 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // not pin a single set (the Shim accepts any currently-active one).
     commit_log::emit(chain, &emitter, sequence, &digest, 0);
 
-    // ----- (8) Parse Token Bridge payload + apply balance work -----
+    // ----- (8) Apply balance work via the injected callback -----
     //
-    // Runs after the replay slot is claimed and the breadcrumb laid down.
-    // Transfer mutates the Account PDAs; Attest no-ops; unknown actions reject
-    // (tx rollback leaves the slot unconsumed for a future upgrade).
-    match parse_token_bridge_payload(body_bytes).map_err(err)? {
-        TokenBridgeAction::Transfer {
-            amount,
-            token_chain,
-            token_address,
-            recipient_chain,
-        } => {
-            apply_transfer(
-                program_id,
-                submitter,
-                source_account_pda,
-                dest_account_pda,
-                chain,
-                recipient_chain,
-                token_chain,
-                &token_address,
-                amount,
-            )?;
-        }
-        TokenBridgeAction::Attest => {
-            // No balance work; slots 8 and 9 are untouched (sentinels OK).
-        }
-        TokenBridgeAction::Other => {
-            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
-        }
-    }
+    // Runs after the replay slot is claimed and the breadcrumb laid down. The
+    // callback parses the token payload and mutates the Account PDAs; any error
+    // (including an unknown payload) rolls back with the tx, leaving the slot
+    // unconsumed for a future upgrade.
+    apply(
+        program_id,
+        submitter,
+        source_account_pda,
+        dest_account_pda,
+        chain,
+        body_bytes,
+    )?;
 
     Ok(())
 }
