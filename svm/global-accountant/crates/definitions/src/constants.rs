@@ -54,10 +54,10 @@ pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
 pub const MODIFICATION_SEED_PREFIX: &[u8] = b"modification";
 
 /// PDA seed prefix for the global-accountant authority that signs all
-/// `solana-noreplay` CPIs. Full tuple: `[b"noreplay-authority"]`. One global
+/// `solana-noreplay` CPIs. Full tuple: `[b"noreplay_authority"]`. One global
 /// authority suffices because the noreplay namespace (`chain_be ‖ emitter`)
 /// already segregates per-emitter sequence spaces.
-pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay-authority";
+pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";
 
 /// PDA seed prefix for Core Bridge's GuardianSet accounts. Full tuple:
 /// `(b"GuardianSet", guardian_set_index_be)`. Owned by CORE_BRIDGE_PROGRAM_ID.
