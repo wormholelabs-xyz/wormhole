@@ -241,14 +241,13 @@ pub fn parent_so_path(name: &str) -> PathBuf {
         .parent()
         .and_then(|p| p.parent())
         .expect("walk up to parent workspace");
-    parent_workspace.join("target/deploy").join(format!("{name}.so"))
+    parent_workspace
+        .join("target/deploy")
+        .join(format!("{name}.so"))
 }
 
 pub fn noreplay_so_path() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let parent_workspace = manifest
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("walk up");
+    let parent_workspace = manifest.parent().and_then(|p| p.parent()).expect("walk up");
     parent_workspace.join("programs/global-accountant/tests/fixtures/solana_noreplay.so")
 }

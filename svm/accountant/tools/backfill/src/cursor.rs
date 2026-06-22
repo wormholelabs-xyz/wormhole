@@ -97,8 +97,7 @@ impl Cursor {
     ) -> Result<Self> {
         if path.exists() {
             let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-            let state: CursorState =
-                serde_json::from_slice(&bytes).context("parse cursor JSON")?;
+            let state: CursorState = serde_json::from_slice(&bytes).context("parse cursor JSON")?;
             if state.catalogue_content_hash != catalogue_content_hash {
                 bail!(
                     "cursor catalogue_content_hash mismatch: stored {} != current {}; refusing to resume against a different catalogue",

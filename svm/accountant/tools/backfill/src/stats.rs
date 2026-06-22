@@ -34,6 +34,18 @@ pub const CHAIN_REGISTRATION_RENT_LAMPORTS: u64 = 1_113_600;
 /// program's `ModifyBalance` ix post-upgrade).
 pub const MODIFICATION_LOG_RENT_LAMPORTS: u64 = 1_670_400;
 
+/// Per-RelayerChainRegistration PDA rent (64-byte account). Same layout size as
+/// ChainRegistration → same rent.
+pub const RELAYER_REGISTRATION_RENT_LAMPORTS: u64 = CHAIN_REGISTRATION_RENT_LAMPORTS;
+
+/// Per-TransceiverHub PDA rent (70-byte account). `3480 × (128 + 70) × 2 =
+/// 1,378,080`.
+pub const TRANSCEIVER_HUB_RENT_LAMPORTS: u64 = 1_378_080;
+
+/// Per-TransceiverPeer PDA rent (70-byte account). Same layout size as
+/// TransceiverHub → same rent.
+pub const TRANSCEIVER_PEER_RENT_LAMPORTS: u64 = TRANSCEIVER_HUB_RENT_LAMPORTS;
+
 /// Lamports per SOL.
 pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 
@@ -49,18 +61,35 @@ pub struct CatalogueStats {
     pub balance_chunks: usize,
     pub deferred_modifications: usize,
     pub deferred_registrations: usize,
+    pub relayer_registrations: u64,
+    pub transceiver_hubs: u64,
+    pub transceiver_peers: u64,
+    pub relayer_registration_chunks: usize,
+    pub transceiver_hub_chunks: usize,
+    pub transceiver_peer_chunks: usize,
 }
 
 impl CatalogueStats {
     pub fn total_records(&self) -> u64 {
-        self.transfers + self.accounts + self.modifications + self.registrations
+        self.transfers
+            + self.accounts
+            + self.modifications
+            + self.registrations
+            + self.relayer_registrations
+            + self.transceiver_hubs
+            + self.transceiver_peers
     }
 
-    /// Transactions submitted during the backfill phase (BackfillNoReplay +
-    /// BackfillBalance). Deferred mods + regs are NOT counted here — they go
-    /// through the operational program post-upgrade.
+    /// Transactions submitted during the backfill phase (the NoReplay/Balance
+    /// pair plus the three NTT-native map instructions). Deferred mods + regs
+    /// are NOT counted here — they go through the operational program
+    /// post-upgrade.
     pub fn backfill_txs(&self) -> u64 {
-        (self.noreplay_chunks + self.balance_chunks) as u64
+        (self.noreplay_chunks
+            + self.balance_chunks
+            + self.relayer_registration_chunks
+            + self.transceiver_hub_chunks
+            + self.transceiver_peer_chunks) as u64
     }
 
     /// Operational-program txs (Phase 7). Each governance VAA replay needs a
@@ -81,6 +110,9 @@ impl CatalogueStats {
             + self.accounts * BALANCE_ACCOUNT_RENT_LAMPORTS
             + self.deferred_registrations as u64 * CHAIN_REGISTRATION_RENT_LAMPORTS
             + self.deferred_modifications as u64 * MODIFICATION_LOG_RENT_LAMPORTS
+            + self.relayer_registrations * RELAYER_REGISTRATION_RENT_LAMPORTS
+            + self.transceiver_hubs * TRANSCEIVER_HUB_RENT_LAMPORTS
+            + self.transceiver_peers * TRANSCEIVER_PEER_RENT_LAMPORTS
     }
 
     pub fn total_lamports(&self) -> u64 {
@@ -94,6 +126,9 @@ struct Counters {
     accounts: u64,
     modifications: u64,
     registrations: u64,
+    relayer_registrations: u64,
+    transceiver_hubs: u64,
+    transceiver_peers: u64,
     buckets: HashSet<(u16, [u8; 32], u64)>,
     emitters: HashSet<(u16, [u8; 32])>,
 }
@@ -109,6 +144,9 @@ impl Counters {
             Record::Account(_) => self.accounts += 1,
             Record::Modification(_) => self.modifications += 1,
             Record::Registration(_) => self.registrations += 1,
+            Record::RelayerChainRegistration(_) => self.relayer_registrations += 1,
+            Record::TransceiverHub(_) => self.transceiver_hubs += 1,
+            Record::TransceiverPeer(_) => self.transceiver_peers += 1,
         }
     }
 }
@@ -135,12 +173,18 @@ pub fn compute(path: &Path) -> Result<CatalogueStats> {
     let mut balance_chunks = 0usize;
     let mut deferred_modifications = 0usize;
     let mut deferred_registrations = 0usize;
+    let mut relayer_registration_chunks = 0usize;
+    let mut transceiver_hub_chunks = 0usize;
+    let mut transceiver_peer_chunks = 0usize;
     for chunk in Chunker::new(iter) {
         match chunk {
             ChunkPlan::BackfillNoReplay(_) => noreplay_chunks += 1,
             ChunkPlan::BackfillBalance(_) => balance_chunks += 1,
             ChunkPlan::DeferredModification(_) => deferred_modifications += 1,
             ChunkPlan::DeferredRegistration(_) => deferred_registrations += 1,
+            ChunkPlan::BackfillRelayerRegistration(_) => relayer_registration_chunks += 1,
+            ChunkPlan::BackfillTransceiverHub(_) => transceiver_hub_chunks += 1,
+            ChunkPlan::BackfillTransceiverPeer(_) => transceiver_peer_chunks += 1,
         }
     }
 
@@ -156,6 +200,12 @@ pub fn compute(path: &Path) -> Result<CatalogueStats> {
         balance_chunks,
         deferred_modifications,
         deferred_registrations,
+        relayer_registrations: c.relayer_registrations,
+        transceiver_hubs: c.transceiver_hubs,
+        transceiver_peers: c.transceiver_peers,
+        relayer_registration_chunks,
+        transceiver_hub_chunks,
+        transceiver_peer_chunks,
     })
 }
 
@@ -181,6 +231,9 @@ fn print_report(path: &Path, s: &CatalogueStats, sol_usd: f64) {
     println!("  account:               {}", s.accounts);
     println!("  modification:          {}", s.modifications);
     println!("  registration:          {}", s.registrations);
+    println!("  relayer registration:  {}", s.relayer_registrations);
+    println!("  transceiver hub:       {}", s.transceiver_hubs);
+    println!("  transceiver peer:      {}", s.transceiver_peers);
     println!();
     println!("unique (chain, emitter): {}", s.unique_emitters);
     println!("unique noreplay buckets: {}", s.unique_buckets);
@@ -192,8 +245,26 @@ fn print_report(path: &Path, s: &CatalogueStats, sol_usd: f64) {
     }
     println!();
     println!("chunking projection:");
-    println!("  BackfillNoReplay txs:  {:>8} (≤18 entries each)", s.noreplay_chunks);
-    println!("  BackfillBalance txs:   {:>8} (≤8 entries each)", s.balance_chunks);
+    println!(
+        "  BackfillNoReplay txs:  {:>8} (≤18 entries each)",
+        s.noreplay_chunks
+    );
+    println!(
+        "  BackfillBalance txs:   {:>8} (≤8 entries each)",
+        s.balance_chunks
+    );
+    println!(
+        "  RelayerRegistration:   {:>8} (≤12 entries each)",
+        s.relayer_registration_chunks
+    );
+    println!(
+        "  TransceiverHub txs:    {:>8} (≤8 entries each)",
+        s.transceiver_hub_chunks
+    );
+    println!(
+        "  TransceiverPeer txs:   {:>8} (≤8 entries each)",
+        s.transceiver_peer_chunks
+    );
     println!(
         "  Deferred records:      {:>8} ({} mods + {} regs — Phase 7, operational program)",
         s.deferred_modifications + s.deferred_registrations,
@@ -201,7 +272,10 @@ fn print_report(path: &Path, s: &CatalogueStats, sol_usd: f64) {
         s.deferred_registrations
     );
     println!("  backfill phase txs:    {:>8}", s.backfill_txs());
-    println!("  operational phase txs: {:>8} (2× deferred records: PostSig + ix)", s.operational_txs());
+    println!(
+        "  operational phase txs: {:>8} (2× deferred records: PostSig + ix)",
+        s.operational_txs()
+    );
     println!();
     println!("cost projection (at ${sol_usd:.2}/SOL):");
     let fees = s.fees_lamports();

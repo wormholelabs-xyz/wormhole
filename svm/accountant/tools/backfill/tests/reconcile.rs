@@ -4,7 +4,10 @@
 
 use std::collections::HashMap;
 
-use ga_backfill::reconcile::{compare_balances, load_expected_balances, BalanceKey, BalanceValue};
+use ga_backfill::reconcile::{
+    compare_balances, compare_maps, load_expected_balances, load_expected_relayer_registrations,
+    load_expected_transceiver_hubs, load_expected_transceiver_peers, BalanceKey, BalanceValue,
+};
 
 fn key(chain: u16, token_chain: u16, addr_seed: u8) -> BalanceKey {
     let mut addr = [0u8; 32];
@@ -137,4 +140,64 @@ fn load_expected_from_sample_fixture() {
     let bal = expected[&key];
     assert_eq!(bal[28], 0x05);
     assert_eq!(bal[31], 0x00);
+}
+
+// ============================================================================
+// NTT-native maps
+// ============================================================================
+
+fn ntt_fixture() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sample_ntt_catalogue.jsonl")
+}
+
+#[test]
+fn compare_maps_generic_verdict() {
+    let mut expected = HashMap::new();
+    expected.insert((2u16, [0u8; 32]), (1u16, [9u8; 32])); // matched
+    expected.insert((3u16, [0u8; 32]), (1u16, [9u8; 32])); // mismatched
+    expected.insert((4u16, [0u8; 32]), (1u16, [9u8; 32])); // missing from chain
+    let mut actual = HashMap::new();
+    actual.insert((2u16, [0u8; 32]), (1u16, [9u8; 32]));
+    actual.insert((3u16, [0u8; 32]), (2u16, [9u8; 32])); // diff value
+    actual.insert((5u16, [0u8; 32]), (1u16, [9u8; 32])); // unexpected on chain
+
+    let v = compare_maps(&expected, &actual);
+    assert_eq!(v.matched, 1);
+    assert_eq!(v.mismatched, 1);
+    assert_eq!(v.missing_from_chain, 1);
+    assert_eq!(v.unexpected_on_chain, 1);
+    assert!(!v.is_clean());
+    assert_eq!(v.total_diffs(), 3);
+}
+
+#[test]
+fn loads_ntt_maps_from_fixture() {
+    let path = ntt_fixture();
+    let relayers = load_expected_relayer_registrations(&path).expect("relayers");
+    assert_eq!(relayers.len(), 2);
+    assert_eq!(relayers[&2u16][31], 0x85);
+
+    let hubs = load_expected_transceiver_hubs(&path).expect("hubs");
+    assert_eq!(hubs.len(), 2);
+    let (hub_chain, hub_address) = hubs[&(2u16, {
+        let mut a = [0u8; 32];
+        a[31] = 0x22;
+        a
+    })];
+    assert_eq!(hub_chain, 1);
+    assert_eq!(hub_address[31], 0x33);
+
+    let peers = load_expected_transceiver_peers(&path).expect("peers");
+    assert_eq!(peers.len(), 1);
+    let peer_address = peers[&(
+        2u16,
+        {
+            let mut a = [0u8; 32];
+            a[31] = 0x66;
+            a
+        },
+        4u16,
+    )];
+    assert_eq!(peer_address[31], 0x77);
 }

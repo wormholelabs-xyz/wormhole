@@ -33,7 +33,10 @@ use tokio::sync::{Mutex, Semaphore};
 use tracing::{debug, warn};
 
 use crate::chunker::ChunkPlan;
-use crate::tx_builder::{build_backfill_balance_ix, build_backfill_noreplay_ix, BackfillCtx};
+use crate::tx_builder::{
+    build_backfill_balance_ix, build_backfill_noreplay_ix, build_backfill_relayer_registration_ix,
+    build_backfill_transceiver_hub_ix, build_backfill_transceiver_peer_ix, BackfillCtx,
+};
 
 /// `NoReplayError::AlreadyAccounted = 7` (solana-noreplay) — re-submitted
 /// entry, treat as success.
@@ -97,7 +100,9 @@ pub fn extract_custom_program_error(msg: &str) -> Option<u32> {
     let needle = "custom program error: 0x";
     let start = msg.find(needle)?;
     let hex = &msg[start + needle.len()..];
-    let end = hex.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(hex.len());
+    let end = hex
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(hex.len());
     u32::from_str_radix(&hex[..end], 16).ok()
 }
 
@@ -137,8 +142,15 @@ impl SharedState {
             ChunkPlan::BackfillNoReplay(transfers) => {
                 build_backfill_noreplay_ix(&self.ctx, &transfers)
             }
-            ChunkPlan::BackfillBalance(accounts) => {
-                build_backfill_balance_ix(&self.ctx, &accounts)
+            ChunkPlan::BackfillBalance(accounts) => build_backfill_balance_ix(&self.ctx, &accounts),
+            ChunkPlan::BackfillRelayerRegistration(entries) => {
+                build_backfill_relayer_registration_ix(&self.ctx, &entries)
+            }
+            ChunkPlan::BackfillTransceiverHub(entries) => {
+                build_backfill_transceiver_hub_ix(&self.ctx, &entries)
+            }
+            ChunkPlan::BackfillTransceiverPeer(entries) => {
+                build_backfill_transceiver_peer_ix(&self.ctx, &entries)
             }
             ChunkPlan::DeferredModification(_) | ChunkPlan::DeferredRegistration(_) => {
                 return Err(anyhow!(
@@ -244,9 +256,7 @@ where
 
     // Await all; any join-error or task-error halts the run.
     for h in handles {
-        h.await
-            .context("task join")?
-            .context("submission error")?;
+        h.await.context("task join")?.context("submission error")?;
     }
 
     let final_stats = stats.lock().await.clone();

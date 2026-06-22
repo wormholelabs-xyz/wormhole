@@ -88,7 +88,8 @@ async fn e2e_orchestrator_full_lifecycle() {
 
     // ---------- Fund payer (must equal `BACKFILL_AUTHORITY`) ----------
     let payer = Keypair::new_from_array([1u8; 32]);
-    let async_rpc = AsyncRpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::confirmed());
+    let async_rpc =
+        AsyncRpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::confirmed());
     async_rpc
         .request_airdrop(&payer.pubkey(), 10_000_000_000_000)
         .await

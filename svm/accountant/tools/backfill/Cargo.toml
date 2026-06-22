@@ -51,6 +51,7 @@ solana-address = { version = "=2.6.0", features = ["curve25519"] }
 # tests.
 global-accountant-definitions = { path = "../../crates/definitions" }
 global-accountant-backfill = { path = "../../programs/global-accountant-backfill", default-features = false }
+ntt-global-accountant-backfill = { path = "../../programs/ntt-global-accountant-backfill", default-features = false }
 
 [dev-dependencies]
 tempfile = "=3.14.0"

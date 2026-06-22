@@ -1,11 +1,45 @@
 //! Integration tests for the catalogue → chunk planner.
 
 use ga_backfill::catalogue::{
-    AccountRecord, ModificationRecord, ModifyKind, Record, RegistrationRecord, TransferRecord,
+    AccountRecord, ModificationRecord, ModifyKind, Record, RegistrationRecord,
+    RelayerChainRegistrationRecord, TransceiverHubRecord, TransceiverPeerRecord, TransferRecord,
 };
 use ga_backfill::chunker::{
     ChunkPlan, Chunker, MAX_BALANCE_ENTRIES_PER_CHUNK, MAX_NOREPLAY_ENTRIES_PER_CHUNK,
+    MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK, MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK,
+    MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK,
 };
+
+fn make_relayer(chain: u16) -> RelayerChainRegistrationRecord {
+    let mut registered_emitter = [0u8; 32];
+    registered_emitter[31] = (chain & 0xff) as u8;
+    RelayerChainRegistrationRecord {
+        chain,
+        registered_emitter,
+    }
+}
+
+fn make_hub(chain: u16, addr_seed: u8) -> TransceiverHubRecord {
+    let mut address = [0u8; 32];
+    address[31] = addr_seed;
+    TransceiverHubRecord {
+        chain,
+        address,
+        hub_chain: 1,
+        hub_address: [0u8; 32],
+    }
+}
+
+fn make_peer(chain: u16, addr_seed: u8, dest_chain: u16) -> TransceiverPeerRecord {
+    let mut address = [0u8; 32];
+    address[31] = addr_seed;
+    TransceiverPeerRecord {
+        chain,
+        address,
+        dest_chain,
+        peer_address: [0u8; 32],
+    }
+}
 
 fn make_transfer(chain: u16, emitter_seed: u8, sequence: u64) -> TransferRecord {
     let mut emitter = [0u8; 32];
@@ -229,4 +263,195 @@ fn catalogue_order_walkthrough() {
     assert!(matches!(chunks[2], ChunkPlan::DeferredRegistration(_)));
     assert!(matches!(chunks[3], ChunkPlan::BackfillNoReplay(ref e) if e.len() == 2));
     assert!(matches!(chunks[4], ChunkPlan::BackfillNoReplay(ref e) if e.len() == 1));
+}
+
+// ============================================================================
+// NTT map caps
+// ============================================================================
+
+#[test]
+fn ntt_caps_match_derivation() {
+    // Entry budget = 8 * (32 meta + 68 data) = 800 bytes (anchored to the WTT
+    // Balance cap). Each NTT cap is 800 / (32 + per-entry-data-bytes).
+    assert_eq!(MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK, 12); // 800 / (32 + 34)
+    assert_eq!(MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK, 8); // 800 / (32 + 68)
+    assert_eq!(MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK, 8); // 800 / (32 + 68)
+}
+
+// ----- relayer registration -----
+
+#[test]
+fn relayer_registrations_pack_up_to_max() {
+    let input: Vec<Record> = (0..MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK as u16)
+        .map(|c| Record::RelayerChainRegistration(make_relayer(c + 1)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 1);
+    match &chunks[0] {
+        ChunkPlan::BackfillRelayerRegistration(e) => {
+            assert_eq!(e.len(), MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK);
+            // strictly ascending by chain
+            for w in e.windows(2) {
+                assert!(w[0].chain < w[1].chain);
+            }
+        }
+        other => panic!("expected BackfillRelayerRegistration, got {other:?}"),
+    }
+}
+
+#[test]
+fn relayer_registrations_overflow_splits_at_max() {
+    let count = MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK + 1;
+    let input: Vec<Record> = (0..count as u16)
+        .map(|c| Record::RelayerChainRegistration(make_relayer(c + 1)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 2);
+    assert!(matches!(
+        &chunks[0],
+        ChunkPlan::BackfillRelayerRegistration(e) if e.len() == MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK
+    ));
+    assert!(matches!(
+        &chunks[1],
+        ChunkPlan::BackfillRelayerRegistration(e) if e.len() == 1
+    ));
+}
+
+#[test]
+fn relayer_registrations_split_on_non_ascending_chain() {
+    // A duplicate chain breaks strict-ascending → the chunker closes the
+    // chunk rather than packing an entry the program would reject.
+    let input = vec![
+        Record::RelayerChainRegistration(make_relayer(3)),
+        Record::RelayerChainRegistration(make_relayer(3)), // not > 3
+    ];
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 2);
+    assert!(matches!(
+        &chunks[0],
+        ChunkPlan::BackfillRelayerRegistration(e) if e.len() == 1
+    ));
+    assert!(matches!(
+        &chunks[1],
+        ChunkPlan::BackfillRelayerRegistration(e) if e.len() == 1
+    ));
+}
+
+// ----- transceiver hub -----
+
+#[test]
+fn transceiver_hubs_pack_up_to_max() {
+    let input: Vec<Record> = (0..MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK as u8)
+        .map(|i| Record::TransceiverHub(make_hub(2, i + 1)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 1);
+    match &chunks[0] {
+        ChunkPlan::BackfillTransceiverHub(e) => {
+            assert_eq!(e.len(), MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK);
+            for w in e.windows(2) {
+                assert!((w[0].chain, w[0].address) < (w[1].chain, w[1].address));
+            }
+        }
+        other => panic!("expected BackfillTransceiverHub, got {other:?}"),
+    }
+}
+
+#[test]
+fn transceiver_hubs_overflow_splits_at_max() {
+    let count = MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK + 2;
+    let input: Vec<Record> = (0..count as u8)
+        .map(|i| Record::TransceiverHub(make_hub(2, i + 1)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 2);
+    assert!(matches!(
+        &chunks[0],
+        ChunkPlan::BackfillTransceiverHub(e) if e.len() == MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK
+    ));
+    assert!(matches!(
+        &chunks[1],
+        ChunkPlan::BackfillTransceiverHub(e) if e.len() == 2
+    ));
+}
+
+#[test]
+fn transceiver_hubs_split_on_non_ascending_key() {
+    // Equal (chain, address) breaks strict-ascending.
+    let input = vec![
+        Record::TransceiverHub(make_hub(2, 5)),
+        Record::TransceiverHub(make_hub(2, 5)),
+    ];
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 2);
+}
+
+// ----- transceiver peer -----
+
+#[test]
+fn transceiver_peers_pack_up_to_max() {
+    // Vary dest_chain to keep the triple strictly ascending.
+    let input: Vec<Record> = (0..MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK as u16)
+        .map(|i| Record::TransceiverPeer(make_peer(2, 7, i + 1)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 1);
+    match &chunks[0] {
+        ChunkPlan::BackfillTransceiverPeer(e) => {
+            assert_eq!(e.len(), MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK);
+            for w in e.windows(2) {
+                assert!(
+                    (w[0].chain, w[0].address, w[0].dest_chain)
+                        < (w[1].chain, w[1].address, w[1].dest_chain)
+                );
+            }
+        }
+        other => panic!("expected BackfillTransceiverPeer, got {other:?}"),
+    }
+}
+
+#[test]
+fn transceiver_peers_overflow_splits_at_max() {
+    let count = MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK + 1;
+    let input: Vec<Record> = (0..count as u16)
+        .map(|i| Record::TransceiverPeer(make_peer(2, 7, i + 1)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 2);
+    assert!(matches!(
+        &chunks[0],
+        ChunkPlan::BackfillTransceiverPeer(e) if e.len() == MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK
+    ));
+    assert!(matches!(
+        &chunks[1],
+        ChunkPlan::BackfillTransceiverPeer(e) if e.len() == 1
+    ));
+}
+
+#[test]
+fn transceiver_peers_split_on_non_ascending_key() {
+    let input = vec![
+        Record::TransceiverPeer(make_peer(2, 7, 4)),
+        Record::TransceiverPeer(make_peer(2, 7, 4)),
+    ];
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 2);
+}
+
+#[test]
+fn ntt_kind_transition_closes_chunk() {
+    // relayer → hub → peer: three distinct chunks, no cross-kind packing.
+    let input = vec![
+        Record::RelayerChainRegistration(make_relayer(1)),
+        Record::TransceiverHub(make_hub(2, 1)),
+        Record::TransceiverPeer(make_peer(2, 1, 3)),
+    ];
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+    assert_eq!(chunks.len(), 3);
+    assert!(matches!(
+        chunks[0],
+        ChunkPlan::BackfillRelayerRegistration(_)
+    ));
+    assert!(matches!(chunks[1], ChunkPlan::BackfillTransceiverHub(_)));
+    assert!(matches!(chunks[2], ChunkPlan::BackfillTransceiverPeer(_)));
 }

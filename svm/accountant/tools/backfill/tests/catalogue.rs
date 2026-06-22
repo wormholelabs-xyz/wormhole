@@ -7,6 +7,11 @@ fn fixture_path() -> std::path::PathBuf {
         .join("tests/fixtures/sample_catalogue.jsonl")
 }
 
+fn ntt_fixture_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/sample_ntt_catalogue.jsonl")
+}
+
 #[test]
 fn parses_all_four_kinds() {
     let reader = CatalogueReader::open(fixture_path()).expect("open fixture");
@@ -23,6 +28,7 @@ fn parses_all_four_kinds() {
             Record::Account(_) => counts[1] += 1,
             Record::Modification(_) => counts[2] += 1,
             Record::Registration(_) => counts[3] += 1,
+            other => panic!("unexpected NTT record kind in TB fixture: {other:?}"),
         }
     }
     assert_eq!(
@@ -105,6 +111,72 @@ fn registration_record_fields_round_trip() {
 
     assert_eq!(r.chain, 2);
     assert_eq!(r.registered_emitter[31], 0x85);
+}
+
+#[test]
+fn parses_all_three_ntt_kinds() {
+    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open ntt fixture");
+    let records: Vec<Record> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .expect("all records parse");
+    assert_eq!(records.len(), 5, "ntt fixture has 5 records");
+
+    let mut counts = [0usize; 3]; // relayer, hub, peer
+    for r in &records {
+        match r {
+            Record::RelayerChainRegistration(_) => counts[0] += 1,
+            Record::TransceiverHub(_) => counts[1] += 1,
+            Record::TransceiverPeer(_) => counts[2] += 1,
+            other => panic!("unexpected record kind in ntt fixture: {other:?}"),
+        }
+    }
+    assert_eq!(counts, [2, 2, 1], "2 relayer + 2 hub + 1 peer");
+}
+
+#[test]
+fn relayer_chain_registration_fields_round_trip() {
+    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open");
+    let r = reader
+        .filter_map(|r| match r {
+            Ok(Record::RelayerChainRegistration(r)) => Some(r),
+            _ => None,
+        })
+        .next()
+        .expect("one relayer registration");
+    assert_eq!(r.chain, 2);
+    assert_eq!(r.registered_emitter[31], 0x85);
+}
+
+#[test]
+fn transceiver_hub_fields_round_trip() {
+    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open");
+    let h = reader
+        .filter_map(|r| match r {
+            Ok(Record::TransceiverHub(h)) => Some(h),
+            _ => None,
+        })
+        .next()
+        .expect("one hub");
+    assert_eq!(h.chain, 2);
+    assert_eq!(h.address[31], 0x22);
+    assert_eq!(h.hub_chain, 1);
+    assert_eq!(h.hub_address[31], 0x33);
+}
+
+#[test]
+fn transceiver_peer_fields_round_trip() {
+    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open");
+    let p = reader
+        .filter_map(|r| match r {
+            Ok(Record::TransceiverPeer(p)) => Some(p),
+            _ => None,
+        })
+        .next()
+        .expect("one peer");
+    assert_eq!(p.chain, 2);
+    assert_eq!(p.address[31], 0x66);
+    assert_eq!(p.dest_chain, 4);
+    assert_eq!(p.peer_address[31], 0x77);
 }
 
 #[test]

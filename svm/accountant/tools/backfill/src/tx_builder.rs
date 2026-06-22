@@ -11,19 +11,32 @@ use std::str::FromStr;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use crate::catalogue::{AccountRecord, TransferRecord};
+use crate::catalogue::{
+    AccountRecord, RelayerChainRegistrationRecord, TransceiverHubRecord, TransceiverPeerRecord,
+    TransferRecord,
+};
 
 use global_accountant_backfill::{Instruction as ProgramIx, BACKFILL_AUTHORITY};
 use global_accountant_definitions::{
     ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
-    NOREPLAY_PROGRAM_ID,
+    NOREPLAY_PROGRAM_ID, RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
+    TRANSCEIVER_PEER_SEED_PREFIX,
 };
+use ntt_global_accountant_backfill::Instruction as NttProgramIx;
 
 /// Instruction discriminator for `BackfillNoReplay`. Mirrored from the
 /// program's enum via const cast; the equality check lives in the test.
 pub const BACKFILL_NOREPLAY_DISC: u8 = ProgramIx::BackfillNoReplay as u8;
 /// Instruction discriminator for `BackfillBalance`.
 pub const BACKFILL_BALANCE_DISC: u8 = ProgramIx::BackfillBalance as u8;
+/// Instruction discriminator for `BackfillRelayerRegistration` (NTT program).
+/// Sourced from the NTT program's `Instruction` enum, same as the WTT discs;
+/// the equality check lives in `tests/tx_builder.rs`.
+pub const BACKFILL_RELAYER_REGISTRATION_DISC: u8 = NttProgramIx::BackfillRelayerRegistration as u8;
+/// Instruction discriminator for `BackfillTransceiverHub` (NTT program).
+pub const BACKFILL_TRANSCEIVER_HUB_DISC: u8 = NttProgramIx::BackfillTransceiverHub as u8;
+/// Instruction discriminator for `BackfillTransceiverPeer` (NTT program).
+pub const BACKFILL_TRANSCEIVER_PEER_DISC: u8 = NttProgramIx::BackfillTransceiverPeer as u8;
 
 /// Pubkey baked into the program's `.so` as `BACKFILL_AUTHORITY`. Re-exported
 /// so the orchestrator can sanity-check the configured signer matches at
@@ -115,6 +128,46 @@ pub fn derive_balance_pda(
             &chain.to_be_bytes(),
             &token_chain.to_be_bytes(),
             token_address,
+        ],
+        program_id,
+    )
+    .0
+}
+
+/// Derive the canonical relayer-chain-registration PDA. Seeds:
+/// `(RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, chain_be)`.
+pub fn derive_relayer_registration_pda(program_id: &Pubkey, chain: u16) -> Pubkey {
+    Pubkey::find_program_address(
+        &[RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
+        program_id,
+    )
+    .0
+}
+
+/// Derive the canonical transceiver-hub PDA. Seeds:
+/// `(TRANSCEIVER_HUB_SEED_PREFIX, chain_be, address)`.
+pub fn derive_transceiver_hub_pda(program_id: &Pubkey, chain: u16, address: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(
+        &[TRANSCEIVER_HUB_SEED_PREFIX, &chain.to_be_bytes(), address],
+        program_id,
+    )
+    .0
+}
+
+/// Derive the canonical transceiver-peer PDA. Seeds:
+/// `(TRANSCEIVER_PEER_SEED_PREFIX, chain_be, address, dest_chain_be)`.
+pub fn derive_transceiver_peer_pda(
+    program_id: &Pubkey,
+    chain: u16,
+    address: &[u8; 32],
+    dest_chain: u16,
+) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            TRANSCEIVER_PEER_SEED_PREFIX,
+            &chain.to_be_bytes(),
+            address,
+            &dest_chain.to_be_bytes(),
         ],
         program_id,
     )
@@ -213,6 +266,114 @@ pub fn build_backfill_balance_ix(ctx: &BackfillCtx, accounts: &[AccountRecord]) 
     ];
     for a in accounts {
         let pda = derive_balance_pda(&ctx.program_id, a.chain, a.token_chain, &a.token_address);
+        metas.push(AccountMeta::new(pda, false));
+    }
+
+    Instruction {
+        program_id: ctx.program_id,
+        accounts: metas,
+        data,
+    }
+}
+
+/// Build a `BackfillRelayerRegistration` ix from a slice of relayer
+/// registrations. Wire is flat: `[disc][count]` then per entry `chain(2 BE) ‖
+/// emitter_address(32)` (34 B/entry). One writable registration PDA meta per
+/// entry, in entry order.
+///
+/// Caller responsibility (NOT enforced here): the chunker must supply a batch
+/// within `MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK` that is strictly
+/// ascending by `chain` — the on-chain handler rejects non-increasing keys.
+pub fn build_backfill_relayer_registration_ix(
+    ctx: &BackfillCtx,
+    entries: &[RelayerChainRegistrationRecord],
+) -> Instruction {
+    let mut data = Vec::with_capacity(2 + entries.len() * 34);
+    data.push(BACKFILL_RELAYER_REGISTRATION_DISC);
+    data.push(entries.len() as u8);
+    for e in entries {
+        data.extend_from_slice(&e.chain.to_be_bytes());
+        data.extend_from_slice(&e.registered_emitter);
+    }
+
+    let mut metas = vec![
+        AccountMeta::new(ctx.payer, true),
+        AccountMeta::new_readonly(ctx.system_program, false),
+    ];
+    for e in entries {
+        let pda = derive_relayer_registration_pda(&ctx.program_id, e.chain);
+        metas.push(AccountMeta::new(pda, false));
+    }
+
+    Instruction {
+        program_id: ctx.program_id,
+        accounts: metas,
+        data,
+    }
+}
+
+/// Build a `BackfillTransceiverHub` ix. Wire: `[disc][count]` then per entry
+/// `chain(2 BE) ‖ address(32) ‖ hub_chain(2 BE) ‖ hub_address(32)` (68
+/// B/entry). One writable hub PDA meta per entry, in entry order.
+///
+/// Caller responsibility: batch within `MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK`,
+/// strictly ascending by `(chain, address)`.
+pub fn build_backfill_transceiver_hub_ix(
+    ctx: &BackfillCtx,
+    entries: &[TransceiverHubRecord],
+) -> Instruction {
+    let mut data = Vec::with_capacity(2 + entries.len() * 68);
+    data.push(BACKFILL_TRANSCEIVER_HUB_DISC);
+    data.push(entries.len() as u8);
+    for e in entries {
+        data.extend_from_slice(&e.chain.to_be_bytes());
+        data.extend_from_slice(&e.address);
+        data.extend_from_slice(&e.hub_chain.to_be_bytes());
+        data.extend_from_slice(&e.hub_address);
+    }
+
+    let mut metas = vec![
+        AccountMeta::new(ctx.payer, true),
+        AccountMeta::new_readonly(ctx.system_program, false),
+    ];
+    for e in entries {
+        let pda = derive_transceiver_hub_pda(&ctx.program_id, e.chain, &e.address);
+        metas.push(AccountMeta::new(pda, false));
+    }
+
+    Instruction {
+        program_id: ctx.program_id,
+        accounts: metas,
+        data,
+    }
+}
+
+/// Build a `BackfillTransceiverPeer` ix. Wire: `[disc][count]` then per entry
+/// `chain(2 BE) ‖ address(32) ‖ dest_chain(2 BE) ‖ peer_address(32)` (68
+/// B/entry). One writable peer PDA meta per entry, in entry order.
+///
+/// Caller responsibility: batch within `MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK`,
+/// strictly ascending by `(chain, address, dest_chain)`.
+pub fn build_backfill_transceiver_peer_ix(
+    ctx: &BackfillCtx,
+    entries: &[TransceiverPeerRecord],
+) -> Instruction {
+    let mut data = Vec::with_capacity(2 + entries.len() * 68);
+    data.push(BACKFILL_TRANSCEIVER_PEER_DISC);
+    data.push(entries.len() as u8);
+    for e in entries {
+        data.extend_from_slice(&e.chain.to_be_bytes());
+        data.extend_from_slice(&e.address);
+        data.extend_from_slice(&e.dest_chain.to_be_bytes());
+        data.extend_from_slice(&e.peer_address);
+    }
+
+    let mut metas = vec![
+        AccountMeta::new(ctx.payer, true),
+        AccountMeta::new_readonly(ctx.system_program, false),
+    ];
+    for e in entries {
+        let pda = derive_transceiver_peer_pda(&ctx.program_id, e.chain, &e.address, e.dest_chain);
         metas.push(AccountMeta::new(pda, false));
     }
 

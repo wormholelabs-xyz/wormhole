@@ -28,8 +28,12 @@ fn fresh_cursor_starts_at_zero() {
 fn observed_events_advance_skip_count() {
     let (_tmp, cursor_path, catalogue) = setup();
     let mut cursor = Cursor::load_or_init(cursor_path, &catalogue, HASH, PROGRAM).expect("load");
-    cursor.observe_confirmed(Some("sig1"), 5_000).expect("observe");
-    cursor.observe_confirmed(Some("sig2"), 5_000).expect("observe");
+    cursor
+        .observe_confirmed(Some("sig1"), 5_000)
+        .expect("observe");
+    cursor
+        .observe_confirmed(Some("sig2"), 5_000)
+        .expect("observe");
     cursor.observe_already_accounted().expect("observe");
     assert_eq!(cursor.skip_count(), 3);
     assert_eq!(cursor.state().submitted, 2);
@@ -44,7 +48,9 @@ fn cursor_persists_and_resumes() {
     {
         let mut cursor =
             Cursor::load_or_init(cursor_path.clone(), &catalogue, HASH, PROGRAM).expect("load");
-        cursor.observe_confirmed(Some("sig1"), 5_000).expect("observe");
+        cursor
+            .observe_confirmed(Some("sig1"), 5_000)
+            .expect("observe");
         cursor.flush().expect("flush");
     }
     let cursor = Cursor::load_or_init(cursor_path, &catalogue, HASH, PROGRAM).expect("resume");
@@ -110,14 +116,9 @@ fn cursor_persists_on_stride_threshold() {
 #[test]
 fn final_flush_persists_pending_events() {
     let (_tmp, cursor_path, catalogue) = setup();
-    let mut cursor = Cursor::load_or_init_with_stride(
-        cursor_path.clone(),
-        &catalogue,
-        HASH,
-        PROGRAM,
-        1_000,
-    )
-    .expect("load");
+    let mut cursor =
+        Cursor::load_or_init_with_stride(cursor_path.clone(), &catalogue, HASH, PROGRAM, 1_000)
+            .expect("load");
     cursor.observe_confirmed(Some("a"), 5_000).expect("observe");
     cursor.observe_confirmed(Some("b"), 5_000).expect("observe");
     // No flush triggered yet (stride 1000). Final flush must persist.
@@ -130,7 +131,8 @@ fn final_flush_persists_pending_events() {
 #[test]
 fn no_tmp_file_left_after_successful_write() {
     let (_tmp, cursor_path, catalogue) = setup();
-    let mut cursor = Cursor::load_or_init(cursor_path.clone(), &catalogue, HASH, PROGRAM).expect("load");
+    let mut cursor =
+        Cursor::load_or_init(cursor_path.clone(), &catalogue, HASH, PROGRAM).expect("load");
     cursor.observe_confirmed(Some("a"), 5_000).expect("observe");
     cursor.flush().expect("flush");
     // Verify no stray .tmp file alongside cursor.json

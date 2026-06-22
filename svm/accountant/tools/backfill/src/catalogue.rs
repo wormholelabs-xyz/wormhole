@@ -2,8 +2,10 @@
 //!
 //! The catalogue is the deterministic output of `tools/wormchain-snapshot/` —
 //! one JSON object per line, sorted by `(kind, chain, emitter, sequence)`.
-//! Four record kinds: `transfer`, `account`, `modification`, `registration`.
-//! See `accountant-migration-backfill.md` §"Contract between A and B" for the
+//! Record kinds: the four Token-Bridge kinds (`transfer`, `account`,
+//! `modification`, `registration`) plus three NTT-native map kinds
+//! (`relayer_chain_registration`, `transceiver_hub`, `transceiver_peer`). See
+//! `accountant-migration-backfill.md` §"Contract between A and B" for the
 //! schema.
 //!
 //! The reader is iterator-based and bounded-memory — it parses one record at a
@@ -26,6 +28,9 @@ pub enum Record {
     Account(AccountRecord),
     Modification(ModificationRecord),
     Registration(RegistrationRecord),
+    RelayerChainRegistration(RelayerChainRegistrationRecord),
+    TransceiverHub(TransceiverHubRecord),
+    TransceiverPeer(TransceiverPeerRecord),
 }
 
 /// `kind: "transfer"` — one VAA-committed token-bridge transfer captured by
@@ -73,6 +78,38 @@ pub struct ModificationRecord {
 pub struct RegistrationRecord {
     pub chain: u16,
     pub registered_emitter: [u8; 32],
+}
+
+/// `kind: "relayer_chain_registration"` — one NTT relayer chain registration.
+/// Fed into the NTT backfill program's `BackfillRelayerRegistration` ix as
+/// `(chain, registered_emitter)`. NTT's analogue of the Token Bridge
+/// `registration` kind, written to a distinct PDA namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayerChainRegistrationRecord {
+    pub chain: u16,
+    pub registered_emitter: [u8; 32],
+}
+
+/// `kind: "transceiver_hub"` — one transceiver→hub mapping. Keyed by
+/// `(chain, address)`, storing the `(hub_chain, hub_address)` the transceiver
+/// belongs to. Fed into `BackfillTransceiverHub`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransceiverHubRecord {
+    pub chain: u16,
+    pub address: [u8; 32],
+    pub hub_chain: u16,
+    pub hub_address: [u8; 32],
+}
+
+/// `kind: "transceiver_peer"` — one transceiver→peer mapping. Keyed by
+/// `(chain, address, dest_chain)`, storing the registered `peer_address` on
+/// `dest_chain`. Fed into `BackfillTransceiverPeer`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransceiverPeerRecord {
+    pub chain: u16,
+    pub address: [u8; 32],
+    pub dest_chain: u16,
+    pub peer_address: [u8; 32],
 }
 
 /// Modification direction. Maps to the on-chain `ModificationKind` enum.
@@ -180,6 +217,11 @@ fn parse_record(line: usize, raw: &str) -> Result<Record, CatalogueError> {
         "account" => Ok(Record::Account(parse_account(line, &v)?)),
         "modification" => Ok(Record::Modification(parse_modification(line, &v)?)),
         "registration" => Ok(Record::Registration(parse_registration(line, &v)?)),
+        "relayer_chain_registration" => Ok(Record::RelayerChainRegistration(
+            parse_relayer_chain_registration(line, &v)?,
+        )),
+        "transceiver_hub" => Ok(Record::TransceiverHub(parse_transceiver_hub(line, &v)?)),
+        "transceiver_peer" => Ok(Record::TransceiverPeer(parse_transceiver_peer(line, &v)?)),
         other => Err(CatalogueError::UnknownKind {
             line,
             kind: other.to_owned(),
@@ -238,13 +280,37 @@ fn parse_registration(line: usize, v: &Value) -> Result<RegistrationRecord, Cata
     })
 }
 
+fn parse_relayer_chain_registration(
+    line: usize,
+    v: &Value,
+) -> Result<RelayerChainRegistrationRecord, CatalogueError> {
+    Ok(RelayerChainRegistrationRecord {
+        chain: get_u16(line, v, "chain")?,
+        registered_emitter: get_hex32(line, v, "registered_emitter")?,
+    })
+}
+
+fn parse_transceiver_hub(line: usize, v: &Value) -> Result<TransceiverHubRecord, CatalogueError> {
+    Ok(TransceiverHubRecord {
+        chain: get_u16(line, v, "chain")?,
+        address: get_hex32(line, v, "address")?,
+        hub_chain: get_u16(line, v, "hub_chain")?,
+        hub_address: get_hex32(line, v, "hub_address")?,
+    })
+}
+
+fn parse_transceiver_peer(line: usize, v: &Value) -> Result<TransceiverPeerRecord, CatalogueError> {
+    Ok(TransceiverPeerRecord {
+        chain: get_u16(line, v, "chain")?,
+        address: get_hex32(line, v, "address")?,
+        dest_chain: get_u16(line, v, "dest_chain")?,
+        peer_address: get_hex32(line, v, "peer_address")?,
+    })
+}
+
 // ----- field accessors -----
 
-fn get_str<'a>(
-    line: usize,
-    v: &'a Value,
-    field: &'static str,
-) -> Result<&'a str, CatalogueError> {
+fn get_str<'a>(line: usize, v: &'a Value, field: &'static str) -> Result<&'a str, CatalogueError> {
     v.get(field)
         .ok_or(CatalogueError::MissingField { line, field })?
         .as_str()

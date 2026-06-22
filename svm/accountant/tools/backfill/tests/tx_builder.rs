@@ -1,12 +1,54 @@
 //! Integration tests for the tx builder.
 
-use ga_backfill::catalogue::{AccountRecord, TransferRecord};
+use ga_backfill::catalogue::{
+    AccountRecord, RelayerChainRegistrationRecord, TransceiverHubRecord, TransceiverPeerRecord,
+    TransferRecord,
+};
 use ga_backfill::tx_builder::{
     backfill_authority_pubkey, build_backfill_balance_ix, build_backfill_noreplay_ix,
-    derive_balance_pda, derive_noreplay_authority_pda, derive_noreplay_bucket, BackfillCtx,
-    BACKFILL_BALANCE_DISC, BACKFILL_NOREPLAY_DISC,
+    build_backfill_relayer_registration_ix, build_backfill_transceiver_hub_ix,
+    build_backfill_transceiver_peer_ix, derive_balance_pda, derive_noreplay_authority_pda,
+    derive_noreplay_bucket, derive_relayer_registration_pda, derive_transceiver_hub_pda,
+    derive_transceiver_peer_pda, BackfillCtx, BACKFILL_BALANCE_DISC, BACKFILL_NOREPLAY_DISC,
+    BACKFILL_RELAYER_REGISTRATION_DISC, BACKFILL_TRANSCEIVER_HUB_DISC,
+    BACKFILL_TRANSCEIVER_PEER_DISC,
 };
 use solana_pubkey::Pubkey;
+
+fn make_relayer(chain: u16, emitter_seed: u8) -> RelayerChainRegistrationRecord {
+    let mut registered_emitter = [0u8; 32];
+    registered_emitter[31] = emitter_seed;
+    RelayerChainRegistrationRecord {
+        chain,
+        registered_emitter,
+    }
+}
+
+fn make_hub(chain: u16, addr_seed: u8, hub_chain: u16, hub_seed: u8) -> TransceiverHubRecord {
+    let mut address = [0u8; 32];
+    address[31] = addr_seed;
+    let mut hub_address = [0u8; 32];
+    hub_address[31] = hub_seed;
+    TransceiverHubRecord {
+        chain,
+        address,
+        hub_chain,
+        hub_address,
+    }
+}
+
+fn make_peer(chain: u16, addr_seed: u8, dest_chain: u16, peer_seed: u8) -> TransceiverPeerRecord {
+    let mut address = [0u8; 32];
+    address[31] = addr_seed;
+    let mut peer_address = [0u8; 32];
+    peer_address[31] = peer_seed;
+    TransceiverPeerRecord {
+        chain,
+        address,
+        dest_chain,
+        peer_address,
+    }
+}
 
 /// The orchestrator's signer must match the program's compile-time
 /// `BACKFILL_AUTHORITY` const. `BackfillCtx::new` asserts this; the tests use
@@ -239,10 +281,7 @@ fn backfill_balance_bulk_entries_in_order() {
 #[test]
 fn backfill_balance_account_list_shape() {
     let c = ctx();
-    let accounts = vec![
-        make_account(1, 2, 0xAA, 1),
-        make_account(1, 2, 0xBB, 2),
-    ];
+    let accounts = vec![make_account(1, 2, 0xAA, 1), make_account(1, 2, 0xBB, 2)];
     let ix = build_backfill_balance_ix(&c, &accounts);
 
     // Fixed 2 + N PDAs = 4
@@ -275,6 +314,190 @@ fn discriminators_match_program_enum() {
     use global_accountant_backfill::Instruction as PI;
     assert_eq!(BACKFILL_NOREPLAY_DISC, PI::BackfillNoReplay as u8);
     assert_eq!(BACKFILL_BALANCE_DISC, PI::BackfillBalance as u8);
+}
+
+#[test]
+fn ntt_discriminators_match_program_enum() {
+    // The NTT-native disc constants MUST match the NTT program's enum, sourced
+    // the same way as the WTT discs.
+    use ntt_global_accountant_backfill::Instruction as NI;
+    assert_eq!(
+        BACKFILL_RELAYER_REGISTRATION_DISC,
+        NI::BackfillRelayerRegistration as u8
+    );
+    assert_eq!(
+        BACKFILL_TRANSCEIVER_HUB_DISC,
+        NI::BackfillTransceiverHub as u8
+    );
+    assert_eq!(
+        BACKFILL_TRANSCEIVER_PEER_DISC,
+        NI::BackfillTransceiverPeer as u8
+    );
+    // Sanity: the literal wire values per the program handlers.
+    assert_eq!(BACKFILL_RELAYER_REGISTRATION_DISC, 2);
+    assert_eq!(BACKFILL_TRANSCEIVER_HUB_DISC, 3);
+    assert_eq!(BACKFILL_TRANSCEIVER_PEER_DISC, 4);
+}
+
+// ============================================================================
+// BackfillRelayerRegistration tx builder
+// ============================================================================
+
+#[test]
+fn relayer_registration_single_entry_wire() {
+    let c = ctx();
+    let ix = build_backfill_relayer_registration_ix(&c, &[make_relayer(2, 0x85)]);
+    // Wire: [disc][count] [chain(BE 2) emitter_address(32)]
+    assert_eq!(ix.data[0], BACKFILL_RELAYER_REGISTRATION_DISC);
+    assert_eq!(ix.data[1], 1);
+    assert_eq!(&ix.data[2..4], &[0x00, 0x02]); // chain BE
+    assert_eq!(ix.data[35], 0x85); // emitter last byte
+    assert_eq!(ix.data.len(), 2 + 34);
+}
+
+#[test]
+fn relayer_registration_bulk_wire_and_pdas() {
+    let c = ctx();
+    let entries = vec![make_relayer(2, 0xAA), make_relayer(5, 0xBB)];
+    let ix = build_backfill_relayer_registration_ix(&c, &entries);
+    assert_eq!(ix.data[1], 2);
+    assert_eq!(ix.data.len(), 2 + 2 * 34);
+    // entry 1 starts at 2 + 34 = 36
+    assert_eq!(&ix.data[36..38], &[0x00, 0x05]);
+    assert_eq!(ix.data[36 + 33], 0xBB);
+
+    // Account list: payer (signer/writable) + system + 2 PDAs (writable, in order)
+    assert_eq!(ix.accounts.len(), 4);
+    assert_eq!(ix.accounts[0].pubkey, c.payer);
+    assert!(ix.accounts[0].is_signer && ix.accounts[0].is_writable);
+    assert_eq!(ix.accounts[1].pubkey, c.system_program);
+    assert!(!ix.accounts[1].is_writable);
+    assert!(ix.accounts[2].is_writable);
+    assert_eq!(
+        ix.accounts[2].pubkey,
+        derive_relayer_registration_pda(&c.program_id, 2)
+    );
+    assert_eq!(
+        ix.accounts[3].pubkey,
+        derive_relayer_registration_pda(&c.program_id, 5)
+    );
+}
+
+#[test]
+fn relayer_registration_pda_depends_on_chain() {
+    let c = ctx();
+    assert_ne!(
+        derive_relayer_registration_pda(&c.program_id, 2),
+        derive_relayer_registration_pda(&c.program_id, 3)
+    );
+}
+
+// ============================================================================
+// BackfillTransceiverHub tx builder
+// ============================================================================
+
+#[test]
+fn transceiver_hub_single_entry_wire() {
+    let c = ctx();
+    let ix = build_backfill_transceiver_hub_ix(&c, &[make_hub(2, 0x22, 1, 0x33)]);
+    // Wire: [disc][count] [chain(2) address(32) hub_chain(2) hub_address(32)]
+    assert_eq!(ix.data[0], BACKFILL_TRANSCEIVER_HUB_DISC);
+    assert_eq!(ix.data[1], 1);
+    // Entry at offset 2: chain@2..4, address@4..36, hub_chain@36..38, hub_address@38..70.
+    assert_eq!(&ix.data[2..4], &[0x00, 0x02]); // chain BE
+    assert_eq!(ix.data[35], 0x22); // address last byte @ 4+32-1 = 35
+    assert_eq!(&ix.data[36..38], &[0x00, 0x01]); // hub_chain BE @ 36
+    assert_eq!(ix.data[69], 0x33); // hub_address last byte @ 38+32-1 = 69
+    assert_eq!(ix.data.len(), 2 + 68);
+}
+
+#[test]
+fn transceiver_hub_bulk_wire_and_pdas() {
+    let c = ctx();
+    let entries = vec![make_hub(2, 0x22, 1, 0x33), make_hub(2, 0x44, 1, 0x55)];
+    let ix = build_backfill_transceiver_hub_ix(&c, &entries);
+    assert_eq!(ix.data[1], 2);
+    assert_eq!(ix.data.len(), 2 + 2 * 68);
+    // entry 1 starts at 2+68=70; address occupies 70+2..70+34, last byte @ 70+33 = 103
+    assert_eq!(ix.data[2 + 68 + 33], 0x44);
+
+    assert_eq!(ix.accounts.len(), 4);
+    assert_eq!(ix.accounts[0].pubkey, c.payer);
+    assert_eq!(ix.accounts[1].pubkey, c.system_program);
+    assert!(ix.accounts[2].is_writable);
+    assert_eq!(
+        ix.accounts[2].pubkey,
+        derive_transceiver_hub_pda(&c.program_id, 2, &entries[0].address)
+    );
+    assert_eq!(
+        ix.accounts[3].pubkey,
+        derive_transceiver_hub_pda(&c.program_id, 2, &entries[1].address)
+    );
+}
+
+#[test]
+fn transceiver_hub_pda_depends_on_chain_and_address() {
+    let c = ctx();
+    let a = derive_transceiver_hub_pda(&c.program_id, 2, &[1u8; 32]);
+    let b = derive_transceiver_hub_pda(&c.program_id, 2, &[2u8; 32]); // diff address
+    let d = derive_transceiver_hub_pda(&c.program_id, 3, &[1u8; 32]); // diff chain
+    assert_ne!(a, b);
+    assert_ne!(a, d);
+}
+
+// ============================================================================
+// BackfillTransceiverPeer tx builder
+// ============================================================================
+
+#[test]
+fn transceiver_peer_single_entry_wire() {
+    let c = ctx();
+    let ix = build_backfill_transceiver_peer_ix(&c, &[make_peer(2, 0x66, 4, 0x77)]);
+    // Wire: [disc][count] [chain(2) address(32) dest_chain(2) peer_address(32)]
+    assert_eq!(ix.data[0], BACKFILL_TRANSCEIVER_PEER_DISC);
+    assert_eq!(ix.data[1], 1);
+    // Entry at offset 2: chain@2..4, address@4..36, dest_chain@36..38, peer_address@38..70.
+    assert_eq!(&ix.data[2..4], &[0x00, 0x02]); // chain BE
+    assert_eq!(ix.data[35], 0x66); // address last byte @ 35
+    assert_eq!(&ix.data[36..38], &[0x00, 0x04]); // dest_chain BE @ 36
+    assert_eq!(ix.data[69], 0x77); // peer_address last byte @ 69
+    assert_eq!(ix.data.len(), 2 + 68);
+}
+
+#[test]
+fn transceiver_peer_bulk_wire_and_pdas() {
+    let c = ctx();
+    let entries = vec![make_peer(2, 0x66, 4, 0x77), make_peer(2, 0x66, 5, 0x88)];
+    let ix = build_backfill_transceiver_peer_ix(&c, &entries);
+    assert_eq!(ix.data[1], 2);
+    assert_eq!(ix.data.len(), 2 + 2 * 68);
+    // entry 1 dest_chain at 2 + 68 + 34 = 104
+    assert_eq!(&ix.data[2 + 68 + 34..2 + 68 + 36], &[0x00, 0x05]);
+
+    assert_eq!(ix.accounts.len(), 4);
+    assert_eq!(ix.accounts[0].pubkey, c.payer);
+    assert_eq!(ix.accounts[1].pubkey, c.system_program);
+    assert!(ix.accounts[2].is_writable);
+    assert_eq!(
+        ix.accounts[2].pubkey,
+        derive_transceiver_peer_pda(&c.program_id, 2, &entries[0].address, 4)
+    );
+    assert_eq!(
+        ix.accounts[3].pubkey,
+        derive_transceiver_peer_pda(&c.program_id, 2, &entries[1].address, 5)
+    );
+}
+
+#[test]
+fn transceiver_peer_pda_depends_on_full_triple() {
+    let c = ctx();
+    let a = derive_transceiver_peer_pda(&c.program_id, 2, &[1u8; 32], 4);
+    let b = derive_transceiver_peer_pda(&c.program_id, 2, &[1u8; 32], 5); // diff dest_chain
+    let d = derive_transceiver_peer_pda(&c.program_id, 2, &[2u8; 32], 4); // diff address
+    let e = derive_transceiver_peer_pda(&c.program_id, 3, &[1u8; 32], 4); // diff chain
+    assert_ne!(a, b);
+    assert_ne!(a, d);
+    assert_ne!(a, e);
 }
 
 #[test]
