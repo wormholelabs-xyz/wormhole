@@ -1,4 +1,5 @@
-//! Instruction discriminators for the program's dispatch table.
+//! Instruction discriminators for the global-accountant (WTT) program's
+//! dispatch table.
 
 /// Instruction discriminators. Single-byte prefix on the instruction data.
 #[repr(u8)]

@@ -9,7 +9,7 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, MAX_QUORUM_BRANCH_CU,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
         NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
     },
@@ -2076,6 +2076,12 @@ fn quorum_with_dusted_destination_account_succeeds() {
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst_post.data);
     assert_eq!(layout.balance, Uint256::from_u128(7_777));
 }
+
+/// Compute-unit ceiling for the hottest `submit_observations` / `submit_vaas`
+/// path (quorum commit branch with a Transfer + lazy-init of both Account PDAs).
+/// Test-only — it pins the regression guard below; no production code depends
+/// on it, so it lives here rather than in the shared definitions crate.
+const MAX_QUORUM_BRANCH_CU: u64 = 80_000;
 
 /// CU regression guard: the quorum-commit branch (lazy-init of both Account
 /// PDAs — the program's most expensive tx) must stay below `MAX_QUORUM_BRANCH_CU`.

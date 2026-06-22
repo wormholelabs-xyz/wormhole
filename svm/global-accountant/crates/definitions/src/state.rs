@@ -318,16 +318,16 @@ mod tests {
         assert_eq!(AccountTag::ChainRegistration as u8, 3);
         assert_eq!(AccountTag::Modification as u8, 4);
         // Each layout's TAG const mirrors its AccountTag value.
-        assert_eq!(PendingObservationsLayout::TAG, AccountTag::PendingObservations as u8);
+        assert_eq!(
+            PendingObservationsLayout::TAG,
+            AccountTag::PendingObservations as u8
+        );
         assert_eq!(BalanceAccountLayout::TAG, AccountTag::Balance as u8);
         assert_eq!(
             ChainRegistrationLayout::TAG,
             AccountTag::ChainRegistration as u8
         );
-        assert_eq!(
-            ModificationLayout::TAG,
-            AccountTag::Modification as u8
-        );
+        assert_eq!(ModificationLayout::TAG, AccountTag::Modification as u8);
     }
 
     #[test]
