@@ -45,9 +45,12 @@ pub fn process_instruction(
         Some(Instruction::ModifyBalance) => {
             instructions::modify_balance::process(program_id, accounts, rest)
         }
-        // Hub/peer registration handlers built in a separate task.
-        Some(Instruction::RegisterHub) | Some(Instruction::RegisterPeer) => {
-            Err(err(GlobalAccountantError::NotEnabled))
+        // NTT transceiver hub/peer registration handlers.
+        Some(Instruction::RegisterHub) => {
+            instructions::register_hub::process(program_id, accounts, rest)
+        }
+        Some(Instruction::RegisterPeer) => {
+            instructions::register_peer::process(program_id, accounts, rest)
         }
         None => Err(err(GlobalAccountantError::InvalidInstruction)),
     }

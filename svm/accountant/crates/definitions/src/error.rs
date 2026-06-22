@@ -90,6 +90,22 @@ pub enum GlobalAccountantError {
     /// destination's registered peer for the source chain is not the source
     /// transceiver. The transfer is rejected.
     PeerRegistrationMismatch = 32,
+    /// NTT `register_hub`: the transceiver-info message is Burning-mode. Only
+    /// Locking-mode info registers a hub; CosmWasm bails with "ignoring
+    /// non-locking NTT initialization". Rejected, NoReplay slot left unconsumed.
+    NotLockingHub = 33,
+    /// NTT `register_hub`: a `TransceiverHub` PDA already exists at
+    /// `(emitter_chain, emitter_address)`. CosmWasm bails with "hub entry already
+    /// exists" — re-registering a hub is not allowed.
+    DuplicateTransceiverHub = 34,
+    /// NTT `register_peer`: a `TransceiverPeer` PDA already exists at
+    /// `(emitter_chain, emitter_address, dest_chain)`. CosmWasm bails with "peer
+    /// entry for this chain already exists".
+    DuplicateTransceiverPeer = 35,
+    /// NTT `register_peer`: the source transceiver has no known hub and the peer
+    /// it is registering is not itself a hub. CosmWasm bails with "ignoring
+    /// attempt to register peer before hub" — the hub must be registered first.
+    PeerBeforeHub = 36,
 }
 
 impl From<GlobalAccountantError> for u32 {

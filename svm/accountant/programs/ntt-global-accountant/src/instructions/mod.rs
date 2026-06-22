@@ -8,6 +8,8 @@
 
 pub mod modify_balance;
 pub mod ntt_transfer;
+pub mod register_hub;
+pub mod register_peer;
 pub mod register_relayer_chain;
 pub mod submit_observations;
 pub mod submit_vaas;

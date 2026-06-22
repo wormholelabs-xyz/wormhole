@@ -5,10 +5,10 @@
 //! and the zero-copy state layouts) lives in `accountant-operational-core`,
 //! deployed under this program's own ID. This crate keeps the NTT-specific
 //! governance handlers (`register_relayer_chain`, `modify_balance`) and the
-//! entrypoint that wires them up. The NTT live-processing path (hub/peer
-//! topology, relayer DeliveryInstruction unwrap, amount normalization) and the
-//! hub/peer registration handlers are built in a later workstream and are
-//! stubbed here.
+//! entrypoint that wires them up, including the transceiver hub/peer
+//! registration handlers. The NTT live-processing path (hub/peer topology,
+//! relayer DeliveryInstruction unwrap, amount normalization) is built in a later
+//! workstream.
 
 // `no_std` on the SBF target (and `bpf`, so nightly clippy can lint the
 // SBF-shaped code — platform-tools ships no clippy).
@@ -30,8 +30,8 @@ pub use accountant_operational_core::err;
 /// `0`/`1`/`2` reuse the `accountant-operational-core` operational machinery
 /// (`SubmitObservations`/`SubmitVaas` are stubbed pending the NTT transfer
 /// flow; `ClosePending` is product-neutral and dispatched directly). `3`/`4`
-/// are the NTT governance handlers built here. `5`/`6` are the hub/peer
-/// registration handlers built in a later workstream and stubbed for now.
+/// are the NTT governance handlers; `5`/`6` are the transceiver hub/peer
+/// registration handlers.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
@@ -44,9 +44,13 @@ pub enum Instruction {
     /// NTT `ModifyBalance` governance handler: verifies the VAA and applies an
     /// Add/Subtract delta to the canonical `BalanceAccount` PDA.
     ModifyBalance = 4,
-    /// NTT transceiver-hub registration (built later).
+    /// NTT transceiver-hub registration (`INFO_PREFIX`, Locking-mode only):
+    /// verifies the VAA and writes the canonical `TransceiverHub` PDA pointing
+    /// the transceiver at itself.
     RegisterHub = 5,
-    /// NTT transceiver-peer registration (built later).
+    /// NTT transceiver-peer registration (`PEER_INFO_PREFIX`): verifies the VAA,
+    /// validates the bidirectional hub match, and writes the canonical
+    /// `TransceiverPeer` PDA.
     RegisterPeer = 6,
 }
 
