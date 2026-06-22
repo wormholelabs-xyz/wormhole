@@ -26,23 +26,29 @@ pub fn process_instruction(
         .ok_or_else(|| err(GlobalAccountantError::InvalidInstructionData))?;
 
     match Instruction::from_u8(*discriminator) {
+        // NTT quorum tracker + signed-VAA backfill over the shared core
+        // primitives, running the NTT transfer flow on the committing branch.
+        Some(Instruction::SubmitObservations) => {
+            instructions::submit_observations::process(program_id, accounts, rest)
+        }
+        Some(Instruction::SubmitVaas) => {
+            instructions::submit_vaas::process(program_id, accounts, rest)
+        }
         // Product-neutral cleanup handler, reused as-is from the core crate.
         Some(Instruction::ClosePending) => {
             core_instructions::close_pending::process(program_id, accounts, rest)
         }
-        // NTT governance handlers (this workstream).
+        // NTT governance handlers.
         Some(Instruction::RegisterRelayerChain) => {
             instructions::register_relayer_chain::process(program_id, accounts, rest)
         }
         Some(Instruction::ModifyBalance) => {
             instructions::modify_balance::process(program_id, accounts, rest)
         }
-        // Built in a later workstream (NTT transfer flow + hub/peer topology).
-        // Stubbed so the slots reject cleanly rather than silently no-op.
-        Some(Instruction::SubmitObservations)
-        | Some(Instruction::SubmitVaas)
-        | Some(Instruction::RegisterHub)
-        | Some(Instruction::RegisterPeer) => Err(err(GlobalAccountantError::NotEnabled)),
+        // Hub/peer registration handlers built in a separate task.
+        Some(Instruction::RegisterHub) | Some(Instruction::RegisterPeer) => {
+            Err(err(GlobalAccountantError::NotEnabled))
+        }
         None => Err(err(GlobalAccountantError::InvalidInstruction)),
     }
 }

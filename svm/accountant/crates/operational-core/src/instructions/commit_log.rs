@@ -12,7 +12,7 @@ use crate::definitions::{ACCOUNTANT_DIGEST_LOG_LEN, ACCOUNTANT_DIGEST_LOG_TAG};
 /// Emit one canonical commit log entry. The host build is a no-op so mollusk
 /// and surfpool host-side compilation continues to work; the SBF build calls
 /// the `sol_log_data` syscall directly.
-pub(crate) fn emit(
+pub fn emit(
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,

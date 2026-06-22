@@ -79,6 +79,17 @@ pub enum GlobalAccountantError {
     /// (rather than committing) leaves the NoReplay slot unconsumed so a future
     /// upgrade can process the VAA.
     UnknownTokenBridgePayload = 29,
+    /// NTT: no `TransceiverHub` PDA registered for the routing key
+    /// `(emitter_chain, sender)`. The transfer cannot be assigned a hub token
+    /// identity, so it is rejected (NoReplay slot left unconsumed).
+    MissingTransceiverHub = 30,
+    /// NTT: a required `TransceiverPeer` PDA is missing for the peer
+    /// cross-registration check (either direction).
+    MissingTransceiverPeer = 31,
+    /// NTT: the bidirectional peer cross-registration does not agree — the
+    /// destination's registered peer for the source chain is not the source
+    /// transceiver. The transfer is rejected.
+    PeerRegistrationMismatch = 32,
 }
 
 impl From<GlobalAccountantError> for u32 {
