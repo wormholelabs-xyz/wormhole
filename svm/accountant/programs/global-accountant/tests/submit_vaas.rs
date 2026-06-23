@@ -731,7 +731,7 @@ fn submit_vaas_rejects_wrong_emitter_for_registered_chain() {
 }
 
 /// A body shorter than the 51-byte header + action byte rejects with
-/// `InvalidInstructionData`.
+/// `InvalidInstructionData` via the `body_len <= VAA_BODY_HEADER_LEN` gate.
 #[test]
 fn submit_vaas_with_short_body_rejects() {
     let mollusk = mollusk();
@@ -756,4 +756,80 @@ fn submit_vaas_with_short_body_rejects() {
         }
         other => panic!("expected Failure(InvalidInstructionData), got {other:?}"),
     }
+}
+
+/// The declared `body_len` prefix disagreeing with the bytes that actually
+/// follow rejects via the `data.len() != FIXED_LEN + body_len` gate, distinct
+/// from the `body_len <= header` short-body gate above. Here `body_len` claims a
+/// full attest body but the wire carries one fewer byte.
+#[test]
+fn submit_vaas_with_declared_len_mismatch_rejects() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new(0xA9);
+
+    // A valid 52-byte attest body, but the length prefix overstates it by one.
+    let body = build_attest_body(scenario.chain, &scenario.emitter, scenario.sequence);
+    let declared_len = (body.len() + 1) as u16;
+    let mut wire = Vec::with_capacity(1 + 1 + 2 + body.len());
+    wire.push(IxDiscriminator::SubmitVaas as u8);
+    wire.push(scenario.guardian_set_bump);
+    wire.extend_from_slice(&declared_len.to_le_bytes());
+    wire.extend_from_slice(&body);
+    let ix = Instruction::new_with_bytes(program_id(), &wire, scenario.account_metas());
+    let result = mollusk.process_instruction(&ix, &scenario.initial_accounts());
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidInstructionData as u32,
+                "expected InvalidInstructionData, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidInstructionData), got {other:?}"),
+    }
+}
+
+/// A body that clears the instruction-data length gate (`body_len > header` and
+/// `data.len()` consistent) but truncates inside the Token Bridge transfer
+/// payload (action 0x01 with fewer than 133 payload bytes) reaches the payload
+/// parser past Shim + NoReplay + registration checks and rejects with
+/// `InvalidInstructionData`.
+#[test]
+fn submit_vaas_with_truncated_transfer_payload_rejects() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new(0xAA);
+
+    // 51-byte header + a single action byte (0x01 = transfer) + a few payload
+    // bytes — well under the 133-byte minimum transfer payload.
+    let mut body = vec![0u8; 60];
+    body[8..10].copy_from_slice(&scenario.chain.to_be_bytes());
+    body[10..42].copy_from_slice(&scenario.emitter);
+    body[42..50].copy_from_slice(&scenario.sequence.to_be_bytes());
+    body[51] = 0x01; // transfer action; payload is truncated after this
+    let digest = double_keccak256_host(&body);
+
+    // Re-sign the digest of this body so the Shim CPI passes; only the payload
+    // length is wrong.
+    let mut scenario = scenario;
+    scenario.body = body;
+    scenario.digest = digest;
+
+    let result = scenario.submit(&mollusk, scenario.initial_accounts());
+    match result.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidInstructionData as u32,
+                "expected InvalidInstructionData from the truncated transfer payload, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidInstructionData), got {other:?}"),
+    }
+
+    // The replay slot must remain unconsumed: the failure rolls the whole tx
+    // back, so the NoReplay bucket stays in its lazy-create entry state.
+    let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
+    assert_bucket_unmarked(bucket);
 }
