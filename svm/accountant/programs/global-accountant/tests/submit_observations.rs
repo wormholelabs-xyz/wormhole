@@ -12,7 +12,7 @@ use {
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
         NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
-        PENDING_OBSERVATIONS_SEED_PREFIX,
+        PENDING_OBSERVATIONS_SEED_PREFIX, SUBMIT_OBSERVATION_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -133,9 +133,30 @@ fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account
 }
 
 /// Host-side `keccak256(keccak256(body))` — the Wormhole VAA digest convention.
+/// This is the *dedup/quorum* digest: it keys the pending PDA, the NoReplay
+/// slot, and the commit-log record. It is NOT the signature digest.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
+}
+
+/// Deterministic source-chain transaction id carried in the wire format and
+/// folded into the signing digest. Audit-only; the program never routes on it.
+const TX_HASH: [u8; 32] = [0xA9_u8; 32];
+
+/// Host mirror of `accountant_operational_core::hash::observation_signing_digest`:
+/// a *single* `keccak256` over `prefix ‖ tx_hash ‖ body`. This is the digest the
+/// guardian actually signs — deliberately distinct from `double_keccak256_host`
+/// so an observation signature is never interchangeable with a VAA signature.
+fn observation_signing_digest_host(prefix: &[u8], tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
+    solana_keccak_hasher::hashv(&[prefix, tx_hash, body]).to_bytes()
+}
+
+/// The WTT signing digest for `body` under the canonical prefix and fixed test
+/// `TX_HASH`. Used everywhere a submitted observation must carry a valid
+/// guardian signature.
+fn signing_digest_for(body: &[u8]) -> [u8; 32] {
+    observation_signing_digest_host(SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body)
 }
 
 /// Attest-payload VAA body (action 0x02). The scenario digest is derived from
@@ -181,14 +202,16 @@ fn submit_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // Wire: discriminator + 70-byte fixed prefix + 2-byte body len (LE) + body.
-    // No digest or PDA bumps travel; the digest and the routing tuple are both
-    // derived on-chain from the body header [8..50].
-    let mut data = Vec::with_capacity(1 + 70 + 2 + body.len());
+    // Wire: discriminator + 70-byte fixed prefix + tx_hash(32) + 2-byte body
+    // len (LE) + body. No digest or PDA bumps travel; the dedup digest and the
+    // routing tuple are derived on-chain from the body header [8..50], and the
+    // signing digest is reconstructed on-chain from prefix ‖ tx_hash ‖ body.
+    let mut data = Vec::with_capacity(1 + 70 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
+    data.extend_from_slice(&TX_HASH);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -323,7 +346,12 @@ struct Scenario {
     /// an Attest payload (no balance work); transfer tests use
     /// `Self::with_transfer_body`.
     body: Vec<u8>,
+    /// Dedup/quorum digest = `double_keccak256(body)`. Keys the pending PDA,
+    /// NoReplay slot, and commit log. NOT what guardians sign.
     digest: [u8; 32],
+    /// Signing digest = `keccak256(prefix ‖ tx_hash ‖ body)`. The value each
+    /// guardian signature is verified against. Distinct from `digest`.
+    signing_digest: [u8; 32],
     guardian_set_index: u32,
     guardians: Vec<Guardian>,
     submitter: Pubkey,
@@ -353,6 +381,7 @@ impl Scenario {
 
         let body = build_attest_body(chain, &emitter, sequence);
         let digest = double_keccak256_host(&body);
+        let signing_digest = signing_digest_for(&body);
 
         let guardians = make_guardians(guardian_count, seed);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
@@ -375,6 +404,7 @@ impl Scenario {
             sequence,
             body,
             digest,
+            signing_digest,
             guardian_set_index: gsi,
             guardians,
             submitter,
@@ -413,6 +443,7 @@ impl Scenario {
             recipient_chain,
         );
         base.digest = double_keccak256_host(&base.body);
+        base.signing_digest = signing_digest_for(&base.body);
         let (pending_pda, _) =
             derive_pending_pda(base.chain, &base.emitter, base.sequence, &base.digest);
         base.pending_pda = pending_pda;
@@ -437,7 +468,7 @@ impl Scenario {
         guardian_index: u8,
     ) -> mollusk_svm::result::InstructionResult {
         let guardian = &self.guardians[guardian_index as usize];
-        let signature = sign_digest(guardian, &self.digest);
+        let signature = sign_digest(guardian, &self.signing_digest);
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_ix_data(
@@ -681,7 +712,7 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
     let mut accounts = accounts_after_12.clone();
     accounts.push((bob, system_owned_account(bob_starting_lamports)));
 
-    let signature = sign_digest(&scenario.guardians[12], &scenario.digest);
+    let signature = sign_digest(&scenario.guardians[12], &scenario.signing_digest);
     let ix_data = submit_ix_data(
         scenario.guardian_set_index,
         12,
@@ -769,7 +800,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let digest = double_keccak256_host(&body);
 
     let guardians = make_guardians(19, 0x80);
-    let signature = sign_digest(&guardians[0], &digest);
+    let signature = sign_digest(&guardians[0], &signing_digest_for(&body));
 
     // Attack: supply a pending PDA canonical for an attacker namespace, not
     // the body's. The program derives the canonical address from body[8..50],
@@ -879,7 +910,7 @@ fn submit_observations_rejects_unregistered_chain() {
     let scenario = Scenario::new(19, 4, 0xA0);
 
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
-    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
 
     // Replace the default registration with an uninitialised PDA.
     let mut accounts = scenario.initial_accounts();
@@ -944,7 +975,7 @@ fn submit_observations_rejects_wrong_emitter_for_registered_chain() {
         }
     }
 
-    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
@@ -987,7 +1018,7 @@ fn submit_observations_rejects_spoofed_registration_pda() {
     let last_idx = metas.len() - 1;
     metas[last_idx] = AccountMeta::new_readonly(spoofed_pda, false);
 
-    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_ix_data(
@@ -1018,7 +1049,7 @@ fn submit_with_invalid_signature_fails() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x45);
 
-    let mut signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let mut signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     signature[0] ^= 0xff;
 
     let ix = Instruction::new_with_bytes(
@@ -1050,7 +1081,7 @@ fn submit_with_invalid_signature_fails() {
 fn submit_with_recovery_id_4_rejects() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x52);
-    let mut signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let mut signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     signature[64] = 4;
 
     let ix = Instruction::new_with_bytes(
@@ -1194,7 +1225,7 @@ fn submit_with_malformed_guardian_set_rejects() {
         // Valid signature — handler must short-circuit before secp256k1_recover.
         let signature = sign_digest(
             &scenario.guardians[guardian_index as usize],
-            &scenario.digest,
+            &scenario.signing_digest,
         );
         let ix = Instruction::new_with_bytes(
             program_id(),
@@ -1228,7 +1259,7 @@ fn submit_with_stale_old_set_observation_fails() {
     let accounts_after_first = new_scenario.submit_n(&mollusk, 1);
 
     let old_guardians = make_guardians(19, 0x48); // distinct keys for GSI=4
-    let stale_signature = sign_digest(&old_guardians[1], &new_scenario.digest);
+    let stale_signature = sign_digest(&old_guardians[1], &new_scenario.signing_digest);
 
     // Derive canonical Guardian Set PDA for GSI=4.
     let gsi_4_be = 4u32.to_be_bytes();
@@ -1306,7 +1337,7 @@ fn submit_with_new_set_observation_wipes_old_pending() {
     // Add the GSI=5 guardian set at its canonical address.
     accounts.push((guardian_set_5_pubkey, new_gs_account));
 
-    let signature = sign_digest(&new_guardians[0], &old_scenario.digest);
+    let signature = sign_digest(&new_guardians[0], &old_scenario.signing_digest);
     let mut metas = old_scenario.account_metas().clone();
     // Update guardian set account meta to point to GSI=5.
     metas[2] = AccountMeta::new_readonly(guardian_set_5_pubkey, false);
@@ -1358,7 +1389,7 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
         alternate_digest, scenario.digest,
         "one-byte body change must yield a different digest"
     );
-    let signature = sign_digest(&scenario.guardians[1], &alternate_digest);
+    let signature = sign_digest(&scenario.guardians[1], &signing_digest_for(&alternate_body));
 
     let (d2_pending_pda, _) = derive_pending_pda(
         scenario.chain,
@@ -1466,7 +1497,8 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
 
     // Drive 13 D2 observations to quorum.
     for i in 0..13u8 {
-        let signature = sign_digest(&scenario.guardians[i as usize], &alternate_digest);
+        let signature =
+            sign_digest(&scenario.guardians[i as usize], &signing_digest_for(&alternate_body));
         let mut metas = scenario.account_metas();
         metas[1] = AccountMeta::new(d2_pending_pda, false);
         let ix = Instruction::new_with_bytes(
@@ -1714,6 +1746,7 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         2,
     );
     scenario.digest = double_keccak256_host(&scenario.body);
+    scenario.signing_digest = signing_digest_for(&scenario.body);
     let (pending_pda, _) = derive_pending_pda(
         scenario.chain,
         &scenario.emitter,
@@ -1903,6 +1936,7 @@ fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
     let mut scenario = Scenario::new(19, 4, 0x65);
     scenario.body[51] = 0x05; // unknown Token Bridge action byte
     scenario.digest = double_keccak256_host(&scenario.body);
+    scenario.signing_digest = signing_digest_for(&scenario.body);
     let (pending_pda, _) = derive_pending_pda(
         scenario.chain,
         &scenario.emitter,
@@ -1950,20 +1984,21 @@ fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
     );
 }
 
-/// Tampering the body after signing changes the on-chain-derived digest
-/// (`keccak256(keccak256(body))`), so signature recovery no longer yields the
-/// guardian key — rejected as `InvalidSignature` before any PDA work. This is
-/// what binds the signature to the exact body now that the digest is derived
-/// rather than supplied.
+/// Tampering the body after signing changes the on-chain-reconstructed signing
+/// digest (`keccak256(prefix ‖ tx_hash ‖ body)`), so signature recovery no
+/// longer yields the guardian key — rejected as `InvalidSignature` before any
+/// PDA work. This is what binds the signature to the exact body now that the
+/// signing digest is reconstructed rather than supplied.
 #[test]
 fn tampered_body_fails_signature_check() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x64);
 
-    // Guardian signs the genuine body's digest...
-    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
-    // ...but a different body is submitted; the program derives the digest from
-    // the submitted bytes, so the recovered key differs from the guardian's.
+    // Guardian signs the genuine body's signing digest...
+    let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
+    // ...but a different body is submitted; the program reconstructs the signing
+    // digest from prefix ‖ tx_hash ‖ submitted-body, so the recovered key differs
+    // from the guardian's.
     let mut tampered_body = scenario.body.clone();
     tampered_body[0] ^= 0xAA; // mutate the timestamp byte
     let ix = Instruction::new_with_bytes(
@@ -2049,7 +2084,7 @@ fn spoofed_guardian_set_not_owned_by_core_bridge_rejects() {
         }
     };
 
-    let signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     let mut accounts = scenario.initial_accounts();
     accounts[2] = (scenario.guardian_set_pubkey, spoofed_guardian_set);
 
@@ -2099,7 +2134,7 @@ fn non_canonical_pending_pda_address_rejects_on_continue() {
     };
     accounts[1] = (spoofed_pending_pubkey, spoofed_pending_account);
 
-    let signature = sign_digest(&scenario.guardians[1], &scenario.digest);
+    let signature = sign_digest(&scenario.guardians[1], &scenario.signing_digest);
     let mut metas = scenario.account_metas();
     metas[1] = AccountMeta::new(spoofed_pending_pubkey, false);
     let ix = Instruction::new_with_bytes(
@@ -2119,4 +2154,71 @@ fn non_canonical_pending_pda_address_rejects_on_continue() {
         }
         other => panic!("expected Failure(InvalidPda), got {other:?}"),
     }
+}
+
+/// Domain-separation firewall: a guardian signature taken over the OLD bare
+/// dedup digest `double_keccak256(body)` — the pre-prefix scheme — must NOT be
+/// accepted. The program verifies against `keccak256(prefix ‖ tx_hash ‖ body)`,
+/// so recovering the key from a bare-digest signature yields a different
+/// pubkey and the observation is rejected as `InvalidSignature`. This proves
+/// the signing domain actually changed: a VAA-style signature is no longer
+/// interchangeable with an accountant observation signature.
+#[test]
+fn submit_with_legacy_bare_digest_signature_is_rejected() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new(19, 4, 0x71);
+
+    // Sanity: the two digests for this exact body are genuinely distinct, so a
+    // signature over one cannot validate against the other.
+    assert_ne!(
+        scenario.digest, scenario.signing_digest,
+        "dedup digest and signing digest must differ for the firewall to bite"
+    );
+
+    // Sign the OLD bare dedup digest (today's pre-prefix scheme) instead of the
+    // domain-separated signing digest.
+    let legacy_signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            scenario.guardian_set_index,
+            0,
+            &legacy_signature,
+            &scenario.body,
+        ),
+        scenario.account_metas(),
+    );
+    let r = mollusk.process_instruction(&ix, &scenario.initial_accounts());
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidSignature as u32,
+                "a signature over the legacy bare double_keccak256(body) digest must \
+                 be rejected as InvalidSignature, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidSignature), got {other:?}"),
+    }
+
+    // Nothing was created: the pending PDA stays uninitialised.
+    let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending.owner, system_program_id());
+    assert!(pending.data.is_empty());
+}
+
+/// Pins the two digests to distinct domains: the prefixed single-keccak signing
+/// digest must never equal the bare `double_keccak256(body)` dedup digest for
+/// the same body. If these ever collide the firewall above is vacuous.
+#[test]
+fn signing_digest_differs_from_dedup_digest() {
+    let body = build_attest_body(2, &[0x77u8; 32], 0x42);
+    let signing = observation_signing_digest_host(SUBMIT_OBSERVATION_PREFIX, &TX_HASH, &body);
+    let dedup = double_keccak256_host(&body);
+    assert_ne!(
+        signing, dedup,
+        "observation signing digest must be a distinct domain from the dedup digest"
+    );
 }

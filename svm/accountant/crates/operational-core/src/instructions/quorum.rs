@@ -37,11 +37,16 @@ use crate::state::pending;
 /// | 4      | 1    | guardian_index                     |
 /// | 5      | 65   | signature (r||s||recovery_id)      |
 ///
-/// Trailing the prefix is `body_len: u16 LE` then `body_len` VAA body bytes.
-/// The signed digest is `keccak256(keccak256(body))`, derived on-chain from the
-/// supplied body rather than passed in: the recovered signature is checked
-/// against it, so the body authenticates itself. PDA bumps are derived on-chain,
-/// not supplied.
+/// Trailing the fixed prefix, each program's orchestration carries
+/// `tx_hash: [u8; 32]`, then `body_len: u16 LE`, then `body_len` VAA body bytes.
+/// Two digests are derived on-chain from these (never passed in):
+///   - the *signing* digest `keccak256(prefix ‖ tx_hash ‖ body)` that the
+///     guardian actually signed, checked by [`verify_signature`]; the
+///     domain-separation `prefix` is product-specific (WTT vs NTT), and
+///   - the *dedup/quorum* digest `keccak256(keccak256(body))` that keys the
+///     pending PDA, the NoReplay slot, and the commit-log record.
+///
+/// PDA bumps are derived on-chain, not supplied.
 ///
 /// The routing tuple `(chain, emitter, sequence)` is sourced exclusively from
 /// the body header `[8..50]`, never caller-supplied data — otherwise an attacker
