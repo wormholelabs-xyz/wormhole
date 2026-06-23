@@ -3,10 +3,11 @@
 //! the bucket account is 129 bytes, noreplay-owned, with the bit for
 //! `sequence % 1024` set.
 //!
-//! `SEQUENCE = 9` puts the bitmap bit outside byte 0 so the mock-noreplay
-//! branch (which only writes byte 0 of a 1-byte buffer) cannot satisfy the
-//! assertion; this test fails under `mock-noreplay` and passes under the real
-//! CPI.
+//! `SEQUENCE = 9` puts the bitmap bit outside byte 0, exercising the full
+//! 129-byte bucket layout written by the real `solana_noreplay` program rather
+//! than a degenerate byte-0-only write. The real noreplay program is always
+//! loaded here (there is no mock); the assertion confirms the live CPI sets the
+//! correct bit at `sequence % 1024`.
 
 #![allow(clippy::too_many_arguments)]
 

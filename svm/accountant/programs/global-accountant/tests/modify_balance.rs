@@ -279,7 +279,10 @@ fn run_modify_balance(
 }
 
 /// Each case mutates one field of an otherwise-canonical body to pin which
-/// body-header validator trips. Mock-vaa is on, so the Shim CPI is not the gate.
+/// body-header validator trips. The real Verify VAA Shim is loaded and the
+/// guardian signatures are re-signed over each mutated body's digest, so the
+/// Shim CPI always passes; the rejection comes from the program's own
+/// governance-header validation, not from signature verification.
 #[test]
 fn modify_balance_body_header_violations_reject() {
     struct Case {
