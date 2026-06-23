@@ -19,8 +19,9 @@ use {
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
         TransceiverHubLayout, TransceiverPeerLayout, Uint256, ACCOUNT_SEED_PREFIX,
         CORE_BRIDGE_PROGRAM_ID, NATIVE_TOKEN_TRANSFER_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
-        TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_SEED_PREFIX,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, NTT_SUBMIT_OBSERVATION_PREFIX,
+        PENDING_OBSERVATIONS_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_MESSAGE_PREFIX,
+        TRANSCEIVER_PEER_SEED_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -159,6 +160,17 @@ fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
+/// Deterministic source-chain transaction id carried in the wire format and
+/// folded into the signing digest.
+const TX_HASH: [u8; 32] = [0xA9_u8; 32];
+
+/// Host mirror of `observation_signing_digest` under the NTT prefix:
+/// `keccak256(NTT_SUBMIT_OBSERVATION_PREFIX ‖ tx_hash ‖ body)`. The digest a
+/// guardian signs on the NTT observation path — distinct from the dedup digest.
+fn signing_digest_for(body: &[u8]) -> [u8; 32] {
+    solana_keccak_hasher::hashv(&[NTT_SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body]).to_bytes()
+}
+
 /// Build a `TransceiverMessage` carrying one `NativeTokenTransfer`. Shape pinned
 /// against `definitions::ntt` test builders. `decimals`/`raw_amount` feed the
 /// `TrimmedAmount`; `to_chain` is the recipient chain.
@@ -203,12 +215,15 @@ fn submit_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
+    // `tx_hash(32)` trails the fixed prefix; the signing digest is reconstructed
+    // on-chain from NTT prefix ‖ tx_hash ‖ body.
+    let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
+    data.extend_from_slice(&TX_HASH);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -304,6 +319,9 @@ struct Scenario {
 
     body: Vec<u8>,
     digest: [u8; 32],
+    /// Signing digest = `keccak256(NTT prefix ‖ tx_hash ‖ body)`. What each
+    /// guardian signature is verified against; distinct from `digest`.
+    signing_digest: [u8; 32],
     guardians: Vec<Guardian>,
 
     submitter: Pubkey,
@@ -347,6 +365,7 @@ impl Scenario {
         let ntt = build_ntt_message(decimals, raw_amount, recipient_chain);
         let body = build_vaa_body(emitter_chain, &emitter, sequence, &ntt);
         let digest = double_keccak256_host(&body);
+        let signing_digest = signing_digest_for(&body);
 
         let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
@@ -378,6 +397,7 @@ impl Scenario {
             normalized,
             body,
             digest,
+            signing_digest,
             guardians,
             submitter,
             pending_pda,
@@ -475,7 +495,7 @@ impl Scenario {
         starting_accounts: Vec<(Pubkey, Account)>,
         guardian_index: u8,
     ) -> mollusk_svm::result::InstructionResult {
-        let signature = sign_digest(&self.guardians[guardian_index as usize], &self.digest);
+        let signature = sign_digest(&self.guardians[guardian_index as usize], &self.signing_digest);
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_ix_data(
@@ -756,4 +776,63 @@ fn ntt_transfer_peer_cross_registration_mismatch_rejects() {
         }
         other => panic!("expected Failure(PeerRegistrationMismatch), got {other:?}"),
     }
+}
+
+/// Domain-separation firewall (NTT): a guardian signature over the OLD bare
+/// dedup digest `double_keccak256(body)` must be rejected. The wire carries the
+/// correct dedup `digest` (so the body cross-check passes), but the program
+/// verifies the signature against `keccak256(NTT prefix ‖ tx_hash ‖ body)`, so a
+/// bare-digest signature recovers a different key and the observation is rejected
+/// as `InvalidSignature`.
+#[test]
+fn submit_with_legacy_bare_digest_signature_is_rejected() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new();
+
+    assert_ne!(
+        scenario.digest, scenario.signing_digest,
+        "dedup digest and signing digest must differ for the firewall to bite"
+    );
+
+    let legacy_signature = sign_digest(&scenario.guardians[0], &scenario.digest);
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &submit_ix_data(
+            &scenario.digest,
+            GUARDIAN_SET_INDEX,
+            0,
+            &legacy_signature,
+            &scenario.body,
+        ),
+        scenario.account_metas(),
+    );
+    let r = mollusk.process_instruction(&ix, &scenario.initial_accounts());
+    match r.program_result {
+        ProgramResult::Failure(e) => {
+            let code = u64::from(e) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidSignature as u32,
+                "a signature over the legacy bare double_keccak256(body) digest must \
+                 be rejected as InvalidSignature, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidSignature), got {other:?}"),
+    }
+
+    let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
+    assert_eq!(pending.owner, system_program_id());
+    assert!(pending.data.is_empty());
+}
+
+/// Pins the NTT signing digest to a distinct domain from the bare dedup digest.
+#[test]
+fn signing_digest_differs_from_dedup_digest() {
+    let scenario = Scenario::new();
+    let signing = signing_digest_for(&scenario.body);
+    let dedup = double_keccak256_host(&scenario.body);
+    assert_ne!(
+        signing, dedup,
+        "NTT observation signing digest must be a distinct domain from the dedup digest"
+    );
 }

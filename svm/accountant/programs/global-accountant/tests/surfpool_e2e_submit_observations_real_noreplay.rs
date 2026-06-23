@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use global_accountant_definitions::{
     ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX, SUBMIT_OBSERVATION_PREFIX,
 };
 use libsecp256k1::{sign, Message, PublicKey, SecretKey};
 use solana_client::rpc_config::RpcSendTransactionConfig;
@@ -151,12 +151,15 @@ fn submit_observations_ix_data(
     body: &[u8],
 ) -> Vec<u8> {
     // No routing prefix (sourced from the body header) and no bump bytes.
-    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
+    // `tx_hash` trails the fixed prefix; the signing digest is reconstructed
+    // on-chain from prefix ‖ tx_hash ‖ body.
+    let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
+    data.extend_from_slice(&TX_HASH);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -347,7 +350,7 @@ fn surfpool_submit_observations_real_noreplay() {
     let mut quorum_tx_sig: Option<String> = None;
     for i in 0..13u8 {
         let g = &guardians[i as usize];
-        let signature = sign_digest(g, &digest);
+        let signature = sign_digest(g, &signing_digest_for(&body));
         let ix = build_submit_observations_ix(
             &ga_program_id,
             &submitter.pubkey(),
@@ -406,7 +409,7 @@ fn surfpool_submit_observations_real_noreplay() {
     );
 
     // A 14th submission must fail the pre-check with AlreadyAccounted (0x7).
-    let extra_signature = sign_digest(&guardians[13], &digest);
+    let extra_signature = sign_digest(&guardians[13], &signing_digest_for(&body));
     let extra_ix = build_submit_observations_ix(
         &ga_program_id,
         &submitter.pubkey(),
@@ -486,6 +489,16 @@ fn send_expect_failure(
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
+}
+
+/// Deterministic source-chain transaction id carried in the wire format and
+/// folded into the signing digest.
+const TX_HASH: [u8; 32] = [0xA9_u8; 32];
+
+/// Host mirror of `observation_signing_digest`: `keccak256(prefix ‖ tx_hash ‖
+/// body)` — the digest the guardian signs, distinct from the dedup digest.
+fn signing_digest_for(body: &[u8]) -> [u8; 32] {
+    solana_keccak_hasher::hashv(&[SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body]).to_bytes()
 }
 
 /// 52-byte VAA body (header + action 0x02 attest); the parser only reads the

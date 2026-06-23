@@ -18,7 +18,8 @@ use {
         ChainRegistrationLayout, GlobalAccountantError, Instruction as IxDiscriminator,
         ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
-        PENDING_OBSERVATIONS_SEED_PREFIX, PendingObservationsLayout, VERIFY_VAA_SHIM_PROGRAM_ID,
+        PENDING_OBSERVATIONS_SEED_PREFIX, PendingObservationsLayout, SUBMIT_OBSERVATION_PREFIX,
+        VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -72,6 +73,18 @@ fn noreplay_program_id() -> Pubkey {
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
+}
+
+/// Deterministic source-chain transaction id carried in the observation wire
+/// format and folded into the signing digest.
+const TX_HASH: [u8; 32] = [0xA9_u8; 32];
+
+/// Host mirror of `observation_signing_digest`: a single `keccak256` over
+/// `prefix ‖ tx_hash ‖ body`. The digest a guardian signs on the observation
+/// path — distinct from `double_keccak256_host` (the dedup digest, and the
+/// digest the VAA path verifies against).
+fn observation_signing_digest_host(prefix: &[u8], tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
+    solana_keccak_hasher::hashv(&[prefix, tx_hash, body]).to_bytes()
 }
 
 fn derive_chain_registration_pda(chain: u16) -> Pubkey {
@@ -217,14 +230,16 @@ fn submit_observations_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // Wire: discriminator + 32-byte digest + 4-byte gsi (LE) + 1-byte index +
-    // 65-byte signature + 2-byte body len (LE) + body.
-    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
+    // Wire: discriminator, 32-byte digest, 4-byte gsi (LE), 1-byte index,
+    // 65-byte signature, tx_hash(32), 2-byte body len (LE), then body. The
+    // signing digest is reconstructed on-chain from prefix ‖ tx_hash ‖ body.
+    let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
     data.extend_from_slice(&GUARDIAN_SET_INDEX.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
+    data.extend_from_slice(&TX_HASH);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -237,6 +252,9 @@ struct ObsCtx {
     sequence: u64,
     body: Vec<u8>,
     digest: [u8; 32],
+    /// Signing digest = `keccak256(prefix ‖ tx_hash ‖ body)`. What each
+    /// observation signature is verified against; distinct from `digest`.
+    signing_digest: [u8; 32],
     guardians: Vec<Guardian>,
     submitter: Pubkey,
     pending_pda: Pubkey,
@@ -251,6 +269,8 @@ struct ObsCtx {
 impl ObsCtx {
     fn new(chain: u16, emitter: [u8; 32], sequence: u64, body: Vec<u8>, token_chain: u16, token_address: &[u8; 32], recipient_chain: u16) -> Self {
         let digest = double_keccak256_host(&body);
+        let signing_digest =
+            observation_signing_digest_host(SUBMIT_OBSERVATION_PREFIX, &TX_HASH, &body);
         let noreplay_authority = derive_noreplay_authority();
         Self {
             chain,
@@ -258,6 +278,7 @@ impl ObsCtx {
             sequence,
             body,
             digest,
+            signing_digest,
             guardians: make_guardians(GUARDIAN_COUNT, 0x42),
             submitter: Pubkey::new_from_array([0x11u8; 32]),
             pending_pda: derive_pending_pda(chain, &emitter, sequence, &digest),
@@ -310,7 +331,7 @@ impl ObsCtx {
         accounts: Vec<(Pubkey, Account)>,
         guardian_index: u8,
     ) -> mollusk_svm::result::InstructionResult {
-        let signature = sign_digest(&self.guardians[guardian_index as usize], &self.digest);
+        let signature = sign_digest(&self.guardians[guardian_index as usize], &self.signing_digest);
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_observations_ix_data(&self.digest, guardian_index, &signature, &self.body),

@@ -15,7 +15,7 @@ use {
     global_accountant_definitions::{
         ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
-        NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
+        NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX, SUBMIT_OBSERVATION_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -102,6 +102,16 @@ fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
+/// Deterministic source-chain transaction id carried in the wire format and
+/// folded into the signing digest.
+const TX_HASH: [u8; 32] = [0xA9_u8; 32];
+
+/// Host mirror of `observation_signing_digest`: `keccak256(prefix ‖ tx_hash ‖
+/// body)` — the digest the guardian signs, distinct from the dedup digest.
+fn signing_digest_for(body: &[u8]) -> [u8; 32] {
+    solana_keccak_hasher::hashv(&[SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body]).to_bytes()
+}
+
 /// Minimal 52-byte attest body. Action 0x02 keeps the program off the transfer
 /// branch so the slot 8/9 Account PDAs can stay sentinels.
 fn build_attest_body(chain: u16, emitter: &[u8; 32], sequence: u64) -> Vec<u8> {
@@ -120,13 +130,15 @@ fn submit_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // No bump bytes on the wire; the program derives them on-chain.
-    let mut data = Vec::with_capacity(1 + 102 + 2 + body.len());
+    // No bump bytes on the wire; the program derives them on-chain. `tx_hash`
+    // trails the fixed prefix; the signing digest is reconstructed on-chain.
+    let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
+    data.extend_from_slice(&TX_HASH);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -164,6 +176,7 @@ struct Scenario {
     emitter: [u8; 32],
     body: Vec<u8>,
     digest: [u8; 32],
+    signing_digest: [u8; 32],
     pending_pda: Pubkey,
     noreplay_authority: Pubkey,
     noreplay_bucket: Pubkey,
@@ -179,6 +192,7 @@ impl Scenario {
         emitter[31] = 0x77;
         let body = build_attest_body(CHAIN, &emitter, SEQUENCE);
         let digest = double_keccak256_host(&body);
+        let signing_digest = signing_digest_for(&body);
         // Only PDA addresses feed the metas; the program derives bumps on-chain.
         let (pending_pda, _) = derive_pending_pda(CHAIN, &emitter, SEQUENCE, &digest);
         let (noreplay_authority, _) =
@@ -195,6 +209,7 @@ impl Scenario {
             emitter,
             body,
             digest,
+            signing_digest,
             pending_pda,
             noreplay_authority,
             noreplay_bucket,
@@ -259,7 +274,7 @@ impl Scenario {
         guardian_index: u8,
     ) -> mollusk_svm::result::InstructionResult {
         let guardian = &self.guardians[guardian_index as usize];
-        let signature = sign_digest(guardian, &self.digest);
+        let signature = sign_digest(guardian, &self.signing_digest);
         let ix = Instruction::new_with_bytes(
             program_id(),
             &submit_ix_data(

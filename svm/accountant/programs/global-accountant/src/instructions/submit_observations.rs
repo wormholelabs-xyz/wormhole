@@ -19,13 +19,15 @@
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
-use accountant_operational_core::hash::double_keccak256;
+use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::instructions::quorum::{
     self, ParsedObservation, BODY_MIN_LEN, SUBMIT_FIXED_LEN,
 };
 use accountant_operational_core::instructions::{commit_log, noreplay};
 
-use crate::definitions::{GlobalAccountantError, PendingObservationsLayout};
+use crate::definitions::{
+    GlobalAccountantError, PendingObservationsLayout, SUBMIT_OBSERVATION_PREFIX,
+};
 use crate::err;
 use crate::instructions::transfer;
 use crate::state::chain_registration;
@@ -35,13 +37,22 @@ use crate::state::chain_registration;
 /// quorum-completing branch after the NoReplay flip and commit-log emit.
 /// A non-quorum-completing submission returns before the apply is reached.
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    // Split into fixed prefix + length-prefixed body. The body is required so
-    // the digest can be re-verified against the bytes the observation covers.
-    if data.len() < SUBMIT_FIXED_LEN + 2 {
+    // Split into fixed prefix + tx_hash + length-prefixed body.
+    // Wire format (after the 1-byte dispatch discriminator):
+    //   digest(32) ‖ guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)
+    //   [SUBMIT_FIXED_LEN] ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body
+    // `tx_hash` is the source-chain transaction id; with the body it reconstructs
+    // the exact observation the guardian signed.
+    const TX_HASH_LEN: usize = 32;
+    if data.len() < SUBMIT_FIXED_LEN + TX_HASH_LEN + 2 {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let (fixed_bytes, rest) = data.split_at(SUBMIT_FIXED_LEN);
     let fixed_bytes: &[u8; SUBMIT_FIXED_LEN] = fixed_bytes
+        .try_into()
+        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+    let (tx_hash, rest) = rest.split_at(TX_HASH_LEN);
+    let tx_hash: &[u8; TX_HASH_LEN] = tx_hash
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
@@ -52,7 +63,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
 
-    // Verify the body matches the signed digest before any state mutation.
+    // Dedup/quorum identity: the VAA-body digest. The supplied digest must match
+    // `double_keccak256(body)`; it keys the pending PDA, the NoReplay slot, and
+    // the commit-log record — unchanged by the signing scheme.
     let computed = double_keccak256(body_bytes);
     if computed != parsed.digest {
         return Err(err(GlobalAccountantError::BodyDigestMismatch));
@@ -61,6 +74,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // Routing tuple is sourced from the now-authenticated body header, never
     // caller-supplied data — see the `quorum` module-level wire-format doc.
     parsed.populate_routing_from_body(body_bytes)?;
+
+    // Signature digest: the domain-separated observation digest the guardian
+    // signed, keccak256(prefix ‖ tx_hash ‖ body). The prefix keeps an accountant
+    // attestation distinct from a VAA signature so the accountant can gate VAA
+    // issuance; this is verified against the guardian key below and is distinct
+    // from `parsed.digest`.
+    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, body_bytes);
 
     // Accounts (WTT layout):
     //   0. `[WRITE, SIGNER]` submitter (fee + rent payer for all lazy PDAs).
@@ -122,7 +142,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         guardian_set,
         parsed.guardian_set_index,
         parsed.guardian_index,
-        &parsed.digest,
+        &signing_digest,
         &parsed.signature,
     )?;
     let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);

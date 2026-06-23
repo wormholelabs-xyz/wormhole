@@ -11,20 +11,25 @@
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
-use accountant_operational_core::hash::double_keccak256;
+use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::instructions::quorum::{
     ParsedObservation, BODY_MIN_LEN, SUBMIT_FIXED_LEN,
 };
 use accountant_operational_core::instructions::{commit_log, noreplay, quorum};
 
-use crate::definitions::{GlobalAccountantError, PendingObservationsLayout};
+use crate::definitions::{
+    GlobalAccountantError, PendingObservationsLayout, NTT_SUBMIT_OBSERVATION_PREFIX,
+};
 use crate::err;
 use crate::instructions::ntt_transfer::apply_ntt_transfer;
 
 /// NTT `submit_observations`. Instruction-data wire format is identical to WTT
 /// (see [`accountant_operational_core::instructions::quorum::SUBMIT_FIXED_LEN`]):
 /// `digest(32) ‖ guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)
-/// ‖ body_len(u16 LE) ‖ body`.
+/// ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body`. Guardian signatures are verified
+/// against `keccak256(NTT_SUBMIT_OBSERVATION_PREFIX ‖ tx_hash ‖ body)`; the
+/// supplied `digest` (cross-checked against `double_keccak256(body)`) remains the
+/// dedup/quorum key.
 ///
 /// Account layout (mirrors WTT slots 0..6, then drops the chain-registration
 /// slot for the six NTT transfer accounts):
@@ -47,11 +52,19 @@ use crate::instructions::ntt_transfer::apply_ntt_transfer;
 /// The transfer accounts are only touched on the quorum-completing branch.
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // ----- Parse the instruction data -----
-    if data.len() < SUBMIT_FIXED_LEN + 2 {
+    // Wire format (after the 1-byte dispatch discriminator):
+    //   digest(32) ‖ guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)
+    //   [SUBMIT_FIXED_LEN] ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body
+    const TX_HASH_LEN: usize = 32;
+    if data.len() < SUBMIT_FIXED_LEN + TX_HASH_LEN + 2 {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let (fixed_bytes, rest) = data.split_at(SUBMIT_FIXED_LEN);
     let fixed_bytes: &[u8; SUBMIT_FIXED_LEN] = fixed_bytes
+        .try_into()
+        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
+    let (tx_hash, rest) = rest.split_at(TX_HASH_LEN);
+    let tx_hash: &[u8; TX_HASH_LEN] = tx_hash
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
@@ -62,7 +75,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
 
-    // Verify the body matches the signed digest before any state mutation.
+    // Dedup/quorum identity: the VAA-body digest. The supplied digest must match
+    // `double_keccak256(body)`; it keys the pending PDA, the NoReplay slot, and
+    // the commit-log record — unchanged by the signing scheme.
     let computed = double_keccak256(body_bytes);
     if computed != parsed.digest {
         return Err(err(GlobalAccountantError::BodyDigestMismatch));
@@ -70,6 +85,12 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // Routing tuple from the authenticated body header (never caller-supplied).
     parsed.populate_routing_from_body(body_bytes)?;
+
+    // Signature digest: the domain-separated NTT observation digest the guardian
+    // signed, keccak256(NTT prefix ‖ tx_hash ‖ body). Distinct from `parsed.digest`
+    // and from the WTT prefix so signatures never cross products.
+    let signing_digest =
+        observation_signing_digest(NTT_SUBMIT_OBSERVATION_PREFIX, tx_hash, body_bytes);
 
     let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, noreplay_program, noreplay_authority, rent_recipient, transfer_accounts @ ..] =
         accounts
@@ -99,7 +120,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         guardian_set,
         parsed.guardian_set_index,
         parsed.guardian_index,
-        &parsed.digest,
+        &signing_digest,
         &parsed.signature,
     )?;
     let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);
