@@ -167,3 +167,22 @@ clippy:
 [doc("cargo clean.")]
 clean:
     cargo clean
+
+# ----- Balance reconciliation -----
+#
+# Replay a decoded snapshot catalogue through the program's accounting sign rule
+# (lock_or_burn / unlock_or_mint) and check the net per-account balances against
+# the committed `account` rows — proving the committed transfer history nets to
+# the committed balances on real data. Both recipes run the same tool, differing
+# only in the default catalogue and output label.
+#
+# NTT: decode `~/wormchain-migration-archive/ntt-raw-dump.jsonl` with the
+#      `wormchain-snapshot` tool (`--input`) first, then pass that catalogue.
+
+[doc("Reconcile NTT balances from a decoded catalogue (pass the path).")]
+reconcile-ntt catalogue:
+    cargo run --manifest-path {{justfile_directory()}}/tools/backfill/Cargo.toml --locked --release --bin reconcile_balances -- --catalogue {{catalogue}} --label NTT
+
+[doc("Reconcile WTT balances (defaults to the migration-archive catalogue).")]
+reconcile-wtt catalogue=(env_var('HOME') / "wormchain-migration-archive/catalogue.jsonl"):
+    cargo run --manifest-path {{justfile_directory()}}/tools/backfill/Cargo.toml --locked --release --bin reconcile_balances -- --catalogue {{catalogue}} --label WTT

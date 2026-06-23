@@ -17,6 +17,12 @@ path = "src/lib.rs"
 name = "ga-backfill"
 path = "src/main.rs"
 
+# Balance-reconciliation tool (see `just reconcile-ntt|wtt`). Kept out of
+# `src/bin/` because the repo `.gitignore` excludes any `bin` directory.
+[[bin]]
+name = "reconcile_balances"
+path = "src/reconcile_balances.rs"
+
 # Per CLAUDE.md: every dependency pinned exact. Versions chosen to match the
 # snapshot tool's already-audited dep set where overlap exists.
 [dependencies]
