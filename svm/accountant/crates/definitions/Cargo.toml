@@ -1,13 +1,21 @@
 [package]
 name = "global-accountant-definitions"
-description = "Shared types for the Wormhole Global Accountant Solana program."
+description = "Wire formats, account layouts, and protocol constants for the Wormhole Global Accountant SVM programs."
+readme = "README.md"
+keywords = ["wormhole", "accountant", "solana", "svm", "no-std"]
+categories = ["cryptography::cryptocurrencies", "encoding", "no-std"]
+# Internal scaffold for now. Flip to publish once the wire formats, account
+# layouts, and instruction discriminants are ABI-frozen — publishing binds them
+# under semver.
 publish = false
 
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-version.workspace = true
+# Decoupled from the workspace so the crate's semver tracks its own ABI
+# (layouts, discriminants, error codes), not unrelated monorepo version bumps.
+version = "0.1.0"
 
 [dependencies]
 bytemuck.workspace = true
