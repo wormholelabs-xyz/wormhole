@@ -8,11 +8,9 @@ pub const GOVERNANCE_EMITTER: [u8; 32] = [
 ];
 
 /// Wormhole chain ID for Solana, also stamped on the governance emitter pair.
+/// `register_chain` governance VAAs must target either chain `0x0000` (Any) or
+/// this; `modify_balance` VAAs must target this.
 pub const SOLANA_CHAIN_ID: u16 = 1;
-
-/// Wormhole chain ID for Wormchain. `register_chain` governance VAAs must
-/// target either chain `0x0000` (Any) or this.
-pub const WORMCHAIN_CHAIN_ID: u16 = 3104;
 
 /// Token Bridge governance module — first 32 bytes of a Token Bridge
 /// governance payload. "TokenBridge" right-aligned in 32 bytes.

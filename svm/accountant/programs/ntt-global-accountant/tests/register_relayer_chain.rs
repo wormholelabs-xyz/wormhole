@@ -121,7 +121,7 @@ fn noreplay_bucket_unmarked() -> Account {
 /// | 42     | 8    | sequence          |
 /// | 51     | 32   | module            |  (RELAYER_GOVERNANCE_MODULE)
 /// | 83     | 1    | action            |  (REGISTER_CHAIN_ACTION = 0x01)
-/// | 84     | 2    | target_chain      |  (0 = Any, 3104 = Wormchain)
+/// | 84     | 2    | target_chain      |  (0 = Any, 1 = Solana)
 /// | 86     | 2    | chain_to_register |
 /// | 88     | 32   | emitter_to_register
 ///

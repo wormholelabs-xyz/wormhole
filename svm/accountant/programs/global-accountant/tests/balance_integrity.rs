@@ -646,7 +646,7 @@ fn modify_balance_add_overflow_leaves_balance_unchanged() {
         0x30,
         &ACCOUNTANT_GOVERNANCE_MODULE,
         MODIFY_BALANCE_ACTION,
-        3104,
+        SOLANA_CHAIN_ID,
         payload_sequence,
         2,
         2,

@@ -4,7 +4,7 @@
 //! upgrades) the `ChainRegistration` PDA that `submit_observations` /
 //! `submit_vaas` cross-check incoming VAAs against. Re-registration uses a fresh
 //! VAA at a higher sequence; the NoReplay bit prevents reusing an old sequence
-//! to undo a rotation. Accepts `Any (0)` or `WORMCHAIN_CHAIN_ID` as target_chain.
+//! to undo a rotation. Accepts `Any (0)` or `SOLANA_CHAIN_ID` as target_chain.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -15,7 +15,6 @@ use pinocchio::{
 use crate::definitions::{
     ChainRegistrationLayout, GlobalAccountantError, CHAIN_REGISTRATION_SEED_PREFIX,
     GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
-    WORMCHAIN_CHAIN_ID,
 };
 use crate::err;
 use crate::state::chain_registration;
@@ -155,8 +154,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
     ]);
-    // Accepts `Any (0)` or `Wormchain`.
-    if target_chain != 0 && target_chain != WORMCHAIN_CHAIN_ID {
+    // Accepts `Any (0)` or `Solana`.
+    if target_chain != 0 && target_chain != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
 

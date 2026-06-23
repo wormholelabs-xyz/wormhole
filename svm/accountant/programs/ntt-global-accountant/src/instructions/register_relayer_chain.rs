@@ -5,7 +5,7 @@
 //! cross-checks the relayer emitter against (relayer-detection step of
 //! `handle_observation`). Re-registration uses a fresh VAA at a higher
 //! sequence; the NoReplay bit prevents reusing an old sequence to undo a
-//! rotation. Accepts `Any (0)` or `WORMCHAIN_CHAIN_ID` as target_chain.
+//! rotation. Accepts `Any (0)` or `SOLANA_CHAIN_ID` as target_chain.
 //!
 //! Near-identical to the WTT `register_chain` handler; the divergences are the
 //! governance module (`RELAYER_GOVERNANCE_MODULE` rather than the Token Bridge
@@ -21,7 +21,7 @@ use pinocchio::{
 use crate::definitions::{
     GlobalAccountantError, RelayerChainRegistrationLayout, GOVERNANCE_EMITTER,
     REGISTER_CHAIN_ACTION, RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, RELAYER_GOVERNANCE_MODULE,
-    SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
+    SOLANA_CHAIN_ID,
 };
 use crate::err;
 use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
@@ -158,8 +158,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
     ]);
-    // Accepts `Any (0)` or `Wormchain`.
-    if target_chain != 0 && target_chain != WORMCHAIN_CHAIN_ID {
+    // Accepts `Any (0)` or `Solana`.
+    if target_chain != 0 && target_chain != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
 

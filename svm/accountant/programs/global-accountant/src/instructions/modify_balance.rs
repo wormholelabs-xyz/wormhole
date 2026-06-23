@@ -1,9 +1,9 @@
 //! `modify_balance` — Accountant governance handler.
 //!
 //! Applies a manual Add / Subtract delta to a `BalanceAccount` PDA via a
-//! Wormchain-emitted governance VAA, for post-incident ledger reconciliation.
+//! governance VAA, for post-incident ledger reconciliation.
 //! Replay protection keys on the payload `sequence` via a per-sequence
-//! `Modification` PDA. Only `WORMCHAIN_CHAIN_ID` is accepted as target_chain.
+//! `Modification` PDA. Only `SOLANA_CHAIN_ID` is accepted as target_chain.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -14,7 +14,7 @@ use pinocchio::{
 use crate::definitions::{
     BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
-    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID,
+    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
 };
 use crate::err;
 use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
@@ -139,8 +139,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
     ]);
-    // Only Wormchain accepted (no `Any`, unlike Token Bridge governance).
-    if target_chain != WORMCHAIN_CHAIN_ID {
+    // Only Solana accepted (no `Any`, unlike Token Bridge governance).
+    if target_chain != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
     let kind_byte = body_bytes[PAYLOAD_KIND_OFFSET];
