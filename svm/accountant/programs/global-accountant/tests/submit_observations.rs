@@ -10,7 +10,7 @@ use {
         BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
         Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
-        MAX_QUORUM_BRANCH_CU, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
         NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
         PENDING_OBSERVATIONS_SEED_PREFIX,
     },
@@ -26,6 +26,10 @@ mod common;
 use common::mollusk_fixtures::{keyed_account_for_noreplay_program, mollusk_with_fixtures};
 
 const PROGRAM_NAME: &str = "global_accountant";
+
+/// Compute-unit ceiling for the hottest quorum-commit branch (Transfer + lazy
+/// init of both Account PDAs). Pinned by the CU regression test below.
+const MAX_QUORUM_BRANCH_CU: u64 = 80_000;
 
 fn program_id() -> Pubkey {
     // Fixed program id so test PDA derivation matches the program's view.

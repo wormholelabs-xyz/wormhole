@@ -1,15 +1,17 @@
-//! `submit_observations` — quorum tracker.
+//! Product-neutral quorum primitives shared by every program's
+//! `submit_observations` orchestration.
 //!
-//! A `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA
-//! accumulates guardian signatures. The quorum-completing observation atomically
-//! flips the NoReplay slot, emits the canonical digest record via
-//! `commit_log::emit`, applies balance effects, and closes the pending PDA,
-//! refunding rent to its recorded payer.
+//! `submit_observations` accumulates guardian signatures in a
+//! `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA.
+//! The fields here are the building blocks each program's orchestration calls:
+//! instruction-data parse, guardian signature verification against the Core
+//! Bridge GuardianSet PDA, the pending-PDA lifecycle (create / wipe-recreate /
+//! continue), the bitmap accumulation + quorum-threshold check, and the
+//! rent-refunding close.
 //!
-//! Sibling buckets at the same `(chain, emitter, sequence)` but different digests
-//! (source-chain reorg) race independently; losers are reclaimed via
-//! `close_pending`. Signatures are verified inline via the `secp256k1_recover`
-//! syscall; only the bitmap is persisted.
+//! WTT (`global-accountant`) and NTT (`ntt-global-accountant`) wire these into
+//! distinct orchestrations with distinct account layouts and distinct
+//! post-quorum balance flows; nothing here is product-specific.
 
 use pinocchio::{
     cpi::{Seed, Signer},
@@ -18,16 +20,13 @@ use pinocchio::{
 };
 
 use crate::definitions::{
-    parse_token_bridge_payload, parse_vaa_namespace_key, GlobalAccountantError,
-    PendingObservationsLayout, TokenBridgeAction, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
-    PENDING_OBSERVATIONS_SEED_PREFIX, VAA_BODY_HEADER_LEN,
+    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
+    CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
-use crate::hash::{double_keccak256, keccak256};
-use crate::instructions::{
-    commit_log, noreplay, pda_init::init_or_upgrade_pda, transfer::apply_transfer,
-};
-use crate::state::{chain_registration, pending};
+use crate::hash::keccak256;
+use crate::instructions::pda_init::init_or_upgrade_pda;
+use crate::state::pending;
 
 /// Fixed-size prefix of `submit_observations` instruction data (after the
 /// 1-byte dispatch discriminator):
@@ -47,217 +46,44 @@ use crate::state::{chain_registration, pending};
 /// The routing tuple `(chain, emitter, sequence)` is sourced exclusively from
 /// the body header `[8..50]`, never caller-supplied data — otherwise an attacker
 /// could replay a signed body under an arbitrary triple and corrupt the ledger.
-const SUBMIT_FIXED_LEN: usize = 4 + 1 + SECP256K1_SIGNATURE_LEN;
+pub const SUBMIT_FIXED_LEN: usize = 4 + 1 + 65;
 
 /// ECDSA recoverable signature length: 32-byte r + 32-byte s + 1-byte recovery id.
-const SECP256K1_SIGNATURE_LEN: usize = 32 + 32 + 1;
+pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 
 /// Ethereum-style guardian pubkey length (`keccak256(uncompressed_pk)[12..]`).
 const GUARDIAN_PUBKEY_LEN: usize = 20;
 
 /// `sol_secp256k1_recover` result buffer: 64-byte uncompressed pubkey (`X || Y`).
-const SECP256K1_PUBKEY_RAW_LEN: usize = 32 + 32;
+const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
 
-/// Minimum VAA body length: the fixed body header plus a 1-byte action.
-const BODY_MIN_LEN: usize = VAA_BODY_HEADER_LEN + 1;
+/// 51-byte VAA header + 1-byte action — the minimum body the parser can read.
+pub const BODY_MIN_LEN: usize = 52;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
-    // Split into fixed prefix + length-prefixed body. The body is required: the
-    // signed digest and the routing tuple are both derived from it.
-    if data.len() < SUBMIT_FIXED_LEN + 2 {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let (fixed_bytes, rest) = data.split_at(SUBMIT_FIXED_LEN);
-    let fixed_bytes: &[u8; SUBMIT_FIXED_LEN] = fixed_bytes
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    if body_len < BODY_MIN_LEN || rest.len() < 2 + body_len {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let body_bytes = &rest[2..2 + body_len];
-
-    let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
-
-    // Derive the signed digest from the supplied body. The signature is verified
-    // against this value below, so the body authenticates itself.
-    parsed.digest = double_keccak256(body_bytes);
-
-    // Routing tuple is sourced from the now-authenticated body header, never
-    // caller-supplied data — see the module-level wire-format doc.
-    parsed.populate_routing_from_body(body_bytes)?;
-
-    // Accounts:
-    //   0. `[WRITE, SIGNER]` submitter (fee + rent payer for all lazy PDAs).
-    //   1. `[WRITE]`         pending PDA.
-    //   2. `[]`              GuardianSet PDA (Core Bridge).
-    //   3. `[WRITE]`         NoReplay bitmap PDA (read at pre-check, written at
-    //                       commit; always WRITE per runtime declaration rules).
-    //   4. `[]`              system program.
-    //   5. `[]`              NoReplay program (CPI target).
-    //   6. `[]`              NoReplay authority PDA owned by this program.
-    //   7. `[WRITE]`         source-chain balance account PDA. Only touched on the
-    //                       quorum-completing Transfer branch; sentinel otherwise.
-    //   8. `[WRITE]`         destination-chain balance account PDA. Same semantics as slot 7.
-    //   9. `[WRITE]`         rent recipient for the pending PDA close. Must equal
-    //                       the bucket's recorded payer (rejected as `PayerMismatch`
-    //                       otherwise); decoupled from submitter so any guardian
-    //                       can complete quorum on the opener's behalf.
-    //  10. `[]`              chain registration PDA. Read to verify the body's
-    //                       `(emitter_chain, emitter_address)` is a registered
-    //                       emitter; system-owned ⇒ `MissingChainRegistration`.
-    //
-    // The canonical digest record is emitted via `sol_log_data` rather than
-    // stored in a PDA; off-chain indexers consume the program-log line carrying
-    // the `ACCOUNTANT_DIGEST_LOG_TAG` prefix.
-    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
-        accounts
-    else {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    };
-
-    if !submitter.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    // NoReplay pre-check rejects replays before any signature work.
-    if noreplay::is_marked(
-        noreplay_bucket,
-        noreplay_authority.address(),
-        parsed.chain,
-        &parsed.emitter,
-        parsed.sequence,
-    )? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
-
-    // Chain-registration cross-check: reject valid sigs for an unregistered
-    // (and therefore potentially fake) emitter. PDA address verified first.
-    chain_registration::verify(
-        program_id,
-        chain_registration_pda,
-        parsed.chain,
-        &parsed.emitter,
-    )?;
-
-    verify_signature(
-        guardian_set,
-        parsed.guardian_set_index,
-        parsed.guardian_index,
-        &parsed.digest,
-        &parsed.signature,
-    )?;
-
-    let pending_action = decide_pending_action(program_id, pending_pda, &parsed)?;
-
-    match pending_action {
-        // 1st observation out of 13
-        PendingAction::Create => {
-            create_pending_pda(program_id, submitter, pending_pda, &parsed)?;
-        }
-        // 1st observation and its dusted
-        PendingAction::WipeAndRecreate => {
-            wipe_pending_pda(pending_pda, submitter)?;
-            create_pending_pda(program_id, submitter, pending_pda, &parsed)?;
-        }
-        // One of the observations between 2-13
-        PendingAction::Continue => {}
-    }
-
-    let mut layout = pending::load(pending_pda)?;
-    let bit = 1u32
-        .checked_shl(parsed.guardian_index as u32)
-        .ok_or_else(|| err(GlobalAccountantError::InvalidGuardianIndex))?;
-    if layout.signatures & bit != 0 {
-        return Err(err(GlobalAccountantError::AlreadySigned));
-    }
-    layout.signatures |= bit;
-    pending::store(pending_pda, &layout)?;
-
-    let popcount = layout.signatures.count_ones();
-    if popcount < PendingObservationsLayout::QUORUM_THRESHOLD {
-        return Ok(());
-    }
-
-    // Quorum reached. Commit atomically: NoReplay flip, canonical log emit,
-    // balance accounting, pending close (tx-level rollback covers failures).
-    noreplay::mark_used(
-        submitter,
-        noreplay_bucket,
-        noreplay_program,
-        noreplay_authority,
-        system_program_acc,
-        program_id,
-        parsed.chain,
-        &parsed.emitter,
-        parsed.sequence,
-    )?;
-
-    commit_log::emit(
-        parsed.chain,
-        &parsed.emitter,
-        parsed.sequence,
-        &parsed.digest,
-        parsed.guardian_set_index,
-    );
-
-    // Transfer payloads mutate two balance account PDAs; Attest skips balance work.
-    match parse_token_bridge_payload(body_bytes).map_err(err)? {
-        TokenBridgeAction::Transfer {
-            amount,
-            token_chain,
-            token_address,
-            recipient_chain,
-        } => {
-            // Source chain is the authenticated VAA emitter chain.
-            let source_chain = parsed.chain;
-            apply_transfer(
-                program_id,
-                submitter,
-                source_account_pda,
-                dest_account_pda,
-                source_chain,
-                recipient_chain,
-                token_chain,
-                &token_address,
-                amount,
-            )?;
-        }
-        TokenBridgeAction::Attest => {
-            // No balance work; slots 8 and 9 are untouched (sentinels OK).
-        }
-        TokenBridgeAction::Other => {
-            // Unknown action: reject. The NoReplay mark rolls back with the tx,
-            // leaving the slot unconsumed for a future upgrade.
-            return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
-        }
-    }
-
-    let recorded_payer = layout.payer;
-    close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;
-    Ok(())
-}
-
+/// The parsed `submit_observations` instruction-data prefix plus the routing
+/// tuple recovered from the authenticated body header. Construct via
+/// [`Self::from_data`], set `digest` to `keccak256(keccak256(body))`, then call
+/// [`Self::populate_routing_from_body`].
 #[derive(Clone, Copy)]
-struct ParsedObservation {
-    /// Signed digest, `keccak256(keccak256(body))`; derived from the body in
-    /// `process`, not parsed from the instruction data.
-    digest: [u8; 32],
+pub struct ParsedObservation {
+    /// Signed digest, `keccak256(keccak256(body))`; derived from the body by the
+    /// caller after `from_data`, not parsed from the instruction data.
+    pub digest: [u8; 32],
     /// Body header `[8..10]`, populated by `populate_routing_from_body`.
-    chain: u16,
+    pub chain: u16,
     /// Body header `[10..42]`, populated by `populate_routing_from_body`.
-    emitter: [u8; 32],
+    pub emitter: [u8; 32],
     /// Body header `[42..50]`, populated by `populate_routing_from_body`.
-    sequence: u64,
-    guardian_set_index: u32,
-    guardian_index: u8,
-    signature: [u8; SECP256K1_SIGNATURE_LEN],
+    pub sequence: u64,
+    pub guardian_set_index: u32,
+    pub guardian_index: u8,
+    pub signature: [u8; SECP256K1_SIGNATURE_LEN],
 }
 
 impl ParsedObservation {
     /// Parse the signature fields from the fixed prefix. The digest and routing
-    /// tuple are derived from the body afterward in `process`.
-    fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> Result<Self, ProgramError> {
+    /// tuple are derived from the body afterward by the caller.
+    pub fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> Result<Self, ProgramError> {
         let (gsi_bytes, rest) = data.split_at(4);
         let guardian_index = rest[0];
         let signature_bytes = &rest[1..1 + SECP256K1_SIGNATURE_LEN];
@@ -282,7 +108,7 @@ impl ParsedObservation {
 
     /// Populate the routing tuple from the body header. `self.digest` must have
     /// been derived from this same `body`.
-    fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
+    pub fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
         let header = parse_vaa_namespace_key(body).map_err(err)?;
         self.chain = header.chain;
         self.emitter = header.emitter;
@@ -292,7 +118,7 @@ impl ParsedObservation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PendingAction {
+pub enum PendingAction {
     /// PDA does not exist yet — allocate, assign, write a fresh layout.
     Create,
     /// PDA exists for an older guardian set — refund payer, wipe, re-create.
@@ -333,7 +159,7 @@ fn verify_pending_pda_address(
 /// Decide what to do with the pending PDA for this observation. Per-digest PDA
 /// seeds and canonical address verification ensure a digest mismatch is
 /// unreachable: any loaded PDA was opened under exactly this digest.
-fn decide_pending_action(
+pub fn decide_pending_action(
     program_id: &Address,
     pending_pda: &AccountView,
     parsed: &ParsedObservation,
@@ -369,6 +195,43 @@ fn decide_pending_action(
     }
     // Digest equality is guaranteed by the per-digest PDA seeds AND canonical address.
     Ok(PendingAction::Continue)
+}
+
+/// Apply `pending_action`, then toggle this guardian's bit. Returns the loaded
+/// layout (so the orchestration can read `payer` on close) and whether quorum
+/// was reached. Idempotent guards: a re-used guardian index rejects
+/// `AlreadySigned`; an out-of-range index rejects `InvalidGuardianIndex`.
+pub fn apply_action_and_accumulate(
+    program_id: &Address,
+    submitter: &mut AccountView,
+    pending_pda: &mut AccountView,
+    parsed: &ParsedObservation,
+    action: PendingAction,
+) -> Result<(PendingObservationsLayout, bool), ProgramError> {
+    match action {
+        PendingAction::Create => {
+            create_pending_pda(program_id, submitter, pending_pda, parsed)?;
+        }
+        PendingAction::WipeAndRecreate => {
+            wipe_pending_pda(pending_pda, submitter)?;
+            create_pending_pda(program_id, submitter, pending_pda, parsed)?;
+        }
+        PendingAction::Continue => {}
+    }
+
+    let mut layout = pending::load(pending_pda)?;
+    let bit = 1u32
+        .checked_shl(parsed.guardian_index as u32)
+        .ok_or_else(|| err(GlobalAccountantError::InvalidGuardianIndex))?;
+    if layout.signatures & bit != 0 {
+        return Err(err(GlobalAccountantError::AlreadySigned));
+    }
+    layout.signatures |= bit;
+    pending::store(pending_pda, &layout)?;
+
+    let quorum_reached =
+        layout.signatures.count_ones() >= PendingObservationsLayout::QUORUM_THRESHOLD;
+    Ok((layout, quorum_reached))
 }
 
 /// Allocate the pending PDA under `(b"pending", chain, emitter, sequence,
@@ -426,7 +289,7 @@ fn create_pending_pda(
 
 /// Refund the recorded payer and close the account. `recorded_payer` is passed
 /// in to avoid re-borrowing the already-loaded layout.
-pub(crate) fn close_pending_pda(
+pub fn close_pending_pda(
     pending_pda: &mut AccountView,
     rent_recipient: &mut AccountView,
     recorded_payer: &[u8; 32],
@@ -465,7 +328,18 @@ fn wipe_pending_pda(
 
 /// Verify a guardian signature: recover the pubkey via `secp256k1_recover` and
 /// compare its keccak hash to the key in the Core Bridge GuardianSet PDA.
-fn verify_signature(
+///
+/// SECURITY: the guardian keys are read straight out of `guardian_set`, which is
+/// the *sole* authenticity anchor on the `submit_observations` path (unlike
+/// `submit_vaas`, which delegates to the Verify VAA Shim). It MUST therefore be
+/// the genuine Core Bridge GuardianSet account — otherwise a caller could pass a
+/// forged account full of attacker-controlled pubkeys, sign the target digest
+/// with the matching attacker keys, and self-accumulate to quorum, forging
+/// arbitrary transfers. A Core-Bridge-owned account can only ever hold
+/// Core-Bridge-written data, so asserting the owner is sufficient (and mirrors
+/// `close_pending::guardian_set_expired`). The shim enforces the equivalent
+/// constraint via Core-Bridge PDA-address derivation; see `shim::verify_vaa`.
+pub fn verify_signature(
     guardian_set: &AccountView,
     expected_guardian_set_index: u32,
     guardian_index: u8,
@@ -477,7 +351,9 @@ fn verify_signature(
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Verify the account is at the canonical Guardian Set PDA address.
+    // Verify the account is at the canonical GuardianSet PDA address. Owner alone
+    // would suffice (a Core-Bridge-owned account can only hold Core-Bridge data),
+    // but pinning the address rejects a stale/wrong-index set up front.
     let index_be = expected_guardian_set_index.to_be_bytes();
     let core_bridge_addr = Address::from(CORE_BRIDGE_PROGRAM_ID);
     let (expected_address, _) =
@@ -522,7 +398,7 @@ fn verify_signature(
 /// | 8      | 20*N | keys               |
 /// | 8+20N  | 4    | creation_time      |
 /// | 12+20N | 4    | expiration_time    |
-fn read_guardian_key(
+pub fn read_guardian_key(
     data: &[u8],
     expected_index: u32,
     guardian_index: u8,

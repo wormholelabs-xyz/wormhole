@@ -118,7 +118,7 @@ pub fn mark_used(
     // constant, never `_noreplay_program.address()` — a caller-controlled target
     // would let an attacker fake `MarkUsed` success and bypass replay protection.
 
-    // Derive and verify the canonical noreplay-authority PDA.
+    // Derive and verify the canonical noreplay_authority PDA.
     let noreplay_program_id_addr = Address::from(NOREPLAY_PROGRAM_ID);
     let (expected_authority, authority_bump) =
         Address::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
@@ -155,7 +155,7 @@ pub fn mark_used(
         accounts: &ix_accounts,
     };
 
-    // invoke_signed seeds for the noreplay-authority PDA.
+    // invoke_signed seeds for the noreplay_authority PDA.
     let bump_seed = [authority_bump];
     let signer_seeds = [
         Seed::from(NOREPLAY_AUTHORITY_SEED_PREFIX),

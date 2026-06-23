@@ -1,15 +1,12 @@
-//! Instruction handlers.
+//! WTT-specific instruction handlers.
 //!
-//! The canonical digest record is emitted via `commit_log::emit` on the
-//! quorum-completing branch of `submit_observations`. Off-chain indexers consume
-//! the program-log line carrying the
-//! [`crate::definitions::ACCOUNTANT_DIGEST_LOG_TAG`] prefix.
+//! All instruction implementations live here: the quorum tracker
+//! (`submit_observations`), signed-VAA backfill (`submit_vaas`), governance
+//! paths (`register_chain`, `modify_balance`), and the balance applicator
+//! (`transfer`). Only the permissionless cleanup handler (`close_pending`)
+//! lives in `accountant-operational-core` since it is shared with NTT.
 
-pub mod close_pending;
-pub(crate) mod commit_log;
 pub mod modify_balance;
-pub mod noreplay;
-pub mod pda_init;
 pub mod register_chain;
 pub mod submit_observations;
 pub mod submit_vaas;

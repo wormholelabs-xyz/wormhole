@@ -29,7 +29,7 @@ pub(crate) fn keccak256(data: &[u8], result: &mut [u8; 32]) {
 
 /// `keccak256(keccak256(body))` — the Wormhole VAA digest convention used by
 /// guardian signing and the Verify VAA Shim's `VerifyHash`.
-pub(crate) fn double_keccak256(body: &[u8]) -> [u8; 32] {
+pub fn double_keccak256(body: &[u8]) -> [u8; 32] {
     let mut inner = [0u8; 32];
     keccak256(body, &mut inner);
     let mut outer = [0u8; 32];

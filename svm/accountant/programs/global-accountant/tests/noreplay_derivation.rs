@@ -1,9 +1,9 @@
-//! Unit tests for `instructions::noreplay::derive_bucket_pda`, pinning its seed
-//! encoding against a host-side reimplementation of
-//! `solana_noreplay::pda::BitmapPdaSeeds`.
+//! Unit tests for `noreplay::derive_bucket_pda`, pinning its seed encoding
+//! against a host-side reimplementation of `solana_noreplay::pda::BitmapPdaSeeds`.
+//! The helper now lives in the shared `accountant-operational-core` crate.
 
 use {
-    global_accountant::instructions::noreplay::derive_bucket_pda,
+    accountant_operational_core::instructions::noreplay::derive_bucket_pda,
     global_accountant_definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID},
     pinocchio::Address,
     solana_pubkey::Pubkey,

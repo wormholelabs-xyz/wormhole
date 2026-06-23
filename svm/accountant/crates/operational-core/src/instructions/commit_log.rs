@@ -1,4 +1,5 @@
-//! Canonical commit-log emit, invoked by `submit_observations` on quorum.
+//! Canonical commit-log emit, shared by `submit_observations` (on quorum) and
+//! `submit_vaas` (after Shim verification).
 //!
 //! Off-chain indexers consume the program-log line carrying the
 //! [`ACCOUNTANT_DIGEST_LOG_TAG`] prefix. The payload layout is the single
@@ -9,9 +10,9 @@
 use crate::definitions::{ACCOUNTANT_DIGEST_LOG_LEN, ACCOUNTANT_DIGEST_LOG_TAG};
 
 /// Emit one canonical commit log entry. The host build is a no-op so mollusk
-/// host-side compilation continues to work; the SBF build calls the
-/// `sol_log_data` syscall directly.
-pub(crate) fn emit(
+/// and surfpool host-side compilation continues to work; the SBF build calls
+/// the `sol_log_data` syscall directly.
+pub fn emit(
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,

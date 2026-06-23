@@ -2,6 +2,8 @@
 use pinocchio::program_entrypoint;
 use pinocchio::{AccountView, Address, ProgramResult};
 
+use accountant_operational_core::instructions as core_instructions;
+
 use crate::definitions::{GlobalAccountantError, Instruction};
 use crate::{err, instructions};
 
@@ -26,7 +28,7 @@ pub fn process_instruction(
             instructions::submit_observations::process(program_id, accounts, rest)
         }
         Some(Instruction::ClosePending) => {
-            instructions::close_pending::process(program_id, accounts, rest)
+            core_instructions::close_pending::process(program_id, accounts, rest)
         }
         Some(Instruction::SubmitVaas) => {
             instructions::submit_vaas::process(program_id, accounts, rest)
