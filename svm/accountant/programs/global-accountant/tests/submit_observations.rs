@@ -1592,6 +1592,53 @@ fn submit_rejected_when_noreplay_already_marked() {
     }
 }
 
+/// Quorum is derived from the live guardian-set size, not a pinned 13. With a
+/// 6-guardian set the threshold is `(6*2)/3 + 1 = 5`: four observations do not
+/// reach quorum (the NoReplay bucket stays unmarked), and the fifth commits
+/// (flipping the bucket to the noreplay program). Guards against any
+/// reintroduction of a hardcoded threshold.
+#[test]
+fn quorum_threshold_tracks_live_guardian_set_size() {
+    const N: usize = 6;
+    let quorum = PendingObservationsLayout::quorum_for(N as u32) as u8; // 5
+    assert_eq!(quorum, 5, "(6*2)/3 + 1 == 5");
+    assert_ne!(
+        quorum,
+        PendingObservationsLayout::quorum_for(19) as u8,
+        "must differ from the 19-guardian quorum to prove it is not pinned"
+    );
+
+    let mollusk = mollusk();
+    // Attest body (default `Scenario::new`) does no balance work, isolating the
+    // quorum gate; reaching quorum is observable as the NoReplay bucket flip.
+    let scenario = Scenario::new(N, 4, 0x9A);
+
+    // One short of quorum: the pending PDA accumulates but NoReplay stays unmarked.
+    let accounts = scenario.submit_n(&mollusk, quorum - 1);
+    let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
+    assert_eq!(
+        bucket.owner,
+        system_program_id(),
+        "{} of {} observations must not reach quorum",
+        quorum - 1,
+        quorum
+    );
+
+    // The quorum-th observation commits.
+    let result = scenario.submit_once(&mollusk, accounts, quorum - 1);
+    assert!(
+        matches!(result.program_result, ProgramResult::Success),
+        "quorum-completing tx must succeed, got {:?}",
+        result.program_result
+    );
+    let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
+    assert_eq!(
+        bucket.owner,
+        Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        "quorum must flip the NoReplay bucket to the noreplay program"
+    );
+}
+
 // ============================================================================
 // close_pending tests
 // ============================================================================
@@ -1845,7 +1892,7 @@ fn drive_transfer_to_quorum(
     scenario: &Scenario,
 ) -> mollusk_svm::result::InstructionResult {
     let mut accounts = scenario.initial_accounts();
-    for i in 0..PendingObservationsLayout::QUORUM_THRESHOLD as u8 {
+    for i in 0..PendingObservationsLayout::quorum_for(19) as u8 {
         let result = scenario.submit_once(mollusk, accounts.clone(), i);
         assert!(
             matches!(result.program_result, ProgramResult::Success),
@@ -1854,7 +1901,7 @@ fn drive_transfer_to_quorum(
         );
         accounts = result.resulting_accounts.clone();
         // Return the final InstructionResult so callers can inspect CU usage.
-        if i + 1 == PendingObservationsLayout::QUORUM_THRESHOLD as u8 {
+        if i + 1 == PendingObservationsLayout::quorum_for(19) as u8 {
             return result;
         }
     }
@@ -2021,7 +2068,7 @@ fn quorum_with_dusted_destination_account_succeeds() {
 
     // Drive to quorum from the dusted starting state.
     let mut result = None;
-    for i in 0..PendingObservationsLayout::QUORUM_THRESHOLD as u8 {
+    for i in 0..PendingObservationsLayout::quorum_for(19) as u8 {
         let r = scenario.submit_once(&mollusk, accounts.clone(), i);
         assert!(
             matches!(r.program_result, ProgramResult::Success),
@@ -2076,7 +2123,7 @@ fn quorum_branch_cu_stays_below_ceiling() {
 
     // First 12 (accumulator path) without measuring CU.
     let mut accounts = scenario.initial_accounts();
-    for i in 0..(PendingObservationsLayout::QUORUM_THRESHOLD as u8 - 1) {
+    for i in 0..(PendingObservationsLayout::quorum_for(19) as u8 - 1) {
         let r = scenario.submit_once(&mollusk, accounts.clone(), i);
         assert!(matches!(r.program_result, ProgramResult::Success));
         accounts = r.resulting_accounts;
@@ -2086,7 +2133,7 @@ fn quorum_branch_cu_stays_below_ceiling() {
     let result = scenario.submit_once(
         &mollusk,
         accounts,
-        PendingObservationsLayout::QUORUM_THRESHOLD as u8 - 1,
+        PendingObservationsLayout::quorum_for(19) as u8 - 1,
     );
     assert!(
         matches!(result.program_result, ProgramResult::Success),

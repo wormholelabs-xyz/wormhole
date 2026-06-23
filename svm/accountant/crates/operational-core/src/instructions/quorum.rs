@@ -160,15 +160,19 @@ pub fn decide_pending_action(
 }
 
 /// Apply `pending_action`, then toggle this guardian's bit. Returns the loaded
-/// layout (so the orchestration can read `payer` on close) and whether quorum
-/// was reached. Idempotent guards: a re-used guardian index rejects
-/// `AlreadySigned`; an out-of-range index rejects `InvalidGuardianIndex`.
+/// layout (so the orchestration can read `payer` on close) and whether the
+/// accumulated bit count has reached `quorum_threshold` — which the caller
+/// derives from the live guardian-set size (see
+/// `PendingObservationsLayout::quorum_for`), not a pinned constant. Idempotent
+/// guards: a re-used guardian index rejects `AlreadySigned`; an out-of-range
+/// index rejects `InvalidGuardianIndex`.
 pub fn apply_action_and_accumulate(
     program_id: &Address,
     submitter: &mut AccountView,
     pending_pda: &mut AccountView,
     parsed: &ParsedObservation,
     action: PendingAction,
+    quorum_threshold: u32,
 ) -> Result<(PendingObservationsLayout, bool), ProgramError> {
     match action {
         PendingAction::Create => {
@@ -191,8 +195,7 @@ pub fn apply_action_and_accumulate(
     layout.signatures |= bit;
     pending::store(pending_pda, &layout)?;
 
-    let quorum_reached =
-        layout.signatures.count_ones() >= PendingObservationsLayout::QUORUM_THRESHOLD;
+    let quorum_reached = layout.signatures.count_ones() >= quorum_threshold;
     Ok((layout, quorum_reached))
 }
 
@@ -290,6 +293,8 @@ fn wipe_pending_pda(
 
 /// Verify a guardian signature: recover the pubkey via `secp256k1_recover` and
 /// compare its keccak hash to the key in the Core Bridge GuardianSet PDA.
+/// Returns the live guardian count (`keys_len`) so the caller can derive the
+/// quorum threshold from the actual set rather than a pinned constant.
 ///
 /// SECURITY: the guardian keys are read straight out of `guardian_set`, which is
 /// the *sole* authenticity anchor on the `submit_observations` path (unlike
@@ -307,12 +312,16 @@ pub fn verify_signature(
     guardian_index: u8,
     digest: &[u8; 32],
     signature: &[u8; SECP256K1_SIGNATURE_LEN],
-) -> ProgramResult {
+) -> Result<u32, ProgramError> {
+    // Verify the account is owned by Core Bridge.
     if guardian_set.owner().as_array() != &CORE_BRIDGE_PROGRAM_ID {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     let data = guardian_set.try_borrow()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
+    // `read_guardian_key` already proved `data.len() >= 8`, so `keys_len` at
+    // `[4..8]` is in bounds. This is the live set size the quorum derives from.
+    let num_guardians = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
     // Recovery id ∈ {0,1,2,3}; values >= 4 are malformed.
     let recovery_id = signature[64];
@@ -332,7 +341,7 @@ pub fn verify_signature(
     if hash[12..] != expected_key[..] {
         return Err(err(GlobalAccountantError::InvalidSignature));
     }
-    Ok(())
+    Ok(num_guardians)
 }
 
 /// Read the 20-byte guardian pubkey at `guardian_index` from a Core Bridge

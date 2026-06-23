@@ -25,7 +25,7 @@ use accountant_operational_core::instructions::quorum::{
 };
 use accountant_operational_core::instructions::{commit_log, noreplay};
 
-use crate::definitions::GlobalAccountantError;
+use crate::definitions::{GlobalAccountantError, PendingObservationsLayout};
 use crate::err;
 use crate::instructions::transfer;
 use crate::state::chain_registration;
@@ -115,17 +115,27 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         &parsed.emitter,
     )?;
 
-    quorum::verify_signature(
+    // Verify the signature and learn the live guardian-set size, then derive the
+    // quorum threshold from it — the set can be resized by governance, so a pinned
+    // threshold would desync this path from the network (and from the shim path).
+    let num_guardians = quorum::verify_signature(
         guardian_set,
         parsed.guardian_set_index,
         parsed.guardian_index,
         &parsed.digest,
         &parsed.signature,
     )?;
+    let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);
 
     let action = quorum::decide_pending_action(pending_pda, &parsed)?;
-    let (layout, quorum_reached) =
-        quorum::apply_action_and_accumulate(program_id, submitter, pending_pda, &parsed, action)?;
+    let (layout, quorum_reached) = quorum::apply_action_and_accumulate(
+        program_id,
+        submitter,
+        pending_pda,
+        &parsed,
+        action,
+        quorum_threshold,
+    )?;
 
     if !quorum_reached {
         return Ok(());
