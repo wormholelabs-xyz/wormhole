@@ -1,7 +1,8 @@
 //! Builds a `Mollusk` with the global-accountant `.so` plus the real
-//! `solana_noreplay.so` at its canonical ID, so tests exercise the production
-//! CPI path with no mock branch. The sibling `.so` lives in `tests/fixtures/`
-//! and is verified against a pinned SHA-256 digest before loading.
+//! `solana_noreplay.so` and `wormhole_verify_vaa_shim.so` at their canonical
+//! IDs, so tests exercise the production CPI paths with no mock branch. The
+//! sibling `.so` files live in `tests/fixtures/` and are verified against
+//! pinned SHA-256 digests before loading.
 //!
 //! ## Regenerating a fixture
 //!
@@ -10,11 +11,11 @@
 //! 3. `shasum -a 256 tests/fixtures/<name>.so` and update the matching
 //!    `*_SO_SHA256` constant below.
 //!
-//! Local iteration: `GA_NOREPLAY_SO=<path>` redirects the resolver and skips
-//! the SHA-256 check.
+//! Local iteration: `GA_NOREPLAY_SO=<path>` / `GA_VERIFY_VAA_SHIM_SO=<path>`
+//! redirect the resolver and skip the SHA-256 check.
 
 use {
-    global_accountant_definitions::NOREPLAY_PROGRAM_ID,
+    global_accountant_definitions::{NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID},
     mollusk_svm::{
         program::{create_program_account_loader_v3, loader_keys::LOADER_V3},
         Mollusk,
@@ -32,9 +33,16 @@ const NOREPLAY_SO_SHA256: [u8; 32] = [
     0x17, 0x90, 0xf2, 0x42, 0xe9, 0x75, 0x07, 0xb4, 0x52, 0xeb, 0x7f, 0x08, 0xd0, 0x86, 0x9a, 0xc7,
 ];
 
-/// Build a `Mollusk` with the global-accountant program at `program_id` and the
-/// noreplay fixture preloaded at its canonical ID. `program_name` is the `.so`
-/// stem (typically `"global_accountant"`).
+/// SHA-256 of the pinned `wormhole_verify_vaa_shim.so`.
+/// Reproduce: `shasum -a 256 programs/global-accountant/tests/fixtures/wormhole_verify_vaa_shim.so`.
+const VERIFY_VAA_SHIM_SO_SHA256: [u8; 32] = [
+    0xba, 0xc0, 0xee, 0x4b, 0xb4, 0xb1, 0x2b, 0xd4, 0xaf, 0x9c, 0xa9, 0xe4, 0x5a, 0xc6, 0x7e, 0x4b,
+    0x77, 0x96, 0xc9, 0xf6, 0x04, 0x68, 0xa4, 0x4d, 0xa0, 0x3d, 0x16, 0x9c, 0x42, 0xaf, 0xaa, 0x40,
+];
+
+/// Build a `Mollusk` with the global-accountant program at `program_id` and
+/// both sibling fixtures preloaded at their canonical IDs. `program_name` is
+/// the `.so` stem (typically `"global_accountant"`).
 pub fn mollusk_with_fixtures(program_id: &Pubkey, program_name: &str) -> Mollusk {
     let mut mollusk = Mollusk::new(program_id, program_name);
 
@@ -44,11 +52,22 @@ pub fn mollusk_with_fixtures(program_id: &Pubkey, program_name: &str) -> Mollusk
         "GA_NOREPLAY_SO",
         &NOREPLAY_SO_SHA256,
     );
+    let shim_elf = read_so(
+        &super::verify_vaa_shim_so_path(),
+        "wormhole_verify_vaa_shim",
+        "GA_VERIFY_VAA_SHIM_SO",
+        &VERIFY_VAA_SHIM_SO_SHA256,
+    );
 
     mollusk.add_program_with_loader_and_elf(
         &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         &LOADER_V3,
         &noreplay_elf,
+    );
+    mollusk.add_program_with_loader_and_elf(
+        &Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID),
+        &LOADER_V3,
+        &shim_elf,
     );
 
     mollusk
@@ -59,6 +78,13 @@ pub fn mollusk_with_fixtures(program_id: &Pubkey, program_name: &str) -> Mollusk
 /// a system-owned stand-in would fail as `UnsupportedProgramId` at CPI time.
 pub fn keyed_account_for_noreplay_program() -> (Pubkey, Account) {
     let id = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
+    let account = create_program_account_loader_v3(&id);
+    (id, account)
+}
+
+/// As `keyed_account_for_noreplay_program`, for the Verify VAA Shim.
+pub fn keyed_account_for_verify_vaa_shim_program() -> (Pubkey, Account) {
+    let id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
     let account = create_program_account_loader_v3(&id);
     (id, account)
 }
