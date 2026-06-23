@@ -21,8 +21,9 @@ use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR, VERIFY_VAA_
 ///     derived from `[GUARDIAN_SET_SEED, guardian_index, guardian_set_bump]`
 ///     under the Core Bridge program id. A Core-Bridge PDA is off-curve and only
 ///     Core-Bridge-assignable, so address equality implies genuine ownership.
-///   The shim then enforces guardian-set expiry, 13/19 quorum, and per-signature
-///   secp256k1 recovery against the stored guardian keys.
+///
+/// The shim then enforces guardian-set expiry, 13/19 quorum, and per-signature
+/// secp256k1 recovery against the stored guardian keys.
 ///
 /// Contrast `submit_observations`: it verifies signatures itself and so must
 /// validate the guardian-set account directly — see `quorum::verify_signature`.
