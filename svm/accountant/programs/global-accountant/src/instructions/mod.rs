@@ -1,11 +1,13 @@
 //! WTT-specific instruction handlers.
 //!
-//! `register_chain` and `modify_balance` are the Token Bridge / Accountant
-//! governance paths; `transfer` is the Token Bridge balance applicator the
-//! entrypoint injects into the core `submit_observations` / `submit_vaas`
-//! handlers. All product-neutral handlers live in
-//! `accountant-operational-core`.
+//! All instruction implementations live here: the quorum tracker
+//! (`submit_observations`), signed-VAA backfill (`submit_vaas`), governance
+//! paths (`register_chain`, `modify_balance`), and the balance applicator
+//! (`transfer`). Only the permissionless cleanup handler (`close_pending`)
+//! lives in `accountant-operational-core` since it is shared with NTT.
 
 pub mod modify_balance;
 pub mod register_chain;
+pub mod submit_observations;
+pub mod submit_vaas;
 pub mod transfer;

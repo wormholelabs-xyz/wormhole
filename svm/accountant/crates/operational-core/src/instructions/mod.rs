@@ -1,4 +1,4 @@
-//! Operational instruction handlers.
+//! Operational instruction handlers — shared across all programs.
 //!
 //! The canonical digest record is emitted via `commit_log::emit` on the
 //! quorum-completing branch of `submit_observations` and on every successful
@@ -11,5 +11,3 @@ pub mod noreplay;
 pub mod pda_init;
 pub mod quorum;
 pub mod shim;
-pub mod submit_observations;
-pub mod submit_vaas;

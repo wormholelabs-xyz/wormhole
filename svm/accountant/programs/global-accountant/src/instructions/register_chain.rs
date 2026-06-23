@@ -18,8 +18,8 @@ use crate::definitions::{
     WORMCHAIN_CHAIN_ID,
 };
 use crate::err;
+use crate::state::chain_registration;
 use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
-use accountant_operational_core::state::chain_registration;
 
 /// Wire format for the `register_chain` instruction data (after the 1-byte
 /// dispatch discriminator):

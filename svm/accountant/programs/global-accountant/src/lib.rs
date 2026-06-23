@@ -16,6 +16,7 @@
 
 pub mod entrypoint;
 pub mod instructions;
+pub mod state;
 
 pub use global_accountant_definitions as definitions;
 

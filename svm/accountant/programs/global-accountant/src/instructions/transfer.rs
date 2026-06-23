@@ -3,7 +3,10 @@
 
 use pinocchio::{AccountView, Address, ProgramResult};
 
-use crate::definitions::{GlobalAccountantError, Uint256, ACCOUNT_SEED_PREFIX};
+use crate::definitions::{
+    parse_token_bridge_payload, GlobalAccountantError, TokenBridgeAction, Uint256,
+    ACCOUNT_SEED_PREFIX,
+};
 use crate::err;
 use accountant_operational_core::state::account as account_state;
 
@@ -74,6 +77,43 @@ pub fn apply_transfer(
     let mut dst = account_state::load(dest_account)?;
     dst.unlock_or_mint(amount).map_err(err)?;
     account_state::store(dest_account, &dst)
+}
+
+/// Parse Token Bridge payload from the verified VAA body and apply balance mutations.
+/// Called from both `submit_observations` (quorum-completing branch) and `submit_vaas`
+/// (signed-VAA backfill path). Attest payloads are no-ops; unknown payloads are rejected
+/// so the NoReplay mark can roll back with the tx.
+pub fn apply_from_body(
+    program_id: &Address,
+    submitter: &mut AccountView,
+    source_account_pda: &mut AccountView,
+    dest_account_pda: &mut AccountView,
+    source_chain: u16,
+    body_bytes: &[u8],
+) -> ProgramResult {
+    match parse_token_bridge_payload(body_bytes).map_err(err)? {
+        TokenBridgeAction::Transfer {
+            amount,
+            token_chain,
+            token_address,
+            recipient_chain,
+        } => apply_transfer(
+            program_id,
+            submitter,
+            source_account_pda,
+            dest_account_pda,
+            source_chain,
+            recipient_chain,
+            token_chain,
+            &token_address,
+            amount,
+        ),
+        TokenBridgeAction::Attest => {
+            // No balance work; the source / dest slots are untouched.
+            Ok(())
+        }
+        TokenBridgeAction::Other => Err(err(GlobalAccountantError::UnknownTokenBridgePayload)),
+    }
 }
 
 /// Re-derive the canonical balance account PDA address + bump from `(chain,

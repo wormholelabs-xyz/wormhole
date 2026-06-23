@@ -12,9 +12,12 @@
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
+use accountant_operational_core::hash::double_keccak256;
+use accountant_operational_core::instructions::{commit_log, noreplay, shim};
+
 use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VAA_BODY_HEADER_LEN};
 use crate::err;
-use crate::instructions::{commit_log, noreplay, shim};
+use crate::instructions::transfer;
 use crate::state::chain_registration;
 
 /// Wire format for the `submit_vaas` instruction data (after the 1-byte
@@ -30,30 +33,11 @@ use crate::state::chain_registration;
 /// bounded only by the `u16` width; the transports are far tighter.
 const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
 
-/// Signed-VAA backfill. The product-specific token-payload parse + balance
-/// mutation is injected via `apply`, invoked after the Shim verification,
-/// NoReplay mark, and commit-log emit. `apply` receives
-/// `(program_id, submitter, source_account_pda, dest_account_pda, source_chain,
-/// body_bytes)` where `source_chain` is the VAA emitter chain and `body_bytes`
-/// are the verified VAA body bytes; it parses the token payload and mutates the
-/// two balance-account PDAs.
-pub fn process<F>(
-    program_id: &Address,
-    accounts: &mut [AccountView],
-    data: &[u8],
-    apply: F,
-) -> ProgramResult
-where
-    F: Fn(
-        &Address,
-        &mut AccountView,
-        &mut AccountView,
-        &mut AccountView,
-        u16,
-        &[u8],
-    ) -> ProgramResult,
-{
-    // ----- (1) Parse wire data -----
+/// Signed-VAA backfill. The WTT-specific token-payload parse + balance
+/// mutation is applied via `transfer::apply_from_body`, invoked after the
+/// Shim verification, NoReplay mark, and commit-log emit.
+pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+    // ----- Parse wire data -----
     if data.len() < SUBMIT_VAAS_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
@@ -64,7 +48,7 @@ where
     }
     let body_bytes = &data[SUBMIT_VAAS_FIXED_LEN..SUBMIT_VAAS_FIXED_LEN + body_len];
 
-    // ----- (2) Compute digest -----
+    // ----- Compute digest -----
     let digest = double_keccak256(body_bytes);
 
     // Accounts:
@@ -95,7 +79,7 @@ where
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // ----- (3) Shim CPI to verify the digest against the posted sigs -----
+    // ----- Shim CPI to verify the digest against the posted sigs -----
     shim::verify_vaa(
         guardian_set,
         guardian_signatures,
@@ -103,11 +87,11 @@ where
         guardian_set_bump,
     )?;
 
-    // ----- (4) Parse the body header -----
+    // ----- Parse the body header -----
     let header = parse_vaa_namespace_key(body_bytes).map_err(err)?;
     let (chain, emitter, sequence) = (header.chain, header.emitter, header.sequence);
 
-    // ----- (5) NoReplay pre-check -----
+    // ----- NoReplay pre-check -----
     //
     // Reject any `(chain, emitter, seq)` already accounted via either path.
     if noreplay::is_marked(
@@ -120,13 +104,13 @@ where
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
-    // ----- (5b) Chain registration cross-check -----
+    // ----- Chain registration cross-check -----
     //
     // The body's emitter must be registered; otherwise valid sigs for a
     // non-Token-Bridge VAA could route accounting against a fake emitter.
     chain_registration::verify(program_id, chain_registration_pda, chain, &emitter)?;
 
-    // ----- (6) NoReplay mark-used CPI -----
+    // ----- NoReplay mark-used CPI -----
     //
     // Burn the slot before any balance change; tx-level rollback covers later
     // failures. A racing tx surfaces as the inner noreplay program's
@@ -144,20 +128,20 @@ where
         sequence,
     )?;
 
-    // ----- (7) Emit canonical commit log -----
+    // ----- Emit canonical commit log -----
     //
     // Same breadcrumb the quorum path leaves, now via `sol_log_data` rather
     // than a PDA. `guardian_set_index = 0` is a sentinel — `submit_vaas` does
     // not pin a single set (the Shim accepts any currently-active one).
     commit_log::emit(chain, &emitter, sequence, &digest, 0);
 
-    // ----- (8) Apply balance work via the injected callback -----
+    // ----- Apply balance work -----
     //
     // Runs after the replay slot is claimed and the breadcrumb laid down. The
     // callback parses the token payload and mutates the Account PDAs; any error
     // (including an unknown payload) rolls back with the tx, leaving the slot
     // unconsumed for a future upgrade.
-    apply(
+    transfer::apply_from_body(
         program_id,
         submitter,
         source_account_pda,
@@ -168,5 +152,3 @@ where
 
     Ok(())
 }
-
-use crate::hash::double_keccak256;
