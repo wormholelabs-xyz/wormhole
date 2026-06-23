@@ -61,7 +61,7 @@ pub enum GlobalAccountantError {
     InvalidGovernanceModule = 22,
     /// `register_chain` payload action byte is not `0x01` (RegisterChain).
     InvalidGovernanceAction = 23,
-    /// `register_chain` target chain is neither `0x0000` (Any) nor Wormchain.
+    /// `register_chain` target chain is neither `0x0000` (Any) nor Solana.
     GovernanceChainMismatch = 24,
     /// `modify_balance` `kind` byte is neither `1` (Add) nor `2` (Subtract).
     InvalidModificationKind = 25,

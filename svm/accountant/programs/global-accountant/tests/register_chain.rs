@@ -120,7 +120,7 @@ fn noreplay_bucket_unmarked() -> Account {
 /// | 50     | 1    | consistency_level |
 /// | 51     | 32   | module            |  (TOKEN_BRIDGE_GOVERNANCE_MODULE)
 /// | 83     | 1    | action            |  (REGISTER_CHAIN_ACTION = 0x01)
-/// | 84     | 2    | target_chain      |  (0 = Any, 3104 = Wormchain)
+/// | 84     | 2    | target_chain      |  (0 = Any, 1 = Solana)
 /// | 86     | 2    | chain_to_register |
 /// | 88     | 32   | emitter_to_register
 ///
@@ -423,7 +423,7 @@ fn register_chain_governance_header_violations_reject() {
             ..canonical
         },
         Case {
-            label: "target_chain neither Any nor Wormchain",
+            label: "target_chain neither Any nor Solana",
             target_chain: 99,
             sequence: 0x05,
             expected: GlobalAccountantError::GovernanceChainMismatch as u32,
