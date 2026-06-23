@@ -1,0 +1,18 @@
+version: v1
+managed:
+  enabled: true
+  go_package_prefix:
+    default: github.com/certusone/wormhole/node/pkg/cantonclient/proto/gen
+  override:
+    # google/rpc/status.proto is provided by genproto and registered there at
+    # runtime; map our import to it (and exclude it from generation below) to
+    # avoid a duplicate proto-registration panic.
+    GO_PACKAGE:
+      google/rpc/status.proto: google.golang.org/genproto/googleapis/rpc/status
+plugins:
+  - name: go
+    out: gen
+    opt: paths=source_relative
+  - name: go-grpc
+    out: gen
+    opt: paths=source_relative

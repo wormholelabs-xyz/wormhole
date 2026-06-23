@@ -396,6 +396,8 @@ const (
 	ChainIDHydration ChainID = 73
 	// ChainIDElysium is the ChainID of Elysium
 	ChainIDElysium ChainID = 74
+	// ChainIDCanton is the ChainID of Canton
+	ChainIDCanton ChainID = 72
 
 	// ChainIDWormchain is the ChainID of Wormchain and is in its own range.
 	ChainIDWormchain ChainID = 3104

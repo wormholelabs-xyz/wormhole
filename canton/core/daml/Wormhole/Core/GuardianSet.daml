@@ -1,0 +1,50 @@
+-- | Guardian-set representation and expiry, mirroring the EVM
+-- @Structs.GuardianSet@ (@ethereum/contracts/Structs.sol@) and the expiry logic
+-- in @Setters.sol@.
+module Wormhole.Core.GuardianSet where
+
+import Wormhole.Core.Bytes
+
+-- | One day, matching the EVM @GUARDIAN_SET_EXPIRY@ (86400 seconds). After a new
+-- set is installed, the previous set remains valid for this long so in-flight
+-- VAAs signed by it still verify.
+guardianSetExpirySeconds : Int
+guardianSetExpirySeconds = 86400
+
+-- | A guardian set: the ordered list of guardian addresses (20-byte,
+-- Ethereum-style, exactly as carried by a GuardianSetUpgrade VAA) and an
+-- optional expiration time. @None@ means "never expires" (the current set).
+data GuardianSet = GuardianSet with
+    keys           : [Bytes20]
+    expirationTime : Optional Time
+  deriving (Eq, Show)
+
+-- | Number of guardians in the set.
+numGuardians : GuardianSet -> Int
+numGuardians gs = length gs.keys
+
+-- | Quorum threshold, identical to EVM @Messages.quorum@:
+-- @floor(n * 2 / 3) + 1@.
+quorum : Int -> Int
+quorum n = (n * 2) / 3 + 1
+
+-- | Look up the 20-byte address of the guardian at @index@ (0-based). Total
+-- (returns None out of range); Daml's Prelude has no list-index operator.
+keyAt : GuardianSet -> Int -> Optional Bytes20
+keyAt gs index = indexOptional gs.keys index
+
+-- | Total list indexing. Top-level because Daml-LF disallows recursive local
+-- (where/let) bindings.
+indexOptional : [a] -> Int -> Optional a
+indexOptional xs i
+  | i < 0 = None
+  | otherwise = case xs of
+      [] -> None
+      (y :: ys) -> if i == 0 then Some y else indexOptional ys (i - 1)
+
+-- | A set is usable at @now@ if it is the current set (no expiry) or has not yet
+-- expired. Matches the EVM check @guardianSet.expirationTime < block.timestamp@.
+isActiveAt : GuardianSet -> Time -> Bool
+isActiveAt gs now = case gs.expirationTime of
+  None -> True
+  Some exp -> now < exp
