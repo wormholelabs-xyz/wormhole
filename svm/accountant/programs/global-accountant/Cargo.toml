@@ -52,6 +52,14 @@ global-accountant = { path = "." }
 # Already in the workspace lock via mollusk's transitive deps; pinning the
 # major version keeps the host-side test build aligned.
 libsecp256k1 = "0.6"
+# Surfpool E2E spike — talks to a subprocess `surfpool start` over JSON-RPC.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+serde_json.workspace = true
 # `ProgramResult::Failure` carries a `solana_program_error::ProgramError`; tests
 # name it to assert builtin error codes (e.g. `InvalidAccountData`) via the full
 # `u64` encoding.
@@ -62,6 +70,11 @@ solana-program-error = "=3.0.1"
 # sibling program ending up in the fixtures dir) surfaces as a panic with
 # the recompute-and-update recipe in the failure message.
 sha2 = "=0.10.9"
+# Base64 decoder for the surfpool e2e `meta.logMessages` walk that asserts
+# the canonical commit log emitted by `instructions::commit_log`. Already in
+# the workspace lock graph via solana-client transitively; pinned per the
+# supply-chain rule.
+base64 = "=0.22.1"
 
 [lints]
 workspace = true
