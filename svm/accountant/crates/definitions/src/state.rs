@@ -80,9 +80,16 @@ impl PendingObservationsLayout {
     /// Account-type tag stamped at offset 0. See [`AccountTag`].
     pub const TAG: u8 = AccountTag::PendingObservations as u8;
 
-    /// Quorum threshold: 13 of 19 guardians — the Core Bridge
-    /// `(len * 2) / 3 + 1` for len 19. Pinned, not derived from the live set.
-    pub const QUORUM_THRESHOLD: u32 = 13;
+    /// Guardian quorum for a live set of `num_guardians`: `(2N / 3) + 1`, the
+    /// same computation the Core Bridge and the Verify VAA Shim use. Callers
+    /// derive `N` from the `keys_len` read out of the Core Bridge `GuardianSet`
+    /// account on every observation — never pinned, so a governance resize of
+    /// the guardian set keeps this program in step with the rest of the network
+    /// (and with the `submit_vaas` shim path). The `u32` `signatures` bitmap
+    /// still caps the set at 32 guardians.
+    pub const fn quorum_for(num_guardians: u32) -> u32 {
+        (num_guardians * 2) / 3 + 1
+    }
 }
 
 const _: () = {

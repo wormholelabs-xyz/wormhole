@@ -548,6 +548,6 @@ fn observations_then_vaas_same_triple_rejects_already_accounted() {
     assert_already_accounted(&replay);
 }
 
-// Pull in the quorum threshold constant so a change to it fails to compile here
-// rather than silently desyncing the QUORUM local.
-const _: () = assert!(QUORUM as u32 == PendingObservationsLayout::QUORUM_THRESHOLD);
+// Tie the QUORUM local to the derived threshold for this set size so a change
+// to the formula fails to compile here rather than silently desyncing.
+const _: () = assert!(QUORUM as u32 == PendingObservationsLayout::quorum_for(GUARDIAN_COUNT as u32));
