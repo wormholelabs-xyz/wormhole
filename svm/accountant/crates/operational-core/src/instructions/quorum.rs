@@ -21,7 +21,7 @@ use pinocchio::{
 
 use crate::definitions::{
     parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
-    PENDING_OBSERVATIONS_SEED_PREFIX,
+    CORE_BRIDGE_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::hash::keccak256;
@@ -290,6 +290,17 @@ fn wipe_pending_pda(
 
 /// Verify a guardian signature: recover the pubkey via `secp256k1_recover` and
 /// compare its keccak hash to the key in the Core Bridge GuardianSet PDA.
+///
+/// SECURITY: the guardian keys are read straight out of `guardian_set`, which is
+/// the *sole* authenticity anchor on the `submit_observations` path (unlike
+/// `submit_vaas`, which delegates to the Verify VAA Shim). It MUST therefore be
+/// the genuine Core Bridge GuardianSet account — otherwise a caller could pass a
+/// forged account full of attacker-controlled pubkeys, sign the target digest
+/// with the matching attacker keys, and self-accumulate to quorum, forging
+/// arbitrary transfers. A Core-Bridge-owned account can only ever hold
+/// Core-Bridge-written data, so asserting the owner is sufficient (and mirrors
+/// `close_pending::guardian_set_expired`). The shim enforces the equivalent
+/// constraint via Core-Bridge PDA-address derivation; see `shim::verify_vaa`.
 pub fn verify_signature(
     guardian_set: &AccountView,
     expected_guardian_set_index: u32,
@@ -297,6 +308,9 @@ pub fn verify_signature(
     digest: &[u8; 32],
     signature: &[u8; SECP256K1_SIGNATURE_LEN],
 ) -> ProgramResult {
+    if guardian_set.owner().as_array() != &CORE_BRIDGE_PROGRAM_ID {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
     let data = guardian_set.try_borrow()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
 

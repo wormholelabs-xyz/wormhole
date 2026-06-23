@@ -679,6 +679,50 @@ fn ntt_transfer_missing_hub_rejects() {
     }
 }
 
+/// SECURITY regression: on the observations path the guardian-set account is the
+/// sole authenticity anchor (no shim here). A forged guardian-set account — not
+/// owned by the Core Bridge — must be rejected by `verify_signature` BEFORE any
+/// signature is counted, even when it carries the real guardian keys and the
+/// observation is signed by a genuine guardian. Without the owner check an
+/// attacker could substitute their own keys/account and self-sign to quorum on a
+/// fabricated transfer.
+#[test]
+fn ntt_transfer_forged_guardian_set_owner_rejects() {
+    let mollusk = mollusk();
+    let scenario = Scenario::new();
+
+    let mut accounts = scenario.initial_accounts();
+    // Re-own the guardian-set account to a non-Core-Bridge program, keeping the
+    // exact same (well-formed, real) guardian keys/index/expiry bytes so that
+    // ONLY the ownership constraint can be what rejects it.
+    for entry in accounts.iter_mut() {
+        if entry.0 == scenario.guardian_set_pubkey {
+            entry.1 = guardian_set_account(
+                GUARDIAN_SET_INDEX,
+                &guardian_keys(&scenario.guardians),
+                0,
+                0,
+                &program_id(), // attacker-chosen owner != Core Bridge
+            );
+        }
+    }
+
+    // Signed by a real guardian (index 0) against the real digest, so the
+    // signature itself is valid — rejection is purely the owner check.
+    let r = scenario.submit_once(&mollusk, accounts, 0);
+    match r.program_result {
+        ProgramResult::Failure(e) => {
+            let code = u64::from(e) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "expected InvalidPda for forged guardian-set owner, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
+    }
+}
+
 /// Reverse peer registers a different transceiver than `sender`: the
 /// cross-registration check rejects with `PeerRegistrationMismatch`.
 #[test]
