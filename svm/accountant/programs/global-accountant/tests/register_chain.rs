@@ -613,3 +613,112 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
         "registration overwritten to new emitter"
     );
 }
+
+/// Rotation then replay of the ORIGINAL VAA: register emitter_A at sequence N
+/// (bucket N flips), rotate to emitter_B via a higher-sequence VAA (a different
+/// bucket), then RESUBMIT the original emitter_A@seq-N governance VAA. It must
+/// reject `AlreadyAccounted` — the seq-N bucket marked by the first call is
+/// keyed on the governance emitter + vaa_sequence, independent of which emitter
+/// is being registered, so the replayed old VAA still collides. This is the
+/// concrete threat NoReplay exists for; the overwrite test only proves forward
+/// rotation succeeds.
+#[test]
+fn register_chain_rotation_then_replay_of_old_vaa_rejects() {
+    let mollusk = mollusk();
+    let emitter_a = [0x77u8; 32];
+    let emitter_b = [0xBBu8; 32];
+    let seq_n: u64 = 0x08;
+    let seq_rotate: u64 = seq_n + 1024; // different noreplay bucket
+
+    let (noreplay_authority_pubkey, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
+    let (registration_pda, _) = derive_chain_registration_pda(2);
+    let bucket_n = derive_canonical_noreplay_bucket(
+        &noreplay_authority_pubkey,
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        seq_n,
+    );
+
+    // 1) Register emitter_A at sequence N — flips bucket N.
+    let body_a = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        seq_n,
+        &TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        2,
+        &emitter_a,
+    );
+    let r1 = run_register_chain(&mollusk, &body_a, 2, None, None);
+    assert!(matches!(r1.program_result, ProgramResult::Success));
+    let post_registration_a = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == registration_pda)
+        .map(|(_, a)| a.clone())
+        .expect("registration PDA missing after first register");
+    let marked_bucket_n = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == bucket_n)
+        .map(|(_, a)| a.clone())
+        .expect("seq-N bucket missing after first register");
+    assert_eq!(
+        marked_bucket_n.owner,
+        Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        "seq-N bucket flipped to noreplay ownership by the first register"
+    );
+
+    // 2) Rotate to emitter_B via a higher-sequence VAA (fresh, distinct bucket).
+    let body_b = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        seq_rotate,
+        &TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        2,
+        &emitter_b,
+    );
+    let r2 = run_register_chain(
+        &mollusk,
+        &body_b,
+        2,
+        Some(post_registration_a),
+        Some(noreplay_bucket_unmarked()),
+    );
+    assert!(
+        matches!(r2.program_result, ProgramResult::Success),
+        "rotation to emitter_B must succeed, got {:?}",
+        r2.program_result
+    );
+    let post_registration_b = r2
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == registration_pda)
+        .map(|(_, a)| a.clone())
+        .expect("registration PDA missing after rotation");
+
+    // 3) Replay the ORIGINAL emitter_A@seq-N VAA, carrying the now-marked seq-N
+    //    bucket and the rotated registration. It must reject AlreadyAccounted.
+    let r3 = run_register_chain(
+        &mollusk,
+        &body_a,
+        2,
+        Some(post_registration_b),
+        Some(marked_bucket_n),
+    );
+    match r3.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::AlreadyAccounted as u32,
+                "replay of the original seq-N VAA must reject AlreadyAccounted, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(AlreadyAccounted), got {other:?}"),
+    }
+}
