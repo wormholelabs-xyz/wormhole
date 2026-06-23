@@ -29,7 +29,11 @@ const PROGRAM_NAME: &str = "global_accountant";
 
 /// Compute-unit ceiling for the hottest quorum-commit branch (Transfer + lazy
 /// init of both Account PDAs). Pinned by the CU regression test below.
-const MAX_QUORUM_BRANCH_CU: u64 = 80_000;
+///
+/// Tightened to the observed cost (~60.2k CU on the quorum-commit branch,
+/// inclusive of the inner noreplay `MarkUsed` CPI) plus ~12% headroom, so a real
+/// regression trips the guard instead of hiding under a loose ceiling.
+const MAX_QUORUM_BRANCH_CU: u64 = 68_000;
 
 fn program_id() -> Pubkey {
     // Fixed program id so test PDA derivation matches the program's view.
