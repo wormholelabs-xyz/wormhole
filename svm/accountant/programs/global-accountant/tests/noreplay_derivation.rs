@@ -55,3 +55,60 @@ fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
     );
     assert_eq!(ours_bump, ref_bump, "canonical bumps must agree");
 }
+
+/// Pin the `sequence / 1024` bucket math at the bucket boundaries (`0`, `1023`,
+/// `1024`) and the extremes (`u64::MAX`), plus a non-1 chain so the chain bytes
+/// participate in the namespace seed. A single canonical case cannot catch an
+/// off-by-one in the bucket-index division or a missing chain prefix; these do.
+#[test]
+fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
+    let authority_bytes = [0x7Au8; 32];
+    let authority = Address::from(authority_bytes);
+    let mut emitter = [0u8; 32];
+    emitter[0] = 0xAB;
+    emitter[31] = 0x11;
+
+    // (chain, sequence) cases. Boundary sequences straddle the 1024-bit bucket
+    // edge; the chain values exercise both chain 1 and a multi-byte chain id.
+    let cases: [(u16, u64); 8] = [
+        (1, 0),
+        (1, 1023),
+        (1, 1024),
+        (1, 1025),
+        (1, u64::MAX),
+        (56, 1023), // non-1 chain at a bucket edge
+        (56, 1024),
+        (56, u64::MAX),
+    ];
+
+    for (chain, sequence) in cases {
+        let (ours, ours_bump) = derive_bucket_pda(&authority, chain, &emitter, sequence);
+        let (reference, ref_bump) =
+            reference_bucket_pda(&authority_bytes, chain, &emitter, sequence);
+        assert_eq!(
+            ours.as_array(),
+            &reference,
+            "bucket PDA mismatch at chain={chain} sequence={sequence}",
+        );
+        assert_eq!(
+            ours_bump, ref_bump,
+            "bucket bump mismatch at chain={chain} sequence={sequence}",
+        );
+    }
+
+    // The boundary actually crosses a bucket: seq 1023 and 1024 must derive
+    // different PDAs (different bucket index), while 1024 and 1025 share one.
+    let (b1023, _) = derive_bucket_pda(&authority, 1, &emitter, 1023);
+    let (b1024, _) = derive_bucket_pda(&authority, 1, &emitter, 1024);
+    let (b1025, _) = derive_bucket_pda(&authority, 1, &emitter, 1025);
+    assert_ne!(
+        b1023.as_array(),
+        b1024.as_array(),
+        "seq 1023 and 1024 fall in different buckets",
+    );
+    assert_eq!(
+        b1024.as_array(),
+        b1025.as_array(),
+        "seq 1024 and 1025 share a bucket",
+    );
+}
