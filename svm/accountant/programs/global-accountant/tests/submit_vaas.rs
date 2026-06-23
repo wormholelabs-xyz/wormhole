@@ -446,7 +446,16 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
         1, // recipient_chain = Solana (wrapped destination)
     );
 
-    let result = scenario.submit(&mollusk, scenario.initial_accounts());
+    // Pre-state: both Account PDAs start system-owned and empty, so this path
+    // also exercises lazy-init of both.
+    let initial = scenario.initial_accounts();
+    for pda in [scenario.source_account_pubkey, scenario.dest_account_pubkey] {
+        let pre = find_account(&initial, &pda);
+        assert_eq!(pre.owner, system_program_id(), "Account PDA starts system-owned");
+        assert!(pre.data.is_empty(), "Account PDA starts with zero data");
+    }
+
+    let result = scenario.submit(&mollusk, initial);
     assert!(
         matches!(result.program_result, ProgramResult::Success),
         "expected Success, got {:?}",
@@ -593,32 +602,6 @@ fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
         other => panic!("expected Failure(AlreadyAccounted), got {other:?}"),
     }
     // The commit-log emit never runs once the NoReplay pre-check short-circuits.
-}
-
-/// A fresh destination Account PDA lazy-inits under the program.
-#[test]
-fn submit_vaas_lazy_inits_destination_account() {
-    let mollusk = mollusk();
-    let token_address = [0x42u8; 32];
-    let scenario = Scenario::with_transfer_body(0xA4, 9_999u128, 2, token_address, 1);
-
-    let initial = scenario.initial_accounts();
-    let dst_pre = find_account(&initial, &scenario.dest_account_pubkey);
-    assert_eq!(dst_pre.owner, system_program_id());
-    assert!(dst_pre.data.is_empty());
-
-    let result = scenario.submit(&mollusk, initial);
-    assert!(matches!(result.program_result, ProgramResult::Success));
-
-    let dst_post = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
-    assert_eq!(
-        dst_post.owner,
-        program_id(),
-        "dest lazy-init flips owner to program"
-    );
-    assert_eq!(dst_post.data.len(), BalanceAccountLayout::LEN);
-    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst_post.data);
-    assert_eq!(layout.balance, Uint256::from_u128(9_999));
 }
 
 /// A wrapped-source debit exceeding the balance surfaces `BalanceUnderflow`
