@@ -1,0 +1,103 @@
+-- | Byte-string helpers for the Wormhole core bridge.
+--
+-- Daml has no native byte-string type, and the @DA.Crypto.Text@ crypto builtins
+-- operate on lowercase hex-encoded 'Text'. We therefore represent all wire bytes
+-- (VAAs, hashes, addresses, public keys) as hex 'Text' WITHOUT a @0x@ prefix,
+-- and do all parsing as fixed-width big-endian slices over that hex.
+--
+-- Every offset/length below is expressed in BYTES; the helpers convert to the
+-- underlying 2-hex-chars-per-byte representation.
+module Wormhole.Core.Bytes where
+
+import DA.Text qualified as T
+
+-- | Hex-encoded byte string (lowercase, no @0x@ prefix).
+type Bytes = Text
+
+-- | A 32-byte value (64 hex chars): VAA hashes, emitter addresses, etc.
+type Bytes32 = Bytes
+
+-- | A 20-byte value (40 hex chars): Ethereum-style guardian addresses.
+type Bytes20 = Bytes
+
+-- | Unwrap an 'Optional' or abort with @msg@. The @error@ lives in the function
+-- body, so under Daml's strict evaluation it is thrown only on 'None' — unlike
+-- @fromOptional (error msg)@, whose default argument is evaluated on every call.
+optionOrFail : Text -> Optional a -> a
+optionOrFail msg opt = case opt of
+  Some v -> v
+  None -> error msg
+
+-- | Number of bytes represented by a hex string.
+byteLength : Bytes -> Int
+byteLength b = T.length b / 2
+
+-- | @sliceBytes start len b@ returns @len@ bytes of @b@ starting at byte offset
+-- @start@. Fails if the slice runs past the end of @b@.
+sliceBytes : Int -> Int -> Bytes -> Bytes
+sliceBytes start len b =
+  let needed = (start + len) * 2
+  in if T.length b < needed
+       then error ("sliceBytes: out of range (need " <> show needed <> " hex chars, have " <> show (T.length b) <> ")")
+       else T.substring (start * 2) (len * 2) b
+
+-- | Bytes from @start@ (inclusive) to the end of @b@.
+sliceFrom : Int -> Bytes -> Bytes
+sliceFrom start b = T.substring (start * 2) (T.length b - start * 2) b
+
+-- | Value of a single lowercase hex digit. NB: Daml is strict, so the @error@
+-- must live inside the @None@ branch — passing it as a @fromOptional@ default
+-- would evaluate (throw) it on every call.
+hexDigit : Text -> Int
+hexDigit c = case lookup c digits of
+    Some v -> v
+    None -> error ("invalid hex digit: " <> c)
+  where
+    digits =
+      [ ("0", 0), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5), ("6", 6)
+      , ("7", 7), ("8", 8), ("9", 9), ("a", 10), ("b", 11), ("c", 12)
+      , ("d", 13), ("e", 14), ("f", 15)
+      ]
+
+-- | Parse a big-endian hex byte string into an 'Int'. Suitable for values that
+-- fit in 63 bits (chain ids, sequences, nonces, fees in practice). Callers that
+-- need uint256 semantics must bound-check upstream.
+bytesToInt : Bytes -> Int
+bytesToInt b = foldl (\acc c -> acc * 16 + hexDigit c) 0 (T.explode (T.asciiToLower b))
+
+-- | Lowercase a hex string so it matches the form returned by the crypto
+-- builtins (which emit lowercase) before equality comparisons.
+normalizeHex : Bytes -> Bytes
+normalizeHex = T.asciiToLower
+
+-- | The lowercase hex character for a nibble value (0..15).
+hexChar : Int -> Text
+hexChar n = case lookup n chars of
+    Some v -> v
+    None -> error ("hexChar: out of range: " <> show n)
+  where
+    chars =
+      [ (0, "0"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5"), (6, "6")
+      , (7, "7"), (8, "8"), (9, "9"), (10, "a"), (11, "b"), (12, "c")
+      , (13, "d"), (14, "e"), (15, "f")
+      ]
+
+-- | Encode a single byte value (0..255) as two lowercase hex chars.
+intToHexByte : Int -> Bytes
+intToHexByte n =
+  if n < 0 || n > 255
+    then error ("intToHexByte: out of range: " <> show n)
+    else hexChar (n / 16) <> hexChar (n % 16)
+
+-- | Drop leading zero bytes ("00") from a hex string, keeping at least one byte.
+-- Used for minimal DER integer encoding.
+stripLeadingZeroBytes : Bytes -> Bytes
+stripLeadingZeroBytes b
+  | byteLength b <= 1 = b
+  | sliceBytes 0 1 b == "00" = stripLeadingZeroBytes (sliceFrom 1 b)
+  | otherwise = b
+
+-- | True if the most-significant bit of the first byte is set (first hex nibble
+-- >= 8). Used to decide whether a DER integer needs a 0x00 sign pad.
+highBitSet : Bytes -> Bool
+highBitSet b = byteLength b > 0 && hexDigit (T.substring 0 1 (normalizeHex b)) >= 8

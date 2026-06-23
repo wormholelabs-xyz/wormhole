@@ -1,0 +1,62 @@
+-- | Governance packet parsing for the core ("Core") module, mirroring
+-- @ethereum/contracts/GovernanceStructs.sol@ and whitepapers 0002 / 0004.
+--
+-- A governance packet is the VAA payload and has the layout:
+--
+-- >  module(32) ‖ action(1) ‖ chain(2) ‖ <action-specific>
+module Wormhole.Core.Governance where
+
+import Wormhole.Core.Bytes
+
+-- | The "Core" module identifier: ASCII "Core" (0x436f7265) left-padded to 32
+-- bytes. All core-bridge governance packets carry this value.
+coreModule : Bytes32
+coreModule = "00000000000000000000000000000000000000000000000000000000436f7265"
+
+-- | A parsed governance action. @RecoverChainId@ (EVM action 5) is intentionally
+-- absent — it repairs @block.chainid@ after an EVM fork and has no Canton analog.
+data GovernanceAction
+  = ContractUpgrade
+      with chain : Int; newContract : Bytes32
+  | GuardianSetUpgrade
+      with chain : Int; newIndex : Int; newKeys : [Bytes20]
+  | SetMessageFee
+      with chain : Int; fee : Int
+  | TransferFees
+      with chain : Int; amount : Int; recipient : Bytes32
+  deriving (Eq, Show)
+
+-- | Parse a governance packet. Verifies the module is "Core" and dispatches on
+-- the action id. Aborts on unknown actions or malformed input.
+parseGovernance : Bytes -> GovernanceAction
+parseGovernance payload =
+  let
+    moduleId = normalizeHex (sliceBytes 0 32 payload)
+    action = bytesToInt (sliceBytes 32 1 payload)
+    chain = bytesToInt (sliceBytes 33 2 payload)
+  in
+    if moduleId /= coreModule
+      then error "governance: not the Core module"
+      else case action of
+        1 -> ContractUpgrade with
+               chain
+               newContract = normalizeHex (sliceBytes 35 32 payload)
+        2 -> let newIndex = bytesToInt (sliceBytes 35 4 payload)
+                 len = bytesToInt (sliceBytes 39 1 payload)
+                 newKeys = parseKeys payload 40 len
+             in GuardianSetUpgrade with chain; newIndex; newKeys
+        3 -> SetMessageFee with
+               chain
+               fee = bytesToInt (sliceBytes 35 32 payload)
+        4 -> TransferFees with
+               chain
+               amount = bytesToInt (sliceBytes 35 32 payload)
+               recipient = normalizeHex (sliceBytes 67 32 payload)
+        _ -> error ("governance: unsupported action " <> show action)
+
+-- | Parse @count@ consecutive 20-byte guardian addresses starting at byte
+-- @offset@.
+parseKeys : Bytes -> Int -> Int -> [Bytes20]
+parseKeys _ _ 0 = []
+parseKeys payload offset count =
+  normalizeHex (sliceBytes offset 20 payload) :: parseKeys payload (offset + 20) (count - 1)

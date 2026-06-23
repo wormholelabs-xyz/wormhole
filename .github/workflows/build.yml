@@ -315,6 +315,10 @@ jobs:
           rm -rf node/pkg/proto
           docker build --target go-export -f Dockerfile.proto -o type=local,dest=node .
           git diff --name-only --exit-code && echo "✅ Generated proto matches committed proto" || (echo "❌ Generated proto differs from committed proto, run \`rm -rf node/pkg/proto && docker build --target go-export -f Dockerfile.proto -o type=local,dest=node .\` and commit the result" >&2 && exit 1)
+      - name: Ensure generated Canton Ledger API stubs match
+        run: |
+          make generate-canton-proto
+          git diff --name-only --exit-code && echo "✅ Generated Canton stubs match committed stubs" || (echo "❌ Generated Canton Ledger API stubs differ from committed, run \`make generate-canton-proto\` and commit the result" >&2 && exit 1)
 
   spellcheck:
     runs-on: ubuntu-latest

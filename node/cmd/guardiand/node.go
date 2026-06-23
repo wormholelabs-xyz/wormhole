@@ -25,6 +25,7 @@ import (
 	managerxrpl "github.com/certusone/wormhole/node/pkg/manager/xrpl"
 	"github.com/certusone/wormhole/node/pkg/watchers/algorand"
 	"github.com/certusone/wormhole/node/pkg/watchers/aptos"
+	"github.com/certusone/wormhole/node/pkg/watchers/canton"
 	"github.com/certusone/wormhole/node/pkg/watchers/evm"
 	"github.com/certusone/wormhole/node/pkg/watchers/near"
 	"github.com/certusone/wormhole/node/pkg/watchers/solana"
@@ -149,6 +150,10 @@ var (
 
 	suiRPC           *string
 	suiMoveEventType *string
+
+	cantonRPC         *string
+	cantonPackageID   *string
+	cantonReadAsParty *string
 
 	solanaRPC          *string
 	solanaContract     *string
@@ -419,6 +424,10 @@ func init() {
 
 	suiRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "suiRPC", "Sui gRPC endpoint", "sui:443", []string{""})
 	suiMoveEventType = NodeCmd.Flags().String("suiMoveEventType", "", "Sui move event type for publish_message")
+
+	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
+	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (empty matches any package version)")
+	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Optional Canton party to narrow the watcher's update stream to; empty observes all parties on the participant")
 
 	solanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaRPC", "Solana RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
 	fogoRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoRPC", "Fogo RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
@@ -990,6 +999,9 @@ func runNode(cmd *cobra.Command, args []string) {
 		logger.Fatal("Either --suiRPC and --suiMoveEventType must all be set or all unset")
 	}
 
+	// --cantonRPC alone enables the Canton watcher; --cantonReadAsParty is
+	// optional (empty observes all parties on the participant).
+
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {
 		logger.Fatal("Either --xrplRPC and --xrplContract must all be set or all unset")
 	}
@@ -1074,6 +1086,7 @@ func runNode(cmd *cobra.Command, args []string) {
 	rpcMap["injectiveWS"] = *injectiveWS
 	// ChainIDOsmosis is not supported in the guardian.
 	rpcMap["suiRPC"] = *suiRPC
+	rpcMap["cantonRPC"] = *cantonRPC
 	rpcMap["aptosRPC"] = *aptosRPC
 	rpcMap["arbitrumRPC"] = *arbitrumRPC
 	rpcMap["optimismRPC"] = *optimismRPC
@@ -1773,6 +1786,17 @@ func runNode(cmd *cobra.Command, args []string) {
 			Rpc:               *suiRPC,
 			SuiMoveEventType:  *suiMoveEventType,
 			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDSui),
+		}
+		watcherConfigs = append(watcherConfigs, wc)
+	}
+
+	if shouldStart(cantonRPC) {
+		wc := &canton.WatcherConfig{
+			NetworkID:   "canton",
+			ChainID:     vaa.ChainIDCanton,
+			Rpc:         *cantonRPC,
+			PackageID:   *cantonPackageID,
+			ReadAsParty: *cantonReadAsParty,
 		}
 		watcherConfigs = append(watcherConfigs, wc)
 	}

@@ -1,0 +1,10 @@
+version: v1
+# Vendored subset of the Canton 3.5.5 Ledger API v2 protos
+# (com.daml.ledger.api.v2) needed by the cantonclient gRPC client: the State and
+# Update services and their transitive imports. See README.md.
+lint:
+  use:
+    - MINIMAL
+breaking:
+  use:
+    - FILE

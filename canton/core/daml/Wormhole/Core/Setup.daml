@@ -1,0 +1,41 @@
+-- | Initialization helpers for the core bridge, mirroring
+-- @ethereum/contracts/Setup.sol@ (the @setup@ entrypoint that installs guardian
+-- set 0 and the governance configuration).
+module Wormhole.Core.Setup where
+
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet
+import Wormhole.Core.State
+
+-- | Wormhole ChainID assigned to Canton.
+cantonChainId : Int
+cantonChainId = 72
+
+-- | The standard Wormhole governance emitter lives on Solana (chain 1) at
+-- address 0x00..04.
+solanaGovernanceChainId : Int
+solanaGovernanceChainId = 1
+
+defaultGovernanceContract : Bytes32
+defaultGovernanceContract = "0000000000000000000000000000000000000000000000000000000000000004"
+
+-- | Build the initial 'CoreState' value with guardian set 0 (never-expiring) and
+-- the supplied governance configuration. The caller @create@s it as @operator@.
+mkInitialCoreState :
+  Party        -- ^ operator
+  -> Int       -- ^ governance chain id
+  -> Bytes32   -- ^ governance contract
+  -> [Bytes20] -- ^ initial guardian addresses (set 0)
+  -> CoreState
+mkInitialCoreState operator govChain govContract initialGuardians =
+  CoreState with
+    operator
+    chainId = cantonChainId
+    governanceChainId = govChain
+    governanceContract = normalizeHex govContract
+    guardianSetIndex = 0
+    guardianSets = Map.fromList [(0, GuardianSet with keys = map normalizeHex initialGuardians, expirationTime = None)]
+    messageFee = 0
+    consumedGovernance = Set.empty
