@@ -2081,7 +2081,11 @@ fn quorum_with_dusted_destination_account_succeeds() {
 /// path (quorum commit branch with a Transfer + lazy-init of both Account PDAs).
 /// Test-only — it pins the regression guard below; no production code depends
 /// on it, so it lives here rather than in the shared definitions crate.
-const MAX_QUORUM_BRANCH_CU: u64 = 80_000;
+///
+/// Tightened to the observed cost (~57.1k CU on the quorum-commit branch,
+/// inclusive of the inner noreplay `MarkUsed` CPI) plus ~12% headroom, so a real
+/// regression trips the guard instead of hiding under a loose ceiling.
+const MAX_QUORUM_BRANCH_CU: u64 = 64_000;
 
 /// CU regression guard: the quorum-commit branch (lazy-init of both Account
 /// PDAs — the program's most expensive tx) must stay below `MAX_QUORUM_BRANCH_CU`.
