@@ -1876,6 +1876,16 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
         token_address,
         1, // recipient_chain = Solana (wrapped destination)
     );
+
+    // Pre-state: both Account PDAs start system-owned and empty, so this path
+    // exercises lazy-init of both on the quorum-commit branch.
+    let initial = scenario.initial_accounts();
+    for pda in [scenario.source_account_pubkey, scenario.dest_account_pubkey] {
+        let pre = find_account(&initial, &pda);
+        assert_eq!(pre.owner, system_program_id(), "Account PDA starts system-owned");
+        assert!(pre.data.is_empty(), "Account PDA starts with zero data");
+    }
+
     let result = drive_transfer_to_quorum(&mollusk, &scenario);
     assert!(
         matches!(result.program_result, ProgramResult::Success),
@@ -1986,45 +1996,6 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         bucket.data.is_empty(),
         "NoReplay must not flip on failed quorum"
     );
-}
-
-/// A fresh destination Account PDA is lazy-initialised under the program on
-/// quorum.
-#[test]
-fn quorum_with_lazy_init_destination_account_succeeds() {
-    let mollusk = mollusk();
-    let token_address = [0x42u8; 32];
-    let scenario = Scenario::with_transfer_body(19, 4, 0x62, 9_999u128, 2, token_address, 1);
-
-    let initial = scenario.initial_accounts();
-    let dst_pre = find_account(&initial, &scenario.dest_account_pubkey);
-    assert_eq!(
-        dst_pre.owner,
-        system_program_id(),
-        "dest Account PDA must start system-owned"
-    );
-    assert_eq!(
-        dst_pre.data.len(),
-        0,
-        "dest Account PDA must start with zero data"
-    );
-
-    let result = drive_transfer_to_quorum(&mollusk, &scenario);
-    assert!(matches!(result.program_result, ProgramResult::Success));
-
-    let dst_post = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
-    assert_eq!(
-        dst_post.owner,
-        program_id(),
-        "dest lazy-init flips owner to program"
-    );
-    assert_eq!(
-        dst_post.data.len(),
-        BalanceAccountLayout::LEN,
-        "dest data sized to full layout"
-    );
-    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst_post.data);
-    assert_eq!(layout.balance, Uint256::from_u128(9_999));
 }
 
 /// Dust-DoS defense: an attacker pre-funds the destination Account PDA address
