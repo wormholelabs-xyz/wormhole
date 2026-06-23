@@ -187,6 +187,40 @@ fn accounts_overflow_splits_at_max() {
 }
 
 #[test]
+fn accounts_sorted_into_handler_order_across_chunks() {
+    // The catalogue groups accounts by `(chain, token_address, token_chain)`,
+    // which does NOT match the `BackfillBalance` handler's required order
+    // `(chain, token_chain, token_address)`. Feed one chain's accounts with
+    // descending `token_chain` spanning more than one chunk and assert every
+    // emitted chunk — and the global sequence — is strictly ascending by the
+    // handler key. Regression: a greedy consecutive pack emitted a
+    // non-ascending chunk the program rejected with `InvalidInstructionData`.
+    let n = MAX_BALANCE_ENTRIES_PER_CHUNK + 1; // force a split
+    let input: Vec<Record> = (0..n as u16)
+        .rev() // descending token_chain: n-1, n-2, …, 0
+        .map(|tc| Record::Account(make_account(1, tc, 0)))
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+
+    let mut flat: Vec<(u16, u16, [u8; 32])> = Vec::new();
+    for chunk in &chunks {
+        let ChunkPlan::BackfillBalance(entries) = chunk else {
+            panic!("expected BackfillBalance");
+        };
+        for w in entries.windows(2) {
+            let a = (w[0].chain, w[0].token_chain, w[0].token_address);
+            let b = (w[1].chain, w[1].token_chain, w[1].token_address);
+            assert!(a < b, "chunk not strictly ascending: {a:?} !< {b:?}");
+        }
+        flat.extend(entries.iter().map(|e| (e.chain, e.token_chain, e.token_address)));
+    }
+    assert_eq!(flat.len(), n, "all accounts must be emitted exactly once");
+    for w in flat.windows(2) {
+        assert!(w[0] < w[1], "global order not ascending: {:?} !< {:?}", w[0], w[1]);
+    }
+}
+
+#[test]
 fn kind_transition_closes_current_chunk() {
     // 3 accounts, then 1 transfer → 2 chunks, not 1
     let input = vec![

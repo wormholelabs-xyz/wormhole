@@ -118,12 +118,22 @@ pub enum ChunkPlan {
 /// catalogue.
 pub struct Chunker<I: Iterator<Item = Record>> {
     source: Peekable<I>,
+    /// Sorted, not-yet-emitted balance entries. The balance handler requires
+    /// each chunk strictly ascending by `(chain, token_chain, token_address)`,
+    /// but the catalogue groups `account` rows by a different sub-key
+    /// (`token_address` precedes `token_chain`), so a greedy consecutive pack
+    /// would emit a non-ascending chunk the program rejects. We instead buffer
+    /// the whole contiguous account run and sort it into handler order before
+    /// chunking. Bounded by the account count (thousands) — unlike the 5M-row
+    /// transfer path, which stays streamed via emitter grouping.
+    balances: std::vec::IntoIter<AccountRecord>,
 }
 
 impl<I: Iterator<Item = Record>> Chunker<I> {
     pub fn new(source: I) -> Self {
         Self {
             source: source.peekable(),
+            balances: Vec::new().into_iter(),
         }
     }
 }
@@ -132,10 +142,21 @@ impl<I: Iterator<Item = Record>> Iterator for Chunker<I> {
     type Item = ChunkPlan;
 
     fn next(&mut self) -> Option<ChunkPlan> {
+        // Drain any buffered, sorted balance entries before advancing the
+        // source — the account run is materialised and sorted on first sight.
+        if let Some(chunk) = self.next_balance_chunk() {
+            return Some(ChunkPlan::BackfillBalance(chunk));
+        }
         let first = self.source.next()?;
         match first {
             Record::Transfer(t) => Some(ChunkPlan::BackfillNoReplay(self.collect_transfers(t))),
-            Record::Account(a) => Some(ChunkPlan::BackfillBalance(self.collect_accounts(a))),
+            Record::Account(a) => {
+                self.buffer_and_sort_balances(a);
+                // Just buffered >=1 entry, so a chunk is guaranteed.
+                Some(ChunkPlan::BackfillBalance(
+                    self.next_balance_chunk().expect("buffered >=1 balance"),
+                ))
+            }
             Record::Modification(m) => Some(ChunkPlan::DeferredModification(m)),
             Record::Registration(r) => Some(ChunkPlan::DeferredRegistration(r)),
             Record::RelayerChainRegistration(r) => Some(ChunkPlan::BackfillRelayerRegistration(
@@ -174,22 +195,37 @@ impl<I: Iterator<Item = Record>> Chunker<I> {
         chunk
     }
 
-    /// Greedy-pack consecutive `Account` records up to the `BackfillBalance`
-    /// cap. No further grouping constraint — each balance PDA is unique.
-    fn collect_accounts(&mut self, first: AccountRecord) -> Vec<AccountRecord> {
-        let mut chunk = Vec::with_capacity(MAX_BALANCE_ENTRIES_PER_CHUNK);
-        chunk.push(first);
-        while chunk.len() < MAX_BALANCE_ENTRIES_PER_CHUNK {
-            let take = matches!(self.source.peek(), Some(Record::Account(_)));
-            if !take {
-                break;
-            }
+    /// Drain the whole contiguous `Account` run starting at `first`, sort it
+    /// strictly ascending by `(chain, token_chain, token_address)` — the order
+    /// the `BackfillBalance` handler enforces — and stash it for chunked
+    /// emission. The catalogue groups accounts by `(chain, token_address,
+    /// token_chain)`, so the sort cannot be skipped: an unsorted chunk is
+    /// rejected on-chain with `InvalidInstructionData`.
+    fn buffer_and_sort_balances(&mut self, first: AccountRecord) {
+        let mut all = Vec::new();
+        all.push(first);
+        while matches!(self.source.peek(), Some(Record::Account(_))) {
             match self.source.next() {
-                Some(Record::Account(a)) => chunk.push(a),
+                Some(Record::Account(a)) => all.push(a),
                 _ => unreachable!("peek confirmed Account"),
             }
         }
-        chunk
+        all.sort_by_key(|a| (a.chain, a.token_chain, a.token_address));
+        self.balances = all.into_iter();
+    }
+
+    /// Pop up to `MAX_BALANCE_ENTRIES_PER_CHUNK` already-sorted balances.
+    /// `None` once the buffer is empty. Each balance PDA is unique, so no
+    /// further grouping constraint applies beyond the per-chunk size cap.
+    fn next_balance_chunk(&mut self) -> Option<Vec<AccountRecord>> {
+        let mut chunk = Vec::with_capacity(MAX_BALANCE_ENTRIES_PER_CHUNK);
+        while chunk.len() < MAX_BALANCE_ENTRIES_PER_CHUNK {
+            match self.balances.next() {
+                Some(a) => chunk.push(a),
+                None => break,
+            }
+        }
+        (!chunk.is_empty()).then_some(chunk)
     }
 
     /// Greedy-pack consecutive relayer-chain-registration records up to the
