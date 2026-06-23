@@ -377,7 +377,9 @@ fn run_register_chain(
 }
 
 /// Each case mutates one body field to pin which body-header validator trips.
-/// Mock-vaa is on, so the Shim CPI is not the gate.
+/// The real Verify VAA Shim is loaded and the guardian signatures are re-signed
+/// over each mutated body's digest, so the Shim CPI always passes; the rejection
+/// comes from the program's own governance-header validation.
 #[test]
 fn register_chain_governance_header_violations_reject() {
     struct Case {
@@ -571,8 +573,10 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
         .expect("noreplay bucket missing from first result");
 
     // Second VAA uses a sequence in a different bucket (sequence / 1024
-    // differs). Under mock-noreplay `is_marked` only checks `bucket[0] != 0`,
-    // so hand the program a fresh unmarked bucket for the new address.
+    // differs), so it derives a DIFFERENT noreplay bucket PDA than body_a. The
+    // real `solana_noreplay` CPI is live; a fresh unmarked bucket is the
+    // correct input here precisely because that distinct PDA has never been
+    // written, not because any mock only inspects byte 0.
     let _ = post_bucket;
     let fresh_bucket = noreplay_bucket_unmarked();
     let body_b = build_register_chain_body(
