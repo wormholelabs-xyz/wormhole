@@ -48,9 +48,8 @@ solana-keccak-hasher.workspace = true
 # harness verifies each fixture's SHA-256 against a hard-coded constant before
 # loading; drift surfaces as a panic with the recompute-and-update recipe.
 sha2 = "=0.10.9"
-# Loads the JSON parity-vector corpus (`tests/fixtures/ntt_parity_vectors.json`)
-# consumed by the corpus-driven `tests/parity.rs` harness. Already pinned in the
-# workspace lockfile; no new resolution.
+# Loads the mainnet-vector corpus (`tests/fixtures/ntt_test_vectors.json`)
+# consumed by `tests/test_vectors.rs`. Already pinned in the workspace lockfile.
 serde_json.workspace = true
 
 [lints]
