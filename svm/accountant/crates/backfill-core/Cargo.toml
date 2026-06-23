@@ -1,0 +1,13 @@
+[package]
+name = "accountant-backfill-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/wormhole-foundation/wormhole"
+rust-version = "1.89"
+
+[dependencies]
+bytemuck = { workspace = true }
+pinocchio = { workspace = true }
+global-accountant-definitions = { path = "../definitions" }
+solana-address = { version = "2.6", features = ["curve25519"] }
