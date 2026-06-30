@@ -73,13 +73,11 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 	return resp.GetOffset(), nil
 }
 
-// updateFormat builds the v2 UpdateFormat that selects transactions in
-// LEDGER_EFFECTS shape (so ExercisedEvents — which carry choice results — are
-// included). A wildcard template filter matches every template; the watcher
-// narrows to the core-bridge template/choice in Go. When readAsParty is empty
-// the events of every party hosted on the participant are streamed
-// (filters_for_any_party); otherwise the stream is narrowed to that one party.
-func (c *grpcClient) updateFormat() *apiv2.UpdateFormat {
+// eventFormat builds the v2 EventFormat with a wildcard template filter (matches
+// every template; callers narrow in Go). When readAsParty is empty the events of
+// every party hosted on the participant are included (filters_for_any_party);
+// otherwise the view is narrowed to that one party.
+func (c *grpcClient) eventFormat() *apiv2.EventFormat {
 	wildcard := &apiv2.Filters{
 		Cumulative: []*apiv2.CumulativeFilter{{
 			IdentifierFilter: &apiv2.CumulativeFilter_WildcardFilter{
@@ -87,18 +85,70 @@ func (c *grpcClient) updateFormat() *apiv2.UpdateFormat {
 			},
 		}},
 	}
-	eventFormat := &apiv2.EventFormat{Verbose: true}
+	ef := &apiv2.EventFormat{Verbose: true}
 	if c.readAsParty == "" {
-		eventFormat.FiltersForAnyParty = wildcard
+		ef.FiltersForAnyParty = wildcard
 	} else {
-		eventFormat.FiltersByParty = map[string]*apiv2.Filters{c.readAsParty: wildcard}
+		ef.FiltersByParty = map[string]*apiv2.Filters{c.readAsParty: wildcard}
 	}
+	return ef
+}
+
+// updateFormat wraps eventFormat in a LEDGER_EFFECTS transaction format, so
+// ExercisedEvents — which carry choice results — are included.
+func (c *grpcClient) updateFormat() *apiv2.UpdateFormat {
 	return &apiv2.UpdateFormat{
 		IncludeTransactions: &apiv2.TransactionFormat{
 			TransactionShape: apiv2.TransactionShape_TRANSACTION_SHAPE_LEDGER_EFFECTS,
-			EventFormat:      eventFormat,
+			EventFormat:      c.eventFormat(),
 		},
 	}
+}
+
+// GetActiveContracts reads the ACS snapshot at the current ledger end for the
+// client's read-as party. Scoping to a single party (e.g. "public") is how a
+// reader confirms it can see the contracts that party observes.
+func (c *grpcClient) GetActiveContracts(ctx context.Context) ([]ActiveContract, error) {
+	off, err := c.GetLedgerEnd(ctx)
+	if err != nil {
+		return nil, err
+	}
+	stream, err := c.state.GetActiveContracts(ctx, &apiv2.GetActiveContractsRequest{
+		EventFormat:    c.eventFormat(),
+		ActiveAtOffset: off,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GetActiveContracts: %w", err)
+	}
+	var out []ActiveContract
+	for {
+		resp, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("GetActiveContracts stream: %w", err)
+		}
+		// Skip incomplete (un)assigned entries; we only want created contracts.
+		ac := resp.GetActiveContract()
+		if ac == nil {
+			continue
+		}
+		ce := ac.GetCreatedEvent()
+		if ce == nil {
+			continue
+		}
+		tid := ce.GetTemplateId()
+		out = append(out, ActiveContract{
+			TemplateID: TemplateID{
+				PackageID:  tid.GetPackageId(),
+				ModuleName: tid.GetModuleName(),
+				EntityName: tid.GetEntityName(),
+			},
+			ContractID: ce.GetContractId(),
+		})
+	}
+	return out, nil
 }
 
 func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64, tmpl TemplateID, choiceName string, out chan<- CantonMessageEvent) (*Subscription, error) {

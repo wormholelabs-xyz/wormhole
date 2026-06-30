@@ -46,6 +46,9 @@ func (f *fakeClient) SubscribeUpdates(_ context.Context, _ int64, _ cantonclient
 func (f *fakeClient) GetUpdateByOffset(_ context.Context, offset int64, _ cantonclient.TemplateID, _ string) (cantonclient.CantonTransaction, error) {
 	return f.byOffset[offset], nil
 }
+func (f *fakeClient) GetActiveContracts(_ context.Context) ([]cantonclient.ActiveContract, error) {
+	return nil, nil
+}
 func (f *fakeClient) Close() error { f.closeCalled = true; return nil }
 
 func testWatcher(msgC chan<- *common.MessagePublication) *Watcher {

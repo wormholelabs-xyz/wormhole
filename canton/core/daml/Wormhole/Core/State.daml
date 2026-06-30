@@ -22,6 +22,19 @@
 -- sequence without the operator's authority, matching EVM where anyone may call
 -- @publishMessage@. 'CoreState' holds only the shared config and governance
 -- state.
+--
+-- PUBLIC READABILITY: the durable templates ('CoreState', 'EmitterIdentity',
+-- 'Emitter') carry a @public@ party and list it as an 'observer', so the full
+-- record (config, emitter registrations, sequences, and published messages) is
+-- readable by anyone the participant grants read-as rights to that party.
+-- @public@ is an ordinary party with no choices and no authority — it only widens
+-- visibility. Granting arbitrary readers the right to read as @public@ is a
+-- Canton topology/participant concern, not enforced here; see canton/README.md.
+-- The @public@ party is chosen once at setup and stored on 'CoreState'; it is the
+-- SINGLE SOURCE OF TRUTH. 'ApproveEmitter' sources it from 'CoreState' (not from a
+-- requester-supplied value) so every 'Emitter'/'EmitterIdentity' is guaranteed to
+-- share the one canonical @public@ party, and it is carried forward on every
+-- recreate (publish, governance transition).
 module Wormhole.Core.State where
 
 import DA.Map (Map)
@@ -70,6 +83,7 @@ maxPayloadBytes = 750
 template CoreState
   with
     operator           : Party              -- owns/advances the singleton; no power over outcomes
+    public             : Party              -- read-only visibility party; see module header
     chainId            : Int                -- 72 (Canton)
     governanceChainId  : Int                -- 1 (Solana)
     governanceContract : Bytes32            -- governance emitter address
@@ -79,6 +93,9 @@ template CoreState
     consumedGovernance : Set Bytes32        -- replay protection, keyed by digest
   where
     signatory operator
+    -- @public@ is an ordinary party that the participant grants broad read-as
+    -- rights to; observing it makes the full record publicly readable.
+    observer public
     -- No contract key: Canton 3.x has no unique keys (see module header).
     -- Uniqueness is operator-enforced; the current cid is tracked off-ledger.
 
@@ -174,6 +191,11 @@ currentSetForUpgrade st =
 -- minting an immutable 'EmitterIdentity' and the publishing 'Emitter' bound to
 -- it, in a single transaction.
 --
+-- The @public@ visibility party is NOT chosen here — 'ApproveEmitter' sources it
+-- authoritatively from the operator's 'CoreState', so the durable emitter records
+-- are guaranteed to be observed by the one canonical @public@ party. The request
+-- itself is transient (archived on approval) and is not public-observed.
+--
 -- No address is assigned here: the 32-byte Wormhole emitter address is
 -- @keccak256(<EmitterIdentity contract-id>)@, derived by the guardian watcher (a
 -- 'ContractId' is opaque on-ledger, so it cannot be hashed in Daml). Because
@@ -191,14 +213,27 @@ template EmitterRequest
     observer operator
 
     choice ApproveEmitter : ContractId Emitter
+      with
+        coreStateCid : ContractId CoreState
+          -- ^ The operator's current 'CoreState'; its @public@ party is the single
+          -- source of truth for emitter visibility.
       controller operator
       do
+        -- Source the visibility party AUTHORITATIVELY from CoreState rather than
+        -- trusting a requester-supplied value, so every emitter is guaranteed to
+        -- be observed by the one canonical @public@ party. Assert the CoreState is
+        -- the operator's own (it is the signatory) to reject a foreign CoreState
+        -- carrying a different @public@.
+        cs <- fetch coreStateCid
+        assertMsg "ApproveEmitter: CoreState is not the operator's" (cs.operator == operator)
+        let public = cs.public
         -- The identity cid is known within this transaction; the 'Emitter' stores
         -- it (not a derived address) and the watcher hashes it off-ledger.
-        identityCid <- create EmitterIdentity with operator, owner = requester
+        identityCid <- create EmitterIdentity with operator, owner = requester, public
         create Emitter with
           operator
           owner = requester
+          public
           identity = identityCid
           sequence = 0
 
@@ -214,9 +249,10 @@ template EmitterIdentity
   with
     operator : Party
     owner    : Party
+    public   : Party   -- read-only visibility party; see module header
   where
     signatory operator
-    observer owner
+    observer owner, public
     -- No choices: immutability is the point. Re-minting an 'Emitter' from a fresh
     -- identity would reset the sequence to 0, so identities are strictly one-shot.
 
@@ -228,11 +264,15 @@ template Emitter
   with
     operator  : Party
     owner     : Party
-    identity  : ContractId EmitterIdentity  -- permanent identity; address = keccak256(this cid)
-    sequence  : Int      -- next sequence to assign
+    public    : Party                        -- read-only visibility party; see module header
+    identity  : ContractId EmitterIdentity   -- permanent identity; address = keccak256(this cid)
+    sequence  : Int                          -- next sequence to assign
   where
     signatory operator
-    observer owner
+    -- @owner@ controls publishing; @public@ makes the record (and every
+    -- published message) world-readable. @create this@ on each publish carries
+    -- @public@ forward unchanged.
+    observer owner, public
     -- No contract key (Canton 3.x); the owner tracks the current cid off-ledger.
 
     -- | Publish a Wormhole message. The choice result is the 'WormholeMessage'

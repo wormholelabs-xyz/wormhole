@@ -25,13 +25,15 @@ defaultGovernanceContract = "000000000000000000000000000000000000000000000000000
 -- the supplied governance configuration. The caller @create@s it as @operator@.
 mkInitialCoreState :
   Party        -- ^ operator
+  -> Party     -- ^ public (read-only visibility party)
   -> Int       -- ^ governance chain id
   -> Bytes32   -- ^ governance contract
   -> [Bytes20] -- ^ initial guardian addresses (set 0)
   -> CoreState
-mkInitialCoreState operator govChain govContract initialGuardians =
+mkInitialCoreState operator public govChain govContract initialGuardians =
   CoreState with
     operator
+    public
     chainId = cantonChainId
     governanceChainId = govChain
     governanceContract = normalizeHex govContract

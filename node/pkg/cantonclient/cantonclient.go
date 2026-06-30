@@ -132,8 +132,21 @@ type CantonClient interface {
 	// UpdateService.GetUpdateByOffset / GetTransactionByOffset.
 	GetUpdateByOffset(ctx context.Context, offset int64, tmpl TemplateID, choiceName string) (CantonTransaction, error)
 
+	// GetActiveContracts returns the active contracts visible to the client's
+	// read-as party (the ACS snapshot at the current ledger end). Used to read
+	// on-ledger state directly — e.g. to confirm a "public" party can read the
+	// core-bridge contracts it observes. Maps to StateService.GetActiveContracts.
+	GetActiveContracts(ctx context.Context) ([]ActiveContract, error)
+
 	// Close releases the underlying gRPC connection.
 	Close() error
+}
+
+// ActiveContract is a minimal view of a created contract from the ACS: the
+// template it instantiates and its contract id.
+type ActiveContract struct {
+	TemplateID TemplateID
+	ContractID string
 }
 
 // offsetTxIDLen is the fixed width of a Canton TxID (a 32-byte, left-padded,

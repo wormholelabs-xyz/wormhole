@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Bootstrap the Wormhole core bridge on the Canton sandbox: allocate the Operator
-# party and create the CoreState (with the devnet guardian) by running the
-# Test.TestCore:setup Daml Script.
+# and Public parties and create the CoreState (with the devnet guardian) by
+# running the Test.TestCore:setup Daml Script.
 #
 # The guardian does NOT need the Operator party id — the watcher uses a wildcard
 # "any party" filter (see canton/README.md §7.1). The party is surfaced below for
@@ -35,11 +35,18 @@ dpm script \
   --ledger-port "${PORT}" \
   --output-file "${RESULT}"
 
-# The setup script returns a tuple {"_1": <Party>, "_2": <ContractId>} as JSON.
-# The party id is the quoted value containing "::" (the namespace separator); the
-# contract id has none. Informational only (the watcher needs no party id).
-OPERATOR_PARTY="$(grep -oE '"[^"]*::[^"]*"' "${RESULT}" | head -1 | tr -d '"')"
+# The setup script returns a tuple {"_1": <Operator>, "_2": <Public>, "_3":
+# <ContractId>} as JSON. Party ids are the quoted values containing "::" (the
+# namespace separator) in tuple order — operator first, then public; the contract
+# id has none. The Operator party is informational (the watcher uses a wildcard
+# filter). The Public party is the read-only visibility party every contract
+# observes (canton/README.md §4.6); surface it so operators can grant read-as
+# rights or point a JSON Ledger API / PQS reader at it.
+PARTIES="$(grep -oE '"[^"]*::[^"]*"' "${RESULT}" | tr -d '"')"
+OPERATOR_PARTY="$(echo "${PARTIES}" | sed -n '1p')"
+PUBLIC_PARTY="$(echo "${PARTIES}" | sed -n '2p')"
 echo "[canton] setup complete; Operator party: ${OPERATOR_PARTY}"
+echo "[canton] public (read-only) party: ${PUBLIC_PARTY}"
 
 touch /canton/success
 echo "[canton] bootstrap done; sleeping"

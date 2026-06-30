@@ -29,20 +29,23 @@ devnetGuardianPubKey = "04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e
 govSetFeeVAA : Bytes
 govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479a78ed5f85017ff4a562a46379753e94abba1e69b9fec5d1994ac7d9fb145820727df0759bf4f80016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000010000000000000000000000000000000000000000000000000000000000436f726503004800000000000000000000000000000000000000000000000000000000000003e8"
 
--- | Bootstrap a devnet 'CoreState' as a fresh operator party.
-setup : Script (Party, ContractId CoreState)
+-- | Bootstrap a devnet 'CoreState' as a fresh operator party, allocating the
+-- read-only @public@ visibility party that every template observes.
+setup : Script (Party, Party, ContractId CoreState)
 setup = do
   operator <- allocateParty "Operator"
+  public <- allocateParty "Public"
   csId <- submit operator do
-    createCmd (mkInitialCoreState operator solanaGovernanceChainId defaultGovernanceContract [devnetGuardian])
-  pure (operator, csId)
+    createCmd (mkInitialCoreState operator public solanaGovernanceChainId defaultGovernanceContract [devnetGuardian])
+  pure (operator, public, csId)
 
 -- | Register an emitter for @owner@: mints its immutable 'EmitterIdentity' and
--- the 'Emitter' bound to it, and returns the 'Emitter' cid.
-registerEmitter : Party -> Party -> Script (ContractId Emitter)
-registerEmitter operator owner = do
+-- the 'Emitter' bound to it. Approval sources the @public@ visibility party
+-- authoritatively from the operator's 'CoreState'. Returns the 'Emitter' cid.
+registerEmitter : Party -> ContractId CoreState -> Party -> Script (ContractId Emitter)
+registerEmitter operator coreStateCid owner = do
   reqId <- submit owner do createCmd EmitterRequest with requester = owner, operator
-  submit operator do exerciseCmd reqId ApproveEmitter
+  submit operator do exerciseCmd reqId ApproveEmitter with coreStateCid
 
 -- | Publishing increments the per-emitter sequence and yields the expected
 -- 'WormholeMessage'. The message carries the emitter's immutable identity (the
@@ -50,9 +53,9 @@ registerEmitter operator owner = do
 -- address itself is not stored on-ledger, so there is nothing to assert here.
 testPublishMessage : Script ()
 testPublishMessage = do
-  (operator, _) <- setup
+  (operator, _, csId) <- setup
   alice <- allocateParty "Alice"
-  emitterId <- registerEmitter operator alice
+  emitterId <- registerEmitter operator csId alice
   Some em <- queryContractId alice emitterId
 
   msg0 <- submit alice do
@@ -73,12 +76,84 @@ testPublishMessage = do
   msg1.identity === em.identity
   pure ()
 
+-- | The @public@ party observes the durable templates, so it can read the full
+-- record of the 'CoreState', each 'Emitter' (including the advanced sequence), and
+-- the 'EmitterIdentity'. Publishing recreates the 'Emitter', and the canonical
+-- @public@ is preserved across every recreation. A party that is neither a
+-- stakeholder nor @public@ sees nothing.
+testPublicVisibility : Script ()
+testPublicVisibility = do
+  (operator, public, csId) <- setup
+  carol <- allocateParty "Carol"
+  emitterId <- registerEmitter operator csId carol
+
+  -- Publish twice, so the Emitter is recreated twice (sequence 0 -> 2).
+  _ <- submit carol do
+    exerciseCmd emitterId PublishMessage with nonce = 1, payload = "abcd", consistencyLevel = 0
+  [(emitterId2, _)] <- query @Emitter carol
+  _ <- submit carol do
+    exerciseCmd emitterId2 PublishMessage with nonce = 2, payload = "beef", consistencyLevel = 0
+
+  -- public reads the shared config singleton...
+  [(csId', cs)] <- query @CoreState public
+  csId' === csId
+  -- ...the twice-recreated emitter with its advanced sequence, still observed by
+  -- the canonical public party sourced from CoreState...
+  [(_, em)] <- query @Emitter public
+  em.sequence === 2
+  em.public === public
+  em.public === cs.public
+  -- ...and the emitter's immutable identity, also observed by public.
+  [(identId, ident)] <- query @EmitterIdentity public
+  em.identity === identId
+  ident.public === public
+
+  -- privacy still holds for a party that is neither stakeholder nor public.
+  outsider <- allocateParty "Outsider"
+  emsForOutsider <- query @Emitter outsider
+  length emsForOutsider === 0
+  csForOutsider <- query @CoreState outsider
+  length csForOutsider === 0
+  identsForOutsider <- query @EmitterIdentity outsider
+  length identsForOutsider === 0
+  pure ()
+
+-- | A governance transition archives and recreates 'CoreState'; the canonical
+-- @public@ party is carried forward, so the new 'CoreState' remains readable by
+-- public.
+testGovernancePreservesPublic : Script ()
+testGovernancePreservesPublic = do
+  (operator, public, csId) <- setup
+  newCsId <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  -- public still reads the recreated CoreState, and its public party is unchanged.
+  [(csId', cs)] <- query @CoreState public
+  csId' === newCsId
+  cs.public === public
+  cs.messageFee === 1000
+  pure ()
+
+-- | 'ApproveEmitter' sources @public@ from the operator's own 'CoreState'; a
+-- foreign 'CoreState' (a different operator's) cannot be used to approve.
+testApproveEmitterRejectsForeignCoreState : Script ()
+testApproveEmitterRejectsForeignCoreState = do
+  (operator, _, _) <- setup
+  -- A second, unrelated operator + CoreState (fresh operator party).
+  (_, _, foreignCsId) <- setup
+  dave <- allocateParty "Dave"
+  reqId <- submit dave do createCmd EmitterRequest with requester = dave, operator
+  -- Approving with the foreign CoreState must fail (operator mismatch / not visible).
+  submitMustFail operator do exerciseCmd reqId ApproveEmitter with coreStateCid = foreignCsId
+  pure ()
+
 -- | Payloads larger than 750 bytes are rejected.
 testPayloadTooLarge : Script ()
 testPayloadTooLarge = do
-  (operator, _) <- setup
+  (operator, _, csId) <- setup
   bob <- allocateParty "Bob"
-  emitterId <- registerEmitter operator bob
+  emitterId <- registerEmitter operator csId bob
   -- 751 bytes = 1502 hex chars.
   let bigPayload = mconcat (replicate 1502 "f")
   submitMustFail bob do
@@ -97,7 +172,7 @@ testQuorum = do
 -- | The current guardian set is installed at index 0 and never expires.
 testInitialGuardianSet : Script ()
 testInitialGuardianSet = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   Some cs <- queryContractId operator csId
   cs.guardianSetIndex === 0
   let gs = fromSome (Map.lookup 0 cs.guardianSets)
@@ -109,7 +184,7 @@ testInitialGuardianSet = do
 -- exercises the full keccak256 + DER + secp256k1WithEcdsaOnly path.
 testParseAndVerifyVAA : Script ()
 testParseAndVerifyVAA = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   vaa <- submit operator do
     exerciseCmd csId ParseAndVerifyVAA with
       encodedVAA = govSetFeeVAA
@@ -121,7 +196,7 @@ testParseAndVerifyVAA = do
 -- | A SetMessageFee governance VAA verifies and updates the message fee.
 testGovernanceSetMessageFee : Script ()
 testGovernanceSetMessageFee = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   newCsId <- submit operator do
     exerciseCmd csId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
@@ -137,26 +212,41 @@ testGovernanceSetMessageFee = do
 -- contract-id, which the Go test recomputes to check the mapping.
 integrationPublish : Script Party
 integrationPublish = do
-  (operator, _) <- setup
+  (operator, _, csId) <- setup
   owner <- allocateParty "IntegrationEmitter"
-  emitterId <- registerEmitter operator owner
+  emitterId <- registerEmitter operator csId owner
   _ <- submit owner do
     exerciseCmd emitterId PublishMessage with nonce = 42, payload = "11223344", consistencyLevel = 0
   pure operator
 
+-- | Integration entrypoint for the public-read test: set up the bridge, register
+-- an emitter, and publish once — then return the PUBLIC party so the Go test can
+-- read the active-contract set AS that party and confirm public observability
+-- works over the real Ledger API (not just in-memory Daml Script).
+integrationPublicParty : Script Party
+integrationPublicParty = do
+  (operator, public, csId) <- setup
+  owner <- allocateParty "PublicReadEmitter"
+  emitterId <- registerEmitter operator csId owner
+  _ <- submit owner do
+    exerciseCmd emitterId PublishMessage with nonce = 7, payload = "abcdef", consistencyLevel = 0
+  pure public
+
 -- | Exercise the auto-generated Archive choice on each template (for coverage).
 testArchives : Script ()
 testArchives = do
-  (operator, csId) <- setup
-  submit operator do archiveCmd csId            -- Archive CoreState
-  alice <- allocateParty "ArchAlice"
-  reqId <- submit alice do createCmd EmitterRequest with requester = alice, operator
-  submit alice do archiveCmd reqId              -- Archive EmitterRequest
+  (operator, _, csId) <- setup
+  -- Register an emitter (which needs a live CoreState) BEFORE archiving CoreState.
   bob <- allocateParty "ArchBob"
-  emId <- registerEmitter operator bob
+  emId <- registerEmitter operator csId bob
   submit operator do archiveCmd emId            -- Archive Emitter
   -- The immutable identity is normally never archived; exercise it here for
   -- coverage (operator is its signatory).
   [(identId, _)] <- query @EmitterIdentity operator
   submit operator do archiveCmd identId         -- Archive EmitterIdentity
+  -- A standalone EmitterRequest, to exercise its Archive choice.
+  alice <- allocateParty "ArchAlice"
+  reqId <- submit alice do createCmd EmitterRequest with requester = alice, operator
+  submit alice do archiveCmd reqId              -- Archive EmitterRequest
+  submit operator do archiveCmd csId            -- Archive CoreState (last)
   pure ()
