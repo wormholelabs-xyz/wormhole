@@ -37,24 +37,27 @@ setup = do
     createCmd (mkInitialCoreState operator solanaGovernanceChainId defaultGovernanceContract [devnetGuardian])
   pure (operator, csId)
 
--- | Register an emitter for @owner@ with the given address.
-registerEmitter : Party -> Party -> Bytes32 -> Script (ContractId Emitter)
-registerEmitter operator owner addr = do
+-- | Register an emitter for @owner@: mints its immutable 'EmitterIdentity' and
+-- the 'Emitter' bound to it, and returns the 'Emitter' cid.
+registerEmitter : Party -> Party -> Script (ContractId Emitter)
+registerEmitter operator owner = do
   reqId <- submit owner do createCmd EmitterRequest with requester = owner, operator
-  submit operator do exerciseCmd reqId ApproveEmitter with emitterAddress = addr
+  submit operator do exerciseCmd reqId ApproveEmitter
 
 -- | Publishing increments the per-emitter sequence and yields the expected
--- 'WormholeMessage'.
+-- 'WormholeMessage'. The message carries the emitter's immutable identity (the
+-- watcher derives the 32-byte address as keccak256 of that contract-id); the
+-- address itself is not stored on-ledger, so there is nothing to assert here.
 testPublishMessage : Script ()
 testPublishMessage = do
   (operator, _) <- setup
   alice <- allocateParty "Alice"
-  let aliceAddr = "00000000000000000000000000000000000000000000000000000000000000aa"
-  emitterId <- registerEmitter operator alice aliceAddr
+  emitterId <- registerEmitter operator alice
+  Some em <- queryContractId alice emitterId
 
   msg0 <- submit alice do
     exerciseCmd emitterId PublishMessage with nonce = 7, payload = "deadbeef", consistencyLevel = 0
-  msg0.sender === normalizeHex aliceAddr
+  msg0.identity === em.identity
   msg0.sequence === 0
   msg0.nonce === 7
   msg0.payload === "deadbeef"
@@ -65,6 +68,9 @@ testPublishMessage = do
   msg1 <- submit alice do
     exerciseCmd emitterId2 PublishMessage with nonce = 8, payload = "cafe", consistencyLevel = 0
   msg1.sequence === 1
+  -- The recreated Emitter carries the same identity forward, so the derived
+  -- address is stable across publishes.
+  msg1.identity === em.identity
   pure ()
 
 -- | Payloads larger than 750 bytes are rejected.
@@ -72,7 +78,7 @@ testPayloadTooLarge : Script ()
 testPayloadTooLarge = do
   (operator, _) <- setup
   bob <- allocateParty "Bob"
-  emitterId <- registerEmitter operator bob "00000000000000000000000000000000000000000000000000000000000000bb"
+  emitterId <- registerEmitter operator bob
   -- 751 bytes = 1502 hex chars.
   let bigPayload = mconcat (replicate 1502 "f")
   submitMustFail bob do
@@ -123,19 +129,17 @@ testGovernanceSetMessageFee = do
   Some cs <- queryContractId operator newCsId
   cs.messageFee === 1000
 
--- The emitter address used by the Go integration test.
-integrationEmitterAddr : Bytes32
-integrationEmitterAddr = "00000000000000000000000000000000000000000000000000000000000000ee"
-
 -- | Integration entrypoint, invoked by the Go integration test via
 -- `dpm script` (NOT by `dpm test`): set up the bridge, register an emitter,
 -- publish one message (nonce 42, payload 0x11223344), and return the Operator
--- party so the watcher can read the ledger as it.
+-- party so the watcher can read the ledger as it. The emitter address is not
+-- chosen here: the watcher derives it as keccak256 of the emitter's identity
+-- contract-id, which the Go test recomputes to check the mapping.
 integrationPublish : Script Party
 integrationPublish = do
   (operator, _) <- setup
   owner <- allocateParty "IntegrationEmitter"
-  emitterId <- registerEmitter operator owner integrationEmitterAddr
+  emitterId <- registerEmitter operator owner
   _ <- submit owner do
     exerciseCmd emitterId PublishMessage with nonce = 42, payload = "11223344", consistencyLevel = 0
   pure operator
@@ -149,6 +153,10 @@ testArchives = do
   reqId <- submit alice do createCmd EmitterRequest with requester = alice, operator
   submit alice do archiveCmd reqId              -- Archive EmitterRequest
   bob <- allocateParty "ArchBob"
-  emId <- registerEmitter operator bob "00000000000000000000000000000000000000000000000000000000000000cc"
+  emId <- registerEmitter operator bob
   submit operator do archiveCmd emId            -- Archive Emitter
+  -- The immutable identity is normally never archived; exercise it here for
+  -- coverage (operator is its signatory).
+  [(identId, _)] <- query @EmitterIdentity operator
+  submit operator do archiveCmd identId         -- Archive EmitterIdentity
   pure ()

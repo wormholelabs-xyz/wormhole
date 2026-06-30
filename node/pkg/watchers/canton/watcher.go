@@ -9,8 +9,10 @@ package canton
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
@@ -21,6 +23,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/supervisor"
 	"github.com/certusone/wormhole/node/pkg/watchers"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -109,21 +112,31 @@ func (e *Watcher) templateID() cantonclient.TemplateID {
 // processMessage turns a decoded Canton message event into a
 // common.MessagePublication and publishes it to the message channel.
 //
+// The 32-byte emitter address is keccak256 of the emitter's immutable
+// EmitterIdentity contract-id: the guardian is the sole source of truth for the
+// address (it is not stored on-ledger), and because Canton contract-ids are
+// globally unique by construction this yields a stable, collision-free address
+// per emitter. See canton/README.md §4.2.
+//
 // The VAA timestamp is taken from the transaction's ledger effective time
 // (whitepaper 0001/0004: the timestamp is block-derived). The TxID is the
 // participant offset encoded as 32 big-endian bytes, so reobservation can decode
 // it back into an offset.
 func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessageEvent, isReobservation bool) {
-	if len(ev.Message.Sender) != 32 {
-		logger.Error("dropping Canton message with malformed sender",
-			zap.Int("senderLen", len(ev.Message.Sender)),
+	// Canton serializes contract-ids as a lowercase hex string (no 0x prefix); be
+	// tolerant of a prefix anyway. keccak256 of the decoded bytes is exactly 32
+	// bytes, which fills the whole vaa.Address.
+	cidBytes, err := hex.DecodeString(strings.TrimPrefix(ev.Message.IdentityCID, "0x"))
+	if err != nil || len(cidBytes) == 0 {
+		logger.Error("dropping Canton message with malformed identity contract-id",
+			zap.String("identityCID", ev.Message.IdentityCID),
 			zap.Int64("offset", ev.Offset))
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
 
 	var emitter vaa.Address
-	copy(emitter[:], ev.Message.Sender)
+	copy(emitter[:], ethcrypto.Keccak256(cidBytes))
 
 	timestamp := ev.EffectiveAt
 	if timestamp.IsZero() {

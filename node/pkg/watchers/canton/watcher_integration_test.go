@@ -14,6 +14,7 @@ package canton
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -144,12 +146,19 @@ func TestCantonWatcherIntegration(t *testing.T) {
 
 	select {
 	case ev := <-eventChan:
-		// The decoded event from the live ledger.
-		require.Len(t, ev.Message.Sender, 32)
-		assert.Equal(t, byte(0xee), ev.Message.Sender[31])
+		// The decoded event from the live ledger. The address is no longer a fixed
+		// constant: it is keccak256 of the emitter's identity contract-id, which we
+		// recompute here from the cid the live ledger assigned.
+		require.NotEmpty(t, ev.Message.IdentityCID)
 		assert.Equal(t, uint64(0), ev.Message.Sequence)
 		assert.Equal(t, uint32(42), ev.Message.Nonce)
 		assert.Equal(t, []byte{0x11, 0x22, 0x33, 0x44}, ev.Message.Payload)
+
+		cidBytes, err := hex.DecodeString(strings.TrimPrefix(ev.Message.IdentityCID, "0x"))
+		require.NoError(t, err)
+		var wantAddr vaa.Address
+		copy(wantAddr[:], ethcrypto.Keccak256(cidBytes))
+		assert.NotEqual(t, vaa.Address{}, wantAddr, "derived emitter address must be non-zero")
 
 		// Feed it through the watcher to confirm the MessagePublication mapping.
 		msgC := make(chan *common.MessagePublication, 1)
@@ -159,7 +168,7 @@ func TestCantonWatcherIntegration(t *testing.T) {
 		assert.Equal(t, vaa.ChainIDCanton, mp.EmitterChain)
 		assert.Equal(t, uint64(0), mp.Sequence)
 		assert.Equal(t, uint32(42), mp.Nonce)
-		assert.Equal(t, byte(0xee), mp.EmitterAddress[31])
+		assert.Equal(t, wantAddr, mp.EmitterAddress)
 		assert.Equal(t, cantonclient.OffsetToTxID(ev.Offset), mp.TxID)
 	case err := <-sub.Err():
 		t.Fatalf("subscription error: %v", err)
