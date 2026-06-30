@@ -209,8 +209,10 @@ func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 
 // decodeWormholeMessage maps a Ledger API Value (a WormholeMessage record) to a
 // CantonMessage. See Wormhole.Core.State.WormholeMessage for the field set:
-// sender/payload are Daml Text (hex) -> Value.text; sequence/nonce/
-// consistencyLevel are Daml Int -> Value.int64.
+// identity is a Daml ContractId -> Value.contract_id (the hex contract-id of the
+// emitter's EmitterIdentity, which the watcher hashes into the emitter address);
+// payload is Daml Text (hex) -> Value.text; sequence/nonce/consistencyLevel are
+// Daml Int -> Value.int64.
 func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	rec := v.GetRecord()
 	if rec == nil {
@@ -220,12 +222,9 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	for _, f := range rec.GetFields() {
 		fields[f.GetLabel()] = f.GetValue()
 	}
-	sender, err := hexField(fields, "sender")
+	identityCID, err := contractIDField(fields, "identity")
 	if err != nil {
 		return CantonMessage{}, err
-	}
-	if len(sender) != 32 {
-		return CantonMessage{}, fmt.Errorf("sender is %d bytes, want 32", len(sender))
 	}
 	payload, err := hexField(fields, "payload")
 	if err != nil {
@@ -247,12 +246,26 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 		return CantonMessage{}, fmt.Errorf("field out of range (seq=%d nonce=%d cl=%d)", seq, nonce, cl)
 	}
 	return CantonMessage{
-		Sender:           sender,
+		IdentityCID:      identityCID,
 		Sequence:         uint64(seq),
 		Nonce:            uint32(nonce),
 		ConsistencyLevel: uint8(cl),
 		Payload:          payload,
 	}, nil
+}
+
+// contractIDField reads a Daml ContractId field, returned by the Ledger API as a
+// non-empty contract_id string (Canton's hex-encoded contract-id).
+func contractIDField(fields map[string]*apiv2.Value, label string) (string, error) {
+	v, ok := fields[label]
+	if !ok {
+		return "", fmt.Errorf("missing field %q", label)
+	}
+	cid := v.GetContractId()
+	if cid == "" {
+		return "", fmt.Errorf("field %q is not a contract id", label)
+	}
+	return cid, nil
 }
 
 func hexField(fields map[string]*apiv2.Value, label string) ([]byte, error) {
