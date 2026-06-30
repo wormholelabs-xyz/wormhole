@@ -2,17 +2,35 @@ package canton
 
 import (
 	"context"
+	"encoding/hex"
 	"testing"
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
 )
+
+// sampleCID is a representative authenticated Canton contract-id (hex): a 0x00
+// version prefix, a 32-byte discriminator, and a suffix. The emitter address is
+// keccak256 of its decoded bytes.
+const sampleCID = "00d3b1f4a2c6e7890a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778" +
+	"8120abccddeeff00112233445566778899aabbccddeeff0011223344556677"
+
+// wantAddr is the emitter address the watcher must derive from sampleCID.
+func wantAddr(t *testing.T) vaa.Address {
+	t.Helper()
+	cidBytes, err := hex.DecodeString(sampleCID)
+	require.NoError(t, err)
+	var a vaa.Address
+	copy(a[:], ethcrypto.Keccak256(cidBytes))
+	return a
+}
 
 // fakeClient is a CantonClient that returns canned data for tests.
 type fakeClient struct {
@@ -34,12 +52,6 @@ func testWatcher(msgC chan<- *common.MessagePublication) *Watcher {
 	return NewWatcher("canton:5011", "pkg123", "Operator::ns", true, msgC, make(chan *gossipv1.ObservationRequest))
 }
 
-func sender32() []byte {
-	b := make([]byte, 32)
-	b[31] = 0xaa
-	return b
-}
-
 func TestProcessMessageBuildsObservation(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
 	w := testWatcher(msgC)
@@ -50,7 +62,7 @@ func TestProcessMessageBuildsObservation(t *testing.T) {
 		UpdateID:    "update-1",
 		EffectiveAt: ts,
 		Message: cantonclient.CantonMessage{
-			Sender:           sender32(),
+			IdentityCID:      sampleCID,
 			Sequence:         7,
 			Nonce:            99,
 			ConsistencyLevel: 0,
@@ -67,24 +79,32 @@ func TestProcessMessageBuildsObservation(t *testing.T) {
 	assert.False(t, got.IsReobservation)
 	// TxID is the offset encoded as 32 big-endian bytes.
 	assert.Equal(t, cantonclient.OffsetToTxID(42), got.TxID)
-	// Emitter address is the 32-byte sender.
-	assert.Equal(t, byte(0xaa), got.EmitterAddress[31])
+	// Emitter address is keccak256 of the identity contract-id's bytes.
+	assert.Equal(t, wantAddr(t), got.EmitterAddress)
 }
 
-func TestProcessMessageDropsBadSender(t *testing.T) {
-	msgC := make(chan *common.MessagePublication, 1)
-	w := testWatcher(msgC)
+func TestProcessMessageDropsBadIdentity(t *testing.T) {
+	for name, cid := range map[string]string{
+		"not hex":    "zzzz",
+		"empty":      "",
+		"odd length": "abc",
+	} {
+		t.Run(name, func(t *testing.T) {
+			msgC := make(chan *common.MessagePublication, 1)
+			w := testWatcher(msgC)
 
-	w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
-		Offset:      1,
-		EffectiveAt: time.Unix(1, 0),
-		Message:     cantonclient.CantonMessage{Sender: []byte{0x01, 0x02}}, // not 32 bytes
-	}, false)
+			w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
+				Offset:      1,
+				EffectiveAt: time.Unix(1, 0),
+				Message:     cantonclient.CantonMessage{IdentityCID: cid},
+			}, false)
 
-	select {
-	case <-msgC:
-		t.Fatal("expected no observation for malformed sender")
-	default:
+			select {
+			case <-msgC:
+				t.Fatal("expected no observation for malformed identity contract-id")
+			default:
+			}
+		})
 	}
 }
 
@@ -100,9 +120,9 @@ func TestHandleReobservation(t *testing.T) {
 				UpdateID:    "update-reobs",
 				EffectiveAt: time.Unix(1_700_000_001, 0).UTC(),
 				Messages: []cantonclient.CantonMessage{{
-					Sender:   sender32(),
-					Sequence: 3,
-					Payload:  []byte{0x01},
+					IdentityCID: sampleCID,
+					Sequence:    3,
+					Payload:     []byte{0x01},
 				}},
 			},
 		},
@@ -117,6 +137,7 @@ func TestHandleReobservation(t *testing.T) {
 	assert.True(t, got.IsReobservation)
 	assert.Equal(t, uint64(3), got.Sequence)
 	assert.Equal(t, cantonclient.OffsetToTxID(offset), got.TxID)
+	assert.Equal(t, wantAddr(t), got.EmitterAddress)
 }
 
 func TestHandleReobservationWrongChainPanics(t *testing.T) {
