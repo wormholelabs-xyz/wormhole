@@ -39,11 +39,20 @@ import Wormhole.Core.VAA
 -- @ExercisedEvent.exercise_result@ on the Ledger-API stream. Equivalent to the
 -- EVM @LogMessagePublished@ event.
 --
+-- Instead of a 32-byte @sender@, the record carries the publishing emitter's
+-- immutable 'EmitterIdentity' contract-id. The 32-byte Wormhole emitter address
+-- is @keccak256(<that contract-id>)@, derived by the watcher (a 'ContractId' is
+-- opaque on-ledger, so it cannot be hashed in Daml). The guardian is thus the
+-- sole source of truth for the address — it is never stored on-ledger and the
+-- operator cannot set or spoof it. Contract-ids are globally unique by
+-- construction (the Canton "unicum"), so distinct identities map to distinct
+-- addresses without any operator-side deduplication. See canton/README.md §4.2.
+--
 -- The block-derived 'timestamp' (whitepaper 0001/0004) is supplied by the
 -- watcher from the transaction's ledger effective time, NOT from this record, so
 -- it is intentionally absent here.
 data WormholeMessage = WormholeMessage with
-    sender           : Bytes32   -- emitter address
+    identity         : ContractId EmitterIdentity  -- emitter identity; address = keccak256(cid)
     sequence         : Int       -- uint64
     nonce            : Int       -- uint32
     consistencyLevel : Int       -- uint8
@@ -162,15 +171,17 @@ currentSetForUpgrade st =
 ----------------------------------------------------------------------
 
 -- | A request by @requester@ to be granted an emitter. The operator approves it,
--- assigning the 32-byte @emitterAddress@ (by convention @keccak256(partyId)@,
--- computed off-ledger).
+-- minting an immutable 'EmitterIdentity' and the publishing 'Emitter' bound to
+-- it, in a single transaction.
 --
--- ADDRESS UNIQUENESS: with no unique contract keys on Canton 3.x, the operator
--- is responsible for not approving two emitters with the same @emitterAddress@
--- (two emitters sharing an address could collide sequences / spoof identity).
--- The operator MUST check its own active 'Emitter' set before approving. This is
--- a security-relevant operator invariant (see module header) and is documented
--- as a validation item in canton/README.md.
+-- No address is assigned here: the 32-byte Wormhole emitter address is
+-- @keccak256(<EmitterIdentity contract-id>)@, derived by the guardian watcher (a
+-- 'ContractId' is opaque on-ledger, so it cannot be hashed in Daml). Because
+-- contract-ids are globally unique by construction, addresses are unique without
+-- the operator having to scan its active set — and a single party may hold many
+-- emitters (each 'ApproveEmitter' mints a fresh identity). This replaces the
+-- former @keccak256(partyId)@ convention and its operator-enforced uniqueness
+-- invariant.
 template EmitterRequest
   with
     requester : Party
@@ -180,24 +191,45 @@ template EmitterRequest
     observer operator
 
     choice ApproveEmitter : ContractId Emitter
-      with emitterAddress : Bytes32
       controller operator
       do
+        -- The identity cid is known within this transaction; the 'Emitter' stores
+        -- it (not a derived address) and the watcher hashes it off-ledger.
+        identityCid <- create EmitterIdentity with operator, owner = requester
         create Emitter with
           operator
           owner = requester
-          emitterAddress = normalizeHex emitterAddress
+          identity = identityCid
           sequence = 0
 
--- | A registered emitter. The per-emitter sequence counter lives here so the
--- owner can publish permissionlessly (without operator authority). Mirrors a
+-- | The immutable, permanent identity of an emitter. Created once per approval
+-- and NEVER archived: its contract-id is the stable on-chain identity, and the
+-- 32-byte Wormhole emitter address is @keccak256(<this contract-id>)@, derived by
+-- the watcher. Keeping it alive (it has no consuming choice) is exactly what
+-- makes that address stable for the life of the emitter — the publishing
+-- 'Emitter' churns its own cid on every send, so it cannot itself be the
+-- identity. Mirrors the identity half of a Sui @EmitterCap@ (its mutable sequence
+-- lives in 'Emitter').
+template EmitterIdentity
+  with
+    operator : Party
+    owner    : Party
+  where
+    signatory operator
+    observer owner
+    -- No choices: immutability is the point. Re-minting an 'Emitter' from a fresh
+    -- identity would reset the sequence to 0, so identities are strictly one-shot.
+
+-- | A registered emitter: the per-emitter sequence counter, bound to its
+-- immutable 'EmitterIdentity'. The sequence lives here (not in 'CoreState') so
+-- the owner can publish permissionlessly (without operator authority). Mirrors a
 -- Sui @EmitterCap@.
 template Emitter
   with
-    operator       : Party
-    owner          : Party
-    emitterAddress : Bytes32
-    sequence       : Int      -- next sequence to assign
+    operator  : Party
+    owner     : Party
+    identity  : ContractId EmitterIdentity  -- permanent identity; address = keccak256(this cid)
+    sequence  : Int      -- next sequence to assign
   where
     signatory operator
     observer owner
@@ -205,11 +237,11 @@ template Emitter
 
     -- | Publish a Wormhole message. The choice result is the 'WormholeMessage'
     -- the watcher observes (decoded directly from @exercise_result@). The
-    -- sequence-bumped 'Emitter' is recreated as a side effect; the owner obtains
-    -- its new contract-id from the transaction's created events (their app
-    -- tracks it from the ledger stream) for the next publish — there is no
-    -- contract key to look it up by on Canton 3.x. Mirrors
-    -- @Implementation.publishMessage@.
+    -- sequence-bumped 'Emitter' is recreated as a side effect, carrying the same
+    -- 'identity' forward so the derived address is unchanged; the owner obtains
+    -- its new contract-id from the transaction's created events (their app tracks
+    -- it from the ledger stream) for the next publish — there is no contract key
+    -- to look it up by on Canton 3.x. Mirrors @Implementation.publishMessage@.
     choice PublishMessage : WormholeMessage
       with
         nonce            : Int
@@ -222,7 +254,7 @@ template Emitter
         -- see README "Open Questions". When wired, the fee is checked here.
         create this with sequence = sequence + 1
         pure WormholeMessage with
-          sender = emitterAddress
+          identity
           sequence
           nonce
           consistencyLevel
