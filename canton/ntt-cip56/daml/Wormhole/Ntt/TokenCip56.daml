@@ -1,0 +1,127 @@
+-- | CIP-56 (Canton Network Token Standard) implementations of the 'NttToken'
+-- seam, built against the vendored token-standard interface DARs. These work for
+-- Canton Coin (Amulet) or any conforming token — no per-token code.
+--
+--   * lock/unlock ('Cip56CustodyToken') via 'TransferFactory_Transfer': lock =
+--     transfer sender -> custody; unlock = transfer custody -> recipient.
+--   * burn/mint ('Cip56BurnMintToken') via 'BurnMintFactory_BurnMint': burn =
+--     spend @inputHoldingCids@ with no outputs; mint = one output to recipient.
+--
+-- Each hook stores the registry factory contract-id (obtained off-ledger from
+-- the token's registry / scan API) and the token 'InstrumentId'; the per-transfer
+-- holdings + choice context arrive through the widened 'NttToken' seam. The
+-- concrete disclosed contracts referenced by @extraArgs@ are attached by the
+-- submitter at command time (off-ledger, via disclosures), exactly as
+-- cn-quickstart's `RegistryApi.getTransferFactory` + `submitWithDisclosures` do.
+--
+-- Amounts: NTT carries an integer 'TrimmedAmount'; CIP-56 holdings are 'Decimal'.
+-- 'trimmedToDecimal' converts (value = amount / 10^decimals).
+module Wormhole.Ntt.TokenCip56 where
+
+import DA.Time (days, addRelTime)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (ExtraArgs (..), emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1 (Transfer (..), TransferFactory, TransferFactory_Transfer (..))
+import Splice.Api.Token.BurnMintV1 (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
+import Wormhole.Ntt.Token
+
+-- | Convert an NTT 'TrimmedAmount' to a CIP-56 'Decimal' token amount:
+-- value = amount / 10^decimals.
+trimmedToDecimal : TrimmedAmount -> Decimal
+trimmedToDecimal ta = intToDecimal ta.amount / intToDecimal (tenPow ta.decimals)
+
+----------------------------------------------------------------------
+-- lock / unlock via the transfer factory
+----------------------------------------------------------------------
+
+template Cip56CustodyToken
+  with
+    admin              : Party                        -- token registry admin (its authority backs transfers)
+    manager            : Party                        -- the NTT operator that drives the seam
+    custody            : Party                        -- holds locked funds between send and receive
+    instrumentId       : InstrumentId
+    transferFactoryCid : ContractId TransferFactory   -- the registry's transfer factory
+  where
+    signatory admin
+    observer manager
+
+    interface instance NttToken for Cip56CustodyToken where
+      view = NttTokenView with admin, manager, mode = LockUnlock
+
+      -- Lock: sender -> custody.
+      lockOrBurnImpl sender amount inputHoldingCids extraArgs = do
+        now <- getTime
+        _ <- exercise transferFactoryCid TransferFactory_Transfer with
+               expectedAdmin = instrumentId.admin
+               transfer = Transfer with
+                 sender
+                 receiver = custody
+                 amount = trimmedToDecimal amount
+                 instrumentId
+                 requestedAt = now
+                 executeBefore = now `addRelTime` days 1
+                 inputHoldingCids
+                 meta = emptyMetadata
+               extraArgs
+        pure ()
+
+      -- Unlock: custody -> recipient, spending the custody holdings.
+      mintOrUnlockImpl recipient amount inputHoldingCids extraArgs = do
+        now <- getTime
+        _ <- exercise transferFactoryCid TransferFactory_Transfer with
+               expectedAdmin = instrumentId.admin
+               transfer = Transfer with
+                 sender = custody
+                 receiver = recipient
+                 amount = trimmedToDecimal amount
+                 instrumentId
+                 requestedAt = now
+                 executeBefore = now `addRelTime` days 1
+                 inputHoldingCids
+                 meta = emptyMetadata
+               extraArgs
+        pure ()
+
+----------------------------------------------------------------------
+-- burn / mint via the burn-mint factory
+----------------------------------------------------------------------
+
+template Cip56BurnMintToken
+  with
+    admin              : Party
+    manager            : Party
+    instrumentId       : InstrumentId
+    burnMintFactoryCid : ContractId BurnMintFactory
+  where
+    signatory admin
+    observer manager
+
+    interface instance NttToken for Cip56BurnMintToken where
+      view = NttTokenView with admin, manager, mode = BurnMint
+
+      -- Burn: spend the sender's holdings, no outputs.
+      lockOrBurnImpl sender _amount inputHoldingCids extraArgs = do
+        _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
+               expectedAdmin = instrumentId.admin
+               outputs = []
+               instrumentId
+               inputHoldingCids
+               extraArgs
+               extraActors = [sender]
+        pure ()
+
+      -- Mint: one output to the recipient, no inputs.
+      mintOrUnlockImpl recipient amount _inputHoldingCids extraArgs = do
+        _ <- exercise burnMintFactoryCid BurnMintFactory_BurnMint with
+               expectedAdmin = instrumentId.admin
+               outputs =
+                 [ BurnMintOutput with
+                     owner = recipient
+                     amount = trimmedToDecimal amount
+                     context = extraArgs.context
+                 ]
+               instrumentId
+               inputHoldingCids = []
+               extraArgs
+               extraActors = []
+        pure ()

@@ -698,73 +698,103 @@ covered by the integration test in §9.
 
 ---
 
-## 10. Integrating higher-level protocols (NTT, token bridge)
+## 10. Native Token Transfers (NTT)
 
-Higher-level protocols don't change the core bridge; they use it as two
-primitives — **publish** (emit a message) and **verify** (check an inbound VAA).
-[NTT](https://github.com/wormhole-foundation/native-token-transfers) is the
-representative case: its on-chain shape is a **Manager** plus one or more
-**Transceivers**, and the `WormholeTransceiver` is the piece that touches this
-bridge. The core-bridge **emitter is the Wormhole transceiver**; peers on other
-chains are configured by `(chainId, emitterAddress)`.
+[NTT](https://github.com/wormhole-foundation/native-token-transfers) is
+implemented as a separate, uploadable package set on top of the core bridge —
+the core bridge is untouched and used as two primitives, **publish** and
+**verify**. NTT's on-chain shape is a **Manager** plus a **Wormhole
+transceiver**; on Canton the transceiver *is* a core `Emitter`.
 
-### Emitter / send path
+Packages (all data-depend on the built `wormhole-core` DAR, as `test` does):
 
-Each NTT deployment runs under its **own admin party** and registers its **own
-`Emitter`**, so one-emitter-per-party is sufficient — no salt needed. The
-transceiver publishes by exercising `PublishMessage` on its `Emitter`
-(`controller owner`), so **sends need no operator authority**, and the
-transceiver's stable `emitterAddress` is exactly what other chains register as
-the peer.
+| Package | Contents |
+| --- | --- |
+| `ntt-token` (`wormhole-ntt-token`) | The `NttToken` interface (token effect seam) + `TokenMode`, `TrimmedAmount`. Interface-only, per Daml's upgradeability rule. Depends on the CIP-56 `holding`/`metadata` interfaces (the seam carries `[ContractId Holding]` + `ExtraArgs`). |
+| `ntt` (`wormhole-ntt`) | `Payload` (wire codec), `Manager` (`NttManagerIdentity`, `NttManager`, deployment/send/receive/peers). |
+| `ntt-cip56` (`wormhole-ntt-cip56`) | Real CIP-56 implementations of `NttToken` — `Cip56CustodyToken` (lock/unlock via `TransferFactory`) and `Cip56BurnMintToken` (burn/mint via `BurnMintFactory`). Works for Canton Coin (Amulet) or any conforming token. See [`ntt-cip56/README.md`](ntt-cip56/README.md). |
+| `vendor/token-standard/` | Vendored CIP-56 interface DARs (`splice-api-token-*-1.0.0`), from cn-quickstart — see [`vendor/token-standard/README.md`](vendor/token-standard/README.md). |
 
-### Verify / receive path
+### Deployment — permissionless, guardian-hosted
 
-A receiving transceiver verifies an inbound VAA, then the manager mints/releases.
-The recommended, lowest-friction integrator API:
+Anyone can stand up a deployment (bring your own token, pick a mode). The
+guardian `operator` is the sole signatory/host (mirroring `CoreState`); it has no
+power over transfer contents. Flow: the deployer (`admin`) registers a core
+`Emitter` (the transceiver) via the existing `EmitterRequest`→`ApproveEmitter`
+flow, then submits an `NttDeploymentRequest` (transceiver `EmitterIdentity`, token
+hook, mode, decimals); the operator's `ApproveDeployment` mints an immutable
+`NttManagerIdentity` and the `NttManager`.
 
-1. **Hint-free pure verification.** With guardian pubkeys persisted in the set
-   ([§5](#5-on-chain-signature-verification-the-crux)), `verifyVAA` is a pure
-   function taking only `(guardianSet, vaaBytes)` — integrators `import` it: no
-   operator interaction, no pubkey hints.
-2. **Read access to the guardian set** via Canton **explicit disclosure**: the
-   operator publishes the active guardian-set contract and shares its disclosure
-   blob through a small read endpoint; the relayer attaches it as a
-   `DisclosedContract`. (Alternative: a public-observer guardian-set snapshot so
-   the relayer submits a bare command — only worthwhile if the deployment already
-   has a shared "public" party.)
-3. **Integrators own replay protection.** The NTT manager tracks consumed inbound
-   digests itself; `CoreState.consumedGovernance` stays reserved for `"Core"`
-   governance — exactly as the EVM token bridge keeps its own
-   `isTransferCompleted`.
+**Two cid-derived identities**, both unique by construction (the Canton "unicum",
+[§4.2](#42-emitter-registration--message-publishing)):
+- **transceiver address** = `keccak256(EmitterIdentity cid)` — the VAA emitter
+  other chains register; derived by the watcher, not stored.
+- **manager address** = `keccak256(NttManagerIdentity cid)`. Unlike the emitter
+  address, the manager needs its own address *on-ledger* to build/validate NTT
+  payloads, so it is stored in `NttManager.managerAddress`, supplied by the
+  operator at approval as that keccak (a `ContractId` is opaque in Daml). Strict
+  same-tx binding is a follow-up (see below).
 
-Sketch of the transceiver's receive choice:
+### Wire codec (`Wormhole.Ntt.Payload`)
 
-```haskell
--- controller = transceiver owner; gs comes from a disclosed guardian-set contract
-choice Receive : ()
-  with vaaBytes : Bytes
-  controller owner
-  do
-    gs <- fetch guardianSetCid                              -- disclosed; the set the VAA names
-    let v = Wormhole.Core.VAA.parseAndVerify gs vaaBytes    -- pure; aborts if invalid
-    assertMsg "unknown peer" (isConfiguredPeer v.emitterChain v.emitterAddress)
-    -- manager: replay protect v.hash, decode NativeTokenTransfer, mint/release
-    ...
-```
+Implements the three nested structures with big-endian encoders built on
+`Bytes.daml` (`NativeTokenTransfer` prefix `0x994E5454`; `NttManagerMessage`;
+`WormholeTransceiverMessage` prefix `0x9945FF10`). Amounts use the NTT
+**TrimmedAmount** (≤ 8 decimals + a scale byte). Round-trips are tested in
+`test/daml/Test/TestNtt.daml:testNttCodec`.
 
-Off-chain the relayer submits a single `exercise Receive {vaaBytes}` command plus
-the one disclosed guardian-set contract — no pubkey computation. This is the
-Canton equivalent of EVM's `parseAndVerifyVM(bytes)`.
+### Send (`NttManager.Transfer`, controller `admin`)
 
-### Design additions this implies
+Trims the amount, drives the token seam's `LockOrBurn`, assembles the nested
+message, and publishes it via `Emitter.PublishMessage` — so the guardian watcher
+observes an **ordinary core message** (no NTT-specific watcher code). The caller
+passes the *current* transceiver `Emitter` cid (it churns on each publish; tracked
+off-ledger); the manager checks the emitter belongs to this deployment.
 
-- Persist guardian **pubkeys** in `GuardianSet` so verification is hint-free
-  ([§5](#5-on-chain-signature-verification-the-crux)).
-- Add a **readable guardian-set contract** and document the
-  explicit-disclosure flow.
-- Export `Wormhole.Core.VAA.parseAndVerify` as the integrator-facing API.
+### Receive (`NttManager.Receive`, controller `operator` — guardian-relayed)
 
-These are tracked in [Open Questions](#11-open-questions--validation-items).
+Reuses `Wormhole.Core.VAA.parseVAA`/`verifyVAA` against the guardian set read
+from a disclosed `CoreState`, enforces the configured peer
+(`(chainId → managerAddress, transceiverAddress)` from `SetPeer`), **replay-
+protects on the VAA hash** (integrator-owned — `CoreState.consumedGovernance`
+stays reserved for `"Core"`), decodes, and drives `MintOrUnlock`. `pubKeys` are
+untrusted hints today (hint-free is a follow-up). Tested end-to-end against a
+real devnet-guardian-signed NTT VAA in `testNttReceive` (incl. replay rejection).
+
+### Token seam (`NttToken`) and modes
+
+`NttManager` never references a concrete token; it holds a `ContractId NttToken`
+and calls `LockOrBurn` / `MintOrUnlock`. This isolates the token detail the way
+`VAA.daml` isolates crypto. `TokenMode` selects **lock/unlock** or **burn/mint**.
+The seam choices carry the CIP-56 runtime handles a real registry needs —
+`inputHoldingCids : [ContractId Holding]` (the holdings to lock/burn; empty for a
+mint) and `extraArgs : ExtraArgs` (the registry's choice context) — which the
+manager threads from `Transfer`/`Receive`.
+
+Real implementations live in `ntt-cip56`: `Cip56CustodyToken` drives
+`TransferFactory_Transfer` (lock = sender→custody, unlock = custody→recipient)
+and `Cip56BurnMintToken` drives `BurnMintFactory_BurnMint` (burn = inputs, mint =
+outputs). Both work for Canton Coin (Amulet) or any conforming token. A stdlib
+`MockToken` in the test package (which ignores the CIP-56 handles) exercises the
+whole protocol end-to-end in `dpm test`.
+
+**Submission caveat:** the factory calls are real token-standard choices, so a
+production send/receive is app-orchestrated — the caller submits with the token
+holder's authority and the registry's **disclosed contracts** (`extraArgs`),
+via `submitWithDisclosures`, exactly as cn-quickstart's
+`RegistryApi.getTransferFactory` + `submitWithDisclosures` do. The on-ledger Daml
+is complete; that submission wiring is off-ledger (relayer/app).
+
+### Follow-ups (tracked in [Open Questions](#11-open-questions--validation-items))
+
+- **`recipientAddress` → `Party`**: inbound mints to a relayer-supplied `Party`,
+  not yet bound to the 32-byte NTT address — needs a Canton address registry.
+- **Hint-free verification** (persist guardian pubkeys) + a **readable
+  guardian-set contract** for permissionless (non-operator) receive via
+  disclosure, so `Receive` need not be operator-controlled.
+- **Strict manager-address binding** (`keccak256(identity cid)` in the same tx),
+  and deferred NTT features: rate limiting, queuing, multi-transceiver threshold
+  (currently fixed at 1).
 
 ---
 

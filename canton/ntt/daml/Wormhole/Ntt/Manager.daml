@@ -1,0 +1,216 @@
+-- | The NttManager and (single, threshold-1) Wormhole transceiver for Canton.
+--
+-- Deployment is permissionless in spirit and guardian-hosted: a deployer
+-- (@admin@) submits an 'NttDeploymentRequest'; the guardian @operator@ approves
+-- it, minting an immutable 'NttManagerIdentity' and the 'NttManager'. The
+-- operator is the sole signatory (the host), mirroring 'CoreState'; it has no
+-- power over transfer contents (those are gated by the token effect and VAA
+-- verification).
+--
+-- Identities (both cid-derived, unique by construction — the Canton "unicum"):
+--   * transceiver address = keccak256(EmitterIdentity cid) — the core Emitter the
+--     deployment publishes through; it is the VAA emitter other chains register.
+--   * manager  address = keccak256(NttManagerIdentity cid). Unlike the emitter
+--     address (which the watcher derives and nothing stores), the manager needs
+--     its own address on-ledger to build/validate NTT payloads, so it is stored
+--     in 'managerAddress' — supplied by the operator at approval as the off-ledger
+--     keccak256 of the identity cid (a 'ContractId' is opaque in Daml). See
+--     README §10 for the derivation and the strict-binding follow-up.
+--
+-- Send rides the core bridge: 'Transfer' publishes via 'Emitter.PublishMessage',
+-- so the guardian watcher observes it as an ordinary core message (no NTT-specific
+-- watcher code). Receive is guardian-relayed: 'Receive' reuses
+-- 'Wormhole.Core.VAA.parseVAA'/'verifyVAA' against the guardian set read from a
+-- disclosed 'CoreState', enforces the configured peer, replay-protects on the VAA
+-- hash, decodes, and drives the token mint/unlock.
+module Wormhole.Ntt.Manager where
+
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Set (Set)
+import DA.Set qualified as Set
+
+import Splice.Api.Token.HoldingV1 (Holding)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Wormhole.Core.Bytes
+import Wormhole.Core.State (Emitter, EmitterIdentity, CoreState, PublishMessage (..))
+import Wormhole.Core.VAA (parseVAA, verifyVAA)
+import Wormhole.Ntt.Payload
+import Wormhole.Ntt.Token
+
+-- | A configured peer NTT deployment on another chain: its manager address (the
+-- @recipientManager@/@sourceManager@ in the transceiver message) and its
+-- transceiver address (the VAA emitter we must see inbound). Both 32 bytes.
+data Peer = Peer with
+    managerAddress     : Bytes32
+    transceiverAddress : Bytes32
+  deriving (Eq, Show)
+
+normalizePeer : Peer -> Peer
+normalizePeer p = Peer with
+    managerAddress = normalizeHex p.managerAddress
+    transceiverAddress = normalizeHex p.transceiverAddress
+
+-- | Immutable manager identity; its contract-id anchors @managerAddress@. Never
+-- archived (same rationale as 'Wormhole.Core.State.EmitterIdentity').
+template NttManagerIdentity
+  with
+    operator : Party
+    admin    : Party
+  where
+    signatory operator
+    observer admin
+
+-- | A request to stand up a deployment. The @admin@ first registers a core
+-- 'Emitter' (the transceiver) via the existing 'EmitterRequest' flow and passes
+-- its 'EmitterIdentity' here, along with the token hook and mode.
+template NttDeploymentRequest
+  with
+    admin               : Party
+    operator            : Party
+    transceiverIdentity : ContractId EmitterIdentity
+    tokenCid            : ContractId NttToken
+    mode                : TokenMode
+    tokenDecimals       : Int
+  where
+    signatory admin
+    observer operator
+
+    choice ApproveDeployment : ContractId NttManager
+      with
+        managerAddress : Bytes32   -- operator supplies keccak256(NttManagerIdentity cid)
+      controller operator
+      do
+        identityCid <- create NttManagerIdentity with operator, admin
+        create NttManager with
+          operator
+          admin
+          identity = identityCid
+          managerAddress = normalizeHex managerAddress
+          transceiverIdentity
+          tokenCid
+          mode
+          tokenDecimals
+          peers = Map.empty
+          outboundSequence = 0
+          consumed = Set.empty
+
+template NttManager
+  with
+    operator            : Party
+    admin               : Party
+    identity            : ContractId NttManagerIdentity
+    managerAddress      : Bytes32          -- keccak256(identity cid), operator-supplied
+    transceiverIdentity : ContractId EmitterIdentity
+    tokenCid            : ContractId NttToken
+    mode                : TokenMode
+    tokenDecimals       : Int
+    peers               : Map Int Peer     -- recipient/ source chainId -> peer
+    outboundSequence    : Int              -- next NttManagerMessage id
+    consumed            : Set Bytes32      -- inbound VAA hashes already executed
+  where
+    signatory operator
+    observer admin
+
+    -- | Register/replace a peer deployment. Controlled by @admin@; the operator
+    -- authority to recreate this contract comes from it being the signatory.
+    choice SetPeer : ContractId NttManager
+      with
+        chainId : Int
+        peer    : Peer
+      controller admin
+      do create this with peers = Map.insert chainId (normalizePeer peer) peers
+
+    -- | Outbound transfer. The caller supplies the CURRENT transceiver 'Emitter'
+    -- cid (it churns on every publish; tracked off-ledger per the core design).
+    -- The token is locked/burned, the NTT message is assembled and published via
+    -- the core bridge, and the sequence advances.
+    choice Transfer : ContractId NttManager
+      with
+        emitterCid       : ContractId Emitter
+        recipientChain   : Int
+        recipientAddress : Bytes32
+        sourceToken      : Bytes32
+        rawAmount        : Int
+        nonce            : Int
+        consistencyLevel : Int
+        inputHoldingCids : [ContractId Holding]  -- CIP-56 holdings to lock/burn
+        extraArgs        : ExtraArgs             -- CIP-56 registry choice context
+      controller admin
+      do
+        let peer = optionOrFail ("ntt: no peer for chain " <> show recipientChain)
+                     (Map.lookup recipientChain peers)
+            trimmed = trimAmount rawAmount tokenDecimals
+        -- Lock (custody) or burn the sender's tokens via the token seam.
+        exercise tokenCid LockOrBurn with
+          sender = admin, amount = trimmed, inputHoldingCids, extraArgs
+        let ntt = NativeTokenTransfer with
+              decimals = trimmed.decimals
+              amount = trimmed.amount
+              sourceToken = normalizeHex sourceToken
+              recipientAddress = normalizeHex recipientAddress
+              recipientChain
+              additionalPayload = ""
+            mm = NttManagerMessage with
+              id = leftPadTo 32 (intToBytesN outboundSequence 8)
+              sender = managerAddress
+              payload = encodeNativeTokenTransfer ntt
+            wm = WormholeTransceiverMessage with
+              sourceManager = managerAddress
+              recipientManager = peer.managerAddress
+              managerPayload = encodeNttManagerMessage mm
+              transceiverPayload = ""
+        emitter <- fetch emitterCid
+        assertMsg "ntt: emitter is not this deployment's transceiver"
+          (emitter.identity == transceiverIdentity)
+        assertMsg "ntt: transceiver not owned by admin" (emitter.owner == admin)
+        _ <- exercise emitterCid PublishMessage with
+               payload = encodeWormholeTransceiverMessage wm
+               nonce
+               consistencyLevel
+        create this with outboundSequence = outboundSequence + 1
+
+    -- | Inbound transfer, guardian-relayed. Verifies the VAA against the guardian
+    -- set in a disclosed 'CoreState', enforces the configured peer, replay-protects
+    -- on the VAA hash, decodes, and mints/unlocks to @recipient@. @pubKeys@ are
+    -- untrusted hints bound to guardian addresses inside 'verifyVAA'.
+    --
+    -- NOTE (milestone gaps, see README §10): (a) the NTT @recipientAddress@ is a
+    -- 32-byte address; mapping it to a Canton @Party@ needs an address registry,
+    -- so @recipient@ is supplied by the relayer here and NOT yet bound to
+    -- @recipientAddress@; (b) hint-free verification via persisted guardian
+    -- pubkeys is a tracked follow-up.
+    choice Receive : NativeTokenTransfer
+      with
+        coreStateCid     : ContractId CoreState
+        vaaBytes         : Bytes
+        pubKeys          : [(Int, Bytes)]
+        recipient        : Party
+        inputHoldingCids : [ContractId Holding]  -- custody holdings to unlock ([] for mint)
+        extraArgs        : ExtraArgs             -- CIP-56 registry choice context
+      controller operator
+      do
+        now <- getTime
+        let vaa = parseVAA vaaBytes
+        cs <- fetch coreStateCid
+        let gs = optionOrFail "ntt: unknown guardian set index"
+                   (Map.lookup vaa.guardianSetIndex cs.guardianSets)
+        let () = verifyVAA gs vaa pubKeys now
+            peer = optionOrFail ("ntt: no peer for source chain " <> show vaa.emitterChain)
+                     (Map.lookup vaa.emitterChain peers)
+        assertMsg "ntt: VAA emitter is not the configured peer transceiver"
+          (normalizeHex vaa.emitterAddress == peer.transceiverAddress)
+        assertMsg "ntt: message already consumed" (not (Set.member vaa.hash consumed))
+        let wm = decodeWormholeTransceiverMessage vaa.payload
+        assertMsg "ntt: wrong recipient manager" (wm.recipientManager == managerAddress)
+        assertMsg "ntt: source manager is not the peer manager"
+          (wm.sourceManager == peer.managerAddress)
+        let mm = decodeNttManagerMessage wm.managerPayload
+            ntt = decodeNativeTokenTransfer mm.payload
+        exercise tokenCid MintOrUnlock with
+          recipient
+          amount = TrimmedAmount with decimals = ntt.decimals, amount = ntt.amount
+          inputHoldingCids
+          extraArgs
+        create this with consumed = Set.insert vaa.hash consumed
+        pure ntt

@@ -5,4 +5,7 @@
 # data-dependency on core's DAR).
 packages:
   - ./core
+  - ./ntt-token
+  - ./ntt
+  - ./ntt-cip56
   - ./test
