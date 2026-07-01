@@ -383,23 +383,21 @@ approval, and is not public-observed.)
 
 `public` is an **ordinary party with no choices and no authority**; observing it
 only widens visibility. It is chosen once at `setup` and stored on `CoreState` —
-the **single source of truth**. `ApproveEmitter` sources it *authoritatively from
-`CoreState`* (fetching the operator's own singleton), not from a requester-supplied
+the **single source of truth**. `ApproveEmitter` sources it _authoritatively from
+`CoreState`_ (fetching the operator's own singleton), not from a requester-supplied
 value, so every `Emitter`/`EmitterIdentity` is guaranteed to share the one
 canonical `public` party; it is then carried forward unchanged on every recreate
 (publish, governance transition). This makes "public observability is always
 granted to the canonical party" an enforced on-ledger invariant, not a convention.
 
 **The Daml change is necessary but not sufficient.** Listing `public` as an
-observer makes the contracts *visible to that party*; letting arbitrary readers
+observer makes the contracts _visible to that party_; letting arbitrary readers
 actually **read as** `public` is a Canton topology/participant concern — grant
 read-as rights for the `public` party on each participant that should serve
 reads, or stand up a read-only front-end (the JSON Ledger API or a Participant
 Query Store instance) configured to read as `public`, so consumers query an
-endpoint and never need the party id. A party id is `hint::fingerprint`, where
-the fingerprint is a hash of the allocating namespace's key — deployment-specific
-and not guessable — so the `public` party id must be published or fronted by an
-API; it cannot be inferred.
+endpoint and never need the party id. A party id has format`hint::fingerprint` so it
+will need to be published.
 
 ---
 

@@ -191,10 +191,8 @@ currentSetForUpgrade st =
 -- minting an immutable 'EmitterIdentity' and the publishing 'Emitter' bound to
 -- it, in a single transaction.
 --
--- The @public@ visibility party is NOT chosen here — 'ApproveEmitter' sources it
--- authoritatively from the operator's 'CoreState', so the durable emitter records
--- are guaranteed to be observed by the one canonical @public@ party. The request
--- itself is transient (archived on approval) and is not public-observed.
+-- @public@ is sourced from the operator's 'CoreState' on approval, guaranteeing
+-- all emitter records share one canonical visibility party. This request is transient.
 --
 -- No address is assigned here: the 32-byte Wormhole emitter address is
 -- @keccak256(<EmitterIdentity contract-id>)@, derived by the guardian watcher (a
@@ -219,11 +217,8 @@ template EmitterRequest
           -- source of truth for emitter visibility.
       controller operator
       do
-        -- Source the visibility party AUTHORITATIVELY from CoreState rather than
-        -- trusting a requester-supplied value, so every emitter is guaranteed to
-        -- be observed by the one canonical @public@ party. Assert the CoreState is
-        -- the operator's own (it is the signatory) to reject a foreign CoreState
-        -- carrying a different @public@.
+        -- @public@ is fetched from CoreState (operator is signatory) so all emitters
+        -- share the canonical visibility party.
         cs <- fetch coreStateCid
         assertMsg "ApproveEmitter: CoreState is not the operator's" (cs.operator == operator)
         let public = cs.public
