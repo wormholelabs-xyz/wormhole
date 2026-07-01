@@ -6,11 +6,11 @@ regenerate them by an unaudited fetch.
 
 ## Provenance
 
-- Source: Splice release bundle, pinned to **v0.5.18** (the Canton 3.4 / Daml SDK
-  3.4.11 line).
-- Bundle: `https://github.com/digital-asset/decentralized-canton-sync/releases/download/v0.5.18/0.5.18_splice-node.tar.gz`
-- Bundle sha256: `4639977f854f3c3c032d7dbe93a933f74644bd410a128f1e7d5371bc988653e1`
-- DARs extracted from `splice-node/dars/` inside that bundle.
+- Source: [`digital-asset/cn-quickstart`](https://github.com/digital-asset/cn-quickstart/tree/main/quickstart/daml/dars),
+  which mirrors the Splice release bundle v0.5.18 (Canton 3.4 / Daml SDK 3.4.11).
+- sha256s verified against the upstream Splice release bundle:
+  `https://github.com/digital-asset/decentralized-canton-sync/releases/download/v0.5.18/0.5.18_splice-node.tar.gz`
+  (bundle sha256: `4639977f854f3c3c032d7dbe93a933f74644bd410a128f1e7d5371bc988653e1`)
 
 ## Pinned files (sha256)
 
@@ -25,11 +25,10 @@ data-dependency compatible with this project's SDK 3.4.11.
 
 ## Re-fetch (only with authorization)
 
-    curl -fSL -o 0.5.18_splice-node.tar.gz \
-      https://github.com/digital-asset/decentralized-canton-sync/releases/download/v0.5.18/0.5.18_splice-node.tar.gz
-    # verify the bundle sha256 above, then:
-    tar xzf 0.5.18_splice-node.tar.gz -C . --strip-components=2 \
-      splice-node/dars/splice-api-token-metadata-v1-1.0.0.dar \
-      splice-node/dars/splice-api-token-holding-v1-1.0.0.dar \
-      splice-node/dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
+    curl -fSL -o splice-api-token-metadata-v1-1.0.0.dar \
+      https://raw.githubusercontent.com/digital-asset/cn-quickstart/main/quickstart/daml/dars/splice-api-token-metadata-v1-1.0.0.dar
+    curl -fSL -o splice-api-token-holding-v1-1.0.0.dar \
+      https://raw.githubusercontent.com/digital-asset/cn-quickstart/main/quickstart/daml/dars/splice-api-token-holding-v1-1.0.0.dar
+    curl -fSL -o splice-api-token-transfer-instruction-v1-1.0.0.dar \
+      https://raw.githubusercontent.com/digital-asset/cn-quickstart/main/quickstart/daml/dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
     # verify each DAR sha256 above
