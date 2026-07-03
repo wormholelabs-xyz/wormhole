@@ -7,7 +7,7 @@
 # root multi-package.yaml ensures core is built first. `dpm build --all` packs
 # core's DALFs into this DAR too, so uploading it to a devnet sandbox makes the
 # core package available there.
-sdk-version: 3.4.11
+sdk-version: 3.5.1
 name: wormhole-core-test
 version: 0.1.0
 source: daml
@@ -15,5 +15,8 @@ dependencies:
   - daml-prim
   - daml-stdlib
   - daml-script
+build-options:
+  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
+  - --target=2.3
 data-dependencies:
   - ../core/.daml/dist/wormhole-core-0.1.0.dar
