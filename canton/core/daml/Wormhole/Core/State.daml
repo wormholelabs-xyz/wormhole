@@ -43,6 +43,7 @@ module Wormhole.Core.State where
 
 import DA.Map (Map)
 import DA.Map qualified as Map
+import DA.Optional (fromSomeNote)
 import DA.Set (Set)
 import DA.Set qualified as Set
 import DA.Time (addRelTime, seconds)
@@ -121,7 +122,7 @@ template CoreState
         let vaa = parseVAA encodedVAA
         -- A VAA may be signed by a non-current-but-unexpired set; pick the set
         -- it names and require it to still be active.
-        let signingSet = optionOrFail "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
+        let signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
         let () = verifyVAA signingSet vaa pubKeys now
         pure vaa
 
@@ -195,7 +196,7 @@ applyGovernance st now action = case action of
 -- | Helper to read the current set off a 'CoreState' value (not a contract).
 currentSetForUpgrade : CoreState -> GuardianSet
 currentSetForUpgrade st =
-  optionOrFail "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
+  fromSomeNote "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
 
 ----------------------------------------------------------------------
 -- Emitter registration & message publishing

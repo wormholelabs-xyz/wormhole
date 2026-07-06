@@ -7,6 +7,7 @@
 module Wormhole.Core.VAA where
 
 import DA.Crypto.Text (keccak256, secp256k1WithEcdsaOnly)
+import DA.Optional (fromSomeNote)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
 
@@ -124,8 +125,8 @@ verifyVAA gs vaa pubKeys now =
 verifyOne : GuardianSet -> Bytes32 -> [(Int, Bytes)] -> Signature -> ()
 verifyOne gs digest pubKeys sig =
   let
-    storedAddr = optionOrFail ("guardian index out of range: " <> show sig.guardianIndex) (keyAt gs sig.guardianIndex)
-    pubKey = optionOrFail ("missing public key for guardian index: " <> show sig.guardianIndex) (lookup sig.guardianIndex pubKeys)
+    storedAddr = fromSomeNote ("guardian index out of range: " <> show sig.guardianIndex) (keyAt gs sig.guardianIndex)
+    pubKey = fromSomeNote ("missing public key for guardian index: " <> show sig.guardianIndex) (lookup sig.guardianIndex pubKeys)
     derivedAddr = addressFromPubKey pubKey
     derSig = derSignature sig.r sig.s
     derKey = derPublicKey pubKey

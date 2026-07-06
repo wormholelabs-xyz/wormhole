@@ -21,14 +21,6 @@ type Bytes32 = Bytes
 -- | A 20-byte value (40 hex chars): Ethereum-style guardian addresses.
 type Bytes20 = Bytes
 
--- | Unwrap an 'Optional' or abort with @msg@. The @error@ lives in the function
--- body, so under Daml's strict evaluation it is thrown only on 'None' — unlike
--- @fromOptional (error msg)@, whose default argument is evaluated on every call.
-optionOrFail : Text -> Optional a -> a
-optionOrFail msg opt = case opt of
-  Some v -> v
-  None -> error msg
-
 -- | Number of bytes represented by a hex string.
 byteLength : Bytes -> Int
 byteLength b = T.length b / 2
