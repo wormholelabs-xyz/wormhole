@@ -162,13 +162,18 @@ applyGovernance st now action = case action of
     assertMsg "guardianSetUpgrade: wrong target chain" (chain == st.chainId || chain == 0)
     assertMsg "guardianSetUpgrade: index must be current + 1" (newIndex == st.guardianSetIndex + 1)
     assertMsg "guardianSetUpgrade: empty set" (not (null newKeys))
-    -- Expire the old current set (now + 1 day) and install the new one.
-    let oldSet = (currentSetForUpgrade st) with expirationTime = Some (addRelTime now (seconds guardianSetExpirySeconds))
+    -- Expire the current set (now + 1 day) in place, then install the new one.
+    -- Map.alter names guardianSetIndex once (look up, modify, reinsert at the same
+    -- key); the None case is an invariant violation — a live CoreState always has
+    -- its current set.
+    let expiry = Some (addRelTime now (seconds guardianSetExpirySeconds))
+        expireCurrent mOld = case mOld of
+          Some gs -> Some gs with expirationTime = expiry
+          None    -> error "no current guardian set"
         newSet = GuardianSet with keys = newKeys, expirationTime = None
-        sets' = Map.insert newIndex newSet (Map.insert st.guardianSetIndex oldSet st.guardianSets)
     pure st with
       guardianSetIndex = newIndex
-      guardianSets = sets'
+      guardianSets = Map.insert newIndex newSet (Map.alter expireCurrent st.guardianSetIndex st.guardianSets)
 
   SetMessageFee chain fee -> do
     assertMsg "setMessageFee: wrong target chain" (chain == st.chainId)
