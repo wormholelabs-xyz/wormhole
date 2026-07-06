@@ -38,42 +38,35 @@ sliceBytes start len b =
 sliceFrom : Int -> Bytes -> Bytes
 sliceFrom start b = T.substring (start * 2) (T.length b - start * 2) b
 
--- | Value of a single lowercase hex digit. NB: Daml is strict, so the @error@
--- must live inside the @None@ branch — passing it as a @fromOptional@ default
--- would evaluate (throw) it on every call.
-hexDigit : Text -> Int
-hexDigit c = case lookup c digits of
-    Some v -> v
-    None -> error ("invalid hex digit: " <> c)
+-- | Value of a single lowercase hex digit, given as a Unicode code point.
+-- Code-point arithmetic rather than an assoc-list lookup: under Daml's strict
+-- evaluation a @where@-bound 16-entry table would be rebuilt — and scanned
+-- linearly — once per nibble.
+hexDigitValue : Int -> Int
+hexDigitValue cp
+  | cp >= cp0 && cp <= cp9 = cp - cp0
+  | cp >= cpa && cp <= cpf = cp - cpa + 10
+  | otherwise = error ("invalid hex digit: " <> T.fromCodePoints [cp])
   where
-    digits =
-      [ ("0", 0), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5), ("6", 6)
-      , ("7", 7), ("8", 8), ("9", 9), ("a", 10), ("b", 11), ("c", 12)
-      , ("d", 13), ("e", 14), ("f", 15)
-      ]
+    [cp0, cp9, cpa, cpf] = T.toCodePoints "09af"
 
 -- | Parse a big-endian hex byte string into an 'Int'. Suitable for values that
 -- fit in 63 bits (chain ids, sequences, nonces, fees in practice). Callers that
 -- need uint256 semantics must bound-check upstream.
 bytesToInt : Bytes -> Int
-bytesToInt b = foldl (\acc c -> acc * 16 + hexDigit c) 0 (T.explode (T.asciiToLower b))
+bytesToInt b = foldl (\acc cp -> acc * 16 + hexDigitValue cp) 0 (T.toCodePoints (T.asciiToLower b))
 
 -- | Lowercase a hex string so it matches the form returned by the crypto
 -- builtins (which emit lowercase) before equality comparisons.
 normalizeHex : Bytes -> Bytes
 normalizeHex = T.asciiToLower
 
--- | The lowercase hex character for a nibble value (0..15).
+-- | The lowercase hex character for a nibble value (0..15), indexed out of the
+-- hex alphabet.
 hexChar : Int -> Text
-hexChar n = case lookup n chars of
-    Some v -> v
-    None -> error ("hexChar: out of range: " <> show n)
-  where
-    chars =
-      [ (0, "0"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5"), (6, "6")
-      , (7, "7"), (8, "8"), (9, "9"), (10, "a"), (11, "b"), (12, "c")
-      , (13, "d"), (14, "e"), (15, "f")
-      ]
+hexChar n
+  | 0 <= n && n <= 15 = T.substring n 1 "0123456789abcdef"
+  | otherwise = error ("hexChar: out of range: " <> show n)
 
 -- | Encode a single byte value (0..255) as two lowercase hex chars.
 intToHexByte : Int -> Bytes
@@ -168,4 +161,6 @@ stripLeadingZeroBytes b
 -- | True if the most-significant bit of the first byte is set (first hex nibble
 -- >= 8). Used to decide whether a DER integer needs a 0x00 sign pad.
 highBitSet : Bytes -> Bool
-highBitSet b = byteLength b > 0 && hexDigit (T.substring 0 1 (normalizeHex b)) >= 8
+highBitSet b = case T.toCodePoints (T.asciiToLower (T.take 1 b)) of
+  cp :: _ -> hexDigitValue cp >= 8
+  [] -> False
