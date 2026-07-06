@@ -37,7 +37,7 @@ setup : Script (Party, ContractId CoreState)
 setup = do
   operator <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
-  csId <- submitMulti [operator, guardianGovernance] [] do
+  csId <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [devnetGuardian])
   _ <- submit operator do createCmd (mkInitialEmitterRegistry operator)
   pure (operator, csId)
@@ -135,7 +135,7 @@ testImpersonationBlocked = do
       emitterAddress = a.emitterAddress, sequence = 0
 
   -- (b) Operator + Mallory can create a same-id emitter, but its address differs.
-  malloryEm <- submitMulti [operator, mallory] [] do
+  malloryEm <- submit (actAs operator <> actAs mallory) do
     createCmd Emitter with
       operator, owner = mallory, emitterId = 0
       emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
@@ -225,14 +225,14 @@ testArchives = do
   (operator, csId) <- setup
   Some cs <- queryContractId operator csId
   -- CoreState is co-signed, so archiving needs operator + guardianGovernance.
-  submitMulti [operator, cs.guardianGovernance] [] do archiveCmd csId
+  submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
   alice <- allocateParty "ArchAlice"
   reqId <- submit alice do createCmd EmitterRequest with requester = alice, operator
   submit alice do archiveCmd reqId              -- Archive EmitterRequest
   bob <- allocateParty "ArchBob"
   emId <- registerEmitter operator bob
   -- Emitter now has two signatories (operator + owner), so both must authorize.
-  submitMulti [operator, bob] [] do archiveCmd emId   -- Archive Emitter
+  submit (actAs operator <> actAs bob) do archiveCmd emId   -- Archive Emitter
   Some (regId, _) <- queryByKey @EmitterRegistry operator operator
   submit operator do archiveCmd regId           -- Archive EmitterRegistry
   pure ()
