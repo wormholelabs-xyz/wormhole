@@ -45,28 +45,30 @@ signatureLen = 66
 
 -- | Parse a hex-encoded VAA. Aborts the transaction (via @error@) on any
 -- malformed input — the correct behavior for an invalid governance/verify
--- submission.
+-- submission. The version is checked before the rest is parsed: Daml is strict,
+-- so a trailing guard would only fire after every field (mis)parsed — a
+-- wrong-version VAA should fail with the version error, not a slice error.
 parseVAA : Bytes -> VAA
-parseVAA encoded =
-  let
+parseVAA encoded
+  | version /= 1 = error ("unsupported VAA version: " <> show version)
+  | otherwise =
+      let
+        guardianSetIndex = bytesToInt (sliceBytes 1 4 encoded)
+        sigCount = bytesToInt (sliceBytes 5 1 encoded)
+        signatures = parseSignatures encoded 6 sigCount
+        bodyStart = 6 + sigCount * signatureLen
+        body = sliceFrom bodyStart encoded
+        timestamp = bytesToInt (sliceBytes 0 4 body)
+        nonce = bytesToInt (sliceBytes 4 4 body)
+        emitterChain = bytesToInt (sliceBytes 8 2 body)
+        emitterAddress = normalizeHex (sliceBytes 10 32 body)
+        sequence = bytesToInt (sliceBytes 42 8 body)
+        consistencyLevel = bytesToInt (sliceBytes 50 1 body)
+        payload = sliceFrom 51 body
+        hash = digestOf body
+      in VAA with ..
+  where
     version = bytesToInt (sliceBytes 0 1 encoded)
-    guardianSetIndex = bytesToInt (sliceBytes 1 4 encoded)
-    sigCount = bytesToInt (sliceBytes 5 1 encoded)
-    signatures = parseSignatures encoded 6 sigCount
-    bodyStart = 6 + sigCount * signatureLen
-    body = sliceFrom bodyStart encoded
-    timestamp = bytesToInt (sliceBytes 0 4 body)
-    nonce = bytesToInt (sliceBytes 4 4 body)
-    emitterChain = bytesToInt (sliceBytes 8 2 body)
-    emitterAddress = normalizeHex (sliceBytes 10 32 body)
-    sequence = bytesToInt (sliceBytes 42 8 body)
-    consistencyLevel = bytesToInt (sliceBytes 50 1 body)
-    payload = sliceFrom 51 body
-    hash = digestOf body
-  in
-    if version /= 1
-      then error ("unsupported VAA version: " <> show version)
-      else VAA with ..
 
 -- | Parse @count@ consecutive signatures starting at byte @offset@.
 parseSignatures : Bytes -> Int -> Int -> [Signature]
