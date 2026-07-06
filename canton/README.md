@@ -780,6 +780,78 @@ This brings up:
 - the **guardian** configured with `--cantonRPC canton:6865` (no
   `--cantonReadAsParty`: the watcher uses a wildcard "any party" filter, §7.1).
 
+### `guardianGovernance` external-party bootstrap
+
+[`devnet/setup_guardian_governance.sh`](devnet/setup_guardian_governance.sh) +
+[`devnet/guardian_governance.canton`](devnet/guardian_governance.canton) stand up
+`guardianGovernance` as an **external, decentralized-namespace party** — a
+namespace owned by three guardian keys with a 2-of-3 threshold, the same pattern
+the Canton Network DSO party uses (§10, §11 item 2). Concretely, the console
+script:
+
+1. self-signs a root `NamespaceDelegation` for each of the three owner keys;
+2. creates a `DecentralizedNamespaceDefinition` (2-of-3 threshold) over those
+   three owner namespaces, authorized by all three;
+3. allocates `guardianGovernance::<namespace>` under it and hosts it at
+   **Confirmation** permission, with the same three keys registered as its
+   threshold transaction-signing keys (`PartyToParticipant.partySigningKeys` —
+   the standalone `PartyToKeyMapping` was deprecated in Canton 3.4 in favor of
+   this); and
+4. writes an artifacts JSON (party id, decentralized-namespace id, owner
+   fingerprints/public-key paths, threshold) that is the handoff to submitting
+   the same topology to the CN global synchronizer later.
+
+Every topology transaction is built **unsigned**
+(`topology.transactions.generate`), signed by each owner's external signer, and
+only then submitted (`topology.transactions.load`) — the participant never holds
+an owner's private key, matching real guardian custody (HSM/KMS/offline signer).
+`devnet/guardian_key_tool.js` is a small Ed25519 keypair/signing helper (Node's
+built-in `crypto` module only, no dependencies) that stands in for that custody
+system locally; production wires `GG_OWNER_SIGN_CMD_1/2/3` to the real one
+instead (see the script's header for the full environment-variable contract).
+
+[`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
+exercises the resulting party: it prepares a `create CoreState` command
+co-signed by an external `operator` party and `guardianGovernance` (the
+interactive-submission equivalent of `Test.TestCore:setup`'s
+`submit (actAs operator <> actAs guardianGovernance)`), has owners sign the
+prepared
+transaction hash, and executes. It supports three modes — `happy` (2-of-3,
+succeeds), `threshold` (1-of-3, rejected), and `forge` (no guardianGovernance
+signature at all, rejected — the anti-forgery property from §10: a compromised
+operator cannot fabricate a `CoreState` bearing the real governance party).
+
+[`devnet/test_guardian_governance.sh`](devnet/test_guardian_governance.sh) runs
+all of the above against a fresh `dpm sandbox` and asserts the full table:
+namespace/threshold/hosting shape, and all three genesis modes' expected
+outcome.
+
+```bash
+canton/devnet/test_guardian_governance.sh
+```
+
+**Sandbox vs. CN fidelity.** The sandbox has no SVs or decentralized
+synchronizer, so "registering with the super-validators" cannot be exercised
+locally. That step is theoretical here by construction, not by omission: the
+decentralized namespace is guardian-owned, so SVs never approve it — CN
+"registration" is just (a) onboarding a participant to the CN global
+synchronizer (one-time, SV-sponsored validator onboarding) and (b) submitting
+the *same* topology transactions this script builds to that synchronizer instead
+of the sandbox's, where they are sequenced and seen by all participants. The
+script is synchronizer-target-parameterized (`GG_SYNCHRONIZER_ALIAS`,
+`GG_CANTON_CONSOLE_CONFIG`) for exactly that reason, and the local run proves
+the namespace/party/threshold mechanics port unchanged.
+
+**Current limitation.** Party hosting is single-participant only
+(`HostingParticipant(participant.id, Confirmation)` for the one console-bound
+participant) — the sandbox has only one participant to host on, so
+multi-participant Confirmation hosting (the production censorship-resistance
+requirement) is not exercised locally. Extending the `Seq[HostingParticipant]`
+built in `guardian_governance.canton` to additional participant ids is
+mechanical; each additional participant's consent-to-host signature follows the
+same `transactions.sign(..., signedBy = Seq(<that participant's fingerprint>))`
+pattern already used for the first one.
+
 ### Status: opt-in while the k8s devnet path is validated
 
 Unlike Sui, the `canton` component is **not** enabled by `--ci`. The guardian
@@ -896,14 +968,19 @@ human decision; see Open Questions.
    — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
 2. **`guardianGovernance` threshold party.** `CoreState` is co-signed by and keyed
    on a `guardianGovernance` party (§4.1), so guardian-set integrity is anchored to
-   it rather than the operator. Stand it up as a decentralized-namespace external
-   party governed by a k-of-n threshold of guardian keys (DSO-style) and confirm:
-   the genesis co-sign ceremony, the topology-level rotation flow (add/remove
-   guardian keys without touching `CoreState`), and that consumers are configured
-   with the correct anchor party id. Note the `CoreState` singleton count ("exactly
-   one") is still behavioral — confirm the genesis automation creates exactly one.
-   (Emitter/manager **address** integrity is separately owner-bound and
-   owner-co-signed, §4.2.)
+   it rather than the operator. §9's `guardianGovernance` external-party bootstrap
+   stands it up as a decentralized-namespace external party governed by a 2-of-3
+   threshold of guardian keys (DSO-style), and its genesis co-sign ceremony is
+   confirmed locally (2-of-3 succeeds, 1-of-3 and no-signature are rejected).
+   Remaining before production: the CN-synchronizer submission itself (only
+   designed/parameterized here, not exercised — no CN localnet available), the
+   topology-level rotation flow (add/remove guardian keys without touching
+   `CoreState` — the decentralized namespace's own threshold governs this once
+   created, but rotation itself is untested), multi-participant Confirmation
+   hosting, and confirming consumers are configured with the correct anchor party
+   id. Note the `CoreState` singleton count ("exactly one") is still behavioral —
+   confirm the genesis automation creates exactly one. (Emitter/manager
+   **address** integrity is separately owner-bound and owner-co-signed, §4.2.)
 3. **Guardian observer topology.** *Mechanism resolved:* the dedicated read-only
    `guardianObserver` party is implemented as a template `observer` on
    `Emitter`/`CoreState` (§4.1, §4.2, §10), and `--cantonReadAsParty` maps to it
