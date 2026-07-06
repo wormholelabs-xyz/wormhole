@@ -3,6 +3,7 @@
 -- in @Setters.sol@.
 module Wormhole.Core.GuardianSet where
 
+import DA.List.Total ((!!))
 import Wormhole.Core.Bytes
 
 -- | One day, matching the EVM @GUARDIAN_SET_EXPIRY@ (86400 seconds). After a new
@@ -28,19 +29,10 @@ numGuardians gs = length gs.keys
 quorum : Int -> Int
 quorum n = (n * 2) / 3 + 1
 
--- | Look up the 20-byte address of the guardian at @index@ (0-based). Total
--- (returns None out of range); Daml's Prelude has no list-index operator.
+-- | Look up the 20-byte address of the guardian at @index@ (0-based). Total:
+-- returns None out of range.
 keyAt : GuardianSet -> Int -> Optional Bytes20
-keyAt gs index = indexOptional gs.keys index
-
--- | Total list indexing. Top-level because Daml-LF disallows recursive local
--- (where/let) bindings.
-indexOptional : [a] -> Int -> Optional a
-indexOptional xs i
-  | i < 0 = None
-  | otherwise = case xs of
-      [] -> None
-      (y :: ys) -> if i == 0 then Some y else indexOptional ys (i - 1)
+keyAt gs index = gs.keys !! index
 
 -- | A set is usable at @now@ if it is the current set (no expiry) or has not yet
 -- expired. Matches the EVM check @guardianSet.expirationTime < block.timestamp@.
