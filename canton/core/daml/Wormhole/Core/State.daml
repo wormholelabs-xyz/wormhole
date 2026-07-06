@@ -6,16 +6,33 @@
 -- a single long-lived 'CoreState' that is archived and recreated on every
 -- governance transition.
 --
--- SINGLETON / UNIQUENESS: Canton 3.x (the public Canton Network) does NOT
--- support unique contract keys, so uniqueness is NOT enforced by a contract
--- key. Instead it is guaranteed by the @operator@ being the sole creator: only
--- the operator can create a 'CoreState' (it is the signatory), so its
--- controlled automation creates exactly one at setup and advances it linearly by
--- contract-id thereafter. The operator has no power over message contents or
--- governance outcomes (those are gated by VAA verification); it is only the
--- bridge's bookkeeper, so trusting it not to double-issue is acceptable. The
--- guardian watcher and integrators reference the current 'CoreState' / 'Emitter'
--- by contract-id (tracked from the ledger stream), not by key.
+-- CONTRACT KEYS / UNIQUENESS: on Daml-LF 2.3 (Canton 3.5 / Protocol Version 35)
+-- contract keys exist but are NOT unique — multiple active contracts may share a
+-- key. So keys give ergonomics (look up / exercise by a stable key rather than a
+-- churning contract-id), not a uniqueness guarantee. Two invariants are enforced
+-- differently:
+--   * 'CoreState' singleton: co-signed by the @operator@ and a @guardianGovernance@
+--     party, and keyed by @guardianGovernance@. The @guardianGovernance@ party is
+--     the guardians' governance anchor — in production a decentralized-namespace
+--     external party controlled by a k-of-n threshold of guardian keys (the same
+--     pattern as the Canton Network DSO party), rotated at the topology layer
+--     without touching this template. Because it is a signatory AND the key
+--     maintainer, a compromised @operator@ CANNOT fabricate a 'CoreState' bearing
+--     the real governance party (that needs its signature) — so a lookup by the
+--     known @guardianGovernance@ party can only ever resolve an authentic
+--     'CoreState', and the operator cannot forge the guardian set. It signs only
+--     at genesis; governance transitions ('SubmitGovernanceVAA') inherit its
+--     authority from the archived contract, so the operator submits them alone.
+--     "Exactly one" remains behavioral (operator + governance create one at
+--     setup), but the guardian-set contents are now cryptographically anchored.
+--   * Emitter identity: cryptographic. The 32-byte Wormhole address is
+--     @keccak256(tag ‖ registrar ‖ owner ‖ id)@ (see 'emitterAddressFor'), and
+--     the emitting @owner@ is a co-signatory. A compromised operator therefore
+--     cannot mint a contract carrying an existing emitter's address (that needs
+--     the owner's signature) — it can only produce a duplicate under a DIFFERENT
+--     owner, which derives a different, untrusted address. This is the invariant
+--     guardians verify by replay: a valid transaction under the vetted package
+--     can never forge an existing address.
 --
 -- Per-emitter sequence numbers live in each 'Emitter' (not in 'CoreState'), so
 -- that publishing is permissionless: the emitter owner can advance its own
@@ -39,20 +56,21 @@ import Wormhole.Core.VAA
 -- @ExercisedEvent.exercise_result@ on the Ledger-API stream. Equivalent to the
 -- EVM @LogMessagePublished@ event.
 --
--- Instead of a 32-byte @sender@, the record carries the publishing emitter's
--- immutable 'EmitterIdentity' contract-id. The 32-byte Wormhole emitter address
--- is @keccak256(<that contract-id>)@, derived by the watcher (a 'ContractId' is
--- opaque on-ledger, so it cannot be hashed in Daml). The guardian is thus the
--- sole source of truth for the address — it is never stored on-ledger and the
--- operator cannot set or spoof it. Contract-ids are globally unique by
--- construction (the Canton "unicum"), so distinct identities map to distinct
--- addresses without any operator-side deduplication. See canton/README.md §4.2.
+-- Instead of a 32-byte @sender@, the record carries the emitter's contract-key
+-- components: @registrar@, @owner@, and @emitterId@. The 32-byte Wormhole emitter
+-- address is @keccak256(tag ‖ registrar ‖ owner ‖ emitterId)@ ('emitterAddressFor'),
+-- derived by the watcher — the guardian is the sole source of truth for the
+-- address, and it is never trusted from the ledger. The @owner@ is part of the
+-- preimage so a compromised operator cannot emit under an existing emitter's
+-- address (see the module header).
 --
 -- The block-derived 'timestamp' (whitepaper 0001/0004) is supplied by the
 -- watcher from the transaction's ledger effective time, NOT from this record, so
 -- it is intentionally absent here.
 data WormholeMessage = WormholeMessage with
-    identity         : ContractId EmitterIdentity  -- emitter identity; address = keccak256(cid)
+    registrar        : Party     -- Emitter key._1 (the operator); address input
+    owner            : Party     -- Emitter key._2 (the emitting party); address input
+    emitterId        : Int       -- Emitter key._3 (registry-allocated); address input
     sequence         : Int       -- uint64
     nonce            : Int       -- uint32
     consistencyLevel : Int       -- uint8
@@ -69,7 +87,8 @@ maxPayloadBytes = 750
 
 template CoreState
   with
-    operator           : Party              -- owns/advances the singleton; no power over outcomes
+    operator           : Party              -- advances the singleton; no power over outcomes
+    guardianGovernance : Party              -- guardians' governance anchor (threshold party)
     chainId            : Int                -- 72 (Canton)
     governanceChainId  : Int                -- 1 (Solana)
     governanceContract : Bytes32            -- governance emitter address
@@ -78,9 +97,16 @@ template CoreState
     messageFee         : Int                -- required fee (native units); 0 in v1
     consumedGovernance : Set Bytes32        -- replay protection, keyed by digest
   where
-    signatory operator
-    -- No contract key: Canton 3.x has no unique keys (see module header).
-    -- Uniqueness is operator-enforced; the current cid is tracked off-ledger.
+    -- Co-signed: the operator advances the singleton, but the guardianGovernance
+    -- party co-signs so the operator cannot forge the guardian set (see module
+    -- header). Keyed by guardianGovernance (its maintainer) so a lookup by the
+    -- known governance party resolves ONLY authentic CoreStates — the operator
+    -- cannot create one under that key. Governance transitions inherit
+    -- guardianGovernance's authority from the archived contract, so it signs only
+    -- at genesis.
+    signatory operator, guardianGovernance
+    key guardianGovernance : Party
+    maintainer key
 
     -- | Read-only VAA verification, for the token bridge / external verifiers.
     -- Verifies against the CURRENT guardian set. @pubKeys@ are untrusted hints
@@ -170,18 +196,43 @@ currentSetForUpgrade st =
 -- Emitter registration & message publishing
 ----------------------------------------------------------------------
 
+-- | Domain-separation tag for emitter addresses. The Go watcher must match this
+-- exactly (see node/pkg/watchers/canton/watcher.go @emitterAddressTag@); the
+-- encoding is pinned across both languages by a shared test vector.
+emitterAddressTag : Text
+emitterAddressTag = "wormhole:emitter:v1"
+
+-- | The 32-byte Wormhole emitter address of the 'Emitter' with key
+-- @(registrar, owner, emitterId)@.
+emitterAddressFor : Party -> Party -> Int -> Bytes32
+emitterAddressFor registrar owner emitterId =
+  derivedAddress emitterAddressTag registrar owner emitterId
+
+-- | Allocates monotonically increasing emitter ids, one registry per operator
+-- (keyed by the operator party). Sequential-id discipline is operator-behavioral
+-- (a non-unique key does not enforce it); what a rogue operator can NOT do is
+-- reuse an id to impersonate an existing emitter — that address includes the
+-- owner, whose signature it lacks (see 'Emitter').
+template EmitterRegistry
+  with
+    operator : Party
+    nextId   : Int
+  where
+    signatory operator
+    key operator : Party
+    maintainer key
+
+    choice AllocateEmitterId : (ContractId EmitterRegistry, Int)
+      controller operator
+      do
+        reg' <- create this with nextId = nextId + 1
+        pure (reg', nextId)
+
 -- | A request by @requester@ to be granted an emitter. The operator approves it,
--- minting an immutable 'EmitterIdentity' and the publishing 'Emitter' bound to
--- it, in a single transaction.
---
--- No address is assigned here: the 32-byte Wormhole emitter address is
--- @keccak256(<EmitterIdentity contract-id>)@, derived by the guardian watcher (a
--- 'ContractId' is opaque on-ledger, so it cannot be hashed in Daml). Because
--- contract-ids are globally unique by construction, addresses are unique without
--- the operator having to scan its active set — and a single party may hold many
--- emitters (each 'ApproveEmitter' mints a fresh identity). This replaces the
--- former @keccak256(partyId)@ convention and its operator-enforced uniqueness
--- invariant.
+-- allocating a stable @emitterId@ from the 'EmitterRegistry' and creating the
+-- 'Emitter' (keyed @(operator, requester, emitterId)@) in a single transaction.
+-- The @requester@'s signature on this request is what authorizes the owner
+-- co-signatory on the created 'Emitter'.
 template EmitterRequest
   with
     requester : Party
@@ -193,55 +244,43 @@ template EmitterRequest
     choice ApproveEmitter : ContractId Emitter
       controller operator
       do
-        -- The identity cid is known within this transaction; the 'Emitter' stores
-        -- it (not a derived address) and the watcher hashes it off-ledger.
-        identityCid <- create EmitterIdentity with operator, owner = requester
+        (_, emitterId) <- exerciseByKey @EmitterRegistry operator AllocateEmitterId
         create Emitter with
           operator
           owner = requester
-          identity = identityCid
+          emitterId
+          emitterAddress = emitterAddressFor operator requester emitterId
           sequence = 0
 
--- | The immutable, permanent identity of an emitter. Created once per approval
--- and NEVER archived: its contract-id is the stable on-chain identity, and the
--- 32-byte Wormhole emitter address is @keccak256(<this contract-id>)@, derived by
--- the watcher. Keeping it alive (it has no consuming choice) is exactly what
--- makes that address stable for the life of the emitter — the publishing
--- 'Emitter' churns its own cid on every send, so it cannot itself be the
--- identity. Mirrors the identity half of a Sui @EmitterCap@ (its mutable sequence
--- lives in 'Emitter').
-template EmitterIdentity
-  with
-    operator : Party
-    owner    : Party
-  where
-    signatory operator
-    observer owner
-    -- No choices: immutability is the point. Re-minting an 'Emitter' from a fresh
-    -- identity would reset the sequence to 0, so identities are strictly one-shot.
-
--- | A registered emitter: the per-emitter sequence counter, bound to its
--- immutable 'EmitterIdentity'. The sequence lives here (not in 'CoreState') so
--- the owner can publish permissionlessly (without operator authority). Mirrors a
--- Sui @EmitterCap@.
+-- | A registered emitter: the per-emitter sequence counter, identified by a
+-- stable contract key @(operator, owner, emitterId)@. The sequence lives here
+-- (not in 'CoreState') so the owner can publish permissionlessly (without
+-- operator authority). Mirrors a Sui @EmitterCap@.
 template Emitter
   with
-    operator  : Party
-    owner     : Party
-    identity  : ContractId EmitterIdentity  -- permanent identity; address = keccak256(this cid)
-    sequence  : Int      -- next sequence to assign
+    operator       : Party
+    owner          : Party
+    emitterId      : Int      -- registry-allocated; key._3
+    emitterAddress : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
+    sequence       : Int      -- next sequence to assign
   where
-    signatory operator
-    observer owner
-    -- No contract key (Canton 3.x); the owner tracks the current cid off-ledger.
+    -- Owner co-signs: only a transaction carrying the owner's authority can create
+    -- a contract whose derived address is the owner's. This is the invariant
+    -- guardians verify by replay — a compromised operator cannot emit under an
+    -- existing address (Canton's msg.sender analog). It also means the operator
+    -- alone cannot archive an emitter (Archive needs all signatories).
+    signatory operator, owner
+    -- Non-unique key: stable across the sequence-bump churn so the owner can
+    -- publish again by key (ExerciseByKeyCommand) without tracking contract-ids.
+    key (operator, owner, emitterId) : (Party, Party, Int)
+    maintainer key._1
 
     -- | Publish a Wormhole message. The choice result is the 'WormholeMessage'
     -- the watcher observes (decoded directly from @exercise_result@). The
-    -- sequence-bumped 'Emitter' is recreated as a side effect, carrying the same
-    -- 'identity' forward so the derived address is unchanged; the owner obtains
-    -- its new contract-id from the transaction's created events (their app tracks
-    -- it from the ledger stream) for the next publish — there is no contract key
-    -- to look it up by on Canton 3.x. Mirrors @Implementation.publishMessage@.
+    -- sequence-bumped 'Emitter' is recreated with the SAME key (both signatures
+    -- inherited from the consumed contract), so the owner publishes again via
+    -- @exerciseByKey@ / @ExerciseByKeyCommand@ — no contract-id tracking. Mirrors
+    -- @Implementation.publishMessage@.
     choice PublishMessage : WormholeMessage
       with
         nonce            : Int
@@ -254,7 +293,9 @@ template Emitter
         -- see README "Open Questions". When wired, the fee is checked here.
         create this with sequence = sequence + 1
         pure WormholeMessage with
-          identity
+          registrar = operator
+          owner
+          emitterId
           sequence
           nonce
           consistencyLevel

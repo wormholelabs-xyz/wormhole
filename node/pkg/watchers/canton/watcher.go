@@ -9,10 +9,9 @@ package canton
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/binary"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
@@ -40,6 +39,40 @@ const (
 	publishMessageEntity = "Emitter"
 	publishMessageChoice = "PublishMessage"
 )
+
+// emitterAddressTag is the domain-separation tag for emitter addresses. It MUST
+// match Wormhole.Core.State.emitterAddressTag; the encoding is pinned across
+// both languages by the shared vector in
+// node/pkg/cantonclient/vectorgen_test.go (TestGenerateAddressVectors),
+// Test.TestCore:testAddressVector, and TestDeriveEmitterAddressMatchesVector.
+const emitterAddressTag = "wormhole:emitter:v1"
+
+// deriveEmitterAddress computes the canonical 32-byte Wormhole emitter address
+// from an emitter's contract-key components:
+//
+//	keccak256( utf8(tag) ‖ lp(registrar) ‖ lp(owner) ‖ uint64be(emitterId) )
+//
+// where lp is a uint32 big-endian byte-length prefix. The two length prefixes
+// make the preimage injective across the two variable-length party ids; owner is
+// part of the preimage so a compromised operator cannot forge an existing
+// emitter's address (see Wormhole.Core.State).
+func deriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.Address {
+	buf := make([]byte, 0, len(emitterAddressTag)+8+len(registrar)+len(owner)+8)
+	buf = append(buf, emitterAddressTag...)
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], uint32(len(registrar))) //nolint:gosec // party ids are short
+	buf = append(buf, l[:]...)
+	buf = append(buf, registrar...)
+	binary.BigEndian.PutUint32(l[:], uint32(len(owner))) //nolint:gosec // party ids are short
+	buf = append(buf, l[:]...)
+	buf = append(buf, owner...)
+	var idb [8]byte
+	binary.BigEndian.PutUint64(idb[:], emitterID)
+	buf = append(buf, idb[:]...)
+	var a vaa.Address
+	copy(a[:], ethcrypto.Keccak256(buf))
+	return a
+}
 
 // cantonDialOpts returns the gRPC dial options for connecting to the Canton
 // Ledger API. In unsafe dev mode the local node serves plaintext gRPC, so TLS is
@@ -112,31 +145,29 @@ func (e *Watcher) templateID() cantonclient.TemplateID {
 // processMessage turns a decoded Canton message event into a
 // common.MessagePublication and publishes it to the message channel.
 //
-// The 32-byte emitter address is keccak256 of the emitter's immutable
-// EmitterIdentity contract-id: the guardian is the sole source of truth for the
-// address (it is not stored on-ledger), and because Canton contract-ids are
-// globally unique by construction this yields a stable, collision-free address
-// per emitter. See canton/README.md §4.2.
+// The 32-byte emitter address is derived from the emitter's contract-key
+// components (registrar, owner, emitterId) via deriveEmitterAddress: the guardian
+// is the sole source of truth for the address (it is not stored on-ledger), and
+// because the owner is part of the preimage a compromised operator cannot forge
+// an existing emitter's address. See canton/README.md §4.2.
 //
 // The VAA timestamp is taken from the transaction's ledger effective time
 // (whitepaper 0001/0004: the timestamp is block-derived). The TxID is the
 // participant offset encoded as 32 big-endian bytes, so reobservation can decode
 // it back into an offset.
 func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessageEvent, isReobservation bool) {
-	// Canton serializes contract-ids as a lowercase hex string (no 0x prefix); be
-	// tolerant of a prefix anyway. keccak256 of the decoded bytes is exactly 32
-	// bytes, which fills the whole vaa.Address.
-	cidBytes, err := hex.DecodeString(strings.TrimPrefix(ev.Message.IdentityCID, "0x"))
-	if err != nil || len(cidBytes) == 0 {
-		logger.Error("dropping Canton message with malformed identity contract-id",
-			zap.String("identityCID", ev.Message.IdentityCID),
+	// Both key parties must be present to derive the address; a missing one means
+	// a malformed record we must not turn into an observation.
+	if ev.Message.Registrar == "" || ev.Message.Owner == "" {
+		logger.Error("dropping Canton message with missing emitter key party",
+			zap.String("registrar", ev.Message.Registrar),
+			zap.String("owner", ev.Message.Owner),
 			zap.Int64("offset", ev.Offset))
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
 
-	var emitter vaa.Address
-	copy(emitter[:], ethcrypto.Keccak256(cidBytes))
+	emitter := deriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
 
 	timestamp := ev.EffectiveAt
 	if timestamp.IsZero() {

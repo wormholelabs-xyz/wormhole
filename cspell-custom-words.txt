@@ -300,3 +300,5 @@ vectorgen
 scalapb
 pekko
 googleapis
+preimage
+builtins

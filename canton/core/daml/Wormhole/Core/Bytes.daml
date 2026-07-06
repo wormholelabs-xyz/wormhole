@@ -9,6 +9,7 @@
 -- underlying 2-hex-chars-per-byte representation.
 module Wormhole.Core.Bytes where
 
+import DA.Crypto.Text (keccak256, toHex)
 import DA.Text qualified as T
 
 -- | Hex-encoded byte string (lowercase, no @0x@ prefix).
@@ -88,6 +89,59 @@ intToHexByte n =
   if n < 0 || n > 255
     then error ("intToHexByte: out of range: " <> show n)
     else hexChar (n / 16) <> hexChar (n % 16)
+
+-- | Encode a non-negative 'Int' as @numBytes@ big-endian bytes (hex). The value
+-- must fit in @numBytes@ bytes; higher-order bytes beyond it are silently
+-- dropped by the modular reduction, so callers bound-check upstream (chain ids,
+-- lengths, and trimmed amounts all fit here).
+intToBytesN : Int -> Int -> Bytes
+intToBytesN value numBytes
+  | numBytes <= 0 = ""
+  | otherwise = intToBytesN (value / 256) (numBytes - 1) <> intToHexByte (value % 256)
+
+-- | Left-pad a hex 'Bytes' with zero bytes to exactly @numBytes@ bytes. If it is
+-- already at least that wide it is returned normalized (addresses are usually
+-- already 32 bytes; ids/short values get padded).
+leftPadTo : Int -> Bytes -> Bytes
+leftPadTo numBytes b =
+  let bl = byteLength b
+  in if bl >= numBytes
+       then normalizeHex b
+       else mconcat (replicate (numBytes - bl) "00") <> normalizeHex b
+
+-- | A 4-byte big-endian byte-length prefix followed by the bytes themselves.
+-- Concatenating two variable-length fields bare is ambiguous ("ab"‖"c" vs
+-- "a"‖"bc"); the length prefix makes the address preimage injective.
+lenPrefixed : Bytes -> Bytes
+lenPrefixed b = intToBytesN (byteLength b) 4 <> b
+
+-- | Canonical 32-byte registry address, keyed off the components of a
+-- registry-allocated contract key:
+--
+-- > keccak256( utf8(tag) ‖ lp(utf8(registrar)) ‖ lp(utf8(owner)) ‖ uint64be(id) )
+--
+-- where @lp@ is the 4-byte big-endian length prefix ('lenPrefixed'). The Text
+-- form is split out from 'derivedAddress' so tests can pin the encoding against
+-- fixed party strings (allocated 'Party' ids carry nondeterministic
+-- fingerprints). The Go watcher recomputes the same value from the
+-- 'WormholeMessage' fields; the encoding is pinned across both languages by a
+-- shared test vector.
+derivedAddressFromText : Text -> Text -> Text -> Int -> Bytes32
+derivedAddressFromText domainTag registrarText ownerText id =
+  normalizeHex (keccak256 (toHex domainTag
+    <> lenPrefixed (toHex registrarText)
+    <> lenPrefixed (toHex ownerText)
+    <> intToBytesN id 8))
+
+-- | Address of the registry-allocated identity @(registrar, owner, id)@ under
+-- @domainTag@. The @owner@ is part of the preimage: reproducing an existing
+-- address requires the owner's signature at create time (the owner is a
+-- signatory of the identity contract), so a compromised registrar cannot
+-- impersonate an existing identity — it can only mint a duplicate under a
+-- different owner, which derives a different, untrusted address.
+derivedAddress : Text -> Party -> Party -> Int -> Bytes32
+derivedAddress domainTag registrar owner id =
+  derivedAddressFromText domainTag (partyToText registrar) (partyToText owner) id
 
 -- | Drop leading zero bytes ("00") from a hex string, keeping at least one byte.
 -- Used for minimal DER integer encoding.

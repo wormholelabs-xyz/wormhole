@@ -2,10 +2,11 @@
 # This is the DAR uploaded to a participant / shipped to integrators.
 #
 # Targets the Daml 3.x line for the PUBLIC Canton Network mainnet (Canton 3.5.x
-# protocol; Daml SDK 3.4.11) — Ledger API v2 and the DA.Crypto.Text builtins used
-# by Wormhole.Core.VAA. Canton 3.x has no unique contract keys, so the contracts
-# use none (uniqueness is operator-enforced; see State.daml and README §4).
-sdk-version: 3.4.11
+# protocol; Daml SDK 3.5.1) — Ledger API v2 and the DA.Crypto.Text builtins used
+# by Wormhole.Core.VAA. `--target=2.3` selects Daml-LF 2.3 (Protocol Version 35),
+# which enables contract keys; identity uniqueness is registry-enforced because
+# Canton keys are non-unique (see State.daml and README §4).
+sdk-version: 3.5.1
 name: wormhole-core
 version: 0.1.0
 source: daml
@@ -13,7 +14,7 @@ dependencies:
   - daml-prim
   - daml-stdlib
 build-options:
-  # DA.Crypto.Text (secp256k1WithEcdsaOnly / keccak256) is Early Access / Alpha;
-  # suppress the alpha warning-as-error. Relying on an Alpha builtin is a
-  # mainnet-readiness risk (see README §5).
-  - -Wno-crypto-text-is-alpha
+  # Daml-LF 2.3 (Protocol Version 35) — required for contract-key syntax. As of
+  # SDK 3.5 the DA.Crypto.Text builtins (keccak256 / secp256k1WithEcdsaOnly) are
+  # stable, so no alpha-warning suppression is needed.
+  - --target=2.3
