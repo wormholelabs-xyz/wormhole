@@ -136,9 +136,13 @@ verifyOne gs digest pubKeys sig =
       then error ("invalid signature for guardian index " <> show sig.guardianIndex)
     else ()
 
--- | True if the list is strictly increasing.
+-- | True if the list is strictly increasing. Direct recursion so @&&@ can
+-- short-circuit on the first violation — under Daml's strict evaluation the
+-- @and (zipWith (<) xs (drop 1 xs))@ formulation would materialize both
+-- intermediate lists in full before checking anything.
 strictlyAscending : [Int] -> Bool
-strictlyAscending xs = and (zipWith (<) xs (drop 1 xs))
+strictlyAscending (x :: rest@(y :: _)) = x < y && strictlyAscending rest
+strictlyAscending _ = True
 
 ----------------------------------------------------------------------
 -- DER encoding for the secp256k1 builtin
