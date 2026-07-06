@@ -151,12 +151,14 @@ derivedAddress domainTag registrar owner id =
   derivedAddressFromText domainTag (RegistrarText (partyToText registrar)) (OwnerText (partyToText owner)) id
 
 -- | Drop leading zero bytes ("00") from a hex string, keeping at least one byte.
--- Used for minimal DER integer encoding.
+-- Used for minimal DER integer encoding. Counts the leading zero chars and
+-- slices once, rather than recursing one byte-slice at a time.
 stripLeadingZeroBytes : Bytes -> Bytes
 stripLeadingZeroBytes b
   | byteLength b <= 1 = b
-  | sliceBytes 0 1 b == "00" = stripLeadingZeroBytes (sliceFrom 1 b)
-  | otherwise = b
+  | otherwise =
+      let zeroBytes = T.length (T.takeWhile (== "0") b) / 2
+      in sliceFrom (min zeroBytes (byteLength b - 1)) b
 
 -- | True if the most-significant bit of the first byte is set (first hex nibble
 -- >= 8). Used to decide whether a DER integer needs a 0x00 sign pad.
