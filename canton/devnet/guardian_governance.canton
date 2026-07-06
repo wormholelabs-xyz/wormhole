@@ -1,0 +1,239 @@
+// Canton console topology script: bootstrap `guardianGovernance` as an
+// external, decentralized-namespace party owned by a k-of-n threshold of
+// guardian keys (default 2-of-3), following the same pattern the Canton
+// Network DSO party uses.
+//
+// Run via `dpm canton-console --bootstrap guardian_governance.canton` against
+// a running participant (sandbox locally; a real participant connected to
+// the CN global synchronizer in production -- see canton/README.md). The
+// bash wrapper `setup_guardian_governance.sh` drives this end to end.
+//
+// WHY THIS DOES NOT USE `topology.decentralized_namespaces.propose` /
+// `party_to_participant_mappings.propose` DIRECTLY WITH `signedBy=<fingerprint>`:
+// those console convenience methods sign locally, using a private key that
+// must live in THIS participant's own crypto vault -- fine for the
+// participant's own identity, wrong for guardian owner keys, which must never
+// touch a participant host (see GG_OWNER_SIGN_CMD_* below). Instead this
+// script builds each topology transaction UNSIGNED
+// (`topology.transactions.generate`), asks each owner's external signer for a
+// raw signature over its hash, wraps that with the public
+// `Signature.fromExternalSigning` constructor, and only then submits the
+// fully-signed transaction (`topology.transactions.load`). This is the same
+// shape production custody uses -- local/test and production differ only in
+// what GG_OWNER_SIGN_CMD_* points at (this repo's `guardian_key_tool.js` vs.
+// a real HSM/KMS CLI), not in the topology-construction code.
+//
+// PartyToKeyMapping is deliberately NOT used: it was deprecated in Canton 3.4
+// in favor of putting the party's signing keys directly on PartyToParticipant
+// via `partySigningKeys` (a `SigningKeysWithThreshold`), which is what this
+// script does.
+//
+// Configuration (environment variables; see setup_guardian_governance.sh for
+// the values it sets):
+//   GG_OWNER_PUBKEY_1/2/3   Paths to the three owners' Ed25519 public keys,
+//                           DER-encoded X.509 SubjectPublicKeyInfo (the same
+//                           format `openssl` and Node's `crypto` module
+//                           produce, and what `guardian_key_tool.js generate`
+//                           writes as `<prefix>.pub`). Required.
+//   GG_OWNER_SIGN_CMD_1/2/3 Shell command that signs a hex-encoded hash and
+//                           prints a hex-encoded raw Ed25519 signature to
+//                           stdout, invoked as `<CMD> <hashHex>` (the command
+//                           string may itself contain arguments, e.g.
+//                           "node guardian_key_tool.js sign owner1.key").
+//                           This is the pluggable custody boundary: locally it
+//                           runs guardian_key_tool.js against a same-host key
+//                           file; in production it should invoke a real
+//                           HSM/KMS/offline signer. Required.
+//   GG_THRESHOLD            Signing/authorization threshold, k of 3. Default 2.
+//   GG_PARTY_NAME           Party name allocated under the decentralized
+//                           namespace. Default "guardianGovernance".
+//   GG_SYNCHRONIZER_ALIAS   Alias of the synchronizer to submit topology to.
+//                           Default: the participant's sole connected
+//                           synchronizer (fails if there is more than one and
+//                           this is unset).
+//   GG_ARTIFACTS_FILE       Output path for the artifacts JSON (party id,
+//                           namespace id, owner fingerprints/pubkey paths,
+//                           threshold). Default "guardian-governance-artifacts.json".
+//
+// This script assumes exactly one participant is bound in the console
+// session (true for `dpm canton-console` against sandbox, and for a
+// single-participant production console session) and hosts the party on that
+// participant at Confirmation permission. Multi-participant hosting (the
+// production censorship-resistance requirement) is a straightforward
+// extension of the `HostingParticipant` sequence built below -- add entries
+// for the other participants' ids -- and the same externally-signed-load
+// pattern applies to their consent-to-host signatures.
+
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.topology.transaction._
+import com.digitalasset.canton.config.RequireTypes.PositiveInt
+import com.digitalasset.canton.crypto._
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+import com.digitalasset.canton.admin.api.client.commands.TopologyAdminCommands.Write.GenerateTransactions.Proposal
+import com.google.protobuf.ByteString
+import com.daml.nonempty.NonEmpty
+import scala.sys.process._
+import scala.collection.immutable.Set
+import java.nio.file.{Files, Paths}
+
+def env(name: String): String =
+  sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
+def envOr(name: String, default: String): String = sys.env.getOrElse(name, default)
+
+val ownerPubkeyFiles = Seq(env("GG_OWNER_PUBKEY_1"), env("GG_OWNER_PUBKEY_2"), env("GG_OWNER_PUBKEY_3"))
+val ownerSignCmds = Seq(env("GG_OWNER_SIGN_CMD_1"), env("GG_OWNER_SIGN_CMD_2"), env("GG_OWNER_SIGN_CMD_3"))
+val threshold = PositiveInt.tryCreate(envOr("GG_THRESHOLD", "2").toInt)
+val partyName = envOr("GG_PARTY_NAME", "guardianGovernance")
+val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
+val artifactsFile = envOr("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
+
+def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
+def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+
+val participant = consoleEnvironment.participants.all match {
+  case Seq(single) => single
+  case other => throw new RuntimeException(
+    s"expected exactly one participant bound in this console session, found ${other.size}")
+}
+
+val connected = participant.synchronizers.list_connected()
+val targetSynchronizer = synchronizerAliasOpt match {
+  case Some(alias) =>
+    connected.find(_.synchronizerAlias.unwrap == alias)
+      .getOrElse(throw new RuntimeException(s"not connected to synchronizer alias '$alias'"))
+  case None =>
+    connected match {
+      case Seq(single) => single
+      case other => throw new RuntimeException(
+        s"connected to ${other.size} synchronizers; set GG_SYNCHRONIZER_ALIAS to disambiguate")
+    }
+}
+val synchronizerId = targetSynchronizer.physicalSynchronizerId
+val store: TopologyStoreId = TopologyStoreId.Synchronizer(synchronizerId)
+val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
+
+// --- Load the three owner public keys and give Canton their exact fingerprint/namespace. ---
+// `SigningPublicKey.create` is a pure value constructor (no vault access, no
+// private-key material involved); its `.fingerprint` matches exactly what
+// `keys.public.upload` would compute server-side for the same bytes, so the
+// namespace derivation below is correct without needing a round trip.
+def loadOwnerKey(pubFile: String): SigningPublicKey = {
+  val der = ByteString.copyFrom(Files.readAllBytes(Paths.get(pubFile)))
+  SigningPublicKey
+    .create(CryptoKeyFormat.DerX509Spki, der, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .getOrElse(sys.error(s"invalid owner public key at $pubFile"))
+}
+val ownerPubkeys = ownerPubkeyFiles.map(loadOwnerKey)
+val ownerNamespaces = ownerPubkeys.map(k => Namespace(k.fingerprint))
+
+// Invoke this owner's external signer (GG_OWNER_SIGN_CMD_i) over the given
+// topology-transaction hash and wrap the raw signature bytes it returns as a
+// Canton `Signature`. The signer never runs inside this JVM process and this
+// script never sees (or could see) any owner's private key material.
+def externalSign(signCmd: String, hash: Hash, fingerprint: Fingerprint): Signature = {
+  val hex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
+  val sigHex = (signCmd + " " + hex).!!.trim
+  val sigBytes = ByteString.copyFrom(hexToBytes(sigHex))
+  Signature.fromExternalSigning(
+    SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
+    sigBytes,
+    fingerprint,
+    SigningAlgorithmSpec.Ed25519,
+  )
+}
+
+def generateUnsigned[M <: TopologyMapping](mapping: M): TopologyTransaction[TopologyChangeOp, M] =
+  participant.topology.transactions
+    .generate(Seq(Proposal(mapping, store)))
+    .head
+    .asInstanceOf[TopologyTransaction[TopologyChangeOp, M]]
+
+println(s"[guardian-governance] owner namespaces: ${ownerNamespaces.mkString(", ")}")
+
+// --- Step 1: each owner's root NamespaceDelegation, self-signed externally. ---
+// A namespace's root key must have an explicit self-signed NamespaceDelegation
+// on record before Canton will accept further signatures "as" that namespace
+// (this bootstraps the namespace's root of trust, the same way a node's own
+// identity key does).
+val rootDelegations = (ownerNamespaces, ownerPubkeys, ownerSignCmds).zipped.map { (ns, pub, signCmd) =>
+  val mapping = NamespaceDelegation
+    .create(ns, pub, DelegationRestriction.CanSignAllMappings)
+    .getOrElse(sys.error(s"failed to build NamespaceDelegation for $ns"))
+  val unsigned = generateUnsigned(mapping)
+  val sig = externalSign(signCmd, unsigned.hash.hash, ns.fingerprint)
+  SignedTopologyTransaction.withSignature(unsigned, sig, isProposal = false, protocolVersion)
+}
+participant.topology.transactions.load(rootDelegations, store)
+println("[guardian-governance] root namespace delegations loaded")
+
+// --- Step 2: DecentralizedNamespaceDefinition, threshold-of-3, all 3 owners externally sign. ---
+// Creating a brand-new decentralized namespace requires every declared owner
+// to authorize it (the namespace does not exist yet, so its own threshold
+// cannot yet govern authorization of this transaction); the threshold takes
+// effect for everything that references the namespace afterwards -- including
+// amending this very definition later (owner rotation).
+val ownerNamespaceSet: Set[Namespace] = ownerNamespaces.toSet
+val dnNamespace = DecentralizedNamespaceDefinition.computeNamespace(ownerNamespaceSet)
+val dn = DecentralizedNamespaceDefinition.tryCreate(dnNamespace, threshold, ownerNamespaceSet)
+val unsignedDn = generateUnsigned(dn)
+val dnSignatures = (ownerNamespaces, ownerSignCmds).zipped.map { (ns, signCmd) =>
+  externalSign(signCmd, unsignedDn.hash.hash, ns.fingerprint)
+}
+val signedDn = dnSignatures.tail.foldLeft(
+  SignedTopologyTransaction.withSignature(unsignedDn, dnSignatures.head, isProposal = false, protocolVersion)
+)(_.addSingleSignature(_))
+participant.topology.transactions.load(Seq(signedDn), store)
+println(s"[guardian-governance] decentralized namespace created: $dnNamespace (threshold ${threshold.value}-of-${ownerNamespaces.size})")
+
+// --- Step 3: allocate the party under the decentralized namespace, host it at
+// Confirmation, and register the same owner keys as its threshold signing
+// keys (PartyToParticipant.partySigningKeys -- the modern replacement for the
+// deprecated standalone PartyToKeyMapping). ---
+val partyId = PartyId.tryCreate(partyName, dnNamespace)
+val signingKeys = SigningKeysWithThreshold(NonEmpty.mk(Set, ownerPubkeys.head, ownerPubkeys.tail: _*), threshold)
+val partyToParticipant = PartyToParticipant
+  .create(
+    partyId,
+    PositiveInt.one, // confirmation threshold across hosting participants (single participant locally)
+    Seq(HostingParticipant(participant.id, ParticipantPermission.Confirmation)),
+    Some(signingKeys),
+  )
+  .getOrElse(sys.error("failed to build PartyToParticipant"))
+val unsignedPtp = generateUnsigned(partyToParticipant)
+val ptpOwnerSignatures = (ownerNamespaces, ownerSignCmds).zipped.map { (ns, signCmd) =>
+  externalSign(signCmd, unsignedPtp.hash.hash, ns.fingerprint)
+}
+val signedPtpOwnersOnly = ptpOwnerSignatures.tail.foldLeft(
+  SignedTopologyTransaction.withSignature(unsignedPtp, ptpOwnerSignatures.head, isProposal = false, protocolVersion)
+)(_.addSingleSignature(_))
+// The hosting participant must also consent to host the party; that is a
+// LOCAL signature (this participant's own identity key), added via the
+// vault-backed `transactions.sign`, not an external one.
+val signedPtp = participant.topology.transactions
+  .sign(Seq(signedPtpOwnersOnly), store, signedBy = Seq(participant.id.uid.namespace.fingerprint))
+  .head
+participant.topology.transactions.load(Seq(signedPtp), store)
+println(s"[guardian-governance] party allocated and hosted: $partyId")
+
+// --- Artifacts: the handoff to (a) the local test harness's assertions and
+// (b) the eventual CN-synchronizer submission. Deliberately plain hand-built
+// JSON (no library dependency) since the shape is flat and fully known here. ---
+def jsonString(s: String): String = "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+val ownersJson = (ownerNamespaces, ownerPubkeyFiles).zipped.map { (ns, pubFile) =>
+  s"""    { "namespace": ${jsonString(ns.fingerprint.toProtoPrimitive)}, "publicKeyFile": ${jsonString(pubFile)} }"""
+}.mkString(",\n")
+val artifactsJson =
+  s"""{
+     |  "partyId": ${jsonString(partyId.toProtoPrimitive)},
+     |  "decentralizedNamespace": ${jsonString(dnNamespace.fingerprint.toProtoPrimitive)},
+     |  "threshold": ${threshold.value},
+     |  "owners": [
+     |$ownersJson
+     |  ],
+     |  "synchronizerId": ${jsonString(synchronizerId.toProtoPrimitive)},
+     |  "hostingParticipant": ${jsonString(participant.id.toProtoPrimitive)},
+     |  "hostingPermission": "Confirmation"
+     |}
+     |""".stripMargin
+Files.write(Paths.get(artifactsFile), artifactsJson.getBytes("UTF-8"))
+println(s"[guardian-governance] artifacts written to $artifactsFile")
