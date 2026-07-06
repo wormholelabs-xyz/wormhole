@@ -105,7 +105,11 @@ testRegistryAllocation = do
 -- have diverged — fix BOTH and regenerate the vector.
 testAddressVector : Script ()
 testAddressVector =
-  derivedAddressFromText emitterAddressTag "vector-operator::1220deadbeef" "vector-owner::1220cafebabe" 7
+  derivedAddressFromText
+      (DomainTag emitterAddressTag)
+      (RegistrarText "vector-operator::1220deadbeef")
+      (OwnerText "vector-owner::1220cafebabe")
+      (RegistryId 7)
     === "45ae8886d1c165b071d3b1202fe81ebedc39f61a6a91a1d13140eb64857f3f2b"
 
 -- | A compromised operator cannot forge an existing emitter's address. The

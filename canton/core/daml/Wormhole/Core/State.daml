@@ -211,7 +211,7 @@ emitterAddressTag = "wormhole:emitter:v1"
 -- @(registrar, owner, emitterId)@.
 emitterAddressFor : Party -> Party -> Int -> Bytes32
 emitterAddressFor registrar owner emitterId =
-  derivedAddress emitterAddressTag registrar owner emitterId
+  derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId)
 
 -- | Allocates monotonically increasing emitter ids, one registry per operator
 -- (keyed by the operator party). Sequential-id discipline is operator-behavioral

@@ -90,13 +90,18 @@ intToHexByte n =
     then error ("intToHexByte: out of range: " <> show n)
     else hexChar (n / 16) <> hexChar (n % 16)
 
--- | Encode a non-negative 'Int' as @numBytes@ big-endian bytes (hex). The value
--- must fit in @numBytes@ bytes; higher-order bytes beyond it are silently
--- dropped by the modular reduction, so callers bound-check upstream (chain ids,
--- lengths, and trimmed amounts all fit here).
+-- | Encode a non-negative 'Int' as @numBytes@ big-endian bytes (hex). Fails
+-- loudly — rather than silently truncating via the modular reduction — if
+-- @numBytes@ is negative, @value@ is negative, or @value@ does not fit in
+-- @numBytes@ bytes. Chain ids, lengths, ids, and trimmed amounts all fit, so a
+-- failure here signals a real upstream bug, not an expected case.
 intToBytesN : Int -> Int -> Bytes
 intToBytesN value numBytes
-  | numBytes <= 0 = ""
+  | numBytes < 0 = error ("intToBytesN: negative width: " <> show numBytes)
+  | value < 0 = error ("intToBytesN: negative value: " <> show value)
+  | numBytes == 0 =
+      -- Recursion has consumed every byte; any nonzero remainder overflowed.
+      if value == 0 then "" else error ("intToBytesN: value does not fit in the requested width")
   | otherwise = intToBytesN (value / 256) (numBytes - 1) <> intToHexByte (value % 256)
 
 -- | Left-pad a hex 'Bytes' with zero bytes to exactly @numBytes@ bytes. If it is
@@ -109,11 +114,28 @@ leftPadTo numBytes b =
        then normalizeHex b
        else mconcat (replicate (numBytes - bl) "00") <> normalizeHex b
 
--- | A 4-byte big-endian byte-length prefix followed by the bytes themselves.
--- Concatenating two variable-length fields bare is ambiguous ("ab"‖"c" vs
--- "a"‖"bc"); the length prefix makes the address preimage injective.
-lenPrefixed : Bytes -> Bytes
-lenPrefixed b = intToBytesN (byteLength b) 4 <> b
+-- | A length-prefixed byte segment: a 4-byte big-endian length followed by the
+-- bytes themselves. A distinct type from raw 'Bytes' (Daml has no @newtype@, so
+-- it is a single-constructor @data@) so a self-delimiting segment can't be
+-- mistaken for, or concatenated as, unprefixed bytes. Concatenating two
+-- variable-length fields bare is ambiguous ("ab"‖"c" vs "a"‖"bc"); the length
+-- prefix makes the address preimage injective. Use 'unLenPrefixed' to get the
+-- raw bytes back for hashing.
+data LenPrefixed = LenPrefixed { unLenPrefixed : Bytes }
+  deriving (Eq, Show)
+
+lenPrefixed : Bytes -> LenPrefixed
+lenPrefixed b = LenPrefixed (intToBytesN (byteLength b) 4 <> b)
+
+-- | Typed inputs to the address preimage. Daml has no @newtype@, so these are
+-- single-constructor @data@ types. Distinct types for the three text fields (and
+-- the id) mean 'derivedAddressFromText' can't have its arguments transposed —
+-- swapping @registrar@ and @owner@ would otherwise silently derive a different
+-- but perfectly valid-looking address, a security-relevant mistake.
+data DomainTag     = DomainTag     Text deriving (Eq, Show)
+data RegistrarText = RegistrarText Text deriving (Eq, Show)
+data OwnerText     = OwnerText     Text deriving (Eq, Show)
+data RegistryId    = RegistryId    Int  deriving (Eq, Show)
 
 -- | Canonical 32-byte registry address, keyed off the components of a
 -- registry-allocated contract key:
@@ -126,11 +148,11 @@ lenPrefixed b = intToBytesN (byteLength b) 4 <> b
 -- fingerprints). The Go watcher recomputes the same value from the
 -- 'WormholeMessage' fields; the encoding is pinned across both languages by a
 -- shared test vector.
-derivedAddressFromText : Text -> Text -> Text -> Int -> Bytes32
-derivedAddressFromText domainTag registrarText ownerText id =
+derivedAddressFromText : DomainTag -> RegistrarText -> OwnerText -> RegistryId -> Bytes32
+derivedAddressFromText (DomainTag domainTag) (RegistrarText registrarText) (OwnerText ownerText) (RegistryId id) =
   normalizeHex (keccak256 (toHex domainTag
-    <> lenPrefixed (toHex registrarText)
-    <> lenPrefixed (toHex ownerText)
+    <> unLenPrefixed (lenPrefixed (toHex registrarText))
+    <> unLenPrefixed (lenPrefixed (toHex ownerText))
     <> intToBytesN id 8))
 
 -- | Address of the registry-allocated identity @(registrar, owner, id)@ under
@@ -139,9 +161,9 @@ derivedAddressFromText domainTag registrarText ownerText id =
 -- signatory of the identity contract), so a compromised registrar cannot
 -- impersonate an existing identity — it can only mint a duplicate under a
 -- different owner, which derives a different, untrusted address.
-derivedAddress : Text -> Party -> Party -> Int -> Bytes32
+derivedAddress : DomainTag -> Party -> Party -> RegistryId -> Bytes32
 derivedAddress domainTag registrar owner id =
-  derivedAddressFromText domainTag (partyToText registrar) (partyToText owner) id
+  derivedAddressFromText domainTag (RegistrarText (partyToText registrar)) (OwnerText (partyToText owner)) id
 
 -- | Drop leading zero bytes ("00") from a hex string, keeping at least one byte.
 -- Used for minimal DER integer encoding.
