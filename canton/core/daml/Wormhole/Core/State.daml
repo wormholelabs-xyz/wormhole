@@ -146,17 +146,18 @@ template CoreState
         assertMsg "governance: action already consumed"
           (not (Set.member vaa.hash consumedGovernance))
         let action = parseGovernance vaa.payload
-        let consumed' = Set.insert vaa.hash consumedGovernance
-        applyGovernance this now consumed' action
+        case applyGovernance this now action of
+          Left err -> assertFail err
+          Right st -> create st with
+            consumedGovernance = Set.insert vaa.hash consumedGovernance
 
 ----------------------------------------------------------------------
--- Governance application (pure-ish helpers in the Update monad)
+-- Governance application (pure helpers in the Either Text monad)
 ----------------------------------------------------------------------
 
--- | Dispatch a parsed governance action, recreating 'CoreState'. @consumed'@
--- already includes this action's digest.
-applyGovernance : CoreState -> Time -> Set Bytes32 -> GovernanceAction -> Update (ContractId CoreState)
-applyGovernance st now consumed' action = case action of
+-- | Dispatch a parsed governance action, recreating 'CoreState'.
+applyGovernance : CoreState -> Time -> GovernanceAction -> Either Text CoreState
+applyGovernance st now action = case action of
   GuardianSetUpgrade chain newIndex newKeys -> do
     assertMsg "guardianSetUpgrade: wrong target chain" (chain == st.chainId || chain == 0)
     assertMsg "guardianSetUpgrade: index must be current + 1" (newIndex == st.guardianSetIndex + 1)
@@ -165,27 +166,26 @@ applyGovernance st now consumed' action = case action of
     let oldSet = (currentSetForUpgrade st) with expirationTime = Some (addRelTime now (seconds guardianSetExpirySeconds))
         newSet = GuardianSet with keys = newKeys, expirationTime = None
         sets' = Map.insert newIndex newSet (Map.insert st.guardianSetIndex oldSet st.guardianSets)
-    create st with
+    pure st with
       guardianSetIndex = newIndex
       guardianSets = sets'
-      consumedGovernance = consumed'
 
   SetMessageFee chain fee -> do
     assertMsg "setMessageFee: wrong target chain" (chain == st.chainId)
-    create st with messageFee = fee, consumedGovernance = consumed'
+    pure st with messageFee = fee
 
   TransferFees chain _amount _recipient -> do
     assertMsg "transferFees: wrong target chain" (chain == st.chainId || chain == 0)
-    -- Native-fee accounting is deferred (messageFee defaults to 0); record the
-    -- action as consumed so replay protection and protocol semantics hold.
-    create st with consumedGovernance = consumed'
+    -- Native-fee accounting is deferred (messageFee defaults to 0); no state
+    -- change here — the caller still records the action as consumed.
+    pure st
 
   ContractUpgrade chain _newContract -> do
     assertMsg "contractUpgrade: wrong target chain" (chain == st.chainId)
     -- On Canton an "upgrade" is an operator-driven Daml package upgrade gated by
-    -- the recorded target package-id; here we record the action as consumed.
-    -- The actual package migration is performed out of band by the operator.
-    create st with consumedGovernance = consumed'
+    -- the recorded target package-id; the actual package migration is performed
+    -- out of band by the operator. The caller records the action as consumed.
+    pure st
 
 -- | Helper to read the current set off a 'CoreState' value (not a contract).
 currentSetForUpgrade : CoreState -> GuardianSet
