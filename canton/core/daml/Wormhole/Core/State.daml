@@ -123,7 +123,7 @@ template CoreState
         -- A VAA may be signed by a non-current-but-unexpired set; pick the set
         -- it names and require it to still be active.
         let signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
-        let () = verifyVAA signingSet vaa pubKeys now
+        either assertFail pure (verifyVAA signingSet vaa pubKeys now)
         pure vaa
 
     -- | Apply a governance VAA: verify it (against the CURRENT set, per EVM),
@@ -139,7 +139,7 @@ template CoreState
         -- Governance must be signed by the current set (EVM Governance.sol).
         assertMsg "governance: not signed by current guardian set"
           (vaa.guardianSetIndex == guardianSetIndex)
-        let () = verifyVAA (currentSetForUpgrade this) vaa pubKeys now
+        either assertFail pure (verifyVAA (currentSetForUpgrade this) vaa pubKeys now)
         assertMsg "governance: wrong emitter chain"
           (vaa.emitterChain == governanceChainId)
         assertMsg "governance: wrong emitter address"
