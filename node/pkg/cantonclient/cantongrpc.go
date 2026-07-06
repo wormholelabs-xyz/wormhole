@@ -209,10 +209,10 @@ func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 
 // decodeWormholeMessage maps a Ledger API Value (a WormholeMessage record) to a
 // CantonMessage. See Wormhole.Core.State.WormholeMessage for the field set:
-// identity is a Daml ContractId -> Value.contract_id (the hex contract-id of the
-// emitter's EmitterIdentity, which the watcher hashes into the emitter address);
-// payload is Daml Text (hex) -> Value.text; sequence/nonce/consistencyLevel are
-// Daml Int -> Value.int64.
+// registrar and owner are Daml Parties -> Value.party (the emitter's key
+// components, from which the watcher derives the emitter address); emitterId,
+// sequence, nonce, consistencyLevel are Daml Int -> Value.int64; payload is Daml
+// Text (hex) -> Value.text.
 func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	rec := v.GetRecord()
 	if rec == nil {
@@ -222,7 +222,15 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	for _, f := range rec.GetFields() {
 		fields[f.GetLabel()] = f.GetValue()
 	}
-	identityCID, err := contractIDField(fields, "identity")
+	registrar, err := partyField(fields, "registrar")
+	if err != nil {
+		return CantonMessage{}, err
+	}
+	owner, err := partyField(fields, "owner")
+	if err != nil {
+		return CantonMessage{}, err
+	}
+	emitterID, err := intField(fields, "emitterId")
 	if err != nil {
 		return CantonMessage{}, err
 	}
@@ -242,11 +250,13 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	if err != nil {
 		return CantonMessage{}, err
 	}
-	if seq < 0 || nonce < 0 || nonce > math.MaxUint32 || cl < 0 || cl > math.MaxUint8 {
-		return CantonMessage{}, fmt.Errorf("field out of range (seq=%d nonce=%d cl=%d)", seq, nonce, cl)
+	if emitterID < 0 || seq < 0 || nonce < 0 || nonce > math.MaxUint32 || cl < 0 || cl > math.MaxUint8 {
+		return CantonMessage{}, fmt.Errorf("field out of range (emitterId=%d seq=%d nonce=%d cl=%d)", emitterID, seq, nonce, cl)
 	}
 	return CantonMessage{
-		IdentityCID:      identityCID,
+		Registrar:        registrar,
+		Owner:            owner,
+		EmitterID:        uint64(emitterID),
 		Sequence:         uint64(seq),
 		Nonce:            uint32(nonce),
 		ConsistencyLevel: uint8(cl),
@@ -254,18 +264,18 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	}, nil
 }
 
-// contractIDField reads a Daml ContractId field, returned by the Ledger API as a
-// non-empty contract_id string (Canton's hex-encoded contract-id).
-func contractIDField(fields map[string]*apiv2.Value, label string) (string, error) {
+// partyField reads a Daml Party field, returned by the Ledger API as a non-empty
+// party-id string (Value.party).
+func partyField(fields map[string]*apiv2.Value, label string) (string, error) {
 	v, ok := fields[label]
 	if !ok {
 		return "", fmt.Errorf("missing field %q", label)
 	}
-	cid := v.GetContractId()
-	if cid == "" {
-		return "", fmt.Errorf("field %q is not a contract id", label)
+	p := v.GetParty()
+	if p == "" {
+		return "", fmt.Errorf("field %q is not a party", label)
 	}
-	return cid, nil
+	return p, nil
 }
 
 func hexField(fields map[string]*apiv2.Value, label string) ([]byte, error) {

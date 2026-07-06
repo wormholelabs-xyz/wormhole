@@ -8,9 +8,11 @@ observes it (implemented in Go under
 client under [`node/pkg/cantonclient`](../node/pkg/cantonclient)).
 
 **Target deployment:** the **public Canton Network mainnet** — Canton **3.5.x**
-protocol, **Daml SDK 3.4.11**. This drives two design choices that differ from a
-private/Canton-2.x deployment: Ledger API **v2**, and **no reliance on unique
-contract keys** (unsupported on Canton 3.x — see §1, §4).
+protocol, **Daml SDK 3.5.1** (Daml-LF **2.3**, Protocol Version **35**). Two
+consequences shape the design: Ledger API **v2**, and **contract keys that are
+non-unique** (Canton keys give stable lookup but do not enforce uniqueness — so
+identity uniqueness is registry-enforced and address integrity is cryptographic;
+see §1, §4).
 
 The goal is parity with the canonical EVM core bridge
 ([`ethereum/contracts/Implementation.sol`](../ethereum/contracts/Implementation.sol),
@@ -23,11 +25,11 @@ the Wormhole whitepapers:
 - [0004 — Message Publishing](../whitepapers/0004_message_publishing.md)
 - [node watcher README](../node/pkg/watchers/README.md)
 
-> **Status:** initial implementation. The Daml package **compiles and tests pass
-> at 100% template/choice coverage on Daml SDK 3.4.11**, including on-chain VAA
-> verification validated against a real guardian-signed VAA. Remaining
-> mainnet-gating items — the **Alpha** status of the `DA.Crypto.Text` built-ins
-> and the exact Ledger-API protobuf surface — are tracked in
+> **Status:** initial implementation. The Daml packages **compile and tests pass
+> on Daml SDK 3.5.1**, including on-chain VAA verification validated against a
+> real guardian-signed VAA and the cross-language address derivation pinned by a
+> shared test vector. The remaining mainnet-gating item — the exact Ledger-API
+> protobuf surface — plus the deployment/observer topology are tracked in
 > [Open Questions & Validation Items](#11-open-questions--validation-items).
 
 ---
@@ -61,18 +63,26 @@ The most consequential differences:
 - **No `msg.sender`.** A Daml choice knows its acting parties, but Wormhole
   needs a stable 32-byte emitter address with a per-emitter monotonically
   increasing sequence. We solve this with an **`Emitter` registration**
-  contract (§4.2), analogous to Sui's `EmitterCap`.
+  contract (§4.2), analogous to Sui's `EmitterCap`. The emitting party (`owner`)
+  co-signs the `Emitter` and is part of the address derivation, so it is the
+  faithful Canton analog of `msg.sender`: only that party's key can emit under
+  its address (§4.2, §10).
 - **No `ecrecover`.** Daml's `secp256k1` builtin _verifies_ a signature against
   a _public key_; it does not _recover_ the signer from the signature like
   Ethereum does. Guardian-set state on Canton therefore stores guardian
   **public keys** (not just their 20-byte addresses), bound to the canonical
   addresses from the governance VAA (§5).
-- **No global mutable singletons, and no unique contract keys.** The "core
+- **No global mutable singletons; contract keys are non-unique.** The "core
   bridge contract" is modeled as a single long-lived **`CoreState`** contract,
-  archived and recreated on every governance transition. Canton 3.x (the public
-  Canton Network) **does not support unique contract keys** ([docs](https://docs.digitalasset.com/build/3.5/reference/daml/contract-keys.html)),
-  so the singleton is **not** enforced by a key — it is enforced by the
-  `operator` being the sole creator (single trusted issuer). See §4.1.
+  archived and recreated on every governance transition. Contract keys exist on
+  Canton 3.5 (Daml-LF 2.3) but are **not unique** — multiple active contracts may
+  share a key ([docs](https://docs.canton.network/appdev/modules/m3-contract-keys#contract-keys)).
+  So keys give ergonomics (stable lookup / `ExerciseByKeyCommand`), not
+  uniqueness: the `CoreState` is **co-signed by the `operator` and a
+  `guardianGovernance` party** (a k-of-n threshold party) and keyed by the latter,
+  so the operator cannot forge the guardian set (§4.1); per-emitter uniqueness is
+  a **registry** that allocates ids plus an owner-bound, cryptographic address
+  (§4.2).
 
 ---
 
@@ -142,7 +152,7 @@ Daml package name: `wormhole-core` (the `core` package). Module layout under
 | `Wormhole.Core.Bytes`       | byte/hex helpers, big-endian integer (de)serialization      |
 | `Wormhole.Core.VAA`         | VAA struct, parser, digest, signature/quorum verification   |
 | `Wormhole.Core.GuardianSet` | guardian-set representation and expiry                      |
-| `Wormhole.Core.State`       | the `CoreState` singleton template + `Emitter` registration |
+| `Wormhole.Core.State`       | the `CoreState` singleton + `EmitterRegistry` and `Emitter` |
 | `Wormhole.Core.Governance`  | governance packet parsing and the governance choices        |
 | `Wormhole.Core.Setup`       | initialization (`setup`)                                    |
 
@@ -151,7 +161,8 @@ Daml package name: `wormhole-core` (the `core` package). Module layout under
 ```haskell
 template CoreState
   with
-    operator           : Party          -- holds/advances the singleton; the "deployer"
+    operator           : Party          -- advances the singleton; the "deployer"
+    guardianGovernance : Party          -- guardians' governance anchor (threshold party)
     chainId            : Int            -- 72
     governanceChainId  : Int            -- 1 (Solana)
     governanceContract : Bytes32        -- 0x..0004 (the governance emitter)
@@ -160,23 +171,38 @@ template CoreState
     messageFee         : Int            -- fee required to publish (native units)
     consumedGovernance : Set Bytes32    -- replay protection (keyed by digest)
   where
-    signatory operator
-    -- No contract key: Canton 3.x has no unique keys. Uniqueness is
-    -- operator-enforced (single issuer); the current cid is tracked off-ledger.
+    signatory operator, guardianGovernance
+    key guardianGovernance : Party   -- lookup by the governance anchor is authentic
+    maintainer key
 ```
 
-Every state-mutating choice is `controller`-checked, archives the current
-`CoreState`, and `create`s the next one with updated fields. This is the Daml
-idiom for mutable state and gives us deterministic, replay-protected
-transitions.
+Every state-mutating choice is `controller`-checked (controller `operator`),
+archives the current `CoreState`, and `create`s the next one with updated fields.
+This is the Daml idiom for mutable state and gives us deterministic,
+replay-protected transitions.
 
-**Singleton without a key.** Canton 3.x doesn't support unique contract keys, so
-"exactly one live `CoreState`" is guaranteed instead by the `operator` being its
-**sole creator**: only the operator can `create` a `CoreState` (it is the
-signatory), so its automation creates exactly one at setup and advances it
-linearly by contract-id thereafter (each governance choice consumes the current
-and returns the next cid). The watcher and integrators reference it by
-contract-id, tracked from the ledger stream — never `fetchByKey`.
+**Singleton co-signed by a governance party, keyed for authenticity.** The
+`CoreState` is co-signed by the `operator` and a **`guardianGovernance`** party.
+In production that is a **decentralized-namespace external party** controlled by a
+k-of-n threshold of guardian keys — the same construction as the Canton Network's
+DSO party — rotated at the topology layer without touching this template (the
+party id, and thus the key and every consumer's lookup, is stable across guardian
+rotation). Two things follow:
+
+- **The operator cannot forge the guardian set.** Because `guardianGovernance` is
+  a signatory *and* the key maintainer, a compromised operator cannot `create` a
+  `CoreState` bearing the real governance party — so a lookup by the known
+  `guardianGovernance` party (`fetchByKey`/`ExerciseByKeyCommand`) can only ever
+  resolve an **authentic** `CoreState`. Its guardian set is thus cryptographically
+  anchored, not operator-controlled. (Keys are still non-unique, so an operator
+  puppet could create a `CoreState` under a *different* governance party — but it
+  is not findable by the real anchor and no consumer trusts it.)
+- **Governance stays low-friction.** `guardianGovernance` actively signs only at
+  **genesis**; each `SubmitGovernanceVAA` transition inherits its authority from
+  the archived contract (the same authority-propagation as the `Emitter` owner
+  through `PublishMessage`), so the operator submits governance alone. "Exactly
+  one live `CoreState`" is still behavioral (operator + governance create one at
+  setup), but the set's *contents* are now anchored.
 
 Per-emitter **sequence numbers are stored in each `Emitter`** (§4.2), not in
 `CoreState`. This is deliberate: in Canton, a contract's choice can only be
@@ -201,7 +227,9 @@ config and governance state.
 Mirrors `publishMessage(nonce, payload, consistencyLevel)` from
 `Implementation.sol:15` and whitepaper 0004.
 
-An integrator first registers an emitter:
+An integrator first registers an emitter. The operator runs an `EmitterRegistry`
+(created at setup, keyed by the operator) that allocates a stable integer id;
+`ApproveEmitter` allocates one and creates the keyed `Emitter` in one transaction:
 
 ```haskell
 template EmitterRequest with
@@ -210,46 +238,61 @@ template EmitterRequest with
   where
     signatory requester
     observer operator
-    -- operator exercises ApproveEmitter, which mints an immutable EmitterIdentity
-    -- and the Emitter bound to it, in one transaction
+    -- operator exercises ApproveEmitter, which allocates an emitterId from the
+    -- EmitterRegistry and creates the keyed Emitter in one transaction. The
+    -- requester's signature on this request authorizes the owner co-signatory.
 
--- Immutable, never archived: its contract-id is the permanent on-chain identity.
-template EmitterIdentity with
+-- One per operator; allocates monotonically increasing emitter ids.
+template EmitterRegistry with
     operator : Party
-    owner    : Party
+    nextId   : Int
   where
     signatory operator
-    observer owner
+    key operator : Party
+    maintainer key
+    -- choice AllocateEmitterId : (ContractId EmitterRegistry, Int)
 
 template Emitter
   with
-    operator : Party
-    owner    : Party
-    identity : ContractId EmitterIdentity  -- permanent; address = keccak256(this cid)
-    sequence : Int                         -- next sequence to assign (per-emitter)
+    operator       : Party
+    owner          : Party
+    emitterId      : Int      -- registry-allocated; key._3
+    emitterAddress : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
+    sequence       : Int      -- next sequence to assign (per-emitter)
   where
-    signatory operator
-    observer owner
-    -- No contract key (Canton 3.x); owner tracks the current cid off-ledger.
+    signatory operator, owner   -- owner co-signs: the msg.sender analog
+    key (operator, owner, emitterId) : (Party, Party, Int)
+    maintainer key._1
 ```
 
 **Emitter address derivation.** The 32-byte Wormhole emitter address is
-**`keccak256(<EmitterIdentity contract-id>)`**, derived by the guardian watcher
-(§7) — it is **never stored on-ledger**. A `ContractId` is opaque in Daml (no
-`ContractId → Bytes`), so it cannot be hashed on-ledger; instead the watcher
-reads the identity contract-id from the `WormholeMessage` and hashes it. The
-guardian is therefore the sole source of truth for the address, and the operator
-cannot set or spoof it. (This replaces the former off-ledger
-`keccak256(utf8(partyId(owner)))` convention.)
 
-**Uniqueness is structural, not operator-enforced.** Contract-ids are globally
-unique by construction. It also lets a single
-party hold **many** emitters (each `ApproveEmitter` mints a fresh identity),
-matching Sui's multiple `EmitterCap`s. The identity is **immutable** (never
-archived): the publishing `Emitter` churns its own cid on every send, so a stable
-identity contract is what keeps the derived address constant for the emitter's
-life. NTT still works as before — each deployment uses its own admin party
-(see [§10](#10-integrating-higher-level-protocols-ntt-token-bridge)).
+```
+keccak256( utf8("wormhole:emitter:v1")
+         ‖ uint32be(len(registrar)) ‖ utf8(registrar)
+         ‖ uint32be(len(owner))     ‖ utf8(owner)
+         ‖ uint64be(emitterId) )
+```
+
+where `registrar` is the operator. The 4-byte length prefixes make the preimage
+injective across the two variable-length party ids. It is computed **on-ledger**
+at allocation (Daml `DA.Crypto.Text` is stable in 3.5) and stored in
+`emitterAddress` for integrators to read, but the guardian watcher **re-derives**
+it from the `WormholeMessage` fields and is the sole source of truth — a corrupt
+on-ledger value cannot spoof it.
+
+**Impersonation is cryptographically prevented (the `msg.sender` guarantee).**
+Because the `owner` is both a **signatory** of the `Emitter` and part of the
+address preimage, only a transaction carrying the owner's authority can create a
+contract whose address is the owner's. A compromised `operator` therefore cannot
+emit under an existing emitter's address: an operator-alone forge is rejected in
+guardian replay (missing the owner's signature), and a colluding duplicate under
+a different owner derives a **different**, untrusted address. This is the
+invariant guardians verify — "the transaction is Daml-valid under the vetted
+package" — with no bespoke watcher logic (see [§10](#10-trust-model--deployment-topology)).
+Registry-allocated ids give per-owner uniqueness and let one party hold **many**
+emitters, matching Sui's multiple `EmitterCap`s; id-sequence discipline is
+operator-behavioral, but address integrity is not.
 
 Publishing — a choice on the **`Emitter`** (controller = `owner`), so it needs
 no operator authority:
@@ -265,23 +308,25 @@ choice PublishMessage : WormholeMessage
   do
     -- 1. assert payload length <= 750
     -- 2. (fee enforcement deferred; messageFee = 0 in v1)
-    -- 3. archive self; create Emitter with sequence = sequence + 1 (same identity)
-    -- 4. return WormholeMessage{identity, sequence, nonce, payload,
-    --      consistencyLevel} -- watcher derives address = keccak256(identity cid)
+    -- 3. archive self; create Emitter with sequence = sequence + 1 (SAME key)
+    -- 4. return WormholeMessage{registrar, owner, emitterId, sequence, nonce,
+    --      payload, consistencyLevel} -- watcher derives the address
     pure result
 ```
 
-The choice's **exercise result** is the `WormholeMessage` (the sequence-bumped
-`Emitter` is recreated as a side effect; the owner obtains its new contract-id
-from the transaction's created events — tracked from the ledger stream — for the
-next publish, since Canton 3.x has no contract key to look it up by).
-The watcher reads the result directly from the `ExercisedEvent.exercise_result`
-on the Ledger-API stream (see §7). The
-`WormholeMessage` record is the wire contract between Daml and the watcher:
+The choice's **exercise result** is the `WormholeMessage`. The sequence-bumped
+`Emitter` is recreated under the **same key** (both signatures inherited from the
+consumed contract), so the owner publishes again via
+`exerciseByKey`/`ExerciseByKeyCommand` — no contract-id tracking. The watcher
+reads the result directly from the `ExercisedEvent.exercise_result` on the
+Ledger-API stream (see §7). The `WormholeMessage` record is the wire contract
+between Daml and the watcher:
 
 ```haskell
 data WormholeMessage = WormholeMessage with
-    identity         : ContractId EmitterIdentity  -- emitter identity; address = keccak256(cid)
+    registrar        : Party     -- Emitter key._1 (operator); address input
+    owner            : Party     -- Emitter key._2; address input (anti-impersonation)
+    emitterId        : Int       -- Emitter key._3 (registry-allocated); address input
     sequence         : Int       -- uint64
     nonce            : Int       -- uint32
     consistencyLevel : Int       -- uint8
@@ -291,13 +336,13 @@ data WormholeMessage = WormholeMessage with
 
 Equivalent to the EVM `LogMessagePublished(sender, sequence, nonce, payload,
 consistencyLevel)` event (`Implementation.sol:12`), except the `sender` (emitter
-address) is **derived by the watcher** as `keccak256(identity)` rather than
-carried in the record. The VAA **timestamp** is not carried in the record either:
-per whitepaper 0001/0004 the guardian derives it from the block, so the watcher
-reads it from the transaction's **ledger effective time**
+address) is **derived by the watcher** from `(registrar, owner, emitterId)`
+rather than carried in the record. The VAA **timestamp** is not carried in the
+record either: per whitepaper 0001/0004 the guardian derives it from the block,
+so the watcher reads it from the transaction's **ledger effective time**
 (`Transaction.effective_at`) — see §7.1.
 
-**Sequence numbers** are per-emitter (per `identity`), start at 0, increment by
+**Sequence numbers** are per-emitter (per key), start at 0, increment by
 1 — identical to EVM's `_state.sequences[emitter]`.
 
 **Fees.** Whitepaper 0004 requires a fee in the chain's native token. Canton's
@@ -409,22 +454,21 @@ We use **`secp256k1WithEcdsaOnly`** because Ethereum signs the 32-byte
 ### Making verification hint-free for integrators (recommended)
 
 Supplying `pubKeys` on every call is acceptable for governance (rare,
-operator-submitted) but is real friction for integrators like NTT, whose
-relayers would otherwise have to look up the signing guardians' keys on every
-inbound message. The recommended evolution: **persist the guardian public keys
-in the guardian set** — i.e. `GuardianSet` stores `pubKeys` alongside `keys`,
+operator-submitted) but is real friction for integrators (e.g. a token bridge),
+whose relayers would otherwise have to look up the signing guardians' keys on
+every inbound message. The recommended evolution: **persist the guardian public
+keys in the guardian set** — i.e. `GuardianSet` stores `pubKeys` alongside `keys`,
 bound to the canonical addresses _once_ at install time (the
 GuardianSetUpgrade / setup choices already receive pubkey hints and verify
 `keccak256(pubKey)[12..32] == addr`, so the binding is free). After that,
 `verifyVAA` reads the keys from the set and callers pass **only the VAA bytes**,
-making the integrator API equivalent to EVM's `parseAndVerifyVM(bytes)`. See
-[§10](#10-integrating-higher-level-protocols-ntt-token-bridge). This is a
-planned change to the current code, which still takes per-call hints.
+making the integrator API equivalent to EVM's `parseAndVerifyVM(bytes)`. This is
+a planned change to the current code, which still takes per-call hints.
 
 ### Validation status
 
 The whole verification path is **empirically validated** against a real
-Ethereum-style guardian signature on Daml SDK 3.4.11. `testParseAndVerifyVAA` and
+Ethereum-style guardian signature on Daml SDK 3.5.1. `testParseAndVerifyVAA` and
 `testGovernanceSetMessageFee` (in [`TestCore.daml`](test/daml/Test/TestCore.daml))
 feed a genuine VAA — signed by the well-known devnet guardian and produced by
 [`node/pkg/cantonclient/vectorgen_test.go`](../node/pkg/cantonclient/vectorgen_test.go)
@@ -436,14 +480,12 @@ feed a genuine VAA — signed by the well-known devnet guardian and produced by
 - ✅ `secp256k1WithEcdsaOnly` verifies the 32-byte digest **directly** (no
   pre-hash), and the pubkey→address keccak binding holds.
 
-One caveat remains, and it is about _stability_, not correctness:
-
-- **⚠️ Alpha feature.** `DA.Crypto.Text` is **Early Access / Alpha** in the
-  Daml 3.4 line ("can change without notice"); the build uses
-  `-Wno-crypto-text-is-alpha`. Depending on an Alpha builtin for on-chain
-  governance is a **mainnet-readiness risk** — confirm its GA timeline before
-  production. All Daml crypto is encapsulated in `Wormhole.Core.VAA`, so if the
-  builtin's contract changes, only that module is affected.
+As of Daml SDK 3.5 the `DA.Crypto.Text` builtins are **stable** (the earlier
+Alpha `-Wno-crypto-text-is-alpha` suppression is no longer needed), so the
+previous mainnet-readiness concern about depending on an Alpha builtin is
+resolved. All Daml crypto remains encapsulated in `Wormhole.Core.VAA`, and the
+same builtins now also back the on-ledger address derivation in
+`Wormhole.Core.Bytes` (`toHex` + `keccak256`).
 
 ---
 
@@ -503,7 +545,11 @@ Mapping to Ledger API v2 RPCs:
 
 The Wormhole message comes from the **`ExercisedEvent`** of the `PublishMessage`
 choice: `exercise_result` is the `WormholeMessage` record (§4.2), decoded from
-the Ledger-API `Value`/`Record` representation.
+the Ledger-API `Value`/`Record` representation. The watcher derives the 32-byte
+emitter address from the record's `registrar`, `owner`, and `emitterId` fields
+using the canonical encoding in §4.2 (see `deriveEmitterAddress` in
+[`watcher.go`](../node/pkg/watchers/canton/watcher.go)); the encoding is pinned
+against the Daml side by a shared cross-language test vector.
 
 **Party filter.** The `GetUpdates` request uses an `UpdateFormat` with a wildcard
 template filter under **`filters_for_any_party`** by default — the watcher
@@ -543,7 +589,7 @@ flowchart TD
 
 Each observed event becomes a `common.MessagePublication`
 ([`chainlock.go`](../node/pkg/common/chainlock.go)) with
-`EmitterChain = vaa.ChainIDCanton`, `EmitterAddress = vaa.Address(msg.sender)`,
+`EmitterChain = vaa.ChainIDCanton`, `EmitterAddress = deriveEmitterAddress(registrar, owner, emitterId)`,
 `Unreliable = false`, then is sent on `msgC`.
 
 ### 7.4 Configuration
@@ -616,21 +662,20 @@ the Daml Scripts, with a data-dependency on core's DAR). Splitting keeps
 curl https://get.digitalasset.com/install/install.sh | sh
 
 cd canton
-dpm install 3.4.11               # fetch the pinned SDK
-dpm build --all                  # → core/.daml/dist/wormhole-core-0.1.0.dar
-                                 #   test/.daml/dist/wormhole-core-test-0.1.0.dar
+dpm install 3.5.1                # fetch the pinned SDK (Daml-LF 2.3)
+dpm build --all                  # builds core, then test → *.daml/dist/*.dar
 cd test && dpm test --all --show-coverage   # run the Scripts + coverage
 ```
 
 `dpm test` runs every `Script` in
-[`test/daml/Test/TestCore.daml`](test/daml/Test/TestCore.daml) on an in-memory
-ledger — no running sandbox required. The suite passes, exercising **100% of the
-core templates and choices** (3/3 templates, 7/7 choices — reported as
-_external_ coverage, since the templates live in the `core` data-dependency),
-including governance and VAA verification with a **real guardian-signed VAA**
-test vector (§5). Note Daml coverage is **template/choice coverage only**; the
-pure parser / DER / governance helpers are additionally validated by Script
-_assertions_ and the signed-VAA vector, not by the coverage metric.
+[`TestCore.daml`](test/daml/Test/TestCore.daml) on an in-memory ledger — no
+running sandbox required. The suite passes, including governance and VAA
+verification with a **real guardian-signed VAA** test vector (§5) and the
+owner-bound emitter address derivation pinned against the shared cross-language
+vector (`testAddressVector`). Note Daml coverage is **template/choice coverage
+only**; the pure parser / DER / governance
+helpers and the address encoding are additionally validated by Script
+_assertions_ and the signed-VAA / address vectors, not by the coverage metric.
 
 ### Watcher integration test (dpm + Go)
 
@@ -676,8 +721,8 @@ This brings up:
 
 Unlike Sui, the `canton` component is **not** enabled by `--ci`. The guardian
 builds the real client by default (no build tag) and the watcher needs no
-operator party id (wildcard filter), so there are no functional gates left — only
-two things to finish/validate:
+operator party id (wildcard filter), so there are no functional gates left — the
+main item to finish is:
 
 1. **Full k8s path validation.** Validated locally: the Go integration test (§9)
    covers the watcher↔ledger path; the sandbox `0.0.0.0` bind
@@ -685,12 +730,8 @@ two things to finish/validate:
    the bootstrap `dpm script --upload-dar` flow, and the same-pod localhost wiring
    are all confirmed against a live `dpm sandbox`. What still needs a real cluster
    run: the `canton-node` **image build** (`canton/Dockerfile`, which fetches dpm
-   and builds the DAR) and the **guardian connecting** to `canton:6865` across the
+   and builds the DARs) and the **guardian connecting** to `canton:6865` across the
    k8s Service.
-2. **Daml crypto is Alpha.** On-chain VAA verification works (validated against a
-   real guardian VAA, §5) but depends on the **Alpha** `DA.Crypto.Text` built-ins
-   — a GA-stability risk, not a correctness one, and not a devnet blocker
-   (Open Question #1).
 
 Today `--canton` stands up the **chain + contracts** for Daml-side development
 (iterating on the templates, `dpm test`); the watcher↔ledger path itself is
@@ -698,104 +739,99 @@ covered by the integration test in §9.
 
 ---
 
-## 10. Integrating higher-level protocols (NTT, token bridge)
+## 10. Trust model & deployment topology
 
-Higher-level protocols don't change the core bridge; they use it as two
-primitives — **publish** (emit a message) and **verify** (check an inbound VAA).
-[NTT](https://github.com/wormhole-foundation/native-token-transfers) is the
-representative case: its on-chain shape is a **Manager** plus one or more
-**Transceivers**, and the `WormholeTransceiver` is the piece that touches this
-bridge. The core-bridge **emitter is the Wormhole transceiver**; peers on other
-chains are configured by `(chainId, emitterAddress)`.
+How does a set of `n` guardians (`k`-of-`n` threshold) run Wormhole on Canton
+faithfully — see and attest only what actually happened under rules they accept —
+given Canton has no global VM that every node re-executes? Two requirements, met
+by two mechanisms:
 
-### Emitter / send path
+- **"The code is what we published."** Daml code identity is content-addressed: a
+  DAR's **package-id is the hash of the compiled package**, and every Ledger-API
+  event carries it (the watcher already filters on `WatcherConfig.PackageID`).
+  Publish source + a reproducible build, and each guardian's participant **vets**
+  that exact package-id before its parties transact under it. A lookalike package
+  simply does not match the filter.
+- **"The events are real."** Canton's synchronizer (sequencer + mediator)
+  **orders and tallies but never runs Daml**. Execution integrity comes from the
+  **participant nodes hosting a transaction's stakeholders re-executing** the
+  choice from the vetted DAR and confirming the result; a transaction commits only
+  if the confirmation policy over those participants is met.
 
-Each NTT deployment runs under its **own admin party** and registers its **own
-`Emitter`**, so one-emitter-per-party is sufficient — no salt needed. The
-transceiver publishes by exercising `PublishMessage` on its `Emitter`
-(`controller owner`), so **sends need no operator authority**, and the
-transceiver's stable `emitterAddress` is exactly what other chains register as
-the peer.
+**Topology.** Each guardian runs a **participant node**, and the `operator` party
+is **multi-hosted on the guardian participants with observation-only permission**.
+That is sufficient and deliberately minimal: the operator is a signatory on every
+core contract, so its projection is the full app trace; each guardian's
+participant independently receives and validates every such transaction, and an
+invalid one never appears on that participant's Ledger API — so a watcher cannot
+sign it. Guardians are **not** given confirmation rights: the VAA quorum is
+already the attestation layer, and Wormhole's job is to *refuse to attest*
+forgeries, not to halt Canton (giving guardians confirmation duty would duplicate
+the quorum and turn guardian downtime into a chain-halt).
 
-### Verify / receive path
+**What a compromised operator can and cannot do.** It can degrade **liveness**
+(stop approving registrations, stop relaying, evict observers — all fail-safe:
+guardians then simply stop seeing and stop signing). It **cannot** produce
+anything guardians would wrongly attest: emitting under an existing address
+requires that owner's signature (§4.2), so an outbound forge is either an invalid
+transaction (rejected in replay, never observed) or a valid contract with a
+different, untrusted address.
 
-A receiving transceiver verifies an inbound VAA, then the manager mints/releases.
-The recommended, lowest-friction integrator API:
+Crucially, it also **cannot forge the guardian set** used for inbound
+verification: `CoreState` is co-signed by the `guardianGovernance` threshold party
+and keyed by it (§4.1), so the operator can neither mutate the real `CoreState`
+nor fabricate one that a consumer would find by the governance anchor. This closes
+the one gap that observation-only hosting does *not* cover — inbound state
+integrity — by moving it from "trust the single operator" to "trust the k-of-n
+governance party." Compromising *that* is a threshold compromise, i.e. genuinely
+takeover-class, rather than a single-key bar. Residual inbound corruption (bugs in
+a verification path, not forged state) can still only damage Canton-local state —
+the same position Wormhole holds on every chain, where a compromised chain wrecks
+its own state but cannot forge messages other chains accept. The guardians'
+faithfulness invariant thus reduces to **"the transaction is Daml-valid under the
+vetted package."**
 
-1. **Hint-free pure verification.** With guardian pubkeys persisted in the set
-   ([§5](#5-on-chain-signature-verification-the-crux)), `verifyVAA` is a pure
-   function taking only `(guardianSet, vaaBytes)` — integrators `import` it: no
-   operator interaction, no pubkey hints.
-2. **Read access to the guardian set** via Canton **explicit disclosure**: the
-   operator publishes the active guardian-set contract and shares its disclosure
-   blob through a small read endpoint; the relayer attaches it as a
-   `DisclosedContract`. (Alternative: a public-observer guardian-set snapshot so
-   the relayer submits a bare command — only worthwhile if the deployment already
-   has a shared "public" party.)
-3. **Integrators own replay protection.** The NTT manager tracks consumed inbound
-   digests itself; `CoreState.consumedGovernance` stays reserved for `"Core"`
-   governance — exactly as the EVM token bridge keeps its own
-   `isTransferCompleted`.
-
-Sketch of the transceiver's receive choice:
-
-```haskell
--- controller = transceiver owner; gs comes from a disclosed guardian-set contract
-choice Receive : ()
-  with vaaBytes : Bytes
-  controller owner
-  do
-    gs <- fetch guardianSetCid                              -- disclosed; the set the VAA names
-    let v = Wormhole.Core.VAA.parseAndVerify gs vaaBytes    -- pure; aborts if invalid
-    assertMsg "unknown peer" (isConfiguredPeer v.emitterChain v.emitterAddress)
-    -- manager: replay protect v.hash, decode NativeTokenTransfer, mint/release
-    ...
-```
-
-Off-chain the relayer submits a single `exercise Receive {vaaBytes}` command plus
-the one disclosed guardian-set contract — no pubkey computation. This is the
-Canton equivalent of EVM's `parseAndVerifyVM(bytes)`.
-
-### Design additions this implies
-
-- Persist guardian **pubkeys** in `GuardianSet` so verification is hint-free
-  ([§5](#5-on-chain-signature-verification-the-crux)).
-- Add a **readable guardian-set contract** and document the
-  explicit-disclosure flow.
-- Export `Wormhole.Core.VAA.parseAndVerify` as the integrator-facing API.
-
-These are tracked in [Open Questions](#11-open-questions--validation-items).
+The exact observer-party mechanics — a dedicated guardian-observer party named as
+a template `observer` vs. replica-hosting the `operator`; external-party namespace
+key custody controlling the hosting topology — are the subject of the
+`feat/canton-public-observer` work and are tracked as an Open Question, not
+implemented here.
 
 ---
 
 ## 11. Open Questions & Validation Items
 
-1. **Daml crypto.** The verification path is now **validated end-to-end** against
-   a real guardian-signed VAA on Daml 3.4.11 (`secp256k1WithEcdsaOnly` + DER
-   sig/SPKI key + double-keccak digest; §5, `testParseAndVerifyVAA`). The only
-   remaining concern is that `DA.Crypto.Text` is **Alpha**
-   (`-Wno-crypto-text-is-alpha`) — confirm its GA timeline before mainnet. All
-   isolated in `Wormhole.Core.VAA`.
-2. **Ledger API v2 RPC surface.** The exact message/field names of
+1. **Ledger API v2 RPC surface.** The exact message/field names of
    `UpdateService.GetUpdates` / `GetUpdateByOffset` / `StateService.GetLedgerEnd`
    shift slightly across Canton releases (e.g. `begin_exclusive`/`end_inclusive`,
    `Update` one-of members). The vendored proto subset targets a specific release
-   — confirm and pin against Daml SDK 3.4.11 / Canton 3.5.x.
-3. **Operator-enforced `CoreState` singleton (Canton 3.x has no unique keys).**
-   The `CoreState` singleton is guaranteed by the operator being its sole issuer,
-   not by a contract key (§4.1). Confirm the operator automation creates exactly
-   one `CoreState` and advances it by cid — a security-relevant invariant now that
-   the ledger no longer enforces it. (Emitter address uniqueness is no longer an
-   operator concern: addresses are `keccak256(<identity cid>)`, unique by
-   construction; see §4.2.)
+   — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
+2. **`guardianGovernance` threshold party.** `CoreState` is co-signed by and keyed
+   on a `guardianGovernance` party (§4.1), so guardian-set integrity is anchored to
+   it rather than the operator. Stand it up as a decentralized-namespace external
+   party governed by a k-of-n threshold of guardian keys (DSO-style) and confirm:
+   the genesis co-sign ceremony, the topology-level rotation flow (add/remove
+   guardian keys without touching `CoreState`), and that consumers are configured
+   with the correct anchor party id. Note the `CoreState` singleton count ("exactly
+   one") is still behavioral — confirm the genesis automation creates exactly one.
+   (Emitter/manager **address** integrity is separately owner-bound and
+   owner-co-signed, §4.2.)
+3. **Guardian observer topology.** Confirm the observer-party mechanics from
+   §10 (dedicated observer party as template `observer` vs. replica-hosted
+   `operator`; external-party namespace-key custody; how `--cantonReadAsParty`
+   maps to the chosen party). Reconcile with `feat/canton-public-observer`. Note
+   this observer party is distinct from the `guardianGovernance` signatory party
+   (item 2): the observer is read-only, the governance party has signatory power.
 4. **Integrator VAA verification.** Implement the hint-free guardian set (persist
    pubkeys, §5) and confirm the guardian-set distribution mechanism for
-   integrators (explicit disclosure vs public-observer snapshot). See
-   [§10](#10-integrating-higher-level-protocols-ntt-token-bridge).
+   integrators (explicit disclosure vs public-observer snapshot).
 5. **Native fees.** Whether/when to wire real Canton Coin (Splice `amulet`)
    payments into `PublishMessage`/`TransferFees`, or whether Canton runs fee-less
    initially (`messageFee = 0`).
 6. **ContractUpgrade mechanism.** Confirm the operator-driven Daml package
    upgrade flow and how strictly the recorded target package-id should gate it.
+   Note contract keys **cannot** be added to an already-deployed template via
+   smart-contract upgrade, so this keyed design must land before any mainnet
+   deployment of the templates.
 7. **Governance emitter.** Uses the standard governance emitter (Solana, chain 1,
    address `0x00..04`). Confirm for the target deployment/network.

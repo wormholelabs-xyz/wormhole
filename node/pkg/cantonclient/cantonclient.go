@@ -29,12 +29,19 @@ type TemplateID struct {
 // produced by the PublishMessage choice. Field types match the Daml definition:
 // hex Text becomes []byte here, Daml Int becomes the appropriately-sized Go int.
 type CantonMessage struct {
-	// IdentityCID is the Canton contract-id (hex) of the emitter's immutable
-	// EmitterIdentity (Daml ContractId -> Ledger API contract_id string). The
-	// 32-byte Wormhole emitter address is keccak256 of this contract-id's bytes,
-	// derived by the watcher (the address is never stored on-ledger); see
+	// Registrar, Owner, and EmitterID are the emitter's contract-key components
+	// (Daml Parties + registry-allocated id). Together they determine the 32-byte
+	// Wormhole emitter address:
+	//
+	//	keccak256("wormhole:emitter:v1" ‖ lp(Registrar) ‖ lp(Owner) ‖ uint64be(EmitterID))
+	//
+	// where lp is a uint32 big-endian byte-length prefix. The address is derived
+	// by the watcher (never stored on-ledger); Owner is in the preimage so a
+	// compromised operator cannot impersonate an existing emitter's address. See
 	// node/pkg/watchers/canton and Wormhole.Core.State.WormholeMessage.
-	IdentityCID string
+	Registrar string
+	Owner     string
+	EmitterID uint64
 	// Sequence is the per-emitter message sequence (Daml Int -> uint64).
 	Sequence uint64
 	// Nonce is the integrator-provided nonce (Daml Int -> uint32).

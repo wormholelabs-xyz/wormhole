@@ -22,16 +22,21 @@ defaultGovernanceContract : Bytes32
 defaultGovernanceContract = "0000000000000000000000000000000000000000000000000000000000000004"
 
 -- | Build the initial 'CoreState' value with guardian set 0 (never-expiring) and
--- the supplied governance configuration. The caller @create@s it as @operator@.
+-- the supplied governance configuration. Genesis must be created with BOTH the
+-- @operator@ and the @guardianGovernance@ party's authority (the CoreState is
+-- co-signed); thereafter governance transitions inherit guardianGovernance's
+-- authority and the operator submits them alone.
 mkInitialCoreState :
   Party        -- ^ operator
+  -> Party     -- ^ guardianGovernance (threshold party; anchors the guardian set)
   -> Int       -- ^ governance chain id
   -> Bytes32   -- ^ governance contract
   -> [Bytes20] -- ^ initial guardian addresses (set 0)
   -> CoreState
-mkInitialCoreState operator govChain govContract initialGuardians =
+mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians =
   CoreState with
     operator
+    guardianGovernance
     chainId = cantonChainId
     governanceChainId = govChain
     governanceContract = normalizeHex govContract
@@ -39,3 +44,8 @@ mkInitialCoreState operator govChain govContract initialGuardians =
     guardianSets = Map.fromList [(0, GuardianSet with keys = map normalizeHex initialGuardians, expirationTime = None)]
     messageFee = 0
     consumedGovernance = Set.empty
+
+-- | The emitter-id registry the operator creates alongside the 'CoreState' at
+-- setup. Emitter ids are allocated sequentially from this contract.
+mkInitialEmitterRegistry : Party -> EmitterRegistry
+mkInitialEmitterRegistry operator = EmitterRegistry with operator, nextId = 0
