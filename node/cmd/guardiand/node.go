@@ -427,7 +427,7 @@ func init() {
 
 	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
 	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (empty matches any package version)")
-	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Optional Canton party to narrow the watcher's update stream to; empty observes all parties on the participant")
+	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton party to narrow the watcher's update stream to; production guardians set this to the read-only guardianObserver party. Empty observes all parties on the participant (devnet default)")
 
 	solanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaRPC", "Solana RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
 	fogoRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoRPC", "Fogo RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
