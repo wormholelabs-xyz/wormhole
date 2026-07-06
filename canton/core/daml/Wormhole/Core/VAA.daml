@@ -68,17 +68,18 @@ parseVAA encoded =
       then error ("unsupported VAA version: " <> show version)
       else VAA with ..
 
--- | Recursively parse @count@ signatures starting at byte @offset@.
+-- | Parse @count@ consecutive signatures starting at byte @offset@.
 parseSignatures : Bytes -> Int -> Int -> [Signature]
-parseSignatures _ _ 0 = []
-parseSignatures encoded offset count =
-  let
-    guardianIndex = bytesToInt (sliceBytes offset 1 encoded)
-    r = normalizeHex (sliceBytes (offset + 1) 32 encoded)
-    s = normalizeHex (sliceBytes (offset + 33) 32 encoded)
-    v = bytesToInt (sliceBytes (offset + 65) 1 encoded)
-    sig = Signature with ..
-  in sig :: parseSignatures encoded (offset + signatureLen) (count - 1)
+parseSignatures encoded offset count = map parseAt [0 .. count - 1]
+  where
+    parseAt i =
+      let
+        base = offset + i * signatureLen
+        guardianIndex = bytesToInt (sliceBytes base 1 encoded)
+        r = normalizeHex (sliceBytes (base + 1) 32 encoded)
+        s = normalizeHex (sliceBytes (base + 33) 32 encoded)
+        v = bytesToInt (sliceBytes (base + 65) 1 encoded)
+      in Signature with ..
 
 -- | The Wormhole digest: double keccak256 over the body. Ethereum signs this
 -- 32-byte value directly.
