@@ -21,14 +21,6 @@ type Bytes32 = Bytes
 -- | A 20-byte value (40 hex chars): Ethereum-style guardian addresses.
 type Bytes20 = Bytes
 
--- | Unwrap an 'Optional' or abort with @msg@. The @error@ lives in the function
--- body, so under Daml's strict evaluation it is thrown only on 'None' — unlike
--- @fromOptional (error msg)@, whose default argument is evaluated on every call.
-optionOrFail : Text -> Optional a -> a
-optionOrFail msg opt = case opt of
-  Some v -> v
-  None -> error msg
-
 -- | Number of bytes represented by a hex string.
 byteLength : Bytes -> Int
 byteLength b = T.length b / 2
@@ -46,42 +38,35 @@ sliceBytes start len b =
 sliceFrom : Int -> Bytes -> Bytes
 sliceFrom start b = T.substring (start * 2) (T.length b - start * 2) b
 
--- | Value of a single lowercase hex digit. NB: Daml is strict, so the @error@
--- must live inside the @None@ branch — passing it as a @fromOptional@ default
--- would evaluate (throw) it on every call.
-hexDigit : Text -> Int
-hexDigit c = case lookup c digits of
-    Some v -> v
-    None -> error ("invalid hex digit: " <> c)
+-- | Value of a single lowercase hex digit, given as a Unicode code point.
+-- Code-point arithmetic rather than an assoc-list lookup: under Daml's strict
+-- evaluation a @where@-bound 16-entry table would be rebuilt — and scanned
+-- linearly — once per nibble.
+hexDigitValue : Int -> Int
+hexDigitValue cp
+  | cp >= cp0 && cp <= cp9 = cp - cp0
+  | cp >= cpa && cp <= cpf = cp - cpa + 10
+  | otherwise = error ("invalid hex digit: " <> T.fromCodePoints [cp])
   where
-    digits =
-      [ ("0", 0), ("1", 1), ("2", 2), ("3", 3), ("4", 4), ("5", 5), ("6", 6)
-      , ("7", 7), ("8", 8), ("9", 9), ("a", 10), ("b", 11), ("c", 12)
-      , ("d", 13), ("e", 14), ("f", 15)
-      ]
+    [cp0, cp9, cpa, cpf] = T.toCodePoints "09af"
 
 -- | Parse a big-endian hex byte string into an 'Int'. Suitable for values that
 -- fit in 63 bits (chain ids, sequences, nonces, fees in practice). Callers that
 -- need uint256 semantics must bound-check upstream.
 bytesToInt : Bytes -> Int
-bytesToInt b = foldl (\acc c -> acc * 16 + hexDigit c) 0 (T.explode (T.asciiToLower b))
+bytesToInt b = foldl (\acc cp -> acc * 16 + hexDigitValue cp) 0 (T.toCodePoints (T.asciiToLower b))
 
 -- | Lowercase a hex string so it matches the form returned by the crypto
 -- builtins (which emit lowercase) before equality comparisons.
 normalizeHex : Bytes -> Bytes
 normalizeHex = T.asciiToLower
 
--- | The lowercase hex character for a nibble value (0..15).
+-- | The lowercase hex character for a nibble value (0..15), indexed out of the
+-- hex alphabet.
 hexChar : Int -> Text
-hexChar n = case lookup n chars of
-    Some v -> v
-    None -> error ("hexChar: out of range: " <> show n)
-  where
-    chars =
-      [ (0, "0"), (1, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5"), (6, "6")
-      , (7, "7"), (8, "8"), (9, "9"), (10, "a"), (11, "b"), (12, "c")
-      , (13, "d"), (14, "e"), (15, "f")
-      ]
+hexChar n
+  | 0 <= n && n <= 15 = T.substring n 1 "0123456789abcdef"
+  | otherwise = error ("hexChar: out of range: " <> show n)
 
 -- | Encode a single byte value (0..255) as two lowercase hex chars.
 intToHexByte : Int -> Bytes
@@ -90,13 +75,18 @@ intToHexByte n =
     then error ("intToHexByte: out of range: " <> show n)
     else hexChar (n / 16) <> hexChar (n % 16)
 
--- | Encode a non-negative 'Int' as @numBytes@ big-endian bytes (hex). The value
--- must fit in @numBytes@ bytes; higher-order bytes beyond it are silently
--- dropped by the modular reduction, so callers bound-check upstream (chain ids,
--- lengths, and trimmed amounts all fit here).
+-- | Encode a non-negative 'Int' as @numBytes@ big-endian bytes (hex). Fails
+-- loudly — rather than silently truncating via the modular reduction — if
+-- @numBytes@ is negative, @value@ is negative, or @value@ does not fit in
+-- @numBytes@ bytes. Chain ids, lengths, ids, and trimmed amounts all fit, so a
+-- failure here signals a real upstream bug, not an expected case.
 intToBytesN : Int -> Int -> Bytes
 intToBytesN value numBytes
-  | numBytes <= 0 = ""
+  | numBytes < 0 = error ("intToBytesN: negative width: " <> show numBytes)
+  | value < 0 = error ("intToBytesN: negative value: " <> show value)
+  | numBytes == 0 =
+      -- Recursion has consumed every byte; any nonzero remainder overflowed.
+      if value == 0 then "" else error ("intToBytesN: value does not fit in the requested width")
   | otherwise = intToBytesN (value / 256) (numBytes - 1) <> intToHexByte (value % 256)
 
 -- | Left-pad a hex 'Bytes' with zero bytes to exactly @numBytes@ bytes. If it is
@@ -109,11 +99,28 @@ leftPadTo numBytes b =
        then normalizeHex b
        else mconcat (replicate (numBytes - bl) "00") <> normalizeHex b
 
--- | A 4-byte big-endian byte-length prefix followed by the bytes themselves.
--- Concatenating two variable-length fields bare is ambiguous ("ab"‖"c" vs
--- "a"‖"bc"); the length prefix makes the address preimage injective.
-lenPrefixed : Bytes -> Bytes
-lenPrefixed b = intToBytesN (byteLength b) 4 <> b
+-- | A length-prefixed byte segment: a 4-byte big-endian length followed by the
+-- bytes themselves. A distinct type from raw 'Bytes' (Daml has no @newtype@, so
+-- it is a single-constructor @data@) so a self-delimiting segment can't be
+-- mistaken for, or concatenated as, unprefixed bytes. Concatenating two
+-- variable-length fields bare is ambiguous ("ab"‖"c" vs "a"‖"bc"); the length
+-- prefix makes the address preimage injective. Use 'unLenPrefixed' to get the
+-- raw bytes back for hashing.
+data LenPrefixed = LenPrefixed { unLenPrefixed : Bytes }
+  deriving (Eq, Show)
+
+lenPrefixed : Bytes -> LenPrefixed
+lenPrefixed b = LenPrefixed (intToBytesN (byteLength b) 4 <> b)
+
+-- | Typed inputs to the address preimage. Daml has no @newtype@, so these are
+-- single-constructor @data@ types. Distinct types for the three text fields (and
+-- the id) mean 'derivedAddressFromText' can't have its arguments transposed —
+-- swapping @registrar@ and @owner@ would otherwise silently derive a different
+-- but perfectly valid-looking address, a security-relevant mistake.
+data DomainTag     = DomainTag     Text deriving (Eq, Show)
+data RegistrarText = RegistrarText Text deriving (Eq, Show)
+data OwnerText     = OwnerText     Text deriving (Eq, Show)
+data RegistryId    = RegistryId    Int  deriving (Eq, Show)
 
 -- | Canonical 32-byte registry address, keyed off the components of a
 -- registry-allocated contract key:
@@ -126,11 +133,11 @@ lenPrefixed b = intToBytesN (byteLength b) 4 <> b
 -- fingerprints). The Go watcher recomputes the same value from the
 -- 'WormholeMessage' fields; the encoding is pinned across both languages by a
 -- shared test vector.
-derivedAddressFromText : Text -> Text -> Text -> Int -> Bytes32
-derivedAddressFromText domainTag registrarText ownerText id =
+derivedAddressFromText : DomainTag -> RegistrarText -> OwnerText -> RegistryId -> Bytes32
+derivedAddressFromText (DomainTag domainTag) (RegistrarText registrarText) (OwnerText ownerText) (RegistryId id) =
   normalizeHex (keccak256 (toHex domainTag
-    <> lenPrefixed (toHex registrarText)
-    <> lenPrefixed (toHex ownerText)
+    <> unLenPrefixed (lenPrefixed (toHex registrarText))
+    <> unLenPrefixed (lenPrefixed (toHex ownerText))
     <> intToBytesN id 8))
 
 -- | Address of the registry-allocated identity @(registrar, owner, id)@ under
@@ -139,19 +146,23 @@ derivedAddressFromText domainTag registrarText ownerText id =
 -- signatory of the identity contract), so a compromised registrar cannot
 -- impersonate an existing identity — it can only mint a duplicate under a
 -- different owner, which derives a different, untrusted address.
-derivedAddress : Text -> Party -> Party -> Int -> Bytes32
+derivedAddress : DomainTag -> Party -> Party -> RegistryId -> Bytes32
 derivedAddress domainTag registrar owner id =
-  derivedAddressFromText domainTag (partyToText registrar) (partyToText owner) id
+  derivedAddressFromText domainTag (RegistrarText (partyToText registrar)) (OwnerText (partyToText owner)) id
 
 -- | Drop leading zero bytes ("00") from a hex string, keeping at least one byte.
--- Used for minimal DER integer encoding.
+-- Used for minimal DER integer encoding. Counts the leading zero chars and
+-- slices once, rather than recursing one byte-slice at a time.
 stripLeadingZeroBytes : Bytes -> Bytes
 stripLeadingZeroBytes b
   | byteLength b <= 1 = b
-  | sliceBytes 0 1 b == "00" = stripLeadingZeroBytes (sliceFrom 1 b)
-  | otherwise = b
+  | otherwise =
+      let zeroBytes = T.length (T.takeWhile (== "0") b) / 2
+      in sliceFrom (min zeroBytes (byteLength b - 1)) b
 
 -- | True if the most-significant bit of the first byte is set (first hex nibble
 -- >= 8). Used to decide whether a DER integer needs a 0x00 sign pad.
 highBitSet : Bytes -> Bool
-highBitSet b = byteLength b > 0 && hexDigit (T.substring 0 1 (normalizeHex b)) >= 8
+highBitSet b = case T.toCodePoints (T.asciiToLower (T.take 1 b)) of
+  cp :: _ -> hexDigitValue cp >= 8
+  [] -> False
