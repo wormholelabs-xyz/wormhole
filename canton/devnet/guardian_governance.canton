@@ -8,20 +8,25 @@
 // the CN global synchronizer in production -- see canton/README.md). The
 // bash wrapper `setup_guardian_governance.sh` drives this end to end.
 //
-// WHY THIS DOES NOT USE `topology.decentralized_namespaces.propose` /
-// `party_to_participant_mappings.propose` DIRECTLY WITH `signedBy=<fingerprint>`:
-// those console convenience methods sign locally, using a private key that
-// must live in THIS participant's own crypto vault -- fine for the
-// participant's own identity, wrong for guardian owner keys, which must never
-// touch a participant host (see GG_OWNER_SIGN_CMD_* below). Instead this
-// script builds each topology transaction UNSIGNED
-// (`topology.transactions.generate`), asks each owner's external signer for a
-// raw signature over its hash, wraps that with the public
-// `Signature.fromExternalSigning` constructor, and only then submits the
-// fully-signed transaction (`topology.transactions.load`). This is the same
-// shape production custody uses -- local/test and production differ only in
-// what GG_OWNER_SIGN_CMD_* points at (this repo's `guardian_key_tool.js` vs.
-// a real HSM/KMS CLI), not in the topology-construction code.
+// EXTERNAL SIGNING FLOW: every owner-authorized topology transaction is built
+// in three explicit steps -- generated UNSIGNED (`topology.transactions.generate`),
+// signed by each owner's external signer over the transaction hash
+// (GG_OWNER_SIGN_CMD_*, wrapped via `Signature.fromExternalSigning`), and only
+// then submitted fully signed (`topology.transactions.load`). The participant
+// only ever handles hashes, public keys, and signatures; owner private keys
+// stay inside guardian custody (HSM/KMS/offline signer) and never touch the
+// participant host. Production uses this exact code path -- local/test and
+// production differ only in what GG_OWNER_SIGN_CMD_* points at (this repo's
+// `guardian_key_tool.js` vs. a real custody CLI), not in the
+// topology-construction code.
+//
+// Vault-backed signing (the console's one-call convenience methods such as
+// `topology.decentralized_namespaces.propose` / `party_to_participant_mappings
+// .propose` with `signedBy=<fingerprint>`, or `transactions.sign`) draws
+// private keys from the participant's own crypto vault, so it is used here
+// only for the participant's own identity key -- the consent-to-host
+// signature below; using it for owner signatures would require importing
+// guardian keys into the node.
 //
 // PartyToKeyMapping is deliberately NOT used: it was deprecated in Canton 3.4
 // in favor of putting the party's signing keys directly on PartyToParticipant
