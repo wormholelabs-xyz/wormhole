@@ -7,6 +7,8 @@
 module Wormhole.Core.VAA where
 
 import DA.Crypto.Text (keccak256, secp256k1WithEcdsaOnly)
+import DA.Either (optionalToEither)
+import DA.Foldable (forA_)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
 
@@ -44,40 +46,43 @@ signatureLen = 66
 
 -- | Parse a hex-encoded VAA. Aborts the transaction (via @error@) on any
 -- malformed input — the correct behavior for an invalid governance/verify
--- submission.
+-- submission. The version is checked before the rest is parsed: Daml is strict,
+-- so a trailing guard would only fire after every field (mis)parsed — a
+-- wrong-version VAA should fail with the version error, not a slice error.
 parseVAA : Bytes -> VAA
-parseVAA encoded =
-  let
+parseVAA encoded
+  | version /= 1 = error ("unsupported VAA version: " <> show version)
+  | otherwise =
+      let
+        guardianSetIndex = bytesToInt (sliceBytes 1 4 encoded)
+        sigCount = bytesToInt (sliceBytes 5 1 encoded)
+        signatures = parseSignatures encoded 6 sigCount
+        bodyStart = 6 + sigCount * signatureLen
+        body = sliceFrom bodyStart encoded
+        timestamp = bytesToInt (sliceBytes 0 4 body)
+        nonce = bytesToInt (sliceBytes 4 4 body)
+        emitterChain = bytesToInt (sliceBytes 8 2 body)
+        emitterAddress = normalizeHex (sliceBytes 10 32 body)
+        sequence = bytesToInt (sliceBytes 42 8 body)
+        consistencyLevel = bytesToInt (sliceBytes 50 1 body)
+        payload = sliceFrom 51 body
+        hash = digestOf body
+      in VAA with ..
+  where
     version = bytesToInt (sliceBytes 0 1 encoded)
-    guardianSetIndex = bytesToInt (sliceBytes 1 4 encoded)
-    sigCount = bytesToInt (sliceBytes 5 1 encoded)
-    signatures = parseSignatures encoded 6 sigCount
-    bodyStart = 6 + sigCount * signatureLen
-    body = sliceFrom bodyStart encoded
-    timestamp = bytesToInt (sliceBytes 0 4 body)
-    nonce = bytesToInt (sliceBytes 4 4 body)
-    emitterChain = bytesToInt (sliceBytes 8 2 body)
-    emitterAddress = normalizeHex (sliceBytes 10 32 body)
-    sequence = bytesToInt (sliceBytes 42 8 body)
-    consistencyLevel = bytesToInt (sliceBytes 50 1 body)
-    payload = sliceFrom 51 body
-    hash = digestOf body
-  in
-    if version /= 1
-      then error ("unsupported VAA version: " <> show version)
-      else VAA with ..
 
--- | Recursively parse @count@ signatures starting at byte @offset@.
+-- | Parse @count@ consecutive signatures starting at byte @offset@.
 parseSignatures : Bytes -> Int -> Int -> [Signature]
-parseSignatures _ _ 0 = []
-parseSignatures encoded offset count =
-  let
-    guardianIndex = bytesToInt (sliceBytes offset 1 encoded)
-    r = normalizeHex (sliceBytes (offset + 1) 32 encoded)
-    s = normalizeHex (sliceBytes (offset + 33) 32 encoded)
-    v = bytesToInt (sliceBytes (offset + 65) 1 encoded)
-    sig = Signature with ..
-  in sig :: parseSignatures encoded (offset + signatureLen) (count - 1)
+parseSignatures encoded offset count = map parseAt [0 .. count - 1]
+  where
+    parseAt i =
+      let
+        base = offset + i * signatureLen
+        guardianIndex = bytesToInt (sliceBytes base 1 encoded)
+        r = normalizeHex (sliceBytes (base + 1) 32 encoded)
+        s = normalizeHex (sliceBytes (base + 33) 32 encoded)
+        v = bytesToInt (sliceBytes (base + 65) 1 encoded)
+      in Signature with ..
 
 -- | The Wormhole digest: double keccak256 over the body. Ethereum signs this
 -- 32-byte value directly.
@@ -93,26 +98,26 @@ addressFromPubKey pubKey =
   in normalizeHex (sliceBytes 12 20 (keccak256 raw))
 
 -- | Verify a VAA against @gs@ at time @now@, using caller-supplied public keys
--- (index -> 65-byte uncompressed key). Aborts on any failure. Mirrors
--- @Messages.verifyVMInternal@:
+-- (index -> 65-byte uncompressed key). Pure — returns the failure as a 'Left'
+-- and the caller decides how to abort. Mirrors @Messages.verifyVMInternal@:
 --
 --   * the guardian set must be active (not expired);
 --   * at least @quorum(n)@ signatures present;
 --   * guardian indices strictly ascending (no double counting);
 --   * each supplied pubkey must hash to the stored guardian address; and
 --   * each signature must verify against that pubkey over the digest.
-verifyVAA : GuardianSet -> VAA -> [(Int, Bytes)] -> Time -> ()
-verifyVAA gs vaa pubKeys now =
-  let
-    n = numGuardians gs
-    required = quorum n
-    sigs = vaa.signatures
-  in
-    if n == 0 then error "guardian set is empty"
-    else if not (isActiveAt gs now) then error "guardian set has expired"
-    else if length sigs < required then error ("no quorum: have " <> show (length sigs) <> ", need " <> show required)
-    else if not (strictlyAscending (map (.guardianIndex) sigs)) then error "signature indices not strictly ascending"
-    else foldl (\() sig -> verifyOne gs vaa.hash pubKeys sig) () sigs
+verifyVAA : GuardianSet -> VAA -> [(Int, Bytes)] -> Time -> Either Text ()
+verifyVAA gs vaa pubKeys now = do
+  let n = numGuardians gs
+      required = quorum n
+      sigs = vaa.signatures
+  assertMsg "guardian set is empty" (n > 0)
+  assertMsg "guardian set has expired" (isActiveAt gs now)
+  assertMsg ("no quorum: have " <> show (length sigs) <> ", need " <> show required)
+    (length sigs >= required)
+  assertMsg "signature indices not strictly ascending"
+    (strictlyAscending (map (.guardianIndex) sigs))
+  forA_ sigs (verifyOne gs vaa.hash pubKeys)
 
 -- | Verify a single signature.
 --
@@ -121,24 +126,24 @@ verifyVAA gs vaa pubKeys now =
 -- we pass the Wormhole @digest@ as the message. It takes a public key, not a
 -- recovery, so we bind the caller-supplied key to the canonical guardian address
 -- via @keccak256(pubkey)[12..]@ — a wrong key cannot pass.
-verifyOne : GuardianSet -> Bytes32 -> [(Int, Bytes)] -> Signature -> ()
-verifyOne gs digest pubKeys sig =
-  let
-    storedAddr = optionOrFail ("guardian index out of range: " <> show sig.guardianIndex) (keyAt gs sig.guardianIndex)
-    pubKey = optionOrFail ("missing public key for guardian index: " <> show sig.guardianIndex) (lookup sig.guardianIndex pubKeys)
-    derivedAddr = addressFromPubKey pubKey
-    derSig = derSignature sig.r sig.s
-    derKey = derPublicKey pubKey
-  in
-    if normalizeHex derivedAddr /= normalizeHex storedAddr
-      then error ("public key does not match guardian address at index " <> show sig.guardianIndex)
-    else if not (secp256k1WithEcdsaOnly derSig digest derKey)
-      then error ("invalid signature for guardian index " <> show sig.guardianIndex)
-    else ()
+verifyOne : GuardianSet -> Bytes32 -> [(Int, Bytes)] -> Signature -> Either Text ()
+verifyOne gs digest pubKeys sig = do
+  storedAddr <- optionalToEither ("guardian index out of range: " <> show sig.guardianIndex)
+    (keyAt gs sig.guardianIndex)
+  pubKey <- optionalToEither ("missing public key for guardian index: " <> show sig.guardianIndex)
+    (lookup sig.guardianIndex pubKeys)
+  assertMsg ("public key does not match guardian address at index " <> show sig.guardianIndex)
+    (normalizeHex (addressFromPubKey pubKey) == normalizeHex storedAddr)
+  assertMsg ("invalid signature for guardian index " <> show sig.guardianIndex)
+    (secp256k1WithEcdsaOnly (derSignature sig.r sig.s) digest (derPublicKey pubKey))
 
--- | True if the list is strictly increasing.
+-- | True if the list is strictly increasing. Direct recursion so @&&@ can
+-- short-circuit on the first violation — under Daml's strict evaluation the
+-- @and (zipWith (<) xs (drop 1 xs))@ formulation would materialize both
+-- intermediate lists in full before checking anything.
 strictlyAscending : [Int] -> Bool
-strictlyAscending xs = and (zipWith (<) xs (drop 1 xs))
+strictlyAscending (x :: rest@(y :: _)) = x < y && strictlyAscending rest
+strictlyAscending _ = True
 
 ----------------------------------------------------------------------
 -- DER encoding for the secp256k1 builtin

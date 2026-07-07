@@ -43,6 +43,7 @@ module Wormhole.Core.State where
 
 import DA.Map (Map)
 import DA.Map qualified as Map
+import DA.Optional (fromSomeNote)
 import DA.Set (Set)
 import DA.Set qualified as Set
 import DA.Time (addRelTime, seconds)
@@ -121,8 +122,8 @@ template CoreState
         let vaa = parseVAA encodedVAA
         -- A VAA may be signed by a non-current-but-unexpired set; pick the set
         -- it names and require it to still be active.
-        let signingSet = optionOrFail "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
-        let () = verifyVAA signingSet vaa pubKeys now
+        let signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
+        either assertFail pure (verifyVAA signingSet vaa pubKeys now)
         pure vaa
 
     -- | Apply a governance VAA: verify it (against the CURRENT set, per EVM),
@@ -138,7 +139,7 @@ template CoreState
         -- Governance must be signed by the current set (EVM Governance.sol).
         assertMsg "governance: not signed by current guardian set"
           (vaa.guardianSetIndex == guardianSetIndex)
-        let () = verifyVAA (currentSetForUpgrade this) vaa pubKeys now
+        either assertFail pure (verifyVAA (currentSetForUpgrade this) vaa pubKeys now)
         assertMsg "governance: wrong emitter chain"
           (vaa.emitterChain == governanceChainId)
         assertMsg "governance: wrong emitter address"
@@ -146,51 +147,56 @@ template CoreState
         assertMsg "governance: action already consumed"
           (not (Set.member vaa.hash consumedGovernance))
         let action = parseGovernance vaa.payload
-        let consumed' = Set.insert vaa.hash consumedGovernance
-        applyGovernance this now consumed' action
+        case applyGovernance this now action of
+          Left err -> assertFail err
+          Right st -> create st with
+            consumedGovernance = Set.insert vaa.hash consumedGovernance
 
 ----------------------------------------------------------------------
--- Governance application (pure-ish helpers in the Update monad)
+-- Governance application (pure helpers in the Either Text monad)
 ----------------------------------------------------------------------
 
--- | Dispatch a parsed governance action, recreating 'CoreState'. @consumed'@
--- already includes this action's digest.
-applyGovernance : CoreState -> Time -> Set Bytes32 -> GovernanceAction -> Update (ContractId CoreState)
-applyGovernance st now consumed' action = case action of
+-- | Dispatch a parsed governance action, recreating 'CoreState'.
+applyGovernance : CoreState -> Time -> GovernanceAction -> Either Text CoreState
+applyGovernance st now action = case action of
   GuardianSetUpgrade chain newIndex newKeys -> do
     assertMsg "guardianSetUpgrade: wrong target chain" (chain == st.chainId || chain == 0)
     assertMsg "guardianSetUpgrade: index must be current + 1" (newIndex == st.guardianSetIndex + 1)
     assertMsg "guardianSetUpgrade: empty set" (not (null newKeys))
-    -- Expire the old current set (now + 1 day) and install the new one.
-    let oldSet = (currentSetForUpgrade st) with expirationTime = Some (addRelTime now (seconds guardianSetExpirySeconds))
+    -- Expire the current set (now + 1 day) in place, then install the new one.
+    -- Map.alter names guardianSetIndex once (look up, modify, reinsert at the same
+    -- key); the None case is an invariant violation — a live CoreState always has
+    -- its current set.
+    let expiry = Some (addRelTime now (seconds guardianSetExpirySeconds))
+        expireCurrent mOld = case mOld of
+          Some gs -> Some gs with expirationTime = expiry
+          None    -> error "no current guardian set"
         newSet = GuardianSet with keys = newKeys, expirationTime = None
-        sets' = Map.insert newIndex newSet (Map.insert st.guardianSetIndex oldSet st.guardianSets)
-    create st with
+    pure st with
       guardianSetIndex = newIndex
-      guardianSets = sets'
-      consumedGovernance = consumed'
+      guardianSets = Map.insert newIndex newSet (Map.alter expireCurrent st.guardianSetIndex st.guardianSets)
 
   SetMessageFee chain fee -> do
     assertMsg "setMessageFee: wrong target chain" (chain == st.chainId)
-    create st with messageFee = fee, consumedGovernance = consumed'
+    pure st with messageFee = fee
 
   TransferFees chain _amount _recipient -> do
     assertMsg "transferFees: wrong target chain" (chain == st.chainId || chain == 0)
-    -- Native-fee accounting is deferred (messageFee defaults to 0); record the
-    -- action as consumed so replay protection and protocol semantics hold.
-    create st with consumedGovernance = consumed'
+    -- Native-fee accounting is deferred (messageFee defaults to 0); no state
+    -- change here — the caller still records the action as consumed.
+    pure st
 
   ContractUpgrade chain _newContract -> do
     assertMsg "contractUpgrade: wrong target chain" (chain == st.chainId)
     -- On Canton an "upgrade" is an operator-driven Daml package upgrade gated by
-    -- the recorded target package-id; here we record the action as consumed.
-    -- The actual package migration is performed out of band by the operator.
-    create st with consumedGovernance = consumed'
+    -- the recorded target package-id; the actual package migration is performed
+    -- out of band by the operator. The caller records the action as consumed.
+    pure st
 
 -- | Helper to read the current set off a 'CoreState' value (not a contract).
 currentSetForUpgrade : CoreState -> GuardianSet
 currentSetForUpgrade st =
-  optionOrFail "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
+  fromSomeNote "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
 
 ----------------------------------------------------------------------
 -- Emitter registration & message publishing
@@ -206,7 +212,7 @@ emitterAddressTag = "wormhole:emitter:v1"
 -- @(registrar, owner, emitterId)@.
 emitterAddressFor : Party -> Party -> Int -> Bytes32
 emitterAddressFor registrar owner emitterId =
-  derivedAddress emitterAddressTag registrar owner emitterId
+  derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId)
 
 -- | Allocates monotonically increasing emitter ids, one registry per operator
 -- (keyed by the operator party). Sequential-id discipline is operator-behavioral
