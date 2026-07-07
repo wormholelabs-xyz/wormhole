@@ -121,9 +121,13 @@ template CoreState
     -- 'CoreState' genuinely needing @guardianGovernance@'s co-signature). Any
     -- external protocol can verify a VAA as itself. The one real requirement is
     -- visibility, not authorization: a non-stakeholder needs @CoreState@
-    -- explicitly disclosed to reference it at all -- a data attachment servable
-    -- by any party with read access, not a discretionary approval (same pattern
-    -- as 'Wormhole.Ntt.Manager.Transfer').
+    -- explicitly disclosed to reference it at all, via Daml's Explicit Contract
+    -- Disclosure feature -- a data attachment, not a signature, servable by any
+    -- party with read access:
+    -- <https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html>.
+    -- In Daml Script, @'submitWithDisclosures'@ is the idiom (see
+    -- @testParseAndVerifyVAAByExternalVerifier@); same pattern as
+    -- 'Wormhole.Ntt.Manager.Transfer'.
     nonconsuming choice ParseAndVerifyVAA : VAA
       with
         verifier   : Party

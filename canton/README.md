@@ -381,9 +381,12 @@ body needs `operator`'s authority for any structural reason (contrast
 `CoreState` genuinely needing `guardianGovernance`'s co-signature). Any external
 protocol — the token bridge, NTT, anything else — can verify a VAA as itself.
 The one real requirement is visibility, not authorization: a non-stakeholder
-needs `CoreState` explicitly disclosed to reference it at all — a data
-attachment servable by any party with read access, not a discretionary
-approval. Proven both in-memory
+needs `CoreState` explicitly disclosed to reference it at all, via Daml's
+[Explicit Contract
+Disclosure](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html)
+feature — a data attachment, not a signature — servable by any party with read
+access. In Daml Script, `submitWithDisclosures` is the idiom. Proven both
+in-memory
 (`test/daml/Test/TestCore.daml:testParseAndVerifyVAAByExternalVerifier`) and
 against a live sandbox/participant
 ([`node/pkg/watchers/canton/core_verify_vaa_integration_test.go`](../node/pkg/watchers/canton/core_verify_vaa_integration_test.go)):

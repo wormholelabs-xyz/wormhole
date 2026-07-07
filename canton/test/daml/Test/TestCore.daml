@@ -199,7 +199,7 @@ testParseAndVerifyVAAByExternalVerifier = do
   (operator, csId) <- setup
   tokenBridge <- allocateParty "ExternalTokenBridge"
   Some dCs <- queryDisclosure operator csId
-  vaa <- submit (actAs tokenBridge <> discloseMany [dCs]) do
+  vaa <- submitWithDisclosures tokenBridge [dCs] do
     exerciseCmd csId ParseAndVerifyVAA with
       verifier = tokenBridge
       encodedVAA = govSetFeeVAA
@@ -220,7 +220,7 @@ integrationParseAndVerifyVAAByExternalVerifier = do
   (operator, csId) <- setup
   tokenBridge <- allocateParty "IntegrationExternalVerifier"
   Some dCs <- queryDisclosure operator csId
-  vaa <- submit (actAs tokenBridge <> discloseMany [dCs]) do
+  vaa <- submitWithDisclosures tokenBridge [dCs] do
     exerciseCmd csId ParseAndVerifyVAA with
       verifier = tokenBridge
       encodedVAA = govSetFeeVAA
