@@ -2,7 +2,7 @@
 #
 # Local end-to-end test for the guardianGovernance external-party bootstrap.
 # Starts (or reuses) a `dpm sandbox`, runs setup_guardian_governance.sh, then
-# asserts the §4 test table from the design plan:
+# asserts:
 #
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
