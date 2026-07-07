@@ -8,8 +8,8 @@ import Daml.Script
 import DA.Assert ((===))
 
 import Wormhole.Core.Bytes (Bytes20, Bytes32)
-import Wormhole.Core.State (EmitterRequest(..), ApproveEmitter(..), EmitterIdentity, WormholeMessage)
-import Wormhole.Core.Setup (mkInitialCoreState, solanaGovernanceChainId, defaultGovernanceContract)
+import Wormhole.Core.State (EmitterRequest(..), ApproveEmitter(..), Emitter, WormholeMessage)
+import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, solanaGovernanceChainId, defaultGovernanceContract)
 
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 
@@ -17,8 +17,8 @@ import Wormhole.Example.TokenRegistry
 import Wormhole.Example.TokenBridge
 
 -- 32-byte addresses used inside the transfer payload (the token's address and the
--- target-chain recipient). These are unrelated to the emitter identity, which is
--- the EmitterIdentity contract-id.
+-- target-chain recipient). These are unrelated to the emitter address, which is
+-- derived from the Emitter's key components (registrar/owner/emitterId).
 usdTokenAddr : Bytes32
 usdTokenAddr = "000000000000000000000000000000000000000000000000000000000000dead"
 
@@ -41,30 +41,30 @@ exampleGuardian = "befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
 
 -- | The full flow: register a bridge emitter, mint a holding to the user, then
 -- lock 1000 units into the bridge's custody and publish the transfer message.
--- Returns @(bridge, user, emitterIdentity, publishedMessage)@. The 32-byte
--- emitter address is keccak256 of @emitterIdentity@ (derived off-ledger by the
--- watcher); it is not chosen here.
-lockAndAttest : Script (Party, Party, ContractId EmitterIdentity, WormholeMessage)
+-- Returns @(operator, bridge, user, emitterCid, publishedMessage)@. The 32-byte
+-- emitter address is derived by the watcher from the message's
+-- registrar/owner/emitterId (see 'Wormhole.Core.State.emitterAddressFor'); it is
+-- not chosen here.
+lockAndAttest : Script (Party, Party, Party, ContractId Emitter, WormholeMessage)
 lockAndAttest = do
-  operator <- allocateParty "Operator"
-  public   <- allocateParty "Public"
-  bridge   <- allocateParty "Bridge"
-  admin    <- allocateParty "Registry"
-  user     <- allocateParty "User"
+  operator           <- allocateParty "Operator"
+  guardianGovernance <- allocateParty "GuardianGovernance"
+  guardianObserver   <- allocateParty "GuardianObserver"
+  bridge             <- allocateParty "Bridge"
+  admin              <- allocateParty "Registry"
+  user               <- allocateParty "User"
 
-  -- A minimal CoreState: ApproveEmitter sources the emitter's canonical @public@
-  -- party from it.
-  csId <- submit operator do
-    createCmd (mkInitialCoreState operator public solanaGovernanceChainId defaultGovernanceContract [exampleGuardian])
+  -- A minimal CoreState + EmitterRegistry: ApproveEmitter allocates the emitter
+  -- id from the registry and threads @guardianObserver@ onto the new 'Emitter'.
+  _ <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [exampleGuardian] guardianObserver)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
 
-  -- The bridge registers its Emitter (owned by the bridge party); approval mints
-  -- the immutable EmitterIdentity and the Emitter bound to it, sourcing @public@
-  -- from CoreState.
+  -- The bridge registers its Emitter (owned by the bridge party).
   reqId <- submit bridge do
     createCmd EmitterRequest with requester = bridge, operator
-  emitterId <- submit operator do
-    exerciseCmd reqId ApproveEmitter with coreStateCid = csId
-  Some bridgeEm <- queryContractId bridge emitterId
+  emitterCid <- submit operator do
+    exerciseCmd reqId ApproveEmitter
 
   -- The registry mints a holding to the user.
   regId <- submit admin do createCmd ExampleRegistry with admin
@@ -73,7 +73,7 @@ lockAndAttest = do
     exerciseCmd regId Mint with owner = user, instrumentId, amount = transferAmount
 
   -- The bridge deploys its orchestrator.
-  tbId <- submit bridge do createCmd TokenBridge with bridge, public
+  tbId <- submit bridge do createCmd TokenBridge with bridge, guardianObserver
 
   -- The user locks custody and the bridge attests, atomically. The bridge-signed
   -- orchestrator, the registry factory, and the emitter are not stakeholders'
@@ -81,13 +81,13 @@ lockAndAttest = do
   -- how the token standard expects an app to hand its factory to a user.
   Some dReg     <- queryDisclosure admin regId
   Some dTb      <- queryDisclosure bridge tbId
-  Some dEmitter <- queryDisclosure bridge emitterId
+  Some dEmitter <- queryDisclosure bridge emitterCid
   (_custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter]) do
     exerciseCmd tbId LockAndPublish with
       user
       factoryCid = toInterfaceContractId regId
       holdingCid = toInterfaceContractId tokId
-      emitterCid = emitterId
+      emitterCid
       instrumentId
       amount = transferAmount
       tokenAddress = usdTokenAddr
@@ -95,18 +95,19 @@ lockAndAttest = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 42
-  pure (bridge, user, bridgeEm.identity, msg)
+  pure (operator, bridge, user, emitterCid, msg)
 
 -- | In-memory unit test: asserts the published message and that custody moved
 -- from the user to the bridge.
 testLockAndPublish : Script ()
 testLockAndPublish = do
-  (bridge, user, identity, msg) <- lockAndAttest
+  (operator, bridge, user, _emitterCid, msg) <- lockAndAttest
 
-  -- Attestation: a transfer message was published from the bridge's emitter. The
-  -- message carries the emitter identity (the watcher derives the 32-byte address
-  -- as keccak256 of it off-ledger), so there is no on-ledger address to assert.
-  msg.identity === identity
+  -- Attestation: a transfer message was published from the bridge's emitter,
+  -- carrying its key components directly (no separate identity contract).
+  msg.registrar === operator
+  msg.owner === bridge
+  msg.emitterId === 0
   msg.sequence === 0
   msg.nonce === 42
   msg.payload === encodeTransfer 1000 usdTokenAddr cantonChainId recipientAddr targetChainId
@@ -127,5 +128,5 @@ testLockAndPublish = do
 -- bridge party. The watcher observes the published message off the real ledger.
 integrationLockAndPublish : Script Party
 integrationLockAndPublish = do
-  (bridge, _user, _identity, _msg) <- lockAndAttest
+  (_operator, bridge, _user, _emitterCid, _msg) <- lockAndAttest
   pure bridge

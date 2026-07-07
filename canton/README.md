@@ -1222,7 +1222,7 @@ An end-to-end integration test
 ([`node/pkg/watchers/canton/token_bridge_integration_test.go`](../node/pkg/watchers/canton/token_bridge_integration_test.go),
 `//go:build integration`) runs the flow against a live sandbox and observes the
 published transfer message through the real watcher — additionally confirming the
-SDK-3.3.x token-standard DARs vet on the Canton 3.4.x participant and that
+SDK-3.3.x token-standard DARs vet on the Canton 3.5.x participant and that
 explicit disclosure works over the Ledger API:
 
 ```
