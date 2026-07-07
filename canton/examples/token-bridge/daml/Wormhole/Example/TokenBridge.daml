@@ -1,0 +1,102 @@
+-- | The Wormhole token-bridge "lock-and-attest" send path on Canton.
+--
+-- A user locks a Canton Network Token Standard holding into the bridge's custody
+-- and the bridge atomically publishes a Wormhole Transfer message attesting it
+-- now holds the funds — in a single transaction the user submits.
+--
+-- Atomicity / authority: 'LockAndPublish' is a choice on a @bridge@-signed
+-- contract, controlled by the @user@, so its body holds @{bridge, user}@
+-- authority. Two legs run in that one transaction:
+--   * the nested @TransferFactory_Transfer@ runs with @{admin, user}@ (the
+--     factory's @admin@ signatory plus its @sender@ = @user@ controller). Admin
+--     authority alone creates the admin-signed custody holding — the receiver
+--     (bridge) is only an observer, so its authority is not needed for this leg.
+--   * @PublishMessage@ (controller @owner = bridge@) runs under the @bridge@
+--     authority the orchestrator carries, recreating the 'Emitter' via its own
+--     operator signatory.
+-- No core operator authority is involved, matching EVM's permissionless
+-- lock+publish.
+module Wormhole.Example.TokenBridge where
+
+import DA.Time (addRelTime, hours)
+
+import Wormhole.Core.Bytes
+import Wormhole.Core.State
+
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1
+
+-- | Wormhole TokenBridge "Transfer" payload, payloadID 1 (whitepaper 0003):
+-- payloadID(1) ++ amount(32) ++ tokenAddress(32) ++ tokenChain(2) ++ to(32) ++
+-- toChain(2) ++ fee(32). Amounts here are encoded as the integer @amount@ in the
+-- instrument's base units; production normalizes decimals to 8 dp.
+encodeTransfer : Int -> Bytes32 -> Int -> Bytes32 -> Int -> Bytes
+encodeTransfer amount tokenAddress tokenChain recipient toChain =
+  intToHexByte 1
+    <> uintBE 32 amount
+    <> normalizeHex tokenAddress
+    <> uintBE 2 tokenChain
+    <> normalizeHex recipient
+    <> uintBE 2 toChain
+    <> uintBE 32 0          -- fee (0 in this example)
+
+-- | Big-endian, fixed-width (@width@ bytes) unsigned encoding of @n@ as hex.
+uintBE : Int -> Int -> Bytes
+uintBE width n
+  | width <= 0 = ""
+  | otherwise  = uintBE (width - 1) (n / 256) <> intToHexByte (n % 256)
+
+template TokenBridge
+  with
+    bridge : Party        -- custodian; also the owner of the registered Emitter
+    public : Party        -- read-only visibility party (matches the core templates)
+  where
+    signatory bridge
+    observer public
+
+    -- | Lock the user's holding into bridge custody and publish a transfer
+    -- attestation, atomically. Returns the new custody holding and the published
+    -- 'WormholeMessage'.
+    nonconsuming choice LockAndPublish : (ContractId Holding, WormholeMessage)
+      with
+        user         : Party                       -- the token owner / sender
+        factoryCid   : ContractId TransferFactory  -- the registry's transfer factory
+        holdingCid   : ContractId Holding          -- the user's input holding
+        emitterCid   : ContractId Emitter          -- the bridge's current Emitter
+        instrumentId : InstrumentId
+        amount       : Decimal
+        tokenAddress : Bytes32                      -- 32-byte token id on this chain
+        tokenChain   : Int                          -- Wormhole chain id of the token
+        recipient    : Bytes32                      -- 32-byte recipient on the target chain
+        toChain      : Int                          -- target Wormhole chain id
+        nonce        : Int
+      controller user
+      do
+        now <- getTime
+        -- 1. LOCK: transfer the holding into the bridge's custody.
+        let transfer = Transfer with
+              sender = user
+              receiver = bridge
+              amount
+              instrumentId
+              requestedAt = now
+              executeBefore = addRelTime now (hours 1)
+              inputHoldingCids = [holdingCid]
+              meta = emptyMetadata
+        result <- exercise factoryCid TransferFactory_Transfer with
+          expectedAdmin = instrumentId.admin
+          transfer
+          extraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+        custodyCid <- case result.output of
+          TransferInstructionResult_Completed cids -> case cids of
+            [c] -> pure c
+            _ -> abort "TokenBridge: expected exactly one custody holding"
+          _ -> abort "TokenBridge: registry did not settle the transfer atomically"
+        -- 2. ATTEST: publish the Wormhole transfer message from the bridge emitter.
+        let payload = encodeTransfer (truncate amount) tokenAddress tokenChain recipient toChain
+        msg <- exercise emitterCid PublishMessage with
+          nonce
+          payload
+          consistencyLevel = 1
+        pure (custodyCid, msg)

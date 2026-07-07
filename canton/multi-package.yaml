@@ -6,3 +6,6 @@
 packages:
   - ./core
   - ./test
+  # Example: token-bridge lock-and-attest send path (CN Token Standard).
+  # Data-depends on core's DAR; not part of the production package.
+  - ./examples/token-bridge
