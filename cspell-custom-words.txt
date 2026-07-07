@@ -51,6 +51,7 @@ Cosmwasm
 counterparty
 cpus
 crosschain
+custodied
 Cyfrin
 datagram
 denoms

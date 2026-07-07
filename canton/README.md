@@ -1058,6 +1058,43 @@ observation. Eviction is fail-safe (guardians stop seeing → stop signing, the 
 liveness posture as a compromised operator above), but the custody choice needs a
 human decision; see Open Questions.
 
+### Worked example: token-bridge send path
+
+`examples/token-bridge` is a runnable example of the lock-and-attest send path on
+the Canton Network Token Standard (CIP-0056). A `TokenBridge.LockAndPublish` choice
+atomically (1) transfers a user's holding into the bridge's custody via the token
+standard's `TransferFactory_Transfer` (`receiver = bridge`) and (2) publishes a
+Wormhole Transfer message from the bridge's `Emitter` — in a single transaction the
+user submits.
+
+Key points it demonstrates:
+
+- **Custody = transfer to the bridge party**, not the allocation API (allocation is
+  DvP and needs a counter-leg, which a one-sided lock does not have).
+- **Atomicity via authority composition**: the bridge-signed orchestrator supplies
+  the publish authority while the registry factory supplies the authority to move
+  the asset, so no core operator is involved — matching EVM's permissionless
+  lock+publish.
+- **Explicit disclosure**: the user receives the bridge, factory, and emitter
+  contracts as disclosed contracts (it is not a stakeholder of them), the standard
+  pattern for an app handing its factory to a user.
+
+The example vendors the standard's interface DARs (pinned; see
+`examples/token-bridge/.lib/THIRD_PARTY.md`) and ships a minimal admin-custodied
+registry so it is self-issuing and runnable without Amulet. Build and test with
+`dpm build --all` then `cd examples/token-bridge && dpm test --all`.
+
+An end-to-end integration test
+([`node/pkg/watchers/canton/token_bridge_integration_test.go`](../node/pkg/watchers/canton/token_bridge_integration_test.go),
+`//go:build integration`) runs the flow against a live sandbox and observes the
+published transfer message through the real watcher — additionally confirming the
+SDK-3.3.x token-standard DARs vet on the Canton 3.4.x participant and that
+explicit disclosure works over the Ledger API:
+
+```
+go test -tags integration -run TestCantonTokenBridgeIntegration ./pkg/watchers/canton -v
+```
+
 ---
 
 ## 11. Open Questions & Validation Items
