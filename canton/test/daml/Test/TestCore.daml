@@ -181,6 +181,27 @@ testParseAndVerifyVAA = do
   (operator, csId) <- setup
   vaa <- submit operator do
     exerciseCmd csId ParseAndVerifyVAA with
+      verifier = operator
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  vaa.guardianSetIndex === 0
+  vaa.emitterChain === 1
+  vaa.sequence === 1
+
+-- | ParseAndVerifyVAA is genuinely permissionless: an external party with no
+-- relationship to CoreState at all (not operator, guardianGovernance, or
+-- guardianObserver) can verify a VAA as itself, with no involvement from
+-- operator, given only CoreState disclosed to it -- a data attachment, not an
+-- approval. This is what the "for the token bridge / external verifiers"
+-- doc comment on the choice promises.
+testParseAndVerifyVAAByExternalVerifier : Script ()
+testParseAndVerifyVAAByExternalVerifier = do
+  (operator, csId) <- setup
+  tokenBridge <- allocateParty "ExternalTokenBridge"
+  Some dCs <- queryDisclosure operator csId
+  vaa <- submit (actAs tokenBridge <> discloseMany [dCs]) do
+    exerciseCmd csId ParseAndVerifyVAA with
+      verifier = tokenBridge
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   vaa.guardianSetIndex === 0

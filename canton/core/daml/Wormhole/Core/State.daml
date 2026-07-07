@@ -112,11 +112,24 @@ template CoreState
     -- | Read-only VAA verification, for the token bridge / external verifiers.
     -- Verifies against the CURRENT guardian set. @pubKeys@ are untrusted hints
     -- bound to guardian addresses inside 'verifyVAA'.
+    --
+    -- @verifier@ (any party, supplied by the caller) is the sole controller --
+    -- @operator@ does not need to be an active party. This choice is
+    -- @nonconsuming@ and does no create/archive at all, so nothing in its body
+    -- needs @operator@'s authority for any structural reason (contrast
+    -- 'SubmitGovernanceVAA', which IS consuming and creates a successor
+    -- 'CoreState' genuinely needing @guardianGovernance@'s co-signature). Any
+    -- external protocol can verify a VAA as itself. The one real requirement is
+    -- visibility, not authorization: a non-stakeholder needs @CoreState@
+    -- explicitly disclosed to reference it at all -- a data attachment servable
+    -- by any party with read access, not a discretionary approval (same pattern
+    -- as 'Wormhole.Ntt.Manager.Transfer').
     nonconsuming choice ParseAndVerifyVAA : VAA
       with
+        verifier   : Party
         encodedVAA : Bytes
         pubKeys    : [(Int, Bytes)]
-      controller operator
+      controller verifier
       do
         now <- getTime
         let vaa = parseVAA encodedVAA

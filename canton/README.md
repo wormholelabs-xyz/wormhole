@@ -359,9 +359,10 @@ governance protocol.
 -- on CoreState; pure verification, does not mutate state
 nonconsuming choice ParseAndVerifyVAA : VerifiedVAA
   with
+    verifier   : Party            -- any party; the sole controller
     encodedVAA : Bytes
     pubKeys    : [(Int, Bytes)]   -- guardianIndex -> 65-byte uncompressed pubkey
-  controller operator
+  controller verifier
   do
     vaa <- parseVAA encodedVAA
     verifyVAA self vaa pubKeys     -- §5
@@ -371,6 +372,18 @@ nonconsuming choice ParseAndVerifyVAA : VerifiedVAA
 `pubKeys` are supplied by the caller because Daml verifies against a public key,
 not by recovery (§5). They are _untrusted hints_; verification fails unless each
 provided key hashes to the guardian address stored in the set.
+
+**This is genuinely permissionless, not merely operator-delegated.** `verifier`
+is the sole controller — `operator` never needs to be an active party. The
+choice is `nonconsuming` and does no create/archive at all, so nothing in its
+body needs `operator`'s authority for any structural reason (contrast
+`SubmitGovernanceVAA` below, which *is* consuming and creates a successor
+`CoreState` genuinely needing `guardianGovernance`'s co-signature). Any external
+protocol — the token bridge, NTT, anything else — can verify a VAA as itself.
+The one real requirement is visibility, not authorization: a non-stakeholder
+needs `CoreState` explicitly disclosed to reference it at all — a data
+attachment servable by any party with read access, not a discretionary
+approval.
 
 ### 4.4 Governance
 
