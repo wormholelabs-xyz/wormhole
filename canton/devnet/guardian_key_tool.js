@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 //
 // Minimal Ed25519 keypair / signing helper for guardianGovernance owner keys.
-// Uses ONLY Node's built-in `crypto` module (Ed25519 has been supported
-// natively since Node 12) -- no third-party dependencies, so no supply-chain
-// surface to audit.
 //
 // This stands in for real guardian custody (HSM/KMS/offline signer) in local
 // testing: `generate` produces a keypair the way a guardian's custody system
@@ -16,9 +13,7 @@
 // Production usage: replace the `sign` subcommand with a call into the real
 // custody system (HSM CLI, KMS API, offline signing ceremony) that accepts
 // the same "hex hash in, hex signature out" contract -- guardian_governance.
-// canton and genesis_guardian_governance.sh only depend on that CLI contract,
-// not on this file, so swapping the signer does not require touching either
-// script (see GG_OWNER_SIGN_CMD_* in setup_guardian_governance.sh).
+// canton and genesis_guardian_governance.sh only depend on that CLI contract.
 'use strict';
 const crypto = require('crypto');
 const fs = require('fs');
