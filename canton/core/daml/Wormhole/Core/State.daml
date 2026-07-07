@@ -90,7 +90,7 @@ template CoreState
   with
     operator           : Party              -- advances the singleton; no power over outcomes
     guardianGovernance : Party              -- guardians' governance anchor (threshold party)
-    guardianObserver   : Party              -- read-only guardian observer (stakeholder, never signs)
+    guardianObserver   : Party              -- read-only guardian observer
     chainId            : Int                -- 72 (Canton)
     governanceChainId  : Int                -- 1 (Solana)
     governanceContract : Bytes32            -- governance emitter address
@@ -107,11 +107,7 @@ template CoreState
     -- guardianGovernance's authority from the archived contract, so it signs only
     -- at genesis.
     signatory operator, guardianGovernance
-    -- Read-only guardian observer: an informee of every consuming exercise on
-    -- this contract (SubmitGovernanceVAA) and of each successor create, so
-    -- guardians watch guardian-set/fee/governance transitions without any
-    -- authority. Never a signatory or controller. The field propagates across
-    -- every `create st with ...` governance recreation automatically.
+    -- Lets guardians watch guardian-set / governance transitions.
     observer guardianObserver
     key guardianGovernance : Party
     maintainer key
@@ -229,19 +225,14 @@ emitterAddressFor registrar owner emitterId =
 template EmitterRegistry
   with
     operator         : Party
-    guardianObserver : Party  -- carried (field only) so ApproveEmitter can thread it into new Emitters
+    guardianObserver : Party  -- threaded into each new Emitter by ApproveEmitter
     nextId           : Int
   where
     signatory operator
-    -- The registry carries guardianObserver as a FIELD only, NOT as a template
-    -- observer: guardians watch the attestation surface (Emitter/CoreState), not
-    -- id allocation (least privilege). The field lets ApproveEmitter thread the
-    -- party into each new Emitter without a second key resolution.
     key operator : Party
     maintainer key
 
-    -- Result carries guardianObserver so ApproveEmitter threads it into the new
-    -- Emitter from this single key resolution (no separate fetchByKey).
+    -- Returns guardianObserver for ApproveEmitter to stamp onto the new Emitter.
     choice AllocateEmitterId : (ContractId EmitterRegistry, Int, Party)
       controller operator
       do
@@ -281,7 +272,7 @@ template Emitter
   with
     operator         : Party
     owner            : Party
-    guardianObserver : Party  -- read-only guardian observer (stakeholder, never signs)
+    guardianObserver : Party  -- read-only guardian observer
     emitterId        : Int      -- registry-allocated; key._3
     emitterAddress   : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
     sequence         : Int      -- next sequence to assign
@@ -292,12 +283,7 @@ template Emitter
     -- existing address (Canton's msg.sender analog). It also means the operator
     -- alone cannot archive an emitter (Archive needs all signatories).
     signatory operator, owner
-    -- Read-only guardian observer: because PublishMessage is a CONSUMING choice,
-    -- observers (stakeholders) are informees of the exercise, so guardianObserver
-    -- sees every PublishMessage exercise (and its result) plus the successor
-    -- Emitter create — the full message surface — over the update stream. It
-    -- never signs, so it confers no authority; the sequence-bump recreation
-    -- (`create this with ...`) preserves the field automatically.
+    -- Lets guardians watch PublishMessage exercises and their results.
     observer guardianObserver
     -- Non-unique key: stable across the sequence-bump churn so the owner can
     -- publish again by key (ExerciseByKeyCommand) without tracking contract-ids.

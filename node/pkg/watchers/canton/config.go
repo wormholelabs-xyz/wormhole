@@ -19,15 +19,9 @@ type WatcherConfig struct {
 	// while preserving module/entity names).
 	PackageID string
 	// ReadAsParty optionally narrows the update stream to a single Canton party.
-	// For a production guardian this should be the read-only guardianObserver
-	// party (a template observer on the Emitter/CoreState attestation surface):
-	// it is a stakeholder of every PublishMessage exercise and CoreState
-	// transition, so reading as it observes the full message surface without any
-	// authority and without depending on the operator party id. Leaving it empty
-	// observes every party hosted on the participant; if the participant hosts
-	// only guardianObserver the two are equivalent, but setting the flag makes
-	// the intended trust boundary explicit (defense in depth). In devnet the
-	// sandbox is a single participant, so the wildcard default is used.
+	// Production guardians set this to the read-only guardianObserver party (an
+	// observer on the Emitter/CoreState attestation surface). Empty observes
+	// every party on the participant (the devnet default).
 	ReadAsParty string
 }
 
