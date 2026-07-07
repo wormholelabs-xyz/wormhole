@@ -21,7 +21,7 @@ regenerate them by an unaudited fetch.
 | splice-api-token-transfer-instruction-v1-1.0.0.dar | e4c73aa7ae73fb2fc330b938ffb99f568792321640ba4b9472902aa8d742c994 |
 
 Package versions are all `1.0.0`; built with Daml SDK 3.3.x (Daml-LF 2.x), which is
-data-dependency compatible with this project's SDK 3.4.11.
+data-dependency compatible with this project's SDK 3.5.1 (Daml-LF 2.3).
 
 ## Re-fetch (only with authorization)
 

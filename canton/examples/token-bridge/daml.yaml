@@ -7,7 +7,7 @@
 # Vendored standard DARs live under .lib/ (see .lib/THIRD_PARTY.md for pinned
 # versions and provenance). It data-depends on the built wormhole-core DAR for
 # the Emitter / PublishMessage primitive.
-sdk-version: 3.4.11
+sdk-version: 3.5.1
 name: wormhole-token-bridge-example
 version: 0.1.0
 source: daml
@@ -21,8 +21,8 @@ data-dependencies:
   - .lib/splice-api-token-holding-v1-1.0.0.dar
   - .lib/splice-api-token-transfer-instruction-v1-1.0.0.dar
 build-options:
-  # wormhole-core's Bytes/VAA modules transitively use the Alpha DA.Crypto.Text.
-  - -Wno-crypto-text-is-alpha
+  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core (contract keys).
+  - --target=2.3
   # This is an example package that intentionally bundles its Daml Script tests
   # with the templates; it is never uploaded to a participant, so the
   # script-in-template-package warning does not apply.

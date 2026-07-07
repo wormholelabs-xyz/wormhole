@@ -49,11 +49,11 @@ uintBE width n
 
 template TokenBridge
   with
-    bridge : Party        -- custodian; also the owner of the registered Emitter
-    public : Party        -- read-only visibility party (matches the core templates)
+    bridge           : Party  -- custodian; also the owner of the registered Emitter
+    guardianObserver : Party  -- read-only guardian observer (matches the core templates)
   where
     signatory bridge
-    observer public
+    observer guardianObserver
 
     -- | Lock the user's holding into bridge custody and publish a transfer
     -- attestation, atomically. Returns the new custody holding and the published

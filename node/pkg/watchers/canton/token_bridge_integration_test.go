@@ -8,7 +8,7 @@
 // lock-and-attest flow via `dpm script`, and observes the resulting Wormhole
 // Transfer message through the real cantonclient gRPC client. This additionally
 // proves what the in-memory Daml Script test cannot: that the SDK-3.3.x-built
-// token-standard DARs vet on the 3.4.x sandbox, that explicit disclosure works
+// token-standard DARs vet on the 3.5.x sandbox, that explicit disclosure works
 // over the real Ledger API, and that a token-custody lock produces a message the
 // guardian watcher maps to a common.MessagePublication.
 //
@@ -22,7 +22,6 @@ package canton
 import (
 	"context"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os"
@@ -36,7 +35,6 @@ import (
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -125,16 +123,15 @@ func TestCantonTokenBridgeIntegration(t *testing.T) {
 
 	select {
 	case ev := <-eventChan:
-		// Header: the emitter address is keccak256 of the emitter's identity
-		// contract-id, recomputed here from the cid the live ledger assigned.
-		require.NotEmpty(t, ev.Message.IdentityCID)
+		// Header: the emitter address is derived from the message's key
+		// components (registrar/owner/emitterId), assigned by the live ledger.
+		require.NotEmpty(t, ev.Message.Registrar)
+		require.NotEmpty(t, ev.Message.Owner)
+		assert.Equal(t, uint64(0), ev.Message.EmitterID)
 		assert.Equal(t, uint64(0), ev.Message.Sequence)
 		assert.Equal(t, uint32(42), ev.Message.Nonce)
 
-		cidBytes, err := hex.DecodeString(strings.TrimPrefix(ev.Message.IdentityCID, "0x"))
-		require.NoError(t, err)
-		var wantAddr vaa.Address
-		copy(wantAddr[:], ethcrypto.Keccak256(cidBytes))
+		wantAddr := deriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
 		assert.NotEqual(t, vaa.Address{}, wantAddr, "derived emitter address must be non-zero")
 
 		// Payload: Wormhole TokenBridge Transfer, payloadID 1 (133 bytes):
