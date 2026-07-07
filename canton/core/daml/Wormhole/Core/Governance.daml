@@ -57,6 +57,5 @@ parseGovernance payload =
 -- | Parse @count@ consecutive 20-byte guardian addresses starting at byte
 -- @offset@.
 parseKeys : Bytes -> Int -> Int -> [Bytes20]
-parseKeys _ _ 0 = []
 parseKeys payload offset count =
-  normalizeHex (sliceBytes offset 20 payload) :: parseKeys payload (offset + 20) (count - 1)
+  map (\i -> normalizeHex (sliceBytes (offset + i * 20) 20 payload)) [0 .. count - 1]
