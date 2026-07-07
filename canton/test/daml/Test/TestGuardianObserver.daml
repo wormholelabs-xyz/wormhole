@@ -118,7 +118,7 @@ testPublishRequiresOnlyOwner = do
   submitMustFail operator2 do
     createCmd (mkInitialCoreState operator2 guardianGovernance2
                  solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2)
-  _ <- submitMulti [operator2, guardianGovernance2] [] do
+  _ <- submit (actAs operator2 <> actAs guardianGovernance2) do
     createCmd (mkInitialCoreState operator2 guardianGovernance2
                  solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2)
   pure ()
