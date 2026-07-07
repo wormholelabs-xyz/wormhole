@@ -383,7 +383,12 @@ protocol — the token bridge, NTT, anything else — can verify a VAA as itself
 The one real requirement is visibility, not authorization: a non-stakeholder
 needs `CoreState` explicitly disclosed to reference it at all — a data
 attachment servable by any party with read access, not a discretionary
-approval.
+approval. Proven both in-memory
+(`test/daml/Test/TestCore.daml:testParseAndVerifyVAAByExternalVerifier`) and
+against a live sandbox/participant
+([`node/pkg/watchers/canton/core_verify_vaa_integration_test.go`](../node/pkg/watchers/canton/core_verify_vaa_integration_test.go)):
+a party with no relationship to `CoreState` at all — not `operator`, not
+`guardianGovernance` — verifies a real guardian-signed VAA as itself.
 
 ### 4.4 Governance
 
@@ -653,6 +658,7 @@ node/pkg/cantonclient/           ← Ledger API v2 gRPC client
   vectorgen_test.go              ← regenerates the signed-VAA test vector (GEN_CANTON_VECTORS=1)
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
   watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
+  core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
 sdk/vaa/structs.go               ← ChainIDCanton = 72
 devnet/canton-devnet.yaml        ← Tilt k8s manifest (sandbox + bootstrap)
 Tiltfile                         ← `canton` component (opt-in)

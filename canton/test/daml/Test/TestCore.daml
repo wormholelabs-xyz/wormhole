@@ -189,11 +189,11 @@ testParseAndVerifyVAA = do
   vaa.sequence === 1
 
 -- | ParseAndVerifyVAA is genuinely permissionless: an external party with no
--- relationship to CoreState at all (not operator, guardianGovernance, or
--- guardianObserver) can verify a VAA as itself, with no involvement from
--- operator, given only CoreState disclosed to it -- a data attachment, not an
--- approval. This is what the "for the token bridge / external verifiers"
--- doc comment on the choice promises.
+-- relationship to CoreState at all (not operator or guardianGovernance --
+-- CoreState's only two stakeholders) can verify a VAA as itself, with no
+-- involvement from operator, given only CoreState disclosed to it -- a data
+-- attachment, not an approval. This is what the "for the token bridge /
+-- external verifiers" doc comment on the choice promises.
 testParseAndVerifyVAAByExternalVerifier : Script ()
 testParseAndVerifyVAAByExternalVerifier = do
   (operator, csId) <- setup
@@ -207,6 +207,28 @@ testParseAndVerifyVAAByExternalVerifier = do
   vaa.guardianSetIndex === 0
   vaa.emitterChain === 1
   vaa.sequence === 1
+
+-- | Integration entrypoint, invoked by the Go integration test via `dpm
+-- script` against a live sandbox/participant -- not just the Script
+-- interpreter. Same scenario as 'testParseAndVerifyVAAByExternalVerifier':
+-- an external party with no relationship to CoreState verifies a real
+-- guardian-signed VAA as itself, given only CoreState disclosed to it.
+-- Returns the external verifier's party id so the Go test can sanity-check
+-- it (a real, hosted party, not something forged).
+integrationParseAndVerifyVAAByExternalVerifier : Script Party
+integrationParseAndVerifyVAAByExternalVerifier = do
+  (operator, csId) <- setup
+  tokenBridge <- allocateParty "IntegrationExternalVerifier"
+  Some dCs <- queryDisclosure operator csId
+  vaa <- submit (actAs tokenBridge <> discloseMany [dCs]) do
+    exerciseCmd csId ParseAndVerifyVAA with
+      verifier = tokenBridge
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  vaa.guardianSetIndex === 0
+  vaa.emitterChain === 1
+  vaa.sequence === 1
+  pure tokenBridge
 
 -- | A SetMessageFee governance VAA verifies and updates the message fee. Looks up
 -- the stable governance anchor once, then exercises by the 'CoreState' key
