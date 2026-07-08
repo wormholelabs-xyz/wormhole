@@ -117,6 +117,7 @@ journalctl
 karura
 Karura
 Keccak
+keypair
 kevm
 KEVM
 keymap
