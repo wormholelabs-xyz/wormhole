@@ -32,11 +32,13 @@ mkInitialCoreState :
   -> Int       -- ^ governance chain id
   -> Bytes32   -- ^ governance contract
   -> [Bytes20] -- ^ initial guardian addresses (set 0)
+  -> Party     -- ^ guardianObserver (read-only guardian observer party)
   -> CoreState
-mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians =
+mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians guardianObserver =
   CoreState with
     operator
     guardianGovernance
+    guardianObserver
     chainId = cantonChainId
     governanceChainId = govChain
     governanceContract = normalizeHex govContract
@@ -46,6 +48,8 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
     consumedGovernance = Set.empty
 
 -- | The emitter-id registry the operator creates alongside the 'CoreState' at
--- setup. Emitter ids are allocated sequentially from this contract.
-mkInitialEmitterRegistry : Party -> EmitterRegistry
-mkInitialEmitterRegistry operator = EmitterRegistry with operator, nextId = 0
+-- setup. Emitter ids are allocated sequentially; it also carries
+-- @guardianObserver@ for 'ApproveEmitter' to thread into each 'Emitter'.
+mkInitialEmitterRegistry : Party -> Party -> EmitterRegistry
+mkInitialEmitterRegistry operator guardianObserver =
+  EmitterRegistry with operator, guardianObserver, nextId = 0

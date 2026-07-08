@@ -31,16 +31,20 @@ govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479
 
 -- | Bootstrap a devnet 'CoreState' and the 'EmitterRegistry'. The 'CoreState' is
 -- co-signed by the @operator@ and a @guardianGovernance@ party (a single party
--- here; in production a k-of-n threshold party), so genesis needs both. The
--- guardianGovernance party is readable off the created 'CoreState'.
-setup : Script (Party, ContractId CoreState)
+-- here; in production a k-of-n threshold party), so genesis needs both. It also
+-- allocates the read-only @guardianObserver@ party and threads it into the
+-- 'CoreState' and 'EmitterRegistry' (from which 'ApproveEmitter' carries it into
+-- each 'Emitter'). The result keeps @operator@ FIRST so bootstrap.sh's first-party
+-- extraction still yields the operator; @guardianObserver@ follows.
+setup : Script (Party, Party, ContractId CoreState)
 setup = do
   operator <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
+  guardianObserver <- allocateParty "GuardianObserver"
   csId <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [devnetGuardian])
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator)
-  pure (operator, csId)
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
+  pure (operator, guardianObserver, csId)
 
 -- | Register an emitter for @owner@: allocates a stable @emitterId@ from the
 -- 'EmitterRegistry' and creates the keyed 'Emitter', returning its cid.
@@ -55,7 +59,7 @@ registerEmitter operator owner = do
 -- the second publish exercises the stable key directly, with no cid tracking.
 testPublishMessage : Script ()
 testPublishMessage = do
-  (operator, _) <- setup
+  (operator, _, _) <- setup
   alice <- allocateParty "Alice"
   emitterId <- registerEmitter operator alice
   Some em <- queryContractId alice emitterId
@@ -86,7 +90,7 @@ testPublishMessage = do
 -- addresses; the registry's counter advances.
 testRegistryAllocation : Script ()
 testRegistryAllocation = do
-  (operator, _) <- setup
+  (operator, _, _) <- setup
   alice <- allocateParty "AllocAlice"
   bob <- allocateParty "AllocBob"
   aliceEm <- registerEmitter operator alice
@@ -122,7 +126,7 @@ testAddressVector =
 -- so registry-id discipline is behavioral — but address integrity is not.
 testImpersonationBlocked : Script ()
 testImpersonationBlocked = do
-  (operator, _) <- setup
+  (operator, guardianObserver, _) <- setup
   alice <- allocateParty "VictimAlice"
   mallory <- allocateParty "Mallory"
   aliceEm <- registerEmitter operator alice
@@ -131,13 +135,13 @@ testImpersonationBlocked = do
   -- (a) Operator-alone forgery of Alice's address is impossible.
   submitMustFail operator do
     createCmd Emitter with
-      operator, owner = alice, emitterId = 0
+      operator, owner = alice, guardianObserver, emitterId = 0
       emitterAddress = a.emitterAddress, sequence = 0
 
   -- (b) Operator + Mallory can create a same-id emitter, but its address differs.
   malloryEm <- submit (actAs operator <> actAs mallory) do
     createCmd Emitter with
-      operator, owner = mallory, emitterId = 0
+      operator, owner = mallory, guardianObserver, emitterId = 0
       emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
   Some m <- queryContractId mallory malloryEm
   assert (m.emitterAddress /= a.emitterAddress)
@@ -145,7 +149,7 @@ testImpersonationBlocked = do
 -- | Payloads larger than 750 bytes are rejected.
 testPayloadTooLarge : Script ()
 testPayloadTooLarge = do
-  (operator, _) <- setup
+  (operator, _, _) <- setup
   bob <- allocateParty "Bob"
   emitterId <- registerEmitter operator bob
   -- 751 bytes = 1502 hex chars.
@@ -166,7 +170,7 @@ testQuorum = do
 -- | The current guardian set is installed at index 0 and never expires.
 testInitialGuardianSet : Script ()
 testInitialGuardianSet = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   Some cs <- queryContractId operator csId
   cs.guardianSetIndex === 0
   let gs = fromSome (Map.lookup 0 cs.guardianSets)
@@ -178,7 +182,7 @@ testInitialGuardianSet = do
 -- exercises the full keccak256 + DER + secp256k1WithEcdsaOnly path.
 testParseAndVerifyVAA : Script ()
 testParseAndVerifyVAA = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   vaa <- submit operator do
     exerciseCmd csId ParseAndVerifyVAA with
       encodedVAA = govSetFeeVAA
@@ -193,7 +197,7 @@ testParseAndVerifyVAA = do
 -- operator submits alone (guardianGovernance's authority is inherited).
 testGovernanceSetMessageFee : Script ()
 testGovernanceSetMessageFee = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   Some cs0 <- queryContractId operator csId
   newCsId <- submit operator do
     exerciseByKeyCmd @CoreState cs0.guardianGovernance SubmitGovernanceVAA with
@@ -211,7 +215,7 @@ testGovernanceSetMessageFee = do
 -- from the message's key components, which the Go test recomputes.
 integrationPublish : Script Party
 integrationPublish = do
-  (operator, _) <- setup
+  (operator, _, _) <- setup
   owner <- allocateParty "IntegrationEmitter"
   _ <- registerEmitter operator owner
   _ <- submit owner do
@@ -222,7 +226,7 @@ integrationPublish = do
 -- | Exercise the auto-generated Archive choice on each template (for coverage).
 testArchives : Script ()
 testArchives = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   Some cs <- queryContractId operator csId
   -- CoreState is co-signed, so archiving needs operator + guardianGovernance.
   submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId

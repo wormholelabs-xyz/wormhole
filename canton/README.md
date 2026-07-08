@@ -163,6 +163,7 @@ template CoreState
   with
     operator           : Party          -- advances the singleton; the "deployer"
     guardianGovernance : Party          -- guardians' governance anchor (threshold party)
+    guardianObserver   : Party          -- read-only guardian observer (stakeholder, never signs)
     chainId            : Int            -- 72
     governanceChainId  : Int            -- 1 (Solana)
     governanceContract : Bytes32        -- 0x..0004 (the governance emitter)
@@ -172,9 +173,24 @@ template CoreState
     consumedGovernance : Set Bytes32    -- replay protection (keyed by digest)
   where
     signatory operator, guardianGovernance
+    observer guardianObserver          -- read-only; sees governance transitions
     key guardianGovernance : Party   -- lookup by the governance anchor is authentic
     maintainer key
 ```
+
+**Read-only guardian observer.** `guardianObserver` is a template `observer`
+(hence a **stakeholder/informee**, never a signatory or controller) on the
+attestation surface — `CoreState` here and `Emitter` in §4.2. The ledger-model
+rule that makes this sufficient: **informees of a *consuming* exercise include
+the contract's stakeholders**. `SubmitGovernanceVAA` is consuming, so the
+observer sees every guardian-set/fee/governance transition and each successor
+`CoreState` create; `PublishMessage` is consuming, so it sees the full message
+surface (§4.2). Nonconsuming exercises (`ParseAndVerifyVAA`, §4.3) do NOT reach
+observers, which is acceptable — that path is a pure read. Adding an observer
+requires no authority from that party and changes nothing about who can
+create/exercise these contracts, so guardians watch what they attest without
+ever entering Canton's confirmation path (§10). The scope is deliberately the
+attestation surface only, **never** holdings, balances, or transfer legs.
 
 Every state-mutating choice is `controller`-checked (controller `operator`),
 archives the current `CoreState`, and `create`s the next one with updated fields.
@@ -244,26 +260,40 @@ template EmitterRequest with
 
 -- One per operator; allocates monotonically increasing emitter ids.
 template EmitterRegistry with
-    operator : Party
-    nextId   : Int
+    operator         : Party
+    guardianObserver : Party   -- carried (field only) to thread into new Emitters
+    nextId           : Int
   where
     signatory operator
     key operator : Party
     maintainer key
-    -- choice AllocateEmitterId : (ContractId EmitterRegistry, Int)
+    -- guardianObserver is a FIELD only here, NOT a template observer: guardians
+    -- watch the attestation surface, not id allocation (least privilege).
+    -- choice AllocateEmitterId : (ContractId EmitterRegistry, Int, Party)
+    --   -- result carries guardianObserver so ApproveEmitter threads it into the
+    --   -- new Emitter from this single key resolution.
 
 template Emitter
   with
-    operator       : Party
-    owner          : Party
-    emitterId      : Int      -- registry-allocated; key._3
-    emitterAddress : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
-    sequence       : Int      -- next sequence to assign (per-emitter)
+    operator         : Party
+    owner            : Party
+    guardianObserver : Party   -- read-only guardian observer (stakeholder, never signs)
+    emitterId        : Int      -- registry-allocated; key._3
+    emitterAddress   : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
+    sequence         : Int      -- next sequence to assign (per-emitter)
   where
     signatory operator, owner   -- owner co-signs: the msg.sender analog
+    observer guardianObserver   -- read-only; sees PublishMessage (consuming)
     key (operator, owner, emitterId) : (Party, Party, Int)
     maintainer key._1
 ```
+
+The `guardianObserver` is threaded in at registration: `ApproveEmitter`
+resolves the `EmitterRegistry` once (`AllocateEmitterId`, whose result now
+carries the party) and sets the field on the created `Emitter`. Because
+`PublishMessage` is consuming, the observer is an informee of every publish
+exercise (and its `WormholeMessage` result) plus the sequence-bumped successor
+`Emitter` create — the full message surface — with no authority (§4.1, §10).
 
 **Emitter address derivation.** The 32-byte Wormhole emitter address is
 
@@ -554,9 +584,15 @@ against the Daml side by a shared cross-language test vector.
 **Party filter.** The `GetUpdates` request uses an `UpdateFormat` with a wildcard
 template filter under **`filters_for_any_party`** by default — the watcher
 observes `PublishMessage` from _every_ emitter on the participant and needs no
-operator party id. (An optional `--cantonReadAsParty` narrows the stream to a
-single party via `filters_by_party` instead.) `TRANSACTION_SHAPE_LEDGER_EFFECTS`
-is required so `ExercisedEvent`s — which carry the choice result — are included.
+operator party id. For **production guardians**, set `--cantonReadAsParty` to the
+read-only **`guardianObserver`** party (§4.1): it is a stakeholder of the
+`Emitter`/`CoreState` attestation surface, so the narrowed `filters_by_party`
+stream still carries every `PublishMessage`, and it makes the trust boundary
+explicit. If the guardian participant hosts only `guardianObserver` the wildcard
+default is equivalent, so the flag is precision / defense-in-depth. The **devnet**
+sandbox is a single participant, so it keeps the wildcard default.
+`TRANSACTION_SHAPE_LEDGER_EFFECTS` is required so `ExercisedEvent`s — which carry
+the choice result — are included.
 
 ### 7.2 `TxID` and offsets
 
@@ -598,16 +634,20 @@ Each observed event becomes a `common.MessagePublication`
 
 ```go
 type WatcherConfig struct {
-    NetworkID  watchers.NetworkID
-    ChainID    vaa.ChainID        // ChainIDCanton
-    Rpc        string             // host:port of the Ledger API
-    PackageID  string             // package-id of wormhole-core (template filter)
+    NetworkID   watchers.NetworkID
+    ChainID     vaa.ChainID        // ChainIDCanton
+    Rpc         string             // host:port of the Ledger API
+    PackageID   string             // package-id of wormhole-core (template filter)
+    ReadAsParty string             // optional; production guardians set the guardianObserver party
 }
 ```
 
 Wired into the guardian via
 [`node/pkg/node/options.go`](../node/pkg/node/options.go) and a `--cantonRPC` /
 `--cantonContract` flag pair in `node/cmd/guardiand`, following the Sui pattern.
+`--cantonReadAsParty` populates `ReadAsParty`; production guardians set it to the
+read-only `guardianObserver` party (§4.1, §7.1), and devnet leaves it empty
+(wildcard).
 
 ---
 
@@ -629,6 +669,7 @@ canton/
   test/                          ← `wormhole-core-test` package (Daml Scripts)
     daml.yaml                    ← data-dependency on core's DAR
     daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
+    daml/Test/TestGuardianObserver.daml ← read-only guardianObserver visibility/authority tests
   devnet/
     start_sandbox.sh             ← starts the Ledger API v2 sandbox
     bootstrap.sh                 ← allocates Operator + creates CoreState
@@ -758,16 +799,38 @@ by two mechanisms:
   choice from the vetted DAR and confirming the result; a transaction commits only
   if the confirmation policy over those participants is met.
 
-**Topology.** Each guardian runs a **participant node**, and the `operator` party
-is **multi-hosted on the guardian participants with observation-only permission**.
-That is sufficient and deliberately minimal: the operator is a signatory on every
-core contract, so its projection is the full app trace; each guardian's
-participant independently receives and validates every such transaction, and an
-invalid one never appears on that participant's Ledger API — so a watcher cannot
-sign it. Guardians are **not** given confirmation rights: the VAA quorum is
+**Topology.** Each guardian runs a **participant node**, and the read-only
+**`guardianObserver`** party (§4.1) is **hosted on every guardian participant at
+`Observation` permission** in the `PartyToParticipant` topology mapping. Being a
+template `observer` on `Emitter`/`CoreState`, it is an informee of every
+`PublishMessage` and `SubmitGovernanceVAA` exercise, so each guardian's
+participant independently receives and validates every attestation-bearing
+transaction, and an invalid one never appears on that participant's Ledger API —
+so a watcher cannot sign it. This is deliberately scoped to the **attestation
+surface only** (§4.1, §4.2): the observer is *not* a stakeholder of
+`EmitterRequest`s, `EmitterRegistry` allocations, or any holding/balance/transfer
+state of other packages — least privilege, in contrast to replica-hosting the
+`operator` (whose projection is its entire signatory footprint; kept as a
+fallback below). A single shared `guardianObserver` covers all guardians (one
+mapping listing every guardian participant), not one party per guardian.
+
+Guardians are **not** given confirmation rights, by two independent properties:
+(1) under Canton's confirmation policy the confirming parties of a node are its
+signatories/actors — a plain observer party is an informee, never a confirming
+party; and (2) even for a confirming party, a participant hosting it at
+`Observation` permission does not submit confirmations. So guardian participant
+downtime never blocks a Canton transaction; it only delays that guardian's own
+observation (fail-safe: it stops signing). This is the point — the VAA quorum is
 already the attestation layer, and Wormhole's job is to *refuse to attest*
 forgeries, not to halt Canton (giving guardians confirmation duty would duplicate
 the quorum and turn guardian downtime into a chain-halt).
+
+> **Fallback (interim, no template change):** where a participant cannot yet host
+> the dedicated party, replica-host the `operator` at `Observation` instead. It
+> works with zero Daml change but gives a coarser scope (the operator's full
+> projection, including `EmitterRequest`s) and couples guardian read access to the
+> operator party and its namespace key. Prefer the dedicated `guardianObserver`;
+> use operator replica-hosting only as a migration stopgap.
 
 **What a compromised operator can and cannot do.** It can degrade **liveness**
 (stop approving registrations, stop relaying, evict observers — all fail-safe:
@@ -791,11 +854,14 @@ its own state but cannot forge messages other chains accept. The guardians'
 faithfulness invariant thus reduces to **"the transaction is Daml-valid under the
 vetted package."**
 
-The exact observer-party mechanics — a dedicated guardian-observer party named as
-a template `observer` vs. replica-hosting the `operator`; external-party namespace
-key custody controlling the hosting topology — are the subject of the
-`feat/canton-public-observer` work and are tracked as an Open Question, not
-implemented here.
+The observer-party mechanism is now implemented: a dedicated read-only
+`guardianObserver` named as a template `observer` on `Emitter`/`CoreState`
+(§4.1, §4.2). The residual operational item is **namespace-key custody** — which
+key owns the `guardianObserver` party (operator-ops vs a guardian-ops key), since
+that key controls the hosting mapping and can therefore evict guardians from
+observation. Eviction is fail-safe (guardians stop seeing → stop signing, the same
+liveness posture as a compromised operator above), but the custody choice needs a
+human decision; see Open Questions.
 
 ---
 
@@ -816,12 +882,18 @@ implemented here.
    one") is still behavioral — confirm the genesis automation creates exactly one.
    (Emitter/manager **address** integrity is separately owner-bound and
    owner-co-signed, §4.2.)
-3. **Guardian observer topology.** Confirm the observer-party mechanics from
-   §10 (dedicated observer party as template `observer` vs. replica-hosted
-   `operator`; external-party namespace-key custody; how `--cantonReadAsParty`
-   maps to the chosen party). Reconcile with `feat/canton-public-observer`. Note
-   this observer party is distinct from the `guardianGovernance` signatory party
-   (item 2): the observer is read-only, the governance party has signatory power.
+3. **Guardian observer topology.** *Mechanism resolved:* the dedicated read-only
+   `guardianObserver` party is implemented as a template `observer` on
+   `Emitter`/`CoreState` (§4.1, §4.2, §10), and `--cantonReadAsParty` maps to it
+   for production guardians (§7.1). This observer party is distinct from the
+   `guardianGovernance` signatory party (item 2): the observer is read-only, the
+   governance party has signatory power. **Residual (needs a human decision):**
+   the production `PartyToParticipant` runbook (host at `Observation` permission;
+   host the party *before* genesis, or run Canton party replication / ACS import
+   so a late-joining participant receives prior contracts), and
+   **namespace-key custody** for the party (operator-ops vs guardian-ops key,
+   which controls the hosting mapping and thus observer eviction — fail-safe
+   either way).
 4. **Integrator VAA verification.** Implement the hint-free guardian set (persist
    pubkeys, §5) and confirm the guardian-set distribution mechanism for
    integrators (explicit disclosure vs public-observer snapshot).
