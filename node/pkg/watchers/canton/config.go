@@ -19,9 +19,9 @@ type WatcherConfig struct {
 	// while preserving module/entity names).
 	PackageID string
 	// ReadAsParty optionally narrows the update stream to a single Canton party.
-	// Leave empty (the default) to observe every party hosted on the participant
-	// — the right default for the core bridge, which should see PublishMessage
-	// from every emitter, and which avoids depending on the operator party id.
+	// Production guardians set this to the read-only guardianObserver party (an
+	// observer on the Emitter/CoreState attestation surface). Empty observes
+	// every party on the participant (the devnet default).
 	ReadAsParty string
 }
 

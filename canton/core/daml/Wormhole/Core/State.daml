@@ -90,6 +90,7 @@ template CoreState
   with
     operator           : Party              -- advances the singleton; no power over outcomes
     guardianGovernance : Party              -- guardians' governance anchor (threshold party)
+    guardianObserver   : Party              -- read-only guardian observer
     chainId            : Int                -- 72 (Canton)
     governanceChainId  : Int                -- 1 (Solana)
     governanceContract : Bytes32            -- governance emitter address
@@ -106,6 +107,8 @@ template CoreState
     -- guardianGovernance's authority from the archived contract, so it signs only
     -- at genesis.
     signatory operator, guardianGovernance
+    -- Lets guardians watch guardian-set / governance transitions.
+    observer guardianObserver
     key guardianGovernance : Party
     maintainer key
 
@@ -221,18 +224,20 @@ emitterAddressFor registrar owner emitterId =
 -- owner, whose signature it lacks (see 'Emitter').
 template EmitterRegistry
   with
-    operator : Party
-    nextId   : Int
+    operator         : Party
+    guardianObserver : Party  -- threaded into each new Emitter by ApproveEmitter
+    nextId           : Int
   where
     signatory operator
     key operator : Party
     maintainer key
 
-    choice AllocateEmitterId : (ContractId EmitterRegistry, Int)
+    -- Returns guardianObserver for ApproveEmitter to stamp onto the new Emitter.
+    choice AllocateEmitterId : (ContractId EmitterRegistry, Int, Party)
       controller operator
       do
         reg' <- create this with nextId = nextId + 1
-        pure (reg', nextId)
+        pure (reg', nextId, guardianObserver)
 
 -- | A request by @requester@ to be granted an emitter. The operator approves it,
 -- allocating a stable @emitterId@ from the 'EmitterRegistry' and creating the
@@ -250,10 +255,11 @@ template EmitterRequest
     choice ApproveEmitter : ContractId Emitter
       controller operator
       do
-        (_, emitterId) <- exerciseByKey @EmitterRegistry operator AllocateEmitterId
+        (_, emitterId, guardianObserver) <- exerciseByKey @EmitterRegistry operator AllocateEmitterId
         create Emitter with
           operator
           owner = requester
+          guardianObserver
           emitterId
           emitterAddress = emitterAddressFor operator requester emitterId
           sequence = 0
@@ -264,11 +270,12 @@ template EmitterRequest
 -- operator authority). Mirrors a Sui @EmitterCap@.
 template Emitter
   with
-    operator       : Party
-    owner          : Party
-    emitterId      : Int      -- registry-allocated; key._3
-    emitterAddress : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
-    sequence       : Int      -- next sequence to assign
+    operator         : Party
+    owner            : Party
+    guardianObserver : Party  -- read-only guardian observer
+    emitterId        : Int      -- registry-allocated; key._3
+    emitterAddress   : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
+    sequence         : Int      -- next sequence to assign
   where
     -- Owner co-signs: only a transaction carrying the owner's authority can create
     -- a contract whose derived address is the owner's. This is the invariant
@@ -276,6 +283,8 @@ template Emitter
     -- existing address (Canton's msg.sender analog). It also means the operator
     -- alone cannot archive an emitter (Archive needs all signatories).
     signatory operator, owner
+    -- Lets guardians watch PublishMessage exercises and their results.
+    observer guardianObserver
     -- Non-unique key: stable across the sequence-bump churn so the owner can
     -- publish again by key (ExerciseByKeyCommand) without tracking contract-ids.
     key (operator, owner, emitterId) : (Party, Party, Int)
