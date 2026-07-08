@@ -1,7 +1,15 @@
 version: v1
-# Vendored subset of the Canton 3.5.5 Ledger API v2 protos
-# (com.daml.ledger.api.v2) needed by the cantonclient gRPC client: the State and
-# Update services and their transitive imports. See README.md.
+# Vendored subset of the Canton 3.5.1 Ledger API v2 protos
+# (com.daml.ledger.api.v2), extracted from the canton-open-source-3.5.1 jar,
+# needed by the cantonclient gRPC client:
+#   - read paths: State and Update services + their transitive imports.
+#   - write path (emitter-approval crank): CommandService — command_service.proto
+#     and commands.proto plus their import closure. The only additional file the
+#     closure requires beyond the read-path set is reassignment_commands.proto
+#     (command_service.proto imports it; reassignment/transaction/transaction_filter/
+#     value are already present). google/protobuf/* are buf well-known types and
+#     google/rpc/status.proto is mapped in buf.gen.yaml, so none are vendored.
+#     See README.md "Write path".
 lint:
   use:
     - MINIMAL

@@ -27,6 +27,12 @@ type grpcClient struct {
 	update      apiv2.UpdateServiceClient
 	readAsParty string
 	logger      *zap.Logger
+	// dedupDuration is the explicit command-deduplication period stamped on every
+	// ApproveEmitter submission (see cantoncmd.go). Defaulted to
+	// defaultDeduplicationDuration by NewCantonGrpcClient; made a field (not a bare
+	// const) so an operator can tune it below the participant's configured max
+	// deduplication duration (task plan §10).
+	dedupDuration time.Duration
 }
 
 // NewCantonGrpcClient dials the Ledger API at rpc. readAsParty narrows the
@@ -45,11 +51,12 @@ func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, opt
 		return nil, fmt.Errorf("cantonclient: failed to dial %s: %w", rpc, err)
 	}
 	return &grpcClient{
-		conn:        conn,
-		state:       apiv2.NewStateServiceClient(conn),
-		update:      apiv2.NewUpdateServiceClient(conn),
-		readAsParty: readAsParty,
-		logger:      logger,
+		conn:          conn,
+		state:         apiv2.NewStateServiceClient(conn),
+		update:        apiv2.NewUpdateServiceClient(conn),
+		readAsParty:   readAsParty,
+		logger:        logger,
+		dedupDuration: defaultDeduplicationDuration,
 	}, nil
 }
 

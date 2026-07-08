@@ -13,6 +13,7 @@ package cantonclient
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -24,6 +25,42 @@ type TemplateID struct {
 	ModuleName string
 	EntityName string
 }
+
+// PendingEmitterRequest is one active EmitterRequest contract as seen in the ACS
+// — the unit of work the crank approves. It lives here (not in cantoncrank) to
+// keep the dependency direction one-way (cantoncrank -> cantonclient).
+//
+// TemplateID is echoed verbatim from the ACS CreatedEvent's template id. The
+// follow-up ApproveEmitter ExerciseCommand needs a template id, and reusing the
+// ledger-reported one keeps the crank package-id-agnostic and upgrade-safe (no
+// hard-coded package id that would break across a Daml package upgrade).
+type PendingEmitterRequest struct {
+	ContractID string     // Ledger API contract id — the dedup seed and exercise target
+	TemplateID TemplateID // echoed from the CreatedEvent; names the package for the exercise
+	Requester  string     // EmitterRequest.requester (signatory)
+	Operator   string     // EmitterRequest.operator (observer / sole ApproveEmitter controller)
+}
+
+// ErrDuplicateCommand is a terminal, benign submit outcome: Ledger API command
+// deduplication rejected a resubmission of the same change id within the
+// deduplication period (DUPLICATE_COMMAND). The approval already succeeded, so
+// there is nothing to retry. This is the efficiency layer — dedup rejects before
+// interpretation.
+var ErrDuplicateCommand = errors.New("emitter request approval already submitted (duplicate command)")
+
+// ErrContractInactive is a terminal, benign submit outcome: the request contract
+// is no longer active, so the exercise targeted an archived/absent contract
+// (CONTRACT_NOT_FOUND / CONTRACT_NOT_ACTIVE). The consuming ApproveEmitter choice
+// already archived it, so a second approve can never mint a duplicate Emitter.
+// This is the unconditional correctness backstop, independent of command
+// deduplication. See the crank package docs.
+var ErrContractInactive = errors.New("emitter request contract no longer active")
+
+// ErrSubmissionInFlight reports that another submission of the same change id is
+// in flight right now (ABORTED / SUBMISSION_ALREADY_IN_FLIGHT) — typically a
+// redundant crank instance racing this one. Benign: skip this tick and let the
+// next one reconcile, since the request is still an active contract.
+var ErrSubmissionInFlight = errors.New("emitter approval submission already in flight")
 
 // CantonMessage is the decoded Wormhole.Core.State.WormholeMessage record
 // produced by the PublishMessage choice. Field types match the Daml definition:
@@ -142,6 +179,14 @@ type CantonClient interface {
 	// Close releases the underlying gRPC connection.
 	Close() error
 }
+
+// The emitter-approval crank's read/write surface — ActiveEmitterRequests
+// (StateService.GetActiveContracts; cantonacs.go) and SubmitApproveEmitter
+// (CommandService.SubmitAndWaitForTransaction; cantoncmd.go) — is deliberately
+// NOT part of CantonClient. The crank depends only on the narrow
+// cantoncrank.Reader / cantoncrank.Submitter interfaces, which the concrete
+// *grpcClient satisfies; keeping these off CantonClient follows the
+// interface-segregation principle and keeps the watcher's test double small.
 
 // offsetTxIDLen is the fixed width of a Canton TxID (a 32-byte, left-padded,
 // big-endian participant offset). 32 bytes so it round-trips through the

@@ -1,0 +1,58 @@
+-- | Integration setup for the emitter-approval crank end-to-end test
+-- (node/pkg/cantoncrank/crank_integration_test.go).
+--
+-- Unlike Test.TestCore:registerEmitter, this script deliberately STOPS at the
+-- pending EmitterRequest: it seeds the ledger and creates the request but does
+-- NOT exercise ApproveEmitter. Firing that choice is the crank's job — the test
+-- then asserts the crank produces the Emitter. Parties are written out so the
+-- Go test can act as the operator over the Ledger API.
+module Test.TestCrank where
+
+import DA.Foldable (forA_)
+import Daml.Script
+import Wormhole.Core.State
+import Wormhole.Core.Setup
+import Test.TestCore (devnetGuardian)
+
+-- Party ids the Go integration test needs: the operator (the crank acts as it)
+-- and the requester (whose Emitter the crank must create).
+data CrankParties = CrankParties with
+    operator  : Party
+    requester : Party
+  deriving (Eq, Show)
+
+-- | Seed CoreState + EmitterRegistry, then create a single PENDING EmitterRequest
+-- for a fresh requester. Returns the parties for the Go harness; leaves the
+-- request unapproved.
+integrationSetup : Script CrankParties
+integrationSetup = do
+  operator <- allocateParty "Operator"
+  guardianGovernance <- allocateParty "GuardianGovernance"
+  guardianObserver <- allocateParty "GuardianObserver"
+  _ <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
+
+  requester <- allocateParty "Requester"
+  _ <- submit requester do createCmd EmitterRequest with requester, operator
+
+  pure CrankParties with operator, requester
+
+-- | Create @count@ additional PENDING EmitterRequests from the same requester to
+-- the same operator, mid-test. Used by the integration test to seed a backlog
+-- after the initial request has been approved, so the "restart idempotency with
+-- a backlog" phase can prove the crank drains N further requests exactly once.
+--
+-- Input is supplied by the Go harness via @--input-file@ (Daml-Script decodes the
+-- JSON into 'AddRequestInput'); the requester must be an existing party (the one
+-- returned by 'integrationSetup') since it signs each new EmitterRequest.
+data AddRequestInput = AddRequestInput with
+    operator  : Party
+    requester : Party
+    count     : Int
+  deriving (Eq, Show)
+
+addRequest : AddRequestInput -> Script ()
+addRequest AddRequestInput{operator, requester, count} =
+  forA_ [1 .. count] $ \_ ->
+    submit requester do createCmd EmitterRequest with requester, operator
