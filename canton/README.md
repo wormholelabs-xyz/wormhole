@@ -1192,41 +1192,156 @@ observation. Eviction is fail-safe (guardians stop seeing → stop signing, the 
 liveness posture as a compromised operator above), but the custody choice needs a
 human decision; see Open Questions.
 
-### Worked example: token-bridge send path
+### Worked example: the Wormhole Token Bridge
 
-`examples/token-bridge` is a runnable example of the lock-and-attest send path on
-the Canton Network Token Standard (CIP-0056). A `TokenBridge.LockAndPublish` choice
-atomically (1) transfers a user's holding into the bridge's custody via the token
-standard's `TransferFactory_Transfer` (`receiver = bridge`) and (2) publishes a
-Wormhole Transfer message from the bridge's `Emitter` — in a single transaction the
-user submits.
+`examples/token-bridge` is a runnable example of the classic **Wormhole Token
+Bridge** protocol (whitepaper 0003, payload ID 1 `Transfer`) on the Canton Network
+Token Standard (CIP-0056) — both the send ("lock-and-attest") and receive
+("verify-and-unlock") legs. It sits alongside NTT (§10) as a second, independent
+worked example: NTT and the classic Token Bridge are genuinely different transfer
+protocols with different wire formats and trust shapes, not two versions of the
+same thing, even though both are built on the same underlying primitives (the core
+`Emitter`/`PublishMessage`, CIP-56 transfer factories, domain-tagged derived
+addresses). This repo carries both because integrators depend on both across the
+existing Wormhole network.
 
-Key points it demonstrates:
+#### Send: `TokenBridge.LockAndPublish`
+
+A `TokenBridge.LockAndPublish` choice atomically (1) transfers a user's holding
+into the bridge's custody via the token standard's `TransferFactory_Transfer`
+(`receiver = bridge`) and (2) publishes a Wormhole `Transfer` message from the
+bridge's `Emitter` — in a single transaction the user submits.
 
 - **Custody = transfer to the bridge party**, not the allocation API (allocation is
   DvP and needs a counter-leg, which a one-sided lock does not have).
-- **Atomicity via authority composition**: the bridge-signed orchestrator supplies
-  the publish authority while the registry factory supplies the authority to move
-  the asset, so no core operator is involved — matching EVM's permissionless
+- **Atomicity via authority composition**: `LockAndPublish` is a nonconsuming
+  choice on the @bridge@-signed `TokenBridge` contract, controlled by `user`, so
+  its body carries `{bridge, user}` authority (Daml propagates a contract's
+  signatories' authority into every choice exercised on it, whether or not that
+  choice is consuming). The nested `TransferFactory_Transfer` authorizes off the
+  `sender = user` controller the interface itself checks; the nested
+  `PublishMessage` (controller `owner = bridge`) runs under the inherited `bridge`
+  authority. No core operator authority is involved, matching EVM's permissionless
   lock+publish.
-- **Explicit disclosure**: the user receives the bridge, factory, and emitter
-  contracts as disclosed contracts (it is not a stakeholder of them), the standard
-  pattern for an app handing its factory to a user.
+- **The bridge's `Emitter` is resolved by its stable key**, not a caller-supplied
+  cid. An earlier version of this choice took `emitterCid` as an argument, which
+  was both stale after one use (`PublishMessage` is consuming, so a disclosed cid
+  works exactly once) and unchecked (nothing stopped a caller supplying a
+  DIFFERENT emitter satisfying `controller owner` with their own authority,
+  attesting from a non-bridge identity). `fetchByKey` removes the cid-tracking
+  burden; it does not remove the disclosure-freshness one — whoever serves
+  disclosures must still fetch and disclose the CURRENT `Emitter` before each call.
+- **`tokenAddress` is derived, not caller-supplied.** `tokenAddressFor instrumentId`
+  — `keccak256("wormhole:token-bridge-token:v1" ‖ lp(admin) ‖ lp(id))`, mirroring
+  `Wormhole.Core.Bytes.derivedAddressFromText`'s style — binds the attestation to
+  the instrument actually locked. The earlier version took `tokenAddress` as a free
+  argument with no connection to `instrumentId`, so a user could lock instrument A
+  while attesting an unrelated address. Like `derivedAddressFromText`'s addresses,
+  this is a Canton-local commitment, not a reversible one: a counterpart chain
+  cannot recover `(admin, id)` from it.
+- **Amounts are normalized to 8 decimals, and locked == attested.** The wire
+  amount is `truncate(amount * 1e8)`; the DECIMAL amount actually taken into
+  custody is truncated to the same precision BEFORE the lock, not just at encoding
+  time. The earlier version's `encodeTransfer (truncate amount)` truncated only the
+  encoded integer (dropping ALL decimals, not just sub-8dp ones) while locking the
+  full, untruncated amount — silently stranding the difference in an
+  unaccounted-for custody holding. Locking the truncated amount instead means any
+  dust comes back to the sender as ordinary registry change (§ toy registry, below)
+  rather than disappearing into custody.
+- **Explicit disclosure, not authorization.** The user receives the bridge,
+  factory, and emitter contracts as disclosed contracts (they are not a
+  stakeholder of them) — the standard pattern for an app handing its factory to a
+  user. Disclosure is a data attachment servable by anyone with read access, not an
+  approval; `testLockAndPublishWithoutDisclosureFails` /
+  `testLockAndPublishRequiresUserAuthority` in `TestTokenBridge.daml` pin the two
+  failure modes (visibility vs. authorization) apart, mirroring the discipline
+  `Wormhole.Ntt.Manager.Transfer`'s own authority proof uses.
+
+#### Receive: `TokenBridge.CompleteTransfer`
+
+`CompleteTransfer` verifies an inbound VAA attesting a transfer TO Canton and
+unlocks the corresponding custody holding to `recipient`. It is **unlock-only** —
+a foreign token arriving on Canton (wrapped-asset mint) is out of scope for this
+example. It reuses the core `parseVAA`/`verifyVAA` primitives against the guardian
+set in a disclosed `CoreState`, enforces a registered peer
+(`RegisterPeer`, `chainId -> peer token-bridge emitter address` — a direct
+controller choice standing in for a real deployment's governance-VAA-gated
+`registerChain`), replay-protects on the VAA hash (`TokenBridge.consumed`, keyed
+`key bridge` so repeated completions resolve by key rather than a churning cid —
+added now rather than later, since Daml keys cannot be added by upgrade), decodes
+the payload, and checks `toChain`/`tokenAddress`/`fee` before unlocking.
+
+**Recipient binding.** `recipient` is a choice argument, but the caller cannot
+steer it arbitrarily: `tokenBridgeRecipientAddressFor recipient` must equal the
+VAA's own `to` field — `keccak256("wormhole:token-bridge-recipient:v1" ‖
+lp(partyToText recipient))`, a fresh domain tag distinct from NTT's own
+`recipientAddressTag` so the two can never collide. This mirrors
+`Wormhole.Ntt.Manager.recipientAddressFor` and its tradeoff exactly: the binding
+permanently ties a signed VAA to the recipient Party string as it existed when the
+sender computed the hash. If the recipient ever needs a DIFFERENT party (lost key,
+planned custodial migration), a VAA already signed against the old hash cannot be
+redirected; the sender must re-send.
+
+**Controller — a correction, not just a decision.** `CompleteTransfer` was
+initially written `controller relayer`, an arbitrary uninvolved party, attempting
+the same permissionless property EVM's `completeTransfer` has and NTT's own
+`Receive` did NOT attempt. This was **empirically disproven**, per the "verify
+empirically, don't just assert" discipline `Wormhole.Ntt.Manager.Transfer`'s
+authority proof models: `cs <- fetch coreStateCid` is a plain Daml `Fetch` action,
+and a `Fetch` action's required authorizers must include at least one of the
+fetched contract's own stakeholders — a hard Daml/Canton ledger-model rule, not a
+design choice. `CoreState`'s stakeholders are
+`operator`/`guardianGovernance`/`guardianObserver`; neither an arbitrary `relayer`
+nor `bridge` (this contract's only signatory) is ever one of those, so NO choice of
+controller other than one of those three can ever authorize this fetch. This is
+exactly why `Wormhole.Ntt.Manager.Receive` is `controller operator` too — not a
+stylistic preference for a "guardian-relayed" design, but the same structural
+consequence, discovered independently here and confirmed against a real
+`AuthorizationError` before the fix (see `CompleteTransfer`'s own comment and
+`testCompleteTransferRecipientMismatchFails`, which now reaches the business-logic
+recipient check as controller `operator` instead of failing on authorization).
+
+#### The toy registry (`ExampleRegistry`/`ExampleToken`)
 
 The example vendors the standard's interface DARs (pinned; see
 `examples/token-bridge/.lib/THIRD_PARTY.md`) and ships a minimal admin-custodied
-registry so it is self-issuing and runnable without Amulet. Build and test with
-`dpm build --all` then `cd examples/token-bridge && dpm test --all`.
+registry so it is self-issuing and runnable without Amulet. It now accepts
+multiple input holdings and returns change (`total - amount` back to the sender)
+rather than requiring a single holding whose amount matches the transfer exactly —
+still no fee handling, and still explicitly **not production-grade**. For a REAL
+`TransferFactory` integration, see NTT's `ntt-cip56` package: its
+`Cip56CustodyToken` drives the exact same interface against Amulet or any
+conforming token. `TokenBridge.LockAndPublish`/`CompleteTransfer` already ARE
+`TransferFactory` clients in the same sense `Cip56CustodyToken` is one — the toy
+registry here only fills in the OTHER side (the factory implementation) so the
+example needs no external token deployment.
 
-An end-to-end integration test
-([`node/pkg/watchers/canton/token_bridge_integration_test.go`](../node/pkg/watchers/canton/token_bridge_integration_test.go),
-`//go:build integration`) runs the flow against a live sandbox and observes the
-published transfer message through the real watcher — additionally confirming the
-SDK-3.3.x token-standard DARs vet on the Canton 3.5.x participant and that
-explicit disclosure works over the Ledger API:
+#### What this example deliberately does not show
+
+Wrapped-asset mint/burn for a foreign token arriving on Canton (only unlock of a
+Canton-native token is implemented); registry-based fee handling (fee is asserted
+`== 0`); governance-VAA-gated peer registration (`RegisterPeer` is a direct
+`controller bridge` choice instead); and the NTT wire protocol generally — see §10
+for that.
+
+Build and test with `dpm build --all` then `cd examples/token-bridge && dpm test
+--all`. Two end-to-end integration tests
+(`//go:build integration`) run against a live sandbox:
 
 ```
+# Send path: observes the published Transfer message through the real watcher —
+# additionally confirming the SDK-3.3.x token-standard DARs vet on the Canton
+# 3.5.x participant and that explicit disclosure works over the Ledger API.
 go test -tags integration -run TestCantonTokenBridgeIntegration ./pkg/watchers/canton -v
+
+# Receive path: closes the same "known test gap" class NTT's own
+# ntt_recipient_match_integration_test.go closes — a live Party's fingerprint
+# (and here, also a live InstrumentId's admin party) can never be baked into an
+# already-signed VAA fixture ahead of time, so the MATCHING-recipient/tokenAddress
+# path can only be proven by a live two-step sign-then-relay harness: allocate on
+# a live sandbox, read the ACTUAL on-ledger hashes, sign a fresh VAA against them
+# in Go, then relay and assert the unlock lands (plus replay rejection).
+go test -tags integration -run TestCantonTokenBridgeCompleteIntegration ./pkg/watchers/canton -v
 ```
 
 ---

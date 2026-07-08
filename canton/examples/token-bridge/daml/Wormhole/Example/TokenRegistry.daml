@@ -2,31 +2,41 @@
 -- Standard (CIP-0056) interfaces needed by the token-bridge example:
 --
 --   * 'ExampleToken'    implements @Holding@ (a fungible holding).
---   * 'ExampleRegistry' implements @TransferFactory@ — an atomic, permissionless
---     transfer that settles in one step (returns @TransferInstructionResult_Completed@).
+--   * 'ExampleRegistry' implements @TransferFactory@ — an atomic,
+--     permissionless transfer that settles in one step (returns
+--     @TransferInstructionResult_Completed@), now accepting multiple input
+--     holdings and returning change.
 --
--- This stands in for a real registry (e.g. Amulet) so the example is self-issuing
--- and runnable without the full Canton Network. It is NOT production-grade: the
--- transfer assumes a single input holding whose amount equals the transfer amount
--- (no change/splitting) and performs no fee handling.
+-- This stands in for a real registry (e.g. Amulet) so the example is
+-- self-issuing and runnable without the full Canton Network. It is NOT
+-- production-grade: no fee handling, and change/splitting is the only
+-- multi-holding behavior modeled. For a REAL registry integration, see
+-- @ntt-cip56@'s @Cip56CustodyToken@ in the sibling NTT package — it drives
+-- the exact same @TransferFactory@ interface against Amulet or any
+-- conforming token; this file only fills in for that in a self-contained
+-- example.
 --
 -- The atomic transfer creates a receiver-owned holding that needs only the
--- @admin@'s authority (carried by the admin-signed factory) — NOT the receiver's,
--- because 'ExampleToken' is @signatory admin@ with the owner as a mere observer.
--- That admin-custodied model is exactly what lets the transfer settle in one step
--- (a co-signed owner+admin holding would instead require a two-step accept).
+-- @admin@'s authority (carried by the admin-signed factory) — NOT the
+-- receiver's, because 'ExampleToken' is @signatory admin@ with the owner as a
+-- mere observer. That admin-custodied model is exactly what lets the transfer
+-- settle in one step (a co-signed owner+admin holding would instead require a
+-- two-step accept).
 module Wormhole.Example.TokenRegistry where
+
+import DA.Foldable (forA_)
 
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1
 
--- | A fungible holding. Signed solely by the instrument @admin@ (the registry),
--- with @owner@ as an observer. This admin-custodied model — rather than a
--- co-signed owner+admin holding — is what lets a transfer settle atomically in a
--- single step: creating the receiver's holding needs only @admin@ authority,
--- which the registry factory already carries. (A co-signed model would instead
--- require a two-step transfer the receiver accepts.)
+-- | A fungible holding. Signed solely by the instrument @admin@ (the
+-- registry), with @owner@ as an observer. This admin-custodied model — rather
+-- than a co-signed owner+admin holding — is what lets a transfer settle
+-- atomically in a single step: creating the receiver's holding needs only
+-- @admin@ authority, which the registry factory already carries. (A
+-- co-signed model would instead require a two-step transfer the receiver
+-- accepts.)
 template ExampleToken
   with
     admin        : Party
@@ -53,8 +63,8 @@ template ExampleRegistry
   where
     signatory admin
 
-    -- | Mint a holding to @owner@. The admin is the sole signatory, so this needs
-    -- only the admin's authority.
+    -- | Mint a holding to @owner@. The admin is the sole signatory, so this
+    -- needs only the admin's authority.
     nonconsuming choice Mint : ContractId ExampleToken
       with
         owner        : Party
@@ -66,30 +76,47 @@ template ExampleRegistry
     interface instance TransferFactory for ExampleRegistry where
       view = TransferFactoryView with admin, meta = emptyMetadata
 
+      -- | Accepts one or more input holdings, requires their total to cover
+      -- the transfer amount, and returns any excess to the sender as change —
+      -- unlike the original single-exact-input version, a sender no longer
+      -- needs to hold a holding whose amount matches the transfer exactly.
       transferFactory_transferImpl _self arg = do
         let t = arg.transfer
         assertMsg "ExampleRegistry: unexpected admin" (arg.expectedAdmin == admin)
         assertMsg "ExampleRegistry: instrument not administered here"
           (t.instrumentId.admin == admin)
-        case t.inputHoldingCids of
-          [hcid] -> do
-            let tokCid = fromInterfaceContractId @ExampleToken hcid
-            tok <- fetch tokCid
-            assertMsg "ExampleRegistry: input not owned by sender" (tok.owner == t.sender)
-            assertMsg "ExampleRegistry: amount must match input (no change)"
-              (tok.amount == t.amount)
-            archive tokCid
-            newCid <- create ExampleToken with
-              admin
-              owner = t.receiver
-              instrumentId = t.instrumentId
-              amount = t.amount
-            pure TransferInstructionResult with
-              output = TransferInstructionResult_Completed with
-                receiverHoldingCids = [toInterfaceContractId newCid]
-              senderChangeCids = []
-              meta = emptyMetadata
-          _ -> abort "ExampleRegistry: expects exactly one input holding"
+        assertMsg "ExampleRegistry: amount must be positive" (t.amount > 0.0)
+        assertMsg "ExampleRegistry: at least one input holding required"
+          (not (null t.inputHoldingCids))
+        toks <- mapA (fetch . fromInterfaceContractId @ExampleToken) t.inputHoldingCids
+        assertMsg "ExampleRegistry: input not owned by sender"
+          (all (\tok -> tok.owner == t.sender) toks)
+        assertMsg "ExampleRegistry: inputs must match the transfer's instrument"
+          (all (\tok -> tok.instrumentId == t.instrumentId) toks)
+        let total = sum (map (.amount) toks)
+        assertMsg "ExampleRegistry: input amount insufficient" (total >= t.amount)
+        forA_ t.inputHoldingCids (archive . fromInterfaceContractId @ExampleToken)
+        receiverCid <- create ExampleToken with
+          admin
+          owner = t.receiver
+          instrumentId = t.instrumentId
+          amount = t.amount
+        let change = total - t.amount
+        changeCids <-
+          if change > 0.0
+            then do
+              changeCid <- create ExampleToken with
+                admin
+                owner = t.sender
+                instrumentId = t.instrumentId
+                amount = change
+              pure [toInterfaceContractId @Holding changeCid]
+            else pure []
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with
+            receiverHoldingCids = [toInterfaceContractId receiverCid]
+          senderChangeCids = changeCids
+          meta = emptyMetadata
 
       transferFactory_publicFetchImpl _self arg = do
         assertMsg "ExampleRegistry: unexpected admin" (arg.expectedAdmin == admin)

@@ -1,32 +1,46 @@
--- | Daml Script test and integration entrypoint for the token-bridge
--- lock-and-attest send path: a user locks a CN-token-standard holding into the
--- bridge's custody and the bridge atomically publishes a Wormhole Transfer
--- message, in a single user-submitted transaction.
+-- | Daml Script tests and integration entrypoints for the Wormhole Token
+-- Bridge worked example: the "lock-and-attest" send path and the
+-- "verify-and-unlock" receive path.
 module Wormhole.Example.Test.TestTokenBridge where
 
-import Daml.Script
 import DA.Assert ((===))
+import DA.Map qualified as Map
+import DA.Set qualified as Set
+import Daml.Script
 
-import Wormhole.Core.Bytes (Bytes20, Bytes32)
-import Wormhole.Core.State (EmitterRequest(..), ApproveEmitter(..), Emitter, WormholeMessage)
-import Wormhole.Core.Setup (mkInitialCoreState, mkInitialEmitterRegistry, solanaGovernanceChainId, defaultGovernanceContract)
+import Splice.Api.Token.HoldingV1 (Holding, InstrumentId(..))
 
-import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes (Bytes, Bytes20, Bytes32)
+import Wormhole.Core.Setup
+  ( cantonChainId
+  , defaultGovernanceContract
+  , mkInitialCoreState
+  , mkInitialEmitterRegistry
+  , solanaGovernanceChainId
+  )
+import Wormhole.Core.State
+  ( ApproveEmitter(..)
+  , CoreState
+  , Emitter
+  , EmitterRequest(..)
+  , WormholeMessage
+  )
+import Wormhole.Core.VAA (parseVAA)
 
-import Wormhole.Example.TokenRegistry
 import Wormhole.Example.TokenBridge
+import Wormhole.Example.TokenRegistry
 
--- 32-byte addresses used inside the transfer payload (the token's address and the
--- target-chain recipient). These are unrelated to the emitter address, which is
--- derived from the Emitter's key components (registrar/owner/emitterId).
+----------------------------------------------------------------------
+-- Fixed test data
+----------------------------------------------------------------------
+
+-- 32-byte addresses used inside outbound transfer payloads (opaque foreign-
+-- chain bytes; unrelated to any derived address on Canton).
 usdTokenAddr : Bytes32
 usdTokenAddr = "000000000000000000000000000000000000000000000000000000000000dead"
 
 recipientAddr : Bytes32
 recipientAddr = "000000000000000000000000000000000000000000000000000000000000aaaa"
-
-cantonChainId : Int
-cantonChainId = 72
 
 targetChainId : Int
 targetChainId = 2
@@ -34,85 +48,174 @@ targetChainId = 2
 transferAmount : Decimal
 transferAmount = 1000.0
 
--- A placeholder guardian for the CoreState's initial set. This send-path example
--- never verifies a VAA, so the guardian set is irrelevant.
+-- A placeholder guardian for the CoreState's initial set. Also the address of
+-- the well-known devnet guardian key used to sign the CompleteTransfer VAA
+-- fixtures below (see node/pkg/cantonclient/vectorgen_test.go).
 exampleGuardian : Bytes20
 exampleGuardian = "befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
 
--- | The full flow: register a bridge emitter, mint a holding to the user, then
--- lock 1000 units into the bridge's custody and publish the transfer message.
--- Returns @(operator, bridge, user, emitterCid, publishedMessage)@. The 32-byte
--- emitter address is derived by the watcher from the message's
--- registrar/owner/emitterId (see 'Wormhole.Core.State.emitterAddressFor'); it is
--- not chosen here.
-lockAndAttest : Script (Party, Party, Party, ContractId Emitter, WormholeMessage)
-lockAndAttest = do
+fixtureGuardianPubKey : Bytes
+fixtureGuardianPubKey = "04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e967023e34e495a8ebf5101036d0fd66e3b0a8c7c61b65fceeaf487ab3cd1b5b7b50beb7970"
+
+-- The foreign chain + peer token-bridge address the CompleteTransfer fixtures
+-- below are signed as coming from.
+peerChainId : Int
+peerChainId = 2
+
+peerEmitterAddress : Bytes32
+peerEmitterAddress = "000000000000000000000000000000000000000000000000000000000000beef"
+
+-- Static VAA fixtures, generated offline by a throwaway Go program mirroring
+-- node/pkg/cantonclient/vectorgen_test.go:TestGenerateCantonVector, signed by
+-- the well-known devnet guardian key. Both encode a Transfer whose
+-- tokenAddress/recipient are DELIBERATELY arbitrary, fixed values that can
+-- never match a live Canton Party's derived hash -- the same static-fixture
+-- limitation Wormhole.Ntt.Manager's Receive tests hit (a live Party's
+-- fingerprint is nondeterministic and can't be baked into an already-signed
+-- fixture). See CompleteTransfer's own comment: closing the true positive
+-- path (a matching recipient AND tokenAddress) needs a live two-step
+-- sign-then-relay harness, not a Daml Script fixture.
+fixtureVaaToChain72 : Bytes
+fixtureVaaToChain72 = "01000000000100422c30413ca2972ee7423a73ebcff4a29a21ce5485ad7cb8773bd3854823c04d6768c8a5e4bff86e9963368be3635ee6be971c82529c69a1be89cdadd91d450c006553f100000000000002000000000000000000000000000000000000000000000000000000000000beef00000000000000010101000000000000000000000000000000000000000000000000000000012a05f200000000000000000000000000000000000000000000000000000000000000abcd0048000000000000000000000000000000000000000000000000000000000001234f00480000000000000000000000000000000000000000000000000000000000000000"
+
+-- Same as above but with toChain = 999 (not Canton).
+fixtureVaaWrongToChain : Bytes
+fixtureVaaWrongToChain = "01000000000100d7f817dc6e9c1b80879150d9a029f168fc1d6160c4d52e55ecccaadd6a7e5c92335a012dc0775537a264ffd716408e4f179f1e832517424497021c2e0fcc04e2006553f100000000000002000000000000000000000000000000000000000000000000000000000000beef00000000000000020101000000000000000000000000000000000000000000000000000000012a05f200000000000000000000000000000000000000000000000000000000000000abcd0048000000000000000000000000000000000000000000000000000000000001234f03e70000000000000000000000000000000000000000000000000000000000000000"
+
+----------------------------------------------------------------------
+-- Shared setup
+----------------------------------------------------------------------
+
+data BaseSetup = BaseSetup with
+    operator           : Party
+    guardianGovernance : Party
+    guardianObserver   : Party
+    bridge             : Party
+    admin              : Party
+    coreStateCid       : ContractId CoreState
+    emitterCid         : ContractId Emitter
+    emitterId          : Int
+    tbId               : ContractId TokenBridge
+
+-- | Allocates parties, installs a minimal CoreState + EmitterRegistry
+-- (guardian set 0 = the well-known devnet guardian, so CompleteTransfer's
+-- fixtures verify against a real signature), registers the bridge's Emitter,
+-- and deploys the TokenBridge orchestrator.
+baseSetup : Script BaseSetup
+baseSetup = do
   operator           <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
   guardianObserver   <- allocateParty "GuardianObserver"
   bridge             <- allocateParty "Bridge"
   admin              <- allocateParty "Registry"
-  user               <- allocateParty "User"
 
-  -- A minimal CoreState + EmitterRegistry: ApproveEmitter allocates the emitter
-  -- id from the registry and threads @guardianObserver@ onto the new 'Emitter'.
-  _ <- submit (actAs operator <> actAs guardianGovernance) do
+  coreStateCid <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [exampleGuardian] guardianObserver)
   _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
 
-  -- The bridge registers its Emitter (owned by the bridge party).
   reqId <- submit bridge do
     createCmd EmitterRequest with requester = bridge, operator
   emitterCid <- submit operator do
     exerciseCmd reqId ApproveEmitter
+  Some emitter <- queryContractId bridge emitterCid
 
-  -- The registry mints a holding to the user.
-  regId <- submit admin do createCmd ExampleRegistry with admin
+  tbId <- submit bridge do
+    createCmd TokenBridge with
+      bridge
+      guardianObserver
+      operator
+      emitterId = emitter.emitterId
+      peers = Map.empty
+      consumed = Set.empty
+
+  pure BaseSetup with emitterId = emitter.emitterId, ..
+
+----------------------------------------------------------------------
+-- Send path: LockAndPublish
+----------------------------------------------------------------------
+
+-- | The full send flow: mint a holding to @user@, then lock it into the
+-- bridge's custody and publish the transfer message. Returns the setup, the
+-- user, the published message, and the custody holding.
+lockAndAttest : Script (BaseSetup, Party, WormholeMessage, ContractId Holding)
+lockAndAttest = do
+  bs@BaseSetup{..} <- baseSetup
+  user <- allocateParty "User"
   let instrumentId = InstrumentId with admin, id = "USD"
+  regId <- submit admin do createCmd ExampleRegistry with admin
   tokId <- submit admin do
     exerciseCmd regId Mint with owner = user, instrumentId, amount = transferAmount
 
-  -- The bridge deploys its orchestrator.
-  tbId <- submit bridge do createCmd TokenBridge with bridge, guardianObserver
-
-  -- The user locks custody and the bridge attests, atomically. The bridge-signed
-  -- orchestrator, the registry factory, and the emitter are not stakeholders'
-  -- contracts for the user, so they are shared via explicit disclosure — exactly
-  -- how the token standard expects an app to hand its factory to a user.
+  -- The bridge-signed orchestrator, the registry factory, and the bridge's
+  -- Emitter are not stakeholders' contracts for the user, so they are shared
+  -- via explicit disclosure -- exactly how the token standard expects an app
+  -- to hand its factory to a user.
   Some dReg     <- queryDisclosure admin regId
   Some dTb      <- queryDisclosure bridge tbId
   Some dEmitter <- queryDisclosure bridge emitterCid
-  (_custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter]) do
+  (custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter]) do
     exerciseCmd tbId LockAndPublish with
       user
       factoryCid = toInterfaceContractId regId
-      holdingCid = toInterfaceContractId tokId
-      emitterCid
+      holdingCids = [toInterfaceContractId tokId]
       instrumentId
       amount = transferAmount
-      tokenAddress = usdTokenAddr
-      tokenChain = cantonChainId
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 42
-  pure (operator, bridge, user, emitterCid, msg)
+  pure (bs, user, msg, custodyCid)
+
+-- | Byte-exact vector for 'encodeTransfer' (133 bytes, payload ID 1).
+testEncodeTransferVector : Script ()
+testEncodeTransferVector = do
+  encodeTransfer 10000000000 usdTokenAddr cantonChainId recipientAddr targetChainId 0
+    === "0100000000000000000000000000000000000000000000000000000002540be400000000000000000000000000000000000000000000000000000000000000dead0048000000000000000000000000000000000000000000000000000000000000aaaa00020000000000000000000000000000000000000000000000000000000000000000"
+
+-- | Fixed-text vector for 'tokenAddressFor', pinning the domain-tagged
+-- preimage: a live Party's fingerprint is nondeterministic, so the encoding
+-- can only be pinned against fixed text (mirrors
+-- 'Wormhole.Ntt.Manager.recipientAddressFromText's testRecipientAddressForVector).
+testTokenAddressForVector : Script ()
+testTokenAddressForVector = do
+  tokenAddressForText "vector-admin::1220deadbeef" "USD"
+    === "a15a49569d35f67a24e69900e45970d2c0de464eae03daec4b0db7d4e0676ff8"
+  assert (tokenAddressForText "vector-admin::1220deadbeef" "USD"
+            /= tokenAddressForText "vector-admin::1220cafebabe" "USD")
+
+-- | Fixed-text vector for 'tokenBridgeRecipientAddressFor'.
+testTokenBridgeRecipientAddressForVector : Script ()
+testTokenBridgeRecipientAddressForVector = do
+  tokenBridgeRecipientAddressFromText "vector-recipient::1220deadbeef"
+    === "8ef13a618f8108a5bac88866c5064c596ac5feb70cc7ccb0bac09919b386ce9f"
+  assert (tokenBridgeRecipientAddressFromText "vector-recipient::1220deadbeef"
+            /= tokenBridgeRecipientAddressFromText "vector-recipient::1220cafebabe")
+
+-- | 'decodeTransfer' inverts 'encodeTransfer'.
+testDecodeTransferRoundTrip : Script ()
+testDecodeTransferRoundTrip = do
+  let payload = encodeTransfer 123456000000 usdTokenAddr cantonChainId recipientAddr targetChainId 0
+      decoded = decodeTransfer payload
+  decoded.amount === 123456000000
+  decoded.tokenAddress === usdTokenAddr
+  decoded.tokenChain === cantonChainId
+  decoded.to === recipientAddr
+  decoded.toChain === targetChainId
+  decoded.fee === 0
 
 -- | In-memory unit test: asserts the published message and that custody moved
 -- from the user to the bridge.
 testLockAndPublish : Script ()
 testLockAndPublish = do
-  (operator, bridge, user, _emitterCid, msg) <- lockAndAttest
+  (BaseSetup{..}, user, msg, _custodyCid) <- lockAndAttest
+  let instrumentId = InstrumentId with admin, id = "USD"
 
-  -- Attestation: a transfer message was published from the bridge's emitter,
-  -- carrying its key components directly (no separate identity contract).
   msg.registrar === operator
   msg.owner === bridge
   msg.emitterId === 0
   msg.sequence === 0
   msg.nonce === 42
-  msg.payload === encodeTransfer 1000 usdTokenAddr cantonChainId recipientAddr targetChainId
+  msg.payload === encodeTransfer 100000000000 (tokenAddressFor instrumentId) cantonChainId recipientAddr targetChainId 0
 
-  -- Custody: the bridge now holds 1000; the user holds nothing.
   bridgeHoldings <- query @ExampleToken bridge
   case bridgeHoldings of
     [(_, h)] -> do
@@ -121,12 +224,401 @@ testLockAndPublish = do
     _ -> abort "expected exactly one bridge-owned custody holding"
   userHoldings <- query @ExampleToken user
   length userHoldings === 0
-  pure ()
 
--- | Integration entrypoint, invoked by the Go integration test via `dpm script`
--- against a live sandbox: runs the full lock-and-attest flow and returns the
--- bridge party. The watcher observes the published message off the real ledger.
+-- | Locking a sub-8dp-precision amount: the amount actually taken into
+-- custody is truncated to 8dp BEFORE locking (not just at encoding time), so
+-- locked == attested, and the truncated dust comes back to the user as
+-- ordinary registry change -- it is never stranded on either side. (The
+-- original example's 'encodeTransfer (truncate amount)' only truncated the
+-- ENCODED value: it would have locked 100.123456789 in full while attesting
+-- 100, silently keeping the dust in an untracked custody holding.)
+testLockAndPublishFractionalAmount : Script ()
+testLockAndPublishFractionalAmount = do
+  BaseSetup{..} <- baseSetup
+  user <- allocateParty "FracUser"
+  let instrumentId = InstrumentId with admin, id = "USD"
+      fullAmount = 100.123456789
+      lockedAmount = 100.12345678
+      dust = 0.000000009
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  tokId <- submit admin do
+    exerciseCmd regId Mint with owner = user, instrumentId, amount = fullAmount
+  Some dReg     <- queryDisclosure admin regId
+  Some dTb      <- queryDisclosure bridge tbId
+  Some dEmitter <- queryDisclosure bridge emitterCid
+  (_custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter]) do
+    exerciseCmd tbId LockAndPublish with
+      user
+      factoryCid = toInterfaceContractId regId
+      holdingCids = [toInterfaceContractId tokId]
+      instrumentId
+      amount = fullAmount
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 1
+
+  let decoded = decodeTransfer msg.payload
+  intToDecimal decoded.amount / 100000000.0 === lockedAmount
+
+  bridgeHoldings <- query @ExampleToken bridge
+  case bridgeHoldings of
+    [(_, h)] -> h.amount === lockedAmount
+    _ -> abort "expected exactly one bridge-owned custody holding"
+  userHoldings <- query @ExampleToken user
+  case userHoldings of
+    [(_, h)] -> h.amount === dust
+    _ -> abort "expected the truncated dust to come back to the user as change"
+
+-- | Two distinct failure reasons for the SAME choice, per the discipline
+-- Wormhole.Ntt.Manager's authority proofs use: (i) supplying @user@ without
+-- their actual authority fails on AUTHORIZATION, no matter what is disclosed;
+-- (ii) supplying one's own authority as @user@ but locking a holding one
+-- doesn't own fails on the registry's BUSINESS-LOGIC ownership check. Neither
+-- of these was previously exercised -- the original suite only had the happy
+-- path.
+testLockAndPublishRequiresUserAuthority : Script ()
+testLockAndPublishRequiresUserAuthority = do
+  BaseSetup{..} <- baseSetup
+  bob     <- allocateParty "Bob"
+  mallory <- allocateParty "Mallory"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  tokId <- submit admin do
+    exerciseCmd regId Mint with owner = bob, instrumentId, amount = transferAmount
+  Some dReg     <- queryDisclosure admin regId
+  Some dTb      <- queryDisclosure bridge tbId
+  Some dEmitter <- queryDisclosure bridge emitterCid
+  Some dTok     <- queryDisclosure admin tokId
+
+  r1 <- trySubmit (actAs bridge <> discloseMany [dReg, dTb, dEmitter, dTok]) do
+    exerciseCmd tbId LockAndPublish with
+      user = bob
+      factoryCid = toInterfaceContractId regId
+      holdingCids = [toInterfaceContractId tokId]
+      instrumentId
+      amount = transferAmount
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 1
+  case r1 of
+    Left (AuthorizationError _) -> pure ()
+    Left other -> abort ("expected an AuthorizationError specifically, got: " <> show other)
+    Right _ -> abort "expected LockAndPublish to fail without bob's authority"
+
+  r2 <- trySubmit (actAs mallory <> discloseMany [dReg, dTb, dEmitter, dTok]) do
+    exerciseCmd tbId LockAndPublish with
+      user = mallory
+      factoryCid = toInterfaceContractId regId
+      holdingCids = [toInterfaceContractId tokId]
+      instrumentId
+      amount = transferAmount
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 1
+  case r2 of
+    Left (FailureStatusError _) -> pure ()
+    Left other -> abort ("expected a FailureStatusError (registry ownership check), got: " <> show other)
+    Right _ -> abort "expected LockAndPublish to fail locking a holding mallory doesn't own"
+
+-- | @user@ has full CONTROLLER authority, but with no disclosures at all
+-- 'TokenBridge'/the factory/the Emitter are not their stakeholder contracts:
+-- this fails on VISIBILITY, not authorization -- backing the module header's
+-- claim that disclosure is a data need, not an approval.
+testLockAndPublishWithoutDisclosureFails : Script ()
+testLockAndPublishWithoutDisclosureFails = do
+  BaseSetup{..} <- baseSetup
+  bob <- allocateParty "Bob2"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  tokId <- submit admin do
+    exerciseCmd regId Mint with owner = bob, instrumentId, amount = transferAmount
+  submitMustFail (actAs bob) do
+    exerciseCmd tbId LockAndPublish with
+      user = bob
+      factoryCid = toInterfaceContractId regId
+      holdingCids = [toInterfaceContractId tokId]
+      instrumentId
+      amount = transferAmount
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 1
+
+-- | Two consecutive locks succeed because the bridge's Emitter is now
+-- resolved BY KEY inside the choice, not from a caller-supplied cid -- the
+-- original example took @emitterCid@ as an argument, so 'PublishMessage'
+-- being consuming meant a second call against the same disclosure failed
+-- outright (the emitter cid had already been archived by the first publish).
+testLockAndPublishTwice : Script ()
+testLockAndPublishTwice = do
+  BaseSetup{..} <- baseSetup
+  user <- allocateParty "TwiceUser"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  tok1 <- submit admin do exerciseCmd regId Mint with owner = user, instrumentId, amount = 10.0
+  tok2 <- submit admin do exerciseCmd regId Mint with owner = user, instrumentId, amount = 10.0
+  Some dReg  <- queryDisclosure admin regId
+  Some dTb   <- queryDisclosure bridge tbId
+  Some dEmt1 <- queryDisclosure bridge emitterCid
+  (_, msg1) <- submit (actAs user <> discloseMany [dReg, dTb, dEmt1]) do
+    exerciseCmd tbId LockAndPublish with
+      user
+      factoryCid = toInterfaceContractId regId
+      holdingCids = [toInterfaceContractId tok1]
+      instrumentId
+      amount = 10.0
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 1
+
+  -- The bridge's Emitter is now a DIFFERENT contract (sequence bumped by the
+  -- first publish) -- whoever serves disclosures must fetch and disclose the
+  -- CURRENT one; this is the "disclosure freshness" burden the module header
+  -- calls out, distinct from (and not fixed by) the by-key resolution above.
+  Some (emitterCid2, _emitter2) <- queryByKey @Emitter bridge (operator, bridge, emitterId)
+  Some dEmt2 <- queryDisclosure bridge emitterCid2
+  (_, msg2) <- submit (actAs user <> discloseMany [dReg, dTb, dEmt2]) do
+    exerciseCmd tbId LockAndPublish with
+      user
+      factoryCid = toInterfaceContractId regId
+      holdingCids = [toInterfaceContractId tok2]
+      instrumentId
+      amount = 10.0
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 2
+
+  msg1.sequence === 0
+  msg2.sequence === 1
+
+----------------------------------------------------------------------
+-- Receive path: CompleteTransfer
+----------------------------------------------------------------------
+
+-- | VAA emitter is not the configured peer -- the registered peer address
+-- deliberately does not match the fixture's actual emitter, so the check
+-- fires before the fixture's payload is even decoded.
+testCompleteTransferWrongPeerFails : Script ()
+testCompleteTransferWrongPeerFails = do
+  BaseSetup{..} <- baseSetup
+  recipient <- allocateParty "Recipient1"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  tbId2 <- submit bridge do
+    exerciseCmd tbId RegisterPeer with
+      chainId = peerChainId
+      peerAddress = "00000000000000000000000000000000000000000000000000000000000000ff"
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  Some dReg <- queryDisclosure admin regId
+  Some dTb  <- queryDisclosure bridge tbId2
+  submitMustFail (actAs operator <> discloseMany [dReg, dTb]) do
+    exerciseCmd tbId2 CompleteTransfer with
+      coreStateCid
+      vaaBytes = fixtureVaaToChain72
+      pubKeys = [(0, fixtureGuardianPubKey)]
+      recipient
+      instrumentId
+      factoryCid = toInterfaceContractId regId
+      custodyHoldingCids = []
+
+-- | Replay protection: the fixture's VAA hash is already in @consumed@
+-- (constructed directly, since reaching this state via a real prior
+-- completion is blocked by the same live-Party-fingerprint limitation
+-- documented on the fixtures above).
+testCompleteTransferReplayFails : Script ()
+testCompleteTransferReplayFails = do
+  BaseSetup{..} <- baseSetup
+  recipient <- allocateParty "Recipient2"
+  let instrumentId = InstrumentId with admin, id = "USD"
+      vaa = parseVAA fixtureVaaToChain72
+  tbReplay <- submit bridge do
+    createCmd TokenBridge with
+      bridge
+      guardianObserver
+      operator
+      emitterId
+      peers = Map.fromList [(peerChainId, peerEmitterAddress)]
+      consumed = Set.fromList [vaa.hash]
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  Some dReg <- queryDisclosure admin regId
+  Some dTb  <- queryDisclosure bridge tbReplay
+  submitMustFail (actAs operator <> discloseMany [dReg, dTb]) do
+    exerciseCmd tbReplay CompleteTransfer with
+      coreStateCid
+      vaaBytes = fixtureVaaToChain72
+      pubKeys = [(0, fixtureGuardianPubKey)]
+      recipient
+      instrumentId
+      factoryCid = toInterfaceContractId regId
+      custodyHoldingCids = []
+
+-- | @toChain@ in the payload is not Canton (999, not 72).
+testCompleteTransferWrongToChainFails : Script ()
+testCompleteTransferWrongToChainFails = do
+  BaseSetup{..} <- baseSetup
+  recipient <- allocateParty "Recipient3"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  tbId2 <- submit bridge do
+    exerciseCmd tbId RegisterPeer with chainId = peerChainId, peerAddress = peerEmitterAddress
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  Some dReg <- queryDisclosure admin regId
+  Some dTb  <- queryDisclosure bridge tbId2
+  submitMustFail (actAs operator <> discloseMany [dReg, dTb]) do
+    exerciseCmd tbId2 CompleteTransfer with
+      coreStateCid
+      vaaBytes = fixtureVaaWrongToChain
+      pubKeys = [(0, fixtureGuardianPubKey)]
+      recipient
+      instrumentId
+      factoryCid = toInterfaceContractId regId
+      custodyHoldingCids = []
+
+-- | The fixture's attested recipient can never match a live-allocated Party's
+-- derived hash (see the fixtures' own doc comment) -- proving the check
+-- actually gates 'CompleteTransfer' against a real, validly-signed VAA. Uses
+-- 'trySubmit' rather than 'submitMustFail' to also serve as this choice's
+-- empirical authorization proof (see 'CompleteTransfer's own comment): with
+-- every prior check satisfied (peer, replay, toChain), operator + disclosures
+-- reach all the way to the business-logic recipient check -- a
+-- FailureStatusError from 'assertMsg', NOT an AuthorizationError or a
+-- visibility error (ContractNotFound/ContractKeyNotFound). If this ever
+-- changes, something upstream of the recipient check has regressed.
+testCompleteTransferRecipientMismatchFails : Script ()
+testCompleteTransferRecipientMismatchFails = do
+  BaseSetup{..} <- baseSetup
+  recipient <- allocateParty "Recipient4"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  tbId2 <- submit bridge do
+    exerciseCmd tbId RegisterPeer with chainId = peerChainId, peerAddress = peerEmitterAddress
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  Some dReg <- queryDisclosure admin regId
+  Some dTb  <- queryDisclosure bridge tbId2
+  result <- trySubmit (actAs operator <> discloseMany [dReg, dTb]) do
+    exerciseCmd tbId2 CompleteTransfer with
+      coreStateCid
+      vaaBytes = fixtureVaaToChain72
+      pubKeys = [(0, fixtureGuardianPubKey)]
+      recipient
+      instrumentId
+      factoryCid = toInterfaceContractId regId
+      custodyHoldingCids = []
+  case result of
+    Left (FailureStatusError _) -> pure ()
+    Left other -> abort ("expected a FailureStatusError (recipient-check assertion), got: " <> show other)
+    Right _ -> abort "expected CompleteTransfer to fail on the fixture's recipient mismatch"
+
+----------------------------------------------------------------------
+-- Integration entrypoints, invoked by Go via `dpm script` against a live
+-- sandbox (see node/pkg/watchers/canton/token_bridge_integration_test.go).
+----------------------------------------------------------------------
+
 integrationLockAndPublish : Script Party
 integrationLockAndPublish = do
-  (_operator, bridge, _user, _emitterCid, _msg) <- lockAndAttest
+  (BaseSetup{bridge}, _user, _msg, _custodyCid) <- lockAndAttest
   pure bridge
+
+----------------------------------------------------------------------
+-- Live two-step integration harness for CompleteTransfer's positive path.
+--
+-- Mirrors Wormhole.Ntt.Manager's ntt_recipient_match_integration_test.go
+-- pattern, closing the same "known test gap" class: CompleteTransfer's
+-- recipient AND tokenAddress bindings both depend on live-allocated Party
+-- text that can't be baked into an ahead-of-time-signed VAA fixture (see the
+-- static fixtures' own doc comment above). Closed with a live two-step
+-- harness instead:
+--   1. integrationCompleteTransferSetup allocates everything CompleteTransfer
+--      needs -- including a bridge-owned custody holding standing in for a
+--      prior LockAndPublish (that leg is already covered live by
+--      integrationLockAndPublish) -- and returns the ACTUAL on-ledger
+--      tokenAddressFor/tokenBridgeRecipientAddressFor hashes, computed from
+--      the real allocated admin/recipient parties, not guessed.
+--   2. Go signs a FRESH Transfer VAA against those hashes, using the same
+--      well-known devnet guardian key vectorgen_test.go signs every other
+--      fixture with.
+--   3. integrationCompleteTransfer relays it against the SAME sandbox,
+--      asserting the unlock lands on the matching recipient and that
+--      replaying the same VAA is rejected.
+----------------------------------------------------------------------
+
+data CompleteTransferSetup = CompleteTransferSetup with
+    coreStateCid     : ContractId CoreState
+    tbId             : ContractId TokenBridge
+    regId            : ContractId ExampleRegistry
+    custodyHoldingId : ContractId ExampleToken
+    operator         : Party
+    bridge           : Party
+    admin            : Party
+    recipient        : Party
+    tokenAddress     : Bytes32
+    recipientAddress : Bytes32
+  deriving (Eq, Show)
+
+integrationCompleteTransferSetup : Script CompleteTransferSetup
+integrationCompleteTransferSetup = do
+  BaseSetup{..} <- baseSetup
+  recipient <- allocateParty "MatchRecipient"
+  let instrumentId = InstrumentId with admin, id = "USD"
+  tbId2 <- submit bridge do
+    exerciseCmd tbId RegisterPeer with chainId = peerChainId, peerAddress = peerEmitterAddress
+  regId <- submit admin do createCmd ExampleRegistry with admin
+  custodyHoldingId <- submit admin do
+    exerciseCmd regId Mint with owner = bridge, instrumentId, amount = 50.0
+  pure CompleteTransferSetup with
+    coreStateCid
+    tbId = tbId2
+    regId
+    custodyHoldingId
+    operator
+    bridge
+    admin
+    recipient
+    tokenAddress = tokenAddressFor instrumentId
+    recipientAddress = tokenBridgeRecipientAddressFor recipient
+
+data CompleteTransferInput = CompleteTransferInput with
+    coreStateCid     : ContractId CoreState
+    tbId             : ContractId TokenBridge
+    regId            : ContractId ExampleRegistry
+    custodyHoldingId : ContractId ExampleToken
+    operator         : Party
+    bridge           : Party
+    admin            : Party
+    recipient        : Party
+    vaaBytes         : Bytes
+  deriving (Eq, Show)
+
+-- | Step 2: relay the freshly signed VAA. Succeeds -- proving the recipient
+-- AND tokenAddress bindings really do match when the sender computed them
+-- correctly off the ACTUAL allocated parties -- and unlocks to @recipient@. A
+-- second relay of the same VAA is rejected (replay).
+integrationCompleteTransfer : CompleteTransferInput -> Script ()
+integrationCompleteTransfer input = do
+  let instrumentId = InstrumentId with admin = input.admin, id = "USD"
+  Some dReg <- queryDisclosure input.admin input.regId
+  Some dTb  <- queryDisclosure input.bridge input.tbId
+  Some dTok <- queryDisclosure input.bridge input.custodyHoldingId
+  _recipientCid <- submit (actAs input.operator <> discloseMany [dReg, dTb, dTok]) do
+    exerciseCmd input.tbId CompleteTransfer with
+      coreStateCid = input.coreStateCid
+      vaaBytes = input.vaaBytes
+      pubKeys = [(0, fixtureGuardianPubKey)]
+      recipient = input.recipient
+      instrumentId
+      factoryCid = toInterfaceContractId input.regId
+      custodyHoldingCids = [toInterfaceContractId input.custodyHoldingId]
+
+  holdings <- query @ExampleToken input.recipient
+  case holdings of
+    [(_, h)] -> h.owner === input.recipient
+    _ -> abort "expected exactly one holding unlocked to the matching recipient"
+
+  [(tb2, _)] <- query @TokenBridge input.bridge
+  Some dReg2 <- queryDisclosure input.admin input.regId
+  Some dTb2  <- queryDisclosure input.bridge tb2
+  submitMustFail (actAs input.operator <> discloseMany [dReg2, dTb2]) do
+    exerciseCmd tb2 CompleteTransfer with
+      coreStateCid = input.coreStateCid
+      vaaBytes = input.vaaBytes
+      pubKeys = [(0, fixtureGuardianPubKey)]
+      recipient = input.recipient
+      instrumentId
+      factoryCid = toInterfaceContractId input.regId
+      custodyHoldingCids = [toInterfaceContractId input.custodyHoldingId]

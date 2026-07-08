@@ -98,3 +98,31 @@ func TestGenerateAddressVectors(t *testing.T) {
 	buf = append(buf, idb[:]...)
 	t.Logf("emitter(%s, %s, %d) = %x", registrar, owner, id, crypto.Keccak256(buf))
 }
+
+// TestGenerateTokenBridgeVectors prints the token-bridge address vectors
+// shared with canton/examples/token-bridge/daml/Wormhole/Example/Test/TestTokenBridge.daml
+// (testTokenAddressForVector, testTokenBridgeRecipientAddressForVector). The
+// preimages are:
+//
+//	tokenAddressFor:          utf8(tag) ‖ lp(utf8(adminText)) ‖ lp(utf8(idText))
+//	tokenBridgeRecipientAddressFor: utf8(tag) ‖ lp(utf8(recipientText))
+func TestGenerateTokenBridgeVectors(t *testing.T) {
+	if os.Getenv("GEN_CANTON_VECTORS") == "" {
+		t.Skip("set GEN_CANTON_VECTORS=1 to regenerate the Daml test vector")
+	}
+	lp := func(s string) []byte {
+		var l [4]byte
+		binary.BigEndian.PutUint32(l[:], uint32(len(s))) //nolint:gosec // fixture strings are short
+		return append(l[:], s...)
+	}
+
+	const adminText = "vector-admin::1220deadbeef"
+	const idText = "USD"
+	tokenBuf := append([]byte("wormhole:token-bridge-token:v1"), lp(adminText)...)
+	tokenBuf = append(tokenBuf, lp(idText)...)
+	t.Logf("tokenAddressFor(%s, %s) = %x", adminText, idText, crypto.Keccak256(tokenBuf))
+
+	const recipientText = "vector-recipient::1220deadbeef"
+	recipientBuf := append([]byte("wormhole:token-bridge-recipient:v1"), lp(recipientText)...)
+	t.Logf("tokenBridgeRecipientAddressFor(%s) = %x", recipientText, crypto.Keccak256(recipientBuf))
+}

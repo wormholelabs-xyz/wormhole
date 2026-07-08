@@ -1,88 +1,241 @@
--- | The Wormhole token-bridge "lock-and-attest" send path on Canton.
+-- | The Wormhole Token Bridge on Canton: the "lock-and-attest" send path and
+-- the "verify-and-unlock" receive path (whitepaper 0003 @Transfer@, payload
+-- ID 1). A worked example alongside NTT (@Wormhole.Ntt.Manager@ in the
+-- sibling @ntt@ package) — a different wire protocol and trust shape for the
+-- same underlying primitives (core 'Emitter'/'PublishMessage', CIP-56
+-- factories, domain-tagged derived addresses). Unlock-only: a foreign token
+-- arriving on Canton (wrapped-asset mint) is out of scope for this example.
 --
--- A user locks a Canton Network Token Standard holding into the bridge's custody
--- and the bridge atomically publishes a Wormhole Transfer message attesting it
--- now holds the funds — in a single transaction the user submits.
---
--- Atomicity / authority: 'LockAndPublish' is a choice on a @bridge@-signed
--- contract, controlled by the @user@, so its body holds @{bridge, user}@
--- authority. Two legs run in that one transaction:
---   * the nested @TransferFactory_Transfer@ runs with @{admin, user}@ (the
---     factory's @admin@ signatory plus its @sender@ = @user@ controller). Admin
---     authority alone creates the admin-signed custody holding — the receiver
---     (bridge) is only an observer, so its authority is not needed for this leg.
+-- Send: 'LockAndPublish' is a nonconsuming choice on a @bridge@-signed
+-- contract, controlled by @user@, so its body holds @{bridge, user}@
+-- authority (Daml propagates a contract's signatories' authority into every
+-- choice exercised on it, consuming or not). Two legs run in one transaction:
+--   * the nested @TransferFactory_Transfer@ authorizes off the @sender = user@
+--     controller the interface itself checks — @bridge@'s authority is not
+--     needed for this leg, since the receiver (bridge) is only an observer of
+--     the resulting custody holding.
 --   * @PublishMessage@ (controller @owner = bridge@) runs under the @bridge@
---     authority the orchestrator carries, recreating the 'Emitter' via its own
---     operator signatory.
+--     authority this choice's body carries because 'TokenBridge' is signed by
+--     @bridge@ — NOT because @user@ is trusted with it.
 -- No core operator authority is involved, matching EVM's permissionless
--- lock+publish.
+-- lock+publish. VISIBILITY, not authorization, is the one real requirement on
+-- @user@: they are not a natural stakeholder of 'TokenBridge', the registry
+-- factory, or the bridge's 'Emitter', so a submission needs those disclosed
+-- (Daml Explicit Contract Disclosure — a data attachment, not a signature).
+--
+-- Receive: 'CompleteTransfer' verifies an inbound VAA and unlocks the
+-- corresponding custody holding. It is CONSUMING (it updates the replay set),
+-- controller @operator@ — a permissioned, guardian-relayed choice, matching
+-- 'Wormhole.Ntt.Manager.Receive' exactly. This was NOT the original design: a
+-- permissionless @controller relayer@ (mirroring EVM's @completeTransfer@)
+-- was attempted first and empirically disproven — see 'CompleteTransfer's own
+-- comment for why fetching the disclosed 'CoreState' structurally requires a
+-- guardian-side party's authority no matter who else co-signs.
 module Wormhole.Example.TokenBridge where
 
+import DA.Crypto.Text (keccak256, toHex)
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Optional (fromSomeNote)
+import DA.Set (Set)
+import DA.Set qualified as Set
 import DA.Time (addRelTime, hours)
 
 import Wormhole.Core.Bytes
-import Wormhole.Core.State
+import Wormhole.Core.Setup (cantonChainId)
+import Wormhole.Core.State (CoreState(..), Emitter, PublishMessage(..), WormholeMessage)
+import Wormhole.Core.VAA (parseVAA, verifyVAA)
 
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1
 
--- | Wormhole TokenBridge "Transfer" payload, payloadID 1 (whitepaper 0003):
+----------------------------------------------------------------------
+-- Wire codec: Wormhole Token Bridge "Transfer", payload ID 1 (whitepaper 0003)
+--
 -- payloadID(1) ++ amount(32) ++ tokenAddress(32) ++ tokenChain(2) ++ to(32) ++
--- toChain(2) ++ fee(32). Amounts here are encoded as the integer @amount@ in the
--- instrument's base units; production normalizes decimals to 8 dp.
-encodeTransfer : Int -> Bytes32 -> Int -> Bytes32 -> Int -> Bytes
-encodeTransfer amount tokenAddress tokenChain recipient toChain =
-  intToHexByte 1
-    <> uintBE 32 amount
-    <> normalizeHex tokenAddress
-    <> uintBE 2 tokenChain
-    <> normalizeHex recipient
-    <> uintBE 2 toChain
-    <> uintBE 32 0          -- fee (0 in this example)
+-- toChain(2) ++ fee(32) = 133 bytes. Amounts are 8dp-normalized integers (see
+-- 'truncateTo8dp'), matching EVM's cross-chain amount normalization.
+----------------------------------------------------------------------
 
--- | Big-endian, fixed-width (@width@ bytes) unsigned encoding of @n@ as hex.
-uintBE : Int -> Int -> Bytes
-uintBE width n
-  | width <= 0 = ""
-  | otherwise  = uintBE (width - 1) (n / 256) <> intToHexByte (n % 256)
+data TransferPayload = TransferPayload with
+    amount       : Int
+    tokenAddress : Bytes32
+    tokenChain   : Int
+    to           : Bytes32
+    toChain      : Int
+    fee          : Int
+  deriving (Eq, Show)
+
+encodeTransfer : Int -> Bytes32 -> Int -> Bytes32 -> Int -> Int -> Bytes
+encodeTransfer amount tokenAddress tokenChain to toChain fee =
+  intToHexByte 1
+    <> intToBytesN amount 32
+    <> normalizeHex tokenAddress
+    <> intToBytesN tokenChain 2
+    <> normalizeHex to
+    <> intToBytesN toChain 2
+    <> intToBytesN fee 32
+
+-- | Inverse of 'encodeTransfer'. Fails loudly on an unsupported payload id —
+-- 'CompleteTransfer' should reject a malformed/foreign payload, not silently
+-- misparse it.
+decodeTransfer : Bytes -> TransferPayload
+decodeTransfer payload
+  | payloadId /= 1 = error ("token-bridge: unsupported payload id: " <> show payloadId)
+  | otherwise = TransferPayload with
+      amount = bytesToInt (sliceBytes 1 32 payload)
+      tokenAddress = normalizeHex (sliceBytes 33 32 payload)
+      tokenChain = bytesToInt (sliceBytes 65 2 payload)
+      to = normalizeHex (sliceBytes 67 32 payload)
+      toChain = bytesToInt (sliceBytes 99 2 payload)
+      fee = bytesToInt (sliceBytes 101 32 payload)
+  where
+    payloadId = bytesToInt (sliceBytes 0 1 payload)
+
+----------------------------------------------------------------------
+-- Amount normalization
+----------------------------------------------------------------------
+
+decimalScale8dp : Decimal
+decimalScale8dp = 100000000.0
+
+-- | Truncate a Decimal amount to at most 8 decimal places. Returns the actual
+-- Decimal amount to lock — with sub-8dp dust dropped BEFORE locking — paired
+-- with its 8dp integer wire encoding, so the amount taken into custody and
+-- the amount attested can never diverge. (The original example's
+-- @encodeTransfer (truncate amount)@ only truncated the ENCODED value: lock
+-- 100.75, attest 100, silently keeping the 0.75 dust in a custody holding
+-- nothing ever attested to.)
+truncateTo8dp : Decimal -> (Decimal, Int)
+truncateTo8dp amount =
+  let scaled = truncate (amount * decimalScale8dp)
+  in (intToDecimal scaled / decimalScale8dp, scaled)
+
+----------------------------------------------------------------------
+-- Derived addresses (domain-tagged keccak256, mirroring Wormhole.Core.Bytes /
+-- Wormhole.Ntt.Manager's style: a small preimage helper split out in Text
+-- form so vector tests can pin the encoding against fixed strings — a live
+-- Party's fingerprint is nondeterministic and can't be baked into a static,
+-- pre-signed VAA fixture).
+----------------------------------------------------------------------
+
+tokenAddressTag : Text
+tokenAddressTag = "wormhole:token-bridge-token:v1"
+
+tokenAddressForText : Text -> Text -> Bytes32
+tokenAddressForText adminText idText =
+  normalizeHex (keccak256 (toHex tokenAddressTag
+    <> unLenPrefixed (lenPrefixed (toHex adminText))
+    <> unLenPrefixed (lenPrefixed (toHex idText))))
+
+-- | The 32-byte token address attested for @instrumentId@. Binds the
+-- attestation to the instrument ACTUALLY locked — 'LockAndPublish' used to
+-- take a free-standing @tokenAddress@ argument with no connection to
+-- @instrumentId@, so a user could lock instrument A while attesting an
+-- unrelated address. This is a Canton-local commitment, not a reversible
+-- address: a counterpart chain cannot recover @(admin, id)@ from it;
+-- attestation-of-metadata (payload 2) is out of scope here.
+tokenAddressFor : InstrumentId -> Bytes32
+tokenAddressFor instrumentId = tokenAddressForText (partyToText instrumentId.admin) instrumentId.id
+
+-- | Distinct from every other domain tag in this codebase (including NTT's
+-- own 'Wormhole.Ntt.Manager.recipientAddressTag') so a token-bridge recipient
+-- binding can never collide with an NTT one or a registry address.
+tokenBridgeRecipientAddressTag : Text
+tokenBridgeRecipientAddressTag = "wormhole:token-bridge-recipient:v1"
+
+tokenBridgeRecipientAddressFromText : Text -> Bytes32
+tokenBridgeRecipientAddressFromText recipientText =
+  normalizeHex (keccak256 (toHex tokenBridgeRecipientAddressTag
+    <> unLenPrefixed (lenPrefixed (toHex recipientText))))
+
+-- | The 32-byte binding a sender must compute off-chain and put in an
+-- outbound transfer's @to@ field to address @recipient@ on Canton. Mirrors
+-- 'Wormhole.Ntt.Manager.recipientAddressFor' and its tradeoff: this
+-- permanently binds a signed VAA to the recipient Party string as it existed
+-- when the sender computed the hash — if the recipient ever needs a
+-- DIFFERENT party (lost key, planned custodial migration), a VAA already
+-- signed against the old hash cannot be redirected; the sender must re-send.
+tokenBridgeRecipientAddressFor : Party -> Bytes32
+tokenBridgeRecipientAddressFor recipient = tokenBridgeRecipientAddressFromText (partyToText recipient)
+
+----------------------------------------------------------------------
+-- TokenBridge
+----------------------------------------------------------------------
 
 template TokenBridge
   with
-    bridge           : Party  -- custodian; also the owner of the registered Emitter
-    guardianObserver : Party  -- read-only guardian observer (matches the core templates)
+    bridge           : Party        -- custodian; also the owner of the registered Emitter
+    guardianObserver : Party        -- read-only guardian observer (matches the core templates)
+    operator         : Party        -- the bridge's Emitter key._1
+    emitterId        : Int          -- the bridge's Emitter key._3
+    peers            : Map Int Bytes32  -- chainId -> peer token-bridge emitter address
+    consumed         : Set Bytes32      -- inbound VAA hashes already executed
   where
     signatory bridge
+    -- Inert for LockAndPublish today: it is nonconsuming, and informees of a
+    -- nonconsuming exercise do not include a contract's template-level
+    -- observers (only its controllers and any explicit choice observers) —
+    -- guardians already see the message surface via the nested Emitter's OWN
+    -- observer field. Kept here deliberately for CompleteTransfer below, a
+    -- CONSUMING choice, where it becomes load-bearing: guardians become
+    -- informees of every unlock, matching the attestation-surface pattern on
+    -- Emitter/CoreState (README §4.1/§4.2).
     observer guardianObserver
+    key bridge : Party
+    maintainer key
 
-    -- | Lock the user's holding into bridge custody and publish a transfer
-    -- attestation, atomically. Returns the new custody holding and the published
-    -- 'WormholeMessage'.
+    -- | Register (or replace) the peer token-bridge deployment on @chainId@,
+    -- whose attested transfers this bridge accepts inbound. Controller
+    -- @bridge@: a real deployment would gate this behind a governance VAA
+    -- (mirroring core @SubmitGovernanceVAA@ / EVM's @registerChain@) — a
+    -- direct controller choice is a stated simplification for this example.
+    choice RegisterPeer : ContractId TokenBridge
+      with
+        chainId     : Int
+        peerAddress : Bytes32
+      controller bridge
+      do create this with peers = Map.insert chainId (normalizeHex peerAddress) peers
+
+    -- | Lock the user's holding(s) into bridge custody and publish a transfer
+    -- attestation, atomically. Returns the new custody holding and the
+    -- published 'WormholeMessage'. See the module header for the authority
+    -- breakdown.
+    --
+    -- The bridge's 'Emitter' is resolved by its stable key, not a
+    -- caller-supplied cid — the original example took @emitterCid@ as a
+    -- choice argument, which was both stale after one use (@PublishMessage@
+    -- is consuming, so a disclosed cid works exactly once) and unchecked (a
+    -- caller could pass ANY emitter satisfying @controller owner@ with their
+    -- OWN authority, attesting from a non-bridge emitter). Because
+    -- 'PublishMessage' is still consuming, whoever serves disclosures must
+    -- disclose the CURRENT 'Emitter' before each call — this choice's own
+    -- key resolution removes the cid-tracking burden, not the
+    -- disclosure-freshness one.
     nonconsuming choice LockAndPublish : (ContractId Holding, WormholeMessage)
       with
-        user         : Party                       -- the token owner / sender
-        factoryCid   : ContractId TransferFactory  -- the registry's transfer factory
-        holdingCid   : ContractId Holding          -- the user's input holding
-        emitterCid   : ContractId Emitter          -- the bridge's current Emitter
+        user         : Party
+        factoryCid   : ContractId TransferFactory
+        holdingCids  : [ContractId Holding]
         instrumentId : InstrumentId
         amount       : Decimal
-        tokenAddress : Bytes32                      -- 32-byte token id on this chain
-        tokenChain   : Int                          -- Wormhole chain id of the token
-        recipient    : Bytes32                      -- 32-byte recipient on the target chain
-        toChain      : Int                          -- target Wormhole chain id
+        recipient    : Bytes32
+        toChain      : Int
         nonce        : Int
       controller user
       do
         now <- getTime
-        -- 1. LOCK: transfer the holding into the bridge's custody.
+        let (lockedAmount, scaledAmount) = truncateTo8dp amount
+        assertMsg "TokenBridge: amount truncates to zero at 8 decimals" (scaledAmount > 0)
         let transfer = Transfer with
               sender = user
               receiver = bridge
-              amount
+              amount = lockedAmount
               instrumentId
               requestedAt = now
               executeBefore = addRelTime now (hours 1)
-              inputHoldingCids = [holdingCid]
+              inputHoldingCids = holdingCids
               meta = emptyMetadata
         result <- exercise factoryCid TransferFactory_Transfer with
           expectedAdmin = instrumentId.admin
@@ -93,10 +246,94 @@ template TokenBridge
             [c] -> pure c
             _ -> abort "TokenBridge: expected exactly one custody holding"
           _ -> abort "TokenBridge: registry did not settle the transfer atomically"
-        -- 2. ATTEST: publish the Wormhole transfer message from the bridge emitter.
-        let payload = encodeTransfer (truncate amount) tokenAddress tokenChain recipient toChain
+        let payload = encodeTransfer scaledAmount (tokenAddressFor instrumentId) cantonChainId recipient toChain 0
+        (emitterCid, _emitter) <- fetchByKey @Emitter (operator, bridge, emitterId)
         msg <- exercise emitterCid PublishMessage with
           nonce
           payload
           consistencyLevel = 1
         pure (custodyCid, msg)
+
+    -- | Verify an inbound VAA attesting a transfer TO Canton and unlock the
+    -- corresponding custody holding to @recipient@. Unlock-only (see module
+    -- header). Consuming — it archives and recreates 'TokenBridge' with the
+    -- VAA's hash added to @consumed@ — so it is resolved BY KEY
+    -- (@exerciseByKeyCmd@), not a caller-supplied cid: the same staleness
+    -- class 'LockAndPublish' used to have on 'Emitter' would otherwise recur
+    -- here on every single completion (this is why O6 keys 'TokenBridge' now
+    -- rather than later — Daml contract keys cannot be added by upgrade).
+    --
+    -- Authorization: controller @operator@ — NOT the permissionless
+    -- @controller relayer@ this choice was first written with. That design
+    -- was EMPIRICALLY DISPROVEN (per the "verify empirically, don't just
+    -- assert" discipline 'Wormhole.Ntt.Manager.Transfer' models): fetching
+    -- the disclosed 'CoreState' below (@cs <- fetch coreStateCid@) is a plain
+    -- Daml @Fetch@ action, and a @Fetch@ action's required authorizers are
+    -- (at least one of) the FETCHED CONTRACT's own stakeholders — this is a
+    -- hard Daml/Canton ledger-model rule, not a design choice. 'CoreState's
+    -- stakeholders are @operator@/@guardianGovernance@/@guardianObserver@;
+    -- neither an arbitrary @relayer@ nor @bridge@ (this contract's only
+    -- signatory) is ever one of them, so no choice of controller other than
+    -- one of those three can ever authorize this fetch. This is exactly why
+    -- 'Wormhole.Ntt.Manager.Receive' is controller @operator@ too — not a
+    -- stylistic preference for a "guardian-relayed" design, but the same
+    -- structural consequence. Confirmed with @testCompleteTransferReachesRecipientCheck@
+    -- in @TestTokenBridge.daml@, which failed with an authorization error
+    -- under @controller relayer@ before this fix, and now reaches the
+    -- business-logic recipient check as controller @operator@ instead.
+    --
+    -- @recipient@ is a choice argument, but the caller cannot steer it
+    -- arbitrarily: 'tokenBridgeRecipientAddressFor' of it must equal the
+    -- VAA's own @to@ field, a value fixed by the sender and covered by the
+    -- guardian signature (mirrors NTT's @recipientAddressFor@ binding and its
+    -- tradeoff, restated on that function).
+    choice CompleteTransfer : ContractId Holding
+      with
+        coreStateCid       : ContractId CoreState
+        vaaBytes           : Bytes
+        pubKeys            : [(Int, Bytes)]
+        recipient          : Party
+        instrumentId       : InstrumentId
+        factoryCid         : ContractId TransferFactory
+        custodyHoldingCids : [ContractId Holding]
+      controller operator
+      do
+        now <- getTime
+        let vaa = parseVAA vaaBytes
+        cs <- fetch coreStateCid
+        let gs = fromSomeNote "token-bridge: unknown guardian set index"
+                   (Map.lookup vaa.guardianSetIndex cs.guardianSets)
+        either assertFail pure (verifyVAA gs vaa pubKeys now)
+        let peerAddress = fromSomeNote ("token-bridge: no peer for chain " <> show vaa.emitterChain)
+                            (Map.lookup vaa.emitterChain peers)
+        assertMsg "token-bridge: VAA emitter is not the configured peer"
+          (normalizeHex vaa.emitterAddress == peerAddress)
+        assertMsg "token-bridge: message already consumed" (not (Set.member vaa.hash consumed))
+        let transfer = decodeTransfer vaa.payload
+        assertMsg "token-bridge: wrong target chain" (transfer.toChain == cantonChainId)
+        assertMsg "token-bridge: recipient does not match VAA's attested recipient"
+          (tokenBridgeRecipientAddressFor recipient == transfer.to)
+        assertMsg "token-bridge: tokenAddress/tokenChain do not match instrument"
+          (transfer.tokenAddress == tokenAddressFor instrumentId && transfer.tokenChain == cantonChainId)
+        assertMsg "token-bridge: nonzero fee is not supported" (transfer.fee == 0)
+        let unlockAmount = intToDecimal transfer.amount / decimalScale8dp
+            xfer = Transfer with
+              sender = bridge
+              receiver = recipient
+              amount = unlockAmount
+              instrumentId
+              requestedAt = now
+              executeBefore = addRelTime now (hours 1)
+              inputHoldingCids = custodyHoldingCids
+              meta = emptyMetadata
+        result <- exercise factoryCid TransferFactory_Transfer with
+          expectedAdmin = instrumentId.admin
+          transfer = xfer
+          extraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+        recipientCid <- case result.output of
+          TransferInstructionResult_Completed cids -> case cids of
+            [c] -> pure c
+            _ -> abort "token-bridge: expected exactly one recipient holding"
+          _ -> abort "token-bridge: registry did not settle the unlock atomically"
+        create this with consumed = Set.insert vaa.hash consumed
+        pure recipientCid

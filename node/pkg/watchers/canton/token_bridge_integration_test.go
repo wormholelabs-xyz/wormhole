@@ -136,10 +136,13 @@ func TestCantonTokenBridgeIntegration(t *testing.T) {
 
 		// Payload: Wormhole TokenBridge Transfer, payloadID 1 (133 bytes):
 		// id(1) ++ amount(32) ++ token(32) ++ tokenChain(2) ++ to(32) ++ toChain(2) ++ fee(32).
+		// The amount is 8dp-normalized (1000.0 -> 1000*1e8): the original example
+		// encoded the bare truncated Decimal (1000), which understated the real
+		// Token Bridge wire format's cross-chain amount normalization.
 		p := ev.Message.Payload
 		require.Len(t, p, 133)
 		assert.Equal(t, byte(0x01), p[0], "payloadID")
-		assert.Equal(t, uint64(1000), binary.BigEndian.Uint64(p[25:33]), "amount")
+		assert.Equal(t, uint64(1000_00000000), binary.BigEndian.Uint64(p[25:33]), "amount (8dp)")
 		assert.Equal(t, uint16(72), binary.BigEndian.Uint16(p[65:67]), "tokenChain")
 		assert.Equal(t, byte(0xaa), p[97], "recipient")
 		assert.Equal(t, byte(0xaa), p[98], "recipient")
