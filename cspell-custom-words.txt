@@ -253,6 +253,7 @@ unpauser
 unrepresentable
 Unrepresentable
 untampered
+untruncated
 upserted
 usize
 utest
