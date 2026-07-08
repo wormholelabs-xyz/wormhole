@@ -389,9 +389,10 @@ governance protocol.
 -- on CoreState; pure verification, does not mutate state
 nonconsuming choice ParseAndVerifyVAA : VerifiedVAA
   with
+    verifier   : Party            -- any party; the sole controller
     encodedVAA : Bytes
     pubKeys    : [(Int, Bytes)]   -- guardianIndex -> 65-byte uncompressed pubkey
-  controller operator
+  controller verifier
   do
     vaa <- parseVAA encodedVAA
     verifyVAA self vaa pubKeys     -- §5
@@ -401,6 +402,26 @@ nonconsuming choice ParseAndVerifyVAA : VerifiedVAA
 `pubKeys` are supplied by the caller because Daml verifies against a public key,
 not by recovery (§5). They are _untrusted hints_; verification fails unless each
 provided key hashes to the guardian address stored in the set.
+
+**This is genuinely permissionless, not merely operator-delegated.** `verifier`
+is the sole controller — `operator` never needs to be an active party. The
+choice is `nonconsuming` and does no create/archive at all, so nothing in its
+body needs `operator`'s authority for any structural reason (contrast
+`SubmitGovernanceVAA` below, which *is* consuming and creates a successor
+`CoreState` genuinely needing `guardianGovernance`'s co-signature). Any external
+protocol — the token bridge, NTT, anything else — can verify a VAA as itself.
+The one real requirement is visibility, not authorization: a non-stakeholder
+needs `CoreState` explicitly disclosed to reference it at all, via Daml's
+[Explicit Contract
+Disclosure](https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html)
+feature — a data attachment, not a signature — servable by any party with read
+access. In Daml Script, `submitWithDisclosures` is the idiom. Proven both
+in-memory
+(`test/daml/Test/TestCore.daml:testParseAndVerifyVAAByExternalVerifier`) and
+against a live sandbox/participant
+([`node/pkg/watchers/canton/core_verify_vaa_integration_test.go`](../node/pkg/watchers/canton/core_verify_vaa_integration_test.go)):
+a party with no relationship to `CoreState` at all — not `operator`, not
+`guardianGovernance` — verifies a real guardian-signed VAA as itself.
 
 ### 4.4 Governance
 
@@ -681,6 +702,7 @@ node/pkg/cantonclient/           ← Ledger API v2 gRPC client
   vectorgen_test.go              ← regenerates the signed-VAA test vector (GEN_CANTON_VECTORS=1)
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
   watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
+  core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
 sdk/vaa/structs.go               ← ChainIDCanton = 72
 devnet/canton-devnet.yaml        ← Tilt k8s manifest (sandbox + bootstrap)
 Tiltfile                         ← `canton` component (opt-in)
