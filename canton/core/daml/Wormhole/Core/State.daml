@@ -43,13 +43,14 @@ module Wormhole.Core.State where
 
 import DA.Map (Map)
 import DA.Map qualified as Map
-import DA.Optional (fromSomeNote)
+import DA.Optional (fromSomeNote, isNone)
 import DA.Set (Set)
 import DA.Set qualified as Set
 import DA.Time (addRelTime, seconds)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
 import Wormhole.Core.Governance
+import Wormhole.Core.Replay
 import Wormhole.Core.VAA
 
 -- | The message record produced by 'PublishMessage'. This is the wire contract
@@ -97,7 +98,9 @@ template CoreState
     guardianSetIndex   : Int                -- index of the current set
     guardianSets       : Map Int GuardianSet
     messageFee         : Int                -- required fee (native units); 0 in v1
-    consumedGovernance : Set Bytes32        -- replay protection, keyed by digest
+    consumedGovernance : Set Bytes32        -- GOVERNANCE-ONLY replay protection, keyed by
+                                            -- digest; bounded by governance cadence. App VAAs
+                                            -- use per-VAA 'ConsumedVAA' guards instead.
   where
     -- Co-signed: the operator advances the singleton, but the guardianGovernance
     -- party co-signs so the operator cannot forge the guardian set (see module
@@ -145,6 +148,54 @@ template CoreState
         let signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
         either assertFail pure (verifyVAA signingSet vaa pubKeys now)
         pure vaa
+
+    -- | Verify a VAA and record its consumption for @consumer@, atomically.
+    -- Integrators (token bridge / NTT) call this in the same transaction as the
+    -- action the VAA authorizes; the second consume of the same digest under
+    -- the same @consumer@ fails on the key lookup. Scoped per consumer: the
+    -- same VAA can be consumed by different integrator parties independently,
+    -- and distinct digests never contend (this choice is nonconsuming).
+    --
+    -- The controller is flexible, so the submitter needs to SEE this contract
+    -- to exercise — via explicit disclosure or an observer party (README "Open
+    -- Questions"). Creating the guard inside this choice is what gives it the
+    -- operator's co-signature (inherited authority), so the consumer cannot
+    -- archive it and replay.
+    --
+    -- SOUNDNESS: the guard lookup below resolves against the submission's
+    -- readers (key lookups are not maintainer-attested; a negative result is a
+    -- pinned validation input, so it fails OPEN), and it is complete only in
+    -- the consumer's read view — the consumer signs every one of its guards.
+    -- The consuming submission must therefore carry that view: canonically,
+    -- propose-accept, where the consumer's automation submits the accept (see
+    -- Test.ExampleIntegrator). The consumer's inherited authority alone does
+    -- not bring its visibility; without the view, the lookup misses existing
+    -- guards and double-consumes (pinned by
+    -- Test.ExampleIntegrator.testReplayNeedsConsumerView).
+    nonconsuming choice VerifyAndConsumeVAA : (VAA, ContractId ConsumedVAA)
+      with
+        encodedVAA : Bytes
+        pubKeys    : [(Int, Bytes)]
+        consumer   : Party
+      controller consumer
+      do
+        now <- getTime
+        let vaa = parseVAA encodedVAA
+        -- Like ParseAndVerifyVAA: any unexpired signing set is acceptable.
+        let signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex guardianSets)
+        either assertFail pure (verifyVAA signingSet vaa pubKeys now)
+        -- The consumer is the key maintainer, so its authority (the controller)
+        -- covers the lookup, and its participant serializes racing consumes.
+        existing <- lookupByKey @ConsumedVAA (consumer, vaa.hash)
+        assertMsg "VAA already consumed" (isNone existing)
+        guardCid <- create ConsumedVAA with
+          consumer
+          operator
+          vaaHash = vaa.hash
+          emitterChain = vaa.emitterChain
+          emitterAddress = vaa.emitterAddress
+          sequence = vaa.sequence
+        pure (vaa, guardCid)
 
     -- | Apply a governance VAA: verify it (against the CURRENT set, per EVM),
     -- check the governance emitter and replay protection, then dispatch.
