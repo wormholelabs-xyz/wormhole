@@ -133,8 +133,9 @@ digest = keccak256( keccak256( body ) )          // double keccak, Ethereum-styl
 ```
 
 Guardians sign `digest` with secp256k1 (Ethereum ECDSA, 65-byte `r‖s‖v`).
-Replay protection keys off `keccak256(body)` (the inner hash) exactly as
-elsewhere in Wormhole. The on-chain Daml verifier reconstructs and re-hashes the
+Replay protection keys off `digest` (the double keccak — EVM's `vm.hash`), both
+for governance (`consumedGovernance`, §4.4) and for integrator VAAs
+(`ConsumedVAA`, §4.6). The on-chain Daml verifier reconstructs and re-hashes the
 body and checks signatures against the stored guardian set (§5).
 
 `ChainID` for Canton is **72** (`ChainIDCanton`), the next free mainnet ID after
@@ -170,7 +171,7 @@ template CoreState
     guardianSetIndex   : Int            -- current set index
     guardianSets       : Map Int GuardianSet   -- index -> set (with expiry)
     messageFee         : Int            -- fee required to publish (native units)
-    consumedGovernance : Set Bytes32    -- replay protection (keyed by digest)
+    consumedGovernance : Set Bytes32    -- governance-only replay protection (§4.6)
   where
     signatory operator, guardianGovernance
     observer guardianObserver          -- read-only; sees governance transitions
@@ -423,6 +424,10 @@ against a live sandbox/participant
 a party with no relationship to `CoreState` at all — not `operator`, not
 `guardianGovernance` — verifies a real guardian-signed VAA as itself.
 
+Integrators that must consume a VAA (redeem exactly once) use
+`VerifyAndConsumeVAA` instead, which verifies **and** records consumption
+atomically (§4.6).
+
 ### 4.4 Governance
 
 Governance follows [0002](../whitepapers/0002_governance_messaging.md). A single
@@ -463,6 +468,100 @@ Matches EVM (`Setters.sol`): when a new set is installed, the previous set's
 `expirationTime` is set to `effectiveTime + 86400` (1 day). `verifyVAA` accepts a
 non-current set only while `effectiveTime < expirationTime`. The current set
 never expires.
+
+### 4.6 Per-VAA replay protection for integrators
+
+Governance replay protection is the `consumedGovernance` set inside `CoreState`
+(§4.4) — fine there, because governance actions are rare and already churn the
+singleton. App VAAs (token bridge / NTT) must **not** be recorded that way: Daml
+values have no structural sharing across contract updates, so an ever-growing
+set would be reserialized into every create node (payload size, participant DB
+write, and network cost all linear in history), and every integrator's consume
+would contend on the one singleton contract.
+
+Instead, consuming a VAA creates a dedicated contract — the Solana
+claim-account shape (`Replay.daml`):
+
+```haskell
+template ConsumedVAA
+  with
+    consumer : Party     -- integrator scope party; bears the replay risk
+    operator : Party     -- co-signs so the consumer cannot archive-and-replay
+    vaaHash  : Bytes32   -- double-keccak digest, same keying as consumedGovernance
+    ...                  -- emitter provenance (untrusted, for ops/debugging)
+  where
+    signatory consumer, operator
+    key (consumer, vaaHash) : (Party, Bytes32)
+    maintainer key._1
+```
+
+`VerifyAndConsumeVAA` (nonconsuming, on `CoreState`, flexible controller
+`consumer`) verifies the VAA (§5), fails if `(consumer, digest)` already has a
+guard (`lookupByKey`), and creates one. Integrators exercise it in the same
+transaction as the action the VAA authorizes, so verify + consume + act is
+atomic. The consumer must be able to see the `CoreState` to exercise — explicit
+disclosure or an observer party (Open Questions item 4).
+
+Properties:
+
+- **Uniqueness.** Contract keys are non-unique on Canton (§4.1), and key
+  lookups are **not maintainer-attested**: a lookup resolves against what the
+  _submission's readers_ can see (local contracts first, then disclosed ones,
+  then the readers' view). "At most one guard per (consumer, digest)" therefore
+  rests on three legs: every create flows through the vetted choice, which
+  looks up before creating (behavioral, like the `EmitterRegistry` id
+  discipline); every consuming submission carries the consumer's read view
+  (see the gotcha below); and the consumer is hosted on a single participant,
+  which then serializes its consumes. The trust is aligned: guardians never
+  re-check target-chain consumption — replay protection is the consumer's own
+  safety property, enforced on exactly the participant that bears the risk.
+- **No archive-and-replay.** The guard is created inside a `CoreState` choice
+  and inherits the `operator`'s signature, so it is co-signed: neither the
+  consumer nor the operator can archive it alone. Guards are never archived —
+  their permanence _is_ the replay protection.
+- **Scoping and contention.** Guards are scoped per consumer party: different
+  apps consume the same VAA independently, and distinct digests never contend
+  at all (the choice is nonconsuming). Cost per consume is one small, key-indexed
+  contract, forever — ACS growth is linear in consumed VAAs by design, the same
+  trade Solana makes with claim accounts.
+
+**Integrating — propose-accept, and why.** The executable reference is
+[`test/daml/Test/ExampleIntegrator.daml`](test/daml/Test/ExampleIntegrator.daml)
+(test package only). The recommended shape is **propose-accept**: the user
+creates a `RedeemRequest` with their sole signature (no disclosures, no read
+grants), and the manager's automation exercises `AcceptRedeem` — verify +
+consume + peer-check + mint, one atomic transaction, **submitted by the
+manager**. The `CoreState` disclosure is held by the manager's backend only;
+the redeemer's signature on the receipt is inherited from the archived
+request.
+
+The reason the *manager must submit* is a property of this key model, worth
+being explicit about. Key lookups are resolved once, on the submitting
+participant, against the submission's readers (local contracts → disclosed →
+reader-visible); the result is a pinned input to validation. Confirming
+participants re-check authorization, conformance, and the activeness of every
+contract the transaction _uses_ — but they do **not** re-run key lookups
+against their own stores (with non-unique keys and per-party visibility there
+is no canonical answer, and local re-checks would make validation
+nondeterministic and leak private state). So a _positive_ resolution is safe —
+it names a cid that is consistency-checked like any input — while a _negative_
+one names nothing and **fails open**. A negative lookup is sound only when the
+resolving view is complete by construction: the manager signs every guard of
+its app, so manager-as-submitter sees them all. A redemption submitted with
+only the user's view misses existing guards and double-consumes —
+`testReplayNeedsConsumerView` pins exactly that (two guards under one key) via
+a minimal `LookupProbe` template, deliberately not shaped like a flow. If that
+test ever starts failing, the ledger has tightened key semantics and this
+section should be revisited.
+
+User-*submitted* redemption (a flexible-controller choice exercised by the end
+user) is deliberately absent from the example: it is sound only when the
+submission carries the manager's read view — `readAs manager` through the
+app's participant, a per-API-user IAM grant exposing the manager's entire ACS.
+If user-submitted redemption is genuinely needed, scope the exposure instead:
+add a well-known public party as observer on `ConsumedVAA` and have users
+submit with `readAs public` (the Splice pattern), trading consumption metadata
+privacy for it.
 
 ---
 
@@ -685,12 +784,14 @@ canton/
     daml/Wormhole/Core/VAA.daml
     daml/Wormhole/Core/GuardianSet.daml
     daml/Wormhole/Core/State.daml
+    daml/Wormhole/Core/Replay.daml
     daml/Wormhole/Core/Governance.daml
     daml/Wormhole/Core/Setup.daml
   test/                          ← `wormhole-core-test` package (Daml Scripts)
     daml.yaml                    ← data-dependency on core's DAR
     daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
     daml/Test/TestGuardianObserver.daml ← read-only guardianObserver visibility/authority tests
+    daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
   devnet/
     start_sandbox.sh             ← starts the Ledger API v2 sandbox
     bootstrap.sh                 ← allocates Operator + creates CoreState

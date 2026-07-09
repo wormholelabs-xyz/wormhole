@@ -1,0 +1,55 @@
+-- | Per-VAA replay protection for integrators (token bridge / NTT).
+--
+-- Governance replay protection lives in 'Wormhole.Core.State.CoreState' as a
+-- @Set@ of consumed digests — fine there, because governance actions are rare
+-- and already churn the singleton. App VAAs are different: recording them in a
+-- shared @Set@ would (a) reserialize an ever-growing structure into every
+-- create node and (b) serialize ALL integrators' consumes through one
+-- contract. Instead, each consumed VAA gets its own small contract — the
+-- Solana claim-account shape — so distinct VAAs never contend and the cost per
+-- consume is one indexed row, forever.
+--
+-- UNIQUENESS / TRUST MODEL: contract keys are non-unique on Canton (see
+-- 'Wormhole.Core.State'), and key lookups are NOT maintainer-attested — a
+-- lookup resolves against what the SUBMISSION'S READERS can see (local
+-- contracts, then disclosed ones, then the readers' view; pinned by
+-- Test.ExampleIntegrator). "At most one 'ConsumedVAA' per (consumer, hash)"
+-- therefore rests on three legs:
+--   * every create flows through the vetted
+--     'Wormhole.Core.State.VerifyAndConsumeVAA' choice, which looks up before
+--     creating (behavioral, like the 'EmitterRegistry' id discipline);
+--   * every consuming submission carries the @consumer@'s read view — the
+--     only view guaranteed to contain all of its guards. Canonically the
+--     consumer's automation submits (propose-accept, see
+--     Test.ExampleIntegrator); @readAs consumer@ through its participant also
+--     works. A submission with only the consumer's inherited AUTHORITY but not
+--     its VISIBILITY misses existing guards and double-consumes;
+--   * the consumer is hosted on a single participant, which then serializes
+--     its consumes.
+-- The trust is aligned: guardians never re-check target-chain consumption, so
+-- replay protection is the consumer's own safety property, enforced on exactly
+-- the participant that bears the risk. The @operator@ co-signs (authority
+-- inherited from the 'CoreState' choice) so the consumer cannot unilaterally
+-- archive a guard and replay the VAA against its own users.
+module Wormhole.Core.Replay where
+
+import Wormhole.Core.Bytes
+
+-- | The replay guard: one active contract per consumed VAA, scoped to the
+-- consuming integrator party. Never archived — its permanence IS the replay
+-- protection. Keyed by @(consumer, vaaHash)@ where @vaaHash@ is the
+-- double-keccak digest ('Wormhole.Core.VAA.digestOf'), matching
+-- @consumedGovernance@ and the EVM @vm.hash@.
+template ConsumedVAA
+  with
+    consumer       : Party    -- integrator scope party; bears the replay risk
+    operator       : Party    -- co-signs so the consumer cannot archive-and-replay
+    vaaHash        : Bytes32  -- double-keccak digest of the VAA body
+    -- Emitter provenance, for ops/debugging only — never trusted, never keyed.
+    emitterChain   : Int
+    emitterAddress : Bytes32
+    sequence       : Int
+  where
+    signatory consumer, operator
+    key (consumer, vaaHash) : (Party, Bytes32)
+    maintainer key._1
