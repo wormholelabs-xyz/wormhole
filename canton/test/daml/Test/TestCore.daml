@@ -11,7 +11,6 @@ import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
-import Wormhole.Core.Replay ()   -- HasField instances for ConsumedVAA record-dot access
 import Wormhole.Core.State
 import Wormhole.Core.Setup
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
@@ -35,8 +34,10 @@ govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479
 -- here; in production a k-of-n threshold party), so genesis needs both. It also
 -- allocates the read-only @guardianObserver@ party and threads it into the
 -- 'CoreState' and 'EmitterRegistry' (from which 'ApproveEmitter' carries it into
--- each 'Emitter'). The result keeps @operator@ FIRST so bootstrap.sh's first-party
--- extraction still yields the operator; @guardianObserver@ follows.
+-- each 'Emitter'). Also creates the 'ReplayRootRegistry' (replay-trie root
+-- grants, see Test.TestReplay). The result keeps @operator@ FIRST so
+-- bootstrap.sh's first-party extraction still yields the operator;
+-- @guardianObserver@ follows.
 setup : Script (Party, Party, ContractId CoreState)
 setup = do
   operator <- allocateParty "Operator"
@@ -45,6 +46,7 @@ setup = do
   csId <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver)
   _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
+  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator)
   pure (operator, guardianObserver, csId)
 
 -- | Register an emitter for @owner@: allocates a stable @emitterId@ from the
@@ -249,47 +251,6 @@ testGovernanceSetMessageFee = do
       pubKeys = [(0, devnetGuardianPubKey)]
   Some cs <- queryContractId operator newCsId
   cs.messageFee === 1000
-
--- | Per-VAA replay protection: a consumer verifies-and-consumes a VAA once,
--- creating the 'ConsumedVAA' guard; the second consume of the same digest is
--- rejected on the key lookup. Scoping is per consumer (another party may
--- consume the same VAA), and the guard is co-signed, so neither the consumer
--- nor the operator can archive it alone. The consumer is not a 'CoreState'
--- stakeholder — it exercises via explicit disclosure, which is also the
--- production access path.
-testVerifyAndConsumeVAA : Script ()
-testVerifyAndConsumeVAA = do
-  (operator, _, csId) <- setup
-  ntt <- allocateParty "NttManager"
-  disc <- fromSome <$> queryDisclosure operator csId
-  (vaa, guardCid) <- submit (actAs ntt <> disclose disc) do
-    exerciseCmd csId VerifyAndConsumeVAA with
-      encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
-      consumer = ntt
-  Some guard <- queryContractId ntt guardCid
-  guard.vaaHash === vaa.hash
-  guard.emitterChain === 1
-  guard.sequence === 1
-
-  -- Replay under the same consumer is rejected.
-  submitMustFail (actAs ntt <> disclose disc) do
-    exerciseCmd csId VerifyAndConsumeVAA with
-      encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
-      consumer = ntt
-
-  -- A different consumer party has its own scope.
-  other <- allocateParty "OtherApp"
-  _ <- submit (actAs other <> disclose disc) do
-    exerciseCmd csId VerifyAndConsumeVAA with
-      encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
-      consumer = other
-
-  -- The guard is co-signed: neither party can archive-and-replay alone.
-  submitMustFail ntt do archiveCmd guardCid
-  submitMustFail operator do archiveCmd guardCid
 
 -- | Governance replay protection (the 'consumedGovernance' set) still rejects
 -- a resubmitted governance VAA.
