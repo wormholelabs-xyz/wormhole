@@ -94,13 +94,14 @@ maxPayloadBytes = 750
 -- bound to guardian addresses inside 'verifyVAA'. NOT used by
 -- 'SubmitGovernanceVAA', which deliberately accepts the CURRENT set only
 -- (EVM Governance.sol parity).
-verifyEncoded : CoreState -> Bytes -> [(Int, Bytes)] -> Update VAA
-verifyEncoded st encodedVAA pubKeys = do
-  now <- getTime
+--
+-- Pure: takes @now@ rather than calling 'getTime' itself, so callers do the
+-- one monadic step (fetching the time) and lift the 'Either' failure.
+verifyEncoded : CoreState -> Bytes -> [(Int, Bytes)] -> Time -> Either Text VAA
+verifyEncoded st encodedVAA pubKeys now =
   let vaa = parseVAA encodedVAA
-  let signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex st.guardianSets)
-  either assertFail pure (verifyVAA signingSet vaa pubKeys now)
-  pure vaa
+      signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex st.guardianSets)
+  in verifyVAA signingSet vaa pubKeys now >> pure vaa
 
 template CoreState
   with
@@ -156,7 +157,8 @@ template CoreState
         pubKeys    : [(Int, Bytes)]
       controller verifier
       do
-        verifyEncoded this encodedVAA pubKeys
+        now <- getTime
+        either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
 
     -- | Verify a VAA and record its consumption for @consumer@, atomically.
     -- Integrators (token bridge / NTT) call this in the same transaction as the
@@ -188,7 +190,8 @@ template CoreState
         consumer   : Party
       controller consumer
       do
-        vaa <- verifyEncoded this encodedVAA pubKeys
+        now <- getTime
+        vaa <- either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
         -- The consumer is the key maintainer, so its authority (the controller)
         -- covers the lookup, and its participant serializes racing consumes.
         existing <- lookupByKey @ConsumedVAA (consumer, vaa.hash)
