@@ -1,55 +1,194 @@
--- | Per-VAA replay protection for integrators (token bridge / NTT).
+-- | Per-consumer replay protection for integrators (token bridge / NTT),
+-- stored as a PREFIX TRIE of consumed VAA digests — leaf contracts only.
 --
 -- Governance replay protection lives in 'Wormhole.Core.State.CoreState' as a
 -- @Set@ of consumed digests — fine there, because governance actions are rare
--- and already churn the singleton. App VAAs are different: recording them in a
--- shared @Set@ would (a) reserialize an ever-growing structure into every
--- create node and (b) serialize ALL integrators' consumes through one
--- contract. Instead, each consumed VAA gets its own small contract — the
--- Solana claim-account shape — so distinct VAAs never contend and the cost per
--- consume is one indexed row, forever.
+-- and already churn the singleton. App VAAs need a structure that scales and,
+-- crucially, one whose absence check does NOT rely on contract keys: on
+-- Daml-LF 2.3 key lookups resolve once, on the submitting participant, against
+-- the submission's readers, and a negative result is a pinned validation input
+-- no confirmer re-checks — negative lookups fail OPEN. This module uses no
+-- keys at all.
 --
--- UNIQUENESS / TRUST MODEL: contract keys are non-unique on Canton (see
--- 'Wormhole.Core.State'), and key lookups are NOT maintainer-attested — a
--- lookup resolves against what the SUBMISSION'S READERS can see (local
--- contracts, then disclosed ones, then the readers' view; pinned by
--- Test.ExampleIntegrator). "At most one 'ConsumedVAA' per (consumer, hash)"
--- therefore rests on three legs:
---   * every create flows through the vetted
---     'Wormhole.Core.State.VerifyAndConsumeVAA' choice, which looks up before
---     creating (behavioral, like the 'EmitterRegistry' id discipline);
---   * every consuming submission carries the @consumer@'s read view — the
---     only view guaranteed to contain all of its guards. Canonically the
---     consumer's automation submits (propose-accept, see
---     Test.ExampleIntegrator); @readAs consumer@ through its participant also
---     works. A submission with only the consumer's inherited AUTHORITY but not
---     its VISIBILITY misses existing guards and double-consumes;
---   * the consumer is hosted on a single participant, which then serializes
---     its consumes.
--- The trust is aligned: guardians never re-check target-chain consumption, so
--- replay protection is the consumer's own safety property, enforced on exactly
--- the participant that bears the risk. The @operator@ co-signs (authority
--- inherited from the 'CoreState' choice) so the consumer cannot unilaterally
--- archive a guard and replay the VAA against its own users.
+-- THE TRIE: a 'ReplayNode' holds a hex @prefix@ and the set of @consumed@
+-- digest SUFFIXES under that prefix (digests are 64 lowercase hex nibbles; a
+-- node at depth d stores 64−d-nibble suffixes). A consumer's trie starts as a
+-- single root (empty prefix, empty set). When a node reaches @splitThreshold@
+-- entries, the next consume splits it into 16 children — one per nibble,
+-- including empty ones — bucketing the suffixes by first nibble (which is
+-- dropped). Internal nodes are never stored.
+--
+-- INVARIANT: the active nodes of one consumer's trie PARTITION the digest
+-- space — every digest has exactly one covering node (a node whose prefix is a
+-- prefix of the digest). The vetted operations preserve it: the root covers
+-- everything, and a split replaces one node by 16 children that exactly tile
+-- its subspace, atomically.
+--
+-- WHY THIS IS SOUND WHERE KEYS WERE NOT: "digest not consumed" becomes a
+-- positive statement about one NAMED contract — fetch the covering node and
+-- check the suffix is absent. 'ConsumeDigest' is consuming, so every confirmer
+-- validates the node's activeness: a stale cid conflicts and aborts, and the
+-- current covering node provably contains or excludes the digest. Soundness is
+-- SUBMITTER-INDEPENDENT: any submitter with a disclosure of the current
+-- covering node gets a correct check; a wrong or stale node can only fail the
+-- transaction, never replay. Archiving a node (both signatories) merely BRICKS
+-- its subspace — no covering node, nothing verifies — fail-closed, the
+-- opposite of the key model.
+--
+-- The replay vector is therefore node RE-CREATION (archive-and-recreate, or a
+-- parallel shadow root), which the signatory design closes: the @operator@
+-- co-signs every node, so the consumer alone can neither archive nor create
+-- one, and roots are granted exactly once per consumer through the
+-- 'ReplayRootRegistry' — a positive, on-ledger one-root-per-consumer check
+-- linearized by consuming the registry (the 'EmitterRegistry' pattern, minus
+-- the key). Splits inherit both signatures from the archived parent, so the
+-- operator is not involved per consume. The irreducible remainder: consumer
+-- and operator COLLUDING can archive and rebuild a trie — signatories can
+-- always unmake their own contracts.
+--
+-- OFF-LEDGER: consumers (and their users) locate the covering node for a
+-- digest via a disclosure service — an ACS index over (consumer, prefix) that
+-- serves the node's contract-id + explicit disclosure. It is untrusted for
+-- safety: the worst it can do is serve a wrong or stale node, which fails.
+-- RETRY PROTOCOL: racing consumes on the same node conflict and exactly one
+-- commits; on rejection, re-resolve the covering node (the cid churns on every
+-- consume) and resubmit. A blind retry of a consume that actually committed
+-- hits the membership check and fails "VAA already consumed" — a clean
+-- idempotency signal.
 module Wormhole.Core.Replay where
 
+import DA.Map qualified as Map
+import DA.Optional (fromOptional)
+import DA.Set (Set)
+import DA.Set qualified as Set
+import DA.Text qualified as T
 import Wormhole.Core.Bytes
 
--- | The replay guard: one active contract per consumed VAA, scoped to the
--- consuming integrator party. Never archived — its permanence IS the replay
--- protection. Keyed by @(consumer, vaaHash)@ where @vaaHash@ is the
--- double-keccak digest ('Wormhole.Core.VAA.digestOf'), matching
--- @consumedGovernance@ and the EVM @vm.hash@.
-template ConsumedVAA
+-- | Default node capacity. Suffixes are ≤64 hex chars (~66 B serialized), and
+-- every consume rewrites the full node, so this bounds both the node payload
+-- (~8.5 KB) and the per-consume write cost (~4 KB on average). The split
+-- transaction redistributes the same bytes across 16 creates (~15 KB) — all
+-- comfortably below Canton's request caps. Larger values thin the ACS but
+-- amplify every write; the 'ensure' clause caps it at 4096 (~270 KB nodes).
+defaultSplitThreshold : Int
+defaultSplitThreshold = 128
+
+-- | One trie node: the consumed digest suffixes under @prefix@. See the module
+-- header for the partition invariant and the trust model. NOT observed by the
+-- guardian observer party: replay state is integrator-private safety state,
+-- not attestation surface — guardians never re-check target-chain consumption.
+template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
-    operator       : Party    -- co-signs so the consumer cannot archive-and-replay
-    vaaHash        : Bytes32  -- double-keccak digest of the VAA body
-    -- Emitter provenance, for ops/debugging only — never trusted, never keyed.
-    emitterChain   : Int
-    emitterAddress : Bytes32
-    sequence       : Int
+    operator       : Party    -- co-signs: no unilateral archive or re-create
+    prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
+    splitThreshold : Int      -- copied to children; see 'defaultSplitThreshold'
+    consumed       : Set Bytes  -- suffixes, each exactly (64 − |prefix|) nibbles
   where
     signatory consumer, operator
-    key (consumer, vaaHash) : (Party, Bytes32)
-    maintainer key._1
+    -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
+    -- (the signatories can always sign a well-formed shadow node). Depth-64
+    -- nodes are unrepresentable; suffix lengths pin the arithmetic that
+    -- membership depends on. Deliberately NO @size consumed <= splitThreshold@:
+    -- a split can legitimately create an over-full child (all parent entries
+    -- in one bucket); its next consume splits it further.
+    ensure splitThreshold >= 1 && splitThreshold <= 4096
+        && T.length prefix <= 63 && isLowerHex prefix
+        && all (\s -> T.length s == 64 - T.length prefix && isLowerHex s)
+               (Set.toList consumed)
+
+    -- | Record @digest@ as consumed, or fail if it already was. Returns the
+    -- node that now contains the digest — the recreated node, or, on a split,
+    -- the child covering it (the other 15 children surface to the disclosure
+    -- service as CreatedEvents). Consuming: racing consumes conflict on this
+    -- contract and exactly one commits (see the retry protocol in the module
+    -- header). To consume two digests under the same node in one transaction,
+    -- chain the second exercise on the returned cid.
+    choice ConsumeDigest : ContractId ReplayNode
+      with
+        digest : Bytes32
+      controller consumer
+      do
+        -- Normalize before anything: membership is exact-text, so an
+        -- uppercase twin of a consumed digest must not slip past the set.
+        -- Validate independently of the caller — this choice is exercisable
+        -- outside 'VerifyAndConsumeVAA'.
+        let d = normalizeHex digest
+        assertMsg "digest must be 32 bytes of lowercase hex"
+          (T.length d == 64 && isLowerHex d)
+        -- Distinct message from the replay failure: callers re-resolve the
+        -- covering node on this one, drop the VAA on the other.
+        assertMsg "replay node does not cover digest" (prefix `T.isPrefixOf` d)
+        let suffix = T.drop (T.length prefix) d
+        -- The replay check MUST precede the split branch: a split inserting a
+        -- duplicate would be a silent Set.insert no-op — a replay that
+        -- "succeeds".
+        assertMsg "VAA already consumed" (not (Set.member suffix consumed))
+        if Set.size consumed < splitThreshold || T.length prefix == 63
+          -- Depth-63 nodes never split: suffixes are single nibbles (≤16
+          -- distinct, so the set is bounded), and children would be degenerate
+          -- depth-64 nodes (unrepresentable, see 'ensure').
+          then create this with consumed = Set.insert suffix consumed
+          else do
+            -- Split: bucket every suffix (plus the new one) by first nibble,
+            -- dropping it, in one pass; then create ALL 16 children — empty
+            -- ones included, or their subspaces would have no covering node.
+            let bucket m s = Map.insertWith Set.union (T.take 1 s) (Set.singleton (T.drop 1 s)) m
+                buckets = bucket (foldl bucket Map.empty (Set.toList consumed)) suffix
+                child nib = create this with
+                  prefix = prefix <> nib
+                  consumed = fromOptional Set.empty (Map.lookup nib buckets)
+            cids <- forA (T.explode "0123456789abcdef") (\nib -> (,) nib <$> child nib)
+            case lookup (T.take 1 suffix) cids of
+              Some cid -> pure cid
+              None -> abort "unreachable: split lost the covering child"
+
+-- | Grants each consumer AT MOST ONE trie root — the positive, on-ledger
+-- uniqueness check that a contract key cannot provide. One registry per
+-- operator, created at setup ('mkInitialReplayRootRegistry'); every grant
+-- consumes it, so grants are linearized through the operator. The set grows by
+-- one Party per integrator app — dozens, not millions.
+template ReplayRootRegistry
+  with
+    operator : Party
+    granted  : Set Party
+  where
+    signatory operator
+
+    choice GrantReplayRoot : ContractId ReplayRootRegistry
+      with
+        consumer : Party
+      controller operator
+      do
+        assertMsg "consumer already has a replay root" (not (Set.member consumer granted))
+        create this with granted = Set.insert consumer granted
+
+-- | The consumer's half of the root-creation ceremony: a one-time
+-- propose-accept per app (mirroring 'EmitterRequest'). The consumer's
+-- signature on this request is what authorizes its co-signature on the root;
+-- the operator accepts against its registry, which enforces
+-- one-root-per-consumer.
+template ReplayRootRequest
+  with
+    consumer       : Party
+    operator       : Party
+    splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
+  where
+    signatory consumer
+    observer operator
+
+    choice ApproveReplayRoot : (ContractId ReplayRootRegistry, ContractId ReplayNode)
+      with
+        registryCid : ContractId ReplayRootRegistry  -- passed by cid: no keys
+      controller operator
+      do
+        reg <- fetch registryCid
+        assertMsg "registry belongs to a different operator" (reg.operator == operator)
+        regCid' <- exercise registryCid GrantReplayRoot with consumer
+        rootCid <- create ReplayNode with
+          consumer
+          operator
+          prefix = ""
+          splitThreshold
+          consumed = Set.empty
+        pure (regCid', rootCid)

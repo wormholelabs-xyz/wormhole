@@ -7,6 +7,7 @@ import DA.Map qualified as Map
 import DA.Set qualified as Set
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
+import Wormhole.Core.Replay
 import Wormhole.Core.State
 
 -- | Wormhole ChainID assigned to Canton.
@@ -53,3 +54,10 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
 mkInitialEmitterRegistry : Party -> Party -> EmitterRegistry
 mkInitialEmitterRegistry operator guardianObserver =
   EmitterRegistry with operator, guardianObserver, nextId = 0
+
+-- | The replay-root registry the operator creates alongside the 'CoreState' at
+-- setup. Grants each integrator consumer at most one 'ReplayNode' trie root
+-- (see 'Wormhole.Core.Replay').
+mkInitialReplayRootRegistry : Party -> ReplayRootRegistry
+mkInitialReplayRootRegistry operator =
+  ReplayRootRegistry with operator, granted = Set.empty

@@ -43,7 +43,7 @@ module Wormhole.Core.State where
 
 import DA.Map (Map)
 import DA.Map qualified as Map
-import DA.Optional (fromSomeNote, isNone)
+import DA.Optional (fromSomeNote)
 import DA.Set (Set)
 import DA.Set qualified as Set
 import DA.Time (addRelTime, seconds)
@@ -116,7 +116,7 @@ template CoreState
     messageFee         : Int                -- required fee (native units); 0 in v1
     consumedGovernance : Set Bytes32        -- GOVERNANCE-ONLY replay protection, keyed by
                                             -- digest; bounded by governance cadence. App VAAs
-                                            -- use per-VAA 'ConsumedVAA' guards instead.
+                                            -- use the per-consumer 'ReplayNode' trie instead.
   where
     -- Co-signed: the operator advances the singleton, but the guardianGovernance
     -- party co-signs so the operator cannot forge the guardian set (see module
@@ -160,50 +160,39 @@ template CoreState
         now <- getTime
         either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
 
-    -- | Verify a VAA and record its consumption for @consumer@, atomically.
-    -- Integrators (token bridge / NTT) call this in the same transaction as the
-    -- action the VAA authorizes; the second consume of the same digest under
-    -- the same @consumer@ fails on the key lookup. Scoped per consumer: the
-    -- same VAA can be consumed by different integrator parties independently,
-    -- and distinct digests never contend (this choice is nonconsuming).
+    -- | Verify a VAA and record its consumption in @consumer@'s replay trie,
+    -- atomically. Integrators (token bridge / NTT) call this in the same
+    -- transaction as the action the VAA authorizes; a replay fails on the
+    -- covering node's membership check. Scoped per consumer: the same VAA can
+    -- be consumed by different integrator parties independently.
     --
-    -- The controller is flexible, so the submitter needs to SEE this contract
-    -- to exercise — via explicit disclosure or an observer party (README "Open
-    -- Questions"). Creating the guard inside this choice is what gives it the
-    -- operator's co-signature (inherited authority), so the consumer cannot
-    -- archive it and replay.
-    --
-    -- SOUNDNESS: the guard lookup below resolves against the submission's
-    -- readers (key lookups are not maintainer-attested; a negative result is a
-    -- pinned validation input, so it fails OPEN), and it is complete only in
-    -- the consumer's read view — the consumer signs every one of its guards.
-    -- The consuming submission must therefore carry that view: canonically,
-    -- propose-accept, where the consumer's automation submits the accept (see
-    -- Test.ExampleIntegrator). The consumer's inherited authority alone does
-    -- not bring its visibility; without the view, the lookup misses existing
-    -- guards and double-consumes (pinned by
-    -- Test.ExampleIntegrator.testReplayNeedsConsumerView).
-    nonconsuming choice VerifyAndConsumeVAA : (VAA, ContractId ConsumedVAA)
+    -- @replayNodeCid@ is the trie node covering @vaa.hash@ — resolved
+    -- off-ledger by the consumer's disclosure service (see
+    -- 'Wormhole.Core.Replay'). SOUNDNESS IS SUBMITTER-INDEPENDENT: the node is
+    -- fetched and consumed positively, so every confirmer validates its
+    -- activeness — a stale or wrong node can only fail the transaction, never
+    -- replay. Any submitter with disclosures of this contract and the covering
+    -- node (the controller is flexible) gets a correct check; no read-view
+    -- discipline is required, unlike the retired key-based guards.
+    nonconsuming choice VerifyAndConsumeVAA : (VAA, ContractId ReplayNode)
       with
-        encodedVAA : Bytes
-        pubKeys    : [(Int, Bytes)]
-        consumer   : Party
+        encodedVAA    : Bytes
+        pubKeys       : [(Int, Bytes)]
+        consumer      : Party
+        replayNodeCid : ContractId ReplayNode
       controller consumer
       do
         now <- getTime
         vaa <- either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
-        -- The consumer is the key maintainer, so its authority (the controller)
-        -- covers the lookup, and its participant serializes racing consumes.
-        existing <- lookupByKey @ConsumedVAA (consumer, vaa.hash)
-        assertMsg "VAA already consumed" (isNone existing)
-        guardCid <- create ConsumedVAA with
-          consumer
-          operator
-          vaaHash = vaa.hash
-          emitterChain = vaa.emitterChain
-          emitterAddress = vaa.emitterAddress
-          sequence = vaa.sequence
-        pure (vaa, guardCid)
+        node <- fetch replayNodeCid
+        -- Exercising ConsumeDigest on a foreign node would fail authorization
+        -- anyway; the explicit check gives a clean error. The operator binding
+        -- rejects tries co-signed by an accomplice "operator" (a shadow trie
+        -- outside the root registry's one-root-per-consumer grant).
+        assertMsg "replay node consumer mismatch" (node.consumer == consumer)
+        assertMsg "replay node operator mismatch" (node.operator == operator)
+        newNodeCid <- exercise replayNodeCid ConsumeDigest with digest = vaa.hash
+        pure (vaa, newNodeCid)
 
     -- | Apply a governance VAA: verify it (against the CURRENT set, per EVM),
     -- check the governance emitter and replay protection, then dispatch.
