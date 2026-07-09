@@ -134,7 +134,7 @@ data IntegratorFixture = IntegratorFixture with
 
 setupIntegrator : Script IntegratorFixture
 setupIntegrator = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   manager <- allocateParty "ExampleManager"
   alice <- allocateParty "RedeemAlice"
   bob <- allocateParty "RedeemBob"

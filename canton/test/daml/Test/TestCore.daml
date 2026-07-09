@@ -201,7 +201,7 @@ testParseAndVerifyVAA = do
 -- external verifiers" doc comment on the choice promises.
 testParseAndVerifyVAAByExternalVerifier : Script ()
 testParseAndVerifyVAAByExternalVerifier = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   tokenBridge <- allocateParty "ExternalTokenBridge"
   Some dCs <- queryDisclosure operator csId
   vaa <- submitWithDisclosures tokenBridge [dCs] do
@@ -222,7 +222,7 @@ testParseAndVerifyVAAByExternalVerifier = do
 -- it (a real, hosted party, not something forged).
 integrationParseAndVerifyVAAByExternalVerifier : Script Party
 integrationParseAndVerifyVAAByExternalVerifier = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   tokenBridge <- allocateParty "IntegrationExternalVerifier"
   Some dCs <- queryDisclosure operator csId
   vaa <- submitWithDisclosures tokenBridge [dCs] do
@@ -259,7 +259,7 @@ testGovernanceSetMessageFee = do
 -- production access path.
 testVerifyAndConsumeVAA : Script ()
 testVerifyAndConsumeVAA = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   ntt <- allocateParty "NttManager"
   disc <- fromSome <$> queryDisclosure operator csId
   (vaa, guardCid) <- submit (actAs ntt <> disclose disc) do
@@ -295,7 +295,7 @@ testVerifyAndConsumeVAA = do
 -- a resubmitted governance VAA.
 testGovernanceReplayRejected : Script ()
 testGovernanceReplayRejected = do
-  (operator, csId) <- setup
+  (operator, _, csId) <- setup
   Some cs0 <- queryContractId operator csId
   _ <- submit operator do
     exerciseByKeyCmd @CoreState cs0.guardianGovernance SubmitGovernanceVAA with
