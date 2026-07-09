@@ -1,0 +1,242 @@
+-- | A reference integrator (a mock NTT-manager shape) demonstrating how an app
+-- consumes a VAA atomically via 'VerifyAndConsumeVAA' (README §4.6).
+--
+-- The flow is PROPOSE-ACCEPT: the user creates a 'RedeemRequest' with their
+-- sole signature (no disclosures, no read grants), and the manager's
+-- automation exercises 'AcceptRedeem', which verifies the VAA, consumes it,
+-- checks the peer, and mints — one atomic transaction. The manager is the
+-- SUBMITTER of the consuming transaction, so the replay-guard lookup inside
+-- 'VerifyAndConsumeVAA' runs in the manager's read view, which provably
+-- contains every guard of this app (the manager signs them all) — the
+-- negative lookup is complete BY CONSTRUCTION, not by operational discipline.
+-- Authority flows the other way: the redeemer's signature on the receipt is
+-- inherited from the archived request. The 'CoreState' disclosure is needed
+-- only by the manager's backend, never by end users.
+--
+-- Why the manager must submit (pinned by 'testReplayNeedsConsumerView' below):
+-- keys are non-unique and lookups are NOT maintainer-attested. Resolution
+-- happens once, on the submitting participant, against the submission's
+-- readers (local contracts, then disclosed ones, then the readers' view), and
+-- the result is a pinned input to validation — no confirming participant
+-- re-runs it against its own store. A positive resolution names a cid that is
+-- checked for activeness like any input; a negative one names nothing and
+-- fails OPEN. A user-submitted consume would carry the manager's inherited
+-- AUTHORITY but not its VISIBILITY, miss existing guards, and double-consume.
+--
+-- Guardian signatures prove the VAA is real, NOT that it is addressed to this
+-- app: 'AcceptRedeem' checks the emitter against the registered peer before
+-- touching the payload.
+--
+-- This module ships in the TEST package only; it is a template for integrator
+-- packages, not part of the core DAR.
+module Test.ExampleIntegrator where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Wormhole.Core.Bytes
+import Wormhole.Core.Replay
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Test.TestCore (setup, govSetFeeVAA, devnetGuardianPubKey)
+
+-- | Stand-in for the integrator's real effect (a mint / unlock). Co-signed:
+-- the manager's authority comes from the accepting submission, the redeemer's
+-- is inherited from the archived 'RedeemRequest'.
+template RedeemReceipt
+  with
+    manager  : Party
+    redeemer : Party
+    sequence : Int
+    payload  : Bytes
+  where
+    signatory manager, redeemer
+
+-- | The app's configuration anchor: the replay scope and the registered peer.
+template ExampleIntegrator
+  with
+    manager     : Party    -- app party: signatory, and the replay scope
+    peerChain   : Int      -- registered source-chain peer of this app
+    peerAddress : Bytes32
+  where
+    signatory manager
+
+-- | The user's half of the propose-accept flow: created with the redeemer's
+-- sole signature and no special visibility. Withdrawable by the redeemer (the
+-- auto-generated Archive) until accepted.
+template RedeemRequest
+  with
+    redeemer   : Party
+    manager    : Party
+    encodedVAA : Bytes
+  where
+    signatory redeemer
+    observer manager
+
+    -- | The manager's half: verify + consume + peer-check + mint, one atomic
+    -- transaction, SUBMITTED BY THE MANAGER — its read view makes the guard
+    -- lookup complete, structurally. Consuming: the accepted request is
+    -- archived (redeemer's authority inherited from this contract), and that
+    -- same inherited authority co-signs the receipt. @pubKeys@ are the
+    -- submitter's untrusted hints, so they are supplied here, not by the user.
+    choice AcceptRedeem : ContractId RedeemReceipt
+      with
+        integratorCid : ContractId ExampleIntegrator
+        coreStateCid  : ContractId CoreState  -- disclosed to the manager's backend
+        pubKeys       : [(Int, Bytes)]
+      controller manager
+      do
+        integ <- fetch integratorCid
+        assertMsg "request addressed to a different manager" (integ.manager == manager)
+        (vaa, _guard) <- exercise coreStateCid VerifyAndConsumeVAA with
+          encodedVAA
+          pubKeys
+          consumer = manager
+        assertMsg "not from the registered peer"
+          (vaa.emitterChain == integ.peerChain
+            && normalizeHex vaa.emitterAddress == normalizeHex integ.peerAddress)
+        create RedeemReceipt with manager, redeemer, sequence = vaa.sequence, payload = vaa.payload
+
+-- | NOT an integration pattern — a minimal semantics probe backing the module
+-- header and README §4.6. Its one choice hands @anyone@ the consumer's
+-- inherited authority for a consume, without the consumer's read view. See
+-- 'testReplayNeedsConsumerView'.
+template LookupProbe
+  with
+    consumer : Party
+    anyone   : Party
+  where
+    signatory consumer
+    observer anyone
+
+    nonconsuming choice ProbeConsume : ()
+      with
+        coreStateCid : ContractId CoreState
+        encodedVAA   : Bytes
+        pubKeys      : [(Int, Bytes)]
+      controller anyone
+      do
+        _ <- exercise coreStateCid VerifyAndConsumeVAA with
+          encodedVAA
+          pubKeys
+          consumer
+        pure ()
+
+-- | Shared fixture: a bootstrapped bridge, one integrator app, and the
+-- CoreState disclosure the manager's backend attaches to accepts.
+data IntegratorFixture = IntegratorFixture with
+  operator : Party
+  csId     : ContractId CoreState
+  manager  : Party
+  users    : [Party]
+  intCid   : ContractId ExampleIntegrator
+  disc     : Disclosure
+
+setupIntegrator : Script IntegratorFixture
+setupIntegrator = do
+  (operator, _, csId) <- setup
+  manager <- allocateParty "ExampleManager"
+  alice <- allocateParty "RedeemAlice"
+  bob <- allocateParty "RedeemBob"
+  intCid <- submit manager do
+    createCmd ExampleIntegrator with
+      manager
+      -- govSetFeeVAA is emitted by (chain 1, 0x..04); register that as the peer.
+      peerChain = solanaGovernanceChainId
+      peerAddress = defaultGovernanceContract
+  -- A CoreState stakeholder (here the operator) exports the disclosure for the
+  -- manager's backend.
+  disc <- fromSome <$> queryDisclosure operator csId
+  pure IntegratorFixture with operator, csId, manager, users = [alice, bob], intCid, disc
+
+devnetPubKeys : [(Int, Bytes)]
+devnetPubKeys = [(0, devnetGuardianPubKey)]
+
+-- | End-to-end propose-accept redemption, the production shape: the user
+-- creates the request alone (no disclosures, no read grants); the manager's
+-- backend accepts with the CoreState disclosure attached, consuming the VAA in
+-- its own read view. Replays are then rejected at accept time for every
+-- requester of this app, while a second app remains its own replay scope.
+testIntegratorRedeem : Script ()
+testIntegratorRedeem = do
+  IntegratorFixture{csId, manager, users = [alice, bob], intCid, disc} <- setupIntegrator
+
+  -- The user's half needs nothing but her own signature.
+  reqCid <- submit alice do
+    createCmd RedeemRequest with redeemer = alice, manager, encodedVAA = govSetFeeVAA
+  let acceptArgs = AcceptRedeem with
+        integratorCid = intCid
+        coreStateCid = csId
+        pubKeys = devnetPubKeys
+
+  -- Even the manager cannot see the CoreState without the disclosure (it is
+  -- not a stakeholder): rejected.
+  submitMustFail (actAs manager) do exerciseCmd reqCid acceptArgs
+
+  -- The manager's backend accepts with the disclosure: verify + consume +
+  -- peer-check + mint, one transaction.
+  receiptCid <- submit (actAs manager <> disclose disc) do
+    exerciseCmd reqCid acceptArgs
+  Some receipt <- queryContractId alice receiptCid
+  receipt.sequence === 1
+  receipt.redeemer === alice
+  -- The request is consumed by the accept.
+  archived <- queryContractId alice reqCid
+  archived === None
+
+  -- The guard is scoped to the manager (not to alice).
+  [(_, guard)] <- query @ConsumedVAA manager
+  guard.consumer === manager
+
+  -- Replay: any further request for the same VAA is rejected at accept time —
+  -- the manager's view sees the guard, structurally.
+  reqCid2 <- submit bob do
+    createCmd RedeemRequest with redeemer = bob, manager, encodedVAA = govSetFeeVAA
+  submitMustFail (actAs manager <> disclose disc) do exerciseCmd reqCid2 acceptArgs
+
+  -- A second app is its own replay scope: the SAME VAA redeems there too.
+  manager2 <- allocateParty "ExampleManager2"
+  intCid2 <- submit manager2 do
+    createCmd ExampleIntegrator with
+      manager = manager2
+      peerChain = solanaGovernanceChainId
+      peerAddress = defaultGovernanceContract
+  reqCid3 <- submit alice do
+    createCmd RedeemRequest with redeemer = alice, manager = manager2, encodedVAA = govSetFeeVAA
+  receipt2Cid <- submit (actAs manager2 <> disclose disc) do
+    exerciseCmd reqCid3 AcceptRedeem with
+      integratorCid = intCid2
+      coreStateCid = csId
+      pubKeys = devnetPubKeys
+  Some receipt2 <- queryContractId alice receipt2Cid
+  receipt2.manager === manager2
+
+-- | THE FOOTGUN, pinned via 'LookupProbe': a consume submitted without the
+-- consumer's read view double-consumes. The guard lookup inside
+-- 'VerifyAndConsumeVAA' resolves against the submission's readers and its
+-- negative result is a pinned input to validation — no confirming participant
+-- re-checks it — so with only the submitter's view it misses the existing
+-- guard and a SECOND guard is created under the same key. This is why
+-- redemption flows must put the consumer in the submission (propose-accept).
+-- If this test ever starts failing, the ledger has tightened key semantics:
+-- revisit README §4.6.
+testReplayNeedsConsumerView : Script ()
+testReplayNeedsConsumerView = do
+  IntegratorFixture{csId, manager, users = [alice, _], disc} <- setupIntegrator
+  -- A sound consume first: the manager submits it itself.
+  _ <- submit (actAs manager <> disclose disc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = devnetPubKeys
+      consumer = manager
+  -- Alice replays through the probe: the manager's AUTHORITY is inherited,
+  -- but the guard lookup runs in alice's view and misses.
+  probeCid <- submit manager do
+    createCmd LookupProbe with consumer = manager, anyone = alice
+  submit (actAs alice <> disclose disc) do
+    exerciseCmd probeCid ProbeConsume with
+      coreStateCid = csId
+      encodedVAA = govSetFeeVAA
+      pubKeys = devnetPubKeys
+  guards <- query @ConsumedVAA manager
+  length guards === 2   -- two guards, same key: the double-consume happened

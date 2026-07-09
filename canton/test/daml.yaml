@@ -18,5 +18,9 @@ dependencies:
 build-options:
   # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
   - --target=2.3
+  # Test.ExampleIntegrator deliberately defines reference templates in this
+  # test-only package (they must never ship in the core DAR); uploading this
+  # DAR — devnet only — drags daml-script along, which is acceptable there.
+  - -Wno-template-interface-depends-on-daml-script
 data-dependencies:
   - ../core/.daml/dist/wormhole-core-0.1.0.dar
