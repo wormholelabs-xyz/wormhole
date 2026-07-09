@@ -50,6 +50,15 @@ hexDigitValue cp
   where
     [cp0, cp9, cpa, cpf] = T.toCodePoints "09af"
 
+-- | True if every character is a lowercase hex digit (@0-9a-f@); true for the
+-- empty string. The predicate counterpart of 'hexDigitValue' (which errors on
+-- a bad digit and so cannot validate).
+isLowerHex : Text -> Bool
+isLowerHex t = all valid (T.toCodePoints t)
+  where
+    valid cp = (cp >= cp0 && cp <= cp9) || (cp >= cpa && cp <= cpf)
+    [cp0, cp9, cpa, cpf] = T.toCodePoints "09af"
+
 -- | Parse a big-endian hex byte string into an 'Int'. Suitable for values that
 -- fit in 63 bits (chain ids, sequences, nonces, fees in practice). Callers that
 -- need uint256 semantics must bound-check upstream.
