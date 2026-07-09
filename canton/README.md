@@ -133,10 +133,10 @@ digest = keccak256( keccak256( body ) )          // double keccak, Ethereum-styl
 ```
 
 Guardians sign `digest` with secp256k1 (Ethereum ECDSA, 65-byte `r‖s‖v`).
-Replay protection keys off `digest` (the double keccak — EVM's `vm.hash`), both
-for governance (`consumedGovernance`, §4.4) and for integrator VAAs
-(`ConsumedVAA`, §4.6). The on-chain Daml verifier reconstructs and re-hashes the
-body and checks signatures against the stored guardian set (§5).
+Replay protection records `digest` (the double keccak — EVM's `vm.hash`), both
+for governance (`consumedGovernance`, §4.4) and for integrator VAAs (the
+`ReplayNode` trie, §4.6). The on-chain Daml verifier reconstructs and re-hashes
+the body and checks signatures against the stored guardian set (§5).
 
 `ChainID` for Canton is **72** (`ChainIDCanton`), the next free mainnet ID after
 Arc (71). It is registered in [`sdk/vaa/structs.go`](../sdk/vaa/structs.go).
@@ -469,7 +469,7 @@ Matches EVM (`Setters.sol`): when a new set is installed, the previous set's
 non-current set only while `effectiveTime < expirationTime`. The current set
 never expires.
 
-### 4.6 Per-VAA replay protection for integrators
+### 4.6 Replay protection for integrators: a trie of consumed digests
 
 Governance replay protection is the `consumedGovernance` set inside `CoreState`
 (§4.4) — fine there, because governance actions are rare and already churn the
@@ -479,89 +479,112 @@ set would be reserialized into every create node (payload size, participant DB
 write, and network cost all linear in history), and every integrator's consume
 would contend on the one singleton contract.
 
-Instead, consuming a VAA creates a dedicated contract — the Solana
-claim-account shape (`Replay.daml`):
+They also must not be recorded as per-digest keyed contracts (the design this
+replaces): Canton LF 2.3 key lookups resolve once, on the submitting
+participant, against the submission's readers, and the result is a pinned
+input to validation. Confirming participants re-check authorization,
+conformance, and the activeness of every contract a transaction _uses_ — but
+they do **not** re-run key lookups against their own stores (with non-unique
+keys and per-party visibility there is no canonical answer, and local
+re-checks would make validation nondeterministic and leak private state). A
+_positive_ resolution names a cid that is consistency-checked like any input;
+a _negative_ one names nothing and **fails open**. Replay protection is
+precisely a negative claim ("this digest was never consumed"), so it cannot be
+built on key lookups — this module uses no contract keys at all.
+
+Instead, each consumer's consumed-digest set is a **prefix trie of leaf
+contracts** (`Replay.daml`). A node covers a hex `prefix` and stores the set
+of digest *suffixes* consumed under it:
 
 ```haskell
-template ConsumedVAA
+template ReplayNode
   with
-    consumer : Party     -- integrator scope party; bears the replay risk
-    operator : Party     -- co-signs so the consumer cannot archive-and-replay
-    vaaHash  : Bytes32   -- double-keccak digest, same keying as consumedGovernance
-    ...                  -- emitter provenance (untrusted, for ops/debugging)
+    consumer       : Party    -- integrator scope party; bears the replay risk
+    operator       : Party    -- co-signs: no unilateral archive or re-create
+    prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
+    splitThreshold : Int      -- node capacity; children inherit it
+    consumed       : Set Bytes  -- suffixes, each (64 − |prefix|) nibbles
   where
     signatory consumer, operator
-    key (consumer, vaaHash) : (Party, Bytes32)
-    maintainer key._1
 ```
 
+A trie starts as one root (empty prefix, empty set). `ConsumeDigest`
+(consuming, controller `consumer`) checks the node covers the digest, rejects
+if the suffix is already present, and recreates the node with it inserted.
+When the node is at `splitThreshold`, the consume instead **splits** it: all
+16 children are created (one per nibble, empty ones included), suffixes
+bucketed by their first nibble, which is dropped. Internal nodes are never
+stored. **The invariant: a consumer's active nodes partition the digest space
+— every digest has exactly one covering node**, so membership in that node is
+global consumption truth.
+
+**Why this is sound where keys were not.** "Not consumed" became a positive
+statement about one *named* contract: fetch the covering node, check absence,
+consume it. Every confirmer validates the node's activeness — a stale cid
+conflicts and aborts; the current covering node provably contains or excludes
+the digest. Soundness is **submitter-independent**: any submitter with a
+disclosure of the current covering node gets a correct check, and a wrong or
+stale node can only fail the transaction, never replay. Where the key design
+failed *open* (a lookup that misses waves a replay through), the trie fails
+*closed* (an archived subspace has no covering node — nothing verifies).
+
 `VerifyAndConsumeVAA` (nonconsuming, on `CoreState`, flexible controller
-`consumer`) verifies the VAA (§5), fails if `(consumer, digest)` already has a
-guard (`lookupByKey`), and creates one. Integrators exercise it in the same
-transaction as the action the VAA authorizes, so verify + consume + act is
-atomic. The consumer must be able to see the `CoreState` to exercise — explicit
-disclosure or an observer party (Open Questions item 4).
+`consumer`) takes the covering node's cid, verifies the VAA (§5), binds the
+node to the (consumer, operator) pairing, and exercises `ConsumeDigest` with
+the digest — verify + consume + act in one transaction.
 
 Properties:
 
-- **Uniqueness.** Contract keys are non-unique on Canton (§4.1), and key
-  lookups are **not maintainer-attested**: a lookup resolves against what the
-  _submission's readers_ can see (local contracts first, then disclosed ones,
-  then the readers' view). "At most one guard per (consumer, digest)" therefore
-  rests on three legs: every create flows through the vetted choice, which
-  looks up before creating (behavioral, like the `EmitterRegistry` id
-  discipline); every consuming submission carries the consumer's read view
-  (see the gotcha below); and the consumer is hosted on a single participant,
-  which then serializes its consumes. The trust is aligned: guardians never
-  re-check target-chain consumption — replay protection is the consumer's own
-  safety property, enforced on exactly the participant that bears the risk.
-- **No archive-and-replay.** The guard is created inside a `CoreState` choice
-  and inherits the `operator`'s signature, so it is co-signed: neither the
-  consumer nor the operator can archive it alone. Guards are never archived —
-  their permanence _is_ the replay protection.
-- **Scoping and contention.** Guards are scoped per consumer party: different
-  apps consume the same VAA independently, and distinct digests never contend
-  at all (the choice is nonconsuming). Cost per consume is one small, key-indexed
-  contract, forever — ACS growth is linear in consumed VAAs by design, the same
-  trade Solana makes with claim accounts.
+- **No archive-and-replay, no shadow roots.** Archival alone only bricks
+  (fail-closed); the replay vector is node *re-creation*. Nodes are co-signed,
+  so neither the consumer nor the operator can archive or create one alone;
+  splits inherit both signatures from the archived parent (the operator is not
+  involved per consume). Roots are granted exactly once per consumer through
+  the operator's `ReplayRootRegistry` — a *positive*, on-ledger
+  one-root-per-consumer check (the registry carries the granted set and every
+  grant consumes it), via a one-time propose-accept ceremony
+  (`ReplayRootRequest`), mirroring emitter registration. The irreducible
+  remainder: consumer and operator *colluding* can rebuild a trie —
+  signatories can always unmake their own contracts.
+- **Scoping and contention.** Tries are per consumer party: different apps
+  consume the same VAA independently. Consumes racing on the *same node*
+  conflict — exactly one commits (validator-checked, regardless of submitter);
+  the loser re-resolves the covering node and retries. A blind retry of a
+  consume that actually committed fails on membership ("VAA already consumed")
+  — a clean idempotency signal. Until the first split, all of one app's
+  consumes serialize through its root; 16-way fanout begins at
+  `splitThreshold` consumes.
+- **Cost.** `defaultSplitThreshold = 128`: suffixes are ≤64-char hex (~66 B
+  serialized), so nodes top out ~8.5 KB, the average consume rewrites ~4 KB,
+  and the split transaction redistributes the same bytes across 16 creates
+  (~15 KB) — all far below Canton's request caps. Total ACS bytes stay ~66 B
+  per digest; 10 M digests ≈ 150 k nodes at depth 3–4. Larger thresholds thin
+  the ACS but amplify every write.
+- **Privacy.** Nodes are integrator-private safety state — deliberately NOT
+  observed by `guardianObserver` (§4.1): guardians never re-check target-chain
+  consumption, and the attestation surface does not include app redemptions.
 
-**Integrating — propose-accept, and why.** The executable reference is
+**The disclosure service.** Submitters locate the covering node off-ledger: a
+service indexes the consumer's active nodes by prefix (following the
+`CreatedEvent`s that consumes and splits produce) and serves, for a digest,
+the covering node's cid plus its explicit disclosure — alongside the
+`CoreState` disclosure it already serves (§4.3). It is **untrusted for
+safety**: the worst it can do is serve a wrong or stale node, which fails the
+transaction. It is trusted for *liveness* only, like any RPC endpoint. (Go
+implementation is future work; the Daml tests simulate it with a script
+helper, `Test.TestReplay.coveringNode`, which also asserts the partition
+invariant on every use.)
+
+**Integrating — direct and user-submitted.** The executable reference is
 [`test/daml/Test/ExampleIntegrator.daml`](test/daml/Test/ExampleIntegrator.daml)
-(test package only). The recommended shape is **propose-accept**: the user
-creates a `RedeemRequest` with their sole signature (no disclosures, no read
-grants), and the manager's automation exercises `AcceptRedeem` — verify +
-consume + peer-check + mint, one atomic transaction, **submitted by the
-manager**. The `CoreState` disclosure is held by the manager's backend only;
-the redeemer's signature on the receipt is inherited from the archived
-request.
-
-The reason the *manager must submit* is a property of this key model, worth
-being explicit about. Key lookups are resolved once, on the submitting
-participant, against the submission's readers (local contracts → disclosed →
-reader-visible); the result is a pinned input to validation. Confirming
-participants re-check authorization, conformance, and the activeness of every
-contract the transaction _uses_ — but they do **not** re-run key lookups
-against their own stores (with non-unique keys and per-party visibility there
-is no canonical answer, and local re-checks would make validation
-nondeterministic and leak private state). So a _positive_ resolution is safe —
-it names a cid that is consistency-checked like any input — while a _negative_
-one names nothing and **fails open**. A negative lookup is sound only when the
-resolving view is complete by construction: the manager signs every guard of
-its app, so manager-as-submitter sees them all. A redemption submitted with
-only the user's view misses existing guards and double-consumes —
-`testReplayNeedsConsumerView` pins exactly that (two guards under one key) via
-a minimal `LookupProbe` template, deliberately not shaped like a flow. If that
-test ever starts failing, the ledger has tightened key semantics and this
-section should be revisited.
-
-User-*submitted* redemption (a flexible-controller choice exercised by the end
-user) is deliberately absent from the example: it is sound only when the
-submission carries the manager's read view — `readAs manager` through the
-app's participant, a per-API-user IAM grant exposing the manager's entire ACS.
-If user-submitted redemption is genuinely needed, scope the exposure instead:
-add a well-known public party as observer on `ConsumedVAA` and have users
-submit with `readAs public` (the Splice pattern), trading consumption metadata
-privacy for it.
+(test package only): the end user herself exercises `Redeem` on the app
+contract with two disclosures attached (CoreState + covering node) and nothing
+else — no read grants, no `readAs`, no relayer queue. The manager's
+*authority* for the consume is inherited from the app contract's signatory;
+its *visibility* is simply not needed. `testIntegratorRedeem` pins the
+inversion of the old key-based footgun: replay attempts by arbitrary
+submitters fail on activeness (stale node) or membership (fresh node) — never
+succeed.
 
 ---
 
@@ -791,6 +814,7 @@ canton/
     daml.yaml                    ← data-dependency on core's DAR
     daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
     daml/Test/TestGuardianObserver.daml ← read-only guardianObserver visibility/authority tests
+    daml/Test/TestReplay.daml    ← replay-trie tests + disclosure-service simulation (§4.6)
     daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
   devnet/
     start_sandbox.sh             ← starts the Ledger API v2 sandbox
