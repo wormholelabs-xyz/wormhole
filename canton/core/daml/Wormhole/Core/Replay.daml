@@ -164,10 +164,9 @@ template ReplayRootRegistry
         create this with granted = Set.insert consumer granted
 
 -- | The consumer's half of the root-creation ceremony: a one-time
--- propose-accept per app (mirroring 'EmitterRequest'). The consumer's
--- signature on this request is what authorizes its co-signature on the root;
--- the operator accepts against its registry, which enforces
--- one-root-per-consumer.
+-- propose-accept per app. The consumer's signature on this request is what
+-- authorizes its co-signature on the root; the operator accepts against its
+-- registry, which enforces one-root-per-consumer.
 template ReplayRootRequest
   with
     consumer       : Party

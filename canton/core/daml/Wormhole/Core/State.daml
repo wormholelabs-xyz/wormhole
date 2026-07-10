@@ -306,46 +306,33 @@ emitterAddressFor registrar owner emitterId =
 template EmitterRegistry
   with
     operator         : Party
-    guardianObserver : Party  -- threaded into each new Emitter by ApproveEmitter
+    guardianObserver : Party  -- threaded into each new Emitter by RegisterEmitter
     nextId           : Int
   where
     signatory operator
 
-    -- Returns guardianObserver for ApproveEmitter to stamp onto the new Emitter.
-    choice AllocateEmitterId : (ContractId EmitterRegistry, Int, Party)
-      controller operator
+    -- | Direct, requester-submitted registration: allocates the next id and
+    -- creates the co-signed 'Emitter', one transaction, no operator crank. The
+    -- flexible controller brings the @requester@'s signature; the operator's
+    -- is INHERITED from this contract's signatory. Permissionless by design
+    -- (EVM/Sui parity: anyone may emit) — the requester only needs this
+    -- registry disclosed (README §4.7). Consuming, so racing registrations
+    -- contend here and exactly one commits; the loser re-resolves the fresh
+    -- registry cid and retries.
+    choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
+      with
+        requester : Party
+      controller requester
       do
         reg' <- create this with nextId = nextId + 1
-        pure (reg', nextId, guardianObserver)
-
--- | A request by @requester@ to be granted an emitter. The operator approves it,
--- allocating a stable @emitterId@ from its 'EmitterRegistry' (passed by cid —
--- the operator resolves it from its own ACS) and creating the 'Emitter' in a
--- single transaction. The @requester@'s signature on this request is what
--- authorizes the owner co-signatory on the created 'Emitter'.
-template EmitterRequest
-  with
-    requester : Party
-    operator  : Party
-  where
-    signatory requester
-    observer operator
-
-    choice ApproveEmitter : ContractId Emitter
-      with
-        registryCid : ContractId EmitterRegistry
-      controller operator
-      do
-        reg <- fetch registryCid
-        assertMsg "registry belongs to a different operator" (reg.operator == operator)
-        (_, emitterId, guardianObserver) <- exercise registryCid AllocateEmitterId
-        create Emitter with
+        emitter <- create Emitter with
           operator
           owner = requester
           guardianObserver
-          emitterId
-          emitterAddress = emitterAddressFor operator requester emitterId
+          emitterId = nextId
+          emitterAddress = emitterAddressFor operator requester nextId
           sequence = 0
+        pure (reg', emitter)
 
 -- | A registered emitter: the per-emitter sequence counter, identified by
 -- @(operator, owner, emitterId)@ in its payload. The sequence lives here (not

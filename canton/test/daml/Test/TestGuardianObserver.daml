@@ -122,19 +122,11 @@ testPublishRequiresOnlyOwner = do
   pure ()
 
 -- | The observer is scoped to the attestation surface only. It is NOT a
--- stakeholder of pre-approval intent ('EmitterRequest') or id allocation
--- ('EmitterRegistry'), so neither is visible to it — least privilege.
+-- stakeholder of id allocation ('EmitterRegistry'), so that is not visible to
+-- it — least privilege.
 testObserverDoesNotSeeOutOfScope : Script ()
 testObserverDoesNotSeeOutOfScope = do
   (operator, guardianObserver, _) <- setup
-  requester <- allocateParty "Requester"
-  reqId <- submit requester do createCmd EmitterRequest with requester, operator
-
-  -- EmitterRequest is out of scope.
-  reqView <- queryContractId guardianObserver reqId
-  reqView === None
-  reqs <- query @EmitterRequest guardianObserver
-  assertMsg "observer must not see EmitterRequests" (null reqs)
 
   -- EmitterRegistry is out of scope (it carries the observer as a field for
   -- threading, but does not name it as a template observer).

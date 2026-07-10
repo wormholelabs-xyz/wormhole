@@ -50,7 +50,7 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
 
 -- | The emitter-id registry the operator creates alongside the 'CoreState' at
 -- setup. Emitter ids are allocated sequentially; it also carries
--- @guardianObserver@ for 'ApproveEmitter' to thread into each 'Emitter'.
+-- @guardianObserver@ for 'RegisterEmitter' to thread into each 'Emitter'.
 mkInitialEmitterRegistry : Party -> Party -> EmitterRegistry
 mkInitialEmitterRegistry operator guardianObserver =
   EmitterRegistry with operator, guardianObserver, nextId = 0

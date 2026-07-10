@@ -33,7 +33,7 @@ govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479
 -- co-signed by the @operator@ and a @guardianGovernance@ party (a single party
 -- here; in production a k-of-n threshold party), so genesis needs both. It also
 -- allocates the read-only @guardianObserver@ party and threads it into the
--- 'CoreState' and 'EmitterRegistry' (from which 'ApproveEmitter' carries it into
+-- 'CoreState' and 'EmitterRegistry' (from which 'RegisterEmitter' carries it into
 -- each 'Emitter'). Also creates the 'ReplayRootRegistry' (replay-trie root
 -- grants, see Test.TestReplay). The result keeps @operator@ FIRST so
 -- bootstrap.sh's first-party extraction still yields the operator;
@@ -49,14 +49,17 @@ setup = do
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator)
   pure (operator, guardianObserver, csId)
 
--- | Register an emitter for @owner@: allocates a stable @emitterId@ from the
--- 'EmitterRegistry' (resolved from the operator's own ACS, passed by cid) and
--- creates the 'Emitter', returning its cid.
+-- | Register an emitter for @owner@, the production way: the requester submits
+-- alone against the disclosed 'EmitterRegistry' (served off-ledger by the
+-- disclosure service — simulated here by querying as the operator); the
+-- operator's co-signature on the 'Emitter' is inherited from the registry.
 registerEmitter : Party -> Party -> Script (ContractId Emitter)
 registerEmitter operator owner = do
-  reqId <- submit owner do createCmd EmitterRequest with requester = owner, operator
   [(regCid, _)] <- query @EmitterRegistry operator
-  submit operator do exerciseCmd reqId ApproveEmitter with registryCid = regCid
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  (_, emCid) <- submit (actAs owner <> disclose regDisc) do
+    exerciseCmd regCid RegisterEmitter with requester = owner
+  pure emCid
 
 -- | Publishing increments the per-emitter sequence and yields the expected
 -- 'WormholeMessage'. The message carries the emitter's identity components
@@ -291,9 +294,6 @@ testArchives = do
   Some cs <- queryContractId operator csId
   -- CoreState is co-signed, so archiving needs operator + guardianGovernance.
   submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
-  alice <- allocateParty "ArchAlice"
-  reqId <- submit alice do createCmd EmitterRequest with requester = alice, operator
-  submit alice do archiveCmd reqId              -- Archive EmitterRequest
   bob <- allocateParty "ArchBob"
   emId <- registerEmitter operator bob
   -- Emitter now has two signatories (operator + owner), so both must authorize.
