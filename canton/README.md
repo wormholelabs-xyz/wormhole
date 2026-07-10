@@ -9,10 +9,11 @@ client under [`node/pkg/cantonclient`](../node/pkg/cantonclient)).
 
 **Target deployment:** the **public Canton Network mainnet** — Canton **3.5.x**
 protocol, **Daml SDK 3.5.1** (Daml-LF **2.3**, Protocol Version **35**). Two
-consequences shape the design: Ledger API **v2**, and **contract keys that are
-non-unique** (Canton keys give stable lookup but do not enforce uniqueness — so
-identity uniqueness is registry-enforced and address integrity is cryptographic;
-see §1, §4).
+consequences shape the design: Ledger API **v2**, and **contract keys too weak
+to build on** (non-unique, resolved against the submitter's read view, negative
+lookups fail open) — the package uses **no contract keys**: contracts are
+addressed by contract-id, resolved off-ledger (§4.7); identity uniqueness is
+registry-enforced and address integrity is cryptographic (see §1, §4).
 
 The goal is parity with the canonical EVM core bridge
 ([`ethereum/contracts/Implementation.sol`](../ethereum/contracts/Implementation.sol),
@@ -72,17 +73,20 @@ The most consequential differences:
   Ethereum does. Guardian-set state on Canton therefore stores guardian
   **public keys** (not just their 20-byte addresses), bound to the canonical
   addresses from the governance VAA (§5).
-- **No global mutable singletons; contract keys are non-unique.** The "core
-  bridge contract" is modeled as a single long-lived **`CoreState`** contract,
-  archived and recreated on every governance transition. Contract keys exist on
-  Canton 3.5 (Daml-LF 2.3) but are **not unique** — multiple active contracts may
-  share a key ([docs](https://docs.canton.network/appdev/modules/m3-contract-keys#contract-keys)).
-  So keys give ergonomics (stable lookup / `ExerciseByKeyCommand`), not
-  uniqueness: the `CoreState` is **co-signed by the `operator` and a
-  `guardianGovernance` party** (a k-of-n threshold party) and keyed by the latter,
-  so the operator cannot forge the guardian set (§4.1); per-emitter uniqueness is
-  a **registry** that allocates ids plus an owner-bound, cryptographic address
-  (§4.2).
+- **No global mutable singletons; no contract keys.** The "core bridge
+  contract" is modeled as a single long-lived **`CoreState`** contract, archived
+  and recreated on every governance transition. Contract keys exist on Canton
+  3.5 (Daml-LF 2.3) but are **not unique** — multiple active contracts may share
+  a key ([docs](https://docs.canton.network/appdev/modules/m3-contract-keys#contract-keys))
+  — and lookups resolve against the submission's readers, with negative results
+  failing open (§4.6). They can carry neither uniqueness nor authenticity, so
+  this package uses none: contracts are addressed **by contract-id**, resolved
+  from a stakeholder's own ACS or via the disclosure service (§4.7), and
+  authenticated by their **payloads** (signatories cannot be forged). The
+  `CoreState` is **co-signed by the `operator` and a `guardianGovernance`
+  party** (a k-of-n threshold party), so the operator cannot forge the guardian
+  set (§4.1); per-emitter uniqueness is a **registry** that allocates ids plus
+  an owner-bound, cryptographic address (§4.2).
 
 ---
 
@@ -175,8 +179,6 @@ template CoreState
   where
     signatory operator, guardianGovernance
     observer guardianObserver          -- read-only; sees governance transitions
-    key guardianGovernance : Party   -- lookup by the governance anchor is authentic
-    maintainer key
 ```
 
 **Read-only guardian observer.** `guardianObserver` is a template `observer`
@@ -198,22 +200,22 @@ archives the current `CoreState`, and `create`s the next one with updated fields
 This is the Daml idiom for mutable state and gives us deterministic,
 replay-protected transitions.
 
-**Singleton co-signed by a governance party, keyed for authenticity.** The
-`CoreState` is co-signed by the `operator` and a **`guardianGovernance`** party.
-In production that is a **decentralized-namespace external party** controlled by a
-k-of-n threshold of guardian keys — the same construction as the Canton Network's
-DSO party — rotated at the topology layer without touching this template (the
-party id, and thus the key and every consumer's lookup, is stable across guardian
-rotation). Two things follow:
+**Singleton co-signed by a governance party; authenticity is in the payload.**
+The `CoreState` is co-signed by the `operator` and a **`guardianGovernance`**
+party. In production that is a **decentralized-namespace external party**
+controlled by a k-of-n threshold of guardian keys — the same construction as
+the Canton Network's DSO party — rotated at the topology layer without touching
+this template (the party id, and thus every consumer's trust anchor, is stable
+across guardian rotation). Two things follow:
 
-- **The operator cannot forge the guardian set.** Because `guardianGovernance` is
-  a signatory *and* the key maintainer, a compromised operator cannot `create` a
-  `CoreState` bearing the real governance party — so a lookup by the known
-  `guardianGovernance` party (`fetchByKey`/`ExerciseByKeyCommand`) can only ever
-  resolve an **authentic** `CoreState`. Its guardian set is thus cryptographically
-  anchored, not operator-controlled. (Keys are still non-unique, so an operator
-  puppet could create a `CoreState` under a *different* governance party — but it
-  is not findable by the real anchor and no consumer trusts it.)
+- **The operator cannot forge the guardian set.** Because `guardianGovernance`
+  is a signatory, a compromised operator cannot `create` a `CoreState` bearing
+  the real governance party — so any fetched or disclosed `CoreState` whose
+  `guardianGovernance` (or `operator`) field is the known anchor party is
+  **authentic by construction**, however its cid was obtained. Consumers
+  authenticate the payload, never the resolution path (§4.7). An operator
+  puppet could create a `CoreState` under a *different* governance party — but
+  its payload names the wrong parties and no consumer trusts it.
 - **Governance stays low-friction.** `guardianGovernance` actively signs only at
   **genesis**; each `SubmitGovernanceVAA` transition inherits its authority from
   the archived contract (the same authority-propagation as the `Emitter` owner
@@ -244,21 +246,17 @@ config and governance state.
 Mirrors `publishMessage(nonce, payload, consistencyLevel)` from
 `Implementation.sol:15` and whitepaper 0004.
 
-An integrator first registers an emitter. The operator runs an `EmitterRegistry`
-(created at setup, keyed by the operator) that allocates a stable integer id;
-`ApproveEmitter` allocates one and creates the keyed `Emitter` in one transaction:
+An integrator first registers an emitter — **directly, with no operator
+involvement**. The operator runs an `EmitterRegistry` (created at setup); the
+requester exercises `RegisterEmitter` on it, holding only the registry's
+disclosure (§4.7). The flexible controller brings the requester's signature;
+the operator's co-signature on the created `Emitter` is *inherited* from the
+registry's signatory — the same authority-inheritance that powers
+`VerifyAndConsumeVAA`. Registration is permissionless (EVM/Sui parity: anyone
+may emit); the choice is consuming, so racing registrations contend on the
+registry and the loser retries with the fresh cid:
 
 ```haskell
-template EmitterRequest with
-    requester : Party
-    operator  : Party
-  where
-    signatory requester
-    observer operator
-    -- operator exercises ApproveEmitter, which allocates an emitterId from the
-    -- EmitterRegistry and creates the keyed Emitter in one transaction. The
-    -- requester's signature on this request authorizes the owner co-signatory.
-
 -- One per operator; allocates monotonically increasing emitter ids.
 template EmitterRegistry with
     operator         : Party
@@ -266,32 +264,27 @@ template EmitterRegistry with
     nextId           : Int
   where
     signatory operator
-    key operator : Party
-    maintainer key
     -- guardianObserver is a FIELD only here, NOT a template observer: guardians
     -- watch the attestation surface, not id allocation (least privilege).
-    -- choice AllocateEmitterId : (ContractId EmitterRegistry, Int, Party)
-    --   -- result carries guardianObserver so ApproveEmitter threads it into the
-    --   -- new Emitter from this single key resolution.
+    -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
+    --   with requester : Party
+    --   controller requester   -- operator authority inherited; no crank
 
 template Emitter
   with
     operator         : Party
     owner            : Party
     guardianObserver : Party   -- read-only guardian observer (stakeholder, never signs)
-    emitterId        : Int      -- registry-allocated; key._3
+    emitterId        : Int      -- registry-allocated
     emitterAddress   : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
     sequence         : Int      -- next sequence to assign (per-emitter)
   where
     signatory operator, owner   -- owner co-signs: the msg.sender analog
     observer guardianObserver   -- read-only; sees PublishMessage (consuming)
-    key (operator, owner, emitterId) : (Party, Party, Int)
-    maintainer key._1
 ```
 
-The `guardianObserver` is threaded in at registration: `ApproveEmitter`
-resolves the `EmitterRegistry` once (`AllocateEmitterId`, whose result now
-carries the party) and sets the field on the created `Emitter`. Because
+The `guardianObserver` is threaded in at registration: `RegisterEmitter` sets
+the registry's field on the created `Emitter`. Because
 `PublishMessage` is consuming, the observer is an informee of every publish
 exercise (and its `WormholeMessage` result) plus the sequence-bumped successor
 `Emitter` create — the full message surface — with no authority (§4.1, §10).
@@ -346,18 +339,19 @@ choice PublishMessage : WormholeMessage
 ```
 
 The choice's **exercise result** is the `WormholeMessage`. The sequence-bumped
-`Emitter` is recreated under the **same key** (both signatures inherited from the
-consumed contract), so the owner publishes again via
-`exerciseByKey`/`ExerciseByKeyCommand` — no contract-id tracking. The watcher
-reads the result directly from the `ExercisedEvent.exercise_result` on the
-Ledger-API stream (see §7). The `WormholeMessage` record is the wire contract
-between Daml and the watcher:
+`Emitter` is recreated with both signatures inherited from the consumed
+contract; the owner is a signatory, so the successor's **cid arrives on its own
+ACS** as the transaction's `CreatedEvent`, and the next publish addresses that
+cid directly — stakeholders never need an off-ledger resolver (§4.7). The
+watcher reads the result directly from the `ExercisedEvent.exercise_result` on
+the Ledger-API stream (see §7). The `WormholeMessage` record is the wire
+contract between Daml and the watcher:
 
 ```haskell
 data WormholeMessage = WormholeMessage with
-    registrar        : Party     -- Emitter key._1 (operator); address input
-    owner            : Party     -- Emitter key._2; address input (anti-impersonation)
-    emitterId        : Int       -- Emitter key._3 (registry-allocated); address input
+    registrar        : Party     -- the operator; address input
+    owner            : Party     -- the emitting party; address input (anti-impersonation)
+    emitterId        : Int       -- registry-allocated; address input
     sequence         : Int       -- uint64
     nonce            : Int       -- uint32
     consistencyLevel : Int       -- uint8
@@ -570,10 +564,11 @@ service indexes the consumer's active nodes by prefix (following the
 the covering node's cid plus its explicit disclosure — alongside the
 `CoreState` disclosure it already serves (§4.3). It is **untrusted for
 safety**: the worst it can do is serve a wrong or stale node, which fails the
-transaction. It is trusted for *liveness* only, like any RPC endpoint. (Go
-implementation is future work; the Daml tests simulate it with a script
-helper, `Test.TestReplay.coveringNode`, which also asserts the partition
-invariant on every use.)
+transaction. It is trusted for *liveness* only, like any RPC endpoint. §4.7
+aggregates every resolution the service must provide. (Go implementation is
+future work; the Daml tests simulate it with a script helper,
+`Test.TestReplay.coveringNode`, which also asserts the partition invariant on
+every use.)
 
 **Integrating — direct and user-submitted.** The executable reference is
 [`test/daml/Test/ExampleIntegrator.daml`](test/daml/Test/ExampleIntegrator.daml)
@@ -585,6 +580,56 @@ its *visibility* is simply not needed. `testIntegratorRedeem` pins the
 inversion of the key-based design's failure mode: replay attempts by arbitrary
 submitters fail on activeness (stale node) or membership (fresh node) — never
 succeed.
+
+### 4.7 Addressing without keys: the disclosure service
+
+With contract keys gone (§1), every contract reference is a **contract-id**.
+Two distinct needs hide behind "how do I find the contract", and they have
+different answers:
+
+- **Cid resolution** — *what is the current cid of X?* Stakeholders get this
+  for free: a consuming exercise delivers the successor's `CreatedEvent` to
+  every stakeholder's ACS, so the operator tracks its registries and the
+  `CoreState`, an emitter owner tracks its `Emitter`, a consumer tracks its
+  trie — all without any off-ledger help.
+- **Disclosure attachment** — a **non-stakeholder** submitter must additionally
+  attach the explicit-disclosure blob of every contract its transaction
+  references, or its participant cannot construct the transaction at all.
+
+The **disclosure service** is the single off-ledger component that provides
+both to parties that need them: an index over the relevant contracts — fed by
+the Ledger API update stream / ACS of a party that sees them — answering
+"current cid (+ disclosure blob) for X". The complete inventory of resolutions
+it must serve:
+
+| Contract                | Index                              | Needed by                                                     | Disclosure attachment?                          | Churn                        |
+| ----------------------- | ---------------------------------- | ------------------------------------------------------------- | ----------------------------------------------- | ---------------------------- |
+| `CoreState`             | the one true instance              | integrators/users exercising §4.3 verify or §4.6 consume       | yes — every non-stakeholder submitter           | per governance action (rare) |
+| `ReplayNode`            | (consumer, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem                | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node |
+| `EmitterRegistry`       | operator                           | `RegisterEmitter`                                              | yes — the requester submits                     | per emitter registration     |
+| `ReplayRootRegistry`    | operator                           | `ApproveReplayRoot`                                            | no — operator submits, own ACS                  | per root grant               |
+| `Emitter`               | (operator, owner, emitterId)       | `PublishMessage`                                               | no — owner submits, own ACS                     | per publish                  |
+| app contracts (e.g. `ExampleIntegrator`) | app-defined      | the app's own choices                                          | app's concern (its users are observers)         | app-defined                  |
+
+Two properties make this safe to outsource:
+
+- **Untrusted for safety.** A wrong or stale answer can only make the
+  transaction fail — the trie fails closed on staleness (§4.6), and consumers
+  authenticate every resolved contract by its **payload**, never by how the
+  cid was found: `CoreState` by its signatory anchor fields (§4.1),
+  `ReplayNode` by the (consumer, operator) binding inside `VerifyAndConsumeVAA`
+  plus the app-side operator pin (see `ExampleIntegrator.Redeem`). The service
+  is trusted for *liveness* only, like any RPC endpoint.
+- **One reader suffices.** A service reading as the operator (a stakeholder of
+  `CoreState`, both registries, and — as co-signatory — every consumer's trie)
+  can serve the whole table; integrators can equally run their own for their
+  trie and app contracts. Reading as a party requires only that party's
+  `CanReadAs` on the serving participant.
+
+Concrete implementation (interface: `(template, index) → (cid,
+created_event_blob)` over the state-service ACS plus the update stream) is
+future work; the Daml tests simulate it with `Test.TestReplay.coveringNode` /
+`queryDisclosure`.
 
 ---
 
@@ -1027,7 +1072,7 @@ participant independently receives and validates every attestation-bearing
 transaction, and an invalid one never appears on that participant's Ledger API —
 so a watcher cannot sign it. This is deliberately scoped to the **attestation
 surface only** (§4.1, §4.2): the observer is *not* a stakeholder of
-`EmitterRequest`s, `EmitterRegistry` allocations, or any holding/balance/transfer
+`EmitterRegistry` allocations, replay tries, or any holding/balance/transfer
 state of other packages — least privilege, in contrast to replica-hosting the
 `operator` (whose projection is its entire signatory footprint; kept as a
 fallback below). A single shared `guardianObserver` covers all guardians (one
@@ -1047,13 +1092,14 @@ the quorum and turn guardian downtime into a chain-halt).
 > **Fallback (interim, no template change):** where a participant cannot yet host
 > the dedicated party, replica-host the `operator` at `Observation` instead. It
 > works with zero Daml change but gives a coarser scope (the operator's full
-> projection, including `EmitterRequest`s) and couples guardian read access to the
-> operator party and its namespace key. Prefer the dedicated `guardianObserver`;
-> use operator replica-hosting only as a migration stopgap.
+> projection, including registries and replay tries) and couples guardian read
+> access to the operator party and its namespace key. Prefer the dedicated
+> `guardianObserver`; use operator replica-hosting only as a migration stopgap.
 
 **What a compromised operator can and cannot do.** It can degrade **liveness**
-(stop approving registrations, stop relaying, evict observers — all fail-safe:
-guardians then simply stop seeing and stop signing). It **cannot** produce
+(stop serving disclosures, stop granting replay roots, evict observers — all
+fail-safe: transactions stop constructing, guardians simply stop seeing and
+stop signing). It **cannot** produce
 anything guardians would wrongly attest: emitting under an existing address
 requires that owner's signature (§4.2), so an outbound forge is either an invalid
 transaction (rejected in replay, never observed) or a valid contract with a
@@ -1061,8 +1107,8 @@ different, untrusted address.
 
 Crucially, it also **cannot forge the guardian set** used for inbound
 verification: `CoreState` is co-signed by the `guardianGovernance` threshold party
-and keyed by it (§4.1), so the operator can neither mutate the real `CoreState`
-nor fabricate one that a consumer would find by the governance anchor. This closes
+(§4.1), so the operator can neither mutate the real `CoreState` nor fabricate
+one whose payload names the governance anchor consumers trust. This closes
 the one gap that observation-only hosting does *not* cover — inbound state
 integrity — by moving it from "trust the single operator" to "trust the k-of-n
 governance party." Compromising *that* is a threshold compromise, i.e. genuinely
@@ -1091,8 +1137,8 @@ human decision; see Open Questions.
    shift slightly across Canton releases (e.g. `begin_exclusive`/`end_inclusive`,
    `Update` one-of members). The vendored proto subset targets a specific release
    — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
-2. **`guardianGovernance` threshold party.** `CoreState` is co-signed by and keyed
-   on a `guardianGovernance` party (§4.1), so guardian-set integrity is anchored to
+2. **`guardianGovernance` threshold party.** `CoreState` is co-signed by a
+   `guardianGovernance` party (§4.1), so guardian-set integrity is anchored to
    it rather than the operator. §9's `guardianGovernance` external-party bootstrap
    stands it up as a decentralized-namespace external party governed by a 2-of-3
    threshold of guardian keys (DSO-style), and its genesis co-sign ceremony is
@@ -1126,8 +1172,7 @@ human decision; see Open Questions.
    initially (`messageFee = 0`).
 6. **ContractUpgrade mechanism.** Confirm the operator-driven Daml package
    upgrade flow and how strictly the recorded target package-id should gate it.
-   Note contract keys **cannot** be added to an already-deployed template via
-   smart-contract upgrade, so this keyed design must land before any mainnet
-   deployment of the templates.
+   (The package uses no contract keys, so the upgrade constraint that keys
+   cannot be added to a deployed template does not apply.)
 7. **Governance emitter.** Uses the standard governance emitter (Solana, chain 1,
    address `0x00..04`). Confirm for the target deployment/network.
