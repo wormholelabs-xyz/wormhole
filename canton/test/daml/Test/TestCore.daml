@@ -50,16 +50,19 @@ setup = do
   pure (operator, guardianObserver, csId)
 
 -- | Register an emitter for @owner@: allocates a stable @emitterId@ from the
--- 'EmitterRegistry' and creates the keyed 'Emitter', returning its cid.
+-- 'EmitterRegistry' (resolved from the operator's own ACS, passed by cid) and
+-- creates the 'Emitter', returning its cid.
 registerEmitter : Party -> Party -> Script (ContractId Emitter)
 registerEmitter operator owner = do
   reqId <- submit owner do createCmd EmitterRequest with requester = owner, operator
-  submit operator do exerciseCmd reqId ApproveEmitter
+  [(regCid, _)] <- query @EmitterRegistry operator
+  submit operator do exerciseCmd reqId ApproveEmitter with registryCid = regCid
 
 -- | Publishing increments the per-emitter sequence and yields the expected
--- 'WormholeMessage'. The message carries the emitter's key components (the
--- watcher derives the 32-byte address as keccak256 of the canonicalised key);
--- the second publish exercises the stable key directly, with no cid tracking.
+-- 'WormholeMessage'. The message carries the emitter's identity components
+-- (the watcher derives the 32-byte address as keccak256 over them); the second
+-- publish resolves the sequence-bumped successor from the owner's own ACS —
+-- the direct-cid model needs no off-ledger service for stakeholders.
 testPublishMessage : Script ()
 testPublishMessage = do
   (operator, _, _) <- setup
@@ -78,10 +81,11 @@ testPublishMessage = do
   msg0.nonce === 7
   msg0.payload === "deadbeef"
 
-  -- The sequence-bumped Emitter is recreated under the SAME key, so the next
-  -- publish exercises it by key — no active-contract-set query, no cid tracking.
+  -- The sequence-bumped successor's cid arrives on the owner's ACS (the owner
+  -- is a signatory), so the next publish addresses it directly.
+  [(emitterId', _)] <- query @Emitter alice
   msg1 <- submit alice do
-    exerciseByKeyCmd @Emitter (operator, alice, 0) PublishMessage with
+    exerciseCmd emitterId' PublishMessage with
       nonce = 8, payload = "cafe", consistencyLevel = 0
   msg1.sequence === 1
   msg1.registrar === operator
@@ -103,7 +107,7 @@ testRegistryAllocation = do
   a.emitterId === 0
   b.emitterId === 1
   assert (a.emitterAddress /= b.emitterAddress)
-  Some (_, reg) <- queryByKey @EmitterRegistry operator operator
+  [(_, reg)] <- query @EmitterRegistry operator
   reg.nextId === 2
 
 -- | Pins the canonical emitter-address encoding against the cross-language test
@@ -125,8 +129,8 @@ testAddressVector =
 --       (missing the owner's signature); and
 --   (b) even colluding with another party, the best it can do is a contract with
 --       a DIFFERENT owner, which derives a different (untrusted) address.
--- This is the invariant guardians verify by replay. Canton keys are non-unique,
--- so registry-id discipline is behavioral — but address integrity is not.
+-- This is the invariant guardians verify by replay. Registry-id discipline is
+-- behavioral — but address integrity is not.
 testImpersonationBlocked : Script ()
 testImpersonationBlocked = do
   (operator, guardianObserver, _) <- setup
@@ -237,16 +241,14 @@ integrationParseAndVerifyVAAByExternalVerifier = do
   vaa.sequence === 1
   pure tokenBridge
 
--- | A SetMessageFee governance VAA verifies and updates the message fee. Looks up
--- the stable governance anchor once, then exercises by the 'CoreState' key
--- (ExerciseByKeyCommand) — so governance needs no contract-id tracking, and the
--- operator submits alone (guardianGovernance's authority is inherited).
+-- | A SetMessageFee governance VAA verifies and updates the message fee. The
+-- operator addresses the 'CoreState' by cid from its own ACS and submits alone
+-- (guardianGovernance's authority is inherited from the archived contract).
 testGovernanceSetMessageFee : Script ()
 testGovernanceSetMessageFee = do
   (operator, _, csId) <- setup
-  Some cs0 <- queryContractId operator csId
   newCsId <- submit operator do
-    exerciseByKeyCmd @CoreState cs0.guardianGovernance SubmitGovernanceVAA with
+    exerciseCmd csId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   Some cs <- queryContractId operator newCsId
@@ -257,30 +259,28 @@ testGovernanceSetMessageFee = do
 testGovernanceReplayRejected : Script ()
 testGovernanceReplayRejected = do
   (operator, _, csId) <- setup
-  Some cs0 <- queryContractId operator csId
-  _ <- submit operator do
-    exerciseByKeyCmd @CoreState cs0.guardianGovernance SubmitGovernanceVAA with
+  newCsId <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   submitMustFail operator do
-    exerciseByKeyCmd @CoreState cs0.guardianGovernance SubmitGovernanceVAA with
+    exerciseCmd newCsId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
 
 -- | Integration entrypoint, invoked by the Go integration test via
 -- `dpm script` (NOT by `dpm test`): set up the bridge, register an emitter,
--- publish one message (nonce 42, payload 0x11223344) by key, and return the
--- Operator party so the watcher can read the ledger as it. The publish uses
--- ExerciseByKeyCommand, so this also exercises the key path against a live
--- Canton ledger. The emitter address is not chosen here: the watcher derives it
--- from the message's key components, which the Go test recomputes.
+-- publish one message (nonce 42, payload 0x11223344) by cid, and return the
+-- Operator party so the watcher can read the ledger as it. The emitter address
+-- is not chosen here: the watcher derives it from the message's identity
+-- components, which the Go test recomputes.
 integrationPublish : Script Party
 integrationPublish = do
   (operator, _, _) <- setup
   owner <- allocateParty "IntegrationEmitter"
-  _ <- registerEmitter operator owner
+  emId <- registerEmitter operator owner
   _ <- submit owner do
-    exerciseByKeyCmd @Emitter (operator, owner, 0) PublishMessage with
+    exerciseCmd emId PublishMessage with
       nonce = 42, payload = "11223344", consistencyLevel = 0
   pure operator
 
@@ -298,6 +298,6 @@ testArchives = do
   emId <- registerEmitter operator bob
   -- Emitter now has two signatories (operator + owner), so both must authorize.
   submit (actAs operator <> actAs bob) do archiveCmd emId   -- Archive Emitter
-  Some (regId, _) <- queryByKey @EmitterRegistry operator operator
+  [(regId, _)] <- query @EmitterRegistry operator
   submit operator do archiveCmd regId           -- Archive EmitterRegistry
   pure ()

@@ -24,9 +24,9 @@ import Wormhole.Core.Setup
 import Test.TestCore (setup, registerEmitter, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
 
 -- | The observer is a stakeholder of the message surface, so after a publish it
--- can query the sequence-bumped 'Emitter' by key and via 'query @Emitter'. This
--- is the Script-level proxy for "informee of the consuming 'PublishMessage'
--- exercise" — i.e. it observes the message on the update stream.
+-- sees the sequence-bumped 'Emitter' via 'query @Emitter'. This is the
+-- Script-level proxy for "informee of the consuming 'PublishMessage' exercise"
+-- — i.e. it observes the message on the update stream.
 testObserverSeesPublishedMessage : Script ()
 testObserverSeesPublishedMessage = do
   (operator, guardianObserver, _) <- setup
@@ -35,14 +35,12 @@ testObserverSeesPublishedMessage = do
   _ <- submit alice do
     exerciseCmd emitterId PublishMessage with nonce = 7, payload = "deadbeef", consistencyLevel = 0
 
-  -- The observer sees the post-publish Emitter (recreated under the same key
-  -- with the sequence bumped) both by key and via an ACS query.
-  Some (_, em) <- queryByKey @Emitter guardianObserver (operator, alice, 0)
+  -- The observer sees the post-publish Emitter (recreated with the sequence
+  -- bumped) on its ACS.
+  [(_, em)] <- query @Emitter guardianObserver
   em.sequence === 1
   em.owner === alice
   em.guardianObserver === guardianObserver
-  emitters <- query @Emitter guardianObserver
-  assertMsg "observer should see at least one Emitter" (not (null emitters))
 
 -- | The observer is a stakeholder of 'CoreState', so it reads the current
 -- guardian set and — because 'SubmitGovernanceVAA' is consuming — the successor
@@ -56,7 +54,7 @@ testObserverSeesCoreState = do
   gs.keys === [devnetGuardian]
 
   newCsId <- submit operator do
-    exerciseByKeyCmd @CoreState cs.guardianGovernance SubmitGovernanceVAA with
+    exerciseCmd csId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   Some cs' <- queryContractId guardianObserver newCsId
@@ -79,7 +77,7 @@ testObserverHasNoAuthority = do
 
   -- Cannot drive governance.
   submitMustFail guardianObserver do
-    exerciseByKeyCmd @CoreState cs.guardianGovernance SubmitGovernanceVAA with
+    exerciseCmd csId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
 
@@ -140,7 +138,7 @@ testObserverDoesNotSeeOutOfScope = do
 
   -- EmitterRegistry is out of scope (it carries the observer as a field for
   -- threading, but does not name it as a template observer).
-  Some (regId, _) <- queryByKey @EmitterRegistry operator operator
+  [(regId, _)] <- query @EmitterRegistry operator
   regView <- queryContractId guardianObserver regId
   regView === None
   regs <- query @EmitterRegistry guardianObserver
