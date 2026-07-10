@@ -520,7 +520,7 @@ global consumption truth.
 
 **Why this is sound where keys were not.** "Not consumed" became a positive
 statement about one *named* contract: fetch the covering node, check absence,
-consume it. Every confirmer validates the node's activeness — a stale cid
+consume it. Every confirming participant validates the node's activeness — a stale cid
 conflicts and aborts; the current covering node provably contains or excludes
 the digest. Soundness is **submitter-independent**: any submitter with a
 disclosure of the current covering node gets a correct check, and a wrong or
@@ -552,7 +552,7 @@ Properties:
   the loser re-resolves the covering node and retries. A blind retry of a
   consume that actually committed fails on membership ("VAA already consumed")
   — a clean idempotency signal. Until the first split, all of one app's
-  consumes serialize through its root; 16-way fanout begins at
+  consumes serialize through its root; 16-way fan-out begins at
   `splitThreshold` consumes.
 - **Cost.** `defaultSplitThreshold = 128`: suffixes are ≤64-char hex (~66 B
   serialized), so nodes top out ~8.5 KB, the average consume rewrites ~4 KB,
@@ -582,7 +582,7 @@ contract with two disclosures attached (CoreState + covering node) and nothing
 else — no read grants, no `readAs`, no relayer queue. The manager's
 *authority* for the consume is inherited from the app contract's signatory;
 its *visibility* is simply not needed. `testIntegratorRedeem` pins the
-inversion of the old key-based footgun: replay attempts by arbitrary
+inversion of the key-based design's failure mode: replay attempts by arbitrary
 submitters fail on activeness (stale node) or membership (fresh node) — never
 succeed.
 
