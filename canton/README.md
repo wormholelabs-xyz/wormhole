@@ -529,23 +529,36 @@ the digest — verify + consume + act in one transaction.
 
 Properties:
 
-- **No archive-and-replay, no shadow roots.** Archival alone only bricks
-  (fail-closed); the replay vector is node *re-creation*. Nodes are co-signed,
-  so neither the consumer nor the operator can archive or create one alone;
-  splits inherit both signatures from the archived parent (the operator is not
-  involved per consume). Roots are granted exactly once per consumer through
-  the operator's `ReplayRootRegistry` — a *positive*, on-ledger
-  one-root-per-consumer check (the registry carries the granted set and every
-  grant consumes it), via a one-time propose-accept ceremony
-  (`ReplayRootRequest`), mirroring emitter registration. The irreducible
-  remainder: consumer and operator *colluding* can rebuild a trie —
-  signatories can always unmake their own contracts.
+- **Nobody can touch someone else's scope; your own scope is your own
+  problem.** Archival alone only bricks (fail-closed); the replay vector is
+  node *re-creation*. Nodes are co-signed, so no third party can archive or
+  re-create them (splits inherit both signatures from the archived parent —
+  the operator is not involved per consume), and roots come only from the
+  operator's `ReplayRootRegistry` — a stateless, never-churning anchor whose
+  nonconsuming `ClaimReplayRoot` lends the operator's *inherited* signature
+  to a consumer-submitted claim (the `RegisterEmitter` pattern: no crank; the
+  operator multisig signs nothing after genesis). Claiming a root for a
+  consumer requires **that consumer's authority**, so nobody can fork another
+  app's replay scope. There is deliberately *no* one-root-per-consumer
+  enforcement: maintaining a single trie is the consumer's own responsibility
+  (its disclosure service defines which trie its consumes resolve into, and
+  detects forks — more than one covering node — for free). This is EVM
+  parity: nobody grants replay storage there either; every integrator owns
+  its mapping. A consumer minting parallel roots, like a consumer whose key
+  is stolen, only harms itself — and a stolen consumer key defeats the app
+  more directly anyway. (If key-compromise resilience is ever wanted, the
+  hardening is trie-identity pinning: thread the original root's cid through
+  successors via `self` and pin it in the app contract — documented, not
+  built.) Spam claims cost the spammer synchronizer traffic per transaction
+  and the operator ~300 B of storage per worthless root; no shared contract
+  grows, nothing bricks.
 - **Scoping and contention.** Tries are per consumer party: different apps
   consume the same VAA independently. Consumes racing on the *same node*
   conflict — exactly one commits (validator-checked, regardless of submitter);
   the loser re-resolves the covering node and retries. A blind retry of a
-  consume that actually committed fails on membership ("VAA already consumed")
-  — a clean idempotency signal. Until the first split, all of one app's
+  consume that actually committed fails on membership ("digest already
+  consumed") — a clean idempotency signal. Until the first split, all of one
+  app's
   consumes serialize through its root; 16-way fan-out begins at
   `splitThreshold` consumes.
 - **Cost.** `defaultSplitThreshold = 128`: suffixes are ≤64-char hex (~66 B
@@ -607,7 +620,7 @@ it must serve:
 | `CoreState`             | the one true instance              | integrators/users exercising §4.3 verify or §4.6 consume       | yes — every non-stakeholder submitter           | per governance action (rare) |
 | `ReplayNode`            | (consumer, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem                | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node |
 | `EmitterRegistry`       | operator                           | `RegisterEmitter`                                              | yes — the requester submits                     | per emitter registration     |
-| `ReplayRootRegistry`    | operator                           | `ApproveReplayRoot`                                            | no — operator submits, own ACS                  | per root grant               |
+| `ReplayRootRegistry`    | operator                           | `ClaimReplayRoot`                                              | yes — the consumer submits (static blob, cacheable) | never (stateless anchor)     |
 | `Emitter`               | (operator, owner, emitterId)       | `PublishMessage`                                               | no — owner submits, own ACS                     | per publish                  |
 | app contracts (e.g. `ExampleIntegrator`) | app-defined      | the app's own choices                                          | app's concern (its users are observers)         | app-defined                  |
 
@@ -1096,10 +1109,16 @@ the quorum and turn guardian downtime into a chain-halt).
 > access to the operator party and its namespace key. Prefer the dedicated
 > `guardianObserver`; use operator replica-hosting only as a migration stopgap.
 
+Note the operator party's ACTIVE signing surface after genesis is empty: every
+day-to-day flow (`RegisterEmitter`, `ClaimReplayRoot`, splits, governance
+transitions) reaches its signature by inheritance from contracts it signed at
+setup. If the operator is stood up as a k-of-n external threshold party (the
+§9 machinery, `GG_THRESHOLD=k`), the interactive-submission signing ceremony
+is needed for genesis only.
+
 **What a compromised operator can and cannot do.** It can degrade **liveness**
-(stop serving disclosures, stop granting replay roots, evict observers — all
-fail-safe: transactions stop constructing, guardians simply stop seeing and
-stop signing). It **cannot** produce
+(stop serving disclosures, evict observers — all fail-safe: transactions stop
+constructing, guardians simply stop seeing and stop signing). It **cannot** produce
 anything guardians would wrongly attest: emitting under an existing address
 requires that owner's signature (§4.2), so an outbound forge is either an invalid
 transaction (rejected in replay, never observed) or a valid contract with a

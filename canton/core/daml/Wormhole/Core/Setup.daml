@@ -55,9 +55,9 @@ mkInitialEmitterRegistry : Party -> Party -> EmitterRegistry
 mkInitialEmitterRegistry operator guardianObserver =
   EmitterRegistry with operator, guardianObserver, nextId = 0
 
--- | The replay-root registry the operator creates alongside the 'CoreState' at
--- setup. Grants each integrator consumer at most one 'ReplayNode' trie root
--- (see 'Wormhole.Core.Replay').
+-- | The replay-root registry (the stateless claim anchor) the operator
+-- creates alongside the 'CoreState' at setup. Hands a 'ReplayNode' trie root
+-- to any consumer that claims one (see 'Wormhole.Core.Replay').
 mkInitialReplayRootRegistry : Party -> ReplayRootRegistry
 mkInitialReplayRootRegistry operator =
-  ReplayRootRegistry with operator, granted = Set.empty
+  ReplayRootRegistry with operator
