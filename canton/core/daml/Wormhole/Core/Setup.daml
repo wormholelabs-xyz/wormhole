@@ -5,9 +5,9 @@ module Wormhole.Core.Setup where
 
 import DA.Map qualified as Map
 import DA.Set qualified as Set
+import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
-import Wormhole.Core.Replay
 import Wormhole.Core.State
 
 -- | Wormhole ChainID assigned to Canton.
@@ -22,20 +22,28 @@ solanaGovernanceChainId = 1
 defaultGovernanceContract : Bytes32
 defaultGovernanceContract = "0000000000000000000000000000000000000000000000000000000000000004"
 
--- | Build the initial 'CoreState' value with guardian set 0 (never-expiring) and
--- the supplied governance configuration. Genesis must be created with BOTH the
--- @operator@ and the @guardianGovernance@ party's authority (the CoreState is
--- co-signed); thereafter governance transitions inherit guardianGovernance's
--- authority and the operator submits them alone.
+-- | Build the initial 'CoreState' value with guardian set 0 (never-expiring)
+-- and the supplied governance configuration. Genesis must be created with BOTH
+-- the @operator@ and the @guardianGovernance@ party's authority (the CoreState
+-- is co-signed); thereafter governance transitions inherit
+-- guardianGovernance's authority and the operator submits them alone.
+--
+-- @feeInstrument@ and @feeRecipient@ are GENESIS-FIXED (no governance action
+-- covers them — changing either is a genesis-class ceremony). In production
+-- the recipient is @guardianGovernance@, putting fee custody under the k-of-n
+-- guardian threshold; the instrument is Canton Coin
+-- (@InstrumentId dsoParty "Amulet"@).
 mkInitialCoreState :
-  Party        -- ^ operator
-  -> Party     -- ^ guardianGovernance (threshold party; anchors the guardian set)
-  -> Int       -- ^ governance chain id
-  -> Bytes32   -- ^ governance contract
-  -> [Bytes20] -- ^ initial guardian addresses (set 0)
-  -> Party     -- ^ guardianObserver (read-only guardian observer party)
+  Party           -- ^ operator
+  -> Party        -- ^ guardianGovernance (threshold party; anchors the guardian set)
+  -> Int          -- ^ governance chain id
+  -> Bytes32      -- ^ governance contract
+  -> [Bytes20]    -- ^ initial guardian addresses (set 0)
+  -> Party        -- ^ guardianObserver (read-only guardian observer party)
+  -> InstrumentId -- ^ fee instrument (CC on mainnet)
+  -> Party        -- ^ fee recipient (guardianGovernance in production)
   -> CoreState
-mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians guardianObserver =
+mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians guardianObserver feeInstrument feeRecipient =
   CoreState with
     operator
     guardianGovernance
@@ -46,18 +54,20 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
     guardianSetIndex = 0
     guardianSets = Map.fromList [(0, GuardianSet with keys = map normalizeHex initialGuardians, expirationTime = None)]
     messageFee = 0
+    feeInstrument
+    feeRecipient
     consumedGovernance = Set.empty
 
 -- | The emitter-id registry the operator creates alongside the 'CoreState' at
 -- setup. Emitter ids are allocated sequentially; it also carries
 -- @guardianObserver@ for 'RegisterEmitter' to thread into each 'Emitter'.
-mkInitialEmitterRegistry : Party -> Party -> EmitterRegistry
-mkInitialEmitterRegistry operator guardianObserver =
-  EmitterRegistry with operator, guardianObserver, nextId = 0
+mkInitialEmitterRegistry : Party -> Party -> Int -> EmitterRegistry
+mkInitialEmitterRegistry operator guardianObserver registrationFee =
+  EmitterRegistry with operator, guardianObserver, registrationFee, nextId = 0
 
 -- | The replay-root registry (the stateless claim anchor) the operator
 -- creates alongside the 'CoreState' at setup. Hands a 'ReplayNode' trie root
 -- to any consumer that claims one (see 'Wormhole.Core.Replay').
-mkInitialReplayRootRegistry : Party -> ReplayRootRegistry
-mkInitialReplayRootRegistry operator =
-  ReplayRootRegistry with operator
+mkInitialReplayRootRegistry : Party -> Int -> ReplayRootRegistry
+mkInitialReplayRootRegistry operator claimFee =
+  ReplayRootRegistry with operator, claimFee

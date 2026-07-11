@@ -1,0 +1,112 @@
+-- | Fee collection via the Canton Network Token Standard (CIP-0056, V1).
+--
+-- The bridge charges fees by CONSUMING token-standard 'Allocation's: the payer
+-- locks funds against our settlement via the token registry's
+-- @AllocationFactory@ (off-ledger, its wallet/CLI plus the registry's CIP-0056
+-- OpenAPI, which supplies the 'ExtraArgs' choice context and any registry
+-- disclosures), and the charging choice exercises
+-- 'Allocation_ExecuteTransfer' — payment and effect in ONE transaction. In
+-- every bridge flow the payer IS the submitter, so the bridge never implements
+-- the wallet-facing @AllocationRequest@ interface (future UX work); it only
+-- validates and executes allocations handed to it.
+--
+-- AUTHORITY: 'Allocation_ExecuteTransfer' requires the JOINT authority of the
+-- leg's sender, the leg's receiver, and the settlement executor. Bridge
+-- convention: @executor = sender = payer@, @receiver = feeRecipient@ (the
+-- guardianGovernance party — see 'Wormhole.Core.State.CoreState'). The
+-- receiver's authority exists in exactly one place: inherited inside a
+-- 'CoreState' choice (it is a signatory), which is why ALL charging routes
+-- through 'ChargeMessageFee' / 'ChargeFee' there. This also blocks theft
+-- structurally: a foreign allocation's sender is a required controller the
+-- transaction never has.
+--
+-- AUTHENTICITY: allocation views are template-computed and forgeable — a
+-- hostile template can claim any instrument while moving nothing. The pin is
+-- the instrument admin's SIGNATURE on the allocation contract (amulet
+-- allocations are DSO-co-signed), checked in 'chargeFee': payloads are
+-- authenticated, never resolution paths.
+--
+-- DENOMINATION: fees are 'Int's in units of 10^-10 tokens — exactly the last
+-- digit of Daml's @Decimal@ (Numeric 10), so every fee is exactly
+-- representable and 'feeToDecimal' is exact for all inputs. The
+-- governance-set @messageFee@ (frozen 32-byte wire format) shares this unit.
+--
+-- Token Standard V2 (CIP-0112) is approved but not yet on mainnet; it ships
+-- as a parallel @-v2@ interface family, and this module is the single seam
+-- where support would be added.
+module Wormhole.Core.Fees where
+
+import DA.Optional (isNone)
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.AllocationV1
+
+-- | The publish-fee configuration read off an authentic 'CoreState' —
+-- includes the operator so callers can pin authenticity (GetOperator-style).
+data FeeConfig = FeeConfig with
+    operator      : Party         -- authenticity pin for the caller
+    messageFee    : Int           -- 10^-10 instrument units
+    feeInstrument : InstrumentId
+    feeRecipient  : Party
+  deriving (Eq, Show)
+
+-- | Exact by construction: 10^-10 is Numeric 10's least significant digit, so
+-- the division never rounds, for any 'Int'.
+feeToDecimal : Int -> Decimal
+feeToDecimal fee = intToDecimal fee / 10000000000.0
+
+-- | The registry-independent 'ExtraArgs' (tests, and registries whose
+-- execute-transfer needs no context; amulet needs real context from its
+-- off-ledger API).
+emptyExtraArgs : ExtraArgs
+emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
+
+-- | Validate and execute a fee allocation. Only called from 'CoreState'
+-- choices (see the module header for why the receiver's authority lives
+-- there).
+--
+--   * @fee <= 0@: require 'None' — never consume funds that are not owed. A
+--     stranded allocation (e.g. a fee-lowering race) stays recoverable by the
+--     payer via @Allocation_Withdraw@.
+--   * @fee > 0@: require an allocation whose leg pays at least the fee, in
+--     the configured instrument, to the fee recipient, from the payer, signed
+--     by the instrument admin. NOTE: the ENTIRE leg amount transfers —
+--     allocations are all-or-nothing, so overpayment is a deliberate
+--     tip/padding against fee-raise races, not refunded change.
+--   * Executing is one-shot: the interface choice is consuming, so a spent
+--     allocation fails activeness on any second use — no replay bookkeeping.
+--   * Deadlines (@settleBefore@) are deliberately NOT checked here: enforcing
+--     them is the registry implementation's contract, and checking would put
+--     @getTime@ (ledger-time sensitivity) on the publish hot path. Likewise
+--     the execute result (receiver holdings) is not inspected — the admin
+--     signature already authenticates the implementation.
+chargeFee
+  :  Party                                        -- ^ payer (the charging choice's controller)
+  -> Party                                        -- ^ fee recipient
+  -> InstrumentId                                 -- ^ configured fee instrument
+  -> Int                                          -- ^ fee due, 10^-10 units
+  -> Optional (ContractId Allocation, ExtraArgs)  -- ^ the payer's fee allocation
+  -> Update ()
+chargeFee payer feeRecipient instrument fee mAlloc
+  | fee <= 0 = assertMsg "no fee due: do not attach a fee allocation" (isNone mAlloc)
+  | otherwise = case mAlloc of
+      None -> abort "fee required: attach a fee allocation"
+      Some (allocCid, extraArgs) -> do
+        -- Interface fetch: the payer (== leg sender) is a stakeholder of its
+        -- own allocation, so the fetch is authorized and the contract is on
+        -- the payer's ACS (no disclosure needed for it).
+        alloc <- fetch allocCid
+        let leg = (view alloc).allocation.transferLeg
+        assertMsg "fee allocation pays the wrong receiver" (leg.receiver == feeRecipient)
+        assertMsg "fee allocation uses the wrong instrument" (leg.instrumentId == instrument)
+        assertMsg "fee allocation amount below the fee" (leg.amount >= feeToDecimal fee)
+        -- Defense-in-depth: Daml authorization already requires the sender as
+        -- a controller; this keeps the guarantee independent of the interface
+        -- controller expression and gives a readable error.
+        assertMsg "fee allocation not sent by the payer" (leg.sender == payer)
+        -- The authenticity pin: views are template-computed and forgeable, the
+        -- instrument admin's signature is not.
+        assertMsg "fee allocation not signed by the instrument admin"
+          (instrument.admin `elem` signatory alloc)
+        _ <- exercise allocCid Allocation_ExecuteTransfer with extraArgs
+        pure ()

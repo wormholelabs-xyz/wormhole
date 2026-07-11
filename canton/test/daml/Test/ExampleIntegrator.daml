@@ -24,6 +24,7 @@ module Test.ExampleIntegrator where
 import Daml.Script
 import DA.Assert ((===))
 import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
@@ -200,7 +201,8 @@ testIntegratorRedeem = do
   fakeObserver <- allocateParty "FakeObserver"
   fakeCsId <- submit (actAs fakeOperator <> actAs fakeGovernance) do
     createCmd (mkInitialCoreState fakeOperator fakeGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] fakeObserver)
+                 defaultGovernanceContract [devnetGuardian] fakeObserver
+                 (InstrumentId with admin = fakeGovernance, id = "UNUSED") fakeGovernance)
   fakeDisc <- fromSome <$> queryDisclosure fakeOperator fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
     exerciseCmd intCid Redeem with
