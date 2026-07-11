@@ -1,0 +1,245 @@
+-- | Fee-payment tests: 'chargeFee' consuming mock CIP-0056 allocations across
+-- all three charge points (publish / emitter registration / replay-root
+-- claim), the validation matrix, and the custody assertions (fees land in
+-- feeRecipient's — guardianGovernance's — holdings; 'TransferFees' mints the
+-- withdrawal authorization).
+module Test.TestFees where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Splice.Api.Token.AllocationV1
+import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Test.MockToken
+import Test.TestCore (setupWithInstrument, registerEmitter, govSetFeeVAA, devnetGuardianPubKey, devnetGuardian)
+
+-- | Bridge bootstrapped with a mock fee instrument; returns the pieces every
+-- fee test needs. The govSetFeeVAA fixture sets messageFee = 1000 (= 1e-7
+-- tokens) when submitted.
+setupFees : Script (Party, Party, ContractId CoreState, InstrumentId, Party)
+setupFees = do
+  mockAdmin <- allocateParty "MockAdmin"
+  let inst = InstrumentId with admin = mockAdmin, id = "MOCK"
+  (operator, _, csId) <- setupWithInstrument (Some inst)
+  Some cs <- queryContractId operator csId
+  pure (operator, mockAdmin, csId, inst, cs.feeRecipient)
+
+mockFee : Int
+mockFee = 1000  -- what govSetFeeVAA sets
+
+-- | The full publish-fee lifecycle: free at fee 0, gated after the
+-- governance fee change (with the stale CoreState cid failing on activeness),
+-- paid with an exact allocation — which lands whole in the fee recipient's
+-- holdings and cannot be spent twice.
+testMessageFeeLifecycle : Script ()
+testMessageFeeLifecycle = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  alice <- allocateParty "FeeAlice"
+  emId <- registerEmitter operator alice
+  csDisc0 <- fromSome <$> queryDisclosure operator csId
+
+  -- Fee 0: publishes are free (no allocation).
+  msg0 <- submit (actAs alice <> disclose csDisc0) do
+    exerciseCmd emId PublishMessage with
+      nonce = 1, payload = "aa", consistencyLevel = 0
+      coreStateCid = csId, feeAllocation = None
+  msg0.sequence === 0
+
+  -- Governance raises the fee to 1000.
+  csId' <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  csDisc <- fromSome <$> queryDisclosure operator csId'
+  [(emId1, _)] <- query @Emitter alice
+
+  -- The stale CoreState cid fails on activeness (retry protocol: re-resolve).
+  submitMustFail (actAs alice <> disclose csDisc0) do
+    exerciseCmd emId1 PublishMessage with
+      nonce = 2, payload = "bb", consistencyLevel = 0
+      coreStateCid = csId, feeAllocation = None
+  -- Fee due, no allocation: rejected.
+  submitMustFail (actAs alice <> disclose csDisc) do
+    exerciseCmd emId1 PublishMessage with
+      nonce = 2, payload = "bb", consistencyLevel = 0
+      coreStateCid = csId', feeAllocation = None
+
+  -- Exact allocation: publish succeeds, WormholeMessage unchanged, the fee
+  -- lands whole in feeRecipient's (guardianGovernance's) holdings.
+  feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal mockFee)
+  msg1 <- submit (actAs alice <> disclose csDisc) do
+    exerciseCmd emId1 PublishMessage with
+      nonce = 2, payload = "bb", consistencyLevel = 0
+      coreStateCid = csId', feeAllocation = Some feePay
+  msg1.sequence === 1
+  msg1.payload === "bb"
+  bal <- mockBalance mockAdmin feeRecipient inst
+  bal === feeToDecimal mockFee
+
+  -- The allocation is consumed: reusing it fails on activeness.
+  [(emId2, _)] <- query @Emitter alice
+  submitMustFail (actAs alice <> disclose csDisc) do
+    exerciseCmd emId2 PublishMessage with
+      nonce = 3, payload = "cc", consistencyLevel = 0
+      coreStateCid = csId', feeAllocation = Some feePay
+
+-- | Every way an allocation can be wrong, each dying on its own check.
+testFeeValidationMatrix : Script ()
+testFeeValidationMatrix = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  alice <- allocateParty "MatrixAlice"
+  mallory <- allocateParty "MatrixMallory"
+  emId <- registerEmitter operator alice
+  csId' <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  csDisc <- fromSome <$> queryDisclosure operator csId'
+  now <- getTime
+  let publishWith feePay = exerciseCmd emId PublishMessage with
+        nonce = 1, payload = "aa", consistencyLevel = 0
+        coreStateCid = csId', feeAllocation = Some feePay
+
+  -- Wrong receiver: pays mallory, not the fee recipient.
+  wrongReceiver <- mintAndAllocate mockAdmin alice mallory inst (feeToDecimal mockFee)
+  submitMustFail (actAs alice <> disclose csDisc) do publishWith wrongReceiver
+  -- Wrong instrument id.
+  wrongInst <- mintAndAllocate mockAdmin alice feeRecipient
+    (InstrumentId with admin = mockAdmin, id = "OTHER") (feeToDecimal mockFee)
+  submitMustFail (actAs alice <> disclose csDisc) do publishWith wrongInst
+  -- Underpayment by one unit.
+  underPay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal (mockFee - 1))
+  submitMustFail (actAs alice <> disclose csDisc) do publishWith underPay
+  -- Honest template, wrong signer: the leg CLAIMS the right instrument, but
+  -- the instrument admin never signed — the authenticity pin fires.
+  imposter <- allocateParty "ImposterAdmin"
+  wrongSigner <- mintAndAllocate imposter alice feeRecipient inst (feeToDecimal mockFee)
+  submitMustFail (actAs alice <> disclose csDisc) do publishWith wrongSigner
+  -- Hostile template lying in its view: same pin.
+  fakeCid <- submit alice do
+    createCmd FakeAllocation with
+      allocation = mkAllocationSpec alice feeRecipient inst (feeToDecimal mockFee) now
+  let fakePay = (toInterfaceContractId @Allocation fakeCid, emptyExtraArgs)
+  submitMustFail (actAs alice <> disclose csDisc) do publishWith fakePay
+  -- A fabricated fee-0 CoreState cannot waive the fee: the operator pin fires.
+  fakeOp <- allocateParty "MatrixFakeOp"
+  fakeGov <- allocateParty "MatrixFakeGov"
+  fakeObs <- allocateParty "MatrixFakeObs"
+  fakeCsId <- submit (actAs fakeOp <> actAs fakeGov) do
+    createCmd (mkInitialCoreState fakeOp fakeGov solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian] fakeObs inst fakeGov)
+  fakeDisc <- fromSome <$> queryDisclosure fakeOp fakeCsId
+  submitMustFail (actAs alice <> disclose fakeDisc) do
+    exerciseCmd emId PublishMessage with
+      nonce = 1, payload = "aa", consistencyLevel = 0
+      coreStateCid = fakeCsId, feeAllocation = None
+
+-- | At fee 0 an attached allocation is rejected outright — funds that are not
+-- owed are never consumed, and the payer can recover a stranded allocation
+-- via Allocation_Withdraw (sender-alone choice).
+testNoFeeDueAndRecovery : Script ()
+testNoFeeDueAndRecovery = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  alice <- allocateParty "RecoveryAlice"
+  emId <- registerEmitter operator alice
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  feePay@(allocCid, extraArgs) <- mintAndAllocate mockAdmin alice feeRecipient inst 1.0
+  submitMustFail (actAs alice <> disclose csDisc) do
+    exerciseCmd emId PublishMessage with
+      nonce = 1, payload = "aa", consistencyLevel = 0
+      coreStateCid = csId, feeAllocation = Some feePay
+  -- Recovery: the payer withdraws alone; the funds come back to her.
+  _ <- submit alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs
+  aliceBal <- mockBalance mockAdmin alice inst
+  aliceBal === 1.0
+
+-- | Overpayment transfers the WHOLE leg amount — allocations are
+-- all-or-nothing; padding against a fee raise is a tip, not refunded change.
+testOverpayTransfersWholeAmount : Script ()
+testOverpayTransfersWholeAmount = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  alice <- allocateParty "OverpayAlice"
+  emId <- registerEmitter operator alice
+  csId' <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  csDisc <- fromSome <$> queryDisclosure operator csId'
+  feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal (2 * mockFee))
+  _ <- submit (actAs alice <> disclose csDisc) do
+    exerciseCmd emId PublishMessage with
+      nonce = 1, payload = "aa", consistencyLevel = 0
+      coreStateCid = csId', feeAllocation = Some feePay
+  bal <- mockBalance mockAdmin feeRecipient inst
+  bal === feeToDecimal (2 * mockFee)
+
+-- | Onboarding fees: a nonzero-fee 'EmitterRegistry' charges registration
+-- through the CoreState (both disclosures attached), and rejects missing
+-- CoreState or missing allocation.
+testRegistrationFee : Script ()
+testRegistrationFee = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  Some cs <- queryContractId operator csId
+  bob <- allocateParty "RegFeeBob"
+  regCid <- submit operator do
+    createCmd (mkInitialEmitterRegistry operator cs.guardianObserver 500)
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  -- Fee due: no CoreState / no allocation both rejected.
+  submitMustFail (actAs bob <> disclose regDisc) do
+    exerciseCmd regCid RegisterEmitter with
+      requester = bob, coreStateCid = None, feeAllocation = None
+  submitMustFail (actAs bob <> disclose regDisc <> disclose csDisc) do
+    exerciseCmd regCid RegisterEmitter with
+      requester = bob, coreStateCid = Some csId, feeAllocation = None
+  -- Paid registration succeeds; the fee lands with the recipient.
+  feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
+  (_, emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
+    exerciseCmd regCid RegisterEmitter with
+      requester = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+  Some em <- queryContractId bob emCid
+  em.owner === bob
+  bal <- mockBalance mockAdmin feeRecipient inst
+  bal === feeToDecimal 500
+
+-- | Same for a nonzero-fee 'ReplayRootRegistry' claim.
+testClaimFee : Script ()
+testClaimFee = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  carol <- allocateParty "ClaimFeeCarol"
+  regCid <- submit operator do
+    createCmd (mkInitialReplayRootRegistry operator 300)
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  submitMustFail (actAs carol <> disclose regDisc <> disclose csDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer = carol, splitThreshold = 4
+      coreStateCid = Some csId, feeAllocation = None
+  feePay <- mintAndAllocate mockAdmin carol feeRecipient inst (feeToDecimal 300)
+  rootCid <- submit (actAs carol <> disclose regDisc <> disclose csDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer = carol, splitThreshold = 4
+      coreStateCid = Some csId, feeAllocation = Some feePay
+  Some root <- queryContractId carol rootCid
+  root.prefix === ""
+  bal <- mockBalance mockAdmin feeRecipient inst
+  bal === feeToDecimal 300
+
+-- | TransferFees mints the on-ledger withdrawal authorization, signed by
+-- guardianGovernance — the artifact its custody ceremony matches against.
+-- (Requires a TransferFees VAA vector; asserted structurally here by checking
+-- none exists after unrelated governance, and covered end-to-end once a
+-- vector is generated — see vectorgen. The SetMessageFee action must NOT mint
+-- one.)
+testNoSpuriousWithdrawalAuthorization : Script ()
+testNoSpuriousWithdrawalAuthorization = do
+  (operator, _, csId, _, _) <- setupFees
+  _ <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  auths <- query @FeeWithdrawalAuthorization operator
+  auths === []

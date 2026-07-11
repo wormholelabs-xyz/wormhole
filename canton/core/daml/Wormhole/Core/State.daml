@@ -51,7 +51,11 @@ import DA.Optional (fromSomeNote)
 import DA.Set (Set)
 import DA.Set qualified as Set
 import DA.Time (addRelTime, seconds)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+import Splice.Api.Token.AllocationV1 (Allocation)
 import Wormhole.Core.Bytes
+import Wormhole.Core.Fees
 import Wormhole.Core.GuardianSet
 import Wormhole.Core.Governance
 import Wormhole.Core.Replay
@@ -117,7 +121,16 @@ template CoreState
     governanceContract : Bytes32            -- governance emitter address
     guardianSetIndex   : Int                -- index of the current set
     guardianSets       : Map Int GuardianSet
-    messageFee         : Int                -- required fee (native units); 0 in v1
+    messageFee         : Int                -- per-publish fee, 10^-10 feeInstrument units;
+                                            -- governance-set via SetMessageFee
+    feeInstrument      : InstrumentId       -- CIP-0056 instrument fees are paid in (CC on
+                                            -- mainnet). GENESIS-FIXED: no governance action
+                                            -- covers it — migrating instruments is a
+                                            -- genesis-class ceremony.
+    feeRecipient       : Party              -- fee custody: guardianGovernance in production,
+                                            -- so fees move only via the k-of-n guardian
+                                            -- ceremony and the operator never touches them.
+                                            -- Genesis-fixed, like feeInstrument.
     consumedGovernance : Set Bytes32        -- GOVERNANCE-ONLY replay protection, keyed by
                                             -- digest; bounded by governance cadence. App VAAs
                                             -- use the per-consumer 'ReplayNode' trie instead.
@@ -176,6 +189,40 @@ template CoreState
       controller reader
       do pure operator
 
+    -- | Charge the governance-set per-publish fee ('messageFee'). Lives here —
+    -- not on 'Emitter' — for two reasons: the fee amount is only knowable from
+    -- this contract, and executing the allocation needs the FEE RECIPIENT'S
+    -- authority ('Allocation_ExecuteTransfer' requires sender ∧ receiver ∧
+    -- executor jointly), which is inherited from this contract's signatories
+    -- when @feeRecipient = guardianGovernance@. Returns the operator so the
+    -- caller can pin authenticity (a self-signed fee-0 fake CoreState must not
+    -- be able to waive the fee).
+    --
+    -- Nonconsuming: publishes never contend with each other; a governance
+    -- transition archiving this contract makes racing publishes fail
+    -- activeness transiently — re-resolve the fresh cid and retry.
+    nonconsuming choice ChargeMessageFee : Party
+      with
+        payer         : Party
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
+      controller payer
+      do
+        chargeFee payer feeRecipient feeInstrument messageFee feeAllocation
+        pure operator
+
+    -- | Charge a caller-specified amount — for the registries' onboarding
+    -- fees, whose amounts live on the registry contracts. Same authority and
+    -- pin story as 'ChargeMessageFee'.
+    nonconsuming choice ChargeFee : Party
+      with
+        payer         : Party
+        fee           : Int  -- 10^-10 feeInstrument units
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
+      controller payer
+      do
+        chargeFee payer feeRecipient feeInstrument fee feeAllocation
+        pure operator
+
     -- | Verify a VAA and record its consumption in @consumer@'s replay trie,
     -- atomically. Integrators (token bridge / NTT) call this in the same
     -- transaction as the action the VAA authorizes; a replay fails on the
@@ -231,6 +278,21 @@ template CoreState
         assertMsg "governance: action already consumed"
           (not (Set.member vaa.hash consumedGovernance))
         let action = parseGovernance vaa.payload
+        -- TransferFees additionally mints an on-ledger withdrawal
+        -- authorization ('applyGovernance' itself stays pure). Fees accrue in
+        -- feeRecipient's (guardianGovernance's) holdings; this contract is
+        -- the artifact the guardians' custody policy honors when
+        -- threshold-signing the actual outbound token transfer.
+        case action of
+          TransferFees _ amount recipient -> do
+            _ <- create FeeWithdrawalAuthorization with
+              guardianGovernance
+              operator
+              amount
+              recipient = normalizeHex recipient
+              vaaHash = vaa.hash
+            pure ()
+          _ -> pure ()
         case applyGovernance this now action of
           Left err -> assertFail err
           Right st -> create st with
@@ -266,8 +328,10 @@ applyGovernance st now action = case action of
 
   TransferFees chain _amount _recipient -> do
     assertMsg "transferFees: wrong target chain" (chain == st.chainId || chain == 0)
-    -- Native-fee accounting is deferred (messageFee defaults to 0); no state
-    -- change here — the caller still records the action as consumed.
+    -- No CoreState change: fees settle directly into feeRecipient's holdings
+    -- at charge time, so there is no pooled balance here to move. The caller
+    -- ('SubmitGovernanceVAA') mints the 'FeeWithdrawalAuthorization' and
+    -- records the action as consumed.
     pure st
 
   ContractUpgrade chain _newContract -> do
@@ -281,6 +345,26 @@ applyGovernance st now action = case action of
 currentSetForUpgrade : CoreState -> GuardianSet
 currentSetForUpgrade st =
   fromSomeNote "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
+
+-- | On-ledger record of a TransferFees governance action: the guardians'
+-- authorization to move @amount@ of accrued fees to @recipient@. Fees live in
+-- feeRecipient's (guardianGovernance's) token holdings — Canton tokens move
+-- only by their owner's signature, so the actual outbound transfer is a
+-- k-of-n guardian threshold ceremony; this contract, signed by
+-- guardianGovernance (authority inherited from the consumed 'CoreState'), is
+-- the artifact that ceremony's custody policy matches against. @recipient@ is
+-- the VAA's 32-byte Wormhole address; mapping it to a Canton party/receiver
+-- is the custody layer's job. Archived by guardianGovernance when fulfilled.
+template FeeWithdrawalAuthorization
+  with
+    guardianGovernance : Party
+    operator           : Party    -- visibility for the operator's tooling
+    amount             : Int      -- 10^-10 feeInstrument units
+    recipient          : Bytes32  -- Wormhole-format recipient from the VAA
+    vaaHash            : Bytes32  -- provenance: the authorizing VAA's digest
+  where
+    signatory guardianGovernance
+    observer operator
 
 ----------------------------------------------------------------------
 -- Emitter registration & message publishing
@@ -307,6 +391,9 @@ template EmitterRegistry
   with
     operator         : Party
     guardianObserver : Party  -- threaded into each new Emitter by RegisterEmitter
+    registrationFee  : Int    -- onboarding fee, 10^-10 CoreState.feeInstrument
+                              -- units; operator-set at creation (archive +
+                              -- recreate to change), 0 for free registration
     nextId           : Int
   where
     signatory operator
@@ -316,14 +403,29 @@ template EmitterRegistry
     -- flexible controller brings the @requester@'s signature; the operator's
     -- is INHERITED from this contract's signatory. Permissionless by design
     -- (EVM/Sui parity: anyone may emit) — the requester only needs this
-    -- registry disclosed (README §4.7). Consuming, so racing registrations
-    -- contend here and exactly one commits; the loser re-resolves the fresh
-    -- registry cid and retries.
+    -- registry disclosed (README §4.7), plus, when @registrationFee > 0@, the
+    -- 'CoreState' disclosure and a fee allocation (README §4.2). Consuming, so
+    -- racing registrations contend here and exactly one commits; the loser
+    -- re-resolves the fresh registry cid and retries.
     choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
       with
-        requester : Party
+        requester     : Party
+        coreStateCid  : Optional (ContractId CoreState)  -- required iff fee > 0
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
       controller requester
       do
+        -- Zero-fee registrations never touch the CoreState (single-disclosure
+        -- onboarding); fee'd ones charge through it, pinning its operator so a
+        -- fabricated CoreState cannot waive or redirect the fee.
+        case (registrationFee > 0, coreStateCid) of
+          (False, _) -> pure ()
+          (True, None) -> abort "registration fee due: pass the CoreState"
+          (True, Some csCid) -> do
+            csOperator <- exercise csCid ChargeFee with
+              payer = requester
+              fee = registrationFee
+              feeAllocation
+            assertMsg "core state operator mismatch" (csOperator == operator)
         reg' <- create this with nextId = nextId + 1
         emitter <- create Emitter with
           operator
@@ -333,6 +435,62 @@ template EmitterRegistry
           emitterAddress = emitterAddressFor operator requester nextId
           sequence = 0
         pure (reg', emitter)
+
+-- | Hands out replay-trie roots to any consumer that asks — a stateless
+-- anchor whose one nonconsuming choice lends the operator's INHERITED
+-- co-signature to consumer-submitted claims (the 'RegisterEmitter' pattern):
+-- no operator crank, no contention, and no churn from claims — the registry's
+-- disclosure blob is cacheable until the operator archives/recreates it to
+-- change 'claimFee'. One per operator, created at setup
+-- ('mkInitialReplayRootRegistry'). Lives here rather than in
+-- 'Wormhole.Core.Replay' because the claim fee is charged through the
+-- 'CoreState' (import cycle otherwise).
+--
+-- There is deliberately NO one-root-per-consumer enforcement: maintaining a
+-- single trie is the CONSUMER'S OWN responsibility (its disclosure service
+-- defines which trie its consumes resolve into). The controller is what keeps
+-- that sound against everyone else — a third party cannot fork someone else's
+-- replay scope, because claiming a root for @consumer@ requires @consumer@'s
+-- authority. Parallel roots can only be minted by the consumer itself (or its
+-- stolen key), which is self-harm (see 'Wormhole.Core.Replay'). Spam claims
+-- cost the spammer synchronizer traffic per transaction, the 'claimFee' when
+-- nonzero, and the operator ~300 B of storage per worthless root; no shared
+-- contract grows.
+template ReplayRootRegistry
+  with
+    operator : Party
+    claimFee : Int  -- onboarding fee, 10^-10 CoreState.feeInstrument units;
+                    -- operator-set at creation (archive + recreate to
+                    -- change), 0 for free claims
+  where
+    signatory operator
+
+    nonconsuming choice ClaimReplayRoot : ContractId ReplayNode
+      with
+        consumer       : Party
+        splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
+        coreStateCid   : Optional (ContractId CoreState)  -- required iff fee > 0
+        feeAllocation  : Optional (ContractId Allocation, ExtraArgs)
+      controller consumer
+      do
+        -- Zero-fee claims never touch the CoreState; fee'd ones charge
+        -- through it, pinning its operator so a fabricated CoreState cannot
+        -- waive or redirect the fee (see README §4.2).
+        case (claimFee > 0, coreStateCid) of
+          (False, _) -> pure ()
+          (True, None) -> abort "claim fee due: pass the CoreState"
+          (True, Some csCid) -> do
+            csOperator <- exercise csCid ChargeFee with
+              payer = consumer
+              fee = claimFee
+              feeAllocation
+            assertMsg "core state operator mismatch" (csOperator == operator)
+        create ReplayNode with
+          consumer
+          operator
+          prefix = ""
+          splitThreshold
+          consumed = Set.empty
 
 -- | A registered emitter: the per-emitter sequence counter, identified by
 -- @(operator, owner, emitterId)@ in its payload. The sequence lives here (not
@@ -364,16 +522,29 @@ template Emitter
     -- cid arrives on its own ACS as the transaction's CreatedEvent and the next
     -- publish addresses that cid directly. Mirrors
     -- @Implementation.publishMessage@.
+    --
+    -- The governance-set 'messageFee' is charged through the referenced
+    -- 'CoreState' (EVM parity: publishMessage reads the current fee on every
+    -- call), whose operator is pinned so a fabricated CoreState cannot waive
+    -- the fee. Publishers therefore attach the CoreState disclosure to every
+    -- publish (cacheable between governance actions; a governance transition
+    -- invalidates the cid transiently — re-resolve and retry). At fee 0 pass
+    -- @feeAllocation = None@; the CoreState reference is still required, since
+    -- the fee amount is only knowable from it.
     choice PublishMessage : WormholeMessage
       with
         nonce            : Int
         payload          : Bytes
         consistencyLevel : Int
+        coreStateCid     : ContractId CoreState
+        feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
       controller owner
       do
+        csOperator <- exercise coreStateCid ChargeMessageFee with
+          payer = owner
+          feeAllocation
+        assertMsg "core state operator mismatch" (csOperator == operator)
         assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
-        -- NOTE: native-token fee enforcement is deferred (messageFee = 0 in v1);
-        -- see README "Open Questions". When wired, the fee is checked here.
         create this with sequence = sequence + 1
         pure WormholeMessage with
           registrar = operator

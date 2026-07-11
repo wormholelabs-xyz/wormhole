@@ -42,6 +42,8 @@ registerReplayRoot operator consumer threshold = do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       splitThreshold = threshold
+      coreStateCid = None    -- claimFee is 0 in the fixture
+      feeAllocation = None
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s trie
 -- covering @digest@, queried as @consumer@. The filter matches the trie owner
@@ -287,11 +289,15 @@ testRootClaims = do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       splitThreshold = 4
+      coreStateCid = None
+      feeAllocation = None
   -- The consumer CAN duplicate its own root — by design, self-harm only.
   _ <- submit (actAs consumer <> disclose regDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer
       splitThreshold = 4
+      coreStateCid = None
+      feeAllocation = None
   roots <- query @ReplayNode consumer
   length roots === 2
   -- The consumer cannot create a co-signed node alone.

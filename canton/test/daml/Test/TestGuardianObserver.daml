@@ -21,7 +21,8 @@ import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import Wormhole.Core.State
 import Wormhole.Core.Setup
-import Test.TestCore (setup, registerEmitter, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
 
 -- | The observer is a stakeholder of the message surface, so after a publish it
 -- sees the sequence-bumped 'Emitter' via 'query @Emitter'. This is the
@@ -29,11 +30,10 @@ import Test.TestCore (setup, registerEmitter, devnetGuardian, govSetFeeVAA, devn
 -- — i.e. it observes the message on the update stream.
 testObserverSeesPublishedMessage : Script ()
 testObserverSeesPublishedMessage = do
-  (operator, guardianObserver, _) <- setup
+  (operator, guardianObserver, csId) <- setup
   alice <- allocateParty "Alice"
   emitterId <- registerEmitter operator alice
-  _ <- submit alice do
-    exerciseCmd emitterId PublishMessage with nonce = 7, payload = "deadbeef", consistencyLevel = 0
+  _ <- publishVia operator csId alice emitterId 7 "deadbeef" 0
 
   -- The observer sees the post-publish Emitter (recreated with the sequence
   -- bumped) on its ACS.
@@ -73,7 +73,9 @@ testObserverHasNoAuthority = do
 
   -- Cannot publish on another owner's emitter (not the controller).
   submitMustFail guardianObserver do
-    exerciseCmd emitterId PublishMessage with nonce = 1, payload = "00", consistencyLevel = 0
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, feeAllocation = None
 
   -- Cannot drive governance.
   submitMustFail guardianObserver do
@@ -93,19 +95,22 @@ testObserverHasNoAuthority = do
       guardianObserver
   submitMustFail guardianObserver do
     createCmd (mkInitialCoreState operator cs.guardianGovernance
-                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver)
+                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver
+                 cs.feeInstrument cs.feeRecipient)
 
--- | Adding the observer introduces no new authority requirement on publishing:
--- the @owner@ alone still publishes. And genesis still requires exactly the
--- @operator@ and @guardianGovernance@ signatures — the observer is not one of
--- them. This is the Script-level proxy for "confirmation semantics unchanged".
+-- | Adding the observer introduces no new AUTHORITY requirement on publishing:
+-- the @owner@ alone still authorizes a publish. (The informee set of a publish
+-- is wider since fee wiring: the referenced 'CoreState''s signatories —
+-- operator and guardianGovernance — are informees of the fee-read exercise,
+-- and the observer remains a plain informee; none of them gains authority.)
+-- Genesis still requires exactly the @operator@ and @guardianGovernance@
+-- signatures — the observer is not one of them.
 testPublishRequiresOnlyOwner : Script ()
 testPublishRequiresOnlyOwner = do
-  (operator, _guardianObserver, _) <- setup
+  (operator, _guardianObserver, csId) <- setup
   alice <- allocateParty "Alice"
   emitterId <- registerEmitter operator alice
-  msg <- submit alice do
-    exerciseCmd emitterId PublishMessage with nonce = 7, payload = "dead", consistencyLevel = 0
+  msg <- publishVia operator csId alice emitterId 7 "dead" 0
   msg.sequence === 0
 
   -- Genesis authority is unchanged: operator alone cannot create a CoreState
@@ -113,12 +118,15 @@ testPublishRequiresOnlyOwner = do
   operator2 <- allocateParty "Operator2"
   guardianGovernance2 <- allocateParty "GuardianGovernance2"
   guardianObserver2 <- allocateParty "GuardianObserver2"
+  let inst2 = InstrumentId with admin = guardianGovernance2, id = "UNUSED"
   submitMustFail operator2 do
     createCmd (mkInitialCoreState operator2 guardianGovernance2
-                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2)
+                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2
+                 inst2 guardianGovernance2)
   _ <- submit (actAs operator2 <> actAs guardianGovernance2) do
     createCmd (mkInitialCoreState operator2 guardianGovernance2
-                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2)
+                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2
+                 inst2 guardianGovernance2)
   pure ()
 
 -- | The observer is scoped to the attestation surface only. It is NOT a
