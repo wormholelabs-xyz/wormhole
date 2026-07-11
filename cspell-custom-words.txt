@@ -52,6 +52,7 @@ counterparty
 cpus
 crosschain
 Cyfrin
+dars
 datagram
 denoms
 devnet
