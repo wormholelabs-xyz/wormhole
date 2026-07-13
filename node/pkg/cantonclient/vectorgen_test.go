@@ -71,14 +71,97 @@ func TestGenerateCantonVector(t *testing.T) {
 	t.Logf("digest       = %x", digest)
 }
 
-// TestGenerateAddressVectors prints the canonical registry-address test vector
-// shared with canton/test/daml/Test/TestCore.daml (testAddressVector) and pinned
-// on the Go side by pkg/watchers/canton/watcher_test.go. The preimage is
+// b32 returns a 32-byte slice whose last byte is `last` (matching the
+// 0x00..XX addresses used in the Daml tests).
+func b32(last byte) []byte {
+	b := make([]byte, 32)
+	b[31] = last
+	return b
+}
+
+// lenPrefixed prepends a uint16 big-endian length to b.
+func lenPrefixed(b []byte) []byte {
+	out := make([]byte, 2)
+	binary.BigEndian.PutUint16(out, uint16(len(b))) //nolint:gosec // test fixtures are small
+	return append(out, b...)
+}
+
+// TestGenerateNttVector generates the signed NTT transfer VAA fixture used by
+// canton/test/daml/Test/TestNtt.daml (receive path). Same devnet guardian as
+// above. Addresses: peer manager 0x..bb, peer transceiver 0x..cc (the VAA
+// emitter), our manager 0x..aa; source chain 2; transfer of 1_000_000 @ 8
+// decimals of token 0x..dd to recipient 0x..ee on chain 72.
+func TestGenerateNttVector(t *testing.T) {
+	if os.Getenv("GEN_CANTON_VECTORS") == "" {
+		t.Skip("set GEN_CANTON_VECTORS=1 to regenerate the Daml test vector")
+	}
+	priv, err := crypto.HexToECDSA("cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// NativeTokenTransfer.
+	ntt := []byte{0x99, 0x4e, 0x54, 0x54} // prefix
+	ntt = append(ntt, 0x08)               // decimals 8
+	amount := make([]byte, 8)
+	binary.BigEndian.PutUint64(amount, 1_000_000)
+	ntt = append(ntt, amount...)    // amount
+	ntt = append(ntt, b32(0xdd)...) // sourceToken
+	ntt = append(ntt, b32(0xee)...) // recipientAddress
+	ntt = append(ntt, 0x00, 0x48)   // recipientChain 72
+
+	// NttManagerMessage: id 0x..01, sender = peer manager 0x..bb, payload = ntt.
+	mm := append([]byte{}, b32(0x01)...)
+	mm = append(mm, b32(0xbb)...)
+	mm = append(mm, lenPrefixed(ntt)...)
+
+	// WormholeTransceiverMessage: source = peer manager 0x..bb, recipient = our
+	// manager 0x..aa, managerPayload = mm, transceiverPayload = empty.
+	wm := []byte{0x99, 0x45, 0xff, 0x10}
+	wm = append(wm, b32(0xbb)...)
+	wm = append(wm, b32(0xaa)...)
+	wm = append(wm, lenPrefixed(mm)...)
+	wm = append(wm, lenPrefixed([]byte{})...)
+
+	// VAA body: emitter chain 2, emitter = peer transceiver 0x..cc.
+	body := make([]byte, 0)
+	ts := make([]byte, 4)
+	binary.BigEndian.PutUint32(ts, 1700000000)
+	body = append(body, ts...)      // timestamp
+	body = append(body, 0, 0, 0, 0) // nonce 0
+	body = append(body, 0x00, 0x02) // emitterChain 2
+	body = append(body, b32(0xcc)...)
+	seq := make([]byte, 8)
+	binary.BigEndian.PutUint64(seq, 1)
+	body = append(body, seq...) // sequence 1
+	body = append(body, 0x00)   // consistencyLevel 0
+	body = append(body, wm...)  // payload
+
+	digest := crypto.Keccak256(crypto.Keccak256(body))
+	sig, err := crypto.Sign(digest, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	vaa := []byte{0x01}           // version
+	vaa = append(vaa, 0, 0, 0, 0) // guardianSetIndex 0
+	vaa = append(vaa, 0x01)       // sig count
+	vaa = append(vaa, 0x00)       // guardian index 0
+	vaa = append(vaa, sig...)
+	vaa = append(vaa, body...)
+
+	t.Logf("nttTransferVAA = %x", vaa)
+}
+
+// TestGenerateAddressVectors prints the canonical registry-address test vectors
+// shared with canton/test/daml/Test/TestCore.daml (testAddressVector) and
+// TestNtt.daml (manager vector), and pinned on the Go side by
+// pkg/watchers/canton/watcher_test.go. The preimage is
 //
 //	utf8(tag) ‖ uint32be(len(registrar)) ‖ utf8(registrar)
 //	          ‖ uint32be(len(owner))     ‖ utf8(owner) ‖ uint64be(id)
 //
-// keccak256 of which is the 32-byte Wormhole emitter address.
+// keccak256 of which is the 32-byte Wormhole emitter / NTT manager address.
 func TestGenerateAddressVectors(t *testing.T) {
 	if os.Getenv("GEN_CANTON_VECTORS") == "" {
 		t.Skip("set GEN_CANTON_VECTORS=1 to regenerate the Daml test vector")
@@ -91,10 +174,18 @@ func TestGenerateAddressVectors(t *testing.T) {
 		binary.BigEndian.PutUint32(l[:], uint32(len(s))) //nolint:gosec // fixture strings are short
 		return append(l[:], s...)
 	}
-	buf := append([]byte("wormhole:emitter:v1"), lp(registrar)...)
-	buf = append(buf, lp(owner)...)
-	var idb [8]byte
-	binary.BigEndian.PutUint64(idb[:], id)
-	buf = append(buf, idb[:]...)
-	t.Logf("emitter(%s, %s, %d) = %x", registrar, owner, id, crypto.Keccak256(buf))
+	for _, tag := range []string{"wormhole:emitter:v1", "wormhole:ntt-manager:v1"} {
+		buf := append([]byte(tag), lp(registrar)...)
+		buf = append(buf, lp(owner)...)
+		var idb [8]byte
+		binary.BigEndian.PutUint64(idb[:], id)
+		buf = append(buf, idb[:]...)
+		t.Logf("%s(%s, %s, %d) = %x", tag, registrar, owner, id, crypto.Keccak256(buf))
+	}
+
+	// Recipient-address preimage shape differs (single string, no id):
+	//   utf8(tag) ‖ uint32be(len(recipientText)) ‖ utf8(recipientText)
+	const recipientText = "vector-recipient::1220deadbeef"
+	recipientBuf := append([]byte("wormhole:ntt-recipient:v1"), lp(recipientText)...)
+	t.Logf("wormhole:ntt-recipient:v1(%s) = %x", recipientText, crypto.Keccak256(recipientBuf))
 }
