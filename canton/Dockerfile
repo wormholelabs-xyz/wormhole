@@ -11,7 +11,7 @@
 #
 # dpm manages the SDK from daml.yaml's `sdk-version` (Daml 3.5.1 → Canton 3.5.x
 # protocol, Daml-LF 2.3 / Protocol Version 35; Ledger API v2 + DA.Crypto.Text
-# builtins + contract keys). Canton is JVM-based, so the base image ships a JDK
+# builtins). Canton is JVM-based, so the base image ships a JDK
 # (17+).
 #
 # NOTE: building this image needs network access to get.digitalasset.com (dpm
@@ -29,11 +29,18 @@ RUN curl -fsSL https://get.digitalasset.com/install/install.sh | sh
 ENV PATH="/root/.dpm/bin:${PATH}"
 WORKDIR /canton-build
 COPY multi-package.yaml ./
+# Vendored CIP-0056 token-standard interface DARs (core fees + NTT data-depend
+# on them); must be present before the build.
+COPY dars ./dars
 COPY core ./core
+COPY ntt-token ./ntt-token
+COPY ntt ./ntt
+COPY ntt-cip56 ./ntt-cip56
 COPY test ./test
-# Multi-package build: core (templates) then test (scripts, data-dep on core).
-# Produces core/.daml/dist/wormhole-core-0.1.0.dar and
-# test/.daml/dist/wormhole-core-test-0.1.0.dar.
+# Multi-package build: core (templates), the NTT packages (data-dep on core),
+# then test (scripts, data-dep on all). Produces
+# core/.daml/dist/wormhole-core-0.2.0.dar and
+# test/.daml/dist/wormhole-core-test-0.1.0.dar (which packs the others' DALFs).
 RUN dpm install "${DAML_SDK_VERSION}" && dpm build --all
 
 FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS canton
@@ -46,7 +53,7 @@ WORKDIR /canton
 # The production (clean) core DAR, for reference, plus the test DAR — which packs
 # core's DALFs and the setup/integration scripts. The bootstrap uploads the test
 # DAR (bundling core) and runs Test.TestCore:setup against the devnet sandbox.
-COPY --from=build /canton-build/core/.daml/dist/wormhole-core-0.1.0.dar /canton/wormhole-core.dar
+COPY --from=build /canton-build/core/.daml/dist/wormhole-core-0.2.0.dar /canton/wormhole-core.dar
 COPY --from=build /canton-build/test/.daml/dist/wormhole-core-test-0.1.0.dar /canton/wormhole-core-test.dar
 COPY devnet/ /canton/devnet/
 # Pre-install the SDK so `dpm sandbox` / `dpm script` start without a fetch.
