@@ -1,0 +1,143 @@
+-- | NTT wire codec: the three nested structures a Native Token Transfer travels
+-- in, mirroring the spec at
+-- https://github.com/wormhole-foundation/native-token-transfers/tree/main/docs
+-- and the EVM/Solana reference implementations.
+--
+-- Layouts (every width in BYTES; all values big-endian; hex 'Bytes' throughout,
+-- matching Wormhole.Core.Bytes):
+--
+-- > NativeTokenTransfer:
+-- >   prefix(4) = 0x994E5454 ‖ decimals(1) ‖ amount(8) ‖ sourceToken(32)
+-- >   ‖ recipientAddress(32) ‖ recipientChain(2)
+-- >   [‖ additionalPayloadLen(2) ‖ additionalPayload]
+-- >
+-- > NttManagerMessage:
+-- >   id(32) ‖ sender(32) ‖ payloadLen(2) ‖ payload
+-- >
+-- > WormholeTransceiverMessage (the VAA payload):
+-- >   prefix(4) = 0x9945FF10 ‖ sourceManager(32) ‖ recipientManager(32)
+-- >   ‖ managerPayloadLen(2) ‖ managerPayload ‖ transceiverPayloadLen(2) ‖ transceiverPayload
+--
+-- Decoders 'error' on malformed input (bad prefix / short buffer), matching the
+-- abort-on-invalid style of 'Wormhole.Core.VAA.parseVAA'.
+module Wormhole.Ntt.Payload where
+
+import Wormhole.Core.Bytes
+
+----------------------------------------------------------------------
+-- Big-endian encoding helpers. The multi-byte builders 'intToBytesN' and
+-- 'leftPadTo' live in Wormhole.Core.Bytes (shared with the core address
+-- derivation); this module adds only the NTT-specific uint16 length prefix.
+----------------------------------------------------------------------
+
+-- | Encode a length-prefixed field: uint16 length ‖ bytes.
+encodeLengthPrefixed : Bytes -> Bytes
+encodeLengthPrefixed b = intToBytesN (byteLength b) 2 <> normalizeHex b
+
+----------------------------------------------------------------------
+-- Prefixes
+----------------------------------------------------------------------
+
+-- | @0x994E5454@ = 0x99 'N' 'T' 'T'.
+nativeTokenTransferPrefix : Bytes
+nativeTokenTransferPrefix = "994e5454"
+
+-- | @0x9945FF10@, the Wormhole transceiver message prefix.
+wormholeTransceiverPrefix : Bytes
+wormholeTransceiverPrefix = "9945ff10"
+
+----------------------------------------------------------------------
+-- NativeTokenTransfer
+----------------------------------------------------------------------
+
+data NativeTokenTransfer = NativeTokenTransfer with
+    decimals          : Int      -- uint8: trimmed-amount decimals
+    amount            : Int      -- uint64: trimmed amount
+    sourceToken       : Bytes32
+    recipientAddress  : Bytes32
+    recipientChain    : Int      -- uint16: Wormhole chain id
+    additionalPayload : Bytes    -- "" when absent
+  deriving (Eq, Show)
+
+encodeNativeTokenTransfer : NativeTokenTransfer -> Bytes
+encodeNativeTokenTransfer n =
+  nativeTokenTransferPrefix
+    <> intToHexByte n.decimals
+    <> intToBytesN n.amount 8
+    <> leftPadTo 32 n.sourceToken
+    <> leftPadTo 32 n.recipientAddress
+    <> intToBytesN n.recipientChain 2
+    <> (if n.additionalPayload == "" then "" else encodeLengthPrefixed n.additionalPayload)
+
+decodeNativeTokenTransfer : Bytes -> NativeTokenTransfer
+decodeNativeTokenTransfer b =
+  let prefix = normalizeHex (sliceBytes 0 4 b)
+      decimals = bytesToInt (sliceBytes 4 1 b)
+      amount = bytesToInt (sliceBytes 5 8 b)
+      sourceToken = normalizeHex (sliceBytes 13 32 b)
+      recipientAddress = normalizeHex (sliceBytes 45 32 b)
+      recipientChain = bytesToInt (sliceBytes 77 2 b)
+      additionalPayload =
+        if byteLength b <= 79
+          then ""
+          else let rest = sliceFrom 79 b
+                   alen = bytesToInt (sliceBytes 0 2 rest)
+               in sliceBytes 2 alen rest
+  in if prefix /= nativeTokenTransferPrefix
+       then error ("ntt: bad NativeTokenTransfer prefix: " <> prefix)
+       else NativeTokenTransfer with ..
+
+----------------------------------------------------------------------
+-- NttManagerMessage
+----------------------------------------------------------------------
+
+data NttManagerMessage = NttManagerMessage with
+    id      : Bytes32   -- unique per (source manager) message id
+    sender  : Bytes32   -- the sending manager address
+    payload : Bytes     -- an encoded NativeTokenTransfer
+  deriving (Eq, Show)
+
+encodeNttManagerMessage : NttManagerMessage -> Bytes
+encodeNttManagerMessage m =
+  leftPadTo 32 m.id <> leftPadTo 32 m.sender <> encodeLengthPrefixed m.payload
+
+decodeNttManagerMessage : Bytes -> NttManagerMessage
+decodeNttManagerMessage b =
+  let id = normalizeHex (sliceBytes 0 32 b)
+      sender = normalizeHex (sliceBytes 32 32 b)
+      plen = bytesToInt (sliceBytes 64 2 b)
+      payload = sliceBytes 66 plen b
+  in NttManagerMessage with ..
+
+----------------------------------------------------------------------
+-- WormholeTransceiverMessage (the Wormhole VAA payload)
+----------------------------------------------------------------------
+
+data WormholeTransceiverMessage = WormholeTransceiverMessage with
+    sourceManager      : Bytes32
+    recipientManager   : Bytes32
+    managerPayload     : Bytes   -- an encoded NttManagerMessage
+    transceiverPayload : Bytes   -- "" for the Wormhole transceiver
+  deriving (Eq, Show)
+
+encodeWormholeTransceiverMessage : WormholeTransceiverMessage -> Bytes
+encodeWormholeTransceiverMessage w =
+  wormholeTransceiverPrefix
+    <> leftPadTo 32 w.sourceManager
+    <> leftPadTo 32 w.recipientManager
+    <> encodeLengthPrefixed w.managerPayload
+    <> encodeLengthPrefixed w.transceiverPayload
+
+decodeWormholeTransceiverMessage : Bytes -> WormholeTransceiverMessage
+decodeWormholeTransceiverMessage b =
+  let prefix = normalizeHex (sliceBytes 0 4 b)
+      sourceManager = normalizeHex (sliceBytes 4 32 b)
+      recipientManager = normalizeHex (sliceBytes 36 32 b)
+      mlen = bytesToInt (sliceBytes 68 2 b)
+      managerPayload = sliceBytes 70 mlen b
+      tOffset = 70 + mlen
+      tlen = bytesToInt (sliceBytes tOffset 2 b)
+      transceiverPayload = sliceBytes (tOffset + 2) tlen b
+  in if prefix /= wormholeTransceiverPrefix
+       then error ("ntt: bad WormholeTransceiver prefix: " <> prefix)
+       else WormholeTransceiverMessage with ..

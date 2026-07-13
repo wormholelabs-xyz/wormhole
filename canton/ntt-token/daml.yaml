@@ -1,0 +1,20 @@
+# The NttToken interface (the token effect seam) and its value types, in a
+# package of their OWN — Daml requires interfaces to live separately from
+# templates for upgradeability. `wormhole-ntt` (templates) and the concrete
+# token implementations (mock in the test package; real CIP-56 in ../ntt-cip56)
+# all data-depend on this package.
+sdk-version: 3.5.1
+name: wormhole-ntt-token
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
+  - --target=2.3
+data-dependencies:
+  # The seam carries CIP-56 runtime handles (holdings + registry choice context)
+  # so real implementations (../ntt-cip56) can drive the token-standard factories.
+  - ../vendor/token-standard/splice-api-token-holding-v1-1.0.0.dar
+  - ../vendor/token-standard/splice-api-token-metadata-v1-1.0.0.dar
