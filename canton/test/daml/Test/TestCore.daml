@@ -86,6 +86,7 @@ publishVia operator csId owner emCid nonce payload consistencyLevel = do
     exerciseCmd emCid PublishMessage with
       nonce, payload, consistencyLevel
       coreStateCid = csId
+      payer = owner
       feeAllocation = None
 
 -- | Publishing increments the per-emitter sequence and yields the expected
@@ -192,7 +193,7 @@ testPayloadTooLarge = do
   submitMustFail (actAs bob <> disclose csDisc) do
     exerciseCmd emitterId PublishMessage with
       nonce = 0, payload = bigPayload, consistencyLevel = 0
-      coreStateCid = csId, feeAllocation = None
+      coreStateCid = csId, payer = bob, feeAllocation = None
   pure ()
 
 -- | Sanity check on quorum thresholds (EVM parity: floor(n*2/3)+1).

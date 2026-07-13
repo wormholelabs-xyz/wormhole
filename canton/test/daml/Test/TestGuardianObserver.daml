@@ -75,7 +75,7 @@ testObserverHasNoAuthority = do
   submitMustFail guardianObserver do
     exerciseCmd emitterId PublishMessage with
       nonce = 1, payload = "00", consistencyLevel = 0
-      coreStateCid = csId, feeAllocation = None
+      coreStateCid = csId, payer = alice, feeAllocation = None
 
   -- Cannot drive governance.
   submitMustFail guardianObserver do

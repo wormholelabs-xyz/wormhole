@@ -45,7 +45,7 @@ testMessageFeeLifecycle = do
   msg0 <- submit (actAs alice <> disclose csDisc0) do
     exerciseCmd emId PublishMessage with
       nonce = 1, payload = "aa", consistencyLevel = 0
-      coreStateCid = csId, feeAllocation = None
+      coreStateCid = csId, payer = alice, feeAllocation = None
   msg0.sequence === 0
 
   -- Governance raises the fee to 1000.
@@ -60,12 +60,12 @@ testMessageFeeLifecycle = do
   submitMustFail (actAs alice <> disclose csDisc0) do
     exerciseCmd emId1 PublishMessage with
       nonce = 2, payload = "bb", consistencyLevel = 0
-      coreStateCid = csId, feeAllocation = None
+      coreStateCid = csId, payer = alice, feeAllocation = None
   -- Fee due, no allocation: rejected.
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId1 PublishMessage with
       nonce = 2, payload = "bb", consistencyLevel = 0
-      coreStateCid = csId', feeAllocation = None
+      coreStateCid = csId', payer = alice, feeAllocation = None
 
   -- Exact allocation: publish succeeds, WormholeMessage unchanged, the fee
   -- lands whole in feeRecipient's (guardianGovernance's) holdings.
@@ -73,7 +73,7 @@ testMessageFeeLifecycle = do
   msg1 <- submit (actAs alice <> disclose csDisc) do
     exerciseCmd emId1 PublishMessage with
       nonce = 2, payload = "bb", consistencyLevel = 0
-      coreStateCid = csId', feeAllocation = Some feePay
+      coreStateCid = csId', payer = alice, feeAllocation = Some feePay
   msg1.sequence === 1
   msg1.payload === "bb"
   bal <- mockBalance mockAdmin feeRecipient inst
@@ -84,7 +84,7 @@ testMessageFeeLifecycle = do
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId2 PublishMessage with
       nonce = 3, payload = "cc", consistencyLevel = 0
-      coreStateCid = csId', feeAllocation = Some feePay
+      coreStateCid = csId', payer = alice, feeAllocation = Some feePay
 
 -- | Every way an allocation can be wrong, each dying on its own check.
 testFeeValidationMatrix : Script ()
@@ -101,7 +101,7 @@ testFeeValidationMatrix = do
   now <- getTime
   let publishWith feePay = exerciseCmd emId PublishMessage with
         nonce = 1, payload = "aa", consistencyLevel = 0
-        coreStateCid = csId', feeAllocation = Some feePay
+        coreStateCid = csId', payer = alice, feeAllocation = Some feePay
 
   -- Wrong receiver: pays mallory, not the fee recipient.
   wrongReceiver <- mintAndAllocate mockAdmin alice mallory inst (feeToDecimal mockFee)
@@ -135,7 +135,7 @@ testFeeValidationMatrix = do
   submitMustFail (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
       nonce = 1, payload = "aa", consistencyLevel = 0
-      coreStateCid = fakeCsId, feeAllocation = None
+      coreStateCid = fakeCsId, payer = alice, feeAllocation = None
 
 -- | At fee 0 an attached allocation is rejected outright — funds that are not
 -- owed are never consumed, and the payer can recover a stranded allocation
@@ -150,7 +150,7 @@ testNoFeeDueAndRecovery = do
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId PublishMessage with
       nonce = 1, payload = "aa", consistencyLevel = 0
-      coreStateCid = csId, feeAllocation = Some feePay
+      coreStateCid = csId, payer = alice, feeAllocation = Some feePay
   -- Recovery: the payer withdraws alone; the funds come back to her.
   _ <- submit alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs
   aliceBal <- mockBalance mockAdmin alice inst
@@ -172,7 +172,7 @@ testOverpayTransfersWholeAmount = do
   _ <- submit (actAs alice <> disclose csDisc) do
     exerciseCmd emId PublishMessage with
       nonce = 1, payload = "aa", consistencyLevel = 0
-      coreStateCid = csId', feeAllocation = Some feePay
+      coreStateCid = csId', payer = alice, feeAllocation = Some feePay
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal (2 * mockFee)
 

@@ -531,17 +531,27 @@ template Emitter
     -- invalidates the cid transiently — re-resolve and retry). At fee 0 pass
     -- @feeAllocation = None@; the CoreState reference is still required, since
     -- the fee amount is only knowable from it.
+    --
+    -- @payer@ funds the fee and co-controls the publish. A direct publisher is
+    -- its own payer (@payer = owner@; the controller set collapses to @owner@,
+    -- so it still submits alone). When the publisher is not the payer — an app
+    -- publishing on a user's behalf through an @owner@-owned emitter, e.g. NTT
+    -- 'Wormhole.Ntt.Manager.Transfer' — the payer is named explicitly, and its
+    -- authority is required precisely because it foots the bill:
+    -- 'Allocation_ExecuteTransfer' inside 'ChargeMessageFee' draws the payer's
+    -- funds, so the payer cannot be some third party who did not authorize.
     choice PublishMessage : WormholeMessage
       with
         nonce            : Int
         payload          : Bytes
         consistencyLevel : Int
         coreStateCid     : ContractId CoreState
+        payer            : Party   -- funds 'messageFee'; = owner for a direct publish
         feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
-      controller owner
+      controller owner, payer
       do
         csOperator <- exercise coreStateCid ChargeMessageFee with
-          payer = owner
+          payer
           feeAllocation
         assertMsg "core state operator mismatch" (csOperator == operator)
         assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)

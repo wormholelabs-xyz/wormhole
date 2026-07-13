@@ -328,11 +328,14 @@ choice PublishMessage : WormholeMessage
     nonce            : Int            -- uint32
     payload          : Bytes          -- <= 750 bytes (whitepaper 0004)
     consistencyLevel : Int            -- uint8; see §6
-  controller owner
+    coreStateCid     : ContractId CoreState                       -- fee read (§ Fees)
+    payer            : Party          -- funds messageFee; = owner for a direct publish
+    feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+  controller owner, payer
   do
-    -- 1. assert payload length <= 750
-    -- 2. (fee enforcement deferred; messageFee = 0 in v1)
-    -- 3. archive self; create Emitter with sequence = sequence + 1 (SAME key)
+    -- 1. charge the current messageFee to payer through CoreState (§ Fees)
+    -- 2. assert payload length <= 750
+    -- 3. archive self; create the successor Emitter with sequence = sequence + 1
     -- 4. return WormholeMessage{registrar, owner, emitterId, sequence, nonce,
     --      payload, consistencyLevel} -- watcher derives the address
     pure result
@@ -403,9 +406,13 @@ instruments is a genesis-class ceremony):
   recipient's authority is inherited. `PublishMessage` therefore references
   the `CoreState` on every publish (EVM parity: the current `messageFee` is
   read each call; the cid churns only on governance actions — a stale cid
-  fails closed and is re-resolved). Registries charge their own operator-set
-  `registrationFee`/`claimFee` through the same choice; at fee 0 they skip
-  the `CoreState` entirely.
+  fails closed and is re-resolved). The fee is charged to `payer`, a choice
+  argument that equals `owner` for a direct publish but is named explicitly
+  when an app publishes on a user's behalf through an `owner`-owned emitter
+  (NTT §10): `payer` co-controls the publish, so it cannot be a third party
+  who did not authorize spending its own funds. Registries charge their own
+  operator-set `registrationFee`/`claimFee` through the same choice; at fee 0
+  they skip the `CoreState` entirely.
 - **Custody is governance-controlled**: `feeRecipient` is the
   `guardianGovernance` threshold party, so accrued fees move only via the
   k-of-n guardian ceremony — the operator never touches them (the Canton
