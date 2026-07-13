@@ -189,6 +189,22 @@ template CoreState
       controller reader
       do pure operator
 
+    -- | Read the @guardianGovernance@ anchor off an authentic 'CoreState' — a
+    -- STRONGER caller-side pin than 'GetOperator' for consumers that must resist
+    -- a compromised operator, not just a third-party forgery. A 'CoreState'
+    -- requires only SOME (operator, gg) signature pair, so an operator whose key
+    -- is compromised can co-sign a forged 'CoreState' (with a throwaway gg party
+    -- it controls and an attacker guardian set) that still passes an
+    -- operator-pin. Pinning @guardianGovernance@ closes that: gg is the
+    -- guardians' k-of-n external threshold party, whose signature a compromised
+    -- operator (a single hot participant key) cannot produce — so no forged
+    -- 'CoreState' can carry the real gg. Used by 'Wormhole.Ntt.Manager.Receive'.
+    nonconsuming choice GetGuardianGovernance : Party
+      with
+        reader : Party
+      controller reader
+      do pure guardianGovernance
+
     -- | Charge the governance-set per-publish fee ('messageFee'). Lives here —
     -- not on 'Emitter' — for two reasons: the fee amount is only knowable from
     -- this contract, and executing the allocation needs the FEE RECIPIENT'S
