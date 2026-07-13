@@ -16,5 +16,5 @@ build-options:
 data-dependencies:
   # The seam carries CIP-56 runtime handles (holdings + registry choice context)
   # so real implementations (../ntt-cip56) can drive the token-standard factories.
-  - ../vendor/token-standard/splice-api-token-holding-v1-1.0.0.dar
-  - ../vendor/token-standard/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar

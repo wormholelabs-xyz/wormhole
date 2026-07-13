@@ -2,9 +2,8 @@
 # built against the vendored token-standard interface DARs. Works for Canton Coin
 # (Amulet) or any conforming token.
 #
-# The DARs under ../vendor/token-standard are vendored from
-# github.com/digital-asset/cn-quickstart (quickstart/daml/dars), the same way
-# that repo's licensing app pins them; see ../vendor/token-standard/README.md.
+# The token-standard interface DARs live under ../dars (shared with the core
+# fee payments); see ../dars/README.md for provenance and package-id vetting.
 sdk-version: 3.5.1
 name: wormhole-ntt-cip56
 version: 0.1.0
@@ -17,7 +16,7 @@ build-options:
   - --target=2.3
 data-dependencies:
   - ../ntt-token/.daml/dist/wormhole-ntt-token-0.1.0.dar
-  - ../vendor/token-standard/splice-api-token-metadata-v1-1.0.0.dar
-  - ../vendor/token-standard/splice-api-token-holding-v1-1.0.0.dar
-  - ../vendor/token-standard/splice-api-token-transfer-instruction-v1-1.0.0.dar
-  - ../vendor/token-standard/splice-api-token-burn-mint-v1-1.0.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-transfer-instruction-v1-1.0.0.dar
+  - ../dars/splice-api-token-burn-mint-v1-1.0.0.dar

@@ -19,8 +19,8 @@
 module Wormhole.Ntt.TokenCip56 where
 
 import DA.Time (days, addRelTime)
-import Splice.Api.Token.HoldingV1 (Holding, InstrumentId (..))
-import Splice.Api.Token.MetadataV1 (ExtraArgs (..), emptyMetadata)
+import Splice.Api.Token.HoldingV1 (InstrumentId (..))
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1 (Transfer (..), TransferFactory, TransferFactory_Transfer (..))
 import Splice.Api.Token.BurnMintV1 (BurnMintFactory, BurnMintFactory_BurnMint (..), BurnMintOutput (..))
 import Wormhole.Ntt.Token

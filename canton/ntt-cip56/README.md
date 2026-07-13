@@ -4,8 +4,8 @@ Concrete CIP-56 (Canton Network Token Standard) implementations of the
 [`NttToken`](../ntt-token/daml/Wormhole/Ntt/Token.daml) seam, so an NTT deployment
 can custody/mint **Canton Coin (Amulet) or any conforming token** with no
 per-token code. Builds against the vendored token-standard interface DARs
-(see [`../vendor/token-standard/README.md`](../vendor/token-standard/README.md))
-and is part of the `dpm build --all` workspace.
+(see [`../dars/README.md`](../dars/README.md), shared with the core fee
+payments) and is part of the `dpm build --all` workspace.
 
 ## Templates (`TokenCip56.daml`)
 
