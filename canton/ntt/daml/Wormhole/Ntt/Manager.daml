@@ -301,7 +301,7 @@ template NttManager
     -- covering 'ReplayNode', the token contract). (A concrete token whose
     -- holdings name the owner as a signatory additionally needs the recipient's
     -- authority or a CIP-56 transfer pre-approval to receive without submitting
-    -- itself — an off-ledger orchestration concern, README §10.)
+    -- itself — an off-ledger orchestration concern, README §11.)
     --
     -- GUARDIAN TRUST ROOT: there is no caller-supplied core-state to substitute
     -- freely — the disclosed @coreStateCid@ is authenticated by pinning its
@@ -329,7 +329,7 @@ template NttManager
     -- the simpler mechanism, accepting that cost.
     --
     -- @pubKeys@ are untrusted hints bound to guardian addresses inside
-    -- 'verifyVAA' (hint-free verification is a tracked follow-up, README §10).
+    -- 'verifyVAA' (hint-free verification is a tracked follow-up, README §11).
     nonconsuming choice Receive : NativeTokenTransfer
       with
         executor         : Party                 -- any relayer; carries no authority, only disclosures

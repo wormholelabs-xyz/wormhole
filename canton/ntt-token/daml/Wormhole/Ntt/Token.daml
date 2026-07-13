@@ -57,7 +57,7 @@ tenPow n = if n <= 0 then 1 else 10 * tenPow (n - 1)
 
 -- | Trim @rawAmount@ (denominated at @fromDecimals@) to the wire form. If the
 -- token has more than 8 decimals the low digits are dropped (NTT dust handling
--- is deferred; see README §10 rate-limiting/queue follow-ups).
+-- is deferred; see README §11 rate-limiting/queue follow-ups).
 trimAmount : Int -> Int -> TrimmedAmount
 trimAmount rawAmount fromDecimals =
   if fromDecimals <= maxTrimmedDecimals

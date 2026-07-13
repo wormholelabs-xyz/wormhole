@@ -3,7 +3,7 @@
 CIP-0056 (Token Standard V1) interface packages. The first three are consumed
 by `wormhole-core` for fee payments (see the main README §4.2); the last two
 (`burn-mint`, `transfer-instruction`) are consumed by the NTT layer's CIP-0056
-token implementations (`ntt-cip56`, README §10). These are **interface-only**
+token implementations (`ntt-cip56`, README §11). These are **interface-only**
 packages — small, stable (frozen at 1.0.0), and network-vetted: the package-ids
 must match what participants on the Canton Network have vetted, so these DARs
 are taken verbatim from an official release and must never be rebuilt from

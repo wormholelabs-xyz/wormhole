@@ -38,6 +38,7 @@ certusone
 chainid
 ChainID
 Chainlink
+cids
 Coinspect
 collateralization
 colour
@@ -50,12 +51,14 @@ cosmwasm
 Cosmwasm
 counterparty
 cpus
+crankless
 crosschain
 Cyfrin
 damlc
 dars
 datagram
 denoms
+deployers
 devnet
 dgset
 doclink

@@ -31,7 +31,7 @@ the Wormhole whitepapers:
 > real guardian-signed VAA and the cross-language address derivation pinned by a
 > shared test vector. The remaining mainnet-gating item — the exact Ledger-API
 > protobuf surface — plus the deployment/observer topology are tracked in
-> [Open Questions & Validation Items](#11-open-questions--validation-items).
+> [Open Questions & Validation Items](#12-open-questions--validation-items).
 
 ---
 
@@ -409,7 +409,7 @@ instruments is a genesis-class ceremony):
   fails closed and is re-resolved). The fee is charged to `payer`, a choice
   argument that equals `owner` for a direct publish but is named explicitly
   when an app publishes on a user's behalf through an `owner`-owned emitter
-  (NTT §10): `payer` co-controls the publish, so it cannot be a third party
+  (NTT §11): `payer` co-controls the publish, so it cannot be a third party
   who did not authorize spending its own funds. Registries charge their own
   operator-set `registrationFee`/`claimFee` through the same choice; at fee 0
   they skip the `CoreState` entirely.
@@ -673,6 +673,7 @@ it must serve:
 | `EmitterRegistry`       | operator                           | `RegisterEmitter`                                              | yes — the requester submits                     | per emitter registration; recreated on operator fee change |
 | `ReplayRootRegistry`    | operator                           | `ClaimReplayRoot`                                              | yes — the consumer submits (cacheable blob)     | only on operator fee change  |
 | `Emitter`               | (operator, owner, emitterId)       | `PublishMessage`                                               | no — owner submits, own ACS (but see `CoreState` row) | per publish                  |
+| NTT (`NttManagerRegistry`, `NttManager`, `NttToken` hook) | see §11 | `RegisterManager` (deployer), `Transfer` (sender), `Receive` (executor) | yes — deployers/senders/relayers are non-stakeholders | registry per deploy; manager per send |
 | token-registry context  | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures    | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service | registry-defined             |
 | app contracts (e.g. `ExampleIntegrator`) | app-defined      | the app's own choices                                          | app's concern (its users are observers)         | app-defined                  |
 
@@ -683,8 +684,10 @@ Two properties make this safe to outsource:
   authenticate every resolved contract by its **payload**, never by how the
   cid was found: `CoreState` by its signatory anchor fields (§4.1),
   `ReplayNode` by the (consumer, operator) binding inside `VerifyAndConsumeVAA`
-  plus the app-side operator pin (see `ExampleIntegrator.Redeem`). The service
-  is trusted for *liveness* only, like any RPC endpoint.
+  plus the app-side operator pin (see `ExampleIntegrator.Redeem`), and — for NTT
+  — the disclosed `CoreState` by the deploy-time `guardianGovernance` pin and the
+  transceiver `Emitter` by its owner-bound address (§11). The service is trusted
+  for *liveness* only, like any RPC endpoint.
 - **One reader suffices.** A service reading as the operator (a stakeholder of
   `CoreState`, both registries, and — as co-signatory — every consumer's trie)
   can serve the whole table; integrators can equally run their own for their
@@ -909,7 +912,7 @@ read-only `guardianObserver` party (§4.1, §7.1), and devnet leaves it empty
 ```
 canton/
   README.md                      ← this document
-  multi-package.yaml             ← multi-package project (core + test)
+  multi-package.yaml             ← multi-package project (core + NTT + test)
   Dockerfile                     ← devnet image (build DARs + run sandbox)
   core/                          ← `wormhole-core` package (templates; NO daml-script)
     daml.yaml
@@ -922,14 +925,22 @@ canton/
     daml/Wormhole/Core/Governance.daml
     daml/Wormhole/Core/Setup.daml
   dars/                          ← vendored token-standard interface DARs (provenance in dars/README.md)
+  ntt-token/                     ← `wormhole-ntt-token` package (the NttToken effect seam; §11)
+    daml/Wormhole/Ntt/Token.daml
+  ntt/                           ← `wormhole-ntt` package (Manager + Payload wire codec; §11)
+    daml/Wormhole/Ntt/Payload.daml
+    daml/Wormhole/Ntt/Manager.daml
+  ntt-cip56/                     ← `wormhole-ntt-cip56` package (real CIP-0056 token hooks; §11)
+    daml/Wormhole/Ntt/TokenCip56.daml
   test/                          ← `wormhole-core-test` package (Daml Scripts)
-    daml.yaml                    ← data-dependency on core's DAR + the interface DARs
+    daml.yaml                    ← data-dependency on core's DAR, the NTT DARs, + the interface DARs
     daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
     daml/Test/TestGuardianObserver.daml ← read-only guardianObserver visibility/authority tests
     daml/Test/TestReplay.daml    ← replay-trie tests + disclosure-service simulation (§4.6)
     daml/Test/MockToken.daml     ← minimal CIP-0056 mock instrument for fee tests
     daml/Test/TestFees.daml      ← fee-payment tests (§4.2)
     daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
+    daml/Test/TestNtt.daml       ← NTT codec/deploy/send/receive tests (§11)
   devnet/
     start_sandbox.sh             ← starts the Ledger API v2 sandbox
     bootstrap.sh                 ← allocates Operator + creates CoreState
@@ -938,10 +949,11 @@ canton/
 node/pkg/cantonclient/           ← Ledger API v2 gRPC client
   proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.5.5)
   proto/gen/                     ← generated Go stubs (buf generate)
-  vectorgen_test.go              ← regenerates the signed-VAA test vector (GEN_CANTON_VECTORS=1)
+  vectorgen_test.go              ← regenerates the signed-VAA + NTT test vectors (GEN_CANTON_VECTORS=1)
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
   watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
   core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
+  ntt_recipient_match_integration_test.go ← live NTT matching-recipient receive harness (integration tag; §11)
 sdk/vaa/structs.go               ← ChainIDCanton = 72
 devnet/canton-devnet.yaml        ← Tilt k8s manifest (sandbox + bootstrap)
 Tiltfile                         ← `canton` component (opt-in)
@@ -1025,7 +1037,7 @@ This brings up:
 [`devnet/guardian_governance.canton`](devnet/guardian_governance.canton) stand up
 `guardianGovernance` as an **external, decentralized-namespace party** — a
 namespace owned by three guardian keys with a 2-of-3 threshold, the same pattern
-the Canton Network DSO party uses (§10, §11 item 2). Concretely, the console
+the Canton Network DSO party uses (§10, §12 item 2). Concretely, the console
 script:
 
 1. self-signs a root `NamespaceDelegation` for each of the three owner keys;
@@ -1211,7 +1223,158 @@ human decision; see Open Questions.
 
 ---
 
-## 11. Open Questions & Validation Items
+## 11. Native Token Transfers (NTT)
+
+[NTT](https://github.com/wormhole-foundation/native-token-transfers) is a
+separate, uploadable package set on top of the core bridge — the core is
+untouched and used as two primitives, **publish** and **verify**. NTT's on-chain
+shape is a **Manager** plus a **Wormhole transceiver**; on Canton the transceiver
+*is* a core `Emitter`. Like the core, NTT uses **no contract keys**: every
+contract is resolved by an explicit, disclosed contract-id (§4.7).
+
+| Package | Contents |
+| --- | --- |
+| `ntt-token` (`wormhole-ntt-token`) | The `NttToken` interface (token effect seam) + `TokenMode`, `TrimmedAmount`. Interface-only, per Daml's upgradeability rule. Depends on the CIP-0056 `holding`/`metadata` interfaces (the seam carries `[ContractId Holding]` + `ExtraArgs`). |
+| `ntt` (`wormhole-ntt`) | `Payload` (wire codec) and `Manager` (`NttManagerRegistry`, `NttManager`, deploy/send/receive/peers). |
+| `ntt-cip56` (`wormhole-ntt-cip56`) | Real CIP-0056 implementations of `NttToken` — `Cip56CustodyToken` (lock/unlock via `TransferFactory`) and `Cip56BurnMintToken` (burn/mint via `BurnMintFactory`). Works for Canton Coin (Amulet) or any conforming token. |
+| `dars/` | The CIP-0056 interface DARs, shared with the core fee path (§4.2, provenance in [`dars/README.md`](dars/README.md)). NTT additionally uses `burn-mint` + `transfer-instruction`. |
+
+### Deployment — permissionless and crankless
+
+Anyone stands up a deployment (bring your own token, pick a mode), mirroring core
+`RegisterEmitter`. The deployer (`admin`) first registers a core `Emitter` (the
+transceiver), then exercises `RegisterManager` directly on the disclosed
+`NttManagerRegistry`: it allocates a stable `managerId` and creates the
+`NttManager`. The `operator`'s co-signature is **inherited from the registry
+signatory** — the guardian operator runs no approval crank. `operator` and
+`admin` co-sign the manager (mirroring `Emitter`); neither has power over transfer
+contents.
+
+**Two key-derived identities**, both owner-bound per [§4.2](#42-message-publishing):
+- **transceiver address** = `keccak256("wormhole:emitter:v1" ‖ operator ‖ admin ‖ emitterId)`
+  — the VAA emitter other chains register; derived by the watcher, not stored.
+- **manager address** = `keccak256("wormhole:ntt-manager:v1" ‖ operator ‖ admin ‖ managerId)`,
+  computed on-ledger at registration and stored in `managerAddress`. The distinct
+  domain tag keeps an emitter and a manager with the same ordinals from colliding;
+  `admin` is in the preimage and co-signs, so a compromised operator cannot forge
+  an existing manager's address (which would let it consume that peer's inbound
+  VAAs). The transceiver must be a **single shared** `Emitter` per deployment — its
+  derived address is the peer identity other chains register — so it cannot be
+  per-user.
+
+### Wire codec (`Wormhole.Ntt.Payload`)
+
+Big-endian encoders for the three nested structures (`NativeTokenTransfer` prefix
+`0x994E5454`; `NttManagerMessage`; `WormholeTransceiverMessage` prefix
+`0x9945FF10`), built on `Bytes.daml`. Amounts use the NTT **TrimmedAmount** (≤ 8
+decimals + a scale byte). Round-trips are tested in `TestNtt:testNttCodec`.
+
+### Send (`NttManager.Transfer`, controller `user`) — the sender self-pays
+
+Trims the amount, drives the token seam's `LockOrBurn` (attributed to `user`, the
+actual caller), assembles the nested message, and publishes it via
+`Emitter.PublishMessage` — so the guardian watcher observes an **ordinary core
+message** (no NTT-specific watcher code). Both the transceiver `Emitter` and the
+`CoreState` are caller-supplied, disclosed cids; the transceiver is fetched and
+bound to the deployment (owner = admin, id = the stored one) before publishing.
+
+`user` is the **sole** controller — no admin/operator sign-off. Exercising
+`Transfer` consumes `NttManager` (signatories `operator, admin`), and consuming a
+contract makes its signatories' authority available to the nested `LockOrBurn`
+(controller = the token's `manager`, i.e. `operator`) and `PublishMessage`
+(controller = the Emitter's `owner`, i.e. `admin`). The CIP-0056 factory
+underneath separately asserts the input holding's owner matches `user`, so a
+caller can never lock/burn a holding it doesn't control.
+
+**The sender pays the message fee itself.** `PublishMessage` charges the
+governance-set `messageFee` to its `payer` (§4.2), and `Transfer` passes
+`payer = user`: `user`'s authority reaches the fee's `Allocation_ExecuteTransfer`
+because, as the payer, it **co-controls** `PublishMessage`. The user attaches a
+fee allocation from its own wallet (empty at fee 0). This is the same fee every
+core publish pays — an NTT send is never fee-exempt (`TestNtt:testNttSend`,
+`testNttTransferByDifferentUser`). Because the transceiver is a *shared*,
+admin-owned emitter, the send fee could not be drawn from the user under the core
+fee model without the `payer` co-controller seam — that seam is why the sender,
+not the deployment, foots each send.
+
+The one non-fee requirement is **visibility, not authorization**: `user` is not a
+stakeholder of `NttManager`, the transceiver `Emitter`, the token, or the
+`CoreState`, so a submission attaches those as explicit disclosures (a data
+attachment served by the deployment's disclosure service, §4.7) — in Daml Script,
+`submitWithDisclosures`. The manager and its transceiver churn their cids on every
+send (both consuming), so a sender re-resolves the fresh cids per send — the same
+fail-closed retry the core publish path uses.
+
+### Receive (`NttManager.Receive`, controller `executor`) — permissionless
+
+Any `executor` — a relayer, the recipient, anyone — relays an inbound VAA on the
+recipient's behalf. The choice is `nonconsuming`, so its body inherits
+`NttManager`'s `operator, admin` authority regardless of who submits; the
+executor's identity carries **no authority**, only the disclosures it attaches
+(the `CoreState`, the covering `ReplayNode`, the token). It verifies + claims the
+VAA atomically via the core `VerifyAndConsumeVAA` — the per-consumer replay trie
+(§4.6), scoped to `admin`, so each deployment claims a VAA at most once and
+distinct VAAs never contend — then enforces the peer, decodes, binds the
+recipient, and mints/unlocks. (`TestNtt:testNttReceiveByExecutorRecipientMismatchFails`
+drives a real receive by a third-party relayer, all the way to the recipient
+gate.)
+
+**Guardian trust root — pinned to `guardianGovernance`, not the operator.** The
+disclosed `CoreState` is authenticated by checking its `guardianGovernance`
+against the anchor `admin` committed at deployment (via `GetGuardianGovernance`).
+This is stronger than pinning the operator: a `CoreState` requires only *some*
+`(operator, gg)` signature pair, so a compromised operator could co-sign a forged
+`CoreState` (throwaway gg party, attacker guardian set) that passes an
+operator-pin. Pinning `guardianGovernance` — the guardians' k-of-n external
+threshold party, unforgeable by a single hot operator key — closes that
+(`TestNtt:testNttReceivePinsGuardianGovernance`). This mirrors EVM NTT verifying
+against an immutable core address; the old key-maintainer trust (a manager keyed
+to `guardianGovernance`) is gone with keys, and this replaces it soundly.
+
+**Recipient binding.** A Canton `Party` id has no fixed-size form to bind against
+the VAA's `Bytes32` `recipientAddress`, so `Receive` checks
+`recipientAddressFor recipient == ntt.recipientAddress`, where `recipientAddressFor`
+is `keccak256("wormhole:ntt-recipient:v1" ‖ lp(partyToText recipient))`. A sender
+computes the same hash off-chain over the recipient's exact Party-id string; since
+it lives inside the VAA it is covered by the guardian signature, so no relayer can
+steer the mint elsewhere. **Tradeoff, deliberate:** a Party id is permanent, so a
+VAA is bound to the recipient party as it existed when the sender hashed it; a
+recipient needing a *different* party (lost key, custodial migration) requires a
+re-send. Pinned by `testRecipientAddressForVector`; the matching-recipient path
+(a live Party's fingerprint is nondeterministic, so no static fixture can match)
+is covered by a live two-step harness
+(`ntt_recipient_match_integration_test.go`).
+
+### Token seam (`NttToken`) and modes
+
+`NttManager` never references a concrete token; it holds a `ContractId NttToken`
+and calls `LockOrBurn` / `MintOrUnlock`, isolating the token detail the way
+`VAA.daml` isolates crypto. `TokenMode` selects lock/unlock or burn/mint. The seam
+choices carry the CIP-0056 runtime handles (`[ContractId Holding]`, `ExtraArgs`)
+the manager threads through. Real implementations live in `ntt-cip56`
+(`Cip56CustodyToken`, `Cip56BurnMintToken`); a stdlib `MockToken` in the test
+package exercises the whole protocol under `dpm test`. **Submission caveat:** a
+production send/receive is app-orchestrated — the caller submits with the token
+holder's authority and the registry's disclosed contracts (`extraArgs`). For a
+third-party-executor receive against a real (owner-signed) token, the recipient
+additionally needs a CIP-0056 transfer pre-approval, or must submit itself; the
+mock (admin-signed holdings) proves the on-ledger path without it.
+
+### Follow-ups (tracked in [Open Questions](#12-open-questions--validation-items))
+
+- **Third-party-executor + owner-signed token**: needs a recipient pre-approval
+  (above) for a fully hands-off relay; the on-ledger permissionless path is done.
+- **Send contention / message id**: `Transfer` is consuming (per-manager
+  `outboundSequence`), so concurrent sends serialize on the manager cid. Sourcing
+  the NTT message id from the transceiver `Emitter`'s sequence would let `Transfer`
+  be nonconsuming, removing that contention point.
+- **Hint-free verification** (persist guardian pubkeys, §5) so `Receive` needs no
+  `pubKeys` hints — core-wide, orthogonal to NTT.
+- **Recipient-address change**: the permanent Party-id binding above.
+
+---
+
+## 12. Open Questions & Validation Items
 
 1. **Ledger API v2 RPC surface.** The exact message/field names of
    `UpdateService.GetUpdates` / `GetUpdateByOffset` / `StateService.GetLedgerEnd`
@@ -1269,3 +1432,14 @@ human decision; see Open Questions.
    cannot be added to a deployed template does not apply.)
 7. **Governance emitter.** Uses the standard governance emitter (Solana, chain 1,
    address `0x00..04`). Confirm for the target deployment/network.
+8. **NTT (§11).** *On-ledger design resolved:* keyless, crankless deployment;
+   sender-self-paid send (the `payer` co-controller seam); permissionless
+   third-party-executor receive; guardian trust root pinned to
+   `guardianGovernance`. **Residuals:** a third-party relay to a real
+   (owner-signed) token needs a recipient CIP-0056 transfer pre-approval (the
+   mock proves the path without one); `Transfer` is consuming, so concurrent
+   sends serialize on the manager — sourcing the message id from the transceiver
+   `Emitter`'s sequence would make it nonconsuming; the recipient binding is a
+   permanent Party-id hash (a party change needs a re-send); validate the CIP-0056
+   token hooks against real amulet on DevNet (shares item 5's registry-fidelity
+   gap). Hint-free verification (item 4) also removes `Receive`'s `pubKeys` hints.

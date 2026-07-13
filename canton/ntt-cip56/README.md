@@ -40,7 +40,11 @@ wiring lives in the (off-ledger) relayer/app.
 
 ## Not yet wired
 
-- `recipientAddress` (32-byte NTT address) → Canton `Party` still needs an
-  address registry (the `Receive` recipient is relayer-supplied); see
-  [`../README.md`](../README.md) §10.
-- Two-legged / `Allocation`-based locked settlement (DARs are vendored, unused).
+- The `recipientAddress` (32-byte NTT address) → Canton `Party` binding IS wired
+  (`Manager.recipientAddressFor`, a permanent keccak of the Party-id string), but
+  a recipient that must move to a DIFFERENT party (lost key, custodial migration)
+  has no recovery for VAAs already signed against the old hash — the sender
+  re-sends; see [`../README.md`](../README.md) §11.
+- Two-legged / `Allocation`-based locked settlement (the allocation interface is
+  vendored for the core fee path, but NTT settles via the transfer/burn-mint
+  factories directly).
