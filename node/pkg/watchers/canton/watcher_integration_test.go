@@ -145,9 +145,8 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	select {
 	case ev := <-eventChan:
 		// The decoded event from the live ledger. The address is derived from the
-		// emitter's key components (registrar/owner/emitterId) assigned by the live
-		// ledger; publishing went via ExerciseByKeyCommand (integrationPublish), so
-		// this also exercises the key path end-to-end.
+		// emitter's identity components (registrar/owner/emitterId) assigned by
+		// the live ledger (integrationPublish exercises the Emitter by cid).
 		require.NotEmpty(t, ev.Message.Registrar)
 		require.NotEmpty(t, ev.Message.Owner)
 		require.Contains(t, ev.Message.Registrar, "::", "registrar should be a full party id")

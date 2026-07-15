@@ -29,26 +29,31 @@ pad64 t = t <> mconcat (replicate (64 - T.length t) "0")
 nibbles : [Text]
 nibbles = T.explode "0123456789abcdef"
 
--- | Propose-accept ceremony granting @consumer@ its trie root: the consumer
--- requests, the operator approves against its (queried, cid-passed — no keys)
--- 'ReplayRootRegistry'.
+-- | Direct, consumer-submitted root claim: the consumer holds the one static
+-- disclosure of the 'ReplayRootRegistry' anchor (served off-ledger by the
+-- disclosure service — simulated here by reading as the operator, and
+-- cacheable forever since the anchor never churns) and submits alone. No
+-- operator crank.
 registerReplayRoot : Party -> Party -> Int -> Script (ContractId ReplayNode)
 registerReplayRoot operator consumer threshold = do
-  reqCid <- submit consumer do
-    createCmd ReplayRootRequest with consumer, operator, splitThreshold = threshold
   [(regCid, _)] <- query @ReplayRootRegistry operator
-  (_, rootCid) <- submit operator do
-    exerciseCmd reqCid ApproveReplayRoot with registryCid = regCid
-  pure rootCid
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  submit (actAs consumer <> disclose regDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      splitThreshold = threshold
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s trie
--- covering @digest@. Aborts if coverage is not exactly one — every call doubles
--- as a check of the partition invariant.
+-- covering @digest@, queried as @consumer@. The filter matches the trie owner
+-- too, because a reader can see nodes of several tries (the operator co-signs
+-- all of them). Aborts if coverage is not exactly one — every call doubles as
+-- a check of the partition invariant, and this abort is also how the service
+-- detects a forked trie (a consumer that minted parallel roots).
 coveringNode : Party -> Text -> Script (ContractId ReplayNode, ReplayNode)
 coveringNode consumer digest = do
   nodes <- query @ReplayNode consumer
   let d = normalizeHex digest
-  case filter (\(_, n) -> n.prefix `T.isPrefixOf` d) nodes of
+  case filter (\(_, n) -> n.consumer == consumer && n.prefix `T.isPrefixOf` d) nodes of
     [one] -> pure one
     covering -> abort ("partition invariant violated: " <> show (length covering) <> " covering nodes")
 
@@ -254,30 +259,41 @@ testNodeArchiveNeedsBoth = do
   submitMustFail consumer do archiveCmd rootCid
   submitMustFail operator do archiveCmd rootCid
   -- Both together can (the irreducible signatory remainder) — coverage for the
-  -- auto-generated Archive choices, including request and registry.
+  -- auto-generated Archive choices, including the registry anchor.
   submit (actAs consumer <> actAs operator) do archiveCmd rootCid
-  reqCid <- submit consumer do
-    createCmd ReplayRootRequest with consumer, operator, splitThreshold = 4
-  submit consumer do archiveCmd reqCid
   [(regCid, _)] <- query @ReplayRootRegistry operator
   submit operator do archiveCmd regCid
 
--- | The root registry grants at most one root per consumer — the positive,
--- on-ledger check that replaces key uniqueness — and roots cannot be minted
--- outside it (the consumer alone lacks the operator's signature).
-testRootRegistry : Script ()
-testRootRegistry = do
+-- | Root claims are free and self-serve; what the registry pins down is WHOSE
+-- scope a claim can touch. Claiming a root for a consumer requires that
+-- consumer's authority — the load-bearing property: nobody can fork someone
+-- ELSE'S replay scope. A consumer duplicating its own root is deliberately
+-- possible (pinned below): parallel roots are self-harm, detected off-ledger
+-- by the disclosure service ('coveringNode' aborts on more than one covering
+-- node). Roots cannot be minted outside the registry — the consumer alone
+-- lacks the operator's signature.
+testRootClaims : Script ()
+testRootClaims = do
   (operator, consumer, rootCid) <- setupTrie 4
   Some root <- queryContractId consumer rootCid
   root.prefix === ""
   root.splitThreshold === 4
   Set.size root.consumed === 0
-  -- A second grant for the same consumer is rejected.
-  reqCid <- submit consumer do
-    createCmd ReplayRootRequest with consumer, operator, splitThreshold = 4
   [(regCid, _)] <- query @ReplayRootRegistry operator
-  submitMustFail operator do
-    exerciseCmd reqCid ApproveReplayRoot with registryCid = regCid
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  -- A third party cannot claim a root for someone else's scope.
+  mallory <- allocateParty "TrieMallory"
+  submitMustFail (actAs mallory <> disclose regDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      splitThreshold = 4
+  -- The consumer CAN duplicate its own root — by design, self-harm only.
+  _ <- submit (actAs consumer <> disclose regDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      splitThreshold = 4
+  roots <- query @ReplayNode consumer
+  length roots === 2
   -- The consumer cannot create a co-signed node alone.
   submitMustFail consumer do
     createCmd ReplayNode with
