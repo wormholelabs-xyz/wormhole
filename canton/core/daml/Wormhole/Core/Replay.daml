@@ -35,16 +35,18 @@
 -- its subspace — no covering node, nothing verifies — fail-closed, the
 -- opposite of the key model.
 --
--- The replay vector is therefore node RE-CREATION (archive-and-recreate, or a
--- parallel shadow root), which the signatory design closes: the @operator@
--- co-signs every node, so the consumer alone can neither archive nor create
--- one, and roots are granted exactly once per consumer through the
--- 'ReplayRootRegistry' — a positive, on-ledger one-root-per-consumer check
--- linearized by consuming the registry (the 'EmitterRegistry' pattern, minus
--- the key). Splits inherit both signatures from the archived parent, so the
--- operator is not involved per consume. The irreducible remainder: consumer
--- and operator COLLUDING can archive and rebuild a trie — signatories can
--- always unmake their own contracts.
+-- The replay vector is therefore node RE-CREATION. Against THIRD PARTIES the
+-- signatory design closes it: the @operator@ co-signs every node (inherited
+-- from the 'ReplayRootRegistry' anchor at the root, from the archived parent
+-- at splits — the operator never signs per consume), and claiming a root for
+-- a consumer requires that consumer's authority, so nobody can archive,
+-- re-create, or fork someone ELSE'S replay scope. Against the consumer
+-- ITSELF there is deliberately no on-ledger defense: a consumer can mint
+-- parallel roots for its own scope (see 'ReplayRootRegistry'), which is
+-- self-harm — replay protection is the consumer's own safety property, and a
+-- compromised consumer key defeats the app more directly anyway. Same class
+-- as the irreducible signatory remainder: signatories can always unmake (or
+-- here, duplicate) their own state.
 --
 -- OFF-LEDGER: consumers (and their users) locate the covering node for a
 -- digest via a disclosure service — an ACS index over (consumer, prefix) that
@@ -53,7 +55,7 @@
 -- RETRY PROTOCOL: racing consumes on the same node conflict and exactly one
 -- commits; on rejection, re-resolve the covering node (the cid churns on every
 -- consume) and resubmit. A blind retry of a consume that actually committed
--- hits the membership check and fails "VAA already consumed" — a clean
+-- hits the membership check and fails "digest already consumed" — a clean
 -- idempotency signal.
 module Wormhole.Core.Replay where
 
@@ -123,7 +125,7 @@ template ReplayNode
         -- The replay check MUST precede the split branch: a split inserting a
         -- duplicate would be a silent Set.insert no-op — a replay that
         -- "succeeds".
-        assertMsg "VAA already consumed" (not (Set.member suffix consumed))
+        assertMsg "digest already consumed" (not (Set.member suffix consumed))
         if Set.size consumed < splitThreshold || T.length prefix == 63
           -- Depth-63 nodes never split: suffixes are single nibbles (≤16
           -- distinct, so the set is bounded), and children would be degenerate
@@ -143,52 +145,41 @@ template ReplayNode
               Some cid -> pure cid
               None -> abort "unreachable: split lost the covering child"
 
--- | Grants each consumer AT MOST ONE trie root — the positive, on-ledger
--- uniqueness check that a contract key cannot provide. One registry per
--- operator, created at setup ('mkInitialReplayRootRegistry'); every grant
--- consumes it, so grants are linearized through the operator. The set grows by
--- one Party per integrator app — dozens, not millions.
+-- | Hands out trie roots to any consumer that asks — a stateless O(1) anchor
+-- whose one nonconsuming choice lends the operator's INHERITED co-signature to
+-- consumer-submitted claims (the 'RegisterEmitter' pattern): no operator
+-- crank, no contention, no churn — the registry's disclosure blob is static
+-- and cacheable. One per operator, created at setup
+-- ('mkInitialReplayRootRegistry').
+--
+-- There is deliberately NO one-root-per-consumer enforcement: maintaining a
+-- single trie is the CONSUMER'S OWN responsibility (its disclosure service
+-- defines which trie its consumes resolve into). The controller is what keeps
+-- that sound against everyone else — a third party cannot fork someone else's
+-- replay scope, because claiming a root for @consumer@ requires @consumer@'s
+-- authority. Parallel roots can only be minted by the consumer itself (or its
+-- stolen key), which is self-harm of the same class as the signatory
+-- remainder above. Spam claims cost the spammer synchronizer traffic per
+-- transaction and the operator ~300 B of storage per worthless root; no
+-- shared contract grows. If consumer-key-compromise resilience is ever
+-- wanted, the hardening is trie-identity pinning: thread the original root's
+-- cid through successors (via @self@ in 'ConsumeDigest') and pin it in the
+-- app contract — documented, not built.
 template ReplayRootRegistry
   with
     operator : Party
-    granted  : Set Party
   where
     signatory operator
 
-    choice GrantReplayRoot : ContractId ReplayRootRegistry
+    nonconsuming choice ClaimReplayRoot : ContractId ReplayNode
       with
-        consumer : Party
-      controller operator
+        consumer       : Party
+        splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
+      controller consumer
       do
-        assertMsg "consumer already has a replay root" (not (Set.member consumer granted))
-        create this with granted = Set.insert consumer granted
-
--- | The consumer's half of the root-creation ceremony: a one-time
--- propose-accept per app (mirroring 'EmitterRequest'). The consumer's
--- signature on this request is what authorizes its co-signature on the root;
--- the operator accepts against its registry, which enforces
--- one-root-per-consumer.
-template ReplayRootRequest
-  with
-    consumer       : Party
-    operator       : Party
-    splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
-  where
-    signatory consumer
-    observer operator
-
-    choice ApproveReplayRoot : (ContractId ReplayRootRegistry, ContractId ReplayNode)
-      with
-        registryCid : ContractId ReplayRootRegistry  -- passed by cid: no keys
-      controller operator
-      do
-        reg <- fetch registryCid
-        assertMsg "registry belongs to a different operator" (reg.operator == operator)
-        regCid' <- exercise registryCid GrantReplayRoot with consumer
-        rootCid <- create ReplayNode with
+        create ReplayNode with
           consumer
           operator
           prefix = ""
           splitThreshold
           consumed = Set.empty
-        pure (regCid', rootCid)

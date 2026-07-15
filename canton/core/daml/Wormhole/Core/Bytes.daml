@@ -131,8 +131,8 @@ data RegistrarText = RegistrarText Text deriving (Eq, Show)
 data OwnerText     = OwnerText     Text deriving (Eq, Show)
 data RegistryId    = RegistryId    Int  deriving (Eq, Show)
 
--- | Canonical 32-byte registry address, keyed off the components of a
--- registry-allocated contract key:
+-- | Canonical 32-byte registry address, derived from the components of a
+-- registry-allocated identity:
 --
 -- > keccak256( utf8(tag) ‖ lp(utf8(registrar)) ‖ lp(utf8(owner)) ‖ uint64be(id) )
 --
