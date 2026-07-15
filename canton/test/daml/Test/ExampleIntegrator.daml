@@ -29,7 +29,7 @@ import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (parseVAA)
-import Test.TestCore (setup, govSetFeeVAA, devnetGuardianPubKey)
+import Test.TestCore (setup, govSetFeeVAA, devnetGuardian, devnetGuardianPubKey)
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 
 -- | Stand-in for the integrator's real effect (a mint / unlock). Co-signed:
@@ -47,6 +47,7 @@ template RedeemReceipt
 template ExampleIntegrator
   with
     manager     : Party    -- app party: signatory, and the replay scope
+    operator    : Party    -- the wormhole core operator this app trusts
     users       : [Party]  -- redeemers; observers so they can exercise Redeem
     peerChain   : Int      -- registered source-chain peer of this app
     peerAddress : Bytes32
@@ -70,6 +71,14 @@ template ExampleIntegrator
         pubKeys       : [(Int, Bytes)]
       controller redeemer
       do
+        -- Cids arrive from an untrusted submitter, so authenticate PAYLOADS:
+        -- a redeemer must not be able to point at a fabricated CoreState with
+        -- an attacker guardian set. A direct fetch is not authorized here (no
+        -- CoreState stakeholder among the authorizers — disclosure grants
+        -- visibility, not fetch authority), so the pin goes through the
+        -- 'GetOperator' read choice, which needs only its controller.
+        csOperator <- exercise coreStateCid GetOperator with reader = redeemer
+        assertMsg "unexpected core operator" (csOperator == operator)
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA
           pubKeys
@@ -100,6 +109,7 @@ setupIntegrator = do
   intCid <- submit manager do
     createCmd ExampleIntegrator with
       manager
+      operator
       users = [alice, bob]
       -- govSetFeeVAA is emitted by (chain 1, 0x..04); register that as the peer.
       peerChain = solanaGovernanceChainId
@@ -166,6 +176,7 @@ testIntegratorRedeem = do
   intCid2 <- submit manager2 do
     createCmd ExampleIntegrator with
       manager = manager2
+      operator
       users = [alice]
       peerChain = solanaGovernanceChainId
       peerAddress = defaultGovernanceContract
@@ -180,3 +191,21 @@ testIntegratorRedeem = do
       pubKeys = devnetPubKeys
   Some receipt2 <- queryContractId alice receipt2Cid
   receipt2.manager === manager2
+
+  -- A fabricated CoreState — attacker-signed, so its operator field cannot
+  -- name the real one — dies on the GetOperator pin before verification or
+  -- consumption run.
+  fakeOperator <- allocateParty "FakeOperator"
+  fakeGovernance <- allocateParty "FakeGovernance"
+  fakeObserver <- allocateParty "FakeObserver"
+  fakeCsId <- submit (actAs fakeOperator <> actAs fakeGovernance) do
+    createCmd (mkInitialCoreState fakeOperator fakeGovernance solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian] fakeObserver)
+  fakeDisc <- fromSome <$> queryDisclosure fakeOperator fakeCsId
+  submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
+    exerciseCmd intCid Redeem with
+      redeemer = alice
+      coreStateCid = fakeCsId
+      replayNodeCid = freshCid
+      encodedVAA = govSetFeeVAA
+      pubKeys = devnetPubKeys
