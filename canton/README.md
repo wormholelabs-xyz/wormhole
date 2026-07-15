@@ -328,11 +328,14 @@ choice PublishMessage : WormholeMessage
     nonce            : Int            -- uint32
     payload          : Bytes          -- <= 750 bytes (whitepaper 0004)
     consistencyLevel : Int            -- uint8; see §6
-  controller owner
+    coreStateCid     : ContractId CoreState                       -- fee read (§ Fees)
+    payer            : Party          -- funds messageFee; = owner for a direct publish
+    feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+  controller owner, payer
   do
-    -- 1. assert payload length <= 750
-    -- 2. (fee enforcement deferred; messageFee = 0 in v1)
-    -- 3. archive self; create Emitter with sequence = sequence + 1 (SAME key)
+    -- 1. charge the current messageFee to payer through CoreState (§ Fees)
+    -- 2. assert payload length <= 750
+    -- 3. archive self; create the successor Emitter with sequence = sequence + 1
     -- 4. return WormholeMessage{registrar, owner, emitterId, sequence, nonce,
     --      payload, consistencyLevel} -- watcher derives the address
     pure result
@@ -367,16 +370,64 @@ record either: per whitepaper 0001/0004 the guardian derives it from the block,
 so the watcher reads it from the transaction's **ledger effective time**
 (`Transaction.effective_at`) — see §7.1.
 
-**Sequence numbers** are per-emitter (per key), start at 0, increment by
+**Sequence numbers** are per-emitter, start at 0, increment by
 1 — identical to EVM's `_state.sequences[emitter]`.
 
-**Fees.** Whitepaper 0004 requires a fee in the chain's native token. Canton's
-native unit is Canton Coin (CC), held as Daml contracts (Splice
-`amulet`). For the initial implementation `messageFee` defaults to **0** and the
-`feePayment` argument is a no-op placeholder; wiring real CC payment/`TransferFees`
-is deferred (see Open Questions). The `SetMessageFee`/`TransferFees` governance
-choices still update/move the accounting state so on-chain behavior matches the
-governance protocol.
+**Fees.** Whitepaper 0004 requires a fee in the chain's native token. Fees are
+paid via the **Canton Network Token Standard** (CIP-0056, V1 — the
+`splice-api-token-*-v1` interface DARs vendored under the `canton/dars/` directory; the old
+splice-wallet payment requests are deprecated), so the bridge works with
+Canton Coin or any standard token, chosen at genesis
+(`CoreState.feeInstrument` — no governance action covers it; migrating
+instruments is a genesis-class ceremony):
+
+- **The payer is the submitter**, so the bridge only *consumes* allocations,
+  never issues wallet-facing `AllocationRequest`s (future UX work). The payer
+  locks funds against the bridge's settlement via the token registry's
+  `AllocationFactory` (its wallet/CLI plus the registry's CIP-0056 OpenAPI,
+  which supplies the `ExtraArgs` choice context and any registry disclosures
+  — the same untrusted-for-safety, liveness-only role as our own disclosure
+  service, §4.7), with the bridge convention `executor = sender = payer`,
+  `receiver = feeRecipient`.
+- The charging choice validates the allocation — receiver, instrument, amount
+  (`≥` fee: the **entire leg amount transfers**, allocations are
+  all-or-nothing, so overpayment is deliberate padding against fee-raise
+  races), sender, and the **instrument admin's signature** (views are
+  template-computed and forgeable; a signature is not — authenticate
+  payloads, never resolution paths) — then exercises
+  `Allocation_ExecuteTransfer` **in the same transaction** as the
+  publish/registration/claim. Executing consumes the allocation: one-shot by
+  activeness, no replay bookkeeping. Fees are `Int`s in **10^-10 token
+  units** (exactly Decimal's last digit — every fee is exactly
+  representable).
+- `Allocation_ExecuteTransfer` needs sender ∧ receiver ∧ executor authority
+  jointly, and the receiver is the fee recipient — so all charging routes
+  through `CoreState` choices (`ChargeMessageFee` / `ChargeFee`), where the
+  recipient's authority is inherited. `PublishMessage` therefore references
+  the `CoreState` on every publish (EVM parity: the current `messageFee` is
+  read each call; the cid churns only on governance actions — a stale cid
+  fails closed and is re-resolved). The fee is charged to `payer`, a choice
+  argument that equals `owner` for a direct publish but is named explicitly
+  when an app publishes on a user's behalf through an `owner`-owned emitter
+  (NTT §10): `payer` co-controls the publish, so it cannot be a third party
+  who did not authorize spending its own funds. Registries charge their own
+  operator-set `registrationFee`/`claimFee` through the same choice; at fee 0
+  they skip the `CoreState` entirely.
+- **Custody is governance-controlled**: `feeRecipient` is the
+  `guardianGovernance` threshold party, so accrued fees move only via the
+  k-of-n guardian ceremony — the operator never touches them (the Canton
+  analog of "fees sit in the bridge contract"). A `TransferFees` governance
+  VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
+  guardianGovernance, authority inherited from the consumed `CoreState`)
+  recording the amount, the VAA's 32-byte recipient, and the VAA hash — the
+  artifact the guardians' custody policy matches when threshold-signing the
+  actual outbound token transfer. The enforcement of "only per authorization"
+  lives in gg key custody, the same trust plane as the guardian keys
+  themselves.
+- Token Standard **V2** (CIP-0112) is approved but not yet on mainnet; it
+  arrives as a parallel `-v2` interface family, and
+  `Wormhole.Core.Fees.chargeFee` is the single seam where support would be
+  added.
 
 ### 4.3 VAA verification choice
 
@@ -617,11 +668,12 @@ it must serve:
 
 | Contract                | Index                              | Needed by                                                     | Disclosure attachment?                          | Churn                        |
 | ----------------------- | ---------------------------------- | ------------------------------------------------------------- | ----------------------------------------------- | ---------------------------- |
-| `CoreState`             | the one true instance              | integrators/users exercising §4.3 verify or §4.6 consume       | yes — every non-stakeholder submitter           | per governance action (rare) |
+| `CoreState`             | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers) | per governance action (rare) |
 | `ReplayNode`            | (consumer, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem                | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node |
-| `EmitterRegistry`       | operator                           | `RegisterEmitter`                                              | yes — the requester submits                     | per emitter registration     |
-| `ReplayRootRegistry`    | operator                           | `ClaimReplayRoot`                                              | yes — the consumer submits (static blob, cacheable) | never (stateless anchor)     |
-| `Emitter`               | (operator, owner, emitterId)       | `PublishMessage`                                               | no — owner submits, own ACS                     | per publish                  |
+| `EmitterRegistry`       | operator                           | `RegisterEmitter`                                              | yes — the requester submits                     | per emitter registration; recreated on operator fee change |
+| `ReplayRootRegistry`    | operator                           | `ClaimReplayRoot`                                              | yes — the consumer submits (cacheable blob)     | only on operator fee change  |
+| `Emitter`               | (operator, owner, emitterId)       | `PublishMessage`                                               | no — owner submits, own ACS (but see `CoreState` row) | per publish                  |
+| token-registry context  | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures    | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service | registry-defined             |
 | app contracts (e.g. `ExampleIntegrator`) | app-defined      | the app's own choices                                          | app's concern (its users are observers)         | app-defined                  |
 
 Two properties make this safe to outsource:
@@ -866,13 +918,17 @@ canton/
     daml/Wormhole/Core/GuardianSet.daml
     daml/Wormhole/Core/State.daml
     daml/Wormhole/Core/Replay.daml
+    daml/Wormhole/Core/Fees.daml ← CIP-0056 fee collection (chargeFee, §4.2)
     daml/Wormhole/Core/Governance.daml
     daml/Wormhole/Core/Setup.daml
+  dars/                          ← vendored token-standard interface DARs (provenance in dars/README.md)
   test/                          ← `wormhole-core-test` package (Daml Scripts)
-    daml.yaml                    ← data-dependency on core's DAR
+    daml.yaml                    ← data-dependency on core's DAR + the interface DARs
     daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
     daml/Test/TestGuardianObserver.daml ← read-only guardianObserver visibility/authority tests
     daml/Test/TestReplay.daml    ← replay-trie tests + disclosure-service simulation (§4.6)
+    daml/Test/MockToken.daml     ← minimal CIP-0056 mock instrument for fee tests
+    daml/Test/TestFees.daml      ← fee-payment tests (§4.2)
     daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
   devnet/
     start_sandbox.sh             ← starts the Ledger API v2 sandbox
@@ -1110,11 +1166,17 @@ the quorum and turn guardian downtime into a chain-halt).
 > `guardianObserver`; use operator replica-hosting only as a migration stopgap.
 
 Note the operator party's ACTIVE signing surface after genesis is empty: every
-day-to-day flow (`RegisterEmitter`, `ClaimReplayRoot`, splits, governance
-transitions) reaches its signature by inheritance from contracts it signed at
-setup. If the operator is stood up as a k-of-n external threshold party (the
-§9 machinery, `GG_THRESHOLD=k`), the interactive-submission signing ceremony
-is needed for genesis only.
+day-to-day flow (`RegisterEmitter`, `ClaimReplayRoot`, fee charging, splits,
+governance transitions) reaches its signature by inheritance from contracts it
+signed at setup. If the operator is stood up as a k-of-n external threshold
+party (the §9 machinery, `GG_THRESHOLD=k`), the interactive-submission signing
+ceremony is needed for genesis only. The `guardianGovernance` party's
+post-genesis surface grew with fees (§4.2): it holds **fee custody** (accrued
+fees sit in its token holdings; withdrawing them is a threshold ceremony
+matched against on-ledger `FeeWithdrawalAuthorization`s), and — because every
+publish reads the fee off the `CoreState` — its participant is an informee of
+every publish, a deliberate throughput/liveness trade recorded in Open
+Questions.
 
 **What a compromised operator can and cannot do.** It can degrade **liveness**
 (stop serving disclosures, evict observers — all fail-safe: transactions stop
@@ -1186,9 +1248,21 @@ human decision; see Open Questions.
 4. **Integrator VAA verification.** Implement the hint-free guardian set (persist
    pubkeys, §5) and confirm the guardian-set distribution mechanism for
    integrators (explicit disclosure vs public-observer snapshot).
-5. **Native fees.** Whether/when to wire real Canton Coin (Splice `amulet`)
-   payments into `PublishMessage`/`TransferFees`, or whether Canton runs fee-less
-   initially (`messageFee = 0`).
+5. **Native fees.** *Mechanism resolved:* CIP-0056 (Token Standard V1)
+   allocations, consumed atomically inside `PublishMessage` / `RegisterEmitter`
+   / `ClaimReplayRoot`, with fee custody under the `guardianGovernance`
+   threshold party and `TransferFees` minting on-ledger withdrawal
+   authorizations (§4.2). **Residual:** validate against real amulet on
+   DevNet (the test suite uses a mock token implementing the interfaces; the
+   real registry adds choice contexts, deadlines, locking, and featured-app
+   rewards — the executor earns them as the amulet "provider"); the fee
+   instrument and recipient are genesis-fixed (no governance action — decide
+   whether that needs one before mainnet); the `CoreState` reference on every
+   publish adds operator + guardianGovernance participants to the publish
+   informee set (throughput/liveness trade to size); a `TransferFees` VAA
+   test vector (vectorgen) for the withdrawal-authorization path; Token
+   Standard V2 (CIP-0112) migration when it reaches mainnet
+   (`Wormhole.Core.Fees.chargeFee` is the seam).
 6. **ContractUpgrade mechanism.** Confirm the operator-driven Daml package
    upgrade flow and how strictly the recorded target package-id should gate it.
    (The package uses no contract keys, so the upgrade constraint that keys
