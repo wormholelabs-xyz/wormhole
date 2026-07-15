@@ -8,7 +8,8 @@ module Test.TestCore where
 import Daml.Script
 import DA.Assert ((===))
 import DA.Map qualified as Map
-import DA.Optional (fromSome)
+import DA.Optional (fromOptional, fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
 import Wormhole.Core.State
@@ -39,27 +40,54 @@ govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479
 -- bootstrap.sh's first-party extraction still yields the operator;
 -- @guardianObserver@ follows.
 setup : Script (Party, Party, ContractId CoreState)
-setup = do
+setup = setupWithInstrument None
+
+-- | 'setup' with a caller-supplied fee instrument (Test.TestFees provides a
+-- mock-token instrument; plain 'setup' uses a placeholder that is never
+-- validated because all fees default to 0). The fee recipient is
+-- @guardianGovernance@, matching production custody.
+setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
+setupWithInstrument mInstrument = do
   operator <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
   guardianObserver <- allocateParty "GuardianObserver"
+  let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
   csId <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
-  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator)
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian] guardianObserver
+                 feeInstrument guardianGovernance)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver 0)
+  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator 0)
   pure (operator, guardianObserver, csId)
 
 -- | Register an emitter for @owner@, the production way: the requester submits
 -- alone against the disclosed 'EmitterRegistry' (served off-ledger by the
 -- disclosure service — simulated here by querying as the operator); the
 -- operator's co-signature on the 'Emitter' is inherited from the registry.
+-- Zero-fee registries need no CoreState reference.
 registerEmitter : Party -> Party -> Script (ContractId Emitter)
 registerEmitter operator owner = do
   [(regCid, _)] <- query @EmitterRegistry operator
   regDisc <- fromSome <$> queryDisclosure operator regCid
   (_, emCid) <- submit (actAs owner <> disclose regDisc) do
-    exerciseCmd regCid RegisterEmitter with requester = owner
+    exerciseCmd regCid RegisterEmitter with
+      requester = owner
+      coreStateCid = None
+      feeAllocation = None
   pure emCid
+
+-- | Publish with the referenced 'CoreState' disclosed (the fee read is on
+-- every publish; at fee 0 no allocation is attached). The disclosure is
+-- fetched as the operator — the disclosure-service simulation.
+publishVia : Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script WormholeMessage
+publishVia operator csId owner emCid nonce payload consistencyLevel = do
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  submit (actAs owner <> disclose csDisc) do
+    exerciseCmd emCid PublishMessage with
+      nonce, payload, consistencyLevel
+      coreStateCid = csId
+      payer = owner
+      feeAllocation = None
 
 -- | Publishing increments the per-emitter sequence and yields the expected
 -- 'WormholeMessage'. The message carries the emitter's identity components
@@ -68,15 +96,14 @@ registerEmitter operator owner = do
 -- the direct-cid model needs no off-ledger service for stakeholders.
 testPublishMessage : Script ()
 testPublishMessage = do
-  (operator, _, _) <- setup
+  (operator, _, csId) <- setup
   alice <- allocateParty "Alice"
   emitterId <- registerEmitter operator alice
   Some em <- queryContractId alice emitterId
   em.emitterId === 0
   em.emitterAddress === emitterAddressFor operator alice 0
 
-  msg0 <- submit alice do
-    exerciseCmd emitterId PublishMessage with nonce = 7, payload = "deadbeef", consistencyLevel = 0
+  msg0 <- publishVia operator csId alice emitterId 7 "deadbeef" 0
   msg0.registrar === operator
   msg0.owner === alice
   msg0.emitterId === 0
@@ -87,9 +114,7 @@ testPublishMessage = do
   -- The sequence-bumped successor's cid arrives on the owner's ACS (the owner
   -- is a signatory), so the next publish addresses it directly.
   [(emitterId', _)] <- query @Emitter alice
-  msg1 <- submit alice do
-    exerciseCmd emitterId' PublishMessage with
-      nonce = 8, payload = "cafe", consistencyLevel = 0
+  msg1 <- publishVia operator csId alice emitterId' 8 "cafe" 0
   msg1.sequence === 1
   msg1.registrar === operator
   msg1.owner === alice
@@ -159,13 +184,16 @@ testImpersonationBlocked = do
 -- | Payloads larger than 750 bytes are rejected.
 testPayloadTooLarge : Script ()
 testPayloadTooLarge = do
-  (operator, _, _) <- setup
+  (operator, _, csId) <- setup
   bob <- allocateParty "Bob"
   emitterId <- registerEmitter operator bob
+  csDisc <- fromSome <$> queryDisclosure operator csId
   -- 751 bytes = 1502 hex chars.
   let bigPayload = mconcat (replicate 1502 "f")
-  submitMustFail bob do
-    exerciseCmd emitterId PublishMessage with nonce = 0, payload = bigPayload, consistencyLevel = 0
+  submitMustFail (actAs bob <> disclose csDisc) do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 0, payload = bigPayload, consistencyLevel = 0
+      coreStateCid = csId, payer = bob, feeAllocation = None
   pure ()
 
 -- | Sanity check on quorum thresholds (EVM parity: floor(n*2/3)+1).
@@ -279,12 +307,10 @@ testGovernanceReplayRejected = do
 -- components, which the Go test recomputes.
 integrationPublish : Script Party
 integrationPublish = do
-  (operator, _, _) <- setup
+  (operator, _, csId) <- setup
   owner <- allocateParty "IntegrationEmitter"
   emId <- registerEmitter operator owner
-  _ <- submit owner do
-    exerciseCmd emId PublishMessage with
-      nonce = 42, payload = "11223344", consistencyLevel = 0
+  _ <- publishVia operator csId owner emId 42 "11223344" 0
   pure operator
 
 -- | Exercise the auto-generated Archive choice on each template (for coverage).

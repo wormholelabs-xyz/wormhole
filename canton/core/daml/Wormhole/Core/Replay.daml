@@ -145,41 +145,7 @@ template ReplayNode
               Some cid -> pure cid
               None -> abort "unreachable: split lost the covering child"
 
--- | Hands out trie roots to any consumer that asks — a stateless O(1) anchor
--- whose one nonconsuming choice lends the operator's INHERITED co-signature to
--- consumer-submitted claims (the 'RegisterEmitter' pattern): no operator
--- crank, no contention, no churn — the registry's disclosure blob is static
--- and cacheable. One per operator, created at setup
--- ('mkInitialReplayRootRegistry').
---
--- There is deliberately NO one-root-per-consumer enforcement: maintaining a
--- single trie is the CONSUMER'S OWN responsibility (its disclosure service
--- defines which trie its consumes resolve into). The controller is what keeps
--- that sound against everyone else — a third party cannot fork someone else's
--- replay scope, because claiming a root for @consumer@ requires @consumer@'s
--- authority. Parallel roots can only be minted by the consumer itself (or its
--- stolen key), which is self-harm of the same class as the signatory
--- remainder above. Spam claims cost the spammer synchronizer traffic per
--- transaction and the operator ~300 B of storage per worthless root; no
--- shared contract grows. If consumer-key-compromise resilience is ever
--- wanted, the hardening is trie-identity pinning: thread the original root's
--- cid through successors (via @self@ in 'ConsumeDigest') and pin it in the
--- app contract — documented, not built.
-template ReplayRootRegistry
-  with
-    operator : Party
-  where
-    signatory operator
-
-    nonconsuming choice ClaimReplayRoot : ContractId ReplayNode
-      with
-        consumer       : Party
-        splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
-      controller consumer
-      do
-        create ReplayNode with
-          consumer
-          operator
-          prefix = ""
-          splitThreshold
-          consumed = Set.empty
+-- NOTE: 'ReplayRootRegistry' (the root-claim anchor) lives in
+-- 'Wormhole.Core.State' beside 'EmitterRegistry' — its claim fee is charged
+-- through the 'CoreState', which itself references 'ReplayNode', so the
+-- registry cannot live here without an import cycle.
