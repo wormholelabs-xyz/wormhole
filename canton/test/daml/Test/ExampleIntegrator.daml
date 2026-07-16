@@ -1,24 +1,19 @@
--- | A reference integrator (a mock NTT-manager shape) demonstrating how an app
+-- | A reference integrator (a mock NTT-manager shape) showing how an app
 -- consumes a VAA atomically via 'VerifyAndConsumeVAA' (README §4.6).
 --
--- The flow is DIRECT AND USER-SUBMITTED: the end user exercises 'Redeem'
--- herself, attaching two explicit disclosures — the 'CoreState' and the
--- current covering 'ReplayNode' of the manager's replay trie (both served by
--- the app's disclosure service). This is sound for ANY submitter: the replay
--- check is a positive fetch-and-consume of the named node, validated for
--- activeness by every confirmer — a wrong or stale node can only fail the
--- transaction, never replay. No read grants, no @readAs@, no propose-accept
--- queue; the manager's AUTHORITY for the consume is inherited from this
--- contract's signatory, and its VISIBILITY is simply not needed (contrast the
--- retired key-based guards, whose negative lookups failed open unless the
--- consumer submitted).
+-- The flow is DIRECT AND USER-SUBMITTED: the end user exercises 'Redeem' herself
+-- with two explicit disclosures — the 'CoreState' and the covering 'ReplayNode'
+-- of the manager's trie. Sound for ANY submitter: the replay check is a positive
+-- fetch-and-consume of the named node, so a wrong or stale node only fails the
+-- transaction, never replays. No read grants, no @readAs@; the manager's
+-- authority for the consume is inherited from this contract's signatory, and its
+-- visibility is not needed.
 --
 -- Guardian signatures prove the VAA is real, NOT that it is addressed to this
--- app: 'Redeem' checks the emitter against the registered peer before touching
--- the payload.
+-- app: 'Redeem' checks the emitter against the registered peer before acting.
 --
--- This module ships in the TEST package only; it is a template for integrator
--- packages, not part of the core DAR.
+-- Test package only; a template for integrator packages, not part of the core
+-- DAR.
 module Test.ExampleIntegrator where
 
 import Daml.Script
@@ -56,13 +51,12 @@ template ExampleIntegrator
     signatory manager
     observer users
 
-    -- | Redeem a VAA: verify + consume + peer-check + mint, one atomic
-    -- transaction, submitted by the redeemer. @consumer = manager@ is
-    -- authorized by inheritance from this contract's signatory; the submitter
-    -- brings disclosures of the 'CoreState' and of the covering 'ReplayNode'.
-    -- All-or-nothing: an already-consumed digest, a stale node, a bad
-    -- signature, or a wrong peer aborts everything — there is no window where
-    -- a VAA is consumed but not acted on, or vice versa.
+    -- | Redeem a VAA: verify + consume + peer-check + mint in one atomic
+    -- transaction, submitted by the redeemer. @consumer = manager@ is authorized
+    -- by inheritance from this contract's signatory; the submitter brings the
+    -- 'CoreState' and covering 'ReplayNode' disclosures. All-or-nothing: an
+    -- already-consumed digest, stale node, bad signature, or wrong peer aborts
+    -- everything.
     nonconsuming choice Redeem : ContractId RedeemReceipt
       with
         redeemer      : Party
@@ -72,11 +66,10 @@ template ExampleIntegrator
         pubKeys       : [(Int, Bytes)]
       controller redeemer
       do
-        -- Cids arrive from an untrusted submitter, so authenticate PAYLOADS:
-        -- a redeemer must not be able to point at a fabricated CoreState with
-        -- an attacker guardian set. A direct fetch is not authorized here (no
-        -- CoreState stakeholder among the authorizers — disclosure grants
-        -- visibility, not fetch authority), so the pin goes through the
+        -- Cids arrive from an untrusted submitter, so authenticate the PAYLOAD:
+        -- a redeemer must not point at a fabricated CoreState with an attacker
+        -- guardian set. A direct fetch is not authorized here (no CoreState
+        -- stakeholder among the authorizers), so the pin goes through the
         -- 'GetOperator' read choice, which needs only its controller.
         csOperator <- exercise coreStateCid GetOperator with reader = redeemer
         assertMsg "unexpected core operator" (csOperator == operator)
@@ -126,12 +119,10 @@ devnetPubKeys : [(Int, Bytes)]
 devnetPubKeys = [(0, devnetGuardianPubKey)]
 
 -- | End-to-end user-submitted redemption: alice redeems with her own authority
--- and two disclosures — nothing else. Replay attempts then fail for EVERY
--- submitter and every node freshness: the stale node disclosure dies on
--- activeness, the fresh one on membership. This inverts the old key-based
--- footgun (where a submitter without the consumer's read view could
--- double-consume): submitter identity and visibility are no longer
--- load-bearing.
+-- and two disclosures — nothing else. Replay attempts then fail for every
+-- submitter regardless of node freshness (stale node dies on activeness, fresh
+-- on membership), inverting the old key-based footgun where a submitter without
+-- the consumer's read view could double-consume.
 testIntegratorRedeem : Script ()
 testIntegratorRedeem = do
   IntegratorFixture{operator, csId, manager, users = [alice, bob], intCid, csDisc} <- setupIntegrator

@@ -182,18 +182,16 @@ template CoreState
 ```
 
 **Read-only guardian observer.** `guardianObserver` is a template `observer`
-(hence a **stakeholder/informee**, never a signatory or controller) on the
-attestation surface — `CoreState` here and `Emitter` in §4.2. The ledger-model
-rule that makes this sufficient: **informees of a *consuming* exercise include
-the contract's stakeholders**. `SubmitGovernanceVAA` is consuming, so the
-observer sees every guardian-set/fee/governance transition and each successor
-`CoreState` create; `PublishMessage` is consuming, so it sees the full message
-surface (§4.2). Nonconsuming exercises (`ParseAndVerifyVAA`, §4.3) do NOT reach
-observers, which is acceptable — that path is a pure read. Adding an observer
-requires no authority from that party and changes nothing about who can
-create/exercise these contracts, so guardians watch what they attest without
-ever entering Canton's confirmation path (§10). The scope is deliberately the
-attestation surface only, **never** holdings, balances, or transfer legs.
+(hence a stakeholder/informee, never a signatory or controller) on the
+attestation surface — `CoreState` here, `Emitter` in §4.2. The ledger-model rule
+that makes this sufficient: **informees of a _consuming_ exercise include the
+contract's stakeholders**. `SubmitGovernanceVAA` and `PublishMessage` are both
+consuming, so the observer sees every governance transition and the full message
+surface; nonconsuming `ParseAndVerifyVAA` (§4.3) does not reach observers, which
+is fine — it is a pure read. Adding an observer needs no authority and changes
+nothing about who can create/exercise these contracts, so guardians watch what
+they attest without entering Canton's confirmation path (§10). Scope is the
+attestation surface only — **never** holdings, balances, or transfer legs.
 
 Every state-mutating choice is `controller`-checked (controller `operator`),
 archives the current `CoreState`, and `create`s the next one with updated fields.
@@ -202,41 +200,34 @@ replay-protected transitions.
 
 **Singleton co-signed by a governance party; authenticity is in the payload.**
 The `CoreState` is co-signed by the `operator` and a **`guardianGovernance`**
-party. In production that is a **decentralized-namespace external party**
-controlled by a k-of-n threshold of guardian keys — the same construction as
-the Canton Network's DSO party — rotated at the topology layer without touching
-this template (the party id, and thus every consumer's trust anchor, is stable
-across guardian rotation). Two things follow:
+party — in production a **decentralized-namespace external party** under a k-of-n
+threshold of guardian keys (the Canton Network DSO construction), rotated at the
+topology layer without touching this template (the party id, and thus every
+consumer's trust anchor, is stable across rotation). Two things follow:
 
 - **The operator cannot forge the guardian set.** Because `guardianGovernance`
   is a signatory, a compromised operator cannot `create` a `CoreState` bearing
-  the real governance party — so any fetched or disclosed `CoreState` whose
-  `guardianGovernance` field is the known anchor party is **authentic by
-  construction**, however its cid was obtained. Consumers authenticate the
-  payload, never the resolution path (§4.7). An operator puppet could create a
-  `CoreState` under a *different* governance party — but its payload names the
-  wrong parties and no consumer trusts it. **Pinning `operator` is weaker than
-  pinning `guardianGovernance`, and the two are not interchangeable:** a
-  compromised operator (a single hot key) *can* co-sign a `CoreState` whose
-  `operator` field is genuine but whose `guardianGovernance`/`feeRecipient` it
+  the real governance party, so any `CoreState` whose `guardianGovernance` field
+  is the known anchor is **authentic by construction**, however its cid was
+  obtained — consumers authenticate the payload, never the resolution path
+  (§4.7). **Pinning `operator` is weaker than pinning `guardianGovernance`:** a
+  compromised operator (a single hot key) can co-sign a `CoreState` whose
+  `operator` is genuine but whose `guardianGovernance`/`feeRecipient` it
   controls, so an `operator`-only pin accepts a shadow `CoreState`. For the fee
-  path — where `guardianGovernance` *is* the fee-custody anchor — only the
-  `guardianGovernance` pin is sufficient (see below).
+  path — where `guardianGovernance` _is_ the fee-custody anchor — only the
+  `guardianGovernance` pin suffices (see below).
 - **Governance stays low-friction.** `guardianGovernance` actively signs only at
-  **genesis**; each `SubmitGovernanceVAA` transition inherits its authority from
-  the archived contract (the same authority-propagation as the `Emitter` owner
-  through `PublishMessage`), so the operator submits governance alone. "Exactly
-  one live `CoreState`" is still behavioral (operator + governance create one at
-  setup), but the set's *contents* are now anchored.
+  **genesis**; each `SubmitGovernanceVAA` inherits its authority from the
+  archived contract (as the `Emitter` owner does through `PublishMessage`), so
+  the operator submits governance alone. "Exactly one live `CoreState`" is still
+  behavioral, but the set's _contents_ are now anchored.
 
-Per-emitter **sequence numbers are stored in each `Emitter`** (§4.2), not in
-`CoreState`. This is deliberate: in Canton, a contract's choice can only be
-exercised by a stakeholder of that contract, and the emitter owner is _not_ a
+Per-emitter **sequence numbers live in each `Emitter`** (§4.2), not `CoreState`:
+a choice can only be exercised by a stakeholder, and the emitter owner is not a
 stakeholder of the operator-owned `CoreState`. Keeping the sequence in the
-`Emitter` (where the owner _is_ a stakeholder) lets the owner publish — and
-advance its own sequence — **without the operator's authority**, preserving
-EVM's permissionless `publishMessage`. `CoreState` therefore holds only shared
-config and governance state.
+`Emitter` lets the owner publish — and advance its own sequence — **without the
+operator's authority**, preserving EVM's permissionless `publishMessage`.
+`CoreState` holds only shared config and governance state.
 
 > **Why an `operator` party?** Canton requires every contract to have a
 > signatory. The `operator` is a designated, well-known party (configured at
@@ -256,7 +247,7 @@ An integrator first registers an emitter — **directly, with no operator
 involvement**. The operator runs an `EmitterRegistry` (created at setup); the
 requester exercises `RegisterEmitter` on it, holding only the registry's
 disclosure (§4.7). The flexible controller brings the requester's signature;
-the operator's co-signature on the created `Emitter` is *inherited* from the
+the operator's co-signature on the created `Emitter` is _inherited_ from the
 registry's signatory — the same authority-inheritance that powers
 `VerifyAndConsumeVAA`. Registration is permissionless (EVM/Sui parity: anyone
 may emit); the choice is consuming, so racing registrations contend on the
@@ -381,64 +372,52 @@ so the watcher reads it from the transaction's **ledger effective time**
 
 **Fees.** Whitepaper 0004 requires a fee in the chain's native token. Fees are
 paid via the **Canton Network Token Standard** (CIP-0056, V1 — the
-`splice-api-token-*-v1` interface DARs vendored under the `canton/dars/` directory; the old
-splice-wallet payment requests are deprecated), so the bridge works with
-Canton Coin or any standard token, chosen at genesis
-(`CoreState.feeInstrument` — no governance action covers it; migrating
-instruments is a genesis-class ceremony):
+`splice-api-token-*-v1` interface DARs under `canton/dars/`), so the bridge works
+with Canton Coin or any standard token, chosen at genesis
+(`CoreState.feeInstrument`, no governance action covers it):
 
-- **The payer is the submitter**, so the bridge only *consumes* allocations,
+- **The payer is the submitter**, so the bridge only _consumes_ allocations,
   never issues wallet-facing `AllocationRequest`s (future UX work). The payer
-  locks funds against the bridge's settlement via the token registry's
-  `AllocationFactory` (its wallet/CLI plus the registry's CIP-0056 OpenAPI,
-  which supplies the `ExtraArgs` choice context and any registry disclosures
-  — the same untrusted-for-safety, liveness-only role as our own disclosure
-  service, §4.7), with the bridge convention `executor = sender = payer`,
+  locks funds via the token registry's `AllocationFactory` (its wallet/CLI plus
+  the registry's CIP-0056 OpenAPI, which supplies the `ExtraArgs` choice context
+  and registry disclosures — untrusted-for-safety, liveness-only, like our own
+  disclosure service, §4.7), with the convention `executor = sender = payer`,
   `receiver = feeRecipient`.
 - The charging choice validates the allocation — receiver, instrument, amount
-  (`≥` fee: the **entire leg amount transfers**, allocations are
-  all-or-nothing, so overpayment is deliberate padding against fee-raise
-  races), sender, and the **instrument admin's signature** (views are
-  template-computed and forgeable; a signature is not — authenticate
-  payloads, never resolution paths) — then exercises
-  `Allocation_ExecuteTransfer` **in the same transaction** as the
+  (`≥` fee: the **entire leg amount transfers**, allocations are all-or-nothing,
+  so overpayment is deliberate padding against fee-raise races), sender, and the
+  **instrument admin's signature** (views are forgeable, a signature is not) —
+  then exercises `Allocation_ExecuteTransfer` **in the same transaction** as the
   publish/registration/claim. Executing consumes the allocation: one-shot by
-  activeness, no replay bookkeeping. Fees are `Int`s in **10^-10 token
-  units** (exactly Decimal's last digit — every fee is exactly
-  representable).
+  activeness, no replay bookkeeping. Fees are `Int`s in **10^-10 token units**
+  (exactly Decimal's last digit — every fee exactly representable).
 - `Allocation_ExecuteTransfer` needs sender ∧ receiver ∧ executor authority
   jointly, and the receiver is the fee recipient — so all charging routes
   through `CoreState` choices (`ChargeMessageFee` / `ChargeFee`), where the
-  recipient's authority is inherited. `PublishMessage` therefore references
-  the `CoreState` on every publish (EVM parity: the current `messageFee` is
-  read each call; the cid churns only on governance actions — a stale cid
-  fails closed and is re-resolved). The fee is charged to `payer`, a choice
-  argument that equals `owner` for a direct publish but is named explicitly
-  when an app publishes on a user's behalf through an `owner`-owned emitter
-  (NTT §10): `payer` co-controls the publish, so it cannot be a third party
-  who did not authorize spending its own funds. Registries charge their own
-  operator-set `registrationFee`/`claimFee` through the same choice; at fee 0
-  they skip the `CoreState` entirely. Before charging, every call site pins the
-  `CoreState`'s authenticity by exercising `GetGuardianGovernance` and checking
-  it against the `guardianGovernance` committed on the emitter/registry —
-  **pinning the fee-custody anchor, not merely the `operator`** — so a forged
-  `CoreState` cannot redirect the fee (see the custody bullet).
+  recipient's authority is inherited. `PublishMessage` therefore references the
+  `CoreState` on every publish (EVM parity: the current `messageFee` is read each
+  call; a stale cid fails closed and is re-resolved). The fee is charged to
+  `payer`, which equals `owner` for a direct publish but is named explicitly when
+  an app publishes on a user's behalf (NTT §10); `payer` co-controls the publish,
+  so it cannot be a third party who did not authorize spending its funds.
+  Registries charge their `registrationFee`/`claimFee` the same way, skipping the
+  `CoreState` entirely at fee 0. Before charging, every call site pins the
+  `CoreState` by exercising `GetGuardianGovernance` against the
+  `guardianGovernance` committed on the emitter/registry — **the fee-custody
+  anchor, not merely the `operator`** — so a forged `CoreState` cannot redirect
+  the fee (see the custody bullet).
 - **Custody is governance-controlled**: `feeRecipient` is the
-  `guardianGovernance` threshold party, so accrued fees move only via the
-  k-of-n guardian ceremony — the operator never touches them (the Canton
-  analog of "fees sit in the bridge contract"). This holds **even against a
-  compromised operator hot key**: because each charge pins `guardianGovernance`
-  (which a single operator key cannot forge — it is the guardians' k-of-n
-  external party) rather than `operator`, an operator that co-signs a shadow
-  `CoreState` under a throwaway `guardianGovernance`/`feeRecipient` it controls
-  is rejected at the pin before any funds move. A `TransferFees` governance
-  VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
-  guardianGovernance, authority inherited from the consumed `CoreState`)
-  recording the amount, the VAA's 32-byte recipient, and the VAA hash — the
-  artifact the guardians' custody policy matches when threshold-signing the
-  actual outbound token transfer. The enforcement of "only per authorization"
-  lives in gg key custody, the same trust plane as the guardian keys
-  themselves.
+  `guardianGovernance` threshold party, so accrued fees move only via the k-of-n
+  guardian ceremony — the operator never touches them (the Canton analog of "fees
+  sit in the bridge contract"). This holds **even against a compromised operator
+  hot key**: each charge pins `guardianGovernance` (unforgeable by a single
+  operator key) rather than `operator`, so an operator co-signing a shadow
+  `CoreState` under a throwaway `feeRecipient` is rejected before any funds move.
+  A `TransferFees` VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
+  guardianGovernance) recording the amount, the VAA's 32-byte recipient, and the
+  VAA hash — the artifact the guardians' custody policy matches when
+  threshold-signing the outbound transfer. "Only per authorization" is enforced
+  in gg key custody, the same trust plane as the guardian keys.
 - Token Standard **V2** (CIP-0112) is approved but not yet on mainnet; it
   arrives as a parallel `-v2` interface family, and
   `Wormhole.Core.Fees.chargeFee` is the single seam where support would be
@@ -468,7 +447,7 @@ provided key hashes to the guardian address stored in the set.
 is the sole controller — `operator` never needs to be an active party. The
 choice is `nonconsuming` and does no create/archive at all, so nothing in its
 body needs `operator`'s authority for any structural reason (contrast
-`SubmitGovernanceVAA` below, which *is* consuming and creates a successor
+`SubmitGovernanceVAA` below, which _is_ consuming and creates a successor
 `CoreState` genuinely needing `guardianGovernance`'s co-signature). Any external
 protocol — the token bridge, NTT, anything else — can verify a VAA as itself.
 The one real requirement is visibility, not authorization: a non-stakeholder
@@ -554,7 +533,7 @@ built on key lookups — this module uses no contract keys at all.
 
 Instead, each consumer's consumed-digest set is a **prefix trie of leaf
 contracts** (`Replay.daml`). A node covers a hex `prefix` and stores the set
-of digest *suffixes* consumed under it:
+of digest _suffixes_ consumed under it:
 
 ```haskell
 template ReplayNode
@@ -579,14 +558,14 @@ stored. **The invariant: a consumer's active nodes partition the digest space
 global consumption truth.
 
 **Why this is sound where keys were not.** "Not consumed" became a positive
-statement about one *named* contract: fetch the covering node, check absence,
+statement about one _named_ contract: fetch the covering node, check absence,
 consume it. Every confirming participant validates the node's activeness — a stale cid
 conflicts and aborts; the current covering node provably contains or excludes
 the digest. Soundness is **submitter-independent**: any submitter with a
 disclosure of the current covering node gets a correct check, and a wrong or
 stale node can only fail the transaction, never replay. Where the key design
-failed *open* (a lookup that misses waves a replay through), the trie fails
-*closed* (an archived subspace has no covering node — nothing verifies).
+failed _open_ (a lookup that misses waves a replay through), the trie fails
+_closed_ (an archived subspace has no covering node — nothing verifies).
 
 `VerifyAndConsumeVAA` (nonconsuming, on `CoreState`, flexible controller
 `consumer`) takes the covering node's cid, verifies the VAA (§5), binds the
@@ -597,15 +576,15 @@ Properties:
 
 - **Nobody can touch someone else's scope; your own scope is your own
   problem.** Archival alone only bricks (fail-closed); the replay vector is
-  node *re-creation*. Nodes are co-signed, so no third party can archive or
+  node _re-creation_. Nodes are co-signed, so no third party can archive or
   re-create them (splits inherit both signatures from the archived parent —
   the operator is not involved per consume), and roots come only from the
   operator's `ReplayRootRegistry` — a stateless, never-churning anchor whose
-  nonconsuming `ClaimReplayRoot` lends the operator's *inherited* signature
+  nonconsuming `ClaimReplayRoot` lends the operator's _inherited_ signature
   to a consumer-submitted claim (the `RegisterEmitter` pattern: no crank; the
   operator multisig signs nothing after genesis). Claiming a root for a
   consumer requires **that consumer's authority**, so nobody can fork another
-  app's replay scope. There is deliberately *no* one-root-per-consumer
+  app's replay scope. There is deliberately _no_ one-root-per-consumer
   enforcement: maintaining a single trie is the consumer's own responsibility
   (its disclosure service defines which trie its consumes resolve into, and
   detects forks — more than one covering node — for free). This is EVM
@@ -619,7 +598,7 @@ Properties:
   and the operator ~300 B of storage per worthless root; no shared contract
   grows, nothing bricks.
 - **Scoping and contention.** Tries are per consumer party: different apps
-  consume the same VAA independently. Consumes racing on the *same node*
+  consume the same VAA independently. Consumes racing on the _same node_
   conflict — exactly one commits (validator-checked, regardless of submitter);
   the loser re-resolves the covering node and retries. A blind retry of a
   consume that actually committed fails on membership ("digest already
@@ -643,7 +622,7 @@ service indexes the consumer's active nodes by prefix (following the
 the covering node's cid plus its explicit disclosure — alongside the
 `CoreState` disclosure it already serves (§4.3). It is **untrusted for
 safety**: the worst it can do is serve a wrong or stale node, which fails the
-transaction. It is trusted for *liveness* only, like any RPC endpoint. §4.7
+transaction. It is trusted for _liveness_ only, like any RPC endpoint. §4.7
 aggregates every resolution the service must provide. (Go implementation is
 future work; the Daml tests simulate it with a script helper,
 `Test.TestReplay.coveringNode`, which also asserts the partition invariant on
@@ -654,8 +633,8 @@ every use.)
 (test package only): the end user herself exercises `Redeem` on the app
 contract with two disclosures attached (CoreState + covering node) and nothing
 else — no read grants, no `readAs`, no relayer queue. The manager's
-*authority* for the consume is inherited from the app contract's signatory;
-its *visibility* is simply not needed. `testIntegratorRedeem` pins the
+_authority_ for the consume is inherited from the app contract's signatory;
+its _visibility_ is simply not needed. `testIntegratorRedeem` pins the
 inversion of the key-based design's failure mode: replay attempts by arbitrary
 submitters fail on activeness (stale node) or membership (fresh node) — never
 succeed.
@@ -666,7 +645,7 @@ With contract keys gone (§1), every contract reference is a **contract-id**.
 Two distinct needs hide behind "how do I find the contract", and they have
 different answers:
 
-- **Cid resolution** — *what is the current cid of X?* Stakeholders get this
+- **Cid resolution** — _what is the current cid of X?_ Stakeholders get this
   for free: a consuming exercise delivers the successor's `CreatedEvent` to
   every stakeholder's ACS, so the operator tracks its registries and the
   `CoreState`, an emitter owner tracks its `Emitter`, a consumer tracks its
@@ -675,21 +654,20 @@ different answers:
   attach the explicit-disclosure blob of every contract its transaction
   references, or its participant cannot construct the transaction at all.
 
-The **disclosure service** is the single off-ledger component that provides
-both to parties that need them: an index over the relevant contracts — fed by
-the Ledger API update stream / ACS of a party that sees them — answering
-"current cid (+ disclosure blob) for X". The complete inventory of resolutions
-it must serve:
+The **disclosure service** is the single off-ledger component that provides both
+to the parties that need them: an index over the relevant contracts — fed by the
+update stream / ACS of a party that sees them — answering "current cid (+
+disclosure blob) for X". The complete inventory it must serve:
 
-| Contract                | Index                              | Needed by                                                     | Disclosure attachment?                          | Churn                        |
-| ----------------------- | ---------------------------------- | ------------------------------------------------------------- | ----------------------------------------------- | ---------------------------- |
-| `CoreState`             | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers) | per governance action (rare) |
-| `ReplayNode`            | (consumer, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem                | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node |
-| `EmitterRegistry`       | operator                           | `RegisterEmitter`                                              | yes — the requester submits                     | per emitter registration; recreated on operator fee change |
-| `ReplayRootRegistry`    | operator                           | `ClaimReplayRoot`                                              | yes — the consumer submits (cacheable blob)     | only on operator fee change  |
-| `Emitter`               | (operator, owner, emitterId)       | `PublishMessage`                                               | no — owner submits, own ACS (but see `CoreState` row) | per publish                  |
-| token-registry context  | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures    | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service | registry-defined             |
-| app contracts (e.g. `ExampleIntegrator`) | app-defined      | the app's own choices                                          | app's concern (its users are observers)         | app-defined                  |
+| Contract                                 | Index                              | Needed by                                                              | Disclosure attachment?                                                            | Churn                                                      |
+| ---------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `CoreState`                              | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers)                      | per governance action (rare)                               |
+| `ReplayNode`                             | (consumer, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem                        | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
+| `EmitterRegistry`                        | operator                           | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated on operator fee change |
+| `ReplayRootRegistry`                     | operator                           | `ClaimReplayRoot`                                                      | yes — the consumer submits (cacheable blob)                                       | only on operator fee change                                |
+| `Emitter`                                | (operator, owner, emitterId)       | `PublishMessage`                                                       | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
+| token-registry context                   | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures            | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service                  | registry-defined                                           |
+| app contracts (e.g. `ExampleIntegrator`) | app-defined                        | the app's own choices                                                  | app's concern (its users are observers)                                           | app-defined                                                |
 
 Two properties make this safe to outsource:
 
@@ -699,7 +677,7 @@ Two properties make this safe to outsource:
   cid was found: `CoreState` by its signatory anchor fields (§4.1),
   `ReplayNode` by the (consumer, operator) binding inside `VerifyAndConsumeVAA`
   plus the app-side operator pin (see `ExampleIntegrator.Redeem`). The service
-  is trusted for *liveness* only, like any RPC endpoint.
+  is trusted for _liveness_ only, like any RPC endpoint.
 - **One reader suffices.** A service reading as the operator (a stakeholder of
   `CoreState`, both registries, and — as co-signatory — every consumer's trie)
   can serve the whole table; integrators can equally run their own for their
@@ -1090,7 +1068,7 @@ locally. That step is theoretical here by construction, not by omission: the
 decentralized namespace is guardian-owned, so SVs never approve it — CN
 "registration" is just (a) onboarding a participant to the CN global
 synchronizer (one-time, SV-sponsored validator onboarding) and (b) submitting
-the *same* topology transactions this script builds to that synchronizer instead
+the _same_ topology transactions this script builds to that synchronizer instead
 of the sandbox's, where they are sequenced and seen by all participants. The
 script is synchronizer-target-parameterized (`GG_SYNCHRONIZER_ALIAS`,
 `GG_CANTON_CONSOLE_CONFIG`) for exactly that reason, and the local run proves
@@ -1155,7 +1133,7 @@ template `observer` on `Emitter`/`CoreState`, it is an informee of every
 participant independently receives and validates every attestation-bearing
 transaction, and an invalid one never appears on that participant's Ledger API —
 so a watcher cannot sign it. This is deliberately scoped to the **attestation
-surface only** (§4.1, §4.2): the observer is *not* a stakeholder of
+surface only** (§4.1, §4.2): the observer is _not_ a stakeholder of
 `EmitterRegistry` allocations, replay tries, or any holding/balance/transfer
 state of other packages — least privilege, in contrast to replica-hosting the
 `operator` (whose projection is its entire signatory footprint; kept as a
@@ -1169,7 +1147,7 @@ party; and (2) even for a confirming party, a participant hosting it at
 `Observation` permission does not submit confirmations. So guardian participant
 downtime never blocks a Canton transaction; it only delays that guardian's own
 observation (fail-safe: it stops signing). This is the point — the VAA quorum is
-already the attestation layer, and Wormhole's job is to *refuse to attest*
+already the attestation layer, and Wormhole's job is to _refuse to attest_
 forgeries, not to halt Canton (giving guardians confirmation duty would duplicate
 the quorum and turn guardian downtime into a chain-halt).
 
@@ -1205,9 +1183,9 @@ Crucially, it also **cannot forge the guardian set** used for inbound
 verification: `CoreState` is co-signed by the `guardianGovernance` threshold party
 (§4.1), so the operator can neither mutate the real `CoreState` nor fabricate
 one whose payload names the governance anchor consumers trust. This closes
-the one gap that observation-only hosting does *not* cover — inbound state
+the one gap that observation-only hosting does _not_ cover — inbound state
 integrity — by moving it from "trust the single operator" to "trust the k-of-n
-governance party." Compromising *that* is a threshold compromise, i.e. genuinely
+governance party." Compromising _that_ is a threshold compromise, i.e. genuinely
 takeover-class, rather than a single-key bar. Residual inbound corruption (bugs in
 a verification path, not forged state) can still only damage Canton-local state —
 the same position Wormhole holds on every chain, where a compromised chain wrecks
@@ -1248,14 +1226,14 @@ human decision; see Open Questions.
    id. Note the `CoreState` singleton count ("exactly one") is still behavioral —
    confirm the genesis automation creates exactly one. (Emitter/manager
    **address** integrity is separately owner-bound and owner-co-signed, §4.2.)
-3. **Guardian observer topology.** *Mechanism resolved:* the dedicated read-only
+3. **Guardian observer topology.** _Mechanism resolved:_ the dedicated read-only
    `guardianObserver` party is implemented as a template `observer` on
    `Emitter`/`CoreState` (§4.1, §4.2, §10), and `--cantonReadAsParty` maps to it
    for production guardians (§7.1). This observer party is distinct from the
    `guardianGovernance` signatory party (item 2): the observer is read-only, the
    governance party has signatory power. **Residual (needs a human decision):**
    the production `PartyToParticipant` runbook (host at `Observation` permission;
-   host the party *before* genesis, or run Canton party replication / ACS import
+   host the party _before_ genesis, or run Canton party replication / ACS import
    so a late-joining participant receives prior contracts), and
    **namespace-key custody** for the party (operator-ops vs guardian-ops key,
    which controls the hosting mapping and thus observer eviction — fail-safe
@@ -1263,7 +1241,7 @@ human decision; see Open Questions.
 4. **Integrator VAA verification.** Implement the hint-free guardian set (persist
    pubkeys, §5) and confirm the guardian-set distribution mechanism for
    integrators (explicit disclosure vs public-observer snapshot).
-5. **Native fees.** *Mechanism resolved:* CIP-0056 (Token Standard V1)
+5. **Native fees.** _Mechanism resolved:_ CIP-0056 (Token Standard V1)
    allocations, consumed atomically inside `PublishMessage` / `RegisterEmitter`
    / `ClaimReplayRoot`, with fee custody under the `guardianGovernance`
    threshold party and `TransferFees` minting on-ledger withdrawal
