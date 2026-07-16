@@ -56,8 +56,8 @@ setupWithInstrument mInstrument = do
     createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                  defaultGovernanceContract [devnetGuardian] guardianObserver
                  feeInstrument guardianGovernance)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver 0)
-  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator 0)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance guardianObserver 0)
+  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
   pure (operator, guardianObserver, csId)
 
 -- | Register an emitter for @owner@, the production way: the requester submits
@@ -170,13 +170,15 @@ testImpersonationBlocked = do
   -- (a) Operator-alone forgery of Alice's address is impossible.
   submitMustFail operator do
     createCmd Emitter with
-      operator, owner = alice, guardianObserver, emitterId = 0
+      operator, guardianGovernance = a.guardianGovernance, owner = alice
+      guardianObserver, emitterId = 0
       emitterAddress = a.emitterAddress, sequence = 0
 
   -- (b) Operator + Mallory can create a same-id emitter, but its address differs.
   malloryEm <- submit (actAs operator <> actAs mallory) do
     createCmd Emitter with
-      operator, owner = mallory, guardianObserver, emitterId = 0
+      operator, guardianGovernance = a.guardianGovernance, owner = mallory
+      guardianObserver, emitterId = 0
       emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
   Some m <- queryContractId mallory malloryEm
   assert (m.emitterAddress /= a.emitterAddress)

@@ -211,11 +211,17 @@ across guardian rotation). Two things follow:
 - **The operator cannot forge the guardian set.** Because `guardianGovernance`
   is a signatory, a compromised operator cannot `create` a `CoreState` bearing
   the real governance party — so any fetched or disclosed `CoreState` whose
-  `guardianGovernance` (or `operator`) field is the known anchor party is
-  **authentic by construction**, however its cid was obtained. Consumers
-  authenticate the payload, never the resolution path (§4.7). An operator
-  puppet could create a `CoreState` under a *different* governance party — but
-  its payload names the wrong parties and no consumer trusts it.
+  `guardianGovernance` field is the known anchor party is **authentic by
+  construction**, however its cid was obtained. Consumers authenticate the
+  payload, never the resolution path (§4.7). An operator puppet could create a
+  `CoreState` under a *different* governance party — but its payload names the
+  wrong parties and no consumer trusts it. **Pinning `operator` is weaker than
+  pinning `guardianGovernance`, and the two are not interchangeable:** a
+  compromised operator (a single hot key) *can* co-sign a `CoreState` whose
+  `operator` field is genuine but whose `guardianGovernance`/`feeRecipient` it
+  controls, so an `operator`-only pin accepts a shadow `CoreState`. For the fee
+  path — where `guardianGovernance` *is* the fee-custody anchor — only the
+  `guardianGovernance` pin is sufficient (see below).
 - **Governance stays low-friction.** `guardianGovernance` actively signs only at
   **genesis**; each `SubmitGovernanceVAA` transition inherits its authority from
   the archived contract (the same authority-propagation as the `Emitter` owner
@@ -412,11 +418,20 @@ instruments is a genesis-class ceremony):
   (NTT §10): `payer` co-controls the publish, so it cannot be a third party
   who did not authorize spending its own funds. Registries charge their own
   operator-set `registrationFee`/`claimFee` through the same choice; at fee 0
-  they skip the `CoreState` entirely.
+  they skip the `CoreState` entirely. Before charging, every call site pins the
+  `CoreState`'s authenticity by exercising `GetGuardianGovernance` and checking
+  it against the `guardianGovernance` committed on the emitter/registry —
+  **pinning the fee-custody anchor, not merely the `operator`** — so a forged
+  `CoreState` cannot redirect the fee (see the custody bullet).
 - **Custody is governance-controlled**: `feeRecipient` is the
   `guardianGovernance` threshold party, so accrued fees move only via the
   k-of-n guardian ceremony — the operator never touches them (the Canton
-  analog of "fees sit in the bridge contract"). A `TransferFees` governance
+  analog of "fees sit in the bridge contract"). This holds **even against a
+  compromised operator hot key**: because each charge pins `guardianGovernance`
+  (which a single operator key cannot forge — it is the guardians' k-of-n
+  external party) rather than `operator`, an operator that co-signs a shadow
+  `CoreState` under a throwaway `guardianGovernance`/`feeRecipient` it controls
+  is rejected at the pin before any funds move. A `TransferFees` governance
   VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
   guardianGovernance, authority inherited from the consumed `CoreState`)
   recording the amount, the VAA's 32-byte recipient, and the VAA hash — the

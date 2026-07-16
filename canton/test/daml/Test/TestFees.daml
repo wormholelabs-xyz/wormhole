@@ -8,6 +8,7 @@ module Test.TestFees where
 import Daml.Script
 import DA.Assert ((===))
 import DA.Optional (fromSome)
+import DA.Text (isInfixOf)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Splice.Api.Token.AllocationV1
 import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
@@ -185,7 +186,7 @@ testRegistrationFee = do
   Some cs <- queryContractId operator csId
   bob <- allocateParty "RegFeeBob"
   regCid <- submit operator do
-    createCmd (mkInitialEmitterRegistry operator cs.guardianObserver 500)
+    createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance cs.guardianObserver 500)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   csDisc <- fromSome <$> queryDisclosure operator csId
   -- Fee due: no CoreState / no allocation both rejected.
@@ -209,9 +210,10 @@ testRegistrationFee = do
 testClaimFee : Script ()
 testClaimFee = do
   (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  Some cs <- queryContractId operator csId
   carol <- allocateParty "ClaimFeeCarol"
   regCid <- submit operator do
-    createCmd (mkInitialReplayRootRegistry operator 300)
+    createCmd (mkInitialReplayRootRegistry operator cs.guardianGovernance 300)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   csDisc <- fromSome <$> queryDisclosure operator csId
   submitMustFail (actAs carol <> disclose regDisc <> disclose csDisc) do
@@ -243,3 +245,115 @@ testNoSpuriousWithdrawalAuthorization = do
       pubKeys = [(0, devnetGuardianPubKey)]
   auths <- query @FeeWithdrawalAuthorization operator
   auths === []
+
+----------------------------------------------------------------------
+-- guardianGovernance pin: the shadow-CoreState fee-redirect regression
+----------------------------------------------------------------------
+--
+-- The three fee-charging call sites pinned only the @operator@ field returned
+-- by 'ChargeFee' / 'ChargeMessageFee'. But @operator@ does NOT determine
+-- @feeRecipient@ (the fee-custody anchor is @guardianGovernance@). A genuine or
+-- compromised operator can co-sign a SECOND, ledger-valid 'CoreState' carrying
+-- an attacker-controlled @guardianGovernance@ (= @feeRecipient@) — the operator
+-- field still matches, so an operator-only pin accepts it and real fees flow to
+-- the attacker. Each call site now exercises 'GetGuardianGovernance' and pins it
+-- against the @guardianGovernance@ committed on the emitter/registry BEFORE
+-- charging, so the forged 'CoreState' dies on the NEW check before any funds
+-- move. Each test builds exactly that forgery (real operator + rogue gg) and
+-- asserts the failure carries the new "guardianGovernance mismatch" message —
+-- the operator pin would pass, so a match on this substring proves the fix, not
+-- an incidental failure.
+
+-- | 'PublishMessage' pins the Emitter's guardianGovernance anchor. The forged
+-- CoreState even has its (rogue) messageFee raised and a matching allocation
+-- attached, so the charge WOULD succeed against @rogueGov@ — the pin rejects it
+-- first.
+testPublishPinsGuardianGovernance : Script ()
+testPublishPinsGuardianGovernance = do
+  (operator, mockAdmin, _realCsId, inst, _realRecipient) <- setupFees
+  alice <- allocateParty "PinPublishAlice"
+  rogueGov <- allocateParty "RoguePublishGov"
+  rogueObserver <- allocateParty "RoguePublishObserver"
+  emId <- registerEmitter operator alice
+  -- The shadow CoreState: co-signed by the REAL operator and a throwaway gg it
+  -- controls, with rogueGov as both guardianGovernance and feeRecipient.
+  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+    createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian] rogueObserver inst rogueGov)
+  fakeCsId' <- submit operator do
+    exerciseCmd fakeCsId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId'
+  feePay <- mintAndAllocate mockAdmin alice rogueGov inst (feeToDecimal mockFee)
+  res <- trySubmit (actAs alice <> disclose fakeDisc) do
+    exerciseCmd emId PublishMessage with
+      nonce = 1, payload = "aa", consistencyLevel = 0
+      coreStateCid = fakeCsId', payer = alice, feeAllocation = Some feePay
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected a guardianGovernance pin failure, got: " <> fs.message)
+        ("guardianGovernance mismatch" `isInfixOf` fs.message)
+    Left err -> abort ("expected a guardianGovernance pin failure, got: " <> show err)
+    Right _ -> abort "PublishMessage accepted a shadow CoreState under a rogue guardianGovernance"
+
+-- | 'RegisterEmitter' pins the registry's guardianGovernance anchor. The
+-- nonzero-fee registry is anchored to the real gg; the forged CoreState routes
+-- its @registrationFee@ to @rogueGov@, and a fully-funded allocation is
+-- attached — the pin rejects it before the charge.
+testRegisterEmitterPinsGuardianGovernance : Script ()
+testRegisterEmitterPinsGuardianGovernance = do
+  (operator, mockAdmin, realCsId, inst, _realRecipient) <- setupFees
+  Some cs <- queryContractId operator realCsId
+  bob <- allocateParty "PinRegBob"
+  rogueGov <- allocateParty "RogueRegGov"
+  rogueObserver <- allocateParty "RogueRegObserver"
+  -- A real, nonzero-fee registry pinned to the REAL guardianGovernance.
+  regCid <- submit operator do
+    createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance cs.guardianObserver 500)
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+    createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian] rogueObserver inst rogueGov)
+  fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
+  feePay <- mintAndAllocate mockAdmin bob rogueGov inst (feeToDecimal 500)
+  res <- trySubmit (actAs bob <> disclose regDisc <> disclose fakeDisc) do
+    exerciseCmd regCid RegisterEmitter with
+      requester = bob
+      coreStateCid = Some fakeCsId
+      feeAllocation = Some feePay
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected a guardianGovernance pin failure, got: " <> fs.message)
+        ("guardianGovernance mismatch" `isInfixOf` fs.message)
+    Left err -> abort ("expected a guardianGovernance pin failure, got: " <> show err)
+    Right _ -> abort "RegisterEmitter accepted a shadow CoreState under a rogue guardianGovernance"
+
+-- | 'ClaimReplayRoot' pins the registry's guardianGovernance anchor. Same
+-- forgery, routing the @claimFee@ to @rogueGov@; the pin rejects it before the
+-- charge.
+testClaimReplayRootPinsGuardianGovernance : Script ()
+testClaimReplayRootPinsGuardianGovernance = do
+  (operator, mockAdmin, realCsId, inst, _realRecipient) <- setupFees
+  Some cs <- queryContractId operator realCsId
+  carol <- allocateParty "PinClaimCarol"
+  rogueGov <- allocateParty "RogueClaimGov"
+  rogueObserver <- allocateParty "RogueClaimObserver"
+  regCid <- submit operator do
+    createCmd (mkInitialReplayRootRegistry operator cs.guardianGovernance 300)
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+    createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian] rogueObserver inst rogueGov)
+  fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
+  feePay <- mintAndAllocate mockAdmin carol rogueGov inst (feeToDecimal 300)
+  res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer = carol, splitThreshold = 4
+      coreStateCid = Some fakeCsId, feeAllocation = Some feePay
+  case res of
+    Left (FailureStatusError fs) ->
+      assertMsg ("expected a guardianGovernance pin failure, got: " <> fs.message)
+        ("guardianGovernance mismatch" `isInfixOf` fs.message)
+    Left err -> abort ("expected a guardianGovernance pin failure, got: " <> show err)
+    Right _ -> abort "ClaimReplayRoot accepted a shadow CoreState under a rogue guardianGovernance"

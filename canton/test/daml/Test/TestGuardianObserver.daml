@@ -90,7 +90,8 @@ testObserverHasNoAuthority = do
   -- Cannot create contracts bearing the real signatory parties (no authority).
   submitMustFail guardianObserver do
     createCmd Emitter with
-      operator, owner = alice, emitterId = 0
+      operator, guardianGovernance = cs.guardianGovernance, owner = alice
+      emitterId = 0
       emitterAddress = emitterAddressFor operator alice 0, sequence = 0
       guardianObserver
   submitMustFail guardianObserver do
