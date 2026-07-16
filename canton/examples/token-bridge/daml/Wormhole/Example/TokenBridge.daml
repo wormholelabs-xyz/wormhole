@@ -14,9 +14,11 @@
 --     controller the interface itself checks — @bridge@'s authority is not
 --     needed for this leg, since the receiver (bridge) is only an observer of
 --     the resulting custody holding.
---   * @PublishMessage@ (controller @owner = bridge@) runs under the @bridge@
---     authority this choice's body carries because 'TokenBridge' is signed by
---     @bridge@ — NOT because @user@ is trusted with it.
+--   * @PublishMessage@ (controller @owner = bridge, payer = user@) runs its
+--     @bridge@ leg under the @bridge@ authority this choice's body carries
+--     because 'TokenBridge' is signed by @bridge@ — NOT because @user@ is
+--     trusted with it. The @user@ authority (the choice controller) covers only
+--     the message-fee draw @user@ funds as @payer@, mirroring EVM's @msg.value@.
 -- No core operator authority is involved, matching EVM's permissionless
 -- lock+publish. VISIBILITY, not authorization, is the one real requirement on
 -- @user@: they are not a natural stakeholder of 'TokenBridge', the registry
@@ -46,6 +48,7 @@ import Wormhole.Core.Setup (cantonChainId)
 import Wormhole.Core.State (CoreState(..), Emitter, PublishMessage(..), WormholeMessage)
 import Wormhole.Core.VAA (parseVAA, verifyVAA)
 
+import Splice.Api.Token.AllocationV1 (Allocation)
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.MetadataV1 (ExtraArgs(..), emptyChoiceContext, emptyMetadata)
 import Splice.Api.Token.TransferInstructionV1
@@ -168,8 +171,8 @@ template TokenBridge
   with
     bridge           : Party        -- custodian; also the owner of the registered Emitter
     guardianObserver : Party        -- read-only guardian observer (matches the core templates)
-    operator         : Party        -- the bridge's Emitter key._1
-    emitterId        : Int          -- the bridge's Emitter key._3
+    operator         : Party        -- the registrar of the bridge's Emitter; CompleteTransfer controller
+    emitterId        : Int          -- the bridge's registered Emitter id (informational; the cid is passed in)
     peers            : Map Int Bytes32  -- chainId -> peer token-bridge emitter address
     consumed         : Set Bytes32      -- inbound VAA hashes already executed
   where
@@ -203,26 +206,33 @@ template TokenBridge
     -- published 'WormholeMessage'. See the module header for the authority
     -- breakdown.
     --
-    -- The bridge's 'Emitter' is resolved by its stable key, not a
-    -- caller-supplied cid — the original example took @emitterCid@ as a
-    -- choice argument, which was both stale after one use (@PublishMessage@
-    -- is consuming, so a disclosed cid works exactly once) and unchecked (a
-    -- caller could pass ANY emitter satisfying @controller owner@ with their
-    -- OWN authority, attesting from a non-bridge emitter). Because
-    -- 'PublishMessage' is still consuming, whoever serves disclosures must
-    -- disclose the CURRENT 'Emitter' before each call — this choice's own
-    -- key resolution removes the cid-tracking burden, not the
-    -- disclosure-freshness one.
+    -- The bridge's 'Emitter' is passed as a disclosed @emitterCid@: wormhole-core
+    -- 0.2.0 removed contract keys (they are non-unique on Daml-LF 2.3 — see the
+    -- core README §4), so a contract is addressed by cid and shared by explicit
+    -- disclosure. 'PublishMessage' is consuming, so a disclosed cid works exactly
+    -- once — whoever serves disclosures must resolve and disclose the CURRENT
+    -- 'Emitter' (and 'CoreState') before EACH call. The caller cannot smuggle in a
+    -- foreign emitter: 'PublishMessage' is controlled by its @owner@, so only the
+    -- @bridge@'s own Emitter can be published under this choice's @bridge@
+    -- authority.
+    --
+    -- The core @messageFee@ is charged through the referenced @coreStateCid@ with
+    -- @payer = user@ (EVM's @msg.value@ analog); at fee 0 pass @feeAllocation =
+    -- None@, but the 'CoreState' reference is still required since the amount is
+    -- only knowable from it.
     nonconsuming choice LockAndPublish : (ContractId Holding, WormholeMessage)
       with
-        user         : Party
-        factoryCid   : ContractId TransferFactory
-        holdingCids  : [ContractId Holding]
-        instrumentId : InstrumentId
-        amount       : Decimal
-        recipient    : Bytes32
-        toChain      : Int
-        nonce        : Int
+        user          : Party
+        factoryCid    : ContractId TransferFactory
+        holdingCids   : [ContractId Holding]
+        instrumentId  : InstrumentId
+        amount        : Decimal
+        recipient     : Bytes32
+        toChain       : Int
+        nonce         : Int
+        emitterCid    : ContractId Emitter
+        coreStateCid  : ContractId CoreState
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
       controller user
       do
         now <- getTime
@@ -247,11 +257,13 @@ template TokenBridge
             _ -> abort "TokenBridge: expected exactly one custody holding"
           _ -> abort "TokenBridge: registry did not settle the transfer atomically"
         let payload = encodeTransfer scaledAmount (tokenAddressFor instrumentId) cantonChainId recipient toChain 0
-        (emitterCid, _emitter) <- fetchByKey @Emitter (operator, bridge, emitterId)
         msg <- exercise emitterCid PublishMessage with
           nonce
           payload
           consistencyLevel = 1
+          coreStateCid
+          payer = user
+          feeAllocation
         pure (custodyCid, msg)
 
     -- | Verify an inbound VAA attesting a transfer TO Canton and unlock the

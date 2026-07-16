@@ -5,6 +5,7 @@ module Wormhole.Example.Test.TestTokenBridge where
 
 import DA.Assert ((===))
 import DA.Map qualified as Map
+import DA.Optional (fromSome)
 import DA.Set qualified as Set
 import Daml.Script
 
@@ -19,10 +20,9 @@ import Wormhole.Core.Setup
   , solanaGovernanceChainId
   )
 import Wormhole.Core.State
-  ( ApproveEmitter(..)
-  , CoreState
+  ( CoreState
   , Emitter
-  , EmitterRequest(..)
+  , RegisterEmitter(..)
   , WormholeMessage
   )
 import Wormhole.Core.VAA (parseVAA)
@@ -109,14 +109,22 @@ baseSetup = do
   bridge             <- allocateParty "Bridge"
   admin              <- allocateParty "Registry"
 
+  -- Fees are 0 throughout this example, so the fee instrument is a never-validated
+  -- placeholder and the recipient is guardianGovernance (production custody).
+  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
   coreStateCid <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [exampleGuardian] guardianObserver)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver)
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract [exampleGuardian] guardianObserver feeInstrument guardianGovernance)
+  regCid <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianObserver 0)
 
-  reqId <- submit bridge do
-    createCmd EmitterRequest with requester = bridge, operator
-  emitterCid <- submit operator do
-    exerciseCmd reqId ApproveEmitter
+  -- Permissionless registration (wormhole-core 0.2.0): the requester submits
+  -- alone against the disclosed 'EmitterRegistry'; the operator's co-signature on
+  -- the 'Emitter' is inherited from the registry. Zero-fee, so no CoreState/allocation.
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  (_, emitterCid) <- submit (actAs bridge <> disclose regDisc) do
+    exerciseCmd regCid RegisterEmitter with
+      requester = bridge
+      coreStateCid = None
+      feeAllocation = None
   Some emitter <- queryContractId bridge emitterCid
 
   tbId <- submit bridge do
@@ -153,7 +161,8 @@ lockAndAttest = do
   Some dReg     <- queryDisclosure admin regId
   Some dTb      <- queryDisclosure bridge tbId
   Some dEmitter <- queryDisclosure bridge emitterCid
-  (custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter]) do
+  Some dCs      <- queryDisclosure operator coreStateCid
+  (custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter, dCs]) do
     exerciseCmd tbId LockAndPublish with
       user
       factoryCid = toInterfaceContractId regId
@@ -163,6 +172,9 @@ lockAndAttest = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 42
+      emitterCid
+      coreStateCid
+      feeAllocation = None
   pure (bs, user, msg, custodyCid)
 
 -- | Byte-exact vector for 'encodeTransfer' (133 bytes, payload ID 1).
@@ -246,7 +258,8 @@ testLockAndPublishFractionalAmount = do
   Some dReg     <- queryDisclosure admin regId
   Some dTb      <- queryDisclosure bridge tbId
   Some dEmitter <- queryDisclosure bridge emitterCid
-  (_custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter]) do
+  Some dCs      <- queryDisclosure operator coreStateCid
+  (_custodyCid, msg) <- submit (actAs user <> discloseMany [dReg, dTb, dEmitter, dCs]) do
     exerciseCmd tbId LockAndPublish with
       user
       factoryCid = toInterfaceContractId regId
@@ -256,6 +269,9 @@ testLockAndPublishFractionalAmount = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 1
+      emitterCid
+      coreStateCid
+      feeAllocation = None
 
   let decoded = decodeTransfer msg.payload
   intToDecimal decoded.amount / 100000000.0 === lockedAmount
@@ -288,9 +304,10 @@ testLockAndPublishRequiresUserAuthority = do
   Some dReg     <- queryDisclosure admin regId
   Some dTb      <- queryDisclosure bridge tbId
   Some dEmitter <- queryDisclosure bridge emitterCid
+  Some dCs      <- queryDisclosure operator coreStateCid
   Some dTok     <- queryDisclosure admin tokId
 
-  r1 <- trySubmit (actAs bridge <> discloseMany [dReg, dTb, dEmitter, dTok]) do
+  r1 <- trySubmit (actAs bridge <> discloseMany [dReg, dTb, dEmitter, dCs, dTok]) do
     exerciseCmd tbId LockAndPublish with
       user = bob
       factoryCid = toInterfaceContractId regId
@@ -300,12 +317,15 @@ testLockAndPublishRequiresUserAuthority = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 1
+      emitterCid
+      coreStateCid
+      feeAllocation = None
   case r1 of
     Left (AuthorizationError _) -> pure ()
     Left other -> abort ("expected an AuthorizationError specifically, got: " <> show other)
     Right _ -> abort "expected LockAndPublish to fail without bob's authority"
 
-  r2 <- trySubmit (actAs mallory <> discloseMany [dReg, dTb, dEmitter, dTok]) do
+  r2 <- trySubmit (actAs mallory <> discloseMany [dReg, dTb, dEmitter, dCs, dTok]) do
     exerciseCmd tbId LockAndPublish with
       user = mallory
       factoryCid = toInterfaceContractId regId
@@ -315,6 +335,9 @@ testLockAndPublishRequiresUserAuthority = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 1
+      emitterCid
+      coreStateCid
+      feeAllocation = None
   case r2 of
     Left (FailureStatusError _) -> pure ()
     Left other -> abort ("expected a FailureStatusError (registry ownership check), got: " <> show other)
@@ -342,6 +365,9 @@ testLockAndPublishWithoutDisclosureFails = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 1
+      emitterCid
+      coreStateCid
+      feeAllocation = None
 
 -- | Two consecutive locks succeed because the bridge's Emitter is now
 -- resolved BY KEY inside the choice, not from a caller-supplied cid -- the
@@ -359,7 +385,8 @@ testLockAndPublishTwice = do
   Some dReg  <- queryDisclosure admin regId
   Some dTb   <- queryDisclosure bridge tbId
   Some dEmt1 <- queryDisclosure bridge emitterCid
-  (_, msg1) <- submit (actAs user <> discloseMany [dReg, dTb, dEmt1]) do
+  Some dCs   <- queryDisclosure operator coreStateCid
+  (_, msg1) <- submit (actAs user <> discloseMany [dReg, dTb, dEmt1, dCs]) do
     exerciseCmd tbId LockAndPublish with
       user
       factoryCid = toInterfaceContractId regId
@@ -369,14 +396,18 @@ testLockAndPublishTwice = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 1
+      emitterCid
+      coreStateCid
+      feeAllocation = None
 
   -- The bridge's Emitter is now a DIFFERENT contract (sequence bumped by the
   -- first publish) -- whoever serves disclosures must fetch and disclose the
-  -- CURRENT one; this is the "disclosure freshness" burden the module header
-  -- calls out, distinct from (and not fixed by) the by-key resolution above.
-  Some (emitterCid2, _emitter2) <- queryByKey @Emitter bridge (operator, bridge, emitterId)
+  -- CURRENT one and pass its cid. With wormhole-core 0.2.0's keyless Emitter it
+  -- is re-resolved from the bridge's ACS (the owner is a signatory), the same
+  -- "disclosure freshness" burden the module header calls out.
+  [(emitterCid2, _emitter2)] <- query @Emitter bridge
   Some dEmt2 <- queryDisclosure bridge emitterCid2
-  (_, msg2) <- submit (actAs user <> discloseMany [dReg, dTb, dEmt2]) do
+  (_, msg2) <- submit (actAs user <> discloseMany [dReg, dTb, dEmt2, dCs]) do
     exerciseCmd tbId LockAndPublish with
       user
       factoryCid = toInterfaceContractId regId
@@ -386,6 +417,9 @@ testLockAndPublishTwice = do
       recipient = recipientAddr
       toChain = targetChainId
       nonce = 2
+      emitterCid = emitterCid2
+      coreStateCid
+      feeAllocation = None
 
   msg1.sequence === 0
   msg2.sequence === 1
