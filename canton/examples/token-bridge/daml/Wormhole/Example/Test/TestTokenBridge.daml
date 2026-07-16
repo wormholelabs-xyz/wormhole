@@ -29,6 +29,7 @@ import Wormhole.Core.VAA (parseVAA)
 
 import Wormhole.Example.TokenBridge
 import Wormhole.Example.TokenRegistry
+import Wormhole.Example.Test.EvilRegistry (CounterfeitRegistry(..))
 
 ----------------------------------------------------------------------
 -- Fixed test data
@@ -423,6 +424,54 @@ testLockAndPublishTwice = do
 
   msg1.sequence === 0
   msg2.sequence === 1
+
+-- | SECURITY (finding: forgeable lock). 'LockAndPublish' takes @factoryCid@
+-- and @holdingCids@ from the caller and, today, publishes an attestation after
+-- only checking the transfer settled with one output cid -- never that the
+-- settlement ran through a genuine, admin-issued registry. This exercises the
+-- attack end to end: Mallory passes her OWN 'CounterfeitRegistry' as the
+-- factory (see 'Wormhole.Example.Test.EvilRegistry'), locks nothing real, and
+-- attests the real registry admin's instrument -- a token she holds none of.
+--
+-- The secure behaviour is to REJECT this. Until the provenance fix lands the
+-- exploit succeeds: the @Right@ branch fires and this script aborts, standing
+-- as the executable proof of the finding. Once 'LockAndPublish' authenticates
+-- the custody holding's provenance, the submission fails and the @Left@ branch
+-- makes this a passing regression test.
+testLockAndPublishRejectsForgedFactory : Script ()
+testLockAndPublishRejectsForgedFactory = do
+  BaseSetup{..} <- baseSetup
+  mallory <- allocateParty "MalloryForge"
+  -- The instrument Mallory attests belongs to the real registry admin; she
+  -- never holds any of it and needs no real tokens for the attack.
+  let instrumentId = InstrumentId with admin, id = "USD"
+  evilReg <- submit mallory do createCmd CounterfeitRegistry with attacker = mallory
+
+  -- Mallory has the bridge orchestrator, its Emitter, and the CoreState the
+  -- same way any user does -- by explicit disclosure. Her factory is her own
+  -- contract, so it needs no disclosure.
+  Some dTb      <- queryDisclosure bridge tbId
+  Some dEmitter <- queryDisclosure bridge emitterCid
+  Some dCs      <- queryDisclosure operator coreStateCid
+  result <- trySubmit (actAs mallory <> discloseMany [dTb, dEmitter, dCs]) do
+    exerciseCmd tbId LockAndPublish with
+      user = mallory
+      factoryCid = toInterfaceContractId evilReg
+      holdingCids = []
+      instrumentId
+      amount = transferAmount
+      recipient = recipientAddr
+      toChain = targetChainId
+      nonce = 7
+      emitterCid
+      coreStateCid
+      feeAllocation = None
+  case result of
+    Left _ -> pure ()  -- fixed: the bridge refused to attest a forged lock
+    Right (_custodyCid, msg) ->
+      abort $ "SECURITY: LockAndPublish attested a forged lock -- no genuine "
+           <> "admin-issued custody exists, yet it published a guardian-signable "
+           <> "message (sequence " <> show msg.sequence <> ")"
 
 ----------------------------------------------------------------------
 -- Receive path: CompleteTransfer

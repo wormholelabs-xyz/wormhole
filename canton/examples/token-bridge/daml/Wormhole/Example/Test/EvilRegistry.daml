@@ -1,0 +1,66 @@
+-- | Adversarial CIP-56 implementations used only by the token-bridge security
+-- tests. A hostile 'TransferFactory' that reports a transfer @Completed@ with a
+-- counterfeit holding while locking nothing real -- modelling an attacker who
+-- passes their OWN contract as 'Wormhole.Example.TokenBridge.LockAndPublish's
+-- @factoryCid@/@holdingCids@. See 'testLockAndPublishRejectsForgedFactory'.
+--
+-- Templates-only (no daml-script dependency): the point is that the
+-- @TransferFactory@/@Holding@ interface types are open, so a caller can supply
+-- an implementation the bridge never authored and never authenticated.
+module Wormhole.Example.Test.EvilRegistry where
+
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.MetadataV1 (emptyMetadata)
+import Splice.Api.Token.TransferInstructionV1
+
+-- | A counterfeit holding: signed only by the attacker, yet its 'HoldingView'
+-- advertises an @instrumentId@ whose @admin@ is the real registry -- a claim
+-- nothing on-ledger backs. The genuine 'Wormhole.Example.TokenRegistry.ExampleToken'
+-- is @signatory admin@; this one cannot be, because the attacker lacks the
+-- admin's authority. The finding is precisely that 'LockAndPublish' never
+-- checks the difference: a 'HoldingView' exposes @owner@/@instrumentId@/@amount@
+-- but never the signatories that would prove issuance.
+template CounterfeitToken
+  with
+    attacker     : Party
+    instrumentId : InstrumentId
+    amount       : Decimal
+  where
+    signatory attacker
+    ensure amount > 0.0
+    interface instance Holding for CounterfeitToken where
+      view = HoldingView with
+        owner = attacker
+        instrumentId
+        amount
+        lock = None
+        meta = emptyMetadata
+
+-- | A hostile factory. Its 'transferFactory_transferImpl' ignores
+-- @expectedAdmin@, the input holdings, and ownership entirely: it mints a
+-- 'CounterfeitToken' from thin air and reports the transfer @Completed@. A
+-- genuine factory ('ExampleRegistry') is @signatory admin@ and can only create
+-- admin-signed holdings; this one proves that the shared @TransferFactory@
+-- interface type alone guarantees neither provenance nor a real lock.
+template CounterfeitRegistry
+  with
+    attacker : Party
+  where
+    signatory attacker
+    interface instance TransferFactory for CounterfeitRegistry where
+      view = TransferFactoryView with admin = attacker, meta = emptyMetadata
+
+      transferFactory_transferImpl _self arg = do
+        let t = arg.transfer
+        counterfeit <- create CounterfeitToken with
+          attacker
+          instrumentId = t.instrumentId
+          amount = t.amount
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with
+            receiverHoldingCids = [toInterfaceContractId @Holding counterfeit]
+          senderChangeCids = []
+          meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self _arg =
+        pure TransferFactoryView with admin = attacker, meta = emptyMetadata
