@@ -1,62 +1,45 @@
--- | Per-consumer replay protection for integrators (token bridge / NTT),
--- stored as a PREFIX TRIE of consumed VAA digests — leaf contracts only.
+-- | Per-consumer replay protection for integrators (token bridge / NTT): a
+-- PREFIX TRIE of consumed VAA digests, leaf contracts only.
 --
 -- Governance replay protection lives in 'Wormhole.Core.State.CoreState' as a
--- @Set@ of consumed digests — fine there, because governance actions are rare
--- and already churn the singleton. App VAAs need a structure that scales and,
--- crucially, one whose absence check does NOT rely on contract keys: on
--- Daml-LF 2.3 key lookups resolve once, on the submitting participant, against
--- the submission's readers, and a negative result is a pinned validation input
--- no confirmer re-checks — negative lookups fail OPEN. This module uses no
--- keys at all.
+-- @Set@ — fine there, since governance actions are rare. App VAAs need a
+-- structure that scales and whose absence check does NOT rely on contract keys:
+-- on Daml-LF 2.3 key lookups resolve on the submitting participant against the
+-- submission's readers, and a negative result no confirmer re-checks fails OPEN.
+-- This module uses no keys at all.
 --
--- THE TRIE: a 'ReplayNode' holds a hex @prefix@ and the set of @consumed@
--- digest SUFFIXES under that prefix (digests are 64 lowercase hex nibbles; a
--- node at depth d stores 64−d-nibble suffixes). A consumer's trie starts as a
--- single root (empty prefix, empty set). When a node reaches @splitThreshold@
--- entries, the next consume splits it into 16 children — one per nibble,
--- including empty ones — bucketing the suffixes by first nibble (which is
--- dropped). Internal nodes are never stored.
+-- THE TRIE: a 'ReplayNode' holds a hex @prefix@ and the set of consumed digest
+-- SUFFIXES under it (digests are 64 lowercase hex nibbles; a node at depth d
+-- stores 64−d-nibble suffixes). A trie starts as a single root (empty prefix,
+-- empty set). When a node reaches @splitThreshold@ entries, the next consume
+-- splits it into 16 children — one per nibble, empty ones included — bucketing
+-- the suffixes by their (dropped) first nibble. Internal nodes are never stored.
+-- INVARIANT: a consumer's active nodes PARTITION the digest space — every digest
+-- has exactly one covering node. The root covers everything, and a split
+-- replaces one node by 16 children that exactly tile its subspace, atomically.
 --
--- INVARIANT: the active nodes of one consumer's trie PARTITION the digest
--- space — every digest has exactly one covering node (a node whose prefix is a
--- prefix of the digest). The vetted operations preserve it: the root covers
--- everything, and a split replaces one node by 16 children that exactly tile
--- its subspace, atomically.
---
--- WHY THIS IS SOUND WHERE KEYS WERE NOT: "digest not consumed" becomes a
--- positive statement about one NAMED contract — fetch the covering node and
--- check the suffix is absent. 'ConsumeDigest' is consuming, so every confirmer
--- validates the node's activeness: a stale cid conflicts and aborts, and the
--- current covering node provably contains or excludes the digest. Soundness is
--- SUBMITTER-INDEPENDENT: any submitter with a disclosure of the current
--- covering node gets a correct check; a wrong or stale node can only fail the
--- transaction, never replay. Archiving a node (both signatories) merely BRICKS
--- its subspace — no covering node, nothing verifies — fail-closed, the
--- opposite of the key model.
+-- WHY THIS IS SOUND WHERE KEYS WERE NOT: "digest not consumed" is a positive
+-- statement about one NAMED contract — fetch the covering node, check the suffix
+-- is absent. 'ConsumeDigest' is consuming, so every confirmer validates the
+-- node's activeness: a stale cid conflicts and aborts. Soundness is
+-- submitter-independent, and archiving a node merely BRICKS its subspace
+-- (fail-closed) — the opposite of the key model.
 --
 -- The replay vector is therefore node RE-CREATION. Against THIRD PARTIES the
--- signatory design closes it: the @operator@ co-signs every node (inherited
--- from the 'ReplayRootRegistry' anchor at the root, from the archived parent
--- at splits — the operator never signs per consume), and claiming a root for
--- a consumer requires that consumer's authority, so nobody can archive,
--- re-create, or fork someone ELSE'S replay scope. Against the consumer
--- ITSELF there is deliberately no on-ledger defense: a consumer can mint
--- parallel roots for its own scope (see 'ReplayRootRegistry'), which is
--- self-harm — replay protection is the consumer's own safety property, and a
--- compromised consumer key defeats the app more directly anyway. Same class
--- as the irreducible signatory remainder: signatories can always unmake (or
--- here, duplicate) their own state.
+-- signatory design closes it: the @operator@ co-signs every node (inherited from
+-- the 'ReplayRootRegistry' anchor at the root, from the archived parent at splits
+-- — never per consume), and claiming a root requires the consumer's authority,
+-- so nobody can archive, re-create, or fork someone ELSE'S scope. Against the
+-- consumer ITSELF there is deliberately no defense: minting parallel roots is
+-- self-harm (see 'ReplayRootRegistry'), the same class as any signatory being
+-- able to unmake its own state.
 --
--- OFF-LEDGER: consumers (and their users) locate the covering node for a
--- digest via a disclosure service — an ACS index over (consumer, prefix) that
--- serves the node's contract-id + explicit disclosure. It is untrusted for
--- safety: the worst it can do is serve a wrong or stale node, which fails.
--- RETRY PROTOCOL: racing consumes on the same node conflict and exactly one
--- commits; on rejection, re-resolve the covering node (the cid churns on every
--- consume) and resubmit. A blind retry of a consume that actually committed
--- hits the membership check and fails "digest already consumed" — a clean
--- idempotency signal.
+-- OFF-LEDGER: consumers locate the covering node via a disclosure service — an
+-- ACS index over (consumer, prefix), untrusted for safety (a wrong or stale node
+-- only fails). RETRY: racing consumes on one node conflict and exactly one
+-- commits; on rejection, re-resolve the covering node (its cid churns per
+-- consume) and resubmit. A blind retry of a committed consume hits the
+-- membership check — a clean idempotency signal.
 module Wormhole.Core.Replay where
 
 import DA.Map qualified as Map
@@ -66,19 +49,18 @@ import DA.Set qualified as Set
 import DA.Text qualified as T
 import Wormhole.Core.Bytes
 
--- | Default node capacity. Suffixes are ≤64 hex chars (~66 B serialized), and
--- every consume rewrites the full node, so this bounds both the node payload
--- (~8.5 KB) and the per-consume write cost (~4 KB on average). The split
--- transaction redistributes the same bytes across 16 creates (~15 KB) — all
--- comfortably below Canton's request caps. Larger values thin the ACS but
--- amplify every write; the 'ensure' clause caps it at 4096 (~270 KB nodes).
+-- | Default node capacity. Suffixes are ≤64 hex chars (~66 B serialized) and
+-- every consume rewrites the full node, bounding the node payload (~8.5 KB), the
+-- per-consume write (~4 KB), and the split's 16 creates (~15 KB) — all below
+-- Canton's request caps. Larger values thin the ACS but amplify every write;
+-- 'ensure' caps it at 4096 (~270 KB nodes).
 defaultSplitThreshold : Int
 defaultSplitThreshold = 128
 
--- | One trie node: the consumed digest suffixes under @prefix@. See the module
--- header for the partition invariant and the trust model. NOT observed by the
--- guardian observer party: replay state is integrator-private safety state,
--- not attestation surface — guardians never re-check target-chain consumption.
+-- | One trie node: the consumed digest suffixes under @prefix@ (see the module
+-- header for the partition invariant and trust model). NOT observed by the
+-- guardian observer: replay state is integrator-private safety state, not
+-- attestation surface — guardians never re-check target-chain consumption.
 template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
@@ -89,23 +71,22 @@ template ReplayNode
   where
     signatory consumer, operator
     -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
-    -- (the signatories can always sign a well-formed shadow node). Depth-64
-    -- nodes are unrepresentable; suffix lengths pin the arithmetic that
-    -- membership depends on. Deliberately NO @size consumed <= splitThreshold@:
-    -- a split can legitimately create an over-full child (all parent entries
-    -- in one bucket); its next consume splits it further.
+    -- (signatories can always sign a well-formed shadow node). Depth-64 nodes are
+    -- unrepresentable; suffix lengths pin the membership arithmetic. Deliberately
+    -- NO @size consumed <= splitThreshold@: a split can legitimately create an
+    -- over-full child (all parent entries in one bucket), split further next
+    -- consume.
     ensure splitThreshold >= 1 && splitThreshold <= 4096
         && T.length prefix <= 63 && isLowerHex prefix
         && all (\s -> T.length s == 64 - T.length prefix && isLowerHex s)
                (Set.toList consumed)
 
-    -- | Record @digest@ as consumed, or fail if it already was. Returns the
-    -- node that now contains the digest — the recreated node, or, on a split,
-    -- the child covering it (the other 15 children surface to the disclosure
-    -- service as CreatedEvents). Consuming: racing consumes conflict on this
-    -- contract and exactly one commits (see the retry protocol in the module
-    -- header). To consume two digests under the same node in one transaction,
-    -- chain the second exercise on the returned cid.
+    -- | Record @digest@ as consumed, or fail if it already was. Returns the node
+    -- now containing the digest — the recreated node, or on a split the child
+    -- covering it (the other 15 surface as CreatedEvents). Consuming: racing
+    -- consumes conflict and exactly one commits (module-header retry protocol).
+    -- To consume two digests under one node in a single transaction, chain the
+    -- second exercise on the returned cid.
     choice ConsumeDigest : ContractId ReplayNode
       with
         digest : Bytes32
