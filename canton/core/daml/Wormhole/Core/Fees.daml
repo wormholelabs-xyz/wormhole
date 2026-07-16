@@ -1,50 +1,26 @@
--- | Fee collection via the Canton Network Token Standard (CIP-0056, V1).
+-- | Fee collection via the Canton Network Token Standard (CIP-0056 V1).
 --
--- The bridge charges fees by CONSUMING token-standard 'Allocation's: the payer
--- locks funds against our settlement via the token registry's
--- @AllocationFactory@ (off-ledger, its wallet/CLI plus the registry's CIP-0056
--- OpenAPI, which supplies the 'ExtraArgs' choice context and any registry
--- disclosures), and the charging choice exercises
--- 'Allocation_ExecuteTransfer' — payment and effect in ONE transaction. In
--- every bridge flow the payer IS the submitter, so the bridge never implements
--- the wallet-facing @AllocationRequest@ interface (future UX work); it only
--- validates and executes allocations handed to it.
+-- Fees are charged by consuming a payer-supplied 'Allocation' via
+-- 'Allocation_ExecuteTransfer' (payment + effect in one transaction); the
+-- bridge only validates/executes allocations, never issuing the
+-- wallet-facing @AllocationRequest@ side.
 --
--- AUTHORITY: 'Allocation_ExecuteTransfer' requires the JOINT authority of the
--- leg's sender, the leg's receiver, and the settlement executor. Bridge
--- convention: @executor = sender = payer@, @receiver = feeRecipient@ (the
--- guardianGovernance party — see 'Wormhole.Core.State.CoreState'). The
--- receiver's authority exists in exactly one place: inherited inside a
--- 'CoreState' choice (it is a signatory), which is why ALL charging routes
--- through 'ChargeMessageFee' / 'ChargeFee' there. This also blocks theft
--- structurally: a foreign allocation's sender is a required controller the
--- transaction never has.
+-- 'Allocation_ExecuteTransfer' needs the sender/receiver/executor's joint
+-- authority: @executor = sender = payer@, @receiver = feeRecipient@
+-- (guardianGovernance). The receiver's authority is inherited from
+-- 'CoreState' (a signatory), so every charge routes through
+-- 'ChargeMessageFee'/'ChargeFee' there, and a foreign sender can never be a
+-- controller — blocking theft structurally, PROVIDED 'CoreState' is
+-- authentic. Callers pin 'GetGuardianGovernance' against their own committed
+-- anchor before charging, so a compromised operator can't redirect fees via
+-- a shadow CoreState under a gg it controls.
 --
--- The "blocks theft structurally" guarantee presupposes an AUTHENTIC
--- 'CoreState' — a rogue one routes @receiver = feeRecipient@ to an
--- attacker-controlled party. Authenticity is now pinned by the caller before
--- every charge: each call site ('PublishMessage', 'RegisterEmitter',
--- 'ClaimReplayRoot') exercises 'Wormhole.Core.State.GetGuardianGovernance' and
--- checks it against the @guardianGovernance@ committed on the
--- emitter/registry. Pinning @guardianGovernance@ (not just the operator)
--- resists a compromised operator: the operator alone does not determine
--- @feeRecipient@, so a shadow 'CoreState' the operator co-signs under a
--- throwaway gg is rejected before any funds move.
+-- Allocation views are forgeable; authenticity is the instrument admin's
+-- signature on the allocation, checked in 'chargeFee'.
 --
--- AUTHENTICITY: allocation views are template-computed and forgeable — a
--- hostile template can claim any instrument while moving nothing. The pin is
--- the instrument admin's SIGNATURE on the allocation contract (amulet
--- allocations are DSO-co-signed), checked in 'chargeFee': payloads are
--- authenticated, never resolution paths.
---
--- DENOMINATION: fees are 'Int's in units of 10^-10 tokens — exactly the last
--- digit of Daml's @Decimal@ (Numeric 10), so every fee is exactly
--- representable and 'feeToDecimal' is exact for all inputs. The
--- governance-set @messageFee@ (frozen 32-byte wire format) shares this unit.
---
--- Token Standard V2 (CIP-0112) is approved but not yet on mainnet; it ships
--- as a parallel @-v2@ interface family, and this module is the single seam
--- where support would be added.
+-- Fees are 'Int's in 10^-10 token units (Decimal's last digit — exact by
+-- construction); @messageFee@ shares this unit. Token Standard V2 (CIP-0112)
+-- isn't on mainnet yet; this module is the seam for it.
 module Wormhole.Core.Fees where
 
 import DA.Optional (isNone)

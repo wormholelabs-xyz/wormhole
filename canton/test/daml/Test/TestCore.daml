@@ -30,15 +30,13 @@ devnetGuardianPubKey = "04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e
 govSetFeeVAA : Bytes
 govSetFeeVAA = "01000000000100710ab5dcf6885f62016990540e090400f26f41286382dab479a78ed5f85017ff4a562a46379753e94abba1e69b9fec5d1994ac7d9fb145820727df0759bf4f80016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000010000000000000000000000000000000000000000000000000000000000436f726503004800000000000000000000000000000000000000000000000000000000000003e8"
 
--- | Bootstrap a devnet 'CoreState' and the 'EmitterRegistry'. The 'CoreState' is
--- co-signed by the @operator@ and a @guardianGovernance@ party (a single party
--- here; in production a k-of-n threshold party), so genesis needs both. It also
--- allocates the read-only @guardianObserver@ party and threads it into the
--- 'CoreState' and 'EmitterRegistry' (from which 'RegisterEmitter' carries it into
--- each 'Emitter'). Also creates the 'ReplayRootRegistry' (replay-trie root
--- grants, see Test.TestReplay). The result keeps @operator@ FIRST so
--- bootstrap.sh's first-party extraction still yields the operator;
--- @guardianObserver@ follows.
+-- | Bootstrap a devnet 'CoreState', 'EmitterRegistry', and 'ReplayRootRegistry'.
+-- The 'CoreState' is co-signed by @operator@ and @guardianGovernance@ (a single
+-- party here; a k-of-n threshold party in production), so genesis needs both. It
+-- allocates the read-only @guardianObserver@ and threads it into the 'CoreState'
+-- and 'EmitterRegistry' (from which 'RegisterEmitter' carries it into each
+-- 'Emitter'). Keeps @operator@ FIRST so bootstrap.sh's first-party extraction
+-- still yields it.
 setup : Script (Party, Party, ContractId CoreState)
 setup = setupWithInstrument None
 
@@ -233,11 +231,9 @@ testParseAndVerifyVAA = do
   vaa.sequence === 1
 
 -- | ParseAndVerifyVAA is genuinely permissionless: an external party with no
--- relationship to CoreState at all (not operator or guardianGovernance --
--- CoreState's only two stakeholders) can verify a VAA as itself, with no
--- involvement from operator, given only CoreState disclosed to it -- a data
--- attachment, not an approval. This is what the "for the token bridge /
--- external verifiers" doc comment on the choice promises.
+-- relationship to CoreState (not operator or guardianGovernance, its only two
+-- stakeholders) verifies a VAA as itself, given only CoreState disclosed to it
+-- -- a data attachment, not an approval.
 testParseAndVerifyVAAByExternalVerifier : Script ()
 testParseAndVerifyVAAByExternalVerifier = do
   (operator, _, csId) <- setup
@@ -252,13 +248,10 @@ testParseAndVerifyVAAByExternalVerifier = do
   vaa.emitterChain === 1
   vaa.sequence === 1
 
--- | Integration entrypoint, invoked by the Go integration test via `dpm
--- script` against a live sandbox/participant -- not just the Script
--- interpreter. Same scenario as 'testParseAndVerifyVAAByExternalVerifier':
--- an external party with no relationship to CoreState verifies a real
--- guardian-signed VAA as itself, given only CoreState disclosed to it.
--- Returns the external verifier's party id so the Go test can sanity-check
--- it (a real, hosted party, not something forged).
+-- | Integration entrypoint, invoked by the Go integration test via `dpm script`
+-- against a live sandbox/participant. Same scenario as
+-- 'testParseAndVerifyVAAByExternalVerifier'; returns the external verifier's
+-- party id so the Go test can sanity-check it (a real, hosted party).
 integrationParseAndVerifyVAAByExternalVerifier : Script Party
 integrationParseAndVerifyVAAByExternalVerifier = do
   (operator, _, csId) <- setup
