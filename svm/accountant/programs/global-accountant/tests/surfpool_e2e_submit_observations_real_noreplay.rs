@@ -5,11 +5,11 @@
 //! # Run
 //!
 //! ```sh
-//! just test-e2e-submit-obs
+//! just build-prod && cargo test --test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
 //! ```
 //!
 //! `#[ignore]` (spawns surfpool). Requires `solana_noreplay.so` and an
-//! up-to-date production `global_accountant.so`; the Makefile target ensures both.
+//! up-to-date production `global_accountant.so` (see `just build-prod`).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -214,7 +214,7 @@ fn build_submit_observations_ix(
 /// 13 observations reach quorum, the real noreplay CPI flips the bitmap bit,
 /// and a 14th submission fails with AlreadyAccounted.
 #[test]
-#[ignore = "spawns surfpool subprocess; run via `just test-e2e-submit-obs` or `cargo test -- --ignored`"]
+#[ignore = "spawns surfpool subprocess; run via `cargo test --test surfpool_e2e_submit_observations_real_noreplay -- --ignored`"]
 fn surfpool_submit_observations_real_noreplay() {
     // Locate both .so artifacts.
     let ga_so = so_path("global_accountant");
