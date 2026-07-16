@@ -210,12 +210,9 @@ consumer's trust anchor, is stable across rotation). Two things follow:
   the real governance party, so any `CoreState` whose `guardianGovernance` field
   is the known anchor is **authentic by construction**, however its cid was
   obtained — consumers authenticate the payload, never the resolution path
-  (§4.7). **Pinning `operator` is weaker than pinning `guardianGovernance`:** a
-  compromised operator (a single hot key) can co-sign a `CoreState` whose
-  `operator` is genuine but whose `guardianGovernance`/`feeRecipient` it
-  controls, so an `operator`-only pin accepts a shadow `CoreState`. For the fee
-  path — where `guardianGovernance` _is_ the fee-custody anchor — only the
-  `guardianGovernance` pin suffices (see below).
+  (§4.7). An operator puppet could create a `CoreState` under a _different_
+  governance party — but its payload names the wrong parties and no consumer
+  trusts it.
 - **Governance stays low-friction.** `guardianGovernance` actively signs only at
   **genesis**; each `SubmitGovernanceVAA` inherits its authority from the
   archived contract (as the `Emitter` owner does through `PublishMessage`), so
@@ -401,19 +398,12 @@ with Canton Coin or any standard token, chosen at genesis
   an app publishes on a user's behalf (NTT §10); `payer` co-controls the publish,
   so it cannot be a third party who did not authorize spending its funds.
   Registries charge their `registrationFee`/`claimFee` the same way, skipping the
-  `CoreState` entirely at fee 0. Before charging, every call site pins the
-  `CoreState` by exercising `GetGuardianGovernance` against the
-  `guardianGovernance` committed on the emitter/registry — **the fee-custody
-  anchor, not merely the `operator`** — so a forged `CoreState` cannot redirect
-  the fee (see the custody bullet).
+  `CoreState` entirely at fee 0.
 - **Custody is governance-controlled**: `feeRecipient` is the
   `guardianGovernance` threshold party, so accrued fees move only via the k-of-n
   guardian ceremony — the operator never touches them (the Canton analog of "fees
-  sit in the bridge contract"). This holds **even against a compromised operator
-  hot key**: each charge pins `guardianGovernance` (unforgeable by a single
-  operator key) rather than `operator`, so an operator co-signing a shadow
-  `CoreState` under a throwaway `feeRecipient` is rejected before any funds move.
-  A `TransferFees` VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
+  sit in the bridge contract"). A `TransferFees` VAA mints an on-ledger
+  `FeeWithdrawalAuthorization` (signed by
   guardianGovernance) recording the amount, the VAA's 32-byte recipient, and the
   VAA hash — the artifact the guardians' custody policy matches when
   threshold-signing the outbound transfer. "Only per authorization" is enforced
