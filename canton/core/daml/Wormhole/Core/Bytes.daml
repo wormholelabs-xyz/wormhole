@@ -39,9 +39,8 @@ sliceFrom : Int -> Bytes -> Bytes
 sliceFrom start b = T.substring (start * 2) (T.length b - start * 2) b
 
 -- | Value of a single lowercase hex digit, given as a Unicode code point.
--- Code-point arithmetic rather than an assoc-list lookup: under Daml's strict
--- evaluation a @where@-bound 16-entry table would be rebuilt — and scanned
--- linearly — once per nibble.
+-- Code-point arithmetic, not an assoc-list lookup: under Daml's strict
+-- evaluation a @where@-bound table would be rebuilt and scanned once per nibble.
 hexDigitValue : Int -> Int
 hexDigitValue cp
   | cp >= cp0 && cp <= cp9 = cp - cp0
@@ -109,38 +108,34 @@ leftPadTo numBytes b =
        else mconcat (replicate (numBytes - bl) "00") <> normalizeHex b
 
 -- | A length-prefixed byte segment: a 4-byte big-endian length followed by the
--- bytes themselves. A distinct type from raw 'Bytes' (Daml has no @newtype@, so
--- it is a single-constructor @data@) so a self-delimiting segment can't be
--- mistaken for, or concatenated as, unprefixed bytes. Concatenating two
--- variable-length fields bare is ambiguous ("ab"‖"c" vs "a"‖"bc"); the length
--- prefix makes the address preimage injective. Use 'unLenPrefixed' to get the
--- raw bytes back for hashing.
+-- bytes. A distinct type from raw 'Bytes' (a single-constructor @data@, Daml
+-- having no @newtype@) so it can't be concatenated as unprefixed bytes:
+-- concatenating variable-length fields bare is ambiguous ("ab"‖"c" vs "a"‖"bc"),
+-- and the length prefix makes the address preimage injective. 'unLenPrefixed'
+-- recovers the raw bytes for hashing.
 data LenPrefixed = LenPrefixed { unLenPrefixed : Bytes }
   deriving (Eq, Show)
 
 lenPrefixed : Bytes -> LenPrefixed
 lenPrefixed b = LenPrefixed (intToBytesN (byteLength b) 4 <> b)
 
--- | Typed inputs to the address preimage. Daml has no @newtype@, so these are
--- single-constructor @data@ types. Distinct types for the three text fields (and
--- the id) mean 'derivedAddressFromText' can't have its arguments transposed —
--- swapping @registrar@ and @owner@ would otherwise silently derive a different
--- but perfectly valid-looking address, a security-relevant mistake.
+-- | Typed inputs to the address preimage (single-constructor @data@, Daml having
+-- no @newtype@). Distinct types stop 'derivedAddressFromText' from having its
+-- arguments transposed — swapping @registrar@ and @owner@ would otherwise
+-- silently derive a different but valid-looking address, a security bug.
 data DomainTag     = DomainTag     Text deriving (Eq, Show)
 data RegistrarText = RegistrarText Text deriving (Eq, Show)
 data OwnerText     = OwnerText     Text deriving (Eq, Show)
 data RegistryId    = RegistryId    Int  deriving (Eq, Show)
 
--- | Canonical 32-byte registry address, derived from the components of a
--- registry-allocated identity:
+-- | Canonical 32-byte registry address of a registry-allocated identity:
 --
 -- > keccak256( utf8(tag) ‖ lp(utf8(registrar)) ‖ lp(utf8(owner)) ‖ uint64be(id) )
 --
--- where @lp@ is the 4-byte big-endian length prefix ('lenPrefixed'). The Text
--- form is split out from 'derivedAddress' so tests can pin the encoding against
--- fixed party strings (allocated 'Party' ids carry nondeterministic
--- fingerprints). The Go watcher recomputes the same value from the
--- 'WormholeMessage' fields; the encoding is pinned across both languages by a
+-- where @lp@ is the 4-byte big-endian length prefix ('lenPrefixed'). Split out
+-- from 'derivedAddress' so tests can pin the encoding against fixed party strings
+-- (allocated 'Party' ids carry nondeterministic fingerprints). The Go watcher
+-- recomputes the same value; the encoding is pinned across both languages by a
 -- shared test vector.
 derivedAddressFromText : DomainTag -> RegistrarText -> OwnerText -> RegistryId -> Bytes32
 derivedAddressFromText (DomainTag domainTag) (RegistrarText registrarText) (OwnerText ownerText) (RegistryId id) =
@@ -150,11 +145,9 @@ derivedAddressFromText (DomainTag domainTag) (RegistrarText registrarText) (Owne
     <> intToBytesN id 8))
 
 -- | Address of the registry-allocated identity @(registrar, owner, id)@ under
--- @domainTag@. The @owner@ is part of the preimage: reproducing an existing
--- address requires the owner's signature at create time (the owner is a
--- signatory of the identity contract), so a compromised registrar cannot
--- impersonate an existing identity — it can only mint a duplicate under a
--- different owner, which derives a different, untrusted address.
+-- @domainTag@. The @owner@ is in the preimage and co-signs the identity contract,
+-- so a compromised registrar cannot impersonate an existing identity — only mint
+-- a duplicate under a different owner, deriving a different, untrusted address.
 derivedAddress : DomainTag -> Party -> Party -> RegistryId -> Bytes32
 derivedAddress domainTag registrar owner id =
   derivedAddressFromText domainTag (RegistrarText (partyToText registrar)) (OwnerText (partyToText owner)) id

@@ -23,15 +23,14 @@ defaultGovernanceContract : Bytes32
 defaultGovernanceContract = "0000000000000000000000000000000000000000000000000000000000000004"
 
 -- | Build the initial 'CoreState' value with guardian set 0 (never-expiring)
--- and the supplied governance configuration. Genesis must be created with BOTH
--- the @operator@ and the @guardianGovernance@ party's authority (the CoreState
--- is co-signed); thereafter governance transitions inherit
--- guardianGovernance's authority and the operator submits them alone.
+-- and the supplied governance configuration. Genesis needs both the @operator@
+-- and @guardianGovernance@ signatures (the CoreState is co-signed); later
+-- transitions inherit guardianGovernance's authority, so the operator submits
+-- alone.
 --
--- @feeInstrument@ and @feeRecipient@ are GENESIS-FIXED (no governance action
--- covers them — changing either is a genesis-class ceremony). In production
--- the recipient is @guardianGovernance@, putting fee custody under the k-of-n
--- guardian threshold; the instrument is Canton Coin
+-- @feeInstrument@ and @feeRecipient@ are genesis-fixed (no governance action
+-- covers them). In production the recipient is @guardianGovernance@, putting fee
+-- custody under the k-of-n guardian threshold; the instrument is Canton Coin
 -- (@InstrumentId dsoParty "Amulet"@).
 mkInitialCoreState :
   Party           -- ^ operator
@@ -59,21 +58,18 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
     consumedGovernance = Set.empty
 
 -- | The emitter-id registry the operator creates alongside the 'CoreState' at
--- setup. Emitter ids are allocated sequentially; it also carries
--- @guardianGovernance@ (the CoreState fee-custody anchor, pinned by
--- 'RegisterEmitter' and threaded into each 'Emitter') and @guardianObserver@
--- (threaded into each 'Emitter'). Pass the same @guardianGovernance@ the
--- 'CoreState' was created with.
+-- setup (sequential ids). Carries @guardianGovernance@ (the fee-custody anchor,
+-- pinned by 'RegisterEmitter') and @guardianObserver@, both threaded into each
+-- 'Emitter'. Pass the same @guardianGovernance@ the 'CoreState' was created with.
 mkInitialEmitterRegistry : Party -> Party -> Party -> Int -> EmitterRegistry
 mkInitialEmitterRegistry operator guardianGovernance guardianObserver registrationFee =
   EmitterRegistry with operator, guardianGovernance, guardianObserver, registrationFee, nextId = 0
 
--- | The replay-root registry (the stateless claim anchor) the operator
--- creates alongside the 'CoreState' at setup. Hands a 'ReplayNode' trie root
--- to any consumer that claims one (see 'Wormhole.Core.Replay'). Carries
--- @guardianGovernance@ (the CoreState fee-custody anchor, pinned by
--- 'ClaimReplayRoot'); pass the same @guardianGovernance@ the 'CoreState' was
--- created with.
+-- | The replay-root registry (the stateless claim anchor) the operator creates
+-- alongside the 'CoreState' at setup; hands a 'ReplayNode' trie root to any
+-- consumer that claims one (see 'Wormhole.Core.Replay'). Carries
+-- @guardianGovernance@ (the fee-custody anchor, pinned by 'ClaimReplayRoot');
+-- pass the same one the 'CoreState' was created with.
 mkInitialReplayRootRegistry : Party -> Party -> Int -> ReplayRootRegistry
 mkInitialReplayRootRegistry operator guardianGovernance claimFee =
   ReplayRootRegistry with operator, guardianGovernance, claimFee
