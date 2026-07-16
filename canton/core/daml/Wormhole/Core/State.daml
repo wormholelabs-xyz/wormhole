@@ -18,7 +18,15 @@
 -- never on how the cid was resolved: signatories cannot be forged, so a
 -- fetched or disclosed 'CoreState' whose @guardianGovernance@ field is the
 -- known governance party is authentic by construction — a compromised
--- @operator@ cannot fabricate one (it lacks that signature). Two invariants:
+-- @operator@ cannot fabricate one (it lacks that signature). The fee-custody
+-- anchor is pinned exactly this way: the fee-charging call sites
+-- ('PublishMessage', 'RegisterEmitter', 'ClaimReplayRoot') exercise
+-- 'GetGuardianGovernance' and compare it against the @guardianGovernance@
+-- committed on the emitter/registry BEFORE charging. Pinning @guardianGovernance@
+-- rather than @operator@ is what makes this hold against a compromised operator:
+-- @operator@ alone does not determine @feeRecipient@, so an operator co-signing a
+-- shadow 'CoreState' under a throwaway gg would pass an operator-pin but cannot
+-- forge the real gg (see 'GetGuardianGovernance'). Two invariants:
 --   * 'CoreState' singleton: co-signed by the @operator@ and a @guardianGovernance@
 --     party. The @guardianGovernance@ party is the guardians' governance anchor —
 --     in production a decentralized-namespace external party controlled by a
@@ -188,6 +196,24 @@ template CoreState
         reader : Party
       controller reader
       do pure operator
+
+    -- | Read the @guardianGovernance@ anchor off an authentic 'CoreState' — a
+    -- STRONGER caller-side pin than 'GetOperator' for consumers that must resist
+    -- a compromised operator, not just a third-party forgery. A 'CoreState'
+    -- requires only SOME (operator, gg) signature pair, so an operator whose key
+    -- is compromised can co-sign a forged 'CoreState' (with a throwaway gg party
+    -- it controls and an attacker guardian set) that still passes an
+    -- operator-pin. Pinning @guardianGovernance@ closes that: gg is the
+    -- guardians' k-of-n external threshold party, whose signature a compromised
+    -- operator (a single hot participant key) cannot produce — so no forged
+    -- 'CoreState' can carry the real gg. Used by 'Wormhole.Ntt.Manager.Receive'
+    -- and the 'CoreState' fee-charging pins ('PublishMessage', 'RegisterEmitter',
+    -- 'ClaimReplayRoot').
+    nonconsuming choice GetGuardianGovernance : Party
+      with
+        reader : Party
+      controller reader
+      do pure guardianGovernance
 
     -- | Charge the governance-set per-publish fee ('messageFee'). Lives here —
     -- not on 'Emitter' — for two reasons: the fee amount is only knowable from
@@ -389,12 +415,15 @@ emitterAddressFor registrar owner emitterId =
 -- signature it lacks (see 'Emitter').
 template EmitterRegistry
   with
-    operator         : Party
-    guardianObserver : Party  -- threaded into each new Emitter by RegisterEmitter
-    registrationFee  : Int    -- onboarding fee, 10^-10 CoreState.feeInstrument
-                              -- units; operator-set at creation (archive +
-                              -- recreate to change), 0 for free registration
-    nextId           : Int
+    operator           : Party
+    guardianGovernance : Party  -- CoreState fee-custody trust anchor; pinned (NOT
+                                -- a signatory) in RegisterEmitter's fee charge so
+                                -- a forged CoreState under a rogue gg is rejected
+    guardianObserver   : Party  -- threaded into each new Emitter by RegisterEmitter
+    registrationFee    : Int    -- onboarding fee, 10^-10 CoreState.feeInstrument
+                                -- units; operator-set at creation (archive +
+                                -- recreate to change), 0 for free registration
+    nextId             : Int
   where
     signatory operator
 
@@ -415,12 +444,17 @@ template EmitterRegistry
       controller requester
       do
         -- Zero-fee registrations never touch the CoreState (single-disclosure
-        -- onboarding); fee'd ones charge through it, pinning its operator so a
-        -- fabricated CoreState cannot waive or redirect the fee.
+        -- onboarding); fee'd ones charge through it. The gg pin runs BEFORE the
+        -- charge: pinning @guardianGovernance@ (not just the operator) rejects a
+        -- CoreState a compromised operator co-signed under a throwaway gg it
+        -- controls — the operator field would match, but the fee-custody anchor
+        -- would not, so a forged CoreState cannot redirect the registration fee.
         case (registrationFee > 0, coreStateCid) of
           (False, _) -> pure ()
           (True, None) -> abort "registration fee due: pass the CoreState"
           (True, Some csCid) -> do
+            csGg <- exercise csCid GetGuardianGovernance with reader = requester
+            assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
             csOperator <- exercise csCid ChargeFee with
               payer = requester
               fee = registrationFee
@@ -429,6 +463,7 @@ template EmitterRegistry
         reg' <- create this with nextId = nextId + 1
         emitter <- create Emitter with
           operator
+          guardianGovernance
           owner = requester
           guardianObserver
           emitterId = nextId
@@ -458,10 +493,13 @@ template EmitterRegistry
 -- contract grows.
 template ReplayRootRegistry
   with
-    operator : Party
-    claimFee : Int  -- onboarding fee, 10^-10 CoreState.feeInstrument units;
-                    -- operator-set at creation (archive + recreate to
-                    -- change), 0 for free claims
+    operator           : Party
+    guardianGovernance : Party  -- CoreState fee-custody trust anchor; pinned (NOT
+                                -- a signatory) in ClaimReplayRoot's fee charge so
+                                -- a forged CoreState under a rogue gg is rejected
+    claimFee           : Int    -- onboarding fee, 10^-10 CoreState.feeInstrument
+                                -- units; operator-set at creation (archive +
+                                -- recreate to change), 0 for free claims
   where
     signatory operator
 
@@ -473,13 +511,18 @@ template ReplayRootRegistry
         feeAllocation  : Optional (ContractId Allocation, ExtraArgs)
       controller consumer
       do
-        -- Zero-fee claims never touch the CoreState; fee'd ones charge
-        -- through it, pinning its operator so a fabricated CoreState cannot
-        -- waive or redirect the fee (see README §4.2).
+        -- Zero-fee claims never touch the CoreState; fee'd ones charge through
+        -- it. The gg pin runs BEFORE the charge: pinning @guardianGovernance@
+        -- (not just the operator) rejects a CoreState a compromised operator
+        -- co-signed under a throwaway gg it controls — the operator field would
+        -- match, but the fee-custody anchor would not, so a forged CoreState
+        -- cannot redirect the claim fee (see README §4.2).
         case (claimFee > 0, coreStateCid) of
           (False, _) -> pure ()
           (True, None) -> abort "claim fee due: pass the CoreState"
           (True, Some csCid) -> do
+            csGg <- exercise csCid GetGuardianGovernance with reader = consumer
+            assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
             csOperator <- exercise csCid ChargeFee with
               payer = consumer
               fee = claimFee
@@ -498,12 +541,15 @@ template ReplayRootRegistry
 -- authority). Mirrors a Sui @EmitterCap@.
 template Emitter
   with
-    operator         : Party
-    owner            : Party
-    guardianObserver : Party  -- read-only guardian observer
-    emitterId        : Int      -- registry-allocated
-    emitterAddress   : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
-    sequence         : Int      -- next sequence to assign
+    operator           : Party
+    guardianGovernance : Party  -- CoreState fee-custody trust anchor; pinned (NOT
+                                -- a signatory) in PublishMessage's fee charge so
+                                -- a forged CoreState under a rogue gg is rejected
+    owner              : Party
+    guardianObserver   : Party  -- read-only guardian observer
+    emitterId          : Int      -- registry-allocated
+    emitterAddress     : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
+    sequence           : Int      -- next sequence to assign
   where
     -- Owner co-signs: only a transaction carrying the owner's authority can create
     -- a contract whose derived address is the owner's. This is the invariant
@@ -550,6 +596,13 @@ template Emitter
         feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
       controller owner, payer
       do
+        -- Pin the fee-custody anchor BEFORE charging: 'guardianGovernance' (not
+        -- just the operator) is what determines where the fee lands. A
+        -- compromised operator can co-sign a forged CoreState under a throwaway
+        -- gg it controls — the operator field would match, but this check
+        -- rejects it, so the message fee cannot be redirected.
+        csGg <- exercise coreStateCid GetGuardianGovernance with reader = payer
+        assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
         csOperator <- exercise coreStateCid ChargeMessageFee with
           payer
           feeAllocation
