@@ -58,15 +58,18 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
     consumedGovernance = Set.empty
 
 -- | The emitter-id registry the operator creates alongside the 'CoreState' at
--- setup (sequential ids). Carries @guardianObserver@, threaded into each
--- 'Emitter'.
-mkInitialEmitterRegistry : Party -> Party -> Int -> EmitterRegistry
-mkInitialEmitterRegistry operator guardianObserver registrationFee =
-  EmitterRegistry with operator, guardianObserver, registrationFee, nextId = 0
+-- setup (sequential ids). Carries @guardianGovernance@ (the fee-custody anchor,
+-- pinned by 'RegisterEmitter') and @guardianObserver@, both threaded into each
+-- 'Emitter'. Pass the same @guardianGovernance@ the 'CoreState' was created with.
+mkInitialEmitterRegistry : Party -> Party -> Party -> Int -> EmitterRegistry
+mkInitialEmitterRegistry operator guardianGovernance guardianObserver registrationFee =
+  EmitterRegistry with operator, guardianGovernance, guardianObserver, registrationFee, nextId = 0
 
 -- | The replay-root registry (the stateless claim anchor) the operator creates
 -- alongside the 'CoreState' at setup; hands a 'ReplayNode' trie root to any
--- consumer that claims one (see 'Wormhole.Core.Replay').
-mkInitialReplayRootRegistry : Party -> Int -> ReplayRootRegistry
-mkInitialReplayRootRegistry operator claimFee =
-  ReplayRootRegistry with operator, claimFee
+-- consumer that claims one (see 'Wormhole.Core.Replay'). Carries
+-- @guardianGovernance@ (the fee-custody anchor, pinned by 'ClaimReplayRoot');
+-- pass the same one the 'CoreState' was created with.
+mkInitialReplayRootRegistry : Party -> Party -> Int -> ReplayRootRegistry
+mkInitialReplayRootRegistry operator guardianGovernance claimFee =
+  ReplayRootRegistry with operator, guardianGovernance, claimFee
