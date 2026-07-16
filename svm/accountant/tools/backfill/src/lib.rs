@@ -1,10 +1,9 @@
 //! Off-chain orchestrator for the wormchain → SVM Global Accountant migration.
 //!
 //! Reads the deterministic catalogue produced by `tools/wormchain-snapshot/`
-//! and drives the on-chain backfill program at scale. Phase plan and
-//! empirically-validated knobs live in
-//! `.claude/tasks/accountant-migration-orchestrator.md`.
+//! and drives the on-chain backfill program at scale.
 
+pub mod balance_reconcile;
 pub mod catalogue;
 pub mod chunker;
 pub mod cursor;
