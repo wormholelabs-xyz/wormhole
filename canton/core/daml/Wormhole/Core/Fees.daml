@@ -20,6 +20,17 @@
 -- structurally: a foreign allocation's sender is a required controller the
 -- transaction never has.
 --
+-- The "blocks theft structurally" guarantee presupposes an AUTHENTIC
+-- 'CoreState' — a rogue one routes @receiver = feeRecipient@ to an
+-- attacker-controlled party. Authenticity is now pinned by the caller before
+-- every charge: each call site ('PublishMessage', 'RegisterEmitter',
+-- 'ClaimReplayRoot') exercises 'Wormhole.Core.State.GetGuardianGovernance' and
+-- checks it against the @guardianGovernance@ committed on the
+-- emitter/registry. Pinning @guardianGovernance@ (not just the operator)
+-- resists a compromised operator: the operator alone does not determine
+-- @feeRecipient@, so a shadow 'CoreState' the operator co-signs under a
+-- throwaway gg is rejected before any funds move.
+--
 -- AUTHENTICITY: allocation views are template-computed and forgeable — a
 -- hostile template can claim any instrument while moving nothing. The pin is
 -- the instrument admin's SIGNATURE on the allocation contract (amulet
