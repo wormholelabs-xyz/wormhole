@@ -10,7 +10,10 @@
 -- (guardianGovernance). The receiver's authority is inherited from
 -- 'CoreState' (a signatory), so every charge routes through
 -- 'ChargeMessageFee'/'ChargeFee' there, and a foreign sender can never be a
--- controller — blocking theft structurally.
+-- controller — blocking theft structurally, PROVIDED 'CoreState' is
+-- authentic. Callers pin 'GetGuardianGovernance' against their own committed
+-- anchor before charging, so a compromised operator can't redirect fees via
+-- a shadow CoreState under a gg it controls.
 --
 -- Allocation views are forgeable; authenticity is the instrument admin's
 -- signature on the allocation, checked in 'chargeFee'.
