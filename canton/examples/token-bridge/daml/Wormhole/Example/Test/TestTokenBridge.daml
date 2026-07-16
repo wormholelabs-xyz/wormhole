@@ -96,6 +96,7 @@ data BaseSetup = BaseSetup with
     coreStateCid       : ContractId CoreState
     emitterCid         : ContractId Emitter
     emitterId          : Int
+    regId              : ContractId ExampleRegistry
     tbId               : ContractId TokenBridge
 
 -- | Allocates parties, installs a minimal CoreState + EmitterRegistry
@@ -128,12 +129,16 @@ baseSetup = do
       feeAllocation = None
   Some emitter <- queryContractId bridge emitterCid
 
+  -- The bridge is onboarded with exactly one trusted registry; every lock and
+  -- unlock settles through it and no other (see 'TokenBridge.trustedFactory').
+  regId <- submit admin (createCmd ExampleRegistry with admin)
   tbId <- submit bridge do
     createCmd TokenBridge with
       bridge
       guardianObserver
       operator
       emitterId = emitter.emitterId
+      trustedFactory = toInterfaceContractId regId
       peers = Map.empty
       consumed = Set.empty
 
@@ -151,7 +156,6 @@ lockAndAttest = do
   bs@BaseSetup{..} <- baseSetup
   user <- allocateParty "User"
   let instrumentId = InstrumentId with admin, id = "USD"
-  regId <- submit admin do createCmd ExampleRegistry with admin
   tokId <- submit admin do
     exerciseCmd regId Mint with owner = user, instrumentId, amount = transferAmount
 
@@ -253,7 +257,6 @@ testLockAndPublishFractionalAmount = do
       fullAmount = 100.123456789
       lockedAmount = 100.12345678
       dust = 0.000000009
-  regId <- submit admin do createCmd ExampleRegistry with admin
   tokId <- submit admin do
     exerciseCmd regId Mint with owner = user, instrumentId, amount = fullAmount
   Some dReg     <- queryDisclosure admin regId
@@ -299,7 +302,6 @@ testLockAndPublishRequiresUserAuthority = do
   bob     <- allocateParty "Bob"
   mallory <- allocateParty "Mallory"
   let instrumentId = InstrumentId with admin, id = "USD"
-  regId <- submit admin do createCmd ExampleRegistry with admin
   tokId <- submit admin do
     exerciseCmd regId Mint with owner = bob, instrumentId, amount = transferAmount
   Some dReg     <- queryDisclosure admin regId
@@ -353,7 +355,6 @@ testLockAndPublishWithoutDisclosureFails = do
   BaseSetup{..} <- baseSetup
   bob <- allocateParty "Bob2"
   let instrumentId = InstrumentId with admin, id = "USD"
-  regId <- submit admin do createCmd ExampleRegistry with admin
   tokId <- submit admin do
     exerciseCmd regId Mint with owner = bob, instrumentId, amount = transferAmount
   submitMustFail (actAs bob) do
@@ -380,7 +381,6 @@ testLockAndPublishTwice = do
   BaseSetup{..} <- baseSetup
   user <- allocateParty "TwiceUser"
   let instrumentId = InstrumentId with admin, id = "USD"
-  regId <- submit admin do createCmd ExampleRegistry with admin
   tok1 <- submit admin do exerciseCmd regId Mint with owner = user, instrumentId, amount = 10.0
   tok2 <- submit admin do exerciseCmd regId Mint with owner = user, instrumentId, amount = 10.0
   Some dReg  <- queryDisclosure admin regId
@@ -425,19 +425,18 @@ testLockAndPublishTwice = do
   msg1.sequence === 0
   msg2.sequence === 1
 
--- | SECURITY (finding: forgeable lock). 'LockAndPublish' takes @factoryCid@
--- and @holdingCids@ from the caller and, today, publishes an attestation after
--- only checking the transfer settled with one output cid -- never that the
--- settlement ran through a genuine, admin-issued registry. This exercises the
--- attack end to end: Mallory passes her OWN 'CounterfeitRegistry' as the
--- factory (see 'Wormhole.Example.Test.EvilRegistry'), locks nothing real, and
--- attests the real registry admin's instrument -- a token she holds none of.
+-- | SECURITY regression (finding: forgeable lock). @factoryCid@ is an OPEN
+-- 'TransferFactory' interface value, so a caller can supply a hand-rolled
+-- implementation that fabricates a @Completed@ result with a counterfeit
+-- holding, locking nothing real. This exercises the attack end to end: Mallory
+-- passes her OWN 'CounterfeitRegistry' (see 'Wormhole.Example.Test.EvilRegistry')
+-- and attests the real registry admin's instrument -- a token she holds none of.
 --
--- The secure behaviour is to REJECT this. Until the provenance fix lands the
--- exploit succeeds: the @Right@ branch fires and this script aborts, standing
--- as the executable proof of the finding. Once 'LockAndPublish' authenticates
--- the custody holding's provenance, the submission fails and the @Left@ branch
--- makes this a passing regression test.
+-- The bridge now settles only through the 'trustedFactory' it was onboarded
+-- with, so Mallory's counterfeit is rejected (@factoryCid == trustedFactory@
+-- fails) and no message is published: the @Left@ branch is taken. Before the
+-- fix this hit the @Right@ branch and aborted -- the executable proof of the
+-- finding, preserved here as the guard against regression.
 testLockAndPublishRejectsForgedFactory : Script ()
 testLockAndPublishRejectsForgedFactory = do
   BaseSetup{..} <- baseSetup
@@ -489,7 +488,6 @@ testCompleteTransferWrongPeerFails = do
     exerciseCmd tbId RegisterPeer with
       chainId = peerChainId
       peerAddress = "00000000000000000000000000000000000000000000000000000000000000ff"
-  regId <- submit admin do createCmd ExampleRegistry with admin
   Some dReg <- queryDisclosure admin regId
   Some dTb  <- queryDisclosure bridge tbId2
   submitMustFail (actAs operator <> discloseMany [dReg, dTb]) do
@@ -518,9 +516,9 @@ testCompleteTransferReplayFails = do
       guardianObserver
       operator
       emitterId
+      trustedFactory = toInterfaceContractId regId
       peers = Map.fromList [(peerChainId, peerEmitterAddress)]
       consumed = Set.fromList [vaa.hash]
-  regId <- submit admin do createCmd ExampleRegistry with admin
   Some dReg <- queryDisclosure admin regId
   Some dTb  <- queryDisclosure bridge tbReplay
   submitMustFail (actAs operator <> discloseMany [dReg, dTb]) do
@@ -541,7 +539,6 @@ testCompleteTransferWrongToChainFails = do
   let instrumentId = InstrumentId with admin, id = "USD"
   tbId2 <- submit bridge do
     exerciseCmd tbId RegisterPeer with chainId = peerChainId, peerAddress = peerEmitterAddress
-  regId <- submit admin do createCmd ExampleRegistry with admin
   Some dReg <- queryDisclosure admin regId
   Some dTb  <- queryDisclosure bridge tbId2
   submitMustFail (actAs operator <> discloseMany [dReg, dTb]) do
@@ -571,7 +568,6 @@ testCompleteTransferRecipientMismatchFails = do
   let instrumentId = InstrumentId with admin, id = "USD"
   tbId2 <- submit bridge do
     exerciseCmd tbId RegisterPeer with chainId = peerChainId, peerAddress = peerEmitterAddress
-  regId <- submit admin do createCmd ExampleRegistry with admin
   Some dReg <- queryDisclosure admin regId
   Some dTb  <- queryDisclosure bridge tbId2
   result <- trySubmit (actAs operator <> discloseMany [dReg, dTb]) do
@@ -641,7 +637,6 @@ integrationCompleteTransferSetup = do
   let instrumentId = InstrumentId with admin, id = "USD"
   tbId2 <- submit bridge do
     exerciseCmd tbId RegisterPeer with chainId = peerChainId, peerAddress = peerEmitterAddress
-  regId <- submit admin do createCmd ExampleRegistry with admin
   custodyHoldingId <- submit admin do
     exerciseCmd regId Mint with owner = bridge, instrumentId, amount = 50.0
   pure CompleteTransferSetup with

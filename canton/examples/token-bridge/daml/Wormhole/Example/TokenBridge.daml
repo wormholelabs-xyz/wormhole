@@ -173,6 +173,7 @@ template TokenBridge
     guardianObserver : Party        -- read-only guardian observer (matches the core templates)
     operator         : Party        -- the registrar of the bridge's Emitter; CompleteTransfer controller
     emitterId        : Int          -- the bridge's registered Emitter id (informational; the cid is passed in)
+    trustedFactory   : ContractId TransferFactory  -- the ONLY registry this bridge settles locks/unlocks through; bound at onboarding
     peers            : Map Int Bytes32  -- chainId -> peer token-bridge emitter address
     consumed         : Set Bytes32      -- inbound VAA hashes already executed
   where
@@ -238,6 +239,22 @@ template TokenBridge
         now <- getTime
         let (lockedAmount, scaledAmount) = truncateTo8dp amount
         assertMsg "TokenBridge: amount truncates to zero at 8 decimals" (scaledAmount > 0)
+        -- Authenticate the factory before trusting its settlement. @factoryCid@
+        -- is a value of the OPEN 'TransferFactory' interface type, so on its own
+        -- it is only "some contract implementing the interface" -- a caller can
+        -- supply their own implementation that fabricates a @Completed@ result
+        -- with a counterfeit holding, locking nothing (see
+        -- 'Wormhole.Example.Test.EvilRegistry'). Interface views never expose
+        -- signatories, and a plain @fetch@ of the admin-signed registry would
+        -- require the admin's authority (breaking permissionless lock), so the
+        -- factory cannot be authenticated by inspection here. Instead it is
+        -- bound: the bridge only settles through the exact @trustedFactory@ it
+        -- was onboarded with (a governance concern in production, mirroring the
+        -- NTT sibling binding its own CIP-56 custody seam). Settlement then runs
+        -- the genuine registry's real ownership/balance checks and mints a fresh
+        -- admin-signed custody holding, which no counterfeit can forge.
+        assertMsg "TokenBridge: factory is not the bridge's onboarded registry"
+          (factoryCid == trustedFactory)
         let transfer = Transfer with
               sender = user
               receiver = bridge
@@ -328,6 +345,11 @@ template TokenBridge
         assertMsg "token-bridge: tokenAddress/tokenChain do not match instrument"
           (transfer.tokenAddress == tokenAddressFor instrumentId && transfer.tokenChain == cantonChainId)
         assertMsg "token-bridge: nonzero fee is not supported" (transfer.fee == 0)
+        -- Authenticate the factory (see 'LockAndPublish'): the unlock settles
+        -- only through the bridge's onboarded 'trustedFactory', never a
+        -- caller-supplied counterfeit implementing the interface.
+        assertMsg "token-bridge: factory is not the bridge's onboarded registry"
+          (factoryCid == trustedFactory)
         let unlockAmount = intToDecimal transfer.amount / decimalScale8dp
             xfer = Transfer with
               sender = bridge
