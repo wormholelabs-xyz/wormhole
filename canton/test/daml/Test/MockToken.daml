@@ -1,16 +1,13 @@
--- | A minimal CIP-0056 token for tests: just enough of the standard's
--- 'Holding' and 'Allocation' interfaces for 'Wormhole.Core.Fees.chargeFee' to
--- validate and execute against, without vendoring the splice-amulet
--- dependency closure. Deliberate divergences from a real registry: no
--- deadline enforcement (registry-side by design — the bridge never checks
--- them) and no locking/change semantics (each allocation is minted whole).
--- Fidelity against real amulet belongs to devnet validation (README Open
--- Questions).
+-- | A minimal CIP-0056 token for tests: just enough of the 'Holding' and
+-- 'Allocation' interfaces for 'Wormhole.Core.Fees.chargeFee' to validate and
+-- execute against, without the splice-amulet dependency closure. Deliberate
+-- divergences from a real registry: no deadline enforcement (registry-side by
+-- design) and no locking/change (each allocation is minted whole). Fidelity
+-- against real amulet belongs to devnet validation (README Open Questions).
 --
--- 'FakeAllocation' exists to prove the admin-signature pin: its view CLAIMS
--- an arbitrary instrument, but it carries only the sender's signature — a
--- genuine registry allocation is co-signed by the instrument admin, which
--- cannot be forged.
+-- 'FakeAllocation' proves the admin-signature pin: its view CLAIMS an arbitrary
+-- instrument but carries only the sender's signature — a genuine allocation is
+-- co-signed by the instrument admin, which cannot be forged.
 module Test.MockToken where
 
 import Daml.Script

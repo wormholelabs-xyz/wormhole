@@ -1,13 +1,12 @@
 -- | Tests for the replay-protection trie ('Wormhole.Core.Replay'), plus the
 -- script-side simulation of the DISCLOSURE SERVICE: 'coveringNode' resolves the
 -- unique active node whose prefix covers a digest (asserting the partition
--- invariant on every use — exactly one covering node), and
--- 'coveringDisclosure' packages it for a non-stakeholder submitter. Production
--- runs the same logic off-ledger over an ACS index by (consumer, prefix).
+-- invariant on every use) and 'coveringDisclosure' packages it for a
+-- non-stakeholder submitter. Production runs the same logic off-ledger over an
+-- ACS index by (consumer, prefix).
 --
--- Trie tests use tiny thresholds (the threshold is a root-creation parameter
--- precisely so splits are cheap to reach in tests; production uses
--- 'defaultSplitThreshold').
+-- Trie tests use tiny thresholds so splits are cheap to reach; production uses
+-- 'defaultSplitThreshold'.
 module Test.TestReplay where
 
 import Daml.Script
@@ -46,11 +45,10 @@ registerReplayRoot operator consumer threshold = do
       feeAllocation = None
 
 -- | The disclosure-service lookup: the unique active node of @consumer@'s trie
--- covering @digest@, queried as @consumer@. The filter matches the trie owner
--- too, because a reader can see nodes of several tries (the operator co-signs
--- all of them). Aborts if coverage is not exactly one — every call doubles as
--- a check of the partition invariant, and this abort is also how the service
--- detects a forked trie (a consumer that minted parallel roots).
+-- covering @digest@, queried as @consumer@. The filter also matches the trie
+-- owner, since a reader can see several tries' nodes (the operator co-signs all).
+-- Aborts unless coverage is exactly one — doubling as a partition-invariant
+-- check, and how the service detects a forked trie (parallel roots).
 coveringNode : Party -> Text -> Script (ContractId ReplayNode, ReplayNode)
 coveringNode consumer digest = do
   nodes <- query @ReplayNode consumer
@@ -266,14 +264,13 @@ testNodeArchiveNeedsBoth = do
   [(regCid, _)] <- query @ReplayRootRegistry operator
   submit operator do archiveCmd regCid
 
--- | Root claims are free and self-serve; what the registry pins down is WHOSE
--- scope a claim can touch. Claiming a root for a consumer requires that
--- consumer's authority — the load-bearing property: nobody can fork someone
--- ELSE'S replay scope. A consumer duplicating its own root is deliberately
--- possible (pinned below): parallel roots are self-harm, detected off-ledger
--- by the disclosure service ('coveringNode' aborts on more than one covering
--- node). Roots cannot be minted outside the registry — the consumer alone
--- lacks the operator's signature.
+-- | Root claims are free and self-serve; the registry pins down WHOSE scope a
+-- claim can touch. Claiming a root for a consumer requires that consumer's
+-- authority — nobody can fork someone ELSE'S scope. A consumer duplicating its
+-- own root is deliberately possible: parallel roots are self-harm, detected
+-- off-ledger ('coveringNode' aborts on more than one covering node). Roots
+-- cannot be minted outside the registry — the consumer alone lacks the
+-- operator's signature.
 testRootClaims : Script ()
 testRootClaims = do
   (operator, consumer, rootCid) <- setupTrie 4

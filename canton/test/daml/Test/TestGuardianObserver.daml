@@ -1,18 +1,16 @@
 -- | Daml Script tests for the read-only @guardianObserver@ party.
 --
--- The @guardianObserver@ is a template @observer@ on exactly the attestation
--- surface of the core bridge ('Emitter' and 'CoreState'). It is never a
--- signatory or controller of anything, so it gives guardians full read
--- visibility of the contracts and events they attest without placing them in
--- Canton's confirmation path.
+-- @guardianObserver@ is a template @observer@ on the core bridge's attestation
+-- surface ('Emitter' and 'CoreState'), never a signatory or controller — full
+-- read visibility of what guardians attest, without placing them in Canton's
+-- confirmation path.
 --
--- Daml Script cannot read the Ledger-API update stream directly, so event-level
--- visibility is asserted via its exact Script-level proxy: stakeholder query
--- visibility ('queryContractId' / 'query') as @guardianObserver@. Because a
--- template observer is a stakeholder, it is an informee of every consuming
--- exercise on the contract (e.g. 'PublishMessage', 'SubmitGovernanceVAA') — the
--- ledger-model rule the target design relies on. The true stream-level check is
--- the Go integration test.
+-- Daml Script cannot read the update stream directly, so event-level visibility
+-- is asserted via its Script-level proxy: stakeholder query visibility
+-- ('queryContractId' / 'query') as @guardianObserver@. A template observer is a
+-- stakeholder, hence an informee of every consuming exercise (e.g.
+-- 'PublishMessage', 'SubmitGovernanceVAA'). The true stream-level check is the
+-- Go integration test.
 module Test.TestGuardianObserver where
 
 import Daml.Script
@@ -100,12 +98,10 @@ testObserverHasNoAuthority = do
                  cs.feeInstrument cs.feeRecipient)
 
 -- | Adding the observer introduces no new AUTHORITY requirement on publishing:
--- the @owner@ alone still authorizes a publish. (The informee set of a publish
--- is wider since fee wiring: the referenced 'CoreState''s signatories —
--- operator and guardianGovernance — are informees of the fee-read exercise,
--- and the observer remains a plain informee; none of them gains authority.)
--- Genesis still requires exactly the @operator@ and @guardianGovernance@
--- signatures — the observer is not one of them.
+-- the @owner@ alone still authorizes it. (Fee wiring widened the informee set —
+-- the CoreState's operator and guardianGovernance are informees of the fee-read
+-- — but none of them gains authority.) Genesis still requires exactly the
+-- @operator@ and @guardianGovernance@ signatures; the observer is not one.
 testPublishRequiresOnlyOwner : Script ()
 testPublishRequiresOnlyOwner = do
   (operator, _guardianObserver, csId) <- setup
