@@ -46,8 +46,8 @@
 
 use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
 
-use crate::definitions::{NOREPLAY_BITMAP_BYTES, NOREPLAY_BITS_PER_BUCKET};
-use crate::instructions::{authority, commit_log, noreplay};
+use crate::definitions::{Pubkey, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITS_PER_BUCKET};
+use crate::instructions::{authority::require_authority, commit_log, noreplay};
 use crate::{err, BackfillError};
 
 /// Group header: `chain (2) + emitter (32) + entry_count (1)`.
@@ -57,7 +57,12 @@ const ENTRY_BYTES: usize = 8 + 32;
 /// Top-level fixed head: `group_count (1)`.
 const FIXED_HEAD: usize = 1;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    data: &[u8],
+    authority: &Pubkey,
+) -> ProgramResult {
     // ----- (1) Parse + validate top-level head -----
     if data.len() < FIXED_HEAD {
         return Err(err(BackfillError::InvalidInstructionData));
@@ -83,7 +88,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     };
 
     // ----- (3) Authority gate -----
-    authority::require_authority(payer)?;
+    require_authority(payer, authority)?;
     let payer: &AccountView = payer;
 
     // ----- (4) Walk groups → entries, OR-mask per bucket, flush on transition -----
