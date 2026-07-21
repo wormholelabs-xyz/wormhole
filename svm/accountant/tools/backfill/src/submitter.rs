@@ -2,22 +2,38 @@
 //!
 //! ## Policy
 //!
-//! - **AlreadyAccounted (custom 7)** → success. NoReplay's on-chain
-//!   idempotency lets us safely re-send a tx that's already landed; the
-//!   second submission rejects with this code and the orchestrator counts
-//!   it as "already done, advance cursor".
+//! - **AlreadyAccounted (custom 7)** → success, if the program ever
+//!   actually returns it. In practice no instruction this program exposes
+//!   today can produce code 7 (`BackfillNoReplay`'s CPI target OR-merges
+//!   its bitmap unconditionally, with no "already set" rejection) — this
+//!   branch is kept as defense-in-depth for a future variant that does
+//!   define it. Resume-time dedup relies on `preflight.rs`'s on-chain
+//!   verification instead, not on this code path.
 //! - **UnauthorizedCaller (custom 3)** → halt. The configured signer does
 //!   not match the program's compile-time `BACKFILL_AUTHORITY` — operator
 //!   misconfig, no point retrying.
 //! - **Other custom program errors** → halt. Logic errors are unrecoverable
 //!   in the orchestrator's frame — the operator needs to inspect.
 //! - **RPC / I/O / blockhash-expired / transient errors** → retry with
-//!   exponential backoff, capped attempts.
+//!   exponential backoff, capped attempts, incrementing
+//!   `SubmissionStats::retries` for every retry actually taken.
 //!
 //! Each tx fetches its own blockhash before signing. Concurrent submission
 //! through a `tokio::sync::Semaphore`; the empirical 16-way concurrency from
 //! the at-scale probe is the default.
+//!
+//! ## Halt semantics
+//!
+//! On first unrecoverable error, dispatch of new chunks stops, but every
+//! chunk already in flight is a real, already-broadcast transaction, so it
+//! is awaited to completion and counted rather than abandoned. A shared
+//! `Arc<AtomicBool>` halt flag is checked before acquiring a concurrency
+//! permit and again right after (the flag may flip while blocked waiting
+//! on a permit), so no new work is spawned once it's set. The join phase
+//! then awaits every handle unconditionally rather than short-circuiting
+//! on the first error.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,7 +45,7 @@ use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{mpsc::UnboundedSender, Mutex, Semaphore};
 use tracing::{debug, warn};
 
 use crate::chunker::ChunkPlan;
@@ -74,10 +90,32 @@ pub struct SubmissionStats {
     pub retries: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum SubmitOutcome {
     Confirmed(String),
     AlreadyAccounted,
+}
+
+/// Per-chunk terminal outcome, reported via the progress channel passed to
+/// [`submit_chunks_with_progress`] in true completion order (not
+/// necessarily dispatch order under concurrency). Mirrors [`SubmitOutcome`]
+/// plus the deferred-skip case, so cursor bookkeeping can track every
+/// chunk's fate, including the ones this submitter never actually sends.
+#[derive(Debug, Clone)]
+pub enum ChunkOutcome {
+    Confirmed(String),
+    AlreadyAccounted,
+    DeferredSkipped,
+}
+
+/// One chunk's terminal outcome, tagged with its position in the ORIGINAL
+/// input sequence passed to [`submit_chunks_with_progress`]. Chunks can
+/// complete out of order under concurrency, so `index` — not arrival order
+/// on the channel — is the only reliable way to know which chunk this is.
+#[derive(Debug, Clone)]
+pub struct ChunkProgress {
+    pub index: usize,
+    pub outcome: ChunkOutcome,
 }
 
 /// How to handle an RPC error. Public because integration tests in the same
@@ -134,6 +172,9 @@ struct SharedState {
     payer: Arc<Keypair>,
     rpc: Arc<RpcClient>,
     config: SubmitterConfig,
+    /// Shared so retries can be counted as they happen, regardless of the
+    /// chunk's eventual outcome.
+    stats: Arc<Mutex<SubmissionStats>>,
 }
 
 impl SharedState {
@@ -186,6 +227,9 @@ impl SharedState {
                         if attempt >= self.config.max_retries {
                             return Err(anyhow!("tx failed after {attempt} attempts: {e}"));
                         }
+                        // Count the retry immediately, not deferred to the
+                        // chunk's eventual outcome.
+                        self.stats.lock().await.retries += 1;
                         warn!(
                             attempt,
                             delay_ms,
@@ -201,10 +245,11 @@ impl SharedState {
     }
 }
 
-/// Drive a stream of chunks through bounded-concurrency submission.
-/// Halts the run on first unrecoverable error; returns aggregated stats
-/// (which include the partial progress) wrapped as `Err`'s context where
-/// the early halt occurred.
+/// Drive a stream of chunks through bounded-concurrency submission. See the
+/// module doc's "Halt semantics" section for the precise halt behavior.
+/// Equivalent to [`submit_chunks_with_progress`] with no progress channel —
+/// use that variant when per-chunk completion needs to be observed, e.g.
+/// to persist cursor progress as chunks land.
 pub async fn submit_chunks<I>(
     ctx: BackfillCtx,
     payer: Keypair,
@@ -214,51 +259,133 @@ pub async fn submit_chunks<I>(
 where
     I: IntoIterator<Item = ChunkPlan>,
 {
+    submit_chunks_with_progress(ctx, payer, config, chunks, None).await
+}
+
+/// As [`submit_chunks`], but additionally reports each chunk's terminal
+/// outcome — tagged with its position in `chunks` — on `progress` the
+/// moment it completes. Chunks can complete out of order under
+/// concurrency; callers that need an ordered "confirmed up to index N"
+/// notion (e.g. a resumable cursor) must track a completion set keyed by
+/// `ChunkProgress::index` and compute the longest confirmed prefix
+/// themselves — see `main.rs`'s `run` orchestrator.
+pub async fn submit_chunks_with_progress<I>(
+    ctx: BackfillCtx,
+    payer: Keypair,
+    config: SubmitterConfig,
+    chunks: I,
+    progress: Option<UnboundedSender<ChunkProgress>>,
+) -> Result<SubmissionStats>
+where
+    I: IntoIterator<Item = ChunkPlan>,
+{
     let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), CommitmentConfig::confirmed());
+    let stats = Arc::new(Mutex::new(SubmissionStats::default()));
     let shared = SharedState {
         ctx,
         payer: Arc::new(payer),
         rpc: Arc::new(rpc),
         config: config.clone(),
+        stats: stats.clone(),
     };
     let sem = Arc::new(Semaphore::new(config.concurrency));
-    let stats = Arc::new(Mutex::new(SubmissionStats::default()));
+    // Set as soon as any dispatched chunk hits an unrecoverable error; see
+    // the module doc's "Halt semantics" section.
+    let halt = Arc::new(AtomicBool::new(false));
 
     let mut handles = Vec::new();
-    for chunk in chunks {
+    for (index, chunk) in chunks.into_iter().enumerate() {
         if matches!(
             chunk,
             ChunkPlan::DeferredModification(_) | ChunkPlan::DeferredRegistration(_)
         ) {
             stats.lock().await.deferred_skipped += 1;
+            if let Some(tx) = &progress {
+                let _ = tx.send(ChunkProgress {
+                    index,
+                    outcome: ChunkOutcome::DeferredSkipped,
+                });
+            }
             continue;
         }
 
+        // Early-out before even trying to acquire a permit.
+        if halt.load(Ordering::SeqCst) {
+            break;
+        }
         let permit = sem.clone().acquire_owned().await.expect("semaphore");
+        // Re-check: the flag may have flipped while this iteration waited
+        // on the semaphore.
+        if halt.load(Ordering::SeqCst) {
+            drop(permit);
+            break;
+        }
+
         let shared = shared.clone();
         let stats = stats.clone();
+        let halt = halt.clone();
+        let progress = progress.clone();
 
         let h = tokio::spawn(async move {
             let _permit = permit;
-            let outcome = shared.submit_chunk(chunk).await?;
-            let mut s = stats.lock().await;
-            match outcome {
-                SubmitOutcome::Confirmed(sig) => {
-                    s.submitted += 1;
-                    debug!(sig = %sig, "tx confirmed");
+            match shared.submit_chunk(chunk).await {
+                Ok(outcome) => {
+                    let mut s = stats.lock().await;
+                    let reported = match &outcome {
+                        SubmitOutcome::Confirmed(sig) => {
+                            s.submitted += 1;
+                            debug!(sig = %sig, "tx confirmed");
+                            ChunkOutcome::Confirmed(sig.clone())
+                        }
+                        SubmitOutcome::AlreadyAccounted => {
+                            s.already_accounted += 1;
+                            ChunkOutcome::AlreadyAccounted
+                        }
+                    };
+                    drop(s);
+                    if let Some(tx) = &progress {
+                        let _ = tx.send(ChunkProgress {
+                            index,
+                            outcome: reported,
+                        });
+                    }
+                    anyhow::Ok(())
                 }
-                SubmitOutcome::AlreadyAccounted => s.already_accounted += 1,
+                Err(e) => {
+                    // Unrecoverable: stop dispatching further work; this
+                    // chunk has no terminal state to report on `progress`.
+                    halt.store(true, Ordering::SeqCst);
+                    Err(e)
+                }
             }
-            anyhow::Ok(())
         });
         handles.push(h);
     }
 
-    // Await all; any join-error or task-error halts the run.
+    // Await every handle unconditionally rather than short-circuiting on
+    // the first error, so in-flight work is always awaited to completion.
+    let mut first_err: Option<anyhow::Error> = None;
     for h in handles {
-        h.await.context("task join")?.context("submission error")?;
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+            Err(join_err) => {
+                if first_err.is_none() {
+                    first_err = Some(anyhow!("task join error: {join_err}"));
+                }
+            }
+        }
     }
 
     let final_stats = stats.lock().await.clone();
+    if let Some(e) = first_err {
+        return Err(e.context(format!(
+            "halted after unrecoverable error; partial stats: {final_stats:?}"
+        )));
+    }
     Ok(final_stats)
 }

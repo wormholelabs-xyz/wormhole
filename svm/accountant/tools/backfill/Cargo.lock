@@ -20,6 +20,7 @@ dependencies = [
  "global-accountant-definitions",
  "pinocchio",
  "pinocchio-system",
+ "solana-address 2.6.0",
 ]
 
 [[package]]
@@ -1156,6 +1157,8 @@ name = "ga-backfill"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
+ "bincode",
  "clap",
  "global-accountant-backfill",
  "global-accountant-definitions",
@@ -1163,13 +1166,16 @@ dependencies = [
  "ntt-global-accountant-backfill",
  "serde",
  "serde_json",
+ "sha2",
  "solana-address 2.6.0",
  "solana-client",
  "solana-commitment-config",
  "solana-hash 3.1.0",
  "solana-instruction",
  "solana-keypair",
+ "solana-message",
  "solana-pubkey 4.2.0",
+ "solana-signature",
  "solana-signer",
  "solana-transaction",
  "tempfile",
@@ -1231,8 +1237,10 @@ name = "global-accountant-backfill"
 version = "0.1.0"
 dependencies = [
  "accountant-backfill-core",
+ "bytemuck",
  "global-accountant-definitions",
  "pinocchio",
+ "pinocchio-system",
  "solana-address 2.6.0",
 ]
 

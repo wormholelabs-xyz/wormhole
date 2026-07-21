@@ -1,6 +1,6 @@
 //! Integration tests for the catalogue reader.
 
-use ga_backfill::catalogue::{CatalogueReader, ModifyKind, Record};
+use ga_backfill::catalogue::{CatalogueError, CatalogueReader, ModifyKind, Record};
 
 fn fixture_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -177,6 +177,110 @@ fn transceiver_peer_fields_round_trip() {
     assert_eq!(p.address[31], 0x66);
     assert_eq!(p.dest_chain, 4);
     assert_eq!(p.peer_address[31], 0x77);
+}
+
+// One malformed/truncated-row test per `CatalogueError` variant. `parse_record`
+// is private, so these go through the public entry point: write a single bad
+// line to a temp file, open it with `CatalogueReader`, and inspect the error.
+
+fn parse_one_line(line: &str) -> CatalogueError {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("bad.jsonl");
+    std::fs::write(&path, format!("{line}\n")).expect("write");
+    CatalogueReader::open(&path)
+        .expect("open")
+        .next()
+        .expect("one record")
+        .expect_err("line must fail to parse")
+}
+
+#[test]
+fn io_error_on_missing_file() {
+    let result = CatalogueReader::open("/nonexistent/path/that/should/not/exist.jsonl");
+    assert!(matches!(result, Err(CatalogueError::Io(_))));
+}
+
+#[test]
+fn json_error_on_malformed_json() {
+    let err = parse_one_line("{ this is not valid json");
+    assert!(matches!(err, CatalogueError::Json { .. }), "got: {err:?}");
+}
+
+#[test]
+fn missing_field_error_when_kind_absent() {
+    let err = parse_one_line(r#"{"chain":1}"#);
+    assert!(
+        matches!(err, CatalogueError::MissingField { field: "kind", .. }),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn missing_field_error_when_kind_specific_field_absent() {
+    // A `transfer` row missing `chain`.
+    let err = parse_one_line(
+        r#"{"kind":"transfer","emitter":"0x0000000000000000000000000000000000000000000000000000000000000001","sequence":1,"digest":"0x0000000000000000000000000000000000000000000000000000000000000001","amount":"0x0000000000000000000000000000000000000000000000000000000000000001","token_chain":1,"token_address":"0x0000000000000000000000000000000000000000000000000000000000000001","recipient_chain":1}"#,
+    );
+    assert!(
+        matches!(err, CatalogueError::MissingField { field: "chain", .. }),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn unknown_kind_error() {
+    let err = parse_one_line(r#"{"kind":"not_a_real_kind"}"#);
+    assert!(
+        matches!(err, CatalogueError::UnknownKind { ref kind, .. } if kind == "not_a_real_kind"),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn bad_type_error_on_non_numeric_chain() {
+    let err = parse_one_line(r#"{"kind":"registration","chain":"not-a-number","registered_emitter":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#);
+    assert!(
+        matches!(err, CatalogueError::BadType { field: "chain", expected: "u64", .. }),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn invalid_hex_error_on_wrong_length() {
+    // `registered_emitter` should be 64 hex chars (32 bytes); this is short.
+    let err = parse_one_line(r#"{"kind":"registration","chain":1,"registered_emitter":"0xaabb"}"#);
+    assert!(
+        matches!(err, CatalogueError::InvalidHex { field: "registered_emitter", .. }),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn invalid_hex_error_on_non_hex_characters() {
+    let err = parse_one_line(r#"{"kind":"registration","chain":1,"registered_emitter":"0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}"#);
+    assert!(
+        matches!(err, CatalogueError::InvalidHex { field: "registered_emitter", .. }),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn out_of_range_error_when_u64_does_not_fit_u16() {
+    // `chain` is parsed as u16; 99999 overflows it.
+    let err = parse_one_line(r#"{"kind":"registration","chain":99999,"registered_emitter":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#);
+    assert!(
+        matches!(err, CatalogueError::OutOfRange { field: "chain", value: 99999, expected: "u16", .. }),
+        "got: {err:?}"
+    );
+}
+
+#[test]
+fn bad_modify_kind_error() {
+    let err = parse_one_line(r#"{"kind":"modification","sequence":1,"chain_id":1,"token_chain":1,"token_address":"0x0000000000000000000000000000000000000000000000000000000000000001","amount":"0x0000000000000000000000000000000000000000000000000000000000000001","reason":"x","modify_kind":"multiply"}"#);
+    assert!(
+        matches!(err, CatalogueError::BadModifyKind { ref value, .. } if value == "multiply"),
+        "got: {err:?}"
+    );
 }
 
 #[test]

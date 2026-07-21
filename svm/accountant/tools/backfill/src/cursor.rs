@@ -176,6 +176,21 @@ impl Cursor {
         self.tick()
     }
 
+    /// Record one chunk that was intentionally never submitted by the
+    /// backfill phase at all (`DeferredModification`/`DeferredRegistration`
+    /// — replayed via the operational program later). Advances
+    /// `last_confirmed_chunk_index` the same as a submitted chunk would,
+    /// WITHOUT touching `submitted`/`already_accounted`/`fees_lamports`.
+    ///
+    /// Keeps `skip_count()` aligned with position in the full planned chunk
+    /// list (backfill chunks interleaved with deferred ones) — otherwise a
+    /// catalogue whose deferred records aren't all at the end would desync
+    /// the cursor from the chunk list's actual positions.
+    pub fn observe_deferred_skipped(&mut self) -> Result<()> {
+        self.state.last_confirmed_chunk_index += 1;
+        self.tick()
+    }
+
     /// Force-flush to disk regardless of stride. Call at end of run.
     pub fn flush(&mut self) -> Result<()> {
         self.write_to_disk()?;
