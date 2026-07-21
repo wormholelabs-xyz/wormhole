@@ -19,6 +19,7 @@ dependencies = [
  "bytemuck",
  "global-accountant-definitions",
  "pinocchio",
+ "pinocchio-system",
  "solana-address 2.6.0",
 ]
 

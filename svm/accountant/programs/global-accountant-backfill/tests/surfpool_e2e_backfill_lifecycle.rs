@@ -11,6 +11,10 @@
 //! 3. `BackfillNoReplay` signed by a non-authority keypair — assert the
 //!    tx fails with `UnauthorizedCaller` (Custom(3)). Establishes that the
 //!    compile-time `BACKFILL_AUTHORITY` const gate is enforced on-chain.
+//! 4. `BackfillBalance` signed by the same non-authority keypair — assert the
+//!    same `UnauthorizedCaller` (Custom(3)) failure and that no PDA was
+//!    created. Confirms the authority gate is enforced on `BackfillBalance`'s
+//!    own instruction handler too.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -395,5 +399,45 @@ fn surfpool_backfill_lifecycle() {
     assert!(
         msg.contains("custom program error: 0x3") || msg.contains("Custom(3)"),
         "expected UnauthorizedCaller (Custom(3)) in wrong-signer error, got: {msg}"
+    );
+
+    // ---------- Phase 4: wrong-signer BackfillBalance → must fail ----------
+    //
+    // Phase 3 only exercised `BackfillNoReplay`'s authority gate end-to-end;
+    // `BackfillBalance` shares the same `require_authority` check but is a
+    // separate instruction handler, so run the same control here too. A
+    // fresh (chain, token_chain, token_address) key avoids colliding with the
+    // PDA already written in Phase 2.
+    let stranger_balance = BalanceEntry {
+        chain: 9,
+        token_chain: 9,
+        token_address: [0x99u8; 32],
+        balance: {
+            let mut b = [0u8; 32];
+            b[24..32].copy_from_slice(&1u64.to_be_bytes());
+            b
+        },
+    };
+    let stranger_bal_pda = derive_balance_pda(&program_id, 9, 9, &[0x99u8; 32]);
+    let metas_stranger_balance = vec![
+        AccountMeta::new(stranger.pubkey(), true),
+        AccountMeta::new_readonly(system_program_id(), false),
+        AccountMeta::new(stranger_bal_pda, false),
+    ];
+    let ix = Instruction {
+        program_id,
+        accounts: metas_stranger_balance,
+        data: build_backfill_balance_data(&[stranger_balance]),
+    };
+    let err = send_ix(&rpc, &stranger, ix).expect_err("stranger BackfillBalance ix must fail");
+    let msg = err.to_string();
+    eprintln!("[backfill-e2e] BackfillBalance wrong-signer error: {msg}");
+    assert!(
+        msg.contains("custom program error: 0x3") || msg.contains("Custom(3)"),
+        "expected UnauthorizedCaller (Custom(3)) in BackfillBalance wrong-signer error, got: {msg}"
+    );
+    assert!(
+        rpc.get_account(&stranger_bal_pda).is_err(),
+        "stranger's BackfillBalance PDA must not exist after a rejected tx"
     );
 }
