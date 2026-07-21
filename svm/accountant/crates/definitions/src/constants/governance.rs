@@ -32,3 +32,22 @@ pub const ACCOUNTANT_GOVERNANCE_MODULE: [u8; 32] = [
 
 /// Accountant governance `ModifyBalance` action byte.
 pub const MODIFY_BALANCE_ACTION: u8 = 0x01;
+
+/// NTT relayer governance module — first 32 bytes of a `WormholeRelayer`
+/// governance payload. "WormholeRelayer" (15 ASCII bytes) right-aligned in 32
+/// bytes (17 leading zero bytes). The NTT `RegisterRelayerChain` handler
+/// validates this module before initialising the relayer-chain registration.
+pub const RELAYER_GOVERNANCE_MODULE: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, b'W', b'o', b'r', b'm', b'h', b'o', b'l', b'e', b'R', b'e', b'l', b'a', b'y', b'e', b'r',
+];
+
+/// NTT accountant governance module — first 32 bytes of an NTT `ModifyBalance`
+/// payload. "NTTGlobalAccountant" (19 ASCII bytes) right-aligned in 32 bytes
+/// (13 leading zero bytes). Same payload layout as the WTT
+/// [`ACCOUNTANT_GOVERNANCE_MODULE`]; only the module string differs, which is
+/// what scopes a `ModifyBalance` VAA to the NTT program.
+pub const NTT_ACCOUNTANT_GOVERNANCE_MODULE: [u8; 32] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, b'N', b'T', b'T',
+    b'G', b'l', b'o', b'b', b'a', b'l', b'A', b'c', b'c', b'o', b'u', b'n', b't', b'a', b'n', b't',
+];

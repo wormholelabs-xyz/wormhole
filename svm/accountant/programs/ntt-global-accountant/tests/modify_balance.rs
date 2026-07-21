@@ -91,6 +91,22 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
+fn balance_account(chain: u16, token_chain: u16, token_address: &[u8; 32], balance: Uint256) -> Account {
+    let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = BalanceAccountLayout::TAG;
+    layout.chain = chain;
+    layout.token_chain = token_chain;
+    layout.token_address = *token_address;
+    layout.balance = balance;
+    Account {
+        lamports: 1_000_000,
+        data: bytemuck::bytes_of(&layout).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
 /// Build an NTT `ModifyBalance` governance VAA body (195 bytes). Same layout as
 /// the WTT handler; only the module string differs.
 fn build_modify_balance_body(
@@ -346,6 +362,150 @@ fn modify_balance_wrong_governance_module_rejects() {
     }
 }
 
+/// A VAA whose emitter chain is not `SOLANA_CHAIN_ID` is rejected with
+/// `InvalidGovernanceEmitter` — governance VAAs must originate from the
+/// canonical Solana governance emitter.
+#[test]
+fn modify_balance_wrong_emitter_chain_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0x89u8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID + 1, // wrong emitter chain
+        &GOVERNANCE_EMITTER,
+        0x12,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        SOLANA_CHAIN_ID,
+        211,
+        2,
+        2,
+        &token_address,
+        1,
+        Uint256::from_u128(1_000),
+        &[0u8; 32],
+    );
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 211, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidGovernanceEmitter as u32,
+                "expected InvalidGovernanceEmitter, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidGovernanceEmitter), got {other:?}"),
+    }
+}
+
+/// A VAA whose emitter address is not the canonical `GOVERNANCE_EMITTER` is
+/// rejected with `InvalidGovernanceEmitter`, even with the correct emitter
+/// chain.
+#[test]
+fn modify_balance_wrong_emitter_address_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0x8Au8; 32];
+    let wrong_emitter = [0x01u8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &wrong_emitter,
+        0x13,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        SOLANA_CHAIN_ID,
+        212,
+        2,
+        2,
+        &token_address,
+        1,
+        Uint256::from_u128(1_000),
+        &[0u8; 32],
+    );
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 212, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidGovernanceEmitter as u32,
+                "expected InvalidGovernanceEmitter, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidGovernanceEmitter), got {other:?}"),
+    }
+}
+
+/// A VAA carrying the correct NTT governance module but a non-`0x01` action
+/// byte is rejected with `InvalidGovernanceAction`.
+#[test]
+fn modify_balance_wrong_governance_action_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0x8Bu8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x14,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        0xFF, // not MODIFY_BALANCE_ACTION
+        SOLANA_CHAIN_ID,
+        213,
+        2,
+        2,
+        &token_address,
+        1,
+        Uint256::from_u128(1_000),
+        &[0u8; 32],
+    );
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 213, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidGovernanceAction as u32,
+                "expected InvalidGovernanceAction, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidGovernanceAction), got {other:?}"),
+    }
+}
+
+/// A VAA whose `target_chain` is neither Solana nor `Any` (unlike Token Bridge
+/// governance, `modify_balance` does not accept `Any`) is rejected with
+/// `GovernanceChainMismatch`.
+#[test]
+fn modify_balance_wrong_target_chain_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0x8Cu8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x16,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        0, // Any — not accepted for modify_balance, unlike register_chain
+        214,
+        2,
+        2,
+        &token_address,
+        1,
+        Uint256::from_u128(1_000),
+        &[0u8; 32],
+    );
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 214, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::GovernanceChainMismatch as u32,
+                "expected GovernanceChainMismatch, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(GovernanceChainMismatch), got {other:?}"),
+    }
+}
+
 /// A second VAA with the same payload sequence collides on the Modification PDA
 /// and rejects with `DuplicateModification`.
 #[test]
@@ -407,4 +567,213 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
         }
         other => panic!("expected Failure(DuplicateModification), got {other:?}"),
     }
+}
+
+/// A `kind` byte that is neither `1` (Add) nor `2` (Subtract) rejects with
+/// `InvalidModificationKind` before any account is touched.
+#[test]
+fn modify_balance_invalid_modification_kind_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0xDDu8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x20,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        SOLANA_CHAIN_ID,
+        220,
+        2,
+        2,
+        &token_address,
+        3, // neither Add (1) nor Subtract (2)
+        Uint256::from_u128(100),
+        &[0u8; 32],
+    );
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 220, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidModificationKind as u32,
+                "expected InvalidModificationKind, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidModificationKind), got {other:?}"),
+    }
+
+    // Balance PDA stays uninitialised: the kind check runs before allocation.
+    let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
+    let post_balance = r
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == balance_pda)
+        .expect("balance PDA missing from result");
+    assert_eq!(post_balance.1.owner, system_program_id());
+    assert!(post_balance.1.data.is_empty());
+}
+
+/// `Subtract` against an uninitialised `BalanceAccount` underflows from zero
+/// and is rejected before allocation (mirrors the WTT sibling's coverage of
+/// the same rejection).
+#[test]
+fn modify_balance_sub_on_uninit_pda_rejects_underflow() {
+    let mollusk = mollusk();
+    let token_address = [0xEEu8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x21,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        SOLANA_CHAIN_ID,
+        221,
+        2,
+        2,
+        &token_address,
+        2, // Subtract
+        Uint256::from_u128(1),
+        &[0u8; 32],
+    );
+    let r = run_modify_balance(&mollusk, &body, 2, 2, &token_address, 221, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::ModifyBalanceUnderflow as u32,
+                "expected ModifyBalanceUnderflow, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(ModifyBalanceUnderflow), got {other:?}"),
+    }
+
+    let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
+    let post_balance = r
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == balance_pda)
+        .expect("balance PDA missing from result");
+    assert_eq!(post_balance.1.owner, system_program_id());
+    assert!(post_balance.1.data.is_empty());
+}
+
+/// `Add` against an existing (non-zero) balance near `Uint256::MAX` overflows
+/// and rejects with `ModifyBalanceOverflow`, leaving the balance unchanged.
+#[test]
+fn modify_balance_add_overflow_against_existing_balance_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0xF1u8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x22,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        SOLANA_CHAIN_ID,
+        222,
+        2,
+        2,
+        &token_address,
+        1, // Add
+        Uint256::from_u128(2),
+        &[0u8; 32],
+    );
+    let mut max_minus_one_bytes = [0xFFu8; 32];
+    max_minus_one_bytes[31] = 0xFE;
+    let pre_balance = balance_account(2, 2, &token_address, Uint256(max_minus_one_bytes));
+    let r = run_modify_balance(
+        &mollusk,
+        &body,
+        2,
+        2,
+        &token_address,
+        222,
+        Some(pre_balance),
+        None,
+    );
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::ModifyBalanceOverflow as u32,
+                "expected ModifyBalanceOverflow, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(ModifyBalanceOverflow), got {other:?}"),
+    }
+
+    let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
+    let post_balance = r
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == balance_pda)
+        .expect("balance PDA missing from result");
+    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&post_balance.1.data);
+    assert_eq!(
+        layout.balance,
+        Uint256(max_minus_one_bytes),
+        "balance unchanged on overflow rejection"
+    );
+}
+
+/// `Subtract` against an existing (non-zero) balance smaller than the
+/// modification amount underflows and rejects with `ModifyBalanceUnderflow`,
+/// leaving the balance unchanged.
+#[test]
+fn modify_balance_sub_underflow_against_existing_balance_rejects() {
+    let mollusk = mollusk();
+    let token_address = [0xF2u8; 32];
+    let body = build_modify_balance_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x23,
+        &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+        MODIFY_BALANCE_ACTION,
+        SOLANA_CHAIN_ID,
+        223,
+        2,
+        2,
+        &token_address,
+        2, // Subtract
+        Uint256::from_u128(1_000),
+        &[0u8; 32],
+    );
+    let pre_balance = balance_account(2, 2, &token_address, Uint256::from_u128(999));
+    let r = run_modify_balance(
+        &mollusk,
+        &body,
+        2,
+        2,
+        &token_address,
+        223,
+        Some(pre_balance),
+        None,
+    );
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::ModifyBalanceUnderflow as u32,
+                "expected ModifyBalanceUnderflow, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(ModifyBalanceUnderflow), got {other:?}"),
+    }
+
+    let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
+    let post_balance = r
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == balance_pda)
+        .expect("balance PDA missing from result");
+    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&post_balance.1.data);
+    assert_eq!(
+        layout.balance,
+        Uint256::from_u128(999),
+        "balance unchanged on underflow rejection"
+    );
 }

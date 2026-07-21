@@ -51,6 +51,23 @@ impl Uint256 {
         a.checked_sub(b).map(|r| Self(r.to_be_bytes::<32>()))
     }
 
+    /// Multiply, returning `None` on overflow.
+    #[inline]
+    pub fn checked_mul(self, other: Self) -> Option<Self> {
+        let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
+        let b = ruint::aliases::U256::from_be_bytes::<32>(other.0);
+        a.checked_mul(b).map(|r| Self(r.to_be_bytes::<32>()))
+    }
+
+    /// Integer division, truncating toward zero. Returns `None` only if
+    /// `divisor` is zero.
+    #[inline]
+    pub fn checked_div(self, divisor: Self) -> Option<Self> {
+        let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
+        let b = ruint::aliases::U256::from_be_bytes::<32>(divisor.0);
+        a.checked_div(b).map(|r| Self(r.to_be_bytes::<32>()))
+    }
+
     /// Construct from 32 big-endian bytes.
     pub const fn from_be_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
