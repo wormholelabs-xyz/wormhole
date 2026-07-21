@@ -15,6 +15,9 @@ crate-type = ["cdylib", "lib"]
 [features]
 default = []
 bpf-entrypoint = []
+# Enables a compile-time assertion (see lib.rs) that fails the build if
+# BACKFILL_AUTHORITY is still the test placeholder.
+mainnet = []
 
 [dependencies]
 bytemuck.workspace = true

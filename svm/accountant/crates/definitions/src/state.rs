@@ -715,6 +715,18 @@ mod tests {
         );
     }
 
+    /// Pins the NTT PDA seed prefixes' exact bytes, not just their layout
+    /// offsets/LEN/tags asserted above.
+    #[test]
+    fn ntt_seed_prefixes_pinned() {
+        assert_eq!(
+            crate::RELAYER_CHAIN_REGISTRATION_SEED_PREFIX,
+            b"relayer_chain_registration"
+        );
+        assert_eq!(crate::TRANSCEIVER_HUB_SEED_PREFIX, b"transceiver_hub");
+        assert_eq!(crate::TRANSCEIVER_PEER_SEED_PREFIX, b"transceiver_peer");
+    }
+
     #[test]
     fn relayer_chain_registration_layout_pinned() {
         use core::mem::offset_of;

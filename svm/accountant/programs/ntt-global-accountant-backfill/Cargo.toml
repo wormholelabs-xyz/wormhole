@@ -15,6 +15,9 @@ crate-type = ["cdylib", "lib"]
 [features]
 default = []
 bpf-entrypoint = []
+# Enables a compile-time assertion (see lib.rs) that fails the build if
+# BACKFILL_AUTHORITY is still the test placeholder.
+mainnet = []
 
 [dependencies]
 accountant-backfill-core = { path = "../../crates/backfill-core" }
@@ -33,6 +36,19 @@ solana-pubkey = { workspace = true, features = ["curve25519"] }
 solana-signer.workspace = true
 solana-address = { version = "2.6", features = ["curve25519"] }
 ntt-global-accountant-backfill = { path = "." }
+# Cross-program authority isolation tests import WTT's real BACKFILL_AUTHORITY
+# const and drive its entrypoint directly (tests/backfill_ntt_maps.rs).
+global-accountant-backfill = { path = "../global-accountant-backfill" }
+sha2 = "=0.10.9"
+# Surfpool e2e helpers, mirroring `global-accountant-backfill`'s dev-deps.
+solana-client.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+solana-rent.workspace = true
+serde_json.workspace = true
+# Already pinned identically by the WTT backfill program.
+base64 = "=0.22.1"
 
 [lints]
 workspace = true

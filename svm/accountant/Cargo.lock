@@ -2670,17 +2670,26 @@ name = "ntt-global-accountant-backfill"
 version = "0.1.0"
 dependencies = [
  "accountant-backfill-core",
+ "base64 0.22.1",
  "bytemuck",
+ "global-accountant-backfill",
  "global-accountant-definitions",
  "mollusk-svm",
  "ntt-global-accountant-backfill",
  "pinocchio",
+ "serde_json",
+ "sha2 0.10.9",
  "solana-account",
  "solana-address 2.6.0",
+ "solana-client",
+ "solana-commitment-config",
  "solana-instruction",
  "solana-keypair",
  "solana-pubkey 4.2.0",
+ "solana-rent",
  "solana-signer",
+ "solana-system-interface 3.2.0",
+ "solana-transaction",
 ]
 
 [[package]]
