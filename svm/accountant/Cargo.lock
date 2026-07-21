@@ -3065,9 +3065,15 @@ dependencies = [
  "sha2 0.10.9",
  "solana-account",
  "solana-address 2.6.0",
+ "solana-client",
+ "solana-commitment-config",
  "solana-instruction",
  "solana-keccak-hasher",
+ "solana-keypair",
  "solana-pubkey 4.2.0",
+ "solana-signer",
+ "solana-system-interface 3.2.0",
+ "solana-transaction",
 ]
 
 [[package]]

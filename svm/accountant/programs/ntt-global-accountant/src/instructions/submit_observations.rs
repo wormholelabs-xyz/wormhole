@@ -25,11 +25,11 @@ use crate::instructions::ntt_transfer::apply_ntt_transfer;
 
 /// NTT `submit_observations`. Instruction-data wire format is identical to WTT
 /// (see [`accountant_operational_core::instructions::quorum::SUBMIT_FIXED_LEN`]):
-/// `digest(32) ‖ guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)
-/// ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body`. Guardian signatures are verified
-/// against `keccak256(NTT_SUBMIT_OBSERVATION_PREFIX ‖ tx_hash ‖ body)`; the
-/// supplied `digest` (cross-checked against `double_keccak256(body)`) remains the
-/// dedup/quorum key.
+/// `guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)`
+/// [`SUBMIT_FIXED_LEN`] `‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body`. Guardian
+/// signatures are verified against `keccak256(NTT_SUBMIT_OBSERVATION_PREFIX ‖
+/// tx_hash ‖ body)`; the dedup/quorum key is `double_keccak256(body)`, derived
+/// from the body rather than received over the wire.
 ///
 /// Account layout (mirrors WTT slots 0..6, then drops the chain-registration
 /// slot for the six NTT transfer accounts):
@@ -53,8 +53,11 @@ use crate::instructions::ntt_transfer::apply_ntt_transfer;
 pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
     // ----- Parse the instruction data -----
     // Wire format (after the 1-byte dispatch discriminator):
-    //   digest(32) ‖ guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)
-    //   [SUBMIT_FIXED_LEN] ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body
+    //   guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)  [SUBMIT_FIXED_LEN]
+    //   ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body
+    // `tx_hash` is the source-chain transaction id; with the body it reconstructs
+    // the exact observation the guardian signed. The dedup/quorum digest is
+    // derived below via `double_keccak256(body_bytes)`, not read from the wire.
     const TX_HASH_LEN: usize = 32;
     if data.len() < SUBMIT_FIXED_LEN + TX_HASH_LEN + 2 {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -75,13 +78,9 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
 
-    // Dedup/quorum identity: the VAA-body digest. The supplied digest must match
-    // `double_keccak256(body)`; it keys the pending PDA, the NoReplay slot, and
-    // the commit-log record — unchanged by the signing scheme.
-    let computed = double_keccak256(body_bytes);
-    if computed != parsed.digest {
-        return Err(err(GlobalAccountantError::BodyDigestMismatch));
-    }
+    // Dedup/quorum identity: the VAA-body digest. Keys the pending PDA, the
+    // NoReplay slot, and the commit-log record — unchanged by the signing scheme.
+    parsed.digest = double_keccak256(body_bytes);
 
     // Routing tuple from the authenticated body header (never caller-supplied).
     parsed.populate_routing_from_body(body_bytes)?;
@@ -125,7 +124,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     )?;
     let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);
 
-    let action = quorum::decide_pending_action(pending_pda, &parsed)?;
+    let action = quorum::decide_pending_action(program_id, pending_pda, &parsed)?;
     let (layout, quorum_reached) = quorum::apply_action_and_accumulate(
         program_id,
         submitter,

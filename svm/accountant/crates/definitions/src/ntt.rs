@@ -486,4 +486,79 @@ mod tests {
             Err(GlobalAccountantError::InvalidInstructionData)
         );
     }
+
+    #[test]
+    fn peer_registration_rejects_truncated_payload() {
+        let mut v = Vec::new();
+        v.extend_from_slice(&TRANSCEIVER_PEER_INFO_PREFIX);
+        v.extend_from_slice(&10u16.to_be_bytes());
+        v.extend_from_slice(&[0x77; 32]);
+        // One byte short of the full peer_address.
+        assert_eq!(
+            parse_transceiver_registration(&v[..v.len() - 1]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
+        // Truncated mid-way through dest_chain.
+        assert_eq!(
+            parse_transceiver_registration(&v[..5]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
+        // Empty payload.
+        assert_eq!(
+            parse_transceiver_registration(&[]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
+    }
+
+    #[test]
+    fn transceiver_info_rejects_truncated_payload() {
+        let full = build_info(0);
+        // One byte short of the full token_decimals field.
+        assert_eq!(
+            parse_transceiver_info(&full[..full.len() - 1]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
+        // Truncated mid-way through manager_address.
+        assert_eq!(
+            parse_transceiver_info(&full[..10]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
+        // Empty payload.
+        assert_eq!(
+            parse_transceiver_info(&[]),
+            Err(GlobalAccountantError::InvalidInstructionData)
+        );
+    }
+
+    // ---- normalize_trimmed_amount edge cases ----
+
+    #[test]
+    fn normalize_decimals_zero_scales_up_to_trimmed() {
+        // 0 decimals -> 8: x10^8.
+        assert_eq!(
+            normalize_trimmed_amount(0, 5),
+            Some(Uint256::from_u128(500_000_000))
+        );
+        assert_eq!(normalize_trimmed_amount(0, 0), Some(Uint256::ZERO));
+    }
+
+    #[test]
+    fn normalize_adversarial_u64_max_scales_up_without_overflow() {
+        // decimals(0) < TRIMMED_DECIMALS(8) => amount * 10^8, well within
+        // Uint256's range.
+        let amount = u64::MAX;
+        let expected = Uint256::from_u128((amount as u128) * 100_000_000u128);
+        assert_eq!(normalize_trimmed_amount(0, amount), Some(expected));
+    }
+
+    #[test]
+    fn normalize_pow10_overflow_returns_none_not_panic_or_wrap() {
+        // decimals(86) - TRIMMED_DECIMALS(8) = 78 => pow10(78) exceeds
+        // Uint256::MAX, so the divisor overflows and the function returns None.
+        assert_eq!(normalize_trimmed_amount(86, 1), None);
+        // u8 ceiling.
+        assert_eq!(normalize_trimmed_amount(255, u64::MAX), None);
+        // decimals=85 => pow10(77) fits; boundary is exact.
+        assert!(normalize_trimmed_amount(85, 1).is_some());
+    }
 }

@@ -18,10 +18,10 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
         TransceiverHubLayout, TransceiverPeerLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CORE_BRIDGE_PROGRAM_ID, NATIVE_TOKEN_TRANSFER_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, NTT_SUBMIT_OBSERVATION_PREFIX,
-        PENDING_OBSERVATIONS_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_MESSAGE_PREFIX,
-        TRANSCEIVER_PEER_SEED_PREFIX,
+        CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED, NATIVE_TOKEN_TRANSFER_PREFIX,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        NTT_SUBMIT_OBSERVATION_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
+        TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_SEED_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -209,17 +209,17 @@ fn build_vaa_body(
 }
 
 fn submit_ix_data(
-    digest: &[u8; 32],
     guardian_set_index: u32,
     guardian_index: u8,
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // `tx_hash(32)` trails the fixed prefix; the signing digest is reconstructed
-    // on-chain from NTT prefix ‖ tx_hash ‖ body.
-    let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
+    // Wire: discriminator + 70-byte fixed prefix + tx_hash(32) + 2-byte body len
+    // (LE) + body. No digest or PDA bumps travel; the dedup digest and the
+    // routing tuple are derived on-chain from the body header [8..50], and the
+    // signing digest is reconstructed on-chain from NTT prefix ‖ tx_hash ‖ body.
+    let mut data = Vec::with_capacity(1 + 70 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
-    data.extend_from_slice(digest);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
     data.push(guardian_index);
     data.extend_from_slice(signature);
@@ -386,6 +386,14 @@ impl Scenario {
             derive_balance_account_pda(emitter_chain, hub_chain, &hub_address);
         let (dest_balance_pubkey, _) =
             derive_balance_account_pda(recipient_chain, hub_chain, &hub_address);
+        // Canonical Guardian Set PDA; verify_signature pins the guardian-set
+        // account to this address, so a non-canonical fixture would fail with
+        // InvalidPda regardless of signature validity.
+        let gsi_be = GUARDIAN_SET_INDEX.to_be_bytes();
+        let (guardian_set_pubkey, _) = Pubkey::find_program_address(
+            &[GUARDIAN_SET_SEED, &gsi_be],
+            &core_bridge_program_id(),
+        );
 
         Self {
             emitter_chain,
@@ -401,7 +409,7 @@ impl Scenario {
             guardians,
             submitter,
             pending_pda,
-            guardian_set_pubkey: Pubkey::new_from_array([0xC1u8; 32]),
+            guardian_set_pubkey,
             noreplay_bucket_pubkey,
             noreplay_authority_pubkey,
             relayer_registration_pubkey,
@@ -498,13 +506,7 @@ impl Scenario {
         let signature = sign_digest(&self.guardians[guardian_index as usize], &self.signing_digest);
         let ix = Instruction::new_with_bytes(
             program_id(),
-            &submit_ix_data(
-                &self.digest,
-                GUARDIAN_SET_INDEX,
-                guardian_index,
-                &signature,
-                &self.body,
-            ),
+            &submit_ix_data(GUARDIAN_SET_INDEX, guardian_index, &signature, &self.body),
             self.account_metas(),
         );
         mollusk.process_instruction(&ix, &starting_accounts)
@@ -797,13 +799,7 @@ fn submit_with_legacy_bare_digest_signature_is_rejected() {
     let legacy_signature = sign_digest(&scenario.guardians[0], &scenario.digest);
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            &scenario.digest,
-            GUARDIAN_SET_INDEX,
-            0,
-            &legacy_signature,
-            &scenario.body,
-        ),
+        &submit_ix_data(GUARDIAN_SET_INDEX, 0, &legacy_signature, &scenario.body),
         scenario.account_metas(),
     );
     let r = mollusk.process_instruction(&ix, &scenario.initial_accounts());

@@ -368,6 +368,125 @@ fn register_relayer_chain_wrong_governance_module_rejects() {
     }
 }
 
+/// A VAA whose emitter chain is not `SOLANA_CHAIN_ID` is rejected with
+/// `InvalidGovernanceEmitter` before the NoReplay pre-check or module/action
+/// validation are reached.
+#[test]
+fn register_relayer_chain_wrong_emitter_chain_rejects() {
+    let mollusk = mollusk();
+    let body = build_register_chain_body(
+        SOLANA_CHAIN_ID + 1, // wrong emitter chain
+        &GOVERNANCE_EMITTER,
+        0x03,
+        &RELAYER_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        2,
+        &[0x77u8; 32],
+    );
+    let r = run_register_relayer_chain(&mollusk, &body, 2, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidGovernanceEmitter as u32,
+                "expected InvalidGovernanceEmitter, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidGovernanceEmitter), got {other:?}"),
+    }
+}
+
+/// A VAA whose emitter address is not the canonical `GOVERNANCE_EMITTER` is
+/// rejected with `InvalidGovernanceEmitter`, even with the correct emitter
+/// chain.
+#[test]
+fn register_relayer_chain_wrong_emitter_address_rejects() {
+    let mollusk = mollusk();
+    let wrong_emitter = [0x02u8; 32];
+    let body = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &wrong_emitter,
+        0x04,
+        &RELAYER_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        2,
+        &[0x77u8; 32],
+    );
+    let r = run_register_relayer_chain(&mollusk, &body, 2, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidGovernanceEmitter as u32,
+                "expected InvalidGovernanceEmitter, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidGovernanceEmitter), got {other:?}"),
+    }
+}
+
+/// A VAA carrying the correct relayer governance module but a non-`0x01`
+/// action byte is rejected with `InvalidGovernanceAction`.
+#[test]
+fn register_relayer_chain_wrong_governance_action_rejects() {
+    let mollusk = mollusk();
+    let body = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x05,
+        &RELAYER_GOVERNANCE_MODULE,
+        0xFF, // not REGISTER_CHAIN_ACTION
+        0,
+        2,
+        &[0x77u8; 32],
+    );
+    let r = run_register_relayer_chain(&mollusk, &body, 2, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidGovernanceAction as u32,
+                "expected InvalidGovernanceAction, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidGovernanceAction), got {other:?}"),
+    }
+}
+
+/// A VAA whose `target_chain` is neither `Any (0)` nor `SOLANA_CHAIN_ID` is
+/// rejected with `GovernanceChainMismatch`.
+#[test]
+fn register_relayer_chain_wrong_target_chain_rejects() {
+    let mollusk = mollusk();
+    let body = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x07,
+        &RELAYER_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        SOLANA_CHAIN_ID + 1, // neither Any (0) nor Solana
+        2,
+        &[0x77u8; 32],
+    );
+    let r = run_register_relayer_chain(&mollusk, &body, 2, None, None);
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::GovernanceChainMismatch as u32,
+                "expected GovernanceChainMismatch, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(GovernanceChainMismatch), got {other:?}"),
+    }
+}
+
 /// The same governance VAA submitted twice: the second rejects via the NoReplay
 /// pre-check.
 #[test]
@@ -432,5 +551,165 @@ fn register_relayer_chain_rejects_replay() {
             );
         }
         other => panic!("expected Failure(AlreadyAccounted), got {other:?}"),
+    }
+}
+
+/// A higher-sequence VAA registering a different relayer emitter overwrites
+/// the existing `RelayerChainRegistration` PDA in place. Replaying the
+/// original, now-stale VAA afterward rejects `AlreadyAccounted`.
+#[test]
+fn register_relayer_chain_rotation_overwrites_at_higher_sequence() {
+    let mollusk = mollusk();
+    let chain_to_register: u16 = 2;
+    let emitter_a = [0x77u8; 32];
+    let emitter_b = [0xBBu8; 32];
+    let seq_n: u64 = 0x20;
+    let seq_rotate: u64 = seq_n + 1024; // distinct noreplay bucket under the real CPI
+
+    let body_a = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        seq_n,
+        &RELAYER_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        chain_to_register,
+        &emitter_a,
+    );
+    let r1 = run_register_relayer_chain(&mollusk, &body_a, chain_to_register, None, None);
+    assert!(
+        matches!(r1.program_result, ProgramResult::Success),
+        "first registration (emitter_a) must succeed, got {:?}",
+        r1.program_result
+    );
+
+    let (registration_pda, _) = derive_relayer_registration_pda(chain_to_register);
+    let post_registration_a = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == registration_pda)
+        .map(|(_, a)| a.clone())
+        .expect("registration PDA missing after first register");
+
+    // Rotate to emitter_b via a higher-sequence VAA; use a fresh noreplay
+    // bucket since seq_rotate falls in a different bucket.
+    let body_b = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        seq_rotate,
+        &RELAYER_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        chain_to_register,
+        &emitter_b,
+    );
+    let r2 = run_register_relayer_chain(
+        &mollusk,
+        &body_b,
+        chain_to_register,
+        Some(post_registration_a),
+        Some(noreplay_bucket_unmarked()),
+    );
+    assert!(
+        matches!(r2.program_result, ProgramResult::Success),
+        "rotation to emitter_b must succeed, got {:?}",
+        r2.program_result
+    );
+    let post_registration_b = r2
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| *k == registration_pda)
+        .map(|(_, a)| a.clone())
+        .expect("registration PDA missing after rotation");
+    assert_eq!(
+        post_registration_b.owner,
+        program_id(),
+        "registration PDA still program-owned after rotation"
+    );
+    let layout: &RelayerChainRegistrationLayout = bytemuck::from_bytes(&post_registration_b.data);
+    assert_eq!(
+        layout.emitter_address, emitter_b,
+        "registration overwritten to point at the new relayer emitter"
+    );
+
+    // Replaying the ORIGINAL emitter_a@seq_n VAA against the rotated state
+    // rejects AlreadyAccounted (the seq_n bucket was flipped by the first call).
+    let (noreplay_authority_pubkey, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
+    let marked_bucket_n = r1
+        .resulting_accounts
+        .iter()
+        .find(|(k, _)| {
+            *k == derive_canonical_noreplay_bucket(
+                &noreplay_authority_pubkey,
+                SOLANA_CHAIN_ID,
+                &GOVERNANCE_EMITTER,
+                seq_n,
+            )
+        })
+        .map(|(_, a)| a.clone())
+        .expect("seq_n bucket missing after first register");
+    let r3 = run_register_relayer_chain(
+        &mollusk,
+        &body_a,
+        chain_to_register,
+        Some(post_registration_b),
+        Some(marked_bucket_n),
+    );
+    match r3.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::AlreadyAccounted as u32,
+                "replay of the stale emitter_a VAA must reject AlreadyAccounted, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(AlreadyAccounted), got {other:?}"),
+    }
+}
+
+/// An existing, program-owned `RelayerChainRegistration` PDA with a corrupted
+/// (too-short) data length rejects with `InvalidPda`.
+#[test]
+fn register_relayer_chain_corrupted_existing_pda_wrong_length_rejects() {
+    let mollusk = mollusk();
+    let chain_to_register: u16 = 2;
+    let body = build_register_chain_body(
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        0x25,
+        &RELAYER_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        0,
+        chain_to_register,
+        &[0x77u8; 32],
+    );
+
+    let corrupted_registration = Account {
+        lamports: 1_000_000,
+        data: vec![0u8; RelayerChainRegistrationLayout::LEN - 1],
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let r = run_register_relayer_chain(
+        &mollusk,
+        &body,
+        chain_to_register,
+        Some(corrupted_registration),
+        None,
+    );
+    match r.program_result {
+        ProgramResult::Failure(err) => {
+            let code = u64::from(err) as u32;
+            assert_eq!(
+                code,
+                GlobalAccountantError::InvalidPda as u32,
+                "expected InvalidPda for a corrupted existing registration PDA, got {code:?}"
+            );
+        }
+        other => panic!("expected Failure(InvalidPda), got {other:?}"),
     }
 }

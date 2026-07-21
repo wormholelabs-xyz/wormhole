@@ -51,6 +51,14 @@ sha2 = "=0.10.9"
 # Loads the mainnet-vector corpus (`tests/fixtures/ntt_test_vectors.json`)
 # consumed by `tests/test_vectors.rs`. Already pinned in the workspace lockfile.
 serde_json.workspace = true
+# Surfpool E2E lifecycle test — talks to a subprocess `surfpool start` over
+# JSON-RPC. Mirrors the WTT `global-accountant` crate's dev-dependency set.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
 
 [lints]
 workspace = true

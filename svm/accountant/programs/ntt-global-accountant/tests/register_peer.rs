@@ -319,6 +319,237 @@ fn expect_failure(r: &mollusk_svm::result::InstructionResult, expected: GlobalAc
     }
 }
 
+/// Variant of `run_register_peer` that lets a test override the wire-supplied
+/// `this_hub_bump` / `peer_bump` independently of the canonical values, to
+/// exercise the on-chain bump-mismatch rejections.
+fn run_register_peer_with_bumps(
+    mollusk: &Mollusk,
+    s: &PeerScenario,
+    this_hub_bump_override: Option<u8>,
+    peer_bump_override: Option<u8>,
+) -> mollusk_svm::result::InstructionResult {
+    let body = build_peer_body(
+        s.emitter_chain,
+        &s.emitter_address,
+        s.sequence,
+        s.dest_chain,
+        &s.peer_address,
+    );
+    let (peer_hub_pda, _) = derive_hub_pda(s.dest_chain, &s.peer_address);
+    let (own_hub_pda, own_hub_bump) = derive_hub_pda(s.emitter_chain, &s.emitter_address);
+    let (peer_pda, peer_bump) = derive_peer_pda(s.emitter_chain, &s.emitter_address, s.dest_chain);
+
+    let payer = Pubkey::new_from_array([0x11u8; 32]);
+    let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
+    let (guardian_set, guardian_set_bump) =
+        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+    let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
+    let digest = double_keccak256_host(&body);
+    let (noreplay_authority, _) =
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
+    let noreplay_bucket = derive_canonical_noreplay_bucket(
+        &noreplay_authority,
+        s.emitter_chain,
+        &s.emitter_address,
+        s.sequence,
+    );
+
+    let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
+        .map(|i| (i, sign_digest(&guardians[i as usize], &digest)))
+        .collect();
+    let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
+
+    let accounts = vec![
+        (payer, system_owned_account(50_000_000_000)),
+        keyed_account_for_verify_vaa_shim_program(),
+        (
+            guardian_set,
+            guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id()),
+        ),
+        (
+            guardian_signatures,
+            guardian_signatures_account(GUARDIAN_SET_INDEX, &payer, &sigs, &shim_program_id()),
+        ),
+        (
+            peer_hub_pda,
+            s.peer_hub.clone().unwrap_or_else(uninitialised_pda_account),
+        ),
+        (
+            own_hub_pda,
+            s.own_hub.clone().unwrap_or_else(uninitialised_pda_account),
+        ),
+        (
+            peer_pda,
+            s.peer.clone().unwrap_or_else(uninitialised_pda_account),
+        ),
+        (noreplay_bucket, system_owned_account(0)),
+        keyed_account_for_noreplay_program(),
+        (noreplay_authority, system_owned_account(0)),
+        keyed_account_for_system_program(),
+    ];
+    let metas = build_metas(
+        payer,
+        guardian_set,
+        guardian_signatures,
+        peer_hub_pda,
+        own_hub_pda,
+        peer_pda,
+        noreplay_bucket,
+        noreplay_authority,
+    );
+    let ix = Instruction::new_with_bytes(
+        program_id(),
+        &register_peer_ix_data(
+            guardian_set_bump,
+            this_hub_bump_override.unwrap_or(own_hub_bump),
+            peer_bump_override.unwrap_or(peer_bump),
+            &body,
+        ),
+        metas,
+    );
+    mollusk.process_instruction(&ix, &accounts)
+}
+
+/// A non-canonical `peer_bump` (wrong bump value for an otherwise-valid peer
+/// PDA address) rejects with `InvalidPda`, regardless of the adopt/match
+/// branch outcome — the bump check runs before either.
+#[test]
+fn register_peer_non_canonical_peer_bump_rejects() {
+    let mollusk = mollusk();
+    let emitter_chain = 2;
+    let emitter_address = [0xAAu8; 32];
+    let dest_chain = 4;
+    let peer_address = [0xBBu8; 32];
+    let peer_hub = hub_account(dest_chain, &peer_address, dest_chain, &peer_address);
+
+    let s = PeerScenario {
+        emitter_chain,
+        emitter_address,
+        sequence: 0x07,
+        dest_chain,
+        peer_address,
+        peer_hub: Some(peer_hub),
+        own_hub: None,
+        peer: None,
+    };
+    let (_, canonical_peer_bump) = derive_peer_pda(emitter_chain, &emitter_address, dest_chain);
+    let r = run_register_peer_with_bumps(
+        &mollusk,
+        &s,
+        None,
+        Some(canonical_peer_bump.wrapping_sub(1)),
+    );
+    expect_failure(&r, GlobalAccountantError::InvalidPda);
+}
+
+/// A non-canonical `this_hub_bump` in the adopt branch (source has no known
+/// hub and the peer is itself a hub) rejects with `InvalidPda` before the own
+/// hub PDA is initialised.
+#[test]
+fn register_peer_non_canonical_this_hub_bump_rejects() {
+    let mollusk = mollusk();
+    let emitter_chain = 2;
+    let emitter_address = [0xAAu8; 32];
+    let dest_chain = 4;
+    let peer_address = [0xBBu8; 32];
+    // Peer's hub points at itself => adopt branch is taken.
+    let peer_hub = hub_account(dest_chain, &peer_address, dest_chain, &peer_address);
+
+    let s = PeerScenario {
+        emitter_chain,
+        emitter_address,
+        sequence: 0x08,
+        dest_chain,
+        peer_address,
+        peer_hub: Some(peer_hub),
+        own_hub: None,
+        peer: None,
+    };
+    let (_, canonical_own_hub_bump) = derive_hub_pda(emitter_chain, &emitter_address);
+    let r = run_register_peer_with_bumps(
+        &mollusk,
+        &s,
+        Some(canonical_own_hub_bump.wrapping_sub(1)),
+        None,
+    );
+    expect_failure(&r, GlobalAccountantError::InvalidPda);
+}
+
+/// The source's own hub PDA is program-owned (so the "already has a hub"
+/// branch is taken) but its data is a truncated length — `read_hub` rejects
+/// with `InvalidPda` before comparing hub identities.
+#[test]
+fn register_peer_corrupted_own_hub_wrong_length_rejects() {
+    let mollusk = mollusk();
+    let emitter_chain = 2;
+    let emitter_address = [0xAAu8; 32];
+    let dest_chain = 4;
+    let peer_address = [0xBBu8; 32];
+    let peer_hub = hub_account(dest_chain, &peer_address, 9, &[0xCCu8; 32]);
+
+    // Program-owned own-hub PDA, but truncated (one byte short of the full
+    // TransceiverHubLayout).
+    let corrupted_own_hub = Account {
+        lamports: 2_000_000,
+        data: vec![0u8; TransceiverHubLayout::LEN - 1],
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let s = PeerScenario {
+        emitter_chain,
+        emitter_address,
+        sequence: 0x09,
+        dest_chain,
+        peer_address,
+        peer_hub: Some(peer_hub),
+        own_hub: Some(corrupted_own_hub),
+        peer: None,
+    };
+    let r = run_register_peer(&mollusk, &s);
+    expect_failure(&r, GlobalAccountantError::InvalidPda);
+}
+
+/// The source's own hub PDA is program-owned and correctly sized, but stamped
+/// with the wrong account-type tag — `read_hub` rejects with `InvalidPda`.
+#[test]
+fn register_peer_corrupted_own_hub_wrong_tag_rejects() {
+    let mollusk = mollusk();
+    let emitter_chain = 2;
+    let emitter_address = [0xAAu8; 32];
+    let dest_chain = 4;
+    let peer_address = [0xBBu8; 32];
+    let peer_hub = hub_account(dest_chain, &peer_address, 9, &[0xCCu8; 32]);
+
+    let mut layout: TransceiverHubLayout = bytemuck::Zeroable::zeroed();
+    layout.tag = TransceiverHubLayout::TAG.wrapping_add(1); // wrong tag
+    layout.chain = emitter_chain;
+    layout.hub_chain = 9;
+    layout.address = emitter_address;
+    layout.hub_address = [0xCCu8; 32];
+    let corrupted_own_hub = Account {
+        lamports: 2_000_000,
+        data: bytemuck::bytes_of(&layout).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+
+    let s = PeerScenario {
+        emitter_chain,
+        emitter_address,
+        sequence: 0x0A,
+        dest_chain,
+        peer_address,
+        peer_hub: Some(peer_hub),
+        own_hub: Some(corrupted_own_hub),
+        peer: None,
+    };
+    let r = run_register_peer(&mollusk, &s);
+    expect_failure(&r, GlobalAccountantError::InvalidPda);
+}
+
 /// Adopt case: the source transceiver has no known hub, and the peer it is
 /// registering IS its own hub (peer_hub points at the peer). The source adopts
 /// the peer as its hub and the peer PDA is written.

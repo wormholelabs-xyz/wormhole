@@ -4,8 +4,11 @@
 //! upgrades) the `RelayerChainRegistration` PDA that the NTT transfer flow
 //! cross-checks the relayer emitter against (relayer-detection step of
 //! `handle_observation`). Re-registration uses a fresh VAA at a higher
-//! sequence; the NoReplay bit prevents reusing an old sequence to undo a
-//! rotation. Accepts `Any (0)` or `SOLANA_CHAIN_ID` as target_chain.
+//! sequence; the NoReplay bit only prevents re-applying a sequence that has
+//! already been consumed — it does not order VAAs, so an older, never-submitted
+//! governance VAA can still be applied after a newer one and revert a rotation
+//! (matches CosmWasm's existing behavior). Accepts `Any (0)` or
+//! `SOLANA_CHAIN_ID` as target_chain.
 //!
 //! Near-identical to the WTT `register_chain` handler; the divergences are the
 //! governance module (`RELAYER_GOVERNANCE_MODULE` rather than the Token Bridge
