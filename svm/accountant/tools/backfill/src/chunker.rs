@@ -2,13 +2,20 @@
 //!
 //! ## Wire budget primer
 //!
-//! Solana's 1232-byte tx wire limit caps how many entries fit in one ix.
-//! Empirically validated at 100k-transfer scale via
-//! `programs/global-accountant-backfill/tests/surfpool_e2e_cost_probe_at_scale.rs`:
+//! Solana's [`PACKET_DATA_SIZE`]-byte (1232) tx wire limit caps how many
+//! entries fit in one ix.
 //!
-//! - **BackfillNoReplay**: 18 same-emitter entries per tx, safe across the 2-3
-//!   bucket-span cases. Chunks larger than that risk wire overflow when the
-//!   batch straddles a 1024-sequence bucket boundary.
+//! - **BackfillNoReplay**: bucket-aware. A flat entry-count cap alone is NOT
+//!   a safe bound — an 18-entry same-emitter chunk that happens to straddle
+//!   18 distinct 1024-sequence buckets serializes to 1621 bytes, 389 over
+//!   the limit (each additional unique bucket costs one more 32-byte account
+//!   meta). `collect_transfers` therefore tracks the running unique-bucket
+//!   count as it packs and, before accepting each candidate entry, measures
+//!   the EXACT wire size the resulting tx would have (see
+//!   [`noreplay_wire_size`]) — entries are packed up to
+//!   [`MAX_NOREPLAY_ENTRIES_PER_CHUNK`] as a secondary cap, but never past
+//!   the point where the real serialized tx would exceed
+//!   [`PACKET_DATA_SIZE`].
 //! - **BackfillBalance**: 8 entries per tx. Each entry adds one writable
 //!   account meta to the account list — the binding constraint here is the
 //!   account-list size, not the data.
@@ -21,21 +28,97 @@
 //! 2. Closes the current chunk on any of three transitions:
 //!    a. Kind changes (account → transfer etc.)
 //!    b. Emitter changes (within a transfer run)
-//!    c. Chunk hits its kind-specific size cap
+//!    c. Chunk hits its kind-specific size cap (entry count and/or wire size)
 //! 3. Yields `Modification` / `Registration` records as single-record
 //!    `Deferred*` chunks — they require the operational program (Phase 7) and
 //!    are passed through here without packing.
 
+use std::collections::HashSet;
 use std::iter::Peekable;
+
+use solana_hash::Hash;
+use solana_instruction::{AccountMeta, Instruction};
+use solana_message::Message;
+use solana_pubkey::Pubkey;
+use solana_transaction::Transaction;
+
+use global_accountant_definitions::NOREPLAY_BITS_PER_BUCKET;
 
 use crate::catalogue::{
     AccountRecord, ModificationRecord, Record, RegistrationRecord, RelayerChainRegistrationRecord,
     TransceiverHubRecord, TransceiverPeerRecord, TransferRecord,
 };
 
-/// Maximum `BackfillNoReplay` entries per tx. Empirical limit from the
-/// at-scale probe — see module docs.
+/// Solana's raw transaction wire limit. Any transaction larger than this is
+/// rejected outright by every validator — this is the hard ceiling the
+/// chunker's `BackfillNoReplay` packing must never cross.
+pub const PACKET_DATA_SIZE: usize = 1232;
+
+/// Secondary/backstop cap on `BackfillNoReplay` entries per tx, from the
+/// at-scale probe's common case (few buckets per emitter). This is NOT the
+/// primary correctness bound any more — [`collect_transfers`] additionally
+/// (and more strictly, when the batch spans many buckets) checks the real
+/// wire size via [`noreplay_wire_size`] against [`PACKET_DATA_SIZE`] before
+/// accepting each candidate entry. See the module doc's wire-budget primer.
 pub const MAX_NOREPLAY_ENTRIES_PER_CHUNK: usize = 18;
+
+/// Fixed accounts every `BackfillNoReplay` ix carries regardless of entry or
+/// bucket count: payer, noreplay program, noreplay-authority PDA, system
+/// program. Mirrors `tx_builder::build_backfill_noreplay_ix`'s account list.
+const NOREPLAY_FIXED_ACCOUNTS: usize = 4;
+
+/// Top-level fixed wire-data head: `disc(1) + group_count(1)`.
+const NOREPLAY_FIXED_DATA_HEADER_BYTES: usize = 1 + 1;
+
+/// Group header: `chain(2) + emitter(32) + entry_count(1)`. `collect_transfers`
+/// only ever packs entries sharing one `(chain, emitter)` key, so a chunk's
+/// data is always exactly one group — see `tx_builder`'s wire format doc.
+const NOREPLAY_GROUP_HEADER_BYTES: usize = 2 + 32 + 1;
+
+/// Per-entry payload inside a group: `sequence(8) + digest(32)`.
+const NOREPLAY_ENTRY_DATA_BYTES: usize = 8 + 32;
+
+/// Exact `BackfillNoReplay` ix-data length for `entry_count` entries packed
+/// into a single group (see [`NOREPLAY_GROUP_HEADER_BYTES`]).
+const fn noreplay_data_len(entry_count: usize) -> usize {
+    NOREPLAY_FIXED_DATA_HEADER_BYTES + NOREPLAY_GROUP_HEADER_BYTES + entry_count * NOREPLAY_ENTRY_DATA_BYTES
+}
+
+/// Exact serialized wire size of a `BackfillNoReplay` tx carrying
+/// `bucket_count` unique noreplay buckets and `entry_count` transfer
+/// entries (single-group, per `collect_transfers`'s packing invariant).
+///
+/// Builds a throwaway [`Instruction`] shaped exactly like the real one
+/// (same account count, same data length) out of distinct dummy pubkeys —
+/// `Message::new_with_blockhash` deduplicates identical account keys, so
+/// distinct dummy values are needed for an accurate account count — and
+/// serializes it through the real `Message`/`Transaction` wire path, the
+/// same short_vec-encoded format actually sent over the wire.
+/// `Transaction::new_unsigned` fills a correctly-sized dummy signature, so
+/// no signing is needed.
+fn noreplay_wire_size(bucket_count: usize, entry_count: usize) -> usize {
+    let num_accounts = NOREPLAY_FIXED_ACCOUNTS + bucket_count;
+    let data_len = noreplay_data_len(entry_count);
+
+    let payer = Pubkey::new_from_array([0u8; 32]);
+    let mut accounts = Vec::with_capacity(num_accounts);
+    accounts.push(AccountMeta::new(payer, true));
+    for i in 1..num_accounts {
+        let mut key = [0u8; 32];
+        key[..8].copy_from_slice(&(i as u64).to_le_bytes());
+        accounts.push(AccountMeta::new_readonly(Pubkey::new_from_array(key), false));
+    }
+    let ix = Instruction {
+        program_id: Pubkey::new_from_array([0xFFu8; 32]),
+        accounts,
+        data: vec![0u8; data_len],
+    };
+    let message = Message::new_with_blockhash(std::slice::from_ref(&ix), Some(&payer), &Hash::default());
+    let tx = Transaction::new_unsigned(message);
+    bincode::serialize(&tx)
+        .expect("serializing a well-formed Transaction cannot fail")
+        .len()
+}
 
 /// Maximum `BackfillBalance` entries per tx. Empirical limit from the cost
 /// probe — see module docs.
@@ -173,19 +256,44 @@ impl<I: Iterator<Item = Record>> Iterator for Chunker<I> {
 }
 
 impl<I: Iterator<Item = Record>> Chunker<I> {
-    /// Greedy-pack consecutive same-`(chain, emitter)` transfers up to the
-    /// `BackfillNoReplay` cap.
+    /// Greedy-pack consecutive same-`(chain, emitter)` transfers, bounded by
+    /// BOTH the `BackfillNoReplay` entry-count cap AND — the primary,
+    /// correctness-critical bound — the real Solana packet-size limit.
+    ///
+    /// A flat entry-count cap alone is not safe: entries from the same
+    /// emitter can land in different 1024-sequence noreplay buckets, and
+    /// each additional unique bucket costs one more 32-byte account meta in
+    /// the built ix (see the module doc's wire-budget primer). So before
+    /// accepting each candidate entry, this tracks the running set of
+    /// unique buckets in the chunk so far and checks the EXACT wire size
+    /// the resulting tx would have via [`noreplay_wire_size`] — an entry is
+    /// only packed if the chunk (including it) would still serialize
+    /// within [`PACKET_DATA_SIZE`].
     fn collect_transfers(&mut self, first: TransferRecord) -> Vec<TransferRecord> {
         let key = (first.chain, first.emitter);
+        let mut buckets: HashSet<u64> = HashSet::new();
+        buckets.insert(first.sequence / NOREPLAY_BITS_PER_BUCKET);
         let mut chunk = Vec::with_capacity(MAX_NOREPLAY_ENTRIES_PER_CHUNK);
         chunk.push(first);
         while chunk.len() < MAX_NOREPLAY_ENTRIES_PER_CHUNK {
-            let take = matches!(
-                self.source.peek(),
-                Some(Record::Transfer(next)) if (next.chain, next.emitter) == key
-            );
-            if !take {
+            let Some(Record::Transfer(next)) = self.source.peek() else {
                 break;
+            };
+            if (next.chain, next.emitter) != key {
+                break;
+            }
+            let candidate_bucket = next.sequence / NOREPLAY_BITS_PER_BUCKET;
+            let is_new_bucket = !buckets.contains(&candidate_bucket);
+            let candidate_bucket_count = buckets.len() + usize::from(is_new_bucket);
+            let candidate_entry_count = chunk.len() + 1;
+            if noreplay_wire_size(candidate_bucket_count, candidate_entry_count) > PACKET_DATA_SIZE
+            {
+                // Accepting this entry would push the real serialized tx
+                // over the packet limit — close the chunk here instead.
+                break;
+            }
+            if is_new_bucket {
+                buckets.insert(candidate_bucket);
             }
             match self.source.next() {
                 Some(Record::Transfer(t)) => chunk.push(t),

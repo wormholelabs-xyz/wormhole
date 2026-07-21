@@ -472,6 +472,112 @@ fn transceiver_peers_split_on_non_ascending_key() {
     assert_eq!(chunks.len(), 2);
 }
 
+// ============================================================================
+// Bucket-boundary-straddling wire-size edge the module doc warns about: 18
+// same-emitter entries, one per noreplay bucket, is the maximum possible
+// bucket span for what used to be an 18-entry chunk cap.
+// ============================================================================
+
+#[test]
+fn eighteen_entries_spanning_eighteen_buckets_is_the_untested_wire_size_edge() {
+    use ga_backfill::chunker::PACKET_DATA_SIZE;
+    use ga_backfill::tx_builder::{build_backfill_noreplay_ix, BackfillCtx};
+    use global_accountant_definitions::NOREPLAY_BITS_PER_BUCKET;
+    use solana_hash::Hash;
+    use solana_keypair::Keypair;
+    use solana_signer::Signer;
+    use solana_transaction::Transaction;
+
+    // 18 entries, same (chain, emitter), each in its own bucket — the
+    // maximum possible bucket span for an 18-entry same-emitter chunk.
+    let input: Vec<Record> = (0..MAX_NOREPLAY_ENTRIES_PER_CHUNK as u64)
+        .map(|i| {
+            let mut t = make_transfer(1, 0xAA, i * NOREPLAY_BITS_PER_BUCKET);
+            t.digest[0] = i as u8; // distinguish entries
+            Record::Transfer(t)
+        })
+        .collect();
+    let chunks: Vec<ChunkPlan> = Chunker::new(input.into_iter()).collect();
+
+    // Bucket-aware chunker must split this batch instead of packing all 18
+    // entries into one chunk.
+    assert!(
+        chunks.len() > 1,
+        "expected the bucket-aware chunker to split the worst-case batch \
+         into more than one chunk, got {} chunk(s)",
+        chunks.len()
+    );
+
+    let mut total_entries = 0usize;
+    let authority = ga_backfill::tx_builder::backfill_authority_pubkey();
+    let payer = Keypair::new_from_array([1u8; 32]); // matches BACKFILL_AUTHORITY
+    for (i, chunk) in chunks.iter().enumerate() {
+        let ChunkPlan::BackfillNoReplay(transfers) = chunk else {
+            panic!("expected BackfillNoReplay, got {chunk:?}");
+        };
+        total_entries += transfers.len();
+
+        // Every emitted chunk's real, signed wire size must stay within
+        // the packet limit.
+        let ctx = BackfillCtx::new(solana_pubkey::Pubkey::new_unique(), authority);
+        let ix = build_backfill_noreplay_ix(&ctx, transfers);
+        let tx = Transaction::new_signed_with_payer(
+            std::slice::from_ref(&ix),
+            Some(&payer.pubkey()),
+            &[&payer],
+            Hash::new_from_array([7u8; 32]),
+        );
+        let wire_size = bincode::serialize(&tx).expect("serialize tx").len();
+        eprintln!(
+            "[wire-size] chunk {i}: {} entries, {} accounts, {wire_size} bytes \
+             (PACKET_DATA_SIZE = {PACKET_DATA_SIZE})",
+            transfers.len(),
+            ix.accounts.len(),
+        );
+        assert!(
+            wire_size <= PACKET_DATA_SIZE,
+            "GAP WOULD BE REINTRODUCED: chunk {i} ({} entries) serializes to \
+             {wire_size} bytes, over PACKET_DATA_SIZE ({PACKET_DATA_SIZE}) — \
+             the bucket-aware bound in collect_transfers is not holding",
+            transfers.len()
+        );
+    }
+    assert_eq!(
+        total_entries, MAX_NOREPLAY_ENTRIES_PER_CHUNK,
+        "every input entry must still be emitted exactly once, just spread \
+         across more chunks"
+    );
+
+    // Boundary check: packing all 18 entries into a single chunk must
+    // still overflow the packet limit.
+    let ctx = BackfillCtx::new(solana_pubkey::Pubkey::new_unique(), authority);
+    let all: Vec<TransferRecord> = chunks
+        .iter()
+        .flat_map(|c| match c {
+            ChunkPlan::BackfillNoReplay(e) => e.clone(),
+            _ => unreachable!(),
+        })
+        .collect();
+    let unified_ix = build_backfill_noreplay_ix(&ctx, &all);
+    let unified_tx = Transaction::new_signed_with_payer(
+        std::slice::from_ref(&unified_ix),
+        Some(&payer.pubkey()),
+        &[&payer],
+        Hash::new_from_array([7u8; 32]),
+    );
+    let unified_wire_size = bincode::serialize(&unified_tx).expect("serialize tx").len();
+    assert_eq!(
+        unified_wire_size, 1621,
+        "if this changes, the wire-size math changed — re-verify against \
+         PACKET_DATA_SIZE (1232) and update this pinned reference value"
+    );
+    assert!(
+        unified_wire_size > PACKET_DATA_SIZE,
+        "the original gap (all 18 packed as one chunk) must still measure \
+         as an overflow — otherwise this test no longer proves anything"
+    );
+}
+
 #[test]
 fn ntt_kind_transition_closes_chunk() {
     // relayer → hub → peer: three distinct chunks, no cross-kind packing.

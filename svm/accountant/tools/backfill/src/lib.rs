@@ -7,6 +7,7 @@ pub mod balance_reconcile;
 pub mod catalogue;
 pub mod chunker;
 pub mod cursor;
+pub mod preflight;
 pub mod reconcile;
 pub mod stats;
 pub mod submitter;

@@ -21,11 +21,27 @@ const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct SurfpoolOptions {
     pub scratch_prefix: &'static str,
+    /// Validator slot time in milliseconds. Default (100) matches every
+    /// existing e2e test's assumption of a fast local validator. Tests that
+    /// need a reliable "still mid-flight" window can slow this down
+    /// instead of racing a fixed sleep against machine speed.
+    pub slot_time_ms: u16,
 }
 
 impl SurfpoolOptions {
     pub fn offline(scratch_prefix: &'static str) -> Self {
-        Self { scratch_prefix }
+        Self {
+            scratch_prefix,
+            slot_time_ms: 100,
+        }
+    }
+
+    /// As [`Self::offline`], but with a slower slot time — see the field doc.
+    pub fn offline_with_slot_time_ms(scratch_prefix: &'static str, slot_time_ms: u16) -> Self {
+        Self {
+            scratch_prefix,
+            slot_time_ms,
+        }
     }
 }
 
@@ -110,7 +126,7 @@ pub fn start_surfpool(opts: SurfpoolOptions) -> SurfpoolGuard {
         .arg("--studio-port")
         .arg(studio_port.to_string())
         .arg("--slot-time")
-        .arg("100")
+        .arg(opts.slot_time_ms.to_string())
         .arg("--log-level")
         .arg("warn")
         .arg("--offline")

@@ -1,12 +1,20 @@
 //! Unit tests for the reconciliation comparison logic.
 //!
-//! The fetch path (gPA) is integration-tested via Phase 9's surfpool e2e.
+//! The on-chain fetch path (gPA) against a *real validator* is
+//! integration-tested via Phase 9's surfpool e2e. The NTT decode-closure
+//! tests further down exercise the same fetch path's byte-offset parsing
+//! against a mock RPC instead, since surfpool e2e coverage is `#[ignore]`d
+//! and heavy — these give fast, always-on coverage of the parsing itself.
+
+mod common;
 
 use std::collections::HashMap;
 
 use ga_backfill::reconcile::{
-    compare_balances, compare_maps, load_expected_balances, load_expected_relayer_registrations,
-    load_expected_transceiver_hubs, load_expected_transceiver_peers, BalanceKey, BalanceValue,
+    compare_balances, compare_maps, fetch_on_chain_relayer_registrations,
+    fetch_on_chain_transceiver_hubs, fetch_on_chain_transceiver_peers, load_expected_balances,
+    load_expected_relayer_registrations, load_expected_transceiver_hubs,
+    load_expected_transceiver_peers, BalanceKey, BalanceValue,
 };
 
 fn key(chain: u16, token_chain: u16, addr_seed: u8) -> BalanceKey {
@@ -200,4 +208,157 @@ fn loads_ntt_maps_from_fixture() {
         4u16,
     )];
     assert_eq!(peer_address[31], 0x77);
+}
+
+// Loads a real file into `load_expected_balances`, then compares it against
+// a deliberately-wrong "actual" map — proving the on-disk (chain,
+// token_chain, token_address) key doesn't get mis-assembled or collided
+// when it flows through to a comparison.
+
+#[test]
+fn load_expected_balances_from_real_file_does_not_miskey_or_collide_similar_records() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let path = tmp.path().join("catalogue.jsonl");
+    // Three rows sharing components in a way that WOULD collide under a
+    // mis-keyed loader: rows 1 and 2 share the same token_address with
+    // (chain, token_chain) swapped; row 3 shares (chain, token_chain) with
+    // row 1 but a different token_address.
+    let jsonl = concat!(
+        "{\"kind\":\"account\",\"chain\":1,\"token_chain\":2,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"balance\":\"0x0000000000000000000000000000000000000000000000000000000000000064\"}\n",
+        "{\"kind\":\"account\",\"chain\":2,\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"balance\":\"0x00000000000000000000000000000000000000000000000000000000000000c8\"}\n",
+        "{\"kind\":\"account\",\"chain\":1,\"token_chain\":2,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000bb\",\"balance\":\"0x00000000000000000000000000000000000000000000000000000000000001f4\"}\n",
+    );
+    std::fs::write(&path, jsonl).expect("write catalogue");
+
+    let expected = load_expected_balances(&path).expect("load");
+    assert_eq!(
+        expected.len(),
+        3,
+        "3 distinct (chain, token_chain, token_address) keys must not collide \
+         into fewer entries"
+    );
+
+    let addr = |seed: u8| {
+        let mut a = [0u8; 32];
+        a[31] = seed;
+        a
+    };
+    assert_eq!(expected[&(1u16, 2u16, addr(0xaa))][31], 0x64);
+    assert_eq!(expected[&(2u16, 1u16, addr(0xaa))][31], 0xc8);
+    assert_eq!(expected[&(1u16, 2u16, addr(0xbb))][31], 0xf4);
+
+    // Deliberately-wrong "actual" (on-chain) map: correct keys but one
+    // wrong value, and one key entirely missing.
+    let mut actual = HashMap::new();
+    actual.insert((1u16, 2u16, addr(0xaa)), value(0x64)); // matches
+    actual.insert((2u16, 1u16, addr(0xaa)), value(0xFF)); // wrong value
+    // (1, 2, 0xbb) missing entirely from "on-chain" state.
+
+    let report = compare_balances(&expected, &actual);
+    assert_eq!(report.matched, 1);
+    assert_eq!(report.mismatched.len(), 1);
+    assert_eq!(report.mismatched[0].key, (2u16, 1u16, addr(0xaa)));
+    assert_eq!(report.missing_from_chain, vec![(1u16, 2u16, addr(0xbb))]);
+    assert!(report.unexpected_on_chain.is_empty());
+}
+
+// NTT decode-closure byte-offset parsing, via a mock `getProgramAccounts`.
+// `fetch_on_chain_relayer_registrations` / `_transceiver_hubs` / `_peers`
+// each embed their decode logic as an inline closure with no standalone
+// testable function, so these drive the real public fetch functions
+// against `tests/common/mock_rpc.rs` rather than reimplementing the
+// byte-offset parsing a second time in the test.
+
+fn le16(v: u16) -> [u8; 2] {
+    v.to_le_bytes()
+}
+
+#[tokio::test]
+async fn fetch_relayer_registrations_decodes_real_byte_layout() {
+    // Layout (64B): tag@0, _pad0@1, chain@2 (LE u16), _padding@4 (28B),
+    // emitter_address@32 (32B).
+    let mut data = vec![0u8; 64];
+    data[0] = 5; // AccountTag::RelayerChainRegistration
+    data[2..4].copy_from_slice(&le16(42));
+    data[32..64].fill(0x9); // recognisable emitter pattern
+    data[63] = 0x77; // distinguishable tail byte
+
+    let program_id = solana_pubkey::Pubkey::new_unique();
+    let pda = solana_pubkey::Pubkey::new_unique();
+    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
+        common::mock_rpc::keyed_account_json(&pda, &program_id, &data),
+    ]);
+    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
+
+    let map = fetch_on_chain_relayer_registrations(&rpc, &program_id)
+        .await
+        .expect("fetch");
+    assert_eq!(map.len(), 1);
+    let emitter = map.get(&42u16).expect("chain 42 present");
+    assert_eq!(emitter[0], 0x9);
+    assert_eq!(emitter[31], 0x77);
+}
+
+#[tokio::test]
+async fn fetch_transceiver_hubs_decodes_real_byte_layout() {
+    // Layout (70B): tag@0, _pad0@1, chain@2 (LE u16), hub_chain@4 (LE u16),
+    // address@6 (32B), hub_address@38 (32B).
+    let mut data = vec![0u8; 70];
+    data[0] = 6; // AccountTag::TransceiverHub
+    data[2..4].copy_from_slice(&le16(11));
+    data[4..6].copy_from_slice(&le16(22));
+    data[6..38].fill(0xAB);
+    data[6] = 0x01; // distinguish first byte of address from fill pattern
+    data[38..70].fill(0xCD);
+    data[69] = 0x02;
+
+    let program_id = solana_pubkey::Pubkey::new_unique();
+    let pda = solana_pubkey::Pubkey::new_unique();
+    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
+        common::mock_rpc::keyed_account_json(&pda, &program_id, &data),
+    ]);
+    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
+
+    let map = fetch_on_chain_transceiver_hubs(&rpc, &program_id)
+        .await
+        .expect("fetch");
+    assert_eq!(map.len(), 1);
+    let mut expected_address = [0xABu8; 32];
+    expected_address[0] = 0x01;
+    let (hub_chain, hub_address) = map
+        .get(&(11u16, expected_address))
+        .expect("(chain=11, address) present");
+    assert_eq!(*hub_chain, 22);
+    assert_eq!(hub_address[0], 0xCD);
+    assert_eq!(hub_address[31], 0x02);
+}
+
+#[tokio::test]
+async fn fetch_transceiver_peers_decodes_real_byte_layout() {
+    // Layout (70B): tag@0, _pad0@1, chain@2 (LE u16), dest_chain@4 (LE u16),
+    // address@6 (32B), peer_address@38 (32B).
+    let mut data = vec![0u8; 70];
+    data[0] = 7; // AccountTag::TransceiverPeer
+    data[2..4].copy_from_slice(&le16(3));
+    data[4..6].copy_from_slice(&le16(4));
+    data[6..38].fill(0xEE);
+    data[38..70].fill(0xFA);
+    data[69] = 0x55;
+
+    let program_id = solana_pubkey::Pubkey::new_unique();
+    let pda = solana_pubkey::Pubkey::new_unique();
+    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
+        common::mock_rpc::keyed_account_json(&pda, &program_id, &data),
+    ]);
+    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
+
+    let map = fetch_on_chain_transceiver_peers(&rpc, &program_id)
+        .await
+        .expect("fetch");
+    assert_eq!(map.len(), 1);
+    let peer_address = map
+        .get(&(3u16, [0xEEu8; 32], 4u16))
+        .expect("(chain=3, address, dest_chain=4) present");
+    assert_eq!(peer_address[0], 0xFA);
+    assert_eq!(peer_address[31], 0x55);
 }
