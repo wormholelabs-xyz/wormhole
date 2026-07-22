@@ -211,10 +211,11 @@ template CoreState
         chargeFee payer feeRecipient feeInstrument fee feeAllocation
         pure operator
 
-    -- | Verify a VAA and record its consumption in @consumer@'s replay trie,
-    -- atomically — integrators (token bridge / NTT) call this in the same
-    -- transaction as the action the VAA authorizes. Scoped per consumer: the
-    -- same VAA can be consumed by different parties independently.
+    -- | Verify a VAA and record its consumption in @consumer@'s @namespace@
+    -- replay trie, atomically — integrators (token bridge / NTT) call this in
+    -- the same transaction as the action the VAA authorizes. Scoped by
+    -- (consumer, namespace): the same VAA can be consumed by different parties
+    -- — or the same party under different namespaces — independently.
     --
     -- @replayNodeCid@ is the covering trie node, resolved off-ledger by the
     -- consumer's disclosure service ('Wormhole.Core.Replay'). Soundness is
@@ -227,6 +228,7 @@ template CoreState
         encodedVAA    : Bytes
         pubKeys       : [(Int, Bytes)]
         consumer      : Party
+        namespace     : Text
         replayNodeCid : ContractId ReplayNode
       controller consumer
       do
@@ -234,10 +236,13 @@ template CoreState
         vaa <- either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
         node <- fetch replayNodeCid
         -- Exercising ConsumeDigest on a foreign node would fail authorization
-        -- anyway; the explicit check gives a clean error. The operator binding
+        -- anyway; the explicit check gives a clean error. The namespace binding
+        -- keeps one consumer's tries mutually isolated (a node from the wrong
+        -- trie must fail, not silently consume there). The operator binding
         -- rejects tries co-signed by an accomplice "operator" (a shadow trie
         -- outside the root registry's one-root-per-consumer grant).
         assertMsg "replay node consumer mismatch" (node.consumer == consumer)
+        assertMsg "replay node namespace mismatch" (node.namespace == namespace)
         assertMsg "replay node operator mismatch" (node.operator == operator)
         newNodeCid <- exercise replayNodeCid ConsumeDigest with digest = vaa.hash
         pure (vaa, newNodeCid)
@@ -431,11 +436,13 @@ template EmitterRegistry
 -- 'Wormhole.Core.Replay' because its claim fee is charged through the 'CoreState'
 -- (which references 'ReplayNode' — an import cycle otherwise).
 --
--- There is deliberately NO one-root-per-consumer enforcement: maintaining a
--- single trie is the CONSUMER'S responsibility. The controller keeps that sound
--- against everyone else — claiming a root for @consumer@ needs @consumer@'s
--- authority, so nobody can fork another's replay scope. Parallel roots can only
--- be minted by the consumer itself, which is self-harm (see
+-- There is deliberately NO one-root-per-(consumer, namespace) enforcement:
+-- maintaining a single trie per scope is the CONSUMER'S responsibility. The
+-- controller keeps that sound against everyone else — claiming a root for
+-- @consumer@ needs @consumer@'s authority, so nobody can fork another's replay
+-- scope (the @namespace@ is a free-form sub-scope UNDER that authority, not a
+-- claim anyone else can contest). Parallel roots under one scope can only be
+-- minted by the consumer itself, which is self-harm (see
 -- 'Wormhole.Core.Replay'). Spam claims cost the spammer per-transaction traffic,
 -- the 'claimFee', and the operator ~300 B per worthless root; no shared contract
 -- grows.
@@ -452,6 +459,8 @@ template ReplayRootRegistry
     nonconsuming choice ClaimReplayRoot : ContractId ReplayNode
       with
         consumer       : Party
+        namespace      : Text -- opaque sub-scope of @consumer@; the trie is
+                              -- scoped by (consumer, namespace)
         splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
         coreStateCid   : Optional (ContractId CoreState)  -- required iff fee > 0
         feeAllocation  : Optional (ContractId Allocation, ExtraArgs)
@@ -476,6 +485,7 @@ template ReplayRootRegistry
         create ReplayNode with
           consumer
           operator
+          namespace
           prefix = ""
           splitThreshold
           consumed = Set.empty

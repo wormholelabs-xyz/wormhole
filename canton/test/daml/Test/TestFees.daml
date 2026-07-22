@@ -218,12 +218,12 @@ testClaimFee = do
   csDisc <- fromSome <$> queryDisclosure operator csId
   submitMustFail (actAs carol <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid ClaimReplayRoot with
-      consumer = carol, splitThreshold = 4
+      consumer = carol, namespace = "fees", splitThreshold = 4
       coreStateCid = Some csId, feeAllocation = None
   feePay <- mintAndAllocate mockAdmin carol feeRecipient inst (feeToDecimal 300)
   rootCid <- submit (actAs carol <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid ClaimReplayRoot with
-      consumer = carol, splitThreshold = 4
+      consumer = carol, namespace = "fees", splitThreshold = 4
       coreStateCid = Some csId, feeAllocation = Some feePay
   Some root <- queryContractId carol rootCid
   root.prefix === ""
@@ -346,7 +346,7 @@ testClaimReplayRootPinsGuardianGovernance = do
   feePay <- mintAndAllocate mockAdmin carol rogueGov inst (feeToDecimal 300)
   res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do
     exerciseCmd regCid ClaimReplayRoot with
-      consumer = carol, splitThreshold = 4
+      consumer = carol, namespace = "fees", splitThreshold = 4
       coreStateCid = Some fakeCsId, feeAllocation = Some feePay
   case res of
     Left (FailureStatusError fs) ->

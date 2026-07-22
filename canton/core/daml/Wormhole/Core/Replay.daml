@@ -1,5 +1,10 @@
 -- | Per-consumer replay protection for integrators (token bridge / NTT): a
--- PREFIX TRIE of consumed VAA digests, leaf contracts only.
+-- PREFIX TRIE of consumed VAA digests, leaf contracts only. A trie is scoped
+-- by (consumer, namespace): the @consumer@ party carries the authority, and
+-- the opaque @namespace@ string lets one consumer maintain many independent
+-- tries — integrators whose admin role is transferable keep the party stable
+-- and derive the namespace from their own permanent identity instead (NTT: a
+-- hash of the instrument id and the initial admin party).
 --
 -- Governance replay protection lives in 'Wormhole.Core.State.CoreState' as a
 -- @Set@ — fine there, since governance actions are rare. App VAAs need a
@@ -35,8 +40,8 @@
 -- able to unmake its own state.
 --
 -- OFF-LEDGER: consumers locate the covering node via a disclosure service — an
--- ACS index over (consumer, prefix), untrusted for safety (a wrong or stale node
--- only fails). RETRY: racing consumes on one node conflict and exactly one
+-- ACS index over (consumer, namespace, prefix), untrusted for safety (a wrong or
+-- stale node only fails). RETRY: racing consumes on one node conflict and exactly one
 -- commits; on rejection, re-resolve the covering node (its cid churns per
 -- consume) and resubmit. A blind retry of a committed consume hits the
 -- membership check — a clean idempotency signal.
@@ -65,6 +70,7 @@ template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
     operator       : Party    -- co-signs: no unilateral archive or re-create
+    namespace      : Text     -- opaque sub-scope: one consumer, many tries
     prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- copied to children; see 'defaultSplitThreshold'
     consumed       : Set Bytes  -- suffixes, each exactly (64 − |prefix|) nibbles
@@ -72,11 +78,14 @@ template ReplayNode
     signatory consumer, operator
     -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
     -- (signatories can always sign a well-formed shadow node). Depth-64 nodes are
-    -- unrepresentable; suffix lengths pin the membership arithmetic. Deliberately
-    -- NO @size consumed <= splitThreshold@: a split can legitimately create an
+    -- unrepresentable; suffix lengths pin the membership arithmetic; the
+    -- namespace bound keeps the per-node overhead out of the size budgets above
+    -- (it is copied into all 16 children on a split). Deliberately NO
+    -- @size consumed <= splitThreshold@: a split can legitimately create an
     -- over-full child (all parent entries in one bucket), split further next
     -- consume.
     ensure splitThreshold >= 1 && splitThreshold <= 4096
+        && T.length namespace <= 128
         && T.length prefix <= 63 && isLowerHex prefix
         && all (\s -> T.length s == 64 - T.length prefix && isLowerHex s)
                (Set.toList consumed)
