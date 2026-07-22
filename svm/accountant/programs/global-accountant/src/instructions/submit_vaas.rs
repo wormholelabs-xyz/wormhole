@@ -10,10 +10,12 @@
 //! the DigestAccount and flip NoReplay; unknown actions are rejected, leaving
 //! the slot unconsumed for a future upgrade.
 
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{commit_log, noreplay, shim};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VAA_BODY_HEADER_LEN};
 use crate::err;
@@ -36,7 +38,7 @@ const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
 /// Signed-VAA backfill. The WTT-specific token-payload parse + balance
 /// mutation is applied via `transfer::apply_from_body`, invoked after the
 /// Shim verification, NoReplay mark, and commit-log emit.
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // ----- Parse wire data -----
     if data.len() < SUBMIT_VAAS_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -75,7 +77,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !submitter.is_signer() {
+    if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
@@ -96,7 +98,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // Reject any `(chain, emitter, seq)` already accounted via either path.
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.address(),
+        noreplay_authority.key,
         chain,
         &emitter,
         sequence,

@@ -244,11 +244,14 @@ fn surfpool_submit_observations_real_noreplay() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    // Fresh program ID per run so PDAs never collide.
-    let ga_program_kp = Keypair::new();
-    let ga_program_id = ga_program_kp.pubkey();
+    // Anchor's `declare_id!` pins the program to a single fixed address,
+    // checked on every entry (`ErrorCode::DeclaredProgramIdMismatch`) — unlike
+    // the pre-migration pinocchio program, which derived every PDA from the
+    // runtime `program_id` and so was deployable anywhere (a fresh keypair
+    // per run, as this test previously did). Deploy at that fixed ID instead.
+    let ga_program_id = Pubkey::new_from_array(global_accountant::ID.to_bytes());
     eprintln!(
-        "[real-cpi] global_accountant program_id={ga_program_id} (fresh) \
+        "[real-cpi] global_accountant program_id={ga_program_id} (fixed, declare_id!) \
          noreplay program_id={NOREPLAY_PROGRAM_ID} (canonical)"
     );
 

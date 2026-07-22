@@ -17,13 +17,15 @@
 //! wires it to the WTT account layout + the Token Bridge chain-registration
 //! check. NTT has its own orchestration over the same `quorum` helpers.
 
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::instructions::quorum::{
     self, ParsedObservation, BODY_MIN_LEN, SUBMIT_FIXED_LEN,
 };
 use accountant_operational_core::instructions::{commit_log, noreplay};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{GlobalAccountantError, PendingObservationsLayout, SUBMIT_OBSERVATION_PREFIX};
 use crate::err;
@@ -34,7 +36,7 @@ use crate::state::chain_registration;
 /// is applied via `transfer::apply_from_body`, invoked once on the
 /// quorum-completing branch after the NoReplay flip and commit-log emit.
 /// A non-quorum-completing submission returns before the apply is reached.
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // Split into fixed prefix + length-prefixed body. The body is required: the
     // signed digest and the routing tuple are both derived from it.
     // Wire format (after the 1-byte dispatch discriminator):
@@ -106,14 +108,14 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !submitter.is_signer() {
+    if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
     // NoReplay pre-check rejects replays before any signature work.
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.address(),
+        noreplay_authority.key,
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,
