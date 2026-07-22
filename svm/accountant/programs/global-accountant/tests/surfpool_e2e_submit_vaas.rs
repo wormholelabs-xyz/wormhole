@@ -308,8 +308,14 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     let rpc = guard.rpc_client();
 
     // Deploy programs and fund payer.
-    let ga_program_kp = Keypair::new();
-    let ga_program_id = ga_program_kp.pubkey();
+    //
+    // Anchor's `declare_id!` pins the program to a single fixed address,
+    // checked on every entry (`ErrorCode::DeclaredProgramIdMismatch`) — unlike
+    // the pre-migration pinocchio program, which derived every PDA from the
+    // runtime `program_id` and so was deployable anywhere. Deploy at that same
+    // fixed ID here (previously a fresh random keypair per run) rather than at
+    // an address the compiled-in `ID` constant would reject.
+    let ga_program_id = Pubkey::new_from_array(global_accountant::ID.to_bytes());
     let payer = Keypair::new();
     let guardian_signatures_kp = Keypair::new();
     eprintln!(

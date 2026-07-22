@@ -5,8 +5,12 @@
 use {
     accountant_operational_core::instructions::noreplay::derive_bucket_pda,
     global_accountant_definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID},
-    pinocchio::Address,
     solana_pubkey::Pubkey,
+    // `derive_bucket_pda` takes `anchor_lang::solana_program::pubkey::Pubkey`,
+    // resolved to the `3.x` line — a separate crate instance from this test's
+    // own `solana_pubkey` (`4.1`, used below only for the reference
+    // derivation). See the dependency comment in Cargo.toml.
+    solana_pubkey_v3::Pubkey as CorePubkey,
 };
 
 /// Reference derivation matching `solana_noreplay::pda::BitmapPdaSeeds::new`,
@@ -39,7 +43,7 @@ fn reference_bucket_pda(
 #[test]
 fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
     let authority_bytes = [0x7Au8; 32];
-    let authority = Address::from(authority_bytes);
+    let authority = CorePubkey::new_from_array(authority_bytes);
     let chain: u16 = 1;
     let mut emitter = [0u8; 32];
     emitter[31] = 0x11;
@@ -49,7 +53,7 @@ fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
     let (reference, ref_bump) = reference_bucket_pda(&authority_bytes, chain, &emitter, sequence);
 
     assert_eq!(
-        ours.as_array(),
+        &ours.to_bytes(),
         &reference,
         "derive_bucket_pda must agree with the upstream BitmapPdaSeeds scheme",
     );
@@ -63,7 +67,7 @@ fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
 #[test]
 fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
     let authority_bytes = [0x7Au8; 32];
-    let authority = Address::from(authority_bytes);
+    let authority = CorePubkey::new_from_array(authority_bytes);
     let mut emitter = [0u8; 32];
     emitter[0] = 0xAB;
     emitter[31] = 0x11;
@@ -86,7 +90,7 @@ fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
         let (reference, ref_bump) =
             reference_bucket_pda(&authority_bytes, chain, &emitter, sequence);
         assert_eq!(
-            ours.as_array(),
+            &ours.to_bytes(),
             &reference,
             "bucket PDA mismatch at chain={chain} sequence={sequence}",
         );
@@ -102,13 +106,13 @@ fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
     let (b1024, _) = derive_bucket_pda(&authority, 1, &emitter, 1024);
     let (b1025, _) = derive_bucket_pda(&authority, 1, &emitter, 1025);
     assert_ne!(
-        b1023.as_array(),
-        b1024.as_array(),
+        &b1023.to_bytes(),
+        &b1024.to_bytes(),
         "seq 1023 and 1024 fall in different buckets",
     );
     assert_eq!(
-        b1024.as_array(),
-        b1025.as_array(),
+        &b1024.to_bytes(),
+        &b1025.to_bytes(),
         "seq 1024 and 1025 share a bucket",
     );
 }

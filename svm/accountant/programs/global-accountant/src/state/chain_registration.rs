@@ -2,7 +2,7 @@
 //!
 //! Read-only on the submit paths; written only by `register_chain`.
 
-use pinocchio::{account::Ref, error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
 
 use crate::definitions::{
     ChainRegistrationLayout, GlobalAccountantError, CHAIN_REGISTRATION_SEED_PREFIX,
@@ -12,11 +12,11 @@ use crate::err;
 /// Read a [`ChainRegistrationLayout`]. Returns `MissingChainRegistration` if
 /// the account is system-owned (no registration VAA landed) or `InvalidPda` on
 /// wrong length. Caller must verify the canonical address first.
-pub fn load(account: &AccountView) -> Result<ChainRegistrationLayout, ProgramError> {
-    if account.owner() == &pinocchio_system::ID {
+pub fn load(account: &AccountInfo) -> accountant_operational_core::ProgramCoreResult<ChainRegistrationLayout> {
+    if account.owner == &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::MissingChainRegistration));
     }
-    let data: Ref<'_, [u8]> = account.try_borrow()?;
+    let data = account.try_borrow_data()?;
     if data.len() != ChainRegistrationLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -31,10 +31,10 @@ pub fn load(account: &AccountView) -> Result<ChainRegistrationLayout, ProgramErr
 /// Write a [`ChainRegistrationLayout`] into the account's data buffer (used by
 /// `register_chain` after allocation).
 pub fn store(
-    account: &mut AccountView,
+    account: &AccountInfo,
     value: &ChainRegistrationLayout,
-) -> Result<(), ProgramError> {
-    let mut data = account.try_borrow_mut()?;
+) -> accountant_operational_core::ProgramResult {
+    let mut data = account.try_borrow_mut_data()?;
     if data.len() != ChainRegistrationLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -47,15 +47,15 @@ pub fn store(
 ///    account masquerading as the registration PDA).
 /// 2. The on-disk `emitter_address` must equal the body header's emitter.
 pub fn verify(
-    program_id: &Address,
-    registration_pda: &AccountView,
+    program_id: &Pubkey,
+    registration_pda: &AccountInfo,
     body_chain: u16,
     body_emitter: &[u8; 32],
-) -> ProgramResult {
+) -> accountant_operational_core::ProgramResult {
     let chain_be = body_chain.to_be_bytes();
     let (expected, _bump) =
-        Address::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
-    if registration_pda.address() != &expected {
+        Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
+    if registration_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     let layout = load(registration_pda)?;

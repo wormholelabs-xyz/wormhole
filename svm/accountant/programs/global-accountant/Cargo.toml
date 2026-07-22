@@ -1,6 +1,6 @@
 [package]
 name = "global-accountant"
-description = "Wormhole Global Accountant Solana program (Pinocchio)."
+description = "Wormhole Global Accountant Solana program (Anchor)."
 publish = false
 
 edition.workspace = true
@@ -13,27 +13,30 @@ version.workspace = true
 crate-type = ["cdylib", "lib"]
 
 [features]
-# Build the BPF entrypoint. Disabled when consumed as a library (e.g. by tests
-# or client tooling).
+# Anchor convention (inverted polarity from the old `bpf-entrypoint` opt-in):
+# the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library/CPI/test consumption. `idl-build` is deliberately never enabled —
+# Anchor's auto-IDL would be partial/inaccurate for the custom offset-0 tag
+# + bytemuck layouts this program keeps (migration plan §7.7), so IDL codegen
+# stays off rather than shipping a misleading artifact.
 default = []
-bpf-entrypoint = []
+no-entrypoint = []
 
 [dependencies]
 accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+borsh.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
-pinocchio.workspace = true
-pinocchio-system.workspace = true
-# Force-enable the `curve25519` feature on solana-address so production-shape
-# host builds (cargo clippy without test features) can resolve
-# `Address::find_program_address`. The function is feature-gated to
-# `curve25519` on the host path; pinocchio's transitive dep only enables
-# `syscalls`, which exposes it on the BPF target but not on the host. On the
-# SBF target the syscall path is unconditionally available, so the dev-dep
-# curve25519-dalek that this brings in via solana-address's host-only branch
-# is dead code on-chain and adds no SBF binary cost. Already in the workspace
-# graph via solana-pubkey's dev-deps; no new supply-chain surface.
-solana-address = { version = "2.6", features = ["curve25519"] }
+# See the identical dependency in `crates/operational-core/Cargo.toml`:
+# `register_chain`/`modify_balance` also call `find_program_address` directly.
+# Aliased (rather than the plain `solana-pubkey` name) so this `3.x` instance
+# never collides with the unrelated `4.1` instance the dev-dependencies below
+# use for mollusk/test plumbing — Cargo forbids depending on the identical
+# resolved package under two different names from the same crate, so the
+# alias must be spelled identically in both `[dependencies]` and
+# `[dev-dependencies]` (see `solana-pubkey-v3` below).
+solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
 
 [dev-dependencies]
 mollusk-svm.workspace = true
@@ -41,12 +44,13 @@ solana-account.workspace = true
 solana-instruction.workspace = true
 solana-keccak-hasher.workspace = true
 solana-pubkey = { workspace = true, features = ["curve25519"] }
-# Pull `curve25519` into the unified feature set so the host build of this
-# crate can resolve `Address::find_program_address` (which is gated on
-# `target_os = "solana"` OR the `curve25519` feature). On-chain the syscall
-# path is unconditionally available; this is purely for `cargo test`.
-solana-address = { version = "2.6", features = ["curve25519"] }
-global-accountant = { path = "." }
+# Same aliased `3.x` instance as `[dependencies]` above — used directly by
+# `tests/noreplay_derivation.rs` to construct the exact `Pubkey` type
+# `accountant_operational_core::instructions::noreplay::derive_bucket_pda`
+# takes, distinct from the `4.1` `solana-pubkey` used for this test's own
+# host-side reference derivation.
+solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
+global-accountant = { path = ".", features = ["no-entrypoint"] }
 # Pure-Rust secp256k1. Tests sign synthetic guardian observations to populate
 # the pending bitmap and exercise the on-chain `sol_secp256k1_recover` path.
 # Already in the workspace lock via mollusk's transitive deps; pinning the

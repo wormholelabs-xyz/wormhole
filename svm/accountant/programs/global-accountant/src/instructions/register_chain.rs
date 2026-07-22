@@ -6,11 +6,12 @@
 //! VAA at a higher sequence; the NoReplay bit prevents reusing an old sequence
 //! to undo a rotation. Accepts `Any (0)` or `SOLANA_CHAIN_ID` as target_chain.
 
-use pinocchio::{
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
+
+use accountant_operational_core::hash::double_keccak256;
+use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     ChainRegistrationLayout, GlobalAccountantError, CHAIN_REGISTRATION_SEED_PREFIX,
@@ -18,7 +19,6 @@ use crate::definitions::{
 };
 use crate::err;
 use crate::state::chain_registration;
-use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
 
 /// Wire format for the `register_chain` instruction data (after the 1-byte
 /// dispatch discriminator):
@@ -59,7 +59,7 @@ const PAYLOAD_EMITTER_OFFSET: usize = BODY_HEADER_LEN + 37;
 const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 2 + 32;
 const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < REGISTER_CHAIN_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -94,7 +94,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !payer.is_signer() {
+    if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
@@ -133,7 +133,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // `RegisterChain` to undo a later emitter rotation.
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.address(),
+        noreplay_authority.key,
         SOLANA_CHAIN_ID,
         &GOVERNANCE_EMITTER,
         sequence,
@@ -174,8 +174,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // canonical (surfaces our own error before the init CPI would fail).
     let chain_be = chain_to_register.to_be_bytes();
     let (expected_pda, canonical_bump) =
-        Address::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
-    if registration_pda.address() != &expected_pda || registration_bump != canonical_bump {
+        Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
+    if registration_pda.key != &expected_pda || registration_bump != canonical_bump {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
@@ -183,24 +183,19 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //
     // First registration (system-owned): Allocate + Assign. Rotation (already
     // program-owned, correct length): overwrite in place. Any other shape rejects.
-    let owner_is_system = registration_pda.owner() == &pinocchio_system::ID;
+    let owner_is_system = registration_pda.owner == &anchor_lang::solana_program::system_program::ID;
     if owner_is_system {
         let bump_seed = [registration_bump];
-        let seeds = [
-            Seed::from(CHAIN_REGISTRATION_SEED_PREFIX),
-            Seed::from(chain_be.as_slice()),
-            Seed::from(bump_seed.as_slice()),
-        ];
-        let signer = Signer::from(&seeds);
+        let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be, &bump_seed];
         init_or_upgrade_pda(
             payer,
             registration_pda,
             program_id,
-            signer,
+            seeds,
             ChainRegistrationLayout::LEN as u64,
         )?;
     } else {
-        if registration_pda.owner() != program_id {
+        if registration_pda.owner != program_id {
             return Err(err(GlobalAccountantError::InvalidPda));
         }
         if registration_pda.data_len() != ChainRegistrationLayout::LEN {
@@ -234,5 +229,3 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     Ok(())
 }
-
-use accountant_operational_core::hash::double_keccak256;
