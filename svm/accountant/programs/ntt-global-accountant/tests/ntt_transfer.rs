@@ -17,11 +17,12 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        RelayerChainRegistrationLayout, TransceiverHubLayout, TransceiverPeerLayout, Uint256,
-        ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, DELIVERY_INSTRUCTION_PAYLOAD_ID,
-        NATIVE_TOKEN_TRANSFER_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
-        NOREPLAY_PROGRAM_ID, RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
+        ntt_global_accountant::Instruction as IxDiscriminator, BalanceAccountLayout,
+        GlobalAccountantError, RelayerChainRegistrationLayout, TransceiverHubLayout,
+        TransceiverPeerLayout, Uint256, ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID,
+        DELIVERY_INSTRUCTION_PAYLOAD_ID, NATIVE_TOKEN_TRANSFER_PREFIX,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
         TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_SEED_PREFIX, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},

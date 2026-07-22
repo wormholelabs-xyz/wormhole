@@ -65,7 +65,7 @@ use global_accountant_definitions::{
     TRANSCEIVER_INFO_PREFIX, TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_INFO_PREFIX,
     TRANSCEIVER_PEER_SEED_PREFIX, VAA_BODY_HEADER_LEN, VERIFY_VAA_SHIM_PROGRAM_ID,
 };
-use ntt_global_accountant::Instruction as IxDiscriminator;
+use global_accountant_definitions::ntt_global_accountant::Instruction as IxDiscriminator;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
@@ -485,8 +485,12 @@ fn surfpool_ntt_lifecycle() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    let program_kp = Keypair::new();
-    let program_id = program_kp.pubkey();
+    // Anchor's `declare_id!` pins the program to a single fixed address,
+    // checked on every entry (`DeclaredProgramIdMismatch`). The pre-migration
+    // pinocchio program had no such check and so deployed at a fresh random
+    // keypair per run; deploy at the declared ID instead so the cheat-written
+    // `.so` (which has the address baked in) passes Anchor's own check.
+    let program_id = Pubkey::new_from_array(ntt_global_accountant::ID.to_bytes());
     let payer = Keypair::new();
     eprintln!("[lifecycle-e2e] program_id={program_id} payer={}", payer.pubkey());
 

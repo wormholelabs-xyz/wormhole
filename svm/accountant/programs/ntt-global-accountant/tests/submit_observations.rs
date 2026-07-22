@@ -16,12 +16,12 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
-        TransceiverHubLayout, TransceiverPeerLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED, NATIVE_TOKEN_TRANSFER_PREFIX,
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
-        NTT_SUBMIT_OBSERVATION_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
-        TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_SEED_PREFIX,
+        ntt_global_accountant::Instruction as IxDiscriminator, BalanceAccountLayout,
+        GlobalAccountantError, TransceiverHubLayout, TransceiverPeerLayout, Uint256,
+        ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
+        NATIVE_TOKEN_TRANSFER_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
+        NOREPLAY_PROGRAM_ID, NTT_SUBMIT_OBSERVATION_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
+        TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_SEED_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
