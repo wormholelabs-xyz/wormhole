@@ -192,19 +192,35 @@ testRegistrationFee = do
   -- Fee due: no CoreState / no allocation both rejected.
   submitMustFail (actAs bob <> disclose regDisc) do
     exerciseCmd regCid RegisterEmitter with
-      requester = bob, coreStateCid = None, feeAllocation = None
+      requester = bob, payer = bob, coreStateCid = None, feeAllocation = None
   submitMustFail (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid RegisterEmitter with
-      requester = bob, coreStateCid = Some csId, feeAllocation = None
+      requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = None
   -- Paid registration succeeds; the fee lands with the recipient.
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
-  (_, emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
+  (regCid', emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid RegisterEmitter with
-      requester = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+      requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = Some feePay
   Some em <- queryContractId bob emCid
   em.owner === bob
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal 500
+
+  -- A distinct payer works: the requester and payer need not be the same
+  -- party (RegisterManager's use case — the registering admin pays on behalf
+  -- of a gg-authority requester). Consuming choice: re-resolve the fresh
+  -- registry cid returned above.
+  regDisc' <- fromSome <$> queryDisclosure operator regCid'
+  dave <- allocateParty "RegFeeDave"
+  regPayer <- allocateParty "RegFeeDavePayer"
+  payerFeePay <- mintAndAllocate mockAdmin regPayer feeRecipient inst (feeToDecimal 500)
+  (_, emCid2) <- submit (actAs dave <> actAs regPayer <> disclose regDisc' <> disclose csDisc) do
+    exerciseCmd regCid' RegisterEmitter with
+      requester = dave, payer = regPayer, coreStateCid = Some csId, feeAllocation = Some payerFeePay
+  Some em2 <- queryContractId dave emCid2
+  em2.owner === dave
+  bal2 <- mockBalance mockAdmin feeRecipient inst
+  bal2 === feeToDecimal 1000
 
 -- | Same for a nonzero-fee 'ReplayRootRegistry' claim.
 testClaimFee : Script ()
@@ -219,16 +235,31 @@ testClaimFee = do
   submitMustFail (actAs carol <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer = carol, namespace = "fees", splitThreshold = 4
-      coreStateCid = Some csId, feeAllocation = None
+      payer = carol, coreStateCid = Some csId, feeAllocation = None
   feePay <- mintAndAllocate mockAdmin carol feeRecipient inst (feeToDecimal 300)
   rootCid <- submit (actAs carol <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer = carol, namespace = "fees", splitThreshold = 4
-      coreStateCid = Some csId, feeAllocation = Some feePay
+      payer = carol, coreStateCid = Some csId, feeAllocation = Some feePay
   Some root <- queryContractId carol rootCid
   root.prefix === ""
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal 300
+
+  -- A distinct payer works: the consumer and payer need not be the same
+  -- party (RegisterManager's use case — the registering admin pays on
+  -- behalf of gg, the replay-scope consumer).
+  dave <- allocateParty "ClaimFeeDave"
+  claimPayer <- allocateParty "ClaimFeeDavePayer"
+  payerFeePay <- mintAndAllocate mockAdmin claimPayer feeRecipient inst (feeToDecimal 300)
+  rootCid2 <- submit (actAs dave <> actAs claimPayer <> disclose regDisc <> disclose csDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer = dave, namespace = "fees", splitThreshold = 4
+      payer = claimPayer, coreStateCid = Some csId, feeAllocation = Some payerFeePay
+  Some root2 <- queryContractId dave rootCid2
+  root2.prefix === ""
+  bal2 <- mockBalance mockAdmin feeRecipient inst
+  bal2 === feeToDecimal 600
 
 -- | TransferFees mints the on-ledger withdrawal authorization, signed by
 -- guardianGovernance — the artifact its custody ceremony matches against.
@@ -317,6 +348,7 @@ testRegisterEmitterPinsGuardianGovernance = do
   res <- trySubmit (actAs bob <> disclose regDisc <> disclose fakeDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob
+      payer = bob
       coreStateCid = Some fakeCsId
       feeAllocation = Some feePay
   case res of
@@ -347,7 +379,7 @@ testClaimReplayRootPinsGuardianGovernance = do
   res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer = carol, namespace = "fees", splitThreshold = 4
-      coreStateCid = Some fakeCsId, feeAllocation = Some feePay
+      payer = carol, coreStateCid = Some fakeCsId, feeAllocation = Some feePay
   case res of
     Left (FailureStatusError fs) ->
       assertMsg ("expected a guardianGovernance pin failure, got: " <> fs.message)

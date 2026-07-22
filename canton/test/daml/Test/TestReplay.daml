@@ -47,6 +47,7 @@ registerReplayRoot operator consumer namespace threshold = do
       consumer
       namespace
       splitThreshold = threshold
+      payer = consumer       -- direct claim: own payer, controller set collapses
       coreStateCid = None    -- claimFee is 0 in the fixture
       feeAllocation = None
 
@@ -324,6 +325,7 @@ testRootClaims = do
       consumer
       namespace = ns
       splitThreshold = 4
+      payer = consumer
       coreStateCid = None
       feeAllocation = None
   -- The consumer CAN duplicate its own root — by design, self-harm only.
@@ -332,6 +334,7 @@ testRootClaims = do
       consumer
       namespace = ns
       splitThreshold = 4
+      payer = consumer
       coreStateCid = None
       feeAllocation = None
   roots <- query @ReplayNode consumer

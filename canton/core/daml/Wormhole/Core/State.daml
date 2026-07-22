@@ -393,12 +393,21 @@ template EmitterRegistry
     -- disclosure and a fee allocation when @registrationFee > 0@ (README §4.2).
     -- Consuming, so racing registrations contend here — the loser re-resolves
     -- and retries.
+    --
+    -- @payer@ funds the registration fee and co-controls, mirroring
+    -- 'PublishMessage': a direct registrant is its own payer (@payer =
+    -- requester@, controller set collapses), while a delegated registrant
+    -- (e.g. NTT's @RegisterManager@, minting on behalf of an admin under
+    -- inherited authority) lets the admin fund the fee without the fee
+    -- recipient — potentially the registering party itself — being made to
+    -- pay for its own onboarding.
     choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
       with
         requester     : Party
+        payer         : Party  -- funds registrationFee; = requester for a direct registration
         coreStateCid  : Optional (ContractId CoreState)  -- required iff fee > 0
         feeAllocation : Optional (ContractId Allocation, ExtraArgs)
-      controller requester
+      controller requester, payer
       do
         -- Zero-fee registrations never touch the CoreState; fee'd ones charge
         -- through it. The gg pin runs BEFORE the charge: pinning
@@ -412,7 +421,7 @@ template EmitterRegistry
             csGg <- exercise csCid GetGuardianGovernance with reader = requester
             assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
             csOperator <- exercise csCid ChargeFee with
-              payer = requester
+              payer
               fee = registrationFee
               feeAllocation
             assertMsg "core state operator mismatch" (csOperator == operator)
@@ -456,15 +465,22 @@ template ReplayRootRegistry
   where
     signatory operator
 
+    -- @payer@ funds the claim fee and co-controls, mirroring
+    -- 'PublishMessage'/'RegisterEmitter': a direct claimant is its own payer
+    -- (@payer = consumer@, controller set collapses), while a delegated
+    -- claimant (e.g. NTT's @RegisterManager@, claiming under gg's inherited
+    -- authority) lets the registering admin fund the fee without the
+    -- replay-scope owner being made to pay.
     nonconsuming choice ClaimReplayRoot : ContractId ReplayNode
       with
         consumer       : Party
         namespace      : Text -- opaque sub-scope of @consumer@; the trie is
                               -- scoped by (consumer, namespace)
         splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
+        payer          : Party  -- funds claimFee; = consumer for a direct claim
         coreStateCid   : Optional (ContractId CoreState)  -- required iff fee > 0
         feeAllocation  : Optional (ContractId Allocation, ExtraArgs)
-      controller consumer
+      controller consumer, payer
       do
         -- Zero-fee claims never touch the CoreState; fee'd ones charge through
         -- it. The gg pin runs BEFORE the charge: pinning @guardianGovernance@
@@ -478,7 +494,7 @@ template ReplayRootRegistry
             csGg <- exercise csCid GetGuardianGovernance with reader = consumer
             assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
             csOperator <- exercise csCid ChargeFee with
-              payer = consumer
+              payer
               fee = claimFee
               feeAllocation
             assertMsg "core state operator mismatch" (csOperator == operator)
