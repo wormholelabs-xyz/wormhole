@@ -14,10 +14,16 @@ default:
 # `test-only-open-digest` feature on/off; with `open_digest` removed
 # entirely (canonical digest record now emitted via `sol_log_data`), there
 # is no longer any dev-vs-prod feature difference.
+#
+# Anchor programs build fine under plain `cargo build-sbf` (still an ordinary
+# SBF cdylib under the hood). The old `--features bpf-entrypoint` flag is
+# gone: Anchor's entrypoint is present by default and only suppressed via
+# `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
+# of the old opt-in polarity.
 
 [doc("SBF build of the production-shape .so.")]
 build:
-    cargo build-sbf --features bpf-entrypoint
+    cargo build-sbf
 
 [doc("Alias preserved for backwards-compatibility with existing scripts.")]
 build-prod: build
@@ -72,40 +78,22 @@ check:
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
     cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant --features bpf-entrypoint
+        -p global-accountant
 
-# SBF-arm clippy. The platform-tools toolchain ships no clippy, but upstream
-# nightly clippy knows the tier-3 `bpfel-unknown-none` target, which sets
-# `target_arch = "bpf"` — the second arm of the crate's cfg pattern
-# (`any(target_os = "solana", target_arch = "bpf")`), kept precisely so this
-# recipe can lint the SBF-shaped code (syscalls, entrypoint, no_std). Tier 3
-# ships no prebuilt core/alloc, hence nightly + rust-src + `-Zbuild-std`.
-#
-# Caveats, recorded so nobody is surprised later:
-#   * Approximation: code gated *exclusively* on `target_os = "solana"` is
-#     invisible here. The crate's convention is the `any(...)` pattern, which
-#     keeps coverage effectively total — maintain that convention.
-#   * Nightly: clippy lint names drift (e.g. workspace lint tables may emit
-#     `renamed_and_removed_lints` warnings). Supplementary gate only; the
-#     stable host `clippy` target remains authoritative.
-
-[doc("Nightly clippy of the SBF-shaped code via bpfel-unknown-none.")]
-clippy-sbf:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! cargo +nightly clippy --version >/dev/null 2>&1; then
-        echo "ERROR: nightly clippy not available." >&2
-        echo "Run 'rustup component add clippy --toolchain nightly'." >&2
-        exit 1
-    fi
-    if ! rustup component list --toolchain nightly --installed 2>/dev/null | grep -q rust-src; then
-        echo "ERROR: rust-src not installed for nightly (required by -Zbuild-std)." >&2
-        echo "Run 'rustup component add rust-src --toolchain nightly'." >&2
-        exit 1
-    fi
-    cargo +nightly clippy --locked -Zbuild-std=core,alloc --target bpfel-unknown-none \
-        -p global-accountant -p global-accountant-definitions \
-        --features bpf-entrypoint -- -D warnings
+# `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
+# via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
+# It only ever worked because the pinocchio-era crates were `no_std`
+# (`#![cfg_attr(any(target_os = "solana", target_arch = "bpf"), no_std)]`),
+# so a bare `core`+`alloc` sysroot sufficed. Anchor is not `no_std`-compatible
+# (`anchor-derive-accounts`' generated code alone reaches for
+# `std::collections::BTreeSet`), and `bpfel-unknown-none` — "none" meaning no
+# OS/std support — has no `std` to build, even under `-Zbuild-std`. Only
+# Anza's platform-tools toolchain (used by `build`/`check` above) carries a
+# custom sysroot with SBF-target `std` support. `crates/definitions` alone
+# stays `no_std` (anchor-free), but it is a small, already-portable leaf crate
+# with no syscalls of its own; `check` above remains the sole SBF-target lint
+# pass for the workspace (clippy itself is still unavailable there — Anza
+# ships no `cargo-clippy` for platform-tools).
 
 [doc("Clippy against the host build.")]
 clippy:
