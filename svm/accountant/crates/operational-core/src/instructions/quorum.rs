@@ -13,12 +13,10 @@
 //! distinct orchestrations with distinct account layouts and distinct
 //! post-quorum balance flows; nothing here is product-specific.
 
-use pinocchio::{
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
+use crate::account_util::{add_lamports, close_account};
 use crate::definitions::{
     parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
     CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED, PENDING_OBSERVATIONS_SEED_PREFIX,
@@ -59,9 +57,6 @@ pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 /// Ethereum-style guardian pubkey length (`keccak256(uncompressed_pk)[12..]`).
 const GUARDIAN_PUBKEY_LEN: usize = 20;
 
-/// `sol_secp256k1_recover` result buffer: 64-byte uncompressed pubkey (`X || Y`).
-const SECP256K1_PUBKEY_RAW_LEN: usize = 64;
-
 /// 51-byte VAA header + 1-byte action — the minimum body the parser can read.
 pub const BODY_MIN_LEN: usize = 52;
 
@@ -88,7 +83,7 @@ pub struct ParsedObservation {
 impl ParsedObservation {
     /// Parse the signature fields from the fixed prefix. The digest and routing
     /// tuple are derived from the body afterward by the caller.
-    pub fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> Result<Self, ProgramError> {
+    pub fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> crate::ProgramCoreResult<Self> {
         let (gsi_bytes, rest) = data.split_at(4);
         let guardian_index = rest[0];
         let signature_bytes = &rest[1..1 + SECP256K1_SIGNATURE_LEN];
@@ -113,7 +108,7 @@ impl ParsedObservation {
 
     /// Populate the routing tuple from the body header. `self.digest` must have
     /// been derived from this same `body`.
-    pub fn populate_routing_from_body(&mut self, body: &[u8]) -> Result<(), ProgramError> {
+    pub fn populate_routing_from_body(&mut self, body: &[u8]) -> crate::ProgramResult {
         let header = parse_vaa_namespace_key(body).map_err(err)?;
         self.chain = header.chain;
         self.emitter = header.emitter;
@@ -136,16 +131,16 @@ pub enum PendingAction {
 /// `(chain, emitter, sequence, digest)`. Follows the same pattern as
 /// `chain_registration::verify`.
 fn verify_pending_pda_address(
-    program_id: &Address,
-    pending_pda: &AccountView,
+    program_id: &Pubkey,
+    pending_pda: &AccountInfo,
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,
     digest: &[u8; 32],
-) -> ProgramResult {
+) -> crate::ProgramResult {
     let chain_be = chain.to_be_bytes();
     let sequence_be = sequence.to_be_bytes();
-    let (expected, _bump) = Address::find_program_address(
+    let (expected, _bump) = Pubkey::find_program_address(
         &[
             PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
@@ -155,7 +150,7 @@ fn verify_pending_pda_address(
         ],
         program_id,
     );
-    if pending_pda.address() != &expected {
+    if pending_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     Ok(())
@@ -165,11 +160,11 @@ fn verify_pending_pda_address(
 /// seeds and canonical address verification ensure a digest mismatch is
 /// unreachable: any loaded PDA was opened under exactly this digest.
 pub fn decide_pending_action(
-    program_id: &Address,
-    pending_pda: &AccountView,
+    program_id: &Pubkey,
+    pending_pda: &AccountInfo,
     parsed: &ParsedObservation,
-) -> Result<PendingAction, ProgramError> {
-    let owner_is_system = pending_pda.owner() == &pinocchio_system::ID;
+) -> crate::ProgramCoreResult<PendingAction> {
+    let owner_is_system = pending_pda.owner == &anchor_lang::solana_program::system_program::ID;
     let data_len = pending_pda.data_len();
 
     if owner_is_system && data_len == 0 {
@@ -209,14 +204,14 @@ pub fn decide_pending_action(
 /// `PendingObservationsLayout::quorum_for`), not a pinned constant. Idempotent
 /// guards: a re-used guardian index rejects `AlreadySigned`; an out-of-range
 /// index rejects `InvalidGuardianIndex`.
-pub fn apply_action_and_accumulate(
-    program_id: &Address,
-    submitter: &mut AccountView,
-    pending_pda: &mut AccountView,
+pub fn apply_action_and_accumulate<'info>(
+    program_id: &Pubkey,
+    submitter: &AccountInfo<'info>,
+    pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
     action: PendingAction,
     quorum_threshold: u32,
-) -> Result<(PendingObservationsLayout, bool), ProgramError> {
+) -> crate::ProgramCoreResult<(PendingObservationsLayout, bool)> {
     match action {
         PendingAction::Create => {
             create_pending_pda(program_id, submitter, pending_pda, parsed)?;
@@ -245,17 +240,17 @@ pub fn apply_action_and_accumulate(
 /// Allocate the pending PDA under `(b"pending", chain, emitter, sequence,
 /// digest)` and stamp a freshly-zeroed layout. The digest in the seeds lets
 /// reorg siblings accumulate in parallel buckets.
-fn create_pending_pda(
-    program_id: &Address,
-    submitter: &AccountView,
-    pending_pda: &mut AccountView,
+fn create_pending_pda<'info>(
+    program_id: &Pubkey,
+    submitter: &AccountInfo<'info>,
+    pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
-) -> ProgramResult {
+) -> crate::ProgramResult {
     // Canonical bump derived on-chain; `invoke_signed` below only signs for the
     // canonical address, so a non-canonical sibling PDA is impossible.
     let chain_be = parsed.chain.to_be_bytes();
     let sequence_be = parsed.sequence.to_be_bytes();
-    let (_expected, canonical_bump) = Address::find_program_address(
+    let (_expected, canonical_bump) = Pubkey::find_program_address(
         &[
             PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
@@ -267,28 +262,27 @@ fn create_pending_pda(
     );
 
     let bump_seed = [canonical_bump];
-    let seeds = [
-        Seed::from(PENDING_OBSERVATIONS_SEED_PREFIX),
-        Seed::from(chain_be.as_slice()),
-        Seed::from(parsed.emitter.as_slice()),
-        Seed::from(sequence_be.as_slice()),
-        Seed::from(parsed.digest.as_slice()),
-        Seed::from(bump_seed.as_slice()),
+    let seeds: &[&[u8]] = &[
+        PENDING_OBSERVATIONS_SEED_PREFIX,
+        &chain_be,
+        &parsed.emitter,
+        &sequence_be,
+        &parsed.digest,
+        &bump_seed,
     ];
-    let signer = Signer::from(&seeds);
 
     init_or_upgrade_pda(
         submitter,
         pending_pda,
         program_id,
-        signer,
+        seeds,
         PendingObservationsLayout::LEN as u64,
     )?;
 
     let mut layout: PendingObservationsLayout = bytemuck::Zeroable::zeroed();
     layout.tag = PendingObservationsLayout::TAG;
     layout.digest = parsed.digest;
-    layout.payer = *submitter.address().as_array();
+    layout.payer = submitter.key.to_bytes();
     layout.guardian_set_index = parsed.guardian_set_index;
     layout.signatures = 0;
     layout.chain = parsed.chain;
@@ -298,21 +292,16 @@ fn create_pending_pda(
 /// Refund the recorded payer and close the account. `recorded_payer` is passed
 /// in to avoid re-borrowing the already-loaded layout.
 pub fn close_pending_pda(
-    pending_pda: &mut AccountView,
-    rent_recipient: &mut AccountView,
+    pending_pda: &AccountInfo,
+    rent_recipient: &AccountInfo,
     recorded_payer: &[u8; 32],
-) -> ProgramResult {
-    if rent_recipient.address().as_array() != recorded_payer {
+) -> crate::ProgramResult {
+    if rent_recipient.key.to_bytes() != *recorded_payer {
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
     let lamports = pending_pda.lamports();
-    let recipient_lamports = rent_recipient.lamports();
-    rent_recipient.set_lamports(
-        recipient_lamports
-            .checked_add(lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?,
-    );
-    pending_pda.close()
+    add_lamports(rent_recipient, lamports)?;
+    close_account(pending_pda)
 }
 
 /// Rotation-wipe variant: credits the PDA's lamports to the new submitter
@@ -321,17 +310,12 @@ pub fn close_pending_pda(
 /// whoever pays the rotation cost; `close_pending` remains available to recover
 /// it ahead of rotation.
 fn wipe_pending_pda(
-    pending_pda: &mut AccountView,
-    new_submitter: &mut AccountView,
-) -> ProgramResult {
+    pending_pda: &AccountInfo,
+    new_submitter: &AccountInfo,
+) -> crate::ProgramResult {
     let lamports = pending_pda.lamports();
-    let submitter_lamports = new_submitter.lamports();
-    new_submitter.set_lamports(
-        submitter_lamports
-            .checked_add(lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?,
-    );
-    pending_pda.close()
+    add_lamports(new_submitter, lamports)?;
+    close_account(pending_pda)
 }
 
 /// Verify a guardian signature: recover the pubkey via `secp256k1_recover` and
@@ -350,14 +334,14 @@ fn wipe_pending_pda(
 /// `close_pending::guardian_set_expired`). The shim enforces the equivalent
 /// constraint via Core-Bridge PDA-address derivation; see `shim::verify_vaa`.
 pub fn verify_signature(
-    guardian_set: &AccountView,
+    guardian_set: &AccountInfo,
     expected_guardian_set_index: u32,
     guardian_index: u8,
     digest: &[u8; 32],
     signature: &[u8; SECP256K1_SIGNATURE_LEN],
-) -> Result<u32, ProgramError> {
+) -> crate::ProgramCoreResult<u32> {
     // Verify the account is owned by Core Bridge.
-    if guardian_set.owner().as_array() != &CORE_BRIDGE_PROGRAM_ID {
+    if guardian_set.owner.to_bytes() != CORE_BRIDGE_PROGRAM_ID {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
@@ -365,14 +349,14 @@ pub fn verify_signature(
     // would suffice (a Core-Bridge-owned account can only hold Core-Bridge data),
     // but pinning the address rejects a stale/wrong-index set up front.
     let index_be = expected_guardian_set_index.to_be_bytes();
-    let core_bridge_addr = Address::from(CORE_BRIDGE_PROGRAM_ID);
+    let core_bridge_addr = Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID);
     let (expected_address, _) =
-        Address::find_program_address(&[GUARDIAN_SET_SEED, &index_be], &core_bridge_addr);
-    if guardian_set.address() != &expected_address {
+        Pubkey::find_program_address(&[GUARDIAN_SET_SEED, &index_be], &core_bridge_addr);
+    if guardian_set.key != &expected_address {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    let data = guardian_set.try_borrow()?;
+    let data = guardian_set.try_borrow_data()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
     // `read_guardian_key` already proved `data.len() >= 8`, so `keys_len` at
     // `[4..8]` is in bounds. This is the live set size the quorum derives from.
@@ -384,15 +368,11 @@ pub fn verify_signature(
         return Err(err(GlobalAccountantError::InvalidSignature));
     }
 
-    let mut recovered = [0u8; SECP256K1_PUBKEY_RAW_LEN];
-    let rc = secp256k1_recover(digest, recovery_id as u64, &signature[..64], &mut recovered);
-    if rc != 0 {
-        return Err(err(GlobalAccountantError::InvalidSignature));
-    }
+    let recovered = solana_secp256k1_recover::secp256k1_recover(digest, recovery_id, &signature[..64])
+        .map_err(|_| err(GlobalAccountantError::InvalidSignature))?;
 
     // Compare `keccak256(recovered_pk)[12..]` to the stored guardian key.
-    let mut hash = [0u8; 32];
-    keccak256(&recovered, &mut hash);
+    let hash = keccak256(&recovered.0);
     if hash[12..] != expected_key[..] {
         return Err(err(GlobalAccountantError::InvalidSignature));
     }
@@ -415,7 +395,7 @@ pub fn read_guardian_key(
     data: &[u8],
     expected_index: u32,
     guardian_index: u8,
-) -> Result<[u8; GUARDIAN_PUBKEY_LEN], ProgramError> {
+) -> crate::ProgramCoreResult<[u8; GUARDIAN_PUBKEY_LEN]> {
     if data.len() < 8 {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -436,31 +416,4 @@ pub fn read_guardian_key(
     let mut key = [0u8; GUARDIAN_PUBKEY_LEN];
     key.copy_from_slice(&data[start..end]);
     Ok(key)
-}
-
-// SBF uses the syscall; the host arm is a build-only stub (returns 1) so the
-// crate compiles under `cargo check` outside `cargo build-sbf`.
-fn secp256k1_recover(
-    hash: &[u8; 32],
-    recovery_id: u64,
-    signature: &[u8],
-    result: &mut [u8],
-) -> u64 {
-    // SAFETY: buffers match the syscall ABI: 32-byte hash, 64-byte signature
-    // (`r||s`), 64-byte result.
-    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
-    let code = unsafe {
-        pinocchio::syscalls::sol_secp256k1_recover(
-            hash.as_ptr(),
-            recovery_id,
-            signature.as_ptr(),
-            result.as_mut_ptr(),
-        )
-    };
-    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-    let code = {
-        let _ = (hash, recovery_id, signature, result);
-        1
-    };
-    code
 }

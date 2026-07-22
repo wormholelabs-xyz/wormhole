@@ -18,12 +18,10 @@
 //! The canonical pending-PDA and noreplay-bucket addresses are re-derived from
 //! these (plus the layout's `chain` / `digest`) and any mismatch is rejected.
 
-use pinocchio::{
-    error::ProgramError,
-    sysvars::{clock::Clock, Sysvar},
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
+use crate::account_util::add_lamports;
 use crate::definitions::{
     GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID, NOREPLAY_AUTHORITY_SEED_PREFIX,
     PENDING_OBSERVATIONS_SEED_PREFIX,
@@ -31,12 +29,13 @@ use crate::definitions::{
 use crate::err;
 use crate::instructions::noreplay;
 use crate::state::pending;
+use crate::ProgramResult;
 
 /// `close_pending` instruction-data size (after the discriminator). See module
 /// doc for the field map.
 const CLOSE_PENDING_DATA_LEN: usize = 32 + 8;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let data: &[u8; CLOSE_PENDING_DATA_LEN] = data
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
@@ -59,13 +58,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !closer.is_signer() {
+    if !closer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
     let layout = pending::load(pending_pda)?;
     let recorded_payer = layout.payer;
-    if rent_recipient.address().as_array() != &recorded_payer {
+    if rent_recipient.key.to_bytes() != recorded_payer {
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
 
@@ -73,7 +72,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // emitter, sequence_be, digest)` and reject mismatches — otherwise a spoofed
     // layout could trick the bitmap lookup into reading an unrelated bucket.
     let chain_be = layout.chain.to_be_bytes();
-    let (expected_pending_pda, _) = Address::find_program_address(
+    let (expected_pending_pda, _) = Pubkey::find_program_address(
         &[
             PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
@@ -83,7 +82,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         ],
         program_id,
     );
-    if pending_pda.address() != &expected_pending_pda {
+    if pending_pda.key != &expected_pending_pda {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
@@ -93,7 +92,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // Trigger (b): NoReplay-marked. Re-derive the authority PDA inline rather
     // than passing it in (cold path; keeps the account list small).
     let (noreplay_authority_addr, _) =
-        Address::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
+        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
     let already_accounted = noreplay::is_marked(
         noreplay_bucket,
         &noreplay_authority_addr,
@@ -107,13 +106,8 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     }
 
     let lamports = pending_pda.lamports();
-    let recipient_lamports = rent_recipient.lamports();
-    rent_recipient.set_lamports(
-        recipient_lamports
-            .checked_add(lamports)
-            .ok_or(ProgramError::ArithmeticOverflow)?,
-    );
-    pending_pda.close()
+    add_lamports(rent_recipient, lamports)?;
+    crate::account_util::close_account(pending_pda)
 }
 
 /// Returns `Ok(true)` if the supplied `GuardianSet` is expired, or if its index
@@ -122,13 +116,13 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 /// The owner is checked against [`CORE_BRIDGE_PROGRAM_ID`] first: without it, a
 /// forged account claiming expiry could DoS any pending PDA from reaching quorum.
 fn guardian_set_expired(
-    guardian_set: &AccountView,
+    guardian_set: &AccountInfo,
     expected_index: u32,
-) -> Result<bool, ProgramError> {
-    if guardian_set.owner().as_array() != &CORE_BRIDGE_PROGRAM_ID {
+) -> crate::ProgramCoreResult<bool> {
+    if guardian_set.owner.to_bytes() != CORE_BRIDGE_PROGRAM_ID {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    let data = guardian_set.try_borrow()?;
+    let data = guardian_set.try_borrow_data()?;
     if data.len() < 8 {
         return Err(err(GlobalAccountantError::InvalidPda));
     }

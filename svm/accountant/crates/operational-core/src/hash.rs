@@ -1,63 +1,23 @@
 //! `keccak256` helpers shared across handlers.
 //!
-//! The SBF arm calls the syscall; the host arm panics. Host compilation is
-//! still required (mollusk/surfpool test binaries and clippy are host-only),
-//! and pinocchio's `syscalls` re-export does not exist on the host target, so
-//! the cfg split is mandatory.
+//! `solana-keccak-hasher` (with the `sha3` feature) provides a real
+//! implementation on both targets — the syscall on-chain, a software
+//! fallback via `sha3` off-chain — so unlike pinocchio's raw syscall wrapper
+//! (which only worked on-chain and needed a host `unreachable!()` stub), no
+//! cfg-gating is needed here at all (migration plan §2e).
 
-/// `keccak256(data)` into `result`. Panics on the host target.
-pub(crate) fn keccak256(data: &[u8], result: &mut [u8; 32]) {
-    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
-    {
-        let vals: [&[u8]; 1] = [data];
-        // SAFETY: the runtime reads exactly `val_len` `&[u8]` fat pointers
-        // starting at `vals_ptr`.
-        unsafe {
-            pinocchio::syscalls::sol_keccak256(
-                vals.as_ptr() as *const u8,
-                vals.len() as u64,
-                result.as_mut_ptr(),
-            );
-        }
-    }
-    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-    {
-        let _ = (data, result);
-        unreachable!("keccak256 is only available on the SBF target");
-    }
+use solana_keccak_hasher::hashv;
+
+/// `keccak256(data)`.
+pub(crate) fn keccak256(data: &[u8]) -> [u8; 32] {
+    hashv(&[data]).to_bytes()
 }
 
 /// `keccak256(keccak256(body))` — the Wormhole VAA digest convention used by
 /// guardian signing and the Verify VAA Shim's `VerifyHash`.
 pub fn double_keccak256(body: &[u8]) -> [u8; 32] {
-    let mut inner = [0u8; 32];
-    keccak256(body, &mut inner);
-    let mut outer = [0u8; 32];
-    keccak256(&inner, &mut outer);
-    outer
-}
-
-/// `keccak256` over the concatenation of `parts`, in a single syscall. Panics on
-/// the host target.
-fn keccak256_parts(parts: &[&[u8]], result: &mut [u8; 32]) {
-    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
-    {
-        // SAFETY: the runtime reads exactly `parts.len()` `&[u8]` fat pointers
-        // starting at `parts.as_ptr()` and hashes their concatenation. Same ABI
-        // as the single-slice `keccak256`, with N entries instead of one.
-        unsafe {
-            pinocchio::syscalls::sol_keccak256(
-                parts.as_ptr() as *const u8,
-                parts.len() as u64,
-                result.as_mut_ptr(),
-            );
-        }
-    }
-    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-    {
-        let _ = (parts, result);
-        unreachable!("keccak256 is only available on the SBF target");
-    }
+    let inner = keccak256(body);
+    keccak256(&inner)
 }
 
 /// `keccak256(prefix ‖ tx_hash ‖ body)` — the guardian observation signing
@@ -73,7 +33,5 @@ fn keccak256_parts(parts: &[&[u8]], result: &mut [u8; 32]) {
 /// attestation domain — the two must stay distinct so an observation signature
 /// is never interchangeable with a VAA signature.
 pub fn observation_signing_digest(prefix: &[u8], tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    keccak256_parts(&[prefix, tx_hash, body], &mut out);
-    out
+    hashv(&[prefix, tx_hash, body]).to_bytes()
 }
