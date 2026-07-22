@@ -30,10 +30,23 @@ const PROGRAM_NAME: &str = "global_accountant";
 /// Compute-unit ceiling for the hottest quorum-commit branch (Transfer + lazy
 /// init of both Account PDAs). Pinned by the CU regression test below.
 ///
-/// Tightened to the observed cost (~60.2k CU on the quorum-commit branch,
-/// inclusive of the inner noreplay `MarkUsed` CPI) plus ~12% headroom, so a real
-/// regression trips the guard instead of hiding under a loose ceiling.
-const MAX_QUORUM_BRANCH_CU: u64 = 68_000;
+/// Re-baselined for the pinocchio -> anchor-lang 1.1.2 migration (see
+/// `.claude/tasks/anchor-migration-plan-v1.1.2.md` §7.1): measured cost on
+/// this branch moved from **60,502 CU** (pinocchio) to **67,009 CU**
+/// (anchor-lang 1.1.2), a **+6,507 CU (+10.8%)** increase — Anchor's
+/// discriminator/argument marshalling and `Context`/`Accounts` construction
+/// overhead, as anticipated by the plan. This is the expected, accepted cost
+/// of the framework migration, not a regression to chase down; mitigations
+/// already applied to keep the delta this small: `UncheckedAccount` (not
+/// Anchor's `seeds`/`owner` constraints, which would re-derive/re-check
+/// addresses this code already validates by hand), the 1-byte instruction
+/// dispatch (`#[instruction(discriminator = N)]`, not Anchor's 8-byte
+/// sighash), and `bytemuck` zero-copy state loads (not borsh).
+///
+/// Ceiling set to the new measured value plus ~12% headroom (matching the
+/// original constant's own margin over its baseline), so a real future
+/// regression still trips the guard instead of hiding under a loose ceiling.
+const MAX_QUORUM_BRANCH_CU: u64 = 75_000;
 
 fn program_id() -> Pubkey {
     // Fixed program id so test PDA derivation matches the program's view.
