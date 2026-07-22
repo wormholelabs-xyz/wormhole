@@ -7,8 +7,29 @@ repository = "https://github.com/wormhole-foundation/wormhole"
 rust-version = "1.89"
 
 [dependencies]
+anchor-lang = { workspace = true }
+borsh = { workspace = true }
 bytemuck = { workspace = true }
-pinocchio = { workspace = true }
-pinocchio-system.workspace = true
 global-accountant-definitions = { path = "../definitions" }
-solana-address = { version = "2.6", features = ["curve25519"] }
+solana-secp256k1-recover.workspace = true
+# Real keccak256 on both targets (syscall on-chain, `sha3` on host) — see
+# `hash.rs`. `default-features = false` because the crate's `std` feature is
+# irrelevant to us and only the `sha3` feature (host fallback) is needed.
+solana-keccak-hasher = { version = "3.1", features = ["sha3"] }
+# `find_program_address` needs the `curve25519` feature for its host-side
+# (non-syscall) implementation; on-chain the syscall path is used regardless.
+# Version left at the same `3` major line anchor-lang's own `solana-pubkey`
+# dependency resolves to, so Cargo unifies both requests into one instance
+# with the union of features, mirroring the original `solana-address`
+# dependency's role in the pinocchio version of this crate.
+solana-pubkey = { version = "3", features = ["curve25519"] }
+# `CreateAccountAllowPrefund` (SIMD-0312) — the dust-DoS-resistant
+# allocate+assign+topup used by `pda_init::init_or_upgrade_pda`. No Anchor
+# equivalent exists (`#[account(init)]` uses plain `CreateAccount`, which
+# fails on a prefunded PDA — see migration plan §2d/§7.2). Anchor's own
+# transitive `solana-system-interface` is pinned to the old `^2.0.0` line,
+# which predates this instruction variant; this direct `3.2` edge is a
+# second, separate major-version instance in the graph (same version family
+# already used by the test/surfpool stack) that does carry it. The `bincode`
+# feature is required for the instruction-builder functions themselves.
+solana-system-interface = { workspace = true, features = ["bincode"] }

@@ -5,22 +5,18 @@
 //! before the caller mutates. Lazy init lets the destination balance account PDA come
 //! into existence on the quorum-completing tx (payer pays rent).
 
-use pinocchio::{
-    account::Ref,
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::*;
 
 use crate::definitions::{
     BalanceAccountLayout, GlobalAccountantError, Uint256, ACCOUNT_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::pda_init::init_or_upgrade_pda;
+use crate::ProgramResult;
 
 /// Read a [`BalanceAccountLayout`]. `InvalidPda` if the buffer is not `LEN`.
-pub fn load(account: &AccountView) -> Result<BalanceAccountLayout, ProgramError> {
-    let data: Ref<'_, [u8]> = account.try_borrow()?;
+pub fn load(account: &AccountInfo) -> crate::ProgramCoreResult<BalanceAccountLayout> {
+    let data = account.try_borrow_data()?;
     if data.len() != BalanceAccountLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -34,8 +30,8 @@ pub fn load(account: &AccountView) -> Result<BalanceAccountLayout, ProgramError>
 }
 
 /// Write a [`BalanceAccountLayout`] into an account's data buffer.
-pub fn store(account: &mut AccountView, value: &BalanceAccountLayout) -> Result<(), ProgramError> {
-    let mut data = account.try_borrow_mut()?;
+pub fn store(account: &AccountInfo, value: &BalanceAccountLayout) -> crate::ProgramResult {
+    let mut data = account.try_borrow_mut_data()?;
     if data.len() != BalanceAccountLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -46,10 +42,10 @@ pub fn store(account: &mut AccountView, value: &BalanceAccountLayout) -> Result<
 /// Lazy-init the canonical balance account PDA. Idempotent: a no-op if the PDA already
 /// exists and is program-owned. Caller must enforce the canonical bump first
 /// (see `verify_account_pda` in `submit_observations`).
-pub fn init_if_needed(
-    program_id: &Address,
-    payer: &AccountView,
-    account_pda: &mut AccountView,
+pub fn init_if_needed<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    account_pda: &AccountInfo<'info>,
     chain: u16,
     token_chain: u16,
     token_address: &[u8; 32],
@@ -57,7 +53,7 @@ pub fn init_if_needed(
 ) -> ProgramResult {
     // Already initialised (program-owned + full length) ⇒ no-op.
     // `init_or_upgrade_pda` only accepts system-owned, empty accounts.
-    if account_pda.owner() != &pinocchio_system::ID
+    if account_pda.owner != &anchor_lang::solana_program::system_program::ID
         && account_pda.data_len() == BalanceAccountLayout::LEN
     {
         return Ok(());
@@ -66,20 +62,19 @@ pub fn init_if_needed(
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     let bump_seed = [canonical_bump];
-    let seeds_with_bump = [
-        Seed::from(ACCOUNT_SEED_PREFIX),
-        Seed::from(chain_be.as_slice()),
-        Seed::from(token_chain_be.as_slice()),
-        Seed::from(token_address.as_slice()),
-        Seed::from(bump_seed.as_slice()),
+    let seeds: &[&[u8]] = &[
+        ACCOUNT_SEED_PREFIX,
+        &chain_be,
+        &token_chain_be,
+        token_address,
+        &bump_seed,
     ];
-    let signer = Signer::from(&seeds_with_bump);
 
     init_or_upgrade_pda(
         payer,
         account_pda,
         program_id,
-        signer,
+        seeds,
         BalanceAccountLayout::LEN as u64,
     )?;
 
