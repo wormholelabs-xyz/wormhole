@@ -9,13 +9,15 @@
 //! and the account layout drops WTT's chain-registration slot in favour of the
 //! six NTT transfer accounts.
 
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::instructions::quorum::{
     ParsedObservation, BODY_MIN_LEN, SUBMIT_FIXED_LEN,
 };
 use accountant_operational_core::instructions::{commit_log, noreplay, quorum};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     GlobalAccountantError, PendingObservationsLayout, NTT_SUBMIT_OBSERVATION_PREFIX,
@@ -50,7 +52,7 @@ use crate::instructions::ntt_transfer::apply_ntt_transfer;
 ///  13. `[WRITE]`         dest balance `(recipient_chain, hub_chain, hub_address)`.
 ///
 /// The transfer accounts are only touched on the quorum-completing branch.
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // ----- Parse the instruction data -----
     // Wire format (after the 1-byte dispatch discriminator):
     //   guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)  [SUBMIT_FIXED_LEN]
@@ -97,14 +99,14 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !submitter.is_signer() {
+    if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
     // NoReplay pre-check rejects replays before any signature work.
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.address(),
+        noreplay_authority.key,
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,

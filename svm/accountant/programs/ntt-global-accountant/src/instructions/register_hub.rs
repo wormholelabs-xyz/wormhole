@@ -18,19 +18,18 @@
 //! authenticity guarantee is the guardian quorum verified by the Shim; the
 //! hub key is taken directly from the body header `(emitter_chain, emitter_address)`.
 
-use pinocchio::{
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
+
+use accountant_operational_core::hash::double_keccak256;
+use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     parse_transceiver_info, parse_vaa_namespace_key, GlobalAccountantError, TransceiverHubLayout,
     TRANSCEIVER_HUB_SEED_PREFIX, VAA_BODY_HEADER_LEN,
 };
 use crate::err;
-use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
 
 /// Wire format for the `register_hub` instruction data (after the 1-byte
 /// dispatch discriminator):
@@ -47,7 +46,7 @@ const REGISTER_HUB_FIXED_LEN: usize = 1 + 1 + 2;
 /// envelope. A hub VAA is the 51-byte header + a small transceiver-info payload.
 const REGISTER_HUB_BODY_MAX: usize = 512;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < REGISTER_HUB_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -84,7 +83,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !payer.is_signer() {
+    if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
@@ -109,7 +108,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // ----- (5) NoReplay pre-check -----
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.address(),
+        noreplay_authority.key,
         emitter_chain,
         &emitter_address,
         sequence,
@@ -130,11 +129,11 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (7) Canonical PDA enforcement -----
     let chain_be = emitter_chain.to_be_bytes();
-    let (expected_pda, canonical_bump) = Address::find_program_address(
+    let (expected_pda, canonical_bump) = Pubkey::find_program_address(
         &[TRANSCEIVER_HUB_SEED_PREFIX, &chain_be, &emitter_address],
         program_id,
     );
-    if hub_pda.address() != &expected_pda || hub_bump != canonical_bump {
+    if hub_pda.key != &expected_pda || hub_bump != canonical_bump {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
@@ -142,24 +141,23 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //
     // CosmWasm bails if a hub entry already exists. An existing hub PDA is
     // program-owned; only a system-owned (uninitialised) PDA is allowed.
-    if hub_pda.owner() != &pinocchio_system::ID {
+    if hub_pda.owner != &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::DuplicateTransceiverHub));
     }
 
     // ----- (9) Init the hub PDA -----
     let bump_seed = [hub_bump];
-    let seeds = [
-        Seed::from(TRANSCEIVER_HUB_SEED_PREFIX),
-        Seed::from(chain_be.as_slice()),
-        Seed::from(emitter_address.as_slice()),
-        Seed::from(bump_seed.as_slice()),
+    let seeds: &[&[u8]] = &[
+        TRANSCEIVER_HUB_SEED_PREFIX,
+        &chain_be,
+        &emitter_address,
+        &bump_seed,
     ];
-    let signer = Signer::from(&seeds);
     init_or_upgrade_pda(
         payer,
         hub_pda,
         program_id,
-        signer,
+        seeds,
         TransceiverHubLayout::LEN as u64,
     )?;
 
@@ -171,7 +169,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     layout.address = emitter_address;
     layout.hub_address = emitter_address;
     {
-        let mut data_mut = hub_pda.try_borrow_mut()?;
+        let mut data_mut = hub_pda.try_borrow_mut_data()?;
         if data_mut.len() != TransceiverHubLayout::LEN {
             return Err(err(GlobalAccountantError::InvalidPda));
         }

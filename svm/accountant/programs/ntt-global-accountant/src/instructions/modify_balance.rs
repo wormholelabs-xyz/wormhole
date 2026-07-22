@@ -9,11 +9,13 @@
 //! string: NTT VAAs carry `NTT_ACCOUNTANT_GOVERNANCE_MODULE`, which scopes a
 //! `ModifyBalance` VAA to this program (the action byte `0x01` is shared).
 
-use pinocchio::{
-    cpi::{Seed, Signer},
-    error::ProgramError,
-    AccountView, Address, ProgramResult,
-};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
+
+use accountant_operational_core::hash::double_keccak256;
+use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::state::{account as balance_account, modification};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLayout, Uint256,
@@ -21,8 +23,6 @@ use crate::definitions::{
     NTT_ACCOUNTANT_GOVERNANCE_MODULE, SOLANA_CHAIN_ID,
 };
 use crate::err;
-use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
-use accountant_operational_core::state::{account as balance_account, modification};
 
 /// Wire format for the `modify_balance` instruction data (after the 1-byte
 /// dispatch discriminator):
@@ -73,7 +73,7 @@ const PAYLOAD_REASON_OFFSET: usize = BODY_HEADER_LEN + 112;
 const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 8 + 2 + 2 + 32 + 1 + 32 + 32;
 const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
 
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < MODIFY_BALANCE_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -107,7 +107,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !payer.is_signer() {
+    if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
@@ -179,7 +179,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // ----- (7) Canonical-PDA enforcement -----
     let chain_id_be = chain_id.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
-    let (expected_balance_pda, canonical_balance_bump) = Address::find_program_address(
+    let (expected_balance_pda, canonical_balance_bump) = Pubkey::find_program_address(
         &[
             ACCOUNT_SEED_PREFIX,
             &chain_id_be,
@@ -188,23 +188,23 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         ],
         program_id,
     );
-    if balance_pda.address() != &expected_balance_pda {
+    if balance_pda.key != &expected_balance_pda {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
     let payload_sequence_be = payload_sequence.to_be_bytes();
-    let (expected_modification_pda, canonical_modification_bump) = Address::find_program_address(
+    let (expected_modification_pda, canonical_modification_bump) = Pubkey::find_program_address(
         &[MODIFICATION_SEED_PREFIX, &payload_sequence_be],
         program_id,
     );
-    if modification_pda.address() != &expected_modification_pda {
+    if modification_pda.key != &expected_modification_pda {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
     // ----- (8) Replay protection -----
     //
     // An initialised `Modification` PDA means this sequence was already used.
-    if modification_pda.owner() != &pinocchio_system::ID {
+    if modification_pda.owner != &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::DuplicateModification));
     }
 
@@ -212,7 +212,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     //
     // Sub on uninit rejects before allocation so the payer doesn't pay rent on a
     // guaranteed failure. Add on uninit lazy-inits with `balance = amount`.
-    let balance_is_uninit = balance_pda.owner() == &pinocchio_system::ID;
+    let balance_is_uninit = balance_pda.owner == &anchor_lang::solana_program::system_program::ID;
     if balance_is_uninit {
         match kind {
             ModificationKind::Subtract => {
@@ -244,17 +244,12 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
     // ----- (10) Lazy-init the Modification PDA + store -----
     let bump_seed = [canonical_modification_bump];
-    let seeds = [
-        Seed::from(MODIFICATION_SEED_PREFIX),
-        Seed::from(payload_sequence_be.as_slice()),
-        Seed::from(bump_seed.as_slice()),
-    ];
-    let signer = Signer::from(&seeds);
+    let seeds: &[&[u8]] = &[MODIFICATION_SEED_PREFIX, &payload_sequence_be, &bump_seed];
     init_or_upgrade_pda(
         payer,
         modification_pda,
         program_id,
-        signer,
+        seeds,
         ModificationLayout::LEN as u64,
     )?;
 
@@ -277,10 +272,10 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
 
 /// Lazy-init the `BalanceAccount` PDA with `balance = amount` (Add on uninit).
 #[allow(clippy::too_many_arguments)]
-fn init_balance_account(
-    program_id: &Address,
-    payer: &AccountView,
-    balance_pda: &mut AccountView,
+fn init_balance_account<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    balance_pda: &AccountInfo<'info>,
     canonical_bump: u8,
     chain_id: u16,
     token_chain: u16,
@@ -290,20 +285,19 @@ fn init_balance_account(
     let chain_id_be = chain_id.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     let bump_seed = [canonical_bump];
-    let seeds = [
-        Seed::from(ACCOUNT_SEED_PREFIX),
-        Seed::from(chain_id_be.as_slice()),
-        Seed::from(token_chain_be.as_slice()),
-        Seed::from(token_address.as_slice()),
-        Seed::from(bump_seed.as_slice()),
+    let seeds: &[&[u8]] = &[
+        ACCOUNT_SEED_PREFIX,
+        &chain_id_be,
+        &token_chain_be,
+        token_address,
+        &bump_seed,
     ];
-    let signer = Signer::from(&seeds);
 
     init_or_upgrade_pda(
         payer,
         balance_pda,
         program_id,
-        signer,
+        seeds,
         BalanceAccountLayout::LEN as u64,
     )?;
 
@@ -316,19 +310,15 @@ fn init_balance_account(
     balance_account::store(balance_pda, &layout)
 }
 
-use accountant_operational_core::hash::double_keccak256;
-
-/// Emit the modification record to the SBF program log. No-op on host builds.
+/// Emit the modification record to the program log for off-chain indexers.
+/// `msg!` and `sol_log_data` both compile and run on host and on-chain, so no
+/// cfg-gating is needed here (unlike pinocchio's raw syscall wrapper).
 fn log_modification(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {
-    #[cfg(any(target_os = "solana", target_arch = "bpf"))]
-    {
-        // SAFETY: syscall ABIs — sol_log_64_ takes five u64s, sol_log_ takes
-        // (ptr, len).
-        unsafe {
-            pinocchio::syscalls::sol_log_64_(sequence, chain_id as u64, kind as u64, 0, 0);
-            pinocchio::syscalls::sol_log_(reason.as_ptr(), reason.len() as u64);
-        }
-    }
-    #[cfg(not(any(target_os = "solana", target_arch = "bpf")))]
-    let _ = (sequence, chain_id, kind, reason);
+    msg!(
+        "modification sequence={} chain_id={} kind={}",
+        sequence,
+        chain_id,
+        kind
+    );
+    anchor_lang::solana_program::log::sol_log_data(&[reason]);
 }

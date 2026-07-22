@@ -8,10 +8,12 @@
 //! with `submit_observations`: once `(chain, emitter, seq)` is marked, any later
 //! caller on either path is rejected as `AlreadyAccounted`.
 
-use pinocchio::{error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{commit_log, noreplay, shim};
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VAA_BODY_HEADER_LEN};
 use crate::err;
@@ -38,7 +40,7 @@ const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
 ///  11. `[]`              TransceiverPeer PDA `(recipient_chain, source_peer, emitter_chain)`.
 ///  12. `[WRITE]`         source balance `(emitter_chain, hub_chain, hub_address)`.
 ///  13. `[WRITE]`         dest balance `(recipient_chain, hub_chain, hub_address)`.
-pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) -> ProgramResult {
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     // ----- (1) Parse wire data -----
     if data.len() < SUBMIT_VAAS_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -59,7 +61,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if !submitter.is_signer() {
+    if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
@@ -78,7 +80,7 @@ pub fn process(program_id: &Address, accounts: &mut [AccountView], data: &[u8]) 
     // ----- (5) NoReplay pre-check -----
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.address(),
+        noreplay_authority.key,
         chain,
         &emitter,
         sequence,

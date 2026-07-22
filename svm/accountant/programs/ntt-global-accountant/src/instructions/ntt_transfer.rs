@@ -23,9 +23,11 @@
 //!      `lock_or_burn(amount)`; dest balance `(recipient_chain, hub_chain,
 //!      hub_address)` `unlock_or_mint(amount)`.
 
-use pinocchio::{account::Ref, error::ProgramError, AccountView, Address, ProgramResult};
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::state::account as account_state;
+use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     parse_delivery_instruction, parse_ntt_transfer, GlobalAccountantError,
@@ -35,7 +37,7 @@ use crate::definitions::{
 };
 use crate::err;
 
-/// The five NTT transfer accounts that trail the quorum accounts in both the
+/// The six NTT transfer accounts that trail the quorum accounts in both the
 /// `submit_observations` and `submit_vaas` layouts. Borrowed as a fixed slice so
 /// the orchestration in each handler passes them through unchanged.
 ///
@@ -55,10 +57,10 @@ pub const TRANSFER_ACCOUNTS_LEN: usize = 6;
 /// authenticated routing key from the body header (NOT the relayer-resolved
 /// sender — that distinction is load-bearing: the digest/transfer key is the
 /// emitter, the hub/peer routing uses the sender).
-pub fn apply_ntt_transfer(
-    program_id: &Address,
-    payer: &mut AccountView,
-    transfer_accounts: &mut [AccountView],
+pub fn apply_ntt_transfer<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    transfer_accounts: &[AccountInfo<'info>],
     emitter_chain: u16,
     emitter_address: &[u8; 32],
     body_bytes: &[u8],
@@ -147,24 +149,24 @@ pub fn apply_ntt_transfer(
 /// different emitter, means the emitter is not a relayer — `false`. The PDA
 /// address is canonical-checked first.
 fn relayer_matches(
-    program_id: &Address,
-    relayer_registration_pda: &AccountView,
+    program_id: &Pubkey,
+    relayer_registration_pda: &AccountInfo,
     chain: u16,
     emitter_address: &[u8; 32],
-) -> Result<bool, ProgramError> {
+) -> core::result::Result<bool, ProgramError> {
     let chain_be = chain.to_be_bytes();
-    let (expected, _) = Address::find_program_address(
+    let (expected, _) = Pubkey::find_program_address(
         &[RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, &chain_be],
         program_id,
     );
-    if relayer_registration_pda.address() != &expected {
+    if relayer_registration_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     // Unregistered chain ⇒ not a relayer.
-    if relayer_registration_pda.owner() == &pinocchio_system::ID {
+    if relayer_registration_pda.owner == &anchor_lang::solana_program::system_program::ID {
         return Ok(false);
     }
-    let data: Ref<'_, [u8]> = relayer_registration_pda.try_borrow()?;
+    let data = relayer_registration_pda.try_borrow_data()?;
     if data.len() != RelayerChainRegistrationLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -178,23 +180,23 @@ fn relayer_matches(
 /// Read the `TransceiverHub` PDA at `(b"transceiver_hub", chain_be, address)`.
 /// Canonical-address-checked; a missing PDA is `MissingTransceiverHub`.
 fn read_transceiver_hub(
-    program_id: &Address,
-    hub_pda: &AccountView,
+    program_id: &Pubkey,
+    hub_pda: &AccountInfo,
     chain: u16,
     address: &[u8; 32],
-) -> Result<TransceiverHubLayout, ProgramError> {
+) -> core::result::Result<TransceiverHubLayout, ProgramError> {
     let chain_be = chain.to_be_bytes();
-    let (expected, _) = Address::find_program_address(
+    let (expected, _) = Pubkey::find_program_address(
         &[TRANSCEIVER_HUB_SEED_PREFIX, &chain_be, address],
         program_id,
     );
-    if hub_pda.address() != &expected {
+    if hub_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    if hub_pda.owner() == &pinocchio_system::ID {
+    if hub_pda.owner == &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::MissingTransceiverHub));
     }
-    let data: Ref<'_, [u8]> = hub_pda.try_borrow()?;
+    let data = hub_pda.try_borrow_data()?;
     if data.len() != TransceiverHubLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -209,15 +211,15 @@ fn read_transceiver_hub(
 /// dest_chain_be)`. Canonical-address-checked; a missing PDA is
 /// `MissingTransceiverPeer`.
 fn read_transceiver_peer(
-    program_id: &Address,
-    peer_pda: &AccountView,
+    program_id: &Pubkey,
+    peer_pda: &AccountInfo,
     chain: u16,
     address: &[u8; 32],
     dest_chain: u16,
-) -> Result<TransceiverPeerLayout, ProgramError> {
+) -> core::result::Result<TransceiverPeerLayout, ProgramError> {
     let chain_be = chain.to_be_bytes();
     let dest_chain_be = dest_chain.to_be_bytes();
-    let (expected, _) = Address::find_program_address(
+    let (expected, _) = Pubkey::find_program_address(
         &[
             TRANSCEIVER_PEER_SEED_PREFIX,
             &chain_be,
@@ -226,13 +228,13 @@ fn read_transceiver_peer(
         ],
         program_id,
     );
-    if peer_pda.address() != &expected {
+    if peer_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    if peer_pda.owner() == &pinocchio_system::ID {
+    if peer_pda.owner == &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::MissingTransceiverPeer));
     }
-    let data: Ref<'_, [u8]> = peer_pda.try_borrow()?;
+    let data = peer_pda.try_borrow_data()?;
     if data.len() != TransceiverPeerLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -249,11 +251,11 @@ fn read_transceiver_peer(
 /// (source == dest PDA) collapse onto one in-memory layout so the second
 /// mutation observes the first. Identical mechanics to WTT `transfer::apply_transfer`.
 #[allow(clippy::too_many_arguments)]
-fn apply_balances(
-    program_id: &Address,
-    payer: &AccountView,
-    source_account: &mut AccountView,
-    dest_account: &mut AccountView,
+fn apply_balances<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    source_account: &AccountInfo<'info>,
+    dest_account: &AccountInfo<'info>,
     source_chain: u16,
     recipient_chain: u16,
     token_chain: u16,
@@ -263,7 +265,7 @@ fn apply_balances(
     // ----- Source side -----
     let (src_expected, src_bump) =
         derive_balance_account_pda(program_id, source_chain, token_chain, token_address);
-    if source_account.address() != &src_expected {
+    if source_account.key != &src_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
     account_state::init_if_needed(
@@ -278,7 +280,7 @@ fn apply_balances(
     let mut src = account_state::load(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
 
-    let same_pda = source_account.address() == dest_account.address();
+    let same_pda = source_account.key == dest_account.key;
     if same_pda {
         src.unlock_or_mint(amount).map_err(err)?;
         account_state::store(source_account, &src)?;
@@ -290,7 +292,7 @@ fn apply_balances(
     // ----- Destination side -----
     let (dst_expected, dst_bump) =
         derive_balance_account_pda(program_id, recipient_chain, token_chain, token_address);
-    if dest_account.address() != &dst_expected {
+    if dest_account.key != &dst_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
     account_state::init_if_needed(
@@ -310,14 +312,14 @@ fn apply_balances(
 /// Re-derive the canonical balance account PDA address + bump from `(chain,
 /// token_chain, token_address)`. Identical seed layout to WTT.
 fn derive_balance_account_pda(
-    program_id: &Address,
+    program_id: &Pubkey,
     chain: u16,
     token_chain: u16,
     token_address: &[u8; 32],
-) -> (Address, u8) {
+) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
-    Address::find_program_address(
+    Pubkey::find_program_address(
         &[
             ACCOUNT_SEED_PREFIX,
             &chain_be,

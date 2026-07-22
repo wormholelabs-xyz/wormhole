@@ -1,6 +1,6 @@
 [package]
 name = "ntt-global-accountant"
-description = "Wormhole NTT Global Accountant Solana program (Pinocchio)."
+description = "Wormhole NTT Global Accountant Solana program (Anchor)."
 publish = false
 
 edition.workspace = true
@@ -13,44 +13,52 @@ version.workspace = true
 crate-type = ["cdylib", "lib"]
 
 [features]
-# Build the BPF entrypoint. Disabled when consumed as a library (e.g. by tests
-# or client tooling).
+# Anchor convention (inverted polarity from the old `bpf-entrypoint` opt-in):
+# the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library/CPI/test consumption. `idl-build` is deliberately never enabled —
+# Anchor's auto-IDL would be partial/inaccurate for the custom offset-0 tag
+# + bytemuck layouts this program keeps (mirrors the sibling `global-accountant`
+# crate's rationale), so IDL codegen stays off rather than shipping a
+# misleading artifact.
 default = []
-bpf-entrypoint = []
+no-entrypoint = []
 
 [dependencies]
 accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+borsh.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
-pinocchio.workspace = true
-pinocchio-system.workspace = true
-# Force-enable the `curve25519` feature on solana-address so production-shape
-# host builds (cargo clippy without test features) can resolve
-# `Address::find_program_address`. Same rationale as the WTT program crate.
-solana-address = { version = "2.6", features = ["curve25519"] }
+# See the identical dependency in `crates/operational-core/Cargo.toml`:
+# `register_hub`/`register_peer`/`register_relayer_chain`/`ntt_transfer` also
+# call `find_program_address` directly. Aliased (rather than the plain
+# `solana-pubkey` name) so this `3.x` instance never collides with the
+# unrelated `4.1` instance the dev-dependencies below use for mollusk/test
+# plumbing — Cargo forbids depending on the identical resolved package under
+# two different names from the same crate, so the alias must be spelled
+# identically in both `[dependencies]` and `[dev-dependencies]` (see
+# `solana-pubkey-v3` below).
+solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
 
 [dev-dependencies]
 mollusk-svm.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true
+solana-keccak-hasher.workspace = true
 solana-pubkey = { workspace = true, features = ["curve25519"] }
-# Pull `curve25519` into the unified feature set so the host build of this
-# crate can resolve `Address::find_program_address`. On-chain the syscall path
-# is unconditionally available; this is purely for `cargo test`.
-solana-address = { version = "2.6", features = ["curve25519"] }
-ntt-global-accountant = { path = "." }
+# Same aliased `3.x` instance as `[dependencies]` above.
+solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
+ntt-global-accountant = { path = ".", features = ["no-entrypoint"] }
 # Pure-Rust secp256k1. Tests sign synthetic guardian observations to populate
 # the GuardianSignatures fixtures the real Verify VAA Shim CPI verifies against.
 libsecp256k1 = "0.6"
-# Keccak256 used host-side to recompute the double-hashed VAA body digest.
-solana-keccak-hasher.workspace = true
+# Loads the mainnet-vector corpus (`tests/fixtures/ntt_test_vectors.json`)
+# consumed by `tests/test_vectors.rs`. Already pinned in the workspace lockfile.
+serde_json.workspace = true
 # Hash-pinned `.so` fixtures live under `tests/fixtures/`. The mollusk test
 # harness verifies each fixture's SHA-256 against a hard-coded constant before
 # loading; drift surfaces as a panic with the recompute-and-update recipe.
 sha2 = "=0.10.9"
-# Loads the mainnet-vector corpus (`tests/fixtures/ntt_test_vectors.json`)
-# consumed by `tests/test_vectors.rs`. Already pinned in the workspace lockfile.
-serde_json.workspace = true
 # Surfpool E2E lifecycle test — talks to a subprocess `surfpool start` over
 # JSON-RPC. Mirrors the WTT `global-accountant` crate's dev-dependency set.
 solana-client.workspace = true
