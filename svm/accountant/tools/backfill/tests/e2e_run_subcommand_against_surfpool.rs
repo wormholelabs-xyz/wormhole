@@ -130,7 +130,15 @@ async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
     ));
     let rpc_url = guard.rpc_url();
 
-    let program_id = Keypair::new().pubkey();
+    // Anchor's `declare_id!` pins this program to a single fixed address,
+    // checked on every entry (`DeclaredProgramIdMismatch` otherwise) — unlike
+    // the pre-migration pinocchio program, which derived every PDA from the
+    // runtime `program_id` and so could deploy at a fresh random keypair per
+    // run. `surfnet_writeProgram` writes program bytecode directly at an
+    // arbitrary address without requiring a signing keypair for that
+    // address, so deploying at the compiled-in ID works here even though no
+    // private key for it is known.
+    let program_id = Pubkey::new_from_array(global_accountant_backfill::ID.to_bytes());
     deploy_program(&rpc_url, &program_id, &backfill_bytes);
     deploy_program(&rpc_url, &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), &noreplay_bytes);
     eprintln!("[run-e2e] program_id={program_id}");
