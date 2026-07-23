@@ -42,8 +42,9 @@ template RedeemReceipt
 
 template ExampleIntegrator
   with
-    manager     : Party    -- app party: signatory, and the replay scope
+    manager     : Party    -- app party: signatory, and the replay-scope party
     operator    : Party    -- the wormhole core operator this app trusts
+    namespace   : Text     -- replay-trie namespace; the scope is (manager, namespace)
     users       : [Party]  -- redeemers; observers so they can exercise Redeem
     peerChain   : Int      -- registered source-chain peer of this app
     peerAddress : Bytes32
@@ -77,6 +78,7 @@ template ExampleIntegrator
           encodedVAA
           pubKeys
           consumer = manager
+          namespace
           replayNodeCid
         -- The integrator's own acceptance check — never skip this.
         assertMsg "not from the registered peer"
@@ -94,6 +96,12 @@ data IntegratorFixture = IntegratorFixture with
   intCid   : ContractId ExampleIntegrator
   csDisc   : Disclosure
 
+-- | The example app's replay-trie namespace. Opaque to the core; a real
+-- integrator derives it from its own stable identity (NTT: a hash of the
+-- instrument id and the initial admin party).
+exampleNamespace : Text
+exampleNamespace = "example"
+
 setupIntegrator : Script IntegratorFixture
 setupIntegrator = do
   (operator, _, csId) <- setup
@@ -104,12 +112,13 @@ setupIntegrator = do
     createCmd ExampleIntegrator with
       manager
       operator
+      namespace = exampleNamespace
       users = [alice, bob]
       -- govSetFeeVAA is emitted by (chain 1, 0x..04); register that as the peer.
       peerChain = solanaGovernanceChainId
       peerAddress = defaultGovernanceContract
   -- One-time ceremony: the manager's replay trie root.
-  _ <- registerReplayRoot operator manager defaultSplitThreshold
+  _ <- registerReplayRoot operator manager exampleNamespace defaultSplitThreshold
   -- The app's disclosure service exports the CoreState disclosure (the
   -- operator is a stakeholder) and, per redemption, the covering node's.
   csDisc <- fromSome <$> queryDisclosure operator csId
@@ -129,7 +138,7 @@ testIntegratorRedeem = do
   -- The disclosure service resolves the covering node for the VAA's digest;
   -- 'parseVAA' is pure, so the script computes the digest as the service would.
   let digest = (parseVAA govSetFeeVAA).hash
-  (nodeCid, nodeDisc) <- coveringDisclosure manager manager digest
+  (nodeCid, nodeDisc) <- coveringDisclosure manager manager exampleNamespace digest
 
   -- Alice redeems: her own authority plus the two disclosures — nothing else.
   receiptCid <- submit (actAs alice <> disclose csDisc <> disclose nodeDisc) do
@@ -154,7 +163,7 @@ testIntegratorRedeem = do
       pubKeys = devnetPubKeys
 
   -- Replay with the FRESH covering node: rejected on membership.
-  (freshCid, freshDisc) <- coveringDisclosure manager manager digest
+  (freshCid, freshDisc) <- coveringDisclosure manager manager exampleNamespace digest
   submitMustFail (actAs bob <> disclose csDisc <> disclose freshDisc) do
     exerciseCmd intCid Redeem with
       redeemer = bob
@@ -164,16 +173,19 @@ testIntegratorRedeem = do
       pubKeys = devnetPubKeys
 
   -- A second app is its own replay scope: the SAME VAA redeems there too.
+  -- Its namespace string is identical — the scope is (consumer, namespace),
+  -- so a distinct manager party alone separates the tries.
   manager2 <- allocateParty "ExampleManager2"
   intCid2 <- submit manager2 do
     createCmd ExampleIntegrator with
       manager = manager2
       operator
+      namespace = exampleNamespace
       users = [alice]
       peerChain = solanaGovernanceChainId
       peerAddress = defaultGovernanceContract
-  _ <- registerReplayRoot operator manager2 defaultSplitThreshold
-  (node2Cid, node2Disc) <- coveringDisclosure manager2 manager2 digest
+  _ <- registerReplayRoot operator manager2 exampleNamespace defaultSplitThreshold
+  (node2Cid, node2Disc) <- coveringDisclosure manager2 manager2 exampleNamespace digest
   receipt2Cid <- submit (actAs alice <> disclose csDisc <> disclose node2Disc) do
     exerciseCmd intCid2 Redeem with
       redeemer = alice

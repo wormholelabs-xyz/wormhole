@@ -70,6 +70,7 @@ registerEmitter operator owner = do
   (_, emCid) <- submit (actAs owner <> disclose regDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = owner
+      payer = owner    -- direct registration: own payer, controller set collapses
       coreStateCid = None
       feeAllocation = None
   pure emCid

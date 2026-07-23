@@ -531,15 +531,21 @@ a _negative_ one names nothing and **fails open**. Replay protection is
 precisely a negative claim ("this digest was never consumed"), so it cannot be
 built on key lookups — this module uses no contract keys at all.
 
-Instead, each consumer's consumed-digest set is a **prefix trie of leaf
-contracts** (`Replay.daml`). A node covers a hex `prefix` and stores the set
-of digest _suffixes_ consumed under it:
+Instead, each replay scope's consumed-digest set is a **prefix trie of leaf
+contracts** (`Replay.daml`). A scope is **(consumer, namespace)**: the
+`consumer` party carries the authority, and the opaque `namespace` string lets
+one consumer party maintain many independent tries — an integrator whose admin
+role is transferable keeps the party stable and derives the namespace from its
+own permanent identity instead (NTT: a hash of the instrument id and the
+initial admin party). A node covers a hex `prefix` and stores the set of
+digest _suffixes_ consumed under it:
 
 ```haskell
 template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
     operator       : Party    -- co-signs: no unilateral archive or re-create
+    namespace      : Text     -- opaque sub-scope: one consumer, many tries
     prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- node capacity; children inherit it
     consumed       : Set Bytes  -- suffixes, each (64 − |prefix|) nibbles
@@ -553,8 +559,8 @@ if the suffix is already present, and recreates the node with it inserted.
 When the node is at `splitThreshold`, the consume instead **splits** it: all
 16 children are created (one per nibble, empty ones included), suffixes
 bucketed by their first nibble, which is dropped. Internal nodes are never
-stored. **The invariant: a consumer's active nodes partition the digest space
-— every digest has exactly one covering node**, so membership in that node is
+stored. **The invariant: a scope's active nodes partition the digest space —
+every digest has exactly one covering node**, so membership in that node is
 global consumption truth.
 
 **Why this is sound where keys were not.** "Not consumed" became a positive
@@ -569,8 +575,8 @@ _closed_ (an archived subspace has no covering node — nothing verifies).
 
 `VerifyAndConsumeVAA` (nonconsuming, on `CoreState`, flexible controller
 `consumer`) takes the covering node's cid, verifies the VAA (§5), binds the
-node to the (consumer, operator) pairing, and exercises `ConsumeDigest` with
-the digest — verify + consume + act in one transaction.
+node to the (consumer, namespace, operator) scope, and exercises
+`ConsumeDigest` with the digest — verify + consume + act in one transaction.
 
 Properties:
 
@@ -584,10 +590,12 @@ Properties:
   to a consumer-submitted claim (the `RegisterEmitter` pattern: no crank; the
   operator multisig signs nothing after genesis). Claiming a root for a
   consumer requires **that consumer's authority**, so nobody can fork another
-  app's replay scope. There is deliberately _no_ one-root-per-consumer
-  enforcement: maintaining a single trie is the consumer's own responsibility
-  (its disclosure service defines which trie its consumes resolve into, and
-  detects forks — more than one covering node — for free). This is EVM
+  app's replay scope (the namespace is a free-form sub-scope _under_ that
+  authority, not a claim anyone else can contest). There is deliberately _no_
+  one-root-per-scope enforcement: maintaining a single trie per scope is the
+  consumer's own responsibility (its disclosure service defines which trie its
+  consumes resolve into, and detects forks — more than one covering node — for
+  free). This is EVM
   parity: nobody grants replay storage there either; every integrator owns
   its mapping. A consumer minting parallel roots, like a consumer whose key
   is stolen, only harms itself — and a stolen consumer key defeats the app
@@ -597,8 +605,9 @@ Properties:
   built.) Spam claims cost the spammer synchronizer traffic per transaction
   and the operator ~300 B of storage per worthless root; no shared contract
   grows, nothing bricks.
-- **Scoping and contention.** Tries are per consumer party: different apps
-  consume the same VAA independently. Consumes racing on the _same node_
+- **Scoping and contention.** Tries are per (consumer, namespace): different
+  apps — or one consumer party under different namespaces — consume the same
+  VAA independently. Consumes racing on the _same node_
   conflict — exactly one commits (validator-checked, regardless of submitter);
   the loser re-resolves the covering node and retries. A blind retry of a
   consume that actually committed fails on membership ("digest already
@@ -617,8 +626,8 @@ Properties:
   consumption, and the attestation surface does not include app redemptions.
 
 **The disclosure service.** Submitters locate the covering node off-ledger: a
-service indexes the consumer's active nodes by prefix (following the
-`CreatedEvent`s that consumes and splits produce) and serves, for a digest,
+service indexes the active nodes by (consumer, namespace, prefix) (following
+the `CreatedEvent`s that consumes and splits produce) and serves, for a digest,
 the covering node's cid plus its explicit disclosure — alongside the
 `CoreState` disclosure it already serves (§4.3). It is **untrusted for
 safety**: the worst it can do is serve a wrong or stale node, which fails the
@@ -662,7 +671,7 @@ disclosure blob) for X". The complete inventory it must serve:
 | Contract                                 | Index                              | Needed by                                                              | Disclosure attachment?                                                            | Churn                                                      |
 | ---------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `CoreState`                              | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers)                      | per governance action (rare)                               |
-| `ReplayNode`                             | (consumer, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem                        | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
+| `ReplayNode`                             | (consumer, namespace, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem             | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
 | `EmitterRegistry`                        | operator                           | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated on operator fee change |
 | `ReplayRootRegistry`                     | operator                           | `ClaimReplayRoot`                                                      | yes — the consumer submits (cacheable blob)                                       | only on operator fee change                                |
 | `Emitter`                                | (operator, owner, emitterId)       | `PublishMessage`                                                       | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
@@ -675,9 +684,10 @@ Two properties make this safe to outsource:
   transaction fail — the trie fails closed on staleness (§4.6), and consumers
   authenticate every resolved contract by its **payload**, never by how the
   cid was found: `CoreState` by its signatory anchor fields (§4.1),
-  `ReplayNode` by the (consumer, operator) binding inside `VerifyAndConsumeVAA`
-  plus the app-side operator pin (see `ExampleIntegrator.Redeem`). The service
-  is trusted for _liveness_ only, like any RPC endpoint.
+  `ReplayNode` by the (consumer, namespace, operator) binding inside
+  `VerifyAndConsumeVAA` plus the app-side operator pin (see
+  `ExampleIntegrator.Redeem`). The service is trusted for _liveness_ only, like
+  any RPC endpoint.
 - **One reader suffices.** A service reading as the operator (a stakeholder of
   `CoreState`, both registries, and — as co-signatory — every consumer's trie)
   can serve the whole table; integrators can equally run their own for their

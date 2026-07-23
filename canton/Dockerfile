@@ -35,7 +35,7 @@ COPY dars ./dars
 COPY core ./core
 COPY test ./test
 # Multi-package build: core (templates) then test (scripts, data-dep on core
-# + the interface DARs). Produces core/.daml/dist/wormhole-core-0.2.0.dar and
+# + the interface DARs). Produces core/.daml/dist/wormhole-core-0.3.0.dar and
 # test/.daml/dist/wormhole-core-test-0.1.0.dar (which packs core's DALFs).
 RUN dpm install "${DAML_SDK_VERSION}" && dpm build --all
 
@@ -49,7 +49,7 @@ WORKDIR /canton
 # The production (clean) core DAR, for reference, plus the test DAR — which packs
 # core's DALFs and the setup/integration scripts. The bootstrap uploads the test
 # DAR (bundling core) and runs Test.TestCore:setup against the devnet sandbox.
-COPY --from=build /canton-build/core/.daml/dist/wormhole-core-0.2.0.dar /canton/wormhole-core.dar
+COPY --from=build /canton-build/core/.daml/dist/wormhole-core-0.3.0.dar /canton/wormhole-core.dar
 COPY --from=build /canton-build/test/.daml/dist/wormhole-core-test-0.1.0.dar /canton/wormhole-core-test.dar
 COPY devnet/ /canton/devnet/
 # Pre-install the SDK so `dpm sandbox` / `dpm script` start without a fetch.
