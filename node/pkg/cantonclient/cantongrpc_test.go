@@ -41,7 +41,7 @@ func wormholeRecord(overrides map[string]*apiv2.Value) *apiv2.Value {
 }
 
 func TestDecodeWormholeMessageHappyPath(t *testing.T) {
-	msg, err := decodeWormholeMessage(wormholeRecord(nil))
+	msg, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(nil)))
 	require.NoError(t, err)
 	assert.Equal(t, "Operator::1220abcd", msg.Registrar)
 	assert.Equal(t, "Alice::1220ef01", msg.Owner)
@@ -64,7 +64,7 @@ func TestDecodeWormholeMessageErrors(t *testing.T) {
 	}
 	for name, overrides := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := decodeWormholeMessage(wormholeRecord(overrides))
+			_, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(overrides)))
 			assert.Error(t, err)
 		})
 	}
@@ -72,5 +72,41 @@ func TestDecodeWormholeMessageErrors(t *testing.T) {
 
 func TestDecodeWormholeMessageNotARecord(t *testing.T) {
 	_, err := decodeWormholeMessage(partyVal("Operator::1220abcd"))
+	assert.Error(t, err)
+}
+
+// contractIdVal builds a Value holding a Daml ContractId, as returned for the
+// tuple's first element (the sequence-bumped Emitter successor cid).
+func contractIdVal(cid string) *apiv2.Value {
+	return &apiv2.Value{Sum: &apiv2.Value_ContractId{ContractId: cid}}
+}
+
+// tupleResult builds the (ContractId Emitter, WormholeMessage) tuple
+// PublishMessage returns: a Tuple2 record with positional labels _1 (the
+// emitter cid) and _2 (the WormholeMessage record).
+func tupleResult(emitterCid string, message *apiv2.Value) *apiv2.Value {
+	rec := &apiv2.Record{
+		Fields: []*apiv2.RecordField{
+			{Label: "_1", Value: contractIdVal(emitterCid)},
+			{Label: "_2", Value: message},
+		},
+	}
+	return &apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}}
+}
+
+// A result without the `_2` element — e.g. a bare WormholeMessage from a
+// pre-tuple core — must error rather than panic or decode to zero values.
+func TestDecodeWormholeMessageRequiresTupleSecondElement(t *testing.T) {
+	_, err := decodeWormholeMessage(wormholeRecord(nil))
+	assert.Error(t, err)
+}
+
+func TestDecodeWormholeMessageNeitherShape(t *testing.T) {
+	rec := &apiv2.Record{
+		Fields: []*apiv2.RecordField{
+			{Label: "somethingElse", Value: textVal("nope")},
+		},
+	}
+	_, err := decodeWormholeMessage(&apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}})
 	assert.Error(t, err)
 }

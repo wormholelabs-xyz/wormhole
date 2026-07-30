@@ -207,19 +207,37 @@ func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 	return id.GetModuleName() == tmpl.ModuleName && id.GetEntityName() == tmpl.EntityName
 }
 
-// decodeWormholeMessage maps a Ledger API Value (a WormholeMessage record) to a
-// CantonMessage. See Wormhole.Core.State.WormholeMessage for the field set:
-// registrar and owner are Daml Parties -> Value.party (the emitter's key
-// components, from which the watcher derives the emitter address); emitterId,
-// sequence, nonce, consistencyLevel are Daml Int -> Value.int64; payload is Daml
-// Text (hex) -> Value.text.
+// tupleMessageField is the second element of the (ContractId Emitter,
+// WormholeMessage) tuple PublishMessage returns. Daml tuples serialize as
+// DA.Types.Tuple2 records with positional labels _1/_2, not field names.
+const tupleMessageField = "_2"
+
+// decodeWormholeMessage maps PublishMessage's exercise result — the
+// (ContractId Emitter, WormholeMessage) tuple — to a CantonMessage. The
+// message is the tuple's second element (tupleMessageField); the first
+// element, the sequence-bumped Emitter successor cid, is for on-ledger
+// callers and is not needed here.
+//
+// See Wormhole.Core.State.WormholeMessage for the field set: registrar and
+// owner are Daml Parties -> Value.party (the emitter's key components, from
+// which the watcher derives the emitter address); emitterId, sequence, nonce,
+// consistencyLevel are Daml Int -> Value.int64; payload is Daml Text (hex) ->
+// Value.text.
 func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	rec := v.GetRecord()
 	if rec == nil {
 		return CantonMessage{}, fmt.Errorf("exercise result is not a record")
 	}
-	fields := map[string]*apiv2.Value{}
+	outer := map[string]*apiv2.Value{}
 	for _, f := range rec.GetFields() {
+		outer[f.GetLabel()] = f.GetValue()
+	}
+	inner := outer[tupleMessageField].GetRecord()
+	if inner == nil {
+		return CantonMessage{}, fmt.Errorf("exercise result has no %s (WormholeMessage) record", tupleMessageField)
+	}
+	fields := map[string]*apiv2.Value{}
+	for _, f := range inner.GetFields() {
 		fields[f.GetLabel()] = f.GetValue()
 	}
 	registrar, err := partyField(fields, "registrar")
