@@ -99,7 +99,7 @@ flowchart TD
         integrator(["integrator party"])
         core["CoreState<br/>(operator-issued singleton)<br/>archives &amp; recreates on each transition"]
         gov["governance choices:<br/>GuardianSetUpgrade · SetMessageFee<br/>TransferFees · ContractUpgrade"]
-        evt(["ExercisedEvent(PublishMessage)<br/>result = WormholeMessage{seq, nonce, payload, …}"])
+        evt(["ExercisedEvent(PublishMessage)<br/>result = (emitterCid, WormholeMessage{seq, nonce, payload, …})"])
         integrator -- "exercise PublishMessage" --> core
         gov -- "SubmitGovernanceVAA" --> core
         core -- emits --> evt
@@ -117,7 +117,8 @@ flowchart TD
 ```
 
 The watcher is **read-only**: it never submits to Canton. It observes the
-`PublishMessage` choice's result event, maps it to a
+`PublishMessage` choice's result event, reads the `WormholeMessage` out of the
+result tuple's second element, maps it to a
 [`common.MessagePublication`](../node/pkg/common/chainlock.go), and hands it to
 the processor exactly like every other watcher.
 
@@ -320,7 +321,9 @@ no operator authority:
 
 ```haskell
 -- on Emitter
-choice PublishMessage : WormholeMessage
+-- Returns the sequence-bumped successor Emitter cid alongside the message,
+-- so callers never re-resolve it off-ledger.
+choice PublishMessage : (ContractId Emitter, WormholeMessage)
   with
     nonce            : Int            -- uint32
     payload          : Bytes          -- <= 750 bytes (whitepaper 0004)
@@ -338,14 +341,15 @@ choice PublishMessage : WormholeMessage
     pure result
 ```
 
-The choice's **exercise result** is the `WormholeMessage`. The sequence-bumped
+The choice's **exercise result** is `(ContractId Emitter, WormholeMessage)` —
+the sequence-bumped successor cid paired with the message. The successor
 `Emitter` is recreated with both signatures inherited from the consumed
-contract; the owner is a signatory, so the successor's **cid arrives on its own
-ACS** as the transaction's `CreatedEvent`, and the next publish addresses that
-cid directly — stakeholders never need an off-ledger resolver (§4.7). The
-watcher reads the result directly from the `ExercisedEvent.exercise_result` on
-the Ledger-API stream (see §7). The `WormholeMessage` record is the wire
-contract between Daml and the watcher:
+contract; the owner is a signatory, so the successor's **cid also arrives on
+its own ACS** as the transaction's `CreatedEvent`, and the next publish
+addresses that cid directly — stakeholders never need an off-ledger resolver
+(§4.7). The watcher reads the tuple's `WormholeMessage` element directly from
+the `ExercisedEvent.exercise_result` on the Ledger-API stream (see §7). The
+`WormholeMessage` record is the wire contract between Daml and the watcher:
 
 ```haskell
 data WormholeMessage = WormholeMessage with

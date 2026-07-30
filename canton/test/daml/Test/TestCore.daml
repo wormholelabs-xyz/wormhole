@@ -77,8 +77,10 @@ registerEmitter operator owner = do
 
 -- | Publish with the referenced 'CoreState' disclosed (the fee read is on
 -- every publish; at fee 0 no allocation is attached). The disclosure is
--- fetched as the operator — the disclosure-service simulation.
-publishVia : Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script WormholeMessage
+-- fetched as the operator — the disclosure-service simulation. Returns the
+-- successor 'Emitter' cid and 'WormholeMessage'; the caller threads the cid
+-- into the next publish with no ACS re-resolution.
+publishVia : Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script (ContractId Emitter, WormholeMessage)
 publishVia operator csId owner emCid nonce payload consistencyLevel = do
   csDisc <- fromSome <$> queryDisclosure operator csId
   submit (actAs owner <> disclose csDisc) do
@@ -91,8 +93,8 @@ publishVia operator csId owner emCid nonce payload consistencyLevel = do
 -- | Publishing increments the per-emitter sequence and yields the expected
 -- 'WormholeMessage'. The message carries the emitter's identity components
 -- (the watcher derives the 32-byte address as keccak256 over them); the second
--- publish resolves the sequence-bumped successor from the owner's own ACS —
--- the direct-cid model needs no off-ledger service for stakeholders.
+-- publish addresses the sequence-bumped successor directly via the cid
+-- 'PublishMessage' returns — no ACS re-resolution needed.
 testPublishMessage : Script ()
 testPublishMessage = do
   (operator, _, csId) <- setup
@@ -102,7 +104,7 @@ testPublishMessage = do
   em.emitterId === 0
   em.emitterAddress === emitterAddressFor operator alice 0
 
-  msg0 <- publishVia operator csId alice emitterId 7 "deadbeef" 0
+  (em0Cid, msg0) <- publishVia operator csId alice emitterId 7 "deadbeef" 0
   msg0.registrar === operator
   msg0.owner === alice
   msg0.emitterId === 0
@@ -110,15 +112,36 @@ testPublishMessage = do
   msg0.nonce === 7
   msg0.payload === "deadbeef"
 
-  -- The sequence-bumped successor's cid arrives on the owner's ACS (the owner
-  -- is a signatory), so the next publish addresses it directly.
-  [(emitterId', _)] <- query @Emitter alice
-  msg1 <- publishVia operator csId alice emitterId' 8 "cafe" 0
+  -- Thread the returned successor cid directly; no ACS re-resolution.
+  (_, msg1) <- publishVia operator csId alice em0Cid 8 "cafe" 0
   msg1.sequence === 1
   msg1.registrar === operator
   msg1.owner === alice
   msg1.emitterId === 0
   pure ()
+
+-- | 'PublishMessage' returns the sequence-bumped successor's cid directly, so
+-- a caller can publish again in the same script with no ACS re-resolution —
+-- the defect this template regresses against was the cid being discarded.
+testPublishReturnsLiveEmitter : Script ()
+testPublishReturnsLiveEmitter = do
+  (operator, _, csId) <- setup
+  alice <- allocateParty "LiveEmitterAlice"
+  emitterId <- registerEmitter operator alice
+
+  (em0Cid, msg0) <- publishVia operator csId alice emitterId 7 "deadbeef" 0
+  msg0.registrar === operator
+  msg0.owner === alice
+  msg0.emitterId === 0
+  msg0.sequence === 0
+  msg0.nonce === 7
+  msg0.consistencyLevel === 0
+  msg0.payload === "deadbeef"
+
+  -- No re-resolution: publish again directly off the cid PublishMessage
+  -- returned above.
+  (_, msg1) <- publishVia operator csId alice em0Cid 8 "cafe" 0
+  msg1.sequence === msg0.sequence + 1
 
 -- | Emitter ids are allocated sequentially and yield distinct, owner-bound
 -- addresses; the registry's counter advances.
