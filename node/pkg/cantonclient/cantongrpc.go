@@ -207,12 +207,21 @@ func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 	return id.GetModuleName() == tmpl.ModuleName && id.GetEntityName() == tmpl.EntityName
 }
 
-// decodeWormholeMessage maps a Ledger API Value (a WormholeMessage record) to a
-// CantonMessage. See Wormhole.Core.State.WormholeMessage for the field set:
-// registrar and owner are Daml Parties -> Value.party (the emitter's key
-// components, from which the watcher derives the emitter address); emitterId,
-// sequence, nonce, consistencyLevel are Daml Int -> Value.int64; payload is Daml
-// Text (hex) -> Value.text.
+// decodeWormholeMessage maps a Ledger API Value to a CantonMessage. It accepts
+// two shapes of PublishMessage's exercise result, both of which are live in the
+// wild during the rollout described in the publish-returns-emitter plan: the
+// current core returns a bare WormholeMessage record; the successor core wraps
+// it in a PublishResult record (`emitterCid`, `message`) so callers can recover
+// the sequence-bumped Emitter cid without an ACS scan. A watcher tolerant of
+// both shapes can ship ahead of the new core DAR — an intolerant watcher
+// against the new core would silently observe nothing, since messagesFromTx
+// logs and continues on decode error rather than failing loudly.
+//
+// See Wormhole.Core.State.WormholeMessage for the field set: registrar and
+// owner are Daml Parties -> Value.party (the emitter's key components, from
+// which the watcher derives the emitter address); emitterId, sequence, nonce,
+// consistencyLevel are Daml Int -> Value.int64; payload is Daml Text (hex) ->
+// Value.text.
 func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	rec := v.GetRecord()
 	if rec == nil {
@@ -221,6 +230,16 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	fields := map[string]*apiv2.Value{}
 	for _, f := range rec.GetFields() {
 		fields[f.GetLabel()] = f.GetValue()
+	}
+	// PublishResult wrapper: descend into the nested `message` record and
+	// decode the WormholeMessage fields from there instead.
+	if msg, ok := fields["message"]; ok {
+		if inner := msg.GetRecord(); inner != nil {
+			fields = map[string]*apiv2.Value{}
+			for _, f := range inner.GetFields() {
+				fields[f.GetLabel()] = f.GetValue()
+			}
+		}
 	}
 	registrar, err := partyField(fields, "registrar")
 	if err != nil {

@@ -99,7 +99,7 @@ flowchart TD
         integrator(["integrator party"])
         core["CoreState<br/>(operator-issued singleton)<br/>archives &amp; recreates on each transition"]
         gov["governance choices:<br/>GuardianSetUpgrade · SetMessageFee<br/>TransferFees · ContractUpgrade"]
-        evt(["ExercisedEvent(PublishMessage)<br/>result = WormholeMessage{seq, nonce, payload, …}"])
+        evt(["ExercisedEvent(PublishMessage)<br/>result = PublishResult{emitterCid, message: WormholeMessage{seq, nonce, payload, …}}"])
         integrator -- "exercise PublishMessage" --> core
         gov -- "SubmitGovernanceVAA" --> core
         core -- emits --> evt
@@ -117,9 +117,12 @@ flowchart TD
 ```
 
 The watcher is **read-only**: it never submits to Canton. It observes the
-`PublishMessage` choice's result event, maps it to a
+`PublishMessage` choice's result event, reads the `message` out of the
+`PublishResult`, maps it to a
 [`common.MessagePublication`](../node/pkg/common/chainlock.go), and hands it to
-the processor exactly like every other watcher.
+the processor exactly like every other watcher. It accepts a bare
+`WormholeMessage` result as well, so the node can be rolled out before a
+participant is upgraded to a core that returns the wrapper.
 
 ---
 
@@ -320,7 +323,9 @@ no operator authority:
 
 ```haskell
 -- on Emitter
-choice PublishMessage : WormholeMessage
+-- PublishResult carries the sequence-bumped successor Emitter cid alongside
+-- the message, so callers never re-resolve it off-ledger.
+choice PublishMessage : PublishResult
   with
     nonce            : Int            -- uint32
     payload          : Bytes          -- <= 750 bytes (whitepaper 0004)

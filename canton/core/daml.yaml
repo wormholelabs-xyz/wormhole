@@ -8,7 +8,7 @@
 # Canton keys are non-unique (see State.daml and README §4).
 sdk-version: 3.5.1
 name: wormhole-core
-version: 0.3.0
+version: 0.4.0
 source: daml
 dependencies:
   - daml-prim

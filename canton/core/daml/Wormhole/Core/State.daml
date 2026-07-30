@@ -81,6 +81,13 @@ data WormholeMessage = WormholeMessage with
     payload          : Bytes
   deriving (Eq, Show)
 
+-- | 'PublishMessage' result. @emitterCid@ is the sequence-bumped successor —
+-- callers thread it directly and never need to re-resolve the emitter off-ledger.
+data PublishResult = PublishResult with
+    emitterCid : ContractId Emitter
+    message    : WormholeMessage
+  deriving (Eq, Show)
+
 -- | Maximum message payload size in bytes (whitepaper 0004).
 maxPayloadBytes : Int
 maxPayloadBytes = 750
@@ -529,12 +536,12 @@ template Emitter
     -- Lets guardians watch PublishMessage exercises and their results.
     observer guardianObserver
 
-    -- | Publish a Wormhole message. The choice result is the 'WormholeMessage'
-    -- the watcher observes (decoded from @exercise_result@ — a wire contract
-    -- with the Go watcher; do not change it). The sequence-bumped 'Emitter' is
-    -- recreated with both signatures inherited; the owner is a signatory, so the
-    -- successor's cid arrives on its own ACS and the next publish addresses it
-    -- directly. Mirrors @Implementation.publishMessage@.
+    -- | Publish a Wormhole message. The choice result is a 'PublishResult'
+    -- wrapping the 'WormholeMessage' the watcher observes (decoded from
+    -- @exercise_result@ — a wire contract with the Go watcher; do not change the
+    -- 'WormholeMessage' shape) and the sequence-bumped successor 'Emitter' cid,
+    -- so the caller need not re-resolve it off-ledger. The successor is
+    -- recreated with both signatures inherited. Mirrors @Implementation.publishMessage@.
     --
     -- The 'messageFee' is charged through the referenced 'CoreState' (EVM parity:
     -- the current fee is read on every call), whose @guardianGovernance@ and
@@ -551,7 +558,7 @@ template Emitter
     -- 'Wormhole.Ntt.Manager.Transfer' — @payer@'s authority is required because
     -- 'ChargeMessageFee' draws its funds, so it cannot be a non-consenting third
     -- party.
-    choice PublishMessage : WormholeMessage
+    choice PublishMessage : PublishResult
       with
         nonce            : Int
         payload          : Bytes
@@ -572,12 +579,14 @@ template Emitter
           feeAllocation
         assertMsg "core state operator mismatch" (csOperator == operator)
         assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
-        create this with sequence = sequence + 1
-        pure WormholeMessage with
-          registrar = operator
-          owner
-          emitterId
-          sequence
-          nonce
-          consistencyLevel
-          payload
+        newEmitterCid <- create this with sequence = sequence + 1
+        pure PublishResult with
+          emitterCid = newEmitterCid
+          message = WormholeMessage with
+            registrar = operator
+            owner
+            emitterId
+            sequence
+            nonce
+            consistencyLevel
+            payload

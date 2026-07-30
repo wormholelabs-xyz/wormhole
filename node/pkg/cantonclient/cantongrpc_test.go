@@ -74,3 +74,71 @@ func TestDecodeWormholeMessageNotARecord(t *testing.T) {
 	_, err := decodeWormholeMessage(partyVal("Operator::1220abcd"))
 	assert.Error(t, err)
 }
+
+// contractIdVal builds a Value holding a Daml ContractId, as returned for the
+// `emitterCid` field of the new PublishResult wrapper.
+func contractIdVal(cid string) *apiv2.Value {
+	return &apiv2.Value{Sum: &apiv2.Value_ContractId{ContractId: cid}}
+}
+
+// wrappedResult builds the NEW PublishResult shape: a record with an
+// `emitterCid` field and a `message` field holding the WormholeMessage record.
+func wrappedResult(emitterCid string, message *apiv2.Value) *apiv2.Value {
+	rec := &apiv2.Record{
+		Fields: []*apiv2.RecordField{
+			{Label: "emitterCid", Value: contractIdVal(emitterCid)},
+			{Label: "message", Value: message},
+		},
+	}
+	return &apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}}
+}
+
+// TestDecodeWormholeMessageAcceptsBareRecord exercises the CURRENT core shape,
+// where the exercise result of PublishMessage is the WormholeMessage record
+// itself (pre-PublishResult core). A tolerant watcher must keep accepting this
+// shape so it can be rolled out ahead of the core change (see C2 in the plan:
+// decode errors are logged and swallowed, so an intolerant watcher would
+// silently stop observing messages against the current core).
+func TestDecodeWormholeMessageAcceptsBareRecord(t *testing.T) {
+	msg, err := decodeWormholeMessage(wormholeRecord(nil))
+	require.NoError(t, err)
+	assert.Equal(t, "Operator::1220abcd", msg.Registrar)
+	assert.Equal(t, "Alice::1220ef01", msg.Owner)
+	assert.Equal(t, uint64(3), msg.EmitterID)
+	assert.Equal(t, uint64(5), msg.Sequence)
+	assert.Equal(t, uint32(42), msg.Nonce)
+	assert.Equal(t, uint8(0), msg.ConsistencyLevel)
+	assert.Equal(t, []byte{0xde, 0xad, 0xbe, 0xef}, msg.Payload)
+}
+
+// TestDecodeWormholeMessageAcceptsWrappedResult exercises the NEW core shape,
+// where PublishMessage returns a PublishResult record wrapping `emitterCid`
+// and `message`. The decoded CantonMessage must be identical to what the bare
+// record produces — the watcher must not care which core version produced the
+// result, so the node can roll out before the new core DAR reaches any
+// participant.
+func TestDecodeWormholeMessageAcceptsWrappedResult(t *testing.T) {
+	msg, err := decodeWormholeMessage(wrappedResult("00deadbeef", wormholeRecord(nil)))
+	require.NoError(t, err)
+	assert.Equal(t, "Operator::1220abcd", msg.Registrar)
+	assert.Equal(t, "Alice::1220ef01", msg.Owner)
+	assert.Equal(t, uint64(3), msg.EmitterID)
+	assert.Equal(t, uint64(5), msg.Sequence)
+	assert.Equal(t, uint32(42), msg.Nonce)
+	assert.Equal(t, uint8(0), msg.ConsistencyLevel)
+	assert.Equal(t, []byte{0xde, 0xad, 0xbe, 0xef}, msg.Payload)
+}
+
+// TestDecodeWormholeMessageNeitherShape asserts that a record which is
+// neither a bare WormholeMessage nor a PublishResult wrapper (no `message`
+// field, and none of the WormholeMessage fields either) produces a clear
+// error rather than a panic or a zero-value success.
+func TestDecodeWormholeMessageNeitherShape(t *testing.T) {
+	rec := &apiv2.Record{
+		Fields: []*apiv2.RecordField{
+			{Label: "somethingElse", Value: textVal("nope")},
+		},
+	}
+	_, err := decodeWormholeMessage(&apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}})
+	assert.Error(t, err)
+}
