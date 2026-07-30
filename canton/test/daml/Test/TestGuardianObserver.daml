@@ -107,7 +107,7 @@ testPublishRequiresOnlyOwner = do
   (operator, _guardianObserver, csId) <- setup
   alice <- allocateParty "Alice"
   emitterId <- registerEmitter operator alice
-  msg <- publishVia operator csId alice emitterId 7 "dead" 0
+  (_, msg) <- publishVia operator csId alice emitterId 7 "dead" 0
   msg.sequence === 0
 
   -- Genesis authority is unchanged: operator alone cannot create a CoreState
