@@ -43,11 +43,11 @@ testMessageFeeLifecycle = do
   csDisc0 <- fromSome <$> queryDisclosure operator csId
 
   -- Fee 0: publishes are free (no allocation).
-  pr0 <- submit (actAs alice <> disclose csDisc0) do
+  (em0Cid, msg0) <- submit (actAs alice <> disclose csDisc0) do
     exerciseCmd emId PublishMessage with
       nonce = 1, payload = "aa", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = None
-  pr0.message.sequence === 0
+  msg0.sequence === 0
 
   -- Governance raises the fee to 1000.
   csId' <- submit operator do
@@ -55,7 +55,7 @@ testMessageFeeLifecycle = do
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   csDisc <- fromSome <$> queryDisclosure operator csId'
-  let emId1 = pr0.emitterCid
+  let emId1 = em0Cid
 
   -- The stale CoreState cid fails on activeness (retry protocol: re-resolve).
   submitMustFail (actAs alice <> disclose csDisc0) do
@@ -71,17 +71,17 @@ testMessageFeeLifecycle = do
   -- Exact allocation: publish succeeds, WormholeMessage unchanged, the fee
   -- lands whole in feeRecipient's (guardianGovernance's) holdings.
   feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal mockFee)
-  pr1 <- submit (actAs alice <> disclose csDisc) do
+  (em1Cid, msg1) <- submit (actAs alice <> disclose csDisc) do
     exerciseCmd emId1 PublishMessage with
       nonce = 2, payload = "bb", consistencyLevel = 0
       coreStateCid = csId', payer = alice, feeAllocation = Some feePay
-  pr1.message.sequence === 1
-  pr1.message.payload === "bb"
+  msg1.sequence === 1
+  msg1.payload === "bb"
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal mockFee
 
   -- The allocation is consumed: reusing it fails on activeness.
-  let emId2 = pr1.emitterCid
+  let emId2 = em1Cid
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId2 PublishMessage with
       nonce = 3, payload = "cc", consistencyLevel = 0
