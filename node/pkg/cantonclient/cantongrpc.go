@@ -207,15 +207,10 @@ func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 	return id.GetModuleName() == tmpl.ModuleName && id.GetEntityName() == tmpl.EntityName
 }
 
-// decodeWormholeMessage maps a Ledger API Value to a CantonMessage. It accepts
-// two shapes of PublishMessage's exercise result, both of which are live in the
-// wild during the rollout described in the publish-returns-emitter plan: the
-// current core returns a bare WormholeMessage record; the successor core wraps
-// it in a PublishResult record (`emitterCid`, `message`) so callers can recover
-// the sequence-bumped Emitter cid without an ACS scan. A watcher tolerant of
-// both shapes can ship ahead of the new core DAR — an intolerant watcher
-// against the new core would silently observe nothing, since messagesFromTx
-// logs and continues on decode error rather than failing loudly.
+// decodeWormholeMessage maps PublishMessage's exercise result — a PublishResult
+// record — to a CantonMessage. The message is nested under `message`; the
+// sibling `emitterCid` (the sequence-bumped Emitter) is for on-ledger callers
+// and is not needed here.
 //
 // See Wormhole.Core.State.WormholeMessage for the field set: registrar and
 // owner are Daml Parties -> Value.party (the emitter's key components, from
@@ -227,19 +222,17 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	if rec == nil {
 		return CantonMessage{}, fmt.Errorf("exercise result is not a record")
 	}
-	fields := map[string]*apiv2.Value{}
+	outer := map[string]*apiv2.Value{}
 	for _, f := range rec.GetFields() {
-		fields[f.GetLabel()] = f.GetValue()
+		outer[f.GetLabel()] = f.GetValue()
 	}
-	// PublishResult wrapper: descend into the nested `message` record and
-	// decode the WormholeMessage fields from there instead.
-	if msg, ok := fields["message"]; ok {
-		if inner := msg.GetRecord(); inner != nil {
-			fields = map[string]*apiv2.Value{}
-			for _, f := range inner.GetFields() {
-				fields[f.GetLabel()] = f.GetValue()
-			}
-		}
+	inner := outer["message"].GetRecord()
+	if inner == nil {
+		return CantonMessage{}, fmt.Errorf("exercise result has no message record")
+	}
+	fields := map[string]*apiv2.Value{}
+	for _, f := range inner.GetFields() {
+		fields[f.GetLabel()] = f.GetValue()
 	}
 	registrar, err := partyField(fields, "registrar")
 	if err != nil {

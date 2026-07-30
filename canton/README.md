@@ -120,9 +120,7 @@ The watcher is **read-only**: it never submits to Canton. It observes the
 `PublishMessage` choice's result event, reads the `message` out of the
 `PublishResult`, maps it to a
 [`common.MessagePublication`](../node/pkg/common/chainlock.go), and hands it to
-the processor exactly like every other watcher. It accepts a bare
-`WormholeMessage` result as well, so the node can be rolled out before a
-participant is upgraded to a core that returns the wrapper.
+the processor exactly like every other watcher.
 
 ---
 
