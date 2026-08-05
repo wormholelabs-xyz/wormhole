@@ -3,6 +3,8 @@ package canton
 import (
 	"context"
 	"encoding/hex"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,21 +39,121 @@ func wantAddr(t *testing.T) vaa.Address {
 	return a
 }
 
-// fakeClient is a CantonClient that returns canned data for tests.
+// fakeClient is a programmable CantonClient that lets a test drive the
+// subscription (push events, fail it) so the Run loop is testable without a
+// live participant.
 type fakeClient struct {
-	ledgerEnd   int64
-	byOffset    map[int64]cantonclient.CantonTransaction
-	closeCalled bool
+	mu sync.Mutex
+
+	ledgerEnd      int64
+	ledgerEndErr   error
+	ledgerEndCalls int
+
+	byOffset     map[int64]cantonclient.CantonTransaction
+	getUpdateErr error
+
+	subCalls   int
+	subBegin   int64                   // beginExclusive of the latest SubscribeUpdates
+	subTmpl    cantonclient.TemplateID // template filter of the latest SubscribeUpdates
+	subChoice  string                  // choice name of the latest SubscribeUpdates
+	out        chan<- cantonclient.CantonMessageEvent
+	sub        *cantonclient.Subscription
+	subscribed chan struct{} // signaled on each SubscribeUpdates
 }
 
-func (f *fakeClient) GetLedgerEnd(_ context.Context) (int64, error) { return f.ledgerEnd, nil }
-func (f *fakeClient) SubscribeUpdates(_ context.Context, _ int64, _ cantonclient.TemplateID, _ string, _ chan<- cantonclient.CantonMessageEvent) (*cantonclient.Subscription, error) {
-	return cantonclient.NewSubscription(func() {}), nil
+func newFakeClient() *fakeClient {
+	return &fakeClient{
+		byOffset:   map[int64]cantonclient.CantonTransaction{},
+		subscribed: make(chan struct{}, 16),
+	}
 }
+
+func (f *fakeClient) GetLedgerEnd(_ context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ledgerEndCalls++
+	if f.ledgerEndErr != nil {
+		return 0, f.ledgerEndErr
+	}
+	return f.ledgerEnd, nil
+}
+
+func (f *fakeClient) SubscribeUpdates(_ context.Context, begin int64, tmpl cantonclient.TemplateID, choice string, out chan<- cantonclient.CantonMessageEvent) (*cantonclient.Subscription, error) {
+	f.mu.Lock()
+	f.subCalls++
+	f.subBegin = begin
+	f.subTmpl = tmpl
+	f.subChoice = choice
+	f.out = out
+	sub := cantonclient.NewSubscription(func() {})
+	f.sub = sub
+	subscribed := f.subscribed
+	f.mu.Unlock()
+	if subscribed != nil {
+		select {
+		case subscribed <- struct{}{}:
+		default:
+		}
+	}
+	return sub, nil
+}
+
 func (f *fakeClient) GetUpdateByOffset(_ context.Context, offset int64, _ cantonclient.TemplateID, _ string) (cantonclient.CantonTransaction, error) {
-	return f.byOffset[offset], nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getUpdateErr != nil {
+		return cantonclient.CantonTransaction{}, f.getUpdateErr
+	}
+	// Match the real client: an offset with no matching transaction is an error,
+	// not an empty result.
+	tx, ok := f.byOffset[offset]
+	if !ok {
+		return cantonclient.CantonTransaction{}, fmt.Errorf("GetUpdateByOffset(%d): not a transaction", offset)
+	}
+	return tx, nil
 }
-func (f *fakeClient) Close() error { f.closeCalled = true; return nil }
+
+func (f *fakeClient) Close() error { return nil }
+
+// waitSubscribed blocks until the data pump has (re)subscribed, so the stream
+// channel is captured before the test pushes events.
+func (f *fakeClient) waitSubscribed(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.subscribed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher never subscribed")
+	}
+}
+
+func (f *fakeClient) pushEvent(ev cantonclient.CantonMessageEvent) {
+	f.mu.Lock()
+	out := f.out
+	f.mu.Unlock()
+	out <- ev
+}
+
+func (f *fakeClient) failSubscription(err error) {
+	f.mu.Lock()
+	sub := f.sub
+	f.mu.Unlock()
+	sub.Fail(err)
+}
+
+func (f *fakeClient) subscribeCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subCalls
+}
+
+// subscribeArgs returns the (beginExclusive, template, choice) of the latest
+// SubscribeUpdates call, so a test can assert the watcher streams from the
+// right offset with the right filter.
+func (f *fakeClient) subscribeArgs() (int64, cantonclient.TemplateID, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.subBegin, f.subTmpl, f.subChoice
+}
 
 func testWatcher(msgC chan<- *common.MessagePublication) *Watcher {
 	return NewWatcher("canton:5011", "pkg123", "Operator::ns", true, msgC, make(chan *gossipv1.ObservationRequest))
