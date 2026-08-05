@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"math"
 	"strings"
 	"time"
@@ -65,7 +64,14 @@ func (c *grpcClient) Close() error {
 	return c.conn.Close()
 }
 
+// unaryRPCTimeout bounds the non-streaming calls so a hung participant fails
+// fast instead of blocking Run. The streaming GetUpdates is deliberately left
+// unbounded (cancelable via context).
+const unaryRPCTimeout = 30 * time.Second
+
 func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
+	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
+	defer cancel()
 	resp, err := c.state.GetLedgerEnd(ctx, &apiv2.GetLedgerEndRequest{})
 	if err != nil {
 		return 0, fmt.Errorf("GetLedgerEnd: %w", err)
@@ -117,14 +123,14 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 		defer sub.Close()
 		for {
 			resp, err := stream.Recv()
-			if err == io.EOF {
-				return
-			}
 			if err != nil {
 				if streamCtx.Err() != nil {
 					return // cancelled via Unsubscribe / parent ctx
 				}
-				sub.Fail(fmt.Errorf("GetUpdates stream: %w", err))
+				// Any non-cancellation error, including a clean io.EOF stream end,
+				// is terminal: fail the subscription so the data pump returns and
+				// the supervisor restarts it rather than silently observing nothing.
+				sub.Fail(fmt.Errorf("GetUpdates stream ended: %w", err))
 				return
 			}
 			tx := resp.GetTransaction()
@@ -149,6 +155,8 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 }
 
 func (c *grpcClient) GetUpdateByOffset(ctx context.Context, offset int64, tmpl TemplateID, choiceName string) (CantonTransaction, error) {
+	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
+	defer cancel()
 	resp, err := c.update.GetUpdateByOffset(ctx, &apiv2.GetUpdateByOffsetRequest{
 		Offset:       offset,
 		UpdateFormat: c.updateFormat(),
