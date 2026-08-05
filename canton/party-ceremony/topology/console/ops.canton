@@ -1,0 +1,169 @@
+// Canton console op dispatcher for the party-ceremony console Topology adapter.
+//
+// One operation per invocation, selected by GG_OP; inputs come from GG_*
+// environment variables and the result is written as key=value lines to the
+// file named by GG_OUT. The topology operations (generate / external-sign /
+// participant-consent / load) are lifted from the proven single-session recipe
+// in canton/devnet/guardian_governance.canton, split so the party-ceremony
+// state machine can drive them one at a time.
+//
+// Scope: single hosting participant (the console's connected participant),
+// which is what the sandbox e2e uses. Multi-participant hosting is the gRPC
+// adapter's job.
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.topology.transaction._
+import com.digitalasset.canton.config.RequireTypes.PositiveInt
+import com.digitalasset.canton.crypto._
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+import com.digitalasset.canton.admin.api.client.commands.TopologyAdminCommands.Write.GenerateTransactions.Proposal
+import com.google.protobuf.ByteString
+import com.daml.nonempty.NonEmpty
+import java.nio.file.{Files, Paths}
+import java.util.Base64
+
+def env(n: String): String = sys.env.getOrElse(n, throw new RuntimeException("missing env " + n))
+def envOr(n: String, d: String): String = sys.env.getOrElse(n, d)
+def b64d(s: String): Array[Byte] = Base64.getDecoder.decode(s)
+def b64e(b: Array[Byte]): String = Base64.getEncoder.encodeToString(b)
+def hexOf(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
+def unhex(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+
+val participant = consoleEnvironment.participants.all match {
+  case Seq(single) => single
+  case other => throw new RuntimeException(s"expected exactly one participant, found ${other.size}")
+}
+val targetSync = participant.synchronizers.list_connected() match {
+  case Seq(single) => single
+  case other => throw new RuntimeException(s"expected exactly one synchronizer, found ${other.size}")
+}
+val synchronizerId = targetSync.physicalSynchronizerId
+val store = TopologyStoreId.Synchronizer(synchronizerId)
+val pv = com.digitalasset.canton.version.ProtocolVersion.latest
+
+def loadKey(der: Array[Byte]): SigningPublicKey =
+  SigningPublicKey
+    .create(CryptoKeyFormat.DerX509Spki, ByteString.copyFrom(der), SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .getOrElse(sys.error("invalid public key"))
+
+def genUnsigned[M <: TopologyMapping](m: M): TopologyTransaction[TopologyChangeOp, M] =
+  participant.topology.transactions
+    .generate(Seq(Proposal(m, store)))
+    .head
+    .asInstanceOf[TopologyTransaction[TopologyChangeOp, M]]
+
+def txHashHex(tx: TopologyTransaction[TopologyChangeOp, TopologyMapping]): String =
+  hexOf(tx.hash.hash.getCryptographicEvidence.toByteArray)
+
+def reload(b64: String): TopologyTransaction[TopologyChangeOp, TopologyMapping] =
+  TopologyTransaction.fromByteString(pv, ByteString.copyFrom(b64d(b64))).getOrElse(sys.error("reload failed"))
+
+// Build a SignedTopologyTransaction from the unsigned tx and a list of
+// (ownerFingerprint, sigHex) external signatures.
+def externalSigned(
+    tx: TopologyTransaction[TopologyChangeOp, TopologyMapping],
+    sigs: Seq[(Fingerprint, String)],
+): SignedTopologyTransaction[TopologyChangeOp, TopologyMapping] = {
+  def mk(fp: Fingerprint, sigHex: String): Signature =
+    Signature.fromExternalSigning(
+      SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
+      ByteString.copyFrom(unhex(sigHex)),
+      fp,
+      SigningAlgorithmSpec.Ed25519,
+    )
+  val first = SignedTopologyTransaction.withSignature(tx, mk(sigs.head._1, sigs.head._2), isProposal = false, pv)
+  sigs.tail.foldLeft(first)((acc, s) => acc.addSingleSignature(mk(s._1, s._2)))
+}
+
+val out = new StringBuilder()
+def put(k: String, v: String): Unit = { out.append(k).append('=').append(v).append('\n'); () }
+
+env("GG_OP") match {
+  case "participant-id" =>
+    put("participantId", participant.id.toProtoPrimitive)
+
+  case "fingerprint" =>
+    put("fingerprint", loadKey(b64d(env("GG_PUB_B64"))).fingerprint.toProtoPrimitive)
+
+  case "prepare-delegation" =>
+    val k = loadKey(b64d(env("GG_PUB_B64")))
+    val ns = Namespace(k.fingerprint)
+    val m = NamespaceDelegation.create(ns, k, DelegationRestriction.CanSignAllMappings).getOrElse(sys.error("bad delegation"))
+    val tx = genUnsigned(m)
+    put("txB64", b64e(tx.toByteString.toByteArray)); put("hashHex", txHashHex(tx))
+
+  case "prepare-dns" =>
+    val pubs = env("GG_OWNER_PUBS_B64").split(",").toSeq.map(s => loadKey(b64d(s)))
+    val nss = pubs.map(k => Namespace(k.fingerprint)).toSet
+    val threshold = PositiveInt.tryCreate(env("GG_THRESHOLD").toInt)
+    val dnNs = DecentralizedNamespaceDefinition.computeNamespace(nss)
+    val dn = DecentralizedNamespaceDefinition.tryCreate(dnNs, threshold, nss)
+    val tx = genUnsigned(dn)
+    put("txB64", b64e(tx.toByteString.toByteArray)); put("hashHex", txHashHex(tx)); put("namespace", dnNs.fingerprint.toProtoPrimitive)
+
+  case "prepare-hosting" =>
+    val dnNs = Namespace(Fingerprint.tryFromString(env("GG_NAMESPACE")))
+    val partyId = PartyId.tryCreate(env("GG_PARTY_NAME"), dnNs)
+    val hosts = env("GG_HOSTS").split(",").toSeq.map { h =>
+      val a = h.split("\\|", 2)
+      val perm = if (a(1) == "Observation") ParticipantPermission.Observation else ParticipantPermission.Confirmation
+      HostingParticipant(ParticipantId.tryFromProtoPrimitive(a(0)), perm)
+    }
+    val confThr = PositiveInt.tryCreate(env("GG_CONF_THRESHOLD").toInt)
+    val signingKeysB64 = envOr("GG_SIGNING_KEYS_B64", "")
+    val swtOpt =
+      if (signingKeysB64.isEmpty) None
+      else {
+        val keys = signingKeysB64.split(",").toSeq.map(s => loadKey(b64d(s)))
+        Some(SigningKeysWithThreshold(NonEmpty.mk(Set, keys.head, keys.tail: _*), PositiveInt.tryCreate(env("GG_SIGNING_THRESHOLD").toInt)))
+      }
+    val ptp = PartyToParticipant.create(partyId, confThr, hosts, swtOpt).getOrElse(sys.error("bad ptp"))
+    val tx = genUnsigned(ptp)
+    put("txB64", b64e(tx.toByteString.toByteArray)); put("hashHex", txHashHex(tx)); put("partyId", partyId.toProtoPrimitive)
+
+  case "describe" =>
+    val tx = reload(env("GG_TX_B64"))
+    put("hashHex", txHashHex(tx))
+    tx.mapping match {
+      case nd: NamespaceDelegation =>
+        put("kind", "delegation"); put("ownerFps", nd.namespace.fingerprint.toProtoPrimitive)
+      case dn: DecentralizedNamespaceDefinition =>
+        put("kind", "namespace")
+        put("ownerFps", dn.owners.forgetNE.toSeq.map(_.fingerprint.toProtoPrimitive).mkString(","))
+        put("threshold", dn.threshold.value.toString)
+      case ptp: PartyToParticipant =>
+        put("kind", "hosting")
+        put("partyName", ptp.partyId.identifier.str)
+        put("hosts", ptp.participants.map(h => h.participantId.toProtoPrimitive + "|" + (if (h.permission == ParticipantPermission.Observation) "Observation" else "Confirmation")).mkString(","))
+        // partySigningKeys is a Set[SigningPublicKey] (empty for a keyless party).
+        put("signingFps", ptp.partySigningKeys.toSeq.map(_.fingerprint.toProtoPrimitive).mkString(","))
+      case _ => put("kind", "unknown")
+    }
+
+  case "submit" =>
+    val tx = reload(env("GG_TX_B64"))
+    val sigs = envOr("GG_OWNER_SIGS", "").split(",").filter(_.nonEmpty).toSeq.map { s =>
+      val a = s.split(":", 2)
+      (Fingerprint.tryFromString(a(0)), a(1))
+    }
+    val ownerSigned = externalSigned(tx, sigs)
+    // A PartyToParticipant mapping additionally needs the hosting participant's
+    // consent — added here with the participant's own (vault) key, valid
+    // because the single connected participant is the sole host.
+    val finalTx = tx.mapping match {
+      case _: PartyToParticipant =>
+        participant.topology.transactions.sign(Seq(ownerSigned), store, signedBy = Seq(participant.id.uid.namespace.fingerprint)).head
+      case _ => ownerSigned
+    }
+    participant.topology.transactions.load(Seq(finalTx), store)
+    put("ok", "true")
+
+  case "read-party" =>
+    val id = env("GG_PARTY_ID")
+    val present = participant.topology.party_to_participant_mappings.list(store).exists(_.item.partyId.toProtoPrimitive == id)
+    put("present", present.toString)
+
+  case other => sys.error("unknown GG_OP " + other)
+}
+
+Files.write(Paths.get(env("GG_OUT")), out.toString.getBytes("UTF-8"))
+println("GG_DONE")
