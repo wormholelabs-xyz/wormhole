@@ -1,10 +1,8 @@
 //go:build integration
 
-// End-to-end integration test for the Canton watcher's real transport.
-//
-// It drives a live Canton sandbox via the `dpm` toolchain and observes a
-// published Wormhole message through the cantonclient gRPC client, exercising
-// the actual Ledger API v2 protos. Run:
+// End-to-end integration test for the Canton watcher: it boots a real Canton
+// sandbox via `dpm`, runs the actual watcher.Run over the Ledger API v2 gRPC
+// transport, and asserts live observation, height advance, and reobservation.
 //
 //	go test -tags integration -run TestCantonWatcherIntegration ./pkg/watchers/canton -v
 //
@@ -24,15 +22,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	"github.com/certusone/wormhole/node/pkg/supervisor"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func findDpm(t *testing.T) string {
@@ -57,20 +54,23 @@ func runCmd(t *testing.T, dir, name string, args ...string) {
 	}
 }
 
-func TestCantonWatcherIntegration(t *testing.T) {
-	dpm := findDpm(t)
+// startSandbox builds the Daml packages and starts a Canton sandbox bound to
+// the ctx lifetime (the JVM child is killed when ctx is cancelled), returning
+// the dpm binary, the test DAR path, and the ledger port.
+func startSandbox(t *testing.T, ctx context.Context) (dpm, dar, port string) {
+	t.Helper()
+	dpm = findDpm(t)
 
 	cantonDir, err := filepath.Abs("../../../../canton")
 	require.NoError(t, err)
 	// The test DAR carries Test.TestCore:integrationPublish and packs the core
 	// DALFs (data-dependency), so --upload-dar uploads+vets core too.
-	dar := filepath.Join(cantonDir, "test", ".daml", "dist", "wormhole-core-test-0.1.0.dar")
+	dar = filepath.Join(cantonDir, "test", ".daml", "dist", "wormhole-core-test-0.1.0.dar")
 
-	port := os.Getenv("CANTON_SANDBOX_PORT")
+	port = os.Getenv("CANTON_SANDBOX_PORT")
 	if port == "" {
 		port = "6865"
 	}
-	addr := "localhost:" + port
 
 	// Build both packages (core, then test).
 	runCmd(t, cantonDir, dpm, "build", "--all")
@@ -79,13 +79,11 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	// from a clean directory: `dpm sandbox` auto-loads a `*.canton` bootstrap or
 	// daml.yaml init-script from its working dir, which we must avoid here.
 	// Canton's sandbox binds the gRPC Ledger API on 6865 by default (no --port).
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	sandboxDir := t.TempDir()
 	logPath := filepath.Join(sandboxDir, "sandbox.log")
 	logFile, err := os.Create(logPath)
 	require.NoError(t, err)
-	defer logFile.Close()
+	t.Cleanup(func() { _ = logFile.Close() })
 
 	sandbox := exec.CommandContext(ctx, dpm, "sandbox", "--no-tty")
 	sandbox.Dir = sandboxDir
@@ -105,15 +103,18 @@ func TestCantonWatcherIntegration(t *testing.T) {
 		return strings.Contains(string(b), "Canton sandbox is ready")
 	}, 180*time.Second, 2*time.Second, "sandbox never became ready")
 	// Belt-and-suspenders: confirm the port accepts connections.
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	conn, err := net.DialTimeout("tcp", "localhost:"+port, 5*time.Second)
 	require.NoError(t, err)
 	_ = conn.Close()
+	return dpm, dar, port
+}
 
-	// Run the integration script once: it uploads+vets the DAR (--upload-dar),
-	// then sets up the bridge, registers an emitter, publishes one message, and
-	// writes the Operator party id. --upload-dar makes vetting synchronous, so no
-	// retry (and no non-idempotent re-allocation of the Operator party) is needed.
-	partyFile := filepath.Join(sandboxDir, "party.json")
+// publishWormholeMessage runs Test.TestCore:integrationPublish once, which sets
+// up the bridge, registers an emitter, and publishes one WormholeMessage
+// (nonce 42, payload 0x11223344). --upload-dar makes vetting synchronous.
+func publishWormholeMessage(t *testing.T, dpm, dar, port string) {
+	t.Helper()
+	partyFile := filepath.Join(t.TempDir(), "party.json")
 	out, err := exec.Command(dpm, "script", "--dar", dar, "--upload-dar", "yes",
 		"--script-name", "Test.TestCore:integrationPublish",
 		"--ledger-host", "localhost", "--ledger-port", port,
@@ -126,51 +127,76 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &operator))
 	require.NotEmpty(t, operator)
 	t.Logf("published as operator party: %s", operator)
+}
 
-	// Observe through the REAL cantonclient gRPC client (insecure, dev sandbox).
-	// Empty readAsParty => wildcard "any party" filter, so we observe the message
-	// without knowing the (namespace-fingerprinted) operator party id.
-	client, err := cantonclient.NewCantonGrpcClient(addr, "", zap.NewNop(),
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
-	require.NoError(t, err)
-	defer client.Close()
+func TestCantonWatcherIntegration(t *testing.T) {
+	rootCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
-	eventChan := make(chan cantonclient.CantonMessageEvent, 8)
-	tmpl := cantonclient.TemplateID{ModuleName: publishMessageModule, EntityName: publishMessageEntity}
-	// beginExclusive=0 streams from the start, so the already-published message is delivered.
-	sub, err := client.SubscribeUpdates(ctx, 0, tmpl, publishMessageChoice, eventChan)
-	require.NoError(t, err)
-	defer sub.Unsubscribe()
+	dpm, dar, port := startSandbox(t, rootCtx)
+	addr := "localhost:" + port
 
+	// Buffered so the watcher never blocks publishing; the test drains it.
+	msgC := make(chan *common.MessagePublication, 16)
+	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
+
+	// packageID "" ⇒ match any package version; readAsParty "" ⇒ observe all
+	// parties (wildcard); unsafeDevMode true ⇒ insecure gRPC to the local
+	// sandbox.
+	w := NewWatcher(addr, "", "", true, msgC, obsvReqC)
+
+	// Start the real watcher exactly as guardiand does.
+	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
+		if err := supervisor.Run(ctx, "canton", w.Run); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}, supervisor.WithPropagatePanic)
+
+	// The data pump streams from the ledger end captured at Run start, so a
+	// message published now (after the watcher started) is delivered even if the
+	// subscription connects slightly later.
+	publishWormholeMessage(t, dpm, dar, port)
+
+	// 1. Live observation through the running watcher.
+	var first *common.MessagePublication
 	select {
-	case ev := <-eventChan:
-		// The decoded event from the live ledger. The address is derived from the
-		// emitter's identity components (registrar/owner/emitterId) assigned by
-		// the live ledger (integrationPublish exercises the Emitter by cid).
-		require.NotEmpty(t, ev.Message.Registrar)
-		require.NotEmpty(t, ev.Message.Owner)
-		require.Contains(t, ev.Message.Registrar, "::", "registrar should be a full party id")
-		assert.Equal(t, uint64(0), ev.Message.EmitterID)
-		assert.Equal(t, uint64(0), ev.Message.Sequence)
-		assert.Equal(t, uint32(42), ev.Message.Nonce)
-		assert.Equal(t, []byte{0x11, 0x22, 0x33, 0x44}, ev.Message.Payload)
-
-		wantAddr := deriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
-		assert.NotEqual(t, vaa.Address{}, wantAddr, "derived emitter address must be non-zero")
-
-		// Feed it through the watcher to confirm the MessagePublication mapping.
-		msgC := make(chan *common.MessagePublication, 1)
-		w := NewWatcher(addr, "", "", true, msgC, make(chan *gossipv1.ObservationRequest))
-		w.processMessage(zap.NewNop(), ev, false)
-		mp := <-msgC
-		assert.Equal(t, vaa.ChainIDCanton, mp.EmitterChain)
-		assert.Equal(t, uint64(0), mp.Sequence)
-		assert.Equal(t, uint32(42), mp.Nonce)
-		assert.Equal(t, wantAddr, mp.EmitterAddress)
-		assert.Equal(t, cantonclient.OffsetToTxID(ev.Offset), mp.TxID)
-	case err := <-sub.Err():
-		t.Fatalf("subscription error: %v", err)
-	case <-time.After(60 * time.Second):
-		t.Fatal("did not observe the published Wormhole message within 60s")
+	case first = <-msgC:
+	case <-time.After(90 * time.Second):
+		t.Fatal("watcher did not emit the published message within 90s")
 	}
+	assert.False(t, first.IsReobservation, "first observation must not be flagged as a reobservation")
+	assert.Equal(t, vaa.ChainIDCanton, first.EmitterChain)
+	assert.Equal(t, uint64(0), first.Sequence)
+	assert.Equal(t, uint32(42), first.Nonce)
+	assert.Equal(t, []byte{0x11, 0x22, 0x33, 0x44}, first.Payload)
+	assert.NotEqual(t, vaa.Address{}, first.EmitterAddress, "derived emitter address must be non-zero")
+	require.Len(t, first.TxID, 32, "TxID is the 32-byte encoded participant offset")
+
+	// 2. The block-height goroutine reports a non-zero ledger offset (the
+	//    readiness/height path), which advances once messages exist.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(currentCantonHeight) > 0
+	}, 15*time.Second, time.Second, "height gauge never advanced")
+
+	// 3. Reobservation over the wire: a gossip ObservationRequest for the same
+	//    TxID drives GetUpdateByOffset and re-emits the message.
+	obsvReqC <- &gossipv1.ObservationRequest{
+		ChainId: uint32(vaa.ChainIDCanton),
+		TxHash:  first.TxID,
+	}
+	var reobs *common.MessagePublication
+	select {
+	case reobs = <-msgC:
+	case <-time.After(60 * time.Second):
+		t.Fatal("watcher did not re-emit the message on reobservation within 60s")
+	}
+	assert.True(t, reobs.IsReobservation, "second emission must be flagged as a reobservation")
+	assert.Equal(t, vaa.ChainIDCanton, reobs.EmitterChain)
+	assert.Equal(t, first.Sequence, reobs.Sequence)
+	assert.Equal(t, first.Nonce, reobs.Nonce)
+	assert.Equal(t, first.Payload, reobs.Payload)
+	assert.Equal(t, first.EmitterAddress, reobs.EmitterAddress)
+	assert.Equal(t, first.TxID, reobs.TxID)
 }
