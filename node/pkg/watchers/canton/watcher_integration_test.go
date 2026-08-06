@@ -143,7 +143,7 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	// packageID "" ⇒ match any package version; readAsParty "" ⇒ observe all
 	// parties (wildcard); unsafeDevMode true ⇒ insecure gRPC to the local
 	// sandbox.
-	w := NewWatcher(addr, "", "", true, msgC, obsvReqC)
+	w := NewWatcher(addr, "", "", AuthConfig{}, true, msgC, obsvReqC)
 
 	// Start the real watcher exactly as guardiand does.
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {

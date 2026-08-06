@@ -156,7 +156,7 @@ func (f *fakeClient) subscribeArgs() (int64, cantonclient.TemplateID, string) {
 }
 
 func testWatcher(msgC chan<- *common.MessagePublication) *Watcher {
-	return NewWatcher("canton:5011", "pkg123", "Operator::ns", true, msgC, make(chan *gossipv1.ObservationRequest))
+	return NewWatcher("canton:5011", "pkg123", "Operator::ns", AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
 }
 
 func TestProcessMessageBuildsObservation(t *testing.T) {

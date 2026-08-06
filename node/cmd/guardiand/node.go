@@ -151,9 +151,12 @@ var (
 	suiRPC           *string
 	suiMoveEventType *string
 
-	cantonRPC         *string
-	cantonPackageID   *string
-	cantonReadAsParty *string
+	cantonRPC              *string
+	cantonPackageID        *string
+	cantonReadAsParty      *string
+	cantonAuthTokenURL     *string
+	cantonAuthClientID     *string
+	cantonAuthClientSecret *string
 
 	solanaRPC          *string
 	solanaContract     *string
@@ -428,6 +431,9 @@ func init() {
 	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
 	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (empty matches any package version)")
 	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton party to narrow the watcher's update stream to; production guardians set the guardianObserver party. Empty observes all parties (devnet default)")
+	cantonAuthTokenURL = NodeCmd.Flags().String("cantonAuthTokenURL", "", "OAuth2 token endpoint for a Keycloak-fronted Canton Ledger API (.../realms/<realm>/protocol/openid-connect/token). Set together with cantonAuthClientID and cantonAuthClientSecret, or not at all")
+	cantonAuthClientID = NodeCmd.Flags().String("cantonAuthClientID", "", "OAuth2 client id for the Canton Ledger API (client-credentials grant)")
+	cantonAuthClientSecret = NodeCmd.Flags().String("cantonAuthClientSecret", "", "OAuth2 client secret for the Canton Ledger API. Prefer the GUARDIAND_CANTONAUTHCLIENTSECRET environment variable over the flag so the secret never appears in process arguments")
 
 	solanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaRPC", "Solana RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
 	fogoRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoRPC", "Fogo RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
@@ -1797,6 +1803,11 @@ func runNode(cmd *cobra.Command, args []string) {
 			Rpc:         *cantonRPC,
 			PackageID:   *cantonPackageID,
 			ReadAsParty: *cantonReadAsParty,
+			Auth: canton.AuthConfig{
+				TokenURL:     *cantonAuthTokenURL,
+				ClientID:     *cantonAuthClientID,
+				ClientSecret: *cantonAuthClientSecret,
+			},
 		}
 		watcherConfigs = append(watcherConfigs, wc)
 	}
