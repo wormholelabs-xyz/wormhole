@@ -101,7 +101,7 @@ CREATE_ARGS="$(jq -n \
   '{
     operator: $operator,
     guardianGovernance: $gg,
-    chainId: "72",
+    chainId: "75",
     governanceChainId: "1",
     governanceContract: "0000000000000000000000000000000000000000000000000000000000000004",
     guardianSetIndex: "0",
