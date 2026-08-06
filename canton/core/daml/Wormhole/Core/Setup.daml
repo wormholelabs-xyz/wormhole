@@ -12,7 +12,7 @@ import Wormhole.Core.State
 
 -- | Wormhole ChainID assigned to Canton.
 cantonChainId : Int
-cantonChainId = 72
+cantonChainId = 75
 
 -- | The standard Wormhole governance emitter lives on Solana (chain 1) at
 -- address 0x00..04.
