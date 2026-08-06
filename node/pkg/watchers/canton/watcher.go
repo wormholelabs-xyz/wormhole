@@ -29,6 +29,7 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -95,17 +96,22 @@ func (a AuthConfig) complete() bool {
 	return a.TokenURL != "" && a.ClientID != "" && a.ClientSecret != ""
 }
 
-// cantonDialOpts returns the gRPC dial options for connecting to the Canton
-// Ledger API. In unsafe dev mode the local node serves plaintext gRPC, so TLS
-// is disabled (and bearer auth is unavailable — per-RPC credentials require
-// transport security); otherwise cantonclient.NewCantonGrpcClient applies TLS
-// by default and OAuth per-RPC credentials are attached when configured. The
+// cantonTransportCreds selects the gRPC transport. The unsafe dev-mode
+// participant serves plaintext; everything else is TLS (nil defers to
+// cantonclient's TLS default).
+func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
+	if e.unsafeDevMode {
+		return insecure.NewCredentials()
+	}
+	return nil
+}
+
+// cantonDialOpts returns the non-transport dial options: OAuth per-RPC
+// credentials when the Ledger API is behind an identity provider. Bearer tokens
+// require transport security, so this stays empty in dev mode (plaintext). The
 // ctx bounds token fetches and must outlive the connection (Run's ctx).
 func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
-	if e.unsafeDevMode {
-		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	}
-	if e.auth.complete() {
+	if !e.unsafeDevMode && e.auth.complete() {
 		return []grpc.DialOption{cantonclient.NewOAuthDialOption(ctx, e.auth.TokenURL, e.auth.ClientID, e.auth.ClientSecret)}
 	}
 	return nil
@@ -301,7 +307,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	// and the goroutines below cannot observe a closed/nil client at shutdown.
 	client := e.cantonClient
 	if client == nil {
-		grpcClient, err := cantonclient.NewCantonGrpcClient(e.cantonRPC, e.readAsParty, logger, e.cantonDialOpts(ctx)...)
+		grpcClient, err := cantonclient.NewCantonGrpcClient(e.cantonRPC, e.readAsParty, logger, e.cantonTransportCreds(), e.cantonDialOpts(ctx)...)
 		if err != nil {
 			return fmt.Errorf("failed to create Canton gRPC client: %w", err)
 		}
