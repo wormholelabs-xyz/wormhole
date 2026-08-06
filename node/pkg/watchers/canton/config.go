@@ -27,6 +27,11 @@ type WatcherConfig struct {
 	// observer on the Emitter/CoreState attestation surface). Empty observes
 	// every party on the participant (the devnet default).
 	ReadAsParty string
+	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
+	// All three fields set enables per-RPC bearer tokens; all empty disables
+	// authentication; anything else is a configuration error. Requires TLS,
+	// so it is incompatible with unsafe dev mode (plaintext).
+	Auth AuthConfig
 }
 
 func (wc *WatcherConfig) GetNetworkID() watchers.NetworkID {
@@ -56,10 +61,21 @@ func (wc *WatcherConfig) Create(
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
 	}
 
+	// OAuth is all-or-nothing: a partial config would silently dial without
+	// credentials (or with an unusable token source) and fail at runtime.
+	if wc.Auth.enabled() && !wc.Auth.complete() {
+		return nil, nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
+	}
+	// Bearer credentials require transport security; dev mode is plaintext.
+	if wc.Auth.enabled() && devMode {
+		return nil, nil, fmt.Errorf("canton: OAuth auth requires TLS and cannot be used in unsafe dev mode")
+	}
+
 	watcher := NewWatcher(
 		wc.Rpc,
 		wc.PackageID,
 		wc.ReadAsParty,
+		wc.Auth,
 		devMode,
 		msgC,
 		obsvReqC,
