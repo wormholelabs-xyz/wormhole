@@ -1,10 +1,15 @@
 package cantonclient
 
 import (
+	"context"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
 
 	apiv2 "github.com/certusone/wormhole/node/pkg/cantonclient/proto/gen/com/daml/ledger/api/v2"
 )
@@ -109,4 +114,31 @@ func TestDecodeWormholeMessageNeitherShape(t *testing.T) {
 	}
 	_, err := decodeWormholeMessage(&apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}})
 	assert.Error(t, err)
+}
+
+// TestNonTransportOptionsDoNotDisableTLS is a regression guard: the client used
+// to infer "caller supplied transport credentials" from opts being non-empty,
+// so passing a non-transport option (per-RPC OAuth credentials) silently
+// dropped TLS and the dial failed with "no transport security set". Transport
+// is now an explicit parameter; a plaintext listener must be rejected by the
+// TLS handshake rather than accepted.
+func TestNonTransportOptionsDoNotDisableTLS(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer lis.Close()       //nolint:errcheck
+	srv := grpc.NewServer() // plaintext
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.Stop()
+
+	// nil transport creds => TLS, plus a non-transport dial option alongside.
+	c, err := NewCantonGrpcClient(lis.Addr().String(), "", zap.NewNop(), nil,
+		grpc.WithUserAgent("regression-test"))
+	require.NoError(t, err)
+	defer c.Close() //nolint:errcheck
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = c.GetLedgerEnd(ctx)
+	require.Error(t, err, "TLS client must not succeed against a plaintext server")
+	assert.NotContains(t, err.Error(), "no transport security set")
 }
