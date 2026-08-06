@@ -143,8 +143,9 @@ for governance (`consumedGovernance`, §4.4) and for integrator VAAs (the
 `ReplayNode` trie, §4.6). The on-chain Daml verifier reconstructs and re-hashes
 the body and checks signatures against the stored guardian set (§5).
 
-`ChainID` for Canton is **72** (`ChainIDCanton`), the next free mainnet ID after
-Arc (71). It is registered in [`sdk/vaa/structs.go`](../sdk/vaa/structs.go).
+`ChainID` for Canton is **75** (`ChainIDCanton`). Upstream assigned 72 (Robinhood)
+and 73 (Hydration) after this branch first claimed 72; Canton moved to 75, leaving
+74 as headroom. It is registered in [`sdk/vaa/structs.go`](../sdk/vaa/structs.go).
 
 ---
 
@@ -170,7 +171,7 @@ template CoreState
     operator           : Party          -- advances the singleton; the "deployer"
     guardianGovernance : Party          -- guardians' governance anchor (threshold party)
     guardianObserver   : Party          -- read-only guardian observer (stakeholder, never signs)
-    chainId            : Int            -- 72
+    chainId            : Int            -- 75
     governanceChainId  : Int            -- 1 (Solana)
     governanceContract : Bytes32        -- 0x..0004 (the governance emitter)
     guardianSetIndex   : Int            -- current set index
@@ -949,7 +950,7 @@ node/pkg/cantonclient/           ← Ledger API v2 gRPC client
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
   watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
   core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
-sdk/vaa/structs.go               ← ChainIDCanton = 72
+sdk/vaa/structs.go               ← ChainIDCanton = 75
 devnet/canton-devnet.yaml        ← Tilt k8s manifest (sandbox + bootstrap)
 Tiltfile                         ← `canton` component (opt-in)
 ```
