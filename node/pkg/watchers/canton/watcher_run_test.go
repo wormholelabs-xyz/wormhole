@@ -23,7 +23,7 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w := NewWatcher("canton:0", "pkg", "", true, msgC, obsvReqC)
+	w := NewWatcher("canton:0", "pkg", "", AuthConfig{}, true, msgC, obsvReqC)
 	w.cantonClient = fake // inject the fake via the DI seam
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -188,4 +188,30 @@ func TestProcessMessageDropsZeroTimestamp(t *testing.T) {
 		t.Fatal("expected no observation for a zero effective time")
 	default:
 	}
+}
+
+// TestRunResumesFromLastOffset proves a supervisor-restarted Run resubscribes
+// from the last processed stream offset rather than the current ledger end.
+// Canton terminates long-lived streams when their access token expires, so
+// stream death and restart is routine; resuming from ledger end would silently
+// drop anything published during the reconnect window.
+func TestRunResumesFromLastOffset(t *testing.T) {
+	fake := newFakeClient()
+	fake.ledgerEnd = 77
+	msgC, _ := startWatcher(t, fake)
+	fake.waitSubscribed(t)
+
+	fake.pushEvent(sampleEvent(100))
+	select {
+	case <-msgC:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no observation emitted")
+	}
+
+	fake.failSubscription(errors.New("stream ended: token expired"))
+	fake.waitSubscribed(t) // supervisor restarts Run, which resubscribes
+
+	begin, _, _ := fake.subscribeArgs()
+	assert.Equal(t, int64(100), begin, "resume must start from the last processed offset, not ledger end")
+	require.GreaterOrEqual(t, fake.subscribeCount(), 2)
 }

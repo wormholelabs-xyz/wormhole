@@ -33,12 +33,19 @@ type grpcClient struct {
 // on the participant (a wildcard "any party" filter), which is the default for
 // the core-bridge watcher — it should see PublishMessage from every emitter, and
 // it avoids depending on the operator party id (which carries a namespace
-// fingerprint not known until allocation). If no transport-credentials dial
-// option is supplied, TLS is used.
-func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, opts ...grpc.DialOption) (CantonClient, error) {
-	if !hasTransportCreds(opts) {
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(nil)))
+// fingerprint not known until allocation).
+//
+// transportCreds selects the transport: pass nil for TLS (the production
+// default), or insecure credentials for a plaintext dev-mode participant. It is
+// an explicit parameter rather than something inferred from opts because gRPC
+// dial options cannot be introspected — opts carries non-transport options such
+// as per-RPC OAuth credentials, and guessing from their presence would silently
+// dial without transport security.
+func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, transportCreds credentials.TransportCredentials, opts ...grpc.DialOption) (CantonClient, error) {
+	if transportCreds == nil {
+		transportCreds = credentials.NewTLS(nil)
 	}
+	opts = append(opts, grpc.WithTransportCredentials(transportCreds))
 	conn, err := grpc.NewClient(rpc, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("cantonclient: failed to dial %s: %w", rpc, err)
@@ -50,14 +57,6 @@ func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, opt
 		readAsParty: readAsParty,
 		logger:      logger,
 	}, nil
-}
-
-// hasTransportCreds reports whether the caller already supplied dial options.
-// grpc exposes no way to introspect option contents, so we rely on the
-// convention that dev mode passes insecure.NewCredentials() explicitly; in that
-// case we must not also add TLS.
-func hasTransportCreds(opts []grpc.DialOption) bool {
-	return len(opts) > 0
 }
 
 func (c *grpcClient) Close() error {

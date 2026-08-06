@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
@@ -28,6 +29,7 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -74,12 +76,43 @@ func deriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.
 	return a
 }
 
-// cantonDialOpts returns the gRPC dial options for connecting to the Canton
-// Ledger API. In unsafe dev mode the local node serves plaintext gRPC, so TLS is
-// disabled; otherwise cantonclient.NewCantonGrpcClient applies TLS by default.
-func cantonDialOpts(unsafeDevMode bool) []grpc.DialOption {
-	if unsafeDevMode {
-		return []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+// AuthConfig carries OAuth2 client-credentials parameters for a
+// Keycloak-fronted Ledger API. All fields set enables per-RPC bearer tokens;
+// all empty disables authentication. Partial configs are rejected by
+// WatcherConfig.Create.
+type AuthConfig struct {
+	// TokenURL is the full OAuth2 token endpoint
+	// (…/realms/<realm>/protocol/openid-connect/token for Keycloak).
+	TokenURL     string
+	ClientID     string
+	ClientSecret string
+}
+
+func (a AuthConfig) enabled() bool {
+	return a.TokenURL != "" || a.ClientID != "" || a.ClientSecret != ""
+}
+
+func (a AuthConfig) complete() bool {
+	return a.TokenURL != "" && a.ClientID != "" && a.ClientSecret != ""
+}
+
+// cantonTransportCreds selects the gRPC transport. The unsafe dev-mode
+// participant serves plaintext; everything else is TLS (nil defers to
+// cantonclient's TLS default).
+func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
+	if e.unsafeDevMode {
+		return insecure.NewCredentials()
+	}
+	return nil
+}
+
+// cantonDialOpts returns the non-transport dial options: OAuth per-RPC
+// credentials when the Ledger API is behind an identity provider. Bearer tokens
+// require transport security, so this stays empty in dev mode (plaintext). The
+// ctx bounds token fetches and must outlive the connection (Run's ctx).
+func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
+	if !e.unsafeDevMode && e.auth.complete() {
+		return []grpc.DialOption{cantonclient.NewOAuthDialOption(ctx, e.auth.TokenURL, e.auth.ClientID, e.auth.ClientSecret)}
 	}
 	return nil
 }
@@ -88,12 +121,20 @@ type Watcher struct {
 	cantonRPC   string
 	packageID   string
 	readAsParty string
+	auth        AuthConfig
 
 	unsafeDevMode bool
 
 	msgChan       chan<- *common.MessagePublication
 	obsvReqC      <-chan *gossipv1.ObservationRequest
 	readinessSync readiness.Component
+
+	// lastOffset is the offset of the newest stream event processed, kept
+	// across supervisor restarts of Run (the Watcher instance persists). Canton
+	// ends streams whose access token expired, so Run resubscribes from here
+	// rather than the current ledger end to avoid dropping the reconnect
+	// window. Written only by the data-pump goroutine.
+	lastOffset atomic.Int64
 
 	// cantonClient is an interface; a nil check is fine for "not injected".
 	// Tests inject a fake; in production Run creates a gRPC client.
@@ -118,6 +159,7 @@ func NewWatcher(
 	cantonRPC string,
 	packageID string,
 	readAsParty string,
+	auth AuthConfig,
 	unsafeDevMode bool,
 	msgC chan<- *common.MessagePublication,
 	obsvReqC <-chan *gossipv1.ObservationRequest,
@@ -126,6 +168,7 @@ func NewWatcher(
 		cantonRPC:     cantonRPC,
 		packageID:     packageID,
 		readAsParty:   readAsParty,
+		auth:          auth,
 		unsafeDevMode: unsafeDevMode,
 		msgChan:       msgC,
 		obsvReqC:      obsvReqC,
@@ -190,6 +233,13 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		ConsistencyLevel: ev.Message.ConsistencyLevel,
 		IsReobservation:  isReobservation,
 		Unreliable:       false,
+	}
+
+	// Record the resume point before publishing so a restart can never skip an
+	// offset the processor already saw. Reobservations replay old offsets and
+	// must not move the stream's resume point backward.
+	if !isReobservation && ev.Offset > e.lastOffset.Load() {
+		e.lastOffset.Store(ev.Offset)
 	}
 
 	e.msgChan <- observation //nolint:channelcheck // The channel to the processor is buffered and shared across chains, if it backs up we should stop processing new observations
@@ -257,7 +307,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	// and the goroutines below cannot observe a closed/nil client at shutdown.
 	client := e.cantonClient
 	if client == nil {
-		grpcClient, err := cantonclient.NewCantonGrpcClient(e.cantonRPC, e.readAsParty, logger, cantonDialOpts(e.unsafeDevMode)...)
+		grpcClient, err := cantonclient.NewCantonGrpcClient(e.cantonRPC, e.readAsParty, logger, e.cantonTransportCreds(), e.cantonDialOpts(ctx)...)
 		if err != nil {
 			return fmt.Errorf("failed to create Canton gRPC client: %w", err)
 		}
@@ -277,6 +327,17 @@ func (e *Watcher) Run(ctx context.Context) error {
 	}
 	currentCantonHeight.Set(float64(ledgerEnd))
 
+	// First run streams from the current ledger end. Restarted runs resume from
+	// the last processed offset: Canton ends streams whose access token expired
+	// (~minutes with Keycloak), and resuming from ledger end would silently
+	// drop anything published during the reconnect window.
+	beginExclusive := ledgerEnd
+	if last := e.lastOffset.Load(); last > 0 {
+		beginExclusive = last
+		logger.Info("resuming update stream from last processed offset",
+			zap.Int64("lastOffset", last), zap.Int64("ledgerEnd", ledgerEnd))
+	}
+
 	timer := time.NewTicker(time.Second * 5)
 	defer timer.Stop()
 
@@ -285,11 +346,11 @@ func (e *Watcher) Run(ctx context.Context) error {
 	supervisor.Signal(ctx, supervisor.SignalHealthy)
 	readiness.SetReady(e.readinessSync)
 
-	// Data pump: stream updates from the current ledger end onward.
+	// Data pump: stream updates from the chosen resume point onward.
 	common.RunWithScissors(ctx, errC, "canton_data_pump", func(ctx context.Context) error {
 		eventChan := make(chan cantonclient.CantonMessageEvent, 64)
 
-		subscription, err := client.SubscribeUpdates(ctx, ledgerEnd, e.templateID(), publishMessageChoice, eventChan)
+		subscription, err := client.SubscribeUpdates(ctx, beginExclusive, e.templateID(), publishMessageChoice, eventChan)
 		if err != nil {
 			return fmt.Errorf("canton_data_pump failed to subscribe to updates: %w", err)
 		}
