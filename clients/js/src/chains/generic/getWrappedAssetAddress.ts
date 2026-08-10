@@ -4,23 +4,22 @@ import {
   getForeignAssetEth,
   getForeignAssetNear,
   getForeignAssetSolana,
-  getForeignAssetTerra,
-  getForeignAssetXpla,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getForeignAsset";
 import { getForeignAssetSui } from "../../sdk/sui";
 import { getForeignAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
-import { impossible } from "../../vaa";
+import { ethers } from "ethers";
 import { getForeignAssetSei } from "../sei/sdk";
 import { getProviderForChain } from "./provider";
 import {
   Chain,
   ChainId,
   Network,
+  chainToPlatform,
   contracts,
   toChain,
   toChainId,
 } from "@wormhole-foundation/sdk-base";
-import { tryNativeToUint8Array } from "../../sdk/array";
+import { toLegacyChainId, tryNativeToUint8Array } from "../../sdk/array";
 
 export const getWrappedAssetAddress = async (
   chain: ChainId | Chain,
@@ -41,72 +40,36 @@ export const getWrappedAssetAddress = async (
     );
   }
 
+  if (chainToPlatform(chainName) === "Evm") {
+    const provider = getProviderForChain(chainName, network, {
+      rpc,
+    }) as ethers.providers.JsonRpcProvider;
+    return getForeignAssetEth(
+      tokenBridgeAddress,
+      provider,
+      toLegacyChainId(originChain),
+      originAddressUint8Array
+    );
+  }
+
   switch (chainName) {
     case "Solana": {
       const provider = getProviderForChain(chainName, network, { rpc });
       return getForeignAssetSolana(
         provider,
         tokenBridgeAddress,
-        toChainId(originChain),
-        originAddressUint8Array
-      );
-    }
-    case "Acala":
-    case "Arbitrum":
-    case "Aurora":
-    case "Avalanche":
-    case "Base":
-    case "Bsc":
-    case "Celo":
-    case "Ethereum":
-    case "Fantom":
-    case "Gnosis":
-    case "Karura":
-    case "Klaytn":
-    case "Moonbeam":
-    case "Neon":
-    case "Oasis":
-    case "Optimism":
-    case "Polygon":
-    // case "Rootstock":
-    case "Scroll":
-    case "Mantle":
-    case "Blast":
-    case "Xlayer":
-    case "Linea":
-    case "Berachain":
-    case "Snaxchain":
-    case "Seievm":
-    case "Sepolia":
-    case "ArbitrumSepolia":
-    case "BaseSepolia":
-    case "OptimismSepolia":
-    case "PolygonSepolia":
-    case "Holesky": {
-      const provider = getProviderForChain(chainName, network, { rpc });
-      return getForeignAssetEth(
-        tokenBridgeAddress,
-        provider,
-        toChainId(originChain),
-        originAddressUint8Array
-      );
-    }
-    case "Terra":
-    case "Terra2": {
-      const provider = getProviderForChain(chainName, network, { rpc });
-      return getForeignAssetTerra(
-        tokenBridgeAddress,
-        provider,
-        toChainId(originChain),
+        toLegacyChainId(originChain),
         originAddressUint8Array
       );
     }
     case "Injective": {
       const provider = getProviderForChain(chainName, network, { rpc });
+      // the legacy SDK bundles its own (older) @injectivelabs/sdk-ts; the
+      // wasm api client is runtime-compatible
       return getForeignAssetInjective(
         tokenBridgeAddress,
-        provider,
-        toChainId(originChain),
+        provider as any,
+        toLegacyChainId(originChain),
         originAddressUint8Array
       );
     }
@@ -119,21 +82,12 @@ export const getWrappedAssetAddress = async (
         originAddressUint8Array
       );
     }
-    case "Xpla": {
-      const provider = getProviderForChain(chainName, network, { rpc });
-      return getForeignAssetXpla(
-        tokenBridgeAddress,
-        provider,
-        toChainId(originChain),
-        originAddressUint8Array
-      );
-    }
     case "Algorand": {
       const provider = getProviderForChain(chainName, network, { rpc });
       return getForeignAssetAlgorand(
         provider,
         BigInt(tokenBridgeAddress),
-        toChainId(originChain),
+        toLegacyChainId(originChain),
         originAddress
       ).then((x) => x?.toString() ?? null);
     }
@@ -142,7 +96,7 @@ export const getWrappedAssetAddress = async (
       return getForeignAssetNear(
         provider,
         tokenBridgeAddress,
-        toChainId(originChain),
+        toLegacyChainId(originChain),
         originAddress
       );
     }
@@ -151,7 +105,7 @@ export const getWrappedAssetAddress = async (
       return getForeignAssetAptos(
         provider,
         tokenBridgeAddress,
-        toChainId(originChain),
+        toLegacyChainId(originChain),
         originAddress
       );
     }
@@ -164,22 +118,7 @@ export const getWrappedAssetAddress = async (
         originAddressUint8Array
       );
     }
-    case "Btc":
-    case "Osmosis":
-    case "Pythnet":
-    case "Wormchain":
-    case "Cosmoshub":
-    case "Evmos":
-    case "Kujira":
-    case "Neutron":
-    case "Celestia":
-    case "Rootstock":
-    case "Stargaze":
-    case "Seda":
-    case "Dymension":
-    case "Provenance":
-      throw new Error(`${chainName} not supported`);
     default:
-      impossible(chainName);
+      throw new Error(`${chainName} not supported`);
   }
 };

@@ -6,13 +6,12 @@ import { Account, Algodv2, mnemonicToSecretKey } from "algosdk";
 import { NETWORKS } from "./consts";
 import { Payload, impossible } from "./vaa";
 import { transferFromAlgorand } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
-import { tryNativeToHexString } from "./sdk/array";
+import { toLegacyChainId, tryNativeToHexString } from "./sdk/array";
 import {
   Chain,
   chainToChainId,
   contracts,
   Network,
-  toChainId,
 } from "@wormhole-foundation/sdk-base";
 
 export async function execute_algorand(
@@ -170,7 +169,7 @@ export async function transferAlgorand(
     assetId,
     BigInt(amount),
     recipient,
-    toChainId(dstChain),
+    toLegacyChainId(dstChain),
     BigInt(0)
   );
   const result = await signSendAndConfirmAlgorand(client, txs, wallet);

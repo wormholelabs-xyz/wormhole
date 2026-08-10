@@ -24,7 +24,7 @@ import {
   chains,
   contracts,
 } from "@wormhole-foundation/sdk-base";
-import { tryNativeToUint8Array } from "./sdk/array";
+import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
 
 const _IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -290,15 +290,13 @@ async function getSigner(
   // NOTE: some of these might have only been tested on mainnet. If it fails in
   // testnet (or devnet), they might require additional guards
   let overrides: ethers.Overrides = {};
-  if (chain === "Karura" || chain == "Acala") {
-    overrides = await getKaruraGasParams(rpc);
-  } else if (chain === "Polygon") {
+  if (chain === "Polygon") {
     const feeData = await provider.getFeeData();
     overrides = {
       maxFeePerGas: feeData.maxFeePerGas?.mul(50) || undefined,
       maxPriorityFeePerGas: feeData.maxPriorityFeePerGas?.mul(50) || undefined,
     };
-  } else if (chain === "Klaytn" || chain === "Fantom") {
+  } else if (chain === "Klaytn") {
     overrides = { gasPrice: (await signer.getGasPrice()).toString() };
   }
   return {
@@ -528,7 +526,7 @@ export async function transferEVM(
       token_bridge,
       signer,
       amount,
-      chainToChainId(dstChain),
+      toLegacyChainId(dstChain),
       tryNativeToUint8Array(dstAddress, chainToChainId(dstChain))
     );
   } else {
@@ -541,7 +539,7 @@ export async function transferEVM(
       signer,
       tokenAddress,
       amount,
-      chainToChainId(dstChain),
+      toLegacyChainId(dstChain),
       tryNativeToUint8Array(dstAddress, chainToChainId(dstChain)),
       undefined,
       overrides
@@ -635,32 +633,6 @@ export async function hijack_evm(
   console.log(`Current guardian set (index ${after_guardian_set_index}):`);
   console.log(new_set[0]);
   console.log("Success.");
-}
-
-async function getKaruraGasParams(rpc: string): Promise<{
-  gasPrice: number;
-  gasLimit: number;
-}> {
-  const gasLimit = 21000000;
-  const storageLimit = 64001;
-  const res = (
-    await axios.post(rpc, {
-      id: 0,
-      jsonrpc: "2.0",
-      method: "eth_getEthGas",
-      params: [
-        {
-          gasLimit,
-          storageLimit,
-        },
-      ],
-    })
-  ).data.result;
-
-  return {
-    gasLimit: parseInt(res.gasLimit, 16),
-    gasPrice: parseInt(res.gasPrice, 16),
-  };
 }
 
 ////////////////////////////////////////////////////////////////////////////////

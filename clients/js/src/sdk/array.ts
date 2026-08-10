@@ -1,26 +1,18 @@
 import { arrayify, zeroPad } from "@ethersproject/bytes";
 import { PublicKey } from "@solana/web3.js";
-import {
-  hexValue,
-  hexZeroPad,
-  keccak256,
-  sha256,
-  stripZeros,
-} from "ethers/lib/utils";
+import { hexValue, hexZeroPad, keccak256, sha256 } from "ethers/lib/utils";
 import { bech32 } from "bech32";
 import {
   Chain,
   ChainId,
+  PlatformToChains,
   chainToChainId,
   chainToPlatform,
+  encoding,
   toChain,
   toChainId,
 } from "@wormhole-foundation/sdk-base";
-import {
-  PlatformToChains,
-  UniversalAddress,
-  encoding,
-} from "@wormhole-foundation/sdk";
+import { UniversalAddress } from "@wormhole-foundation/sdk-definitions";
 import {
   chainToNativeDenoms,
   CosmwasmAddress,
@@ -32,31 +24,20 @@ import {
   uint8ArrayToNativeStringAlgorand,
 } from "@certusone/wormhole-sdk/lib/esm/algorand";
 import { isValidSuiType } from "@certusone/wormhole-sdk/lib/esm/sui";
+import { ChainId as LegacyChainId } from "@certusone/wormhole-sdk/lib/esm/utils/consts";
 
 /**
+ * Convert a chain to the legacy \@certusone/wormhole-sdk ChainId type.
  *
- * Returns true iff the hex string represents a native Terra denom.
- *
- * Native assets on terra don't have an associated smart contract address, just
- * like eth isn't an ERC-20 contract on Ethereum.
- *
- * The difference is that the EVM implementations of Portal don't support eth
- * directly, and instead require swapping to an ERC-20 wrapped eth (WETH)
- * contract first.
- *
- * The Terra implementation instead supports Terra-native denoms without
- * wrapping to CW-20 token first. As these denoms don't have an address, they
- * are encoded in the Portal payloads by the setting the first byte to 1.  This
- * encoding is safe, because the first 12 bytes of the 32-byte wormhole address
- * space are not used on Terra otherwise, as cosmos addresses are 20 bytes wide.
+ * The legacy SDK is frozen, so its ChainId union doesn't include chains added
+ * after its last release. On the wire a chain id is just a uint16, so passing
+ * newer ids through the legacy functions is safe.
  */
-export const isHexNativeTerra = (h: string): boolean => h.startsWith("01");
+export const toLegacyChainId = (chain: ChainId | Chain): LegacyChainId =>
+  toChainId(chain) as number as LegacyChainId;
 
 const isLikely20ByteCosmwasm = (h: string): boolean =>
   h.startsWith("000000000000000000000000");
-
-export const nativeTerraHexToDenom = (h: string): string =>
-  Buffer.from(stripZeros(hexToUint8Array(h.substr(2)))).toString("ascii");
 
 export const uint8ArrayToHex = (a: Uint8Array): string =>
   encoding.hex.encode(a);
@@ -103,17 +84,6 @@ export const tryUint8ArrayToNative = (
     return hexZeroPad(hexValue(a), 20);
   } else if (chainToPlatform(chainName) === "Solana") {
     return new PublicKey(a).toString();
-  } else if (chainName === "Terra" || chainName === "Terra2") {
-    const h = uint8ArrayToHex(a);
-    if (isHexNativeTerra(h)) {
-      return nativeTerraHexToDenom(h);
-    } else {
-      if (chainName === "Terra2" && !isLikely20ByteCosmwasm(h)) {
-        // terra 2 has 32 byte addresses for contracts and 20 for wallets
-        return humanAddress("terra", a);
-      }
-      return humanAddress("terra", a.slice(-20));
-    }
   } else if (chainName === "Injective") {
     const h = uint8ArrayToHex(a);
     return humanAddress("inj", isLikely20ByteCosmwasm(h) ? a.slice(-20) : a);
@@ -125,9 +95,6 @@ export const tryUint8ArrayToNative = (
       "wormhole",
       isLikely20ByteCosmwasm(h) ? a.slice(-20) : a
     );
-  } else if (chainName === "Xpla") {
-    const h = uint8ArrayToHex(a);
-    return humanAddress("xpla", isLikely20ByteCosmwasm(h) ? a.slice(-20) : a);
   } else if (chainName === "Sei") {
     const h = uint8ArrayToHex(a);
     return humanAddress("sei", isLikely20ByteCosmwasm(h) ? a.slice(-20) : a);
@@ -195,23 +162,7 @@ export const tryNativeToHexString = (
     return uint8ArrayToHex(zeroPad(arrayify(address), 32));
   } else if (chainToPlatform(chainName) === "Solana") {
     return uint8ArrayToHex(zeroPad(new PublicKey(address).toBytes(), 32));
-  } else if (chainName === "Terra") {
-    if (chainToNativeDenoms("Mainnet", chainName) === address) {
-      return (
-        "01" +
-        uint8ArrayToHex(
-          zeroPad(new Uint8Array(Buffer.from(address, "ascii")), 31)
-        )
-      );
-    } else {
-      return uint8ArrayToHex(zeroPad(canonicalAddress(address), 32));
-    }
-  } else if (
-    chainName === "Terra2" ||
-    chainName === "Injective" ||
-    chainName === "Xpla" ||
-    chainName === "Sei"
-  ) {
+  } else if (chainName === "Injective" || chainName === "Sei") {
     return buildTokenId(chainName, address);
   } else if (chainName === "Algorand") {
     return nativeStringToHexAlgorand(address);

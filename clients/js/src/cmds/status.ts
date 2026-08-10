@@ -8,7 +8,12 @@ import {
   chainToChainId,
   contracts,
 } from "@wormhole-foundation/sdk-base";
-import { ChainName, relayer, toChainName } from "@certusone/wormhole-sdk";
+import {
+  CHAIN_ID_TO_NAME,
+  ChainName,
+  relayer,
+  toChainName,
+} from "@certusone/wormhole-sdk";
 
 export const command = "status <network> <chain> <tx>";
 export const desc =
@@ -47,14 +52,25 @@ export const handler = async (
   const sourceChainProvider = new ethers.providers.JsonRpcProvider(sourceRPC);
   const targetChainProviders = new Map<ChainName, ethers.providers.Provider>();
   for (const key in NETWORKS[network]) {
+    const chainId = chainToChainId(key as Chain);
+    // chains added after the legacy SDK was frozen can't be relayer targets
+    if (!(chainId in CHAIN_ID_TO_NAME)) {
+      continue;
+    }
     targetChainProviders.set(
-      toChainName(chainToChainId(key as Chain)),
+      toChainName(chainId as Parameters<typeof toChainName>[0]),
       new ethers.providers.JsonRpcProvider(NETWORKS[network][key as Chain].rpc)
     );
   }
 
   // TODO: Convert this over to sdkv2
-  const v1ChainName = toChainName(chainToChainId(chain));
+  const sourceChainId = chainToChainId(chain);
+  if (!(sourceChainId in CHAIN_ID_TO_NAME)) {
+    throw new Error(`${chain} is not supported by the legacy relayer SDK`);
+  }
+  const v1ChainName = toChainName(
+    sourceChainId as Parameters<typeof toChainName>[0]
+  );
   const info = await relayer.getWormholeRelayerInfo(v1ChainName, argv.tx, {
     environment:
       network === "Devnet"

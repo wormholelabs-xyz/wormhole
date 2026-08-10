@@ -5,22 +5,21 @@ import {
   getOriginalAssetEth,
   getOriginalAssetNear,
   getOriginalAssetSolana,
-  getOriginalAssetTerra,
-  getOriginalAssetXpla,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
 import { getOriginalAssetSui } from "../../sdk/sui";
 import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
-import { impossible } from "../../vaa";
+import { ethers } from "ethers";
 import { getOriginalAssetSei } from "../sei/sdk";
 import { getProviderForChain } from "./provider";
 import {
   Chain,
   ChainId,
   Network,
+  chainToPlatform,
   contracts,
   toChain,
 } from "@wormhole-foundation/sdk-base";
-import { toChainId } from "@wormhole-foundation/sdk";
+import { toLegacyChainId } from "../../sdk/array";
 
 export const getOriginalAsset = async (
   chain: ChainId | Chain,
@@ -36,66 +35,32 @@ export const getOriginalAsset = async (
     );
   }
 
+  if (chainToPlatform(chainName) === "Evm") {
+    const provider = getProviderForChain(chainName, network, {
+      rpc,
+    }) as ethers.providers.JsonRpcProvider;
+    return getOriginalAssetEth(
+      tokenBridgeAddress,
+      provider,
+      assetAddress,
+      toLegacyChainId(chain)
+    );
+  }
+
   switch (chainName) {
     case "Solana": {
       const provider = getProviderForChain(chainName, network, { rpc });
       return getOriginalAssetSolana(provider, tokenBridgeAddress, assetAddress);
     }
-    case "Acala":
-    case "Arbitrum":
-    case "Aurora":
-    case "Avalanche":
-    case "Base":
-    case "Bsc":
-    case "Celo":
-    case "Ethereum":
-    case "Fantom":
-    case "Gnosis":
-    case "Karura":
-    case "Klaytn":
-    case "Moonbeam":
-    case "Neon":
-    case "Oasis":
-    case "Optimism":
-    case "Polygon":
-    case "Scroll":
-    case "Mantle":
-    case "Blast":
-    case "Xlayer":
-    case "Linea":
-    case "Berachain":
-    case "Snaxchain":
-    case "Seievm":
-    case "Sepolia":
-    case "ArbitrumSepolia":
-    case "BaseSepolia":
-    case "OptimismSepolia":
-    case "PolygonSepolia":
-    case "Holesky": {
-      const provider = getProviderForChain(chainName, network, { rpc });
-      return getOriginalAssetEth(
-        tokenBridgeAddress,
-        provider,
-        assetAddress,
-        toChainId(chain)
-      );
-    }
-    case "Terra":
-    case "Terra2": {
-      const provider = getProviderForChain(chainName, network, { rpc });
-      return getOriginalAssetTerra(provider, assetAddress);
-    }
     case "Injective": {
       const provider = getProviderForChain(chainName, network, { rpc });
-      return getOriginalAssetInjective(assetAddress, provider);
+      // the legacy SDK bundles its own (older) @injectivelabs/sdk-ts; the
+      // wasm api client is runtime-compatible
+      return getOriginalAssetInjective(assetAddress, provider as any);
     }
     case "Sei": {
       const provider = await getProviderForChain(chainName, network, { rpc });
       return getOriginalAssetSei(assetAddress, provider);
-    }
-    case "Xpla": {
-      const provider = getProviderForChain(chainName, network, { rpc });
-      return getOriginalAssetXpla(provider, assetAddress);
     }
     case "Algorand": {
       const provider = getProviderForChain(chainName, network, { rpc });
@@ -121,22 +86,7 @@ export const getOriginalAsset = async (
         assetAddress
       )) as WormholeWrappedInfo;
     }
-    case "Btc":
-    case "Osmosis":
-    case "Pythnet":
-    case "Wormchain":
-    case "Cosmoshub":
-    case "Evmos":
-    case "Kujira":
-    case "Neutron":
-    case "Celestia":
-    case "Stargaze":
-    case "Seda":
-    case "Dymension":
-    case "Provenance":
-    case "Rootstock":
-      throw new Error(`${chainName} not supported`);
     default:
-      impossible(chainName);
+      throw new Error(`${chainName} not supported`);
   }
 };
