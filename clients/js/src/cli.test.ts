@@ -1,5 +1,47 @@
 const { exec } = require("child_process");
 
+// The CLI bundles heavy, natively-flavored dependencies; a module-load crash
+// (e.g. a hoisted dependency with an incompatible API) is not caught by the
+// build or the typechecker. These tests fail fast on any startup breakage.
+describe("Smoke Tests", () => {
+  it("worm --version", (done) => {
+    exec(
+      "node build/main.js --version",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error: ${error}`));
+        }
+
+        try {
+          expect(stdout.trim()).toMatch(/^\d+\.\d+\.\d+$/);
+          done();
+        } catch (e) {
+          done(e);
+        }
+      }
+    );
+  });
+
+  it("worm chains", (done) => {
+    exec(
+      "node build/main.js chains",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error: ${error}`));
+        }
+
+        try {
+          expect(stdout).toContain("Solana");
+          expect(stdout).toContain("Ethereum");
+          done();
+        } catch (e) {
+          done(e);
+        }
+      }
+    );
+  });
+});
+
 describe("Info Tests", () => {
   it("worm info contract mainnet ethereum TokenBridge", (done) => {
     exec(
@@ -407,6 +449,242 @@ describe("Generate Tests", () => {
             } catch (e) {
               done(`JSON parse error: ${e}`);
               return;
+            }
+          }
+        );
+      }
+    );
+  });
+
+  it("worm generate upgrade", (done) => {
+    exec(
+      "node build/main.js generate upgrade --chain bsc --contract-address 0x706abc4E45D419950511e474C7B9Ed348A4a716c --module TokenBridge --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error during generation: ${error}`));
+        }
+
+        const vaa = stdout.trim();
+        expect(vaa).not.toBeNull();
+
+        exec(
+          `node build/main.js parse ${vaa}`,
+          (error: any, stdout: string, stderr: any) => {
+            if (error) {
+              return done(new Error(`Execution error during parse: ${error}`));
+            }
+            try {
+              const outputObject = JSON.parse(stdout);
+
+              // Can't check the signature, sequence, or digest because they
+              // are different each time.
+              expect(outputObject.emitterChain).toBe(1);
+              expect(outputObject.emitterAddress).toBe(
+                "0x0000000000000000000000000000000000000000000000000000000000000004"
+              );
+              expect(outputObject.payload).toMatchObject({
+                module: "TokenBridge",
+                type: "ContractUpgrade",
+                chain: 4,
+                address:
+                  "0x000000000000000000000000706abc4e45d419950511e474c7b9ed348a4a716c",
+              });
+              done();
+            } catch (e) {
+              done(`JSON parse error: ${e}`);
+            }
+          }
+        );
+      }
+    );
+  });
+
+  it("worm generate recover-chain-id", (done) => {
+    exec(
+      "node build/main.js generate recover-chain-id --module Core --evm-chain-id 56 --new-chain-id 4 --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error during generation: ${error}`));
+        }
+
+        const vaa = stdout.trim();
+        expect(vaa).not.toBeNull();
+
+        exec(
+          `node build/main.js parse ${vaa}`,
+          (error: any, stdout: string, stderr: any) => {
+            if (error) {
+              return done(new Error(`Execution error during parse: ${error}`));
+            }
+            try {
+              const outputObject = JSON.parse(stdout);
+
+              // Can't check the signature, sequence, or digest because they
+              // are different each time.
+              expect(outputObject.emitterChain).toBe(1);
+              expect(outputObject.payload).toMatchObject({
+                module: "Core",
+                type: "RecoverChainId",
+                evmChainId: "56",
+                newChainId: 4,
+              });
+              done();
+            } catch (e) {
+              done(`JSON parse error: ${e}`);
+            }
+          }
+        );
+      }
+    );
+  });
+
+  it("worm generate set-default-delivery-provider", (done) => {
+    exec(
+      "node build/main.js generate set-default-delivery-provider --chain ethereum --delivery-provider-address 0x7A0a53847776f7e94Cc35742971aCb2217b0Db81 --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error during generation: ${error}`));
+        }
+
+        const vaa = stdout.trim();
+        expect(vaa).not.toBeNull();
+
+        exec(
+          `node build/main.js parse ${vaa}`,
+          (error: any, stdout: string, stderr: any) => {
+            if (error) {
+              return done(new Error(`Execution error during parse: ${error}`));
+            }
+            try {
+              const outputObject = JSON.parse(stdout);
+
+              // Can't check the signature, sequence, or digest because they
+              // are different each time.
+              expect(outputObject.emitterChain).toBe(1);
+              expect(outputObject.payload).toMatchObject({
+                module: "WormholeRelayer",
+                type: "SetDefaultDeliveryProvider",
+                chain: 2,
+                relayProviderAddress:
+                  "0x0000000000000000000000007a0a53847776f7e94cc35742971acb2217b0db81",
+              });
+              done();
+            } catch (e) {
+              done(`JSON parse error: ${e}`);
+            }
+          }
+        );
+      }
+    );
+  });
+});
+
+describe("Edit VAA Tests", () => {
+  // The token-bridge-registration-1 VAA from the Parse Tests below: one
+  // guardian signature, TokenBridge RegisterChain payload.
+  const REGISTRATION_VAA =
+    "010000000001001890714264dbbc8022a58df0c12b436d588b20b6304b38c383bda1d7fc101bb2443081e6d42719bce602116a1491b10d4666967da9f8d922079759c972ed37b40100000000191428f700010000000000000000000000000000000000000000000000000000000000000004f7c884f209e7158720000000000000000000000000000000000000000000546f6b656e427269646765010000000195f83a27e90c622a98c037353f271fd8f5f57b4dc18ebf5ff75a934724bd0491";
+
+  it("worm edit-vaa round-trips a VAA unchanged", (done) => {
+    // parse -> serialise with no edits must be byte-identical
+    exec(
+      `node build/main.js edit-vaa --network devnet --vaa ${REGISTRATION_VAA}`,
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error: ${error}`));
+        }
+
+        try {
+          expect(stdout.trim()).toBe(REGISTRATION_VAA);
+          done();
+        } catch (e) {
+          done(e);
+        }
+      }
+    );
+  });
+
+  it("worm edit-vaa updates envelope fields", (done) => {
+    exec(
+      `node build/main.js edit-vaa --network devnet --vaa ${REGISTRATION_VAA} --nonce 42 --sequence 999 --consistency-level 5 --timestamp 1700000000`,
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error during edit: ${error}`));
+        }
+
+        const vaa = stdout.trim();
+        exec(
+          `node build/main.js parse ${vaa}`,
+          (error: any, stdout: string, stderr: any) => {
+            if (error) {
+              return done(new Error(`Execution error during parse: ${error}`));
+            }
+            try {
+              const outputObject = JSON.parse(stdout);
+
+              expect(outputObject.nonce).toBe(42);
+              expect(outputObject.sequence).toBe("999");
+              expect(outputObject.consistencyLevel).toBe(5);
+              expect(outputObject.timestamp).toBe(1700000000);
+              // everything else must be untouched, including the original
+              // signature (the edited body is intentionally left unsigned)
+              expect(outputObject.signatures).toMatchObject([
+                {
+                  guardianSetIndex: 0,
+                  signature:
+                    "1890714264dbbc8022a58df0c12b436d588b20b6304b38c383bda1d7fc101bb2443081e6d42719bce602116a1491b10d4666967da9f8d922079759c972ed37b401",
+                },
+              ]);
+              expect(outputObject.payload).toMatchObject({
+                module: "TokenBridge",
+                type: "RegisterChain",
+                chain: 0,
+                emitterChain: 1,
+                emitterAddress:
+                  "0x95f83a27e90c622a98c037353f271fd8f5f57b4dc18ebf5ff75a934724bd0491",
+              });
+              done();
+            } catch (e) {
+              done(`JSON parse error: ${e}`);
+            }
+          }
+        );
+      }
+    );
+  });
+
+  it("worm edit-vaa re-signs with a guardian secret", (done) => {
+    // First replace the real signature with garbage, then re-sign with the
+    // devnet guardian key. The fixture was originally signed by that key, and
+    // ECDSA signing is deterministic (RFC 6979), so a correct signing path
+    // must reproduce the original VAA byte for byte.
+    const garbageSig = "00".repeat(65);
+    exec(
+      `node build/main.js edit-vaa --network devnet --vaa ${REGISTRATION_VAA} --signatures ${garbageSig}`,
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error while unsigning: ${error}`));
+        }
+
+        const unsigned = stdout.trim();
+        try {
+          expect(unsigned).not.toBe(REGISTRATION_VAA);
+        } catch (e) {
+          return done(e);
+        }
+
+        exec(
+          `node build/main.js edit-vaa --network devnet --vaa ${unsigned} --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0`,
+          (error: any, stdout: string, stderr: any) => {
+            if (error) {
+              return done(new Error(`Execution error while signing: ${error}`));
+            }
+
+            try {
+              expect(stdout.trim()).toBe(REGISTRATION_VAA);
+              done();
+            } catch (e) {
+              done(e);
             }
           }
         );
