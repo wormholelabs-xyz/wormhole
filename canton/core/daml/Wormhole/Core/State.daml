@@ -1,0 +1,583 @@
+-- | The core-bridge state singleton, emitter registration, and message
+-- publishing. Mirrors @Implementation.sol@ (publishMessage), @State.sol@
+-- (storage), and @Governance.sol@ (governance choices).
+--
+-- State is the active-contract set, so the "core contract" is a single
+-- long-lived 'CoreState', archived and recreated on every governance
+-- transition.
+--
+-- No contract keys: on Daml-LF 2.3 keys are non-unique and resolve against the
+-- submission's readers (negative lookups fail open — see 'Wormhole.Core.Replay'),
+-- so they carry neither uniqueness nor authenticity. Contracts are addressed by
+-- contract-id — stakeholders resolve current cids from their own ACS (the
+-- successor arrives as a CreatedEvent of the consuming exercise); non-stakeholders
+-- receive cids with explicit disclosures from the off-ledger disclosure service
+-- (README §4.7). Authenticity is checked on the PAYLOAD, never the resolution
+-- path: signatories cannot be forged, so a 'CoreState' whose @guardianGovernance@
+-- is the known anchor is authentic by construction — a compromised @operator@
+-- cannot fabricate one. The fee-custody anchor is pinned this way: 'PublishMessage',
+-- 'RegisterEmitter', and 'ClaimReplayRoot' exercise 'GetGuardianGovernance' and
+-- compare it against the @guardianGovernance@ committed on the emitter/registry
+-- before charging. Pinning @guardianGovernance@ (not @operator@) is what holds
+-- against a compromised operator, which alone does not determine @feeRecipient@.
+--
+-- Two invariants:
+--
+--   * 'CoreState' singleton co-signed by @operator@ and @guardianGovernance@.
+--     The latter is the guardians' governance anchor — in production a
+--     decentralized-namespace external party under a k-of-n threshold of guardian
+--     keys (the Canton Network DSO pattern), rotated at the topology layer without
+--     touching this template. It signs only at genesis; transitions
+--     ('SubmitGovernanceVAA') inherit its authority from the archived contract.
+--     "Exactly one" is behavioral, but the guardian-set contents are
+--     cryptographically anchored by its co-signature.
+--   * Emitter identity is cryptographic: the 32-byte address is
+--     @keccak256(tag ‖ registrar ‖ owner ‖ id)@ ('emitterAddressFor') and the
+--     @owner@ co-signs, so a compromised operator cannot mint a contract carrying
+--     an existing emitter's address (that needs the owner's signature) — only a
+--     duplicate under a DIFFERENT owner, which derives a different, untrusted
+--     address. This is the invariant guardians verify by replay.
+--
+-- Per-emitter sequence numbers live in each 'Emitter', not 'CoreState', so
+-- publishing is permissionless: the owner advances its own sequence without the
+-- operator, matching EVM's @publishMessage@. 'CoreState' holds only shared config
+-- and governance state.
+module Wormhole.Core.State where
+
+import DA.Map (Map)
+import DA.Map qualified as Map
+import DA.Optional (fromSomeNote)
+import DA.Set (Set)
+import DA.Set qualified as Set
+import DA.Time (addRelTime, seconds)
+import Splice.Api.Token.MetadataV1 (ExtraArgs)
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+import Splice.Api.Token.AllocationV1 (Allocation)
+import Wormhole.Core.Bytes
+import Wormhole.Core.Fees
+import Wormhole.Core.GuardianSet
+import Wormhole.Core.Governance
+import Wormhole.Core.Replay
+import Wormhole.Core.VAA
+
+-- | The message record produced by 'PublishMessage' — the wire contract with
+-- the guardian watcher, read from @ExercisedEvent.exercise_result@ on the
+-- Ledger-API stream. Equivalent to the EVM @LogMessagePublished@ event.
+--
+-- Instead of a 32-byte @sender@ it carries the emitter identity components
+-- (@registrar@, @owner@, @emitterId@); the watcher derives the address as
+-- @keccak256(tag ‖ registrar ‖ owner ‖ emitterId)@ ('emitterAddressFor') and is
+-- its sole source of truth, never trusting the on-ledger value (the @owner@ in
+-- the preimage blocks operator impersonation — see the module header). The
+-- 'timestamp' (whitepaper 0001/0004) is likewise the watcher's, from the ledger
+-- effective time, so it is absent here.
+data WormholeMessage = WormholeMessage with
+    registrar        : Party     -- the operator; address input
+    owner            : Party     -- the emitting party; address input
+    emitterId        : Int       -- registry-allocated; address input
+    sequence         : Int       -- uint64
+    nonce            : Int       -- uint32
+    consistencyLevel : Int       -- uint8
+    payload          : Bytes
+  deriving (Eq, Show)
+
+-- | Maximum message payload size in bytes (whitepaper 0004).
+maxPayloadBytes : Int
+maxPayloadBytes = 750
+
+----------------------------------------------------------------------
+-- Core state singleton
+----------------------------------------------------------------------
+
+-- | Shared verification core of 'ParseAndVerifyVAA' and 'VerifyAndConsumeVAA':
+-- parse, resolve the guardian set the VAA names, and verify signatures against
+-- it (a non-current-but-unexpired set is accepted; 'verifyVAA' checks it is
+-- still active). @pubKeys@ are untrusted hints bound to guardian addresses in
+-- 'verifyVAA'. NOT used by 'SubmitGovernanceVAA', which accepts the CURRENT set
+-- only (EVM Governance.sol parity). Pure — takes @now@ rather than calling
+-- 'getTime', leaving the caller the one monadic step.
+verifyEncoded : CoreState -> Bytes -> [(Int, Bytes)] -> Time -> Either Text VAA
+verifyEncoded st encodedVAA pubKeys now =
+  let vaa = parseVAA encodedVAA
+      signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex st.guardianSets)
+  in verifyVAA signingSet vaa pubKeys now >> pure vaa
+
+template CoreState
+  with
+    operator           : Party              -- advances the singleton; no power over outcomes
+    guardianGovernance : Party              -- guardians' governance anchor (threshold party)
+    guardianObserver   : Party              -- read-only guardian observer
+    chainId            : Int                -- 72 (Canton)
+    governanceChainId  : Int                -- 1 (Solana)
+    governanceContract : Bytes32            -- governance emitter address
+    guardianSetIndex   : Int                -- index of the current set
+    guardianSets       : Map Int GuardianSet
+    messageFee         : Int                -- per-publish fee, 10^-10 feeInstrument
+                                            -- units; governance-set via SetMessageFee
+    feeInstrument      : InstrumentId       -- CIP-0056 instrument fees are paid in (CC on
+                                            -- mainnet). Genesis-fixed: no governance action
+                                            -- covers it.
+    feeRecipient       : Party              -- fee custody; guardianGovernance in production,
+                                            -- so fees move only via the k-of-n guardian
+                                            -- ceremony. Genesis-fixed.
+    consumedGovernance : Set Bytes32        -- governance-only replay protection, keyed by
+                                            -- digest. App VAAs use the 'ReplayNode' trie.
+  where
+    -- Co-signed: guardianGovernance's signature is what stops the operator
+    -- forging the guardian set (module header). Transitions inherit its
+    -- authority from the archived contract, so it signs only at genesis.
+    signatory operator, guardianGovernance
+    -- Lets guardians watch guardian-set / governance transitions.
+    observer guardianObserver
+
+    -- | Read-only VAA verification against the CURRENT guardian set, for the
+    -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
+    -- guardian addresses in 'verifyVAA'.
+    --
+    -- @verifier@ (any party) is the sole controller: this choice is
+    -- @nonconsuming@ and creates/archives nothing, so nothing needs @operator@'s
+    -- authority (contrast 'SubmitGovernanceVAA', which is consuming and needs
+    -- @guardianGovernance@'s co-signature). The one requirement is visibility: a
+    -- non-stakeholder needs 'CoreState' explicitly disclosed to it — a data
+    -- attachment, not a signature —
+    -- <https://docs.digitalasset.com/build/3.4/sdlc-howtos/applications/develop/explicit-contract-disclosure.html>.
+    -- In Daml Script that is @'submitWithDisclosures'@ (see
+    -- @testParseAndVerifyVAAByExternalVerifier@).
+    nonconsuming choice ParseAndVerifyVAA : VAA
+      with
+        verifier   : Party
+        encodedVAA : Bytes
+        pubKeys    : [(Int, Bytes)]
+      controller verifier
+      do
+        now <- getTime
+        either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
+
+    -- | Read the operator off an authentic 'CoreState' — the caller-side
+    -- authenticity pin for anyone addressing this contract by cid. A plain
+    -- @fetch@ needs a stakeholder among the authorizers and disclosure grants
+    -- only visibility, so third-party reads must go through a choice; this is
+    -- it — nonconsuming, flexible controller. The result is bound to the
+    -- exercised contract, so a fabricated "CoreState" returns its forged
+    -- operator and fails the caller's pin (see Test.ExampleIntegrator.Redeem).
+    nonconsuming choice GetOperator : Party
+      with
+        reader : Party
+      controller reader
+      do pure operator
+
+    -- | Read the @guardianGovernance@ anchor off an authentic 'CoreState' — a
+    -- STRONGER pin than 'GetOperator' for consumers that must resist a compromised
+    -- operator, not just third-party forgery. A 'CoreState' needs only some
+    -- (operator, gg) signature pair, so a compromised operator key can co-sign a
+    -- forged one under a throwaway gg it controls and pass an operator-pin;
+    -- pinning @guardianGovernance@ (the guardians' k-of-n external party,
+    -- unforgeable by a single operator key) closes that. Used by
+    -- 'Wormhole.Ntt.Manager.Receive' and the fee-charging pins ('PublishMessage',
+    -- 'RegisterEmitter', 'ClaimReplayRoot').
+    nonconsuming choice GetGuardianGovernance : Party
+      with
+        reader : Party
+      controller reader
+      do pure guardianGovernance
+
+    -- | Charge the governance-set per-publish fee ('messageFee'). Lives here,
+    -- not on 'Emitter': the fee amount is only knowable from this contract, and
+    -- 'Allocation_ExecuteTransfer' needs the fee recipient's authority (sender ∧
+    -- receiver ∧ executor), inherited from this contract's signatories when
+    -- @feeRecipient = guardianGovernance@. Returns the operator so the caller can
+    -- pin authenticity (a self-signed fee-0 fake must not waive the fee).
+    -- Nonconsuming: a governance transition archiving this contract only makes
+    -- racing publishes fail activeness transiently — re-resolve and retry.
+    nonconsuming choice ChargeMessageFee : Party
+      with
+        payer         : Party
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
+      controller payer
+      do
+        chargeFee payer feeRecipient feeInstrument messageFee feeAllocation
+        pure operator
+
+    -- | Charge a caller-specified amount — for the registries' onboarding
+    -- fees, whose amounts live on the registry contracts. Same authority and
+    -- pin story as 'ChargeMessageFee'.
+    nonconsuming choice ChargeFee : Party
+      with
+        payer         : Party
+        fee           : Int  -- 10^-10 feeInstrument units
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
+      controller payer
+      do
+        chargeFee payer feeRecipient feeInstrument fee feeAllocation
+        pure operator
+
+    -- | Verify a VAA and record its consumption in @consumer@'s @namespace@
+    -- replay trie, atomically — integrators (token bridge / NTT) call this in
+    -- the same transaction as the action the VAA authorizes. Scoped by
+    -- (consumer, namespace): the same VAA can be consumed by different parties
+    -- — or the same party under different namespaces — independently.
+    --
+    -- @replayNodeCid@ is the covering trie node, resolved off-ledger by the
+    -- consumer's disclosure service ('Wormhole.Core.Replay'). Soundness is
+    -- submitter-independent: the node is fetched and consumed positively, so
+    -- every confirmer validates its activeness — a stale or wrong node can only
+    -- fail the transaction, never replay. Any submitter with disclosures of this
+    -- contract and the covering node gets a correct check.
+    nonconsuming choice VerifyAndConsumeVAA : (VAA, ContractId ReplayNode)
+      with
+        encodedVAA    : Bytes
+        pubKeys       : [(Int, Bytes)]
+        consumer      : Party
+        namespace     : Text
+        replayNodeCid : ContractId ReplayNode
+      controller consumer
+      do
+        now <- getTime
+        vaa <- either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
+        node <- fetch replayNodeCid
+        -- Exercising ConsumeDigest on a foreign node would fail authorization
+        -- anyway; the explicit check gives a clean error. The namespace binding
+        -- keeps one consumer's tries mutually isolated (a node from the wrong
+        -- trie must fail, not silently consume there). The operator binding
+        -- rejects tries co-signed by an accomplice "operator" (a shadow trie
+        -- outside the root registry's one-root-per-consumer grant).
+        assertMsg "replay node consumer mismatch" (node.consumer == consumer)
+        assertMsg "replay node namespace mismatch" (node.namespace == namespace)
+        assertMsg "replay node operator mismatch" (node.operator == operator)
+        newNodeCid <- exercise replayNodeCid ConsumeDigest with digest = vaa.hash
+        pure (vaa, newNodeCid)
+
+    -- | Apply a governance VAA: verify it (against the CURRENT set, per EVM),
+    -- check the governance emitter and replay protection, then dispatch.
+    choice SubmitGovernanceVAA : ContractId CoreState
+      with
+        encodedVAA : Bytes
+        pubKeys    : [(Int, Bytes)]
+      controller operator
+      do
+        now <- getTime
+        let vaa = parseVAA encodedVAA
+        -- Governance must be signed by the current set (EVM Governance.sol).
+        assertMsg "governance: not signed by current guardian set"
+          (vaa.guardianSetIndex == guardianSetIndex)
+        either assertFail pure (verifyVAA (currentSetForUpgrade this) vaa pubKeys now)
+        assertMsg "governance: wrong emitter chain"
+          (vaa.emitterChain == governanceChainId)
+        assertMsg "governance: wrong emitter address"
+          (normalizeHex vaa.emitterAddress == normalizeHex governanceContract)
+        assertMsg "governance: action already consumed"
+          (not (Set.member vaa.hash consumedGovernance))
+        let action = parseGovernance vaa.payload
+        -- TransferFees additionally mints an on-ledger withdrawal
+        -- authorization ('applyGovernance' stays pure); it is the artifact the
+        -- guardians' custody policy honors when threshold-signing the outbound
+        -- transfer of the fees accrued in feeRecipient's holdings.
+        case action of
+          TransferFees _ amount recipient -> do
+            _ <- create FeeWithdrawalAuthorization with
+              guardianGovernance
+              operator
+              amount
+              recipient = normalizeHex recipient
+              vaaHash = vaa.hash
+            pure ()
+          _ -> pure ()
+        case applyGovernance this now action of
+          Left err -> assertFail err
+          Right st -> create st with
+            consumedGovernance = Set.insert vaa.hash consumedGovernance
+
+----------------------------------------------------------------------
+-- Governance application (pure helpers in the Either Text monad)
+----------------------------------------------------------------------
+
+-- | Dispatch a parsed governance action, recreating 'CoreState'.
+applyGovernance : CoreState -> Time -> GovernanceAction -> Either Text CoreState
+applyGovernance st now action = case action of
+  GuardianSetUpgrade chain newIndex newKeys -> do
+    assertMsg "guardianSetUpgrade: wrong target chain" (chain == st.chainId || chain == 0)
+    assertMsg "guardianSetUpgrade: index must be current + 1" (newIndex == st.guardianSetIndex + 1)
+    assertMsg "guardianSetUpgrade: empty set" (not (null newKeys))
+    -- Expire the current set (now + 1 day) in place, then install the new one.
+    -- The None case is an invariant violation — a live CoreState always has its
+    -- current set.
+    let expiry = Some (addRelTime now (seconds guardianSetExpirySeconds))
+        expireCurrent mOld = case mOld of
+          Some gs -> Some gs with expirationTime = expiry
+          None    -> error "no current guardian set"
+        newSet = GuardianSet with keys = newKeys, expirationTime = None
+    pure st with
+      guardianSetIndex = newIndex
+      guardianSets = Map.insert newIndex newSet (Map.alter expireCurrent st.guardianSetIndex st.guardianSets)
+
+  SetMessageFee chain fee -> do
+    assertMsg "setMessageFee: wrong target chain" (chain == st.chainId)
+    pure st with messageFee = fee
+
+  TransferFees chain _amount _recipient -> do
+    assertMsg "transferFees: wrong target chain" (chain == st.chainId || chain == 0)
+    -- No CoreState change: fees settle into feeRecipient's holdings at charge
+    -- time, so there is no pooled balance here to move. The caller mints the
+    -- 'FeeWithdrawalAuthorization' and records the action consumed.
+    pure st
+
+  ContractUpgrade chain _newContract -> do
+    assertMsg "contractUpgrade: wrong target chain" (chain == st.chainId)
+    -- On Canton an "upgrade" is an operator-driven Daml package upgrade gated by
+    -- the recorded target package-id, performed out of band. The caller records
+    -- the action consumed.
+    pure st
+
+-- | Helper to read the current set off a 'CoreState' value (not a contract).
+currentSetForUpgrade : CoreState -> GuardianSet
+currentSetForUpgrade st =
+  fromSomeNote "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
+
+-- | On-ledger record of a TransferFees action: the guardians' authorization to
+-- move @amount@ of accrued fees to @recipient@. Fees live in feeRecipient's
+-- (guardianGovernance's) holdings, and Canton tokens move only by their owner's
+-- signature, so the outbound transfer is a k-of-n guardian ceremony; this
+-- contract (signed by guardianGovernance, authority inherited from the consumed
+-- 'CoreState') is the artifact that ceremony's custody policy matches against.
+-- @recipient@ is the VAA's 32-byte Wormhole address; mapping it to a Canton
+-- receiver is the custody layer's job. Archived by guardianGovernance when
+-- fulfilled.
+template FeeWithdrawalAuthorization
+  with
+    guardianGovernance : Party
+    operator           : Party    -- visibility for the operator's tooling
+    amount             : Int      -- 10^-10 feeInstrument units
+    recipient          : Bytes32  -- Wormhole-format recipient from the VAA
+    vaaHash            : Bytes32  -- provenance: the authorizing VAA's digest
+  where
+    signatory guardianGovernance
+    observer operator
+
+----------------------------------------------------------------------
+-- Emitter registration & message publishing
+----------------------------------------------------------------------
+
+-- | Domain-separation tag for emitter addresses. The Go watcher must match this
+-- exactly (see node/pkg/watchers/canton/watcher.go @emitterAddressTag@); the
+-- encoding is pinned across both languages by a shared test vector.
+emitterAddressTag : Text
+emitterAddressTag = "wormhole:emitter:v1"
+
+-- | The 32-byte Wormhole emitter address of the 'Emitter' identified by
+-- @(registrar, owner, emitterId)@.
+emitterAddressFor : Party -> Party -> Int -> Bytes32
+emitterAddressFor registrar owner emitterId =
+  derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId)
+
+-- | Allocates monotonically increasing emitter ids, one registry per operator.
+-- Sequential-id discipline is operator-behavioral; what a rogue operator cannot
+-- do is reuse an id to impersonate an existing emitter — that address includes
+-- the owner, whose signature it lacks (see 'Emitter').
+template EmitterRegistry
+  with
+    operator           : Party
+    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
+                                -- signatory) in RegisterEmitter's fee charge
+    guardianObserver   : Party  -- threaded into each new Emitter by RegisterEmitter
+    registrationFee    : Int    -- onboarding fee, 10^-10 feeInstrument units;
+                                -- operator-set at creation, 0 for free
+    nextId             : Int
+  where
+    signatory operator
+
+    -- | Direct, requester-submitted registration: allocates the next id and
+    -- creates the co-signed 'Emitter' in one transaction, no operator crank —
+    -- the flexible controller brings the @requester@'s signature, the operator's
+    -- is inherited from this contract. Permissionless (EVM/Sui parity); the
+    -- requester needs this registry disclosed (README §4.7), plus the 'CoreState'
+    -- disclosure and a fee allocation when @registrationFee > 0@ (README §4.2).
+    -- Consuming, so racing registrations contend here — the loser re-resolves
+    -- and retries.
+    --
+    -- @payer@ funds the registration fee and co-controls, mirroring
+    -- 'PublishMessage': a direct registrant is its own payer (@payer =
+    -- requester@, controller set collapses), while a delegated registrant
+    -- (e.g. NTT's @RegisterManager@, minting on behalf of an admin under
+    -- inherited authority) lets the admin fund the fee without the fee
+    -- recipient — potentially the registering party itself — being made to
+    -- pay for its own onboarding.
+    choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
+      with
+        requester     : Party
+        payer         : Party  -- funds registrationFee; = requester for a direct registration
+        coreStateCid  : Optional (ContractId CoreState)  -- required iff fee > 0
+        feeAllocation : Optional (ContractId Allocation, ExtraArgs)
+      controller requester, payer
+      do
+        -- Zero-fee registrations never touch the CoreState; fee'd ones charge
+        -- through it. The gg pin runs BEFORE the charge: pinning
+        -- @guardianGovernance@ (not just @operator@, which a forged CoreState
+        -- would match) rejects a shadow CoreState under a rogue gg, so the
+        -- registration fee cannot be redirected.
+        case (registrationFee > 0, coreStateCid) of
+          (False, _) -> pure ()
+          (True, None) -> abort "registration fee due: pass the CoreState"
+          (True, Some csCid) -> do
+            csGg <- exercise csCid GetGuardianGovernance with reader = requester
+            assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
+            csOperator <- exercise csCid ChargeFee with
+              payer
+              fee = registrationFee
+              feeAllocation
+            assertMsg "core state operator mismatch" (csOperator == operator)
+        reg' <- create this with nextId = nextId + 1
+        emitter <- create Emitter with
+          operator
+          guardianGovernance
+          owner = requester
+          guardianObserver
+          emitterId = nextId
+          emitterAddress = emitterAddressFor operator requester nextId
+          sequence = 0
+        pure (reg', emitter)
+
+-- | Hands out replay-trie roots to any consumer that asks — a stateless anchor
+-- whose one nonconsuming choice lends the operator's INHERITED co-signature to
+-- consumer-submitted claims (the 'RegisterEmitter' pattern): no operator crank,
+-- no contention, and a disclosure blob cacheable until the operator
+-- archives/recreates it to change 'claimFee'. One per operator, created at setup
+-- ('mkInitialReplayRootRegistry'). Lives here rather than in
+-- 'Wormhole.Core.Replay' because its claim fee is charged through the 'CoreState'
+-- (which references 'ReplayNode' — an import cycle otherwise).
+--
+-- There is deliberately NO one-root-per-(consumer, namespace) enforcement:
+-- maintaining a single trie per scope is the CONSUMER'S responsibility. The
+-- controller keeps that sound against everyone else — claiming a root for
+-- @consumer@ needs @consumer@'s authority, so nobody can fork another's replay
+-- scope (the @namespace@ is a free-form sub-scope UNDER that authority, not a
+-- claim anyone else can contest). Parallel roots under one scope can only be
+-- minted by the consumer itself, which is self-harm (see
+-- 'Wormhole.Core.Replay'). Spam claims cost the spammer per-transaction traffic,
+-- the 'claimFee', and the operator ~300 B per worthless root; no shared contract
+-- grows.
+template ReplayRootRegistry
+  with
+    operator           : Party
+    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
+                                -- signatory) in ClaimReplayRoot's fee charge
+    claimFee           : Int    -- onboarding fee, 10^-10 feeInstrument units;
+                                -- operator-set at creation, 0 for free
+  where
+    signatory operator
+
+    -- @payer@ funds the claim fee and co-controls, mirroring
+    -- 'PublishMessage'/'RegisterEmitter': a direct claimant is its own payer
+    -- (@payer = consumer@, controller set collapses), while a delegated
+    -- claimant (e.g. NTT's @RegisterManager@, claiming under gg's inherited
+    -- authority) lets the registering admin fund the fee without the
+    -- replay-scope owner being made to pay.
+    nonconsuming choice ClaimReplayRoot : ContractId ReplayNode
+      with
+        consumer       : Party
+        namespace      : Text -- opaque sub-scope of @consumer@; the trie is
+                              -- scoped by (consumer, namespace)
+        splitThreshold : Int  -- normally 'defaultSplitThreshold'; tiny in tests
+        payer          : Party  -- funds claimFee; = consumer for a direct claim
+        coreStateCid   : Optional (ContractId CoreState)  -- required iff fee > 0
+        feeAllocation  : Optional (ContractId Allocation, ExtraArgs)
+      controller consumer, payer
+      do
+        -- Zero-fee claims never touch the CoreState; fee'd ones charge through
+        -- it. The gg pin runs BEFORE the charge: pinning @guardianGovernance@
+        -- (not just @operator@, which a forged CoreState would match) rejects a
+        -- shadow CoreState under a rogue gg, so the claim fee cannot be
+        -- redirected (see README §4.2).
+        case (claimFee > 0, coreStateCid) of
+          (False, _) -> pure ()
+          (True, None) -> abort "claim fee due: pass the CoreState"
+          (True, Some csCid) -> do
+            csGg <- exercise csCid GetGuardianGovernance with reader = consumer
+            assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
+            csOperator <- exercise csCid ChargeFee with
+              payer
+              fee = claimFee
+              feeAllocation
+            assertMsg "core state operator mismatch" (csOperator == operator)
+        create ReplayNode with
+          consumer
+          operator
+          namespace
+          prefix = ""
+          splitThreshold
+          consumed = Set.empty
+
+-- | A registered emitter: the per-emitter sequence counter, identified by
+-- @(operator, owner, emitterId)@ in its payload. The sequence lives here (not
+-- in 'CoreState') so the owner can publish permissionlessly (without operator
+-- authority). Mirrors a Sui @EmitterCap@.
+template Emitter
+  with
+    operator           : Party
+    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
+                                -- signatory) in PublishMessage's fee charge
+    owner              : Party
+    guardianObserver   : Party  -- read-only guardian observer
+    emitterId          : Int      -- registry-allocated
+    emitterAddress     : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
+    sequence           : Int      -- next sequence to assign
+  where
+    -- Owner co-signs: only a transaction with the owner's authority can create a
+    -- contract whose derived address is the owner's — the invariant guardians
+    -- verify by replay, and Canton's msg.sender analog. Also means the operator
+    -- alone cannot archive an emitter (Archive needs all signatories).
+    signatory operator, owner
+    -- Lets guardians watch PublishMessage exercises and their results.
+    observer guardianObserver
+
+    -- | Publish a Wormhole message. Returns the sequence-bumped successor
+    -- 'Emitter' cid alongside the 'WormholeMessage' the watcher observes
+    -- (decoded from @exercise_result@ — a wire contract with the Go watcher;
+    -- do not change the 'WormholeMessage' shape), so the caller need not
+    -- re-resolve the successor off-ledger. The successor is recreated with
+    -- both signatures inherited. Mirrors @Implementation.publishMessage@.
+    --
+    -- The 'messageFee' is charged through the referenced 'CoreState' (EVM parity:
+    -- the current fee is read on every call), whose @guardianGovernance@ and
+    -- operator are pinned so a fake CoreState cannot redirect or waive it.
+    -- Publishers attach the CoreState disclosure to every publish (cacheable
+    -- between governance actions, which invalidate the cid transiently —
+    -- re-resolve and retry); at fee 0 pass @feeAllocation = None@, but the
+    -- CoreState reference is still required since the fee amount is only knowable
+    -- from it.
+    --
+    -- @payer@ funds the fee and co-controls the publish. A direct publisher is
+    -- its own payer (@payer = owner@, so the controller set collapses to @owner@).
+    -- When they differ — an app publishing on a user's behalf, e.g. NTT
+    -- 'Wormhole.Ntt.Manager.Transfer' — @payer@'s authority is required because
+    -- 'ChargeMessageFee' draws its funds, so it cannot be a non-consenting third
+    -- party.
+    choice PublishMessage : (ContractId Emitter, WormholeMessage)
+      with
+        nonce            : Int
+        payload          : Bytes
+        consistencyLevel : Int
+        coreStateCid     : ContractId CoreState
+        payer            : Party   -- funds 'messageFee'; = owner for a direct publish
+        feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+      controller owner, payer
+      do
+        -- Pin the fee-custody anchor BEFORE charging: @guardianGovernance@ (not
+        -- just @operator@, which a forged CoreState would match) determines where
+        -- the fee lands, so this check rejects a shadow CoreState under a rogue
+        -- gg before the message fee can be redirected.
+        csGg <- exercise coreStateCid GetGuardianGovernance with reader = payer
+        assertMsg "core state guardianGovernance mismatch" (csGg == guardianGovernance)
+        csOperator <- exercise coreStateCid ChargeMessageFee with
+          payer
+          feeAllocation
+        assertMsg "core state operator mismatch" (csOperator == operator)
+        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
+        newEmitterCid <- create this with sequence = sequence + 1
+        pure (newEmitterCid, WormholeMessage with
+          registrar = operator
+          owner
+          emitterId
+          sequence
+          nonce
+          consistencyLevel
+          payload)

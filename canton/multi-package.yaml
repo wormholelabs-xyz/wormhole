@@ -1,0 +1,8 @@
+# Multi-package project: the production `wormhole-core` package (templates only)
+# and a separate `wormhole-core-test` package (Daml Scripts). Splitting keeps
+# daml-script — and the test code — out of the production DAR that gets uploaded
+# to a participant. `dpm build --all` builds core first, then test (which has a
+# data-dependency on core's DAR).
+packages:
+  - ./core
+  - ./test

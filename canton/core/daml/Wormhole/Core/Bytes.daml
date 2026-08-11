@@ -1,0 +1,170 @@
+-- | Byte-string helpers for the Wormhole core bridge.
+--
+-- Daml has no native byte-string type, and the @DA.Crypto.Text@ crypto builtins
+-- operate on lowercase hex-encoded 'Text'. We therefore represent all wire bytes
+-- (VAAs, hashes, addresses, public keys) as hex 'Text' WITHOUT a @0x@ prefix,
+-- and do all parsing as fixed-width big-endian slices over that hex.
+--
+-- Every offset/length below is expressed in BYTES; the helpers convert to the
+-- underlying 2-hex-chars-per-byte representation.
+module Wormhole.Core.Bytes where
+
+import DA.Crypto.Text (keccak256, toHex)
+import DA.Text qualified as T
+
+-- | Hex-encoded byte string (lowercase, no @0x@ prefix).
+type Bytes = Text
+
+-- | A 32-byte value (64 hex chars): VAA hashes, emitter addresses, etc.
+type Bytes32 = Bytes
+
+-- | A 20-byte value (40 hex chars): Ethereum-style guardian addresses.
+type Bytes20 = Bytes
+
+-- | Number of bytes represented by a hex string.
+byteLength : Bytes -> Int
+byteLength b = T.length b / 2
+
+-- | @sliceBytes start len b@ returns @len@ bytes of @b@ starting at byte offset
+-- @start@. Fails if the slice runs past the end of @b@.
+sliceBytes : Int -> Int -> Bytes -> Bytes
+sliceBytes start len b =
+  let needed = (start + len) * 2
+  in if T.length b < needed
+       then error ("sliceBytes: out of range (need " <> show needed <> " hex chars, have " <> show (T.length b) <> ")")
+       else T.substring (start * 2) (len * 2) b
+
+-- | Bytes from @start@ (inclusive) to the end of @b@.
+sliceFrom : Int -> Bytes -> Bytes
+sliceFrom start b = T.substring (start * 2) (T.length b - start * 2) b
+
+-- | Value of a single lowercase hex digit, given as a Unicode code point.
+-- Code-point arithmetic, not an assoc-list lookup: under Daml's strict
+-- evaluation a @where@-bound table would be rebuilt and scanned once per nibble.
+hexDigitValue : Int -> Int
+hexDigitValue cp
+  | cp >= cp0 && cp <= cp9 = cp - cp0
+  | cp >= cpa && cp <= cpf = cp - cpa + 10
+  | otherwise = error ("invalid hex digit: " <> T.fromCodePoints [cp])
+  where
+    [cp0, cp9, cpa, cpf] = T.toCodePoints "09af"
+
+-- | True if every character is a lowercase hex digit (@0-9a-f@); true for the
+-- empty string. The predicate counterpart of 'hexDigitValue' (which errors on
+-- a bad digit and so cannot validate).
+isLowerHex : Text -> Bool
+isLowerHex t = all valid (T.toCodePoints t)
+  where
+    valid cp = (cp >= cp0 && cp <= cp9) || (cp >= cpa && cp <= cpf)
+    [cp0, cp9, cpa, cpf] = T.toCodePoints "09af"
+
+-- | Parse a big-endian hex byte string into an 'Int'. Suitable for values that
+-- fit in 63 bits (chain ids, sequences, nonces, fees in practice). Callers that
+-- need uint256 semantics must bound-check upstream.
+bytesToInt : Bytes -> Int
+bytesToInt b = foldl (\acc cp -> acc * 16 + hexDigitValue cp) 0 (T.toCodePoints (T.asciiToLower b))
+
+-- | Lowercase a hex string so it matches the form returned by the crypto
+-- builtins (which emit lowercase) before equality comparisons.
+normalizeHex : Bytes -> Bytes
+normalizeHex = T.asciiToLower
+
+-- | The lowercase hex character for a nibble value (0..15), indexed out of the
+-- hex alphabet.
+hexChar : Int -> Text
+hexChar n
+  | 0 <= n && n <= 15 = T.substring n 1 "0123456789abcdef"
+  | otherwise = error ("hexChar: out of range: " <> show n)
+
+-- | Encode a single byte value (0..255) as two lowercase hex chars.
+intToHexByte : Int -> Bytes
+intToHexByte n =
+  if n < 0 || n > 255
+    then error ("intToHexByte: out of range: " <> show n)
+    else hexChar (n / 16) <> hexChar (n % 16)
+
+-- | Encode a non-negative 'Int' as @numBytes@ big-endian bytes (hex). Fails
+-- loudly — rather than silently truncating via the modular reduction — if
+-- @numBytes@ is negative, @value@ is negative, or @value@ does not fit in
+-- @numBytes@ bytes. Chain ids, lengths, ids, and trimmed amounts all fit, so a
+-- failure here signals a real upstream bug, not an expected case.
+intToBytesN : Int -> Int -> Bytes
+intToBytesN value numBytes
+  | numBytes < 0 = error ("intToBytesN: negative width: " <> show numBytes)
+  | value < 0 = error ("intToBytesN: negative value: " <> show value)
+  | numBytes == 0 =
+      -- Recursion has consumed every byte; any nonzero remainder overflowed.
+      if value == 0 then "" else error ("intToBytesN: value does not fit in the requested width")
+  | otherwise = intToBytesN (value / 256) (numBytes - 1) <> intToHexByte (value % 256)
+
+-- | Left-pad a hex 'Bytes' with zero bytes to exactly @numBytes@ bytes. If it is
+-- already at least that wide it is returned normalized (addresses are usually
+-- already 32 bytes; ids/short values get padded).
+leftPadTo : Int -> Bytes -> Bytes
+leftPadTo numBytes b =
+  let bl = byteLength b
+  in if bl >= numBytes
+       then normalizeHex b
+       else mconcat (replicate (numBytes - bl) "00") <> normalizeHex b
+
+-- | A length-prefixed byte segment: a 4-byte big-endian length followed by the
+-- bytes. A distinct type from raw 'Bytes' (a single-constructor @data@, Daml
+-- having no @newtype@) so it can't be concatenated as unprefixed bytes:
+-- concatenating variable-length fields bare is ambiguous ("ab"‖"c" vs "a"‖"bc"),
+-- and the length prefix makes the address preimage injective. 'unLenPrefixed'
+-- recovers the raw bytes for hashing.
+data LenPrefixed = LenPrefixed { unLenPrefixed : Bytes }
+  deriving (Eq, Show)
+
+lenPrefixed : Bytes -> LenPrefixed
+lenPrefixed b = LenPrefixed (intToBytesN (byteLength b) 4 <> b)
+
+-- | Typed inputs to the address preimage (single-constructor @data@, Daml having
+-- no @newtype@). Distinct types stop 'derivedAddressFromText' from having its
+-- arguments transposed — swapping @registrar@ and @owner@ would otherwise
+-- silently derive a different but valid-looking address, a security bug.
+data DomainTag     = DomainTag     Text deriving (Eq, Show)
+data RegistrarText = RegistrarText Text deriving (Eq, Show)
+data OwnerText     = OwnerText     Text deriving (Eq, Show)
+data RegistryId    = RegistryId    Int  deriving (Eq, Show)
+
+-- | Canonical 32-byte registry address of a registry-allocated identity:
+--
+-- > keccak256( utf8(tag) ‖ lp(utf8(registrar)) ‖ lp(utf8(owner)) ‖ uint64be(id) )
+--
+-- where @lp@ is the 4-byte big-endian length prefix ('lenPrefixed'). Split out
+-- from 'derivedAddress' so tests can pin the encoding against fixed party strings
+-- (allocated 'Party' ids carry nondeterministic fingerprints). The Go watcher
+-- recomputes the same value; the encoding is pinned across both languages by a
+-- shared test vector.
+derivedAddressFromText : DomainTag -> RegistrarText -> OwnerText -> RegistryId -> Bytes32
+derivedAddressFromText (DomainTag domainTag) (RegistrarText registrarText) (OwnerText ownerText) (RegistryId id) =
+  normalizeHex (keccak256 (toHex domainTag
+    <> unLenPrefixed (lenPrefixed (toHex registrarText))
+    <> unLenPrefixed (lenPrefixed (toHex ownerText))
+    <> intToBytesN id 8))
+
+-- | Address of the registry-allocated identity @(registrar, owner, id)@ under
+-- @domainTag@. The @owner@ is in the preimage and co-signs the identity contract,
+-- so a compromised registrar cannot impersonate an existing identity — only mint
+-- a duplicate under a different owner, deriving a different, untrusted address.
+derivedAddress : DomainTag -> Party -> Party -> RegistryId -> Bytes32
+derivedAddress domainTag registrar owner id =
+  derivedAddressFromText domainTag (RegistrarText (partyToText registrar)) (OwnerText (partyToText owner)) id
+
+-- | Drop leading zero bytes ("00") from a hex string, keeping at least one byte.
+-- Used for minimal DER integer encoding. Counts the leading zero chars and
+-- slices once, rather than recursing one byte-slice at a time.
+stripLeadingZeroBytes : Bytes -> Bytes
+stripLeadingZeroBytes b
+  | byteLength b <= 1 = b
+  | otherwise =
+      let zeroBytes = T.length (T.takeWhile (== "0") b) / 2
+      in sliceFrom (min zeroBytes (byteLength b - 1)) b
+
+-- | True if the most-significant bit of the first byte is set (first hex nibble
+-- >= 8). Used to decide whether a DER integer needs a 0x00 sign pad.
+highBitSet : Bytes -> Bool
+highBitSet b = case T.toCodePoints (T.asciiToLower (T.take 1 b)) of
+  cp :: _ -> hexDigitValue cp >= 8
+  [] -> False

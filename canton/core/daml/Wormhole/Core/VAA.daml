@@ -1,0 +1,185 @@
+-- | VAA parsing, digest computation, and on-chain signature/quorum
+-- verification, mirroring @ethereum/contracts/Messages.sol@.
+--
+-- All Daml secp256k1/keccak256 assumptions are isolated in this module so that,
+-- if the deployed Daml-LF builtin contract differs from what we assume (see the
+-- README "Open Questions / Validation Items"), only this file changes.
+module Wormhole.Core.VAA where
+
+import DA.Crypto.Text (keccak256, secp256k1WithEcdsaOnly)
+import DA.Either (optionalToEither)
+import DA.Foldable (forA_)
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet
+
+-- | One guardian signature. @v@ (the Ethereum recovery id) is parsed for
+-- completeness but is unused here, because Daml's @secp256k1@ verifies against a
+-- supplied public key rather than recovering the signer.
+data Signature = Signature with
+    guardianIndex : Int
+    r : Bytes        -- 32 bytes
+    s : Bytes        -- 32 bytes
+    v : Int
+  deriving (Eq, Show)
+
+-- | A parsed VAA. The header (version, guardianSetIndex, signatures) is NOT part
+-- of the signed digest; the body fields are. @body@ keeps the raw body bytes so
+-- the digest can be recomputed, and @hash@ is @keccak256(keccak256(body))@.
+data VAA = VAA with
+    version          : Int
+    guardianSetIndex : Int
+    signatures       : [Signature]
+    timestamp        : Int
+    nonce            : Int
+    emitterChain     : Int
+    emitterAddress   : Bytes32
+    sequence         : Int
+    consistencyLevel : Int
+    payload          : Bytes
+    body             : Bytes
+    hash             : Bytes32
+  deriving (Eq, Show)
+
+-- | Byte width of one encoded signature: guardianIndex(1) + r(32) + s(32) + v(1).
+signatureLen : Int
+signatureLen = 66
+
+-- | Parse a hex-encoded VAA. Aborts the transaction (via @error@) on any
+-- malformed input — the correct behavior for an invalid governance/verify
+-- submission. The version is checked before the rest is parsed: Daml is strict,
+-- so a trailing guard would only fire after every field (mis)parsed — a
+-- wrong-version VAA should fail with the version error, not a slice error.
+parseVAA : Bytes -> VAA
+parseVAA encoded
+  | version /= 1 = error ("unsupported VAA version: " <> show version)
+  | otherwise =
+      let
+        guardianSetIndex = bytesToInt (sliceBytes 1 4 encoded)
+        sigCount = bytesToInt (sliceBytes 5 1 encoded)
+        signatures = parseSignatures encoded 6 sigCount
+        bodyStart = 6 + sigCount * signatureLen
+        body = sliceFrom bodyStart encoded
+        timestamp = bytesToInt (sliceBytes 0 4 body)
+        nonce = bytesToInt (sliceBytes 4 4 body)
+        emitterChain = bytesToInt (sliceBytes 8 2 body)
+        emitterAddress = normalizeHex (sliceBytes 10 32 body)
+        sequence = bytesToInt (sliceBytes 42 8 body)
+        consistencyLevel = bytesToInt (sliceBytes 50 1 body)
+        payload = sliceFrom 51 body
+        hash = digestOf body
+      in VAA with ..
+  where
+    version = bytesToInt (sliceBytes 0 1 encoded)
+
+-- | Parse @count@ consecutive signatures starting at byte @offset@.
+parseSignatures : Bytes -> Int -> Int -> [Signature]
+parseSignatures encoded offset count = map parseAt [0 .. count - 1]
+  where
+    parseAt i =
+      let
+        base = offset + i * signatureLen
+        guardianIndex = bytesToInt (sliceBytes base 1 encoded)
+        r = normalizeHex (sliceBytes (base + 1) 32 encoded)
+        s = normalizeHex (sliceBytes (base + 33) 32 encoded)
+        v = bytesToInt (sliceBytes (base + 65) 1 encoded)
+      in Signature with ..
+
+-- | The Wormhole digest: double keccak256 over the body. Ethereum signs this
+-- 32-byte value directly.
+digestOf : Bytes -> Bytes32
+digestOf body = keccak256 (keccak256 body)
+
+-- | Derive the 20-byte Ethereum-style address from a secp256k1 public key.
+-- The address is @keccak256(X ‖ Y)[12..32]@; if the key carries the 0x04
+-- uncompressed prefix (65 bytes) it is stripped first.
+addressFromPubKey : Bytes -> Bytes20
+addressFromPubKey pubKey =
+  let raw = if byteLength pubKey == 65 then sliceFrom 1 pubKey else pubKey
+  in normalizeHex (sliceBytes 12 20 (keccak256 raw))
+
+-- | Verify a VAA against @gs@ at time @now@, using caller-supplied public keys
+-- (index -> 65-byte uncompressed key). Pure — returns the failure as a 'Left'
+-- and the caller decides how to abort. Mirrors @Messages.verifyVMInternal@:
+--
+--   * the guardian set must be active (not expired);
+--   * at least @quorum(n)@ signatures present;
+--   * guardian indices strictly ascending (no double counting);
+--   * each supplied pubkey must hash to the stored guardian address; and
+--   * each signature must verify against that pubkey over the digest.
+verifyVAA : GuardianSet -> VAA -> [(Int, Bytes)] -> Time -> Either Text ()
+verifyVAA gs vaa pubKeys now = do
+  let n = numGuardians gs
+      required = quorum n
+      sigs = vaa.signatures
+  assertMsg "guardian set is empty" (n > 0)
+  assertMsg "guardian set has expired" (isActiveAt gs now)
+  assertMsg ("no quorum: have " <> show (length sigs) <> ", need " <> show required)
+    (length sigs >= required)
+  assertMsg "signature indices not strictly ascending"
+    (strictlyAscending (map (.guardianIndex) sigs))
+  forA_ sigs (verifyOne gs vaa.hash pubKeys)
+
+-- | Verify a single signature.
+--
+-- Daml's @secp256k1WithEcdsaOnly@ verifies a DER-encoded ECDSA signature over
+-- the message bytes WITHOUT pre-hashing (Ethereum signs the digest directly), so
+-- we pass the Wormhole @digest@ as the message. It takes a public key, not a
+-- recovery, so we bind the caller-supplied key to the canonical guardian address
+-- via @keccak256(pubkey)[12..]@ — a wrong key cannot pass.
+verifyOne : GuardianSet -> Bytes32 -> [(Int, Bytes)] -> Signature -> Either Text ()
+verifyOne gs digest pubKeys sig = do
+  storedAddr <- optionalToEither ("guardian index out of range: " <> show sig.guardianIndex)
+    (keyAt gs sig.guardianIndex)
+  pubKey <- optionalToEither ("missing public key for guardian index: " <> show sig.guardianIndex)
+    (lookup sig.guardianIndex pubKeys)
+  assertMsg ("public key does not match guardian address at index " <> show sig.guardianIndex)
+    (normalizeHex (addressFromPubKey pubKey) == normalizeHex storedAddr)
+  assertMsg ("invalid signature for guardian index " <> show sig.guardianIndex)
+    (secp256k1WithEcdsaOnly (derSignature sig.r sig.s) digest (derPublicKey pubKey))
+
+-- | True if the list is strictly increasing. Direct recursion so @&&@ can
+-- short-circuit on the first violation — under Daml's strict evaluation the
+-- @and (zipWith (<) xs (drop 1 xs))@ formulation would materialize both
+-- intermediate lists in full before checking anything.
+strictlyAscending : [Int] -> Bool
+strictlyAscending (x :: rest@(y :: _)) = x < y && strictlyAscending rest
+strictlyAscending _ = True
+
+----------------------------------------------------------------------
+-- DER encoding for the secp256k1 builtin
+--
+-- @secp256k1WithEcdsaOnly@ wants a DER-encoded ECDSA signature and a DER (SPKI)
+-- encoded public key. The VAA carries raw 32-byte @r@/@s@ and we hold the
+-- guardian's uncompressed public key, so we DER-encode here.
+----------------------------------------------------------------------
+
+-- | DER encoding of one ASN.1 INTEGER from a big-endian hex value: minimal
+-- (no leading zero bytes), 0x00-padded when the high bit is set so it stays
+-- positive. @r@/@s@ are <= 33 bytes, so single-byte length suffices.
+derInteger : Bytes -> Bytes
+derInteger raw =
+  let stripped = stripLeadingZeroBytes (normalizeHex raw)
+      body = if highBitSet stripped then "00" <> stripped else stripped
+  in "02" <> intToHexByte (byteLength body) <> body
+
+-- | DER encoding of @SEQUENCE { INTEGER r; INTEGER s }@. Total content is
+-- <= ~70 bytes, so single-byte length suffices.
+derSignature : Bytes -> Bytes -> Bytes
+derSignature r s =
+  let content = derInteger r <> derInteger s
+  in "30" <> intToHexByte (byteLength content) <> content
+
+-- | Fixed SubjectPublicKeyInfo DER prefix for an uncompressed secp256k1 key:
+-- SEQUENCE { SEQUENCE { id-ecPublicKey, secp256k1 }, BIT STRING { 00 .. } }.
+-- The 65-byte uncompressed point (0x04 ‖ X ‖ Y) follows this prefix.
+spkiPrefixSecp256k1 : Bytes
+spkiPrefixSecp256k1 = "3056301006072a8648ce3d020106052b8104000a034200"
+
+-- | SPKI-DER encode an secp256k1 public key. Accepts the 65-byte uncompressed
+-- form (0x04 ‖ X ‖ Y) or the 64-byte raw point (X ‖ Y), to which the 0x04 tag is
+-- prepended.
+derPublicKey : Bytes -> Bytes
+derPublicKey pub =
+  let p = normalizeHex pub
+      uncompressed = if byteLength p == 64 then "04" <> p else p
+  in spkiPrefixSecp256k1 <> uncompressed

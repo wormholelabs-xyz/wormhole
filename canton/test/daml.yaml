@@ -1,0 +1,29 @@
+# Test/devnet package: Daml Scripts that exercise the wormhole-core templates
+# (unit tests via `dpm test`, and the devnet setup / integration entrypoints).
+# Kept separate from the production package so daml-script stays out of the
+# wormhole-core DAR.
+#
+# It references wormhole-core as a data-dependency (the built core DAR). The
+# root multi-package.yaml ensures core is built first. `dpm build --all` packs
+# core's DALFs into this DAR too, so uploading it to a devnet sandbox makes the
+# core package available there.
+sdk-version: 3.5.1
+name: wormhole-core-test
+version: 0.1.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+  - daml-script
+build-options:
+  # Daml-LF 2.3 (Protocol Version 35), matching wormhole-core.
+  - --target=2.3
+  # Test.ExampleIntegrator deliberately defines reference templates in this
+  # test-only package (they must never ship in the core DAR); uploading this
+  # DAR — devnet only — drags daml-script along, which is acceptable there.
+  - -Wno-template-interface-depends-on-daml-script
+data-dependencies:
+  - ../core/.daml/dist/wormhole-core-0.5.0.dar
+  - ../dars/splice-api-token-metadata-v1-1.0.0.dar
+  - ../dars/splice-api-token-holding-v1-1.0.0.dar
+  - ../dars/splice-api-token-allocation-v1-1.0.0.dar

@@ -1,0 +1,141 @@
+-- | Per-consumer replay protection for integrators (token bridge / NTT): a
+-- PREFIX TRIE of consumed VAA digests, leaf contracts only. A trie is scoped
+-- by (consumer, namespace): the @consumer@ party carries the authority, and
+-- the opaque @namespace@ string lets one consumer maintain many independent
+-- tries — integrators whose admin role is transferable keep the party stable
+-- and derive the namespace from their own permanent identity instead (NTT: a
+-- hash of the instrument id and the initial admin party).
+--
+-- Governance replay protection lives in 'Wormhole.Core.State.CoreState' as a
+-- @Set@ — fine there, since governance actions are rare. App VAAs need a
+-- structure that scales and whose absence check does NOT rely on contract keys:
+-- on Daml-LF 2.3 key lookups resolve on the submitting participant against the
+-- submission's readers, and a negative result no confirmer re-checks fails OPEN.
+-- This module uses no keys at all.
+--
+-- THE TRIE: a 'ReplayNode' holds a hex @prefix@ and the set of consumed digest
+-- SUFFIXES under it (digests are 64 lowercase hex nibbles; a node at depth d
+-- stores 64−d-nibble suffixes). A trie starts as a single root (empty prefix,
+-- empty set). When a node reaches @splitThreshold@ entries, the next consume
+-- splits it into 16 children — one per nibble, empty ones included — bucketing
+-- the suffixes by their (dropped) first nibble. Internal nodes are never stored.
+-- INVARIANT: a consumer's active nodes PARTITION the digest space — every digest
+-- has exactly one covering node. The root covers everything, and a split
+-- replaces one node by 16 children that exactly tile its subspace, atomically.
+--
+-- WHY THIS IS SOUND WHERE KEYS WERE NOT: "digest not consumed" is a positive
+-- statement about one NAMED contract — fetch the covering node, check the suffix
+-- is absent. 'ConsumeDigest' is consuming, so every confirmer validates the
+-- node's activeness: a stale cid conflicts and aborts. Soundness is
+-- submitter-independent, and archiving a node merely BRICKS its subspace
+-- (fail-closed) — the opposite of the key model.
+--
+-- The replay vector is therefore node RE-CREATION. Against THIRD PARTIES the
+-- signatory design closes it: the @operator@ co-signs every node (inherited from
+-- the 'ReplayRootRegistry' anchor at the root, from the archived parent at splits
+-- — never per consume), and claiming a root requires the consumer's authority,
+-- so nobody can archive, re-create, or fork someone ELSE'S scope. Against the
+-- consumer ITSELF there is deliberately no defense: minting parallel roots is
+-- self-harm (see 'ReplayRootRegistry'), the same class as any signatory being
+-- able to unmake its own state.
+--
+-- OFF-LEDGER: consumers locate the covering node via a disclosure service — an
+-- ACS index over (consumer, namespace, prefix), untrusted for safety (a wrong or
+-- stale node only fails). RETRY: racing consumes on one node conflict and exactly one
+-- commits; on rejection, re-resolve the covering node (its cid churns per
+-- consume) and resubmit. A blind retry of a committed consume hits the
+-- membership check — a clean idempotency signal.
+module Wormhole.Core.Replay where
+
+import DA.Map qualified as Map
+import DA.Optional (fromOptional)
+import DA.Set (Set)
+import DA.Set qualified as Set
+import DA.Text qualified as T
+import Wormhole.Core.Bytes
+
+-- | Default node capacity. Suffixes are ≤64 hex chars (~66 B serialized) and
+-- every consume rewrites the full node, bounding the node payload (~8.5 KB), the
+-- per-consume write (~4 KB), and the split's 16 creates (~15 KB) — all below
+-- Canton's request caps. Larger values thin the ACS but amplify every write;
+-- 'ensure' caps it at 4096 (~270 KB nodes).
+defaultSplitThreshold : Int
+defaultSplitThreshold = 128
+
+-- | One trie node: the consumed digest suffixes under @prefix@ (see the module
+-- header for the partition invariant and trust model). NOT observed by the
+-- guardian observer: replay state is integrator-private safety state, not
+-- attestation surface — guardians never re-check target-chain consumption.
+template ReplayNode
+  with
+    consumer       : Party    -- integrator scope party; bears the replay risk
+    operator       : Party    -- co-signs: no unilateral archive or re-create
+    namespace      : Text     -- opaque sub-scope: one consumer, many tries
+    prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
+    splitThreshold : Int      -- copied to children; see 'defaultSplitThreshold'
+    consumed       : Set Bytes  -- suffixes, each exactly (64 − |prefix|) nibbles
+  where
+    signatory consumer, operator
+    -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
+    -- (signatories can always sign a well-formed shadow node). Depth-64 nodes are
+    -- unrepresentable; suffix lengths pin the membership arithmetic; the
+    -- namespace bound keeps the per-node overhead out of the size budgets above
+    -- (it is copied into all 16 children on a split). Deliberately NO
+    -- @size consumed <= splitThreshold@: a split can legitimately create an
+    -- over-full child (all parent entries in one bucket), split further next
+    -- consume.
+    ensure splitThreshold >= 1 && splitThreshold <= 4096
+        && T.length namespace <= 128
+        && T.length prefix <= 63 && isLowerHex prefix
+        && all (\s -> T.length s == 64 - T.length prefix && isLowerHex s)
+               (Set.toList consumed)
+
+    -- | Record @digest@ as consumed, or fail if it already was. Returns the node
+    -- now containing the digest — the recreated node, or on a split the child
+    -- covering it (the other 15 surface as CreatedEvents). Consuming: racing
+    -- consumes conflict and exactly one commits (module-header retry protocol).
+    -- To consume two digests under one node in a single transaction, chain the
+    -- second exercise on the returned cid.
+    choice ConsumeDigest : ContractId ReplayNode
+      with
+        digest : Bytes32
+      controller consumer
+      do
+        -- Normalize before anything: membership is exact-text, so an
+        -- uppercase twin of a consumed digest must not slip past the set.
+        -- Validate independently of the caller — this choice is exercisable
+        -- outside 'VerifyAndConsumeVAA'.
+        let d = normalizeHex digest
+        assertMsg "digest must be 32 bytes of lowercase hex"
+          (T.length d == 64 && isLowerHex d)
+        -- Distinct message from the replay failure: callers re-resolve the
+        -- covering node on this one, drop the VAA on the other.
+        assertMsg "replay node does not cover digest" (prefix `T.isPrefixOf` d)
+        let suffix = T.drop (T.length prefix) d
+        -- The replay check MUST precede the split branch: a split inserting a
+        -- duplicate would be a silent Set.insert no-op — a replay that
+        -- "succeeds".
+        assertMsg "digest already consumed" (not (Set.member suffix consumed))
+        if Set.size consumed < splitThreshold || T.length prefix == 63
+          -- Depth-63 nodes never split: suffixes are single nibbles (≤16
+          -- distinct, so the set is bounded), and children would be degenerate
+          -- depth-64 nodes (unrepresentable, see 'ensure').
+          then create this with consumed = Set.insert suffix consumed
+          else do
+            -- Split: bucket every suffix (plus the new one) by first nibble,
+            -- dropping it, in one pass; then create ALL 16 children — empty
+            -- ones included, or their subspaces would have no covering node.
+            let bucket m s = Map.insertWith Set.union (T.take 1 s) (Set.singleton (T.drop 1 s)) m
+                buckets = bucket (foldl bucket Map.empty (Set.toList consumed)) suffix
+                child nib = create this with
+                  prefix = prefix <> nib
+                  consumed = fromOptional Set.empty (Map.lookup nib buckets)
+            cids <- forA (T.explode "0123456789abcdef") (\nib -> (,) nib <$> child nib)
+            case lookup (T.take 1 suffix) cids of
+              Some cid -> pure cid
+              None -> abort "unreachable: split lost the covering child"
+
+-- NOTE: 'ReplayRootRegistry' (the root-claim anchor) lives in
+-- 'Wormhole.Core.State' beside 'EmitterRegistry' — its claim fee is charged
+-- through the 'CoreState', which itself references 'ReplayNode', so the
+-- registry cannot live here without an import cycle.

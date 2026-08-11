@@ -1,0 +1,441 @@
+-- | Tests for the replay-protection trie ('Wormhole.Core.Replay'), plus the
+-- script-side simulation of the DISCLOSURE SERVICE: 'coveringNode' resolves the
+-- unique active node whose prefix covers a digest (asserting the partition
+-- invariant on every use) and 'coveringDisclosure' packages it for a
+-- non-stakeholder submitter. Production runs the same logic off-ledger over an
+-- ACS index by (consumer, namespace, prefix).
+--
+-- Trie tests use tiny thresholds so splits are cheap to reach; production uses
+-- 'defaultSplitThreshold'.
+module Test.TestReplay where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.List (sort)
+import DA.Optional (fromSome)
+import DA.Set qualified as Set
+import DA.Text qualified as T
+import Wormhole.Core.Bytes
+import Wormhole.Core.Replay
+import Wormhole.Core.State
+import Test.TestCore (setup, govSetFeeVAA, devnetGuardianPubKey)
+
+-- | Right-pad a hex fragment with zeros to a full 64-nibble digest.
+pad64 : Text -> Text
+pad64 t = t <> mconcat (replicate (64 - T.length t) "0")
+
+nibbles : [Text]
+nibbles = T.explode "0123456789abcdef"
+
+-- | The single namespace most tests run under; namespace partitioning itself is
+-- covered by 'testNamespaceScopes'.
+ns : Text
+ns = "test"
+
+-- | Direct, consumer-submitted root claim: the consumer holds the one static
+-- disclosure of the 'ReplayRootRegistry' anchor (served off-ledger by the
+-- disclosure service — simulated here by reading as the operator, and
+-- cacheable forever since the anchor never churns) and submits alone. No
+-- operator crank.
+registerReplayRoot : Party -> Party -> Text -> Int -> Script (ContractId ReplayNode)
+registerReplayRoot operator consumer namespace threshold = do
+  [(regCid, _)] <- query @ReplayRootRegistry operator
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  submit (actAs consumer <> disclose regDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      namespace
+      splitThreshold = threshold
+      payer = consumer       -- direct claim: own payer, controller set collapses
+      coreStateCid = None    -- claimFee is 0 in the fixture
+      feeAllocation = None
+
+-- | The disclosure-service lookup: the unique active node of @consumer@'s
+-- @namespace@ trie covering @digest@, queried as @consumer@. The filter matches
+-- the full trie scope (consumer, namespace), since a reader can see several
+-- tries' nodes (the operator co-signs all, and one consumer may keep one trie
+-- per namespace). Aborts unless coverage is exactly one — doubling as a
+-- partition-invariant check, and how the service detects a forked trie
+-- (parallel roots).
+coveringNode : Party -> Text -> Text -> Script (ContractId ReplayNode, ReplayNode)
+coveringNode consumer namespace digest = do
+  nodes <- query @ReplayNode consumer
+  let d = normalizeHex digest
+  case filter (\(_, n) -> n.consumer == consumer && n.namespace == namespace && n.prefix `T.isPrefixOf` d) nodes of
+    [one] -> pure one
+    covering -> abort ("partition invariant violated: " <> show (length covering) <> " covering nodes")
+
+-- | 'coveringNode' plus the explicit disclosure a non-stakeholder submitter
+-- attaches. @reader@ is any party that sees the node (the consumer, or the
+-- operator's service).
+coveringDisclosure : Party -> Party -> Text -> Text -> Script (ContractId ReplayNode, Disclosure)
+coveringDisclosure reader consumer namespace digest = do
+  (cid, _) <- coveringNode consumer namespace digest
+  disc <- fromSome <$> queryDisclosure reader cid
+  pure (cid, disc)
+
+-- | Consume @digest@ into @consumer@'s @namespace@ trie via the
+-- disclosure-service lookup.
+consume : Party -> Text -> Text -> Script (ContractId ReplayNode)
+consume consumer namespace digest = do
+  (cid, _) <- coveringNode consumer namespace digest
+  submit consumer do exerciseCmd cid ConsumeDigest with digest
+
+consumeMustFail : Party -> Text -> Text -> Script ()
+consumeMustFail consumer namespace digest = do
+  (cid, _) <- coveringNode consumer namespace digest
+  submitMustFail consumer do exerciseCmd cid ConsumeDigest with digest
+
+-- | Fixture: bridge + one consumer with a threshold-@t@ trie root under 'ns'.
+setupTrie : Int -> Script (Party, Party, ContractId ReplayNode)
+setupTrie t = do
+  (operator, _, _) <- setup
+  consumer <- allocateParty "TrieConsumer"
+  rootCid <- registerReplayRoot operator consumer ns t
+  pure (operator, consumer, rootCid)
+
+-- | Inserts land in the root and replays are rejected; the returned cid is the
+-- node the disclosure service would resolve next.
+testTrieInsertAndReplay : Script ()
+testTrieInsertAndReplay = do
+  (_, consumer, _) <- setupTrie 4
+  let dA = pad64 "a1"
+      dB = pad64 "b2"
+      dC = pad64 "c3"
+  cid1 <- consume consumer ns dA
+  (cid1', _) <- coveringNode consumer ns dB
+  cid1' === cid1
+  _ <- consume consumer ns dB
+  _ <- consume consumer ns dC
+  (_, root) <- coveringNode consumer ns dA
+  root.prefix === ""
+  Set.size root.consumed === 3
+  consumeMustFail consumer ns dA
+
+-- | The consume that exceeds the threshold splits the node into exactly 16
+-- children — empty ones included — with the suffixes bucketed by (dropped)
+-- first nibble; the parent is archived; the returned cid is the child covering
+-- the digest.
+testTrieSplit : Script ()
+testTrieSplit = do
+  (_, consumer, _) <- setupTrie 4
+  let ds = map pad64 ["a1", "b2", "c3", "d4"]
+  forA_ ds (consume consumer ns)
+  -- 5th consume: 4 == threshold, so the root splits.
+  childCid <- consume consumer ns (pad64 "e5")
+  nodes <- query @ReplayNode consumer
+  length nodes === 16
+  sort (map (\(_, n) -> n.prefix) nodes) === nibbles
+  -- All children inherit the parent's namespace.
+  forA_ nodes \(_, n) -> n.namespace === ns
+  -- Buckets: each consumed digest's suffix sits in its first-nibble child,
+  -- nibble dropped; unused children are empty.
+  forA_ nodes \(cid, n) -> case n.prefix of
+    "a" -> do Set.toList n.consumed === [T.drop 1 (pad64 "a1")]
+    "e" -> do
+      Set.toList n.consumed === [T.drop 1 (pad64 "e5")]
+      cid === childCid
+    "b" -> Set.size n.consumed === 1
+    "c" -> Set.size n.consumed === 1
+    "d" -> Set.size n.consumed === 1
+    _   -> Set.size n.consumed === 0
+  -- Post-split, both old and new digests remain replay-protected.
+  consumeMustFail consumer ns (pad64 "a1")
+  consumeMustFail consumer ns (pad64 "e5")
+  -- A fresh digest under a now-empty child inserts normally.
+  _ <- consume consumer ns (pad64 "f6")
+  pure ()
+
+-- | Digests sharing a first nibble force an over-threshold child at the first
+-- split (all parent entries in one bucket — legal and transient); its next
+-- consume splits it again, one level deeper.
+testMultiLevelSplit : Script ()
+testMultiLevelSplit = do
+  (_, consumer, _) <- setupTrie 2
+  forA_ (map pad64 ["f0", "f1"]) (consume consumer ns)
+  -- Third consume splits the root; all three suffixes share the 'f' bucket.
+  _ <- consume consumer ns (pad64 "f2")
+  (_, childF) <- coveringNode consumer ns (pad64 "f0")
+  childF.prefix === "f"
+  Set.size childF.consumed === 3   -- over the threshold of 2, by design
+  -- Fourth consume under 'f' splits the over-full child into grandchildren.
+  _ <- consume consumer ns (pad64 "f3")
+  nodes <- query @ReplayNode consumer
+  length nodes === 31   -- 15 depth-1 siblings + 16 depth-2 children of "f"
+  (_, gf) <- coveringNode consumer ns (pad64 "f2")
+  gf.prefix === "f2"
+  Set.toList gf.consumed === [T.drop 2 (pad64 "f2")]
+  -- Replay still rejected across both levels.
+  consumeMustFail consumer ns (pad64 "f0")
+  consumeMustFail consumer ns (pad64 "f3")
+
+-- | Input hygiene. Uppercase input is normalized (its lowercase twin is a
+-- replay); malformed digests are rejected outright.
+testDigestValidation : Script ()
+testDigestValidation = do
+  (_, consumer, rootCid) <- setupTrie 4
+  let upper = "AB" <> mconcat (replicate 62 "0")
+  _ <- consume consumer ns upper
+  consumeMustFail consumer ns (pad64 "ab")   -- lowercase twin: same digest
+  forA_ [ mconcat (replicate 63 "0")        -- too short
+        , mconcat (replicate 65 "0")        -- too long
+        , "0x" <> mconcat (replicate 62 "0") -- 0x prefix
+        , "g" <> mconcat (replicate 63 "0")  -- not hex
+        ] \bad -> do
+    (cid, _) <- coveringNode consumer ns (pad64 "ff")
+    submitMustFail consumer do exerciseCmd cid ConsumeDigest with digest = bad
+  -- rootCid is stale after the first consume: distinct failure from hygiene.
+  submitMustFail consumer do exerciseCmd rootCid ConsumeDigest with digest = pad64 "cd"
+
+-- | A node rejects digests outside its prefix ("does not cover") — the
+-- disclosure-service-handed-me-the-wrong-node case; the digest stays
+-- consumable via the right node.
+testWrongNodeRejected : Script ()
+testWrongNodeRejected = do
+  (_, consumer, _) <- setupTrie 4
+  forA_ (map pad64 ["a0", "b1", "c2", "d3", "e4"]) (consume consumer ns)  -- forces the split
+  (wrongCid, wrong) <- coveringNode consumer ns (pad64 "a0")
+  wrong.prefix === "a"
+  submitMustFail consumer do exerciseCmd wrongCid ConsumeDigest with digest = pad64 "b9"
+  _ <- consume consumer ns (pad64 "b9")
+  pure ()
+
+-- | The retry protocol: a consume against a stale cid is rejected by
+-- activeness (someone advanced the node); the retry against the fresh covering
+-- node succeeds; and a blind retry of a consume that actually committed fails
+-- on membership — never a double consume.
+testStaleCidAndRetry : Script ()
+testStaleCidAndRetry = do
+  (_, consumer, rootCid) <- setupTrie 4
+  _ <- submit consumer do exerciseCmd rootCid ConsumeDigest with digest = pad64 "11"
+  -- rootCid is now archived: a consume of a DIFFERENT digest against it fails.
+  submitMustFail consumer do exerciseCmd rootCid ConsumeDigest with digest = pad64 "22"
+  -- Retry against the fresh covering node succeeds.
+  _ <- consume consumer ns (pad64 "22")
+  -- Ambiguous-timeout case: the original commit actually landed; the blind
+  -- retry hits the membership check, a clean idempotency signal.
+  consumeMustFail consumer ns (pad64 "11")
+
+-- | Depth-63 nodes only insert, never split (suffixes are single nibbles,
+-- bounded at 16); and the 'ensure' shape invariants reject degenerate nodes.
+testDepth63NeverSplits : Script ()
+testDepth63NeverSplits = do
+  (operator, consumer, _) <- setupTrie 4
+  let deepPrefix = mconcat (replicate 63 "f")
+  -- Direct creation needs both signatories — fine for a test fixture.
+  deepCid <- submit (actAs consumer <> actAs operator) do
+    createCmd ReplayNode with
+      consumer, operator, namespace = ns, prefix = deepPrefix, splitThreshold = 1, consumed = Set.empty
+  -- Two inserts exceed threshold 1, yet the node never splits.
+  deepCid' <- submit consumer do exerciseCmd deepCid ConsumeDigest with digest = deepPrefix <> "0"
+  deepCid'' <- submit consumer do exerciseCmd deepCid' ConsumeDigest with digest = deepPrefix <> "1"
+  Some deep <- queryContractId consumer deepCid''
+  deep.prefix === deepPrefix
+  Set.size deep.consumed === 2
+  submitMustFail consumer do exerciseCmd deepCid'' ConsumeDigest with digest = deepPrefix <> "0"
+  -- ensure: depth-64 prefixes, non-positive thresholds, wrong-length suffixes,
+  -- and oversized namespaces are unrepresentable.
+  submitMustFail (actAs consumer <> actAs operator) do
+    createCmd ReplayNode with
+      consumer, operator, namespace = ns, prefix = pad64 "", splitThreshold = 1, consumed = Set.empty
+  submitMustFail (actAs consumer <> actAs operator) do
+    createCmd ReplayNode with
+      consumer, operator, namespace = ns, prefix = "", splitThreshold = 0, consumed = Set.empty
+  submitMustFail (actAs consumer <> actAs operator) do
+    createCmd ReplayNode with
+      consumer, operator, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.fromList ["00"]
+  submitMustFail (actAs consumer <> actAs operator) do
+    createCmd ReplayNode with
+      consumer, operator, namespace = mconcat (replicate 129 "n")
+      prefix = "", splitThreshold = 4, consumed = Set.empty
+
+-- | Scopes are independent and authorization is per-consumer: a different
+-- party can neither advance another's trie nor is it affected by it.
+testCrossConsumerScopes : Script ()
+testCrossConsumerScopes = do
+  (operator, alice, _) <- setupTrie 4
+  bob <- allocateParty "TrieBob"
+  _ <- registerReplayRoot operator bob ns 4
+  _ <- consume alice ns (pad64 "aa")
+  -- Bob cannot exercise Alice's node, even seeing it via disclosure.
+  (aliceCid, _) <- coveringNode alice ns (pad64 "bb")
+  aliceDisc <- fromSome <$> queryDisclosure alice aliceCid
+  submitMustFail (actAs bob <> disclose aliceDisc) do
+    exerciseCmd aliceCid ConsumeDigest with digest = pad64 "bb"
+  -- The same digest consumes independently in Bob's own trie.
+  _ <- consume bob ns (pad64 "aa")
+  pure ()
+
+-- | Namespaces partition one consumer's replay scopes: tries under the same
+-- consumer but different namespaces are fully independent — the same digest
+-- consumes in each, replays are per-namespace, and a split in one leaves the
+-- other's single root untouched.
+testNamespaceScopes : Script ()
+testNamespaceScopes = do
+  (operator, consumer, _) <- setupTrie 4
+  let nsB = "other"
+  _ <- registerReplayRoot operator consumer nsB 4
+  -- Same digest, both namespaces; replay rejected within each.
+  _ <- consume consumer ns (pad64 "aa")
+  _ <- consume consumer nsB (pad64 "aa")
+  consumeMustFail consumer ns (pad64 "aa")
+  consumeMustFail consumer nsB (pad64 "aa")
+  -- Split the 'ns' trie; the 'other' trie keeps its single root.
+  forA_ (map pad64 ["b1", "c2", "d3", "e4"]) (consume consumer ns)
+  nodes <- query @ReplayNode consumer
+  length (filter (\(_, n) -> n.namespace == ns) nodes) === 16
+  (_, rootB) <- coveringNode consumer nsB (pad64 "aa")
+  rootB.prefix === ""
+  Set.size rootB.consumed === 1
+
+-- | Nodes are co-signed: neither the consumer nor the operator can archive
+-- (and so re-create-empty) a node alone.
+testNodeArchiveNeedsBoth : Script ()
+testNodeArchiveNeedsBoth = do
+  (operator, consumer, rootCid) <- setupTrie 4
+  submitMustFail consumer do archiveCmd rootCid
+  submitMustFail operator do archiveCmd rootCid
+  -- Both together can (the irreducible signatory remainder) — coverage for the
+  -- auto-generated Archive choices, including the registry anchor.
+  submit (actAs consumer <> actAs operator) do archiveCmd rootCid
+  [(regCid, _)] <- query @ReplayRootRegistry operator
+  submit operator do archiveCmd regCid
+
+-- | Root claims are free and self-serve; the registry pins down WHOSE scope a
+-- claim can touch. Claiming a root for a consumer requires that consumer's
+-- authority — nobody can fork someone ELSE'S scope. A consumer duplicating its
+-- own root is deliberately possible: parallel roots are self-harm, detected
+-- off-ledger ('coveringNode' aborts on more than one covering node). Roots
+-- cannot be minted outside the registry — the consumer alone lacks the
+-- operator's signature.
+testRootClaims : Script ()
+testRootClaims = do
+  (operator, consumer, rootCid) <- setupTrie 4
+  Some root <- queryContractId consumer rootCid
+  root.prefix === ""
+  root.splitThreshold === 4
+  Set.size root.consumed === 0
+  [(regCid, _)] <- query @ReplayRootRegistry operator
+  regDisc <- fromSome <$> queryDisclosure operator regCid
+  -- A third party cannot claim a root for someone else's scope.
+  mallory <- allocateParty "TrieMallory"
+  submitMustFail (actAs mallory <> disclose regDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      namespace = ns
+      splitThreshold = 4
+      payer = consumer
+      coreStateCid = None
+      feeAllocation = None
+  -- The consumer CAN duplicate its own root — by design, self-harm only.
+  _ <- submit (actAs consumer <> disclose regDisc) do
+    exerciseCmd regCid ClaimReplayRoot with
+      consumer
+      namespace = ns
+      splitThreshold = 4
+      payer = consumer
+      coreStateCid = None
+      feeAllocation = None
+  roots <- query @ReplayNode consumer
+  length roots === 2
+  -- The consumer cannot create a co-signed node alone.
+  submitMustFail consumer do
+    createCmd ReplayNode with
+      consumer, operator, namespace = ns, prefix = "", splitThreshold = 4, consumed = Set.empty
+
+-- | End-to-end: verify + consume through 'CoreState.VerifyAndConsumeVAA' with
+-- the real guardian-signed VAA. The consumer submits with only the CoreState
+-- disclosure (it is a stakeholder of its own nodes); replay against the fresh
+-- covering node fails on membership; a second consumer — or the same consumer
+-- under a second namespace — has its own scope; and nodes from outside the
+-- (consumer, namespace, operator) scope are rejected.
+testVerifyAndConsumeVAA : Script ()
+testVerifyAndConsumeVAA = do
+  (operator, _, csId) <- setup
+  ntt <- allocateParty "NttManager"
+  rootCid <- registerReplayRoot operator ntt ns defaultSplitThreshold
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  (vaa, nodeCid) <- submit (actAs ntt <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = ns
+      replayNodeCid = rootCid
+  Some node <- queryContractId ntt nodeCid
+  Set.member vaa.hash node.consumed === True
+  -- Replay: resolve the FRESH covering node, still rejected (membership).
+  (freshCid, _) <- coveringNode ntt ns vaa.hash
+  freshCid === nodeCid
+  submitMustFail (actAs ntt <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = ns
+      replayNodeCid = freshCid
+  -- A different consumer party consumes the same VAA in its own trie.
+  other <- allocateParty "OtherApp"
+  otherRoot <- registerReplayRoot operator other ns defaultSplitThreshold
+  _ <- submit (actAs other <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = other
+      namespace = ns
+      replayNodeCid = otherRoot
+  -- The SAME consumer consumes the same VAA again under a second namespace —
+  -- one controller party, many independent replay scopes.
+  let ns2 = "second"
+  root2 <- registerReplayRoot operator ntt ns2 defaultSplitThreshold
+  _ <- submit (actAs ntt <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = ns2
+      replayNodeCid = root2
+  -- Namespace mismatch: the passed namespace must match the node's. The third
+  -- trie has NOT consumed this VAA (membership alone would pass), so only the
+  -- namespace check can reject it — and does; with the right namespace the
+  -- same node then consumes fine.
+  root3 <- registerReplayRoot operator ntt "third" defaultSplitThreshold
+  submitMustFail (actAs ntt <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = ns
+      replayNodeCid = root3
+  _ <- submit (actAs ntt <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = "third"
+      replayNodeCid = root3
+  -- Consumer mismatch: ntt cannot consume into other's trie.
+  (otherFresh, _) <- coveringNode other ns vaa.hash
+  otherDisc <- fromSome <$> queryDisclosure other otherFresh
+  submitMustFail (actAs ntt <> disclose csDisc <> disclose otherDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = ns
+      replayNodeCid = otherFresh
+  -- Operator mismatch: a shadow trie co-signed by an accomplice "operator" is
+  -- rejected even though the consumer authority and namespace match.
+  accomplice <- allocateParty "AccompliceOperator"
+  shadowCid <- submit (actAs ntt <> actAs accomplice) do
+    createCmd ReplayNode with
+      consumer = ntt, operator = accomplice, namespace = ns, prefix = ""
+      splitThreshold = 4, consumed = Set.empty
+  submitMustFail (actAs ntt <> disclose csDisc) do
+    exerciseCmd csId VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+      consumer = ntt
+      namespace = ns
+      replayNodeCid = shadowCid

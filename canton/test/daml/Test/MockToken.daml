@@ -1,0 +1,141 @@
+-- | A minimal CIP-0056 token for tests: just enough of the 'Holding' and
+-- 'Allocation' interfaces for 'Wormhole.Core.Fees.chargeFee' to validate and
+-- execute against, without the splice-amulet dependency closure. Deliberate
+-- divergences from a real registry: no deadline enforcement (registry-side by
+-- design) and no locking/change (each allocation is minted whole). Fidelity
+-- against real amulet belongs to devnet validation (README Open Questions).
+--
+-- 'FakeAllocation' proves the admin-signature pin: its view CLAIMS an arbitrary
+-- instrument but carries only the sender's signature — a genuine allocation is
+-- co-signed by the instrument admin, which cannot be forged.
+module Test.MockToken where
+
+import Daml.Script
+import DA.Optional (fromSome)
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.AllocationV1
+import Wormhole.Core.Fees (emptyExtraArgs)
+
+template MockHolding
+  with
+    admin      : Party    -- instrument admin (the mock "DSO")
+    owner      : Party
+    instrument : InstrumentId
+    amount     : Decimal
+  where
+    signatory admin, owner   -- mirrors amulet: dso + owner
+
+    interface instance Holding for MockHolding where
+      view = HoldingView with
+        owner
+        instrumentId = instrument
+        amount
+        lock = None
+        meta = emptyMetadata
+
+template MockAllocation
+  with
+    admin      : Party                   -- instrument admin; co-signs — the authenticity pin
+    allocation : AllocationSpecification
+  where
+    signatory admin, allocation.transferLeg.sender
+    observer allocation.settlement.executor, allocation.transferLeg.receiver
+
+    interface instance Allocation for MockAllocation where
+      view = AllocationView with
+        allocation
+        holdingCids = []
+        meta = emptyMetadata
+      allocation_executeTransferImpl _self _arg = do
+        cid <- toInterfaceContractId @Holding <$> create MockHolding with
+          admin
+          owner = allocation.transferLeg.receiver
+          instrument = allocation.transferLeg.instrumentId
+          amount = allocation.transferLeg.amount
+        pure Allocation_ExecuteTransferResult with
+          senderHoldingCids = []
+          receiverHoldingCids = [cid]
+          meta = emptyMetadata
+      allocation_cancelImpl _self _arg = do
+        cid <- toInterfaceContractId @Holding <$> create MockHolding with
+          admin
+          owner = allocation.transferLeg.sender
+          instrument = allocation.transferLeg.instrumentId
+          amount = allocation.transferLeg.amount
+        pure Allocation_CancelResult with
+          senderHoldingCids = [cid]
+          meta = emptyMetadata
+      allocation_withdrawImpl _self _arg = do
+        cid <- toInterfaceContractId @Holding <$> create MockHolding with
+          admin
+          owner = allocation.transferLeg.sender
+          instrument = allocation.transferLeg.instrumentId
+          amount = allocation.transferLeg.amount
+        pure Allocation_WithdrawResult with
+          senderHoldingCids = [cid]
+          meta = emptyMetadata
+
+-- | A hostile allocation: the view claims whatever instrument it likes, the
+-- implementation moves nothing, and — the detectable part — the instrument
+-- admin never signed it.
+template FakeAllocation
+  with
+    allocation : AllocationSpecification
+  where
+    signatory allocation.transferLeg.sender
+    observer allocation.settlement.executor, allocation.transferLeg.receiver
+
+    interface instance Allocation for FakeAllocation where
+      view = AllocationView with
+        allocation
+        holdingCids = []
+        meta = emptyMetadata
+      allocation_executeTransferImpl _self _arg =
+        pure Allocation_ExecuteTransferResult with
+          senderHoldingCids = []
+          receiverHoldingCids = []
+          meta = emptyMetadata
+      allocation_cancelImpl _self _arg =
+        pure Allocation_CancelResult with senderHoldingCids = [], meta = emptyMetadata
+      allocation_withdrawImpl _self _arg =
+        pure Allocation_WithdrawResult with senderHoldingCids = [], meta = emptyMetadata
+
+-- | The bridge's allocation convention: @executor = sender = payer@,
+-- @receiver@ = the fee recipient. Timestamps are placeholders — the mock does
+-- not enforce deadlines.
+mkAllocationSpec : Party -> Party -> InstrumentId -> Decimal -> Time -> AllocationSpecification
+mkAllocationSpec payer recipient instrument amount now = AllocationSpecification with
+  settlement = SettlementInfo with
+    executor = payer
+    settlementRef = Reference with id = "wormhole-fee", cid = None
+    requestedAt = now
+    allocateBefore = now
+    settleBefore = now
+    meta = emptyMetadata
+  transferLegId = "fee"
+  transferLeg = TransferLeg with
+    sender = payer
+    receiver = recipient
+    amount
+    instrumentId = instrument
+    meta = emptyMetadata
+
+-- | Simulates the wallet+registry side: mint an allocation of @amount@ from
+-- @payer@ to @recipient@, co-signed by the instrument admin, packaged with
+-- empty 'ExtraArgs' (the mock needs no registry choice context).
+mintAndAllocate : Party -> Party -> Party -> InstrumentId -> Decimal -> Script (ContractId Allocation, ExtraArgs)
+mintAndAllocate admin payer recipient instrument amount = do
+  now <- getTime
+  cid <- submit (actAs payer <> actAs admin) do
+    createCmd MockAllocation with
+      admin
+      allocation = mkAllocationSpec payer recipient instrument amount now
+  pure (toInterfaceContractId @Allocation cid, emptyExtraArgs)
+
+-- | The recipient's mock-token balance: the sum of its holdings in the
+-- given instrument, as visible to @reader@.
+mockBalance : Party -> Party -> InstrumentId -> Script Decimal
+mockBalance reader owner instrument = do
+  holdings <- query @MockHolding reader
+  pure $ sum [ h.amount | (_, h) <- holdings, h.owner == owner, h.instrument == instrument ]

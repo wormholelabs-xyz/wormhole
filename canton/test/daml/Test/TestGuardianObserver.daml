@@ -1,0 +1,142 @@
+-- | Daml Script tests for the read-only @guardianObserver@ party.
+--
+-- @guardianObserver@ is a template @observer@ on the core bridge's attestation
+-- surface ('Emitter' and 'CoreState'), never a signatory or controller — full
+-- read visibility of what guardians attest, without placing them in Canton's
+-- confirmation path.
+--
+-- Daml Script cannot read the update stream directly, so event-level visibility
+-- is asserted via its Script-level proxy: stakeholder query visibility
+-- ('queryContractId' / 'query') as @guardianObserver@. A template observer is a
+-- stakeholder, hence an informee of every consuming exercise (e.g.
+-- 'PublishMessage', 'SubmitGovernanceVAA'). The true stream-level check is the
+-- Go integration test.
+module Test.TestGuardianObserver where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import Wormhole.Core.State
+import Wormhole.Core.Setup
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
+
+-- | The observer is a stakeholder of the message surface, so after a publish it
+-- sees the sequence-bumped 'Emitter' via 'query @Emitter'. This is the
+-- Script-level proxy for "informee of the consuming 'PublishMessage' exercise"
+-- — i.e. it observes the message on the update stream.
+testObserverSeesPublishedMessage : Script ()
+testObserverSeesPublishedMessage = do
+  (operator, guardianObserver, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter operator alice
+  _ <- publishVia operator csId alice emitterId 7 "deadbeef" 0
+
+  -- The observer sees the post-publish Emitter (recreated with the sequence
+  -- bumped) on its ACS.
+  [(_, em)] <- query @Emitter guardianObserver
+  em.sequence === 1
+  em.owner === alice
+  em.guardianObserver === guardianObserver
+
+-- | The observer is a stakeholder of 'CoreState', so it reads the current
+-- guardian set and — because 'SubmitGovernanceVAA' is consuming — the successor
+-- 'CoreState' after a governance transition.
+testObserverSeesCoreState : Script ()
+testObserverSeesCoreState = do
+  (operator, guardianObserver, csId) <- setup
+  Some cs <- queryContractId guardianObserver csId
+  cs.guardianSetIndex === 0
+  let gs = fromSome (Map.lookup 0 cs.guardianSets)
+  gs.keys === [devnetGuardian]
+
+  newCsId <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  Some cs' <- queryContractId guardianObserver newCsId
+  cs'.messageFee === 1000
+  cs'.guardianObserver === guardianObserver
+
+-- | The observer has no authority: it cannot publish, submit governance, archive
+-- the attestation contracts, or create contracts bearing the real parties.
+-- Read-only in the strictest sense — adding an observer confers no power.
+testObserverHasNoAuthority : Script ()
+testObserverHasNoAuthority = do
+  (operator, guardianObserver, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter operator alice
+  Some cs <- queryContractId operator csId
+
+  -- Cannot publish on another owner's emitter (not the controller).
+  submitMustFail guardianObserver do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, payer = alice, feeAllocation = None
+
+  -- Cannot drive governance.
+  submitMustFail guardianObserver do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+
+  -- Cannot archive the attestation contracts (Archive needs all signatories).
+  submitMustFail guardianObserver do archiveCmd emitterId
+  submitMustFail guardianObserver do archiveCmd csId
+
+  -- Cannot create contracts bearing the real signatory parties (no authority).
+  submitMustFail guardianObserver do
+    createCmd Emitter with
+      operator, guardianGovernance = cs.guardianGovernance, owner = alice
+      emitterId = 0
+      emitterAddress = emitterAddressFor operator alice 0, sequence = 0
+      guardianObserver
+  submitMustFail guardianObserver do
+    createCmd (mkInitialCoreState operator cs.guardianGovernance
+                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver
+                 cs.feeInstrument cs.feeRecipient)
+
+-- | Adding the observer introduces no new AUTHORITY requirement on publishing:
+-- the @owner@ alone still authorizes it. (Fee wiring widened the informee set —
+-- the CoreState's operator and guardianGovernance are informees of the fee-read
+-- — but none of them gains authority.) Genesis still requires exactly the
+-- @operator@ and @guardianGovernance@ signatures; the observer is not one.
+testPublishRequiresOnlyOwner : Script ()
+testPublishRequiresOnlyOwner = do
+  (operator, _guardianObserver, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter operator alice
+  (_, msg) <- publishVia operator csId alice emitterId 7 "dead" 0
+  msg.sequence === 0
+
+  -- Genesis authority is unchanged: operator alone cannot create a CoreState
+  -- (guardianGovernance must co-sign); the pair together can.
+  operator2 <- allocateParty "Operator2"
+  guardianGovernance2 <- allocateParty "GuardianGovernance2"
+  guardianObserver2 <- allocateParty "GuardianObserver2"
+  let inst2 = InstrumentId with admin = guardianGovernance2, id = "UNUSED"
+  submitMustFail operator2 do
+    createCmd (mkInitialCoreState operator2 guardianGovernance2
+                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2
+                 inst2 guardianGovernance2)
+  _ <- submit (actAs operator2 <> actAs guardianGovernance2) do
+    createCmd (mkInitialCoreState operator2 guardianGovernance2
+                 solanaGovernanceChainId defaultGovernanceContract [devnetGuardian] guardianObserver2
+                 inst2 guardianGovernance2)
+  pure ()
+
+-- | The observer is scoped to the attestation surface only. It is NOT a
+-- stakeholder of id allocation ('EmitterRegistry'), so that is not visible to
+-- it — least privilege.
+testObserverDoesNotSeeOutOfScope : Script ()
+testObserverDoesNotSeeOutOfScope = do
+  (operator, guardianObserver, _) <- setup
+
+  -- EmitterRegistry is out of scope (it carries the observer as a field for
+  -- threading, but does not name it as a template observer).
+  [(regId, _)] <- query @EmitterRegistry operator
+  regView <- queryContractId guardianObserver regId
+  regView === None
+  regs <- query @EmitterRegistry guardianObserver
+  assertMsg "observer must not see the EmitterRegistry" (null regs)

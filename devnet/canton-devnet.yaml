@@ -1,0 +1,70 @@
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: canton
+  name: canton
+spec:
+  ports:
+    # Canton Ledger API v2 (gRPC), consumed by the guardian's canton watcher as
+    # `canton:6865`.
+    - name: ledger-api
+      port: 6865
+      targetPort: ledger-api
+  selector:
+    app: canton
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: canton
+  name: canton
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: canton
+  serviceName: canton
+  template:
+    metadata:
+      labels:
+        app: canton
+    spec:
+      containers:
+        - name: canton-node
+          image: canton-node
+          resources:
+            requests:
+              memory: "2048Mi"
+          command:
+            - /bin/bash
+            - -c
+            - /canton/devnet/start_sandbox.sh
+          ports:
+            - containerPort: 6865
+              name: ledger-api
+              protocol: TCP
+          readinessProbe:
+            tcpSocket:
+              port: 6865
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 60
+        # Bootstrap (same pod as canton-node): uploads+vets the DAR and creates
+        # the CoreState via Test.TestCore:setup, reaching the sandbox over
+        # localhost. The guardian needs no party id (the watcher uses a wildcard
+        # filter), so the allocated Operator party is logged for information only.
+        - name: canton-contracts
+          image: canton-node
+          command: ["/bin/bash", "-c"]
+          args:
+            ["cd /canton && ./devnet/bootstrap.sh"]
+          readinessProbe:
+            initialDelaySeconds: 30
+            periodSeconds: 5
+            failureThreshold: 300
+            exec:
+              command:
+                - cat
+                - /canton/success
