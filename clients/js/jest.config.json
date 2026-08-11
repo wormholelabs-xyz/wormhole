@@ -17,8 +17,7 @@
     ]
   },
   "transformIgnorePatterns": [
-    "node_modules/(?!(@wormhole-foundation|@solana/web3\\.js|@mysten|@scure|@noble|@injectivelabs|uuid)/)",
-    "node_modules/(?!(?:@mysten|@noble|@scure)/)"
+    "node_modules/(?!(@wormhole-foundation|@solana/web3\\.js|@mysten|@scure|@noble|@injectivelabs|uuid)/)"
   ],
   "testRegex": "(/__tests__/.*|(\\.|/)(test|spec))\\.(jsx?|tsx?)$",
   "testPathIgnorePatterns": ["__tests__/utils"],

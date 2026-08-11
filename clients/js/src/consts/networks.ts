@@ -89,9 +89,7 @@ const Mainnet = {
     key: getEnvVar("APTOS_KEY"),
   },
   Sui: {
-    // NOTE: Sui deprecated JSON-RPC on public fullnodes in favor of
-    // gRPC/GraphQL, so Sui queries currently fail against this endpoint.
-    // The migration to gRPC is tracked in a separate PR.
+    // used as the gRPC base URL: Sui deprecated JSON-RPC on public fullnodes
     rpc: "https://fullnode.mainnet.sui.io:443",
     key: getEnvVar("SUI_KEY"),
   },
@@ -173,7 +171,7 @@ const Testnet = {
     key: getEnvVar("APTOS_TESTNET"),
   },
   Sui: {
-    // see the Mainnet entry: JSON-RPC is deprecated on public fullnodes
+    // used as the gRPC base URL: Sui deprecated JSON-RPC on public fullnodes
     rpc: "https://fullnode.testnet.sui.io:443",
     key: getEnvVar("SUI_KEY_TESTNET"),
   },

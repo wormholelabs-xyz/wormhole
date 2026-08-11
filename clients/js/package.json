@@ -80,9 +80,11 @@
   "overrides": {
     "elliptic": "^6.6.1",
     "@certusone/wormhole-sdk": {
+      "@injectivelabs/exceptions": "1.10.12",
+      "@injectivelabs/networks": "1.10.12",
+      "@injectivelabs/sdk-ts": "1.10.72",
       "@injectivelabs/ts-types": "1.10.12",
-      "@injectivelabs/utils": "1.10.12",
-      "@injectivelabs/exceptions": "1.10.12"
+      "@injectivelabs/utils": "1.10.12"
     }
   }
 }

@@ -16,7 +16,7 @@ import {
   chainToChainId,
   contracts,
 } from "@wormhole-foundation/sdk-base";
-import { toLegacyChainId, tryNativeToUint8Array } from "../../sdk/array";
+import { tryNativeToUint8Array } from "../../sdk/array";
 
 const SUI_TYPE_ARG = "0x2::sui::SUI";
 
@@ -40,7 +40,6 @@ export async function transferSui(
   const client = getProvider(network, rpc);
   const signer = getSigner(client, network);
   const owner = signer.keypair.getPublicKey().toSuiAddress();
-<<<<<<< HEAD
   const coinType = tokenAddress === "native" ? SUI_TYPE_ARG : tokenAddress;
   const recipientChainId = chainToChainId(dstChain);
   const recipient = tryNativeToUint8Array(dstAddress, recipientChainId);
@@ -141,26 +140,5 @@ export async function transferSui(
 
   setMaxGasBudgetDevnet(network, tx);
   const result = await executeTransactionBlock(signer, tx);
-=======
-  const coinType = tokenAddress === "native" ? "0x2::sui::SUI" : tokenAddress;
-  const coins = (
-    await client.getCoins({
-      owner,
-      coinType,
-    })
-  ).data;
-  const tx = await transferFromSui(
-    client as any,
-    core,
-    token_bridge,
-    coins,
-    coinType,
-    BigInt(amount),
-    toLegacyChainId(dstChain),
-    tryNativeToUint8Array(dstAddress, chainToChainId(dstChain))
-  );
-  setMaxGasBudgetDevnet(network, tx as any);
-  const result = await executeTransactionBlock(signer, tx as any);
->>>>>>> 9a54536b (chore: bump wormhole sdk to latest version; clean up deprecated chains code)
   console.log(JSON.stringify(result));
 }

@@ -94,11 +94,7 @@ describe("Info Tests", () => {
     );
   });
 
-  // Skipped: Sui deprecated JSON-RPC on public fullnodes in favor of
-  // gRPC/GraphQL, and the CLI's Sui queries still use JSON-RPC (SuiClient).
-  // Re-enable once the Sui gRPC migration lands (tracked in a separate PR).
-  // See https://docs.sui.io/develop/accessing-data/json-rpc-migration
-  it.skip("worm info wrapped ethereum 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 sui", (done) => {
+  it("worm info wrapped ethereum 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 sui", (done) => {
     exec(
       "node build/main.js info wrapped ethereum 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48 sui",
       (error: any, stdout: string, stderr: any) => {
@@ -116,11 +112,7 @@ describe("Info Tests", () => {
     );
   });
 
-  // Skipped: Sui deprecated JSON-RPC on public fullnodes in favor of
-  // gRPC/GraphQL, and the CLI's Sui queries still use JSON-RPC (SuiClient).
-  // Re-enable once the Sui gRPC migration lands (tracked in a separate PR).
-  // See https://docs.sui.io/develop/accessing-data/json-rpc-migration
-  it.skip("worm info origin sui 0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN", (done) => {
+  it("worm info origin sui 0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN", (done) => {
     exec(
       "node build/main.js info origin sui 0x5d4b302506645c37ff133b98c4b50a5ae14841659738d6d733d59d0d217a93bf::coin::COIN",
       (error: any, stdout: string, stderr: any) => {

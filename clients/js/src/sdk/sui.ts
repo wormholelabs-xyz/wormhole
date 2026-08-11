@@ -1,6 +1,6 @@
 import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { isValidStructTag, parseStructTag } from "@mysten/sui/utils";
-import { Chain, chainToChainId } from "@wormhole-foundation/sdk";
+import { Chain, chainToChainId } from "@wormhole-foundation/sdk-base";
 import { normalizeSuiAddress } from "../chains/sui/utils";
 
 // BCS schema for the `token_registry::CoinTypeKey` dynamic-field key used to look
