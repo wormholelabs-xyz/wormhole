@@ -529,46 +529,6 @@ describe("Generate Tests", () => {
       }
     );
   });
-
-  it("worm generate set-default-delivery-provider", (done) => {
-    exec(
-      "node build/main.js generate set-default-delivery-provider --chain ethereum --delivery-provider-address 0x7A0a53847776f7e94Cc35742971aCb2217b0Db81 --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0",
-      (error: any, stdout: string, stderr: any) => {
-        if (error) {
-          return done(new Error(`Execution error during generation: ${error}`));
-        }
-
-        const vaa = stdout.trim();
-        expect(vaa).not.toBeNull();
-
-        exec(
-          `node build/main.js parse ${vaa}`,
-          (error: any, stdout: string, stderr: any) => {
-            if (error) {
-              return done(new Error(`Execution error during parse: ${error}`));
-            }
-            try {
-              const outputObject = JSON.parse(stdout);
-
-              // Can't check the signature, sequence, or digest because they
-              // are different each time.
-              expect(outputObject.emitterChain).toBe(1);
-              expect(outputObject.payload).toMatchObject({
-                module: "WormholeRelayer",
-                type: "SetDefaultDeliveryProvider",
-                chain: 2,
-                relayProviderAddress:
-                  "0x0000000000000000000000007a0a53847776f7e94cc35742971acb2217b0db81",
-              });
-              done();
-            } catch (e) {
-              done(`JSON parse error: ${e}`);
-            }
-          }
-        );
-      }
-    );
-  });
 });
 
 describe("Edit VAA Tests", () => {

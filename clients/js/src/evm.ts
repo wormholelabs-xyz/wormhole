@@ -29,40 +29,6 @@ import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
 const _IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 
-// Public RPCs rate-limit and answer with 5xx errors when the registrations of
-// all ~65 chains are queried at once, so run the queries in a bounded pool and
-// retry each one once on failure.
-const REGISTRATION_QUERY_CONCURRENCY = 6;
-
-async function queryChainRegistrations(
-  contract: { bridgeContracts(chainId: number): Promise<string> },
-  chain: Chain
-): Promise<[Chain, string][]> {
-  const others = chains.filter((c) => c !== chain);
-  const results: [Chain, string][] = new Array(others.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < others.length) {
-      const i = next++;
-      const c = others[i];
-      const chainId = chainToChainId(c);
-      try {
-        results[i] = [c, await contract.bridgeContracts(chainId)];
-      } catch {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        results[i] = [c, await contract.bridgeContracts(chainId)];
-      }
-    }
-  };
-  await Promise.all(
-    Array.from(
-      { length: Math.min(REGISTRATION_QUERY_CONCURRENCY, others.length) },
-      worker
-    )
-  );
-  return results;
-}
-
 export async function query_contract_evm(
   network: Network,
   chain: PlatformToChains<"Evm">,
@@ -147,7 +113,14 @@ export async function query_contract_evm(
         provider
       );
       result.address = contract_address;
-      const registrationsPromise = queryChainRegistrations(tb, chain);
+      const registrationsPromise = Promise.all(
+        chains
+          .filter((c_name) => c_name !== chain)
+          .map(async (c_name) => [
+            c_name,
+            await tb.bridgeContracts(chainToChainId(c_name)),
+          ])
+      );
       const [
         wormhole,
         implementationSlotTb,
@@ -202,7 +175,14 @@ export async function query_contract_evm(
         provider
       );
       result.address = contract_address;
-      const registrationsPromiseNb = queryChainRegistrations(nb, chain);
+      const registrationsPromiseNb = Promise.all(
+        chains
+          .filter(([c_name, _]) => c_name !== chain)
+          .map(async (c_name) => [
+            c_name,
+            await nb.bridgeContracts(chainToChainId(c_name)),
+          ])
+      );
       const [
         wormholeNb,
         implementationSlotNb,
@@ -867,7 +847,14 @@ export async function queryRegistrationsEvm(
       throw new Error(`Invalid module: ${module}`);
   }
 
-  const registrations = await queryChainRegistrations(contract, chain);
+  const registrations: string[][] = await Promise.all(
+    chains
+      .filter((cname) => cname !== chain)
+      .map(async (cname) => [
+        cname,
+        await contract.bridgeContracts(chainToChainId(cname)),
+      ])
+  );
 
   const results: { [key: string]: string } = {};
   for (let [cname, c] of registrations) {
