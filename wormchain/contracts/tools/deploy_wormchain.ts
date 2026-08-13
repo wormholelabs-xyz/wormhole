@@ -249,7 +249,6 @@ async function main() {
     bsc: String(process.env.REGISTER_BSC_TOKEN_BRIDGE_VAA),
     algo: String(process.env.REGISTER_ALGO_TOKEN_BRIDGE_VAA),
     near: String(process.env.REGISTER_NEAR_TOKEN_BRIDGE_VAA),
-    terra2: String(process.env.REGISTER_TERRA2_TOKEN_BRIDGE_VAA),
     aptos: String(process.env.REGISTER_APTOS_TOKEN_BRIDGE_VAA),
     sui: String(process.env.REGISTER_SUI_TOKEN_BRIDGE_VAA),
   };
@@ -487,8 +486,6 @@ async function main() {
       process.env.REGISTER_BSC_TOKEN_BRIDGE_VAA,
       // ALGO
       process.env.REGISTER_ALGO_TOKEN_BRIDGE_VAA,
-      // TERRA2
-      process.env.REGISTER_TERRA2_TOKEN_BRIDGE_VAA,
       // NEAR
       process.env.REGISTER_NEAR_TOKEN_BRIDGE_VAA,
       // APTOS
@@ -588,52 +585,6 @@ async function main() {
     "instantiated ibc translator contract: ",
     addresses["ibc_translator.wasm"]
   );
-
-  // update channel mapping
-  let updateChannelVaa: VAA<Other> = {
-    version: 1,
-    guardianSetIndex: 0,
-    signatures: [],
-    timestamp: 0,
-    nonce: 0,
-    emitterChain: GOVERNANCE_CHAIN,
-    emitterAddress: GOVERNANCE_EMITTER,
-    sequence: BigInt(Math.floor(Math.random() * 100000000)),
-    consistencyLevel: 0,
-    payload: {
-      type: "Other",
-      hex:
-        "000000000000000000000000000000000000004962635472616e736c61746f72" + // module IbcTranslator
-        "01" + // action IbcReceiverActionUpdateChannelChain
-        "0c20" + // target chain id wormchain
-        "000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006368616e6e656c2d31" + // channel-1
-        "0012", // chain id terra2 (18)
-    },
-  };
-  updateChannelVaa.signatures = sign(
-    VAA_SIGNERS,
-    updateChannelVaa as unknown as VAA<Payload>
-  );
-  const updateMsg = client.wasm.msgExecuteContract({
-    sender: signer,
-    contract: addresses["ibc_translator.wasm"],
-    msg: toUtf8(
-      JSON.stringify({
-        submit_update_chain_to_channel_map: {
-          vaa: Buffer.from(
-            serialiseVAA(updateChannelVaa as unknown as VAA<Payload>),
-            "hex"
-          ).toString("base64"),
-        },
-      })
-    ),
-    funds: [],
-  });
-  const executeRes = await client.signAndBroadcast(signer, [updateMsg], {
-    ...ZERO_FEE,
-    gas: "10000000",
-  });
-  console.log("updated channel mapping: ", executeRes.transactionHash);
 
   // set params for tokenfactory and PFM
   let setDefaultParamsVaa: VAA<Other> = {

@@ -5,7 +5,6 @@ set -euo pipefail
 # build contexts scoped to the chain, rather than the root just to read this file.
 file="./scripts/devnet-consts.json"
 paths=(
-    ./terra2/tools/
     ./wormchain/contracts/tools/
 )
 

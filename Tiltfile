@@ -64,13 +64,11 @@ config.define_bool("evm2", False, "Enable second Eth component")
 config.define_bool("solana", False, "Enable Solana component")
 config.define_bool("solana_watcher", False, "Enable Solana watcher on guardian")
 config.define_bool("pythnet", False, "Enable PythNet component")
-config.define_bool("terra2", False, "Enable Terra 2 component")
 config.define_bool("ci_tests", False, "Enable tests runner component")
 config.define_bool("guardiand_debug", False, "Enable dlv endpoint for guardiand")
 config.define_bool("node_metrics", False, "Enable Prometheus & Grafana for Guardian metrics")
 config.define_bool("guardiand_governor", False, "Enable chain governor in guardiand")
 config.define_bool("wormchain", False, "Enable a wormchain node")
-config.define_bool("ibc_relayer", False, "Enable IBC relayer between cosmos chains")
 config.define_bool("query_server", False, "Enable cross-chain query server")
 config.define_bool("manager_service", False, "Enable manager service for UTXO chains (Dogecoin)")
 
@@ -88,13 +86,11 @@ evm2 = cfg.get("evm2", ci)
 solana = cfg.get("solana", ci)
 pythnet = cfg.get("pythnet", False)
 solana_watcher = cfg.get("solana_watcher", solana or pythnet)
-terra2 = cfg.get("terra2", ci)
 wormchain = cfg.get("wormchain", ci)
 ci_tests = cfg.get("ci_tests", ci)
 guardiand_debug = cfg.get("guardiand_debug", False)
 node_metrics = cfg.get("node_metrics", False)
 guardiand_governor = cfg.get("guardiand_governor", False)
-ibc_relayer = cfg.get("ibc_relayer", ci)
 btc = cfg.get("btc", False)
 query_server = cfg.get("query_server", ci)
 manager_service = cfg.get("manager_service", False)
@@ -322,16 +318,6 @@ def build_node_yaml():
                     "H3fxXJ86ADW2PNuDDmZJg6mzTtPxkYCpNuQUTgmJ7AjU",
                 ]
 
-            if terra2:
-                container["command"] += [
-                    "--terra2WS",
-                    "ws://terra2-terrad:26657/websocket",
-                    "--terra2LCD",
-                    "http://terra2-terrad:1317",
-                    "--terra2Contract",
-                    "terra14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9ssrc8au",
-                ]
-
             if algorand:
                 container["command"] += [
                     "--algorandAppID",
@@ -466,8 +452,6 @@ if solana_watcher:
     guardian_resource_deps = guardian_resource_deps + ["solana-devnet"]
 if near:
     guardian_resource_deps = guardian_resource_deps + ["near"]
-if terra2:
-    guardian_resource_deps = guardian_resource_deps + ["terra2-terrad"]
 if algorand:
     guardian_resource_deps = guardian_resource_deps + ["algorand"]
 if aptos:
@@ -787,39 +771,13 @@ if ci_tests:
             resource_deps = ["sui"]
         )
 
-if terra2 or wormchain:
+if wormchain:
     docker_build(
         ref = "cosmwasm_artifacts",
         context = ".",
         dockerfile = "./cosmwasm/Dockerfile",
         target = "artifacts",
         platform = "linux/amd64",
-    )
-
-if terra2:
-    docker_build(
-        ref = "terra2-image",
-        context = "./cosmwasm/deployment/terra2/devnet",
-        dockerfile = "./cosmwasm/deployment/terra2/devnet/Dockerfile",
-        platform = "linux/amd64",
-    )
-
-    docker_build(
-        ref = "terra2-deploy",
-        context = "./cosmwasm/deployment/terra2",
-        dockerfile = "./cosmwasm/Dockerfile.deploy",
-    )
-
-    k8s_yaml_with_ns("devnet/terra2-devnet.yaml")
-
-    k8s_resource(
-        "terra2-terrad",
-        port_forwards = [
-            port_forward(26658, container_port = 26657, name = "Terra 2 RPC [:26658]", host = webHost),
-            port_forward(1318, container_port = 1317, name = "Terra 2 LCD [:1318]", host = webHost),
-        ],
-        labels = ["terra2"],
-        trigger_mode = trigger_mode,
     )
 
 if algorand:
@@ -984,26 +942,6 @@ if wormchain:
         "wormchain-deploy",
         resource_deps = ["wormchain"],
         labels = ["wormchain"],
-        trigger_mode = trigger_mode,
-    )
-
-if ibc_relayer:
-    docker_build(
-        ref = "ibc-relayer-image",
-        context = ".",
-        dockerfile = "./wormchain/ibc-relayer/Dockerfile",
-        only = []
-    )
-
-    k8s_yaml_with_ns("devnet/ibc-relayer.yaml")
-
-    k8s_resource(
-        "ibc-relayer",
-        port_forwards = [
-            port_forward(7597, name = "HTTPDEBUG [:7597]", host = webHost),
-        ],
-        resource_deps = ["wormchain-deploy", "terra2-terrad"],
-        labels = ["ibc-relayer"],
         trigger_mode = trigger_mode,
     )
 
