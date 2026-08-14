@@ -19,13 +19,10 @@ import {
 import {
   Network,
   PlatformToChains,
-  chainToChainId,
-  chains,
   contracts,
 } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
-import { CliChain, cliChainToChainId } from "./utils";
-import { TERRA2 } from "./chains/terra2";
+import { CLI_CHAINS, CliChain, cliChainToChainId } from "./utils";
 
 const _IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -115,8 +112,7 @@ export async function query_contract_evm(
       );
       result.address = contract_address;
       const registrationsPromise = Promise.all(
-        [...chains, TERRA2]
-          .filter((c_name) => c_name !== chain)
+        CLI_CHAINS.filter((c_name) => c_name !== chain)
           .map(async (c_name) => [
             c_name,
             await tb.bridgeContracts(cliChainToChainId(c_name)),
@@ -177,8 +173,7 @@ export async function query_contract_evm(
       );
       result.address = contract_address;
       const registrationsPromiseNb = Promise.all(
-        [...chains, TERRA2]
-          .filter((c_name) => c_name !== chain)
+        CLI_CHAINS.filter((c_name) => c_name !== chain)
           .map(async (c_name) => [
             c_name,
             await nb.bridgeContracts(cliChainToChainId(c_name)),
@@ -849,8 +844,7 @@ export async function queryRegistrationsEvm(
   }
 
   const registrations: string[][] = await Promise.all(
-    [...chains, TERRA2]
-      .filter((cname) => cname !== chain)
+    CLI_CHAINS.filter((cname) => cname !== chain)
       .map(async (cname) => [
         cname,
         await contract.bridgeContracts(cliChainToChainId(cname)),

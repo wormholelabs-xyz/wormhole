@@ -1,6 +1,6 @@
 import yargs from "yargs";
 import { transferEVM } from "../evm";
-import { NETWORK_OPTIONS, NETWORKS } from "../consts";
+import { NETWORK_OPTIONS } from "../consts";
 import { transferInjective } from "../injective";
 import { transferSolana } from "../solana";
 import { transferAlgorand } from "../algorand";
@@ -12,9 +12,10 @@ import {
   CliChain,
   chainToChain,
   cliChainToPlatform,
+  getChainRpc,
   getNetwork,
 } from "../utils";
-import { TERRA2, TERRA2_CONNECTIONS, transferTerra2 } from "../chains/terra2";
+import { TERRA2, transferTerra2 } from "../chains/terra2";
 
 export const command = "transfer";
 export const desc = "Transfer a token";
@@ -78,11 +79,7 @@ export const handler = async (
   }
   const dstAddr = argv["dst-addr"];
   const network = getNetwork(argv.network);
-  const rpc =
-    argv.rpc ??
-    (srcChain === TERRA2
-      ? TERRA2_CONNECTIONS[network].rpc
-      : NETWORKS[network][srcChain].rpc);
+  const rpc = argv.rpc ?? getChainRpc(network, srcChain);
   if (!rpc) {
     throw new Error(`No ${network} rpc defined for ${srcChain}`);
   }

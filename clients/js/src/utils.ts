@@ -8,6 +8,8 @@ import {
   chainIdToChain,
   chainToChainId,
   chainToPlatform,
+  chains,
+  contracts,
   toChain,
 } from "@wormhole-foundation/sdk-base";
 import { spawnSync } from "child_process";
@@ -15,10 +17,13 @@ import { ethers } from "ethers";
 import {
   TERRA2,
   TERRA2_CHAIN_ID,
+  TERRA2_CONNECTIONS,
   Terra2,
   Terra2Like,
   isTerra2Like,
+  terra2Contracts,
 } from "./chains/terra2/consts";
+import { NETWORKS } from "./consts";
 
 /**
  * A chain the CLI supports: everything the SDK knows, plus the Terra2
@@ -71,6 +76,57 @@ export function cliChainToPlatform(
   chain: ChainId | CliChain | Terra2Like
 ): Platform {
   return isTerra2Like(chain) ? "Cosmwasm" : chainToPlatform(toChain(chain));
+}
+
+/**
+ * Every chain the CLI supports: the SDK's list plus Terra2, which the SDK
+ * removed but the CLI keeps alive (see ./chains/terra2).
+ */
+export const CLI_CHAINS: CliChain[] = [...chains, TERRA2];
+
+// Per-chain config lookups that hide the Terra2 split: the SDK no longer
+// carries Terra2's rpc/contracts, so these fall back to the compat layer.
+
+export function getChainRpc(
+  network: Network,
+  chain: CliChain
+): string | undefined {
+  return chain === TERRA2
+    ? TERRA2_CONNECTIONS[network].rpc
+    : NETWORKS[network][chain].rpc;
+}
+
+export function getCoreContract(
+  network: Network,
+  chain: CliChain
+): string | undefined {
+  return chain === TERRA2
+    ? terra2Contracts(network).core
+    : contracts.coreBridge.get(network, chain);
+}
+
+export function getTokenBridgeContract(
+  network: Network,
+  chain: CliChain
+): string | undefined {
+  return chain === TERRA2
+    ? terra2Contracts(network).tokenBridge
+    : contracts.tokenBridge.get(network, chain);
+}
+
+export function getNftBridgeContract(
+  network: Network,
+  chain: CliChain
+): string | undefined {
+  // Terra2 never had an NFT bridge deployment
+  return chain === TERRA2 ? undefined : contracts.nftBridge.get(network, chain);
+}
+
+export function getRelayerContract(
+  network: Network,
+  chain: CliChain
+): string | undefined {
+  return chain === TERRA2 ? undefined : contracts.relayer.get(network, chain);
 }
 
 export function getNetwork(network: string): Network {

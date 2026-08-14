@@ -9,27 +9,23 @@ import { execute_injective } from "../injective";
 import { execute_near } from "../near";
 import { execute_solana } from "../solana";
 import { assertKnownPayload, parse, Payload, VAA } from "../vaa";
-import { NETWORKS } from "../consts";
 import {
+  CLI_CHAINS,
   CliChain,
   chainToChain,
   cliChainIdToChain,
   cliChainToChainId,
+  getChainRpc,
   getNetwork,
+  getNftBridgeContract,
+  getTokenBridgeContract,
 } from "../utils";
 import {
   Network,
   PlatformToChains,
   chainToPlatform,
-  chains,
-  contracts,
 } from "@wormhole-foundation/sdk";
-import {
-  TERRA2,
-  TERRA2_CONNECTIONS,
-  execute_terra2,
-  terra2Contracts,
-} from "../chains/terra2";
+import { TERRA2, execute_terra2 } from "../chains/terra2";
 
 export const command = "submit <vaa>";
 export const desc = "Execute a VAA";
@@ -210,12 +206,8 @@ async function submitToAll(
     );
   }
 
-  const allChains: CliChain[] = [...chains, TERRA2];
-  for (const chain of allChains) {
-    const rpc =
-      chain === TERRA2
-        ? TERRA2_CONNECTIONS[network].rpc
-        : NETWORKS[network][chain].rpc;
+  for (const chain of CLI_CHAINS) {
+    const rpc = getChainRpc(network, chain);
     if (cliChainToChainId(chain) === skip_chain_id) {
       console.log(`Skipping ${chain} because it's the origin chain`);
       continue;
@@ -224,12 +216,8 @@ async function submitToAll(
       console.log(`Skipping ${chain} because the rpc is not defined`);
       continue;
     }
-    const tokenBridge =
-      chain === TERRA2
-        ? terra2Contracts(network).tokenBridge
-        : contracts.tokenBridge.get(network, chain);
-    const nftBridge =
-      chain === TERRA2 ? undefined : contracts.nftBridge.get(network, chain);
+    const tokenBridge = getTokenBridgeContract(network, chain);
+    const nftBridge = getNftBridgeContract(network, chain);
     if (
       (parsedVaa.payload.module === "TokenBridge" && !tokenBridge) ||
       (parsedVaa.payload.module === "NFTBridge" && !nftBridge)
