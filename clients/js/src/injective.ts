@@ -17,13 +17,13 @@ import { NETWORKS } from "./consts";
 import { impossible, Payload } from "./vaa";
 import { transferFromInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import {
-  Chain,
   chainToChainId,
   contracts,
   Network,
 } from "@wormhole-foundation/sdk-base";
 import { chains } from "@wormhole-foundation/sdk";
 import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
+import { CliChain } from "./utils";
 
 export async function execute_injective(
   payload: Payload,
@@ -169,7 +169,7 @@ export async function execute_injective(
 }
 
 export async function transferInjective(
-  dstChain: Chain,
+  dstChain: CliChain,
   dstAddress: string,
   tokenAddress: string,
   amount: string,
@@ -198,7 +198,7 @@ export async function transferInjective(
     tokenAddress,
     amount,
     toLegacyChainId(dstChain),
-    tryNativeToUint8Array(dstAddress, chainToChainId(dstChain))
+    tryNativeToUint8Array(dstAddress, dstChain)
   );
 
   // the legacy SDK bundles its own (older) @injectivelabs/sdk-ts, but its

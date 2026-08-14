@@ -43,6 +43,7 @@ import {
   toLegacyChainId,
   tryNativeToUint8Array,
 } from "./sdk/array";
+import { CliChain } from "./utils";
 
 export async function execute_solana(
   v: VAA<Payload>,
@@ -253,7 +254,7 @@ export async function execute_solana(
 
 export async function transferSolana(
   srcChain: PlatformToChains<"Solana">,
-  dstChain: Chain,
+  dstChain: CliChain,
   dstAddress: string,
   tokenAddress: string,
   amount: string,
@@ -294,7 +295,7 @@ export async function transferSolana(
       tokenBridgeId,
       payerAddress,
       BigInt(amount),
-      tryNativeToUint8Array(dstAddress, chainToChainId(dstChain)),
+      tryNativeToUint8Array(dstAddress, dstChain),
       toLegacyChainId(dstChain)
     );
   } else {
@@ -313,7 +314,7 @@ export async function transferSolana(
       fromAddress,
       tokenAddress, // mintAddress
       BigInt(amount),
-      tryNativeToUint8Array(dstAddress, chainToChainId(dstChain)),
+      tryNativeToUint8Array(dstAddress, dstChain),
       toLegacyChainId(dstChain)
     );
   }

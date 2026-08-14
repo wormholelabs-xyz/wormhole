@@ -2,6 +2,7 @@ import yargs from "yargs";
 import { impossible } from "../../vaa";
 import { contracts } from "@wormhole-foundation/sdk-base";
 import { chainToChain, getNetwork } from "../../utils";
+import { TERRA2, terra2Contracts } from "../../chains/terra2";
 
 export const command = "contract <network> <chain> <module>";
 export const desc = "Print contract address";
@@ -31,6 +32,16 @@ export const handler = async (
   const module = argv["module"];
 
   let addr: string | undefined;
+  if (chain === TERRA2) {
+    // Terra2 compat: the SDK no longer carries these addresses
+    const t2 = terra2Contracts(network);
+    addr = module === "Core" ? t2.core : module === "TokenBridge" ? t2.tokenBridge : undefined;
+    if (!addr) {
+      throw new Error(`${module} not deployed on ${chain}`);
+    }
+    console.log(addr);
+    return;
+  }
   switch (module) {
     case "Core":
       addr = contracts.coreBridge.get(network, chain);

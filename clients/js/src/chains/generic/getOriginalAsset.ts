@@ -5,7 +5,13 @@ import {
   getOriginalAssetEth,
   getOriginalAssetNear,
   getOriginalAssetSolana,
+  getOriginalAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
+import {
+  Terra2Like,
+  getTerra2Client,
+  isTerra2Like,
+} from "../terra2";
 import { getOriginalAssetSui } from "../../sdk/sui";
 import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";
@@ -22,11 +28,15 @@ import {
 import { toLegacyChainId } from "../../sdk/array";
 
 export const getOriginalAsset = async (
-  chain: ChainId | Chain,
+  chain: ChainId | Chain | Terra2Like,
   network: Network,
   assetAddress: string,
   rpc?: string
 ): Promise<WormholeWrappedInfo> => {
+  if (isTerra2Like(chain)) {
+    const client = getTerra2Client(network, rpc);
+    return getOriginalAssetTerra(client as any, assetAddress);
+  }
   const chainName = toChain(chain);
   const tokenBridgeAddress = contracts.tokenBridge.get(network, chainName);
   if (!tokenBridgeAddress) {

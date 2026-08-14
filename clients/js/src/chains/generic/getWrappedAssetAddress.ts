@@ -4,7 +4,14 @@ import {
   getForeignAssetEth,
   getForeignAssetNear,
   getForeignAssetSolana,
+  getForeignAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getForeignAsset";
+import {
+  Terra2Like,
+  getTerra2Client,
+  isTerra2Like,
+  terra2Contracts,
+} from "../terra2";
 import { getForeignAssetSui } from "../../sdk/sui";
 import { getForeignAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";
@@ -22,17 +29,26 @@ import {
 import { toLegacyChainId, tryNativeToUint8Array } from "../../sdk/array";
 
 export const getWrappedAssetAddress = async (
-  chain: ChainId | Chain,
+  chain: ChainId | Chain | Terra2Like,
   network: Network,
-  originChain: ChainId | Chain,
+  originChain: ChainId | Chain | Terra2Like,
   originAddress: string,
   rpc?: string
 ): Promise<string | null> => {
-  const chainName = toChain(chain);
   const originAddressUint8Array = tryNativeToUint8Array(
     originAddress,
     originChain
   );
+  if (isTerra2Like(chain)) {
+    const client = getTerra2Client(network, rpc);
+    return getForeignAssetTerra(
+      terra2Contracts(network).tokenBridge,
+      client as any,
+      toLegacyChainId(originChain),
+      originAddressUint8Array
+    );
+  }
+  const chainName = toChain(chain);
   const tokenBridgeAddress = contracts.tokenBridge.get(network, chainName);
   if (!tokenBridgeAddress) {
     throw new Error(

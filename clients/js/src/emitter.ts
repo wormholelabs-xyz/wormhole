@@ -4,13 +4,23 @@ import {
   chainToPlatform,
   toChain,
 } from "@wormhole-foundation/sdk-base";
+import { Terra2Like, isTerra2Like } from "./chains/terra2/consts";
 import { decodeAddress, getApplicationAddress } from "algosdk";
 import { uint8ArrayToHex } from "./sdk/array";
 import { arrayify, sha256, zeroPad } from "ethers/lib/utils";
 import { bech32 } from "bech32";
 import { PublicKey } from "@solana/web3.js";
 
-export async function getEmitterAddress(chain: ChainId | Chain, addr: string) {
+export async function getEmitterAddress(
+  chain: ChainId | Chain | Terra2Like,
+  addr: string
+) {
+  if (isTerra2Like(chain)) {
+    // Terra2 compat: same encoding as any Cosmwasm chain
+    return uint8ArrayToHex(
+      zeroPad(bech32.fromWords(bech32.decode(addr).words), 32)
+    );
+  }
   const localChain = toChain(chain);
   if (chainToPlatform(localChain) === "Solana") {
     const seeds = [Buffer.from("emitter")];

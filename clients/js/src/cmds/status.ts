@@ -63,7 +63,6 @@ export const handler = async (
     );
   }
 
-  // TODO: Convert this over to sdkv2
   const sourceChainId = chainToChainId(chain);
   if (!(sourceChainId in CHAIN_ID_TO_NAME)) {
     throw new Error(`${chain} is not supported by the legacy relayer SDK`);

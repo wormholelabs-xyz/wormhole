@@ -7,13 +7,14 @@ import { transferAlgorand } from "../algorand";
 import { transferNear } from "../near";
 import { transferSui } from "../chains/sui/transfer";
 import { transferAptos } from "../aptos";
+import { PlatformToChains } from "@wormhole-foundation/sdk-base";
 import {
-  Chain,
-  PlatformToChains,
-  chainToPlatform,
-  toChain,
-} from "@wormhole-foundation/sdk-base";
-import { chainToChain, getNetwork } from "../utils";
+  CliChain,
+  chainToChain,
+  cliChainToPlatform,
+  getNetwork,
+} from "../utils";
+import { TERRA2, TERRA2_CONNECTIONS, transferTerra2 } from "../chains/terra2";
 
 export const command = "transfer";
 export const desc = "Transfer a token";
@@ -58,8 +59,8 @@ export const builder = (y: typeof yargs) =>
 export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
-  const srcChain: Chain = chainToChain(argv["src-chain"]);
-  const dstChain: Chain = chainToChain(argv["dst-chain"]);
+  const srcChain: CliChain = chainToChain(argv["src-chain"]);
+  const dstChain: CliChain = chainToChain(argv["dst-chain"]);
   // TODO: support transfers to sei
   if (dstChain === "Sei") {
     throw new Error("transfer to sei currently unsupported");
@@ -72,16 +73,22 @@ export const handler = async (
     throw new Error("amount must be greater than 0");
   }
   const tokenAddr = argv["token-addr"];
-  if (tokenAddr === "native" && chainToPlatform(srcChain) === "Cosmwasm") {
+  if (tokenAddr === "native" && cliChainToPlatform(srcChain) === "Cosmwasm") {
     throw new Error(`token-addr must be specified for ${srcChain}`);
   }
   const dstAddr = argv["dst-addr"];
   const network = getNetwork(argv.network);
-  const rpc = argv.rpc ?? NETWORKS[network][toChain(srcChain)].rpc;
+  const rpc =
+    argv.rpc ??
+    (srcChain === TERRA2
+      ? TERRA2_CONNECTIONS[network].rpc
+      : NETWORKS[network][srcChain].rpc);
   if (!rpc) {
     throw new Error(`No ${network} rpc defined for ${srcChain}`);
   }
-  if (chainToPlatform(srcChain) === "Evm") {
+  if (srcChain === TERRA2) {
+    await transferTerra2(dstChain, dstAddr, tokenAddr, amount, network, rpc);
+  } else if (cliChainToPlatform(srcChain) === "Evm") {
     await transferEVM(
       srcChain as PlatformToChains<"Evm">,
       dstChain,

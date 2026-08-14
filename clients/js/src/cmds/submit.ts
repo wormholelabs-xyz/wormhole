@@ -10,19 +10,26 @@ import { execute_near } from "../near";
 import { execute_solana } from "../solana";
 import { assertKnownPayload, parse, Payload, VAA } from "../vaa";
 import { NETWORKS } from "../consts";
-import { chainToChain, getNetwork } from "../utils";
 import {
-  Chain,
+  CliChain,
+  chainToChain,
+  cliChainIdToChain,
+  cliChainToChainId,
+  getNetwork,
+} from "../utils";
+import {
   Network,
   PlatformToChains,
-  assertChain,
-  assertChainId,
-  chainIdToChain,
   chainToPlatform,
   chains,
   contracts,
-  toChain,
 } from "@wormhole-foundation/sdk";
+import {
+  TERRA2,
+  TERRA2_CONNECTIONS,
+  execute_terra2,
+  terra2Contracts,
+} from "../chains/terra2";
 
 export const command = "submit <vaa>";
 export const desc = "Execute a VAA";
@@ -104,31 +111,29 @@ export const handler = async (
 
   // if vaa_chain_id is 0, it means the chain is not specified in the VAA.
   // We don't have a notion of an unsupported chain, so we don't want to just assert.
-  let vaa_chain;
+  let vaa_chain: CliChain | undefined;
   if (vaa_chain_id !== 0) {
-    assertChainId(vaa_chain_id);
-    vaa_chain = chainIdToChain(vaa_chain_id);
+    // cliChainIdToChain also covers Terra2 (id 18), which the SDK removed
+    vaa_chain = cliChainIdToChain(vaa_chain_id);
   }
 
-  // get chain from command line arg
-  const cli_chain = argv.chain ? chainToChain(argv.chain) : argv.chain;
+  // get chain from command line arg; chainToChain validates the name
+  const cli_chain = argv.chain ? chainToChain(argv.chain) : undefined;
 
-  let chain: Chain;
+  let chain: CliChain;
   if (cli_chain !== undefined) {
-    assertChain(cli_chain);
     if (vaa_chain && cli_chain !== vaa_chain) {
       throw Error(
         `Specified target chain (${cli_chain}) does not match VAA target chain (${vaa_chain})`
       );
     }
-    chain = toChain(cli_chain);
+    chain = cli_chain;
   } else {
     if (!vaa_chain) {
       throw Error(
         `VAA does not specify a target chain and one was not provided, please specify one with --chain or -c`
       );
     }
-    assertChain(vaa_chain);
     chain = vaa_chain;
   }
 
@@ -148,11 +153,13 @@ async function executeSubmit(
   parsedVaa: VAA<Payload>,
   buf: Buffer,
   network: Network,
-  chain: Chain,
+  chain: CliChain,
   rpc: string | undefined,
   contractAddress: string | undefined
 ) {
-  if (chainToPlatform(chain) === "Evm") {
+  if (chain === TERRA2) {
+    await execute_terra2(parsedVaa.payload, buf, network);
+  } else if (chainToPlatform(chain) === "Evm") {
     await execute_evm(
       parsedVaa.payload,
       buf,
@@ -190,32 +197,42 @@ async function submitToAll(
   buf: Buffer,
   network: Network
 ) {
-  let skip_chain: Chain;
+  // the skip chain is compared by chain id: the VAA may reference a chain the
+  // SDK no longer knows (e.g. Terra2)
+  let skip_chain_id: number;
   if (parsedVaa.payload.type === "RegisterChain") {
-    skip_chain = toChain(parsedVaa.payload.emitterChain);
+    skip_chain_id = parsedVaa.payload.emitterChain;
   } else if (parsedVaa.payload.type === "AttestMeta") {
-    skip_chain = toChain(parsedVaa.payload.tokenChain);
+    skip_chain_id = parsedVaa.payload.tokenChain;
   } else {
     throw Error(
       `Invalid VAA payload type (${parsedVaa.payload.type}), only "RegisterChain" and "AttestMeta" are supported with --all-chains`
     );
   }
 
-  for (const chain of chains) {
-    const n = NETWORKS[network][chain];
-    if (chain == skip_chain) {
+  const allChains: CliChain[] = [...chains, TERRA2];
+  for (const chain of allChains) {
+    const rpc =
+      chain === TERRA2
+        ? TERRA2_CONNECTIONS[network].rpc
+        : NETWORKS[network][chain].rpc;
+    if (cliChainToChainId(chain) === skip_chain_id) {
       console.log(`Skipping ${chain} because it's the origin chain`);
       continue;
     }
-    if (!n || !n.rpc) {
+    if (!rpc) {
       console.log(`Skipping ${chain} because the rpc is not defined`);
       continue;
     }
+    const tokenBridge =
+      chain === TERRA2
+        ? terra2Contracts(network).tokenBridge
+        : contracts.tokenBridge.get(network, chain);
+    const nftBridge =
+      chain === TERRA2 ? undefined : contracts.nftBridge.get(network, chain);
     if (
-      (parsedVaa.payload.module === "TokenBridge" &&
-        !contracts.tokenBridge.get(network, chain)) ||
-      (parsedVaa.payload.module === "NFTBridge" &&
-        !contracts.nftBridge.get(network, chain))
+      (parsedVaa.payload.module === "TokenBridge" && !tokenBridge) ||
+      (parsedVaa.payload.module === "NFTBridge" && !nftBridge)
     ) {
       console.log(`Skipping ${chain} because the contract is not defined`);
       continue;

@@ -4,24 +4,20 @@ import {
   MnemonicKey,
   Msg,
   MsgExecuteContract,
-  TxInfo,
   Wallet,
   isTxError,
 } from "@terra-money/terra.js";
 import { getEmitterAddressTerra, parseSequenceFromLogTerra } from "../..";
-import { getSignedVAABySequence } from "../../token_bridge/__tests__/utils/helpers";
+import {
+  TERRA2_NODE_URL,
+  TERRA_CHAIN_ID,
+} from "../../token_bridge/__tests__/utils/consts";
+import {
+  getSignedVAABySequence,
+  waitForTerraExecution,
+} from "../../token_bridge/__tests__/utils/helpers";
 import { CHAIN_ID_KUJIRA } from "../../utils/consts";
 
-// This test used the terra2 devnet as a stand-in for Kujira, connected to
-// wormchain through the devnet IBC relayer. Both were removed from the Tilt
-// environment along with the rest of the deprecated terra2 setup, so this
-// suite is skipped until a replacement counterparty chain and relayer are
-// added back to devnet.
-const ci = !!process.env.CI;
-const TERRA2_NODE_URL = ci
-  ? "http://terra2-terrad:1317"
-  : "http://localhost:1318";
-const TERRA_CHAIN_ID = "localterra";
 const TERRA2_PRIVATE_KEY_4 =
   "bounce success option birth apple portion aunt rural episode solution hockey pencil lend session cause hedgehog slender journey system canvas decorate razor catch empty";
 
@@ -34,31 +30,6 @@ const terraWallet = lcd.wallet(
 );
 const terraWalletAddress = terraWallet.key.accAddress;
 
-const waitForTerraExecution = async (
-  transaction: string
-): Promise<TxInfo | undefined> => {
-  let done: boolean = false;
-  let info;
-  while (!done) {
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    try {
-      info = await lcd.tx.txInfo(transaction);
-      if (info) {
-        done = true;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }
-  if (info && info.code !== 0) {
-    // error code
-    throw new Error(
-      `Tx ${transaction}: error code ${info.code}: ${info.raw_log}`
-    );
-  }
-  return info;
-};
-
 const terraBroadcastAndWaitForExecution = async (
   msgs: Msg[],
   wallet: Wallet
@@ -70,7 +41,7 @@ const terraBroadcastAndWaitForExecution = async (
   if (isTxError(txResult)) {
     throw new Error("tx error");
   }
-  const txInfo = await waitForTerraExecution(txResult.txhash);
+  const txInfo = await waitForTerraExecution(txResult.txhash, lcd);
   if (!txInfo) {
     throw new Error("tx info not found");
   }
@@ -90,7 +61,7 @@ const terraBroadcastTxAndGetSignedVaa = async (
   return await getSignedVAABySequence(CHAIN_ID_KUJIRA, txSequence, emitter);
 };
 
-describe.skip("IBC Watcher Integration Tests", () => {
+describe("IBC Watcher Integration Tests", () => {
   test('Send a message from "Kujira" (Terra2) via IBC', async () => {
     const postMsg = new MsgExecuteContract(
       terraWalletAddress,

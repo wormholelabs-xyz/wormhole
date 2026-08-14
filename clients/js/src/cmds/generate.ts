@@ -3,7 +3,13 @@ import base58 from "bs58";
 import { sha3_256 } from "js-sha3";
 import yargs from "yargs";
 import { GOVERNANCE_CHAIN, GOVERNANCE_EMITTER } from "../consts";
-import { chainToChain, evm_address } from "../utils";
+import {
+  CliChain,
+  chainToChain,
+  cliChainToChainId,
+  cliChainToPlatform,
+  evm_address,
+} from "../utils";
 import {
   ContractUpgrade,
   Payload,
@@ -16,8 +22,6 @@ import {
   WormholeRelayerSetDefaultDeliveryProvider,
 } from "../vaa";
 import {
-  Chain,
-  chainToPlatform,
   Platform,
   platforms,
   toChainId,
@@ -100,7 +104,7 @@ export const builder = function (y: typeof yargs) {
           }
           const module = argv["module"];
           const emitterChain = argv.chain
-            ? toChainId(chainToChain(argv.chain))
+            ? cliChainToChainId(chainToChain(argv.chain))
             : argv["chain-id"];
           if (emitterChain === undefined) {
             throw new Error("emitterChain is undefined");
@@ -160,7 +164,7 @@ export const builder = function (y: typeof yargs) {
           const payload: ContractUpgrade = {
             module,
             type: "ContractUpgrade",
-            chain: toChainId(chain),
+            chain: cliChainToChainId(chain),
             address: parseCodeAddress(chain, argv["contract-address"]),
           };
           const vaa = makeVAA(
@@ -229,13 +233,13 @@ export const builder = function (y: typeof yargs) {
             type: "AttestMeta",
             chain: 0,
             tokenAddress: parseAddress(chain, argv["token-address"]),
-            tokenChain: toChainId(chain),
+            tokenChain: cliChainToChainId(chain),
             decimals: argv["decimals"],
             symbol: argv["symbol"],
             name: argv["name"],
           };
           const vaa = makeVAA(
-            toChainId(emitter_chain),
+            cliChainToChainId(emitter_chain),
             parseAddress(emitter_chain, argv["emitter-address"]),
             argv["guardian-secret"].split(","),
             payload
@@ -354,10 +358,10 @@ function parseAddressByPlatform(platform: Platform, address: string): string {
   }
 }
 
-function parseAddress(chain: Chain, address: string): string {
-  if (chainToPlatform(chain) === "Evm") {
+function parseAddress(chain: CliChain, address: string): string {
+  if (cliChainToPlatform(chain) === "Evm") {
     return "0x" + evm_address(address);
-  } else if (chainToPlatform(chain) === "Cosmwasm") {
+  } else if (cliChainToPlatform(chain) === "Cosmwasm") {
     return "0x" + toHex(fromBech32(address).data).padStart(64, "0");
   } else if (chain === "Solana" || chain === "Pythnet") {
     return "0x" + toHex(base58.decode(address)).padStart(64, "0");
@@ -387,8 +391,8 @@ function parseAddress(chain: Chain, address: string): string {
   }
 }
 
-function parseCodeAddress(chain: Chain, address: string): string {
-  if (chainToPlatform(chain) === "Cosmwasm") {
+function parseCodeAddress(chain: CliChain, address: string): string {
+  if (cliChainToPlatform(chain) === "Cosmwasm") {
     return "0x" + parseInt(address, 10).toString(16).padStart(64, "0");
   } else {
     return parseAddress(chain, address);

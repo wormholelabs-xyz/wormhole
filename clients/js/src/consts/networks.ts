@@ -97,10 +97,6 @@ const Mainnet = {
     rpc: "http://api.pythnet.pyth.network:8899/",
     key: getEnvVar("SOLANA_KEY"),
   },
-  Moonbeam: {
-    rpc: "https://rpc.api.moonbeam.network",
-    key: getEnvVar("ETH_KEY"),
-  },
   Arbitrum: {
     rpc: "https://arb1.arbitrum.io/rpc",
     key: getEnvVar("ETH_KEY"),

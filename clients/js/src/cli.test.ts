@@ -77,6 +77,46 @@ describe("Info Tests", () => {
     );
   });
 
+  // Terra2 was removed from @wormhole-foundation/sdk 6.x; the CLI keeps
+  // supporting it through the compatibility layer in src/chains/terra2.
+  it("worm info chain-id terra2", (done) => {
+    exec(
+      "node build/main.js info chain-id terra2",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error: ${error}`));
+        }
+
+        try {
+          expect(stdout.trim()).toBe("18");
+          done();
+        } catch (e) {
+          done(e);
+        }
+      }
+    );
+  });
+
+  it("worm info contract mainnet terra2 TokenBridge", (done) => {
+    exec(
+      "node build/main.js info contract mainnet terra2 TokenBridge",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error: ${error}`));
+        }
+
+        try {
+          expect(stdout.trim()).toBe(
+            "terra153366q50k7t8nn7gec00hg66crnhkdggpgdtaxltaq6xrutkkz3s992fw9"
+          );
+          done();
+        } catch (e) {
+          done(e);
+        }
+      }
+    );
+  });
+
   it("worm info rpc mainnet Bsc", (done) => {
     exec(
       "node build/main.js info rpc mainnet Bsc",
@@ -215,10 +255,10 @@ describe("Info Tests", () => {
                 "0x0000000000000000000000005b08ac39eaed75c0439fc750d9fe7e1f9dd0193f",
               Celo: "0x000000000000000000000000796dff6d74f3e27060b71255fe517bfb23c93eed",
               Near: "0x148410499d3fcda4dcfd68a1ebfcdddda16ab28326448d4aae4d2f0465cdfcb7",
-              Moonbeam:
-                "0x000000000000000000000000b1731c586ca89a23809861c6103f0b96b3f57d92",
               Injective:
                 "0x00000000000000000000000045dbea4617971d93188eda21530bc6503d153313",
+              Terra2:
+                "0xa463ad028fb79679cfc8ce1efba35ac0e77b35080a1abe9bebe83461f176b0a3",
               Sui: "0xccceeb29348f71bdd22ffef43a2a19c1f5b5e17c5cca5411529120182672ade5",
               Aptos:
                 "0x0000000000000000000000000000000000000000000000000000000000000001",
@@ -286,6 +326,21 @@ describe("EVM Tests", () => {
 });
 
 describe("Generate Tests", () => {
+  const U64_MAX = BigInt("0xffffffffffffffff");
+
+  // The signature, sequence, and digest of a generated VAA differ on every
+  // invocation (the sequence is random and the signature covers it), so
+  // check their shape instead of their value: a single 65-byte guardian
+  // signature (r || s || v as hex), a sequence within u64 bounds, and a
+  // 32-byte hex digest.
+  function expectValidVaaEnvelope(outputObject: any) {
+    expect(outputObject.signatures).toHaveLength(1);
+    expect(outputObject.signatures[0].signature).toMatch(/^[0-9a-f]{130}$/);
+    const sequence = BigInt(outputObject.sequence);
+    expect(sequence >= BigInt(0) && sequence <= U64_MAX).toBe(true);
+    expect(outputObject.digest).toMatch(/^0x[0-9a-f]{64}$/);
+  }
+
   it("worm generate registration", (done) => {
     exec(
       "node build/main.js generate registration --module NFTBridge --chain bsc --contract-address 0x706abc4E45D419950511e474C7B9Ed348A4a716c --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0",
@@ -335,7 +390,7 @@ describe("Generate Tests", () => {
                   "0x662f2eef2c8522846c34d312b3e48219d73b7d0af08f16bae95a6e4d8363c8ce",
               };
 
-              // Can't check the signature, sequence, or digest because they are different each time.
+              expectValidVaaEnvelope(outputObject);
               expect(outputObject.version).toBe(expectedOutput.version);
               expect(outputObject.guardianSetIndex).toBe(
                 expectedOutput.guardianSetIndex
@@ -418,7 +473,7 @@ describe("Generate Tests", () => {
                   "0x898a01e89a1757d9cdefa63af43f7b3cce0883a2365f6c2c4103b4474e741a29",
               };
 
-              // Can't check the signature, sequence, or digest because they are different each time.
+              expectValidVaaEnvelope(outputObject);
               expect(outputObject.version).toBe(expectedOutput.version);
               expect(outputObject.guardianSetIndex).toBe(
                 expectedOutput.guardianSetIndex
@@ -468,8 +523,7 @@ describe("Generate Tests", () => {
             try {
               const outputObject = JSON.parse(stdout);
 
-              // Can't check the signature, sequence, or digest because they
-              // are different each time.
+              expectValidVaaEnvelope(outputObject);
               expect(outputObject.emitterChain).toBe(1);
               expect(outputObject.emitterAddress).toBe(
                 "0x0000000000000000000000000000000000000000000000000000000000000004"
@@ -480,6 +534,48 @@ describe("Generate Tests", () => {
                 chain: 4,
                 address:
                   "0x000000000000000000000000706abc4e45d419950511e474c7b9ed348a4a716c",
+              });
+              done();
+            } catch (e) {
+              done(`JSON parse error: ${e}`);
+            }
+          }
+        );
+      }
+    );
+  });
+
+  // Terra2 goes through the compatibility layer (the SDK removed chain 18);
+  // the expected emitter is the canonical Terra2 token bridge emitter.
+  it("worm generate registration for terra2", (done) => {
+    exec(
+      "node build/main.js generate registration --module TokenBridge --chain terra2 --contract-address terra153366q50k7t8nn7gec00hg66crnhkdggpgdtaxltaq6xrutkkz3s992fw9 --guardian-secret cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0",
+      (error: any, stdout: string, stderr: any) => {
+        if (error) {
+          return done(new Error(`Execution error during generation: ${error}`));
+        }
+
+        const vaa = stdout.trim();
+        expect(vaa).not.toBeNull();
+
+        exec(
+          `node build/main.js parse ${vaa}`,
+          (error: any, stdout: string, stderr: any) => {
+            if (error) {
+              return done(new Error(`Execution error during parse: ${error}`));
+            }
+            try {
+              const outputObject = JSON.parse(stdout);
+
+              expectValidVaaEnvelope(outputObject);
+              expect(outputObject.emitterChain).toBe(1);
+              expect(outputObject.payload).toMatchObject({
+                module: "TokenBridge",
+                type: "RegisterChain",
+                chain: 0,
+                emitterChain: 18,
+                emitterAddress:
+                  "0xa463ad028fb79679cfc8ce1efba35ac0e77b35080a1abe9bebe83461f176b0a3",
               });
               done();
             } catch (e) {
@@ -511,8 +607,7 @@ describe("Generate Tests", () => {
             try {
               const outputObject = JSON.parse(stdout);
 
-              // Can't check the signature, sequence, or digest because they
-              // are different each time.
+              expectValidVaaEnvelope(outputObject);
               expect(outputObject.emitterChain).toBe(1);
               expect(outputObject.payload).toMatchObject({
                 module: "Core",

@@ -1,9 +1,8 @@
 import yargs from "yargs";
 import { getOriginalAsset } from "../../chains/generic";
 import { RPC_OPTIONS } from "../../consts";
-import { getNetwork, chainToChain } from "../../utils";
+import { getNetwork, chainToChain, cliChainIdToChain } from "../../utils";
 import { tryUint8ArrayToNative } from "../../sdk/array";
-import { toChain } from "@wormhole-foundation/sdk-base";
 
 export const command = "origin <chain> <address>";
 export const desc = `Print the origin chain and address of the asset that corresponds to the given chain and address.`;
@@ -42,7 +41,10 @@ export const handler = async (
   );
   console.log({
     ...res,
-    assetAddress: tryUint8ArrayToNative(res.assetAddress, toChain(res.chainId)),
+    assetAddress: tryUint8ArrayToNative(
+      res.assetAddress,
+      cliChainIdToChain(res.chainId)
+    ),
   });
 
   console.warn = consoleWarnTemp;

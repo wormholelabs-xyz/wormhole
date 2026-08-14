@@ -83,6 +83,7 @@ ethTokenBridge=$(jq --raw-output '.chains."2".contracts.tokenBridgeEmitterAddres
 bscTokenBridge=$(jq --raw-output '.chains."4".contracts.tokenBridgeEmitterAddress' $addressesJson)
 algoTokenBridge=$(jq --raw-output '.chains."8".contracts.tokenBridgeEmitterAddress' $addressesJson)
 nearTokenBridge=$(jq --raw-output '.chains."15".contracts.tokenBridgeEmitterAddress' $addressesJson)
+terra2TokenBridge=$(jq --raw-output '.chains."18".contracts.tokenBridgeEmitterAddress' $addressesJson)
 suiTokenBridge=$(jq --raw-output '.chains."21".contracts.tokenBridgeEmitterAddress' $addressesJson)
 aptosTokenBridge=$(jq --raw-output '.chains."22".contracts.tokenBridgeEmitterAddress' $addressesJson)
 wormchainTokenBridge=$(jq --raw-output '.chains."3104".contracts.tokenBridgeEmitterAddress' $addressesJson)
@@ -99,6 +100,7 @@ ethTokenBridgeVAA=$(worm generate registration -m TokenBridge -c ethereum -a ${e
 bscTokenBridgeVAA=$(worm generate registration -m TokenBridge -c bsc -a ${bscTokenBridge} -g ${guardiansPrivateCSV})
 algoTokenBridgeVAA=$(worm generate registration -m TokenBridge -c algorand -a ${algoTokenBridge} -g ${guardiansPrivateCSV})
 nearTokenBridgeVAA=$(worm generate registration -m TokenBridge -c near -a ${nearTokenBridge} -g ${guardiansPrivateCSV})
+terra2TokenBridgeVAA=$(worm generate registration -m TokenBridge -c terra2 -a ${terra2TokenBridge} -g ${guardiansPrivateCSV})
 suiTokenBridgeVAA=$(worm generate registration -m TokenBridge -c sui -a ${suiTokenBridge} -g ${guardiansPrivateCSV})
 aptosTokenBridgeVAA=$(worm generate registration -m TokenBridge -c aptos -a ${aptosTokenBridge} -g ${guardiansPrivateCSV})
 wormchainTokenBridgeVAA=$(worm generate registration -m TokenBridge -c wormchain -a ${wormchainTokenBridge} -g ${guardiansPrivateCSV})
@@ -119,6 +121,7 @@ solTokenBridge="REGISTER_SOL_TOKEN_BRIDGE_VAA"
 ethTokenBridge="REGISTER_ETH_TOKEN_BRIDGE_VAA"
 bscTokenBridge="REGISTER_BSC_TOKEN_BRIDGE_VAA"
 algoTokenBridge="REGISTER_ALGO_TOKEN_BRIDGE_VAA"
+terra2TokenBridge="REGISTER_TERRA2_TOKEN_BRIDGE_VAA"
 nearTokenBridge="REGISTER_NEAR_TOKEN_BRIDGE_VAA"
 suiTokenBridge="REGISTER_SUI_TOKEN_BRIDGE_VAA"
 aptosTokenBridge="REGISTER_APTOS_TOKEN_BRIDGE_VAA"
@@ -151,6 +154,9 @@ upsert_env_file $envFile $bscTokenBridge $bscTokenBridgeVAA
 upsert_env_file $ethFile $algoTokenBridge $algoTokenBridgeVAA
 upsert_env_file $envFile $algoTokenBridge $algoTokenBridgeVAA
 
+# terra2 token bridge
+upsert_env_file $ethFile $terra2TokenBridge $terra2TokenBridgeVAA
+upsert_env_file $envFile $terra2TokenBridge $terra2TokenBridgeVAA
 
 # near token bridge
 upsert_env_file $ethFile $nearTokenBridge $nearTokenBridgeVAA
@@ -187,6 +193,7 @@ paths=(
     ./algorand/.env
     ./near/.env
     ./solana/.env
+    ./cosmwasm/deployment/terra2/tools/.env
     ./sui/.env
     ./aptos/.env
     ./wormchain/contracts/tools/.env

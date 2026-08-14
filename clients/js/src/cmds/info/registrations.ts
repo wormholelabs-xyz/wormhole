@@ -11,8 +11,7 @@ import {
   contracts,
   toChain,
 } from "@wormhole-foundation/sdk-base";
-import { chainToChain, getNetwork } from "../../utils";
-import { Chain } from "@wormhole-foundation/sdk";
+import { CliChain, chainToChain, getNetwork } from "../../utils";
 
 export const command = "registrations <network> <chain> <module>";
 export const desc = "Print chain registrations";
@@ -56,6 +55,9 @@ export const handler = async (
   if (chain === "Solana") {
     const solana = require("../../solana");
     results = await solana.queryRegistrationsSolana(network, module);
+  } else if (chain === "Terra2") {
+    const terra2 = require("../../chains/terra2");
+    results = await terra2.queryRegistrationsTerra2(network, module);
   } else if (chainToPlatform(chain) === "Evm") {
     const evm = require("../../evm");
     results = await evm.queryRegistrationsEvm(network, chain, module);
@@ -84,7 +86,7 @@ export const handler = async (
 // verifyRegistrations takes the results returned above and verifies them against the expected values in the consts file.
 async function verifyRegistrations(
   network: Network,
-  chain: Chain,
+  chain: CliChain,
   module: "NFTBridge" | "TokenBridge",
   input: Object
 ) {

@@ -13,9 +13,9 @@ import {
   Network,
   assertChainId,
   contracts,
-  toChainId,
 } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
+import { CliChain } from "./utils";
 
 export async function execute_aptos(
   payload: Payload,
@@ -244,7 +244,7 @@ export async function execute_aptos(
 }
 
 export async function transferAptos(
-  dstChain: Chain,
+  dstChain: CliChain,
   dstAddress: string,
   tokenAddress: string,
   amount: string,
@@ -270,7 +270,7 @@ export async function transferAptos(
     tokenAddress === "native" ? "0x1::aptos_coin::AptosCoin" : tokenAddress,
     amount,
     toLegacyChainId(dstChain),
-    tryNativeToUint8Array(dstAddress, toChainId(dstChain))
+    tryNativeToUint8Array(dstAddress, dstChain)
   );
   const tx = (await generateSignAndSubmitEntryFunction(
     client,

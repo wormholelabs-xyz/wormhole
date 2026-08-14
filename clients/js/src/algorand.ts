@@ -9,10 +9,10 @@ import { transferFromAlgorand } from "@certusone/wormhole-sdk/lib/esm/token_brid
 import { toLegacyChainId, tryNativeToHexString } from "./sdk/array";
 import {
   Chain,
-  chainToChainId,
   contracts,
   Network,
 } from "@wormhole-foundation/sdk-base";
+import { CliChain } from "./utils";
 
 export async function execute_algorand(
   payload: Payload,
@@ -138,7 +138,7 @@ export async function execute_algorand(
 }
 
 export async function transferAlgorand(
-  dstChain: Chain,
+  dstChain: CliChain,
   dstAddress: string,
   tokenAddress: string,
   amount: string,
@@ -155,7 +155,7 @@ export async function transferAlgorand(
   const TOKEN_BRIDGE_ID = BigInt(
     parseInt(contracts.tokenBridge(network, "Algorand"))
   );
-  const recipient = tryNativeToHexString(dstAddress, chainToChainId(dstChain));
+  const recipient = tryNativeToHexString(dstAddress, dstChain);
   if (!recipient) {
     throw new Error("Failed to convert recipient address");
   }

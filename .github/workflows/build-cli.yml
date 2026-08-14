@@ -6,7 +6,7 @@ on:
     branches:
       - main
     paths:
-      - ./clients/js
+      - clients/js/**
 
 permissions:
   contents: read

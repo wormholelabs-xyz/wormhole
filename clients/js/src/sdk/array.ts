@@ -25,16 +25,29 @@ import {
 } from "@certusone/wormhole-sdk/lib/esm/algorand";
 import { isValidSuiType } from "@certusone/wormhole-sdk/lib/esm/sui";
 import { ChainId as LegacyChainId } from "@certusone/wormhole-sdk/lib/esm/utils/consts";
+import {
+  TERRA2_ADDRESS_PREFIX,
+  TERRA2_CHAIN_ID,
+  TERRA2_NATIVE_DENOM,
+  Terra2Like,
+  isTerra2Like,
+} from "../chains/terra2/consts";
 
 /**
  * Convert a chain to the legacy \@certusone/wormhole-sdk ChainId type.
  *
  * The legacy SDK is frozen, so its ChainId union doesn't include chains added
  * after its last release. On the wire a chain id is just a uint16, so passing
- * newer ids through the legacy functions is safe.
+ * newer ids through the legacy functions is safe. Terra2 is handled by the
+ * CLI's compatibility layer (the current SDK removed it; the legacy SDK still
+ * knows id 18).
  */
-export const toLegacyChainId = (chain: ChainId | Chain): LegacyChainId =>
-  toChainId(chain) as number as LegacyChainId;
+export const toLegacyChainId = (
+  chain: ChainId | Chain | Terra2Like
+): LegacyChainId =>
+  (isTerra2Like(chain)
+    ? TERRA2_CHAIN_ID
+    : toChainId(chain)) as number as LegacyChainId;
 
 const isLikely20ByteCosmwasm = (h: string): boolean =>
   h.startsWith("000000000000000000000000");
@@ -76,8 +89,22 @@ export function buildTokenId(
 
 export const tryUint8ArrayToNative = (
   a: Uint8Array,
-  chain: ChainId | Chain
+  chain: ChainId | Chain | Terra2Like
 ): string => {
+  if (isTerra2Like(chain)) {
+    const h = uint8ArrayToHex(a);
+    if (h.startsWith("01")) {
+      // native denoms are encoded with the first byte set to 1
+      return Buffer.from(
+        hexToUint8Array(h.substring(2)).filter((b) => b !== 0)
+      ).toString("ascii");
+    }
+    if (!isLikely20ByteCosmwasm(h)) {
+      // terra2 has 32 byte addresses for contracts and 20 for wallets
+      return humanAddress(TERRA2_ADDRESS_PREFIX, a);
+    }
+    return humanAddress(TERRA2_ADDRESS_PREFIX, a.slice(-20));
+  }
   const chainName = toChain(chain);
   if (chainToPlatform(chainName) === "Evm") {
     // if (isEVMChain(chainId)) {
@@ -155,8 +182,15 @@ export const tryHexToNativeAssetString = (h: string, c: ChainId): string =>
  */
 export const tryNativeToHexString = (
   address: string,
-  chain: ChainId | Chain
+  chain: ChainId | Chain | Terra2Like
 ): string => {
+  if (isTerra2Like(chain)) {
+    // same scheme as buildTokenId below, with the denom the SDK no longer maps
+    return (
+      (address === TERRA2_NATIVE_DENOM ? "01" : "00") +
+      keccak256(Buffer.from(address, "utf-8")).substring(4)
+    );
+  }
   const chainName = toChain(chain);
   if (chainToPlatform(chainName) === "Evm") {
     return uint8ArrayToHex(zeroPad(arrayify(address), 32));
@@ -200,8 +234,11 @@ export const tryNativeToHexString = (
  */
 export function tryNativeToUint8Array(
   address: string,
-  chain: ChainId | Chain
+  chain: ChainId | Chain | Terra2Like
 ): Uint8Array {
+  if (isTerra2Like(chain)) {
+    return hexToUint8Array(tryNativeToHexString(address, chain));
+  }
   const chainId = toChainId(chain);
   return hexToUint8Array(tryNativeToHexString(address, chainId));
 }

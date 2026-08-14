@@ -17,7 +17,6 @@ import {
   transferFromEthNative,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
 import {
-  Chain,
   Network,
   PlatformToChains,
   chainToChainId,
@@ -25,6 +24,8 @@ import {
   contracts,
 } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
+import { CliChain, cliChainToChainId } from "./utils";
+import { TERRA2 } from "./chains/terra2";
 
 const _IMPLEMENTATION_SLOT =
   "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
@@ -114,11 +115,11 @@ export async function query_contract_evm(
       );
       result.address = contract_address;
       const registrationsPromise = Promise.all(
-        chains
+        [...chains, TERRA2]
           .filter((c_name) => c_name !== chain)
           .map(async (c_name) => [
             c_name,
-            await tb.bridgeContracts(chainToChainId(c_name)),
+            await tb.bridgeContracts(cliChainToChainId(c_name)),
           ])
       );
       const [
@@ -176,11 +177,11 @@ export async function query_contract_evm(
       );
       result.address = contract_address;
       const registrationsPromiseNb = Promise.all(
-        chains
-          .filter(([c_name, _]) => c_name !== chain)
+        [...chains, TERRA2]
+          .filter((c_name) => c_name !== chain)
           .map(async (c_name) => [
             c_name,
-            await nb.bridgeContracts(chainToChainId(c_name)),
+            await nb.bridgeContracts(cliChainToChainId(c_name)),
           ])
       );
       const [
@@ -504,7 +505,7 @@ export async function execute_evm(
 
 export async function transferEVM(
   srcChain: PlatformToChains<"Evm">,
-  dstChain: Chain,
+  dstChain: CliChain,
   dstAddress: string,
   tokenAddress: string,
   amount: string,
@@ -527,7 +528,7 @@ export async function transferEVM(
       signer,
       amount,
       toLegacyChainId(dstChain),
-      tryNativeToUint8Array(dstAddress, chainToChainId(dstChain))
+      tryNativeToUint8Array(dstAddress, dstChain)
     );
   } else {
     const allowance = await getAllowanceEth(token_bridge, tokenAddress, signer);
@@ -540,7 +541,7 @@ export async function transferEVM(
       tokenAddress,
       amount,
       toLegacyChainId(dstChain),
-      tryNativeToUint8Array(dstAddress, chainToChainId(dstChain)),
+      tryNativeToUint8Array(dstAddress, dstChain),
       undefined,
       overrides
     );
@@ -848,11 +849,11 @@ export async function queryRegistrationsEvm(
   }
 
   const registrations: string[][] = await Promise.all(
-    chains
+    [...chains, TERRA2]
       .filter((cname) => cname !== chain)
       .map(async (cname) => [
         cname,
-        await contract.bridgeContracts(chainToChainId(cname)),
+        await contract.bridgeContracts(cliChainToChainId(cname)),
       ])
   );
 
