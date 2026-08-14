@@ -8,7 +8,12 @@ import {
 } from "@terra-money/terra.js";
 import axios from "axios";
 import { fromUint8Array } from "js-base64";
-import { Chain, Network, chains, toChainId } from "@wormhole-foundation/sdk-base";
+import {
+  Chain,
+  Network,
+  chains,
+  toChainId,
+} from "@wormhole-foundation/sdk-base";
 import { transferFromTerra } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
 import { Payload, impossible } from "../../vaa";
 import { toLegacyChainId, tryNativeToUint8Array } from "../../sdk/array";
@@ -16,10 +21,7 @@ import { TERRA2_CONNECTIONS, Terra2, terra2Contracts } from "./consts";
 
 const GAS_PRICES_URL = "https://phoenix-fcd.terra.dev/v1/txs/gas_prices";
 
-export const getTerra2Client = (
-  network: Network,
-  rpc?: string
-): LCDClient => {
+export const getTerra2Client = (network: Network, rpc?: string): LCDClient => {
   const connection = TERRA2_CONNECTIONS[network];
   const url = rpc ?? connection.rpc;
   if (!url) {

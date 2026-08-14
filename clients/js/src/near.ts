@@ -7,10 +7,7 @@ import {
   transferNearFromNear,
   transferTokenFromNear,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
-import {
-  contracts,
-  Network,
-} from "@wormhole-foundation/sdk-base";
+import { contracts, Network } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId, tryNativeToUint8Array } from "./sdk/array";
 import { CliChain } from "./utils";
 

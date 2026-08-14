@@ -7,11 +7,7 @@ import {
   getOriginalAssetSolana,
   getOriginalAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
-import {
-  Terra2Like,
-  getTerra2Client,
-  isTerra2Like,
-} from "../terra2";
+import { Terra2Like, getTerra2Client, isTerra2Like } from "../terra2";
 import { getOriginalAssetSui } from "../../sdk/sui";
 import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";

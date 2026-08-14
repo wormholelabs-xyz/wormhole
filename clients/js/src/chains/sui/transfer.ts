@@ -10,10 +10,7 @@ import {
 } from "./utils";
 import { getObjectFields } from "../../sdk/sui";
 import { selectCoinsForAmount } from "./selectCoins";
-import {
-  Network,
-  contracts,
-} from "@wormhole-foundation/sdk-base";
+import { Network, contracts } from "@wormhole-foundation/sdk-base";
 import { tryNativeToUint8Array } from "../../sdk/array";
 import { CliChain, cliChainToChainId } from "../../utils";
 

@@ -54,7 +54,11 @@ export const TERRA2_CONNECTIONS: { [network in Network]: Terra2Connection } = {
 
 // The current SDK dropped the Terra2 contract addresses along with the chain;
 // the frozen legacy SDK still has the canonical values.
-const legacyNetwork = { Mainnet: "MAINNET", Testnet: "TESTNET", Devnet: "DEVNET" } as const;
+const legacyNetwork = {
+  Mainnet: "MAINNET",
+  Testnet: "TESTNET",
+  Devnet: "DEVNET",
+} as const;
 
 export const terra2Contracts = (
   network: Network

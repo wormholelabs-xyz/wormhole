@@ -21,11 +21,7 @@ import {
   VAA,
   WormholeRelayerSetDefaultDeliveryProvider,
 } from "../vaa";
-import {
-  Platform,
-  platforms,
-  toChainId,
-} from "@wormhole-foundation/sdk-base";
+import { Platform, platforms, toChainId } from "@wormhole-foundation/sdk-base";
 
 function makeVAA(
   emitterChain: number,

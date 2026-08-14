@@ -7,11 +7,7 @@ import { NETWORKS } from "./consts";
 import { Payload, impossible } from "./vaa";
 import { transferFromAlgorand } from "@certusone/wormhole-sdk/lib/esm/token_bridge/transfer";
 import { toLegacyChainId, tryNativeToHexString } from "./sdk/array";
-import {
-  Chain,
-  contracts,
-  Network,
-} from "@wormhole-foundation/sdk-base";
+import { Chain, contracts, Network } from "@wormhole-foundation/sdk-base";
 import { CliChain } from "./utils";
 
 export async function execute_algorand(

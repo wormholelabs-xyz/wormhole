@@ -112,11 +112,10 @@ export async function query_contract_evm(
       );
       result.address = contract_address;
       const registrationsPromise = Promise.all(
-        CLI_CHAINS.filter((c_name) => c_name !== chain)
-          .map(async (c_name) => [
-            c_name,
-            await tb.bridgeContracts(cliChainToChainId(c_name)),
-          ])
+        CLI_CHAINS.filter((c_name) => c_name !== chain).map(async (c_name) => [
+          c_name,
+          await tb.bridgeContracts(cliChainToChainId(c_name)),
+        ])
       );
       const [
         wormhole,
@@ -173,11 +172,10 @@ export async function query_contract_evm(
       );
       result.address = contract_address;
       const registrationsPromiseNb = Promise.all(
-        CLI_CHAINS.filter((c_name) => c_name !== chain)
-          .map(async (c_name) => [
-            c_name,
-            await nb.bridgeContracts(cliChainToChainId(c_name)),
-          ])
+        CLI_CHAINS.filter((c_name) => c_name !== chain).map(async (c_name) => [
+          c_name,
+          await nb.bridgeContracts(cliChainToChainId(c_name)),
+        ])
       );
       const [
         wormholeNb,
@@ -844,11 +842,10 @@ export async function queryRegistrationsEvm(
   }
 
   const registrations: string[][] = await Promise.all(
-    CLI_CHAINS.filter((cname) => cname !== chain)
-      .map(async (cname) => [
-        cname,
-        await contract.bridgeContracts(cliChainToChainId(cname)),
-      ])
+    CLI_CHAINS.filter((cname) => cname !== chain).map(async (cname) => [
+      cname,
+      await contract.bridgeContracts(cliChainToChainId(cname)),
+    ])
   );
 
   const results: { [key: string]: string } = {};
