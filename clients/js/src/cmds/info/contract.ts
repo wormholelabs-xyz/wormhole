@@ -1,7 +1,7 @@
 import yargs from "yargs";
 import { impossible } from "../../vaa";
 import {
-  chainToChain,
+  chainToCliChain,
   getCoreContract,
   getNetwork,
   getNftBridgeContract,
@@ -33,7 +33,7 @@ export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
   const network = getNetwork(argv.network);
-  const chain = chainToChain(argv.chain);
+  const chain = chainToCliChain(argv.chain);
   const module = argv["module"];
 
   let addr: string | undefined;

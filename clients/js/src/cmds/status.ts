@@ -1,7 +1,7 @@
 import yargs from "yargs";
 import { ethers } from "ethers";
 import { NETWORKS } from "../consts";
-import { chainToChain, getNetwork } from "../utils";
+import { chainToCliChain, getNetwork } from "../utils";
 import {
   Chain,
   assertChain,
@@ -40,7 +40,7 @@ export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
   const network = getNetwork(argv.network);
-  const chain = chainToChain(argv.chain);
+  const chain = chainToCliChain(argv.chain);
   assertChain(chain);
 
   const addr = contracts.relayer.get(network, chain);

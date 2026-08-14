@@ -1,10 +1,6 @@
-import {
-  Chain,
-  ChainId,
-  chainToPlatform,
-  toChain,
-} from "@wormhole-foundation/sdk-base";
-import { Terra2Like, isTerra2Like } from "./chains/terra2/consts";
+import { Chain, ChainId } from "@wormhole-foundation/sdk-base";
+import { Terra2Like } from "./chains/terra2/consts";
+import { cliChainToPlatform, toCliChain } from "./utils";
 import { decodeAddress, getApplicationAddress } from "algosdk";
 import { uint8ArrayToHex } from "./sdk/array";
 import { arrayify, sha256, zeroPad } from "ethers/lib/utils";
@@ -15,21 +11,16 @@ export async function getEmitterAddress(
   chain: ChainId | Chain | Terra2Like,
   addr: string
 ) {
-  if (isTerra2Like(chain)) {
-    // Terra2 compat: same encoding as any Cosmwasm chain
-    return uint8ArrayToHex(
-      zeroPad(bech32.fromWords(bech32.decode(addr).words), 32)
-    );
-  }
-  const localChain = toChain(chain);
-  if (chainToPlatform(localChain) === "Solana") {
+  const localChain = toCliChain(chain);
+  if (cliChainToPlatform(localChain) === "Solana") {
     const seeds = [Buffer.from("emitter")];
     const programAddr = PublicKey.findProgramAddressSync(
       seeds,
       new PublicKey(addr)
     )[0];
     addr = programAddr.toBuffer().toString("hex");
-  } else if (chainToPlatform(localChain) === "Cosmwasm") {
+  } else if (cliChainToPlatform(localChain) === "Cosmwasm") {
+    // this also covers Terra2, which the CLI's compat layer keeps alive
     addr = Buffer.from(
       zeroPad(bech32.fromWords(bech32.decode(addr).words), 32)
     ).toString("hex");

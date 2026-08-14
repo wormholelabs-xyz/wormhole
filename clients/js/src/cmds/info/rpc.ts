@@ -1,5 +1,5 @@
 import yargs from "yargs";
-import { chainToChain, getChainRpc, getNetwork } from "../../utils";
+import { chainToCliChain, getChainRpc, getNetwork } from "../../utils";
 
 export const command = "rpc <network> <chain>";
 export const desc = "Print RPC address";
@@ -20,6 +20,6 @@ export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
   const network = getNetwork(argv.network);
-  const chain = chainToChain(argv.chain);
+  const chain = chainToCliChain(argv.chain);
   console.log(getChainRpc(network, chain));
 };

@@ -5,7 +5,7 @@ import yargs from "yargs";
 import { GOVERNANCE_CHAIN, GOVERNANCE_EMITTER } from "../consts";
 import {
   CliChain,
-  chainToChain,
+  chainToCliChain,
   cliChainToChainId,
   cliChainToPlatform,
   evm_address,
@@ -100,7 +100,7 @@ export const builder = function (y: typeof yargs) {
           }
           const module = argv["module"];
           const emitterChain = argv.chain
-            ? cliChainToChainId(chainToChain(argv.chain))
+            ? cliChainToChainId(chainToCliChain(argv.chain))
             : argv["chain-id"];
           if (emitterChain === undefined) {
             throw new Error("emitterChain is undefined");
@@ -108,7 +108,10 @@ export const builder = function (y: typeof yargs) {
           let emitterAddress = argv.platform
             ? parseAddressByPlatform(argv.platform, argv["contract-address"])
             : argv.chain
-            ? parseAddress(chainToChain(argv.chain), argv["contract-address"])
+            ? parseAddress(
+                chainToCliChain(argv.chain),
+                argv["contract-address"]
+              )
             : undefined;
           if (emitterAddress === undefined) {
             throw new Error("emitterAddress is undefined");
@@ -155,7 +158,7 @@ export const builder = function (y: typeof yargs) {
               demandOption: true,
             } as const),
         (argv) => {
-          const chain = chainToChain(argv.chain);
+          const chain = chainToCliChain(argv.chain);
           const module = argv["module"];
           const payload: ContractUpgrade = {
             module,
@@ -222,8 +225,8 @@ export const builder = function (y: typeof yargs) {
               demandOption: true,
             }),
         (argv) => {
-          const emitter_chain = chainToChain(argv["emitter-chain"]);
-          const chain = chainToChain(argv.chain);
+          const emitter_chain = chainToCliChain(argv["emitter-chain"]);
+          const chain = chainToCliChain(argv.chain);
           const payload: TokenBridgeAttestMeta = {
             module: "TokenBridge",
             type: "AttestMeta",
@@ -304,7 +307,7 @@ export const builder = function (y: typeof yargs) {
             });
         },
         (argv) => {
-          const chain = chainToChain(argv.chain);
+          const chain = chainToCliChain(argv.chain);
           const payload: WormholeRelayerSetDefaultDeliveryProvider = {
             module: "WormholeRelayer",
             type: "SetDefaultDeliveryProvider",

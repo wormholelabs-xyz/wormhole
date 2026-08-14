@@ -7,7 +7,6 @@ import {
   ChainId,
   PlatformToChains,
   chainToChainId,
-  chainToPlatform,
   encoding,
   toChain,
   toChainId,
@@ -32,6 +31,7 @@ import {
   Terra2Like,
   isTerra2Like,
 } from "../chains/terra2/consts";
+import { cliChainToPlatform, toCliChain } from "../utils";
 
 /**
  * Convert a chain to the legacy \@certusone/wormhole-sdk ChainId type.
@@ -70,11 +70,15 @@ export function humanAddress(
 }
 
 export function buildTokenId(
-  chain: Exclude<PlatformToChains<"Cosmwasm">, "Seda">,
+  chain: Exclude<PlatformToChains<"Cosmwasm">, "Seda"> | Terra2Like,
   address: string
 ) {
+  // the SDK no longer maps Terra2's native denom; the compat layer does
+  const nativeDenom = isTerra2Like(chain)
+    ? TERRA2_NATIVE_DENOM
+    : chainToNativeDenoms("Mainnet", chain);
   return (
-    (chainToNativeDenoms("Mainnet", chain) === address ? "01" : "00") +
+    (nativeDenom === address ? "01" : "00") +
     keccak256(Buffer.from(address, "utf-8")).substring(4)
   );
 }
@@ -91,7 +95,15 @@ export const tryUint8ArrayToNative = (
   a: Uint8Array,
   chain: ChainId | Chain | Terra2Like
 ): string => {
-  if (isTerra2Like(chain)) {
+  const chainName = toCliChain(chain);
+  if (cliChainToPlatform(chainName) === "Evm") {
+    return hexZeroPad(hexValue(a), 20);
+  } else if (cliChainToPlatform(chainName) === "Solana") {
+    return new PublicKey(a).toString();
+  } else if (chainName === "Injective") {
+    const h = uint8ArrayToHex(a);
+    return humanAddress("inj", isLikely20ByteCosmwasm(h) ? a.slice(-20) : a);
+  } else if (chainName === "Terra2") {
     const h = uint8ArrayToHex(a);
     if (h.startsWith("01")) {
       // native denoms are encoded with the first byte set to 1
@@ -99,21 +111,11 @@ export const tryUint8ArrayToNative = (
         hexToUint8Array(h.substring(2)).filter((b) => b !== 0)
       ).toString("ascii");
     }
-    if (!isLikely20ByteCosmwasm(h)) {
-      // terra2 has 32 byte addresses for contracts and 20 for wallets
-      return humanAddress(TERRA2_ADDRESS_PREFIX, a);
-    }
-    return humanAddress(TERRA2_ADDRESS_PREFIX, a.slice(-20));
-  }
-  const chainName = toChain(chain);
-  if (chainToPlatform(chainName) === "Evm") {
-    // if (isEVMChain(chainId)) {
-    return hexZeroPad(hexValue(a), 20);
-  } else if (chainToPlatform(chainName) === "Solana") {
-    return new PublicKey(a).toString();
-  } else if (chainName === "Injective") {
-    const h = uint8ArrayToHex(a);
-    return humanAddress("inj", isLikely20ByteCosmwasm(h) ? a.slice(-20) : a);
+    // terra2 has 32 byte addresses for contracts and 20 for wallets
+    return humanAddress(
+      TERRA2_ADDRESS_PREFIX,
+      isLikely20ByteCosmwasm(h) ? a.slice(-20) : a
+    );
   } else if (chainName === "Algorand") {
     return uint8ArrayToNativeStringAlgorand(a);
   } else if (chainName == "Wormchain") {
@@ -184,19 +186,16 @@ export const tryNativeToHexString = (
   address: string,
   chain: ChainId | Chain | Terra2Like
 ): string => {
-  if (isTerra2Like(chain)) {
-    // same scheme as buildTokenId below, with the denom the SDK no longer maps
-    return (
-      (address === TERRA2_NATIVE_DENOM ? "01" : "00") +
-      keccak256(Buffer.from(address, "utf-8")).substring(4)
-    );
-  }
-  const chainName = toChain(chain);
-  if (chainToPlatform(chainName) === "Evm") {
+  const chainName = toCliChain(chain);
+  if (cliChainToPlatform(chainName) === "Evm") {
     return uint8ArrayToHex(zeroPad(arrayify(address), 32));
-  } else if (chainToPlatform(chainName) === "Solana") {
+  } else if (cliChainToPlatform(chainName) === "Solana") {
     return uint8ArrayToHex(zeroPad(new PublicKey(address).toBytes(), 32));
-  } else if (chainName === "Injective" || chainName === "Sei") {
+  } else if (
+    chainName === "Injective" ||
+    chainName === "Sei" ||
+    chainName === "Terra2"
+  ) {
     return buildTokenId(chainName, address);
   } else if (chainName === "Algorand") {
     return nativeStringToHexAlgorand(address);
@@ -236,11 +235,7 @@ export function tryNativeToUint8Array(
   address: string,
   chain: ChainId | Chain | Terra2Like
 ): Uint8Array {
-  if (isTerra2Like(chain)) {
-    return hexToUint8Array(tryNativeToHexString(address, chain));
-  }
-  const chainId = toChainId(chain);
-  return hexToUint8Array(tryNativeToHexString(address, chainId));
+  return hexToUint8Array(tryNativeToHexString(address, chain));
 }
 
 /**

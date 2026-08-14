@@ -12,7 +12,7 @@ import { assertKnownPayload, parse, Payload, VAA } from "../vaa";
 import {
   CLI_CHAINS,
   CliChain,
-  chainToChain,
+  chainToCliChain,
   cliChainIdToChain,
   cliChainToChainId,
   getChainRpc,
@@ -113,8 +113,8 @@ export const handler = async (
     vaa_chain = cliChainIdToChain(vaa_chain_id);
   }
 
-  // get chain from command line arg; chainToChain validates the name
-  const cli_chain = argv.chain ? chainToChain(argv.chain) : undefined;
+  // get chain from command line arg; chainToCliChain validates the name
+  const cli_chain = argv.chain ? chainToCliChain(argv.chain) : undefined;
 
   let chain: CliChain;
   if (cli_chain !== undefined) {

@@ -11,7 +11,7 @@ import {
   contracts,
   toChain,
 } from "@wormhole-foundation/sdk-base";
-import { CliChain, chainToChain, getNetwork } from "../../utils";
+import { CliChain, chainToCliChain, getNetwork } from "../../utils";
 
 export const command = "registrations <network> <chain> <module>";
 export const desc = "Print chain registrations";
@@ -45,7 +45,7 @@ export const builder = (y: typeof yargs) => {
 export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
-  const chain = chainToChain(argv.chain);
+  const chain = chainToCliChain(argv.chain);
   const network = getNetwork(argv.network);
   const module = argv.module;
   if (module !== "TokenBridge" && module !== "NFTBridge") {

@@ -7,21 +7,19 @@ import {
   getOriginalAssetSolana,
   getOriginalAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
-import { Terra2Like, getTerra2Client, isTerra2Like } from "../terra2";
+import { Terra2Like } from "../terra2";
 import { getOriginalAssetSui } from "../../sdk/sui";
 import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";
 import { getOriginalAssetSei } from "../sei/sdk";
 import { getProviderForChain } from "./provider";
-import {
-  Chain,
-  ChainId,
-  Network,
-  chainToPlatform,
-  contracts,
-  toChain,
-} from "@wormhole-foundation/sdk-base";
+import { Chain, ChainId, Network } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId } from "../../sdk/array";
+import {
+  cliChainToPlatform,
+  getTokenBridgeContract,
+  toCliChain,
+} from "../../utils";
 
 export const getOriginalAsset = async (
   chain: ChainId | Chain | Terra2Like,
@@ -29,19 +27,15 @@ export const getOriginalAsset = async (
   assetAddress: string,
   rpc?: string
 ): Promise<WormholeWrappedInfo> => {
-  if (isTerra2Like(chain)) {
-    const client = getTerra2Client(network, rpc);
-    return getOriginalAssetTerra(client as any, assetAddress);
-  }
-  const chainName = toChain(chain);
-  const tokenBridgeAddress = contracts.tokenBridge.get(network, chainName);
+  const chainName = toCliChain(chain);
+  const tokenBridgeAddress = getTokenBridgeContract(network, chainName);
   if (!tokenBridgeAddress) {
     throw new Error(
       `Token bridge address not defined for ${chainName} ${network}`
     );
   }
 
-  if (chainToPlatform(chainName) === "Evm") {
+  if (cliChainToPlatform(chainName) === "Evm") {
     const provider = getProviderForChain(chainName, network, {
       rpc,
     }) as ethers.providers.JsonRpcProvider;
@@ -57,6 +51,12 @@ export const getOriginalAsset = async (
     case "Solana": {
       const provider = getProviderForChain(chainName, network, { rpc });
       return getOriginalAssetSolana(provider, tokenBridgeAddress, assetAddress);
+    }
+    case "Terra2": {
+      const provider = getProviderForChain(chainName, network, { rpc });
+      // the legacy SDK bundles its own (older) @terra-money/terra.js; the
+      // LCD client is runtime-compatible
+      return getOriginalAssetTerra(provider as any, assetAddress);
     }
     case "Injective": {
       const provider = getProviderForChain(chainName, network, { rpc });

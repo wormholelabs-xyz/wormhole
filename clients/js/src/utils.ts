@@ -72,6 +72,11 @@ export function cliChainIdToChain(chainId: number): CliChain {
   return chainIdToChain(chainId);
 }
 
+/** Normalize a chain name or id — including Terra2's — to a CliChain name. */
+export function toCliChain(chain: ChainId | Chain | Terra2Like): CliChain {
+  return isTerra2Like(chain) ? TERRA2 : toChain(chain);
+}
+
 export function cliChainToPlatform(
   chain: ChainId | CliChain | Terra2Like
 ): Platform {
@@ -143,7 +148,7 @@ export function getNetwork(network: string): Network {
   throw new Error(`Unknown network: ${network}`);
 }
 
-export function chainToChain(input: string): CliChain {
+export function chainToCliChain(input: string): CliChain {
   if (input.length < 2) {
     throw new Error(`Invalid chain: ${input}`);
   }

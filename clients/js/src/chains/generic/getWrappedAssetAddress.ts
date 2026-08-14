@@ -6,27 +6,19 @@ import {
   getForeignAssetSolana,
   getForeignAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getForeignAsset";
-import {
-  Terra2Like,
-  getTerra2Client,
-  isTerra2Like,
-  terra2Contracts,
-} from "../terra2";
+import { Terra2Like } from "../terra2";
 import { getForeignAssetSui } from "../../sdk/sui";
 import { getForeignAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";
 import { getForeignAssetSei } from "../sei/sdk";
 import { getProviderForChain } from "./provider";
-import {
-  Chain,
-  ChainId,
-  Network,
-  chainToPlatform,
-  contracts,
-  toChain,
-  toChainId,
-} from "@wormhole-foundation/sdk-base";
+import { Chain, ChainId, Network } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId, tryNativeToUint8Array } from "../../sdk/array";
+import {
+  cliChainToPlatform,
+  getTokenBridgeContract,
+  toCliChain,
+} from "../../utils";
 
 export const getWrappedAssetAddress = async (
   chain: ChainId | Chain | Terra2Like,
@@ -39,24 +31,15 @@ export const getWrappedAssetAddress = async (
     originAddress,
     originChain
   );
-  if (isTerra2Like(chain)) {
-    const client = getTerra2Client(network, rpc);
-    return getForeignAssetTerra(
-      terra2Contracts(network).tokenBridge,
-      client as any,
-      toLegacyChainId(originChain),
-      originAddressUint8Array
-    );
-  }
-  const chainName = toChain(chain);
-  const tokenBridgeAddress = contracts.tokenBridge.get(network, chainName);
+  const chainName = toCliChain(chain);
+  const tokenBridgeAddress = getTokenBridgeContract(network, chainName);
   if (!tokenBridgeAddress) {
     throw new Error(
       `Token bridge address not defined for ${chainName} ${network}`
     );
   }
 
-  if (chainToPlatform(chainName) === "Evm") {
+  if (cliChainToPlatform(chainName) === "Evm") {
     const provider = getProviderForChain(chainName, network, {
       rpc,
     }) as ethers.providers.JsonRpcProvider;
@@ -78,6 +61,17 @@ export const getWrappedAssetAddress = async (
         originAddressUint8Array
       );
     }
+    case "Terra2": {
+      const provider = getProviderForChain(chainName, network, { rpc });
+      // the legacy SDK bundles its own (older) @terra-money/terra.js; the
+      // LCD client is runtime-compatible
+      return getForeignAssetTerra(
+        tokenBridgeAddress,
+        provider as any,
+        toLegacyChainId(originChain),
+        originAddressUint8Array
+      );
+    }
     case "Injective": {
       const provider = getProviderForChain(chainName, network, { rpc });
       // the legacy SDK bundles its own (older) @injectivelabs/sdk-ts; the
@@ -94,7 +88,7 @@ export const getWrappedAssetAddress = async (
       return getForeignAssetSei(
         tokenBridgeAddress,
         provider,
-        toChainId(originChain),
+        originChain,
         originAddressUint8Array
       );
     }
@@ -130,7 +124,7 @@ export const getWrappedAssetAddress = async (
       return getForeignAssetSui(
         provider,
         tokenBridgeAddress,
-        toChain(originChain),
+        toCliChain(originChain),
         originAddressUint8Array
       );
     }

@@ -1,7 +1,7 @@
 import yargs from "yargs";
 import { getOriginalAsset } from "../../chains/generic";
 import { RPC_OPTIONS } from "../../consts";
-import { getNetwork, chainToChain, cliChainIdToChain } from "../../utils";
+import { getNetwork, chainToCliChain, cliChainIdToChain } from "../../utils";
 import { tryUint8ArrayToNative } from "../../sdk/array";
 
 export const command = "origin <chain> <address>";
@@ -35,7 +35,7 @@ export const handler = async (
 
   const network = getNetwork(argv.network);
   const res = await getOriginalAsset(
-    chainToChain(argv.chain),
+    chainToCliChain(argv.chain),
     network,
     argv.address
   );

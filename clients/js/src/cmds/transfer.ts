@@ -10,7 +10,7 @@ import { transferAptos } from "../aptos";
 import { PlatformToChains } from "@wormhole-foundation/sdk-base";
 import {
   CliChain,
-  chainToChain,
+  chainToCliChain,
   cliChainToPlatform,
   getChainRpc,
   getNetwork,
@@ -60,8 +60,8 @@ export const builder = (y: typeof yargs) =>
 export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
-  const srcChain: CliChain = chainToChain(argv["src-chain"]);
-  const dstChain: CliChain = chainToChain(argv["dst-chain"]);
+  const srcChain: CliChain = chainToCliChain(argv["src-chain"]);
+  const dstChain: CliChain = chainToCliChain(argv["dst-chain"]);
   // TODO: support transfers to sei
   if (dstChain === "Sei") {
     throw new Error("transfer to sei currently unsupported");

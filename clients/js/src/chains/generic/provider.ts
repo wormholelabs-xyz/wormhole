@@ -8,20 +8,18 @@ import { SuiGrpcClient } from "@mysten/sui/grpc";
 import { getSuiNetwork } from "../sui/utils";
 import { getCosmWasmClient } from "@sei-js/core";
 import { Connection as SolanaConnection } from "@solana/web3.js";
+import type { LCDClient as TerraLCDClient } from "@terra-money/terra.js";
 import { Algodv2 } from "algosdk";
 import { AptosClient } from "aptos";
 import { ethers } from "ethers";
 import { connect } from "near-api-js";
 import { Provider as NearProvider } from "near-api-js/lib/providers";
 import { NETWORKS } from "../../consts";
-import {
-  Chain,
-  Network,
-  PlatformToChains,
-  chainToPlatform,
-} from "@wormhole-foundation/sdk-base";
+import { getTerra2Client } from "../terra2";
+import { Network, PlatformToChains } from "@wormhole-foundation/sdk-base";
+import { CliChain, cliChainToPlatform, getChainRpc } from "../../utils";
 
-export type ChainProvider<T extends Chain> = T extends "Algorand"
+export type ChainProvider<T extends CliChain> = T extends "Algorand"
   ? Algodv2
   : T extends "Aptos"
   ? AptosClient
@@ -31,6 +29,8 @@ export type ChainProvider<T extends Chain> = T extends "Algorand"
   ? ChainGrpcWasmApi
   : T extends "Near"
   ? Promise<NearProvider>
+  : T extends "Terra2"
+  ? TerraLCDClient
   : T extends "Sei"
   ? Promise<CosmWasmClient>
   : T extends "Solana"
@@ -39,23 +39,25 @@ export type ChainProvider<T extends Chain> = T extends "Algorand"
   ? SuiGrpcClient
   : never;
 
-export const getProviderForChain = <T extends Chain>(
+export const getProviderForChain = <T extends CliChain>(
   chain: T,
   network: Network,
   options?: { rpc?: string; [opt: string]: any }
 ): ChainProvider<T> => {
-  const rpc = options?.rpc ?? NETWORKS[network][chain].rpc;
+  const rpc = options?.rpc ?? getChainRpc(network, chain);
   if (!rpc) {
     throw new Error(`No ${network} rpc defined for ${chain}`);
   }
 
-  if (chainToPlatform(chain) === "Evm") {
+  if (cliChainToPlatform(chain) === "Evm") {
     return new ethers.providers.JsonRpcProvider(rpc) as ChainProvider<T>;
   }
 
   switch (chain) {
     case "Solana":
       return new SolanaConnection(rpc, "confirmed") as ChainProvider<T>;
+    case "Terra2":
+      return getTerra2Client(network, rpc) as ChainProvider<T>;
     case "Injective": {
       const endpoints = getNetworkEndpoints(
         network === "Mainnet"
