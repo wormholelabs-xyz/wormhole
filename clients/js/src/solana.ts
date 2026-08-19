@@ -52,7 +52,6 @@ export async function execute_solana(
   chain: Chain
 ) {
   if (chainToPlatform(chain) !== "Solana") {
-    // This "Solana" platform, also, includes Pythnet
     throw new Error("Invalid chain");
   }
   const { rpc, key } = NETWORKS[network][chain];
@@ -261,7 +260,6 @@ export async function transferSolana(
   network: Network,
   rpc: string
 ) {
-  platformToChains("Solana");
   const { key } = NETWORKS[network][srcChain];
   if (!key) {
     throw Error(`No ${network} key defined for ${srcChain}`);

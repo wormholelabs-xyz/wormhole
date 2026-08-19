@@ -6,24 +6,24 @@ import {
   getForeignAssetSolana,
   getForeignAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getForeignAsset";
-import { Terra2Like } from "../terra2";
 import { getForeignAssetSui } from "../../sdk/sui";
 import { getForeignAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";
 import { getForeignAssetSei } from "../sei/sdk";
 import { getProviderForChain } from "./provider";
-import { Chain, ChainId, Network } from "@wormhole-foundation/sdk-base";
+import { Network } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId, tryNativeToUint8Array } from "../../sdk/array";
 import {
+  CliChainLike,
   cliChainToPlatform,
   getTokenBridgeContract,
   toCliChain,
 } from "../../utils";
 
 export const getWrappedAssetAddress = async (
-  chain: ChainId | Chain | Terra2Like,
+  chain: CliChainLike,
   network: Network,
-  originChain: ChainId | Chain | Terra2Like,
+  originChain: CliChainLike,
   originAddress: string,
   rpc?: string
 ): Promise<string | null> => {

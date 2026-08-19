@@ -1,16 +1,11 @@
-import { Chain, ChainId } from "@wormhole-foundation/sdk-base";
-import { Terra2Like } from "./chains/terra2/consts";
-import { cliChainToPlatform, toCliChain } from "./utils";
+import { CliChainLike, cliChainToPlatform, toCliChain } from "./utils";
 import { decodeAddress, getApplicationAddress } from "algosdk";
 import { uint8ArrayToHex } from "./sdk/array";
 import { arrayify, sha256, zeroPad } from "ethers/lib/utils";
 import { bech32 } from "bech32";
 import { PublicKey } from "@solana/web3.js";
 
-export async function getEmitterAddress(
-  chain: ChainId | Chain | Terra2Like,
-  addr: string
-) {
+export async function getEmitterAddress(chain: CliChainLike, addr: string) {
   const localChain = toCliChain(chain);
   if (cliChainToPlatform(localChain) === "Solana") {
     const seeds = [Buffer.from("emitter")];

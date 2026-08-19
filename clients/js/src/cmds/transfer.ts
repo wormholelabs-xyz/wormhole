@@ -16,6 +16,7 @@ import {
   getNetwork,
 } from "../utils";
 import { TERRA2, transferTerra2 } from "../chains/terra2";
+import { isDeprecatedChain } from "../chains/deprecated";
 
 export const command = "transfer";
 export const desc = "Transfer a token";
@@ -65,6 +66,11 @@ export const handler = async (
   // TODO: support transfers to sei
   if (dstChain === "Sei") {
     throw new Error("transfer to sei currently unsupported");
+  }
+  if (isDeprecatedChain(dstChain)) {
+    throw new Error(
+      `${dstChain} was dropped from the SDK and has no live bridge; transfers to it are not supported`
+    );
   }
   if (srcChain === dstChain) {
     throw new Error("source and destination chains can't be the same");

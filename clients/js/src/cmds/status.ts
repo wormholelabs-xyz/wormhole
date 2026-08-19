@@ -1,13 +1,14 @@
 import yargs from "yargs";
 import { ethers } from "ethers";
 import { NETWORKS } from "../consts";
-import { chainToCliChain, getNetwork } from "../utils";
 import {
-  Chain,
-  assertChain,
-  chainToChainId,
-  contracts,
-} from "@wormhole-foundation/sdk-base";
+  chainToCliChain,
+  cliChainToChainId,
+  getChainRpc,
+  getNetwork,
+  getRelayerContract,
+} from "../utils";
+import { Chain, chainToChainId } from "@wormhole-foundation/sdk-base";
 import {
   CHAIN_ID_TO_NAME,
   ChainName,
@@ -41,14 +42,13 @@ export const handler = async (
 ) => {
   const network = getNetwork(argv.network);
   const chain = chainToCliChain(argv.chain);
-  assertChain(chain);
 
-  const addr = contracts.relayer.get(network, chain);
+  const addr = getRelayerContract(network, chain);
   if (!addr) {
     throw new Error(`Wormhole Relayer not deployed on ${chain} in ${network}`);
   }
 
-  const sourceRPC = NETWORKS[network][chain].rpc;
+  const sourceRPC = getChainRpc(network, chain);
   const sourceChainProvider = new ethers.providers.JsonRpcProvider(sourceRPC);
   const targetChainProviders = new Map<ChainName, ethers.providers.Provider>();
   for (const key in NETWORKS[network]) {
@@ -63,7 +63,7 @@ export const handler = async (
     );
   }
 
-  const sourceChainId = chainToChainId(chain);
+  const sourceChainId = cliChainToChainId(chain);
   if (!(sourceChainId in CHAIN_ID_TO_NAME)) {
     throw new Error(`${chain} is not supported by the legacy relayer SDK`);
   }
@@ -75,8 +75,8 @@ export const handler = async (
       network === "Devnet"
         ? "DEVNET"
         : network === "Testnet"
-        ? "TESTNET"
-        : "MAINNET",
+          ? "TESTNET"
+          : "MAINNET",
     sourceChainProvider,
     targetChainProviders,
   });

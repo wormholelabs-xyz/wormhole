@@ -7,22 +7,22 @@ import {
   getOriginalAssetSolana,
   getOriginalAssetTerra,
 } from "@certusone/wormhole-sdk/lib/esm/token_bridge/getOriginalAsset";
-import { Terra2Like } from "../terra2";
 import { getOriginalAssetSui } from "../../sdk/sui";
 import { getOriginalAssetInjective } from "@certusone/wormhole-sdk/lib/esm/token_bridge/injective";
 import { ethers } from "ethers";
 import { getOriginalAssetSei } from "../sei/sdk";
 import { getProviderForChain } from "./provider";
-import { Chain, ChainId, Network } from "@wormhole-foundation/sdk-base";
+import { Network } from "@wormhole-foundation/sdk-base";
 import { toLegacyChainId } from "../../sdk/array";
 import {
+  CliChainLike,
   cliChainToPlatform,
   getTokenBridgeContract,
   toCliChain,
 } from "../../utils";
 
 export const getOriginalAsset = async (
-  chain: ChainId | Chain | Terra2Like,
+  chain: CliChainLike,
   network: Network,
   assetAddress: string,
   rpc?: string

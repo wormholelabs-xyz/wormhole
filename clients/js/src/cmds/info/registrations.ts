@@ -6,12 +6,16 @@ import yargs from "yargs";
 import { getEmitterAddress } from "../../emitter";
 import {
   Network,
-  chainToPlatform,
   chains,
   contracts,
   toChain,
 } from "@wormhole-foundation/sdk-base";
-import { CliChain, chainToCliChain, getNetwork } from "../../utils";
+import {
+  CliChain,
+  chainToCliChain,
+  cliChainToPlatform,
+  getNetwork,
+} from "../../utils";
 
 export const command = "registrations <network> <chain> <module>";
 export const desc = "Print chain registrations";
@@ -58,7 +62,7 @@ export const handler = async (
   } else if (chain === "Terra2") {
     const terra2 = require("../../chains/terra2");
     results = await terra2.queryRegistrationsTerra2(network, module);
-  } else if (chainToPlatform(chain) === "Evm") {
+  } else if (cliChainToPlatform(chain) === "Evm") {
     const evm = require("../../evm");
     results = await evm.queryRegistrationsEvm(network, chain, module);
   } else if (chain === "Injective") {

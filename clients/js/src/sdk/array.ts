@@ -3,7 +3,6 @@ import { PublicKey } from "@solana/web3.js";
 import { hexValue, hexZeroPad, keccak256, sha256 } from "ethers/lib/utils";
 import { bech32 } from "bech32";
 import {
-  Chain,
   ChainId,
   PlatformToChains,
   chainToChainId,
@@ -26,28 +25,28 @@ import { isValidSuiType } from "@certusone/wormhole-sdk/lib/esm/sui";
 import { ChainId as LegacyChainId } from "@certusone/wormhole-sdk/lib/esm/utils/consts";
 import {
   TERRA2_ADDRESS_PREFIX,
-  TERRA2_CHAIN_ID,
   TERRA2_NATIVE_DENOM,
   Terra2Like,
   isTerra2Like,
 } from "../chains/terra2/consts";
-import { cliChainToPlatform, toCliChain } from "../utils";
+import {
+  CliChainLike,
+  cliChainToChainId,
+  cliChainToPlatform,
+  toCliChain,
+} from "../utils";
 
 /**
  * Convert a chain to the legacy \@certusone/wormhole-sdk ChainId type.
  *
  * The legacy SDK is frozen, so its ChainId union doesn't include chains added
  * after its last release. On the wire a chain id is just a uint16, so passing
- * newer ids through the legacy functions is safe. Terra2 is handled by the
- * CLI's compatibility layer (the current SDK removed it; the legacy SDK still
- * knows id 18).
+ * newer ids through the legacy functions is safe. Terra2 and the chains the
+ * SDK dropped entirely are handled by `cliChainToChainId` (the legacy SDK
+ * still knows their ids).
  */
-export const toLegacyChainId = (
-  chain: ChainId | Chain | Terra2Like
-): LegacyChainId =>
-  (isTerra2Like(chain)
-    ? TERRA2_CHAIN_ID
-    : toChainId(chain)) as number as LegacyChainId;
+export const toLegacyChainId = (chain: CliChainLike): LegacyChainId =>
+  cliChainToChainId(toCliChain(chain)) as number as LegacyChainId;
 
 const isLikely20ByteCosmwasm = (h: string): boolean =>
   h.startsWith("000000000000000000000000");
@@ -93,7 +92,7 @@ export function buildTokenId(
 
 export const tryUint8ArrayToNative = (
   a: Uint8Array,
-  chain: ChainId | Chain | Terra2Like
+  chain: CliChainLike
 ): string => {
   const chainName = toCliChain(chain);
   if (cliChainToPlatform(chainName) === "Evm") {
@@ -184,7 +183,7 @@ export const tryHexToNativeAssetString = (h: string, c: ChainId): string =>
  */
 export const tryNativeToHexString = (
   address: string,
-  chain: ChainId | Chain | Terra2Like
+  chain: CliChainLike
 ): string => {
   const chainName = toCliChain(chain);
   if (cliChainToPlatform(chainName) === "Evm") {
@@ -233,7 +232,7 @@ export const tryNativeToHexString = (
  */
 export function tryNativeToUint8Array(
   address: string,
-  chain: ChainId | Chain | Terra2Like
+  chain: CliChainLike
 ): Uint8Array {
   return hexToUint8Array(tryNativeToHexString(address, chain));
 }

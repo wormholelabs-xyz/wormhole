@@ -113,6 +113,10 @@ const Mainnet = {
     rpc: "https://sei-rpc.polkachu.com/",
     key: getEnvVar("SEI_KEY"),
   },
+  Fogo: {
+    rpc: "https://mainnet.fogo.io",
+    key: getEnvVar("SOLANA_KEY"),
+  },
 };
 
 const Testnet = {
@@ -230,6 +234,10 @@ const Testnet = {
   PolygonSepolia: {
     rpc: "https://rpc-amoy.polygon.technology/",
     key: getEnvVar("ETH_KEY_TESTNET"),
+  },
+  Fogo: {
+    rpc: "https://testnet.fogo.io",
+    key: getEnvVar("SOLANA_KEY_TESTNET"),
   },
 };
 
