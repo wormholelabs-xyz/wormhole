@@ -26,18 +26,17 @@ export const DEPRECATED_CHAINS = {
   Blast: { id: 36, platform: "Evm" },
   Xlayer: { id: 37, platform: "Evm" },
   Snaxchain: { id: 43, platform: "Evm" },
-} as const satisfies Record<string, { id: number; platform: Platform }>;
+} as const;
 
 export type DeprecatedChain = keyof typeof DEPRECATED_CHAINS;
-export type DeprecatedChainId =
-  (typeof DEPRECATED_CHAINS)[DeprecatedChain]["id"];
+export type DeprecatedChainId = typeof DEPRECATED_CHAINS[DeprecatedChain]["id"];
 export type DeprecatedChainLike = DeprecatedChain | DeprecatedChainId;
 
 const idToDeprecatedChain = new Map<number, DeprecatedChain>(
   (
     Object.entries(DEPRECATED_CHAINS) as [
       DeprecatedChain,
-      (typeof DEPRECATED_CHAINS)[DeprecatedChain],
+      typeof DEPRECATED_CHAINS[DeprecatedChain]
     ][]
   ).map(([name, { id }]) => [id, name])
 );
