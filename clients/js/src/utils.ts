@@ -218,6 +218,22 @@ export function getNetwork(network: string): Network {
   throw new Error(`Unknown network: ${network}`);
 }
 
+/**
+ * Reject chains the SDK dropped entirely: their ids/names still surface in
+ * historical VAAs and on-chain state (so the CLI can *name* them), but they
+ * have no live bridge to execute against.
+ */
+export function assertLiveChain(
+  chain: CliChain,
+  unsupported: string
+): asserts chain is Exclude<CliChain, DeprecatedChain> {
+  if (isDeprecatedChain(chain)) {
+    throw new Error(
+      `${chain} was dropped from the SDK and has no live bridge; ${unsupported}`
+    );
+  }
+}
+
 export function chainToCliChain(input: string): CliChain {
   const match = CLI_CHAINS.find(
     (chain) => chain.toLowerCase() === input.toLowerCase()

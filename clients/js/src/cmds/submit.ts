@@ -12,6 +12,7 @@ import { assertKnownPayload, parse, Payload, VAA } from "../vaa";
 import {
   CLI_CHAINS,
   CliChain,
+  assertLiveChain,
   chainToCliChain,
   cliChainIdToChain,
   cliChainToChainId,
@@ -23,6 +24,7 @@ import {
 } from "../utils";
 import { Network, PlatformToChains } from "@wormhole-foundation/sdk";
 import { TERRA2, execute_terra2 } from "../chains/terra2";
+import { isDeprecatedChain } from "../chains/deprecated";
 
 export const command = "submit <vaa>";
 export const desc = "Execute a VAA";
@@ -130,6 +132,10 @@ export const handler = async (
     chain = vaa_chain;
   }
 
+  // the VAA (or --chain) may name a chain the SDK dropped — we can decode
+  // those, but there is nothing live to submit to
+  assertLiveChain(chain, "VAAs cannot be submitted to it");
+
   await executeSubmit(
     vaa_hex,
     parsed_vaa,
@@ -209,6 +215,12 @@ async function submitToAll(
   }
 
   for (const chain of CLI_CHAINS) {
+    if (isDeprecatedChain(chain)) {
+      console.log(
+        `Skipping ${chain} because it was dropped from the SDK and has no live bridge`
+      );
+      continue;
+    }
     const rpc = getChainRpc(network, chain);
     if (cliChainToChainId(chain) === skip_chain_id) {
       console.log(`Skipping ${chain} because it's the origin chain`);

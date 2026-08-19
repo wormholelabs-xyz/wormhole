@@ -10,13 +10,13 @@ import { transferAptos } from "../aptos";
 import { PlatformToChains } from "@wormhole-foundation/sdk-base";
 import {
   CliChain,
+  assertLiveChain,
   chainToCliChain,
   cliChainToPlatform,
   getChainRpc,
   getNetwork,
 } from "../utils";
 import { TERRA2, transferTerra2 } from "../chains/terra2";
-import { isDeprecatedChain } from "../chains/deprecated";
 
 export const command = "transfer";
 export const desc = "Transfer a token";
@@ -67,11 +67,8 @@ export const handler = async (
   if (dstChain === "Sei") {
     throw new Error("transfer to sei currently unsupported");
   }
-  if (isDeprecatedChain(dstChain)) {
-    throw new Error(
-      `${dstChain} was dropped from the SDK and has no live bridge; transfers to it are not supported`
-    );
-  }
+  assertLiveChain(srcChain, "transfers from it are not supported");
+  assertLiveChain(dstChain, "transfers to it are not supported");
   if (srcChain === dstChain) {
     throw new Error("source and destination chains can't be the same");
   }

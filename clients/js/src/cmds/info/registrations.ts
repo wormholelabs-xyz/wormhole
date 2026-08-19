@@ -12,6 +12,7 @@ import {
 } from "@wormhole-foundation/sdk-base";
 import {
   CliChain,
+  assertLiveChain,
   chainToCliChain,
   cliChainToPlatform,
   getNetwork,
@@ -50,6 +51,9 @@ export const handler = async (
   argv: Awaited<ReturnType<typeof builder>["argv"]>
 ) => {
   const chain = chainToCliChain(argv.chain);
+  // deprecated chains can still appear *inside* query results (their ids
+  // linger in on-chain registrations), but they can't be the queried chain
+  assertLiveChain(chain, "its registrations cannot be queried");
   const network = getNetwork(argv.network);
   const module = argv.module;
   if (module !== "TokenBridge" && module !== "NFTBridge") {
@@ -81,7 +85,7 @@ export const handler = async (
     throw Error(`Command not supported for chain ${chain}`);
   }
   if (argv["verify"]) {
-    verifyRegistrations(network, chain, module, results);
+    await verifyRegistrations(network, chain, module, results);
   } else {
     console.log(results);
   }

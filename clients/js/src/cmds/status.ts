@@ -2,6 +2,7 @@ import yargs from "yargs";
 import { ethers } from "ethers";
 import { NETWORKS } from "../consts";
 import {
+  assertLiveChain,
   chainToCliChain,
   cliChainToChainId,
   getChainRpc,
@@ -42,6 +43,7 @@ export const handler = async (
 ) => {
   const network = getNetwork(argv.network);
   const chain = chainToCliChain(argv.chain);
+  assertLiveChain(chain, "relayer status cannot be queried for it");
 
   const addr = getRelayerContract(network, chain);
   if (!addr) {
