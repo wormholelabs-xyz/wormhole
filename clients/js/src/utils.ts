@@ -49,7 +49,10 @@ export type CliChain = Chain | Terra2 | DeprecatedChain;
  * equivalent.
  */
 export type CliChainLike =
-  ChainId | CliChain | Terra2Like | DeprecatedChainLike;
+  | ChainId
+  | CliChain
+  | Terra2Like
+  | DeprecatedChainLike;
 
 export const checkBinary = (binaryName: string, readmeUrl?: string): void => {
   const binary = spawnSync(binaryName, ["--version"]);

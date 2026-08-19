@@ -77,8 +77,8 @@ export const handler = async (
       network === "Devnet"
         ? "DEVNET"
         : network === "Testnet"
-          ? "TESTNET"
-          : "MAINNET",
+        ? "TESTNET"
+        : "MAINNET",
     sourceChainProvider,
     targetChainProviders,
   });
