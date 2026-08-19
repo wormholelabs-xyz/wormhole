@@ -149,12 +149,11 @@ export function getNetwork(network: string): Network {
 }
 
 export function chainToCliChain(input: string): CliChain {
-  if (input.length < 2) {
+  const match = CLI_CHAINS.find(
+    (chain) => chain.toLowerCase() === input.toLowerCase()
+  );
+  if (!match) {
     throw new Error(`Invalid chain: ${input}`);
   }
-  const chainStr = input[0].toUpperCase() + input.slice(1).toLowerCase();
-  if (chainStr === TERRA2) {
-    return TERRA2;
-  }
-  return toChain(chainStr);
+  return match;
 }

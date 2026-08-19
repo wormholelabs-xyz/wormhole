@@ -95,9 +95,9 @@ export const handler = async (
       network,
       rpc
     );
-  } else if (srcChain === "Solana" || srcChain === "Pythnet") {
+  } else if (cliChainToPlatform(srcChain) === "Solana") {
     await transferSolana(
-      srcChain,
+      srcChain as PlatformToChains<"Solana">,
       dstChain,
       dstAddr,
       tokenAddr,

@@ -21,7 +21,7 @@ import {
   VAA,
   WormholeRelayerSetDefaultDeliveryProvider,
 } from "../vaa";
-import { Platform, platforms, toChainId } from "@wormhole-foundation/sdk-base";
+import { Platform, platforms } from "@wormhole-foundation/sdk-base";
 
 function makeVAA(
   emitterChain: number,
@@ -311,7 +311,7 @@ export const builder = function (y: typeof yargs) {
           const payload: WormholeRelayerSetDefaultDeliveryProvider = {
             module: "WormholeRelayer",
             type: "SetDefaultDeliveryProvider",
-            chain: toChainId(chain),
+            chain: cliChainToChainId(chain),
             relayProviderAddress: parseAddress(
               chain,
               argv["delivery-provider-address"]
@@ -358,36 +358,7 @@ function parseAddressByPlatform(platform: Platform, address: string): string {
 }
 
 function parseAddress(chain: CliChain, address: string): string {
-  if (cliChainToPlatform(chain) === "Evm") {
-    return "0x" + evm_address(address);
-  } else if (cliChainToPlatform(chain) === "Cosmwasm") {
-    return "0x" + toHex(fromBech32(address).data).padStart(64, "0");
-  } else if (chain === "Solana" || chain === "Pythnet") {
-    return "0x" + toHex(base58.decode(address)).padStart(64, "0");
-  } else if (chain === "Algorand") {
-    // TODO: is there a better native format for algorand?
-    return "0x" + evm_address(address);
-  } else if (chain === "Near") {
-    return "0x" + evm_address(address);
-  } else if (chain === "Sui") {
-    return "0x" + evm_address(address);
-  } else if (chain === "Aptos") {
-    if (/^(0x)?[0-9a-fA-F]+$/.test(address)) {
-      return "0x" + evm_address(address);
-    }
-
-    return sha3_256(Buffer.from(address)); // address is hash of fully qualified type
-  } else if (chain === "Btc") {
-    throw Error("btc is not supported yet");
-  } else if (chain === "Cosmoshub") {
-    throw Error("cosmoshub is not supported yet");
-  } else if (chain === "Evmos") {
-    throw Error("evmos is not supported yet");
-  } else if (chain === "Kujira") {
-    throw Error("kujira is not supported yet");
-  } else {
-    throw Error(`Unsupported chain: ${chain}`);
-  }
+  return parseAddressByPlatform(cliChainToPlatform(chain), address);
 }
 
 function parseCodeAddress(chain: CliChain, address: string): string {

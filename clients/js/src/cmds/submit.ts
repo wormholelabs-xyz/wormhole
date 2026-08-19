@@ -15,16 +15,13 @@ import {
   chainToCliChain,
   cliChainIdToChain,
   cliChainToChainId,
+  cliChainToPlatform,
   getChainRpc,
   getNetwork,
   getNftBridgeContract,
   getTokenBridgeContract,
 } from "../utils";
-import {
-  Network,
-  PlatformToChains,
-  chainToPlatform,
-} from "@wormhole-foundation/sdk";
+import { Network, PlatformToChains } from "@wormhole-foundation/sdk";
 import { TERRA2, execute_terra2 } from "../chains/terra2";
 
 export const command = "submit <vaa>";
@@ -155,7 +152,7 @@ async function executeSubmit(
 ) {
   if (chain === TERRA2) {
     await execute_terra2(parsedVaa.payload, buf, network);
-  } else if (chainToPlatform(chain) === "Evm") {
+  } else if (cliChainToPlatform(chain) === "Evm") {
     await execute_evm(
       parsedVaa.payload,
       buf,
@@ -164,8 +161,13 @@ async function executeSubmit(
       contractAddress,
       rpc
     );
-  } else if (chain === "Solana" || chain === "Pythnet") {
-    await execute_solana(parsedVaa, buf, network, chain);
+  } else if (cliChainToPlatform(chain) === "Solana") {
+    await execute_solana(
+      parsedVaa,
+      buf,
+      network,
+      chain as PlatformToChains<"Solana">
+    );
   } else if (chain === "Algorand") {
     await execute_algorand(
       parsedVaa.payload,
