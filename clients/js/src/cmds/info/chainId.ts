@@ -14,5 +14,5 @@ export const builder = (y: typeof yargs) => {
 };
 export const handler = (argv: Awaited<ReturnType<typeof builder>["argv"]>) => {
   const inputChain = chainToCliChain(argv.chain);
-  console.log(cliChainToChainId(inputChain));
+  console.log(cliChainToChainId(inputChain).toString());
 };
