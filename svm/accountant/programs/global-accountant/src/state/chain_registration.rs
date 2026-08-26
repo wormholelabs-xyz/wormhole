@@ -1,6 +1,4 @@
-//! Zero-copy load/store/verify helpers for `ChainRegistrationLayout`.
-//!
-//! Read-only on the submit paths; written only by `register_chain`.
+//! Load / store / check helpers for `ChainRegistrationLayout`.
 
 use anchor_lang::prelude::*;
 
@@ -9,9 +7,8 @@ use crate::definitions::{
 };
 use crate::err;
 
-/// Read a [`ChainRegistrationLayout`]. Returns `MissingChainRegistration` if
-/// the account is system-owned (no registration VAA landed) or `InvalidPda` on
-/// wrong length. Caller must verify the canonical address first.
+/// `MissingChainRegistration` if system-owned; `InvalidPda` on wrong length or tag.
+/// Caller checks the address first.
 pub fn load(account: &AccountInfo) -> accountant_operational_core::ProgramCoreResult<ChainRegistrationLayout> {
     if account.owner == &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::MissingChainRegistration));
@@ -21,15 +18,12 @@ pub fn load(account: &AccountInfo) -> accountant_operational_core::ProgramCoreRe
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     let layout = bytemuck::from_bytes::<ChainRegistrationLayout>(&data);
-    // Defense-in-depth: offset-0 tag must match (tag 0 = uninitialised).
     if layout.tag != ChainRegistrationLayout::TAG {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     Ok(*layout)
 }
 
-/// Write a [`ChainRegistrationLayout`] into the account's data buffer (used by
-/// `register_chain` after allocation).
 pub fn store(
     account: &AccountInfo,
     value: &ChainRegistrationLayout,
@@ -42,10 +36,8 @@ pub fn store(
     Ok(())
 }
 
-/// Chain-registration cross-check used by both submit paths:
-/// 1. The account must live at the canonical address (rejecting a foreign
-///    account masquerading as the registration PDA).
-/// 2. The on-disk `emitter_address` must equal the body header's emitter.
+/// SECURITY: `registration_pda` must be at the address for `body_chain`, and its
+/// `emitter_address` must equal `body_emitter`.
 pub fn verify(
     program_id: &Pubkey,
     registration_pda: &AccountInfo,

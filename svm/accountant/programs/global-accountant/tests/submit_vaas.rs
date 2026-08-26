@@ -1,8 +1,5 @@
-//! Integration tests for `submit_vaas`.
-//!
-//! Driven against a Mollusk instance with the real `solana_noreplay.so` and
-//! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
-//! `common::mollusk_fixtures`).
+//! Mollusk integration tests for `submit_vaas`, with the real `solana_noreplay.so` and
+//! `wormhole_verify_vaa_shim.so` (see `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -33,14 +30,11 @@ use common::mollusk_fixtures::{
 const PROGRAM_NAME: &str = "global_accountant";
 const GUARDIAN_COUNT: usize = 19;
 const QUORUM: u8 = 13;
-/// Guardian set index baked into the fixtures. `submit_vaas` records the
-/// sentinel `0` in the commit log's `guardian_set_index` slot (the Shim
-/// accepts any currently-active set, so no single index meaningfully
-/// describes the authorisation).
+/// Guardian set index in the fixtures. `submit_vaas` logs `guardian_set_index = 0`.
 const GUARDIAN_SET_INDEX: u32 = 4;
 
 fn program_id() -> Pubkey {
-    // Fixed program id so PDA derivations match the program's view.
+    // Fixed program id; PDA derivation must match the program.
     Pubkey::new_from_array([7u8; 32])
 }
 
@@ -59,10 +53,6 @@ fn core_bridge_program_id() -> Pubkey {
 fn shim_program_id() -> Pubkey {
     Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
 }
-
-// ============================================================================
-// PDA derivation helpers
-// ============================================================================
 
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
@@ -119,15 +109,11 @@ fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account
     }
 }
 
-/// Host-side `keccak256(keccak256(body))` — the Wormhole digest convention.
+/// Dedup digest `keccak256(keccak256(body))`.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
-
-// ============================================================================
-// VAA body builders — mirror the helpers in `submit_observations.rs` tests.
-// ============================================================================
 
 fn build_attest_body(emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> Vec<u8> {
     let mut body = vec![0u8; 52];
@@ -161,12 +147,8 @@ fn build_transfer_body(
     body
 }
 
-// ============================================================================
-// Wire builders
-// ============================================================================
-
 fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
-    // Wire: discriminator + guardian_set_bump + 2-byte body len (LE) + body.
+    // Wire: discriminator + guardian_set_bump + body_len(u16 LE) + body.
     let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::SubmitVaas as u8);
     data.push(guardian_set_bump);
@@ -174,10 +156,6 @@ fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
     data.extend_from_slice(body);
     data
 }
-
-// ============================================================================
-// Account fixtures
-// ============================================================================
 
 fn system_owned_account(lamports: u64) -> Account {
     Account {
@@ -193,13 +171,12 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// Fresh NoReplay bucket: system-owned, zero data.
+/// Uninitialised NoReplay bucket.
 fn noreplay_bucket_unmarked() -> Account {
     system_owned_account(0)
 }
 
-/// Pre-marked NoReplay bucket: 129-byte bitmap with the bit at `sequence % 1024`
-/// set.
+/// NoReplay bucket with the bit at `sequence % 1024` set.
 fn noreplay_bucket_marked(sequence: u64) -> Account {
     let mut data = vec![0u8; NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES];
     let bit_index = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
@@ -213,8 +190,7 @@ fn noreplay_bucket_marked(sequence: u64) -> Account {
     }
 }
 
-/// `GuardianSignatures` fixture: quorum guardians sign the digest, packed into
-/// the Shim layout for `VerifyHash` recovery.
+/// `GuardianSignatures` fixture in the Shim layout, signed by a quorum.
 fn real_guardian_signatures_account(
     digest: &[u8; 32],
     refund_recipient: &Pubkey,
@@ -231,15 +207,11 @@ fn real_guardian_signatures_account(
     )
 }
 
-/// `GuardianSet` fixture: 19 synthetic addresses, never-expires, Core-Bridge-owned.
+/// `GuardianSet` fixture: 19 addresses, never expires, Core-Bridge-owned.
 fn real_guardian_set_account(guardians: &[Guardian]) -> Account {
     let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
     guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id())
 }
-
-// ============================================================================
-// Scenario builder
-// ============================================================================
 
 #[derive(Clone)]
 struct Scenario {
@@ -261,7 +233,7 @@ struct Scenario {
 }
 
 impl Scenario {
-    /// Default Attest-payload scenario; `with_transfer_body` swaps in a Transfer.
+    /// Default Attest scenario; `with_transfer_body` swaps in a Transfer.
     fn new(seed: u8) -> Self {
         let chain: u16 = 2;
         let mut emitter = [0u8; 32];
@@ -294,7 +266,7 @@ impl Scenario {
             guardian_signatures_pubkey: Pubkey::new_from_array([0xC5u8; 32]),
             noreplay_bucket_pubkey,
             noreplay_authority_pubkey,
-            // Sentinel: Attest payloads never touch slots 7/8.
+            // Attest: slots 7/8 unused.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
             chain_registration_pubkey,
@@ -368,7 +340,6 @@ impl Scenario {
             accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
         }
         accounts.push(keyed_account_for_system_program());
-        // Slot 10: chain-registration PDA pre-populated with (chain, emitter).
         accounts.push((
             self.chain_registration_pubkey,
             chain_registration_account(self.chain, &self.emitter),
@@ -398,8 +369,7 @@ fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Acco
         .1
 }
 
-/// Assert the bucket is noreplay-owned, 129 bytes, with the bit at
-/// `sequence % 1024` set.
+/// Assert the bucket is NoReplay-owned, 129 bytes, bit at `sequence % 1024` set.
 fn assert_bucket_marked(bucket: &Account, sequence: u64) {
     assert_eq!(
         bucket.owner,
@@ -417,8 +387,7 @@ fn assert_bucket_marked(bucket: &Account, sequence: u64) {
     assert_eq!(bucket.data[byte] & mask, mask, "bitmap bit set");
 }
 
-/// Assert the bucket is still in its lazy-create entry state (system-owned,
-/// empty).
+/// Assert the bucket is uninitialised.
 fn assert_bucket_unmarked(bucket: &Account) {
     assert_eq!(
         bucket.owner,
@@ -428,12 +397,7 @@ fn assert_bucket_unmarked(bucket: &Account) {
     assert!(bucket.data.is_empty(), "bucket still uninitialised");
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-/// Happy path: Ethereum-native USDC transfer to Solana credits both source
-/// (native) and dest (wrapped), flips NoReplay, and opens the DigestAccount.
+/// Ethereum-native USDC to Solana: both balance PDAs credit, NoReplay flips.
 #[test]
 fn submit_vaas_transfer_commits_balances_and_opens_digest() {
     let mollusk = mollusk();
@@ -446,8 +410,6 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
         1, // recipient_chain = Solana (wrapped destination)
     );
 
-    // Pre-state: both Account PDAs start system-owned and empty, so this path
-    // also exercises lazy-init of both.
     let initial = scenario.initial_accounts();
     for pda in [scenario.source_account_pubkey, scenario.dest_account_pubkey] {
         let pre = find_account(&initial, &pda);
@@ -465,9 +427,7 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_marked(bucket, scenario.sequence);
 
-    // The canonical digest record is emitted via `sol_log_data` rather than a
-    // PDA. Mollusk's `InstructionResult` does not expose program logs, so log
-    // content is verified in the surfpool e2e suite.
+    // Mollusk hides program logs; the surfpool e2e suite checks the commit log.
 
     // Source (native): credit.
     let src = find_account(&result.resulting_accounts, &scenario.source_account_pubkey);
@@ -486,8 +446,7 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
     assert_eq!(dst_layout.balance, Uint256::from_u128(500_000));
 }
 
-/// Second `submit_vaas` for the same `(chain, emitter, sequence)` rejects with
-/// `AlreadyAccounted` via the NoReplay pre-check.
+/// Second `submit_vaas` for the same `(chain, emitter, sequence)`: `AlreadyAccounted`.
 #[test]
 fn submit_vaas_rejects_duplicate_after_noreplay_set() {
     let mollusk = mollusk();
@@ -511,8 +470,7 @@ fn submit_vaas_rejects_duplicate_after_noreplay_set() {
     }
 }
 
-/// Attest payload commits (NoReplay + canonical log emit) but touches neither
-/// Account PDA.
+/// Attest commits but touches neither balance PDA.
 #[test]
 fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
     let mollusk = mollusk();
@@ -525,12 +483,9 @@ fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
         result.program_result
     );
 
-    // NoReplay flipped. Commit log emission is covered by the surfpool e2e
-    // suite (mollusk does not expose program logs).
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_marked(bucket, scenario.sequence);
 
-    // Sentinel slots stay system-owned (program never touched them).
     assert_eq!(
         scenario.source_account_pubkey,
         scenario.noreplay_authority_pubkey
@@ -547,8 +502,7 @@ fn submit_vaas_with_attest_payload_skips_balance_work_but_marks_replay() {
     assert!(sentinel.data.is_empty());
 }
 
-/// An unknown payload action rejects with `UnknownTokenBridgePayload`, leaving
-/// the replay slot unconsumed.
+/// Unknown payload action: `UnknownTokenBridgePayload`; replay slot stays free.
 #[test]
 fn submit_vaas_with_unknown_payload_rejects_and_preserves_replay_slot() {
     let mollusk = mollusk();
@@ -569,14 +523,11 @@ fn submit_vaas_with_unknown_payload_rejects_and_preserves_replay_slot() {
         other => panic!("expected Failure(UnknownTokenBridgePayload), got {other:?}"),
     }
 
-    // Replay slot unconsumed (the commit-log emit is similarly rolled back by
-    // tx-level atomicity; mollusk does not expose program logs for inspection).
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_unmarked(bucket);
 }
 
-/// A pre-marked NoReplay bucket rejects with `AlreadyAccounted` before any
-/// state mutation.
+/// Pre-marked NoReplay bucket: `AlreadyAccounted` before any state change.
 #[test]
 fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
     let mollusk = mollusk();
@@ -601,17 +552,14 @@ fn submit_vaas_with_pre_marked_noreplay_rejects_before_state_mutation() {
         }
         other => panic!("expected Failure(AlreadyAccounted), got {other:?}"),
     }
-    // The commit-log emit never runs once the NoReplay pre-check short-circuits.
 }
 
-/// A wrapped-source debit exceeding the balance surfaces `BalanceUnderflow`
-/// and reverts the whole tx (NoReplay unset).
+/// Wrapped-source debit above the balance: `BalanceUnderflow`, NoReplay unset.
 #[test]
 fn submit_vaas_with_balance_underflow_reverts() {
     let mollusk = mollusk();
     let token_address = [0x88u8; 32];
-    // Solana sends Ethereum-native USDC back to Ethereum; source is wrapped
-    // (chain != token_chain) and starts at zero, so the debit underflows.
+    // Solana sends Ethereum-native USDC back; wrapped source starts at zero.
     let mut scenario = Scenario::with_transfer_body(0xA5, 1_000u128, 2, token_address, 2);
     scenario.chain = 1;
     scenario.body = build_transfer_body(
@@ -626,7 +574,6 @@ fn submit_vaas_with_balance_underflow_reverts() {
     scenario.digest = double_keccak256_host(&scenario.body);
     let (src, _) = derive_account_pda(1, 2, &token_address);
     let (dst, _) = derive_account_pda(2, 2, &token_address);
-    // Re-derive registration PDA and noreplay bucket for the new chain.
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
     scenario.chain_registration_pubkey = registration_pda;
     scenario.noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
@@ -650,13 +597,11 @@ fn submit_vaas_with_balance_underflow_reverts() {
         }
         other => panic!("expected Failure(BalanceUnderflow), got {other:?}"),
     }
-    // NoReplay unset (the commit-log emit is similarly rolled back).
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_unmarked(bucket);
 }
 
-/// A VAA whose emitter_chain has no registration PDA is refused with
-/// `MissingChainRegistration`.
+/// No registration PDA for `emitter_chain`: `MissingChainRegistration`.
 #[test]
 fn submit_vaas_rejects_unregistered_chain() {
     let mollusk = mollusk();
@@ -684,8 +629,7 @@ fn submit_vaas_rejects_unregistered_chain() {
     }
 }
 
-/// Registration exists but holds a different emitter than the body header:
-/// rejects with `UnregisteredEmitter`.
+/// Registration holds another emitter: `UnregisteredEmitter`.
 #[test]
 fn submit_vaas_rejects_wrong_emitter_for_registered_chain() {
     let mollusk = mollusk();
@@ -713,8 +657,7 @@ fn submit_vaas_rejects_wrong_emitter_for_registered_chain() {
     }
 }
 
-/// A body shorter than the 51-byte header + action byte rejects with
-/// `InvalidInstructionData` via the `body_len <= VAA_BODY_HEADER_LEN` gate.
+/// Body of 51 bytes: `InvalidInstructionData` from the `body_len <= VAA_BODY_HEADER_LEN` gate.
 #[test]
 fn submit_vaas_with_short_body_rejects() {
     let mollusk = mollusk();
@@ -741,16 +684,14 @@ fn submit_vaas_with_short_body_rejects() {
     }
 }
 
-/// The declared `body_len` prefix disagreeing with the bytes that actually
-/// follow rejects via the `data.len() != FIXED_LEN + body_len` gate, distinct
-/// from the `body_len <= header` short-body gate above. Here `body_len` claims a
-/// full attest body but the wire carries one fewer byte.
+/// `body_len` prefix larger than the bytes present: `InvalidInstructionData` from the
+/// `data.len() != FIXED_LEN + body_len` gate.
 #[test]
 fn submit_vaas_with_declared_len_mismatch_rejects() {
     let mollusk = mollusk();
     let scenario = Scenario::new(0xA9);
 
-    // A valid 52-byte attest body, but the length prefix overstates it by one.
+    // Valid 52-byte attest body; length prefix overstates by one.
     let body = build_attest_body(scenario.chain, &scenario.emitter, scenario.sequence);
     let declared_len = (body.len() + 1) as u16;
     let mut wire = Vec::with_capacity(1 + 1 + 2 + body.len());
@@ -773,18 +714,13 @@ fn submit_vaas_with_declared_len_mismatch_rejects() {
     }
 }
 
-/// A body that clears the instruction-data length gate (`body_len > header` and
-/// `data.len()` consistent) but truncates inside the Token Bridge transfer
-/// payload (action 0x01 with fewer than 133 payload bytes) reaches the payload
-/// parser past Shim + NoReplay + registration checks and rejects with
-/// `InvalidInstructionData`.
+/// Transfer payload shorter than 133 bytes passes the length gates, Shim, NoReplay,
+/// and registration checks. The payload parser then fails with `InvalidInstructionData`.
 #[test]
 fn submit_vaas_with_truncated_transfer_payload_rejects() {
     let mollusk = mollusk();
     let scenario = Scenario::new(0xAA);
 
-    // 51-byte header + a single action byte (0x01 = transfer) + a few payload
-    // bytes — well under the 133-byte minimum transfer payload.
     let mut body = vec![0u8; 60];
     body[8..10].copy_from_slice(&scenario.chain.to_be_bytes());
     body[10..42].copy_from_slice(&scenario.emitter);
@@ -792,8 +728,7 @@ fn submit_vaas_with_truncated_transfer_payload_rejects() {
     body[51] = 0x01; // transfer action; payload is truncated after this
     let digest = double_keccak256_host(&body);
 
-    // Re-sign the digest of this body so the Shim CPI passes; only the payload
-    // length is wrong.
+    // Re-sign so the Shim CPI passes.
     let mut scenario = scenario;
     scenario.body = body;
     scenario.digest = digest;
@@ -811,8 +746,7 @@ fn submit_vaas_with_truncated_transfer_payload_rejects() {
         other => panic!("expected Failure(InvalidInstructionData), got {other:?}"),
     }
 
-    // The replay slot must remain unconsumed: the failure rolls the whole tx
-    // back, so the NoReplay bucket stays in its lazy-create entry state.
+    // Rolled back: bucket uninitialised.
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_bucket_unmarked(bucket);
 }

@@ -1,6 +1,4 @@
-//! Shared helpers for integration tests: surfpool subprocess management and
-//! cheatcode plumbing, plus mollusk fixtures (`guardian_fixtures`,
-//! `mollusk_fixtures`) for the in-process real-CPI suite.
+//! Shared test helpers: surfpool process management, cheatcodes, and mollusk fixtures.
 
 #![allow(dead_code)] // Different integration tests use different subsets.
 
@@ -23,11 +21,10 @@ use solana_pubkey::Pubkey;
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Options for starting surfpool. `datasource_rpc_url = None` boots `--offline`;
-/// `Some(url)` forks from mainnet.
+/// Surfpool options. `datasource_rpc_url = None` boots `--offline`; `Some(url)` forks mainnet.
 pub struct SurfpoolOptions {
     pub datasource_rpc_url: Option<String>,
-    /// Per-test scratch dir prefix; surfpool drops `.surfpool/` artefacts here.
+    /// Scratch dir prefix for surfpool artefacts.
     pub scratch_prefix: &'static str,
 }
 
@@ -47,8 +44,7 @@ impl SurfpoolOptions {
     }
 }
 
-/// Owns the surfpool child process and its stdout/stderr drain threads;
-/// `Drop` kills the child even on panic.
+/// Owns the surfpool child and its drain threads; `Drop` kills the child.
 pub struct SurfpoolGuard {
     child: Child,
     rpc_port: u16,
@@ -68,20 +64,18 @@ impl SurfpoolGuard {
 
 impl Drop for SurfpoolGuard {
     fn drop(&mut self) {
-        // Best-effort SIGKILL; `wait` reaps the zombie.
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Pick a free TCP port by binding to 0 and reading the assigned port.
+/// Free TCP port.
 pub fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
     listener.local_addr().expect("local_addr").port()
 }
 
-/// Resolve the `surfpool` binary, falling back to `~/.local/bin/surfpool`
-/// (the installer's default, not always on `$PATH` under `cargo test`).
+/// Resolve the `surfpool` binary; falls back to `~/.local/bin/surfpool`.
 pub fn surfpool_binary() -> PathBuf {
     if let Ok(found) = which_global("surfpool") {
         return found;
@@ -108,7 +102,7 @@ fn which_global(name: &str) -> Result<PathBuf, ()> {
     Err(())
 }
 
-/// Boot surfpool with the supplied options and block until JSON-RPC is healthy.
+/// Boot surfpool and block until JSON-RPC is healthy.
 pub fn start_surfpool(opts: SurfpoolOptions) -> SurfpoolGuard {
     let bin = surfpool_binary();
     let rpc_port = free_port();
@@ -161,8 +155,7 @@ pub fn start_surfpool(opts: SurfpoolOptions) -> SurfpoolGuard {
 
     let mut child = cmd.spawn().expect("spawn surfpool");
 
-    // Drain stdout/stderr into the test's stderr; required so the pipes do not
-    // fill and block surfpool's writes.
+    // Drain pipes so surfpool writes do not block.
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_pump = stdout.map(|s| {
@@ -215,8 +208,7 @@ fn wait_for_rpc_ready(guard: &SurfpoolGuard) {
     );
 }
 
-/// Path to the SBF `.so` for the named program crate under `target/deploy/`.
-/// The caller must have run the relevant `build-dev`/`build-prod` recipe first.
+/// Path to the SBF `.so` under `target/deploy/`. Build first.
 pub fn so_path(name: &str) -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
@@ -229,8 +221,7 @@ pub fn so_path(name: &str) -> PathBuf {
         .join(format!("{name}.so"))
 }
 
-/// Resolve `solana_noreplay.so`: the hash-pinned `tests/fixtures/` copy by
-/// default, or `GA_NOREPLAY_SO` for local iteration (override skips the check).
+/// `solana_noreplay.so`: the hash-pinned fixture, or `GA_NOREPLAY_SO` (skips the hash check).
 pub fn noreplay_so_path() -> PathBuf {
     if let Ok(p) = std::env::var("GA_NOREPLAY_SO") {
         return PathBuf::from(p);
@@ -238,9 +229,8 @@ pub fn noreplay_so_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/solana_noreplay.so")
 }
 
-/// Resolve `wormhole_verify_vaa_shim.so`: the hash-pinned `tests/fixtures/`
-/// copy by default, or `GA_VERIFY_VAA_SHIM_SO` for local iteration (override
-/// skips the check).
+/// `wormhole_verify_vaa_shim.so`: the hash-pinned fixture, or `GA_VERIFY_VAA_SHIM_SO`
+/// (skips the hash check).
 pub fn verify_vaa_shim_so_path() -> PathBuf {
     if let Ok(p) = std::env::var("GA_VERIFY_VAA_SHIM_SO") {
         return PathBuf::from(p);
@@ -248,18 +238,14 @@ pub fn verify_vaa_shim_so_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wormhole_verify_vaa_shim.so")
 }
 
-/// Canonical `solana-noreplay` program ID
-/// (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`), pinned as raw bytes to
-/// avoid a base58 dev-dep.
+/// `solana-noreplay` program ID (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`).
 pub const NOREPLAY_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0x0c, 0xb8, 0x38, 0x00, 0x73, 0xdf, 0x36, 0x25, 0xa1, 0x32, 0x11, 0x1f, 0xee, 0x67, 0x8d, 0xd0,
     0x6b, 0x7e, 0x3d, 0xf2, 0x90, 0xa2, 0xb1, 0xd5, 0x4a, 0x48, 0x5b, 0xdb, 0x72, 0x61, 0x82, 0x91,
 ]);
 
-/// Derive the solana-noreplay bitmap PDA for `(authority, namespace, sequence)`.
-/// Mirrors `solana_noreplay::pda::BitmapPdaSeeds`:
-///   seeds = [authority, namespace[..min(len, 32)], namespace[min(len, 32)..],
-///            (sequence / 1024).to_le_bytes()]
+/// NoReplay bitmap PDA for `(authority, namespace, sequence)`. Seeds:
+/// `[authority, namespace[..min(len, 32)], namespace[min(len, 32)..], (sequence / 1024) LE]`.
 pub fn derive_noreplay_bitmap_pda(
     authority: &Pubkey,
     namespace: &[u8],
@@ -279,7 +265,7 @@ pub fn derive_noreplay_bitmap_pda(
     Pubkey::find_program_address(&seeds, &NOREPLAY_PROGRAM_ID)
 }
 
-/// Hex-encode a byte slice. Avoids a dev-dep on `hex`.
+/// Hex-encode.
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -290,9 +276,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
-/// POST a JSON-RPC request to surfpool. Hand-rolled HTTP/1.1 because
-/// `solana-client` does not expose the `surfnet_*` cheatcodes. Localhost only;
-/// no TLS, no chunking, no keep-alive.
+/// POST a JSON-RPC request to surfpool over plain HTTP/1.1. Localhost only.
 pub fn rpc_call(url: &str, method: &str, params: serde_json::Value) -> serde_json::Value {
     use std::io::Write;
     use std::net::TcpStream;
@@ -325,7 +309,7 @@ pub fn rpc_call(url: &str, method: &str, params: serde_json::Value) -> serde_jso
     if let Ok(v) = serde_json::from_str(raw_body) {
         return v;
     }
-    // Chunked-decode fallback.
+    // Chunked decode.
     if let Some(nl) = raw_body.find("\r\n") {
         let rest = &raw_body[nl + 2..];
         let end = rest.find("\r\n").unwrap_or(rest.len());
@@ -353,13 +337,13 @@ fn parse_url(input: &str) -> Result<ParsedUrl, &'static str> {
     Ok(ParsedUrl { host, port })
 }
 
-/// Deploy a `.so` at `program_id` via the `surfnet_writeProgram` cheatcode.
+/// Deploy a `.so` at `program_id` through `surfnet_writeProgram`.
 pub fn deploy_program(rpc_url: &str, program_id: &Pubkey, so_bytes: &[u8]) {
     let hex = hex_encode(so_bytes);
     let resp = rpc_call(
         rpc_url,
         "surfnet_writeProgram",
-        // Args: (program_id_b58, hex_data, slot=0 ⇒ current).
+        // Args: (program_id_b58, hex_data, slot=0 = current).
         serde_json::json!([program_id.to_string(), hex, 0]),
     );
     assert!(
@@ -369,8 +353,7 @@ pub fn deploy_program(rpc_url: &str, program_id: &Pubkey, so_bytes: &[u8]) {
     eprintln!("[surfpool] writeProgram OK for {program_id}");
 }
 
-/// Parsed view of a Wormhole VAA v1 fixture, computed once at load time.
-///
+/// Parsed Wormhole VAA v1 fixture.
 /// Wire format:
 ///
 /// | offset | size  | field                                      |
@@ -387,20 +370,18 @@ pub fn deploy_program(rpc_url: &str, program_id: &Pubkey, so_bytes: &[u8]) {
 /// | ...    | 1     | consistency_level                          |
 /// | ...    | rest  | payload                                    |
 ///
-/// `digest` is `keccak256(keccak256(body))` — what the Shim's `VerifyHash`
-/// recovers against and what the canonical commit log records on the
-/// quorum-completing branch.
+/// `digest` is `keccak256(keccak256(body))`.
 #[derive(Clone)]
 pub struct ParsedVaa {
-    /// Raw VAA bytes, kept so callers can re-slice without copying.
+    /// Raw VAA bytes.
     pub bytes: Vec<u8>,
-    /// `keccak256(keccak256(body))` — the digest the guardians signed.
+    /// `keccak256(keccak256(body))`.
     pub digest: [u8; 32],
     pub guardian_set_index: u32,
     pub num_signatures: u8,
-    /// Byte offset where the signature block starts (always 6 for v1 VAAs).
+    /// Signature block offset (6 for v1).
     pub signatures_offset: usize,
-    /// Byte offset where the body starts (= `6 + 66 * num_signatures`).
+    /// Body offset (`6 + 66 * num_signatures`).
     pub body_offset: usize,
     pub emitter_chain: u16,
     pub emitter_address: [u8; 32],
@@ -409,10 +390,10 @@ pub struct ParsedVaa {
 }
 
 impl ParsedVaa {
-    /// One signature record: 1-byte index + 64-byte r||s + 1-byte recovery_id.
+    /// One signature record: index (1) + r||s (64) + recovery_id (1).
     pub const GUARDIAN_SIGNATURE_LENGTH: usize = 66;
 
-    /// Contiguous signature block (`num_signatures * 66` bytes).
+    /// Signature block (`num_signatures * 66` bytes).
     pub fn signatures_slice(&self) -> &[u8] {
         let start = self.signatures_offset;
         let end = start + (self.num_signatures as usize) * Self::GUARDIAN_SIGNATURE_LENGTH;
@@ -420,8 +401,7 @@ impl ParsedVaa {
     }
 }
 
-/// Load and parse a VAA fixture from `tests/fixtures/<name>`. Panics on a
-/// missing file or invalid wire format.
+/// Load and parse `tests/fixtures/<name>`. Panics on a missing file or bad format.
 pub fn load_vaa_fixture(name: &str) -> ParsedVaa {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
@@ -431,8 +411,7 @@ pub fn load_vaa_fixture(name: &str) -> ParsedVaa {
     parse_vaa(&bytes).unwrap_or_else(|e| panic!("parse VAA fixture {}: {e}", path.display()))
 }
 
-/// Pure parser, separate from the loader so unit tests can drive in-memory
-/// blobs without the filesystem.
+/// Pure parser for in-memory blobs.
 pub fn parse_vaa(bytes: &[u8]) -> Result<ParsedVaa, String> {
     if bytes.len() < 6 {
         return Err(format!("VAA too short: {} bytes", bytes.len()));
@@ -477,20 +456,15 @@ pub fn parse_vaa(bytes: &[u8]) -> Result<ParsedVaa, String> {
     })
 }
 
-/// `keccak256(keccak256(body))` — the Wormhole digest convention, host-side.
+/// `keccak256(keccak256(body))`.
 fn double_keccak(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hash(body);
     let outer = solana_keccak_hasher::hashv(&[&inner.to_bytes()]);
     outer.to_bytes()
 }
 
-/// Fetch the on-chain logs for `tx_sig` via JSON-RPC and assert that exactly
-/// one `Program data: …` line decodes to the canonical commit-log payload
-/// emitted by `instructions::commit_log::emit` on the quorum-completing
-/// branch of `submit_observations` (and on every successful `submit_vaas`).
-///
-/// The expected payload layout is the single source of truth in
-/// `global_accountant_definitions::ACCOUNTANT_DIGEST_LOG_TAG` / `_LEN`.
+/// Fetch the logs for `tx_sig`. Assert exactly one `Program data:` line decodes to the
+/// `commit_log::emit` payload. Layout: `ACCOUNTANT_DIGEST_LOG_TAG` / `_LEN`.
 pub fn assert_canonical_log_in_tx(
     rpc_url: &str,
     tx_sig: &str,
@@ -503,7 +477,7 @@ pub fn assert_canonical_log_in_tx(
     use base64::Engine;
     use global_accountant_definitions::{ACCOUNTANT_DIGEST_LOG_LEN, ACCOUNTANT_DIGEST_LOG_TAG};
 
-    // Poll briefly; the tx is already confirmed but indexing can lag a slot.
+    // Indexing can lag a slot.
     let mut last_resp = serde_json::Value::Null;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -575,7 +549,7 @@ pub fn assert_canonical_log_in_tx(
     );
 }
 
-/// Poll `confirm_transaction` until `Ok(true)` or the timeout.
+/// Poll `confirm_transaction` until `Ok(true)` or timeout.
 pub fn await_confirmed<F: Fn() -> Result<bool, solana_client::client_error::ClientError>>(
     label: &str,
     timeout: Duration,

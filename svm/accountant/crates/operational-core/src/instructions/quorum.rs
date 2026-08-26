@@ -1,17 +1,5 @@
-//! Product-neutral quorum primitives shared by every program's
-//! `submit_observations` orchestration.
-//!
-//! `submit_observations` accumulates guardian signatures in a
-//! `(chain, emitter, sequence, digest)`-keyed `PendingObservationsLayout` PDA.
-//! The fields here are the building blocks each program's orchestration calls:
-//! instruction-data parse, guardian signature verification against the Core
-//! Bridge GuardianSet PDA, the pending-PDA lifecycle (create / wipe-recreate /
-//! continue), the bitmap accumulation + quorum-threshold check, and the
-//! rent-refunding close.
-//!
-//! WTT (`global-accountant`) and NTT (`ntt-global-accountant`) wire these into
-//! distinct orchestrations with distinct account layouts and distinct
-//! post-quorum balance flows; nothing here is product-specific.
+//! Quorum primitives for `submit_observations`: instruction parse, guardian signature
+//! check, pending-PDA lifecycle, bitmap accumulation, and close.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -26,8 +14,7 @@ use crate::hash::keccak256;
 use crate::instructions::pda_init::init_or_upgrade_pda;
 use crate::state::pending;
 
-/// Fixed-size prefix of `submit_observations` instruction data (after the
-/// 1-byte dispatch discriminator):
+/// Fixed prefix of `submit_observations` data (after the 1-byte discriminator):
 ///
 /// | offset | size | field                              |
 /// |--------|------|------------------------------------|
@@ -35,45 +22,33 @@ use crate::state::pending;
 /// | 4      | 1    | guardian_index                     |
 /// | 5      | 65   | signature (r||s||recovery_id)      |
 ///
-/// Trailing the fixed prefix, each program's orchestration carries
-/// `tx_hash: [u8; 32]`, then `body_len: u16 LE`, then `body_len` VAA body bytes.
-/// Two digests are derived on-chain from these (never passed in):
-///   - the *signing* digest `keccak256(prefix ‖ tx_hash ‖ body)` that the
-///     guardian actually signed, checked by [`verify_signature`]; the
-///     domain-separation `prefix` is product-specific (WTT vs NTT), and
-///   - the *dedup/quorum* digest `keccak256(keccak256(body))` that keys the
-///     pending PDA, the NoReplay slot, and the commit-log record.
+/// Then: `tx_hash: [u8; 32]`, `body_len: u16 LE`, `body_len` body bytes.
+/// Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and
+/// dedup digest `keccak256(keccak256(body))`.
 ///
-/// PDA bumps are derived on-chain, not supplied.
-///
-/// The routing tuple `(chain, emitter, sequence)` is sourced exclusively from
-/// the body header `[8..50]`, never caller-supplied data — otherwise an attacker
-/// could replay a signed body under an arbitrary triple and corrupt the ledger.
+/// SECURITY: `(chain, emitter, sequence)` comes from body header `[8..50]` only.
 pub const SUBMIT_FIXED_LEN: usize = 4 + 1 + 65;
 
-/// ECDSA recoverable signature length: 32-byte r + 32-byte s + 1-byte recovery id.
+/// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 
-/// Ethereum-style guardian pubkey length (`keccak256(uncompressed_pk)[12..]`).
+/// Guardian key: `keccak256(uncompressed_pk)[12..]`.
 const GUARDIAN_PUBKEY_LEN: usize = 20;
 
-/// 51-byte VAA header + 1-byte action — the minimum body the parser can read.
+/// 51-byte header + 1-byte action.
 pub const BODY_MIN_LEN: usize = 52;
 
-/// The parsed `submit_observations` instruction-data prefix plus the routing
-/// tuple recovered from the authenticated body header. Construct via
-/// [`Self::from_data`], set `digest` to `keccak256(keccak256(body))`, then call
-/// [`Self::populate_routing_from_body`].
+/// Parsed prefix plus the body-header routing tuple. Build with [`Self::from_data`],
+/// set `digest`, then call [`Self::populate_routing_from_body`].
 #[derive(Clone, Copy)]
 pub struct ParsedObservation {
-    /// Signed digest, `keccak256(keccak256(body))`; derived from the body by the
-    /// caller after `from_data`, not parsed from the instruction data.
+    /// `keccak256(keccak256(body))`, set by the caller.
     pub digest: [u8; 32],
-    /// Body header `[8..10]`, populated by `populate_routing_from_body`.
+    /// Body header `[8..10]`.
     pub chain: u16,
-    /// Body header `[10..42]`, populated by `populate_routing_from_body`.
+    /// Body header `[10..42]`.
     pub emitter: [u8; 32],
-    /// Body header `[42..50]`, populated by `populate_routing_from_body`.
+    /// Body header `[42..50]`.
     pub sequence: u64,
     pub guardian_set_index: u32,
     pub guardian_index: u8,
@@ -81,8 +56,7 @@ pub struct ParsedObservation {
 }
 
 impl ParsedObservation {
-    /// Parse the signature fields from the fixed prefix. The digest and routing
-    /// tuple are derived from the body afterward by the caller.
+    /// Parse the fixed prefix. `digest` and routing fields stay zero.
     pub fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> crate::ProgramCoreResult<Self> {
         let (gsi_bytes, rest) = data.split_at(4);
         let guardian_index = rest[0];
@@ -106,8 +80,7 @@ impl ParsedObservation {
         })
     }
 
-    /// Populate the routing tuple from the body header. `self.digest` must have
-    /// been derived from this same `body`.
+    /// Set the routing tuple from the body header. `self.digest` must derive from this `body`.
     pub fn populate_routing_from_body(&mut self, body: &[u8]) -> crate::ProgramResult {
         let header = parse_vaa_namespace_key(body).map_err(err)?;
         self.chain = header.chain;
@@ -119,17 +92,15 @@ impl ParsedObservation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PendingAction {
-    /// PDA does not exist yet — allocate, assign, write a fresh layout.
+    /// PDA absent: allocate and write a fresh layout.
     Create,
-    /// PDA exists for an older guardian set — refund payer, wipe, re-create.
+    /// PDA holds an older guardian set: refund, wipe, re-create.
     WipeAndRecreate,
-    /// PDA exists for the same guardian set — toggle the bitmap bit.
+    /// PDA holds the same guardian set: set the bitmap bit.
     Continue,
 }
 
-/// Verify a pending PDA lives at its canonical address derived from
-/// `(chain, emitter, sequence, digest)`. Follows the same pattern as
-/// `chain_registration::verify`.
+/// `InvalidPda` unless `pending_pda` is at the address for `(chain, emitter, sequence, digest)`.
 fn verify_pending_pda_address(
     program_id: &Pubkey,
     pending_pda: &AccountInfo,
@@ -156,9 +127,7 @@ fn verify_pending_pda_address(
     Ok(())
 }
 
-/// Decide what to do with the pending PDA for this observation. Per-digest PDA
-/// seeds and canonical address verification ensure a digest mismatch is
-/// unreachable: any loaded PDA was opened under exactly this digest.
+/// Choose the [`PendingAction`] for this observation.
 pub fn decide_pending_action(
     program_id: &Pubkey,
     pending_pda: &AccountInfo,
@@ -171,11 +140,9 @@ pub fn decide_pending_action(
         return Ok(PendingAction::Create);
     }
     if owner_is_system {
-        // System-owned with non-zero data is unreachable on Solana; reject loudly.
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Non-system owner: must be us. Verify the canonical address first.
     verify_pending_pda_address(
         program_id,
         pending_pda,
@@ -185,7 +152,6 @@ pub fn decide_pending_action(
         &parsed.digest,
     )?;
 
-    // Load and compare guardian set indices.
     let existing = pending::load(pending_pda)?;
     if existing.guardian_set_index < parsed.guardian_set_index {
         return Ok(PendingAction::WipeAndRecreate);
@@ -193,17 +159,12 @@ pub fn decide_pending_action(
     if existing.guardian_set_index > parsed.guardian_set_index {
         return Err(err(GlobalAccountantError::StaleGuardianSet));
     }
-    // Digest equality is guaranteed by the per-digest PDA seeds AND canonical address.
     Ok(PendingAction::Continue)
 }
 
-/// Apply `pending_action`, then toggle this guardian's bit. Returns the loaded
-/// layout (so the orchestration can read `payer` on close) and whether the
-/// accumulated bit count has reached `quorum_threshold` — which the caller
-/// derives from the live guardian-set size (see
-/// `PendingObservationsLayout::quorum_for`), not a pinned constant. Idempotent
-/// guards: a re-used guardian index rejects `AlreadySigned`; an out-of-range
-/// index rejects `InvalidGuardianIndex`.
+/// Apply `action`, then set this guardian's bit. Returns the layout and whether
+/// the bit count reached `quorum_threshold`. Rejects a set bit with `AlreadySigned`
+/// and an index >= 32 with `InvalidGuardianIndex`.
 pub fn apply_action_and_accumulate<'info>(
     program_id: &Pubkey,
     submitter: &AccountInfo<'info>,
@@ -237,17 +198,13 @@ pub fn apply_action_and_accumulate<'info>(
     Ok((layout, quorum_reached))
 }
 
-/// Allocate the pending PDA under `(b"pending", chain, emitter, sequence,
-/// digest)` and stamp a freshly-zeroed layout. The digest in the seeds lets
-/// reorg siblings accumulate in parallel buckets.
+/// Allocate the pending PDA and write a fresh layout.
 fn create_pending_pda<'info>(
     program_id: &Pubkey,
     submitter: &AccountInfo<'info>,
     pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
 ) -> crate::ProgramResult {
-    // Canonical bump derived on-chain; `invoke_signed` below only signs for the
-    // canonical address, so a non-canonical sibling PDA is impossible.
     let chain_be = parsed.chain.to_be_bytes();
     let sequence_be = parsed.sequence.to_be_bytes();
     let (_expected, canonical_bump) = Pubkey::find_program_address(
@@ -289,8 +246,7 @@ fn create_pending_pda<'info>(
     pending::store(pending_pda, &layout)
 }
 
-/// Refund the recorded payer and close the account. `recorded_payer` is passed
-/// in to avoid re-borrowing the already-loaded layout.
+/// Refund `recorded_payer` and close the account.
 pub fn close_pending_pda(
     pending_pda: &AccountInfo,
     rent_recipient: &AccountInfo,
@@ -304,11 +260,7 @@ pub fn close_pending_pda(
     close_account(pending_pda)
 }
 
-/// Rotation-wipe variant: credits the PDA's lamports to the new submitter
-/// rather than the recorded payer. The wire shape carries no original-payer
-/// account on rotation, so that payer's (bounded, ~$0.10) rent is forfeit to
-/// whoever pays the rotation cost; `close_pending` remains available to recover
-/// it ahead of rotation.
+/// Close on guardian-set rotation; lamports go to `new_submitter`, not the recorded payer.
 fn wipe_pending_pda(
     pending_pda: &AccountInfo,
     new_submitter: &AccountInfo,
@@ -318,21 +270,11 @@ fn wipe_pending_pda(
     close_account(pending_pda)
 }
 
-/// Verify a guardian signature: recover the pubkey via `secp256k1_recover` and
-/// compare its keccak hash to the key in the Core Bridge GuardianSet PDA.
-/// Returns the live guardian count (`keys_len`) so the caller can derive the
-/// quorum threshold from the actual set rather than a pinned constant.
+/// Recover the signer with `secp256k1_recover` and compare to the key in `guardian_set`.
+/// Returns `keys_len` for the quorum computation.
 ///
-/// SECURITY: the guardian keys are read straight out of `guardian_set`, which is
-/// the *sole* authenticity anchor on the `submit_observations` path (unlike
-/// `submit_vaas`, which delegates to the Verify VAA Shim). It MUST therefore be
-/// the genuine Core Bridge GuardianSet account — otherwise a caller could pass a
-/// forged account full of attacker-controlled pubkeys, sign the target digest
-/// with the matching attacker keys, and self-accumulate to quorum, forging
-/// arbitrary transfers. A Core-Bridge-owned account can only ever hold
-/// Core-Bridge-written data, so asserting the owner is sufficient (and mirrors
-/// `close_pending::guardian_set_expired`). The shim enforces the equivalent
-/// constraint via Core-Bridge PDA-address derivation; see `shim::verify_vaa`.
+/// SECURITY: `guardian_set` is the only trust anchor on this path. Owner must be the
+/// Core Bridge; a forged set would let an attacker reach quorum with own keys.
 pub fn verify_signature(
     guardian_set: &AccountInfo,
     expected_guardian_set_index: u32,
@@ -340,14 +282,11 @@ pub fn verify_signature(
     digest: &[u8; 32],
     signature: &[u8; SECP256K1_SIGNATURE_LEN],
 ) -> crate::ProgramCoreResult<u32> {
-    // Verify the account is owned by Core Bridge.
     if guardian_set.owner.to_bytes() != CORE_BRIDGE_PROGRAM_ID {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Verify the account is at the canonical GuardianSet PDA address. Owner alone
-    // would suffice (a Core-Bridge-owned account can only hold Core-Bridge data),
-    // but pinning the address rejects a stale/wrong-index set up front.
+    // Address check also rejects a wrong-index set early.
     let index_be = expected_guardian_set_index.to_be_bytes();
     let core_bridge_addr = Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID);
     let (expected_address, _) =
@@ -358,11 +297,9 @@ pub fn verify_signature(
 
     let data = guardian_set.try_borrow_data()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
-    // `read_guardian_key` already proved `data.len() >= 8`, so `keys_len` at
-    // `[4..8]` is in bounds. This is the live set size the quorum derives from.
+    // `read_guardian_key` checked `data.len() >= 8`.
     let num_guardians = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
 
-    // Recovery id ∈ {0,1,2,3}; values >= 4 are malformed.
     let recovery_id = signature[64];
     if recovery_id >= 4 {
         return Err(err(GlobalAccountantError::InvalidSignature));
@@ -371,7 +308,6 @@ pub fn verify_signature(
     let recovered = solana_secp256k1_recover::secp256k1_recover(digest, recovery_id, &signature[..64])
         .map_err(|_| err(GlobalAccountantError::InvalidSignature))?;
 
-    // Compare `keccak256(recovered_pk)[12..]` to the stored guardian key.
     let hash = keccak256(&recovered.0);
     if hash[12..] != expected_key[..] {
         return Err(err(GlobalAccountantError::InvalidSignature));
@@ -379,10 +315,9 @@ pub fn verify_signature(
     Ok(num_guardians)
 }
 
-/// Read the 20-byte guardian pubkey at `guardian_index` from a Core Bridge
-/// `GuardianSet` account.
+/// Read the guardian key at `guardian_index` from a Core Bridge `GuardianSet` account.
 ///
-/// On-disk layout:
+/// Layout:
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
@@ -399,7 +334,6 @@ pub fn read_guardian_key(
     if data.len() < 8 {
         return Err(ProgramError::InvalidAccountData);
     }
-    // `data.len() >= 8` is guaranteed above, so these reads are infallible.
     let on_chain_index = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     if on_chain_index != expected_index {
         return Err(err(GlobalAccountantError::InvalidGuardianIndex));

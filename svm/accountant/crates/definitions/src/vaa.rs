@@ -1,24 +1,68 @@
 //! VAA body parsing: the noreplay namespace key and the Token Bridge payload.
+//!
+//! Wire layouts follow `sdk/vaa/structs.go` (`Unmarshal`,
+//! `DecodeTransferPayloadHdr`).
 
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
-/// Fixed VAA body header length: timestamp (4) + nonce (4) + emitter_chain (2)
+/// VAA body header length: timestamp (4) + nonce (4) + emitter_chain (2)
 /// + emitter_address (32) + sequence (8) + consistency_level (1).
 pub const VAA_BODY_HEADER_LEN: usize = 51;
 
-// Byte offsets of the namespace-key fields within the VAA body header. These are
-// `const`, so they inline at every use site and cost no extra compute units or
-// binary size versus literal slice bounds.
+// Body header field offsets.
 const EMITTER_CHAIN_OFFSET: usize = 8;
 const EMITTER_ADDRESS_OFFSET: usize = 10;
 const SEQUENCE_OFFSET: usize = 42;
+const CONSISTENCY_LEVEL_OFFSET: usize = 50;
 
-/// Replay-protection key parsed from the VAA body header. `chain` and `emitter`
-/// form the noreplay namespace; `sequence` indexes the bitmap within it. The
-/// triple keys all accountant state (the pending PDA, the noreplay slot, and the
-/// commit log), so this struct and [`parse_vaa_namespace_key`] are the sole
-/// authority for these offsets — do not re-derive them in instruction modules.
+// Token Bridge payload field offsets, relative to the payload start.
+const ACTION_OFFSET: usize = 0;
+const AMOUNT_OFFSET: usize = 1;
+const TOKEN_ADDRESS_OFFSET: usize = 33;
+const TOKEN_CHAIN_OFFSET: usize = 65;
+const RECIPIENT_OFFSET: usize = 67;
+const RECIPIENT_CHAIN_OFFSET: usize = 99;
+const FEE_OFFSET: usize = 101;
+/// Minimum transfer payload length: action 0x01 is exactly this long;
+/// action 0x03 appends an arbitrary payload.
+const TRANSFER_PAYLOAD_MIN: usize = 133;
+
+const ACTION_TRANSFER: u8 = 0x01;
+const ACTION_ATTEST: u8 = 0x02;
+const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
+
+// Field offsets must tile the header and the transfer payload without gaps.
+const _: () = {
+    assert!(EMITTER_CHAIN_OFFSET == 4 + 4);
+    assert!(EMITTER_CHAIN_OFFSET + 2 == EMITTER_ADDRESS_OFFSET);
+    assert!(EMITTER_ADDRESS_OFFSET + 32 == SEQUENCE_OFFSET);
+    assert!(SEQUENCE_OFFSET + 8 == CONSISTENCY_LEVEL_OFFSET);
+    assert!(CONSISTENCY_LEVEL_OFFSET + 1 == VAA_BODY_HEADER_LEN);
+
+    assert!(ACTION_OFFSET + 1 == AMOUNT_OFFSET);
+    assert!(AMOUNT_OFFSET + 32 == TOKEN_ADDRESS_OFFSET);
+    assert!(TOKEN_ADDRESS_OFFSET + 32 == TOKEN_CHAIN_OFFSET);
+    assert!(TOKEN_CHAIN_OFFSET + 2 == RECIPIENT_OFFSET);
+    assert!(RECIPIENT_OFFSET + 32 == RECIPIENT_CHAIN_OFFSET);
+    assert!(RECIPIENT_CHAIN_OFFSET + 2 == FEE_OFFSET);
+    assert!(FEE_OFFSET + 32 == TRANSFER_PAYLOAD_MIN);
+    // Guardian SDK `DecodeTransferPayloadHdr` requires 101 bytes; 133 is a superset.
+    assert!(TRANSFER_PAYLOAD_MIN >= FEE_OFFSET);
+};
+
+/// Copy `N` bytes at `offset` into a fixed array. Returns `None` when `buf`
+/// is too short.
+#[inline]
+fn read_array<const N: usize>(buf: &[u8], offset: usize) -> Option<[u8; N]> {
+    let end = offset.checked_add(N)?;
+    buf.get(offset..end)?.try_into().ok()
+}
+
+/// Replay-protection key from the VAA body header. `chain` and `emitter`
+/// select the noreplay namespace; `sequence` indexes the bitmap. The triple
+/// keys the pending PDA, the noreplay slot, and the commit log.
+/// [`parse_vaa_namespace_key`] is the single source of these offsets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaaNamespaceKey {
     /// `emitter_chain`, body bytes `[8..10]` (u16 BE).
@@ -29,47 +73,55 @@ pub struct VaaNamespaceKey {
     pub sequence: u64,
 }
 
-/// Parse the noreplay namespace key from a VAA body header. Rejects bodies
-/// shorter than the 51-byte header with `InvalidInstructionData`.
+/// Parse the noreplay namespace key from a VAA body.
+///
+/// SECURITY: precondition `body.len() >= 51`; otherwise returns
+/// `InvalidInstructionData`. Every field read is bounds-checked; the function
+/// cannot panic.
+///
+/// SECURITY: postcondition: the returned fields are byte-exact copies of body
+/// bytes `[8..10]`, `[10..42]`, `[42..50]`.
 pub fn parse_vaa_namespace_key(body: &[u8]) -> Result<VaaNamespaceKey, GlobalAccountantError> {
-    if body.len() < VAA_BODY_HEADER_LEN {
-        return Err(GlobalAccountantError::InvalidInstructionData);
-    }
-    let chain = u16::from_be_bytes([body[EMITTER_CHAIN_OFFSET], body[EMITTER_CHAIN_OFFSET + 1]]);
-    let mut emitter = [0u8; 32];
-    emitter.copy_from_slice(&body[EMITTER_ADDRESS_OFFSET..EMITTER_ADDRESS_OFFSET + 32]);
-    let mut sequence_bytes = [0u8; 8];
-    sequence_bytes.copy_from_slice(&body[SEQUENCE_OFFSET..SEQUENCE_OFFSET + 8]);
+    let header: &[u8; VAA_BODY_HEADER_LEN] = body
+        .get(..VAA_BODY_HEADER_LEN)
+        .and_then(|h| h.try_into().ok())
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+
+    let chain = read_array::<2>(header, EMITTER_CHAIN_OFFSET)
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+    let emitter = read_array::<32>(header, EMITTER_ADDRESS_OFFSET)
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+    let sequence = read_array::<8>(header, SEQUENCE_OFFSET)
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+
     Ok(VaaNamespaceKey {
-        chain,
+        chain: u16::from_be_bytes(chain),
         emitter,
-        sequence: u64::from_be_bytes(sequence_bytes),
+        sequence: u64::from_be_bytes(sequence),
     })
 }
 
-/// Decoded Token Bridge VAA payload, carrying only the fields the accountant
-/// needs at quorum commit.
+/// Decoded Token Bridge payload. Carries only the fields the accountant
+/// applies at quorum commit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenBridgeAction {
-    /// Action 0x01 (`Transfer`) and 0x03 (`TransferWithPayload`) — same
-    /// accountant logic; only these fields affect balances.
+    /// Action 0x01 (`Transfer`) or 0x03 (`TransferWithPayload`). Both move
+    /// balances identically.
     Transfer {
         amount: Uint256,
         token_chain: u16,
         token_address: [u8; 32],
         recipient_chain: u16,
     },
-    /// Action 0x02 (`Attest`) — moves no value; commit finishes but skips
-    /// balance updates.
+    /// Action 0x02 (`Attest`). Commit completes with no balance change.
     Attest,
-    /// Any other action byte. Both commit paths reject it with
-    /// [`GlobalAccountantError::UnknownTokenBridgePayload`], leaving the
-    /// NoReplay slot unconsumed for a future upgrade.
-    Other,
+    /// Any other action byte. Commit paths reject with
+    /// [`GlobalAccountantError::UnknownTokenBridgePayload`] and leave the
+    /// NoReplay slot free for a future upgrade.
+    Other(u8),
 }
 
-/// Parse a VAA body's payload (bytes at `body[51..]`) into a
-/// [`TokenBridgeAction`].
+/// Parse the payload at `body[51..]` into a [`TokenBridgeAction`].
 ///
 /// VAA body layout:
 ///
@@ -83,7 +135,7 @@ pub enum TokenBridgeAction {
 /// | 50     | 1    | consistency_level  |
 /// | 51..   | rest | payload            |
 ///
-/// Token Bridge transfer payload, starting at offset 51:
+/// Token Bridge transfer payload, offsets relative to 51:
 ///
 /// | offset | size | field            |
 /// |--------|------|------------------|
@@ -93,43 +145,46 @@ pub enum TokenBridgeAction {
 /// | 65     | 2    | token_chain      |
 /// | 67     | 32   | recipient        |
 /// | 99     | 2    | recipient_chain  |
-/// | 101    | 32   | fee (action 1)   |
-/// | 133..  | rest | extra (action 3) |
+/// | 101    | 32   | fee              |
+/// | 133..  | rest | extra (0x03)     |
 ///
-/// Requires ≥ 52 bytes (to read the action), or ≥ 184 for transfer actions;
-/// returns `InvalidInstructionData` on any short slice.
+/// SECURITY: precondition `body.len() >= 52`; transfer actions require
+/// `payload.len() >= 133`. Short input returns `InvalidInstructionData`.
+/// Every field read is bounds-checked; the function cannot panic.
+///
+/// SECURITY: the guardian accountant accepts action 0x01 payloads by the same
+/// `>= 133` rule. Do not tighten to `== 133`: a stricter parser here would
+/// reject a VAA the network already accounted and fork balance state.
 pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
-    const ACTION_TRANSFER: u8 = 0x01;
-    const ACTION_ATTEST: u8 = 0x02;
-    const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
-    const TRANSFER_PAYLOAD_MIN: usize = 1 + 32 + 32 + 2 + 32 + 2 + 32; // 133
+    let payload = body
+        .get(VAA_BODY_HEADER_LEN..)
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+    let action = *payload
+        .get(ACTION_OFFSET)
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
 
-    if body.len() <= VAA_BODY_HEADER_LEN {
-        return Err(GlobalAccountantError::InvalidInstructionData);
-    }
-    let payload = &body[VAA_BODY_HEADER_LEN..];
-    let action = payload[0];
     match action {
         ACTION_TRANSFER | ACTION_TRANSFER_WITH_PAYLOAD => {
             if payload.len() < TRANSFER_PAYLOAD_MIN {
                 return Err(GlobalAccountantError::InvalidInstructionData);
             }
-            let mut amount = [0u8; 32];
-            amount.copy_from_slice(&payload[1..33]);
-            let mut token_address = [0u8; 32];
-            token_address.copy_from_slice(&payload[33..65]);
-            let token_chain = u16::from_be_bytes([payload[65], payload[66]]);
-            // payload[67..99] is recipient — ignored.
-            let recipient_chain = u16::from_be_bytes([payload[99], payload[100]]);
+            let amount = read_array::<32>(payload, AMOUNT_OFFSET)
+                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+            let token_address = read_array::<32>(payload, TOKEN_ADDRESS_OFFSET)
+                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+            let token_chain = read_array::<2>(payload, TOKEN_CHAIN_OFFSET)
+                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+            let recipient_chain = read_array::<2>(payload, RECIPIENT_CHAIN_OFFSET)
+                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
             Ok(TokenBridgeAction::Transfer {
                 amount: Uint256::from_be_bytes(amount),
-                token_chain,
+                token_chain: u16::from_be_bytes(token_chain),
                 token_address,
-                recipient_chain,
+                recipient_chain: u16::from_be_bytes(recipient_chain),
             })
         }
         ACTION_ATTEST => Ok(TokenBridgeAction::Attest),
-        _ => Ok(TokenBridgeAction::Other),
+        other => Ok(TokenBridgeAction::Other(other)),
     }
 }
 
@@ -137,123 +192,318 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
 mod tests {
     use super::*;
 
-    /// Build a 184-byte VAA body (51-byte header + 133-byte transfer payload)
-    /// in a stack array.
+    const HDR: usize = VAA_BODY_HEADER_LEN;
+    const MIN_TRANSFER_BODY: usize = HDR + TRANSFER_PAYLOAD_MIN; // 184
+
+    /// Mainnet VAAs, envelope included (13 signatures, body at 6 + 66 * 13).
+    const FIXTURE_TRANSFER_SEQ1395207: &[u8] = include_bytes!(
+        "../../../programs/global-accountant/tests/fixtures/mainnet_solana_token_bridge_transfer_seq1395207.vaa"
+    );
+    const FIXTURE_OTHER_SEQ2211: &[u8] = include_bytes!(
+        "../../../programs/global-accountant/tests/fixtures/mainnet_solana_token_bridge_seq2211.vaa"
+    );
+
+    /// Strip the VAA envelope: version (1) + guardian set index (4) +
+    /// signature count (1) + 66 bytes per signature.
+    fn fixture_body(vaa: &[u8]) -> &[u8] {
+        let n_sigs = vaa[5] as usize;
+        assert_eq!(n_sigs, 13, "fixtures carry 13 signatures");
+        &vaa[6 + 66 * n_sigs..]
+    }
+
+    /// Body with a 133-byte transfer payload; recipient bytes are marked to
+    /// catch off-by-one reads.
     fn transfer_body(
         action: u8,
-        amount: u128,
+        amount: Uint256,
         token_address: [u8; 32],
         token_chain: u16,
         recipient_chain: u16,
-    ) -> [u8; 184] {
-        let mut body = [0u8; 184];
-        // Header is zeroed; transfer payload starts at offset 51.
-        body[51] = action;
-        // amount: 32-byte BE, low 16 bytes hold the u128.
-        body[52 + 16..52 + 32].copy_from_slice(&amount.to_be_bytes());
-        body[84..116].copy_from_slice(&token_address);
-        body[116..118].copy_from_slice(&token_chain.to_be_bytes());
-        // recipient (118..150): recognisable bytes to catch off-by-one.
-        body[118] = 0xAB;
-        body[149] = 0xCD;
-        body[150..152].copy_from_slice(&recipient_chain.to_be_bytes());
+    ) -> [u8; MIN_TRANSFER_BODY] {
+        let mut body = [0u8; MIN_TRANSFER_BODY];
+        body[HDR] = action;
+        body[HDR + 1..HDR + 33].copy_from_slice(&amount.0);
+        body[HDR + 33..HDR + 65].copy_from_slice(&token_address);
+        body[HDR + 65..HDR + 67].copy_from_slice(&token_chain.to_be_bytes());
+        body[HDR + 67] = 0xAB;
+        body[HDR + 98] = 0xCD;
+        body[HDR + 99..HDR + 101].copy_from_slice(&recipient_chain.to_be_bytes());
+        body
+    }
+
+    fn header_body(chain: u16, emitter: [u8; 32], sequence: u64) -> [u8; HDR] {
+        let mut body = [0u8; HDR];
+        body[8..10].copy_from_slice(&chain.to_be_bytes());
+        body[10..42].copy_from_slice(&emitter);
+        body[42..50].copy_from_slice(&sequence.to_be_bytes());
         body
     }
 
     #[test]
-    fn parse_vaa_namespace_key_decodes_routing_tuple() {
-        let mut body = [0u8; VAA_BODY_HEADER_LEN];
-        body[8..10].copy_from_slice(&2u16.to_be_bytes());
-        body[10] = 0xAA;
-        body[41] = 0xBB;
-        body[42..50].copy_from_slice(&0x0102_0304_0506_0708u64.to_be_bytes());
+    fn namespace_key_table() {
+        struct Case<'a> {
+            name: &'static str,
+            body: &'a [u8],
+            expect: Result<VaaNamespaceKey, GlobalAccountantError>,
+        }
+        let mut emitter_marked = [0u8; 32];
+        emitter_marked[0] = 0xAA;
+        emitter_marked[31] = 0xBB;
+        let marked = header_body(2, emitter_marked, 0x0102_0304_0506_0708);
+        let max = header_body(u16::MAX, [0xFF; 32], u64::MAX);
+        let zero = [0u8; HDR];
+        let short = [0xFFu8; HDR - 1];
+        let empty: [u8; 0] = [];
+        let mut long = [0xFFu8; HDR + 200];
+        long[..HDR].copy_from_slice(&marked);
 
-        let header = parse_vaa_namespace_key(&body).unwrap();
-        assert_eq!(header.chain, 2);
-        assert_eq!(header.emitter[0], 0xAA);
-        assert_eq!(header.emitter[31], 0xBB);
-        assert_eq!(header.sequence, 0x0102_0304_0506_0708);
-    }
-
-    #[test]
-    fn parse_vaa_namespace_key_accepts_exact_header_len() {
-        assert!(parse_vaa_namespace_key(&[0u8; VAA_BODY_HEADER_LEN]).is_ok());
-    }
-
-    #[test]
-    fn parse_vaa_namespace_key_short_body_rejects() {
-        assert_eq!(
-            parse_vaa_namespace_key(&[0u8; VAA_BODY_HEADER_LEN - 1]),
-            Err(GlobalAccountantError::InvalidInstructionData)
-        );
-    }
-
-    #[test]
-    fn parse_token_bridge_payload_transfer_decodes_amount_token_recipient() {
-        let mut token_address = [0u8; 32];
-        token_address[0] = 0x11;
-        token_address[31] = 0x99;
-        let body = transfer_body(0x01, 1_000_000_u128, token_address, 2, 10);
-        let action = parse_token_bridge_payload(&body).expect("transfer parses");
-        match action {
-            TokenBridgeAction::Transfer {
-                amount,
-                token_chain,
-                token_address: ta,
-                recipient_chain,
-            } => {
-                assert_eq!(amount, Uint256::from_u128(1_000_000));
-                assert_eq!(token_chain, 2);
-                assert_eq!(ta, token_address);
-                assert_eq!(recipient_chain, 10);
-            }
-            other => panic!("expected Transfer, got {other:?}"),
+        let cases = [
+            Case {
+                name: "marked fields decode",
+                body: &marked,
+                expect: Ok(VaaNamespaceKey {
+                    chain: 2,
+                    emitter: emitter_marked,
+                    sequence: 0x0102_0304_0506_0708,
+                }),
+            },
+            Case {
+                name: "max values",
+                body: &max,
+                expect: Ok(VaaNamespaceKey {
+                    chain: u16::MAX,
+                    emitter: [0xFF; 32],
+                    sequence: u64::MAX,
+                }),
+            },
+            Case {
+                name: "zero body at exact header len",
+                body: &zero,
+                expect: Ok(VaaNamespaceKey {
+                    chain: 0,
+                    emitter: [0; 32],
+                    sequence: 0,
+                }),
+            },
+            Case {
+                name: "trailing payload ignored",
+                body: &long,
+                expect: Ok(VaaNamespaceKey {
+                    chain: 2,
+                    emitter: emitter_marked,
+                    sequence: 0x0102_0304_0506_0708,
+                }),
+            },
+            Case {
+                name: "one byte short",
+                body: &short,
+                expect: Err(GlobalAccountantError::InvalidInstructionData),
+            },
+            Case {
+                name: "empty",
+                body: &empty,
+                expect: Err(GlobalAccountantError::InvalidInstructionData),
+            },
+        ];
+        assert!(!cases.is_empty());
+        for c in &cases {
+            assert_eq!(parse_vaa_namespace_key(c.body), c.expect, "{}", c.name);
         }
     }
 
     #[test]
-    fn parse_token_bridge_payload_transfer_with_payload_same_as_transfer() {
-        // Action 0x03 must decode to the same Transfer variant as 0x01.
-        let token_address = [0x42u8; 32];
-        let body_01 = transfer_body(0x01, 99, token_address, 5, 7);
-        let body_03 = transfer_body(0x03, 99, token_address, 5, 7);
-        let a = parse_token_bridge_payload(&body_01).unwrap();
-        let b = parse_token_bridge_payload(&body_03).unwrap();
-        assert_eq!(a, b, "action 0x01 and 0x03 must decode identically");
+    fn token_bridge_payload_table() {
+        struct Case<'a> {
+            name: &'static str,
+            body: &'a [u8],
+            expect: Result<TokenBridgeAction, GlobalAccountantError>,
+        }
+        let mut token_address = [0u8; 32];
+        token_address[0] = 0x11;
+        token_address[31] = 0x99;
+        let transfer_01 = transfer_body(0x01, Uint256::from_u128(1_000_000), token_address, 2, 10);
+        let transfer_03 = transfer_body(0x03, Uint256::from_u128(1_000_000), token_address, 2, 10);
+        let transfer_max = transfer_body(0x01, Uint256::MAX, [0xFF; 32], u16::MAX, u16::MAX);
+        let mut transfer_03_extra = [0u8; MIN_TRANSFER_BODY + 40];
+        transfer_03_extra[..MIN_TRANSFER_BODY].copy_from_slice(&transfer_03);
+        transfer_03_extra[MIN_TRANSFER_BODY..].fill(0xEE);
+        let mut transfer_132 = [0u8; MIN_TRANSFER_BODY - 1];
+        transfer_132.copy_from_slice(&transfer_01[..MIN_TRANSFER_BODY - 1]);
+        let mut attest = [0u8; HDR + 1];
+        attest[HDR] = 0x02;
+        let mut attest_long = [0u8; HDR + 100];
+        attest_long[HDR] = 0x02;
+        let mut action_00 = [0u8; HDR + 1];
+        action_00[HDR] = 0x00;
+        let mut action_ff = [0u8; HDR + 1];
+        action_ff[HDR] = 0xFF;
+        let mut action_77 = [0u8; HDR + 1];
+        action_77[HDR] = 0x77;
+        let header_only = [0u8; HDR];
+        let mut transfer_short = [0u8; HDR + 11];
+        transfer_short[HDR] = 0x01;
+        let empty: [u8; 0] = [];
+
+        let expected_transfer = Ok(TokenBridgeAction::Transfer {
+            amount: Uint256::from_u128(1_000_000),
+            token_chain: 2,
+            token_address,
+            recipient_chain: 10,
+        });
+        let cases = [
+            Case {
+                name: "action 0x01 exact 133",
+                body: &transfer_01,
+                expect: expected_transfer,
+            },
+            Case {
+                name: "action 0x03 decodes as 0x01",
+                body: &transfer_03,
+                expect: expected_transfer,
+            },
+            Case {
+                name: "action 0x03 with trailing payload",
+                body: &transfer_03_extra,
+                expect: expected_transfer,
+            },
+            Case {
+                name: "max field values",
+                body: &transfer_max,
+                expect: Ok(TokenBridgeAction::Transfer {
+                    amount: Uint256::MAX,
+                    token_chain: u16::MAX,
+                    token_address: [0xFF; 32],
+                    recipient_chain: u16::MAX,
+                }),
+            },
+            Case {
+                name: "attest at 52 bytes",
+                body: &attest,
+                expect: Ok(TokenBridgeAction::Attest),
+            },
+            Case {
+                name: "attest with trailing bytes",
+                body: &attest_long,
+                expect: Ok(TokenBridgeAction::Attest),
+            },
+            Case {
+                name: "action 0x00",
+                body: &action_00,
+                expect: Ok(TokenBridgeAction::Other(0x00)),
+            },
+            Case {
+                name: "action 0x77",
+                body: &action_77,
+                expect: Ok(TokenBridgeAction::Other(0x77)),
+            },
+            Case {
+                name: "action 0xFF",
+                body: &action_ff,
+                expect: Ok(TokenBridgeAction::Other(0xFF)),
+            },
+            Case {
+                name: "transfer payload 132 bytes",
+                body: &transfer_132,
+                expect: Err(GlobalAccountantError::InvalidInstructionData),
+            },
+            Case {
+                name: "transfer payload 11 bytes",
+                body: &transfer_short,
+                expect: Err(GlobalAccountantError::InvalidInstructionData),
+            },
+            Case {
+                name: "header only, no action byte",
+                body: &header_only,
+                expect: Err(GlobalAccountantError::InvalidInstructionData),
+            },
+            Case {
+                name: "empty",
+                body: &empty,
+                expect: Err(GlobalAccountantError::InvalidInstructionData),
+            },
+        ];
+        assert!(!cases.is_empty());
+        for c in &cases {
+            assert_eq!(parse_token_bridge_payload(c.body), c.expect, "{}", c.name);
+        }
     }
 
     #[test]
-    fn parse_token_bridge_payload_attest() {
-        // Action 0x02 only needs the one-byte action past the 51-byte header.
-        let mut body = [0u8; 52];
-        body[51] = 0x02;
-        let action = parse_token_bridge_payload(&body).expect("attest parses");
-        assert_eq!(action, TokenBridgeAction::Attest);
+    fn mainnet_transfer_fixture_decodes() {
+        let body = fixture_body(FIXTURE_TRANSFER_SEQ1395207);
+        assert_eq!(body.len(), MIN_TRANSFER_BODY);
+
+        let key = parse_vaa_namespace_key(body).unwrap();
+        let mut emitter = [0u8; 32];
+        hex_into(
+            "ec7372995d5cc8732397fb0ad35c0121e0eaa90d26f828a534cab54391b3a4f5",
+            &mut emitter,
+        );
+        assert_eq!(
+            key,
+            VaaNamespaceKey {
+                chain: 1,
+                emitter,
+                sequence: 1_395_207,
+            }
+        );
+
+        let mut token_address = [0u8; 32];
+        hex_into(
+            "000000000000000000000000814e0908b12a99fecf5bc101bb5d0b8b5cdf7d26",
+            &mut token_address,
+        );
+        assert_eq!(
+            parse_token_bridge_payload(body),
+            Ok(TokenBridgeAction::Transfer {
+                amount: Uint256::from_u128(1_624_428_966_986),
+                token_chain: 2,
+                token_address,
+                recipient_chain: 2,
+            })
+        );
     }
 
     #[test]
-    fn parse_token_bridge_payload_unknown_action() {
-        // Any byte other than 0x01/0x02/0x03 decodes to Other.
-        let mut body = [0u8; 52];
-        body[51] = 0x77;
-        let action = parse_token_bridge_payload(&body).expect("unknown action parses");
-        assert_eq!(action, TokenBridgeAction::Other);
+    fn mainnet_non_token_bridge_fixture_is_other() {
+        let body = fixture_body(FIXTURE_OTHER_SEQ2211);
+        let key = parse_vaa_namespace_key(body).unwrap();
+        assert_eq!(key.chain, 1);
+        assert_eq!(key.sequence, 2211);
+        assert_eq!(
+            parse_token_bridge_payload(body),
+            Ok(TokenBridgeAction::Other(0x99))
+        );
     }
 
+    /// Offsets match `DecodeTransferPayloadHdr` in `sdk/vaa/structs.go`:
+    /// type at 0, amount 1..33, origin address 33..65, origin chain 65..67,
+    /// target address 67..99, target chain 99..101.
     #[test]
-    fn parse_token_bridge_payload_short_body_rejects() {
-        // 51-byte body (no action byte) must reject.
-        let body = [0u8; 51];
-        let err = parse_token_bridge_payload(&body).unwrap_err();
-        assert_eq!(err, GlobalAccountantError::InvalidInstructionData);
+    fn payload_offsets_match_guardian_sdk() {
+        let go_sdk: [(&str, usize); 6] = [
+            ("type", 0),
+            ("amount", 1),
+            ("origin_address", 33),
+            ("origin_chain", 65),
+            ("target_address", 67),
+            ("target_chain", 99),
+        ];
+        let ours = [
+            ("type", ACTION_OFFSET),
+            ("amount", AMOUNT_OFFSET),
+            ("origin_address", TOKEN_ADDRESS_OFFSET),
+            ("origin_chain", TOKEN_CHAIN_OFFSET),
+            ("target_address", RECIPIENT_OFFSET),
+            ("target_chain", RECIPIENT_CHAIN_OFFSET),
+        ];
+        assert_eq!(go_sdk, ours);
     }
 
-    #[test]
-    fn parse_token_bridge_payload_short_transfer_payload_rejects() {
-        // Header + action 0x01 + 10 bytes — short of the 133-byte minimum.
-        let mut body = [0u8; 62];
-        body[51] = 0x01;
-        let err = parse_token_bridge_payload(&body).unwrap_err();
-        assert_eq!(err, GlobalAccountantError::InvalidInstructionData);
+    fn hex_into(hex: &str, out: &mut [u8]) {
+        assert_eq!(hex.len(), out.len() * 2);
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        }
     }
 }

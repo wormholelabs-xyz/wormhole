@@ -1,15 +1,8 @@
-//! register_chain -> submit integration: prove the ChainRegistration PDA written
-//! by `register_chain` is byte-compatible with the reader in the submit path.
+//! `register_chain` writes the `ChainRegistration` PDA. `submit_vaas` then reads that exact
+//! account. This proves writer and reader agree on the layout.
 //!
-//! Every other submit test fabricates the registration account directly,
-//! bypassing `register_chain`, so the writer/reader layout agreement is
-//! otherwise unproven. Here `register_chain` WRITES the PDA from a governance
-//! VAA, and that exact resulting account is fed into a `submit_vaas` call whose
-//! body header carries the same `(chain, emitter)`; the submit must pass its
-//! registration cross-check and account the transfer.
-//!
-//! Driven against a Mollusk with the real `solana_noreplay.so` and
-//! `wormhole_verify_vaa_shim.so` loaded (see `common::mollusk_fixtures`).
+//! Mollusk with the real `solana_noreplay.so` and `wormhole_verify_vaa_shim.so`
+//! (see `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -128,10 +121,6 @@ fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Acco
         .1
 }
 
-// ----------------------------------------------------------------------------
-// register_chain
-// ----------------------------------------------------------------------------
-
 fn build_register_chain_body(
     sequence: u64,
     chain_to_register: u16,
@@ -159,7 +148,7 @@ fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[
     data
 }
 
-/// Run `register_chain` and return the written ChainRegistration PDA account.
+/// Run `register_chain`; return the written `ChainRegistration` account.
 fn register_chain(
     mollusk: &Mollusk,
     chain_to_register: u16,
@@ -226,10 +215,6 @@ fn register_chain(
     find_account(&r.resulting_accounts, &registration_pda).clone()
 }
 
-// ----------------------------------------------------------------------------
-// submit_vaas (transfer), consuming the register_chain-written registration
-// ----------------------------------------------------------------------------
-
 fn build_transfer_body(
     emitter_chain: u16,
     emitter_address: &[u8; 32],
@@ -260,32 +245,30 @@ fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
     data
 }
 
-/// register_chain writes the ChainRegistration PDA; that exact account is then
-/// fed into submit_vaas, which must accept it on the registration cross-check.
+/// `submit_vaas` accepts the registration account that `register_chain` wrote.
 #[test]
 fn register_chain_then_submit_vaas_accepts_written_registration() {
     let mollusk = mollusk();
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let payer = Pubkey::new_from_array([0x11u8; 32]);
 
-    // The chain whose Token Bridge emitter we register, and the emitter itself.
     let chain: u16 = 2;
     let mut emitter = [0u8; 32];
     emitter[31] = 0x77;
 
-    // 1) register_chain WRITES the registration PDA from a governance VAA.
+    // 1) `register_chain` writes the PDA.
     let written_registration = register_chain(&mollusk, chain, &emitter, 0x09, &guardians, payer);
     assert_eq!(
         written_registration.owner,
         program_id(),
         "register_chain output owned by the program"
     );
-    // Sanity: the writer's layout decodes to the registered (chain, emitter).
+    // The written layout decodes to `(chain, emitter)`.
     let layout: &ChainRegistrationLayout = bytemuck::from_bytes(&written_registration.data);
     assert_eq!(layout.chain, chain);
     assert_eq!(layout.emitter_address, emitter);
 
-    // 2) Build a transfer VAA from the SAME emitter on the SAME chain.
+    // 2) Transfer VAA from the same emitter and chain.
     let token_chain: u16 = 2;
     let token_address = [0x55u8; 32];
     let recipient_chain: u16 = 1;
@@ -334,7 +317,7 @@ fn register_chain_then_submit_vaas_accepts_written_registration() {
         (source_account, uninitialised_pda_account()),
         (dest_account, uninitialised_pda_account()),
         keyed_account_for_system_program(),
-        // Slot 10: the EXACT account register_chain wrote, not a fabricated one.
+        // Slot 10: the account `register_chain` wrote.
         (registration_pda, written_registration),
     ];
     let metas = vec![
@@ -363,16 +346,13 @@ fn register_chain_then_submit_vaas_accepts_written_registration() {
         r.program_result
     );
 
-    // The transfer applied: source (native) credited; the registration the
-    // submit read was the writer's output, so the cross-check passed on real
-    // bytes rather than a hand-built fixture.
+    // Source (native) credited.
     let src = find_account(&r.resulting_accounts, &source_account);
     assert_eq!(src.owner, program_id(), "source Account PDA owned by program");
     let src_layout: &BalanceAccountLayout = bytemuck::from_bytes(&src.data);
     assert_eq!(src_layout.balance, Uint256::from_u128(amount));
 
-    // Negative control: a registration written for a DIFFERENT emitter must be
-    // rejected, proving the cross-check actually reads the written bytes.
+    // Negative control: a registration for another emitter fails.
     let other_emitter = [0xEEu8; 32];
     let mismatched = register_chain(&mollusk, chain, &other_emitter, 0x0A, &guardians, payer);
     let mut bad_accounts = accounts_clone_for_replay(
@@ -388,7 +368,7 @@ fn register_chain_then_submit_vaas_accepts_written_registration() {
         registration_pda,
         mismatched,
     );
-    // Use a fresh bucket so the failure is the emitter mismatch, not replay.
+    // Fresh bucket so the failure is the emitter mismatch.
     if let Some(e) = bad_accounts.iter_mut().find(|(k, _)| *k == noreplay_bucket) {
         e.1 = system_owned_account(0);
     }

@@ -1,7 +1,5 @@
-//! Integration tests for `submit_observations`.
-//!
-//! Driven against a Mollusk instance with the real `solana_noreplay.so` loaded
-//! at the canonical program ID (see `common::mollusk_fixtures`).
+//! Mollusk integration tests for `submit_observations`, with the real `solana_noreplay.so`
+//! (see `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -27,29 +25,12 @@ use common::mollusk_fixtures::{keyed_account_for_noreplay_program, mollusk_with_
 
 const PROGRAM_NAME: &str = "global_accountant";
 
-/// Compute-unit ceiling for the hottest quorum-commit branch (Transfer + lazy
-/// init of both Account PDAs). Pinned by the CU regression test below.
-///
-/// Re-baselined for the pinocchio -> anchor-lang 1.1.2 migration (see
-/// `.claude/tasks/anchor-migration-plan-v1.1.2.md` §7.1): measured cost on
-/// this branch moved from **60,502 CU** (pinocchio) to **67,009 CU**
-/// (anchor-lang 1.1.2), a **+6,507 CU (+10.8%)** increase — Anchor's
-/// discriminator/argument marshalling and `Context`/`Accounts` construction
-/// overhead, as anticipated by the plan. This is the expected, accepted cost
-/// of the framework migration, not a regression to chase down; mitigations
-/// already applied to keep the delta this small: `UncheckedAccount` (not
-/// Anchor's `seeds`/`owner` constraints, which would re-derive/re-check
-/// addresses this code already validates by hand), the 1-byte instruction
-/// dispatch (`#[instruction(discriminator = N)]`, not Anchor's 8-byte
-/// sighash), and `bytemuck` zero-copy state loads (not borsh).
-///
-/// Ceiling set to the new measured value plus ~12% headroom (matching the
-/// original constant's own margin over its baseline), so a real future
-/// regression still trips the guard instead of hiding under a loose ceiling.
+/// CU ceiling for the quorum-commit branch (Transfer + lazy init of both balance PDAs).
+/// Measured 67,009 CU on anchor-lang 1.1.2; ceiling adds ~12% headroom.
 const MAX_QUORUM_BRANCH_CU: u64 = 75_000;
 
 fn program_id() -> Pubkey {
-    // Fixed program id so test PDA derivation matches the program's view.
+    // Fixed program id; PDA derivation must match the program.
     Pubkey::new_from_array([7u8; 32])
 }
 
@@ -60,10 +41,6 @@ fn mollusk() -> Mollusk {
 fn system_program_id() -> Pubkey {
     keyed_account_for_system_program().0
 }
-
-// ============================================================================
-// PDA / instruction-data helpers
-// ============================================================================
 
 fn derive_pending_pda(
     chain: u16,
@@ -104,9 +81,7 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
-/// Host-side derivation of the canonical NoReplay bitmap PDA for
-/// `(authority, chain, emitter, sequence)`. Mirrors the on-chain
-/// `instructions::noreplay::derive_bucket_pda`.
+/// Host mirror of `noreplay::derive_bucket_pda`.
 fn derive_canonical_noreplay_bucket(
     authority: &Pubkey,
     chain: u16,
@@ -129,8 +104,7 @@ fn derive_canonical_noreplay_bucket(
     pda
 }
 
-/// Program-owned chain-registration PDA fixture for the given emitter,
-/// bypassing the `register_chain` governance path.
+/// Program-owned `ChainRegistration` PDA fixture.
 fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account {
     let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
     layout.tag = ChainRegistrationLayout::TAG;
@@ -145,38 +119,28 @@ fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account
     }
 }
 
-/// Host-side `keccak256(keccak256(body))` — the Wormhole VAA digest convention.
-/// This is the *dedup/quorum* digest: it keys the pending PDA, the NoReplay
-/// slot, and the commit-log record. It is NOT the signature digest.
+/// Dedup digest `keccak256(keccak256(body))`.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
-/// Deterministic source-chain transaction id carried in the wire format and
-/// folded into the signing digest. Audit-only; the program never routes on it.
+/// Fixed source-chain transaction id for the signing digest.
 const TX_HASH: [u8; 32] = [0xA9_u8; 32];
 
-/// Host mirror of `accountant_operational_core::hash::observation_signing_digest`:
-/// a *single* `keccak256` over `prefix ‖ tx_hash ‖ body`. This is the digest the
-/// guardian actually signs — deliberately distinct from `double_keccak256_host`
-/// so an observation signature is never interchangeable with a VAA signature.
+/// Host mirror of `hash::observation_signing_digest`.
 fn observation_signing_digest_host(prefix: &[u8], tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[prefix, tx_hash, body]).to_bytes()
 }
 
-/// The WTT signing digest for `body` under the canonical prefix and fixed test
-/// `TX_HASH`. Used everywhere a submitted observation must carry a valid
-/// guardian signature.
+/// WTT signing digest for `body` under the canonical prefix and `TX_HASH`.
 fn signing_digest_for(body: &[u8]) -> [u8; 32] {
     observation_signing_digest_host(SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body)
 }
 
-/// Attest-payload VAA body (action 0x02). The scenario digest is derived from
-/// the body, not supplied independently.
+/// Attest VAA body (action 0x02).
 fn build_attest_body(emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> Vec<u8> {
-    // 51-byte header + action byte. The parser only reads the action, so 52
-    // bytes suffice.
+    // 51-byte header + action byte.
     let mut body = vec![0u8; 52];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
     body[10..42].copy_from_slice(emitter_address);
@@ -215,10 +179,7 @@ fn submit_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // Wire: discriminator + 70-byte fixed prefix + tx_hash(32) + 2-byte body
-    // len (LE) + body. No digest or PDA bumps travel; the dedup digest and the
-    // routing tuple are derived on-chain from the body header [8..50], and the
-    // signing digest is reconstructed on-chain from prefix ‖ tx_hash ‖ body.
+    // Wire: discriminator + 70-byte prefix + tx_hash(32) + body_len(u16 LE) + body.
     let mut data = Vec::with_capacity(1 + 70 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(&guardian_set_index.to_le_bytes());
@@ -229,10 +190,6 @@ fn submit_ix_data(
     data.extend_from_slice(body);
     data
 }
-
-// ============================================================================
-// Account fixtures
-// ============================================================================
 
 fn system_owned_account(lamports: u64) -> Account {
     Account {
@@ -248,13 +205,12 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// Fresh NoReplay bucket: lazy-create entry state (system-owned, zero data).
+/// Uninitialised NoReplay bucket.
 fn noreplay_bucket_unmarked() -> Account {
     system_owned_account(0)
 }
 
-/// Pre-marked NoReplay bucket: 129-byte bitmap owned by `solana_noreplay` with
-/// the bit at `sequence % 1024` set.
+/// NoReplay bucket with the bit at `sequence % 1024` set.
 fn noreplay_bucket_marked(sequence: u64) -> Account {
     let mut data = vec![0u8; NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES];
     let bit_index = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
@@ -268,8 +224,7 @@ fn noreplay_bucket_marked(sequence: u64) -> Account {
     }
 }
 
-/// Core-Bridge-style `GuardianSet` account with the supplied 20-byte guardian
-/// addresses, `creation_time`, and `expiration_time`.
+/// Core Bridge `GuardianSet` account.
 fn guardian_set_account(
     index: u32,
     keys: &[[u8; 20]],
@@ -293,19 +248,13 @@ fn guardian_set_account(
     }
 }
 
-// ============================================================================
-// Guardian-set generation: deterministic per-test seeded keys.
-// ============================================================================
-
 #[derive(Clone)]
 struct Guardian {
     secret: SecretKey,
     eth_address: [u8; 20],
 }
 
-/// Generate `count` deterministic secp256k1 keypairs and their 20-byte
-/// Ethereum-style addresses. Small-magnitude seed bytes keep the scalar inside
-/// the group order without needing a crypto-grade RNG.
+/// `count` deterministic secp256k1 keypairs and their 20-byte addresses.
 fn make_guardians(count: usize, seed: u8) -> Vec<Guardian> {
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
@@ -317,7 +266,7 @@ fn make_guardians(count: usize, seed: u8) -> Vec<Guardian> {
         let secret =
             SecretKey::parse(&sk_bytes).expect("deterministic seed inside secp256k1 group order");
         let public = PublicKey::from_secret_key(&secret);
-        // `serialize()` emits 0x04 prefix + 64 raw (X||Y); strip prefix.
+        // Strip the 0x04 prefix.
         let pk_uncompressed = public.serialize();
         let raw = &pk_uncompressed[1..];
         let hash = keccak256_host(raw);
@@ -331,7 +280,6 @@ fn make_guardians(count: usize, seed: u8) -> Vec<Guardian> {
     out
 }
 
-/// Host-side keccak256 for deriving guardian-set fixture addresses.
 fn keccak256_host(data: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[data]).to_bytes()
 }
@@ -346,24 +294,16 @@ fn sign_digest(guardian: &Guardian, digest: &[u8; 32]) -> [u8; 65] {
     out
 }
 
-// ============================================================================
-// Scenario builder — assembles the account list and submits observations.
-// ============================================================================
-
 #[derive(Clone)]
 struct Scenario {
     chain: u16,
     emitter: [u8; 32],
     sequence: u64,
-    /// VAA body — the source of truth; `digest` is derived from it. Default is
-    /// an Attest payload (no balance work); transfer tests use
-    /// `Self::with_transfer_body`.
+    /// VAA body; `digest` derives from it. Default is Attest.
     body: Vec<u8>,
-    /// Dedup/quorum digest = `double_keccak256(body)`. Keys the pending PDA,
-    /// NoReplay slot, and commit log. NOT what guardians sign.
+    /// `double_keccak256(body)`.
     digest: [u8; 32],
-    /// Signing digest = `keccak256(prefix ‖ tx_hash ‖ body)`. The value each
-    /// guardian signature is verified against. Distinct from `digest`.
+    /// `keccak256(prefix ‖ tx_hash ‖ body)`.
     signing_digest: [u8; 32],
     guardian_set_index: u32,
     guardians: Vec<Guardian>,
@@ -372,16 +312,12 @@ struct Scenario {
     guardian_set_pubkey: Pubkey,
     noreplay_bucket_pubkey: Pubkey,
     noreplay_program_pubkey: Pubkey,
-    /// Canonical `noreplay-authority` PDA.
     noreplay_authority_pubkey: Pubkey,
-    /// Source-chain Account PDA (slot 7). Attest scenarios use the
-    /// noreplay-authority pubkey as a sentinel since the slot is untouched.
+    /// Slot 7. Attest scenarios use the authority pubkey as a placeholder.
     source_account_pubkey: Pubkey,
-    /// Destination-chain Account PDA (slot 8). Same semantics as `source`.
+    /// Slot 8.
     dest_account_pubkey: Pubkey,
-    /// Chain-registration PDA (slot 10), default pre-populated `chain -> emitter`.
-    /// Negative tests override it to drive `MissingChainRegistration` /
-    /// `UnregisteredEmitter`.
+    /// Slot 10, pre-populated `chain -> emitter`.
     chain_registration_pubkey: Pubkey,
 }
 
@@ -404,7 +340,6 @@ impl Scenario {
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(chain);
         let noreplay_bucket_pubkey =
             derive_canonical_noreplay_bucket(&noreplay_authority_pubkey, chain, &emitter, sequence);
-        // Derive the canonical Guardian Set PDA address (Core Bridge program).
         let gsi_be = gsi.to_be_bytes();
         let (guardian_set_pubkey, _) = Pubkey::find_program_address(
             &[GUARDIAN_SET_SEED, &gsi_be],
@@ -426,16 +361,14 @@ impl Scenario {
             noreplay_bucket_pubkey,
             noreplay_program_pubkey: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
             noreplay_authority_pubkey,
-            // Attest payload ⇒ slots 8/9 untouched; reuse noreplay-authority as
-            // a sentinel.
+            // Attest: slots 7/8 unused.
             source_account_pubkey: noreplay_authority_pubkey,
             dest_account_pubkey: noreplay_authority_pubkey,
             chain_registration_pubkey,
         }
     }
 
-    /// Swap the Attest body for a Transfer body and re-derive the digest,
-    /// pending PDA, and source/dest Account PDAs.
+    /// Switch to a Transfer body; re-derive digest and PDAs.
     fn with_transfer_body(
         guardian_count: usize,
         gsi: u32,
@@ -472,8 +405,7 @@ impl Scenario {
         self.guardians.iter().map(|g| g.eth_address).collect()
     }
 
-    /// Submit one observation from `guardian_index`. Pass the previous result's
-    /// accounts to persist PDA state across observations.
+    /// Submit one observation. Pass the previous result's accounts to carry state.
     fn submit_once(
         &self,
         mollusk: &Mollusk,
@@ -495,9 +427,7 @@ impl Scenario {
         mollusk.process_instruction(&ix, &starting_accounts)
     }
 
-    /// 11-entry account-meta list. Slot 9 is rent_recipient (= submitter),
-    /// slot 10 the chain-registration PDA. Multi-submitter and
-    /// registration-negative tests build their own meta vec inline.
+    /// 11-entry account list. Slot 9 is `rent_recipient` (= submitter).
     fn account_metas(&self) -> Vec<AccountMeta> {
         vec![
             AccountMeta::new(self.submitter, true),
@@ -514,8 +444,7 @@ impl Scenario {
         ]
     }
 
-    /// Initial account list with all PDAs uninitialised. Slots 7/8 are
-    /// system-owned + empty so the lazy-init path fires on Transfer quorum.
+    /// Initial accounts with all PDAs uninitialised.
     fn initial_accounts(&self) -> Vec<(Pubkey, Account)> {
         let mut accounts = vec![
             (self.submitter, system_owned_account(50_000_000_000)),
@@ -529,8 +458,7 @@ impl Scenario {
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority_pubkey, system_owned_account(0)),
         ];
-        // Slots 7/8: append only when the sentinel hasn't collapsed them onto
-        // the noreplay-authority pubkey (Attest scenario).
+        // Slots 7/8 only when distinct from the authority placeholder.
         if self.source_account_pubkey != self.noreplay_authority_pubkey {
             accounts.push((self.source_account_pubkey, uninitialised_pda_account()));
         }
@@ -539,7 +467,6 @@ impl Scenario {
         {
             accounts.push((self.dest_account_pubkey, uninitialised_pda_account()));
         }
-        // Slot 10: chain-registration PDA pre-populated with the scenario emitter.
         accounts.push((
             self.chain_registration_pubkey,
             chain_registration_account(self.chain, &self.emitter),
@@ -547,8 +474,7 @@ impl Scenario {
         accounts
     }
 
-    /// Run `n` observations from guardian indices `0..n`, returning the final
-    /// accounts.
+    /// Run observations from guardian indices `0..n`.
     fn submit_n(&self, mollusk: &Mollusk, n: u8) -> Vec<(Pubkey, Account)> {
         let mut accounts = self.initial_accounts();
         for i in 0..n {
@@ -571,10 +497,6 @@ fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Acco
         .unwrap_or_else(|| panic!("account {key} not in result list"))
         .1
 }
-
-// ============================================================================
-// Tests
-// ============================================================================
 
 /// First observation allocates and populates the pending PDA.
 #[test]
@@ -605,7 +527,6 @@ fn submit_first_observation_creates_pending_pda() {
         "submitter is the recorded payer"
     );
 
-    // No quorum: NoReplay bucket stays in lazy-create entry state.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -635,7 +556,6 @@ fn submit_12_observations_accumulates_without_commit() {
         "bits 0..12 set in low-to-high order"
     );
 
-    // Sub-quorum: NoReplay unmarked.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -656,7 +576,6 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
 
     let accounts = scenario.submit_n(&mollusk, 13);
 
-    // Pending PDA closed: lamports drained, owner reverted to system.
     let pending = find_account(&accounts, &scenario.pending_pda);
     assert_eq!(
         pending.lamports, 0,
@@ -673,13 +592,8 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
         pending.data.len()
     );
 
-    // The canonical commit log is emitted on the quorum-completing branch via
-    // `sol_log_data` (see `instructions/commit_log.rs`). Mollusk's
-    // `InstructionResult` does not expose program logs, so log content is
-    // verified in the surfpool e2e suite (`tx.meta.logMessages`).
+    // Mollusk hides program logs; the surfpool e2e suite checks the commit log.
 
-    // NoReplay flipped: bitmap allocated, owned by noreplay, bit at
-    // `sequence % 1024` set.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -701,15 +615,13 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
     );
 }
 
-/// Quorum completed by a different submitter: rent refunds to the recorded
-/// payer (slot 10), not the quorum-completing signer. A wrong rent_recipient
-/// must fail with `PayerMismatch`.
+/// Rent refunds to the recorded payer, not the completing signer.
+/// A wrong `rent_recipient` fails with `PayerMismatch`.
 #[test]
 fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x70);
 
-    // Alice (= scenario.submitter) accumulates the first 12 signatures.
     let accounts_after_12 = scenario.submit_n(&mollusk, 12);
     let alice = scenario.submitter;
     let alice_lamports_pre = find_account(&accounts_after_12, &alice).lamports;
@@ -719,7 +631,6 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         "pending PDA must be rent-funded at 12/19"
     );
 
-    // Bob arrives with the 13th signature from a freshly-funded wallet.
     let bob = Pubkey::new_from_array([0xB0u8; 32]);
     let bob_starting_lamports = 50_000_000_000u64;
     let mut accounts = accounts_after_12.clone();
@@ -733,7 +644,7 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         &scenario.body,
     );
 
-    // (1) Wrong rent_recipient (bob): must fail with PayerMismatch.
+    // Wrong rent_recipient.
     let wrong_metas = vec![
         AccountMeta::new(bob, true),
         AccountMeta::new(scenario.pending_pda, false),
@@ -761,7 +672,7 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         other => panic!("expected Failure(PayerMismatch), got {other:?}"),
     }
 
-    // (2) Correct rent_recipient (alice): succeeds and refunds alice.
+    // Correct rent_recipient.
     let correct_metas = vec![
         AccountMeta::new(bob, true),
         AccountMeta::new(scenario.pending_pda, false),
@@ -784,11 +695,6 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
         r_correct.program_result
     );
 
-    // Refund routes to alice (recorded payer). The commit log emit's
-    // payer-of-record is now implicit in the submitting tx's fee payer rather
-    // than a field on the (removed) DigestAccount PDA; the log content itself
-    // is verified by the surfpool e2e suite, which has access to
-    // `tx.meta.logMessages` (mollusk's `InstructionResult` does not expose them).
     let alice_post = find_account(&r_correct.resulting_accounts, &alice);
     assert_eq!(
         alice_post.lamports,
@@ -797,14 +703,12 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
     );
 }
 
-/// Security: the routing tuple (chain, emitter, sequence) is read from the
-/// signed body header [8..50], never from caller-supplied prefix bytes. An
-/// attacker-supplied pending PDA at a different namespace is rejected.
+/// The routing tuple comes from body header `[8..50]`; a pending PDA for another
+/// namespace is rejected.
 #[test]
 fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let mollusk = mollusk();
 
-    // Authoritative routing tuple lives in body[8..50].
     let body_chain = 2u16;
     let mut body_emitter = [0u8; 32];
     body_emitter[31] = 0x77;
@@ -815,9 +719,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let guardians = make_guardians(19, 0x80);
     let signature = sign_digest(&guardians[0], &signing_digest_for(&body));
 
-    // Attack: supply a pending PDA canonical for an attacker namespace, not
-    // the body's. The program derives the canonical address from body[8..50],
-    // so it cannot sign for the attacker's address.
+    // Pending PDA canonical for the attacker namespace, not the body's.
     let attacker_chain = 99u16;
     let attacker_emitter = [0xFFu8; 32];
     let attacker_sequence = 0x9999u64;
@@ -853,8 +755,6 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
 
     let ix_data = submit_ix_data(guardian_set_index, 0, &signature, &body);
 
-    // Pre-populate the body-chain registration so the registration check
-    // passes; this test targets the pending-PDA rejection.
     let (registration_pda, _) = derive_chain_registration_pda(body_chain);
 
     let guardian_keys: Vec<[u8; 20]> = guardians.iter().map(|g| g.eth_address).collect();
@@ -891,8 +791,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     let ix = Instruction::new_with_bytes(program_id(), &ix_data, metas);
     let r = mollusk.process_instruction(&ix, &accounts);
 
-    // The init CPI can only sign for the body-derived canonical address, so a
-    // pending PDA at any other address aborts with `PrivilegeEscalation`.
+    // The init CPI signs only for the body-derived address.
     assert!(
         !matches!(r.program_result, ProgramResult::Success),
         "spoofed pending PDA must be rejected, got {:?}",
@@ -906,7 +805,6 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
          so the init CPI cannot sign for the attacker's address; got {result_debug}"
     );
 
-    // Attacker's pending PDA stays uninitialised (tx unwinds atomically).
     let attacker_after = find_account(&r.resulting_accounts, &attacker_pending_pda);
     assert_eq!(
         attacker_after.owner,
@@ -915,8 +813,7 @@ fn submit_observations_routes_by_body_header_not_caller_supplied_prefix() {
     );
 }
 
-/// Observation whose emitter_chain has no registration PDA is refused with
-/// `MissingChainRegistration`.
+/// No registration PDA for `emitter_chain`: `MissingChainRegistration`.
 #[test]
 fn submit_observations_rejects_unregistered_chain() {
     let mollusk = mollusk();
@@ -925,7 +822,6 @@ fn submit_observations_rejects_unregistered_chain() {
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
     let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
 
-    // Replace the default registration with an uninitialised PDA.
     let mut accounts = scenario.initial_accounts();
     for entry in accounts.iter_mut() {
         if entry.0 == registration_pda {
@@ -971,8 +867,7 @@ fn submit_observations_rejects_unregistered_chain() {
     }
 }
 
-/// Registration exists but holds a different emitter than the body header:
-/// rejects with `UnregisteredEmitter`.
+/// Registration holds another emitter: `UnregisteredEmitter`.
 #[test]
 fn submit_observations_rejects_wrong_emitter_for_registered_chain() {
     let mollusk = mollusk();
@@ -1013,14 +908,12 @@ fn submit_observations_rejects_wrong_emitter_for_registered_chain() {
     }
 }
 
-/// Wrong-seed registration PDA is rejected by the canonical-address check
-/// (`InvalidPda`) before any data read.
+/// Wrong-seed registration PDA: `InvalidPda`.
 #[test]
 fn submit_observations_rejects_spoofed_registration_pda() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0xA2);
 
-    // Spoofed PDA derived from a different chain ID.
     let (spoofed_pda, _) = derive_chain_registration_pda(99);
     assert_ne!(spoofed_pda, scenario.chain_registration_pubkey);
 
@@ -1056,7 +949,7 @@ fn submit_observations_rejects_spoofed_registration_pda() {
     }
 }
 
-/// A corrupted signature is rejected with `InvalidSignature`.
+/// Corrupted signature: `InvalidSignature`.
 #[test]
 fn submit_with_invalid_signature_fails() {
     let mollusk = mollusk();
@@ -1089,7 +982,7 @@ fn submit_with_invalid_signature_fails() {
     }
 }
 
-/// Recovery id outside {0,1,2,3} is rejected before `secp256k1_recover`.
+/// Recovery id >= 4: `InvalidSignature` before `secp256k1_recover`.
 #[test]
 fn submit_with_recovery_id_4_rejects() {
     let mollusk = mollusk();
@@ -1121,7 +1014,7 @@ fn submit_with_recovery_id_4_rejects() {
     }
 }
 
-/// Two observations from the same guardian index: second fails `AlreadySigned`.
+/// Same guardian index twice: `AlreadySigned`.
 #[test]
 fn submit_with_duplicate_guardian_index_fails() {
     let mollusk = mollusk();
@@ -1146,7 +1039,7 @@ fn submit_with_duplicate_guardian_index_fails() {
     }
 }
 
-/// Drives each `read_guardian_key` rejection branch:
+/// Each `read_guardian_key` rejection:
 ///   (a) truncated header              -> InvalidPda
 ///   (b) on-chain index != wire index  -> InvalidGuardianIndex
 ///   (c) guardian_index >= keys_len    -> InvalidGuardianIndex
@@ -1165,13 +1058,12 @@ fn submit_with_malformed_guardian_set_rejects() {
     };
 
     let mismatched_index = {
-        // Same keys, header encodes a different index.
         let scenario = Scenario::new(19, 4, 0x53);
         guardian_set_account(99, &scenario.guardian_keys(), 0, 0)
     };
 
     let short_keys_array = {
-        // keys_len = 3 but wire guardian_index = 5.
+        // keys_len = 3, guardian_index = 5.
         let scenario = Scenario::new(19, 4, 0x53);
         let truncated: Vec<[u8; 20]> = scenario.guardians[..3]
             .iter()
@@ -1181,7 +1073,7 @@ fn submit_with_malformed_guardian_set_rejects() {
     };
 
     let truncated_keys_buffer = {
-        // keys_len = 19 but only 5 keys present; an 18th-key read overruns.
+        // keys_len = 19 but 5 keys present.
         let mut data = Vec::with_capacity(8 + 5 * 20);
         data.extend_from_slice(&4u32.to_le_bytes());
         data.extend_from_slice(&19u32.to_le_bytes());
@@ -1195,9 +1087,7 @@ fn submit_with_malformed_guardian_set_rejects() {
         }
     };
 
-    // Length/shape failures map to the builtin `InvalidAccountData`; identity
-    // mismatches map to the custom `InvalidGuardianIndex`. Codes compared as the
-    // full `u64` encoding so builtin errors (high 32 bits) aren't truncated.
+    // Compare the full `u64` so builtin error codes keep their high bits.
     let cases: [(&str, Account, u8, u64); 4] = [
         (
             "truncated header",
@@ -1235,7 +1125,7 @@ fn submit_with_malformed_guardian_set_rejects() {
             entry.1 = gs_account;
         }
 
-        // Valid signature — handler must short-circuit before secp256k1_recover.
+        // Valid signature; the handler must fail before recovery.
         let signature = sign_digest(
             &scenario.guardians[guardian_index as usize],
             &scenario.signing_digest,
@@ -1264,7 +1154,7 @@ fn submit_with_malformed_guardian_set_rejects() {
     }
 }
 
-/// Pending PDA at GSI=5; an observation under stale GSI=4 fails `StaleGuardianSet`.
+/// Pending PDA at GSI=5; observation under GSI=4: `StaleGuardianSet`.
 #[test]
 fn submit_with_stale_old_set_observation_fails() {
     let mollusk = mollusk();
@@ -1274,7 +1164,6 @@ fn submit_with_stale_old_set_observation_fails() {
     let old_guardians = make_guardians(19, 0x48); // distinct keys for GSI=4
     let stale_signature = sign_digest(&old_guardians[1], &new_scenario.signing_digest);
 
-    // Derive canonical Guardian Set PDA for GSI=4.
     let gsi_4_be = 4u32.to_be_bytes();
     let (guardian_set_4_pubkey, _) = Pubkey::find_program_address(
         &[b"GuardianSet", &gsi_4_be],
@@ -1290,11 +1179,9 @@ fn submit_with_stale_old_set_observation_fails() {
         0,
     );
     let mut accounts = accounts_after_first.clone();
-    // Add the GSI=4 guardian set at its canonical address.
     accounts.push((guardian_set_4_pubkey, old_gs_account));
 
     let mut metas = new_scenario.account_metas().clone();
-    // Update guardian set account meta to point to GSI=4.
     metas[2] = AccountMeta::new_readonly(guardian_set_4_pubkey, false);
 
     let ix = Instruction::new_with_bytes(
@@ -1321,15 +1208,14 @@ fn submit_with_stale_old_set_observation_fails() {
     }
 }
 
-/// Observation under a newer GSI wipes the old pending PDA and recreates it
-/// with a single bit set under the new index.
+/// Newer GSI wipes the pending PDA and recreates it with one bit set.
 #[test]
 fn submit_with_new_set_observation_wipes_old_pending() {
     let mollusk = mollusk();
     let old_scenario = Scenario::new(19, 4, 0x4A);
     let accounts_after_first = old_scenario.submit_n(&mollusk, 1);
 
-    // Same emitter/sequence/chain so the pending PDA address collides.
+    // Same routing tuple so the pending PDA address collides.
     let new_guardians = make_guardians(19, 0x4B);
     let new_gs_account = guardian_set_account(
         5,
@@ -1340,19 +1226,16 @@ fn submit_with_new_set_observation_wipes_old_pending() {
         0,
         0,
     );
-    // Derive canonical Guardian Set PDA for GSI=5.
     let gsi_5_be = 5u32.to_be_bytes();
     let (guardian_set_5_pubkey, _) = Pubkey::find_program_address(
         &[b"GuardianSet", &gsi_5_be],
         &Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID),
     );
     let mut accounts = accounts_after_first.clone();
-    // Add the GSI=5 guardian set at its canonical address.
     accounts.push((guardian_set_5_pubkey, new_gs_account));
 
     let signature = sign_digest(&new_guardians[0], &old_scenario.signing_digest);
     let mut metas = old_scenario.account_metas().clone();
-    // Update guardian set account meta to point to GSI=5.
     metas[2] = AccountMeta::new_readonly(guardian_set_5_pubkey, false);
     let ix = Instruction::new_with_bytes(
         program_id(),
@@ -1383,18 +1266,15 @@ fn submit_with_new_set_observation_wipes_old_pending() {
     );
 }
 
-/// A second digest under the same guardian set routes into a sibling pending
-/// PDA (digest is in the seeds) rather than being rejected.
+/// A second digest under the same guardian set uses a sibling pending PDA.
 #[test]
 fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x4C);
 
-    // First observation under digest D1.
     let accounts_after_first = scenario.submit_n(&mollusk, 1);
 
-    // D2 must land in a sibling PDA. Mutate consistency_level (offset 50) so
-    // the routing tuple at body[8..50] is unchanged.
+    // Mutate consistency_level (offset 50); routing tuple unchanged.
     let mut alternate_body = scenario.body.clone();
     alternate_body[50] = 0xAA;
     let alternate_digest = double_keccak256_host(&alternate_body);
@@ -1438,7 +1318,6 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
         r.program_result
     );
 
-    // D1 bucket untouched at 1 sig.
     let d1 = find_account(&r.resulting_accounts, &scenario.pending_pda);
     let d1_layout: &PendingObservationsLayout = bytemuck::from_bytes(&d1.data);
     assert_eq!(d1_layout.digest, scenario.digest);
@@ -1447,7 +1326,6 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
         "D1 bucket still at one signature"
     );
 
-    // D2 bucket has one sig at guardian-index 1.
     let d2 = find_account(&r.resulting_accounts, &d2_pending_pda);
     assert_eq!(d2.owner, program_id(), "D2 sibling PDA owned by program");
     let d2_layout: &PendingObservationsLayout = bytemuck::from_bytes(&d2.data);
@@ -1462,25 +1340,13 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     );
 }
 
-/// Fork-recovery: two digests for the same `(chain, emitter, sequence)` under
-/// one guardian set accumulate in separate sibling PDAs and race to quorum.
-/// The digest-in-seeds design substitutes for CosmWasm's `tx_hash` bucket
-/// discriminator; NoReplay (keyed by `(chain, emitter, sequence)` only) is
-/// shared across siblings, so the losing digest's PDA is later reclaimable via
-/// `close_pending`.
+/// Two digests for one `(chain, emitter, sequence)` race in sibling PDAs.
+/// NoReplay is shared, so the loser is reclaimable through `close_pending`.
 #[test]
 fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
-    // 1. 7 guardians observe D1 under set 6.
-    // 2-4. A reorg flips the body timestamp; 13 guardians observe D2 in a
-    //      fresh sibling PDA.
-    // 5. D2 reaches quorum: NoReplay flips, DigestAccount opens with D2, D2
-    //    pending closes.
-    // 6. The D1 pending PDA (7 sigs) is stranded.
-
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 6, 0x5A);
 
-    // Accumulate 7 D1 signatures.
     let accounts_after_d1 = scenario.submit_n(&mollusk, 7);
     let d1_after = find_account(&accounts_after_d1, &scenario.pending_pda);
     let d1_layout: &PendingObservationsLayout = bytemuck::from_bytes(&d1_after.data);
@@ -1490,8 +1356,7 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
         "D1 bucket accumulated 7 sigs before reorg"
     );
 
-    // Switch to D2. Mutate only consistency_level (byte 50) so the routing
-    // tuple at body[8..50] is unchanged.
+    // Mutate consistency_level (byte 50); routing tuple unchanged.
     let mut alternate_body = scenario.body.clone();
     alternate_body[50] = 0xA5;
     let alternate_digest = double_keccak256_host(&alternate_body);
@@ -1508,7 +1373,6 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     let mut accounts = accounts_after_d1.clone();
     accounts.push((d2_pending_pda, uninitialised_pda_account()));
 
-    // Drive 13 D2 observations to quorum.
     for i in 0..13u8 {
         let signature =
             sign_digest(&scenario.guardians[i as usize], &signing_digest_for(&alternate_body));
@@ -1533,8 +1397,6 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
         accounts = r.resulting_accounts.clone();
     }
 
-    // Post-quorum: NoReplay flipped, DigestAccount = D2, D2 pending closed,
-    // D1 pending stranded at 7 sigs.
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -1546,9 +1408,7 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
         NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES
     );
 
-    // The winning digest (D2) is emitted via `sol_log_data` on the
-    // quorum-completing branch; log content is verified by the surfpool e2e
-    // suite (mollusk does not expose `program_logs`).
+    // Mollusk hides program logs; the surfpool e2e suite checks the commit log.
 
     let d2_post = find_account(&accounts, &d2_pending_pda);
     assert_eq!(d2_post.lamports, 0, "D2 pending PDA drained on commit");
@@ -1573,7 +1433,7 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     );
 }
 
-/// A marked NoReplay bucket aborts submit before any signature or PDA work.
+/// Marked NoReplay bucket: abort before signature or PDA work.
 #[test]
 fn submit_rejected_when_noreplay_already_marked() {
     let mollusk = mollusk();
@@ -1601,11 +1461,8 @@ fn submit_rejected_when_noreplay_already_marked() {
     }
 }
 
-/// Quorum is derived from the live guardian-set size, not a pinned 13. With a
-/// 6-guardian set the threshold is `(6*2)/3 + 1 = 5`: four observations do not
-/// reach quorum (the NoReplay bucket stays unmarked), and the fifth commits
-/// (flipping the bucket to the noreplay program). Guards against any
-/// reintroduction of a hardcoded threshold.
+/// Quorum derives from the live set size. With 6 guardians the threshold is
+/// `(6*2)/3 + 1 = 5`.
 #[test]
 fn quorum_threshold_tracks_live_guardian_set_size() {
     const N: usize = 6;
@@ -1618,11 +1475,9 @@ fn quorum_threshold_tracks_live_guardian_set_size() {
     );
 
     let mollusk = mollusk();
-    // Attest body (default `Scenario::new`) does no balance work, isolating the
-    // quorum gate; reaching quorum is observable as the NoReplay bucket flip.
+    // Attest body isolates the quorum gate; the NoReplay flip marks quorum.
     let scenario = Scenario::new(N, 4, 0x9A);
 
-    // One short of quorum: the pending PDA accumulates but NoReplay stays unmarked.
     let accounts = scenario.submit_n(&mollusk, quorum - 1);
     let bucket = find_account(&accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
@@ -1633,7 +1488,6 @@ fn quorum_threshold_tracks_live_guardian_set_size() {
         quorum
     );
 
-    // The quorum-th observation commits.
     let result = scenario.submit_once(&mollusk, accounts, quorum - 1);
     assert!(
         matches!(result.program_result, ProgramResult::Success),
@@ -1648,14 +1502,7 @@ fn quorum_threshold_tracks_live_guardian_set_size() {
     );
 }
 
-// ============================================================================
-// Balance-accounting tests. The quorum-completing observation parses the
-// Token Bridge payload and routes balance updates through
-// `lock_or_burn` / `unlock_or_mint` against the source/dest Account PDAs.
-// ============================================================================
-
-/// Drive 13 observations against a transfer scenario, returning the final
-/// `InstructionResult`.
+/// Drive 13 observations against a transfer scenario.
 fn drive_transfer_to_quorum(
     mollusk: &Mollusk,
     scenario: &Scenario,
@@ -1669,7 +1516,6 @@ fn drive_transfer_to_quorum(
             result.program_result
         );
         accounts = result.resulting_accounts.clone();
-        // Return the final InstructionResult so callers can inspect CU usage.
         if i + 1 == PendingObservationsLayout::quorum_for(19) as u8 {
             return result;
         }
@@ -1677,8 +1523,7 @@ fn drive_transfer_to_quorum(
     unreachable!("loop above always returns on the final iteration")
 }
 
-/// Transfer of Ethereum-native USDC (chain=2) to Solana (chain=1): source
-/// (native) credits, dest (wrapped) credits; both Account PDAs lazy-init.
+/// Ethereum-native USDC (chain 2) to Solana (chain 1): both balance PDAs credit and lazy-init.
 #[test]
 fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
     let mollusk = mollusk();
@@ -1693,8 +1538,6 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
         1, // recipient_chain = Solana (wrapped destination)
     );
 
-    // Pre-state: both Account PDAs start system-owned and empty, so this path
-    // exercises lazy-init of both on the quorum-commit branch.
     let initial = scenario.initial_accounts();
     for pda in [scenario.source_account_pubkey, scenario.dest_account_pubkey] {
         let pre = find_account(&initial, &pda);
@@ -1709,7 +1552,7 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
         result.program_result
     );
 
-    // Source (chain == token_chain == 2): native lock ⇒ credit.
+    // Source (chain == token_chain): native lock credits.
     let src = find_account(&result.resulting_accounts, &scenario.source_account_pubkey);
     assert_eq!(
         src.owner,
@@ -1723,7 +1566,7 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
     assert_eq!(src_layout.token_address, token_address);
     assert_eq!(src_layout.balance, Uint256::from_u128(500_000));
 
-    // Dest (chain 1 != token_chain 2): wrapped mint ⇒ credit.
+    // Dest (chain != token_chain): wrapped mint credits.
     let dst = find_account(&result.resulting_accounts, &scenario.dest_account_pubkey);
     assert_eq!(dst.owner, program_id(), "dest Account PDA owned by program");
     let dst_layout: &BalanceAccountLayout = bytemuck::from_bytes(&dst.data);
@@ -1732,8 +1575,7 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
     assert_eq!(dst_layout.balance, Uint256::from_u128(500_000));
 }
 
-/// Reverse direction (Solana wUSDC back to Ethereum): the wrapped-source debit
-/// underflows from zero and the whole tx reverts.
+/// Solana wUSDC back to Ethereum: the wrapped-source debit underflows from zero.
 #[test]
 fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance() {
     let mollusk = mollusk();
@@ -1747,7 +1589,6 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         token_address,
         2, // recipient_chain = Ethereum
     );
-    // VAA emitter is Solana, not Ethereum.
     scenario.chain = 1;
     scenario.body = build_transfer_body(
         scenario.chain,
@@ -1769,7 +1610,6 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     scenario.pending_pda = pending_pda;
     let (src, _) = derive_balance_account_pda(1, 2, &token_address);
     let (dst, _) = derive_balance_account_pda(2, 2, &token_address);
-    // Re-derive registration PDA and noreplay bucket for the new chain.
     let (registration_pda, _) = derive_chain_registration_pda(scenario.chain);
     scenario.chain_registration_pubkey = registration_pda;
     scenario.noreplay_bucket_pubkey = derive_canonical_noreplay_bucket(
@@ -1787,7 +1627,6 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         assert!(matches!(r.program_result, ProgramResult::Success));
         accounts = r.resulting_accounts;
     }
-    // 13th observation: quorum + balance work ⇒ underflow.
     let r = scenario.submit_once(&mollusk, accounts, 12);
     match r.program_result {
         ProgramResult::Failure(err) => {
@@ -1800,9 +1639,7 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
         }
         other => panic!("expected Failure(BalanceUnderflow), got {other:?}"),
     }
-    // Tx rolled back: bucket stays untouched (the commit log is similarly
-    // unwound by tx-level atomicity, but mollusk does not expose program logs
-    // for inspection here — surfpool e2e covers the positive log assertion).
+    // Rolled back: bucket untouched.
     let bucket = find_account(&r.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -1815,19 +1652,15 @@ fn quorum_with_transfer_underflows_when_wrapped_chain_has_insufficient_balance()
     );
 }
 
-/// Dust-DoS defense: an attacker pre-funds the destination Account PDA address
-/// with lamports below the rent-exempt minimum (the only griefing possible
-/// against an off-curve PDA). A naive `CreateAccount` would fail on the
-/// non-zero balance; `CreateAccountAllowPrefund` (SIMD-0312) must still
-/// lazy-init it, topping up the shortfall in a single CPI.
+/// Dust on the destination PDA (below rent minimum) must not block lazy init;
+/// `CreateAccountAllowPrefund` tops up the shortfall.
 #[test]
 fn quorum_with_dusted_destination_account_succeeds() {
     let mollusk = mollusk();
     let token_address = [0x4Du8; 32];
     let scenario = Scenario::with_transfer_body(19, 4, 0x63, 7_777u128, 2, token_address, 1);
 
-    // Inject dust into the destination PDA: system-owned, non-zero balance,
-    // zero data — the exact shape a griefer can create permissionlessly.
+    // System-owned, non-zero balance, zero data.
     const DUST: u64 = 1;
     let mut accounts = scenario.initial_accounts();
     accounts
@@ -1836,7 +1669,6 @@ fn quorum_with_dusted_destination_account_succeeds() {
         .expect("dest PDA in account list")
         .1 = system_owned_account(DUST);
 
-    // Drive to quorum from the dusted starting state.
     let mut result = None;
     for i in 0..PendingObservationsLayout::quorum_for(19) as u8 {
         let r = scenario.submit_once(&mollusk, accounts.clone(), i);
@@ -1865,8 +1697,7 @@ fn quorum_with_dusted_destination_account_succeeds() {
     assert_eq!(layout.balance, Uint256::from_u128(7_777));
 }
 
-/// CU regression guard: the quorum-commit branch (lazy-init of both Account
-/// PDAs — the program's most expensive tx) must stay below `MAX_QUORUM_BRANCH_CU`.
+/// CU guard: the quorum-commit branch stays below `MAX_QUORUM_BRANCH_CU`.
 #[test]
 fn quorum_branch_cu_stays_below_ceiling() {
     let mollusk = mollusk();
@@ -1881,7 +1712,6 @@ fn quorum_branch_cu_stays_below_ceiling() {
         1, // recipient_chain = Solana so both Account PDAs lazy-init
     );
 
-    // First 12 (accumulator path) without measuring CU.
     let mut accounts = scenario.initial_accounts();
     for i in 0..(PendingObservationsLayout::quorum_for(19) as u8 - 1) {
         let r = scenario.submit_once(&mollusk, accounts.clone(), i);
@@ -1889,7 +1719,6 @@ fn quorum_branch_cu_stays_below_ceiling() {
         accounts = r.resulting_accounts;
     }
 
-    // 13th observation — full commit branch.
     let result = scenario.submit_once(
         &mollusk,
         accounts,
@@ -1909,7 +1738,7 @@ fn quorum_branch_cu_stays_below_ceiling() {
     );
 }
 
-/// Attest quorum completes the commit branch but touches neither Account PDA.
+/// Attest quorum commits but touches neither balance PDA.
 #[test]
 fn quorum_with_attest_payload_skips_balance_work_but_finishes_commit() {
     let mollusk = mollusk();
@@ -1921,7 +1750,6 @@ fn quorum_with_attest_payload_skips_balance_work_but_finishes_commit() {
         result.program_result
     );
 
-    // Sentinel Account PDA slots stay system-owned.
     assert_eq!(
         scenario.source_account_pubkey,
         scenario.noreplay_authority_pubkey
@@ -1941,8 +1769,7 @@ fn quorum_with_attest_payload_skips_balance_work_but_finishes_commit() {
     );
 }
 
-/// An unknown payload action rejects at quorum with `UnknownTokenBridgePayload`,
-/// rolling back the NoReplay mark so the replay slot stays unconsumed.
+/// Unknown payload action: `UnknownTokenBridgePayload` at quorum; NoReplay mark rolls back.
 #[test]
 fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
     let mollusk = mollusk();
@@ -1958,7 +1785,7 @@ fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
     );
     scenario.pending_pda = pending_pda;
 
-    // Payload is parsed only at quorum; the first 12 accumulate normally.
+    // Payload parses only at quorum.
     let accounts = scenario.submit_n(&mollusk, 12);
 
     let result = scenario.submit_once(&mollusk, accounts, 12);
@@ -1974,7 +1801,6 @@ fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
         other => panic!("expected Failure(UnknownTokenBridgePayload), got {other:?}"),
     }
 
-    // NoReplay mark reverted: bucket stays uninitialised.
     let bucket = find_account(&result.resulting_accounts, &scenario.noreplay_bucket_pubkey);
     assert_eq!(
         bucket.owner,
@@ -1986,7 +1812,6 @@ fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
         "noreplay bucket data untouched after rejection"
     );
 
-    // Pending bucket survives with its 12 signatures.
     let pending = find_account(&result.resulting_accounts, &scenario.pending_pda);
     assert_eq!(pending.owner, program_id(), "pending PDA still live");
     let layout: &PendingObservationsLayout = bytemuck::from_bytes(&pending.data);
@@ -1997,21 +1822,13 @@ fn quorum_with_unknown_payload_rejects_and_preserves_replay_slot() {
     );
 }
 
-/// Tampering the body after signing changes the on-chain-reconstructed signing
-/// digest (`keccak256(prefix ‖ tx_hash ‖ body)`), so signature recovery no
-/// longer yields the guardian key — rejected as `InvalidSignature` before any
-/// PDA work. This is what binds the signature to the exact body now that the
-/// signing digest is reconstructed rather than supplied.
+/// A body changed after signing yields another signing digest: `InvalidSignature`.
 #[test]
 fn tampered_body_fails_signature_check() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x64);
 
-    // Guardian signs the genuine body's signing digest...
     let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
-    // ...but a different body is submitted; the program reconstructs the signing
-    // digest from prefix ‖ tx_hash ‖ submitted-body, so the recovered key differs
-    // from the guardian's.
     let mut tampered_body = scenario.body.clone();
     tampered_body[0] ^= 0xAA; // mutate the timestamp byte
     let ix = Instruction::new_with_bytes(
@@ -2031,20 +1848,18 @@ fn tampered_body_fails_signature_check() {
         }
         other => panic!("expected Failure(InvalidSignature), got {other:?}"),
     }
-    // Pending PDA stays uninitialised.
     let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
     assert_eq!(pending.owner, system_program_id());
     assert!(pending.data.is_empty());
 }
 
-/// A wrong-seed source Account PDA in slot 8 is rejected at quorum with
-/// `InvalidAccountPda`.
+/// Wrong-seed source balance PDA: `InvalidAccountPda` at quorum.
 #[test]
 fn quorum_with_invalid_source_account_pda_rejects() {
     let mollusk = mollusk();
     let token_address = [0x99u8; 32];
     let mut scenario = Scenario::with_transfer_body(19, 4, 0x65, 100u128, 2, token_address, 1);
-    // Spoofed source PDA (wrong token chain).
+    // Wrong token chain.
     let (spoofed, _) = derive_balance_account_pda(2, 99, &token_address);
     scenario.source_account_pubkey = spoofed;
 
@@ -2068,21 +1883,16 @@ fn quorum_with_invalid_source_account_pda_rejects() {
     }
 }
 
-/// Spoofed GuardianSet account (not owned by Core Bridge) is rejected as
-/// `InvalidPda` before any signature work. This blocks an attacker from passing
-/// an arbitrary account with 13 controlled guardian keys, signing with them, and
-/// reaching quorum.
+/// `GuardianSet` not owned by the Core Bridge: `InvalidPda` before signature work.
 #[test]
 fn spoofed_guardian_set_not_owned_by_core_bridge_rejects() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x66);
 
-    // Create a spoofed GuardianSet account owned by system program instead of Core Bridge.
     let spoofed_guardian_set = {
         let mut data = Vec::with_capacity(8 + 13 * 20 + 8);
         data.extend_from_slice(&scenario.guardian_set_index.to_le_bytes());
         data.extend_from_slice(&13u32.to_le_bytes()); // keys_len = 13
-        // Add 13 attacker-controlled guardian keys.
         for i in 0..13 {
             data.extend_from_slice(&[i as u8; 20]);
         }
@@ -2120,22 +1930,18 @@ fn spoofed_guardian_set_not_owned_by_core_bridge_rejects() {
     }
 }
 
-/// Non-canonical Pending PDA address is rejected as `InvalidPda` on the
-/// Continue path. This blocks an attacker from creating a spoofed pending PDA
-/// at a random address, funneling guardian signatures from different VAA bodies
-/// into it, and committing a target VAA with fabricated quorum.
+/// Non-canonical pending PDA on the Continue path: `InvalidPda`.
 #[test]
 fn non_canonical_pending_pda_address_rejects_on_continue() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x67);
 
-    // First signature: create the canonical pending PDA.
     let mut accounts = scenario.initial_accounts();
     let r1 = scenario.submit_once(&mollusk, accounts.clone(), 0);
     assert!(matches!(r1.program_result, ProgramResult::Success));
     accounts = r1.resulting_accounts;
 
-    // Second signature: spoof the pending PDA by replacing it with a non-canonical address.
+    // Replace the pending PDA with a non-canonical address.
     let spoofed_pending_pubkey = Pubkey::new_unique();
     let pending_layout = *bytemuck::from_bytes::<PendingObservationsLayout>(&accounts[1].1.data);
     let spoofed_pending_account = Account {
@@ -2169,27 +1975,19 @@ fn non_canonical_pending_pda_address_rejects_on_continue() {
     }
 }
 
-/// Domain-separation firewall: a guardian signature taken over the OLD bare
-/// dedup digest `double_keccak256(body)` — the pre-prefix scheme — must NOT be
-/// accepted. The program verifies against `keccak256(prefix ‖ tx_hash ‖ body)`,
-/// so recovering the key from a bare-digest signature yields a different
-/// pubkey and the observation is rejected as `InvalidSignature`. This proves
-/// the signing domain actually changed: a VAA-style signature is no longer
-/// interchangeable with an accountant observation signature.
+/// A signature over the bare dedup digest `double_keccak256(body)` fails with
+/// `InvalidSignature`; the program checks `keccak256(prefix ‖ tx_hash ‖ body)`.
 #[test]
 fn submit_with_legacy_bare_digest_signature_is_rejected() {
     let mollusk = mollusk();
     let scenario = Scenario::new(19, 4, 0x71);
 
-    // Sanity: the two digests for this exact body are genuinely distinct, so a
-    // signature over one cannot validate against the other.
     assert_ne!(
         scenario.digest, scenario.signing_digest,
         "dedup digest and signing digest must differ for the firewall to bite"
     );
 
-    // Sign the OLD bare dedup digest (today's pre-prefix scheme) instead of the
-    // domain-separated signing digest.
+    // Sign the bare dedup digest.
     let legacy_signature = sign_digest(&scenario.guardians[0], &scenario.digest);
 
     let ix = Instruction::new_with_bytes(
@@ -2216,15 +2014,12 @@ fn submit_with_legacy_bare_digest_signature_is_rejected() {
         other => panic!("expected Failure(InvalidSignature), got {other:?}"),
     }
 
-    // Nothing was created: the pending PDA stays uninitialised.
     let pending = find_account(&r.resulting_accounts, &scenario.pending_pda);
     assert_eq!(pending.owner, system_program_id());
     assert!(pending.data.is_empty());
 }
 
-/// Pins the two digests to distinct domains: the prefixed single-keccak signing
-/// digest must never equal the bare `double_keccak256(body)` dedup digest for
-/// the same body. If these ever collide the firewall above is vacuous.
+/// The signing digest and the dedup digest differ for the same body.
 #[test]
 fn signing_digest_differs_from_dedup_digest() {
     let body = build_attest_body(2, &[0x77u8; 32], 0x42);

@@ -1,35 +1,61 @@
 //! `solana-noreplay`: program ID, instruction discriminators, and bitmap geometry.
 
 use crate::primitives::Pubkey;
+use const_crypto::bs58;
 
-/// Canonical program ID for `solana-noreplay`
-/// (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`). Raw bytes to keep this
-/// crate Solana-SDK-free.
-pub const NOREPLAY_PROGRAM_ID: Pubkey = [
-    0x0c, 0xb8, 0x38, 0x00, 0x73, 0xdf, 0x36, 0x25, 0xa1, 0x32, 0x11, 0x1f, 0xee, 0x67, 0x8d, 0xd0,
-    0x6b, 0x7e, 0x3d, 0xf2, 0x90, 0xa2, 0xb1, 0xd5, 0x4a, 0x48, 0x5b, 0xdb, 0x72, 0x61, 0x82, 0x91,
-];
+/// `solana-noreplay` program ID, from `NOREPLAY_PROGRAM_ID` at compile time (the variable
+/// `solana-noreplay` itself reads). Set per target network in `justfile`.
+pub const NOREPLAY_PROGRAM_ID: Pubkey = bs58::decode_pubkey(env!("NOREPLAY_PROGRAM_ID"));
 
-/// Discriminator for `solana-noreplay`'s `MarkUsed`. Wire format:
+/// `MarkUsed` discriminator. Wire format:
 /// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][sequence: u64 LE]`.
 pub const NOREPLAY_MARK_USED_DISCRIMINATOR: u8 = 1;
 
-/// Discriminator for `solana-noreplay`'s `MarkUsedBulk`. Wire format:
-/// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][bucket_index: u64 LE]
-///  [or_mask: 128 B]`. Semantics: `bitmap |= or_mask` (OR-only; never clears
-/// bits). Used by the backfill program to flip many bits per CPI, dropping
-/// per-entry CU from ~3,000 to ~80 in the dense-bucket case.
-///
-/// Allocated as the next free byte in the noreplay program's dispatch table
-/// after `CreateBitmap=0`, `MarkUsed=1`, `UnmarkUsed=2`.
+/// `MarkUsedBulk` discriminator. Wire format:
+/// `[disc: u8][namespace_len: u16 LE][namespace: ≤64 B][bucket_index: u64 LE][or_mask: 128 B]`.
+/// Effect: `bitmap |= or_mask`.
 pub const NOREPLAY_MARK_USED_BULK_DISCRIMINATOR: u8 = 3;
 
-/// Bits per bitmap bucket. Bucket index is `sequence / BITS_PER_BUCKET`, bit
-/// offset is `sequence % BITS_PER_BUCKET`.
+/// Bits per bucket. Bucket = `sequence / BITS_PER_BUCKET`; bit = `sequence % BITS_PER_BUCKET`.
 pub const NOREPLAY_BITS_PER_BUCKET: u64 = 1024;
 
-/// Bitmap payload size inside a noreplay PDA (account is 1-byte bump + bitmap).
+/// Bitmap payload size in a NoReplay PDA (1-byte bump + bitmap).
 pub const NOREPLAY_BITMAP_BYTES: usize = 128;
 
-/// Byte offset of the bitmap payload (byte 0 is the stored canonical bump).
+/// Bitmap payload offset; byte 0 holds the bump.
 pub const NOREPLAY_BITMAP_OFFSET: usize = 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only deployment as of 2026-08: Solana devnet `repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`.
+    #[test]
+    fn program_id_is_known_deployment() {
+        let devnet = bs58::decode_pubkey("repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t");
+        assert_eq!(NOREPLAY_PROGRAM_ID, devnet);
+    }
+
+    #[test]
+    fn wire_constants_match_solana_noreplay() {
+        assert_eq!(NOREPLAY_MARK_USED_DISCRIMINATOR, solana_noreplay::MARK_USED);
+        assert_eq!(NOREPLAY_BITS_PER_BUCKET, solana_noreplay::BITS_PER_BUCKET);
+        assert_eq!(NOREPLAY_BITMAP_BYTES, solana_noreplay::BITMAP_BYTES);
+        assert_eq!(
+            NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES,
+            solana_noreplay::BITMAP_ACCOUNT_SIZE
+        );
+    }
+
+    #[test]
+    fn mark_used_bulk_matches_solana_noreplay() {
+        assert_eq!(
+            NOREPLAY_MARK_USED_BULK_DISCRIMINATOR,
+            solana_noreplay::MARK_USED_BULK
+        );
+        assert_eq!(
+            NOREPLAY_BITMAP_BYTES,
+            solana_noreplay::MARK_USED_BULK_MASK_LEN
+        );
+    }
+}

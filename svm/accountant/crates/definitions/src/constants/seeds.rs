@@ -1,33 +1,37 @@
 //! PDA seed prefixes for every account type.
 
-/// PDA seed prefix for [`crate::PendingObservationsLayout`]. Full tuple:
-/// `(b"pending", chain_be, emitter, sequence_be, digest)`. The digest suffix
-/// lets fork/reorg observations accumulate in sibling buckets and binds each
-/// bucket to its digest, so no runtime digest-equality check is needed.
+/// Seed prefix for [`crate::PendingObservationsLayout`]:
+/// `(b"pending", chain_be, emitter, sequence_be, digest)`. The digest seed gives
+/// fork observations their own bucket.
 pub const PENDING_OBSERVATIONS_SEED_PREFIX: &[u8] = b"pending";
 
-/// PDA seed prefix for [`crate::BalanceAccountLayout`]. Full tuple:
-/// `(b"account", chain_be, token_chain_be, token_address)`. Big-endian chain
-/// fields match the VAA wire format and the other seed derivations.
+/// Seed prefix for [`crate::BalanceAccountLayout`]:
+/// `(b"account", chain_be, token_chain_be, token_address)`.
 pub const ACCOUNT_SEED_PREFIX: &[u8] = b"account";
 
-/// PDA seed prefix for [`crate::ChainRegistrationLayout`]. Full tuple:
-/// `(b"chain_registration", chain_be)`.
+/// Seed prefix for [`crate::ChainRegistrationLayout`]: `(b"chain_registration", chain_be)`.
 pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
 
-/// PDA seed prefix for [`crate::ModificationLayout`]. Full tuple:
-/// `(b"modification", sequence_be)`. Existence of this PDA enforces replay
-/// protection on the governance path.
+/// Seed prefix for [`crate::ModifyBalanceLayout`]: `(b"modification", sequence_be)`.
+/// PDA existence is the governance-path replay protection.
 pub const MODIFICATION_SEED_PREFIX: &[u8] = b"modification";
 
-/// PDA seed prefix for the global-accountant authority that signs all
-/// `solana-noreplay` CPIs. Full tuple: `[b"noreplay_authority"]`. One global
-/// authority suffices because the noreplay namespace (`chain_be ‖ emitter`)
-/// already segregates per-emitter sequence spaces.
+/// Seed for the authority PDA that signs all NoReplay CPIs: `[b"noreplay_authority"]`.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";
 
-/// PDA seed prefix for Core Bridge's GuardianSet accounts. Full tuple:
-/// `(b"GuardianSet", guardian_set_index_be)`. Owned by `CORE_BRIDGE_PROGRAM_ID`;
-/// `submit_observations` re-derives this address to authenticate the GuardianSet
-/// account before reading guardian keys from it.
+/// Core Bridge `GuardianSet` seed prefix: `(b"GuardianSet", guardian_set_index_be)`.
+/// Owner is `CORE_BRIDGE_PROGRAM_ID`.
 pub const GUARDIAN_SET_SEED: &[u8] = b"GuardianSet";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guardian_set_seed_matches_wormhole_svm_definitions() {
+        assert_eq!(
+            GUARDIAN_SET_SEED,
+            wormhole_svm_definitions::GUARDIAN_SET_SEED
+        );
+    }
+}

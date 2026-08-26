@@ -1,15 +1,8 @@
-//! Cross-path replay invariant: a `(chain, emitter, sequence)` accounted via one
-//! submission path must be rejected as `AlreadyAccounted` on the other.
+//! Cross-path replay: a `(chain, emitter, sequence)` accounted on one path fails with
+//! `AlreadyAccounted` on the other. Both paths share one NoReplay bucket PDA.
 //!
-//! Both `submit_observations` (quorum tracker) and `submit_vaas` (signed-VAA
-//! backfill) share a single NoReplay bucket PDA, derived identically from
-//! `(noreplay_authority, chain, emitter, sequence)` under the same program id.
-//! Once either path marks that slot, the other must refuse the same triple. The
-//! two pre-existing replay tests are same-path only; this file pins the
-//! double-spend invariant across the path boundary in both directions.
-//!
-//! Driven against a Mollusk with the real `solana_noreplay.so` and
-//! `wormhole_verify_vaa_shim.so` loaded (see `common::mollusk_fixtures`).
+//! Mollusk with the real `solana_noreplay.so` and `wormhole_verify_vaa_shim.so`
+//! (see `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -66,23 +59,15 @@ fn noreplay_program_id() -> Pubkey {
     Pubkey::new_from_array(NOREPLAY_PROGRAM_ID)
 }
 
-// ----------------------------------------------------------------------------
-// Shared derivations and fixtures
-// ----------------------------------------------------------------------------
-
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
-/// Deterministic source-chain transaction id carried in the observation wire
-/// format and folded into the signing digest.
+/// Fixed source-chain transaction id for the signing digest.
 const TX_HASH: [u8; 32] = [0xA9_u8; 32];
 
-/// Host mirror of `observation_signing_digest`: a single `keccak256` over
-/// `prefix ‖ tx_hash ‖ body`. The digest a guardian signs on the observation
-/// path — distinct from `double_keccak256_host` (the dedup/quorum digest, and
-/// the digest the VAA path verifies against).
+/// Host mirror of `observation_signing_digest`.
 fn observation_signing_digest_host(prefix: &[u8], tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[prefix, tx_hash, body]).to_bytes()
 }
@@ -172,7 +157,7 @@ fn chain_registration_account(chain: u16, emitter_address: &[u8; 32]) -> Account
     }
 }
 
-/// Transfer VAA body (Token Bridge action 0x01), shared shape across paths.
+/// Transfer VAA body (action 0x01).
 fn build_transfer_body(
     emitter_chain: u16,
     emitter_address: &[u8; 32],
@@ -204,7 +189,7 @@ fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Acco
         .1
 }
 
-/// Replace `key`'s entry in `accounts` with `state` (or push it if absent).
+/// Replace `key`'s entry in `accounts` with `state`, or push it.
 fn upsert(accounts: &mut Vec<(Pubkey, Account)>, key: Pubkey, state: Account) {
     if let Some(entry) = accounts.iter_mut().find(|(k, _)| *k == key) {
         entry.1 = state;
@@ -213,22 +198,14 @@ fn upsert(accounts: &mut Vec<(Pubkey, Account)>, key: Pubkey, state: Account) {
     }
 }
 
-// ----------------------------------------------------------------------------
-// submit_observations driver (inline-secp guardian set)
-// ----------------------------------------------------------------------------
-
-/// Core-Bridge `GuardianSet` account for the inline secp path: raw 20-byte keys,
-/// never-expiring, owned by the Core Bridge.
+/// Core Bridge `GuardianSet` account: 20-byte keys, never expires.
 fn obs_guardian_set_account(guardians: &[Guardian]) -> Account {
     let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = guardians.iter().map(|g| g.eth_address).collect();
     core_bridge_guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id())
 }
 
-/// Build `submit_observations` instruction data in the TARGET wire format:
-/// discriminator, 4-byte gsi (LE), 1-byte guardian index, 65-byte signature,
-/// tx_hash(32), 2-byte body len (LE), then body. The dedup digest and routing
-/// tuple are re-derived on-chain from the body; the signing digest is
-/// reconstructed on-chain from prefix ‖ tx_hash ‖ body.
+/// `submit_observations` data: discriminator, gsi (u32 LE), guardian index (u8),
+/// signature (65), tx_hash (32), body_len (u16 LE), body.
 fn submit_observations_ix_data(
     guardian_index: u8,
     signature: &[u8; 65],
@@ -251,12 +228,10 @@ struct ObsCtx {
     #[allow(dead_code)] // retained for readability; derivations consume it in `new`.
     sequence: u64,
     body: Vec<u8>,
-    /// Dedup/quorum digest `double_keccak256(body)`. Consumed in `new` to derive
-    /// `pending_pda`; retained for readability.
+    /// `double_keccak256(body)`; derives `pending_pda`.
     #[allow(dead_code)]
     digest: [u8; 32],
-    /// Signing digest = `keccak256(prefix ‖ tx_hash ‖ body)`. What each
-    /// observation signature is verified against; distinct from `digest`.
+    /// `keccak256(prefix ‖ tx_hash ‖ body)`.
     signing_digest: [u8; 32],
     guardians: Vec<Guardian>,
     submitter: Pubkey,
@@ -275,8 +250,7 @@ impl ObsCtx {
         let signing_digest =
             observation_signing_digest_host(SUBMIT_OBSERVATION_PREFIX, &TX_HASH, &body);
         let noreplay_authority = derive_noreplay_authority();
-        // Canonical GuardianSet PDA (Core Bridge): the observation path pins the
-        // address, not just the owner, so a placeholder pubkey is rejected.
+        // The observation path checks the `GuardianSet` address, not only the owner.
         let (guardian_set_pubkey, _) =
             derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
         Self {
@@ -347,7 +321,7 @@ impl ObsCtx {
         mollusk.process_instruction(&ix, &accounts)
     }
 
-    /// Drive to quorum, returning the final resulting accounts (bucket marked).
+    /// Drive to quorum; the bucket is marked afterwards.
     fn drive_to_quorum(&self, mollusk: &Mollusk) -> Vec<(Pubkey, Account)> {
         let mut accounts = self.initial_accounts();
         for i in 0..QUORUM {
@@ -362,10 +336,6 @@ impl ObsCtx {
         accounts
     }
 }
-
-// ----------------------------------------------------------------------------
-// submit_vaas driver (Shim CPI + posted GuardianSignatures)
-// ----------------------------------------------------------------------------
 
 fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
@@ -495,12 +465,7 @@ fn assert_already_accounted(result: &mollusk_svm::result::InstructionResult) {
     }
 }
 
-// ----------------------------------------------------------------------------
-// Tests
-// ----------------------------------------------------------------------------
-
-/// submit_vaas marks the slot; a later submit_observations quorum for the same
-/// `(chain, emitter, sequence)` is rejected `AlreadyAccounted`.
+/// `submit_vaas` marks the slot; a later `submit_observations` quorum fails `AlreadyAccounted`.
 #[test]
 fn vaas_then_observations_same_triple_rejects_already_accounted() {
     let mollusk = mollusk();
@@ -513,7 +478,7 @@ fn vaas_then_observations_same_triple_rejects_already_accounted() {
     let recipient_chain: u16 = 1;
     let body = build_transfer_body(chain, &emitter, sequence, 1_000, token_chain, &token_address, recipient_chain);
 
-    // 1) Account the triple via submit_vaas (single-call mark).
+    // 1) `submit_vaas`.
     let vaas = VaasCtx::new(chain, emitter, sequence, body.clone(), token_chain, &token_address, recipient_chain);
     let first = vaas.submit(&mollusk, vaas.initial_accounts());
     assert!(
@@ -523,9 +488,7 @@ fn vaas_then_observations_same_triple_rejects_already_accounted() {
     );
     let marked_bucket = find_account(&first.resulting_accounts, &vaas.noreplay_bucket).clone();
 
-    // 2) Carry the now-marked bucket into a fresh submit_observations quorum
-    //    attempt for the same triple. The first observation must already trip
-    //    the NoReplay pre-check.
+    // 2) First observation for the same triple trips the pre-check.
     let obs = ObsCtx::new(chain, emitter, sequence, body, token_chain, &token_address, recipient_chain);
     assert_eq!(
         obs.noreplay_bucket, vaas.noreplay_bucket,
@@ -538,8 +501,7 @@ fn vaas_then_observations_same_triple_rejects_already_accounted() {
     assert_already_accounted(&replay);
 }
 
-/// submit_observations reaches quorum and marks the slot; a later submit_vaas
-/// for the same `(chain, emitter, sequence)` is rejected `AlreadyAccounted`.
+/// `submit_observations` marks the slot; a later `submit_vaas` fails `AlreadyAccounted`.
 #[test]
 fn observations_then_vaas_same_triple_rejects_already_accounted() {
     let mollusk = mollusk();
@@ -552,7 +514,7 @@ fn observations_then_vaas_same_triple_rejects_already_accounted() {
     let recipient_chain: u16 = 1;
     let body = build_transfer_body(chain, &emitter, sequence, 2_000, token_chain, &token_address, recipient_chain);
 
-    // 1) Account the triple via the quorum path.
+    // 1) Quorum path.
     let obs = ObsCtx::new(chain, emitter, sequence, body.clone(), token_chain, &token_address, recipient_chain);
     let after_quorum = obs.drive_to_quorum(&mollusk);
     let marked_bucket = find_account(&after_quorum, &obs.noreplay_bucket).clone();
@@ -562,7 +524,7 @@ fn observations_then_vaas_same_triple_rejects_already_accounted() {
         "quorum must flip the bucket to noreplay ownership"
     );
 
-    // 2) Carry the marked bucket into a submit_vaas call for the same triple.
+    // 2) `submit_vaas` for the same triple.
     let vaas = VaasCtx::new(chain, emitter, sequence, body, token_chain, &token_address, recipient_chain);
     assert_eq!(vaas.noreplay_bucket, obs.noreplay_bucket);
     let mut accounts = vaas.initial_accounts();
@@ -572,6 +534,5 @@ fn observations_then_vaas_same_triple_rejects_already_accounted() {
     assert_already_accounted(&replay);
 }
 
-// Tie the QUORUM local to the derived threshold for this set size so a change
-// to the formula fails to compile here rather than silently desyncing.
+// Tie `QUORUM` to the derived threshold so a formula change fails here.
 const _: () = assert!(QUORUM as u32 == PendingObservationsLayout::quorum_for(GUARDIAN_COUNT as u32));

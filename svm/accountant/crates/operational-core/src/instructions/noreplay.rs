@@ -1,12 +1,8 @@
-//! NoReplay integration — direct-read pre-check (`is_marked`) plus the
-//! `MarkUsed` CPI into `solana-noreplay`. `is_marked` is shared by
-//! `submit_observations`, `submit_vaas`, `register_chain`, and `close_pending`;
-//! `mark_used` fires only from the first three (`close_pending` never holds the
-//! authority PDA).
+//! NoReplay bitmap pre-check (`is_marked`) and `MarkUsed` CPI (`mark_used`).
 //!
 //! `solana-noreplay` wire format:
 //!
-//! - Account size: 129 bytes (`[bump: u8][bitmap: 128 B]`).
+//! - Account: 129 bytes, `[bump: u8][bitmap: 128 B]`.
 //! - Bit `sequence % 1024` of `bitmap` marks the sequence.
 //! - `MarkUsed` data: `[disc=1u8][ns_len: u16 LE][ns][seq: u64 LE]`.
 //! - `MarkUsed` accounts: payer (signer, writable), authority (signer, readonly),
@@ -14,8 +10,7 @@
 //! - Bitmap PDA seeds: `[authority, ns[..min(len, 32)], ns[min(len, 32)..],
 //!   (seq / 1024) LE]`.
 //!
-//! Our authority is a PDA at `[NOREPLAY_AUTHORITY_SEED_PREFIX]`, so the bitmap is
-//! write-controlled exclusively by this program.
+//! The authority is this program's PDA at `[NOREPLAY_AUTHORITY_SEED_PREFIX]`.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -24,15 +19,11 @@ use anchor_lang::solana_program::program::invoke_signed;
 use crate::definitions::{GlobalAccountantError, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID};
 use crate::{err, ProgramResult};
 
-/// NoReplay namespace: `chain_be (2 B) ‖ emitter (32 B)`. The noreplay program
-/// splits namespaces > 32 bytes at this boundary into two seed chunks.
+/// Namespace: `chain_be (2 B) ‖ emitter (32 B)`. NoReplay splits seeds at byte 32.
 const NAMESPACE_TOTAL_LEN: usize = 2 + 32;
 const NAMESPACE_CHUNK_BOUNDARY: usize = 32;
 
-/// Re-derive the canonical noreplay bitmap PDA for
-/// `(authority, chain, emitter, sequence)`. Seeds:
-/// `[authority, namespace[..32], namespace[32..], (sequence / 1024) LE]` where
-/// `namespace = chain_be ‖ emitter`. Returns `(address, bump)`.
+/// Bitmap PDA `(address, bump)` for `(authority, chain, emitter, sequence)`.
 pub fn derive_bucket_pda(
     noreplay_authority: &Pubkey,
     chain: u16,
@@ -55,15 +46,13 @@ pub fn derive_bucket_pda(
     )
 }
 
-// Pre-check (direct account read).
-
-/// Direct-read pre-check against the noreplay bitmap PDA. Returns:
-///   - `Ok(false)` if uninitialised or the bit is clear — proceed.
-///   - `Ok(true)` if the bit at `sequence % 1024` is set — `AlreadyAccounted`.
-///   - `Err(InvalidPda)` on non-canonical address or malformed data.
+/// Read the bit for `sequence` from the bitmap PDA.
 ///
-/// The bucket address is re-derived and a non-canonical account is rejected —
-/// otherwise a caller could trick the bit lookup into reading another namespace.
+/// - `Ok(false)`: bucket uninitialised or bit clear.
+/// - `Ok(true)`: bit set.
+/// - `Err(InvalidPda)`: wrong address or malformed data.
+///
+/// SECURITY: the bucket address is re-derived; a wrong bucket would read another namespace.
 pub fn is_marked(
     bucket: &AccountInfo,
     noreplay_authority: &Pubkey,
@@ -75,12 +64,9 @@ pub fn is_marked(
     if bucket.key != &expected_bucket {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    // Uninitialised bucket (system-owned) — no bit set yet, the normal first-
-    // message case.
     if bucket.owner == &anchor_lang::solana_program::system_program::ID {
         return Ok(false);
     }
-    // Initialised: bitmap PDA must be exactly 129 bytes.
     let data = bucket.try_borrow_data()?;
     if data.len()
         != crate::definitions::NOREPLAY_BITMAP_OFFSET + crate::definitions::NOREPLAY_BITMAP_BYTES
@@ -92,10 +78,7 @@ pub fn is_marked(
     Ok(byte & (1 << (bit % 8)) != 0)
 }
 
-// Mark-used: CPIs `MarkUsed` into solana-noreplay with invoke_signed authority.
-
-/// `MarkUsed` instruction-data length:
-/// `[disc=1u8][ns_len: u16 LE][ns: 34 B][seq: u64 LE]`.
+/// `MarkUsed` data length: `[disc: u8][ns_len: u16 LE][ns: 34 B][seq: u64 LE]`.
 const MARK_USED_DATA_LEN: usize = 1 + 2 + NAMESPACE_TOTAL_LEN + 8;
 
 #[allow(clippy::too_many_arguments)]
@@ -112,11 +95,7 @@ pub fn mark_used<'info>(
 ) -> ProgramResult {
     use crate::definitions::{NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_MARK_USED_DISCRIMINATOR};
 
-    // SECURITY: the CPI target is built from the hardcoded `NOREPLAY_PROGRAM_ID`
-    // constant, never `_noreplay_program.key`  — a caller-controlled target
-    // would let an attacker fake `MarkUsed` success and bypass replay protection.
-
-    // Derive and verify the canonical noreplay_authority PDA.
+    // SECURITY: CPI target is the constant `NOREPLAY_PROGRAM_ID`, never `_noreplay_program.key`.
     let noreplay_program_id_addr = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
     let (expected_authority, authority_bump) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
@@ -124,7 +103,6 @@ pub fn mark_used<'info>(
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Namespace: chain_be (2 B) ‖ emitter (32 B).
     let mut namespace = [0u8; NAMESPACE_TOTAL_LEN];
     namespace[..2].copy_from_slice(&chain.to_be_bytes());
     namespace[2..].copy_from_slice(emitter);
@@ -135,11 +113,6 @@ pub fn mark_used<'info>(
     ix_data[3..3 + NAMESPACE_TOTAL_LEN].copy_from_slice(&namespace);
     ix_data[3 + NAMESPACE_TOTAL_LEN..].copy_from_slice(&sequence.to_le_bytes());
 
-    // `MarkUsed` account list:
-    //   0. [signer, writable] payer
-    //   1. [signer, readonly] authority (our PDA)
-    //   2. [writable]         bitmap PDA
-    //   3. [readonly]         system program
     let ix_accounts = vec![
         AccountMeta::new(*payer.key, true),
         AccountMeta::new_readonly(*noreplay_authority.key, true),
@@ -153,19 +126,10 @@ pub fn mark_used<'info>(
         data: ix_data.to_vec(),
     };
 
-    // invoke_signed seeds for the noreplay_authority PDA.
     let bump_seed = [authority_bump];
     let signer_seeds: &[&[u8]] = &[NOREPLAY_AUTHORITY_SEED_PREFIX, &bump_seed];
 
-    // `invoke_signed` itself only returns `Err(...)` for *pre-CPI validation*
-    // failures — missing account, address mismatch, borrow-check conflicts. If
-    // the inner noreplay program returns a `ProgramError` (e.g.
-    // `AccountAlreadyInitialized` on a race-loss), the SBF runtime aborts THIS
-    // program with the inner exit code directly; `invoke_signed` never sees
-    // that error. So mapping the returned `Result` to a custom "CPI failed"
-    // code would only fire on caller bugs in this helper, which are better
-    // surfaced as their natural variant for debuggability. Pass through
-    // unchanged.
+    // An inner-program error aborts this program directly; `Err` here is a pre-CPI failure.
     invoke_signed(
         &instruction,
         &[
@@ -176,4 +140,32 @@ pub fn mark_used<'info>(
         ],
         &[signer_seeds],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Our seed layout must equal `solana_noreplay::BitmapPdaSeeds` for the same inputs.
+    #[test]
+    fn bucket_pda_matches_solana_noreplay_seeds() {
+        let authority = Pubkey::new_unique();
+        let chain: u16 = 2;
+        let emitter = [0xABu8; 32];
+        let sequence: u64 = 5_000;
+
+        let mut namespace = [0u8; NAMESPACE_TOTAL_LEN];
+        namespace[..2].copy_from_slice(&chain.to_be_bytes());
+        namespace[2..].copy_from_slice(&emitter);
+        let seeds = solana_noreplay::BitmapPdaSeeds::new(&namespace, sequence);
+        let expected = Pubkey::find_program_address(
+            &seeds.as_seeds(authority.as_ref()),
+            &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        );
+
+        assert_eq!(
+            derive_bucket_pda(&authority, chain, &emitter, sequence),
+            expected
+        );
+    }
 }

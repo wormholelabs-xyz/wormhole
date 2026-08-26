@@ -1,20 +1,16 @@
-//! Instruction discriminators for the global-accountant (WTT) program's
-//! dispatch table.
+//! Global-accountant (WTT) instruction discriminators.
 
-/// Instruction discriminators. Single-byte prefix on the instruction data.
+/// Single-byte prefix on the instruction data.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
     SubmitObservations = 0,
     ClosePending = 1,
-    /// Permissionless signed-VAA backfill via the Verify VAA Shim CPI; applies
-    /// balance effects directly, bypassing the quorum tracker.
+    /// Signed-VAA path through the Verify VAA Shim; applies balances without quorum tracking.
     SubmitVaas = 2,
-    /// Token Bridge `RegisterChain` governance handler: verifies the VAA and
-    /// initialises/updates the canonical `ChainRegistration` PDA.
+    /// Token Bridge `RegisterChain` governance: writes the `ChainRegistration` PDA.
     RegisterChain = 3,
-    /// Accountant `ModifyBalance` governance handler: verifies the VAA and
-    /// applies an Add/Subtract delta to the canonical `BalanceAccount` PDA.
+    /// Accountant `ModifyBalance` governance: applies a delta to a `BalanceAccount` PDA.
     ModifyBalance = 4,
 }
 

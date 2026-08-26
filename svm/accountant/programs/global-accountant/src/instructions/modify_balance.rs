@@ -1,9 +1,6 @@
-//! `modify_balance` — Accountant governance handler.
-//!
-//! Applies a manual Add / Subtract delta to a `BalanceAccount` PDA via a
-//! governance VAA, for post-incident ledger reconciliation.
-//! Replay protection keys on the payload `sequence` via a per-sequence
-//! `Modification` PDA. Only `SOLANA_CHAIN_ID` is accepted as target_chain.
+//! `modify_balance`: accountant governance. Applies an Add or Subtract delta to a
+//! `BalanceAccount` PDA. A per-sequence `Modification` PDA is the replay guard.
+//! Accepts target chain `SOLANA_CHAIN_ID` only.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -14,14 +11,13 @@ use accountant_operational_core::state::{account as balance_account, modificatio
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLayout, Uint256,
+    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
     MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
 };
 use crate::err;
 
-/// Wire format for the `modify_balance` instruction data (after the 1-byte
-/// dispatch discriminator):
+/// Wire format after the 1-byte discriminator:
 ///
 /// | offset | size     | field             |
 /// |--------|----------|-------------------|
@@ -29,20 +25,18 @@ use crate::err;
 /// | 1      | 2        | body_len (LE)     |
 /// | 3      | body_len | body              |
 ///
-/// `guardian_set_bump` is forwarded to the Shim's `VerifyHash`. PDA bumps are
-/// derived on-chain, not supplied.
+/// `guardian_set_bump` goes to the Shim's `VerifyHash`.
 const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 2;
 
-/// Maximum VAA body size. Canonical ModifyBalance body is 195 bytes; 256 leaves
-/// headroom inside Solana's 1232-byte tx envelope.
+/// Body size cap. A `ModifyBalance` body is 195 bytes.
 const MODIFY_BALANCE_BODY_MAX: usize = 256;
 
-/// Body header offsets (canonical Wormhole VAA layout, 51-byte header).
+/// VAA body header offsets.
 const BODY_EMITTER_CHAIN_OFFSET: usize = 8;
 const BODY_EMITTER_ADDRESS_OFFSET: usize = 10;
 const BODY_HEADER_LEN: usize = 51;
 
-/// Payload byte offsets (relative to body start). Layout:
+/// Payload offsets from the body start:
 ///
 /// | offset                | size | field          |
 /// |-----------------------|------|----------------|
@@ -70,7 +64,6 @@ const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 8 + 2 + 2 + 32 + 1 + 32 + 32;
 const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    // ----- (1) Parse wire data -----
     if data.len() < MODIFY_BALANCE_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
@@ -83,20 +76,16 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
     let body_bytes = &data[MODIFY_BALANCE_FIXED_LEN..MODIFY_BALANCE_FIXED_LEN + body_len];
 
-    // ----- (2) Compute digest -----
     let digest = double_keccak256(body_bytes);
 
     // Accounts:
-    //   0. `[WRITE, SIGNER]` payer.
-    //   1. `[]`              Verify VAA Shim program (CPI target).
-    //   2. `[]`              Core Bridge `GuardianSet` PDA.
-    //   3. `[]`              `GuardianSignatures` PDA.
-    //   4. `[WRITE]`         `BalanceAccount` PDA — lazy-init on first Add;
-    //                       must exist for Sub.
-    //   5. `[]`              system program.
-    //   6. `[WRITE]`         `Modification` PDA at
-    //                       `(b"modification", payload_sequence_be)`. Existence
-    //                       ⇒ `DuplicateModification`.
+    //   0. `[WRITE, SIGNER]` payer
+    //   1. `[]`              Verify VAA Shim program
+    //   2. `[]`              Core Bridge `GuardianSet` PDA
+    //   3. `[]`              `GuardianSignatures` PDA
+    //   4. `[WRITE]`         `BalanceAccount` PDA
+    //   5. `[]`              system program
+    //   6. `[WRITE]`         `Modification` PDA
     let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
         accounts
     else {
@@ -107,7 +96,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // ----- (3) Shim CPI to verify the digest -----
     shim::verify_vaa(
         guardian_set,
         guardian_signatures,
@@ -115,7 +103,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set_bump,
     )?;
 
-    // ----- (4) Governance emitter check -----
+    // SECURITY: the emitter must be `(chain=1, GOVERNANCE_EMITTER)`.
     let body_emitter_chain = u16::from_be_bytes([
         body_bytes[BODY_EMITTER_CHAIN_OFFSET],
         body_bytes[BODY_EMITTER_CHAIN_OFFSET + 1],
@@ -127,7 +115,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::InvalidGovernanceEmitter));
     }
 
-    // ----- (5) Payload validation -----
     if body_bytes[PAYLOAD_MODULE_OFFSET..PAYLOAD_MODULE_OFFSET + 32] != ACCOUNTANT_GOVERNANCE_MODULE
     {
         return Err(err(GlobalAccountantError::InvalidGovernanceModule));
@@ -139,7 +126,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
     ]);
-    // Only Solana accepted (no `Any`, unlike Token Bridge governance).
     if target_chain != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
@@ -147,7 +133,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let kind = ModificationKind::from_u8(kind_byte)
         .ok_or_else(|| err(GlobalAccountantError::InvalidModificationKind))?;
 
-    // ----- (6) Parse modification fields -----
     let payload_sequence = u64::from_be_bytes(
         body_bytes[PAYLOAD_SEQUENCE_OFFSET..PAYLOAD_SEQUENCE_OFFSET + 8]
             .try_into()
@@ -171,7 +156,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let mut reason = [0u8; 32];
     reason.copy_from_slice(&body_bytes[PAYLOAD_REASON_OFFSET..PAYLOAD_REASON_OFFSET + 32]);
 
-    // ----- (7) Canonical-PDA enforcement -----
     let chain_id_be = chain_id.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     let (expected_balance_pda, canonical_balance_bump) = Pubkey::find_program_address(
@@ -196,17 +180,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // ----- (8) Replay protection -----
-    //
-    // An initialised `Modification` PDA means this sequence was already used.
+    // Replay guard.
     if modification_pda.owner != &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::DuplicateModification));
     }
 
-    // ----- (9) Apply the delta -----
-    //
-    // Sub on uninit rejects before allocation so the payer doesn't pay rent on a
-    // guaranteed failure. Add on uninit lazy-inits with `balance = amount`.
+    // Subtract on an absent PDA fails before allocation; Add creates it with `balance = amount`.
     let balance_is_uninit = balance_pda.owner == &anchor_lang::solana_program::system_program::ID;
     if balance_is_uninit {
         match kind {
@@ -227,8 +206,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             }
         }
     } else {
-        // Existing balance PDA. No owner check needed: the canonical address was
-        // verified above, and only this program can ever assign ownership of it.
         let mut layout = balance_account::load(balance_pda)?;
         match kind {
             ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
@@ -237,7 +214,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         balance_account::store(balance_pda, &layout)?;
     }
 
-    // ----- (10) Lazy-init the Modification PDA + store -----
     let bump_seed = [canonical_modification_bump];
     let seeds: &[&[u8]] = &[MODIFICATION_SEED_PREFIX, &payload_sequence_be, &bump_seed];
     init_or_upgrade_pda(
@@ -245,11 +221,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         modification_pda,
         program_id,
         seeds,
-        ModificationLayout::LEN as u64,
+        ModifyBalanceLayout::LEN as u64,
     )?;
 
-    let mut log: ModificationLayout = bytemuck::Zeroable::zeroed();
-    log.tag = ModificationLayout::TAG;
+    let mut log: ModifyBalanceLayout = bytemuck::Zeroable::zeroed();
+    log.tag = ModifyBalanceLayout::TAG;
     log.sequence = payload_sequence;
     log.chain_id = chain_id;
     log.token_chain = token_chain;
@@ -259,13 +235,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     log.reason = reason;
     modification::store(modification_pda, &log)?;
 
-    // ----- (11) Emit the modification to the program log for indexers -----
     log_modification(payload_sequence, chain_id, kind_byte, &reason);
 
     Ok(())
 }
 
-/// Lazy-init the `BalanceAccount` PDA with `balance = amount` (Add on uninit).
+/// Create the `BalanceAccount` PDA with `balance = amount`.
 #[allow(clippy::too_many_arguments)]
 fn init_balance_account<'info>(
     program_id: &Pubkey,
@@ -305,9 +280,7 @@ fn init_balance_account<'info>(
     balance_account::store(balance_pda, &layout)
 }
 
-/// Emit the modification record to the program log for off-chain indexers.
-/// `msg!` and `sol_log_data` both compile and run on host and on-chain, so no
-/// cfg-gating is needed here (unlike pinocchio's raw syscall wrapper).
+/// Log the modification for off-chain indexers.
 fn log_modification(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {
     msg!(
         "modification sequence={} chain_id={} kind={}",

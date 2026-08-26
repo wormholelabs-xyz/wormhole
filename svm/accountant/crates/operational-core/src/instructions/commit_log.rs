@@ -1,19 +1,8 @@
-//! Canonical commit-log emit, shared by `submit_observations` (on quorum) and
-//! `submit_vaas` (after Shim verification).
-//!
-//! Off-chain indexers consume the program-log line carrying the
-//! [`ACCOUNTANT_DIGEST_LOG_TAG`] prefix. The payload layout is the single
-//! source of truth in [`crate::definitions`]; this module merely marshals
-//! caller-supplied fields into the 86-byte buffer and hands it to
-//! `sol_log_data`.
-//!
-//! `anchor_lang::solana_program::log::sol_log_data` has a real on-chain arm
-//! (the syscall) and a host no-op arm built in, so — unlike pinocchio's raw
-//! syscall wrapper — no cfg-gating is needed on our side.
+//! Commit-log emit. Layout: see [`ACCOUNTANT_DIGEST_LOG_TAG`].
 
 use crate::definitions::{ACCOUNTANT_DIGEST_LOG_LEN, ACCOUNTANT_DIGEST_LOG_TAG};
 
-/// Emit one canonical commit log entry.
+/// Emit one commit log entry through `sol_log_data`.
 pub fn emit(
     chain: u16,
     emitter: &[u8; 32],

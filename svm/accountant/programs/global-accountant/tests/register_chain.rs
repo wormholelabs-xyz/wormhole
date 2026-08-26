@@ -1,8 +1,5 @@
-//! Integration tests for `register_chain`.
-//!
-//! Driven against a Mollusk instance with the real `solana_noreplay.so` and
-//! `wormhole_verify_vaa_shim.so` loaded at their canonical program IDs (see
-//! `common::mollusk_fixtures`).
+//! Mollusk integration tests for `register_chain`, with the real `solana_noreplay.so` and
+//! `wormhole_verify_vaa_shim.so` (see `common::mollusk_fixtures`).
 
 #![allow(clippy::too_many_arguments)]
 
@@ -55,7 +52,7 @@ fn shim_program_id() -> Pubkey {
     Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
 }
 
-/// Host-side `keccak256(keccak256(body))` — the Wormhole digest convention.
+/// Dedup digest `keccak256(keccak256(body))`.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
@@ -66,7 +63,7 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
-/// Host-side derivation of the canonical NoReplay bitmap PDA.
+/// Host mirror of `noreplay::derive_bucket_pda`.
 fn derive_canonical_noreplay_bucket(
     authority: &Pubkey,
     chain: u16,
@@ -104,11 +101,11 @@ fn uninitialised_pda_account() -> Account {
 }
 
 fn noreplay_bucket_unmarked() -> Account {
-    // Lazy-create entry state: system-owned, empty.
+    // Uninitialised.
     system_owned_account(0)
 }
 
-/// Build a Token Bridge `RegisterChain` governance VAA body. Layout:
+/// Token Bridge `RegisterChain` governance VAA body:
 ///
 /// | offset | size | field             |
 /// |--------|------|-------------------|
@@ -148,8 +145,7 @@ fn build_register_chain_body(
 }
 
 fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[u8]) -> Vec<u8> {
-    // Wire: discriminator + guardian_set_bump + registration_bump + 2-byte body
-    // len (LE) + body.
+    // Wire: discriminator + guardian_set_bump + registration_bump + body_len(u16 LE) + body.
     let mut data = Vec::with_capacity(1 + 1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::RegisterChain as u8);
     data.push(guardian_set_bump);
@@ -159,7 +155,7 @@ fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[
     data
 }
 
-/// Build the minimal account list for a `register_chain` call. Slot order:
+/// Account list for `register_chain`:
 ///   0. payer (SIGNER, WRITE)
 ///   1. Verify VAA Shim program
 ///   2. Core Bridge GuardianSet
@@ -167,7 +163,7 @@ fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[
 ///   4. chain_registration PDA (WRITE)
 ///   5. NoReplay bitmap PDA (WRITE)
 ///   6. NoReplay program
-///   7. NoReplay authority PDA owned by this program
+///   7. NoReplay authority PDA
 ///   8. system program
 fn build_metas(
     payer: Pubkey,
@@ -225,8 +221,7 @@ fn build_initial_accounts(
     ]
 }
 
-/// Happy path: a RegisterChain governance VAA targeting "Any" initialises the
-/// canonical ChainRegistration PDA with the supplied `(chain, emitter)`.
+/// `RegisterChain` with target chain Any initialises the `ChainRegistration` PDA.
 #[test]
 fn register_chain_via_governance_vaa_initialises_registration_pda() {
     let mollusk = mollusk();
@@ -316,8 +311,7 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
     );
 }
 
-/// Single-call test driver over the standard fixture set, with optional
-/// overrides for the initial registration and noreplay-bucket accounts.
+/// Single-call driver with optional registration and bucket overrides.
 fn run_register_chain(
     mollusk: &Mollusk,
     body: &[u8],
@@ -334,7 +328,7 @@ fn run_register_chain(
     let digest = double_keccak256_host(body);
     let (noreplay_authority, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
-    // vaa_sequence (body[42..50]) drives the canonical noreplay bucket.
+    // `vaa_sequence` (body[42..50]) selects the NoReplay bucket.
     let vaa_sequence = {
         let mut buf = [0u8; 8];
         buf.copy_from_slice(&body[42..50]);
@@ -376,10 +370,8 @@ fn run_register_chain(
     mollusk.process_instruction(&ix, &accounts)
 }
 
-/// Each case mutates one body field to pin which body-header validator trips.
-/// The real Verify VAA Shim is loaded and the guardian signatures are re-signed
-/// over each mutated body's digest, so the Shim CPI always passes; the rejection
-/// comes from the program's own governance-header validation.
+/// Each case mutates one body field. Signatures are re-signed over the mutated body, so
+/// the Shim passes and the rejection comes from the governance-header validation.
 #[test]
 fn register_chain_governance_header_violations_reject() {
     struct Case {
@@ -460,8 +452,7 @@ fn register_chain_governance_header_violations_reject() {
     }
 }
 
-/// The same governance VAA submitted twice: the second rejects via the
-/// NoReplay pre-check.
+/// Same governance VAA twice: `AlreadyAccounted`.
 #[test]
 fn register_chain_rejects_replay() {
     let mollusk = mollusk();
@@ -483,7 +474,6 @@ fn register_chain_rejects_replay() {
         r1.program_result
     );
 
-    // Carry the flipped bucket and initialised registration into the replay.
     let (registration_pda, _) = derive_chain_registration_pda(2);
     let (noreplay_authority_pubkey, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
@@ -527,8 +517,7 @@ fn register_chain_rejects_replay() {
     }
 }
 
-/// Emitter rotation: a later governance VAA overwrites the registration so the
-/// PDA ends up holding the new emitter.
+/// A later governance VAA overwrites the registration with the new emitter.
 #[test]
 fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
     let mollusk = mollusk();
@@ -548,7 +537,6 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
     let r1 = run_register_chain(&mollusk, &body_a, 2, None, None);
     assert!(matches!(r1.program_result, ProgramResult::Success));
 
-    // Carry the initialised PDA + flipped bucket into the second call.
     let (registration_pda, _) = derive_chain_registration_pda(2);
     let (noreplay_authority_pubkey, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
@@ -572,11 +560,7 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
         .map(|(_, a)| a.clone())
         .expect("noreplay bucket missing from first result");
 
-    // Second VAA uses a sequence in a different bucket (sequence / 1024
-    // differs), so it derives a DIFFERENT noreplay bucket PDA than body_a. The
-    // real `solana_noreplay` CPI is live; a fresh unmarked bucket is the
-    // correct input here precisely because that distinct PDA has never been
-    // written, not because any mock only inspects byte 0.
+    // The second sequence is in another bucket (`sequence / 1024` differs), so its PDA is unmarked.
     let _ = post_bucket;
     let fresh_bucket = noreplay_bucket_unmarked();
     let body_b = build_register_chain_body(
@@ -614,14 +598,8 @@ fn register_chain_overwrite_via_new_governance_vaa_succeeds() {
     );
 }
 
-/// Rotation then replay of the ORIGINAL VAA: register emitter_A at sequence N
-/// (bucket N flips), rotate to emitter_B via a higher-sequence VAA (a different
-/// bucket), then RESUBMIT the original emitter_A@seq-N governance VAA. It must
-/// reject `AlreadyAccounted` — the seq-N bucket marked by the first call is
-/// keyed on the governance emitter + vaa_sequence, independent of which emitter
-/// is being registered, so the replayed old VAA still collides. This is the
-/// concrete threat NoReplay exists for; the overwrite test only proves forward
-/// rotation succeeds.
+/// Register emitter_A at sequence N, rotate to emitter_B, then resubmit the emitter_A VAA:
+/// `AlreadyAccounted`. The bucket keys on the governance emitter and VAA sequence.
 #[test]
 fn register_chain_rotation_then_replay_of_old_vaa_rejects() {
     let mollusk = mollusk();
@@ -640,7 +618,7 @@ fn register_chain_rotation_then_replay_of_old_vaa_rejects() {
         seq_n,
     );
 
-    // 1) Register emitter_A at sequence N — flips bucket N.
+    // 1) emitter_A at sequence N.
     let body_a = build_register_chain_body(
         SOLANA_CHAIN_ID,
         &GOVERNANCE_EMITTER,
@@ -671,7 +649,7 @@ fn register_chain_rotation_then_replay_of_old_vaa_rejects() {
         "seq-N bucket flipped to noreplay ownership by the first register"
     );
 
-    // 2) Rotate to emitter_B via a higher-sequence VAA (fresh, distinct bucket).
+    // 2) emitter_B at a higher sequence.
     let body_b = build_register_chain_body(
         SOLANA_CHAIN_ID,
         &GOVERNANCE_EMITTER,
@@ -701,8 +679,7 @@ fn register_chain_rotation_then_replay_of_old_vaa_rejects() {
         .map(|(_, a)| a.clone())
         .expect("registration PDA missing after rotation");
 
-    // 3) Replay the ORIGINAL emitter_A@seq-N VAA, carrying the now-marked seq-N
-    //    bucket and the rotated registration. It must reject AlreadyAccounted.
+    // 3) Replay the emitter_A VAA with the marked bucket.
     let r3 = run_register_chain(
         &mollusk,
         &body_a,

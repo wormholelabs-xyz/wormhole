@@ -1,23 +1,9 @@
-//! Balance-applicator integrity tests, driven through `submit_vaas` and
-//! `modify_balance` against a Mollusk instance with the real
-//! `solana_noreplay.so` and `wormhole_verify_vaa_shim.so` loaded.
+//! Balance-applicator integrity tests through `submit_vaas` and `modify_balance`, with the
+//! real `solana_noreplay.so` and `wormhole_verify_vaa_shim.so`.
 //!
-//! These pin the subtle invariants of `transfer::apply_transfer` (the
-//! source-then-dest `lock_or_burn` / `unlock_or_mint` ledger) and the
-//! governance `modify_balance` raw-add path that the layout-level unit tests
-//! cannot reach:
-//!   * the same-chain self-transfer collapse onto a single in-memory layout,
-//!     in both its success and transient-underflow forms;
-//!   * atomic rollback when the destination mutation fails after the source
-//!     side has already been mutated in memory (overflow and invalid-PDA); and
-//!   * `modify_balance` Add-overflow leaving the pre-funded balance intact.
-//!
-//! All transfer cases are driven through `submit_vaas` (not
-//! `submit_observations`) so the wire shape ports unchanged to the sibling
-//! branch. Each asserts resulting on-chain state — balances, the NoReplay bit,
-//! PDA contents — not merely the error code, and each is constructed so the
-//! failure originates in the balance applicator, not an upstream Shim /
-//! registration / replay gate.
+//! Covers `transfer::apply_transfer` invariants: the same-PDA collapse (success and
+//! transient underflow), rollback after a destination failure, and `modify_balance` Add
+//! overflow. Each case asserts on-chain state. Each failure originates in the balance applicator.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -75,10 +61,6 @@ fn noreplay_program_id() -> Pubkey {
     Pubkey::new_from_array(NOREPLAY_PROGRAM_ID)
 }
 
-// ============================================================================
-// PDA derivation helpers
-// ============================================================================
-
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
@@ -125,11 +107,7 @@ fn derive_canonical_noreplay_bucket(
     pda
 }
 
-// ============================================================================
-// Body builders
-// ============================================================================
-
-/// Host-side `keccak256(keccak256(body))` — the Wormhole digest convention.
+/// Dedup digest `keccak256(keccak256(body))`.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
@@ -190,10 +168,6 @@ fn build_modify_balance_body(
     body
 }
 
-// ============================================================================
-// Account fixtures
-// ============================================================================
-
 fn system_owned_account(lamports: u64) -> Account {
     Account {
         lamports,
@@ -208,7 +182,7 @@ fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }
 
-/// Program-owned `BalanceAccount` PDA pre-funded with `balance`.
+/// Program-owned `BalanceAccount` PDA with `balance`.
 fn balance_account(
     chain: u16,
     token_chain: u16,
@@ -275,8 +249,7 @@ fn balance_of(accounts: &[(Pubkey, Account)], key: &Pubkey) -> Uint256 {
     layout.balance
 }
 
-/// Assert the NoReplay bucket is still in its lazy-create entry state
-/// (system-owned, empty) — i.e. the tx rolled back.
+/// Assert the NoReplay bucket is uninitialised (tx rolled back).
 fn assert_bucket_unmarked(bucket: &Account) {
     assert_eq!(bucket.owner, system_program_id(), "bucket still system-owned");
     assert!(bucket.data.is_empty(), "bucket still uninitialised");
@@ -301,14 +274,8 @@ fn extract_code(result: &ProgramResult) -> u32 {
     }
 }
 
-// ============================================================================
-// Transfer scenario harness (submit_vaas)
-// ============================================================================
-
-/// A fully-described `submit_vaas` Transfer scenario. Built so that the failure
-/// (if any) originates in the balance applicator: the Shim CPI verifies the
-/// re-signed digest, the registration PDA matches the emitter, and the NoReplay
-/// slot starts clear.
+/// `submit_vaas` Transfer scenario. Shim, registration, and NoReplay checks pass, so
+/// any failure comes from the balance applicator.
 struct TransferCase {
     emitter_chain: u16,
     emitter: [u8; 32],
@@ -317,10 +284,9 @@ struct TransferCase {
     token_chain: u16,
     token_address: [u8; 32],
     recipient_chain: u16,
-    /// Optional override for the dest Account PDA meta (defaults to the
-    /// canonical derivation). Used to inject a wrong dest PDA.
+    /// Override for the dest PDA meta; injects a wrong dest PDA.
     dest_override: Option<Pubkey>,
-    /// Optional pre-funded state for the source / dest balance PDAs.
+    /// Pre-funded state for the source / dest balance PDAs.
     source_prefund: Option<Uint256>,
     dest_prefund: Option<Uint256>,
 }
@@ -396,14 +362,13 @@ impl TransferCase {
             (noreplay_authority, system_owned_account(0)),
         ];
 
-        // Source slot.
         let source_state = match self.source_prefund {
             Some(bal) => balance_account(self.emitter_chain, self.token_chain, &self.token_address, bal),
             None => uninitialised_pda_account(),
         };
         accounts.push((source_pubkey, source_state));
 
-        // Dest slot — skipped when it collapses onto the source PDA.
+        // Dest slot; omitted when it equals the source PDA.
         if dest_pubkey != source_pubkey {
             let dest_state = match self.dest_prefund {
                 Some(bal) => {
@@ -432,16 +397,8 @@ impl TransferCase {
     }
 }
 
-// ============================================================================
-// Tests — transfer applicator (submit_vaas)
-// ============================================================================
-
-/// Same-chain self-transfer, NATIVE token, success path. `emitter_chain ==
-/// recipient_chain == token_chain` ⇒ source and dest derive to the SAME PDA, so
-/// the `same_pda` collapse branch applies both ops to one in-memory layout:
-/// `lock_or_burn` credits (+amount), then `unlock_or_mint` debits (-amount). The
-/// single PDA must net back to its pre-funded balance, and the two metas must be
-/// the same pubkey.
+/// Same-chain native self-transfer: source and dest are one PDA. `lock_or_burn` credits.
+/// `unlock_or_mint` debits. The balance returns to its start value.
 #[test]
 fn self_transfer_native_collapse_nets_to_prefunded_balance() {
     let mollusk = mollusk();
@@ -466,14 +423,13 @@ fn self_transfer_native_collapse_nets_to_prefunded_balance() {
         result.program_result
     );
 
-    // Source and dest slots are the SAME account.
     assert_eq!(source, dest, "same-chain transfer collapses to one PDA");
     assert_eq!(
         metas[7].pubkey, metas[8].pubkey,
         "source and dest metas point at the same pubkey"
     );
 
-    // ADD 500_000 then SUB 500_000 over the pre-funded 1_000_000 ⇒ net unchanged.
+    // +500_000 then -500_000 over 1_000_000.
     assert_eq!(
         balance_of(&result.resulting_accounts, &source),
         Uint256::from_u128(1_000_000),
@@ -483,12 +439,8 @@ fn self_transfer_native_collapse_nets_to_prefunded_balance() {
     assert_bucket_marked(find_account(&result.resulting_accounts, &bucket), case.sequence);
 }
 
-/// Same-chain self-transfer, WRAPPED token, transient-underflow case. With
-/// `chain != token_chain` the collapse runs `lock_or_burn` (a SUB) first; when
-/// the wrapped balance is below `amount` this SUB underflows even though the net
-/// (burn-then-mint) would be zero. Must reject `BalanceUnderflow`, and — because
-/// the failure rolls the whole tx back — the NoReplay bit must NOT be set. This
-/// pins the invariant the `same_pda` source comment flags.
+/// Same-chain wrapped self-transfer: `lock_or_burn` debits first. Balance below `amount`
+/// fails with `BalanceUnderflow` and the NoReplay bit stays clear.
 #[test]
 fn self_transfer_wrapped_collapse_transient_underflow_rejects() {
     let mollusk = mollusk();
@@ -502,8 +454,7 @@ fn self_transfer_wrapped_collapse_transient_underflow_rejects() {
         token_address,
         recipient_chain: 2,   // same chain ⇒ same PDA
         dest_override: None,
-        // Wrapped balance (100) < amount (1_000): the in-flight burn underflows
-        // although mint-back would restore the net to 100.
+        // Wrapped balance 100 < amount 1_000.
         source_prefund: Some(Uint256::from_u128(100)),
         dest_prefund: None,
     };
@@ -517,9 +468,7 @@ fn self_transfer_wrapped_collapse_transient_underflow_rejects() {
         result.program_result
     );
 
-    // Tx rolled back: replay slot must remain unconsumed.
     assert_bucket_unmarked(find_account(&result.resulting_accounts, &bucket));
-    // Pre-funded balance is untouched.
     assert_eq!(
         balance_of(&result.resulting_accounts, &source),
         Uint256::from_u128(100),
@@ -527,13 +476,8 @@ fn self_transfer_wrapped_collapse_transient_underflow_rejects() {
     );
 }
 
-/// Destination-side overflow rolls the source mutation back. Distinct source /
-/// dest PDAs: source is native (`emitter_chain == token_chain`) so
-/// `lock_or_burn` credits and succeeds against a non-zero balance; the wrapped
-/// dest (`recipient_chain != token_chain`) is pre-funded at `MAX` so the
-/// `unlock_or_mint` credit overflows → `BalanceOverflow`. The source PDA must
-/// read its original balance afterwards, proving the in-memory source mutation
-/// was never persisted.
+/// Destination overflow rolls back the source mutation. Native source credits; wrapped
+/// dest at `MAX` overflows with `BalanceOverflow`. Source keeps its original balance.
 #[test]
 fn dest_overflow_rolls_back_source_mutation() {
     let mollusk = mollusk();
@@ -549,7 +493,7 @@ fn dest_overflow_rolls_back_source_mutation() {
         recipient_chain: 1,   // dest wrapped (chain 1 != token_chain 2): credit
         dest_override: None,
         source_prefund: Some(source_initial),
-        // Dest at MAX so the wrapped-mint credit overflows.
+        // Dest at MAX.
         dest_prefund: Some(Uint256::MAX),
     };
 
@@ -562,14 +506,12 @@ fn dest_overflow_rolls_back_source_mutation() {
         result.program_result
     );
 
-    // Atomic rollback: the source PDA still holds its original balance even
-    // though `lock_or_burn` had credited it in memory before the dest failed.
+    // Source unchanged.
     assert_eq!(
         balance_of(&result.resulting_accounts, &source),
         source_initial,
         "source mutation rolled back on dest overflow"
     );
-    // Dest PDA still at MAX (unchanged).
     assert_eq!(
         balance_of(&result.resulting_accounts, &dest),
         Uint256::MAX,
@@ -578,18 +520,14 @@ fn dest_overflow_rolls_back_source_mutation() {
     assert_bucket_unmarked(find_account(&result.resulting_accounts, &bucket));
 }
 
-/// Destination-side invalid Account PDA. A wrong dest PDA (derived for the wrong
-/// `token_chain`) is passed at slot 8 so the canonical-address check inside
-/// `apply_transfer` fails AFTER the source side has been processed →
-/// `InvalidAccountPda`. The source PDA must be unchanged (rollback). Existing
-/// tests only spoof the SOURCE slot, so this pins the dest-slot guard.
+/// Wrong dest PDA (wrong `token_chain`) at slot 8 fails with `InvalidAccountPda` after
+/// the source side ran. Source keeps its original balance.
 #[test]
 fn dest_invalid_account_pda_rolls_back_source() {
     let mollusk = mollusk();
     let token_address = [0x74u8; 32];
     let source_initial = Uint256::from_u128(2_000);
-    // The dest should be derived for (recipient_chain=1, token_chain=2); we pass
-    // the PDA for a wrong token_chain (9) instead so the address check trips.
+    // Expected dest is (recipient_chain=1, token_chain=2); pass token_chain 9.
     let wrong_dest = derive_account_pda(1, 9, &token_address).0;
     let case = TransferCase {
         emitter_chain: 2,
@@ -613,7 +551,6 @@ fn dest_invalid_account_pda_rolls_back_source() {
         result.program_result
     );
 
-    // Source mutation rolled back.
     assert_eq!(
         balance_of(&result.resulting_accounts, &source),
         source_initial,
@@ -622,20 +559,14 @@ fn dest_invalid_account_pda_rolls_back_source() {
     assert_bucket_unmarked(find_account(&result.resulting_accounts, &bucket));
 }
 
-// ============================================================================
-// Tests — modify_balance raw-add overflow rollback
-// ============================================================================
-
-/// `modify_balance` Add that overflows leaves the pre-funded balance intact.
-/// Strengthens the existing overflow test (which only checks the error code) by
-/// asserting no partial write: the balance PDA still reads `MAX - 1` afterwards.
+/// `modify_balance` Add overflow leaves the balance at `MAX - 1`.
 #[test]
 fn modify_balance_add_overflow_leaves_balance_unchanged() {
     let mollusk = mollusk();
     let token_address = [0x75u8; 32];
     let payload_sequence: u64 = 700;
 
-    // Pre-fund with MAX - 1; Add 2 overflows.
+    // MAX - 1 plus 2 overflows.
     let mut max_minus_one = [0xFFu8; 32];
     max_minus_one[31] = 0xFE;
     let pre_balance_value = Uint256(max_minus_one);
@@ -706,7 +637,6 @@ fn modify_balance_add_overflow_leaves_balance_unchanged() {
         result.program_result
     );
 
-    // No partial write: the balance PDA still holds its original value.
     assert_eq!(
         balance_of(&result.resulting_accounts, &balance_pda),
         pre_balance_value,

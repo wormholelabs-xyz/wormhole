@@ -1,22 +1,15 @@
-//! `close_pending` — permissionless cleanup of stranded
-//! `PendingObservationsLayout` PDAs.
-//!
-//! Anyone may close a pending PDA when either trigger holds, refunding lamports
-//! to the recorded `payer`:
+//! `close_pending`: permissionless close of a `PendingObservationsLayout` PDA.
+//! Refunds lamports to the recorded `payer` when either condition holds:
 //!
 //! - (a) The recorded guardian set has expired.
-//! - (b) NoReplay is already marked for `(chain, emitter, sequence)` — the entry
-//!   was accounted via another path.
+//! - (b) NoReplay is marked for `(chain, emitter, sequence)`.
 //!
-//! Wire format (after the 1-byte dispatch discriminator):
+//! Wire format (after the 1-byte discriminator):
 //!
 //! | offset | size | field                  |
 //! |--------|------|------------------------|
 //! | 0      | 32   | emitter                |
 //! | 32     | 8    | sequence (big endian)  |
-//!
-//! The canonical pending-PDA and noreplay-bucket addresses are re-derived from
-//! these (plus the layout's `chain` / `digest`) and any mismatch is rejected.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -31,8 +24,7 @@ use crate::instructions::noreplay;
 use crate::state::pending;
 use crate::ProgramResult;
 
-/// `close_pending` instruction-data size (after the discriminator). See module
-/// doc for the field map.
+/// Instruction-data size after the discriminator.
 const CLOSE_PENDING_DATA_LEN: usize = 32 + 8;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -48,12 +40,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let sequence = u64::from_be_bytes(sequence_be);
 
-    // Accounts:
-    //   0. `[SIGNER]` closer (permissionless)
-    //   1. `[WRITE]`  pending PDA
-    //   2. `[WRITE]`  rent recipient — must equal the recorded payer
-    //   3. `[]`       GuardianSet PDA — checks expiry (trigger a)
-    //   4. `[]`       NoReplay bitmap PDA — checks the marked condition (trigger b)
+    // 0 closer (signer), 1 pending PDA (w), 2 rent recipient (w), 3 GuardianSet, 4 NoReplay bucket.
     let [closer, pending_pda, rent_recipient, guardian_set, noreplay_bucket] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -68,9 +55,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
 
-    // Canonical-pending-PDA enforcement: re-derive from `(b"pending", chain_be,
-    // emitter, sequence_be, digest)` and reject mismatches — otherwise a spoofed
-    // layout could trick the bitmap lookup into reading an unrelated bucket.
+    // SECURITY: re-derive the pending PDA; a spoofed layout could point at another bucket.
     let chain_be = layout.chain.to_be_bytes();
     let (expected_pending_pda, _) = Pubkey::find_program_address(
         &[
@@ -86,11 +71,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Trigger (a): GuardianSet expired.
+    // Condition (a).
     let expired = guardian_set_expired(guardian_set, layout.guardian_set_index)?;
 
-    // Trigger (b): NoReplay-marked. Re-derive the authority PDA inline rather
-    // than passing it in (cold path; keeps the account list small).
+    // Condition (b).
     let (noreplay_authority_addr, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
     let already_accounted = noreplay::is_marked(
@@ -110,11 +94,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     crate::account_util::close_account(pending_pda)
 }
 
-/// Returns `Ok(true)` if the supplied `GuardianSet` is expired, or if its index
-/// does not match the recorded one (a non-current set is a superset of expired).
+/// `Ok(true)` if `guardian_set` is expired or its index differs from `expected_index`.
 ///
-/// The owner is checked against [`CORE_BRIDGE_PROGRAM_ID`] first: without it, a
-/// forged account claiming expiry could DoS any pending PDA from reaching quorum.
+/// SECURITY: owner must be [`CORE_BRIDGE_PROGRAM_ID`]; a forged set could close any pending PDA.
 fn guardian_set_expired(
     guardian_set: &AccountInfo,
     expected_index: u32,
@@ -132,7 +114,6 @@ fn guardian_set_expired(
             .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
     );
     if on_chain_index != expected_index {
-        // Not the recorded set — treat as non-current (superset of expired).
         return Ok(true);
     }
     let keys_len = u32::from_le_bytes(
@@ -150,10 +131,10 @@ fn guardian_set_expired(
             .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
     );
     if expiration_time == 0 {
-        return Ok(false); // never-expiring set (the active one)
+        return Ok(false); // active set
     }
     let timestamp = Clock::get()?.unix_timestamp;
-    // Clamp the i64 timestamp into u32 (negatives -> 0, overflow -> MAX).
+    // Clamp i64 to u32.
     let timestamp_u32 = if timestamp < 0 {
         0
     } else if (timestamp as u64) > (u32::MAX as u64) {

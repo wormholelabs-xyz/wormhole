@@ -1,21 +1,16 @@
-//! Unit tests for `noreplay::derive_bucket_pda`, pinning its seed encoding
-//! against a host-side reimplementation of `solana_noreplay::pda::BitmapPdaSeeds`.
-//! The helper now lives in the shared `accountant-operational-core` crate.
+//! Tests for `noreplay::derive_bucket_pda` against a host reimplementation of
+//! `solana_noreplay::pda::BitmapPdaSeeds`.
 
 use {
     accountant_operational_core::instructions::noreplay::derive_bucket_pda,
     global_accountant_definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID},
     solana_pubkey::Pubkey,
-    // `derive_bucket_pda` takes `anchor_lang::solana_program::pubkey::Pubkey`,
-    // resolved to the `3.x` line — a separate crate instance from this test's
-    // own `solana_pubkey` (`4.1`, used below only for the reference
-    // derivation). See the dependency comment in Cargo.toml.
+    // `derive_bucket_pda` takes the `3.x` `Pubkey`; the reference uses `solana_pubkey` `4.1`.
+    // See the dependency comment in Cargo.toml.
     solana_pubkey_v3::Pubkey as CorePubkey,
 };
 
-/// Reference derivation matching `solana_noreplay::pda::BitmapPdaSeeds::new`,
-/// built via `solana_pubkey` (vs. the program's pinocchio impl) to catch
-/// transcription errors on either side.
+/// Reference derivation of `solana_noreplay::pda::BitmapPdaSeeds::new` through `solana_pubkey`.
 fn reference_bucket_pda(
     authority: &[u8; 32],
     chain: u16,
@@ -39,7 +34,7 @@ fn reference_bucket_pda(
     (pubkey.to_bytes(), bump)
 }
 
-/// `derive_bucket_pda` agrees with the reference derivation (address + bump).
+/// `derive_bucket_pda` equals the reference (address and bump).
 #[test]
 fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
     let authority_bytes = [0x7Au8; 32];
@@ -60,10 +55,7 @@ fn derive_bucket_pda_matches_reference_for_canonical_inputs() {
     assert_eq!(ours_bump, ref_bump, "canonical bumps must agree");
 }
 
-/// Pin the `sequence / 1024` bucket math at the bucket boundaries (`0`, `1023`,
-/// `1024`) and the extremes (`u64::MAX`), plus a non-1 chain so the chain bytes
-/// participate in the namespace seed. A single canonical case cannot catch an
-/// off-by-one in the bucket-index division or a missing chain prefix; these do.
+/// Bucket math at `0`, `1023`, `1024`, `u64::MAX`, and a multi-byte chain id.
 #[test]
 fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
     let authority_bytes = [0x7Au8; 32];
@@ -72,8 +64,7 @@ fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
     emitter[0] = 0xAB;
     emitter[31] = 0x11;
 
-    // (chain, sequence) cases. Boundary sequences straddle the 1024-bit bucket
-    // edge; the chain values exercise both chain 1 and a multi-byte chain id.
+    // (chain, sequence) cases.
     let cases: [(u16, u64); 8] = [
         (1, 0),
         (1, 1023),
@@ -100,8 +91,7 @@ fn derive_bucket_pda_matches_reference_at_bucket_boundaries() {
         );
     }
 
-    // The boundary actually crosses a bucket: seq 1023 and 1024 must derive
-    // different PDAs (different bucket index), while 1024 and 1025 share one.
+    // 1023 and 1024 derive different PDAs; 1024 and 1025 share one.
     let (b1023, _) = derive_bucket_pda(&authority, 1, &emitter, 1023);
     let (b1024, _) = derive_bucket_pda(&authority, 1, &emitter, 1024);
     let (b1025, _) = derive_bucket_pda(&authority, 1, &emitter, 1025);

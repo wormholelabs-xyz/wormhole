@@ -42,6 +42,23 @@ accountant-operational-core = { path = "crates/operational-core" }
 # `checked_add`/`checked_sub` plus the `to_be_bytes` / `from_be_bytes`
 # conversions, so the deactivated features stay deactivated.
 ruint = { version = "=1.17.2", default-features = false }
+# Compile-time base58 decoding for external program IDs. `no_std`, two const
+# hashing deps. Same version the in-tree `wormhole-svm-definitions` crate uses.
+const-crypto = "=0.3.0"
+# Canonical in-tree program IDs. Dev-only: it pins `solana-program <=2`, so it
+# adds a second solana tree to the test build. Do not promote to a dependency.
+# Canonical governance wire format (`sdk/rust`). Dev-only, host deps only.
+wormhole-vaas-serde = { path = "../../sdk/rust/vaas-serde" }
+serde_wormhole = { path = "../../sdk/rust/serde_wormhole" }
+# NoReplay program crate. Dev-only parity checks for the wire constants and PDA
+# seeds; pulls `pinocchio`, so it must stay out of the SBF build. Pinned to a
+# commit on `main`.
+solana-noreplay = { git = "ssh://git@github.com/wormholelabs-xyz/solana-noreplay.git", rev = "e4bad6a1c890411346fc27f17baae6ae2decd507" }
+# `solana-noreplay` re-exports pinocchio's `Address`; its host-side
+# `find_program_address` needs this feature, enabled here explicitly rather
+# than by accidental unification with another crate's graph.
+solana-address = { version = "=2.6.0", default-features = false, features = ["curve25519"] }
+wormhole-svm-definitions = { path = "../wormhole-core-shims/crates/definitions", features = ["solana", "verify-vaa-shim"] }
 
 # Test-only dependencies. Kept in workspace so versions stay aligned.
 mollusk-svm = "0.12.1-agave-4.0"

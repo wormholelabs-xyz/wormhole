@@ -1,16 +1,11 @@
-//! Primitive value types shared across the accountant: the untyped address
-//! alias and the on-disk 256-bit unsigned integer.
+//! Primitive value types: the address alias and the on-disk 256-bit integer.
 
 use bytemuck::{Pod, Zeroable};
 
-/// 32-byte address, layout-compatible with `solana_address::Address` and
-/// pinocchio's `Address`. Untyped to keep this crate Solana-SDK-free.
+/// 32-byte address, layout-compatible with `solana_address::Address`.
 pub type Pubkey = [u8; 32];
 
-/// 256-bit unsigned integer stored on-disk as 32 **big-endian** bytes. BE
-/// matches the VAA `amount` wire format so a payload's bytes copy in directly.
-/// `#[repr(transparent)]` over `[u8; 32]` keeps it `Pod`; arithmetic round-trips
-/// through `ruint`'s `U256` at the boundary.
+/// 256-bit unsigned integer, 32 big-endian bytes on disk (VAA `amount` wire order).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Pod, Zeroable)]
 pub struct Uint256(pub [u8; 32]);
@@ -22,8 +17,7 @@ impl Uint256 {
     /// All-ones value (`2^256 - 1`).
     pub const MAX: Self = Self([0xffu8; 32]);
 
-    /// Build a `Uint256` from a `u128`, big-endian (low 16 bytes carry the
-    /// value).
+    /// Big-endian `u128` in the low 16 bytes.
     pub const fn from_u128(v: u128) -> Self {
         let v_be = v.to_be_bytes();
         let mut bytes = [0u8; 32];
@@ -35,7 +29,7 @@ impl Uint256 {
         Self(bytes)
     }
 
-    /// Add, returning `None` on overflow.
+    /// `None` on overflow.
     #[inline]
     pub fn checked_add(self, other: Self) -> Option<Self> {
         let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
@@ -43,7 +37,7 @@ impl Uint256 {
         a.checked_add(b).map(|r| Self(r.to_be_bytes::<32>()))
     }
 
-    /// Subtract, returning `None` on underflow.
+    /// `None` on underflow.
     #[inline]
     pub fn checked_sub(self, other: Self) -> Option<Self> {
         let a = ruint::aliases::U256::from_be_bytes::<32>(self.0);
@@ -51,7 +45,7 @@ impl Uint256 {
         a.checked_sub(b).map(|r| Self(r.to_be_bytes::<32>()))
     }
 
-    /// Construct from 32 big-endian bytes.
+    /// From 32 big-endian bytes.
     pub const fn from_be_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -65,7 +59,7 @@ impl PartialOrd for Uint256 {
 
 impl Ord for Uint256 {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        // Lexicographic over big-endian bytes equals numerical order.
+        // Big-endian byte order equals numeric order.
         self.0.cmp(&other.0)
     }
 }
@@ -111,8 +105,7 @@ mod tests {
 
     #[test]
     fn uint256_big_endian_wire_order() {
-        // `0x1234` packs MSB-first (network byte order), matching the VAA
-        // `amount` encoding.
+        // MSB-first, as in the VAA `amount` field.
         let v = Uint256::from_u128(0x1234);
         let mut expected = [0u8; 32];
         expected[30] = 0x12;
@@ -125,7 +118,7 @@ mod tests {
         assert!(Uint256::from_u128(1) < Uint256::from_u128(2));
         assert!(Uint256::MAX > Uint256::from_u128(u128::MAX));
         assert!(Uint256::ZERO < Uint256::from_u128(1));
-        // Higher MSB sorts higher even with smaller LSBs.
+        // Higher MSB sorts higher.
         let mut a_bytes = [0u8; 32];
         a_bytes[0] = 0x01;
         let a = Uint256::from_be_bytes(a_bytes);

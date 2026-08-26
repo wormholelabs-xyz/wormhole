@@ -6,6 +6,16 @@
 # Exported into every recipe so `cargo test` finds the freshly-built `.so`.
 export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 
+# External program IDs, read by `crates/definitions` via `env!` at compile
+# time. Variable names match `wormhole-svm-definitions` (`from-env`) and
+# `solana-noreplay`. A missing variable is a build error; plain `cargo` outside
+# `just` needs them exported. Values below are the test environment: mainnet
+# Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay (its
+# only deployment).
+export BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
+export VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
+export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+
 # Default recipe: list available targets with their docstrings.
 default:
     @just --list
