@@ -1,21 +1,14 @@
-//! Zero-copy, on-disk account layouts and the tags that discriminate them.
+//! Zero-copy account layouts and their type tags.
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
 use crate::primitives::{Pubkey, Uint256};
 
-/// Account-type tag stored at offset 0 of every program-owned PDA layout.
+/// Account-type tag at offset 0 of every program-owned PDA. Off-chain readers
+/// filter with `memcmp(offset 0, [tag])`; on-chain loaders check it after PDA derivation.
 ///
-/// Seeds namespace writes on-chain but are not recoverable from
-/// `getProgramAccounts`, so off-chain consumers discriminate account types with
-/// a single `memcmp(offset 0, [tag])` filter. On-chain, the load helpers compare
-/// the tag as defense-in-depth against a handler that forgets to re-derive a PDA.
-///
-/// Values are append-only (same discipline as [`GlobalAccountantError`]); never
-/// renumber once shipped. `0` is reserved: a freshly allocated account is all
-/// zeroes, so zeroed data must never parse as a valid tag. The NTT accountant
-/// port extends this space (4+).
+/// Append-only; do not renumber. `0` is reserved because a fresh account is all zeroes.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccountTag {
@@ -25,8 +18,7 @@ pub enum AccountTag {
     Modification = 4,
 }
 
-/// `ModifyBalance` payload `kind` byte values. Any byte other than `Add` or
-/// `Subtract` is rejected as `InvalidModificationKind`.
+/// `ModifyBalance` payload `kind` byte. Other values raise `InvalidModificationKind`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ModificationKind {
@@ -44,8 +36,7 @@ impl ModificationKind {
     }
 }
 
-/// Zero-copy layout for a per-`(chain, emitter, sequence)` pending-quorum PDA.
-/// On-disk size is **76 bytes** (4-byte alignment, tag at offset 0).
+/// Pending-quorum PDA for one `(chain, emitter, sequence)`. 76 bytes, 4-byte aligned.
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
@@ -57,14 +48,12 @@ impl ModificationKind {
 /// | 12     | 32   | digest             |
 /// | 44     | 32   | payer              |
 ///
-/// The 32-bit bitmap covers 32 guardian indices. A protocol move to >32
-/// guardians requires widening the field and bumping the layout version.
+/// The bitmap caps the guardian set at 32; a larger set needs a new layout version.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct PendingObservationsLayout {
-    /// Account-type tag; always [`AccountTag::PendingObservations`]. See [`Self::TAG`].
+    /// Always [`AccountTag::PendingObservations`].
     pub tag: u8,
-    /// Alignment padding; crate-private so callers go through `Zeroable`.
     pub(crate) _pad0: u8,
     pub chain: u16,
     pub guardian_set_index: u32,
@@ -74,19 +63,13 @@ pub struct PendingObservationsLayout {
 }
 
 impl PendingObservationsLayout {
-    /// Byte length of the layout (also the rent-paying allocation size).
+    /// Layout length; also the allocation size.
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    /// Account-type tag stamped at offset 0. See [`AccountTag`].
     pub const TAG: u8 = AccountTag::PendingObservations as u8;
 
-    /// Guardian quorum for a live set of `num_guardians`: `(2N / 3) + 1`, the
-    /// same computation the Core Bridge and the Verify VAA Shim use. Callers
-    /// derive `N` from the `keys_len` read out of the Core Bridge `GuardianSet`
-    /// account on every observation — never pinned, so a governance resize of
-    /// the guardian set keeps this program in step with the rest of the network
-    /// (and with the `submit_vaas` shim path). The `u32` `signatures` bitmap
-    /// still caps the set at 32 guardians.
+    /// Quorum `(2N / 3) + 1`, as in the Core Bridge and the Verify VAA Shim.
+    /// Callers read `N` from the `GuardianSet` account on every observation.
     pub const fn quorum_for(num_guardians: u32) -> u32 {
         (num_guardians * 2) / 3 + 1
     }
@@ -103,8 +86,7 @@ const _: () = {
     assert!(PendingObservationsLayout::LEN == 76);
 };
 
-/// Zero-copy balance account for a `(chain, token_chain, token_address)`
-/// triple. On-disk size is **70 bytes** (tag at offset 0).
+/// Balance account for one `(chain, token_chain, token_address)`. 70 bytes.
 ///
 /// | offset | size | field         |
 /// |--------|------|---------------|
@@ -117,29 +99,24 @@ const _: () = {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct BalanceAccountLayout {
-    /// Account-type tag; always [`AccountTag::Balance`]. See [`Self::TAG`].
+    /// Always [`AccountTag::Balance`].
     pub tag: u8,
-    /// Alignment padding; crate-private so callers go through `Zeroable`.
     pub(crate) _pad0: u8,
-    /// Chain on which this balance is held.
+    /// Chain that holds this balance.
     pub chain: u16,
     /// Native chain of the token.
     pub token_chain: u16,
     /// Token address on its native chain.
     pub token_address: [u8; 32],
-    /// Current balance, 32-byte big-endian (matches the VAA `amount` encoding).
     pub balance: Uint256,
 }
 
 impl BalanceAccountLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    /// Account-type tag stamped at offset 0. See [`AccountTag`].
     pub const TAG: u8 = AccountTag::Balance as u8;
 
-    /// Apply a `lock_or_burn`: credits when `chain == token_chain` (native
-    /// lock), debits otherwise (wrapped burn). Overflow/underflow surface as
-    /// `BalanceOverflow`/`BalanceUnderflow`.
+    /// Native (`chain == token_chain`): credit. Wrapped: debit.
     pub fn lock_or_burn(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
         if self.chain == self.token_chain {
             self.balance = self
@@ -155,9 +132,7 @@ impl BalanceAccountLayout {
         Ok(())
     }
 
-    /// Apply an `unlock_or_mint`: debits when `chain == token_chain` (native
-    /// unlock), credits otherwise (wrapped mint). Symmetric to
-    /// [`Self::lock_or_burn`].
+    /// Native (`chain == token_chain`): debit. Wrapped: credit.
     pub fn unlock_or_mint(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
         if self.chain == self.token_chain {
             self.balance = self
@@ -173,8 +148,7 @@ impl BalanceAccountLayout {
         Ok(())
     }
 
-    /// Raw `balance += amount` for the governance `modify_balance` path (no
-    /// native/wrapped dispatch). Overflow surfaces as `ModifyBalanceOverflow`.
+    /// `balance += amount` for `modify_balance`; overflow is `ModifyBalanceOverflow`.
     pub fn raw_add(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
         self.balance = self
             .balance
@@ -183,8 +157,7 @@ impl BalanceAccountLayout {
         Ok(())
     }
 
-    /// Raw `balance -= amount` for the governance `modify_balance` path.
-    /// Underflow surfaces as `ModifyBalanceUnderflow`.
+    /// `balance -= amount` for `modify_balance`; underflow is `ModifyBalanceUnderflow`.
     pub fn raw_sub(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
         self.balance = self
             .balance
@@ -194,7 +167,6 @@ impl BalanceAccountLayout {
     }
 }
 
-// Compile-time pins for the balance layout.
 const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(BalanceAccountLayout, tag) == 0);
@@ -205,10 +177,8 @@ const _: () = {
     assert!(BalanceAccountLayout::LEN == 70);
 };
 
-/// Zero-copy per-chain Token Bridge emitter registration. One PDA per chain at
-/// `(b"chain_registration", chain_be)`, holding the canonical emitter address.
-/// Written only by `register_chain`; re-registration with a higher-sequence VAA
-/// overwrites the emitter (supports emitter rotation).
+/// Token Bridge emitter registration, one PDA per chain at `(b"chain_registration", chain_be)`.
+/// `register_chain` writes it; a later VAA overwrites the emitter.
 ///
 /// | offset | size | field           |
 /// |--------|------|-----------------|
@@ -220,22 +190,19 @@ const _: () = {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct ChainRegistrationLayout {
-    /// Account-type tag; always [`AccountTag::ChainRegistration`]. See [`Self::TAG`].
+    /// Always [`AccountTag::ChainRegistration`].
     pub tag: u8,
-    /// Alignment padding; crate-private so callers go through `Zeroable`.
     pub(crate) _pad0: u8,
-    /// Wormhole chain ID this PDA registers (mirrors the seed bytes).
+    /// Registered Wormhole chain ID; equals the seed value.
     pub chain: u16,
-    /// Reserved; crate-private so callers go through `Zeroable`.
     pub(crate) _padding: [u8; 28],
-    /// Canonical Token Bridge emitter address on `chain`.
+    /// Token Bridge emitter address on `chain`.
     pub emitter_address: [u8; 32],
 }
 
 impl ChainRegistrationLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    /// Account-type tag stamped at offset 0. See [`AccountTag`].
     pub const TAG: u8 = AccountTag::ChainRegistration as u8;
 }
 
@@ -248,10 +215,8 @@ const _: () = {
     assert!(ChainRegistrationLayout::LEN == 64);
 };
 
-/// Zero-copy per-modification audit-log PDA. Each `modify_balance` lazy-inits
-/// one PDA at `(b"modification", payload_sequence_be)`. A second VAA with the
-/// same sequence collides on this address and is rejected with
-/// `DuplicateModification` — this is the governance-path replay protection.
+/// Audit-log PDA at `(b"modification", payload_sequence_be)`, created by `modify_balance`.
+/// A second VAA with the same sequence fails with `DuplicateModification`.
 ///
 /// | offset | size | field         |
 /// |--------|------|---------------|
@@ -265,76 +230,67 @@ const _: () = {
 /// | 48     | 32   | amount        |
 /// | 80     | 32   | reason        |
 ///
-/// Total: 112 bytes (multiple of 8 for `Pod` alignment). Small fields are
-/// clustered ahead of the 8-aligned `sequence` so the tag sits at offset 0.
+/// Total: 112 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct ModificationLayout {
-    /// Account-type tag; always [`AccountTag::Modification`]. See [`Self::TAG`].
+pub struct ModifyBalanceLayout {
+    /// Always [`AccountTag::Modification`].
     pub tag: u8,
-    /// `1` for `Add`, `2` for `Subtract` (see [`ModificationKind`]).
+    /// See [`ModificationKind`].
     pub kind: u8,
-    /// Chain whose balance was modified.
+    /// Chain of the modified balance.
     pub chain_id: u16,
-    /// Native chain of the modified token.
+    /// Native chain of the token.
     pub token_chain: u16,
-    /// Alignment padding ahead of `sequence`; crate-private so callers go
-    /// through `Zeroable`.
     pub(crate) _pad0: [u8; 2],
-    /// Modification's own sequence (distinct from the VAA emitter sequence).
+    /// Modification sequence from the payload; distinct from the VAA sequence.
     pub sequence: u64,
     /// Token address on its native chain.
     pub token_address: [u8; 32],
-    /// Modification amount, big-endian 256-bit unsigned integer.
     pub amount: Uint256,
-    /// Free-form reason, 32-byte right-padded ASCII. Audit-trail only.
+    /// Right-padded ASCII reason; audit only.
     pub reason: [u8; 32],
 }
 
-impl ModificationLayout {
+impl ModifyBalanceLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    /// Account-type tag stamped at offset 0. See [`AccountTag`].
     pub const TAG: u8 = AccountTag::Modification as u8;
 }
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(offset_of!(ModificationLayout, tag) == 0);
-    assert!(offset_of!(ModificationLayout, kind) == 1);
-    assert!(offset_of!(ModificationLayout, chain_id) == 2);
-    assert!(offset_of!(ModificationLayout, token_chain) == 4);
-    assert!(offset_of!(ModificationLayout, sequence) == 8);
-    assert!(offset_of!(ModificationLayout, token_address) == 16);
-    assert!(offset_of!(ModificationLayout, amount) == 48);
-    assert!(offset_of!(ModificationLayout, reason) == 80);
-    assert!(ModificationLayout::LEN == 112);
+    assert!(offset_of!(ModifyBalanceLayout, tag) == 0);
+    assert!(offset_of!(ModifyBalanceLayout, kind) == 1);
+    assert!(offset_of!(ModifyBalanceLayout, chain_id) == 2);
+    assert!(offset_of!(ModifyBalanceLayout, token_chain) == 4);
+    assert!(offset_of!(ModifyBalanceLayout, sequence) == 8);
+    assert!(offset_of!(ModifyBalanceLayout, token_address) == 16);
+    assert!(offset_of!(ModifyBalanceLayout, amount) == 48);
+    assert!(offset_of!(ModifyBalanceLayout, reason) == 80);
+    assert!(ModifyBalanceLayout::LEN == 112);
 };
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ---- AccountTag retrofit tests ----
-
     #[test]
     fn account_tag_values_pinned() {
-        // Append-only: never renumber once shipped.
         assert_eq!(AccountTag::PendingObservations as u8, 1);
         assert_eq!(AccountTag::Balance as u8, 2);
         assert_eq!(AccountTag::ChainRegistration as u8, 3);
         assert_eq!(AccountTag::Modification as u8, 4);
-        // Each layout's TAG const mirrors its AccountTag value.
-        assert_eq!(PendingObservationsLayout::TAG, AccountTag::PendingObservations as u8);
+        assert_eq!(
+            PendingObservationsLayout::TAG,
+            AccountTag::PendingObservations as u8
+        );
         assert_eq!(BalanceAccountLayout::TAG, AccountTag::Balance as u8);
         assert_eq!(
             ChainRegistrationLayout::TAG,
             AccountTag::ChainRegistration as u8
         );
-        assert_eq!(
-            ModificationLayout::TAG,
-            AccountTag::Modification as u8
-        );
+        assert_eq!(ModifyBalanceLayout::TAG, AccountTag::Modification as u8);
     }
 
     #[test]
@@ -343,17 +299,15 @@ mod tests {
         assert_eq!(offset_of!(PendingObservationsLayout, tag), 0);
         assert_eq!(offset_of!(BalanceAccountLayout, tag), 0);
         assert_eq!(offset_of!(ChainRegistrationLayout, tag), 0);
-        assert_eq!(offset_of!(ModificationLayout, tag), 0);
+        assert_eq!(offset_of!(ModifyBalanceLayout, tag), 0);
     }
 
     #[test]
     fn zeroed_layout_is_not_a_valid_tag() {
-        // A freshly allocated (all-zero) account must not parse as any type:
-        // tag 0 is reserved, distinct from every AccountTag value.
         assert_eq!(<PendingObservationsLayout as Zeroable>::zeroed().tag, 0);
         assert_eq!(<BalanceAccountLayout as Zeroable>::zeroed().tag, 0);
         assert_eq!(<ChainRegistrationLayout as Zeroable>::zeroed().tag, 0);
-        assert_eq!(<ModificationLayout as Zeroable>::zeroed().tag, 0);
+        assert_eq!(<ModifyBalanceLayout as Zeroable>::zeroed().tag, 0);
         for tag in [
             AccountTag::PendingObservations,
             AccountTag::Balance,
@@ -364,19 +318,13 @@ mod tests {
         }
     }
 
-    // ---- BalanceAccountLayout tests ----
-
     #[test]
     fn balance_layout_size_pinned() {
-        // 70 bytes — tag (1) + _pad0 (1) + chain (2) + token_chain (2) +
-        // token_address (32) + balance (32). Grew from 68 to 70 when the
-        // offset-0 account tag was retrofitted.
         assert_eq!(BalanceAccountLayout::LEN, 70);
     }
 
     #[test]
     fn balance_layout_uint256_offsets_pinned() {
-        // Runtime mirror of the const-assert block above.
         use core::mem::offset_of;
         assert_eq!(offset_of!(BalanceAccountLayout, tag), 0);
         assert_eq!(offset_of!(BalanceAccountLayout, chain), 2);
@@ -405,11 +353,8 @@ mod tests {
         assert_eq!(&original, copy);
     }
 
-    // ---- PendingObservationsLayout tests ----
-
     #[test]
     fn pending_layout_size_pinned() {
-        // Runtime mirror of the const-assert above (incl. 2 bytes tail padding).
         assert_eq!(PendingObservationsLayout::LEN, 76);
     }
 
@@ -447,8 +392,6 @@ mod tests {
 
     #[test]
     fn balance_layout_balance_encodes_big_endian_on_disk() {
-        // The on-disk balance bytes must be the big-endian encoding, so a VAA
-        // `amount` slice copies in without byte-order conversion.
         let original = BalanceAccountLayout {
             tag: BalanceAccountLayout::TAG,
             _pad0: 0,
@@ -467,10 +410,7 @@ mod tests {
         assert_eq!(balance_slice, &expected);
     }
 
-    // ---- lock_or_burn / unlock_or_mint tests ----
-
     fn balance_with(chain: u16, token_chain: u16, balance: Uint256) -> BalanceAccountLayout {
-        // Recognisable token-address pattern; irrelevant to the arithmetic.
         let mut token_address = [0u8; 32];
         token_address[0] = 0x62;
         token_address[31] = 0x61;
@@ -486,7 +426,6 @@ mod tests {
 
     #[test]
     fn lock_or_burn_native_chain_credits() {
-        // chain == token_chain ⇒ native-side credit (500 + 200 = 700).
         let mut acc = balance_with(0xbae2, 0xbae2, Uint256::from_u128(500));
         acc.lock_or_burn(Uint256::from_u128(200)).unwrap();
         assert_eq!(acc.balance, Uint256::from_u128(700));
@@ -494,7 +433,6 @@ mod tests {
 
     #[test]
     fn lock_or_burn_wrapped_chain_debits() {
-        // chain != token_chain ⇒ wrapped-side debit (500 - 200 = 300).
         let mut acc = balance_with(0xcae8, 0xbae2, Uint256::from_u128(500));
         acc.lock_or_burn(Uint256::from_u128(200)).unwrap();
         assert_eq!(acc.balance, Uint256::from_u128(300));
@@ -502,7 +440,6 @@ mod tests {
 
     #[test]
     fn lock_or_burn_wrapped_chain_underflow_rejects() {
-        // Underflow ⇒ BalanceUnderflow.
         let mut acc = balance_with(0xcae8, 0xbae2, Uint256::ZERO);
         let err = acc.lock_or_burn(Uint256::from_u128(200)).unwrap_err();
         assert_eq!(err, GlobalAccountantError::BalanceUnderflow);
@@ -511,7 +448,6 @@ mod tests {
 
     #[test]
     fn lock_or_burn_native_chain_overflow_rejects() {
-        // Overflow ⇒ BalanceOverflow.
         let mut acc = balance_with(0xbae2, 0xbae2, Uint256::MAX);
         let err = acc.lock_or_burn(Uint256::from_u128(200)).unwrap_err();
         assert_eq!(err, GlobalAccountantError::BalanceOverflow);
@@ -520,7 +456,6 @@ mod tests {
 
     #[test]
     fn unlock_or_mint_native_chain_debits() {
-        // chain == token_chain ⇒ native-side debit (500 - 200 = 300).
         let mut acc = balance_with(0xbae2, 0xbae2, Uint256::from_u128(500));
         acc.unlock_or_mint(Uint256::from_u128(200)).unwrap();
         assert_eq!(acc.balance, Uint256::from_u128(300));
@@ -528,7 +463,6 @@ mod tests {
 
     #[test]
     fn unlock_or_mint_native_chain_underflow_rejects() {
-        // Underflow ⇒ BalanceUnderflow.
         let mut acc = balance_with(0xbae2, 0xbae2, Uint256::ZERO);
         let err = acc.unlock_or_mint(Uint256::from_u128(200)).unwrap_err();
         assert_eq!(err, GlobalAccountantError::BalanceUnderflow);
@@ -537,7 +471,6 @@ mod tests {
 
     #[test]
     fn unlock_or_mint_wrapped_chain_credits() {
-        // chain != token_chain ⇒ wrapped-side credit (500 + 200 = 700).
         let mut acc = balance_with(0xcae8, 0xbae2, Uint256::from_u128(500));
         acc.unlock_or_mint(Uint256::from_u128(200)).unwrap();
         assert_eq!(acc.balance, Uint256::from_u128(700));
@@ -545,7 +478,6 @@ mod tests {
 
     #[test]
     fn unlock_or_mint_wrapped_chain_overflow_rejects() {
-        // Overflow ⇒ BalanceOverflow.
         let mut acc = balance_with(0xcae8, 0xbae2, Uint256::MAX);
         let err = acc.unlock_or_mint(Uint256::from_u128(200)).unwrap_err();
         assert_eq!(err, GlobalAccountantError::BalanceOverflow);

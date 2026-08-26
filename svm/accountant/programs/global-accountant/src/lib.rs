@@ -1,44 +1,18 @@
-//! Wormhole Global Accountant — Solana port (anchor-lang 1.1.2).
+//! Wormhole Global Accountant (WTT) Solana program, anchor-lang 1.1.2.
 //!
-//! The product-neutral operational machinery (quorum tracker, signed-VAA
-//! backfill, pending cleanup, NoReplay/Shim CPIs, PDA-init, commit-log, hashing,
-//! and the zero-copy state layouts) lives in `accountant-operational-core`. This
-//! crate keeps the WTT-specific governance handlers (`register_chain`,
-//! `modify_balance`), the Token Bridge transfer applicator (`transfer`), and the
-//! `#[program]` entrypoint that wires the core handlers to a Token Bridge
-//! balance-application callback.
+//! Shared machinery lives in `accountant-operational-core`. This crate holds the
+//! governance handlers, the Token Bridge transfer applicator, and the `#[program]` entry.
 //!
-//! Ported from pinocchio to anchor-lang 1.1.2 — see
-//! `.claude/tasks/anchor-migration-plan-v1.1.2.md` for the full design record.
-//! Anchor is adopted purely for the `#[program]`/`#[derive(Accounts)]`/
-//! `Context` ergonomics; every wire-format-affecting decision from the
-//! pinocchio version is preserved byte-for-byte:
+//! Wire-format constraints; keep these when you change the program:
 //!
-//! - The offset-0 1-byte `AccountTag` (not Anchor's 8-byte account
-//!   discriminator) is still the account discriminator; state layouts stay
-//!   `bytemuck::Pod` in the anchor-free `definitions` crate, loaded through
-//!   `UncheckedAccount` + manual `bytemuck`, never `#[account(zero_copy)]`.
-//! - The 1-byte instruction dispatch discriminator (`0..=4`) is preserved via
-//!   `#[instruction(discriminator = N)]` on each handler below, instead of
-//!   Anchor's default 8-byte sighash.
-//! - `CreateAccountAllowPrefund` (SIMD-0312) is still a manual CPI (see
-//!   `accountant_operational_core::instructions::pda_init`), never Anchor's
-//!   `#[account(init)]`, which would regress the dust-DoS defense.
-//! - `GlobalAccountantError` still maps to `ProgramError::Custom(code)` with
-//!   the same stable numeric ABI, not Anchor's `#[error_code]` (which would
-//!   renumber every code with anchor's own `+6000` offset).
+//! - Account discriminator is the 1-byte `AccountTag` at offset 0. Load state with
+//!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
+//! - Instruction discriminator is 1 byte (`0..=4`) through `#[instruction(discriminator = N)]`.
+//! - PDA creation uses `CreateAccountAllowPrefund` through `pda_init`; `#[account(init)]`
+//!   fails on a prefunded PDA.
+//! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
 //!
-//! One new, unavoidable constraint Anchor does impose: `declare_id!` pins this
-//! program to a single fixed address, checked on every entry
-//! (`try_entry`/`ErrorCode::DeclaredProgramIdMismatch`). The pre-migration
-//! pinocchio program had no such check — it derived every PDA from the
-//! *runtime* `program_id` and so was deployable at any address. All existing
-//! fixtures already used the same fixed test address
-//! (`Pubkey::new_from_array([7u8; 32])`, base58
-//! `US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx`) for the mollusk suite, so
-//! `declare_id!` below reuses that value; the two surfpool E2E tests that
-//! previously deployed at a fresh random keypair per run were updated to
-//! deploy at this same fixed ID (see the migration report for the full list).
+//! `declare_id!` pins the program address; PDAs still derive from the runtime `program_id`.
 
 #![allow(unexpected_cfgs)]
 
@@ -52,21 +26,14 @@ pub mod state;
 pub use global_accountant_definitions as definitions;
 pub use accountant_operational_core::err;
 
-// `#[derive(Accounts)]`'s macro-generated companion items (e.g.
-// `__client_accounts_submit_vaas`) are emitted alongside each struct, i.e.
-// under `crate::contexts::`. The `#[program]` macro's own codegen assumes
-// they're reachable at the crate root, so re-export the whole module.
+// `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
 use raw_ix_data::RawIxData;
 
 declare_id!("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
 
-/// Flatten a `#[derive(Accounts)]` struct's fields into a positionally
-/// ordered `Vec<AccountInfo>` matching the original pinocchio slice order, so
-/// the (unchanged) `instructions::*::process` / `accountant_operational_core`
-/// handlers can be called exactly as before. A macro because each handler's
-/// field list/count differs; see `contexts.rs` for the field order each
-/// mirrors.
+/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
+/// Field order must match the handler's account list.
 macro_rules! flatten_accounts {
     ($accounts:expr, [$($field:ident),+ $(,)?]) => {
         vec![$($accounts.$field.to_account_info()),+]
@@ -77,7 +44,7 @@ macro_rules! flatten_accounts {
 pub mod global_accountant {
     use super::*;
 
-    /// Dispatch discriminator 0. See `crate::instructions::submit_observations`.
+    /// See `crate::instructions::submit_observations`.
     #[instruction(discriminator = 0)]
     pub fn submit_observations(ctx: Context<SubmitObservations>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -100,8 +67,7 @@ pub mod global_accountant {
         Ok(())
     }
 
-    /// Dispatch discriminator 1. Shared handler; see
-    /// `accountant_operational_core::instructions::close_pending`.
+    /// See `accountant_operational_core::instructions::close_pending`.
     #[instruction(discriminator = 1)]
     pub fn close_pending(ctx: Context<ClosePending>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -116,7 +82,7 @@ pub mod global_accountant {
         Ok(())
     }
 
-    /// Dispatch discriminator 2. See `crate::instructions::submit_vaas`.
+    /// See `crate::instructions::submit_vaas`.
     #[instruction(discriminator = 2)]
     pub fn submit_vaas(ctx: Context<SubmitVaas>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -139,7 +105,7 @@ pub mod global_accountant {
         Ok(())
     }
 
-    /// Dispatch discriminator 3. See `crate::instructions::register_chain`.
+    /// See `crate::instructions::register_chain`.
     #[instruction(discriminator = 3)]
     pub fn register_chain(ctx: Context<RegisterChain>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -160,7 +126,7 @@ pub mod global_accountant {
         Ok(())
     }
 
-    /// Dispatch discriminator 4. See `crate::instructions::modify_balance`.
+    /// See `crate::instructions::modify_balance`.
     #[instruction(discriminator = 4)]
     pub fn modify_balance(ctx: Context<ModifyBalance>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(

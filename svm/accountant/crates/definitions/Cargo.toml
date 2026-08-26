@@ -11,7 +11,15 @@ version.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+const-crypto.workspace = true
 ruint.workspace = true
+
+[dev-dependencies]
+serde_wormhole.workspace = true
+solana-address.workspace = true
+solana-noreplay.workspace = true
+wormhole-svm-definitions.workspace = true
+wormhole-vaas-serde.workspace = true
 
 [lints]
 workspace = true

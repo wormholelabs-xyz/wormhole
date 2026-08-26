@@ -1,13 +1,27 @@
 //! Wormhole Core Bridge program ID.
 
 use crate::primitives::Pubkey;
+use const_crypto::bs58;
 
-/// Wormhole Core Bridge program ID on Solana mainnet
-/// (`worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth`). Raw bytes to keep this
-/// crate Solana-SDK-free. Used by `close_pending` to verify the `GuardianSet`
-/// account is Core-Bridge-owned before reading it — otherwise a forged
-/// "expired" set could permanently DoS a pending PDA.
-pub const CORE_BRIDGE_PROGRAM_ID: Pubkey = [
-    0x0e, 0x0a, 0x58, 0x9a, 0x41, 0xa5, 0x5f, 0xbd, 0x66, 0xc5, 0x2a, 0x47, 0x5f, 0x2d, 0x92, 0xa6,
-    0xd3, 0xdc, 0x9b, 0x47, 0x47, 0x11, 0x4c, 0xb9, 0xaf, 0x82, 0x5a, 0x98, 0xb5, 0x45, 0xd3, 0xce,
-];
+/// Core Bridge program ID, from `BRIDGE_ADDRESS` at compile time (same variable
+/// `wormhole-svm-definitions` `from-env` reads). Set per target network in `justfile`.
+/// `close_pending` checks `GuardianSet` ownership against it. Without the check, a forged
+/// expired set could close a pending PDA.
+pub const CORE_BRIDGE_PROGRAM_ID: Pubkey = bs58::decode_pubkey(env!("BRIDGE_ADDRESS"));
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `BRIDGE_ADDRESS` must name a known Wormhole Core Bridge deployment.
+    #[test]
+    fn is_known_wormhole_svm_definitions_deployment() {
+        use wormhole_svm_definitions::solana::{devnet, localnet, mainnet};
+        let known = [
+            mainnet::CORE_BRIDGE_PROGRAM_ID_ARRAY,
+            devnet::CORE_BRIDGE_PROGRAM_ID_ARRAY,
+            localnet::CORE_BRIDGE_PROGRAM_ID_ARRAY,
+        ];
+        assert!(known.contains(&CORE_BRIDGE_PROGRAM_ID));
+    }
+}

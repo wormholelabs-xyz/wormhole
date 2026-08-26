@@ -1,9 +1,5 @@
-//! Protocol constants: log tags, PDA seed prefixes, governance identifiers,
-//! external program IDs, and the NoReplay wire format.
-//!
-//! Organised into one submodule per source/concern (external programs each get
-//! their own). Every item is re-exported flat here, so consumers continue to
-//! reach them at the crate root (`global_accountant_definitions::<NAME>`).
+//! Protocol constants: log tags, PDA seeds, governance identifiers, external
+//! program IDs, and the NoReplay wire format. All items re-exported flat.
 
 pub mod core_bridge;
 pub mod governance;

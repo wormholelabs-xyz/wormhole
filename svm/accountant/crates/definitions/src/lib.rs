@@ -1,12 +1,7 @@
 //! Shared types and constants for the Wormhole Global Accountant Solana program.
 //!
-//! No Solana dependency so the layouts can be re-used from on-chain code,
-//! host-side tests, and client tooling.
-//!
-//! The surface is split into domain modules — [`instruction`], [`error`],
-//! [`primitives`], [`constants`], [`state`], and [`vaa`] — but every public
-//! item is re-exported here, so consumers continue to reach them at the crate
-//! root (`global_accountant_definitions::<Name>`).
+//! Solana-SDK-free, so on-chain code, host tests, and client tooling share the layouts.
+//! Every public item of the submodules is re-exported at the crate root.
 
 #![no_std]
 

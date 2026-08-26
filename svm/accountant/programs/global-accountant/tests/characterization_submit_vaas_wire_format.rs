@@ -1,18 +1,6 @@
-//! Characterization test for the pinocchio -> anchor-lang 1.1.2 migration.
-//!
-//! This test pins, byte-for-byte, the pre-migration `submit_vaas` happy-path
-//! wire contract: the exact on-wire instruction bytes, the exact account-meta
-//! order/signer/writable flags, and the exact post-transaction account bytes
-//! (owner, lamports, and data) for every account touched. It is written
-//! against literal, hand-computed expected values rather than by calling the
-//! production wire-builder helpers used elsewhere in this test suite, so it
-//! cannot silently drift alongside an implementation change.
-//!
-//! Written *before* the anchor-lang port (see
-//! `.claude/tasks/anchor-migration-plan-v1.1.2.md`) and left unmodified by it.
-//! It must pass identically against both the pre-migration pinocchio `.so`
-//! and the post-migration anchor-lang `.so` — that is what proves the port is
-//! byte-identical on the wire.
+//! Characterization test for the `submit_vaas` happy-path wire contract. Pins instruction
+//! bytes, account-meta order and flags, and post-tx account bytes with literal values.
+//! Must pass unchanged across implementation ports.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -44,9 +32,7 @@ const GUARDIAN_COUNT: usize = 19;
 const QUORUM: usize = 13;
 const GUARDIAN_SET_INDEX: u32 = 4;
 
-// Fixed scenario constants. Chosen to be recognisable in a hex dump and
-// distinct across fields so a transposition bug in either the program or this
-// test surfaces immediately.
+// Scenario constants; distinct per field so a transposition shows in a hex dump.
 const EMITTER_CHAIN: u16 = 2; // Ethereum
 const EMITTER_ADDRESS: [u8; 32] = {
     let mut a = [0u8; 32];
@@ -84,15 +70,13 @@ fn noreplay_program_id() -> Pubkey {
     Pubkey::new_from_array(NOREPLAY_PROGRAM_ID)
 }
 
-/// Host-side `keccak256(keccak256(body))` — the Wormhole VAA digest convention.
+/// `keccak256(keccak256(body))`.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
-/// Hand-build a 184-byte Token Bridge Transfer VAA body (51-byte header +
-/// 133-byte transfer payload), byte-by-byte, independent of any shared
-/// production or test helper — this is the literal wire layout being pinned.
+/// 184-byte Token Bridge Transfer body (51-byte header + 133-byte payload), built byte by byte.
 fn build_body_literal() -> Vec<u8> {
     let mut body = vec![0u8; 51 + 133];
     // Header: timestamp(4)=0, nonce(4)=0.
@@ -100,20 +84,18 @@ fn build_body_literal() -> Vec<u8> {
     body[10..42].copy_from_slice(&EMITTER_ADDRESS);
     body[42..50].copy_from_slice(&SEQUENCE.to_be_bytes());
     body[50] = 0; // consistency_level
-                  // Transfer payload (offset 51): action(1) amount(32) token_address(32) token_chain(2) recipient(32) recipient_chain(2) fee(32).
+                  // Payload at 51: action(1) amount(32) token_address(32) token_chain(2) recipient(32) recipient_chain(2) fee(32).
     body[51] = 0x01;
     body[52 + 16..52 + 32].copy_from_slice(&TRANSFER_AMOUNT.to_be_bytes());
     body[84..116].copy_from_slice(&TOKEN_ADDRESS);
     body[116..118].copy_from_slice(&TOKEN_CHAIN.to_be_bytes());
     body[118..150].copy_from_slice(&[0xEEu8; 32]); // recipient — ignored by the program
     body[150..152].copy_from_slice(&RECIPIENT_CHAIN.to_be_bytes());
-    // body[152..184] fee — left zero, unused by this program.
+    // body[152..184] fee: zero.
     body
 }
 
-/// Literal expected instruction-data bytes for `submit_vaas`, per the module
-/// doc in `programs/global-accountant/src/instructions/submit_vaas.rs`:
-/// `[discriminator: u8 = 2][guardian_set_bump: u8][body_len: u16 LE][body]`.
+/// Expected `submit_vaas` data: `[disc: u8 = 2][guardian_set_bump: u8][body_len: u16 LE][body]`.
 fn build_expected_ix_bytes(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
     let mut expected = Vec::with_capacity(1 + 1 + 2 + body.len());
     expected.push(2u8); // IxDiscriminator::SubmitVaas
@@ -191,20 +173,17 @@ fn find_account<'a>(accounts: &'a [(Pubkey, Account)], key: &Pubkey) -> &'a Acco
         .1
 }
 
-/// Pins the full `submit_vaas` happy-path wire contract: instruction bytes,
-/// account-meta order/flags, and post-tx account bytes for every account.
+/// Pins the `submit_vaas` wire contract: instruction bytes, metas, post-tx account bytes.
 #[test]
 fn characterize_submit_vaas_happy_path_wire_format() {
     let mollusk = mollusk();
 
-    // ----- Guardians / digest -----
     let guardians = make_guardians(GUARDIAN_COUNT, 0x24);
     let body = build_body_literal();
     let digest = double_keccak256_host(&body);
     let (guardian_set_pubkey, guardian_set_bump) =
         derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
 
-    // ----- Pubkeys -----
     let submitter = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_signatures_pubkey = Pubkey::new_from_array([0xC5u8; 32]);
     let (noreplay_authority_pubkey, _) =
@@ -220,7 +199,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         derive_account_pda(RECIPIENT_CHAIN, TOKEN_CHAIN, &TOKEN_ADDRESS);
     let (chain_registration_pubkey, _) = derive_chain_registration_pda(EMITTER_CHAIN);
 
-    // ----- (1) Pin the literal instruction bytes -----
+    // (1) Instruction bytes.
     let ix_data = build_expected_ix_bytes(guardian_set_bump, &body);
     assert_eq!(ix_data[0], 2, "byte 0 is the SubmitVaas discriminator");
     assert_eq!(ix_data[1], guardian_set_bump, "byte 1 is guardian_set_bump");
@@ -229,7 +208,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     assert_eq!(&ix_data[4..], &body[..], "bytes 4.. are the raw body");
     assert_eq!(ix_data.len(), 1 + 1 + 2 + 184, "total wire length pinned");
 
-    // ----- (2) Pin the literal account-meta order and flags -----
+    // (2) Account-meta order and flags.
     let account_metas = vec![
         AccountMeta::new(submitter, true),
         AccountMeta::new_readonly(shim_program_id(), false),
@@ -265,7 +244,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         );
     }
 
-    // ----- (3) Build the initial account state -----
+    // (3) Initial account state.
     let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
         .map(|i| (i as u8, sign_digest(&guardians[i], &digest)))
         .collect();
@@ -294,7 +273,6 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         ),
     ];
 
-    // ----- (4) Execute -----
     let ix = Instruction::new_with_bytes(program_id(), &ix_data, account_metas);
     let result = mollusk.process_instruction(&ix, &initial_accounts);
     assert!(
@@ -303,10 +281,9 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         result.program_result
     );
 
-    // ----- (5) Pin the exact post-tx account bytes -----
+    // (4) Post-tx account bytes.
 
-    // NoReplay bucket: program-owned by solana-noreplay, 129 bytes, exactly
-    // the bit at `SEQUENCE % 1024` set and no other bits.
+    // NoReplay bucket: 129 bytes, owned by solana-noreplay, only bit `SEQUENCE % 1024` set.
     let bucket = find_account(&result.resulting_accounts, &noreplay_bucket_pubkey);
     assert_eq!(bucket.owner, noreplay_program_id());
     assert_eq!(bucket.data.len(), NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES);
@@ -316,7 +293,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         assert_eq!(*byte, expected_byte, "bitmap byte {i} exact content");
     }
 
-    // Source (native, since EMITTER_CHAIN == TOKEN_CHAIN): credited.
+    // Source (native): credited.
     let src = find_account(&result.resulting_accounts, &source_account_pubkey);
     assert_eq!(src.owner, program_id());
     assert_eq!(src.data.len(), BalanceAccountLayout::LEN);
@@ -326,11 +303,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     assert_eq!(src_layout.token_chain, TOKEN_CHAIN);
     assert_eq!(src_layout.token_address, TOKEN_ADDRESS);
     assert_eq!(src_layout.balance, Uint256::from_u128(TRANSFER_AMOUNT));
-    // Exact on-disk bytes, independent of the layout struct's own accessors.
-    // NOTE: `chain`/`token_chain` are plain `u16` struct fields serialized in
-    // the host's native (little-endian) byte order by `#[repr(C)] Pod` — only
-    // the `Uint256 balance` field (and the seed derivation, separately) uses
-    // big-endian, matching the VAA wire's `amount` encoding.
+    // `chain`/`token_chain` are native-endian `u16` (`#[repr(C)] Pod`); only `balance` is big-endian.
     assert_eq!(src.data[0], 2, "tag byte literal");
     assert_eq!(&src.data[2..4], &EMITTER_CHAIN.to_le_bytes());
     assert_eq!(&src.data[4..6], &TOKEN_CHAIN.to_le_bytes());
@@ -339,7 +312,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     expected_balance_be[16..].copy_from_slice(&TRANSFER_AMOUNT.to_be_bytes());
     assert_eq!(&src.data[38..70], &expected_balance_be);
 
-    // Dest (wrapped, since RECIPIENT_CHAIN != TOKEN_CHAIN): credited.
+    // Dest (wrapped): credited.
     let dst = find_account(&result.resulting_accounts, &dest_account_pubkey);
     assert_eq!(dst.owner, program_id());
     assert_eq!(dst.data.len(), BalanceAccountLayout::LEN);
@@ -348,23 +321,19 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     assert_eq!(dst_layout.token_chain, TOKEN_CHAIN);
     assert_eq!(dst_layout.balance, Uint256::from_u128(TRANSFER_AMOUNT));
 
-    // Chain registration PDA: untouched (read-only cross-check).
+    // Registration PDA: read only.
     let reg = find_account(&result.resulting_accounts, &chain_registration_pubkey);
     assert_eq!(reg.owner, program_id());
     assert_eq!(reg.data, chain_registration_account(EMITTER_CHAIN, &EMITTER_ADDRESS).data);
 
-    // Submitter paid rent for two lazy-inited PDAs and the noreplay bucket
-    // CPI's own rent; started at 50_000_000_000 lamports; must have strictly
-    // decreased and never gone negative (mollusk would panic on underflow
-    // regardless, but pin the direction explicitly here).
+    // Submitter paid rent for two PDAs and the bucket; balance decreased from 50_000_000_000.
     let submitter_post = find_account(&result.resulting_accounts, &submitter);
     assert!(
         submitter_post.lamports < 50_000_000_000,
         "submitter must have paid rent for the lazily-created PDAs"
     );
 
-    // Guardian set / guardian signatures / shim / noreplay program / system
-    // program: read-only in this instruction, byte-identical post-tx.
+    // Read-only accounts: byte-identical.
     for key in [
         guardian_set_pubkey,
         guardian_signatures_pubkey,

@@ -1,6 +1,5 @@
-//! Surfpool E2E — `submit_observations` against the real `solana-noreplay`
-//! co-deployed with global-accountant. Drives 13 guardian observations so the
-//! quorum-completing branch CPIs into `MarkUsed` and flips the real bitmap bit.
+//! Surfpool E2E for `submit_observations` with the real `solana-noreplay`. Drives 13
+//! observations so the quorum branch CPIs `MarkUsed` and sets the real bitmap bit.
 //!
 //! # Run
 //!
@@ -8,8 +7,7 @@
 //! just build-prod && cargo test --test surfpool_e2e_submit_observations_real_noreplay -- --ignored --nocapture
 //! ```
 //!
-//! `#[ignore]` (spawns surfpool). Requires `solana_noreplay.so` and an
-//! up-to-date production `global_accountant.so` (see `just build-prod`).
+//! `#[ignore]`: spawns surfpool. Needs `solana_noreplay.so` and a current `global_accountant.so`.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -34,13 +32,11 @@ use common::{
     noreplay_so_path, so_path, start_surfpool, SurfpoolOptions, NOREPLAY_PROGRAM_ID,
 };
 
-/// `BITS_PER_BUCKET` mirror from `solana-noreplay::state`.
+/// Mirror of `solana-noreplay::state::BITS_PER_BUCKET`.
 const BITS_PER_BUCKET: u64 = 1024;
 
-/// Bitmap offset inside a 129-byte noreplay PDA (byte 0 = bump, 1..129 = bitmap).
+/// Bitmap offset in the 129-byte NoReplay PDA; byte 0 is the bump.
 const NOREPLAY_BITMAP_OFFSET: usize = 1;
-
-// Guardian fixture.
 
 #[derive(Clone)]
 struct Guardian {
@@ -81,7 +77,7 @@ fn sign_digest(guardian: &Guardian, digest: &[u8; 32]) -> [u8; 65] {
     out
 }
 
-/// Core-Bridge-style `GuardianSet` data buffer (owner is set via the cheatcode).
+/// Core Bridge `GuardianSet` data; owner set by cheatcode.
 fn guardian_set_data(
     index: u32,
     keys: &[[u8; 20]],
@@ -98,8 +94,6 @@ fn guardian_set_data(
     data.extend_from_slice(&expiration_time.to_le_bytes());
     data
 }
-
-// PDA derivation mirrors of the on-chain helpers.
 
 fn derive_pending_pda(
     program_id: &Pubkey,
@@ -122,26 +116,22 @@ fn derive_pending_pda(
     )
 }
 
-/// Derive the global-accountant noreplay_authority PDA.
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
 }
 
-/// Derive the chain-registration PDA for `chain`.
 fn derive_chain_registration_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
     Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id)
 }
 
-/// Build the 34-byte noreplay namespace `(chain_be ‖ emitter)`.
+/// 34-byte NoReplay namespace `chain_be ‖ emitter`.
 fn build_namespace(chain: u16, emitter: &[u8; 32]) -> [u8; 34] {
     let mut ns = [0u8; 34];
     ns[..2].copy_from_slice(&chain.to_be_bytes());
     ns[2..].copy_from_slice(emitter);
     ns
 }
-
-// Instruction builders.
 
 fn submit_observations_ix_data(
     digest: &[u8; 32],
@@ -150,9 +140,7 @@ fn submit_observations_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // No routing prefix (sourced from the body header) and no bump bytes.
-    // `tx_hash` trails the fixed prefix; the signing digest is reconstructed
-    // on-chain from prefix ‖ tx_hash ‖ body.
+    // `tx_hash` follows the fixed prefix; no routing or bump bytes on the wire.
     let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
@@ -189,9 +177,7 @@ fn build_submit_observations_ix(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Instruction {
-    // Production 11-slot account list. Slots 7/8 (source/dest Account PDAs) are
-    // only touched on the Transfer branch; for Attest the noreplay_authority PDA
-    // is a sentinel. Slot 9 (rent recipient) must equal the recorded payer.
+    // 11-slot account list. Attest leaves slots 7/8 unused; slot 9 must equal the recorded payer.
     Instruction {
         program_id: *program_id,
         accounts: vec![
@@ -211,12 +197,10 @@ fn build_submit_observations_ix(
     }
 }
 
-/// 13 observations reach quorum, the real noreplay CPI flips the bitmap bit,
-/// and a 14th submission fails with AlreadyAccounted.
+/// 13 observations reach quorum and set the real bitmap bit; a 14th fails `AlreadyAccounted`.
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `cargo test --test surfpool_e2e_submit_observations_real_noreplay -- --ignored`"]
 fn surfpool_submit_observations_real_noreplay() {
-    // Locate both .so artifacts.
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
@@ -239,23 +223,17 @@ fn surfpool_submit_observations_real_noreplay() {
         noreplay_bytes.len()
     );
 
-    // Boot surfpool offline.
     let guard = start_surfpool(SurfpoolOptions::offline("ga-surfpool-submit-real-noreplay"));
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    // Anchor's `declare_id!` pins the program to a single fixed address,
-    // checked on every entry (`ErrorCode::DeclaredProgramIdMismatch`) — unlike
-    // the pre-migration pinocchio program, which derived every PDA from the
-    // runtime `program_id` and so was deployable anywhere (a fresh keypair
-    // per run, as this test previously did). Deploy at that fixed ID instead.
+    // Deploy at the `declare_id!` address; the program rejects any other.
     let ga_program_id = Pubkey::new_from_array(global_accountant::ID.to_bytes());
     eprintln!(
         "[real-cpi] global_accountant program_id={ga_program_id} (fixed, declare_id!) \
          noreplay program_id={NOREPLAY_PROGRAM_ID} (canonical)"
     );
 
-    // Airdrop the submitter (the noreplay_authority PDA never holds lamports).
     let submitter = Keypair::new();
     let sig = rpc
         .request_airdrop(&submitter.pubkey(), 20_000_000_000)
@@ -264,20 +242,16 @@ fn surfpool_submit_observations_real_noreplay() {
         rpc.confirm_transaction(&sig)
     });
 
-    // Deploy both programs.
     deploy_program(&rpc_url, &ga_program_id, &ga_bytes);
     deploy_program(&rpc_url, &NOREPLAY_PROGRAM_ID, &noreplay_bytes);
 
-    // Derive PDAs.
     let chain: u16 = 2;
     let mut emitter = [0u8; 32];
     emitter[31] = 0x77;
     let sequence: u64 = 0x42;
-    // Digest must be `keccak256(keccak256(body))` or the program rejects.
     let body = build_attest_body(chain, &emitter, sequence);
     let digest = double_keccak256_host(&body);
 
-    // Only PDA addresses feed the metas; bumps derive on-chain.
     let (pending_pda, _) = derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &digest);
     let (noreplay_authority, _noreplay_authority_bump) =
         derive_noreplay_authority_pda(&ga_program_id);
@@ -290,8 +264,7 @@ fn surfpool_submit_observations_real_noreplay() {
          noreplay_authority={noreplay_authority} bitmap_pda={bitmap_pda} bump={bitmap_bump}"
     );
 
-    // Synthesise a 19-guardian set (index 4) and inject it via cheatcode
-    // (no Core Bridge ownership check today, so any owner works).
+    // 19-guardian set at index 4, injected by cheatcode.
     let guardians = make_guardians(19, 0x42);
     let keys: Vec<[u8; 20]> = guardians.iter().map(|g| g.eth_address).collect();
     let gs_data = guardian_set_data(4, &keys, 0, 0);
@@ -320,9 +293,7 @@ fn surfpool_submit_observations_real_noreplay() {
         .expect("GS account after setAccount");
     assert_eq!(gs_after.data.len(), gs_data.len(), "GS data round-trips");
 
-    // Inject the chain-registration PDA: the program cross-checks the body's
-    // (emitter_chain, emitter) against it on every submission. Cheatcode-written
-    // since the prod-shape build only creates it via `register_chain` governance.
+    // Registration PDA written by cheatcode; the `.so` creates it only through `register_chain`.
     let mut registration: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
     registration.tag = ChainRegistrationLayout::TAG;
     registration.chain = chain;
@@ -346,10 +317,7 @@ fn surfpool_submit_observations_real_noreplay() {
         "surfnet_setAccount failed for chain registration: {resp}"
     );
 
-    // Drive 13 observations. The 13th submission emits the canonical commit
-    // log via `sol_log_data`; we capture its tx signature and walk
-    // `meta.logMessages` after quorum to verify the on-chain emission shape
-    // against [`assert_canonical_log_in_tx`].
+    // Capture the 13th tx signature for the commit-log check.
     let mut quorum_tx_sig: Option<String> = None;
     for i in 0..13u8 {
         let g = &guardians[i as usize];
@@ -381,10 +349,6 @@ fn surfpool_submit_observations_real_noreplay() {
     let quorum_sig = quorum_tx_sig.expect("13th submission captured a tx signature");
     eprintln!("[real-cpi] quorum-completing tx sig={quorum_sig}");
 
-    // Assert the canonical commit-log payload was emitted on the
-    // quorum-completing tx. Off-chain consumers reading `meta.logMessages`
-    // and filtering on `ACCOUNTANT_DIGEST_LOG_TAG` is the on-chain breadcrumb
-    // that replaced the (removed) DigestAccount PDA.
     assert_canonical_log_in_tx(
         &rpc_url,
         &quorum_sig,
@@ -395,7 +359,6 @@ fn surfpool_submit_observations_real_noreplay() {
         4, // guardian_set_index used by the quorum-completing observation
     );
 
-    // Assert the bitmap bit got set in the real noreplay PDA.
     let bitmap_after = rpc
         .get_account(&bitmap_pda)
         .expect("bitmap PDA exists post-quorum");
@@ -411,7 +374,7 @@ fn surfpool_submit_observations_real_noreplay() {
         "bit {bit_index} set in the bitmap post-quorum"
     );
 
-    // A 14th submission must fail the pre-check with AlreadyAccounted (0x7).
+    // 14th submission: `AlreadyAccounted` (0x7).
     let extra_signature = sign_digest(&guardians[13], &signing_digest_for(&body));
     let extra_ix = build_submit_observations_ix(
         &ga_program_id,
@@ -488,24 +451,21 @@ fn send_expect_failure(
     }
 }
 
-/// `keccak256(keccak256(body))` — Wormhole VAA digest convention, host-side.
+/// `keccak256(keccak256(body))`.
 fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     let inner = solana_keccak_hasher::hashv(&[body]).to_bytes();
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
-/// Deterministic source-chain transaction id carried in the wire format and
-/// folded into the signing digest.
+/// Fixed source-chain transaction id for the signing digest.
 const TX_HASH: [u8; 32] = [0xA9_u8; 32];
 
-/// Host mirror of `observation_signing_digest`: `keccak256(prefix ‖ tx_hash ‖
-/// body)` — the digest the guardian signs, distinct from the dedup digest.
+/// Host mirror of `observation_signing_digest`.
 fn signing_digest_for(body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body]).to_bytes()
 }
 
-/// 52-byte VAA body (header + action 0x02 attest); the parser only reads the
-/// action byte.
+/// 52-byte Attest body.
 fn build_attest_body(emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> Vec<u8> {
     let mut body = vec![0u8; 52];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());

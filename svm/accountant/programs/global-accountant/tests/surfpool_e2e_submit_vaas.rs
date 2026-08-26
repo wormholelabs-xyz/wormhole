@@ -1,12 +1,6 @@
-//! Surfpool E2E — `submit_vaas` (signed-VAA backfill path) against the real
-//! Verify VAA Shim and real `solana-noreplay`. Deploys the production-shape
-//! `.so`, pre-posts the VAA's signatures via the Shim's `PostSignatures`, and
-//! submits a real historical Token Bridge transfer VAA.
-//!
-//! Asserts the NoReplay bit is set and both source and destination ledgers
-//! are debited. The canonical digest record is emitted via `sol_log_data` (see
-//! `instructions/commit_log.rs`); log-payload inspection is deferred to a
-//! follow-up that walks `meta.logMessages`.
+//! Surfpool E2E for `submit_vaas` against the real Verify VAA Shim and `solana-noreplay`.
+//! Deploys the `.so`, posts the VAA signatures through the Shim, and submits a real
+//! Token Bridge transfer VAA. Asserts the NoReplay bit and both balance debits.
 //!
 //! # Run
 //!
@@ -14,13 +8,10 @@
 //! just test-e2e-submit-vaas
 //! ```
 //!
-//! `#[ignore]` (spawns surfpool). Requires `solana_noreplay.so` and an
-//! up-to-date production `global_accountant.so`; the Makefile target ensures both.
+//! `#[ignore]`: spawns surfpool. Needs `solana_noreplay.so` and a current `global_accountant.so`.
 //!
-//! The fixture (`mainnet_solana_token_bridge_transfer_seq1395207.vaa`) is a
-//! Solana → Ethereum transfer of an Ethereum-native ERC-20. Both sides debit
-//! (source = wrapped burn, chain != token_chain; dest = native unlock, chain ==
-//! token_chain), so both Account PDAs are pre-seeded with sufficient balance.
+//! Fixture `mainnet_solana_token_bridge_transfer_seq1395207.vaa`: Solana to Ethereum transfer
+//! of an Ethereum-native ERC-20. Both sides debit, so both balance PDAs are pre-seeded.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -46,38 +37,31 @@ use common::{
     SurfpoolOptions, NOREPLAY_PROGRAM_ID,
 };
 
-/// Wormhole Core Bridge program ID on Solana mainnet.
+/// Core Bridge program ID on Solana mainnet.
 const CORE_BRIDGE_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0x0e, 0x0a, 0x58, 0x9a, 0x41, 0xa5, 0x5f, 0xbd, 0x66, 0xc5, 0x2a, 0x47, 0x5f, 0x2d, 0x92, 0xa6,
     0xd3, 0xdc, 0x9b, 0x47, 0x47, 0x11, 0x4c, 0xb9, 0xaf, 0x82, 0x5a, 0x98, 0xb5, 0x45, 0xd3, 0xce,
 ]);
 
-/// Anchor discriminator for `post_signatures`
-/// (`sha256("global:post_signatures")[..8]`).
+/// `post_signatures` discriminator (`sha256("global:post_signatures")[..8]`).
 const POST_SIGNATURES_SELECTOR: [u8; 8] = [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
 
-/// Compute Budget program ID.
 const COMPUTE_BUDGET_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0x03, 0x06, 0x46, 0x6f, 0xe5, 0x21, 0x17, 0x32, 0xff, 0xec, 0xad, 0xba, 0x72, 0xc3, 0x9b, 0xe7,
     0xbc, 0x8c, 0xe5, 0xbb, 0xc5, 0xf7, 0x12, 0x6b, 0x2c, 0x43, 0x9b, 0x3a, 0x40, 0x00, 0x00, 0x00,
 ]);
 
-/// CU ceiling for `submit_vaas` (VerifyHash ~200k CU plus the NoReplay CPI,
-/// balance lazy-init, and the `sol_log_data` commit-log emit).
+/// CU ceiling for `submit_vaas` (VerifyHash ~200k CU plus CPIs and lazy init).
 const SUBMIT_VAAS_CU_LIMIT: u32 = 400_000;
 
-/// Lamports funded into a cheatcode-seeded `BalanceAccountLayout` PDA (70 bytes
-/// after the offset-0 tag retrofit). `surfnet_setAccount` does not enforce
-/// rent-exemption, so this is a sufficient fixed balance, not the exact minimum.
+/// Lamports for a cheatcode-seeded `BalanceAccountLayout` PDA; above the rent minimum.
 const BALANCE_PDA_RENT_LAMPORTS: u64 = 1_169_280;
 
-/// Datasource URL for surfpool's mainnet fork; `GA_E2E_DATASOURCE_RPC` overrides.
+/// Surfpool mainnet fork datasource; `GA_E2E_DATASOURCE_RPC` overrides.
 fn datasource_rpc_url() -> String {
     std::env::var("GA_E2E_DATASOURCE_RPC")
         .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string())
 }
-
-// PDA derivation mirrors.
 
 fn derive_guardian_set_pda(index: u32) -> (Pubkey, u8) {
     let idx_be = index.to_be_bytes();
@@ -119,8 +103,6 @@ fn build_namespace(chain: u16, emitter: &[u8; 32]) -> [u8; 34] {
     ns
 }
 
-// Instruction builders.
-
 fn set_compute_unit_limit_ix(units: u32) -> Instruction {
     let mut data = Vec::with_capacity(5);
     data.push(0x02);
@@ -133,8 +115,7 @@ fn set_compute_unit_limit_ix(units: u32) -> Instruction {
 }
 
 fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
-    // Wire shape per `submit_vaas.rs::SUBMIT_VAAS_FIXED_LEN`:
-    //   [disc: u8][guardian_set_bump: u8][body_len: u16 LE][body bytes]
+    // [disc: u8][guardian_set_bump: u8][body_len: u16 LE][body]
     let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::SubmitVaas as u8);
     data.push(guardian_set_bump);
@@ -196,8 +177,7 @@ fn post_signatures(
     eprintln!("[submit-vaas-e2e] PostSignatures tx={sig}");
 }
 
-/// Seed an Account PDA with a starting balance (via `surfnet_setAccount`) so
-/// the transfer's debits succeed.
+/// Seed a balance PDA through `surfnet_setAccount`.
 fn seed_account_pda(
     rpc_url: &str,
     program_id: &Pubkey,
@@ -236,12 +216,10 @@ fn seed_account_pda(
     );
 }
 
-/// submit_vaas applied to a real Token Bridge transfer VAA sets the NoReplay
-/// bit, opens the DigestAccount, and debits both ledgers.
+/// A real Token Bridge transfer VAA sets the NoReplay bit and debits both ledgers.
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `just test-e2e-submit-vaas` or `cargo test -- --ignored`"]
 fn surfpool_submit_vaas_token_bridge_transfer() {
-    // Locate both .so artefacts.
     let ga_so = so_path("global_accountant");
     let ga_bytes = std::fs::read(&ga_so).unwrap_or_else(|e| {
         panic!(
@@ -264,7 +242,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         noreplay_bytes.len()
     );
 
-    // Load + parse the Token Bridge transfer VAA.
     let vaa = load_vaa_fixture("mainnet_solana_token_bridge_transfer_seq1395207.vaa");
     eprintln!(
         "[submit-vaas-e2e] VAA gsi={} chain={} sequence={} digest={}",
@@ -278,7 +255,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         "fixture must come from the active guardian set"
     );
 
-    // Decode the transfer payload to size the pre-seeded balances.
+    // Size the pre-seeded balances from the payload.
     let body = &vaa.bytes[vaa.body_offset..];
     assert_eq!(
         body[51], 0x01,
@@ -299,7 +276,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         hex_encode(&token_address),
     );
 
-    // Boot surfpool with mainnet fork.
     let guard = start_surfpool(SurfpoolOptions::mainnet_fork(
         "ga-surfpool-submit-vaas",
         datasource_rpc_url(),
@@ -307,14 +283,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     let rpc_url = guard.rpc_url();
     let rpc = guard.rpc_client();
 
-    // Deploy programs and fund payer.
-    //
-    // Anchor's `declare_id!` pins the program to a single fixed address,
-    // checked on every entry (`ErrorCode::DeclaredProgramIdMismatch`) — unlike
-    // the pre-migration pinocchio program, which derived every PDA from the
-    // runtime `program_id` and so was deployable anywhere. Deploy at that same
-    // fixed ID here (previously a fresh random keypair per run) rather than at
-    // an address the compiled-in `ID` constant would reject.
+    // Deploy at the `declare_id!` address; the program rejects any other.
     let ga_program_id = Pubkey::new_from_array(global_accountant::ID.to_bytes());
     let payer = Keypair::new();
     let guardian_signatures_kp = Keypair::new();
@@ -334,7 +303,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     deploy_program(&rpc_url, &ga_program_id, &ga_bytes);
     deploy_program(&rpc_url, &NOREPLAY_PROGRAM_ID, &noreplay_bytes);
 
-    // Lazy-fetch Shim + Core Bridge + GuardianSet PDA.
     let shim_program_id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
     let _shim = rpc.get_account(&shim_program_id).expect("Shim lazy-fetch");
     let _core = rpc
@@ -353,7 +321,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         gs_account.data.len()
     );
 
-    // Pre-post the VAA signatures via the real Shim.
     let post_start = Instant::now();
     post_signatures(&rpc, &payer, &guardian_signatures_kp, &vaa);
     eprintln!(
@@ -361,7 +328,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         post_start.elapsed()
     );
 
-    // Derive the submit_vaas account PDAs.
     let (noreplay_authority, _na_bump) = derive_noreplay_authority_pda(&ga_program_id);
     let namespace = build_namespace(vaa.emitter_chain, &vaa.emitter_address);
     let (bitmap_pda, bitmap_bump) =
@@ -380,7 +346,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
          dst_pda={dest_account_pda}"
     );
 
-    // Pre-seed both Account PDAs above `amount` (both sides debit).
+    // Both sides debit.
     let seed_amount = amount
         .checked_add(Uint256::from_u128(1_000_000_000))
         .expect("seed amount fits in u256");
@@ -403,10 +369,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         seed_amount,
     );
 
-    // Inject the chain-registration PDA for the VAA's emitter; submit_vaas
-    // cross-checks (emitter_chain, emitter) against it on every submission.
-    // Cheatcode-written since the prod-shape build only creates it via
-    // `register_chain` governance.
+    // Registration PDA written by cheatcode; the `.so` creates it only through `register_chain`.
     let (chain_registration_pda, _cr_bump) =
         derive_chain_registration_pda(&ga_program_id, vaa.emitter_chain);
     {
@@ -434,7 +397,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         );
     }
 
-    // Build + send the submit_vaas tx.
     let body = vaa.bytes[vaa.body_offset..].to_vec();
     let ix = Instruction {
         program_id: ga_program_id,
@@ -465,7 +427,6 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         .expect("submit_vaas send_and_confirm");
     eprintln!("[submit-vaas-e2e] submit_vaas tx={sig}");
 
-    // Assert: NoReplay bit set.
     let bitmap_after = rpc
         .get_account_with_commitment(&bitmap_pda, CommitmentConfig::confirmed())
         .expect("bitmap PDA fetch")
@@ -483,11 +444,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         "bit {bit_index} set in noreplay bitmap after submit_vaas"
     );
 
-    // Assert the canonical commit-log payload was emitted on the submit_vaas
-    // tx. `guardian_set_index = 0` is the sentinel value `submit_vaas` records
-    // (the Shim accepts any currently-active set, so no single index
-    // meaningfully describes the authorisation — see `commit_log::emit`
-    // call-site in `submit_vaas.rs`).
+    // `guardian_set_index = 0` on the `submit_vaas` path.
     assert_canonical_log_in_tx(
         &rpc_url,
         &sig.to_string(),
@@ -498,7 +455,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         0,
     );
 
-    // Source Account: debited by `amount` (chain != token_chain ⇒ wrapped burn).
+    // Source: wrapped burn debits.
     let src_after = rpc
         .get_account(&source_account_pda)
         .expect("source Account PDA exists");
@@ -512,7 +469,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         "source ledger debited by transfer amount"
     );
 
-    // Dest Account: debited by `amount` (chain == token_chain ⇒ native unlock).
+    // Dest: native unlock debits.
     let dst_after = rpc
         .get_account(&dest_account_pda)
         .expect("dest Account PDA exists");
@@ -526,7 +483,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     eprintln!("[submit-vaas-e2e] all phases green");
 }
 
-/// Pin `BalanceAccountLayout::LEN` against drift in the e2e assertions.
+/// Pin `BalanceAccountLayout::LEN` for the e2e assertions.
 const _: () = assert!(
     BalanceAccountLayout::LEN == 70,
     "BalanceAccountLayout::LEN drift — update the e2e assertions"

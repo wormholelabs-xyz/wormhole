@@ -1,10 +1,6 @@
-//! `register_chain` — Token Bridge governance handler.
-//!
-//! Validates a Token Bridge `RegisterChain` governance VAA and writes (or
-//! upgrades) the `ChainRegistration` PDA that `submit_observations` /
-//! `submit_vaas` cross-check incoming VAAs against. Re-registration uses a fresh
-//! VAA at a higher sequence; the NoReplay bit prevents reusing an old sequence
-//! to undo a rotation. Accepts `Any (0)` or `SOLANA_CHAIN_ID` as target_chain.
+//! `register_chain`: Token Bridge `RegisterChain` governance. Writes or overwrites the
+//! `ChainRegistration` PDA. NoReplay blocks replay of an older registration VAA.
+//! Accepts target chain `0` (Any) or `SOLANA_CHAIN_ID`.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -20,8 +16,7 @@ use crate::definitions::{
 use crate::err;
 use crate::state::chain_registration;
 
-/// Wire format for the `register_chain` instruction data (after the 1-byte
-/// dispatch discriminator):
+/// Wire format after the 1-byte discriminator:
 ///
 /// | offset | size     | field             |
 /// |--------|----------|-------------------|
@@ -31,18 +26,16 @@ use crate::state::chain_registration;
 /// | 4      | body_len | body              |
 const REGISTER_CHAIN_FIXED_LEN: usize = 1 + 1 + 2;
 
-/// Maximum VAA body size. Canonical RegisterChain body is 120 bytes; 256 leaves
-/// headroom inside Solana's 1232-byte tx envelope.
+/// Body size cap. A `RegisterChain` body is 120 bytes.
 const REGISTER_CHAIN_BODY_MAX: usize = 256;
 
-/// Body header offsets (canonical Wormhole VAA layout, 51-byte header).
+/// VAA body header offsets.
 const BODY_EMITTER_CHAIN_OFFSET: usize = 8;
 const BODY_EMITTER_ADDRESS_OFFSET: usize = 10;
 const BODY_SEQUENCE_OFFSET: usize = 42;
 const BODY_HEADER_LEN: usize = 51;
 
-/// Payload byte offsets (relative to body start). Token Bridge governance
-/// payload layout:
+/// Payload offsets from the body start. Token Bridge governance payload:
 ///
 /// | offset | size | field             |
 /// |--------|------|-------------------|
@@ -60,7 +53,6 @@ const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 2 + 32;
 const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    // ----- (1) Parse wire data -----
     if data.len() < REGISTER_CHAIN_FIXED_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
@@ -74,20 +66,18 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
     let body_bytes = &data[REGISTER_CHAIN_FIXED_LEN..REGISTER_CHAIN_FIXED_LEN + body_len];
 
-    // ----- (2) Compute digest -----
     let digest = double_keccak256(body_bytes);
 
     // Accounts:
-    //   0. `[WRITE, SIGNER]` payer — rent for fresh PDAs.
-    //   1. `[]`              Verify VAA Shim program (CPI target). Sentinel under `mock-vaa`.
-    //   2. `[]`              Core Bridge `GuardianSet` PDA. Sentinel under `mock-vaa`.
-    //   3. `[]`              `GuardianSignatures` PDA. Sentinel under `mock-vaa`.
-    //   4. `[WRITE]`         Chain registration PDA. Init on first call;
-    //                       overwritten on emitter rotation.
-    //   5. `[WRITE]`         NoReplay bitmap PDA. Pre-check then mark-used CPI.
-    //   6. `[]`              NoReplay program (CPI target).
-    //   7. `[]`              NoReplay authority PDA owned by this program.
-    //   8. `[]`              system program.
+    //   0. `[WRITE, SIGNER]` payer
+    //   1. `[]`              Verify VAA Shim program
+    //   2. `[]`              Core Bridge `GuardianSet` PDA
+    //   3. `[]`              `GuardianSignatures` PDA
+    //   4. `[WRITE]`         `ChainRegistration` PDA
+    //   5. `[WRITE]`         NoReplay bitmap PDA
+    //   6. `[]`              NoReplay program
+    //   7. `[]`              NoReplay authority PDA
+    //   8. `[]`              system program
     let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, noreplay_program, noreplay_authority, system_program_acc] =
         accounts
     else {
@@ -98,7 +88,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // ----- (3) Shim CPI to verify the digest -----
     shim::verify_vaa(
         guardian_set,
         guardian_signatures,
@@ -106,10 +95,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set_bump,
     )?;
 
-    // ----- (4) Governance emitter check -----
-    //
-    // Pin the emitter to (chain=1, GOVERNANCE_EMITTER); reject any other even if
-    // its signatures verify.
+    // SECURITY: the emitter must be `(chain=1, GOVERNANCE_EMITTER)`.
     let body_emitter_chain = u16::from_be_bytes([
         body_bytes[BODY_EMITTER_CHAIN_OFFSET],
         body_bytes[BODY_EMITTER_CHAIN_OFFSET + 1],
@@ -121,16 +107,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::InvalidGovernanceEmitter));
     }
 
-    // Extract sequence for NoReplay keying.
     let sequence_bytes: [u8; 8] = body_bytes[BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]
         .try_into()
         .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
     let sequence = u64::from_be_bytes(sequence_bytes);
 
-    // ----- (5) NoReplay pre-check -----
-    //
-    // Reject a previously-applied governance VAA, preventing replay of an old
-    // `RegisterChain` to undo a later emitter rotation.
     if noreplay::is_marked(
         noreplay_bucket,
         noreplay_authority.key,
@@ -141,7 +122,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
-    // ----- (6) Payload checks -----
     if body_bytes[PAYLOAD_MODULE_OFFSET..PAYLOAD_MODULE_OFFSET + 32]
         != TOKEN_BRIDGE_GOVERNANCE_MODULE
     {
@@ -154,12 +134,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
         body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
     ]);
-    // Accepts `Any (0)` or `Solana`.
     if target_chain != 0 && target_chain != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
 
-    // ----- (7) Extract registration payload -----
     let chain_to_register = u16::from_be_bytes([
         body_bytes[PAYLOAD_CHAIN_OFFSET],
         body_bytes[PAYLOAD_CHAIN_OFFSET + 1],
@@ -168,10 +146,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     emitter_to_register
         .copy_from_slice(&body_bytes[PAYLOAD_EMITTER_OFFSET..PAYLOAD_EMITTER_OFFSET + 32]);
 
-    // ----- (8) Canonical PDA enforcement -----
-    //
-    // Verify the account is at the canonical address and the supplied bump is
-    // canonical (surfaces our own error before the init CPI would fail).
     let chain_be = chain_to_register.to_be_bytes();
     let (expected_pda, canonical_bump) =
         Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
@@ -179,10 +153,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // ----- (9) Init-or-upgrade dispatch -----
-    //
-    // First registration (system-owned): Allocate + Assign. Rotation (already
-    // program-owned, correct length): overwrite in place. Any other shape rejects.
+    // First registration creates the PDA; rotation overwrites in place.
     let owner_is_system = registration_pda.owner == &anchor_lang::solana_program::system_program::ID;
     if owner_is_system {
         let bump_seed = [registration_bump];
@@ -203,18 +174,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }
     }
 
-    // ----- (10) Write the new registration layout -----
     let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
     layout.tag = ChainRegistrationLayout::TAG;
     layout.chain = chain_to_register;
     layout.emitter_address = emitter_to_register;
     chain_registration::store(registration_pda, &layout)?;
 
-    // ----- (11) NoReplay mark-used -----
-    //
-    // Claim the sequence slot; a racing tx surfaces as the inner noreplay
-    // program's `AccountAlreadyInitialized` — the SBF runtime propagates it
-    // directly (see `noreplay::mark_used` comment).
     noreplay::mark_used(
         payer,
         noreplay_bucket,

@@ -1,11 +1,9 @@
-//! In-process parser sanity check for the VAA fixtures, so format regressions
-//! surface during `cargo test` before any surfpool layer boots.
+//! Parser check for the VAA fixtures; runs in `cargo test` without surfpool.
 
 mod common;
 use common::{load_vaa_fixture, ParsedVaa};
 
-/// Both fixtures parse, and the seq 2211 digest matches the pinned value used
-/// by surfpool_e2e_mainnet_fork.
+/// Both fixtures parse; the seq 2211 digest equals the pinned value.
 #[test]
 fn corpus_fixtures_parse_and_digest_consistently() {
     const SEQ_2211_EXPECTED_DIGEST: [u8; 32] = [
@@ -23,9 +21,7 @@ fn corpus_fixtures_parse_and_digest_consistently() {
     assert_eq!(baseline.sequence, 2211);
     assert_eq!(baseline.num_signatures, 13);
 
-    // Token Bridge transfer fixture (source for surfpool_e2e_submit_vaas). Pin
-    // the digest and routing tuple so a corrupted or swapped fixture is caught
-    // here, not only at the surfpool layer.
+    // Pin the digest and routing tuple of the transfer fixture.
     const SEQ_1395207_EXPECTED_DIGEST: [u8; 32] = [
         0x89, 0xc4, 0x1f, 0x5a, 0xc9, 0xc3, 0x5b, 0xa9, 0xd1, 0x5b, 0xf3, 0x58, 0xb9, 0x31, 0xd6,
         0xf7, 0x54, 0xa7, 0x73, 0x49, 0x02, 0x2d, 0x0a, 0x64, 0xf1, 0x39, 0x62, 0x07, 0x8f, 0x63,

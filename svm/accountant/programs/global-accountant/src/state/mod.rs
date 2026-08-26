@@ -1,3 +1,3 @@
-//! WTT-specific state layouts and serialization.
+//! WTT-specific state helpers.
 
 pub mod chain_registration;

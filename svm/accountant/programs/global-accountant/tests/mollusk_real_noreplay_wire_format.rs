@@ -1,13 +1,7 @@
-//! Real `solana_noreplay` CPI wire-format anchor: drives `submit_observations`
-//! to quorum against a Mollusk with the real `solana_noreplay.so` and asserts
-//! the bucket account is 129 bytes, noreplay-owned, with the bit for
-//! `sequence % 1024` set.
+//! Real `solana_noreplay` CPI wire format. Drives `submit_observations` to quorum. Asserts
+//! the bucket is 129 bytes, NoReplay-owned, with bit `sequence % 1024` set.
 //!
-//! `SEQUENCE = 9` puts the bitmap bit outside byte 0, exercising the full
-//! 129-byte bucket layout written by the real `solana_noreplay` program rather
-//! than a degenerate byte-0-only write. The real noreplay program is always
-//! loaded here (there is no mock); the assertion confirms the live CPI sets the
-//! correct bit at `sequence % 1024`.
+//! `SEQUENCE = 9` puts the bit outside byte 0.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -30,7 +24,7 @@ use common::guardian_fixtures::{
 use common::mollusk_fixtures::{keyed_account_for_noreplay_program, mollusk_with_fixtures};
 
 const PROGRAM_NAME: &str = "global_accountant";
-/// Bitmap bit lands outside byte 0 — see the module doc.
+/// Bit lands outside byte 0.
 const SEQUENCE: u64 = 9;
 const CHAIN: u16 = 2;
 const GUARDIAN_SET_INDEX: u32 = 4;
@@ -74,7 +68,6 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
-/// Derive the `solana_noreplay` bitmap PDA under `authority`.
 fn derive_noreplay_bucket_pda(
     authority: &Pubkey,
     chain: u16,
@@ -102,18 +95,15 @@ fn double_keccak256_host(body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[&inner]).to_bytes()
 }
 
-/// Deterministic source-chain transaction id carried in the wire format and
-/// folded into the signing digest.
+/// Fixed source-chain transaction id for the signing digest.
 const TX_HASH: [u8; 32] = [0xA9_u8; 32];
 
-/// Host mirror of `observation_signing_digest`: `keccak256(prefix ‖ tx_hash ‖
-/// body)` — the digest the guardian signs, distinct from the dedup digest.
+/// Host mirror of `observation_signing_digest`.
 fn signing_digest_for(body: &[u8]) -> [u8; 32] {
     solana_keccak_hasher::hashv(&[SUBMIT_OBSERVATION_PREFIX, &TX_HASH, body]).to_bytes()
 }
 
-/// Minimal 52-byte attest body. Action 0x02 keeps the program off the transfer
-/// branch so the slot 8/9 Account PDAs can stay sentinels.
+/// 52-byte Attest body; slots 7/8 stay unused.
 fn build_attest_body(chain: u16, emitter: &[u8; 32], sequence: u64) -> Vec<u8> {
     let mut body = vec![0u8; 52];
     body[8..10].copy_from_slice(&chain.to_be_bytes());
@@ -130,8 +120,7 @@ fn submit_ix_data(
     signature: &[u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    // No bump bytes on the wire; the program derives them on-chain. `tx_hash`
-    // trails the fixed prefix; the signing digest is reconstructed on-chain.
+    // `tx_hash` follows the fixed prefix; no bump bytes on the wire.
     let mut data = Vec::with_capacity(1 + 102 + 32 + 2 + body.len());
     data.push(IxDiscriminator::SubmitObservations as u8);
     data.extend_from_slice(digest);
@@ -193,15 +182,13 @@ impl Scenario {
         let body = build_attest_body(CHAIN, &emitter, SEQUENCE);
         let digest = double_keccak256_host(&body);
         let signing_digest = signing_digest_for(&body);
-        // Only PDA addresses feed the metas; the program derives bumps on-chain.
         let (pending_pda, _) = derive_pending_pda(CHAIN, &emitter, SEQUENCE, &digest);
         let (noreplay_authority, _) =
             Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
         let noreplay_bucket =
             derive_noreplay_bucket_pda(&noreplay_authority, CHAIN, &emitter, SEQUENCE);
         let (chain_registration_pubkey, _) = derive_chain_registration_pda(CHAIN);
-        // The inline secp256k1_recover path only reads guardian pubkeys from
-        // this account, so any deterministic address works.
+        // The inline recovery path reads only guardian keys from this account.
         let guardian_set_pubkey = Pubkey::new_from_array([0xC1u8; 32]);
         let submitter = Pubkey::new_from_array([0x11u8; 32]);
         let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
@@ -252,14 +239,13 @@ impl Scenario {
                     &core_bridge_program_id(),
                 ),
             ),
-            // Bucket starts system-owned + empty; the CPI allocates on MarkUsed.
+            // The CPI allocates the bucket on `MarkUsed`.
             (self.noreplay_bucket, uninit_pda_account()),
             keyed_account_for_system_program(),
-            // Slot 5: noreplay program, needs a Loader-V3 executable entry since
-            // process_instruction takes the account list verbatim.
+            // Slot 5 needs a Loader-V3 executable entry.
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority, system_owned_account(0)),
-            // Slots 7/8: attest payload ⇒ never touched.
+            // Slots 7/8 unused for Attest.
             (
                 self.chain_registration_pubkey,
                 chain_registration_account(CHAIN, &self.emitter),
@@ -290,7 +276,7 @@ impl Scenario {
     }
 }
 
-/// Driving submit_observations to quorum flips the real noreplay bitmap bit.
+/// Quorum sets the real NoReplay bitmap bit.
 #[test]
 fn submit_observations_quorum_marks_real_noreplay_bitmap() {
     let mollusk = mollusk_with_fixtures(&program_id(), PROGRAM_NAME);
@@ -313,7 +299,6 @@ fn submit_observations_quorum_marks_real_noreplay_bitmap() {
         .map(|(_, a)| a.clone())
         .expect("noreplay bucket in resulting accounts");
 
-    // Real CPI: noreplay-owned, 129-byte layout, bit at `sequence % 1024` set.
     assert_eq!(
         bucket.owner,
         Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),

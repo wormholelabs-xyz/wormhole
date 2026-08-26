@@ -33,3 +33,7 @@ solana-pubkey = { version = "3", features = ["curve25519"] }
 # already used by the test/surfpool stack) that does carry it. The `bincode`
 # feature is required for the instruction-builder functions themselves.
 solana-system-interface = { workspace = true, features = ["bincode"] }
+
+[dev-dependencies]
+solana-address.workspace = true
+solana-noreplay.workspace = true

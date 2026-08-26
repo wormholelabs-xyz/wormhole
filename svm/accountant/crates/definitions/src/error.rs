@@ -1,7 +1,6 @@
-//! Stable custom error codes returned via `ProgramError::Custom(u32)`.
+//! Custom error codes returned as `ProgramError::Custom(u32)`.
 
-/// Custom error codes returned via `ProgramError::Custom(u32)`. Stable across
-/// program versions; do not renumber.
+/// Custom error codes. Do not renumber.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalAccountantError {
@@ -10,73 +9,54 @@ pub enum GlobalAccountantError {
     InvalidPda = 2,
     DigestMismatch = 3,
     PayerMismatch = 4,
-    /// Reserved slot; never raised. Kept to preserve ABI numbering.
+    /// Reserved; keeps numbering stable.
     NotImplemented = 5,
-    /// The instruction was feature-gated off in this build (keeps
-    /// `test_only_open_digest` out of production).
+    /// Instruction is feature-gated off in this build.
     NotEnabled = 6,
-    /// `(chain, emitter, sequence)` already marked accounted-for in NoReplay.
+    /// `(chain, emitter, sequence)` already marked in NoReplay.
     AlreadyAccounted = 7,
-    /// Retired — never raised. `pinocchio::cpi::invoke_signed` only surfaces
-    /// pre-CPI validation errors via `Result`; an inner-program failure aborts
-    /// THIS program directly via the SBF runtime, bypassing any `map_err`.
-    /// Race-loss `AccountAlreadyInitialized` from `MarkUsed` propagates as
-    /// itself, not as this code. Kept so error-code numbering stays stable.
+    /// Reserved; keeps numbering stable.
     NoReplayCpiFailed = 8,
-    /// Signature failed `secp256k1_recover`, or the recovered pubkey did not
-    /// match the `guardian_index` in the GuardianSet PDA.
+    /// `secp256k1_recover` failed, or the recovered key differs from `guardian_index`.
     InvalidSignature = 9,
     /// `guardian_index` out of bounds for the guardian set.
     InvalidGuardianIndex = 10,
-    /// The guardian's bit is already set in the pending bitmap.
+    /// Guardian bit already set in the pending bitmap.
     AlreadySigned = 11,
-    /// Observation references a guardian set older than the one the pending PDA
-    /// is accumulating against (stale observation after rotation).
+    /// Observation guardian set is older than the pending PDA's set.
     StaleGuardianSet = 12,
-    /// Retired — no longer emitted. Kept so error-code numbering stays stable.
+    /// Reserved; keeps numbering stable.
     DigestForgery = 13,
-    /// `close_pending` triggers unmet: recorded guardian set still active AND
-    /// NoReplay does not mark the entry accounted-for.
+    /// `close_pending` conditions unmet: guardian set still active and NoReplay unmarked.
     CannotCleanup = 14,
-    /// Balance overflow on the transfer path (`lock_or_burn` /
-    /// `unlock_or_mint`).
+    /// Balance overflow in `lock_or_burn` / `unlock_or_mint`.
     BalanceOverflow = 15,
-    /// Balance underflow on the transfer path (insufficient source balance).
+    /// Balance underflow in `lock_or_burn` / `unlock_or_mint`.
     BalanceUnderflow = 16,
-    // 17 reserved (previously `BodyDigestMismatch`; the digest is now derived
-    // from the body in `submit_observations`, so a mismatch is unrepresentable).
-    /// Supplied Account PDA does not match the canonical seeds for the
-    /// source/destination side of the transfer.
+    // 17 reserved.
+    /// Balance PDA differs from the canonical seeds for the transfer side.
     InvalidAccountPda = 18,
-    /// No `ChainRegistration` PDA for the body's `emitter_chain` — wait for the
-    /// Token Bridge `RegisterChain` VAA before observations are accepted.
+    /// No `ChainRegistration` PDA for the body's `emitter_chain`.
     MissingChainRegistration = 19,
-    /// Registration PDA exists but its `emitter_address` does not match the
-    /// body header's emitter.
+    /// `ChainRegistration.emitter_address` differs from the body emitter.
     UnregisteredEmitter = 20,
-    /// `register_chain` body did not come from the governance emitter
-    /// `(chain=1, GOVERNANCE_EMITTER)`.
+    /// `register_chain` emitter is not `(chain=1, GOVERNANCE_EMITTER)`.
     InvalidGovernanceEmitter = 21,
-    /// `register_chain` payload module is not `TOKEN_BRIDGE_GOVERNANCE_MODULE`.
+    /// `register_chain` module is not `TOKEN_BRIDGE_GOVERNANCE_MODULE`.
     InvalidGovernanceModule = 22,
-    /// `register_chain` payload action byte is not `0x01` (RegisterChain).
+    /// `register_chain` action byte is not `0x01`.
     InvalidGovernanceAction = 23,
-    /// `register_chain` target chain is neither `0x0000` (Any) nor Solana.
+    /// `register_chain` target chain is neither `0x0000` nor Solana.
     GovernanceChainMismatch = 24,
-    /// `modify_balance` `kind` byte is neither `1` (Add) nor `2` (Subtract).
+    /// `modify_balance` `kind` byte is neither `1` nor `2`.
     InvalidModificationKind = 25,
-    /// `modify_balance` `Add` overflow. Distinct from `BalanceOverflow` so logs
-    /// disambiguate the entrypoint.
+    /// `modify_balance` `Add` overflow.
     ModifyBalanceOverflow = 26,
-    /// `modify_balance` `Subtract` underflow (also raised when subtracting from
-    /// an uninitialised PDA, rejected before allocation).
+    /// `modify_balance` `Subtract` underflow, including on an uninitialised PDA.
     ModifyBalanceUnderflow = 27,
-    /// A `Modification` PDA already exists at `(b"modification", sequence)`.
-    /// Replay protection keyed on the payload's modification sequence.
+    /// `Modification` PDA already exists for this sequence.
     DuplicateModification = 28,
-    /// Token Bridge payload action is not `0x01`/`0x02`/`0x03`. Rejecting
-    /// (rather than committing) leaves the NoReplay slot unconsumed so a future
-    /// upgrade can process the VAA.
+    /// Token Bridge action byte is not `0x01`, `0x02`, or `0x03`. The NoReplay slot stays free.
     UnknownTokenBridgePayload = 29,
 }
 
