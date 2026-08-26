@@ -72,7 +72,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     // Condition (a).
-    let expired = guardian_set_expired(guardian_set, layout.guardian_set_index)?;
+    let expired = is_guardian_set_expired(guardian_set, layout.guardian_set_index)?;
 
     // Condition (b).
     let (noreplay_authority_addr, _) =
@@ -97,7 +97,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 /// `Ok(true)` if `guardian_set` is expired or its index differs from `expected_index`.
 ///
 /// SECURITY: owner must be [`CORE_BRIDGE_PROGRAM_ID`]; a forged set could close any pending PDA.
-fn guardian_set_expired(
+fn is_guardian_set_expired(
     guardian_set: &AccountInfo,
     expected_index: u32,
 ) -> crate::ProgramCoreResult<bool> {
