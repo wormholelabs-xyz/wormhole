@@ -18,11 +18,20 @@ testing environment.
 Alternatively, when using on another SVM chain (or on Solana, but against an
 independent Wormhole deployment) just specify the `from-env` feature flag (and
 don't specify Solana, even if the chain is Solana). In this case, the following
-4 environment variables are needed:
+environment variables are needed:
 - `CHAIN_ID`: the Wormhole ID of the chain deployed on. e.g. Solana is 1, Fogo is 51.
 - `BRIDGE_ADDRESS`: program ID of the Wormhole program
 - `POST_MESSAGE_SHIM_PROGRAM_ID`: program ID of the [../../programs/post-message/](post-message shim).
 - `VERIFY_VAA_SHIM_PROGRAM_ID`: program ID of the [../../programs/verify-vaa](verify-vaa shim).
+- `NOREPLAY_PROGRAM_ID` (feature `noreplay`): program ID of the NoReplay
+  replay-protection program. Same variable name the NoReplay program itself
+  reads at compile time.
+
+The `noreplay` feature exposes `NOREPLAY_PROGRAM_ID`. With the `solana`
+feature, only the `testnet` (Solana devnet) address exists; there is no mainnet
+deployment yet, so a `solana` + `noreplay` build without `testnet` fails to
+compile. The devnet address is always available as
+`crate::solana::devnet::NOREPLAY_PROGRAM_ID`.
 
 The definitions crate can be compiled without either the `solana` or the
 `from-env` feature flags. In this case, it will not expose any addresses in the top-level crate, for example `crate::CORE_BRIDGE_FEE_COLLECTOR` won't be available. However, the predefined Solana addresses are still available via their qualified paths:

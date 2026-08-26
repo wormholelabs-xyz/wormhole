@@ -56,6 +56,12 @@ pub mod devnet {
         bs58::decode_pubkey("EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at");
 
     crate::derive_verify_vaa_shim_consts!();
+    /// NoReplay program ID on Solana devnet. No mainnet deployment yet; the
+    /// `mainnet` module gains this constant when one exists.
+    pub const NOREPLAY_PROGRAM_ID_ARRAY: [u8; 32] =
+        bs58::decode_pubkey("repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t");
+
+    crate::derive_noreplay_consts!();
 }
 
 pub mod localnet {

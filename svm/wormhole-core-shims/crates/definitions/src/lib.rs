@@ -10,6 +10,15 @@ pub mod zero_copy;
 #[cfg(all(feature = "from-env", feature = "solana"))]
 compile_error!("Features 'from-env' and 'solana' are mutually exclusive.");
 
+#[cfg(all(
+    feature = "solana",
+    feature = "noreplay",
+    not(any(feature = "testnet", feature = "localnet"))
+))]
+compile_error!(
+    "NoReplay has no Solana mainnet deployment; use 'testnet' or 'from-env' with NOREPLAY_PROGRAM_ID."
+);
+
 // We define the constants (chain id + addresses) here.
 // - For 'solana', we just re-export the definitions in the solana module.
 // - For 'from-env', we pick these up from environment variables and parse (+
@@ -59,6 +68,13 @@ mod defs {
 
             #[cfg(feature = "verify-vaa-shim")]
             derive_verify_vaa_shim_consts!();
+
+            #[cfg(feature = "noreplay")]
+            pub const NOREPLAY_PROGRAM_ID_ARRAY: [u8; 32] =
+                env_pubkey!("NOREPLAY_PROGRAM_ID");
+
+            #[cfg(feature = "noreplay")]
+            derive_noreplay_consts!();
         }
     }
 }
@@ -392,6 +408,14 @@ macro_rules! derive_verify_vaa_shim_consts {
     };
 }
 
+#[macro_export]
+macro_rules! derive_noreplay_consts {
+    () => {
+        pub const NOREPLAY_PROGRAM_ID: solana_program::pubkey::Pubkey =
+            solana_program::pubkey::Pubkey::new_from_array(NOREPLAY_PROGRAM_ID_ARRAY);
+    };
+}
+
 #[allow(dead_code)]
 /// A test to make sure the expected IDs are available.
 fn available_ids() {
@@ -402,6 +426,10 @@ fn available_ids() {
     let _ = crate::solana::CORE_BRIDGE_PROGRAM_ID;
     #[cfg(all(any(feature = "solana", feature = "from-env"), feature = "core"))]
     let _ = crate::CORE_BRIDGE_PROGRAM_ID;
+    // NoReplay is deployed on Solana devnet only.
+    let _ = crate::solana::devnet::NOREPLAY_PROGRAM_ID;
+    #[cfg(all(any(feature = "solana", feature = "from-env"), feature = "noreplay"))]
+    let _ = crate::NOREPLAY_PROGRAM_ID;
 }
 
 #[cfg(test)]
