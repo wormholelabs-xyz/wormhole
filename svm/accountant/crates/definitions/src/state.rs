@@ -63,6 +63,19 @@ pub struct PendingObservationsLayout {
 }
 
 impl PendingObservationsLayout {
+    /// Fresh record with no signatures.
+    pub fn new(chain: u16, guardian_set_index: u32, digest: [u8; 32], payer: Pubkey) -> Self {
+        Self {
+            tag: Self::TAG,
+            _pad0: 0,
+            chain,
+            guardian_set_index,
+            signatures: 0,
+            digest,
+            payer,
+        }
+    }
+
     /// Layout length; also the allocation size.
     pub const LEN: usize = core::mem::size_of::<Self>();
 
@@ -113,6 +126,17 @@ pub struct BalanceAccountLayout {
 
 impl BalanceAccountLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(chain: u16, token_chain: u16, token_address: [u8; 32], balance: Uint256) -> Self {
+        Self {
+            tag: Self::TAG,
+            _pad0: 0,
+            chain,
+            token_chain,
+            token_address,
+            balance,
+        }
+    }
 
     pub const TAG: u8 = AccountTag::Balance as u8;
 
@@ -204,6 +228,16 @@ impl ChainRegistrationLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub const TAG: u8 = AccountTag::ChainRegistration as u8;
+
+    pub fn new(chain: u16, emitter_address: [u8; 32]) -> Self {
+        Self {
+            tag: Self::TAG,
+            _pad0: 0,
+            chain,
+            _padding: [0; 28],
+            emitter_address,
+        }
+    }
 }
 
 const _: () = {
@@ -256,6 +290,28 @@ impl ModifyBalanceLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
     pub const TAG: u8 = AccountTag::Modification as u8;
+
+    pub fn new(
+        kind: ModificationKind,
+        chain_id: u16,
+        token_chain: u16,
+        sequence: u64,
+        token_address: [u8; 32],
+        amount: Uint256,
+        reason: [u8; 32],
+    ) -> Self {
+        Self {
+            tag: Self::TAG,
+            kind: kind as u8,
+            chain_id,
+            token_chain,
+            _pad0: [0; 2],
+            sequence,
+            token_address,
+            amount,
+            reason,
+        }
+    }
 }
 
 const _: () = {

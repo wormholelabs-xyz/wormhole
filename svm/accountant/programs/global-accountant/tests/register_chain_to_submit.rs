@@ -9,10 +9,11 @@
 use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
-        Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
-        CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, NOREPLAY_AUTHORITY_SEED_PREFIX,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
-        TOKEN_BRIDGE_GOVERNANCE_MODULE, VERIFY_VAA_SHIM_PROGRAM_ID,
+        Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -83,7 +84,12 @@ fn derive_noreplay_authority() -> Pubkey {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id()).0
 }
 
-fn derive_noreplay_bucket(authority: &Pubkey, chain: u16, emitter: &[u8; 32], sequence: u64) -> Pubkey {
+fn derive_noreplay_bucket(
+    authority: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> Pubkey {
     let mut namespace = [0u8; 34];
     namespace[..2].copy_from_slice(&chain.to_be_bytes());
     namespace[2..].copy_from_slice(emitter);
@@ -138,11 +144,10 @@ fn build_register_chain_body(
     body
 }
 
-fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[u8]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 1 + 1 + 2 + body.len());
+fn register_chain_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
+    let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::RegisterChain as u8);
     data.push(guardian_set_bump);
-    data.push(registration_bump);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -159,13 +164,17 @@ fn register_chain(
 ) -> Account {
     let body = build_register_chain_body(sequence, chain_to_register, emitter_to_register);
     let digest = double_keccak256_host(&body);
-    let (registration_pda, registration_bump) = derive_chain_registration_pda(chain_to_register);
+    let (registration_pda, _) = derive_chain_registration_pda(chain_to_register);
     let (guardian_set, guardian_set_bump) =
         derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
     let noreplay_authority = derive_noreplay_authority();
-    let noreplay_bucket =
-        derive_noreplay_bucket(&noreplay_authority, SOLANA_CHAIN_ID, &GOVERNANCE_EMITTER, sequence);
+    let noreplay_bucket = derive_noreplay_bucket(
+        &noreplay_authority,
+        SOLANA_CHAIN_ID,
+        &GOVERNANCE_EMITTER,
+        sequence,
+    );
 
     let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
         .map(|i| (i, sign_digest(&guardians[i as usize], &digest)))
@@ -203,7 +212,7 @@ fn register_chain(
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &register_chain_ix_data(guardian_set_bump, registration_bump, &body),
+        &register_chain_ix_data(guardian_set_bump, &body),
         metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -348,7 +357,11 @@ fn register_chain_then_submit_vaas_accepts_written_registration() {
 
     // Source (native) credited.
     let src = find_account(&r.resulting_accounts, &source_account);
-    assert_eq!(src.owner, program_id(), "source Account PDA owned by program");
+    assert_eq!(
+        src.owner,
+        program_id(),
+        "source Account PDA owned by program"
+    );
     let src_layout: &BalanceAccountLayout = bytemuck::from_bytes(&src.data);
     assert_eq!(src_layout.balance, Uint256::from_u128(amount));
 

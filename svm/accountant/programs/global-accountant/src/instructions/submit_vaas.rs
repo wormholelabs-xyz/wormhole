@@ -9,34 +9,21 @@ use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{commit_log, noreplay, shim};
 use accountant_operational_core::ProgramResult;
 
-use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VaaBodyHeader};
+use crate::definitions::{
+    parse_vaa_namespace_key, split_body, GlobalAccountantError, SubmitVaasIxData, VaaBodyHeader,
+};
 use crate::err;
 use crate::instructions::transfer;
 use crate::state::chain_registration;
 
-/// Wire format after the 1-byte discriminator:
-///
-/// | offset | size     | field             |
-/// |--------|----------|-------------------|
-/// | 0      | 1        | guardian_set_bump |
-/// | 1      | 2        | body_len (LE)     |
-/// | 3      | body_len | body              |
-///
-/// `guardian_set_bump` goes to the Shim's `VerifyHash`.
-const SUBMIT_VAAS_FIXED_LEN: usize = 1 + 2;
-
 /// Order: Shim check, NoReplay pre-check, registration check, NoReplay mark,
 /// commit log, balance apply.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if data.len() < SUBMIT_VAAS_FIXED_LEN {
+    let (ix, body_bytes) = split_body::<SubmitVaasIxData>(data).map_err(err)?;
+    if body_bytes.len() <= VaaBodyHeader::LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
-    let guardian_set_bump = data[0];
-    let body_len = u16::from_le_bytes([data[1], data[2]]) as usize;
-    if body_len <= VaaBodyHeader::LEN || data.len() != SUBMIT_VAAS_FIXED_LEN + body_len {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let body_bytes = &data[SUBMIT_VAAS_FIXED_LEN..SUBMIT_VAAS_FIXED_LEN + body_len];
+    let guardian_set_bump = ix.guardian_set_bump;
 
     let digest = double_keccak256(body_bytes);
 

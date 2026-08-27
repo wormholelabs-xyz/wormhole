@@ -16,29 +16,18 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::add_lamports;
 use crate::definitions::{
-    GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    PENDING_OBSERVATIONS_SEED_PREFIX,
+    ClosePendingIxData, GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::noreplay;
 use crate::state::pending;
 use crate::ProgramResult;
 
-/// Instruction-data size after the discriminator.
-const CLOSE_PENDING_DATA_LEN: usize = 32 + 8;
-
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    let data: &[u8; CLOSE_PENDING_DATA_LEN] = data
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let (emitter_bytes, sequence_bytes) = data.split_at(32);
-    let emitter: [u8; 32] = emitter_bytes
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let sequence_be: [u8; 8] = sequence_bytes
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let sequence = u64::from_be_bytes(sequence_be);
+    let ix = ClosePendingIxData::from_bytes(data).map_err(err)?;
+    let emitter = ix.emitter;
+    let sequence = ix.sequence();
 
     // 0 closer (signer), 1 pending PDA (w), 2 rent recipient (w), 3 GuardianSet, 4 NoReplay bucket.
     let [closer, pending_pda, rent_recipient, guardian_set, noreplay_bucket] = accounts else {
@@ -62,7 +51,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
             PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             &emitter,
-            &sequence_be,
+            &ix.sequence,
             &layout.digest,
         ],
         program_id,

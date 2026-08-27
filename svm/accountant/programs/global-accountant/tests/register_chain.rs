@@ -144,12 +144,11 @@ fn build_register_chain_body(
     body
 }
 
-fn register_chain_ix_data(guardian_set_bump: u8, registration_bump: u8, body: &[u8]) -> Vec<u8> {
-    // Wire: discriminator + guardian_set_bump + registration_bump + body_len(u16 LE) + body.
-    let mut data = Vec::with_capacity(1 + 1 + 1 + 2 + body.len());
+fn register_chain_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
+    // Wire: discriminator + guardian_set_bump + body_len(u16 LE) + body.
+    let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());
     data.push(IxDiscriminator::RegisterChain as u8);
     data.push(guardian_set_bump);
-    data.push(registration_bump);
     data.extend_from_slice(&(body.len() as u16).to_le_bytes());
     data.extend_from_slice(body);
     data
@@ -239,7 +238,7 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
         &emitter_to_register,
     );
 
-    let (registration_pda, registration_bump) = derive_chain_registration_pda(chain_to_register);
+    let (registration_pda, _) = derive_chain_registration_pda(chain_to_register);
     let payer = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
     let (guardian_set, guardian_set_bump) =
@@ -278,7 +277,7 @@ fn register_chain_via_governance_vaa_initialises_registration_pda() {
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &register_chain_ix_data(guardian_set_bump, registration_bump, &body),
+        &register_chain_ix_data(guardian_set_bump, &body),
         metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -319,7 +318,7 @@ fn run_register_chain(
     initial_registration: Option<Account>,
     initial_noreplay_bucket: Option<Account>,
 ) -> mollusk_svm::result::InstructionResult {
-    let (registration_pda, registration_bump) = derive_chain_registration_pda(chain_to_register);
+    let (registration_pda, _) = derive_chain_registration_pda(chain_to_register);
     let payer = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
     let (guardian_set, guardian_set_bump) =
@@ -364,7 +363,7 @@ fn run_register_chain(
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &register_chain_ix_data(guardian_set_bump, registration_bump, body),
+        &register_chain_ix_data(guardian_set_bump, body),
         metas,
     );
     mollusk.process_instruction(&ix, &accounts)

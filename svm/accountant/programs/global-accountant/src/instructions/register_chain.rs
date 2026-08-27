@@ -4,45 +4,27 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
+use anchor_lang::solana_program::system_program;
 
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
-use accountant_operational_core::ProgramResult;
+use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
-    ChainRegistrationLayout, GlobalAccountantError, RegisterChainPayload, VaaBodyHeader,
-    CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
-    TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    split_body, ChainRegistrationLayout, GlobalAccountantError, RegisterChainIxData,
+    RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER,
+    SOLANA_CHAIN_ID,
 };
 use crate::err;
 use crate::state::chain_registration;
 
-/// Wire format after the 1-byte discriminator:
-///
-/// | offset | size     | field             |
-/// |--------|----------|-------------------|
-/// | 0      | 1        | guardian_set_bump |
-/// | 1      | 1        | registration_bump |
-/// | 2      | 2        | body_len (LE)     |
-/// | 4      | body_len | body              |
-const REGISTER_CHAIN_FIXED_LEN: usize = 1 + 1 + 2;
-
 /// A `RegisterChain` body is exactly header + payload.
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
 
+/// Order: instruction framing, signer, Shim signature check, governance validation,
+/// NoReplay pre-check, PDA check, write registration, NoReplay mark.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if data.len() < REGISTER_CHAIN_FIXED_LEN {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let guardian_set_bump = data[0];
-    let registration_bump = data[1];
-    let body_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-    if body_len != REGISTER_CHAIN_BODY_LEN || data.len() != REGISTER_CHAIN_FIXED_LEN + body_len {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let body_bytes = &data[REGISTER_CHAIN_FIXED_LEN..REGISTER_CHAIN_FIXED_LEN + body_len];
-
-    let digest = double_keccak256(body_bytes);
+    let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` payer
@@ -59,7 +41,6 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-
     if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
@@ -67,16 +48,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     shim::verify_vaa(
         guardian_set,
         guardian_signatures,
-        &digest,
-        guardian_set_bump,
+        &double_keccak256(body),
+        ix.guardian_set_bump,
     )?;
 
-    let (header, payload) = RegisterChainPayload::from_body(body_bytes).map_err(err)?;
-
-    // SECURITY: the emitter must be `(chain=1, GOVERNANCE_EMITTER)`.
-    if header.emitter_chain() != SOLANA_CHAIN_ID || header.emitter_address != GOVERNANCE_EMITTER {
-        return Err(err(GlobalAccountantError::InvalidGovernanceEmitter));
-    }
+    let (header, payload) = RegisterChainPayload::from_body(body).map_err(err)?;
+    payload.validate(header).map_err(err)?;
     let sequence = header.sequence();
 
     if noreplay::is_marked(
@@ -89,54 +66,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
-    if payload.header.module != TOKEN_BRIDGE_GOVERNANCE_MODULE {
-        return Err(err(GlobalAccountantError::InvalidGovernanceModule));
-    }
-    if payload.header.action != REGISTER_CHAIN_ACTION {
-        return Err(err(GlobalAccountantError::InvalidGovernanceAction));
-    }
-    let target_chain = payload.header.target_chain();
-    if target_chain != 0 && target_chain != SOLANA_CHAIN_ID {
-        return Err(err(GlobalAccountantError::GovernanceChainMismatch));
-    }
-
-    let chain_to_register = payload.chain();
-    let emitter_to_register = payload.emitter_address;
-
-    let chain_be = chain_to_register.to_be_bytes();
-    let (expected_pda, canonical_bump) =
-        Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], program_id);
-    if registration_pda.key != &expected_pda || registration_bump != canonical_bump {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-
-    // First registration creates the PDA; rotation overwrites in place.
-    let owner_is_system =
-        registration_pda.owner == &anchor_lang::solana_program::system_program::ID;
-    if owner_is_system {
-        let bump_seed = [registration_bump];
-        let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be, &bump_seed];
-        init_or_upgrade_pda(
-            payer,
-            registration_pda,
-            program_id,
-            seeds,
-            ChainRegistrationLayout::LEN as u64,
-        )?;
-    } else {
-        if registration_pda.owner != program_id {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
-        if registration_pda.data_len() != ChainRegistrationLayout::LEN {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
-    }
-
-    let mut layout: ChainRegistrationLayout = bytemuck::Zeroable::zeroed();
-    layout.tag = ChainRegistrationLayout::TAG;
-    layout.chain = chain_to_register;
-    layout.emitter_address = emitter_to_register;
-    chain_registration::store(registration_pda, &layout)?;
+    let registration_bump = check_registration_pda(program_id, registration_pda, payload.chain())?;
+    write_registration(
+        program_id,
+        payer,
+        registration_pda,
+        registration_bump,
+        payload,
+    )?;
 
     noreplay::mark_used(
         payer,
@@ -151,4 +88,62 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     Ok(())
+}
+
+/// Instruction data: [`RegisterChainIxData`] prefix then an exact-length body.
+fn parse_instruction(data: &[u8]) -> ProgramCoreResult<(&RegisterChainIxData, &[u8])> {
+    let (ix, body) = split_body::<RegisterChainIxData>(data).map_err(err)?;
+    if body.len() != REGISTER_CHAIN_BODY_LEN {
+        return Err(err(GlobalAccountantError::InvalidInstructionData));
+    }
+    Ok((ix, body))
+}
+
+/// `(b"chain_registration", chain_be)`.
+pub fn derive_registration_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
+        program_id,
+    )
+}
+
+/// `registration_pda` must be the canonical account for `chain`; returns its bump.
+fn check_registration_pda(
+    program_id: &Pubkey,
+    registration_pda: &AccountInfo,
+    chain: u16,
+) -> ProgramCoreResult<u8> {
+    let (expected, bump) = derive_registration_pda(program_id, chain);
+    if registration_pda.key != &expected {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    Ok(bump)
+}
+
+/// First registration creates the PDA; a rotation overwrites it in place.
+fn write_registration<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    registration_pda: &AccountInfo<'info>,
+    registration_bump: u8,
+    payload: &RegisterChainPayload,
+) -> ProgramResult {
+    if registration_pda.owner == &system_program::ID {
+        let bump_seed = [registration_bump];
+        let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &payload.chain, &bump_seed]; // chain BE
+        init_or_upgrade_pda(
+            payer,
+            registration_pda,
+            program_id,
+            seeds,
+            ChainRegistrationLayout::LEN as u64,
+        )?;
+    } else if registration_pda.owner != program_id
+        || registration_pda.data_len() != ChainRegistrationLayout::LEN
+    {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+
+    let layout = ChainRegistrationLayout::new(payload.chain(), payload.emitter_address);
+    chain_registration::store(registration_pda, &layout)
 }
