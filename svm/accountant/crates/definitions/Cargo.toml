@@ -12,9 +12,9 @@ version.workspace = true
 [dependencies]
 bytemuck.workspace = true
 const-crypto.workspace = true
-ruint.workspace = true
 
 [dev-dependencies]
+ruint.workspace = true
 accountant-test-fixtures.workspace = true
 serde_wormhole.workspace = true
 solana-address.workspace = true

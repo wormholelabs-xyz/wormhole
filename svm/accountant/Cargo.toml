@@ -53,11 +53,8 @@ solana-noreplay = { git = "ssh://git@github.com/wormholelabs-xyz/solana-noreplay
 # `find_program_address` needs this feature, enabled here explicitly rather
 # than by accidental unification with another crate's graph.
 solana-address = { version = "=2.6.0", default-features = false, features = ["curve25519"] }
-# 256-bit unsigned integer primitive backing `Uint256`. Pinned exact per the
-# supply-chain rule in CLAUDE.md; `default-features = false` is required so
-# the crate compiles on the SBF target (no `std`). We only consume
-# `checked_add`/`checked_sub` plus the `to_be_bytes` / `from_be_bytes`
-# conversions, so the deactivated features stay deactivated.
+# Reference U256 for the `Uint256` equivalence tests. Dev-only; two packages.
+# 1.20 (fixes RUSTSEC-2026-0220, shift ops we never call) needs Rust 1.90.
 ruint = { version = "=1.17.2", default-features = false }
 # Shim instruction builders; dev-only parity check for `VerifyHashData`.
 wormhole-svm-shim = { path = "../wormhole-core-shims/crates/shim" }
