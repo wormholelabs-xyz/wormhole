@@ -6,10 +6,9 @@
 use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
-        Instruction as IxDiscriminator, Uint256, ACCOUNT_SEED_PREFIX,
+        Instruction as IxDiscriminator, NoReplayBitmapAccount, Uint256, ACCOUNT_SEED_PREFIX,
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, NOREPLAY_AUTHORITY_SEED_PREFIX,
-        NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
-        NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -178,12 +177,12 @@ fn noreplay_bucket_unmarked() -> Account {
 
 /// NoReplay bucket with the bit at `sequence % 1024` set.
 fn noreplay_bucket_marked(sequence: u64) -> Account {
-    let mut data = vec![0u8; NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES];
+    let mut account: NoReplayBitmapAccount = bytemuck::Zeroable::zeroed();
     let bit_index = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
-    data[NOREPLAY_BITMAP_OFFSET + bit_index / 8] |= 1u8 << (bit_index % 8);
+    account.bitmap[bit_index / 8] |= 1u8 << (bit_index % 8);
     Account {
         lamports: 1_500_000_000,
-        data,
+        data: bytemuck::bytes_of(&account).to_vec(),
         owner: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         executable: false,
         rent_epoch: 0,
@@ -376,15 +375,9 @@ fn assert_bucket_marked(bucket: &Account, sequence: u64) {
         Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         "bucket owned by solana_noreplay after MarkUsed"
     );
-    assert_eq!(
-        bucket.data.len(),
-        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES,
-        "bucket sized to bitmap layout"
-    );
-    let bit = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
-    let byte = NOREPLAY_BITMAP_OFFSET + bit / 8;
-    let mask = 1u8 << (bit % 8);
-    assert_eq!(bucket.data[byte] & mask, mask, "bitmap bit set");
+    let account =
+        NoReplayBitmapAccount::from_bytes(&bucket.data).expect("bucket sized to bitmap layout");
+    assert!(account.is_marked(sequence), "bitmap bit set");
 }
 
 /// Assert the bucket is uninitialised.
@@ -413,7 +406,11 @@ fn submit_vaas_transfer_commits_balances_and_opens_digest() {
     let initial = scenario.initial_accounts();
     for pda in [scenario.source_account_pubkey, scenario.dest_account_pubkey] {
         let pre = find_account(&initial, &pda);
-        assert_eq!(pre.owner, system_program_id(), "Account PDA starts system-owned");
+        assert_eq!(
+            pre.owner,
+            system_program_id(),
+            "Account PDA starts system-owned"
+        );
         assert!(pre.data.is_empty(), "Account PDA starts with zero data");
     }
 
@@ -657,7 +654,7 @@ fn submit_vaas_rejects_wrong_emitter_for_registered_chain() {
     }
 }
 
-/// Body of 51 bytes: `InvalidInstructionData` from the `body_len <= VAA_BODY_HEADER_LEN` gate.
+/// Body of 51 bytes: `InvalidInstructionData` from the `body_len <= VaaBodyHeader::LEN` gate.
 #[test]
 fn submit_vaas_with_short_body_rejects() {
     let mollusk = mollusk();

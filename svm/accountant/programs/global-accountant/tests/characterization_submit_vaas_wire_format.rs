@@ -6,10 +6,10 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, ChainRegistrationLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID,
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITMAP_OFFSET,
-        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
+        BalanceAccountLayout, ChainRegistrationLayout, NoReplayBitmapAccount, Uint256,
+        ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID,
+        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
+        VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -124,7 +124,12 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     )
 }
 
-fn derive_noreplay_bucket(authority: &Pubkey, chain: u16, emitter: &[u8; 32], sequence: u64) -> Pubkey {
+fn derive_noreplay_bucket(
+    authority: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> Pubkey {
     let mut namespace = [0u8; 34];
     namespace[..2].copy_from_slice(&chain.to_be_bytes());
     namespace[2..].copy_from_slice(emitter);
@@ -195,8 +200,7 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         SEQUENCE,
     );
     let (source_account_pubkey, _) = derive_account_pda(EMITTER_CHAIN, TOKEN_CHAIN, &TOKEN_ADDRESS);
-    let (dest_account_pubkey, _) =
-        derive_account_pda(RECIPIENT_CHAIN, TOKEN_CHAIN, &TOKEN_ADDRESS);
+    let (dest_account_pubkey, _) = derive_account_pda(RECIPIENT_CHAIN, TOKEN_CHAIN, &TOKEN_ADDRESS);
     let (chain_registration_pubkey, _) = derive_chain_registration_pda(EMITTER_CHAIN);
 
     // (1) Instruction bytes.
@@ -222,7 +226,11 @@ fn characterize_submit_vaas_happy_path_wire_format() {
         AccountMeta::new_readonly(system_program_id(), false),
         AccountMeta::new_readonly(chain_registration_pubkey, false),
     ];
-    assert_eq!(account_metas.len(), 11, "submit_vaas takes exactly 11 accounts");
+    assert_eq!(
+        account_metas.len(),
+        11,
+        "submit_vaas takes exactly 11 accounts"
+    );
     let expected_flags: [(bool, bool); 11] = [
         (true, true),   // 0 submitter: writable, signer
         (false, false), // 1 shim program: readonly
@@ -286,9 +294,9 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     // NoReplay bucket: 129 bytes, owned by solana-noreplay, only bit `SEQUENCE % 1024` set.
     let bucket = find_account(&result.resulting_accounts, &noreplay_bucket_pubkey);
     assert_eq!(bucket.owner, noreplay_program_id());
-    assert_eq!(bucket.data.len(), NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES);
+    let account = NoReplayBitmapAccount::from_bytes(&bucket.data).expect("129-byte bitmap account");
     let bit = (SEQUENCE % NOREPLAY_BITS_PER_BUCKET) as usize;
-    for (i, byte) in bucket.data[NOREPLAY_BITMAP_OFFSET..].iter().enumerate() {
+    for (i, byte) in account.bitmap.iter().enumerate() {
         let expected_byte = if i == bit / 8 { 1u8 << (bit % 8) } else { 0u8 };
         assert_eq!(*byte, expected_byte, "bitmap byte {i} exact content");
     }
@@ -324,7 +332,10 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     // Registration PDA: read only.
     let reg = find_account(&result.resulting_accounts, &chain_registration_pubkey);
     assert_eq!(reg.owner, program_id());
-    assert_eq!(reg.data, chain_registration_account(EMITTER_CHAIN, &EMITTER_ADDRESS).data);
+    assert_eq!(
+        reg.data,
+        chain_registration_account(EMITTER_CHAIN, &EMITTER_ADDRESS).data
+    );
 
     // Submitter paid rent for two PDAs and the bucket; balance decreased from 50_000_000_000.
     let submitter_post = find_account(&result.resulting_accounts, &submitter);
@@ -343,7 +354,13 @@ fn characterize_submit_vaas_happy_path_wire_format() {
     ] {
         let pre = find_account(&initial_accounts, &key);
         let post = find_account(&result.resulting_accounts, &key);
-        assert_eq!(pre.data, post.data, "read-only account {key} data unchanged");
-        assert_eq!(pre.owner, post.owner, "read-only account {key} owner unchanged");
+        assert_eq!(
+            pre.data, post.data,
+            "read-only account {key} data unchanged"
+        );
+        assert_eq!(
+            pre.owner, post.owner,
+            "read-only account {key} owner unchanged"
+        );
     }
 }

@@ -4,7 +4,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke;
 
-use crate::definitions::{VERIFY_HASH_DATA_LEN, VERIFY_HASH_SELECTOR, VERIFY_VAA_SHIM_PROGRAM_ID};
+use crate::definitions::{VerifyHashData, VERIFY_VAA_SHIM_PROGRAM_ID};
 use crate::ProgramResult;
 
 /// Check `digest` through the Shim's `VerifyHash`.
@@ -22,11 +22,7 @@ pub fn verify_vaa<'info>(
 ) -> ProgramResult {
     let shim_program_id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
 
-    // [0..8] selector, [8] guardian_set_bump, [9..41] digest.
-    let mut ix_data = [0u8; VERIFY_HASH_DATA_LEN];
-    ix_data[..8].copy_from_slice(&VERIFY_HASH_SELECTOR);
-    ix_data[8] = guardian_set_bump;
-    ix_data[9..].copy_from_slice(digest);
+    let ix_data = VerifyHashData::new(guardian_set_bump, *digest);
 
     let ix_accounts = vec![
         AccountMeta::new_readonly(*guardian_set.key, false),
@@ -36,8 +32,11 @@ pub fn verify_vaa<'info>(
     let instruction = Instruction {
         program_id: shim_program_id,
         accounts: ix_accounts,
-        data: ix_data.to_vec(),
+        data: ix_data.as_bytes().to_vec(),
     };
 
-    invoke(&instruction, &[guardian_set.clone(), guardian_signatures.clone()])
+    invoke(
+        &instruction,
+        &[guardian_set.clone(), guardian_signatures.clone()],
+    )
 }

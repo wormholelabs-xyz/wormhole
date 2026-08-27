@@ -5,8 +5,12 @@
 
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 pub mod constants;
 pub mod error;
+pub mod governance;
 pub mod instruction;
 pub mod primitives;
 pub mod state;
@@ -14,6 +18,7 @@ pub mod vaa;
 
 pub use constants::*;
 pub use error::*;
+pub use governance::*;
 pub use instruction::*;
 pub use primitives::*;
 pub use state::*;

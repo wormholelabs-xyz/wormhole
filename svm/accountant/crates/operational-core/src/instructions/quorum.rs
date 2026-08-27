@@ -6,7 +6,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::{add_lamports, close_account};
 use crate::definitions::{
-    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
+    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout, VaaBodyHeader,
     CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
@@ -35,8 +35,8 @@ pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 /// Guardian key: `keccak256(uncompressed_pk)[12..]`.
 const GUARDIAN_PUBKEY_LEN: usize = 20;
 
-/// 51-byte header + 1-byte action.
-pub const BODY_MIN_LEN: usize = 52;
+/// Header plus a non-empty payload; `payload[0]` is the Token Bridge action byte.
+pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
 
 /// Parsed prefix plus the body-header routing tuple. Build with [`Self::from_data`],
 /// set `digest`, then call [`Self::populate_routing_from_body`].
@@ -305,8 +305,9 @@ pub fn verify_signature(
         return Err(err(GlobalAccountantError::InvalidSignature));
     }
 
-    let recovered = solana_secp256k1_recover::secp256k1_recover(digest, recovery_id, &signature[..64])
-        .map_err(|_| err(GlobalAccountantError::InvalidSignature))?;
+    let recovered =
+        solana_secp256k1_recover::secp256k1_recover(digest, recovery_id, &signature[..64])
+            .map_err(|_| err(GlobalAccountantError::InvalidSignature))?;
 
     let hash = keccak256(&recovered.0);
     if hash[12..] != expected_key[..] {

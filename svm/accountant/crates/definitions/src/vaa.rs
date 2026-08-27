@@ -3,73 +3,119 @@
 //! Wire layouts follow `sdk/vaa/structs.go` (`Unmarshal`,
 //! `DecodeTransferPayloadHdr`).
 
+use bytemuck::{Pod, Zeroable};
+
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
-
-/// VAA body header length: timestamp (4) + nonce (4) + emitter_chain (2)
-/// + emitter_address (32) + sequence (8) + consistency_level (1).
-pub const VAA_BODY_HEADER_LEN: usize = 51;
-
-// Body header field offsets.
-const EMITTER_CHAIN_OFFSET: usize = 8;
-const EMITTER_ADDRESS_OFFSET: usize = 10;
-const SEQUENCE_OFFSET: usize = 42;
-const CONSISTENCY_LEVEL_OFFSET: usize = 50;
-
-// Token Bridge payload field offsets, relative to the payload start.
-const ACTION_OFFSET: usize = 0;
-const AMOUNT_OFFSET: usize = 1;
-const TOKEN_ADDRESS_OFFSET: usize = 33;
-const TOKEN_CHAIN_OFFSET: usize = 65;
-const RECIPIENT_OFFSET: usize = 67;
-const RECIPIENT_CHAIN_OFFSET: usize = 99;
-const FEE_OFFSET: usize = 101;
-/// Minimum transfer payload length: action 0x01 is exactly this long;
-/// action 0x03 appends an arbitrary payload.
-const TRANSFER_PAYLOAD_MIN: usize = 133;
 
 const ACTION_TRANSFER: u8 = 0x01;
 const ACTION_ATTEST: u8 = 0x02;
 const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
 
-// Field offsets must tile the header and the transfer payload without gaps.
-const _: () = {
-    assert!(EMITTER_CHAIN_OFFSET == 4 + 4);
-    assert!(EMITTER_CHAIN_OFFSET + 2 == EMITTER_ADDRESS_OFFSET);
-    assert!(EMITTER_ADDRESS_OFFSET + 32 == SEQUENCE_OFFSET);
-    assert!(SEQUENCE_OFFSET + 8 == CONSISTENCY_LEVEL_OFFSET);
-    assert!(CONSISTENCY_LEVEL_OFFSET + 1 == VAA_BODY_HEADER_LEN);
+/// Zero-copy view of the 51-byte VAA body header. All fields are byte arrays,
+/// so the struct has alignment 1 and no padding; big-endian decoding happens
+/// in the accessors.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct VaaBodyHeader {
+    pub timestamp: [u8; 4],
+    pub nonce: [u8; 4],
+    pub emitter_chain: [u8; 2],
+    pub emitter_address: [u8; 32],
+    pub sequence: [u8; 8],
+    pub consistency_level: u8,
+}
 
-    assert!(ACTION_OFFSET + 1 == AMOUNT_OFFSET);
-    assert!(AMOUNT_OFFSET + 32 == TOKEN_ADDRESS_OFFSET);
-    assert!(TOKEN_ADDRESS_OFFSET + 32 == TOKEN_CHAIN_OFFSET);
-    assert!(TOKEN_CHAIN_OFFSET + 2 == RECIPIENT_OFFSET);
-    assert!(RECIPIENT_OFFSET + 32 == RECIPIENT_CHAIN_OFFSET);
-    assert!(RECIPIENT_CHAIN_OFFSET + 2 == FEE_OFFSET);
-    assert!(FEE_OFFSET + 32 == TRANSFER_PAYLOAD_MIN);
-    // Guardian SDK `DecodeTransferPayloadHdr` requires 101 bytes; 133 is a superset.
-    assert!(TRANSFER_PAYLOAD_MIN >= FEE_OFFSET);
+const _: () = {
+    use core::mem::offset_of;
+    assert!(VaaBodyHeader::LEN == 51);
+    assert!(offset_of!(VaaBodyHeader, emitter_chain) == 8);
+    assert!(offset_of!(VaaBodyHeader, emitter_address) == 10);
+    assert!(offset_of!(VaaBodyHeader, sequence) == 42);
+    assert!(offset_of!(VaaBodyHeader, consistency_level) == 50);
 };
 
-/// Copy `N` bytes at `offset` into a fixed array. Returns `None` when `buf`
-/// is too short.
-#[inline]
-fn read_array<const N: usize>(buf: &[u8], offset: usize) -> Option<[u8; N]> {
-    let end = offset.checked_add(N)?;
-    buf.get(offset..end)?.try_into().ok()
+impl VaaBodyHeader {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Split `body` into the header view and the payload.
+    ///
+    /// SECURITY: precondition `body.len() >= 51`; otherwise
+    /// `InvalidInstructionData`. Cannot panic.
+    pub fn split(body: &[u8]) -> Result<(&Self, &[u8]), GlobalAccountantError> {
+        let (head, payload) = body
+            .split_at_checked(Self::LEN)
+            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+        let header = bytemuck::try_from_bytes(head)
+            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
+        Ok((header, payload))
+    }
+
+    pub fn emitter_chain(&self) -> u16 {
+        u16::from_be_bytes(self.emitter_chain)
+    }
+
+    pub fn sequence(&self) -> u64 {
+        u64::from_be_bytes(self.sequence)
+    }
+
+    pub fn namespace_key(&self) -> VaaNamespaceKey {
+        VaaNamespaceKey {
+            chain: self.emitter_chain(),
+            emitter: self.emitter_address,
+            sequence: self.sequence(),
+        }
+    }
+}
+
+/// Zero-copy view of the fixed 133-byte head of a Token Bridge transfer
+/// payload (action 0x01 is exactly this; 0x03 appends an arbitrary payload).
+/// Layout per `sdk/vaa/structs.go` `DecodeTransferPayloadHdr`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct TokenBridgeTransfer {
+    pub action: u8,
+    pub amount: [u8; 32],
+    pub token_address: [u8; 32],
+    pub token_chain: [u8; 2],
+    pub recipient: [u8; 32],
+    pub recipient_chain: [u8; 2],
+    pub fee: [u8; 32],
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(TokenBridgeTransfer::LEN == 133);
+    assert!(offset_of!(TokenBridgeTransfer, amount) == 1);
+    assert!(offset_of!(TokenBridgeTransfer, token_address) == 33);
+    assert!(offset_of!(TokenBridgeTransfer, token_chain) == 65);
+    assert!(offset_of!(TokenBridgeTransfer, recipient) == 67);
+    assert!(offset_of!(TokenBridgeTransfer, recipient_chain) == 99);
+    // Guardian SDK `DecodeTransferPayloadHdr` requires 101 bytes; 133 is a superset.
+    assert!(offset_of!(TokenBridgeTransfer, fee) == 101);
+};
+
+impl TokenBridgeTransfer {
+    /// Action 0x01 is exactly this long; action 0x03 appends an arbitrary payload.
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn token_chain(&self) -> u16 {
+        u16::from_be_bytes(self.token_chain)
+    }
+
+    pub fn recipient_chain(&self) -> u16 {
+        u16::from_be_bytes(self.recipient_chain)
+    }
 }
 
 /// Replay-protection key from the VAA body header. `chain` and `emitter`
 /// select the noreplay namespace; `sequence` indexes the bitmap. The triple
 /// keys the pending PDA, the noreplay slot, and the commit log.
-/// [`parse_vaa_namespace_key`] is the single source of these offsets.
+/// [`VaaBodyHeader`] is the single source of these offsets.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VaaNamespaceKey {
-    /// `emitter_chain`, body bytes `[8..10]` (u16 BE).
     pub chain: u16,
-    /// `emitter_address`, body bytes `[10..42]`.
     pub emitter: [u8; 32],
-    /// `sequence`, body bytes `[42..50]` (u64 BE).
     pub sequence: u64,
 }
 
@@ -82,23 +128,8 @@ pub struct VaaNamespaceKey {
 /// SECURITY: postcondition: the returned fields are byte-exact copies of body
 /// bytes `[8..10]`, `[10..42]`, `[42..50]`.
 pub fn parse_vaa_namespace_key(body: &[u8]) -> Result<VaaNamespaceKey, GlobalAccountantError> {
-    let header: &[u8; VAA_BODY_HEADER_LEN] = body
-        .get(..VAA_BODY_HEADER_LEN)
-        .and_then(|h| h.try_into().ok())
-        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-
-    let chain = read_array::<2>(header, EMITTER_CHAIN_OFFSET)
-        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-    let emitter = read_array::<32>(header, EMITTER_ADDRESS_OFFSET)
-        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-    let sequence = read_array::<8>(header, SEQUENCE_OFFSET)
-        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-
-    Ok(VaaNamespaceKey {
-        chain: u16::from_be_bytes(chain),
-        emitter,
-        sequence: u64::from_be_bytes(sequence),
-    })
+    let (header, _payload) = VaaBodyHeader::split(body)?;
+    Ok(header.namespace_key())
 }
 
 /// Decoded Token Bridge payload. Carries only the fields the accountant
@@ -123,30 +154,7 @@ pub enum TokenBridgeAction {
 
 /// Parse the payload at `body[51..]` into a [`TokenBridgeAction`].
 ///
-/// VAA body layout:
-///
-/// | offset | size | field              |
-/// |--------|------|--------------------|
-/// | 0      | 4    | timestamp (u32 BE) |
-/// | 4      | 4    | nonce (u32 BE)     |
-/// | 8      | 2    | emitter_chain      |
-/// | 10     | 32   | emitter_address    |
-/// | 42     | 8    | sequence (u64 BE)  |
-/// | 50     | 1    | consistency_level  |
-/// | 51..   | rest | payload            |
-///
-/// Token Bridge transfer payload, offsets relative to 51:
-///
-/// | offset | size | field            |
-/// |--------|------|------------------|
-/// | 0      | 1    | action           |
-/// | 1      | 32   | amount (Uint256) |
-/// | 33     | 32   | token_address    |
-/// | 65     | 2    | token_chain      |
-/// | 67     | 32   | recipient        |
-/// | 99     | 2    | recipient_chain  |
-/// | 101    | 32   | fee              |
-/// | 133..  | rest | extra (0x03)     |
+/// Layouts: [`VaaBodyHeader`], [`TokenBridgeTransfer`].
 ///
 /// SECURITY: precondition `body.len() >= 52`; transfer actions require
 /// `payload.len() >= 133`. Short input returns `InvalidInstructionData`.
@@ -156,31 +164,23 @@ pub enum TokenBridgeAction {
 /// `>= 133` rule. Do not tighten to `== 133`: a stricter parser here would
 /// reject a VAA the network already accounted and fork balance state.
 pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
-    let payload = body
-        .get(VAA_BODY_HEADER_LEN..)
-        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+    let (_header, payload) = VaaBodyHeader::split(body)?;
     let action = *payload
-        .get(ACTION_OFFSET)
+        .first()
         .ok_or(GlobalAccountantError::InvalidInstructionData)?;
 
     match action {
         ACTION_TRANSFER | ACTION_TRANSFER_WITH_PAYLOAD => {
-            if payload.len() < TRANSFER_PAYLOAD_MIN {
-                return Err(GlobalAccountantError::InvalidInstructionData);
-            }
-            let amount = read_array::<32>(payload, AMOUNT_OFFSET)
+            let head = payload
+                .get(..TokenBridgeTransfer::LEN)
                 .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-            let token_address = read_array::<32>(payload, TOKEN_ADDRESS_OFFSET)
-                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-            let token_chain = read_array::<2>(payload, TOKEN_CHAIN_OFFSET)
-                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-            let recipient_chain = read_array::<2>(payload, RECIPIENT_CHAIN_OFFSET)
-                .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+            let transfer: &TokenBridgeTransfer = bytemuck::try_from_bytes(head)
+                .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
             Ok(TokenBridgeAction::Transfer {
-                amount: Uint256::from_be_bytes(amount),
-                token_chain: u16::from_be_bytes(token_chain),
-                token_address,
-                recipient_chain: u16::from_be_bytes(recipient_chain),
+                amount: Uint256::from_be_bytes(transfer.amount),
+                token_chain: transfer.token_chain(),
+                token_address: transfer.token_address,
+                recipient_chain: transfer.recipient_chain(),
             })
         }
         ACTION_ATTEST => Ok(TokenBridgeAction::Attest),
@@ -192,24 +192,10 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
 mod tests {
     use super::*;
 
-    const HDR: usize = VAA_BODY_HEADER_LEN;
-    const MIN_TRANSFER_BODY: usize = HDR + TRANSFER_PAYLOAD_MIN; // 184
+    const HDR: usize = VaaBodyHeader::LEN;
+    const MIN_TRANSFER_BODY: usize = HDR + TokenBridgeTransfer::LEN; // 184
 
-    /// Mainnet VAAs, envelope included (13 signatures, body at 6 + 66 * 13).
-    const FIXTURE_TRANSFER_SEQ1395207: &[u8] = include_bytes!(
-        "../../../programs/global-accountant/tests/fixtures/mainnet_solana_token_bridge_transfer_seq1395207.vaa"
-    );
-    const FIXTURE_OTHER_SEQ2211: &[u8] = include_bytes!(
-        "../../../programs/global-accountant/tests/fixtures/mainnet_solana_token_bridge_seq2211.vaa"
-    );
-
-    /// Strip the VAA envelope: version (1) + guardian set index (4) +
-    /// signature count (1) + 66 bytes per signature.
-    fn fixture_body(vaa: &[u8]) -> &[u8] {
-        let n_sigs = vaa[5] as usize;
-        assert_eq!(n_sigs, 13, "fixtures carry 13 signatures");
-        &vaa[6 + 66 * n_sigs..]
-    }
+    use accountant_test_fixtures::{MAINNET_OTHER_SEQ2211, MAINNET_TRANSFER_SEQ1395207};
 
     /// Body with a 133-byte transfer payload; recipient bytes are marked to
     /// catch off-by-one reads.
@@ -430,7 +416,7 @@ mod tests {
 
     #[test]
     fn mainnet_transfer_fixture_decodes() {
-        let body = fixture_body(FIXTURE_TRANSFER_SEQ1395207);
+        let body = MAINNET_TRANSFER_SEQ1395207.body();
         assert_eq!(body.len(), MIN_TRANSFER_BODY);
 
         let key = parse_vaa_namespace_key(body).unwrap();
@@ -466,7 +452,7 @@ mod tests {
 
     #[test]
     fn mainnet_non_token_bridge_fixture_is_other() {
-        let body = fixture_body(FIXTURE_OTHER_SEQ2211);
+        let body = MAINNET_OTHER_SEQ2211.body();
         let key = parse_vaa_namespace_key(body).unwrap();
         assert_eq!(key.chain, 1);
         assert_eq!(key.sequence, 2211);
@@ -489,13 +475,20 @@ mod tests {
             ("target_address", 67),
             ("target_chain", 99),
         ];
+        use core::mem::offset_of;
         let ours = [
-            ("type", ACTION_OFFSET),
-            ("amount", AMOUNT_OFFSET),
-            ("origin_address", TOKEN_ADDRESS_OFFSET),
-            ("origin_chain", TOKEN_CHAIN_OFFSET),
-            ("target_address", RECIPIENT_OFFSET),
-            ("target_chain", RECIPIENT_CHAIN_OFFSET),
+            ("type", offset_of!(TokenBridgeTransfer, action)),
+            ("amount", offset_of!(TokenBridgeTransfer, amount)),
+            (
+                "origin_address",
+                offset_of!(TokenBridgeTransfer, token_address),
+            ),
+            ("origin_chain", offset_of!(TokenBridgeTransfer, token_chain)),
+            ("target_address", offset_of!(TokenBridgeTransfer, recipient)),
+            (
+                "target_chain",
+                offset_of!(TokenBridgeTransfer, recipient_chain),
+            ),
         ];
         assert_eq!(go_sdk, ours);
     }

@@ -18,10 +18,7 @@ pub fn load(account: &AccountInfo) -> crate::ProgramCoreResult<PendingObservatio
     Ok(*layout)
 }
 
-pub fn store(
-    account: &AccountInfo,
-    value: &PendingObservationsLayout,
-) -> crate::ProgramResult {
+pub fn store(account: &AccountInfo, value: &PendingObservationsLayout) -> crate::ProgramResult {
     let mut data = account.try_borrow_mut_data()?;
     if data.len() != PendingObservationsLayout::LEN {
         return Err(err(GlobalAccountantError::InvalidPda));

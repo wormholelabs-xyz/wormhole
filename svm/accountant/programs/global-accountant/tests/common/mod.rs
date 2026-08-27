@@ -221,28 +221,17 @@ pub fn so_path(name: &str) -> PathBuf {
         .join(format!("{name}.so"))
 }
 
-/// `solana_noreplay.so`: the hash-pinned fixture, or `GA_NOREPLAY_SO` (skips the hash check).
+/// `solana_noreplay.so`: the pinned fixture, or `GA_NOREPLAY_SO` (unchecked).
 pub fn noreplay_so_path() -> PathBuf {
-    if let Ok(p) = std::env::var("GA_NOREPLAY_SO") {
-        return PathBuf::from(p);
+    match std::env::var("GA_NOREPLAY_SO") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => accountant_test_fixtures::NOREPLAY_SO.path().to_path_buf(),
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/solana_noreplay.so")
 }
 
-/// `wormhole_verify_vaa_shim.so`: the hash-pinned fixture, or `GA_VERIFY_VAA_SHIM_SO`
-/// (skips the hash check).
-pub fn verify_vaa_shim_so_path() -> PathBuf {
-    if let Ok(p) = std::env::var("GA_VERIFY_VAA_SHIM_SO") {
-        return PathBuf::from(p);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wormhole_verify_vaa_shim.so")
-}
-
-/// `solana-noreplay` program ID (`repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`).
-pub const NOREPLAY_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
-    0x0c, 0xb8, 0x38, 0x00, 0x73, 0xdf, 0x36, 0x25, 0xa1, 0x32, 0x11, 0x1f, 0xee, 0x67, 0x8d, 0xd0,
-    0x6b, 0x7e, 0x3d, 0xf2, 0x90, 0xa2, 0xb1, 0xd5, 0x4a, 0x48, 0x5b, 0xdb, 0x72, 0x61, 0x82, 0x91,
-]);
+/// `solana-noreplay` program ID, same compile-time source as the program under test.
+pub const NOREPLAY_PROGRAM_ID: Pubkey =
+    Pubkey::new_from_array(global_accountant_definitions::NOREPLAY_PROGRAM_ID);
 
 /// NoReplay bitmap PDA for `(authority, namespace, sequence)`. Seeds:
 /// `[authority, namespace[..min(len, 32)], namespace[min(len, 32)..], (sequence / 1024) LE]`.
@@ -401,14 +390,9 @@ impl ParsedVaa {
     }
 }
 
-/// Load and parse `tests/fixtures/<name>`. Panics on a missing file or bad format.
-pub fn load_vaa_fixture(name: &str) -> ParsedVaa {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name);
-    let bytes =
-        std::fs::read(&path).unwrap_or_else(|e| panic!("read VAA fixture {}: {e}", path.display()));
-    parse_vaa(&bytes).unwrap_or_else(|e| panic!("parse VAA fixture {}: {e}", path.display()))
+/// Parse an embedded VAA fixture. Panics on a bad format.
+pub fn load_vaa_fixture(vaa: &accountant_test_fixtures::Vaa) -> ParsedVaa {
+    parse_vaa(vaa.bytes).unwrap_or_else(|e| panic!("parse VAA fixture: {e}"))
 }
 
 /// Pure parser for in-memory blobs.
@@ -464,7 +448,7 @@ fn double_keccak(body: &[u8]) -> [u8; 32] {
 }
 
 /// Fetch the logs for `tx_sig`. Assert exactly one `Program data:` line decodes to the
-/// `commit_log::emit` payload. Layout: `ACCOUNTANT_DIGEST_LOG_TAG` / `_LEN`.
+/// `commit_log::emit` payload (`AccountantDigestLog`).
 pub fn assert_canonical_log_in_tx(
     rpc_url: &str,
     tx_sig: &str,
@@ -475,7 +459,7 @@ pub fn assert_canonical_log_in_tx(
     expected_guardian_set_index: u32,
 ) {
     use base64::Engine;
-    use global_accountant_definitions::{ACCOUNTANT_DIGEST_LOG_LEN, ACCOUNTANT_DIGEST_LOG_TAG};
+    use global_accountant_definitions::{AccountantDigestLog, ACCOUNTANT_DIGEST_LOG_TAG};
 
     // Indexing can lag a slot.
     let mut last_resp = serde_json::Value::Null;
@@ -519,25 +503,23 @@ pub fn assert_canonical_log_in_tx(
         if bytes.len() < 8 || bytes[..8] != ACCOUNTANT_DIGEST_LOG_TAG {
             continue;
         }
-        assert_eq!(
-            bytes.len(),
-            ACCOUNTANT_DIGEST_LOG_LEN,
-            "commit-log payload size mismatch"
-        );
-        let chain = u16::from_be_bytes([bytes[8], bytes[9]]);
-        let mut emitter = [0u8; 32];
-        emitter.copy_from_slice(&bytes[10..42]);
-        let sequence = u64::from_be_bytes(bytes[42..50].try_into().unwrap());
-        let mut digest = [0u8; 32];
-        digest.copy_from_slice(&bytes[50..82]);
-        let gsi = u32::from_le_bytes(bytes[82..86].try_into().unwrap());
+        let entry = AccountantDigestLog::from_bytes(&bytes)
+            .unwrap_or_else(|| panic!("commit-log payload malformed: {} bytes", bytes.len()));
 
-        assert_eq!(chain, expected_chain, "commit-log chain mismatch");
-        assert_eq!(&emitter, expected_emitter, "commit-log emitter mismatch");
-        assert_eq!(sequence, expected_sequence, "commit-log sequence mismatch");
-        assert_eq!(&digest, expected_digest, "commit-log digest mismatch");
+        assert_eq!(entry.chain(), expected_chain, "commit-log chain mismatch");
         assert_eq!(
-            gsi, expected_guardian_set_index,
+            &entry.emitter, expected_emitter,
+            "commit-log emitter mismatch"
+        );
+        assert_eq!(
+            entry.sequence(),
+            expected_sequence,
+            "commit-log sequence mismatch"
+        );
+        assert_eq!(&entry.digest, expected_digest, "commit-log digest mismatch");
+        assert_eq!(
+            entry.guardian_set_index(),
+            expected_guardian_set_index,
             "commit-log guardian_set_index mismatch"
         );
         matched += 1;

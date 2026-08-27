@@ -11,7 +11,7 @@ fn corpus_fixtures_parse_and_digest_consistently() {
         0x76, 0x28, 0x97, 0x05, 0x45, 0x80, 0x71, 0xc7, 0xdd, 0xbe, 0xf8, 0x05, 0x49, 0x9a, 0x05,
         0x41, 0x16,
     ];
-    let baseline = load_vaa_fixture("mainnet_solana_token_bridge_seq2211.vaa");
+    let baseline = load_vaa_fixture(&accountant_test_fixtures::MAINNET_OTHER_SEQ2211);
     assert_eq!(
         baseline.digest, SEQ_2211_EXPECTED_DIGEST,
         "seq 2211 digest pinned"
@@ -27,7 +27,7 @@ fn corpus_fixtures_parse_and_digest_consistently() {
         0xf7, 0x54, 0xa7, 0x73, 0x49, 0x02, 0x2d, 0x0a, 0x64, 0xf1, 0x39, 0x62, 0x07, 0x8f, 0x63,
         0x2a, 0x39,
     ];
-    let transfer = load_vaa_fixture("mainnet_solana_token_bridge_transfer_seq1395207.vaa");
+    let transfer = load_vaa_fixture(&accountant_test_fixtures::MAINNET_TRANSFER_SEQ1395207);
     assert_eq!(transfer.guardian_set_index, 6);
     assert!(transfer.num_signatures >= 13);
     assert_eq!(

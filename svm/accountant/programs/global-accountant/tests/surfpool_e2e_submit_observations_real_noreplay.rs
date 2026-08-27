@@ -32,12 +32,6 @@ use common::{
     noreplay_so_path, so_path, start_surfpool, SurfpoolOptions, NOREPLAY_PROGRAM_ID,
 };
 
-/// Mirror of `solana-noreplay::state::BITS_PER_BUCKET`.
-const BITS_PER_BUCKET: u64 = 1024;
-
-/// Bitmap offset in the 129-byte NoReplay PDA; byte 0 is the bump.
-const NOREPLAY_BITMAP_OFFSET: usize = 1;
-
 #[derive(Clone)]
 struct Guardian {
     secret: SecretKey,
@@ -366,12 +360,12 @@ fn surfpool_submit_observations_real_noreplay() {
         bitmap_after.owner, NOREPLAY_PROGRAM_ID,
         "bitmap PDA owned by noreplay program"
     );
-    assert_eq!(bitmap_after.data.len(), 129, "bitmap PDA is 129 bytes");
-    let bit_index = (sequence % BITS_PER_BUCKET) as usize;
-    let byte = bitmap_after.data[NOREPLAY_BITMAP_OFFSET + bit_index / 8];
+    let bitmap =
+        global_accountant_definitions::NoReplayBitmapAccount::from_bytes(&bitmap_after.data)
+            .expect("bitmap PDA is 129 bytes");
     assert!(
-        byte & (1 << (bit_index % 8)) != 0,
-        "bit {bit_index} set in the bitmap post-quorum"
+        bitmap.is_marked(sequence),
+        "bit set in the bitmap post-quorum"
     );
 
     // 14th submission: `AlreadyAccounted` (0x7).

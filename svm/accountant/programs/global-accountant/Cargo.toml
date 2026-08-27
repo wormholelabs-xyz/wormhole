@@ -39,6 +39,7 @@ global-accountant-definitions.workspace = true
 solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
 
 [dev-dependencies]
+accountant-test-fixtures.workspace = true
 mollusk-svm.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true
@@ -68,11 +69,8 @@ serde_json.workspace = true
 # name it to assert builtin error codes (e.g. `InvalidAccountData`) via the full
 # `u64` encoding.
 solana-program-error = "=3.0.1"
-# Hash-pinned `.so` fixtures live under `tests/fixtures/`. The mollusk-side
-# test harness verifies each fixture's SHA-256 against a hard-coded constant
-# before passing the bytes to mollusk; drift (an unintended rebuild of a
-# sibling program ending up in the fixtures dir) surfaces as a panic with
-# the recompute-and-update recipe in the failure message.
+# Verifies the SHA-256 of each `accountant-test-fixtures` program binary before
+# mollusk loads it.
 sha2 = "=0.10.9"
 # Base64 decoder for the surfpool e2e `meta.logMessages` walk that asserts
 # the canonical commit log emitted by `instructions::commit_log`. Already in

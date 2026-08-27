@@ -6,11 +6,10 @@
 use {
     global_accountant_definitions::{
         BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError,
-        Instruction as IxDiscriminator, PendingObservationsLayout, Uint256, ACCOUNT_SEED_PREFIX,
-        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
-        NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
-        PENDING_OBSERVATIONS_SEED_PREFIX, SUBMIT_OBSERVATION_PREFIX,
+        Instruction as IxDiscriminator, NoReplayBitmapAccount, PendingObservationsLayout, Uint256,
+        ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID,
+        GUARDIAN_SET_SEED, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
+        NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX, SUBMIT_OBSERVATION_PREFIX,
     },
     libsecp256k1::{sign, Message, PublicKey, SecretKey},
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -62,7 +61,11 @@ fn derive_pending_pda(
     )
 }
 
-fn derive_balance_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> (Pubkey, u8) {
+fn derive_balance_account_pda(
+    chain: u16,
+    token_chain: u16,
+    token_address: &[u8; 32],
+) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
@@ -212,12 +215,12 @@ fn noreplay_bucket_unmarked() -> Account {
 
 /// NoReplay bucket with the bit at `sequence % 1024` set.
 fn noreplay_bucket_marked(sequence: u64) -> Account {
-    let mut data = vec![0u8; NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES];
+    let mut account: NoReplayBitmapAccount = bytemuck::Zeroable::zeroed();
     let bit_index = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
-    data[NOREPLAY_BITMAP_OFFSET + bit_index / 8] |= 1u8 << (bit_index % 8);
+    account.bitmap[bit_index / 8] |= 1u8 << (bit_index % 8);
     Account {
         lamports: 1_500_000_000,
-        data,
+        data: bytemuck::bytes_of(&account).to_vec(),
         owner: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         executable: false,
         rent_epoch: 0,
@@ -600,19 +603,9 @@ fn submit_13th_observation_reaches_quorum_and_commits() {
         Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         "bucket owned by solana_noreplay after MarkUsed"
     );
-    assert_eq!(
-        bucket.data.len(),
-        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES,
-        "bucket data sized to bitmap layout"
-    );
-    let bit = (scenario.sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
-    let byte = NOREPLAY_BITMAP_OFFSET + bit / 8;
-    let mask = 1u8 << (bit % 8);
-    assert_eq!(
-        bucket.data[byte] & mask,
-        mask,
-        "bitmap bit set on quorum reach"
-    );
+    let account = NoReplayBitmapAccount::from_bytes(&bucket.data)
+        .expect("bucket data sized to bitmap layout");
+    assert!(account.is_marked(scenario.sequence), "bitmap bit set");
 }
 
 /// Rent refunds to the recorded payer, not the completing signer.
@@ -637,12 +630,7 @@ fn submit_observations_quorum_with_different_submitter_refunds_recorded_payer() 
     accounts.push((bob, system_owned_account(bob_starting_lamports)));
 
     let signature = sign_digest(&scenario.guardians[12], &scenario.signing_digest);
-    let ix_data = submit_ix_data(
-        scenario.guardian_set_index,
-        12,
-        &signature,
-        &scenario.body,
-    );
+    let ix_data = submit_ix_data(scenario.guardian_set_index, 12, &signature, &scenario.body);
 
     // Wrong rent_recipient.
     let wrong_metas = vec![
@@ -845,12 +833,7 @@ fn submit_observations_rejects_unregistered_chain() {
     ];
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            scenario.guardian_set_index,
-            0,
-            &signature,
-            &scenario.body,
-        ),
+        &submit_ix_data(scenario.guardian_set_index, 0, &signature, &scenario.body),
         metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -886,12 +869,7 @@ fn submit_observations_rejects_wrong_emitter_for_registered_chain() {
     let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            scenario.guardian_set_index,
-            0,
-            &signature,
-            &scenario.body,
-        ),
+        &submit_ix_data(scenario.guardian_set_index, 0, &signature, &scenario.body),
         scenario.account_metas(),
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -927,12 +905,7 @@ fn submit_observations_rejects_spoofed_registration_pda() {
     let signature = sign_digest(&scenario.guardians[0], &scenario.signing_digest);
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            scenario.guardian_set_index,
-            0,
-            &signature,
-            &scenario.body,
-        ),
+        &submit_ix_data(scenario.guardian_set_index, 0, &signature, &scenario.body),
         metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -960,12 +933,7 @@ fn submit_with_invalid_signature_fails() {
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            scenario.guardian_set_index,
-            0,
-            &signature,
-            &scenario.body,
-        ),
+        &submit_ix_data(scenario.guardian_set_index, 0, &signature, &scenario.body),
         scenario.account_metas(),
     );
     let result = mollusk.process_instruction(&ix, &scenario.initial_accounts());
@@ -992,12 +960,7 @@ fn submit_with_recovery_id_4_rejects() {
 
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            scenario.guardian_set_index,
-            0,
-            &signature,
-            &scenario.body,
-        ),
+        &submit_ix_data(scenario.guardian_set_index, 0, &signature, &scenario.body),
         scenario.account_metas(),
     );
     let result = mollusk.process_instruction(&ix, &scenario.initial_accounts());
@@ -1302,12 +1265,7 @@ fn submit_with_different_digest_under_same_set_creates_sibling_bucket() {
     metas[1] = AccountMeta::new(d2_pending_pda, false); // slot 1 = D2 sibling
     let ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_ix_data(
-            scenario.guardian_set_index,
-            1,
-            &signature,
-            &alternate_body,
-        ),
+        &submit_ix_data(scenario.guardian_set_index, 1, &signature, &alternate_body),
         metas,
     );
     let r = mollusk.process_instruction(&ix, &accounts);
@@ -1374,18 +1332,15 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
     accounts.push((d2_pending_pda, uninitialised_pda_account()));
 
     for i in 0..13u8 {
-        let signature =
-            sign_digest(&scenario.guardians[i as usize], &signing_digest_for(&alternate_body));
+        let signature = sign_digest(
+            &scenario.guardians[i as usize],
+            &signing_digest_for(&alternate_body),
+        );
         let mut metas = scenario.account_metas();
         metas[1] = AccountMeta::new(d2_pending_pda, false);
         let ix = Instruction::new_with_bytes(
             program_id(),
-            &submit_ix_data(
-                scenario.guardian_set_index,
-                i,
-                &signature,
-                &alternate_body,
-            ),
+            &submit_ix_data(scenario.guardian_set_index, i, &signature, &alternate_body),
             metas,
         );
         let r = mollusk.process_instruction(&ix, &accounts);
@@ -1403,10 +1358,7 @@ fn fork_recovery_different_digest_same_seq_under_same_set_both_accumulate() {
         Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         "NoReplay flipped on D2 quorum reach (shared bucket across siblings)"
     );
-    assert_eq!(
-        bucket.data.len(),
-        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES
-    );
+    assert_eq!(bucket.data.len(), NoReplayBitmapAccount::LEN);
 
     // Mollusk hides program logs; the surfpool e2e suite checks the commit log.
 
@@ -1541,7 +1493,11 @@ fn quorum_with_transfer_credits_native_chain_and_mints_wrapped_chain() {
     let initial = scenario.initial_accounts();
     for pda in [scenario.source_account_pubkey, scenario.dest_account_pubkey] {
         let pre = find_account(&initial, &pda);
-        assert_eq!(pre.owner, system_program_id(), "Account PDA starts system-owned");
+        assert_eq!(
+            pre.owner,
+            system_program_id(),
+            "Account PDA starts system-owned"
+        );
         assert!(pre.data.is_empty(), "Account PDA starts with zero data");
     }
 

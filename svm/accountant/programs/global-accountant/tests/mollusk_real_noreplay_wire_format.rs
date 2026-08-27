@@ -7,8 +7,8 @@
 
 use {
     global_accountant_definitions::{
-        ChainRegistrationLayout, Instruction as IxDiscriminator, CHAIN_REGISTRATION_SEED_PREFIX,
-        NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET,
+        ChainRegistrationLayout, Instruction as IxDiscriminator, NoReplayBitmapAccount,
+        CHAIN_REGISTRATION_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
         NOREPLAY_PROGRAM_ID, PENDING_OBSERVATIONS_SEED_PREFIX, SUBMIT_OBSERVATION_PREFIX,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -304,17 +304,11 @@ fn submit_observations_quorum_marks_real_noreplay_bitmap() {
         Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         "noreplay bucket must be owned by solana_noreplay after MarkUsed"
     );
-    assert_eq!(
-        bucket.data.len(),
-        NOREPLAY_BITMAP_OFFSET + (NOREPLAY_BITS_PER_BUCKET as usize) / 8,
-        "noreplay bucket must be 129 bytes ([bump: u8][bitmap: 128 B])"
-    );
+    let account = NoReplayBitmapAccount::from_bytes(&bucket.data)
+        .expect("noreplay bucket must be 129 bytes ([bump: u8][bitmap: 128 B])");
     let bit_index = (SEQUENCE % NOREPLAY_BITS_PER_BUCKET) as usize;
-    let byte_offset = NOREPLAY_BITMAP_OFFSET + bit_index / 8;
-    let bit_mask = 1u8 << (bit_index % 8);
-    assert_eq!(
-        bucket.data[byte_offset] & bit_mask,
-        bit_mask,
-        "noreplay bitmap bit for sequence {SEQUENCE} must be set"
+    assert!(
+        account.is_marked(SEQUENCE),
+        "bit {bit_index} must be set after MarkUsed"
     );
 }

@@ -36,12 +36,7 @@ borsh = "=1.5.7"
 solana-secp256k1-recover = "=3.2.0"
 global-accountant-definitions = { path = "crates/definitions" }
 accountant-operational-core = { path = "crates/operational-core" }
-# 256-bit unsigned integer primitive backing `Uint256`. Pinned exact per the
-# supply-chain rule in CLAUDE.md; `default-features = false` is required so
-# the crate compiles on the SBF target (no `std`). We only consume
-# `checked_add`/`checked_sub` plus the `to_be_bytes` / `from_be_bytes`
-# conversions, so the deactivated features stay deactivated.
-ruint = { version = "=1.17.2", default-features = false }
+accountant-test-fixtures = { path = "crates/test-fixtures" }
 # Compile-time base58 decoding for external program IDs. `no_std`, two const
 # hashing deps. Same version the in-tree `wormhole-svm-definitions` crate uses.
 const-crypto = "=0.3.0"
@@ -58,6 +53,15 @@ solana-noreplay = { git = "ssh://git@github.com/wormholelabs-xyz/solana-noreplay
 # `find_program_address` needs this feature, enabled here explicitly rather
 # than by accidental unification with another crate's graph.
 solana-address = { version = "=2.6.0", default-features = false, features = ["curve25519"] }
+# 256-bit unsigned integer primitive backing `Uint256`. Pinned exact per the
+# supply-chain rule in CLAUDE.md; `default-features = false` is required so
+# the crate compiles on the SBF target (no `std`). We only consume
+# `checked_add`/`checked_sub` plus the `to_be_bytes` / `from_be_bytes`
+# conversions, so the deactivated features stay deactivated.
+ruint = { version = "=1.17.2", default-features = false }
+# Shim instruction builders; dev-only parity check for `VerifyHashData`.
+wormhole-svm-shim = { path = "../wormhole-core-shims/crates/shim" }
+solana-program = "=2.3.0"
 wormhole-svm-definitions = { path = "../wormhole-core-shims/crates/definitions", features = ["solana", "verify-vaa-shim"] }
 
 # Test-only dependencies. Kept in workspace so versions stay aligned.
