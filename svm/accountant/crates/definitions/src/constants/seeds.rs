@@ -12,9 +12,9 @@ pub const ACCOUNT_SEED_PREFIX: &[u8] = b"account";
 /// Seed prefix for [`crate::ChainRegistrationLayout`]: `(b"chain_registration", chain_be)`.
 pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
 
-/// Seed prefix for [`crate::ModifyBalanceLayout`]: `(b"modification", sequence_be)`.
+/// Seed prefix for [`crate::ModifyBalanceLayout`]: `(b"modify_balance", sequence_be)`.
 /// PDA existence is the governance-path replay protection.
-pub const MODIFICATION_SEED_PREFIX: &[u8] = b"modification";
+pub const MODIFY_BALANCE_SEED_PREFIX: &[u8] = b"modify_balance";
 
 /// Seed for the authority PDA that signs all NoReplay CPIs: `[b"noreplay_authority"]`.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";

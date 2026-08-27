@@ -23,8 +23,8 @@ pub mod instructions;
 pub mod raw_ix_data;
 pub mod state;
 
-pub use global_accountant_definitions as definitions;
 pub use accountant_operational_core::err;
+pub use global_accountant_definitions as definitions;
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
@@ -72,7 +72,13 @@ pub mod global_accountant {
     pub fn close_pending(ctx: Context<ClosePending>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
             ctx.accounts,
-            [closer, pending_pda, rent_recipient, guardian_set, noreplay_bucket]
+            [
+                closer,
+                pending_pda,
+                rent_recipient,
+                guardian_set,
+                noreplay_bucket
+            ]
         );
         accountant_operational_core::instructions::close_pending::process(
             ctx.program_id,
@@ -138,7 +144,7 @@ pub mod global_accountant {
                 guardian_signatures,
                 balance_pda,
                 system_program,
-                modification_pda,
+                modify_balance_pda,
             ]
         );
         crate::instructions::modify_balance::process(ctx.program_id, &accounts, &ix_data.0)?;

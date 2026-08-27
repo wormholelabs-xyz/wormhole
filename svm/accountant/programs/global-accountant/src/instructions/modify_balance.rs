@@ -1,5 +1,5 @@
 //! `modify_balance`: accountant governance. Applies an Add or Subtract delta to a
-//! `BalanceAccount` PDA. A per-sequence `Modification` PDA is the replay guard.
+//! `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the replay guard.
 //! Accepts target chain `SOLANA_CHAIN_ID` only.
 
 use anchor_lang::prelude::*;
@@ -8,12 +8,14 @@ use anchor_lang::solana_program::system_program;
 
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
-use accountant_operational_core::state::{account as balance_account, modification};
+use accountant_operational_core::state::{
+    account as balance_account, modify_balance as modify_balance_record,
+};
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
     split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
-    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFICATION_SEED_PREFIX,
+    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFY_BALANCE_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::transfer::derive_balance_account_pda;
@@ -33,8 +35,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   3. `[]`              `GuardianSignatures` PDA
     //   4. `[WRITE]`         `BalanceAccount` PDA
     //   5. `[]`              system program
-    //   6. `[WRITE]`         `Modification` PDA
-    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program, modification_pda] =
+    //   6. `[WRITE]`         `ModifyBalance` PDA
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program, modify_balance_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -55,19 +57,19 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     let balance_bump = check_balance_pda(program_id, balance_pda, payload)?;
     let modification_bump =
-        check_modification_pda(program_id, modification_pda, payload.sequence())?;
+        check_modify_balance_pda(program_id, modify_balance_pda, payload.sequence())?;
 
     apply_delta(program_id, payer, balance_pda, balance_bump, payload, kind)?;
-    record_modification(
+    record_modify_balance(
         program_id,
         payer,
-        modification_pda,
+        modify_balance_pda,
         modification_bump,
         payload,
         kind,
     )?;
 
-    log_modification(
+    log_modify_balance(
         payload.sequence(),
         payload.chain_id(),
         kind as u8,
@@ -103,27 +105,27 @@ fn check_balance_pda(
     Ok(bump)
 }
 
-/// `modification_pda` must be the canonical account for `sequence` and must not exist yet
+/// `modify_balance_pda` must be the canonical account for `sequence` and must not exist yet
 /// (replay guard); returns its bump.
-fn check_modification_pda(
+fn check_modify_balance_pda(
     program_id: &Pubkey,
-    modification_pda: &AccountInfo,
+    modify_balance_pda: &AccountInfo,
     sequence: u64,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_modification_pda(program_id, sequence);
-    if modification_pda.key != &expected {
+    let (expected, bump) = derive_modify_balance_pda(program_id, sequence);
+    if modify_balance_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    if modification_pda.owner != &system_program::ID {
-        return Err(err(GlobalAccountantError::DuplicateModification));
+    if modify_balance_pda.owner != &system_program::ID {
+        return Err(err(GlobalAccountantError::DuplicateModifyBalance));
     }
     Ok(bump)
 }
 
-/// `(b"modification", sequence_be)`.
-pub fn derive_modification_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
+/// `(b"modify_balance", sequence_be)`.
+pub fn derive_modify_balance_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
     Pubkey::find_program_address(
-        &[MODIFICATION_SEED_PREFIX, &sequence.to_be_bytes()],
+        &[MODIFY_BALANCE_SEED_PREFIX, &sequence.to_be_bytes()],
         program_id,
     )
 }
@@ -165,20 +167,20 @@ fn apply_delta<'info>(
     balance_account::store(balance_pda, &layout)
 }
 
-/// Create the `Modification` PDA and write the record.
-fn record_modification<'info>(
+/// Create the `ModifyBalance` PDA and write the record.
+fn record_modify_balance<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
-    modification_pda: &AccountInfo<'info>,
+    modify_balance_pda: &AccountInfo<'info>,
     modification_bump: u8,
     payload: &ModifyBalancePayload,
     kind: ModificationKind,
 ) -> ProgramResult {
     let bump_seed = [modification_bump];
-    let seeds: &[&[u8]] = &[MODIFICATION_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
+    let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
     init_or_upgrade_pda(
         payer,
-        modification_pda,
+        modify_balance_pda,
         program_id,
         seeds,
         ModifyBalanceLayout::LEN as u64,
@@ -193,11 +195,11 @@ fn record_modification<'info>(
         payload.amount(),
         payload.reason,
     );
-    modification::store(modification_pda, &record)
+    modify_balance_record::store(modify_balance_pda, &record)
 }
 
 /// Log the modification for off-chain indexers.
-fn log_modification(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {
+fn log_modify_balance(sequence: u64, chain_id: u16, kind: u8, reason: &[u8; 32]) {
     msg!(
         "modification sequence={} chain_id={} kind={}",
         sequence,
