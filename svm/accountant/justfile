@@ -11,7 +11,7 @@ export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 # `solana-noreplay`. A missing variable is a build error; plain `cargo` outside
 # `just` needs them exported. Values below are the test environment: mainnet
 # Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay (its
-# only deployment).
+# only deployment). A release build must set all three from one network.
 export BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
 export VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
 export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
@@ -38,20 +38,10 @@ build:
 [doc("Alias preserved for backwards-compatibility with existing scripts.")]
 build-prod: build
 
-# The mollusk suite CPIs into the real `solana_noreplay.so` replay-protection
-# bitmap program. The canonical `.so` is hash-pinned under
-# `programs/global-accountant/tests/fixtures/`. The mollusk test harness
-# verifies its SHA-256 against a hard-coded constant in
-# `tests/common/mollusk_fixtures.rs` before loading; drift panics with the
-# recompute-and-update recipe inline in the failure message.
-#
-# To intentionally regenerate a fixture:
-#   1. Build the upstream program (cd <sibling-repo> && cargo build-sbf).
-#   2. Copy the resulting .so over tests/fixtures/<name>.so.
-#   3. Recompute the digest:
-#        shasum -a 256 programs/global-accountant/tests/fixtures/<name>.so
-#   4. Update the corresponding *_SO_SHA256 constant in mollusk_fixtures.rs.
-#   5. Commit both the .so and the const update in the same change.
+# The mollusk suite CPIs into the real `solana_noreplay.so` and
+# `wormhole_verify_vaa_shim.so`, embedded by `crates/test-fixtures` with a
+# pinned SHA-256 each; drift panics with the regen recipe (see that crate's
+# `src/lib.rs`).
 #
 # For local iteration without rebaking the fixture, point an env override at
 # your locally-built .so:

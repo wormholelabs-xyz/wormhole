@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "accountant-test-fixtures"
+version = "0.1.0"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2159,6 +2163,7 @@ name = "global-accountant"
 version = "0.1.0"
 dependencies = [
  "accountant-operational-core",
+ "accountant-test-fixtures",
  "anchor-lang",
  "base64 0.22.1",
  "borsh 1.5.7",
@@ -2187,13 +2192,16 @@ dependencies = [
 name = "global-accountant-definitions"
 version = "0.1.0"
 dependencies = [
+ "accountant-test-fixtures",
  "bytemuck",
  "const-crypto",
  "ruint",
  "serde_wormhole",
  "solana-address 2.6.0",
  "solana-noreplay",
+ "solana-program",
  "wormhole-svm-definitions",
+ "wormhole-svm-shim",
  "wormhole-vaas-serde",
 ]
 
@@ -8166,6 +8174,14 @@ dependencies = [
  "const-crypto",
  "sha2-const-stable",
  "solana-program",
+]
+
+[[package]]
+name = "wormhole-svm-shim"
+version = "0.1.0"
+dependencies = [
+ "solana-program",
+ "wormhole-svm-definitions",
 ]
 
 [[package]]

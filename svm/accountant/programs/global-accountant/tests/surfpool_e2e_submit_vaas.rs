@@ -242,7 +242,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         noreplay_bytes.len()
     );
 
-    let vaa = load_vaa_fixture("mainnet_solana_token_bridge_transfer_seq1395207.vaa");
+    let vaa = load_vaa_fixture(&accountant_test_fixtures::MAINNET_TRANSFER_SEQ1395207);
     eprintln!(
         "[submit-vaas-e2e] VAA gsi={} chain={} sequence={} digest={}",
         vaa.guardian_set_index,

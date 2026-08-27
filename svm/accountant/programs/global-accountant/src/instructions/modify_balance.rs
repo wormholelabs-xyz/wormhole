@@ -11,9 +11,10 @@ use accountant_operational_core::state::{account as balance_account, modificatio
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceLayout, Uint256,
-    ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER,
-    MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
+    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceLayout,
+    ModifyBalancePayload, Uint256, VaaBodyHeader, ACCOUNTANT_GOVERNANCE_MODULE,
+    ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION,
+    SOLANA_CHAIN_ID,
 };
 use crate::err;
 
@@ -28,40 +29,8 @@ use crate::err;
 /// `guardian_set_bump` goes to the Shim's `VerifyHash`.
 const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 2;
 
-/// Body size cap. A `ModifyBalance` body is 195 bytes.
-const MODIFY_BALANCE_BODY_MAX: usize = 256;
-
-/// VAA body header offsets.
-const BODY_EMITTER_CHAIN_OFFSET: usize = 8;
-const BODY_EMITTER_ADDRESS_OFFSET: usize = 10;
-const BODY_HEADER_LEN: usize = 51;
-
-/// Payload offsets from the body start:
-///
-/// | offset                | size | field          |
-/// |-----------------------|------|----------------|
-/// | BODY_HEADER_LEN       | 32   | module         |
-/// | +32                   | 1    | action         |
-/// | +33                   | 2    | target_chain   |
-/// | +35                   | 8    | payload_seq    |
-/// | +43                   | 2    | chain_id       |
-/// | +45                   | 2    | token_chain    |
-/// | +47                   | 32   | token_address  |
-/// | +79                   | 1    | kind           |
-/// | +80                   | 32   | amount         |
-/// | +112                  | 32   | reason         |
-const PAYLOAD_MODULE_OFFSET: usize = BODY_HEADER_LEN;
-const PAYLOAD_ACTION_OFFSET: usize = BODY_HEADER_LEN + 32;
-const PAYLOAD_TARGET_CHAIN_OFFSET: usize = BODY_HEADER_LEN + 33;
-const PAYLOAD_SEQUENCE_OFFSET: usize = BODY_HEADER_LEN + 35;
-const PAYLOAD_CHAIN_ID_OFFSET: usize = BODY_HEADER_LEN + 43;
-const PAYLOAD_TOKEN_CHAIN_OFFSET: usize = BODY_HEADER_LEN + 45;
-const PAYLOAD_TOKEN_ADDRESS_OFFSET: usize = BODY_HEADER_LEN + 47;
-const PAYLOAD_KIND_OFFSET: usize = BODY_HEADER_LEN + 79;
-const PAYLOAD_AMOUNT_OFFSET: usize = BODY_HEADER_LEN + 80;
-const PAYLOAD_REASON_OFFSET: usize = BODY_HEADER_LEN + 112;
-const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 8 + 2 + 2 + 32 + 1 + 32 + 32;
-const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
+/// A `ModifyBalance` body is exactly header + payload.
+const MODIFY_BALANCE_BODY_LEN: usize = VaaBodyHeader::LEN + ModifyBalancePayload::LEN;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if data.len() < MODIFY_BALANCE_FIXED_LEN {
@@ -69,9 +38,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
     let guardian_set_bump = data[0];
     let body_len = u16::from_le_bytes([data[1], data[2]]) as usize;
-    if !(BODY_MIN_LEN..=MODIFY_BALANCE_BODY_MAX).contains(&body_len)
-        || data.len() != MODIFY_BALANCE_FIXED_LEN + body_len
-    {
+    if body_len != MODIFY_BALANCE_BODY_LEN || data.len() != MODIFY_BALANCE_FIXED_LEN + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let body_bytes = &data[MODIFY_BALANCE_FIXED_LEN..MODIFY_BALANCE_FIXED_LEN + body_len];
@@ -103,58 +70,32 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set_bump,
     )?;
 
+    let (header, payload) = ModifyBalancePayload::from_body(body_bytes).map_err(err)?;
+
     // SECURITY: the emitter must be `(chain=1, GOVERNANCE_EMITTER)`.
-    let body_emitter_chain = u16::from_be_bytes([
-        body_bytes[BODY_EMITTER_CHAIN_OFFSET],
-        body_bytes[BODY_EMITTER_CHAIN_OFFSET + 1],
-    ]);
-    if body_emitter_chain != SOLANA_CHAIN_ID
-        || body_bytes[BODY_EMITTER_ADDRESS_OFFSET..BODY_EMITTER_ADDRESS_OFFSET + 32]
-            != GOVERNANCE_EMITTER
-    {
+    if header.emitter_chain() != SOLANA_CHAIN_ID || header.emitter_address != GOVERNANCE_EMITTER {
         return Err(err(GlobalAccountantError::InvalidGovernanceEmitter));
     }
 
-    if body_bytes[PAYLOAD_MODULE_OFFSET..PAYLOAD_MODULE_OFFSET + 32] != ACCOUNTANT_GOVERNANCE_MODULE
-    {
+    if payload.header.module != ACCOUNTANT_GOVERNANCE_MODULE {
         return Err(err(GlobalAccountantError::InvalidGovernanceModule));
     }
-    if body_bytes[PAYLOAD_ACTION_OFFSET] != MODIFY_BALANCE_ACTION {
+    if payload.header.action != MODIFY_BALANCE_ACTION {
         return Err(err(GlobalAccountantError::InvalidGovernanceAction));
     }
-    let target_chain = u16::from_be_bytes([
-        body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
-        body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
-    ]);
-    if target_chain != SOLANA_CHAIN_ID {
+    if payload.header.target_chain() != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
-    let kind_byte = body_bytes[PAYLOAD_KIND_OFFSET];
+    let kind_byte = payload.kind;
     let kind = ModificationKind::from_u8(kind_byte)
         .ok_or_else(|| err(GlobalAccountantError::InvalidModificationKind))?;
 
-    let payload_sequence = u64::from_be_bytes(
-        body_bytes[PAYLOAD_SEQUENCE_OFFSET..PAYLOAD_SEQUENCE_OFFSET + 8]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?,
-    );
-    let chain_id = u16::from_be_bytes([
-        body_bytes[PAYLOAD_CHAIN_ID_OFFSET],
-        body_bytes[PAYLOAD_CHAIN_ID_OFFSET + 1],
-    ]);
-    let token_chain = u16::from_be_bytes([
-        body_bytes[PAYLOAD_TOKEN_CHAIN_OFFSET],
-        body_bytes[PAYLOAD_TOKEN_CHAIN_OFFSET + 1],
-    ]);
-    let mut token_address = [0u8; 32];
-    token_address.copy_from_slice(
-        &body_bytes[PAYLOAD_TOKEN_ADDRESS_OFFSET..PAYLOAD_TOKEN_ADDRESS_OFFSET + 32],
-    );
-    let mut amount_bytes = [0u8; 32];
-    amount_bytes.copy_from_slice(&body_bytes[PAYLOAD_AMOUNT_OFFSET..PAYLOAD_AMOUNT_OFFSET + 32]);
-    let amount = Uint256(amount_bytes);
-    let mut reason = [0u8; 32];
-    reason.copy_from_slice(&body_bytes[PAYLOAD_REASON_OFFSET..PAYLOAD_REASON_OFFSET + 32]);
+    let payload_sequence = payload.sequence();
+    let chain_id = payload.chain_id();
+    let token_chain = payload.token_chain();
+    let token_address = payload.token_address;
+    let amount = payload.amount();
+    let reason = payload.reason;
 
     let chain_id_be = chain_id.to_be_bytes();
     let token_chain_be = token_chain.to_be_bytes();

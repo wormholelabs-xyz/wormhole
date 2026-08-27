@@ -9,12 +9,11 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator, Uint256,
-        ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
-        CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
-        MODIFY_BALANCE_ACTION, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES,
-        NOREPLAY_BITMAP_OFFSET, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, SOLANA_CHAIN_ID,
-        VERIFY_VAA_SHIM_PROGRAM_ID,
+        BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
+        NoReplayBitmapAccount, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
+        CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER,
+        MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, NOREPLAY_AUTHORITY_SEED_PREFIX,
+        NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, SOLANA_CHAIN_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -227,7 +226,12 @@ fn real_guardian_signatures_account(
     let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
         .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
         .collect();
-    guardian_signatures_account(GUARDIAN_SET_INDEX, refund_recipient, &sigs, &shim_program_id())
+    guardian_signatures_account(
+        GUARDIAN_SET_INDEX,
+        refund_recipient,
+        &sigs,
+        &shim_program_id(),
+    )
 }
 
 fn real_guardian_set_account(guardians: &[Guardian]) -> Account {
@@ -251,20 +255,22 @@ fn balance_of(accounts: &[(Pubkey, Account)], key: &Pubkey) -> Uint256 {
 
 /// Assert the NoReplay bucket is uninitialised (tx rolled back).
 fn assert_bucket_unmarked(bucket: &Account) {
-    assert_eq!(bucket.owner, system_program_id(), "bucket still system-owned");
+    assert_eq!(
+        bucket.owner,
+        system_program_id(),
+        "bucket still system-owned"
+    );
     assert!(bucket.data.is_empty(), "bucket still uninitialised");
 }
 
 fn assert_bucket_marked(bucket: &Account, sequence: u64) {
-    assert_eq!(bucket.owner, noreplay_program_id(), "bucket owned by noreplay");
     assert_eq!(
-        bucket.data.len(),
-        NOREPLAY_BITMAP_OFFSET + NOREPLAY_BITMAP_BYTES
+        bucket.owner,
+        noreplay_program_id(),
+        "bucket owned by noreplay"
     );
-    let bit = (sequence % NOREPLAY_BITS_PER_BUCKET) as usize;
-    let byte = NOREPLAY_BITMAP_OFFSET + bit / 8;
-    let mask = 1u8 << (bit % 8);
-    assert_eq!(bucket.data[byte] & mask, mask, "bitmap bit set");
+    let account = NoReplayBitmapAccount::from_bytes(&bucket.data).expect("129-byte bitmap account");
+    assert!(account.is_marked(sequence), "bitmap bit set");
 }
 
 fn extract_code(result: &ProgramResult) -> u32 {
@@ -309,11 +315,21 @@ impl TransferCase {
     }
 
     fn dest_pubkey(&self) -> Pubkey {
-        self.dest_override
-            .unwrap_or_else(|| derive_account_pda(self.recipient_chain, self.token_chain, &self.token_address).0)
+        self.dest_override.unwrap_or_else(|| {
+            derive_account_pda(self.recipient_chain, self.token_chain, &self.token_address).0
+        })
     }
 
-    fn run(&self, mollusk: &Mollusk) -> (mollusk_svm::result::InstructionResult, Pubkey, Pubkey, Pubkey, Vec<AccountMeta>) {
+    fn run(
+        &self,
+        mollusk: &Mollusk,
+    ) -> (
+        mollusk_svm::result::InstructionResult,
+        Pubkey,
+        Pubkey,
+        Pubkey,
+        Vec<AccountMeta>,
+    ) {
         let body = self.body();
         let digest = double_keccak256_host(&body);
 
@@ -363,7 +379,12 @@ impl TransferCase {
         ];
 
         let source_state = match self.source_prefund {
-            Some(bal) => balance_account(self.emitter_chain, self.token_chain, &self.token_address, bal),
+            Some(bal) => balance_account(
+                self.emitter_chain,
+                self.token_chain,
+                &self.token_address,
+                bal,
+            ),
             None => uninitialised_pda_account(),
         };
         accounts.push((source_pubkey, source_state));
@@ -371,9 +392,12 @@ impl TransferCase {
         // Dest slot; omitted when it equals the source PDA.
         if dest_pubkey != source_pubkey {
             let dest_state = match self.dest_prefund {
-                Some(bal) => {
-                    balance_account(self.recipient_chain, self.token_chain, &self.token_address, bal)
-                }
+                Some(bal) => balance_account(
+                    self.recipient_chain,
+                    self.token_chain,
+                    &self.token_address,
+                    bal,
+                ),
                 None => uninitialised_pda_account(),
             };
             accounts.push((dest_pubkey, dest_state));
@@ -405,12 +429,17 @@ fn self_transfer_native_collapse_nets_to_prefunded_balance() {
     let token_address = [0x71u8; 32];
     let case = TransferCase {
         emitter_chain: 2,
-        emitter: { let mut e = [0u8; 32]; e[0] = 0xB0; e[31] = 0x77; e },
+        emitter: {
+            let mut e = [0u8; 32];
+            e[0] = 0xB0;
+            e[31] = 0x77;
+            e
+        },
         sequence: 0x42,
         amount: 500_000,
-        token_chain: 2,       // native: chain == token_chain
+        token_chain: 2, // native: chain == token_chain
         token_address,
-        recipient_chain: 2,   // same chain ⇒ same PDA
+        recipient_chain: 2, // same chain ⇒ same PDA
         dest_override: None,
         source_prefund: Some(Uint256::from_u128(1_000_000)),
         dest_prefund: None,
@@ -436,7 +465,10 @@ fn self_transfer_native_collapse_nets_to_prefunded_balance() {
         "collapse applied both ops to one layout: 1_000_000 + 500_000 - 500_000"
     );
 
-    assert_bucket_marked(find_account(&result.resulting_accounts, &bucket), case.sequence);
+    assert_bucket_marked(
+        find_account(&result.resulting_accounts, &bucket),
+        case.sequence,
+    );
 }
 
 /// Same-chain wrapped self-transfer: `lock_or_burn` debits first. Balance below `amount`
@@ -447,12 +479,17 @@ fn self_transfer_wrapped_collapse_transient_underflow_rejects() {
     let token_address = [0x72u8; 32];
     let case = TransferCase {
         emitter_chain: 2,
-        emitter: { let mut e = [0u8; 32]; e[0] = 0xB1; e[31] = 0x77; e },
+        emitter: {
+            let mut e = [0u8; 32];
+            e[0] = 0xB1;
+            e[31] = 0x77;
+            e
+        },
         sequence: 0x43,
         amount: 1_000,
-        token_chain: 3,       // wrapped: chain (2) != token_chain (3)
+        token_chain: 3, // wrapped: chain (2) != token_chain (3)
         token_address,
-        recipient_chain: 2,   // same chain ⇒ same PDA
+        recipient_chain: 2, // same chain ⇒ same PDA
         dest_override: None,
         // Wrapped balance 100 < amount 1_000.
         source_prefund: Some(Uint256::from_u128(100)),
@@ -485,12 +522,17 @@ fn dest_overflow_rolls_back_source_mutation() {
     let source_initial = Uint256::from_u128(1_000);
     let case = TransferCase {
         emitter_chain: 2,
-        emitter: { let mut e = [0u8; 32]; e[0] = 0xB2; e[31] = 0x77; e },
+        emitter: {
+            let mut e = [0u8; 32];
+            e[0] = 0xB2;
+            e[31] = 0x77;
+            e
+        },
         sequence: 0x44,
         amount: 500,
-        token_chain: 2,       // source native (chain 2 == token_chain 2): credit
+        token_chain: 2, // source native (chain 2 == token_chain 2): credit
         token_address,
-        recipient_chain: 1,   // dest wrapped (chain 1 != token_chain 2): credit
+        recipient_chain: 1, // dest wrapped (chain 1 != token_chain 2): credit
         dest_override: None,
         source_prefund: Some(source_initial),
         // Dest at MAX.
@@ -531,10 +573,15 @@ fn dest_invalid_account_pda_rolls_back_source() {
     let wrong_dest = derive_account_pda(1, 9, &token_address).0;
     let case = TransferCase {
         emitter_chain: 2,
-        emitter: { let mut e = [0u8; 32]; e[0] = 0xB3; e[31] = 0x77; e },
+        emitter: {
+            let mut e = [0u8; 32];
+            e[0] = 0xB3;
+            e[31] = 0x77;
+            e
+        },
         sequence: 0x45,
         amount: 500,
-        token_chain: 2,       // source native: credit succeeds
+        token_chain: 2, // source native: credit succeeds
         token_address,
         recipient_chain: 1,
         dest_override: Some(wrong_dest),

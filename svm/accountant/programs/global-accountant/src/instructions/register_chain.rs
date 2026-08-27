@@ -10,8 +10,9 @@ use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgr
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    ChainRegistrationLayout, GlobalAccountantError, CHAIN_REGISTRATION_SEED_PREFIX,
-    GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    ChainRegistrationLayout, GlobalAccountantError, RegisterChainPayload, VaaBodyHeader,
+    CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
+    TOKEN_BRIDGE_GOVERNANCE_MODULE,
 };
 use crate::err;
 use crate::state::chain_registration;
@@ -26,31 +27,8 @@ use crate::state::chain_registration;
 /// | 4      | body_len | body              |
 const REGISTER_CHAIN_FIXED_LEN: usize = 1 + 1 + 2;
 
-/// Body size cap. A `RegisterChain` body is 120 bytes.
-const REGISTER_CHAIN_BODY_MAX: usize = 256;
-
-/// VAA body header offsets.
-const BODY_EMITTER_CHAIN_OFFSET: usize = 8;
-const BODY_EMITTER_ADDRESS_OFFSET: usize = 10;
-const BODY_SEQUENCE_OFFSET: usize = 42;
-const BODY_HEADER_LEN: usize = 51;
-
-/// Payload offsets from the body start. Token Bridge governance payload:
-///
-/// | offset | size | field             |
-/// |--------|------|-------------------|
-/// | 0      | 32   | module            |
-/// | 32     | 1    | action            |
-/// | 33     | 2    | target_chain      |
-/// | 35     | 2    | chain_to_register |
-/// | 37     | 32   | emitter_to_register
-const PAYLOAD_MODULE_OFFSET: usize = BODY_HEADER_LEN;
-const PAYLOAD_ACTION_OFFSET: usize = BODY_HEADER_LEN + 32;
-const PAYLOAD_TARGET_CHAIN_OFFSET: usize = BODY_HEADER_LEN + 33;
-const PAYLOAD_CHAIN_OFFSET: usize = BODY_HEADER_LEN + 35;
-const PAYLOAD_EMITTER_OFFSET: usize = BODY_HEADER_LEN + 37;
-const PAYLOAD_TOTAL_LEN: usize = 32 + 1 + 2 + 2 + 32;
-const BODY_MIN_LEN: usize = BODY_HEADER_LEN + PAYLOAD_TOTAL_LEN;
+/// A `RegisterChain` body is exactly header + payload.
+const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     if data.len() < REGISTER_CHAIN_FIXED_LEN {
@@ -59,9 +37,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let guardian_set_bump = data[0];
     let registration_bump = data[1];
     let body_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-    if !(BODY_MIN_LEN..=REGISTER_CHAIN_BODY_MAX).contains(&body_len)
-        || data.len() != REGISTER_CHAIN_FIXED_LEN + body_len
-    {
+    if body_len != REGISTER_CHAIN_BODY_LEN || data.len() != REGISTER_CHAIN_FIXED_LEN + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let body_bytes = &data[REGISTER_CHAIN_FIXED_LEN..REGISTER_CHAIN_FIXED_LEN + body_len];
@@ -95,22 +71,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set_bump,
     )?;
 
+    let (header, payload) = RegisterChainPayload::from_body(body_bytes).map_err(err)?;
+
     // SECURITY: the emitter must be `(chain=1, GOVERNANCE_EMITTER)`.
-    let body_emitter_chain = u16::from_be_bytes([
-        body_bytes[BODY_EMITTER_CHAIN_OFFSET],
-        body_bytes[BODY_EMITTER_CHAIN_OFFSET + 1],
-    ]);
-    if body_emitter_chain != SOLANA_CHAIN_ID
-        || body_bytes[BODY_EMITTER_ADDRESS_OFFSET..BODY_EMITTER_ADDRESS_OFFSET + 32]
-            != GOVERNANCE_EMITTER
-    {
+    if header.emitter_chain() != SOLANA_CHAIN_ID || header.emitter_address != GOVERNANCE_EMITTER {
         return Err(err(GlobalAccountantError::InvalidGovernanceEmitter));
     }
-
-    let sequence_bytes: [u8; 8] = body_bytes[BODY_SEQUENCE_OFFSET..BODY_SEQUENCE_OFFSET + 8]
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let sequence = u64::from_be_bytes(sequence_bytes);
+    let sequence = header.sequence();
 
     if noreplay::is_marked(
         noreplay_bucket,
@@ -122,29 +89,19 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
-    if body_bytes[PAYLOAD_MODULE_OFFSET..PAYLOAD_MODULE_OFFSET + 32]
-        != TOKEN_BRIDGE_GOVERNANCE_MODULE
-    {
+    if payload.header.module != TOKEN_BRIDGE_GOVERNANCE_MODULE {
         return Err(err(GlobalAccountantError::InvalidGovernanceModule));
     }
-    if body_bytes[PAYLOAD_ACTION_OFFSET] != REGISTER_CHAIN_ACTION {
+    if payload.header.action != REGISTER_CHAIN_ACTION {
         return Err(err(GlobalAccountantError::InvalidGovernanceAction));
     }
-    let target_chain = u16::from_be_bytes([
-        body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET],
-        body_bytes[PAYLOAD_TARGET_CHAIN_OFFSET + 1],
-    ]);
+    let target_chain = payload.header.target_chain();
     if target_chain != 0 && target_chain != SOLANA_CHAIN_ID {
         return Err(err(GlobalAccountantError::GovernanceChainMismatch));
     }
 
-    let chain_to_register = u16::from_be_bytes([
-        body_bytes[PAYLOAD_CHAIN_OFFSET],
-        body_bytes[PAYLOAD_CHAIN_OFFSET + 1],
-    ]);
-    let mut emitter_to_register = [0u8; 32];
-    emitter_to_register
-        .copy_from_slice(&body_bytes[PAYLOAD_EMITTER_OFFSET..PAYLOAD_EMITTER_OFFSET + 32]);
+    let chain_to_register = payload.chain();
+    let emitter_to_register = payload.emitter_address;
 
     let chain_be = chain_to_register.to_be_bytes();
     let (expected_pda, canonical_bump) =
@@ -154,7 +111,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     // First registration creates the PDA; rotation overwrites in place.
-    let owner_is_system = registration_pda.owner == &anchor_lang::solana_program::system_program::ID;
+    let owner_is_system =
+        registration_pda.owner == &anchor_lang::solana_program::system_program::ID;
     if owner_is_system {
         let bump_seed = [registration_bump];
         let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be, &bump_seed];
