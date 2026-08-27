@@ -9,7 +9,9 @@ use crate::err;
 
 /// `MissingChainRegistration` if system-owned; `InvalidPda` on wrong length or tag.
 /// Caller checks the address first.
-pub fn load(account: &AccountInfo) -> accountant_operational_core::ProgramCoreResult<ChainRegistrationLayout> {
+pub fn load(
+    account: &AccountInfo,
+) -> accountant_operational_core::ProgramCoreResult<ChainRegistrationLayout> {
     if account.owner == &anchor_lang::solana_program::system_program::ID {
         return Err(err(GlobalAccountantError::MissingChainRegistration));
     }

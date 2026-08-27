@@ -97,9 +97,7 @@ pub fn apply_from_body<'info>(
             &token_address,
             amount,
         ),
-        TokenBridgeAction::Attest => {
-            Ok(())
-        }
+        TokenBridgeAction::Attest => Ok(()),
         TokenBridgeAction::Other(_) => Err(err(GlobalAccountantError::UnknownTokenBridgePayload)),
     }
 }

@@ -12,7 +12,7 @@ use {
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
         NoReplayBitmapAccount, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
         CHAIN_REGISTRATION_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER,
-        MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION, NOREPLAY_AUTHORITY_SEED_PREFIX,
+        MODIFY_BALANCE_ACTION, MODIFY_BALANCE_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
         NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID, SOLANA_CHAIN_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -79,9 +79,9 @@ fn derive_chain_registration_pda(chain: u16) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be], &program_id())
 }
 
-fn derive_modification_pda(sequence: u64) -> (Pubkey, u8) {
+fn derive_modify_balance_pda(sequence: u64) -> (Pubkey, u8) {
     let seq_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(&[MODIFICATION_SEED_PREFIX, &seq_be], &program_id())
+    Pubkey::find_program_address(&[MODIFY_BALANCE_SEED_PREFIX, &seq_be], &program_id())
 }
 
 fn derive_canonical_noreplay_bucket(
@@ -636,7 +636,7 @@ fn modify_balance_add_overflow_leaves_balance_unchanged() {
     let digest = double_keccak256_host(&body);
 
     let (balance_pda, _) = derive_account_pda(2, 2, &token_address);
-    let (modification_pda, _) = derive_modification_pda(payload_sequence);
+    let (modify_balance_pda, _) = derive_modify_balance_pda(payload_sequence);
     let payer = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
     let (guardian_set, guardian_set_bump) =
@@ -656,7 +656,7 @@ fn modify_balance_add_overflow_leaves_balance_unchanged() {
             balance_account(2, 2, &token_address, pre_balance_value),
         ),
         keyed_account_for_system_program(),
-        (modification_pda, uninitialised_pda_account()),
+        (modify_balance_pda, uninitialised_pda_account()),
     ];
     let metas = vec![
         AccountMeta::new(payer, true),
@@ -665,7 +665,7 @@ fn modify_balance_add_overflow_leaves_balance_unchanged() {
         AccountMeta::new_readonly(guardian_signatures, false),
         AccountMeta::new(balance_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(modification_pda, false),
+        AccountMeta::new(modify_balance_pda, false),
     ];
 
     let mut data = Vec::with_capacity(1 + 1 + 2 + body.len());

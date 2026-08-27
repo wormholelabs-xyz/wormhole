@@ -54,8 +54,8 @@ pub enum GlobalAccountantError {
     ModifyBalanceOverflow = 26,
     /// `modify_balance` `Subtract` underflow, including on an uninitialised PDA.
     ModifyBalanceUnderflow = 27,
-    /// `Modification` PDA already exists for this sequence.
-    DuplicateModification = 28,
+    /// `ModifyBalance` PDA already exists for this sequence.
+    DuplicateModifyBalance = 28,
     /// Token Bridge action byte is not `0x01`, `0x02`, or `0x03`. The NoReplay slot stays free.
     UnknownTokenBridgePayload = 29,
 }

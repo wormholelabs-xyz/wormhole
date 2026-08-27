@@ -15,7 +15,7 @@ pub enum AccountTag {
     PendingObservations = 1,
     Balance = 2,
     ChainRegistration = 3,
-    Modification = 4,
+    ModifyBalance = 4,
 }
 
 /// `ModifyBalance` payload `kind` byte. Other values raise `InvalidModificationKind`.
@@ -249,12 +249,12 @@ const _: () = {
     assert!(ChainRegistrationLayout::LEN == 64);
 };
 
-/// Audit-log PDA at `(b"modification", payload_sequence_be)`, created by `modify_balance`.
-/// A second VAA with the same sequence fails with `DuplicateModification`.
+/// Audit-log PDA at `(b"modify_balance", payload_sequence_be)`, created by `modify_balance`.
+/// A second VAA with the same sequence fails with `DuplicateModifyBalance`.
 ///
 /// | offset | size | field         |
 /// |--------|------|---------------|
-/// | 0      | 1    | tag ([`AccountTag::Modification`]) |
+/// | 0      | 1    | tag ([`AccountTag::ModifyBalance`]) |
 /// | 1      | 1    | kind          |
 /// | 2      | 2    | chain_id      |
 /// | 4      | 2    | token_chain   |
@@ -268,7 +268,7 @@ const _: () = {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct ModifyBalanceLayout {
-    /// Always [`AccountTag::Modification`].
+    /// Always [`AccountTag::ModifyBalance`].
     pub tag: u8,
     /// See [`ModificationKind`].
     pub kind: u8,
@@ -289,7 +289,7 @@ pub struct ModifyBalanceLayout {
 impl ModifyBalanceLayout {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    pub const TAG: u8 = AccountTag::Modification as u8;
+    pub const TAG: u8 = AccountTag::ModifyBalance as u8;
 
     pub fn new(
         kind: ModificationKind,
@@ -336,7 +336,7 @@ mod tests {
         assert_eq!(AccountTag::PendingObservations as u8, 1);
         assert_eq!(AccountTag::Balance as u8, 2);
         assert_eq!(AccountTag::ChainRegistration as u8, 3);
-        assert_eq!(AccountTag::Modification as u8, 4);
+        assert_eq!(AccountTag::ModifyBalance as u8, 4);
         assert_eq!(
             PendingObservationsLayout::TAG,
             AccountTag::PendingObservations as u8
@@ -346,7 +346,7 @@ mod tests {
             ChainRegistrationLayout::TAG,
             AccountTag::ChainRegistration as u8
         );
-        assert_eq!(ModifyBalanceLayout::TAG, AccountTag::Modification as u8);
+        assert_eq!(ModifyBalanceLayout::TAG, AccountTag::ModifyBalance as u8);
     }
 
     #[test]
@@ -368,7 +368,7 @@ mod tests {
             AccountTag::PendingObservations,
             AccountTag::Balance,
             AccountTag::ChainRegistration,
-            AccountTag::Modification,
+            AccountTag::ModifyBalance,
         ] {
             assert_ne!(tag as u8, 0);
         }

@@ -7,8 +7,8 @@ use {
     global_accountant_definitions::{
         BalanceAccountLayout, GlobalAccountantError, Instruction as IxDiscriminator,
         ModifyBalanceLayout, Uint256, ACCOUNTANT_GOVERNANCE_MODULE, ACCOUNT_SEED_PREFIX,
-        CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
-        MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
+        CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION,
+        MODIFY_BALANCE_SEED_PREFIX, SOLANA_CHAIN_ID, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
     solana_account::Account,
@@ -68,9 +68,9 @@ fn derive_balance_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
     )
 }
 
-fn derive_modification_pda(sequence: u64) -> (Pubkey, u8) {
+fn derive_modify_balance_pda(sequence: u64) -> (Pubkey, u8) {
     let seq_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(&[MODIFICATION_SEED_PREFIX, &seq_be], &program_id())
+    Pubkey::find_program_address(&[MODIFY_BALANCE_SEED_PREFIX, &seq_be], &program_id())
 }
 
 fn system_owned_account(lamports: u64) -> Account {
@@ -180,7 +180,7 @@ fn build_metas(
     guardian_set: Pubkey,
     guardian_signatures: Pubkey,
     balance_pda: Pubkey,
-    modification_pda: Pubkey,
+    modify_balance_pda: Pubkey,
 ) -> Vec<AccountMeta> {
     vec![
         AccountMeta::new(payer, true),
@@ -189,7 +189,7 @@ fn build_metas(
         AccountMeta::new_readonly(guardian_signatures, false),
         AccountMeta::new(balance_pda, false),
         AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(modification_pda, false),
+        AccountMeta::new(modify_balance_pda, false),
     ]
 }
 
@@ -201,8 +201,8 @@ fn build_initial_accounts(
     guardians: &[Guardian],
     balance_pda: Pubkey,
     balance_pda_state: Account,
-    modification_pda: Pubkey,
-    modification_pda_state: Account,
+    modify_balance_pda: Pubkey,
+    modify_balance_pda_state: Account,
 ) -> Vec<(Pubkey, Account)> {
     let sigs: Vec<(u8, [u8; 65])> = (0..QUORUM)
         .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
@@ -221,7 +221,7 @@ fn build_initial_accounts(
         ),
         (balance_pda, balance_pda_state),
         keyed_account_for_system_program(),
-        (modification_pda, modification_pda_state),
+        (modify_balance_pda, modify_balance_pda_state),
     ]
 }
 
@@ -238,7 +238,7 @@ fn run_modify_balance(
     modification_initial: Option<Account>,
 ) -> mollusk_svm::result::InstructionResult {
     let (balance_pda, _) = derive_balance_pda(chain_id, token_chain, token_address);
-    let (modification_pda, _) = derive_modification_pda(payload_sequence);
+    let (modify_balance_pda, _) = derive_modify_balance_pda(payload_sequence);
 
     let payer = Pubkey::new_from_array([0x11u8; 32]);
     let guardian_signatures = Pubkey::new_from_array([0xC3u8; 32]);
@@ -255,7 +255,7 @@ fn run_modify_balance(
         &guardians,
         balance_pda,
         balance_initial.unwrap_or_else(uninitialised_pda_account),
-        modification_pda,
+        modify_balance_pda,
         modification_initial.unwrap_or_else(uninitialised_pda_account),
     );
     let metas = build_metas(
@@ -263,7 +263,7 @@ fn run_modify_balance(
         guardian_set,
         guardian_signatures,
         balance_pda,
-        modification_pda,
+        modify_balance_pda,
     );
 
     let ix = Instruction::new_with_bytes(
@@ -432,11 +432,11 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
     assert_eq!(layout.token_address, token_address);
     assert_eq!(layout.balance, Uint256::from_u128(1_000_000));
 
-    let (modification_pda, _) = derive_modification_pda(200);
+    let (modify_balance_pda, _) = derive_modify_balance_pda(200);
     let post_log = r
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == modification_pda)
+        .find(|(k, _)| *k == modify_balance_pda)
         .expect("modification PDA missing from result");
     assert_eq!(
         post_log.1.owner,
@@ -639,7 +639,7 @@ fn modify_balance_add_overflow_rejects() {
     }
 }
 
-/// Second VAA with the same payload sequence: `DuplicateModification`.
+/// Second VAA with the same payload sequence: `DuplicateModifyBalance`.
 #[test]
 fn modify_balance_rejects_duplicate_modification_sequence() {
     let mollusk = mollusk();
@@ -664,7 +664,7 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
     assert!(matches!(r1.program_result, ProgramResult::Success));
 
     let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
-    let (modification_pda, _) = derive_modification_pda(205);
+    let (modify_balance_pda, _) = derive_modify_balance_pda(205);
     let post_balance = r1
         .resulting_accounts
         .iter()
@@ -674,7 +674,7 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
     let post_modification = r1
         .resulting_accounts
         .iter()
-        .find(|(k, _)| *k == modification_pda)
+        .find(|(k, _)| *k == modify_balance_pda)
         .map(|(_, a)| a.clone())
         .expect("modification PDA missing");
 
@@ -693,15 +693,15 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
             let code = u64::from(err) as u32;
             assert_eq!(
                 code,
-                GlobalAccountantError::DuplicateModification as u32,
-                "expected DuplicateModification on replay, got {code:?}"
+                GlobalAccountantError::DuplicateModifyBalance as u32,
+                "expected DuplicateModifyBalance on replay, got {code:?}"
             );
         }
-        other => panic!("expected Failure(DuplicateModification), got {other:?}"),
+        other => panic!("expected Failure(DuplicateModifyBalance), got {other:?}"),
     }
 }
 
-/// Two VAAs on one balance triple succeed with distinct `Modification` PDAs.
+/// Two VAAs on one balance triple succeed with distinct `ModifyBalance` PDAs.
 #[test]
 fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
     let mollusk = mollusk();
@@ -730,8 +730,8 @@ fn modify_balance_two_sequences_share_balance_pda_with_distinct_logs() {
     );
 
     let (balance_pda, _) = derive_balance_pda(2, 2, &token_address);
-    let (mod_pda_300, _) = derive_modification_pda(300);
-    let (mod_pda_301, _) = derive_modification_pda(301);
+    let (mod_pda_300, _) = derive_modify_balance_pda(300);
+    let (mod_pda_301, _) = derive_modify_balance_pda(301);
     assert_ne!(
         mod_pda_300, mod_pda_301,
         "distinct sequences must derive to distinct modification PDAs"

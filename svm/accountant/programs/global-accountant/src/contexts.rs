@@ -110,7 +110,7 @@ pub struct ModifyBalance<'info> {
     pub system_program: UncheckedAccount<'info>,
     /// CHECK: address checked in the handler; existence is the replay guard.
     #[account(mut)]
-    pub modification_pda: UncheckedAccount<'info>,
+    pub modify_balance_pda: UncheckedAccount<'info>,
 }
 
 /// Accounts for `close_pending` (5 accounts). Handler:
