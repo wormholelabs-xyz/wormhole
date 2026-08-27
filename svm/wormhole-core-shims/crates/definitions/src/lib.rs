@@ -15,9 +15,7 @@ compile_error!("Features 'from-env' and 'solana' are mutually exclusive.");
     feature = "noreplay",
     not(any(feature = "testnet", feature = "localnet"))
 ))]
-compile_error!(
-    "NoReplay has no Solana mainnet deployment; use 'testnet' or 'from-env' with NOREPLAY_PROGRAM_ID."
-);
+compile_error!("NoReplay has no Solana mainnet deployment; use 'testnet' or 'from-env'.");
 
 // We define the constants (chain id + addresses) here.
 // - For 'solana', we just re-export the definitions in the solana module.
@@ -426,7 +424,6 @@ fn available_ids() {
     let _ = crate::solana::CORE_BRIDGE_PROGRAM_ID;
     #[cfg(all(any(feature = "solana", feature = "from-env"), feature = "core"))]
     let _ = crate::CORE_BRIDGE_PROGRAM_ID;
-    // NoReplay is deployed on Solana devnet only.
     let _ = crate::solana::devnet::NOREPLAY_PROGRAM_ID;
     #[cfg(all(any(feature = "solana", feature = "from-env"), feature = "noreplay"))]
     let _ = crate::NOREPLAY_PROGRAM_ID;
