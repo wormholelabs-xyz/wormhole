@@ -4,9 +4,24 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::constants::{
+    ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION,
+    SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+};
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
+use crate::state::ModificationKind;
 use crate::vaa::VaaBodyHeader;
+
+/// Reject a body whose emitter is not `(chain 1, GOVERNANCE_EMITTER)`.
+///
+/// SECURITY: every governance handler calls this before reading the payload.
+pub fn require_governance_emitter(header: &VaaBodyHeader) -> Result<(), GlobalAccountantError> {
+    if header.emitter_chain() != SOLANA_CHAIN_ID || header.emitter_address != GOVERNANCE_EMITTER {
+        return Err(GlobalAccountantError::InvalidGovernanceEmitter);
+    }
+    Ok(())
+}
 
 /// Common governance prefix: `module ‖ action ‖ target_chain`.
 #[repr(C)]
@@ -20,6 +35,25 @@ pub struct GovernanceHeader {
 impl GovernanceHeader {
     pub fn target_chain(&self) -> u16 {
         u16::from_be_bytes(self.target_chain)
+    }
+
+    /// Module and action must match; `target_chain` must be in `accepted_targets`.
+    fn check(
+        &self,
+        module: &[u8; 32],
+        action: u8,
+        accepted_targets: &[u16],
+    ) -> Result<(), GlobalAccountantError> {
+        if self.module != *module {
+            return Err(GlobalAccountantError::InvalidGovernanceModule);
+        }
+        if self.action != action {
+            return Err(GlobalAccountantError::InvalidGovernanceAction);
+        }
+        if !accepted_targets.contains(&self.target_chain()) {
+            return Err(GlobalAccountantError::GovernanceChainMismatch);
+        }
+        Ok(())
     }
 }
 
@@ -51,6 +85,16 @@ impl RegisterChainPayload {
 
     pub fn chain(&self) -> u16 {
         u16::from_be_bytes(self.chain)
+    }
+
+    /// Governance emitter, `TokenBridge` module, `RegisterChain` action, target `Any` or Solana.
+    pub fn validate(&self, header: &VaaBodyHeader) -> Result<(), GlobalAccountantError> {
+        require_governance_emitter(header)?;
+        self.header.check(
+            &TOKEN_BRIDGE_GOVERNANCE_MODULE,
+            REGISTER_CHAIN_ACTION,
+            &[0, SOLANA_CHAIN_ID],
+        )
     }
 }
 
@@ -100,6 +144,21 @@ impl ModifyBalancePayload {
     pub fn amount(&self) -> Uint256 {
         Uint256::from_be_bytes(self.amount)
     }
+
+    /// Governance emitter, `GlobalAccountant` module, `ModifyBalance` action, target Solana,
+    /// known `kind`. Returns the parsed kind.
+    pub fn validate(
+        &self,
+        header: &VaaBodyHeader,
+    ) -> Result<ModificationKind, GlobalAccountantError> {
+        require_governance_emitter(header)?;
+        self.header.check(
+            &ACCOUNTANT_GOVERNANCE_MODULE,
+            MODIFY_BALANCE_ACTION,
+            &[SOLANA_CHAIN_ID],
+        )?;
+        ModificationKind::from_u8(self.kind).ok_or(GlobalAccountantError::InvalidModificationKind)
+    }
 }
 
 const _: () = {
@@ -125,11 +184,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{
-        ACCOUNTANT_GOVERNANCE_MODULE, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION,
-        TOKEN_BRIDGE_GOVERNANCE_MODULE,
-    };
-    use wormhole_sdk::accountant_modification::ModificationKind;
+    use wormhole_sdk::accountant_modification::ModificationKind as SdkKind;
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
 
     fn body_with(payload: &[u8]) -> std::vec::Vec<u8> {
@@ -174,7 +229,7 @@ mod tests {
                 chain_id: 2,
                 token_chain: 5,
                 token_address: Address([0x22; 32]),
-                kind: ModificationKind::Subtract,
+                kind: SdkKind::Subtract,
                 amount: Amount([0x33; 32]),
                 reason: "fix".into(),
             },
@@ -191,11 +246,157 @@ mod tests {
         assert_eq!(view.chain_id(), 2);
         assert_eq!(view.token_chain(), 5);
         assert_eq!(view.token_address, [0x22; 32]);
-        assert_eq!(view.kind, ModificationKind::Subtract as u8);
+        assert_eq!(view.kind, SdkKind::Subtract as u8);
         assert_eq!(view.amount(), Uint256([0x33; 32]));
         // `arraystring`: right-aligned, zero-padded on the left.
         assert_eq!(view.reason[..29], [0u8; 29]);
         assert_eq!(&view.reason[29..], b"fix");
+    }
+
+    fn governance_header(chain: u16, emitter: [u8; 32]) -> VaaBodyHeader {
+        let mut header = VaaBodyHeader::zeroed();
+        header.emitter_chain = chain.to_be_bytes();
+        header.emitter_address = emitter;
+        header
+    }
+
+    fn register_chain_payload() -> RegisterChainPayload {
+        let mut payload = RegisterChainPayload::zeroed();
+        payload.header.module = TOKEN_BRIDGE_GOVERNANCE_MODULE;
+        payload.header.action = REGISTER_CHAIN_ACTION;
+        payload.header.target_chain = 0u16.to_be_bytes();
+        payload
+    }
+
+    fn modify_balance_payload() -> ModifyBalancePayload {
+        let mut payload = ModifyBalancePayload::zeroed();
+        payload.header.module = ACCOUNTANT_GOVERNANCE_MODULE;
+        payload.header.action = MODIFY_BALANCE_ACTION;
+        payload.header.target_chain = SOLANA_CHAIN_ID.to_be_bytes();
+        payload.kind = ModificationKind::Add as u8;
+        payload
+    }
+
+    #[test]
+    fn register_chain_validate_table() {
+        use GlobalAccountantError as E;
+        let good = governance_header(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER);
+        let mut wrong_chain = good;
+        wrong_chain.emitter_chain = 2u16.to_be_bytes();
+        let mut wrong_addr = good;
+        wrong_addr.emitter_address[0] ^= 1;
+
+        let mut wrong_module = register_chain_payload();
+        wrong_module.header.module[31] ^= 1;
+        let mut wrong_action = register_chain_payload();
+        wrong_action.header.action = 2;
+        let mut target_solana = register_chain_payload();
+        target_solana.header.target_chain = SOLANA_CHAIN_ID.to_be_bytes();
+        let mut target_wormchain = register_chain_payload();
+        target_wormchain.header.target_chain = 3104u16.to_be_bytes();
+
+        let cases: [(&str, VaaBodyHeader, RegisterChainPayload, Result<(), E>); 7] = [
+            ("any target", good, register_chain_payload(), Ok(())),
+            ("solana target", good, target_solana, Ok(())),
+            (
+                "wormchain target",
+                good,
+                target_wormchain,
+                Err(E::GovernanceChainMismatch),
+            ),
+            (
+                "wrong emitter chain",
+                wrong_chain,
+                register_chain_payload(),
+                Err(E::InvalidGovernanceEmitter),
+            ),
+            (
+                "wrong emitter address",
+                wrong_addr,
+                register_chain_payload(),
+                Err(E::InvalidGovernanceEmitter),
+            ),
+            (
+                "wrong module",
+                good,
+                wrong_module,
+                Err(E::InvalidGovernanceModule),
+            ),
+            (
+                "wrong action",
+                good,
+                wrong_action,
+                Err(E::InvalidGovernanceAction),
+            ),
+        ];
+        for (name, header, payload, expected) in cases {
+            assert_eq!(payload.validate(&header), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn modify_balance_validate_table() {
+        use GlobalAccountantError as E;
+        let good = governance_header(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER);
+        let mut wrong_chain = good;
+        wrong_chain.emitter_chain = 2u16.to_be_bytes();
+
+        let mut subtract = modify_balance_payload();
+        subtract.kind = ModificationKind::Subtract as u8;
+        let mut kind_zero = modify_balance_payload();
+        kind_zero.kind = 0;
+        let mut kind_three = modify_balance_payload();
+        kind_three.kind = 3;
+        let mut target_any = modify_balance_payload();
+        target_any.header.target_chain = 0u16.to_be_bytes();
+        let mut wrong_module = modify_balance_payload();
+        wrong_module.header.module = TOKEN_BRIDGE_GOVERNANCE_MODULE;
+        let mut wrong_action = modify_balance_payload();
+        wrong_action.header.action = 2;
+
+        let cases: [(
+            &str,
+            VaaBodyHeader,
+            ModifyBalancePayload,
+            Result<ModificationKind, E>,
+        ); 8] = [
+            (
+                "add",
+                good,
+                modify_balance_payload(),
+                Ok(ModificationKind::Add),
+            ),
+            ("subtract", good, subtract, Ok(ModificationKind::Subtract)),
+            ("kind 0", good, kind_zero, Err(E::InvalidModificationKind)),
+            ("kind 3", good, kind_three, Err(E::InvalidModificationKind)),
+            (
+                "any target rejected",
+                good,
+                target_any,
+                Err(E::GovernanceChainMismatch),
+            ),
+            (
+                "wrong emitter chain",
+                wrong_chain,
+                modify_balance_payload(),
+                Err(E::InvalidGovernanceEmitter),
+            ),
+            (
+                "token bridge module",
+                good,
+                wrong_module,
+                Err(E::InvalidGovernanceModule),
+            ),
+            (
+                "wrong action",
+                good,
+                wrong_action,
+                Err(E::InvalidGovernanceAction),
+            ),
+        ];
+        for (name, header, payload, expected) in cases {
+            assert_eq!(payload.validate(&header), expected, "{name}");
+        }
     }
 
     /// Exact length: one byte short or long is rejected.

@@ -682,7 +682,7 @@ fn submit_vaas_with_short_body_rejects() {
 }
 
 /// `body_len` prefix larger than the bytes present: `InvalidInstructionData` from the
-/// `data.len() != FIXED_LEN + body_len` gate.
+/// `split_body` exact-framing gate.
 #[test]
 fn submit_vaas_with_declared_len_mismatch_rejects() {
     let mollusk = mollusk();

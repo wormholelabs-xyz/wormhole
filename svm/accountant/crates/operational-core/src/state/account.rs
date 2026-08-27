@@ -48,17 +48,29 @@ pub fn init_if_needed<'info>(
         return Ok(());
     }
 
-    let chain_be = chain.to_be_bytes();
-    let token_chain_be = token_chain.to_be_bytes();
+    let layout = BalanceAccountLayout::new(chain, token_chain, *token_address, Uint256::ZERO);
+    create(program_id, payer, account_pda, canonical_bump, &layout)
+}
+
+/// Allocate the balance PDA for `layout`'s key and write `layout`. Seeds derive from the
+/// layout so address and contents cannot disagree.
+pub fn create<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    account_pda: &AccountInfo<'info>,
+    canonical_bump: u8,
+    layout: &BalanceAccountLayout,
+) -> ProgramResult {
+    let chain_be = layout.chain.to_be_bytes();
+    let token_chain_be = layout.token_chain.to_be_bytes();
     let bump_seed = [canonical_bump];
     let seeds: &[&[u8]] = &[
         ACCOUNT_SEED_PREFIX,
         &chain_be,
         &token_chain_be,
-        token_address,
+        &layout.token_address,
         &bump_seed,
     ];
-
     init_or_upgrade_pda(
         payer,
         account_pda,
@@ -66,12 +78,5 @@ pub fn init_if_needed<'info>(
         seeds,
         BalanceAccountLayout::LEN as u64,
     )?;
-
-    let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
-    layout.tag = BalanceAccountLayout::TAG;
-    layout.chain = chain;
-    layout.token_chain = token_chain;
-    layout.token_address = *token_address;
-    layout.balance = Uint256::ZERO;
-    store(account_pda, &layout)
+    store(account_pda, layout)
 }

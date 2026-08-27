@@ -4,46 +4,27 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
+use anchor_lang::solana_program::system_program;
 
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
 use accountant_operational_core::state::{account as balance_account, modification};
-use accountant_operational_core::ProgramResult;
+use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
-    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceLayout,
-    ModifyBalancePayload, Uint256, VaaBodyHeader, ACCOUNTANT_GOVERNANCE_MODULE,
-    ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION,
-    SOLANA_CHAIN_ID,
+    split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
+    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFICATION_SEED_PREFIX,
 };
 use crate::err;
-
-/// Wire format after the 1-byte discriminator:
-///
-/// | offset | size     | field             |
-/// |--------|----------|-------------------|
-/// | 0      | 1        | guardian_set_bump |
-/// | 1      | 2        | body_len (LE)     |
-/// | 3      | body_len | body              |
-///
-/// `guardian_set_bump` goes to the Shim's `VerifyHash`.
-const MODIFY_BALANCE_FIXED_LEN: usize = 1 + 2;
+use crate::instructions::transfer::derive_balance_account_pda;
 
 /// A `ModifyBalance` body is exactly header + payload.
 const MODIFY_BALANCE_BODY_LEN: usize = VaaBodyHeader::LEN + ModifyBalancePayload::LEN;
 
+/// Order: instruction framing, signer, Shim signature check, governance validation,
+/// PDA checks, replay guard, balance delta, modification record.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    if data.len() < MODIFY_BALANCE_FIXED_LEN {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let guardian_set_bump = data[0];
-    let body_len = u16::from_le_bytes([data[1], data[2]]) as usize;
-    if body_len != MODIFY_BALANCE_BODY_LEN || data.len() != MODIFY_BALANCE_FIXED_LEN + body_len {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let body_bytes = &data[MODIFY_BALANCE_FIXED_LEN..MODIFY_BALANCE_FIXED_LEN + body_len];
-
-    let digest = double_keccak256(body_bytes);
+    let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` payer
@@ -53,12 +34,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   4. `[WRITE]`         `BalanceAccount` PDA
     //   5. `[]`              system program
     //   6. `[WRITE]`         `Modification` PDA
-    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program, modification_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-
     if !payer.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }
@@ -66,97 +46,136 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     shim::verify_vaa(
         guardian_set,
         guardian_signatures,
-        &digest,
-        guardian_set_bump,
+        &double_keccak256(body),
+        ix.guardian_set_bump,
     )?;
 
-    let (header, payload) = ModifyBalancePayload::from_body(body_bytes).map_err(err)?;
+    let (header, payload) = ModifyBalancePayload::from_body(body).map_err(err)?;
+    let kind = payload.validate(header).map_err(err)?;
 
-    // SECURITY: the emitter must be `(chain=1, GOVERNANCE_EMITTER)`.
-    if header.emitter_chain() != SOLANA_CHAIN_ID || header.emitter_address != GOVERNANCE_EMITTER {
-        return Err(err(GlobalAccountantError::InvalidGovernanceEmitter));
-    }
+    let balance_bump = check_balance_pda(program_id, balance_pda, payload)?;
+    let modification_bump =
+        check_modification_pda(program_id, modification_pda, payload.sequence())?;
 
-    if payload.header.module != ACCOUNTANT_GOVERNANCE_MODULE {
-        return Err(err(GlobalAccountantError::InvalidGovernanceModule));
-    }
-    if payload.header.action != MODIFY_BALANCE_ACTION {
-        return Err(err(GlobalAccountantError::InvalidGovernanceAction));
-    }
-    if payload.header.target_chain() != SOLANA_CHAIN_ID {
-        return Err(err(GlobalAccountantError::GovernanceChainMismatch));
-    }
-    let kind_byte = payload.kind;
-    let kind = ModificationKind::from_u8(kind_byte)
-        .ok_or_else(|| err(GlobalAccountantError::InvalidModificationKind))?;
-
-    let payload_sequence = payload.sequence();
-    let chain_id = payload.chain_id();
-    let token_chain = payload.token_chain();
-    let token_address = payload.token_address;
-    let amount = payload.amount();
-    let reason = payload.reason;
-
-    let chain_id_be = chain_id.to_be_bytes();
-    let token_chain_be = token_chain.to_be_bytes();
-    let (expected_balance_pda, canonical_balance_bump) = Pubkey::find_program_address(
-        &[
-            ACCOUNT_SEED_PREFIX,
-            &chain_id_be,
-            &token_chain_be,
-            &token_address,
-        ],
+    apply_delta(program_id, payer, balance_pda, balance_bump, payload, kind)?;
+    record_modification(
         program_id,
+        payer,
+        modification_pda,
+        modification_bump,
+        payload,
+        kind,
+    )?;
+
+    log_modification(
+        payload.sequence(),
+        payload.chain_id(),
+        kind as u8,
+        &payload.reason,
     );
-    if balance_pda.key != &expected_balance_pda {
+    Ok(())
+}
+
+/// Instruction data: [`ModifyBalanceIxData`] prefix then an exact-length body.
+fn parse_instruction(data: &[u8]) -> ProgramCoreResult<(&ModifyBalanceIxData, &[u8])> {
+    let (ix, body) = split_body::<ModifyBalanceIxData>(data).map_err(err)?;
+    if body.len() != MODIFY_BALANCE_BODY_LEN {
+        return Err(err(GlobalAccountantError::InvalidInstructionData));
+    }
+    Ok((ix, body))
+}
+
+/// `balance_pda` must be the canonical account for the payload's token; returns its bump.
+fn check_balance_pda(
+    program_id: &Pubkey,
+    balance_pda: &AccountInfo,
+    payload: &ModifyBalancePayload,
+) -> ProgramCoreResult<u8> {
+    let (expected, bump) = derive_balance_account_pda(
+        program_id,
+        payload.chain_id(),
+        payload.token_chain(),
+        &payload.token_address,
+    );
+    if balance_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
+    Ok(bump)
+}
 
-    let payload_sequence_be = payload_sequence.to_be_bytes();
-    let (expected_modification_pda, canonical_modification_bump) = Pubkey::find_program_address(
-        &[MODIFICATION_SEED_PREFIX, &payload_sequence_be],
-        program_id,
-    );
-    if modification_pda.key != &expected_modification_pda {
+/// `modification_pda` must be the canonical account for `sequence` and must not exist yet
+/// (replay guard); returns its bump.
+fn check_modification_pda(
+    program_id: &Pubkey,
+    modification_pda: &AccountInfo,
+    sequence: u64,
+) -> ProgramCoreResult<u8> {
+    let (expected, bump) = derive_modification_pda(program_id, sequence);
+    if modification_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-
-    // Replay guard.
-    if modification_pda.owner != &anchor_lang::solana_program::system_program::ID {
+    if modification_pda.owner != &system_program::ID {
         return Err(err(GlobalAccountantError::DuplicateModification));
     }
+    Ok(bump)
+}
 
-    // Subtract on an absent PDA fails before allocation; Add creates it with `balance = amount`.
-    let balance_is_uninit = balance_pda.owner == &anchor_lang::solana_program::system_program::ID;
-    if balance_is_uninit {
-        match kind {
-            ModificationKind::Subtract => {
-                return Err(err(GlobalAccountantError::ModifyBalanceUnderflow));
-            }
-            ModificationKind::Add => {
-                init_balance_account(
-                    program_id,
-                    payer,
-                    balance_pda,
-                    canonical_balance_bump,
-                    chain_id,
-                    token_chain,
-                    &token_address,
+/// `(b"modification", sequence_be)`.
+pub fn derive_modification_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[MODIFICATION_SEED_PREFIX, &sequence.to_be_bytes()],
+        program_id,
+    )
+}
+
+/// Apply `kind` with `payload.amount()`. Add on an absent PDA creates it with
+/// `balance = amount`; Subtract on an absent PDA is an underflow.
+fn apply_delta<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    balance_pda: &AccountInfo<'info>,
+    balance_bump: u8,
+    payload: &ModifyBalancePayload,
+    kind: ModificationKind,
+) -> ProgramResult {
+    let amount = payload.amount();
+    // Not initialized branch
+    if balance_pda.owner == &system_program::ID {
+        return match kind {
+            ModificationKind::Subtract => Err(err(GlobalAccountantError::ModifyBalanceUnderflow)),
+            ModificationKind::Add => balance_account::create(
+                program_id,
+                payer,
+                balance_pda,
+                balance_bump,
+                &BalanceAccountLayout::new(
+                    payload.chain_id(),
+                    payload.token_chain(),
+                    payload.token_address,
                     amount,
-                )?;
-            }
-        }
-    } else {
-        let mut layout = balance_account::load(balance_pda)?;
-        match kind {
-            ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
-            ModificationKind::Subtract => layout.raw_sub(amount).map_err(err)?,
-        }
-        balance_account::store(balance_pda, &layout)?;
+                ),
+            ),
+        };
     }
+    let mut layout = balance_account::load(balance_pda)?;
+    match kind {
+        ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
+        ModificationKind::Subtract => layout.raw_sub(amount).map_err(err)?,
+    }
+    balance_account::store(balance_pda, &layout)
+}
 
-    let bump_seed = [canonical_modification_bump];
-    let seeds: &[&[u8]] = &[MODIFICATION_SEED_PREFIX, &payload_sequence_be, &bump_seed];
+/// Create the `Modification` PDA and write the record.
+fn record_modification<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    modification_pda: &AccountInfo<'info>,
+    modification_bump: u8,
+    payload: &ModifyBalancePayload,
+    kind: ModificationKind,
+) -> ProgramResult {
+    let bump_seed = [modification_bump];
+    let seeds: &[&[u8]] = &[MODIFICATION_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
     init_or_upgrade_pda(
         payer,
         modification_pda,
@@ -165,60 +184,16 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         ModifyBalanceLayout::LEN as u64,
     )?;
 
-    let mut log: ModifyBalanceLayout = bytemuck::Zeroable::zeroed();
-    log.tag = ModifyBalanceLayout::TAG;
-    log.sequence = payload_sequence;
-    log.chain_id = chain_id;
-    log.token_chain = token_chain;
-    log.kind = kind_byte;
-    log.token_address = token_address;
-    log.amount = amount;
-    log.reason = reason;
-    modification::store(modification_pda, &log)?;
-
-    log_modification(payload_sequence, chain_id, kind_byte, &reason);
-
-    Ok(())
-}
-
-/// Create the `BalanceAccount` PDA with `balance = amount`.
-#[allow(clippy::too_many_arguments)]
-fn init_balance_account<'info>(
-    program_id: &Pubkey,
-    payer: &AccountInfo<'info>,
-    balance_pda: &AccountInfo<'info>,
-    canonical_bump: u8,
-    chain_id: u16,
-    token_chain: u16,
-    token_address: &[u8; 32],
-    amount: Uint256,
-) -> ProgramResult {
-    let chain_id_be = chain_id.to_be_bytes();
-    let token_chain_be = token_chain.to_be_bytes();
-    let bump_seed = [canonical_bump];
-    let seeds: &[&[u8]] = &[
-        ACCOUNT_SEED_PREFIX,
-        &chain_id_be,
-        &token_chain_be,
-        token_address,
-        &bump_seed,
-    ];
-
-    init_or_upgrade_pda(
-        payer,
-        balance_pda,
-        program_id,
-        seeds,
-        BalanceAccountLayout::LEN as u64,
-    )?;
-
-    let mut layout: BalanceAccountLayout = bytemuck::Zeroable::zeroed();
-    layout.tag = BalanceAccountLayout::TAG;
-    layout.chain = chain_id;
-    layout.token_chain = token_chain;
-    layout.token_address = *token_address;
-    layout.balance = amount;
-    balance_account::store(balance_pda, &layout)
+    let record = ModifyBalanceLayout::new(
+        kind,
+        payload.chain_id(),
+        payload.token_chain(),
+        payload.sequence(),
+        payload.token_address,
+        payload.amount(),
+        payload.reason,
+    );
+    modification::store(modification_pda, &record)
 }
 
 /// Log the modification for off-chain indexers.

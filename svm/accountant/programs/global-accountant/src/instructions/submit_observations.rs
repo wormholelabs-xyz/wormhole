@@ -10,40 +10,26 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
-use accountant_operational_core::instructions::quorum::{
-    self, ParsedObservation, BODY_MIN_LEN, SUBMIT_FIXED_LEN,
-};
+use accountant_operational_core::instructions::quorum::{self, ParsedObservation, BODY_MIN_LEN};
 use accountant_operational_core::instructions::{commit_log, noreplay};
 use accountant_operational_core::ProgramResult;
 
-use crate::definitions::{GlobalAccountantError, PendingObservationsLayout, SUBMIT_OBSERVATION_PREFIX};
+use crate::definitions::{
+    split_body, GlobalAccountantError, PendingObservationsLayout, SubmitObservationsIxData,
+    SUBMIT_OBSERVATION_PREFIX,
+};
 use crate::err;
 use crate::instructions::transfer;
 use crate::state::chain_registration;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    // Wire format after the 1-byte discriminator:
-    //   guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65) ‖ tx_hash(32)
-    //   ‖ body_len(u16 LE) ‖ body
-    const TX_HASH_LEN: usize = 32;
-    if data.len() < SUBMIT_FIXED_LEN + TX_HASH_LEN + 2 {
+    let (ix, body_bytes) = split_body::<SubmitObservationsIxData>(data).map_err(err)?;
+    if body_bytes.len() < BODY_MIN_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
-    let (fixed_bytes, rest) = data.split_at(SUBMIT_FIXED_LEN);
-    let fixed_bytes: &[u8; SUBMIT_FIXED_LEN] = fixed_bytes
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let (tx_hash, rest) = rest.split_at(TX_HASH_LEN);
-    let tx_hash: &[u8; TX_HASH_LEN] = tx_hash
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    if body_len < BODY_MIN_LEN || rest.len() < 2 + body_len {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let body_bytes = &rest[2..2 + body_len];
+    let tx_hash = &ix.tx_hash;
 
-    let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
+    let mut parsed = ParsedObservation::from_ix(ix);
 
     // Dedup digest keys the pending PDA, NoReplay slot, and commit log.
     parsed.digest = double_keccak256(body_bytes);

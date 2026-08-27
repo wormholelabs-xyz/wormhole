@@ -6,28 +6,20 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::{add_lamports, close_account};
 use crate::definitions::{
-    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout, VaaBodyHeader,
-    CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED, PENDING_OBSERVATIONS_SEED_PREFIX,
+    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
+    SubmitObservationsIxData, VaaBodyHeader, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
+    PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::hash::keccak256;
 use crate::instructions::pda_init::init_or_upgrade_pda;
 use crate::state::pending;
 
-/// Fixed prefix of `submit_observations` data (after the 1-byte discriminator):
-///
-/// | offset | size | field                              |
-/// |--------|------|------------------------------------|
-/// | 0      | 4    | guardian_set_index (little-endian) |
-/// | 4      | 1    | guardian_index                     |
-/// | 5      | 65   | signature (r||s||recovery_id)      |
-///
-/// Then: `tx_hash: [u8; 32]`, `body_len: u16 LE`, `body_len` body bytes.
-/// Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and
-/// dedup digest `keccak256(keccak256(body))`.
-///
-/// SECURITY: `(chain, emitter, sequence)` comes from body header `[8..50]` only.
-pub const SUBMIT_FIXED_LEN: usize = 4 + 1 + 65;
+// `submit_observations` data: `SubmitObservationsIxData` prefix then the VAA body.
+// Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and dedup digest
+// `keccak256(keccak256(body))`.
+//
+// SECURITY: `(chain, emitter, sequence)` comes from the body header only.
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
@@ -56,28 +48,17 @@ pub struct ParsedObservation {
 }
 
 impl ParsedObservation {
-    /// Parse the fixed prefix. `digest` and routing fields stay zero.
-    pub fn from_data(data: &[u8; SUBMIT_FIXED_LEN]) -> crate::ProgramCoreResult<Self> {
-        let (gsi_bytes, rest) = data.split_at(4);
-        let guardian_index = rest[0];
-        let signature_bytes = &rest[1..1 + SECP256K1_SIGNATURE_LEN];
-
-        let gsi: [u8; 4] = gsi_bytes
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-        let signature: [u8; SECP256K1_SIGNATURE_LEN] = signature_bytes
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-
-        Ok(Self {
+    /// From the instruction prefix. `digest` and routing fields stay zero.
+    pub fn from_ix(ix: &SubmitObservationsIxData) -> Self {
+        Self {
             digest: [0u8; 32],
             chain: 0,
             emitter: [0u8; 32],
             sequence: 0,
-            guardian_set_index: u32::from_le_bytes(gsi),
-            guardian_index,
-            signature,
-        })
+            guardian_set_index: ix.guardian_set_index(),
+            guardian_index: ix.guardian_index,
+            signature: ix.signature,
+        }
     }
 
     /// Set the routing tuple from the body header. `self.digest` must derive from this `body`.
@@ -236,13 +217,12 @@ fn create_pending_pda<'info>(
         PendingObservationsLayout::LEN as u64,
     )?;
 
-    let mut layout: PendingObservationsLayout = bytemuck::Zeroable::zeroed();
-    layout.tag = PendingObservationsLayout::TAG;
-    layout.digest = parsed.digest;
-    layout.payer = submitter.key.to_bytes();
-    layout.guardian_set_index = parsed.guardian_set_index;
-    layout.signatures = 0;
-    layout.chain = parsed.chain;
+    let layout = PendingObservationsLayout::new(
+        parsed.chain,
+        parsed.guardian_set_index,
+        parsed.digest,
+        submitter.key.to_bytes(),
+    );
     pending::store(pending_pda, &layout)
 }
 
