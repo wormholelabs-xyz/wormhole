@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn round_trips_through_bytes() {
+    fn round_trips_and_rejects_bad_framing() {
         let entry = AccountantDigestLog::new(2, [0xAA; 32], 7, [0xBB; 32], 3);
         let bytes = entry.as_bytes();
         assert_eq!(bytes.len(), AccountantDigestLog::LEN);
@@ -88,23 +88,22 @@ mod tests {
         assert_eq!(bytes[8..10], [0, 2]);
         assert_eq!(bytes[42..50], 7u64.to_be_bytes());
         assert_eq!(bytes[82..86], [3, 0, 0, 0]);
-
-        let view = AccountantDigestLog::from_bytes(bytes).expect("view");
-        assert_eq!(view.chain(), 2);
-        assert_eq!(view.sequence(), 7);
-        assert_eq!(view.guardian_set_index(), 3);
+        let view = AccountantDigestLog::from_bytes(bytes).unwrap();
+        assert_eq!(
+            (view.chain(), view.sequence(), view.guardian_set_index()),
+            (2, 7, 3)
+        );
         assert_eq!(view, &entry);
-    }
 
-    #[test]
-    fn from_bytes_rejects_wrong_length_and_tag() {
-        let entry = AccountantDigestLog::new(2, [0; 32], 7, [0; 32], 0);
-        let mut bytes = entry.as_bytes().to_vec();
-        assert!(AccountantDigestLog::from_bytes(&bytes[..85]).is_none());
-        bytes.push(0);
-        assert!(AccountantDigestLog::from_bytes(&bytes).is_none());
-        bytes.pop();
-        bytes[0] ^= 1;
-        assert!(AccountantDigestLog::from_bytes(&bytes).is_none());
+        let mut bad_tag = bytes.to_vec();
+        bad_tag[0] ^= 1;
+        let cases: [(&str, std::vec::Vec<u8>); 3] = [
+            ("one byte short", bytes[..85].to_vec()),
+            ("one byte long", [bytes, &[0]].concat()),
+            ("wrong tag", bad_tag),
+        ];
+        for (name, bytes) in cases {
+            assert!(AccountantDigestLog::from_bytes(&bytes).is_none(), "{name}");
+        }
     }
 }

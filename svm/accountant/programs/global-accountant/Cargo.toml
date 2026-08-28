@@ -40,6 +40,7 @@ solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curv
 
 [dev-dependencies]
 accountant-test-fixtures.workspace = true
+wormhole-svm-definitions.workspace = true
 mollusk-svm.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true

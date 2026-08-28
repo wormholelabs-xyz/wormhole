@@ -38,6 +38,24 @@ const _: () = {
 impl VaaBodyHeader {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
+    pub fn new(
+        timestamp: u32,
+        nonce: u32,
+        emitter_chain: u16,
+        emitter_address: [u8; 32],
+        sequence: u64,
+        consistency_level: u8,
+    ) -> Self {
+        Self {
+            timestamp: timestamp.to_be_bytes(),
+            nonce: nonce.to_be_bytes(),
+            emitter_chain: emitter_chain.to_be_bytes(),
+            emitter_address,
+            sequence: sequence.to_be_bytes(),
+            consistency_level,
+        }
+    }
+
     /// Split `body` into the header view and the payload.
     ///
     /// SECURITY: precondition `body.len() >= 51`; otherwise
@@ -98,6 +116,26 @@ const _: () = {
 impl TokenBridgeTransfer {
     /// Action 0x01 is exactly this long; action 0x03 appends an arbitrary payload.
     pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(
+        action: u8,
+        amount: Uint256,
+        token_address: [u8; 32],
+        token_chain: u16,
+        recipient: [u8; 32],
+        recipient_chain: u16,
+        fee: Uint256,
+    ) -> Self {
+        Self {
+            action,
+            amount: amount.0,
+            token_address,
+            token_chain: token_chain.to_be_bytes(),
+            recipient,
+            recipient_chain: recipient_chain.to_be_bytes(),
+            fee: fee.0,
+        }
+    }
 
     pub fn token_chain(&self) -> u16 {
         u16::from_be_bytes(self.token_chain)
@@ -191,312 +229,243 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const HDR: usize = VaaBodyHeader::LEN;
-    const MIN_TRANSFER_BODY: usize = HDR + TokenBridgeTransfer::LEN; // 184
-
     use accountant_test_fixtures::{MAINNET_OTHER_SEQ2211, MAINNET_TRANSFER_SEQ1395207};
 
-    /// Body with a 133-byte transfer payload; recipient bytes are marked to
-    /// catch off-by-one reads.
+    const HDR: usize = VaaBodyHeader::LEN;
+    const TRANSFER_BODY: usize = HDR + TokenBridgeTransfer::LEN;
+
+    fn header_body(chain: u16, emitter: [u8; 32], sequence: u64) -> [u8; HDR] {
+        let header = VaaBodyHeader::new(0, 0, chain, emitter, sequence, 0);
+        let mut body = [0u8; HDR];
+        body.copy_from_slice(bytemuck::bytes_of(&header));
+        body
+    }
+
     fn transfer_body(
         action: u8,
         amount: Uint256,
         token_address: [u8; 32],
         token_chain: u16,
         recipient_chain: u16,
-    ) -> [u8; MIN_TRANSFER_BODY] {
-        let mut body = [0u8; MIN_TRANSFER_BODY];
-        body[HDR] = action;
-        body[HDR + 1..HDR + 33].copy_from_slice(&amount.0);
-        body[HDR + 33..HDR + 65].copy_from_slice(&token_address);
-        body[HDR + 65..HDR + 67].copy_from_slice(&token_chain.to_be_bytes());
-        body[HDR + 67] = 0xAB;
-        body[HDR + 98] = 0xCD;
-        body[HDR + 99..HDR + 101].copy_from_slice(&recipient_chain.to_be_bytes());
+    ) -> [u8; TRANSFER_BODY] {
+        let mut recipient = [0u8; 32];
+        recipient[0] = 0xAB;
+        recipient[31] = 0xCD;
+        let transfer = TokenBridgeTransfer::new(
+            action,
+            amount,
+            token_address,
+            token_chain,
+            recipient,
+            recipient_chain,
+            Uint256::ZERO,
+        );
+        let mut body = [0u8; TRANSFER_BODY];
+        body[HDR..].copy_from_slice(bytemuck::bytes_of(&transfer));
         body
     }
 
-    fn header_body(chain: u16, emitter: [u8; 32], sequence: u64) -> [u8; HDR] {
-        let mut body = [0u8; HDR];
-        body[8..10].copy_from_slice(&chain.to_be_bytes());
-        body[10..42].copy_from_slice(&emitter);
-        body[42..50].copy_from_slice(&sequence.to_be_bytes());
+    fn action_body<const N: usize>(action: u8) -> [u8; N] {
+        let mut body = [0u8; N];
+        body[HDR] = action;
         body
+    }
+
+    fn hex(hex: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        }
+        out
     }
 
     #[test]
-    fn namespace_key_table() {
-        struct Case<'a> {
-            name: &'static str,
-            body: &'a [u8],
-            expect: Result<VaaNamespaceKey, GlobalAccountantError>,
-        }
-        let mut emitter_marked = [0u8; 32];
-        emitter_marked[0] = 0xAA;
-        emitter_marked[31] = 0xBB;
-        let marked = header_body(2, emitter_marked, 0x0102_0304_0506_0708);
-        let max = header_body(u16::MAX, [0xFF; 32], u64::MAX);
-        let zero = [0u8; HDR];
-        let short = [0xFFu8; HDR - 1];
-        let empty: [u8; 0] = [];
+    fn parses_table() {
+        use GlobalAccountantError as E;
+        let mut emitter = [0u8; 32];
+        emitter[0] = 0xAA;
+        emitter[31] = 0xBB;
+        let marked = header_body(2, emitter, 0x0102_0304_0506_0708);
+        let marked_key = VaaNamespaceKey {
+            chain: 2,
+            emitter,
+            sequence: 0x0102_0304_0506_0708,
+        };
         let mut long = [0xFFu8; HDR + 200];
         long[..HDR].copy_from_slice(&marked);
-
-        let cases = [
-            Case {
-                name: "marked fields decode",
-                body: &marked,
-                expect: Ok(VaaNamespaceKey {
-                    chain: 2,
-                    emitter: emitter_marked,
-                    sequence: 0x0102_0304_0506_0708,
-                }),
-            },
-            Case {
-                name: "max values",
-                body: &max,
-                expect: Ok(VaaNamespaceKey {
+        let namespace_cases: [(&str, &[u8], Result<VaaNamespaceKey, E>); 6] = [
+            ("marked fields decode", &marked, Ok(marked_key)),
+            (
+                "max values",
+                &header_body(u16::MAX, [0xFF; 32], u64::MAX),
+                Ok(VaaNamespaceKey {
                     chain: u16::MAX,
                     emitter: [0xFF; 32],
                     sequence: u64::MAX,
                 }),
-            },
-            Case {
-                name: "zero body at exact header len",
-                body: &zero,
-                expect: Ok(VaaNamespaceKey {
+            ),
+            (
+                "zero body at header len",
+                &[0u8; HDR],
+                Ok(VaaNamespaceKey {
                     chain: 0,
                     emitter: [0; 32],
                     sequence: 0,
                 }),
-            },
-            Case {
-                name: "trailing payload ignored",
-                body: &long,
-                expect: Ok(VaaNamespaceKey {
-                    chain: 2,
-                    emitter: emitter_marked,
-                    sequence: 0x0102_0304_0506_0708,
-                }),
-            },
-            Case {
-                name: "one byte short",
-                body: &short,
-                expect: Err(GlobalAccountantError::InvalidInstructionData),
-            },
-            Case {
-                name: "empty",
-                body: &empty,
-                expect: Err(GlobalAccountantError::InvalidInstructionData),
-            },
+            ),
+            ("trailing payload ignored", &long, Ok(marked_key)),
+            (
+                "one byte short",
+                &[0xFFu8; HDR - 1],
+                Err(E::InvalidInstructionData),
+            ),
+            ("empty", &[], Err(E::InvalidInstructionData)),
         ];
-        assert!(!cases.is_empty());
-        for c in &cases {
-            assert_eq!(parse_vaa_namespace_key(c.body), c.expect, "{}", c.name);
+        for (name, body, expected) in namespace_cases {
+            assert_eq!(parse_vaa_namespace_key(body), expected, "{name}");
         }
-    }
 
-    #[test]
-    fn token_bridge_payload_table() {
-        struct Case<'a> {
-            name: &'static str,
-            body: &'a [u8],
-            expect: Result<TokenBridgeAction, GlobalAccountantError>,
-        }
         let mut token_address = [0u8; 32];
         token_address[0] = 0x11;
         token_address[31] = 0x99;
-        let transfer_01 = transfer_body(0x01, Uint256::from_u128(1_000_000), token_address, 2, 10);
-        let transfer_03 = transfer_body(0x03, Uint256::from_u128(1_000_000), token_address, 2, 10);
-        let transfer_max = transfer_body(0x01, Uint256::MAX, [0xFF; 32], u16::MAX, u16::MAX);
-        let mut transfer_03_extra = [0u8; MIN_TRANSFER_BODY + 40];
-        transfer_03_extra[..MIN_TRANSFER_BODY].copy_from_slice(&transfer_03);
-        transfer_03_extra[MIN_TRANSFER_BODY..].fill(0xEE);
-        let mut transfer_132 = [0u8; MIN_TRANSFER_BODY - 1];
-        transfer_132.copy_from_slice(&transfer_01[..MIN_TRANSFER_BODY - 1]);
-        let mut attest = [0u8; HDR + 1];
-        attest[HDR] = 0x02;
-        let mut attest_long = [0u8; HDR + 100];
-        attest_long[HDR] = 0x02;
-        let mut action_00 = [0u8; HDR + 1];
-        action_00[HDR] = 0x00;
-        let mut action_ff = [0u8; HDR + 1];
-        action_ff[HDR] = 0xFF;
-        let mut action_77 = [0u8; HDR + 1];
-        action_77[HDR] = 0x77;
-        let header_only = [0u8; HDR];
-        let mut transfer_short = [0u8; HDR + 11];
-        transfer_short[HDR] = 0x01;
-        let empty: [u8; 0] = [];
-
-        let expected_transfer = Ok(TokenBridgeAction::Transfer {
-            amount: Uint256::from_u128(1_000_000),
+        let amount = Uint256::from_u128(1_000_000);
+        let transfer_01 = transfer_body(0x01, amount, token_address, 2, 10);
+        let transfer_03 = transfer_body(0x03, amount, token_address, 2, 10);
+        let mut transfer_03_extra = [0xEEu8; TRANSFER_BODY + 40];
+        transfer_03_extra[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        let expected_transfer = TokenBridgeAction::Transfer {
+            amount,
             token_chain: 2,
             token_address,
             recipient_chain: 10,
-        });
-        let cases = [
-            Case {
-                name: "action 0x01 exact 133",
-                body: &transfer_01,
-                expect: expected_transfer,
-            },
-            Case {
-                name: "action 0x03 decodes as 0x01",
-                body: &transfer_03,
-                expect: expected_transfer,
-            },
-            Case {
-                name: "action 0x03 with trailing payload",
-                body: &transfer_03_extra,
-                expect: expected_transfer,
-            },
-            Case {
-                name: "max field values",
-                body: &transfer_max,
-                expect: Ok(TokenBridgeAction::Transfer {
+        };
+        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 13] = [
+            ("action 0x01 exact 133", &transfer_01, Ok(expected_transfer)),
+            (
+                "action 0x03 decodes as 0x01",
+                &transfer_03,
+                Ok(expected_transfer),
+            ),
+            (
+                "action 0x03 with trailing payload",
+                &transfer_03_extra,
+                Ok(expected_transfer),
+            ),
+            (
+                "max field values",
+                &transfer_body(0x01, Uint256::MAX, [0xFF; 32], u16::MAX, u16::MAX),
+                Ok(TokenBridgeAction::Transfer {
                     amount: Uint256::MAX,
                     token_chain: u16::MAX,
                     token_address: [0xFF; 32],
                     recipient_chain: u16::MAX,
                 }),
-            },
-            Case {
-                name: "attest at 52 bytes",
-                body: &attest,
-                expect: Ok(TokenBridgeAction::Attest),
-            },
-            Case {
-                name: "attest with trailing bytes",
-                body: &attest_long,
-                expect: Ok(TokenBridgeAction::Attest),
-            },
-            Case {
-                name: "action 0x00",
-                body: &action_00,
-                expect: Ok(TokenBridgeAction::Other(0x00)),
-            },
-            Case {
-                name: "action 0x77",
-                body: &action_77,
-                expect: Ok(TokenBridgeAction::Other(0x77)),
-            },
-            Case {
-                name: "action 0xFF",
-                body: &action_ff,
-                expect: Ok(TokenBridgeAction::Other(0xFF)),
-            },
-            Case {
-                name: "transfer payload 132 bytes",
-                body: &transfer_132,
-                expect: Err(GlobalAccountantError::InvalidInstructionData),
-            },
-            Case {
-                name: "transfer payload 11 bytes",
-                body: &transfer_short,
-                expect: Err(GlobalAccountantError::InvalidInstructionData),
-            },
-            Case {
-                name: "header only, no action byte",
-                body: &header_only,
-                expect: Err(GlobalAccountantError::InvalidInstructionData),
-            },
-            Case {
-                name: "empty",
-                body: &empty,
-                expect: Err(GlobalAccountantError::InvalidInstructionData),
-            },
+            ),
+            (
+                "attest at 52 bytes",
+                &action_body::<{ HDR + 1 }>(0x02),
+                Ok(TokenBridgeAction::Attest),
+            ),
+            (
+                "attest with trailing bytes",
+                &action_body::<{ HDR + 100 }>(0x02),
+                Ok(TokenBridgeAction::Attest),
+            ),
+            (
+                "action 0x00",
+                &action_body::<{ HDR + 1 }>(0x00),
+                Ok(TokenBridgeAction::Other(0x00)),
+            ),
+            (
+                "action 0x77",
+                &action_body::<{ HDR + 1 }>(0x77),
+                Ok(TokenBridgeAction::Other(0x77)),
+            ),
+            (
+                "action 0xFF",
+                &action_body::<{ HDR + 1 }>(0xFF),
+                Ok(TokenBridgeAction::Other(0xFF)),
+            ),
+            (
+                "transfer payload 132 bytes",
+                &transfer_01[..TRANSFER_BODY - 1],
+                Err(E::InvalidInstructionData),
+            ),
+            (
+                "transfer payload 11 bytes",
+                &action_body::<{ HDR + 11 }>(0x01),
+                Err(E::InvalidInstructionData),
+            ),
+            ("header only", &[0u8; HDR], Err(E::InvalidInstructionData)),
+            ("empty", &[], Err(E::InvalidInstructionData)),
         ];
-        assert!(!cases.is_empty());
-        for c in &cases {
-            assert_eq!(parse_token_bridge_payload(c.body), c.expect, "{}", c.name);
+        for (name, body, expected) in payload_cases {
+            assert_eq!(parse_token_bridge_payload(body), expected, "{name}");
         }
     }
 
     #[test]
-    fn mainnet_transfer_fixture_decodes() {
-        let body = MAINNET_TRANSFER_SEQ1395207.body();
-        assert_eq!(body.len(), MIN_TRANSFER_BODY);
-
-        let key = parse_vaa_namespace_key(body).unwrap();
-        let mut emitter = [0u8; 32];
-        hex_into(
-            "ec7372995d5cc8732397fb0ad35c0121e0eaa90d26f828a534cab54391b3a4f5",
-            &mut emitter,
-        );
+    fn mainnet_fixtures_decode() {
+        let transfer = MAINNET_TRANSFER_SEQ1395207.body();
+        assert_eq!(transfer.len(), TRANSFER_BODY);
         assert_eq!(
-            key,
-            VaaNamespaceKey {
+            parse_vaa_namespace_key(transfer),
+            Ok(VaaNamespaceKey {
                 chain: 1,
-                emitter,
+                emitter: hex("ec7372995d5cc8732397fb0ad35c0121e0eaa90d26f828a534cab54391b3a4f5"),
                 sequence: 1_395_207,
-            }
-        );
-
-        let mut token_address = [0u8; 32];
-        hex_into(
-            "000000000000000000000000814e0908b12a99fecf5bc101bb5d0b8b5cdf7d26",
-            &mut token_address,
+            })
         );
         assert_eq!(
-            parse_token_bridge_payload(body),
+            parse_token_bridge_payload(transfer),
             Ok(TokenBridgeAction::Transfer {
                 amount: Uint256::from_u128(1_624_428_966_986),
                 token_chain: 2,
-                token_address,
+                token_address: hex(
+                    "000000000000000000000000814e0908b12a99fecf5bc101bb5d0b8b5cdf7d26"
+                ),
                 recipient_chain: 2,
             })
         );
-    }
 
-    #[test]
-    fn mainnet_non_token_bridge_fixture_is_other() {
-        let body = MAINNET_OTHER_SEQ2211.body();
-        let key = parse_vaa_namespace_key(body).unwrap();
-        assert_eq!(key.chain, 1);
-        assert_eq!(key.sequence, 2211);
+        let other = MAINNET_OTHER_SEQ2211.body();
+        let key = parse_vaa_namespace_key(other).unwrap();
+        assert_eq!((key.chain, key.sequence), (1, 2211));
         assert_eq!(
-            parse_token_bridge_payload(body),
+            parse_token_bridge_payload(other),
             Ok(TokenBridgeAction::Other(0x99))
         );
     }
 
-    /// Offsets match `DecodeTransferPayloadHdr` in `sdk/vaa/structs.go`:
-    /// type at 0, amount 1..33, origin address 33..65, origin chain 65..67,
-    /// target address 67..99, target chain 99..101.
     #[test]
     fn payload_offsets_match_guardian_sdk() {
-        let go_sdk: [(&str, usize); 6] = [
-            ("type", 0),
-            ("amount", 1),
-            ("origin_address", 33),
-            ("origin_chain", 65),
-            ("target_address", 67),
-            ("target_chain", 99),
-        ];
         use core::mem::offset_of;
-        let ours = [
-            ("type", offset_of!(TokenBridgeTransfer, action)),
-            ("amount", offset_of!(TokenBridgeTransfer, amount)),
+        let cases: [(&str, usize, usize); 6] = [
+            ("type", 0, offset_of!(TokenBridgeTransfer, action)),
+            ("amount", 1, offset_of!(TokenBridgeTransfer, amount)),
             (
                 "origin_address",
+                33,
                 offset_of!(TokenBridgeTransfer, token_address),
             ),
-            ("origin_chain", offset_of!(TokenBridgeTransfer, token_chain)),
-            ("target_address", offset_of!(TokenBridgeTransfer, recipient)),
+            (
+                "origin_chain",
+                65,
+                offset_of!(TokenBridgeTransfer, token_chain),
+            ),
+            (
+                "target_address",
+                67,
+                offset_of!(TokenBridgeTransfer, recipient),
+            ),
             (
                 "target_chain",
+                99,
                 offset_of!(TokenBridgeTransfer, recipient_chain),
             ),
         ];
-        assert_eq!(go_sdk, ours);
-    }
-
-    fn hex_into(hex: &str, out: &mut [u8]) {
-        assert_eq!(hex.len(), out.len() * 2);
-        for (i, byte) in out.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+        for (name, go_sdk, ours) in cases {
+            assert_eq!(ours, go_sdk, "{name}");
         }
     }
 }

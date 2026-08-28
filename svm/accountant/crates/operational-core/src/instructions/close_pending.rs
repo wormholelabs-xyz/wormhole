@@ -19,7 +19,7 @@ use crate::accounts;
 use crate::cpi::noreplay;
 use crate::definitions::{
     ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout, CORE_BRIDGE_PROGRAM_ID,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
+    NOREPLAY_AUTHORITY_SEED_PREFIX,
 };
 use crate::err;
 use crate::ProgramResult;
@@ -45,16 +45,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     // SECURITY: re-derive the pending PDA; a spoofed layout could point at another bucket.
-    let chain_be = layout.chain.to_be_bytes();
-    let (expected_pending_pda, _) = Pubkey::find_program_address(
-        &[
-            PENDING_OBSERVATIONS_SEED_PREFIX,
-            &chain_be,
-            &emitter,
-            &ix.sequence,
-            &layout.digest,
-        ],
+    let (expected_pending_pda, _) = crate::support::quorum::derive_pending_pda(
         program_id,
+        layout.chain,
+        &emitter,
+        sequence,
+        &layout.digest,
     );
     if pending_pda.key != &expected_pending_pda {
         return Err(err(GlobalAccountantError::InvalidPda));

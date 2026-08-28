@@ -127,7 +127,6 @@ mod tests {
         from_reference(U256::from(1u8) << shift)
     }
 
-    /// Powers of two at limb boundaries and their neighbours, plus 0, 1, MAX.
     fn edge_values() -> std::vec::Vec<Uint256> {
         let one = Uint256::from_u128(1);
         let mut out = std::vec![Uint256::ZERO, one, Uint256::MAX];
@@ -163,7 +162,6 @@ mod tests {
         );
     }
 
-    /// Every pair of edge values, both orders, against `ruint::U256`.
     #[test]
     fn matches_ruint_on_edge_pairs() {
         let edges = edge_values();
@@ -174,7 +172,6 @@ mod tests {
         }
     }
 
-    /// Deterministic pseudo-random pairs (xorshift64*), bounded iteration count.
     #[test]
     fn matches_ruint_on_random_pairs() {
         const ITERATIONS: usize = 20_000;
@@ -185,7 +182,6 @@ mod tests {
             state ^= state >> 27;
             state.wrapping_mul(0x2545_F491_4F6C_DD1D)
         };
-        // `limbs_set` low limbs random, the rest zero, so carries cross limb boundaries.
         let mut random = |limbs_set: usize| {
             let mut bytes = [0u8; 32];
             for limb in (Uint256::LIMBS - limbs_set)..Uint256::LIMBS {
@@ -200,58 +196,70 @@ mod tests {
         }
     }
 
-    /// Known answers independent of either implementation.
     #[test]
     fn known_answers() {
         let one = Uint256::from_u128(1);
-        assert_eq!(Uint256::MAX.checked_add(one), None);
-        assert_eq!(Uint256::ZERO.checked_sub(one), None);
-        assert_eq!(Uint256::MAX.checked_add(Uint256::ZERO), Some(Uint256::MAX));
-        assert_eq!(
-            Uint256::ZERO.checked_sub(Uint256::ZERO),
-            Some(Uint256::ZERO)
-        );
-        assert_eq!(
-            Uint256::from_u128(500).checked_add(Uint256::from_u128(200)),
-            Some(Uint256::from_u128(700))
-        );
-        assert_eq!(
-            Uint256::from_u128(500).checked_sub(Uint256::from_u128(200)),
-            Some(Uint256::from_u128(300))
-        );
-    }
-
-    /// Carry must propagate across every limb boundary.
-    #[test]
-    fn carry_propagates_across_all_limbs() {
-        let one = Uint256::from_u128(1);
         let mut almost_max = Uint256::MAX;
         almost_max.0[31] = 0xfe;
-        assert_eq!(almost_max.checked_add(one), Some(Uint256::MAX));
         let low_limbs_full = Uint256::from_u128(u128::MAX);
-        assert_eq!(low_limbs_full.checked_add(one), Some(pow2(128)));
-        assert_eq!(pow2(128).checked_sub(one), Some(low_limbs_full));
-        assert_eq!(
-            pow2(64).checked_sub(one),
-            Some(Uint256::from_u128(u64::MAX as u128))
-        );
-    }
 
-    #[test]
-    fn ordering_is_numeric() {
+        let adds: [(&str, Uint256, Uint256, Option<Uint256>); 5] = [
+            ("max plus one overflows", Uint256::MAX, one, None),
+            (
+                "max plus zero",
+                Uint256::MAX,
+                Uint256::ZERO,
+                Some(Uint256::MAX),
+            ),
+            (
+                "500 plus 200",
+                Uint256::from_u128(500),
+                Uint256::from_u128(200),
+                Some(Uint256::from_u128(700)),
+            ),
+            ("carry into top limb", almost_max, one, Some(Uint256::MAX)),
+            ("carry across limb 2", low_limbs_full, one, Some(pow2(128))),
+        ];
+        for (name, a, b, expected) in adds {
+            assert_eq!(a.checked_add(b), expected, "{name}");
+        }
+
+        let subs: [(&str, Uint256, Uint256, Option<Uint256>); 5] = [
+            ("zero minus one underflows", Uint256::ZERO, one, None),
+            (
+                "zero minus zero",
+                Uint256::ZERO,
+                Uint256::ZERO,
+                Some(Uint256::ZERO),
+            ),
+            (
+                "500 minus 200",
+                Uint256::from_u128(500),
+                Uint256::from_u128(200),
+                Some(Uint256::from_u128(300)),
+            ),
+            ("borrow across limb 2", pow2(128), one, Some(low_limbs_full)),
+            (
+                "borrow across limb 3",
+                pow2(64),
+                one,
+                Some(Uint256::from_u128(u64::MAX as u128)),
+            ),
+        ];
+        for (name, a, b, expected) in subs {
+            assert_eq!(a.checked_sub(b), expected, "{name}");
+        }
+
         assert!(Uint256::from_u128(1) < Uint256::from_u128(2));
-        assert!(Uint256::MAX > Uint256::from_u128(u128::MAX));
-        assert!(pow2(128) > Uint256::from_u128(u128::MAX));
+        assert!(Uint256::MAX > low_limbs_full);
+        assert!(pow2(128) > low_limbs_full);
         assert!(pow2(255) > pow2(254));
-    }
 
-    #[test]
-    fn big_endian_wire_order() {
         let v = Uint256::from_u128(0x1234);
-        let mut expected = [0u8; 32];
-        expected[30] = 0x12;
-        expected[31] = 0x34;
-        assert_eq!(v.0, expected);
+        let mut wire = [0u8; 32];
+        wire[30] = 0x12;
+        wire[31] = 0x34;
+        assert_eq!(v.0, wire);
         assert_eq!(reference(v), U256::from(0x1234u32));
     }
 }

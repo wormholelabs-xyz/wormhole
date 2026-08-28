@@ -145,34 +145,53 @@ mod tests {
     }
 
     #[test]
-    fn split_body_requires_exact_framing() {
+    fn framing_table() {
         let body = [0xABu8; 60];
         let prefix = SubmitVaasIxData {
             guardian_set_bump: 7,
             body_len: 60u16.to_le_bytes(),
         };
         let data = framed(&prefix, &body);
-        let (view, got) = split_body::<SubmitVaasIxData>(&data).expect("exact");
+        let (view, got) = split_body::<SubmitVaasIxData>(&data).unwrap();
         assert_eq!(view.guardian_set_bump, 7);
         assert_eq!(got, &body[..]);
 
-        let cases: [(&str, std::vec::Vec<u8>); 4] = [
+        let split_cases: [(&str, std::vec::Vec<u8>); 4] = [
             ("one byte short", data[..data.len() - 1].to_vec()),
             ("one byte long", [data.as_slice(), &[0]].concat()),
             ("prefix only", data[..SubmitVaasIxData::LEN].to_vec()),
             ("empty", std::vec::Vec::new()),
         ];
-        for (name, bytes) in cases {
+        for (name, bytes) in split_cases {
             assert_eq!(
                 split_body::<SubmitVaasIxData>(&bytes).err(),
                 Some(GlobalAccountantError::InvalidInstructionData),
                 "{name}"
             );
         }
+
+        let mut close = [0u8; ClosePendingIxData::LEN];
+        close[32..].copy_from_slice(&9u64.to_be_bytes());
+        let close_cases: [(&str, std::vec::Vec<u8>, bool); 3] = [
+            ("close_pending exact", close.to_vec(), true),
+            ("close_pending short", close[..39].to_vec(), false),
+            (
+                "close_pending long",
+                [close.as_slice(), &[0]].concat(),
+                false,
+            ),
+        ];
+        for (name, bytes, ok) in close_cases {
+            assert_eq!(ClosePendingIxData::from_bytes(&bytes).is_ok(), ok, "{name}");
+        }
+        assert_eq!(
+            ClosePendingIxData::from_bytes(&close).unwrap().sequence(),
+            9
+        );
     }
 
     #[test]
-    fn submit_observations_prefix_fields() {
+    fn submit_observations_prefix_round_trips() {
         let mut prefix = SubmitObservationsIxData::zeroed();
         prefix.guardian_set_index = 4u32.to_le_bytes();
         prefix.guardian_index = 12;
@@ -180,23 +199,11 @@ mod tests {
         prefix.tx_hash = [0xCC; 32];
         prefix.body_len = 52u16.to_le_bytes();
         let data = framed(&prefix, &[0u8; 52]);
-        let (view, body) = split_body::<SubmitObservationsIxData>(&data).expect("exact");
+        let (view, body) = split_body::<SubmitObservationsIxData>(&data).unwrap();
         assert_eq!(view.guardian_set_index(), 4);
         assert_eq!(view.guardian_index, 12);
         assert_eq!(view.signature[64], 1);
         assert_eq!(view.tx_hash, [0xCC; 32]);
         assert_eq!(body.len(), 52);
-    }
-
-    #[test]
-    fn close_pending_is_exact_length() {
-        let mut bytes = [0u8; ClosePendingIxData::LEN];
-        bytes[32..].copy_from_slice(&9u64.to_be_bytes());
-        assert_eq!(
-            ClosePendingIxData::from_bytes(&bytes).unwrap().sequence(),
-            9
-        );
-        assert!(ClosePendingIxData::from_bytes(&bytes[..39]).is_err());
-        assert!(ClosePendingIxData::from_bytes(&[bytes.as_slice(), &[0]].concat()).is_err());
     }
 }
