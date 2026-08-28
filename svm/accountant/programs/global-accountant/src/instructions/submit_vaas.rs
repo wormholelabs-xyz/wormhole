@@ -14,7 +14,7 @@ use crate::definitions::{
 };
 use crate::err;
 use crate::instructions::transfer;
-use crate::state::chain_registration;
+use accountant_operational_core::accounts::chain_registration;
 
 /// Order: Shim check, NoReplay pre-check, registration check, NoReplay mark,
 /// commit log, balance apply.

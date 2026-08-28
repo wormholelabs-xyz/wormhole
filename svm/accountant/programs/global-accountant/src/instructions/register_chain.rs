@@ -16,7 +16,7 @@ use crate::definitions::{
     SOLANA_CHAIN_ID,
 };
 use crate::err;
-use crate::state::chain_registration;
+use accountant_operational_core::accounts::chain_registration;
 
 /// A `RegisterChain` body is exactly header + payload.
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
@@ -99,21 +99,13 @@ fn parse_instruction(data: &[u8]) -> ProgramCoreResult<(&RegisterChainIxData, &[
     Ok((ix, body))
 }
 
-/// `(b"chain_registration", chain_be)`.
-pub fn derive_registration_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
-        program_id,
-    )
-}
-
 /// `registration_pda` must be the canonical account for `chain`; returns its bump.
 fn check_registration_pda(
     program_id: &Pubkey,
     registration_pda: &AccountInfo,
     chain: u16,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_registration_pda(program_id, chain);
+    let (expected, bump) = chain_registration::derive_pda(program_id, chain);
     if registration_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
