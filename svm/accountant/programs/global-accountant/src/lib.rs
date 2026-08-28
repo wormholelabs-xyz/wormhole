@@ -21,7 +21,6 @@ use anchor_lang::prelude::*;
 pub mod contexts;
 pub mod instructions;
 pub mod raw_ix_data;
-pub mod state;
 
 pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;

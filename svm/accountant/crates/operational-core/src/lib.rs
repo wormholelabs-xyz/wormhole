@@ -8,9 +8,9 @@
 //! Functions take `&AccountInfo` / `&[u8]`; Anchor `Context` types stay in the program crates.
 
 pub mod account_util;
+pub mod accounts;
 pub mod hash;
 pub mod instructions;
-pub mod state;
 
 pub use global_accountant_definitions as definitions;
 

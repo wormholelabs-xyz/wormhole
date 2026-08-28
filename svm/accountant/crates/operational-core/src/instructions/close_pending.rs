@@ -15,13 +15,13 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::add_lamports;
+use crate::accounts;
 use crate::definitions::{
-    ClosePendingIxData, GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID,
+    ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout, CORE_BRIDGE_PROGRAM_ID,
     NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::noreplay;
-use crate::state::pending;
 use crate::ProgramResult;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -38,7 +38,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    let layout = pending::load(pending_pda)?;
+    let layout = accounts::load::<PendingObservationsLayout>(pending_pda)?;
     let recorded_payer = layout.payer;
     if rent_recipient.key.to_bytes() != recorded_payer {
         return Err(err(GlobalAccountantError::PayerMismatch));

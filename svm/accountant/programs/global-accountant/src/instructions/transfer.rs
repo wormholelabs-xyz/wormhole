@@ -3,11 +3,11 @@
 use anchor_lang::prelude::*;
 
 use crate::definitions::{
-    parse_token_bridge_payload, GlobalAccountantError, TokenBridgeAction, Uint256,
-    ACCOUNT_SEED_PREFIX,
+    parse_token_bridge_payload, BalanceAccountLayout, GlobalAccountantError, TokenBridgeAction,
+    Uint256, ACCOUNT_SEED_PREFIX,
 };
 use crate::err;
-use accountant_operational_core::state::account as account_state;
+use accountant_operational_core::accounts::{self, balance};
 use accountant_operational_core::ProgramResult;
 
 /// Source `lock_or_burn`, then destination `unlock_or_mint`. When both PDAs are the same
@@ -29,7 +29,7 @@ pub fn apply_transfer<'info>(
     if source_account.key != &src_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
-    account_state::init_if_needed(
+    balance::init_if_needed(
         program_id,
         payer,
         source_account,
@@ -38,25 +38,25 @@ pub fn apply_transfer<'info>(
         token_address,
         src_bump,
     )?;
-    let mut src = account_state::load(source_account)?;
+    let mut src = accounts::load::<BalanceAccountLayout>(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
 
     // Same PDA: burn-then-mint must still underflow when the balance is below `amount`.
     let same_pda = source_account.key == dest_account.key;
     if same_pda {
         src.unlock_or_mint(amount).map_err(err)?;
-        account_state::store(source_account, &src)?;
+        accounts::store(source_account, &src)?;
         return Ok(());
     }
 
-    account_state::store(source_account, &src)?;
+    accounts::store(source_account, &src)?;
 
     let (dst_expected, dst_bump) =
         derive_balance_account_pda(program_id, recipient_chain, token_chain, token_address);
     if dest_account.key != &dst_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
-    account_state::init_if_needed(
+    balance::init_if_needed(
         program_id,
         payer,
         dest_account,
@@ -65,9 +65,9 @@ pub fn apply_transfer<'info>(
         token_address,
         dst_bump,
     )?;
-    let mut dst = account_state::load(dest_account)?;
+    let mut dst = accounts::load::<BalanceAccountLayout>(dest_account)?;
     dst.unlock_or_mint(amount).map_err(err)?;
-    account_state::store(dest_account, &dst)
+    accounts::store(dest_account, &dst)
 }
 
 /// Parse the Token Bridge payload and apply it. Attest is a no-op; an unknown action

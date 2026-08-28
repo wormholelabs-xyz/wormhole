@@ -1,38 +1,9 @@
-//! Load / store / lazy-init for [`BalanceAccountLayout`] at
-//! `(b"account", chain_be, token_chain_be, token_address)`. Load copies by value.
-
 use anchor_lang::prelude::*;
 
-use crate::definitions::{
-    BalanceAccountLayout, GlobalAccountantError, Uint256, ACCOUNT_SEED_PREFIX,
-};
-use crate::err;
+use crate::definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX};
 use crate::instructions::pda_init::init_or_upgrade_pda;
 use crate::ProgramResult;
 
-/// `InvalidPda` if the length or tag is wrong.
-pub fn load(account: &AccountInfo) -> crate::ProgramCoreResult<BalanceAccountLayout> {
-    let data = account.try_borrow_data()?;
-    if data.len() != BalanceAccountLayout::LEN {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let layout = bytemuck::from_bytes::<BalanceAccountLayout>(&data);
-    if layout.tag != BalanceAccountLayout::TAG {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    Ok(*layout)
-}
-
-pub fn store(account: &AccountInfo, value: &BalanceAccountLayout) -> crate::ProgramResult {
-    let mut data = account.try_borrow_mut_data()?;
-    if data.len() != BalanceAccountLayout::LEN {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    data.copy_from_slice(bytemuck::bytes_of(value));
-    Ok(())
-}
-
-/// Create the balance PDA if absent. Caller checks `canonical_bump` first.
 pub fn init_if_needed<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
@@ -78,5 +49,5 @@ pub fn create<'info>(
         seeds,
         BalanceAccountLayout::LEN as u64,
     )?;
-    store(account_pda, layout)
+    super::store(account_pda, layout)
 }

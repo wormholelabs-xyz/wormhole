@@ -20,7 +20,7 @@ use crate::definitions::{
 };
 use crate::err;
 use crate::instructions::transfer;
-use crate::state::chain_registration;
+use accountant_operational_core::accounts::chain_registration;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let (ix, body_bytes) = split_body::<SubmitObservationsIxData>(data).map_err(err)?;

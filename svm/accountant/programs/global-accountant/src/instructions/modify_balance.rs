@@ -6,11 +6,9 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 use anchor_lang::solana_program::system_program;
 
+use accountant_operational_core::accounts::{self, balance as balance_account};
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
-use accountant_operational_core::state::{
-    account as balance_account, modify_balance as modify_balance_record,
-};
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
@@ -159,12 +157,12 @@ fn apply_delta<'info>(
             ),
         };
     }
-    let mut layout = balance_account::load(balance_pda)?;
+    let mut layout = accounts::load::<BalanceAccountLayout>(balance_pda)?;
     match kind {
         ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
         ModificationKind::Subtract => layout.raw_sub(amount).map_err(err)?,
     }
-    balance_account::store(balance_pda, &layout)
+    accounts::store(balance_pda, &layout)
 }
 
 /// Create the `ModifyBalance` PDA and write the record.
@@ -195,7 +193,7 @@ fn record_modify_balance<'info>(
         payload.amount(),
         payload.reason,
     );
-    modify_balance_record::store(modify_balance_pda, &record)
+    accounts::store(modify_balance_pda, &record)
 }
 
 /// Log the modification for off-chain indexers.

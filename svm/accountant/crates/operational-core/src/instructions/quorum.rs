@@ -5,6 +5,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::{add_lamports, close_account};
+use crate::accounts;
 use crate::definitions::{
     parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
     SubmitObservationsIxData, VaaBodyHeader, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
@@ -13,7 +14,6 @@ use crate::definitions::{
 use crate::err;
 use crate::hash::keccak256;
 use crate::instructions::pda_init::init_or_upgrade_pda;
-use crate::state::pending;
 
 // `submit_observations` data: `SubmitObservationsIxData` prefix then the VAA body.
 // Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and dedup digest
@@ -133,7 +133,7 @@ pub fn decide_pending_action(
         &parsed.digest,
     )?;
 
-    let existing = pending::load(pending_pda)?;
+    let existing = accounts::load::<PendingObservationsLayout>(pending_pda)?;
     if existing.guardian_set_index < parsed.guardian_set_index {
         return Ok(PendingAction::WipeAndRecreate);
     }
@@ -165,7 +165,7 @@ pub fn apply_action_and_accumulate<'info>(
         PendingAction::Continue => {}
     }
 
-    let mut layout = pending::load(pending_pda)?;
+    let mut layout = accounts::load::<PendingObservationsLayout>(pending_pda)?;
     let bit = 1u32
         .checked_shl(parsed.guardian_index as u32)
         .ok_or_else(|| err(GlobalAccountantError::InvalidGuardianIndex))?;
@@ -173,7 +173,7 @@ pub fn apply_action_and_accumulate<'info>(
         return Err(err(GlobalAccountantError::AlreadySigned));
     }
     layout.signatures |= bit;
-    pending::store(pending_pda, &layout)?;
+    accounts::store(pending_pda, &layout)?;
 
     let quorum_reached = layout.signatures.count_ones() >= quorum_threshold;
     Ok((layout, quorum_reached))
@@ -223,7 +223,7 @@ fn create_pending_pda<'info>(
         parsed.digest,
         submitter.key.to_bytes(),
     );
-    pending::store(pending_pda, &layout)
+    accounts::store(pending_pda, &layout)
 }
 
 /// Refund `recorded_payer` and close the account.

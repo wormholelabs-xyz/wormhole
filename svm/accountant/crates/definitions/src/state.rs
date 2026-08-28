@@ -62,6 +62,45 @@ pub struct PendingObservationsLayout {
     pub payer: Pubkey,
 }
 
+pub trait AccountLayout: Pod {
+    const TAG: u8;
+    const LEN: usize = core::mem::size_of::<Self>();
+
+    fn tag(&self) -> u8;
+}
+
+impl AccountLayout for PendingObservationsLayout {
+    const TAG: u8 = Self::TAG;
+
+    fn tag(&self) -> u8 {
+        self.tag
+    }
+}
+
+impl AccountLayout for BalanceAccountLayout {
+    const TAG: u8 = Self::TAG;
+
+    fn tag(&self) -> u8 {
+        self.tag
+    }
+}
+
+impl AccountLayout for ChainRegistrationLayout {
+    const TAG: u8 = Self::TAG;
+
+    fn tag(&self) -> u8 {
+        self.tag
+    }
+}
+
+impl AccountLayout for ModifyBalanceLayout {
+    const TAG: u8 = Self::TAG;
+
+    fn tag(&self) -> u8 {
+        self.tag
+    }
+}
+
 impl PendingObservationsLayout {
     /// Fresh record with no signatures.
     pub fn new(chain: u16, guardian_set_index: u32, digest: [u8; 32], payer: Pubkey) -> Self {
