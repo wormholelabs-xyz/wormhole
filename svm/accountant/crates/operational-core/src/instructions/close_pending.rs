@@ -16,12 +16,12 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::add_lamports;
 use crate::accounts;
+use crate::cpi::noreplay;
 use crate::definitions::{
     ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout, CORE_BRIDGE_PROGRAM_ID,
     NOREPLAY_AUTHORITY_SEED_PREFIX, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
-use crate::instructions::noreplay;
 use crate::ProgramResult;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {

@@ -5,8 +5,9 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
+use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{commit_log, noreplay, shim};
+use accountant_operational_core::support::commit_log;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{

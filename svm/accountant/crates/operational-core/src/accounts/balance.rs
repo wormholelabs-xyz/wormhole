@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 
 use crate::definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX};
-use crate::instructions::pda_init::init_or_upgrade_pda;
+use crate::support::pda_init::init_or_upgrade_pda;
 use crate::ProgramResult;
 
 pub fn init_if_needed<'info>(

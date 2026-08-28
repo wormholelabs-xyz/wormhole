@@ -7,8 +7,9 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use anchor_lang::solana_program::system_program;
 
 use accountant_operational_core::accounts::{self, balance as balance_account};
+use accountant_operational_core::cpi::shim;
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
