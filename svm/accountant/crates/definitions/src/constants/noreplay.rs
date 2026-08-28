@@ -130,39 +130,36 @@ const _: () = {
 mod tests {
     use super::*;
 
-    /// Only deployment as of 2026-08: Solana devnet `repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t`.
     #[test]
-    fn program_id_is_known_deployment() {
+    fn matches_solana_noreplay_and_addresses_bits() {
         let devnet = bs58::decode_pubkey("repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t");
         assert_eq!(NOREPLAY_PROGRAM_ID, devnet);
-    }
-
-    #[test]
-    fn wire_constants_match_solana_noreplay() {
         assert_eq!(NOREPLAY_MARK_USED_DISCRIMINATOR, solana_noreplay::MARK_USED);
+        assert_eq!(
+            NOREPLAY_MARK_USED_BULK_DISCRIMINATOR,
+            solana_noreplay::MARK_USED_BULK
+        );
         assert_eq!(NOREPLAY_BITS_PER_BUCKET, solana_noreplay::BITS_PER_BUCKET);
         assert_eq!(NOREPLAY_BITMAP_BYTES, solana_noreplay::BITMAP_BYTES);
+        assert_eq!(
+            NOREPLAY_BITMAP_BYTES,
+            solana_noreplay::MARK_USED_BULK_MASK_LEN
+        );
         assert_eq!(
             NoReplayBitmapAccount::LEN,
             solana_noreplay::BITMAP_ACCOUNT_SIZE
         );
-    }
 
-    /// `solana-noreplay`'s own parser must read back what we encode.
-    #[test]
-    fn mark_used_data_parses_with_solana_noreplay() {
         let namespace = NoReplayNamespace::new(2, [0xAB; 32]);
-        let data = NoReplayMarkUsedData::new(namespace, 5_000);
-        let bytes = data.as_bytes();
+        let bytes = NoReplayMarkUsedData::new(namespace, 5_000)
+            .as_bytes()
+            .to_vec();
         assert_eq!(bytes[0], solana_noreplay::MARK_USED);
-        let parsed = solana_noreplay::InstructionData::try_from(&bytes[1..]).expect("parse");
+        let parsed = solana_noreplay::InstructionData::try_from(&bytes[1..]).unwrap();
         assert_eq!(parsed.namespace, namespace.as_bytes());
         assert_eq!(parsed.sequence, 5_000);
-    }
 
-    #[test]
-    fn bucket_and_bit_index() {
-        let cases: [(u64, u64, usize); 6] = [
+        let index_cases: [(u64, u64, usize); 6] = [
             (0, 0, 0),
             (1, 0, 1),
             (1023, 0, 1023),
@@ -170,7 +167,7 @@ mod tests {
             (2049, 2, 1),
             (u64::MAX, u64::MAX / 1024, 1023),
         ];
-        for (sequence, bucket, bit) in cases {
+        for (sequence, bucket, bit) in index_cases {
             assert_eq!(
                 NoReplayBitmapAccount::bucket_index(sequence),
                 bucket,
@@ -182,29 +179,19 @@ mod tests {
                 "bit {sequence}"
             );
         }
-    }
 
-    #[test]
-    fn bitmap_bit_addressing() {
         let mut account = NoReplayBitmapAccount::zeroed();
         account.bitmap[0] = 0b0000_0001;
         account.bitmap[127] = 0b1000_0000;
-        assert!(account.is_marked(0));
-        assert!(!account.is_marked(1));
-        assert!(account.is_marked(1023));
-        assert!(account.is_marked(1024)); // same bit, next bucket
+        let bit_cases: [(&str, u64, bool); 4] = [
+            ("bit 0 set", 0, true),
+            ("bit 1 clear", 1, false),
+            ("bit 1023 set", 1023, true),
+            ("bit 1024 aliases bit 0", 1024, true),
+        ];
+        for (name, sequence, marked) in bit_cases {
+            assert_eq!(account.is_marked(sequence), marked, "{name}");
+        }
         assert_eq!(NoReplayBitmapAccount::from_bytes(&[0u8; 128]), None);
-    }
-
-    #[test]
-    fn mark_used_bulk_matches_solana_noreplay() {
-        assert_eq!(
-            NOREPLAY_MARK_USED_BULK_DISCRIMINATOR,
-            solana_noreplay::MARK_USED_BULK
-        );
-        assert_eq!(
-            NOREPLAY_BITMAP_BYTES,
-            solana_noreplay::MARK_USED_BULK_MASK_LEN
-        );
     }
 }

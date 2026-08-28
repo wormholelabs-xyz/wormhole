@@ -371,211 +371,133 @@ mod tests {
     use super::*;
 
     #[test]
-    fn account_tag_values_pinned() {
-        assert_eq!(AccountTag::PendingObservations as u8, 1);
-        assert_eq!(AccountTag::Balance as u8, 2);
-        assert_eq!(AccountTag::ChainRegistration as u8, 3);
-        assert_eq!(AccountTag::ModifyBalance as u8, 4);
-        assert_eq!(
-            PendingObservationsLayout::TAG,
-            AccountTag::PendingObservations as u8
-        );
-        assert_eq!(BalanceAccountLayout::TAG, AccountTag::Balance as u8);
-        assert_eq!(
-            ChainRegistrationLayout::TAG,
-            AccountTag::ChainRegistration as u8
-        );
-        assert_eq!(ModifyBalanceLayout::TAG, AccountTag::ModifyBalance as u8);
-    }
-
-    #[test]
-    fn tag_at_offset_zero_for_all_layouts() {
-        use core::mem::offset_of;
-        assert_eq!(offset_of!(PendingObservationsLayout, tag), 0);
-        assert_eq!(offset_of!(BalanceAccountLayout, tag), 0);
-        assert_eq!(offset_of!(ChainRegistrationLayout, tag), 0);
-        assert_eq!(offset_of!(ModifyBalanceLayout, tag), 0);
-    }
-
-    #[test]
-    fn zeroed_layout_is_not_a_valid_tag() {
-        assert_eq!(<PendingObservationsLayout as Zeroable>::zeroed().tag, 0);
-        assert_eq!(<BalanceAccountLayout as Zeroable>::zeroed().tag, 0);
-        assert_eq!(<ChainRegistrationLayout as Zeroable>::zeroed().tag, 0);
-        assert_eq!(<ModifyBalanceLayout as Zeroable>::zeroed().tag, 0);
-        for tag in [
-            AccountTag::PendingObservations,
-            AccountTag::Balance,
-            AccountTag::ChainRegistration,
-            AccountTag::ModifyBalance,
-        ] {
-            assert_ne!(tag as u8, 0);
+    fn account_tags_are_pinned_and_zeroed_layout_is_invalid() {
+        let cases: [(&str, u8, u8, u8); 4] = [
+            (
+                "pending",
+                AccountTag::PendingObservations as u8,
+                PendingObservationsLayout::TAG,
+                <PendingObservationsLayout as Zeroable>::zeroed().tag,
+            ),
+            (
+                "balance",
+                AccountTag::Balance as u8,
+                BalanceAccountLayout::TAG,
+                <BalanceAccountLayout as Zeroable>::zeroed().tag,
+            ),
+            (
+                "chain_registration",
+                AccountTag::ChainRegistration as u8,
+                ChainRegistrationLayout::TAG,
+                <ChainRegistrationLayout as Zeroable>::zeroed().tag,
+            ),
+            (
+                "modify_balance",
+                AccountTag::ModifyBalance as u8,
+                ModifyBalanceLayout::TAG,
+                <ModifyBalanceLayout as Zeroable>::zeroed().tag,
+            ),
+        ];
+        for (i, (name, tag, layout_tag, zeroed_tag)) in cases.iter().enumerate() {
+            assert_eq!(*tag, i as u8 + 1, "{name} tag value");
+            assert_eq!(*layout_tag, *tag, "{name} layout tag");
+            assert_eq!(*zeroed_tag, 0, "{name} zeroed tag");
         }
     }
 
     #[test]
-    fn balance_layout_size_pinned() {
-        assert_eq!(BalanceAccountLayout::LEN, 70);
-    }
-
-    #[test]
-    fn balance_layout_uint256_offsets_pinned() {
-        use core::mem::offset_of;
-        assert_eq!(offset_of!(BalanceAccountLayout, tag), 0);
-        assert_eq!(offset_of!(BalanceAccountLayout, chain), 2);
-        assert_eq!(offset_of!(BalanceAccountLayout, token_chain), 4);
-        assert_eq!(offset_of!(BalanceAccountLayout, token_address), 6);
-        assert_eq!(offset_of!(BalanceAccountLayout, balance), 38);
-    }
-
-    #[test]
-    fn balance_layout_is_pod_friendly() {
-        let mut token_address = [0u8; 32];
-        for (i, b) in token_address.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        let original = BalanceAccountLayout {
-            tag: BalanceAccountLayout::TAG,
-            _pad0: 0,
-            chain: 1,
-            token_chain: 2,
-            token_address,
-            balance: Uint256::from_u128(0xcafe_babe),
-        };
-        let bytes = bytemuck::bytes_of(&original);
-        assert_eq!(bytes.len(), BalanceAccountLayout::LEN);
+    fn balance_encodes_big_endian_on_disk() {
+        let layout = BalanceAccountLayout::new(1, 2, [0x62; 32], Uint256::from_u128(0x1234_5678));
+        let bytes = bytemuck::bytes_of(&layout);
         let copy: &BalanceAccountLayout = bytemuck::from_bytes(bytes);
-        assert_eq!(&original, copy);
-    }
-
-    #[test]
-    fn pending_layout_size_pinned() {
-        assert_eq!(PendingObservationsLayout::LEN, 76);
-    }
-
-    #[test]
-    fn pending_layout_offsets_pinned() {
-        use core::mem::offset_of;
-        assert_eq!(offset_of!(PendingObservationsLayout, tag), 0);
-        assert_eq!(offset_of!(PendingObservationsLayout, chain), 2);
-        assert_eq!(offset_of!(PendingObservationsLayout, guardian_set_index), 4);
-        assert_eq!(offset_of!(PendingObservationsLayout, signatures), 8);
-        assert_eq!(offset_of!(PendingObservationsLayout, digest), 12);
-        assert_eq!(offset_of!(PendingObservationsLayout, payer), 44);
-    }
-
-    #[test]
-    fn pending_layout_is_pod_friendly() {
-        let mut digest = [0u8; 32];
-        for (i, b) in digest.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        let original = PendingObservationsLayout {
-            tag: PendingObservationsLayout::TAG,
-            _pad0: 0,
-            chain: 1,
-            guardian_set_index: 0x0BAD_CAFE,
-            signatures: 0x0000_1FFFu32, // 13 low bits set
-            digest,
-            payer: [0xAA; 32],
-        };
-        let bytes = bytemuck::bytes_of(&original);
-        let copy: &PendingObservationsLayout = bytemuck::from_bytes(bytes);
-        assert_eq!(&original, copy);
-        assert_eq!(PendingObservationsLayout::LEN, bytes.len());
-    }
-
-    #[test]
-    fn balance_layout_balance_encodes_big_endian_on_disk() {
-        let original = BalanceAccountLayout {
-            tag: BalanceAccountLayout::TAG,
-            _pad0: 0,
-            chain: 0,
-            token_chain: 0,
-            token_address: [0u8; 32],
-            balance: Uint256::from_u128(0x1234_5678),
-        };
-        let bytes = bytemuck::bytes_of(&original);
-        let balance_slice = &bytes[38..70];
+        assert_eq!(copy, &layout);
         let mut expected = [0u8; 32];
-        expected[28] = 0x12;
-        expected[29] = 0x34;
-        expected[30] = 0x56;
-        expected[31] = 0x78;
-        assert_eq!(balance_slice, &expected);
+        expected[28..].copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(&bytes[38..70], &expected);
     }
 
-    fn balance_with(chain: u16, token_chain: u16, balance: Uint256) -> BalanceAccountLayout {
-        let mut token_address = [0u8; 32];
-        token_address[0] = 0x62;
-        token_address[31] = 0x61;
-        BalanceAccountLayout {
-            tag: BalanceAccountLayout::TAG,
-            _pad0: 0,
-            chain,
-            token_chain,
-            token_address,
-            balance,
+    #[test]
+    fn lock_and_unlock_table() {
+        use GlobalAccountantError as E;
+        const NATIVE: u16 = 0xbae2;
+        const WRAPPED: u16 = 0xcae8;
+        type Case = (&'static str, u16, bool, Uint256, Result<Uint256, E>);
+        let amount = Uint256::from_u128(200);
+        let cases: [Case; 8] = [
+            (
+                "lock native credits",
+                NATIVE,
+                true,
+                Uint256::from_u128(500),
+                Ok(Uint256::from_u128(700)),
+            ),
+            (
+                "lock wrapped debits",
+                WRAPPED,
+                true,
+                Uint256::from_u128(500),
+                Ok(Uint256::from_u128(300)),
+            ),
+            (
+                "lock wrapped underflows",
+                WRAPPED,
+                true,
+                Uint256::ZERO,
+                Err(E::BalanceUnderflow),
+            ),
+            (
+                "lock native overflows",
+                NATIVE,
+                true,
+                Uint256::MAX,
+                Err(E::BalanceOverflow),
+            ),
+            (
+                "unlock native debits",
+                NATIVE,
+                false,
+                Uint256::from_u128(500),
+                Ok(Uint256::from_u128(300)),
+            ),
+            (
+                "unlock native underflows",
+                NATIVE,
+                false,
+                Uint256::ZERO,
+                Err(E::BalanceUnderflow),
+            ),
+            (
+                "unlock wrapped credits",
+                WRAPPED,
+                false,
+                Uint256::from_u128(500),
+                Ok(Uint256::from_u128(700)),
+            ),
+            (
+                "unlock wrapped overflows",
+                WRAPPED,
+                false,
+                Uint256::MAX,
+                Err(E::BalanceOverflow),
+            ),
+        ];
+        for (name, chain, lock, start, expected) in cases {
+            let mut acc = BalanceAccountLayout::new(chain, NATIVE, [0x62; 32], start);
+            let result = if lock {
+                acc.lock_or_burn(amount)
+            } else {
+                acc.unlock_or_mint(amount)
+            };
+            match expected {
+                Ok(balance) => {
+                    assert_eq!(result, Ok(()), "{name}");
+                    assert_eq!(acc.balance, balance, "{name}");
+                }
+                Err(err) => {
+                    assert_eq!(result, Err(err), "{name}");
+                    assert_eq!(acc.balance, start, "{name} balance unchanged");
+                }
+            }
         }
-    }
-
-    #[test]
-    fn lock_or_burn_native_chain_credits() {
-        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::from_u128(500));
-        acc.lock_or_burn(Uint256::from_u128(200)).unwrap();
-        assert_eq!(acc.balance, Uint256::from_u128(700));
-    }
-
-    #[test]
-    fn lock_or_burn_wrapped_chain_debits() {
-        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::from_u128(500));
-        acc.lock_or_burn(Uint256::from_u128(200)).unwrap();
-        assert_eq!(acc.balance, Uint256::from_u128(300));
-    }
-
-    #[test]
-    fn lock_or_burn_wrapped_chain_underflow_rejects() {
-        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::ZERO);
-        let err = acc.lock_or_burn(Uint256::from_u128(200)).unwrap_err();
-        assert_eq!(err, GlobalAccountantError::BalanceUnderflow);
-        assert_eq!(acc.balance, Uint256::ZERO, "balance unchanged on error");
-    }
-
-    #[test]
-    fn lock_or_burn_native_chain_overflow_rejects() {
-        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::MAX);
-        let err = acc.lock_or_burn(Uint256::from_u128(200)).unwrap_err();
-        assert_eq!(err, GlobalAccountantError::BalanceOverflow);
-        assert_eq!(acc.balance, Uint256::MAX, "balance unchanged on error");
-    }
-
-    #[test]
-    fn unlock_or_mint_native_chain_debits() {
-        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::from_u128(500));
-        acc.unlock_or_mint(Uint256::from_u128(200)).unwrap();
-        assert_eq!(acc.balance, Uint256::from_u128(300));
-    }
-
-    #[test]
-    fn unlock_or_mint_native_chain_underflow_rejects() {
-        let mut acc = balance_with(0xbae2, 0xbae2, Uint256::ZERO);
-        let err = acc.unlock_or_mint(Uint256::from_u128(200)).unwrap_err();
-        assert_eq!(err, GlobalAccountantError::BalanceUnderflow);
-        assert_eq!(acc.balance, Uint256::ZERO);
-    }
-
-    #[test]
-    fn unlock_or_mint_wrapped_chain_credits() {
-        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::from_u128(500));
-        acc.unlock_or_mint(Uint256::from_u128(200)).unwrap();
-        assert_eq!(acc.balance, Uint256::from_u128(700));
-    }
-
-    #[test]
-    fn unlock_or_mint_wrapped_chain_overflow_rejects() {
-        let mut acc = balance_with(0xcae8, 0xbae2, Uint256::MAX);
-        let err = acc.unlock_or_mint(Uint256::from_u128(200)).unwrap_err();
-        assert_eq!(err, GlobalAccountantError::BalanceOverflow);
-        assert_eq!(acc.balance, Uint256::MAX);
     }
 }

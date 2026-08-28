@@ -48,28 +48,27 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_program::pubkey::Pubkey;
+    use wormhole_svm_definitions::solana::{devnet, localnet, mainnet};
+    use wormhole_svm_shim::verify_vaa::{VerifyHash, VerifyHashAccounts};
 
-    /// `VERIFY_VAA_SHIM_PROGRAM_ID` must name a known shim deployment.
     #[test]
-    fn program_id_is_known_wormhole_svm_definitions_deployment() {
-        use wormhole_svm_definitions::solana::{devnet, localnet, mainnet};
+    fn matches_wormhole_svm_definitions_and_shim() {
         let known = [
             mainnet::VERIFY_VAA_SHIM_PROGRAM_ID_ARRAY,
             devnet::VERIFY_VAA_SHIM_PROGRAM_ID_ARRAY,
             localnet::VERIFY_VAA_SHIM_PROGRAM_ID_ARRAY,
         ];
         assert!(known.contains(&VERIFY_VAA_SHIM_PROGRAM_ID));
-    }
+        assert_eq!(
+            VERIFY_HASH_SELECTOR,
+            wormhole_svm_definitions::make_anchor_discriminator(b"global:verify_hash")
+        );
 
-    /// Byte-identical to the instruction `wormhole-svm-shim` builds.
-    #[test]
-    fn data_matches_wormhole_svm_shim_builder() {
-        use wormhole_svm_shim::verify_vaa::{VerifyHash, VerifyHashAccounts};
-        let program_id = solana_program::pubkey::Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
-        let guardian_set = solana_program::pubkey::Pubkey::new_unique();
-        let guardian_signatures = solana_program::pubkey::Pubkey::new_unique();
+        let program_id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
+        let guardian_set = Pubkey::new_unique();
+        let guardian_signatures = Pubkey::new_unique();
         let digest = [0xD1u8; 32];
-
         let theirs = VerifyHash {
             program_id: &program_id,
             accounts: VerifyHashAccounts {
@@ -82,21 +81,11 @@ mod tests {
             ),
         }
         .instruction();
-
         assert_eq!(theirs.data, VerifyHashData::new(7, digest).as_bytes());
         assert_eq!(theirs.accounts.len(), 2);
         assert!(theirs
             .accounts
             .iter()
             .all(|m| !m.is_writable && !m.is_signer));
-    }
-
-    /// Same derivation `wormhole-svm-shim` uses for its `VERIFY_HASH_SELECTOR`.
-    #[test]
-    fn selector_is_anchor_discriminator_of_verify_hash() {
-        assert_eq!(
-            VERIFY_HASH_SELECTOR,
-            wormhole_svm_definitions::make_anchor_discriminator(b"global:verify_hash")
-        );
     }
 }

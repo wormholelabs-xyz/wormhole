@@ -35,45 +35,31 @@ mod tests {
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
 
     #[test]
-    fn governance_emitter_matches_sdk() {
+    fn matches_sdk() {
         assert_eq!(GOVERNANCE_EMITTER, wormhole_sdk::GOVERNANCE_EMITTER.0);
-    }
-
-    #[test]
-    fn solana_chain_id_matches_canonical_sources() {
         assert_eq!(SOLANA_CHAIN_ID, wormhole_svm_definitions::solana::CHAIN_ID);
         assert_eq!(SOLANA_CHAIN_ID, u16::from(Chain::Solana));
-    }
-
-    #[test]
-    fn governance_modules_match_sdk() {
         assert_eq!(TOKEN_BRIDGE_GOVERNANCE_MODULE, token::MODULE);
         assert_eq!(ACCOUNTANT_GOVERNANCE_MODULE, accountant::MODULE);
-    }
+        assert_eq!(ModificationKind::Add as u8, 1);
+        assert_eq!(ModificationKind::Subtract as u8, 2);
 
-    /// SDK-encoded `RegisterChain` packet: `module ‖ action ‖ target_chain_be ‖ ...`.
-    #[test]
-    fn register_chain_wire_prefix_matches_sdk_encoding() {
-        let packet = token::GovernancePacket {
+        let register = serde_wormhole::to_vec(&token::GovernancePacket {
             chain: Chain::Solana,
             action: token::Action::RegisterChain {
                 chain: Chain::Ethereum,
                 emitter_address: Address([0x11; 32]),
             },
-        };
-        let bytes = serde_wormhole::to_vec(&packet).expect("encode");
-        assert_eq!(bytes[..32], TOKEN_BRIDGE_GOVERNANCE_MODULE);
-        assert_eq!(bytes[32], REGISTER_CHAIN_ACTION);
-        assert_eq!(bytes[33..35], SOLANA_CHAIN_ID.to_be_bytes());
-        assert_eq!(bytes[35..37], u16::from(Chain::Ethereum).to_be_bytes());
-        assert_eq!(bytes[37..69], [0x11; 32]);
-        assert_eq!(bytes.len(), 69);
-    }
+        })
+        .unwrap();
+        assert_eq!(register.len(), 69);
+        assert_eq!(register[..32], TOKEN_BRIDGE_GOVERNANCE_MODULE);
+        assert_eq!(register[32], REGISTER_CHAIN_ACTION);
+        assert_eq!(register[33..35], SOLANA_CHAIN_ID.to_be_bytes());
+        assert_eq!(register[35..37], u16::from(Chain::Ethereum).to_be_bytes());
+        assert_eq!(register[37..69], [0x11; 32]);
 
-    /// SDK-encoded `ModifyBalance` packet: `module ‖ action ‖ target_chain_be ‖ ...`.
-    #[test]
-    fn modify_balance_wire_prefix_matches_sdk_encoding() {
-        let packet = accountant::GovernancePacket {
+        let modify = serde_wormhole::to_vec(&accountant::GovernancePacket {
             chain: Chain::Solana,
             action: accountant::Action::ModifyBalance {
                 sequence: 7,
@@ -84,17 +70,10 @@ mod tests {
                 amount: Amount([0x33; 32]),
                 reason: "test".into(),
             },
-        };
-        let bytes = serde_wormhole::to_vec(&packet).expect("encode");
-        assert_eq!(bytes[..32], ACCOUNTANT_GOVERNANCE_MODULE);
-        assert_eq!(bytes[32], MODIFY_BALANCE_ACTION);
-        assert_eq!(bytes[33..35], SOLANA_CHAIN_ID.to_be_bytes());
-    }
-
-    /// `modify_balance` kind bytes: 1 = Add, 2 = Subtract.
-    #[test]
-    fn modification_kind_bytes_match_sdk() {
-        assert_eq!(ModificationKind::Add as u8, 1);
-        assert_eq!(ModificationKind::Subtract as u8, 2);
+        })
+        .unwrap();
+        assert_eq!(modify[..32], ACCOUNTANT_GOVERNANCE_MODULE);
+        assert_eq!(modify[32], MODIFY_BALANCE_ACTION);
+        assert_eq!(modify[33..35], SOLANA_CHAIN_ID.to_be_bytes());
     }
 }

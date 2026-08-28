@@ -81,6 +81,25 @@ pub enum PendingAction {
     Continue,
 }
 
+pub fn derive_pending_pda(
+    program_id: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+    digest: &[u8; 32],
+) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[
+            PENDING_OBSERVATIONS_SEED_PREFIX,
+            &chain.to_be_bytes(),
+            emitter,
+            &sequence.to_be_bytes(),
+            digest,
+        ],
+        program_id,
+    )
+}
+
 /// `InvalidPda` unless `pending_pda` is at the address for `(chain, emitter, sequence, digest)`.
 fn verify_pending_pda_address(
     program_id: &Pubkey,
@@ -90,18 +109,7 @@ fn verify_pending_pda_address(
     sequence: u64,
     digest: &[u8; 32],
 ) -> crate::ProgramResult {
-    let chain_be = chain.to_be_bytes();
-    let sequence_be = sequence.to_be_bytes();
-    let (expected, _bump) = Pubkey::find_program_address(
-        &[
-            PENDING_OBSERVATIONS_SEED_PREFIX,
-            &chain_be,
-            emitter,
-            &sequence_be,
-            digest,
-        ],
-        program_id,
-    );
+    let (expected, _bump) = derive_pending_pda(program_id, chain, emitter, sequence, digest);
     if pending_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -186,19 +194,16 @@ fn create_pending_pda<'info>(
     pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
 ) -> crate::ProgramResult {
-    let chain_be = parsed.chain.to_be_bytes();
-    let sequence_be = parsed.sequence.to_be_bytes();
-    let (_expected, canonical_bump) = Pubkey::find_program_address(
-        &[
-            PENDING_OBSERVATIONS_SEED_PREFIX,
-            &chain_be,
-            &parsed.emitter,
-            &sequence_be,
-            &parsed.digest,
-        ],
+    let (_expected, canonical_bump) = derive_pending_pda(
         program_id,
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+        &parsed.digest,
     );
 
+    let chain_be = parsed.chain.to_be_bytes();
+    let sequence_be = parsed.sequence.to_be_bytes();
     let bump_seed = [canonical_bump];
     let seeds: &[&[u8]] = &[
         PENDING_OBSERVATIONS_SEED_PREFIX,

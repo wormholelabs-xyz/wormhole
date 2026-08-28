@@ -18,9 +18,22 @@ impl Vaa {
     const ENVELOPE_FIXED: usize = 6;
     const SIGNATURE_LEN: usize = 66;
 
+    pub fn guardian_set_index(&self) -> u32 {
+        u32::from_be_bytes([self.bytes[1], self.bytes[2], self.bytes[3], self.bytes[4]])
+    }
+
+    pub fn signature_count(&self) -> u8 {
+        self.bytes[5]
+    }
+
+    pub fn signatures(&self) -> &'static [u8] {
+        let end = Self::ENVELOPE_FIXED + Self::SIGNATURE_LEN * self.signature_count() as usize;
+        &self.bytes[Self::ENVELOPE_FIXED..end]
+    }
+
     /// Body after the envelope.
     pub fn body(&self) -> &'static [u8] {
-        let n_sigs = self.bytes[5] as usize;
+        let n_sigs = self.signature_count() as usize;
         &self.bytes[Self::ENVELOPE_FIXED + Self::SIGNATURE_LEN * n_sigs..]
     }
 }
