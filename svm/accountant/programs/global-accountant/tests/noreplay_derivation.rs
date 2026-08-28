@@ -2,7 +2,7 @@
 //! `solana_noreplay::pda::BitmapPdaSeeds`.
 
 use {
-    accountant_operational_core::instructions::noreplay::derive_bucket_pda,
+    accountant_operational_core::cpi::noreplay::derive_bucket_pda,
     global_accountant_definitions::{NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID},
     solana_pubkey::Pubkey,
     // `derive_bucket_pda` takes the `3.x` `Pubkey`; the reference uses `solana_pubkey` `4.1`.

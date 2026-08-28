@@ -47,7 +47,7 @@ solana-keccak-hasher.workspace = true
 solana-pubkey = { workspace = true, features = ["curve25519"] }
 # Same aliased `3.x` instance as `[dependencies]` above — used directly by
 # `tests/noreplay_derivation.rs` to construct the exact `Pubkey` type
-# `accountant_operational_core::instructions::noreplay::derive_bucket_pda`
+# `accountant_operational_core::cpi::noreplay::derive_bucket_pda`
 # takes, distinct from the `4.1` `solana-pubkey` used for this test's own
 # host-side reference derivation.
 solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
@@ -73,7 +73,7 @@ solana-program-error = "=3.0.1"
 # mollusk loads it.
 sha2 = "=0.10.9"
 # Base64 decoder for the surfpool e2e `meta.logMessages` walk that asserts
-# the canonical commit log emitted by `instructions::commit_log`. Already in
+# the canonical commit log emitted by `support::commit_log`. Already in
 # the workspace lock graph via solana-client transitively; pinned per the
 # supply-chain rule.
 base64 = "=0.22.1"

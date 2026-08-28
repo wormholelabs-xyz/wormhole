@@ -1,5 +1,5 @@
 //! `submit_observations`: WTT quorum tracker over
-//! [`accountant_operational_core::instructions::quorum`].
+//! [`accountant_operational_core::support::quorum`].
 //!
 //! A `(chain, emitter, sequence, digest)` pending PDA accumulates guardian signatures.
 //! The quorum-completing observation marks NoReplay, emits the commit log, applies
@@ -9,9 +9,10 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
+use accountant_operational_core::cpi::noreplay;
 use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
-use accountant_operational_core::instructions::quorum::{self, ParsedObservation, BODY_MIN_LEN};
-use accountant_operational_core::instructions::{commit_log, noreplay};
+use accountant_operational_core::support::commit_log;
+use accountant_operational_core::support::quorum::{self, ParsedObservation, BODY_MIN_LEN};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{

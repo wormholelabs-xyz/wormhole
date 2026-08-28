@@ -13,7 +13,7 @@ use crate::definitions::{
 };
 use crate::err;
 use crate::hash::keccak256;
-use crate::instructions::pda_init::init_or_upgrade_pda;
+use crate::support::pda_init::init_or_upgrade_pda;
 
 // `submit_observations` data: `SubmitObservationsIxData` prefix then the VAA body.
 // Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and dedup digest
