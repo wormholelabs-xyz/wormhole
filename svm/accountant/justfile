@@ -53,6 +53,17 @@ build-prod: build
 test: build
     cargo test
 
+# Verify a deploy-ready `.so` enforces a specific operator authority pubkey,
+# independent of the `BACKFILL_AUTHORITY` compiled into this source tree.
+# Runs the target `.so`'s authority check inside a mollusk-hosted SBF VM.
+# Run against the actual production artifact and intended operator pubkey
+# before every mainnet deploy.
+[doc("Verify a deploy-ready .so enforces a specific operator authority pubkey.")]
+verify-authority so_path pubkey:
+    GA_VERIFY_SO={{so_path}} GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
+        cargo test -p global-accountant-backfill --test artifact_authority_check \
+        -- --ignored --nocapture verify_so_enforces_specific_operator_authority
+
 # SBF-target type-check. There is no upstream `cargo check-sbf`, but
 # `cargo build-sbf` registers the platform-tools compiler with rustup (e.g.
 # `1.89.0-sbpf-solana-v1.52`), which can drive a plain `cargo check` against
@@ -79,7 +90,7 @@ check:
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
     cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant
+        -p global-accountant -p global-accountant-backfill
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
 # via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
