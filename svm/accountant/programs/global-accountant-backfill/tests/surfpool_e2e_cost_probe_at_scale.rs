@@ -1,32 +1,14 @@
-//! **Operator cost-measurement tool.** Its headline figure (~35 SOL / ~$8K)
-//! anchors the master plan's cost estimate.
+//! Operator cost-measurement tool. Drives 100,000 catalogue transfers through
+//! `BackfillNoReplay` across many `(chain, emitter)` pairs to confirm
+//! per-bucket rent is stable, the tx fee is the deterministic 5,000 L base
+//! fee, and the program survives a mainnet-scale workload. The trailing
+//! asserts (`total_failures_v == 0`, `rent_per_bucket > 0`) are the probe's
+//! own pass/fail signal.
 //!
-//! Lives under `tests/` for the `#[ignore]` + `cargo test --ignored`
-//! workflow. The asserts (`total_failures_v == 0`, `rent_per_bucket > 0`)
-//! are sanity checks on the probe itself.
+//! Requires `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl`. Wall clock
+//! ~5-10 min.
 //!
-//! What it does: drives 100,000 catalogue transfers across diverse
-//! `(chain, emitter)` pairs through `BackfillNoReplay` against a real
-//! surfpool subprocess to empirically pin three properties:
-//!
-//!   1. **Per-bucket rent is stable** — every newly-created NoReplay bucket
-//!      PDA debits the same lamport amount. The smaller `_cost_probe`
-//!      observes one bucket creation; this probe creates hundreds-to-
-//!      thousands, confirming the rent figure statistically.
-//!   2. **Tx fees scale linearly** — base fee is deterministic at 5,000 L
-//!      per tx regardless of CU; the at-scale run pins this end-to-end.
-//!   3. **The program survives mainnet-scale workload** — full dry-run of
-//!      the eventual workstream-C orchestrator against the same `.so`.
-//!
-//! Diverse-emitter sampling: walks the catalogue with a per-emitter
-//! rotation so the sample draws from many `(chain, emitter)` pairs rather
-//! than one emitter's tightly-packed sequences.
-//!
-//! Requires `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl`, present on
-//! the operator's own machine only. Wall-clock ~5-10 min.
-//!
-//! Run via:
-//!   `cargo test --test surfpool_e2e_cost_probe_at_scale -- --ignored --nocapture`
+//! Run: `cargo test --test surfpool_e2e_cost_probe_at_scale -- --ignored --nocapture`
 
 #![allow(clippy::too_many_arguments)]
 
@@ -49,15 +31,18 @@ use solana_signer::Signer;
 use solana_transaction::Transaction;
 use tokio::sync::Semaphore;
 
-use global_accountant_backfill::Instruction as IxDiscriminator;
 use global_accountant_definitions::{
     NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
 };
+use solana_packet::PACKET_DATA_SIZE;
 
 mod common;
-use common::surfpool::{deploy_program, rpc_call, so_path, start_surfpool, SurfpoolOptions};
+use common::{
+    surfpool::{deploy_program, rpc_call, so_path, start_surfpool, SurfpoolOptions},
+    wire::{encode_noreplay_batch, NoReplayEntry as TransferEntry},
+    BACKFILL_PROGRAM_NAME,
+};
 
-const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
 const CATALOGUE_PATH: &str = "/tmp/wormchain-mainnet-snapshot/catalogue.jsonl";
 
 /// Target transfer count for the at-scale probe.
@@ -65,7 +50,7 @@ const TARGET_TRANSFERS: usize = 100_000;
 /// Entries per BackfillNoReplay tx. The compact emitter-grouped wire format
 /// fits 22 same-emitter / single-bucket entries, but a chunk spanning a
 /// 1024-sequence bucket boundary needs one extra 32-byte account meta. 18
-/// stays under the 1232-byte raw tx limit even across a 3-bucket span.
+/// stays under `PACKET_DATA_SIZE` even across a 3-bucket span.
 const TRANSFER_BATCH: usize = 18;
 /// Concurrent in-flight transactions.
 const MAX_CONCURRENT: usize = 16;
@@ -74,14 +59,6 @@ const METADATA_SAMPLE_STRIDE: u64 = 50;
 
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SOL_USD: f64 = 230.0;
-
-#[derive(Clone, Copy, Debug)]
-struct TransferEntry {
-    chain: u16,
-    emitter: [u8; 32],
-    sequence: u64,
-    digest: [u8; 32],
-}
 
 fn parse_hex32(s: &str) -> [u8; 32] {
     let s = s.strip_prefix("0x").unwrap_or(s);
@@ -93,14 +70,9 @@ fn parse_hex32(s: &str) -> [u8; 32] {
     out
 }
 
-/// Walk the catalogue in order and take the first `target` transfers across
-/// a configurable set of distinct emitters. Catalogue is pre-sorted by
-/// `(chain, emitter, sequence)`, so in-order entries yield long consecutive
-/// runs from the same emitter — the production orchestrator's shape, and
-/// the shape the compact wire format optimises for. To exercise multiple
-/// emitters within one probe run, the function rotates round-robin: take
-/// up to `per_emitter` consecutive sequences from each emitter before
-/// advancing.
+/// Take the first `target` transfers from the (pre-sorted) catalogue,
+/// round-robin across emitters: up to `per_emitter` consecutive sequences
+/// from each before advancing.
 fn read_in_order_transfers(target: usize, per_emitter: usize) -> Vec<TransferEntry> {
     let f = File::open(CATALOGUE_PATH).unwrap_or_else(|e| {
         panic!("missing catalogue at {CATALOGUE_PATH}: {e} — run the snapshot tool first")
@@ -183,36 +155,13 @@ fn build_backfill_noreplay_ix(
     noreplay_auth: Pubkey,
     chunk: &[TransferEntry],
 ) -> Instruction {
-    // Compact emitter-grouped wire format.
-    let mut groups: Vec<Vec<TransferEntry>> = Vec::new();
-    let mut current: Vec<TransferEntry> = Vec::new();
-    let mut current_key: Option<(u16, [u8; 32])> = None;
-    for e in chunk {
-        let key = (e.chain, e.emitter);
-        if current_key != Some(key) {
-            if !current.is_empty() {
-                groups.push(std::mem::take(&mut current));
-            }
-            current_key = Some(key);
-        }
-        current.push(*e);
-    }
-    if !current.is_empty() {
-        groups.push(current);
-    }
-    let mut data = Vec::new();
-    data.push(IxDiscriminator::BackfillNoReplay as u8);
-    data.push(groups.len() as u8);
-    for group in &groups {
-        let first = &group[0];
-        data.extend_from_slice(&first.chain.to_be_bytes());
-        data.extend_from_slice(&first.emitter);
-        data.push(group.len() as u8);
-        for e in group {
-            data.extend_from_slice(&e.sequence.to_be_bytes());
-            data.extend_from_slice(&e.digest);
-        }
-    }
+    let data = encode_noreplay_batch(chunk);
+    debug_assert!(
+        data.len() < PACKET_DATA_SIZE,
+        "BackfillNoReplay ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
+        data.len(),
+        PACKET_DATA_SIZE
+    );
     let mut bucket_metas: Vec<AccountMeta> = Vec::new();
     let mut prev_bucket: Option<(u16, [u8; 32], u64)> = None;
     for e in chunk {
@@ -281,7 +230,10 @@ fn fetch_meta(rpc_url: &str, sig: &str, expected_buckets: usize) -> Option<TxSam
     })
 }
 
-fn count_new_buckets(chunk: &[TransferEntry], seen: &mut HashMap<(u16, [u8; 32], u64), ()>) -> usize {
+fn count_new_buckets(
+    chunk: &[TransferEntry],
+    seen: &mut HashMap<(u16, [u8; 32], u64), ()>,
+) -> usize {
     let mut n = 0;
     for e in chunk {
         let key = (e.chain, e.emitter, e.sequence / NOREPLAY_BITS_PER_BUCKET);
@@ -305,13 +257,9 @@ fn surfpool_cost_probe_at_scale() {
 
     // -------- Sample --------
     //
-    // Take up to 4 buckets' worth (4 × 1024 = 4096) of consecutive sequences
-    // from each emitter before rotating. With ~40 emitters and
-    // TARGET_TRANSFERS = 100k, this drains 4-5 emitters fully and yields
-    // ~100-150 bucket creations across at least 3 emitters — enough to
-    // confirm per-bucket rent stability across emitters, while still
-    // producing the long same-emitter runs the compact wire format
-    // optimises for.
+    // 4 buckets/emitter (4096 sequences) drains several of the ~40 emitters
+    // fully, yielding cross-emitter bucket samples while keeping the long
+    // same-emitter runs the wire format favors.
     eprintln!("[cost-probe-scale] reading in-order {TARGET_TRANSFERS} transfer samples...");
     let mut transfers = read_in_order_transfers(TARGET_TRANSFERS, 4 * 1024);
     transfers.sort_by_key(|e| (e.chain, e.emitter, e.sequence));
@@ -319,7 +267,10 @@ fn surfpool_cost_probe_at_scale() {
     let n = transfers.len();
     let mut bucket_keys: HashMap<(u16, [u8; 32], u64), ()> = HashMap::new();
     for e in &transfers {
-        bucket_keys.insert((e.chain, e.emitter, e.sequence / NOREPLAY_BITS_PER_BUCKET), ());
+        bucket_keys.insert(
+            (e.chain, e.emitter, e.sequence / NOREPLAY_BITS_PER_BUCKET),
+            (),
+        );
     }
     let unique_buckets_sample = bucket_keys.len();
     let mut emitter_set: HashMap<(u16, [u8; 32]), ()> = HashMap::new();
@@ -334,7 +285,10 @@ fn surfpool_cost_probe_at_scale() {
     // -------- Boot surfpool + deploy --------
     let backfill_so = so_path(BACKFILL_PROGRAM_NAME);
     let backfill_bytes = std::fs::read(&backfill_so).unwrap_or_else(|e| {
-        panic!("read {}: {e} — run `just build` first", backfill_so.display())
+        panic!(
+            "read {}: {e} — run `just build` first",
+            backfill_so.display()
+        )
     });
     let noreplay_bytes = accountant_test_fixtures::NOREPLAY_SO.bytes;
 
@@ -367,8 +321,8 @@ fn surfpool_cost_probe_at_scale() {
         n.div_ceil(TRANSFER_BATCH)
     );
 
-    // Chunk by both (a) emitter boundaries and (b) size cap. Multi-emitter
-    // chunks cost an extra 35-byte group header each; better to split.
+    // Chunk by emitter boundary and size cap; crossing emitters costs an
+    // extra 35-byte group header.
     let mut chunks: Vec<Vec<TransferEntry>> = Vec::new();
     let mut current: Vec<TransferEntry> = Vec::new();
     let mut current_emitter: Option<(u16, [u8; 32])> = None;
@@ -424,12 +378,8 @@ fn surfpool_cost_probe_at_scale() {
                     rpc_url.as_str().to_string(),
                     solana_commitment_config::CommitmentConfig::confirmed(),
                 );
-                let ix = build_backfill_noreplay_ix(
-                    &program_id,
-                    &payer.pubkey(),
-                    noreplay_auth,
-                    &chunk,
-                );
+                let ix =
+                    build_backfill_noreplay_ix(&program_id, &payer.pubkey(), noreplay_auth, &chunk);
                 match send_ix(&rpc, &payer, ix) {
                     Ok(sig) => {
                         *total_txs.lock().unwrap() += 1;
@@ -500,7 +450,10 @@ fn surfpool_cost_probe_at_scale() {
         "Distinct (chain, emitter) pairs:   {} of 40 known in the full catalogue",
         emitter_set.len()
     );
-    eprintln!("Wall clock:                        {:.1}s", elapsed.as_secs_f64());
+    eprintln!(
+        "Wall clock:                        {:.1}s",
+        elapsed.as_secs_f64()
+    );
     eprintln!();
     eprintln!("Per-tx fee (deterministic):        5,000 L");
     eprintln!(
@@ -517,10 +470,7 @@ fn surfpool_cost_probe_at_scale() {
         total_fees_v,
         total_fees_v as f64 / LAMPORTS_PER_SOL
     );
-    eprintln!(
-        "  rent (sampled subset, partial): {:>15} L",
-        total_rent_v
-    );
+    eprintln!("  rent (sampled subset, partial): {:>15} L", total_rent_v);
     eprintln!(
         "  rent (extrapolated by bucket count × sampled per-bucket): {:>15} L  ({:.4} SOL)",
         extrapolated_rent,
@@ -551,9 +501,6 @@ fn surfpool_cost_probe_at_scale() {
     );
     eprintln!("============================================================");
 
-    assert!(
-        total_failures_v == 0,
-        "had {total_failures_v} tx failures"
-    );
+    assert!(total_failures_v == 0, "had {total_failures_v} tx failures");
     assert!(rent_per_bucket > 0, "no rent samples captured");
 }

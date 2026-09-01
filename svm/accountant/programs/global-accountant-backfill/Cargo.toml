@@ -23,11 +23,8 @@ default = []
 no-entrypoint = []
 
 [dependencies]
-accountant-backfill-core = { path = "../../crates/backfill-core" }
+accountant-operational-core.workspace = true
 anchor-lang.workspace = true
-# `AnchorSerialize`/`AnchorDeserialize` (= borsh's own traits) implemented by
-# hand for `RawIxData`; see `src/raw_ix_data.rs`.
-borsh.workspace = true
 # Used directly by the integration test suite (`bytemuck::from_bytes` against
 # `BalanceAccountLayout`), not by this crate's own `src/`.
 bytemuck.workspace = true
@@ -56,6 +53,9 @@ base64 = "=0.22.1"
 # Parallel-send the at-scale cost probe; already in the workspace lock graph
 # via solana-client.
 tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
+# `PACKET_DATA_SIZE`, for the cost probes' batch-size reasoning. Already in the
+# workspace lock graph at this exact version via mollusk-svm.
+solana-packet = "=4.1.0"
 
 [lints]
 workspace = true

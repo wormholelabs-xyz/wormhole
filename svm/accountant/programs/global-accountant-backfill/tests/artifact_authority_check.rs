@@ -17,13 +17,15 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use global_accountant_backfill::{Instruction as IxDiscriminator, BACKFILL_AUTHORITY};
-use global_accountant_definitions::ACCOUNT_SEED_PREFIX;
+use global_accountant_backfill::BACKFILL_AUTHORITY;
+use global_accountant_definitions::{Uint256, ACCOUNT_SEED_PREFIX};
 
 mod common;
-use common::surfpool::so_path;
-
-const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
+use common::{
+    surfpool::so_path,
+    wire::{balance_entry, encode_balance_batch},
+    BACKFILL_PROGRAM_NAME,
+};
 
 /// The program's `declare_id!`-fixed address. Anchor checks the declared
 /// program id against the runtime `program_id` on every entry
@@ -57,11 +59,8 @@ fn build_authority_probe(
     program_id: &Pubkey,
     candidate: Pubkey,
 ) -> (Instruction, Vec<(Pubkey, Account)>) {
-    let mut data = vec![IxDiscriminator::BackfillBalance as u8, 1u8 /* count */];
-    data.extend_from_slice(&1u16.to_be_bytes()); // chain
-    data.extend_from_slice(&1u16.to_be_bytes()); // token_chain
-    data.extend_from_slice(&[0x01u8; 32]); // token_address
-    data.extend_from_slice(&[0u8; 32]); // balance = 0
+    let entry = balance_entry(1, 1, [0x01u8; 32], Uint256::ZERO.0);
+    let data = encode_balance_batch(&[entry]);
 
     let pda = derive_probe_balance_pda(program_id);
     let (sys_id, sys_acc) = keyed_account_for_system_program();
@@ -185,8 +184,7 @@ fn verify_so_enforces_specific_operator_authority() {
         panic!("GA_EXPECT_AUTHORITY_BASE58={expected_base58} is not a valid base58 pubkey: {e:?}")
     });
 
-    let elf = std::fs::read(&so_path)
-        .unwrap_or_else(|e| panic!("could not read {so_path}: {e}"));
+    let elf = std::fs::read(&so_path).unwrap_or_else(|e| panic!("could not read {so_path}: {e}"));
 
     assert!(
         so_accepts_authority(&elf, expected),

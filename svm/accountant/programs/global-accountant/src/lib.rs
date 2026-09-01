@@ -16,28 +16,19 @@
 
 #![allow(unexpected_cfgs)]
 
+use accountant_operational_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
 pub mod instructions;
-pub mod raw_ix_data;
 
-pub use accountant_operational_core::err;
+pub use accountant_operational_core::{err, raw_ix_data::RawIxData};
 pub use global_accountant_definitions as definitions;
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
-use raw_ix_data::RawIxData;
 
 declare_id!("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
-
-/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
-/// Field order must match the handler's account list.
-macro_rules! flatten_accounts {
-    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
-        vec![$($accounts.$field.to_account_info()),+]
-    };
-}
 
 #[program]
 pub mod global_accountant {

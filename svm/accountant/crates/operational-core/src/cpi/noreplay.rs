@@ -1,6 +1,8 @@
-//! NoReplay bitmap pre-check (`is_marked`) and `MarkUsed` CPI (`mark_used`).
-//! Wire layouts: [`NoReplayNamespace`], [`NoReplayMarkUsedData`], [`NoReplayBitmapAccount`].
-//! The authority is this program's PDA at `[NOREPLAY_AUTHORITY_SEED_PREFIX]`.
+//! NoReplay bitmap pre-check (`is_marked`), `MarkUsed` CPI (`mark_used`), and the
+//! bulk-flip `MarkUsedBulk` CPI (`mark_used_bulk`).
+//! Wire layouts: [`NoReplayNamespace`], [`NoReplayMarkUsedData`], [`NoReplayMarkUsedBulkData`],
+//! [`NoReplayBitmapAccount`]. The authority is this program's PDA at
+//! `[NOREPLAY_AUTHORITY_SEED_PREFIX]`.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -8,8 +10,8 @@ use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program::system_program;
 
 use crate::definitions::{
-    GlobalAccountantError, NoReplayBitmapAccount, NoReplayMarkUsedData, NoReplayNamespace,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID,
+    GlobalAccountantError, NoReplayBitmapAccount, NoReplayMarkUsedBulkData, NoReplayMarkUsedData,
+    NoReplayNamespace, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_PROGRAM_ID,
 };
 use crate::{err, ProgramCoreResult, ProgramResult};
 
@@ -75,11 +77,26 @@ fn verify_authority(
     Ok(bump)
 }
 
-/// `MarkUsed` instruction. Accounts: payer (signer, writable), authority (signer),
-/// bitmap PDA (writable), system program.
+/// Account metas for `MarkUsed` and `MarkUsedBulk`: payer (signer, writable),
+/// authority (signer), bitmap PDA (writable), system program. Upstream
+/// `solana-noreplay` defines the same layout for both instructions.
+fn noreplay_account_metas(
+    payer: &Pubkey,
+    noreplay_authority: &Pubkey,
+    bucket: &Pubkey,
+) -> Vec<AccountMeta> {
+    vec![
+        AccountMeta::new(*payer, true),
+        AccountMeta::new_readonly(*noreplay_authority, true),
+        AccountMeta::new(*bucket, false),
+        AccountMeta::new_readonly(system_program::ID, false),
+    ]
+}
+
+/// `MarkUsed` instruction.
 ///
-/// SECURITY: the CPI target is the constant `NOREPLAY_PROGRAM_ID`, never a caller-supplied
-/// account.
+/// SECURITY: set the CPI target from the constant `NOREPLAY_PROGRAM_ID`, not a
+/// caller-supplied account.
 fn mark_used_instruction(
     payer: &Pubkey,
     noreplay_authority: &Pubkey,
@@ -91,12 +108,7 @@ fn mark_used_instruction(
     let data = NoReplayMarkUsedData::new(NoReplayNamespace::new(chain, *emitter), sequence);
     Instruction {
         program_id: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-        accounts: vec![
-            AccountMeta::new(*payer, true),
-            AccountMeta::new_readonly(*noreplay_authority, true),
-            AccountMeta::new(*bucket, false),
-            AccountMeta::new_readonly(system_program::ID, false),
-        ],
+        accounts: noreplay_account_metas(payer, noreplay_authority, bucket),
         data: data.as_bytes().to_vec(),
     }
 }
@@ -126,6 +138,67 @@ pub fn mark_used<'info>(
         sequence,
     );
     // `invoke_signed` takes owned `AccountInfo`s; the clone is `Rc` refcount bumps, no data copy.
+    invoke_signed(
+        &instruction,
+        &[
+            payer.clone(),
+            noreplay_authority.clone(),
+            bucket.clone(),
+            system_program.clone(),
+        ],
+        &[&[NOREPLAY_AUTHORITY_SEED_PREFIX, &[authority_bump]]],
+    )
+}
+
+/// `MarkUsedBulk` instruction. Data payload carries a 128-byte OR mask
+/// instead of one sequence.
+#[allow(clippy::too_many_arguments)]
+fn mark_used_bulk_instruction(
+    payer: &Pubkey,
+    noreplay_authority: &Pubkey,
+    bucket: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    bucket_index: u64,
+    or_mask: [u8; NOREPLAY_BITMAP_BYTES],
+) -> Instruction {
+    let data = NoReplayMarkUsedBulkData::new(
+        NoReplayNamespace::new(chain, *emitter),
+        bucket_index,
+        or_mask,
+    );
+    Instruction {
+        program_id: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        accounts: noreplay_account_metas(payer, noreplay_authority, bucket),
+        data: data.as_bytes().to_vec(),
+    }
+}
+
+/// Flip up to 1024 bits in one CPI: ~80 CU/entry versus ~3,065 CU for `mark_used`,
+/// mostly saved on repeated CPI dispatch, arg deser, and `find_program_address`.
+#[allow(clippy::too_many_arguments)]
+pub fn mark_used_bulk<'info>(
+    payer: &AccountInfo<'info>,
+    bucket: &AccountInfo<'info>,
+    _noreplay_program: &AccountInfo<'info>,
+    noreplay_authority: &AccountInfo<'info>,
+    system_program: &AccountInfo<'info>,
+    program_id: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    bucket_index: u64,
+    or_mask: &[u8; NOREPLAY_BITMAP_BYTES],
+) -> ProgramResult {
+    let authority_bump = verify_authority(program_id, noreplay_authority)?;
+    let instruction = mark_used_bulk_instruction(
+        payer.key,
+        noreplay_authority.key,
+        bucket.key,
+        chain,
+        emitter,
+        bucket_index,
+        *or_mask,
+    );
     invoke_signed(
         &instruction,
         &[
@@ -171,6 +244,31 @@ mod tests {
         let ix = mark_used_instruction(&payer, &authority, &bucket, 2, &[0xAB; 32], 5_000);
         assert_eq!(ix.program_id, Pubkey::new_from_array(NOREPLAY_PROGRAM_ID));
         assert_eq!(ix.data.len(), NoReplayMarkUsedData::LEN);
+        let metas: Vec<(Pubkey, bool, bool)> = ix
+            .accounts
+            .iter()
+            .map(|m| (m.pubkey, m.is_signer, m.is_writable))
+            .collect();
+        assert_eq!(
+            metas,
+            vec![
+                (payer, true, true),
+                (authority, true, false),
+                (bucket, false, true),
+                (system_program::ID, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn mark_used_bulk_instruction_shape() {
+        let payer = Pubkey::new_unique();
+        let authority = Pubkey::new_unique();
+        let bucket = Pubkey::new_unique();
+        let mask = [0xFFu8; NOREPLAY_BITMAP_BYTES];
+        let ix = mark_used_bulk_instruction(&payer, &authority, &bucket, 2, &[0xAB; 32], 7, mask);
+        assert_eq!(ix.program_id, Pubkey::new_from_array(NOREPLAY_PROGRAM_ID));
+        assert_eq!(ix.data.len(), NoReplayMarkUsedBulkData::LEN);
         let metas: Vec<(Pubkey, bool, bool)> = ix
             .accounts
             .iter()

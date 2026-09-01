@@ -291,8 +291,11 @@ fn register_wormchain_target_accepted_during_migration_window() {
     let mollusk = mollusk();
     let emitter_a = [0x77u8; 32];
 
-    let wormchain_target =
-        governance_header(TOKEN_BRIDGE_GOVERNANCE_MODULE, REGISTER_CHAIN_ACTION, WORMCHAIN);
+    let wormchain_target = governance_header(
+        TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        WORMCHAIN,
+    );
     let body = register_chain_body(
         SOLANA_CHAIN_ID,
         GOVERNANCE_EMITTER,

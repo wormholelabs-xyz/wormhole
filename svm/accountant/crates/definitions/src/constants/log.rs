@@ -6,8 +6,12 @@ use bytemuck::{Pod, Zeroable};
 /// 8-byte tag on every commit log entry.
 pub const ACCOUNTANT_DIGEST_LOG_TAG: [u8; 8] = *b"ACCDGST\0";
 
+/// `guardian_set_index` sentinel: auditors verify the entry against the VAA archive
+/// rather than a pinned guardian set.
+pub const UNPINNED_GUARDIAN_SET_INDEX: u32 = 0;
+
 /// Commit log entry (86 bytes). `guardian_set_index` is the quorum set on the observations
-/// path; `submit_vaas` writes `0`.
+/// path; `submit_vaas` writes `UNPINNED_GUARDIAN_SET_INDEX`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct AccountantDigestLog {

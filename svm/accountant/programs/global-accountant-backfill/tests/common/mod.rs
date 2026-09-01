@@ -7,6 +7,7 @@
 
 pub mod mollusk;
 pub mod surfpool;
+pub mod wire;
 
 use {
     accountant_test_fixtures::{Program, NOREPLAY_SO},

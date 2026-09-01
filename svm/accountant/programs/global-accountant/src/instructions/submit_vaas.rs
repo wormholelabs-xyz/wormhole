@@ -12,6 +12,7 @@ use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     parse_vaa_namespace_key, split_body, GlobalAccountantError, SubmitVaasIxData, VaaBodyHeader,
+    UNPINNED_GUARDIAN_SET_INDEX,
 };
 use crate::err;
 use crate::instructions::transfer;
@@ -80,8 +81,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         sequence,
     )?;
 
-    // `guardian_set_index = 0`: the Shim accepts any active set.
-    commit_log::emit(chain, &emitter, sequence, &digest, 0);
+    // The Shim accepts any active guardian set.
+    commit_log::emit(
+        chain,
+        &emitter,
+        sequence,
+        &digest,
+        UNPINNED_GUARDIAN_SET_INDEX,
+    );
 
     transfer::apply_from_body(
         program_id,
