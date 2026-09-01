@@ -64,6 +64,8 @@ pub enum GlobalAccountantError {
     DuplicateRegisterChain = 31,
     /// Token Bridge transfer payload exceeds `MAX_TRANSFER_PAYLOAD_LEN`.
     TransferPayloadTooLarge = 32,
+    /// Signer does not match the expected backfill authority pubkey.
+    UnauthorizedCaller = 33,
 }
 
 impl From<GlobalAccountantError> for u32 {

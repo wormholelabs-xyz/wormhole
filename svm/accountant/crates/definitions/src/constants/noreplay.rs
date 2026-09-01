@@ -128,7 +128,11 @@ pub struct NoReplayMarkUsedBulkData {
 impl NoReplayMarkUsedBulkData {
     pub const LEN: usize = core::mem::size_of::<Self>();
 
-    pub fn new(namespace: NoReplayNamespace, bucket_index: u64, or_mask: [u8; NOREPLAY_BITMAP_BYTES]) -> Self {
+    pub fn new(
+        namespace: NoReplayNamespace,
+        bucket_index: u64,
+        or_mask: [u8; NOREPLAY_BITMAP_BYTES],
+    ) -> Self {
         Self {
             discriminator: NOREPLAY_MARK_USED_BULK_DISCRIMINATOR,
             namespace_len: (NoReplayNamespace::LEN as u16).to_le_bytes(),
@@ -230,7 +234,11 @@ mod tests {
     }
 
     #[test]
+    // Runtime half of the offset check: a dev-dependency, visible only here.
+    #[allow(clippy::assertions_on_constants)]
     fn mark_used_bulk_data_shape() {
+        assert!(NoReplayNamespace::LEN <= solana_noreplay::MAX_NAMESPACE_LEN);
+
         let namespace = NoReplayNamespace::new(2, [0xAB; 32]);
         let mask = [0xFFu8; NOREPLAY_BITMAP_BYTES];
         let data = NoReplayMarkUsedBulkData::new(namespace, 7, mask);
@@ -240,5 +248,10 @@ mod tests {
         assert_eq!(&bytes[3..37], namespace.as_bytes());
         assert_eq!(&bytes[37..45], &7u64.to_le_bytes());
         assert_eq!(&bytes[45..], &mask);
+
+        let parsed = solana_noreplay::MarkUsedBulkData::try_from(&bytes[1..]).unwrap();
+        assert_eq!(parsed.namespace, namespace.as_bytes());
+        assert_eq!(parsed.bucket_index, 7);
+        assert_eq!(parsed.or_mask, &mask);
     }
 }

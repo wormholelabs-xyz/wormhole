@@ -12,9 +12,10 @@
 #![allow(clippy::too_many_arguments)]
 
 use {
-    global_accountant_backfill::{BackfillError, Instruction as IxDiscriminator, BACKFILL_AUTHORITY},
+    accountant_operational_core::cpi::noreplay::derive_bucket_pda,
+    global_accountant_backfill::{Instruction as IxDiscriminator, BACKFILL_AUTHORITY},
     global_accountant_definitions::{
-        NoReplayBitmapAccount, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
+        GlobalAccountantError, NoReplayBitmapAccount, NOREPLAY_AUTHORITY_SEED_PREFIX,
         NOREPLAY_PROGRAM_ID,
     },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult},
@@ -29,6 +30,7 @@ use common::{
     mollusk::{
         mollusk, program_id, signer_account, test_authority_pubkey, uninitialised_pda_account,
     },
+    wire::{encode_noreplay_batch, encode_noreplay_batch_raw, NoReplayEntry as Entry},
 };
 
 // ============================================================================
@@ -45,95 +47,18 @@ fn derive_noreplay_bucket(
     emitter: &[u8; 32],
     sequence: u64,
 ) -> Pubkey {
-    let mut namespace = [0u8; 34];
-    namespace[..2].copy_from_slice(&chain.to_be_bytes());
-    namespace[2..].copy_from_slice(emitter);
-    let bucket_index = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
-    let (pda, _) = Pubkey::find_program_address(
-        &[
-            authority.as_ref(),
-            &namespace[..32],
-            &namespace[32..],
-            &bucket_index,
-        ],
-        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-    );
-    pda
-}
-
-// ============================================================================
-// Wire format builder
-// ============================================================================
-
-#[derive(Clone, Copy)]
-struct Entry {
-    chain: u16,
-    emitter: [u8; 32],
-    sequence: u64,
-    digest: [u8; 32],
-}
-
-fn build_ix_data(entries: &[Entry]) -> Vec<u8> {
-    let mut groups: Vec<Vec<&Entry>> = Vec::new();
-    let mut current: Vec<&Entry> = Vec::new();
-    let mut current_key: Option<(u16, [u8; 32])> = None;
-    for e in entries {
-        let key = (e.chain, e.emitter);
-        if current_key != Some(key) {
-            if !current.is_empty() {
-                groups.push(std::mem::take(&mut current));
-            }
-            current_key = Some(key);
-        }
-        current.push(e);
-    }
-    if !current.is_empty() {
-        groups.push(current);
-    }
-    let mut data = Vec::new();
-    data.push(IxDiscriminator::BackfillNoReplay as u8);
-    data.push(groups.len() as u8);
-    for group in &groups {
-        let first = group[0];
-        data.extend_from_slice(&first.chain.to_be_bytes());
-        data.extend_from_slice(&first.emitter);
-        data.push(group.len() as u8);
-        for e in group {
-            data.extend_from_slice(&e.sequence.to_be_bytes());
-            data.extend_from_slice(&e.digest);
-        }
-    }
-    data
-}
-
-/// One raw group for [`build_ix_data_raw`]: `(chain, emitter, entries)` where
-/// each entry is `(sequence, digest)`.
-type RawGroup<'a> = (u16, [u8; 32], &'a [(u64, [u8; 32])]);
-
-/// Writes a multi-group payload exactly as given, unsorted and unmerged —
-/// lets malformed-wire tests construct duplicate/descending groups beyond
-/// what `build_ix_data`'s well-formed builder produces.
-fn build_ix_data_raw(groups: &[RawGroup]) -> Vec<u8> {
-    let mut data = Vec::new();
-    data.push(IxDiscriminator::BackfillNoReplay as u8);
-    data.push(groups.len() as u8);
-    for (chain, emitter, entries) in groups {
-        data.extend_from_slice(&chain.to_be_bytes());
-        data.extend_from_slice(emitter);
-        data.push(entries.len() as u8);
-        for (seq, digest) in entries.iter() {
-            data.extend_from_slice(&seq.to_be_bytes());
-            data.extend_from_slice(digest);
-        }
-    }
-    data
+    derive_bucket_pda(authority, chain, emitter, sequence).0
 }
 
 fn unique_buckets_in_order(noreplay_authority: &Pubkey, entries: &[Entry]) -> Vec<Pubkey> {
     let mut out: Vec<Pubkey> = Vec::new();
     let mut prev_key: Option<(u16, [u8; 32], u64)> = None;
     for e in entries {
-        let cur_key = (e.chain, e.emitter, e.sequence / NOREPLAY_BITS_PER_BUCKET);
+        let cur_key = (
+            e.chain,
+            e.emitter,
+            NoReplayBitmapAccount::bucket_index(e.sequence),
+        );
         if prev_key != Some(cur_key) {
             out.push(derive_noreplay_bucket(
                 noreplay_authority,
@@ -180,7 +105,10 @@ fn build_invocation(
 
 fn assert_bit_set(account: &Account, sequence: u64) {
     let bitmap = NoReplayBitmapAccount::from_bytes(&account.data).expect("bitmap account");
-    assert!(bitmap.is_marked(sequence), "expected bit for {sequence} set");
+    assert!(
+        bitmap.is_marked(sequence),
+        "expected bit for {sequence} set"
+    );
 }
 
 // ============================================================================
@@ -217,7 +145,7 @@ fn backfill_noreplay_single_entry_flips_bit() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -245,9 +173,24 @@ fn backfill_noreplay_multiple_entries_same_bucket_one_cpi() {
     let signer = test_authority_pubkey();
     let emitter = [0x22u8; 32];
     let entries = [
-        Entry { chain: 2, emitter, sequence: 10, digest: [0xaau8; 32] },
-        Entry { chain: 2, emitter, sequence: 200, digest: [0xbbu8; 32] },
-        Entry { chain: 2, emitter, sequence: 800, digest: [0xccu8; 32] },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 10,
+            digest: [0xaau8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 200,
+            digest: [0xbbu8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 800,
+            digest: [0xccu8; 32],
+        },
     ];
     let (accounts, metas) = build_invocation(signer, &entries);
     // Sanity: 4 fixed slots + 1 bucket.
@@ -256,7 +199,7 @@ fn backfill_noreplay_multiple_entries_same_bucket_one_cpi() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -286,9 +229,24 @@ fn backfill_noreplay_multiple_entries_different_buckets() {
     let signer = test_authority_pubkey();
     let emitter = [0x33u8; 32];
     let entries = [
-        Entry { chain: 2, emitter, sequence: 10, digest: [0xaau8; 32] },
-        Entry { chain: 2, emitter, sequence: 500, digest: [0xbbu8; 32] },
-        Entry { chain: 2, emitter, sequence: 1500, digest: [0xccu8; 32] },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 10,
+            digest: [0xaau8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 500,
+            digest: [0xbbu8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 1500,
+            digest: [0xccu8; 32],
+        },
     ];
     let (accounts, metas) = build_invocation(signer, &entries);
     assert_eq!(metas.len(), 4 + 2, "expected two unique buckets");
@@ -296,7 +254,7 @@ fn backfill_noreplay_multiple_entries_different_buckets() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -330,14 +288,13 @@ fn backfill_noreplay_multiple_entries_different_buckets() {
     assert_bit_set(&b1, 1500);
 }
 
-
 /// Caller signs with a pubkey other than `BACKFILL_AUTHORITY`. Must reject
 /// with `UnauthorizedCaller` — the const-check is the only thing standing
 /// between an attacker and arbitrary state writes.
 #[test]
 fn backfill_noreplay_wrong_signer_rejects() {
     let mollusk = mollusk();
-    let wrong_signer = Pubkey::new_from_array([0xDEu8; 32]); // not the test authority
+    let wrong_signer = Pubkey::new_from_array([0xDEu8; 32]); // arbitrary, unrelated to BACKFILL_AUTHORITY
     let entries = [Entry {
         chain: 2,
         emitter: [0x11u8; 32],
@@ -349,14 +306,14 @@ fn backfill_noreplay_wrong_signer_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::UnauthorizedCaller as u32
+                if *code == GlobalAccountantError::UnauthorizedCaller as u32
         ),
         "expected UnauthorizedCaller, got {:?}",
         result.raw_result
@@ -366,7 +323,7 @@ fn backfill_noreplay_wrong_signer_rejects() {
 /// Correct `BACKFILL_AUTHORITY` pubkey but not signed. Under Anchor,
 /// `payer`'s `Signer<'info>` wrapper enforces `is_signer` during
 /// `try_accounts`, ahead of
-/// `accountant_backfill_core::instructions::authority::require_authority`'s
+/// `accountant_operational_core::support::authority::require_authority`'s
 /// own check. Rejection surfaces as Anchor's `AccountNotSigner` (3010).
 #[test]
 fn backfill_noreplay_correct_signer_not_signed_rejects() {
@@ -385,7 +342,7 @@ fn backfill_noreplay_correct_signer_not_signed_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -422,47 +379,24 @@ fn backfill_noreplay_spoofed_noreplay_authority_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidPda as u32
+                if *code == GlobalAccountantError::InvalidPda as u32
         ),
         "expected InvalidPda, got {:?}",
         result.raw_result
     );
 }
 
-/// `group_count == 0` must be rejected outright — a zero-group instruction
-/// carries no work and the handler explicitly guards against it.
-#[test]
-fn backfill_noreplay_group_count_zero_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: vec![IxDiscriminator::BackfillNoReplay as u8, 0u8],
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for group_count == 0, got {:?}",
-        result.raw_result
-    );
-}
-
-/// Instruction data ending before the `group_count` byte must be rejected
-/// cleanly.
+/// Malformed-wire e2e proof #1: instruction data ending before the
+/// `group_count` byte rejects through the deployed `.so`. Matches
+/// `noreplay_batch_rejects_malformed_wire`'s "empty data" case in
+/// `crates/definitions/src/instructions/backfill.rs`.
 #[test]
 fn backfill_noreplay_zero_length_data_rejects() {
     let mollusk = mollusk();
@@ -479,104 +413,17 @@ fn backfill_noreplay_zero_length_data_rejects() {
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for zero-length sub-data, got {:?}",
         result.raw_result
     );
 }
 
-/// `entry_count == 0` for a declared group must be rejected — groups MUST be
-/// non-empty per the wire-format contract.
-#[test]
-fn backfill_noreplay_entry_count_zero_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    // One group header declaring entry_count = 0, no entry bytes follow.
-    let data = build_ix_data_raw(&[(2u16, [0x11u8; 32], &[])]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for entry_count == 0, got {:?}",
-        result.raw_result
-    );
-}
-
-/// A group header truncated below the fixed 35 bytes (`chain + emitter +
-/// entry_count`) must be rejected.
-#[test]
-fn backfill_noreplay_truncated_group_header_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let mut data = vec![IxDiscriminator::BackfillNoReplay as u8, 1u8 /* group_count */];
-    // Only 10 of the required 35 group-header bytes follow.
-    data.extend_from_slice(&[0u8; 10]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for truncated group header, got {:?}",
-        result.raw_result
-    );
-}
-
-/// A group whose header declares `entry_count >= 1` but whose entry bytes are
-/// truncated (cursor + 40 > data.len()) must be rejected.
-#[test]
-fn backfill_noreplay_truncated_entry_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let mut data = vec![IxDiscriminator::BackfillNoReplay as u8, 1u8 /* group_count */];
-    data.extend_from_slice(&2u16.to_be_bytes()); // chain
-    data.extend_from_slice(&[0x11u8; 32]); // emitter
-    data.push(1u8); // entry_count = 1
-                     // Only 20 of the required 40 entry bytes (sequence + digest) follow.
-    data.extend_from_slice(&[0u8; 20]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for truncated entry, got {:?}",
-        result.raw_result
-    );
-}
-
-/// Groups must appear in strictly ascending `(chain, emitter)` order; a
-/// second group with a lower chain than the first is rejected.
+/// Malformed-wire e2e proof #2: a second group with a lower chain than the
+/// first rejects through the deployed `.so`. Matches
+/// `noreplay_batch_rejects_malformed_wire`'s "descending group key" case in
+/// `crates/definitions/src/instructions/backfill.rs`.
 #[test]
 fn backfill_noreplay_descending_group_order_rejects() {
     let mollusk = mollusk();
@@ -585,7 +432,7 @@ fn backfill_noreplay_descending_group_order_rejects() {
 
     let group_a_entries = [(1u64, [0xaau8; 32])];
     let group_b_entries = [(1u64, [0xbbu8; 32])];
-    let data = build_ix_data_raw(&[
+    let data = encode_noreplay_batch_raw(&[
         (5u16, [0x11u8; 32], &group_a_entries), // chain 5 first
         (2u16, [0x22u8; 32], &group_b_entries), // chain 2 second — descending
     ]);
@@ -600,133 +447,9 @@ fn backfill_noreplay_descending_group_order_rejects() {
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for descending group order, got {:?}",
-        result.raw_result
-    );
-}
-
-/// Two groups with the exact same `(chain, emitter)` key (duplicate, not
-/// merged) must be rejected — `cur_group <= prev` also forbids equality.
-#[test]
-fn backfill_noreplay_duplicate_group_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let entries_1 = [(1u64, [0xaau8; 32])];
-    let entries_2 = [(2u64, [0xbbu8; 32])];
-    let emitter = [0x11u8; 32];
-    let data = build_ix_data_raw(&[
-        (2u16, emitter, &entries_1),
-        (2u16, emitter, &entries_2), // exact duplicate (chain, emitter)
-    ]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for duplicate group, got {:?}",
-        result.raw_result
-    );
-}
-
-/// Within a single group, entries must appear in strictly ascending
-/// `sequence`. A descending pair is rejected.
-#[test]
-fn backfill_noreplay_descending_sequence_within_group_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let entries = [(100u64, [0xaau8; 32]), (50u64, [0xbbu8; 32])]; // descending
-    let data = build_ix_data_raw(&[(2u16, [0x11u8; 32], &entries)]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for descending sequence, got {:?}",
-        result.raw_result
-    );
-}
-
-/// A duplicate sequence within a group (`cur_full == prev`) is rejected — the
-/// strict-ascending check also forbids equality.
-#[test]
-fn backfill_noreplay_duplicate_sequence_within_group_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let entries = [(100u64, [0xaau8; 32]), (100u64, [0xbbu8; 32])]; // duplicate sequence
-    let data = build_ix_data_raw(&[(2u16, [0x11u8; 32], &entries)]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for duplicate sequence, got {:?}",
-        result.raw_result
-    );
-}
-
-/// Trailing bytes after the last declared group must be rejected — the final
-/// `cursor != data.len()` check catches any malformed wire that overstates
-/// its own length.
-#[test]
-fn backfill_noreplay_trailing_bytes_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let entries = [Entry {
-        chain: 2,
-        emitter: [0x11u8; 32],
-        sequence: 42,
-        digest: [0x77u8; 32],
-    }];
-    let (accounts, metas) = build_invocation(signer, &entries);
-
-    let mut data = build_ix_data(&entries);
-    data.push(0xFF); // trailing garbage byte
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data,
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for trailing bytes, got {:?}",
         result.raw_result
     );
 }
@@ -740,12 +463,31 @@ fn backfill_noreplay_too_few_bucket_accounts_mid_flush_rejects() {
     let signer = test_authority_pubkey();
     let emitter = [0x44u8; 32];
     let entries = [
-        Entry { chain: 2, emitter, sequence: 0, digest: [0xaau8; 32] },
-        Entry { chain: 2, emitter, sequence: 1500, digest: [0xbbu8; 32] },
-        Entry { chain: 2, emitter, sequence: 3000, digest: [0xccu8; 32] },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 0,
+            digest: [0xaau8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 1500,
+            digest: [0xbbu8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 3000,
+            digest: [0xccu8; 32],
+        },
     ];
     let (mut accounts, mut metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 3, "expected three unique buckets before truncation");
+    assert_eq!(
+        metas.len(),
+        4 + 3,
+        "expected three unique buckets before truncation"
+    );
     // Keep only the first bucket account (index 4); drop buckets 1 and 2.
     accounts.truncate(4 + 1);
     metas.truncate(4 + 1);
@@ -753,14 +495,14 @@ fn backfill_noreplay_too_few_bucket_accounts_mid_flush_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for too-few bucket accounts mid-flush, got {:?}",
         result.raw_result
@@ -781,9 +523,13 @@ fn backfill_noreplay_extra_unused_bucket_account_rejects() {
         digest: [0x77u8; 32],
     }];
     let (mut accounts, mut metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 1, "expected exactly one bucket before the extra is added");
+    assert_eq!(
+        metas.len(),
+        4 + 1,
+        "expected exactly one bucket before the extra is added"
+    );
 
-    // Extra bucket account not consumed by the walk.
+    // Dead-state extra bucket account, beyond what the walk consumes.
     let dead_bucket = Pubkey::new_from_array([0x99u8; 32]);
     accounts.push((dead_bucket, uninitialised_pda_account()));
     metas.push(AccountMeta::new(dead_bucket, false));
@@ -791,14 +537,14 @@ fn backfill_noreplay_extra_unused_bucket_account_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for dead-state extra bucket account, got {:?}",
         result.raw_result
@@ -834,7 +580,7 @@ fn backfill_noreplay_not_enough_account_keys_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -850,7 +596,7 @@ fn backfill_noreplay_not_enough_account_keys_rejects() {
 
 /// Boundary check on the bucket-crossing arithmetic: sequence 1023 stays in
 /// bucket 0 while sequence 1024 crosses into bucket 1. An off-by-one in
-/// `sequence / NOREPLAY_BITS_PER_BUCKET` would either merge these into one
+/// `NoReplayBitmapAccount::bucket_index` would either merge these into one
 /// CPI or misplace a bit.
 #[test]
 fn backfill_noreplay_bucket_boundary_1023_vs_1024() {
@@ -858,16 +604,30 @@ fn backfill_noreplay_bucket_boundary_1023_vs_1024() {
     let signer = test_authority_pubkey();
     let emitter = [0x66u8; 32];
     let entries = [
-        Entry { chain: 2, emitter, sequence: 1023, digest: [0xaau8; 32] },
-        Entry { chain: 2, emitter, sequence: 1024, digest: [0xbbu8; 32] },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 1023,
+            digest: [0xaau8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 1024,
+            digest: [0xbbu8; 32],
+        },
     ];
     let (accounts, metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 2, "1023 and 1024 must land in distinct buckets");
+    assert_eq!(
+        metas.len(),
+        4 + 2,
+        "1023 and 1024 must land in distinct buckets"
+    );
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -880,7 +640,10 @@ fn backfill_noreplay_bucket_boundary_1023_vs_1024() {
     let (np_auth, _) = derive_noreplay_authority_pda();
     let bucket_0 = derive_noreplay_bucket(&np_auth, 2, &emitter, 1023);
     let bucket_1 = derive_noreplay_bucket(&np_auth, 2, &emitter, 1024);
-    assert_ne!(bucket_0, bucket_1, "distinct buckets must derive to distinct PDAs");
+    assert_ne!(
+        bucket_0, bucket_1,
+        "distinct buckets must derive to distinct PDAs"
+    );
 
     let b0 = result.get_account(&bucket_0).unwrap().clone();
     assert_bit_set(&b0, 1023);
@@ -904,12 +667,16 @@ fn backfill_noreplay_max_entry_count_255_single_bucket() {
         })
         .collect();
     let (accounts, metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 1, "255 entries in one bucket ⇒ one bucket account");
+    assert_eq!(
+        metas.len(),
+        4 + 1,
+        "255 entries in one bucket ⇒ one bucket account"
+    );
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -947,12 +714,16 @@ fn backfill_noreplay_near_max_group_count_distinct_buckets() {
         })
         .collect();
     let (accounts, metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 30, "30 distinct emitters ⇒ 30 distinct buckets");
+    assert_eq!(
+        metas.len(),
+        4 + 30,
+        "30 distinct emitters ⇒ 30 distinct buckets"
+    );
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -979,11 +750,25 @@ fn backfill_noreplay_swapped_bucket_accounts_rejects() {
     let signer = test_authority_pubkey();
     let emitter = [0x66u8; 32];
     let entries = [
-        Entry { chain: 2, emitter, sequence: 10, digest: [0xaau8; 32] },
-        Entry { chain: 2, emitter, sequence: 1500, digest: [0xbbu8; 32] },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 10,
+            digest: [0xaau8; 32],
+        },
+        Entry {
+            chain: 2,
+            emitter,
+            sequence: 1500,
+            digest: [0xbbu8; 32],
+        },
     ];
     let (mut accounts, mut metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 2, "expected two distinct buckets before the swap");
+    assert_eq!(
+        metas.len(),
+        4 + 2,
+        "expected two distinct buckets before the swap"
+    );
     // Swap the two bucket accounts (indices 4 and 5) — each is a genuine PDA
     // for *some* bucket, just not the one the handler expects at that slot.
     accounts.swap(4, 5);
@@ -992,7 +777,7 @@ fn backfill_noreplay_swapped_bucket_accounts_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     // `solana-noreplay` rejects with `InvalidSeeds` when the supplied bucket
@@ -1020,23 +805,26 @@ fn backfill_noreplay_zero_bucket_accounts_final_flush_shortfall_rejects() {
         digest: [0x77u8; 32],
     }];
     let (mut accounts, mut metas) = build_invocation(signer, &entries);
-    assert_eq!(metas.len(), 4 + 1, "expected exactly one bucket before truncation");
-    // Drop the only bucket account — nothing is left for the final flush to
-    // consume.
+    assert_eq!(
+        metas.len(),
+        4 + 1,
+        "expected exactly one bucket before truncation"
+    );
+    // Truncate to the fixed 4 accounts; the final flush needs a 5th bucket account.
     accounts.truncate(4);
     metas.truncate(4);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for final-flush bucket shortfall, got {:?}",
         result.raw_result
@@ -1067,7 +855,7 @@ fn backfill_noreplay_spoofed_cpi_target_program_is_hardcoded_not_caller_supplied
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
 
     let previous_hook = std::panic::take_hook();

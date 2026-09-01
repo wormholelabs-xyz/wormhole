@@ -9,10 +9,10 @@
 //! 2. `BackfillBalance` for two accounts. Assert both `BalanceAccountLayout`
 //!    PDAs are written at canonical seeds via `getAccountInfo`.
 //! 3. `BackfillNoReplay` signed by a non-authority keypair. Assert the tx
-//!    fails with `UnauthorizedCaller` (Custom(3)), confirming the
-//!    compile-time `BACKFILL_AUTHORITY` const gate runs on-chain.
+//!    fails with `UnauthorizedCaller`, confirming the compile-time
+//!    `BACKFILL_AUTHORITY` const gate runs on-chain.
 //! 4. `BackfillBalance` signed by the same non-authority keypair. Assert
-//!    the same `UnauthorizedCaller` (Custom(3)) failure, and that
+//!    the same `UnauthorizedCaller` failure, and that
 //!    `getAccountInfo` on the target PDA still errors, confirming the
 //!    authority gate covers `BackfillBalance`'s own handler too.
 
@@ -28,22 +28,36 @@ use solana_rent::Rent;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use global_accountant_backfill::Instruction as IxDiscriminator;
 use global_accountant_definitions::{
-    BalanceAccountLayout, NoReplayBitmapAccount, Uint256, ACCOUNT_SEED_PREFIX,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID,
+    BalanceAccountLayout, GlobalAccountantError, NoReplayBitmapAccount, Uint256,
+    ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID,
 };
 
 mod common;
-use common::surfpool::{
-    await_confirmed, deploy_program, fetch_accdgst_logs, so_path, start_surfpool, SurfpoolOptions,
+use common::{
+    surfpool::{
+        await_confirmed, deploy_program, fetch_accdgst_logs, so_path, start_surfpool,
+        SurfpoolOptions,
+    },
+    wire::{balance_entry, encode_balance_batch, encode_noreplay_batch, NoReplayEntry},
+    BACKFILL_PROGRAM_NAME,
 };
-
-const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
 
 // ============================================================================
 // PDA derivations
 // ============================================================================
+
+/// Assert an RPC error string carries `UnauthorizedCaller`. The code is read from
+/// the enum, so renumbering cannot leave this assertion stale.
+fn assert_unauthorized_caller(msg: &str, label: &str) {
+    let code = GlobalAccountantError::UnauthorizedCaller as u32;
+    let hex = format!("custom program error: {code:#x}");
+    let debug = format!("Custom({code})");
+    assert!(
+        msg.contains(&hex) || msg.contains(&debug),
+        "expected UnauthorizedCaller ({debug}) in {label} error, got: {msg}"
+    );
+}
 
 fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
@@ -91,87 +105,13 @@ fn derive_balance_pda(
     pda
 }
 
-// ============================================================================
-// Ix data builders
-// ============================================================================
-
-#[derive(Clone, Copy)]
-struct NoReplayEntry {
-    chain: u16,
-    emitter: [u8; 32],
-    sequence: u64,
-    digest: [u8; 32],
-}
-
-/// Compact emitter-grouped wire format:
-/// `[disc][group_count] [chain emitter entry_count [seq digest]...]...`
-/// Caller must pre-sort entries by `(chain, emitter, sequence)`.
-fn build_backfill_noreplay_data(entries: &[NoReplayEntry]) -> Vec<u8> {
-    let mut groups: Vec<Vec<NoReplayEntry>> = Vec::new();
-    let mut current: Vec<NoReplayEntry> = Vec::new();
-    let mut current_key: Option<(u16, [u8; 32])> = None;
-    for e in entries {
-        let key = (e.chain, e.emitter);
-        if current_key != Some(key) {
-            if !current.is_empty() {
-                groups.push(std::mem::take(&mut current));
-            }
-            current_key = Some(key);
-        }
-        current.push(*e);
-    }
-    if !current.is_empty() {
-        groups.push(current);
-    }
-    let mut data = Vec::new();
-    data.push(IxDiscriminator::BackfillNoReplay as u8);
-    data.push(groups.len() as u8);
-    for group in &groups {
-        let first = &group[0];
-        data.extend_from_slice(&first.chain.to_be_bytes());
-        data.extend_from_slice(&first.emitter);
-        data.push(group.len() as u8);
-        for e in group {
-            data.extend_from_slice(&e.sequence.to_be_bytes());
-            data.extend_from_slice(&e.digest);
-        }
-    }
-    data
-}
-
-#[derive(Clone, Copy)]
-struct BalanceEntry {
-    chain: u16,
-    token_chain: u16,
-    token_address: [u8; 32],
-    balance: [u8; 32],
-}
-
-fn build_backfill_balance_data(entries: &[BalanceEntry]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(2 + entries.len() * 68);
-    data.push(IxDiscriminator::BackfillBalance as u8);
-    data.push(entries.len() as u8);
-    for e in entries {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.token_chain.to_be_bytes());
-        data.extend_from_slice(&e.token_address);
-        data.extend_from_slice(&e.balance);
-    }
-    data
-}
-
 fn system_program_id() -> Pubkey {
     Pubkey::from_str("11111111111111111111111111111111").unwrap()
 }
 
 fn send_ix(rpc: &RpcClient, payer: &Keypair, ix: Instruction) -> Result<String, ClientError> {
     let blockhash = rpc.get_latest_blockhash()?;
-    let tx = Transaction::new_signed_with_payer(
-        &[ix],
-        Some(&payer.pubkey()),
-        &[payer],
-        blockhash,
-    );
+    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], blockhash);
     rpc.send_and_confirm_transaction(&tx).map(|s| s.to_string())
 }
 
@@ -277,7 +217,7 @@ fn surfpool_backfill_lifecycle() {
     let ix = Instruction {
         program_id,
         accounts: metas_no_replay,
-        data: build_backfill_noreplay_data(&entries),
+        data: encode_noreplay_batch(&entries),
     };
     let sig = send_ix(&rpc, &authority, ix).expect("BackfillNoReplay tx");
     eprintln!("[backfill-e2e] BackfillNoReplay tx={sig}");
@@ -306,26 +246,8 @@ fn surfpool_backfill_lifecycle() {
 
     // ---------- Phase 2: BackfillBalance (2 accounts) ----------
     let balances = [
-        BalanceEntry {
-            chain: 2,
-            token_chain: 2,
-            token_address: [0x11u8; 32],
-            balance: {
-                let mut b = [0u8; 32];
-                b[24..32].copy_from_slice(&1_000_000u64.to_be_bytes());
-                b
-            },
-        },
-        BalanceEntry {
-            chain: 4,
-            token_chain: 4,
-            token_address: [0x22u8; 32],
-            balance: {
-                let mut b = [0u8; 32];
-                b[24..32].copy_from_slice(&2_500_000u64.to_be_bytes());
-                b
-            },
-        },
+        balance_entry(2, 2, [0x11u8; 32], Uint256::from_u128(1_000_000).0),
+        balance_entry(4, 4, [0x22u8; 32], Uint256::from_u128(2_500_000).0),
     ];
     let bal_pda_0 = derive_balance_pda(&program_id, 2, 2, &[0x11u8; 32]);
     let bal_pda_1 = derive_balance_pda(&program_id, 4, 4, &[0x22u8; 32]);
@@ -338,7 +260,7 @@ fn surfpool_backfill_lifecycle() {
     let ix = Instruction {
         program_id,
         accounts: metas_balance,
-        data: build_backfill_balance_data(&balances),
+        data: encode_balance_batch(&balances),
     };
     let sig = send_ix(&rpc, &authority, ix).expect("BackfillBalance tx");
     eprintln!("[backfill-e2e] BackfillBalance tx={sig}");
@@ -357,17 +279,16 @@ fn surfpool_backfill_lifecycle() {
             "balance PDA rent should equal `Rent::default().minimum_balance(BalanceAccountLayout::LEN)` ({expected_rent})"
         );
         let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
-        assert_eq!(layout.chain, entry.chain);
-        assert_eq!(layout.token_chain, entry.token_chain);
+        assert_eq!(layout.chain, entry.chain());
+        assert_eq!(layout.token_chain, entry.token_chain());
         assert_eq!(layout.token_address, entry.token_address);
-        assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
+        assert_eq!(layout.balance, entry.balance());
     }
 
     // ---------- Phase 3: wrong-signer BackfillNoReplay → must fail ----------
     //
     // The compile-time `BACKFILL_AUTHORITY` const gates arbitrary state
-    // writes. Run a control tx signed by a stranger and assert
-    // `UnauthorizedCaller` (Custom(3)).
+    // writes. Run a control tx signed by a stranger.
     let stranger_entry = NoReplayEntry {
         chain: 2,
         emitter,
@@ -385,33 +306,19 @@ fn surfpool_backfill_lifecycle() {
     let ix = Instruction {
         program_id,
         accounts: metas_stranger,
-        data: build_backfill_noreplay_data(&[stranger_entry]),
+        data: encode_noreplay_batch(&[stranger_entry]),
     };
     let err = send_ix(&rpc, &stranger, ix).expect_err("stranger ix must fail");
     let msg = err.to_string();
     eprintln!("[backfill-e2e] wrong-signer error: {msg}");
-    // Custom(3) = UnauthorizedCaller. The RPC client surfaces this as
-    // "custom program error: 0x3" in the error string.
-    assert!(
-        msg.contains("custom program error: 0x3") || msg.contains("Custom(3)"),
-        "expected UnauthorizedCaller (Custom(3)) in wrong-signer error, got: {msg}"
-    );
+    assert_unauthorized_caller(&msg, "wrong-signer BackfillNoReplay");
 
     // ---------- Phase 4: wrong-signer BackfillBalance → must fail ----------
     //
     // `BackfillBalance` shares `require_authority` but is a separate
     // handler; run the same control here too. Fresh (chain, token_chain,
     // token_address) key avoids colliding with the PDA written in Phase 2.
-    let stranger_balance = BalanceEntry {
-        chain: 9,
-        token_chain: 9,
-        token_address: [0x99u8; 32],
-        balance: {
-            let mut b = [0u8; 32];
-            b[24..32].copy_from_slice(&1u64.to_be_bytes());
-            b
-        },
-    };
+    let stranger_balance = balance_entry(9, 9, [0x99u8; 32], Uint256::from_u128(1).0);
     let stranger_bal_pda = derive_balance_pda(&program_id, 9, 9, &[0x99u8; 32]);
     let metas_stranger_balance = vec![
         AccountMeta::new(stranger.pubkey(), true),
@@ -421,15 +328,12 @@ fn surfpool_backfill_lifecycle() {
     let ix = Instruction {
         program_id,
         accounts: metas_stranger_balance,
-        data: build_backfill_balance_data(&[stranger_balance]),
+        data: encode_balance_batch(&[stranger_balance]),
     };
     let err = send_ix(&rpc, &stranger, ix).expect_err("stranger BackfillBalance ix must fail");
     let msg = err.to_string();
     eprintln!("[backfill-e2e] BackfillBalance wrong-signer error: {msg}");
-    assert!(
-        msg.contains("custom program error: 0x3") || msg.contains("Custom(3)"),
-        "expected UnauthorizedCaller (Custom(3)) in BackfillBalance wrong-signer error, got: {msg}"
-    );
+    assert_unauthorized_caller(&msg, "wrong-signer BackfillBalance");
     assert!(
         rpc.get_account(&stranger_bal_pda).is_err(),
         "stranger's BackfillBalance PDA must not exist after a rejected tx"
