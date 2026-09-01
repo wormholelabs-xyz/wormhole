@@ -1,16 +1,8 @@
-//! `#[derive(Accounts)]` context structs for the two backfill instructions.
-//!
-//! Every account is a bare `Signer`/`UncheckedAccount`, validated by hand
-//! inside the handler bodies in `accountant_backfill_core`. The
-//! bulk-batched PDA seeds depend on the parsed instruction payload rather
-//! than a fixed account field, which is why validation happens in the
-//! handler rather than as an Anchor `owner`/`seeds`/`address` constraint.
-//! Anchor here provides `Context`/arity/discriminator ergonomics.
-//!
-//! Only the fixed-position accounts are named fields; the variadic
-//! bucket/balance-PDA tails ride in `ctx.remaining_accounts`, preserving
-//! the on-wire account-meta order the pre-migration pinocchio slice relied
-//! on.
+//! `#[derive(Accounts)]` contexts for the two backfill instructions. Accounts
+//! are bare `Signer`/`UncheckedAccount`; handlers in
+//! `accountant_operational_core` validate them by hand, since bulk PDA seeds
+//! derive from the parsed payload. Variadic bucket/balance PDAs ride in
+//! `ctx.remaining_accounts`.
 
 use anchor_lang::prelude::*;
 
@@ -20,11 +12,9 @@ use anchor_lang::prelude::*;
 pub struct BackfillNoReplayAccounts<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    /// CHECK: NoReplay program; the CPI target is always the hardcoded
-    /// `NOREPLAY_PROGRAM_ID` constant, never this account's address.
+    /// CHECK: do not use this account's address as the CPI target; use `NOREPLAY_PROGRAM_ID`.
     pub noreplay_program: UncheckedAccount<'info>,
-    /// CHECK: this program's NoReplay authority PDA; address re-derived in
-    /// `accountant_backfill_core::instructions::noreplay::mark_used_bulk`.
+    /// CHECK: NoReplay authority PDA, re-derived in `cpi::noreplay::mark_used_bulk`.
     pub noreplay_authority: UncheckedAccount<'info>,
     /// CHECK: System Program, passed through positionally to the NoReplay CPI.
     pub system_program: UncheckedAccount<'info>,
@@ -36,7 +26,6 @@ pub struct BackfillNoReplayAccounts<'info> {
 pub struct BackfillBalanceAccounts<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    /// CHECK: System Program, required at the tx wire level for
-    /// `pda_init::init_or_upgrade_pda`'s `CreateAccountAllowPrefund` CPI.
+    /// CHECK: System Program, required by `pda_init::init_or_upgrade_pda`'s CPI.
     pub system_program: UncheckedAccount<'info>,
 }

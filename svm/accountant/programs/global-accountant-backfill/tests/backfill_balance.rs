@@ -4,8 +4,11 @@
 #![allow(clippy::too_many_arguments)]
 
 use {
-    global_accountant_backfill::{BackfillError, Instruction as IxDiscriminator},
-    global_accountant_definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX},
+    global_accountant_backfill::Instruction as IxDiscriminator,
+    global_accountant_definitions::{
+        BackfillBalanceEntry, BalanceAccountLayout, GlobalAccountantError, Uint256,
+        ACCOUNT_SEED_PREFIX,
+    },
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult},
     solana_account::Account,
     solana_instruction::{error::InstructionError, AccountMeta, Instruction},
@@ -13,9 +16,12 @@ use {
 };
 
 mod common;
-use common::mollusk::{
-    mollusk, program_id, signer_account, system_owned_account, test_authority_pubkey,
-    uninitialised_pda_account,
+use common::{
+    mollusk::{
+        mollusk, program_id, signer_account, system_owned_account, test_authority_pubkey,
+        uninitialised_pda_account,
+    },
+    wire::{balance_entry, encode_balance_batch},
 };
 
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> Pubkey {
@@ -33,50 +39,22 @@ fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
     pda
 }
 
-// ============================================================================
-// Wire format
-// ============================================================================
-
-#[derive(Clone, Copy)]
-struct BalanceEntry {
-    chain: u16,
-    token_chain: u16,
-    token_address: [u8; 32],
-    /// Big-endian Uint256 bytes.
-    balance: [u8; 32],
-}
-
-fn build_ix_data(entries: &[BalanceEntry]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(1 + 1 + entries.len() * 68);
-    data.push(IxDiscriminator::BackfillBalance as u8);
-    data.push(entries.len() as u8);
-    for e in entries {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.token_chain.to_be_bytes());
-        data.extend_from_slice(&e.token_address);
-        data.extend_from_slice(&e.balance);
-    }
-    data
-}
-
 /// Build `(accounts, metas)` for a BackfillBalance invocation.
 /// `signer` parameterised so individual tests can probe wrong-pubkey paths.
 fn build_invocation(
     signer: Pubkey,
-    entries: &[BalanceEntry],
+    entries: &[BackfillBalanceEntry],
 ) -> (Vec<(Pubkey, Account)>, Vec<AccountMeta>) {
     let (sys_id, sys_acc) = keyed_account_for_system_program();
 
-    let mut accounts: Vec<(Pubkey, Account)> = vec![
-        (signer, signer_account(10_000_000_000)),
-        (sys_id, sys_acc),
-    ];
+    let mut accounts: Vec<(Pubkey, Account)> =
+        vec![(signer, signer_account(10_000_000_000)), (sys_id, sys_acc)];
     let mut metas: Vec<AccountMeta> = vec![
         AccountMeta::new(signer, true),
         AccountMeta::new_readonly(sys_id, false),
     ];
     for e in entries {
-        let pda = derive_account_pda(e.chain, e.token_chain, &e.token_address);
+        let pda = derive_account_pda(e.chain(), e.token_chain(), &e.token_address);
         accounts.push((pda, uninitialised_pda_account()));
         metas.push(AccountMeta::new(pda, false));
     }
@@ -92,21 +70,13 @@ fn build_invocation(
 fn backfill_balance_single_entry_writes_pda() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [
-            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 1, 0,
-        ], // 256 (low byte at position 30)
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], Uint256::from_u128(256).0);
     let (accounts, metas) = build_invocation(signer, &[entry]);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -116,7 +86,7 @@ fn backfill_balance_single_entry_writes_pda() {
         result.raw_result
     );
 
-    let pda = derive_account_pda(entry.chain, entry.token_chain, &entry.token_address);
+    let pda = derive_account_pda(entry.chain(), entry.token_chain(), &entry.token_address);
     let acc = result
         .resulting_accounts
         .iter()
@@ -128,10 +98,10 @@ fn backfill_balance_single_entry_writes_pda() {
     assert_eq!(acc.owner, program_id());
 
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
-    assert_eq!(layout.chain, entry.chain);
-    assert_eq!(layout.token_chain, entry.token_chain);
+    assert_eq!(layout.chain, entry.chain());
+    assert_eq!(layout.token_chain, entry.token_chain());
     assert_eq!(layout.token_address, entry.token_address);
-    assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
+    assert_eq!(layout.balance, entry.balance());
 }
 
 /// Three distinct balances in one ix.
@@ -140,31 +110,16 @@ fn backfill_balance_bulk_writes_multiple_pdas() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
     let entries = [
-        BalanceEntry {
-            chain: 2,
-            token_chain: 2,
-            token_address: [0x11u8; 32],
-            balance: [0xaau8; 32],
-        },
-        BalanceEntry {
-            chain: 2,
-            token_chain: 4,
-            token_address: [0x22u8; 32],
-            balance: [0xbbu8; 32],
-        },
-        BalanceEntry {
-            chain: 5,
-            token_chain: 5,
-            token_address: [0x33u8; 32],
-            balance: [0xccu8; 32],
-        },
+        balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]),
+        balance_entry(2, 4, [0x22u8; 32], [0xbbu8; 32]),
+        balance_entry(5, 5, [0x33u8; 32], [0xccu8; 32]),
     ];
     let (accounts, metas) = build_invocation(signer, &entries);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_balance_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -175,13 +130,13 @@ fn backfill_balance_bulk_writes_multiple_pdas() {
     );
 
     for e in &entries {
-        let pda = derive_account_pda(e.chain, e.token_chain, &e.token_address);
+        let pda = derive_account_pda(e.chain(), e.token_chain(), &e.token_address);
         let acc = result.get_account(&pda).unwrap();
         let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
-        assert_eq!(layout.chain, e.chain);
-        assert_eq!(layout.token_chain, e.token_chain);
+        assert_eq!(layout.chain, e.chain());
+        assert_eq!(layout.token_chain, e.token_chain());
         assert_eq!(layout.token_address, e.token_address);
-        assert_eq!(layout.balance, Uint256::from_be_bytes(e.balance));
+        assert_eq!(layout.balance, e.balance());
     }
 }
 
@@ -197,19 +152,14 @@ fn backfill_balance_bulk_writes_multiple_pdas() {
 fn backfill_balance_resubmission_rejected() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
 
     // ---------- First submit (fresh PDA) — must succeed ----------
     let (accounts, metas) = build_invocation(signer, &[entry]);
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas.clone(),
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let first = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -225,7 +175,7 @@ fn backfill_balance_resubmission_rejected() {
     // accounts and use it as the input to the second invocation. The signer's
     // post-state (with lamports debited for rent) also feeds back in so
     // CreateAccount accounting stays consistent.
-    let pda = derive_account_pda(entry.chain, entry.token_chain, &entry.token_address);
+    let pda = derive_account_pda(entry.chain(), entry.token_chain(), &entry.token_address);
     let pda_post = first
         .resulting_accounts
         .iter()
@@ -247,7 +197,7 @@ fn backfill_balance_resubmission_rejected() {
         matches!(
             &second.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidPda as u32
+                if *code == GlobalAccountantError::InvalidPda as u32
         ),
         "expected InvalidPda on re-submission, got {:?}",
         second.raw_result
@@ -258,26 +208,21 @@ fn backfill_balance_resubmission_rejected() {
 #[test]
 fn backfill_balance_wrong_signer_rejects() {
     let mollusk = mollusk();
-    let wrong_signer = Pubkey::new_from_array([0xDEu8; 32]); // not the test authority
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let wrong_signer = Pubkey::new_from_array([0xDEu8; 32]); // arbitrary, unrelated to BACKFILL_AUTHORITY
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (accounts, metas) = build_invocation(wrong_signer, &[entry]);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::UnauthorizedCaller as u32
+                if *code == GlobalAccountantError::UnauthorizedCaller as u32
         ),
         "expected UnauthorizedCaller, got {:?}",
         result.raw_result
@@ -286,25 +231,20 @@ fn backfill_balance_wrong_signer_rejects() {
 
 /// Under Anchor, `payer`'s `Signer<'info>` wrapper enforces `is_signer`
 /// during `try_accounts`, ahead of
-/// `accountant_backfill_core::instructions::authority::require_authority`'s
+/// `accountant_operational_core::support::authority::require_authority`'s
 /// own check. Rejection surfaces as Anchor's `AccountNotSigner` (3010).
 #[test]
 fn backfill_balance_correct_signer_not_signed_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (accounts, mut metas) = build_invocation(signer, &[entry]);
     metas[0] = AccountMeta::new(signer, false);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -318,98 +258,16 @@ fn backfill_balance_correct_signer_not_signed_rejects() {
     );
 }
 
-#[test]
-fn backfill_balance_count_zero_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let (accounts, metas) = build_invocation(signer, &[]);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: vec![IxDiscriminator::BackfillBalance as u8, 0u8],
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for count == 0, got {:?}",
-        result.raw_result
-    );
-}
-
-#[test]
-fn backfill_balance_data_length_mismatch_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
-    let (accounts, metas) = build_invocation(signer, &[entry]);
-
-    // count = 1 declares 69 bytes (1 + 68); shortfall by one byte.
-    let mut short_data = build_ix_data(&[entry]);
-    short_data.pop();
-
-    let short_ix = Instruction {
-        program_id: program_id(),
-        accounts: metas.clone(),
-        data: short_data,
-    };
-    let short_result = mollusk.process_instruction(&short_ix, &accounts);
-    assert!(
-        matches!(
-            &short_result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for truncated (shortfall) data, got {:?}",
-        short_result.raw_result
-    );
-
-    let mut long_data = build_ix_data(&[entry]);
-    long_data.push(0xFF);
-
-    let long_ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: long_data,
-    };
-    let long_result = mollusk.process_instruction(&long_ix, &accounts);
-    assert!(
-        matches!(
-            &long_result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for overrun data, got {:?}",
-        long_result.raw_result
-    );
-}
-
+/// Account-level check: `balance_pdas.len() != count` shortfall, verified against the
+/// deployed `.so`. Wire-only framing/ordering cases live in
+/// `crates/definitions/src/instructions/backfill.rs`.
 #[test]
 fn backfill_balance_account_count_mismatch_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
     let entries = [
-        BalanceEntry {
-            chain: 2,
-            token_chain: 2,
-            token_address: [0x11u8; 32],
-            balance: [0xaau8; 32],
-        },
-        BalanceEntry {
-            chain: 4,
-            token_chain: 4,
-            token_address: [0x22u8; 32],
-            balance: [0xbbu8; 32],
-        },
+        balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]),
+        balance_entry(4, 4, [0x22u8; 32], [0xbbu8; 32]),
     ];
     let (mut accounts, mut metas) = build_invocation(signer, &entries);
     // wire data still declares count = 2 after this pop
@@ -419,83 +277,46 @@ fn backfill_balance_account_count_mismatch_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_balance_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for balance_pdas.len() != count, got {:?}",
         result.raw_result
     );
 }
 
+/// Malformed-wire e2e proof #1: descending key order rejects through the
+/// deployed `.so`. Matches `balance_batch_rejects_malformed_wire`'s
+/// "descending key" case in `crates/definitions/src/instructions/backfill.rs`.
 #[test]
 fn backfill_balance_descending_key_order_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
     let entries = [
-        BalanceEntry {
-            chain: 5,
-            token_chain: 5,
-            token_address: [0x33u8; 32],
-            balance: [0xaau8; 32],
-        },
-        BalanceEntry {
-            chain: 2,
-            token_chain: 2,
-            token_address: [0x11u8; 32],
-            balance: [0xbbu8; 32],
-        },
+        balance_entry(5, 5, [0x33u8; 32], [0xaau8; 32]),
+        balance_entry(2, 2, [0x11u8; 32], [0xbbu8; 32]),
     ];
     let (accounts, metas) = build_invocation(signer, &entries);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_balance_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for descending key order, got {:?}",
-        result.raw_result
-    );
-}
-
-#[test]
-fn backfill_balance_duplicate_key_rejects() {
-    let mollusk = mollusk();
-    let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
-    let entries = [entry, entry];
-    let (accounts, metas) = build_invocation(signer, &entries);
-
-    let ix = Instruction {
-        program_id: program_id(),
-        accounts: metas,
-        data: build_ix_data(&entries),
-    };
-    let result = mollusk.process_instruction(&ix, &accounts);
-    assert!(
-        matches!(
-            &result.raw_result,
-            Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
-        ),
-        "expected InvalidInstructionData for duplicate key, got {:?}",
         result.raw_result
     );
 }
@@ -504,12 +325,7 @@ fn backfill_balance_duplicate_key_rejects() {
 fn backfill_balance_non_canonical_pda_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (mut accounts, mut metas) = build_invocation(signer, &[entry]);
 
     // Swap the balance PDA (index 2) for an unrelated, non-canonical pubkey.
@@ -520,14 +336,14 @@ fn backfill_balance_non_canonical_pda_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidPda as u32
+                if *code == GlobalAccountantError::InvalidPda as u32
         ),
         "expected InvalidPda for non-canonical PDA, got {:?}",
         result.raw_result
@@ -543,12 +359,7 @@ fn backfill_balance_non_canonical_pda_rejects() {
 fn backfill_balance_not_enough_account_keys_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
 
     // Only the payer — missing system_program and the balance PDA.
     let accounts: Vec<(Pubkey, Account)> = vec![(signer, signer_account(10_000_000_000))];
@@ -557,7 +368,7 @@ fn backfill_balance_not_enough_account_keys_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -581,16 +392,11 @@ fn backfill_balance_not_enough_account_keys_rejects() {
 fn backfill_balance_near_max_count_58_entries() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entries: Vec<BalanceEntry> = (0u16..58)
+    let entries: Vec<BackfillBalanceEntry> = (0u16..58)
         .map(|i| {
             let mut token_address = [0u8; 32];
             token_address[30..].copy_from_slice(&i.to_be_bytes());
-            BalanceEntry {
-                chain: 2,
-                token_chain: 2,
-                token_address,
-                balance: [0xaau8; 32],
-            }
+            balance_entry(2, 2, token_address, [0xaau8; 32])
         })
         .collect();
     let (accounts, metas) = build_invocation(signer, &entries);
@@ -599,7 +405,7 @@ fn backfill_balance_near_max_count_58_entries() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&entries),
+        data: encode_balance_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -610,7 +416,7 @@ fn backfill_balance_near_max_count_58_entries() {
     );
 
     for e in [entries[0], entries[57]] {
-        let pda = derive_account_pda(e.chain, e.token_chain, &e.token_address);
+        let pda = derive_account_pda(e.chain(), e.token_chain(), &e.token_address);
         let acc = result.get_account(&pda).unwrap();
         let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
         assert_eq!(layout.token_address, e.token_address);
@@ -622,18 +428,13 @@ fn backfill_balance_near_max_count_58_entries() {
 fn backfill_balance_uint256_min_zero_value() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: Uint256::ZERO.0,
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], Uint256::ZERO.0);
     let (accounts, metas) = build_invocation(signer, &[entry]);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -643,7 +444,7 @@ fn backfill_balance_uint256_min_zero_value() {
         result.raw_result
     );
 
-    let pda = derive_account_pda(entry.chain, entry.token_chain, &entry.token_address);
+    let pda = derive_account_pda(entry.chain(), entry.token_chain(), &entry.token_address);
     let acc = result.get_account(&pda).unwrap();
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
     assert_eq!(layout.balance, Uint256::ZERO);
@@ -654,18 +455,13 @@ fn backfill_balance_uint256_min_zero_value() {
 fn backfill_balance_uint256_max_all_ff_value() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: Uint256::MAX.0,
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], Uint256::MAX.0);
     let (accounts, metas) = build_invocation(signer, &[entry]);
 
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -675,7 +471,7 @@ fn backfill_balance_uint256_max_all_ff_value() {
         result.raw_result
     );
 
-    let pda = derive_account_pda(entry.chain, entry.token_chain, &entry.token_address);
+    let pda = derive_account_pda(entry.chain(), entry.token_chain(), &entry.token_address);
     let acc = result.get_account(&pda).unwrap();
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
     assert_eq!(layout.balance, Uint256::MAX);
@@ -688,12 +484,7 @@ fn backfill_balance_uint256_max_all_ff_value() {
 fn backfill_balance_dust_prefunded_pda_top_up_succeeds() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (mut accounts, metas) = build_invocation(signer, &[entry]);
 
     // Pre-fund the balance PDA (index 2) below the rent-exempt minimum.
@@ -703,7 +494,7 @@ fn backfill_balance_dust_prefunded_pda_top_up_succeeds() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -717,25 +508,20 @@ fn backfill_balance_dust_prefunded_pda_top_up_succeeds() {
     assert_eq!(acc.owner, program_id());
     assert_eq!(acc.data.len(), BalanceAccountLayout::LEN);
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
-    assert_eq!(layout.chain, entry.chain);
-    assert_eq!(layout.token_chain, entry.token_chain);
+    assert_eq!(layout.chain, entry.chain());
+    assert_eq!(layout.token_chain, entry.token_chain());
     assert_eq!(layout.token_address, entry.token_address);
-    assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
+    assert_eq!(layout.balance, entry.balance());
 }
 
 /// A PDA already funded at or above the rent-exempt minimum makes
 /// `init_or_upgrade_pda`'s `top_up` exactly zero, taking
-/// `CreateAccountAllowPrefund`'s no-top-up path (lamports untouched).
+/// `CreateAccountAllowPrefund`'s zero-`top_up` path; lamports stay fixed.
 #[test]
 fn backfill_balance_over_funded_pda_no_transfer_needed() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (mut accounts, metas) = build_invocation(signer, &[entry]);
 
     // Pre-fund the balance PDA (index 2) above the rent-exempt minimum.
@@ -746,7 +532,7 @@ fn backfill_balance_over_funded_pda_no_transfer_needed() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert_eq!(
@@ -759,16 +545,16 @@ fn backfill_balance_over_funded_pda_no_transfer_needed() {
     let acc = result.get_account(&pda).unwrap();
     assert_eq!(acc.owner, program_id());
     assert_eq!(acc.data.len(), BalanceAccountLayout::LEN);
-    // Allocate/Assign never move lamports.
+    // Allocate/Assign leave lamports fixed.
     assert_eq!(
         acc.lamports, OVER_FUNDED_LAMPORTS,
         "over-funded PDA's lamports must be untouched (top_up == 0 ⇒ no Transfer CPI)"
     );
     let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
-    assert_eq!(layout.chain, entry.chain);
-    assert_eq!(layout.token_chain, entry.token_chain);
+    assert_eq!(layout.chain, entry.chain());
+    assert_eq!(layout.token_chain, entry.token_chain());
     assert_eq!(layout.token_address, entry.token_address);
-    assert_eq!(layout.balance, Uint256::from_be_bytes(entry.balance));
+    assert_eq!(layout.balance, entry.balance());
 }
 
 /// `data_len == 0` owned by neither the system program nor this program:
@@ -779,12 +565,7 @@ fn backfill_balance_over_funded_pda_no_transfer_needed() {
 fn backfill_balance_wrong_owner_zero_data_len_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (mut accounts, metas) = build_invocation(signer, &[entry]);
 
     let pda = accounts[2].0;
@@ -802,20 +583,24 @@ fn backfill_balance_wrong_owner_zero_data_len_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidPda as u32
+                if *code == GlobalAccountantError::InvalidPda as u32
         ),
         "expected InvalidPda for data_len==0 with a non-system owner, got {:?}",
         result.raw_result
     );
 }
 
+/// Malformed-wire e2e proof #2: instruction data ending before the `count`
+/// byte rejects through the deployed `.so`. Matches
+/// `balance_batch_rejects_malformed_wire`'s "empty data" case in
+/// `crates/definitions/src/instructions/backfill.rs`.
 #[test]
 fn backfill_balance_zero_length_data_rejects() {
     let mollusk = mollusk();
@@ -832,7 +617,7 @@ fn backfill_balance_zero_length_data_rejects() {
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for zero-length sub-data, got {:?}",
         result.raw_result
@@ -845,14 +630,13 @@ fn backfill_balance_zero_length_data_rejects() {
 fn backfill_balance_extra_unused_pda_account_rejects() {
     let mollusk = mollusk();
     let signer = test_authority_pubkey();
-    let entry = BalanceEntry {
-        chain: 2,
-        token_chain: 2,
-        token_address: [0x11u8; 32],
-        balance: [0xaau8; 32],
-    };
+    let entry = balance_entry(2, 2, [0x11u8; 32], [0xaau8; 32]);
     let (mut accounts, mut metas) = build_invocation(signer, &[entry]);
-    assert_eq!(metas.len(), 2 + 1, "expected exactly one balance PDA before the extra is added");
+    assert_eq!(
+        metas.len(),
+        2 + 1,
+        "expected exactly one balance PDA before the extra is added"
+    );
 
     let dead_pda = Pubkey::new_from_array([0x88u8; 32]);
     accounts.push((dead_pda, uninitialised_pda_account()));
@@ -861,14 +645,14 @@ fn backfill_balance_extra_unused_pda_account_rejects() {
     let ix = Instruction {
         program_id: program_id(),
         accounts: metas,
-        data: build_ix_data(&[entry]),
+        data: encode_balance_batch(&[entry]),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
     assert!(
         matches!(
             &result.raw_result,
             Err(InstructionError::Custom(code))
-                if *code == BackfillError::InvalidInstructionData as u32
+                if *code == GlobalAccountantError::InvalidInstructionData as u32
         ),
         "expected InvalidInstructionData for extra unused balance PDA account, got {:?}",
         result.raw_result

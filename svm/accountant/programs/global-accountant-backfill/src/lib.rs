@@ -10,7 +10,7 @@
 //!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
 //! - Instruction discriminator is 1 byte (`0`/`1`) through `#[instruction(discriminator = N)]`.
 //! - PDA creation uses `CreateAccountAllowPrefund` through
-//!   `accountant_backfill_core::instructions::pda_init`; `#[account(init)]` fails on a
+//!   `accountant_operational_core::support::pda_init`; `#[account(init)]` fails on a
 //!   prefunded PDA.
 //! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
 //!
@@ -19,71 +19,40 @@
 
 #![allow(unexpected_cfgs)]
 
+use accountant_operational_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
-pub mod instructions;
-pub mod raw_ix_data;
 
-pub use accountant_backfill_core::{definitions, err, BackfillError, BACKFILL_AUTHORITY};
+pub use accountant_operational_core::{definitions, err, raw_ix_data::RawIxData};
 pub use global_accountant_definitions;
 
-// `#[derive(Accounts)]`'s macro-generated companion items (e.g.
-// `__client_accounts_backfill_no_replay_accounts`) land in `crate::contexts::`.
-// The `#[program]` macro's codegen expects them at the crate root, so
-// re-export the whole module.
+// `#[program]`'s codegen expects `#[derive(Accounts)]`'s companion items at
+// the crate root; re-export `contexts::*` to place them there.
 pub use contexts::*;
-use raw_ix_data::RawIxData;
 
 declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
 
-/// Instruction discriminators. Single-byte prefix on instruction data,
-/// mirrored by `#[instruction(discriminator = N)]` on the handlers below.
-/// Exposed as a convenience for off-chain callers building raw transactions;
-/// Anchor's own generated dispatch drives on-chain routing.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Instruction {
-    BackfillNoReplay = 0,
-    BackfillBalance = 1,
-}
+/// Wire discriminator, defined in `global_accountant_definitions::BackfillInstruction`.
+/// Re-exported for off-chain callers building raw transactions.
+pub use global_accountant_definitions::BackfillInstruction as Instruction;
 
-impl Instruction {
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::BackfillNoReplay),
-            1 => Some(Self::BackfillBalance),
-            _ => None,
-        }
-    }
-}
-
-/// Flatten a `#[derive(Accounts)]` struct's fixed fields plus the variadic
-/// `remaining_accounts` tail into a positionally ordered `Vec<AccountInfo>`,
-/// matching the original pinocchio slice order that
-/// `accountant_backfill_core::instructions::*::process` expects.
-macro_rules! flatten_accounts {
-    ($ctx:expr, [$($field:ident),+ $(,)?]) => {{
-        let mut accounts: Vec<AccountInfo> =
-            vec![$($ctx.accounts.$field.to_account_info()),+];
-        accounts.extend($ctx.remaining_accounts.iter().cloned());
-        accounts
-    }};
-}
+/// Pubkey that must sign every backfill ix. Replace before mainnet deploy;
+/// this default is the test keypair `Keypair::new_from_array([1u8; 32])`,
+/// guarded by `tests/artifact_authority_check.rs`.
+pub const BACKFILL_AUTHORITY: [u8; 32] = [
+    0x8a, 0x88, 0xe3, 0xdd, 0x74, 0x09, 0xf1, 0x95, 0xfd, 0x52, 0xdb, 0x2d, 0x3c, 0xba, 0x5d, 0x72,
+    0xca, 0x67, 0x09, 0xbf, 0x1d, 0x94, 0x12, 0x1b, 0xf3, 0x74, 0x88, 0x01, 0xb4, 0x0f, 0x6f, 0x5c,
+];
 
 #[program]
 pub mod global_accountant_backfill {
     use super::*;
 
-    /// Dispatch discriminator 0. See
-    /// `accountant_backfill_core::instructions::backfill_noreplay`.
+    /// See `accountant_operational_core::instructions::backfill_noreplay`.
     ///
-    /// The explicit `'info` lifetime is required: combining
-    /// `ctx.accounts.*.to_account_info()` with
-    /// `ctx.remaining_accounts.iter().cloned()` in one `Vec<AccountInfo>`
-    /// type-checks only when both draw from the same named lifetime —
-    /// `Signer` is invariant over `'info`, so two elided lifetimes fail to
-    /// unify.
+    /// Explicit `'info`: unifies `to_account_info()` and
+    /// `remaining_accounts.iter().cloned()` in one `Vec<AccountInfo>`.
     #[instruction(discriminator = 0)]
     pub fn backfill_no_replay<'info>(
         ctx: Context<'info, BackfillNoReplayAccounts<'info>>,
@@ -91,28 +60,30 @@ pub mod global_accountant_backfill {
     ) -> Result<()> {
         let accounts = flatten_accounts!(
             ctx,
-            [payer, noreplay_program, noreplay_authority, system_program]
+            [payer, noreplay_program, noreplay_authority, system_program],
+            remaining
         );
-        accountant_backfill_core::instructions::backfill_noreplay::process(
+        accountant_operational_core::instructions::backfill_noreplay::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
+            &BACKFILL_AUTHORITY,
         )?;
         Ok(())
     }
 
-    /// Dispatch discriminator 1. See
-    /// `accountant_backfill_core::instructions::backfill_balance`.
+    /// See `accountant_operational_core::instructions::backfill_balance`.
     #[instruction(discriminator = 1)]
     pub fn backfill_balance<'info>(
         ctx: Context<'info, BackfillBalanceAccounts<'info>>,
         ix_data: RawIxData,
     ) -> Result<()> {
-        let accounts = flatten_accounts!(ctx, [payer, system_program]);
-        accountant_backfill_core::instructions::backfill_balance::process(
+        let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
+        accountant_operational_core::instructions::backfill_balance::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
+            &BACKFILL_AUTHORITY,
         )?;
         Ok(())
     }

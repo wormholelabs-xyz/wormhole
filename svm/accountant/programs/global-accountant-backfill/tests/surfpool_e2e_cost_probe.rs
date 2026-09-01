@@ -1,26 +1,13 @@
-//! **Operator cost-measurement tool.** Reports figures for the migration
-//! plan; its asserts sanity-check the probe's own measurement logic only.
+//! Operator cost-measurement tool. Sends a small sample of BackfillNoReplay
+//! and BackfillBalance entries through a real surfpool subprocess, measures
+//! per-tx fee/CU/rent via `getTransaction`, and extrapolates to the full
+//! mainnet catalogue (5.5M transfers, 17K accounts).
 //!
-//! Lives under `tests/` for the `#[ignore]` + `cargo test --ignored`
-//! workflow. The asserts at the end (`total_failures_v == 0`,
-//! `rent_per_bucket > 0`) are sanity checks on the probe itself.
+//! Requires `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl` on the
+//! operator's machine. The `_at_scale` sibling runs a larger sample; this
+//! one is for quick iteration.
 //!
-//! What it does: drives `TRANSFER_SAMPLE` transfer entries and
-//! `ACCOUNT_SAMPLE` account entries from
-//! `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl` through the backfill
-//! program against a real surfpool subprocess. Captures per-tx `fee`,
-//! `computeUnitsConsumed`, and `(preBalance - postBalance - fee)` (the rent
-//! debit) via `getTransaction`; averages per-entry, extrapolates to the
-//! full mainnet catalogue (5.5M transfers + 17K accounts + 40
-//! registrations + 6 modifications), and prints a SOL / USD breakdown.
-//!
-//! Requires `/tmp/wormchain-mainnet-snapshot/catalogue.jsonl`, present on
-//! the operator's own machine only. The `_at_scale` sibling runs a larger
-//! sample (100k transfers, parallelised) and anchors the master plan's
-//! cost projection; this smaller probe is for quick iteration.
-//!
-//! Run via:
-//!   `cargo test --test surfpool_e2e_cost_probe -- --ignored --nocapture`
+//! Run: `cargo test --test surfpool_e2e_cost_probe -- --ignored --nocapture`
 
 #![allow(clippy::too_many_arguments)]
 
@@ -40,16 +27,21 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use global_accountant_backfill::Instruction as IxDiscriminator;
 use global_accountant_definitions::{
-    ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
-    NOREPLAY_PROGRAM_ID,
+    BackfillBalanceEntry, ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
 };
+use solana_packet::PACKET_DATA_SIZE;
 
 mod common;
-use common::surfpool::{deploy_program, rpc_call, so_path, start_surfpool, SurfpoolOptions};
+use common::{
+    surfpool::{deploy_program, rpc_call, so_path, start_surfpool, SurfpoolOptions},
+    wire::{
+        balance_entry, encode_balance_batch, encode_noreplay_batch, NoReplayEntry as TransferEntry,
+    },
+    BACKFILL_PROGRAM_NAME,
+};
 
-const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
 const CATALOGUE_PATH: &str = "/tmp/wormchain-mainnet-snapshot/catalogue.jsonl";
 
 // Full mainnet catalogue totals as of snapshot at height 18,669,029.
@@ -63,8 +55,8 @@ const FULL_MODIFICATION_COUNT: u64 = 6;
 const TRANSFER_SAMPLE: usize = 100;
 const ACCOUNT_SAMPLE: usize = 50;
 
-// Batch sizes per tx, picked empirically just below the 1232-byte wire-size
-// budget once metas + ix data are accounted for, leaving header headroom.
+// Batch sizes per tx, picked empirically just below `PACKET_DATA_SIZE` once
+// metas + ix data are accounted for, leaving header headroom.
 const TRANSFER_BATCH: usize = 10;
 const ACCOUNT_BATCH: usize = 8;
 
@@ -72,22 +64,6 @@ const ACCOUNT_BATCH: usize = 8;
 // dollars; this only affects the human-friendly figure.
 const SOL_USD: f64 = 230.0;
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
-
-#[derive(Clone, Copy, Debug)]
-struct TransferEntry {
-    chain: u16,
-    emitter: [u8; 32],
-    sequence: u64,
-    digest: [u8; 32],
-}
-
-#[derive(Clone, Copy, Debug)]
-struct AccountEntry {
-    chain: u16,
-    token_chain: u16,
-    token_address: [u8; 32],
-    balance: [u8; 32],
-}
 
 #[derive(Default, Debug)]
 struct TxMeasurement {
@@ -114,15 +90,13 @@ fn hex_decode(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn read_samples() -> (Vec<TransferEntry>, Vec<AccountEntry>) {
+fn read_samples() -> (Vec<TransferEntry>, Vec<BackfillBalanceEntry>) {
     let f = File::open(CATALOGUE_PATH).unwrap_or_else(|e| {
-        panic!(
-            "missing catalogue at {CATALOGUE_PATH}: {e}\nRun the snapshot tool first."
-        )
+        panic!("missing catalogue at {CATALOGUE_PATH}: {e}\nRun the snapshot tool first.")
     });
     let reader = BufReader::new(f);
     let mut transfers: Vec<TransferEntry> = Vec::with_capacity(TRANSFER_SAMPLE);
-    let mut accounts: Vec<AccountEntry> = Vec::with_capacity(ACCOUNT_SAMPLE);
+    let mut accounts: Vec<BackfillBalanceEntry> = Vec::with_capacity(ACCOUNT_SAMPLE);
     for line in reader.lines() {
         let line = line.expect("read line");
         if line.is_empty() {
@@ -140,12 +114,12 @@ fn read_samples() -> (Vec<TransferEntry>, Vec<AccountEntry>) {
                 });
             }
             "account" if accounts.len() < ACCOUNT_SAMPLE => {
-                accounts.push(AccountEntry {
-                    chain: v["chain"].as_u64().expect("chain") as u16,
-                    token_chain: v["token_chain"].as_u64().expect("token_chain") as u16,
-                    token_address: parse_hex32(v["token_address"].as_str().expect("addr")),
-                    balance: parse_hex32(v["balance"].as_str().expect("balance")),
-                });
+                accounts.push(balance_entry(
+                    v["chain"].as_u64().expect("chain") as u16,
+                    v["token_chain"].as_u64().expect("token_chain") as u16,
+                    parse_hex32(v["token_address"].as_str().expect("addr")),
+                    parse_hex32(v["balance"].as_str().expect("balance")),
+                ));
             }
             _ => {}
         }
@@ -190,7 +164,12 @@ fn derive_noreplay_bucket(
     .0
 }
 
-fn derive_balance_pda(program_id: &Pubkey, chain: u16, token_chain: u16, token_address: &[u8; 32]) -> Pubkey {
+fn derive_balance_pda(
+    program_id: &Pubkey,
+    chain: u16,
+    token_chain: u16,
+    token_address: &[u8; 32],
+) -> Pubkey {
     Pubkey::find_program_address(
         &[
             ACCOUNT_SEED_PREFIX,
@@ -209,37 +188,13 @@ fn build_backfill_noreplay_ix(
     noreplay_auth: Pubkey,
     chunk: &[TransferEntry],
 ) -> Instruction {
-    // Compact emitter-grouped wire:
-    // [disc][group_count] [chain emitter entry_count [seq digest]...]...
-    let mut groups: Vec<Vec<TransferEntry>> = Vec::new();
-    let mut current: Vec<TransferEntry> = Vec::new();
-    let mut current_key: Option<(u16, [u8; 32])> = None;
-    for e in chunk {
-        let key = (e.chain, e.emitter);
-        if current_key != Some(key) {
-            if !current.is_empty() {
-                groups.push(std::mem::take(&mut current));
-            }
-            current_key = Some(key);
-        }
-        current.push(*e);
-    }
-    if !current.is_empty() {
-        groups.push(current);
-    }
-    let mut data = Vec::new();
-    data.push(IxDiscriminator::BackfillNoReplay as u8);
-    data.push(groups.len() as u8);
-    for group in &groups {
-        let first = &group[0];
-        data.extend_from_slice(&first.chain.to_be_bytes());
-        data.extend_from_slice(&first.emitter);
-        data.push(group.len() as u8);
-        for e in group {
-            data.extend_from_slice(&e.sequence.to_be_bytes());
-            data.extend_from_slice(&e.digest);
-        }
-    }
+    let data = encode_noreplay_batch(chunk);
+    debug_assert!(
+        data.len() < PACKET_DATA_SIZE,
+        "BackfillNoReplay ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
+        data.len(),
+        PACKET_DATA_SIZE
+    );
 
     // Unique buckets in order of first occurrence; the handler walks entries
     // in lockstep with this slot list, flushing on bucket transition.
@@ -272,23 +227,21 @@ fn build_backfill_noreplay_ix(
 fn build_backfill_balance_ix(
     program_id: &Pubkey,
     payer: &Pubkey,
-    chunk: &[AccountEntry],
+    chunk: &[BackfillBalanceEntry],
 ) -> Instruction {
-    let mut data = Vec::with_capacity(2 + chunk.len() * 68);
-    data.push(IxDiscriminator::BackfillBalance as u8);
-    data.push(chunk.len() as u8);
-    for e in chunk {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.token_chain.to_be_bytes());
-        data.extend_from_slice(&e.token_address);
-        data.extend_from_slice(&e.balance);
-    }
+    let data = encode_balance_batch(chunk);
+    debug_assert!(
+        data.len() < PACKET_DATA_SIZE,
+        "BackfillBalance ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
+        data.len(),
+        PACKET_DATA_SIZE
+    );
     let mut metas = vec![
         AccountMeta::new(*payer, true),
         AccountMeta::new_readonly(system_program_id(), false),
     ];
     for e in chunk {
-        let pda = derive_balance_pda(program_id, e.chain, e.token_chain, &e.token_address);
+        let pda = derive_balance_pda(program_id, e.chain(), e.token_chain(), &e.token_address);
         metas.push(AccountMeta::new(pda, false));
     }
     Instruction {
@@ -300,12 +253,7 @@ fn build_backfill_balance_ix(
 
 fn send_ix(rpc: &RpcClient, payer: &Keypair, ix: Instruction) -> Result<String, ClientError> {
     let blockhash = rpc.get_latest_blockhash()?;
-    let tx = Transaction::new_signed_with_payer(
-        &[ix],
-        Some(&payer.pubkey()),
-        &[payer],
-        blockhash,
-    );
+    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], blockhash);
     rpc.send_and_confirm_transaction(&tx).map(|s| s.to_string())
 }
 
@@ -384,13 +332,16 @@ fn surfpool_cost_probe() {
     // Strict-ascending sort required by the program.
     transfers.sort_by_key(|e| (e.chain, e.emitter, e.sequence));
     transfers.dedup_by_key(|e| (e.chain, e.emitter, e.sequence));
-    accounts.sort_by_key(|e| (e.chain, e.token_chain, e.token_address));
-    accounts.dedup_by_key(|e| (e.chain, e.token_chain, e.token_address));
+    accounts.sort_by_key(|e| e.key());
+    accounts.dedup_by_key(|e| e.key());
 
     // -------- Boot surfpool + deploy --------
     let backfill_so = so_path(BACKFILL_PROGRAM_NAME);
     let backfill_bytes = std::fs::read(&backfill_so).unwrap_or_else(|e| {
-        panic!("read {}: {e} — run `just build` first", backfill_so.display())
+        panic!(
+            "read {}: {e} — run `just build` first",
+            backfill_so.display()
+        )
     });
     let noreplay_bytes = accountant_test_fixtures::NOREPLAY_SO.bytes;
 
@@ -420,12 +371,7 @@ fn surfpool_cost_probe() {
     // -------- Drive transfer batches --------
     let mut transfer_agg = Aggregate::default();
     for chunk in transfers.chunks(TRANSFER_BATCH) {
-        let ix = build_backfill_noreplay_ix(
-            &program_id,
-            &payer.pubkey(),
-            noreplay_auth,
-            chunk,
-        );
+        let ix = build_backfill_noreplay_ix(&program_id, &payer.pubkey(), noreplay_auth, chunk);
         let sig = send_ix(&rpc, &payer, ix).expect("send BackfillNoReplay");
         let mut m = fetch_meta(&rpc_url, &sig);
         m.entry_count = chunk.len();
@@ -512,14 +458,34 @@ fn surfpool_cost_probe() {
         "  BackfillNoReplay: {} entries / {} txs",
         FULL_TRANSFER_COUNT, tx_full_transfer
     );
-    eprintln!("    fees:  {:>15} L  ({:>8.2} SOL  ${:>10.2})", t_fee, t_fee as f64 / LAMPORTS_PER_SOL, lamports_to_usd(t_fee));
-    eprintln!("    rent:  {:>15} L  ({:>8.2} SOL  ${:>10.2})", t_rent, t_rent as f64 / LAMPORTS_PER_SOL, lamports_to_usd(t_rent));
+    eprintln!(
+        "    fees:  {:>15} L  ({:>8.2} SOL  ${:>10.2})",
+        t_fee,
+        t_fee as f64 / LAMPORTS_PER_SOL,
+        lamports_to_usd(t_fee)
+    );
+    eprintln!(
+        "    rent:  {:>15} L  ({:>8.2} SOL  ${:>10.2})",
+        t_rent,
+        t_rent as f64 / LAMPORTS_PER_SOL,
+        lamports_to_usd(t_rent)
+    );
     eprintln!(
         "  BackfillBalance:  {} entries / {} txs",
         FULL_ACCOUNT_COUNT, tx_full_balance
     );
-    eprintln!("    fees:  {:>15} L  ({:>8.2} SOL  ${:>10.2})", a_fee, a_fee as f64 / LAMPORTS_PER_SOL, lamports_to_usd(a_fee));
-    eprintln!("    rent:  {:>15} L  ({:>8.2} SOL  ${:>10.2})", a_rent, a_rent as f64 / LAMPORTS_PER_SOL, lamports_to_usd(a_rent));
+    eprintln!(
+        "    fees:  {:>15} L  ({:>8.2} SOL  ${:>10.2})",
+        a_fee,
+        a_fee as f64 / LAMPORTS_PER_SOL,
+        lamports_to_usd(a_fee)
+    );
+    eprintln!(
+        "    rent:  {:>15} L  ({:>8.2} SOL  ${:>10.2})",
+        a_rent,
+        a_rent as f64 / LAMPORTS_PER_SOL,
+        lamports_to_usd(a_rent)
+    );
     eprintln!();
     eprintln!("  Registrations + modifications: {} + {} = 46 txs via operational program (Shim CPI ~$0.50/tx worst case ⇒ ~$23).", FULL_REGISTRATION_COUNT, FULL_MODIFICATION_COUNT);
     eprintln!();
@@ -545,7 +511,9 @@ fn surfpool_cost_probe() {
     eprintln!();
     eprintln!("Assumptions:");
     eprintln!("  - linear extrapolation from sample entries to full catalogue counts");
-    eprintln!("  - no priority fees (surfpool default); mainnet may add $0-$3000 depending on congestion");
+    eprintln!(
+        "  - no priority fees (surfpool default); mainnet may add $0-$3000 depending on congestion"
+    );
     eprintln!("  - SOL/USD = ${:.2} (informational)", SOL_USD);
     eprintln!("============================================================");
 }
