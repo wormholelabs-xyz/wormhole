@@ -9,8 +9,8 @@
 
 use {
     global_accountant_definitions::{
-        BalanceAccountLayout, GlobalAccountantError, ModificationLayout, Uint256,
-        ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
+        BalanceAccountLayout, GlobalAccountantError, ModifyBalanceLayout, Uint256,
+        ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFY_BALANCE_SEED_PREFIX,
         MODIFY_BALANCE_ACTION, NTT_ACCOUNTANT_GOVERNANCE_MODULE, SOLANA_CHAIN_ID,
         VERIFY_VAA_SHIM_PROGRAM_ID,
     },
@@ -74,7 +74,7 @@ fn derive_balance_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) ->
 
 fn derive_modification_pda(sequence: u64) -> (Pubkey, u8) {
     let seq_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(&[MODIFICATION_SEED_PREFIX, &seq_be], &program_id())
+    Pubkey::find_program_address(&[MODIFY_BALANCE_SEED_PREFIX, &seq_be], &program_id())
 }
 
 fn system_owned_account(lamports: u64) -> Account {
@@ -313,7 +313,7 @@ fn modify_balance_add_on_uninit_pda_initialises_and_credits() {
         program_id(),
         "modification PDA owned by program"
     );
-    let log: &ModificationLayout = bytemuck::from_bytes(&post_log.1.data);
+    let log: &ModifyBalanceLayout = bytemuck::from_bytes(&post_log.1.data);
     assert_eq!(log.sequence, 200);
     assert_eq!(log.chain_id, 2);
     assert_eq!(log.kind, 1);
@@ -507,7 +507,7 @@ fn modify_balance_wrong_target_chain_rejects() {
 }
 
 /// A second VAA with the same payload sequence collides on the Modification PDA
-/// and rejects with `DuplicateModification`.
+/// and rejects with `DuplicateModifyBalance`.
 #[test]
 fn modify_balance_rejects_duplicate_modification_sequence() {
     let mollusk = mollusk();
@@ -561,11 +561,11 @@ fn modify_balance_rejects_duplicate_modification_sequence() {
             let code = u64::from(err) as u32;
             assert_eq!(
                 code,
-                GlobalAccountantError::DuplicateModification as u32,
-                "expected DuplicateModification on replay, got {code:?}"
+                GlobalAccountantError::DuplicateModifyBalance as u32,
+                "expected DuplicateModifyBalance on replay, got {code:?}"
             );
         }
-        other => panic!("expected Failure(DuplicateModification), got {other:?}"),
+        other => panic!("expected Failure(DuplicateModifyBalance), got {other:?}"),
     }
 }
 

@@ -14,7 +14,7 @@ use {
         GlobalAccountantError, TransceiverHubLayout, TransceiverPeerLayout, CORE_BRIDGE_PROGRAM_ID,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
         TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_PEER_INFO_PREFIX, TRANSCEIVER_PEER_SEED_PREFIX,
-        VAA_BODY_HEADER_LEN, VERIFY_VAA_SHIM_PROGRAM_ID,
+        VaaBodyHeader, VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     global_accountant_definitions::ntt_global_accountant::Instruction as IxDiscriminator,
     mollusk_svm::{program::keyed_account_for_system_program, result::ProgramResult, Mollusk},
@@ -148,7 +148,7 @@ fn build_peer_body(
     dest_chain: u16,
     peer_address: &[u8; 32],
 ) -> Vec<u8> {
-    let mut body = vec![0u8; VAA_BODY_HEADER_LEN];
+    let mut body = vec![0u8; VaaBodyHeader::LEN];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
     body[10..42].copy_from_slice(emitter_address);
     body[42..50].copy_from_slice(&sequence.to_be_bytes());

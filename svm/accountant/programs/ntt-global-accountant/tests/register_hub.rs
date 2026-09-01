@@ -12,7 +12,7 @@ use {
     global_accountant_definitions::{
         GlobalAccountantError, TransceiverHubLayout, CORE_BRIDGE_PROGRAM_ID,
         NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, NOREPLAY_PROGRAM_ID,
-        TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_INFO_PREFIX, VAA_BODY_HEADER_LEN,
+        TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_INFO_PREFIX, VaaBodyHeader,
         VERIFY_VAA_SHIM_PROGRAM_ID,
     },
     global_accountant_definitions::ntt_global_accountant::Instruction as IxDiscriminator,
@@ -116,7 +116,7 @@ fn build_hub_body(
     sequence: u64,
     mode: u8,
 ) -> Vec<u8> {
-    let mut body = vec![0u8; VAA_BODY_HEADER_LEN];
+    let mut body = vec![0u8; VaaBodyHeader::LEN];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
     body[10..42].copy_from_slice(emitter_address);
     body[42..50].copy_from_slice(&sequence.to_be_bytes());

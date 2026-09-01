@@ -19,7 +19,8 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::cpi::{noreplay, shim};
+use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{

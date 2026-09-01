@@ -41,6 +41,7 @@ global-accountant-definitions.workspace = true
 solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
 
 [dev-dependencies]
+accountant-test-fixtures.workspace = true
 mollusk-svm.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true

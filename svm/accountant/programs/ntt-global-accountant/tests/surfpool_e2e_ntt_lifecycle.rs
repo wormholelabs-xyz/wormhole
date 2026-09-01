@@ -3,7 +3,7 @@
 //! `register_hub` -> `register_peer` (adopt) -> `register_peer` (match) ->
 //! `register_relayer_chain` -> `submit_vaas` (relayer-unwrap transfer) ->
 //! `modify_balance` -> a real on-chain negative path (replaying the
-//! `modify_balance` VAA rejects `DuplicateModification`), asserting on-chain
+//! `modify_balance` VAA rejects `DuplicateModifyBalance`), asserting on-chain
 //! state after each step.
 //!
 //! Modelled on `programs/global-accountant/tests/surfpool_e2e_submit_vaas.rs`
@@ -56,14 +56,14 @@
 use std::time::Duration;
 
 use global_accountant_definitions::{
-    BalanceAccountLayout, GlobalAccountantError, ModificationLayout,
+    BalanceAccountLayout, GlobalAccountantError, ModifyBalanceLayout,
     RelayerChainRegistrationLayout, TransceiverHubLayout, TransceiverPeerLayout, Uint256,
-    ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX,
+    ACCOUNT_SEED_PREFIX, CORE_BRIDGE_PROGRAM_ID, GOVERNANCE_EMITTER, MODIFY_BALANCE_SEED_PREFIX,
     MODIFY_BALANCE_ACTION, NATIVE_TOKEN_TRANSFER_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX,
     NTT_ACCOUNTANT_GOVERNANCE_MODULE, REGISTER_CHAIN_ACTION, RELAYER_CHAIN_REGISTRATION_SEED_PREFIX,
     RELAYER_GOVERNANCE_MODULE, SOLANA_CHAIN_ID, TRANSCEIVER_HUB_SEED_PREFIX,
     TRANSCEIVER_INFO_PREFIX, TRANSCEIVER_MESSAGE_PREFIX, TRANSCEIVER_PEER_INFO_PREFIX,
-    TRANSCEIVER_PEER_SEED_PREFIX, VAA_BODY_HEADER_LEN, VERIFY_VAA_SHIM_PROGRAM_ID,
+    TRANSCEIVER_PEER_SEED_PREFIX, VaaBodyHeader, VERIFY_VAA_SHIM_PROGRAM_ID,
 };
 use global_accountant_definitions::ntt_global_accountant::Instruction as IxDiscriminator;
 use solana_commitment_config::CommitmentConfig;
@@ -182,7 +182,7 @@ fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
 
 fn derive_modification_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
     let seq_be = sequence.to_be_bytes();
-    Pubkey::find_program_address(&[MODIFICATION_SEED_PREFIX, &seq_be], program_id)
+    Pubkey::find_program_address(&[MODIFY_BALANCE_SEED_PREFIX, &seq_be], program_id)
 }
 
 fn build_namespace(chain: u16, emitter: &[u8; 32]) -> [u8; 34] {
@@ -203,7 +203,7 @@ fn derive_noreplay_bucket(program_id: &Pubkey, chain: u16, emitter: &[u8; 32], s
 
 /// `WormholeTransceiverInfo` (hub-registration, `INFO_PREFIX`) payload.
 fn build_hub_body(emitter_chain: u16, emitter_address: &[u8; 32], sequence: u64) -> Vec<u8> {
-    let mut body = vec![0u8; VAA_BODY_HEADER_LEN];
+    let mut body = vec![0u8; VaaBodyHeader::LEN];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
     body[10..42].copy_from_slice(emitter_address);
     body[42..50].copy_from_slice(&sequence.to_be_bytes());
@@ -223,7 +223,7 @@ fn build_peer_body(
     dest_chain: u16,
     peer_address: &[u8; 32],
 ) -> Vec<u8> {
-    let mut body = vec![0u8; VAA_BODY_HEADER_LEN];
+    let mut body = vec![0u8; VaaBodyHeader::LEN];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
     body[10..42].copy_from_slice(emitter_address);
     body[42..50].copy_from_slice(&sequence.to_be_bytes());
@@ -326,7 +326,7 @@ fn build_transfer_body(
     sequence: u64,
     payload: &[u8],
 ) -> Vec<u8> {
-    let mut body = vec![0u8; VAA_BODY_HEADER_LEN];
+    let mut body = vec![0u8; VaaBodyHeader::LEN];
     body[8..10].copy_from_slice(&emitter_chain.to_be_bytes());
     body[10..42].copy_from_slice(emitter_address);
     body[42..50].copy_from_slice(&sequence.to_be_bytes());
@@ -798,14 +798,14 @@ fn surfpool_ntt_lifecycle() {
 
     let modification_account = rpc.get_account(&modification_pda).expect("modification PDA exists");
     assert_eq!(modification_account.owner, program_id);
-    let modification_layout: &ModificationLayout = bytemuck::from_bytes(&modification_account.data);
+    let modification_layout: &ModifyBalanceLayout = bytemuck::from_bytes(&modification_account.data);
     assert_eq!(modification_layout.sequence, 900);
     assert_eq!(modification_layout.amount, delta);
 
     // ---- (7) Negative path, live against the validator: replaying the exact
     //          same modify_balance VAA collides on the now-existing
     //          Modification PDA (keyed on the payload's sequence, 900) and is
-    //          rejected `DuplicateModification` — a real on-chain rejection,
+    //          rejected `DuplicateModifyBalance` — a real on-chain rejection,
     //          not a mollusk-only assertion. The GuardianSignatures account
     //          posted in step (6) is read-only to this instruction and was
     //          never closed, so it remains valid for a second verify. ----
@@ -830,10 +830,10 @@ fn surfpool_ntt_lifecycle() {
     let code = harness.send_expect_custom_error(replay_ix);
     assert_eq!(
         code,
-        GlobalAccountantError::DuplicateModification as u32,
-        "replaying the modify_balance VAA must reject DuplicateModification, got code {code}"
+        GlobalAccountantError::DuplicateModifyBalance as u32,
+        "replaying the modify_balance VAA must reject DuplicateModifyBalance, got code {code}"
     );
-    eprintln!("[lifecycle-e2e] modify_balance replay correctly rejected: DuplicateModification");
+    eprintln!("[lifecycle-e2e] modify_balance replay correctly rejected: DuplicateModifyBalance");
 
     // Dest balance must be unchanged by the rejected replay.
     let dest_account_final = rpc
@@ -848,5 +848,5 @@ fn surfpool_ntt_lifecycle() {
         "dest balance unchanged by the rejected replay"
     );
 
-    eprintln!("[lifecycle-e2e] full lifecycle green: register_hub -> register_peer (x2) -> register_relayer_chain -> submit_vaas -> modify_balance -> rejected replay (DuplicateModification)");
+    eprintln!("[lifecycle-e2e] full lifecycle green: register_hub -> register_peer (x2) -> register_relayer_chain -> submit_vaas -> modify_balance -> rejected replay (DuplicateModifyBalance)");
 }

@@ -619,7 +619,7 @@ fn ntt_transfer_malformed_delivery_instruction_from_relayer_rejects() {
 
     // Truncate the delivery-instruction payload well before the end (cuts off
     // partway through `sender_address` / the trailing message-key count).
-    let payload_start = 51; // VAA_BODY_HEADER_LEN
+    let payload_start = 51; // VaaBodyHeader::LEN
     let full_len = scenario.body.len();
     scenario.body.truncate(full_len - 20);
     assert!(

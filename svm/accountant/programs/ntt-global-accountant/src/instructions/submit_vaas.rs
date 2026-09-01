@@ -12,10 +12,11 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{commit_log, noreplay, shim};
+use accountant_operational_core::cpi::{noreplay, shim};
+use accountant_operational_core::support::commit_log;
 use accountant_operational_core::ProgramResult;
 
-use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VAA_BODY_HEADER_LEN};
+use crate::definitions::{parse_vaa_namespace_key, GlobalAccountantError, VaaBodyHeader};
 use crate::err;
 use crate::instructions::ntt_transfer::apply_ntt_transfer;
 
@@ -47,7 +48,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
     let guardian_set_bump = data[0];
     let body_len = u16::from_le_bytes([data[1], data[2]]) as usize;
-    if body_len <= VAA_BODY_HEADER_LEN || data.len() != SUBMIT_VAAS_FIXED_LEN + body_len {
+    if body_len <= VaaBodyHeader::LEN || data.len() != SUBMIT_VAAS_FIXED_LEN + body_len {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
     let body_bytes = &data[SUBMIT_VAAS_FIXED_LEN..SUBMIT_VAAS_FIXED_LEN + body_len];

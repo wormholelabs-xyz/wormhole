@@ -31,13 +31,14 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::cpi::{noreplay, shim};
+use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     parse_transceiver_registration, parse_vaa_namespace_key, GlobalAccountantError,
     TransceiverHubLayout, TransceiverPeerLayout, TRANSCEIVER_HUB_SEED_PREFIX,
-    TRANSCEIVER_PEER_SEED_PREFIX, VAA_BODY_HEADER_LEN,
+    TRANSCEIVER_PEER_SEED_PREFIX, VaaBodyHeader,
 };
 use crate::err;
 
@@ -66,7 +67,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let this_hub_bump = data[1];
     let peer_bump = data[2];
     let body_len = u16::from_le_bytes([data[3], data[4]]) as usize;
-    if !(VAA_BODY_HEADER_LEN..=REGISTER_PEER_BODY_MAX).contains(&body_len)
+    if !(VaaBodyHeader::LEN..=REGISTER_PEER_BODY_MAX).contains(&body_len)
         || data.len() != REGISTER_PEER_FIXED_LEN + body_len
     {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -130,7 +131,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     // ----- (6) Parse the registration payload -----
-    let payload = &body_bytes[VAA_BODY_HEADER_LEN..];
+    let payload = &body_bytes[VaaBodyHeader::LEN..];
     let reg = parse_transceiver_registration(payload).map_err(err)?;
     let dest_chain = reg.dest_chain;
     let peer_address = reg.peer_address;

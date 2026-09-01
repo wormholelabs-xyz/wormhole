@@ -22,12 +22,13 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{noreplay, pda_init::init_or_upgrade_pda, shim};
+use accountant_operational_core::cpi::{noreplay, shim};
+use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     parse_transceiver_info, parse_vaa_namespace_key, GlobalAccountantError, TransceiverHubLayout,
-    TRANSCEIVER_HUB_SEED_PREFIX, VAA_BODY_HEADER_LEN,
+    TRANSCEIVER_HUB_SEED_PREFIX, VaaBodyHeader,
 };
 use crate::err;
 
@@ -54,7 +55,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let guardian_set_bump = data[0];
     let hub_bump = data[1];
     let body_len = u16::from_le_bytes([data[2], data[3]]) as usize;
-    if !(VAA_BODY_HEADER_LEN..=REGISTER_HUB_BODY_MAX).contains(&body_len)
+    if !(VaaBodyHeader::LEN..=REGISTER_HUB_BODY_MAX).contains(&body_len)
         || data.len() != REGISTER_HUB_FIXED_LEN + body_len
     {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
@@ -121,7 +122,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     // CosmWasm only acts on Locking-mode info; Burning is rejected
     // (`bail!("ignoring non-locking NTT initialization")`). We reject too, leaving
     // the NoReplay slot unconsumed so a later upgrade could process the VAA.
-    let payload = &body_bytes[VAA_BODY_HEADER_LEN..];
+    let payload = &body_bytes[VaaBodyHeader::LEN..];
     let info = parse_transceiver_info(payload).map_err(err)?;
     if !info.locking {
         return Err(err(GlobalAccountantError::NotLockingHub));

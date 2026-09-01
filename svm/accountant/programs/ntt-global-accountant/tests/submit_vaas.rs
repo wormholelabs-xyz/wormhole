@@ -580,14 +580,14 @@ fn submit_vaas_digest_mismatch_rejects() {
 }
 
 /// A body shorter than the 51-byte header + at-least-one-payload-byte bound
-/// (`body_len <= VAA_BODY_HEADER_LEN`) rejects with `InvalidInstructionData`
+/// (`body_len <= VaaBodyHeader::LEN`) rejects with `InvalidInstructionData`
 /// before the Shim is even invoked.
 #[test]
 fn submit_vaas_with_short_body_rejects() {
     let mollusk = mollusk();
     let scenario = Scenario::new(0xB2);
 
-    let short_body = vec![0u8; 51]; // == VAA_BODY_HEADER_LEN, not > it
+    let short_body = vec![0u8; 51]; // == VaaBodyHeader::LEN, not > it
     let ix = Instruction::new_with_bytes(
         program_id(),
         &submit_vaas_ix_data(scenario.guardian_set_bump, &short_body),

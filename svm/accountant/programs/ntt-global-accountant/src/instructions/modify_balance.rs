@@ -13,13 +13,14 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::instructions::{pda_init::init_or_upgrade_pda, shim};
-use accountant_operational_core::state::{account as balance_account, modification};
+use accountant_operational_core::cpi::shim;
+use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
+use accountant_operational_core::accounts;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModificationLayout, Uint256,
-    ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER, MODIFICATION_SEED_PREFIX, MODIFY_BALANCE_ACTION,
+    BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceLayout, Uint256,
+    ACCOUNT_SEED_PREFIX, GOVERNANCE_EMITTER, MODIFY_BALANCE_SEED_PREFIX, MODIFY_BALANCE_ACTION,
     NTT_ACCOUNTANT_GOVERNANCE_MODULE, SOLANA_CHAIN_ID,
 };
 use crate::err;
@@ -100,7 +101,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   5. `[]`              system program.
     //   6. `[WRITE]`         `Modification` PDA at
     //                       `(b"modification", payload_sequence_be)`. Existence
-    //                       ⇒ `DuplicateModification`.
+    //                       ⇒ `DuplicateModifyBalance`.
     let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, balance_pda, _system_program_acc, modification_pda] =
         accounts
     else {
@@ -194,7 +195,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     let payload_sequence_be = payload_sequence.to_be_bytes();
     let (expected_modification_pda, canonical_modification_bump) = Pubkey::find_program_address(
-        &[MODIFICATION_SEED_PREFIX, &payload_sequence_be],
+        &[MODIFY_BALANCE_SEED_PREFIX, &payload_sequence_be],
         program_id,
     );
     if modification_pda.key != &expected_modification_pda {
@@ -205,7 +206,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //
     // An initialised `Modification` PDA means this sequence was already used.
     if modification_pda.owner != &anchor_lang::solana_program::system_program::ID {
-        return Err(err(GlobalAccountantError::DuplicateModification));
+        return Err(err(GlobalAccountantError::DuplicateModifyBalance));
     }
 
     // ----- (9) Apply the delta -----
@@ -234,27 +235,27 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     } else {
         // Existing balance PDA. No owner check needed: the canonical address was
         // verified above, and only this program can ever assign ownership of it.
-        let mut layout = balance_account::load(balance_pda)?;
+        let mut layout = accounts::load::<BalanceAccountLayout>(balance_pda)?;
         match kind {
             ModificationKind::Add => layout.raw_add(amount).map_err(err)?,
             ModificationKind::Subtract => layout.raw_sub(amount).map_err(err)?,
         }
-        balance_account::store(balance_pda, &layout)?;
+        accounts::store(balance_pda, &layout)?;
     }
 
     // ----- (10) Lazy-init the Modification PDA + store -----
     let bump_seed = [canonical_modification_bump];
-    let seeds: &[&[u8]] = &[MODIFICATION_SEED_PREFIX, &payload_sequence_be, &bump_seed];
+    let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &payload_sequence_be, &bump_seed];
     init_or_upgrade_pda(
         payer,
         modification_pda,
         program_id,
         seeds,
-        ModificationLayout::LEN as u64,
+        ModifyBalanceLayout::LEN as u64,
     )?;
 
-    let mut log: ModificationLayout = bytemuck::Zeroable::zeroed();
-    log.tag = ModificationLayout::TAG;
+    let mut log: ModifyBalanceLayout = bytemuck::Zeroable::zeroed();
+    log.tag = ModifyBalanceLayout::TAG;
     log.sequence = payload_sequence;
     log.chain_id = chain_id;
     log.token_chain = token_chain;
@@ -262,7 +263,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     log.token_address = token_address;
     log.amount = amount;
     log.reason = reason;
-    modification::store(modification_pda, &log)?;
+    accounts::store(modification_pda, &log)?;
 
     // ----- (11) Emit the modification to the program log for indexers -----
     log_modification(payload_sequence, chain_id, kind_byte, &reason);
@@ -307,7 +308,7 @@ fn init_balance_account<'info>(
     layout.token_chain = token_chain;
     layout.token_address = *token_address;
     layout.balance = amount;
-    balance_account::store(balance_pda, &layout)
+    accounts::store(balance_pda, &layout)
 }
 
 /// Emit the modification record to the program log for off-chain indexers.

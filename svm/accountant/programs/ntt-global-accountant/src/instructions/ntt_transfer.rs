@@ -26,14 +26,15 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
-use accountant_operational_core::state::account as account_state;
+use accountant_operational_core::accounts::{self, balance};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    parse_delivery_instruction, parse_ntt_transfer, GlobalAccountantError,
+    parse_delivery_instruction, parse_ntt_transfer, BalanceAccountLayout,
+    GlobalAccountantError,
     RelayerChainRegistrationLayout, TransceiverHubLayout, TransceiverPeerLayout, Uint256,
     ACCOUNT_SEED_PREFIX, RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
-    TRANSCEIVER_PEER_SEED_PREFIX, VAA_BODY_HEADER_LEN,
+    TRANSCEIVER_PEER_SEED_PREFIX, VaaBodyHeader,
 };
 use crate::err;
 
@@ -71,10 +72,10 @@ pub fn apply_ntt_transfer<'info>(
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
-    if body_bytes.len() <= VAA_BODY_HEADER_LEN {
+    if body_bytes.len() <= VaaBodyHeader::LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
-    let body_payload = &body_bytes[VAA_BODY_HEADER_LEN..];
+    let body_payload = &body_bytes[VaaBodyHeader::LEN..];
 
     // ----- (1) Relayer-unwrap -----
     //
@@ -268,7 +269,7 @@ fn apply_balances<'info>(
     if source_account.key != &src_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
-    account_state::init_if_needed(
+    balance::init_if_needed(
         program_id,
         payer,
         source_account,
@@ -277,17 +278,17 @@ fn apply_balances<'info>(
         token_address,
         src_bump,
     )?;
-    let mut src = account_state::load(source_account)?;
+    let mut src = accounts::load::<BalanceAccountLayout>(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
 
     let same_pda = source_account.key == dest_account.key;
     if same_pda {
         src.unlock_or_mint(amount).map_err(err)?;
-        account_state::store(source_account, &src)?;
+        accounts::store(source_account, &src)?;
         return Ok(());
     }
 
-    account_state::store(source_account, &src)?;
+    accounts::store(source_account, &src)?;
 
     // ----- Destination side -----
     let (dst_expected, dst_bump) =
@@ -295,7 +296,7 @@ fn apply_balances<'info>(
     if dest_account.key != &dst_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
-    account_state::init_if_needed(
+    balance::init_if_needed(
         program_id,
         payer,
         dest_account,
@@ -304,9 +305,9 @@ fn apply_balances<'info>(
         token_address,
         dst_bump,
     )?;
-    let mut dst = account_state::load(dest_account)?;
+    let mut dst = accounts::load::<BalanceAccountLayout>(dest_account)?;
     dst.unlock_or_mint(amount).map_err(err)?;
-    account_state::store(dest_account, &dst)
+    accounts::store(dest_account, &dst)
 }
 
 /// Re-derive the canonical balance account PDA address + bump from `(chain,

@@ -13,25 +13,23 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
-use accountant_operational_core::instructions::quorum::{
-    ParsedObservation, BODY_MIN_LEN, SUBMIT_FIXED_LEN,
-};
-use accountant_operational_core::instructions::{commit_log, noreplay, quorum};
+use accountant_operational_core::cpi::noreplay;
+use accountant_operational_core::support::quorum::{ParsedObservation, BODY_MIN_LEN};
+use accountant_operational_core::support::{commit_log, quorum};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    GlobalAccountantError, PendingObservationsLayout, NTT_SUBMIT_OBSERVATION_PREFIX,
+    split_body, GlobalAccountantError, PendingObservationsLayout, SubmitObservationsIxData,
+    NTT_SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
 use crate::instructions::ntt_transfer::apply_ntt_transfer;
 
 /// NTT `submit_observations`. Instruction-data wire format is identical to WTT
-/// (see [`accountant_operational_core::instructions::quorum::SUBMIT_FIXED_LEN`]):
-/// `guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)`
-/// [`SUBMIT_FIXED_LEN`] `‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body`. Guardian
-/// signatures are verified against `keccak256(NTT_SUBMIT_OBSERVATION_PREFIX ‖
-/// tx_hash ‖ body)`; the dedup/quorum key is `double_keccak256(body)`, derived
-/// from the body rather than received over the wire.
+/// ([`SubmitObservationsIxData`] ‖ body). Guardian signatures are verified
+/// against `keccak256(NTT_SUBMIT_OBSERVATION_PREFIX ‖ tx_hash ‖ body)`; the
+/// dedup/quorum key is `double_keccak256(body)`, derived from the body rather
+/// than received over the wire.
 ///
 /// Account layout (mirrors WTT slots 0..6, then drops the chain-registration
 /// slot for the six NTT transfer accounts):
@@ -53,32 +51,15 @@ use crate::instructions::ntt_transfer::apply_ntt_transfer;
 ///
 /// The transfer accounts are only touched on the quorum-completing branch.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    // ----- Parse the instruction data -----
-    // Wire format (after the 1-byte dispatch discriminator):
-    //   guardian_set_index(u32 LE) ‖ guardian_index(1) ‖ signature(65)  [SUBMIT_FIXED_LEN]
-    //   ‖ tx_hash(32) ‖ body_len(u16 LE) ‖ body
     // `tx_hash` is the source-chain transaction id; with the body it reconstructs
-    // the exact observation the guardian signed. The dedup/quorum digest is
-    // derived below via `double_keccak256(body_bytes)`, not read from the wire.
-    const TX_HASH_LEN: usize = 32;
-    if data.len() < SUBMIT_FIXED_LEN + TX_HASH_LEN + 2 {
+    // the exact observation the guardian signed.
+    let (ix, body_bytes) = split_body::<SubmitObservationsIxData>(data).map_err(err)?;
+    if body_bytes.len() < BODY_MIN_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
-    let (fixed_bytes, rest) = data.split_at(SUBMIT_FIXED_LEN);
-    let fixed_bytes: &[u8; SUBMIT_FIXED_LEN] = fixed_bytes
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let (tx_hash, rest) = rest.split_at(TX_HASH_LEN);
-    let tx_hash: &[u8; TX_HASH_LEN] = tx_hash
-        .try_into()
-        .map_err(|_| err(GlobalAccountantError::InvalidInstructionData))?;
-    let body_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
-    if body_len < BODY_MIN_LEN || rest.len() < 2 + body_len {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
-    let body_bytes = &rest[2..2 + body_len];
+    let tx_hash = &ix.tx_hash;
 
-    let mut parsed = ParsedObservation::from_data(fixed_bytes)?;
+    let mut parsed = ParsedObservation::from_ix(ix);
 
     // Dedup/quorum identity: the VAA-body digest. Keys the pending PDA, the
     // NoReplay slot, and the commit-log record — unchanged by the signing scheme.
