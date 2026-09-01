@@ -16,6 +16,9 @@ const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 pub struct SurfpoolOptions {
     pub datasource_rpc_url: Option<String>,
     pub scratch_prefix: &'static str,
+    /// Log to files in the scratch dir instead of piping into this process,
+    /// so the child survives this process exiting. Pair with [`SurfpoolGuard::detach`].
+    pub detached: bool,
 }
 
 impl SurfpoolOptions {
@@ -23,6 +26,15 @@ impl SurfpoolOptions {
         Self {
             datasource_rpc_url: None,
             scratch_prefix,
+            detached: false,
+        }
+    }
+
+    pub fn offline_detached(scratch_prefix: &'static str) -> Self {
+        Self {
+            datasource_rpc_url: None,
+            scratch_prefix,
+            detached: true,
         }
     }
 
@@ -30,6 +42,7 @@ impl SurfpoolOptions {
         Self {
             datasource_rpc_url: Some(rpc_url.into()),
             scratch_prefix,
+            detached: false,
         }
     }
 }
@@ -48,6 +61,16 @@ impl SurfpoolGuard {
 
     pub fn rpc_client(&self) -> RpcClient {
         RpcClient::new_with_commitment(self.rpc_url(), CommitmentConfig::confirmed())
+    }
+
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Leave surfpool running after this process exits. Only sound with
+    /// [`SurfpoolOptions::detached`], which sends the child's logs to files.
+    pub fn detach(self) {
+        std::mem::forget(self);
     }
 }
 
@@ -132,9 +155,23 @@ pub fn start_surfpool(opts: SurfpoolOptions) -> SurfpoolGuard {
         }
     }
 
-    cmd.current_dir(&scratch)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    if opts.detached {
+        let stdout_log =
+            std::fs::File::create(scratch.join("surfpool.stdout.log")).expect("stdout log file");
+        let stderr_log =
+            std::fs::File::create(scratch.join("surfpool.stderr.log")).expect("stderr log file");
+        cmd.current_dir(&scratch)
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log));
+        eprintln!(
+            "[surfpool] detached logs: {}/surfpool.{{stdout,stderr}}.log",
+            scratch.display()
+        );
+    } else {
+        cmd.current_dir(&scratch)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+    }
 
     let mut child = cmd.spawn().expect("spawn surfpool");
 

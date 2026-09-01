@@ -12,6 +12,8 @@ pub enum Instruction {
     RegisterChain = 3,
     /// Accountant `ModifyBalance` governance: applies a delta to a `BalanceAccount` PDA.
     ModifyBalance = 4,
+    /// Accountant `UpgradeContract` governance: upgrades this program from a buffer.
+    UpgradeContract = 5,
 }
 
 impl Instruction {
@@ -22,6 +24,7 @@ impl Instruction {
             2 => Some(Self::SubmitVaas),
             3 => Some(Self::RegisterChain),
             4 => Some(Self::ModifyBalance),
+            5 => Some(Self::UpgradeContract),
             _ => None,
         }
     }

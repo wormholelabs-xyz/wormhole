@@ -7,7 +7,7 @@
 //!
 //! - Account discriminator is the 1-byte `AccountTag` at offset 0. Load state with
 //!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
-//! - Instruction discriminator is 1 byte (`0..=4`) through `#[instruction(discriminator = N)]`.
+//! - Instruction discriminator is 1 byte (`0..=5`) through `#[instruction(discriminator = N)]`.
 //! - PDA creation uses `CreateAccountAllowPrefund` through `pda_init`; `#[account(init)]`
 //!   fails on a prefunded PDA.
 //! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
@@ -147,6 +147,34 @@ pub mod global_accountant {
             ]
         );
         crate::instructions::modify_balance::process(ctx.program_id, &accounts, &ix_data.0)?;
+        Ok(())
+    }
+
+    /// See `crate::instructions::upgrade_contract`.
+    #[instruction(discriminator = 5)]
+    pub fn upgrade_contract(ctx: Context<UpgradeContract>, ix_data: RawIxData) -> Result<()> {
+        let accounts = flatten_accounts!(
+            ctx.accounts,
+            [
+                payer,
+                verify_vaa_shim_program,
+                guardian_set,
+                guardian_signatures,
+                noreplay_bucket,
+                noreplay_program,
+                noreplay_authority,
+                system_program,
+                upgrade_authority,
+                spill,
+                buffer,
+                program_data,
+                program_account,
+                rent,
+                clock,
+                bpf_loader_upgradeable_program,
+            ]
+        );
+        crate::instructions::upgrade_contract::process(ctx.program_id, &accounts, &ix_data.0)?;
         Ok(())
     }
 }

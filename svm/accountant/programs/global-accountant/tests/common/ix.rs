@@ -1,7 +1,8 @@
 use global_accountant_definitions::{
     ClosePendingIxData, GovernanceHeader, Instruction, ModifyBalanceIxData, ModifyBalancePayload,
     RegisterChainIxData, RegisterChainPayload, SubmitObservationsIxData, SubmitVaasIxData,
-    TokenBridgeTransfer, Uint256, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
+    TokenBridgeTransfer, Uint256, UpgradeContractIxData, UpgradeContractPayload, VaaBodyHeader,
+    SUBMIT_OBSERVATION_PREFIX,
 };
 
 pub use accountant_operational_core::hash::double_keccak256;
@@ -98,6 +99,22 @@ pub fn modify_balance_body(
     body
 }
 
+pub fn upgrade_contract_body(
+    emitter_chain: u16,
+    emitter_address: [u8; 32],
+    sequence: u64,
+    header: GovernanceHeader,
+    new_contract: [u8; 32],
+) -> Vec<u8> {
+    let payload = UpgradeContractPayload {
+        header,
+        new_contract,
+    };
+    let mut body = vaa_header(emitter_chain, emitter_address, sequence);
+    body.extend_from_slice(bytemuck::bytes_of(&payload));
+    body
+}
+
 pub fn signing_digest(body: &[u8]) -> [u8; 32] {
     accountant_operational_core::hash::observation_signing_digest(
         SUBMIT_OBSERVATION_PREFIX,
@@ -165,6 +182,18 @@ pub fn modify_balance_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
     };
     framed(
         Instruction::ModifyBalance,
+        bytemuck::bytes_of(&prefix),
+        body,
+    )
+}
+
+pub fn upgrade_contract_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
+    let prefix = UpgradeContractIxData {
+        guardian_set_bump,
+        body_len: (body.len() as u16).to_le_bytes(),
+    };
+    framed(
+        Instruction::UpgradeContract,
         bytemuck::bytes_of(&prefix),
         body,
     )

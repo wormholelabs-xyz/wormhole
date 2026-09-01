@@ -30,7 +30,7 @@ const GUARDIAN_PUBKEY_LEN: usize = 20;
 /// Header plus a non-empty payload; `payload[0]` is the Token Bridge action byte.
 pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
 
-/// Parsed prefix plus the body-header routing tuple. Build with [`Self::from_data`],
+/// Parsed prefix plus the body-header routing tuple. Build with [`Self::from_ix`],
 /// set `digest`, then call [`Self::populate_routing_from_body`].
 #[derive(Clone, Copy)]
 pub struct ParsedObservation {
