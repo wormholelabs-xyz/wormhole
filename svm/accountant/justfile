@@ -99,6 +99,31 @@ check:
 clippy:
     cargo clippy --all-targets -- -D warnings
 
+# Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
+# records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets
+# that instance; stop kills it. See tests/surfpool_e2e_upgrade_contract.rs.
+
+[doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
+e2e-upgrade-deploy: build
+    cargo test --test surfpool_e2e_upgrade_contract deploy_upgradeable_accountant -- --ignored --exact --nocapture
+
+[doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
+e2e-upgrade-submit:
+    cargo test --test surfpool_e2e_upgrade_contract submit_upgrade_vaa -- --ignored --exact --nocapture
+
+[doc("upgrade_contract e2e: kill the surfpool from step 1.")]
+e2e-upgrade-stop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state="target/e2e-upgrade-contract.json"
+    if [ ! -f "${state}" ]; then
+        echo "no ${state}; nothing to stop"
+        exit 0
+    fi
+    pid=$(python3 -c "import json; print(json.load(open('${state}'))['surfpool_pid'])")
+    kill "${pid}" 2>/dev/null && echo "killed surfpool pid ${pid}" || echo "surfpool pid ${pid} already gone"
+    rm -f "${state}"
+
 [doc("cargo clean.")]
 clean:
     cargo clean

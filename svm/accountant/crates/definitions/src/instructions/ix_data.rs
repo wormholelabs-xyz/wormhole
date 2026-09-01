@@ -97,6 +97,20 @@ impl IxPrefix for ModifyBalanceIxData {
     }
 }
 
+/// `upgrade_contract` prefix (3 bytes). PDA bumps derive on-chain.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct UpgradeContractIxData {
+    pub guardian_set_bump: u8,
+    pub body_len: [u8; 2],
+}
+
+impl IxPrefix for UpgradeContractIxData {
+    fn body_len(&self) -> usize {
+        u16::from_le_bytes(self.body_len) as usize
+    }
+}
+
 /// `close_pending` data (40 bytes, no body).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
@@ -130,6 +144,8 @@ const _: () = {
     assert!(RegisterChainIxData::LEN == 3);
     assert!(offset_of!(RegisterChainIxData, body_len) == 1);
     assert!(ModifyBalanceIxData::LEN == 3);
+    assert!(UpgradeContractIxData::LEN == 3);
+    assert!(offset_of!(UpgradeContractIxData, body_len) == 1);
     assert!(ClosePendingIxData::LEN == 40);
     assert!(offset_of!(ClosePendingIxData, sequence) == 32);
 };
@@ -169,6 +185,16 @@ mod tests {
                 "{name}"
             );
         }
+
+        let upgrade = UpgradeContractIxData {
+            guardian_set_bump: 3,
+            body_len: 5u16.to_le_bytes(),
+        };
+        let upgrade_data = framed(&upgrade, &[9; 5]);
+        let (upgrade_view, upgrade_body) =
+            split_body::<UpgradeContractIxData>(&upgrade_data).unwrap();
+        assert_eq!(upgrade_view.guardian_set_bump, 3);
+        assert_eq!(upgrade_body, &[9; 5]);
 
         let mut close = [0u8; ClosePendingIxData::LEN];
         close[32..].copy_from_slice(&9u64.to_be_bytes());

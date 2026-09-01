@@ -6,7 +6,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::constants::{
     ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION,
-    SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE, UPGRADE_CONTRACT_ACTION,
 };
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
@@ -161,6 +161,42 @@ impl ModifyBalancePayload {
     }
 }
 
+/// Accountant `UpgradeContract` payload (67 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct UpgradeContractPayload {
+    pub header: GovernanceHeader,
+    pub new_contract: [u8; 32],
+}
+
+impl UpgradeContractPayload {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Exact-length view of `payload`.
+    ///
+    /// SECURITY: precondition `payload.len() == 67`; anything else is
+    /// `InvalidInstructionData`. Cannot panic.
+    pub fn from_payload(payload: &[u8]) -> Result<&Self, GlobalAccountantError> {
+        bytemuck::try_from_bytes(payload).map_err(|_| GlobalAccountantError::InvalidInstructionData)
+    }
+
+    /// Split a full VAA body into header view and payload view.
+    pub fn from_body(body: &[u8]) -> Result<(&VaaBodyHeader, &Self), GlobalAccountantError> {
+        let (header, payload) = VaaBodyHeader::split(body)?;
+        Ok((header, Self::from_payload(payload)?))
+    }
+
+    /// Governance emitter, `GlobalAccountant` module, `UpgradeContract` action, target Solana.
+    pub fn validate(&self, header: &VaaBodyHeader) -> Result<(), GlobalAccountantError> {
+        require_governance_emitter(header)?;
+        self.header.check(
+            &ACCOUNTANT_GOVERNANCE_MODULE,
+            UPGRADE_CONTRACT_ACTION,
+            &[SOLANA_CHAIN_ID],
+        )
+    }
+}
+
 const _: () = {
     use core::mem::{offset_of, size_of};
     assert!(size_of::<GovernanceHeader>() == 35);
@@ -170,6 +206,9 @@ const _: () = {
     assert!(RegisterChainPayload::LEN == 69);
     assert!(offset_of!(RegisterChainPayload, chain) == 35);
     assert!(offset_of!(RegisterChainPayload, emitter_address) == 37);
+
+    assert!(UpgradeContractPayload::LEN == 67);
+    assert!(offset_of!(UpgradeContractPayload, new_contract) == 35);
 
     assert!(ModifyBalancePayload::LEN == 144);
     assert!(offset_of!(ModifyBalancePayload, sequence) == 35);
@@ -202,6 +241,14 @@ mod tests {
         let mut payload = RegisterChainPayload::zeroed();
         payload.header.module = TOKEN_BRIDGE_GOVERNANCE_MODULE;
         payload.header.action = REGISTER_CHAIN_ACTION;
+        payload
+    }
+
+    fn upgrade_contract_payload() -> UpgradeContractPayload {
+        let mut payload = UpgradeContractPayload::zeroed();
+        payload.header.module = ACCOUNTANT_GOVERNANCE_MODULE;
+        payload.header.action = UPGRADE_CONTRACT_ACTION;
+        payload.header.target_chain = SOLANA_CHAIN_ID.to_be_bytes();
         payload
     }
 
@@ -261,6 +308,21 @@ mod tests {
         assert_eq!(view.amount(), Uint256([0x33; 32]));
         assert_eq!(view.reason[..29], [0u8; 29]);
         assert_eq!(&view.reason[29..], b"fix");
+
+        let upgrade = serde_wormhole::to_vec(&accountant::GovernancePacket {
+            chain: Chain::Solana,
+            action: accountant::Action::UpgradeContract {
+                new_contract: Address([0xC4; 32]),
+            },
+        })
+        .unwrap();
+        assert_eq!(upgrade.len(), UpgradeContractPayload::LEN);
+        let body = body_with(&upgrade);
+        let (_, view) = UpgradeContractPayload::from_body(&body).unwrap();
+        assert_eq!(view.header.module, ACCOUNTANT_GOVERNANCE_MODULE);
+        assert_eq!(view.header.action, UPGRADE_CONTRACT_ACTION);
+        assert_eq!(view.header.target_chain(), 1);
+        assert_eq!(view.new_contract, [0xC4; 32]);
     }
 
     #[test]
@@ -383,24 +445,88 @@ mod tests {
         for (name, header, payload, expected) in modify_cases {
             assert_eq!(payload.validate(&header), expected, "{name}");
         }
+
+        let upgrade = |f: fn(&mut UpgradeContractPayload)| {
+            let mut p = upgrade_contract_payload();
+            f(&mut p);
+            p
+        };
+        let upgrade_cases: [(&str, VaaBodyHeader, UpgradeContractPayload, Result<(), E>); 5] = [
+            ("upgrade solana target", good, upgrade(|_| {}), Ok(())),
+            (
+                "upgrade any target",
+                good,
+                upgrade(|p| p.header.target_chain = [0; 2]),
+                Err(E::GovernanceChainMismatch),
+            ),
+            (
+                "upgrade wrong module",
+                good,
+                upgrade(|p| p.header.module = TOKEN_BRIDGE_GOVERNANCE_MODULE),
+                Err(E::InvalidGovernanceModule),
+            ),
+            (
+                "upgrade modify_balance action",
+                good,
+                upgrade(|p| p.header.action = MODIFY_BALANCE_ACTION),
+                Err(E::InvalidGovernanceAction),
+            ),
+            (
+                "upgrade wrong emitter chain",
+                wrong_chain,
+                upgrade(|_| {}),
+                Err(E::InvalidGovernanceEmitter),
+            ),
+        ];
+        for (name, header, payload, expected) in upgrade_cases {
+            assert_eq!(payload.validate(&header), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn upgrade_contract_view_matches_wire() {
+        let mut wire = std::vec::Vec::new();
+        wire.extend_from_slice(&ACCOUNTANT_GOVERNANCE_MODULE);
+        wire.push(0x02);
+        wire.extend_from_slice(&1u16.to_be_bytes());
+        wire.extend_from_slice(&[0xC4; 32]);
+        assert_eq!(wire.len(), UpgradeContractPayload::LEN);
+        let body = body_with(&wire);
+        let (header, view) = UpgradeContractPayload::from_body(&body).unwrap();
+        assert_eq!((header.emitter_chain(), header.sequence()), (1, 7));
+        assert_eq!(view.header.module, ACCOUNTANT_GOVERNANCE_MODULE);
+        assert_eq!(view.header.action, UPGRADE_CONTRACT_ACTION);
+        assert_eq!(view.header.target_chain(), SOLANA_CHAIN_ID);
+        assert_eq!(view.new_contract, [0xC4; 32]);
+        assert_eq!(
+            view.validate(header),
+            Err(GlobalAccountantError::InvalidGovernanceEmitter)
+        );
+        let governed = VaaBodyHeader::new(0, 0, SOLANA_CHAIN_ID, GOVERNANCE_EMITTER, 7, 0);
+        assert_eq!(view.validate(&governed), Ok(()));
     }
 
     #[test]
     fn payload_length_is_exact() {
-        let cases: [(&str, usize, bool); 6] = [
+        let cases: [(&str, usize, bool); 9] = [
             ("register -1", RegisterChainPayload::LEN - 1, false),
             ("register ==", RegisterChainPayload::LEN, true),
             ("register +1", RegisterChainPayload::LEN + 1, false),
             ("modify -1", ModifyBalancePayload::LEN - 1, false),
             ("modify ==", ModifyBalancePayload::LEN, true),
             ("modify +1", ModifyBalancePayload::LEN + 1, false),
+            ("upgrade -1", UpgradeContractPayload::LEN - 1, false),
+            ("upgrade ==", UpgradeContractPayload::LEN, true),
+            ("upgrade +1", UpgradeContractPayload::LEN + 1, false),
         ];
         for (name, len, ok) in cases {
             let buf = std::vec![0u8; len];
             let got = if name.starts_with("register") {
                 RegisterChainPayload::from_payload(&buf).is_ok()
-            } else {
+            } else if name.starts_with("modify") {
                 ModifyBalancePayload::from_payload(&buf).is_ok()
+            } else {
+                UpgradeContractPayload::from_payload(&buf).is_ok()
             };
             assert_eq!(got, ok, "{name}");
         }

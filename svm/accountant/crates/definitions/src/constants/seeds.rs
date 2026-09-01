@@ -19,6 +19,10 @@ pub const MODIFY_BALANCE_SEED_PREFIX: &[u8] = b"modify_balance";
 /// Seed for the authority PDA that signs all NoReplay CPIs: `[b"noreplay_authority"]`.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";
 
+/// Seed for the program upgrade authority PDA: `[b"upgrade"]`. Matches the Core Bridge
+/// and Token Bridge upgrade authority seed.
+pub const UPGRADE_AUTHORITY_SEED_PREFIX: &[u8] = b"upgrade";
+
 /// Core Bridge `GuardianSet` seed prefix: `(b"GuardianSet", guardian_set_index_be)`.
 /// Owner is `CORE_BRIDGE_PROGRAM_ID`.
 pub const GUARDIAN_SET_SEED: &[u8] = b"GuardianSet";

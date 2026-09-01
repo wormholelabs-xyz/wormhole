@@ -28,6 +28,9 @@ pub const ACCOUNTANT_GOVERNANCE_MODULE: [u8; 32] = [
 /// Accountant governance `ModifyBalance` action byte.
 pub const MODIFY_BALANCE_ACTION: u8 = 0x01;
 
+/// Accountant governance `UpgradeContract` action byte.
+pub const UPGRADE_CONTRACT_ACTION: u8 = 0x02;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +78,18 @@ mod tests {
         assert_eq!(modify[..32], ACCOUNTANT_GOVERNANCE_MODULE);
         assert_eq!(modify[32], MODIFY_BALANCE_ACTION);
         assert_eq!(modify[33..35], SOLANA_CHAIN_ID.to_be_bytes());
+
+        let upgrade = serde_wormhole::to_vec(&accountant::GovernancePacket {
+            chain: Chain::Solana,
+            action: accountant::Action::UpgradeContract {
+                new_contract: Address([0x44; 32]),
+            },
+        })
+        .unwrap();
+        assert_eq!(upgrade.len(), 67);
+        assert_eq!(upgrade[..32], ACCOUNTANT_GOVERNANCE_MODULE);
+        assert_eq!(upgrade[32], UPGRADE_CONTRACT_ACTION);
+        assert_eq!(upgrade[33..35], SOLANA_CHAIN_ID.to_be_bytes());
+        assert_eq!(upgrade[35..67], [0x44; 32]);
     }
 }
