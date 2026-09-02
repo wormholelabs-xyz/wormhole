@@ -19,7 +19,7 @@ use crate::accounts;
 use crate::cpi::noreplay;
 use crate::definitions::{
     ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout, CORE_BRIDGE_PROGRAM_ID,
-    NOREPLAY_AUTHORITY_SEED_PREFIX,
+    GUARDIAN_SET_SEED, NOREPLAY_AUTHORITY_SEED_PREFIX,
 };
 use crate::err;
 use crate::ProgramResult;
@@ -79,14 +79,23 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     crate::account_util::close_account(pending_pda)
 }
 
-/// `Ok(true)` if `guardian_set` is expired or its index differs from `expected_index`.
+/// `Ok(true)` if the Core Bridge `GuardianSet` at `expected_index` has expired.
 ///
-/// SECURITY: owner must be [`CORE_BRIDGE_PROGRAM_ID`]; a forged set could close any pending PDA.
+/// SECURITY: `guardian_set` must be the Core Bridge PDA for `expected_index`. Any other
+/// set, including another genuine epoch, is `InvalidPda`; only the recorded set's own
+/// expiration field can prove it expired.
 fn is_guardian_set_expired(
     guardian_set: &AccountInfo,
     expected_index: u32,
 ) -> crate::ProgramCoreResult<bool> {
     if guardian_set.owner.to_bytes() != CORE_BRIDGE_PROGRAM_ID {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    let index_be = expected_index.to_be_bytes();
+    let core_bridge_addr = Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID);
+    let (expected_address, _) =
+        Pubkey::find_program_address(&[GUARDIAN_SET_SEED, &index_be], &core_bridge_addr);
+    if guardian_set.key != &expected_address {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     let data = guardian_set.try_borrow_data()?;
@@ -99,7 +108,7 @@ fn is_guardian_set_expired(
             .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
     );
     if on_chain_index != expected_index {
-        return Ok(true);
+        return Err(err(GlobalAccountantError::InvalidPda));
     }
     let keys_len = u32::from_le_bytes(
         data[4..8]
