@@ -23,8 +23,8 @@ pub enum GlobalAccountantError {
     InvalidGuardianIndex = 10,
     /// Guardian bit already set in the pending bitmap.
     AlreadySigned = 11,
-    /// Observation guardian set is older than the pending PDA's set.
-    StaleGuardianSet = 12,
+    /// Observation guardian set is past its Core Bridge expiration time.
+    ExpiredGuardianSet = 12,
     /// Reserved; keeps numbering stable.
     DigestForgery = 13,
     /// `close_pending` conditions unmet: guardian set still active and NoReplay unmarked.

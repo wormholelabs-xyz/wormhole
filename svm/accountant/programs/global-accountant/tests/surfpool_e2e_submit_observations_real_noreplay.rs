@@ -83,16 +83,19 @@ fn derive_pending_pda(
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,
+    guardian_set_index: u32,
     digest: &[u8; 32],
 ) -> (Pubkey, u8) {
     let chain_be = chain.to_be_bytes();
     let sequence_be = sequence.to_be_bytes();
+    let index_be = guardian_set_index.to_be_bytes();
     Pubkey::find_program_address(
         &[
             PENDING_OBSERVATIONS_SEED_PREFIX,
             &chain_be,
             emitter,
             &sequence_be,
+            &index_be,
             digest,
         ],
         program_id,
@@ -223,7 +226,15 @@ fn surfpool_submit_observations_real_noreplay() {
     let body = build_attest_body(chain, &emitter, sequence);
     let digest = double_keccak256_host(&body);
 
-    let (pending_pda, _) = derive_pending_pda(&ga_program_id, chain, &emitter, sequence, &digest);
+    let guardian_set_index: u32 = 4;
+    let (pending_pda, _) = derive_pending_pda(
+        &ga_program_id,
+        chain,
+        &emitter,
+        sequence,
+        guardian_set_index,
+        &digest,
+    );
     let (noreplay_authority, _noreplay_authority_bump) =
         derive_noreplay_authority_pda(&ga_program_id);
     let (chain_registration_pda, _) = derive_chain_registration_pda(&ga_program_id, chain);
@@ -298,7 +309,7 @@ fn surfpool_submit_observations_real_noreplay() {
             &noreplay_authority,
             &chain_registration_pda,
             &digest,
-            4,
+            guardian_set_index,
             i,
             &signature,
             &body,
@@ -343,7 +354,7 @@ fn surfpool_submit_observations_real_noreplay() {
         &noreplay_authority,
         &chain_registration_pda,
         &digest,
-        4,
+        guardian_set_index,
         13,
         &extra_signature,
         &body,

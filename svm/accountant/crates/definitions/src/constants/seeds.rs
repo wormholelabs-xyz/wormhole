@@ -1,8 +1,9 @@
 //! PDA seed prefixes for every account type.
 
 /// Seed prefix for [`crate::PendingObservationsLayout`]:
-/// `(b"pending", chain_be, emitter, sequence_be, digest)`. The digest seed gives
-/// fork observations their own bucket.
+/// `(b"pending", chain_be, emitter, sequence_be, guardian_set_index_be, digest)`. The
+/// index seed keeps each guardian set's signatures in their own record, as wormchain does;
+/// the digest seed does the same for fork observations.
 pub const PENDING_OBSERVATIONS_SEED_PREFIX: &[u8] = b"pending";
 
 /// Seed prefix for [`crate::BalanceAccountLayout`]:

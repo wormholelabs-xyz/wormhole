@@ -18,10 +18,11 @@ use crate::account_util::add_lamports;
 use crate::accounts;
 use crate::cpi::noreplay;
 use crate::definitions::{
-    ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout, CORE_BRIDGE_PROGRAM_ID,
-    GUARDIAN_SET_SEED, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout,
+    NOREPLAY_AUTHORITY_SEED_PREFIX,
 };
 use crate::err;
+use crate::support::guardian_set;
 use crate::ProgramResult;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -50,14 +51,16 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         layout.chain,
         &emitter,
         sequence,
+        layout.guardian_set_index,
         &layout.digest,
     );
     if pending_pda.key != &expected_pending_pda {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Condition (a).
-    let expired = is_guardian_set_expired(guardian_set, layout.guardian_set_index)?;
+    // Condition (a). Only the recorded set's own expiration field can prove it expired.
+    guardian_set::verify_account(guardian_set, layout.guardian_set_index)?;
+    let expired = guardian_set::is_expired(guardian_set)?;
 
     // Condition (b).
     let (noreplay_authority_addr, _) =
@@ -77,64 +80,4 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let lamports = pending_pda.lamports();
     add_lamports(rent_recipient, lamports)?;
     crate::account_util::close_account(pending_pda)
-}
-
-/// `Ok(true)` if the Core Bridge `GuardianSet` at `expected_index` has expired.
-///
-/// SECURITY: `guardian_set` must be the Core Bridge PDA for `expected_index`. Any other
-/// set, including another genuine epoch, is `InvalidPda`; only the recorded set's own
-/// expiration field can prove it expired.
-fn is_guardian_set_expired(
-    guardian_set: &AccountInfo,
-    expected_index: u32,
-) -> crate::ProgramCoreResult<bool> {
-    if guardian_set.owner.to_bytes() != CORE_BRIDGE_PROGRAM_ID {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let index_be = expected_index.to_be_bytes();
-    let core_bridge_addr = Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID);
-    let (expected_address, _) =
-        Pubkey::find_program_address(&[GUARDIAN_SET_SEED, &index_be], &core_bridge_addr);
-    if guardian_set.key != &expected_address {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let data = guardian_set.try_borrow_data()?;
-    if data.len() < 8 {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let on_chain_index = u32::from_le_bytes(
-        data[..4]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
-    );
-    if on_chain_index != expected_index {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let keys_len = u32::from_le_bytes(
-        data[4..8]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
-    );
-    let trailer_offset = 8 + (keys_len as usize) * 20;
-    if data.len() < trailer_offset + 8 {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let expiration_time = u32::from_le_bytes(
-        data[trailer_offset + 4..trailer_offset + 8]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
-    );
-    if expiration_time == 0 {
-        return Ok(false); // active set
-    }
-    let timestamp = Clock::get()?.unix_timestamp;
-    // Clamp i64 to u32.
-    let timestamp_u32 = if timestamp < 0 {
-        0
-    } else if (timestamp as u64) > (u32::MAX as u64) {
-        u32::MAX
-    } else {
-        timestamp as u32
-    };
-    Ok(timestamp_u32 > expiration_time)
 }

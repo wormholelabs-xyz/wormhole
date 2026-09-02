@@ -324,6 +324,7 @@ impl ObsScenario {
             self.chain,
             &self.emitter,
             self.sequence,
+            self.guardian_set_index,
             &self.digest,
         )
         .0;

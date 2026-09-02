@@ -5,7 +5,6 @@ use global_accountant_definitions::{
 use mollusk_svm::Mollusk;
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
-use solana_program_error::ProgramError;
 use solana_pubkey::Pubkey;
 
 mod common;
@@ -26,6 +25,9 @@ fn assert_closed(account: &Account, label: &str) {
     assert_eq!(account.owner, system_program_id(), "{label}: owner");
     assert!(account.data.is_empty(), "{label}: data");
 }
+
+/// Mollusk clock value for expiry rows.
+const NOW: i64 = 1_800_000_000;
 
 fn guardian_set_with(index: u32, guardians: &[Guardian], owner: &Pubkey) -> Account {
     guardian_set_account(index, &keys_of(guardians), 0, 0, owner)
@@ -126,6 +128,7 @@ fn routing_comes_from_body_not_caller_prefix() {
         99,
         &[0xFFu8; 32],
         0x9999,
+        GUARDIAN_SET_INDEX,
         &scenario.digest,
     )
     .0;
@@ -155,7 +158,8 @@ fn routing_comes_from_body_not_caller_prefix() {
 
 #[test]
 fn rejects() {
-    let mollusk = mollusk();
+    let mut mollusk = mollusk();
+    mollusk.sysvars.clock.unix_timestamp = NOW;
     type Case = fn(&Mollusk) -> (Vec<(Pubkey, Account)>, Vec<u8>, Vec<AccountMeta>);
 
     fn fresh(seed: u8) -> ObsScenario {
@@ -172,7 +176,7 @@ fn rejects() {
         submit_observations_ix_data(s.guardian_set_index, guardian_index, signature, body)
     }
 
-    let cases: [(&str, Case, u64); 17] = [
+    let cases: [(&str, Case, u64); 18] = [
         (
             "corrupted signature",
             |_| {
@@ -253,7 +257,7 @@ fn rejects() {
                 );
                 plain(s, accounts, 0)
             },
-            u64::from(ProgramError::InvalidAccountData),
+            GlobalAccountantError::InvalidPda as u64,
         ),
         (
             "guardian set index mismatch",
@@ -267,7 +271,7 @@ fn rejects() {
                 );
                 plain(s, accounts, 0)
             },
-            GlobalAccountantError::InvalidGuardianIndex as u64,
+            GlobalAccountantError::InvalidPda as u64,
         ),
         (
             "guardian index beyond set",
@@ -309,7 +313,7 @@ fn rejects() {
                 );
                 plain(s, accounts, 18)
             },
-            u64::from(ProgramError::InvalidAccountData),
+            GlobalAccountantError::InvalidPda as u64,
         ),
         (
             "guardian set not owned by core bridge",
@@ -326,23 +330,44 @@ fn rejects() {
             GlobalAccountantError::InvalidPda as u64,
         ),
         (
-            "stale guardian set",
-            |m| {
-                let s = ObsScenario::attest(GUARDIAN_COUNT, 5, 0x47);
-                let mut accounts = s.submit_n(m, 1);
-                let old_guardians = make_guardians(GUARDIAN_COUNT, 0x48);
-                let old_set = derive_guardian_set_pda(4, &core_bridge_program_id()).0;
-                accounts.push((
-                    old_set,
-                    guardian_set_with(4, &old_guardians, &core_bridge_program_id()),
-                ));
-                let sig = sign_digest(&old_guardians[1], &s.signing_digest);
-                let ix = submit_observations_ix_data(4, 1, sig, &s.body);
-                let mut metas = s.account_metas();
-                metas[2] = AccountMeta::new_readonly(old_set, false);
-                (accounts, ix, metas)
+            "expired guardian set",
+            |_| {
+                let s = fresh(0x47);
+                let mut accounts = s.initial_accounts();
+                replace_account(
+                    &mut accounts,
+                    &s.guardian_set,
+                    guardian_set_account(
+                        GUARDIAN_SET_INDEX,
+                        &keys_of(&s.guardians),
+                        0,
+                        NOW as u32 - 1,
+                        &core_bridge_program_id(),
+                    ),
+                );
+                plain(s, accounts, 0)
             },
-            GlobalAccountantError::StaleGuardianSet as u64,
+            GlobalAccountantError::ExpiredGuardianSet as u64,
+        ),
+        (
+            "superseded guardian set inside expiry window accepted",
+            |_| {
+                let s = fresh(0x49);
+                let mut accounts = s.initial_accounts();
+                replace_account(
+                    &mut accounts,
+                    &s.guardian_set,
+                    guardian_set_account(
+                        GUARDIAN_SET_INDEX,
+                        &keys_of(&s.guardians),
+                        0,
+                        NOW as u32 + 100,
+                        &core_bridge_program_id(),
+                    ),
+                );
+                plain(s, accounts, 0)
+            },
+            u64::MAX,
         ),
         (
             "pre-marked noreplay",
@@ -441,6 +466,11 @@ fn rejects() {
         let (accounts, ix_data, metas) = case(&mollusk);
         let before = accounts.clone();
         let result = submit(&mollusk, accounts, ix_data, metas);
+        // `u64::MAX` marks the one positive control in this table.
+        if expected == u64::MAX {
+            assert_success(&result, label);
+            continue;
+        }
         assert_error(&result, expected, label);
         assert_eq!(
             result.resulting_accounts, before,
@@ -449,20 +479,35 @@ fn rejects() {
     }
 }
 
+/// A newer guardian set opens a sibling pending PDA keyed on its index. The older set's
+/// record, bitmap, and rent are untouched, matching wormchain's per-set pending entries.
 #[test]
-fn guardian_set_rotation_wipes_pending_and_tracks_live_size() {
+fn guardian_set_rotation_opens_sibling_pending_and_tracks_live_size() {
     let mollusk = mollusk();
 
     let old = ObsScenario::attest(GUARDIAN_COUNT, 4, 0x4A);
     let mut accounts = old.submit_n(&mollusk, 1);
+    let old_pending = find_account(&accounts, &old.pending_pda).clone();
     let new_guardians = make_guardians(GUARDIAN_COUNT, 0x4B);
     let new_set = derive_guardian_set_pda(5, &core_bridge_program_id()).0;
     accounts.push((
         new_set,
         guardian_set_with(5, &new_guardians, &core_bridge_program_id()),
     ));
+    let sibling = accountant_operational_core::support::quorum::derive_pending_pda(
+        &program_id(),
+        old.chain,
+        &old.emitter,
+        old.sequence,
+        5,
+        &old.digest,
+    )
+    .0;
+    assert_ne!(sibling, old.pending_pda);
+    accounts.push((sibling, uninitialised_pda_account()));
     let sig = sign_digest(&new_guardians[0], &old.signing_digest);
     let mut metas = old.account_metas();
+    metas[1] = AccountMeta::new(sibling, false);
     metas[2] = AccountMeta::new_readonly(new_set, false);
     let rotated = submit(
         &mollusk,
@@ -471,7 +516,13 @@ fn guardian_set_rotation_wipes_pending_and_tracks_live_size() {
         metas,
     );
     assert_success(&rotated, "observation under new set");
-    let pending = pending_layout(find_account(&rotated.resulting_accounts, &old.pending_pda));
+    let after = &rotated.resulting_accounts;
+    assert_eq!(
+        *find_account(after, &old.pending_pda),
+        old_pending,
+        "old set record untouched"
+    );
+    let pending = pending_layout(find_account(after, &sibling));
     assert_eq!(pending.guardian_set_index, 5);
     assert_eq!(pending.signatures, 0b1);
 

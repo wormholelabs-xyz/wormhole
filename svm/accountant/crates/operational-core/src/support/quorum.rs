@@ -8,11 +8,11 @@ use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
     parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
-    SubmitObservationsIxData, VaaBodyHeader, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED,
-    PENDING_OBSERVATIONS_SEED_PREFIX,
+    SubmitObservationsIxData, VaaBodyHeader, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::hash::keccak256;
+use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
 use crate::support::pda_init::init_or_upgrade_pda;
 
 // `submit_observations` data: `SubmitObservationsIxData` prefix then the VAA body.
@@ -23,9 +23,6 @@ use crate::support::pda_init::init_or_upgrade_pda;
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
-
-/// Guardian key: `keccak256(uncompressed_pk)[12..]`.
-const GUARDIAN_PUBKEY_LEN: usize = 20;
 
 /// Header plus a non-empty payload; `payload[0]` is the Token Bridge action byte.
 pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
@@ -75,17 +72,18 @@ impl ParsedObservation {
 pub enum PendingAction {
     /// PDA absent: allocate and write a fresh layout.
     Create,
-    /// PDA holds an older guardian set: refund, wipe, re-create.
-    WipeAndRecreate,
-    /// PDA holds the same guardian set: set the bitmap bit.
+    /// PDA present for this guardian set and digest: set the bitmap bit.
     Continue,
 }
 
+/// One record per `(chain, emitter, sequence, guardian_set_index, digest)`. A rotation
+/// or a fork opens a sibling; signatures never mix across sets.
 pub fn derive_pending_pda(
     program_id: &Pubkey,
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,
+    guardian_set_index: u32,
     digest: &[u8; 32],
 ) -> (Pubkey, u8) {
     Pubkey::find_program_address(
@@ -94,22 +92,32 @@ pub fn derive_pending_pda(
             &chain.to_be_bytes(),
             emitter,
             &sequence.to_be_bytes(),
+            &guardian_set_index.to_be_bytes(),
             digest,
         ],
         program_id,
     )
 }
 
-/// `InvalidPda` unless `pending_pda` is at the address for `(chain, emitter, sequence, digest)`.
+/// `InvalidPda` unless `pending_pda` is at the address for
+/// `(chain, emitter, sequence, guardian_set_index, digest)`.
 fn verify_pending_pda_address(
     program_id: &Pubkey,
     pending_pda: &AccountInfo,
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,
+    guardian_set_index: u32,
     digest: &[u8; 32],
 ) -> crate::ProgramResult {
-    let (expected, _bump) = derive_pending_pda(program_id, chain, emitter, sequence, digest);
+    let (expected, _bump) = derive_pending_pda(
+        program_id,
+        chain,
+        emitter,
+        sequence,
+        guardian_set_index,
+        digest,
+    );
     if pending_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -138,15 +146,17 @@ pub fn decide_pending_action(
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,
+        parsed.guardian_set_index,
         &parsed.digest,
     )?;
 
+    // Redundant with the address check: the seeds already fix both fields.
     let existing = accounts::load::<PendingObservationsLayout>(pending_pda)?;
-    if existing.guardian_set_index < parsed.guardian_set_index {
-        return Ok(PendingAction::WipeAndRecreate);
+    if existing.guardian_set_index != parsed.guardian_set_index {
+        return Err(err(GlobalAccountantError::InvalidPda));
     }
-    if existing.guardian_set_index > parsed.guardian_set_index {
-        return Err(err(GlobalAccountantError::StaleGuardianSet));
+    if existing.digest != parsed.digest {
+        return Err(err(GlobalAccountantError::InvalidPda));
     }
     Ok(PendingAction::Continue)
 }
@@ -164,10 +174,6 @@ pub fn apply_action_and_accumulate<'info>(
 ) -> crate::ProgramCoreResult<(PendingObservationsLayout, bool)> {
     match action {
         PendingAction::Create => {
-            create_pending_pda(program_id, submitter, pending_pda, parsed)?;
-        }
-        PendingAction::WipeAndRecreate => {
-            wipe_pending_pda(pending_pda, submitter)?;
             create_pending_pda(program_id, submitter, pending_pda, parsed)?;
         }
         PendingAction::Continue => {}
@@ -199,17 +205,20 @@ fn create_pending_pda<'info>(
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,
+        parsed.guardian_set_index,
         &parsed.digest,
     );
 
     let chain_be = parsed.chain.to_be_bytes();
     let sequence_be = parsed.sequence.to_be_bytes();
+    let index_be = parsed.guardian_set_index.to_be_bytes();
     let bump_seed = [canonical_bump];
     let seeds: &[&[u8]] = &[
         PENDING_OBSERVATIONS_SEED_PREFIX,
         &chain_be,
         &parsed.emitter,
         &sequence_be,
+        &index_be,
         &parsed.digest,
         &bump_seed,
     ];
@@ -245,21 +254,12 @@ pub fn close_pending_pda(
     close_account(pending_pda)
 }
 
-/// Close on guardian-set rotation; lamports go to `new_submitter`, not the recorded payer.
-fn wipe_pending_pda(
-    pending_pda: &AccountInfo,
-    new_submitter: &AccountInfo,
-) -> crate::ProgramResult {
-    let lamports = pending_pda.lamports();
-    add_lamports(new_submitter, lamports)?;
-    close_account(pending_pda)
-}
-
 /// Recover the signer with `secp256k1_recover` and compare to the key in `guardian_set`.
 /// Returns `keys_len` for the quorum computation.
 ///
-/// SECURITY: `guardian_set` is the only trust anchor on this path. Owner must be the
-/// Core Bridge; a forged set would let an attacker reach quorum with own keys.
+/// SECURITY: `guardian_set` is the only trust anchor on this path; see
+/// [`guardian_set::verify_account`]. A set past its Core Bridge expiration is rejected,
+/// as wormchain does (`x/wormhole/keeper/vaa.go`).
 pub fn verify_signature(
     guardian_set: &AccountInfo,
     expected_guardian_set_index: u32,
@@ -267,23 +267,14 @@ pub fn verify_signature(
     digest: &[u8; 32],
     signature: &[u8; SECP256K1_SIGNATURE_LEN],
 ) -> crate::ProgramCoreResult<u32> {
-    if guardian_set.owner.to_bytes() != CORE_BRIDGE_PROGRAM_ID {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-
-    // Address check also rejects a wrong-index set early.
-    let index_be = expected_guardian_set_index.to_be_bytes();
-    let core_bridge_addr = Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID);
-    let (expected_address, _) =
-        Pubkey::find_program_address(&[GUARDIAN_SET_SEED, &index_be], &core_bridge_addr);
-    if guardian_set.key != &expected_address {
-        return Err(err(GlobalAccountantError::InvalidPda));
+    guardian_set::verify_account(guardian_set, expected_guardian_set_index)?;
+    if guardian_set::is_expired(guardian_set)? {
+        return Err(err(GlobalAccountantError::ExpiredGuardianSet));
     }
 
     let data = guardian_set.try_borrow_data()?;
     let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
-    // `read_guardian_key` checked `data.len() >= 8`.
-    let num_guardians = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+    let num_guardians = guardian_set::keys_len(&data)?;
 
     let recovery_id = signature[64];
     if recovery_id >= 4 {
@@ -301,17 +292,7 @@ pub fn verify_signature(
     Ok(num_guardians)
 }
 
-/// Read the guardian key at `guardian_index` from a Core Bridge `GuardianSet` account.
-///
-/// Layout:
-///
-/// | offset | size | field              |
-/// |--------|------|--------------------|
-/// | 0      | 4    | guardian_set_index |
-/// | 4      | 4    | keys_len           |
-/// | 8      | 20*N | keys               |
-/// | 8+20N  | 4    | creation_time      |
-/// | 12+20N | 4    | expiration_time    |
+/// Read the guardian key at `guardian_index`; layout in [`guardian_set`].
 pub fn read_guardian_key(
     data: &[u8],
     expected_index: u32,

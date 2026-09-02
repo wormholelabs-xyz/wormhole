@@ -1,10 +1,10 @@
 //! `submit_observations`: WTT quorum tracker over
 //! [`accountant_operational_core::support::quorum`].
 //!
-//! A `(chain, emitter, sequence, digest)` pending PDA accumulates guardian signatures.
-//! The quorum-completing observation marks NoReplay, emits the commit log, applies
-//! balances, and closes the pending PDA. Fork siblings with another digest use their
-//! own PDA; `close_pending` reclaims the losers.
+//! A `(chain, emitter, sequence, guardian_set_index, digest)` pending PDA accumulates
+//! guardian signatures. The quorum-completing observation marks NoReplay, emits the
+//! commit log, applies balances, and closes the pending PDA. Another guardian set or
+//! another digest uses its own sibling PDA; `close_pending` reclaims the losers.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
