@@ -3,8 +3,8 @@
 //! every test call site in this suite uses these instead of hand-rolled bytes.
 
 use global_accountant_definitions::{
-    BackfillBalanceEntry, BackfillInstruction, BackfillNoReplayEntry, BackfillNoReplayGroupHeader,
-    Uint256,
+    BackfillBalanceEntry, BackfillInstruction, BackfillModifyBalanceEntry, BackfillNoReplayEntry,
+    BackfillNoReplayGroupHeader, Uint256,
 };
 
 /// `chain`/`token_chain` as `u16`, `balance` as raw big-endian bytes.
@@ -26,6 +26,40 @@ pub fn balance_entry(
 pub fn encode_balance_batch(entries: &[BackfillBalanceEntry]) -> Vec<u8> {
     let mut data = vec![
         BackfillInstruction::BackfillBalance as u8,
+        entries.len() as u8,
+    ];
+    for entry in entries {
+        data.extend_from_slice(bytemuck::bytes_of(entry));
+    }
+    data
+}
+
+/// `kind`/`chain_id`/`token_chain` as given, `amount` as raw big-endian bytes.
+#[allow(clippy::too_many_arguments)]
+pub fn modify_balance_entry(
+    kind: u8,
+    chain_id: u16,
+    token_chain: u16,
+    sequence: u64,
+    token_address: [u8; 32],
+    amount: [u8; 32],
+    reason: [u8; 32],
+) -> BackfillModifyBalanceEntry {
+    BackfillModifyBalanceEntry::new(
+        kind,
+        chain_id,
+        token_chain,
+        sequence,
+        token_address,
+        Uint256::from_be_bytes(amount),
+        reason,
+    )
+}
+
+/// `BackfillModifyBalance` instruction data: `disc ‖ count ‖ count × BackfillModifyBalanceEntry`.
+pub fn encode_modify_balance_batch(entries: &[BackfillModifyBalanceEntry]) -> Vec<u8> {
+    let mut data = vec![
+        BackfillInstruction::BackfillModifyBalance as u8,
         entries.len() as u8,
     ];
     for entry in entries {
@@ -93,7 +127,18 @@ pub fn encode_noreplay_batch(entries: &[NoReplayEntry]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use global_accountant_definitions::{BalanceBatch, NoReplayBatch};
+    use global_accountant_definitions::{BalanceBatch, ModifyBalanceBatch, NoReplayBatch};
+
+    #[test]
+    fn modify_balance_batch_round_trips_through_the_parser() {
+        let entries = [
+            modify_balance_entry(1, 1, 1, 100, [0x11; 32], [0xAA; 32], [0x01; 32]),
+            modify_balance_entry(2, 1, 2, 101, [0x22; 32], [0xBB; 32], [0x02; 32]),
+        ];
+        let data = encode_modify_balance_batch(&entries);
+        let batch = ModifyBalanceBatch::parse(&data[1..]).unwrap();
+        assert_eq!(batch.entries(), entries.as_slice());
+    }
 
     #[test]
     fn balance_batch_round_trips_through_the_parser() {

@@ -4,7 +4,7 @@ use anchor_lang::prelude::*;
 
 use crate::definitions::{
     parse_token_bridge_payload, BalanceAccountLayout, GlobalAccountantError, TokenBridgeAction,
-    Uint256, ACCOUNT_SEED_PREFIX,
+    Uint256,
 };
 use crate::err;
 use accountant_operational_core::accounts::{self, balance};
@@ -111,22 +111,4 @@ pub fn apply_from_body<'info>(
     }
 }
 
-/// Balance PDA `(address, bump)` for `(chain, token_chain, token_address)`.
-pub fn derive_balance_account_pda(
-    program_id: &Pubkey,
-    chain: u16,
-    token_chain: u16,
-    token_address: &[u8; 32],
-) -> (Pubkey, u8) {
-    let chain_be = chain.to_be_bytes();
-    let token_chain_be = token_chain.to_be_bytes();
-    Pubkey::find_program_address(
-        &[
-            ACCOUNT_SEED_PREFIX,
-            &chain_be,
-            &token_chain_be,
-            token_address,
-        ],
-        program_id,
-    )
-}
+pub use accountant_operational_core::accounts::balance::derive_pda as derive_balance_account_pda;

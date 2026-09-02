@@ -26,18 +26,34 @@
 //! `BackfillNoReplay` wire: `group_count (u8) ‖ group_count × (header ‖ entry_count ×
 //! entry)`. Groups strictly ascending by `(chain, emitter)`; sequences strictly
 //! ascending within a group.
+//!
+//! `BackfillModifyBalanceEntry` (109 bytes):
+//!
+//! | offset | size | field         |
+//! |--------|------|---------------|
+//! | 0      | 1    | kind          |
+//! | 1      | 2    | chain_id (BE) |
+//! | 3      | 2    | token_chain (BE) |
+//! | 5      | 8    | sequence (BE) |
+//! | 13     | 32   | token_address |
+//! | 45     | 32   | amount (BE)   |
+//! | 77     | 32   | reason        |
+//!
+//! `ModifyBalanceBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
+//! by `sequence`.
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
-/// `BackfillBalance` / `BackfillNoReplay` instruction discriminator.
+/// `BackfillBalance` / `BackfillNoReplay` / `BackfillModifyBalance` instruction discriminator.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackfillInstruction {
     BackfillNoReplay = 0,
     BackfillBalance = 1,
+    BackfillModifyBalance = 2,
 }
 
 impl BackfillInstruction {
@@ -45,6 +61,7 @@ impl BackfillInstruction {
         match value {
             0 => Some(Self::BackfillNoReplay),
             1 => Some(Self::BackfillBalance),
+            2 => Some(Self::BackfillModifyBalance),
             _ => None,
         }
     }
@@ -138,6 +155,60 @@ impl BackfillNoReplayEntry {
     }
 }
 
+/// `BackfillModifyBalance` entry (109 bytes). Big-endian, as in the wormchain row.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct BackfillModifyBalanceEntry {
+    pub kind: u8,
+    pub chain_id: [u8; 2],
+    pub token_chain: [u8; 2],
+    pub sequence: [u8; 8],
+    pub token_address: [u8; 32],
+    pub amount: [u8; 32],
+    pub reason: [u8; 32],
+}
+
+impl BackfillModifyBalanceEntry {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        kind: u8,
+        chain_id: u16,
+        token_chain: u16,
+        sequence: u64,
+        token_address: [u8; 32],
+        amount: Uint256,
+        reason: [u8; 32],
+    ) -> Self {
+        Self {
+            kind,
+            chain_id: chain_id.to_be_bytes(),
+            token_chain: token_chain.to_be_bytes(),
+            sequence: sequence.to_be_bytes(),
+            token_address,
+            amount: amount.0,
+            reason,
+        }
+    }
+
+    pub fn chain_id(&self) -> u16 {
+        u16::from_be_bytes(self.chain_id)
+    }
+
+    pub fn token_chain(&self) -> u16 {
+        u16::from_be_bytes(self.token_chain)
+    }
+
+    pub fn sequence(&self) -> u64 {
+        u64::from_be_bytes(self.sequence)
+    }
+
+    pub fn amount(&self) -> Uint256 {
+        Uint256::from_be_bytes(self.amount)
+    }
+}
+
 const _: () = {
     use core::mem::offset_of;
     assert!(BackfillBalanceEntry::LEN == 68);
@@ -149,6 +220,13 @@ const _: () = {
     assert!(offset_of!(BackfillNoReplayGroupHeader, entry_count) == 34);
     assert!(BackfillNoReplayEntry::LEN == 40);
     assert!(offset_of!(BackfillNoReplayEntry, digest) == 8);
+    assert!(BackfillModifyBalanceEntry::LEN == 109);
+    assert!(offset_of!(BackfillModifyBalanceEntry, chain_id) == 1);
+    assert!(offset_of!(BackfillModifyBalanceEntry, token_chain) == 3);
+    assert!(offset_of!(BackfillModifyBalanceEntry, sequence) == 5);
+    assert!(offset_of!(BackfillModifyBalanceEntry, token_address) == 13);
+    assert!(offset_of!(BackfillModifyBalanceEntry, amount) == 45);
+    assert!(offset_of!(BackfillModifyBalanceEntry, reason) == 77);
 };
 
 /// Balance entries, strictly ascending by `(chain, token_chain, token_address)`.
@@ -189,6 +267,47 @@ impl<'a> BalanceBatch<'a> {
     }
 
     pub fn entries(&self) -> &'a [BackfillBalanceEntry] {
+        self.0
+    }
+}
+
+/// Modification records, strictly ascending by `sequence`. `parse` is the only constructor.
+pub struct ModifyBalanceBatch<'a>(&'a [BackfillModifyBalanceEntry]);
+
+impl<'a> ModifyBalanceBatch<'a> {
+    /// Wire: `count (u8) ‖ count × BackfillModifyBalanceEntry`.
+    pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
+        let (&count, rest) = data
+            .split_first()
+            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+        if count == 0 {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let expected_len = count as usize * BackfillModifyBalanceEntry::LEN;
+        if rest.len() != expected_len {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let entries: &[BackfillModifyBalanceEntry] = bytemuck::try_cast_slice(rest)
+            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
+        if entries.len() != count as usize {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+
+        let mut prev_sequence: Option<u64> = None;
+        for entry in entries {
+            let sequence = entry.sequence();
+            if let Some(prev) = prev_sequence {
+                if sequence <= prev {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+            }
+            prev_sequence = Some(sequence);
+        }
+
+        Ok(Self(entries))
+    }
+
+    pub fn entries(&self) -> &'a [BackfillModifyBalanceEntry] {
         self.0
     }
 }
@@ -577,13 +696,125 @@ mod tests {
 
     #[test]
     fn backfill_instruction_from_u8() {
-        let cases: [(u8, Option<BackfillInstruction>); 3] = [
+        let cases: [(u8, Option<BackfillInstruction>); 4] = [
             (0, Some(BackfillInstruction::BackfillNoReplay)),
             (1, Some(BackfillInstruction::BackfillBalance)),
-            (2, None),
+            (2, Some(BackfillInstruction::BackfillModifyBalance)),
+            (3, None),
         ];
         for (value, expected) in cases {
             assert_eq!(BackfillInstruction::from_u8(value), expected, "{value}");
         }
+    }
+
+    fn modify_balance_entry(kind: u8, sequence: u64, amount: u128) -> BackfillModifyBalanceEntry {
+        BackfillModifyBalanceEntry::new(
+            kind,
+            2,
+            2,
+            sequence,
+            [0xAA; 32],
+            Uint256::from_u128(amount),
+            *b"audit-log: backfilled modify    ",
+        )
+    }
+
+    fn encode_modify_balance_batch(entries: &[BackfillModifyBalanceEntry]) -> std::vec::Vec<u8> {
+        let mut out = std::vec![entries.len() as u8];
+        for entry in entries {
+            out.extend_from_slice(bytemuck::bytes_of(entry));
+        }
+        out
+    }
+
+    #[test]
+    fn modify_balance_batch_parses_positive_cases() {
+        let one = [modify_balance_entry(1, 100, 1_000)];
+        let several = [
+            modify_balance_entry(1, 100, 1_000),
+            modify_balance_entry(2, 101, 2_000),
+            modify_balance_entry(1, 102, 3_000),
+            modify_balance_entry(2, 103, 4_000),
+            modify_balance_entry(1, 104, 5_000),
+            modify_balance_entry(2, 105, 6_000),
+        ];
+        let max_count: std::vec::Vec<BackfillModifyBalanceEntry> = (0..255u64)
+            .map(|i| modify_balance_entry(1, i, i as u128))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<BackfillModifyBalanceEntry>); 3] = [
+            ("one entry", one.to_vec()),
+            ("six entries", several.to_vec()),
+            ("max u8 count", max_count),
+        ];
+        for (name, entries) in cases {
+            let data = encode_modify_balance_batch(&entries);
+            let batch =
+                ModifyBalanceBatch::parse(&data).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(batch.entries(), entries.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn modify_balance_batch_rejects_malformed_wire() {
+        let ok_entries = [
+            modify_balance_entry(1, 100, 1_000),
+            modify_balance_entry(2, 101, 2_000),
+        ];
+        let ok_data = encode_modify_balance_batch(&ok_entries);
+
+        let dup_entries = [
+            modify_balance_entry(1, 100, 1_000),
+            modify_balance_entry(2, 100, 2_000),
+        ];
+        let desc_entries = [
+            modify_balance_entry(1, 101, 1_000),
+            modify_balance_entry(2, 100, 2_000),
+        ];
+
+        let cases: [(&str, std::vec::Vec<u8>); 8] = [
+            ("empty data", std::vec::Vec::new()),
+            ("zero count", std::vec![0u8]),
+            ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
+            ("one byte long", [ok_data.as_slice(), &[0u8]].concat()),
+            (
+                "trailing bytes after exact entries",
+                [ok_data.as_slice(), &[0xFFu8; 3]].concat(),
+            ),
+            (
+                "duplicate sequence",
+                encode_modify_balance_batch(&dup_entries),
+            ),
+            (
+                "descending sequence",
+                encode_modify_balance_batch(&desc_entries),
+            ),
+            ("count claims more entries than present", {
+                let mut d = encode_modify_balance_batch(&ok_entries);
+                d[0] = 3;
+                d
+            }),
+        ];
+        for (name, data) in cases {
+            assert_eq!(
+                ModifyBalanceBatch::parse(&data).err(),
+                Some(GlobalAccountantError::InvalidInstructionData),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn modify_balance_entry_round_trips_through_bytes() {
+        let entry = modify_balance_entry(2, 42, 12345);
+        let bytes = bytemuck::bytes_of(&entry);
+        let data = encode_modify_balance_batch(core::slice::from_ref(&entry));
+        let batch = ModifyBalanceBatch::parse(&data).unwrap();
+        assert_eq!(batch.entries()[0], entry);
+        assert_eq!(batch.entries()[0].chain_id(), 2);
+        assert_eq!(batch.entries()[0].token_chain(), 2);
+        assert_eq!(batch.entries()[0].sequence(), 42);
+        assert_eq!(batch.entries()[0].amount(), Uint256::from_u128(12345));
+        assert_eq!(bytes.len(), BackfillModifyBalanceEntry::LEN);
     }
 }
