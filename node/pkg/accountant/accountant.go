@@ -19,6 +19,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/supervisor"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	sdktx "github.com/cosmos/cosmos-sdk/types/tx"
+	"github.com/gagliardetto/solana-go"
 	"github.com/wormhole-foundation/wormhole/sdk"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 
@@ -39,6 +40,54 @@ type (
 		SubmitQuery(ctx context.Context, contractAddress string, query []byte) ([]byte, error)
 		SignAndBroadcastTx(ctx context.Context, msg sdktypes.Msg) (*sdktx.BroadcastTxResponse, error)
 		BroadcastTxResponseToString(txResp *sdktx.BroadcastTxResponse) string
+	}
+
+	// AccountantSolanaConn is the read-only RPC surface of the Solana accountant program.
+	AccountantSolanaConn interface {
+		Close()
+
+		// Results are positional with addrs. A nil element marks an absent account.
+		GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*SolanaAccountResult, error)
+
+		// Filters: memcmp(offset 0, tag) and dataSize.
+		GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]SolanaProgramAccount, error)
+
+		// Newest first, back to and excluding until. A zero until means no lower bound.
+		GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, until solana.Signature, limit int) ([]solana.Signature, error)
+
+		GetTransaction(ctx context.Context, sig solana.Signature) (*SolanaTransactionResult, error)
+
+		// The channel closes on disconnect.
+		SubscribeLogs(ctx context.Context, program solana.PublicKey) (<-chan SolanaLogEvent, error)
+	}
+
+	SolanaAccountResult struct {
+		Owner solana.PublicKey
+		Data  []byte
+	}
+
+	SolanaProgramAccount struct {
+		Address solana.PublicKey
+		Owner   solana.PublicKey
+		Data    []byte
+	}
+
+	SolanaInstruction struct {
+		ProgramID solana.PublicKey
+		Data      []byte
+	}
+
+	SolanaTransactionResult struct {
+		Instructions []SolanaInstruction
+		LogMessages  []string
+		// Do not parse LogMessages when Failed is true.
+		Failed bool
+	}
+
+	SolanaLogEvent struct {
+		Signature solana.Signature
+		Logs      []string
+		Failed    bool
 	}
 
 	// emitterKey is the key to a map of emitters to be monitored

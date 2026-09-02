@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/devnet"
 	"github.com/certusone/wormhole/node/pkg/guardiansigner"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	"github.com/gagliardetto/solana-go"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
@@ -128,6 +130,179 @@ func (c *AuditMockWormchainConn) QueryCount() int {
 	c.queryLock.Lock()
 	defer c.queryLock.Unlock()
 	return len(c.queries)
+}
+
+type MockGetProgramAccountsByTagCall struct {
+	Program  solana.PublicKey
+	Tag      byte
+	DataSize uint64
+}
+
+type MockGetSignaturesForAddressCall struct {
+	Addr  solana.PublicKey
+	Until solana.Signature
+	Limit int
+}
+
+// MockAccountantSolanaConn is the AccountantSolanaConn test double.
+type MockAccountantSolanaConn struct {
+	mu sync.Mutex
+
+	closed bool
+
+	accounts map[solana.PublicKey]*SolanaAccountResult
+
+	programAccounts    []SolanaProgramAccount
+	programAccountsErr error
+
+	signatures    map[solana.PublicKey][]solana.Signature
+	signaturesErr error
+
+	transactions    map[solana.Signature]*SolanaTransactionResult
+	transactionsErr error
+
+	logEvents        chan SolanaLogEvent
+	subscribeLogsErr error
+
+	GetMultipleAccountsCalls     [][]solana.PublicKey
+	GetProgramAccountsByTagCalls []MockGetProgramAccountsByTagCall
+	GetSignaturesForAddressCalls []MockGetSignaturesForAddressCall
+	GetTransactionCalls          []solana.Signature
+}
+
+var _ AccountantSolanaConn = (*MockAccountantSolanaConn)(nil)
+
+func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
+	return &MockAccountantSolanaConn{
+		accounts:     make(map[solana.PublicKey]*SolanaAccountResult),
+		signatures:   make(map[solana.PublicKey][]solana.Signature),
+		transactions: make(map[solana.Signature]*SolanaTransactionResult),
+		// Buffered so tests can queue events before the reader starts.
+		logEvents: make(chan SolanaLogEvent, 16),
+	}
+}
+
+func (c *MockAccountantSolanaConn) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
+}
+
+func (c *MockAccountantSolanaConn) Closed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
+}
+
+// A nil result marks an absent account.
+func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *SolanaAccountResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accounts[addr] = result
+}
+
+func (c *MockAccountantSolanaConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*SolanaAccountResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetMultipleAccountsCalls = append(c.GetMultipleAccountsCalls, addrs)
+	results := make([]*SolanaAccountResult, len(addrs))
+	for i, addr := range addrs {
+		results[i] = c.accounts[addr]
+	}
+	return results, nil
+}
+
+func (c *MockAccountantSolanaConn) SetProgramAccounts(accounts []SolanaProgramAccount, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.programAccounts = accounts
+	c.programAccountsErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]SolanaProgramAccount, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetProgramAccountsByTagCalls = append(c.GetProgramAccountsByTagCalls, MockGetProgramAccountsByTagCall{
+		Program: program, Tag: tag, DataSize: dataSize,
+	})
+	if c.programAccountsErr != nil {
+		return nil, c.programAccountsErr
+	}
+	return c.programAccounts, nil
+}
+
+func (c *MockAccountantSolanaConn) SetSignaturesForAddress(addr solana.PublicKey, sigs []solana.Signature) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signatures[addr] = sigs
+}
+
+func (c *MockAccountantSolanaConn) SetSignaturesForAddressErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signaturesErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, until solana.Signature, limit int) ([]solana.Signature, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetSignaturesForAddressCalls = append(c.GetSignaturesForAddressCalls, MockGetSignaturesForAddressCall{
+		Addr: addr, Until: until, Limit: limit,
+	})
+	if c.signaturesErr != nil {
+		return nil, c.signaturesErr
+	}
+	return c.signatures[addr], nil
+}
+
+func (c *MockAccountantSolanaConn) SetTransaction(sig solana.Signature, tx *SolanaTransactionResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.transactions[sig] = tx
+}
+
+func (c *MockAccountantSolanaConn) SetTransactionErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.transactionsErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetTransaction(ctx context.Context, sig solana.Signature) (*SolanaTransactionResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetTransactionCalls = append(c.GetTransactionCalls, sig)
+	if c.transactionsErr != nil {
+		return nil, c.transactionsErr
+	}
+	tx, ok := c.transactions[sig]
+	if !ok {
+		return nil, fmt.Errorf("mock accountant solana conn: no transaction set up for signature %s", sig)
+	}
+	return tx, nil
+}
+
+func (c *MockAccountantSolanaConn) SetSubscribeLogsErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.subscribeLogsErr = err
+}
+
+func (c *MockAccountantSolanaConn) SubscribeLogs(ctx context.Context, program solana.PublicKey) (<-chan SolanaLogEvent, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.subscribeLogsErr != nil {
+		return nil, c.subscribeLogsErr
+	}
+	return c.logEvents, nil
+}
+
+func (c *MockAccountantSolanaConn) PushLogEvent(evt SolanaLogEvent) {
+	c.logEvents <- evt
+}
+
+// CloseLogEvents simulates a subscription disconnect.
+func (c *MockAccountantSolanaConn) CloseLogEvents() {
+	close(c.logEvents)
 }
 
 func newAccountantForTest(
