@@ -121,13 +121,7 @@ fn check_modify_balance_pda(
     Ok(bump)
 }
 
-/// `(b"modify_balance", sequence_be)`.
-pub fn derive_modify_balance_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[MODIFY_BALANCE_SEED_PREFIX, &sequence.to_be_bytes()],
-        program_id,
-    )
-}
+pub use accountant_operational_core::accounts::modify_balance::derive_pda as derive_modify_balance_pda;
 
 /// Apply `kind` with `payload.amount()`. Add on an absent PDA creates it with
 /// `balance = amount`; Subtract on an absent PDA is an underflow.

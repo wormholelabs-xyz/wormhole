@@ -29,3 +29,13 @@ pub struct BackfillBalanceAccounts<'info> {
     /// CHECK: System Program, required by `pda_init::init_or_upgrade_pda`'s CPI.
     pub system_program: UncheckedAccount<'info>,
 }
+
+/// Fixed accounts for `BackfillModifyBalance`: 2 accounts plus variadic record
+/// PDAs in `ctx.remaining_accounts`.
+#[derive(Accounts)]
+pub struct BackfillModifyBalanceAccounts<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: System Program, required by `pda_init::init_or_upgrade_pda`'s CPI.
+    pub system_program: UncheckedAccount<'info>,
+}

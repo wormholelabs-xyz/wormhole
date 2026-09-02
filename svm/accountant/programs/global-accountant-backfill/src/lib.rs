@@ -8,7 +8,7 @@
 //!
 //! - Account discriminator is the 1-byte `AccountTag` at offset 0. Load state with
 //!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
-//! - Instruction discriminator is 1 byte (`0`/`1`) through `#[instruction(discriminator = N)]`.
+//! - Instruction discriminator is 1 byte (`0`/`1`/`2`) through `#[instruction(discriminator = N)]`.
 //! - PDA creation uses `CreateAccountAllowPrefund` through
 //!   `accountant_operational_core::support::pda_init`; `#[account(init)]` fails on a
 //!   prefunded PDA.
@@ -80,6 +80,22 @@ pub mod global_accountant_backfill {
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
         accountant_operational_core::instructions::backfill_balance::process(
+            ctx.program_id,
+            &accounts,
+            &ix_data.0,
+            &BACKFILL_AUTHORITY,
+        )?;
+        Ok(())
+    }
+
+    /// See `accountant_operational_core::instructions::backfill_modify_balance`.
+    #[instruction(discriminator = 2)]
+    pub fn backfill_modify_balance<'info>(
+        ctx: Context<'info, BackfillModifyBalanceAccounts<'info>>,
+        ix_data: RawIxData,
+    ) -> Result<()> {
+        let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
+        accountant_operational_core::instructions::backfill_modify_balance::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
