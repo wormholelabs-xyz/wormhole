@@ -10,8 +10,9 @@ use crate::err;
 use accountant_operational_core::accounts::{self, balance};
 use accountant_operational_core::ProgramResult;
 
-/// Source `lock_or_burn`, then destination `unlock_or_mint`. When both PDAs are the same
-/// account, both operations apply to one in-memory layout.
+/// Source `lock_or_burn`, then destination `unlock_or_mint`. Both PDAs are derived from the
+/// payload and checked before any write. A same-chain transfer applies both operations to
+/// one in-memory layout.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_transfer<'info>(
     program_id: &Pubkey,
@@ -41,21 +42,29 @@ pub fn apply_transfer<'info>(
     let mut src = accounts::load::<BalanceAccountLayout>(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
 
-    // Same PDA: burn-then-mint must still underflow when the balance is below `amount`.
-    let same_pda = source_account.key == dest_account.key;
-    if same_pda {
-        src.unlock_or_mint(amount).map_err(err)?;
-        accounts::store(source_account, &src)?;
-        return Ok(());
-    }
-
-    accounts::store(source_account, &src)?;
-
+    // Destination PDA is derived from the payload; the check runs on every path.
     let (dst_expected, dst_bump) =
         derive_balance_account_pda(program_id, recipient_chain, token_chain, token_address);
     if dest_account.key != &dst_expected {
         return Err(err(GlobalAccountantError::InvalidAccountPda));
     }
+
+    // Same chain: both PDAs are one account. Burn-then-mint must still underflow when the
+    // balance is below `amount`, so apply both to one in-memory layout.
+    if source_chain == recipient_chain {
+        if source_account.key != dest_account.key {
+            return Err(err(GlobalAccountantError::InvalidAccountPda));
+        }
+        src.unlock_or_mint(amount).map_err(err)?;
+        accounts::store(source_account, &src)?;
+        return Ok(());
+    }
+    if source_account.key == dest_account.key {
+        return Err(err(GlobalAccountantError::InvalidAccountPda));
+    }
+
+    accounts::store(source_account, &src)?;
+
     balance::init_if_needed(
         program_id,
         payer,
