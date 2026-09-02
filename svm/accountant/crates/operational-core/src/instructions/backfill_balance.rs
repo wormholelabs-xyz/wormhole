@@ -10,6 +10,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
+use crate::accounts;
 use crate::definitions::{
     BalanceAccountLayout, BalanceBatch, GlobalAccountantError, ACCOUNT_SEED_PREFIX,
 };
@@ -37,15 +38,11 @@ pub fn process(
     require_authority(payer, expected_authority)?;
 
     for (entry, balance_pda) in batch.entries().iter().zip(balance_pdas) {
-        // `find_program_address` over `create_program_address`+bump: caller is fully trusted.
-        let (expected, canonical_bump) = Pubkey::find_program_address(
-            &[
-                ACCOUNT_SEED_PREFIX,
-                entry.chain.as_slice(),
-                entry.token_chain.as_slice(),
-                entry.token_address.as_slice(),
-            ],
+        let (expected, canonical_bump) = accounts::balance::derive_pda(
             program_id,
+            entry.chain(),
+            entry.token_chain(),
+            &entry.token_address,
         );
         if balance_pda.key != &expected {
             return Err(err(GlobalAccountantError::InvalidPda));
