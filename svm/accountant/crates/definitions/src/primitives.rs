@@ -108,6 +108,106 @@ impl Uint256 {
         debug_assert!(result <= self);
         Some(result)
     }
+
+    /// Big-endian bit accessor: index 0 is the most significant bit.
+    #[inline]
+    fn bit(self, index: usize) -> bool {
+        (self.0[index / 8] >> (7 - index % 8)) & 1 == 1
+    }
+
+    /// `self * 2 + carry_in`, truncated to 256 bits.
+    #[inline]
+    fn shl1(self, carry_in: bool) -> Self {
+        let mut out = [0u8; 32];
+        let mut carry = u8::from(carry_in);
+        for i in (0..32).rev() {
+            out[i] = (self.0[i] << 1) | carry;
+            carry = self.0[i] >> 7;
+        }
+        Self(out)
+    }
+
+    /// `self - other` modulo `2^256`.
+    #[inline]
+    fn wrapping_sub(self, other: Self) -> Self {
+        let a = self.limbs();
+        let b = other.limbs();
+        let mut out = [0u64; Self::LIMBS];
+        let mut borrow = 0i128;
+        for i in (0..Self::LIMBS).rev() {
+            let diff = i128::from(a[i]) - i128::from(b[i]) - borrow;
+            out[i] = diff as u64;
+            borrow = i128::from(diff < 0);
+        }
+        Self::from_limbs(out)
+    }
+
+    /// `None` on overflow.
+    ///
+    /// SECURITY: postcondition `result` divided by either nonzero operand
+    /// recovers the other exactly (checked in debug).
+    #[inline]
+    pub fn checked_mul(self, other: Self) -> Option<Self> {
+        // Little-endian limb copies: index 0 least significant.
+        let mut a = self.limbs();
+        a.reverse();
+        let mut b = other.limbs();
+        b.reverse();
+        // Schoolbook multiply: 512-bit product in 8 little-endian limbs.
+        // `u64 * u64 + u64 + carry` fits in `u128`.
+        let mut prod = [0u64; 2 * Self::LIMBS];
+        for i in 0..Self::LIMBS {
+            let mut carry = 0u128;
+            for j in 0..Self::LIMBS {
+                let cur = u128::from(prod[i + j]) + u128::from(a[i]) * u128::from(b[j]) + carry;
+                prod[i + j] = cur as u64;
+                carry = cur >> 64;
+            }
+            prod[i + Self::LIMBS] = carry as u64;
+        }
+        // A nonzero high half means the product needs more than 256 bits.
+        if prod[Self::LIMBS..].iter().any(|&limb| limb != 0) {
+            return None;
+        }
+        let mut out = [0u64; Self::LIMBS];
+        for (i, limb) in out.iter_mut().enumerate() {
+            *limb = prod[Self::LIMBS - 1 - i];
+        }
+        let result = Self::from_limbs(out);
+        debug_assert!(other == Self::ZERO || result.checked_div(other) == Some(self));
+        debug_assert!(self == Self::ZERO || result.checked_div(self) == Some(other));
+        Some(result)
+    }
+
+    /// Truncating division. `None` only when `divisor` is zero.
+    ///
+    /// SECURITY: postcondition `result <= self`.
+    #[inline]
+    pub fn checked_div(self, divisor: Self) -> Option<Self> {
+        if divisor == Self::ZERO {
+            return None;
+        }
+        // Binary long division, most significant dividend bit first; exactly
+        // 256 iterations. Invariant at loop entry: rem < divisor.
+        let mut quotient = [0u8; 32];
+        let mut rem = Self::ZERO;
+        for index in 0..256 {
+            // `2*rem + bit` can need bit 256 when `divisor > 2^255`: capture
+            // it before the truncating shift.
+            let shifted_out = rem.bit(0);
+            rem = rem.shl1(self.bit(index));
+            if shifted_out || rem >= divisor {
+                // With bit 256 set the shifted remainder exceeds any divisor;
+                // wrapping subtraction cancels that bit and the result fits.
+                rem = rem.wrapping_sub(divisor);
+                quotient[index / 8] |= 1 << (7 - index % 8);
+            }
+        }
+        let result = Self(quotient);
+        debug_assert!(result <= self);
+        debug_assert!(rem < divisor);
+        Some(result)
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +254,16 @@ mod tests {
             a.checked_sub(b),
             reference(a).checked_sub(reference(b)).map(from_reference),
             "sub {a:?} - {b:?}"
+        );
+        assert_eq!(
+            a.checked_mul(b),
+            reference(a).checked_mul(reference(b)).map(from_reference),
+            "mul {a:?} * {b:?}"
+        );
+        assert_eq!(
+            a.checked_div(b),
+            reference(a).checked_div(reference(b)).map(from_reference),
+            "div {a:?} / {b:?}"
         );
         assert_eq!(
             a.cmp(&b),
@@ -248,6 +358,44 @@ mod tests {
         ];
         for (name, a, b, expected) in subs {
             assert_eq!(a.checked_sub(b), expected, "{name}");
+        }
+
+        let muls: [(&str, Uint256, Uint256, Option<Uint256>); 5] = [
+            (
+                "500 times 200",
+                Uint256::from_u128(500),
+                Uint256::from_u128(200),
+                Some(Uint256::from_u128(100_000)),
+            ),
+            ("max times one", Uint256::MAX, one, Some(Uint256::MAX)),
+            (
+                "max times two overflows",
+                Uint256::MAX,
+                Uint256::from_u128(2),
+                None,
+            ),
+            ("carry across halves", pow2(128), pow2(127), Some(pow2(255))),
+            ("pow2 overflow", pow2(128), pow2(128), None),
+        ];
+        for (name, a, b, expected) in muls {
+            assert_eq!(a.checked_mul(b), expected, "{name}");
+        }
+
+        let divs: [(&str, Uint256, Uint256, Option<Uint256>); 6] = [
+            ("divisor zero", one, Uint256::ZERO, None),
+            ("zero dividend", Uint256::ZERO, Uint256::MAX, Some(Uint256::ZERO)),
+            (
+                "500 over 200 truncates",
+                Uint256::from_u128(500),
+                Uint256::from_u128(200),
+                Some(Uint256::from_u128(2)),
+            ),
+            ("max over one", Uint256::MAX, one, Some(Uint256::MAX)),
+            ("max over max", Uint256::MAX, Uint256::MAX, Some(one)),
+            ("top-bit divisor", Uint256::MAX, pow2(255), Some(one)),
+        ];
+        for (name, a, b, expected) in divs {
+            assert_eq!(a.checked_div(b), expected, "{name}");
         }
 
         assert!(Uint256::from_u128(1) < Uint256::from_u128(2));

@@ -16,6 +16,20 @@ pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
 /// PDA existence is the governance-path replay protection.
 pub const MODIFY_BALANCE_SEED_PREFIX: &[u8] = b"modify_balance";
 
+/// Seed prefix for [`crate::RelayerChainRegistrationLayout`]:
+/// `(b"relayer_chain_registration", chain_be)`. NTT's analogue of
+/// [`CHAIN_REGISTRATION_SEED_PREFIX`]; the distinct prefix gives the relayer
+/// registry its own address space.
+pub const RELAYER_CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"relayer_chain_registration";
+
+/// Seed prefix for [`crate::TransceiverHubLayout`]:
+/// `(b"transceiver_hub", chain_be, address)`.
+pub const TRANSCEIVER_HUB_SEED_PREFIX: &[u8] = b"transceiver_hub";
+
+/// Seed prefix for [`crate::TransceiverPeerLayout`]:
+/// `(b"transceiver_peer", chain_be, address, dest_chain_be)`.
+pub const TRANSCEIVER_PEER_SEED_PREFIX: &[u8] = b"transceiver_peer";
+
 /// Seed for the authority PDA that signs all NoReplay CPIs: `[b"noreplay_authority"]`.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";
 

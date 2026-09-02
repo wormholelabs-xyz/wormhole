@@ -3050,6 +3050,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 
 [[package]]
+name = "ntt-global-accountant"
+version = "0.1.0"
+dependencies = [
+ "accountant-operational-core",
+ "accountant-test-fixtures",
+ "anchor-lang",
+ "borsh 1.5.7",
+ "bytemuck",
+ "global-accountant-definitions",
+ "libsecp256k1",
+ "mollusk-svm",
+ "ntt-global-accountant",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-account 3.4.0",
+ "solana-client",
+ "solana-commitment-config",
+ "solana-instruction 3.4.0",
+ "solana-keccak-hasher 3.1.0",
+ "solana-keypair",
+ "solana-pubkey 3.0.0",
+ "solana-pubkey 4.2.0",
+ "solana-signer",
+ "solana-system-interface 3.2.0",
+ "solana-transaction",
+]
+
+[[package]]
 name = "num"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

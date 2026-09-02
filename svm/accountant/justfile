@@ -78,7 +78,7 @@ check:
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
     cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant
+        -p global-accountant -p ntt-global-accountant
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
 # via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.

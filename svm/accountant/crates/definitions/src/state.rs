@@ -16,6 +16,12 @@ pub enum AccountTag {
     Balance = 2,
     ChainRegistration = 3,
     ModifyBalance = 4,
+    // NTT accountant port. Deployed under a separate program ID, so tags need
+    // only be unique within each program; the space is kept globally
+    // append-only regardless.
+    RelayerChainRegistration = 5,
+    TransceiverHub = 6,
+    TransceiverPeer = 7,
 }
 
 /// `ModifyBalance` payload `kind` byte. Other values raise `InvalidModificationKind`.
@@ -364,6 +370,144 @@ const _: () = {
     assert!(offset_of!(ModifyBalanceLayout, amount) == 48);
     assert!(offset_of!(ModifyBalanceLayout, reason) == 80);
     assert!(ModifyBalanceLayout::LEN == 112);
+};
+
+/// Zero-copy per-chain NTT relayer-emitter registration. One PDA per chain at
+/// `(b"relayer_chain_registration", chain_be)`, holding the canonical relayer
+/// emitter address. NTT's analogue of [`ChainRegistrationLayout`] — byte-for-byte
+/// the same shape, distinguished only by its tag so the relayer and Token Bridge
+/// registries stay independently `memcmp`-filterable.
+///
+/// | offset | size | field           |
+/// |--------|------|-----------------|
+/// | 0      | 1    | tag ([`AccountTag::RelayerChainRegistration`]) |
+/// | 1      | 1    | _pad0           |
+/// | 2      | 2    | chain           |
+/// | 4      | 28   | _padding        |
+/// | 32     | 32   | emitter_address |
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct RelayerChainRegistrationLayout {
+    /// Account-type tag; always [`AccountTag::RelayerChainRegistration`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// Alignment padding; crate-private so callers go through `Zeroable`.
+    pub(crate) _pad0: u8,
+    /// Wormhole chain ID this PDA registers (mirrors the seed bytes).
+    pub chain: u16,
+    /// Reserved; crate-private so callers go through `Zeroable`.
+    pub(crate) _padding: [u8; 28],
+    /// Canonical NTT relayer emitter address on `chain`.
+    pub emitter_address: [u8; 32],
+}
+
+impl RelayerChainRegistrationLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::RelayerChainRegistration as u8;
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(RelayerChainRegistrationLayout, tag) == 0);
+    assert!(offset_of!(RelayerChainRegistrationLayout, chain) == 2);
+    assert!(offset_of!(RelayerChainRegistrationLayout, _padding) == 4);
+    assert!(offset_of!(RelayerChainRegistrationLayout, emitter_address) == 32);
+    assert!(RelayerChainRegistrationLayout::LEN == 64);
+};
+
+/// Zero-copy NTT transceiver-hub mapping. One PDA per `(emitter_chain,
+/// transceiver_address)` at `(b"transceiver_hub", chain_be, address)`, recording
+/// the `(hub_chain, hub_address)` the transceiver belongs to. Key and value are
+/// both stored so the record is fully reconstructable off-chain.
+///
+/// | offset | size | field        |
+/// |--------|------|--------------|
+/// | 0      | 1    | tag ([`AccountTag::TransceiverHub`]) |
+/// | 1      | 1    | _pad0        |
+/// | 2      | 2    | chain        |
+/// | 4      | 2    | hub_chain    |
+/// | 6      | 32   | address      |
+/// | 38     | 32   | hub_address  |
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct TransceiverHubLayout {
+    /// Account-type tag; always [`AccountTag::TransceiverHub`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// Alignment padding; crate-private so callers go through `Zeroable`.
+    pub(crate) _pad0: u8,
+    /// Emitter chain of the transceiver (key; mirrors the seed bytes).
+    pub chain: u16,
+    /// Chain of the hub this transceiver belongs to (value).
+    pub hub_chain: u16,
+    /// Transceiver address on `chain` (key).
+    pub address: [u8; 32],
+    /// Hub address on `hub_chain` (value).
+    pub hub_address: [u8; 32],
+}
+
+impl TransceiverHubLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::TransceiverHub as u8;
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(TransceiverHubLayout, tag) == 0);
+    assert!(offset_of!(TransceiverHubLayout, chain) == 2);
+    assert!(offset_of!(TransceiverHubLayout, hub_chain) == 4);
+    assert!(offset_of!(TransceiverHubLayout, address) == 6);
+    assert!(offset_of!(TransceiverHubLayout, hub_address) == 38);
+    assert!(TransceiverHubLayout::LEN == 70);
+};
+
+/// Zero-copy NTT transceiver-peer registration. One PDA per `(emitter_chain,
+/// transceiver_address, dest_chain)` at `(b"transceiver_peer", chain_be, address,
+/// dest_chain_be)`, recording the registered `peer_address` on `dest_chain`. Key
+/// and value both stored for off-chain reconstruction.
+///
+/// | offset | size | field        |
+/// |--------|------|--------------|
+/// | 0      | 1    | tag ([`AccountTag::TransceiverPeer`]) |
+/// | 1      | 1    | _pad0        |
+/// | 2      | 2    | chain        |
+/// | 4      | 2    | dest_chain   |
+/// | 6      | 32   | address      |
+/// | 38     | 32   | peer_address |
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct TransceiverPeerLayout {
+    /// Account-type tag; always [`AccountTag::TransceiverPeer`]. See [`Self::TAG`].
+    pub tag: u8,
+    /// Alignment padding; crate-private so callers go through `Zeroable`.
+    pub(crate) _pad0: u8,
+    /// Emitter chain of the transceiver (key; mirrors the seed bytes).
+    pub chain: u16,
+    /// Destination chain the peer is registered for (key).
+    pub dest_chain: u16,
+    /// Transceiver address on `chain` (key).
+    pub address: [u8; 32],
+    /// Registered peer address on `dest_chain` (value).
+    pub peer_address: [u8; 32],
+}
+
+impl TransceiverPeerLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    /// Account-type tag stamped at offset 0. See [`AccountTag`].
+    pub const TAG: u8 = AccountTag::TransceiverPeer as u8;
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(TransceiverPeerLayout, tag) == 0);
+    assert!(offset_of!(TransceiverPeerLayout, chain) == 2);
+    assert!(offset_of!(TransceiverPeerLayout, dest_chain) == 4);
+    assert!(offset_of!(TransceiverPeerLayout, address) == 6);
+    assert!(offset_of!(TransceiverPeerLayout, peer_address) == 38);
+    assert!(TransceiverPeerLayout::LEN == 70);
 };
 
 #[cfg(test)]
