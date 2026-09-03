@@ -12,6 +12,7 @@
 //! | 12+20N | 4    | expiration_time    |
 
 use anchor_lang::prelude::*;
+use wormhole_svm_definitions::zero_copy::GuardianSet;
 
 use crate::definitions::{GlobalAccountantError, CORE_BRIDGE_PROGRAM_ID, GUARDIAN_SET_SEED};
 use crate::err;
@@ -20,7 +21,6 @@ use crate::err;
 pub const GUARDIAN_PUBKEY_LEN: usize = 20;
 
 const HEADER_LEN: usize = 8;
-const TRAILER_LEN: usize = 8;
 
 /// `Ok(())` when `guardian_set` is the Core Bridge PDA for `index` and its stored index
 /// agrees.
@@ -57,24 +57,14 @@ pub fn keys_len(data: &[u8]) -> crate::ProgramCoreResult<u32> {
     Ok(u32::from_le_bytes([data[4], data[5], data[6], data[7]]))
 }
 
-/// `Ok(true)` when `expiration_time` is nonzero and before the clock. The Core Bridge
-/// sets it on rotation to `now + 24h`; the latest set keeps zero. Caller must have passed
+/// `Ok(true)` when the set is inactive at the clock: `expiration_time` nonzero and past,
+/// or mainnet set 0 (index 0, `creation_time` 1628099186), which the Core Bridge never
+/// stamped and blocks by hand (`solana/bridge/program/src/api/post_vaa.rs`). The rule is
+/// [`GuardianSet::is_active`], shared with the Verify VAA Shim. Caller must have passed
 /// [`verify_account`].
 pub fn is_expired(guardian_set: &AccountInfo) -> crate::ProgramCoreResult<bool> {
     let data = guardian_set.try_borrow_data()?;
-    let keys_len = keys_len(&data)? as usize;
-    let trailer_offset = HEADER_LEN + keys_len * GUARDIAN_PUBKEY_LEN;
-    if data.len() < trailer_offset + TRAILER_LEN {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    let expiration_time = u32::from_le_bytes(
-        data[trailer_offset + 4..trailer_offset + 8]
-            .try_into()
-            .map_err(|_| err(GlobalAccountantError::InvalidPda))?,
-    );
-    if expiration_time == 0 {
-        return Ok(false);
-    }
+    let set = GuardianSet::new(&data).ok_or_else(|| err(GlobalAccountantError::InvalidPda))?;
     let timestamp = Clock::get()?.unix_timestamp;
     let timestamp_u32 = if timestamp < 0 {
         0
@@ -83,5 +73,5 @@ pub fn is_expired(guardian_set: &AccountInfo) -> crate::ProgramCoreResult<bool> 
     } else {
         timestamp as u32
     };
-    Ok(timestamp_u32 > expiration_time)
+    Ok(!set.is_active(timestamp_u32))
 }

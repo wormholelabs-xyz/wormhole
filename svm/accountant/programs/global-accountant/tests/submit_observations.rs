@@ -176,7 +176,7 @@ fn rejects() {
         submit_observations_ix_data(s.guardian_set_index, guardian_index, signature, body)
     }
 
-    let cases: [(&str, Case, u64); 18] = [
+    let cases: [(&str, Case, u64); 19] = [
         (
             "corrupted signature",
             |_| {
@@ -342,6 +342,28 @@ fn rejects() {
                         &keys_of(&s.guardians),
                         0,
                         NOW as u32 - 1,
+                        &core_bridge_program_id(),
+                    ),
+                );
+                plain(s, accounts, 0)
+            },
+            GlobalAccountantError::ExpiredGuardianSet as u64,
+        ),
+        (
+            // Mainnet set 0: one key, `expiration_time == 0`, retired by creation time only.
+            "legacy mainnet guardian set 0",
+            |_| {
+                const MAINNET_GENESIS_SET_CREATION_TIME: u32 = 1_628_099_186;
+                let s = ObsScenario::attest(1, 0, 0x50);
+                let mut accounts = s.initial_accounts();
+                replace_account(
+                    &mut accounts,
+                    &s.guardian_set,
+                    guardian_set_account(
+                        0,
+                        &keys_of(&s.guardians),
+                        MAINNET_GENESIS_SET_CREATION_TIME,
+                        0,
                         &core_bridge_program_id(),
                     ),
                 );

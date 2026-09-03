@@ -11,6 +11,8 @@ anchor-lang = { workspace = true }
 borsh = { workspace = true }
 bytemuck = { workspace = true }
 global-accountant-definitions = { path = "../definitions" }
+# `zero_copy::GuardianSet::is_active`: the Verify VAA Shim's activity rule, incl. mainnet set 0.
+wormhole-svm-definitions.workspace = true
 solana-secp256k1-recover.workspace = true
 # Real keccak256 on both targets (syscall on-chain, `sha3` on host) — see
 # `hash.rs`. `default-features = false` because the crate's `std` feature is

@@ -26,6 +26,7 @@ dependencies = [
  "solana-pubkey 3.0.0",
  "solana-secp256k1-recover 3.2.0",
  "solana-system-interface 3.2.0",
+ "wormhole-svm-definitions",
 ]
 
 [[package]]
