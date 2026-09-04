@@ -163,7 +163,7 @@ pub fn decide_pending_action(
 
 /// Apply `action`, then set this guardian's bit. Returns the layout and whether
 /// the bit count reached `quorum_threshold`. Rejects a set bit with `AlreadySigned`
-/// and an index >= 32 with `InvalidGuardianIndex`.
+/// and an index >= `MAX_GUARDIANS` with `InvalidGuardianIndex`.
 pub fn apply_action_and_accumulate<'info>(
     program_id: &Pubkey,
     submitter: &AccountInfo<'info>,
@@ -180,16 +180,18 @@ pub fn apply_action_and_accumulate<'info>(
     }
 
     let mut layout = accounts::load::<PendingObservationsLayout>(pending_pda)?;
-    let bit = 1u32
-        .checked_shl(parsed.guardian_index as u32)
+    let already_signed = layout
+        .has_signature(parsed.guardian_index)
         .ok_or_else(|| err(GlobalAccountantError::InvalidGuardianIndex))?;
-    if layout.signatures & bit != 0 {
+    if already_signed {
         return Err(err(GlobalAccountantError::AlreadySigned));
     }
-    layout.signatures |= bit;
+    layout
+        .set_signature(parsed.guardian_index)
+        .ok_or_else(|| err(GlobalAccountantError::InvalidGuardianIndex))?;
     accounts::store(pending_pda, &layout)?;
 
-    let quorum_reached = layout.signatures.count_ones() >= quorum_threshold;
+    let quorum_reached = layout.num_signatures() >= quorum_threshold;
     Ok((layout, quorum_reached))
 }
 
@@ -273,8 +275,12 @@ pub fn verify_signature(
     }
 
     let data = guardian_set.try_borrow_data()?;
-    let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
     let num_guardians = guardian_set::keys_len(&data)?;
+    // SECURITY: the pending bitmap holds MAX_GUARDIANS bits; a larger set could never commit.
+    if num_guardians > PendingObservationsLayout::MAX_GUARDIANS {
+        return Err(err(GlobalAccountantError::GuardianSetTooLarge));
+    }
+    let expected_key = read_guardian_key(&data, expected_guardian_set_index, guardian_index)?;
 
     let recovery_id = signature[64];
     if recovery_id >= 4 {

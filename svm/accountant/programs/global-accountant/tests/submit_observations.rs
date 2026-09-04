@@ -61,13 +61,16 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
         scenario.digest,
         SUBMITTER.to_bytes(),
     );
-    expected.signatures = 0b1;
+    expected.signatures = [0b1, 0, 0, 0];
     assert_eq!(pending_layout(pending), expected);
     assert_bucket_unmarked(find_account(&after_one, &scenario.noreplay_bucket));
 
     let after_twelve = scenario.submit_range(&mollusk, after_one, 1..12);
     let pending = find_account(&after_twelve, &scenario.pending_pda);
-    assert_eq!(pending_layout(pending).signatures, 0b1111_1111_1111);
+    assert_eq!(
+        pending_layout(pending).signatures,
+        [0b1111_1111_1111, 0, 0, 0]
+    );
     assert_bucket_unmarked(find_account(&after_twelve, &scenario.noreplay_bucket));
     let pending_rent = pending.lamports;
     let alice_before = find_account(&after_twelve, &SUBMITTER).lamports;
@@ -176,7 +179,7 @@ fn rejects() {
         submit_observations_ix_data(s.guardian_set_index, guardian_index, signature, body)
     }
 
-    let cases: [(&str, Case, u64); 19] = [
+    let cases: [(&str, Case, u64); 20] = [
         (
             "corrupted signature",
             |_| {
@@ -372,6 +375,15 @@ fn rejects() {
             GlobalAccountantError::ExpiredGuardianSet as u64,
         ),
         (
+            "guardian set larger than the 128-bit bitmap",
+            |_| {
+                let s = ObsScenario::attest(129, GUARDIAN_SET_INDEX, 0x51);
+                let accounts = s.initial_accounts();
+                plain(s, accounts, 0)
+            },
+            GlobalAccountantError::GuardianSetTooLarge as u64,
+        ),
+        (
             "superseded guardian set inside expiry window accepted",
             |_| {
                 let s = fresh(0x49);
@@ -546,7 +558,7 @@ fn guardian_set_rotation_opens_sibling_pending_and_tracks_live_size() {
     );
     let pending = pending_layout(find_account(after, &sibling));
     assert_eq!(pending.guardian_set_index, 5);
-    assert_eq!(pending.signatures, 0b1);
+    assert_eq!(pending.signatures, [0b1, 0, 0, 0]);
 
     let small = ObsScenario::attest(6, GUARDIAN_SET_INDEX, 0x9A);
     let quorum = PendingObservationsLayout::quorum_for(6) as u8;
@@ -561,15 +573,30 @@ fn guardian_set_rotation_opens_sibling_pending_and_tracks_live_size() {
     );
 }
 
+/// Quorum of a 33-key set is 23. Indices 10..=32 reach it; index 32 needs the second
+/// bitmap word, matching wormchain's 128-bit `Data.signatures`.
+#[test]
+fn guardian_index_32_counts_toward_quorum_in_a_33_key_set() {
+    let mollusk = mollusk();
+    let s = ObsScenario::attest(33, GUARDIAN_SET_INDEX, 0x60);
+    let quorum = PendingObservationsLayout::quorum_for(33) as u8;
+    assert_eq!(quorum, 23);
+
+    let accounts = s.submit_range(&mollusk, s.initial_accounts(), 10..33);
+    assert_bucket_marked(find_account(&accounts, &s.noreplay_bucket), s.sequence);
+    assert_closed(
+        find_account(&accounts, &s.pending_pda),
+        "pending closed at quorum",
+    );
+}
+
 #[test]
 fn fork_observations_accumulate_in_sibling_pendings() {
     let mollusk = mollusk();
     let d1 = ObsScenario::attest(GUARDIAN_COUNT, 6, 0x5A);
     let mut accounts = d1.submit_n(&mollusk, 7);
     assert_eq!(
-        pending_layout(find_account(&accounts, &d1.pending_pda))
-            .signatures
-            .count_ones(),
+        pending_layout(find_account(&accounts, &d1.pending_pda)).num_signatures(),
         7
     );
 
@@ -585,12 +612,10 @@ fn fork_observations_accumulate_in_sibling_pendings() {
     assert_success(&first, "first sibling observation");
     let sibling = pending_layout(find_account(&first.resulting_accounts, &d2.pending_pda));
     assert_eq!(sibling.digest, d2.digest);
-    assert_eq!(sibling.signatures, 0b10);
+    assert_eq!(sibling.signatures, [0b10, 0, 0, 0]);
     assert_eq!(sibling.guardian_set_index, d2.guardian_set_index);
     assert_eq!(
-        pending_layout(find_account(&first.resulting_accounts, &d1.pending_pda))
-            .signatures
-            .count_ones(),
+        pending_layout(find_account(&first.resulting_accounts, &d1.pending_pda)).num_signatures(),
         7
     );
 
@@ -599,7 +624,7 @@ fn fork_observations_accumulate_in_sibling_pendings() {
     assert_closed(find_account(&accounts, &d2.pending_pda), "sibling closed");
     let stranded = find_account(&accounts, &d1.pending_pda);
     assert_eq!(stranded.owner, program_id());
-    assert_eq!(pending_layout(stranded).signatures.count_ones(), 7);
+    assert_eq!(pending_layout(stranded).num_signatures(), 7);
     assert_eq!(pending_layout(stranded).digest, d1.digest);
 }
 
@@ -634,7 +659,7 @@ fn attest_and_unknown_payload_leave_balances_and_replay_slot() {
     ));
     let pending = find_account(&result.resulting_accounts, &unknown.pending_pda);
     assert_eq!(pending.owner, program_id());
-    assert_eq!(pending_layout(pending).signatures.count_ones(), 12);
+    assert_eq!(pending_layout(pending).num_signatures(), 12);
 }
 
 #[test]

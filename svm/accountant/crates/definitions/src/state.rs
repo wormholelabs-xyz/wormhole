@@ -36,7 +36,7 @@ impl ModificationKind {
     }
 }
 
-/// Pending-quorum PDA for one `(chain, emitter, sequence)`. 76 bytes, 4-byte aligned.
+/// Pending-quorum PDA for one `(chain, emitter, sequence)`. 88 bytes, 4-byte aligned.
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
@@ -44,11 +44,12 @@ impl ModificationKind {
 /// | 1      | 1    | _pad0              |
 /// | 2      | 2    | chain              |
 /// | 4      | 4    | guardian_set_index |
-/// | 8      | 4    | signatures (u32 bitmap; bit N == guardian-index N signed) |
-/// | 12     | 32   | digest             |
-/// | 44     | 32   | payer              |
+/// | 8      | 16   | signatures (128-bit bitmap as 4 LE `u32` words; bit N == guardian-index N signed) |
+/// | 24     | 32   | digest             |
+/// | 56     | 32   | payer              |
 ///
-/// The bitmap caps the guardian set at 32; a larger set needs a new layout version.
+/// The bitmap caps the guardian set at [`Self::MAX_GUARDIANS`], as wormchain's `u128`
+/// `Data.signatures` does. `[u32; 4]` keeps 4-byte alignment; `u128` would need 16.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct PendingObservationsLayout {
@@ -57,7 +58,7 @@ pub struct PendingObservationsLayout {
     pub(crate) _pad0: u8,
     pub chain: u16,
     pub guardian_set_index: u32,
-    pub signatures: u32,
+    pub signatures: [u32; 4],
     pub digest: [u8; 32],
     pub payer: Pubkey,
 }
@@ -109,7 +110,7 @@ impl PendingObservationsLayout {
             _pad0: 0,
             chain,
             guardian_set_index,
-            signatures: 0,
+            signatures: [0; 4],
             digest,
             payer,
         }
@@ -125,6 +126,33 @@ impl PendingObservationsLayout {
     pub const fn quorum_for(num_guardians: u32) -> u32 {
         (num_guardians * 2) / 3 + 1
     }
+
+    /// Bitmap capacity; equals wormchain's `u128`.
+    pub const MAX_GUARDIANS: u32 = 128;
+
+    /// `None` when `index >= MAX_GUARDIANS`.
+    pub fn has_signature(&self, index: u8) -> Option<bool> {
+        let (word, bit) = Self::bit_position(index)?;
+        Some(self.signatures[word] & bit != 0)
+    }
+
+    /// Set the bit for `index`. `None` when `index >= MAX_GUARDIANS`.
+    pub fn set_signature(&mut self, index: u8) -> Option<()> {
+        let (word, bit) = Self::bit_position(index)?;
+        self.signatures[word] |= bit;
+        Some(())
+    }
+
+    pub fn num_signatures(&self) -> u32 {
+        self.signatures.iter().map(|w| w.count_ones()).sum()
+    }
+
+    fn bit_position(index: u8) -> Option<(usize, u32)> {
+        if (index as u32) >= Self::MAX_GUARDIANS {
+            return None;
+        }
+        Some(((index / 32) as usize, 1u32 << (index % 32)))
+    }
 }
 
 const _: () = {
@@ -133,9 +161,10 @@ const _: () = {
     assert!(offset_of!(PendingObservationsLayout, chain) == 2);
     assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 4);
     assert!(offset_of!(PendingObservationsLayout, signatures) == 8);
-    assert!(offset_of!(PendingObservationsLayout, digest) == 12);
-    assert!(offset_of!(PendingObservationsLayout, payer) == 44);
-    assert!(PendingObservationsLayout::LEN == 76);
+    assert!(offset_of!(PendingObservationsLayout, digest) == 24);
+    assert!(offset_of!(PendingObservationsLayout, payer) == 56);
+    assert!(PendingObservationsLayout::LEN == 88);
+    assert!(PendingObservationsLayout::MAX_GUARDIANS == 32 * 4);
 };
 
 /// Balance account for one `(chain, token_chain, token_address)`. 70 bytes.

@@ -58,6 +58,8 @@ pub enum GlobalAccountantError {
     DuplicateModifyBalance = 28,
     /// Token Bridge action byte is not `0x01`, `0x02`, or `0x03`. The NoReplay slot stays free.
     UnknownTokenBridgePayload = 29,
+    /// `GuardianSet` has more keys than `PendingObservationsLayout::MAX_GUARDIANS`.
+    GuardianSetTooLarge = 30,
 }
 
 impl From<GlobalAccountantError> for u32 {
