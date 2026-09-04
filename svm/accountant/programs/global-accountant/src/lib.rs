@@ -28,7 +28,12 @@ pub use global_accountant_definitions as definitions;
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
 
-declare_id!("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
+declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
+
+const _: () = assert!(
+    definitions::is_accountant_program_id(&ID.to_bytes()),
+    "declare_id! does not match ACCOUNTANT_PROGRAM_ID"
+);
 
 #[program]
 pub mod global_accountant {
