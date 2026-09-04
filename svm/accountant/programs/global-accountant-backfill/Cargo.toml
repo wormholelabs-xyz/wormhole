@@ -25,6 +25,7 @@ no-entrypoint = []
 [dependencies]
 accountant-operational-core.workspace = true
 anchor-lang.workspace = true
+const-crypto.workspace = true
 # Used directly by the integration test suite (`bytemuck::from_bytes` against
 # `BalanceAccountLayout`), not by this crate's own `src/`.
 bytemuck.workspace = true

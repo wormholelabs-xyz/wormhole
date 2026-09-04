@@ -37,13 +37,12 @@ declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
 /// Re-exported for off-chain callers building raw transactions.
 pub use global_accountant_definitions::BackfillInstruction as Instruction;
 
-/// Pubkey that must sign every backfill ix. Replace before mainnet deploy;
-/// this default is the test keypair `Keypair::new_from_array([1u8; 32])`,
-/// guarded by `tests/artifact_authority_check.rs`.
-pub const BACKFILL_AUTHORITY: [u8; 32] = [
-    0x8a, 0x88, 0xe3, 0xdd, 0x74, 0x09, 0xf1, 0x95, 0xfd, 0x52, 0xdb, 0x2d, 0x3c, 0xba, 0x5d, 0x72,
-    0xca, 0x67, 0x09, 0xbf, 0x1d, 0x94, 0x12, 0x1b, 0xf3, 0x74, 0x88, 0x01, 0xb4, 0x0f, 0x6f, 0x5c,
-];
+/// Pubkey that must sign every backfill ix, from `BACKFILL_AUTHORITY` at compile
+/// time. Set per deploy in `justfile`; a missing variable is a build error, so a
+/// release build must name the operator key. Checked against the built artifact
+/// by `just verify-authority`.
+pub const BACKFILL_AUTHORITY: [u8; 32] =
+    const_crypto::bs58::decode_pubkey(env!("BACKFILL_AUTHORITY"));
 
 #[program]
 pub mod global_accountant_backfill {

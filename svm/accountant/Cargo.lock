@@ -2224,6 +2224,7 @@ dependencies = [
  "anchor-lang",
  "base64 0.22.1",
  "bytemuck",
+ "const-crypto",
  "global-accountant-backfill",
  "global-accountant-definitions",
  "mollusk-svm",
