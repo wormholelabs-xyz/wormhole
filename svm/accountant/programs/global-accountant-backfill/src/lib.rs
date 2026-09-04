@@ -33,6 +33,11 @@ pub use contexts::*;
 
 declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
 
+const _: () = assert!(
+    global_accountant_definitions::is_accountant_program_id(&ID.to_bytes()),
+    "declare_id! does not match ACCOUNTANT_PROGRAM_ID"
+);
+
 /// Wire discriminator, defined in `global_accountant_definitions::BackfillInstruction`.
 /// Re-exported for off-chain callers building raw transactions.
 pub use global_accountant_definitions::BackfillInstruction as Instruction;

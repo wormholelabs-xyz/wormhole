@@ -17,8 +17,9 @@ export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 #
 # Mainnet Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay
 # (its only deployment). That mix is a test environment, not any one network.
-# `BACKFILL_AUTHORITY` is the deterministic test keypair
-# `Keypair::new_from_array([1u8; 32])`.
+# `ACCOUNTANT_PROGRAM_ID` is the mollusk/surfpool fixture address, asserted
+# against each `declare_id!` at compile time. `BACKFILL_AUTHORITY` is the
+# deterministic test keypair `Keypair::new_from_array([1u8; 32])`.
 #
 # Plain variables, not exports. `build` below has to see an empty environment
 # when the caller has set nothing, so a deploy artifact can never inherit a test
@@ -26,16 +27,18 @@ export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 TEST_BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
 TEST_VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
 TEST_NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+TEST_ACCOUNTANT_PROGRAM_ID := "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf"
 TEST_BACKFILL_AUTHORITY := "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9"
 
 # Names the deploy build requires in the caller's environment.
 DEPLOY_VARS := "BRIDGE_ADDRESS VERIFY_VAA_SHIM_PROGRAM_ID NOREPLAY_PROGRAM_ID \
-    BACKFILL_AUTHORITY"
+    ACCOUNTANT_PROGRAM_ID BACKFILL_AUTHORITY"
 
 # Prefix that puts the test values into one command's environment.
 test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
     " VERIFY_VAA_SHIM_PROGRAM_ID=" + TEST_VERIFY_VAA_SHIM_PROGRAM_ID + \
     " NOREPLAY_PROGRAM_ID=" + TEST_NOREPLAY_PROGRAM_ID + \
+    " ACCOUNTANT_PROGRAM_ID=" + TEST_ACCOUNTANT_PROGRAM_ID + \
     " BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY
 
 # Default recipe: list available targets with their docstrings.
