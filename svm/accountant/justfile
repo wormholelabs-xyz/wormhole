@@ -2,28 +2,51 @@
 #
 # The program is loaded by mollusk-svm in integration tests, so the SBF
 # binary must exist before `cargo test` runs.
+#
+# Two build paths, deliberately separate:
+#   `just build-devnet` values below; what `test`, `check`, `clippy` use
+#   `just build`       deploy build; every address and key comes from the
+#                      caller's environment, and a missing one aborts
 
 # Exported into every recipe so `cargo test` finds the freshly-built `.so`.
 export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 
-# External program IDs, read by `crates/definitions` via `env!` at compile
-# time. Variable names match `wormhole-svm-definitions` (`from-env`) and
-# `solana-noreplay`. A missing variable is a build error; plain `cargo` outside
-# `just` needs them exported. Values below are the test environment: mainnet
-# Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay (its
-# only deployment). A release build must set all three from one network.
-export BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
-export VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
-export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+# Test-environment addresses and keys, read by `crates/definitions` and the two
+# program crates via `env!` at compile time. Variable names match
+# `wormhole-svm-definitions` (`from-env`) and `solana-noreplay`.
+#
+# Mainnet Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay
+# (its only deployment). That mix is a test environment, not any one network.
+# `BACKFILL_AUTHORITY` is the deterministic test keypair
+# `Keypair::new_from_array([1u8; 32])`.
+#
+# Plain variables, not exports. `build` below has to see an empty environment
+# when the caller has set nothing, so a deploy artifact can never inherit a test
+# value by accident.
+TEST_BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
+TEST_VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
+TEST_NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+TEST_BACKFILL_AUTHORITY := "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9"
+
+# Names the deploy build requires in the caller's environment.
+DEPLOY_VARS := "BRIDGE_ADDRESS VERIFY_VAA_SHIM_PROGRAM_ID NOREPLAY_PROGRAM_ID \
+    BACKFILL_AUTHORITY"
+
+# Prefix that puts the test values into one command's environment.
+test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
+    " VERIFY_VAA_SHIM_PROGRAM_ID=" + TEST_VERIFY_VAA_SHIM_PROGRAM_ID + \
+    " NOREPLAY_PROGRAM_ID=" + TEST_NOREPLAY_PROGRAM_ID + \
+    " BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY
 
 # Default recipe: list available targets with their docstrings.
 default:
     @just --list
 
-# One build target. The historical dev/prod split existed to gate the
-# `test-only-open-digest` feature on/off; with `open_digest` removed
-# entirely (canonical digest record now emitted via `sol_log_data`), there
-# is no longer any dev-vs-prod feature difference.
+# `build-devnet` and `build` compile identical code. They differ only in where the
+# compile-time addresses and keys come from. The older dev/prod split gated the
+# `test-only-open-digest` feature on/off; with `open_digest` removed entirely
+# (canonical digest record now emitted via `sol_log_data`), no feature
+# difference remains.
 #
 # Anchor programs build fine under plain `cargo build-sbf` (still an ordinary
 # SBF cdylib under the hood). The old `--features bpf-entrypoint` flag is
@@ -31,11 +54,30 @@ default:
 # `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
 # of the old opt-in polarity.
 
-[doc("SBF build of the production-shape .so.")]
+[doc("SBF build with the values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority key -- see the comment above them.")]
+build-devnet:
+    {{test_env}} cargo build-sbf
+
+# Deploy build. Every compile-time address and key comes from the caller's
+# environment; a missing one aborts before `cargo` runs. Verify the result with
+# `just verify-authority <so-path> <operator-pubkey>` before a mainnet deploy.
+[doc("SBF build for deploy. Every address and key must be set in the environment.")]
 build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    missing=()
+    for v in {{DEPLOY_VARS}}; do
+        [ -n "${!v:-}" ] || missing+=("${v}")
+    done
+    if [ ${#missing[@]} -ne 0 ]; then
+        echo "ERROR: deploy build needs these set in the environment:" >&2
+        printf '  %s\n' "${missing[@]}" >&2
+        echo "Run 'just build-devnet' for a devnet/test artifact." >&2
+        exit 1
+    fi
     cargo build-sbf
 
-[doc("Alias preserved for backwards-compatibility with existing scripts.")]
+[doc("Alias of `build` (deploy build), preserved for existing scripts.")]
 build-prod: build
 
 # The mollusk suite CPIs into the real `solana_noreplay.so` and
@@ -50,8 +92,8 @@ build-prod: build
 # The override skips the SHA-256 check (active-development escape hatch).
 
 [doc("Mollusk integration tests.")]
-test: build
-    cargo test
+test: build-devnet
+    {{test_env}} cargo test
 
 # Verify a deploy-ready `.so` enforces a specific operator authority pubkey,
 # independent of the `BACKFILL_AUTHORITY` compiled into this source tree.
@@ -60,7 +102,7 @@ test: build
 # before every mainnet deploy.
 [doc("Verify a deploy-ready .so enforces a specific operator authority pubkey.")]
 verify-authority so_path pubkey:
-    GA_VERIFY_SO={{so_path}} GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
+    {{test_env}} GA_VERIFY_SO={{so_path}} GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
         cargo test -p global-accountant-backfill --test artifact_authority_check \
         -- --ignored --nocapture verify_so_enforces_specific_operator_authority
 
@@ -89,7 +131,7 @@ check:
     fi
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
-    cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
+    {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
         -p global-accountant -p global-accountant-backfill
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
@@ -109,27 +151,27 @@ check:
 
 [doc("Clippy against the host build.")]
 clippy:
-    cargo clippy --all-targets -- -D warnings
+    {{test_env}} cargo clippy --all-targets -- -D warnings
 
 # Surfpool e2e suite (tests/surfpool/, one binary, all tests `#[ignore]`).
 # Single-threaded: each test spawns its own surfpool plus program deploys.
 # The upgrade_contract module is a two-step flow with its own recipes below.
 
 [doc("Surfpool e2e: submit_vaas and submit_observations against a fresh surfpool.")]
-e2e: build
-    cargo test --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+e2e: build-devnet
+    {{test_env}} cargo test --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
 # Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
 # records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets
 # that instance; stop kills it. See tests/surfpool/upgrade_contract.rs.
 
 [doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
-e2e-upgrade-deploy: build
-    cargo test --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
+e2e-upgrade-deploy: build-devnet
+    {{test_env}} cargo test --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
 e2e-upgrade-submit:
-    cargo test --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+    {{test_env}} cargo test --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
 e2e-upgrade-stop:
