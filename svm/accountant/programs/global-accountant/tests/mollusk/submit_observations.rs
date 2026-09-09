@@ -1,3 +1,4 @@
+use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
     BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, Uint256,
@@ -178,7 +179,7 @@ fn rejects() {
         submit_observations_ix_data(s.guardian_set_index, guardian_index, signature, body)
     }
 
-    let cases: [(&str, Case, u64); 20] = [
+    let cases: [(&str, Case, u64); 21] = [
         (
             "corrupted signature",
             |_| {
@@ -415,6 +416,30 @@ fn rejects() {
                 plain(s, accounts, 0)
             },
             GlobalAccountantError::AlreadyAccounted as u64,
+        ),
+        (
+            // The real bucket is marked. A bucket derived from a fake authority is empty, so
+            // a pre-check keyed on the caller's authority would pass and open a pending PDA.
+            "fake noreplay authority",
+            |_| {
+                let s = fresh(0x4E);
+                let fake_authority = Pubkey::new_unique();
+                let fake_bucket =
+                    derive_bucket_pda(&fake_authority, s.chain, &s.emitter, s.sequence).0;
+                let mut accounts = s.initial_accounts();
+                replace_account(
+                    &mut accounts,
+                    &s.noreplay_bucket,
+                    noreplay_bucket_marked(s.sequence),
+                );
+                accounts.push((fake_authority, system_owned_account(0)));
+                accounts.push((fake_bucket, noreplay_bucket_unmarked()));
+                let mut metas = s.account_metas();
+                metas[3] = AccountMeta::new(fake_bucket, false);
+                metas[6] = AccountMeta::new_readonly(fake_authority, false);
+                (accounts, s.ix_data(0), metas)
+            },
+            GlobalAccountantError::InvalidPda as u64,
         ),
         (
             "missing chain registration",

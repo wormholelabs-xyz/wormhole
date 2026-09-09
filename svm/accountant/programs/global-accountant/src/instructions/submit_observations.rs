@@ -65,7 +65,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.key,
+        program_id,
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,

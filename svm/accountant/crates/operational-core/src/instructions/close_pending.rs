@@ -17,10 +17,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::add_lamports;
 use crate::accounts;
 use crate::cpi::noreplay;
-use crate::definitions::{
-    ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout,
-    NOREPLAY_AUTHORITY_SEED_PREFIX,
-};
+use crate::definitions::{ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout};
 use crate::err;
 use crate::support::guardian_set;
 use crate::ProgramResult;
@@ -63,11 +60,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let expired = guardian_set::is_expired(guardian_set)?;
 
     // Condition (b)
-    let (noreplay_authority_addr, _) =
-        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
     let already_accounted = noreplay::is_marked(
         noreplay_bucket,
-        &noreplay_authority_addr,
+        program_id,
         layout.chain,
         &emitter,
         sequence,

@@ -29,21 +29,28 @@ pub fn derive_bucket_pda(
     )
 }
 
+/// This program's NoReplay authority PDA `(address, bump)`.
+pub fn derive_authority(program_id: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
+}
+
 /// Read the bit for `sequence` from the bitmap PDA.
 ///
 /// - `Ok(false)`: bucket uninitialised or bit clear.
 /// - `Ok(true)`: bit set.
 /// - `Err(InvalidPda)`: wrong address or malformed data.
 ///
-/// SECURITY: the bucket address is re-derived; a wrong bucket would read another namespace.
+/// SECURITY: the bucket address is re-derived from `program_id`, never from a
+/// caller-supplied authority key. A bucket under any other authority is `InvalidPda`.
 pub fn is_marked(
     bucket: &AccountInfo,
-    noreplay_authority: &Pubkey,
+    program_id: &Pubkey,
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,
 ) -> ProgramCoreResult<bool> {
-    let (expected_bucket, _) = derive_bucket_pda(noreplay_authority, chain, emitter, sequence);
+    let (noreplay_authority, _) = derive_authority(program_id);
+    let (expected_bucket, _) = derive_bucket_pda(&noreplay_authority, chain, emitter, sequence);
     if bucket.key != &expected_bucket {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
@@ -61,8 +68,7 @@ fn verify_authority(
     program_id: &Pubkey,
     noreplay_authority: &AccountInfo,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) =
-        Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
+    let (expected, bump) = derive_authority(program_id);
     if noreplay_authority.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
     }

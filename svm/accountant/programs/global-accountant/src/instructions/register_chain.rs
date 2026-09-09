@@ -60,7 +60,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     if noreplay::is_marked(
         noreplay_bucket,
-        noreplay_authority.key,
+        program_id,
         SOLANA_CHAIN_ID,
         &GOVERNANCE_EMITTER,
         sequence,

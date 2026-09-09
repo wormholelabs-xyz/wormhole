@@ -60,13 +60,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let header = parse_vaa_namespace_key(body_bytes).map_err(err)?;
     let (chain, emitter, sequence) = (header.chain, header.emitter, header.sequence);
 
-    if noreplay::is_marked(
-        noreplay_bucket,
-        noreplay_authority.key,
-        chain,
-        &emitter,
-        sequence,
-    )? {
+    if noreplay::is_marked(noreplay_bucket, program_id, chain, &emitter, sequence)? {
         return Err(err(GlobalAccountantError::AlreadyAccounted));
     }
 
