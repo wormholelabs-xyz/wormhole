@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
 
 use crate::definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX};
-use crate::support::pda_init::init_or_upgrade_pda;
+use crate::support::pda_init::create_pda_allow_prefund;
 use crate::ProgramResult;
 
 pub fn init_if_needed<'info>(
@@ -42,7 +42,7 @@ pub fn create<'info>(
         &layout.token_address,
         &bump_seed,
     ];
-    init_or_upgrade_pda(
+    create_pda_allow_prefund(
         payer,
         account_pda,
         program_id,

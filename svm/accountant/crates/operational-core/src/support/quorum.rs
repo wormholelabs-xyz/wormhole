@@ -13,7 +13,7 @@ use crate::definitions::{
 use crate::err;
 use crate::hash::keccak256;
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
-use crate::support::pda_init::init_or_upgrade_pda;
+use crate::support::pda_init::create_pda_allow_prefund;
 
 // `submit_observations` data: `SubmitObservationsIxData` prefix then the VAA body.
 // Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and dedup digest
@@ -225,7 +225,7 @@ fn create_pending_pda<'info>(
         &bump_seed,
     ];
 
-    init_or_upgrade_pda(
+    create_pda_allow_prefund(
         submitter,
         pending_pda,
         program_id,

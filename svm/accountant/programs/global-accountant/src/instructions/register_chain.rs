@@ -8,7 +8,7 @@ use anchor_lang::solana_program::system_program;
 
 use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
+use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
@@ -124,7 +124,7 @@ fn write_registration<'info>(
     if registration_pda.owner == &system_program::ID {
         let bump_seed = [registration_bump];
         let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &payload.chain, &bump_seed]; // chain BE
-        init_or_upgrade_pda(
+        create_pda_allow_prefund(
             payer,
             registration_pda,
             program_id,

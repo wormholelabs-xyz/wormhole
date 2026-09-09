@@ -9,7 +9,7 @@ use anchor_lang::solana_program::system_program;
 use accountant_operational_core::accounts::{self, balance as balance_account};
 use accountant_operational_core::cpi::shim;
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::init_or_upgrade_pda;
+use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
@@ -177,7 +177,7 @@ fn record_modify_balance<'info>(
 ) -> ProgramResult {
     let bump_seed = [modification_bump];
     let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
-    init_or_upgrade_pda(
+    create_pda_allow_prefund(
         payer,
         modify_balance_pda,
         program_id,

@@ -45,7 +45,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
 
-    // SECURITY: re-derive the pending PDA; a spoofed layout could point at another bucket.
+    // SECURITY: re-derive the pending PDA from the fields
     let (expected_pending_pda, _) = crate::support::quorum::derive_pending_pda(
         program_id,
         layout.chain,
@@ -58,11 +58,11 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::InvalidPda));
     }
 
-    // Condition (a). Only the recorded set's own expiration field can prove it expired.
+    // Condition (a)
     guardian_set::verify_account(guardian_set, layout.guardian_set_index)?;
     let expired = guardian_set::is_expired(guardian_set)?;
 
-    // Condition (b).
+    // Condition (b)
     let (noreplay_authority_addr, _) =
         Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id);
     let already_accounted = noreplay::is_marked(

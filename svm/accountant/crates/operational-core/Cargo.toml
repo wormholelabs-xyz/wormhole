@@ -25,10 +25,10 @@ solana-keccak-hasher = { version = "3.1", features = ["sha3"] }
 # with the union of features, mirroring the original `solana-address`
 # dependency's role in the pinocchio version of this crate.
 solana-pubkey = { version = "3", features = ["curve25519"] }
-# `CreateAccountAllowPrefund` (SIMD-0312) — the dust-DoS-resistant
-# allocate+assign+topup used by `pda_init::init_or_upgrade_pda`. No Anchor
-# equivalent exists (`#[account(init)]` uses plain `CreateAccount`, which
-# fails on a prefunded PDA — see migration plan §2d/§7.2). Anchor's own
+# `CreateAccountAllowPrefund` (SIMD-0312): creates a PDA at any starting
+# balance, topping up to rent-exempt. Used by `pda_init::create_pda_allow_prefund`.
+# No Anchor equivalent exists: `#[account(init)]` uses plain `CreateAccount`,
+# which fails on a prefunded PDA. Anchor's own
 # transitive `solana-system-interface` is pinned to the old `^2.0.0` line,
 # which predates this instruction variant; this direct `3.2` edge is a
 # second, separate major-version instance in the graph (same version family

@@ -11,7 +11,7 @@ use anchor_lang::solana_program::program::invoke_signed;
 use crate::definitions::GlobalAccountantError;
 use crate::{err, ProgramResult};
 
-pub fn init_or_upgrade_pda<'info>(
+pub fn create_pda_allow_prefund<'info>(
     payer: &AccountInfo<'info>,
     pda: &AccountInfo<'info>,
     program_id: &Pubkey,
@@ -26,26 +26,27 @@ pub fn init_or_upgrade_pda<'info>(
     let minimum_balance = rent.minimum_balance(space as usize);
     let top_up = minimum_balance.saturating_sub(pda.lamports());
 
-    let ix = if top_up > 0 {
-        solana_system_interface::instruction::create_account_allow_prefund(
-            pda.key,
-            Some((payer.key, top_up)),
-            space,
-            program_id,
+    let infos = [pda.clone(), payer.clone()];
+    let (ix, account_infos): (_, &[AccountInfo]) = if top_up > 0 {
+        (
+            solana_system_interface::instruction::create_account_allow_prefund(
+                pda.key,
+                Some((payer.key, top_up)),
+                space,
+                program_id,
+            ),
+            &infos[..],
         )
     } else {
-        solana_system_interface::instruction::create_account_allow_prefund(
-            pda.key, None, space, program_id,
+        (
+            solana_system_interface::instruction::create_account_allow_prefund(
+                pda.key, None, space, program_id,
+            ),
+            &infos[..1],
         )
     };
 
-    let account_infos: Vec<AccountInfo> = if top_up > 0 {
-        vec![pda.clone(), payer.clone()]
-    } else {
-        vec![pda.clone()]
-    };
-
-    invoke_signed(&ix, &account_infos, &[seeds])?;
+    invoke_signed(&ix, account_infos, &[seeds])?;
 
     Ok(())
 }

@@ -4,7 +4,9 @@
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
+    // Guardian submit observation on a single message
     SubmitObservations = 0,
+    // Close PendingObservation accounts to reclaim rent
     ClosePending = 1,
     /// Signed-VAA path through the Verify VAA Shim; applies balances without quorum tracking.
     SubmitVaas = 2,
