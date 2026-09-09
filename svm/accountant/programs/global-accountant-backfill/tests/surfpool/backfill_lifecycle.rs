@@ -33,15 +33,8 @@ use global_accountant_definitions::{
     ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID,
 };
 
-mod common;
-use common::{
-    surfpool::{
-        await_confirmed, deploy_program, fetch_accdgst_logs, so_path, start_surfpool,
-        SurfpoolOptions,
-    },
-    wire::{balance_entry, encode_balance_batch, encode_noreplay_batch, NoReplayEntry},
-    BACKFILL_PROGRAM_NAME,
-};
+use crate::common::*;
+use crate::harness::*;
 
 // ============================================================================
 // PDA derivations

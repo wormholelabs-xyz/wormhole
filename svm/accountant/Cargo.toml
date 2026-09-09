@@ -36,6 +36,7 @@ borsh = "=1.5.7"
 solana-secp256k1-recover = "=3.2.0"
 global-accountant-definitions = { path = "crates/definitions" }
 accountant-operational-core = { path = "crates/operational-core" }
+accountant-backfill-core = { path = "crates/backfill-core" }
 accountant-test-fixtures = { path = "crates/test-fixtures" }
 # Compile-time base58 decoding for external program IDs. `no_std`, two const
 # hashing deps. Same version the in-tree `wormhole-svm-definitions` crate uses.

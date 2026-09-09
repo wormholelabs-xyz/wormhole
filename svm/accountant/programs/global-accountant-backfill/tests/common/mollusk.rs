@@ -1,18 +1,25 @@
-//! Shared mollusk fixtures for `backfill_noreplay.rs` and
-//! `backfill_balance.rs`. Centralised so the canonical program id, payer,
-//! and account stubs stay identical across both suites.
+//! Mollusk harness and in-memory account stubs. Centralised so the canonical
+//! program id, payer, and account stubs stay identical across the suites.
 
 #![allow(dead_code)] // Different test files use different subsets.
 
 use {
-    mollusk_svm::{program::keyed_account_for_system_program, Mollusk},
+    accountant_test_fixtures::NOREPLAY_SO,
+    global_accountant_definitions::NOREPLAY_PROGRAM_ID,
+    mollusk_svm::{
+        program::{
+            create_program_account_loader_v3, keyed_account_for_system_program,
+            loader_keys::LOADER_V3,
+        },
+        Mollusk,
+    },
     solana_account::Account,
     solana_keypair::Keypair,
     solana_pubkey::Pubkey,
     solana_signer::Signer,
 };
 
-use super::mollusk_with_noreplay;
+use super::fixtures::{program_elf, BACKFILL_PROGRAM_NAME};
 
 /// Canonical test program id (`[8u8; 32]`), deterministic so PDAs derive to
 /// the same addresses across both test suites.
@@ -65,4 +72,28 @@ pub fn signer_account(lamports: u64) -> Account {
 /// Drives the fresh-`CreateAccount` branch of `pda_init::create_pda_allow_prefund`.
 pub fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
+}
+
+/// Build a `Mollusk` with the backfill `.so` plus the real
+/// `solana_noreplay.so` at its canonical ID.
+pub fn mollusk_with_noreplay(program_id: &Pubkey) -> Mollusk {
+    let mut mollusk = Mollusk::new(program_id, BACKFILL_PROGRAM_NAME);
+
+    let noreplay_elf = program_elf(&NOREPLAY_SO, "solana_noreplay", "GA_NOREPLAY_SO");
+    mollusk.add_program_with_loader_and_elf(
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        &LOADER_V3,
+        &noreplay_elf,
+    );
+
+    mollusk
+}
+
+/// `(pubkey, Account)` for the noreplay program. Mollusk consumes the
+/// account list verbatim; a system-owned stand-in fails at CPI time as
+/// `UnsupportedProgramId`.
+pub fn keyed_account_for_noreplay_program() -> (Pubkey, Account) {
+    let id = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID);
+    let account = create_program_account_loader_v3(&id);
+    (id, account)
 }

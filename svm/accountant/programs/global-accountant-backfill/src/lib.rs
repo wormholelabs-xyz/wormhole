@@ -19,7 +19,7 @@
 
 #![allow(unexpected_cfgs)]
 
-use accountant_operational_core::flatten_accounts;
+use accountant_backfill_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
@@ -53,7 +53,7 @@ pub const BACKFILL_AUTHORITY: [u8; 32] =
 pub mod global_accountant_backfill {
     use super::*;
 
-    /// See `accountant_operational_core::instructions::backfill_noreplay`.
+    /// See `accountant_backfill_core::instructions::backfill_noreplay`.
     ///
     /// Explicit `'info`: unifies `to_account_info()` and
     /// `remaining_accounts.iter().cloned()` in one `Vec<AccountInfo>`.
@@ -67,7 +67,7 @@ pub mod global_accountant_backfill {
             [payer, noreplay_program, noreplay_authority, system_program],
             remaining
         );
-        accountant_operational_core::instructions::backfill_noreplay::process(
+        accountant_backfill_core::instructions::backfill_noreplay::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
@@ -76,14 +76,14 @@ pub mod global_accountant_backfill {
         Ok(())
     }
 
-    /// See `accountant_operational_core::instructions::backfill_balance`.
+    /// See `accountant_backfill_core::instructions::backfill_balance`.
     #[instruction(discriminator = 1)]
     pub fn backfill_balance<'info>(
         ctx: Context<'info, BackfillBalanceAccounts<'info>>,
         ix_data: RawIxData,
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
-        accountant_operational_core::instructions::backfill_balance::process(
+        accountant_backfill_core::instructions::backfill_balance::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
@@ -92,14 +92,14 @@ pub mod global_accountant_backfill {
         Ok(())
     }
 
-    /// See `accountant_operational_core::instructions::backfill_modify_balance`.
+    /// See `accountant_backfill_core::instructions::backfill_modify_balance`.
     #[instruction(discriminator = 2)]
     pub fn backfill_modify_balance<'info>(
         ctx: Context<'info, BackfillModifyBalanceAccounts<'info>>,
         ix_data: RawIxData,
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
-        accountant_operational_core::instructions::backfill_modify_balance::process(
+        accountant_backfill_core::instructions::backfill_modify_balance::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,

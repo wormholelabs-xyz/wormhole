@@ -16,7 +16,6 @@
 
 #![allow(unexpected_cfgs)]
 
-use accountant_operational_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
@@ -34,6 +33,14 @@ const _: () = assert!(
     definitions::is_accountant_program_id(&ID.to_bytes()),
     "declare_id! does not match ACCOUNTANT_PROGRAM_ID"
 );
+
+/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
+/// Field order must match the handler's account list.
+macro_rules! flatten_accounts {
+    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
+        vec![$($accounts.$field.to_account_info()),+]
+    };
+}
 
 #[program]
 pub mod global_accountant {

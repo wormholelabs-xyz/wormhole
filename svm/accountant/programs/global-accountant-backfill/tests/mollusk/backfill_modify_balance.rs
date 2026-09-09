@@ -17,13 +17,7 @@ use {
     solana_pubkey::Pubkey,
 };
 
-mod common;
-use common::{
-    mollusk::{
-        mollusk, program_id, signer_account, test_authority_pubkey, uninitialised_pda_account,
-    },
-    wire::{encode_modify_balance_batch, modify_balance_entry},
-};
+use crate::common::*;
 
 fn derive_record_pda(sequence: u64) -> Pubkey {
     let sequence_be = sequence.to_be_bytes();
