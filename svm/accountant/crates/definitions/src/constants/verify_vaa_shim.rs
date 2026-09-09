@@ -1,4 +1,4 @@
-//! Verify VAA Shim program ID and `verify_hash` selector / wire size.
+//! Verify VAA Shim program ID plus the `verify_hash` and `post_signatures` wire layouts.
 
 use bytemuck::{Pod, Zeroable};
 use const_crypto::bs58;
@@ -37,6 +37,52 @@ impl VerifyHashData {
         bytemuck::bytes_of(self)
     }
 }
+
+/// `post_signatures` discriminator: first 8 bytes of `sha256("global:post_signatures")`.
+pub const POST_SIGNATURES_SELECTOR: [u8; 8] = [0x8a, 0x02, 0x35, 0xa6, 0x2d, 0x4d, 0x89, 0x33];
+
+/// `post_signatures` instruction prefix. The signature block follows:
+/// `guardian_signatures_len` entries of `guardian_index ‖ signature`, 66 bytes each.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct PostSignaturesIxData {
+    pub selector: [u8; 8],
+    /// Little-endian.
+    pub guardian_set_index: [u8; 4],
+    /// Sizes the guardian-signatures account; can exceed the signatures in this call.
+    pub total_signatures: u8,
+    /// Little-endian count of 66-byte entries that follow this prefix.
+    pub guardian_signatures_len: [u8; 4],
+}
+
+impl PostSignaturesIxData {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub const fn new(
+        guardian_set_index: u32,
+        total_signatures: u8,
+        guardian_signatures_len: u32,
+    ) -> Self {
+        Self {
+            selector: POST_SIGNATURES_SELECTOR,
+            guardian_set_index: guardian_set_index.to_le_bytes(),
+            total_signatures,
+            guardian_signatures_len: guardian_signatures_len.to_le_bytes(),
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(PostSignaturesIxData::LEN == 17);
+    assert!(offset_of!(PostSignaturesIxData, guardian_set_index) == 8);
+    assert!(offset_of!(PostSignaturesIxData, total_signatures) == 12);
+    assert!(offset_of!(PostSignaturesIxData, guardian_signatures_len) == 13);
+};
 
 const _: () = {
     use core::mem::offset_of;
@@ -87,5 +133,40 @@ mod tests {
             .accounts
             .iter()
             .all(|m| !m.is_writable && !m.is_signer));
+    }
+
+    #[test]
+    fn post_signatures_matches_shim_builder() {
+        use wormhole_svm_shim::verify_vaa::{
+            PostSignatures, PostSignaturesAccounts, PostSignaturesData,
+        };
+
+        assert_eq!(
+            POST_SIGNATURES_SELECTOR,
+            wormhole_svm_definitions::make_anchor_discriminator(b"global:post_signatures")
+        );
+
+        let program_id = Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID);
+        let payer = Pubkey::new_unique();
+        let guardian_signatures = Pubkey::new_unique();
+        let entries: [[u8; 66]; 2] = [[0xA1; 66], [0xB2; 66]];
+        let theirs = PostSignatures {
+            program_id: &program_id,
+            accounts: PostSignaturesAccounts {
+                payer: &payer,
+                guardian_signatures: &guardian_signatures,
+            },
+            data: PostSignaturesData::new(6, 13, &entries),
+        }
+        .instruction();
+
+        let mut ours = PostSignaturesIxData::new(6, 13, 2).as_bytes().to_vec();
+        ours.extend_from_slice(&entries[0]);
+        ours.extend_from_slice(&entries[1]);
+        assert_eq!(theirs.data, ours);
+        assert_eq!(theirs.accounts.len(), 3);
+        assert!(theirs.accounts[0].is_signer && theirs.accounts[0].is_writable);
+        assert!(theirs.accounts[1].is_signer && theirs.accounts[1].is_writable);
+        assert!(!theirs.accounts[2].is_signer && !theirs.accounts[2].is_writable);
     }
 }

@@ -30,7 +30,7 @@ fn assert_closed(account: &Account, label: &str) {
 const NOW: i64 = 1_800_000_000;
 
 fn guardian_set_with(index: u32, guardians: &[Guardian], owner: &Pubkey) -> Account {
-    guardian_set_account(index, &keys_of(guardians), 0, 0, owner)
+    guardian_set_account(index, &guardian_keys(guardians), 0, 0, owner)
 }
 
 fn submit(
@@ -342,7 +342,7 @@ fn rejects() {
                     &s.guardian_set,
                     guardian_set_account(
                         GUARDIAN_SET_INDEX,
-                        &keys_of(&s.guardians),
+                        &guardian_keys(&s.guardians),
                         0,
                         NOW as u32 - 1,
                         &core_bridge_program_id(),
@@ -364,7 +364,7 @@ fn rejects() {
                     &s.guardian_set,
                     guardian_set_account(
                         0,
-                        &keys_of(&s.guardians),
+                        &guardian_keys(&s.guardians),
                         MAINNET_GENESIS_SET_CREATION_TIME,
                         0,
                         &core_bridge_program_id(),
@@ -393,7 +393,7 @@ fn rejects() {
                     &s.guardian_set,
                     guardian_set_account(
                         GUARDIAN_SET_INDEX,
-                        &keys_of(&s.guardians),
+                        &guardian_keys(&s.guardians),
                         0,
                         NOW as u32 + 100,
                         &core_bridge_program_id(),

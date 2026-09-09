@@ -6,6 +6,8 @@ pub use wormhole_svm_definitions::{
     GUARDIAN_SIGNATURE_LENGTH,
 };
 
+pub use wormhole_svm_definitions::zero_copy::GuardianSet;
+
 pub const GUARDIAN_SIGNATURES_MIN_SIZE: usize = 48;
 
 #[derive(Clone)]
@@ -87,10 +89,7 @@ pub fn guardian_signatures_account(
     data.extend_from_slice(refund_recipient.as_ref());
     data.extend_from_slice(&set_index.to_be_bytes());
     data.extend_from_slice(&(signatures.len() as u32).to_le_bytes());
-    for (idx, sig) in signatures {
-        data.push(*idx);
-        data.extend_from_slice(&sig[..]);
-    }
+    data.extend_from_slice(&signature_block(signatures));
     Account {
         lamports: 5_000_000_000,
         data,
@@ -98,4 +97,32 @@ pub fn guardian_signatures_account(
         executable: false,
         rent_epoch: 0,
     }
+}
+
+/// Concatenate `(guardian_index, signature)` pairs into the shim's wire form.
+pub fn signature_block(signatures: &[(u8, [u8; 65])]) -> Vec<u8> {
+    let mut block = Vec::with_capacity(signatures.len() * GUARDIAN_SIGNATURE_LENGTH);
+    for (idx, sig) in signatures {
+        block.push(*idx);
+        block.extend_from_slice(&sig[..]);
+    }
+    block
+}
+
+/// Copy of `existing` with `expiration_time` replaced. Reads the fields through the
+/// zero-copy `GuardianSet` view and rebuilds via [`guardian_set_account`].
+pub fn guardian_set_with_expiration(existing: &Account, expiration_time: u32) -> Account {
+    let set = GuardianSet::new(&existing.data).expect("guardian set layout");
+    let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> = (0..set.keys_len() as usize)
+        .map(|i| set.key(i).expect("key within keys_len"))
+        .collect();
+    let mut account = guardian_set_account(
+        set.guardian_set_index(),
+        &keys,
+        set.creation_time(),
+        expiration_time,
+        &existing.owner,
+    );
+    account.lamports = existing.lamports;
+    account
 }

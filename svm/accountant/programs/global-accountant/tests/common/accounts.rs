@@ -1,6 +1,6 @@
 use global_accountant_definitions::{
     BalanceAccountLayout, ChainRegistrationLayout, NoReplayBitmapAccount, Uint256,
-    NOREPLAY_BITS_PER_BUCKET,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
 };
 use solana_account::Account;
 use solana_pubkey::Pubkey;
@@ -71,4 +71,9 @@ pub fn assert_balance(accounts: &[(Pubkey, Account)], key: &Pubkey, expected: Ui
     let account = super::mollusk::find_account(accounts, key);
     assert_eq!(account.owner, program_id(), "balance PDA owner {key}");
     assert_eq!(balance_of(account), expected, "balance {key}");
+}
+
+/// The accountant's NoReplay authority PDA for `program_id`.
+pub fn noreplay_authority_pda(program_id: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id).0
 }

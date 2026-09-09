@@ -99,17 +99,25 @@ check:
 clippy:
     cargo clippy --all-targets -- -D warnings
 
+# Surfpool e2e suite (tests/surfpool/, one binary, all tests `#[ignore]`).
+# Single-threaded: each test spawns its own surfpool plus program deploys.
+# The upgrade_contract module is a two-step flow with its own recipes below.
+
+[doc("Surfpool e2e: submit_vaas and submit_observations against a fresh surfpool.")]
+e2e: build
+    cargo test --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+
 # Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
 # records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets
-# that instance; stop kills it. See tests/surfpool_e2e_upgrade_contract.rs.
+# that instance; stop kills it. See tests/surfpool/upgrade_contract.rs.
 
 [doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
 e2e-upgrade-deploy: build
-    cargo test --test surfpool_e2e_upgrade_contract deploy_upgradeable_accountant -- --ignored --exact --nocapture
+    cargo test --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
 e2e-upgrade-submit:
-    cargo test --test surfpool_e2e_upgrade_contract submit_upgrade_vaa -- --ignored --exact --nocapture
+    cargo test --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
 e2e-upgrade-stop:

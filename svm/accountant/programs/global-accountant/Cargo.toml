@@ -78,6 +78,13 @@ sha2 = "=0.10.9"
 # the workspace lock graph via solana-client transitively; pinned per the
 # supply-chain rule.
 base64 = "=0.22.1"
+# BPF upgradeable loader account layouts (`UpgradeableLoaderState`) for the
+# surfpool upgrade e2e, serialized with bincode as the loader does. Both crates
+# were already in the lock graph; pinned per the supply-chain rule.
+solana-loader-v3-interface = { version = "=6.1.1", features = ["bincode"] }
+bincode = "=1.3.3"
+# Names the `Signature` type the surfpool harness returns from `send`; already locked.
+solana-signature = "=3.4.1"
 
 [lints]
 workspace = true

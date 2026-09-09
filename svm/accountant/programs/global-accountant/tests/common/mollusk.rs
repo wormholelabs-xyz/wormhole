@@ -1,7 +1,7 @@
 use accountant_test_fixtures::{Program, NOREPLAY_SO, VERIFY_VAA_SHIM_SO};
 use global_accountant_definitions::{
-    CORE_BRIDGE_PROGRAM_ID, NOREPLAY_PROGRAM_ID as NOREPLAY_PROGRAM_ID_BYTES,
-    VERIFY_VAA_SHIM_PROGRAM_ID,
+    COMPUTE_BUDGET_PROGRAM_ID, CORE_BRIDGE_PROGRAM_ID,
+    NOREPLAY_PROGRAM_ID as NOREPLAY_PROGRAM_ID_BYTES, VERIFY_VAA_SHIM_PROGRAM_ID,
 };
 use mollusk_svm::program::{
     create_program_account_loader_v3, keyed_account_for_system_program, loader_keys::LOADER_V3,
@@ -34,14 +34,30 @@ pub fn noreplay_program_id() -> Pubkey {
     NOREPLAY_PROGRAM_ID
 }
 
+pub fn compute_budget_program_id() -> Pubkey {
+    Pubkey::new_from_array(COMPUTE_BUDGET_PROGRAM_ID)
+}
+
+pub fn loader_v3_id() -> Pubkey {
+    LOADER_V3
+}
+
+pub fn rent_sysvar_id() -> Pubkey {
+    Pubkey::from_str_const("SysvarRent111111111111111111111111111111111")
+}
+
+pub fn clock_sysvar_id() -> Pubkey {
+    Pubkey::from_str_const("SysvarC1ock11111111111111111111111111111111")
+}
+
 pub fn mollusk() -> Mollusk {
     mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
 }
 
 pub fn mollusk_with_fixtures(program_id: &Pubkey, program_name: &str) -> Mollusk {
     let mut mollusk = Mollusk::new(program_id, program_name);
-    let noreplay_elf = program_elf(&NOREPLAY_SO, "solana_noreplay", "GA_NOREPLAY_SO");
-    let shim_elf = program_elf(
+    let noreplay_elf = fixture_elf(&NOREPLAY_SO, "solana_noreplay", "GA_NOREPLAY_SO");
+    let shim_elf = fixture_elf(
         &VERIFY_VAA_SHIM_SO,
         "wormhole_verify_vaa_shim",
         "GA_VERIFY_VAA_SHIM_SO",
@@ -91,7 +107,9 @@ pub fn replace_account(accounts: &mut [(Pubkey, Account)], key: &Pubkey, account
     slot.1 = account;
 }
 
-fn program_elf(program: &Program, label: &str, env_override: &str) -> Vec<u8> {
+/// ELF bytes of a sibling program fixture. `env_override` names an env var whose
+/// value is a path to a locally built `.so`; it skips the SHA-256 pin.
+pub fn fixture_elf(program: &Program, label: &str, env_override: &str) -> Vec<u8> {
     if let Ok(path) = std::env::var(env_override) {
         return std::fs::read(&path)
             .unwrap_or_else(|e| panic!("read ${env_override}={path} for `{label}`: {e}"));

@@ -1,9 +1,14 @@
 use global_accountant_definitions::{
     ClosePendingIxData, GovernanceHeader, Instruction, ModifyBalanceIxData, ModifyBalancePayload,
-    RegisterChainIxData, RegisterChainPayload, SubmitObservationsIxData, SubmitVaasIxData,
-    TokenBridgeTransfer, Uint256, UpgradeContractIxData, UpgradeContractPayload, VaaBodyHeader,
-    SUBMIT_OBSERVATION_PREFIX,
+    PostSignaturesIxData, RegisterChainIxData, RegisterChainPayload, SetComputeUnitLimitData,
+    SubmitObservationsIxData, SubmitVaasIxData, TokenBridgeTransfer, Uint256,
+    UpgradeContractIxData, UpgradeContractPayload, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
 };
+use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
+use solana_pubkey::Pubkey;
+
+use super::guardians::GUARDIAN_SIGNATURE_LENGTH;
+use super::mollusk::{compute_budget_program_id, shim_program_id, system_program_id};
 
 pub use accountant_operational_core::hash::double_keccak256;
 
@@ -123,6 +128,11 @@ pub fn signing_digest(body: &[u8]) -> [u8; 32] {
     )
 }
 
+/// Encode one instruction as `discriminator ‖ prefix ‖ body`.
+///
+/// `prefix` is a `Pod` `*IxData` struct as raw bytes; its `body_len` field
+/// must equal `body.len()`. `split_body` in the definitions crate reverses
+/// this layout and rejects any other length.
 fn framed(discriminator: Instruction, prefix: &[u8], body: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(1 + prefix.len() + body.len());
     data.push(discriminator as u8);
@@ -205,4 +215,44 @@ pub fn close_pending_ix_data(emitter: [u8; 32], sequence: u64) -> Vec<u8> {
         sequence: sequence.to_be_bytes(),
     };
     framed(Instruction::ClosePending, bytemuck::bytes_of(&data), &[])
+}
+
+/// Compute Budget `SetComputeUnitLimit`.
+pub fn set_compute_unit_limit_ix(units: u32) -> SvmInstruction {
+    SvmInstruction {
+        program_id: compute_budget_program_id(),
+        accounts: vec![],
+        data: SetComputeUnitLimitData::new(units).as_bytes().to_vec(),
+    }
+}
+
+/// Verify VAA Shim `post_signatures`. `signature_block` is `guardian_index ‖ signature`
+/// entries, 66 bytes each; see [`super::guardians::signature_block`]. `total_signatures`
+/// sizes the account and equals the block's entry count when one call posts them all.
+pub fn post_signatures_ix(
+    payer: &Pubkey,
+    guardian_signatures: &Pubkey,
+    guardian_set_index: u32,
+    total_signatures: u8,
+    signature_block: &[u8],
+) -> SvmInstruction {
+    assert_eq!(
+        signature_block.len() % GUARDIAN_SIGNATURE_LENGTH,
+        0,
+        "signature block is whole 66-byte entries"
+    );
+    let count = (signature_block.len() / GUARDIAN_SIGNATURE_LENGTH) as u32;
+    let prefix = PostSignaturesIxData::new(guardian_set_index, total_signatures, count);
+    let mut data = Vec::with_capacity(PostSignaturesIxData::LEN + signature_block.len());
+    data.extend_from_slice(prefix.as_bytes());
+    data.extend_from_slice(signature_block);
+    SvmInstruction {
+        program_id: shim_program_id(),
+        accounts: vec![
+            AccountMeta::new(*payer, true),
+            AccountMeta::new(*guardian_signatures, true),
+            AccountMeta::new_readonly(system_program_id(), false),
+        ],
+        data,
+    }
 }

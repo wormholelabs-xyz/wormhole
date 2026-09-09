@@ -23,7 +23,7 @@ fn closes_only_on_recorded_set_expiry_or_noreplay_mark() {
         (
             "other epoch set",
             |s, accounts| {
-                let keys = keys_of(&s.guardians);
+                let keys = guardian_keys(&s.guardians);
                 let set =
                     derive_guardian_set_pda(GUARDIAN_SET_INDEX + 1, &core_bridge_program_id()).0;
                 accounts.push((
@@ -48,7 +48,7 @@ fn closes_only_on_recorded_set_expiry_or_noreplay_mark() {
         (
             "recorded set superseded, inside expiry window",
             |s, accounts| {
-                let keys = keys_of(&s.guardians);
+                let keys = guardian_keys(&s.guardians);
                 replace_account(
                     accounts,
                     &s.guardian_set,
@@ -67,7 +67,7 @@ fn closes_only_on_recorded_set_expiry_or_noreplay_mark() {
         (
             "recorded set expired",
             |s, accounts| {
-                let keys = keys_of(&s.guardians);
+                let keys = guardian_keys(&s.guardians);
                 replace_account(
                     accounts,
                     &s.guardian_set,

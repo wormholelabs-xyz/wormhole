@@ -2,7 +2,7 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
 use global_accountant::instructions::transfer::derive_balance_account_pda;
-use global_accountant_definitions::{Uint256, NOREPLAY_AUTHORITY_SEED_PREFIX};
+use global_accountant_definitions::Uint256;
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::{InstructionResult, ProgramResult};
 use mollusk_svm::Mollusk;
@@ -32,7 +32,7 @@ pub fn emitter(seed: u8) -> [u8; 32] {
 }
 
 pub fn noreplay_authority() -> Pubkey {
-    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id()).0
+    noreplay_authority_pda(&program_id())
 }
 
 pub fn error_code(result: &ProgramResult) -> Option<u64> {
@@ -122,7 +122,7 @@ pub fn signatures_for(guardians: &[Guardian], digest: &[u8; 32], count: u8) -> V
         .collect()
 }
 
-pub fn keys_of(guardians: &[Guardian]) -> Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> {
+pub fn guardian_keys(guardians: &[Guardian]) -> Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> {
     guardians.iter().map(|g| g.eth_address).collect()
 }
 
@@ -191,7 +191,7 @@ impl VaaScenario {
                 self.guardian_set,
                 guardian_set_account(
                     GUARDIAN_SET_INDEX,
-                    &keys_of(&self.guardians),
+                    &guardian_keys(&self.guardians),
                     0,
                     0,
                     &core_bridge_program_id(),
@@ -355,7 +355,7 @@ impl ObsScenario {
                 self.guardian_set,
                 guardian_set_account(
                     self.guardian_set_index,
-                    &keys_of(&self.guardians),
+                    &guardian_keys(&self.guardians),
                     0,
                     0,
                     &core_bridge_program_id(),
