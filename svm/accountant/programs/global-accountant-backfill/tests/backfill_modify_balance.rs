@@ -228,7 +228,7 @@ fn backfill_modify_balance_wrong_signer_rejects() {
 
 /// Re-submitting an entry whose record PDA is already owned by the program (a previous
 /// backfill tx landed it, or `modify_balance` already recorded this sequence) must
-/// hard-fail via `pda_init::init_or_upgrade_pda`'s `data_len != 0 ||
+/// hard-fail via `pda_init::create_pda_allow_prefund`'s `data_len != 0 ||
 /// !initial_owner_is_system` guard — the same backstop `BackfillBalance` relies on.
 #[test]
 fn backfill_modify_balance_resubmission_rejected() {
