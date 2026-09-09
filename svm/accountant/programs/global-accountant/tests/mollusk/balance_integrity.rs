@@ -1,8 +1,7 @@
 use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{GlobalAccountantError, Uint256};
 
-mod common;
-use common::*;
+use crate::common::*;
 
 #[test]
 fn dest_failure_rolls_back_source() {

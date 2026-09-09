@@ -12,8 +12,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-mod common;
-use common::*;
+use crate::common::*;
 
 const NEW_CONTRACT: [u8; 32] = [0xC4; 32];
 

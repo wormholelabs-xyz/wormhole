@@ -6,7 +6,6 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
 use global_accountant_definitions::GlobalAccountantError;
-use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
@@ -104,10 +103,7 @@ fn surfpool_submit_observations_real_noreplay() {
     set_account(
         &rpc,
         &chain_registration_pda,
-        &Account {
-            owner: program_id,
-            ..chain_registration_account(CHAIN, emitter)
-        },
+        &chain_registration_account(CHAIN, emitter),
     );
 
     let noreplay_authority = noreplay_authority_pda(&program_id);

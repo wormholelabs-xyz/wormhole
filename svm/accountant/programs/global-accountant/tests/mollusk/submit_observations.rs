@@ -7,8 +7,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-mod common;
-use common::*;
+use crate::common::*;
 
 const MAX_QUORUM_BRANCH_CU: u64 = 75_000;
 

@@ -2,8 +2,7 @@ use global_accountant_definitions::GlobalAccountantError;
 use mollusk_svm::Mollusk;
 use solana_account::Account;
 
-mod common;
-use common::*;
+use crate::common::*;
 
 fn marked_by_vaas(mollusk: &Mollusk, transfer: Transfer) -> Account {
     let vaas = VaaScenario::transfer(transfer);

@@ -1,54 +1,13 @@
-use accountant_test_fixtures::{Program, NOREPLAY_SO, VERIFY_VAA_SHIM_SO};
-use global_accountant_definitions::{
-    COMPUTE_BUDGET_PROGRAM_ID, CORE_BRIDGE_PROGRAM_ID,
-    NOREPLAY_PROGRAM_ID as NOREPLAY_PROGRAM_ID_BYTES, VERIFY_VAA_SHIM_PROGRAM_ID,
-};
-use mollusk_svm::program::{
-    create_program_account_loader_v3, keyed_account_for_system_program, loader_keys::LOADER_V3,
-};
+//! Mollusk harness construction and in-memory account helpers.
+
+use accountant_test_fixtures::{NOREPLAY_SO, VERIFY_VAA_SHIM_SO};
+use mollusk_svm::program::{create_program_account_loader_v3, loader_keys::LOADER_V3};
 use mollusk_svm::Mollusk;
-use sha2::{Digest, Sha256};
 use solana_account::Account;
 use solana_pubkey::Pubkey;
 
-pub const PROGRAM_NAME: &str = "global_accountant";
-pub const NOREPLAY_PROGRAM_ID: Pubkey = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID_BYTES);
-
-pub fn program_id() -> Pubkey {
-    Pubkey::new_from_array([7u8; 32])
-}
-
-pub fn system_program_id() -> Pubkey {
-    keyed_account_for_system_program().0
-}
-
-pub fn core_bridge_program_id() -> Pubkey {
-    Pubkey::new_from_array(CORE_BRIDGE_PROGRAM_ID)
-}
-
-pub fn shim_program_id() -> Pubkey {
-    Pubkey::new_from_array(VERIFY_VAA_SHIM_PROGRAM_ID)
-}
-
-pub fn noreplay_program_id() -> Pubkey {
-    NOREPLAY_PROGRAM_ID
-}
-
-pub fn compute_budget_program_id() -> Pubkey {
-    Pubkey::new_from_array(COMPUTE_BUDGET_PROGRAM_ID)
-}
-
-pub fn loader_v3_id() -> Pubkey {
-    LOADER_V3
-}
-
-pub fn rent_sysvar_id() -> Pubkey {
-    Pubkey::from_str_const("SysvarRent111111111111111111111111111111111")
-}
-
-pub fn clock_sysvar_id() -> Pubkey {
-    Pubkey::from_str_const("SysvarC1ock11111111111111111111111111111111")
-}
+use super::fixtures::{fixture_elf, PROGRAM_NAME};
+use super::ids::{noreplay_program_id, program_id, shim_program_id, system_program_id};
 
 pub fn mollusk() -> Mollusk {
     mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
@@ -105,21 +64,4 @@ pub fn replace_account(accounts: &mut [(Pubkey, Account)], key: &Pubkey, account
         .find(|(k, _)| k == key)
         .unwrap_or_else(|| panic!("account {key} not in account list"));
     slot.1 = account;
-}
-
-/// ELF bytes of a sibling program fixture. `env_override` names an env var whose
-/// value is a path to a locally built `.so`; it skips the SHA-256 pin.
-pub fn fixture_elf(program: &Program, label: &str, env_override: &str) -> Vec<u8> {
-    if let Ok(path) = std::env::var(env_override) {
-        return std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("read ${env_override}={path} for `{label}`: {e}"));
-    }
-    let actual = Sha256::digest(program.bytes);
-    assert_eq!(
-        actual[..],
-        program.sha256,
-        "fixture `{label}` SHA-256 mismatch; rebuild the sibling program, copy the .so over \
-         `crates/test-fixtures/data/{label}.so`, update `sha256` in `crates/test-fixtures/src/lib.rs`"
-    );
-    program.bytes.to_vec()
 }

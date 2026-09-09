@@ -23,7 +23,7 @@ use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use crate::common::{fixture_elf, shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::common::{fixture_elf, program_id, shim_program_id, NOREPLAY_PROGRAM_ID};
 
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -328,7 +328,7 @@ impl ProgramImage {
             .unwrap_or_else(|e| panic!("read {}: {e}. Run `just build` first.", path.display()));
         Self {
             label: "global_accountant",
-            program_id: Pubkey::new_from_array(global_accountant::ID.to_bytes()),
+            program_id: program_id(),
             elf,
         }
     }

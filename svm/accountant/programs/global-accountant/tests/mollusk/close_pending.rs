@@ -3,8 +3,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-mod common;
-use common::*;
+use crate::common::*;
 
 const CLOSER: Pubkey = Pubkey::new_from_array([0x22u8; 32]);
 const NOW: i64 = 1_800_000_000;

@@ -8,7 +8,7 @@ use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
 use solana_pubkey::Pubkey;
 
 use super::guardians::GUARDIAN_SIGNATURE_LENGTH;
-use super::mollusk::{compute_budget_program_id, shim_program_id, system_program_id};
+use super::ids::{compute_budget_program_id, shim_program_id, system_program_id};
 
 pub use accountant_operational_core::hash::double_keccak256;
 

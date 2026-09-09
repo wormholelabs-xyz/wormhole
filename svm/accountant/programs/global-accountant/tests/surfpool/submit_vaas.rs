@@ -10,7 +10,6 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{TokenBridgeTransfer, Uint256, VaaBodyHeader};
-use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -131,19 +130,13 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         set_account(
             &rpc,
             &pda,
-            &Account {
-                owner: program_id,
-                ..balance_account(chain, token_chain, transfer.token_address, seed_balance)
-            },
+            &balance_account(chain, token_chain, transfer.token_address, seed_balance),
         );
     }
     set_account(
         &rpc,
         &chain_registration_pda,
-        &Account {
-            owner: program_id,
-            ..chain_registration_account(emitter_chain, emitter_address)
-        },
+        &chain_registration_account(emitter_chain, emitter_address),
     );
 
     let submit = Instruction {

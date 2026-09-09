@@ -12,6 +12,7 @@ use solana_pubkey::Pubkey;
 
 use super::accounts::*;
 use super::guardians::*;
+use super::ids::*;
 use super::ix::*;
 use super::mollusk::*;
 

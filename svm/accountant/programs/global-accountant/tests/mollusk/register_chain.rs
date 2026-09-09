@@ -12,8 +12,7 @@ use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-mod common;
-use common::*;
+use crate::common::*;
 
 const WORMCHAIN: u16 = 3104;
 

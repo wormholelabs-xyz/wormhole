@@ -2,8 +2,7 @@ use global_accountant_definitions::{GlobalAccountantError, Uint256};
 use solana_account::Account;
 use solana_pubkey::Pubkey;
 
-mod common;
-use common::*;
+use crate::common::*;
 
 #[test]
 fn transfer_commits_and_marks_noreplay() {

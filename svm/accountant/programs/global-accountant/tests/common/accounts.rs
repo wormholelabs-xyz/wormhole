@@ -5,7 +5,8 @@ use global_accountant_definitions::{
 use solana_account::Account;
 use solana_pubkey::Pubkey;
 
-use super::mollusk::{noreplay_program_id, program_id, system_owned_account, system_program_id};
+use super::ids::{noreplay_program_id, program_id, system_program_id};
+use super::mollusk::system_owned_account;
 
 pub fn balance_account(
     chain: u16,
