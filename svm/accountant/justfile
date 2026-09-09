@@ -122,8 +122,8 @@ verify-authority so_path pubkey:
 # RUSTFLAGS=-Dwarnings promotes the compiler's own lints to errors on the SBF
 # target; `clippy-sbf` below approximates clippy coverage of the SBF arms.
 
-[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied.")]
-check:
+[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied. With no arguments, checks every program; pass program names to narrow (e.g. `just check global-accountant`).")]
+check *programs:
     #!/usr/bin/env bash
     set -euo pipefail
     toolchain=$(rustup toolchain list | awk '/sbpf-solana/ {print $1; exit}')
@@ -132,10 +132,50 @@ check:
         echo "Run 'cargo build-sbf' once to install it." >&2
         exit 1
     fi
+
+    # Package names, not directory names: a manifest's `name` can differ from
+    # its directory.
+    all=()
+    for m in programs/*/Cargo.toml; do
+        all+=("$(awk -F'"' '/^name = /{print $2; exit}' "${m}")")
+    done
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+
+    # bash 3.2 (macOS default) rejects `"${arr[@]}"` on an empty array under
+    # `set -u`; check the length before any such expansion.
+    requested=({{programs}})
+    targets=()
+    if [ ${#requested[@]} -eq 0 ]; then
+        targets=("${all[@]}")
+    else
+        for name in "${requested[@]}"; do
+            match=""
+            for p in "${all[@]}"; do
+                if [ "${p}" = "${name}" ]; then
+                    match="${p}"
+                    break
+                fi
+            done
+            if [ -z "${match}" ]; then
+                echo "ERROR: unknown program '${name}'. Available:" >&2
+                printf '  %s\n' "${all[@]}" >&2
+                exit 1
+            fi
+            targets+=("${match}")
+        done
+    fi
+
+    args=()
+    for t in "${targets[@]}"; do
+        args+=(-p "${t}")
+    done
+
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
-    {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant -p global-accountant-backfill
+    {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana "${args[@]}"
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
 # via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
@@ -160,9 +200,11 @@ clippy:
 # Single-threaded: each test spawns its own surfpool plus program deploys.
 # The upgrade_contract module is a two-step flow with its own recipes below.
 
+# Both programs hold a `surfpool` target, so each recipe names its package.
+
 [doc("Surfpool e2e: submit_vaas and submit_observations against a fresh surfpool.")]
 e2e: build-devnet
-    {{test_env}} cargo test --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+    {{test_env}} cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
 # Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
 # records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets
@@ -170,11 +212,15 @@ e2e: build-devnet
 
 [doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
 e2e-upgrade-deploy: build-devnet
-    {{test_env}} cargo test --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
+    {{test_env}} cargo test -p global-accountant --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
 e2e-upgrade-submit:
-    {{test_env}} cargo test --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+    {{test_env}} cargo test -p global-accountant --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+
+[doc("Surfpool e2e: the backfill lifecycle and the cost probes.")]
+e2e-backfill: build-devnet
+    {{test_env}} cargo test -p global-accountant-backfill --test surfpool -- --ignored --test-threads=1 --nocapture
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
 e2e-upgrade-stop:
