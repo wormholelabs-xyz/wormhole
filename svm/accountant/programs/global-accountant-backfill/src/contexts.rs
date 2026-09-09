@@ -14,7 +14,7 @@ pub struct BackfillNoReplayAccounts<'info> {
     pub payer: Signer<'info>,
     /// CHECK: do not use this account's address as the CPI target; use `NOREPLAY_PROGRAM_ID`.
     pub noreplay_program: UncheckedAccount<'info>,
-    /// CHECK: NoReplay authority PDA, re-derived in `cpi::noreplay::mark_used_bulk`.
+    /// CHECK: NoReplay authority PDA, re-derived in `accountant_backfill_core::cpi::noreplay::mark_used_bulk`.
     pub noreplay_authority: UncheckedAccount<'info>,
     /// CHECK: System Program, passed through positionally to the NoReplay CPI.
     pub system_program: UncheckedAccount<'info>,

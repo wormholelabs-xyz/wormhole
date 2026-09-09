@@ -7,14 +7,15 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
-use crate::accounts;
+use accountant_operational_core::accounts;
+use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
+use accountant_operational_core::{err, ProgramResult};
+
 use crate::definitions::{
     GlobalAccountantError, ModificationKind, ModifyBalanceBatch, ModifyBalanceLayout,
     MODIFY_BALANCE_SEED_PREFIX,
 };
 use crate::support::authority::require_authority;
-use crate::support::pda_init::create_pda_allow_prefund;
-use crate::{err, ProgramResult};
 
 pub fn process(
     program_id: &Pubkey,

@@ -3,8 +3,9 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
+use accountant_operational_core::{err, ProgramResult};
+
 use crate::definitions::GlobalAccountantError;
-use crate::{err, ProgramResult};
 
 /// Reject unless `payer` signed the tx and its pubkey equals `expected`.
 #[inline]

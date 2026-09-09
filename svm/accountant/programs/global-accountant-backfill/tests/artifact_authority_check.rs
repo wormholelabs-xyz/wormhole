@@ -21,11 +21,7 @@ use global_accountant_backfill::BACKFILL_AUTHORITY;
 use global_accountant_definitions::{Uint256, ACCOUNT_SEED_PREFIX};
 
 mod common;
-use common::{
-    surfpool::so_path,
-    wire::{balance_entry, encode_balance_batch},
-    BACKFILL_PROGRAM_NAME,
-};
+use common::*;
 
 /// The program's `declare_id!`-fixed address. Anchor checks the declared
 /// program id against the runtime `program_id` on every entry

@@ -1,0 +1,16 @@
+[package]
+name = "accountant-backfill-core"
+description = "Migration-only backfill handlers shared by the accountant backfill programs."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anchor-lang.workspace = true
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+accountant-operational-core.workspace = true

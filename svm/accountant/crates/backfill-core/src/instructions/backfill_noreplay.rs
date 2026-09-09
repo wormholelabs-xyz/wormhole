@@ -8,14 +8,23 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
+use accountant_operational_core::support::commit_log;
+use accountant_operational_core::{err, ProgramResult};
+
 use crate::cpi::noreplay::mark_used_bulk;
 use crate::definitions::{
-    GlobalAccountantError, NoReplayBatch, NoReplayBitmapAccount, NOREPLAY_BITMAP_BYTES,
-    UNPINNED_GUARDIAN_SET_INDEX,
+    GlobalAccountantError, NoReplayBatch, NoReplayBitmapAccount, NoReplayNamespace,
+    NOREPLAY_BITMAP_BYTES, UNPINNED_GUARDIAN_SET_INDEX,
 };
 use crate::support::authority::require_authority;
-use crate::support::commit_log;
-use crate::{err, ProgramResult};
+
+/// One bucket's identity. A change of either field ends the current mask and forces a
+/// flush, so the two travel as one value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BucketKey {
+    namespace: NoReplayNamespace,
+    bucket_index: u64,
+}
 
 pub fn process(
     program_id: &Pubkey,
@@ -28,16 +37,16 @@ pub fn process(
     // Accounts: [WRITE, SIGNER] payer, [] solana-noreplay program (CPI target),
     // [] noreplay-authority PDA (signs MarkUsedBulk via invoke_signed), [] system program,
     // then one bucket PDA per unique (chain, emitter, bucket_index) in walk order.
-    let [payer, noreplay_program, noreplay_authority, system_program, buckets @ ..] = accounts
+    let [payer, _noreplay_program, noreplay_authority, system_program, buckets @ ..] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
 
     require_authority(payer, expected_authority)?;
 
-    let mut prev_bucket: Option<(u16, [u8; 32], u64)> = None;
+    let mut previous_bucket: Option<BucketKey> = None;
     let mut or_mask = [0u8; NOREPLAY_BITMAP_BYTES];
-    let mut bucket_account_idx: usize = 0;
+    let mut bucket_account_index: usize = 0;
 
     for group in batch.groups() {
         let chain = group.header.chain();
@@ -45,29 +54,26 @@ pub fn process(
 
         for entry in group.entries {
             let sequence = entry.sequence();
-            let cur_bucket = (
-                chain,
-                emitter,
-                NoReplayBitmapAccount::bucket_index(sequence),
-            );
-            if let Some(prev_b) = prev_bucket {
-                if cur_bucket != prev_b {
-                    if bucket_account_idx >= buckets.len() {
+            let current_bucket = BucketKey {
+                namespace: NoReplayNamespace::new(chain, emitter),
+                bucket_index: NoReplayBitmapAccount::bucket_index(sequence),
+            };
+            if let Some(previous) = previous_bucket {
+                if current_bucket != previous {
+                    if bucket_account_index >= buckets.len() {
                         return Err(err(GlobalAccountantError::InvalidInstructionData));
                     }
                     mark_used_bulk(
                         payer,
-                        &buckets[bucket_account_idx],
-                        noreplay_program,
+                        &buckets[bucket_account_index],
                         noreplay_authority,
                         system_program,
                         program_id,
-                        prev_b.0,
-                        &prev_b.1,
-                        prev_b.2,
+                        &previous.namespace,
+                        previous.bucket_index,
                         &or_mask,
                     )?;
-                    bucket_account_idx += 1;
+                    bucket_account_index += 1;
                     or_mask = [0u8; NOREPLAY_BITMAP_BYTES];
                 }
             }
@@ -83,33 +89,31 @@ pub fn process(
                 UNPINNED_GUARDIAN_SET_INDEX,
             );
 
-            prev_bucket = Some(cur_bucket);
+            previous_bucket = Some(current_bucket);
         }
     }
 
     // Final flush for the last bucket.
-    if let Some(prev_b) = prev_bucket {
-        if bucket_account_idx >= buckets.len() {
+    if let Some(previous) = previous_bucket {
+        if bucket_account_index >= buckets.len() {
             return Err(err(GlobalAccountantError::InvalidInstructionData));
         }
         mark_used_bulk(
             payer,
-            &buckets[bucket_account_idx],
-            noreplay_program,
+            &buckets[bucket_account_index],
             noreplay_authority,
             system_program,
             program_id,
-            prev_b.0,
-            &prev_b.1,
-            prev_b.2,
+            &previous.namespace,
+            previous.bucket_index,
             &or_mask,
         )?;
-        bucket_account_idx += 1;
+        bucket_account_index += 1;
     }
 
     // A trailing unused bucket account means the caller passed dead state (rent-griefing
     // risk); a shortfall is already caught in-loop.
-    if bucket_account_idx != buckets.len() {
+    if bucket_account_index != buckets.len() {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
     }
 

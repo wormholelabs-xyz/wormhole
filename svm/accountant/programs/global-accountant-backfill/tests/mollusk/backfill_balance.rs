@@ -15,14 +15,7 @@ use {
     solana_pubkey::Pubkey,
 };
 
-mod common;
-use common::{
-    mollusk::{
-        mollusk, program_id, signer_account, system_owned_account, test_authority_pubkey,
-        uninitialised_pda_account,
-    },
-    wire::{balance_entry, encode_balance_batch},
-};
+use crate::common::*;
 
 fn derive_account_pda(chain: u16, token_chain: u16, token_address: &[u8; 32]) -> Pubkey {
     let chain_be = chain.to_be_bytes();
@@ -231,7 +224,7 @@ fn backfill_balance_wrong_signer_rejects() {
 
 /// Under Anchor, `payer`'s `Signer<'info>` wrapper enforces `is_signer`
 /// during `try_accounts`, ahead of
-/// `accountant_operational_core::support::authority::require_authority`'s
+/// `accountant_backfill_core::support::authority::require_authority`'s
 /// own check. Rejection surfaces as Anchor's `AccountNotSigner` (3010).
 #[test]
 fn backfill_balance_correct_signer_not_signed_rejects() {

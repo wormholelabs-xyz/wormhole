@@ -31,22 +31,3 @@ pub type ProgramCoreResult<T> = Result<T, ProgramError>;
 pub fn err(e: GlobalAccountantError) -> ProgramError {
     ProgramError::Custom(e as u32)
 }
-
-/// Flatten a `#[derive(Accounts)]` struct into a positional `Vec<AccountInfo>`.
-///
-/// Two forms:
-/// - `flatten_accounts!(ctx.accounts, [field, ...])` — fixed accounts only.
-/// - `flatten_accounts!(ctx, [field, ...], remaining)` — fixed accounts plus
-///   `ctx.remaining_accounts` appended.
-#[macro_export]
-macro_rules! flatten_accounts {
-    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
-        vec![$($accounts.$field.to_account_info()),+]
-    };
-    ($ctx:expr, [$($field:ident),+ $(,)?], remaining) => {{
-        let mut accounts: ::std::vec::Vec<::anchor_lang::prelude::AccountInfo> =
-            vec![$($ctx.accounts.$field.to_account_info()),+];
-        accounts.extend($ctx.remaining_accounts.iter().cloned());
-        accounts
-    }};
-}

@@ -13,6 +13,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "accountant-backfill-core"
+version = "0.1.0"
+dependencies = [
+ "accountant-operational-core",
+ "anchor-lang",
+ "bytemuck",
+ "global-accountant-definitions",
+]
+
+[[package]]
 name = "accountant-operational-core"
 version = "0.1.0"
 dependencies = [
@@ -2196,6 +2206,7 @@ dependencies = [
 name = "global-accountant-backfill"
 version = "0.1.0"
 dependencies = [
+ "accountant-backfill-core",
  "accountant-operational-core",
  "accountant-test-fixtures",
  "anchor-lang",
