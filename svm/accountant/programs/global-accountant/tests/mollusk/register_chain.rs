@@ -313,6 +313,6 @@ fn register_wormchain_target_accepted_during_migration_window() {
     let account = find_account(&result.resulting_accounts, &registration.registration_pda);
     assert_eq!(
         registration_layout(account),
-        ChainRegistrationLayout::new(ETHEREUM, emitter_a)
+        ChainRegistrationLayout::new(ETHEREUM, emitter_a, 20)
     );
 }

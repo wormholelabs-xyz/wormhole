@@ -62,7 +62,7 @@ pub fn signer_account(lamports: u64) -> Account {
 }
 
 /// Uninitialised PDA stub: zero lamports, zero-length data, system-owned.
-/// Drives the fresh-`CreateAccount` branch of `pda_init::init_or_upgrade_pda`.
+/// Drives the fresh-`CreateAccount` branch of `pda_init::create_pda_allow_prefund`.
 pub fn uninitialised_pda_account() -> Account {
     system_owned_account(0)
 }

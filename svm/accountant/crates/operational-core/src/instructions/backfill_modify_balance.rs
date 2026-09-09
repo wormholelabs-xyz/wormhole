@@ -13,7 +13,7 @@ use crate::definitions::{
     MODIFY_BALANCE_SEED_PREFIX,
 };
 use crate::support::authority::require_authority;
-use crate::support::pda_init::init_or_upgrade_pda;
+use crate::support::pda_init::create_pda_allow_prefund;
 use crate::{err, ProgramResult};
 
 pub fn process(
@@ -25,7 +25,7 @@ pub fn process(
     let batch = ModifyBalanceBatch::parse(data).map_err(err)?;
 
     // Accounts: [WRITE, SIGNER] payer, [] system program (required for
-    // `init_or_upgrade_pda`'s CPI), then one `ModifyBalance` record PDA per entry in order.
+    // `create_pda_allow_prefund`'s CPI), then one `ModifyBalance` record PDA per entry in order.
     let [payer, _system_program, record_pdas @ ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -48,7 +48,7 @@ pub fn process(
         let bump_seed = [canonical_bump];
         let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &entry.sequence, &bump_seed];
 
-        init_or_upgrade_pda(
+        create_pda_allow_prefund(
             payer,
             record_pda,
             program_id,
