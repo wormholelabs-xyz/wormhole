@@ -10,8 +10,8 @@ use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
-    split_body, GlobalAccountantError, UpgradeContractIxData, UpgradeContractPayload,
-    VaaBodyHeader, GOVERNANCE_EMITTER, SOLANA_CHAIN_ID,
+    split_body, GlobalAccountantError, NoReplayNamespace, UpgradeContractIxData,
+    UpgradeContractPayload, VaaBodyHeader, GOVERNANCE_EMITTER, SOLANA_CHAIN_ID,
 };
 use crate::err;
 
@@ -40,7 +40,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //  13. `[]`              rent sysvar
     //  14. `[]`              clock sysvar
     //  15. `[]`              BPF upgradeable loader
-    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, noreplay_program, noreplay_authority, system_program_acc, upgrade_authority, spill, buffer, program_data, program_account, rent, clock, _bpf_loader_upgradeable_program] =
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, _noreplay_program, noreplay_authority, system_program_acc, upgrade_authority, spill, buffer, program_data, program_account, rent, clock, _bpf_loader_upgradeable_program] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -85,12 +85,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     noreplay::mark_used(
         payer,
         noreplay_bucket,
-        noreplay_program,
         noreplay_authority,
         system_program_acc,
         program_id,
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
+        &NoReplayNamespace::new(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER),
         sequence,
     )?;
 

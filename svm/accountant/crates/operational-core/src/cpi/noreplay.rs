@@ -84,11 +84,10 @@ fn mark_used_instruction(
     payer: &Pubkey,
     noreplay_authority: &Pubkey,
     bucket: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
+    namespace: &NoReplayNamespace,
     sequence: u64,
 ) -> Instruction {
-    let data = NoReplayMarkUsedData::new(NoReplayNamespace::new(chain, *emitter), sequence);
+    let data = NoReplayMarkUsedData::new(*namespace, sequence);
     Instruction {
         program_id: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
         accounts: vec![
@@ -101,19 +100,19 @@ fn mark_used_instruction(
     }
 }
 
-/// Mark `(chain, emitter, sequence)` used via CPI, signed by the authority PDA.
+/// Mark `(namespace, sequence)` used via CPI, signed by the authority PDA.
 ///
 /// An inner-program error aborts this program directly; `Err` here is a pre-CPI failure.
-#[allow(clippy::too_many_arguments)]
+///
+/// The caller must keep the NoReplay program in the transaction's account list, so the
+/// runtime loads it. The CPI target comes from `NOREPLAY_PROGRAM_ID`.
 pub fn mark_used<'info>(
     payer: &AccountInfo<'info>,
     bucket: &AccountInfo<'info>,
-    _noreplay_program: &AccountInfo<'info>,
     noreplay_authority: &AccountInfo<'info>,
     system_program: &AccountInfo<'info>,
     program_id: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
+    namespace: &NoReplayNamespace,
     sequence: u64,
 ) -> ProgramResult {
     let authority_bump = verify_authority(program_id, noreplay_authority)?;
@@ -121,8 +120,7 @@ pub fn mark_used<'info>(
         payer.key,
         noreplay_authority.key,
         bucket.key,
-        chain,
-        emitter,
+        namespace,
         sequence,
     );
     // `invoke_signed` takes owned `AccountInfo`s; the clone is `Rc` refcount bumps, no data copy.
@@ -168,7 +166,8 @@ mod tests {
         let payer = Pubkey::new_unique();
         let authority = Pubkey::new_unique();
         let bucket = Pubkey::new_unique();
-        let ix = mark_used_instruction(&payer, &authority, &bucket, 2, &[0xAB; 32], 5_000);
+        let namespace = NoReplayNamespace::new(2, [0xAB; 32]);
+        let ix = mark_used_instruction(&payer, &authority, &bucket, &namespace, 5_000);
         assert_eq!(ix.program_id, Pubkey::new_from_array(NOREPLAY_PROGRAM_ID));
         assert_eq!(ix.data.len(), NoReplayMarkUsedData::LEN);
         let metas: Vec<(Pubkey, bool, bool)> = ix

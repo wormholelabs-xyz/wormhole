@@ -13,9 +13,9 @@ use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
-    split_body, ChainRegistrationLayout, GlobalAccountantError, RegisterChainIxData,
-    RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX, GOVERNANCE_EMITTER,
-    SOLANA_CHAIN_ID,
+    split_body, ChainRegistrationLayout, GlobalAccountantError, NoReplayNamespace,
+    RegisterChainIxData, RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX,
+    GOVERNANCE_EMITTER, SOLANA_CHAIN_ID,
 };
 use crate::err;
 use accountant_operational_core::accounts::chain_registration;
@@ -38,7 +38,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   6. `[]`              NoReplay program
     //   7. `[]`              NoReplay authority PDA
     //   8. `[]`              system program
-    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, noreplay_program, noreplay_authority, system_program_acc] =
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, _noreplay_program, noreplay_authority, system_program_acc] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -81,12 +81,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     noreplay::mark_used(
         payer,
         noreplay_bucket,
-        noreplay_program,
         noreplay_authority,
         system_program_acc,
         program_id,
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
+        &NoReplayNamespace::new(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER),
         sequence,
     )?;
 

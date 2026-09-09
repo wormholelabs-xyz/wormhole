@@ -16,8 +16,8 @@ use accountant_operational_core::support::quorum::{self, ParsedObservation, BODY
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    split_body, GlobalAccountantError, PendingObservationsLayout, SubmitObservationsIxData,
-    SUBMIT_OBSERVATION_PREFIX,
+    split_body, GlobalAccountantError, NoReplayNamespace, PendingObservationsLayout,
+    SubmitObservationsIxData, SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
 use crate::instructions::transfer;
@@ -53,7 +53,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   8. `[WRITE]`         destination-chain balance PDA (as 7)
     //   9. `[WRITE]`         rent recipient; must equal the recorded payer
     //  10. `[]`              `ChainRegistration` PDA
-    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
+    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, _noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -109,12 +109,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
-        noreplay_program,
         noreplay_authority,
         system_program_acc,
         program_id,
-        parsed.chain,
-        &parsed.emitter,
+        &NoReplayNamespace::new(parsed.chain, parsed.emitter),
         parsed.sequence,
     )?;
 

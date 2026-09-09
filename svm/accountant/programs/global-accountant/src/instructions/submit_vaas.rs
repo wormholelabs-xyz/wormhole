@@ -12,7 +12,8 @@ use accountant_operational_core::support::guardian_set;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    parse_vaa_namespace_key, split_body, GlobalAccountantError, SubmitVaasIxData, VaaBodyHeader,
+    parse_vaa_namespace_key, split_body, GlobalAccountantError, NoReplayNamespace,
+    SubmitVaasIxData, VaaBodyHeader,
 };
 use crate::err;
 use crate::instructions::transfer;
@@ -41,7 +42,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   8. `[WRITE]`         destination-chain balance PDA (as 7)
     //   9. `[]`              system program
     //  10. `[]`              `ChainRegistration` PDA
-    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
+    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, _noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -79,12 +80,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     noreplay::mark_used(
         submitter,
         noreplay_bucket,
-        noreplay_program,
         noreplay_authority,
         _system_program,
         program_id,
-        chain,
-        &emitter,
+        &NoReplayNamespace::new(chain, emitter),
         sequence,
     )?;
 
