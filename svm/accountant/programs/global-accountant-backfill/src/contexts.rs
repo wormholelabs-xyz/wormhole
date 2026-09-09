@@ -26,7 +26,7 @@ pub struct BackfillNoReplayAccounts<'info> {
 pub struct BackfillBalanceAccounts<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    /// CHECK: System Program, required by `pda_init::init_or_upgrade_pda`'s CPI.
+    /// CHECK: System Program, required by `pda_init::create_pda_allow_prefund`'s CPI.
     pub system_program: UncheckedAccount<'info>,
 }
 
@@ -36,6 +36,6 @@ pub struct BackfillBalanceAccounts<'info> {
 pub struct BackfillModifyBalanceAccounts<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
-    /// CHECK: System Program, required by `pda_init::init_or_upgrade_pda`'s CPI.
+    /// CHECK: System Program, required by `pda_init::create_pda_allow_prefund`'s CPI.
     pub system_program: UncheckedAccount<'info>,
 }

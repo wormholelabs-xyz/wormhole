@@ -144,7 +144,7 @@ fn backfill_balance_bulk_writes_multiple_pdas() {
 /// previous backfill tx landed it) must hard-fail. `BackfillNoReplay` gets
 /// idempotency for free via `solana-noreplay`'s `AlreadyAccounted`
 /// short-circuit; `BackfillBalance` relies on
-/// `pda_init::init_or_upgrade_pda`'s `data_len != 0 ||
+/// `pda_init::create_pda_allow_prefund`'s `data_len != 0 ||
 /// !initial_owner_is_system` guard instead. The orchestrator's cursor
 /// normally prevents re-submission; this guard is the backstop for a
 /// lagging cursor or a manual re-run.
@@ -478,7 +478,7 @@ fn backfill_balance_uint256_max_all_ff_value() {
 }
 
 /// A dust-prefunded PDA (lamports > 0, `data_len == 0`, system-owned) takes
-/// `init_or_upgrade_pda`'s `CreateAccountAllowPrefund` top-up path and still
+/// `create_pda_allow_prefund`'s `CreateAccountAllowPrefund` top-up path and still
 /// succeeds with the correct final state.
 #[test]
 fn backfill_balance_dust_prefunded_pda_top_up_succeeds() {
@@ -515,7 +515,7 @@ fn backfill_balance_dust_prefunded_pda_top_up_succeeds() {
 }
 
 /// A PDA already funded at or above the rent-exempt minimum makes
-/// `init_or_upgrade_pda`'s `top_up` exactly zero, taking
+/// `create_pda_allow_prefund`'s `top_up` exactly zero, taking
 /// `CreateAccountAllowPrefund`'s zero-`top_up` path; lamports stay fixed.
 #[test]
 fn backfill_balance_over_funded_pda_no_transfer_needed() {
@@ -558,7 +558,7 @@ fn backfill_balance_over_funded_pda_no_transfer_needed() {
 }
 
 /// `data_len == 0` owned by neither the system program nor this program:
-/// `init_or_upgrade_pda`'s guard (`initial_data_len != 0 ||
+/// `create_pda_allow_prefund`'s guard (`initial_data_len != 0 ||
 /// !initial_owner_is_system`) must reject this before attempting
 /// `CreateAccount`/`Allocate`/`Assign`.
 #[test]

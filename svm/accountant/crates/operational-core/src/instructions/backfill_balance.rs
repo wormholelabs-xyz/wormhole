@@ -15,7 +15,7 @@ use crate::definitions::{
     BalanceAccountLayout, BalanceBatch, GlobalAccountantError, ACCOUNT_SEED_PREFIX,
 };
 use crate::support::authority::require_authority;
-use crate::support::pda_init::init_or_upgrade_pda;
+use crate::support::pda_init::create_pda_allow_prefund;
 use crate::{err, ProgramResult};
 
 pub fn process(
@@ -27,7 +27,7 @@ pub fn process(
     let batch = BalanceBatch::parse(data).map_err(err)?;
 
     // Accounts: [WRITE, SIGNER] payer, [] system program (required for
-    // `init_or_upgrade_pda`'s CPI), then one balance PDA per entry in order.
+    // `create_pda_allow_prefund`'s CPI), then one balance PDA per entry in order.
     let [payer, _system_program, balance_pdas @ ..] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -57,7 +57,7 @@ pub fn process(
             &bump_seed,
         ];
 
-        init_or_upgrade_pda(
+        create_pda_allow_prefund(
             payer,
             balance_pda,
             program_id,
