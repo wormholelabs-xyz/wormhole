@@ -5,8 +5,9 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::constants::{
-    ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION,
-    SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE, UPGRADE_CONTRACT_ACTION,
+    ACCEPTED_MODIFY_BALANCE_TARGETS, ACCEPTED_REGISTER_CHAIN_TARGETS, ACCOUNTANT_GOVERNANCE_MODULE,
+    GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
+    TOKEN_BRIDGE_GOVERNANCE_MODULE, UPGRADE_CONTRACT_ACTION,
 };
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
@@ -87,13 +88,14 @@ impl RegisterChainPayload {
         u16::from_be_bytes(self.chain)
     }
 
-    /// Governance emitter, `TokenBridge` module, `RegisterChain` action, target `Any` or Solana.
+    /// Governance emitter, `TokenBridge` module, `RegisterChain` action, target in
+    /// [`ACCEPTED_REGISTER_CHAIN_TARGETS`].
     pub fn validate(&self, header: &VaaBodyHeader) -> Result<(), GlobalAccountantError> {
         require_governance_emitter(header)?;
         self.header.check(
             &TOKEN_BRIDGE_GOVERNANCE_MODULE,
             REGISTER_CHAIN_ACTION,
-            &[0, SOLANA_CHAIN_ID],
+            ACCEPTED_REGISTER_CHAIN_TARGETS,
         )
     }
 }
@@ -145,8 +147,8 @@ impl ModifyBalancePayload {
         Uint256::from_be_bytes(self.amount)
     }
 
-    /// Governance emitter, `GlobalAccountant` module, `ModifyBalance` action, target Solana,
-    /// known `kind`. Returns the parsed kind.
+    /// Governance emitter, `GlobalAccountant` module, `ModifyBalance` action, target in
+    /// [`ACCEPTED_MODIFY_BALANCE_TARGETS`], known `kind`. Returns the parsed kind.
     pub fn validate(
         &self,
         header: &VaaBodyHeader,
@@ -155,7 +157,7 @@ impl ModifyBalancePayload {
         self.header.check(
             &ACCOUNTANT_GOVERNANCE_MODULE,
             MODIFY_BALANCE_ACTION,
-            &[SOLANA_CHAIN_ID],
+            ACCEPTED_MODIFY_BALANCE_TARGETS,
         )?;
         ModificationKind::from_u8(self.kind).ok_or(GlobalAccountantError::InvalidModificationKind)
     }
@@ -223,6 +225,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::WORMCHAIN_CHAIN_ID;
     use wormhole_sdk::accountant_modification::ModificationKind as SdkKind;
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
 
@@ -348,10 +351,10 @@ mod tests {
                 Ok(()),
             ),
             (
-                "register wormchain target",
+                "register wormchain target accepted during migration window",
                 good,
-                register(|p| p.header.target_chain = 3104u16.to_be_bytes()),
-                Err(E::GovernanceChainMismatch),
+                register(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
+                Ok(()),
             ),
             (
                 "register wrong emitter chain",
@@ -392,11 +395,17 @@ mod tests {
             VaaBodyHeader,
             ModifyBalancePayload,
             Result<ModificationKind, E>,
-        ); 8] = [
+        ); 9] = [
             (
                 "modify add",
                 good,
                 modify(|_| {}),
+                Ok(ModificationKind::Add),
+            ),
+            (
+                "modify wormchain target accepted during migration window",
+                good,
+                modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
                 Ok(ModificationKind::Add),
             ),
             (

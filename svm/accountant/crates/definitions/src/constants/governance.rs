@@ -9,6 +9,19 @@ pub const GOVERNANCE_EMITTER: [u8; 32] = [
 /// Wormhole chain ID for Solana. Governance VAAs target this or `0x0000` (Any).
 pub const SOLANA_CHAIN_ID: u16 = 1;
 
+/// Wormhole chain ID for Wormchain, home of the retiring cosmwasm accountant.
+pub const WORMCHAIN_CHAIN_ID: u16 = 3104;
+
+/// `RegisterChain` target chains accepted during the wormchain -> Solana migration window.
+/// Post-cutover upgrade (wormchain accountant retired): drop `WORMCHAIN_CHAIN_ID`, leaving
+/// `[0, SOLANA_CHAIN_ID]`.
+pub const ACCEPTED_REGISTER_CHAIN_TARGETS: &[u16] = &[0, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID];
+
+/// `ModifyBalance` target chains accepted during the wormchain -> Solana migration window.
+/// Post-cutover upgrade (wormchain accountant retired): drop `WORMCHAIN_CHAIN_ID`, leaving
+/// `[SOLANA_CHAIN_ID]`.
+pub const ACCEPTED_MODIFY_BALANCE_TARGETS: &[u16] = &[SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID];
+
 /// Token Bridge governance module: "TokenBridge" right-aligned in 32 bytes.
 pub const TOKEN_BRIDGE_GOVERNANCE_MODULE: [u8; 32] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -42,6 +55,7 @@ mod tests {
         assert_eq!(GOVERNANCE_EMITTER, wormhole_sdk::GOVERNANCE_EMITTER.0);
         assert_eq!(SOLANA_CHAIN_ID, wormhole_svm_definitions::solana::CHAIN_ID);
         assert_eq!(SOLANA_CHAIN_ID, u16::from(Chain::Solana));
+        assert_eq!(WORMCHAIN_CHAIN_ID, u16::from(Chain::Wormchain));
         assert_eq!(TOKEN_BRIDGE_GOVERNANCE_MODULE, token::MODULE);
         assert_eq!(ACCOUNTANT_GOVERNANCE_MODULE, accountant::MODULE);
         assert_eq!(ModificationKind::Add as u8, 1);

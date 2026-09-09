@@ -1,0 +1,62 @@
+[package]
+name = "global-accountant-backfill"
+description = "Wormhole Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits and Balance PDAs from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Anchor convention (inverted polarity from the old `bpf-entrypoint` opt-in):
+# the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library/CPI/test consumption. `idl-build` is deliberately never enabled —
+# Anchor's auto-IDL would be partial/inaccurate for the custom offset-0 tag
+# + bytemuck layouts this program keeps, so IDL codegen stays off rather than
+# shipping a misleading artifact.
+default = []
+no-entrypoint = []
+
+[dependencies]
+accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+const-crypto.workspace = true
+# Used directly by the integration test suite (`bytemuck::from_bytes` against
+# `BalanceAccountLayout`), not by this crate's own `src/`.
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+
+[dev-dependencies]
+accountant-test-fixtures.workspace = true
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+global-accountant-backfill = { path = ".", features = ["no-entrypoint"] }
+sha2 = "=0.10.9"
+# Surfpool e2e helpers and ACCDGST\0 commit-log parsing.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+solana-rent.workspace = true
+serde_json.workspace = true
+# Pinned exact per CLAUDE.md; already in the workspace lock via the operational
+# program's identical use.
+base64 = "=0.22.1"
+# Parallel-send the at-scale cost probe; already in the workspace lock graph
+# via solana-client.
+tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "sync"] }
+# `PACKET_DATA_SIZE`, for the cost probes' batch-size reasoning. Already in the
+# workspace lock graph at this exact version via mollusk-svm.
+solana-packet = "=4.1.0"
+
+[lints]
+workspace = true

@@ -62,6 +62,8 @@ pub enum GlobalAccountantError {
     GuardianSetTooLarge = 30,
     /// `register_chain`: the VAA's governance sequence is not above the stored one.
     StaleRegistration = 31,
+    /// Signer does not match the expected backfill authority pubkey.
+    UnauthorizedCaller = 32,
 }
 
 impl From<GlobalAccountantError> for u32 {
