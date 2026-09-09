@@ -8,7 +8,7 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -190,18 +190,6 @@ fn wait_for_rpc_ready(guard: &SurfpoolGuard) {
         SURFPOOL_BOOT_TIMEOUT,
         last_err
     );
-}
-
-pub fn so_path(name: &str) -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root from CARGO_MANIFEST_DIR")
-        .to_path_buf();
-    workspace_root
-        .join("target/deploy")
-        .join(format!("{name}.so"))
 }
 
 pub fn hex_encode(bytes: &[u8]) -> String {

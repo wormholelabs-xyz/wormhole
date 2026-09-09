@@ -36,12 +36,9 @@ use global_accountant_definitions::{
 };
 use solana_packet::PACKET_DATA_SIZE;
 
-mod common;
-use common::{
-    surfpool::{deploy_program, rpc_call, so_path, start_surfpool, SurfpoolOptions},
-    wire::{encode_noreplay_batch, NoReplayEntry as TransferEntry},
-    BACKFILL_PROGRAM_NAME,
-};
+use crate::common::NoReplayEntry as TransferEntry;
+use crate::common::*;
+use crate::harness::*;
 
 const CATALOGUE_PATH: &str = "/tmp/wormchain-mainnet-snapshot/catalogue.jsonl";
 

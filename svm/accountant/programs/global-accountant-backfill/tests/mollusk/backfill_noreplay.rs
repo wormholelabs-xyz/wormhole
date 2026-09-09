@@ -24,14 +24,8 @@ use {
     solana_pubkey::Pubkey,
 };
 
-mod common;
-use common::{
-    keyed_account_for_noreplay_program,
-    mollusk::{
-        mollusk, program_id, signer_account, test_authority_pubkey, uninitialised_pda_account,
-    },
-    wire::{encode_noreplay_batch, encode_noreplay_batch_raw, NoReplayEntry as Entry},
-};
+use crate::common::NoReplayEntry as Entry;
+use crate::common::*;
 
 // ============================================================================
 // PDA derivations
@@ -323,7 +317,7 @@ fn backfill_noreplay_wrong_signer_rejects() {
 /// Correct `BACKFILL_AUTHORITY` pubkey but not signed. Under Anchor,
 /// `payer`'s `Signer<'info>` wrapper enforces `is_signer` during
 /// `try_accounts`, ahead of
-/// `accountant_operational_core::support::authority::require_authority`'s
+/// `accountant_backfill_core::support::authority::require_authority`'s
 /// own check. Rejection surfaces as Anchor's `AccountNotSigner` (3010).
 #[test]
 fn backfill_noreplay_correct_signer_not_signed_rejects() {
@@ -742,8 +736,9 @@ fn backfill_noreplay_near_max_group_count_distinct_buckets() {
 
 /// Two entries in distinct buckets, but the bucket accounts are passed in
 /// swapped positions — both are legitimately-derived PDAs, just for the
-/// wrong bucket. Caught only by the vendored `solana_noreplay.so`
-/// re-deriving its own expected PDA per `MarkUsedBulk` CPI.
+/// wrong bucket. `mark_used_bulk` re-derives the expected bucket per CPI and
+/// rejects before invoking. The vendored `solana_noreplay.so` re-derives it
+/// too, so the check holds on both sides of the CPI boundary.
 #[test]
 fn backfill_noreplay_swapped_bucket_accounts_rejects() {
     let mollusk = mollusk();
@@ -780,13 +775,13 @@ fn backfill_noreplay_swapped_bucket_accounts_rejects() {
         data: encode_noreplay_batch(&entries),
     };
     let result = mollusk.process_instruction(&ix, &accounts);
-    // `solana-noreplay` rejects with `InvalidSeeds` when the supplied bucket
-    // account doesn't match the PDA it re-derives from
-    // `(authority, namespace, bucket_index)` for that specific CPI call.
     assert!(
-        matches!(&result.raw_result, Err(InstructionError::InvalidSeeds)),
-        "expected the vendored noreplay program to reject swapped bucket accounts \
-         with InvalidSeeds, got {:?}",
+        matches!(
+            &result.raw_result,
+            Err(InstructionError::Custom(code))
+                if *code == GlobalAccountantError::InvalidPda as u32
+        ),
+        "expected InvalidPda for swapped bucket accounts, got {:?}",
         result.raw_result
     );
 }

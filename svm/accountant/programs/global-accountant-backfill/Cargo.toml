@@ -23,6 +23,7 @@ default = []
 no-entrypoint = []
 
 [dependencies]
+accountant-backfill-core.workspace = true
 accountant-operational-core.workspace = true
 anchor-lang.workspace = true
 const-crypto.workspace = true
