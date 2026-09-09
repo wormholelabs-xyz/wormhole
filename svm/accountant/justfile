@@ -45,7 +45,8 @@ build-prod: build
 #
 # For local iteration without rebaking the fixture, point an env override at
 # your locally-built .so:
-#   GA_NOREPLAY_SO=/path/to/solana_noreplay.so cargo test ...
+#   GA_NOREPLAY_SO=/path/to/solana_noreplay.so just test
+#   GA_VERIFY_VAA_SHIM_SO=/path/to/wormhole_verify_vaa_shim.so just test
 # The override skips the SHA-256 check (active-development escape hatch).
 
 [doc("Mollusk integration tests.")]
@@ -131,6 +132,10 @@ e2e-upgrade-stop:
     pid=$(python3 -c "import json; print(json.load(open('${state}'))['surfpool_pid'])")
     kill "${pid}" 2>/dev/null && echo "killed surfpool pid ${pid}" || echo "surfpool pid ${pid} already gone"
     rm -f "${state}"
+
+[doc("Audit Cargo.lock against the RustSec advisory database.")]
+audit:
+    cargo audit
 
 [doc("cargo clean.")]
 clean:

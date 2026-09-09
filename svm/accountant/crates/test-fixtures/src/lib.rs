@@ -2,7 +2,8 @@
 //!
 //! ## Regenerate a program fixture
 //!
-//! 1. `cd <sibling-repo> && cargo build-sbf`.
+//! 1. Build the sibling repo: `just build` in `solana-noreplay`, `make build` in
+//!    `wormhole-core-shims`.
 //! 2. Copy the `.so` over `data/<name>.so`.
 //! 3. `shasum -a 256 data/<name>.so` and update the `sha256` field.
 
