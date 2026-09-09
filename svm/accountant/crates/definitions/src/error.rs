@@ -60,6 +60,8 @@ pub enum GlobalAccountantError {
     UnknownTokenBridgePayload = 29,
     /// `GuardianSet` has more keys than `PendingObservationsLayout::MAX_GUARDIANS`.
     GuardianSetTooLarge = 30,
+    /// `register_chain`: the VAA's governance sequence is not above the stored one.
+    StaleRegistration = 31,
 }
 
 impl From<GlobalAccountantError> for u32 {

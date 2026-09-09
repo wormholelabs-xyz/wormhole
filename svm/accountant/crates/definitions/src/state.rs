@@ -270,15 +270,18 @@ const _: () = {
 };
 
 /// Token Bridge emitter registration, one PDA per chain at `(b"chain_registration", chain_be)`.
-/// `register_chain` writes it; a later VAA overwrites the emitter.
+/// `register_chain` writes it. A later VAA overwrites the emitter only when its governance
+/// sequence is above `governance_sequence`; all `RegisterChain` VAAs share the governance
+/// emitter's sequence space, so a higher sequence is the newer registration.
 ///
-/// | offset | size | field           |
-/// |--------|------|-----------------|
+/// | offset | size | field               |
+/// |--------|------|---------------------|
 /// | 0      | 1    | tag ([`AccountTag::ChainRegistration`]) |
-/// | 1      | 1    | _pad0           |
-/// | 2      | 2    | chain           |
-/// | 4      | 28   | _padding        |
-/// | 32     | 32   | emitter_address |
+/// | 1      | 1    | _pad0               |
+/// | 2      | 2    | chain               |
+/// | 4      | 8    | governance_sequence |
+/// | 12     | 20   | _padding            |
+/// | 32     | 32   | emitter_address     |
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct ChainRegistrationLayout {
@@ -287,7 +290,9 @@ pub struct ChainRegistrationLayout {
     pub(crate) _pad0: u8,
     /// Registered Wormhole chain ID; equals the seed value.
     pub chain: u16,
-    pub(crate) _padding: [u8; 28],
+    /// Little-endian sequence of the governance VAA that wrote this record.
+    pub governance_sequence: [u8; 8],
+    pub(crate) _padding: [u8; 20],
     /// Token Bridge emitter address on `chain`.
     pub emitter_address: [u8; 32],
 }
@@ -297,14 +302,19 @@ impl ChainRegistrationLayout {
 
     pub const TAG: u8 = AccountTag::ChainRegistration as u8;
 
-    pub fn new(chain: u16, emitter_address: [u8; 32]) -> Self {
+    pub fn new(chain: u16, emitter_address: [u8; 32], governance_sequence: u64) -> Self {
         Self {
             tag: Self::TAG,
             _pad0: 0,
             chain,
-            _padding: [0; 28],
+            governance_sequence: governance_sequence.to_le_bytes(),
+            _padding: [0; 20],
             emitter_address,
         }
+    }
+
+    pub fn governance_sequence(&self) -> u64 {
+        u64::from_le_bytes(self.governance_sequence)
     }
 }
 
@@ -312,7 +322,8 @@ const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(ChainRegistrationLayout, tag) == 0);
     assert!(offset_of!(ChainRegistrationLayout, chain) == 2);
-    assert!(offset_of!(ChainRegistrationLayout, _padding) == 4);
+    assert!(offset_of!(ChainRegistrationLayout, governance_sequence) == 4);
+    assert!(offset_of!(ChainRegistrationLayout, _padding) == 12);
     assert!(offset_of!(ChainRegistrationLayout, emitter_address) == 32);
     assert!(ChainRegistrationLayout::LEN == 64);
 };

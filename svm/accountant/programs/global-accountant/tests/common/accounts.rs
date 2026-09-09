@@ -24,8 +24,9 @@ pub fn balance_account(
     }
 }
 
+/// Registration as written by governance sequence 0, so any later VAA supersedes it.
 pub fn chain_registration_account(chain: u16, emitter_address: [u8; 32]) -> Account {
-    let layout = ChainRegistrationLayout::new(chain, emitter_address);
+    let layout = ChainRegistrationLayout::new(chain, emitter_address, 0);
     Account {
         lamports: 1_000_000,
         data: bytemuck::bytes_of(&layout).to_vec(),

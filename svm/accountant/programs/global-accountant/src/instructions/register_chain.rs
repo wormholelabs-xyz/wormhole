@@ -1,5 +1,6 @@
 //! `register_chain`: Token Bridge `RegisterChain` governance. Writes or overwrites the
-//! `ChainRegistration` PDA. NoReplay blocks replay of an older registration VAA.
+//! `ChainRegistration` PDA. NoReplay blocks an exact replay; the stored governance sequence
+//! blocks an older registration VAA that was never applied here.
 //! Accepts target chain `0` (Any) or `SOLANA_CHAIN_ID`.
 
 use anchor_lang::prelude::*;
@@ -23,7 +24,7 @@ use accountant_operational_core::accounts::chain_registration;
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
 
 /// Order: instruction framing, signer, Shim signature check, governance validation,
-/// NoReplay pre-check, PDA check, write registration, NoReplay mark.
+/// NoReplay pre-check, PDA check, sequence check, write registration, NoReplay mark.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
@@ -74,6 +75,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         registration_pda,
         registration_bump,
         payload,
+        sequence,
     )?;
 
     noreplay::mark_used(
@@ -113,13 +115,19 @@ fn check_registration_pda(
     Ok(bump)
 }
 
-/// First registration creates the PDA; a rotation overwrites it in place.
+/// First registration creates the PDA. A rotation overwrites it in place when `sequence`
+/// is above the stored governance sequence.
+///
+/// SECURITY: `RegisterChain` VAAs for every chain come from one emitter, so `sequence`
+/// orders them. A lower or equal sequence is an older registration and must not roll the
+/// emitter back.
 fn write_registration<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
     registration_pda: &AccountInfo<'info>,
     registration_bump: u8,
     payload: &RegisterChainPayload,
+    sequence: u64,
 ) -> ProgramResult {
     if registration_pda.owner == &system_program::ID {
         let bump_seed = [registration_bump];
@@ -135,8 +143,13 @@ fn write_registration<'info>(
         || registration_pda.data_len() != ChainRegistrationLayout::LEN
     {
         return Err(err(GlobalAccountantError::InvalidPda));
+    } else {
+        let existing = chain_registration::load(registration_pda)?;
+        if sequence <= existing.governance_sequence() {
+            return Err(err(GlobalAccountantError::StaleRegistration));
+        }
     }
 
-    let layout = ChainRegistrationLayout::new(payload.chain(), payload.emitter_address);
+    let layout = ChainRegistrationLayout::new(payload.chain(), payload.emitter_address, sequence);
     chain_registration::store(registration_pda, &layout)
 }

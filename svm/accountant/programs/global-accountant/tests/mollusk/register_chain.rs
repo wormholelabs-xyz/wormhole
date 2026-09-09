@@ -150,7 +150,7 @@ fn register_rotate_and_submit_vaas_flow() {
     assert_eq!(registration.owner, program_id());
     assert_eq!(
         registration_layout(registration),
-        ChainRegistrationLayout::new(ETHEREUM, emitter_a)
+        ChainRegistrationLayout::new(ETHEREUM, emitter_a, 6)
     );
     assert_bucket_marked(
         find_account(&r1.resulting_accounts, &first.noreplay_bucket),
@@ -166,7 +166,7 @@ fn register_rotate_and_submit_vaas_flow() {
     let rotated = find_account(&r2.resulting_accounts, &rotation.registration_pda);
     assert_eq!(
         registration_layout(rotated),
-        ChainRegistrationLayout::new(ETHEREUM, emitter_b)
+        ChainRegistrationLayout::new(ETHEREUM, emitter_b, 7)
     );
 
     let mut transfer = Transfer::new(0, ETHEREUM, SOLANA_CHAIN_ID, 500_000);
@@ -180,6 +180,37 @@ fn register_rotate_and_submit_vaas_flow() {
         &r3.resulting_accounts,
         &vaas.dest_account,
         Uint256::from_u128(500_000),
+    );
+}
+
+/// A genuine older `RegisterChain` VAA, never applied here, must not roll the emitter back
+/// after a newer one has been applied. NoReplay cannot catch it; only the stored sequence can.
+#[test]
+fn older_registration_after_newer_is_stale() {
+    let mollusk = mollusk();
+    let emitter_a = [0x77u8; 32];
+    let emitter_b = [0xBBu8; 32];
+
+    let newer = Registration::new(7, ETHEREUM, emitter_b);
+    let applied = newer.submit(
+        &mollusk,
+        newer.accounts(uninitialised_pda_account(), noreplay_bucket_unmarked()),
+    );
+    assert_success(&applied, "newer registration");
+    let registered = find_account(&applied.resulting_accounts, &newer.registration_pda).clone();
+
+    let older = Registration::new(5, ETHEREUM, emitter_a);
+    let accounts = older.accounts(registered.clone(), noreplay_bucket_unmarked());
+    let result = older.submit(&mollusk, accounts);
+    assert_error(
+        &result,
+        GlobalAccountantError::StaleRegistration as u64,
+        "older registration",
+    );
+    assert_eq!(
+        find_account(&result.resulting_accounts, &older.registration_pda),
+        &registered,
+        "registration unchanged"
     );
 }
 
