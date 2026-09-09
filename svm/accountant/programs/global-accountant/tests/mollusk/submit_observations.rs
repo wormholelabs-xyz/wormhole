@@ -122,6 +122,48 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
     );
 }
 
+/// `tx_hash` is in the signing digest but not in the body, so it is not part of message
+/// identity: observations of one body under different `tx_hash` values share a pending PDA.
+#[test]
+fn tx_hash_does_not_split_the_pending_pda() {
+    let mollusk = mollusk();
+    let s = ObsScenario::attest(GUARDIAN_COUNT, GUARDIAN_SET_INDEX, 0x51);
+    let first = submit(
+        &mollusk,
+        s.initial_accounts(),
+        s.ix_data(0),
+        s.account_metas(),
+    );
+    assert_success(&first, "guardian 0, default tx_hash");
+
+    let other_tx_hash = [0x5Au8; 32];
+    let signature = sign_digest(
+        &s.guardians[1],
+        &signing_digest_with_tx_hash(&other_tx_hash, &s.body),
+    );
+    let ix_data = submit_observations_ix_data_with_tx_hash(
+        s.guardian_set_index,
+        1,
+        signature,
+        &other_tx_hash,
+        &s.body,
+    );
+    let second = submit(
+        &mollusk,
+        first.resulting_accounts,
+        ix_data,
+        s.account_metas(),
+    );
+    assert_success(&second, "guardian 1, other tx_hash");
+
+    let pending = pending_layout(find_account(&second.resulting_accounts, &s.pending_pda));
+    assert_eq!(
+        pending.num_signatures(),
+        2,
+        "both observations in one pending PDA"
+    );
+}
+
 #[test]
 fn routing_comes_from_body_not_caller_prefix() {
     let mollusk = mollusk();

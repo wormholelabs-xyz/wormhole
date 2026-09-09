@@ -121,9 +121,13 @@ pub fn upgrade_contract_body(
 }
 
 pub fn signing_digest(body: &[u8]) -> [u8; 32] {
+    signing_digest_with_tx_hash(&TX_HASH, body)
+}
+
+pub fn signing_digest_with_tx_hash(tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
     accountant_operational_core::hash::observation_signing_digest(
         SUBMIT_OBSERVATION_PREFIX,
-        &TX_HASH,
+        tx_hash,
         body,
     )
 }
@@ -147,11 +151,27 @@ pub fn submit_observations_ix_data(
     signature: [u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
+    submit_observations_ix_data_with_tx_hash(
+        guardian_set_index,
+        guardian_index,
+        signature,
+        &TX_HASH,
+        body,
+    )
+}
+
+pub fn submit_observations_ix_data_with_tx_hash(
+    guardian_set_index: u32,
+    guardian_index: u8,
+    signature: [u8; 65],
+    tx_hash: &[u8; 32],
+    body: &[u8],
+) -> Vec<u8> {
     let prefix = SubmitObservationsIxData {
         guardian_set_index: guardian_set_index.to_le_bytes(),
         guardian_index,
         signature,
-        tx_hash: TX_HASH,
+        tx_hash: *tx_hash,
         body_len: (body.len() as u16).to_le_bytes(),
     };
     framed(

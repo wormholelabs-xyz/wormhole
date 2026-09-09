@@ -41,6 +41,22 @@ fn transfer_commits_and_marks_noreplay() {
     assert_balance(after, &scenario.dest_account, Uint256::from_u128(500_000));
 }
 
+/// Signatures posted for one body do not verify another: the Shim recovers each signature
+/// against the digest the accountant computes from the instruction body.
+#[test]
+fn signatures_for_another_body_are_rejected() {
+    let mollusk = mollusk();
+    let signed = VaaScenario::transfer(Transfer::new(0xB1, ETHEREUM, SOLANA, 100));
+    let mut submitted = signed.clone();
+    submitted.body = Transfer::new(0xB1, ETHEREUM, SOLANA, 200).body();
+    let result = submitted.submit(&mollusk, signed.accounts());
+    assert_error(
+        &result,
+        u64::from(solana_program_error::ProgramError::InvalidAccountData),
+        "shim rejects signatures over another body",
+    );
+}
+
 #[test]
 fn rejects() {
     let mollusk = mollusk();

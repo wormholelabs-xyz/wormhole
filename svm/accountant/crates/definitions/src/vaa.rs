@@ -333,14 +333,23 @@ mod tests {
         let transfer_03 = transfer_body(0x03, amount, token_address, 2, 10);
         let mut transfer_03_extra = [0xEEu8; TRANSFER_BODY + 40];
         transfer_03_extra[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        // The guardian SDK (`DecodeTransferPayloadHdr`) requires >= 101 bytes and sets no
+        // upper bound, so trailing bytes after an action 0x01 payload parse too.
+        let mut transfer_01_extra = [0xEEu8; TRANSFER_BODY + 40];
+        transfer_01_extra[..TRANSFER_BODY].copy_from_slice(&transfer_01);
         let expected_transfer = TokenBridgeAction::Transfer {
             amount,
             token_chain: 2,
             token_address,
             recipient_chain: 10,
         };
-        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 13] = [
+        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 14] = [
             ("action 0x01 exact 133", &transfer_01, Ok(expected_transfer)),
+            (
+                "action 0x01 with trailing payload",
+                &transfer_01_extra,
+                Ok(expected_transfer),
+            ),
             (
                 "action 0x03 decodes as 0x01",
                 &transfer_03,
