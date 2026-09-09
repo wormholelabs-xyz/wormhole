@@ -8,6 +8,7 @@ mod balance_integrity;
 mod close_pending;
 mod cross_path_replay;
 mod modify_balance;
+mod program_id;
 mod register_chain;
 mod submit_observations;
 mod submit_vaas;
