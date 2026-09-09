@@ -6,8 +6,9 @@ use bytemuck::{Pod, Zeroable};
 /// 8-byte tag on every commit log entry.
 pub const ACCOUNTANT_DIGEST_LOG_TAG: [u8; 8] = *b"ACCDGST\0";
 
-/// Commit log entry (86 bytes). `guardian_set_index` is the quorum set on the observations
-/// path; `submit_vaas` writes `0`.
+/// Commit log entry (86 bytes). `guardian_set_index` is the set that authorised the row:
+/// the quorum set on the observations path, the signing set of the VAA on the
+/// `submit_vaas` path.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct AccountantDigestLog {

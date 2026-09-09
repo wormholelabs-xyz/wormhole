@@ -38,15 +38,19 @@ pub fn verify_account(guardian_set: &AccountInfo, index: u32) -> crate::ProgramC
     if guardian_set.key != &expected_address {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
+    if read_index(guardian_set)? != index {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    Ok(())
+}
+
+/// `guardian_set_index` from the account header.
+pub fn read_index(guardian_set: &AccountInfo) -> crate::ProgramCoreResult<u32> {
     let data = guardian_set.try_borrow_data()?;
     if data.len() < HEADER_LEN {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    let on_chain_index = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-    if on_chain_index != index {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    Ok(())
+    Ok(u32::from_le_bytes([data[0], data[1], data[2], data[3]]))
 }
 
 /// `keys_len` from the header. Caller must have passed [`verify_account`].

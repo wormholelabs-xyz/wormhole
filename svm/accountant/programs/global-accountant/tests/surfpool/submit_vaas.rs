@@ -172,7 +172,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         &emitter_address,
         sequence,
         &digest,
-        0,
+        vaa.guardian_set_index(),
     );
 
     let expected_balance = seed_balance

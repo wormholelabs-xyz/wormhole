@@ -8,6 +8,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::support::commit_log;
+use accountant_operational_core::support::guardian_set;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
@@ -57,6 +58,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set_bump,
     )?;
 
+    // Read after the Shim CPI, which is what validates the account.
+    let guardian_set_index = guardian_set::read_index(guardian_set)?;
+    // SECURITY: the index comes from the account, so this proves the account is the
+    // canonical Core Bridge PDA for the index it claims. The Shim proves which set
+    // signed.
+    guardian_set::verify_account(guardian_set, guardian_set_index)?;
+
     let header = parse_vaa_namespace_key(body_bytes).map_err(err)?;
     let (chain, emitter, sequence) = (header.chain, header.emitter, header.sequence);
 
@@ -80,8 +88,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         sequence,
     )?;
 
-    // `guardian_set_index = 0`: the Shim accepts any active set.
-    commit_log::emit(chain, &emitter, sequence, &digest, 0);
+    commit_log::emit(chain, &emitter, sequence, &digest, guardian_set_index);
 
     transfer::apply_from_body(
         program_id,
