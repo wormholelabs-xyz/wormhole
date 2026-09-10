@@ -709,8 +709,21 @@ fn backfill_modify_balance_near_max_count_58_entries() {
 #[test]
 fn backfill_modify_balance_edge_values_round_trip() {
     // (label, kind, chain_id, token_chain, sequence, amount)
-    // TODO(human): fill in the edge cases worth pinning for a record-only instruction.
-    let cases: &[(&str, u8, u16, u16, u64, Uint256)] = &[];
+    let cases: &[(&str, u8, u16, u16, u64, Uint256)] = &[
+        ("max_subtract_solana", 2, 1, 1, 200000, Uint256::MAX),
+        ("max_add_solana", 1, 1, 1, 200000, Uint256::MAX),
+        ("zero_amount", 1, 2, 2, 1, Uint256::ZERO),
+        ("max_chain_ids", 2, u16::MAX, u16::MAX, 42, Uint256::from_u128(1)),
+        ("max_sequence", 1, 2, 2, u64::MAX, Uint256::from_u128(1)),
+        (
+            "distinct_byte_amount",
+            2,
+            2,
+            2,
+            7,
+            Uint256::from_u128(0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10),
+        ),
+    ];
 
     assert!(
         !cases.is_empty(),
