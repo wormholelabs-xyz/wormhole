@@ -1,30 +1,34 @@
 //! `register_chain`: Token Bridge `RegisterChain` governance. Writes or overwrites the
-//! `ChainRegistration` PDA. NoReplay blocks an exact replay; the stored governance sequence
-//! blocks an older registration VAA that was never applied here.
+//! `ChainRegistration` PDA. A per-sequence `RegisterChain` PDA is the replay guard.
+//!
+//! SECURITY: governance sequence numbers are assigned at random, not monotonically, so this
+//! instruction accepts any VAA on an unused sequence and overwrites the registration
+//! unconditionally. Registration recency rests entirely on the guardian network issuing one
+//! valid `RegisterChain` VAA per registration event.
 //! Accepts target chain `0` (Any) or `SOLANA_CHAIN_ID`.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 use anchor_lang::solana_program::system_program;
 
-use accountant_operational_core::cpi::{noreplay, shim};
+use accountant_operational_core::accounts::{self, chain_registration};
+use accountant_operational_core::cpi::shim;
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
-    split_body, ChainRegistrationLayout, GlobalAccountantError, NoReplayNamespace,
-    RegisterChainIxData, RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX,
-    GOVERNANCE_EMITTER, SOLANA_CHAIN_ID,
+    split_body, ChainRegistrationLayout, GlobalAccountantError, RegisterChainIxData,
+    RegisterChainLayout, RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX,
+    REGISTER_CHAIN_SEED_PREFIX,
 };
 use crate::err;
-use accountant_operational_core::accounts::chain_registration;
 
 /// A `RegisterChain` body is exactly header + payload.
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
 
 /// Order: instruction framing, signer, Shim signature check, governance validation,
-/// NoReplay pre-check, PDA check, sequence check, write registration, NoReplay mark.
+/// PDA checks, write registration, registration record.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
@@ -34,11 +38,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   2. `[]`              Core Bridge `GuardianSet` PDA
     //   3. `[]`              `GuardianSignatures` PDA
     //   4. `[WRITE]`         `ChainRegistration` PDA
-    //   5. `[WRITE]`         NoReplay bitmap PDA
-    //   6. `[]`              NoReplay program
-    //   7. `[]`              NoReplay authority PDA
-    //   8. `[]`              system program
-    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, noreplay_bucket, _noreplay_program, noreplay_authority, system_program_acc] =
+    //   5. `[]`              system program
+    //   6. `[WRITE]`         `RegisterChain` PDA
+    let [payer, _verify_vaa_shim_program, guardian_set, guardian_signatures, registration_pda, _system_program, register_chain_pda] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -58,17 +60,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     payload.validate(header).map_err(err)?;
     let sequence = header.sequence();
 
-    if noreplay::is_marked(
-        noreplay_bucket,
-        program_id,
-        SOLANA_CHAIN_ID,
-        &GOVERNANCE_EMITTER,
-        sequence,
-    )? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
-
+    let register_bump = check_register_chain_pda(program_id, register_chain_pda, sequence)?;
     let registration_bump = check_registration_pda(program_id, registration_pda, payload.chain())?;
+
     write_registration(
         program_id,
         payer,
@@ -78,13 +72,12 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         sequence,
     )?;
 
-    noreplay::mark_used(
-        payer,
-        noreplay_bucket,
-        noreplay_authority,
-        system_program_acc,
+    record_register_chain(
         program_id,
-        &NoReplayNamespace::new(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER),
+        payer,
+        register_chain_pda,
+        register_bump,
+        payload,
         sequence,
     )?;
 
@@ -113,12 +106,34 @@ fn check_registration_pda(
     Ok(bump)
 }
 
-/// First registration creates the PDA. A rotation overwrites it in place when `sequence`
-/// is above the stored governance sequence.
-///
-/// SECURITY: `RegisterChain` VAAs for every chain come from one emitter, so `sequence`
-/// orders them. A lower or equal sequence is an older registration and must not roll the
-/// emitter back.
+/// `register_chain_pda` must be the canonical account for `sequence` and must not exist yet
+/// (replay guard); returns its bump.
+fn check_register_chain_pda(
+    program_id: &Pubkey,
+    register_chain_pda: &AccountInfo,
+    sequence: u64,
+) -> ProgramCoreResult<u8> {
+    let (expected, bump) = derive_register_chain_pda(program_id, sequence);
+    if register_chain_pda.key != &expected {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    if register_chain_pda.owner != &system_program::ID {
+        return Err(err(GlobalAccountantError::DuplicateRegisterChain));
+    }
+    Ok(bump)
+}
+
+/// `(b"register_chain", sequence_be)`.
+pub fn derive_register_chain_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[REGISTER_CHAIN_SEED_PREFIX, &sequence.to_be_bytes()],
+        program_id,
+    )
+}
+
+/// First registration creates the PDA; every later call overwrites it in place. Acceptance
+/// is gated solely by `check_register_chain_pda`'s replay guard — see the module-level
+/// `SECURITY` note.
 fn write_registration<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
@@ -141,13 +156,32 @@ fn write_registration<'info>(
         || registration_pda.data_len() != ChainRegistrationLayout::LEN
     {
         return Err(err(GlobalAccountantError::InvalidPda));
-    } else {
-        let existing = chain_registration::load(registration_pda)?;
-        if sequence <= existing.governance_sequence() {
-            return Err(err(GlobalAccountantError::StaleRegistration));
-        }
     }
 
     let layout = ChainRegistrationLayout::new(payload.chain(), payload.emitter_address, sequence);
     chain_registration::store(registration_pda, &layout)
+}
+
+/// Create the `RegisterChain` PDA and write the audit record.
+fn record_register_chain<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    register_chain_pda: &AccountInfo<'info>,
+    register_bump: u8,
+    payload: &RegisterChainPayload,
+    sequence: u64,
+) -> ProgramResult {
+    let bump_seed = [register_bump];
+    let sequence_be = sequence.to_be_bytes();
+    let seeds: &[&[u8]] = &[REGISTER_CHAIN_SEED_PREFIX, &sequence_be, &bump_seed];
+    create_pda_allow_prefund(
+        payer,
+        register_chain_pda,
+        program_id,
+        seeds,
+        RegisterChainLayout::LEN as u64,
+    )?;
+
+    let record = RegisterChainLayout::new(payload.chain(), payload.emitter_address, sequence);
+    accounts::store(register_chain_pda, &record)
 }

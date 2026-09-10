@@ -17,6 +17,11 @@ pub const CHAIN_REGISTRATION_SEED_PREFIX: &[u8] = b"chain_registration";
 /// PDA existence is the governance-path replay protection.
 pub const MODIFY_BALANCE_SEED_PREFIX: &[u8] = b"modify_balance";
 
+/// Seed prefix for [`crate::RegisterChainLayout`]: `(b"register_chain", sequence_be)`.
+/// PDA existence is the replay protection, mirroring `MODIFY_BALANCE_SEED_PREFIX`; the guard
+/// keys on governance sequence, covering emitter-rotation re-registrations of the same chain.
+pub const REGISTER_CHAIN_SEED_PREFIX: &[u8] = b"register_chain";
+
 /// Seed for the authority PDA that signs all NoReplay CPIs: `[b"noreplay_authority"]`.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";
 

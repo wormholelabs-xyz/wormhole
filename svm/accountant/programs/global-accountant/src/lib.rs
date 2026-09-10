@@ -121,10 +121,8 @@ pub mod global_accountant {
                 guardian_set,
                 guardian_signatures,
                 registration_pda,
-                noreplay_bucket,
-                noreplay_program,
-                noreplay_authority,
                 system_program,
+                register_chain_pda,
             ]
         );
         crate::instructions::register_chain::process(ctx.program_id, &accounts, &ix_data.0)?;

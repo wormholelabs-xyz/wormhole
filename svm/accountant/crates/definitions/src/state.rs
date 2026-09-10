@@ -16,6 +16,7 @@ pub enum AccountTag {
     Balance = 2,
     ChainRegistration = 3,
     ModifyBalance = 4,
+    RegisterChain = 5,
 }
 
 /// `ModifyBalance` payload `kind` byte. Other values raise `InvalidModificationKind`.
@@ -95,6 +96,14 @@ impl AccountLayout for ChainRegistrationLayout {
 }
 
 impl AccountLayout for ModifyBalanceLayout {
+    const TAG: u8 = Self::TAG;
+
+    fn tag(&self) -> u8 {
+        self.tag
+    }
+}
+
+impl AccountLayout for RegisterChainLayout {
     const TAG: u8 = Self::TAG;
 
     fn tag(&self) -> u8 {
@@ -270,9 +279,9 @@ const _: () = {
 };
 
 /// Token Bridge emitter registration, one PDA per chain at `(b"chain_registration", chain_be)`.
-/// `register_chain` writes it. A later VAA overwrites the emitter only when its governance
-/// sequence is above `governance_sequence`; all `RegisterChain` VAAs share the governance
-/// emitter's sequence space, so a higher sequence is the newer registration.
+/// `register_chain` writes it, unconditionally overwriting the emitter on every valid,
+/// unreplayed VAA. `governance_sequence` is an audit field recording which VAA wrote the
+/// current value; governance sequence numbers are assigned at random.
 ///
 /// | offset | size | field               |
 /// |--------|------|---------------------|
@@ -406,13 +415,67 @@ const _: () = {
     assert!(ModifyBalanceLayout::LEN == 112);
 };
 
+/// Audit-log PDA at `(b"register_chain", sequence_be)`, created by `register_chain`.
+/// A second VAA with the same sequence fails with `DuplicateRegisterChain`.
+///
+/// | offset | size | field           |
+/// |--------|------|-----------------|
+/// | 0      | 1    | tag ([`AccountTag::RegisterChain`]) |
+/// | 1      | 1    | _pad0           |
+/// | 2      | 2    | chain           |
+/// | 4      | 4    | _pad1           |
+/// | 8      | 8    | sequence        |
+/// | 16     | 32   | emitter_address |
+///
+/// Total: 48 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct RegisterChainLayout {
+    /// Always [`AccountTag::RegisterChain`].
+    pub tag: u8,
+    pub(crate) _pad0: u8,
+    /// Registered Wormhole chain ID.
+    pub chain: u16,
+    pub(crate) _pad1: [u8; 4],
+    /// VAA sequence that wrote this record.
+    pub sequence: u64,
+    /// Token Bridge emitter address on `chain`.
+    pub emitter_address: [u8; 32],
+}
+
+impl RegisterChainLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub const TAG: u8 = AccountTag::RegisterChain as u8;
+
+    pub fn new(chain: u16, emitter_address: [u8; 32], sequence: u64) -> Self {
+        Self {
+            tag: Self::TAG,
+            _pad0: 0,
+            chain,
+            _pad1: [0; 4],
+            sequence,
+            emitter_address,
+        }
+    }
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(RegisterChainLayout, tag) == 0);
+    assert!(offset_of!(RegisterChainLayout, chain) == 2);
+    assert!(offset_of!(RegisterChainLayout, sequence) == 8);
+    assert!(offset_of!(RegisterChainLayout, emitter_address) == 16);
+    assert!(RegisterChainLayout::LEN == 48);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn account_tags_are_pinned_and_zeroed_layout_is_invalid() {
-        let cases: [(&str, u8, u8, u8); 4] = [
+        let cases: [(&str, u8, u8, u8); 5] = [
             (
                 "pending",
                 AccountTag::PendingObservations as u8,
@@ -436,6 +499,12 @@ mod tests {
                 AccountTag::ModifyBalance as u8,
                 ModifyBalanceLayout::TAG,
                 <ModifyBalanceLayout as Zeroable>::zeroed().tag,
+            ),
+            (
+                "register_chain",
+                AccountTag::RegisterChain as u8,
+                RegisterChainLayout::TAG,
+                <RegisterChainLayout as Zeroable>::zeroed().tag,
             ),
         ];
         for (i, (name, tag, layout_tag, zeroed_tag)) in cases.iter().enumerate() {

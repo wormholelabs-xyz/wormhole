@@ -67,7 +67,7 @@ pub struct SubmitVaas<'info> {
     pub chain_registration_pda: UncheckedAccount<'info>,
 }
 
-/// Accounts for `register_chain` (9 accounts).
+/// Accounts for `register_chain` (7 accounts).
 #[derive(Accounts)]
 pub struct RegisterChain<'info> {
     #[account(mut)]
@@ -81,15 +81,11 @@ pub struct RegisterChain<'info> {
     /// CHECK: address and bump checked in the handler.
     #[account(mut)]
     pub registration_pda: UncheckedAccount<'info>,
-    /// CHECK: address checked in `noreplay::is_marked` / `noreplay::mark_used`.
-    #[account(mut)]
-    pub noreplay_bucket: UncheckedAccount<'info>,
-    /// CHECK: CPI target is the constant `NOREPLAY_PROGRAM_ID`.
-    pub noreplay_program: UncheckedAccount<'info>,
-    /// CHECK: address checked in `noreplay::mark_used`.
-    pub noreplay_authority: UncheckedAccount<'info>,
-    /// CHECK: passed through to the NoReplay CPI.
+    /// CHECK: passed through to the system CPI.
     pub system_program: UncheckedAccount<'info>,
+    /// CHECK: address checked in the handler
+    #[account(mut)]
+    pub register_chain_pda: UncheckedAccount<'info>,
 }
 
 /// Accounts for `modify_balance` (7 accounts).
