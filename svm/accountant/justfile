@@ -1,0 +1,142 @@
+# Build & test the Wormhole Global Accountant Solana program.
+#
+# The program is loaded by mollusk-svm in integration tests, so the SBF
+# binary must exist before `cargo test` runs.
+
+# Exported into every recipe so `cargo test` finds the freshly-built `.so`.
+export SBF_OUT_DIR := justfile_directory() / "target/deploy"
+
+# External program IDs, read by `crates/definitions` via `env!` at compile
+# time. Variable names match `wormhole-svm-definitions` (`from-env`) and
+# `solana-noreplay`. A missing variable is a build error; plain `cargo` outside
+# `just` needs them exported. Values below are the test environment: mainnet
+# Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay (its
+# only deployment). A release build must set all three from one network.
+export BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
+export VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
+export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+
+# Default recipe: list available targets with their docstrings.
+default:
+    @just --list
+
+# One build target. The historical dev/prod split existed to gate the
+# `test-only-open-digest` feature on/off; with `open_digest` removed
+# entirely (canonical digest record now emitted via `sol_log_data`), there
+# is no longer any dev-vs-prod feature difference.
+#
+# Anchor programs build fine under plain `cargo build-sbf` (still an ordinary
+# SBF cdylib under the hood). The old `--features bpf-entrypoint` flag is
+# gone: Anchor's entrypoint is present by default and only suppressed via
+# `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
+# of the old opt-in polarity.
+
+[doc("SBF build of the production-shape .so.")]
+build:
+    cargo build-sbf
+
+[doc("Alias preserved for backwards-compatibility with existing scripts.")]
+build-prod: build
+
+# The mollusk suite CPIs into the real `solana_noreplay.so` and
+# `wormhole_verify_vaa_shim.so`, embedded by `crates/test-fixtures` with a
+# pinned SHA-256 each; drift panics with the regen recipe (see that crate's
+# `src/lib.rs`).
+#
+# For local iteration without rebaking the fixture, point an env override at
+# your locally-built .so:
+#   GA_NOREPLAY_SO=/path/to/solana_noreplay.so just test
+#   GA_VERIFY_VAA_SHIM_SO=/path/to/wormhole_verify_vaa_shim.so just test
+# The override skips the SHA-256 check (active-development escape hatch).
+
+[doc("Mollusk integration tests.")]
+test: build
+    cargo test
+
+# SBF-target type-check. There is no upstream `cargo check-sbf`, but
+# `cargo build-sbf` registers the platform-tools compiler with rustup (e.g.
+# `1.89.0-sbpf-solana-v1.52`), which can drive a plain `cargo check` against
+# the real `sbpf-solana-solana` target. This checks the exact cfg shape that
+# ships (`target_os = "solana"` arms, real syscall declarations) without the
+# cost of a full `build-sbf`. The toolchain name embeds the platform-tools
+# version, so it is discovered rather than hard-coded.
+#
+# Note: clippy cannot run on this toolchain (Anza ships no cargo-clippy for
+# platform-tools, and rustup cannot add components to custom toolchains).
+# RUSTFLAGS=-Dwarnings promotes the compiler's own lints to errors on the SBF
+# target; `clippy-sbf` below approximates clippy coverage of the SBF arms.
+
+[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied.")]
+check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    toolchain=$(rustup toolchain list | awk '/sbpf-solana/ {print $1; exit}')
+    if [ -z "${toolchain}" ]; then
+        echo "ERROR: no sbpf-solana platform-tools toolchain found in rustup." >&2
+        echo "Run 'cargo build-sbf' once to install it." >&2
+        exit 1
+    fi
+    echo "Using toolchain: ${toolchain}"
+    export RUSTFLAGS="-Dwarnings"
+    cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
+        -p global-accountant
+
+# `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
+# via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
+# It only ever worked because the pinocchio-era crates were `no_std`
+# (`#![cfg_attr(any(target_os = "solana", target_arch = "bpf"), no_std)]`),
+# so a bare `core`+`alloc` sysroot sufficed. Anchor is not `no_std`-compatible
+# (`anchor-derive-accounts`' generated code alone reaches for
+# `std::collections::BTreeSet`), and `bpfel-unknown-none` — "none" meaning no
+# OS/std support — has no `std` to build, even under `-Zbuild-std`. Only
+# Anza's platform-tools toolchain (used by `build`/`check` above) carries a
+# custom sysroot with SBF-target `std` support. `crates/definitions` alone
+# stays `no_std` (anchor-free), but it is a small, already-portable leaf crate
+# with no syscalls of its own; `check` above remains the sole SBF-target lint
+# pass for the workspace (clippy itself is still unavailable there — Anza
+# ships no `cargo-clippy` for platform-tools).
+
+[doc("Clippy against the host build.")]
+clippy:
+    cargo clippy --all-targets -- -D warnings
+
+# Surfpool e2e suite (tests/surfpool/, one binary, all tests `#[ignore]`).
+# Single-threaded: each test spawns its own surfpool plus program deploys.
+# The upgrade_contract module is a two-step flow with its own recipes below.
+
+[doc("Surfpool e2e: submit_vaas and submit_observations against a fresh surfpool.")]
+e2e: build
+    cargo test --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+
+# Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
+# records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets
+# that instance; stop kills it. See tests/surfpool/upgrade_contract.rs.
+
+[doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
+e2e-upgrade-deploy: build
+    cargo test --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
+
+[doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
+e2e-upgrade-submit:
+    cargo test --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+
+[doc("upgrade_contract e2e: kill the surfpool from step 1.")]
+e2e-upgrade-stop:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    state="target/e2e-upgrade-contract.json"
+    if [ ! -f "${state}" ]; then
+        echo "no ${state}; nothing to stop"
+        exit 0
+    fi
+    pid=$(python3 -c "import json; print(json.load(open('${state}'))['surfpool_pid'])")
+    kill "${pid}" 2>/dev/null && echo "killed surfpool pid ${pid}" || echo "surfpool pid ${pid} already gone"
+    rm -f "${state}"
+
+[doc("Audit Cargo.lock against the RustSec advisory database.")]
+audit:
+    cargo audit
+
+[doc("cargo clean.")]
+clean:
+    cargo clean
