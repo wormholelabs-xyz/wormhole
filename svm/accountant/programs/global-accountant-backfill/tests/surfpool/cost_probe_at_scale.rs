@@ -52,7 +52,7 @@ const TRANSFER_BATCH: usize = 18;
 /// Concurrent in-flight transactions.
 const MAX_CONCURRENT: usize = 16;
 /// Sample meta on every Nth tx; full meta on every tx is expensive at scale.
-const METADATA_SAMPLE_STRIDE: u64 = 50;
+const METADATA_SAMPLE_STRIDE: usize = 50;
 
 const LAMPORTS_PER_SOL: f64 = 1_000_000_000.0;
 const SOL_USD: f64 = 230.0;
@@ -380,7 +380,7 @@ fn surfpool_cost_probe_at_scale() {
                 match send_ix(&rpc, &payer, ix) {
                     Ok(sig) => {
                         *total_txs.lock().unwrap() += 1;
-                        if i as u64 % METADATA_SAMPLE_STRIDE == 0 {
+                        if i.is_multiple_of(METADATA_SAMPLE_STRIDE) {
                             if let Some(m) = fetch_meta(&rpc_url, &sig, new_buckets) {
                                 *total_fees.lock().unwrap() += m.fee_lamports;
                                 *total_rent.lock().unwrap() += m.rent_lamports;
