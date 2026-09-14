@@ -49,7 +49,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         &emitter,
         sequence,
         layout.guardian_set_index,
-        &layout.digest,
+        &layout.content_digest,
     );
     if pending_pda.key != &expected_pending_pda {
         return Err(err(GlobalAccountantError::InvalidPda));

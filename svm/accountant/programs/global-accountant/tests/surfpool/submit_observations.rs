@@ -12,8 +12,8 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
 use crate::common::{
-    assert_bucket_marked, attest_body, chain_registration_account, core_bridge_program_id,
-    derive_guardian_set_pda, double_keccak256, emitter, guardian_keys, guardian_set_account,
+    assert_bucket_marked, attest_body, chain_registration_account, content_digest,
+    core_bridge_program_id, derive_guardian_set_pda, emitter, guardian_keys, guardian_set_account,
     make_guardians, noreplay_authority_pda, sign_digest, signing_digest,
     submit_observations_ix_data, system_program_id, Guardian, GUARDIAN_COUNT, GUARDIAN_SET_INDEX,
     NOREPLAY_PROGRAM_ID, QUORUM,
@@ -83,7 +83,7 @@ fn surfpool_submit_observations_real_noreplay() {
 
     let emitter = emitter(0);
     let body = attest_body(CHAIN, emitter, SEQUENCE);
-    let digest = double_keccak256(&body);
+    let digest = content_digest(&body);
 
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let (guardian_set, _) = derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());

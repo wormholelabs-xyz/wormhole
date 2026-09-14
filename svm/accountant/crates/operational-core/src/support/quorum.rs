@@ -7,64 +7,63 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
-    parse_vaa_namespace_key, GlobalAccountantError, PendingObservationsLayout,
-    SubmitObservationsIxData, VaaBodyHeader, PENDING_OBSERVATIONS_SEED_PREFIX,
+    GlobalAccountantError, PendingObservationsLayout, SubmitObservationsIxData, Uint256,
+    VaaBodyHeader, PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::hash::keccak256;
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
 use crate::support::pda_init::create_pda_allow_prefund;
 
-// `submit_observations` data: `SubmitObservationsIxData` prefix then the VAA body.
-// Derived on-chain: signing digest `keccak256(prefix ‖ tx_hash ‖ body)` and dedup digest
-// `keccak256(keccak256(body))`.
-//
-// SECURITY: `(chain, emitter, sequence)` comes from the body header only.
+// `submit_observations` data is `SubmitObservationsIxData` (fixed size). Signing digest:
+// `keccak256(prefix ‖ tx_hash ‖ ix.fields_and_digest())`. Content digest:
+// `keccak256(keccak256(ix.fields_and_digest()))`, independent of `tx_hash`.
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 
-/// Header plus a non-empty payload; `payload[0]` is the Token Bridge action byte.
+/// Header plus a non-empty payload; used to bound a staged/inline VAA body elsewhere.
 pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
 
-/// Parsed prefix plus the body-header routing tuple. Build with [`Self::from_ix`],
-/// set `digest`, then call [`Self::populate_routing_from_body`].
+/// Build with [`Self::from_ix`].
 #[derive(Clone, Copy)]
 pub struct ParsedObservation {
-    /// `keccak256(keccak256(body))`, set by the caller.
-    pub digest: [u8; 32],
-    /// Body header `[8..10]`.
+    /// Pending-PDA seed and commit-log key.
+    pub content_digest: [u8; 32],
     pub chain: u16,
-    /// Body header `[10..42]`.
     pub emitter: [u8; 32],
-    /// Body header `[42..50]`.
     pub sequence: u64,
     pub guardian_set_index: u32,
     pub guardian_index: u8,
     pub signature: [u8; SECP256K1_SIGNATURE_LEN],
+    /// 0x02 is a no-op; anything but 0x01/0x02/0x03 is `UnknownTokenBridgePayload`.
+    pub action: u8,
+    /// Set only when `action` is a transfer.
+    pub token_chain: u16,
+    /// Set only when `action` is a transfer.
+    pub token_address: [u8; 32],
+    /// Set only when `action` is a transfer.
+    pub recipient_chain: u16,
+    /// Set only when `action` is a transfer.
+    pub amount: Uint256,
 }
 
 impl ParsedObservation {
-    /// From the instruction prefix. `digest` and routing fields stay zero.
-    pub fn from_ix(ix: &SubmitObservationsIxData) -> Self {
+    pub fn from_ix(ix: &SubmitObservationsIxData, content_digest: [u8; 32]) -> Self {
         Self {
-            digest: [0u8; 32],
-            chain: 0,
-            emitter: [0u8; 32],
-            sequence: 0,
+            content_digest,
+            chain: ix.chain(),
+            emitter: ix.emitter,
+            sequence: ix.sequence(),
             guardian_set_index: ix.guardian_set_index(),
             guardian_index: ix.guardian_index,
             signature: ix.signature,
+            action: ix.action,
+            token_chain: ix.token_chain(),
+            token_address: ix.token_address,
+            recipient_chain: ix.recipient_chain(),
+            amount: ix.amount,
         }
-    }
-
-    /// Set the routing tuple from the body header. `self.digest` must derive from this `body`.
-    pub fn populate_routing_from_body(&mut self, body: &[u8]) -> crate::ProgramResult {
-        let header = parse_vaa_namespace_key(body).map_err(err)?;
-        self.chain = header.chain;
-        self.emitter = header.emitter;
-        self.sequence = header.sequence;
-        Ok(())
     }
 }
 
@@ -76,15 +75,16 @@ pub enum PendingAction {
     Continue,
 }
 
-/// One record per `(chain, emitter, sequence, guardian_set_index, digest)`. A rotation
-/// or a fork opens a sibling; signatures never mix across sets.
+/// One record per `(chain, emitter, sequence, guardian_set_index, content_digest)`. A
+/// rotation or a fork opens a sibling, keeping each guardian set's signatures in its own
+/// record.
 pub fn derive_pending_pda(
     program_id: &Pubkey,
     chain: u16,
     emitter: &[u8; 32],
     sequence: u64,
     guardian_set_index: u32,
-    digest: &[u8; 32],
+    content_digest: &[u8; 32],
 ) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[
@@ -93,14 +93,14 @@ pub fn derive_pending_pda(
             emitter,
             &sequence.to_be_bytes(),
             &guardian_set_index.to_be_bytes(),
-            digest,
+            content_digest,
         ],
         program_id,
     )
 }
 
 /// `InvalidPda` unless `pending_pda` is at the address for
-/// `(chain, emitter, sequence, guardian_set_index, digest)`.
+/// `(chain, emitter, sequence, guardian_set_index, content_digest)`.
 fn verify_pending_pda_address(
     program_id: &Pubkey,
     pending_pda: &AccountInfo,
@@ -108,7 +108,7 @@ fn verify_pending_pda_address(
     emitter: &[u8; 32],
     sequence: u64,
     guardian_set_index: u32,
-    digest: &[u8; 32],
+    content_digest: &[u8; 32],
 ) -> crate::ProgramResult {
     let (expected, _bump) = derive_pending_pda(
         program_id,
@@ -116,7 +116,7 @@ fn verify_pending_pda_address(
         emitter,
         sequence,
         guardian_set_index,
-        digest,
+        content_digest,
     );
     if pending_pda.key != &expected {
         return Err(err(GlobalAccountantError::InvalidPda));
@@ -147,7 +147,7 @@ pub fn decide_pending_action(
         &parsed.emitter,
         parsed.sequence,
         parsed.guardian_set_index,
-        &parsed.digest,
+        &parsed.content_digest,
     )?;
 
     // Redundant with the address check: the seeds already fix both fields.
@@ -155,7 +155,7 @@ pub fn decide_pending_action(
     if existing.guardian_set_index != parsed.guardian_set_index {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
-    if existing.digest != parsed.digest {
+    if existing.content_digest != parsed.content_digest {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     Ok(PendingAction::Continue)
@@ -208,7 +208,7 @@ fn create_pending_pda<'info>(
         &parsed.emitter,
         parsed.sequence,
         parsed.guardian_set_index,
-        &parsed.digest,
+        &parsed.content_digest,
     );
 
     let chain_be = parsed.chain.to_be_bytes();
@@ -221,7 +221,7 @@ fn create_pending_pda<'info>(
         &parsed.emitter,
         &sequence_be,
         &index_be,
-        &parsed.digest,
+        &parsed.content_digest,
         &bump_seed,
     ];
 
@@ -236,7 +236,7 @@ fn create_pending_pda<'info>(
     let layout = PendingObservationsLayout::new(
         parsed.chain,
         parsed.guardian_set_index,
-        parsed.digest,
+        parsed.content_digest,
         submitter.key.to_bytes(),
     );
     accounts::store(pending_pda, &layout)

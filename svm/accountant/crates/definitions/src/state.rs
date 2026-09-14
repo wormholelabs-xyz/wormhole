@@ -46,7 +46,7 @@ impl ModificationKind {
 /// | 2      | 2    | chain              |
 /// | 4      | 4    | guardian_set_index |
 /// | 8      | 16   | signatures (128-bit bitmap as 4 LE `u32` words; bit N == guardian-index N signed) |
-/// | 24     | 32   | digest             |
+/// | 24     | 32   | content_digest     |
 /// | 56     | 32   | payer              |
 ///
 /// The bitmap caps the guardian set at [`Self::MAX_GUARDIANS`], as wormchain's `u128`
@@ -60,7 +60,7 @@ pub struct PendingObservationsLayout {
     pub chain: u16,
     pub guardian_set_index: u32,
     pub signatures: [u32; 4],
-    pub digest: [u8; 32],
+    pub content_digest: [u8; 32],
     pub payer: Pubkey,
 }
 
@@ -112,15 +112,20 @@ impl AccountLayout for RegisterChainLayout {
 }
 
 impl PendingObservationsLayout {
-    /// Fresh record with no signatures.
-    pub fn new(chain: u16, guardian_set_index: u32, digest: [u8; 32], payer: Pubkey) -> Self {
+    /// New record with a zeroed signature bitmap.
+    pub fn new(
+        chain: u16,
+        guardian_set_index: u32,
+        content_digest: [u8; 32],
+        payer: Pubkey,
+    ) -> Self {
         Self {
             tag: Self::TAG,
             _pad0: 0,
             chain,
             guardian_set_index,
             signatures: [0; 4],
-            digest,
+            content_digest,
             payer,
         }
     }
@@ -170,7 +175,7 @@ const _: () = {
     assert!(offset_of!(PendingObservationsLayout, chain) == 2);
     assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 4);
     assert!(offset_of!(PendingObservationsLayout, signatures) == 8);
-    assert!(offset_of!(PendingObservationsLayout, digest) == 24);
+    assert!(offset_of!(PendingObservationsLayout, content_digest) == 24);
     assert!(offset_of!(PendingObservationsLayout, payer) == 56);
     assert!(PendingObservationsLayout::LEN == 88);
     assert!(PendingObservationsLayout::MAX_GUARDIANS == 32 * 4);

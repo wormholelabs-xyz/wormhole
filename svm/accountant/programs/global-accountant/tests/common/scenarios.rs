@@ -245,7 +245,7 @@ pub struct ObsScenario {
     pub emitter: [u8; 32],
     pub sequence: u64,
     pub body: Vec<u8>,
-    pub digest: [u8; 32],
+    pub content_digest: [u8; 32],
     pub signing_digest: [u8; 32],
     pub guardian_set_index: u32,
     pub guardians: Vec<Guardian>,
@@ -304,7 +304,7 @@ impl ObsScenario {
             emitter,
             sequence,
             body: Vec::new(),
-            digest: [0; 32],
+            content_digest: [0; 32],
             signing_digest: [0; 32],
             guardian_set_index,
             guardians: make_guardians(guardian_count, seed),
@@ -318,7 +318,7 @@ impl ObsScenario {
     }
 
     pub fn set_body(&mut self, body: Vec<u8>) {
-        self.digest = double_keccak256(&body);
+        self.content_digest = content_digest(&body);
         self.signing_digest = signing_digest(&body);
         self.pending_pda = derive_pending_pda(
             &program_id(),
@@ -326,7 +326,7 @@ impl ObsScenario {
             &self.emitter,
             self.sequence,
             self.guardian_set_index,
-            &self.digest,
+            &self.content_digest,
         )
         .0;
         self.body = body;

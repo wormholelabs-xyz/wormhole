@@ -8,9 +8,17 @@ use bytemuck::{Pod, Zeroable};
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
-const ACTION_TRANSFER: u8 = 0x01;
-const ACTION_ATTEST: u8 = 0x02;
-const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
+pub const ACTION_TRANSFER: u8 = 0x01;
+pub const ACTION_ATTEST: u8 = 0x02;
+pub const ACTION_TRANSFER_WITH_PAYLOAD: u8 = 0x03;
+
+pub const fn is_transfer_action(action: u8) -> bool {
+    matches!(action, ACTION_TRANSFER | ACTION_TRANSFER_WITH_PAYLOAD)
+}
+
+pub const fn is_attest_action(action: u8) -> bool {
+    action == ACTION_ATTEST
+}
 
 /// Zero-copy view of the 51-byte VAA body header. All fields are byte arrays,
 /// so the struct has alignment 1 and no padding; big-endian decoding happens

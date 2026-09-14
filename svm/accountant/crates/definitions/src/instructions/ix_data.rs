@@ -5,6 +5,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
+use crate::primitives::Uint256;
 
 /// Fixed prefix followed by a `body_len`-framed body.
 pub trait IxPrefix: Pod {
@@ -29,7 +30,8 @@ pub fn split_body<P: IxPrefix>(data: &[u8]) -> Result<(&P, &[u8]), GlobalAccount
     Ok((prefix, body))
 }
 
-/// `submit_observations` prefix (104 bytes).
+/// `submit_observations` data: 245 bytes, fixed size. Carries only the fields this
+/// program uses; every other real-body field folds into `digest`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct SubmitObservationsIxData {
@@ -40,18 +42,59 @@ pub struct SubmitObservationsIxData {
     pub signature: [u8; 65],
     /// Source-chain transaction id; part of the signing digest only.
     pub tx_hash: [u8; 32],
-    pub body_len: [u8; 2],
+    /// Token Bridge action byte. 0x02 is a no-op; anything but 0x01/0x02/0x03 is
+    /// `UnknownTokenBridgePayload`.
+    pub action: u8,
+    /// Big-endian.
+    pub chain: [u8; 2],
+    pub emitter: [u8; 32],
+    /// Big-endian.
+    pub sequence: [u8; 8],
+    /// Big-endian. Set only when `action` is a transfer.
+    pub token_chain: [u8; 2],
+    /// Set only when `action` is a transfer.
+    pub token_address: [u8; 32],
+    /// Big-endian. Set only when `action` is a transfer.
+    pub recipient_chain: [u8; 2],
+    /// Set only when `action` is a transfer.
+    pub amount: Uint256,
+    /// `double_keccak256` of the real VAA body.
+    pub digest: [u8; 32],
 }
 
 impl SubmitObservationsIxData {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
     pub fn guardian_set_index(&self) -> u32 {
         u32::from_le_bytes(self.guardian_set_index)
     }
-}
 
-impl IxPrefix for SubmitObservationsIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
+    pub fn chain(&self) -> u16 {
+        u16::from_be_bytes(self.chain)
+    }
+
+    pub fn sequence(&self) -> u64 {
+        u64::from_be_bytes(self.sequence)
+    }
+
+    pub fn token_chain(&self) -> u16 {
+        u16::from_be_bytes(self.token_chain)
+    }
+
+    pub fn recipient_chain(&self) -> u16 {
+        u16::from_be_bytes(self.recipient_chain)
+    }
+
+    /// Exact-length view.
+    pub fn from_bytes(data: &[u8]) -> Result<&Self, GlobalAccountantError> {
+        bytemuck::try_from_bytes(data).map_err(|_| GlobalAccountantError::InvalidInstructionData)
+    }
+
+    /// `action ‖ chain ‖ emitter ‖ sequence ‖ token_chain ‖ token_address ‖
+    /// recipient_chain ‖ amount ‖ digest`. Hashed for the signing digest and the content
+    /// digest.
+    pub fn fields_and_digest(&self) -> &[u8] {
+        &bytemuck::bytes_of(self)[core::mem::offset_of!(Self, action)..]
     }
 }
 
@@ -135,11 +178,19 @@ impl ClosePendingIxData {
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(SubmitObservationsIxData::LEN == 104);
+    assert!(SubmitObservationsIxData::LEN == 245);
     assert!(offset_of!(SubmitObservationsIxData, guardian_index) == 4);
     assert!(offset_of!(SubmitObservationsIxData, signature) == 5);
     assert!(offset_of!(SubmitObservationsIxData, tx_hash) == 70);
-    assert!(offset_of!(SubmitObservationsIxData, body_len) == 102);
+    assert!(offset_of!(SubmitObservationsIxData, action) == 102);
+    assert!(offset_of!(SubmitObservationsIxData, chain) == 103);
+    assert!(offset_of!(SubmitObservationsIxData, emitter) == 105);
+    assert!(offset_of!(SubmitObservationsIxData, sequence) == 137);
+    assert!(offset_of!(SubmitObservationsIxData, token_chain) == 145);
+    assert!(offset_of!(SubmitObservationsIxData, token_address) == 147);
+    assert!(offset_of!(SubmitObservationsIxData, recipient_chain) == 179);
+    assert!(offset_of!(SubmitObservationsIxData, amount) == 181);
+    assert!(offset_of!(SubmitObservationsIxData, digest) == 213);
     assert!(SubmitVaasIxData::LEN == 3);
     assert!(RegisterChainIxData::LEN == 3);
     assert!(offset_of!(RegisterChainIxData, body_len) == 1);
@@ -217,19 +268,55 @@ mod tests {
     }
 
     #[test]
-    fn submit_observations_prefix_round_trips() {
-        let mut prefix = SubmitObservationsIxData::zeroed();
-        prefix.guardian_set_index = 4u32.to_le_bytes();
-        prefix.guardian_index = 12;
-        prefix.signature[64] = 1;
-        prefix.tx_hash = [0xCC; 32];
-        prefix.body_len = 52u16.to_le_bytes();
-        let data = framed(&prefix, &[0u8; 52]);
-        let (view, body) = split_body::<SubmitObservationsIxData>(&data).unwrap();
+    fn submit_observations_round_trips() {
+        let mut ix = SubmitObservationsIxData::zeroed();
+        ix.guardian_set_index = 4u32.to_le_bytes();
+        ix.guardian_index = 12;
+        ix.signature[64] = 1;
+        ix.tx_hash = [0xCC; 32];
+        ix.action = 0x01;
+        ix.chain = 2u16.to_be_bytes();
+        ix.emitter = [0xEE; 32];
+        ix.sequence = 7u64.to_be_bytes();
+        ix.token_chain = 3u16.to_be_bytes();
+        ix.token_address = [0x33; 32];
+        ix.recipient_chain = 5u16.to_be_bytes();
+        ix.amount = Uint256::from_u128(1_000);
+        ix.digest = [0x55; 32];
+
+        let bytes = bytemuck::bytes_of(&ix).to_vec();
+        let view = SubmitObservationsIxData::from_bytes(&bytes).unwrap();
         assert_eq!(view.guardian_set_index(), 4);
         assert_eq!(view.guardian_index, 12);
         assert_eq!(view.signature[64], 1);
         assert_eq!(view.tx_hash, [0xCC; 32]);
-        assert_eq!(body.len(), 52);
+        assert_eq!(view.action, 0x01);
+        assert_eq!(view.chain(), 2);
+        assert_eq!(view.emitter, [0xEE; 32]);
+        assert_eq!(view.sequence(), 7);
+        assert_eq!(view.token_chain(), 3);
+        assert_eq!(view.token_address, [0x33; 32]);
+        assert_eq!(view.recipient_chain(), 5);
+        assert_eq!(view.amount, Uint256::from_u128(1_000));
+        assert_eq!(view.digest, [0x55; 32]);
+
+        let short = &bytes[..bytes.len() - 1];
+        assert!(SubmitObservationsIxData::from_bytes(short).is_err());
+        let long = [bytes.as_slice(), &[0]].concat();
+        assert!(SubmitObservationsIxData::from_bytes(&long).is_err());
+    }
+
+    #[test]
+    fn fields_and_digest_is_contiguous_from_action() {
+        let mut ix = SubmitObservationsIxData::zeroed();
+        ix.action = 0x03;
+        ix.digest = [0x99; 32];
+        let slice = ix.fields_and_digest();
+        assert_eq!(
+            slice.len(),
+            SubmitObservationsIxData::LEN - core::mem::offset_of!(SubmitObservationsIxData, action)
+        );
+        assert_eq!(slice[0], 0x03);
+        assert_eq!(&slice[slice.len() - 32..], &[0x99; 32]);
     }
 }

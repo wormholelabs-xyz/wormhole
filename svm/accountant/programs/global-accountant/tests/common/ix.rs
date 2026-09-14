@@ -1,8 +1,9 @@
 use global_accountant_definitions::{
-    ClosePendingIxData, GovernanceHeader, Instruction, ModifyBalanceIxData, ModifyBalancePayload,
-    PostSignaturesIxData, RegisterChainIxData, RegisterChainPayload, SetComputeUnitLimitData,
-    SubmitObservationsIxData, SubmitVaasIxData, TokenBridgeTransfer, Uint256,
-    UpgradeContractIxData, UpgradeContractPayload, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
+    parse_token_bridge_payload, ClosePendingIxData, GovernanceHeader, Instruction,
+    ModifyBalanceIxData, ModifyBalancePayload, PostSignaturesIxData, RegisterChainIxData,
+    RegisterChainPayload, SetComputeUnitLimitData, SubmitObservationsIxData, SubmitVaasIxData,
+    TokenBridgeAction, TokenBridgeTransfer, Uint256, UpgradeContractIxData, UpgradeContractPayload,
+    VaaBodyHeader, ACTION_ATTEST, ACTION_TRANSFER, SUBMIT_OBSERVATION_PREFIX,
 };
 use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
 use solana_pubkey::Pubkey;
@@ -22,7 +23,7 @@ pub fn vaa_header(emitter_chain: u16, emitter_address: [u8; 32], sequence: u64) 
 
 pub fn attest_body(emitter_chain: u16, emitter_address: [u8; 32], sequence: u64) -> Vec<u8> {
     let mut body = vaa_header(emitter_chain, emitter_address, sequence);
-    body.push(0x02);
+    body.push(ACTION_ATTEST);
     body
 }
 
@@ -36,7 +37,7 @@ pub fn transfer_body(
     recipient_chain: u16,
 ) -> Vec<u8> {
     let transfer = TokenBridgeTransfer::new(
-        0x01,
+        ACTION_TRANSFER,
         amount,
         token_address,
         token_chain,
@@ -120,15 +121,63 @@ pub fn upgrade_contract_body(
     body
 }
 
+/// Builds the `SubmitObservationsIxData` a guardian would send for `body`.
+pub fn observation_ix_from_body(
+    guardian_set_index: u32,
+    guardian_index: u8,
+    signature: [u8; 65],
+    tx_hash: [u8; 32],
+    body: &[u8],
+) -> SubmitObservationsIxData {
+    let (header, payload) = VaaBodyHeader::split(body).expect("test body has a valid VAA header");
+    let key = header.namespace_key();
+    let action_byte = *payload.first().expect("test body has a non-empty payload");
+    let (token_chain, token_address, recipient_chain, amount) =
+        match parse_token_bridge_payload(body).expect("test body has a valid token bridge payload")
+        {
+            TokenBridgeAction::Transfer {
+                amount,
+                token_chain,
+                token_address,
+                recipient_chain,
+            } => (token_chain, token_address, recipient_chain, amount),
+            TokenBridgeAction::Attest | TokenBridgeAction::Other(_) => {
+                (0, [0u8; 32], 0, Uint256::ZERO)
+            }
+        };
+    SubmitObservationsIxData {
+        guardian_set_index: guardian_set_index.to_le_bytes(),
+        guardian_index,
+        signature,
+        tx_hash,
+        action: action_byte,
+        chain: key.chain.to_be_bytes(),
+        emitter: key.emitter,
+        sequence: key.sequence.to_be_bytes(),
+        token_chain: token_chain.to_be_bytes(),
+        token_address,
+        recipient_chain: recipient_chain.to_be_bytes(),
+        amount,
+        digest: double_keccak256(body),
+    }
+}
+
+/// Content digest for `body`, matching the on-chain pending-PDA key.
+pub fn content_digest(body: &[u8]) -> [u8; 32] {
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], TX_HASH, body);
+    double_keccak256(ix.fields_and_digest())
+}
+
 pub fn signing_digest(body: &[u8]) -> [u8; 32] {
     signing_digest_with_tx_hash(&TX_HASH, body)
 }
 
 pub fn signing_digest_with_tx_hash(tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], *tx_hash, body);
     accountant_operational_core::hash::observation_signing_digest(
         SUBMIT_OBSERVATION_PREFIX,
         tx_hash,
-        body,
+        ix.fields_and_digest(),
     )
 }
 
@@ -167,18 +216,17 @@ pub fn submit_observations_ix_data_with_tx_hash(
     tx_hash: &[u8; 32],
     body: &[u8],
 ) -> Vec<u8> {
-    let prefix = SubmitObservationsIxData {
-        guardian_set_index: guardian_set_index.to_le_bytes(),
+    let ix = observation_ix_from_body(
+        guardian_set_index,
         guardian_index,
         signature,
-        tx_hash: *tx_hash,
-        body_len: (body.len() as u16).to_le_bytes(),
-    };
-    framed(
-        Instruction::SubmitObservations,
-        bytemuck::bytes_of(&prefix),
+        *tx_hash,
         body,
-    )
+    );
+    let mut data = Vec::with_capacity(1 + SubmitObservationsIxData::LEN);
+    data.push(Instruction::SubmitObservations as u8);
+    data.extend_from_slice(bytemuck::bytes_of(&ix));
+    data
 }
 
 pub fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {

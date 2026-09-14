@@ -12,41 +12,27 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use accountant_operational_core::cpi::noreplay;
 use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::support::commit_log;
-use accountant_operational_core::support::quorum::{self, ParsedObservation, BODY_MIN_LEN};
+use accountant_operational_core::support::quorum::{self, ParsedObservation};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
-    split_body, GlobalAccountantError, NoReplayNamespace, PendingObservationsLayout,
-    SubmitObservationsIxData, SUBMIT_OBSERVATION_PREFIX,
+    is_attest_action, is_transfer_action, GlobalAccountantError, NoReplayNamespace,
+    PendingObservationsLayout, SubmitObservationsIxData, SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
 use crate::instructions::transfer;
 use accountant_operational_core::accounts::chain_registration;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    // Data (after the 1-byte instruction discriminator):
-    //   0..4     guardian_set_index (LE u32)
-    //   4        guardian_index
-    //   5..70    signature (r ‖ s ‖ recovery_id)
-    //   70..102  tx_hash (source-chain tx id; feeds the signing digest only)
-    //   102..104 body_len (LE u16)
-    //   104..    body_bytes (VAA body: envelope + token-bridge payload, big-endian)
-    let (ix, body_bytes) = split_body::<SubmitObservationsIxData>(data).map_err(err)?;
-    if body_bytes.len() < BODY_MIN_LEN {
-        return Err(err(GlobalAccountantError::InvalidInstructionData));
-    }
+    let ix = SubmitObservationsIxData::from_bytes(data).map_err(err)?;
     let tx_hash = &ix.tx_hash;
+    let fields = ix.fields_and_digest();
 
-    let mut parsed = ParsedObservation::from_ix(ix);
+    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, fields);
+    // Pending-PDA / commit-log key. Independent of `tx_hash`.
+    let content_digest = double_keccak256(fields);
 
-    // Dedup digest keys the pending PDA, NoReplay slot, and commit log.
-    parsed.digest = double_keccak256(body_bytes);
-
-    // SECURITY: routing tuple comes from the body header, never from caller data.
-    parsed.populate_routing_from_body(body_bytes)?;
-
-    // Signing digest differs from `parsed.digest`; see `observation_signing_digest`.
-    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, body_bytes);
+    let parsed = ParsedObservation::from_ix(ix, content_digest);
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` submitter (rent payer)
@@ -127,19 +113,26 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,
-        &parsed.digest,
+        &parsed.content_digest,
         parsed.guardian_set_index,
     );
 
-    // The emitter chain is the transfer source chain.
-    transfer::apply_from_body(
-        program_id,
-        submitter,
-        source_account_pda,
-        dest_account_pda,
-        parsed.chain,
-        body_bytes,
-    )?;
+    // An unknown action fails here, rolling back the NoReplay mark above.
+    if is_transfer_action(parsed.action) {
+        transfer::apply_transfer(
+            program_id,
+            submitter,
+            source_account_pda,
+            dest_account_pda,
+            parsed.chain,
+            parsed.recipient_chain,
+            parsed.token_chain,
+            &parsed.token_address,
+            parsed.amount,
+        )?;
+    } else if !is_attest_action(parsed.action) {
+        return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
+    }
 
     let recorded_payer = layout.payer;
     quorum::close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;

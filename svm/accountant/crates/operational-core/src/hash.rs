@@ -8,6 +8,8 @@ pub(crate) fn keccak256(data: &[u8]) -> [u8; 32] {
 }
 
 /// `keccak256(keccak256(body))`: the VAA digest that guardians sign and the Shim checks.
+/// Also used as `submit_observations`'s content digest, over
+/// `SubmitObservationsIxData::fields_and_digest()`.
 pub fn double_keccak256(body: &[u8]) -> [u8; 32] {
     let inner = keccak256(body);
     keccak256(&inner)

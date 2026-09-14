@@ -58,7 +58,7 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
     let mut expected = PendingObservationsLayout::new(
         scenario.chain,
         scenario.guardian_set_index,
-        scenario.digest,
+        scenario.content_digest,
         SUBMITTER.to_bytes(),
     );
     expected.signatures = [0b1, 0, 0, 0];
@@ -174,7 +174,7 @@ fn routing_comes_from_body_not_caller_prefix() {
         &[0xFFu8; 32],
         0x9999,
         GUARDIAN_SET_INDEX,
-        &scenario.digest,
+        &scenario.content_digest,
     )
     .0;
     assert_ne!(attacker_pending, scenario.pending_pda);
@@ -266,8 +266,8 @@ fn rejects() {
             "legacy bare-digest signature",
             |_| {
                 let s = fresh(0x71);
-                assert_ne!(s.digest, s.signing_digest);
-                let sig = sign_digest(&s.guardians[0], &s.digest);
+                assert_ne!(s.content_digest, s.signing_digest);
+                let sig = sign_digest(&s.guardians[0], &s.content_digest);
                 let ix = signed(&s, 0, sig, &s.body);
                 let accounts = s.initial_accounts();
                 let metas = s.account_metas();
@@ -600,7 +600,7 @@ fn guardian_set_rotation_opens_sibling_pending_and_tracks_live_size() {
         &old.emitter,
         old.sequence,
         5,
-        &old.digest,
+        &old.content_digest,
     )
     .0;
     assert_ne!(sibling, old.pending_pda);
@@ -670,14 +670,14 @@ fn fork_observations_accumulate_in_sibling_pendings() {
     let mut body = d1.body.clone();
     body[50] = 0xA5;
     d2.set_body(body);
-    assert_ne!(d2.digest, d1.digest);
+    assert_ne!(d2.content_digest, d1.content_digest);
     assert_ne!(d2.pending_pda, d1.pending_pda);
     accounts.push((d2.pending_pda, uninitialised_pda_account()));
 
     let first = d2.submit_once(&mollusk, accounts.clone(), 1);
     assert_success(&first, "first sibling observation");
     let sibling = pending_layout(find_account(&first.resulting_accounts, &d2.pending_pda));
-    assert_eq!(sibling.digest, d2.digest);
+    assert_eq!(sibling.content_digest, d2.content_digest);
     assert_eq!(sibling.signatures, [0b10, 0, 0, 0]);
     assert_eq!(sibling.guardian_set_index, d2.guardian_set_index);
     assert_eq!(
@@ -691,7 +691,7 @@ fn fork_observations_accumulate_in_sibling_pendings() {
     let stranded = find_account(&accounts, &d1.pending_pda);
     assert_eq!(stranded.owner, program_id());
     assert_eq!(pending_layout(stranded).num_signatures(), 7);
-    assert_eq!(pending_layout(stranded).digest, d1.digest);
+    assert_eq!(pending_layout(stranded).content_digest, d1.content_digest);
 }
 
 #[test]
