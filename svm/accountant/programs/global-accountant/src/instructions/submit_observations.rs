@@ -23,14 +23,31 @@ use crate::err;
 use crate::instructions::transfer;
 use accountant_operational_core::accounts::chain_registration;
 
+/// `data`: `SubmitObservationsIxData`, 245 bytes fixed.
+///
+/// ```text
+/// 0    4   guardian_set_index (LE u32)
+/// 4    1   guardian_index
+/// 5    65  signature (r ‖ s ‖ recovery_id)
+/// 70   32  tx_hash
+/// 102  1   action
+/// 103  2   chain (BE u16)
+/// 105  32  emitter
+/// 137  8   sequence (BE u64)
+/// 145  2   token_chain (BE u16)
+/// 147  32  token_address
+/// 179  2   recipient_chain (BE u16)
+/// 181  32  amount (BE Uint256)
+/// 213  32  digest
+/// ```
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let ix = SubmitObservationsIxData::from_bytes(data).map_err(err)?;
     let tx_hash = &ix.tx_hash;
     let fields = ix.fields_and_digest();
 
-    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, fields);
+    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, &fields);
     // Pending-PDA / commit-log key. Independent of `tx_hash`.
-    let content_digest = double_keccak256(fields);
+    let content_digest = double_keccak256(&fields);
 
     let parsed = ParsedObservation::from_ix(ix, content_digest);
 

@@ -91,11 +91,38 @@ impl SubmitObservationsIxData {
     }
 
     /// `action ‖ chain ‖ emitter ‖ sequence ‖ token_chain ‖ token_address ‖
-    /// recipient_chain ‖ amount ‖ digest`. Hashed for the signing digest and the content
-    /// digest.
-    pub fn fields_and_digest(&self) -> &[u8] {
-        &bytemuck::bytes_of(self)[core::mem::offset_of!(Self, action)..]
+    /// recipient_chain ‖ amount ‖ digest`, 143 bytes. Hashed for the signing digest and
+    /// the content digest.
+    pub fn fields_and_digest(&self) -> [u8; 143] {
+        bytemuck::cast(ObservationFieldsAndDigest {
+            action: self.action,
+            chain: self.chain,
+            emitter: self.emitter,
+            sequence: self.sequence,
+            token_chain: self.token_chain,
+            token_address: self.token_address,
+            recipient_chain: self.recipient_chain,
+            amount: self.amount,
+            digest: self.digest,
+        })
     }
+}
+
+/// The exact fields `fields_and_digest` hashes, as their own `Pod` layout. Naming every
+/// field in a struct literal is exhaustiveness-checked by the compiler; `bytemuck::cast`
+/// then reinterprets it as bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+struct ObservationFieldsAndDigest {
+    action: u8,
+    chain: [u8; 2],
+    emitter: [u8; 32],
+    sequence: [u8; 8],
+    token_chain: [u8; 2],
+    token_address: [u8; 32],
+    recipient_chain: [u8; 2],
+    amount: Uint256,
+    digest: [u8; 32],
 }
 
 /// `submit_vaas` prefix (3 bytes).
@@ -179,6 +206,7 @@ impl ClosePendingIxData {
 const _: () = {
     use core::mem::offset_of;
     assert!(SubmitObservationsIxData::LEN == 245);
+    assert!(core::mem::size_of::<ObservationFieldsAndDigest>() == 143);
     assert!(offset_of!(SubmitObservationsIxData, guardian_index) == 4);
     assert!(offset_of!(SubmitObservationsIxData, signature) == 5);
     assert!(offset_of!(SubmitObservationsIxData, tx_hash) == 70);
@@ -307,16 +335,28 @@ mod tests {
     }
 
     #[test]
-    fn fields_and_digest_is_contiguous_from_action() {
+    fn fields_and_digest_packs_fields_in_order() {
         let mut ix = SubmitObservationsIxData::zeroed();
         ix.action = 0x03;
+        ix.chain = 7u16.to_be_bytes();
+        ix.emitter = [0x11; 32];
+        ix.sequence = 9u64.to_be_bytes();
+        ix.token_chain = 2u16.to_be_bytes();
+        ix.token_address = [0x22; 32];
+        ix.recipient_chain = 5u16.to_be_bytes();
+        ix.amount = Uint256::from_u128(4_242);
         ix.digest = [0x99; 32];
-        let slice = ix.fields_and_digest();
-        assert_eq!(
-            slice.len(),
-            SubmitObservationsIxData::LEN - core::mem::offset_of!(SubmitObservationsIxData, action)
-        );
-        assert_eq!(slice[0], 0x03);
-        assert_eq!(&slice[slice.len() - 32..], &[0x99; 32]);
+
+        let packed = ix.fields_and_digest();
+        assert_eq!(packed.len(), 143);
+        assert_eq!(packed[0], 0x03);
+        assert_eq!(&packed[1..3], 7u16.to_be_bytes());
+        assert_eq!(&packed[3..35], &[0x11; 32]);
+        assert_eq!(&packed[35..43], 9u64.to_be_bytes());
+        assert_eq!(&packed[43..45], 2u16.to_be_bytes());
+        assert_eq!(&packed[45..77], &[0x22; 32]);
+        assert_eq!(&packed[77..79], 5u16.to_be_bytes());
+        assert_eq!(&packed[79..111], Uint256::from_u128(4_242).0);
+        assert_eq!(&packed[111..143], &[0x99; 32]);
     }
 }
