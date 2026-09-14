@@ -24,6 +24,13 @@ use crate::instructions::transfer;
 use accountant_operational_core::accounts::chain_registration;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    // Data (after the 1-byte instruction discriminator):
+    //   0..4     guardian_set_index (LE u32)
+    //   4        guardian_index
+    //   5..70    signature (r ‖ s ‖ recovery_id)
+    //   70..102  tx_hash (source-chain tx id; feeds the signing digest only)
+    //   102..104 body_len (LE u16)
+    //   104..    body_bytes (VAA body: envelope + token-bridge payload, big-endian)
     let (ix, body_bytes) = split_body::<SubmitObservationsIxData>(data).map_err(err)?;
     if body_bytes.len() < BODY_MIN_LEN {
         return Err(err(GlobalAccountantError::InvalidInstructionData));
