@@ -1,0 +1,90 @@
+[package]
+name = "global-accountant"
+description = "Wormhole Global Accountant Solana program (Anchor)."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Anchor convention (inverted polarity from the old `bpf-entrypoint` opt-in):
+# the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library/CPI/test consumption. `idl-build` is deliberately never enabled —
+# Anchor's auto-IDL would be partial/inaccurate for the custom offset-0 tag
+# + bytemuck layouts this program keeps (migration plan §7.7), so IDL codegen
+# stays off rather than shipping a misleading artifact.
+default = []
+no-entrypoint = []
+
+[dependencies]
+accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+borsh.workspace = true
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+# See the identical dependency in `crates/operational-core/Cargo.toml`:
+# `register_chain`/`modify_balance` also call `find_program_address` directly.
+# Aliased (rather than the plain `solana-pubkey` name) so this `3.x` instance
+# never collides with the unrelated `4.1` instance the dev-dependencies below
+# use for mollusk/test plumbing — Cargo forbids depending on the identical
+# resolved package under two different names from the same crate, so the
+# alias must be spelled identically in both `[dependencies]` and
+# `[dev-dependencies]` (see `solana-pubkey-v3` below).
+solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
+
+[dev-dependencies]
+accountant-test-fixtures.workspace = true
+wormhole-svm-definitions.workspace = true
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-keccak-hasher.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+# Same aliased `3.x` instance as `[dependencies]` above — used directly by
+# `tests/noreplay_derivation.rs` to construct the exact `Pubkey` type
+# `accountant_operational_core::cpi::noreplay::derive_bucket_pda`
+# takes, distinct from the `4.1` `solana-pubkey` used for this test's own
+# host-side reference derivation.
+solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
+global-accountant = { path = ".", features = ["no-entrypoint"] }
+# Pure-Rust secp256k1. Tests sign synthetic guardian observations to populate
+# the pending bitmap and exercise the on-chain `sol_secp256k1_recover` path.
+# Already in the workspace lock via mollusk's transitive deps; pinning the
+# major version keeps the host-side test build aligned.
+libsecp256k1 = "0.6"
+# Surfpool E2E spike — talks to a subprocess `surfpool start` over JSON-RPC.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+serde_json.workspace = true
+# `ProgramResult::Failure` carries a `solana_program_error::ProgramError`; tests
+# name it to assert builtin error codes (e.g. `InvalidAccountData`) via the full
+# `u64` encoding.
+solana-program-error = "=3.0.1"
+# Verifies the SHA-256 of each `accountant-test-fixtures` program binary before
+# mollusk loads it.
+sha2 = "=0.10.9"
+# Base64 decoder for the surfpool e2e `meta.logMessages` walk that asserts
+# the canonical commit log emitted by `support::commit_log`. Already in
+# the workspace lock graph via solana-client transitively; pinned per the
+# supply-chain rule.
+base64 = "=0.22.1"
+# BPF upgradeable loader account layouts (`UpgradeableLoaderState`) for the
+# surfpool upgrade e2e, serialized with bincode as the loader does. Both crates
+# were already in the lock graph; pinned per the supply-chain rule.
+solana-loader-v3-interface = { version = "=6.1.1", features = ["bincode"] }
+bincode = "=1.3.3"
+# Names the `Signature` type the surfpool harness returns from `send`; already locked.
+solana-signature = "=3.4.1"
+
+[lints]
+workspace = true
