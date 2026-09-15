@@ -62,6 +62,8 @@ pub enum GlobalAccountantError {
     GuardianSetTooLarge = 30,
     /// `RegisterChain` PDA already exists for this sequence.
     DuplicateRegisterChain = 31,
+    /// Token Bridge transfer payload exceeds `MAX_TRANSFER_PAYLOAD_LEN`.
+    TransferPayloadTooLarge = 32,
 }
 
 impl From<GlobalAccountantError> for u32 {

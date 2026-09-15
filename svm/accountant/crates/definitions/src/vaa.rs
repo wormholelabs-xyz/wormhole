@@ -109,6 +109,9 @@ pub struct TokenBridgeTransfer {
     pub fee: [u8; 32],
 }
 
+/// Maximum arbitrary payload past the fixed 133-byte head, for `TransferWithPayload`.
+pub const MAX_TRANSFER_PAYLOAD_LEN: usize = 2000;
+
 const _: () = {
     use core::mem::offset_of;
     assert!(TokenBridgeTransfer::LEN == 133);
@@ -203,8 +206,10 @@ pub enum TokenBridgeAction {
 /// Layouts: [`VaaBodyHeader`], [`TokenBridgeTransfer`].
 ///
 /// SECURITY: precondition `body.len() >= 52`; transfer actions require
-/// `payload.len() >= 133`. Short input returns `InvalidInstructionData`.
-/// Every field read is bounds-checked; the function cannot panic.
+/// `payload.len() >= 133` and `payload.len() - 133 <= MAX_TRANSFER_PAYLOAD_LEN`. Short
+/// input returns `InvalidInstructionData`; oversized input returns
+/// `TransferPayloadTooLarge`. Every field read is bounds-checked; the function cannot
+/// panic.
 ///
 /// SECURITY: the guardian accountant accepts action 0x01 payloads by the same
 /// `>= 133` rule. Do not tighten to `== 133`: a stricter parser here would
@@ -220,6 +225,9 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
             let head = payload
                 .get(..TokenBridgeTransfer::LEN)
                 .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+            if payload.len() - TokenBridgeTransfer::LEN > MAX_TRANSFER_PAYLOAD_LEN {
+                return Err(GlobalAccountantError::TransferPayloadTooLarge);
+            }
             let transfer: &TokenBridgeTransfer = bytemuck::try_from_bytes(head)
                 .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
             Ok(TokenBridgeAction::Transfer {
@@ -345,13 +353,17 @@ mod tests {
         // upper bound, so trailing bytes after an action 0x01 payload parse too.
         let mut transfer_01_extra = [0xEEu8; TRANSFER_BODY + 40];
         transfer_01_extra[..TRANSFER_BODY].copy_from_slice(&transfer_01);
+        let mut transfer_03_at_cap = [0xEEu8; TRANSFER_BODY + MAX_TRANSFER_PAYLOAD_LEN];
+        transfer_03_at_cap[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        let mut transfer_03_over_cap = [0xEEu8; TRANSFER_BODY + MAX_TRANSFER_PAYLOAD_LEN + 1];
+        transfer_03_over_cap[..TRANSFER_BODY].copy_from_slice(&transfer_03);
         let expected_transfer = TokenBridgeAction::Transfer {
             amount,
             token_chain: 2,
             token_address,
             recipient_chain: 10,
         };
-        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 14] = [
+        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 16] = [
             ("action 0x01 exact 133", &transfer_01, Ok(expected_transfer)),
             (
                 "action 0x01 with trailing payload",
@@ -367,6 +379,16 @@ mod tests {
                 "action 0x03 with trailing payload",
                 &transfer_03_extra,
                 Ok(expected_transfer),
+            ),
+            (
+                "action 0x03 payload at MAX_TRANSFER_PAYLOAD_LEN",
+                &transfer_03_at_cap,
+                Ok(expected_transfer),
+            ),
+            (
+                "action 0x03 payload over MAX_TRANSFER_PAYLOAD_LEN",
+                &transfer_03_over_cap,
+                Err(E::TransferPayloadTooLarge),
             ),
             (
                 "max field values",
