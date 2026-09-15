@@ -10,15 +10,3 @@ pub mod instructions;
 pub mod support;
 
 pub use global_accountant_definitions as definitions;
-
-/// Flatten a `#[derive(Accounts)]` struct plus `ctx.remaining_accounts` into a
-/// positional `Vec<AccountInfo>`. Field order must match the handler's account list.
-#[macro_export]
-macro_rules! flatten_accounts {
-    ($ctx:expr, [$($field:ident),+ $(,)?], remaining) => {{
-        let mut accounts: ::std::vec::Vec<::anchor_lang::prelude::AccountInfo> =
-            vec![$($ctx.accounts.$field.to_account_info()),+];
-        accounts.extend($ctx.remaining_accounts.iter().cloned());
-        accounts
-    }};
-}

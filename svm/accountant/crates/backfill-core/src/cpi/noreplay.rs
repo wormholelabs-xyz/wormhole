@@ -7,7 +7,7 @@ use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program::system_program;
 
-use accountant_operational_core::cpi::noreplay::{derive_authority, derive_bucket_pda};
+use accountant_operational_core::cpi::noreplay::{derive_bucket_pda, verify_authority};
 use accountant_operational_core::{err, ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
@@ -29,10 +29,7 @@ fn verify_accounts(
     namespace: &NoReplayNamespace,
     bucket_index: u64,
 ) -> ProgramCoreResult<u8> {
-    let (expected_authority, authority_bump) = derive_authority(program_id);
-    if noreplay_authority.key != &expected_authority {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
+    let authority_bump = verify_authority(program_id, noreplay_authority)?;
 
     // `derive_bucket_pda` takes a sequence and divides it down; the first sequence of
     // the bucket recovers `bucket_index` exactly.
@@ -40,7 +37,7 @@ fn verify_accounts(
         .checked_mul(NOREPLAY_BITS_PER_BUCKET)
         .ok_or_else(|| err(GlobalAccountantError::InvalidInstructionData))?;
     let (expected_bucket, _) = derive_bucket_pda(
-        &expected_authority,
+        noreplay_authority.key,
         u16::from_be_bytes(namespace.chain),
         &namespace.emitter,
         first_sequence,

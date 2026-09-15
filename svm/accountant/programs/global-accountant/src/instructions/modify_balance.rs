@@ -10,12 +10,11 @@ use anchor_lang::solana_program::system_program;
 use accountant_operational_core::accounts::{self, balance as balance_account};
 use accountant_operational_core::cpi::shim;
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
     split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
-    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFY_BALANCE_SEED_PREFIX,
+    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader,
 };
 use crate::err;
 use crate::instructions::transfer::derive_balance_account_pda;
@@ -170,16 +169,6 @@ fn record_modify_balance<'info>(
     payload: &ModifyBalancePayload,
     kind: ModificationKind,
 ) -> ProgramResult {
-    let bump_seed = [modification_bump];
-    let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
-    create_pda_allow_prefund(
-        payer,
-        modify_balance_pda,
-        program_id,
-        seeds,
-        ModifyBalanceLayout::LEN as u64,
-    )?;
-
     let record = ModifyBalanceLayout::new(
         kind,
         payload.chain_id(),
@@ -189,7 +178,7 @@ fn record_modify_balance<'info>(
         payload.amount(),
         payload.reason,
     );
-    accounts::store(modify_balance_pda, &record)
+    accounts::modify_balance::create(program_id, payer, modify_balance_pda, modification_bump, &record)
 }
 
 /// Log the modification for off-chain indexers.
