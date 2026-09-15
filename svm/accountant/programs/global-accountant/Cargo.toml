@@ -38,10 +38,15 @@ global-accountant-definitions.workspace = true
 # `[dev-dependencies]` (see `solana-pubkey-v3` below).
 solana-pubkey-v3 = { package = "solana-pubkey", version = "3", features = ["curve25519"] }
 
+[[bench]]
+name = "compute_units"
+harness = false
+
 [dev-dependencies]
 accountant-test-fixtures.workspace = true
 wormhole-svm-definitions.workspace = true
 mollusk-svm.workspace = true
+mollusk-svm-bencher.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true
 solana-keccak-hasher.workspace = true
