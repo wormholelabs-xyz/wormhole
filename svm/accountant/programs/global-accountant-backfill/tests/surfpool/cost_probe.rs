@@ -482,7 +482,14 @@ fn surfpool_cost_probe() {
         lamports_to_usd(a_rent)
     );
     eprintln!();
-    eprintln!("  Registrations + modifications: {} + {} = 46 txs via operational program (Shim CPI ~$0.50/tx worst case ⇒ ~$23).", FULL_REGISTRATION_COUNT, FULL_MODIFICATION_COUNT);
+    eprintln!(
+        "  Registrations: {} txs via operational register_chain (Shim CPI ~$0.50/tx worst case ⇒ ~$20).",
+        FULL_REGISTRATION_COUNT
+    );
+    eprintln!(
+        "  Modifications: {} record-only entries via BackfillModifyBalance (one tx, no Shim CPI; negligible).",
+        FULL_MODIFICATION_COUNT
+    );
     eprintln!();
     eprintln!("TOTAL (sample-derived):");
     eprintln!(
