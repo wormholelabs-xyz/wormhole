@@ -1,6 +1,6 @@
 //! `#[derive(Accounts)]` contexts for the two backfill instructions. Accounts
 //! are bare `Signer`/`UncheckedAccount`; handlers in
-//! `accountant_operational_core` validate them by hand, since bulk PDA seeds
+//! `accountant_backfill_core` validate them by hand, since bulk PDA seeds
 //! derive from the parsed payload. Variadic bucket/balance PDAs ride in
 //! `ctx.remaining_accounts`.
 

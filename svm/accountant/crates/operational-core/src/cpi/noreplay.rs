@@ -64,7 +64,7 @@ pub fn is_marked(
 }
 
 /// Check `noreplay_authority` is this program's authority PDA; returns its bump.
-fn verify_authority(
+pub fn verify_authority(
     program_id: &Pubkey,
     noreplay_authority: &AccountInfo,
 ) -> ProgramCoreResult<u8> {

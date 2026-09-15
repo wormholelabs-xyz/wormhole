@@ -19,13 +19,12 @@
 
 #![allow(unexpected_cfgs)]
 
-use accountant_backfill_core::flatten_accounts;
+use accountant_operational_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
 
 pub use accountant_operational_core::{definitions, err, raw_ix_data::RawIxData};
-pub use global_accountant_definitions;
 
 // `#[program]`'s codegen expects `#[derive(Accounts)]`'s companion items at
 // the crate root; re-export `contexts::*` to place them there.
@@ -34,13 +33,13 @@ pub use contexts::*;
 declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
 
 const _: () = assert!(
-    global_accountant_definitions::is_accountant_program_id(&ID.to_bytes()),
-    "declare_id! does not match ACCOUNTANT_PROGRAM_ID"
+    definitions::is_global_accountant_program_id(&ID.to_bytes()),
+    "declare_id! does not match GLOBAL_ACCOUNTANT_PROGRAM_ID"
 );
 
-/// Wire discriminator, defined in `global_accountant_definitions::BackfillInstruction`.
+/// Wire discriminator, defined in `definitions::BackfillInstruction`.
 /// Re-exported for off-chain callers building raw transactions.
-pub use global_accountant_definitions::BackfillInstruction as Instruction;
+pub use definitions::BackfillInstruction as Instruction;
 
 /// Pubkey that must sign every backfill ix, from `BACKFILL_AUTHORITY` at compile
 /// time. Set per deploy in `justfile`; a missing variable is a build error, so a

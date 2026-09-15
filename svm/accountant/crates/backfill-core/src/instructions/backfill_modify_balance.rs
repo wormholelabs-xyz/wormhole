@@ -8,12 +8,10 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::accounts;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{err, ProgramResult};
 
 use crate::definitions::{
     GlobalAccountantError, ModificationKind, ModifyBalanceBatch, ModifyBalanceLayout,
-    MODIFY_BALANCE_SEED_PREFIX,
 };
 use crate::support::authority::require_authority;
 
@@ -46,17 +44,6 @@ pub fn process(
             return Err(err(GlobalAccountantError::InvalidPda));
         }
 
-        let bump_seed = [canonical_bump];
-        let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &entry.sequence, &bump_seed];
-
-        create_pda_allow_prefund(
-            payer,
-            record_pda,
-            program_id,
-            seeds,
-            ModifyBalanceLayout::LEN as u64,
-        )?;
-
         let record = ModifyBalanceLayout::new(
             kind,
             entry.chain_id(),
@@ -68,11 +55,7 @@ pub fn process(
         );
 
         // Record only. Do not touch a balance account here.
-        let mut data_mut = record_pda.try_borrow_mut_data()?;
-        if data_mut.len() != ModifyBalanceLayout::LEN {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
-        data_mut.copy_from_slice(bytemuck::bytes_of(&record));
+        accounts::modify_balance::create(program_id, payer, record_pda, canonical_bump, &record)?;
     }
 
     Ok(())

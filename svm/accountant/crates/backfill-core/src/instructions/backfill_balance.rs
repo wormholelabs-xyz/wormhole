@@ -11,12 +11,9 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::accounts;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{err, ProgramResult};
 
-use crate::definitions::{
-    BalanceAccountLayout, BalanceBatch, GlobalAccountantError, ACCOUNT_SEED_PREFIX,
-};
+use crate::definitions::{BalanceAccountLayout, BalanceBatch, GlobalAccountantError};
 use crate::support::authority::require_authority;
 
 pub fn process(
@@ -49,23 +46,6 @@ pub fn process(
             return Err(err(GlobalAccountantError::InvalidPda));
         }
 
-        let bump_seed = [canonical_bump];
-        let seeds: &[&[u8]] = &[
-            ACCOUNT_SEED_PREFIX,
-            entry.chain.as_slice(),
-            entry.token_chain.as_slice(),
-            entry.token_address.as_slice(),
-            &bump_seed,
-        ];
-
-        create_pda_allow_prefund(
-            payer,
-            balance_pda,
-            program_id,
-            seeds,
-            BalanceAccountLayout::LEN as u64,
-        )?;
-
         let layout = BalanceAccountLayout::new(
             entry.chain(),
             entry.token_chain(),
@@ -73,11 +53,7 @@ pub fn process(
             entry.balance(),
         );
 
-        let mut data_mut = balance_pda.try_borrow_mut_data()?;
-        if data_mut.len() != BalanceAccountLayout::LEN {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
-        data_mut.copy_from_slice(bytemuck::bytes_of(&layout));
+        accounts::balance::create(program_id, payer, balance_pda, canonical_bump, &layout)?;
     }
 
     Ok(())
