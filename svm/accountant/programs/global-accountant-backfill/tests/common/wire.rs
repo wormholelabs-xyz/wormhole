@@ -3,8 +3,8 @@
 //! every test call site in this suite uses these instead of hand-rolled bytes.
 
 use global_accountant_definitions::{
-    BackfillBalanceEntry, BackfillInstruction, BackfillModifyBalanceEntry, BackfillNoReplayEntry,
-    BackfillNoReplayGroupHeader, Uint256,
+    BackfillBalanceEntry, BackfillChainRegistrationEntry, BackfillInstruction,
+    BackfillModifyBalanceEntry, BackfillNoReplayEntry, BackfillNoReplayGroupHeader, Uint256,
 };
 
 /// `chain`/`token_chain` as `u16`, `balance` as raw big-endian bytes.
@@ -60,6 +60,26 @@ pub fn modify_balance_entry(
 pub fn encode_modify_balance_batch(entries: &[BackfillModifyBalanceEntry]) -> Vec<u8> {
     let mut data = vec![
         BackfillInstruction::BackfillModifyBalance as u8,
+        entries.len() as u8,
+    ];
+    for entry in entries {
+        data.extend_from_slice(bytemuck::bytes_of(entry));
+    }
+    data
+}
+
+pub fn chain_registration_entry(
+    chain: u16,
+    sequence: u64,
+    emitter: [u8; 32],
+) -> BackfillChainRegistrationEntry {
+    BackfillChainRegistrationEntry::new(chain, sequence, emitter)
+}
+
+/// `BackfillChainRegistration` instruction data: `disc ‖ count ‖ count × BackfillChainRegistrationEntry`.
+pub fn encode_chain_registration_batch(entries: &[BackfillChainRegistrationEntry]) -> Vec<u8> {
+    let mut data = vec![
+        BackfillInstruction::BackfillChainRegistration as u8,
         entries.len() as u8,
     ];
     for entry in entries {
@@ -127,7 +147,20 @@ pub fn encode_noreplay_batch(entries: &[NoReplayEntry]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use global_accountant_definitions::{BalanceBatch, ModifyBalanceBatch, NoReplayBatch};
+    use global_accountant_definitions::{
+        BalanceBatch, ChainRegistrationBatch, ModifyBalanceBatch, NoReplayBatch,
+    };
+
+    #[test]
+    fn chain_registration_batch_round_trips_through_the_parser() {
+        let entries = [
+            chain_registration_entry(2, 100, [0x11; 32]),
+            chain_registration_entry(4, 7, [0x22; 32]),
+        ];
+        let data = encode_chain_registration_batch(&entries);
+        let batch = ChainRegistrationBatch::parse(&data[1..]).unwrap();
+        assert_eq!(batch.entries(), entries.as_slice());
+    }
 
     #[test]
     fn modify_balance_batch_round_trips_through_the_parser() {

@@ -5,5 +5,6 @@
 mod common;
 
 mod backfill_balance;
+mod backfill_chain_registration;
 mod backfill_modify_balance;
 mod backfill_noreplay;
