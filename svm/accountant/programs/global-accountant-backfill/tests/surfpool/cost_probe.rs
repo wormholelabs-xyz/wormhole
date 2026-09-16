@@ -483,12 +483,8 @@ fn surfpool_cost_probe() {
     );
     eprintln!();
     eprintln!(
-        "  Registrations: {} txs via operational register_chain (Shim CPI ~$0.50/tx worst case ⇒ ~$20).",
-        FULL_REGISTRATION_COUNT
-    );
-    eprintln!(
-        "  Modifications: {} record-only entries via BackfillModifyBalance (one tx, no Shim CPI; negligible).",
-        FULL_MODIFICATION_COUNT
+        "  Registrations + modifications: {} + {} record-only entries via BackfillChainRegistration / BackfillModifyBalance (one tx each, no Shim CPI; negligible).",
+        FULL_REGISTRATION_COUNT, FULL_MODIFICATION_COUNT
     );
     eprintln!();
     eprintln!("TOTAL (sample-derived):");
