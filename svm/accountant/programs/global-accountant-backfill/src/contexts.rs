@@ -1,7 +1,7 @@
-//! `#[derive(Accounts)]` contexts for the two backfill instructions. Accounts
+//! `#[derive(Accounts)]` contexts for the backfill instructions. Accounts
 //! are bare `Signer`/`UncheckedAccount`; handlers in
 //! `accountant_backfill_core` validate them by hand, since bulk PDA seeds
-//! derive from the parsed payload. Variadic bucket/balance PDAs ride in
+//! derive from the parsed payload. Variadic bucket/balance/record PDAs ride in
 //! `ctx.remaining_accounts`.
 
 use anchor_lang::prelude::*;
@@ -34,6 +34,16 @@ pub struct BackfillBalanceAccounts<'info> {
 /// PDAs in `ctx.remaining_accounts`.
 #[derive(Accounts)]
 pub struct BackfillModifyBalanceAccounts<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: System Program, required by `pda_init::create_pda_allow_prefund`'s CPI.
+    pub system_program: UncheckedAccount<'info>,
+}
+
+/// Fixed accounts for `BackfillChainRegistration`: 2 accounts plus, per entry, a
+/// `ChainRegistration` PDA and a `RegisterChain` PDA in `ctx.remaining_accounts`.
+#[derive(Accounts)]
+pub struct BackfillChainRegistrationAccounts<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     /// CHECK: System Program, required by `pda_init::create_pda_allow_prefund`'s CPI.
