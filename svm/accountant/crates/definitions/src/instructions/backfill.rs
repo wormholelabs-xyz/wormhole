@@ -41,19 +41,31 @@
 //!
 //! `ModifyBalanceBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
 //! by `sequence`.
+//!
+//! `BackfillChainRegistrationEntry` (42 bytes):
+//!
+//! | offset | size | field         |
+//! |--------|------|---------------|
+//! | 0      | 2    | chain (BE)    |
+//! | 2      | 8    | sequence (BE) |
+//! | 10     | 32   | emitter       |
+//!
+//! `ChainRegistrationBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
+//! by `chain`.
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
-/// `BackfillBalance` / `BackfillNoReplay` / `BackfillModifyBalance` instruction discriminator.
+/// Backfill instruction discriminator.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackfillInstruction {
     BackfillNoReplay = 0,
     BackfillBalance = 1,
     BackfillModifyBalance = 2,
+    BackfillChainRegistration = 3,
 }
 
 impl BackfillInstruction {
@@ -62,6 +74,7 @@ impl BackfillInstruction {
             0 => Some(Self::BackfillNoReplay),
             1 => Some(Self::BackfillBalance),
             2 => Some(Self::BackfillModifyBalance),
+            3 => Some(Self::BackfillChainRegistration),
             _ => None,
         }
     }
@@ -209,8 +222,42 @@ impl BackfillModifyBalanceEntry {
     }
 }
 
+/// `BackfillChainRegistration` entry (42 bytes). Big-endian, as in the wormchain row.
+/// `sequence` is the governance VAA that installed the registration; it keys the
+/// `RegisterChain` record PDA and is stored in `ChainRegistrationLayout`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct BackfillChainRegistrationEntry {
+    pub chain: [u8; 2],
+    pub sequence: [u8; 8],
+    pub emitter: [u8; 32],
+}
+
+impl BackfillChainRegistrationEntry {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(chain: u16, sequence: u64, emitter: [u8; 32]) -> Self {
+        Self {
+            chain: chain.to_be_bytes(),
+            sequence: sequence.to_be_bytes(),
+            emitter,
+        }
+    }
+
+    pub fn chain(&self) -> u16 {
+        u16::from_be_bytes(self.chain)
+    }
+
+    pub fn sequence(&self) -> u64 {
+        u64::from_be_bytes(self.sequence)
+    }
+}
+
 const _: () = {
     use core::mem::offset_of;
+    assert!(BackfillChainRegistrationEntry::LEN == 42);
+    assert!(offset_of!(BackfillChainRegistrationEntry, sequence) == 2);
+    assert!(offset_of!(BackfillChainRegistrationEntry, emitter) == 10);
     assert!(BackfillBalanceEntry::LEN == 68);
     assert!(offset_of!(BackfillBalanceEntry, token_chain) == 2);
     assert!(offset_of!(BackfillBalanceEntry, token_address) == 4);
@@ -308,6 +355,47 @@ impl<'a> ModifyBalanceBatch<'a> {
     }
 
     pub fn entries(&self) -> &'a [BackfillModifyBalanceEntry] {
+        self.0
+    }
+}
+
+/// Chain registrations, strictly ascending by `chain`. `parse` is the only constructor.
+pub struct ChainRegistrationBatch<'a>(&'a [BackfillChainRegistrationEntry]);
+
+impl<'a> ChainRegistrationBatch<'a> {
+    /// Wire: `count (u8) ‖ count × BackfillChainRegistrationEntry`.
+    pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
+        let (&count, rest) = data
+            .split_first()
+            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+        if count == 0 {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let expected_len = count as usize * BackfillChainRegistrationEntry::LEN;
+        if rest.len() != expected_len {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let entries: &[BackfillChainRegistrationEntry] = bytemuck::try_cast_slice(rest)
+            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
+        if entries.len() != count as usize {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+
+        let mut prev_chain: Option<u16> = None;
+        for entry in entries {
+            let chain = entry.chain();
+            if let Some(prev) = prev_chain {
+                if chain <= prev {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+            }
+            prev_chain = Some(chain);
+        }
+
+        Ok(Self(entries))
+    }
+
+    pub fn entries(&self) -> &'a [BackfillChainRegistrationEntry] {
         self.0
     }
 }
@@ -696,11 +784,12 @@ mod tests {
 
     #[test]
     fn backfill_instruction_from_u8() {
-        let cases: [(u8, Option<BackfillInstruction>); 4] = [
+        let cases: [(u8, Option<BackfillInstruction>); 5] = [
             (0, Some(BackfillInstruction::BackfillNoReplay)),
             (1, Some(BackfillInstruction::BackfillBalance)),
             (2, Some(BackfillInstruction::BackfillModifyBalance)),
-            (3, None),
+            (3, Some(BackfillInstruction::BackfillChainRegistration)),
+            (4, None),
         ];
         for (value, expected) in cases {
             assert_eq!(BackfillInstruction::from_u8(value), expected, "{value}");
@@ -816,5 +905,106 @@ mod tests {
         assert_eq!(batch.entries()[0].sequence(), 42);
         assert_eq!(batch.entries()[0].amount(), Uint256::from_u128(12345));
         assert_eq!(bytes.len(), BackfillModifyBalanceEntry::LEN);
+    }
+
+    fn chain_registration_entry(chain: u16, sequence: u64) -> BackfillChainRegistrationEntry {
+        BackfillChainRegistrationEntry::new(chain, sequence, [chain as u8; 32])
+    }
+
+    fn encode_chain_registration_batch(
+        entries: &[BackfillChainRegistrationEntry],
+    ) -> std::vec::Vec<u8> {
+        let mut out = std::vec![entries.len() as u8];
+        for entry in entries {
+            out.extend_from_slice(bytemuck::bytes_of(entry));
+        }
+        out
+    }
+
+    #[test]
+    fn chain_registration_batch_parses_positive_cases() {
+        let one = [chain_registration_entry(2, 100)];
+        let several = [
+            chain_registration_entry(2, 300),
+            chain_registration_entry(4, 100),
+            chain_registration_entry(5, 200),
+        ];
+        let max_count: std::vec::Vec<BackfillChainRegistrationEntry> = (0..255u16)
+            .map(|i| chain_registration_entry(i + 1, i as u64))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<BackfillChainRegistrationEntry>); 3] = [
+            ("one entry", one.to_vec()),
+            ("several entries, sequences unordered", several.to_vec()),
+            ("max u8 count", max_count),
+        ];
+        for (name, entries) in cases {
+            let data = encode_chain_registration_batch(&entries);
+            let batch =
+                ChainRegistrationBatch::parse(&data).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(batch.entries(), entries.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn chain_registration_batch_rejects_malformed_wire() {
+        let ok_entries = [
+            chain_registration_entry(2, 100),
+            chain_registration_entry(4, 101),
+        ];
+        let ok_data = encode_chain_registration_batch(&ok_entries);
+
+        let dup_entries = [
+            chain_registration_entry(2, 100),
+            chain_registration_entry(2, 101),
+        ];
+        let desc_entries = [
+            chain_registration_entry(4, 100),
+            chain_registration_entry(2, 101),
+        ];
+
+        let cases: [(&str, std::vec::Vec<u8>); 8] = [
+            ("empty data", std::vec::Vec::new()),
+            ("zero count", std::vec![0u8]),
+            ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
+            ("one byte long", [ok_data.as_slice(), &[0u8]].concat()),
+            (
+                "trailing bytes after exact entries",
+                [ok_data.as_slice(), &[0xFFu8; 3]].concat(),
+            ),
+            (
+                "duplicate chain",
+                encode_chain_registration_batch(&dup_entries),
+            ),
+            (
+                "descending chain",
+                encode_chain_registration_batch(&desc_entries),
+            ),
+            ("count claims more entries than present", {
+                let mut d = encode_chain_registration_batch(&ok_entries);
+                d[0] = 3;
+                d
+            }),
+        ];
+        for (name, data) in cases {
+            assert_eq!(
+                ChainRegistrationBatch::parse(&data).err(),
+                Some(GlobalAccountantError::InvalidInstructionData),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn chain_registration_entry_round_trips_through_bytes() {
+        let entry = BackfillChainRegistrationEntry::new(7, 42, [0x11; 32]);
+        let bytes = bytemuck::bytes_of(&entry);
+        let data = encode_chain_registration_batch(core::slice::from_ref(&entry));
+        let batch = ChainRegistrationBatch::parse(&data).unwrap();
+        assert_eq!(batch.entries()[0], entry);
+        assert_eq!(batch.entries()[0].chain(), 7);
+        assert_eq!(batch.entries()[0].sequence(), 42);
+        assert_eq!(batch.entries()[0].emitter, [0x11; 32]);
+        assert_eq!(bytes.len(), BackfillChainRegistrationEntry::LEN);
     }
 }
