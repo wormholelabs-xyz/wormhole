@@ -4,6 +4,7 @@ use anchor_lang::solana_program::system_program;
 use crate::definitions::{
     ChainRegistrationLayout, GlobalAccountantError, CHAIN_REGISTRATION_SEED_PREFIX,
 };
+use crate::support::pda_init::create_pda_allow_prefund;
 use crate::{err, ProgramCoreResult, ProgramResult};
 
 pub fn derive_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
@@ -11,6 +12,29 @@ pub fn derive_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
         &[CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
         program_id,
     )
+}
+
+/// Allocate the `ChainRegistration` PDA for `layout`'s chain and write `layout`. Seeds
+/// derive from the layout so address and contents cannot disagree. The governance handler
+/// and the backfill both call this, so the account they produce is byte-identical.
+pub fn create<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    registration_pda: &AccountInfo<'info>,
+    canonical_bump: u8,
+    layout: &ChainRegistrationLayout,
+) -> ProgramResult {
+    let chain_be = layout.chain.to_be_bytes();
+    let bump_seed = [canonical_bump];
+    let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &chain_be, &bump_seed];
+    create_pda_allow_prefund(
+        payer,
+        registration_pda,
+        program_id,
+        seeds,
+        ChainRegistrationLayout::LEN as u64,
+    )?;
+    store(registration_pda, layout)
 }
 
 pub fn load(account: &AccountInfo) -> ProgramCoreResult<ChainRegistrationLayout> {

@@ -1,6 +1,5 @@
 //! The `.so` executes only at its `declare_id!` address. Anchor's entry returns
-//! `DeclaredProgramIdMismatch` for any other program id before dispatch. The declared
-//! id is `[7u8; 32]` in base58, so the foreign id below is `[8u8; 32]`.
+//! `DeclaredProgramIdMismatch` for any other program id before dispatch.
 
 use solana_instruction::Instruction;
 use solana_pubkey::Pubkey;
@@ -12,7 +11,7 @@ const DECLARED_PROGRAM_ID_MISMATCH: u64 = 4100;
 
 #[test]
 fn rejects_execution_under_another_program_id() {
-    let foreign_id = Pubkey::new_from_array([8u8; 32]);
+    let foreign_id: Pubkey = Pubkey::new_unique();
     assert_ne!(foreign_id, program_id());
     let mollusk = mollusk_with_fixtures(&foreign_id, PROGRAM_NAME);
 
