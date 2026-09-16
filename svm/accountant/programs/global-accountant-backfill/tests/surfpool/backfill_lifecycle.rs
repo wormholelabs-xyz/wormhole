@@ -8,10 +8,13 @@
 //!    entries appear via `meta.logMessages` over real RPC.
 //! 2. `BackfillBalance` for two accounts. Assert both `BalanceAccountLayout`
 //!    PDAs are written at canonical seeds via `getAccountInfo`.
-//! 3. `BackfillNoReplay` signed by a non-authority keypair. Assert the tx
+//! 3. `BackfillChainRegistration` for two chains. Assert the `ChainRegistration`
+//!    and `RegisterChain` PDAs are written at the operational program's seeds,
+//!    rent-exempt, with the expected layouts.
+//! 4. `BackfillNoReplay` signed by a non-authority keypair. Assert the tx
 //!    fails with `UnauthorizedCaller`, confirming the compile-time
 //!    `BACKFILL_AUTHORITY` const gate runs on-chain.
-//! 4. `BackfillBalance` signed by the same non-authority keypair. Assert
+//! 5. `BackfillBalance` signed by the same non-authority keypair. Assert
 //!    the same `UnauthorizedCaller` failure, and that
 //!    `getAccountInfo` on the target PDA still errors, confirming the
 //!    authority gate covers `BackfillBalance`'s own handler too.
@@ -29,8 +32,9 @@ use solana_signer::Signer;
 use solana_transaction::Transaction;
 
 use global_accountant_definitions::{
-    BalanceAccountLayout, GlobalAccountantError, NoReplayBitmapAccount, Uint256,
-    ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID,
+    BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError, NoReplayBitmapAccount,
+    RegisterChainLayout, Uint256, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID, REGISTER_CHAIN_SEED_PREFIX,
 };
 
 use crate::common::*;
@@ -93,6 +97,22 @@ fn derive_balance_pda(
             &token_chain_be,
             token_address,
         ],
+        program_id,
+    );
+    pda
+}
+
+fn derive_registration_pda(program_id: &Pubkey, chain: u16) -> Pubkey {
+    let (pda, _) = Pubkey::find_program_address(
+        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
+        program_id,
+    );
+    pda
+}
+
+fn derive_register_chain_pda(program_id: &Pubkey, sequence: u64) -> Pubkey {
+    let (pda, _) = Pubkey::find_program_address(
+        &[REGISTER_CHAIN_SEED_PREFIX, &sequence.to_be_bytes()],
         program_id,
     );
     pda
@@ -278,7 +298,62 @@ fn surfpool_backfill_lifecycle() {
         assert_eq!(layout.balance, entry.balance());
     }
 
-    // ---------- Phase 3: wrong-signer BackfillNoReplay → must fail ----------
+    // ---------- Phase 3: BackfillChainRegistration (2 chains) ----------
+    let registrations = [
+        chain_registration_entry(2, 1_234, [0x51u8; 32]),
+        chain_registration_entry(4, 77, [0x52u8; 32]),
+    ];
+    let mut metas_registration = vec![
+        AccountMeta::new(authority.pubkey(), true),
+        AccountMeta::new_readonly(system_program_id(), false),
+    ];
+    for entry in &registrations {
+        metas_registration.push(AccountMeta::new(
+            derive_registration_pda(&program_id, entry.chain()),
+            false,
+        ));
+        metas_registration.push(AccountMeta::new(
+            derive_register_chain_pda(&program_id, entry.sequence()),
+            false,
+        ));
+    }
+    let ix = Instruction {
+        program_id,
+        accounts: metas_registration,
+        data: encode_chain_registration_batch(&registrations),
+    };
+    let sig = send_ix(&rpc, &authority, ix).expect("BackfillChainRegistration tx");
+    eprintln!("[backfill-e2e] BackfillChainRegistration tx={sig}");
+
+    let registration_rent = Rent::default().minimum_balance(ChainRegistrationLayout::LEN);
+    let record_rent = Rent::default().minimum_balance(RegisterChainLayout::LEN);
+    for entry in &registrations {
+        let acc = rpc
+            .get_account(&derive_registration_pda(&program_id, entry.chain()))
+            .expect("ChainRegistration PDA");
+        assert_eq!(acc.owner, program_id);
+        assert_eq!(acc.data.len(), ChainRegistrationLayout::LEN);
+        assert_eq!(acc.lamports, registration_rent);
+        let layout: &ChainRegistrationLayout = bytemuck::from_bytes(&acc.data);
+        assert_eq!(
+            *layout,
+            ChainRegistrationLayout::new(entry.chain(), entry.emitter, entry.sequence())
+        );
+
+        let acc = rpc
+            .get_account(&derive_register_chain_pda(&program_id, entry.sequence()))
+            .expect("RegisterChain PDA");
+        assert_eq!(acc.owner, program_id);
+        assert_eq!(acc.data.len(), RegisterChainLayout::LEN);
+        assert_eq!(acc.lamports, record_rent);
+        let layout: &RegisterChainLayout = bytemuck::from_bytes(&acc.data);
+        assert_eq!(
+            *layout,
+            RegisterChainLayout::new(entry.chain(), entry.emitter, entry.sequence())
+        );
+    }
+
+    // ---------- Phase 4: wrong-signer BackfillNoReplay → must fail ----------
     //
     // The compile-time `BACKFILL_AUTHORITY` const gates arbitrary state
     // writes. Run a control tx signed by a stranger.
@@ -306,7 +381,7 @@ fn surfpool_backfill_lifecycle() {
     eprintln!("[backfill-e2e] wrong-signer error: {msg}");
     assert_unauthorized_caller(&msg, "wrong-signer BackfillNoReplay");
 
-    // ---------- Phase 4: wrong-signer BackfillBalance → must fail ----------
+    // ---------- Phase 5: wrong-signer BackfillBalance → must fail ----------
     //
     // `BackfillBalance` shares `require_authority` but is a separate
     // handler; run the same control here too. Fresh (chain, token_chain,
