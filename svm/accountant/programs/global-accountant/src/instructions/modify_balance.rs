@@ -18,7 +18,6 @@ use crate::definitions::{
     MODIFY_BALANCE_SEED_PREFIX,
 };
 use crate::err;
-use crate::instructions::transfer::derive_balance_account_pda;
 
 /// A `ModifyBalance` body is exactly header + payload.
 const MODIFY_BALANCE_BODY_LEN: usize = VaaBodyHeader::LEN + ModifyBalancePayload::LEN;
@@ -95,7 +94,7 @@ fn check_balance_pda(
     balance_pda: &AccountInfo,
     payload: &ModifyBalancePayload,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_balance_account_pda(
+    let (expected, bump) = balance_account::derive_pda(
         program_id,
         payload.chain_id(),
         payload.token_chain(),

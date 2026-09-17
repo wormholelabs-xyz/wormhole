@@ -7,26 +7,25 @@
 //! `UnregisteredEmitter`, and replaying the first `RegisterChain` sequence
 //! rejects with `DuplicateRegisterChain`.
 
+use accountant_operational_core::accounts::balance;
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant::instructions::register_chain::derive_register_chain_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
-    ChainRegistrationLayout, GlobalAccountantError, GovernanceHeader, RegisterChainLayout,
-    Uint256, GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
-    TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    ChainRegistrationLayout, GlobalAccountantError, GovernanceHeader, RegisterChainLayout, Uint256,
+    GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
 };
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    balance_account, balance_of, core_bridge_program_id, derive_guardian_set_pda,
-    double_keccak256, governance_header, guardian_keys, guardian_set_account, make_guardians,
-    noreplay_authority_pda, post_signatures_ix, register_chain_body, register_chain_ix_data,
-    set_compute_unit_limit_ix, shim_program_id, signature_block, signatures_for,
-    submit_vaas_ix_data, system_program_id, transfer_body, ETHEREUM, GUARDIAN_COUNT,
-    GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
+    balance_account, balance_of, core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
+    governance_header, guardian_keys, guardian_set_account, make_guardians, noreplay_authority_pda,
+    post_signatures_ix, register_chain_body, register_chain_ix_data, set_compute_unit_limit_ix,
+    shim_program_id, signature_block, signatures_for, submit_vaas_ix_data, system_program_id,
+    transfer_body, ETHEREUM, GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM,
+    TOKEN_ADDRESS,
 };
 use crate::harness::{
     deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ProgramImage,
@@ -136,9 +135,8 @@ fn surfpool_register_chain_rotate_and_replay() {
     };
 
     let noreplay_authority = noreplay_authority_pda(&program_id);
-    let (source, _) = derive_balance_account_pda(&program_id, ETHEREUM, ETHEREUM, &TOKEN_ADDRESS);
-    let (dest, _) =
-        derive_balance_account_pda(&program_id, SOLANA_CHAIN_ID, ETHEREUM, &TOKEN_ADDRESS);
+    let (source, _) = balance::derive_pda(&program_id, ETHEREUM, ETHEREUM, &TOKEN_ADDRESS);
+    let (dest, _) = balance::derive_pda(&program_id, SOLANA_CHAIN_ID, ETHEREUM, &TOKEN_ADDRESS);
 
     // Signs a Token Bridge transfer from `emitter` on `ETHEREUM` and returns the
     // `submit_vaas` instruction for it. `chain_registration::verify` gates this on
@@ -221,7 +219,12 @@ fn surfpool_register_chain_rotate_and_replay() {
     set_account(
         &rpc,
         &source,
-        &balance_account(ETHEREUM, ETHEREUM, TOKEN_ADDRESS, Uint256::from_u128(SEED_BALANCE)),
+        &balance_account(
+            ETHEREUM,
+            ETHEREUM,
+            TOKEN_ADDRESS,
+            Uint256::from_u128(SEED_BALANCE),
+        ),
     );
     set_account(
         &rpc,
@@ -237,7 +240,10 @@ fn surfpool_register_chain_rotate_and_replay() {
     send(
         &rpc,
         "submit_vaas[registered emitter]",
-        &[set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT), transfer_before],
+        &[
+            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
+            transfer_before,
+        ],
         &[&payer],
     );
     let source_after_transfer = rpc.get_account(&source).expect("source balance PDA exists");
@@ -275,7 +281,10 @@ fn surfpool_register_chain_rotate_and_replay() {
     send_expect_error(
         &rpc,
         "submit_vaas[unregistered emitter]",
-        &[set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT), transfer_after],
+        &[
+            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
+            transfer_after,
+        ],
         &[&payer],
         GlobalAccountantError::UnregisteredEmitter,
     );

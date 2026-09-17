@@ -3,8 +3,8 @@
 //! second `Add` and a `Subtract` share that PDA, and replaying a payload sequence
 //! rejects with `DuplicateModifyBalance`.
 
+use accountant_operational_core::accounts::balance;
 use global_accountant::instructions::modify_balance::derive_modify_balance_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
     GlobalAccountantError, GovernanceHeader, ModificationKind, ModifyBalanceLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
@@ -71,8 +71,7 @@ fn surfpool_modify_balance_create_delta_and_replay() {
         ),
     );
 
-    let (balance_pda, _) =
-        derive_balance_account_pda(&program_id, ETHEREUM, ETHEREUM, &TOKEN_ADDRESS);
+    let (balance_pda, _) = balance::derive_pda(&program_id, ETHEREUM, ETHEREUM, &TOKEN_ADDRESS);
 
     // Signs `vaa_sequence`/`payload_sequence` with the test guardians, posts the
     // signatures through the real shim, and returns the `modify_balance` instruction.
@@ -130,24 +129,25 @@ fn surfpool_modify_balance_create_delta_and_replay() {
             "{label} balance"
         );
     };
-    let assert_record = |payload_sequence: u64, kind: ModificationKind, amount: u128, label: &str| {
-        let (pda, _) = derive_modify_balance_pda(&program_id, payload_sequence);
-        let record = rpc.get_account(&pda).expect("modify_balance record exists");
-        assert_eq!(record.owner, program_id, "{label} record owner");
-        assert_eq!(
-            record_layout(&record.data),
-            ModifyBalanceLayout::new(
-                kind,
-                ETHEREUM,
-                ETHEREUM,
-                payload_sequence,
-                TOKEN_ADDRESS,
-                Uint256::from_u128(amount),
-                REASON,
-            ),
-            "{label} record"
-        );
-    };
+    let assert_record =
+        |payload_sequence: u64, kind: ModificationKind, amount: u128, label: &str| {
+            let (pda, _) = derive_modify_balance_pda(&program_id, payload_sequence);
+            let record = rpc.get_account(&pda).expect("modify_balance record exists");
+            assert_eq!(record.owner, program_id, "{label} record owner");
+            assert_eq!(
+                record_layout(&record.data),
+                ModifyBalanceLayout::new(
+                    kind,
+                    ETHEREUM,
+                    ETHEREUM,
+                    payload_sequence,
+                    TOKEN_ADDRESS,
+                    Uint256::from_u128(amount),
+                    REASON,
+                ),
+                "{label} record"
+            );
+        };
 
     let create = build_modification_ix(0x10, 200, ModificationKind::Add, 1_000_000);
     send(
@@ -183,7 +183,10 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     send_expect_error(
         &rpc,
         "modify_balance[subtract] underflow",
-        &[set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT), overdraft],
+        &[
+            set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT),
+            overdraft,
+        ],
         &[&payer],
         GlobalAccountantError::ModifyBalanceUnderflow,
     );

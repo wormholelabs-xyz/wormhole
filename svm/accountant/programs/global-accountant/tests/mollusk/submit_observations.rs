@@ -1,5 +1,5 @@
+use accountant_operational_core::accounts::balance;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
     BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, Uint256,
 };
@@ -554,7 +554,7 @@ fn rejects() {
                     Transfer::new(0, ETHEREUM, SOLANA, 100),
                 );
                 s.source_account =
-                    derive_balance_account_pda(&program_id(), ETHEREUM, 99, &TOKEN_ADDRESS).0;
+                    balance::derive_pda(&program_id(), ETHEREUM, 99, &TOKEN_ADDRESS).0;
                 let accounts = s.submit_n(m, 12);
                 plain(s, accounts, 12)
             },

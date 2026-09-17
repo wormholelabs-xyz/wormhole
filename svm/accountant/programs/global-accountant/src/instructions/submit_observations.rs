@@ -20,8 +20,8 @@ use crate::definitions::{
     PendingObservationsLayout, SubmitObservationsIxData, SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
-use crate::instructions::transfer;
 use accountant_operational_core::accounts::chain_registration;
+use accountant_operational_core::transfer;
 
 /// `data`: `SubmitObservationsIxData`, 245 bytes fixed.
 ///

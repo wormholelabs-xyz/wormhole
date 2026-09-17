@@ -6,9 +6,9 @@
 //! mainnet. The test rewrites the forked set 6 account with
 //! `expiration_time = 0` so the fixture stays valid.
 
+use accountant_operational_core::accounts::balance;
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{TokenBridgeTransfer, Uint256, VaaBodyHeader};
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
@@ -109,13 +109,13 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
         &emitter_address,
         sequence,
     );
-    let (source, _) = derive_balance_account_pda(
+    let (source, _) = balance::derive_pda(
         &program_id,
         emitter_chain,
         token_chain,
         &transfer.token_address,
     );
-    let (dest, _) = derive_balance_account_pda(
+    let (dest, _) = balance::derive_pda(
         &program_id,
         recipient_chain,
         token_chain,

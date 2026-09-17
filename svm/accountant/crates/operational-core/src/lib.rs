@@ -13,6 +13,7 @@ pub mod cpi;
 pub mod hash;
 pub mod instructions;
 pub mod support;
+pub mod transfer;
 
 pub use global_accountant_definitions as definitions;
 
