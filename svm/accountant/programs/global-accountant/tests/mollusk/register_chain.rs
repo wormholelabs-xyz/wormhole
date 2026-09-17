@@ -255,8 +255,10 @@ fn rejects() {
             emitter_a,
         )
     };
-    let mut wrong_module = any_target();
-    wrong_module.module[31] ^= 1;
+    let wrong_module = GovernanceHeader {
+        module: TOKEN_BRIDGE_GOVERNANCE_MODULE.one_bit_off(),
+        ..any_target()
+    };
     let mut wrong_action = any_target();
     wrong_action.action = 2;
     let wormchain_target = governance_header(

@@ -20,7 +20,7 @@ use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 use crate::definitions::{
     split_body, ChainRegistrationLayout, GlobalAccountantError, RegisterChainIxData,
     RegisterChainLayout, RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX,
-    REGISTER_CHAIN_SEED_PREFIX,
+    REGISTER_CHAIN_SEED_PREFIX, TOKEN_BRIDGE_GOVERNANCE_MODULE,
 };
 use crate::err;
 
@@ -57,7 +57,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = RegisterChainPayload::from_body(body).map_err(err)?;
-    payload.validate(header).map_err(err)?;
+    payload
+        .validate(header, &TOKEN_BRIDGE_GOVERNANCE_MODULE)
+        .map_err(err)?;
     let sequence = header.sequence();
 
     let register_bump = check_register_chain_pda(program_id, register_chain_pda, sequence)?;

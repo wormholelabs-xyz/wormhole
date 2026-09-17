@@ -40,13 +40,13 @@ pub enum GlobalAccountantError {
     MissingChainRegistration = 19,
     /// `ChainRegistration.emitter_address` differs from the body emitter.
     UnregisteredEmitter = 20,
-    /// `register_chain` emitter is not `(chain=1, GOVERNANCE_EMITTER)`.
+    /// Governance VAA emitter is not `(chain=1, GOVERNANCE_EMITTER)`.
     InvalidGovernanceEmitter = 21,
-    /// `register_chain` module is not `TOKEN_BRIDGE_GOVERNANCE_MODULE`.
+    /// Governance payload module differs from the module the handler expects.
     InvalidGovernanceModule = 22,
-    /// `register_chain` action byte is not `0x01`.
+    /// Governance payload action byte differs from the handler's action.
     InvalidGovernanceAction = 23,
-    /// `register_chain` target chain is neither `0x0000` nor Solana.
+    /// Governance target chain is not one the handler accepts (`0x0000` and/or Solana).
     GovernanceChainMismatch = 24,
     /// `modify_balance` `kind` byte is neither `1` nor `2`.
     InvalidModificationKind = 25,

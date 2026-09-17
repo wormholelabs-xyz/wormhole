@@ -14,7 +14,8 @@ use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
     split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
-    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFY_BALANCE_SEED_PREFIX,
+    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, ACCOUNTANT_GOVERNANCE_MODULE,
+    MODIFY_BALANCE_SEED_PREFIX,
 };
 use crate::err;
 use crate::instructions::transfer::derive_balance_account_pda;
@@ -52,7 +53,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = ModifyBalancePayload::from_body(body).map_err(err)?;
-    let kind = payload.validate(header).map_err(err)?;
+    let kind = payload
+        .validate(header, &ACCOUNTANT_GOVERNANCE_MODULE)
+        .map_err(err)?;
 
     let balance_bump = check_balance_pda(program_id, balance_pda, payload)?;
     let modification_bump =

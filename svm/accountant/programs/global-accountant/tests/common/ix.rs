@@ -1,9 +1,10 @@
 use global_accountant_definitions::{
-    parse_token_bridge_payload, ClosePendingIxData, GovernanceHeader, Instruction,
-    ModifyBalanceIxData, ModifyBalancePayload, PostSignaturesIxData, RegisterChainIxData,
-    RegisterChainPayload, SetComputeUnitLimitData, SubmitObservationsIxData, SubmitVaasIxData,
-    TokenBridgeAction, TokenBridgeTransfer, Uint256, UpgradeContractIxData, UpgradeContractPayload,
-    VaaBodyHeader, ACTION_ATTEST, ACTION_TRANSFER, SUBMIT_OBSERVATION_PREFIX,
+    parse_token_bridge_payload, ClosePendingIxData, GovernanceHeader, GovernanceModule,
+    Instruction, ModifyBalanceIxData, ModifyBalancePayload, PostSignaturesIxData,
+    RegisterChainIxData, RegisterChainPayload, SetComputeUnitLimitData, SubmitObservationsIxData,
+    SubmitVaasIxData, TokenBridgeAction, TokenBridgeTransfer, Uint256, UpgradeContractIxData,
+    UpgradeContractPayload, VaaBodyHeader, ACTION_ATTEST, ACTION_TRANSFER,
+    SUBMIT_OBSERVATION_PREFIX,
 };
 use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
 use solana_pubkey::Pubkey;
@@ -50,7 +51,25 @@ pub fn transfer_body(
     body
 }
 
-pub fn governance_header(module: [u8; 32], action: u8, target_chain: u16) -> GovernanceHeader {
+/// Near-miss modules for rejection tests.
+pub trait GovernanceModuleExt {
+    /// `self` with the lowest bit of its last name byte flipped: one bit away from a valid
+    /// module. Proves the handler compares all 32 module bytes for exact equality.
+    fn one_bit_off(self) -> Self;
+}
+
+impl GovernanceModuleExt for GovernanceModule {
+    fn one_bit_off(mut self) -> Self {
+        self.0[31] ^= 1;
+        self
+    }
+}
+
+pub fn governance_header(
+    module: GovernanceModule,
+    action: u8,
+    target_chain: u16,
+) -> GovernanceHeader {
     GovernanceHeader {
         module,
         action,

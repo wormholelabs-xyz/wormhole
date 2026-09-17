@@ -212,8 +212,10 @@ fn add_creates_then_add_and_subtract_share_pda() {
 #[test]
 fn rejects() {
     let mollusk = mollusk();
-    let mut wrong_module = solana_target();
-    wrong_module.module[31] ^= 1;
+    let wrong_module = GovernanceHeader {
+        module: ACCOUNTANT_GOVERNANCE_MODULE.one_bit_off(),
+        ..solana_target()
+    };
     let existing_record = {
         let layout = Modification::new(0, 300, ModificationKind::Add, 1).expected_record();
         Account {
