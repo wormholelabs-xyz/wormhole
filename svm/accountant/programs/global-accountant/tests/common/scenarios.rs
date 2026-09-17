@@ -1,7 +1,7 @@
+use accountant_operational_core::accounts::balance;
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::Uint256;
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::{InstructionResult, ProgramResult};
@@ -97,7 +97,7 @@ impl Transfer {
     }
 
     pub fn source(&self) -> Pubkey {
-        derive_balance_account_pda(
+        balance::derive_pda(
             &program_id(),
             self.chain,
             self.token_chain,
@@ -107,7 +107,7 @@ impl Transfer {
     }
 
     pub fn dest(&self) -> Pubkey {
-        derive_balance_account_pda(
+        balance::derive_pda(
             &program_id(),
             self.recipient_chain,
             self.token_chain,

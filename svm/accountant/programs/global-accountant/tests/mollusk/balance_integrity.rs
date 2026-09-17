@@ -1,4 +1,4 @@
-use global_accountant::instructions::transfer::derive_balance_account_pda;
+use accountant_operational_core::accounts::balance;
 use global_accountant_definitions::{GlobalAccountantError, Uint256};
 
 use crate::common::*;
@@ -18,8 +18,7 @@ fn dest_failure_rolls_back_source() {
             "wrong dest pda",
             Transfer::new(0xB3, ETHEREUM, SOLANA, 500),
             |s| {
-                s.dest_account =
-                    derive_balance_account_pda(&program_id(), SOLANA, 9, &TOKEN_ADDRESS).0;
+                s.dest_account = balance::derive_pda(&program_id(), SOLANA, 9, &TOKEN_ADDRESS).0;
                 None
             },
             GlobalAccountantError::InvalidAccountPda,

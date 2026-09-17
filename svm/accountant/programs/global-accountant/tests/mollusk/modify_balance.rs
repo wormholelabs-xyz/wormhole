@@ -1,5 +1,5 @@
+use accountant_operational_core::accounts::balance;
 use global_accountant::instructions::modify_balance::derive_modify_balance_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
     GlobalAccountantError, GovernanceHeader, ModificationKind, ModifyBalanceLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,
@@ -81,13 +81,7 @@ impl Modification {
             payer: SUBMITTER,
             guardian_set,
             guardian_signatures: Pubkey::new_from_array([0xC3u8; 32]),
-            balance_pda: derive_balance_account_pda(
-                &program_id(),
-                ETHEREUM,
-                ETHEREUM,
-                &TOKEN_ADDRESS,
-            )
-            .0,
+            balance_pda: balance::derive_pda(&program_id(), ETHEREUM, ETHEREUM, &TOKEN_ADDRESS).0,
             modify_balance_pda: derive_modify_balance_pda(&program_id(), payload_sequence).0,
             guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }

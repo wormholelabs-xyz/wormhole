@@ -1,3 +1,5 @@
+//! Balance PDA helpers: derivation and lazy creation.
+
 use anchor_lang::prelude::*;
 
 use crate::definitions::{BalanceAccountLayout, Uint256, ACCOUNT_SEED_PREFIX};
@@ -11,11 +13,13 @@ pub fn derive_pda(
     token_chain: u16,
     token_address: &[u8; 32],
 ) -> (Pubkey, u8) {
+    let chain_be = chain.to_be_bytes();
+    let token_chain_be = token_chain.to_be_bytes();
     Pubkey::find_program_address(
         &[
             ACCOUNT_SEED_PREFIX,
-            &chain.to_be_bytes(),
-            &token_chain.to_be_bytes(),
+            &chain_be,
+            &token_chain_be,
             token_address,
         ],
         program_id,
