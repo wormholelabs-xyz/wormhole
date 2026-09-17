@@ -34,6 +34,32 @@ name = "accountant-test-fixtures"
 version = "0.1.0"
 
 [[package]]
+name = "accountant-test-harness"
+version = "0.1.0"
+dependencies = [
+ "accountant-operational-core",
+ "accountant-test-fixtures",
+ "base64 0.22.1",
+ "bytemuck",
+ "global-accountant-definitions",
+ "libsecp256k1",
+ "mollusk-svm",
+ "serde_json",
+ "sha2 0.10.9",
+ "solana-account 3.4.0",
+ "solana-client",
+ "solana-commitment-config",
+ "solana-instruction 3.4.0",
+ "solana-keccak-hasher 3.1.0",
+ "solana-keypair",
+ "solana-pubkey 4.2.0",
+ "solana-signature",
+ "solana-signer",
+ "solana-transaction",
+ "wormhole-svm-definitions",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2187,6 +2213,7 @@ version = "0.1.0"
 dependencies = [
  "accountant-operational-core",
  "accountant-test-fixtures",
+ "accountant-test-harness",
  "anchor-lang",
  "base64 0.22.1",
  "bincode",

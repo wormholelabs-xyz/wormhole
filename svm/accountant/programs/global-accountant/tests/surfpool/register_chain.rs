@@ -20,12 +20,12 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    balance_account, balance_of, core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
-    governance_header, guardian_keys, guardian_set_account, make_guardians, noreplay_authority_pda,
-    post_signatures_ix, register_chain_body, register_chain_ix_data, set_compute_unit_limit_ix,
-    shim_program_id, signature_block, signatures_for, submit_vaas_ix_data, system_program_id,
-    transfer_body, ETHEREUM, GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM,
-    TOKEN_ADDRESS,
+    accountant_image, balance_account, balance_of, core_bridge_program_id, derive_guardian_set_pda,
+    double_keccak256, governance_header, guardian_keys, guardian_set_account, make_guardians,
+    noreplay_authority_pda, post_signatures_ix, register_chain_body, register_chain_ix_data,
+    set_compute_unit_limit_ix, shim_program_id, signature_block, signatures_for,
+    submit_vaas_ix_data, system_program_id, transfer_body, ETHEREUM, GUARDIAN_COUNT,
+    GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
     deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ProgramImage,
@@ -62,7 +62,7 @@ fn surfpool_register_chain_rotate_and_replay() {
     let guard = start_surfpool(SurfpoolOptions::offline("ga-surfpool-register-chain"));
     let rpc = guard.rpc_client();
 
-    let accountant = ProgramImage::accountant();
+    let accountant = accountant_image();
     let program_id = accountant.program_id;
     deploy_programs(
         &rpc,

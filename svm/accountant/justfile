@@ -31,9 +31,11 @@ default:
 # `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
 # of the old opt-in polarity.
 
+# Program packages only: the workspace also holds host-only crates (the test harness pulls
+# in `solana-client`), which do not compile for the SBF target.
 [doc("SBF build of the production-shape .so.")]
 build:
-    cargo build-sbf
+    cargo build-sbf -- -p global-accountant
 
 [doc("Alias preserved for backwards-compatibility with existing scripts.")]
 build-prod: build

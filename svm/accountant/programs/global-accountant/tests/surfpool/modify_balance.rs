@@ -14,10 +14,10 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    balance_of, core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
-    governance_header, guardian_keys, guardian_set_account, make_guardians, modify_balance_body,
-    modify_balance_ix_data, post_signatures_ix, set_compute_unit_limit_ix, shim_program_id,
-    signature_block, signatures_for, system_program_id, ETHEREUM, GUARDIAN_COUNT,
+    accountant_image, balance_of, core_bridge_program_id, derive_guardian_set_pda,
+    double_keccak256, governance_header, guardian_keys, guardian_set_account, make_guardians,
+    modify_balance_body, modify_balance_ix_data, post_signatures_ix, set_compute_unit_limit_ix,
+    shim_program_id, signature_block, signatures_for, system_program_id, ETHEREUM, GUARDIAN_COUNT,
     GUARDIAN_SET_INDEX, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
@@ -49,7 +49,7 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     let guard = start_surfpool(SurfpoolOptions::offline("ga-surfpool-modify-balance"));
     let rpc = guard.rpc_client();
 
-    let accountant = ProgramImage::accountant();
+    let accountant = accountant_image();
     let program_id = accountant.program_id;
     deploy_programs(&rpc, &[accountant, ProgramImage::verify_vaa_shim()]);
 

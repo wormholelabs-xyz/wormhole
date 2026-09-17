@@ -1,0 +1,37 @@
+[package]
+name = "accountant-test-harness"
+description = "Mollusk and surfpool test harness shared by the accountant program suites."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+# Dev-only: programs list this crate under `[dev-dependencies]`. Every dependency below is
+# already pinned in the workspace lockfile via the program crates' own dev-dependencies.
+[dependencies]
+accountant-operational-core.workspace = true
+accountant-test-fixtures.workspace = true
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+wormhole-svm-definitions.workspace = true
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-keccak-hasher.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+libsecp256k1 = "0.6"
+sha2 = "=0.10.9"
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-signature = "=3.4.1"
+serde_json.workspace = true
+base64 = "=0.22.1"
+
+[lints]
+workspace = true
