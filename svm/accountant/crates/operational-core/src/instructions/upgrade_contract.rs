@@ -1,27 +1,30 @@
-//! `upgrade_contract`: accountant governance. Replaces this program's code with a
-//! prepared buffer through the BPF upgradeable loader. NoReplay blocks replay.
+//! `upgrade_contract`: accountant governance for the caller's module. Replaces the calling
+//! program's code with a prepared buffer through the BPF upgradeable loader. NoReplay
+//! blocks replay.
 //! Accepts target chain `SOLANA_CHAIN_ID` only.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
-use accountant_operational_core::cpi::{loader, noreplay, shim};
-use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::{ProgramCoreResult, ProgramResult};
-
+use crate::cpi::{loader, noreplay, shim};
 use crate::definitions::{
-    split_body, GlobalAccountantError, NoReplayNamespace, UpgradeContractIxData,
-    UpgradeContractPayload, VaaBodyHeader, ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER,
-    SOLANA_CHAIN_ID,
+    split_body, GlobalAccountantError, GovernanceModule, NoReplayNamespace, UpgradeContractIxData,
+    UpgradeContractPayload, VaaBodyHeader, GOVERNANCE_EMITTER, SOLANA_CHAIN_ID,
 };
-use crate::err;
+use crate::hash::double_keccak256;
+use crate::{err, ProgramCoreResult, ProgramResult};
 
 /// An `UpgradeContract` body is exactly header + payload.
 const UPGRADE_CONTRACT_BODY_LEN: usize = VaaBodyHeader::LEN + UpgradeContractPayload::LEN;
 
-/// Order: instruction framing, signer, Shim signature check, governance validation,
-/// NoReplay pre-check, loader upgrade CPI, NoReplay mark.
-pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+/// Order: instruction framing, signer, Shim signature check, governance validation against
+/// `module`, NoReplay pre-check, loader upgrade CPI, NoReplay mark.
+pub fn process(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+    module: &GovernanceModule,
+) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
@@ -58,9 +61,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = UpgradeContractPayload::from_body(body).map_err(err)?;
-    payload
-        .validate(header, &ACCOUNTANT_GOVERNANCE_MODULE)
-        .map_err(err)?;
+    payload.validate(header, module).map_err(err)?;
     let sequence = header.sequence();
 
     if noreplay::is_marked(

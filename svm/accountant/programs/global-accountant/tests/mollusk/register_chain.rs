@@ -1,5 +1,5 @@
 use accountant_operational_core::accounts::chain_registration;
-use global_accountant::instructions::register_chain::derive_register_chain_pda;
+use accountant_operational_core::instructions::register_chain::derive_register_chain_pda;
 use global_accountant_definitions::{
     ChainRegistrationLayout, GlobalAccountantError, GovernanceHeader, RegisterChainLayout, Uint256,
     GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,

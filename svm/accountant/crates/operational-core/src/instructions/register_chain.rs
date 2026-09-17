@@ -1,5 +1,6 @@
-//! `register_chain`: Token Bridge `RegisterChain` governance. Writes or overwrites the
-//! `ChainRegistration` PDA. A per-sequence `RegisterChain` PDA is the replay guard.
+//! `register_chain`: `RegisterChain` governance for the caller's module (Token Bridge for
+//! WTT, Wormhole Relayer for NTT). Writes or overwrites the `ChainRegistration` PDA. A
+//! per-sequence `RegisterChain` PDA is the replay guard.
 //!
 //! SECURITY: governance sequence numbers are assigned at random, not monotonically, so this
 //! instruction accepts any VAA on an unused sequence and overwrites the registration
@@ -11,25 +12,28 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 use anchor_lang::solana_program::system_program;
 
-use accountant_operational_core::accounts::{self, chain_registration};
-use accountant_operational_core::cpi::shim;
-use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
-use accountant_operational_core::{ProgramCoreResult, ProgramResult};
-
+use crate::accounts::{self, chain_registration};
+use crate::cpi::shim;
 use crate::definitions::{
-    split_body, ChainRegistrationLayout, GlobalAccountantError, RegisterChainIxData,
-    RegisterChainLayout, RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX,
-    REGISTER_CHAIN_SEED_PREFIX, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    split_body, ChainRegistrationLayout, GlobalAccountantError, GovernanceModule,
+    RegisterChainIxData, RegisterChainLayout, RegisterChainPayload, VaaBodyHeader,
+    CHAIN_REGISTRATION_SEED_PREFIX, REGISTER_CHAIN_SEED_PREFIX,
 };
-use crate::err;
+use crate::hash::double_keccak256;
+use crate::support::pda_init::create_pda_allow_prefund;
+use crate::{err, ProgramCoreResult, ProgramResult};
 
 /// A `RegisterChain` body is exactly header + payload.
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
 
-/// Order: instruction framing, signer, Shim signature check, governance validation,
-/// PDA checks, write registration, registration record.
-pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+/// Order: instruction framing, signer, Shim signature check, governance validation against
+/// `module`, PDA checks, write registration, registration record.
+pub fn process(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+    module: &GovernanceModule,
+) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
@@ -57,9 +61,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = RegisterChainPayload::from_body(body).map_err(err)?;
-    payload
-        .validate(header, &TOKEN_BRIDGE_GOVERNANCE_MODULE)
-        .map_err(err)?;
+    payload.validate(header, module).map_err(err)?;
     let sequence = header.sequence();
 
     let register_bump = check_register_chain_pda(program_id, register_chain_pda, sequence)?;
