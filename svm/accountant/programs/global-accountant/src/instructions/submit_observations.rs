@@ -49,7 +49,15 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     // Pending-PDA / commit-log key. Independent of `tx_hash`.
     let content_digest = double_keccak256(&fields);
 
-    let parsed = ParsedObservation::from_ix(ix, content_digest);
+    let parsed = ParsedObservation {
+        content_digest,
+        chain: ix.chain(),
+        emitter: ix.emitter,
+        sequence: ix.sequence(),
+        guardian_set_index: ix.guardian_set_index(),
+        guardian_index: ix.guardian_index,
+        signature: ix.signature,
+    };
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` submitter (rent payer)
@@ -135,19 +143,19 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     );
 
     // An unknown action fails here, rolling back the NoReplay mark above.
-    if is_transfer_action(parsed.action) {
+    if is_transfer_action(ix.action) {
         transfer::apply_transfer(
             program_id,
             submitter,
             source_account_pda,
             dest_account_pda,
             parsed.chain,
-            parsed.recipient_chain,
-            parsed.token_chain,
-            &parsed.token_address,
-            parsed.amount,
+            ix.recipient_chain(),
+            ix.token_chain(),
+            &ix.token_address,
+            ix.amount,
         )?;
-    } else if !is_attest_action(parsed.action) {
+    } else if !is_attest_action(ix.action) {
         return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
     }
 

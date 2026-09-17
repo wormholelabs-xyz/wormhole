@@ -7,17 +7,16 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
-    GlobalAccountantError, PendingObservationsLayout, SubmitObservationsIxData, Uint256,
-    VaaBodyHeader, PENDING_OBSERVATIONS_SEED_PREFIX,
+    GlobalAccountantError, PendingObservationsLayout, VaaBodyHeader,
+    PENDING_OBSERVATIONS_SEED_PREFIX,
 };
 use crate::err;
 use crate::hash::keccak256;
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
 use crate::support::pda_init::create_pda_allow_prefund;
 
-// `submit_observations` data is `SubmitObservationsIxData` (fixed size). Signing digest:
-// `keccak256(prefix ‖ tx_hash ‖ ix.fields_and_digest())`. Content digest:
-// `keccak256(keccak256(ix.fields_and_digest()))`, independent of `tx_hash`.
+// Signing digest: `keccak256(prefix ‖ tx_hash ‖ fields)`. Content digest:
+// `keccak256(keccak256(fields))`, independent of `tx_hash`.
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
@@ -25,7 +24,7 @@ pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 /// Header plus a non-empty payload; used to bound a staged/inline VAA body elsewhere.
 pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
 
-/// Build with [`Self::from_ix`].
+/// Observation fields the quorum path reads; product fields stay on each program's ix.
 #[derive(Clone, Copy)]
 pub struct ParsedObservation {
     /// Pending-PDA seed and commit-log key.
@@ -36,35 +35,6 @@ pub struct ParsedObservation {
     pub guardian_set_index: u32,
     pub guardian_index: u8,
     pub signature: [u8; SECP256K1_SIGNATURE_LEN],
-    /// 0x02 is a no-op; anything but 0x01/0x02/0x03 is `UnknownTokenBridgePayload`.
-    pub action: u8,
-    /// Set only when `action` is a transfer.
-    pub token_chain: u16,
-    /// Set only when `action` is a transfer.
-    pub token_address: [u8; 32],
-    /// Set only when `action` is a transfer.
-    pub recipient_chain: u16,
-    /// Set only when `action` is a transfer.
-    pub amount: Uint256,
-}
-
-impl ParsedObservation {
-    pub fn from_ix(ix: &SubmitObservationsIxData, content_digest: [u8; 32]) -> Self {
-        Self {
-            content_digest,
-            chain: ix.chain(),
-            emitter: ix.emitter,
-            sequence: ix.sequence(),
-            guardian_set_index: ix.guardian_set_index(),
-            guardian_index: ix.guardian_index,
-            signature: ix.signature,
-            action: ix.action,
-            token_chain: ix.token_chain(),
-            token_address: ix.token_address,
-            recipient_chain: ix.recipient_chain(),
-            amount: ix.amount,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
