@@ -11,7 +11,8 @@ use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
     split_body, GlobalAccountantError, NoReplayNamespace, UpgradeContractIxData,
-    UpgradeContractPayload, VaaBodyHeader, GOVERNANCE_EMITTER, SOLANA_CHAIN_ID,
+    UpgradeContractPayload, VaaBodyHeader, ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER,
+    SOLANA_CHAIN_ID,
 };
 use crate::err;
 
@@ -57,7 +58,9 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = UpgradeContractPayload::from_body(body).map_err(err)?;
-    payload.validate(header).map_err(err)?;
+    payload
+        .validate(header, &ACCOUNTANT_GOVERNANCE_MODULE)
+        .map_err(err)?;
     let sequence = header.sequence();
 
     if noreplay::is_marked(
