@@ -1,4 +1,4 @@
-//! Surfpool process control and RPC helpers shared by the e2e modules.
+//! Surfpool process control and RPC helpers for the e2e suites.
 
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
@@ -23,7 +23,8 @@ use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use crate::common::{fixture_elf, program_id, shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::fixtures::fixture_elf;
+use crate::ids::{shim_program_id, NOREPLAY_PROGRAM_ID};
 
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -297,20 +298,18 @@ fn wait_for_rpc_ready(guard: &SurfpoolGuard) {
     );
 }
 
-/// Path of a built program: `<workspace>/target/deploy/<name>.so`.
-///
-/// The workspace root is two levels above this crate's manifest directory.
-/// Run `just build` first; the file must exist.
+/// Path of a built program: `<SBF_OUT_DIR>/<name>.so`, falling back to
+/// `<workspace>/target/deploy` two levels above this crate. Run `just build` first.
 pub fn so_path(name: &str) -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(Path::parent)
-        .expect("workspace root from CARGO_MANIFEST_DIR")
-        .to_path_buf();
-    workspace_root
-        .join("target/deploy")
-        .join(format!("{name}.so"))
+    let deploy_dir = match std::env::var_os("SBF_OUT_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root from CARGO_MANIFEST_DIR")
+            .join("target/deploy"),
+    };
+    deploy_dir.join(format!("{name}.so"))
 }
 
 /// A program to load into surfpool: its address and ELF bytes.
@@ -321,14 +320,14 @@ pub struct ProgramImage {
 }
 
 impl ProgramImage {
-    /// The accountant from `target/deploy`, at its `declare_id!` address.
-    pub fn accountant() -> Self {
-        let path = so_path("global_accountant");
+    /// A built program `<label>.so` from the deploy dir, to load at `program_id`.
+    pub fn from_deploy_dir(label: &'static str, program_id: Pubkey) -> Self {
+        let path = so_path(label);
         let elf = std::fs::read(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}. Run `just build` first.", path.display()));
         Self {
-            label: "global_accountant",
-            program_id: program_id(),
+            label,
+            program_id,
             elf,
         }
     }

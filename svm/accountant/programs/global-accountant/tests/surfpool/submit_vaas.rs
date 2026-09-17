@@ -15,8 +15,8 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    assert_bucket_marked, balance_account, balance_of, chain_registration_account,
-    core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
+    accountant_image, assert_bucket_marked, balance_account, balance_of,
+    chain_registration_account, core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
     guardian_set_with_expiration, noreplay_authority_pda, post_signatures_ix,
     set_compute_unit_limit_ix, shim_program_id, submit_vaas_ix_data, system_program_id,
     NOREPLAY_PROGRAM_ID,
@@ -63,7 +63,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     ));
     let rpc = guard.rpc_client();
 
-    let accountant = ProgramImage::accountant();
+    let accountant = accountant_image();
     let program_id = accountant.program_id;
     deploy_programs(&rpc, &[accountant, ProgramImage::noreplay()]);
 

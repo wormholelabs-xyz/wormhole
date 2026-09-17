@@ -5,7 +5,7 @@
 
 #[path = "../common/mod.rs"]
 mod common;
-mod harness;
+use accountant_test_harness::surfpool as harness;
 
 mod modify_balance;
 mod register_chain;

@@ -38,6 +38,7 @@ global-accountant-definitions = { path = "crates/definitions" }
 accountant-operational-core = { path = "crates/operational-core" }
 accountant-backfill-core = { path = "crates/backfill-core" }
 accountant-test-fixtures = { path = "crates/test-fixtures" }
+accountant-test-harness = { path = "crates/test-harness" }
 # Compile-time base58 decoding for external program IDs. `no_std`, two const
 # hashing deps. Same version the in-tree `wormhole-svm-definitions` crate uses.
 const-crypto = "=0.3.0"

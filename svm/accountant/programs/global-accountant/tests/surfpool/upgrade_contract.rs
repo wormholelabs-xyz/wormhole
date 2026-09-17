@@ -29,12 +29,12 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
 use crate::common::{
-    assert_bucket_marked, clock_sysvar_id, core_bridge_program_id, derive_guardian_set_pda,
-    double_keccak256, governance_header, guardian_keys, guardian_set_account, loader_v3_id,
-    make_guardians, noreplay_authority_pda, post_signatures_ix, rent_sysvar_id,
-    set_compute_unit_limit_ix, shim_program_id, signature_block, signatures_for, system_program_id,
-    upgrade_contract_body, upgrade_contract_ix_data, GUARDIAN_COUNT, GUARDIAN_SET_INDEX,
-    NOREPLAY_PROGRAM_ID, QUORUM,
+    accountant_image, assert_bucket_marked, clock_sysvar_id, core_bridge_program_id,
+    derive_guardian_set_pda, double_keccak256, governance_header, guardian_keys,
+    guardian_set_account, loader_v3_id, make_guardians, noreplay_authority_pda, post_signatures_ix,
+    rent_sysvar_id, set_compute_unit_limit_ix, shim_program_id, signature_block, signatures_for,
+    system_program_id, upgrade_contract_body, upgrade_contract_ix_data, GUARDIAN_COUNT,
+    GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, PROGRAM_NAME, QUORUM,
 };
 use crate::harness::{
     deploy_programs, fund, rpc_client, send, send_expect_error, set_account, so_path,
@@ -57,7 +57,7 @@ fn derive_program_data(program_id: &Pubkey) -> Pubkey {
 
 /// Step 1 records the surfpool pid plus RPC URL here. Step 2 reads it; so does `e2e-upgrade-stop`.
 fn state_file() -> PathBuf {
-    so_path("global_accountant")
+    so_path(PROGRAM_NAME)
         .parent()
         .and_then(|p| p.parent())
         .expect("target dir from .so path")
@@ -117,7 +117,7 @@ fn deploy_upgradeable_accountant() {
     let guard = start_surfpool(SurfpoolOptions::offline_detached("ga-surfpool-upgrade"));
     let rpc = guard.rpc_client();
 
-    let accountant = ProgramImage::accountant();
+    let accountant = accountant_image();
     let program_id = accountant.program_id;
     let elf = accountant.elf.clone();
     deploy_programs(
@@ -240,7 +240,7 @@ fn submit_upgrade_vaa() {
         panic!("surfpool at {rpc_url} not healthy: {e}. Run `just e2e-upgrade-deploy` first.")
     });
 
-    let program_id = ProgramImage::accountant().program_id;
+    let program_id = accountant_image().program_id;
     let program_data = derive_program_data(&program_id);
     let (upgrade_authority, _) = derive_upgrade_authority(&program_id);
     let noreplay_authority = noreplay_authority_pda(&program_id);
@@ -333,7 +333,7 @@ fn submit_upgrade_vaa() {
         slot_after > slot_before,
         "program-data slot advances: {slot_before} -> {slot_after}"
     );
-    let elf = ProgramImage::accountant().elf;
+    let elf = accountant_image().elf;
     let metadata_len = UpgradeableLoaderState::size_of_programdata_metadata();
     assert_eq!(
         &pd_after.data[metadata_len..metadata_len + elf.len()],

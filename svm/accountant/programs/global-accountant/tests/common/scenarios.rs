@@ -4,60 +4,18 @@ use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
 use global_accountant_definitions::Uint256;
 use mollusk_svm::program::keyed_account_for_system_program;
-use mollusk_svm::result::{InstructionResult, ProgramResult};
+use mollusk_svm::result::InstructionResult;
 use mollusk_svm::Mollusk;
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use super::accounts::*;
-use super::guardians::*;
-use super::ids::*;
-use super::ix::*;
-use super::mollusk::*;
+use super::*;
 
-pub const GUARDIAN_COUNT: usize = 19;
-pub const QUORUM: u8 = 13;
-pub const GUARDIAN_SET_INDEX: u32 = 4;
-pub const SOLANA: u16 = 1;
-pub const ETHEREUM: u16 = 2;
 pub const TOKEN_ADDRESS: [u8; 32] = [0x77u8; 32];
-pub const SUBMITTER: Pubkey = Pubkey::new_from_array([0x11u8; 32]);
-pub const GUARDIAN_SIGNATURES: Pubkey = Pubkey::new_from_array([0xC5u8; 32]);
-
-pub fn emitter(seed: u8) -> [u8; 32] {
-    let mut emitter = [0u8; 32];
-    emitter[0] = seed;
-    emitter[31] = 0x77;
-    emitter
-}
 
 pub fn noreplay_authority() -> Pubkey {
     noreplay_authority_pda(&program_id())
-}
-
-pub fn error_code(result: &ProgramResult) -> Option<u64> {
-    match result {
-        ProgramResult::Failure(err) => Some(u64::from(err.clone())),
-        _ => None,
-    }
-}
-
-pub fn assert_success(result: &InstructionResult, label: &str) {
-    assert!(
-        matches!(result.program_result, ProgramResult::Success),
-        "{label}: {:?}",
-        result.program_result
-    );
-}
-
-pub fn assert_error(result: &InstructionResult, expected: u64, label: &str) {
-    assert_eq!(
-        error_code(&result.program_result),
-        Some(expected),
-        "{label}: {:?}",
-        result.program_result
-    );
 }
 
 #[derive(Clone, Copy)]
@@ -115,16 +73,6 @@ impl Transfer {
         )
         .0
     }
-}
-
-pub fn signatures_for(guardians: &[Guardian], digest: &[u8; 32], count: u8) -> Vec<(u8, [u8; 65])> {
-    (0..count)
-        .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
-        .collect()
-}
-
-pub fn guardian_keys(guardians: &[Guardian]) -> Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> {
-    guardians.iter().map(|g| g.eth_address).collect()
 }
 
 #[derive(Clone)]
