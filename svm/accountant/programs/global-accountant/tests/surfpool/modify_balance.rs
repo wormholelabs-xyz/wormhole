@@ -4,7 +4,7 @@
 //! rejects with `DuplicateModifyBalance`.
 
 use accountant_operational_core::accounts::balance;
-use global_accountant::instructions::modify_balance::derive_modify_balance_pda;
+use accountant_operational_core::instructions::modify_balance::derive_modify_balance_pda;
 use global_accountant_definitions::{
     GlobalAccountantError, GovernanceHeader, ModificationKind, ModifyBalanceLayout, Uint256,
     ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID,

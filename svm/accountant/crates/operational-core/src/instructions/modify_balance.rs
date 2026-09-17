@@ -1,5 +1,6 @@
-//! `modify_balance`: accountant governance. Applies an Add or Subtract delta to a
-//! `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the replay guard.
+//! `modify_balance`: accountant governance for the caller's module. Applies an Add or
+//! Subtract delta to a `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the
+//! replay guard.
 //! Accepts the target chains in `ACCEPTED_MODIFY_BALANCE_TARGETS`: Solana, and Wormchain
 //! for the migration window.
 
@@ -7,23 +8,26 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 use anchor_lang::solana_program::system_program;
 
-use accountant_operational_core::accounts::{self, balance as balance_account};
-use accountant_operational_core::cpi::shim;
-use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::{ProgramCoreResult, ProgramResult};
-
+use crate::accounts::{self, balance as balance_account};
+use crate::cpi::shim;
 use crate::definitions::{
-    split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
-    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, ACCOUNTANT_GOVERNANCE_MODULE,
+    split_body, BalanceAccountLayout, GlobalAccountantError, GovernanceModule, ModificationKind,
+    ModifyBalanceIxData, ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader,
 };
-use crate::err;
+use crate::hash::double_keccak256;
+use crate::{err, ProgramCoreResult, ProgramResult};
 
 /// A `ModifyBalance` body is exactly header + payload.
 const MODIFY_BALANCE_BODY_LEN: usize = VaaBodyHeader::LEN + ModifyBalancePayload::LEN;
 
-/// Order: instruction framing, signer, Shim signature check, governance validation,
-/// PDA checks, replay guard, balance delta, modification record.
-pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+/// Order: instruction framing, signer, Shim signature check, governance validation against
+/// `module`, PDA checks, replay guard, balance delta, modification record.
+pub fn process(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+    module: &GovernanceModule,
+) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
@@ -51,9 +55,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = ModifyBalancePayload::from_body(body).map_err(err)?;
-    let kind = payload
-        .validate(header, &ACCOUNTANT_GOVERNANCE_MODULE)
-        .map_err(err)?;
+    let kind = payload.validate(header, module).map_err(err)?;
 
     let balance_bump = check_balance_pda(program_id, balance_pda, payload)?;
     let modification_bump =
@@ -122,7 +124,7 @@ fn check_modify_balance_pda(
     Ok(bump)
 }
 
-pub use accountant_operational_core::accounts::modify_balance::derive_pda as derive_modify_balance_pda;
+pub use crate::accounts::modify_balance::derive_pda as derive_modify_balance_pda;
 
 /// Apply `kind` with `payload.amount()`. Add on an absent PDA creates it with
 /// `balance = amount`; Subtract on an absent PDA is an underflow.
