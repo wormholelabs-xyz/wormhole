@@ -69,6 +69,14 @@ pub const MAINNET_OTHER_SEQ2211: Vaa = Vaa {
     bytes: include_bytes!(data!("mainnet_solana_token_bridge_seq2211.vaa")),
 };
 
+/// 28 signed mainnet NTT VAAs (wormholescan) with what the wormchain NTT accountant committed
+/// for each, from its state dump at height 18,669,029: the hub registry, and per transfer the
+/// digest, normalized amount, hub-substituted token identity and recipient chain. Sampled two
+/// transfers per `(chain, emitter)`; `via_relayer` is `emitter == chain's registered relayer`.
+/// `{hubs: [{chain, address, hub_chain, hub_address}], vectors: [{chain, emitter, sequence,
+/// via_relayer, expected_*, vaa_hex}]}`.
+pub const NTT_TEST_VECTORS: &str = include_str!(data!("ntt_test_vectors.json"));
+
 pub const NOREPLAY_SO: Program = Program {
     bytes: include_bytes!(data!("solana_noreplay.so")),
     sha256: [
