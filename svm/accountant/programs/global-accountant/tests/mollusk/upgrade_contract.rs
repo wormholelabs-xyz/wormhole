@@ -16,72 +16,12 @@ use crate::common::*;
 
 const NEW_CONTRACT: [u8; 32] = [0xC4; 32];
 
-fn loader_id() -> Pubkey {
-    Pubkey::from_str_const("BPFLoaderUpgradeab1e11111111111111111111111")
-}
-
-fn rent_sysvar_id() -> Pubkey {
-    Pubkey::from_str_const("SysvarRent111111111111111111111111111111111")
-}
-
-fn clock_sysvar_id() -> Pubkey {
-    Pubkey::from_str_const("SysvarC1ock11111111111111111111111111111111")
-}
-
 fn solana_target() -> GovernanceHeader {
     governance_header(
         ACCOUNTANT_GOVERNANCE_MODULE,
         UPGRADE_CONTRACT_ACTION,
         SOLANA_CHAIN_ID,
     )
-}
-
-fn program_elf() -> Vec<u8> {
-    let dir = std::env::var("SBF_OUT_DIR").expect("SBF_OUT_DIR");
-    std::fs::read(format!("{dir}/global_accountant.so")).expect("global_accountant.so")
-}
-
-fn buffer_account(authority: &Pubkey, elf: &[u8]) -> Account {
-    let mut data = Vec::with_capacity(37 + elf.len());
-    data.extend_from_slice(&1u32.to_le_bytes());
-    data.push(1);
-    data.extend_from_slice(authority.as_ref());
-    data.extend_from_slice(elf);
-    Account {
-        lamports: 10_000_000_000,
-        data,
-        owner: loader_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
-}
-
-fn program_data_account(authority: &Pubkey, elf_len: usize) -> Account {
-    let mut data = vec![0u8; 45 + elf_len + 1024];
-    data[..4].copy_from_slice(&3u32.to_le_bytes());
-    data[4..12].copy_from_slice(&1u64.to_le_bytes());
-    data[12] = 1;
-    data[13..45].copy_from_slice(authority.as_ref());
-    Account {
-        lamports: 10_000_000_000,
-        data,
-        owner: loader_id(),
-        executable: false,
-        rent_epoch: 0,
-    }
-}
-
-fn program_account(program_data: &Pubkey) -> Account {
-    let mut data = vec![0u8; 36];
-    data[..4].copy_from_slice(&2u32.to_le_bytes());
-    data[4..36].copy_from_slice(program_data.as_ref());
-    Account {
-        lamports: 1_000_000_000,
-        data,
-        owner: loader_id(),
-        executable: true,
-        rent_epoch: 0,
-    }
 }
 
 #[derive(Clone)]
@@ -123,7 +63,7 @@ impl Upgrade {
         let (guardian_set, guardian_set_bump) =
             derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
         let (upgrade_authority, _) = derive_upgrade_authority(&program_id());
-        let elf = program_elf();
+        let elf = deployed_elf(PROGRAM_NAME);
         Self {
             sequence,
             body,
@@ -142,9 +82,9 @@ impl Upgrade {
             upgrade_authority,
             spill: Pubkey::new_unique(),
             buffer: Pubkey::new_from_array(NEW_CONTRACT),
-            program_data: Pubkey::find_program_address(&[program_id().as_ref()], &loader_id()).0,
-            buffer_state: buffer_account(&upgrade_authority, &elf),
-            program_data_state: program_data_account(&upgrade_authority, elf.len()),
+            program_data: Pubkey::find_program_address(&[program_id().as_ref()], &loader_v3_id()).0,
+            buffer_state: upgradeable_buffer_account(&upgrade_authority, &elf),
+            program_data_state: upgradeable_program_data_account(&upgrade_authority, elf.len()),
             guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }
     }
@@ -166,7 +106,7 @@ impl Upgrade {
             AccountMeta::new(program_id(), false),
             AccountMeta::new_readonly(rent_sysvar_id(), false),
             AccountMeta::new_readonly(clock_sysvar_id(), false),
-            AccountMeta::new_readonly(loader_id(), false),
+            AccountMeta::new_readonly(loader_v3_id(), false),
         ]
     }
 
@@ -201,19 +141,13 @@ impl Upgrade {
             (self.spill, system_owned_account(0)),
             (self.buffer, self.buffer_state.clone()),
             (self.program_data, self.program_data_state.clone()),
-            (program_id(), program_account(&self.program_data)),
+            (
+                program_id(),
+                upgradeable_program_account(&self.program_data),
+            ),
             mollusk.sysvars.keyed_account_for_rent_sysvar(),
             mollusk.sysvars.keyed_account_for_clock_sysvar(),
-            (
-                loader_id(),
-                Account {
-                    lamports: 1,
-                    data: vec![],
-                    owner: Pubkey::from_str_const("NativeLoader1111111111111111111111111111111"),
-                    executable: true,
-                    rent_epoch: 0,
-                },
-            ),
+            keyed_account_for_loader_v3(),
         ]
     }
 
@@ -245,7 +179,7 @@ fn upgrade_replaces_program_data_and_marks_noreplay() {
         0,
         "program data slot moves to the upgrade slot"
     );
-    let elf = program_elf();
+    let elf = deployed_elf(PROGRAM_NAME);
     assert_eq!(&program_data.data[45..45 + elf.len()], &elf[..]);
     assert_bucket_marked(
         find_account(&result.resulting_accounts, &upgrade.noreplay_bucket),

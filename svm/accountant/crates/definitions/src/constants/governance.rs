@@ -48,6 +48,14 @@ pub const REGISTER_CHAIN_ACTION: u8 = 0x01;
 pub const ACCOUNTANT_GOVERNANCE_MODULE: GovernanceModule =
     GovernanceModule::from_name("GlobalAccountant");
 
+/// Standard Relayer governance module; its `RegisterChain` sets the relayer emitter per chain.
+pub const RELAYER_GOVERNANCE_MODULE: GovernanceModule =
+    GovernanceModule::from_name("WormholeRelayer");
+
+/// NTT accountant governance module.
+pub const NTT_ACCOUNTANT_GOVERNANCE_MODULE: GovernanceModule =
+    GovernanceModule::from_name("NTTGlobalAccountant");
+
 /// Accountant governance `ModifyBalance` action byte.
 pub const MODIFY_BALANCE_ACTION: u8 = 0x01;
 
@@ -58,7 +66,7 @@ pub const UPGRADE_CONTRACT_ACTION: u8 = 0x02;
 mod tests {
     use super::*;
     use wormhole_sdk::accountant_modification::ModificationKind;
-    use wormhole_sdk::{accountant, token, Address, Amount, Chain};
+    use wormhole_sdk::{accountant, ntt_accountant, relayer, token, Address, Amount, Chain};
 
     #[test]
     fn matches_sdk() {
@@ -67,6 +75,8 @@ mod tests {
         assert_eq!(SOLANA_CHAIN_ID, u16::from(Chain::Solana));
         assert_eq!(TOKEN_BRIDGE_GOVERNANCE_MODULE.0, token::MODULE);
         assert_eq!(ACCOUNTANT_GOVERNANCE_MODULE.0, accountant::MODULE);
+        assert_eq!(RELAYER_GOVERNANCE_MODULE.0, relayer::MODULE);
+        assert_eq!(NTT_ACCOUNTANT_GOVERNANCE_MODULE.0, ntt_accountant::MODULE);
         assert_eq!(ModificationKind::Add as u8, 1);
         assert_eq!(ModificationKind::Subtract as u8, 2);
 
