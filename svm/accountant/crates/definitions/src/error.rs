@@ -1,4 +1,5 @@
-//! Custom error codes returned as `ProgramError::Custom(u32)`.
+//! Custom error codes returned as `ProgramError::Custom(u32)` by both accountant programs
+//! (the Global Accountant family: WTT and NTT). Variants are shared unless marked.
 
 /// Custom error codes. Do not renumber.
 #[repr(u32)]
@@ -56,14 +57,20 @@ pub enum GlobalAccountantError {
     ModifyBalanceUnderflow = 27,
     /// `ModifyBalance` PDA already exists for this sequence.
     DuplicateModifyBalance = 28,
-    /// Token Bridge action byte is not `0x01`, `0x02`, or `0x03`. The NoReplay slot stays free.
+    /// WTT only. Token Bridge action byte is not `0x01`, `0x02`, or `0x03`.
     UnknownTokenBridgePayload = 29,
     /// `GuardianSet` has more keys than `PendingObservationsLayout::MAX_GUARDIANS`.
     GuardianSetTooLarge = 30,
     /// `RegisterChain` PDA already exists for this sequence.
     DuplicateRegisterChain = 31,
-    /// Token Bridge transfer payload exceeds `MAX_TRANSFER_PAYLOAD_LEN`.
+    /// WTT only. Token Bridge transfer payload exceeds `MAX_TRANSFER_PAYLOAD_LEN`.
     TransferPayloadTooLarge = 32,
+    /// NTT only. Transceiver message (transfer, hub or peer registration) failed to parse.
+    MalformedNttMessage = 33,
+    /// NTT only. Standard Relayer `DeliveryInstruction` failed to parse.
+    MalformedDeliveryInstruction = 34,
+    /// NTT only. Transceiver message or relayer delivery exceeds `MAX_NTT_PAYLOAD_LEN`.
+    NttPayloadTooLarge = 35,
 }
 
 impl From<GlobalAccountantError> for u32 {
