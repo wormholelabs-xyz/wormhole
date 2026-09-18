@@ -59,7 +59,7 @@ default:
 
 # Program packages only: the workspace also holds host-only crates (the test harness pulls
 # in `solana-client`), which do not compile for the SBF target.
-sbf_packages := "-p global-accountant -p global-accountant-backfill"
+sbf_packages := "-p global-accountant -p global-accountant-backfill -p ntt-global-accountant"
 
 [doc("SBF build with the values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority key -- see the comment above them.")]
 build-devnet:

@@ -32,6 +32,9 @@ solana-commitment-config.workspace = true
 solana-signature = "=3.4.1"
 serde_json.workspace = true
 base64 = "=0.22.1"
+# BPF upgradeable loader account layouts, encoded with bincode as the loader does.
+solana-loader-v3-interface = { version = "=6.1.1", features = ["bincode"] }
+bincode = "=1.3.3"
 
 [lints]
 workspace = true

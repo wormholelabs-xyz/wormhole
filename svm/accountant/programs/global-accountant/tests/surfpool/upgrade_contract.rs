@@ -31,10 +31,11 @@ use solana_signer::Signer;
 use crate::common::{
     accountant_image, assert_bucket_marked, clock_sysvar_id, core_bridge_program_id,
     derive_guardian_set_pda, double_keccak256, governance_header, guardian_keys,
-    guardian_set_account, loader_v3_id, make_guardians, noreplay_authority_pda, post_signatures_ix,
-    rent_sysvar_id, set_compute_unit_limit_ix, shim_program_id, signature_block, signatures_for,
-    system_program_id, upgrade_contract_body, upgrade_contract_ix_data, GUARDIAN_COUNT,
-    GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, PROGRAM_NAME, QUORUM,
+    guardian_set_account, loader_account_data, loader_state, loader_v3_id, make_guardians,
+    noreplay_authority_pda, post_signatures_ix, rent_sysvar_id, set_compute_unit_limit_ix,
+    shim_program_id, signature_block, signatures_for, system_program_id, upgrade_contract_body,
+    upgrade_contract_ix_data, GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID,
+    PROGRAM_NAME, QUORUM,
 };
 use crate::harness::{
     deploy_programs, fund, rpc_client, send, send_expect_error, set_account, so_path,
@@ -62,19 +63,6 @@ fn state_file() -> PathBuf {
         .and_then(|p| p.parent())
         .expect("target dir from .so path")
         .join("e2e-upgrade-contract.json")
-}
-
-/// Loader header of a program, buffer, or program-data account. `bincode` stops at
-/// the header and skips the trailing ELF bytes.
-fn loader_state(account: &Account) -> UpgradeableLoaderState {
-    bincode::deserialize(&account.data).expect("upgradeable loader state")
-}
-
-/// Serialized `header ‖ payload`, the layout of buffer and program-data accounts.
-fn loader_account(header: &UpgradeableLoaderState, payload: &[u8]) -> Vec<u8> {
-    let mut data = bincode::serialize(header).expect("serialize loader state");
-    data.extend_from_slice(payload);
-    data
 }
 
 fn upgrade_body() -> Vec<u8> {
@@ -156,7 +144,7 @@ fn deploy_upgradeable_accountant() {
         &rpc,
         &programdata_address,
         &Account {
-            data: loader_account(
+            data: loader_account_data(
                 &UpgradeableLoaderState::ProgramData {
                     slot,
                     upgrade_authority_address: Some(upgrade_authority),
@@ -192,7 +180,7 @@ fn deploy_upgradeable_accountant() {
         &BUFFER,
         &Account {
             lamports: BUFFER_LAMPORTS,
-            data: loader_account(
+            data: loader_account_data(
                 &UpgradeableLoaderState::Buffer {
                     authority_address: Some(upgrade_authority),
                 },

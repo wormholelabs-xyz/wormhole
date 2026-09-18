@@ -5,10 +5,80 @@ use global_accountant_definitions::{
     NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
 };
 use solana_account::Account;
+use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_pubkey::Pubkey;
 
-use crate::ids::{noreplay_program_id, system_program_id};
+use crate::ids::{loader_v3_id, noreplay_program_id, system_program_id};
 use crate::mollusk::{find_account, system_owned_account};
+
+/// `<SBF_OUT_DIR>/<program_name>.so`, as `just build` wrote it.
+pub fn deployed_elf(program_name: &str) -> Vec<u8> {
+    let dir = std::env::var("SBF_OUT_DIR").expect("SBF_OUT_DIR");
+    std::fs::read(format!("{dir}/{program_name}.so")).expect("built program .so")
+}
+
+/// Loader header of a program, buffer, or program-data account. `bincode` stops at the
+/// header and skips the trailing ELF bytes.
+pub fn loader_state(account: &Account) -> UpgradeableLoaderState {
+    bincode::deserialize(&account.data).expect("upgradeable loader state")
+}
+
+/// Serialized `header ‖ payload`, the layout of buffer and program-data accounts.
+pub fn loader_account_data(header: &UpgradeableLoaderState, payload: &[u8]) -> Vec<u8> {
+    let mut data = bincode::serialize(header).expect("serialize loader state");
+    data.extend_from_slice(payload);
+    data
+}
+
+fn loader_owned(data: Vec<u8>, lamports: u64, executable: bool) -> Account {
+    Account {
+        lamports,
+        data,
+        owner: loader_v3_id(),
+        executable,
+        rent_epoch: 0,
+    }
+}
+
+/// `Buffer` holding `elf`, with `authority` as its upgrade authority.
+pub fn upgradeable_buffer_account(authority: &Pubkey, elf: &[u8]) -> Account {
+    let header = UpgradeableLoaderState::Buffer {
+        authority_address: Some(*authority),
+    };
+    loader_owned(loader_account_data(&header, elf), 10_000_000_000, false)
+}
+
+/// `ProgramData` last upgraded at slot 1, sized for `elf_len` bytes plus 1024 spare.
+pub fn upgradeable_program_data_account(authority: &Pubkey, elf_len: usize) -> Account {
+    let header = UpgradeableLoaderState::ProgramData {
+        slot: 1,
+        upgrade_authority_address: Some(*authority),
+    };
+    let code = vec![0u8; elf_len + 1024];
+    loader_owned(loader_account_data(&header, &code), 10_000_000_000, false)
+}
+
+/// Executable `Program` pointing at `program_data`.
+pub fn upgradeable_program_account(program_data: &Pubkey) -> Account {
+    let header = UpgradeableLoaderState::Program {
+        programdata_address: *program_data,
+    };
+    loader_owned(loader_account_data(&header, &[]), 1_000_000_000, true)
+}
+
+/// The upgradeable loader's own executable account.
+pub fn keyed_account_for_loader_v3() -> (Pubkey, Account) {
+    (
+        loader_v3_id(),
+        Account {
+            lamports: 1,
+            data: vec![],
+            owner: Pubkey::from_str_const("NativeLoader1111111111111111111111111111111"),
+            executable: true,
+            rent_epoch: 0,
+        },
+    )
+}
 
 /// `BalanceAccount` PDA data owned by `program_id`.
 pub fn balance_account_for(
