@@ -20,10 +20,12 @@ run under separate program IDs, so their PDAs never collide.
 An NTT message names its transceiver two ways. A transceiver that publishes
 directly is the VAA emitter. A transceiver that publishes through the
 Wormhole Standard Relayer is the `sender` inside the relayer's
-`DeliveryInstruction`, and the relayer contract is the VAA emitter. The
-program resolves the transceiver the same way for every NTT message: when
+`DeliveryInstruction`, and the relayer contract is the VAA emitter. For every
+VAA-carrying message the program resolves the transceiver the same way: when
 the emitter is the registered relayer of its chain, it unwraps the envelope;
-otherwise the emitter is the transceiver.
+otherwise the emitter is the transceiver. A guardian observation carries the
+resolved `sender` as a field instead; the program checks that `sender` differs
+from the emitter exactly when the emitter is the registered relayer.
 
 Two registries route a transfer:
 
@@ -210,7 +212,7 @@ the pair `(sender hub, peer hub)`:
 | 4 | relayer `ChainRegistration` PDA | | | For the emitter chain; can be absent. |
 | 5 | sender's `TransceiverHub` PDA | W | | At `(chain, sender)`; written only on adoption. |
 | 6 | peer's `TransceiverHub` PDA | | | At `(dest_chain, peer)`; can be absent. |
-| 7 | peer's `TransceiverPeer` PDA | | | At `(dest_chain, peer, chain)`; read on adoption. |
+| 7 | peer's `TransceiverPeer` PDA | | | At `(dest_chain, peer, chain)`; address always checked, contents read on adoption. |
 | 8 | `TransceiverPeer` PDA | W | | At `(chain, sender, dest_chain)`; must not exist. |
 | 9 | NoReplay bitmap PDA | W | | |
 | 10 | NoReplay program | | | |
