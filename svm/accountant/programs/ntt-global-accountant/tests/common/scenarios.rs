@@ -8,6 +8,7 @@ use super::*;
 
 /// A VAA body signed by the test guardian set: the four Shim-facing accounts every
 /// Shim-verified instruction starts with (payer, Shim program, guardian set, signatures).
+#[derive(Clone)]
 pub struct SignedVaa {
     pub body: Vec<u8>,
     pub guardian_set: Pubkey,

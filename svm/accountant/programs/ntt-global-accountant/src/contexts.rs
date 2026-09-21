@@ -22,6 +22,43 @@ pub struct ClosePending<'info> {
     pub noreplay_bucket: UncheckedAccount<'info>,
 }
 
+/// Accounts for `submit_vaas` (14 accounts). Slots 0-10 match the WTT program; slot 10 is the
+/// Standard Relayer registration for the emitter chain.
+#[derive(Accounts)]
+pub struct SubmitVaas<'info> {
+    #[account(mut)]
+    pub submitter: Signer<'info>,
+    /// CHECK: CPI target is the constant `VERIFY_VAA_SHIM_PROGRAM_ID`.
+    pub verify_vaa_shim_program: UncheckedAccount<'info>,
+    /// CHECK: authenticated by the Shim.
+    pub guardian_set: UncheckedAccount<'info>,
+    /// CHECK: authenticated by the Shim.
+    pub guardian_signatures: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::is_marked` / `noreplay::mark_used`.
+    #[account(mut)]
+    pub noreplay_bucket: UncheckedAccount<'info>,
+    /// CHECK: CPI target is the constant `NOREPLAY_PROGRAM_ID`.
+    pub noreplay_program: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::mark_used`.
+    pub noreplay_authority: UncheckedAccount<'info>,
+    /// CHECK: address checked and lazy-initialised in `transfer::apply_transfer`.
+    #[account(mut)]
+    pub source_account_pda: UncheckedAccount<'info>,
+    /// CHECK: as `source_account_pda`.
+    #[account(mut)]
+    pub dest_account_pda: UncheckedAccount<'info>,
+    /// CHECK: passed through to the NoReplay CPI.
+    pub system_program: UncheckedAccount<'info>,
+    /// CHECK: address checked in `chain_registration::is_registered_emitter`; may be uninitialised.
+    pub relayer_registration_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; must hold the sender's hub.
+    pub hub_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; the sender's peer entry for the recipient chain.
+    pub peer_src_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; the peer's entry for the sender's chain.
+    pub peer_dst_pda: UncheckedAccount<'info>,
+}
+
 /// Accounts for `register_relayer_chain` (7 accounts). The registration PDA holds the
 /// Standard Relayer emitter for one chain.
 #[derive(Accounts)]

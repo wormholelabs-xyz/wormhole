@@ -93,6 +93,12 @@ pub enum GlobalAccountantError {
     HubHasNotRegisteredPeer = 44,
     /// NTT only. Only a hub (self-referential entry) may register a peer that has no hub.
     HublessPeerRequiresHub = 45,
+    /// NTT only. The sender has no `TransceiverPeer` entry for the recipient chain.
+    MissingSourcePeer = 46,
+    /// NTT only. The sender's peer has no `TransceiverPeer` entry for the sender's chain.
+    MissingDestinationPeer = 47,
+    /// NTT only. The peer's entry for the sender's chain names another transceiver.
+    PeersNotCrossRegistered = 48,
 }
 
 impl From<GlobalAccountantError> for u32 {

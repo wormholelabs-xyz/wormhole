@@ -9,4 +9,5 @@ mod program_id;
 mod register_hub;
 mod register_peer;
 mod register_relayer_chain;
+mod submit_vaas;
 mod upgrade_contract;
