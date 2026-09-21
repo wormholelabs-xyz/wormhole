@@ -3,6 +3,7 @@
 use std::mem::size_of;
 
 use accountant_test_harness::{vaa_header, wire};
+pub use global_accountant_definitions::instructions::ntt_global_accountant::Instruction as NttInstruction;
 use global_accountant_definitions::instructions::ntt_global_accountant::Instruction;
 use global_accountant_definitions::{
     ManagerHead, ManagerMode, NativeTokenTransfer, RegisterHubIxData, RegisterPeerIxData,
