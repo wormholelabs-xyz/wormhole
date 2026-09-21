@@ -22,6 +22,13 @@ pub const MODIFY_BALANCE_SEED_PREFIX: &[u8] = b"modify_balance";
 /// keys on governance sequence, covering emitter-rotation re-registrations of the same chain.
 pub const REGISTER_CHAIN_SEED_PREFIX: &[u8] = b"register_chain";
 
+/// Seed prefix for [`crate::TransceiverHubLayout`]: `(b"transceiver_hub", chain_be, address)`.
+pub const TRANSCEIVER_HUB_SEED_PREFIX: &[u8] = b"transceiver_hub";
+
+/// Seed prefix for [`crate::TransceiverPeerLayout`]:
+/// `(b"transceiver_peer", chain_be, address, dest_chain_be)`.
+pub const TRANSCEIVER_PEER_SEED_PREFIX: &[u8] = b"transceiver_peer";
+
 /// Seed for the authority PDA that signs all NoReplay CPIs: `[b"noreplay_authority"]`.
 pub const NOREPLAY_AUTHORITY_SEED_PREFIX: &[u8] = b"noreplay_authority";
 

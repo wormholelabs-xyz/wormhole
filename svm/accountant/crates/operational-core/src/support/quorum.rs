@@ -7,13 +7,12 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
-    GlobalAccountantError, PendingObservationsLayout, VaaBodyHeader,
-    PENDING_OBSERVATIONS_SEED_PREFIX,
+    GlobalAccountantError, PendingKey, PendingObservationsLayout, VaaBodyHeader,
 };
 use crate::err;
 use crate::hash::keccak256;
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
-use crate::support::pda_init::create_pda_allow_prefund;
+use crate::support::pda;
 
 // Signing digest: `keccak256(prefix ‖ tx_hash ‖ fields)`. Content digest:
 // `keccak256(keccak256(fields))`, independent of `tx_hash`.
@@ -56,17 +55,14 @@ pub fn derive_pending_pda(
     guardian_set_index: u32,
     content_digest: &[u8; 32],
 ) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[
-            PENDING_OBSERVATIONS_SEED_PREFIX,
-            &chain.to_be_bytes(),
-            emitter,
-            &sequence.to_be_bytes(),
-            &guardian_set_index.to_be_bytes(),
-            content_digest,
-        ],
-        program_id,
-    )
+    let key = PendingKey::new(
+        chain,
+        *emitter,
+        sequence,
+        guardian_set_index,
+        *content_digest,
+    );
+    pda::derive(program_id, &key)
 }
 
 /// `InvalidPda` unless `pending_pda` is at the address for
@@ -80,17 +76,14 @@ fn verify_pending_pda_address(
     guardian_set_index: u32,
     content_digest: &[u8; 32],
 ) -> crate::ProgramResult {
-    let (expected, _bump) = derive_pending_pda(
-        program_id,
+    let key = PendingKey::new(
         chain,
-        emitter,
+        *emitter,
         sequence,
         guardian_set_index,
-        content_digest,
+        *content_digest,
     );
-    if pending_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
+    pda::check(program_id, pending_pda, &key)?;
     Ok(())
 }
 
@@ -100,14 +93,11 @@ pub fn decide_pending_action(
     pending_pda: &AccountInfo,
     parsed: &ParsedObservation,
 ) -> crate::ProgramCoreResult<PendingAction> {
-    let owner_is_system = pending_pda.owner == &anchor_lang::solana_program::system_program::ID;
-    let data_len = pending_pda.data_len();
-
-    if owner_is_system && data_len == 0 {
+    if !pda::is_initialised(program_id, pending_pda)? {
+        if pending_pda.data_len() != 0 {
+            return Err(err(GlobalAccountantError::InvalidPda));
+        }
         return Ok(PendingAction::Create);
-    }
-    if owner_is_system {
-        return Err(err(GlobalAccountantError::InvalidPda));
     }
 
     verify_pending_pda_address(
@@ -172,44 +162,28 @@ fn create_pending_pda<'info>(
     pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
 ) -> crate::ProgramResult {
-    let (_expected, canonical_bump) = derive_pending_pda(
-        program_id,
+    let key = PendingKey::new(
         parsed.chain,
-        &parsed.emitter,
+        parsed.emitter,
         parsed.sequence,
         parsed.guardian_set_index,
-        &parsed.content_digest,
+        parsed.content_digest,
     );
-
-    let chain_be = parsed.chain.to_be_bytes();
-    let sequence_be = parsed.sequence.to_be_bytes();
-    let index_be = parsed.guardian_set_index.to_be_bytes();
-    let bump_seed = [canonical_bump];
-    let seeds: &[&[u8]] = &[
-        PENDING_OBSERVATIONS_SEED_PREFIX,
-        &chain_be,
-        &parsed.emitter,
-        &sequence_be,
-        &index_be,
-        &parsed.content_digest,
-        &bump_seed,
-    ];
-
-    create_pda_allow_prefund(
-        submitter,
-        pending_pda,
-        program_id,
-        seeds,
-        PendingObservationsLayout::LEN as u64,
-    )?;
-
+    let (_expected, canonical_bump) = pda::derive(program_id, &key);
     let layout = PendingObservationsLayout::new(
         parsed.chain,
         parsed.guardian_set_index,
         parsed.content_digest,
         submitter.key.to_bytes(),
     );
-    accounts::store(pending_pda, &layout)
+    pda::create(
+        program_id,
+        submitter,
+        pending_pda,
+        &key,
+        canonical_bump,
+        &layout,
+    )
 }
 
 /// Refund `recorded_payer` and close the account.

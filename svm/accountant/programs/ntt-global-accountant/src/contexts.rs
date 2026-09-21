@@ -65,6 +65,67 @@ pub struct ModifyBalance<'info> {
     pub modify_balance_pda: UncheckedAccount<'info>,
 }
 
+/// Accounts for `register_hub` (10 accounts).
+#[derive(Accounts)]
+pub struct RegisterHub<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: CPI target is the constant `VERIFY_VAA_SHIM_PROGRAM_ID`.
+    pub verify_vaa_shim_program: UncheckedAccount<'info>,
+    /// CHECK: authenticated by the Shim.
+    pub guardian_set: UncheckedAccount<'info>,
+    /// CHECK: authenticated by the Shim.
+    pub guardian_signatures: UncheckedAccount<'info>,
+    /// CHECK: address checked in `chain_registration::is_registered_emitter`; may be uninitialised.
+    pub relayer_registration_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check_uninitialised`.
+    #[account(mut)]
+    pub hub_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::is_marked` / `noreplay::mark_used`.
+    #[account(mut)]
+    pub noreplay_bucket: UncheckedAccount<'info>,
+    /// CHECK: CPI target is the constant `NOREPLAY_PROGRAM_ID`.
+    pub noreplay_program: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::mark_used`.
+    pub noreplay_authority: UncheckedAccount<'info>,
+    /// CHECK: passed through to the system and NoReplay CPIs.
+    pub system_program: UncheckedAccount<'info>,
+}
+
+/// Accounts for `register_peer` (13 accounts).
+#[derive(Accounts)]
+pub struct RegisterPeer<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: CPI target is the constant `VERIFY_VAA_SHIM_PROGRAM_ID`.
+    pub verify_vaa_shim_program: UncheckedAccount<'info>,
+    /// CHECK: authenticated by the Shim.
+    pub guardian_set: UncheckedAccount<'info>,
+    /// CHECK: authenticated by the Shim.
+    pub guardian_signatures: UncheckedAccount<'info>,
+    /// CHECK: address checked in `chain_registration::is_registered_emitter`; may be uninitialised.
+    pub relayer_registration_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; written only when adopting.
+    #[account(mut)]
+    pub own_hub_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; may be uninitialised.
+    pub peer_hub_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; may be uninitialised.
+    pub hub_peer_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check_uninitialised`.
+    #[account(mut)]
+    pub peer_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::is_marked` / `noreplay::mark_used`.
+    #[account(mut)]
+    pub noreplay_bucket: UncheckedAccount<'info>,
+    /// CHECK: CPI target is the constant `NOREPLAY_PROGRAM_ID`.
+    pub noreplay_program: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::mark_used`.
+    pub noreplay_authority: UncheckedAccount<'info>,
+    /// CHECK: passed through to the system and NoReplay CPIs.
+    pub system_program: UncheckedAccount<'info>,
+}
+
 /// Accounts for `upgrade_contract` (16 accounts).
 #[derive(Accounts)]
 pub struct UpgradeContract<'info> {

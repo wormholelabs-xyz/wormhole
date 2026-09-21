@@ -1,8 +1,8 @@
 //! NTT global-accountant instruction discriminators. Namespaced: both programs name their enum
 //! `Instruction`. Numbering mirrors the WTT program for the shared instructions.
 
-/// Single-byte prefix on the instruction data. `0`, `2`, `5` and `6` are taken by
-/// `submit_observations`, `submit_vaas`, `register_hub` and `register_peer`.
+/// Single-byte prefix on the instruction data. `0` and `2` are taken by
+/// `submit_observations` and `submit_vaas`.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Instruction {
@@ -12,6 +12,10 @@ pub enum Instruction {
     RegisterRelayerChain = 3,
     /// NTT accountant `ModifyBalance` governance: applies a delta to a `BalanceAccount` PDA.
     ModifyBalance = 4,
+    /// Transceiver info (Locking mode): writes the self-referential `TransceiverHub` PDA.
+    RegisterHub = 5,
+    /// Transceiver peer registration: writes the `TransceiverPeer` PDA after the hub check.
+    RegisterPeer = 6,
     /// NTT accountant `UpgradeContract` governance: upgrades this program from a buffer.
     UpgradeContract = 7,
 }
@@ -22,6 +26,8 @@ impl Instruction {
             1 => Some(Self::ClosePending),
             3 => Some(Self::RegisterRelayerChain),
             4 => Some(Self::ModifyBalance),
+            5 => Some(Self::RegisterHub),
+            6 => Some(Self::RegisterPeer),
             7 => Some(Self::UpgradeContract),
             _ => None,
         }

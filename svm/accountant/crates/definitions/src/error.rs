@@ -71,6 +71,26 @@ pub enum GlobalAccountantError {
     MalformedDeliveryInstruction = 34,
     /// NTT only. Transceiver message or relayer delivery exceeds `MAX_NTT_PAYLOAD_LEN`.
     NttPayloadTooLarge = 35,
+    /// NTT only. `register_hub` info message is Burning mode; only Locking registers a hub.
+    NotLockingHub = 36,
+    /// NTT only. `TransceiverHub` PDA already exists for this transceiver.
+    DuplicateTransceiverHub = 37,
+    /// NTT only. No `TransceiverHub` PDA for the transceiver; in `register_peer`, neither the
+    /// sender nor the peer has one.
+    MissingTransceiverHub = 38,
+    /// NTT only. `TransceiverPeer` PDA already exists for this transceiver and chain.
+    DuplicateTransceiverPeer = 39,
+    /// NTT only. The peer's hub differs from this transceiver's registered hub.
+    PeerRegistrationMismatch = 40,
+    /// NTT only. The sender has no hub and the peer's hub is not the peer itself.
+    PeerBeforeHub = 41,
+    /// NTT only. `register_peer` names a peer on the sender's own chain.
+    SameChainPeer = 42,
+    /// NTT only. The hub has no `TransceiverPeer` entry naming the sender on its chain, so the
+    /// sender may not adopt it.
+    HubHasNotRegisteredPeer = 43,
+    /// NTT only. Only a hub (self-referential entry) may register a peer that has no hub.
+    HublessPeerRequiresHub = 44,
 }
 
 impl From<GlobalAccountantError> for u32 {

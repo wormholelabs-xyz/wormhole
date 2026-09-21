@@ -1,7 +1,8 @@
 //! Wormhole NTT Global Accountant Solana program, anchor-lang 1.1.2.
 //!
 //! Shared machinery lives in `accountant-operational-core`, including the governance handlers.
-//! This crate holds the NTT-specific paths and the `#[program]` entry. Wire-format constraints
+//! This crate holds the NTT registries (transceiver hubs and peers), the NTT-specific
+//! instructions, and the `#[program]` entry. Wire-format constraints
 //! are those of the sibling `global-accountant` crate: 1-byte `AccountTag` at offset 0 with
 //! `UncheckedAccount` + `bytemuck`, 1-byte instruction discriminators, PDA creation through
 //! `pda_init`, and errors as `ProgramError::Custom(code)`.
@@ -13,6 +14,7 @@
 use anchor_lang::prelude::*;
 
 pub mod contexts;
+pub mod instructions;
 pub mod raw_ix_data;
 
 pub use accountant_operational_core::err;
@@ -105,6 +107,53 @@ pub mod ntt_global_accountant {
             &ix_data.0,
             &NTT_ACCOUNTANT_GOVERNANCE_MODULE,
         )?;
+        Ok(())
+    }
+
+    /// See `crate::instructions::register_hub`.
+    #[instruction(discriminator = 5)]
+    pub fn register_hub(ctx: Context<RegisterHub>, ix_data: RawIxData) -> Result<()> {
+        let accounts = flatten_accounts!(
+            ctx.accounts,
+            [
+                payer,
+                verify_vaa_shim_program,
+                guardian_set,
+                guardian_signatures,
+                relayer_registration_pda,
+                hub_pda,
+                noreplay_bucket,
+                noreplay_program,
+                noreplay_authority,
+                system_program,
+            ]
+        );
+        crate::instructions::register_hub::process(ctx.program_id, &accounts, &ix_data.0)?;
+        Ok(())
+    }
+
+    /// See `crate::instructions::register_peer`.
+    #[instruction(discriminator = 6)]
+    pub fn register_peer(ctx: Context<RegisterPeer>, ix_data: RawIxData) -> Result<()> {
+        let accounts = flatten_accounts!(
+            ctx.accounts,
+            [
+                payer,
+                verify_vaa_shim_program,
+                guardian_set,
+                guardian_signatures,
+                relayer_registration_pda,
+                own_hub_pda,
+                peer_hub_pda,
+                hub_peer_pda,
+                peer_pda,
+                noreplay_bucket,
+                noreplay_program,
+                noreplay_authority,
+                system_program,
+            ]
+        );
+        crate::instructions::register_peer::process(ctx.program_id, &accounts, &ix_data.0)?;
         Ok(())
     }
 

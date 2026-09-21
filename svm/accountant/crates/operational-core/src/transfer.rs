@@ -4,7 +4,8 @@
 use anchor_lang::prelude::*;
 
 use crate::accounts::{self, balance};
-use crate::definitions::{BalanceAccountLayout, GlobalAccountantError, Uint256};
+use crate::definitions::{BalanceAccountLayout, BalanceKey, GlobalAccountantError, Uint256};
+use crate::support::pda;
 use crate::{err, ProgramResult};
 
 /// Source `lock_or_burn`, then destination `unlock_or_mint`. Both PDAs are derived from
@@ -25,11 +26,12 @@ pub fn apply_transfer<'info>(
     token_address: &[u8; 32],
     amount: Uint256,
 ) -> ProgramResult {
-    let (src_expected, src_bump) =
-        balance::derive_pda(program_id, source_chain, token_chain, token_address);
-    if source_account.key != &src_expected {
-        return Err(err(GlobalAccountantError::InvalidAccountPda));
-    }
+    let src_bump = pda::check_or(
+        program_id,
+        source_account,
+        &BalanceKey::new(source_chain, token_chain, *token_address),
+        GlobalAccountantError::InvalidAccountPda,
+    )?;
     balance::init_if_needed(
         program_id,
         payer,
@@ -43,11 +45,12 @@ pub fn apply_transfer<'info>(
     src.lock_or_burn(amount).map_err(err)?;
 
     // Destination PDA is derived from the payload; the check runs on every path.
-    let (dst_expected, dst_bump) =
-        balance::derive_pda(program_id, recipient_chain, token_chain, token_address);
-    if dest_account.key != &dst_expected {
-        return Err(err(GlobalAccountantError::InvalidAccountPda));
-    }
+    let dst_bump = pda::check_or(
+        program_id,
+        dest_account,
+        &BalanceKey::new(recipient_chain, token_chain, *token_address),
+        GlobalAccountantError::InvalidAccountPda,
+    )?;
 
     // Same chain: both PDAs are one account. Burn-then-mint must still underflow when the
     // balance is below `amount`, so apply both to one in-memory layout.

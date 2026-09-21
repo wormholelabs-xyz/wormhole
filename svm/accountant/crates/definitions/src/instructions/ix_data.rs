@@ -7,6 +7,8 @@ use bytemuck::{Pod, Zeroable};
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
+// TODO: decide if we want to collapse the `*IxData` prefixes into one generic since they are
+// all the same size.
 /// Fixed prefix followed by a `body_len`-framed body.
 pub trait IxPrefix: Pod {
     const LEN: usize = core::mem::size_of::<Self>();
@@ -148,6 +150,34 @@ pub struct RegisterChainIxData {
 }
 
 impl IxPrefix for RegisterChainIxData {
+    fn body_len(&self) -> usize {
+        u16::from_le_bytes(self.body_len) as usize
+    }
+}
+
+/// `register_hub` prefix (3 bytes). The hub PDA bump derives on-chain.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct RegisterHubIxData {
+    pub guardian_set_bump: u8,
+    pub body_len: [u8; 2],
+}
+
+impl IxPrefix for RegisterHubIxData {
+    fn body_len(&self) -> usize {
+        u16::from_le_bytes(self.body_len) as usize
+    }
+}
+
+/// `register_peer` prefix (3 bytes). Hub and peer PDA bumps derive on-chain.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct RegisterPeerIxData {
+    pub guardian_set_bump: u8,
+    pub body_len: [u8; 2],
+}
+
+impl IxPrefix for RegisterPeerIxData {
     fn body_len(&self) -> usize {
         u16::from_le_bytes(self.body_len) as usize
     }
