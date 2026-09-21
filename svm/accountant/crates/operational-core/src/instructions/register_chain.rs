@@ -11,15 +11,16 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
-use anchor_lang::solana_program::system_program;
 
 use crate::accounts::{chain_registration, register_chain};
 use crate::cpi::shim;
 use crate::definitions::{
-    split_body, ChainRegistrationLayout, GlobalAccountantError, GovernanceModule,
-    RegisterChainIxData, RegisterChainLayout, RegisterChainPayload, VaaBodyHeader,
+    split_body, ChainRegistrationKey, ChainRegistrationLayout, GlobalAccountantError,
+    GovernanceModule, RegisterChainIxData, RegisterChainKey, RegisterChainLayout,
+    RegisterChainPayload, VaaBodyHeader,
 };
 use crate::hash::double_keccak256;
+use crate::support::pda;
 use crate::{err, ProgramCoreResult, ProgramResult};
 
 pub use crate::accounts::register_chain::derive_pda as derive_register_chain_pda;
@@ -104,11 +105,11 @@ fn check_registration_pda(
     registration_pda: &AccountInfo,
     chain: u16,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = chain_registration::derive_pda(program_id, chain);
-    if registration_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    Ok(bump)
+    pda::check(
+        program_id,
+        registration_pda,
+        &ChainRegistrationKey::new(chain),
+    )
 }
 
 /// `register_chain_pda` must be the canonical account for `sequence` and must not exist yet
@@ -118,14 +119,12 @@ fn check_register_chain_pda(
     register_chain_pda: &AccountInfo,
     sequence: u64,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_register_chain_pda(program_id, sequence);
-    if register_chain_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    if register_chain_pda.owner != &system_program::ID {
-        return Err(err(GlobalAccountantError::DuplicateRegisterChain));
-    }
-    Ok(bump)
+    pda::check_uninitialised(
+        program_id,
+        register_chain_pda,
+        &RegisterChainKey::new(sequence),
+        GlobalAccountantError::DuplicateRegisterChain,
+    )
 }
 
 /// First registration creates the PDA; every later call overwrites it in place. Acceptance
@@ -141,21 +140,19 @@ fn write_registration<'info>(
     sequence: u64,
 ) -> ProgramResult {
     let layout = ChainRegistrationLayout::new(payload.chain(), payload.emitter_address, sequence);
-    if registration_pda.owner == &system_program::ID {
-        return chain_registration::create(
-            program_id,
-            payer,
-            registration_pda,
-            registration_bump,
-            &layout,
-        );
+    if pda::is_initialised(program_id, registration_pda)? {
+        if registration_pda.data_len() != ChainRegistrationLayout::LEN {
+            return Err(err(GlobalAccountantError::InvalidPda));
+        }
+        return chain_registration::store(registration_pda, &layout);
     }
-    if registration_pda.owner != program_id
-        || registration_pda.data_len() != ChainRegistrationLayout::LEN
-    {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    chain_registration::store(registration_pda, &layout)
+    chain_registration::create(
+        program_id,
+        payer,
+        registration_pda,
+        registration_bump,
+        &layout,
+    )
 }
 
 /// Create the `RegisterChain` PDA and write the audit record.

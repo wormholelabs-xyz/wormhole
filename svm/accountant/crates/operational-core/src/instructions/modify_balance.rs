@@ -6,15 +6,16 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
-use anchor_lang::solana_program::system_program;
 
 use crate::accounts::{self, balance as balance_account};
 use crate::cpi::shim;
 use crate::definitions::{
-    split_body, BalanceAccountLayout, GlobalAccountantError, GovernanceModule, ModificationKind,
-    ModifyBalanceIxData, ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader,
+    split_body, BalanceAccountLayout, BalanceKey, GlobalAccountantError, GovernanceModule,
+    ModificationKind, ModifyBalanceIxData, ModifyBalanceKey, ModifyBalanceLayout,
+    ModifyBalancePayload, VaaBodyHeader,
 };
 use crate::hash::double_keccak256;
+use crate::support::pda;
 use crate::{err, ProgramCoreResult, ProgramResult};
 
 /// A `ModifyBalance` body is exactly header + payload.
@@ -95,16 +96,12 @@ fn check_balance_pda(
     balance_pda: &AccountInfo,
     payload: &ModifyBalancePayload,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = balance_account::derive_pda(
-        program_id,
+    let key = BalanceKey::new(
         payload.chain_id(),
         payload.token_chain(),
-        &payload.token_address,
+        payload.token_address,
     );
-    if balance_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    Ok(bump)
+    pda::check(program_id, balance_pda, &key)
 }
 
 /// `modify_balance_pda` must be the canonical account for `sequence` and must not exist yet
@@ -114,14 +111,12 @@ fn check_modify_balance_pda(
     modify_balance_pda: &AccountInfo,
     sequence: u64,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_modify_balance_pda(program_id, sequence);
-    if modify_balance_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    if modify_balance_pda.owner != &system_program::ID {
-        return Err(err(GlobalAccountantError::DuplicateModifyBalance));
-    }
-    Ok(bump)
+    pda::check_uninitialised(
+        program_id,
+        modify_balance_pda,
+        &ModifyBalanceKey::new(sequence),
+        GlobalAccountantError::DuplicateModifyBalance,
+    )
 }
 
 pub use crate::accounts::modify_balance::derive_pda as derive_modify_balance_pda;
@@ -137,8 +132,7 @@ fn apply_delta<'info>(
     kind: ModificationKind,
 ) -> ProgramResult {
     let amount = payload.amount();
-    // Not initialized branch
-    if balance_pda.owner == &system_program::ID {
+    if !pda::is_initialised(program_id, balance_pda)? {
         return match kind {
             ModificationKind::Subtract => Err(err(GlobalAccountantError::ModifyBalanceUnderflow)),
             ModificationKind::Add => balance_account::create(

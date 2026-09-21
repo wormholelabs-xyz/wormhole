@@ -15,13 +15,32 @@ const fn keccak_prefix(name: &[u8]) -> [u8; 4] {
     [hash[0], hash[1], hash[2], hash[3]]
 }
 
-/// `WormholeTransceiverInfo`: hub registration message, 70 bytes.
+/// NTT manager mode byte of `WormholeTransceiverInfo`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManagerMode {
+    Locking = 0,
+    Burning = 1,
+}
+
+impl TryFrom<u8> for ManagerMode {
+    type Error = GlobalAccountantError;
+
+    fn try_from(mode: u8) -> Result<Self, Self::Error> {
+        match mode {
+            0 => Ok(Self::Locking),
+            1 => Ok(Self::Burning),
+            _ => Err(GlobalAccountantError::MalformedNttMessage),
+        }
+    }
+}
+
+/// `WormholeTransceiverInfo` wire layout, 70 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct TransceiverInfoPayload {
     pub prefix: [u8; 4],
     pub manager_address: [u8; 32],
-    /// `0` Locking, `1` Burning.
     pub mode: u8,
     pub token_address: [u8; 32],
     pub token_decimals: u8,
@@ -29,26 +48,31 @@ pub struct TransceiverInfoPayload {
 
 impl TransceiverInfoPayload {
     pub const LEN: usize = core::mem::size_of::<Self>();
-    pub const MODE_LOCKING: u8 = 0;
-    pub const MODE_BURNING: u8 = 1;
+}
 
-    /// Exact length and `INFO_PREFIX`, else `MalformedNttMessage`.
-    pub fn from_payload(payload: &[u8]) -> Result<&Self, GlobalAccountantError> {
-        let view: &Self = bytemuck::try_from_bytes(payload)
+/// Parsed `WormholeTransceiverInfo`; construct via [`Self::from_payload`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransceiverInfo {
+    pub manager_address: [u8; 32],
+    pub mode: ManagerMode,
+    pub token_address: [u8; 32],
+    pub token_decimals: u8,
+}
+
+impl TransceiverInfo {
+    /// Exact length, `INFO_PREFIX` and a known mode, else `MalformedNttMessage`.
+    pub fn from_payload(payload: &[u8]) -> Result<Self, GlobalAccountantError> {
+        let wire: &TransceiverInfoPayload = bytemuck::try_from_bytes(payload)
             .map_err(|_| GlobalAccountantError::MalformedNttMessage)?;
-        if view.prefix != TRANSCEIVER_INFO_PREFIX {
+        if wire.prefix != TRANSCEIVER_INFO_PREFIX {
             return Err(GlobalAccountantError::MalformedNttMessage);
         }
-        Ok(view)
-    }
-
-    /// Locking registers a hub; other modes are invalid.
-    pub fn is_locking(&self) -> Result<bool, GlobalAccountantError> {
-        match self.mode {
-            Self::MODE_LOCKING => Ok(true),
-            Self::MODE_BURNING => Ok(false),
-            _ => Err(GlobalAccountantError::MalformedNttMessage),
-        }
+        Ok(Self {
+            manager_address: wire.manager_address,
+            mode: ManagerMode::try_from(wire.mode)?,
+            token_address: wire.token_address,
+            token_decimals: wire.token_decimals,
+        })
     }
 }
 
@@ -126,10 +150,11 @@ mod tests {
         info_bad_prefix[0] = 0;
         let mut info_long = info(0);
         info_long.push(0);
-        let info_cases: [Case<Option<bool>>; 6] = [
-            ("locking", info(0), Ok(Some(true))),
-            ("burning", info(1), Ok(Some(false))),
+        let info_cases: [Case<ManagerMode>; 7] = [
+            ("locking", info(0), Ok(ManagerMode::Locking)),
+            ("burning", info(1), Ok(ManagerMode::Burning)),
             ("mode 2", info(2), Err(E::MalformedNttMessage)),
+            ("mode 255", info(255), Err(E::MalformedNttMessage)),
             ("bad prefix", info_bad_prefix, Err(E::MalformedNttMessage)),
             (
                 "one byte short",
@@ -139,8 +164,7 @@ mod tests {
             ("one byte long", info_long, Err(E::MalformedNttMessage)),
         ];
         for (name, payload, expected) in info_cases {
-            let got = TransceiverInfoPayload::from_payload(&payload)
-                .and_then(|view| view.is_locking().map(Some));
+            let got = TransceiverInfo::from_payload(&payload).map(|info| info.mode);
             assert_eq!(got, expected, "info {name}");
         }
 
