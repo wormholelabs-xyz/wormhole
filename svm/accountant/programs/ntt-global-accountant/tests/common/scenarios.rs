@@ -1,8 +1,10 @@
 use accountant_operational_core::accounts::{balance, chain_registration};
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
-use accountant_operational_core::hash::observation_signing_digest;
 use accountant_operational_core::support::pda;
-use accountant_operational_core::support::quorum::derive_pending_pda;
+use accountant_operational_core::support::quorum::{
+    derive_pending_pda, observation_digests, ObservationDigests,
+};
+use accountant_test_harness::wire;
 use global_accountant_definitions::{
     NttSubmitObservationsIxData, TransceiverKey, TransceiverPeerKey, NTT_SUBMIT_OBSERVATION_PREFIX,
 };
@@ -15,79 +17,42 @@ use solana_pubkey::Pubkey;
 
 use super::*;
 
-/// A VAA body signed by the test guardian set: the four Shim-facing accounts every
-/// Shim-verified instruction starts with (payer, Shim program, guardian set, signatures).
-#[derive(Clone)]
-pub struct SignedVaa {
-    pub body: Vec<u8>,
-    pub guardian_set: Pubkey,
-    pub guardian_set_bump: u8,
-    guardians: Vec<Guardian>,
+/// PDAs both transfer handlers take for `sender` on `chain` under `hub`, cross-registered
+/// with `peer` on `recipient_chain`, published under `(emitter, sequence)`.
+struct RoutePdas {
+    noreplay_bucket: Pubkey,
+    source_balance: Pubkey,
+    dest_balance: Pubkey,
+    relayer_registration_pda: Pubkey,
+    hub_pda: Pubkey,
+    peer_src_pda: Pubkey,
+    peer_dst_pda: Pubkey,
 }
 
-impl SignedVaa {
-    pub fn new(body: Vec<u8>) -> Self {
-        let (guardian_set, guardian_set_bump) =
-            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
-        Self {
-            body,
-            guardian_set,
-            guardian_set_bump,
-            guardians: make_guardians(GUARDIAN_COUNT, 0x42),
-        }
-    }
-
-    pub fn shim_metas(&self) -> Vec<AccountMeta> {
-        vec![
-            AccountMeta::new(SUBMITTER, true),
-            AccountMeta::new_readonly(shim_program_id(), false),
-            AccountMeta::new_readonly(self.guardian_set, false),
-            AccountMeta::new_readonly(GUARDIAN_SIGNATURES, false),
-        ]
-    }
-
-    pub fn shim_accounts(&self) -> Vec<(Pubkey, Account)> {
-        let digest = double_keccak256(&self.body);
-        vec![
-            (SUBMITTER, system_owned_account(50_000_000_000)),
-            keyed_account_for_verify_vaa_shim_program(),
-            (
-                self.guardian_set,
-                guardian_set_account(
-                    GUARDIAN_SET_INDEX,
-                    &guardian_keys(&self.guardians),
-                    0,
-                    0,
-                    &core_bridge_program_id(),
-                ),
-            ),
-            (
-                GUARDIAN_SIGNATURES,
-                guardian_signatures_account(
-                    GUARDIAN_SET_INDEX,
-                    &SUBMITTER,
-                    &signatures_for(&self.guardians, &digest, QUORUM),
-                    &shim_program_id(),
-                ),
-            ),
-        ]
-    }
-
-    /// Run `ix_data` against `program` with the Shim accounts first, then `extra`.
-    pub fn submit(
-        &self,
-        mollusk: &Mollusk,
-        program: Pubkey,
-        ix_data: &[u8],
-        extra_metas: Vec<AccountMeta>,
-        extra_accounts: Vec<(Pubkey, Account)>,
-    ) -> InstructionResult {
-        let mut metas = self.shim_metas();
-        metas.extend(extra_metas);
-        let mut accounts = self.shim_accounts();
-        accounts.extend(extra_accounts);
-        let ix = Instruction::new_with_bytes(program, ix_data, metas);
-        mollusk.process_instruction(&ix, &accounts)
+#[allow(clippy::too_many_arguments)]
+fn route_pdas(
+    chain: u16,
+    emitter: [u8; 32],
+    sequence: u64,
+    sender: [u8; 32],
+    recipient_chain: u16,
+    peer: [u8; 32],
+    (hub_chain, hub): (u16, [u8; 32]),
+) -> RoutePdas {
+    let id = program_id();
+    RoutePdas {
+        noreplay_bucket: derive_bucket_pda(&noreplay_authority_pda(&id), chain, &emitter, sequence)
+            .0,
+        source_balance: balance::derive_pda(&id, chain, hub_chain, &hub).0,
+        dest_balance: balance::derive_pda(&id, recipient_chain, hub_chain, &hub).0,
+        relayer_registration_pda: chain_registration::derive_pda(&id, chain).0,
+        hub_pda: pda::derive(&id, &TransceiverKey::new(chain, sender)).0,
+        peer_src_pda: pda::derive(
+            &id,
+            &TransceiverPeerKey::new(chain, sender, recipient_chain),
+        )
+        .0,
+        peer_dst_pda: pda::derive(&id, &TransceiverPeerKey::new(recipient_chain, peer, chain)).0,
     }
 }
 
@@ -165,28 +130,33 @@ impl VaaScenario {
         (hub_chain, hub): (u16, [u8; 32]),
         body: Vec<u8>,
     ) -> Self {
-        let id = program_id();
+        let RoutePdas {
+            noreplay_bucket,
+            source_balance,
+            dest_balance,
+            relayer_registration_pda,
+            hub_pda,
+            peer_src_pda,
+            peer_dst_pda,
+        } = route_pdas(
+            chain,
+            emitter,
+            sequence,
+            sender,
+            recipient_chain,
+            peer,
+            (hub_chain, hub),
+        );
         Self {
             vaa: SignedVaa::new(body),
             sequence,
-            noreplay_bucket: derive_bucket_pda(
-                &noreplay_authority_pda(&id),
-                chain,
-                &emitter,
-                sequence,
-            )
-            .0,
-            source_balance: balance::derive_pda(&id, chain, hub_chain, &hub).0,
-            dest_balance: balance::derive_pda(&id, recipient_chain, hub_chain, &hub).0,
-            relayer_registration_pda: chain_registration::derive_pda(&id, chain).0,
-            hub_pda: pda::derive(&id, &TransceiverKey::new(chain, sender)).0,
-            peer_src_pda: pda::derive(
-                &id,
-                &TransceiverPeerKey::new(chain, sender, recipient_chain),
-            )
-            .0,
-            peer_dst_pda: pda::derive(&id, &TransceiverPeerKey::new(recipient_chain, peer, chain))
-                .0,
+            noreplay_bucket,
+            source_balance,
+            dest_balance,
+            relayer_registration_pda,
+            hub_pda,
+            peer_src_pda,
+            peer_dst_pda,
         }
     }
 
@@ -366,9 +336,14 @@ impl Observation {
         }
     }
 
-    /// Content digest: the pending-PDA and commit-log key.
+    fn digests_with(&self, prefix: &[u8], tx_hash: &[u8; 32]) -> ObservationDigests {
+        let ix = self.ix(0, 0, [0; 65], *tx_hash);
+        observation_digests(prefix, tx_hash, &ix.fields_and_digest())
+    }
+
     pub fn content_digest(&self) -> [u8; 32] {
-        double_keccak256(&self.ix(0, 0, [0; 65], TX_HASH).fields_and_digest())
+        self.digests_with(NTT_SUBMIT_OBSERVATION_PREFIX, &TX_HASH)
+            .content
     }
 
     pub fn signing_digest(&self) -> [u8; 32] {
@@ -376,8 +351,7 @@ impl Observation {
     }
 
     pub fn signing_digest_with(&self, prefix: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
-        let ix = self.ix(0, 0, [0; 65], *tx_hash);
-        observation_signing_digest(prefix, tx_hash, &ix.fields_and_digest())
+        self.digests_with(prefix, tx_hash).signing
     }
 }
 
@@ -419,8 +393,23 @@ impl ObsScenario {
         guardian_set_index: u32,
         guardians: Vec<Guardian>,
     ) -> Self {
-        let id = program_id();
-        let (chain, sender, recipient_chain) = (obs.chain, obs.sender, obs.recipient_chain);
+        let RoutePdas {
+            noreplay_bucket,
+            source_balance,
+            dest_balance,
+            relayer_registration_pda,
+            hub_pda,
+            peer_src_pda,
+            peer_dst_pda,
+        } = route_pdas(
+            obs.chain,
+            obs.emitter,
+            obs.sequence,
+            obs.sender,
+            obs.recipient_chain,
+            peer,
+            hub,
+        );
         Self {
             obs,
             hub,
@@ -428,8 +417,8 @@ impl ObsScenario {
             guardian_set_index,
             guardians,
             pending_pda: derive_pending_pda(
-                &id,
-                chain,
+                &program_id(),
+                obs.chain,
                 &obs.emitter,
                 obs.sequence,
                 guardian_set_index,
@@ -437,30 +426,24 @@ impl ObsScenario {
             )
             .0,
             guardian_set: derive_guardian_set_pda(guardian_set_index, &core_bridge_program_id()).0,
-            noreplay_bucket: derive_bucket_pda(
-                &noreplay_authority_pda(&id),
-                chain,
-                &obs.emitter,
-                obs.sequence,
-            )
-            .0,
-            source_balance: balance::derive_pda(&id, chain, hub.0, &hub.1).0,
-            dest_balance: balance::derive_pda(&id, recipient_chain, hub.0, &hub.1).0,
-            relayer_registration_pda: chain_registration::derive_pda(&id, chain).0,
-            hub_pda: pda::derive(&id, &TransceiverKey::new(chain, sender)).0,
-            peer_src_pda: pda::derive(
-                &id,
-                &TransceiverPeerKey::new(chain, sender, recipient_chain),
-            )
-            .0,
-            peer_dst_pda: pda::derive(&id, &TransceiverPeerKey::new(recipient_chain, peer, chain))
-                .0,
+            noreplay_bucket,
+            source_balance,
+            dest_balance,
+            relayer_registration_pda,
+            hub_pda,
+            peer_src_pda,
+            peer_dst_pda,
         }
     }
 
     pub fn account_metas(&self) -> Vec<AccountMeta> {
+        self.account_metas_for(SUBMITTER)
+    }
+
+    /// `submitter` signs and is the rent recipient.
+    pub fn account_metas_for(&self, submitter: Pubkey) -> Vec<AccountMeta> {
         vec![
-            AccountMeta::new(SUBMITTER, true),
+            AccountMeta::new(submitter, true),
             AccountMeta::new(self.pending_pda, false),
             AccountMeta::new_readonly(self.guardian_set, false),
             AccountMeta::new(self.noreplay_bucket, false),
@@ -469,7 +452,7 @@ impl ObsScenario {
             AccountMeta::new_readonly(noreplay_authority_pda(&program_id()), false),
             AccountMeta::new(self.source_balance, false),
             AccountMeta::new(self.dest_balance, false),
-            AccountMeta::new(SUBMITTER, false),
+            AccountMeta::new(submitter, false),
             AccountMeta::new_readonly(self.relayer_registration_pda, false),
             AccountMeta::new_readonly(self.hub_pda, false),
             AccountMeta::new_readonly(self.peer_src_pda, false),
@@ -542,10 +525,11 @@ impl ObsScenario {
         let ix = self
             .obs
             .ix(self.guardian_set_index, guardian_index, signature, *tx_hash);
-        let mut data = Vec::with_capacity(1 + NttSubmitObservationsIxData::LEN);
-        data.push(NttInstruction::SubmitObservations as u8);
-        data.extend_from_slice(bytemuck::bytes_of(&ix));
-        data
+        wire::framed(
+            NttInstruction::SubmitObservations as u8,
+            bytemuck::bytes_of(&ix),
+            &[],
+        )
     }
 
     pub fn submit_with(
@@ -580,14 +564,11 @@ impl ObsScenario {
     pub fn submit_range(
         &self,
         mollusk: &Mollusk,
-        mut accounts: Vec<(Pubkey, Account)>,
+        accounts: Vec<(Pubkey, Account)>,
         range: std::ops::Range<u8>,
     ) -> Vec<(Pubkey, Account)> {
-        for i in range {
-            let result = self.submit_once(mollusk, accounts, i);
-            assert_success(&result, &format!("observation {i}"));
-            accounts = result.resulting_accounts;
-        }
-        accounts
+        accountant_test_harness::submit_range(mollusk, accounts, range, |m, a, i| {
+            self.submit_once(m, a, i)
+        })
     }
 }

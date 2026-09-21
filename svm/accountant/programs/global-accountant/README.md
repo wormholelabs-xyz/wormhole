@@ -184,6 +184,7 @@ PDA.
   real Verify VAA Shim, for `submit_observations`, `submit_vaas`,
   `register_chain`, and `modify_balance`.
 - `just e2e-upgrade-deploy` / `just e2e-upgrade-submit` / `just e2e-upgrade-stop`
-  — the two-step `upgrade_contract` end-to-end test.
+  — the two-step `upgrade_contract` end-to-end test. Each recipe takes the
+  cargo package as an optional argument; the default is this program.
 - `just bench` — compute-unit regression tracking for `submit_vaas` and
   `submit_observations`, tracked at `benches/compute_units.md`.

@@ -1,13 +1,11 @@
 //! The `.so` executes only at its `declare_id!` address. Anchor's entry returns
 //! `DeclaredProgramIdMismatch` for any other program id before dispatch.
 
+use anchor_lang::error::ErrorCode;
 use solana_instruction::Instruction;
 use solana_pubkey::Pubkey;
 
 use crate::common::*;
-
-/// `anchor_lang::error::ErrorCode::DeclaredProgramIdMismatch`.
-const DECLARED_PROGRAM_ID_MISMATCH: u64 = 4100;
 
 #[test]
 fn rejects_execution_under_another_program_id() {
@@ -22,5 +20,9 @@ fn rejects_execution_under_another_program_id() {
         vaa.shim_metas(),
     );
     let result = mollusk.process_instruction(&ix, &vaa.shim_accounts());
-    assert_error(&result, DECLARED_PROGRAM_ID_MISMATCH, "foreign program id");
+    assert_error(
+        &result,
+        ErrorCode::DeclaredProgramIdMismatch as u64,
+        "foreign program id",
+    );
 }

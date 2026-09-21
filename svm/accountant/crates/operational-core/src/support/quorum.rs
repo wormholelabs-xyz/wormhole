@@ -10,12 +10,28 @@ use crate::definitions::{
     GlobalAccountantError, PendingKey, PendingObservationsLayout, VaaBodyHeader,
 };
 use crate::err;
-use crate::hash::keccak256;
+use crate::hash::{double_keccak256, keccak256, observation_signing_digest};
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
 use crate::support::pda;
 
-// Signing digest: `keccak256(prefix ‖ tx_hash ‖ fields)`. Content digest:
-// `keccak256(keccak256(fields))`, independent of `tx_hash`.
+/// The two digests of one observation over `fields = ix.fields_and_digest()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationDigests {
+    /// `keccak256(prefix ‖ tx_hash ‖ fields)`; what the guardian signs.
+    pub signing: [u8; 32],
+    /// `keccak256(keccak256(fields))`; pending-PDA seed and commit-log key, independent of
+    /// `tx_hash`.
+    pub content: [u8; 32],
+}
+
+/// SECURITY: keep `signing` a single prefixed keccak and `content` a double keccak. The two
+/// must differ from each other and from the VAA digest.
+pub fn observation_digests(prefix: &[u8], tx_hash: &[u8; 32], fields: &[u8]) -> ObservationDigests {
+    ObservationDigests {
+        signing: observation_signing_digest(prefix, tx_hash, fields),
+        content: double_keccak256(fields),
+    }
+}
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;

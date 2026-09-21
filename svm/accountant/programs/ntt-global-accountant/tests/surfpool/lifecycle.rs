@@ -28,8 +28,8 @@ use solana_signer::Signer;
 
 use crate::common::*;
 use crate::harness::{
-    assert_canonical_log_in_tx, deploy_programs, fund, send, send_expect_error, set_account,
-    start_surfpool, ProgramImage, SurfpoolOptions,
+    assert_canonical_log_in_tx, deploy_guardian_set, deploy_programs, fund, send,
+    send_expect_error, set_account, start_surfpool, ProgramImage, SurfpoolOptions,
 };
 
 const PAYER_LAMPORTS: u64 = 20_000_000_000;
@@ -42,10 +42,6 @@ const AMOUNT: u64 = 1_500_000;
 const BOOKED: u128 = 150_000_000;
 const CREDIT: u128 = 500;
 const REASON: [u8; 32] = *b"audit-log: post-incident credit ";
-
-fn layout<T: bytemuck::Pod>(account: &solana_account::Account) -> T {
-    *bytemuck::from_bytes(&account.data)
-}
 
 #[test]
 #[ignore = "spawns surfpool subprocess; run via `just e2e`"]
@@ -69,18 +65,7 @@ fn surfpool_ntt_lifecycle() {
 
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let (guardian_set, guardian_set_bump) =
-        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
-    set_account(
-        &rpc,
-        &guardian_set,
-        &guardian_set_account(
-            GUARDIAN_SET_INDEX,
-            &guardian_keys(&guardians),
-            0,
-            0,
-            &core_bridge_program_id(),
-        ),
-    );
+        deploy_guardian_set(&rpc, GUARDIAN_SET_INDEX, &guardians);
 
     // Sign `body` with the test guardians, post the signatures through the real shim, and
     // return the four Shim-facing account metas every VAA instruction starts with.
@@ -332,9 +317,7 @@ fn surfpool_ntt_lifecycle() {
         SPOKE,
         SOLANA_HUB,
     );
-    let mut metas = obs.account_metas();
-    metas[0] = AccountMeta::new(payer.pubkey(), true);
-    metas[9] = AccountMeta::new(payer.pubkey(), false);
+    let metas = obs.account_metas_for(payer.pubkey());
     let mut quorum_sig = None;
     for index in 0..QUORUM {
         quorum_sig = Some(send(

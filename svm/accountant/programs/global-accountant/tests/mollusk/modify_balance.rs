@@ -28,14 +28,9 @@ struct Modification {
     payload_sequence: u64,
     kind: ModificationKind,
     amount: Uint256,
-    body: Vec<u8>,
-    guardian_set_bump: u8,
-    payer: Pubkey,
-    guardian_set: Pubkey,
-    guardian_signatures: Pubkey,
+    vaa: SignedVaa,
     balance_pda: Pubkey,
     modify_balance_pda: Pubkey,
-    guardians: Vec<Guardian>,
 }
 
 impl Modification {
@@ -70,68 +65,40 @@ impl Modification {
             amount,
             REASON,
         );
-        let (guardian_set, guardian_set_bump) =
-            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
         Self {
             payload_sequence,
             kind,
             amount,
-            body,
-            guardian_set_bump,
-            payer: SUBMITTER,
-            guardian_set,
-            guardian_signatures: Pubkey::new_from_array([0xC3u8; 32]),
+            vaa: SignedVaa::new(body),
             balance_pda: balance::derive_pda(&program_id(), ETHEREUM, ETHEREUM, &TOKEN_ADDRESS).0,
             modify_balance_pda: derive_modify_balance_pda(&program_id(), payload_sequence).0,
-            guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }
     }
 
     fn account_metas(&self) -> Vec<AccountMeta> {
-        vec![
-            AccountMeta::new(self.payer, true),
-            AccountMeta::new_readonly(shim_program_id(), false),
-            AccountMeta::new_readonly(self.guardian_set, false),
-            AccountMeta::new_readonly(self.guardian_signatures, false),
+        let mut metas = self.vaa.shim_metas();
+        metas.extend([
             AccountMeta::new(self.balance_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new(self.modify_balance_pda, false),
-        ]
+        ]);
+        metas
     }
 
     fn accounts(&self, balance: Account, record: Account) -> Vec<(Pubkey, Account)> {
-        let digest = double_keccak256(&self.body);
-        let signatures: Vec<(u8, [u8; 65])> = (0..QUORUM)
-            .map(|i| (i, sign_digest(&self.guardians[i as usize], &digest)))
-            .collect();
-        let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> =
-            self.guardians.iter().map(|g| g.eth_address).collect();
-        vec![
-            (self.payer, system_owned_account(50_000_000_000)),
-            keyed_account_for_verify_vaa_shim_program(),
-            (
-                self.guardian_set,
-                guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id()),
-            ),
-            (
-                self.guardian_signatures,
-                guardian_signatures_account(
-                    GUARDIAN_SET_INDEX,
-                    &self.payer,
-                    &signatures,
-                    &shim_program_id(),
-                ),
-            ),
+        let mut accounts = self.vaa.shim_accounts();
+        accounts.extend([
             (self.balance_pda, balance),
             keyed_account_for_system_program(),
             (self.modify_balance_pda, record),
-        ]
+        ]);
+        accounts
     }
 
     fn submit(&self, mollusk: &Mollusk, accounts: Vec<(Pubkey, Account)>) -> InstructionResult {
         let ix = Instruction::new_with_bytes(
             program_id(),
-            &modify_balance_ix_data(self.guardian_set_bump, &self.body),
+            &modify_balance_ix_data(self.vaa.guardian_set_bump, &self.vaa.body),
             self.account_metas(),
         );
         mollusk.process_instruction(&ix, &accounts)

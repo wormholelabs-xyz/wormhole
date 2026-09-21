@@ -77,9 +77,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let emitter = header.emitter_address;
     let sequence = header.sequence();
 
-    if noreplay::is_marked(noreplay_bucket, program_id, chain, &emitter, sequence)? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
+    noreplay::reject_if_marked(noreplay_bucket, program_id, chain, &emitter, sequence)?;
 
     let message = sender::resolve(
         program_id,

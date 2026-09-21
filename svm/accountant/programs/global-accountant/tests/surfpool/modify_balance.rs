@@ -14,15 +14,13 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    accountant_image, balance_of, core_bridge_program_id, derive_guardian_set_pda,
-    double_keccak256, governance_header, guardian_keys, guardian_set_account, make_guardians,
+    accountant_image, balance_of, double_keccak256, governance_header, layout, make_guardians,
     modify_balance_body, modify_balance_ix_data, post_signatures_ix, set_compute_unit_limit_ix,
     shim_program_id, signature_block, signatures_for, system_program_id, ETHEREUM, GUARDIAN_COUNT,
     GUARDIAN_SET_INDEX, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
-    deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ProgramImage,
-    SurfpoolOptions,
+    deploy_programs, fund, send, send_expect_error, start_surfpool, ProgramImage, SurfpoolOptions,
 };
 
 const PAYER_LAMPORTS: u64 = 20_000_000_000;
@@ -37,10 +35,6 @@ fn solana_target() -> GovernanceHeader {
         MODIFY_BALANCE_ACTION,
         SOLANA_CHAIN_ID,
     )
-}
-
-fn record_layout(data: &[u8]) -> ModifyBalanceLayout {
-    *bytemuck::from_bytes(data)
 }
 
 #[test]
@@ -58,18 +52,7 @@ fn surfpool_modify_balance_create_delta_and_replay() {
 
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let (guardian_set, guardian_set_bump) =
-        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
-    set_account(
-        &rpc,
-        &guardian_set,
-        &guardian_set_account(
-            GUARDIAN_SET_INDEX,
-            &guardian_keys(&guardians),
-            0,
-            0,
-            &core_bridge_program_id(),
-        ),
-    );
+        crate::harness::deploy_guardian_set(&rpc, GUARDIAN_SET_INDEX, &guardians);
 
     let (balance_pda, _) = balance::derive_pda(&program_id, ETHEREUM, ETHEREUM, &TOKEN_ADDRESS);
 
@@ -135,7 +118,7 @@ fn surfpool_modify_balance_create_delta_and_replay() {
             let record = rpc.get_account(&pda).expect("modify_balance record exists");
             assert_eq!(record.owner, program_id, "{label} record owner");
             assert_eq!(
-                record_layout(&record.data),
+                layout::<ModifyBalanceLayout>(&record),
                 ModifyBalanceLayout::new(
                     kind,
                     ETHEREUM,

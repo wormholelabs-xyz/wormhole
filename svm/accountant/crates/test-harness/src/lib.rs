@@ -11,6 +11,7 @@ pub mod ix;
 pub mod mollusk;
 pub mod scenario;
 pub mod surfpool;
+pub mod upgrade_e2e;
 pub mod wire;
 
 pub use accounts::*;
@@ -20,3 +21,4 @@ pub use ids::*;
 pub use ix::*;
 pub use mollusk::*;
 pub use scenario::*;
+pub use upgrade_e2e::*;

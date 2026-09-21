@@ -1,8 +1,7 @@
 //! NTT parsers checked against the reference encoders (`ntt-messages` at the rev wormchain
 //! pins) and the mainnet vector corpus.
 
-use std::collections::HashMap;
-
+use accountant_test_fixtures::NttCorpus;
 use global_accountant_definitions::*;
 use wormhole_io::TypePrefixedPayload;
 
@@ -114,90 +113,49 @@ fn parses_ntt_messages_encodings() {
     );
 }
 
+/// Independent of `operational-core`, which this crate cannot depend on.
 fn double_keccak256(body: &[u8]) -> [u8; 32] {
     let inner = solana_program::keccak::hashv(&[body]).to_bytes();
     solana_program::keccak::hashv(&[&inner]).to_bytes()
 }
 
-fn hex_bytes(s: &str) -> Vec<u8> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex byte"))
-        .collect()
-}
-
-fn hex32(s: &str) -> [u8; 32] {
-    let mut a = [0u8; 32];
-    a.copy_from_slice(&hex_bytes(s));
-    a
-}
-
-fn u16_field(v: &serde_json::Value, k: &str) -> u16 {
-    v[k].as_u64().unwrap_or_else(|| panic!("field {k}")) as u16
-}
-
 /// Mainnet VAAs parse to what the wormchain NTT accountant committed.
 #[test]
 fn mainnet_vectors_parse_to_committed_accounting() {
-    let corpus: serde_json::Value =
-        serde_json::from_str(accountant_test_fixtures::NTT_TEST_VECTORS).expect("corpus");
-
-    let mut hubs: HashMap<(u16, [u8; 32]), (u16, [u8; 32])> = HashMap::new();
-    for h in corpus["hubs"].as_array().expect("hubs") {
-        hubs.insert(
-            (u16_field(h, "chain"), hex32(h["address"].as_str().unwrap())),
-            (
-                u16_field(h, "hub_chain"),
-                hex32(h["hub_address"].as_str().unwrap()),
-            ),
-        );
-    }
-
-    let vectors = corpus["vectors"].as_array().expect("vectors");
-    assert!(vectors.len() >= 28, "full corpus, got {}", vectors.len());
+    let corpus = NttCorpus::load();
+    assert!(
+        corpus.vectors.len() >= 28,
+        "full corpus, got {}",
+        corpus.vectors.len()
+    );
 
     let (mut relayer, mut direct) = (0usize, 0usize);
-    for v in vectors {
-        let chain = u16_field(v, "chain");
-        let seq = v["sequence"].as_u64().expect("sequence");
-        let label: String = std::format!("chain={chain} seq={seq}");
-
-        let vaa = hex_bytes(v["vaa_hex"].as_str().expect("vaa_hex"));
-        let num_sigs = vaa[5] as usize;
-        let body = &vaa[6 + 66 * num_sigs..];
+    for v in &corpus.vectors {
+        let label = v.label();
+        let body = v.body();
         assert_eq!(
             double_keccak256(body),
-            hex32(v["expected_digest"].as_str().expect("expected_digest")),
+            v.expected_digest,
             "[{label}] committed digest"
         );
 
-        let payload = &body[51..];
-        let emitter = hex32(v["emitter"].as_str().expect("emitter"));
-        let (sender, ntt_payload): ([u8; 32], &[u8]) =
-            if v["via_relayer"].as_bool().expect("via_relayer") {
-                relayer += 1;
-                let unwrap = parse_delivery_instruction(payload)
-                    .unwrap_or_else(|e| panic!("[{label}] delivery: {e:?}"));
-                (unwrap.sender, unwrap.inner_payload)
-            } else {
-                direct += 1;
-                (emitter, payload)
-            };
+        let (_, payload) = VaaBodyHeader::split(body).expect("header");
+        let (sender, ntt_payload): ([u8; 32], &[u8]) = if v.via_relayer {
+            relayer += 1;
+            let unwrap = parse_delivery_instruction(payload)
+                .unwrap_or_else(|e| panic!("[{label}] delivery: {e:?}"));
+            (unwrap.sender, unwrap.inner_payload)
+        } else {
+            direct += 1;
+            (v.emitter, payload)
+        };
 
-        let hub = hubs
-            .get(&(chain, sender))
+        let hub = corpus
+            .hub_for(v.chain, sender)
             .unwrap_or_else(|| panic!("[{label}] no hub for (chain, sender)"));
         assert_eq!(
-            *hub,
-            (
-                u16_field(v, "expected_token_chain"),
-                hex32(
-                    v["expected_token_address"]
-                        .as_str()
-                        .expect("expected_token_address")
-                ),
-            ),
+            hub,
+            (v.expected_token_chain, v.expected_token_address),
             "[{label}] hub token identity"
         );
 
@@ -205,14 +163,11 @@ fn mainnet_vectors_parse_to_committed_accounting() {
             parse_ntt_transfer(ntt_payload).unwrap_or_else(|e| panic!("[{label}] transfer: {e:?}"));
         assert_eq!(
             transfer.amount,
-            Uint256::from_be_bytes(hex32(
-                v["expected_amount"].as_str().expect("expected_amount")
-            )),
+            Uint256::from_be_bytes(v.expected_amount),
             "[{label}] normalized amount"
         );
         assert_eq!(
-            transfer.recipient_chain,
-            u16_field(v, "expected_recipient_chain"),
+            transfer.recipient_chain, v.expected_recipient_chain,
             "[{label}] recipient chain"
         );
     }

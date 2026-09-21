@@ -1,5 +1,6 @@
 //! Token Bridge bodies, observation ix data, and WTT-discriminator framing wrappers.
 
+use accountant_operational_core::support::quorum::{observation_digests, ObservationDigests};
 use accountant_test_harness::wire;
 use accountant_test_harness::{double_keccak256, vaa_header, TX_HASH};
 use global_accountant_definitions::{
@@ -80,10 +81,13 @@ pub fn observation_ix_from_body(
     }
 }
 
-/// Content digest for `body`, matching the on-chain pending-PDA key.
+fn digests_with_tx_hash(tx_hash: &[u8; 32], body: &[u8]) -> ObservationDigests {
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], *tx_hash, body);
+    observation_digests(SUBMIT_OBSERVATION_PREFIX, tx_hash, &ix.fields_and_digest())
+}
+
 pub fn content_digest(body: &[u8]) -> [u8; 32] {
-    let ix = observation_ix_from_body(0, 0, [0u8; 65], TX_HASH, body);
-    double_keccak256(&ix.fields_and_digest())
+    digests_with_tx_hash(&TX_HASH, body).content
 }
 
 pub fn signing_digest(body: &[u8]) -> [u8; 32] {
@@ -91,12 +95,7 @@ pub fn signing_digest(body: &[u8]) -> [u8; 32] {
 }
 
 pub fn signing_digest_with_tx_hash(tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
-    let ix = observation_ix_from_body(0, 0, [0u8; 65], *tx_hash, body);
-    accountant_operational_core::hash::observation_signing_digest(
-        SUBMIT_OBSERVATION_PREFIX,
-        tx_hash,
-        &ix.fields_and_digest(),
-    )
+    digests_with_tx_hash(tx_hash, body).signing
 }
 
 pub fn submit_observations_ix_data(
@@ -128,10 +127,11 @@ pub fn submit_observations_ix_data_with_tx_hash(
         *tx_hash,
         body,
     );
-    let mut data = Vec::with_capacity(1 + SubmitObservationsIxData::LEN);
-    data.push(Instruction::SubmitObservations as u8);
-    data.extend_from_slice(bytemuck::bytes_of(&ix));
-    data
+    wire::framed(
+        Instruction::SubmitObservations as u8,
+        bytemuck::bytes_of(&ix),
+        &[],
+    )
 }
 
 pub fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {

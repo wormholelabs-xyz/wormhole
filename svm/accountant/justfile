@@ -109,29 +109,30 @@ clippy:
 [doc("Surfpool e2e for both programs against fresh surfpool instances.")]
 e2e: build
     cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
-    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --nocapture
+    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
 [doc("Surfpool e2e: the NTT accountant lifecycle only.")]
 e2e-ntt: build
-    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --nocapture
+    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
-# Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
-# records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets
-# that instance; stop kills it. See tests/surfpool/upgrade_contract.rs.
+# Two-step upgrade_contract e2e, per program (`program` is the cargo package). Step 1
+# leaves a detached surfpool running and records its pid + RPC URL in
+# target/e2e-upgrade-contract-<program>.json; step 2 targets that instance; stop kills it.
+# Flow: crates/test-harness/src/upgrade_e2e.rs.
 
 [doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
-e2e-upgrade-deploy: build
-    cargo test --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
+e2e-upgrade-deploy program="global-accountant": build
+    cargo test -p {{program}} --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
-e2e-upgrade-submit:
-    cargo test --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+e2e-upgrade-submit program="global-accountant":
+    cargo test -p {{program}} --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
-e2e-upgrade-stop:
+e2e-upgrade-stop program="global-accountant":
     #!/usr/bin/env bash
     set -euo pipefail
-    state="target/e2e-upgrade-contract.json"
+    state="target/e2e-upgrade-contract-{{program}}.json"
     if [ ! -f "${state}" ]; then
         echo "no ${state}; nothing to stop"
         exit 0

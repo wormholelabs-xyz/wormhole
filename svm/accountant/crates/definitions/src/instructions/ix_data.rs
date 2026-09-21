@@ -7,8 +7,6 @@ use bytemuck::{Pod, Zeroable};
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
-// TODO: decide if we want to collapse the `*IxData` prefixes into one generic since they are
-// all the same size.
 /// Fixed prefix followed by a `body_len`-framed body.
 pub trait IxPrefix: Pod {
     const LEN: usize = core::mem::size_of::<Self>();
@@ -214,88 +212,41 @@ struct NttObservationFieldsAndDigest {
     digest: [u8; 32],
 }
 
-/// `submit_vaas` prefix (3 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct SubmitVaasIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
+/// 3-byte prefix `guardian_set_bump ‖ body_len`, one distinct type per instruction so a call
+/// site cannot pass one instruction's prefix to another's parser. PDA bumps derive on-chain.
+macro_rules! bump_prefix_ix_data {
+    ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {
+        $(
+            $(#[$doc])*
+            #[repr(C)]
+            #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+            pub struct $name {
+                pub guardian_set_bump: u8,
+                pub body_len: [u8; 2],
+            }
+
+            impl IxPrefix for $name {
+                fn body_len(&self) -> usize {
+                    u16::from_le_bytes(self.body_len) as usize
+                }
+            }
+        )+
+    };
 }
 
-impl IxPrefix for SubmitVaasIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
-}
-
-/// `register_chain` prefix (3 bytes). PDA bumps derive on-chain.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct RegisterChainIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for RegisterChainIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
-}
-
-/// `register_hub` prefix (3 bytes). The hub PDA bump derives on-chain.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct RegisterHubIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for RegisterHubIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
-}
-
-/// `register_peer` prefix (3 bytes). Hub and peer PDA bumps derive on-chain.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct RegisterPeerIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for RegisterPeerIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
-}
-
-/// `modify_balance` prefix (3 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct ModifyBalanceIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for ModifyBalanceIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
-}
-
-/// `upgrade_contract` prefix (3 bytes). PDA bumps derive on-chain.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct UpgradeContractIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for UpgradeContractIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
+bump_prefix_ix_data! {
+    /// `submit_vaas` prefix.
+    SubmitVaasIxData,
+    /// `register_chain` prefix.
+    RegisterChainIxData,
+    /// `register_hub` prefix.
+    RegisterHubIxData,
+    /// `register_peer` prefix.
+    RegisterPeerIxData,
+    /// `modify_balance` prefix.
+    ModifyBalanceIxData,
+    /// `upgrade_contract` prefix.
+    UpgradeContractIxData,
 }
 
 /// `close_pending` data (40 bytes, no body).

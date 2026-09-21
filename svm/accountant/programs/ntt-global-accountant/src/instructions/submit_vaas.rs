@@ -8,7 +8,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::{commit_log, guardian_set, pda};
+use accountant_operational_core::support::{commit_log, pda};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
@@ -51,25 +51,19 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    shim::verify_vaa(
+    let guardian_set_index = shim::verify_vaa_and_read_index(
         guardian_set,
         guardian_signatures,
         &digest,
         ix.guardian_set_bump,
     )?;
-    // Read after the Shim CPI, which is what validates the account.
-    let guardian_set_index = guardian_set::read_index(guardian_set)?;
-    // SECURITY: proves the account is the canonical Core Bridge PDA for the index it claims.
-    guardian_set::verify_account(guardian_set, guardian_set_index)?;
 
     let (header, payload) = VaaBodyHeader::split(body_bytes).map_err(err)?;
     let chain = header.emitter_chain();
     let emitter = header.emitter_address;
     let sequence = header.sequence();
 
-    if noreplay::is_marked(noreplay_bucket, program_id, chain, &emitter, sequence)? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
+    noreplay::reject_if_marked(noreplay_bucket, program_id, chain, &emitter, sequence)?;
 
     let message = sender::resolve(
         program_id,

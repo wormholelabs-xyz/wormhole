@@ -77,61 +77,30 @@ pub trait AccountLayout: Pod {
     fn tag(&self) -> u8;
 }
 
-impl AccountLayout for PendingObservationsLayout {
-    const TAG: u8 = Self::TAG;
+/// Each layout carries its tag in its first byte and an inherent `TAG` constant.
+macro_rules! impl_account_layout {
+    ($($layout:ty),+ $(,)?) => {
+        $(
+            impl AccountLayout for $layout {
+                const TAG: u8 = Self::TAG;
 
-    fn tag(&self) -> u8 {
-        self.tag
-    }
+                fn tag(&self) -> u8 {
+                    self.tag
+                }
+            }
+        )+
+    };
 }
 
-impl AccountLayout for BalanceAccountLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for ChainRegistrationLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for ModifyBalanceLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for RegisterChainLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for TransceiverHubLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for TransceiverPeerLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
+impl_account_layout!(
+    PendingObservationsLayout,
+    BalanceAccountLayout,
+    ChainRegistrationLayout,
+    ModifyBalanceLayout,
+    RegisterChainLayout,
+    TransceiverHubLayout,
+    TransceiverPeerLayout,
+);
 
 impl PendingObservationsLayout {
     /// New record with a zeroed signature bitmap.

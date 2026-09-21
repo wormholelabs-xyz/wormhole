@@ -1,9 +1,10 @@
 //! `submit_vaas`: a signed NTT transfer moves balances keyed on the sender's hub once the
 //! sender and its peer are cross-registered.
 
-use std::collections::HashMap;
-
-use global_accountant_definitions::{parse_delivery_instruction, GlobalAccountantError, Uint256};
+use accountant_test_fixtures::NttCorpus;
+use global_accountant_definitions::{
+    parse_delivery_instruction, GlobalAccountantError, Uint256, VaaBodyHeader,
+};
 use solana_pubkey::Pubkey;
 
 use crate::common::*;
@@ -119,7 +120,23 @@ fn rejects() {
         Option<u16>,
         GlobalAccountantError,
     );
-    let cases: [Row; 13] = [
+    let cases: [Row; 14] = [
+        (
+            "header-only body",
+            VaaScenario::build(
+                37,
+                SOLANA,
+                HUB,
+                HUB,
+                ETHEREUM,
+                SPOKE,
+                SOLANA_HUB,
+                vaa_header(SOLANA, HUB, 37),
+            ),
+            hub_to_spoke_accounts(),
+            None,
+            GlobalAccountantError::InvalidInstructionData,
+        ),
         (
             "pre-marked noreplay",
             hub_to_spoke(20),
@@ -272,85 +289,47 @@ fn rejects() {
     }
 }
 
-/// A synthetic peer for the corpus rows; the corpus has hubs but no peer table.
+/// Peer registered for every corpus sender.
 const CORPUS_PEER: [u8; 32] = [0xEEu8; 32];
-
-fn hex_bytes(s: &str) -> Vec<u8> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
-        .collect()
-}
-
-fn hex32(s: &str) -> [u8; 32] {
-    hex_bytes(s).try_into().expect("32 bytes")
-}
-
-fn u16_field(v: &serde_json::Value, k: &str) -> u16 {
-    u16::try_from(v[k].as_u64().expect(k)).expect(k)
-}
 
 /// Every mainnet vector, re-signed by the test guardian set, books `expected_amount` under
 /// the hub wormchain recorded for its sender.
 #[test]
 fn mainnet_vectors_commit_through_submit_vaas() {
     let mollusk = mollusk();
-    let corpus: serde_json::Value =
-        serde_json::from_str(accountant_test_fixtures::NTT_TEST_VECTORS).expect("corpus");
-
-    let mut hubs: HashMap<(u16, [u8; 32]), (u16, [u8; 32])> = HashMap::new();
-    for h in corpus["hubs"].as_array().expect("hubs") {
-        hubs.insert(
-            (u16_field(h, "chain"), hex32(h["address"].as_str().unwrap())),
-            (
-                u16_field(h, "hub_chain"),
-                hex32(h["hub_address"].as_str().unwrap()),
-            ),
-        );
-    }
-
-    let vectors = corpus["vectors"].as_array().expect("vectors");
-    assert_eq!(vectors.len(), 28, "full corpus");
-    for v in vectors {
-        let chain = u16_field(v, "chain");
-        let sequence = v["sequence"].as_u64().expect("sequence");
-        let label = format!("chain={chain} seq={sequence}");
-        let emitter = hex32(v["emitter"].as_str().expect("emitter"));
-        let via_relayer = v["via_relayer"].as_bool().expect("via_relayer");
-        let recipient_chain = u16_field(v, "expected_recipient_chain");
-        let amount = Uint256::from_be_bytes(hex32(v["expected_amount"].as_str().unwrap()));
-
-        let vaa = hex_bytes(v["vaa_hex"].as_str().expect("vaa_hex"));
-        let body = vaa[6 + 66 * vaa[5] as usize..].to_vec();
-        let sender = if via_relayer {
-            parse_delivery_instruction(&body[51..])
+    let corpus = NttCorpus::load();
+    assert_eq!(corpus.vectors.len(), 28, "full corpus");
+    for v in &corpus.vectors {
+        let label = v.label();
+        let body = v.body();
+        let (_, payload) = VaaBodyHeader::split(body).expect("header");
+        let sender = if v.via_relayer {
+            parse_delivery_instruction(payload)
                 .expect("delivery")
                 .sender
         } else {
-            emitter
+            v.emitter
         };
-        let hub = hubs[&(chain, sender)];
+        let hub = corpus.hub_for(v.chain, sender).expect("hub");
         assert_eq!(
             hub,
-            (
-                u16_field(v, "expected_token_chain"),
-                hex32(v["expected_token_address"].as_str().unwrap()),
-            ),
+            (v.expected_token_chain, v.expected_token_address),
             "[{label}] corpus hub is the committed token"
         );
+        let amount = Uint256::from_be_bytes(v.expected_amount);
+        let recipient_chain = v.expected_recipient_chain;
 
         let transfer = VaaScenario::build(
-            sequence,
-            chain,
-            emitter,
+            v.sequence,
+            v.chain,
+            v.emitter,
             sender,
             recipient_chain,
             CORPUS_PEER,
             hub,
-            body,
+            body.to_vec(),
         );
-        let source_debited = chain != hub.0;
+        let source_debited = v.chain != hub.0;
         let dest_debited = recipient_chain == hub.0;
         let funded = |debited: bool, on_chain: u16| {
             if debited {
@@ -360,20 +339,20 @@ fn mainnet_vectors_commit_through_submit_vaas() {
             }
         };
         let accounts = VaaAccounts {
-            relayer_registration: if via_relayer {
-                chain_registration_account_for(&program_id(), chain, emitter)
+            relayer_registration: if v.via_relayer {
+                chain_registration_account_for(&program_id(), v.chain, v.emitter)
             } else {
                 uninitialised_pda_account()
             },
-            source_balance: funded(source_debited, chain),
+            source_balance: funded(source_debited, v.chain),
             dest_balance: funded(dest_debited, recipient_chain),
-            ..VaaAccounts::registered(chain, sender, recipient_chain, CORPUS_PEER, hub)
+            ..VaaAccounts::registered(v.chain, sender, recipient_chain, CORPUS_PEER, hub)
         };
 
         let result = transfer.submit(&mollusk, accounts);
         assert_success(&result, &label);
         let after = &result.resulting_accounts;
-        assert_bucket_marked(find_account(after, &transfer.noreplay_bucket), sequence);
+        assert_bucket_marked(find_account(after, &transfer.noreplay_bucket), v.sequence);
         let settled = |debited: bool| if debited { Uint256::ZERO } else { amount };
         assert_balance(after, &transfer.source_balance, settled(source_debited));
         assert_balance(after, &transfer.dest_balance, settled(dest_debited));

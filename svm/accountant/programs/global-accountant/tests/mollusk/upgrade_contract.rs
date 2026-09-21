@@ -2,8 +2,8 @@ use accountant_operational_core::cpi::loader::derive_upgrade_authority;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant_definitions::{
     GlobalAccountantError, GovernanceHeader, ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER,
-    MODIFY_BALANCE_ACTION, NOREPLAY_AUTHORITY_SEED_PREFIX, SOLANA_CHAIN_ID,
-    TOKEN_BRIDGE_GOVERNANCE_MODULE, UPGRADE_CONTRACT_ACTION,
+    MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    UPGRADE_CONTRACT_ACTION,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -27,11 +27,7 @@ fn solana_target() -> GovernanceHeader {
 #[derive(Clone)]
 struct Upgrade {
     sequence: u64,
-    body: Vec<u8>,
-    guardian_set_bump: u8,
-    payer: Pubkey,
-    guardian_set: Pubkey,
-    guardian_signatures: Pubkey,
+    vaa: SignedVaa,
     noreplay_bucket: Pubkey,
     noreplay_authority: Pubkey,
     upgrade_authority: Pubkey,
@@ -40,7 +36,6 @@ struct Upgrade {
     program_data: Pubkey,
     buffer_state: Account,
     program_data_state: Account,
-    guardians: Vec<Guardian>,
 }
 
 impl Upgrade {
@@ -58,19 +53,12 @@ impl Upgrade {
     }
 
     fn with_body(sequence: u64, body: Vec<u8>) -> Self {
-        let (noreplay_authority, _) =
-            Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], &program_id());
-        let (guardian_set, guardian_set_bump) =
-            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
+        let noreplay_authority = noreplay_authority_pda(&program_id());
         let (upgrade_authority, _) = derive_upgrade_authority(&program_id());
         let elf = deployed_elf(PROGRAM_NAME);
         Self {
             sequence,
-            body,
-            guardian_set_bump,
-            payer: SUBMITTER,
-            guardian_set,
-            guardian_signatures: GUARDIAN_SIGNATURES,
+            vaa: SignedVaa::new(body),
             noreplay_bucket: derive_bucket_pda(
                 &noreplay_authority,
                 SOLANA_CHAIN_ID,
@@ -82,19 +70,15 @@ impl Upgrade {
             upgrade_authority,
             spill: Pubkey::new_unique(),
             buffer: Pubkey::new_from_array(NEW_CONTRACT),
-            program_data: Pubkey::find_program_address(&[program_id().as_ref()], &loader_v3_id()).0,
+            program_data: program_data_address(&program_id()),
             buffer_state: upgradeable_buffer_account(&upgrade_authority, &elf),
             program_data_state: upgradeable_program_data_account(&upgrade_authority, elf.len()),
-            guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }
     }
 
     fn account_metas(&self) -> Vec<AccountMeta> {
-        vec![
-            AccountMeta::new(self.payer, true),
-            AccountMeta::new_readonly(shim_program_id(), false),
-            AccountMeta::new_readonly(self.guardian_set, false),
-            AccountMeta::new_readonly(self.guardian_signatures, false),
+        let mut metas = self.vaa.shim_metas();
+        metas.extend([
             AccountMeta::new(self.noreplay_bucket, false),
             AccountMeta::new_readonly(noreplay_program_id(), false),
             AccountMeta::new_readonly(self.noreplay_authority, false),
@@ -107,32 +91,13 @@ impl Upgrade {
             AccountMeta::new_readonly(rent_sysvar_id(), false),
             AccountMeta::new_readonly(clock_sysvar_id(), false),
             AccountMeta::new_readonly(loader_v3_id(), false),
-        ]
+        ]);
+        metas
     }
 
     fn accounts(&self, mollusk: &Mollusk, bucket: Account) -> Vec<(Pubkey, Account)> {
-        let digest = double_keccak256(&self.body);
-        let signatures: Vec<(u8, [u8; 65])> = (0..QUORUM)
-            .map(|i| (i, sign_digest(&self.guardians[i as usize], &digest)))
-            .collect();
-        let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> =
-            self.guardians.iter().map(|g| g.eth_address).collect();
-        vec![
-            (self.payer, system_owned_account(50_000_000_000)),
-            keyed_account_for_verify_vaa_shim_program(),
-            (
-                self.guardian_set,
-                guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id()),
-            ),
-            (
-                self.guardian_signatures,
-                guardian_signatures_account(
-                    GUARDIAN_SET_INDEX,
-                    &self.payer,
-                    &signatures,
-                    &shim_program_id(),
-                ),
-            ),
+        let mut accounts = self.vaa.shim_accounts();
+        accounts.extend([
             (self.noreplay_bucket, bucket),
             keyed_account_for_noreplay_program(),
             (self.noreplay_authority, system_owned_account(0)),
@@ -148,13 +113,14 @@ impl Upgrade {
             mollusk.sysvars.keyed_account_for_rent_sysvar(),
             mollusk.sysvars.keyed_account_for_clock_sysvar(),
             keyed_account_for_loader_v3(),
-        ]
+        ]);
+        accounts
     }
 
     fn submit(&self, mollusk: &Mollusk, accounts: Vec<(Pubkey, Account)>) -> InstructionResult {
         let ix = Instruction::new_with_bytes(
             program_id(),
-            &upgrade_contract_ix_data(self.guardian_set_bump, &self.body),
+            &upgrade_contract_ix_data(self.vaa.guardian_set_bump, &self.vaa.body),
             self.account_metas(),
         );
         mollusk.process_instruction(&ix, &accounts)
@@ -180,7 +146,11 @@ fn upgrade_replaces_program_data_and_marks_noreplay() {
         "program data slot moves to the upgrade slot"
     );
     let elf = deployed_elf(PROGRAM_NAME);
-    assert_eq!(&program_data.data[45..45 + elf.len()], &elf[..]);
+    let metadata_len = program_data_metadata_len();
+    assert_eq!(
+        &program_data.data[metadata_len..metadata_len + elf.len()],
+        &elf[..]
+    );
     assert_bucket_marked(
         find_account(&result.resulting_accounts, &upgrade.noreplay_bucket),
         upgrade.sequence,
@@ -216,7 +186,7 @@ fn rejects() {
     let mut wrong_program_data = Upgrade::new(27);
     wrong_program_data.program_data = Pubkey::new_unique();
     let mut truncated = Upgrade::new(28);
-    truncated.body.pop();
+    truncated.vaa.body.pop();
 
     let cases: [(&str, Upgrade, Account, u64); 9] = [
         (

@@ -12,7 +12,6 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay;
-use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::support::quorum::{self, ParsedObservation};
 use accountant_operational_core::support::{commit_log, pda};
 use accountant_operational_core::ProgramResult;
@@ -30,13 +29,10 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let ix = NttSubmitObservationsIxData::from_bytes(data).map_err(err)?;
     let fields = ix.fields_and_digest();
 
-    let signing_digest =
-        observation_signing_digest(NTT_SUBMIT_OBSERVATION_PREFIX, &ix.tx_hash, &fields);
-    // Pending-PDA / commit-log key. Independent of `tx_hash`.
-    let content_digest = double_keccak256(&fields);
+    let digests = quorum::observation_digests(NTT_SUBMIT_OBSERVATION_PREFIX, &ix.tx_hash, &fields);
 
     let parsed = ParsedObservation {
-        content_digest,
+        content_digest: digests.content,
         chain: ix.chain(),
         emitter: ix.emitter,
         sequence: ix.sequence(),
@@ -69,15 +65,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    if noreplay::is_marked(
+    noreplay::reject_if_marked(
         noreplay_bucket,
         program_id,
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,
-    )? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
+    )?;
 
     // SECURITY: `sender` differs from `emitter` only for a registered Standard Relayer, as in
     // `submit_vaas`. Any other combination is a malformed or forged observation.
@@ -108,7 +102,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set,
         parsed.guardian_set_index,
         parsed.guardian_index,
-        &signing_digest,
+        &digests.signing,
         &parsed.signature,
     )?;
     let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);

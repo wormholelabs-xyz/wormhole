@@ -80,27 +80,20 @@ pub struct VaaScenario {
     pub chain: u16,
     pub emitter: [u8; 32],
     pub sequence: u64,
-    pub body: Vec<u8>,
-    pub guardian_set_bump: u8,
-    pub guardian_set: Pubkey,
+    pub vaa: SignedVaa,
     pub noreplay_bucket: Pubkey,
     pub source_account: Pubkey,
     pub dest_account: Pubkey,
     pub chain_registration: Pubkey,
-    pub guardians: Vec<Guardian>,
 }
 
 impl VaaScenario {
     pub fn transfer(transfer: Transfer) -> Self {
-        let (guardian_set, guardian_set_bump) =
-            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
         Self {
             chain: transfer.chain,
             emitter: transfer.emitter,
             sequence: transfer.sequence,
-            body: transfer.body(),
-            guardian_set_bump,
-            guardian_set,
+            vaa: SignedVaa::new(transfer.body()),
             noreplay_bucket: derive_bucket_pda(
                 &noreplay_authority(),
                 transfer.chain,
@@ -111,16 +104,12 @@ impl VaaScenario {
             source_account: transfer.source(),
             dest_account: transfer.dest(),
             chain_registration: chain_registration::derive_pda(&program_id(), transfer.chain).0,
-            guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }
     }
 
     pub fn account_metas(&self) -> Vec<AccountMeta> {
-        vec![
-            AccountMeta::new(SUBMITTER, true),
-            AccountMeta::new_readonly(shim_program_id(), false),
-            AccountMeta::new_readonly(self.guardian_set, false),
-            AccountMeta::new_readonly(GUARDIAN_SIGNATURES, false),
+        let mut metas = self.vaa.shim_metas();
+        metas.extend([
             AccountMeta::new(self.noreplay_bucket, false),
             AccountMeta::new_readonly(noreplay_program_id(), false),
             AccountMeta::new_readonly(noreplay_authority(), false),
@@ -128,33 +117,13 @@ impl VaaScenario {
             AccountMeta::new(self.dest_account, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(self.chain_registration, false),
-        ]
+        ]);
+        metas
     }
 
     pub fn accounts(&self) -> Vec<(Pubkey, Account)> {
-        let digest = double_keccak256(&self.body);
-        vec![
-            (SUBMITTER, system_owned_account(50_000_000_000)),
-            keyed_account_for_verify_vaa_shim_program(),
-            (
-                self.guardian_set,
-                guardian_set_account(
-                    GUARDIAN_SET_INDEX,
-                    &guardian_keys(&self.guardians),
-                    0,
-                    0,
-                    &core_bridge_program_id(),
-                ),
-            ),
-            (
-                GUARDIAN_SIGNATURES,
-                guardian_signatures_account(
-                    GUARDIAN_SET_INDEX,
-                    &SUBMITTER,
-                    &signatures_for(&self.guardians, &digest, QUORUM),
-                    &shim_program_id(),
-                ),
-            ),
+        let mut accounts = self.vaa.shim_accounts();
+        accounts.extend([
             (self.noreplay_bucket, noreplay_bucket_unmarked()),
             keyed_account_for_noreplay_program(),
             (noreplay_authority(), system_owned_account(0)),
@@ -165,14 +134,15 @@ impl VaaScenario {
                 self.chain_registration,
                 chain_registration_account(self.chain, self.emitter),
             ),
-        ]
+        ]);
+        accounts
     }
 
     pub fn submit(&self, mollusk: &Mollusk, accounts: Vec<(Pubkey, Account)>) -> InstructionResult {
         self.submit_with(
             mollusk,
             accounts,
-            submit_vaas_ix_data(self.guardian_set_bump, &self.body),
+            submit_vaas_ix_data(self.vaa.guardian_set_bump, &self.vaa.body),
         )
     }
 
@@ -362,14 +332,11 @@ impl ObsScenario {
     pub fn submit_range(
         &self,
         mollusk: &Mollusk,
-        mut accounts: Vec<(Pubkey, Account)>,
+        accounts: Vec<(Pubkey, Account)>,
         range: std::ops::Range<u8>,
     ) -> Vec<(Pubkey, Account)> {
-        for i in range {
-            let result = self.submit_once(mollusk, accounts, i);
-            assert_success(&result, &format!("observation {i}"));
-            accounts = result.resulting_accounts;
-        }
-        accounts
+        accountant_test_harness::submit_range(mollusk, accounts, range, |m, a, i| {
+            self.submit_once(m, a, i)
+        })
     }
 }

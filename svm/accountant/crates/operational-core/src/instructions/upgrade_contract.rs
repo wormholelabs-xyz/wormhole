@@ -64,15 +64,13 @@ pub fn process(
     payload.validate(header, module).map_err(err)?;
     let sequence = header.sequence();
 
-    if noreplay::is_marked(
+    noreplay::reject_if_marked(
         noreplay_bucket,
         program_id,
         SOLANA_CHAIN_ID,
         &GOVERNANCE_EMITTER,
         sequence,
-    )? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
+    )?;
 
     loader::upgrade_program(
         program_account,

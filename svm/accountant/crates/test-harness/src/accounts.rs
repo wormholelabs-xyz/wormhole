@@ -1,8 +1,8 @@
 //! Account data builders and assertions for program-owned and NoReplay PDAs.
 
 use global_accountant_definitions::{
-    BalanceAccountLayout, ChainRegistrationLayout, NoReplayBitmapAccount, Uint256,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
+    BalanceAccountLayout, ChainRegistrationLayout, NoReplayBitmapAccount,
+    PendingObservationsLayout, Uint256, NOREPLAY_BITS_PER_BUCKET,
 };
 use solana_account::Account;
 use solana_loader_v3_interface::state::UpgradeableLoaderState;
@@ -142,9 +142,22 @@ pub fn assert_bucket_unmarked(bucket: &Account) {
     assert!(bucket.data.is_empty(), "bucket uninitialised");
 }
 
+pub fn layout<T: bytemuck::Pod>(account: &Account) -> T {
+    *bytemuck::from_bytes(&account.data)
+}
+
 pub fn balance_of(account: &Account) -> Uint256 {
-    let layout: &BalanceAccountLayout = bytemuck::from_bytes(&account.data);
-    layout.balance
+    layout::<BalanceAccountLayout>(account).balance
+}
+
+pub fn pending_layout(account: &Account) -> PendingObservationsLayout {
+    layout(account)
+}
+
+pub fn assert_closed(account: &Account, label: &str) {
+    assert_eq!(account.lamports, 0, "{label}: lamports");
+    assert_eq!(account.owner, system_program_id(), "{label}: owner");
+    assert!(account.data.is_empty(), "{label}: data");
 }
 
 /// Balance PDA `key` is owned by `program_id` and holds `expected`.
@@ -161,5 +174,13 @@ pub fn assert_balance_for(
 
 /// The accountant's NoReplay authority PDA for `program_id`.
 pub fn noreplay_authority_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id).0
+    accountant_operational_core::cpi::noreplay::derive_authority(program_id).0
+}
+
+pub fn program_data_address(program_id: &Pubkey) -> Pubkey {
+    solana_loader_v3_interface::get_program_data_address(program_id)
+}
+
+pub fn program_data_metadata_len() -> usize {
+    UpgradeableLoaderState::size_of_programdata_metadata()
 }

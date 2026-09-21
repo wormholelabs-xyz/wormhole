@@ -286,3 +286,7 @@ PDA.
   instance and the real Verify VAA Shim. `just e2e-ntt` runs the NTT
   lifecycle alone: hub, peers, relayer registration, a relayed transfer, an
   observation quorum, and a balance correction.
+- `just e2e-upgrade-deploy ntt-global-accountant` /
+  `just e2e-upgrade-submit ntt-global-accountant` /
+  `just e2e-upgrade-stop ntt-global-accountant` — the two-step
+  `upgrade_contract` end-to-end test for this program.
