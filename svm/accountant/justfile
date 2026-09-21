@@ -140,11 +140,11 @@ e2e-upgrade-stop:
     kill "${pid}" 2>/dev/null && echo "killed surfpool pid ${pid}" || echo "surfpool pid ${pid} already gone"
     rm -f "${state}"
 
-# `compute_units.rs` benches `submit_vaas` and `submit_observations` (both the
-# common single-guardian path and the more expensive quorum-closing path)
-# through Mollusk, writing CU numbers to the tracked
-# `programs/global-accountant/benches/compute_units.md`.
-[doc("CU regression bench for submit_vaas/submit_observations.")]
+# Each program's `benches/compute_units.rs` benches `submit_vaas` and
+# `submit_observations` (the common single-guardian path and the more expensive
+# quorum-closing path) through Mollusk, writing CU numbers to the tracked
+# `programs/<program>/benches/compute_units.md`.
+[doc("CU regression bench for submit_vaas/submit_observations, both programs.")]
 bench: build
     cargo bench
 

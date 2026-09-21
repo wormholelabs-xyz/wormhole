@@ -3159,6 +3159,7 @@ dependencies = [
  "bytemuck",
  "global-accountant-definitions",
  "mollusk-svm",
+ "mollusk-svm-bencher",
  "ntt-global-accountant",
  "serde_json",
  "solana-account 3.4.0",
