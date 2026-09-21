@@ -136,6 +136,13 @@ build-prod: build
 test: build-devnet
     {{test_env}} cargo test
 
+# The `env!` addresses make a bare `cargo test` fail to compile; the recipe
+# supplies them. Copy the printed hex into `solana_layout_test.go`.
+
+[doc("Print the Go layout fixtures for node/pkg/accountant/solana_layout_test.go.")]
+go-fixtures:
+    {{test_env}} cargo test -p global-accountant --test go_fixture_vectors -- --nocapture
+
 # Verify a deploy-ready `.so` enforces a specific operator authority pubkey, independent of
 # the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
 # gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the

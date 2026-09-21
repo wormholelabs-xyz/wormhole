@@ -1,34 +1,89 @@
 // Layout decoders and PDA derivations for the svm/accountant program.
-// Constants mirror svm/accountant/crates/definitions. Fixtures in
-// solana_layout_test.go come from programs/global-accountant/tests/go_fixture_vectors.rs.
+// Constants mirror svm/accountant/crates/definitions/src: state.rs,
+// instructions/ix_data.rs, vaa.rs, constants/log.rs, constants/noreplay.rs,
+// constants/seeds.rs. Fixtures in solana_layout_test.go come from
+// programs/global-accountant/tests/go_fixture_vectors.rs.
 
 package accountant
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/gagliardetto/solana-go"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
 const (
-	// ACCOUNTANT_DIGEST_LOG_LEN, constants/log.rs.
+	// AccountantDigestLog::LEN, constants/log.rs.
 	accountantDigestLogLen = 8 + 2 + 32 + 8 + 32 + 4
 
-	// PendingObservationsLayout::LEN and ::TAG, state.rs.
-	pendingObservationsLen = 76
-	pendingObservationsTag = 1
+	// PendingObservationsLayout LEN, TAG and MAX_GUARDIANS, state.rs.
+	pendingObservationsLen          = 88
+	pendingObservationsTag          = 1
+	pendingObservationsMaxGuardians = 128
 
-	// solana-noreplay bucket: bump(1) + bitmap(128), operational-core noreplay.rs.
+	// solana-noreplay bucket: bump(1) + bitmap(128), constants/noreplay.rs.
 	noreplayBucketLen     = 129
 	noreplayBitmapOffset  = 1
 	noreplayBitsPerBucket = 1024
 
-	// SUBMIT_FIXED_LEN, operational-core quorum.rs: guardian_set_index(4) + guardian_index(1) + signature(65).
-	submitObservationsDispatchLen = 1
-	submitFixedLen                = 4 + 1 + 65
-	submitObservationsTxHashLen   = 32
+	// Instruction::SubmitObservations and SubmitObservationsIxData::LEN, ix_data.rs.
+	submitObservationsDispatchLen   = 1
+	submitObservationsDiscriminator = 0
+	submitObservationsIxDataLen     = 278
+
+	// HASH_TX_ID_LEN and SIGNATURE_TX_ID_LEN, ix_data.rs.
+	hashTxIDLen      = 32
+	signatureTxIDLen = 64
+
+	// ObservationFieldsAndDigest, ix_data.rs. The hashed record.
+	observationFieldsLen = 143
+
+	// TokenBridgeTransfer::LEN and MAX_TRANSFER_PAYLOAD_LEN, vaa.rs.
+	tokenBridgeTransferLen = 133
+	maxTransferPayloadLen  = 2000
+
+	// ACTION_TRANSFER and ACTION_TRANSFER_WITH_PAYLOAD, vaa.rs.
+	actionTransfer            = 0x01
+	actionTransferWithPayload = 0x03
+)
+
+// Field offsets inside the 143-byte hashed record, ix_data.rs
+// ObservationFieldsAndDigest.
+const (
+	fieldsActionOffset         = 0
+	fieldsChainOffset          = 1
+	fieldsEmitterOffset        = 3
+	fieldsSequenceOffset       = 35
+	fieldsTokenChainOffset     = 43
+	fieldsTokenAddressOffset   = 45
+	fieldsRecipientChainOffset = 77
+	fieldsAmountOffset         = 79
+	fieldsVaaDigestOffset      = 111
+)
+
+// Field offsets inside submit_observations instruction data, past the
+// 1-byte discriminator. SubmitObservationsIxData, ix_data.rs.
+const (
+	submitGuardianSetIndexOffset = 1
+	submitGuardianIndexOffset    = 5
+	submitSignatureOffset        = 6
+	submitSignatureLen           = 65
+	submitTxIDLenOffset          = 71
+	submitTxIDOffset             = 72
+	submitFieldsOffset           = 136
+)
+
+// Compile-time equalities: tx_id fills the gap before the fields, and the fields end the data.
+const (
+	_ = uint(submitFieldsOffset - submitTxIDOffset - signatureTxIDLen)
+	_ = uint(submitTxIDOffset + signatureTxIDLen - submitFieldsOffset)
+	_ = uint(submitFieldsOffset + observationFieldsLen - submitObservationsDispatchLen - submitObservationsIxDataLen)
+	_ = uint(submitObservationsDispatchLen + submitObservationsIxDataLen - submitFieldsOffset - observationFieldsLen)
 )
 
 // ACCOUNTANT_DIGEST_LOG_TAG, constants/log.rs.
@@ -40,7 +95,7 @@ var (
 	noreplayAuthoritySeedPrefix   = []byte("noreplay_authority")
 )
 
-// solanaCommitEvent is a decoded ACCDGST commit log.
+// solanaCommitEvent is a decoded ACCDGST commit log. Digest is the content digest.
 type solanaCommitEvent struct {
 	Chain            vaa.ChainID
 	Emitter          vaa.Address
@@ -75,9 +130,10 @@ func parseAccountantDigestLog(data []byte) (*solanaCommitEvent, error) {
 type solanaPendingObs struct {
 	Chain            vaa.ChainID
 	GuardianSetIndex uint32
-	Signatures       uint32
-	Digest           [32]byte
-	Payer            solana.PublicKey
+	// 128-bit signature bitmap as four little-endian words.
+	Signatures    [4]uint32
+	ContentDigest [32]byte
+	Payer         solana.PublicKey
 }
 
 // parsePendingObservationsAccount decodes a PendingObservationsLayout account.
@@ -92,26 +148,41 @@ func parsePendingObservationsAccount(data []byte) (*solanaPendingObs, error) {
 	obs := &solanaPendingObs{
 		Chain:            vaa.ChainID(binary.LittleEndian.Uint16(data[2:4])),
 		GuardianSetIndex: binary.LittleEndian.Uint32(data[4:8]),
-		Signatures:       binary.LittleEndian.Uint32(data[8:12]),
 	}
-	copy(obs.Digest[:], data[12:44])
-	copy(obs.Payer[:], data[44:76])
+	for word := range obs.Signatures {
+		start := 8 + word*4
+		obs.Signatures[word] = binary.LittleEndian.Uint32(data[start : start+4])
+	}
+	copy(obs.ContentDigest[:], data[24:56])
+	copy(obs.Payer[:], data[56:88])
 	return obs, nil
 }
 
-// derivePendingObservationsPDA mirrors quorum.rs create_pending_pda.
-func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, emitter vaa.Address, sequence uint64, digest [32]byte) (solana.PublicKey, error) {
+// hasSignature mirrors PendingObservationsLayout::has_signature. Bit N lives in
+// word N/32 at position N%32.
+func (o *solanaPendingObs) hasSignature(index uint8) (bool, error) {
+	if uint32(index) >= pendingObservationsMaxGuardians {
+		return false, fmt.Errorf("pending observations account: guardian index %d is at or past the %d-bit bitmap", index, pendingObservationsMaxGuardians)
+	}
+	return o.Signatures[index/32]&(1<<(index%32)) != 0, nil
+}
+
+// derivePendingObservationsPDA mirrors quorum.rs derive_pending_pda.
+func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, emitter vaa.Address, sequence uint64, guardianSetIndex uint32, contentDigest [32]byte) (solana.PublicKey, error) {
 	var chainBE [2]byte
 	binary.BigEndian.PutUint16(chainBE[:], uint16(chain))
 	var sequenceBE [8]byte
 	binary.BigEndian.PutUint64(sequenceBE[:], sequence)
+	var guardianSetIndexBE [4]byte
+	binary.BigEndian.PutUint32(guardianSetIndexBE[:], guardianSetIndex)
 
 	pda, _, err := solana.FindProgramAddress([][]byte{
 		pendingObservationsSeedPrefix,
 		chainBE[:],
 		emitter[:],
 		sequenceBE[:],
-		digest[:],
+		guardianSetIndexBE[:],
+		contentDigest[:],
 	}, program)
 	if err != nil {
 		return solana.PublicKey{}, fmt.Errorf("derive pending observations PDA: %w", err)
@@ -119,7 +190,7 @@ func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, e
 	return pda, nil
 }
 
-// deriveNoreplayAuthorityPDA mirrors noreplay.rs mark_used.
+// deriveNoreplayAuthorityPDA mirrors noreplay.rs derive_authority.
 func deriveNoreplayAuthorityPDA(accountantProgram solana.PublicKey) (solana.PublicKey, error) {
 	pda, _, err := solana.FindProgramAddress([][]byte{
 		noreplayAuthoritySeedPrefix,
@@ -163,15 +234,189 @@ func noreplayBitSet(bucketData []byte, sequence uint64) (bool, error) {
 	return bucketData[byteOffset]&mask != 0, nil
 }
 
-// parseSubmitObservationsTxHash reads tx_hash from raw submit_observations instruction data.
-// Layout: discriminator(1) ‖ SUBMIT_FIXED_LEN ‖ tx_hash(32) ‖ body_len(2 LE) ‖ body.
-func parseSubmitObservationsTxHash(instructionData []byte) ([]byte, error) {
-	minLen := submitObservationsDispatchLen + submitFixedLen + submitObservationsTxHashLen
-	if len(instructionData) < minLen {
-		return nil, fmt.Errorf("submit_observations instruction data: want at least %d bytes, got %d", minLen, len(instructionData))
+// solanaObservationFields is the 143-byte record the program hashes for both the
+// content digest and the signing digest. ix_data.rs ObservationFieldsAndDigest.
+type solanaObservationFields struct {
+	Action         uint8
+	Chain          vaa.ChainID
+	Emitter        vaa.Address
+	Sequence       uint64
+	TokenChain     vaa.ChainID
+	TokenAddress   [32]byte
+	RecipientChain vaa.ChainID
+	// Big-endian Uint256.
+	Amount [32]byte
+	// keccak256(keccak256(body)); equals the pending entry's inner digest field.
+	VaaDigest [32]byte
+}
+
+// pack serializes the record in the program's field order.
+func (f *solanaObservationFields) pack() [observationFieldsLen]byte {
+	var out [observationFieldsLen]byte
+	out[fieldsActionOffset] = f.Action
+	binary.BigEndian.PutUint16(out[fieldsChainOffset:fieldsChainOffset+2], uint16(f.Chain))
+	copy(out[fieldsEmitterOffset:fieldsEmitterOffset+32], f.Emitter[:])
+	binary.BigEndian.PutUint64(out[fieldsSequenceOffset:fieldsSequenceOffset+8], f.Sequence)
+	binary.BigEndian.PutUint16(out[fieldsTokenChainOffset:fieldsTokenChainOffset+2], uint16(f.TokenChain))
+	copy(out[fieldsTokenAddressOffset:fieldsTokenAddressOffset+32], f.TokenAddress[:])
+	binary.BigEndian.PutUint16(out[fieldsRecipientChainOffset:fieldsRecipientChainOffset+2], uint16(f.RecipientChain))
+	copy(out[fieldsAmountOffset:fieldsAmountOffset+32], f.Amount[:])
+	copy(out[fieldsVaaDigestOffset:fieldsVaaDigestOffset+32], f.VaaDigest[:])
+	return out
+}
+
+// contentDigest is the pending-PDA seed and the commit-log digest:
+// keccak256(keccak256(pack())).
+func (f *solanaObservationFields) contentDigest() [32]byte {
+	packed := f.pack()
+	return [32]byte(crypto.Keccak256(crypto.Keccak256(packed[:])))
+}
+
+// unpackObservationFields reads the record from an exactly 143-byte slice.
+//
+// SECURITY: precondition len(data) == observationFieldsLen.
+func unpackObservationFields(data []byte) (solanaObservationFields, error) {
+	var f solanaObservationFields
+	if len(data) != observationFieldsLen {
+		return f, fmt.Errorf("observation fields: want %d bytes, got %d", observationFieldsLen, len(data))
 	}
-	start := submitObservationsDispatchLen + submitFixedLen
-	txHash := make([]byte, submitObservationsTxHashLen)
-	copy(txHash, instructionData[start:start+submitObservationsTxHashLen])
-	return txHash, nil
+	f.Action = data[fieldsActionOffset]
+	f.Chain = vaa.ChainID(binary.BigEndian.Uint16(data[fieldsChainOffset : fieldsChainOffset+2]))
+	copy(f.Emitter[:], data[fieldsEmitterOffset:fieldsEmitterOffset+32])
+	f.Sequence = binary.BigEndian.Uint64(data[fieldsSequenceOffset : fieldsSequenceOffset+8])
+	f.TokenChain = vaa.ChainID(binary.BigEndian.Uint16(data[fieldsTokenChainOffset : fieldsTokenChainOffset+2]))
+	copy(f.TokenAddress[:], data[fieldsTokenAddressOffset:fieldsTokenAddressOffset+32])
+	f.RecipientChain = vaa.ChainID(binary.BigEndian.Uint16(data[fieldsRecipientChainOffset : fieldsRecipientChainOffset+2]))
+	copy(f.Amount[:], data[fieldsAmountOffset:fieldsAmountOffset+32])
+	copy(f.VaaDigest[:], data[fieldsVaaDigestOffset:fieldsVaaDigestOffset+32])
+	return f, nil
+}
+
+// solanaObservationFieldsFromPayload builds the record a guardian submits, mirroring
+// ix.rs observation_ix_from_body and vaa.rs parse_token_bridge_payload. payload is the
+// VAA body past its 51-byte header; vaaDigest is keccak256(keccak256(body)).
+//
+// SECURITY: a transfer action requires a 133-byte fixed head and at most
+// maxTransferPayloadLen trailing bytes. Any other action carries zeroed transfer fields.
+func solanaObservationFieldsFromPayload(chain vaa.ChainID, emitter vaa.Address, sequence uint64, payload []byte, vaaDigest [32]byte) (*solanaObservationFields, error) {
+	if len(payload) == 0 {
+		return nil, errors.New("observation fields: empty payload")
+	}
+
+	fields := &solanaObservationFields{
+		Action:    payload[0],
+		Chain:     chain,
+		Emitter:   emitter,
+		Sequence:  sequence,
+		VaaDigest: vaaDigest,
+	}
+	if fields.Action != actionTransfer && fields.Action != actionTransferWithPayload {
+		return fields, nil
+	}
+
+	if len(payload) < tokenBridgeTransferLen {
+		return nil, fmt.Errorf("observation fields: transfer payload wants at least %d bytes, got %d", tokenBridgeTransferLen, len(payload))
+	}
+	if extra := len(payload) - tokenBridgeTransferLen; extra > maxTransferPayloadLen {
+		return nil, fmt.Errorf("observation fields: transfer payload carries %d extra bytes, limit %d", extra, maxTransferPayloadLen)
+	}
+
+	// Offsets pin to TokenBridgeTransfer, vaa.rs.
+	copy(fields.Amount[:], payload[1:33])
+	copy(fields.TokenAddress[:], payload[33:65])
+	fields.TokenChain = vaa.ChainID(binary.BigEndian.Uint16(payload[65:67]))
+	fields.RecipientChain = vaa.ChainID(binary.BigEndian.Uint16(payload[99:101]))
+	return fields, nil
+}
+
+// solanaTxID is a source-chain transaction id in a form ix_data.rs TxId accepts: exactly
+// hashTxIDLen or signatureTxIDLen bytes. Build with newSolanaTxID or parseSolanaTxID.
+type solanaTxID struct {
+	length uint8
+	padded [signatureTxIDLen]byte
+}
+
+// newSolanaTxID copies id, which must be exactly hashTxIDLen or signatureTxIDLen bytes.
+func newSolanaTxID(id []byte) (solanaTxID, error) {
+	var txID solanaTxID
+	if len(id) != hashTxIDLen && len(id) != signatureTxIDLen {
+		return txID, fmt.Errorf("tx id: want %d or %d bytes, got %d", hashTxIDLen, signatureTxIDLen, len(id))
+	}
+	txID.length = uint8(len(id)) // #nosec G115 -- len(id) is 32 or 64, checked above
+	copy(txID.padded[:], id)
+	return txID, nil
+}
+
+// parseSolanaTxID mirrors ix_data.rs TxId::parse over the tx_id_len byte and the padded field.
+//
+// SECURITY: the length is exactly 32 or 64 and every byte past it is zero, so one id has one
+// encoding.
+func parseSolanaTxID(length uint8, padded []byte) (solanaTxID, error) {
+	var txID solanaTxID
+	if len(padded) != signatureTxIDLen {
+		return txID, fmt.Errorf("tx id: want a %d-byte padded field, got %d", signatureTxIDLen, len(padded))
+	}
+	switch int(length) {
+	case hashTxIDLen:
+		if !bytes.Equal(padded[hashTxIDLen:], make([]byte, signatureTxIDLen-hashTxIDLen)) {
+			return txID, errors.New("tx id: nonzero padding past a 32-byte id")
+		}
+	case signatureTxIDLen:
+	default:
+		return txID, fmt.Errorf("tx id: length byte %d is neither %d nor %d", length, hashTxIDLen, signatureTxIDLen)
+	}
+	txID.length = length
+	copy(txID.padded[:], padded)
+	return txID, nil
+}
+
+// Bytes is a copy of the id, without padding.
+func (t solanaTxID) Bytes() []byte {
+	return bytes.Clone(t.padded[:t.length])
+}
+
+// valid reports whether t came from a constructor rather than the zero value.
+func (t solanaTxID) valid() bool {
+	return t.length == hashTxIDLen || t.length == signatureTxIDLen
+}
+
+// solanaSubmitObservationsIx is decoded submit_observations instruction data. The
+// audit path reads TxID, Chain, Emitter and Sequence from this one record.
+type solanaSubmitObservationsIx struct {
+	GuardianSetIndex uint32
+	GuardianIndex    uint8
+	// r ‖ s ‖ recovery_id.
+	Signature [submitSignatureLen]byte
+	TxID      solanaTxID
+	solanaObservationFields
+}
+
+// parseSubmitObservationsIxData decodes raw submit_observations instruction data.
+// Layout: discriminator(1) ‖ SubmitObservationsIxData(278), fixed size.
+func parseSubmitObservationsIxData(instructionData []byte) (*solanaSubmitObservationsIx, error) {
+	wantLen := submitObservationsDispatchLen + submitObservationsIxDataLen
+	if len(instructionData) != wantLen {
+		return nil, fmt.Errorf("submit_observations instruction data: want %d bytes, got %d", wantLen, len(instructionData))
+	}
+	if instructionData[0] != submitObservationsDiscriminator {
+		return nil, fmt.Errorf("submit_observations instruction data: discriminator mismatch, want %d got %d", submitObservationsDiscriminator, instructionData[0])
+	}
+
+	fields, err := unpackObservationFields(instructionData[submitFieldsOffset:])
+	if err != nil {
+		return nil, fmt.Errorf("submit_observations instruction data: %w", err)
+	}
+	txID, err := parseSolanaTxID(instructionData[submitTxIDLenOffset], instructionData[submitTxIDOffset:submitFieldsOffset])
+	if err != nil {
+		return nil, fmt.Errorf("submit_observations instruction data: %w", err)
+	}
+
+	ix := &solanaSubmitObservationsIx{
+		GuardianSetIndex:        binary.LittleEndian.Uint32(instructionData[submitGuardianSetIndexOffset : submitGuardianSetIndexOffset+4]),
+		GuardianIndex:           instructionData[submitGuardianIndexOffset],
+		TxID:                    txID,
+		solanaObservationFields: fields,
+	}
+	copy(ix.Signature[:], instructionData[submitSignatureOffset:submitSignatureOffset+submitSignatureLen])
+	return ix, nil
 }
