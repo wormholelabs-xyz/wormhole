@@ -56,17 +56,23 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = VaaBodyHeader::split(body).map_err(err)?;
-    let chain = header.emitter_chain();
-    let emitter = header.emitter_address;
-    let sequence = header.sequence();
+    let vaa_chain = header.emitter_chain();
+    let vaa_emitter = header.emitter_address;
+    let vaa_sequence = header.sequence();
 
-    noreplay::reject_if_marked(noreplay_bucket, program_id, chain, &emitter, sequence)?;
+    noreplay::reject_if_marked(
+        noreplay_bucket,
+        program_id,
+        vaa_chain,
+        &vaa_emitter,
+        vaa_sequence,
+    )?;
 
     let message = sender::resolve(
         program_id,
         relayer_registration_pda,
-        chain,
-        &emitter,
+        vaa_chain,
+        &vaa_emitter,
         payload,
     )?;
     let info = TransceiverInfo::from_payload(message.payload).map_err(err)?;
@@ -74,7 +80,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::NotLockingHub));
     }
 
-    let hub = TransceiverHubKey::new(chain, message.sender);
+    let hub = TransceiverHubKey::new(vaa_chain, message.sender);
     let bump = pda::check_uninitialised(
         program_id,
         hub_pda,
@@ -96,8 +102,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         noreplay_authority,
         system_program_acc,
         program_id,
-        &NoReplayNamespace::new(chain, emitter),
-        sequence,
+        &NoReplayNamespace::new(vaa_chain, vaa_emitter),
+        vaa_sequence,
     )
 }
 
