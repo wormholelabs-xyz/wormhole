@@ -12,18 +12,8 @@ use crate::common::*;
 
 const MAX_QUORUM_BRANCH_CU: u64 = 75_000;
 
-fn pending_layout(account: &Account) -> PendingObservationsLayout {
-    *bytemuck::from_bytes::<PendingObservationsLayout>(&account.data)
-}
-
 fn balance_layout(account: &Account) -> BalanceAccountLayout {
-    *bytemuck::from_bytes::<BalanceAccountLayout>(&account.data)
-}
-
-fn assert_closed(account: &Account, label: &str) {
-    assert_eq!(account.lamports, 0, "{label}: lamports");
-    assert_eq!(account.owner, system_program_id(), "{label}: owner");
-    assert!(account.data.is_empty(), "{label}: data");
+    layout(account)
 }
 
 /// Mollusk clock value for expiry rows.

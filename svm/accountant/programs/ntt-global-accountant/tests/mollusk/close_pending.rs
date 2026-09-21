@@ -20,26 +20,30 @@ fn closes_once_noreplay_is_marked() {
     );
 
     type Setup = fn(&ObsScenario, &mut Vec<(Pubkey, Account)>);
-    let cases: [(&str, Setup, Option<GlobalAccountantError>); 2] = [
+    let mark_noreplay: Setup = |s, accounts| {
+        replace_account(
+            accounts,
+            &s.noreplay_bucket,
+            noreplay_bucket_marked(s.obs.sequence),
+        );
+    };
+    let cases: [(&str, Setup, Pubkey, Option<GlobalAccountantError>); 3] = [
         (
             "recorded set active, noreplay unmarked",
             |_, _| {},
+            SUBMITTER,
             Some(GlobalAccountantError::CannotCleanup),
         ),
         (
-            "noreplay marked",
-            |s, accounts| {
-                replace_account(
-                    accounts,
-                    &s.noreplay_bucket,
-                    noreplay_bucket_marked(s.obs.sequence),
-                );
-            },
-            None,
+            "noreplay marked, rent recipient is not the recorded payer",
+            mark_noreplay,
+            CLOSER,
+            Some(GlobalAccountantError::PayerMismatch),
         ),
+        ("noreplay marked", mark_noreplay, SUBMITTER, None),
     ];
 
-    for (label, setup, expected) in cases {
+    for (label, setup, rent_recipient, expected) in cases {
         let mut accounts = s.submit_n(&mollusk, 3);
         accounts.push((CLOSER, system_owned_account(1_000_000_000)));
         setup(&s, &mut accounts);
@@ -53,7 +57,7 @@ fn closes_once_noreplay_is_marked() {
             vec![
                 AccountMeta::new(CLOSER, true),
                 AccountMeta::new(s.pending_pda, false),
-                AccountMeta::new(SUBMITTER, false),
+                AccountMeta::new(rent_recipient, false),
                 AccountMeta::new_readonly(s.guardian_set, false),
                 AccountMeta::new_readonly(s.noreplay_bucket, false),
             ],

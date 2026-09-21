@@ -51,7 +51,7 @@ impl Upgrade {
             noreplay_authority,
             upgrade_authority: derive_upgrade_authority(&program_id()).0,
             spill: Pubkey::new_unique(),
-            program_data: Pubkey::find_program_address(&[program_id().as_ref()], &loader_v3_id()).0,
+            program_data: program_data_address(&program_id()),
             elf: deployed_elf(PROGRAM_NAME),
         }
     }
@@ -119,8 +119,9 @@ fn wtt_module_is_rejected_then_ntt_module_upgrades() {
     let result = upgrade.submit(&mollusk);
     assert_success(&result, "upgrade");
     let program_data = find_account(&result.resulting_accounts, &upgrade.program_data);
+    let metadata_len = program_data_metadata_len();
     assert_eq!(
-        &program_data.data[45..45 + upgrade.elf.len()],
+        &program_data.data[metadata_len..metadata_len + upgrade.elf.len()],
         &upgrade.elf[..]
     );
     assert_bucket_marked(

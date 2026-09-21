@@ -88,12 +88,20 @@ fn relayer_module_registers_and_wtt_module_is_rejected() {
         RegisterChainLayout::new(ETHEREUM, RELAYER, 6)
     );
 
-    let cases: [(&str, Registration, Account, GlobalAccountantError); 2] = [
+    let mut spoofed_registration = Registration::new(RELAYER_GOVERNANCE_MODULE, 8, RELAYER);
+    spoofed_registration.registration_pda = Pubkey::new_unique();
+    let cases: [(&str, Registration, Account, GlobalAccountantError); 3] = [
         (
             "token bridge module",
             Registration::new(TOKEN_BRIDGE_GOVERNANCE_MODULE, 7, RELAYER),
             uninitialised_pda_account(),
             GlobalAccountantError::InvalidGovernanceModule,
+        ),
+        (
+            "non-canonical registration pda",
+            spoofed_registration,
+            uninitialised_pda_account(),
+            GlobalAccountantError::InvalidPda,
         ),
         (
             "replayed sequence",

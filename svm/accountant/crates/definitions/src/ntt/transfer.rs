@@ -70,7 +70,18 @@ pub struct NttTransfer {
     pub recipient_chain: u16,
 }
 
-/// Parse a transfer.
+/// Parse a transfer and normalize its amount.
+pub fn parse_ntt_transfer(payload: &[u8]) -> Result<NttTransfer, GlobalAccountantError> {
+    let transfer = parse_native_token_transfer(payload)?;
+    let amount = normalize_trimmed_amount(transfer.decimals, u64::from_be_bytes(transfer.amount))
+        .ok_or(GlobalAccountantError::MalformedNttMessage)?;
+    Ok(NttTransfer {
+        amount,
+        recipient_chain: u16::from_be_bytes(transfer.to_chain),
+    })
+}
+
+/// View of the `NativeTokenTransfer` inside a transfer, trimmed fields as sent.
 ///
 /// ```text
 /// TransceiverHead | ManagerHead | NativeTokenTransfer | [additional_len(u16) | additional]
@@ -80,7 +91,10 @@ pub struct NttTransfer {
 /// SECURITY: each length-prefixed section is parsed as its own slice and must be consumed
 /// exactly, and the input must end after `transceiver_payload`, as the `ntt-messages` reader
 /// requires. Over [`MAX_NTT_PAYLOAD_LEN`]: `NttPayloadTooLarge`.
-pub fn parse_ntt_transfer(payload: &[u8]) -> Result<NttTransfer, GlobalAccountantError> {
+#[inline(always)]
+pub fn parse_native_token_transfer(
+    payload: &[u8],
+) -> Result<&NativeTokenTransfer, GlobalAccountantError> {
     if payload.len() > MAX_NTT_PAYLOAD_LEN {
         return Err(GlobalAccountantError::NttPayloadTooLarge);
     }
@@ -90,7 +104,7 @@ pub fn parse_ntt_transfer(payload: &[u8]) -> Result<NttTransfer, GlobalAccountan
     parse(payload).ok_or(GlobalAccountantError::MalformedNttMessage)
 }
 
-fn parse(payload: &[u8]) -> Option<NttTransfer> {
+fn parse(payload: &[u8]) -> Option<&NativeTokenTransfer> {
     let (head, rest) = payload.split_at_checked(size_of::<TransceiverHead>())?;
     let head: &TransceiverHead = bytemuck::try_from_bytes(head).ok()?;
     if head.prefix != TRANSCEIVER_MESSAGE_PREFIX {
@@ -122,10 +136,7 @@ fn parse(payload: &[u8]) -> Option<NttTransfer> {
         }
     }
 
-    Some(NttTransfer {
-        amount: normalize_trimmed_amount(transfer.decimals, u64::from_be_bytes(transfer.amount))?,
-        recipient_chain: u16::from_be_bytes(transfer.to_chain),
-    })
+    Some(transfer)
 }
 
 #[cfg(test)]
@@ -183,6 +194,20 @@ mod tests {
     const MANAGER_LEN_OFFSET: usize = 4 + 32 + 32;
     const INNER_LEN_OFFSET: usize = MANAGER_LEN_OFFSET + 2 + 32 + 32;
     const NTT_PREFIX_OFFSET: usize = INNER_LEN_OFFSET + 2;
+
+    #[test]
+    fn raw_view_keeps_trimmed_fields() {
+        let msg = build_msg(3, 1000, 2);
+        let raw = parse_native_token_transfer(&msg).expect("raw view");
+        assert_eq!(raw.decimals, 3);
+        assert_eq!(u64::from_be_bytes(raw.amount), 1000);
+        assert_eq!(u16::from_be_bytes(raw.to_chain), 2);
+        assert_eq!(
+            parse_native_token_transfer(&build_msg(86, 1, 10)).map(|t| t.decimals),
+            Ok(86),
+            "normalization is the caller's; the raw view accepts any decimals"
+        );
+    }
 
     #[test]
     fn parse_ntt_transfer_table() {

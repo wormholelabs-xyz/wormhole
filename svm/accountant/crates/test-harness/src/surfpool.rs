@@ -24,7 +24,9 @@ use solana_signer::Signer;
 use solana_transaction::Transaction;
 
 use crate::fixtures::fixture_elf;
-use crate::ids::{shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::guardians::{derive_guardian_set_pda, guardian_set_account, Guardian};
+use crate::ids::{core_bridge_program_id, shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::scenario::guardian_keys;
 
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -403,6 +405,23 @@ pub fn deploy_programs(rpc: &RpcClient, images: &[ProgramImage]) {
 }
 
 /// Write `account` at `key` via `surfnet_setAccount`, replacing any existing account.
+/// Write `guardians` as Core Bridge guardian set `index`. Returns the PDA and its bump.
+pub fn deploy_guardian_set(rpc: &RpcClient, index: u32, guardians: &[Guardian]) -> (Pubkey, u8) {
+    let (guardian_set, bump) = derive_guardian_set_pda(index, &core_bridge_program_id());
+    set_account(
+        rpc,
+        &guardian_set,
+        &guardian_set_account(
+            index,
+            &guardian_keys(guardians),
+            0,
+            0,
+            &core_bridge_program_id(),
+        ),
+    );
+    (guardian_set, bump)
+}
+
 pub fn set_account(rpc: &RpcClient, key: &Pubkey, account: &Account) {
     cheat_code(
         rpc,

@@ -2,7 +2,8 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::pda;
 use global_accountant_definitions::{
-    GlobalAccountantError, ManagerMode, TransceiverHubLayout, TransceiverKey,
+    GlobalAccountantError, ManagerMode, TransceiverHubLayout, TransceiverKey, VaaBodyHeader,
+    MAX_NTT_PAYLOAD_LEN,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -160,8 +161,18 @@ fn rejects() {
         15,
         direct_body(ETHEREUM, RELAYER, 15, &hub_payload(ManagerMode::Locking)),
     );
+    let mut over_cap = direct_body(ETHEREUM, SPOKE, 17, &hub_payload(ManagerMode::Locking));
+    over_cap.resize(VaaBodyHeader::LEN + MAX_NTT_PAYLOAD_LEN + 1, 0);
 
-    let cases: [(&str, Hub, Account, Account, Account, GlobalAccountantError); 10] = [
+    let cases: [(&str, Hub, Account, Account, Account, GlobalAccountantError); 11] = [
+        (
+            "body over the cap",
+            Hub::with_body(SPOKE, 17, over_cap),
+            uninitialised_pda_account(),
+            uninitialised_pda_account(),
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidInstructionData,
+        ),
         (
             "burning mode",
             Hub::direct(7, ManagerMode::Burning),

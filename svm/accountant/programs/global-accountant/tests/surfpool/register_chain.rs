@@ -20,12 +20,11 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    accountant_image, balance_account, balance_of, core_bridge_program_id, derive_guardian_set_pda,
-    double_keccak256, governance_header, guardian_keys, guardian_set_account, make_guardians,
-    noreplay_authority_pda, post_signatures_ix, register_chain_body, register_chain_ix_data,
-    set_compute_unit_limit_ix, shim_program_id, signature_block, signatures_for,
-    submit_vaas_ix_data, system_program_id, transfer_body, ETHEREUM, GUARDIAN_COUNT,
-    GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
+    accountant_image, balance_account, balance_of, double_keccak256, governance_header, layout,
+    make_guardians, noreplay_authority_pda, post_signatures_ix, register_chain_body,
+    register_chain_ix_data, set_compute_unit_limit_ix, shim_program_id, signature_block,
+    signatures_for, submit_vaas_ix_data, system_program_id, transfer_body, ETHEREUM,
+    GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
     deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ProgramImage,
@@ -46,14 +45,6 @@ const SUBMIT_VAAS_CU_LIMIT: u32 = 400_000;
 
 fn any_target() -> GovernanceHeader {
     governance_header(TOKEN_BRIDGE_GOVERNANCE_MODULE, REGISTER_CHAIN_ACTION, 0)
-}
-
-fn registration_layout(data: &[u8]) -> ChainRegistrationLayout {
-    *bytemuck::from_bytes(data)
-}
-
-fn record_layout(data: &[u8]) -> RegisterChainLayout {
-    *bytemuck::from_bytes(data)
 }
 
 #[test]
@@ -78,18 +69,7 @@ fn surfpool_register_chain_rotate_and_replay() {
 
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
     let (guardian_set, guardian_set_bump) =
-        derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
-    set_account(
-        &rpc,
-        &guardian_set,
-        &guardian_set_account(
-            GUARDIAN_SET_INDEX,
-            &guardian_keys(&guardians),
-            0,
-            0,
-            &core_bridge_program_id(),
-        ),
-    );
+        crate::harness::deploy_guardian_set(&rpc, GUARDIAN_SET_INDEX, &guardians);
 
     let (registration_pda, _) = chain_registration::derive_pda(&program_id, ETHEREUM);
 
@@ -201,7 +181,7 @@ fn surfpool_register_chain_rotate_and_replay() {
         .expect("registration PDA exists");
     assert_eq!(registration.owner, program_id, "registration PDA owner");
     assert_eq!(
-        registration_layout(&registration.data),
+        layout::<ChainRegistrationLayout>(&registration),
         ChainRegistrationLayout::new(ETHEREUM, emitter_a, SEQUENCE_A)
     );
     let (register_chain_pda_a, _) = derive_register_chain_pda(&program_id, SEQUENCE_A);
@@ -209,7 +189,7 @@ fn surfpool_register_chain_rotate_and_replay() {
         .get_account(&register_chain_pda_a)
         .expect("register_chain record exists");
     assert_eq!(
-        record_layout(&record_a.data),
+        layout::<RegisterChainLayout>(&record_a),
         RegisterChainLayout::new(ETHEREUM, emitter_a, SEQUENCE_A)
     );
 
@@ -271,7 +251,7 @@ fn surfpool_register_chain_rotate_and_replay() {
         .get_account(&registration_pda)
         .expect("registration PDA exists after rotation");
     assert_eq!(
-        registration_layout(&rotated.data),
+        layout::<ChainRegistrationLayout>(&rotated),
         ChainRegistrationLayout::new(ETHEREUM, emitter_b, SEQUENCE_B)
     );
 

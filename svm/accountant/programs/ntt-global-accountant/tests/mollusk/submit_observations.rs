@@ -1,11 +1,10 @@
 //! `submit_observations`: guardian observations accumulate per `(chain, emitter, sequence,
 //! guardian set, digest)` and commit at quorum, routed by the sender's hub.
 
-use std::collections::HashMap;
-
+use accountant_test_fixtures::NttCorpus;
 use global_accountant_definitions::{
-    parse_delivery_instruction, GlobalAccountantError, NativeTokenTransfer,
-    PendingObservationsLayout, Uint256, SUBMIT_OBSERVATION_PREFIX,
+    parse_delivery_instruction, parse_native_token_transfer, GlobalAccountantError,
+    PendingObservationsLayout, Uint256, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
 };
 use mollusk_svm::Mollusk;
 use solana_account::Account;
@@ -21,16 +20,6 @@ const AMOUNT: u64 = 1_500_000;
 const BOOKED: u128 = 150_000_000;
 /// Mollusk clock value for expiry rows.
 const NOW: i64 = 1_800_000_000;
-
-fn pending_layout(account: &Account) -> PendingObservationsLayout {
-    *bytemuck::from_bytes::<PendingObservationsLayout>(&account.data)
-}
-
-fn assert_closed(account: &Account, label: &str) {
-    assert_eq!(account.lamports, 0, "{label}: lamports");
-    assert_eq!(account.owner, system_program_id(), "{label}: owner");
-    assert!(account.data.is_empty(), "{label}: data");
-}
 
 /// The Solana hub sends to its Ethereum spoke.
 fn hub_to_spoke(sequence: u64) -> ObsScenario {
@@ -369,71 +358,35 @@ fn rejects() {
     }
 }
 
-/// A synthetic peer for the corpus rows; the corpus has hubs but no peer table.
+/// Peer registered for every corpus sender.
 const CORPUS_PEER: [u8; 32] = [0xEEu8; 32];
-
-fn hex_bytes(s: &str) -> Vec<u8> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
-        .collect()
-}
-
-fn hex32(s: &str) -> [u8; 32] {
-    hex_bytes(s).try_into().expect("32 bytes")
-}
-
-fn u16_field(v: &serde_json::Value, k: &str) -> u16 {
-    u16::try_from(v[k].as_u64().expect(k)).expect(k)
-}
 
 /// Every mainnet vector, observed by thirteen test guardians with the fields the node would
 /// extract, books `expected_amount` under the hub wormchain recorded for its sender.
 #[test]
 fn mainnet_vectors_commit_at_quorum() {
     let mollusk = mollusk();
-    let corpus: serde_json::Value =
-        serde_json::from_str(accountant_test_fixtures::NTT_TEST_VECTORS).expect("corpus");
-
-    let mut hubs: HashMap<(u16, [u8; 32]), (u16, [u8; 32])> = HashMap::new();
-    for h in corpus["hubs"].as_array().expect("hubs") {
-        hubs.insert(
-            (u16_field(h, "chain"), hex32(h["address"].as_str().unwrap())),
-            (
-                u16_field(h, "hub_chain"),
-                hex32(h["hub_address"].as_str().unwrap()),
-            ),
-        );
-    }
-
-    let vectors = corpus["vectors"].as_array().expect("vectors");
-    assert_eq!(vectors.len(), 28, "full corpus");
-    for v in vectors {
-        let chain = u16_field(v, "chain");
-        let sequence = v["sequence"].as_u64().expect("sequence");
-        let label = format!("chain={chain} seq={sequence}");
-        let emitter = hex32(v["emitter"].as_str().expect("emitter"));
-        let recipient_chain = u16_field(v, "expected_recipient_chain");
-        let expected = Uint256::from_be_bytes(hex32(v["expected_amount"].as_str().unwrap()));
-
-        let vaa = hex_bytes(v["vaa_hex"].as_str().expect("vaa_hex"));
-        let body = &vaa[6 + 66 * vaa[5] as usize..];
-        let payload = &body[51..];
-        let (sender, ntt_payload) = if v["via_relayer"].as_bool().expect("via_relayer") {
+    let corpus = NttCorpus::load();
+    assert_eq!(corpus.vectors.len(), 28, "full corpus");
+    for v in &corpus.vectors {
+        let label = v.label();
+        let body = v.body();
+        let (_, payload) = VaaBodyHeader::split(body).expect("header");
+        let (sender, ntt_payload) = if v.via_relayer {
             let d = parse_delivery_instruction(payload).expect("delivery");
             (d.sender, d.inner_payload)
         } else {
-            (emitter, payload)
+            (v.emitter, payload)
         };
-        // `NativeTokenTransfer` follows the 70-byte transceiver head and 66-byte manager head.
-        let transfer: &NativeTokenTransfer = bytemuck::from_bytes(&ntt_payload[136..215]);
-        let hub = hubs[&(chain, sender)];
+        let transfer = parse_native_token_transfer(ntt_payload).expect("transfer");
+        let hub = corpus.hub_for(v.chain, sender).expect("hub");
+        let expected = Uint256::from_be_bytes(v.expected_amount);
+        let recipient_chain = v.expected_recipient_chain;
 
         let obs = Observation {
-            chain,
-            emitter,
-            sequence,
+            chain: v.chain,
+            emitter: v.emitter,
+            sequence: v.sequence,
             sender,
             recipient_chain,
             trimmed_decimals: transfer.decimals,
@@ -441,14 +394,14 @@ fn mainnet_vectors_commit_at_quorum() {
             digest: double_keccak256(body),
         };
         let s = ObsScenario::new(obs, CORPUS_PEER, hub);
-        let source_debited = chain != hub.0;
+        let source_debited = v.chain != hub.0;
         let dest_debited = recipient_chain == hub.0;
         let mut accounts = s.initial_accounts();
         if source_debited {
             replace_account(
                 &mut accounts,
                 &s.source_balance,
-                balance_account(chain, hub.0, hub.1, expected),
+                balance_account(v.chain, hub.0, hub.1, expected),
             );
         }
         if dest_debited {
@@ -461,7 +414,7 @@ fn mainnet_vectors_commit_at_quorum() {
 
         let after = s.submit_range(&mollusk, accounts, 0..13);
         assert_closed(find_account(&after, &s.pending_pda), &label);
-        assert_bucket_marked(find_account(&after, &s.noreplay_bucket), sequence);
+        assert_bucket_marked(find_account(&after, &s.noreplay_bucket), v.sequence);
         let settled = |debited: bool| if debited { Uint256::ZERO } else { expected };
         assert_balance(&after, &s.source_balance, settled(source_debited));
         assert_balance(&after, &s.dest_balance, settled(dest_debited));

@@ -1,5 +1,6 @@
 //! Token Bridge bodies, observation ix data, and WTT-discriminator framing wrappers.
 
+use accountant_operational_core::support::quorum::{observation_digests, ObservationDigests};
 use accountant_test_harness::wire;
 use accountant_test_harness::{double_keccak256, vaa_header, TX_ID};
 use global_accountant_definitions::{
@@ -84,10 +85,13 @@ pub fn observation_ix_from_body(
     }
 }
 
-/// Content digest for `body`, matching the on-chain pending-PDA key.
+fn digests_with_tx_id(tx_id: TxId<'_>, body: &[u8]) -> ObservationDigests {
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], tx_id, body);
+    observation_digests(SUBMIT_OBSERVATION_PREFIX, tx_id, &ix.fields_and_digest())
+}
+
 pub fn content_digest(body: &[u8]) -> [u8; 32] {
-    let ix = observation_ix_from_body(0, 0, [0u8; 65], TX_ID, body);
-    double_keccak256(&ix.fields_and_digest())
+    digests_with_tx_id(TX_ID, body).content
 }
 
 pub fn signing_digest(body: &[u8]) -> [u8; 32] {
@@ -95,12 +99,7 @@ pub fn signing_digest(body: &[u8]) -> [u8; 32] {
 }
 
 pub fn signing_digest_with_tx_id(tx_id: TxId<'_>, body: &[u8]) -> [u8; 32] {
-    let ix = observation_ix_from_body(0, 0, [0u8; 65], tx_id, body);
-    accountant_operational_core::hash::observation_signing_digest(
-        SUBMIT_OBSERVATION_PREFIX,
-        tx_id,
-        &ix.fields_and_digest(),
-    )
+    digests_with_tx_id(tx_id, body).signing
 }
 
 pub fn submit_observations_ix_data(
@@ -126,10 +125,11 @@ pub fn submit_observations_ix_data_with_tx_id(
     body: &[u8],
 ) -> Vec<u8> {
     let ix = observation_ix_from_body(guardian_set_index, guardian_index, signature, tx_id, body);
-    let mut data = Vec::with_capacity(1 + SubmitObservationsIxData::LEN);
-    data.push(Instruction::SubmitObservations as u8);
-    data.extend_from_slice(bytemuck::bytes_of(&ix));
-    data
+    wire::framed(
+        Instruction::SubmitObservations as u8,
+        bytemuck::bytes_of(&ix),
+        &[],
+    )
 }
 
 pub fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
