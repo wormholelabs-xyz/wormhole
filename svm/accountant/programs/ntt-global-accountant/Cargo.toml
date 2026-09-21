@@ -34,6 +34,9 @@ serde_json.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true
 solana-pubkey = { workspace = true, features = ["curve25519"] }
+# Surfpool e2e: signs and sends transactions to the subprocess validator.
+solana-keypair.workspace = true
+solana-signer.workspace = true
 ntt-global-accountant = { path = ".", features = ["no-entrypoint"] }
 
 [lints]

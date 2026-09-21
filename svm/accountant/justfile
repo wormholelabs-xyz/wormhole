@@ -106,9 +106,14 @@ clippy:
 # Single-threaded: each test spawns its own surfpool plus program deploys.
 # The upgrade_contract module is a two-step flow with its own recipes below.
 
-[doc("Surfpool e2e: submit_vaas and submit_observations against a fresh surfpool.")]
+[doc("Surfpool e2e for both programs against fresh surfpool instances.")]
 e2e: build
-    cargo test --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+    cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --nocapture
+
+[doc("Surfpool e2e: the NTT accountant lifecycle only.")]
+e2e-ntt: build
+    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --nocapture
 
 # Two-step upgrade_contract e2e. Step 1 leaves a detached surfpool running and
 # records its pid + RPC URL in target/e2e-upgrade-contract.json; step 2 targets

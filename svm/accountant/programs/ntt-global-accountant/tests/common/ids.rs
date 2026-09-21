@@ -1,4 +1,5 @@
 use accountant_test_harness::mollusk_with_fixtures;
+use accountant_test_harness::surfpool::ProgramImage;
 use mollusk_svm::Mollusk;
 use solana_pubkey::Pubkey;
 
@@ -12,4 +13,9 @@ pub fn program_id() -> Pubkey {
 
 pub fn mollusk() -> Mollusk {
     mollusk_with_fixtures(&program_id(), PROGRAM_NAME)
+}
+
+/// The accountant from the deploy dir, at its `declare_id!` address.
+pub fn accountant_image() -> ProgramImage {
+    ProgramImage::from_deploy_dir(PROGRAM_NAME, program_id())
 }
