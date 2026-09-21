@@ -6,16 +6,16 @@ use solana_pubkey::Pubkey;
 
 use super::*;
 
-/// A governance VAA body signed by the test guardian set: the four Shim-facing accounts
-/// every governance instruction starts with (payer, Shim program, guardian set, signatures).
-pub struct GovernanceVaa {
+/// A VAA body signed by the test guardian set: the four Shim-facing accounts every
+/// Shim-verified instruction starts with (payer, Shim program, guardian set, signatures).
+pub struct SignedVaa {
     pub body: Vec<u8>,
     pub guardian_set: Pubkey,
     pub guardian_set_bump: u8,
     guardians: Vec<Guardian>,
 }
 
-impl GovernanceVaa {
+impl SignedVaa {
     pub fn new(body: Vec<u8>) -> Self {
         let (guardian_set, guardian_set_bump) =
             derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());

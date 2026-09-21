@@ -17,10 +17,8 @@ use solana_pubkey::Pubkey;
 
 use crate::common::*;
 
-const RELAYER: [u8; 32] = [0x5Eu8; 32];
-
 struct Registration {
-    vaa: GovernanceVaa,
+    vaa: SignedVaa,
     registration_pda: Pubkey,
     register_chain_pda: Pubkey,
 }
@@ -37,7 +35,7 @@ impl Registration {
             emitter,
         );
         Self {
-            vaa: GovernanceVaa::new(body),
+            vaa: SignedVaa::new(body),
             registration_pda: chain_registration::derive_pda(&program_id(), ETHEREUM).0,
             register_chain_pda: derive_register_chain_pda(&program_id(), sequence).0,
         }

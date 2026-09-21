@@ -17,7 +17,7 @@ use crate::common::*;
 const NEW_CONTRACT: [u8; 32] = [0xC4; 32];
 
 struct Upgrade {
-    vaa: GovernanceVaa,
+    vaa: SignedVaa,
     sequence: u64,
     noreplay_bucket: Pubkey,
     noreplay_authority: Pubkey,
@@ -39,7 +39,7 @@ impl Upgrade {
         );
         let noreplay_authority = noreplay_authority_pda(&program_id());
         Self {
-            vaa: GovernanceVaa::new(body),
+            vaa: SignedVaa::new(body),
             sequence,
             noreplay_bucket: derive_bucket_pda(
                 &noreplay_authority,
