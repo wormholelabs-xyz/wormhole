@@ -5,10 +5,7 @@
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::pda;
-use global_accountant_definitions::{
-    GlobalAccountantError, TransceiverHubLayout, TransceiverKey, TransceiverPeerKey,
-    TransceiverPeerLayout,
-};
+use global_accountant_definitions::{GlobalAccountantError, TransceiverKey, TransceiverPeerKey};
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
 use mollusk_svm::Mollusk;
@@ -148,27 +145,6 @@ impl Default for Accounts {
             bucket: noreplay_bucket_unmarked(),
         }
     }
-}
-
-fn hub_layout(
-    chain: u16,
-    address: [u8; 32],
-    hub_chain: u16,
-    hub: [u8; 32],
-) -> TransceiverHubLayout {
-    TransceiverHubLayout::new(
-        TransceiverKey::new(chain, address),
-        TransceiverKey::new(hub_chain, hub),
-    )
-}
-
-fn peer_layout(
-    chain: u16,
-    address: [u8; 32],
-    dest_chain: u16,
-    peer: [u8; 32],
-) -> TransceiverPeerLayout {
-    TransceiverPeerLayout::new(TransceiverPeerKey::new(chain, address, dest_chain), peer)
 }
 
 fn self_hub(chain: u16, address: [u8; 32]) -> Account {

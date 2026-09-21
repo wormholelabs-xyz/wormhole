@@ -3160,6 +3160,7 @@ dependencies = [
  "global-accountant-definitions",
  "mollusk-svm",
  "ntt-global-accountant",
+ "serde_json",
  "solana-account 3.4.0",
  "solana-instruction 3.4.0",
  "solana-pubkey 4.2.0",

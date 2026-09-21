@@ -58,6 +58,32 @@ pub mod ntt_global_accountant {
         Ok(())
     }
 
+    /// See `crate::instructions::submit_vaas`.
+    #[instruction(discriminator = 2)]
+    pub fn submit_vaas(ctx: Context<SubmitVaas>, ix_data: RawIxData) -> Result<()> {
+        let accounts = flatten_accounts!(
+            ctx.accounts,
+            [
+                submitter,
+                verify_vaa_shim_program,
+                guardian_set,
+                guardian_signatures,
+                noreplay_bucket,
+                noreplay_program,
+                noreplay_authority,
+                source_account_pda,
+                dest_account_pda,
+                system_program,
+                relayer_registration_pda,
+                hub_pda,
+                peer_src_pda,
+                peer_dst_pda,
+            ]
+        );
+        crate::instructions::submit_vaas::process(ctx.program_id, &accounts, &ix_data.0)?;
+        Ok(())
+    }
+
     /// Standard Relayer `RegisterChain`; see
     /// `accountant_operational_core::instructions::register_chain`.
     #[instruction(discriminator = 3)]
