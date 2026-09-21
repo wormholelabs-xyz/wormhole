@@ -6,5 +6,7 @@ mod common;
 
 mod modify_balance;
 mod program_id;
+mod register_hub;
+mod register_peer;
 mod register_relayer_chain;
 mod upgrade_contract;

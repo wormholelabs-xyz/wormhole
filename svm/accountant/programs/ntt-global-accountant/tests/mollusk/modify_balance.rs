@@ -19,7 +19,7 @@ const HUB_TOKEN: [u8; 32] = [0x77u8; 32];
 const REASON: [u8; 32] = *b"audit-log: post-incident credit ";
 
 struct Modification {
-    vaa: GovernanceVaa,
+    vaa: SignedVaa,
     balance_pda: Pubkey,
     modify_balance_pda: Pubkey,
 }
@@ -41,7 +41,7 @@ impl Modification {
             REASON,
         );
         Self {
-            vaa: GovernanceVaa::new(body),
+            vaa: SignedVaa::new(body),
             balance_pda: balance::derive_pda(&program_id(), ETHEREUM, ETHEREUM, &HUB_TOKEN).0,
             modify_balance_pda: derive_modify_balance_pda(&program_id(), payload_sequence).0,
         }

@@ -15,7 +15,7 @@ fn rejects_execution_under_another_program_id() {
     assert_ne!(foreign_id, program_id());
     let mollusk = mollusk_with_fixtures(&foreign_id, PROGRAM_NAME);
 
-    let vaa = GovernanceVaa::new(vec![0u8; 51]);
+    let vaa = SignedVaa::new(vec![0u8; 51]);
     let ix = Instruction::new_with_bytes(
         foreign_id,
         &register_relayer_chain_ix_data(vaa.guardian_set_bump, &vaa.body),
