@@ -3,7 +3,7 @@
 
 use crate::constants::seeds::*;
 
-/// Largest seed count of any key ([`PendingKey`]).
+/// Largest seed count of any key ([`PendingObservationsKey`]).
 pub const MAX_SEEDS: usize = 6;
 
 /// Seed slices of one PDA, without the bump.
@@ -53,13 +53,13 @@ impl PdaSeeds for ChainRegistrationKey {
 
 /// `(b"account", chain_be, token_chain_be, token_address)`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BalanceKey {
+pub struct BalanceAccountKey {
     chain: [u8; 2],
     token_chain: [u8; 2],
     token_address: [u8; 32],
 }
 
-impl BalanceKey {
+impl BalanceAccountKey {
     pub fn new(chain: u16, token_chain: u16, token_address: [u8; 32]) -> Self {
         Self {
             chain: chain.to_be_bytes(),
@@ -69,7 +69,7 @@ impl BalanceKey {
     }
 }
 
-impl PdaSeeds for BalanceKey {
+impl PdaSeeds for BalanceAccountKey {
     fn seeds(&self) -> Seeds<'_> {
         Seeds::new([
             ACCOUNT_SEED_PREFIX,
@@ -122,7 +122,7 @@ impl PdaSeeds for ModifyBalanceKey {
 
 /// `(b"pending", chain_be, emitter, sequence_be, guardian_set_index_be, content_digest)`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PendingKey {
+pub struct PendingObservationsKey {
     chain: [u8; 2],
     emitter: [u8; 32],
     sequence: [u8; 8],
@@ -130,7 +130,7 @@ pub struct PendingKey {
     content_digest: [u8; 32],
 }
 
-impl PendingKey {
+impl PendingObservationsKey {
     pub fn new(
         chain: u16,
         emitter: [u8; 32],
@@ -148,7 +148,7 @@ impl PendingKey {
     }
 }
 
-impl PdaSeeds for PendingKey {
+impl PdaSeeds for PendingObservationsKey {
     fn seeds(&self) -> Seeds<'_> {
         Seeds::new([
             PENDING_OBSERVATIONS_SEED_PREFIX,
@@ -164,12 +164,12 @@ impl PdaSeeds for PendingKey {
 /// A transceiver `(chain, address)`; the `TransceiverHub` PDA key
 /// `(b"transceiver_hub", chain_be, address)` and the value a hub entry points at.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TransceiverKey {
+pub struct TransceiverHubKey {
     chain: [u8; 2],
     pub address: [u8; 32],
 }
 
-impl TransceiverKey {
+impl TransceiverHubKey {
     pub fn new(chain: u16, address: [u8; 32]) -> Self {
         Self {
             chain: chain.to_be_bytes(),
@@ -182,7 +182,7 @@ impl TransceiverKey {
     }
 }
 
-impl PdaSeeds for TransceiverKey {
+impl PdaSeeds for TransceiverHubKey {
     fn seeds(&self) -> Seeds<'_> {
         Seeds::new([TRANSCEIVER_HUB_SEED_PREFIX, &self.chain, &self.address])
     }
@@ -254,7 +254,7 @@ mod tests {
             ),
             (
                 "balance",
-                owned(&BalanceKey::new(2, 1, token)),
+                owned(&BalanceAccountKey::new(2, 1, token)),
                 vec![
                     b"account".to_vec(),
                     2u16.to_be_bytes().to_vec(),
@@ -274,7 +274,7 @@ mod tests {
             ),
             (
                 "pending",
-                owned(&PendingKey::new(2, emitter, 5, 4, digest)),
+                owned(&PendingObservationsKey::new(2, emitter, 5, 4, digest)),
                 vec![
                     b"pending".to_vec(),
                     2u16.to_be_bytes().to_vec(),
@@ -286,7 +286,7 @@ mod tests {
             ),
             (
                 "transceiver hub",
-                owned(&TransceiverKey::new(2, emitter)),
+                owned(&TransceiverHubKey::new(2, emitter)),
                 vec![
                     b"transceiver_hub".to_vec(),
                     2u16.to_be_bytes().to_vec(),

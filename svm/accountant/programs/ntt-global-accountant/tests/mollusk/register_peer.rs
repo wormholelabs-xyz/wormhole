@@ -5,7 +5,7 @@
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::pda;
-use global_accountant_definitions::{GlobalAccountantError, TransceiverKey, TransceiverPeerKey};
+use global_accountant_definitions::{GlobalAccountantError, TransceiverHubKey, TransceiverPeerKey};
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
 use mollusk_svm::Mollusk;
@@ -75,8 +75,8 @@ impl Registration {
             sequence,
             emitter,
             relayer_registration_pda: chain_registration::derive_pda(&id, chain).0,
-            own_hub_pda: pda::derive(&id, &TransceiverKey::new(chain, sender)).0,
-            peer_hub_pda: pda::derive(&id, &TransceiverKey::new(dest_chain, peer)).0,
+            own_hub_pda: pda::derive(&id, &TransceiverHubKey::new(chain, sender)).0,
+            peer_hub_pda: pda::derive(&id, &TransceiverHubKey::new(dest_chain, peer)).0,
             hub_peer_pda: pda::derive(&id, &TransceiverPeerKey::new(dest_chain, peer, chain)).0,
             peer_pda: pda::derive(&id, &TransceiverPeerKey::new(chain, sender, dest_chain)).0,
             noreplay_bucket: derive_bucket_pda(

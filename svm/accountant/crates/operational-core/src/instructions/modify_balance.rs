@@ -9,7 +9,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::accounts::{self, balance as balance_account};
 use crate::cpi::shim;
 use crate::definitions::{
-    split_body, BalanceAccountLayout, BalanceKey, GlobalAccountantError, GovernanceModule,
+    split_body, BalanceAccountKey, BalanceAccountLayout, GlobalAccountantError, GovernanceModule,
     ModificationKind, ModifyBalanceIxData, ModifyBalanceKey, ModifyBalanceLayout,
     ModifyBalancePayload, VaaBodyHeader,
 };
@@ -95,7 +95,7 @@ fn check_balance_pda(
     balance_pda: &AccountInfo,
     payload: &ModifyBalancePayload,
 ) -> ProgramCoreResult<u8> {
-    let key = BalanceKey::new(
+    let key = BalanceAccountKey::new(
         payload.chain_id(),
         payload.token_chain(),
         payload.token_address,

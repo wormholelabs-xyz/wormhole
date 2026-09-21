@@ -2,7 +2,7 @@
 
 use anchor_lang::prelude::*;
 
-use crate::definitions::{BalanceAccountLayout, BalanceKey, GlobalAccountantError, Uint256};
+use crate::definitions::{BalanceAccountKey, BalanceAccountLayout, GlobalAccountantError, Uint256};
 use crate::support::pda;
 use crate::{err, ProgramResult};
 
@@ -15,7 +15,7 @@ pub fn derive_pda(
 ) -> (Pubkey, u8) {
     pda::derive(
         program_id,
-        &BalanceKey::new(chain, token_chain, *token_address),
+        &BalanceAccountKey::new(chain, token_chain, *token_address),
     )
 }
 

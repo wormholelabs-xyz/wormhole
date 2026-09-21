@@ -18,7 +18,7 @@ use crate::account_util::add_lamports;
 use crate::accounts;
 use crate::cpi::noreplay;
 use crate::definitions::{
-    ClosePendingIxData, GlobalAccountantError, PendingKey, PendingObservationsLayout,
+    ClosePendingIxData, GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout,
 };
 use crate::err;
 use crate::support::{guardian_set, pda};
@@ -45,7 +45,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     // SECURITY: re-derive the pending PDA from the fields
-    let key = PendingKey::new(
+    let key = PendingObservationsKey::new(
         layout.chain,
         emitter,
         sequence,

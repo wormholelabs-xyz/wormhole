@@ -25,9 +25,9 @@ use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 use accountant_operational_core::support::pda;
 
 use crate::definitions::{
-    split_body, GlobalAccountantError, NoReplayNamespace, RegisterPeerIxData, TransceiverHubLayout,
-    TransceiverKey, TransceiverPeerKey, TransceiverPeerLayout, TransceiverRegistrationPayload,
-    VaaBodyHeader, MAX_NTT_PAYLOAD_LEN,
+    split_body, GlobalAccountantError, NoReplayNamespace, RegisterPeerIxData, TransceiverHubKey,
+    TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout,
+    TransceiverRegistrationPayload, VaaBodyHeader, MAX_NTT_PAYLOAD_LEN,
 };
 use crate::err;
 use crate::instructions::sender;
@@ -95,8 +95,8 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::SameChainPeer));
     }
 
-    let sender_key = TransceiverKey::new(chain, sender);
-    let peer_key = TransceiverKey::new(dest_chain, peer_address);
+    let sender_key = TransceiverHubKey::new(chain, sender);
+    let peer_key = TransceiverHubKey::new(dest_chain, peer_address);
     let peer_entry_key = TransceiverPeerKey::new(chain, sender, dest_chain);
     let hub_entry_key = TransceiverPeerKey::new(dest_chain, peer_address, chain);
 

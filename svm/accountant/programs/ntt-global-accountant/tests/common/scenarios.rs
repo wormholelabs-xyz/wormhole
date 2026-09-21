@@ -6,7 +6,8 @@ use accountant_operational_core::support::quorum::{
 };
 use accountant_test_harness::wire;
 use global_accountant_definitions::{
-    NttSubmitObservationsIxData, TransceiverKey, TransceiverPeerKey, NTT_SUBMIT_OBSERVATION_PREFIX,
+    NttSubmitObservationsIxData, TransceiverHubKey, TransceiverPeerKey,
+    NTT_SUBMIT_OBSERVATION_PREFIX,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -46,7 +47,7 @@ fn route_pdas(
         source_balance: balance::derive_pda(&id, chain, hub_chain, &hub).0,
         dest_balance: balance::derive_pda(&id, recipient_chain, hub_chain, &hub).0,
         relayer_registration_pda: chain_registration::derive_pda(&id, chain).0,
-        hub_pda: pda::derive(&id, &TransceiverKey::new(chain, sender)).0,
+        hub_pda: pda::derive(&id, &TransceiverHubKey::new(chain, sender)).0,
         peer_src_pda: pda::derive(
             &id,
             &TransceiverPeerKey::new(chain, sender, recipient_chain),

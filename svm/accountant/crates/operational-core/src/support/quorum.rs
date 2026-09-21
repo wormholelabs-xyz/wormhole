@@ -7,7 +7,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
-    GlobalAccountantError, PendingKey, PendingObservationsLayout, VaaBodyHeader,
+    GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout, VaaBodyHeader,
 };
 use crate::err;
 use crate::hash::{double_keccak256, keccak256, observation_signing_digest};
@@ -71,7 +71,7 @@ pub fn derive_pending_pda(
     guardian_set_index: u32,
     content_digest: &[u8; 32],
 ) -> (Pubkey, u8) {
-    let key = PendingKey::new(
+    let key = PendingObservationsKey::new(
         chain,
         *emitter,
         sequence,
@@ -92,7 +92,7 @@ fn verify_pending_pda_address(
     guardian_set_index: u32,
     content_digest: &[u8; 32],
 ) -> crate::ProgramResult {
-    let key = PendingKey::new(
+    let key = PendingObservationsKey::new(
         chain,
         *emitter,
         sequence,
@@ -178,7 +178,7 @@ fn create_pending_pda<'info>(
     pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
 ) -> crate::ProgramResult {
-    let key = PendingKey::new(
+    let key = PendingObservationsKey::new(
         parsed.chain,
         parsed.emitter,
         parsed.sequence,

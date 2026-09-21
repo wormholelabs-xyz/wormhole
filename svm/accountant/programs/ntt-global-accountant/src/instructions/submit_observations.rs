@@ -18,8 +18,8 @@ use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     normalize_trimmed_amount, GlobalAccountantError, NoReplayNamespace,
-    NttSubmitObservationsIxData, PendingObservationsLayout, TransceiverHubLayout, TransceiverKey,
-    NTT_SUBMIT_OBSERVATION_PREFIX,
+    NttSubmitObservationsIxData, PendingObservationsLayout, TransceiverHubKey,
+    TransceiverHubLayout, NTT_SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
 use crate::instructions::ntt_transfer;
@@ -91,7 +91,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     // SECURITY: an observation from a transceiver with no hub must not move balances. Gated
     // before signature recovery, as `submit_vaas` gates before the balance move.
-    let sender_key = TransceiverKey::new(parsed.chain, ix.sender);
+    let sender_key = TransceiverHubKey::new(parsed.chain, ix.sender);
     pda::check(program_id, hub_pda, &sender_key)?;
     let hub = pda::read_if_initialised::<TransceiverHubLayout>(program_id, hub_pda)?
         .ok_or_else(|| err(GlobalAccountantError::MissingTransceiverHub))?
