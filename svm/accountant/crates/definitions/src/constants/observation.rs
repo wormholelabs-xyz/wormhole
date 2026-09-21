@@ -4,3 +4,7 @@
 /// `keccak256(prefix ‖ observation)`. Must equal the node's `SubmitObservationPrefix`
 /// (`node/pkg/accountant/submit_obs.go`). Whitepaper 0009 requires a >= 32-byte prefix.
 pub const SUBMIT_OBSERVATION_PREFIX: &[u8] = b"acct_sub_obsfig_000000000000000000|";
+
+/// NTT accountant observation prefix. Must equal the node's `NttSubmitObservationPrefix`
+/// (`node/pkg/accountant/submit_obs.go`).
+pub const NTT_SUBMIT_OBSERVATION_PREFIX: &[u8] = b"ntt_acct_sub_obsfig_00000000000000|";

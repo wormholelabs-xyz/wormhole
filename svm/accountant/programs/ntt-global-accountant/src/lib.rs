@@ -1,8 +1,7 @@
 //! Wormhole NTT Global Accountant Solana program, anchor-lang 1.1.2.
 //!
 //! Shared machinery lives in `accountant-operational-core`, including the governance handlers.
-//! This crate holds the NTT registries (transceiver hubs and peers), the NTT-specific
-//! instructions, and the `#[program]` entry. Wire-format constraints
+//! This crate holds the NTT-specific instructions and the `#[program]` entry. Wire-format constraints
 //! are those of the sibling `global-accountant` crate: 1-byte `AccountTag` at offset 0 with
 //! `UncheckedAccount` + `bytemuck`, 1-byte instruction discriminators, PDA creation through
 //! `pda_init`, and errors as `ProgramError::Custom(code)`.
@@ -40,6 +39,32 @@ macro_rules! flatten_accounts {
 #[program]
 pub mod ntt_global_accountant {
     use super::*;
+
+    /// See `crate::instructions::submit_observations`.
+    #[instruction(discriminator = 0)]
+    pub fn submit_observations(ctx: Context<SubmitObservations>, ix_data: RawIxData) -> Result<()> {
+        let accounts = flatten_accounts!(
+            ctx.accounts,
+            [
+                submitter,
+                pending_pda,
+                guardian_set,
+                noreplay_bucket,
+                system_program,
+                noreplay_program,
+                noreplay_authority,
+                source_account_pda,
+                dest_account_pda,
+                rent_recipient,
+                relayer_registration_pda,
+                hub_pda,
+                peer_src_pda,
+                peer_dst_pda,
+            ]
+        );
+        crate::instructions::submit_observations::process(ctx.program_id, &accounts, &ix_data.0)?;
+        Ok(())
+    }
 
     /// See `accountant_operational_core::instructions::close_pending`.
     #[instruction(discriminator = 1)]

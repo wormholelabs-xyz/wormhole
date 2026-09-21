@@ -5,6 +5,45 @@
 
 use anchor_lang::prelude::*;
 
+/// Accounts for `submit_observations` (14 accounts). Slots 0-10 match the WTT program; slot 10
+/// is the Standard Relayer registration for the emitter chain.
+#[derive(Accounts)]
+pub struct SubmitObservations<'info> {
+    #[account(mut)]
+    pub submitter: Signer<'info>,
+    /// CHECK: address and lifecycle handled in `quorum`.
+    #[account(mut)]
+    pub pending_pda: UncheckedAccount<'info>,
+    /// CHECK: owner and address checked in `quorum::verify_signature`.
+    pub guardian_set: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::is_marked` / `noreplay::mark_used`.
+    #[account(mut)]
+    pub noreplay_bucket: UncheckedAccount<'info>,
+    /// CHECK: passed through to the NoReplay CPI.
+    pub system_program: UncheckedAccount<'info>,
+    /// CHECK: CPI target is the constant `NOREPLAY_PROGRAM_ID`.
+    pub noreplay_program: UncheckedAccount<'info>,
+    /// CHECK: address checked in `noreplay::mark_used`.
+    pub noreplay_authority: UncheckedAccount<'info>,
+    /// CHECK: address checked and lazy-initialised in `transfer::apply_transfer`.
+    #[account(mut)]
+    pub source_account_pda: UncheckedAccount<'info>,
+    /// CHECK: as `source_account_pda`.
+    #[account(mut)]
+    pub dest_account_pda: UncheckedAccount<'info>,
+    /// CHECK: compared to the recorded payer in `quorum::close_pending_pda`.
+    #[account(mut)]
+    pub rent_recipient: UncheckedAccount<'info>,
+    /// CHECK: address checked in `chain_registration::is_registered_emitter`; may be uninitialised.
+    pub relayer_registration_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; must hold the sender's hub.
+    pub hub_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; the sender's peer entry for the recipient chain.
+    pub peer_src_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `pda::check`; the peer's entry for the sender's chain.
+    pub peer_dst_pda: UncheckedAccount<'info>,
+}
+
 /// Accounts for `close_pending` (5 accounts). Handler:
 /// `accountant_operational_core::instructions::close_pending`.
 #[derive(Accounts)]
