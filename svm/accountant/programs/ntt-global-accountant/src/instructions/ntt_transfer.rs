@@ -8,7 +8,7 @@ use accountant_operational_core::support::pda;
 use accountant_operational_core::{transfer, ProgramResult};
 
 use crate::definitions::{
-    GlobalAccountantError, TransceiverKey, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
+    GlobalAccountantError, TransceiverHubKey, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
 };
 use crate::err;
 
@@ -19,7 +19,7 @@ use crate::err;
 pub fn apply_routed<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
-    hub: TransceiverKey,
+    hub: TransceiverHubKey,
     peer_src_pda: &AccountInfo<'info>,
     peer_dst_pda: &AccountInfo<'info>,
     source_balance: &AccountInfo<'info>,

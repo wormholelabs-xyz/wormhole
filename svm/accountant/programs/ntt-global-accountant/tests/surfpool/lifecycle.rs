@@ -17,7 +17,7 @@ use accountant_operational_core::instructions::register_chain::derive_register_c
 use accountant_operational_core::support::pda;
 use global_accountant_definitions::{
     ChainRegistrationLayout, GlobalAccountantError, ManagerMode, ModificationKind,
-    TransceiverHubLayout, TransceiverKey, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
+    TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
     GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, NTT_ACCOUNTANT_GOVERNANCE_MODULE,
     REGISTER_CHAIN_ACTION, RELAYER_GOVERNANCE_MODULE, SOLANA_CHAIN_ID,
 };
@@ -103,8 +103,8 @@ fn surfpool_ntt_lifecycle() {
         ]
     };
     let relayer_registration_pda = chain_registration::derive_pda(&id, ETHEREUM).0;
-    let hub_key = TransceiverKey::new(SOLANA, HUB);
-    let spoke_key = TransceiverKey::new(ETHEREUM, SPOKE);
+    let hub_key = TransceiverHubKey::new(SOLANA, HUB);
+    let spoke_key = TransceiverHubKey::new(ETHEREUM, SPOKE);
     let hub_pda = pda::derive(&id, &hub_key).0;
     let spoke_hub_pda = pda::derive(&id, &spoke_key).0;
     let hub_peer_pda = pda::derive(&id, &TransceiverPeerKey::new(SOLANA, HUB, ETHEREUM)).0;
@@ -147,11 +147,11 @@ fn surfpool_ntt_lifecycle() {
         accounts.extend([
             AccountMeta::new_readonly(chain_registration::derive_pda(&id, chain).0, false),
             AccountMeta::new(
-                pda::derive(&id, &TransceiverKey::new(chain, sender)).0,
+                pda::derive(&id, &TransceiverHubKey::new(chain, sender)).0,
                 false,
             ),
             AccountMeta::new_readonly(
-                pda::derive(&id, &TransceiverKey::new(dest_chain, peer)).0,
+                pda::derive(&id, &TransceiverHubKey::new(dest_chain, peer)).0,
                 false,
             ),
             AccountMeta::new_readonly(

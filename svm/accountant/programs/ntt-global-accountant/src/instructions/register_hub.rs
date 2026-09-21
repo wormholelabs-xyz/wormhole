@@ -15,7 +15,7 @@ use accountant_operational_core::support::pda;
 
 use crate::definitions::{
     split_body, GlobalAccountantError, ManagerMode, NoReplayNamespace, RegisterHubIxData,
-    TransceiverHubLayout, TransceiverInfo, TransceiverKey, VaaBodyHeader, MAX_NTT_PAYLOAD_LEN,
+    TransceiverHubKey, TransceiverHubLayout, TransceiverInfo, VaaBodyHeader, MAX_NTT_PAYLOAD_LEN,
 };
 use crate::err;
 use crate::instructions::sender;
@@ -74,7 +74,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(err(GlobalAccountantError::NotLockingHub));
     }
 
-    let hub = TransceiverKey::new(chain, message.sender);
+    let hub = TransceiverHubKey::new(chain, message.sender);
     let bump = pda::check_uninitialised(
         program_id,
         hub_pda,

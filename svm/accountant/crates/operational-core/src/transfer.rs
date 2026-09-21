@@ -4,7 +4,7 @@
 use anchor_lang::prelude::*;
 
 use crate::accounts::{self, balance};
-use crate::definitions::{BalanceAccountLayout, BalanceKey, GlobalAccountantError, Uint256};
+use crate::definitions::{BalanceAccountKey, BalanceAccountLayout, GlobalAccountantError, Uint256};
 use crate::support::pda;
 use crate::{err, ProgramResult};
 
@@ -29,7 +29,7 @@ pub fn apply_transfer<'info>(
     let src_bump = pda::check_or(
         program_id,
         source_account,
-        &BalanceKey::new(source_chain, token_chain, *token_address),
+        &BalanceAccountKey::new(source_chain, token_chain, *token_address),
         GlobalAccountantError::InvalidAccountPda,
     )?;
     balance::init_if_needed(
@@ -48,7 +48,7 @@ pub fn apply_transfer<'info>(
     let dst_bump = pda::check_or(
         program_id,
         dest_account,
-        &BalanceKey::new(recipient_chain, token_chain, *token_address),
+        &BalanceAccountKey::new(recipient_chain, token_chain, *token_address),
         GlobalAccountantError::InvalidAccountPda,
     )?;
 

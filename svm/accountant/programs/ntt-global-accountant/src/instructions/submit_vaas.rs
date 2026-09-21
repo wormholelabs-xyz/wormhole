@@ -13,7 +13,7 @@ use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
     parse_ntt_transfer, split_body, GlobalAccountantError, NoReplayNamespace, SubmitVaasIxData,
-    TransceiverHubLayout, TransceiverKey, VaaBodyHeader,
+    TransceiverHubKey, TransceiverHubLayout, VaaBodyHeader,
 };
 use crate::err;
 use crate::instructions::{ntt_transfer, sender};
@@ -75,7 +75,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     let transfer = parse_ntt_transfer(message.payload).map_err(err)?;
 
     // SECURITY: a signed transfer from a transceiver with no hub must not move balances.
-    let sender_key = TransceiverKey::new(chain, message.sender);
+    let sender_key = TransceiverHubKey::new(chain, message.sender);
     pda::check(program_id, hub_pda, &sender_key)?;
     let hub = pda::read_if_initialised::<TransceiverHubLayout>(program_id, hub_pda)?
         .ok_or_else(|| err(GlobalAccountantError::MissingTransceiverHub))?

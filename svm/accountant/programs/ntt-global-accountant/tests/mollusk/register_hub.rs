@@ -2,7 +2,7 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::pda;
 use global_accountant_definitions::{
-    GlobalAccountantError, ManagerMode, TransceiverHubLayout, TransceiverKey, VaaBodyHeader,
+    GlobalAccountantError, ManagerMode, TransceiverHubKey, TransceiverHubLayout, VaaBodyHeader,
     MAX_NTT_PAYLOAD_LEN,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
@@ -46,7 +46,7 @@ impl Hub {
             vaa: SignedVaa::new(body),
             sequence,
             relayer_registration_pda: chain_registration::derive_pda(&program_id(), ETHEREUM).0,
-            hub_pda: pda::derive(&program_id(), &TransceiverKey::new(ETHEREUM, SPOKE)).0,
+            hub_pda: pda::derive(&program_id(), &TransceiverHubKey::new(ETHEREUM, SPOKE)).0,
             noreplay_bucket: derive_bucket_pda(
                 &noreplay_authority_pda(&program_id()),
                 ETHEREUM,
@@ -102,8 +102,8 @@ fn assert_self_hub_created(result: &InstructionResult, hub: &Hub) {
     assert_eq!(
         *bytemuck::from_bytes::<TransceiverHubLayout>(&account.data),
         TransceiverHubLayout::new(
-            TransceiverKey::new(ETHEREUM, SPOKE),
-            TransceiverKey::new(ETHEREUM, SPOKE),
+            TransceiverHubKey::new(ETHEREUM, SPOKE),
+            TransceiverHubKey::new(ETHEREUM, SPOKE),
         ),
         "hub points at itself"
     );
@@ -145,8 +145,8 @@ fn relayed_locking_info_registers_the_inner_sender_as_hub() {
 fn rejects() {
     let mollusk = mollusk();
     let existing = hub_account(&TransceiverHubLayout::new(
-        TransceiverKey::new(ETHEREUM, SPOKE),
-        TransceiverKey::new(ETHEREUM, SPOKE),
+        TransceiverHubKey::new(ETHEREUM, SPOKE),
+        TransceiverHubKey::new(ETHEREUM, SPOKE),
     ));
     let mut short = direct_body(ETHEREUM, SPOKE, 10, &hub_payload(ManagerMode::Locking));
     short.pop();
