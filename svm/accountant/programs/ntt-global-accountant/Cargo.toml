@@ -25,11 +25,16 @@ anchor-lang.workspace = true
 borsh.workspace = true
 global-accountant-definitions.workspace = true
 
+[[bench]]
+name = "compute_units"
+harness = false
+
 [dev-dependencies]
 accountant-test-fixtures.workspace = true
 accountant-test-harness.workspace = true
 bytemuck.workspace = true
 mollusk-svm.workspace = true
+mollusk-svm-bencher.workspace = true
 serde_json.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true
