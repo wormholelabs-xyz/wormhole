@@ -59,23 +59,29 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = VaaBodyHeader::split(body_bytes).map_err(err)?;
-    let chain = header.emitter_chain();
-    let emitter = header.emitter_address;
-    let sequence = header.sequence();
+    let vaa_chain = header.emitter_chain();
+    let vaa_emitter = header.emitter_address;
+    let vaa_sequence = header.sequence();
 
-    noreplay::reject_if_marked(noreplay_bucket, program_id, chain, &emitter, sequence)?;
+    noreplay::reject_if_marked(
+        noreplay_bucket,
+        program_id,
+        vaa_chain,
+        &vaa_emitter,
+        vaa_sequence,
+    )?;
 
     let message = sender::resolve(
         program_id,
         relayer_registration_pda,
-        chain,
-        &emitter,
+        vaa_chain,
+        &vaa_emitter,
         payload,
     )?;
     let transfer = parse_ntt_transfer(message.payload).map_err(err)?;
 
     // SECURITY: a signed transfer from a transceiver with no hub must not move balances.
-    let sender_key = TransceiverHubKey::new(chain, message.sender);
+    let sender_key = TransceiverHubKey::new(vaa_chain, message.sender);
     pda::check(program_id, hub_pda, &sender_key)?;
     let hub = pda::read_if_initialised::<TransceiverHubLayout>(program_id, hub_pda)?
         .ok_or_else(|| err(GlobalAccountantError::MissingTransceiverHub))?
@@ -88,11 +94,17 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         noreplay_authority,
         system_program_acc,
         program_id,
-        &NoReplayNamespace::new(chain, emitter),
-        sequence,
+        &NoReplayNamespace::new(vaa_chain, vaa_emitter),
+        vaa_sequence,
     )?;
 
-    commit_log::emit(chain, &emitter, sequence, &digest, guardian_set_index);
+    commit_log::emit(
+        vaa_chain,
+        &vaa_emitter,
+        vaa_sequence,
+        &digest,
+        guardian_set_index,
+    );
 
     ntt_transfer::apply_routed(
         program_id,
@@ -102,7 +114,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         peer_dst_pda,
         source_balance,
         dest_balance,
-        chain,
+        vaa_chain,
         message.sender,
         transfer.recipient_chain,
         transfer.amount,
