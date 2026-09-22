@@ -107,10 +107,16 @@ parses the batch and before it writes anything.
 ## Wire formats
 
 Instruction data is `discriminator(1) ‖ payload`. A payload starts with a 1-byte
-count. The parser is the only constructor, and it rejects four shapes with
-`InvalidInstructionData`: a count of 0, a length that the count does not
-explain, a pair of entries out of order, and a duplicate sort key. Sort order is
-strictly ascending on the key named below.
+count. The parser is the only constructor, and it rejects five shapes with
+`InvalidInstructionData`: a count of 0, a count above `MAX_BATCH_ENTRIES`, a
+length that the count does not explain, a pair of entries out of order, and a
+duplicate sort key. Sort order is strictly ascending on the key named below.
+
+`MAX_BATCH_ENTRIES` is 63. Each entry costs one System Program CPI, and Solana
+caps an instruction trace at 64 entries, so a larger batch would abort mid-write
+with `MaxInstructionTraceLengthExceeded`. The heap gives a lower practical
+ceiling for the wider entries; `BackfillBalance` and `BackfillModifyBalance` are
+measured at 58 entries per transaction.
 
 `BackfillBalance` entry, 68 bytes. Sort key `(chain, token_chain,
 token_address)`:
@@ -192,7 +198,11 @@ Entry, 40 bytes:
 | 8 | 32 | digest |
 
 Groups ascend strictly by `(chain, emitter)`. Sequences ascend strictly inside a
-group. A bucket holds 1024 bits: the bucket index is `sequence / 1024`, and the
+group. `MAX_BATCH_ENTRIES` does not apply here: the cost is one CPI per bucket,
+plus a second nested CPI for each bucket the NoReplay program still has to
+create, so the ceiling depends on which buckets already exist on chain. The
+bucket account list is the operator's bound; 30 buckets per transaction is
+measured to pass. A bucket holds 1024 bits: the bucket index is `sequence / 1024`, and the
 bit index is `sequence % 1024`. The handler ORs the bits of consecutive entries
 that share one bucket into one 128-byte mask. It then sends one `MarkUsedBulk`
 CPI per bucket.

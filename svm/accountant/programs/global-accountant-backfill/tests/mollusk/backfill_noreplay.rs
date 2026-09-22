@@ -154,8 +154,9 @@ fn marks_noreplay_buckets() {
     let full_bucket: Vec<Entry> = (0u64..255)
         .map(|i| entry(ETHEREUM, emitter, i, [i as u8; 32]))
         .collect();
-    // `group_count` is one wire byte too, but each bucket nests a CPI and Solana caps an
-    // instruction trace at 64 entries, so 30 groups is the practical ceiling.
+    // `MAX_BATCH_ENTRIES` does not bind this arm: the cost is one CPI per bucket plus a
+    // nested create for a new bucket, and Solana caps an instruction trace at 64 entries, so
+    // 30 groups is the practical ceiling.
     let many_groups: Vec<Entry> = (0u16..30)
         .map(|i| {
             let mut group_emitter = [0u8; 32];

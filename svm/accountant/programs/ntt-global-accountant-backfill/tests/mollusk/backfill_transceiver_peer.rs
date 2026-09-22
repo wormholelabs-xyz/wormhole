@@ -7,6 +7,7 @@ use anchor_lang::error::ErrorCode as AnchorError;
 use global_accountant_definitions::ntt_global_accountant_backfill::Instruction;
 use global_accountant_definitions::{
     BackfillTransceiverPeerEntry, GlobalAccountantError, TransceiverPeerKey, TransceiverPeerLayout,
+    MAX_BATCH_ENTRIES,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -142,10 +143,10 @@ struct Case {
 #[test]
 fn writes_transceiver_peer_pdas() {
     let mollusk = mollusk();
-    // `count` is one wire byte (255 max), but the 64-entry instruction trace binds first:
-    // each PDA creation is one System Program CPI. Measured by binary search: 63 entries
-    // pass, 64 raises `MaxInstructionTraceLengthExceeded`.
-    let trace_bound: Vec<BackfillTransceiverPeerEntry> = (0u16..63)
+    // `MAX_BATCH_ENTRIES` is the wire ceiling: each PDA creation is one System Program CPI
+    // and Solana caps an instruction trace at 64 entries. 64 entries now fail in the parser
+    // with `InvalidInstructionData`, ahead of the trace limit.
+    let trace_bound: Vec<BackfillTransceiverPeerEntry> = (0u16..MAX_BATCH_ENTRIES as u16)
         .map(|i| {
             let mut address = [0u8; 32];
             address[30..].copy_from_slice(&i.to_be_bytes());
@@ -172,7 +173,7 @@ fn writes_transceiver_peer_pdas() {
                 wire::transceiver_peer_entry(SOLANA, HUB, POLYGON, OTHER),
             ],
         ),
-        ("63 entries, the instruction-trace bound", trace_bound),
+        ("MAX_BATCH_ENTRIES entries, the wire bound", trace_bound),
     ];
 
     for (label, entries) in cases {
