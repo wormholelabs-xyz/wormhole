@@ -47,6 +47,7 @@ solana-signature = "=3.4.1"
 serde_json.workspace = true
 # `Rent::default().minimum_balance`, to pin each written PDA at the rent-exempt minimum.
 solana-rent = "=3.1.0"
+solana-packet.workspace = true
 # Bounded-concurrency sends in the at-scale cost probe. Already in the lock graph
 # via `solana-client`.
 tokio = { version = "=1.52.3", features = ["rt-multi-thread", "sync"] }

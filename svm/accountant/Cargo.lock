@@ -2278,6 +2278,7 @@ dependencies = [
  "solana-commitment-config",
  "solana-instruction 3.4.0",
  "solana-keypair",
+ "solana-packet 4.1.0",
  "solana-pubkey 4.2.0",
  "solana-rent 3.1.0",
  "solana-signature",
