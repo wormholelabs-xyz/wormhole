@@ -12,6 +12,7 @@ use global_accountant_definitions::{
     AccountantDigestLog, GlobalAccountantError, ACCOUNTANT_DIGEST_LOG_TAG,
 };
 use solana_account::Account;
+use solana_client::client_error::ClientError;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcTransactionConfig, UiTransactionEncoding};
 use solana_client::rpc_request::RpcRequest;
@@ -452,16 +453,21 @@ pub fn fund(rpc: &RpcClient, key: &Pubkey, lamports: u64) {
 ///
 /// Panics with `label` when the transaction fails preflight or execution.
 pub fn send(rpc: &RpcClient, label: &str, ixs: &[Instruction], signers: &[&Keypair]) -> Signature {
-    let payer = signers.first().expect("at least one signer").pubkey();
-    let blockhash = rpc
-        .get_latest_blockhash()
-        .unwrap_or_else(|e| panic!("{label} blockhash: {e}"));
-    let tx = Transaction::new_signed_with_payer(ixs, Some(&payer), signers, blockhash);
-    let sig = rpc
-        .send_and_confirm_transaction(&tx)
-        .unwrap_or_else(|e| panic!("{label} send_and_confirm: {e}"));
+    let sig = try_send(rpc, ixs, signers).unwrap_or_else(|e| panic!("{label} send: {e}"));
     eprintln!("[surfpool] {label} tx={sig}");
     sig
+}
+
+/// [`send`] for callers that tally failures instead of stopping at the first one.
+pub fn try_send(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    signers: &[&Keypair],
+) -> Result<Signature, ClientError> {
+    let payer = signers.first().expect("at least one signer").pubkey();
+    let blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(ixs, Some(&payer), signers, blockhash);
+    rpc.send_and_confirm_transaction(&tx)
 }
 
 /// Send `ixs` and require the accountant to reject with `expected`.
@@ -496,26 +502,39 @@ pub fn send_expect_error(
     );
 }
 
-/// Assert that transaction `sig` emitted exactly one accountant commit-log
-/// record with the expected fields.
+/// Every accountant commit-log record emitted by transaction `sig`, in log order.
 ///
 /// Polls `getTransaction` for up to 5 s, because surfpool indexes a confirmed
-/// transaction a little after confirmation. Then scans the log messages for
+/// transaction a little after confirmation. Scans the log messages for
 /// `Program data: <base64>` lines whose decoded bytes start with
-/// `ACCOUNTANT_DIGEST_LOG_TAG`. The scan ignores other `Program data` lines.
-/// The count must equal 1, so a duplicate commit and a missing commit both
-/// fail.
-pub fn assert_canonical_log_in_tx(
-    rpc: &RpcClient,
-    sig: &Signature,
-    expected_chain: u16,
-    expected_emitter: &[u8; 32],
-    expected_sequence: u64,
-    expected_digest: &[u8; 32],
-    expected_guardian_set_index: u32,
-) {
+/// `ACCOUNTANT_DIGEST_LOG_TAG`; other `Program data` lines are skipped. A
+/// tagged payload of the wrong length panics.
+pub fn accdgst_logs_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<AccountantDigestLog> {
     use base64::Engine;
 
+    let mut entries = Vec::new();
+    for line in log_messages_in_tx(rpc, sig) {
+        let Some(b64) = line.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+            continue;
+        };
+        if bytes.len() < 8 || bytes[..8] != ACCOUNTANT_DIGEST_LOG_TAG {
+            continue;
+        }
+        let entry = AccountantDigestLog::from_bytes(&bytes)
+            .unwrap_or_else(|| panic!("commit-log payload malformed: {} bytes", bytes.len()));
+        entries.push(*entry);
+    }
+    entries
+}
+
+/// `meta.logMessages` of transaction `sig`, polled until surfpool indexes it.
+///
+/// Panics when the transaction stays unindexed past `TX_INDEX_TIMEOUT`, or when
+/// the response carries no meta or no log messages.
+fn log_messages_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<String> {
     let config = RpcTransactionConfig {
         encoding: Some(UiTransactionEncoding::Json),
         commitment: Some(CommitmentConfig::confirmed()),
@@ -537,32 +556,34 @@ pub fn assert_canonical_log_in_tx(
         .meta
         .unwrap_or_else(|| panic!("getTransaction {sig} returned no meta"));
     let logs: Option<Vec<String>> = meta.log_messages.into();
-    let logs = logs.unwrap_or_else(|| panic!("getTransaction {sig} returned no logMessages"));
+    logs.unwrap_or_else(|| panic!("getTransaction {sig} returned no logMessages"))
+}
 
-    let mut matched = 0usize;
-    for line in &logs {
-        let Some(b64) = line.strip_prefix("Program data: ") else {
-            continue;
-        };
-        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if bytes.len() < 8 || bytes[..8] != ACCOUNTANT_DIGEST_LOG_TAG {
-            continue;
-        }
-        let entry = AccountantDigestLog::from_bytes(&bytes)
-            .unwrap_or_else(|| panic!("commit-log payload malformed: {} bytes", bytes.len()));
-        assert_eq!(entry.chain(), expected_chain, "commit-log chain");
-        assert_eq!(&entry.emitter, expected_emitter, "commit-log emitter");
-        assert_eq!(entry.sequence(), expected_sequence, "commit-log sequence");
-        assert_eq!(&entry.digest, expected_digest, "commit-log digest");
-        assert_eq!(
-            entry.guardian_set_index(),
-            expected_guardian_set_index,
-            "commit-log guardian_set_index"
-        );
-        matched += 1;
-    }
-    assert_eq!(matched, 1, "exactly one canonical commit-log entry");
+/// Assert that transaction `sig` emitted exactly one accountant commit-log
+/// record with the expected fields.
+///
+/// The count must equal 1, so a duplicate commit and a missing commit both
+/// fail. Batch writers emit one record per entry; read those with
+/// [`accdgst_logs_in_tx`].
+pub fn assert_canonical_log_in_tx(
+    rpc: &RpcClient,
+    sig: &Signature,
+    expected_chain: u16,
+    expected_emitter: &[u8; 32],
+    expected_sequence: u64,
+    expected_digest: &[u8; 32],
+    expected_guardian_set_index: u32,
+) {
+    let entries = accdgst_logs_in_tx(rpc, sig);
+    assert_eq!(entries.len(), 1, "exactly one canonical commit-log entry");
+    let entry = &entries[0];
+    assert_eq!(entry.chain(), expected_chain, "commit-log chain");
+    assert_eq!(&entry.emitter, expected_emitter, "commit-log emitter");
+    assert_eq!(entry.sequence(), expected_sequence, "commit-log sequence");
+    assert_eq!(&entry.digest, expected_digest, "commit-log digest");
+    assert_eq!(
+        entry.guardian_set_index(),
+        expected_guardian_set_index,
+        "commit-log guardian_set_index"
+    );
 }
