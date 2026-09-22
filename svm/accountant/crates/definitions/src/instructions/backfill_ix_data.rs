@@ -1,6 +1,8 @@
 //! Backfill wire formats, after the 1-byte instruction discriminator. Offsets are
 //! pinned by the `const _` block below; these tables are orientation only.
 //!
+//! Every `count`-prefixed batch carries 1 to [`MAX_BATCH_ENTRIES`] entries.
+//!
 //! `BackfillBalanceEntry` (68 bytes):
 //!
 //! | offset | size | field         |
@@ -84,6 +86,36 @@ use crate::pda::{TransceiverHubKey, TransceiverPeerKey};
 use crate::primitives::Uint256;
 use crate::state::{TransceiverHubLayout, TransceiverPeerLayout};
 
+/// Entry ceiling for every batch that creates one PDA per entry. Each creation is one
+/// System Program CPI, and Solana caps an instruction trace at 64 entries, so a 64-entry
+/// batch aborts mid-write with `MaxInstructionTraceLengthExceeded`. `parse` rejects above
+/// this instead, before any account is touched.
+pub const MAX_BATCH_ENTRIES: u8 = 63;
+
+/// Shared framing for the `count (u8) ‖ count × T` batches: count bounds, exact length, cast.
+/// Each batch adds its own ordering rule on top.
+fn parse_batch<T: Pod>(data: &[u8]) -> Result<&[T], GlobalAccountantError> {
+    let (&count, rest) = data
+        .split_first()
+        .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+    if count == 0 {
+        return Err(GlobalAccountantError::InvalidInstructionData);
+    }
+    if count > MAX_BATCH_ENTRIES {
+        return Err(GlobalAccountantError::InvalidInstructionData);
+    }
+    let expected_len = count as usize * core::mem::size_of::<T>();
+    if rest.len() != expected_len {
+        return Err(GlobalAccountantError::InvalidInstructionData);
+    }
+    let entries: &[T] = bytemuck::try_cast_slice(rest)
+        .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
+    if entries.len() != count as usize {
+        return Err(GlobalAccountantError::InvalidInstructionData);
+    }
+    Ok(entries)
+}
+
 /// `BackfillBalance` entry (68 bytes). Big-endian, as in the wormchain snapshot row.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
@@ -118,8 +150,8 @@ impl BackfillBalanceEntry {
         Uint256::from_be_bytes(self.balance)
     }
 
-    /// PDA seed key, and the batch sort key.
-    pub fn key(&self) -> (u16, u16, [u8; 32]) {
+    /// Batch sort key, and the PDA seed tuple.
+    pub fn sort_key(&self) -> (u16, u16, [u8; 32]) {
         (self.chain(), self.token_chain(), self.token_address)
     }
 }
@@ -385,31 +417,17 @@ pub struct BalanceBatch<'a>(&'a [BackfillBalanceEntry]);
 impl<'a> BalanceBatch<'a> {
     /// Wire: `count (u8) ‖ count × BackfillBalanceEntry`.
     pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
-        let (&count, rest) = data
-            .split_first()
-            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-        if count == 0 {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let expected_len = count as usize * BackfillBalanceEntry::LEN;
-        if rest.len() != expected_len {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let entries: &[BackfillBalanceEntry] = bytemuck::try_cast_slice(rest)
-            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
-        if entries.len() != count as usize {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
+        let entries: &[BackfillBalanceEntry] = parse_batch(data)?;
 
-        let mut prev_key: Option<(u16, u16, [u8; 32])> = None;
+        let mut previous_sort_key: Option<(u16, u16, [u8; 32])> = None;
         for entry in entries {
-            let cur_key = entry.key();
-            if let Some(prev) = prev_key {
-                if cur_key <= prev {
+            let sort_key = entry.sort_key();
+            if let Some(previous) = previous_sort_key {
+                if sort_key <= previous {
                     return Err(GlobalAccountantError::InvalidInstructionData);
                 }
             }
-            prev_key = Some(cur_key);
+            previous_sort_key = Some(sort_key);
         }
 
         Ok(Self(entries))
@@ -426,31 +444,17 @@ pub struct ModifyBalanceBatch<'a>(&'a [BackfillModifyBalanceEntry]);
 impl<'a> ModifyBalanceBatch<'a> {
     /// Wire: `count (u8) ‖ count × BackfillModifyBalanceEntry`.
     pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
-        let (&count, rest) = data
-            .split_first()
-            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-        if count == 0 {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let expected_len = count as usize * BackfillModifyBalanceEntry::LEN;
-        if rest.len() != expected_len {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let entries: &[BackfillModifyBalanceEntry] = bytemuck::try_cast_slice(rest)
-            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
-        if entries.len() != count as usize {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
+        let entries: &[BackfillModifyBalanceEntry] = parse_batch(data)?;
 
-        let mut prev_sequence: Option<u64> = None;
+        let mut previous_sort_key: Option<u64> = None;
         for entry in entries {
-            let sequence = entry.sequence();
-            if let Some(prev) = prev_sequence {
-                if sequence <= prev {
+            let sort_key = entry.sequence();
+            if let Some(previous) = previous_sort_key {
+                if sort_key <= previous {
                     return Err(GlobalAccountantError::InvalidInstructionData);
                 }
             }
-            prev_sequence = Some(sequence);
+            previous_sort_key = Some(sort_key);
         }
 
         Ok(Self(entries))
@@ -467,31 +471,17 @@ pub struct ChainRegistrationBatch<'a>(&'a [BackfillChainRegistrationEntry]);
 impl<'a> ChainRegistrationBatch<'a> {
     /// Wire: `count (u8) ‖ count × BackfillChainRegistrationEntry`.
     pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
-        let (&count, rest) = data
-            .split_first()
-            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-        if count == 0 {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let expected_len = count as usize * BackfillChainRegistrationEntry::LEN;
-        if rest.len() != expected_len {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let entries: &[BackfillChainRegistrationEntry] = bytemuck::try_cast_slice(rest)
-            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
-        if entries.len() != count as usize {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
+        let entries: &[BackfillChainRegistrationEntry] = parse_batch(data)?;
 
-        let mut prev_chain: Option<u16> = None;
+        let mut previous_sort_key: Option<u16> = None;
         for entry in entries {
-            let chain = entry.chain();
-            if let Some(prev) = prev_chain {
-                if chain <= prev {
+            let sort_key = entry.chain();
+            if let Some(previous) = previous_sort_key {
+                if sort_key <= previous {
                     return Err(GlobalAccountantError::InvalidInstructionData);
                 }
             }
-            prev_chain = Some(chain);
+            previous_sort_key = Some(sort_key);
         }
 
         Ok(Self(entries))
@@ -509,31 +499,17 @@ pub struct TransceiverHubBatch<'a>(&'a [BackfillTransceiverHubEntry]);
 impl<'a> TransceiverHubBatch<'a> {
     /// Wire: `count (u8) ‖ count × BackfillTransceiverHubEntry`.
     pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
-        let (&count, rest) = data
-            .split_first()
-            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-        if count == 0 {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let expected_len = count as usize * BackfillTransceiverHubEntry::LEN;
-        if rest.len() != expected_len {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let entries: &[BackfillTransceiverHubEntry] = bytemuck::try_cast_slice(rest)
-            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
-        if entries.len() != count as usize {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
+        let entries: &[BackfillTransceiverHubEntry] = parse_batch(data)?;
 
-        let mut prev_key: Option<(u16, [u8; 32])> = None;
+        let mut previous_sort_key: Option<(u16, [u8; 32])> = None;
         for entry in entries {
-            let key = (entry.chain(), entry.address);
-            if let Some(prev) = prev_key {
-                if key <= prev {
+            let sort_key = (entry.chain(), entry.address);
+            if let Some(previous) = previous_sort_key {
+                if sort_key <= previous {
                     return Err(GlobalAccountantError::InvalidInstructionData);
                 }
             }
-            prev_key = Some(key);
+            previous_sort_key = Some(sort_key);
         }
 
         Ok(Self(entries))
@@ -551,35 +527,21 @@ pub struct TransceiverPeerBatch<'a>(&'a [BackfillTransceiverPeerEntry]);
 impl<'a> TransceiverPeerBatch<'a> {
     /// Wire: `count (u8) ‖ count × BackfillTransceiverPeerEntry`.
     pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
-        let (&count, rest) = data
-            .split_first()
-            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-        if count == 0 {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let expected_len = count as usize * BackfillTransceiverPeerEntry::LEN;
-        if rest.len() != expected_len {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
-        let entries: &[BackfillTransceiverPeerEntry] = bytemuck::try_cast_slice(rest)
-            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
-        if entries.len() != count as usize {
-            return Err(GlobalAccountantError::InvalidInstructionData);
-        }
+        let entries: &[BackfillTransceiverPeerEntry] = parse_batch(data)?;
 
-        let mut prev_key: Option<(u16, [u8; 32], u16)> = None;
+        let mut previous_sort_key: Option<(u16, [u8; 32], u16)> = None;
         for entry in entries {
             // `register_peer` rejects a peer on the sender's own chain.
             if entry.chain() == entry.dest_chain() {
                 return Err(GlobalAccountantError::SameChainPeer);
             }
-            let key = (entry.chain(), entry.address, entry.dest_chain());
-            if let Some(prev) = prev_key {
-                if key <= prev {
+            let sort_key = (entry.chain(), entry.address, entry.dest_chain());
+            if let Some(previous) = previous_sort_key {
+                if sort_key <= previous {
                     return Err(GlobalAccountantError::InvalidInstructionData);
                 }
             }
-            prev_key = Some(key);
+            previous_sort_key = Some(sort_key);
         }
 
         Ok(Self(entries))
@@ -592,6 +554,14 @@ impl<'a> TransceiverPeerBatch<'a> {
 
 /// NoReplay groups, strictly ascending by `(chain, emitter)`, each group non-empty,
 /// each group's sequences strictly ascending. `parse` is the only constructor.
+///
+/// The instruction-trace budget binds on buckets here, not entries: the handler sends one
+/// `MarkUsedBulk` CPI per unique `(chain, emitter, sequence / NOREPLAY_BITS_PER_BUCKET)`, and
+/// a bucket the NoReplay program has to create costs a second, nested CPI. The trace cost of
+/// a given batch therefore depends on which bucket accounts already exist on chain, so
+/// [`MAX_BATCH_ENTRIES`] has no counterpart here. The caller instead passes one bucket
+/// account per bucket and `backfill_noreplay` requires the two counts to match, which puts
+/// the ceiling in the transaction's own account list.
 pub struct NoReplayBatch<'a> {
     body: &'a [u8],
     group_count: u8,
@@ -750,14 +720,14 @@ mod tests {
             balance_entry(1, 2, 0xAA, 200),
             balance_entry(2, 1, 0xAA, 300),
         ];
-        let max_count: std::vec::Vec<BackfillBalanceEntry> = (0..255u16)
+        let max_count: std::vec::Vec<BackfillBalanceEntry> = (0..MAX_BATCH_ENTRIES as u16)
             .map(|i| balance_entry(1, i, 0, i as u128))
             .collect();
 
         let cases: [(&str, std::vec::Vec<BackfillBalanceEntry>); 3] = [
             ("one entry", one.to_vec()),
             ("several entries", several.to_vec()),
-            ("max u8 count", max_count),
+            ("MAX_BATCH_ENTRIES entries", max_count),
         ];
         for (name, entries) in cases {
             let data = encode_balance_batch(&entries);
@@ -783,7 +753,11 @@ mod tests {
             balance_entry(1, 1, 0xAA, 200),
         ];
 
-        let cases: [(&str, std::vec::Vec<u8>); 8] = [
+        let over_bound: std::vec::Vec<BackfillBalanceEntry> = (0..MAX_BATCH_ENTRIES as u16 + 1)
+            .map(|i| balance_entry(1, i, 0, i as u128))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<u8>); 9] = [
             ("empty data", std::vec::Vec::new()),
             ("zero count", std::vec![0u8]),
             ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
@@ -794,6 +768,10 @@ mod tests {
             ),
             ("duplicate key", encode_balance_batch(&dup_entries)),
             ("descending key", encode_balance_batch(&desc_entries)),
+            (
+                "one entry above MAX_BATCH_ENTRIES",
+                encode_balance_batch(&over_bound),
+            ),
             ("count claims more entries than present", {
                 let mut d = encode_balance_batch(&ok_entries);
                 d[0] = 3;
@@ -1003,14 +981,14 @@ mod tests {
             modify_balance_entry(1, 104, 5_000),
             modify_balance_entry(2, 105, 6_000),
         ];
-        let max_count: std::vec::Vec<BackfillModifyBalanceEntry> = (0..255u64)
+        let max_count: std::vec::Vec<BackfillModifyBalanceEntry> = (0..MAX_BATCH_ENTRIES as u64)
             .map(|i| modify_balance_entry(1, i, i as u128))
             .collect();
 
         let cases: [(&str, std::vec::Vec<BackfillModifyBalanceEntry>); 3] = [
             ("one entry", one.to_vec()),
             ("six entries", several.to_vec()),
-            ("max u8 count", max_count),
+            ("MAX_BATCH_ENTRIES entries", max_count),
         ];
         for (name, entries) in cases {
             let data = encode_modify_balance_batch(&entries);
@@ -1037,7 +1015,12 @@ mod tests {
             modify_balance_entry(2, 100, 2_000),
         ];
 
-        let cases: [(&str, std::vec::Vec<u8>); 8] = [
+        let over_bound: std::vec::Vec<BackfillModifyBalanceEntry> = (0..MAX_BATCH_ENTRIES as u64
+            + 1)
+            .map(|i| modify_balance_entry(1, i, i as u128))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<u8>); 9] = [
             ("empty data", std::vec::Vec::new()),
             ("zero count", std::vec![0u8]),
             ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
@@ -1053,6 +1036,10 @@ mod tests {
             (
                 "descending sequence",
                 encode_modify_balance_batch(&desc_entries),
+            ),
+            (
+                "one entry above MAX_BATCH_ENTRIES",
+                encode_modify_balance_batch(&over_bound),
             ),
             ("count claims more entries than present", {
                 let mut d = encode_modify_balance_batch(&ok_entries);
@@ -1105,14 +1092,15 @@ mod tests {
             chain_registration_entry(4, 100),
             chain_registration_entry(5, 200),
         ];
-        let max_count: std::vec::Vec<BackfillChainRegistrationEntry> = (0..255u16)
+        let max_count: std::vec::Vec<BackfillChainRegistrationEntry> = (0..MAX_BATCH_ENTRIES
+            as u16)
             .map(|i| chain_registration_entry(i + 1, i as u64))
             .collect();
 
         let cases: [(&str, std::vec::Vec<BackfillChainRegistrationEntry>); 3] = [
             ("one entry", one.to_vec()),
             ("several entries, sequences unordered", several.to_vec()),
-            ("max u8 count", max_count),
+            ("MAX_BATCH_ENTRIES entries", max_count),
         ];
         for (name, entries) in cases {
             let data = encode_chain_registration_batch(&entries);
@@ -1139,7 +1127,12 @@ mod tests {
             chain_registration_entry(2, 101),
         ];
 
-        let cases: [(&str, std::vec::Vec<u8>); 8] = [
+        let over_bound: std::vec::Vec<BackfillChainRegistrationEntry> =
+            (0..MAX_BATCH_ENTRIES as u16 + 1)
+                .map(|i| chain_registration_entry(i + 1, i as u64))
+                .collect();
+
+        let cases: [(&str, std::vec::Vec<u8>); 9] = [
             ("empty data", std::vec::Vec::new()),
             ("zero count", std::vec![0u8]),
             ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
@@ -1155,6 +1148,10 @@ mod tests {
             (
                 "descending chain",
                 encode_chain_registration_batch(&desc_entries),
+            ),
+            (
+                "one entry above MAX_BATCH_ENTRIES",
+                encode_chain_registration_batch(&over_bound),
             ),
             ("count claims more entries than present", {
                 let mut d = encode_chain_registration_batch(&ok_entries);
@@ -1215,7 +1212,7 @@ mod tests {
             transceiver_hub_entry(2, 0x01, 2, 0x01),
             transceiver_hub_entry(2, 0x02, 2, 0x01),
         ];
-        let max_count: std::vec::Vec<BackfillTransceiverHubEntry> = (0..255u16)
+        let max_count: std::vec::Vec<BackfillTransceiverHubEntry> = (0..MAX_BATCH_ENTRIES as u16)
             .map(|i| transceiver_hub_entry(i + 1, 0x01, 1, 0x7B))
             .collect();
 
@@ -1226,7 +1223,7 @@ mod tests {
                 "one chain, ascending addresses",
                 same_chain_ascending_address.to_vec(),
             ),
-            ("max u8 count", max_count),
+            ("MAX_BATCH_ENTRIES entries", max_count),
         ];
         for (name, entries) in cases {
             let data = encode_transceiver_hub_batch(&entries);
@@ -1257,7 +1254,12 @@ mod tests {
             transceiver_hub_entry(2, 0x11, 1, 0x7B),
         ];
 
-        let cases: [(&str, std::vec::Vec<u8>); 9] = [
+        let over_bound: std::vec::Vec<BackfillTransceiverHubEntry> = (0..MAX_BATCH_ENTRIES as u16
+            + 1)
+            .map(|i| transceiver_hub_entry(i + 1, 0x01, 1, 0x7B))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<u8>); 10] = [
             ("empty data", std::vec::Vec::new()),
             ("zero count", std::vec![0u8]),
             ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
@@ -1265,6 +1267,10 @@ mod tests {
             (
                 "trailing bytes after exact entries",
                 [ok_data.as_slice(), &[0xFFu8; 3]].concat(),
+            ),
+            (
+                "one entry above MAX_BATCH_ENTRIES",
+                encode_transceiver_hub_batch(&over_bound),
             ),
             (
                 "duplicate (chain, address)",
@@ -1351,7 +1357,7 @@ mod tests {
             transceiver_peer_entry(1, 0x7B, 2, 0x7A),
             transceiver_peer_entry(1, 0x7B, 5, 0x7C),
         ];
-        let max_count: std::vec::Vec<BackfillTransceiverPeerEntry> = (0..255u16)
+        let max_count: std::vec::Vec<BackfillTransceiverPeerEntry> = (0..MAX_BATCH_ENTRIES as u16)
             .map(|i| transceiver_peer_entry(i + 2, 0x01, 1, 0x7B))
             .collect();
 
@@ -1362,7 +1368,7 @@ mod tests {
                 "one transceiver, ascending dest chains",
                 same_address_ascending_dest.to_vec(),
             ),
-            ("max u8 count", max_count),
+            ("MAX_BATCH_ENTRIES entries", max_count),
         ];
         for (name, entries) in cases {
             let data = encode_transceiver_peer_batch(&entries);
@@ -1397,7 +1403,12 @@ mod tests {
             transceiver_peer_entry(1, 0x7B, 2, 0x7A),
         ];
 
-        let cases: [(&str, std::vec::Vec<u8>); 10] = [
+        let over_bound: std::vec::Vec<BackfillTransceiverPeerEntry> = (0..MAX_BATCH_ENTRIES as u16
+            + 1)
+            .map(|i| transceiver_peer_entry(i + 2, 0x01, 1, 0x7B))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<u8>); 11] = [
             ("empty data", std::vec::Vec::new()),
             ("zero count", std::vec![0u8]),
             ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
@@ -1405,6 +1416,10 @@ mod tests {
             (
                 "trailing bytes after exact entries",
                 [ok_data.as_slice(), &[0xFFu8; 3]].concat(),
+            ),
+            (
+                "one entry above MAX_BATCH_ENTRIES",
+                encode_transceiver_peer_batch(&over_bound),
             ),
             (
                 "duplicate (chain, address, dest_chain)",

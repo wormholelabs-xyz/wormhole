@@ -264,7 +264,7 @@ fn backfilled_state_settles_mainnet_transfers_through_submit_vaas() {
                 .filter(|(_, debited)| *debited)
                 .map(|(on_chain, _)| wire::balance_entry(on_chain, hub.0, hub.1, v.expected_amount))
                 .collect();
-        balance_entries.sort_by_key(|entry| entry.key());
+        balance_entries.sort_by_key(|entry| entry.sort_key());
         let balance_pdas: Vec<Pubkey> = balance_entries
             .iter()
             .map(|entry| {

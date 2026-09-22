@@ -173,8 +173,8 @@ fn surfpool_cost_probe() {
     // Both wire formats demand strictly ascending keys.
     transfers.sort_by_key(|e| (e.chain, e.emitter, e.sequence));
     transfers.dedup_by_key(|e| (e.chain, e.emitter, e.sequence));
-    accounts.sort_by_key(|e| e.key());
-    accounts.dedup_by_key(|e| e.key());
+    accounts.sort_by_key(|e| e.sort_key());
+    accounts.dedup_by_key(|e| e.sort_key());
 
     let guard = start_surfpool(SurfpoolOptions::offline("ga-backfill-cost-probe"));
     let rpc = guard.rpc_client();

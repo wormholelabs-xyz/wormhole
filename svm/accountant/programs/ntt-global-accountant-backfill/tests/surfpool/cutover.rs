@@ -188,7 +188,7 @@ fn surfpool_ntt_cutover_rehearsal() {
     .map(|(on_chain, _)| wire::balance_entry(on_chain, hub.0, hub.1, settled.expected_amount))
     .collect();
     assert!(!balance_entries.is_empty(), "a funded side");
-    balance_entries.sort_by_key(|entry| entry.key());
+    balance_entries.sort_by_key(|entry| entry.sort_key());
     let balance_pdas: Vec<Pubkey> = balance_entries
         .iter()
         .map(|entry| {
