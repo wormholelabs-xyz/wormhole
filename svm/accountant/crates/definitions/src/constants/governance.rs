@@ -14,12 +14,12 @@ pub const SOLANA_CHAIN_ID: u16 = 1;
 /// Wormhole chain ID for Wormchain, home of the retiring cosmwasm accountant.
 pub const WORMCHAIN_CHAIN_ID: u16 = 3104;
 
-/// `RegisterChain` target chains accepted during the wormchain -> Solana migration window.
-/// Drop `WORMCHAIN_CHAIN_ID` at the post-cutover upgrade.
+/// `RegisterChain` target chains accepted during the wormchain -> Solana migration window:
+/// `0` (Any), Solana, Wormchain. Post-cutover the list becomes `[0, SOLANA_CHAIN_ID]`.
 pub const ACCEPTED_REGISTER_CHAIN_TARGETS: &[u16] = &[0, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID];
 
-/// `ModifyBalance` target chains accepted during the wormchain -> Solana migration window.
-/// Drop `WORMCHAIN_CHAIN_ID` at the post-cutover upgrade.
+/// `ModifyBalance` target chains accepted during the wormchain -> Solana migration window:
+/// Solana, Wormchain. Post-cutover the list becomes `[SOLANA_CHAIN_ID]`.
 pub const ACCEPTED_MODIFY_BALANCE_TARGETS: &[u16] = &[SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID];
 
 /// Governance module identifier: an ASCII name right-aligned in 32 zero-padded bytes,

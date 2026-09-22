@@ -5,7 +5,10 @@
 //! Layering: `definitions <- operational-core <- backfill-core <- backfill program shells`.
 //! Every PDA write goes through `operational-core`, so backfilled bytes equal the bytes the
 //! operational program writes. Do not add this crate to an operational program's dependencies;
-//! its handlers write state without governance proof.
+//! its handlers write state under an operator key alone.
+//!
+//! Migration-window code: remove this crate once the cutover to the operational programs is
+//! complete.
 
 pub mod cpi;
 pub mod instructions;

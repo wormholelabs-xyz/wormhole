@@ -79,6 +79,8 @@ pub fn reject_if_marked(
 }
 
 /// Check `noreplay_authority` is this program's authority PDA; returns its bump.
+/// `accountant-backfill-core`'s bulk CPI calls this too, so the operational and backfill
+/// images sign `MarkUsed` and `MarkUsedBulk` with the same PDA.
 pub fn verify_authority(
     program_id: &Pubkey,
     noreplay_authority: &AccountInfo,
