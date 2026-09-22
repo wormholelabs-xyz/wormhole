@@ -221,8 +221,8 @@ clippy:
 
 # Each program holds a `surfpool` target, so each recipe names its package.
 
-[doc("Surfpool e2e for both operational programs against fresh surfpool instances.")]
-e2e: build-devnet
+[doc("Surfpool e2e for every program against fresh surfpool instances.")]
+e2e: build-devnet e2e-backfill e2e-ntt-backfill
     {{test_env}} cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
     {{test_env}} cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
@@ -237,6 +237,10 @@ e2e-backfill: build-devnet
 [doc("Backfill cost probes. Needs the wormchain snapshot catalogue staged.")]
 e2e-backfill-probe: build-devnet
     {{test_env}} cargo test -p global-accountant-backfill --test surfpool cost_probe -- --ignored --test-threads=1 --nocapture
+
+[doc("Surfpool e2e: the NTT backfill lifecycle.")]
+e2e-ntt-backfill: build-devnet
+    {{test_env}} cargo test -p ntt-global-accountant-backfill --test surfpool -- --ignored --test-threads=1 --skip cutover --nocapture
 
 [doc("Surfpool e2e: the NTT accountant lifecycle only.")]
 e2e-ntt: build-devnet
