@@ -205,6 +205,8 @@ impl BackfillNoReplayEntry {
 }
 
 /// `BackfillModifyBalance` entry (109 bytes). Big-endian, as in the wormchain row.
+/// `reason` is the governance payload's own 32 bytes: the ASCII text zero-left-padded, never
+/// right-padded.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct BackfillModifyBalanceEntry {

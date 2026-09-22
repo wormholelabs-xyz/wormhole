@@ -143,6 +143,10 @@ token_address)`:
 `kind` is 1 for `Add` and 2 for `Subtract`. Any other value raises
 `InvalidModificationKind`.
 
+`reason` is the audit text zero-left-padded to 32 bytes, which is how the
+governance wire carries it: a 3-byte reason occupies bytes 29 to 31 and bytes 0
+to 28 are zero. Copy the 32 bytes out of the original VAA payload.
+
 `BackfillRelayerChainRegistration` entry, 42 bytes. Sort key `chain`:
 
 | offset | size | field |
