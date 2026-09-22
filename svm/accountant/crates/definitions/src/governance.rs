@@ -88,7 +88,7 @@ impl RegisterChainPayload {
         u16::from_be_bytes(self.chain)
     }
 
-    /// Governance emitter, `module`, `RegisterChain` action, target in
+    /// Governance emitter, `module`, `RegisterChain` action, target chain in
     /// [`ACCEPTED_REGISTER_CHAIN_TARGETS`].
     ///
     /// `module` is the caller's governance module: the Token Bridge module for the WTT
@@ -154,7 +154,7 @@ impl ModifyBalancePayload {
         Uint256::from_be_bytes(self.amount)
     }
 
-    /// Governance emitter, `module`, `ModifyBalance` action, target in
+    /// Governance emitter, `module`, `ModifyBalance` action, target chain in
     /// [`ACCEPTED_MODIFY_BALANCE_TARGETS`], known `kind`. Returns the parsed kind.
     /// `module` is the calling accountant's governance module.
     pub fn validate(
@@ -442,13 +442,6 @@ mod tests {
                 Ok(ModificationKind::Add),
             ),
             (
-                "modify wormchain target accepted during migration window",
-                good,
-                ACCOUNTANT_GOVERNANCE_MODULE,
-                modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
-                Ok(ModificationKind::Add),
-            ),
-            (
                 "modify subtract",
                 good,
                 ACCOUNTANT_GOVERNANCE_MODULE,
@@ -475,6 +468,13 @@ mod tests {
                 ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.target_chain = [0; 2]),
                 Err(E::GovernanceChainMismatch),
+            ),
+            (
+                "modify wormchain target",
+                good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
+                modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
+                Ok(ModificationKind::Add),
             ),
             (
                 "modify wrong emitter chain",

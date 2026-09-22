@@ -2,10 +2,10 @@
 //! WTT, Wormhole Relayer for NTT). Writes or overwrites the `ChainRegistration` PDA. A
 //! per-sequence `RegisterChain` PDA is the replay guard.
 //!
-//! SECURITY: governance sequence numbers are assigned at random. This instruction accepts
-//! any VAA on an unused sequence and overwrites the registration unconditionally.
-//! Registration recency rests entirely on the guardian network issuing one valid
-//! `RegisterChain` VAA per registration event.
+//! SECURITY: governance sequence numbers are assigned at random, not monotonically, so this
+//! instruction accepts any VAA on an unused sequence and overwrites the registration
+//! unconditionally. Registration recency rests entirely on the guardian network issuing one
+//! valid `RegisterChain` VAA per registration event.
 //! Accepts the target chains in `ACCEPTED_REGISTER_CHAIN_TARGETS`: `0` (Any), Solana,
 //! and Wormchain for the migration window.
 

@@ -15,13 +15,11 @@ pub const SOLANA_CHAIN_ID: u16 = 1;
 pub const WORMCHAIN_CHAIN_ID: u16 = 3104;
 
 /// `RegisterChain` target chains accepted during the wormchain -> Solana migration window.
-/// Post-cutover upgrade (wormchain accountant retired): drop `WORMCHAIN_CHAIN_ID`, leaving
-/// `[0, SOLANA_CHAIN_ID]`.
+/// Drop `WORMCHAIN_CHAIN_ID` at the post-cutover upgrade.
 pub const ACCEPTED_REGISTER_CHAIN_TARGETS: &[u16] = &[0, SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID];
 
 /// `ModifyBalance` target chains accepted during the wormchain -> Solana migration window.
-/// Post-cutover upgrade (wormchain accountant retired): drop `WORMCHAIN_CHAIN_ID`, leaving
-/// `[SOLANA_CHAIN_ID]`.
+/// Drop `WORMCHAIN_CHAIN_ID` at the post-cutover upgrade.
 pub const ACCEPTED_MODIFY_BALANCE_TARGETS: &[u16] = &[SOLANA_CHAIN_ID, WORMCHAIN_CHAIN_ID];
 
 /// Governance module identifier: an ASCII name right-aligned in 32 zero-padded bytes,
