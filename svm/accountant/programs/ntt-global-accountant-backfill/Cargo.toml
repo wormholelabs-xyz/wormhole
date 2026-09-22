@@ -1,6 +1,6 @@
 [package]
 name = "ntt-global-accountant-backfill"
-description = "Wormhole NTT Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records and relayer ChainRegistration state from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
+description = "Wormhole NTT Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records, relayer ChainRegistration state and TransceiverHub entries from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
 publish = false
 
 edition.workspace = true
@@ -29,6 +29,7 @@ global-accountant-definitions.workspace = true
 
 [dev-dependencies]
 accountant-test-harness.workspace = true
+bytemuck.workspace = true
 mollusk-svm.workspace = true
 solana-account.workspace = true
 solana-instruction.workspace = true

@@ -15,6 +15,8 @@ pub enum Instruction {
     /// Write the Standard Relayer `ChainRegistration` PDA and the `RegisterChain` record PDA
     /// per registration, both under the NTT program id.
     BackfillRelayerChainRegistration = 3,
+    /// Write `TransceiverHub` PDAs from the `transceiver_to_hub` map.
+    BackfillTransceiverHub = 4,
 }
 
 impl Instruction {
@@ -24,6 +26,7 @@ impl Instruction {
             1 => Some(Self::BackfillBalance),
             2 => Some(Self::BackfillModifyBalance),
             3 => Some(Self::BackfillRelayerChainRegistration),
+            4 => Some(Self::BackfillTransceiverHub),
             _ => None,
         }
     }
@@ -35,12 +38,13 @@ mod tests {
 
     #[test]
     fn from_u8_covers_every_discriminator() {
-        let cases: [(u8, Option<Instruction>); 5] = [
+        let cases: [(u8, Option<Instruction>); 6] = [
             (0, Some(Instruction::BackfillNoReplay)),
             (1, Some(Instruction::BackfillBalance)),
             (2, Some(Instruction::BackfillModifyBalance)),
             (3, Some(Instruction::BackfillRelayerChainRegistration)),
-            (4, None),
+            (4, Some(Instruction::BackfillTransceiverHub)),
+            (5, None),
         ];
         for (value, expected) in cases {
             assert_eq!(Instruction::from_u8(value), expected, "{value}");

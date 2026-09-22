@@ -52,11 +52,25 @@
 //!
 //! `ChainRegistrationBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
 //! by `chain`.
+//!
+//! `BackfillTransceiverHubEntry` (68 bytes):
+//!
+//! | offset | size | field          |
+//! |--------|------|----------------|
+//! | 0      | 2    | chain (BE)     |
+//! | 2      | 32   | address        |
+//! | 34     | 2    | hub_chain (BE) |
+//! | 36     | 32   | hub_address    |
+//!
+//! `TransceiverHubBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
+//! by `(chain, address)`.
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
+use crate::pda::TransceiverHubKey;
 use crate::primitives::Uint256;
+use crate::state::TransceiverHubLayout;
 
 /// `BackfillBalance` entry (68 bytes). Big-endian, as in the wormchain snapshot row.
 #[repr(C)]
@@ -231,8 +245,60 @@ impl BackfillChainRegistrationEntry {
     }
 }
 
+/// `BackfillTransceiverHub` entry (68 bytes). Big-endian, as in the wormchain
+/// `transceiver_to_hub` row. A hub names itself; a spoke names the hub that
+/// `register_peer`'s adoption arm put it under.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct BackfillTransceiverHubEntry {
+    pub chain: [u8; 2],
+    pub address: [u8; 32],
+    pub hub_chain: [u8; 2],
+    pub hub_address: [u8; 32],
+}
+
+impl BackfillTransceiverHubEntry {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(chain: u16, address: [u8; 32], hub_chain: u16, hub_address: [u8; 32]) -> Self {
+        Self {
+            chain: chain.to_be_bytes(),
+            address,
+            hub_chain: hub_chain.to_be_bytes(),
+            hub_address,
+        }
+    }
+
+    pub fn chain(&self) -> u16 {
+        u16::from_be_bytes(self.chain)
+    }
+
+    pub fn hub_chain(&self) -> u16 {
+        u16::from_be_bytes(self.hub_chain)
+    }
+
+    /// PDA key of the transceiver this row is stored under.
+    pub fn key(&self) -> TransceiverHubKey {
+        TransceiverHubKey::new(self.chain(), self.address)
+    }
+
+    /// The hub this transceiver belongs to.
+    pub fn hub(&self) -> TransceiverHubKey {
+        TransceiverHubKey::new(self.hub_chain(), self.hub_address)
+    }
+
+    /// Account bytes, from the constructor `register_hub` and `register_peer` use.
+    pub fn layout(&self) -> TransceiverHubLayout {
+        TransceiverHubLayout::new(self.key(), self.hub())
+    }
+}
+
 const _: () = {
     use core::mem::offset_of;
+    assert!(BackfillTransceiverHubEntry::LEN == 68);
+    assert!(offset_of!(BackfillTransceiverHubEntry, address) == 2);
+    assert!(offset_of!(BackfillTransceiverHubEntry, hub_chain) == 34);
+    assert!(offset_of!(BackfillTransceiverHubEntry, hub_address) == 36);
     assert!(BackfillChainRegistrationEntry::LEN == 42);
     assert!(offset_of!(BackfillChainRegistrationEntry, sequence) == 2);
     assert!(offset_of!(BackfillChainRegistrationEntry, emitter) == 10);
@@ -374,6 +440,48 @@ impl<'a> ChainRegistrationBatch<'a> {
     }
 
     pub fn entries(&self) -> &'a [BackfillChainRegistrationEntry] {
+        self.0
+    }
+}
+
+/// Transceiver-to-hub rows, strictly ascending by `(chain, address)`. `parse` is the only
+/// constructor.
+pub struct TransceiverHubBatch<'a>(&'a [BackfillTransceiverHubEntry]);
+
+impl<'a> TransceiverHubBatch<'a> {
+    /// Wire: `count (u8) ‖ count × BackfillTransceiverHubEntry`.
+    pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
+        let (&count, rest) = data
+            .split_first()
+            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+        if count == 0 {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let expected_len = count as usize * BackfillTransceiverHubEntry::LEN;
+        if rest.len() != expected_len {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let entries: &[BackfillTransceiverHubEntry] = bytemuck::try_cast_slice(rest)
+            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
+        if entries.len() != count as usize {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+
+        let mut prev_key: Option<(u16, [u8; 32])> = None;
+        for entry in entries {
+            let key = (entry.chain(), entry.address);
+            if let Some(prev) = prev_key {
+                if key <= prev {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+            }
+            prev_key = Some(key);
+        }
+
+        Ok(Self(entries))
+    }
+
+    pub fn entries(&self) -> &'a [BackfillTransceiverHubEntry] {
         self.0
     }
 }
@@ -970,5 +1078,141 @@ mod tests {
         assert_eq!(batch.entries()[0].sequence(), 42);
         assert_eq!(batch.entries()[0].emitter, [0x11; 32]);
         assert_eq!(bytes.len(), BackfillChainRegistrationEntry::LEN);
+    }
+
+    fn transceiver_hub_entry(
+        chain: u16,
+        address_seed: u8,
+        hub_chain: u16,
+        hub_seed: u8,
+    ) -> BackfillTransceiverHubEntry {
+        BackfillTransceiverHubEntry::new(chain, [address_seed; 32], hub_chain, [hub_seed; 32])
+    }
+
+    fn encode_transceiver_hub_batch(entries: &[BackfillTransceiverHubEntry]) -> std::vec::Vec<u8> {
+        let mut out = std::vec![entries.len() as u8];
+        for entry in entries {
+            out.extend_from_slice(bytemuck::bytes_of(entry));
+        }
+        out
+    }
+
+    #[test]
+    fn transceiver_hub_batch_parses_positive_cases() {
+        let one = [transceiver_hub_entry(1, 0x7B, 1, 0x7B)];
+        // Hubs and spokes share one map; a spoke points at another chain's hub.
+        let several = [
+            transceiver_hub_entry(1, 0x7B, 1, 0x7B),
+            transceiver_hub_entry(2, 0x11, 1, 0x7B),
+            transceiver_hub_entry(2, 0x22, 1, 0x7B),
+            transceiver_hub_entry(5, 0x33, 1, 0x7B),
+        ];
+        let same_chain_ascending_address = [
+            transceiver_hub_entry(2, 0x01, 2, 0x01),
+            transceiver_hub_entry(2, 0x02, 2, 0x01),
+        ];
+        let max_count: std::vec::Vec<BackfillTransceiverHubEntry> = (0..255u16)
+            .map(|i| transceiver_hub_entry(i + 1, 0x01, 1, 0x7B))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<BackfillTransceiverHubEntry>); 4] = [
+            ("one self-referential hub", one.to_vec()),
+            ("hub plus spokes", several.to_vec()),
+            (
+                "one chain, ascending addresses",
+                same_chain_ascending_address.to_vec(),
+            ),
+            ("max u8 count", max_count),
+        ];
+        for (name, entries) in cases {
+            let data = encode_transceiver_hub_batch(&entries);
+            let batch =
+                TransceiverHubBatch::parse(&data).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(batch.entries(), entries.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn transceiver_hub_batch_rejects_malformed_wire() {
+        let ok_entries = [
+            transceiver_hub_entry(1, 0x7B, 1, 0x7B),
+            transceiver_hub_entry(2, 0x11, 1, 0x7B),
+        ];
+        let ok_data = encode_transceiver_hub_batch(&ok_entries);
+
+        let dup_entries = [
+            transceiver_hub_entry(2, 0x11, 1, 0x7B),
+            transceiver_hub_entry(2, 0x11, 2, 0x11),
+        ];
+        let desc_chain = [
+            transceiver_hub_entry(4, 0x11, 1, 0x7B),
+            transceiver_hub_entry(2, 0x11, 1, 0x7B),
+        ];
+        let desc_address = [
+            transceiver_hub_entry(2, 0x22, 1, 0x7B),
+            transceiver_hub_entry(2, 0x11, 1, 0x7B),
+        ];
+
+        let cases: [(&str, std::vec::Vec<u8>); 9] = [
+            ("empty data", std::vec::Vec::new()),
+            ("zero count", std::vec![0u8]),
+            ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
+            ("one byte long", [ok_data.as_slice(), &[0u8]].concat()),
+            (
+                "trailing bytes after exact entries",
+                [ok_data.as_slice(), &[0xFFu8; 3]].concat(),
+            ),
+            (
+                "duplicate (chain, address)",
+                encode_transceiver_hub_batch(&dup_entries),
+            ),
+            (
+                "descending chain",
+                encode_transceiver_hub_batch(&desc_chain),
+            ),
+            (
+                "descending address within a chain",
+                encode_transceiver_hub_batch(&desc_address),
+            ),
+            ("count claims more entries than present", {
+                let mut d = encode_transceiver_hub_batch(&ok_entries);
+                d[0] = 3;
+                d
+            }),
+        ];
+        for (name, data) in cases {
+            assert_eq!(
+                TransceiverHubBatch::parse(&data).err(),
+                Some(GlobalAccountantError::InvalidInstructionData),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn transceiver_hub_entry_round_trips_through_bytes() {
+        let entry = BackfillTransceiverHubEntry::new(2, [0x11; 32], 1, [0x7B; 32]);
+        let bytes = bytemuck::bytes_of(&entry);
+        let data = encode_transceiver_hub_batch(core::slice::from_ref(&entry));
+        let batch = TransceiverHubBatch::parse(&data).unwrap();
+        assert_eq!(batch.entries()[0], entry);
+        assert_eq!(batch.entries()[0].chain(), 2);
+        assert_eq!(batch.entries()[0].hub_chain(), 1);
+        assert_eq!(
+            batch.entries()[0].key(),
+            TransceiverHubKey::new(2, [0x11; 32])
+        );
+        assert_eq!(
+            batch.entries()[0].hub(),
+            TransceiverHubKey::new(1, [0x7B; 32])
+        );
+        assert_eq!(
+            batch.entries()[0].layout(),
+            TransceiverHubLayout::new(
+                TransceiverHubKey::new(2, [0x11; 32]),
+                TransceiverHubKey::new(1, [0x7B; 32]),
+            )
+        );
+        assert_eq!(bytes.len(), BackfillTransceiverHubEntry::LEN);
     }
 }
