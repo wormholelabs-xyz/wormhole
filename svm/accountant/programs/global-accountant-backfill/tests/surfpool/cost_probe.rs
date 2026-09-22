@@ -17,6 +17,7 @@ use global_accountant_definitions::{
     BackfillBalanceEntry, NoReplayBitmapAccount, NOREPLAY_PROGRAM_ID,
 };
 use solana_instruction::{AccountMeta, Instruction};
+use solana_packet::PACKET_DATA_SIZE;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
@@ -38,8 +39,8 @@ const FULL_MODIFICATION_COUNT: u64 = 6;
 const TRANSFER_SAMPLE: usize = 100;
 const ACCOUNT_SAMPLE: usize = 50;
 
-/// Entries per transaction. Both sit below the 1232-byte packet limit once the
-/// account metas and the instruction data are added up.
+/// Entries per transaction. Both sit below `PACKET_DATA_SIZE` once the account metas and the
+/// instruction data are added up; the builders below assert the data half.
 const TRANSFER_BATCH: usize = 10;
 const ACCOUNT_BATCH: usize = 8;
 
@@ -87,10 +88,17 @@ pub(crate) fn noreplay_ix(
         AccountMeta::new_readonly(system_program_id(), false),
     ];
     accounts.extend(bucket_metas(noreplay_authority, entries));
+    let data = wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, entries);
+    debug_assert!(
+        data.len() < PACKET_DATA_SIZE,
+        "BackfillNoReplay ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
+        data.len(),
+        PACKET_DATA_SIZE
+    );
     Instruction {
         program_id: *program_id,
         accounts,
-        data: wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, entries),
+        data,
     }
 }
 
@@ -113,10 +121,17 @@ fn balance_ix(
         .0;
         AccountMeta::new(pda, false)
     }));
+    let data = wire::encode_balance_batch(Arm::BackfillBalance as u8, entries);
+    debug_assert!(
+        data.len() < PACKET_DATA_SIZE,
+        "BackfillBalance ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
+        data.len(),
+        PACKET_DATA_SIZE
+    );
     Instruction {
         program_id: *program_id,
         accounts,
-        data: wire::encode_balance_batch(Arm::BackfillBalance as u8, entries),
+        data,
     }
 }
 

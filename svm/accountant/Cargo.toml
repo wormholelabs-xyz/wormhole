@@ -74,6 +74,9 @@ mollusk-svm-bencher = "0.12.1-agave-4.0"
 solana-account = "3.4"
 solana-instruction = "3.2"
 solana-pubkey = "4.1"
+# `PACKET_DATA_SIZE`, asserted by the cost probes' instruction builders. Pinned to the
+# version already in `Cargo.lock` via mollusk-svm.
+solana-packet = "=4.1.0"
 # Surfpool E2E tests — talk to a subprocess `surfpool start` over JSON-RPC.
 # Versions chosen to unify with mollusk's solana-* 3.x set: surfpool v1.2.1
 # reports `solana-core: 3.1.10` in `getVersion`, so the 3.1 client matches the
