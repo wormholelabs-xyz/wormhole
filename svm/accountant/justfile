@@ -9,12 +9,18 @@ export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 # External program IDs, read by `crates/definitions` via `env!` at compile
 # time. Variable names match `wormhole-svm-definitions` (`from-env`) and
 # `solana-noreplay`. A missing variable is a build error; plain `cargo` outside
-# `just` needs them exported. Values below are the test environment: mainnet
+# `just` needs every exported variable in this file set in its environment. Values below are the test environment: mainnet
 # Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay (its
 # only deployment). A release build must set all three from one network.
 export BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
 export VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
 export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+
+# This workspace's own program IDs, read by `crates/definitions` via `env!` and asserted
+# at compile time against each program's `declare_id!`. A family's backfill `.so` and
+# operational `.so` share one program account, so both carry the same address.
+export GLOBAL_ACCOUNTANT_PROGRAM_ID := "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+export NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID := "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
 
 # Default recipe: list available targets with their docstrings.
 default:
