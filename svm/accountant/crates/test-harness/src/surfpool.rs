@@ -19,20 +19,28 @@ use solana_client::rpc_request::RpcRequest;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
+use solana_loader_v3_interface::instruction::upgrade as loader_upgrade_ix;
+use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
+use crate::accounts::{
+    loader_account_data, loader_state, program_data_address, upgradeable_buffer_account,
+};
 use crate::fixtures::fixture_elf;
 use crate::guardians::{derive_guardian_set_pda, guardian_set_account, Guardian};
-use crate::ids::{core_bridge_program_id, shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::ids::{core_bridge_program_id, loader_v3_id, shim_program_id, NOREPLAY_PROGRAM_ID};
 use crate::scenario::guardian_keys;
 
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TX_INDEX_TIMEOUT: Duration = Duration::from_secs(5);
 const TX_INDEX_POLL_INTERVAL: Duration = Duration::from_millis(150);
+/// Program-data lamports floor for [`loader_upgrade`]; the loader charges rent for the
+/// resized account and spills the remainder.
+const PROGRAM_DATA_LAMPORTS: u64 = 10_000_000_000;
 
 /// Launch options for one surfpool instance.
 ///
@@ -356,6 +364,100 @@ impl ProgramImage {
             ),
         }
     }
+}
+
+/// Buffer address [`loader_upgrade`] stages the replacement image at.
+const UPGRADE_BUFFER: Pubkey = Pubkey::new_from_array([0xCBu8; 32]);
+
+/// Replace the image of the deployed program at `program_id` with `elf`, through the
+/// loader's `Upgrade`: the path `solana program upgrade` takes.
+///
+/// `authority` is made the program's upgrade authority, then signs and pays for the upgrade;
+/// fund it first. The program-data account is resized to hold `elf`, which on a cluster is
+/// fixed once at deploy time by `solana program deploy --max-len`.
+pub fn loader_upgrade(rpc: &RpcClient, program_id: &Pubkey, elf: &[u8], authority: &Keypair) {
+    let program = rpc.get_account(program_id).expect("program account");
+    assert_eq!(program.owner, loader_v3_id(), "program owner");
+    let UpgradeableLoaderState::Program {
+        programdata_address,
+    } = loader_state(&program)
+    else {
+        panic!("program account is not loader state Program");
+    };
+    assert_eq!(
+        programdata_address,
+        program_data_address(program_id),
+        "program points at the canonical program-data address"
+    );
+
+    let before = rpc
+        .get_account(&programdata_address)
+        .expect("program-data account");
+    let UpgradeableLoaderState::ProgramData {
+        slot: slot_before, ..
+    } = loader_state(&before)
+    else {
+        panic!("program-data account is not loader state ProgramData");
+    };
+    let metadata_len = UpgradeableLoaderState::size_of_programdata_metadata();
+    let mut code = before.data[metadata_len..].to_vec();
+    code.resize(code.len().max(elf.len()), 0);
+    set_account(
+        rpc,
+        &programdata_address,
+        &Account {
+            lamports: before.lamports.max(PROGRAM_DATA_LAMPORTS),
+            data: loader_account_data(
+                &UpgradeableLoaderState::ProgramData {
+                    slot: slot_before,
+                    upgrade_authority_address: Some(authority.pubkey()),
+                },
+                &code,
+            ),
+            ..before
+        },
+    );
+    set_account(
+        rpc,
+        &UPGRADE_BUFFER,
+        &upgradeable_buffer_account(&authority.pubkey(), elf),
+    );
+
+    let spill = Pubkey::new_unique();
+    send(
+        rpc,
+        "loader upgrade",
+        &[loader_upgrade_ix(
+            program_id,
+            &UPGRADE_BUFFER,
+            &authority.pubkey(),
+            &spill,
+        )],
+        &[authority],
+    );
+
+    let after = rpc
+        .get_account(&programdata_address)
+        .expect("program-data after");
+    let UpgradeableLoaderState::ProgramData {
+        slot: slot_after, ..
+    } = loader_state(&after)
+    else {
+        panic!("program-data after is not loader state ProgramData");
+    };
+    assert!(
+        slot_after > slot_before,
+        "program-data slot advances: {slot_before} -> {slot_after}"
+    );
+    assert_eq!(
+        &after.data[metadata_len..metadata_len + elf.len()],
+        elf,
+        "program-data carries the new image"
+    );
+    eprintln!(
+        "[surfpool] upgraded {program_id} to a {} byte image at slot {slot_after}",
+        elf.len()
+    );
 }
 
 /// Lowercase hex, two chars per byte. Surfpool cheat codes take program and
