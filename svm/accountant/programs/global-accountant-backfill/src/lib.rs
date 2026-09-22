@@ -14,8 +14,8 @@
 //!   prefunded PDA.
 //! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
 //!
-//! `declare_id!` pins the program to the fixed address the mollusk/surfpool fixtures deploy at
-//! (`Pubkey::new_from_array([8u8; 32])`, base58 `YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf`).
+//! `declare_id!` pins the program to the operational program's address,
+//! `GLOBAL_ACCOUNTANT_PROGRAM_ID`; the mollusk/surfpool fixtures deploy there.
 
 #![allow(unexpected_cfgs)]
 
@@ -30,10 +30,10 @@ pub use accountant_operational_core::{definitions, err, raw_ix_data::RawIxData};
 // the crate root; re-export `contexts::*` to place them there.
 pub use contexts::*;
 
-declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
+declare_id!("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
 
 const _: () = assert!(
-    definitions::is_global_accountant_program_id(&ID.to_bytes()),
+    definitions::pubkey_eq(&ID.to_bytes(), &definitions::GLOBAL_ACCOUNTANT_PROGRAM_ID),
     "declare_id! does not match GLOBAL_ACCOUNTANT_PROGRAM_ID"
 );
 

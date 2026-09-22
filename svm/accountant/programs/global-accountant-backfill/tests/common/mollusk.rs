@@ -21,10 +21,10 @@ use {
 
 use super::fixtures::{program_elf, BACKFILL_PROGRAM_NAME};
 
-/// Canonical test program id (`[8u8; 32]`), deterministic so PDAs derive to
-/// the same addresses across both test suites.
+/// The program's `declare_id!` address, so PDAs derive to the same addresses across both
+/// test suites.
 pub fn program_id() -> Pubkey {
-    Pubkey::new_from_array([8u8; 32])
+    Pubkey::new_from_array(global_accountant_backfill::ID.to_bytes())
 }
 
 /// Mollusk loaded with the backfill `.so` + the pinned `solana_noreplay.so`.

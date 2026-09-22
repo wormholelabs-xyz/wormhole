@@ -20,13 +20,20 @@ pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;
 
 use accountant_operational_core::instructions as shared;
-use definitions::{NTT_ACCOUNTANT_GOVERNANCE_MODULE, RELAYER_GOVERNANCE_MODULE};
+use definitions::{
+    pubkey_eq, NTT_ACCOUNTANT_GOVERNANCE_MODULE, NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID,
+    RELAYER_GOVERNANCE_MODULE,
+};
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
 use raw_ix_data::RawIxData;
 
 declare_id!("cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN");
+const _: () = assert!(
+    pubkey_eq(&ID.to_bytes(), &NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID),
+    "declare_id! does not match NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID"
+);
 
 /// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
 /// Field order must match the handler's account list.
