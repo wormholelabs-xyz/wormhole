@@ -23,21 +23,24 @@ export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
 export GLOBAL_ACCOUNTANT_PROGRAM_ID := "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
 export NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID := "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
 
-# Backfill operator key, read by `programs/global-accountant-backfill` via `env!` at
-# compile time. Deliberately a plain variable, not an export: the deploy build below
+# Backfill operator keys, read by the two backfill programs via `env!` at compile time,
+# one variable each. Deliberately plain variables, not exports: the deploy build below
 # has to see an empty environment when the caller sets nothing, so a deploy artifact
-# can never inherit the test key. The value is the pubkey of the deterministic test
-# keypair `Keypair::new_from_array([1u8; 32])`.
+# can never inherit a test key. The values are the pubkeys of the deterministic test
+# keypairs `Keypair::new_from_array([1u8; 32])` and `Keypair::new_from_array([2u8; 32])`.
 TEST_BACKFILL_AUTHORITY := "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9"
+TEST_NTT_BACKFILL_AUTHORITY := "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"
 
-# Prefix that puts the test authority into one command's environment.
-test_env := "BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY
+# Prefix that puts the test authorities into one command's environment.
+test_env := "BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY + \
+    " NTT_BACKFILL_AUTHORITY=" + TEST_NTT_BACKFILL_AUTHORITY
 
-# Names the deploy build requires in the caller's environment. Every one but
-# `BACKFILL_AUTHORITY` is exported above with a default, so in practice only that
-# key has to come from the caller.
+# Names the deploy build requires in the caller's environment. Every one but the two
+# backfill authorities is exported above with a default, so in practice only those
+# keys have to come from the caller.
 DEPLOY_VARS := "BRIDGE_ADDRESS VERIFY_VAA_SHIM_PROGRAM_ID NOREPLAY_PROGRAM_ID \
-    GLOBAL_ACCOUNTANT_PROGRAM_ID BACKFILL_AUTHORITY"
+    GLOBAL_ACCOUNTANT_PROGRAM_ID NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID \
+    BACKFILL_AUTHORITY NTT_BACKFILL_AUTHORITY"
 
 # Default recipe: list available targets with their docstrings.
 default:
@@ -58,7 +61,8 @@ default:
 # in `solana-client`), which do not compile for the SBF target.
 [doc("SBF build of the production-shape .so, with the test values above.")]
 build:
-    {{test_env}} cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill
+    {{test_env}} cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
+        -p ntt-global-accountant-backfill
 
 # Deploy build. The backfill authority comes from the caller's environment; a missing
 # one aborts before `cargo` runs. The five compile-time values are echoed so the
@@ -81,7 +85,8 @@ build-prod:
     for v in {{DEPLOY_VARS}}; do
         printf '  %s=%s\n' "${v}" "${!v}"
     done
-    cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill
+    cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
+        -p ntt-global-accountant-backfill
 
 # The mollusk suite CPIs into the real `solana_noreplay.so` and
 # `wormhole_verify_vaa_shim.so`, embedded by `crates/test-fixtures` with a
@@ -102,8 +107,10 @@ test: build
 # the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
 # gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the
 # intended operator pubkey before every mainnet deploy.
+# `package` selects which backfill crate hosts the check; it must be the crate the `.so`
+# was built from, since the check loads it at that program's `declare_id!` address.
 [doc("Verify a deploy-ready .so enforces a specific operator authority pubkey.")]
-verify-authority so_path pubkey:
+verify-authority so_path pubkey package="global-accountant-backfill":
     #!/usr/bin/env bash
     set -euo pipefail
     # `cargo test` runs the binary from the package directory, so `so_path` is resolved
@@ -111,7 +118,7 @@ verify-authority so_path pubkey:
     so=$(cd "$(dirname "{{so_path}}")" && pwd)/$(basename "{{so_path}}")
     [ -f "${so}" ] || { echo "ERROR: no such file: ${so}" >&2; exit 1; }
     {{test_env}} GA_VERIFY_SO="${so}" GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
-        cargo test -p global-accountant-backfill --test artifact_authority_check \
+        cargo test -p {{package}} --test artifact_authority_check \
         -- --ignored --nocapture verify_so_enforces_specific_operator_authority
 
 # SBF-target type-check. There is no upstream `cargo check-sbf`, but
@@ -140,7 +147,8 @@ check:
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
     {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant -p ntt-global-accountant -p global-accountant-backfill
+        -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
+        -p ntt-global-accountant-backfill
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
 # via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.

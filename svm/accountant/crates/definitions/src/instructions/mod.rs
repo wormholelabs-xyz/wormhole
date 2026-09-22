@@ -5,6 +5,7 @@ pub mod global_accountant;
 pub mod global_accountant_backfill;
 pub mod ix_data;
 pub mod ntt_global_accountant;
+pub mod ntt_global_accountant_backfill;
 
 pub use backfill_ix_data::*;
 pub use global_accountant::*;
