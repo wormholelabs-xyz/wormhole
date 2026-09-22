@@ -295,3 +295,9 @@ PDA.
   `just e2e-upgrade-submit ntt-global-accountant` /
   `just e2e-upgrade-stop ntt-global-accountant` — the two-step
   `upgrade_contract` end-to-end test for this program.
+
+## See also
+
+- [`ntt-global-accountant-backfill`](../ntt-global-accountant-backfill/README.md)
+  — the one-shot migration image that seeds this program's state from the
+  wormchain snapshot, and the cutover procedure.
