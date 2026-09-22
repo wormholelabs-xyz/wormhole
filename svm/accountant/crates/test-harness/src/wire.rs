@@ -4,8 +4,8 @@
 use global_accountant_definitions::{
     BackfillBalanceEntry, BackfillChainRegistrationEntry, BackfillModifyBalanceEntry,
     BackfillNoReplayEntry, BackfillNoReplayGroupHeader, BackfillTransceiverHubEntry,
-    ClosePendingIxData, DeliveryHead, DeliveryMiddle, DeliveryTail, ModifyBalanceIxData,
-    RegisterChainIxData, SubmitVaasIxData, Uint256, UpgradeContractIxData,
+    BackfillTransceiverPeerEntry, ClosePendingIxData, DeliveryHead, DeliveryMiddle, DeliveryTail,
+    ModifyBalanceIxData, RegisterChainIxData, SubmitVaasIxData, Uint256, UpgradeContractIxData,
     DELIVERY_INSTRUCTION_PAYLOAD_ID,
 };
 
@@ -157,6 +157,15 @@ pub fn transceiver_hub_entry(
     BackfillTransceiverHubEntry::new(chain, address, hub_chain, hub_address)
 }
 
+pub fn transceiver_peer_entry(
+    chain: u16,
+    address: [u8; 32],
+    dest_chain: u16,
+    peer_address: [u8; 32],
+) -> BackfillTransceiverPeerEntry {
+    BackfillTransceiverPeerEntry::new(chain, address, dest_chain, peer_address)
+}
+
 fn encode_batch<T: bytemuck::Pod>(discriminator: u8, entries: &[T]) -> Vec<u8> {
     let mut data = vec![discriminator, entries.len() as u8];
     for entry in entries {
@@ -186,6 +195,13 @@ pub fn encode_chain_registration_batch(
 pub fn encode_transceiver_hub_batch(
     discriminator: u8,
     entries: &[BackfillTransceiverHubEntry],
+) -> Vec<u8> {
+    encode_batch(discriminator, entries)
+}
+
+pub fn encode_transceiver_peer_batch(
+    discriminator: u8,
+    entries: &[BackfillTransceiverPeerEntry],
 ) -> Vec<u8> {
     encode_batch(discriminator, entries)
 }
@@ -247,7 +263,7 @@ mod tests {
     use super::*;
     use global_accountant_definitions::{
         BalanceBatch, ChainRegistrationBatch, ModifyBalanceBatch, NoReplayBatch,
-        TransceiverHubBatch,
+        TransceiverHubBatch, TransceiverPeerBatch,
     };
 
     /// Any byte: these encoders frame a batch, the discriminator names the program's arm.
@@ -298,6 +314,18 @@ mod tests {
         let data = encode_transceiver_hub_batch(DISC, &entries);
         assert_eq!(data[0], DISC);
         let batch = TransceiverHubBatch::parse(&data[1..]).unwrap();
+        assert_eq!(batch.entries(), entries.as_slice());
+    }
+
+    #[test]
+    fn transceiver_peer_batch_round_trips_through_the_parser() {
+        let entries = [
+            transceiver_peer_entry(1, [0x7B; 32], 2, [0x7A; 32]),
+            transceiver_peer_entry(2, [0x7A; 32], 1, [0x7B; 32]),
+        ];
+        let data = encode_transceiver_peer_batch(DISC, &entries);
+        assert_eq!(data[0], DISC);
+        let batch = TransceiverPeerBatch::parse(&data[1..]).unwrap();
         assert_eq!(batch.entries(), entries.as_slice());
     }
 

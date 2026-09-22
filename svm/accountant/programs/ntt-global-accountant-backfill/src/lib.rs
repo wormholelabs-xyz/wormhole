@@ -1,10 +1,10 @@
 //! Wormhole NTT Global Accountant Backfill Solana program, anchor-lang 1.1.2.
 //!
 //! One-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records,
-//! relayer `ChainRegistration` state and `TransceiverHub` entries from a wormchain
-//! `query_all_accounts` snapshot. It occupies
-//! the NTT operational program's account and is upgraded out via `solana program upgrade` once
-//! `ntt-global-accountant` takes over.
+//! relayer `ChainRegistration` state and the `TransceiverHub` and `TransceiverPeer` maps from
+//! a wormchain `query_all_accounts` snapshot. It occupies the NTT operational program's
+//! account and is upgraded out via `solana program upgrade` once `ntt-global-accountant`
+//! takes over.
 //!
 //! Every handler is shared with the WTT backfill through `accountant-backfill-core`; only the
 //! program id and the operator authority differ, so the bytes written here are the bytes the
@@ -14,7 +14,7 @@
 //!
 //! - Account discriminator is the 1-byte `AccountTag` at offset 0. Load state with
 //!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
-//! - Instruction discriminator is 1 byte (`0..=4`) through `#[instruction(discriminator = N)]`.
+//! - Instruction discriminator is 1 byte (`0..=5`) through `#[instruction(discriminator = N)]`.
 //! - PDA creation uses `CreateAccountAllowPrefund` through `pda_init`; `#[account(init)]`
 //!   fails on a prefunded PDA.
 //! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
@@ -155,6 +155,22 @@ pub mod ntt_global_accountant_backfill {
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
         backfill::backfill_transceiver_hub::process(
+            ctx.program_id,
+            &accounts,
+            &ix_data.0,
+            &NTT_BACKFILL_AUTHORITY,
+        )?;
+        Ok(())
+    }
+
+    /// See `accountant_backfill_core::instructions::backfill_transceiver_peer`.
+    #[instruction(discriminator = 5)]
+    pub fn backfill_transceiver_peer<'info>(
+        ctx: Context<'info, BackfillTransceiverPeerAccounts<'info>>,
+        ix_data: RawIxData,
+    ) -> Result<()> {
+        let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
+        backfill::backfill_transceiver_peer::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,

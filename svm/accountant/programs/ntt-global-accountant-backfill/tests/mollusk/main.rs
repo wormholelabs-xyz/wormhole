@@ -12,6 +12,7 @@ mod ntt_ix;
 
 mod authority;
 mod backfill_transceiver_hub;
+mod backfill_transceiver_peer;
 mod operational_parity;
 mod program_id;
 mod reused_handlers;
