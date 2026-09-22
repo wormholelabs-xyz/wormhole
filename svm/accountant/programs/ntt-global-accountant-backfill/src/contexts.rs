@@ -49,3 +49,13 @@ pub struct BackfillRelayerChainRegistrationAccounts<'info> {
     /// CHECK: System Program, required by `pda_init::create_pda_allow_prefund`'s CPI.
     pub system_program: UncheckedAccount<'info>,
 }
+
+/// Fixed accounts for `BackfillTransceiverHub`: 2 accounts plus one `TransceiverHub` PDA per
+/// entry in `ctx.remaining_accounts`.
+#[derive(Accounts)]
+pub struct BackfillTransceiverHubAccounts<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: System Program, required by `pda_init::create_pda_allow_prefund`'s CPI.
+    pub system_program: UncheckedAccount<'info>,
+}
