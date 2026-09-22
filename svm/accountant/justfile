@@ -170,6 +170,18 @@ e2e: build
     {{test_env}} cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
     {{test_env}} cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
+[doc("Surfpool e2e: the backfill lifecycle. The cost probes are skipped; see `e2e-backfill-probe`.")]
+e2e-backfill: build
+    {{test_env}} cargo test -p global-accountant-backfill --test surfpool -- --ignored --test-threads=1 --skip cost_probe --nocapture
+
+# Operator tooling, not a gate: the probes measure fee, compute units and rent per
+# transaction and extrapolate to the whole migration. They read the wormchain snapshot
+# catalogue at /tmp/wormchain-mainnet-snapshot/catalogue.jsonl and print a skip message
+# when it is absent. `cost_probe_at_scale` runs 5-10 minutes.
+[doc("Backfill cost probes. Needs the wormchain snapshot catalogue staged.")]
+e2e-backfill-probe: build
+    {{test_env}} cargo test -p global-accountant-backfill --test surfpool cost_probe -- --ignored --test-threads=1 --nocapture
+
 [doc("Surfpool e2e: the NTT accountant lifecycle only.")]
 e2e-ntt: build
     {{test_env}} cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
