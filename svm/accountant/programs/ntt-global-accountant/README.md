@@ -264,9 +264,12 @@ the sender's peer entry and the peer's entry for the sender's chain. A
 transceiver writes only its own entries, so one transceiver cannot move a
 hub's balances to a counterparty that did not register it.
 
-**Hub gate before signature work.** `submit_observations` rejects a sender
-with no hub before it recovers the guardian signature, as the
-`global-accountant` program rejects an unregistered emitter.
+**Routing gates before signature work.** `submit_observations` rejects a
+sender with no hub, and a pair that is not cross-registered, before it
+recovers the guardian signature and before it writes a pending PDA. This is
+the order of wormchain's `handle_observation`. An unroutable message
+therefore never opens a pending PDA, and the quorum-completing observation
+passes the same gates before it moves balances.
 
 **One PDA toolkit.** Every program-owned PDA has one key type that holds its
 seeds. Address checks, existence probes, and creation all go through the

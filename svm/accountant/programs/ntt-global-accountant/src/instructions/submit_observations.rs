@@ -14,7 +14,7 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay;
 use accountant_operational_core::support::quorum::{self, ParsedObservation};
 use accountant_operational_core::support::{commit_log, pda};
-use accountant_operational_core::ProgramResult;
+use accountant_operational_core::{transfer, ProgramResult};
 
 use crate::definitions::{
     normalize_trimmed_amount, GlobalAccountantError, NoReplayNamespace,
@@ -89,13 +89,23 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         }));
     }
 
-    // SECURITY: an observation from a transceiver with no hub must not move balances. Gated
-    // before signature recovery, as `submit_vaas` gates before the balance move.
+    // SECURITY: the hub gate and the peer gate run before signature recovery, ahead of the
+    // pending write, as in wormchain's `handle_observation`. Only a routable message reaches
+    // the pending PDA. Every observation passes these gates, so the commit below only moves
+    // balances.
     let sender_key = TransceiverHubKey::new(parsed.chain, ix.sender);
     pda::check(program_id, hub_pda, &sender_key)?;
     let hub = pda::read_if_initialised::<TransceiverHubLayout>(program_id, hub_pda)?
         .ok_or_else(|| err(GlobalAccountantError::MissingTransceiverHub))?
         .hub();
+    ntt_transfer::check_route(
+        program_id,
+        peer_src_pda,
+        peer_dst_pda,
+        parsed.chain,
+        ix.sender,
+        ix.recipient_chain(),
+    )?;
 
     // Quorum derives from the live set size; governance can resize the set.
     let num_guardians = quorum::verify_signature(
@@ -141,17 +151,15 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     let amount = normalize_trimmed_amount(ix.trimmed_decimals, ix.trimmed_amount())
         .ok_or_else(|| err(GlobalAccountantError::InvalidInstructionData))?;
-    ntt_transfer::apply_routed(
+    transfer::apply_transfer(
         program_id,
         submitter,
-        hub,
-        peer_src_pda,
-        peer_dst_pda,
         source_balance,
         dest_balance,
         parsed.chain,
-        ix.sender,
         ix.recipient_chain(),
+        hub.chain(),
+        &hub.address,
         amount,
     )?;
 
