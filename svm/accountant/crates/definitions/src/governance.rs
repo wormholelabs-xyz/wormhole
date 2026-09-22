@@ -5,8 +5,9 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::constants::{
-    GovernanceModule, GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION,
-    SOLANA_CHAIN_ID, UPGRADE_CONTRACT_ACTION,
+    GovernanceModule, ACCEPTED_MODIFY_BALANCE_TARGETS, ACCEPTED_REGISTER_CHAIN_TARGETS,
+    GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
+    UPGRADE_CONTRACT_ACTION,
 };
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
@@ -87,7 +88,8 @@ impl RegisterChainPayload {
         u16::from_be_bytes(self.chain)
     }
 
-    /// Governance emitter, `module`, `RegisterChain` action, target `Any` or Solana.
+    /// Governance emitter, `module`, `RegisterChain` action, target chain in
+    /// [`ACCEPTED_REGISTER_CHAIN_TARGETS`].
     ///
     /// `module` is the caller's governance module: the Token Bridge module for the WTT
     /// accountant, the Wormhole Relayer module for the NTT accountant.
@@ -97,8 +99,11 @@ impl RegisterChainPayload {
         module: &GovernanceModule,
     ) -> Result<(), GlobalAccountantError> {
         require_governance_emitter(header)?;
-        self.header
-            .check(module, REGISTER_CHAIN_ACTION, &[0, SOLANA_CHAIN_ID])
+        self.header.check(
+            module,
+            REGISTER_CHAIN_ACTION,
+            ACCEPTED_REGISTER_CHAIN_TARGETS,
+        )
     }
 }
 
@@ -149,16 +154,20 @@ impl ModifyBalancePayload {
         Uint256::from_be_bytes(self.amount)
     }
 
-    /// Governance emitter, `module`, `ModifyBalance` action, target Solana, known `kind`.
-    /// Returns the parsed kind. `module` is the calling accountant's governance module.
+    /// Governance emitter, `module`, `ModifyBalance` action, target chain in
+    /// [`ACCEPTED_MODIFY_BALANCE_TARGETS`], known `kind`. Returns the parsed kind.
+    /// `module` is the calling accountant's governance module.
     pub fn validate(
         &self,
         header: &VaaBodyHeader,
         module: &GovernanceModule,
     ) -> Result<ModificationKind, GlobalAccountantError> {
         require_governance_emitter(header)?;
-        self.header
-            .check(module, MODIFY_BALANCE_ACTION, &[SOLANA_CHAIN_ID])?;
+        self.header.check(
+            module,
+            MODIFY_BALANCE_ACTION,
+            ACCEPTED_MODIFY_BALANCE_TARGETS,
+        )?;
         ModificationKind::from_u8(self.kind).ok_or(GlobalAccountantError::InvalidModificationKind)
     }
 }
@@ -227,7 +236,9 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::{ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE};
+    use crate::constants::{
+        ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE, WORMCHAIN_CHAIN_ID,
+    };
     use wormhole_sdk::accountant_modification::ModificationKind as SdkKind;
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
 
@@ -374,8 +385,8 @@ mod tests {
                 "register wormchain target",
                 good,
                 TOKEN_BRIDGE_GOVERNANCE_MODULE,
-                register(|p| p.header.target_chain = 3104u16.to_be_bytes()),
-                Err(E::GovernanceChainMismatch),
+                register(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
+                Ok(()),
             ),
             (
                 "register wrong emitter chain",
@@ -422,7 +433,7 @@ mod tests {
             f(&mut p);
             p
         };
-        let modify_cases: [Case<ModifyBalancePayload, Result<ModificationKind, E>>; 9] = [
+        let modify_cases: [Case<ModifyBalancePayload, Result<ModificationKind, E>>; 10] = [
             (
                 "modify add",
                 good,
@@ -457,6 +468,13 @@ mod tests {
                 ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.target_chain = [0; 2]),
                 Err(E::GovernanceChainMismatch),
+            ),
+            (
+                "modify wormchain target",
+                good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
+                modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
+                Ok(ModificationKind::Add),
             ),
             (
                 "modify wrong emitter chain",

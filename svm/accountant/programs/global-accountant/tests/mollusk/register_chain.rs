@@ -228,16 +228,10 @@ fn rejects() {
     };
     let mut wrong_action = any_target();
     wrong_action.action = 2;
-    let wormchain_target = governance_header(
-        TOKEN_BRIDGE_GOVERNANCE_MODULE,
-        REGISTER_CHAIN_ACTION,
-        WORMCHAIN,
-    );
-
     let mut spoofed_pda = Registration::new(15, ETHEREUM, emitter_a);
     spoofed_pda.registration_pda = chain_registration::derive_pda(&program_id(), 3).0;
 
-    let cases: [(&str, Registration, Account, Account, GlobalAccountantError); 6] = [
+    let cases: [(&str, Registration, Account, Account, GlobalAccountantError); 5] = [
         (
             "wrong module",
             Registration::with_body(10, ETHEREUM, body(wrong_module, SOLANA_CHAIN_ID, 10)),
@@ -260,13 +254,6 @@ fn rejects() {
             GlobalAccountantError::InvalidGovernanceEmitter,
         ),
         (
-            "wormchain target chain",
-            Registration::with_body(13, ETHEREUM, body(wormchain_target, SOLANA_CHAIN_ID, 13)),
-            uninitialised_pda_account(),
-            uninitialised_pda_account(),
-            GlobalAccountantError::GovernanceChainMismatch,
-        ),
-        (
             "old vaa replayed after rotation",
             Registration::new(6, ETHEREUM, emitter_a),
             registered_b,
@@ -286,4 +273,45 @@ fn rejects() {
         let result = registration.submit(&mollusk, registration.accounts(pda_state, record_state));
         assert_error(&result, expected as u64, label);
     }
+}
+
+/// `RegisterChain` governance VAAs targeted at Wormchain (the retiring cosmwasm accountant's
+/// chain) are accepted during the wormchain -> Solana migration window; see
+/// `ACCEPTED_REGISTER_CHAIN_TARGETS`.
+#[test]
+fn register_wormchain_target_accepted_during_migration_window() {
+    let mollusk = mollusk();
+    let emitter = [0x77u8; 32];
+
+    let wormchain_target = governance_header(
+        TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        WORMCHAIN,
+    );
+    let body = register_chain_body(
+        SOLANA_CHAIN_ID,
+        GOVERNANCE_EMITTER,
+        20,
+        wormchain_target,
+        ETHEREUM,
+        emitter,
+    );
+    let registration = Registration::with_body(20, ETHEREUM, body);
+    let result = registration.submit(
+        &mollusk,
+        registration.accounts(uninitialised_pda_account(), uninitialised_pda_account()),
+    );
+    assert_success(&result, "wormchain-targeted registration");
+    let account = find_account(&result.resulting_accounts, &registration.registration_pda);
+    assert_eq!(
+        registration_layout(account),
+        ChainRegistrationLayout::new(ETHEREUM, emitter, 20)
+    );
+    assert_register_chain_record(
+        &result.resulting_accounts,
+        &registration.register_chain_pda,
+        ETHEREUM,
+        emitter,
+        registration.sequence,
+    );
 }
