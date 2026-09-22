@@ -38,12 +38,8 @@ use crate::harness::{
     ProgramImage, SurfpoolOptions,
 };
 
-const SOLANA: u16 = 1;
-const ETHEREUM: u16 = 2;
 const BSC: u16 = 4;
 const EMITTER: [u8; 32] = [0x42u8; 32];
-const HUB: [u8; 32] = [0x7Bu8; 32];
-const SPOKE: [u8; 32] = [0x7Au8; 32];
 const AUTHORITY_LAMPORTS: u64 = 20_000_000_000;
 const STRANGER_LAMPORTS: u64 = 2_000_000_000;
 

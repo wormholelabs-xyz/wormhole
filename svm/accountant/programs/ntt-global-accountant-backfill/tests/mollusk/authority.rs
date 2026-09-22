@@ -10,7 +10,6 @@ use solana_pubkey::Pubkey;
 
 use crate::common::*;
 
-const ETHEREUM: u16 = 2;
 const TOKEN_ADDRESS: [u8; 32] = [0x11u8; 32];
 
 /// The WTT backfill `.so` at its own `declare_id!` address.

@@ -19,7 +19,6 @@ use solana_pubkey::Pubkey;
 
 use crate::common::*;
 
-const ETHEREUM: u16 = 2;
 const BSC: u16 = 4;
 const POLYGON: u16 = 5;
 

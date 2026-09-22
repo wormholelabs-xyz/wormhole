@@ -6,3 +6,4 @@ pub mod ids;
 pub mod probe;
 
 pub use ids::*;
+pub use probe::*;
