@@ -19,8 +19,9 @@ export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 # (its only deployment). That mix is a test environment, not any one network.
 # `GLOBAL_ACCOUNTANT_PROGRAM_ID` and `NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID` are the
 # mollusk/surfpool fixture addresses, asserted against each `declare_id!` at compile
-# time. A family's backfill `.so` and operational `.so` share one address. `BACKFILL_AUTHORITY` is the
-# deterministic test keypair `Keypair::new_from_array([1u8; 32])`.
+# time. A family's backfill `.so` and operational `.so` share one address.
+# `BACKFILL_AUTHORITY` and `NTT_BACKFILL_AUTHORITY` are the deterministic test keypairs
+# `Keypair::new_from_array([1u8; 32])` and `Keypair::new_from_array([2u8; 32])`.
 #
 # Plain variables, not exports. `build` below has to see an empty environment
 # when the caller has set nothing, so a deploy artifact can never inherit a test
@@ -31,10 +32,12 @@ TEST_NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
 TEST_GLOBAL_ACCOUNTANT_PROGRAM_ID := "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
 TEST_NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID := "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
 TEST_BACKFILL_AUTHORITY := "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9"
+TEST_NTT_BACKFILL_AUTHORITY := "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"
 
 # Names the deploy build requires in the caller's environment.
 DEPLOY_VARS := "BRIDGE_ADDRESS VERIFY_VAA_SHIM_PROGRAM_ID NOREPLAY_PROGRAM_ID \
-    GLOBAL_ACCOUNTANT_PROGRAM_ID NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID BACKFILL_AUTHORITY"
+    GLOBAL_ACCOUNTANT_PROGRAM_ID NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID \
+    BACKFILL_AUTHORITY NTT_BACKFILL_AUTHORITY"
 
 # Prefix that puts the test values into one command's environment.
 test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
@@ -42,7 +45,8 @@ test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
     " NOREPLAY_PROGRAM_ID=" + TEST_NOREPLAY_PROGRAM_ID + \
     " GLOBAL_ACCOUNTANT_PROGRAM_ID=" + TEST_GLOBAL_ACCOUNTANT_PROGRAM_ID + \
     " NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID=" + TEST_NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID + \
-    " BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY
+    " BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY + \
+    " NTT_BACKFILL_AUTHORITY=" + TEST_NTT_BACKFILL_AUTHORITY
 
 # Default recipe: list available targets with their docstrings.
 default:
@@ -62,7 +66,8 @@ default:
 
 # Program packages only: the workspace also holds host-only crates (the test harness pulls
 # in `solana-client`), which do not compile for the SBF target.
-sbf_packages := "-p global-accountant -p global-accountant-backfill -p ntt-global-accountant"
+sbf_packages := "-p global-accountant -p global-accountant-backfill -p ntt-global-accountant \
+    -p ntt-global-accountant-backfill"
 
 [doc("SBF build with the values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority key -- see the comment above them.")]
 build-devnet:
@@ -109,8 +114,10 @@ test: build-devnet
 # the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
 # gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the
 # intended operator pubkey before every mainnet deploy.
+# `package` selects which backfill crate hosts the check; it must be the crate the `.so`
+# was built from, since the check loads it at that program's `declare_id!` address.
 [doc("Verify a deploy-ready .so enforces a specific operator authority pubkey.")]
-verify-authority so_path pubkey:
+verify-authority so_path pubkey package="global-accountant-backfill":
     #!/usr/bin/env bash
     set -euo pipefail
     # `cargo test` runs the binary from the package directory, so `so_path` is resolved
@@ -118,7 +125,7 @@ verify-authority so_path pubkey:
     so=$(cd "$(dirname "{{so_path}}")" && pwd)/$(basename "{{so_path}}")
     [ -f "${so}" ] || { echo "ERROR: no such file: ${so}" >&2; exit 1; }
     {{test_env}} GA_VERIFY_SO="${so}" GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
-        cargo test -p global-accountant-backfill --test artifact_authority_check \
+        cargo test -p {{package}} --test artifact_authority_check \
         -- --ignored --nocapture verify_so_enforces_specific_operator_authority
 
 # SBF-target type-check. There is no upstream `cargo check-sbf`, but

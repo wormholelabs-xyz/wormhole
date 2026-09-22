@@ -15,3 +15,14 @@ pub fn test_authority_keypair() -> Keypair {
 pub fn test_authority_pubkey() -> Pubkey {
     test_authority_keypair().pubkey()
 }
+
+/// Signer the `ntt-global-accountant-backfill` test artifact accepts. Its pubkey is the
+/// justfile's `TEST_NTT_BACKFILL_AUTHORITY`, passed as `NTT_BACKFILL_AUTHORITY` at build
+/// time. Distinct from the WTT key so cross-program authority isolation is testable.
+pub fn ntt_test_authority_keypair() -> Keypair {
+    Keypair::new_from_array([2u8; 32])
+}
+
+pub fn ntt_test_authority_pubkey() -> Pubkey {
+    ntt_test_authority_keypair().pubkey()
+}
