@@ -254,7 +254,7 @@ e2e-upgrade-stop program="global-accountant":
 # `programs/<program>/benches/compute_units.md`.
 [doc("CU regression bench for submit_vaas/submit_observations, both programs.")]
 bench: build
-    cargo bench
+    {{test_env}} cargo bench
 
 [doc("Audit Cargo.lock against the RustSec advisory database.")]
 audit:

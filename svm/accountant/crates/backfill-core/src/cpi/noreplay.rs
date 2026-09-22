@@ -51,6 +51,8 @@ fn verify_accounts(
 
 /// `MarkUsedBulk` instruction. Data payload carries a 128-byte OR mask
 /// instead of one sequence.
+///
+/// SECURITY: the CPI target is the constant `NOREPLAY_PROGRAM_ID`.
 fn mark_used_bulk_instruction(
     payer: &Pubkey,
     noreplay_authority: &Pubkey,
@@ -103,6 +105,7 @@ pub fn mark_used_bulk<'info>(
         bucket_index,
         *or_mask,
     );
+    // `invoke_signed` takes owned `AccountInfo`s; the clone bumps an `Rc` refcount.
     invoke_signed(
         &instruction,
         &[

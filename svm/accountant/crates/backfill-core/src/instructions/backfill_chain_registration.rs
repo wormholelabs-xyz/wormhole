@@ -9,7 +9,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
-use accountant_operational_core::accounts::{chain_registration, register_chain};
+use accountant_operational_core::support::pda;
 use accountant_operational_core::{err, ProgramResult};
 
 use crate::definitions::{
@@ -41,29 +41,27 @@ pub fn process(
         let (registration_pda, record_pda) = (&pair[0], &pair[1]);
         let (chain, sequence, emitter) = (entry.chain(), entry.sequence(), entry.emitter);
 
-        let (expected_registration, registration_bump) =
-            chain_registration::derive_pda(program_id, chain);
-        if registration_pda.key != &expected_registration {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
-        let (expected_record, record_bump) = register_chain::derive_pda(program_id, sequence);
-        if record_pda.key != &expected_record {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
+        let registration = ChainRegistrationLayout::new(chain, emitter, sequence);
+        let record = RegisterChainLayout::new(chain, emitter, sequence);
 
-        chain_registration::create(
+        let registration_bump = pda::check(program_id, registration_pda, &registration.key())?;
+        let record_bump = pda::check(program_id, record_pda, &record.key())?;
+
+        pda::create(
             program_id,
             payer,
             registration_pda,
+            &registration.key(),
             registration_bump,
-            &ChainRegistrationLayout::new(chain, emitter, sequence),
+            &registration,
         )?;
-        register_chain::create(
+        pda::create(
             program_id,
             payer,
             record_pda,
+            &record.key(),
             record_bump,
-            &RegisterChainLayout::new(chain, emitter, sequence),
+            &record,
         )?;
     }
 

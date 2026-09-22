@@ -170,10 +170,8 @@ fn add_creates_then_add_and_subtract_share_pda() {
     assert_ne!(add.modify_balance_pda, subtract.modify_balance_pda);
 }
 
-/// Regression test, PR 63 Bugbot HIGH finding: a `ModifyBalance` record PDA in the shape
-/// the backfill program writes must block replay of the archived governance VAA, and the
-/// balance — already carrying the historical delta, as the wormchain snapshot would — must
-/// stay untouched.
+/// A `ModifyBalance` record written by the backfill program (balance already carries the
+/// delta) makes the operational program reject the same governance VAA after the cutover.
 #[test]
 fn backfilled_record_blocks_replay_and_leaves_balance_unchanged() {
     let mollusk = mollusk();
@@ -185,7 +183,6 @@ fn backfilled_record_blocks_replay_and_leaves_balance_unchanged() {
         executable: false,
         rent_epoch: 0,
     };
-    // Balance already includes this modification's effect.
     let balance = balance_account(ETHEREUM, ETHEREUM, TOKEN_ADDRESS, modification.amount);
 
     let accounts = modification.accounts(balance, backfilled_record);

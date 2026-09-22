@@ -58,28 +58,6 @@ use bytemuck::{Pod, Zeroable};
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
 
-/// Backfill instruction discriminator.
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BackfillInstruction {
-    BackfillNoReplay = 0,
-    BackfillBalance = 1,
-    BackfillModifyBalance = 2,
-    BackfillChainRegistration = 3,
-}
-
-impl BackfillInstruction {
-    pub const fn from_u8(value: u8) -> Option<Self> {
-        match value {
-            0 => Some(Self::BackfillNoReplay),
-            1 => Some(Self::BackfillBalance),
-            2 => Some(Self::BackfillModifyBalance),
-            3 => Some(Self::BackfillChainRegistration),
-            _ => None,
-        }
-    }
-}
-
 /// `BackfillBalance` entry (68 bytes). Big-endian, as in the wormchain snapshot row.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
@@ -780,20 +758,6 @@ mod tests {
         assert_eq!(groups[0].header.chain(), 3);
         assert_eq!(groups[0].entries[0], entry);
         assert_eq!(groups[0].entries[0].sequence(), 42);
-    }
-
-    #[test]
-    fn backfill_instruction_from_u8() {
-        let cases: [(u8, Option<BackfillInstruction>); 5] = [
-            (0, Some(BackfillInstruction::BackfillNoReplay)),
-            (1, Some(BackfillInstruction::BackfillBalance)),
-            (2, Some(BackfillInstruction::BackfillModifyBalance)),
-            (3, Some(BackfillInstruction::BackfillChainRegistration)),
-            (4, None),
-        ];
-        for (value, expected) in cases {
-            assert_eq!(BackfillInstruction::from_u8(value), expected, "{value}");
-        }
     }
 
     fn modify_balance_entry(kind: u8, sequence: u64, amount: u128) -> BackfillModifyBalanceEntry {

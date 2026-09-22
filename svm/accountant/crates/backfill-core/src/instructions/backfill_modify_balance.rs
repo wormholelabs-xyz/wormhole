@@ -2,12 +2,12 @@
 //! governance modifications the snapshot's balances already reflect.
 //!
 //! Arms `modify_balance`'s PDA-existence replay guard for the historical sequences.
-//! Do not apply any balance delta here: the snapshot balances already carry it.
+//! The snapshot balances already carry each delta, so this handler writes records only.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
-use accountant_operational_core::accounts;
+use accountant_operational_core::support::pda;
 use accountant_operational_core::{err, ProgramResult};
 
 use crate::definitions::{
@@ -36,13 +36,7 @@ pub fn process(
 
     for (entry, record_pda) in batch.entries().iter().zip(record_pdas) {
         let kind = ModificationKind::from_u8(entry.kind)
-            .ok_or(err(GlobalAccountantError::InvalidModificationKind))?;
-
-        let (expected, canonical_bump) =
-            accounts::modify_balance::derive_pda(program_id, entry.sequence());
-        if record_pda.key != &expected {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
+            .ok_or_else(|| err(GlobalAccountantError::InvalidModificationKind))?;
 
         let record = ModifyBalanceLayout::new(
             kind,
@@ -54,8 +48,8 @@ pub fn process(
             entry.reason,
         );
 
-        // Record only. Do not touch a balance account here.
-        accounts::modify_balance::create(program_id, payer, record_pda, canonical_bump, &record)?;
+        let bump = pda::check(program_id, record_pda, &record.key())?;
+        pda::create(program_id, payer, record_pda, &record.key(), bump, &record)?;
     }
 
     Ok(())

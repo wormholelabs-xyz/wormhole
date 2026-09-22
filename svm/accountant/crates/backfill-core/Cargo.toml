@@ -10,7 +10,10 @@ rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
+accountant-operational-core.workspace = true
 anchor-lang.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
-accountant-operational-core.workspace = true
+
+[lints]
+workspace = true

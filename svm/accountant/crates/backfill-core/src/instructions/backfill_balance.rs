@@ -11,6 +11,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::accounts;
+use accountant_operational_core::support::pda;
 use accountant_operational_core::{err, ProgramResult};
 
 use crate::definitions::{BalanceAccountLayout, BalanceBatch, GlobalAccountantError};
@@ -36,16 +37,6 @@ pub fn process(
     require_authority(payer, expected_authority)?;
 
     for (entry, balance_pda) in batch.entries().iter().zip(balance_pdas) {
-        let (expected, canonical_bump) = accounts::balance::derive_pda(
-            program_id,
-            entry.chain(),
-            entry.token_chain(),
-            &entry.token_address,
-        );
-        if balance_pda.key != &expected {
-            return Err(err(GlobalAccountantError::InvalidPda));
-        }
-
         let layout = BalanceAccountLayout::new(
             entry.chain(),
             entry.token_chain(),
@@ -53,7 +44,8 @@ pub fn process(
             entry.balance(),
         );
 
-        accounts::balance::create(program_id, payer, balance_pda, canonical_bump, &layout)?;
+        let bump = pda::check(program_id, balance_pda, &layout.key())?;
+        accounts::balance::create(program_id, payer, balance_pda, bump, &layout)?;
     }
 
     Ok(())
