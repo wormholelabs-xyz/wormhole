@@ -173,8 +173,8 @@ clippy:
 # Single-threaded: each test spawns its own surfpool plus program deploys.
 # The upgrade_contract module is a two-step flow with its own recipes below.
 
-[doc("Surfpool e2e for both programs against fresh surfpool instances.")]
-e2e: build
+[doc("Surfpool e2e for every program against fresh surfpool instances.")]
+e2e: build e2e-backfill e2e-ntt-backfill
     {{test_env}} cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
     {{test_env}} cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
@@ -189,6 +189,10 @@ e2e-backfill: build
 [doc("Backfill cost probes. Needs the wormchain snapshot catalogue staged.")]
 e2e-backfill-probe: build
     {{test_env}} cargo test -p global-accountant-backfill --test surfpool cost_probe -- --ignored --test-threads=1 --nocapture
+
+[doc("Surfpool e2e: the NTT backfill lifecycle.")]
+e2e-ntt-backfill: build
+    {{test_env}} cargo test -p ntt-global-accountant-backfill --test surfpool -- --ignored --test-threads=1 --skip cutover --nocapture
 
 [doc("Surfpool e2e: the NTT accountant lifecycle only.")]
 e2e-ntt: build

@@ -3227,8 +3227,12 @@ dependencies = [
  "mollusk-svm",
  "ntt-global-accountant-backfill",
  "solana-account 3.4.0",
+ "solana-client",
  "solana-instruction 3.4.0",
+ "solana-keypair",
  "solana-pubkey 4.2.0",
+ "solana-rent 3.1.0",
+ "solana-signer",
  "solana-svm-log-collector",
 ]
 
