@@ -374,7 +374,8 @@ pub struct ModifyBalanceLayout {
     /// Token address on its native chain.
     pub token_address: [u8; 32],
     pub amount: Uint256,
-    /// Right-padded ASCII reason; audit only.
+    /// Audit-only ASCII reason, zero-left-padded to 32 bytes, as the governance wire
+    /// carries it (`sdk/rust/vaas-serde/src/arraystring.rs`).
     pub reason: [u8; 32],
 }
 

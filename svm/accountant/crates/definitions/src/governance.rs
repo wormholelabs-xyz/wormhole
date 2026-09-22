@@ -239,6 +239,7 @@ mod tests {
     use crate::constants::{
         ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE, WORMCHAIN_CHAIN_ID,
     };
+    use crate::state::ModifyBalanceLayout;
     use wormhole_sdk::accountant_modification::ModificationKind as SdkKind;
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
 
@@ -286,6 +287,56 @@ mod tests {
         payload.header.target_chain = SOLANA_CHAIN_ID.to_be_bytes();
         payload.kind = ModificationKind::Add as u8;
         payload
+    }
+
+    /// `reason` on the wire is the ASCII text zero-left-padded to 32 bytes. Tooling that
+    /// right-pads writes 32 wrong bytes into the `ModifyBalance` record.
+    #[test]
+    fn modify_balance_reason_is_zero_left_padded() {
+        fn zero_left_padded(reason: &str) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out[32 - reason.len()..].copy_from_slice(reason.as_bytes());
+            out
+        }
+
+        let cases: [&str; 4] = [
+            "",
+            "fix",
+            "audit-log: backfilled modify",
+            "reason exactly 32 bytes long!!!!",
+        ];
+        for reason in cases {
+            let payload = serde_wormhole::to_vec(&accountant::GovernancePacket {
+                chain: Chain::Solana,
+                action: accountant::Action::ModifyBalance {
+                    sequence: 1,
+                    chain_id: 2,
+                    token_chain: 2,
+                    token_address: Address([0x22; 32]),
+                    kind: SdkKind::Add,
+                    amount: Amount([0x33; 32]),
+                    reason: reason.into(),
+                },
+            })
+            .unwrap();
+            let body = body_with(&payload);
+            let (_, view) = ModifyBalancePayload::from_body(&body).unwrap();
+            assert_eq!(view.reason, zero_left_padded(reason), "{reason}");
+            assert_eq!(
+                ModifyBalanceLayout::new(
+                    ModificationKind::Add,
+                    view.chain_id(),
+                    view.token_chain(),
+                    view.sequence(),
+                    view.token_address,
+                    view.amount(),
+                    view.reason,
+                )
+                .reason,
+                zero_left_padded(reason),
+                "{reason} through the layout"
+            );
+        }
     }
 
     #[test]
