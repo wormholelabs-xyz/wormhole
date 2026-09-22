@@ -159,7 +159,7 @@ fn rejects() {
     mollusk.sysvars.clock.unix_timestamp = NOW;
     type Case = fn(&Mollusk) -> (ObsScenario, Vec<(Pubkey, Account)>, Vec<u8>);
 
-    let cases: [(&str, Case, GlobalAccountantError); 13] = [
+    let cases: [(&str, Case, GlobalAccountantError); 14] = [
         (
             "sender differs from emitter with no relayer registered",
             |_| {
@@ -204,6 +204,21 @@ fn rejects() {
                 (s, accounts, ix)
             },
             GlobalAccountantError::MissingTransceiverHub,
+        ),
+        (
+            "peer not cross-registered rejected before signature recovery",
+            |_| {
+                let s = hub_to_spoke(30);
+                let mut accounts = s.initial_accounts();
+                replace_account(
+                    &mut accounts,
+                    &s.peer_dst_pda,
+                    peer_account(&peer_layout(ETHEREUM, SPOKE, SOLANA, OTHER)),
+                );
+                let ix = s.ix_data_signed(0, [0x11; 65], &TX_HASH);
+                (s, accounts, ix)
+            },
+            GlobalAccountantError::PeersNotCrossRegistered,
         ),
         (
             "corrupted signature",
@@ -291,7 +306,7 @@ fn rejects() {
             GlobalAccountantError::AlreadyAccounted,
         ),
         (
-            "peer not cross-registered at quorum",
+            "peer re-pointed after twelve signatures",
             |m| {
                 let s = hub_to_spoke(29);
                 let mut accounts = s.submit_n(m, 12);

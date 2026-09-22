@@ -15,19 +15,13 @@ use crate::err;
 /// SECURITY: the peer's entry for the sender's chain must name the sender. A transceiver
 /// writes only its own peer entries. So one transceiver cannot move the hub's balances to a
 /// counterparty that did not register it.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_routed<'info>(
+pub fn check_route(
     program_id: &Pubkey,
-    payer: &AccountInfo<'info>,
-    hub: TransceiverHubKey,
-    peer_src_pda: &AccountInfo<'info>,
-    peer_dst_pda: &AccountInfo<'info>,
-    source_balance: &AccountInfo<'info>,
-    dest_balance: &AccountInfo<'info>,
+    peer_src_pda: &AccountInfo,
+    peer_dst_pda: &AccountInfo,
     chain: u16,
     sender: [u8; 32],
     recipient_chain: u16,
-    amount: Uint256,
 ) -> ProgramResult {
     // Sender's peer entry: `(chain, sender, recipient_chain)`, derived from the VAA fields.
     // Its value is the counterparty on the recipient chain.
@@ -54,6 +48,32 @@ pub fn apply_routed<'info>(
     if destination_peer != sender {
         return Err(err(GlobalAccountantError::PeersNotCrossRegistered));
     }
+    Ok(())
+}
+
+/// [`check_route`], then move `amount` between the hub token's balances.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_routed<'info>(
+    program_id: &Pubkey,
+    payer: &AccountInfo<'info>,
+    hub: TransceiverHubKey,
+    peer_src_pda: &AccountInfo<'info>,
+    peer_dst_pda: &AccountInfo<'info>,
+    source_balance: &AccountInfo<'info>,
+    dest_balance: &AccountInfo<'info>,
+    chain: u16,
+    sender: [u8; 32],
+    recipient_chain: u16,
+    amount: Uint256,
+) -> ProgramResult {
+    check_route(
+        program_id,
+        peer_src_pda,
+        peer_dst_pda,
+        chain,
+        sender,
+        recipient_chain,
+    )?;
 
     transfer::apply_transfer(
         program_id,
