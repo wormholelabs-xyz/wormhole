@@ -21,6 +21,9 @@
 //!
 //! `declare_id!` pins this `.so` to the NTT operational program's address, so the two share one
 //! program account across the upgrade.
+//!
+//! Migration-window program: remove this crate once the cutover to `ntt-global-accountant` is
+//! complete.
 
 #![allow(unexpected_cfgs)]
 
@@ -52,7 +55,9 @@ const _: () = assert!(
 /// Pubkey that must sign every backfill instruction, from `NTT_BACKFILL_AUTHORITY` at compile
 /// time. `env!` makes a missing variable a build error, so every artifact names an operator
 /// key explicitly. Set per deploy in `justfile`. Distinct from the WTT backfill's
-/// `BACKFILL_AUTHORITY`: the two migrations run under their own keys.
+/// `BACKFILL_AUTHORITY`: the two migrations run under their own keys. Read the key back out
+/// of a built `.so` with
+/// `just verify-authority <so-path> <base58-pubkey> ntt-global-accountant-backfill`.
 pub const NTT_BACKFILL_AUTHORITY: [u8; 32] =
     const_crypto::bs58::decode_pubkey(env!("NTT_BACKFILL_AUTHORITY"));
 

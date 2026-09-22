@@ -16,6 +16,9 @@
 //!
 //! `declare_id!` pins this `.so` to the operational program's address, so the two share one
 //! program account across the upgrade.
+//!
+//! Migration-window program: remove this crate once the cutover to `global-accountant` is
+//! complete.
 
 #![allow(unexpected_cfgs)]
 
@@ -46,7 +49,8 @@ const _: () = assert!(
 
 /// Pubkey that must sign every backfill instruction, from `BACKFILL_AUTHORITY` at compile
 /// time. `env!` makes a missing variable a build error, so every artifact names an operator
-/// key explicitly. Set per deploy in `justfile`.
+/// key explicitly. Set per deploy in `justfile`. Read the key back out of a built `.so` with
+/// `just verify-authority <so-path> <base58-pubkey>`.
 pub const BACKFILL_AUTHORITY: [u8; 32] =
     const_crypto::bs58::decode_pubkey(env!("BACKFILL_AUTHORITY"));
 

@@ -101,8 +101,8 @@ The other five instructions:
 | 2.. | target PDA | W | | One or two per entry; see the instruction table. |
 
 A PDA account count that differs from the entry count raises
-`InvalidInstructionData`. Each handler checks the authority after it parses the
-batch, and before it writes anything.
+`InvalidInstructionData`. Each handler checks the authority first, before it
+parses the batch and before it writes anything.
 
 ## Wire formats
 
