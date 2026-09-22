@@ -3215,6 +3215,7 @@ version = "0.1.0"
 dependencies = [
  "accountant-backfill-core",
  "accountant-operational-core",
+ "accountant-test-fixtures",
  "accountant-test-harness",
  "anchor-lang",
  "base64 0.22.1",

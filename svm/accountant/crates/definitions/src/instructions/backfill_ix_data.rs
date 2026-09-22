@@ -64,13 +64,25 @@
 //!
 //! `TransceiverHubBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
 //! by `(chain, address)`.
+//!
+//! `BackfillTransceiverPeerEntry` (68 bytes):
+//!
+//! | offset | size | field           |
+//! |--------|------|-----------------|
+//! | 0      | 2    | chain (BE)      |
+//! | 2      | 32   | address         |
+//! | 34     | 2    | dest_chain (BE) |
+//! | 36     | 32   | peer_address    |
+//!
+//! `TransceiverPeerBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
+//! by `(chain, address, dest_chain)`.
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
-use crate::pda::TransceiverHubKey;
+use crate::pda::{TransceiverHubKey, TransceiverPeerKey};
 use crate::primitives::Uint256;
-use crate::state::TransceiverHubLayout;
+use crate::state::{TransceiverHubLayout, TransceiverPeerLayout};
 
 /// `BackfillBalance` entry (68 bytes). Big-endian, as in the wormchain snapshot row.
 #[repr(C)]
@@ -293,9 +305,55 @@ impl BackfillTransceiverHubEntry {
     }
 }
 
+/// `BackfillTransceiverPeer` entry (68 bytes). Big-endian, as in the wormchain
+/// `transceiver_peers` row: `address` on `chain` sends to `peer_address` on `dest_chain`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct BackfillTransceiverPeerEntry {
+    pub chain: [u8; 2],
+    pub address: [u8; 32],
+    pub dest_chain: [u8; 2],
+    pub peer_address: [u8; 32],
+}
+
+impl BackfillTransceiverPeerEntry {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(chain: u16, address: [u8; 32], dest_chain: u16, peer_address: [u8; 32]) -> Self {
+        Self {
+            chain: chain.to_be_bytes(),
+            address,
+            dest_chain: dest_chain.to_be_bytes(),
+            peer_address,
+        }
+    }
+
+    pub fn chain(&self) -> u16 {
+        u16::from_be_bytes(self.chain)
+    }
+
+    pub fn dest_chain(&self) -> u16 {
+        u16::from_be_bytes(self.dest_chain)
+    }
+
+    /// PDA key of the peer entry, and the batch sort key.
+    pub fn key(&self) -> TransceiverPeerKey {
+        TransceiverPeerKey::new(self.chain(), self.address, self.dest_chain())
+    }
+
+    /// Account bytes, from the constructor `register_peer` uses.
+    pub fn layout(&self) -> TransceiverPeerLayout {
+        TransceiverPeerLayout::new(self.key(), self.peer_address)
+    }
+}
+
 const _: () = {
     use core::mem::offset_of;
     assert!(BackfillTransceiverHubEntry::LEN == 68);
+    assert!(BackfillTransceiverPeerEntry::LEN == 68);
+    assert!(offset_of!(BackfillTransceiverPeerEntry, address) == 2);
+    assert!(offset_of!(BackfillTransceiverPeerEntry, dest_chain) == 34);
+    assert!(offset_of!(BackfillTransceiverPeerEntry, peer_address) == 36);
     assert!(offset_of!(BackfillTransceiverHubEntry, address) == 2);
     assert!(offset_of!(BackfillTransceiverHubEntry, hub_chain) == 34);
     assert!(offset_of!(BackfillTransceiverHubEntry, hub_address) == 36);
@@ -482,6 +540,52 @@ impl<'a> TransceiverHubBatch<'a> {
     }
 
     pub fn entries(&self) -> &'a [BackfillTransceiverHubEntry] {
+        self.0
+    }
+}
+
+/// Transceiver peer rows, strictly ascending by `(chain, address, dest_chain)`. `parse` is
+/// the only constructor.
+pub struct TransceiverPeerBatch<'a>(&'a [BackfillTransceiverPeerEntry]);
+
+impl<'a> TransceiverPeerBatch<'a> {
+    /// Wire: `count (u8) ‖ count × BackfillTransceiverPeerEntry`.
+    pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
+        let (&count, rest) = data
+            .split_first()
+            .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+        if count == 0 {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let expected_len = count as usize * BackfillTransceiverPeerEntry::LEN;
+        if rest.len() != expected_len {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+        let entries: &[BackfillTransceiverPeerEntry] = bytemuck::try_cast_slice(rest)
+            .map_err(|_| GlobalAccountantError::InvalidInstructionData)?;
+        if entries.len() != count as usize {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
+
+        let mut prev_key: Option<(u16, [u8; 32], u16)> = None;
+        for entry in entries {
+            // `register_peer` rejects a peer on the sender's own chain.
+            if entry.chain() == entry.dest_chain() {
+                return Err(GlobalAccountantError::SameChainPeer);
+            }
+            let key = (entry.chain(), entry.address, entry.dest_chain());
+            if let Some(prev) = prev_key {
+                if key <= prev {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+            }
+            prev_key = Some(key);
+        }
+
+        Ok(Self(entries))
+    }
+
+    pub fn entries(&self) -> &'a [BackfillTransceiverPeerEntry] {
         self.0
     }
 }
@@ -1214,5 +1318,153 @@ mod tests {
             )
         );
         assert_eq!(bytes.len(), BackfillTransceiverHubEntry::LEN);
+    }
+
+    fn transceiver_peer_entry(
+        chain: u16,
+        address_seed: u8,
+        dest_chain: u16,
+        peer_seed: u8,
+    ) -> BackfillTransceiverPeerEntry {
+        BackfillTransceiverPeerEntry::new(chain, [address_seed; 32], dest_chain, [peer_seed; 32])
+    }
+
+    fn encode_transceiver_peer_batch(
+        entries: &[BackfillTransceiverPeerEntry],
+    ) -> std::vec::Vec<u8> {
+        let mut out = std::vec![entries.len() as u8];
+        for entry in entries {
+            out.extend_from_slice(bytemuck::bytes_of(entry));
+        }
+        out
+    }
+
+    #[test]
+    fn transceiver_peer_batch_parses_positive_cases() {
+        let one = [transceiver_peer_entry(1, 0x7B, 2, 0x7A)];
+        // Both directions of one pair, and a second destination for the same transceiver.
+        let pair = [
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+            transceiver_peer_entry(2, 0x7A, 1, 0x7B),
+        ];
+        let same_address_ascending_dest = [
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+            transceiver_peer_entry(1, 0x7B, 5, 0x7C),
+        ];
+        let max_count: std::vec::Vec<BackfillTransceiverPeerEntry> = (0..255u16)
+            .map(|i| transceiver_peer_entry(i + 2, 0x01, 1, 0x7B))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<BackfillTransceiverPeerEntry>); 4] = [
+            ("one peer", one.to_vec()),
+            ("both directions of one pair", pair.to_vec()),
+            (
+                "one transceiver, ascending dest chains",
+                same_address_ascending_dest.to_vec(),
+            ),
+            ("max u8 count", max_count),
+        ];
+        for (name, entries) in cases {
+            let data = encode_transceiver_peer_batch(&entries);
+            let batch =
+                TransceiverPeerBatch::parse(&data).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(batch.entries(), entries.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn transceiver_peer_batch_rejects_malformed_wire() {
+        let ok_entries = [
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+            transceiver_peer_entry(2, 0x7A, 1, 0x7B),
+        ];
+        let ok_data = encode_transceiver_peer_batch(&ok_entries);
+
+        let dup_entries = [
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+            transceiver_peer_entry(1, 0x7B, 2, 0x11),
+        ];
+        let desc_chain = [
+            transceiver_peer_entry(2, 0x7A, 1, 0x7B),
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+        ];
+        let desc_address = [
+            transceiver_peer_entry(1, 0x7C, 2, 0x7A),
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+        ];
+        let desc_dest_chain = [
+            transceiver_peer_entry(1, 0x7B, 5, 0x7C),
+            transceiver_peer_entry(1, 0x7B, 2, 0x7A),
+        ];
+
+        let cases: [(&str, std::vec::Vec<u8>); 10] = [
+            ("empty data", std::vec::Vec::new()),
+            ("zero count", std::vec![0u8]),
+            ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
+            ("one byte long", [ok_data.as_slice(), &[0u8]].concat()),
+            (
+                "trailing bytes after exact entries",
+                [ok_data.as_slice(), &[0xFFu8; 3]].concat(),
+            ),
+            (
+                "duplicate (chain, address, dest_chain)",
+                encode_transceiver_peer_batch(&dup_entries),
+            ),
+            (
+                "descending chain",
+                encode_transceiver_peer_batch(&desc_chain),
+            ),
+            (
+                "descending address within a chain",
+                encode_transceiver_peer_batch(&desc_address),
+            ),
+            (
+                "descending dest chain within a transceiver",
+                encode_transceiver_peer_batch(&desc_dest_chain),
+            ),
+            ("count claims more entries than present", {
+                let mut d = encode_transceiver_peer_batch(&ok_entries);
+                d[0] = 3;
+                d
+            }),
+        ];
+        for (name, data) in cases {
+            assert_eq!(
+                TransceiverPeerBatch::parse(&data).err(),
+                Some(GlobalAccountantError::InvalidInstructionData),
+                "{name}"
+            );
+        }
+    }
+
+    /// `register_peer` rejects a peer on the transceiver's own chain, so no such row can
+    /// exist in the snapshot.
+    #[test]
+    fn transceiver_peer_batch_rejects_a_same_chain_peer() {
+        let data = encode_transceiver_peer_batch(&[transceiver_peer_entry(2, 0x7A, 2, 0x7B)]);
+        assert_eq!(
+            TransceiverPeerBatch::parse(&data).err(),
+            Some(GlobalAccountantError::SameChainPeer)
+        );
+    }
+
+    #[test]
+    fn transceiver_peer_entry_round_trips_through_bytes() {
+        let entry = BackfillTransceiverPeerEntry::new(2, [0x11; 32], 1, [0x7B; 32]);
+        let bytes = bytemuck::bytes_of(&entry);
+        let data = encode_transceiver_peer_batch(core::slice::from_ref(&entry));
+        let batch = TransceiverPeerBatch::parse(&data).unwrap();
+        assert_eq!(batch.entries()[0], entry);
+        assert_eq!(batch.entries()[0].chain(), 2);
+        assert_eq!(batch.entries()[0].dest_chain(), 1);
+        assert_eq!(
+            batch.entries()[0].key(),
+            TransceiverPeerKey::new(2, [0x11; 32], 1)
+        );
+        assert_eq!(
+            batch.entries()[0].layout(),
+            TransceiverPeerLayout::new(TransceiverPeerKey::new(2, [0x11; 32], 1), [0x7B; 32])
+        );
+        assert_eq!(bytes.len(), BackfillTransceiverPeerEntry::LEN);
     }
 }

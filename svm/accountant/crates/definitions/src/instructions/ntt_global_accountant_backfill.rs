@@ -17,6 +17,8 @@ pub enum Instruction {
     BackfillRelayerChainRegistration = 3,
     /// Write `TransceiverHub` PDAs from the `transceiver_to_hub` map.
     BackfillTransceiverHub = 4,
+    /// Write `TransceiverPeer` PDAs from the `transceiver_peers` map.
+    BackfillTransceiverPeer = 5,
 }
 
 impl Instruction {
@@ -27,6 +29,7 @@ impl Instruction {
             2 => Some(Self::BackfillModifyBalance),
             3 => Some(Self::BackfillRelayerChainRegistration),
             4 => Some(Self::BackfillTransceiverHub),
+            5 => Some(Self::BackfillTransceiverPeer),
             _ => None,
         }
     }
@@ -38,13 +41,14 @@ mod tests {
 
     #[test]
     fn from_u8_covers_every_discriminator() {
-        let cases: [(u8, Option<Instruction>); 6] = [
+        let cases: [(u8, Option<Instruction>); 7] = [
             (0, Some(Instruction::BackfillNoReplay)),
             (1, Some(Instruction::BackfillBalance)),
             (2, Some(Instruction::BackfillModifyBalance)),
             (3, Some(Instruction::BackfillRelayerChainRegistration)),
             (4, Some(Instruction::BackfillTransceiverHub)),
-            (5, None),
+            (5, Some(Instruction::BackfillTransceiverPeer)),
+            (6, None),
         ];
         for (value, expected) in cases {
             assert_eq!(Instruction::from_u8(value), expected, "{value}");
