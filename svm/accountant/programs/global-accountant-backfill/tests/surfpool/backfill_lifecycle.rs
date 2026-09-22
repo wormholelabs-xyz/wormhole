@@ -36,7 +36,6 @@ use crate::harness::{
     ProgramImage, SurfpoolOptions,
 };
 
-const ETHEREUM: u16 = 2;
 const BSC: u16 = 4;
 const EMITTER: [u8; 32] = [0x42u8; 32];
 const AUTHORITY_LAMPORTS: u64 = 20_000_000_000;

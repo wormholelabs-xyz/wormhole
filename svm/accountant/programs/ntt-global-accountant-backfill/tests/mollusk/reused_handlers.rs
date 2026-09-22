@@ -20,7 +20,6 @@ use solana_svm_log_collector::LogCollector;
 use crate::common::wire::NoReplayEntry;
 use crate::common::*;
 
-const ETHEREUM: u16 = 2;
 const EMITTER: [u8; 32] = [0x11u8; 32];
 const TOKEN_ADDRESS: [u8; 32] = [0x22u8; 32];
 const SEQUENCE: u64 = 42;

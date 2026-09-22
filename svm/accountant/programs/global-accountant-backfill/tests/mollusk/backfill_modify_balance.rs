@@ -18,7 +18,6 @@ use solana_pubkey::Pubkey;
 
 use crate::common::*;
 
-const ETHEREUM: u16 = 2;
 const TOKEN_ADDRESS: [u8; 32] = [0x11u8; 32];
 const REASON: [u8; 32] = [0x01u8; 32];
 

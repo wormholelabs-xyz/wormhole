@@ -18,11 +18,6 @@ use solana_pubkey::Pubkey;
 
 use crate::common::*;
 
-const SOLANA: u16 = 1;
-const ETHEREUM: u16 = 2;
-const POLYGON: u16 = 5;
-const HUB: [u8; 32] = [0x7Bu8; 32];
-const SPOKE: [u8; 32] = [0x7Au8; 32];
 const OTHER: [u8; 32] = [0x7Cu8; 32];
 
 fn peer_pda(entry: &BackfillTransceiverPeerEntry) -> Pubkey {

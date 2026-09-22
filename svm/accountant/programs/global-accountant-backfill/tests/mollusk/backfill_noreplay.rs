@@ -16,8 +16,6 @@ use solana_pubkey::Pubkey;
 use crate::common::wire::NoReplayEntry as Entry;
 use crate::common::*;
 
-const ETHEREUM: u16 = 2;
-
 fn bucket_pda(chain: u16, emitter: &[u8; 32], sequence: u64) -> Pubkey {
     derive_bucket_pda(
         &noreplay_authority_pda(&program_id()),

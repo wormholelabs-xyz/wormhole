@@ -26,10 +26,6 @@ use crate::ntt_ix::{direct_body, peer_payload, register_peer_ix_data, submit_vaa
 /// The NTT operational program's `.so` under `SBF_OUT_DIR`, at the shared program id.
 const OPERATIONAL_PROGRAM_NAME: &str = "ntt_global_accountant";
 
-const SOLANA: u16 = 1;
-const ETHEREUM: u16 = 2;
-const HUB: [u8; 32] = [0x7Bu8; 32];
-const SPOKE: [u8; 32] = [0x7Au8; 32];
 const SEQUENCE: u64 = 6;
 
 /// Step 5 of the CosmWasm setup order: the hub pre-registers a hubless spoke, which needs
