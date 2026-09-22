@@ -98,6 +98,22 @@ build-prod:
 test: build
     {{test_env}} cargo test
 
+# Verify a deploy-ready `.so` enforces a specific operator authority pubkey, independent of
+# the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
+# gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the
+# intended operator pubkey before every mainnet deploy.
+[doc("Verify a deploy-ready .so enforces a specific operator authority pubkey.")]
+verify-authority so_path pubkey:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `cargo test` runs the binary from the package directory, so `so_path` is resolved
+    # here, against the caller's own working directory.
+    so=$(cd "$(dirname "{{so_path}}")" && pwd)/$(basename "{{so_path}}")
+    [ -f "${so}" ] || { echo "ERROR: no such file: ${so}" >&2; exit 1; }
+    {{test_env}} GA_VERIFY_SO="${so}" GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
+        cargo test -p global-accountant-backfill --test artifact_authority_check \
+        -- --ignored --nocapture verify_so_enforces_specific_operator_authority
+
 # SBF-target type-check. There is no upstream `cargo check-sbf`, but
 # `cargo build-sbf` registers the platform-tools compiler with rustup (e.g.
 # `1.89.0-sbpf-solana-v1.52`), which can drive a plain `cargo check` against

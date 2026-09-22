@@ -31,6 +31,11 @@ const-crypto.workspace = true
 global-accountant-definitions.workspace = true
 
 [dev-dependencies]
+accountant-test-harness.workspace = true
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
 global-accountant-backfill = { path = ".", features = ["no-entrypoint"] }
 
 [lints]
