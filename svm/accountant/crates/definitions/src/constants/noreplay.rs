@@ -114,6 +114,39 @@ impl NoReplayMarkUsedData {
     }
 }
 
+/// `MarkUsedBulk` instruction data: `disc ‖ namespace_len_le ‖ namespace ‖ bucket_index_le ‖ or_mask`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct NoReplayMarkUsedBulkData {
+    pub discriminator: u8,
+    pub namespace_len: [u8; 2],
+    pub namespace: NoReplayNamespace,
+    pub bucket_index: [u8; 8],
+    pub or_mask: [u8; NOREPLAY_BITMAP_BYTES],
+}
+
+impl NoReplayMarkUsedBulkData {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(
+        namespace: NoReplayNamespace,
+        bucket_index: u64,
+        or_mask: [u8; NOREPLAY_BITMAP_BYTES],
+    ) -> Self {
+        Self {
+            discriminator: NOREPLAY_MARK_USED_BULK_DISCRIMINATOR,
+            namespace_len: (NoReplayNamespace::LEN as u16).to_le_bytes(),
+            namespace,
+            bucket_index: bucket_index.to_le_bytes(),
+            or_mask,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+}
+
 const _: () = {
     use core::mem::offset_of;
     assert!(NoReplayNamespace::LEN <= 64); // NoReplay `MAX_NAMESPACE_LEN`
@@ -124,6 +157,11 @@ const _: () = {
     assert!(offset_of!(NoReplayMarkUsedData, namespace_len) == 1);
     assert!(offset_of!(NoReplayMarkUsedData, namespace) == 3);
     assert!(offset_of!(NoReplayMarkUsedData, sequence) == 37);
+    assert!(NoReplayMarkUsedBulkData::LEN == 173);
+    assert!(offset_of!(NoReplayMarkUsedBulkData, namespace_len) == 1);
+    assert!(offset_of!(NoReplayMarkUsedBulkData, namespace) == 3);
+    assert!(offset_of!(NoReplayMarkUsedBulkData, bucket_index) == 37);
+    assert!(offset_of!(NoReplayMarkUsedBulkData, or_mask) == 45);
 };
 
 #[cfg(test)]
@@ -193,5 +231,27 @@ mod tests {
             assert_eq!(account.is_marked(sequence), marked, "{name}");
         }
         assert_eq!(NoReplayBitmapAccount::from_bytes(&[0u8; 128]), None);
+    }
+
+    #[test]
+    // Runtime half of the offset check: a dev-dependency, visible only here.
+    #[allow(clippy::assertions_on_constants)]
+    fn mark_used_bulk_data_shape() {
+        assert!(NoReplayNamespace::LEN <= solana_noreplay::MAX_NAMESPACE_LEN);
+
+        let namespace = NoReplayNamespace::new(2, [0xAB; 32]);
+        let mask = [0xFFu8; NOREPLAY_BITMAP_BYTES];
+        let data = NoReplayMarkUsedBulkData::new(namespace, 7, mask);
+        let bytes = data.as_bytes();
+        assert_eq!(bytes.len(), NoReplayMarkUsedBulkData::LEN);
+        assert_eq!(bytes[0], solana_noreplay::MARK_USED_BULK);
+        assert_eq!(&bytes[3..37], namespace.as_bytes());
+        assert_eq!(&bytes[37..45], &7u64.to_le_bytes());
+        assert_eq!(&bytes[45..], &mask);
+
+        let parsed = solana_noreplay::MarkUsedBulkData::try_from(&bytes[1..]).unwrap();
+        assert_eq!(parsed.namespace, namespace.as_bytes());
+        assert_eq!(parsed.bucket_index, 7);
+        assert_eq!(parsed.or_mask, &mask);
     }
 }

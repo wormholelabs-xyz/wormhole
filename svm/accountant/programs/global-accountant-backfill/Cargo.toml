@@ -1,0 +1,37 @@
+[package]
+name = "global-accountant-backfill"
+description = "Wormhole Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records and ChainRegistration state from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Anchor convention (inverted polarity from the old `bpf-entrypoint` opt-in):
+# the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library/CPI/test consumption. `idl-build` is deliberately never enabled —
+# Anchor's auto-IDL would be partial/inaccurate for the custom offset-0 tag
+# + bytemuck layouts this program keeps, so IDL codegen stays off rather than
+# shipping a misleading artifact.
+default = []
+no-entrypoint = []
+
+[dependencies]
+accountant-backfill-core.workspace = true
+accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+borsh.workspace = true
+const-crypto.workspace = true
+global-accountant-definitions.workspace = true
+
+[dev-dependencies]
+global-accountant-backfill = { path = ".", features = ["no-entrypoint"] }
+
+[lints]
+workspace = true
