@@ -188,3 +188,9 @@ PDA.
   cargo package as an optional argument; the default is this program.
 - `just bench` — compute-unit regression tracking for `submit_vaas` and
   `submit_observations`, tracked at `benches/compute_units.md`.
+
+## See also
+
+- [`global-accountant-backfill`](../global-accountant-backfill/README.md) — the
+  one-shot migration image that seeds this program's state from the wormchain
+  snapshot, and the cutover procedure.
