@@ -42,6 +42,13 @@ DEPLOY_VARS := "BRIDGE_ADDRESS VERIFY_VAA_SHIM_PROGRAM_ID NOREPLAY_PROGRAM_ID \
     GLOBAL_ACCOUNTANT_PROGRAM_ID NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID \
     BACKFILL_AUTHORITY NTT_BACKFILL_AUTHORITY"
 
+# Program packages, read from `programs/*/Cargo.toml`, so a new program is never
+# silently skipped by a hard-coded list. Package names, not directory names: a
+# manifest's `name` can differ from its directory. The SBF recipes name packages
+# because the workspace also holds host-only crates (the test harness pulls in
+# `solana-client`), which do not compile for the SBF target.
+program_packages := `for m in programs/*/Cargo.toml; do awk -F'"' '/^name = /{print $2; exit}' "$m"; done | tr '\n' ' '`
+
 # Prefix that puts the test values into one command's environment.
 test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
     " VERIFY_VAA_SHIM_PROGRAM_ID=" + TEST_VERIFY_VAA_SHIM_PROGRAM_ID + \
@@ -66,14 +73,23 @@ default:
 # gone: Anchor's entrypoint is present by default and only suppressed via
 # `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
 # of the old opt-in polarity.
-#
-# Program packages only: the workspace also holds host-only crates (the test harness pulls
-# in `solana-client`), which do not compile for the SBF target.
 
 [doc("SBF build with the test values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority keys -- see the comment above them.")]
 build-devnet:
-    {{test_env}} cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
-        -p ntt-global-accountant-backfill
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # bash 3.2 (macOS default) rejects `"${arr[@]}"` on an empty array under
+    # `set -u`; check the length before any such expansion.
+    all=({{program_packages}})
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+    args=()
+    for p in "${all[@]}"; do
+        args+=(-p "${p}")
+    done
+    {{test_env}} cargo build-sbf -- "${args[@]}"
 
 # Deploy build. Every compile-time address and key comes from the caller's
 # environment; a missing one aborts before `cargo` runs. The values are echoed
@@ -94,12 +110,20 @@ build:
         echo "Run 'just build-devnet' for a test artifact." >&2
         exit 1
     fi
+    all=({{program_packages}})
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+    args=()
+    for p in "${all[@]}"; do
+        args+=(-p "${p}")
+    done
     echo "Building with:"
     for v in {{DEPLOY_VARS}}; do
         printf '  %s=%s\n' "${v}" "${!v}"
     done
-    cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
-        -p ntt-global-accountant-backfill
+    cargo build-sbf -- "${args[@]}"
 
 [doc("Alias of `build` (deploy build), preserved for existing scripts.")]
 build-prod: build
@@ -150,8 +174,8 @@ verify-authority so_path pubkey package="global-accountant-backfill":
 # RUSTFLAGS=-Dwarnings promotes the compiler's own lints to errors on the SBF
 # target; `clippy-sbf` below approximates clippy coverage of the SBF arms.
 
-[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied.")]
-check:
+[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied. With no arguments, checks every program; pass program names to narrow (e.g. `just check global-accountant`).")]
+check *programs:
     #!/usr/bin/env bash
     set -euo pipefail
     toolchain=$(rustup toolchain list | awk '/sbpf-solana/ {print $1; exit}')
@@ -160,11 +184,45 @@ check:
         echo "Run 'cargo build-sbf' once to install it." >&2
         exit 1
     fi
+
+    all=({{program_packages}})
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+
+    # bash 3.2 (macOS default) rejects `"${arr[@]}"` on an empty array under
+    # `set -u`; check the length before any such expansion.
+    requested=({{programs}})
+    targets=()
+    if [ ${#requested[@]} -eq 0 ]; then
+        targets=("${all[@]}")
+    else
+        for name in "${requested[@]}"; do
+            match=""
+            for p in "${all[@]}"; do
+                if [ "${p}" = "${name}" ]; then
+                    match="${p}"
+                    break
+                fi
+            done
+            if [ -z "${match}" ]; then
+                echo "ERROR: unknown program '${name}'. Available:" >&2
+                printf '  %s\n' "${all[@]}" >&2
+                exit 1
+            fi
+            targets+=("${match}")
+        done
+    fi
+
+    args=()
+    for t in "${targets[@]}"; do
+        args+=(-p "${t}")
+    done
+
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
-    {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
-        -p ntt-global-accountant-backfill
+    {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana "${args[@]}"
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
 # via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
