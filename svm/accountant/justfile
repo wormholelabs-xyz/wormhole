@@ -1,31 +1,34 @@
-# Build & test the Wormhole Global Accountant Solana program.
+# Build & test the Wormhole Global Accountant Solana programs.
 #
-# The program is loaded by mollusk-svm in integration tests, so the SBF
-# binary must exist before `cargo test` runs.
+# The programs are loaded by mollusk-svm in integration tests, so the SBF
+# binaries must exist before `cargo test` runs.
 #
 # Two build paths, deliberately separate:
-#   `just build-devnet` values below; what `test`, `check`, `clippy` use
-#   `just build`       deploy build; every address and key comes from the
-#                      caller's environment, and a missing one aborts
+#   `just build-devnet` the test artifact; it uses the values below, and it is
+#                       what `test`, `check`, `clippy`, `bench` and `e2e*` use
+#   `just build`        the deploy build; every address and key comes from the
+#                       caller's environment, and a missing one aborts
 
 # Exported into every recipe so `cargo test` finds the freshly-built `.so`.
 export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 
 # Test-environment addresses and keys, read by `crates/definitions` and the two
-# program crates via `env!` at compile time. Variable names match
+# backfill program crates via `env!` at compile time. Variable names match
 # `wormhole-svm-definitions` (`from-env`) and `solana-noreplay`.
 #
 # Mainnet Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay
 # (its only deployment). That mix is a test environment, not any one network.
-# `GLOBAL_ACCOUNTANT_PROGRAM_ID` and `NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID` are the
-# mollusk/surfpool fixture addresses, asserted against each `declare_id!` at compile
-# time. A family's backfill `.so` and operational `.so` share one address.
-# `BACKFILL_AUTHORITY` and `NTT_BACKFILL_AUTHORITY` are the deterministic test keypairs
-# `Keypair::new_from_array([1u8; 32])` and `Keypair::new_from_array([2u8; 32])`.
+# A family's backfill `.so` and operational `.so` share one program account, so
+# both carry the same address; each is asserted against its `declare_id!` at
+# compile time. The two backfill authorities are the pubkeys of the
+# deterministic test keypairs `Keypair::new_from_array([1u8; 32])` and
+# `Keypair::new_from_array([2u8; 32])`.
 #
 # Plain variables, not exports. `build` below has to see an empty environment
 # when the caller has set nothing, so a deploy artifact can never inherit a test
 # value by accident.
+# A missing variable is a build error, so plain `cargo` outside `just` needs all
+# seven names set in its own environment.
 TEST_BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
 TEST_VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
 TEST_NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
@@ -52,10 +55,10 @@ test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
 default:
     @just --list
 
-# `build-devnet` and `build` compile identical code. They differ only in where the
-# compile-time addresses and keys come from. The older dev/prod split gated the
-# `test-only-open-digest` feature on/off; with `open_digest` removed entirely
-# (canonical digest record now emitted via `sol_log_data`), no feature
+# `build-devnet` and `build` compile identical code. They differ only in where
+# the compile-time addresses and keys come from. The historical dev/prod split
+# gated the `test-only-open-digest` feature on/off; with `open_digest` removed
+# entirely (canonical digest record now emitted via `sol_log_data`), no feature
 # difference remains.
 #
 # Anchor programs build fine under plain `cargo build-sbf` (still an ordinary
@@ -63,19 +66,20 @@ default:
 # gone: Anchor's entrypoint is present by default and only suppressed via
 # `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
 # of the old opt-in polarity.
-
+#
 # Program packages only: the workspace also holds host-only crates (the test harness pulls
 # in `solana-client`), which do not compile for the SBF target.
-sbf_packages := "-p global-accountant -p global-accountant-backfill -p ntt-global-accountant \
-    -p ntt-global-accountant-backfill"
 
-[doc("SBF build with the values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority key -- see the comment above them.")]
+[doc("SBF build with the test values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority keys -- see the comment above them.")]
 build-devnet:
-    {{test_env}} cargo build-sbf -- {{sbf_packages}}
+    {{test_env}} cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
+        -p ntt-global-accountant-backfill
 
 # Deploy build. Every compile-time address and key comes from the caller's
-# environment; a missing one aborts before `cargo` runs. Verify the result with
-# `just verify-authority <so-path> <operator-pubkey>` before a mainnet deploy.
+# environment; a missing one aborts before `cargo` runs. The values are echoed
+# so the operator can read back what the artifact will enforce. Verify the
+# result with `just verify-authority <so-path> <operator-pubkey> <package>`
+# before a mainnet deploy.
 [doc("SBF build for deploy. Every address and key must be set in the environment.")]
 build:
     #!/usr/bin/env bash
@@ -87,10 +91,15 @@ build:
     if [ ${#missing[@]} -ne 0 ]; then
         echo "ERROR: deploy build needs these set in the environment:" >&2
         printf '  %s\n' "${missing[@]}" >&2
-        echo "Run 'just build-devnet' for a devnet/test artifact." >&2
+        echo "Run 'just build-devnet' for a test artifact." >&2
         exit 1
     fi
-    cargo build-sbf -- {{sbf_packages}}
+    echo "Building with:"
+    for v in {{DEPLOY_VARS}}; do
+        printf '  %s=%s\n' "${v}" "${!v}"
+    done
+    cargo build-sbf -- -p global-accountant -p ntt-global-accountant -p global-accountant-backfill \
+        -p ntt-global-accountant-backfill
 
 [doc("Alias of `build` (deploy build), preserved for existing scripts.")]
 build-prod: build
@@ -283,7 +292,7 @@ e2e-upgrade-stop program="global-accountant":
 # quorum-closing path) through Mollusk, writing CU numbers to the tracked
 # `programs/<program>/benches/compute_units.md`.
 [doc("CU regression bench for submit_vaas/submit_observations, both programs.")]
-bench: build
+bench: build-devnet
     {{test_env}} cargo bench
 
 [doc("Audit Cargo.lock against the RustSec advisory database.")]

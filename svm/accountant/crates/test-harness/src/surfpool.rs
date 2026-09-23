@@ -310,7 +310,7 @@ fn wait_for_rpc_ready(guard: &SurfpoolGuard) {
 }
 
 /// Path of a built program: `<SBF_OUT_DIR>/<name>.so`, falling back to
-/// `<workspace>/target/deploy` two levels above this crate. Run `just build` first.
+/// `<workspace>/target/deploy` two levels above this crate. Run `just build-devnet` first.
 pub fn so_path(name: &str) -> PathBuf {
     let deploy_dir = match std::env::var_os("SBF_OUT_DIR") {
         Some(dir) => PathBuf::from(dir),
@@ -334,8 +334,12 @@ impl ProgramImage {
     /// A built program `<label>.so` from the deploy dir, to load at `program_id`.
     pub fn from_deploy_dir(label: &'static str, program_id: Pubkey) -> Self {
         let path = so_path(label);
-        let elf = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}. Run `just build` first.", path.display()));
+        let elf = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "read {}: {e}. Run `just build-devnet` first.",
+                path.display()
+            )
+        });
         Self {
             label,
             program_id,
