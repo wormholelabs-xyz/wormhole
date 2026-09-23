@@ -235,11 +235,12 @@ Run the recipes below from `svm/accountant`.
 
 | Recipe | Result |
 |---|---|
-| `just build` | Test artifact. The `justfile` supplies the test keys. |
-| `just build-prod` | Deploy artifact. The caller's environment supplies every name in `DEPLOY_VARS`. |
+| `just build-devnet` | Test artifact. The `justfile` supplies the test values. |
+| `just build` | Deploy artifact. The caller's environment supplies every name in `DEPLOY_VARS`. |
 
-`just build-prod` prints the values it compiles in. It aborts with the list of
-missing names when the caller sets none.
+`just build` prints the values it compiles in. It aborts with the list of
+missing names when the caller sets none. `just build-prod` is an alias of
+`just build`.
 
 Check a deploy artifact against the intended operator key:
 
@@ -268,7 +269,7 @@ small for the new image. Size the account at the first deploy.
 
 Procedure:
 
-1. Build the deploy artifact with `just build-prod`.
+1. Build the deploy artifact with `just build`.
 2. Check the artifact with `just verify-authority`, against the operator key.
 3. Measure both images with `ls -l target/deploy/*.so`.
 4. Deploy the backfill artifact at the NTT program id. Give `--max-len` at least
