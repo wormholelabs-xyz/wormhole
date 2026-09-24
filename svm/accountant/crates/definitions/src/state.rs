@@ -4,8 +4,8 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
 use crate::pda::{
-    BalanceAccountKey, ChainRegistrationKey, ModifyBalanceKey, RegisterChainKey, TransceiverHubKey,
-    TransceiverPeerKey,
+    BalanceAccountKey, BelongsToHub, ChainRegistrationKey, ModifyBalanceKey, RegisterChainKey,
+    TransceiverHubKey, TransceiverPeerKey,
 };
 use crate::primitives::{Pubkey, Uint256};
 
@@ -513,15 +513,15 @@ impl TransceiverHubLayout {
 
     pub const TAG: u8 = AccountTag::TransceiverHub as u8;
 
-    /// Entry for transceiver `key` belonging to `hub`; a hub passes itself twice.
-    pub fn new(key: TransceiverHubKey, hub: TransceiverHubKey) -> Self {
+    /// Entry for transceiver `key` belonging to `hub`; a hub passes `BelongsToHub(key)`.
+    pub fn new(key: TransceiverHubKey, hub: BelongsToHub) -> Self {
         Self {
             tag: Self::TAG,
             _pad0: 0,
             chain: key.chain(),
-            hub_chain: hub.chain(),
+            hub_chain: hub.0.chain(),
             address: key.address,
-            hub_address: hub.address,
+            hub_address: hub.0.address,
         }
     }
 
@@ -532,6 +532,11 @@ impl TransceiverHubLayout {
     /// The hub this transceiver belongs to.
     pub fn hub(&self) -> TransceiverHubKey {
         TransceiverHubKey::new(self.hub_chain, self.hub_address)
+    }
+
+    /// [`hub`](Self::hub) in the form [`new`](Self::new) takes.
+    pub fn belongs_to_hub(&self) -> BelongsToHub {
+        BelongsToHub(self.hub())
     }
 }
 

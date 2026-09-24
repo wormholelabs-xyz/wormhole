@@ -14,8 +14,9 @@ use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 use accountant_operational_core::support::pda;
 
 use crate::definitions::{
-    split_body, GlobalAccountantError, ManagerMode, NoReplayNamespace, RegisterHubIxData,
-    TransceiverHubKey, TransceiverHubLayout, TransceiverInfo, VaaBodyHeader, MAX_NTT_PAYLOAD_LEN,
+    split_body, BelongsToHub, GlobalAccountantError, ManagerMode, NoReplayNamespace,
+    RegisterHubIxData, TransceiverHubKey, TransceiverHubLayout, TransceiverInfo, VaaBodyHeader,
+    MAX_NTT_PAYLOAD_LEN,
 };
 use crate::err;
 use crate::instructions::sender;
@@ -93,7 +94,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         hub_pda,
         &hub,
         bump,
-        &TransceiverHubLayout::new(hub, hub),
+        &TransceiverHubLayout::new(hub, BelongsToHub(hub)),
     )?;
 
     noreplay::mark_used(

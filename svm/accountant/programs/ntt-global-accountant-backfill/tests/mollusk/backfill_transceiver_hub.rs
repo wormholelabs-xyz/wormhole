@@ -6,8 +6,8 @@ use accountant_operational_core::support::pda;
 use anchor_lang::error::ErrorCode as AnchorError;
 use global_accountant_definitions::ntt_global_accountant_backfill::Instruction;
 use global_accountant_definitions::{
-    BackfillTransceiverHubEntry, GlobalAccountantError, TransceiverHubKey, TransceiverHubLayout,
-    MAX_BATCH_ENTRIES,
+    BackfillTransceiverHubEntry, BelongsToHub, GlobalAccountantError, TransceiverHubKey,
+    TransceiverHubLayout, MAX_BATCH_ENTRIES,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -110,7 +110,7 @@ fn assert_written(
         layout::<TransceiverHubLayout>(account),
         TransceiverHubLayout::new(
             TransceiverHubKey::new(entry.chain(), entry.address),
-            TransceiverHubKey::new(entry.hub_chain(), entry.hub_address),
+            BelongsToHub(TransceiverHubKey::new(entry.hub_chain(), entry.hub_address)),
         ),
         "{label}: layout"
     );
@@ -196,7 +196,7 @@ fn prefunded_pda_is_allocated_and_assigned() {
         layout::<TransceiverHubLayout>(account),
         TransceiverHubLayout::new(
             TransceiverHubKey::new(SOLANA, HUB),
-            TransceiverHubKey::new(SOLANA, HUB),
+            BelongsToHub(TransceiverHubKey::new(SOLANA, HUB)),
         ),
         "layout"
     );

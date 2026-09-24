@@ -2,8 +2,8 @@ use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::pda;
 use global_accountant_definitions::{
-    GlobalAccountantError, ManagerMode, TransceiverHubKey, TransceiverHubLayout, VaaBodyHeader,
-    MAX_NTT_PAYLOAD_LEN,
+    BelongsToHub, GlobalAccountantError, ManagerMode, TransceiverHubKey, TransceiverHubLayout,
+    VaaBodyHeader, MAX_NTT_PAYLOAD_LEN,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -103,7 +103,7 @@ fn assert_self_hub_created(result: &InstructionResult, hub: &Hub) {
         *bytemuck::from_bytes::<TransceiverHubLayout>(&account.data),
         TransceiverHubLayout::new(
             TransceiverHubKey::new(ETHEREUM, SPOKE),
-            TransceiverHubKey::new(ETHEREUM, SPOKE),
+            BelongsToHub(TransceiverHubKey::new(ETHEREUM, SPOKE)),
         ),
         "hub points at itself"
     );
@@ -146,7 +146,7 @@ fn rejects() {
     let mollusk = mollusk();
     let existing = hub_account(&TransceiverHubLayout::new(
         TransceiverHubKey::new(ETHEREUM, SPOKE),
-        TransceiverHubKey::new(ETHEREUM, SPOKE),
+        BelongsToHub(TransceiverHubKey::new(ETHEREUM, SPOKE)),
     ));
     let mut short = direct_body(ETHEREUM, SPOKE, 10, &hub_payload(ManagerMode::Locking));
     short.pop();
