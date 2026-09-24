@@ -80,8 +80,8 @@ impl Uint256 {
             return None;
         }
         let result = Self::from_limbs(out);
-        debug_assert!(result >= self);
-        debug_assert!(result >= other);
+        assert!(result >= self);
+        assert!(result >= other);
         Some(result)
     }
 
@@ -105,7 +105,7 @@ impl Uint256 {
             return None;
         }
         let result = Self::from_limbs(out);
-        debug_assert!(result <= self);
+        assert!(result <= self);
         Some(result)
     }
 }
