@@ -1,5 +1,6 @@
-//! `register_chain`: Token Bridge `RegisterChain` governance. Writes or overwrites the
-//! `ChainRegistration` PDA. A per-sequence `RegisterChain` PDA is the replay guard.
+//! `register_chain`: `RegisterChain` governance for the caller's module (Token Bridge for
+//! WTT, Wormhole Relayer for NTT). Writes or overwrites the `ChainRegistration` PDA. A
+//! per-sequence `RegisterChain` PDA is the replay guard.
 //!
 //! SECURITY: governance sequence numbers are assigned at random, not monotonically, so this
 //! instruction accepts any VAA on an unused sequence and overwrites the registration
@@ -9,27 +10,29 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
-use anchor_lang::solana_program::system_program;
 
-use accountant_operational_core::accounts::{self, chain_registration};
-use accountant_operational_core::cpi::shim;
-use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
-use accountant_operational_core::{ProgramCoreResult, ProgramResult};
-
+use crate::accounts::chain_registration;
+use crate::cpi::shim;
 use crate::definitions::{
-    split_body, ChainRegistrationLayout, GlobalAccountantError, RegisterChainIxData,
-    RegisterChainLayout, RegisterChainPayload, VaaBodyHeader, CHAIN_REGISTRATION_SEED_PREFIX,
-    REGISTER_CHAIN_SEED_PREFIX,
+    split_body, ChainRegistrationKey, ChainRegistrationLayout, GlobalAccountantError,
+    GovernanceModule, RegisterChainIxData, RegisterChainKey, RegisterChainLayout,
+    RegisterChainPayload, VaaBodyHeader,
 };
-use crate::err;
+use crate::hash::double_keccak256;
+use crate::support::pda;
+use crate::{err, ProgramCoreResult, ProgramResult};
 
 /// A `RegisterChain` body is exactly header + payload.
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
 
-/// Order: instruction framing, signer, Shim signature check, governance validation,
-/// PDA checks, write registration, registration record.
-pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+/// Order: instruction framing, signer, Shim signature check, governance validation against
+/// `module`, PDA checks, write registration, registration record.
+pub fn process(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+    module: &GovernanceModule,
+) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
@@ -57,7 +60,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = RegisterChainPayload::from_body(body).map_err(err)?;
-    payload.validate(header).map_err(err)?;
+    payload.validate(header, module).map_err(err)?;
     let sequence = header.sequence();
 
     let register_bump = check_register_chain_pda(program_id, register_chain_pda, sequence)?;
@@ -99,11 +102,11 @@ fn check_registration_pda(
     registration_pda: &AccountInfo,
     chain: u16,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = chain_registration::derive_pda(program_id, chain);
-    if registration_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    Ok(bump)
+    pda::check(
+        program_id,
+        registration_pda,
+        &ChainRegistrationKey::new(chain),
+    )
 }
 
 /// `register_chain_pda` must be the canonical account for `sequence` and must not exist yet
@@ -113,22 +116,17 @@ fn check_register_chain_pda(
     register_chain_pda: &AccountInfo,
     sequence: u64,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_register_chain_pda(program_id, sequence);
-    if register_chain_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    if register_chain_pda.owner != &system_program::ID {
-        return Err(err(GlobalAccountantError::DuplicateRegisterChain));
-    }
-    Ok(bump)
+    pda::check_uninitialised(
+        program_id,
+        register_chain_pda,
+        &RegisterChainKey::new(sequence),
+        GlobalAccountantError::DuplicateRegisterChain,
+    )
 }
 
 /// `(b"register_chain", sequence_be)`.
 pub fn derive_register_chain_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[REGISTER_CHAIN_SEED_PREFIX, &sequence.to_be_bytes()],
-        program_id,
-    )
+    pda::derive(program_id, &RegisterChainKey::new(sequence))
 }
 
 /// First registration creates the PDA; every later call overwrites it in place. Acceptance
@@ -142,24 +140,18 @@ fn write_registration<'info>(
     payload: &RegisterChainPayload,
     sequence: u64,
 ) -> ProgramResult {
-    if registration_pda.owner == &system_program::ID {
-        let bump_seed = [registration_bump];
-        let seeds: &[&[u8]] = &[CHAIN_REGISTRATION_SEED_PREFIX, &payload.chain, &bump_seed]; // chain BE
-        create_pda_allow_prefund(
-            payer,
-            registration_pda,
-            program_id,
-            seeds,
-            ChainRegistrationLayout::LEN as u64,
-        )?;
-    } else if registration_pda.owner != program_id
-        || registration_pda.data_len() != ChainRegistrationLayout::LEN
-    {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-
     let layout = ChainRegistrationLayout::new(payload.chain(), payload.emitter_address, sequence);
-    chain_registration::store(registration_pda, &layout)
+    if pda::is_initialised(program_id, registration_pda)? {
+        return chain_registration::store(registration_pda, &layout);
+    }
+    pda::create(
+        program_id,
+        payer,
+        registration_pda,
+        &layout.key(),
+        registration_bump,
+        &layout,
+    )
 }
 
 /// Create the `RegisterChain` PDA and write the audit record.
@@ -171,17 +163,13 @@ fn record_register_chain<'info>(
     payload: &RegisterChainPayload,
     sequence: u64,
 ) -> ProgramResult {
-    let bump_seed = [register_bump];
-    let sequence_be = sequence.to_be_bytes();
-    let seeds: &[&[u8]] = &[REGISTER_CHAIN_SEED_PREFIX, &sequence_be, &bump_seed];
-    create_pda_allow_prefund(
+    let record = RegisterChainLayout::new(payload.chain(), payload.emitter_address, sequence);
+    pda::create(
+        program_id,
         payer,
         register_chain_pda,
-        program_id,
-        seeds,
-        RegisterChainLayout::LEN as u64,
-    )?;
-
-    let record = RegisterChainLayout::new(payload.chain(), payload.emitter_address, sequence);
-    accounts::store(register_chain_pda, &record)
+        &record.key(),
+        register_bump,
+        &record,
+    )
 }

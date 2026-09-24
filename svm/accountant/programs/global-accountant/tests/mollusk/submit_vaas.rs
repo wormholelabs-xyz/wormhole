@@ -48,7 +48,7 @@ fn signatures_for_another_body_are_rejected() {
     let mollusk = mollusk();
     let signed = VaaScenario::transfer(Transfer::new(0xB1, ETHEREUM, SOLANA, 100));
     let mut submitted = signed.clone();
-    submitted.body = Transfer::new(0xB1, ETHEREUM, SOLANA, 200).body();
+    submitted.vaa.body = Transfer::new(0xB1, ETHEREUM, SOLANA, 200).body();
     let result = submitted.submit(&mollusk, signed.accounts());
     assert_error(
         &result,
@@ -108,9 +108,9 @@ fn rejects() {
             VaaScenario::transfer(Transfer::new(0xA5, ETHEREUM, SOLANA, 100)),
             |s, _| {
                 Some(submit_vaas_ix_data_with_len(
-                    s.guardian_set_bump,
-                    s.body.len() as u16 + 1,
-                    &s.body,
+                    s.vaa.guardian_set_bump,
+                    s.vaa.body.len() as u16 + 1,
+                    &s.vaa.body,
                 ))
             },
             GlobalAccountantError::InvalidInstructionData,
@@ -119,7 +119,7 @@ fn rejects() {
             "truncated transfer payload",
             VaaScenario::transfer(Transfer::new(0xA6, ETHEREUM, SOLANA, 100)),
             |s, accounts| {
-                s.body.truncate(60);
+                s.vaa.body.truncate(60);
                 *accounts = s.accounts();
                 None
             },

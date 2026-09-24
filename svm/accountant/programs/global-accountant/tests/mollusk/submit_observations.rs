@@ -1,5 +1,5 @@
+use accountant_operational_core::accounts::balance;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
     BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, Uint256,
 };
@@ -12,18 +12,8 @@ use crate::common::*;
 
 const MAX_QUORUM_BRANCH_CU: u64 = 75_000;
 
-fn pending_layout(account: &Account) -> PendingObservationsLayout {
-    *bytemuck::from_bytes::<PendingObservationsLayout>(&account.data)
-}
-
 fn balance_layout(account: &Account) -> BalanceAccountLayout {
-    *bytemuck::from_bytes::<BalanceAccountLayout>(&account.data)
-}
-
-fn assert_closed(account: &Account, label: &str) {
-    assert_eq!(account.lamports, 0, "{label}: lamports");
-    assert_eq!(account.owner, system_program_id(), "{label}: owner");
-    assert!(account.data.is_empty(), "{label}: data");
+    layout(account)
 }
 
 /// Mollusk clock value for expiry rows.
@@ -554,7 +544,7 @@ fn rejects() {
                     Transfer::new(0, ETHEREUM, SOLANA, 100),
                 );
                 s.source_account =
-                    derive_balance_account_pda(&program_id(), ETHEREUM, 99, &TOKEN_ADDRESS).0;
+                    balance::derive_pda(&program_id(), ETHEREUM, 99, &TOKEN_ADDRESS).0;
                 let accounts = s.submit_n(m, 12);
                 plain(s, accounts, 12)
             },

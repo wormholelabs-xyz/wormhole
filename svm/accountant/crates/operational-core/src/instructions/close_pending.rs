@@ -17,9 +17,11 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::add_lamports;
 use crate::accounts;
 use crate::cpi::noreplay;
-use crate::definitions::{ClosePendingIxData, GlobalAccountantError, PendingObservationsLayout};
+use crate::definitions::{
+    ClosePendingIxData, GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout,
+};
 use crate::err;
-use crate::support::guardian_set;
+use crate::support::{guardian_set, pda};
 use crate::ProgramResult;
 
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
@@ -43,17 +45,14 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     }
 
     // SECURITY: re-derive the pending PDA from the fields
-    let (expected_pending_pda, _) = crate::support::quorum::derive_pending_pda(
-        program_id,
+    let key = PendingObservationsKey::new(
         layout.chain,
-        &emitter,
+        emitter,
         sequence,
         layout.guardian_set_index,
-        &layout.content_digest,
+        layout.content_digest,
     );
-    if pending_pda.key != &expected_pending_pda {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
+    pda::check(program_id, pending_pda, &key)?;
 
     // Condition (a)
     guardian_set::verify_account(guardian_set, layout.guardian_set_index)?;

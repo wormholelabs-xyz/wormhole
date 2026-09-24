@@ -3,6 +3,10 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
+use crate::pda::{
+    BalanceAccountKey, ChainRegistrationKey, ModifyBalanceKey, RegisterChainKey, TransceiverHubKey,
+    TransceiverPeerKey,
+};
 use crate::primitives::{Pubkey, Uint256};
 
 /// Account-type tag at offset 0 of every program-owned PDA. Off-chain readers
@@ -17,6 +21,8 @@ pub enum AccountTag {
     ChainRegistration = 3,
     ModifyBalance = 4,
     RegisterChain = 5,
+    TransceiverHub = 6,
+    TransceiverPeer = 7,
 }
 
 /// `ModifyBalance` payload `kind` byte. Other values raise `InvalidModificationKind`.
@@ -71,45 +77,30 @@ pub trait AccountLayout: Pod {
     fn tag(&self) -> u8;
 }
 
-impl AccountLayout for PendingObservationsLayout {
-    const TAG: u8 = Self::TAG;
+/// Each layout carries its tag in its first byte and an inherent `TAG` constant.
+macro_rules! impl_account_layout {
+    ($($layout:ty),+ $(,)?) => {
+        $(
+            impl AccountLayout for $layout {
+                const TAG: u8 = Self::TAG;
 
-    fn tag(&self) -> u8 {
-        self.tag
-    }
+                fn tag(&self) -> u8 {
+                    self.tag
+                }
+            }
+        )+
+    };
 }
 
-impl AccountLayout for BalanceAccountLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for ChainRegistrationLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for ModifyBalanceLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
-
-impl AccountLayout for RegisterChainLayout {
-    const TAG: u8 = Self::TAG;
-
-    fn tag(&self) -> u8 {
-        self.tag
-    }
-}
+impl_account_layout!(
+    PendingObservationsLayout,
+    BalanceAccountLayout,
+    ChainRegistrationLayout,
+    ModifyBalanceLayout,
+    RegisterChainLayout,
+    TransceiverHubLayout,
+    TransceiverPeerLayout,
+);
 
 impl PendingObservationsLayout {
     /// New record with a zeroed signature bitmap.
@@ -222,6 +213,10 @@ impl BalanceAccountLayout {
 
     pub const TAG: u8 = AccountTag::Balance as u8;
 
+    pub fn key(&self) -> BalanceAccountKey {
+        BalanceAccountKey::new(self.chain, self.token_chain, self.token_address)
+    }
+
     /// Native (`chain == token_chain`): credit. Wrapped: debit.
     pub fn lock_or_burn(&mut self, amount: Uint256) -> Result<(), GlobalAccountantError> {
         if self.chain == self.token_chain {
@@ -330,6 +325,10 @@ impl ChainRegistrationLayout {
     pub fn governance_sequence(&self) -> u64 {
         u64::from_le_bytes(self.governance_sequence)
     }
+
+    pub fn key(&self) -> ChainRegistrationKey {
+        ChainRegistrationKey::new(self.chain)
+    }
 }
 
 const _: () = {
@@ -405,6 +404,10 @@ impl ModifyBalanceLayout {
             reason,
         }
     }
+
+    pub fn key(&self) -> ModifyBalanceKey {
+        ModifyBalanceKey::new(self.sequence)
+    }
 }
 
 const _: () = {
@@ -463,6 +466,10 @@ impl RegisterChainLayout {
             emitter_address,
         }
     }
+
+    pub fn key(&self) -> RegisterChainKey {
+        RegisterChainKey::new(self.sequence)
+    }
 }
 
 const _: () = {
@@ -474,13 +481,131 @@ const _: () = {
     assert!(RegisterChainLayout::LEN == 48);
 };
 
+/// NTT `TRANSCEIVER_TO_HUB` entry: the hub whose token identity the accountant books
+/// transfers from transceiver `(chain, address)` under. A hub points at itself.
+///
+/// | offset | size | field |
+/// |---|---|---|
+/// | 0 | 1 | tag ([`AccountTag::TransceiverHub`]) |
+/// | 2 | 2 | chain |
+/// | 4 | 2 | hub_chain |
+/// | 6 | 32 | address |
+/// | 38 | 32 | hub_address |
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct TransceiverHubLayout {
+    /// Always [`AccountTag::TransceiverHub`].
+    pub tag: u8,
+    pub(crate) _pad0: u8,
+    /// Transceiver's chain (key).
+    pub chain: u16,
+    /// Hub's chain (value).
+    pub hub_chain: u16,
+    /// Transceiver address on `chain` (key).
+    pub address: [u8; 32],
+    /// Hub address on `hub_chain` (value).
+    pub hub_address: [u8; 32],
+}
+
+impl TransceiverHubLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub const TAG: u8 = AccountTag::TransceiverHub as u8;
+
+    /// Entry for transceiver `key` belonging to `hub`; a hub passes itself twice.
+    pub fn new(key: TransceiverHubKey, hub: TransceiverHubKey) -> Self {
+        Self {
+            tag: Self::TAG,
+            _pad0: 0,
+            chain: key.chain(),
+            hub_chain: hub.chain(),
+            address: key.address,
+            hub_address: hub.address,
+        }
+    }
+
+    pub fn key(&self) -> TransceiverHubKey {
+        TransceiverHubKey::new(self.chain, self.address)
+    }
+
+    /// The hub this transceiver belongs to.
+    pub fn hub(&self) -> TransceiverHubKey {
+        TransceiverHubKey::new(self.hub_chain, self.hub_address)
+    }
+}
+
+/// NTT `TRANSCEIVER_PEER` entry: the peer transceiver `(chain, address)` sends to on
+/// `dest_chain`.
+///
+/// | offset | size | field |
+/// |---|---|---|
+/// | 0 | 1 | tag ([`AccountTag::TransceiverPeer`]) |
+/// | 2 | 2 | chain |
+/// | 4 | 2 | dest_chain |
+/// | 6 | 32 | address |
+/// | 38 | 32 | peer_address |
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct TransceiverPeerLayout {
+    /// Always [`AccountTag::TransceiverPeer`].
+    pub tag: u8,
+    pub(crate) _pad0: u8,
+    /// Transceiver's chain (key).
+    pub chain: u16,
+    /// Destination chain (key).
+    pub dest_chain: u16,
+    /// Transceiver address on `chain` (key).
+    pub address: [u8; 32],
+    /// Peer transceiver address on `dest_chain` (value).
+    pub peer_address: [u8; 32],
+}
+
+impl TransceiverPeerLayout {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub const TAG: u8 = AccountTag::TransceiverPeer as u8;
+
+    /// Entry for `key`'s peer `peer_address` on `key.dest_chain()`.
+    pub fn new(key: TransceiverPeerKey, peer_address: [u8; 32]) -> Self {
+        Self {
+            tag: Self::TAG,
+            _pad0: 0,
+            chain: key.chain(),
+            dest_chain: key.dest_chain(),
+            address: key.address,
+            peer_address,
+        }
+    }
+
+    pub fn key(&self) -> TransceiverPeerKey {
+        TransceiverPeerKey::new(self.chain, self.address, self.dest_chain)
+    }
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(offset_of!(TransceiverHubLayout, tag) == 0);
+    assert!(offset_of!(TransceiverHubLayout, chain) == 2);
+    assert!(offset_of!(TransceiverHubLayout, hub_chain) == 4);
+    assert!(offset_of!(TransceiverHubLayout, address) == 6);
+    assert!(offset_of!(TransceiverHubLayout, hub_address) == 38);
+    assert!(TransceiverHubLayout::LEN == 70);
+
+    assert!(offset_of!(TransceiverPeerLayout, tag) == 0);
+    assert!(offset_of!(TransceiverPeerLayout, chain) == 2);
+    assert!(offset_of!(TransceiverPeerLayout, dest_chain) == 4);
+    assert!(offset_of!(TransceiverPeerLayout, address) == 6);
+    assert!(offset_of!(TransceiverPeerLayout, peer_address) == 38);
+    assert!(TransceiverPeerLayout::LEN == 70);
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn account_tags_are_pinned_and_zeroed_layout_is_invalid() {
-        let cases: [(&str, u8, u8, u8); 5] = [
+        let cases: [(&str, u8, u8, u8); 7] = [
             (
                 "pending",
                 AccountTag::PendingObservations as u8,
@@ -510,6 +635,18 @@ mod tests {
                 AccountTag::RegisterChain as u8,
                 RegisterChainLayout::TAG,
                 <RegisterChainLayout as Zeroable>::zeroed().tag,
+            ),
+            (
+                "transceiver_hub",
+                AccountTag::TransceiverHub as u8,
+                TransceiverHubLayout::TAG,
+                <TransceiverHubLayout as Zeroable>::zeroed().tag,
+            ),
+            (
+                "transceiver_peer",
+                AccountTag::TransceiverPeer as u8,
+                TransceiverPeerLayout::TAG,
+                <TransceiverPeerLayout as Zeroable>::zeroed().tag,
             ),
         ];
         for (i, (name, tag, layout_tag, zeroed_tag)) in cases.iter().enumerate() {

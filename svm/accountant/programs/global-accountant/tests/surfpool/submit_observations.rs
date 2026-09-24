@@ -12,9 +12,8 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
 use crate::common::{
-    assert_bucket_marked, attest_body, chain_registration_account, content_digest,
-    core_bridge_program_id, derive_guardian_set_pda, emitter, guardian_keys, guardian_set_account,
-    make_guardians, noreplay_authority_pda, sign_digest, signing_digest,
+    accountant_image, assert_bucket_marked, attest_body, chain_registration_account,
+    content_digest, emitter, make_guardians, noreplay_authority_pda, sign_digest, signing_digest,
     submit_observations_ix_data, system_program_id, Guardian, GUARDIAN_COUNT, GUARDIAN_SET_INDEX,
     NOREPLAY_PROGRAM_ID, QUORUM,
 };
@@ -74,7 +73,7 @@ fn surfpool_submit_observations_real_noreplay() {
     let guard = start_surfpool(SurfpoolOptions::offline("ga-surfpool-submit-observations"));
     let rpc = guard.rpc_client();
 
-    let accountant = ProgramImage::accountant();
+    let accountant = accountant_image();
     let program_id = accountant.program_id;
     deploy_programs(&rpc, &[accountant, ProgramImage::noreplay()]);
 
@@ -86,18 +85,8 @@ fn surfpool_submit_observations_real_noreplay() {
     let digest = content_digest(&body);
 
     let guardians = make_guardians(GUARDIAN_COUNT, 0x42);
-    let (guardian_set, _) = derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
-    set_account(
-        &rpc,
-        &guardian_set,
-        &guardian_set_account(
-            GUARDIAN_SET_INDEX,
-            &guardian_keys(&guardians),
-            0,
-            0,
-            &core_bridge_program_id(),
-        ),
-    );
+    let (guardian_set, _) =
+        crate::harness::deploy_guardian_set(&rpc, GUARDIAN_SET_INDEX, &guardians);
 
     let (chain_registration_pda, _) = chain_registration::derive_pda(&program_id, CHAIN);
     set_account(

@@ -44,6 +44,7 @@ harness = false
 
 [dev-dependencies]
 accountant-test-fixtures.workspace = true
+accountant-test-harness.workspace = true
 wormhole-svm-definitions.workspace = true
 mollusk-svm.workspace = true
 mollusk-svm-bencher.workspace = true

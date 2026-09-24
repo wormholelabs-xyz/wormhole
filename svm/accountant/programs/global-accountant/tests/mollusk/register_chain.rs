@@ -1,5 +1,5 @@
 use accountant_operational_core::accounts::chain_registration;
-use global_accountant::instructions::register_chain::derive_register_chain_pda;
+use accountant_operational_core::instructions::register_chain::derive_register_chain_pda;
 use global_accountant_definitions::{
     ChainRegistrationLayout, GlobalAccountantError, GovernanceHeader, RegisterChainLayout, Uint256,
     GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
@@ -22,14 +22,9 @@ fn any_target() -> GovernanceHeader {
 #[derive(Clone)]
 struct Registration {
     sequence: u64,
-    body: Vec<u8>,
-    guardian_set_bump: u8,
-    payer: Pubkey,
-    guardian_set: Pubkey,
-    guardian_signatures: Pubkey,
+    vaa: SignedVaa,
     registration_pda: Pubkey,
     register_chain_pda: Pubkey,
-    guardians: Vec<Guardian>,
 }
 
 impl Registration {
@@ -49,66 +44,38 @@ impl Registration {
     }
 
     fn with_body(sequence: u64, chain: u16, body: Vec<u8>) -> Self {
-        let (guardian_set, guardian_set_bump) =
-            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
         Self {
             sequence,
-            body,
-            guardian_set_bump,
-            payer: SUBMITTER,
-            guardian_set,
-            guardian_signatures: GUARDIAN_SIGNATURES,
+            vaa: SignedVaa::new(body),
             registration_pda: chain_registration::derive_pda(&program_id(), chain).0,
             register_chain_pda: derive_register_chain_pda(&program_id(), sequence).0,
-            guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }
     }
 
     fn account_metas(&self) -> Vec<AccountMeta> {
-        vec![
-            AccountMeta::new(self.payer, true),
-            AccountMeta::new_readonly(shim_program_id(), false),
-            AccountMeta::new_readonly(self.guardian_set, false),
-            AccountMeta::new_readonly(self.guardian_signatures, false),
+        let mut metas = self.vaa.shim_metas();
+        metas.extend([
             AccountMeta::new(self.registration_pda, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new(self.register_chain_pda, false),
-        ]
+        ]);
+        metas
     }
 
     fn accounts(&self, registration: Account, record: Account) -> Vec<(Pubkey, Account)> {
-        let digest = double_keccak256(&self.body);
-        let signatures: Vec<(u8, [u8; 65])> = (0..QUORUM)
-            .map(|i| (i, sign_digest(&self.guardians[i as usize], &digest)))
-            .collect();
-        let keys: Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> =
-            self.guardians.iter().map(|g| g.eth_address).collect();
-        vec![
-            (self.payer, system_owned_account(50_000_000_000)),
-            keyed_account_for_verify_vaa_shim_program(),
-            (
-                self.guardian_set,
-                guardian_set_account(GUARDIAN_SET_INDEX, &keys, 0, 0, &core_bridge_program_id()),
-            ),
-            (
-                self.guardian_signatures,
-                guardian_signatures_account(
-                    GUARDIAN_SET_INDEX,
-                    &self.payer,
-                    &signatures,
-                    &shim_program_id(),
-                ),
-            ),
+        let mut accounts = self.vaa.shim_accounts();
+        accounts.extend([
             (self.registration_pda, registration),
             keyed_account_for_system_program(),
             (self.register_chain_pda, record),
-        ]
+        ]);
+        accounts
     }
 
     fn submit(&self, mollusk: &Mollusk, accounts: Vec<(Pubkey, Account)>) -> InstructionResult {
         let ix = Instruction::new_with_bytes(
             program_id(),
-            &register_chain_ix_data(self.guardian_set_bump, &self.body),
+            &register_chain_ix_data(self.vaa.guardian_set_bump, &self.vaa.body),
             self.account_metas(),
         );
         mollusk.process_instruction(&ix, &accounts)
@@ -255,8 +222,10 @@ fn rejects() {
             emitter_a,
         )
     };
-    let mut wrong_module = any_target();
-    wrong_module.module[31] ^= 1;
+    let wrong_module = GovernanceHeader {
+        module: TOKEN_BRIDGE_GOVERNANCE_MODULE.one_bit_off(),
+        ..any_target()
+    };
     let mut wrong_action = any_target();
     wrong_action.action = 2;
     let wormchain_target = governance_header(

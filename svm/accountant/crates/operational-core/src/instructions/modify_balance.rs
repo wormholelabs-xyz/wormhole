@@ -1,30 +1,33 @@
-//! `modify_balance`: accountant governance. Applies an Add or Subtract delta to a
-//! `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the replay guard.
+//! `modify_balance`: accountant governance for the caller's module. Applies an Add or
+//! Subtract delta to a `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the
+//! replay guard.
 //! Accepts target chain `SOLANA_CHAIN_ID` only.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
-use anchor_lang::solana_program::system_program;
 
-use accountant_operational_core::accounts::{self, balance as balance_account};
-use accountant_operational_core::cpi::shim;
-use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
-use accountant_operational_core::{ProgramCoreResult, ProgramResult};
-
+use crate::accounts::{self, balance as balance_account};
+use crate::cpi::shim;
 use crate::definitions::{
-    split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
-    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFY_BALANCE_SEED_PREFIX,
+    split_body, BalanceAccountKey, BalanceAccountLayout, GlobalAccountantError, GovernanceModule,
+    ModificationKind, ModifyBalanceIxData, ModifyBalanceKey, ModifyBalanceLayout,
+    ModifyBalancePayload, VaaBodyHeader,
 };
-use crate::err;
-use crate::instructions::transfer::derive_balance_account_pda;
+use crate::hash::double_keccak256;
+use crate::support::pda;
+use crate::{err, ProgramCoreResult, ProgramResult};
 
 /// A `ModifyBalance` body is exactly header + payload.
 const MODIFY_BALANCE_BODY_LEN: usize = VaaBodyHeader::LEN + ModifyBalancePayload::LEN;
 
-/// Order: instruction framing, signer, Shim signature check, governance validation,
-/// PDA checks, replay guard, balance delta, modification record.
-pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+/// Order: instruction framing, signer, Shim signature check, governance validation against
+/// `module`, PDA checks, replay guard, balance delta, modification record.
+pub fn process(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+    module: &GovernanceModule,
+) -> ProgramResult {
     let (ix, body) = parse_instruction(data)?;
 
     // Accounts:
@@ -52,7 +55,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     )?;
 
     let (header, payload) = ModifyBalancePayload::from_body(body).map_err(err)?;
-    let kind = payload.validate(header).map_err(err)?;
+    let kind = payload.validate(header, module).map_err(err)?;
 
     let balance_bump = check_balance_pda(program_id, balance_pda, payload)?;
     let modification_bump =
@@ -92,16 +95,12 @@ fn check_balance_pda(
     balance_pda: &AccountInfo,
     payload: &ModifyBalancePayload,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_balance_account_pda(
-        program_id,
+    let key = BalanceAccountKey::new(
         payload.chain_id(),
         payload.token_chain(),
-        &payload.token_address,
+        payload.token_address,
     );
-    if balance_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    Ok(bump)
+    pda::check(program_id, balance_pda, &key)
 }
 
 /// `modify_balance_pda` must be the canonical account for `sequence` and must not exist yet
@@ -111,22 +110,17 @@ fn check_modify_balance_pda(
     modify_balance_pda: &AccountInfo,
     sequence: u64,
 ) -> ProgramCoreResult<u8> {
-    let (expected, bump) = derive_modify_balance_pda(program_id, sequence);
-    if modify_balance_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
-    if modify_balance_pda.owner != &system_program::ID {
-        return Err(err(GlobalAccountantError::DuplicateModifyBalance));
-    }
-    Ok(bump)
+    pda::check_uninitialised(
+        program_id,
+        modify_balance_pda,
+        &ModifyBalanceKey::new(sequence),
+        GlobalAccountantError::DuplicateModifyBalance,
+    )
 }
 
 /// `(b"modify_balance", sequence_be)`.
 pub fn derive_modify_balance_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[MODIFY_BALANCE_SEED_PREFIX, &sequence.to_be_bytes()],
-        program_id,
-    )
+    pda::derive(program_id, &ModifyBalanceKey::new(sequence))
 }
 
 /// Apply `kind` with `payload.amount()`. Add on an absent PDA creates it with
@@ -140,8 +134,7 @@ fn apply_delta<'info>(
     kind: ModificationKind,
 ) -> ProgramResult {
     let amount = payload.amount();
-    // Not initialized branch
-    if balance_pda.owner == &system_program::ID {
+    if !pda::is_initialised(program_id, balance_pda)? {
         return match kind {
             ModificationKind::Subtract => Err(err(GlobalAccountantError::ModifyBalanceUnderflow)),
             ModificationKind::Add => balance_account::create(
@@ -175,16 +168,6 @@ fn record_modify_balance<'info>(
     payload: &ModifyBalancePayload,
     kind: ModificationKind,
 ) -> ProgramResult {
-    let bump_seed = [modification_bump];
-    let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
-    create_pda_allow_prefund(
-        payer,
-        modify_balance_pda,
-        program_id,
-        seeds,
-        ModifyBalanceLayout::LEN as u64,
-    )?;
-
     let record = ModifyBalanceLayout::new(
         kind,
         payload.chain_id(),
@@ -194,7 +177,14 @@ fn record_modify_balance<'info>(
         payload.amount(),
         payload.reason,
     );
-    accounts::store(modify_balance_pda, &record)
+    pda::create(
+        program_id,
+        payer,
+        modify_balance_pda,
+        &record.key(),
+        modification_bump,
+        &record,
+    )
 }
 
 /// Log the modification for off-chain indexers.

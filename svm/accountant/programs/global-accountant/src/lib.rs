@@ -1,7 +1,7 @@
 //! Wormhole Global Accountant (WTT) Solana program, anchor-lang 1.1.2.
 //!
-//! Shared machinery lives in `accountant-operational-core`. This crate holds the
-//! governance handlers, the Token Bridge transfer applicator, and the `#[program]` entry.
+//! Shared machinery lives in `accountant-operational-core`, including the governance
+//! handlers. This crate holds the Token Bridge parsing paths and the `#[program]` entry.
 //!
 //! Wire-format constraints; keep these when you change the program:
 //!
@@ -24,6 +24,9 @@ pub mod raw_ix_data;
 
 pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;
+
+use accountant_operational_core::instructions as shared;
+use definitions::{ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE};
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
@@ -79,11 +82,7 @@ pub mod global_accountant {
                 noreplay_bucket
             ]
         );
-        accountant_operational_core::instructions::close_pending::process(
-            ctx.program_id,
-            &accounts,
-            &ix_data.0,
-        )?;
+        shared::close_pending::process(ctx.program_id, &accounts, &ix_data.0)?;
         Ok(())
     }
 
@@ -110,7 +109,7 @@ pub mod global_accountant {
         Ok(())
     }
 
-    /// See `crate::instructions::register_chain`.
+    /// See `accountant_operational_core::instructions::register_chain`.
     #[instruction(discriminator = 3)]
     pub fn register_chain(ctx: Context<RegisterChain>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -125,11 +124,16 @@ pub mod global_accountant {
                 register_chain_pda,
             ]
         );
-        crate::instructions::register_chain::process(ctx.program_id, &accounts, &ix_data.0)?;
+        shared::register_chain::process(
+            ctx.program_id,
+            &accounts,
+            &ix_data.0,
+            &TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        )?;
         Ok(())
     }
 
-    /// See `crate::instructions::modify_balance`.
+    /// See `accountant_operational_core::instructions::modify_balance`.
     #[instruction(discriminator = 4)]
     pub fn modify_balance(ctx: Context<ModifyBalance>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -144,11 +148,16 @@ pub mod global_accountant {
                 modify_balance_pda,
             ]
         );
-        crate::instructions::modify_balance::process(ctx.program_id, &accounts, &ix_data.0)?;
+        shared::modify_balance::process(
+            ctx.program_id,
+            &accounts,
+            &ix_data.0,
+            &ACCOUNTANT_GOVERNANCE_MODULE,
+        )?;
         Ok(())
     }
 
-    /// See `crate::instructions::upgrade_contract`.
+    /// See `accountant_operational_core::instructions::upgrade_contract`.
     #[instruction(discriminator = 5)]
     pub fn upgrade_contract(ctx: Context<UpgradeContract>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
@@ -172,7 +181,12 @@ pub mod global_accountant {
                 bpf_loader_upgradeable_program,
             ]
         );
-        crate::instructions::upgrade_contract::process(ctx.program_id, &accounts, &ix_data.0)?;
+        shared::upgrade_contract::process(
+            ctx.program_id,
+            &accounts,
+            &ix_data.0,
+            &ACCOUNTANT_GOVERNANCE_MODULE,
+        )?;
         Ok(())
     }
 }

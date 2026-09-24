@@ -63,6 +63,21 @@ pub fn is_marked(
     Ok(account.is_marked(sequence))
 }
 
+/// `AlreadyAccounted` when `(chain, emitter, sequence)` is marked.
+#[inline(always)]
+pub fn reject_if_marked(
+    bucket: &AccountInfo,
+    program_id: &Pubkey,
+    chain: u16,
+    emitter: &[u8; 32],
+    sequence: u64,
+) -> ProgramResult {
+    if is_marked(bucket, program_id, chain, emitter, sequence)? {
+        return Err(err(GlobalAccountantError::AlreadyAccounted));
+    }
+    Ok(())
+}
+
 /// Check `noreplay_authority` is this program's authority PDA; returns its bump.
 fn verify_authority(
     program_id: &Pubkey,

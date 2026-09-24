@@ -10,7 +10,6 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::cpi::noreplay;
-use accountant_operational_core::hash::{double_keccak256, observation_signing_digest};
 use accountant_operational_core::support::commit_log;
 use accountant_operational_core::support::quorum::{self, ParsedObservation};
 use accountant_operational_core::ProgramResult;
@@ -20,8 +19,8 @@ use crate::definitions::{
     PendingObservationsLayout, SubmitObservationsIxData, SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
-use crate::instructions::transfer;
 use accountant_operational_core::accounts::chain_registration;
+use accountant_operational_core::transfer;
 
 /// `data`: `SubmitObservationsIxData`, 245 bytes fixed.
 ///
@@ -42,14 +41,18 @@ use accountant_operational_core::accounts::chain_registration;
 /// ```
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let ix = SubmitObservationsIxData::from_bytes(data).map_err(err)?;
-    let tx_hash = &ix.tx_hash;
     let fields = ix.fields_and_digest();
+    let digests = quorum::observation_digests(SUBMIT_OBSERVATION_PREFIX, &ix.tx_hash, &fields);
 
-    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, &fields);
-    // Pending-PDA / commit-log key. Independent of `tx_hash`.
-    let content_digest = double_keccak256(&fields);
-
-    let parsed = ParsedObservation::from_ix(ix, content_digest);
+    let parsed = ParsedObservation {
+        content_digest: digests.content,
+        chain: ix.chain(),
+        emitter: ix.emitter,
+        sequence: ix.sequence(),
+        guardian_set_index: ix.guardian_set_index(),
+        guardian_index: ix.guardian_index,
+        signature: ix.signature,
+    };
 
     // Accounts:
     //   0. `[WRITE, SIGNER]` submitter (rent payer)
@@ -73,15 +76,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    if noreplay::is_marked(
+    noreplay::reject_if_marked(
         noreplay_bucket,
         program_id,
         parsed.chain,
         &parsed.emitter,
         parsed.sequence,
-    )? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
+    )?;
 
     // SECURITY: a signed observation from an unregistered emitter must not move balances.
     chain_registration::verify(
@@ -96,7 +97,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         guardian_set,
         parsed.guardian_set_index,
         parsed.guardian_index,
-        &signing_digest,
+        &digests.signing,
         &parsed.signature,
     )?;
     let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);
@@ -135,19 +136,19 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     );
 
     // An unknown action fails here, rolling back the NoReplay mark above.
-    if is_transfer_action(parsed.action) {
+    if is_transfer_action(ix.action) {
         transfer::apply_transfer(
             program_id,
             submitter,
             source_account_pda,
             dest_account_pda,
             parsed.chain,
-            parsed.recipient_chain,
-            parsed.token_chain,
-            &parsed.token_address,
-            parsed.amount,
+            ix.recipient_chain(),
+            ix.token_chain(),
+            &ix.token_address,
+            ix.amount,
         )?;
-    } else if !is_attest_action(parsed.action) {
+    } else if !is_attest_action(ix.action) {
         return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
     }
 

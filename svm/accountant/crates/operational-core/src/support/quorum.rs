@@ -7,17 +7,31 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
-    GlobalAccountantError, PendingObservationsLayout, SubmitObservationsIxData, Uint256,
-    VaaBodyHeader, PENDING_OBSERVATIONS_SEED_PREFIX,
+    GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout, VaaBodyHeader,
 };
 use crate::err;
-use crate::hash::keccak256;
+use crate::hash::{double_keccak256, keccak256, observation_signing_digest};
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
-use crate::support::pda_init::create_pda_allow_prefund;
+use crate::support::pda;
 
-// `submit_observations` data is `SubmitObservationsIxData` (fixed size). Signing digest:
-// `keccak256(prefix ‖ tx_hash ‖ ix.fields_and_digest())`. Content digest:
-// `keccak256(keccak256(ix.fields_and_digest()))`, independent of `tx_hash`.
+/// The two digests of one observation over `fields = ix.fields_and_digest()`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationDigests {
+    /// `keccak256(prefix ‖ tx_hash ‖ fields)`; what the guardian signs.
+    pub signing: [u8; 32],
+    /// `keccak256(keccak256(fields))`; pending-PDA seed and commit-log key, independent of
+    /// `tx_hash`.
+    pub content: [u8; 32],
+}
+
+/// SECURITY: keep `signing` a single prefixed keccak and `content` a double keccak. The two
+/// must differ from each other and from the VAA digest.
+pub fn observation_digests(prefix: &[u8], tx_hash: &[u8; 32], fields: &[u8]) -> ObservationDigests {
+    ObservationDigests {
+        signing: observation_signing_digest(prefix, tx_hash, fields),
+        content: double_keccak256(fields),
+    }
+}
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
@@ -25,7 +39,7 @@ pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 /// Header plus a non-empty payload; used to bound a staged/inline VAA body elsewhere.
 pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
 
-/// Build with [`Self::from_ix`].
+/// Observation fields the quorum path reads; product fields stay on each program's ix.
 #[derive(Clone, Copy)]
 pub struct ParsedObservation {
     /// Pending-PDA seed and commit-log key.
@@ -36,35 +50,6 @@ pub struct ParsedObservation {
     pub guardian_set_index: u32,
     pub guardian_index: u8,
     pub signature: [u8; SECP256K1_SIGNATURE_LEN],
-    /// 0x02 is a no-op; anything but 0x01/0x02/0x03 is `UnknownTokenBridgePayload`.
-    pub action: u8,
-    /// Set only when `action` is a transfer.
-    pub token_chain: u16,
-    /// Set only when `action` is a transfer.
-    pub token_address: [u8; 32],
-    /// Set only when `action` is a transfer.
-    pub recipient_chain: u16,
-    /// Set only when `action` is a transfer.
-    pub amount: Uint256,
-}
-
-impl ParsedObservation {
-    pub fn from_ix(ix: &SubmitObservationsIxData, content_digest: [u8; 32]) -> Self {
-        Self {
-            content_digest,
-            chain: ix.chain(),
-            emitter: ix.emitter,
-            sequence: ix.sequence(),
-            guardian_set_index: ix.guardian_set_index(),
-            guardian_index: ix.guardian_index,
-            signature: ix.signature,
-            action: ix.action,
-            token_chain: ix.token_chain(),
-            token_address: ix.token_address,
-            recipient_chain: ix.recipient_chain(),
-            amount: ix.amount,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,17 +71,14 @@ pub fn derive_pending_pda(
     guardian_set_index: u32,
     content_digest: &[u8; 32],
 ) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[
-            PENDING_OBSERVATIONS_SEED_PREFIX,
-            &chain.to_be_bytes(),
-            emitter,
-            &sequence.to_be_bytes(),
-            &guardian_set_index.to_be_bytes(),
-            content_digest,
-        ],
-        program_id,
-    )
+    let key = PendingObservationsKey::new(
+        chain,
+        *emitter,
+        sequence,
+        guardian_set_index,
+        *content_digest,
+    );
+    pda::derive(program_id, &key)
 }
 
 /// `InvalidPda` unless `pending_pda` is at the address for
@@ -110,17 +92,14 @@ fn verify_pending_pda_address(
     guardian_set_index: u32,
     content_digest: &[u8; 32],
 ) -> crate::ProgramResult {
-    let (expected, _bump) = derive_pending_pda(
-        program_id,
+    let key = PendingObservationsKey::new(
         chain,
-        emitter,
+        *emitter,
         sequence,
         guardian_set_index,
-        content_digest,
+        *content_digest,
     );
-    if pending_pda.key != &expected {
-        return Err(err(GlobalAccountantError::InvalidPda));
-    }
+    pda::check(program_id, pending_pda, &key)?;
     Ok(())
 }
 
@@ -130,14 +109,11 @@ pub fn decide_pending_action(
     pending_pda: &AccountInfo,
     parsed: &ParsedObservation,
 ) -> crate::ProgramCoreResult<PendingAction> {
-    let owner_is_system = pending_pda.owner == &anchor_lang::solana_program::system_program::ID;
-    let data_len = pending_pda.data_len();
-
-    if owner_is_system && data_len == 0 {
+    if !pda::is_initialised(program_id, pending_pda)? {
+        if pending_pda.data_len() != 0 {
+            return Err(err(GlobalAccountantError::InvalidPda));
+        }
         return Ok(PendingAction::Create);
-    }
-    if owner_is_system {
-        return Err(err(GlobalAccountantError::InvalidPda));
     }
 
     verify_pending_pda_address(
@@ -202,44 +178,28 @@ fn create_pending_pda<'info>(
     pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
 ) -> crate::ProgramResult {
-    let (_expected, canonical_bump) = derive_pending_pda(
-        program_id,
+    let key = PendingObservationsKey::new(
         parsed.chain,
-        &parsed.emitter,
+        parsed.emitter,
         parsed.sequence,
         parsed.guardian_set_index,
-        &parsed.content_digest,
+        parsed.content_digest,
     );
-
-    let chain_be = parsed.chain.to_be_bytes();
-    let sequence_be = parsed.sequence.to_be_bytes();
-    let index_be = parsed.guardian_set_index.to_be_bytes();
-    let bump_seed = [canonical_bump];
-    let seeds: &[&[u8]] = &[
-        PENDING_OBSERVATIONS_SEED_PREFIX,
-        &chain_be,
-        &parsed.emitter,
-        &sequence_be,
-        &index_be,
-        &parsed.content_digest,
-        &bump_seed,
-    ];
-
-    create_pda_allow_prefund(
-        submitter,
-        pending_pda,
-        program_id,
-        seeds,
-        PendingObservationsLayout::LEN as u64,
-    )?;
-
+    let (_expected, canonical_bump) = pda::derive(program_id, &key);
     let layout = PendingObservationsLayout::new(
         parsed.chain,
         parsed.guardian_set_index,
         parsed.content_digest,
         submitter.key.to_bytes(),
     );
-    accounts::store(pending_pda, &layout)
+    pda::create(
+        program_id,
+        submitter,
+        pending_pda,
+        &key,
+        canonical_bump,
+        &layout,
+    )
 }
 
 /// Refund `recorded_payer` and close the account.

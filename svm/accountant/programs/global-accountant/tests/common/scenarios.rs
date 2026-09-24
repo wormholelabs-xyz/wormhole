@@ -1,63 +1,21 @@
+use accountant_operational_core::accounts::balance;
 use accountant_operational_core::accounts::chain_registration;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
-use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::Uint256;
 use mollusk_svm::program::keyed_account_for_system_program;
-use mollusk_svm::result::{InstructionResult, ProgramResult};
+use mollusk_svm::result::InstructionResult;
 use mollusk_svm::Mollusk;
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
 
-use super::accounts::*;
-use super::guardians::*;
-use super::ids::*;
-use super::ix::*;
-use super::mollusk::*;
+use super::*;
 
-pub const GUARDIAN_COUNT: usize = 19;
-pub const QUORUM: u8 = 13;
-pub const GUARDIAN_SET_INDEX: u32 = 4;
-pub const SOLANA: u16 = 1;
-pub const ETHEREUM: u16 = 2;
 pub const TOKEN_ADDRESS: [u8; 32] = [0x77u8; 32];
-pub const SUBMITTER: Pubkey = Pubkey::new_from_array([0x11u8; 32]);
-pub const GUARDIAN_SIGNATURES: Pubkey = Pubkey::new_from_array([0xC5u8; 32]);
-
-pub fn emitter(seed: u8) -> [u8; 32] {
-    let mut emitter = [0u8; 32];
-    emitter[0] = seed;
-    emitter[31] = 0x77;
-    emitter
-}
 
 pub fn noreplay_authority() -> Pubkey {
     noreplay_authority_pda(&program_id())
-}
-
-pub fn error_code(result: &ProgramResult) -> Option<u64> {
-    match result {
-        ProgramResult::Failure(err) => Some(u64::from(err.clone())),
-        _ => None,
-    }
-}
-
-pub fn assert_success(result: &InstructionResult, label: &str) {
-    assert!(
-        matches!(result.program_result, ProgramResult::Success),
-        "{label}: {:?}",
-        result.program_result
-    );
-}
-
-pub fn assert_error(result: &InstructionResult, expected: u64, label: &str) {
-    assert_eq!(
-        error_code(&result.program_result),
-        Some(expected),
-        "{label}: {:?}",
-        result.program_result
-    );
 }
 
 #[derive(Clone, Copy)]
@@ -97,7 +55,7 @@ impl Transfer {
     }
 
     pub fn source(&self) -> Pubkey {
-        derive_balance_account_pda(
+        balance::derive_pda(
             &program_id(),
             self.chain,
             self.token_chain,
@@ -107,7 +65,7 @@ impl Transfer {
     }
 
     pub fn dest(&self) -> Pubkey {
-        derive_balance_account_pda(
+        balance::derive_pda(
             &program_id(),
             self.recipient_chain,
             self.token_chain,
@@ -117,42 +75,25 @@ impl Transfer {
     }
 }
 
-pub fn signatures_for(guardians: &[Guardian], digest: &[u8; 32], count: u8) -> Vec<(u8, [u8; 65])> {
-    (0..count)
-        .map(|i| (i, sign_digest(&guardians[i as usize], digest)))
-        .collect()
-}
-
-pub fn guardian_keys(guardians: &[Guardian]) -> Vec<[u8; GUARDIAN_PUBKEY_LENGTH]> {
-    guardians.iter().map(|g| g.eth_address).collect()
-}
-
 #[derive(Clone)]
 pub struct VaaScenario {
     pub chain: u16,
     pub emitter: [u8; 32],
     pub sequence: u64,
-    pub body: Vec<u8>,
-    pub guardian_set_bump: u8,
-    pub guardian_set: Pubkey,
+    pub vaa: SignedVaa,
     pub noreplay_bucket: Pubkey,
     pub source_account: Pubkey,
     pub dest_account: Pubkey,
     pub chain_registration: Pubkey,
-    pub guardians: Vec<Guardian>,
 }
 
 impl VaaScenario {
     pub fn transfer(transfer: Transfer) -> Self {
-        let (guardian_set, guardian_set_bump) =
-            derive_guardian_set_pda(GUARDIAN_SET_INDEX, &core_bridge_program_id());
         Self {
             chain: transfer.chain,
             emitter: transfer.emitter,
             sequence: transfer.sequence,
-            body: transfer.body(),
-            guardian_set_bump,
-            guardian_set,
+            vaa: SignedVaa::new(transfer.body()),
             noreplay_bucket: derive_bucket_pda(
                 &noreplay_authority(),
                 transfer.chain,
@@ -163,16 +104,12 @@ impl VaaScenario {
             source_account: transfer.source(),
             dest_account: transfer.dest(),
             chain_registration: chain_registration::derive_pda(&program_id(), transfer.chain).0,
-            guardians: make_guardians(GUARDIAN_COUNT, 0x42),
         }
     }
 
     pub fn account_metas(&self) -> Vec<AccountMeta> {
-        vec![
-            AccountMeta::new(SUBMITTER, true),
-            AccountMeta::new_readonly(shim_program_id(), false),
-            AccountMeta::new_readonly(self.guardian_set, false),
-            AccountMeta::new_readonly(GUARDIAN_SIGNATURES, false),
+        let mut metas = self.vaa.shim_metas();
+        metas.extend([
             AccountMeta::new(self.noreplay_bucket, false),
             AccountMeta::new_readonly(noreplay_program_id(), false),
             AccountMeta::new_readonly(noreplay_authority(), false),
@@ -180,33 +117,13 @@ impl VaaScenario {
             AccountMeta::new(self.dest_account, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(self.chain_registration, false),
-        ]
+        ]);
+        metas
     }
 
     pub fn accounts(&self) -> Vec<(Pubkey, Account)> {
-        let digest = double_keccak256(&self.body);
-        vec![
-            (SUBMITTER, system_owned_account(50_000_000_000)),
-            keyed_account_for_verify_vaa_shim_program(),
-            (
-                self.guardian_set,
-                guardian_set_account(
-                    GUARDIAN_SET_INDEX,
-                    &guardian_keys(&self.guardians),
-                    0,
-                    0,
-                    &core_bridge_program_id(),
-                ),
-            ),
-            (
-                GUARDIAN_SIGNATURES,
-                guardian_signatures_account(
-                    GUARDIAN_SET_INDEX,
-                    &SUBMITTER,
-                    &signatures_for(&self.guardians, &digest, QUORUM),
-                    &shim_program_id(),
-                ),
-            ),
+        let mut accounts = self.vaa.shim_accounts();
+        accounts.extend([
             (self.noreplay_bucket, noreplay_bucket_unmarked()),
             keyed_account_for_noreplay_program(),
             (noreplay_authority(), system_owned_account(0)),
@@ -217,14 +134,15 @@ impl VaaScenario {
                 self.chain_registration,
                 chain_registration_account(self.chain, self.emitter),
             ),
-        ]
+        ]);
+        accounts
     }
 
     pub fn submit(&self, mollusk: &Mollusk, accounts: Vec<(Pubkey, Account)>) -> InstructionResult {
         self.submit_with(
             mollusk,
             accounts,
-            submit_vaas_ix_data(self.guardian_set_bump, &self.body),
+            submit_vaas_ix_data(self.vaa.guardian_set_bump, &self.vaa.body),
         )
     }
 
@@ -414,14 +332,11 @@ impl ObsScenario {
     pub fn submit_range(
         &self,
         mollusk: &Mollusk,
-        mut accounts: Vec<(Pubkey, Account)>,
+        accounts: Vec<(Pubkey, Account)>,
         range: std::ops::Range<u8>,
     ) -> Vec<(Pubkey, Account)> {
-        for i in range {
-            let result = self.submit_once(mollusk, accounts, i);
-            assert_success(&result, &format!("observation {i}"));
-            accounts = result.resulting_accounts;
-        }
-        accounts
+        accountant_test_harness::submit_range(mollusk, accounts, range, |m, a, i| {
+            self.submit_once(m, a, i)
+        })
     }
 }
