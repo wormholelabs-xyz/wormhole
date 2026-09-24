@@ -16,7 +16,7 @@ use accountant_operational_core::instructions::modify_balance::derive_modify_bal
 use accountant_operational_core::instructions::register_chain::derive_register_chain_pda;
 use accountant_operational_core::support::pda;
 use global_accountant_definitions::{
-    ChainRegistrationLayout, GlobalAccountantError, ManagerMode, ModificationKind,
+    BelongsToHub, ChainRegistrationLayout, GlobalAccountantError, ManagerMode, ModificationKind,
     TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
     GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, NTT_ACCOUNTANT_GOVERNANCE_MODULE,
     REGISTER_CHAIN_ACTION, RELAYER_GOVERNANCE_MODULE, SOLANA_CHAIN_ID,
@@ -133,7 +133,7 @@ fn surfpool_ntt_lifecycle() {
     );
     assert_eq!(
         layout::<TransceiverHubLayout>(&rpc.get_account(&hub_pda).expect("hub PDA")),
-        TransceiverHubLayout::new(hub_key, hub_key),
+        TransceiverHubLayout::new(hub_key, BelongsToHub(hub_key)),
         "self-referential hub"
     );
 
@@ -195,7 +195,7 @@ fn surfpool_ntt_lifecycle() {
     );
     assert_eq!(
         layout::<TransceiverHubLayout>(&rpc.get_account(&spoke_hub_pda).expect("spoke hub PDA")),
-        TransceiverHubLayout::new(spoke_key, hub_key),
+        TransceiverHubLayout::new(spoke_key, BelongsToHub(hub_key)),
         "spoke adopted the hub"
     );
     assert_eq!(

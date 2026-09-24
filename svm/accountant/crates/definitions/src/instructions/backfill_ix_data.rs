@@ -82,7 +82,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
-use crate::pda::{TransceiverHubKey, TransceiverPeerKey};
+use crate::pda::{BelongsToHub, TransceiverHubKey, TransceiverPeerKey};
 use crate::primitives::Uint256;
 use crate::state::{TransceiverHubLayout, TransceiverPeerLayout};
 
@@ -333,9 +333,14 @@ impl BackfillTransceiverHubEntry {
         TransceiverHubKey::new(self.hub_chain(), self.hub_address)
     }
 
+    /// [`hub`](Self::hub) in the form [`TransceiverHubLayout::new`] takes.
+    pub fn belongs_to_hub(&self) -> BelongsToHub {
+        BelongsToHub(self.hub())
+    }
+
     /// Account bytes, from the constructor `register_hub` and `register_peer` use.
     pub fn layout(&self) -> TransceiverHubLayout {
-        TransceiverHubLayout::new(self.key(), self.hub())
+        TransceiverHubLayout::new(self.key(), self.belongs_to_hub())
     }
 }
 
@@ -1322,7 +1327,7 @@ mod tests {
             batch.entries()[0].layout(),
             TransceiverHubLayout::new(
                 TransceiverHubKey::new(2, [0x11; 32]),
-                TransceiverHubKey::new(1, [0x7B; 32]),
+                BelongsToHub(TransceiverHubKey::new(1, [0x7B; 32])),
             )
         );
         assert_eq!(bytes.len(), BackfillTransceiverHubEntry::LEN);

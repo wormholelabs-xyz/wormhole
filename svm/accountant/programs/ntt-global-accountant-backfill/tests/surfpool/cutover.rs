@@ -29,8 +29,8 @@ use accountant_operational_core::support::pda;
 use accountant_test_fixtures::{NttCorpus, NttVector};
 use global_accountant_definitions::ntt_global_accountant_backfill::Instruction as Arm;
 use global_accountant_definitions::{
-    GlobalAccountantError, TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey,
-    TransceiverPeerLayout, Uint256,
+    BelongsToHub, GlobalAccountantError, TransceiverHubKey, TransceiverHubLayout,
+    TransceiverPeerKey, TransceiverPeerLayout, Uint256,
 };
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
@@ -249,7 +249,7 @@ fn surfpool_ntt_cutover_rehearsal() {
         layout::<TransceiverHubLayout>(&hub_before),
         TransceiverHubLayout::new(
             TransceiverHubKey::new(settled.chain, settled.emitter),
-            TransceiverHubKey::new(hub.0, hub.1),
+            BelongsToHub(TransceiverHubKey::new(hub.0, hub.1)),
         ),
         "backfilled hub layout"
     );

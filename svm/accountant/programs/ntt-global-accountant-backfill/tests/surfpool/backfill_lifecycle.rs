@@ -333,7 +333,7 @@ fn surfpool_ntt_backfill_lifecycle() {
         assert_written(
             &account,
             &id,
-            TransceiverHubLayout::new(entry.key(), entry.hub()),
+            TransceiverHubLayout::new(entry.key(), entry.belongs_to_hub()),
             "transceiver hub",
         );
     }

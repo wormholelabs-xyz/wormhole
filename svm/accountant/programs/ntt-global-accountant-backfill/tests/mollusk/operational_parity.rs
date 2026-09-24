@@ -11,8 +11,8 @@ use accountant_test_fixtures::NttCorpus;
 use accountant_test_harness::mollusk_with_fixtures;
 use global_accountant_definitions::ntt_global_accountant_backfill::Instruction;
 use global_accountant_definitions::{
-    parse_delivery_instruction, TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey,
-    TransceiverPeerLayout, Uint256, VaaBodyHeader,
+    parse_delivery_instruction, BelongsToHub, TransceiverHubKey, TransceiverHubLayout,
+    TransceiverPeerKey, TransceiverPeerLayout, Uint256, VaaBodyHeader,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::Mollusk;
@@ -63,7 +63,7 @@ fn backfilled_hub_satisfies_operational_register_peer() {
         layout::<TransceiverHubLayout>(&backfilled_hub),
         TransceiverHubLayout::new(
             TransceiverHubKey::new(SOLANA, HUB),
-            TransceiverHubKey::new(SOLANA, HUB),
+            BelongsToHub(TransceiverHubKey::new(SOLANA, HUB)),
         ),
         "backfilled hub layout"
     );
