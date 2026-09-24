@@ -36,6 +36,7 @@ borsh = "=1.5.7"
 solana-secp256k1-recover = "=3.2.0"
 global-accountant-definitions = { path = "crates/definitions" }
 accountant-operational-core = { path = "crates/operational-core" }
+accountant-backfill-core = { path = "crates/backfill-core" }
 accountant-test-fixtures = { path = "crates/test-fixtures" }
 # Compile-time base58 decoding for external program IDs. `no_std`, two const
 # hashing deps. Same version the in-tree `wormhole-svm-definitions` crate uses.
@@ -54,8 +55,8 @@ solana-noreplay = { git = "ssh://git@github.com/wormholelabs-xyz/solana-noreplay
 # than by accidental unification with another crate's graph.
 solana-address = { version = "=2.6.0", default-features = false, features = ["curve25519"] }
 # Reference U256 for the `Uint256` equivalence tests. Dev-only; two packages.
-# 1.20 (fixes RUSTSEC-2026-0220, shift ops we never call) needs Rust 1.90.
-ruint = { version = "=1.17.2", default-features = false }
+# Pinned below 1.20 (fixes RUSTSEC-2026-0220) because that version needs Rust 1.90.
+ruint = { version = "=1.20.0", default-features = false }
 # Shim instruction builders; dev-only parity check for `VerifyHashData`.
 wormhole-svm-shim = { path = "../wormhole-core-shims/crates/shim" }
 solana-program = "=2.3.0"
@@ -82,6 +83,10 @@ solana-signer = "3.0"
 solana-transaction = "3.0"
 solana-commitment-config = "3.1"
 solana-system-interface = "3.2"
+# Rent constants exposed to host-side integration tests so they can derive the
+# rent-exempt minimum from `BalanceAccountLayout::LEN` instead of hardcoding it.
+# Aligned with mollusk's transitive 3.0 to avoid pulling in two versions.
+solana-rent = "3.0"
 serde_json = "1"
 # Keccak256 used by the `submit_observations` tests to recompute the
 # double-hashed body digest (`keccak(keccak(body))`) for synthetic VAAs. The

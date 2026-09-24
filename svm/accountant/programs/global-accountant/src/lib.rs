@@ -16,28 +16,24 @@
 
 #![allow(unexpected_cfgs)]
 
+use accountant_operational_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
 pub mod instructions;
-pub mod raw_ix_data;
 
-pub use accountant_operational_core::err;
+pub use accountant_operational_core::{err, raw_ix_data::RawIxData};
 pub use global_accountant_definitions as definitions;
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
-use raw_ix_data::RawIxData;
 
-declare_id!("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
+declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
 
-/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
-/// Field order must match the handler's account list.
-macro_rules! flatten_accounts {
-    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
-        vec![$($accounts.$field.to_account_info()),+]
-    };
-}
+const _: () = assert!(
+    definitions::is_global_accountant_program_id(&ID.to_bytes()),
+    "declare_id! does not match GLOBAL_ACCOUNTANT_PROGRAM_ID"
+);
 
 #[program]
 pub mod global_accountant {
@@ -47,7 +43,7 @@ pub mod global_accountant {
     #[instruction(discriminator = 0)]
     pub fn submit_observations(ctx: Context<SubmitObservations>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 submitter,
                 pending_pda,
@@ -70,7 +66,7 @@ pub mod global_accountant {
     #[instruction(discriminator = 1)]
     pub fn close_pending(ctx: Context<ClosePending>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 closer,
                 pending_pda,
@@ -91,7 +87,7 @@ pub mod global_accountant {
     #[instruction(discriminator = 2)]
     pub fn submit_vaas(ctx: Context<SubmitVaas>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 submitter,
                 verify_vaa_shim_program,
@@ -114,7 +110,7 @@ pub mod global_accountant {
     #[instruction(discriminator = 3)]
     pub fn register_chain(ctx: Context<RegisterChain>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
@@ -133,7 +129,7 @@ pub mod global_accountant {
     #[instruction(discriminator = 4)]
     pub fn modify_balance(ctx: Context<ModifyBalance>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
@@ -152,7 +148,7 @@ pub mod global_accountant {
     #[instruction(discriminator = 5)]
     pub fn upgrade_contract(ctx: Context<UpgradeContract>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,

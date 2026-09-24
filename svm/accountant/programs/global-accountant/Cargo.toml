@@ -25,7 +25,6 @@ no-entrypoint = []
 [dependencies]
 accountant-operational-core.workspace = true
 anchor-lang.workspace = true
-borsh.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
 # See the identical dependency in `crates/operational-core/Cargo.toml`:

@@ -209,6 +209,39 @@ fn add_creates_then_add_and_subtract_share_pda() {
     assert_ne!(add.modify_balance_pda, subtract.modify_balance_pda);
 }
 
+/// Regression test, PR 63 Bugbot HIGH finding: a `ModifyBalance` record PDA in the shape
+/// the backfill program writes must block replay of the archived governance VAA, and the
+/// balance — already carrying the historical delta, as the wormchain snapshot would — must
+/// stay untouched.
+#[test]
+fn backfilled_record_blocks_replay_and_leaves_balance_unchanged() {
+    let mollusk = mollusk();
+    let modification = Modification::new(0x30, 400, ModificationKind::Add, 1_000_000);
+    let backfilled_record = Account {
+        lamports: 1_000_000,
+        data: bytemuck::bytes_of(&modification.expected_record()).to_vec(),
+        owner: program_id(),
+        executable: false,
+        rent_epoch: 0,
+    };
+    // Balance already includes this modification's effect.
+    let balance = balance_account(ETHEREUM, ETHEREUM, TOKEN_ADDRESS, modification.amount);
+
+    let accounts = modification.accounts(balance, backfilled_record);
+    let before = accounts.clone();
+    let result = modification.submit(&mollusk, accounts);
+
+    assert_error(
+        &result,
+        GlobalAccountantError::DuplicateModifyBalance as u64,
+        "backfilled record blocks replay",
+    );
+    assert_eq!(
+        result.resulting_accounts, before,
+        "balance and record must be untouched"
+    );
+}
+
 #[test]
 fn rejects() {
     let mollusk = mollusk();
