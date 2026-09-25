@@ -6,7 +6,7 @@
 # "the mollusk/surfpool Rust tests do not require the TS/`anchor test`
 # harness." `[scripts] test` below simply points `anchor test` at that same
 # flow for anyone who reaches for the Anchor CLI out of habit; `anchor build`
-# itself is not part of the documented build path (`just build`/
+# itself is not part of the documented build path (`just build-devnet`/
 # `cargo build-sbf` is), though it should work interchangeably since this is
 # an ordinary SBF cdylib either way.
 
@@ -20,6 +20,8 @@ skip-lint = true
 [programs.localnet]
 global_accountant = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
 ntt_global_accountant = "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+global_accountant_backfill = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+ntt_global_accountant_backfill = "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
 
 [registry]
 url = "https://api.apr.dev"

@@ -1,5 +1,6 @@
 use global_accountant_definitions::{
-    TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
+    BelongsToHub, TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey,
+    TransceiverPeerLayout, Uint256,
 };
 use solana_account::Account;
 use solana_pubkey::Pubkey;
@@ -15,7 +16,7 @@ pub fn hub_layout(
 ) -> TransceiverHubLayout {
     TransceiverHubLayout::new(
         TransceiverHubKey::new(chain, address),
-        TransceiverHubKey::new(hub_chain, hub),
+        BelongsToHub(TransceiverHubKey::new(hub_chain, hub)),
     )
 }
 

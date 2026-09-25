@@ -1,0 +1,54 @@
+[package]
+name = "ntt-global-accountant-backfill"
+description = "Wormhole NTT Global Accountant backfill program — one-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records, relayer ChainRegistration state and the TransceiverHub and TransceiverPeer maps from a wormchain snapshot, then is upgraded out via `solana program upgrade`."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Anchor convention: the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library/CPI/test consumption. `idl-build` stays off: the 1-byte account tags and bytemuck
+# layouts have no faithful IDL (see the sibling `global-accountant-backfill` crate).
+default = []
+no-entrypoint = []
+
+[dependencies]
+accountant-backfill-core.workspace = true
+accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+borsh.workspace = true
+const-crypto.workspace = true
+global-accountant-definitions.workspace = true
+
+[dev-dependencies]
+accountant-test-fixtures.workspace = true
+accountant-test-harness.workspace = true
+bytemuck.workspace = true
+mollusk-svm.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+ntt-global-accountant-backfill = { path = ".", features = ["no-entrypoint"] }
+# The sibling WTT backfill, for the cross-program authority isolation test. `no-entrypoint`
+# keeps a second Anchor entrypoint symbol out of the test binary.
+global-accountant-backfill = { path = "../global-accountant-backfill", features = ["no-entrypoint"] }
+# `ACCDGST\0` commit-log records reach mollusk through `Mollusk::logger` as
+# `Program data: <base64>` lines.
+base64 = "=0.22.1"
+solana-svm-log-collector = { version = "=4.0.0-rc.0", features = ["agave-unstable-api"] }
+# Surfpool e2e: RPC client and the operator signing keys.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+# `Rent::default().minimum_balance`, to pin each written PDA at the rent-exempt minimum.
+solana-rent = "=3.1.0"
+
+[lints]
+workspace = true

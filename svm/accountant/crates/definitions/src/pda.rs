@@ -188,6 +188,14 @@ impl PdaSeeds for TransceiverHubKey {
     }
 }
 
+/// The hub side of a [`TransceiverHubLayout`](crate::state::TransceiverHubLayout): the hub the
+/// row's transceiver is accounted under. Its `(chain, address)` becomes the
+/// `(token_chain, token_address)` of every balance row that transceiver's transfers touch.
+/// Both sides of the layout are a [`TransceiverHubKey`], so this wrapper is what stops a
+/// swapped argument compiling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BelongsToHub(pub TransceiverHubKey);
+
 /// `(b"transceiver_peer", chain_be, address, dest_chain_be)`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransceiverPeerKey {

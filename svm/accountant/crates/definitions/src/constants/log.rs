@@ -6,6 +6,10 @@ use bytemuck::{Pod, Zeroable};
 /// 8-byte tag on every commit log entry.
 pub const ACCOUNTANT_DIGEST_LOG_TAG: [u8; 8] = *b"ACCDGST\0";
 
+/// `guardian_set_index` on a backfilled digest, whose signing set is not recorded in the
+/// wormchain snapshot. Auditors verify such an entry against the VAA archive.
+pub const UNPINNED_GUARDIAN_SET_INDEX: u32 = 0;
+
 /// Commit log entry (86 bytes). `guardian_set_index` is the set that authorised the row:
 /// the quorum set on the observations path, the signing set of the VAA on the
 /// `submit_vaas` path.

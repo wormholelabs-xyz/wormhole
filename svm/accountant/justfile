@@ -1,29 +1,72 @@
-# Build & test the Wormhole Global Accountant Solana program.
+# Build & test the Wormhole Global Accountant Solana programs.
 #
-# The program is loaded by mollusk-svm in integration tests, so the SBF
-# binary must exist before `cargo test` runs.
+# The programs are loaded by mollusk-svm in integration tests, so the SBF
+# binaries must exist before `cargo test` runs.
+#
+# Two build paths, deliberately separate:
+#   `just build-devnet` the test artifact; it uses the values below, and it is
+#                       what `test`, `check`, `clippy`, `bench` and `e2e*` use
+#   `just build`        the deploy build; every address and key comes from the
+#                       caller's environment, and a missing one aborts
 
 # Exported into every recipe so `cargo test` finds the freshly-built `.so`.
 export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 
-# External program IDs, read by `crates/definitions` via `env!` at compile
-# time. Variable names match `wormhole-svm-definitions` (`from-env`) and
-# `solana-noreplay`. A missing variable is a build error; plain `cargo` outside
-# `just` needs them exported. Values below are the test environment: mainnet
-# Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay (its
-# only deployment). A release build must set all three from one network.
-export BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
-export VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
-export NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+# Test-environment addresses and keys, read by `crates/definitions` and the two
+# backfill program crates via `env!` at compile time. Variable names match
+# `wormhole-svm-definitions` (`from-env`) and `solana-noreplay`.
+#
+# Mainnet Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay
+# (its only deployment). That mix is a test environment, not any one network.
+# A family's backfill `.so` and operational `.so` share one program account, so
+# both carry the same address; each is asserted against its `declare_id!` at
+# compile time. The two backfill authorities are the pubkeys of the
+# deterministic test keypairs `Keypair::new_from_array([1u8; 32])` and
+# `Keypair::new_from_array([2u8; 32])`.
+#
+# Plain variables, not exports. `build` below has to see an empty environment
+# when the caller has set nothing, so a deploy artifact can never inherit a test
+# value by accident.
+# A missing variable is a build error, so plain `cargo` outside `just` needs all
+# seven names set in its own environment.
+TEST_BRIDGE_ADDRESS := "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
+TEST_VERIFY_VAA_SHIM_PROGRAM_ID := "EFaNWErqAtVWufdNb7yofSHHfWFos843DFpu4JBw24at"
+TEST_NOREPLAY_PROGRAM_ID := "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
+TEST_GLOBAL_ACCOUNTANT_PROGRAM_ID := "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+TEST_NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID := "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+TEST_BACKFILL_AUTHORITY := "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaRSZ9"
+TEST_NTT_BACKFILL_AUTHORITY := "9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"
+
+# Names the deploy build requires in the caller's environment.
+DEPLOY_VARS := "BRIDGE_ADDRESS VERIFY_VAA_SHIM_PROGRAM_ID NOREPLAY_PROGRAM_ID \
+    GLOBAL_ACCOUNTANT_PROGRAM_ID NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID \
+    BACKFILL_AUTHORITY NTT_BACKFILL_AUTHORITY"
+
+# Program packages, read from `programs/*/Cargo.toml`, so a new program is never
+# silently skipped by a hard-coded list. Package names, not directory names: a
+# manifest's `name` can differ from its directory. The SBF recipes name packages
+# because the workspace also holds host-only crates (the test harness pulls in
+# `solana-client`), which do not compile for the SBF target.
+program_packages := `for m in programs/*/Cargo.toml; do awk -F'"' '/^name = /{print $2; exit}' "$m"; done | tr '\n' ' '`
+
+# Prefix that puts the test values into one command's environment.
+test_env := "BRIDGE_ADDRESS=" + TEST_BRIDGE_ADDRESS + \
+    " VERIFY_VAA_SHIM_PROGRAM_ID=" + TEST_VERIFY_VAA_SHIM_PROGRAM_ID + \
+    " NOREPLAY_PROGRAM_ID=" + TEST_NOREPLAY_PROGRAM_ID + \
+    " GLOBAL_ACCOUNTANT_PROGRAM_ID=" + TEST_GLOBAL_ACCOUNTANT_PROGRAM_ID + \
+    " NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID=" + TEST_NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID + \
+    " BACKFILL_AUTHORITY=" + TEST_BACKFILL_AUTHORITY + \
+    " NTT_BACKFILL_AUTHORITY=" + TEST_NTT_BACKFILL_AUTHORITY
 
 # Default recipe: list available targets with their docstrings.
 default:
     @just --list
 
-# One build target. The historical dev/prod split existed to gate the
-# `test-only-open-digest` feature on/off; with `open_digest` removed
-# entirely (canonical digest record now emitted via `sol_log_data`), there
-# is no longer any dev-vs-prod feature difference.
+# `build-devnet` and `build` compile identical code. They differ only in where
+# the compile-time addresses and keys come from. The historical dev/prod split
+# gated the `test-only-open-digest` feature on/off; with `open_digest` removed
+# entirely (canonical digest record now emitted via `sol_log_data`), no feature
+# difference remains.
 #
 # Anchor programs build fine under plain `cargo build-sbf` (still an ordinary
 # SBF cdylib under the hood). The old `--features bpf-entrypoint` flag is
@@ -31,13 +74,58 @@ default:
 # `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
 # of the old opt-in polarity.
 
-# Program packages only: the workspace also holds host-only crates (the test harness pulls
-# in `solana-client`), which do not compile for the SBF target.
-[doc("SBF build of the production-shape .so.")]
-build:
-    cargo build-sbf -- -p global-accountant -p ntt-global-accountant
+[doc("SBF build with the test values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority keys -- see the comment above them.")]
+build-devnet:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # bash 3.2 (macOS default) rejects `"${arr[@]}"` on an empty array under
+    # `set -u`; check the length before any such expansion.
+    all=({{program_packages}})
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+    args=()
+    for p in "${all[@]}"; do
+        args+=(-p "${p}")
+    done
+    {{test_env}} cargo build-sbf -- "${args[@]}"
 
-[doc("Alias preserved for backwards-compatibility with existing scripts.")]
+# Deploy build. Every compile-time address and key comes from the caller's
+# environment; a missing one aborts before `cargo` runs. The values are echoed
+# so the operator can read back what the artifact will enforce. Verify the
+# result with `just verify-authority <so-path> <operator-pubkey> <package>`
+# before a mainnet deploy.
+[doc("SBF build for deploy. Every address and key must be set in the environment.")]
+build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    missing=()
+    for v in {{DEPLOY_VARS}}; do
+        [ -n "${!v:-}" ] || missing+=("${v}")
+    done
+    if [ ${#missing[@]} -ne 0 ]; then
+        echo "ERROR: deploy build needs these set in the environment:" >&2
+        printf '  %s\n' "${missing[@]}" >&2
+        echo "Run 'just build-devnet' for a test artifact." >&2
+        exit 1
+    fi
+    all=({{program_packages}})
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+    args=()
+    for p in "${all[@]}"; do
+        args+=(-p "${p}")
+    done
+    echo "Building with:"
+    for v in {{DEPLOY_VARS}}; do
+        printf '  %s=%s\n' "${v}" "${!v}"
+    done
+    cargo build-sbf -- "${args[@]}"
+
+[doc("Alias of `build` (deploy build), preserved for existing scripts.")]
 build-prod: build
 
 # The mollusk suite CPIs into the real `solana_noreplay.so` and
@@ -52,8 +140,26 @@ build-prod: build
 # The override skips the SHA-256 check (active-development escape hatch).
 
 [doc("Mollusk integration tests.")]
-test: build
-    cargo test
+test: build-devnet
+    {{test_env}} cargo test
+
+# Verify a deploy-ready `.so` enforces a specific operator authority pubkey, independent of
+# the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
+# gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the
+# intended operator pubkey before every mainnet deploy.
+# `package` selects which backfill crate hosts the check; it must be the crate the `.so`
+# was built from, since the check loads it at that program's `declare_id!` address.
+[doc("Verify a deploy-ready .so enforces a specific operator authority pubkey.")]
+verify-authority so_path pubkey package="global-accountant-backfill":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # `cargo test` runs the binary from the package directory, so `so_path` is resolved
+    # here, against the caller's own working directory.
+    so=$(cd "$(dirname "{{so_path}}")" && pwd)/$(basename "{{so_path}}")
+    [ -f "${so}" ] || { echo "ERROR: no such file: ${so}" >&2; exit 1; }
+    {{test_env}} GA_VERIFY_SO="${so}" GA_EXPECT_AUTHORITY_BASE58={{pubkey}} \
+        cargo test -p {{package}} --test artifact_authority_check \
+        -- --ignored --nocapture verify_so_enforces_specific_operator_authority
 
 # SBF-target type-check. There is no upstream `cargo check-sbf`, but
 # `cargo build-sbf` registers the platform-tools compiler with rustup (e.g.
@@ -68,8 +174,8 @@ test: build
 # RUSTFLAGS=-Dwarnings promotes the compiler's own lints to errors on the SBF
 # target; `clippy-sbf` below approximates clippy coverage of the SBF arms.
 
-[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied.")]
-check:
+[doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied. With no arguments, checks every program; pass program names to narrow (e.g. `just check global-accountant`).")]
+check *programs:
     #!/usr/bin/env bash
     set -euo pipefail
     toolchain=$(rustup toolchain list | awk '/sbpf-solana/ {print $1; exit}')
@@ -78,10 +184,45 @@ check:
         echo "Run 'cargo build-sbf' once to install it." >&2
         exit 1
     fi
+
+    all=({{program_packages}})
+    if [ ${#all[@]} -eq 0 ]; then
+        echo "ERROR: no program manifests found under programs/*/Cargo.toml." >&2
+        exit 1
+    fi
+
+    # bash 3.2 (macOS default) rejects `"${arr[@]}"` on an empty array under
+    # `set -u`; check the length before any such expansion.
+    requested=({{programs}})
+    targets=()
+    if [ ${#requested[@]} -eq 0 ]; then
+        targets=("${all[@]}")
+    else
+        for name in "${requested[@]}"; do
+            match=""
+            for p in "${all[@]}"; do
+                if [ "${p}" = "${name}" ]; then
+                    match="${p}"
+                    break
+                fi
+            done
+            if [ -z "${match}" ]; then
+                echo "ERROR: unknown program '${name}'. Available:" >&2
+                printf '  %s\n' "${all[@]}" >&2
+                exit 1
+            fi
+            targets+=("${match}")
+        done
+    fi
+
+    args=()
+    for t in "${targets[@]}"; do
+        args+=(-p "${t}")
+    done
+
     echo "Using toolchain: ${toolchain}"
     export RUSTFLAGS="-Dwarnings"
-    cargo "+${toolchain}" check --locked --target sbpf-solana-solana \
-        -p global-accountant -p ntt-global-accountant
+    {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana "${args[@]}"
 
 # `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
 # via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
@@ -100,20 +241,42 @@ check:
 
 [doc("Clippy against the host build.")]
 clippy:
-    cargo clippy --all-targets -- -D warnings
+    {{test_env}} cargo clippy --all-targets -- -D warnings
 
 # Surfpool e2e suite (tests/surfpool/, one binary, all tests `#[ignore]`).
 # Single-threaded: each test spawns its own surfpool plus program deploys.
 # The upgrade_contract module is a two-step flow with its own recipes below.
 
-[doc("Surfpool e2e for both programs against fresh surfpool instances.")]
-e2e: build
-    cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
-    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+[doc("Surfpool e2e for every program against fresh surfpool instances.")]
+e2e: build-devnet e2e-backfill e2e-ntt-backfill e2e-ntt-cutover
+    {{test_env}} cargo test -p global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+    {{test_env}} cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+
+[doc("Surfpool e2e: the backfill lifecycle. The cost probes are skipped; see `e2e-backfill-probe`.")]
+e2e-backfill: build-devnet
+    {{test_env}} cargo test -p global-accountant-backfill --test surfpool -- --ignored --test-threads=1 --skip cost_probe --nocapture
+
+# Operator tooling, not a gate: the probes measure fee, compute units and rent per
+# transaction and extrapolate to the whole migration. They read the wormchain snapshot
+# catalogue at /tmp/wormchain-mainnet-snapshot/catalogue.jsonl and print a skip message
+# when it is absent. `cost_probe_at_scale` runs 5-10 minutes.
+[doc("Backfill cost probes. Needs the wormchain snapshot catalogue staged.")]
+e2e-backfill-probe: build-devnet
+    {{test_env}} cargo test -p global-accountant-backfill --test surfpool cost_probe -- --ignored --test-threads=1 --nocapture
+
+[doc("Surfpool e2e: the NTT backfill lifecycle.")]
+e2e-ntt-backfill: build-devnet
+    {{test_env}} cargo test -p ntt-global-accountant-backfill --test surfpool -- --ignored --test-threads=1 --skip cutover --nocapture
+
+# The cutover rehearsal deploys the backfill image and the operational image in turn at one
+# program id, so it runs alone rather than inside `e2e-ntt-backfill`.
+[doc("Surfpool e2e: the backfill-to-operational cutover rehearsal.")]
+e2e-ntt-cutover: build-devnet
+    {{test_env}} cargo test -p ntt-global-accountant-backfill --test surfpool cutover -- --ignored --test-threads=1 --nocapture
 
 [doc("Surfpool e2e: the NTT accountant lifecycle only.")]
-e2e-ntt: build
-    cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
+e2e-ntt: build-devnet
+    {{test_env}} cargo test -p ntt-global-accountant --test surfpool -- --ignored --test-threads=1 --skip upgrade_contract --nocapture
 
 # Two-step upgrade_contract e2e, per program (`program` is the cargo package). Step 1
 # leaves a detached surfpool running and records its pid + RPC URL in
@@ -121,12 +284,12 @@ e2e-ntt: build
 # Flow: crates/test-harness/src/upgrade_e2e.rs.
 
 [doc("upgrade_contract e2e step 1: start surfpool, deploy the accountant as upgradeable (authority = upgrade PDA), stage the buffer.")]
-e2e-upgrade-deploy program="global-accountant": build
-    cargo test -p {{program}} --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
+e2e-upgrade-deploy program="global-accountant": build-devnet
+    {{test_env}} cargo test -p {{program}} --test surfpool upgrade_contract::deploy_upgradeable_accountant -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
 e2e-upgrade-submit program="global-accountant":
-    cargo test -p {{program}} --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+    {{test_env}} cargo test -p {{program}} --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
 e2e-upgrade-stop program="global-accountant":
@@ -146,8 +309,8 @@ e2e-upgrade-stop program="global-accountant":
 # quorum-closing path) through Mollusk, writing CU numbers to the tracked
 # `programs/<program>/benches/compute_units.md`.
 [doc("CU regression bench for submit_vaas/submit_observations, both programs.")]
-bench: build
-    cargo bench
+bench: build-devnet
+    {{test_env}} cargo bench
 
 [doc("Audit Cargo.lock against the RustSec advisory database.")]
 audit:

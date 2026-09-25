@@ -4,6 +4,7 @@
 //! Product-specific scenarios stay in each program's `tests/common`.
 
 pub mod accounts;
+pub mod backfill;
 pub mod fixtures;
 pub mod guardians;
 pub mod ids;
@@ -15,6 +16,7 @@ pub mod upgrade_e2e;
 pub mod wire;
 
 pub use accounts::*;
+pub use backfill::*;
 pub use fixtures::*;
 pub use guardians::*;
 pub use ids::*;

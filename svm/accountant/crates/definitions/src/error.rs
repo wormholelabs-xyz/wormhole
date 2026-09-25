@@ -97,6 +97,8 @@ pub enum GlobalAccountantError {
     MissingDestinationPeer = 46,
     /// NTT only. The peer's entry for the sender's chain names another transceiver.
     PeersNotCrossRegistered = 47,
+    /// Backfill only. Signer does not match the expected backfill authority pubkey.
+    UnauthorizedCaller = 48,
 }
 
 impl From<GlobalAccountantError> for u32 {

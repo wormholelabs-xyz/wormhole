@@ -6,7 +6,7 @@
 //! instruction accepts any VAA on an unused sequence and overwrites the registration
 //! unconditionally. Registration recency rests entirely on the guardian network issuing one
 //! valid `RegisterChain` VAA per registration event.
-//! Accepts target chain `0` (Any) or `SOLANA_CHAIN_ID`.
+//! Accepts the target chains in `ACCEPTED_REGISTER_CHAIN_TARGETS`: `0` (Any) and Solana.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;

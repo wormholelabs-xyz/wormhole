@@ -11,6 +11,17 @@ pub const GOVERNANCE_EMITTER: [u8; 32] = [
 /// Wormhole chain ID for Solana. Governance VAAs target this or `0x0000` (Any).
 pub const SOLANA_CHAIN_ID: u16 = 1;
 
+/// Wormhole chain ID for Wormchain, home of the retiring cosmwasm accountant.
+pub const WORMCHAIN_CHAIN_ID: u16 = 3104;
+
+/// `RegisterChain` target chains: `0` (Any) and Solana. A registration VAA carries target
+/// chain 0 (`sdk/vaa/payloads.go`), so `0` is the form seen on the wire.
+pub const ACCEPTED_REGISTER_CHAIN_TARGETS: &[u16] = &[0, SOLANA_CHAIN_ID];
+
+/// `ModifyBalance` target chains: Solana. The wormchain-targeted modifications are the
+/// backfill's, written as records before the cutover, so the governance path never sees them.
+pub const ACCEPTED_MODIFY_BALANCE_TARGETS: &[u16] = &[SOLANA_CHAIN_ID];
+
 /// Governance module identifier: an ASCII name right-aligned in 32 zero-padded bytes,
 /// the first field of every governance payload (`sdk/vaa/governance.go`).
 ///
@@ -73,6 +84,7 @@ mod tests {
         assert_eq!(GOVERNANCE_EMITTER, wormhole_sdk::GOVERNANCE_EMITTER.0);
         assert_eq!(SOLANA_CHAIN_ID, wormhole_svm_definitions::solana::CHAIN_ID);
         assert_eq!(SOLANA_CHAIN_ID, u16::from(Chain::Solana));
+        assert_eq!(WORMCHAIN_CHAIN_ID, u16::from(Chain::Wormchain));
         assert_eq!(TOKEN_BRIDGE_GOVERNANCE_MODULE.0, token::MODULE);
         assert_eq!(ACCOUNTANT_GOVERNANCE_MODULE.0, accountant::MODULE);
         assert_eq!(RELAYER_GOVERNANCE_MODULE.0, relayer::MODULE);

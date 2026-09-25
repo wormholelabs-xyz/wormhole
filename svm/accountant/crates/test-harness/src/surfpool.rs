@@ -12,26 +12,35 @@ use global_accountant_definitions::{
     AccountantDigestLog, GlobalAccountantError, ACCOUNTANT_DIGEST_LOG_TAG,
 };
 use solana_account::Account;
+use solana_client::client_error::ClientError;
 use solana_client::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcTransactionConfig, UiTransactionEncoding};
 use solana_client::rpc_request::RpcRequest;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
+use solana_loader_v3_interface::instruction::upgrade as loader_upgrade_ix;
+use solana_loader_v3_interface::state::UpgradeableLoaderState;
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
+use crate::accounts::{
+    loader_account_data, loader_state, program_data_address, upgradeable_buffer_account,
+};
 use crate::fixtures::fixture_elf;
 use crate::guardians::{derive_guardian_set_pda, guardian_set_account, Guardian};
-use crate::ids::{core_bridge_program_id, shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::ids::{core_bridge_program_id, loader_v3_id, shim_program_id, NOREPLAY_PROGRAM_ID};
 use crate::scenario::guardian_keys;
 
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TX_INDEX_TIMEOUT: Duration = Duration::from_secs(5);
 const TX_INDEX_POLL_INTERVAL: Duration = Duration::from_millis(150);
+/// Program-data lamports floor for [`loader_upgrade`]; the loader charges rent for the
+/// resized account and spills the remainder.
+const PROGRAM_DATA_LAMPORTS: u64 = 10_000_000_000;
 
 /// Launch options for one surfpool instance.
 ///
@@ -301,7 +310,7 @@ fn wait_for_rpc_ready(guard: &SurfpoolGuard) {
 }
 
 /// Path of a built program: `<SBF_OUT_DIR>/<name>.so`, falling back to
-/// `<workspace>/target/deploy` two levels above this crate. Run `just build` first.
+/// `<workspace>/target/deploy` two levels above this crate. Run `just build-devnet` first.
 pub fn so_path(name: &str) -> PathBuf {
     let deploy_dir = match std::env::var_os("SBF_OUT_DIR") {
         Some(dir) => PathBuf::from(dir),
@@ -325,8 +334,12 @@ impl ProgramImage {
     /// A built program `<label>.so` from the deploy dir, to load at `program_id`.
     pub fn from_deploy_dir(label: &'static str, program_id: Pubkey) -> Self {
         let path = so_path(label);
-        let elf = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}. Run `just build` first.", path.display()));
+        let elf = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "read {}: {e}. Run `just build-devnet` first.",
+                path.display()
+            )
+        });
         Self {
             label,
             program_id,
@@ -355,6 +368,100 @@ impl ProgramImage {
             ),
         }
     }
+}
+
+/// Buffer address [`loader_upgrade`] stages the replacement image at.
+const UPGRADE_BUFFER: Pubkey = Pubkey::new_from_array([0xCBu8; 32]);
+
+/// Replace the image of the deployed program at `program_id` with `elf`, through the
+/// loader's `Upgrade`: the path `solana program upgrade` takes.
+///
+/// `authority` is made the program's upgrade authority, then signs and pays for the upgrade;
+/// fund it first. The program-data account is resized to hold `elf`, which on a cluster is
+/// fixed once at deploy time by `solana program deploy --max-len`.
+pub fn loader_upgrade(rpc: &RpcClient, program_id: &Pubkey, elf: &[u8], authority: &Keypair) {
+    let program = rpc.get_account(program_id).expect("program account");
+    assert_eq!(program.owner, loader_v3_id(), "program owner");
+    let UpgradeableLoaderState::Program {
+        programdata_address,
+    } = loader_state(&program)
+    else {
+        panic!("program account is not loader state Program");
+    };
+    assert_eq!(
+        programdata_address,
+        program_data_address(program_id),
+        "program points at the canonical program-data address"
+    );
+
+    let before = rpc
+        .get_account(&programdata_address)
+        .expect("program-data account");
+    let UpgradeableLoaderState::ProgramData {
+        slot: slot_before, ..
+    } = loader_state(&before)
+    else {
+        panic!("program-data account is not loader state ProgramData");
+    };
+    let metadata_len = UpgradeableLoaderState::size_of_programdata_metadata();
+    let mut code = before.data[metadata_len..].to_vec();
+    code.resize(code.len().max(elf.len()), 0);
+    set_account(
+        rpc,
+        &programdata_address,
+        &Account {
+            lamports: before.lamports.max(PROGRAM_DATA_LAMPORTS),
+            data: loader_account_data(
+                &UpgradeableLoaderState::ProgramData {
+                    slot: slot_before,
+                    upgrade_authority_address: Some(authority.pubkey()),
+                },
+                &code,
+            ),
+            ..before
+        },
+    );
+    set_account(
+        rpc,
+        &UPGRADE_BUFFER,
+        &upgradeable_buffer_account(&authority.pubkey(), elf),
+    );
+
+    let spill = Pubkey::new_unique();
+    send(
+        rpc,
+        "loader upgrade",
+        &[loader_upgrade_ix(
+            program_id,
+            &UPGRADE_BUFFER,
+            &authority.pubkey(),
+            &spill,
+        )],
+        &[authority],
+    );
+
+    let after = rpc
+        .get_account(&programdata_address)
+        .expect("program-data after");
+    let UpgradeableLoaderState::ProgramData {
+        slot: slot_after, ..
+    } = loader_state(&after)
+    else {
+        panic!("program-data after is not loader state ProgramData");
+    };
+    assert!(
+        slot_after > slot_before,
+        "program-data slot advances: {slot_before} -> {slot_after}"
+    );
+    assert_eq!(
+        &after.data[metadata_len..metadata_len + elf.len()],
+        elf,
+        "program-data carries the new image"
+    );
+    eprintln!(
+        "[surfpool] upgraded {program_id} to a {} byte image at slot {slot_after}",
+        elf.len()
+    );
 }
 
 /// Lowercase hex, two chars per byte. Surfpool cheat codes take program and
@@ -452,16 +559,21 @@ pub fn fund(rpc: &RpcClient, key: &Pubkey, lamports: u64) {
 ///
 /// Panics with `label` when the transaction fails preflight or execution.
 pub fn send(rpc: &RpcClient, label: &str, ixs: &[Instruction], signers: &[&Keypair]) -> Signature {
-    let payer = signers.first().expect("at least one signer").pubkey();
-    let blockhash = rpc
-        .get_latest_blockhash()
-        .unwrap_or_else(|e| panic!("{label} blockhash: {e}"));
-    let tx = Transaction::new_signed_with_payer(ixs, Some(&payer), signers, blockhash);
-    let sig = rpc
-        .send_and_confirm_transaction(&tx)
-        .unwrap_or_else(|e| panic!("{label} send_and_confirm: {e}"));
+    let sig = try_send(rpc, ixs, signers).unwrap_or_else(|e| panic!("{label} send: {e}"));
     eprintln!("[surfpool] {label} tx={sig}");
     sig
+}
+
+/// [`send`] for callers that tally failures instead of stopping at the first one.
+pub fn try_send(
+    rpc: &RpcClient,
+    ixs: &[Instruction],
+    signers: &[&Keypair],
+) -> Result<Signature, ClientError> {
+    let payer = signers.first().expect("at least one signer").pubkey();
+    let blockhash = rpc.get_latest_blockhash()?;
+    let tx = Transaction::new_signed_with_payer(ixs, Some(&payer), signers, blockhash);
+    rpc.send_and_confirm_transaction(&tx)
 }
 
 /// Send `ixs` and require the accountant to reject with `expected`.
@@ -496,26 +608,39 @@ pub fn send_expect_error(
     );
 }
 
-/// Assert that transaction `sig` emitted exactly one accountant commit-log
-/// record with the expected fields.
+/// Every accountant commit-log record emitted by transaction `sig`, in log order.
 ///
 /// Polls `getTransaction` for up to 5 s, because surfpool indexes a confirmed
-/// transaction a little after confirmation. Then scans the log messages for
+/// transaction a little after confirmation. Scans the log messages for
 /// `Program data: <base64>` lines whose decoded bytes start with
-/// `ACCOUNTANT_DIGEST_LOG_TAG`. The scan ignores other `Program data` lines.
-/// The count must equal 1, so a duplicate commit and a missing commit both
-/// fail.
-pub fn assert_canonical_log_in_tx(
-    rpc: &RpcClient,
-    sig: &Signature,
-    expected_chain: u16,
-    expected_emitter: &[u8; 32],
-    expected_sequence: u64,
-    expected_digest: &[u8; 32],
-    expected_guardian_set_index: u32,
-) {
+/// `ACCOUNTANT_DIGEST_LOG_TAG`; other `Program data` lines are skipped. A
+/// tagged payload of the wrong length panics.
+pub fn accdgst_logs_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<AccountantDigestLog> {
     use base64::Engine;
 
+    let mut entries = Vec::new();
+    for line in log_messages_in_tx(rpc, sig) {
+        let Some(b64) = line.strip_prefix("Program data: ") else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
+            continue;
+        };
+        if bytes.len() < 8 || bytes[..8] != ACCOUNTANT_DIGEST_LOG_TAG {
+            continue;
+        }
+        let entry = AccountantDigestLog::from_bytes(&bytes)
+            .unwrap_or_else(|| panic!("commit-log payload malformed: {} bytes", bytes.len()));
+        entries.push(*entry);
+    }
+    entries
+}
+
+/// `meta.logMessages` of transaction `sig`, polled until surfpool indexes it.
+///
+/// Panics when the transaction stays unindexed past `TX_INDEX_TIMEOUT`, or when
+/// the response carries no meta or no log messages.
+fn log_messages_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<String> {
     let config = RpcTransactionConfig {
         encoding: Some(UiTransactionEncoding::Json),
         commitment: Some(CommitmentConfig::confirmed()),
@@ -537,32 +662,34 @@ pub fn assert_canonical_log_in_tx(
         .meta
         .unwrap_or_else(|| panic!("getTransaction {sig} returned no meta"));
     let logs: Option<Vec<String>> = meta.log_messages.into();
-    let logs = logs.unwrap_or_else(|| panic!("getTransaction {sig} returned no logMessages"));
+    logs.unwrap_or_else(|| panic!("getTransaction {sig} returned no logMessages"))
+}
 
-    let mut matched = 0usize;
-    for line in &logs {
-        let Some(b64) = line.strip_prefix("Program data: ") else {
-            continue;
-        };
-        let bytes = match base64::engine::general_purpose::STANDARD.decode(b64.trim()) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        if bytes.len() < 8 || bytes[..8] != ACCOUNTANT_DIGEST_LOG_TAG {
-            continue;
-        }
-        let entry = AccountantDigestLog::from_bytes(&bytes)
-            .unwrap_or_else(|| panic!("commit-log payload malformed: {} bytes", bytes.len()));
-        assert_eq!(entry.chain(), expected_chain, "commit-log chain");
-        assert_eq!(&entry.emitter, expected_emitter, "commit-log emitter");
-        assert_eq!(entry.sequence(), expected_sequence, "commit-log sequence");
-        assert_eq!(&entry.digest, expected_digest, "commit-log digest");
-        assert_eq!(
-            entry.guardian_set_index(),
-            expected_guardian_set_index,
-            "commit-log guardian_set_index"
-        );
-        matched += 1;
-    }
-    assert_eq!(matched, 1, "exactly one canonical commit-log entry");
+/// Assert that transaction `sig` emitted exactly one accountant commit-log
+/// record with the expected fields.
+///
+/// The count must equal 1, so a duplicate commit and a missing commit both
+/// fail. Batch writers emit one record per entry; read those with
+/// [`accdgst_logs_in_tx`].
+pub fn assert_canonical_log_in_tx(
+    rpc: &RpcClient,
+    sig: &Signature,
+    expected_chain: u16,
+    expected_emitter: &[u8; 32],
+    expected_sequence: u64,
+    expected_digest: &[u8; 32],
+    expected_guardian_set_index: u32,
+) {
+    let entries = accdgst_logs_in_tx(rpc, sig);
+    assert_eq!(entries.len(), 1, "exactly one canonical commit-log entry");
+    let entry = &entries[0];
+    assert_eq!(entry.chain(), expected_chain, "commit-log chain");
+    assert_eq!(&entry.emitter, expected_emitter, "commit-log emitter");
+    assert_eq!(entry.sequence(), expected_sequence, "commit-log sequence");
+    assert_eq!(&entry.digest, expected_digest, "commit-log digest");
+    assert_eq!(
+        entry.guardian_set_index(),
+        expected_guardian_set_index,
+        "commit-log guardian_set_index"
+    );
 }

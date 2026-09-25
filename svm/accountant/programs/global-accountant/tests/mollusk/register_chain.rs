@@ -228,16 +228,10 @@ fn rejects() {
     };
     let mut wrong_action = any_target();
     wrong_action.action = 2;
-    let wormchain_target = governance_header(
-        TOKEN_BRIDGE_GOVERNANCE_MODULE,
-        REGISTER_CHAIN_ACTION,
-        WORMCHAIN,
-    );
-
     let mut spoofed_pda = Registration::new(15, ETHEREUM, emitter_a);
     spoofed_pda.registration_pda = chain_registration::derive_pda(&program_id(), 3).0;
 
-    let cases: [(&str, Registration, Account, Account, GlobalAccountantError); 6] = [
+    let cases: [(&str, Registration, Account, Account, GlobalAccountantError); 5] = [
         (
             "wrong module",
             Registration::with_body(10, ETHEREUM, body(wrong_module, SOLANA_CHAIN_ID, 10)),
@@ -260,13 +254,6 @@ fn rejects() {
             GlobalAccountantError::InvalidGovernanceEmitter,
         ),
         (
-            "wormchain target chain",
-            Registration::with_body(13, ETHEREUM, body(wormchain_target, SOLANA_CHAIN_ID, 13)),
-            uninitialised_pda_account(),
-            uninitialised_pda_account(),
-            GlobalAccountantError::GovernanceChainMismatch,
-        ),
-        (
             "old vaa replayed after rotation",
             Registration::new(6, ETHEREUM, emitter_a),
             registered_b,
@@ -286,4 +273,37 @@ fn rejects() {
         let result = registration.submit(&mollusk, registration.accounts(pda_state, record_state));
         assert_error(&result, expected as u64, label);
     }
+}
+
+/// A `RegisterChain` VAA carries target chain 0 (`sdk/vaa/payloads.go`), so a Wormchain
+/// target never occurs on the wire. The program rejects it; see
+/// `ACCEPTED_REGISTER_CHAIN_TARGETS`.
+#[test]
+fn register_wormchain_target_rejected() {
+    let mollusk = mollusk();
+    let emitter = [0x77u8; 32];
+
+    let wormchain_target = governance_header(
+        TOKEN_BRIDGE_GOVERNANCE_MODULE,
+        REGISTER_CHAIN_ACTION,
+        WORMCHAIN,
+    );
+    let body = register_chain_body(
+        SOLANA_CHAIN_ID,
+        GOVERNANCE_EMITTER,
+        20,
+        wormchain_target,
+        ETHEREUM,
+        emitter,
+    );
+    let registration = Registration::with_body(20, ETHEREUM, body);
+    let result = registration.submit(
+        &mollusk,
+        registration.accounts(uninitialised_pda_account(), uninitialised_pda_account()),
+    );
+    assert_error(
+        &result,
+        GlobalAccountantError::GovernanceChainMismatch as u64,
+        "wormchain-targeted registration",
+    );
 }

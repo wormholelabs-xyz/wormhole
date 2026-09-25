@@ -11,7 +11,7 @@ use solana_pubkey::Pubkey;
 use crate::ids::{loader_v3_id, noreplay_program_id, system_program_id};
 use crate::mollusk::{find_account, system_owned_account};
 
-/// `<SBF_OUT_DIR>/<program_name>.so`, as `just build` wrote it.
+/// `<SBF_OUT_DIR>/<program_name>.so`, as `just build-devnet` wrote it.
 pub fn deployed_elf(program_name: &str) -> Vec<u8> {
     let dir = std::env::var("SBF_OUT_DIR").expect("SBF_OUT_DIR");
     std::fs::read(format!("{dir}/{program_name}.so")).expect("built program .so")
