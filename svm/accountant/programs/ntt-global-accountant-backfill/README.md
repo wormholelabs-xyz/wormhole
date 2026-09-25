@@ -270,6 +270,11 @@ entry, and `pda::check` derives the PDA address from that layout's own key. A
 substituted account raises `InvalidPda` before the write. The NoReplay path
 re-derives the authority PDA and the bucket PDA from the entry's own namespace.
 
+**The address check binds the address, and the address alone.** Only the key
+fields of a layout are seeds. The operator picks the value fields, and the
+snapshot is what holds them to Wormchain. The off-chain parity check is where
+the values get their check.
+
 **Creation is create-only.** `pda::create` goes through
 `create_pda_allow_prefund`, which raises `InvalidPda` when the account already
 holds data or carries another owner. A replayed batch therefore fails at its
@@ -341,33 +346,48 @@ The migration has no on-chain finalize marker, by design. The off-chain parity
 check is the gate. The operator runs it first, and then each guardian runs it
 independently against its own copy of the snapshot.
 
+The operational program accepts Solana-targeted governance only. A governance VAA
+issued against Wormchain after the snapshot cut therefore has no path onto
+Solana. The freeze in step 1 is what stops such a VAA from existing. Keep the
+freeze until the operational image is live.
+
 CAUTION: `solana program upgrade` fails when the program-data account is too
 small for the new image. Size the account at the first deploy.
 
 Procedure:
 
-1. Build the deploy artifact with `just build`.
-2. Check the artifact with `just verify-authority`, against the operator key.
-3. Measure both images with `ls -l target/deploy/*.so`.
-4. Deploy the backfill artifact at the NTT program id. Give `--max-len` at least
+1. Freeze accountant governance on Wormchain.
+2. Take the Wormchain snapshot.
+3. Put every governance VAA that landed before the freeze into the batches below.
+4. Build the deploy artifact with `just build`.
+5. Check the artifact with `just verify-authority`, against the operator key.
+6. Measure both images with `ls -l target/deploy/*.so`.
+7. Deploy the backfill artifact at the NTT program id. Give `--max-len` at least
    the size of the operational image.
-5. Send the `BackfillNoReplay` batches.
-6. Send the `BackfillBalance` batches.
-7. Send the `BackfillModifyBalance` batches.
-8. Send the `BackfillRelayerChainRegistration` batches.
-9. Send the `BackfillTransceiverHub` batches.
-10. Send the `BackfillTransceiverPeer` batches.
-11. Run the off-chain parity check as the operator.
-12. Collect a parity result from every guardian.
-13. Upgrade the account to `ntt_global_accountant.so` with `solana program
+8. Send the `BackfillNoReplay` batches.
+9. Send the `BackfillBalance` batches.
+10. Send the `BackfillModifyBalance` batches.
+11. Send the `BackfillRelayerChainRegistration` batches.
+12. Send the `BackfillTransceiverHub` batches.
+13. Send the `BackfillTransceiverPeer` batches.
+14. Run the off-chain parity check as the operator.
+15. Collect a parity result from every guardian.
+16. Upgrade the account to `ntt_global_accountant.so` with `solana program
     upgrade`.
-14. Tell the guardians to start signing.
+17. Move upgrade authority to the program's `[b"upgrade"]` PDA with
+    `solana program set-upgrade-authority`.
+18. Lift the governance freeze. A new VAA targets Solana.
+19. Tell the guardians to start signing.
 
-At this commit the two images measure 160,392 bytes (backfill) and 294,976 bytes
-(operational). Both numbers move with every code change, so step 3 measures them
+After step 17 the deploy key can no longer upgrade the program. Each later
+upgrade needs a guardian-signed `UpgradeContract` VAA, through the program's own
+`upgrade_contract` instruction.
+
+At this commit the two images measure 160,392 bytes (backfill) and 294,960 bytes
+(operational). Both numbers move with every code change, so step 6 measures them
 again.
 
-Steps 5 to 10 are independent of each other. The order above is the order the
+Steps 8 to 13 are independent of each other. The order above is the order the
 surfpool lifecycle test uses.
 
 ## Errors

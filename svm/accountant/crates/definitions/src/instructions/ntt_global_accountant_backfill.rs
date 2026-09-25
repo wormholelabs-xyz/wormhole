@@ -13,7 +13,10 @@ pub enum Instruction {
     /// Write `ModifyBalance` record PDAs, arming `modify_balance`'s replay guard.
     BackfillModifyBalance = 2,
     /// Write the Standard Relayer `ChainRegistration` PDA and the `RegisterChain` record PDA
-    /// per registration, both under the NTT program id.
+    /// per registration, both under the NTT program id. Shares the handler and the wire format
+    /// with the WTT backfill's `BackfillChainRegistration`. The source module is the one
+    /// difference: these registrations are the Wormhole Relayer module's, not the Token Bridge
+    /// module's.
     BackfillRelayerChainRegistration = 3,
     /// Write `TransceiverHub` PDAs from the `transceiver_to_hub` map.
     BackfillTransceiverHub = 4,

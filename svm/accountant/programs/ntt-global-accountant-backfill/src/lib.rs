@@ -36,7 +36,7 @@ pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;
 
 use accountant_backfill_core::instructions as backfill;
-use definitions::{pubkey_eq, NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID};
+use definitions::NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID;
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
@@ -46,11 +46,7 @@ use raw_ix_data::RawIxData;
 /// Re-exported for off-chain callers building raw transactions.
 pub use definitions::ntt_global_accountant_backfill::Instruction;
 
-declare_id!("cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN");
-const _: () = assert!(
-    pubkey_eq(&ID.to_bytes(), &NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID),
-    "declare_id! does not match NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID"
-);
+declare_id!(Pubkey::new_from_array(NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID));
 
 /// Pubkey that must sign every backfill instruction, from `NTT_BACKFILL_AUTHORITY` at compile
 /// time. `env!` makes a missing variable a build error, so every artifact names an operator

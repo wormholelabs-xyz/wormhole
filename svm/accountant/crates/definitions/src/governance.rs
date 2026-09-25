@@ -437,7 +437,7 @@ mod tests {
                 good,
                 TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
-                Ok(()),
+                Err(E::GovernanceChainMismatch),
             ),
             (
                 "register wrong emitter chain",
@@ -525,7 +525,7 @@ mod tests {
                 good,
                 ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
-                Ok(ModificationKind::Add),
+                Err(E::GovernanceChainMismatch),
             ),
             (
                 "modify wrong emitter chain",

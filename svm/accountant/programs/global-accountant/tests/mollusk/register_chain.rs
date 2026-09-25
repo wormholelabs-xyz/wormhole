@@ -275,11 +275,11 @@ fn rejects() {
     }
 }
 
-/// `RegisterChain` governance VAAs targeted at Wormchain (the retiring cosmwasm accountant's
-/// chain) are accepted during the wormchain -> Solana migration window; see
+/// A `RegisterChain` VAA carries target chain 0 (`sdk/vaa/payloads.go`), so a Wormchain
+/// target never occurs on the wire. The program rejects it; see
 /// `ACCEPTED_REGISTER_CHAIN_TARGETS`.
 #[test]
-fn register_wormchain_target_accepted_during_migration_window() {
+fn register_wormchain_target_rejected() {
     let mollusk = mollusk();
     let emitter = [0x77u8; 32];
 
@@ -301,17 +301,9 @@ fn register_wormchain_target_accepted_during_migration_window() {
         &mollusk,
         registration.accounts(uninitialised_pda_account(), uninitialised_pda_account()),
     );
-    assert_success(&result, "wormchain-targeted registration");
-    let account = find_account(&result.resulting_accounts, &registration.registration_pda);
-    assert_eq!(
-        registration_layout(account),
-        ChainRegistrationLayout::new(ETHEREUM, emitter, 20)
-    );
-    assert_register_chain_record(
-        &result.resulting_accounts,
-        &registration.register_chain_pda,
-        ETHEREUM,
-        emitter,
-        registration.sequence,
+    assert_error(
+        &result,
+        GlobalAccountantError::GovernanceChainMismatch as u64,
+        "wormchain-targeted registration",
     );
 }

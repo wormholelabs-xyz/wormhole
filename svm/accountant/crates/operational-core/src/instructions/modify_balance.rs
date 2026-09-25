@@ -1,8 +1,7 @@
 //! `modify_balance`: accountant governance for the caller's module. Applies an Add or
 //! Subtract delta to a `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the
 //! replay guard.
-//! Accepts the target chains in `ACCEPTED_MODIFY_BALANCE_TARGETS`: Solana, and Wormchain
-//! for the migration window.
+//! Accepts the target chains in `ACCEPTED_MODIFY_BALANCE_TARGETS`: Solana.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;

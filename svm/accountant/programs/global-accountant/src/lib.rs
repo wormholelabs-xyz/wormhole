@@ -27,19 +27,14 @@ pub use global_accountant_definitions as definitions;
 
 use accountant_operational_core::instructions as shared;
 use definitions::{
-    pubkey_eq, ACCOUNTANT_GOVERNANCE_MODULE, GLOBAL_ACCOUNTANT_PROGRAM_ID,
-    TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    ACCOUNTANT_GOVERNANCE_MODULE, GLOBAL_ACCOUNTANT_PROGRAM_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
 };
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
 use raw_ix_data::RawIxData;
 
-declare_id!("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
-const _: () = assert!(
-    pubkey_eq(&ID.to_bytes(), &GLOBAL_ACCOUNTANT_PROGRAM_ID),
-    "declare_id! does not match GLOBAL_ACCOUNTANT_PROGRAM_ID"
-);
+declare_id!(Pubkey::new_from_array(GLOBAL_ACCOUNTANT_PROGRAM_ID));
 
 /// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
 /// Field order must match the handler's account list.
