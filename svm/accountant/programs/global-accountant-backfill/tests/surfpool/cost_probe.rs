@@ -205,7 +205,7 @@ fn surfpool_cost_probe() {
     for chunk in transfers.chunks(TRANSFER_BATCH) {
         let sig = send(
             &rpc,
-            "backfill_no_replay",
+            "backfill_noreplay",
             &[noreplay_ix(
                 &id,
                 &payer.pubkey(),

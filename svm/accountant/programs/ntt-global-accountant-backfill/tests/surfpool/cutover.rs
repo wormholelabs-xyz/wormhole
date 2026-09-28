@@ -226,7 +226,7 @@ fn surfpool_ntt_cutover_rehearsal() {
     ];
     send(
         &rpc,
-        "backfill_no_replay",
+        "backfill_noreplay",
         &[Instruction {
             program_id: id,
             accounts: noreplay_accounts,

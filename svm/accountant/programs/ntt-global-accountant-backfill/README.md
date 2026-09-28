@@ -49,7 +49,7 @@ its handler in `accountant_backfill_core::instructions`.
 
 | # | Name | Handler | PDAs per entry |
 |---|------|---------|----------------|
-| 0 | `backfill_no_replay` | `backfill_noreplay` | One bucket per bucket, not per entry |
+| 0 | `backfill_noreplay` | `backfill_noreplay` | One bucket per bucket, not per entry |
 | 1 | `backfill_balance` | `backfill_balance` | One `BalanceAccount` |
 | 2 | `backfill_modify_balance` | `backfill_modify_balance` | One `ModifyBalance` |
 | 3 | `backfill_relayer_chain_registration` | `backfill_chain_registration` | Two: `ChainRegistration`, then `RegisterChain` |
@@ -75,7 +75,7 @@ Creation goes through `create_pda_allow_prefund`, so a prefunded PDA still
 works. A PDA that already holds data raises `InvalidPda`, which makes a
 resubmitted batch fail.
 
-`backfill_no_replay` instead flips bits in the NoReplay program's bitmap
+`backfill_noreplay` instead flips bits in the NoReplay program's bitmap
 buckets. A bucket address derives from the NoReplay authority PDA, the
 namespace seed chunks of `(chain, emitter)`, and the little-endian bucket index.
 
@@ -84,7 +84,7 @@ namespace seed chunks of `(chain, emitter)`, and the little-endian bucket index.
 **W** marks a writable account. **S** marks a required signer. The variadic PDAs
 ride in `ctx.remaining_accounts`, in wire order.
 
-`backfill_no_replay`:
+`backfill_noreplay`:
 
 | # | Account | W | S | Purpose |
 |---|---------|---|---|---------|

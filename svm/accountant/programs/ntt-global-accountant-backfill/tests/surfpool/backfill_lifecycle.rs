@@ -122,7 +122,7 @@ fn surfpool_ntt_backfill_lifecycle() {
     accounts.push(AccountMeta::new(bucket(1_500), false));
     let sig = send(
         &rpc,
-        "backfill_no_replay",
+        "backfill_noreplay",
         &[Instruction {
             program_id: id,
             accounts,

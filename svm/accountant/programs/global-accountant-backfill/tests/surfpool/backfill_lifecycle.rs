@@ -119,7 +119,7 @@ fn surfpool_backfill_lifecycle() {
     accounts.push(AccountMeta::new(bucket(1_500), false));
     let sig = send(
         &rpc,
-        "backfill_no_replay",
+        "backfill_noreplay",
         &[Instruction {
             program_id: id,
             accounts,
@@ -314,7 +314,7 @@ fn surfpool_backfill_lifecycle() {
     accounts.push(AccountMeta::new(bucket(9_999), false));
     send_expect_error(
         &rpc,
-        "backfill_no_replay[stranger]",
+        "backfill_noreplay[stranger]",
         &[Instruction {
             program_id: id,
             accounts,

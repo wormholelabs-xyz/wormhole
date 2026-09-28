@@ -66,7 +66,7 @@ pub mod ntt_global_accountant_backfill {
     /// Explicit `'info`: unifies `to_account_info()` and
     /// `remaining_accounts.iter().cloned()` in one `Vec<AccountInfo>`.
     #[instruction(discriminator = 0)]
-    pub fn backfill_no_replay<'info>(
+    pub fn backfill_noreplay<'info>(
         ctx: Context<'info, BackfillNoReplayAccounts<'info>>,
         ix_data: RawIxData,
     ) -> Result<()> {
