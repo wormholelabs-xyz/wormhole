@@ -8,7 +8,7 @@ use accountant_operational_core::instructions::register_chain::derive_register_c
 use global_accountant_definitions::global_accountant_backfill::Instruction;
 use global_accountant_definitions::{
     BackfillChainRegistrationEntry, ChainRegistrationLayout, GlobalAccountantError,
-    RegisterChainLayout,
+    RegisterChainLayout, MAX_CHAIN_REGISTRATION_ENTRIES,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -261,4 +261,46 @@ fn rejects() {
         let result = submit(&mollusk, &case.data, &case.accounts, case.metas);
         assert_error(&result, case.expected, case.label);
     }
+}
+
+/// Two PDA creates per entry: `MAX_CHAIN_REGISTRATION_ENTRIES` fit the 64-entry instruction
+/// trace, one more fails in the parser ahead of any write.
+#[test]
+fn batch_bound_is_two_creates_per_entry() {
+    let mollusk = mollusk();
+    let entries = |count: u16| -> Vec<BackfillChainRegistrationEntry> {
+        (1..=count)
+            .map(|chain| {
+                let mut emitter = [0u8; 32];
+                emitter[30..].copy_from_slice(&chain.to_be_bytes());
+                wire::chain_registration_entry(chain, u64::from(chain), emitter)
+            })
+            .collect()
+    };
+
+    let bound = u16::from(MAX_CHAIN_REGISTRATION_ENTRIES);
+    assert_eq!(
+        bound, 31,
+        "two creates per entry plus the top-level instruction"
+    );
+
+    let at_bound = entries(bound);
+    let result = Batch::new(&at_bound).submit(&mollusk);
+    assert_success(&result, "at the trace bound");
+    for entry in &at_bound {
+        assert_written(&result, entry, "at the trace bound");
+    }
+
+    let over_bound = Batch::new(&entries(bound + 1));
+    let accounts = over_bound.accounts();
+    let result = submit(&mollusk, &over_bound.data(), &accounts, over_bound.metas());
+    assert_error(
+        &result,
+        GlobalAccountantError::InvalidInstructionData as u64,
+        "one entry above the trace bound",
+    );
+    assert_eq!(
+        result.resulting_accounts, accounts,
+        "no PDA may be touched on rejection"
+    );
 }

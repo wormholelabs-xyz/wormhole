@@ -2,6 +2,7 @@
 //! pinned by the `const _` block below; these tables are orientation only.
 //!
 //! Every `count`-prefixed batch carries 1 to [`MAX_BATCH_ENTRIES`] entries.
+//! `ChainRegistrationBatch` carries 1 to [`MAX_CHAIN_REGISTRATION_ENTRIES`].
 //!
 //! `BackfillBalanceEntry` (68 bytes):
 //!
@@ -91,6 +92,12 @@ use crate::state::{TransceiverHubLayout, TransceiverPeerLayout};
 /// batch aborts mid-write with `MaxInstructionTraceLengthExceeded`. `parse` rejects above
 /// this instead, before any account is touched.
 pub const MAX_BATCH_ENTRIES: u8 = 63;
+
+/// Entry ceiling for `ChainRegistrationBatch`: two PDA creates per entry, 64-entry trace.
+pub const MAX_CHAIN_REGISTRATION_ENTRIES: u8 = 31;
+
+// Top-level instruction plus two creates per entry; one more entry needs 65.
+const _: () = assert!(1 + 2 * MAX_CHAIN_REGISTRATION_ENTRIES as u16 == 63);
 
 /// Shared framing for the `count (u8) ‖ count × T` batches: count bounds, exact length, cast.
 /// Each batch adds its own ordering rule on top.
@@ -479,6 +486,9 @@ impl<'a> ChainRegistrationBatch<'a> {
     /// Wire: `count (u8) ‖ count × BackfillChainRegistrationEntry`.
     pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
         let entries: &[BackfillChainRegistrationEntry] = parse_batch(data)?;
+        if entries.len() > MAX_CHAIN_REGISTRATION_ENTRIES as usize {
+            return Err(GlobalAccountantError::InvalidInstructionData);
+        }
 
         let mut previous_sort_key: Option<u16> = None;
         for entry in entries {
@@ -1099,15 +1109,15 @@ mod tests {
             chain_registration_entry(4, 100),
             chain_registration_entry(5, 200),
         ];
-        let max_count: std::vec::Vec<BackfillChainRegistrationEntry> = (0..MAX_BATCH_ENTRIES
-            as u16)
+        let max_count: std::vec::Vec<BackfillChainRegistrationEntry> = (0
+            ..MAX_CHAIN_REGISTRATION_ENTRIES as u16)
             .map(|i| chain_registration_entry(i + 1, i as u64))
             .collect();
 
         let cases: [(&str, std::vec::Vec<BackfillChainRegistrationEntry>); 3] = [
             ("one entry", one.to_vec()),
             ("several entries, sequences unordered", several.to_vec()),
-            ("MAX_BATCH_ENTRIES entries", max_count),
+            ("MAX_CHAIN_REGISTRATION_ENTRIES entries", max_count),
         ];
         for (name, entries) in cases {
             let data = encode_chain_registration_batch(&entries);
@@ -1134,10 +1144,10 @@ mod tests {
             chain_registration_entry(2, 101),
         ];
 
-        let over_bound: std::vec::Vec<BackfillChainRegistrationEntry> =
-            (0..MAX_BATCH_ENTRIES as u16 + 1)
-                .map(|i| chain_registration_entry(i + 1, i as u64))
-                .collect();
+        let over_bound: std::vec::Vec<BackfillChainRegistrationEntry> = (0
+            ..MAX_CHAIN_REGISTRATION_ENTRIES as u16 + 1)
+            .map(|i| chain_registration_entry(i + 1, i as u64))
+            .collect();
 
         let cases: [(&str, std::vec::Vec<u8>); 9] = [
             ("empty data", std::vec::Vec::new()),
@@ -1157,7 +1167,7 @@ mod tests {
                 encode_chain_registration_batch(&desc_entries),
             ),
             (
-                "one entry above MAX_BATCH_ENTRIES",
+                "one entry above MAX_CHAIN_REGISTRATION_ENTRIES",
                 encode_chain_registration_batch(&over_bound),
             ),
             ("count claims more entries than present", {

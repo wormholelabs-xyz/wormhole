@@ -111,9 +111,10 @@ duplicate sort key. Sort order is strictly ascending on the key named below.
 
 `MAX_BATCH_ENTRIES` is 63. Each entry costs one System Program CPI, and Solana
 caps an instruction trace at 64 entries, so a larger batch would abort mid-write
-with `MaxInstructionTraceLengthExceeded`. The transaction packet gives a lower
-practical ceiling. The cost probes measure that ceiling per arm against a real
-validator.
+with `MaxInstructionTraceLengthExceeded`. `BackfillChainRegistration` creates
+two PDAs per entry, so its cap is `MAX_CHAIN_REGISTRATION_ENTRIES`, which is 31.
+The transaction packet gives a lower practical ceiling. The cost probes measure
+that ceiling per arm against a real validator.
 
 `BackfillBalance` entry, 68 bytes. Sort key `(chain, token_chain,
 token_address)`:
