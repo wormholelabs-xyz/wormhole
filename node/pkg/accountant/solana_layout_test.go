@@ -418,7 +418,7 @@ func TestParseSubmitObservationsIxData(t *testing.T) {
 
 			packed := ix.pack()
 			assert.Equal(t, fixtureTransferFieldsHex, hex.EncodeToString(packed[:]))
-			assert.Equal(t, mustHexDecode32(t, fixtureTransferContentDigestHex), ix.contentDigest())
+			assert.Equal(t, mustHexDecode32(t, fixtureTransferContentDigestHex), ix.contentDigest)
 		})
 	}
 }
@@ -546,7 +546,7 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 			require.NotNil(t, fields)
 			packed := fields.pack()
 			assert.Equal(t, tt.wantFieldsHex, hex.EncodeToString(packed[:]))
-			assert.Equal(t, mustHexDecode32(t, tt.wantContentDigest), fields.contentDigest())
+			assert.Equal(t, mustHexDecode32(t, tt.wantContentDigest), fields.contentDigest)
 			if tt.wantZeroTransferSet {
 				assert.Equal(t, vaa.ChainID(0), fields.TokenChain)
 				assert.Equal(t, [32]byte{}, fields.TokenAddress)
@@ -577,4 +577,27 @@ func TestSolanaObservationFieldsMatchSDKTransferHeader(t *testing.T) {
 	assert.Equal(t, vaa.Address(fields.TokenAddress), hdr.OriginAddress)
 	assert.Equal(t, hdr.TargetChain, fields.RecipientChain)
 	assert.Equal(t, 0, hdr.Amount.Cmp(new(big.Int).SetBytes(fields.Amount[:])))
+}
+
+// Values are the ERR_* lines of go_fixture_vectors.rs.
+func TestSolanaErrorCodesMatchProgram(t *testing.T) {
+	tests := []struct {
+		name string
+		got  uint32
+		want uint32
+	}{
+		{"ERR_PAYER_MISMATCH", solanaErrPayerMismatch, 4},
+		{"ERR_ALREADY_ACCOUNTED", solanaErrAlreadyAccounted, 7},
+		{"ERR_INVALID_SIGNATURE", solanaErrInvalidSignature, 9},
+		{"ERR_INVALID_GUARDIAN_INDEX", solanaErrInvalidGuardianIndex, 10},
+		{"ERR_ALREADY_SIGNED", solanaErrAlreadySigned, 11},
+		{"ERR_EXPIRED_GUARDIAN_SET", solanaErrExpiredGuardianSet, 12},
+		{"ERR_MISSING_CHAIN_REGISTRATION", solanaErrMissingChainRegistration, 19},
+		{"ERR_UNREGISTERED_EMITTER", solanaErrUnregisteredEmitter, 20},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tc.got)
+		})
+	}
 }

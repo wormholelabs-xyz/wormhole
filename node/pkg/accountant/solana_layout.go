@@ -46,10 +46,6 @@ const (
 	// TokenBridgeTransfer::LEN and MAX_TRANSFER_PAYLOAD_LEN, vaa.rs.
 	tokenBridgeTransferLen = 133
 	maxTransferPayloadLen  = 2000
-
-	// ACTION_TRANSFER and ACTION_TRANSFER_WITH_PAYLOAD, vaa.rs.
-	actionTransfer            = 0x01
-	actionTransferWithPayload = 0x03
 )
 
 // Field offsets inside the 143-byte hashed record, ix_data.rs
@@ -89,13 +85,29 @@ const (
 // ACCOUNTANT_DIGEST_LOG_TAG, constants/log.rs.
 var accountantDigestLogTag = [8]byte{'A', 'C', 'C', 'D', 'G', 'S', 'T', 0}
 
-// constants/seeds.rs.
+// constants/seeds.rs. GUARDIAN_SET_SEED is the Core Bridge's own seed.
 var (
 	pendingObservationsSeedPrefix = []byte("pending")
 	noreplayAuthoritySeedPrefix   = []byte("noreplay_authority")
+	balanceAccountSeedPrefix      = []byte("account")
+	chainRegistrationSeedPrefix   = []byte("chain_registration")
+	guardianSetSeedPrefix         = []byte("GuardianSet")
 )
 
-// solanaCommitEvent is a decoded ACCDGST commit log. Digest is the content digest.
+// GlobalAccountantError codes returned as ProgramError::Custom, error.rs. Do not renumber.
+const (
+	solanaErrPayerMismatch            = 4
+	solanaErrAlreadyAccounted         = 7
+	solanaErrInvalidSignature         = 9
+	solanaErrInvalidGuardianIndex     = 10
+	solanaErrAlreadySigned            = 11
+	solanaErrExpiredGuardianSet       = 12
+	solanaErrMissingChainRegistration = 19
+	solanaErrUnregisteredEmitter      = 20
+)
+
+// solanaCommitEvent is a decoded ACCDGST commit log. Digest is the content digest from
+// submit_observations, or the VAA digest from submit_vaas and the backfill.
 type solanaCommitEvent struct {
 	Chain            vaa.ChainID
 	Emitter          vaa.Address
@@ -167,6 +179,26 @@ func (o *solanaPendingObs) hasSignature(index uint8) (bool, error) {
 	return o.Signatures[index/32]&(1<<(index%32)) != 0, nil
 }
 
+// checkPendingObservationsAccount decodes a pending account, requires its content digest
+// to equal wantDigest, and reports whether guardianIndex signed it.
+//
+// SECURITY: the content digest is a PDA seed, so a mismatch means the address is not the
+// one derived for the transfer.
+func checkPendingObservationsAccount(data []byte, wantDigest [32]byte, guardianIndex uint8) (*solanaPendingObs, bool, error) {
+	obs, err := parsePendingObservationsAccount(data)
+	if err != nil {
+		return nil, false, err
+	}
+	if obs.ContentDigest != wantDigest {
+		return nil, false, errors.New("pending observations account: content digest mismatch")
+	}
+	signed, err := obs.hasSignature(guardianIndex)
+	if err != nil {
+		return nil, false, err
+	}
+	return obs, signed, nil
+}
+
 // derivePendingObservationsPDA mirrors quorum.rs derive_pending_pda.
 func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, emitter vaa.Address, sequence uint64, guardianSetIndex uint32, contentDigest [32]byte) (solana.PublicKey, error) {
 	var chainBE [2]byte
@@ -223,6 +255,57 @@ func deriveNoreplayBucketPDA(noreplayProgram, authority solana.PublicKey, chain 
 	return pda, nil
 }
 
+// deriveBalanceAccountPDA mirrors accounts/balance.rs derive_pda. chain is the side of
+// the transfer the balance belongs to: the emitter chain for the source, the recipient
+// chain for the destination.
+func deriveBalanceAccountPDA(program solana.PublicKey, chain vaa.ChainID, tokenChain vaa.ChainID, tokenAddress [32]byte) (solana.PublicKey, error) {
+	var chainBE [2]byte
+	binary.BigEndian.PutUint16(chainBE[:], uint16(chain))
+	var tokenChainBE [2]byte
+	binary.BigEndian.PutUint16(tokenChainBE[:], uint16(tokenChain))
+
+	pda, _, err := solana.FindProgramAddress([][]byte{
+		balanceAccountSeedPrefix,
+		chainBE[:],
+		tokenChainBE[:],
+		tokenAddress[:],
+	}, program)
+	if err != nil {
+		return solana.PublicKey{}, fmt.Errorf("derive balance account PDA: %w", err)
+	}
+	return pda, nil
+}
+
+// deriveChainRegistrationPDA mirrors accounts/chain_registration.rs derive_pda.
+func deriveChainRegistrationPDA(program solana.PublicKey, chain vaa.ChainID) (solana.PublicKey, error) {
+	var chainBE [2]byte
+	binary.BigEndian.PutUint16(chainBE[:], uint16(chain))
+
+	pda, _, err := solana.FindProgramAddress([][]byte{
+		chainRegistrationSeedPrefix,
+		chainBE[:],
+	}, program)
+	if err != nil {
+		return solana.PublicKey{}, fmt.Errorf("derive chain registration PDA: %w", err)
+	}
+	return pda, nil
+}
+
+// deriveGuardianSetPDA is the Core Bridge GuardianSet account for one set index.
+func deriveGuardianSetPDA(coreBridge solana.PublicKey, guardianSetIndex uint32) (solana.PublicKey, error) {
+	var indexBE [4]byte
+	binary.BigEndian.PutUint32(indexBE[:], guardianSetIndex)
+
+	pda, _, err := solana.FindProgramAddress([][]byte{
+		guardianSetSeedPrefix,
+		indexBE[:],
+	}, coreBridge)
+	if err != nil {
+		return solana.PublicKey{}, fmt.Errorf("derive guardian set PDA: %w", err)
+	}
+	return pda, nil
+}
+
 // noreplayBitSet mirrors noreplay.rs is_marked.
 func noreplayBitSet(bucketData []byte, sequence uint64) (bool, error) {
 	if len(bucketData) != noreplayBucketLen {
@@ -248,6 +331,10 @@ type solanaObservationFields struct {
 	Amount [32]byte
 	// keccak256(keccak256(body)); equals the pending entry's inner digest field.
 	VaaDigest [32]byte
+
+	// keccak256(keccak256(pack())): the pending-PDA seed and the commit-log digest. Set by
+	// the constructors.
+	contentDigest [32]byte
 }
 
 // pack serializes the record in the program's field order.
@@ -265,11 +352,13 @@ func (f *solanaObservationFields) pack() [observationFieldsLen]byte {
 	return out
 }
 
-// contentDigest is the pending-PDA seed and the commit-log digest:
-// keccak256(keccak256(pack())).
-func (f *solanaObservationFields) contentDigest() [32]byte {
+func (f *solanaObservationFields) computeContentDigest() [32]byte {
 	packed := f.pack()
 	return [32]byte(crypto.Keccak256(crypto.Keccak256(packed[:])))
+}
+
+func (f *solanaObservationFields) setContentDigest() {
+	f.contentDigest = f.computeContentDigest()
 }
 
 // unpackObservationFields reads the record from an exactly 143-byte slice.
@@ -289,6 +378,7 @@ func unpackObservationFields(data []byte) (solanaObservationFields, error) {
 	f.RecipientChain = vaa.ChainID(binary.BigEndian.Uint16(data[fieldsRecipientChainOffset : fieldsRecipientChainOffset+2]))
 	copy(f.Amount[:], data[fieldsAmountOffset:fieldsAmountOffset+32])
 	copy(f.VaaDigest[:], data[fieldsVaaDigestOffset:fieldsVaaDigestOffset+32])
+	f.setContentDigest()
 	return f, nil
 }
 
@@ -310,7 +400,8 @@ func solanaObservationFieldsFromPayload(chain vaa.ChainID, emitter vaa.Address, 
 		Sequence:  sequence,
 		VaaDigest: vaaDigest,
 	}
-	if fields.Action != actionTransfer && fields.Action != actionTransferWithPayload {
+	if !vaa.IsTransfer(payload) {
+		fields.setContentDigest()
 		return fields, nil
 	}
 
@@ -321,11 +412,12 @@ func solanaObservationFieldsFromPayload(chain vaa.ChainID, emitter vaa.Address, 
 		return nil, fmt.Errorf("observation fields: transfer payload carries %d extra bytes, limit %d", extra, maxTransferPayloadLen)
 	}
 
-	// Offsets pin to TokenBridgeTransfer, vaa.rs.
+	// Offsets match TokenBridgeTransfer, vaa.rs, and vaa.DecodeTransferPayloadHdr.
 	copy(fields.Amount[:], payload[1:33])
 	copy(fields.TokenAddress[:], payload[33:65])
 	fields.TokenChain = vaa.ChainID(binary.BigEndian.Uint16(payload[65:67]))
 	fields.RecipientChain = vaa.ChainID(binary.BigEndian.Uint16(payload[99:101]))
+	fields.setContentDigest()
 	return fields, nil
 }
 

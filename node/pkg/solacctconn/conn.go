@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 )
 
 // Conn is the RPC surface of the Solana accountant program.
@@ -11,7 +12,7 @@ type Conn interface {
 	Close()
 
 	// Results are positional with addrs. A nil element marks an absent account.
-	GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*AccountResult, error)
+	GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment Commitment) ([]*AccountResult, error)
 
 	// Filters: memcmp(offset 0, tag) and dataSize.
 	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]ProgramAccount, error)
@@ -38,6 +39,21 @@ type Conn interface {
 
 	// Lamport balance at confirmed commitment.
 	GetBalance(ctx context.Context, addr solana.PublicKey) (uint64, error)
+}
+
+// Commitment is the commitment level of an account read. Use CommitmentConfirmed or
+// CommitmentFinalized; the zero value is rejected.
+type Commitment struct {
+	level rpc.CommitmentType
+}
+
+var (
+	CommitmentConfirmed = Commitment{level: rpc.CommitmentConfirmed}
+	CommitmentFinalized = Commitment{level: rpc.CommitmentFinalized}
+)
+
+func (c Commitment) String() string {
+	return string(c.level)
 }
 
 type Blockhash struct {
