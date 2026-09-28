@@ -403,6 +403,53 @@ mod tests {
         assert_eq!(view.new_contract, [0xC4; 32]);
     }
 
+    /// The SDK's NTT `UpgradeContract` encodes the bytes the NTT program parses, under the
+    /// NTT module and not the WTT one.
+    #[test]
+    fn ntt_upgrade_contract_matches_sdk_encoding() {
+        use crate::constants::{GOVERNANCE_EMITTER, NTT_ACCOUNTANT_GOVERNANCE_MODULE};
+        use wormhole_sdk::ntt_accountant;
+
+        let encoded = serde_wormhole::to_vec(&ntt_accountant::GovernancePacket {
+            chain: Chain::Solana,
+            action: ntt_accountant::Action::UpgradeContract {
+                new_contract: Address([0xC4; 32]),
+            },
+        })
+        .unwrap();
+        let expected = UpgradeContractPayload {
+            header: GovernanceHeader {
+                module: NTT_ACCOUNTANT_GOVERNANCE_MODULE,
+                action: UPGRADE_CONTRACT_ACTION,
+                target_chain: SOLANA_CHAIN_ID.to_be_bytes(),
+            },
+            new_contract: [0xC4; 32],
+        };
+        assert_eq!(encoded.as_slice(), bytemuck::bytes_of(&expected));
+
+        let body = body_with(&encoded);
+        let (_, view) = UpgradeContractPayload::from_body(&body).unwrap();
+        assert_eq!(*view, expected);
+        let header = governance_header(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER);
+        assert_eq!(
+            view.validate(&header, &NTT_ACCOUNTANT_GOVERNANCE_MODULE),
+            Ok(())
+        );
+        assert_eq!(
+            view.validate(&header, &ACCOUNTANT_GOVERNANCE_MODULE),
+            Err(GlobalAccountantError::InvalidGovernanceModule)
+        );
+
+        let decoded: ntt_accountant::GovernancePacket =
+            serde_wormhole::from_slice(&encoded).unwrap();
+        assert_eq!(
+            decoded.action,
+            ntt_accountant::Action::UpgradeContract {
+                new_contract: Address([0xC4; 32]),
+            }
+        );
+    }
+
     #[test]
     fn validate_table() {
         use GlobalAccountantError as E;
