@@ -37,9 +37,9 @@ The shell crate holds the Anchor boundary only:
 
 - `declare_id!` and the program-id assert, in `src/lib.rs`.
 - `NTT_BACKFILL_AUTHORITY`, in `src/lib.rs`.
-- The `flatten_accounts!` macro, in `src/lib.rs`.
 - Six `#[derive(Accounts)]` contexts, in `src/contexts.rs`.
-- `RawIxData`, the raw instruction-data newtype, in `src/raw_ix_data.rs`.
+
+`RawIxData` and `flatten_accounts!` come from `accountant-operational-core`.
 
 An arm parses no payload itself. It flattens its context plus
 `ctx.remaining_accounts` into one positional `Vec<AccountInfo>`. It then calls

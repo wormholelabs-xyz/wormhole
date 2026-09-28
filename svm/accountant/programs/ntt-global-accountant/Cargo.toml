@@ -22,7 +22,6 @@ no-entrypoint = []
 [dependencies]
 accountant-operational-core.workspace = true
 anchor-lang.workspace = true
-borsh.workspace = true
 global-accountant-definitions.workspace = true
 
 [[bench]]

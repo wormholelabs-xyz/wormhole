@@ -27,10 +27,11 @@
 
 #![allow(unexpected_cfgs)]
 
+use accountant_operational_core::flatten_accounts;
+use accountant_operational_core::raw_ix_data::RawIxData;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
-pub mod raw_ix_data;
 
 pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;
@@ -40,7 +41,6 @@ use definitions::NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID;
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
-use raw_ix_data::RawIxData;
 
 /// Wire discriminator, defined in `definitions::ntt_global_accountant_backfill::Instruction`.
 /// Re-exported for off-chain callers building raw transactions.
@@ -56,21 +56,6 @@ declare_id!(Pubkey::new_from_array(NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID));
 /// `just verify-authority <so-path> <base58-pubkey> ntt-global-accountant-backfill`.
 pub const NTT_BACKFILL_AUTHORITY: [u8; 32] =
     const_crypto::bs58::decode_pubkey(env!("NTT_BACKFILL_AUTHORITY"));
-
-/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
-/// Field order must match the handler's account list. The `remaining` form appends
-/// `ctx.remaining_accounts`, which carry the variadic PDAs.
-macro_rules! flatten_accounts {
-    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
-        vec![$($accounts.$field.to_account_info()),+]
-    };
-    ($ctx:expr, [$($field:ident),+ $(,)?], remaining) => {{
-        let mut accounts: Vec<AccountInfo> =
-            vec![$($ctx.accounts.$field.to_account_info()),+];
-        accounts.extend($ctx.remaining_accounts.iter().cloned());
-        accounts
-    }};
-}
 
 #[program]
 pub mod ntt_global_accountant_backfill {

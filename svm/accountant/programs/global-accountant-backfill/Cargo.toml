@@ -26,7 +26,6 @@ no-entrypoint = []
 accountant-backfill-core.workspace = true
 accountant-operational-core.workspace = true
 anchor-lang.workspace = true
-borsh.workspace = true
 const-crypto.workspace = true
 global-accountant-definitions.workspace = true
 

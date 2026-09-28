@@ -10,11 +10,12 @@
 
 #![allow(unexpected_cfgs)]
 
+use accountant_operational_core::flatten_accounts;
+use accountant_operational_core::raw_ix_data::RawIxData;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
 pub mod instructions;
-pub mod raw_ix_data;
 
 pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;
@@ -26,17 +27,8 @@ use definitions::{
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
-use raw_ix_data::RawIxData;
 
 declare_id!(Pubkey::new_from_array(NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID));
-
-/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
-/// Field order must match the handler's account list.
-macro_rules! flatten_accounts {
-    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
-        vec![$($accounts.$field.to_account_info()),+]
-    };
-}
 
 #[program]
 pub mod ntt_global_accountant {
@@ -46,7 +38,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 0)]
     pub fn submit_observations(ctx: Context<SubmitObservations>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 submitter,
                 pending_pda,
@@ -72,7 +64,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 1)]
     pub fn close_pending(ctx: Context<ClosePending>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 closer,
                 pending_pda,
@@ -89,7 +81,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 2)]
     pub fn submit_vaas(ctx: Context<SubmitVaas>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 submitter,
                 verify_vaa_shim_program,
@@ -119,7 +111,7 @@ pub mod ntt_global_accountant {
         ix_data: RawIxData,
     ) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
@@ -143,7 +135,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 4)]
     pub fn modify_balance(ctx: Context<ModifyBalance>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
@@ -167,7 +159,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 5)]
     pub fn register_hub(ctx: Context<RegisterHub>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
@@ -189,7 +181,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 6)]
     pub fn register_peer(ctx: Context<RegisterPeer>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
@@ -214,7 +206,7 @@ pub mod ntt_global_accountant {
     #[instruction(discriminator = 7)]
     pub fn upgrade_contract(ctx: Context<UpgradeContract>, ix_data: RawIxData) -> Result<()> {
         let accounts = flatten_accounts!(
-            ctx.accounts,
+            ctx,
             [
                 payer,
                 verify_vaa_shim_program,
