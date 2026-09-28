@@ -118,7 +118,10 @@ fn check_modify_balance_pda(
     )
 }
 
-pub use crate::accounts::modify_balance::derive_pda as derive_modify_balance_pda;
+/// `(b"modify_balance", sequence_be)`.
+pub fn derive_modify_balance_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
+    pda::derive(program_id, &ModifyBalanceKey::new(sequence))
+}
 
 /// Apply `kind` with `payload.amount()`. Add on an absent PDA creates it with
 /// `balance = amount`; Subtract on an absent PDA is an underflow.
@@ -174,10 +177,11 @@ fn record_modify_balance<'info>(
         payload.amount(),
         payload.reason,
     );
-    accounts::modify_balance::create(
+    pda::create(
         program_id,
         payer,
         modify_balance_pda,
+        &record.key(),
         modification_bump,
         &record,
     )

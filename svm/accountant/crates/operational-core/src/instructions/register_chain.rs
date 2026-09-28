@@ -11,7 +11,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
 
-use crate::accounts::{chain_registration, register_chain};
+use crate::accounts::chain_registration;
 use crate::cpi::shim;
 use crate::definitions::{
     split_body, ChainRegistrationKey, ChainRegistrationLayout, GlobalAccountantError,
@@ -21,8 +21,6 @@ use crate::definitions::{
 use crate::hash::double_keccak256;
 use crate::support::pda;
 use crate::{err, ProgramCoreResult, ProgramResult};
-
-pub use crate::accounts::register_chain::derive_pda as derive_register_chain_pda;
 
 /// A `RegisterChain` body is exactly header + payload.
 const REGISTER_CHAIN_BODY_LEN: usize = VaaBodyHeader::LEN + RegisterChainPayload::LEN;
@@ -126,10 +124,14 @@ fn check_register_chain_pda(
     )
 }
 
+/// `(b"register_chain", sequence_be)`.
+pub fn derive_register_chain_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
+    pda::derive(program_id, &RegisterChainKey::new(sequence))
+}
+
 /// First registration creates the PDA; every later call overwrites it in place. Acceptance
 /// is gated solely by `check_register_chain_pda`'s replay guard — see the module-level
-/// `SECURITY` note. Creation goes through `chain_registration::create`, shared with the
-/// backfill, so a backfilled registration is byte-identical to a governance-written one.
+/// `SECURITY` note.
 fn write_registration<'info>(
     program_id: &Pubkey,
     payer: &AccountInfo<'info>,
@@ -145,10 +147,11 @@ fn write_registration<'info>(
         }
         return chain_registration::store(registration_pda, &layout);
     }
-    chain_registration::create(
+    pda::create(
         program_id,
         payer,
         registration_pda,
+        &layout.key(),
         registration_bump,
         &layout,
     )
@@ -164,10 +167,11 @@ fn record_register_chain<'info>(
     sequence: u64,
 ) -> ProgramResult {
     let record = RegisterChainLayout::new(payload.chain(), payload.emitter_address, sequence);
-    register_chain::create(
+    pda::create(
         program_id,
         payer,
         register_chain_pda,
+        &record.key(),
         register_bump,
         &record,
     )

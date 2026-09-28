@@ -9,26 +9,6 @@ pub fn derive_pda(program_id: &Pubkey, chain: u16) -> (Pubkey, u8) {
     pda::derive(program_id, &ChainRegistrationKey::new(chain))
 }
 
-/// Allocate the `ChainRegistration` PDA for `layout`'s chain and write `layout`. Seeds
-/// derive from the layout so address and contents cannot disagree. The governance handler
-/// and the backfill both call this, so the account they produce is byte-identical.
-pub fn create<'info>(
-    program_id: &Pubkey,
-    payer: &AccountInfo<'info>,
-    registration_pda: &AccountInfo<'info>,
-    canonical_bump: u8,
-    layout: &ChainRegistrationLayout,
-) -> ProgramResult {
-    pda::create(
-        program_id,
-        payer,
-        registration_pda,
-        &layout.key(),
-        canonical_bump,
-        layout,
-    )
-}
-
 pub fn load(account: &AccountInfo) -> ProgramCoreResult<ChainRegistrationLayout> {
     if account.owner == &system_program::ID {
         return Err(err(GlobalAccountantError::MissingChainRegistration));
