@@ -139,7 +139,7 @@ test: build-devnet
 # The `env!` addresses make a bare `cargo test` fail to compile; the recipe
 # supplies them. Copy the printed hex into `solana_layout_test.go`.
 
-[doc("Print the Go layout fixtures for node/pkg/accountant/solana_layout_test.go.")]
+[doc("Print the WTT accountant layout fixtures pinned by node/pkg/accountant/solana_layout_test.go.")]
 go-fixtures:
     {{test_env}} cargo test -p global-accountant --test go_fixture_vectors -- --nocapture
 
@@ -277,6 +277,15 @@ e2e-upgrade-deploy program="global-accountant": build-devnet
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
 e2e-upgrade-submit program="global-accountant":
     {{test_env}} cargo test -p {{program}} --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+
+# The guardian e2e is node/pkg/accountant/solana_e2e_test.go, behind the `surfpool`
+# build tag. It starts its own surfpool, deploys this `.so` and the NoReplay fixture,
+# seeds the GuardianSet and ChainRegistration accounts, and drives the guardian's
+# submission worker, log watcher and audit. It skips when `surfpool` is missing.
+
+[doc("Guardian e2e of the WTT accountant against surfpool: builds the .so, then runs the Go surfpool-tagged test.")]
+e2e-guardian: build-devnet
+    cd ../../node && go test -tags surfpool -count=1 -run '^TestSurfpool' -v ./pkg/accountant/
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
 e2e-upgrade-stop program="global-accountant":
