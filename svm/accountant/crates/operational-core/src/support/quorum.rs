@@ -16,8 +16,8 @@ use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
 use crate::support::pda_init::create_pda_allow_prefund;
 
 // `submit_observations` data is `SubmitObservationsIxData` (fixed size). Signing digest:
-// `keccak256(prefix ‖ tx_hash ‖ ix.fields_and_digest())`. Content digest:
-// `keccak256(keccak256(ix.fields_and_digest()))`, independent of `tx_hash`.
+// `keccak256(prefix ‖ ix.tx_id() ‖ ix.fields_and_digest())`. Content digest:
+// `keccak256(keccak256(ix.fields_and_digest()))`, independent of `tx_id`.
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;

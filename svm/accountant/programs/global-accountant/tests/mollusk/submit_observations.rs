@@ -1,7 +1,7 @@
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant::instructions::transfer::derive_balance_account_pda;
 use global_accountant_definitions::{
-    BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, Uint256,
+    BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, TxId, Uint256,
 };
 use mollusk_svm::Mollusk;
 use solana_account::Account;
@@ -122,10 +122,10 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
     );
 }
 
-/// `tx_hash` is in the signing digest but not in the body, so it is not part of message
-/// identity: observations of one body under different `tx_hash` values share a pending PDA.
+/// `tx_id` is in the signing digest but not in the body, so it is not part of message
+/// identity: observations of one body under different `tx_id` values share a pending PDA.
 #[test]
-fn tx_hash_does_not_split_the_pending_pda() {
+fn tx_id_does_not_split_the_pending_pda() {
     let mollusk = mollusk();
     let s = ObsScenario::attest(GUARDIAN_COUNT, GUARDIAN_SET_INDEX, 0x51);
     let first = submit(
@@ -134,18 +134,18 @@ fn tx_hash_does_not_split_the_pending_pda() {
         s.ix_data(0),
         s.account_metas(),
     );
-    assert_success(&first, "guardian 0, default tx_hash");
+    assert_success(&first, "guardian 0, default tx_id");
 
-    let other_tx_hash = [0x5Au8; 32];
+    let other_tx_id = TxId::Hash(&[0x5Au8; 32]);
     let signature = sign_digest(
         &s.guardians[1],
-        &signing_digest_with_tx_hash(&other_tx_hash, &s.body),
+        &signing_digest_with_tx_id(other_tx_id, &s.body),
     );
-    let ix_data = submit_observations_ix_data_with_tx_hash(
+    let ix_data = submit_observations_ix_data_with_tx_id(
         s.guardian_set_index,
         1,
         signature,
-        &other_tx_hash,
+        other_tx_id,
         &s.body,
     );
     let second = submit(
@@ -154,7 +154,7 @@ fn tx_hash_does_not_split_the_pending_pda() {
         ix_data,
         s.account_metas(),
     );
-    assert_success(&second, "guardian 1, other tx_hash");
+    assert_success(&second, "guardian 1, other tx_id");
 
     let pending = pending_layout(find_account(&second.resulting_accounts, &s.pending_pda));
     assert_eq!(
