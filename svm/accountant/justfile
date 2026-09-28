@@ -63,16 +63,8 @@ default:
     @just --list
 
 # `build-devnet` and `build` compile identical code. They differ only in where
-# the compile-time addresses and keys come from. The historical dev/prod split
-# gated the `test-only-open-digest` feature on/off; with `open_digest` removed
-# entirely (canonical digest record now emitted via `sol_log_data`), no feature
-# difference remains.
-#
-# Anchor programs build fine under plain `cargo build-sbf` (still an ordinary
-# SBF cdylib under the hood). The old `--features bpf-entrypoint` flag is
-# gone: Anchor's entrypoint is present by default and only suppressed via
-# `no-entrypoint` (see `programs/global-accountant/Cargo.toml`), the inverse
-# of the old opt-in polarity.
+# the compile-time addresses and keys come from. Anchor's entrypoint is present
+# by default; `no-entrypoint` suppresses it for library and test builds.
 
 [doc("SBF build with the test values above. Devnet NoReplay, but MAINNET Core Bridge and the test authority keys -- see the comment above them.")]
 build-devnet:
@@ -169,10 +161,9 @@ verify-authority so_path pubkey package="global-accountant-backfill":
 # cost of a full `build-sbf`. The toolchain name embeds the platform-tools
 # version, so it is discovered rather than hard-coded.
 #
-# Note: clippy cannot run on this toolchain (Anza ships no cargo-clippy for
-# platform-tools, and rustup cannot add components to custom toolchains).
-# RUSTFLAGS=-Dwarnings promotes the compiler's own lints to errors on the SBF
-# target; `clippy-sbf` below approximates clippy coverage of the SBF arms.
+# Clippy cannot run on this toolchain: Anza ships no cargo-clippy for
+# platform-tools. RUSTFLAGS=-Dwarnings promotes the compiler's own lints to
+# errors on the SBF target, so this recipe is the SBF-target lint pass.
 
 [doc("Type-check against the real SBF target (sbpf-solana-solana), warnings denied. With no arguments, checks every program; pass program names to narrow (e.g. `just check global-accountant`).")]
 check *programs:
@@ -224,20 +215,8 @@ check *programs:
     export RUSTFLAGS="-Dwarnings"
     {{test_env}} cargo "+${toolchain}" check --locked --target sbpf-solana-solana "${args[@]}"
 
-# `clippy-sbf` (nightly clippy against the tier-3 `bpfel-unknown-none` target
-# via `-Zbuild-std=core,alloc`) is gone as of the anchor-lang 1.1.2 migration.
-# It only ever worked because the pinocchio-era crates were `no_std`
-# (`#![cfg_attr(any(target_os = "solana", target_arch = "bpf"), no_std)]`),
-# so a bare `core`+`alloc` sysroot sufficed. Anchor is not `no_std`-compatible
-# (`anchor-derive-accounts`' generated code alone reaches for
-# `std::collections::BTreeSet`), and `bpfel-unknown-none` — "none" meaning no
-# OS/std support — has no `std` to build, even under `-Zbuild-std`. Only
-# Anza's platform-tools toolchain (used by `build`/`check` above) carries a
-# custom sysroot with SBF-target `std` support. `crates/definitions` alone
-# stays `no_std` (anchor-free), but it is a small, already-portable leaf crate
-# with no syscalls of its own; `check` above remains the sole SBF-target lint
-# pass for the workspace (clippy itself is still unavailable there — Anza
-# ships no `cargo-clippy` for platform-tools).
+# Clippy runs on the host target only. Anchor needs `std`, and only the
+# platform-tools toolchain carries an SBF-target `std`; `check` covers that target.
 
 [doc("Clippy against the host build.")]
 clippy:

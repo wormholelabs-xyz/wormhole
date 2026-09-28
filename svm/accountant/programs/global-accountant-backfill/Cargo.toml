@@ -13,12 +13,9 @@ version.workspace = true
 crate-type = ["cdylib", "lib"]
 
 [features]
-# Anchor convention (inverted polarity from the old `bpf-entrypoint` opt-in):
-# the entrypoint is present by default; `no-entrypoint` suppresses it for
-# library/CPI/test consumption. `idl-build` is deliberately never enabled —
-# Anchor's auto-IDL would be partial/inaccurate for the custom offset-0 tag
-# + bytemuck layouts this program keeps, so IDL codegen stays off rather than
-# shipping a misleading artifact.
+# Anchor convention: the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library and test consumption. `idl-build` stays off: the 1-byte account tags and bytemuck
+# layouts have no faithful IDL.
 default = []
 no-entrypoint = []
 

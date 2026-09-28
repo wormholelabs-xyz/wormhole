@@ -14,25 +14,14 @@ version = "0.1.0"
 
 [workspace.dependencies]
 bytemuck = { version = "1.21", features = ["derive", "min_const_generics"] }
-# Pinned exactly per the CLAUDE.md supply-chain rule: this is the framework
-# migration target (pinocchio -> anchor-lang 1.x), so the version is load-
-# bearing, not just a floor. `anchor-lang` 1.1.2 pulls solana-* 3.x, which is
-# what makes this line unify cleanly with the existing mollusk/surfpool test
-# stack (already on solana-* 3.x) — see the migration plan §0.
+# anchor-lang 1.1.2 pulls solana-* 3.x, which unifies with the mollusk and surfpool
+# test stack.
 anchor-lang = "=1.1.2"
-# `AnchorDeserialize`/`AnchorSerialize` are re-exports of `borsh`'s own
-# `BorshDeserialize`/`BorshSerialize` traits (anchor-lang 1.1.2 pins
-# `borsh = "1.5.7"`). Pinned to the exact version anchor's own graph resolves
-# to (verified via `cargo tree`) so there is exactly one `borsh` in the graph.
-# Needed directly (not just transitively) so `instructions::raw_ix_data`
-# can implement these traits by hand for the raw-bytes instruction-argument
-# wrapper described there.
+# `AnchorSerialize`/`AnchorDeserialize` are borsh traits. Pinned to the version
+# anchor-lang resolves, so the graph holds one `borsh`. `operational-core`'s
+# `raw_ix_data` implements them by hand.
 borsh = "=1.5.7"
-# On-chain `secp256k1_recover` for the `submit_observations` guardian-signature
-# check (`quorum::verify_signature`). Unlike pinocchio's raw syscall (which
-# only works on-chain, needing a host `unreachable!()` stub), this crate has a
-# real host-side implementation (via `k256`) gated on `target_os`, so no
-# cfg-gated stub is needed on our side. Pinned exact per the supply-chain rule.
+# `secp256k1_recover` for `quorum::verify_signature`: syscall on-chain, `k256` on host.
 solana-secp256k1-recover = "=3.2.0"
 global-accountant-definitions = { path = "crates/definitions" }
 accountant-operational-core = { path = "crates/operational-core" }
@@ -48,8 +37,6 @@ serde_wormhole = { path = "../../sdk/rust/serde_wormhole" }
 # NoReplay program crate. Dev-only parity checks for the wire constants and PDA
 # seeds; pulls `pinocchio`, so it must stay out of the SBF build. Pinned to a
 # commit on `main`.
-# Canonical in-tree program IDs and the shim's `GuardianSet`. Dev-only: it pins
-# `solana-program <=2`. Do not promote to a dependency.
 solana-noreplay = { git = "ssh://git@github.com/wormholelabs-xyz/solana-noreplay.git", rev = "e4bad6a1c890411346fc27f17baae6ae2decd507" }
 # `solana-noreplay` re-exports pinocchio's `Address`; its host-side
 # `find_program_address` needs this feature, enabled here explicitly rather
@@ -61,6 +48,8 @@ ruint = { version = "=1.20.0", default-features = false }
 # Shim instruction builders; dev-only parity check for `VerifyHashData`.
 wormhole-svm-shim = { path = "../wormhole-core-shims/crates/shim" }
 solana-program = "=2.3.0"
+# Canonical in-tree program IDs and the shim's `GuardianSet`. Dev-only: it pins
+# `solana-program <=2`. Do not promote to a dependency.
 wormhole-svm-definitions = { path = "../wormhole-core-shims/crates/definitions", features = ["solana", "verify-vaa-shim"] }
 
 # Test-only dependencies. Kept in workspace so versions stay aligned.

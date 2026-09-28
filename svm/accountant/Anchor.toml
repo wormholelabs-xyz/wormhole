@@ -1,14 +1,7 @@
-# Anchor workspace manifest for the Wormhole Global Accountant program.
+# Anchor workspace manifest for the Wormhole Global Accountant programs.
 #
-# This workspace's test suite is the Rust mollusk/surfpool flow driven by
-# `justfile` (`just test`), not the TS/local-validator `anchor test` harness —
-# see the migration plan (`.claude/tasks/anchor-migration-plan-v1.1.2.md` §6):
-# "the mollusk/surfpool Rust tests do not require the TS/`anchor test`
-# harness." `[scripts] test` below simply points `anchor test` at that same
-# flow for anyone who reaches for the Anchor CLI out of habit; `anchor build`
-# itself is not part of the documented build path (`just build-devnet`/
-# `cargo build-sbf` is), though it should work interchangeably since this is
-# an ordinary SBF cdylib either way.
+# The test suite is the Rust mollusk and surfpool flow in `justfile`. `[scripts] test`
+# points `anchor test` at `just test`. The build path is `just build-devnet` or `just build`.
 
 [toolchain]
 anchor_version = "1.1.2"

@@ -17,8 +17,8 @@
 //! `declare_id!` pins this `.so` to the operational program's address, so the two share one
 //! program account across the upgrade.
 //!
-//! Migration-window program: remove this crate once the cutover to `global-accountant` is
-//! complete.
+//! Migration-window program: it runs only between the wormchain snapshot and the cutover to
+//! `global-accountant`.
 
 #![allow(unexpected_cfgs)]
 
