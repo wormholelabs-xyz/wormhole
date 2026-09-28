@@ -2,8 +2,9 @@ use global_accountant_definitions::{
     parse_token_bridge_payload, ClosePendingIxData, GovernanceHeader, Instruction,
     ModifyBalanceIxData, ModifyBalancePayload, PostSignaturesIxData, RegisterChainIxData,
     RegisterChainPayload, SetComputeUnitLimitData, SubmitObservationsIxData, SubmitVaasIxData,
-    TokenBridgeAction, TokenBridgeTransfer, Uint256, UpgradeContractIxData, UpgradeContractPayload,
-    VaaBodyHeader, ACTION_ATTEST, ACTION_TRANSFER, SUBMIT_OBSERVATION_PREFIX,
+    TokenBridgeAction, TokenBridgeTransfer, TxId, Uint256, UpgradeContractIxData,
+    UpgradeContractPayload, VaaBodyHeader, ACTION_ATTEST, ACTION_TRANSFER, SIGNATURE_TX_ID_LEN,
+    SUBMIT_OBSERVATION_PREFIX,
 };
 use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
 use solana_pubkey::Pubkey;
@@ -13,7 +14,7 @@ use super::ids::{compute_budget_program_id, shim_program_id, system_program_id};
 
 pub use accountant_operational_core::hash::double_keccak256;
 
-pub const TX_HASH: [u8; 32] = [0xA9u8; 32];
+pub const TX_ID: TxId<'static> = TxId::Hash(&[0xA9u8; 32]);
 pub const RECIPIENT: [u8; 32] = [0xAB; 32];
 
 pub fn vaa_header(emitter_chain: u16, emitter_address: [u8; 32], sequence: u64) -> Vec<u8> {
@@ -126,9 +127,12 @@ pub fn observation_ix_from_body(
     guardian_set_index: u32,
     guardian_index: u8,
     signature: [u8; 65],
-    tx_hash: [u8; 32],
+    tx_id: TxId<'_>,
     body: &[u8],
 ) -> SubmitObservationsIxData {
+    let tx_id_bytes = tx_id.as_bytes();
+    let mut tx_id_padded = [0u8; SIGNATURE_TX_ID_LEN];
+    tx_id_padded[..tx_id_bytes.len()].copy_from_slice(tx_id_bytes);
     let (header, payload) = VaaBodyHeader::split(body).expect("test body has a valid VAA header");
     let key = header.namespace_key();
     let action_byte = *payload.first().expect("test body has a non-empty payload");
@@ -149,7 +153,8 @@ pub fn observation_ix_from_body(
         guardian_set_index: guardian_set_index.to_le_bytes(),
         guardian_index,
         signature,
-        tx_hash,
+        tx_id_len: u8::try_from(tx_id_bytes.len()).expect("tx id length fits u8"),
+        tx_id: tx_id_padded,
         action: action_byte,
         chain: key.chain.to_be_bytes(),
         emitter: key.emitter,
@@ -164,19 +169,19 @@ pub fn observation_ix_from_body(
 
 /// Content digest for `body`, matching the on-chain pending-PDA key.
 pub fn content_digest(body: &[u8]) -> [u8; 32] {
-    let ix = observation_ix_from_body(0, 0, [0u8; 65], TX_HASH, body);
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], TX_ID, body);
     double_keccak256(&ix.fields_and_digest())
 }
 
 pub fn signing_digest(body: &[u8]) -> [u8; 32] {
-    signing_digest_with_tx_hash(&TX_HASH, body)
+    signing_digest_with_tx_id(TX_ID, body)
 }
 
-pub fn signing_digest_with_tx_hash(tx_hash: &[u8; 32], body: &[u8]) -> [u8; 32] {
-    let ix = observation_ix_from_body(0, 0, [0u8; 65], *tx_hash, body);
+pub fn signing_digest_with_tx_id(tx_id: TxId<'_>, body: &[u8]) -> [u8; 32] {
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], tx_id, body);
     accountant_operational_core::hash::observation_signing_digest(
         SUBMIT_OBSERVATION_PREFIX,
-        tx_hash,
+        tx_id,
         &ix.fields_and_digest(),
     )
 }
@@ -200,29 +205,23 @@ pub fn submit_observations_ix_data(
     signature: [u8; 65],
     body: &[u8],
 ) -> Vec<u8> {
-    submit_observations_ix_data_with_tx_hash(
+    submit_observations_ix_data_with_tx_id(
         guardian_set_index,
         guardian_index,
         signature,
-        &TX_HASH,
+        TX_ID,
         body,
     )
 }
 
-pub fn submit_observations_ix_data_with_tx_hash(
+pub fn submit_observations_ix_data_with_tx_id(
     guardian_set_index: u32,
     guardian_index: u8,
     signature: [u8; 65],
-    tx_hash: &[u8; 32],
+    tx_id: TxId<'_>,
     body: &[u8],
 ) -> Vec<u8> {
-    let ix = observation_ix_from_body(
-        guardian_set_index,
-        guardian_index,
-        signature,
-        *tx_hash,
-        body,
-    );
+    let ix = observation_ix_from_body(guardian_set_index, guardian_index, signature, tx_id, body);
     let mut data = Vec::with_capacity(1 + SubmitObservationsIxData::LEN);
     data.push(Instruction::SubmitObservations as u8);
     data.extend_from_slice(bytemuck::bytes_of(&ix));

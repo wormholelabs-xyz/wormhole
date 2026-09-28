@@ -30,7 +30,7 @@ pub fn split_body<P: IxPrefix>(data: &[u8]) -> Result<(&P, &[u8]), GlobalAccount
     Ok((prefix, body))
 }
 
-/// `submit_observations` data: 245 bytes, fixed size. Carries only the fields this
+/// `submit_observations` data: 278 bytes, fixed size. Carries only the fields this
 /// program uses; every other real-body field folds into `digest`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
@@ -40,8 +40,11 @@ pub struct SubmitObservationsIxData {
     pub guardian_index: u8,
     /// `r ‖ s ‖ recovery_id`.
     pub signature: [u8; 65],
-    /// Source-chain transaction id; part of the signing digest only.
-    pub tx_hash: [u8; 32],
+    /// Byte length of `tx_id`: 32 or 64.
+    pub tx_id_len: u8,
+    /// Source-chain transaction id, zero-padded past `tx_id_len`; part of the signing
+    /// digest only. Read through `tx_id()`.
+    pub tx_id: [u8; SIGNATURE_TX_ID_LEN],
     /// Token Bridge action byte. 0x02 is a no-op; anything but 0x01/0x02/0x03 is
     /// `UnknownTokenBridgePayload`.
     pub action: u8,
@@ -60,6 +63,27 @@ pub struct SubmitObservationsIxData {
     pub amount: Uint256,
     /// `double_keccak256` of the real VAA body.
     pub digest: [u8; 32],
+}
+
+/// Hash-sized transaction id.
+pub const HASH_TX_ID_LEN: usize = 32;
+/// Solana-family id: the 64-byte ed25519 transaction signature.
+pub const SIGNATURE_TX_ID_LEN: usize = 64;
+
+/// Source-chain transaction id; one variant per valid length.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TxId<'a> {
+    Hash(&'a [u8; HASH_TX_ID_LEN]),
+    Signature(&'a [u8; SIGNATURE_TX_ID_LEN]),
+}
+
+impl TxId<'_> {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            TxId::Hash(id) => id.as_slice(),
+            TxId::Signature(id) => id.as_slice(),
+        }
+    }
 }
 
 impl SubmitObservationsIxData {
@@ -88,6 +112,29 @@ impl SubmitObservationsIxData {
     /// Exact-length view.
     pub fn from_bytes(data: &[u8]) -> Result<&Self, GlobalAccountantError> {
         bytemuck::try_from_bytes(data).map_err(|_| GlobalAccountantError::InvalidInstructionData)
+    }
+
+    /// The first `tx_id_len` bytes of `tx_id`.
+    ///
+    /// SECURITY: `tx_id_len` is exactly 32 or 64 and every byte past it is zero, so one
+    /// id has one encoding. Anything else is `InvalidInstructionData`.
+    pub fn tx_id(&self) -> Result<TxId<'_>, GlobalAccountantError> {
+        let tx_id = match usize::from(self.tx_id_len) {
+            HASH_TX_ID_LEN => {
+                let (id, padding) = self
+                    .tx_id
+                    .split_first_chunk::<HASH_TX_ID_LEN>()
+                    .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+                if padding.iter().any(|&b| b != 0) {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+                TxId::Hash(id)
+            }
+            SIGNATURE_TX_ID_LEN => TxId::Signature(&self.tx_id),
+            _ => return Err(GlobalAccountantError::InvalidInstructionData),
+        };
+        debug_assert!(tx_id.as_bytes().len() == usize::from(self.tx_id_len));
+        Ok(tx_id)
     }
 
     /// `action ‖ chain ‖ emitter ‖ sequence ‖ token_chain ‖ token_address ‖
@@ -205,20 +252,21 @@ impl ClosePendingIxData {
 
 const _: () = {
     use core::mem::offset_of;
-    assert!(SubmitObservationsIxData::LEN == 245);
+    assert!(SubmitObservationsIxData::LEN == 278);
     assert!(core::mem::size_of::<ObservationFieldsAndDigest>() == 143);
     assert!(offset_of!(SubmitObservationsIxData, guardian_index) == 4);
     assert!(offset_of!(SubmitObservationsIxData, signature) == 5);
-    assert!(offset_of!(SubmitObservationsIxData, tx_hash) == 70);
-    assert!(offset_of!(SubmitObservationsIxData, action) == 102);
-    assert!(offset_of!(SubmitObservationsIxData, chain) == 103);
-    assert!(offset_of!(SubmitObservationsIxData, emitter) == 105);
-    assert!(offset_of!(SubmitObservationsIxData, sequence) == 137);
-    assert!(offset_of!(SubmitObservationsIxData, token_chain) == 145);
-    assert!(offset_of!(SubmitObservationsIxData, token_address) == 147);
-    assert!(offset_of!(SubmitObservationsIxData, recipient_chain) == 179);
-    assert!(offset_of!(SubmitObservationsIxData, amount) == 181);
-    assert!(offset_of!(SubmitObservationsIxData, digest) == 213);
+    assert!(offset_of!(SubmitObservationsIxData, tx_id_len) == 70);
+    assert!(offset_of!(SubmitObservationsIxData, tx_id) == 71);
+    assert!(offset_of!(SubmitObservationsIxData, action) == 135);
+    assert!(offset_of!(SubmitObservationsIxData, chain) == 136);
+    assert!(offset_of!(SubmitObservationsIxData, emitter) == 138);
+    assert!(offset_of!(SubmitObservationsIxData, sequence) == 170);
+    assert!(offset_of!(SubmitObservationsIxData, token_chain) == 178);
+    assert!(offset_of!(SubmitObservationsIxData, token_address) == 180);
+    assert!(offset_of!(SubmitObservationsIxData, recipient_chain) == 212);
+    assert!(offset_of!(SubmitObservationsIxData, amount) == 214);
+    assert!(offset_of!(SubmitObservationsIxData, digest) == 246);
     assert!(SubmitVaasIxData::LEN == 3);
     assert!(RegisterChainIxData::LEN == 3);
     assert!(offset_of!(RegisterChainIxData, body_len) == 1);
@@ -301,7 +349,8 @@ mod tests {
         ix.guardian_set_index = 4u32.to_le_bytes();
         ix.guardian_index = 12;
         ix.signature[64] = 1;
-        ix.tx_hash = [0xCC; 32];
+        ix.tx_id_len = 32;
+        ix.tx_id[..32].copy_from_slice(&[0xCC; 32]);
         ix.action = 0x01;
         ix.chain = 2u16.to_be_bytes();
         ix.emitter = [0xEE; 32];
@@ -317,7 +366,7 @@ mod tests {
         assert_eq!(view.guardian_set_index(), 4);
         assert_eq!(view.guardian_index, 12);
         assert_eq!(view.signature[64], 1);
-        assert_eq!(view.tx_hash, [0xCC; 32]);
+        assert_eq!(view.tx_id(), Ok(TxId::Hash(&[0xCC; 32])));
         assert_eq!(view.action, 0x01);
         assert_eq!(view.chain(), 2);
         assert_eq!(view.emitter, [0xEE; 32]);
@@ -332,6 +381,32 @@ mod tests {
         assert!(SubmitObservationsIxData::from_bytes(short).is_err());
         let long = [bytes.as_slice(), &[0]].concat();
         assert!(SubmitObservationsIxData::from_bytes(&long).is_err());
+    }
+
+    #[test]
+    fn tx_id_parses_only_canonical_lengths() {
+        let hash = [0xCC; HASH_TX_ID_LEN];
+        let signature = [0xDD; SIGNATURE_TX_ID_LEN];
+        let mut hash_padded = [0u8; SIGNATURE_TX_ID_LEN];
+        hash_padded[..HASH_TX_ID_LEN].copy_from_slice(&hash);
+        let mut dirty_padding = hash_padded;
+        dirty_padding[SIGNATURE_TX_ID_LEN - 1] = 1;
+
+        let cases: [(&str, u8, [u8; SIGNATURE_TX_ID_LEN], Result<TxId, _>); 6] = [
+            ("hash", 32, hash_padded, Ok(TxId::Hash(&hash))),
+            ("signature", 64, signature, Ok(TxId::Signature(&signature))),
+            ("hash, dirty padding", 32, dirty_padding, Err(())),
+            ("zero length", 0, [0u8; SIGNATURE_TX_ID_LEN], Err(())),
+            ("off by one", 33, hash_padded, Err(())),
+            ("over max", 65, signature, Err(())),
+        ];
+        for (name, len, bytes, expected) in cases {
+            let mut ix = SubmitObservationsIxData::zeroed();
+            ix.tx_id_len = len;
+            ix.tx_id = bytes;
+            let expected = expected.map_err(|()| GlobalAccountantError::InvalidInstructionData);
+            assert_eq!(ix.tx_id(), expected, "{name}");
+        }
     }
 
     #[test]

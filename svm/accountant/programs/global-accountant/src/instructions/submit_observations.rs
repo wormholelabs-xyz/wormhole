@@ -23,30 +23,31 @@ use crate::err;
 use crate::instructions::transfer;
 use accountant_operational_core::accounts::chain_registration;
 
-/// `data`: `SubmitObservationsIxData`, 245 bytes fixed.
+/// `data`: `SubmitObservationsIxData`, 278 bytes fixed.
 ///
 /// ```text
 /// 0    4   guardian_set_index (LE u32)
 /// 4    1   guardian_index
 /// 5    65  signature (r ‖ s ‖ recovery_id)
-/// 70   32  tx_hash
-/// 102  1   action
-/// 103  2   chain (BE u16)
-/// 105  32  emitter
-/// 137  8   sequence (BE u64)
-/// 145  2   token_chain (BE u16)
-/// 147  32  token_address
-/// 179  2   recipient_chain (BE u16)
-/// 181  32  amount (BE Uint256)
-/// 213  32  digest
+/// 70   1   tx_id_len (32 or 64)
+/// 71   64  tx_id (zero-padded past tx_id_len)
+/// 135  1   action
+/// 136  2   chain (BE u16)
+/// 138  32  emitter
+/// 170  8   sequence (BE u64)
+/// 178  2   token_chain (BE u16)
+/// 180  32  token_address
+/// 212  2   recipient_chain (BE u16)
+/// 214  32  amount (BE Uint256)
+/// 246  32  digest
 /// ```
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let ix = SubmitObservationsIxData::from_bytes(data).map_err(err)?;
-    let tx_hash = &ix.tx_hash;
+    let tx_id = ix.tx_id().map_err(err)?;
     let fields = ix.fields_and_digest();
 
-    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_hash, &fields);
-    // Pending-PDA / commit-log key. Independent of `tx_hash`.
+    let signing_digest = observation_signing_digest(SUBMIT_OBSERVATION_PREFIX, tx_id, &fields);
+    // Pending-PDA / commit-log key. Independent of `tx_id`.
     let content_digest = double_keccak256(&fields);
 
     let parsed = ParsedObservation::from_ix(ix, content_digest);
