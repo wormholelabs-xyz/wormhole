@@ -228,7 +228,6 @@ fn rejects() {
     };
     let mut wrong_action = any_target();
     wrong_action.action = 2;
-
     let mut spoofed_pda = Registration::new(15, ETHEREUM, emitter_a);
     spoofed_pda.registration_pda = chain_registration::derive_pda(&program_id(), 3).0;
 
@@ -276,13 +275,13 @@ fn rejects() {
     }
 }
 
-/// RegisterChain governance VAAs targeted at Wormchain (the retiring cosmwasm accountant's
-/// chain) are accepted during the wormchain -> Solana migration window; see
+/// A `RegisterChain` VAA carries target chain 0 (`sdk/vaa/payloads.go`), so a Wormchain
+/// target never occurs on the wire. The program rejects it; see
 /// `ACCEPTED_REGISTER_CHAIN_TARGETS`.
 #[test]
-fn register_wormchain_target_accepted_during_migration_window() {
+fn register_wormchain_target_rejected() {
     let mollusk = mollusk();
-    let emitter_a = [0x77u8; 32];
+    let emitter = [0x77u8; 32];
 
     let wormchain_target = governance_header(
         TOKEN_BRIDGE_GOVERNANCE_MODULE,
@@ -295,17 +294,16 @@ fn register_wormchain_target_accepted_during_migration_window() {
         20,
         wormchain_target,
         ETHEREUM,
-        emitter_a,
+        emitter,
     );
     let registration = Registration::with_body(20, ETHEREUM, body);
     let result = registration.submit(
         &mollusk,
-        registration.accounts(uninitialised_pda_account(), noreplay_bucket_unmarked()),
+        registration.accounts(uninitialised_pda_account(), uninitialised_pda_account()),
     );
-    assert_success(&result, "wormchain-targeted registration");
-    let account = find_account(&result.resulting_accounts, &registration.registration_pda);
-    assert_eq!(
-        registration_layout(account),
-        ChainRegistrationLayout::new(ETHEREUM, emitter_a, 20)
+    assert_error(
+        &result,
+        GlobalAccountantError::GovernanceChainMismatch as u64,
+        "wormchain-targeted registration",
     );
 }

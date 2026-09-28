@@ -26,17 +26,14 @@ pub use accountant_operational_core::{err, raw_ix_data::RawIxData};
 pub use global_accountant_definitions as definitions;
 
 use accountant_operational_core::instructions as shared;
-use definitions::{ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE};
+use definitions::{
+    ACCOUNTANT_GOVERNANCE_MODULE, GLOBAL_ACCOUNTANT_PROGRAM_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+};
 
 // `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
 
-declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
-
-const _: () = assert!(
-    definitions::is_global_accountant_program_id(&ID.to_bytes()),
-    "declare_id! does not match GLOBAL_ACCOUNTANT_PROGRAM_ID"
-);
+declare_id!(Pubkey::new_from_array(GLOBAL_ACCOUNTANT_PROGRAM_ID));
 
 #[program]
 pub mod global_accountant {

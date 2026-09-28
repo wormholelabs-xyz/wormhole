@@ -1,409 +1,346 @@
-//! Surfpool E2E — backfill program lifecycle against a real subprocess
-//! validator, with the production `solana_noreplay.so` co-deployed.
+//! The backfill program's lifecycle against a fresh surfpool, with the pinned
+//! `solana_noreplay.so` co-deployed:
 //!
-//! Phases the test exercises in order:
+//! 1. `BackfillNoReplay`: three entries across two buckets. The bitmap bits flip and
+//!    one `ACCDGST\0` record per entry reaches `meta.logMessages` over real RPC.
+//! 2. `BackfillBalance`: two `BalanceAccountLayout` PDAs at the operational seeds.
+//! 3. `BackfillChainRegistration`: two chains, each writing the `ChainRegistration`
+//!    PDA and the `RegisterChain` record.
+//! 4. `BackfillModifyBalance`: one `ModifyBalanceLayout` record.
+//! 5. A stranger signs `BackfillNoReplay` and `BackfillBalance`: both reject with
+//!    `UnauthorizedCaller`, and `getAccountInfo` on the target balance PDA errors.
 //!
-//! 1. `BackfillNoReplay` for three entries spanning two buckets. Assert the
-//!    NoReplay bitmap bits flip and the canonical `ACCDGST\0` commit-log
-//!    entries appear via `meta.logMessages` over real RPC.
-//! 2. `BackfillBalance` for two accounts. Assert both `BalanceAccountLayout`
-//!    PDAs are written at canonical seeds via `getAccountInfo`.
-//! 3. `BackfillChainRegistration` for two chains. Assert the `ChainRegistration`
-//!    and `RegisterChain` PDAs are written at the operational program's seeds,
-//!    rent-exempt, with the expected layouts.
-//! 4. `BackfillNoReplay` signed by a non-authority keypair. Assert the tx
-//!    fails with `UnauthorizedCaller`, confirming the compile-time
-//!    `BACKFILL_AUTHORITY` const gate runs on-chain.
-//! 5. `BackfillBalance` signed by the same non-authority keypair. Assert
-//!    the same `UnauthorizedCaller` failure, and that
-//!    `getAccountInfo` on the target PDA still errors, confirming the
-//!    authority gate covers `BackfillBalance`'s own handler too.
+//! Every write is checked for owner, length, rent and layout, so the on-chain bytes
+//! are the bytes the operational program reads after the cutover upgrade.
 
-#![allow(clippy::too_many_arguments)]
-
-use std::{str::FromStr, time::Duration};
-
-use solana_client::{client_error::ClientError, rpc_client::RpcClient};
+use accountant_operational_core::accounts::{balance, chain_registration};
+use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
+use accountant_operational_core::instructions::modify_balance::derive_modify_balance_pda;
+use accountant_operational_core::instructions::register_chain::derive_register_chain_pda;
+use global_accountant_definitions::global_accountant_backfill::Instruction as Arm;
+use global_accountant_definitions::{
+    BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError, ModificationKind,
+    ModifyBalanceLayout, NoReplayBitmapAccount, RegisterChainLayout, Uint256,
+    UNPINNED_GUARDIAN_SET_INDEX,
+};
+use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
 use solana_rent::Rent;
 use solana_signer::Signer;
-use solana_transaction::Transaction;
-
-use global_accountant_definitions::{
-    BalanceAccountLayout, ChainRegistrationLayout, GlobalAccountantError, NoReplayBitmapAccount,
-    RegisterChainLayout, Uint256, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_PROGRAM_ID, REGISTER_CHAIN_SEED_PREFIX,
-};
 
 use crate::common::*;
-use crate::harness::*;
+use crate::harness::{
+    accdgst_logs_in_tx, deploy_programs, fund, send, send_expect_error, start_surfpool,
+    ProgramImage, SurfpoolOptions,
+};
 
-// ============================================================================
-// PDA derivations
-// ============================================================================
+const BSC: u16 = 4;
+const EMITTER: [u8; 32] = [0x42u8; 32];
+const AUTHORITY_LAMPORTS: u64 = 20_000_000_000;
+const STRANGER_LAMPORTS: u64 = 2_000_000_000;
 
-/// Assert an RPC error string carries `UnauthorizedCaller`. The code is read from
-/// the enum, so renumbering cannot leave this assertion stale.
-fn assert_unauthorized_caller(msg: &str, label: &str) {
-    let code = GlobalAccountantError::UnauthorizedCaller as u32;
-    let hex = format!("custom program error: {code:#x}");
-    let debug = format!("Custom({code})");
-    assert!(
-        msg.contains(&hex) || msg.contains(&debug),
-        "expected UnauthorizedCaller ({debug}) in {label} error, got: {msg}"
-    );
-}
-
-fn derive_noreplay_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id)
-}
-
-fn derive_noreplay_bucket(
-    authority: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-) -> Pubkey {
-    let mut namespace = [0u8; 34];
-    namespace[..2].copy_from_slice(&chain.to_be_bytes());
-    namespace[2..].copy_from_slice(emitter);
-    let bucket_index = NoReplayBitmapAccount::bucket_index(sequence).to_le_bytes();
-    let (pda, _) = Pubkey::find_program_address(
-        &[
-            authority.as_ref(),
-            &namespace[..32],
-            &namespace[32..],
-            &bucket_index,
-        ],
-        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-    );
-    pda
-}
-
-fn derive_balance_pda(
+/// Account written by the backfill: owner, length, rent and layout in one check.
+fn assert_written<T: bytemuck::Pod + PartialEq + core::fmt::Debug>(
+    account: &Account,
     program_id: &Pubkey,
-    chain: u16,
-    token_chain: u16,
-    token_address: &[u8; 32],
-) -> Pubkey {
-    let chain_be = chain.to_be_bytes();
-    let token_chain_be = token_chain.to_be_bytes();
-    let (pda, _) = Pubkey::find_program_address(
-        &[
-            ACCOUNT_SEED_PREFIX,
-            &chain_be,
-            &token_chain_be,
-            token_address,
-        ],
-        program_id,
+    expected: T,
+    label: &str,
+) {
+    let len = core::mem::size_of::<T>();
+    assert_eq!(account.owner, *program_id, "{label}: owner");
+    assert_eq!(account.data.len(), len, "{label}: data length");
+    assert_eq!(
+        account.lamports,
+        Rent::default().minimum_balance(len),
+        "{label}: rent-exempt minimum"
     );
-    pda
+    assert_eq!(layout::<T>(account), expected, "{label}: layout");
 }
-
-fn derive_registration_pda(program_id: &Pubkey, chain: u16) -> Pubkey {
-    let (pda, _) = Pubkey::find_program_address(
-        &[CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
-        program_id,
-    );
-    pda
-}
-
-fn derive_register_chain_pda(program_id: &Pubkey, sequence: u64) -> Pubkey {
-    let (pda, _) = Pubkey::find_program_address(
-        &[REGISTER_CHAIN_SEED_PREFIX, &sequence.to_be_bytes()],
-        program_id,
-    );
-    pda
-}
-
-fn system_program_id() -> Pubkey {
-    Pubkey::from_str("11111111111111111111111111111111").unwrap()
-}
-
-fn send_ix(rpc: &RpcClient, payer: &Keypair, ix: Instruction) -> Result<String, ClientError> {
-    let blockhash = rpc.get_latest_blockhash()?;
-    let tx = Transaction::new_signed_with_payer(&[ix], Some(&payer.pubkey()), &[payer], blockhash);
-    rpc.send_and_confirm_transaction(&tx).map(|s| s.to_string())
-}
-
-// ============================================================================
-// The test
-// ============================================================================
 
 #[test]
-#[ignore = "spawns surfpool subprocess; run via `cargo test --test surfpool_e2e_backfill_lifecycle -- --ignored`"]
+#[ignore = "spawns surfpool subprocess; run via `just e2e-backfill`"]
 fn surfpool_backfill_lifecycle() {
-    // ---------- Load .so artefacts ----------
-    let backfill_so = so_path(BACKFILL_PROGRAM_NAME);
-    let backfill_bytes = std::fs::read(&backfill_so).unwrap_or_else(|e| {
-        panic!(
-            "could not read {}: {e}. Run `just build` first.",
-            backfill_so.display()
-        )
-    });
-    let noreplay_bytes = accountant_test_fixtures::NOREPLAY_SO.bytes;
-    eprintln!(
-        "[backfill-e2e] backfill={} bytes, noreplay={} bytes",
-        backfill_bytes.len(),
-        noreplay_bytes.len()
-    );
-
-    // ---------- Boot surfpool offline ----------
-    let guard = start_surfpool(SurfpoolOptions::offline("ga-backfill-e2e"));
-    let rpc_url = guard.rpc_url();
+    let guard = start_surfpool(SurfpoolOptions::offline("ga-backfill-lifecycle"));
     let rpc = guard.rpc_client();
 
-    // ---------- Fixed program id + authority/payer airdrop ----------
-    //
-    // Anchor's `declare_id!` pins this program to a single fixed address,
-    // checked on every entry (`DeclaredProgramIdMismatch` otherwise), so
-    // deploy at that fixed ID.
-    let program_id = Pubkey::new_from_array(global_accountant_backfill::ID.to_bytes());
-    // Payer must equal `BACKFILL_AUTHORITY` — deterministic test keypair
-    // (seed `[1u8; 32]`) keeps fixtures reproducible.
-    let authority = Keypair::new_from_array([1u8; 32]);
+    let backfill = accountant_image();
+    let id = backfill.program_id;
+    deploy_programs(&rpc, &[backfill, ProgramImage::noreplay()]);
+
+    // The payer is the compiled-in `BACKFILL_AUTHORITY`; every other signer is a stranger.
+    let authority = test_authority_keypair();
     let stranger = Keypair::new();
-    eprintln!(
-        "[backfill-e2e] program_id={program_id} authority={} stranger={}",
-        authority.pubkey(),
-        stranger.pubkey()
-    );
+    fund(&rpc, &authority.pubkey(), AUTHORITY_LAMPORTS);
+    fund(&rpc, &stranger.pubkey(), STRANGER_LAMPORTS);
 
-    let airdrop = rpc
-        .request_airdrop(&authority.pubkey(), 20_000_000_000)
-        .expect("airdrop authority");
-    await_confirmed("airdrop", Duration::from_secs(10), || {
-        rpc.confirm_transaction(&airdrop)
-    });
-    let stranger_drop = rpc
-        .request_airdrop(&stranger.pubkey(), 2_000_000_000)
-        .expect("airdrop stranger");
-    await_confirmed("airdrop-stranger", Duration::from_secs(10), || {
-        rpc.confirm_transaction(&stranger_drop)
-    });
+    let noreplay_authority = noreplay_authority_pda(&id);
+    let bucket =
+        |sequence: u64| derive_bucket_pda(&noreplay_authority, ETHEREUM, &EMITTER, sequence).0;
+    let noreplay_head = |signer: &Pubkey| {
+        vec![
+            AccountMeta::new(*signer, true),
+            AccountMeta::new_readonly(noreplay_program_id(), false),
+            AccountMeta::new_readonly(noreplay_authority, false),
+            AccountMeta::new_readonly(system_program_id(), false),
+        ]
+    };
+    let write_head = |signer: &Pubkey| {
+        vec![
+            AccountMeta::new(*signer, true),
+            AccountMeta::new_readonly(system_program_id(), false),
+        ]
+    };
 
-    deploy_program(&rpc_url, &program_id, &backfill_bytes);
-    deploy_program(
-        &rpc_url,
-        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-        noreplay_bytes,
-    );
-
-    // ---------- Derive PDAs ----------
-    let (noreplay_auth_pda, _) = derive_noreplay_authority_pda(&program_id);
-
-    // ---------- Phase 1: BackfillNoReplay (3 entries, 2 buckets) ----------
-    let emitter = [0x42u8; 32];
-    let entries = [
-        NoReplayEntry {
-            chain: 2,
-            emitter,
+    // 1. BackfillNoReplay: sequences 10 and 500 share bucket 0, 1500 opens bucket 1.
+    let transfers = [
+        wire::NoReplayEntry {
+            chain: ETHEREUM,
+            emitter: EMITTER,
             sequence: 10,
             digest: [0xa1u8; 32],
         },
-        NoReplayEntry {
-            chain: 2,
-            emitter,
+        wire::NoReplayEntry {
+            chain: ETHEREUM,
+            emitter: EMITTER,
             sequence: 500,
             digest: [0xa2u8; 32],
         },
-        NoReplayEntry {
-            chain: 2,
-            emitter,
-            sequence: 1500,
+        wire::NoReplayEntry {
+            chain: ETHEREUM,
+            emitter: EMITTER,
+            sequence: 1_500,
             digest: [0xa3u8; 32],
         },
     ];
-    let bucket_0 = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 0);
-    let bucket_1 = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 1500);
+    let mut accounts = noreplay_head(&authority.pubkey());
+    accounts.push(AccountMeta::new(bucket(10), false));
+    accounts.push(AccountMeta::new(bucket(1_500), false));
+    let sig = send(
+        &rpc,
+        "backfill_no_replay",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, &transfers),
+        }],
+        &[&authority],
+    );
 
-    let metas_no_replay = vec![
-        AccountMeta::new(authority.pubkey(), true),
-        AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
-        AccountMeta::new_readonly(noreplay_auth_pda, false),
-        AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(bucket_0, false),
-        AccountMeta::new(bucket_1, false),
-    ];
-    let ix = Instruction {
-        program_id,
-        accounts: metas_no_replay,
-        data: encode_noreplay_batch(&entries),
-    };
-    let sig = send_ix(&rpc, &authority, ix).expect("BackfillNoReplay tx");
-    eprintln!("[backfill-e2e] BackfillNoReplay tx={sig}");
-
-    // Three ACCDGST\0 log entries in original order.
-    let logs = fetch_accdgst_logs(&rpc_url, &sig);
-    assert_eq!(logs.len(), 3, "expected 3 commit-log entries");
-    for (i, e) in entries.iter().enumerate() {
-        let (chain, em, seq, dig, gsi) = &logs[i];
-        assert_eq!(*chain, e.chain);
-        assert_eq!(em, &e.emitter);
-        assert_eq!(*seq, e.sequence);
-        assert_eq!(dig, &e.digest);
-        assert_eq!(*gsi, 0, "guardian_set_index sentinel");
+    let logs = accdgst_logs_in_tx(&rpc, &sig);
+    assert_eq!(
+        logs.len(),
+        transfers.len(),
+        "one commit-log record per entry"
+    );
+    for (entry, log) in transfers.iter().zip(&logs) {
+        let label = entry.sequence;
+        assert_eq!(log.chain(), entry.chain, "commit-log chain {label}");
+        assert_eq!(log.emitter, entry.emitter, "commit-log emitter {label}");
+        assert_eq!(
+            log.sequence(),
+            entry.sequence,
+            "commit-log sequence {label}"
+        );
+        assert_eq!(log.digest, entry.digest, "commit-log digest {label}");
+        assert_eq!(
+            log.guardian_set_index(),
+            UNPINNED_GUARDIAN_SET_INDEX,
+            "commit-log guardian_set_index {label}"
+        );
     }
-
-    // Bitmap bits set in both buckets.
-    let b0 = rpc.get_account(&bucket_0).expect("bucket_0 account");
-    let b1 = rpc.get_account(&bucket_1).expect("bucket_1 account");
-    let bitmap_0 = NoReplayBitmapAccount::from_bytes(&b0.data).expect("bucket_0 bitmap");
-    let bitmap_1 = NoReplayBitmapAccount::from_bytes(&b1.data).expect("bucket_1 bitmap");
-    for seq in [10u64, 500] {
-        assert!(bitmap_0.is_marked(seq), "expected bit for {seq} set");
+    for sequence in [10u64, 500, 1_500] {
+        let account = rpc.get_account(&bucket(sequence)).expect("bucket PDA");
+        assert_bucket_marked(&account, sequence);
     }
-    assert!(bitmap_1.is_marked(1500), "expected bit for 1500 set");
+    assert_eq!(
+        NoReplayBitmapAccount::bucket_index(1_500),
+        1,
+        "1500 belongs to the second bucket"
+    );
 
-    // ---------- Phase 2: BackfillBalance (2 accounts) ----------
+    // 2. BackfillBalance.
     let balances = [
-        balance_entry(2, 2, [0x11u8; 32], Uint256::from_u128(1_000_000).0),
-        balance_entry(4, 4, [0x22u8; 32], Uint256::from_u128(2_500_000).0),
+        wire::balance_entry(
+            ETHEREUM,
+            ETHEREUM,
+            [0x11u8; 32],
+            Uint256::from_u128(1_000_000).0,
+        ),
+        wire::balance_entry(BSC, BSC, [0x22u8; 32], Uint256::from_u128(2_500_000).0),
     ];
-    let bal_pda_0 = derive_balance_pda(&program_id, 2, 2, &[0x11u8; 32]);
-    let bal_pda_1 = derive_balance_pda(&program_id, 4, 4, &[0x22u8; 32]);
-    let metas_balance = vec![
-        AccountMeta::new(authority.pubkey(), true),
-        AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(bal_pda_0, false),
-        AccountMeta::new(bal_pda_1, false),
-    ];
-    let ix = Instruction {
-        program_id,
-        accounts: metas_balance,
-        data: encode_balance_batch(&balances),
+    let balance_pda = |entry: &global_accountant_definitions::BackfillBalanceEntry| {
+        balance::derive_pda(
+            &id,
+            entry.chain(),
+            entry.token_chain(),
+            &entry.token_address,
+        )
+        .0
     };
-    let sig = send_ix(&rpc, &authority, ix).expect("BackfillBalance tx");
-    eprintln!("[backfill-e2e] BackfillBalance tx={sig}");
-
-    // Pin the rent-exempt minimum the runtime debits per balance PDA. A
-    // regression in `BalanceAccountLayout` size (adding a field, restoring
-    // `_reserved`) would shift this number and trip the assert before any
-    // mainnet rent estimate goes stale.
-    let expected_rent = Rent::default().minimum_balance(BalanceAccountLayout::LEN);
-    for (entry, pda) in balances.iter().zip([bal_pda_0, bal_pda_1]) {
-        let acc = rpc.get_account(&pda).expect("balance PDA");
-        assert_eq!(acc.owner, program_id);
-        assert_eq!(acc.data.len(), BalanceAccountLayout::LEN);
-        assert_eq!(
-            acc.lamports, expected_rent,
-            "balance PDA rent should equal `Rent::default().minimum_balance(BalanceAccountLayout::LEN)` ({expected_rent})"
+    let mut accounts = write_head(&authority.pubkey());
+    accounts.extend(
+        balances
+            .iter()
+            .map(|entry| AccountMeta::new(balance_pda(entry), false)),
+    );
+    send(
+        &rpc,
+        "backfill_balance",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_balance_batch(Arm::BackfillBalance as u8, &balances),
+        }],
+        &[&authority],
+    );
+    for entry in &balances {
+        let account = rpc.get_account(&balance_pda(entry)).expect("balance PDA");
+        assert_written(
+            &account,
+            &id,
+            BalanceAccountLayout::new(
+                entry.chain(),
+                entry.token_chain(),
+                entry.token_address,
+                entry.balance(),
+            ),
+            "balance",
         );
-        let layout: &BalanceAccountLayout = bytemuck::from_bytes(&acc.data);
-        assert_eq!(layout.chain, entry.chain());
-        assert_eq!(layout.token_chain, entry.token_chain());
-        assert_eq!(layout.token_address, entry.token_address);
-        assert_eq!(layout.balance, entry.balance());
     }
 
-    // ---------- Phase 3: BackfillChainRegistration (2 chains) ----------
+    // 3. BackfillChainRegistration: the registration PDA and the governance record.
     let registrations = [
-        chain_registration_entry(2, 1_234, [0x51u8; 32]),
-        chain_registration_entry(4, 77, [0x52u8; 32]),
+        wire::chain_registration_entry(ETHEREUM, 1_234, [0x51u8; 32]),
+        wire::chain_registration_entry(BSC, 77, [0x52u8; 32]),
     ];
-    let mut metas_registration = vec![
-        AccountMeta::new(authority.pubkey(), true),
-        AccountMeta::new_readonly(system_program_id(), false),
-    ];
+    let mut accounts = write_head(&authority.pubkey());
     for entry in &registrations {
-        metas_registration.push(AccountMeta::new(
-            derive_registration_pda(&program_id, entry.chain()),
+        accounts.push(AccountMeta::new(
+            chain_registration::derive_pda(&id, entry.chain()).0,
             false,
         ));
-        metas_registration.push(AccountMeta::new(
-            derive_register_chain_pda(&program_id, entry.sequence()),
+        accounts.push(AccountMeta::new(
+            derive_register_chain_pda(&id, entry.sequence()).0,
             false,
         ));
     }
-    let ix = Instruction {
-        program_id,
-        accounts: metas_registration,
-        data: encode_chain_registration_batch(&registrations),
-    };
-    let sig = send_ix(&rpc, &authority, ix).expect("BackfillChainRegistration tx");
-    eprintln!("[backfill-e2e] BackfillChainRegistration tx={sig}");
-
-    let registration_rent = Rent::default().minimum_balance(ChainRegistrationLayout::LEN);
-    let record_rent = Rent::default().minimum_balance(RegisterChainLayout::LEN);
+    send(
+        &rpc,
+        "backfill_chain_registration",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_chain_registration_batch(
+                Arm::BackfillChainRegistration as u8,
+                &registrations,
+            ),
+        }],
+        &[&authority],
+    );
     for entry in &registrations {
-        let acc = rpc
-            .get_account(&derive_registration_pda(&program_id, entry.chain()))
+        let (chain, sequence, emitter) = (entry.chain(), entry.sequence(), entry.emitter);
+        let account = rpc
+            .get_account(&chain_registration::derive_pda(&id, chain).0)
             .expect("ChainRegistration PDA");
-        assert_eq!(acc.owner, program_id);
-        assert_eq!(acc.data.len(), ChainRegistrationLayout::LEN);
-        assert_eq!(acc.lamports, registration_rent);
-        let layout: &ChainRegistrationLayout = bytemuck::from_bytes(&acc.data);
-        assert_eq!(
-            *layout,
-            ChainRegistrationLayout::new(entry.chain(), entry.emitter, entry.sequence())
+        assert_written(
+            &account,
+            &id,
+            ChainRegistrationLayout::new(chain, emitter, sequence),
+            "chain registration",
         );
-
-        let acc = rpc
-            .get_account(&derive_register_chain_pda(&program_id, entry.sequence()))
+        let account = rpc
+            .get_account(&derive_register_chain_pda(&id, sequence).0)
             .expect("RegisterChain PDA");
-        assert_eq!(acc.owner, program_id);
-        assert_eq!(acc.data.len(), RegisterChainLayout::LEN);
-        assert_eq!(acc.lamports, record_rent);
-        let layout: &RegisterChainLayout = bytemuck::from_bytes(&acc.data);
-        assert_eq!(
-            *layout,
-            RegisterChainLayout::new(entry.chain(), entry.emitter, entry.sequence())
+        assert_written(
+            &account,
+            &id,
+            RegisterChainLayout::new(chain, emitter, sequence),
+            "register chain record",
         );
     }
 
-    // ---------- Phase 4: wrong-signer BackfillNoReplay → must fail ----------
-    //
-    // The compile-time `BACKFILL_AUTHORITY` const gates arbitrary state
-    // writes. Run a control tx signed by a stranger.
-    let stranger_entry = NoReplayEntry {
-        chain: 2,
-        emitter,
-        sequence: 9999,
-        digest: [0xb0u8; 32],
-    };
-    let stranger_bucket = derive_noreplay_bucket(&noreplay_auth_pda, 2, &emitter, 9999);
-    let metas_stranger = vec![
-        AccountMeta::new(stranger.pubkey(), true),
-        AccountMeta::new_readonly(Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), false),
-        AccountMeta::new_readonly(noreplay_auth_pda, false),
-        AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(stranger_bucket, false),
-    ];
-    let ix = Instruction {
-        program_id,
-        accounts: metas_stranger,
-        data: encode_noreplay_batch(&[stranger_entry]),
-    };
-    let err = send_ix(&rpc, &stranger, ix).expect_err("stranger ix must fail");
-    let msg = err.to_string();
-    eprintln!("[backfill-e2e] wrong-signer error: {msg}");
-    assert_unauthorized_caller(&msg, "wrong-signer BackfillNoReplay");
+    // 4. BackfillModifyBalance: the record that arms `modify_balance`'s replay guard.
+    let reason: [u8; 32] = *b"wormchain modification sequence ";
+    let modification = wire::modify_balance_entry(
+        ModificationKind::Add as u8,
+        ETHEREUM,
+        ETHEREUM,
+        9,
+        [0x33u8; 32],
+        Uint256::from_u128(4_200).0,
+        reason,
+    );
+    let record = derive_modify_balance_pda(&id, modification.sequence()).0;
+    let mut accounts = write_head(&authority.pubkey());
+    accounts.push(AccountMeta::new(record, false));
+    send(
+        &rpc,
+        "backfill_modify_balance",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_modify_balance_batch(
+                Arm::BackfillModifyBalance as u8,
+                &[modification],
+            ),
+        }],
+        &[&authority],
+    );
+    assert_written(
+        &rpc.get_account(&record).expect("ModifyBalance PDA"),
+        &id,
+        ModifyBalanceLayout::new(
+            ModificationKind::from_u8(modification.kind).expect("valid kind"),
+            modification.chain_id(),
+            modification.token_chain(),
+            modification.sequence(),
+            modification.token_address,
+            modification.amount(),
+            modification.reason,
+        ),
+        "modify balance record",
+    );
 
-    // ---------- Phase 5: wrong-signer BackfillBalance → must fail ----------
-    //
-    // `BackfillBalance` shares `require_authority` but is a separate
-    // handler; run the same control here too. Fresh (chain, token_chain,
-    // token_address) key avoids colliding with the PDA written in Phase 2.
-    let stranger_balance = balance_entry(9, 9, [0x99u8; 32], Uint256::from_u128(1).0);
-    let stranger_bal_pda = derive_balance_pda(&program_id, 9, 9, &[0x99u8; 32]);
-    let metas_stranger_balance = vec![
-        AccountMeta::new(stranger.pubkey(), true),
-        AccountMeta::new_readonly(system_program_id(), false),
-        AccountMeta::new(stranger_bal_pda, false),
-    ];
-    let ix = Instruction {
-        program_id,
-        accounts: metas_stranger_balance,
-        data: encode_balance_batch(&[stranger_balance]),
-    };
-    let err = send_ix(&rpc, &stranger, ix).expect_err("stranger BackfillBalance ix must fail");
-    let msg = err.to_string();
-    eprintln!("[backfill-e2e] BackfillBalance wrong-signer error: {msg}");
-    assert_unauthorized_caller(&msg, "wrong-signer BackfillBalance");
+    // 5. A stranger's writes: the compile-time authority gate runs in both handlers.
+    let stranger_transfer = [wire::NoReplayEntry {
+        chain: ETHEREUM,
+        emitter: EMITTER,
+        sequence: 9_999,
+        digest: [0xb0u8; 32],
+    }];
+    let mut accounts = noreplay_head(&stranger.pubkey());
+    accounts.push(AccountMeta::new(bucket(9_999), false));
+    send_expect_error(
+        &rpc,
+        "backfill_no_replay[stranger]",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, &stranger_transfer),
+        }],
+        &[&stranger],
+        GlobalAccountantError::UnauthorizedCaller,
+    );
+
+    let stranger_balance = wire::balance_entry(9, 9, [0x99u8; 32], Uint256::from_u128(1).0);
+    let stranger_pda = balance_pda(&stranger_balance);
+    let mut accounts = write_head(&stranger.pubkey());
+    accounts.push(AccountMeta::new(stranger_pda, false));
+    send_expect_error(
+        &rpc,
+        "backfill_balance[stranger]",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_balance_batch(Arm::BackfillBalance as u8, &[stranger_balance]),
+        }],
+        &[&stranger],
+        GlobalAccountantError::UnauthorizedCaller,
+    );
     assert!(
-        rpc.get_account(&stranger_bal_pda).is_err(),
-        "stranger's BackfillBalance PDA must not exist after a rejected tx"
+        rpc.get_account(&stranger_pda).is_err(),
+        "rejected BackfillBalance wrote its target PDA"
     );
 }

@@ -88,7 +88,7 @@ impl RegisterChainPayload {
         u16::from_be_bytes(self.chain)
     }
 
-    /// Governance emitter, `module`, `RegisterChain` action, target in
+    /// Governance emitter, `module`, `RegisterChain` action, target chain in
     /// [`ACCEPTED_REGISTER_CHAIN_TARGETS`].
     ///
     /// `module` is the caller's governance module: the Token Bridge module for the WTT
@@ -154,7 +154,7 @@ impl ModifyBalancePayload {
         Uint256::from_be_bytes(self.amount)
     }
 
-    /// Governance emitter, `module`, `ModifyBalance` action, target in
+    /// Governance emitter, `module`, `ModifyBalance` action, target chain in
     /// [`ACCEPTED_MODIFY_BALANCE_TARGETS`], known `kind`. Returns the parsed kind.
     /// `module` is the calling accountant's governance module.
     pub fn validate(
@@ -239,6 +239,7 @@ mod tests {
     use crate::constants::{
         ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE, WORMCHAIN_CHAIN_ID,
     };
+    use crate::state::ModifyBalanceLayout;
     use wormhole_sdk::accountant_modification::ModificationKind as SdkKind;
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
 
@@ -286,6 +287,56 @@ mod tests {
         payload.header.target_chain = SOLANA_CHAIN_ID.to_be_bytes();
         payload.kind = ModificationKind::Add as u8;
         payload
+    }
+
+    /// `reason` on the wire is the ASCII text zero-left-padded to 32 bytes. Tooling that
+    /// right-pads writes 32 wrong bytes into the `ModifyBalance` record.
+    #[test]
+    fn modify_balance_reason_is_zero_left_padded() {
+        fn zero_left_padded(reason: &str) -> [u8; 32] {
+            let mut out = [0u8; 32];
+            out[32 - reason.len()..].copy_from_slice(reason.as_bytes());
+            out
+        }
+
+        let cases: [&str; 4] = [
+            "",
+            "fix",
+            "audit-log: backfilled modify",
+            "reason exactly 32 bytes long!!!!",
+        ];
+        for reason in cases {
+            let payload = serde_wormhole::to_vec(&accountant::GovernancePacket {
+                chain: Chain::Solana,
+                action: accountant::Action::ModifyBalance {
+                    sequence: 1,
+                    chain_id: 2,
+                    token_chain: 2,
+                    token_address: Address([0x22; 32]),
+                    kind: SdkKind::Add,
+                    amount: Amount([0x33; 32]),
+                    reason: reason.into(),
+                },
+            })
+            .unwrap();
+            let body = body_with(&payload);
+            let (_, view) = ModifyBalancePayload::from_body(&body).unwrap();
+            assert_eq!(view.reason, zero_left_padded(reason), "{reason}");
+            assert_eq!(
+                ModifyBalanceLayout::new(
+                    ModificationKind::Add,
+                    view.chain_id(),
+                    view.token_chain(),
+                    view.sequence(),
+                    view.token_address,
+                    view.amount(),
+                    view.reason,
+                )
+                .reason,
+                zero_left_padded(reason),
+                "{reason} through the layout"
+            );
+        }
     }
 
     #[test]
@@ -382,11 +433,11 @@ mod tests {
                 Ok(()),
             ),
             (
-                "register wormchain target accepted during migration window",
+                "register wormchain target",
                 good,
                 TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
-                Ok(()),
+                Err(E::GovernanceChainMismatch),
             ),
             (
                 "register wrong emitter chain",
@@ -442,13 +493,6 @@ mod tests {
                 Ok(ModificationKind::Add),
             ),
             (
-                "modify wormchain target accepted during migration window",
-                good,
-                ACCOUNTANT_GOVERNANCE_MODULE,
-                modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
-                Ok(ModificationKind::Add),
-            ),
-            (
                 "modify subtract",
                 good,
                 ACCOUNTANT_GOVERNANCE_MODULE,
@@ -474,6 +518,13 @@ mod tests {
                 good,
                 ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.target_chain = [0; 2]),
+                Err(E::GovernanceChainMismatch),
+            ),
+            (
+                "modify wormchain target",
+                good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
+                modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
                 Err(E::GovernanceChainMismatch),
             ),
             (

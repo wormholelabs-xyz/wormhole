@@ -1,52 +1,69 @@
-//! Wormhole Global Accountant Backfill, anchor-lang 1.1.2.
+//! Wormhole Global Accountant (WTT) Backfill Solana program, anchor-lang 1.1.2.
 //!
-//! One-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records,
-//! and ChainRegistration state from a wormchain `query_all_accounts` snapshot, then is
-//! upgraded out via `solana program upgrade` once `global-accountant` takes over.
+//! One-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records and
+//! ChainRegistration state from a wormchain `query_all_accounts` snapshot. It occupies the
+//! operational program's account and is upgraded out via `solana program upgrade` once
+//! `global-accountant` takes over.
 //!
 //! Wire-format constraints; keep these when you change the program:
 //!
 //! - Account discriminator is the 1-byte `AccountTag` at offset 0. Load state with
 //!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
-//! - Instruction discriminator is 1 byte (`0`..`3`) through `#[instruction(discriminator = N)]`.
-//! - PDA creation uses `CreateAccountAllowPrefund` through
-//!   `accountant_operational_core::support::pda_init`; `#[account(init)]` fails on a
-//!   prefunded PDA.
+//! - Instruction discriminator is 1 byte (`0..=3`) through `#[instruction(discriminator = N)]`.
+//! - PDA creation uses `CreateAccountAllowPrefund` through `pda_init`; `#[account(init)]`
+//!   fails on a prefunded PDA.
 //! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
 //!
-//! `declare_id!` pins the program to the fixed address the mollusk/surfpool fixtures deploy at
-//! (`Pubkey::new_from_array([8u8; 32])`, base58 `YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf`).
+//! `declare_id!` pins this `.so` to the operational program's address, so the two share one
+//! program account across the upgrade.
+//!
+//! Migration-window program: remove this crate once the cutover to `global-accountant` is
+//! complete.
 
 #![allow(unexpected_cfgs)]
 
-use accountant_operational_core::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
+pub mod raw_ix_data;
 
-pub use accountant_operational_core::{definitions, err, raw_ix_data::RawIxData};
+pub use accountant_operational_core::err;
+pub use global_accountant_definitions as definitions;
 
-// `#[program]`'s codegen expects `#[derive(Accounts)]`'s companion items at
-// the crate root; re-export `contexts::*` to place them there.
+use accountant_backfill_core::instructions as backfill;
+use definitions::GLOBAL_ACCOUNTANT_PROGRAM_ID;
+
+// `#[program]` codegen expects the `#[derive(Accounts)]` companion items at the crate root.
 pub use contexts::*;
+use raw_ix_data::RawIxData;
 
-declare_id!("YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf");
-
-const _: () = assert!(
-    definitions::is_global_accountant_program_id(&ID.to_bytes()),
-    "declare_id! does not match GLOBAL_ACCOUNTANT_PROGRAM_ID"
-);
-
-/// Wire discriminator, defined in `definitions::BackfillInstruction`.
+/// Wire discriminator, defined in `definitions::global_accountant_backfill::Instruction`.
 /// Re-exported for off-chain callers building raw transactions.
-pub use definitions::BackfillInstruction as Instruction;
+pub use definitions::global_accountant_backfill::Instruction;
 
-/// Pubkey that must sign every backfill ix, from `BACKFILL_AUTHORITY` at compile
-/// time. Set per deploy in `justfile`; a missing variable is a build error, so a
-/// release build must name the operator key. Checked against the built artifact
-/// by `just verify-authority`.
+declare_id!(Pubkey::new_from_array(GLOBAL_ACCOUNTANT_PROGRAM_ID));
+
+/// Pubkey that must sign every backfill instruction, from `BACKFILL_AUTHORITY` at compile
+/// time. `env!` makes a missing variable a build error, so every artifact names an operator
+/// key explicitly. Set per deploy in `justfile`. Read the key back out of a built `.so` with
+/// `just verify-authority <so-path> <base58-pubkey>`.
 pub const BACKFILL_AUTHORITY: [u8; 32] =
     const_crypto::bs58::decode_pubkey(env!("BACKFILL_AUTHORITY"));
+
+/// Flatten an `Accounts` struct into the positional `Vec<AccountInfo>` the handlers take.
+/// Field order must match the handler's account list. The `remaining` form appends
+/// `ctx.remaining_accounts`, which carry the variadic PDAs.
+macro_rules! flatten_accounts {
+    ($accounts:expr, [$($field:ident),+ $(,)?]) => {
+        vec![$($accounts.$field.to_account_info()),+]
+    };
+    ($ctx:expr, [$($field:ident),+ $(,)?], remaining) => {{
+        let mut accounts: Vec<AccountInfo> =
+            vec![$($ctx.accounts.$field.to_account_info()),+];
+        accounts.extend($ctx.remaining_accounts.iter().cloned());
+        accounts
+    }};
+}
 
 #[program]
 pub mod global_accountant_backfill {
@@ -66,7 +83,7 @@ pub mod global_accountant_backfill {
             [payer, noreplay_program, noreplay_authority, system_program],
             remaining
         );
-        accountant_backfill_core::instructions::backfill_noreplay::process(
+        backfill::backfill_noreplay::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
@@ -82,7 +99,7 @@ pub mod global_accountant_backfill {
         ix_data: RawIxData,
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
-        accountant_backfill_core::instructions::backfill_balance::process(
+        backfill::backfill_balance::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
@@ -98,7 +115,7 @@ pub mod global_accountant_backfill {
         ix_data: RawIxData,
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
-        accountant_backfill_core::instructions::backfill_modify_balance::process(
+        backfill::backfill_modify_balance::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,
@@ -114,7 +131,7 @@ pub mod global_accountant_backfill {
         ix_data: RawIxData,
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
-        accountant_backfill_core::instructions::backfill_chain_registration::process(
+        backfill::backfill_chain_registration::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,

@@ -4,6 +4,13 @@
 //!
 //! Bulk-CPI design: consecutive entries sharing a `NoReplayBitmapAccount` bucket OR
 //! their bits into one 128-byte mask; one `MarkUsedBulk` CPI per unique bucket.
+//!
+//! SECURITY: `require_authority` is the sole authentication for every bit flipped here. It
+//! runs before the parser, so the parser sees operator-supplied data only. `mark_used_bulk`
+//! re-derives the authority PDA and the bucket PDA from the entry's own namespace, so a
+//! substituted bucket account fails with `InvalidPda` ahead of the CPI. The bucket slot count
+//! must equal the number of bucket transitions the walk makes, which pins each mask to the
+//! account the caller passed for it.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -26,23 +33,35 @@ struct BucketKey {
     bucket_index: u64,
 }
 
+/// Order: account framing, authority, wire parse, then the bucket walk, one `MarkUsedBulk`
+/// CPI per bucket transition and a final flush.
 pub fn process(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
     expected_authority: &[u8; 32],
 ) -> ProgramResult {
-    let batch = NoReplayBatch::parse(data).map_err(err)?;
-
-    // Accounts: [WRITE, SIGNER] payer, [] solana-noreplay program (CPI target),
-    // [] noreplay-authority PDA (signs MarkUsedBulk via invoke_signed), [] system program,
-    // then one bucket PDA per unique (chain, emitter, bucket_index) in walk order.
+    // Accounts:
+    //   0.  `[WRITE, SIGNER]` payer
+    //   1.  `[]`              solana-noreplay program (CPI target)
+    //   2.  `[]`              noreplay-authority PDA (signs `MarkUsedBulk` via `invoke_signed`)
+    //   3.  `[]`              system program
+    //   4.. `[WRITE]`         bucket PDA, one per unique `(chain, emitter, bucket_index)`,
+    //                         in walk order
     let [payer, _noreplay_program, noreplay_authority, system_program, buckets @ ..] = accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
-
     require_authority(payer, expected_authority)?;
+
+    let batch = NoReplayBatch::parse(data).map_err(err)?;
+    msg!(
+        "BackfillNoReplay: {} entries",
+        batch
+            .groups()
+            .map(|group| group.entries.len())
+            .sum::<usize>()
+    );
 
     let mut previous_bucket: Option<BucketKey> = None;
     let mut or_mask = [0u8; NOREPLAY_BITMAP_BYTES];
