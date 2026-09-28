@@ -1,6 +1,7 @@
 //! `modify_balance`: accountant governance. Applies an Add or Subtract delta to a
 //! `BalanceAccount` PDA. A per-sequence `ModifyBalance` PDA is the replay guard.
-//! Accepts target chain `SOLANA_CHAIN_ID` only.
+//! Accepts the target chains in `ACCEPTED_MODIFY_BALANCE_TARGETS`: Solana, and Wormchain
+//! for the migration window.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -9,12 +10,11 @@ use anchor_lang::solana_program::system_program;
 use accountant_operational_core::accounts::{self, balance as balance_account};
 use accountant_operational_core::cpi::shim;
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::pda_init::create_pda_allow_prefund;
 use accountant_operational_core::{ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
     split_body, BalanceAccountLayout, GlobalAccountantError, ModificationKind, ModifyBalanceIxData,
-    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader, MODIFY_BALANCE_SEED_PREFIX,
+    ModifyBalanceLayout, ModifyBalancePayload, VaaBodyHeader,
 };
 use crate::err;
 use crate::instructions::transfer::derive_balance_account_pda;
@@ -121,13 +121,7 @@ fn check_modify_balance_pda(
     Ok(bump)
 }
 
-/// `(b"modify_balance", sequence_be)`.
-pub fn derive_modify_balance_pda(program_id: &Pubkey, sequence: u64) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[MODIFY_BALANCE_SEED_PREFIX, &sequence.to_be_bytes()],
-        program_id,
-    )
-}
+pub use accountant_operational_core::accounts::modify_balance::derive_pda as derive_modify_balance_pda;
 
 /// Apply `kind` with `payload.amount()`. Add on an absent PDA creates it with
 /// `balance = amount`; Subtract on an absent PDA is an underflow.
@@ -175,16 +169,6 @@ fn record_modify_balance<'info>(
     payload: &ModifyBalancePayload,
     kind: ModificationKind,
 ) -> ProgramResult {
-    let bump_seed = [modification_bump];
-    let seeds: &[&[u8]] = &[MODIFY_BALANCE_SEED_PREFIX, &payload.sequence, &bump_seed]; // sequence BE
-    create_pda_allow_prefund(
-        payer,
-        modify_balance_pda,
-        program_id,
-        seeds,
-        ModifyBalanceLayout::LEN as u64,
-    )?;
-
     let record = ModifyBalanceLayout::new(
         kind,
         payload.chain_id(),
@@ -194,7 +178,7 @@ fn record_modify_balance<'info>(
         payload.amount(),
         payload.reason,
     );
-    accounts::store(modify_balance_pda, &record)
+    accounts::modify_balance::create(program_id, payer, modify_balance_pda, modification_bump, &record)
 }
 
 /// Log the modification for off-chain indexers.
