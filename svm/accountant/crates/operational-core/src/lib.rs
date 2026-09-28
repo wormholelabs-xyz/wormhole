@@ -17,6 +17,7 @@ pub mod hash;
 pub mod instructions;
 pub mod raw_ix_data;
 pub mod support;
+pub mod transfer;
 
 pub use global_accountant_definitions as definitions;
 

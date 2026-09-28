@@ -19,6 +19,7 @@ skip-lint = true
 
 [programs.localnet]
 global_accountant = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+ntt_global_accountant = "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
 
 [registry]
 url = "https://api.apr.dev"

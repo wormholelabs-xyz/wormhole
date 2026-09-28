@@ -24,16 +24,27 @@ fn main() {
     let vaa_accounts = vaa.accounts();
     let vaa_ix = Instruction::new_with_bytes(
         program_id(),
-        &submit_vaas_ix_data(vaa.guardian_set_bump, &vaa.body),
+        &submit_vaas_ix_data(vaa.vaa.guardian_set_bump, &vaa.vaa.body),
         vaa.account_metas(),
     );
 
-    let obs_first = ObsScenario::transfer(GUARDIAN_SET_INDEX, 0x42, Transfer::new(1, ETHEREUM, SOLANA, 500_000));
+    let obs_first = ObsScenario::transfer(
+        GUARDIAN_SET_INDEX,
+        0x42,
+        Transfer::new(1, ETHEREUM, SOLANA, 500_000),
+    );
     let obs_first_accounts = obs_first.initial_accounts();
-    let obs_first_ix =
-        Instruction::new_with_bytes(program_id(), &obs_first.ix_data(0), obs_first.account_metas());
+    let obs_first_ix = Instruction::new_with_bytes(
+        program_id(),
+        &obs_first.ix_data(0),
+        obs_first.account_metas(),
+    );
 
-    let obs_quorum = ObsScenario::transfer(GUARDIAN_SET_INDEX, 0x42, Transfer::new(2, ETHEREUM, SOLANA, 500_000));
+    let obs_quorum = ObsScenario::transfer(
+        GUARDIAN_SET_INDEX,
+        0x42,
+        Transfer::new(2, ETHEREUM, SOLANA, 500_000),
+    );
     let pre_quorum_accounts =
         obs_quorum.submit_range(&mollusk(), obs_quorum.initial_accounts(), 0..(QUORUM - 1));
     let obs_quorum_ix = Instruction::new_with_bytes(

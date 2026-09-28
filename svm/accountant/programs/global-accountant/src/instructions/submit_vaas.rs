@@ -8,7 +8,6 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
 use accountant_operational_core::support::commit_log;
-use accountant_operational_core::support::guardian_set;
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
@@ -52,26 +51,17 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    shim::verify_vaa(
+    let guardian_set_index = shim::verify_vaa_and_read_index(
         guardian_set,
         guardian_signatures,
         &digest,
         guardian_set_bump,
     )?;
 
-    // Read after the Shim CPI, which is what validates the account.
-    let guardian_set_index = guardian_set::read_index(guardian_set)?;
-    // SECURITY: the index comes from the account, so this proves the account is the
-    // canonical Core Bridge PDA for the index it claims. The Shim proves which set
-    // signed.
-    guardian_set::verify_account(guardian_set, guardian_set_index)?;
-
     let header = parse_vaa_namespace_key(body_bytes).map_err(err)?;
     let (chain, emitter, sequence) = (header.chain, header.emitter, header.sequence);
 
-    if noreplay::is_marked(noreplay_bucket, program_id, chain, &emitter, sequence)? {
-        return Err(err(GlobalAccountantError::AlreadyAccounted));
-    }
+    noreplay::reject_if_marked(noreplay_bucket, program_id, chain, &emitter, sequence)?;
 
     // SECURITY: a signed VAA from an unregistered emitter must not move balances.
     chain_registration::verify(program_id, chain_registration_pda, chain, &emitter)?;

@@ -1,0 +1,48 @@
+[package]
+name = "ntt-global-accountant"
+description = "Wormhole NTT Global Accountant Solana program (Anchor)."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Anchor convention: the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library and test consumption. `idl-build` stays off: the 1-byte account tags and bytemuck
+# layouts have no faithful IDL (see the sibling `global-accountant` crate).
+default = []
+no-entrypoint = []
+
+[dependencies]
+accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+borsh.workspace = true
+global-accountant-definitions.workspace = true
+
+[[bench]]
+name = "compute_units"
+harness = false
+
+[dev-dependencies]
+accountant-test-fixtures.workspace = true
+accountant-test-harness.workspace = true
+bytemuck.workspace = true
+mollusk-svm.workspace = true
+mollusk-svm-bencher.workspace = true
+serde_json.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+# Surfpool e2e: signs and sends transactions to the subprocess validator.
+solana-keypair.workspace = true
+solana-signer.workspace = true
+ntt-global-accountant = { path = ".", features = ["no-entrypoint"] }
+
+[lints]
+workspace = true

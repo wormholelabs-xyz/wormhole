@@ -77,7 +77,32 @@ pub enum TxId<'a> {
     Signature(&'a [u8; SIGNATURE_TX_ID_LEN]),
 }
 
-impl TxId<'_> {
+impl<'a> TxId<'a> {
+    /// The first `len` bytes of the zero-padded wire field `padded`.
+    ///
+    /// SECURITY: `len` is exactly 32 or 64 and every byte past it is zero, so one id has one
+    /// encoding. Anything else is `InvalidInstructionData`.
+    pub fn parse(
+        len: u8,
+        padded: &'a [u8; SIGNATURE_TX_ID_LEN],
+    ) -> Result<Self, GlobalAccountantError> {
+        let tx_id = match usize::from(len) {
+            HASH_TX_ID_LEN => {
+                let (id, padding) = padded
+                    .split_first_chunk::<HASH_TX_ID_LEN>()
+                    .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+                if padding.iter().any(|&b| b != 0) {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+                TxId::Hash(id)
+            }
+            SIGNATURE_TX_ID_LEN => TxId::Signature(padded),
+            _ => return Err(GlobalAccountantError::InvalidInstructionData),
+        };
+        debug_assert!(tx_id.as_bytes().len() == usize::from(len));
+        Ok(tx_id)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             TxId::Hash(id) => id.as_slice(),
@@ -114,27 +139,9 @@ impl SubmitObservationsIxData {
         bytemuck::try_from_bytes(data).map_err(|_| GlobalAccountantError::InvalidInstructionData)
     }
 
-    /// The first `tx_id_len` bytes of `tx_id`.
-    ///
-    /// SECURITY: `tx_id_len` is exactly 32 or 64 and every byte past it is zero, so one
-    /// id has one encoding. Anything else is `InvalidInstructionData`.
+    /// The first `tx_id_len` bytes of `tx_id`. See [`TxId::parse`].
     pub fn tx_id(&self) -> Result<TxId<'_>, GlobalAccountantError> {
-        let tx_id = match usize::from(self.tx_id_len) {
-            HASH_TX_ID_LEN => {
-                let (id, padding) = self
-                    .tx_id
-                    .split_first_chunk::<HASH_TX_ID_LEN>()
-                    .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-                if padding.iter().any(|&b| b != 0) {
-                    return Err(GlobalAccountantError::InvalidInstructionData);
-                }
-                TxId::Hash(id)
-            }
-            SIGNATURE_TX_ID_LEN => TxId::Signature(&self.tx_id),
-            _ => return Err(GlobalAccountantError::InvalidInstructionData),
-        };
-        debug_assert!(tx_id.as_bytes().len() == usize::from(self.tx_id_len));
-        Ok(tx_id)
+        TxId::parse(self.tx_id_len, &self.tx_id)
     }
 
     /// `action ‖ chain ‖ emitter ‖ sequence ‖ token_chain ‖ token_address ‖
@@ -172,60 +179,136 @@ struct ObservationFieldsAndDigest {
     digest: [u8; 32],
 }
 
-/// `submit_vaas` prefix (3 bytes).
+/// NTT `submit_observations` data: 252 bytes, fixed size. `sender` is the transceiver after
+/// relayer unwrap; it equals `emitter` for a direct publish. The amount is the raw
+/// `TrimmedAmount`; normalization to eight decimals happens on-chain at quorum.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct SubmitVaasIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
+pub struct NttSubmitObservationsIxData {
+    /// Little-endian.
+    pub guardian_set_index: [u8; 4],
+    pub guardian_index: u8,
+    /// `r ‖ s ‖ recovery_id`.
+    pub signature: [u8; 65],
+    /// Byte length of `tx_id`: 32 or 64.
+    pub tx_id_len: u8,
+    /// Source-chain transaction id, zero-padded past `tx_id_len`; part of the signing
+    /// digest only. Read through `tx_id()`.
+    pub tx_id: [u8; SIGNATURE_TX_ID_LEN],
+    /// Big-endian.
+    pub chain: [u8; 2],
+    pub emitter: [u8; 32],
+    /// Big-endian.
+    pub sequence: [u8; 8],
+    pub sender: [u8; 32],
+    /// Big-endian.
+    pub recipient_chain: [u8; 2],
+    pub trimmed_decimals: u8,
+    /// Big-endian.
+    pub trimmed_amount: [u8; 8],
+    /// `double_keccak256` of the real VAA body.
+    pub digest: [u8; 32],
 }
 
-impl IxPrefix for SubmitVaasIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
+impl NttSubmitObservationsIxData {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn guardian_set_index(&self) -> u32 {
+        u32::from_le_bytes(self.guardian_set_index)
+    }
+
+    pub fn chain(&self) -> u16 {
+        u16::from_be_bytes(self.chain)
+    }
+
+    pub fn sequence(&self) -> u64 {
+        u64::from_be_bytes(self.sequence)
+    }
+
+    pub fn recipient_chain(&self) -> u16 {
+        u16::from_be_bytes(self.recipient_chain)
+    }
+
+    pub fn trimmed_amount(&self) -> u64 {
+        u64::from_be_bytes(self.trimmed_amount)
+    }
+
+    /// The first `tx_id_len` bytes of `tx_id`. See [`TxId::parse`].
+    pub fn tx_id(&self) -> Result<TxId<'_>, GlobalAccountantError> {
+        TxId::parse(self.tx_id_len, &self.tx_id)
+    }
+
+    /// Exact-length view.
+    pub fn from_bytes(data: &[u8]) -> Result<&Self, GlobalAccountantError> {
+        bytemuck::try_from_bytes(data).map_err(|_| GlobalAccountantError::InvalidInstructionData)
+    }
+
+    /// `chain ‖ emitter ‖ sequence ‖ sender ‖ recipient_chain ‖ trimmed_decimals ‖
+    /// trimmed_amount ‖ digest`, 117 bytes. Hashed for the signing digest and the content
+    /// digest.
+    pub fn fields_and_digest(&self) -> [u8; 117] {
+        bytemuck::cast(NttObservationFieldsAndDigest {
+            chain: self.chain,
+            emitter: self.emitter,
+            sequence: self.sequence,
+            sender: self.sender,
+            recipient_chain: self.recipient_chain,
+            trimmed_decimals: self.trimmed_decimals,
+            trimmed_amount: self.trimmed_amount,
+            digest: self.digest,
+        })
     }
 }
 
-/// `register_chain` prefix (3 bytes). PDA bumps derive on-chain.
+/// The exact fields `NttSubmitObservationsIxData::fields_and_digest` hashes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct RegisterChainIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
+struct NttObservationFieldsAndDigest {
+    chain: [u8; 2],
+    emitter: [u8; 32],
+    sequence: [u8; 8],
+    sender: [u8; 32],
+    recipient_chain: [u8; 2],
+    trimmed_decimals: u8,
+    trimmed_amount: [u8; 8],
+    digest: [u8; 32],
 }
 
-impl IxPrefix for RegisterChainIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
+/// 3-byte prefix `guardian_set_bump ‖ body_len`, one distinct type per instruction so a call
+/// site cannot pass one instruction's prefix to another's parser. PDA bumps derive on-chain.
+macro_rules! bump_prefix_ix_data {
+    ($($(#[$doc:meta])* $name:ident),+ $(,)?) => {
+        $(
+            $(#[$doc])*
+            #[repr(C)]
+            #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+            pub struct $name {
+                pub guardian_set_bump: u8,
+                pub body_len: [u8; 2],
+            }
+
+            impl IxPrefix for $name {
+                fn body_len(&self) -> usize {
+                    u16::from_le_bytes(self.body_len) as usize
+                }
+            }
+        )+
+    };
 }
 
-/// `modify_balance` prefix (3 bytes).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct ModifyBalanceIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for ModifyBalanceIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
-}
-
-/// `upgrade_contract` prefix (3 bytes). PDA bumps derive on-chain.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
-pub struct UpgradeContractIxData {
-    pub guardian_set_bump: u8,
-    pub body_len: [u8; 2],
-}
-
-impl IxPrefix for UpgradeContractIxData {
-    fn body_len(&self) -> usize {
-        u16::from_le_bytes(self.body_len) as usize
-    }
+bump_prefix_ix_data! {
+    /// `submit_vaas` prefix.
+    SubmitVaasIxData,
+    /// `register_chain` prefix.
+    RegisterChainIxData,
+    /// `register_hub` prefix.
+    RegisterHubIxData,
+    /// `register_peer` prefix.
+    RegisterPeerIxData,
+    /// `modify_balance` prefix.
+    ModifyBalanceIxData,
+    /// `upgrade_contract` prefix.
+    UpgradeContractIxData,
 }
 
 /// `close_pending` data (40 bytes, no body).
@@ -267,8 +350,24 @@ const _: () = {
     assert!(offset_of!(SubmitObservationsIxData, recipient_chain) == 212);
     assert!(offset_of!(SubmitObservationsIxData, amount) == 214);
     assert!(offset_of!(SubmitObservationsIxData, digest) == 246);
+    assert!(NttSubmitObservationsIxData::LEN == 252);
+    assert!(core::mem::size_of::<NttObservationFieldsAndDigest>() == 117);
+    assert!(offset_of!(NttSubmitObservationsIxData, guardian_index) == 4);
+    assert!(offset_of!(NttSubmitObservationsIxData, signature) == 5);
+    assert!(offset_of!(NttSubmitObservationsIxData, tx_id_len) == 70);
+    assert!(offset_of!(NttSubmitObservationsIxData, tx_id) == 71);
+    assert!(offset_of!(NttSubmitObservationsIxData, chain) == 135);
+    assert!(offset_of!(NttSubmitObservationsIxData, emitter) == 137);
+    assert!(offset_of!(NttSubmitObservationsIxData, sequence) == 169);
+    assert!(offset_of!(NttSubmitObservationsIxData, sender) == 177);
+    assert!(offset_of!(NttSubmitObservationsIxData, recipient_chain) == 209);
+    assert!(offset_of!(NttSubmitObservationsIxData, trimmed_decimals) == 211);
+    assert!(offset_of!(NttSubmitObservationsIxData, trimmed_amount) == 212);
+    assert!(offset_of!(NttSubmitObservationsIxData, digest) == 220);
     assert!(SubmitVaasIxData::LEN == 3);
     assert!(RegisterChainIxData::LEN == 3);
+    assert!(RegisterHubIxData::LEN == 3);
+    assert!(RegisterPeerIxData::LEN == 3);
     assert!(offset_of!(RegisterChainIxData, body_len) == 1);
     assert!(ModifyBalanceIxData::LEN == 3);
     assert!(UpgradeContractIxData::LEN == 3);

@@ -5,9 +5,9 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::constants::{
-    ACCEPTED_MODIFY_BALANCE_TARGETS, ACCEPTED_REGISTER_CHAIN_TARGETS, ACCOUNTANT_GOVERNANCE_MODULE,
+    GovernanceModule, ACCEPTED_MODIFY_BALANCE_TARGETS, ACCEPTED_REGISTER_CHAIN_TARGETS,
     GOVERNANCE_EMITTER, MODIFY_BALANCE_ACTION, REGISTER_CHAIN_ACTION, SOLANA_CHAIN_ID,
-    TOKEN_BRIDGE_GOVERNANCE_MODULE, UPGRADE_CONTRACT_ACTION,
+    UPGRADE_CONTRACT_ACTION,
 };
 use crate::error::GlobalAccountantError;
 use crate::primitives::Uint256;
@@ -28,7 +28,7 @@ pub fn require_governance_emitter(header: &VaaBodyHeader) -> Result<(), GlobalAc
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
 pub struct GovernanceHeader {
-    pub module: [u8; 32],
+    pub module: GovernanceModule,
     pub action: u8,
     pub target_chain: [u8; 2],
 }
@@ -41,7 +41,7 @@ impl GovernanceHeader {
     /// Module and action must match; `target_chain` must be in `accepted_targets`.
     fn check(
         &self,
-        module: &[u8; 32],
+        module: &GovernanceModule,
         action: u8,
         accepted_targets: &[u16],
     ) -> Result<(), GlobalAccountantError> {
@@ -88,12 +88,19 @@ impl RegisterChainPayload {
         u16::from_be_bytes(self.chain)
     }
 
-    /// Governance emitter, `TokenBridge` module, `RegisterChain` action, target in
+    /// Governance emitter, `module`, `RegisterChain` action, target in
     /// [`ACCEPTED_REGISTER_CHAIN_TARGETS`].
-    pub fn validate(&self, header: &VaaBodyHeader) -> Result<(), GlobalAccountantError> {
+    ///
+    /// `module` is the caller's governance module: the Token Bridge module for the WTT
+    /// accountant, the Wormhole Relayer module for the NTT accountant.
+    pub fn validate(
+        &self,
+        header: &VaaBodyHeader,
+        module: &GovernanceModule,
+    ) -> Result<(), GlobalAccountantError> {
         require_governance_emitter(header)?;
         self.header.check(
-            &TOKEN_BRIDGE_GOVERNANCE_MODULE,
+            module,
             REGISTER_CHAIN_ACTION,
             ACCEPTED_REGISTER_CHAIN_TARGETS,
         )
@@ -147,15 +154,17 @@ impl ModifyBalancePayload {
         Uint256::from_be_bytes(self.amount)
     }
 
-    /// Governance emitter, `GlobalAccountant` module, `ModifyBalance` action, target in
+    /// Governance emitter, `module`, `ModifyBalance` action, target in
     /// [`ACCEPTED_MODIFY_BALANCE_TARGETS`], known `kind`. Returns the parsed kind.
+    /// `module` is the calling accountant's governance module.
     pub fn validate(
         &self,
         header: &VaaBodyHeader,
+        module: &GovernanceModule,
     ) -> Result<ModificationKind, GlobalAccountantError> {
         require_governance_emitter(header)?;
         self.header.check(
-            &ACCOUNTANT_GOVERNANCE_MODULE,
+            module,
             MODIFY_BALANCE_ACTION,
             ACCEPTED_MODIFY_BALANCE_TARGETS,
         )?;
@@ -188,14 +197,16 @@ impl UpgradeContractPayload {
         Ok((header, Self::from_payload(payload)?))
     }
 
-    /// Governance emitter, `GlobalAccountant` module, `UpgradeContract` action, target Solana.
-    pub fn validate(&self, header: &VaaBodyHeader) -> Result<(), GlobalAccountantError> {
+    /// Governance emitter, `module`, `UpgradeContract` action, target Solana.
+    /// `module` is the calling accountant's governance module.
+    pub fn validate(
+        &self,
+        header: &VaaBodyHeader,
+        module: &GovernanceModule,
+    ) -> Result<(), GlobalAccountantError> {
         require_governance_emitter(header)?;
-        self.header.check(
-            &ACCOUNTANT_GOVERNANCE_MODULE,
-            UPGRADE_CONTRACT_ACTION,
-            &[SOLANA_CHAIN_ID],
-        )
+        self.header
+            .check(module, UPGRADE_CONTRACT_ACTION, &[SOLANA_CHAIN_ID])
     }
 }
 
@@ -225,9 +236,22 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constants::WORMCHAIN_CHAIN_ID;
+    use crate::constants::{
+        ACCOUNTANT_GOVERNANCE_MODULE, TOKEN_BRIDGE_GOVERNANCE_MODULE, WORMCHAIN_CHAIN_ID,
+    };
     use wormhole_sdk::accountant_modification::ModificationKind as SdkKind;
     use wormhole_sdk::{accountant, token, Address, Amount, Chain};
+
+    /// One `validate` row: name, body header, expected module, payload, result.
+    type Case<P, R> = (&'static str, VaaBodyHeader, GovernanceModule, P, R);
+
+    impl GovernanceModule {
+        /// One bit away from a valid module: proves the check is exact over all 32 bytes.
+        fn one_bit_off(mut self) -> Self {
+            self.0[31] ^= 1;
+            self
+        }
+    }
 
     fn body_with(payload: &[u8]) -> std::vec::Vec<u8> {
         let header = VaaBodyHeader::new(0, 0, 1, [0x11; 32], 7, 0);
@@ -342,47 +366,66 @@ mod tests {
             f(&mut p);
             p
         };
-        let register_cases: [(&str, VaaBodyHeader, RegisterChainPayload, Result<(), E>); 7] = [
-            ("register any target", good, register(|_| {}), Ok(())),
+        let register_cases: [Case<RegisterChainPayload, Result<(), E>>; 8] = [
+            (
+                "register any target",
+                good,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
+                register(|_| {}),
+                Ok(()),
+            ),
             (
                 "register solana target",
                 good,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|p| p.header.target_chain = SOLANA_CHAIN_ID.to_be_bytes()),
                 Ok(()),
             ),
             (
                 "register wormchain target accepted during migration window",
                 good,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
                 Ok(()),
             ),
             (
                 "register wrong emitter chain",
                 wrong_chain,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|_| {}),
                 Err(E::InvalidGovernanceEmitter),
             ),
             (
                 "register wrong emitter address",
                 wrong_addr,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|_| {}),
                 Err(E::InvalidGovernanceEmitter),
             ),
             (
                 "register wrong module",
                 good,
-                register(|p| p.header.module[31] ^= 1),
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
+                register(|p| p.header.module = p.header.module.one_bit_off()),
+                Err(E::InvalidGovernanceModule),
+            ),
+            (
+                "register expected module differs",
+                good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
+                register(|_| {}),
                 Err(E::InvalidGovernanceModule),
             ),
             (
                 "register wrong action",
                 good,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
                 register(|p| p.header.action = 2),
                 Err(E::InvalidGovernanceAction),
             ),
         ];
-        for (name, header, payload, expected) in register_cases {
-            assert_eq!(payload.validate(&header), expected, "{name}");
+        for (name, header, module, payload, expected) in register_cases {
+            assert_eq!(payload.validate(&header, &module), expected, "{name}");
         }
 
         let modify = |f: fn(&mut ModifyBalancePayload)| {
@@ -390,69 +433,80 @@ mod tests {
             f(&mut p);
             p
         };
-        let modify_cases: [(
-            &str,
-            VaaBodyHeader,
-            ModifyBalancePayload,
-            Result<ModificationKind, E>,
-        ); 9] = [
+        let modify_cases: [Case<ModifyBalancePayload, Result<ModificationKind, E>>; 10] = [
             (
                 "modify add",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|_| {}),
                 Ok(ModificationKind::Add),
             ),
             (
                 "modify wormchain target accepted during migration window",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.target_chain = WORMCHAIN_CHAIN_ID.to_be_bytes()),
                 Ok(ModificationKind::Add),
             ),
             (
                 "modify subtract",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.kind = ModificationKind::Subtract as u8),
                 Ok(ModificationKind::Subtract),
             ),
             (
                 "modify kind 0",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.kind = 0),
                 Err(E::InvalidModificationKind),
             ),
             (
                 "modify kind 3",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.kind = 3),
                 Err(E::InvalidModificationKind),
             ),
             (
                 "modify any target",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.target_chain = [0; 2]),
                 Err(E::GovernanceChainMismatch),
             ),
             (
                 "modify wrong emitter chain",
                 wrong_chain,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|_| {}),
                 Err(E::InvalidGovernanceEmitter),
             ),
             (
                 "modify token bridge module",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.module = TOKEN_BRIDGE_GOVERNANCE_MODULE),
+                Err(E::InvalidGovernanceModule),
+            ),
+            (
+                "modify expected module differs",
+                good,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
+                modify(|_| {}),
                 Err(E::InvalidGovernanceModule),
             ),
             (
                 "modify wrong action",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 modify(|p| p.header.action = 2),
                 Err(E::InvalidGovernanceAction),
             ),
         ];
-        for (name, header, payload, expected) in modify_cases {
-            assert_eq!(payload.validate(&header), expected, "{name}");
+        for (name, header, module, payload, expected) in modify_cases {
+            assert_eq!(payload.validate(&header, &module), expected, "{name}");
         }
 
         let upgrade = |f: fn(&mut UpgradeContractPayload)| {
@@ -460,42 +514,59 @@ mod tests {
             f(&mut p);
             p
         };
-        let upgrade_cases: [(&str, VaaBodyHeader, UpgradeContractPayload, Result<(), E>); 5] = [
-            ("upgrade solana target", good, upgrade(|_| {}), Ok(())),
+        let upgrade_cases: [Case<UpgradeContractPayload, Result<(), E>>; 6] = [
+            (
+                "upgrade solana target",
+                good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
+                upgrade(|_| {}),
+                Ok(()),
+            ),
             (
                 "upgrade any target",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 upgrade(|p| p.header.target_chain = [0; 2]),
                 Err(E::GovernanceChainMismatch),
             ),
             (
                 "upgrade wrong module",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 upgrade(|p| p.header.module = TOKEN_BRIDGE_GOVERNANCE_MODULE),
+                Err(E::InvalidGovernanceModule),
+            ),
+            (
+                "upgrade expected module differs",
+                good,
+                TOKEN_BRIDGE_GOVERNANCE_MODULE,
+                upgrade(|_| {}),
                 Err(E::InvalidGovernanceModule),
             ),
             (
                 "upgrade modify_balance action",
                 good,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 upgrade(|p| p.header.action = MODIFY_BALANCE_ACTION),
                 Err(E::InvalidGovernanceAction),
             ),
             (
                 "upgrade wrong emitter chain",
                 wrong_chain,
+                ACCOUNTANT_GOVERNANCE_MODULE,
                 upgrade(|_| {}),
                 Err(E::InvalidGovernanceEmitter),
             ),
         ];
-        for (name, header, payload, expected) in upgrade_cases {
-            assert_eq!(payload.validate(&header), expected, "{name}");
+        for (name, header, module, payload, expected) in upgrade_cases {
+            assert_eq!(payload.validate(&header, &module), expected, "{name}");
         }
     }
 
     #[test]
     fn upgrade_contract_view_matches_wire() {
         let mut wire = std::vec::Vec::new();
-        wire.extend_from_slice(&ACCOUNTANT_GOVERNANCE_MODULE);
+        wire.extend_from_slice(&ACCOUNTANT_GOVERNANCE_MODULE.0);
         wire.push(0x02);
         wire.extend_from_slice(&1u16.to_be_bytes());
         wire.extend_from_slice(&[0xC4; 32]);
@@ -508,11 +579,14 @@ mod tests {
         assert_eq!(view.header.target_chain(), SOLANA_CHAIN_ID);
         assert_eq!(view.new_contract, [0xC4; 32]);
         assert_eq!(
-            view.validate(header),
+            view.validate(header, &ACCOUNTANT_GOVERNANCE_MODULE),
             Err(GlobalAccountantError::InvalidGovernanceEmitter)
         );
         let governed = VaaBodyHeader::new(0, 0, SOLANA_CHAIN_ID, GOVERNANCE_EMITTER, 7, 0);
-        assert_eq!(view.validate(&governed), Ok(()));
+        assert_eq!(
+            view.validate(&governed, &ACCOUNTANT_GOVERNANCE_MODULE),
+            Ok(())
+        );
     }
 
     #[test]
