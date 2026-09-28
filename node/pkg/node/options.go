@@ -189,6 +189,7 @@ func GuardianOptionAccountant(
 	wormchainConn *wormconn.ClientConn,
 	nttContract string,
 	nttWormchainConn *wormconn.ClientConn,
+	solanaCfg accountant.AccountantSolanaConfig,
 	submitObservationBatchSize int,
 ) *GuardianOption {
 	return &GuardianOption{
@@ -203,12 +204,13 @@ func GuardianOptionAccountant(
 			// will be passed to it for processing. It will forward all token bridge transfers to the accountant contract.
 			// If accountantCheckEnabled is set to true, token bridge transfers will not be signed and published until they
 			// are approved by the accountant smart contract.
-			if contract == "" && nttContract == "" {
+			solanaEnabled := solanaCfg.Conn != nil
+			if contract == "" && nttContract == "" && !solanaEnabled {
 				logger.Info("accountant is disabled", zap.String("component", "gacct"))
 				return nil
 			}
 
-			if websocket == "" {
+			if (contract != "" || nttContract != "") && websocket == "" {
 				return errors.New("if either accountantContract or accountantNttContract is specified, accountantWS is required")
 			}
 			if contract != "" {
@@ -239,6 +241,7 @@ func GuardianOptionAccountant(
 				enforcing,
 				nttContract,
 				nttWormchainConn,
+				solanaCfg,
 				g.guardianSigner,
 				g.gst,
 				g.acctC.writeC,
