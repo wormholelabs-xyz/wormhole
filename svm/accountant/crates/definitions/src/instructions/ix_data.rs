@@ -77,7 +77,32 @@ pub enum TxId<'a> {
     Signature(&'a [u8; SIGNATURE_TX_ID_LEN]),
 }
 
-impl TxId<'_> {
+impl<'a> TxId<'a> {
+    /// The first `len` bytes of the zero-padded wire field `padded`.
+    ///
+    /// SECURITY: `len` is exactly 32 or 64 and every byte past it is zero, so one id has one
+    /// encoding. Anything else is `InvalidInstructionData`.
+    pub fn parse(
+        len: u8,
+        padded: &'a [u8; SIGNATURE_TX_ID_LEN],
+    ) -> Result<Self, GlobalAccountantError> {
+        let tx_id = match usize::from(len) {
+            HASH_TX_ID_LEN => {
+                let (id, padding) = padded
+                    .split_first_chunk::<HASH_TX_ID_LEN>()
+                    .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+                if padding.iter().any(|&b| b != 0) {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+                TxId::Hash(id)
+            }
+            SIGNATURE_TX_ID_LEN => TxId::Signature(padded),
+            _ => return Err(GlobalAccountantError::InvalidInstructionData),
+        };
+        debug_assert!(tx_id.as_bytes().len() == usize::from(len));
+        Ok(tx_id)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             TxId::Hash(id) => id.as_slice(),
@@ -114,27 +139,9 @@ impl SubmitObservationsIxData {
         bytemuck::try_from_bytes(data).map_err(|_| GlobalAccountantError::InvalidInstructionData)
     }
 
-    /// The first `tx_id_len` bytes of `tx_id`.
-    ///
-    /// SECURITY: `tx_id_len` is exactly 32 or 64 and every byte past it is zero, so one
-    /// id has one encoding. Anything else is `InvalidInstructionData`.
+    /// The first `tx_id_len` bytes of `tx_id`. See [`TxId::parse`].
     pub fn tx_id(&self) -> Result<TxId<'_>, GlobalAccountantError> {
-        let tx_id = match usize::from(self.tx_id_len) {
-            HASH_TX_ID_LEN => {
-                let (id, padding) = self
-                    .tx_id
-                    .split_first_chunk::<HASH_TX_ID_LEN>()
-                    .ok_or(GlobalAccountantError::InvalidInstructionData)?;
-                if padding.iter().any(|&b| b != 0) {
-                    return Err(GlobalAccountantError::InvalidInstructionData);
-                }
-                TxId::Hash(id)
-            }
-            SIGNATURE_TX_ID_LEN => TxId::Signature(&self.tx_id),
-            _ => return Err(GlobalAccountantError::InvalidInstructionData),
-        };
-        debug_assert!(tx_id.as_bytes().len() == usize::from(self.tx_id_len));
-        Ok(tx_id)
+        TxId::parse(self.tx_id_len, &self.tx_id)
     }
 
     /// `action ‖ chain ‖ emitter ‖ sequence ‖ token_chain ‖ token_address ‖
@@ -172,7 +179,7 @@ struct ObservationFieldsAndDigest {
     digest: [u8; 32],
 }
 
-/// NTT `submit_observations` data: 219 bytes, fixed size. `sender` is the transceiver after
+/// NTT `submit_observations` data: 252 bytes, fixed size. `sender` is the transceiver after
 /// relayer unwrap; it equals `emitter` for a direct publish. The amount is the raw
 /// `TrimmedAmount`; normalization to eight decimals happens on-chain at quorum.
 #[repr(C)]
@@ -183,8 +190,11 @@ pub struct NttSubmitObservationsIxData {
     pub guardian_index: u8,
     /// `r ‖ s ‖ recovery_id`.
     pub signature: [u8; 65],
-    /// Source-chain transaction id; part of the signing digest only.
-    pub tx_hash: [u8; 32],
+    /// Byte length of `tx_id`: 32 or 64.
+    pub tx_id_len: u8,
+    /// Source-chain transaction id, zero-padded past `tx_id_len`; part of the signing
+    /// digest only. Read through `tx_id()`.
+    pub tx_id: [u8; SIGNATURE_TX_ID_LEN],
     /// Big-endian.
     pub chain: [u8; 2],
     pub emitter: [u8; 32],
@@ -221,6 +231,11 @@ impl NttSubmitObservationsIxData {
 
     pub fn trimmed_amount(&self) -> u64 {
         u64::from_be_bytes(self.trimmed_amount)
+    }
+
+    /// The first `tx_id_len` bytes of `tx_id`. See [`TxId::parse`].
+    pub fn tx_id(&self) -> Result<TxId<'_>, GlobalAccountantError> {
+        TxId::parse(self.tx_id_len, &self.tx_id)
     }
 
     /// Exact-length view.
@@ -335,19 +350,20 @@ const _: () = {
     assert!(offset_of!(SubmitObservationsIxData, recipient_chain) == 212);
     assert!(offset_of!(SubmitObservationsIxData, amount) == 214);
     assert!(offset_of!(SubmitObservationsIxData, digest) == 246);
-    assert!(NttSubmitObservationsIxData::LEN == 219);
+    assert!(NttSubmitObservationsIxData::LEN == 252);
     assert!(core::mem::size_of::<NttObservationFieldsAndDigest>() == 117);
     assert!(offset_of!(NttSubmitObservationsIxData, guardian_index) == 4);
     assert!(offset_of!(NttSubmitObservationsIxData, signature) == 5);
-    assert!(offset_of!(NttSubmitObservationsIxData, tx_hash) == 70);
-    assert!(offset_of!(NttSubmitObservationsIxData, chain) == 102);
-    assert!(offset_of!(NttSubmitObservationsIxData, emitter) == 104);
-    assert!(offset_of!(NttSubmitObservationsIxData, sequence) == 136);
-    assert!(offset_of!(NttSubmitObservationsIxData, sender) == 144);
-    assert!(offset_of!(NttSubmitObservationsIxData, recipient_chain) == 176);
-    assert!(offset_of!(NttSubmitObservationsIxData, trimmed_decimals) == 178);
-    assert!(offset_of!(NttSubmitObservationsIxData, trimmed_amount) == 179);
-    assert!(offset_of!(NttSubmitObservationsIxData, digest) == 187);
+    assert!(offset_of!(NttSubmitObservationsIxData, tx_id_len) == 70);
+    assert!(offset_of!(NttSubmitObservationsIxData, tx_id) == 71);
+    assert!(offset_of!(NttSubmitObservationsIxData, chain) == 135);
+    assert!(offset_of!(NttSubmitObservationsIxData, emitter) == 137);
+    assert!(offset_of!(NttSubmitObservationsIxData, sequence) == 169);
+    assert!(offset_of!(NttSubmitObservationsIxData, sender) == 177);
+    assert!(offset_of!(NttSubmitObservationsIxData, recipient_chain) == 209);
+    assert!(offset_of!(NttSubmitObservationsIxData, trimmed_decimals) == 211);
+    assert!(offset_of!(NttSubmitObservationsIxData, trimmed_amount) == 212);
+    assert!(offset_of!(NttSubmitObservationsIxData, digest) == 220);
     assert!(SubmitVaasIxData::LEN == 3);
     assert!(RegisterChainIxData::LEN == 3);
     assert!(RegisterHubIxData::LEN == 3);

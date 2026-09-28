@@ -19,21 +19,18 @@ use accountant_operational_core::{transfer, ProgramResult};
 use crate::definitions::{
     normalize_trimmed_amount, GlobalAccountantError, NoReplayNamespace,
     NttSubmitObservationsIxData, PendingObservationsLayout, TransceiverHubKey,
-    TransceiverHubLayout, TxId, NTT_SUBMIT_OBSERVATION_PREFIX,
+    TransceiverHubLayout, NTT_SUBMIT_OBSERVATION_PREFIX,
 };
 use crate::err;
 use crate::instructions::ntt_transfer;
 
-/// `data`: [`NttSubmitObservationsIxData`], 219 bytes fixed.
+/// `data`: [`NttSubmitObservationsIxData`], 252 bytes fixed.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     let ix = NttSubmitObservationsIxData::from_bytes(data).map_err(err)?;
+    let tx_id = ix.tx_id().map_err(err)?;
     let fields = ix.fields_and_digest();
 
-    let digests = quorum::observation_digests(
-        NTT_SUBMIT_OBSERVATION_PREFIX,
-        TxId::Hash(&ix.tx_hash),
-        &fields,
-    );
+    let digests = quorum::observation_digests(NTT_SUBMIT_OBSERVATION_PREFIX, tx_id, &fields);
 
     let parsed = ParsedObservation {
         content_digest: digests.content,

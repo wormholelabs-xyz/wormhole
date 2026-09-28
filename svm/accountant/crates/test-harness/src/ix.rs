@@ -13,8 +13,7 @@ use crate::ids::{compute_budget_program_id, shim_program_id, system_program_id};
 
 pub use accountant_operational_core::hash::double_keccak256;
 
-pub const TX_HASH: [u8; 32] = [0xA9u8; 32];
-pub const TX_ID: TxId<'static> = TxId::Hash(&TX_HASH);
+pub const TX_ID: TxId<'static> = TxId::Hash(&[0xA9u8; 32]);
 
 pub fn vaa_header(emitter_chain: u16, emitter_address: [u8; 32], sequence: u64) -> Vec<u8> {
     let header = VaaBodyHeader::new(0, 0, emitter_chain, emitter_address, sequence, 0);

@@ -65,9 +65,10 @@ commits the transfer, marks NoReplay, and closes the pending PDA.
 `submit_vaas` shares this NoReplay state: each `(chain, emitter, sequence)`
 commits once through either path.
 
-The observation is a fixed 219-byte struct. The guardian resolves the
-transceiver and copies the raw trimmed amount; the program normalizes the
-amount to eight decimals at quorum. The signing prefix is
+The observation is a fixed 252-byte struct. The source transaction id is 32
+or 64 bytes; a Solana-family id is the 64-byte transaction signature. The
+guardian resolves the transceiver and copies the raw trimmed amount; the
+program normalizes the amount to eight decimals at quorum. The signing prefix is
 `ntt_acct_sub_obsfig_00000000000000|`.
 
 The program checks two NTT rules before it recovers the signature. The

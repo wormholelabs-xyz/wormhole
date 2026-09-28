@@ -4,7 +4,7 @@
 use accountant_test_fixtures::NttCorpus;
 use global_accountant_definitions::{
     parse_delivery_instruction, parse_native_token_transfer, GlobalAccountantError,
-    PendingObservationsLayout, Uint256, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
+    PendingObservationsLayout, TxId, Uint256, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
 };
 use mollusk_svm::Mollusk;
 use solana_account::Account;
@@ -121,30 +121,31 @@ fn relayed_observation_commits_under_the_inner_sender() {
     assert_balance(&after, &s.dest_balance, Uint256::ZERO);
 }
 
-/// `tx_hash` is in the signing digest but not in the content digest, so observations of one
-/// message under different `tx_hash` values share a pending PDA.
+/// `tx_id` is in the signing digest but not in the content digest, so observations of one
+/// message under different `tx_id` values share a pending PDA. The second id is a 64-byte
+/// Solana-family signature.
 #[test]
-fn tx_hash_does_not_split_the_pending_pda() {
+fn tx_id_does_not_split_the_pending_pda() {
     let mollusk = mollusk();
     let s = hub_to_spoke(8);
     let first = s.submit_once(&mollusk, s.initial_accounts(), 0);
-    assert_success(&first, "guardian 0, default tx_hash");
+    assert_success(&first, "guardian 0, default 32-byte tx_id");
 
-    let other_tx_hash = [0x5Au8; 32];
+    let other_tx_id = TxId::Signature(&[0x5Au8; 64]);
     let signature = sign_digest(
         &s.guardians[1],
         &s.obs.signing_digest_with(
             global_accountant_definitions::NTT_SUBMIT_OBSERVATION_PREFIX,
-            &other_tx_hash,
+            other_tx_id,
         ),
     );
     let second = s.submit_with(
         &mollusk,
         first.resulting_accounts,
-        s.ix_data_signed(1, signature, &other_tx_hash),
+        s.ix_data_signed(1, signature, other_tx_id),
         s.account_metas(),
     );
-    assert_success(&second, "guardian 1, other tx_hash");
+    assert_success(&second, "guardian 1, 64-byte tx_id");
     let pending = pending_layout(find_account(&second.resulting_accounts, &s.pending_pda));
     assert_eq!(
         pending.num_signatures(),
@@ -200,7 +201,7 @@ fn rejects() {
                 let s = hub_to_spoke(22);
                 let mut accounts = s.initial_accounts();
                 replace_account(&mut accounts, &s.hub_pda, uninitialised_pda_account());
-                let ix = s.ix_data_signed(0, [0x11; 65], &TX_HASH);
+                let ix = s.ix_data_signed(0, [0x11; 65], TX_ID);
                 (s, accounts, ix)
             },
             GlobalAccountantError::MissingTransceiverHub,
@@ -215,7 +216,7 @@ fn rejects() {
                     &s.peer_dst_pda,
                     peer_account(&peer_layout(ETHEREUM, SPOKE, SOLANA, OTHER)),
                 );
-                let ix = s.ix_data_signed(0, [0x11; 65], &TX_HASH);
+                let ix = s.ix_data_signed(0, [0x11; 65], TX_ID);
                 (s, accounts, ix)
             },
             GlobalAccountantError::PeersNotCrossRegistered,
@@ -227,7 +228,7 @@ fn rejects() {
                 let mut sig = sign_digest(&s.guardians[0], &s.obs.signing_digest());
                 sig[0] ^= 0xff;
                 let accounts = s.initial_accounts();
-                let ix = s.ix_data_signed(0, sig, &TX_HASH);
+                let ix = s.ix_data_signed(0, sig, TX_ID);
                 (s, accounts, ix)
             },
             GlobalAccountantError::InvalidSignature,
@@ -236,13 +237,11 @@ fn rejects() {
             "signature over the WTT prefix",
             |_| {
                 let s = hub_to_spoke(24);
-                let digest = s
-                    .obs
-                    .signing_digest_with(SUBMIT_OBSERVATION_PREFIX, &TX_HASH);
+                let digest = s.obs.signing_digest_with(SUBMIT_OBSERVATION_PREFIX, TX_ID);
                 assert_ne!(digest, s.obs.signing_digest());
                 let sig = sign_digest(&s.guardians[0], &digest);
                 let accounts = s.initial_accounts();
-                let ix = s.ix_data_signed(0, sig, &TX_HASH);
+                let ix = s.ix_data_signed(0, sig, TX_ID);
                 (s, accounts, ix)
             },
             GlobalAccountantError::InvalidSignature,

@@ -7,7 +7,7 @@ use accountant_operational_core::support::quorum::{
 use accountant_test_harness::wire;
 use global_accountant_definitions::{
     NttSubmitObservationsIxData, TransceiverHubKey, TransceiverPeerKey, TxId,
-    NTT_SUBMIT_OBSERVATION_PREFIX,
+    NTT_SUBMIT_OBSERVATION_PREFIX, SIGNATURE_TX_ID_LEN,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::result::InstructionResult;
@@ -319,13 +319,17 @@ impl Observation {
         guardian_set_index: u32,
         guardian_index: u8,
         signature: [u8; 65],
-        tx_hash: [u8; 32],
+        tx_id: TxId<'_>,
     ) -> NttSubmitObservationsIxData {
+        let tx_id_bytes = tx_id.as_bytes();
+        let mut tx_id_padded = [0u8; SIGNATURE_TX_ID_LEN];
+        tx_id_padded[..tx_id_bytes.len()].copy_from_slice(tx_id_bytes);
         NttSubmitObservationsIxData {
             guardian_set_index: guardian_set_index.to_le_bytes(),
             guardian_index,
             signature,
-            tx_hash,
+            tx_id_len: u8::try_from(tx_id_bytes.len()).expect("tx id length fits u8"),
+            tx_id: tx_id_padded,
             chain: self.chain.to_be_bytes(),
             emitter: self.emitter,
             sequence: self.sequence.to_be_bytes(),
@@ -337,22 +341,22 @@ impl Observation {
         }
     }
 
-    fn digests_with(&self, prefix: &[u8], tx_hash: &[u8; 32]) -> ObservationDigests {
-        let ix = self.ix(0, 0, [0; 65], *tx_hash);
-        observation_digests(prefix, TxId::Hash(tx_hash), &ix.fields_and_digest())
+    fn digests_with(&self, prefix: &[u8], tx_id: TxId<'_>) -> ObservationDigests {
+        let ix = self.ix(0, 0, [0; 65], tx_id);
+        observation_digests(prefix, tx_id, &ix.fields_and_digest())
     }
 
     pub fn content_digest(&self) -> [u8; 32] {
-        self.digests_with(NTT_SUBMIT_OBSERVATION_PREFIX, &TX_HASH)
+        self.digests_with(NTT_SUBMIT_OBSERVATION_PREFIX, TX_ID)
             .content
     }
 
     pub fn signing_digest(&self) -> [u8; 32] {
-        self.signing_digest_with(NTT_SUBMIT_OBSERVATION_PREFIX, &TX_HASH)
+        self.signing_digest_with(NTT_SUBMIT_OBSERVATION_PREFIX, TX_ID)
     }
 
-    pub fn signing_digest_with(&self, prefix: &[u8], tx_hash: &[u8; 32]) -> [u8; 32] {
-        self.digests_with(prefix, tx_hash).signing
+    pub fn signing_digest_with(&self, prefix: &[u8], tx_id: TxId<'_>) -> [u8; 32] {
+        self.digests_with(prefix, tx_id).signing
     }
 }
 
@@ -514,18 +518,18 @@ impl ObsScenario {
             &self.guardians[guardian_index as usize],
             &self.obs.signing_digest(),
         );
-        self.ix_data_signed(guardian_index, signature, &TX_HASH)
+        self.ix_data_signed(guardian_index, signature, TX_ID)
     }
 
     pub fn ix_data_signed(
         &self,
         guardian_index: u8,
         signature: [u8; 65],
-        tx_hash: &[u8; 32],
+        tx_id: TxId<'_>,
     ) -> Vec<u8> {
         let ix = self
             .obs
-            .ix(self.guardian_set_index, guardian_index, signature, *tx_hash);
+            .ix(self.guardian_set_index, guardian_index, signature, tx_id);
         wire::framed(
             NttInstruction::SubmitObservations as u8,
             bytemuck::bytes_of(&ix),
