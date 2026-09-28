@@ -220,6 +220,10 @@ The caller passes one bucket account per bucket, in walk order. A short or a
 long bucket list raises `InvalidInstructionData`.
 
 The handler also emits one `ACCDGST\0` commit-log record per entry, with
+Before the handler logs an entry, it reads the entry's bit from the bucket. A
+bit that is already set raises `AlreadyAccounted`. A replayed batch therefore
+fails at its first entry.
+
 `UNPINNED_GUARDIAN_SET_INDEX` (0) in the guardian-set field. The wormchain
 snapshot does not record the signing set, so an auditor checks such a record
 against the VAA archive.
@@ -284,6 +288,8 @@ the values get their check.
 `create_pda_allow_prefund`, which raises `InvalidPda` when the account already
 holds data or carries another owner. A replayed batch therefore fails at its
 first entry instead of overwriting state.
+The NoReplay path raises `AlreadyAccounted` for a bit that is already set, so
+a replayed NoReplay batch also fails at its first entry.
 
 **Check order.** Each handler checks the authority before it parses the batch.
 An unauthorized caller cannot reach the parser, and a rejected instruction
@@ -406,6 +412,7 @@ Anchor's `+6000` offset does not apply.
 | 1 | `InvalidInstructionData` | A malformed batch, or a PDA account count that the entry count does not match. |
 | 2 | `InvalidPda` | The PDA address is not the derived address, or the account already holds data. |
 | 25 | `InvalidModificationKind` | A `ModifyBalance` entry carries a `kind` byte other than 1 or 2. |
+| 7 | `AlreadyAccounted` | A `BackfillNoReplay` entry's bit is already set. |
 | 42 | `SameChainPeer` | A `TransceiverPeer` entry carries `dest_chain` equal to `chain`. |
 | 48 | `UnauthorizedCaller` | The payer is not `NTT_BACKFILL_AUTHORITY`. |
 

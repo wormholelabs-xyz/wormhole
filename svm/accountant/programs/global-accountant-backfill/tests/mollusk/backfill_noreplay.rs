@@ -351,6 +351,32 @@ fn rejects() {
     }
 }
 
+/// A resent batch fails at its first already-marked entry, ahead of that entry's log.
+#[test]
+fn replayed_batch_is_rejected() {
+    let mollusk = mollusk();
+    let emitter = [0x33u8; 32];
+    let batch = Batch::new(&[
+        entry(ETHEREUM, emitter, 7, [0xaau8; 32]),
+        entry(ETHEREUM, emitter, 1500, [0xbbu8; 32]),
+    ]);
+
+    let first = batch.submit(&mollusk);
+    assert_success(&first, "first submission");
+
+    let replay_accounts = first.resulting_accounts.clone();
+    let replay = submit(&mollusk, &batch.data(), &replay_accounts, batch.metas());
+    assert_error(
+        &replay,
+        GlobalAccountantError::AlreadyAccounted as u64,
+        "same batch resent",
+    );
+    assert_eq!(
+        replay.resulting_accounts, replay_accounts,
+        "no bucket may change on rejection"
+    );
+}
+
 /// `mark_used_bulk` builds its CPI against the compiled-in `NOREPLAY_PROGRAM_ID`, so
 /// replacing the `noreplay_program` slot removes the real program from every slot and
 /// mollusk panics naming the compiled-in id.

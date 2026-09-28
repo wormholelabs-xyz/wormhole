@@ -10,7 +10,9 @@
 //! re-derives the authority PDA and the bucket PDA from the entry's own namespace, so a
 //! substituted bucket account fails with `InvalidPda` ahead of the CPI. The bucket slot count
 //! must equal the number of bucket transitions the walk makes, which pins each mask to the
-//! account the caller passed for it.
+//! account the caller passed for it. `reject_if_marked` fails an entry whose bit is already
+//! set with `AlreadyAccounted`, before that entry's log, so a replayed batch fails at its
+//! first entry as the sibling arms do.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program_error::ProgramError;
@@ -18,7 +20,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use accountant_operational_core::support::commit_log;
 use accountant_operational_core::{err, ProgramResult};
 
-use crate::cpi::noreplay::mark_used_bulk;
+use crate::cpi::noreplay::{mark_used_bulk, reject_if_marked};
 use crate::definitions::{
     GlobalAccountantError, NoReplayBatch, NoReplayBitmapAccount, NoReplayNamespace,
     NOREPLAY_BITMAP_BYTES, UNPINNED_GUARDIAN_SET_INDEX,
@@ -33,8 +35,8 @@ struct BucketKey {
     bucket_index: u64,
 }
 
-/// Order: account framing, authority, wire parse, then the bucket walk, one `MarkUsedBulk`
-/// CPI per bucket transition and a final flush.
+/// Order: account framing, authority, wire parse, then the bucket walk: per entry the replay
+/// check and the log, one `MarkUsedBulk` CPI per bucket transition, and a final flush.
 pub fn process(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -96,6 +98,12 @@ pub fn process(
                     or_mask = [0u8; NOREPLAY_BITMAP_BYTES];
                 }
             }
+
+            // Replay guard, ahead of this entry's log.
+            if bucket_account_index >= buckets.len() {
+                return Err(err(GlobalAccountantError::InvalidInstructionData));
+            }
+            reject_if_marked(&buckets[bucket_account_index], sequence)?;
 
             let bit = NoReplayBitmapAccount::bit_index(sequence);
             or_mask[bit / 8] |= 1u8 << (bit % 8);

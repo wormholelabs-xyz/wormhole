@@ -1,4 +1,4 @@
-//! Bulk-flip `MarkUsedBulk` CPI (`mark_used_bulk`).
+//! Bucket pre-check (`reject_if_marked`) and bulk-flip `MarkUsedBulk` CPI (`mark_used_bulk`).
 //! Wire layout: [`NoReplayMarkUsedBulkData`]. The authority is this program's PDA at
 //! `[NOREPLAY_AUTHORITY_SEED_PREFIX]`.
 
@@ -11,10 +11,31 @@ use accountant_operational_core::cpi::noreplay::{derive_bucket_pda, verify_autho
 use accountant_operational_core::{err, ProgramCoreResult, ProgramResult};
 
 use crate::definitions::{
-    GlobalAccountantError, NoReplayMarkUsedBulkData, NoReplayNamespace,
+    GlobalAccountantError, NoReplayBitmapAccount, NoReplayMarkUsedBulkData, NoReplayNamespace,
     NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITMAP_BYTES, NOREPLAY_BITS_PER_BUCKET,
     NOREPLAY_PROGRAM_ID,
 };
+
+/// `AlreadyAccounted` when `bucket` holds the bit for `sequence`. A system-owned bucket is
+/// uninitialised and holds no bits.
+///
+/// SECURITY: reads `bucket` before `mark_used_bulk` checks its address. A substituted
+/// account fails that check with `InvalidPda`, so the transaction still aborts.
+pub fn reject_if_marked(bucket: &AccountInfo, sequence: u64) -> ProgramResult {
+    if bucket.owner == &system_program::ID {
+        return Ok(());
+    }
+    if bucket.owner.to_bytes() != NOREPLAY_PROGRAM_ID {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    let data = bucket.try_borrow_data()?;
+    let account = NoReplayBitmapAccount::from_bytes(&data)
+        .ok_or_else(|| err(GlobalAccountantError::InvalidPda))?;
+    if account.is_marked(sequence) {
+        return Err(err(GlobalAccountantError::AlreadyAccounted));
+    }
+    Ok(())
+}
 
 /// Re-derive the authority PDA and the bucket PDA, and check both against the accounts
 /// the caller passed. Returns the authority bump for `invoke_signed`.
