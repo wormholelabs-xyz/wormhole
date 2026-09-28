@@ -60,7 +60,7 @@ func TestGetMultipleAccountsChunking(t *testing.T) {
 				return map[string]any{"context": map[string]any{"slot": 1}, "value": values}, nil
 			})
 
-			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(tt.count))
+			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(tt.count), CommitmentFinalized)
 			require.NoError(t, err)
 			require.Len(t, results, tt.count)
 
@@ -113,7 +113,7 @@ func TestGetMultipleAccountsResults(t *testing.T) {
 				return tt.reply(accountKeys(t, call)), nil
 			})
 
-			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(3))
+			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(3), CommitmentFinalized)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -134,7 +134,7 @@ func TestGetMultipleAccountsRPCError(t *testing.T) {
 		return nil, &jsonrpc.RPCError{Code: -32000, Message: "node is behind"}
 	})
 
-	_, err := conn.GetMultipleAccounts(context.Background(), testKeys(1))
+	_, err := conn.GetMultipleAccounts(context.Background(), testKeys(1), CommitmentFinalized)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "getMultipleAccounts")
 }
@@ -299,6 +299,43 @@ func TestGetTransaction(t *testing.T) {
 			require.Len(t, res.Instructions, 1)
 			assert.Equal(t, program, res.Instructions[0].ProgramID)
 			assert.Equal(t, []byte{0x00, 0x01}, res.Instructions[0].Data)
+		})
+	}
+}
+
+func TestGetMultipleAccountsCommitment(t *testing.T) {
+	tests := []struct {
+		name       string
+		commitment Commitment
+		want       string
+		wantErr    bool
+	}{
+		{name: "confirmed", commitment: CommitmentConfirmed, want: "confirmed"},
+		{name: "finalized", commitment: CommitmentFinalized, want: "finalized"},
+		{name: "zero value is rejected", commitment: Commitment{}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
+				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{nil}}, nil
+			})
+
+			_, err := conn.GetMultipleAccounts(context.Background(), testKeys(1), tt.commitment)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Empty(t, srv.recorded())
+				return
+			}
+			require.NoError(t, err)
+
+			var opts struct {
+				Commitment string `json:"commitment"`
+			}
+			calls := srv.recorded()
+			require.Len(t, calls, 1)
+			require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
+			assert.Equal(t, tt.want, opts.Commitment)
 		})
 	}
 }

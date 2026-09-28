@@ -21,10 +21,12 @@ const (
 	MaxLogLinesPerTx = 2048
 )
 
-// GetMultipleAccounts reads accounts at finalized commitment. Results are positional with
-// addrs and a nil element marks an absent account. Requests are chunked at
-// maxAccountsPerRequest.
-func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*AccountResult, error) {
+// GetMultipleAccounts reads accounts at commitment. Results are positional with addrs and
+// a nil element marks an absent account. Requests are chunked at maxAccountsPerRequest.
+func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment Commitment) ([]*AccountResult, error) {
+	if commitment != CommitmentConfirmed && commitment != CommitmentFinalized {
+		return nil, fmt.Errorf("getMultipleAccounts: unsupported commitment %q", commitment)
+	}
 	out := make([]*AccountResult, 0, len(addrs))
 
 	for start := 0; start < len(addrs); start += maxAccountsPerRequest {
@@ -32,7 +34,7 @@ func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.Pub
 
 		resp, err := c.rpc.GetMultipleAccountsWithOpts(ctx, chunk, &rpc.GetMultipleAccountsOpts{
 			Encoding:   solana.EncodingBase64,
-			Commitment: rpc.CommitmentFinalized,
+			Commitment: commitment.level,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("getMultipleAccounts: %w", err)

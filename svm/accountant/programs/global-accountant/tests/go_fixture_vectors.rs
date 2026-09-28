@@ -7,8 +7,8 @@ use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
 use accountant_test_fixtures::{Vaa, MAINNET_OTHER_SEQ2211, MAINNET_TRANSFER_SEQ1395207};
 use global_accountant_definitions::{
-    AccountantDigestLog, Instruction, PendingObservationsLayout, SubmitObservationsIxData, TxId,
-    VaaBodyHeader,
+    AccountantDigestLog, GlobalAccountantError, Instruction, PendingObservationsLayout,
+    SubmitObservationsIxData, TxId, VaaBodyHeader, SUBMIT_OBSERVATION_PREFIX,
 };
 use solana_pubkey::Pubkey;
 
@@ -185,4 +185,47 @@ fn print_go_layout_fixtures() {
         "SUBMIT_OBSERVATIONS_SIGNATURE_TX_ID: {}",
         hex(&signature_tx_id)
     );
+
+    // What each guardian signs for the transfer above: keccak256(prefix ‖ tx_id ‖ fields).
+    let signing_digest = accountant_operational_core::hash::observation_signing_digest(
+        SUBMIT_OBSERVATION_PREFIX,
+        TxId::Hash(&hash_tx_id),
+        &ix.fields_and_digest(),
+    );
+    println!("TRANSFER_SIGNING_DIGEST: {}", hex(&signing_digest));
+    let signature_signing_digest = accountant_operational_core::hash::observation_signing_digest(
+        SUBMIT_OBSERVATION_PREFIX,
+        TxId::Signature(&signature_tx_id),
+        &signature_ix.fields_and_digest(),
+    );
+    println!(
+        "TRANSFER_SIGNATURE_TX_ID_SIGNING_DIGEST: {}",
+        hex(&signature_signing_digest)
+    );
+
+    // Codes the Go submit path branches on.
+    for (name, code) in [
+        ("PAYER_MISMATCH", GlobalAccountantError::PayerMismatch),
+        ("ALREADY_ACCOUNTED", GlobalAccountantError::AlreadyAccounted),
+        ("INVALID_SIGNATURE", GlobalAccountantError::InvalidSignature),
+        (
+            "INVALID_GUARDIAN_INDEX",
+            GlobalAccountantError::InvalidGuardianIndex,
+        ),
+        ("ALREADY_SIGNED", GlobalAccountantError::AlreadySigned),
+        (
+            "EXPIRED_GUARDIAN_SET",
+            GlobalAccountantError::ExpiredGuardianSet,
+        ),
+        (
+            "MISSING_CHAIN_REGISTRATION",
+            GlobalAccountantError::MissingChainRegistration,
+        ),
+        (
+            "UNREGISTERED_EMITTER",
+            GlobalAccountantError::UnregisteredEmitter,
+        ),
+    ] {
+        println!("ERR_{name}: {}", u32::from(code));
+    }
 }

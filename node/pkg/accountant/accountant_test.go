@@ -152,6 +152,8 @@ type MockAccountantSolanaConn struct {
 
 	accounts    map[solana.PublicKey]*solacctconn.AccountResult
 	accountsErr error
+	// Visible to confirmed reads only; takes precedence over accounts.
+	confirmedAccounts map[solana.PublicKey]*solacctconn.AccountResult
 
 	programAccounts    []solacctconn.ProgramAccount
 	programAccountsErr error
@@ -168,8 +170,9 @@ type MockAccountantSolanaConn struct {
 	latestBlockhash    solacctconn.Blockhash
 	latestBlockhashErr error
 
-	blockHeight    uint64
-	blockHeightErr error
+	blockHeight     uint64
+	blockHeightErr  error
+	blockHeightHook func()
 
 	sendTransactionErr  error
 	sendTransactionHook func(tx *solana.Transaction) error
@@ -182,15 +185,16 @@ type MockAccountantSolanaConn struct {
 	balance    uint64
 	balanceErr error
 
-	GetMultipleAccountsCalls     [][]solana.PublicKey
-	GetProgramAccountsByTagCalls []MockGetProgramAccountsByTagCall
-	GetSignaturesForAddressCalls []MockGetSignaturesForAddressCall
-	GetTransactionCalls          []solana.Signature
-	GetLatestBlockhashCalls      int
-	GetBlockHeightCalls          int
-	SentTransactions             []*solana.Transaction
-	GetSignatureStatusesCalls    [][]solana.Signature
-	GetBalanceCalls              []solana.PublicKey
+	GetMultipleAccountsCalls       [][]solana.PublicKey
+	GetMultipleAccountsCommitments []solacctconn.Commitment
+	GetProgramAccountsByTagCalls   []MockGetProgramAccountsByTagCall
+	GetSignaturesForAddressCalls   []MockGetSignaturesForAddressCall
+	GetTransactionCalls            []solana.Signature
+	GetLatestBlockhashCalls        int
+	GetBlockHeightCalls            int
+	SentTransactions               []*solana.Transaction
+	GetSignatureStatusesCalls      [][]solana.Signature
+	GetBalanceCalls                []solana.PublicKey
 }
 
 var _ solacctconn.Conn = (*MockAccountantSolanaConn)(nil)
@@ -198,6 +202,7 @@ var _ solacctconn.Conn = (*MockAccountantSolanaConn)(nil)
 func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 	return &MockAccountantSolanaConn{
 		accounts:          make(map[solana.PublicKey]*solacctconn.AccountResult),
+		confirmedAccounts: make(map[solana.PublicKey]*solacctconn.AccountResult),
 		signatures:        make(map[solana.PublicKey][]solana.Signature),
 		transactions:      make(map[solana.Signature]*solacctconn.TransactionResult),
 		signatureStatuses: make(map[solana.Signature]*solacctconn.SignatureStatus),
@@ -231,16 +236,27 @@ func (c *MockAccountantSolanaConn) SetGetMultipleAccountsErr(err error) {
 	c.accountsErr = err
 }
 
-func (c *MockAccountantSolanaConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*solacctconn.AccountResult, error) {
+// SetConfirmedAccount sets an account that confirmed reads see and finalized reads do not.
+func (c *MockAccountantSolanaConn) SetConfirmedAccount(addr solana.PublicKey, result *solacctconn.AccountResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.confirmedAccounts[addr] = result
+}
+
+func (c *MockAccountantSolanaConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment solacctconn.Commitment) ([]*solacctconn.AccountResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetMultipleAccountsCalls = append(c.GetMultipleAccountsCalls, addrs)
+	c.GetMultipleAccountsCommitments = append(c.GetMultipleAccountsCommitments, commitment)
 	if c.accountsErr != nil {
 		return nil, c.accountsErr
 	}
 	results := make([]*solacctconn.AccountResult, len(addrs))
 	for i, addr := range addrs {
 		results[i] = c.accounts[addr]
+		if confirmed, ok := c.confirmedAccounts[addr]; ok && commitment == solacctconn.CommitmentConfirmed {
+			results[i] = confirmed
+		}
 	}
 	return results, nil
 }
@@ -362,14 +378,27 @@ func (c *MockAccountantSolanaConn) SetBlockHeight(height uint64, err error) {
 	c.blockHeightErr = err
 }
 
-func (c *MockAccountantSolanaConn) GetBlockHeight(ctx context.Context) (uint64, error) {
+// SetBlockHeightHook runs hook after each block height read. It runs without the mock
+// lock, so the hook may call back into the mock.
+func (c *MockAccountantSolanaConn) SetBlockHeightHook(hook func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.blockHeightHook = hook
+}
+
+func (c *MockAccountantSolanaConn) GetBlockHeight(ctx context.Context) (uint64, error) {
+	c.mu.Lock()
 	c.GetBlockHeightCalls++
-	if c.blockHeightErr != nil {
-		return 0, c.blockHeightErr
+	height, err, hook := c.blockHeight, c.blockHeightErr, c.blockHeightHook
+	c.mu.Unlock()
+
+	if hook != nil {
+		hook()
 	}
-	return c.blockHeight, nil
+	if err != nil {
+		return 0, err
+	}
+	return height, nil
 }
 
 func (c *MockAccountantSolanaConn) SetSendTransactionErr(err error) {
