@@ -19,8 +19,7 @@ export SBF_OUT_DIR := justfile_directory() / "target/deploy"
 # Mainnet Core Bridge and shim (the fixtures are mainnet data), devnet NoReplay
 # (its only deployment). That mix is a test environment, not any one network.
 # A family's backfill `.so` and operational `.so` share one program account, so
-# both carry the same address; each is asserted against its `declare_id!` at
-# compile time. The two backfill authorities are the pubkeys of the
+# both carry the same address in `declare_id!`. The two backfill authorities are the pubkeys of the
 # deterministic test keypairs `Keypair::new_from_array([1u8; 32])` and
 # `Keypair::new_from_array([2u8; 32])`.
 #

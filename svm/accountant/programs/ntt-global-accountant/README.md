@@ -116,6 +116,11 @@ guardian signatures. The program resolves the transceiver, parses the
 `TransceiverMessage`, loads the transceiver's hub, marks NoReplay, and moves
 the hub token's balances after the peer checks.
 
+`submit_vaas`, `register_hub` and `register_peer` carry the full VAA body
+inline. The body and the account keys must fit one transaction packet
+(`PACKET_DATA_SIZE`, 1232 bytes), which is less than `MAX_NTT_PAYLOAD_LEN`. A
+larger transfer settles through `submit_observations` only.
+
 The transfer parser is stricter than the wormchain reader. It checks every
 nested length field and rejects trailing bytes, as the EVM receivers do.
 
@@ -298,6 +303,8 @@ PDA.
   `just e2e-upgrade-submit ntt-global-accountant` /
   `just e2e-upgrade-stop ntt-global-accountant` — the two-step
   `upgrade_contract` end-to-end test for this program.
+- `just bench` — compute-unit regression tracking for `submit_vaas` and
+  `submit_observations`, tracked at `benches/compute_units.md`.
 
 ## See also
 

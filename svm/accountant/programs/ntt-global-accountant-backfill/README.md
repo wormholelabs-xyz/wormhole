@@ -12,7 +12,7 @@ the `TransceiverHub` map, and the `TransceiverPeer` map.
 
 The image occupies the operational program account
 `cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN`. `declare_id!` carries that
-address, and a `const _` assert pins it to `NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID`.
+address, which it reads from `NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID` at compile time.
 The operator ends the migration with `solana program upgrade`, which installs
 `ntt_global_accountant.so` in the same account.
 
@@ -35,7 +35,7 @@ handler therefore cannot enter a live dispatch table and still compile.
 
 The shell crate holds the Anchor boundary only:
 
-- `declare_id!` and the program-id assert, in `src/lib.rs`.
+- `declare_id!`, in `src/lib.rs`.
 - `NTT_BACKFILL_AUTHORITY`, in `src/lib.rs`.
 - Six `#[derive(Accounts)]` contexts, in `src/contexts.rs`.
 
@@ -210,20 +210,21 @@ Groups ascend strictly by `(chain, emitter)`. Sequences ascend strictly inside a
 group. `MAX_BATCH_ENTRIES` does not apply here: the cost is one CPI per bucket,
 plus a second nested CPI for each bucket the NoReplay program still has to
 create, so the ceiling depends on which buckets already exist on chain. The
-bucket account list is the operator's bound; 30 buckets per transaction is
-measured to pass. A bucket holds 1024 bits: the bucket index is `sequence / 1024`, and the
-bit index is `sequence % 1024`. The handler ORs the bits of consecutive entries
-that share one bucket into one 128-byte mask. It then sends one `MarkUsedBulk`
-CPI per bucket.
+bucket account list is the operator's bound. Mollusk passes 30 buckets in one
+instruction; the transaction packet gives a lower practical ceiling. A bucket
+holds 1024 bits: the bucket index is `sequence / 1024`, and the bit index is
+`sequence % 1024`. The handler ORs the bits of consecutive entries that share
+one bucket into one 128-byte mask. It then sends one `MarkUsedBulk` CPI per
+bucket.
 
 The caller passes one bucket account per bucket, in walk order. A short or a
 long bucket list raises `InvalidInstructionData`.
 
-The handler also emits one `ACCDGST\0` commit-log record per entry, with
 Before the handler logs an entry, it reads the entry's bit from the bucket. A
 bit that is already set raises `AlreadyAccounted`. A replayed batch therefore
 fails at its first entry.
 
+The handler also emits one `ACCDGST\0` commit-log record per entry, with
 `UNPINNED_GUARDIAN_SET_INDEX` (0) in the guardian-set field. The wormchain
 snapshot does not record the signing set, so an auditor checks such a record
 against the VAA archive.
@@ -236,9 +237,8 @@ compile time. A missing variable is a build error, so every artifact names one
 operator key. The WTT backfill reads a separate variable, `BACKFILL_AUTHORITY`,
 so the two migrations run under their own keys.
 
-`NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID` is the second compile-time pin. The assert
-after `declare_id!` fails the build when the two disagree, so one artifact can
-target one program account only.
+`NTT_GLOBAL_ACCOUNTANT_PROGRAM_ID` is the second compile-time value.
+`declare_id!` reads it, so one artifact targets one program account only.
 
 Run the recipes below from `svm/accountant`.
 
@@ -248,8 +248,8 @@ Run the recipes below from `svm/accountant`.
 | `just build` | Deploy artifact. The caller's environment supplies every name in `DEPLOY_VARS`. |
 
 `just build` prints the values it compiles in. It aborts with the list of
-missing names when the caller sets none. `just build-prod` is an alias of
-`just build`.
+missing names when any name in `DEPLOY_VARS` is missing. `just build-prod` is an
+alias of `just build`.
 
 Check a deploy artifact against the intended operator key:
 
@@ -341,11 +341,12 @@ makes is the decimal string to a 32-byte big-endian value.
 wormchain restarts from zero on Solana. The guardians re-observe the message
 after the cutover.
 
-**`UNPINNED_GUARDIAN_SET_INDEX` is 0.** A backfilled `ACCDGST\0` record carries 0
-in its guardian-set field, because the snapshot does not record the signing set.
-Mainnet guardian set 0 expired long ago, and the program rejects an expired set.
-No operational record can therefore carry 0. A consumer of the `ACCDGST` log
-reads 0 as "backfilled; audit against the VAA archive".
+**`UNPINNED_GUARDIAN_SET_INDEX` is 0.** A backfilled `ACCDGST\0` record carries
+0 in its guardian-set field, because the snapshot does not record the signing
+set. The operational program accepts only an active guardian set.
+`guardian_set::is_expired` treats the original set 0 (creation time 1628099186)
+as expired. No operational record can therefore carry 0. A consumer of the
+`ACCDGST` log reads 0 as "backfilled; audit against the VAA archive".
 
 **Upstream check order.** The operational program changed its observation check
 order after the wire formats became final. No layout, seed, tag or arithmetic
@@ -394,7 +395,7 @@ After step 17 the deploy key can no longer upgrade the program. Each later
 upgrade needs a guardian-signed `UpgradeContract` VAA, through the program's own
 `upgrade_contract` instruction.
 
-At this commit the two images measure 160,392 bytes (backfill) and 294,960 bytes
+At this commit the two images measure 161,856 bytes (backfill) and 297,736 bytes
 (operational). Both numbers move with every code change, so step 6 measures them
 again.
 
@@ -411,10 +412,10 @@ Anchor's `+6000` offset does not apply.
 |---|---|---|
 | 1 | `InvalidInstructionData` | A malformed batch, or a PDA account count that the entry count does not match. |
 | 2 | `InvalidPda` | The PDA address is not the derived address, or the account already holds data. |
-| 25 | `InvalidModificationKind` | A `ModifyBalance` entry carries a `kind` byte other than 1 or 2. |
 | 7 | `AlreadyAccounted` | A `BackfillNoReplay` entry's bit is already set. |
-| 42 | `SameChainPeer` | A `TransceiverPeer` entry carries `dest_chain` equal to `chain`. |
-| 48 | `UnauthorizedCaller` | The payer is not `NTT_BACKFILL_AUTHORITY`. |
+| 25 | `InvalidModificationKind` | A `ModifyBalance` entry carries a `kind` byte other than 1 or 2. |
+| 33 | `UnauthorizedCaller` | The payer is not `NTT_BACKFILL_AUTHORITY`. |
+| 43 | `SameChainPeer` | A `TransceiverPeer` entry carries `dest_chain` equal to `chain`. |
 
 Anchor raises three more codes before a handler runs:
 

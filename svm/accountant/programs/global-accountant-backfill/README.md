@@ -11,7 +11,7 @@ PDAs, `ModifyBalance` records, and the Token Bridge `ChainRegistration` state.
 
 The image occupies the operational program account
 `US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx`. `declare_id!` carries that
-address, and a `const _` assert pins it to `GLOBAL_ACCOUNTANT_PROGRAM_ID`. The
+address, which it reads from `GLOBAL_ACCOUNTANT_PROGRAM_ID` at compile time. The
 operator ends the migration with `solana program upgrade`, which installs
 `global_accountant.so` in the same account.
 
@@ -34,7 +34,7 @@ handler therefore cannot enter a live dispatch table and still compile.
 
 The shell crate holds the Anchor boundary only:
 
-- `declare_id!` and the program-id assert, in `src/lib.rs`.
+- `declare_id!`, in `src/lib.rs`.
 - `BACKFILL_AUTHORITY`, in `src/lib.rs`.
 - Four `#[derive(Accounts)]` contexts, in `src/contexts.rs`.
 
@@ -205,9 +205,8 @@ compile time. A missing variable is a build error, so every artifact names one
 operator key. The NTT backfill reads a separate variable,
 `NTT_BACKFILL_AUTHORITY`, so the two migrations run under their own keys.
 
-`GLOBAL_ACCOUNTANT_PROGRAM_ID` is the second compile-time pin. The assert after
-`declare_id!` fails the build when the two disagree, so one artifact can target
-one program account only.
+`GLOBAL_ACCOUNTANT_PROGRAM_ID` is the second compile-time value. `declare_id!`
+reads it, so one artifact targets one program account only.
 
 Run the recipes below from `svm/accountant`.
 
@@ -217,8 +216,8 @@ Run the recipes below from `svm/accountant`.
 | `just build` | Deploy artifact. The caller's environment supplies every name in `DEPLOY_VARS`. |
 
 `just build` prints the values it compiles in. It aborts with the list of
-missing names when the caller sets none. `just build-prod` is an alias of
-`just build`.
+missing names when any name in `DEPLOY_VARS` is missing. `just build-prod` is an
+alias of `just build`.
 
 Check a deploy artifact against the intended operator key:
 
@@ -256,9 +255,9 @@ the values get their check.
 **Creation is create-only.** `pda::create` goes through
 `create_pda_allow_prefund`, which raises `InvalidPda` when the account already
 holds data or carries another owner. A replayed batch therefore fails at its
+first entry instead of overwriting state.
 The NoReplay path raises `AlreadyAccounted` for a bit that is already set, so
 a replayed NoReplay batch also fails at its first entry.
-first entry instead of overwriting state.
 
 **Check order.** Each handler checks the authority before it parses the batch.
 An unauthorized caller cannot reach the parser, and a rejected instruction
@@ -303,11 +302,12 @@ the VAA sequence.
 wormchain restarts from zero on Solana. The guardians re-observe the message
 after the cutover.
 
-**`UNPINNED_GUARDIAN_SET_INDEX` is 0.** A backfilled `ACCDGST\0` record carries 0
-in its guardian-set field, because the snapshot does not record the signing set.
-Mainnet guardian set 0 expired long ago, and the program rejects an expired set.
-No operational record can therefore carry 0. A consumer of the `ACCDGST` log
-reads 0 as "backfilled; audit against the VAA archive".
+**`UNPINNED_GUARDIAN_SET_INDEX` is 0.** A backfilled `ACCDGST\0` record carries
+0 in its guardian-set field, because the snapshot does not record the signing
+set. The operational program accepts only an active guardian set.
+`guardian_set::is_expired` treats the original set 0 (creation time 1628099186)
+as expired. No operational record can therefore carry 0. A consumer of the
+`ACCDGST` log reads 0 as "backfilled; audit against the VAA archive".
 
 **Upstream check order.** The operational program changed its observation check
 order after the wire formats became final. No layout, seed, tag or arithmetic
@@ -353,7 +353,7 @@ After step 15 the deploy key can no longer upgrade the program. Each later
 upgrade needs a guardian-signed `UpgradeContract` VAA, through the program's own
 `upgrade_contract` instruction.
 
-At this commit the two images measure 146,312 bytes (backfill) and 236,088 bytes
+At this commit the two images measure 147,776 bytes (backfill) and 238,880 bytes
 (operational). Both numbers move with every code change, so step 6 measures them
 again.
 
@@ -380,7 +380,7 @@ Anchor's `+6000` offset does not apply.
 | 2 | `InvalidPda` | The PDA address is not the derived address, or the account already holds data. |
 | 7 | `AlreadyAccounted` | A `BackfillNoReplay` entry's bit is already set. |
 | 25 | `InvalidModificationKind` | A `ModifyBalance` entry carries a `kind` byte other than 1 or 2. |
-| 48 | `UnauthorizedCaller` | The payer is not `BACKFILL_AUTHORITY`. |
+| 33 | `UnauthorizedCaller` | The payer is not `BACKFILL_AUTHORITY`. |
 
 Anchor raises three more codes before a handler runs:
 
@@ -402,7 +402,8 @@ Anchor raises three more codes before a handler runs:
   instruction rejects with `UnauthorizedCaller` and writes nothing.
 - `just e2e-backfill-probe` — the cost probes. They need the snapshot catalogue
   staged, and they print a skip message when it is absent.
-- `just e2e` — every surfpool suite of the workspace, including the two above.
+- `just e2e` — every surfpool suite of the workspace. It runs
+  `just e2e-backfill` and skips the cost probes.
 
 ## See also
 

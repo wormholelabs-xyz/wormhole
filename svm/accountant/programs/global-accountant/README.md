@@ -33,6 +33,10 @@ commits the transfer, marks NoReplay, and closes the pending PDA.
 `submit_vaas` shares this NoReplay state: each `(chain, emitter, sequence)`
 commits once through either path.
 
+The observation is a fixed 278-byte struct. The source transaction id is 32
+or 64 bytes; a Solana-family id is the 64-byte transaction signature. The id is
+part of the signing digest, not of the pending PDA key.
+
 | # | Account | W | S | Purpose |
 |---|---------|---|---|---------|
 | 0 | submitter | W | S | Pays rent for the pending PDA. |
@@ -70,6 +74,11 @@ signatures. The instruction accepts a Token Bridge `Transfer`,
 governance VAA is always rejected here: its emitter is never a registered
 Token Bridge contract, so the `ChainRegistration` check fails before any
 balance changes.
+
+The instruction carries the full VAA body inline. The body and the account keys
+must fit one transaction packet (`PACKET_DATA_SIZE`, 1232 bytes), which is less
+than `MAX_TRANSFER_PAYLOAD_LEN`. A larger `TransferWithPayload` settles through
+`submit_observations` only.
 
 | # | Account | W | S | Purpose |
 |---|---------|---|---|---------|
