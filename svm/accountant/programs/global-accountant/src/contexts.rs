@@ -120,7 +120,8 @@ pub struct ClosePending<'info> {
     /// CHECK: compared to the recorded payer in the handler.
     #[account(mut)]
     pub rent_recipient: UncheckedAccount<'info>,
-    /// CHECK: owner checked in `is_guardian_set_expired`.
+    /// CHECK: owner and address checked in `guardian_set::verify_account`, expiry read by
+    /// `guardian_set::is_expired`.
     pub guardian_set: UncheckedAccount<'info>,
     /// CHECK: address checked in `noreplay::is_marked`.
     pub noreplay_bucket: UncheckedAccount<'info>,

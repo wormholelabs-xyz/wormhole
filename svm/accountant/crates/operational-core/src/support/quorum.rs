@@ -7,7 +7,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
-    GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout, TxId, VaaBodyHeader,
+    GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout, TxId,
 };
 use crate::err;
 use crate::hash::{double_keccak256, keccak256, observation_signing_digest};
@@ -35,9 +35,6 @@ pub fn observation_digests(prefix: &[u8], tx_id: TxId<'_>, fields: &[u8]) -> Obs
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.
 pub const SECP256K1_SIGNATURE_LEN: usize = 65;
-
-/// Header plus a non-empty payload; used to bound a staged/inline VAA body elsewhere.
-pub const BODY_MIN_LEN: usize = VaaBodyHeader::LEN + 1;
 
 /// Observation fields the quorum path reads; product fields stay on each program's ix.
 #[derive(Clone, Copy)]
