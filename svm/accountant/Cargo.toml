@@ -56,7 +56,7 @@ solana-noreplay = { git = "ssh://git@github.com/wormholelabs-xyz/solana-noreplay
 # than by accidental unification with another crate's graph.
 solana-address = { version = "=2.6.0", default-features = false, features = ["curve25519"] }
 # Reference U256 for the `Uint256` equivalence tests. Dev-only; two packages.
-# Pinned below 1.20 (fixes RUSTSEC-2026-0220) because that version needs Rust 1.90.
+# 1.20 fixes RUSTSEC-2026-0220 and needs Rust 1.90 (`rust-toolchain.toml`).
 ruint = { version = "=1.20.0", default-features = false }
 # Shim instruction builders; dev-only parity check for `VerifyHashData`.
 wormhole-svm-shim = { path = "../wormhole-core-shims/crates/shim" }

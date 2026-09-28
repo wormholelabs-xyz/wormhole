@@ -1,5 +1,7 @@
 # NTT Global Accountant
 
+<!-- cspell:ignore obsfig -->
+
 The NTT Global Accountant is a Solana Anchor port of the wormchain NTT Global
 Accountant CosmWasm contract. It tracks a balance per `(chain, hub_chain,
 hub_address)` triple, where the hub is the locking transceiver of one NTT

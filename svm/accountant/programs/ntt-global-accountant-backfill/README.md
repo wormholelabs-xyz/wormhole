@@ -1,5 +1,7 @@
 # NTT Global Accountant Backfill
 
+<!-- cspell:ignore Zvgw Gcsws Pizu -->
+
 ## Purpose
 
 This program is the one-shot migration image for the NTT Global Accountant. It
@@ -281,7 +283,7 @@ holds data or carries another owner. A replayed batch therefore fails at its
 first entry instead of overwriting state.
 
 **Check order.** Each handler checks the authority before it parses the batch.
-An unauthorised caller cannot reach the parser, and a rejected instruction
+An unauthorized caller cannot reach the parser, and a rejected instruction
 writes nothing.
 
 **No on-chain finalize marker.** A Solana program cannot iterate its own PDAs,
