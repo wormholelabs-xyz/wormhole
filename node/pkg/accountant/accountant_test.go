@@ -26,6 +26,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/devnet"
 	"github.com/certusone/wormhole/node/pkg/guardiansigner"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	"github.com/certusone/wormhole/node/pkg/solacctconn"
 	"github.com/gagliardetto/solana-go"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
@@ -140,45 +141,68 @@ type MockGetProgramAccountsByTagCall struct {
 
 type MockGetSignaturesForAddressCall struct {
 	Addr  solana.PublicKey
-	Until solana.Signature
 	Limit int
 }
 
-// MockAccountantSolanaConn is the AccountantSolanaConn test double.
+// MockAccountantSolanaConn is the solacctconn.Conn test double.
 type MockAccountantSolanaConn struct {
 	mu sync.Mutex
 
 	closed bool
 
-	accounts map[solana.PublicKey]*SolanaAccountResult
+	accounts    map[solana.PublicKey]*solacctconn.AccountResult
+	accountsErr error
 
-	programAccounts    []SolanaProgramAccount
+	programAccounts    []solacctconn.ProgramAccount
 	programAccountsErr error
 
 	signatures    map[solana.PublicKey][]solana.Signature
 	signaturesErr error
 
-	transactions    map[solana.Signature]*SolanaTransactionResult
+	transactions    map[solana.Signature]*solacctconn.TransactionResult
 	transactionsErr error
 
-	logEvents        chan SolanaLogEvent
+	logEvents        chan solacctconn.LogEvent
 	subscribeLogsErr error
+
+	latestBlockhash    solacctconn.Blockhash
+	latestBlockhashErr error
+
+	blockHeight    uint64
+	blockHeightErr error
+
+	sendTransactionErr  error
+	sendTransactionHook func(tx *solana.Transaction) error
+
+	signatureStatuses         map[solana.Signature]*solacctconn.SignatureStatus
+	signatureStatusesErr      error
+	defaultSignatureStatus    *solacctconn.SignatureStatus
+	defaultSignatureStatusSet bool
+
+	balance    uint64
+	balanceErr error
 
 	GetMultipleAccountsCalls     [][]solana.PublicKey
 	GetProgramAccountsByTagCalls []MockGetProgramAccountsByTagCall
 	GetSignaturesForAddressCalls []MockGetSignaturesForAddressCall
 	GetTransactionCalls          []solana.Signature
+	GetLatestBlockhashCalls      int
+	GetBlockHeightCalls          int
+	SentTransactions             []*solana.Transaction
+	GetSignatureStatusesCalls    [][]solana.Signature
+	GetBalanceCalls              []solana.PublicKey
 }
 
-var _ AccountantSolanaConn = (*MockAccountantSolanaConn)(nil)
+var _ solacctconn.Conn = (*MockAccountantSolanaConn)(nil)
 
 func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 	return &MockAccountantSolanaConn{
-		accounts:     make(map[solana.PublicKey]*SolanaAccountResult),
-		signatures:   make(map[solana.PublicKey][]solana.Signature),
-		transactions: make(map[solana.Signature]*SolanaTransactionResult),
+		accounts:          make(map[solana.PublicKey]*solacctconn.AccountResult),
+		signatures:        make(map[solana.PublicKey][]solana.Signature),
+		transactions:      make(map[solana.Signature]*solacctconn.TransactionResult),
+		signatureStatuses: make(map[solana.Signature]*solacctconn.SignatureStatus),
 		// Buffered so tests can queue events before the reader starts.
-		logEvents: make(chan SolanaLogEvent, 16),
+		logEvents: make(chan solacctconn.LogEvent, 16),
 	}
 }
 
@@ -195,31 +219,40 @@ func (c *MockAccountantSolanaConn) Closed() bool {
 }
 
 // A nil result marks an absent account.
-func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *SolanaAccountResult) {
+func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *solacctconn.AccountResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.accounts[addr] = result
 }
 
-func (c *MockAccountantSolanaConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*SolanaAccountResult, error) {
+func (c *MockAccountantSolanaConn) SetGetMultipleAccountsErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.accountsErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey) ([]*solacctconn.AccountResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetMultipleAccountsCalls = append(c.GetMultipleAccountsCalls, addrs)
-	results := make([]*SolanaAccountResult, len(addrs))
+	if c.accountsErr != nil {
+		return nil, c.accountsErr
+	}
+	results := make([]*solacctconn.AccountResult, len(addrs))
 	for i, addr := range addrs {
 		results[i] = c.accounts[addr]
 	}
 	return results, nil
 }
 
-func (c *MockAccountantSolanaConn) SetProgramAccounts(accounts []SolanaProgramAccount, err error) {
+func (c *MockAccountantSolanaConn) SetProgramAccounts(accounts []solacctconn.ProgramAccount, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.programAccounts = accounts
 	c.programAccountsErr = err
 }
 
-func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]SolanaProgramAccount, error) {
+func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]solacctconn.ProgramAccount, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetProgramAccountsByTagCalls = append(c.GetProgramAccountsByTagCalls, MockGetProgramAccountsByTagCall{
@@ -243,11 +276,11 @@ func (c *MockAccountantSolanaConn) SetSignaturesForAddressErr(err error) {
 	c.signaturesErr = err
 }
 
-func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, until solana.Signature, limit int) ([]solana.Signature, error) {
+func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, limit int) ([]solana.Signature, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetSignaturesForAddressCalls = append(c.GetSignaturesForAddressCalls, MockGetSignaturesForAddressCall{
-		Addr: addr, Until: until, Limit: limit,
+		Addr: addr, Limit: limit,
 	})
 	if c.signaturesErr != nil {
 		return nil, c.signaturesErr
@@ -255,7 +288,7 @@ func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, 
 	return c.signatures[addr], nil
 }
 
-func (c *MockAccountantSolanaConn) SetTransaction(sig solana.Signature, tx *SolanaTransactionResult) {
+func (c *MockAccountantSolanaConn) SetTransaction(sig solana.Signature, tx *solacctconn.TransactionResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.transactions[sig] = tx
@@ -267,7 +300,7 @@ func (c *MockAccountantSolanaConn) SetTransactionErr(err error) {
 	c.transactionsErr = err
 }
 
-func (c *MockAccountantSolanaConn) GetTransaction(ctx context.Context, sig solana.Signature) (*SolanaTransactionResult, error) {
+func (c *MockAccountantSolanaConn) GetTransaction(ctx context.Context, sig solana.Signature) (*solacctconn.TransactionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetTransactionCalls = append(c.GetTransactionCalls, sig)
@@ -287,7 +320,7 @@ func (c *MockAccountantSolanaConn) SetSubscribeLogsErr(err error) {
 	c.subscribeLogsErr = err
 }
 
-func (c *MockAccountantSolanaConn) SubscribeLogs(ctx context.Context, program solana.PublicKey) (<-chan SolanaLogEvent, error) {
+func (c *MockAccountantSolanaConn) SubscribeLogs(ctx context.Context, program solana.PublicKey) (<-chan solacctconn.LogEvent, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.subscribeLogsErr != nil {
@@ -296,13 +329,139 @@ func (c *MockAccountantSolanaConn) SubscribeLogs(ctx context.Context, program so
 	return c.logEvents, nil
 }
 
-func (c *MockAccountantSolanaConn) PushLogEvent(evt SolanaLogEvent) {
+func (c *MockAccountantSolanaConn) PushLogEvent(evt solacctconn.LogEvent) {
 	c.logEvents <- evt
 }
 
 // CloseLogEvents simulates a subscription disconnect.
 func (c *MockAccountantSolanaConn) CloseLogEvents() {
 	close(c.logEvents)
+}
+
+func (c *MockAccountantSolanaConn) SetLatestBlockhash(bh solacctconn.Blockhash, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.latestBlockhash = bh
+	c.latestBlockhashErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetLatestBlockhash(ctx context.Context) (solacctconn.Blockhash, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetLatestBlockhashCalls++
+	if c.latestBlockhashErr != nil {
+		return solacctconn.Blockhash{}, c.latestBlockhashErr
+	}
+	return c.latestBlockhash, nil
+}
+
+func (c *MockAccountantSolanaConn) SetBlockHeight(height uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.blockHeight = height
+	c.blockHeightErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetBlockHeight(ctx context.Context) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetBlockHeightCalls++
+	if c.blockHeightErr != nil {
+		return 0, c.blockHeightErr
+	}
+	return c.blockHeight, nil
+}
+
+func (c *MockAccountantSolanaConn) SetSendTransactionErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sendTransactionErr = err
+}
+
+// SetSendTransactionHook answers each send from hook. It runs without the mock lock, so
+// the hook may call back into the mock.
+func (c *MockAccountantSolanaConn) SetSendTransactionHook(hook func(tx *solana.Transaction) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sendTransactionHook = hook
+}
+
+func (c *MockAccountantSolanaConn) SendTransaction(ctx context.Context, tx *solana.Transaction) (solana.Signature, error) {
+	c.mu.Lock()
+	c.SentTransactions = append(c.SentTransactions, tx)
+	sendErr := c.sendTransactionErr
+	hook := c.sendTransactionHook
+	c.mu.Unlock()
+
+	if hook != nil {
+		if err := hook(tx); err != nil {
+			return solana.Signature{}, err
+		}
+	}
+	if sendErr != nil {
+		return solana.Signature{}, sendErr
+	}
+	if len(tx.Signatures) == 0 {
+		return solana.Signature{}, errors.New("mock accountant solana conn: transaction is not signed")
+	}
+	return tx.Signatures[0], nil
+}
+
+// SetDefaultSignatureStatus answers every signature that SetSignatureStatus did not name.
+// A nil status marks them unknown.
+func (c *MockAccountantSolanaConn) SetDefaultSignatureStatus(status *solacctconn.SignatureStatus) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.defaultSignatureStatus = status
+	c.defaultSignatureStatusSet = true
+}
+
+// A nil status marks an unknown signature.
+func (c *MockAccountantSolanaConn) SetSignatureStatus(sig solana.Signature, status *solacctconn.SignatureStatus) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signatureStatuses[sig] = status
+}
+
+func (c *MockAccountantSolanaConn) SetSignatureStatusesErr(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signatureStatusesErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetSignatureStatuses(ctx context.Context, sigs []solana.Signature) ([]*solacctconn.SignatureStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetSignatureStatusesCalls = append(c.GetSignatureStatusesCalls, sigs)
+	if c.signatureStatusesErr != nil {
+		return nil, c.signatureStatusesErr
+	}
+	out := make([]*solacctconn.SignatureStatus, len(sigs))
+	for i, sig := range sigs {
+		status, exists := c.signatureStatuses[sig]
+		if !exists && c.defaultSignatureStatusSet {
+			status = c.defaultSignatureStatus
+		}
+		out[i] = status
+	}
+	return out, nil
+}
+
+func (c *MockAccountantSolanaConn) SetBalance(lamports uint64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.balance = lamports
+	c.balanceErr = err
+}
+
+func (c *MockAccountantSolanaConn) GetBalance(ctx context.Context, addr solana.PublicKey) (uint64, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.GetBalanceCalls = append(c.GetBalanceCalls, addr)
+	if c.balanceErr != nil {
+		return 0, c.balanceErr
+	}
+	return c.balance, nil
 }
 
 func newAccountantForTest(
@@ -340,6 +499,7 @@ func newAccountantForTest(
 		accountantCheckEnabled,
 		"",
 		nil,
+		AccountantSolanaConfig{},
 		guardianSigner,
 		gst,
 		acctWriteC,
@@ -969,6 +1129,7 @@ func newAccountantForAuditModeTest(
 		true, // enforceFlag
 		nttContract,
 		nttWormchainConn,
+		AccountantSolanaConfig{},
 		guardianSigner,
 		gst,
 		acctWriteC,
@@ -1079,7 +1240,7 @@ func TestPerformAuditResubmitsUnsignedTransfer(t *testing.T) {
 	assert.Equal(t, 0, len(tmpMap), "expected tmpMap to be empty")
 
 	// Verify: submitPending flag should be set
-	assert.True(t, pe.submitPending(), "expected submitPending to be true")
+	assert.True(t, pe.submitPending(backendWormchain), "expected submitPending to be true")
 
 	// Drain channels
 	drainMsgChannel(acct.subChan)
@@ -1289,7 +1450,7 @@ func TestPerformAuditPhase2Unknown(t *testing.T) {
 	assert.Equal(t, 1, len(acct.subChan), "expected 1 message in subChan")
 
 	// Verify: submitPending flag should be set
-	assert.True(t, pe.submitPending(), "expected submitPending to be true")
+	assert.True(t, pe.submitPending(backendWormchain), "expected submitPending to be true")
 
 	// Verify: tmpMap still contains the entry because phase 2 never deletes from tmpMap.
 	// The contract returned null status (unknown), so the entry was resubmitted, but

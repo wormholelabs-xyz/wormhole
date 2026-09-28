@@ -155,11 +155,15 @@ func (acct *Accountant) audit(ctx context.Context) error {
 
 // runAudit is the entry point for the audit of the pending transfer map. It creates a temporary map of all pending transfers and invokes the main audit function.
 func (acct *Accountant) runAudit(ctx context.Context) {
-	if acct.baseEnabled() {
+	if acct.wormchainBaseEnabled() {
 		knownPendingTransferMap := acct.createAuditMap(false)
 		acct.logger.Debug("in AuditPendingTransfers: starting base audit", zap.Int("numPending", numPendingEntries(knownPendingTransferMap)))
 		acct.performAudit(ctx, knownPendingTransferMap, acct.wormchainConn, acct.contract)
 		acct.logger.Debug("in AuditPendingTransfers: finished base audit")
+	}
+
+	if acct.solanaEnabled() {
+		acct.runSolanaAudit(ctx, acct.solana)
 	}
 
 	if acct.nttEnabled() {
@@ -198,12 +202,12 @@ func (acct *Accountant) createAuditMap(isNTT bool) map[string][]*pendingEntry {
 			continue
 		}
 		if pe.isNTT == isNTT {
-			if pe.hasBeenPendingForTooLong() {
+			if pe.hasBeenPendingForTooLong(backendWormchain) {
 				auditErrors.Inc()
 				acct.logger.Error("transfer has been in the submit pending state for too long", zap.Stringer("lastUpdateTime", pe.updTime()))
 			}
 			key := pe.makeAuditKey()
-			acct.logger.Debug("will audit pending transfer", zap.String("msgId", pe.msgId), zap.String("moKey", key), zap.Bool("submitPending", pe.submitPending()), zap.Stringer("lastUpdateTime", pe.updTime()))
+			acct.logger.Debug("will audit pending transfer", zap.String("msgId", pe.msgId), zap.String("moKey", key), zap.Bool("submitPending", pe.submitPending(backendWormchain)), zap.Stringer("lastUpdateTime", pe.updTime()))
 			knownPendingTransferMap[key] = append(knownPendingTransferMap[key], pe)
 		}
 	}
@@ -212,10 +216,10 @@ func (acct *Accountant) createAuditMap(isNTT bool) map[string][]*pendingEntry {
 }
 
 // hasBeenPendingForTooLong determines if a transfer has been in the "submit pending" state for too long.
-func (pe *pendingEntry) hasBeenPendingForTooLong() bool {
+func (pe *pendingEntry) hasBeenPendingForTooLong(backend accountantBackend) bool {
 	pe.stateLock.Lock()
 	defer pe.stateLock.Unlock()
-	return pe.state.submitPending && time.Since(pe.state.updTime) > maxSubmitPendingTime
+	return pe.state.submitPending[backend] && time.Since(pe.state.updTime) > maxSubmitPendingTime
 }
 
 // performAudit audits the temporary map against the smart contract. It is meant to be run in a go routine. It takes a temporary map of all pending transfers
@@ -280,7 +284,7 @@ func (acct *Accountant) performAudit(ctx context.Context, knownPendingTransferMa
 					}
 
 					// We have it locally but haven't submitted successfully - resubmit
-					if acct.submitObservation(ctx, pe, true) {
+					if acct.submitObservation(ctx, pe, backendWormchain, true) {
 						auditErrors.Inc()
 						acct.logger.Error("contract reported we have not signed a pending transfer, resubmitting", zap.String("msgId", pe.msgId))
 					} else {
@@ -339,7 +343,7 @@ func (acct *Accountant) performAudit(ctx context.Context, knownPendingTransferMa
 		}
 		status, exists := transferDetails[pe.msgId]
 		if !exists {
-			if acct.submitObservation(ctx, pe, true) {
+			if acct.submitObservation(ctx, pe, backendWormchain, true) {
 				auditErrors.Inc()
 				acct.logger.Error("query did not return status for transfer, this should not happen, resubmitted it", zap.String("msgId", pe.msgId))
 			} else {
@@ -351,7 +355,7 @@ func (acct *Accountant) performAudit(ctx context.Context, knownPendingTransferMa
 
 		if status == nil {
 			// This is the case when the contract does not know about a transfer. Resubmit it.
-			if acct.submitObservation(ctx, pe, true) {
+			if acct.submitObservation(ctx, pe, backendWormchain, true) {
 				auditErrors.Inc()
 				acct.logger.Error("contract does not know about pending transfer, resubmitted it", zap.String("msgId", pe.msgId))
 			}
@@ -369,7 +373,7 @@ func (acct *Accountant) performAudit(ctx context.Context, knownPendingTransferMa
 			acct.logger.Debug("contract says transfer is still pending", zap.String("msgId", pe.msgId))
 		} else {
 			// This is the case when the contract does not know about a transfer. Resubmit it.
-			if acct.submitObservation(ctx, pe, true) {
+			if acct.submitObservation(ctx, pe, backendWormchain, true) {
 				auditErrors.Inc()
 				bytes, err := json.Marshal(*status)
 				if err != nil {
