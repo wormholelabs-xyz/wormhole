@@ -326,6 +326,12 @@ func (acct *Accountant) Start(ctx context.Context) error {
 		}
 	}
 
+	if acct.solanaNttEnabled() && acct.env != common.AccountantMock && acct.env != common.GoTest {
+		if err := supervisor.Run(ctx, "acctsolnttworker", common.WrapWithScissors(acct.solanaNttWorker, "acctsolnttworker")); err != nil {
+			return fmt.Errorf("failed to start solana NTT submit observation worker: %w", err)
+		}
+	}
+
 	// Start the audit worker if not mocking/testing and either Global or NTT accountant are enabled
 	if acct.env != common.AccountantMock && acct.env != common.GoTest && (acct.baseEnabled() || acct.nttEnabled()) {
 		if err := supervisor.Run(ctx, "acctaudit", common.WrapWithScissors(acct.audit, "acctaudit")); err != nil {

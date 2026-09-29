@@ -3,10 +3,16 @@ package accountant
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/common"
+	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	"github.com/certusone/wormhole/node/pkg/solacctconn"
+	ethCrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/gagliardetto/solana-go"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -163,6 +169,293 @@ func TestMalformedNttTransferLeavesNoEntry(t *testing.T) {
 			// Log-only emitters publish regardless. The devnet transceivers enforce.
 			assert.Equal(t, !acct.nttDirectEmitters[emitterKey{emitterChainId: msg.EmitterChain, emitterAddr: msg.EmitterAddress}], shouldPub)
 			assert.NotContains(t, acct.pendingTransfers, msg.MessageIDString())
+		})
+	}
+}
+
+// solanaNttFixture is one accountant with a Solana NTT backend and one pending NTT transfer.
+type solanaNttFixture struct {
+	acct    *Accountant
+	b       *solanaBackend
+	conn    *MockAccountantSolanaConn
+	obsvReq chan *gossipv1.ObservationRequest
+	msgChan chan *common.MessagePublication
+	msg     *common.MessagePublication
+	pe      *pendingEntry
+	fields  *solanaNttObservationFields
+	sub     *solanaSubmission
+
+	hub  solanaNttHub
+	peer vaa.Address
+}
+
+func newSolanaNttFixture(t *testing.T, ctx context.Context, relayed bool) *solanaNttFixture {
+	t.Helper()
+	obsvReq := make(chan *gossipv1.ObservationRequest, 10)
+	acct, conn, msgChan := newSolanaTestAccountantWithObsvReq(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true, solanaNtt: true}, obsvReq)
+	setSolanaConfirmPollInterval(t, 0)
+	acct.submitObservationBatchSize = 1
+	conn.Balance, conn.BalanceErr = 1_000_000, nil
+
+	msg := solanaTestNttTransfer(t, 88, relayed)
+	_, err := acct.SubmitObservation(msg)
+	require.NoError(t, err)
+	pe := acct.pendingTransfers[msg.MessageIDString()]
+	require.NotNil(t, pe)
+	require.NotNil(t, pe.solanaNttFields)
+
+	b := acct.solanaNtt
+	sub, err := b.deriveSolanaSubmission(0, msg, pe.solanaNttFields)
+	require.NoError(t, err)
+
+	conn.LatestBlockhash = solacctconn.Blockhash{Hash: solana.Hash{9}, LastValidBlockHeight: 1000}
+	conn.BlockHeight = 900
+	conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Confirmed: true}
+
+	return &solanaNttFixture{
+		acct: acct, b: b, conn: conn, obsvReq: obsvReq, msgChan: msgChan, msg: msg, pe: pe, fields: pe.solanaNttFields, sub: sub,
+		hub:  solanaNttHub{Chain: vaa.ChainIDSolana, Address: vaa.Address{0x7B}},
+		peer: vaa.Address{0x7A},
+	}
+}
+
+// transceiverHubAccount is a TransceiverHubLayout image.
+func transceiverHubAccount(chain vaa.ChainID, address vaa.Address, hub solanaNttHub) *solacctconn.OwnedAccount {
+	return &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: mustEncodeWire(&transceiverHubWire{
+		Tag:        transceiverHubTag,
+		Chain:      uint16(chain),
+		HubChain:   uint16(hub.Chain),
+		Address:    address,
+		HubAddress: hub.Address,
+	})}
+}
+
+// transceiverPeerAccount is a TransceiverPeerLayout image.
+func transceiverPeerAccount(chain vaa.ChainID, address vaa.Address, destChain vaa.ChainID, peer vaa.Address) *solacctconn.OwnedAccount {
+	return &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: mustEncodeWire(&transceiverPeerWire{
+		Tag:         transceiverPeerTag,
+		Chain:       uint16(chain),
+		DestChain:   uint16(destChain),
+		Address:     address,
+		PeerAddress: peer,
+	})}
+}
+
+// registerRoute seeds the sender's hub and its peer on the recipient chain.
+func (f *solanaNttFixture) registerRoute() {
+	f.conn.SetAccount(f.sub.nttRoute.hubPDA, transceiverHubAccount(f.fields.Chain, f.fields.Sender, f.hub))
+	f.conn.SetAccount(f.sub.nttRoute.peerSrcPDA, transceiverPeerAccount(f.fields.Chain, f.fields.Sender, f.fields.RecipientChain, f.peer))
+}
+
+func (f *solanaNttFixture) queue() {
+	f.pe.setSubmitPending(backendSolanaNTT, true)
+	f.b.subChan <- f.msg
+}
+
+func TestSolanaNttSubmitTransaction(t *testing.T) {
+	for _, relayed := range []bool{false, true} {
+		t.Run(map[bool]string{false: "direct", true: "relayed"}[relayed], func(t *testing.T) {
+			ctx := context.Background()
+			f := newSolanaNttFixture(t, ctx, relayed)
+			f.registerRoute()
+			f.queue()
+
+			require.NoError(t, f.acct.handleSolanaBatch(ctx, f.b))
+			require.Len(t, f.conn.SentTransactions, 1)
+			assert.False(t, f.pe.submitPending(backendSolanaNTT))
+
+			tx := f.conn.SentTransactions[0]
+			ix := tx.Message.Instructions[len(tx.Message.Instructions)-1]
+			program, err := tx.Message.Program(ix.ProgramIDIndex)
+			require.NoError(t, err)
+			require.Equal(t, f.b.program, program)
+
+			parsed, err := parseNttSubmitObservationsIxData(ix.Data)
+			require.NoError(t, err)
+			require.Equal(t, *f.fields, parsed.solanaNttObservationFields)
+			require.Equal(t, f.msg.TxID, parsed.TxID.Bytes())
+
+			digest, err := solanaObservationSigningDigest(NttSubmitObservationPrefix, parsed.TxID, &parsed.solanaNttObservationFields)
+			require.NoError(t, err)
+			pub, err := ethCrypto.SigToPub(digest.Bytes(), parsed.Signature[:])
+			require.NoError(t, err)
+			require.Equal(t, f.acct.guardianAddr, ethCrypto.PubkeyToAddress(*pub))
+
+			guardianSet, err := deriveGuardianSetPDA(f.b.coreBridge, 0)
+			require.NoError(t, err)
+			pending, err := derivePendingObservationsPDA(f.b.program, f.fields.Chain, f.fields.Emitter, f.fields.Sequence, 0, f.fields.contentDigest)
+			require.NoError(t, err)
+			bucket, err := deriveNoreplayBucketPDA(f.b.noreplay, f.b.authority, f.fields.Chain, f.fields.Emitter, f.fields.Sequence)
+			require.NoError(t, err)
+			source, err := deriveBalanceAccountPDA(f.b.program, f.fields.Chain, f.hub.Chain, f.hub.Address)
+			require.NoError(t, err)
+			dest, err := deriveBalanceAccountPDA(f.b.program, f.fields.RecipientChain, f.hub.Chain, f.hub.Address)
+			require.NoError(t, err)
+			relayer, err := deriveChainRegistrationPDA(f.b.program, f.fields.Chain)
+			require.NoError(t, err)
+			hubPDA, err := deriveTransceiverHubPDA(f.b.program, f.fields.Chain, f.fields.Sender)
+			require.NoError(t, err)
+			peerSrc, err := deriveTransceiverPeerPDA(f.b.program, f.fields.Chain, f.fields.Sender, f.fields.RecipientChain)
+			require.NoError(t, err)
+			peerDst, err := deriveTransceiverPeerPDA(f.b.program, f.fields.RecipientChain, f.peer, f.fields.Chain)
+			require.NoError(t, err)
+
+			// Account list of the NTT program's submit_observations.rs and README.
+			want := [nttSubmitObservationsAccountCount]struct {
+				key      solana.PublicKey
+				writable bool
+				signer   bool
+			}{
+				{f.b.feePayer.PublicKey(), true, true},
+				{pending, true, false},
+				{guardianSet, false, false},
+				{bucket, true, false},
+				{solana.SystemProgramID, false, false},
+				{f.b.noreplay, false, false},
+				{f.b.authority, false, false},
+				{source, true, false},
+				{dest, true, false},
+				{f.b.feePayer.PublicKey(), true, false},
+				{relayer, false, false},
+				{hubPDA, false, false},
+				{peerSrc, false, false},
+				{peerDst, false, false},
+			}
+			accounts, err := ix.ResolveInstructionAccounts(&tx.Message)
+			require.NoError(t, err)
+			require.Len(t, accounts, nttSubmitObservationsAccountCount)
+			for idx, w := range want {
+				assert.Equal(t, w.key, accounts[idx].PublicKey, "account %d", idx)
+				assert.Equal(t, w.writable, accounts[idx].IsWritable, "account %d writable", idx)
+				// The fee payer is also slot 9, so the message marks both slots as the signer.
+				if idx != 9 {
+					assert.Equal(t, w.signer, accounts[idx].IsSigner, "account %d signer", idx)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleSolanaNttBatchRoutes(t *testing.T) {
+	tests := []struct {
+		name         string
+		setup        func(t *testing.T, f *solanaNttFixture)
+		wantSent     int
+		wantFailures float64
+	}{
+		{name: "routable", setup: func(t *testing.T, f *solanaNttFixture) { f.registerRoute() }, wantSent: 1},
+		{
+			name: "absent hub is unroutable",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.registerRoute()
+				f.conn.SetAccount(f.sub.nttRoute.hubPDA, nil)
+			},
+			wantFailures: 1,
+		},
+		{
+			name: "absent source peer is unroutable",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.registerRoute()
+				f.conn.SetAccount(f.sub.nttRoute.peerSrcPDA, nil)
+			},
+			wantFailures: 1,
+		},
+		{
+			name: "hub with a peer tag is unroutable",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.registerRoute()
+				f.conn.SetAccount(f.sub.nttRoute.hubPDA, &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: mustEncodeWire(&transceiverHubWire{Tag: transceiverPeerTag, Chain: uint16(f.fields.Chain), HubChain: uint16(f.hub.Chain), Address: f.fields.Sender, HubAddress: f.hub.Address})})
+			},
+			wantFailures: 1,
+		},
+		{
+			name: "peer for another dest chain is unroutable",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.registerRoute()
+				f.conn.SetAccount(f.sub.nttRoute.peerSrcPDA, transceiverPeerAccount(f.fields.Chain, f.fields.Sender, f.fields.Chain, f.peer))
+			},
+			wantFailures: 1,
+		},
+		{
+			name: "route read failure abandons the batch",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.conn.GetOwnedAccountsErr = errors.New("rpc down")
+			},
+			wantFailures: 1,
+		},
+		{
+			name: "recorded payer race retries once",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.registerRoute()
+				f.conn.SendTransactionErr = customTxError(solanaErrPayerMismatch)
+			},
+			wantSent:     2,
+			wantFailures: 1,
+		},
+		{
+			name: "missing destination peer fails",
+			setup: func(t *testing.T, f *solanaNttFixture) {
+				f.registerRoute()
+				f.conn.SendTransactionErr = customTxError(solanaErrMissingDestinationPeer)
+			},
+			wantSent:     1,
+			wantFailures: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newSolanaNttFixture(t, ctx, false)
+			tt.setup(t, f)
+			f.queue()
+
+			failures := solanaSubmitFailures.WithLabelValues("ntt")
+			wttFailures := solanaSubmitFailures.WithLabelValues("wtt")
+			before, wttBefore := testutil.ToFloat64(failures), testutil.ToFloat64(wttFailures)
+			require.NoError(t, f.acct.handleSolanaBatch(ctx, f.b))
+			assert.Len(t, f.conn.SentTransactions, tt.wantSent)
+			assert.Equal(t, tt.wantFailures, testutil.ToFloat64(failures)-before)
+			assert.Equal(t, float64(0), testutil.ToFloat64(wttFailures)-wttBefore)
+			assert.Contains(t, f.acct.pendingTransfers, f.msg.MessageIDString())
+			assert.False(t, f.pe.submitPending(backendSolanaNTT))
+		})
+	}
+}
+
+func TestSolanaNttSubmissionRejectsTheOtherFamily(t *testing.T) {
+	ctx := context.Background()
+	f := newSolanaNttFixture(t, ctx, false)
+	wttFields := fixtureTransferFields(t)
+
+	_, err := f.b.deriveSolanaSubmission(0, f.msg, wttFields)
+	require.Error(t, err)
+	_, err = f.acct.solana.deriveSolanaSubmission(0, f.msg, f.fields)
+	require.Error(t, err)
+
+	// submitAccountMetas requires a resolved route.
+	_, err = f.b.submitAccountMetas(solanaGuardianIdentity{}, f.sub)
+	require.Error(t, err)
+}
+
+func TestClassifySolanaNttTxError(t *testing.T) {
+	tests := []struct {
+		name       string
+		code       uint32
+		wantReason string
+	}{
+		{name: "invalid instruction data", code: solanaErrInvalidInstructionData, wantReason: "the program rejected the instruction data"},
+		{name: "unregistered emitter", code: solanaErrUnregisteredEmitter, wantReason: "the emitter is not registered"},
+		{name: "malformed ntt message", code: solanaErrMalformedNttMessage, wantReason: "the program rejected the NTT message"},
+		{name: "missing hub", code: solanaErrMissingTransceiverHub, wantReason: "the sender has no transceiver hub"},
+		{name: "missing source peer", code: solanaErrMissingSourcePeer, wantReason: "the sender has no peer on the recipient chain"},
+		{name: "missing destination peer", code: solanaErrMissingDestinationPeer, wantReason: "the peer has no entry for the source chain"},
+		{name: "not cross-registered", code: solanaErrPeersNotCrossRegistered, wantReason: "the peers are not cross-registered"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			disposition, reason := classifySolanaTxError(customTxError(tt.code))
+			assert.Equal(t, solanaTxFailed, disposition)
+			assert.Equal(t, tt.wantReason, reason)
 		})
 	}
 }

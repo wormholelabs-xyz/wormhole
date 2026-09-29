@@ -34,8 +34,9 @@ const (
 	// Status polls before the audit takes over a round.
 	maxSolanaConfirmPolls = 300
 
-	// submit_observations.rs.
-	submitObservationsAccountCount = 11
+	// submit_observations.rs of each program.
+	submitObservationsAccountCount    = 11
+	nttSubmitObservationsAccountCount = 14
 )
 
 // solanaTxDisposition is what the worker does with one transaction result.
@@ -55,6 +56,16 @@ type solanaGuardianIdentity struct {
 	guardianSetPDA   solana.PublicKey // Core Bridge GuardianSet at guardianSetIndex
 }
 
+// solanaNttRoute is the NTT routing accounts of one observation, slots 11 to 13.
+type solanaNttRoute struct {
+	hubPDA     solana.PublicKey
+	peerSrcPDA solana.PublicKey
+	// Derived from the peer that peerSrcPDA names. resolveSolanaNttRoutes sets it with the
+	// hub balances.
+	peerDstPDA solana.PublicKey
+	resolved   bool
+}
+
 // solanaSubmission is one observation in flight.
 type solanaSubmission struct {
 	msgId  string
@@ -68,6 +79,8 @@ type solanaSubmission struct {
 	destBalance    solana.PublicKey
 	// Token Bridge ChainRegistration for WTT, relayer ChainRegistration for NTT.
 	chainRegistrationPDA solana.PublicKey
+	// Set for the NTT family only.
+	nttRoute *solanaNttRoute
 
 	// The payer recorded in the pending PDA, or the fee payer when the PDA is absent. The
 	// program checks it on the quorum-closing call.
@@ -89,6 +102,14 @@ func (acct *Accountant) solanaBaseWorker(ctx context.Context) error {
 		return errors.New("acctsolworker: the solana backend is not configured")
 	}
 	return acct.solanaWorker(ctx, acct.solana)
+}
+
+// solanaNttWorker is the entry point for the NTT Solana submission worker.
+func (acct *Accountant) solanaNttWorker(ctx context.Context) error {
+	if acct.solanaNtt == nil {
+		return errors.New("acctsolnttworker: the solana NTT backend is not configured")
+	}
+	return acct.solanaWorker(ctx, acct.solanaNtt)
 }
 
 // isNilSolanaRecord reports whether r is nil or a typed nil pointer.
@@ -157,7 +178,8 @@ func encodeSubmitObservationsIxData(guardianSetIndex uint32, guardianIndex uint8
 	})
 }
 
-// deriveSolanaSubmission resolves every account one observation touches.
+// deriveSolanaSubmission resolves every account one observation touches. An NTT
+// observation leaves its balances and slot 13 to resolveSolanaNttRoutes.
 func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *common.MessagePublication, record solanaObservationRecord) (*solanaSubmission, error) {
 	if isNilSolanaRecord(record) {
 		return nil, errors.New("solana submission: no observation fields")
@@ -203,6 +225,19 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 			return nil, fmt.Errorf("solana submission: a WTT record on the %s backend", b.family)
 		}
 		return b.deriveWTTBalances(sub, fields)
+	case *solanaNttObservationFields:
+		if b.family != solanaFamilyNTT {
+			return nil, fmt.Errorf("solana submission: an NTT record on the %s backend", b.family)
+		}
+		route := &solanaNttRoute{}
+		if route.hubPDA, err = deriveTransceiverHubPDA(b.program, fields.Chain, fields.Sender); err != nil {
+			return nil, err
+		}
+		if route.peerSrcPDA, err = deriveTransceiverPeerPDA(b.program, fields.Chain, fields.Sender, fields.RecipientChain); err != nil {
+			return nil, err
+		}
+		sub.nttRoute = route
+		return sub, nil
 	}
 	return nil, fmt.Errorf("solana submission: unknown observation record %T", record)
 }
@@ -307,6 +342,9 @@ func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend)
 	}
 
 	work := acct.deriveSolanaSubmissions(b, msgs, gs.Index)
+	if b.family == solanaFamilyNTT {
+		work = acct.resolveSolanaNttRoutes(ctx, b, work)
+	}
 	for round := 0; round < maxSolanaSubmitRounds && len(work) != 0; round++ {
 		work = acct.submitSolanaRound(ctx, b, guardian, work)
 	}
@@ -523,29 +561,18 @@ func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBacken
 	if err != nil {
 		return nil, err
 	}
-
-	// Order and writability match the account list in submit_observations.rs.
-	feePayer := b.feePayer.PublicKey()
-	accounts := [submitObservationsAccountCount]*solana.AccountMeta{
-		solana.NewAccountMeta(feePayer, true, true),
-		solana.NewAccountMeta(sub.pendingPDA, true, false),
-		solana.NewAccountMeta(guardian.guardianSetPDA, false, false),
-		solana.NewAccountMeta(sub.noreplayBucket, true, false),
-		solana.NewAccountMeta(solana.SystemProgramID, false, false),
-		solana.NewAccountMeta(b.noreplay, false, false),
-		solana.NewAccountMeta(b.authority, false, false),
-		solana.NewAccountMeta(sub.sourceBalance, true, false),
-		solana.NewAccountMeta(sub.destBalance, true, false),
-		solana.NewAccountMeta(sub.rentRecipient, true, false),
-		solana.NewAccountMeta(sub.chainRegistrationPDA, false, false),
+	accounts, err := b.submitAccountMetas(guardian, sub)
+	if err != nil {
+		return nil, err
 	}
+	feePayer := b.feePayer.PublicKey()
 
 	instructions := make([]solana.Instruction, 0, 3)
 	instructions = append(instructions, computebudget.NewSetComputeUnitLimitInstruction(solanaSubmitComputeUnitLimit).Build())
 	if b.priorityFee > 0 {
 		instructions = append(instructions, computebudget.NewSetComputeUnitPriceInstruction(b.priorityFee).Build())
 	}
-	instructions = append(instructions, solana.NewInstruction(b.program, accounts[:], data))
+	instructions = append(instructions, solana.NewInstruction(b.program, accounts, data))
 
 	tx, err := solana.NewTransaction(instructions, blockhash, solana.TransactionPayer(feePayer))
 	if err != nil {
@@ -560,6 +587,45 @@ func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBacken
 		return nil, fmt.Errorf("failed to sign the transaction: %w", err)
 	}
 	return tx, nil
+}
+
+// submitAccountMetas lists the submit_observations accounts of sub. Order and writability
+// match the account list in each program's submit_observations.rs. Slots 0 to 10 are shared.
+func (b *solanaBackend) submitAccountMetas(guardian solanaGuardianIdentity, sub *solanaSubmission) ([]*solana.AccountMeta, error) {
+	feePayer := b.feePayer.PublicKey()
+	shared := [submitObservationsAccountCount]*solana.AccountMeta{
+		solana.NewAccountMeta(feePayer, true, true),
+		solana.NewAccountMeta(sub.pendingPDA, true, false),
+		solana.NewAccountMeta(guardian.guardianSetPDA, false, false),
+		solana.NewAccountMeta(sub.noreplayBucket, true, false),
+		solana.NewAccountMeta(solana.SystemProgramID, false, false),
+		solana.NewAccountMeta(b.noreplay, false, false),
+		solana.NewAccountMeta(b.authority, false, false),
+		solana.NewAccountMeta(sub.sourceBalance, true, false),
+		solana.NewAccountMeta(sub.destBalance, true, false),
+		solana.NewAccountMeta(sub.rentRecipient, true, false),
+		solana.NewAccountMeta(sub.chainRegistrationPDA, false, false),
+	}
+
+	switch b.family {
+	case solanaFamilyWTT:
+		if sub.nttRoute != nil {
+			return nil, errors.New("solana submission: an NTT route on a WTT observation")
+		}
+		return shared[:], nil
+	case solanaFamilyNTT:
+		// SECURITY: an unresolved route has zero balance and slot 13 keys.
+		if sub.nttRoute == nil || !sub.nttRoute.resolved {
+			return nil, errors.New("solana submission: the NTT route is unresolved")
+		}
+		var metas [nttSubmitObservationsAccountCount]*solana.AccountMeta
+		copy(metas[:], shared[:])
+		metas[11] = solana.NewAccountMeta(sub.nttRoute.hubPDA, false, false)
+		metas[12] = solana.NewAccountMeta(sub.nttRoute.peerSrcPDA, false, false)
+		metas[13] = solana.NewAccountMeta(sub.nttRoute.peerDstPDA, false, false)
+		return metas[:], nil
+	}
+	return nil, fmt.Errorf("solana submission: unknown program family %s", b.family)
 }
 
 // confirmSolanaSubmissions polls signature statuses until every transaction resolves, the
@@ -726,6 +792,18 @@ func classifySolanaTxError(err error) (solanaTxDisposition, string) {
 			return solanaTxFailed, "the chain is not registered"
 		case solanaErrInvalidSignature:
 			return solanaTxFailed, "the program rejected the signature"
+		case solanaErrInvalidInstructionData:
+			return solanaTxFailed, "the program rejected the instruction data"
+		case solanaErrMalformedNttMessage:
+			return solanaTxFailed, "the program rejected the NTT message"
+		case solanaErrMissingTransceiverHub:
+			return solanaTxFailed, "the sender has no transceiver hub"
+		case solanaErrMissingSourcePeer:
+			return solanaTxFailed, "the sender has no peer on the recipient chain"
+		case solanaErrMissingDestinationPeer:
+			return solanaTxFailed, "the peer has no entry for the source chain"
+		case solanaErrPeersNotCrossRegistered:
+			return solanaTxFailed, "the peers are not cross-registered"
 		}
 		return solanaTxFailed, fmt.Sprintf("custom program error %d", txErr.CustomCode)
 	}
