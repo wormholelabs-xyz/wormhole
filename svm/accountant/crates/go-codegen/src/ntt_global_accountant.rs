@@ -4,7 +4,7 @@
 //! from `global_accountant`. This module asserts that the shared parts agree and emits the
 //! NTT-only layouts.
 
-use core::mem::{offset_of, size_of_val};
+use core::mem::{offset_of, size_of, size_of_val};
 
 use accountant_operational_core::accounts::{balance, chain_registration};
 use accountant_operational_core::hash::double_keccak256;
@@ -15,14 +15,20 @@ use accountant_test_harness::ntt::{hub_layout, peer_layout, NttInstruction, Obse
 use bytemuck::Zeroable;
 use global_accountant_definitions::{
     normalize_trimmed_amount, parse_delivery_instruction, parse_native_token_transfer,
-    GlobalAccountantError, Instruction, NttSubmitObservationsIxData, SubmitObservationsIxData,
-    TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, TxId,
-    VaaBodyHeader, NTT_SUBMIT_OBSERVATION_PREFIX, SIGNATURE_TX_ID_LEN, TRANSCEIVER_HUB_SEED_PREFIX,
+    GlobalAccountantError, Instruction, ManagerHead, NativeTokenTransfer,
+    NttSubmitObservationsIxData, SubmitObservationsIxData, TransceiverHead, TransceiverHubKey,
+    TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, TxId, VaaBodyHeader,
+    MAX_NTT_PAYLOAD_LEN, NATIVE_TOKEN_TRANSFER_PREFIX, NTT_SUBMIT_OBSERVATION_PREFIX,
+    SIGNATURE_TX_ID_LEN, TRANSCEIVER_HUB_SEED_PREFIX, TRANSCEIVER_MESSAGE_PREFIX,
     TRANSCEIVER_PEER_SEED_PREFIX,
 };
 use solana_pubkey::Pubkey;
 
 use crate::go::{field, n, Field, GoFile, GoType};
+use crate::GO_PACKAGE_DIR;
+
+/// The corpus file, relative to the Go package directory.
+const CORPUS_PATH: &str = "../../../svm/accountant/crates/test-fixtures/data/ntt_test_vectors.json";
 
 /// The program dispatches on one `u8` discriminator before the instruction data.
 const DISPATCH_LEN: usize = 1;
@@ -35,6 +41,21 @@ const GUARDIAN_SET_INDEX: u32 = 4;
 
 /// Fields and content digests exclude the tx id. Thus the real-data vectors use a zero tx id.
 const ZERO_TX_ID: TxId<'static> = TxId::Hash(&[0u8; 32]);
+
+/// Largest decimals `normalize_trimmed_amount` accepts. Amount 1 is the probe, so only the
+/// exponent limit decides.
+fn max_trimmed_decimals() -> u8 {
+    let max = (0..=u8::MAX)
+        .rev()
+        .find(|decimals| normalize_trimmed_amount(*decimals, 1).is_some())
+        .expect("some decimals normalize");
+    assert!(max < u8::MAX, "decimals are unbounded");
+    assert!(
+        normalize_trimmed_amount(max + 1, 1).is_none(),
+        "decimals past the largest are rejected"
+    );
+    max
+}
 
 pub(crate) fn layout_file() -> String {
     // SECURITY: the NTT instruction data shares its head with the WTT instruction data. The
@@ -282,6 +303,131 @@ pub(crate) fn layout_file() -> String {
         ],
     );
 
+    go.section("NTT transceiver message, ntt/transfer.rs.");
+    go.constants(&[
+        (
+            "MAX_NTT_PAYLOAD_LEN.",
+            "maxNttPayloadLen",
+            n(MAX_NTT_PAYLOAD_LEN),
+        ),
+        (
+            "TransceiverHead size.",
+            "nttTransceiverHeadLen",
+            n(size_of::<TransceiverHead>()),
+        ),
+        (
+            "ManagerHead size.",
+            "nttManagerHeadLen",
+            n(size_of::<ManagerHead>()),
+        ),
+        (
+            "NativeTokenTransfer size.",
+            "nttNativeTokenTransferLen",
+            n(size_of::<NativeTokenTransfer>()),
+        ),
+        (
+            "Size of a u16 length prefix.",
+            "nttLengthPrefixLen",
+            n(size_of::<u16>()),
+        ),
+        (
+            "Smallest transceiver message: empty additional and transceiver payloads.",
+            "nttMinTransferLen",
+            n(size_of::<TransceiverHead>()
+                + size_of::<ManagerHead>()
+                + size_of::<NativeTokenTransfer>()
+                + size_of::<u16>()),
+        ),
+        (
+            "Largest trimmed decimals normalize_trimmed_amount accepts.",
+            "maxNttTrimmedDecimals",
+            u64::from(max_trimmed_decimals()),
+        ),
+    ]);
+    go.byte_array(
+        "TRANSCEIVER_MESSAGE_PREFIX.",
+        "nttTransceiverMessagePrefix",
+        &TRANSCEIVER_MESSAGE_PREFIX,
+    );
+    go.byte_array(
+        "NATIVE_TOKEN_TRANSFER_PREFIX.",
+        "nttNativeTokenTransferPrefix",
+        &NATIVE_TOKEN_TRANSFER_PREFIX,
+    );
+    go.wire_struct(
+        "nttTransceiverHeadWire is TransceiverHead. The last field is the manager payload length.",
+        "nttTransceiverHeadWire",
+        "ntt transceiver head",
+        "nttTransceiverHeadLen",
+        size_of::<TransceiverHead>(),
+        0,
+        &[
+            field!(
+                TransceiverHead,
+                prefix,
+                "Prefix",
+                GoType::Bytes(TRANSCEIVER_MESSAGE_PREFIX.len())
+            ),
+            field!(
+                TransceiverHead,
+                source_ntt_manager,
+                "SourceNttManager",
+                GoType::Bytes(32)
+            ),
+            field!(
+                TransceiverHead,
+                recipient_ntt_manager,
+                "RecipientNttManager",
+                GoType::Bytes(32)
+            ),
+            field!(
+                TransceiverHead,
+                ntt_manager_payload_len,
+                "ManagerPayloadLen",
+                GoType::Be16
+            ),
+        ],
+    );
+    go.wire_struct(
+        "nttManagerHeadWire is ManagerHead. The last field is the transfer length.",
+        "nttManagerHeadWire",
+        "ntt manager head",
+        "nttManagerHeadLen",
+        size_of::<ManagerHead>(),
+        0,
+        &[
+            field!(ManagerHead, id, "ID", GoType::Bytes(32)),
+            field!(ManagerHead, sender, "Sender", GoType::Bytes(32)),
+            field!(ManagerHead, payload_len, "PayloadLen", GoType::Be16),
+        ],
+    );
+    go.wire_struct(
+        "nttNativeTokenTransferWire is NativeTokenTransfer, the fixed fields of the transfer.",
+        "nttNativeTokenTransferWire",
+        "ntt native token transfer",
+        "nttNativeTokenTransferLen",
+        size_of::<NativeTokenTransfer>(),
+        0,
+        &[
+            field!(
+                NativeTokenTransfer,
+                prefix,
+                "Prefix",
+                GoType::Bytes(NATIVE_TOKEN_TRANSFER_PREFIX.len())
+            ),
+            field!(NativeTokenTransfer, decimals, "Decimals", GoType::U8),
+            field!(NativeTokenTransfer, amount, "Amount", GoType::Be64),
+            field!(
+                NativeTokenTransfer,
+                source_token,
+                "SourceToken",
+                GoType::Bytes(32)
+            ),
+            field!(NativeTokenTransfer, to, "To", GoType::Bytes(32)),
+            field!(NativeTokenTransfer, to_chain, "ToChain", GoType::Be16),
+        ],
+    );
+
     go.section("PDA seed prefixes, constants/seeds.rs.");
     go.seeds(&[
         (
@@ -458,6 +604,16 @@ pub(crate) fn fixtures_file() -> String {
         .expect("a relayed row");
 
     let mut go = GoFile::new();
+
+    assert!(
+        std::path::Path::new(GO_PACKAGE_DIR)
+            .join(CORPUS_PATH)
+            .exists(),
+        "{CORPUS_PATH} does not exist"
+    );
+    go.section("The mainnet NTT corpus the program tests use.");
+    go.constant("", "fixtureNttCorpusPath", format!("\"{CORPUS_PATH}\""));
+    go.constant("", "fixtureNttCorpusVectors", corpus.vectors.len());
 
     go.section("Mainnet NTT transfer published directly by the transceiver.");
     let direct_obs = real_vectors(&mut go, "Direct", &corpus, direct);

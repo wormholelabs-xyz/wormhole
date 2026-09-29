@@ -104,6 +104,72 @@ func (transceiverPeerWire) wireLen() int { return transceiverPeerLen }
 
 func (transceiverPeerWire) wireName() string { return "transceiver peer account" }
 
+// NTT transceiver message, ntt/transfer.rs.
+
+// MAX_NTT_PAYLOAD_LEN.
+const maxNttPayloadLen = 2000
+
+// TransceiverHead size.
+const nttTransceiverHeadLen = 70
+
+// ManagerHead size.
+const nttManagerHeadLen = 66
+
+// NativeTokenTransfer size.
+const nttNativeTokenTransferLen = 79
+
+// Size of a u16 length prefix.
+const nttLengthPrefixLen = 2
+
+// Smallest transceiver message: empty additional and transceiver payloads.
+const nttMinTransferLen = 217
+
+// Largest trimmed decimals normalize_trimmed_amount accepts.
+const maxNttTrimmedDecimals = 85
+
+// TRANSCEIVER_MESSAGE_PREFIX.
+var nttTransceiverMessagePrefix = [4]byte{0x99, 0x45, 0xff, 0x10}
+
+// NATIVE_TOKEN_TRANSFER_PREFIX.
+var nttNativeTokenTransferPrefix = [4]byte{0x99, 0x4e, 0x54, 0x54}
+
+// nttTransceiverHeadWire is TransceiverHead. The last field is the manager payload length.
+type nttTransceiverHeadWire struct {
+	Prefix              [4]byte
+	SourceNttManager    [32]byte
+	RecipientNttManager [32]byte
+	ManagerPayloadLen   be16
+}
+
+func (nttTransceiverHeadWire) wireLen() int { return nttTransceiverHeadLen }
+
+func (nttTransceiverHeadWire) wireName() string { return "ntt transceiver head" }
+
+// nttManagerHeadWire is ManagerHead. The last field is the transfer length.
+type nttManagerHeadWire struct {
+	ID         [32]byte
+	Sender     [32]byte
+	PayloadLen be16
+}
+
+func (nttManagerHeadWire) wireLen() int { return nttManagerHeadLen }
+
+func (nttManagerHeadWire) wireName() string { return "ntt manager head" }
+
+// nttNativeTokenTransferWire is NativeTokenTransfer, the fixed fields of the transfer.
+type nttNativeTokenTransferWire struct {
+	Prefix      [4]byte
+	Decimals    uint8
+	Amount      be64
+	SourceToken [32]byte
+	To          [32]byte
+	ToChain     be16
+}
+
+func (nttNativeTokenTransferWire) wireLen() int { return nttNativeTokenTransferLen }
+
+func (nttNativeTokenTransferWire) wireName() string { return "ntt native token transfer" }
+
 // PDA seed prefixes, constants/seeds.rs.
 
 // TRANSCEIVER_HUB_SEED_PREFIX.

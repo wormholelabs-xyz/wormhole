@@ -8,7 +8,7 @@ mod go;
 mod ntt_global_accountant;
 
 /// Repository root is four levels above this crate.
-const GO_PACKAGE_DIR: &str = concat!(
+pub(crate) const GO_PACKAGE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../../../node/pkg/accountant"
 );

@@ -2,6 +2,12 @@
 
 package accountant
 
+// The mainnet NTT corpus the program tests use.
+
+const fixtureNttCorpusPath = "../../../svm/accountant/crates/test-fixtures/data/ntt_test_vectors.json"
+
+const fixtureNttCorpusVectors = 28
+
 // Mainnet NTT transfer published directly by the transceiver.
 
 const fixtureNttDirectBodyHex = "661fc306000000000001cf5f3614e2cd9b374558f35c7618b25f0d306d5e749b7d29cc030a1a156862380000000000000005209945ff10057f97be1c39478e57974f6cc9dbfbeebb0e5ce340c2efd52b8295e889a9ede4000000000000000000000000c072b1aef336edde59a049699ef4e8fa9d594a4800917637d514483ece71dcbfa8badb9c96094c4cfcf6f0216ee28a2f42708419672167947ef13a158cb9bfcabea018b3f8d2e55b2281a76362624273971dbafa1e99004f994e54540600000000000027106927fdc01ea906f96d7137874cdd7adad00ca35764619310e54196c781d84d5b00000000000000000000000049887a216375fded17dc1aaad4920c377726561400020000"

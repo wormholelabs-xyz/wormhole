@@ -581,14 +581,16 @@ func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, famil
 	return false
 }
 
-// newPendingEntry builds a pending transfer. While Solana is enabled, it decodes the VAA
-// digest of every entry and builds the Solana observation record of a Token Bridge entry.
+// newPendingEntry builds a pending transfer. While a Solana backend is enabled, it decodes
+// the VAA digest of every entry and builds the Solana observation record of each enabled
+// backend that accounts the entry.
 //
-// SECURITY: postcondition: while Solana is enabled, every entry has vaaDigest and a Token
-// Bridge entry has solanaFields. processCommittedDigest compares against both.
-// An error comes from the message itself and occurs only while Solana is enabled.
+// SECURITY: postcondition: while a Solana backend is enabled, every entry has vaaDigest.
+// While Solana WTT is enabled, a Token Bridge entry has solanaFields. While Solana NTT is
+// enabled, an NTT entry has solanaNttFields. processCommittedDigest compares against both.
+// An error comes from the message itself and occurs only while a Solana backend is enabled.
 func (acct *Accountant) newPendingEntry(msg *common.MessagePublication, msgId string, digest string, isNTT bool, enforceFlag bool) (*pendingEntry, error) {
-	if !acct.solanaEnabled() {
+	if len(acct.solanaBackends()) == 0 {
 		return &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}, nil
 	}
 
@@ -597,13 +599,20 @@ func (acct *Accountant) newPendingEntry(msg *common.MessagePublication, msgId st
 		return nil, err
 	}
 	pe := &pendingEntry{msg: msg, msgId: msgId, digest: digest, vaaDigest: vaaDigest, isNTT: isNTT, enforceFlag: enforceFlag}
+
 	if isNTT {
+		if acct.solanaNttEnabled() {
+			if pe.solanaNttFields, err = acct.solanaNttObservationFieldsFromMessage(msg, vaaDigest); err != nil {
+				return nil, err
+			}
+		}
 		return pe, nil
 	}
 
-	pe.solanaFields, err = solanaObservationFieldsFromPayload(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, msg.Payload, vaaDigest)
-	if err != nil {
-		return nil, err
+	if acct.solanaEnabled() {
+		if pe.solanaFields, err = solanaObservationFieldsFromPayload(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, msg.Payload, vaaDigest); err != nil {
+			return nil, err
+		}
 	}
 	return pe, nil
 }
