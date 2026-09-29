@@ -15,7 +15,7 @@ use accountant_test_harness::ntt::{hub_layout, peer_layout, NttInstruction, Obse
 use bytemuck::Zeroable;
 use global_accountant_definitions::{
     normalize_trimmed_amount, parse_delivery_instruction, parse_native_token_transfer,
-    GlobalAccountantError, Instruction, ManagerHead, NativeTokenTransfer,
+    BalanceAccountLayout, GlobalAccountantError, Instruction, ManagerHead, NativeTokenTransfer,
     NttSubmitObservationsIxData, SubmitObservationsIxData, TransceiverHead, TransceiverHubKey,
     TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, TxId, VaaBodyHeader,
     MAX_NTT_PAYLOAD_LEN, NATIVE_TOKEN_TRANSFER_PREFIX, NTT_SUBMIT_OBSERVATION_PREFIX,
@@ -614,6 +614,40 @@ pub(crate) fn fixtures_file() -> String {
     go.section("The mainnet NTT corpus the program tests use.");
     go.constant("", "fixtureNttCorpusPath", format!("\"{CORPUS_PATH}\""));
     go.constant("", "fixtureNttCorpusVectors", corpus.vectors.len());
+
+    go.section("BalanceAccountLayout, state.rs.");
+    go.constants(&[
+        (
+            "BalanceAccountLayout::LEN.",
+            "balanceAccountLen",
+            n(BalanceAccountLayout::LEN),
+        ),
+        (
+            "BalanceAccountLayout::TAG.",
+            "balanceAccountTag",
+            u64::from(BalanceAccountLayout::TAG),
+        ),
+    ]);
+    go.wire_struct(
+        "balanceAccountWire is BalanceAccountLayout. Balance is a big-endian Uint256.",
+        "balanceAccountWire",
+        "balance account",
+        "balanceAccountLen",
+        BalanceAccountLayout::LEN,
+        0,
+        &[
+            field!(BalanceAccountLayout, tag, "Tag", GoType::U8),
+            field!(BalanceAccountLayout, chain, "Chain", GoType::U16),
+            field!(BalanceAccountLayout, token_chain, "TokenChain", GoType::U16),
+            field!(
+                BalanceAccountLayout,
+                token_address,
+                "TokenAddress",
+                GoType::Bytes(32)
+            ),
+            field!(BalanceAccountLayout, balance, "Balance", GoType::Bytes(32)),
+        ],
+    );
 
     go.section("Mainnet NTT transfer published directly by the transceiver.");
     let direct_obs = real_vectors(&mut go, "Direct", &corpus, direct);

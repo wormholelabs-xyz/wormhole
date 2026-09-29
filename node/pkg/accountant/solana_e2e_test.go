@@ -71,14 +71,15 @@ func (c *subscriptionSignalingConn) SubscribeLogs(ctx context.Context, program s
 }
 
 // trackSolanaCounters returns an assertion on the confirmed submissions and applied
-// commits since the call.
-func trackSolanaCounters(t *testing.T) func(wantSubmitted float64, wantApproved float64) {
-	submitted := testutil.ToFloat64(solanaTransfersSubmitted.WithLabelValues("wtt"))
-	approved := testutil.ToFloat64(solanaTransfersApproved.WithLabelValues("wtt"))
+// commits of one program family since the call.
+func trackSolanaCounters(t *testing.T, family solanaProgramFamily) func(wantSubmitted float64, wantApproved float64) {
+	label := family.String()
+	submitted := testutil.ToFloat64(solanaTransfersSubmitted.WithLabelValues(label))
+	approved := testutil.ToFloat64(solanaTransfersApproved.WithLabelValues(label))
 	return func(wantSubmitted float64, wantApproved float64) {
 		t.Helper()
-		require.Equal(t, wantSubmitted, testutil.ToFloat64(solanaTransfersSubmitted.WithLabelValues("wtt"))-submitted, "confirmed submissions")
-		require.Equal(t, wantApproved, testutil.ToFloat64(solanaTransfersApproved.WithLabelValues("wtt"))-approved, "applied commits")
+		require.Equal(t, wantSubmitted, testutil.ToFloat64(solanaTransfersSubmitted.WithLabelValues(label))-submitted, "confirmed submissions")
+		require.Equal(t, wantApproved, testutil.ToFloat64(solanaTransfersApproved.WithLabelValues(label))-approved, "applied commits")
 	}
 }
 
@@ -182,7 +183,7 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 	}
 
 	t.Run("the worker submits and the watcher releases the transfer", func(t *testing.T) {
-		requireCounterDeltas := trackSolanaCounters(t)
+		requireCounterDeltas := trackSolanaCounters(t, solanaFamilyWTT)
 
 		canPublish, err := acct.SubmitObservation(msg)
 		require.NoError(t, err)
@@ -193,7 +194,7 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 	})
 
 	t.Run("the audit resolves the commit from the closed pending account", func(t *testing.T) {
-		requireCounterDeltas := trackSolanaCounters(t)
+		requireCounterDeltas := trackSolanaCounters(t, solanaFamilyWTT)
 
 		// The transfer is accounted and its pending account is closed. Thus the audit must
 		// resolve the digest from the signatures of the closed account.
