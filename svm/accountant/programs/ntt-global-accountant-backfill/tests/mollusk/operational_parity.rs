@@ -21,7 +21,8 @@ use solana_instruction::{AccountMeta, Instruction as SolanaInstruction};
 use solana_pubkey::Pubkey;
 
 use crate::common::*;
-use crate::ntt_ix::{direct_body, peer_payload, register_peer_ix_data, submit_vaas_ix_data};
+use crate::ntt_ix::{peer_payload, register_peer_ix_data, submit_vaas_ix_data};
+use accountant_test_harness::ntt::direct_body;
 
 /// The NTT operational program's `.so` under `SBF_OUT_DIR`, at the shared program id.
 const OPERATIONAL_PROGRAM_NAME: &str = "ntt_global_accountant";

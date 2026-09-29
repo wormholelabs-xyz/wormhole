@@ -8,6 +8,7 @@ pub mod ids;
 pub mod ix;
 pub mod scenarios;
 
+pub use accountant_test_harness::ntt::*;
 pub use accounts::*;
 pub use actors::*;
 pub use ids::*;

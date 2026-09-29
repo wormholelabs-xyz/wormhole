@@ -11,6 +11,7 @@ pub mod guardians;
 pub mod ids;
 pub mod ix;
 pub mod mollusk;
+pub mod ntt;
 pub mod scenario;
 pub mod surfpool;
 pub mod upgrade_e2e;

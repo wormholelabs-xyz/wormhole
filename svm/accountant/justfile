@@ -139,7 +139,7 @@ test: build-devnet
 # A bare `cargo test` fails to compile, because the `env!` addresses need values.
 # The recipe supplies them. `just test` checks the written files.
 
-[doc("Write the Go layout constants and fixtures of node/pkg/accountant from the WTT accountant.")]
+[doc("Write the Go layout constants and fixtures of node/pkg/accountant from the WTT and NTT accountants.")]
 go-codegen:
     {{test_env}} cargo run -p accountant-go-codegen --locked
 

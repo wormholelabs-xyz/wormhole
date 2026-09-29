@@ -5,6 +5,7 @@
 
 mod global_accountant;
 mod go;
+mod ntt_global_accountant;
 
 /// Repository root is four levels above this crate.
 const GO_PACKAGE_DIR: &str = concat!(
@@ -13,12 +14,16 @@ const GO_PACKAGE_DIR: &str = concat!(
 );
 const LAYOUT_FILE: &str = "solana_layout_gen.go";
 const FIXTURES_FILE: &str = "solana_layout_fixtures_gen_test.go";
+const NTT_LAYOUT_FILE: &str = "solana_ntt_layout_gen.go";
+const NTT_FIXTURES_FILE: &str = "solana_ntt_layout_fixtures_gen_test.go";
 
 /// `(file name, contents)` of every generated file.
-fn files() -> [(&'static str, String); 2] {
+fn files() -> [(&'static str, String); 4] {
     [
         (LAYOUT_FILE, global_accountant::layout_file()),
         (FIXTURES_FILE, global_accountant::fixtures_file()),
+        (NTT_LAYOUT_FILE, ntt_global_accountant::layout_file()),
+        (NTT_FIXTURES_FILE, ntt_global_accountant::fixtures_file()),
     ]
 }
 
