@@ -145,6 +145,7 @@ var (
 	accountantSolanaRPC              *string
 	accountantSolanaWS               *string
 	accountantSolanaContract         *string
+	accountantSolanaNttContract      *string
 	accountantSolanaNoreplayContract *string
 	accountantSolanaKeyPath          *string
 	accountantSolanaPriorityFee      *uint64
@@ -426,12 +427,13 @@ func init() {
 	accountantNttKeyPath = NodeCmd.Flags().String("accountantNttKeyPath", "", "path to NTT accountant private key for signing transactions")
 	accountantNttKeyPassPhrase = NodeCmd.Flags().String("accountantNttKeyPassPhrase", "", "pass phrase used to unarmor the NTT accountant key file")
 
-	accountantSolanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "accountantSolanaRPC", "RPC URL of the cluster hosting the Solana WTT accountant program", "http://solana-devnet:8899", []string{"http", "https"})
-	accountantSolanaWS = node.RegisterFlagWithValidationOrFail(NodeCmd, "accountantSolanaWS", "Websocket URL of the cluster hosting the Solana WTT accountant program", "ws://solana-devnet:8900", []string{"ws", "wss"})
+	accountantSolanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "accountantSolanaRPC", "RPC URL of the cluster hosting the Solana WTT and NTT accountant programs", "http://solana-devnet:8899", []string{"http", "https"})
+	accountantSolanaWS = node.RegisterFlagWithValidationOrFail(NodeCmd, "accountantSolanaWS", "Websocket URL of the cluster hosting the Solana WTT and NTT accountant programs", "ws://solana-devnet:8900", []string{"ws", "wss"})
 	accountantSolanaContract = NodeCmd.Flags().String("accountantSolanaContract", "", "Address of the Solana WTT accountant program")
-	accountantSolanaNoreplayContract = NodeCmd.Flags().String("accountantSolanaNoreplayContract", "", "Address of the NoReplay program the Solana WTT accountant uses")
-	accountantSolanaKeyPath = NodeCmd.Flags().String("accountantSolanaKeyPath", "", "path to the solana-keygen JSON keypair that pays Solana WTT accountant fees")
-	accountantSolanaPriorityFee = NodeCmd.Flags().Uint64("accountantSolanaPriorityFee", 0, "priority fee in micro-lamports per compute unit for Solana WTT accountant transactions")
+	accountantSolanaNttContract = NodeCmd.Flags().String("accountantSolanaNttContract", "", "Address of the Solana NTT accountant program")
+	accountantSolanaNoreplayContract = NodeCmd.Flags().String("accountantSolanaNoreplayContract", "", "Address of the NoReplay program the Solana WTT and NTT accountants use")
+	accountantSolanaKeyPath = NodeCmd.Flags().String("accountantSolanaKeyPath", "", "path to the solana-keygen JSON keypair that pays Solana WTT and NTT accountant fees")
+	accountantSolanaPriorityFee = NodeCmd.Flags().Uint64("accountantSolanaPriorityFee", 0, "priority fee in micro-lamports per compute unit for Solana WTT and NTT accountant transactions")
 
 	aptosRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "aptosRPC", "Aptos RPC URL", "http://aptos:8080", []string{"http", "https"})
 	aptosAccount = NodeCmd.Flags().String("aptosAccount", "", "aptos account")
@@ -1270,24 +1272,21 @@ func runNode(cmd *cobra.Command, args []string) {
 	}
 
 	var accountantSolanaCfg accountant.AccountantSolanaConfig
-	if !argsConsistent([]string{*accountantSolanaContract, *accountantSolanaNoreplayContract, *accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaKeyPath}) {
-		logger.Fatal("--accountantSolanaContract, --accountantSolanaNoreplayContract, --accountantSolanaRPC, --accountantSolanaWS and --accountantSolanaKeyPath must all be set or all be unset", zap.String("component", "gacct"))
+	if err := checkAccountantSolanaFlagPresence(*accountantSolanaContract, *accountantSolanaNttContract, *accountantSolanaNoreplayContract, *accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaKeyPath, *accountantSolanaPriorityFee); err != nil {
+		logger.Fatal("invalid solana accountant flags", zap.Error(err), zap.String("component", "gacct"))
 	}
-	if *accountantSolanaContract == "" && *accountantSolanaPriorityFee != 0 {
-		logger.Fatal("--accountantSolanaPriorityFee may only be specified if --accountantSolanaContract is specified", zap.String("component", "gacct"))
-	}
-	if *accountantSolanaContract != "" {
+	if *accountantSolanaContract != "" || *accountantSolanaNttContract != "" {
 		if *solanaContract == "" {
-			logger.Fatal("if accountantSolanaContract is specified, solanaContract is required as the Core Bridge program id", zap.String("component", "gacct"))
+			logger.Fatal("if accountantSolanaContract or accountantSolanaNttContract is specified, solanaContract is required as the Core Bridge program id", zap.String("component", "gacct"))
 		}
 
 		if err := checkAccountantSolanaConnFlags(*accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaPriorityFee); err != nil {
-			logger.Fatal("invalid solana WTT accountant flag", zap.Error(err), zap.String("component", "gacct"))
+			logger.Fatal("invalid solana accountant flag", zap.Error(err), zap.String("component", "gacct"))
 		}
 
-		programIDs, err := parseAccountantSolanaProgramIDs(*accountantSolanaContract, *accountantSolanaNoreplayContract, *solanaContract)
+		programIDs, err := parseAccountantSolanaProgramIDs(*accountantSolanaContract, *accountantSolanaNttContract, *accountantSolanaNoreplayContract, *solanaContract)
 		if err != nil {
-			logger.Fatal("invalid solana WTT accountant program id", zap.Error(err), zap.String("component", "gacct"))
+			logger.Fatal("invalid solana accountant program id", zap.Error(err), zap.String("component", "gacct"))
 		}
 
 		keyPathName := *accountantSolanaKeyPath
@@ -1301,13 +1300,14 @@ func runNode(cmd *cobra.Command, args []string) {
 
 		feePayer, err := solacctconn.LoadFeePayer(keyPathName)
 		if err != nil {
-			logger.Fatal("failed to load the solana WTT accountant fee payer key", zap.Error(err), zap.String("component", "gacct"))
+			logger.Fatal("failed to load the solana accountant fee payer key", zap.Error(err), zap.String("component", "gacct"))
 		}
 
-		logger.Info("Connecting to solana for WTT accountant",
+		logger.Info("Connecting to solana for the accountant",
 			zap.String("accountantSolanaRPC", *accountantSolanaRPC),
 			zap.String("keyPath", keyPathName),
 			zap.Stringer("program", programIDs.program),
+			zap.Stringer("nttProgram", programIDs.nttProgram),
 			zap.Stringer("noreplay", programIDs.noreplay),
 			zap.Stringer("coreBridge", programIDs.coreBridge),
 			zap.Stringer("feePayer", feePayer.PublicKey()),
@@ -1315,11 +1315,12 @@ func runNode(cmd *cobra.Command, args []string) {
 		)
 		solanaConn, err := solacctconn.NewConn(*accountantSolanaRPC, *accountantSolanaWS)
 		if err != nil {
-			logger.Fatal("failed to create the solana WTT accountant connection", zap.Error(err), zap.String("component", "gacct"))
+			logger.Fatal("failed to create the solana accountant connection", zap.Error(err), zap.String("component", "gacct"))
 		}
 		accountantSolanaCfg = accountant.AccountantSolanaConfig{
 			Conn:        solanaConn,
 			Program:     programIDs.program,
+			NttProgram:  programIDs.nttProgram,
 			Noreplay:    programIDs.noreplay,
 			CoreBridge:  programIDs.coreBridge,
 			FeePayer:    feePayer,
