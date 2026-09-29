@@ -81,6 +81,69 @@ func TestNttObservationFieldsPackAndDigest(t *testing.T) {
 	}
 }
 
+func TestNttObservationSigningDigest(t *testing.T) {
+	fields := fixtureNttRelayedFields(t)
+	hashTxID, err := newSolanaTxID(mustHexDecode(t, fixtureNttHashTxIDHex))
+	require.NoError(t, err)
+	signatureTxID, err := newSolanaTxID(mustHexDecode(t, fixtureNttSignatureTxIDHex))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name   string
+		prefix []byte
+		txID   solanaTxID
+		want   string
+		wantEq bool
+	}{
+		{name: "32-byte tx id", prefix: NttSubmitObservationPrefix, txID: hashTxID, want: fixtureNttHashTxIDSigningDigestHex, wantEq: true},
+		{name: "64-byte tx id", prefix: NttSubmitObservationPrefix, txID: signatureTxID, want: fixtureNttSignatureTxIDSigningDigestHex, wantEq: true},
+		{name: "wtt prefix", prefix: SubmitObservationPrefix, txID: hashTxID, want: fixtureNttHashTxIDSigningDigestHex},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := solanaObservationSigningDigest(tt.prefix, tt.txID, &fields)
+			require.NoError(t, err)
+			if tt.wantEq {
+				require.Equal(t, mustHexDecode32(t, tt.want), [32]byte(got))
+			} else {
+				require.NotEqual(t, mustHexDecode32(t, tt.want), [32]byte(got))
+			}
+		})
+	}
+}
+
+func TestEncodeNttSubmitObservationsIxData(t *testing.T) {
+	fields := fixtureNttRelayedFields(t)
+	var signature [submitSignatureLen]byte
+	for i := range signature {
+		signature[i] = byte(i)
+	}
+	tests := []struct {
+		name string
+		txID string
+		want string
+	}{
+		{name: "32-byte tx id", txID: fixtureNttHashTxIDHex, want: fixtureNttHashTxIDIxDataHex},
+		{name: "64-byte tx id", txID: fixtureNttSignatureTxIDHex, want: fixtureNttSignatureTxIDIxDataHex},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			txID, err := newSolanaTxID(mustHexDecode(t, tt.txID))
+			require.NoError(t, err)
+			got, err := encodeSubmitObservationsIxData(fixtureNttGuardianSetIndex, fixtureNttGuardianIndex, signature[:], txID, &fields)
+			require.NoError(t, err)
+			require.Equal(t, mustHexDecode(t, tt.want), got)
+			require.Len(t, got, nttSubmitObservationsInstructionLen)
+		})
+	}
+
+	var nilFields *solanaNttObservationFields
+	txID, err := newSolanaTxID(mustHexDecode(t, fixtureNttHashTxIDHex))
+	require.NoError(t, err)
+	_, err = encodeSubmitObservationsIxData(0, 0, signature[:], txID, nilFields)
+	require.Error(t, err)
+}
+
 func TestParseNttSubmitObservationsIxData(t *testing.T) {
 	hashData := mustHexDecode(t, fixtureNttHashTxIDIxDataHex)
 	require.Len(t, hashData, nttSubmitObservationsInstructionLen)

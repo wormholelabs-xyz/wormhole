@@ -171,7 +171,7 @@ func (acct *Accountant) runAudit(ctx context.Context) {
 		acct.runSolanaAudit(ctx, acct.solana)
 	}
 
-	if acct.nttEnabled() {
+	if acct.wormchainNttEnabled() {
 		knownPendingNttTransferMap := acct.createAuditMap(true)
 		acct.logger.Debug("in AuditPendingTransfers: starting ntt audit", zap.Int("numPending", numPendingEntries(knownPendingNttTransferMap)))
 		acct.performAudit(ctx, knownPendingNttTransferMap, acct.nttWormchainConn, acct.nttContract)

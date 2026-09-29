@@ -51,11 +51,14 @@ func (d *fakeAccountantDB) AcctGetData(logger *zap.Logger) ([]*common.MessagePub
 
 type solanaTestOpts struct {
 	wormchainContract string
+	nttContract       string
 	enforce           bool
 	disableSolana     bool
 	// solanaConfig replaces the complete test config when set.
 	solanaConfig *AccountantSolanaConfig
-	db           guardianDB.AccountantDB
+	// solanaNtt enables the Solana NTT program beside the WTT one.
+	solanaNtt bool
+	db        guardianDB.AccountantDB
 }
 
 // newSolanaTestAccountant builds a started accountant in the GoTest environment. The test
@@ -98,6 +101,9 @@ func newUnstartedSolanaTestAccountant(t *testing.T, ctx context.Context, opts so
 		CoreBridge: solanaTestCoreBridge(),
 		FeePayer:   solanaTestFeePayer(t),
 	}
+	if opts.solanaNtt {
+		cfg.NttProgram = solanaTestNttProgram()
+	}
 	switch {
 	case opts.disableSolana:
 		cfg = AccountantSolanaConfig{}
@@ -115,7 +121,7 @@ func newUnstartedSolanaTestAccountant(t *testing.T, ctx context.Context, opts so
 		"none",
 		nil,
 		opts.enforce,
-		"",
+		opts.nttContract,
 		nil,
 		cfg,
 		guardianSigner,
@@ -153,7 +159,15 @@ func solanaTestTransfer(t *testing.T, sequence uint64) *common.MessagePublicatio
 	}
 }
 
-func TestNewSolanaBackend(t *testing.T) {
+func solanaTestNttProgram() solana.PublicKey {
+	var pk [32]byte
+	for i := range pk {
+		pk[i] = 0x44
+	}
+	return pk
+}
+
+func TestNewSolanaBackends(t *testing.T) {
 	conn := NewMockAccountantSolanaConn()
 	feePayer := solanaTestFeePayer(t)
 	full := AccountantSolanaConfig{Conn: conn, Program: solanaTestProgram(), Noreplay: solanaTestNoreplay(), CoreBridge: solanaTestCoreBridge(), FeePayer: feePayer, PriorityFee: 7}
@@ -166,38 +180,70 @@ func TestNewSolanaBackend(t *testing.T) {
 	tests := []struct {
 		name    string
 		cfg     AccountantSolanaConfig
-		wantNil bool
+		wantWTT bool
+		wantNTT bool
 		wantErr bool
 	}{
-		{name: "zero config disables", cfg: AccountantSolanaConfig{}, wantNil: true},
+		{name: "zero config disables", cfg: AccountantSolanaConfig{}},
 		{name: "conn without program", cfg: AccountantSolanaConfig{Conn: conn}, wantErr: true},
 		{name: "program without conn", cfg: AccountantSolanaConfig{Program: solanaTestProgram()}, wantErr: true},
+		{name: "ntt program without conn", cfg: AccountantSolanaConfig{NttProgram: solanaTestNttProgram()}, wantErr: true},
+		{name: "neither program", cfg: with(func(c *AccountantSolanaConfig) { c.Program = solana.PublicKey{} }), wantErr: true},
 		{name: "missing noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.Noreplay = solana.PublicKey{} }), wantErr: true},
 		{name: "missing core bridge", cfg: with(func(c *AccountantSolanaConfig) { c.CoreBridge = solana.PublicKey{} }), wantErr: true},
 		{name: "missing fee payer", cfg: with(func(c *AccountantSolanaConfig) { c.FeePayer = nil }), wantErr: true},
 		{name: "program equals noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.Noreplay = solanaTestProgram() }), wantErr: true},
 		{name: "core bridge equals program", cfg: with(func(c *AccountantSolanaConfig) { c.CoreBridge = solanaTestProgram() }), wantErr: true},
 		{name: "core bridge equals noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.CoreBridge = solanaTestNoreplay() }), wantErr: true},
-		{name: "complete config", cfg: full},
+		{name: "ntt program equals program", cfg: with(func(c *AccountantSolanaConfig) { c.NttProgram = solanaTestProgram() }), wantErr: true},
+		{name: "ntt program equals noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.NttProgram = solanaTestNoreplay() }), wantErr: true},
+		{name: "ntt program equals core bridge", cfg: with(func(c *AccountantSolanaConfig) { c.NttProgram = solanaTestCoreBridge() }), wantErr: true},
+		{name: "wtt only", cfg: full, wantWTT: true},
+		{name: "ntt only", cfg: with(func(c *AccountantSolanaConfig) { c.Program = solana.PublicKey{}; c.NttProgram = solanaTestNttProgram() }), wantNTT: true},
+		{name: "both programs", cfg: with(func(c *AccountantSolanaConfig) { c.NttProgram = solanaTestNttProgram() }), wantWTT: true, wantNTT: true},
+	}
+
+	check := func(t *testing.T, b *solanaBackend, family solanaProgramFamily, program solana.PublicKey, backend accountantBackend, prefix []byte, tag string) {
+		t.Helper()
+		require.NotNil(t, b)
+		assert.Equal(t, family, b.family)
+		assert.Equal(t, backend, b.backend)
+		assert.Equal(t, program, b.program)
+		assert.Equal(t, solanaTestNoreplay(), b.noreplay)
+		assert.Equal(t, solanaTestCoreBridge(), b.coreBridge)
+		assert.Equal(t, prefix, b.prefix)
+		assert.Equal(t, tag, b.tag)
+		assert.Equal(t, uint64(7), b.priorityFee)
+		wantAuthority, err := deriveNoreplayAuthorityPDA(program)
+		require.NoError(t, err)
+		assert.Equal(t, wantAuthority, b.authority)
+		assert.Equal(t, subChanSize, cap(b.subChan))
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b, err := newSolanaBackend(tt.cfg)
+			wtt, ntt, err := newSolanaBackends(tt.cfg)
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Nil(t, b)
+				assert.Nil(t, wtt)
+				assert.Nil(t, ntt)
 				return
 			}
 			require.NoError(t, err)
-			if tt.wantNil {
-				assert.Nil(t, b)
-				return
+			if tt.wantWTT {
+				check(t, wtt, solanaFamilyWTT, solanaTestProgram(), backendSolana, SubmitObservationPrefix, "solana-accountant")
+			} else {
+				assert.Nil(t, wtt)
 			}
-			require.NotNil(t, b)
-			wantAuthority, err := deriveNoreplayAuthorityPDA(solanaTestProgram())
-			require.NoError(t, err)
-			assert.Equal(t, wantAuthority, b.authority)
+			if tt.wantNTT {
+				check(t, ntt, solanaFamilyNTT, solanaTestNttProgram(), backendSolanaNTT, NttSubmitObservationPrefix, "solana-ntt-accountant")
+			} else {
+				assert.Nil(t, ntt)
+			}
+			if tt.wantWTT && tt.wantNTT {
+				assert.Same(t, wtt.conn, ntt.conn)
+				assert.Equal(t, wtt.feePayer, ntt.feePayer)
+			}
 		})
 	}
 }
@@ -223,6 +269,9 @@ func TestFeatureString(t *testing.T) {
 		{name: "wormchain log only", acct: &Accountant{}, want: "acct-logonly"},
 		{name: "solana enforcing", acct: &Accountant{enforceFlag: true, solana: backend}, want: "acct:sol-acct"},
 		{name: "solana log only", acct: &Accountant{solana: backend}, want: "acct-logonly:sol-acct-logonly"},
+		{name: "solana ntt enforcing", acct: &Accountant{enforceFlag: true, solanaNtt: backend}, want: "acct:sol-ntt-acct"},
+		{name: "solana ntt log only", acct: &Accountant{solanaNtt: backend}, want: "acct-logonly:sol-ntt-acct-logonly"},
+		{name: "all four", acct: &Accountant{enforceFlag: true, nttContract: "x", solana: backend, solanaNtt: backend}, want: "acct:ntt-acct:sol-acct:sol-ntt-acct"},
 	}
 
 	for _, tt := range tests {
@@ -238,21 +287,28 @@ func TestSubmitObservationFanOut(t *testing.T) {
 	tests := []struct {
 		name          string
 		wormchain     string
+		nttContract   string
+		solanaNtt     bool
 		disableSolana bool
 		isNTT         bool
 		wantWormchain int
 		wantSolana    int
 		wantNtt       int
+		wantSolanaNtt int
 	}{
 		{name: "wormchain only", wormchain: "0xdeadbeef", disableSolana: true, wantWormchain: 1},
 		{name: "solana only", wormchain: "", wantSolana: 1},
 		{name: "both backends", wormchain: "0xdeadbeef", wantWormchain: 1, wantSolana: 1},
-		{name: "ntt entry stays on the ntt channel", wormchain: "0xdeadbeef", isNTT: true, wantNtt: 1},
+		{name: "token bridge entry skips solana ntt", wormchain: "0xdeadbeef", solanaNtt: true, wantWormchain: 1, wantSolana: 1},
+		{name: "ntt entry stays on the ntt channel", wormchain: "0xdeadbeef", nttContract: "0xfeed", isNTT: true, wantNtt: 1},
+		{name: "ntt entry without an ntt backend", wormchain: "0xdeadbeef", isNTT: true},
+		{name: "ntt entry on solana ntt only", wormchain: "0xdeadbeef", solanaNtt: true, isNTT: true, wantSolanaNtt: 1},
+		{name: "ntt entry on both ntt backends", wormchain: "0xdeadbeef", nttContract: "0xfeed", solanaNtt: true, isNTT: true, wantNtt: 1, wantSolanaNtt: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: tt.wormchain, disableSolana: tt.disableSolana, enforce: true})
+			acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: tt.wormchain, nttContract: tt.nttContract, solanaNtt: tt.solanaNtt, disableSolana: tt.disableSolana, enforce: true})
 
 			msg := solanaTestTransfer(t, 1)
 			_, err := acct.SubmitObservation(msg)
@@ -270,6 +326,11 @@ func TestSubmitObservationFanOut(t *testing.T) {
 			assert.Equal(t, tt.wantNtt, len(acct.nttSubChan))
 			if acct.solanaEnabled() {
 				assert.Equal(t, tt.wantSolana, len(acct.solana.subChan))
+			}
+			if acct.solanaNttEnabled() {
+				assert.Equal(t, tt.wantSolanaNtt, len(acct.solanaNtt.subChan))
+			} else {
+				assert.Zero(t, tt.wantSolanaNtt)
 			}
 		})
 	}

@@ -69,6 +69,29 @@ func (f *solanaNttObservationFields) setContentDigest() error {
 	return nil
 }
 
+func (f *solanaNttObservationFields) identity() (vaa.ChainID, vaa.Address, uint64) {
+	return f.Chain, f.Emitter, f.Sequence
+}
+
+func (f *solanaNttObservationFields) committedDigest() [32]byte {
+	return f.contentDigest
+}
+
+// submitInstructionData is the discriminator and NttSubmitObservationsIxData for f.
+func (f *solanaNttObservationFields) submitInstructionData(head solanaSubmitHead) ([]byte, error) {
+	return encodeWire(&nttSubmitObservationsInstructionWire{
+		Discriminator: nttSubmitObservationsDiscriminator,
+		Data: nttSubmitObservationsIxDataWire{
+			GuardianSetIndex: head.guardianSetIndex,
+			GuardianIndex:    head.guardianIndex,
+			Signature:        head.signature,
+			TxIDLen:          head.txID.length,
+			TxID:             head.txID.padded,
+			Fields:           f.wire(),
+		},
+	})
+}
+
 // nttObservationFieldsFromWire converts the program's layout and sets the content digest.
 func nttObservationFieldsFromWire(wire *nttObservationFieldsWire) (solanaNttObservationFields, error) {
 	f := solanaNttObservationFields{

@@ -1,5 +1,6 @@
-// Watcher for the svm/accountant program. It subscribes to the program's transaction logs,
-// decodes each ACCDGST commit, and releases the matching pending transfer.
+// Watcher for the svm/accountant programs. It subscribes to one program's transaction logs,
+// decodes each ACCDGST commit, and releases the matching pending transfer. One watcher runs
+// per program family.
 
 package accountant
 
@@ -78,7 +79,7 @@ func (acct *Accountant) solanaWatcher(ctx context.Context, b *solanaBackend) err
 
 	events, err := b.conn.SubscribeLogs(ctx, b.program)
 	if err != nil {
-		solanaConnectionErrors.Inc()
+		b.metrics.connectionErrors.Inc()
 		return fmt.Errorf("failed to subscribe to %s logs: %w", b.tag, err)
 	}
 	// SECURITY: the live path misses commits that finalized while no subscription was open.
@@ -95,7 +96,7 @@ func (acct *Accountant) solanaWatcher(ctx context.Context, b *solanaBackend) err
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				solanaConnectionErrors.Inc()
+				b.metrics.connectionErrors.Inc()
 				return fmt.Errorf("%s log subscription closed", b.tag)
 			}
 			acct.handleSolanaLogEvent(evt, b)
@@ -105,22 +106,22 @@ func (acct *Accountant) solanaWatcher(ctx context.Context, b *solanaBackend) err
 
 // handleSolanaLogEvent processes the logs of one transaction.
 func (acct *Accountant) handleSolanaLogEvent(evt solacctconn.LogEvent, b *solanaBackend) {
-	solanaEventsReceived.Inc()
+	b.metrics.eventsReceived.Inc()
 
 	if evt.Failed {
-		solanaFailedTxSkipped.Inc()
+		b.metrics.failedTxSkipped.Inc()
 		acct.logger.Debug("acctwatch: skipping failed solana transaction", zap.String("backend", b.tag), zap.Stringer("signature", evt.Signature))
 		return
 	}
 
 	commits, err := parseSolanaCommitLogs(evt.Logs, b.program)
 	if err != nil {
-		solanaMalformedLogs.Inc()
+		b.metrics.malformedLogs.Inc()
 		acct.logger.Error("acctwatch: failed to parse solana transaction logs", zap.String("backend", b.tag), zap.Stringer("signature", evt.Signature), zap.Error(err))
 	}
 
 	for idx := range commits {
-		acct.processSolanaCommitEvent(&commits[idx], evt.Signature, b.tag)
+		acct.processSolanaCommitEvent(&commits[idx], evt.Signature, b)
 	}
 }
 
@@ -128,11 +129,11 @@ func (acct *Accountant) handleSolanaLogEvent(evt solacctconn.LogEvent, b *solana
 //
 // SECURITY: precondition: evt comes from parseSolanaCommitLogs over a successful,
 // finalized transaction.
-func (acct *Accountant) processSolanaCommitEvent(evt *solanaCommitEvent, sig solana.Signature, tag string) {
+func (acct *Accountant) processSolanaCommitEvent(evt *solanaCommitEvent, sig solana.Signature, b *solanaBackend) {
 	msgId := TransferKey{EmitterChain: uint16(evt.Chain), EmitterAddress: evt.Emitter, Sequence: evt.Sequence}.String()
 
 	acct.logger.Debug("acctwatch: solana commit detected",
-		zap.String("backend", tag),
+		zap.String("backend", b.tag),
 		zap.String("msgId", msgId),
 		zap.Stringer("signature", sig),
 		zap.Uint32("guardianSetIndex", evt.GuardianSetIndex),
@@ -143,8 +144,8 @@ func (acct *Accountant) processSolanaCommitEvent(evt *solanaCommitEvent, sig sol
 
 	// submit_observations commits the content digest. submit_vaas and the backfill commit
 	// the VAA digest. Either digest releases the transfer.
-	if acct.processCommittedDigest(msgId, evt.Digest, true, tag) {
-		solanaTransfersApproved.Inc()
+	if acct.processCommittedDigest(msgId, evt.Digest, b.family, b.tag) {
+		b.metrics.transfersApproved.Inc()
 	}
 }
 

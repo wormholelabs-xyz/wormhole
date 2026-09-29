@@ -369,14 +369,12 @@ func TestProcessCommittedDigest(t *testing.T) {
 	const ownMsgId = "own"
 
 	tests := []struct {
-		name          string
-		msgId         string
-		digest        func(pe *pendingEntry) [32]byte
-		acceptContent bool
-		wantPending   bool
+		name        string
+		msgId       string
+		digest      func(pe *pendingEntry) [32]byte
+		wantPending bool
 	}{
-		{name: "content digest not accepted", msgId: ownMsgId, digest: contentDigest},
-		{name: "mismatch", msgId: ownMsgId, digest: otherDigest, acceptContent: true},
+		{name: "mismatch", msgId: ownMsgId, digest: otherDigest},
 		{name: "unknown message id", msgId: "2/0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16/999", digest: contentDigest, wantPending: true},
 		{name: "empty message id", msgId: "", digest: contentDigest, wantPending: true},
 	}
@@ -398,7 +396,7 @@ func TestProcessCommittedDigest(t *testing.T) {
 			}
 
 			acct.pendingTransfersLock.Lock()
-			approved := acct.processCommittedDigest(msgId, tt.digest(pe), tt.acceptContent, "test")
+			approved := acct.processCommittedDigest(msgId, tt.digest(pe), solanaFamilyWTT, "test")
 			acct.pendingTransfersLock.Unlock()
 
 			assert.False(t, approved)

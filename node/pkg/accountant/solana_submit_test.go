@@ -300,7 +300,7 @@ func TestBuildSolanaSubmitTx(t *testing.T) {
 		assert.Contains(t, []uint8{0, 1}, parsed.Signature[64])
 
 		// The program recovers the guardian from the signature over its own digest.
-		digest, err := solanaObservationSigningDigest(b.prefix, f.sub.txID, f.sub.fields)
+		digest, err := solanaObservationSigningDigest(b.prefix, f.sub.txID, f.sub.record)
 		require.NoError(t, err)
 		pub, err := ethCrypto.SigToPub(digest.Bytes(), parsed.Signature[:])
 		require.NoError(t, err)
@@ -382,7 +382,7 @@ func TestHandleSolanaBatch(t *testing.T) {
 			setup: func(t *testing.T, f *solanaBatchFixture) {
 				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{
 					State: solacctconn.AccountInitialised,
-					Data:  solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, f.acct.solana.feePayer.PublicKey(), []uint8{0}),
+					Data:  solanaPendingAccountData(t, f.sub.wttFields(t).Chain, 0, f.sub.wttFields(t).contentDigest, f.acct.solana.feePayer.PublicKey(), []uint8{0}),
 				})
 			},
 			wantPending: 1,
@@ -392,7 +392,7 @@ func TestHandleSolanaBatch(t *testing.T) {
 			setup: func(t *testing.T, f *solanaBatchFixture) {
 				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{
 					State: solacctconn.AccountInitialised,
-					Data:  solanaPendingAccountData(t, f.sub.fields.Chain, 0, [32]byte{0xEE}, solana.PublicKey{0xAB}, nil),
+					Data:  solanaPendingAccountData(t, f.sub.wttFields(t).Chain, 0, [32]byte{0xEE}, solana.PublicKey{0xAB}, nil),
 				})
 			},
 			wantPending: 1,
@@ -499,7 +499,7 @@ func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 		if sends == 1 {
 			f.conn.SetConfirmedAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{
 				State: solacctconn.AccountInitialised,
-				Data:  solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, recordedPayer, []uint8{1}),
+				Data:  solanaPendingAccountData(t, f.sub.wttFields(t).Chain, 0, f.sub.wttFields(t).contentDigest, recordedPayer, []uint8{1}),
 			})
 			return customTxError(solanaErrPayerMismatch)
 		}
@@ -634,4 +634,12 @@ func TestConfirmSolanaSubmissions(t *testing.T) {
 			}
 		})
 	}
+}
+
+// wttFields is the WTT record of s.
+func (s *solanaSubmission) wttFields(t *testing.T) *solanaObservationFields {
+	t.Helper()
+	fields, ok := s.record.(*solanaObservationFields)
+	require.True(t, ok, "record is %T", s.record)
+	return fields
 }

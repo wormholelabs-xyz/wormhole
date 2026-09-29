@@ -73,12 +73,12 @@ func (c *subscriptionSignalingConn) SubscribeLogs(ctx context.Context, program s
 // trackSolanaCounters returns an assertion on the confirmed submissions and applied
 // commits since the call.
 func trackSolanaCounters(t *testing.T) func(wantSubmitted float64, wantApproved float64) {
-	submitted := testutil.ToFloat64(solanaTransfersSubmitted)
-	approved := testutil.ToFloat64(solanaTransfersApproved)
+	submitted := testutil.ToFloat64(solanaTransfersSubmitted.WithLabelValues("wtt"))
+	approved := testutil.ToFloat64(solanaTransfersApproved.WithLabelValues("wtt"))
 	return func(wantSubmitted float64, wantApproved float64) {
 		t.Helper()
-		require.Equal(t, wantSubmitted, testutil.ToFloat64(solanaTransfersSubmitted)-submitted, "confirmed submissions")
-		require.Equal(t, wantApproved, testutil.ToFloat64(solanaTransfersApproved)-approved, "applied commits")
+		require.Equal(t, wantSubmitted, testutil.ToFloat64(solanaTransfersSubmitted.WithLabelValues("wtt"))-submitted, "confirmed submissions")
+		require.Equal(t, wantApproved, testutil.ToFloat64(solanaTransfersApproved.WithLabelValues("wtt"))-approved, "applied commits")
 	}
 }
 

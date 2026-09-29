@@ -61,9 +61,13 @@ type (
 
 		// vaaDigest is the decoded digest. newPendingEntry sets it while the Solana backend is enabled.
 		vaaDigest [digestLen]byte
-		// solanaFields is the record the Solana accountant program hashes. newPendingEntry sets it
-		// on Token Bridge entries while the Solana backend is enabled.
+		// solanaFields is the record the Solana WTT accountant program hashes. newPendingEntry sets
+		// it on Token Bridge entries while the Solana WTT backend is enabled.
 		solanaFields *solanaObservationFields
+
+		// solanaNttFields is the record the Solana NTT accountant program hashes. It is set
+		// for NTT entries while the Solana NTT backend is enabled.
+		solanaNttFields *solanaNttObservationFields
 
 		// stateLock is used to protect the contents of the state struct.
 		stateLock sync.Mutex
@@ -86,9 +90,28 @@ type accountantBackend uint8
 const (
 	// The wormchain contract. NTT entries use this slot for the NTT contract.
 	backendWormchain accountantBackend = iota
+	// The Solana WTT program. It accounts Token Bridge entries.
 	backendSolana
+	// The Solana NTT program. It accounts NTT entries.
+	backendSolanaNTT
 	numAccountantBackends
 )
+
+// solanaRecord returns the record pe submits to family. It returns nil if that family
+// accounts a different kind of entry.
+func (pe *pendingEntry) solanaRecord(family solanaProgramFamily) solanaObservationRecord {
+	switch family {
+	case solanaFamilyWTT:
+		if !pe.isNTT && pe.solanaFields != nil {
+			return pe.solanaFields
+		}
+	case solanaFamilyNTT:
+		if pe.isNTT && pe.solanaNttFields != nil {
+			return pe.solanaNttFields
+		}
+	}
+	return nil
+}
 
 // Accountant is the object that manages the interface to the wormchain accountant smart contract.
 type Accountant struct {
@@ -118,8 +141,9 @@ type Accountant struct {
 	nttSubChan        chan *common.MessagePublication
 
 	solanaCfg AccountantSolanaConfig
-	// Start builds solana from solanaCfg. A nil value disables the Solana backend.
-	solana *solanaBackend
+	// Start builds solana and solanaNtt from solanaCfg. A nil value disables that Solana backend.
+	solana    *solanaBackend
+	solanaNtt *solanaBackend
 	// Capacity 1, so requests that arrive during an audit coalesce into one more audit.
 	solanaAuditRequests chan struct{}
 }
@@ -138,6 +162,23 @@ func (acct *Accountant) wormchainBaseEnabled() bool {
 // solanaEnabled returns true if the Solana base accountant is enabled.
 func (acct *Accountant) solanaEnabled() bool {
 	return acct.solana != nil
+}
+
+// solanaNttEnabled returns true if the Solana NTT accountant is enabled.
+func (acct *Accountant) solanaNttEnabled() bool {
+	return acct.solanaNtt != nil
+}
+
+// solanaBackends returns the enabled Solana backends.
+func (acct *Accountant) solanaBackends() []*solanaBackend {
+	out := make([]*solanaBackend, 0, 2)
+	if acct.solana != nil {
+		out = append(out, acct.solana)
+	}
+	if acct.solanaNtt != nil {
+		out = append(out, acct.solanaNtt)
+	}
+	return out
 }
 
 // baseEnabled returns true if any backend covers Token Bridge transfers.
@@ -204,13 +245,14 @@ func (acct *Accountant) Start(ctx context.Context) error {
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
 
-	solBackend, err := newSolanaBackend(acct.solanaCfg)
+	solBackend, solNttBackend, err := newSolanaBackends(acct.solanaCfg)
 	if err != nil {
 		return fmt.Errorf("failed to configure the solana accountant: %w", err)
 	}
 	acct.solana = solBackend
-	if acct.solanaEnabled() {
-		acct.logger.Debug("solana accountant enabled", zap.Bool("baseEnabled", acct.baseEnabled()))
+	acct.solanaNtt = solNttBackend
+	if len(acct.solanaBackends()) != 0 {
+		acct.logger.Debug("solana accountant enabled", zap.Bool("baseEnabled", acct.baseEnabled()), zap.Bool("solanaNttEnabled", acct.solanaNttEnabled()))
 	}
 
 	if !acct.baseEnabled() && !acct.nttEnabled() {
@@ -303,9 +345,11 @@ func (acct *Accountant) Close() {
 		acct.nttWormchainConn.Close()
 		acct.nttWormchainConn = nil
 	}
-	if acct.solana != nil {
-		acct.solana.conn.Close()
+	// Both Solana backends share one connection.
+	if backends := acct.solanaBackends(); len(backends) != 0 {
+		backends[0].conn.Close()
 		acct.solana = nil
+		acct.solanaNtt = nil
 	}
 }
 
@@ -316,7 +360,7 @@ func (acct *Accountant) FeatureString() string {
 	} else {
 		ret = "acct"
 	}
-	if acct.nttEnabled() {
+	if acct.wormchainNttEnabled() {
 		if ret != "" {
 			ret += ":"
 		}
@@ -330,6 +374,16 @@ func (acct *Accountant) FeatureString() string {
 			ret += "sol-acct-logonly"
 		} else {
 			ret += "sol-acct"
+		}
+	}
+	if acct.solanaNttEnabled() {
+		if ret != "" {
+			ret += ":"
+		}
+		if !acct.enforceFlag {
+			ret += "sol-ntt-acct-logonly"
+		} else {
+			ret += "sol-ntt-acct"
 		}
 	}
 
@@ -480,15 +534,17 @@ func digestBytes(digest string) ([digestLen]byte, error) {
 	return [digestLen]byte(raw), nil
 }
 
-// processCommittedDigest publishes or drops a transfer that the Solana backend reports as
-// committed under digest got. The VAA digest always matches. If acceptContent is true, the
-// Solana content digest also matches. submit_observations commits that digest. It returns
-// true when it publishes the transfer.
+// processCommittedDigest publishes or drops a transfer that a Solana backend reports as
+// committed under digest got. The VAA digest always matches. The content digest of the
+// record of the reporting program family also matches. submit_observations commits that
+// digest. It returns true when it publishes the transfer.
 //
 // SECURITY: the caller holds pendingTransfersLock.
-// SECURITY: precondition: the Solana backend is enabled, so newPendingEntry set vaaDigest and solanaFields.
+// SECURITY: precondition: a Solana backend is enabled, so newPendingEntry set vaaDigest and the record of the family.
 // SECURITY: precondition msgId != "". A violation leaves the transfer pending.
-func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, acceptContent bool, source string) bool {
+// SECURITY: a commit for an entry that family does not account is ignored. Thus a WTT commit
+// cannot release or drop an NTT entry, and an NTT commit cannot release or drop a WTT entry.
+func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, family solanaProgramFamily, source string) bool {
 	if msgId == "" {
 		acct.logger.Error("acctwatch: committed digest with an empty message id", zap.String("source", source))
 		return false
@@ -502,8 +558,13 @@ func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, accep
 		return false
 	}
 
-	// A Token Bridge entry carries solanaFields while Solana is enabled.
-	if got == pe.vaaDigest || (acceptContent && !pe.isNTT && got == pe.solanaFields.contentDigest) {
+	record := pe.solanaRecord(family)
+	if record == nil {
+		acct.logger.Error("acctwatch: a solana commit names a transfer its program does not account, ignoring it", zap.String("msgId", msgId), zap.String("source", source), zap.Stringer("program", family), zap.Bool("isNTT", pe.isNTT))
+		return false
+	}
+
+	if got == pe.vaaDigest || got == record.committedDigest() {
 		acct.logger.Info("acctwatch: pending transfer has been approved", zap.String("msgId", msgId), zap.String("source", source))
 		acct.publishTransferAlreadyLocked(pe)
 		return true
@@ -658,7 +719,10 @@ func (acct *Accountant) backendChannel(pe *pendingEntry, backend accountantBacke
 	switch backend {
 	case backendWormchain:
 		if pe.isNTT {
-			return acct.nttSubChan, "ntt-accountant", true
+			if acct.wormchainNttEnabled() {
+				return acct.nttSubChan, "ntt-accountant", true
+			}
+			return nil, "", false
 		}
 		if acct.wormchainBaseEnabled() {
 			return acct.subChan, "accountant", true
@@ -666,6 +730,10 @@ func (acct *Accountant) backendChannel(pe *pendingEntry, backend accountantBacke
 	case backendSolana:
 		if !pe.isNTT && acct.solanaEnabled() {
 			return acct.solana.subChan, acct.solana.tag, true
+		}
+	case backendSolanaNTT:
+		if pe.isNTT && acct.solanaNttEnabled() {
+			return acct.solanaNtt.subChan, acct.solanaNtt.tag, true
 		}
 	}
 	return nil, "", false

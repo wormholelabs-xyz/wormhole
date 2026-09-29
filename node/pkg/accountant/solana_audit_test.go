@@ -60,7 +60,7 @@ func newSolanaAuditFixture(t *testing.T, ctx context.Context) *solanaAuditFixtur
 	require.NotNil(t, pe.solanaFields)
 
 	b := acct.solana
-	pending, err := solanaPendingPDAAtSet(b, pe, 0)
+	pending, err := solanaPendingPDAAtSet(b, pe.solanaFields, 0)
 	require.NoError(t, err)
 	bucket, err := deriveNoreplayBucketPDA(b.noreplay, b.authority, pe.solanaFields.Chain, pe.solanaFields.Emitter, pe.solanaFields.Sequence)
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func (f *solanaAuditFixture) moveToGuardianSetOne(t *testing.T) (current solana.
 	gs := f.acct.gst.Get()
 	f.acct.gst.Set(&common.GuardianSet{Index: 1, Keys: gs.Keys})
 
-	current, err := solanaPendingPDAAtSet(f.acct.solana, f.pe, 1)
+	current, err := solanaPendingPDAAtSet(f.acct.solana, f.pe.solanaFields, 1)
 	require.NoError(t, err)
 	require.NotEqual(t, current, f.pending)
 	return current, f.pending
@@ -162,14 +162,14 @@ func TestPublishSolanaFeePayerBalance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
 			conn.Balance, conn.BalanceErr = tt.lamports, tt.err
-			solanaFeePayerLamports.Set(7)
-			errorsBefore := testutil.ToFloat64(solanaFeePayerErrors)
+			solanaFeePayerLamports.WithLabelValues("wtt").Set(7)
+			errorsBefore := testutil.ToFloat64(solanaFeePayerErrors.WithLabelValues("wtt"))
 
 			acct.publishSolanaFeePayerBalance(ctx, acct.solana)
 			require.Len(t, conn.GetBalanceCalls, 1)
 			assert.Equal(t, acct.solana.feePayer.PublicKey(), conn.GetBalanceCalls[0])
-			assert.Equal(t, tt.wantGauge, testutil.ToFloat64(solanaFeePayerLamports))
-			assert.Equal(t, tt.wantErrors, testutil.ToFloat64(solanaFeePayerErrors)-errorsBefore)
+			assert.Equal(t, tt.wantGauge, testutil.ToFloat64(solanaFeePayerLamports.WithLabelValues("wtt")))
+			assert.Equal(t, tt.wantErrors, testutil.ToFloat64(solanaFeePayerErrors.WithLabelValues("wtt"))-errorsBefore)
 		})
 	}
 }

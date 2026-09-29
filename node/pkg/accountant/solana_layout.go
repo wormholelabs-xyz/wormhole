@@ -317,6 +317,29 @@ func observationFieldsFromWire(wire *observationFieldsWire) (solanaObservationFi
 	return f, f.setContentDigest()
 }
 
+func (f *solanaObservationFields) identity() (vaa.ChainID, vaa.Address, uint64) {
+	return f.Chain, f.Emitter, f.Sequence
+}
+
+func (f *solanaObservationFields) committedDigest() [32]byte {
+	return f.contentDigest
+}
+
+// submitInstructionData is the discriminator and SubmitObservationsIxData for f.
+func (f *solanaObservationFields) submitInstructionData(head solanaSubmitHead) ([]byte, error) {
+	return encodeWire(&submitObservationsInstructionWire{
+		Discriminator: submitObservationsDiscriminator,
+		Data: submitObservationsIxDataWire{
+			GuardianSetIndex: head.guardianSetIndex,
+			GuardianIndex:    head.guardianIndex,
+			Signature:        head.signature,
+			TxIDLen:          head.txID.length,
+			TxID:             head.txID.padded,
+			Fields:           f.wire(),
+		},
+	})
+}
+
 // unpackObservationFields reads the record from exactly observationFieldsLen bytes.
 func unpackObservationFields(data []byte) (solanaObservationFields, error) {
 	var wire observationFieldsWire
@@ -417,6 +440,16 @@ func (t solanaTxID) Bytes() []byte {
 // valid reports whether t came from a constructor rather than the zero value.
 func (t solanaTxID) valid() bool {
 	return t.length == hashTxIDLen || t.length == signatureTxIDLen
+}
+
+// solanaSubmitHead is the instruction data both program families share before the hashed
+// record.
+type solanaSubmitHead struct {
+	guardianSetIndex uint32
+	guardianIndex    uint8
+	// r ‖ s ‖ recovery_id.
+	signature [submitSignatureLen]byte
+	txID      solanaTxID
 }
 
 // solanaSubmitObservationsIx holds decoded submit_observations instruction data. The

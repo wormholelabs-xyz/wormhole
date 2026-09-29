@@ -1,7 +1,7 @@
-// Submission worker for the svm/accountant program. It signs each pending observation
+// Submission worker for the svm/accountant programs. It signs each pending observation
 // with the guardian key. It builds one submit_observations transaction per observation.
 // The configured Solana keypair pays the fee. The worker sends each transaction and
-// confirms it.
+// confirms it. One worker runs for each program family.
 
 package accountant
 
@@ -23,7 +23,8 @@ import (
 )
 
 const (
-	// Twice MAX_QUORUM_BRANCH_CU, mollusk submit_observations.rs.
+	// Twice MAX_QUORUM_BRANCH_CU, mollusk submit_observations.rs. The NTT quorum-closing path
+	// is 71,026 CU (ntt-global-accountant benches/compute_units.md), so one limit covers both.
 	solanaSubmitComputeUnitLimit = 150_000
 
 	// Round two covers the recorded-payer race and a stale blockhash. A preflight
@@ -58,13 +59,14 @@ type solanaGuardianIdentity struct {
 type solanaSubmission struct {
 	msgId  string
 	msg    *common.MessagePublication
-	fields *solanaObservationFields
+	record solanaObservationRecord
 	txID   solanaTxID
 
-	pendingPDA           solana.PublicKey
-	noreplayBucket       solana.PublicKey
-	sourceBalance        solana.PublicKey
-	destBalance          solana.PublicKey
+	pendingPDA     solana.PublicKey
+	noreplayBucket solana.PublicKey
+	sourceBalance  solana.PublicKey
+	destBalance    solana.PublicKey
+	// Token Bridge ChainRegistration for WTT, relayer ChainRegistration for NTT.
 	chainRegistrationPDA solana.PublicKey
 
 	// The payer recorded in the pending PDA, or the fee payer when the PDA is absent. The
@@ -89,6 +91,19 @@ func (acct *Accountant) solanaBaseWorker(ctx context.Context) error {
 	return acct.solanaWorker(ctx, acct.solana)
 }
 
+// isNilSolanaRecord reports whether r is nil or a typed nil pointer.
+func isNilSolanaRecord(r solanaObservationRecord) bool {
+	switch v := r.(type) {
+	case nil:
+		return true
+	case *solanaObservationFields:
+		return v == nil
+	case *solanaNttObservationFields:
+		return v == nil
+	}
+	return false
+}
+
 // solanaWorker drains the backend's submission channel until the context ends.
 func (acct *Accountant) solanaWorker(ctx context.Context, b *solanaBackend) error {
 	for {
@@ -105,62 +120,59 @@ func (acct *Accountant) solanaWorker(ctx context.Context, b *solanaBackend) erro
 
 // solanaObservationSigningDigest is keccak256(prefix ‖ tx_id ‖ fields), matching
 // operational-core hash.rs observation_signing_digest.
-func solanaObservationSigningDigest(prefix []byte, txID solanaTxID, fields *solanaObservationFields) (ethCommon.Hash, error) {
+func solanaObservationSigningDigest(prefix []byte, txID solanaTxID, record solanaObservationRecord) (ethCommon.Hash, error) {
 	if !txID.valid() {
 		return ethCommon.Hash{}, errors.New("observation signing digest: no tx id")
 	}
-	if fields == nil {
+	if isNilSolanaRecord(record) {
 		return ethCommon.Hash{}, errors.New("observation signing digest: no observation fields")
 	}
-	packed, err := fields.pack()
+	packed, err := record.pack()
 	if err != nil {
 		return ethCommon.Hash{}, fmt.Errorf("observation signing digest: %w", err)
 	}
 	return vaa.MessageSigningDigest(prefix, append(txID.Bytes(), packed...))
 }
 
-// encodeSubmitObservationsIxData is the inverse of parseSubmitObservationsIxData.
+// encodeSubmitObservationsIxData is the inverse of parseSubmitObservationsIxData and
+// parseNttSubmitObservationsIxData. Both layouts share every byte before the fields.
 //
 // SECURITY: preconditions are a submitSignatureLen signature, a constructed tx id and a
-// non-nil fields record.
-func encodeSubmitObservationsIxData(guardianSetIndex uint32, guardianIndex uint8, signature []byte, txID solanaTxID, fields *solanaObservationFields) ([]byte, error) {
+// non-nil record.
+func encodeSubmitObservationsIxData(guardianSetIndex uint32, guardianIndex uint8, signature []byte, txID solanaTxID, record solanaObservationRecord) ([]byte, error) {
 	if len(signature) != submitSignatureLen {
 		return nil, fmt.Errorf("submit_observations instruction data: signature is %d bytes, want %d", len(signature), submitSignatureLen)
 	}
 	if !txID.valid() {
 		return nil, errors.New("submit_observations instruction data: no tx id")
 	}
-	if fields == nil {
+	if isNilSolanaRecord(record) {
 		return nil, errors.New("submit_observations instruction data: no observation fields")
 	}
-
-	return encodeWire(&submitObservationsInstructionWire{
-		Discriminator: submitObservationsDiscriminator,
-		Data: submitObservationsIxDataWire{
-			GuardianSetIndex: guardianSetIndex,
-			GuardianIndex:    guardianIndex,
-			Signature:        [submitSignatureLen]byte(signature),
-			TxIDLen:          txID.length,
-			TxID:             txID.padded,
-			Fields:           fields.wire(),
-		},
+	return record.submitInstructionData(solanaSubmitHead{
+		guardianSetIndex: guardianSetIndex,
+		guardianIndex:    guardianIndex,
+		signature:        [submitSignatureLen]byte(signature),
+		txID:             txID,
 	})
 }
 
 // deriveSolanaSubmission resolves every account one observation touches.
-func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *common.MessagePublication, fields *solanaObservationFields) (*solanaSubmission, error) {
-	if fields == nil {
+func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *common.MessagePublication, record solanaObservationRecord) (*solanaSubmission, error) {
+	if isNilSolanaRecord(record) {
 		return nil, errors.New("solana submission: no observation fields")
 	}
 	// SECURITY: the cached content digest seeds the pending PDA. A stale digest derives the
 	// address of a different observation.
-	digest, err := fields.computeContentDigest()
+	contentDigest := record.committedDigest()
+	digest, err := record.computeContentDigest()
 	if err != nil {
 		return nil, fmt.Errorf("solana submission: %w", err)
 	}
-	if fields.contentDigest != digest {
+	if contentDigest != digest {
 		return nil, errors.New("solana submission: the content digest does not match the fields")
 	}
+	chain, emitter, sequence := record.identity()
 
 	// The program accepts only a 32-byte or 64-byte tx id.
 	txID, err := newSolanaTxID(msg.TxID)
@@ -171,20 +183,33 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 	sub := &solanaSubmission{
 		msgId:  msg.MessageIDString(),
 		msg:    msg,
-		fields: fields,
+		record: record,
 		txID:   txID,
 	}
 
-	if sub.pendingPDA, err = derivePendingObservationsPDA(b.program, fields.Chain, fields.Emitter, fields.Sequence, guardianSetIndex, fields.contentDigest); err != nil {
+	if sub.pendingPDA, err = derivePendingObservationsPDA(b.program, chain, emitter, sequence, guardianSetIndex, contentDigest); err != nil {
 		return nil, err
 	}
-	if sub.noreplayBucket, err = deriveNoreplayBucketPDA(b.noreplay, b.authority, fields.Chain, fields.Emitter, fields.Sequence); err != nil {
+	if sub.noreplayBucket, err = deriveNoreplayBucketPDA(b.noreplay, b.authority, chain, emitter, sequence); err != nil {
 		return nil, err
 	}
-	if sub.chainRegistrationPDA, err = deriveChainRegistrationPDA(b.program, fields.Chain); err != nil {
+	if sub.chainRegistrationPDA, err = deriveChainRegistrationPDA(b.program, chain); err != nil {
 		return nil, err
 	}
 
+	switch fields := record.(type) {
+	case *solanaObservationFields:
+		if b.family != solanaFamilyWTT {
+			return nil, fmt.Errorf("solana submission: a WTT record on the %s backend", b.family)
+		}
+		return b.deriveWTTBalances(sub, fields)
+	}
+	return nil, fmt.Errorf("solana submission: unknown observation record %T", record)
+}
+
+// deriveWTTBalances sets the Token Bridge balance slots of sub.
+func (b *solanaBackend) deriveWTTBalances(sub *solanaSubmission, fields *solanaObservationFields) (*solanaSubmission, error) {
+	var err error
 	// The program reads the balance slots only for a transfer. For other actions, the
 	// on-chain tests fill them with the authority PDA.
 	if !vaa.IsTransfer([]byte{fields.Action}) {
@@ -247,11 +272,11 @@ func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend)
 	}
 
 	// Every exit below leaves the batch retryable by the audit.
-	defer acct.clearSubmitPendingFlags(msgs, backendSolana)
+	defer acct.clearSubmitPendingFlags(msgs, b.backend)
 
 	// confirmSolanaSubmissions reads the status of every transaction of the batch in one call.
 	if len(msgs) > solacctconn.MaxStatusesPerCall {
-		solanaSubmitFailures.Add(float64(len(msgs) - solacctconn.MaxStatusesPerCall))
+		b.metrics.submitFailures.Add(float64(len(msgs) - solacctconn.MaxStatusesPerCall))
 		acct.logger.Warn("the solana batch is past the status read limit, the audit will retry the rest",
 			zap.String("backend", b.tag),
 			zap.Int("numMsgs", len(msgs)),
@@ -287,7 +312,7 @@ func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend)
 	}
 
 	for _, sub := range work {
-		solanaSubmitFailures.Inc()
+		b.metrics.submitFailures.Inc()
 		acct.logger.Error("gave up submitting an observation to the solana accountant, the audit will retry", zap.String("backend", b.tag), zap.String("msgId", sub.msgId))
 	}
 	return nil
@@ -295,7 +320,7 @@ func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend)
 
 // failSolanaBatch counts and logs a failure that stops the whole batch.
 func (acct *Accountant) failSolanaBatch(b *solanaBackend, msgs []*common.MessagePublication, err error) {
-	solanaSubmitFailures.Add(float64(len(msgs)))
+	b.metrics.submitFailures.Add(float64(len(msgs)))
 	acct.logger.Error("failed to submit a batch to the solana accountant, the audit will retry", zap.String("backend", b.tag), zap.Int("numMsgs", len(msgs)), zap.Error(err))
 }
 
@@ -304,7 +329,7 @@ func (acct *Accountant) failSolanaBatch(b *solanaBackend, msgs []*common.Message
 func (acct *Accountant) deriveSolanaSubmissions(b *solanaBackend, msgs []*common.MessagePublication, guardianSetIndex uint32) []*solanaSubmission {
 	type pendingObservation struct {
 		msg    *common.MessagePublication
-		fields *solanaObservationFields
+		record solanaObservationRecord
 	}
 
 	pending := make([]pendingObservation, 0, len(msgs))
@@ -315,15 +340,21 @@ func (acct *Accountant) deriveSolanaSubmissions(b *solanaBackend, msgs []*common
 			acct.logger.Debug("skipping a solana observation, the transfer is no longer pending", zap.String("backend", b.tag), zap.String("msgId", msg.MessageIDString()))
 			continue
 		}
-		pending = append(pending, pendingObservation{msg: msg, fields: pe.solanaFields})
+		record := pe.solanaRecord(b.family)
+		if record == nil {
+			b.metrics.submitFailures.Inc()
+			acct.logger.Error("skipping a solana observation, the transfer has no record for this program", zap.String("backend", b.tag), zap.String("msgId", msg.MessageIDString()), zap.Bool("isNTT", pe.isNTT))
+			continue
+		}
+		pending = append(pending, pendingObservation{msg: msg, record: record})
 	}
 	acct.pendingTransfersLock.Unlock()
 
 	out := make([]*solanaSubmission, 0, len(pending))
 	for _, obs := range pending {
-		sub, err := b.deriveSolanaSubmission(guardianSetIndex, obs.msg, obs.fields)
+		sub, err := b.deriveSolanaSubmission(guardianSetIndex, obs.msg, obs.record)
 		if err != nil {
-			solanaSubmitFailures.Inc()
+			b.metrics.submitFailures.Inc()
 			acct.logger.Error("failed to derive the accounts for a solana observation", zap.String("backend", b.tag), zap.String("msgId", obs.msg.MessageIDString()), zap.Error(err))
 			continue
 		}
@@ -343,7 +374,7 @@ func (acct *Accountant) submitSolanaRound(ctx context.Context, b *solanaBackend,
 
 	blockhash, err := b.conn.GetLatestBlockhash(ctx)
 	if err != nil {
-		solanaSubmitFailures.Add(float64(len(ready)))
+		b.metrics.submitFailures.Add(float64(len(ready)))
 		acct.logger.Error("failed to read a solana blockhash", zap.String("backend", b.tag), zap.Int("numMsgs", len(ready)), zap.Error(err))
 		return nil
 	}
@@ -353,7 +384,7 @@ func (acct *Accountant) submitSolanaRound(ctx context.Context, b *solanaBackend,
 	for _, sub := range ready {
 		tx, err := acct.buildSolanaSubmitTx(ctx, b, guardian, sub, blockhash.Hash)
 		if err != nil {
-			solanaSubmitFailures.Inc()
+			b.metrics.submitFailures.Inc()
 			acct.logger.Error("failed to build a solana observation transaction", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Error(err))
 			continue
 		}
@@ -426,12 +457,12 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 
 	accounts, err := b.conn.GetOwnedAccounts(ctx, addrs, b.program, solacctconn.CommitmentConfirmed)
 	if err != nil {
-		solanaSubmitFailures.Add(float64(len(unread)))
+		b.metrics.submitFailures.Add(float64(len(unread)))
 		acct.logger.Error("failed to read the solana pending accounts", zap.String("backend", b.tag), zap.Int("numMsgs", len(unread)), zap.Error(err))
 		return ready
 	}
 	if len(accounts) != len(unread) {
-		solanaSubmitFailures.Add(float64(len(unread)))
+		b.metrics.submitFailures.Add(float64(len(unread)))
 		acct.logger.Error("the solana pending account read returned the wrong number of results", zap.String("backend", b.tag), zap.Int("want", len(unread)), zap.Int("got", len(accounts)))
 		return ready
 	}
@@ -452,14 +483,14 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 			continue
 		case solacctconn.AccountInitialised:
 		default:
-			solanaSubmitFailures.Inc()
+			b.metrics.submitFailures.Inc()
 			acct.logger.Error("a solana pending account read returned an unknown state", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Uint8("state", uint8(account.State)))
 			continue
 		}
 
-		obs, signed, err := checkPendingObservationsAccount(account.Data, sub.fields.contentDigest, guardianIndex)
+		obs, signed, err := checkPendingObservationsAccount(account.Data, sub.record.committedDigest(), guardianIndex)
 		if err != nil {
-			solanaSubmitFailures.Inc()
+			b.metrics.submitFailures.Inc()
 			acct.logger.Error("failed to check a solana pending account", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Stringer("pendingPda", sub.pendingPDA), zap.Error(err))
 			continue
 		}
@@ -478,7 +509,7 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 // the observation on first use. The runtime requires the compute budget instructions first.
 func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBackend, guardian solanaGuardianIdentity, sub *solanaSubmission, blockhash solana.Hash) (*solana.Transaction, error) {
 	if sub.guardianSignature == nil {
-		digest, err := solanaObservationSigningDigest(b.prefix, sub.txID, sub.fields)
+		digest, err := solanaObservationSigningDigest(b.prefix, sub.txID, sub.record)
 		if err != nil {
 			return nil, err
 		}
@@ -488,7 +519,7 @@ func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBacken
 		}
 		sub.guardianSignature = signature
 	}
-	data, err := encodeSubmitObservationsIxData(guardian.guardianSetIndex, guardian.guardianIndex, sub.guardianSignature, sub.txID, sub.fields)
+	data, err := encodeSubmitObservationsIxData(guardian.guardianSetIndex, guardian.guardianIndex, sub.guardianSignature, sub.txID, sub.record)
 	if err != nil {
 		return nil, err
 	}
@@ -571,12 +602,12 @@ func (acct *Accountant) confirmSolanaSubmissions(ctx context.Context, b *solanaB
 
 		statuses, err := b.conn.GetSignatureStatuses(ctx, sigs)
 		if err != nil {
-			solanaSubmitFailures.Add(float64(len(outstanding)))
+			b.metrics.submitFailures.Add(float64(len(outstanding)))
 			acct.logger.Error("failed to read solana signature statuses", zap.String("backend", b.tag), zap.Int("outstanding", len(outstanding)), zap.Error(err))
 			return retry
 		}
 		if len(statuses) != len(sigs) {
-			solanaSubmitFailures.Add(float64(len(outstanding)))
+			b.metrics.submitFailures.Add(float64(len(outstanding)))
 			acct.logger.Error("the solana signature status read returned the wrong number of results", zap.String("backend", b.tag), zap.Int("want", len(sigs)), zap.Int("got", len(statuses)))
 			return retry
 		}
@@ -601,7 +632,7 @@ func (acct *Accountant) confirmSolanaSubmissions(ctx context.Context, b *solanaB
 			}
 
 			delete(outstanding, sig)
-			solanaTransfersSubmitted.Inc()
+			b.metrics.transfersSubmitted.Inc()
 			acct.logger.Info("submitted an observation to the solana accountant", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Stringer("signature", sub.txSignature))
 		}
 		if len(outstanding) == 0 {
@@ -612,7 +643,7 @@ func (acct *Accountant) confirmSolanaSubmissions(ctx context.Context, b *solanaB
 		if heightErr == nil && height > minLastValidBlockHeight {
 			for _, sig := range unseen {
 				sub := outstanding[sig]
-				solanaSubmitFailures.Inc()
+				b.metrics.submitFailures.Inc()
 				acct.logger.Error("a solana observation was dropped, the audit will retry",
 					zap.String("backend", b.tag),
 					zap.String("msgId", sub.msgId),
@@ -636,7 +667,7 @@ func (acct *Accountant) confirmSolanaSubmissions(ctx context.Context, b *solanaB
 	}
 
 	for _, sub := range outstanding {
-		solanaSubmitFailures.Inc()
+		b.metrics.submitFailures.Inc()
 		acct.logger.Error("a solana observation did not confirm in time, the audit will retry", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Stringer("signature", sub.txSignature))
 	}
 	return retry
@@ -660,10 +691,10 @@ func (acct *Accountant) handleSolanaTxError(b *solanaBackend, sub *solanaSubmiss
 	case solanaTxRetryNextRound:
 		acct.logger.Warn("retrying a solana observation", fields...)
 	case solanaTxFeePayerCannotPay:
-		solanaFeePayerErrors.Inc()
+		b.metrics.feePayerErrors.Inc()
 		acct.logger.Error("the solana fee payer cannot pay", append(fields, zap.Stringer("feePayer", b.feePayer.PublicKey()))...)
 	case solanaTxFailed:
-		solanaSubmitFailures.Inc()
+		b.metrics.submitFailures.Inc()
 		acct.logger.Error("a solana observation failed", fields...)
 	}
 	return disposition
