@@ -13,6 +13,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "accountant-anchor-adapter"
+version = "0.1.0"
+dependencies = [
+ "borsh 1.5.7",
+]
+
+[[package]]
 name = "accountant-backfill-core"
 version = "0.1.0"
 dependencies = [
@@ -27,7 +34,6 @@ name = "accountant-operational-core"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
- "borsh 1.5.7",
  "bytemuck",
  "global-accountant-definitions",
  "solana-address 2.6.0",
@@ -2226,6 +2232,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 name = "global-accountant"
 version = "0.1.0"
 dependencies = [
+ "accountant-anchor-adapter",
  "accountant-operational-core",
  "accountant-test-fixtures",
  "accountant-test-harness",
@@ -2254,6 +2261,7 @@ dependencies = [
 name = "global-accountant-backfill"
 version = "0.1.0"
 dependencies = [
+ "accountant-anchor-adapter",
  "accountant-backfill-core",
  "accountant-operational-core",
  "accountant-test-harness",
@@ -3183,6 +3191,7 @@ checksum = "38bf9645c8b145698bb0b18a4637dcacbc421ea49bef2317e4fd8065a387cf21"
 name = "ntt-global-accountant"
 version = "0.1.0"
 dependencies = [
+ "accountant-anchor-adapter",
  "accountant-operational-core",
  "accountant-test-fixtures",
  "accountant-test-harness",
@@ -3204,6 +3213,7 @@ dependencies = [
 name = "ntt-global-accountant-backfill"
 version = "0.1.0"
 dependencies = [
+ "accountant-anchor-adapter",
  "accountant-backfill-core",
  "accountant-operational-core",
  "accountant-test-fixtures",

@@ -16,13 +16,14 @@
 
 #![allow(unexpected_cfgs)]
 
-use accountant_operational_core::flatten_accounts;
+use accountant_anchor_adapter::flatten_accounts;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
 pub mod instructions;
 
-pub use accountant_operational_core::{err, raw_ix_data::RawIxData};
+pub use accountant_anchor_adapter::RawIxData;
+pub use accountant_operational_core::err;
 pub use global_accountant_definitions as definitions;
 
 use accountant_operational_core::instructions as shared;

@@ -9,7 +9,6 @@ version.workspace = true
 
 [dependencies]
 anchor-lang.workspace = true
-borsh.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
 solana-secp256k1-recover.workspace = true

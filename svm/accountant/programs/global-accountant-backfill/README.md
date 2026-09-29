@@ -38,7 +38,7 @@ The shell crate holds the Anchor boundary only:
 - `BACKFILL_AUTHORITY`, in `src/lib.rs`.
 - Four `#[derive(Accounts)]` contexts, in `src/contexts.rs`.
 
-`RawIxData` and `flatten_accounts!` come from `accountant-operational-core`.
+`RawIxData` and `flatten_accounts!` come from `accountant-anchor-adapter`.
 
 An arm parses no payload itself. It flattens its context plus
 `ctx.remaining_accounts` into one positional `Vec<AccountInfo>`. It then calls

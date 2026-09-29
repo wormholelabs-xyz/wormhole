@@ -17,14 +17,15 @@ bytemuck = { version = "1.21", features = ["derive", "min_const_generics"] }
 # anchor-lang 1.1.2 pulls solana-* 3.x, which unifies with the mollusk and surfpool
 # test stack.
 anchor-lang = "=1.1.2"
-# `AnchorSerialize`/`AnchorDeserialize` are borsh traits. Pinned to the version
-# anchor-lang resolves, so the graph holds one `borsh`. `operational-core`'s
-# `raw_ix_data` implements them by hand.
-borsh = "=1.5.7"
+# `AnchorSerialize`/`AnchorDeserialize` are borsh traits; `anchor-adapter` implements
+# them by hand. Pinned to anchor-lang's resolution, so the graph holds one `borsh`.
+# Default features off so `anchor-adapter` builds `no_std`; anchor-lang enables `std`.
+borsh = { version = "=1.5.7", default-features = false }
 # `secp256k1_recover` for `quorum::verify_signature`: syscall on-chain, `k256` on host.
 solana-secp256k1-recover = "=3.2.0"
 global-accountant-definitions = { path = "crates/definitions" }
 accountant-operational-core = { path = "crates/operational-core" }
+accountant-anchor-adapter = { path = "crates/anchor-adapter" }
 accountant-backfill-core = { path = "crates/backfill-core" }
 accountant-test-fixtures = { path = "crates/test-fixtures" }
 accountant-test-harness = { path = "crates/test-harness" }

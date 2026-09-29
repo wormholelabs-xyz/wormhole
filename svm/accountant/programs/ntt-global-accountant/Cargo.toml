@@ -20,6 +20,7 @@ default = []
 no-entrypoint = []
 
 [dependencies]
+accountant-anchor-adapter.workspace = true
 accountant-operational-core.workspace = true
 anchor-lang.workspace = true
 global-accountant-definitions.workspace = true

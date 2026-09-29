@@ -10,8 +10,8 @@
 
 #![allow(unexpected_cfgs)]
 
-use accountant_operational_core::flatten_accounts;
-use accountant_operational_core::raw_ix_data::RawIxData;
+use accountant_anchor_adapter::flatten_accounts;
+use accountant_anchor_adapter::RawIxData;
 use anchor_lang::prelude::*;
 
 pub mod contexts;
