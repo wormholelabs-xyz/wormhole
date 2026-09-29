@@ -71,6 +71,14 @@ func (acct *Accountant) requestSolanaAudit() {
 	}
 }
 
+// solanaNttWatcher is the entry point for the NTT Solana watcher.
+func (acct *Accountant) solanaNttWatcher(ctx context.Context) error {
+	if acct.solanaNtt == nil {
+		return errors.New("acctwatch: the solana NTT backend is not configured")
+	}
+	return acct.solanaWatcher(ctx, acct.solanaNtt)
+}
+
 // solanaWatcher subscribes to the accountant program's logs, requests one audit, and drains
 // the logs. It returns on context cancellation, on a subscribe failure, and when the
 // subscription closes, so the supervisor restarts it.

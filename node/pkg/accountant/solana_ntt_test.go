@@ -459,3 +459,144 @@ func TestClassifySolanaNttTxError(t *testing.T) {
 		})
 	}
 }
+
+func TestSolanaNttCommitIsKeyedOnFamily(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		ntt           bool // the pending entry is NTT
+		viaNtt        bool // the commit comes from the NTT program
+		useContent    bool
+		wantPublished int
+		wantPending   int
+	}{
+		{name: "ntt content digest releases an ntt entry", ntt: true, viaNtt: true, useContent: true, wantPublished: 1},
+		{name: "ntt vaa digest from submit_vaas releases an ntt entry", ntt: true, viaNtt: true, wantPublished: 1},
+		{name: "wtt commit leaves an ntt entry", ntt: true, wantPending: 1},
+		{name: "wtt commit with the ntt content digest leaves an ntt entry", ntt: true, useContent: true, wantPending: 1},
+		{name: "ntt commit leaves a wtt entry", viaNtt: true, wantPending: 1},
+		{name: "ntt commit with the wtt content digest leaves a wtt entry", viaNtt: true, useContent: true, wantPending: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acct, _, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true, solanaNtt: true})
+			msg := solanaTestTransfer(t, 21)
+			if tt.ntt {
+				msg = solanaTestNttTransfer(t, 21, false)
+			}
+			_, err := acct.SubmitObservation(msg)
+			require.NoError(t, err)
+			pe := acct.pendingTransfers[msg.MessageIDString()]
+			require.NotNil(t, pe)
+
+			digest := pe.vaaDigest
+			if tt.useContent {
+				if tt.ntt {
+					digest = pe.solanaNttFields.contentDigest
+				} else {
+					digest = pe.solanaFields.contentDigest
+				}
+			}
+			b := acct.solana
+			if tt.viaNtt {
+				b = acct.solanaNtt
+			}
+			commit := newSolanaCommitEvent(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, digest, 0)
+			acct.handleSolanaLogEvent(solacctconn.LogEvent{Logs: commitLogs(b.program, commit)}, b)
+
+			assert.Len(t, msgChan, tt.wantPublished)
+			assert.Len(t, acct.pendingTransfers, tt.wantPending)
+		})
+	}
+}
+
+func TestAuditSolanaNttOwnPendingTransfers(t *testing.T) {
+	tests := []struct {
+		name          string
+		pending       func(f *solanaNttFixture) *solacctconn.OwnedAccount
+		accounted     bool
+		wantResubmit  int
+		wantPublished int
+	}{
+		{name: "absent and unaccounted resubmits", pending: func(f *solanaNttFixture) *solacctconn.OwnedAccount { return nil }, wantResubmit: 1},
+		{name: "lacks own signature resubmits", pending: func(f *solanaNttFixture) *solacctconn.OwnedAccount { return f.pendingAccount(t, nil) }, wantResubmit: 1},
+		{name: "has own signature waits", pending: func(f *solanaNttFixture) *solacctconn.OwnedAccount { return f.pendingAccount(t, []uint8{0}) }},
+		{name: "accounted finds the commit", pending: func(f *solanaNttFixture) *solacctconn.OwnedAccount { return nil }, accounted: true, wantPublished: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newSolanaNttFixture(t, ctx, true)
+			// A WTT transfer shares the map and stays out of the NTT audit.
+			wtt := solanaTestTransfer(t, 5)
+			_, err := f.acct.SubmitObservation(wtt)
+			require.NoError(t, err)
+
+			own := f.acct.snapshotSolanaOwnPendingTransfers(f.b, 0)
+			require.Len(t, own, 1)
+			transfer, exists := own[f.sub.pendingPDA]
+			require.True(t, exists)
+			require.Same(t, f.pe, transfer.pe)
+
+			f.conn.SetAccount(f.sub.pendingPDA, tt.pending(f))
+			if tt.accounted {
+				f.conn.SetAccount(f.sub.noreplayBucket, &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: solanaNoreplayBucket(t, f.fields.Sequence)})
+				sig := solana.Signature{0x42}
+				f.conn.SetSignaturesForAddress(f.sub.pendingPDA, []solana.Signature{sig})
+				commit := newSolanaCommitEvent(f.fields.Chain, f.fields.Emitter, f.fields.Sequence, f.fields.contentDigest, 0)
+				f.conn.SetTransaction(sig, &solacctconn.TransactionResult{LogMessages: commitLogs(f.b.program, commit)})
+			}
+
+			f.acct.auditSolanaOwnPendingTransfers(ctx, f.b, 0, 0, own)
+			assert.Len(t, f.b.subChan, tt.wantResubmit)
+			assert.Empty(t, f.acct.solana.subChan)
+			assert.Len(t, f.msgChan, tt.wantPublished)
+		})
+	}
+}
+
+// pendingAccount is the live-set NTT pending account of the fixture transfer at set index 0.
+func (f *solanaNttFixture) pendingAccount(t *testing.T, signedBy []uint8) *solacctconn.OwnedAccount {
+	t.Helper()
+	return &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: solanaPendingAccountData(t, f.fields.Chain, 0, f.fields.contentDigest, f.b.feePayer.PublicKey(), signedBy)}
+}
+
+func TestReobserveUnknownSolanaNttPendingAccount(t *testing.T) {
+	ctx := context.Background()
+	f := newSolanaNttFixture(t, ctx, false)
+
+	unknown := *f.fields
+	unknown.Sequence = 9_999
+	unknown.setContentDigest()
+	pda, err := derivePendingObservationsPDA(f.b.program, unknown.Chain, unknown.Emitter, unknown.Sequence, 0, unknown.contentDigest)
+	require.NoError(t, err)
+
+	signatureTxID := make([]byte, signatureTxIDLen)
+	for i := range signatureTxID {
+		signatureTxID[i] = 0xA0 + byte(i)
+	}
+	txID, err := newSolanaTxID(signatureTxID)
+	require.NoError(t, err)
+	wttData, err := encodeSubmitObservationsIxData(0, 0, make([]byte, submitSignatureLen), txID, fixtureTransferFields(t))
+	require.NoError(t, err)
+	nttData, err := encodeSubmitObservationsIxData(0, 0, make([]byte, submitSignatureLen), txID, &unknown)
+	require.NoError(t, err)
+
+	sig := solana.Signature{0x77}
+	f.conn.SetSignaturesForAddress(pda, []solana.Signature{sig})
+	f.conn.SetTransaction(sig, &solacctconn.TransactionResult{Instructions: []solacctconn.Instruction{
+		// A WTT-layout instruction under the NTT program fails to decode and is skipped.
+		{ProgramID: f.b.program, Data: wttData},
+		{ProgramID: f.b.program, Data: nttData},
+	}})
+
+	f.conn.ProgramAccounts = []solacctconn.ProgramAccount{{Address: pda, Data: solanaPendingAccountData(t, unknown.Chain, 0, unknown.contentDigest, solana.PublicKey{0x01}, nil)}}
+	own := f.acct.snapshotSolanaOwnPendingTransfers(f.b, 0)
+	f.acct.auditSolanaProgramPendingAccounts(ctx, f.b, 0, 0, own, map[solana.PublicKey]struct{}{})
+
+	require.Len(t, f.obsvReq, 1)
+	req := <-f.obsvReq
+	assert.Equal(t, uint32(unknown.Chain), req.ChainId)
+	assert.Equal(t, signatureTxID, req.TxHash)
+}

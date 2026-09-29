@@ -330,6 +330,10 @@ func (acct *Accountant) Start(ctx context.Context) error {
 		if err := supervisor.Run(ctx, "acctsolnttworker", common.WrapWithScissors(acct.solanaNttWorker, "acctsolnttworker")); err != nil {
 			return fmt.Errorf("failed to start solana NTT submit observation worker: %w", err)
 		}
+
+		if err := supervisor.Run(ctx, "acctsolnttwatcher", common.WrapWithScissors(acct.solanaNttWatcher, "acctsolnttwatcher")); err != nil {
+			return fmt.Errorf("failed to start solana NTT watcher: %w", err)
+		}
 	}
 
 	// Start the audit worker if not mocking/testing and either Global or NTT accountant are enabled

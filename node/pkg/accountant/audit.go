@@ -151,8 +151,8 @@ func (acct *Accountant) audit(ctx context.Context) error {
 		case <-ticker.C:
 			acct.runAudit(ctx)
 		case <-acct.solanaAuditRequests:
-			if acct.solanaEnabled() {
-				acct.runSolanaAudit(ctx, acct.solana)
+			for _, b := range acct.solanaBackends() {
+				acct.runSolanaAudit(ctx, b)
 			}
 		}
 	}
@@ -169,6 +169,10 @@ func (acct *Accountant) runAudit(ctx context.Context) {
 
 	if acct.solanaEnabled() {
 		acct.runSolanaAudit(ctx, acct.solana)
+	}
+
+	if acct.solanaNttEnabled() {
+		acct.runSolanaAudit(ctx, acct.solanaNtt)
 	}
 
 	if acct.wormchainNttEnabled() {
