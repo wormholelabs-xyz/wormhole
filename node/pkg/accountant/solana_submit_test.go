@@ -21,14 +21,6 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// TRANSFER_SIGNING_DIGEST and TRANSFER_SIGNATURE_TX_ID_SIGNING_DIGEST from svm/accountant
-// go_fixture_vectors.rs. Each is the digest a guardian signs for the transfer fixture.
-// The tx ids are SUBMIT_OBSERVATIONS_IX_DATA_TX_ID and SUBMIT_OBSERVATIONS_SIGNATURE_TX_ID.
-const (
-	fixtureTransferSigningDigestHex              = "58958c01d8a5db371a118b7a7d75b9d0aedae479b3f41837e583302d812b554d"
-	fixtureTransferSignatureTxIDSigningDigestHex = "e7a88aabdbccd270b421ac030d94e004d6b221bdbc1e9693b31751c16b14216c"
-)
-
 // mustSolanaTxID builds a solanaTxID from hex.
 func mustSolanaTxID(t *testing.T, s string) solanaTxID {
 	t.Helper()

@@ -137,11 +137,11 @@ test: build-devnet
     {{test_env}} cargo test
 
 # A bare `cargo test` fails to compile, because the `env!` addresses need values.
-# The recipe supplies them. Copy the printed hex into `solana_layout_test.go`.
+# The recipe supplies them. `just test` checks the written files.
 
-[doc("Print the WTT accountant layout fixtures pinned by node/pkg/accountant/solana_layout_test.go.")]
-go-fixtures:
-    {{test_env}} cargo test -p global-accountant --test go_fixture_vectors -- --nocapture
+[doc("Write the Go layout constants and fixtures of node/pkg/accountant from the WTT accountant.")]
+go-codegen:
+    GO_CODEGEN_WRITE=1 {{test_env}} cargo test -p global-accountant --test go_codegen
 
 # Verify a deploy-ready `.so` enforces a specific operator authority pubkey, independent of
 # the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
