@@ -195,6 +195,39 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 	return sub, nil
 }
 
+// readBatch reads up to submitObservationBatchSize messages within batchTimeout and drops
+// those no longer pending.
+func (acct *Accountant) readBatch(ctx context.Context, subChan chan *common.MessagePublication, tag string) ([]*common.MessagePublication, error) {
+	readCtx, cancel := context.WithTimeout(ctx, batchTimeout)
+	defer cancel()
+
+	msgs, err := common.ReadFromChannelWithTimeout[*common.MessagePublication](readCtx, subChan, acct.submitObservationBatchSize)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return nil, fmt.Errorf("failed to read messages from channel for %s: %w", tag, err)
+	}
+	if len(msgs) == 0 {
+		return nil, nil
+	}
+	return acct.removeCompleted(msgs), nil
+}
+
+// guardianIndex returns the live guardian set and this guardian's index in it. Callers
+// bound the index for their encoding.
+func (acct *Accountant) guardianIndex() (*common.GuardianSet, int, error) {
+	gs := acct.gst.Get()
+	if gs == nil {
+		return nil, 0, errors.New("failed to get the guardian set")
+	}
+	index, found := gs.KeyIndex(acct.guardianAddr)
+	if !found {
+		return nil, 0, errors.New("this guardian is not in the current guardian set")
+	}
+	if index < 0 {
+		return nil, 0, fmt.Errorf("negative guardian index %d", index)
+	}
+	return gs, index, nil
+}
+
 // handleSolanaBatch reads one batch from the backend channel and submits each observation
 // as its own transaction.
 func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend) error {

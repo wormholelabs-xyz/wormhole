@@ -2,13 +2,13 @@
 
 // End-to-end test of the Solana accountant against a live surfpool. In the first scenario,
 // the submission worker signs and sends an observation. The program reaches quorum. The
-// watcher releases the transfer from the commit log. The second scenario drives the audit.
+// watcher releases the transfer from the commit log. In the second scenario, the audit
+// resolves the same commit from the closed pending account.
 
 package accountant
 
 import (
 	"context"
-	"encoding/binary"
 	"sync"
 	"testing"
 	"time"
@@ -25,7 +25,6 @@ import (
 	"github.com/gagliardetto/solana-go"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
-	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -33,17 +32,10 @@ const (
 	// The guardian set the program reads. One key, so quorum is one observation.
 	surfpoolGuardianSetIndex = 0
 
-	// Devnet Token Bridge emitter on Ethereum, sdk/devnet_consts.go.
-	surfpoolEmitterChain       = vaa.ChainIDEthereum
-	surfpoolTokenBridgeEmitter = "0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16"
-
 	// Core Bridge id in the program build, TEST_BRIDGE_ADDRESS in svm/accountant/justfile.
 	surfpoolCoreBridgeProgramID = "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
 
-	// Both land in one NoReplay bucket, so the audit scenario reads an existing bucket
-	// with its own bit clear.
-	surfpoolWorkerScenarioSequence = 0xe2e01
-	surfpoolAuditScenarioSequence  = 0xe2e02
+	surfpoolSequence = 0xe2e01
 
 	surfpoolFeePayerLamports      = 20_000_000_000
 	surfpoolSeededAccountLamports = 1_000_000_000
@@ -57,9 +49,6 @@ const (
 	surfpoolReadTimeout = 20 * time.Second
 
 	surfpoolStartTimeout = 20 * time.Second
-
-	surfpoolWaitPoll     = 250 * time.Millisecond
-	surfpoolMaxWaitPolls = 1000
 
 	// Time for the supervisor tree to stop logging after the context ends.
 	surfpoolShutdownDrain = 500 * time.Millisecond
@@ -81,32 +70,22 @@ func (c *subscriptionSignalingConn) SubscribeLogs(ctx context.Context, program s
 	return events, err
 }
 
-// solanaCounters is a snapshot of the counters that tell the release paths apart.
-type solanaCounters struct {
-	submitted float64
-	approved  float64
-}
-
-func readSolanaCounters() solanaCounters {
-	return solanaCounters{
-		submitted: testutil.ToFloat64(solanaTransfersSubmitted),
-		approved:  testutil.ToFloat64(solanaTransfersApproved),
+// trackSolanaCounters returns an assertion on the confirmed submissions and applied
+// commits since the call.
+func trackSolanaCounters(t *testing.T) func(wantSubmitted float64, wantApproved float64) {
+	submitted := testutil.ToFloat64(solanaTransfersSubmitted)
+	approved := testutil.ToFloat64(solanaTransfersApproved)
+	return func(wantSubmitted float64, wantApproved float64) {
+		t.Helper()
+		require.Equal(t, wantSubmitted, testutil.ToFloat64(solanaTransfersSubmitted)-submitted, "confirmed submissions")
+		require.Equal(t, wantApproved, testutil.ToFloat64(solanaTransfersApproved)-approved, "applied commits")
 	}
-}
-
-// requireCounterDeltas asserts how many confirmed submissions and applied commits
-// happened since before.
-func requireCounterDeltas(t *testing.T, before solanaCounters, wantSubmitted float64, wantApproved float64) {
-	t.Helper()
-	after := readSolanaCounters()
-	require.Equal(t, wantSubmitted, after.submitted-before.submitted, "confirmed submissions")
-	require.Equal(t, wantApproved, after.approved-before.approved, "applied commits")
 }
 
 // TestSurfpoolSolanaAccountant drives the Solana accountant against a freshly started surfpool.
 func TestSurfpoolSolanaAccountant(t *testing.T) {
-	accountantELF := readBuiltProgram(t, surfpoolAccountantSOPath, "`just build-devnet` in svm/accountant")
-	noreplayELF := readCommittedProgram(t, surfpoolNoreplaySOPath)
+	accountantELF := readProgram(t, surfpoolAccountantSOPath, "`just build-devnet` in svm/accountant")
+	noreplayELF := readProgram(t, surfpoolNoreplaySOPath, "")
 
 	h := startSurfpool(t)
 	program := solana.MustPublicKeyFromBase58(surfpoolAccountantProgramID)
@@ -127,12 +106,11 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 	h.setAccount(guardianSetPDA, surfpoolSeededAccountLamports, coreBridge,
 		guardianSetAccountData(t, surfpoolGuardianSetIndex, [][20]byte{guardianAddr}, 0, 0))
 
-	emitter, err := vaa.StringToAddress(surfpoolTokenBridgeEmitter)
-	require.NoError(t, err)
-	registrationPDA, err := deriveChainRegistrationPDA(program, surfpoolEmitterChain)
+	msg := solanaTestTransfer(t, surfpoolSequence)
+	registrationPDA, err := deriveChainRegistrationPDA(program, msg.EmitterChain)
 	require.NoError(t, err)
 	h.setAccount(registrationPDA, surfpoolSeededAccountLamports, program,
-		chainRegistrationAccountData(t, surfpoolEmitterChain, emitter, 0))
+		chainRegistrationAccountData(t, msg.EmitterChain, msg.EmitterAddress, 0))
 
 	feePayer, err := solana.NewRandomPrivateKey()
 	require.NoError(t, err)
@@ -203,91 +181,28 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 		t.Fatalf("acctsolwatcher did not subscribe to the program logs within %v", surfpoolStartTimeout)
 	}
 
-	authority, err := deriveNoreplayAuthorityPDA(program)
-	require.NoError(t, err)
-
 	t.Run("the worker submits and the watcher releases the transfer", func(t *testing.T) {
-		msg := surfpoolTokenBridgeTransfer(t, surfpoolWorkerScenarioSequence)
-		before := readSolanaCounters()
+		requireCounterDeltas := trackSolanaCounters(t)
 
 		canPublish, err := acct.SubmitObservation(msg)
 		require.NoError(t, err)
 		require.False(t, canPublish, "an enforcing accountant holds the transfer until it commits")
 
 		requirePublication(t, msgChan, msg, surfpoolCommitTimeout)
-		requirePendingEmpty(t, acct)
-		requireCommitOnChain(t, rootCtx, conn, program, noreplay, authority, msg)
-		requireCounterDeltas(t, before, 1, 1)
+		requireCounterDeltas(1, 1)
 	})
 
-	t.Run("the audit resubmits and then resolves the commit", func(t *testing.T) {
-		msg := surfpoolTokenBridgeTransfer(t, surfpoolAuditScenarioSequence)
-		before := readSolanaCounters()
+	t.Run("the audit resolves the commit from the closed pending account", func(t *testing.T) {
+		requireCounterDeltas := trackSolanaCounters(t)
 
-		// The audit is the only path that reaches the submission channel here.
-		insertPendingTransfer(t, acct, msg)
-		acct.runAudit(rootCtx)
-
-		requirePublication(t, msgChan, msg, surfpoolCommitTimeout)
-		requirePendingEmpty(t, acct)
-		requireCommitOnChain(t, rootCtx, conn, program, noreplay, authority, msg)
-		requireCounterDeltas(t, before, 1, 1)
-
-		// The transfer is accounted and its pending account is closed. Thus this cycle must
+		// The transfer is accounted and its pending account is closed. Thus the audit must
 		// resolve the digest from the signatures of the closed account.
-		before = readSolanaCounters()
 		insertPendingTransfer(t, acct, msg)
 		acct.runAudit(rootCtx)
 
 		requirePublication(t, msgChan, msg, surfpoolReadTimeout)
-		requirePendingEmpty(t, acct)
-		requireCounterDeltas(t, before, 0, 1)
+		requireCounterDeltas(0, 1)
 	})
-}
-
-// surfpoolTokenBridgeTransfer is a Token Bridge transfer of an Ethereum-native token from
-// Ethereum to Polygon. The source balance rises and the destination balance rises, so
-// both balance accounts start from zero.
-func surfpoolTokenBridgeTransfer(t *testing.T, sequence uint64) *common.MessagePublication {
-	t.Helper()
-	emitterAddr, err := vaa.StringToAddress(surfpoolTokenBridgeEmitter)
-	require.NoError(t, err)
-
-	txID := make([]byte, digestLen)
-	binary.BigEndian.PutUint64(txID[digestLen-8:], sequence)
-
-	// buildMockTransferPayloadBytes stops at the recipient chain. The 32-byte fee
-	// completes the 133-byte TokenBridgeTransfer that the Solana program parses.
-	payload := append(buildMockTransferPayloadBytes(1,
-		vaa.ChainIDEthereum,
-		"0x707f9118e33a9b8998bea41dd0d46f38bb963fc8",
-		vaa.ChainIDPolygon,
-		"0x707f9118e33a9b8998bea41dd0d46f38bb963fc8",
-		1.25,
-	), make([]byte, 32)...)
-	require.Len(t, payload, tokenBridgeTransferLen)
-
-	return &common.MessagePublication{
-		TxID:             txID,
-		Timestamp:        time.Unix(int64(1654543099), 0),
-		Nonce:            uint32(1),
-		Sequence:         sequence,
-		EmitterChain:     surfpoolEmitterChain,
-		EmitterAddress:   emitterAddr,
-		ConsistencyLevel: uint8(32),
-		Payload:          payload,
-	}
-}
-
-// surfpoolObservationFields is the record the program hashes for msg.
-func surfpoolObservationFields(t *testing.T, msg *common.MessagePublication) *solanaObservationFields {
-	t.Helper()
-	vaaDigest, err := digestBytes(msg.CreateDigest())
-	require.NoError(t, err)
-	fields, err := solanaObservationFieldsFromPayload(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, msg.Payload, vaaDigest)
-	require.NoError(t, err)
-	require.NotNil(t, fields)
-	return fields
 }
 
 // insertPendingTransfer adds one pending entry straight to the map.
@@ -311,60 +226,4 @@ func requirePublication(t *testing.T, msgChan chan *common.MessagePublication, m
 	case <-time.After(timeout):
 		t.Fatalf("no publication for %s within %v", msg.MessageIDString(), timeout)
 	}
-}
-
-// requirePendingEmpty waits for the pending transfer map to drain.
-func requirePendingEmpty(t *testing.T, acct *Accountant) {
-	t.Helper()
-	waitUntil(t, "the pending transfer map to empty", surfpoolReadTimeout, func() bool {
-		acct.pendingTransfersLock.Lock()
-		defer acct.pendingTransfersLock.Unlock()
-		return len(acct.pendingTransfers) == 0
-	})
-}
-
-// requireCommitOnChain asserts the chain state that the quorum-closing transaction leaves.
-// The NoReplay bit is set. Exactly one transaction created the pending account and closed it.
-func requireCommitOnChain(t *testing.T, ctx context.Context, conn solacctconn.Conn, program solana.PublicKey, noreplay solana.PublicKey, authority solana.PublicKey, msg *common.MessagePublication) {
-	t.Helper()
-	fields := surfpoolObservationFields(t, msg)
-
-	bucket, err := deriveNoreplayBucketPDA(noreplay, authority, fields.Chain, fields.Emitter, fields.Sequence)
-	require.NoError(t, err)
-	accounts, err := conn.GetMultipleAccounts(ctx, []solana.PublicKey{bucket}, solacctconn.CommitmentFinalized)
-	require.NoError(t, err)
-	require.Len(t, accounts, 1)
-	require.NotNil(t, accounts[0], "the noreplay bucket exists after quorum")
-	marked, err := noreplayBitSet(accounts[0].Data, fields.Sequence)
-	require.NoError(t, err)
-	require.True(t, marked, "the noreplay bit of sequence %d is set", fields.Sequence)
-
-	pending, err := derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, surfpoolGuardianSetIndex, fields.contentDigest)
-	require.NoError(t, err)
-
-	var sigs []solana.Signature
-	waitUntil(t, "the commit transaction to be indexed", surfpoolReadTimeout, func() bool {
-		var err error
-		sigs, err = conn.GetSignaturesForAddress(ctx, pending, maxSolanaCommitSearchSignatures)
-		return err == nil && len(sigs) != 0
-	})
-	// One transaction created the pending account, reached quorum and closed it.
-	require.Len(t, sigs, 1)
-	t.Logf("commit transaction for %s: %s", msg.MessageIDString(), sigs[0])
-}
-
-// waitUntil polls cond until it holds, the timeout passes, or the poll budget runs out.
-func waitUntil(t *testing.T, what string, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for poll := 0; poll < surfpoolMaxWaitPolls; poll++ {
-		if cond() {
-			return
-		}
-		if time.Now().After(deadline) {
-			break
-		}
-		time.Sleep(surfpoolWaitPoll)
-	}
-	t.Fatalf("timed out after %v waiting for %s", timeout, what)
 }

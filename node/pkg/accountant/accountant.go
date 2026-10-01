@@ -56,10 +56,11 @@ type (
 		msg         *common.MessagePublication
 		msgId       string
 		digest      string
-		vaaDigest   [digestLen]byte
 		isNTT       bool
 		enforceFlag bool
 
+		// vaaDigest is the decoded digest. newPendingEntry sets it while the Solana backend is enabled.
+		vaaDigest [digestLen]byte
 		// solanaFields is the record the Solana accountant program hashes. newPendingEntry sets it
 		// on Token Bridge entries while the Solana backend is enabled.
 		solanaFields *solanaObservationFields
@@ -196,6 +197,7 @@ func NewAccountant(
 
 // Start initializes the accountant and starts the worker and watcher runnables.
 func (acct *Accountant) Start(ctx context.Context) error {
+	acct.logger.Debug("entering Start", zap.Bool("enforceFlag", acct.enforceFlag), zap.Bool("baseEnabled", acct.baseEnabled()), zap.Bool("nttEnabled", acct.nttEnabled()), zap.Int("submitObservationBatchSize", acct.submitObservationBatchSize))
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
 
@@ -204,8 +206,9 @@ func (acct *Accountant) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to configure the solana accountant: %w", err)
 	}
 	acct.solana = solBackend
-
-	acct.logger.Debug("entering Start", zap.Bool("enforceFlag", acct.enforceFlag), zap.Bool("baseEnabled", acct.baseEnabled()), zap.Bool("solanaEnabled", acct.solanaEnabled()), zap.Bool("nttEnabled", acct.nttEnabled()), zap.Int("submitObservationBatchSize", acct.submitObservationBatchSize))
+	if acct.solanaEnabled() {
+		acct.logger.Debug("solana accountant enabled", zap.Bool("baseEnabled", acct.baseEnabled()))
+	}
 
 	if !acct.baseEnabled() && !acct.nttEnabled() {
 		return fmt.Errorf("start should not be called when neither base nor NTT accountant are enabled")
@@ -474,12 +477,13 @@ func digestBytes(digest string) ([digestLen]byte, error) {
 	return [digestLen]byte(raw), nil
 }
 
-// processCommittedDigest publishes or drops a transfer that a backend reports as committed
-// under digest got. Every backend uses this one branch. The VAA digest always matches.
-// If acceptContent is true, the Solana content digest also matches. submit_observations
-// commits that digest. It returns true when it publishes the transfer.
+// processCommittedDigest publishes or drops a transfer that the Solana backend reports as
+// committed under digest got. The VAA digest always matches. If acceptContent is true, the
+// Solana content digest also matches. submit_observations commits that digest. It returns
+// true when it publishes the transfer.
 //
 // SECURITY: the caller holds pendingTransfersLock.
+// SECURITY: precondition: the Solana backend is enabled, so newPendingEntry set vaaDigest and solanaFields.
 // SECURITY: precondition msgId != "". A violation leaves the transfer pending.
 func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, acceptContent bool, source string) bool {
 	if msgId == "" {
@@ -513,18 +517,23 @@ func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, accep
 	return false
 }
 
-// newPendingEntry builds a pending transfer. It decodes the VAA digest and, for a Token
-// Bridge transfer while Solana is enabled, builds the Solana observation record.
+// newPendingEntry builds a pending transfer. While Solana is enabled, it decodes the VAA
+// digest of every entry and builds the Solana observation record of a Token Bridge entry.
 //
-// SECURITY: postcondition: while Solana is enabled, a Token Bridge entry has solanaFields.
-// An error comes from the message itself.
+// SECURITY: postcondition: while Solana is enabled, every entry has vaaDigest and a Token
+// Bridge entry has solanaFields. processCommittedDigest compares against both.
+// An error comes from the message itself and occurs only while Solana is enabled.
 func (acct *Accountant) newPendingEntry(msg *common.MessagePublication, msgId string, digest string, isNTT bool, enforceFlag bool) (*pendingEntry, error) {
+	if !acct.solanaEnabled() {
+		return &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}, nil
+	}
+
 	vaaDigest, err := digestBytes(digest)
 	if err != nil {
 		return nil, err
 	}
 	pe := &pendingEntry{msg: msg, msgId: msgId, digest: digest, vaaDigest: vaaDigest, isNTT: isNTT, enforceFlag: enforceFlag}
-	if !acct.solanaEnabled() || isNTT {
+	if isNTT {
 		return pe, nil
 	}
 

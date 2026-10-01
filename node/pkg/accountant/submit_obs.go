@@ -65,17 +65,30 @@ func (acct *Accountant) worker(ctx context.Context, isNTT bool) error {
 // handleBatch reads a batch of events from the channel, either until a timeout occurs or the batch is full,
 // and submits them to the smart contract.
 func (acct *Accountant) handleBatch(ctx context.Context, subChan chan *common.MessagePublication, wormchainConn AccountantWormchainConn, contract string, prefix []byte, tag string) error {
-	msgs, err := acct.readBatch(ctx, subChan, tag)
-	if err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(ctx, batchTimeout)
+	defer cancel()
+
+	msgs, err := common.ReadFromChannelWithTimeout[*common.MessagePublication](ctx, subChan, acct.submitObservationBatchSize)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("failed to read messages from channel for %s: %w", tag, err)
 	}
+
+	if len(msgs) != 0 {
+		msgs = acct.removeCompleted(msgs)
+	}
+
 	if len(msgs) == 0 {
 		return nil
 	}
 
-	gs, guardianIndex, err := acct.guardianIndex()
-	if err != nil {
-		return fmt.Errorf("%s: %w", tag, err)
+	gs := acct.gst.Get()
+	if gs == nil {
+		return fmt.Errorf("failed to get guardian set for %s", tag)
+	}
+
+	guardianIndex, found := gs.KeyIndex(acct.guardianAddr)
+	if !found {
+		return fmt.Errorf("failed to get guardian index for %s", tag)
 	}
 
 	if guardianIndex > math.MaxUint32 {
@@ -85,39 +98,6 @@ func (acct *Accountant) handleBatch(ctx context.Context, subChan chan *common.Me
 	acct.submitObservationsToContract(msgs, gs.Index, uint32(guardianIndex), wormchainConn, contract, prefix, tag) // #nosec G115 -- This is checked above
 	transfersSubmitted.Add(float64(len(msgs)))
 	return nil
-}
-
-// readBatch reads up to submitObservationBatchSize messages within batchTimeout and drops
-// those no longer pending.
-func (acct *Accountant) readBatch(ctx context.Context, subChan chan *common.MessagePublication, tag string) ([]*common.MessagePublication, error) {
-	readCtx, cancel := context.WithTimeout(ctx, batchTimeout)
-	defer cancel()
-
-	msgs, err := common.ReadFromChannelWithTimeout[*common.MessagePublication](readCtx, subChan, acct.submitObservationBatchSize)
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return nil, fmt.Errorf("failed to read messages from channel for %s: %w", tag, err)
-	}
-	if len(msgs) == 0 {
-		return nil, nil
-	}
-	return acct.removeCompleted(msgs), nil
-}
-
-// guardianIndex returns the live guardian set and this guardian's index in it. Callers
-// bound the index for their encoding.
-func (acct *Accountant) guardianIndex() (*common.GuardianSet, int, error) {
-	gs := acct.gst.Get()
-	if gs == nil {
-		return nil, 0, errors.New("failed to get the guardian set")
-	}
-	index, found := gs.KeyIndex(acct.guardianAddr)
-	if !found {
-		return nil, 0, errors.New("this guardian is not in the current guardian set")
-	}
-	if index < 0 {
-		return nil, 0, fmt.Errorf("negative guardian index %d", index)
-	}
-	return gs, index, nil
 }
 
 // removeCompleted drops any messages that are no longer in the pending transfer map. This is to handle the case where the contract reports

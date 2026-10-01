@@ -6,14 +6,12 @@
 package accountant
 
 import (
-	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
@@ -66,13 +65,12 @@ const surfpoolWatchdogScript = `"$@" </dev/null & child=$!; read -r _; kill "$ch
 
 // surfpoolHarness is one running surfpool instance and its JSON-RPC client.
 type surfpoolHarness struct {
-	t            *testing.T
-	rpcURL       string
-	wsURL        string
-	client       *http.Client
-	healthClient *http.Client
-	logDir       string
-	exited       <-chan struct{}
+	t      *testing.T
+	rpcURL string
+	wsURL  string
+	client *rpc.Client
+	logDir string
+	exited <-chan struct{}
 }
 
 // surfpoolBinary locates surfpool on PATH, then at ~/.local/bin/surfpool, the path the
@@ -90,23 +88,15 @@ func surfpoolBinary(t *testing.T) string {
 	return ""
 }
 
-// readBuiltProgram returns the bytes of a program built from this tree. The test skips
-// until buildCommand has produced it.
-func readBuiltProgram(t *testing.T, path string, buildCommand string) []byte {
+// readProgram returns the bytes of a program image. With a buildCommand, the test skips
+// until that command has produced the image. Without one, the image is checked in.
+func readProgram(t *testing.T, path string, buildCommand string) []byte {
 	t.Helper()
 	elf, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil && buildCommand != "" {
 		t.Skipf("%s is missing; run %s first: %v", path, buildCommand, err)
 	}
-	require.NotEmpty(t, elf, path)
-	return elf
-}
-
-// readCommittedProgram returns the bytes of a program image checked into the repository.
-func readCommittedProgram(t *testing.T, path string) []byte {
-	t.Helper()
-	elf, err := os.ReadFile(path)
-	require.NoError(t, err, "committed program image")
+	require.NoError(t, err, path)
 	require.NotEmpty(t, elf, path)
 	return elf
 }
@@ -149,9 +139,7 @@ func startSurfpool(t *testing.T) *surfpoolHarness {
 	workdir, err := os.MkdirTemp("", fmt.Sprintf("ga-guardian-e2e-%d-", rpcPort))
 	require.NoError(t, err)
 
-	stdout, err := os.Create(filepath.Join(workdir, "surfpool.stdout.log"))
-	require.NoError(t, err)
-	stderr, err := os.Create(filepath.Join(workdir, "surfpool.stderr.log"))
+	logFile, err := os.Create(filepath.Join(workdir, "surfpool.log"))
 	require.NoError(t, err)
 
 	cmd := exec.Command("/bin/sh", "-c", surfpoolWatchdogScript, "sh", //nolint:gosec // bin comes from PATH or the install location
@@ -169,8 +157,8 @@ func startSurfpool(t *testing.T) *surfpoolHarness {
 		"--offline",
 	)
 	cmd.Dir = workdir
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
 	// Own process group: a terminal interrupt reaches the test, which closes the watchdog pipe.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	watchdog, err := cmd.StdinPipe()
@@ -184,20 +172,21 @@ func startSurfpool(t *testing.T) *surfpoolHarness {
 		close(exited)
 	}()
 
+	rpcURL := fmt.Sprintf("http://127.0.0.1:%d", rpcPort)
+	client := rpc.New(rpcURL)
 	t.Cleanup(func() {
 		stopSurfpool(t, cmd, watchdog, exited)
-		stdout.Close()
-		stderr.Close()
+		_ = client.Close()
+		logFile.Close()
 	})
 
 	h := &surfpoolHarness{
-		t:            t,
-		rpcURL:       fmt.Sprintf("http://127.0.0.1:%d", rpcPort),
-		wsURL:        fmt.Sprintf("ws://127.0.0.1:%d", wsPort),
-		client:       &http.Client{Timeout: surfpoolRPCTimeout},
-		healthClient: &http.Client{Timeout: surfpoolHealthTimeout},
-		logDir:       workdir,
-		exited:       exited,
+		t:      t,
+		rpcURL: rpcURL,
+		wsURL:  fmt.Sprintf("ws://127.0.0.1:%d", wsPort),
+		client: client,
+		logDir: workdir,
+		exited: exited,
 	}
 	h.waitForHealth()
 	return h
@@ -234,10 +223,15 @@ func (h *surfpoolHarness) waitForHealth() {
 			h.t.Fatalf("surfpool exited before its RPC became healthy (logs in %s)", h.logDir)
 		default:
 		}
-		_, err := h.rpcCall(h.healthClient, "getHealth", []any{})
-		if err == nil {
+		ctx, cancel := context.WithTimeout(context.Background(), surfpoolHealthTimeout)
+		status, err := h.client.GetHealth(ctx)
+		cancel()
+		if err == nil && status == rpc.HealthOk {
 			h.t.Logf("surfpool RPC ready at %s", h.rpcURL)
 			return
+		}
+		if err == nil {
+			err = fmt.Errorf("getHealth returned %q", status)
 		}
 		lastErr = err
 		time.Sleep(surfpoolReadyPoll)
@@ -245,48 +239,13 @@ func (h *surfpoolHarness) waitForHealth() {
 	h.t.Fatalf("surfpool RPC at %s was not healthy within %v: %v (logs in %s)", h.rpcURL, surfpoolBootTimeout, lastErr, h.logDir)
 }
 
-// rpcCall sends one JSON-RPC request and returns its result.
-func (h *surfpoolHarness) rpcCall(client *http.Client, method string, params any) (json.RawMessage, error) {
-	payload, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  method,
-		"params":  params,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := client.Post(h.rpcURL, "application/json", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s: http status %d", method, resp.StatusCode)
-	}
-
-	var envelope struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
-		return nil, fmt.Errorf("%s: decode response: %w", method, err)
-	}
-	if envelope.Error != nil {
-		return nil, fmt.Errorf("%s: rpc error %d: %s", method, envelope.Error.Code, envelope.Error.Message)
-	}
-	return envelope.Result, nil
-}
-
 // cheatCode sends one surfnet_* request, failing the test on any error.
-func (h *surfpoolHarness) cheatCode(method string, params any) {
+func (h *surfpoolHarness) cheatCode(method string, params []any) {
 	h.t.Helper()
-	_, err := h.rpcCall(h.client, method, params)
-	require.NoError(h.t, err, "cheat code %s", method)
+	ctx, cancel := context.WithTimeout(context.Background(), surfpoolRPCTimeout)
+	defer cancel()
+	var result any
+	require.NoError(h.t, h.client.RPCCallForInto(ctx, &result, method, params), "cheat code %s", method)
 }
 
 // writeProgram loads an ELF as an executable program account.

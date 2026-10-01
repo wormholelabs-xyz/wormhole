@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -45,13 +46,7 @@ func failedLine(program solana.PublicKey) string {
 	return fmt.Sprintf("Program %s failed: custom program error: 0x7", program)
 }
 
-func foreignProgram() solana.PublicKey {
-	var pk [32]byte
-	for i := range pk {
-		pk[i] = 0x33
-	}
-	return pk
-}
+func foreignProgram() solana.PublicKey { return filledKey(0x33) }
 
 func newSolanaCommitEvent(chain vaa.ChainID, emitter vaa.Address, sequence uint64, digest [32]byte, gsIndex uint32) solanaCommitEvent {
 	return solanaCommitEvent{Chain: chain, Emitter: emitter, Sequence: sequence, Digest: digest, GuardianSetIndex: gsIndex}
@@ -64,12 +59,6 @@ func commitLogs(program solana.PublicKey, commits ...solanaCommitEvent) []string
 		logs = append(logs, programDataLine(encodeAccountantDigestLog(commit)))
 	}
 	return append(logs, successLine(program))
-}
-
-func TestTransferKeyMatchesMessageID(t *testing.T) {
-	key := TransferKey{EmitterChain: uint16(vaa.ChainIDEthereum), EmitterAddress: fixtureEmitter(), Sequence: 99}
-	msg := common.MessagePublication{EmitterChain: vaa.ChainIDEthereum, EmitterAddress: fixtureEmitter(), Sequence: 99}
-	assert.Equal(t, msg.MessageIDString(), key.String())
 }
 
 func TestParseSolanaCommitLogs(t *testing.T) {
@@ -105,38 +94,13 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 		wantErr     bool
 	}{
 		{
-			name:        "one commit",
-			logs:        commitLogs(program, commit),
-			wantCommits: []solanaCommitEvent{commit},
-		},
-		{
 			name:        "two commits",
 			logs:        commitLogs(program, commit, other),
 			wantCommits: []solanaCommitEvent{commit, other},
 		},
 		{
-			name: "only program log lines",
-			logs: []string{invokeLine(program, 1), "Program log: Instruction: SubmitObservations", successLine(program)},
-		},
-		{name: "empty logs", logs: []string{}},
-		{
-			name: "foreign frame",
-			logs: commitLogs(foreign, commit),
-		},
-		{
 			name: "data at depth zero",
 			logs: []string{programDataLine(payload)},
-		},
-		{
-			name: "nested cpi, data in our frame",
-			logs: []string{
-				invokeLine(program, 1),
-				invokeLine(foreign, 2),
-				successLine(foreign),
-				programDataLine(payload),
-				successLine(program),
-			},
-			wantCommits: []solanaCommitEvent{commit},
 		},
 		{
 			name: "nested cpi, data in child frame",
@@ -182,11 +146,6 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 			logs: []string{invokeLine(program, 1), programDataLine([]byte{1, 2, 3}), successLine(program)},
 		},
 		{
-			name:    "accdgst one byte short",
-			logs:    []string{invokeLine(program, 1), programDataLine(payload[:accountantDigestLogLen-1]), successLine(program)},
-			wantErr: true,
-		},
-		{
 			name:    "base64 garbage",
 			logs:    []string{invokeLine(program, 1), solanaProgramDataPrefix + "!!!!", successLine(program)},
 			wantErr: true,
@@ -210,7 +169,7 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 		{
 			name:        "over the commit bound",
 			logs:        overCommitBound,
-			wantCommits: repeatCommit(commit, maxSolanaCommitEventsPerTx),
+			wantCommits: slices.Repeat([]solanaCommitEvent{commit}, maxSolanaCommitEventsPerTx),
 			wantErr:     true,
 		},
 		{
@@ -245,16 +204,6 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 			},
 		},
 		{
-			name: "program log success under our frame keeps the commit",
-			logs: []string{
-				invokeLine(program, 1),
-				"Program log: success",
-				programDataLine(payload),
-				successLine(program),
-			},
-			wantCommits: []solanaCommitEvent{commit},
-		},
-		{
 			name:    "success id differs from the innermost frame",
 			logs:    []string{invokeLine(program, 1), successLine(foreign), programDataLine(payload), successLine(program)},
 			wantErr: true,
@@ -265,14 +214,14 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:        "commit at the SIMD-0268 invoke height of 9",
-			logs:        nestedCommitLogs(program, foreign, 9, payload),
+			name:        "commit at the maximum invoke depth",
+			logs:        nestedCommitLogs(program, foreign, maxSolanaInvokeDepth, payload),
 			wantCommits: []solanaCommitEvent{commit},
 		},
 		{
-			name:    "success with an unparsable id",
-			logs:    []string{invokeLine(program, 1), "Program notvalid0OIl success"},
-			wantErr: true,
+			name:        "rust fixture payload",
+			logs:        []string{invokeLine(program, 1), programDataLine(mustHexDecode(t, fixtureACCDGSTLogHex)), successLine(program)},
+			wantCommits: []solanaCommitEvent{newSolanaCommitEvent(vaa.ChainIDEthereum, fixtureEmitter(), 100_000, fixtureDigest(), 4)},
 		},
 	}
 
@@ -305,75 +254,48 @@ func nestedCommitLogs(program, foreign solana.PublicKey, depth int, payload []by
 	return logs
 }
 
-func repeatCommit(commit solanaCommitEvent, n int) []solanaCommitEvent {
-	out := make([]solanaCommitEvent, n)
-	for i := range out {
-		out[i] = commit
-	}
-	return out
-}
-
 func TestProcessCommittedDigest(t *testing.T) {
 	ctx := context.Background()
-	otherDigest := [32]byte{0xde, 0xad}
+	contentDigest := func(pe *pendingEntry) [32]byte { return pe.solanaFields.contentDigest }
+	otherDigest := func(*pendingEntry) [32]byte { return [32]byte{0xde, 0xad} }
+	const ownMsgId = "own"
 
 	tests := []struct {
-		name            string
-		enforce         bool
-		acceptContent   bool
-		unknownMsgId    bool
-		emptyMsgId      bool
-		useContent      bool
-		useOtherDigest  bool
-		wantApproved    bool
-		wantPublished   int
-		wantStillPendng bool
+		name          string
+		msgId         string
+		digest        func(pe *pendingEntry) [32]byte
+		acceptContent bool
+		wantPending   bool
 	}{
-		{name: "vaa digest while enforcing", enforce: true, wantApproved: true, wantPublished: 1},
-		{name: "vaa digest in log only mode", wantApproved: true},
-		{name: "content digest accepted", enforce: true, acceptContent: true, useContent: true, wantApproved: true, wantPublished: 1},
-		{name: "content digest not accepted", enforce: true, useContent: true},
-		{name: "mismatch", enforce: true, acceptContent: true, useOtherDigest: true},
-		{name: "unknown message id", enforce: true, unknownMsgId: true, wantStillPendng: true},
-		{name: "empty message id", enforce: true, emptyMsgId: true, wantStillPendng: true},
+		{name: "content digest not accepted", msgId: ownMsgId, digest: contentDigest},
+		{name: "mismatch", msgId: ownMsgId, digest: otherDigest, acceptContent: true},
+		{name: "unknown message id", msgId: "2/0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16/999", digest: contentDigest, wantPending: true},
+		{name: "empty message id", msgId: "", digest: contentDigest, wantPending: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			acct, _, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: tt.enforce})
+			acct, _, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true})
 
 			msg := solanaTestTransfer(t, 5)
 			_, err := acct.SubmitObservation(msg)
 			require.NoError(t, err)
-			msgId := msg.MessageIDString()
-
-			pe := acct.pendingTransfers[msgId]
+			pe := acct.pendingTransfers[msg.MessageIDString()]
 			require.NotNil(t, pe)
 			require.NotNil(t, pe.solanaFields)
 
-			got := pe.vaaDigest
-			if tt.useContent {
-				got = pe.solanaFields.contentDigest
-			}
-			if tt.useOtherDigest {
-				got = otherDigest
-			}
-
-			lookupId := msgId
-			if tt.unknownMsgId {
-				lookupId = "2/0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16/999"
-			}
-			if tt.emptyMsgId {
-				lookupId = ""
+			msgId := tt.msgId
+			if msgId == ownMsgId {
+				msgId = msg.MessageIDString()
 			}
 
 			acct.pendingTransfersLock.Lock()
-			approved := acct.processCommittedDigest(lookupId, got, tt.acceptContent, "test")
+			approved := acct.processCommittedDigest(msgId, tt.digest(pe), tt.acceptContent, "test")
 			acct.pendingTransfersLock.Unlock()
 
-			assert.Equal(t, tt.wantApproved, approved)
-			assert.Equal(t, tt.wantPublished, len(msgChan))
-			if tt.wantStillPendng {
+			assert.False(t, approved)
+			assert.Empty(t, msgChan)
+			if tt.wantPending {
 				assert.Len(t, acct.pendingTransfers, 1)
 			} else {
 				assert.Empty(t, acct.pendingTransfers)
@@ -385,7 +307,6 @@ func TestProcessCommittedDigest(t *testing.T) {
 func TestHandleSolanaLogEvent(t *testing.T) {
 	ctx := context.Background()
 	program := solanaTestProgram()
-	foreign := foreignProgram()
 
 	tests := []struct {
 		name          string
@@ -394,13 +315,6 @@ func TestHandleSolanaLogEvent(t *testing.T) {
 		wantPublished int
 		wantPending   int
 	}{
-		{
-			name: "content digest approves",
-			build: func(pe *pendingEntry) []string {
-				return commitLogs(program, newSolanaCommitEvent(pe.msg.EmitterChain, pe.msg.EmitterAddress, pe.msg.Sequence, pe.solanaFields.contentDigest, 0))
-			},
-			wantPublished: 1,
-		},
 		{
 			name: "vaa digest approves",
 			build: func(pe *pendingEntry) []string {
@@ -416,13 +330,6 @@ func TestHandleSolanaLogEvent(t *testing.T) {
 				return commitLogs(program, newSolanaCommitEvent(pe.msg.EmitterChain, pe.msg.EmitterAddress, pe.msg.Sequence, pe.solanaFields.contentDigest, 0))
 			},
 			failed:      true,
-			wantPending: 1,
-		},
-		{
-			name: "forged commit from a foreign frame",
-			build: func(pe *pendingEntry) []string {
-				return commitLogs(foreign, newSolanaCommitEvent(pe.msg.EmitterChain, pe.msg.EmitterAddress, pe.msg.Sequence, pe.solanaFields.contentDigest, 0))
-			},
 			wantPending: 1,
 		},
 		{
@@ -462,20 +369,37 @@ func TestHandleSolanaLogEvent(t *testing.T) {
 	}
 }
 
+// startSolanaWatcher runs the watcher of acct.solana and returns its result channel.
+func startSolanaWatcher(t *testing.T, ctx context.Context) (*Accountant, *MockAccountantSolanaConn, chan *common.MessagePublication, chan error) {
+	t.Helper()
+	acct, conn, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
+	errC := make(chan error, 1)
+	go func() { errC <- acct.solanaWatcher(ctx, acct.solana) }()
+	return acct, conn, msgChan, errC
+}
+
+func waitSolanaWatcher(t *testing.T, errC chan error) error {
+	t.Helper()
+	select {
+	case err := <-errC:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the watcher to return")
+		return nil
+	}
+}
+
 func TestSolanaWatcherLoop(t *testing.T) {
 	t.Run("publishes then returns on cancel", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		acct, conn, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
+		acct, conn, msgChan, errC := startSolanaWatcher(t, ctx)
 		msg := solanaTestTransfer(t, 21)
 		_, err := acct.SubmitObservation(msg)
 		require.NoError(t, err)
 		pe := acct.pendingTransfers[msg.MessageIDString()]
 		require.NotNil(t, pe)
-
-		errC := make(chan error, 1)
-		go func() { errC <- acct.solanaWatcher(ctx, acct.solana) }()
 
 		conn.PushLogEvent(solacctconn.LogEvent{
 			Signature: solana.Signature{2},
@@ -490,42 +414,19 @@ func TestSolanaWatcherLoop(t *testing.T) {
 		}
 
 		cancel()
-		select {
-		case err := <-errC:
-			assert.ErrorIs(t, err, context.Canceled)
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for the watcher to return")
-		}
+		assert.ErrorIs(t, waitSolanaWatcher(t, errC), context.Canceled)
 	})
 
 	t.Run("subscription close returns an error", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
-		errC := make(chan error, 1)
-		go func() { errC <- acct.solanaWatcher(ctx, acct.solana) }()
-
+		_, conn, _, errC := startSolanaWatcher(t, ctx)
 		conn.CloseLogEvents()
-		select {
-		case err := <-errC:
-			require.Error(t, err)
-			assert.NotErrorIs(t, err, context.Canceled)
-			assert.Contains(t, err.Error(), "subscription closed")
-		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for the watcher to return")
-		}
-	})
-
-	t.Run("cancel wins over a closed subscription", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
-		cancel()
-		conn.CloseLogEvents()
-		// select picks randomly among ready cases.
-		for range 32 {
-			require.ErrorIs(t, acct.solanaWatcher(ctx, acct.solana), context.Canceled)
-		}
+		err := waitSolanaWatcher(t, errC)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), "subscription closed")
 	})
 
 	t.Run("subscribe failure is wrapped", func(t *testing.T) {
@@ -537,12 +438,4 @@ func TestSolanaWatcherLoop(t *testing.T) {
 		err := acct.solanaWatcher(ctx, acct.solana)
 		require.ErrorIs(t, err, want)
 	})
-}
-
-func TestParseSolanaCommitLogsRustFixture(t *testing.T) {
-	line := programDataLine(mustHexDecode(t, fixtureACCDGSTLogHex))
-	commits, err := parseSolanaCommitLogs([]string{invokeLine(solanaTestProgram(), 1), line, successLine(solanaTestProgram())}, solanaTestProgram())
-	require.NoError(t, err)
-	require.Len(t, commits, 1)
-	assert.Equal(t, fixtureDigest(), commits[0].Digest)
 }

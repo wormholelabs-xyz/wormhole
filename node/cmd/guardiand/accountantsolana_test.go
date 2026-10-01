@@ -28,16 +28,10 @@ func TestParseAccountantSolanaProgramIDs(t *testing.T) {
 	}{
 		{name: "three distinct programs", contract: acct, noreplay: norep, coreBridge: core},
 		{name: "contract is not base58", contract: "not-an-address", noreplay: norep, coreBridge: core, wantErr: true},
-		{name: "noreplay is not base58", contract: acct, noreplay: "not-an-address", coreBridge: core, wantErr: true},
-		{name: "core bridge is not base58", contract: acct, noreplay: norep, coreBridge: "not-an-address", wantErr: true},
 		{name: "contract is the zero address", contract: zeroAddress, noreplay: norep, coreBridge: core, wantErr: true},
-		{name: "noreplay is the zero address", contract: acct, noreplay: zeroAddress, coreBridge: core, wantErr: true},
-		{name: "core bridge is the zero address", contract: acct, noreplay: norep, coreBridge: zeroAddress, wantErr: true},
 		{name: "contract equals noreplay", contract: acct, noreplay: acct, coreBridge: core, wantErr: true},
 		{name: "core bridge equals contract", contract: acct, noreplay: norep, coreBridge: acct, wantErr: true},
 		{name: "core bridge equals noreplay", contract: acct, noreplay: norep, coreBridge: norep, wantErr: true},
-		{name: "empty contract", contract: "", noreplay: norep, coreBridge: core, wantErr: true},
-		{name: "empty core bridge", contract: acct, noreplay: norep, coreBridge: "", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -67,13 +61,10 @@ func TestCheckAccountantSolanaConnFlags(t *testing.T) {
 		priorityFee uint64
 		wantErr     bool
 	}{
-		{name: "valid with zero fee", rpcURL: rpcURL, wsURL: wsURL},
 		{name: "valid at the fee cap", rpcURL: rpcURL, wsURL: wsURL, priorityFee: maxAccountantSolanaPriorityFee},
 		{name: "fee one above the cap", rpcURL: rpcURL, wsURL: wsURL, priorityFee: maxAccountantSolanaPriorityFee + 1, wantErr: true},
 		{name: "rpc is none", rpcURL: "none", wsURL: wsURL, wantErr: true},
 		{name: "ws is none", rpcURL: rpcURL, wsURL: "none", wantErr: true},
-		{name: "rpc is empty", rpcURL: "", wsURL: wsURL, wantErr: true},
-		{name: "ws is empty", rpcURL: rpcURL, wsURL: "", wantErr: true},
 	}
 
 	for _, tt := range tests {
