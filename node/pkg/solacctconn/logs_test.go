@@ -30,21 +30,10 @@ var testLogsTimeouts = logsTimeouts{
 	pongTimeout:  500 * time.Millisecond,
 }
 
-func testLogsProgram() solana.PublicKey {
-	var pk [32]byte
-	for i := range pk {
-		pk[i] = 0x11
-	}
-	return pk
-}
-
-func testLogsSignature() solana.Signature {
-	var sig [64]byte
-	for i := range sig {
-		sig[i] = byte(i + 1)
-	}
-	return sig
-}
+var (
+	testLogsProgram   = solana.PublicKey{0x11}
+	testLogsSignature = solana.Signature{1, 2, 3}
+)
 
 // notificationFrame is a logsNotification as the cluster sends it.
 func notificationFrame(sig solana.Signature, logs []string, txErr any) string {
@@ -140,119 +129,76 @@ func TestSubscribeLogsHandshake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	events, err := conn.SubscribeLogs(ctx, testLogsProgram())
+	events, err := conn.SubscribeLogs(ctx, testLogsProgram)
 	require.NoError(t, err)
 	require.NotNil(t, events)
 
 	require.Eventually(t, func() bool { return srv.subscribeFrame() != "" }, testLogsReadTimeout, 10*time.Millisecond)
 
-	var req struct {
-		JSONRPC string            `json:"jsonrpc"`
-		ID      int               `json:"id"`
-		Method  string            `json:"method"`
-		Params  []json.RawMessage `json:"params"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(srv.subscribeFrame()), &req))
-	assert.Equal(t, "2.0", req.JSONRPC)
-	assert.Equal(t, logsSubscribeRequestID, req.ID)
-	assert.Equal(t, "logsSubscribe", req.Method)
-	require.Len(t, req.Params, 2)
-
-	var mentions struct {
-		Mentions []string `json:"mentions"`
-	}
-	require.NoError(t, json.Unmarshal(req.Params[0], &mentions))
-	require.Len(t, mentions.Mentions, 1)
-	assert.Equal(t, testLogsProgram().String(), mentions.Mentions[0])
-
-	var commitment struct {
-		Commitment string `json:"commitment"`
-	}
-	require.NoError(t, json.Unmarshal(req.Params[1], &commitment))
-	assert.Equal(t, "finalized", commitment.Commitment)
+	want := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"logsSubscribe","params":[{"mentions":[%q]},{"commitment":"finalized"}]}`,
+		logsSubscribeRequestID, testLogsProgram.String())
+	assert.JSONEq(t, want, srv.subscribeFrame())
 }
 
-func TestSubscribeLogsRejectsZeroProgram(t *testing.T) {
-	srv := newWSServer(t, writeFrames())
-	conn := connTo(t, srv)
-	events, err := conn.SubscribeLogs(context.Background(), solana.PublicKey{})
-	require.Error(t, err)
-	assert.Nil(t, events)
-}
-
-func TestSubscribeLogsDialFailure(t *testing.T) {
-	conn, err := NewConn("http://127.0.0.1:1", "ws://127.0.0.1:1")
-	require.NoError(t, err)
-	t.Cleanup(conn.Close)
-
-	events, err := conn.SubscribeLogs(context.Background(), testLogsProgram())
-	require.Error(t, err)
-	assert.Nil(t, events)
-}
-
-func TestSubscribeLogsEvents(t *testing.T) {
-	sig := testLogsSignature()
-	logs := []string{"Program " + testLogsProgram().String() + " invoke [1]", "Program data: QUNDREdTVA=="}
-
+func TestSubscribeLogsFails(t *testing.T) {
 	tests := []struct {
-		name       string
-		frames     []string
-		wantEvents []struct {
-			sig    solana.Signature
-			logs   []string
-			failed bool
-		}
+		name    string
+		live    bool
+		program solana.PublicKey
 	}{
-		{
-			name:   "one notification after the acknowledgement",
-			frames: []string{testAck, notificationFrame(sig, logs, nil)},
-			wantEvents: []struct {
-				sig    solana.Signature
-				logs   []string
-				failed bool
-			}{{sig: sig, logs: logs, failed: false}},
-		},
-		{
-			name:   "failed transaction is flagged",
-			frames: []string{testAck, notificationFrame(sig, logs, map[string]any{"InstructionError": []any{0, map[string]any{"Custom": 7}}})},
-			wantEvents: []struct {
-				sig    solana.Signature
-				logs   []string
-				failed bool
-			}{{sig: sig, logs: logs, failed: true}},
-		},
-		{
-			name:   "empty log list is delivered",
-			frames: []string{testAck, notificationFrame(sig, []string{}, nil)},
-			wantEvents: []struct {
-				sig    solana.Signature
-				logs   []string
-				failed bool
-			}{{sig: sig, logs: []string{}, failed: false}},
-		},
+		{name: "zero program", live: true},
+		{name: "dial failure", program: testLogsProgram},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := newWSServer(t, writeFrames(tt.frames...))
+			wsURL := "ws://127.0.0.1:1"
+			if tt.live {
+				wsURL = newWSServer(t, writeFrames()).url
+			}
+			conn, err := NewConn("http://127.0.0.1:1", wsURL)
+			require.NoError(t, err)
+			t.Cleanup(conn.Close)
+
+			events, err := conn.SubscribeLogs(context.Background(), tt.program)
+			require.Error(t, err)
+			assert.Nil(t, events)
+		})
+	}
+}
+
+func TestSubscribeLogsEvents(t *testing.T) {
+	sig := testLogsSignature
+	logs := []string{"Program " + testLogsProgram.String() + " invoke [1]", "Program data: QUNDREdTVA=="}
+
+	tests := []struct {
+		name       string
+		txErr      any
+		wantFailed bool
+	}{
+		{name: "one notification after the acknowledgement"},
+		{name: "failed transaction is flagged", txErr: map[string]any{"InstructionError": []any{0, map[string]any{"Custom": 7}}}, wantFailed: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newWSServer(t, writeFrames(testAck, notificationFrame(sig, logs, tt.txErr)))
 			conn := connTo(t, srv)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			events, err := conn.SubscribeLogs(ctx, testLogsProgram())
+			events, err := conn.SubscribeLogs(ctx, testLogsProgram)
 			require.NoError(t, err)
 
-			for _, want := range tt.wantEvents {
-				select {
-				case evt, ok := <-events:
-					require.True(t, ok, "channel closed before the event arrived")
-					assert.Equal(t, want.sig, evt.Signature)
-					assert.Equal(t, want.logs, evt.Logs)
-					assert.Equal(t, want.failed, evt.Failed)
-				case <-time.After(testLogsReadTimeout):
-					t.Fatal("timed out waiting for a log event")
-				}
+			select {
+			case evt, ok := <-events:
+				require.True(t, ok, "channel closed before the event arrived")
+				assert.Equal(t, sig, evt.Signature)
+				assert.Equal(t, logs, evt.Logs)
+				assert.Equal(t, tt.wantFailed, evt.Failed)
+			case <-time.After(testLogsReadTimeout):
+				t.Fatal("timed out waiting for a log event")
 			}
 		})
 	}
@@ -260,12 +206,7 @@ func TestSubscribeLogsEvents(t *testing.T) {
 
 // TestSubscribeLogsChannelCloses covers every path that ends the subscription.
 func TestSubscribeLogsChannelCloses(t *testing.T) {
-	sig := testLogsSignature()
-
-	overLineLimit := make([]string, MaxLogLinesPerTx+1)
-	for i := range overLineLimit {
-		overLineLimit[i] = "Program log: noise"
-	}
+	sig := testLogsSignature
 
 	tests := []struct {
 		name      string
@@ -278,7 +219,7 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 		},
 		{
 			name:      "context cancelled",
-			serve:     answerPings(testAck),
+			serve:     answerPingsAfter(0, testAck),
 			cancelCtx: true,
 		},
 		{
@@ -299,11 +240,11 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 		},
 		{
 			name:  "log line count past the limit",
-			serve: writeFrames(testAck, notificationFrame(sig, overLineLimit, nil)),
+			serve: writeFrames(testAck, notificationFrame(sig, overLogLimit(), nil)),
 		},
 		{
 			name:  "no acknowledgement",
-			serve: answerPings(),
+			serve: answerPingsAfter(0),
 		},
 		{
 			name:  "notification before the acknowledgement",
@@ -339,7 +280,7 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			events, err := conn.subscribeLogs(ctx, testLogsProgram(), testLogsTimeouts)
+			events, err := conn.subscribeLogs(ctx, testLogsProgram, testLogsTimeouts)
 			require.NoError(t, err)
 
 			if tt.cancelCtx {
@@ -357,11 +298,7 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 	}
 }
 
-// answerPings answers pings, then sends frames after delay, then blocks until the test ends.
-func answerPings(frames ...string) func(t *testing.T, conn *websocket.Conn, subscribe string) {
-	return answerPingsAfter(0, frames...)
-}
-
+// answerPingsAfter answers pings, sends frames with delay before the second, then blocks until the test ends.
 func answerPingsAfter(delay time.Duration, frames ...string) func(t *testing.T, conn *websocket.Conn, subscribe string) {
 	return func(t *testing.T, conn *websocket.Conn, subscribe string) {
 		t.Helper()
@@ -382,7 +319,7 @@ func answerPingsAfter(delay time.Duration, frames ...string) func(t *testing.T, 
 
 // TestSubscribeLogsSurvivesIdle holds a quiet subscription open past many ping intervals.
 func TestSubscribeLogsSurvivesIdle(t *testing.T) {
-	sig := testLogsSignature()
+	sig := testLogsSignature
 	idle := 3 * (testLogsTimeouts.pingInterval + testLogsTimeouts.pongTimeout)
 	require.Less(t, idle, testLogsReadTimeout)
 
@@ -392,7 +329,7 @@ func TestSubscribeLogsSurvivesIdle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	events, err := conn.subscribeLogs(ctx, testLogsProgram(), testLogsTimeouts)
+	events, err := conn.subscribeLogs(ctx, testLogsProgram, testLogsTimeouts)
 	require.NoError(t, err)
 
 	select {

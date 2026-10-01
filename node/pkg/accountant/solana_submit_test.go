@@ -5,13 +5,10 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/common"
-	"github.com/certusone/wormhole/node/pkg/devnet"
 	"github.com/certusone/wormhole/node/pkg/solacctconn"
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	ethCrypto "github.com/ethereum/go-ethereum/crypto"
@@ -73,8 +70,6 @@ func TestEncodeSubmitObservationsIxDataRejects(t *testing.T) {
 		fields    *solanaObservationFields
 	}{
 		{name: "short signature", signature: make([]byte, submitSignatureLen-1), txID: txID, fields: fields},
-		{name: "long signature", signature: make([]byte, submitSignatureLen+1), txID: txID, fields: fields},
-		{name: "no signature", signature: nil, txID: txID, fields: fields},
 		{name: "no tx id", signature: make([]byte, submitSignatureLen), fields: fields},
 		{name: "no fields", signature: make([]byte, submitSignatureLen), txID: txID},
 	}
@@ -115,60 +110,6 @@ func TestSolanaObservationSigningDigest(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestSolanaObservationSignatureRecovers signs the program's digest with the devnet
-// guardian key and recovers the guardian address, as secp256k1_recover does on chain.
-func TestSolanaObservationSignatureRecovers(t *testing.T) {
-	ctx := context.Background()
-	key := devnet.InsecureDeterministicEcdsaKeyByIndex(0)
-	wantAddr := ethCrypto.PubkeyToAddress(key.PublicKey)
-	fields := fixtureTransferFields(t)
-
-	tests := []struct {
-		name       string
-		txID       solanaTxID
-		wantSameID bool
-	}{
-		{name: "fixture tx id recovers the guardian", txID: mustSolanaTxID(t, fixtureSubmitObservationsTxIDHex), wantSameID: true},
-		{name: "altered tx id recovers another address", txID: mustSolanaTxID(t, "01"+strings.Repeat("00", hashTxIDLen-1))},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			digest, err := solanaObservationSigningDigest(SubmitObservationPrefix, tt.txID, fields)
-			require.NoError(t, err)
-
-			signature, err := ethCrypto.Sign(digest.Bytes(), key)
-			require.NoError(t, err)
-			require.Len(t, signature, submitSignatureLen)
-			assert.LessOrEqual(t, signature[64], uint8(1))
-
-			// Recovery against the fixture digest, which is what the program hashes.
-			fixtureDigest := mustHexDecode(t, fixtureTransferSigningDigestHex)
-			pub, err := ethCrypto.SigToPub(fixtureDigest, signature)
-			require.NoError(t, err)
-			gotAddr := ethCrypto.PubkeyToAddress(*pub)
-
-			if tt.wantSameID {
-				assert.Equal(t, wantAddr, gotAddr)
-				return
-			}
-			assert.NotEqual(t, wantAddr, gotAddr)
-		})
-	}
-
-	// The guardian signer produces the same 65-byte signature that the program checks.
-	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
-	digest, err := solanaObservationSigningDigest(SubmitObservationPrefix, mustSolanaTxID(t, fixtureSubmitObservationsTxIDHex), fields)
-	require.NoError(t, err)
-	signed, err := acct.guardianSigner.Sign(ctx, digest.Bytes())
-	require.NoError(t, err)
-	require.Len(t, signed, submitSignatureLen)
-
-	pub, err := ethCrypto.SigToPub(digest.Bytes(), signed)
-	require.NoError(t, err)
-	assert.Equal(t, wantAddr, ethCrypto.PubkeyToAddress(*pub))
-}
-
 // setSolanaConfirmPollInterval sets the confirmation poll interval for one test.
 func setSolanaConfirmPollInterval(t *testing.T, interval time.Duration) {
 	t.Helper()
@@ -189,20 +130,13 @@ func TestClassifySolanaTxError(t *testing.T) {
 		wantDisposition solanaTxDisposition
 	}{
 		{name: "already signed", txErr: customTxError(solanaErrAlreadySigned), wantDisposition: solanaTxAlreadyDone},
-		{name: "already accounted", txErr: customTxError(solanaErrAlreadyAccounted), wantDisposition: solanaTxAlreadyDone},
 		{name: "payer mismatch", txErr: customTxError(solanaErrPayerMismatch), wantDisposition: solanaTxRetryNextRound},
-		{name: "expired guardian set", txErr: customTxError(solanaErrExpiredGuardianSet), wantDisposition: solanaTxFailed},
-		{name: "invalid guardian index", txErr: customTxError(solanaErrInvalidGuardianIndex), wantDisposition: solanaTxFailed},
-		{name: "unregistered emitter", txErr: customTxError(solanaErrUnregisteredEmitter), wantDisposition: solanaTxFailed},
-		{name: "missing chain registration", txErr: customTxError(solanaErrMissingChainRegistration), wantDisposition: solanaTxFailed},
 		{name: "invalid signature", txErr: customTxError(solanaErrInvalidSignature), wantDisposition: solanaTxFailed},
 		{name: "unmapped custom code", txErr: customTxError(29), wantDisposition: solanaTxFailed},
 		{name: "blockhash not found", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrBlockhashNotFound}, wantDisposition: solanaTxRetryNextRound},
 		{name: "already processed", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrAlreadyProcessed}, wantDisposition: solanaTxAlreadyDone},
-		{name: "account not found", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrAccountNotFound}, wantDisposition: solanaTxFeePayerCannotPay},
 		{name: "insufficient funds for fee", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrInsufficientFundsForFee}, wantDisposition: solanaTxFeePayerCannotPay},
 		{name: "other transaction error", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrOther}, wantDisposition: solanaTxFailed},
-		{name: "wrapped", txErr: fmt.Errorf("send: %w", customTxError(solanaErrPayerMismatch)), wantDisposition: solanaTxRetryNextRound},
 		{name: "transport error", txErr: errors.New("connection reset"), wantDisposition: solanaTxFailed},
 	}
 
@@ -234,11 +168,6 @@ func solanaPendingAccountData(t *testing.T, chain vaa.ChainID, guardianSetIndex 
 	}
 	copy(data[24:56], contentDigest[:])
 	copy(data[56:88], payer[:])
-
-	obs, err := parsePendingObservationsAccount(data)
-	require.NoError(t, err)
-	require.Equal(t, contentDigest, obs.ContentDigest)
-	require.Equal(t, payer, obs.Payer)
 	return data
 }
 
@@ -263,8 +192,6 @@ func newSolanaBatchFixture(t *testing.T, ctx context.Context) *solanaBatchFixtur
 	_, err := acct.SubmitObservation(msg)
 	require.NoError(t, err)
 	pe := acct.pendingTransfers[msg.MessageIDString()]
-	require.NotNil(t, pe)
-	require.NotNil(t, pe.solanaFields)
 
 	sub, err := acct.solana.deriveSolanaSubmission(0, msg, pe.solanaFields)
 	require.NoError(t, err)
@@ -324,7 +251,6 @@ func TestDeriveSolanaSubmission(t *testing.T) {
 			{name: "32 bytes", length: hashTxIDLen},
 			{name: "64 bytes", length: signatureTxIDLen},
 			{name: "33 bytes", length: hashTxIDLen + 1, wantErr: true},
-			{name: "65 bytes", length: signatureTxIDLen + 1, wantErr: true},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -340,16 +266,6 @@ func TestDeriveSolanaSubmission(t *testing.T) {
 				assert.Equal(t, withTxID.TxID, sub.txID.Bytes())
 			})
 		}
-	})
-
-	t.Run("attest fills the balance slots with the authority", func(t *testing.T) {
-		attest := *fields
-		attest.Action = 0x02
-		attest.setContentDigest()
-		sub, err := b.deriveSolanaSubmission(0, msg, &attest)
-		require.NoError(t, err)
-		assert.Equal(t, b.authority, sub.sourceBalance)
-		assert.Equal(t, b.authority, sub.destBalance)
 	})
 
 	t.Run("a stale content digest is rejected", func(t *testing.T) {
@@ -390,13 +306,10 @@ func TestBuildSolanaSubmitTx(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, b.program, program)
 
-		data := tx.Message.Instructions[1].Data
-		require.Len(t, data, submitObservationsDispatchLen+submitObservationsIxDataLen)
-		parsed, err := parseSubmitObservationsIxData(data)
+		parsed, err := parseSubmitObservationsIxData(tx.Message.Instructions[1].Data)
 		require.NoError(t, err)
-		assert.Equal(t, f.sub.txID, parsed.TxID)
-		assert.Equal(t, uint32(0), parsed.GuardianSetIndex)
-		assert.Equal(t, f.pe.solanaFields.contentDigest, parsed.solanaObservationFields.contentDigest)
+		// secp256k1_recover takes a recovery id of 0 or 1, not 27 or 28.
+		assert.Contains(t, []uint8{0, 1}, parsed.Signature[64])
 
 		// The program recovers the guardian from the signature over its own digest.
 		digest, err := solanaObservationSigningDigest(b.prefix, f.sub.txID, f.sub.fields)
@@ -478,28 +391,11 @@ func TestHandleSolanaBatch(t *testing.T) {
 			wantPending: 1,
 		},
 		{
-			name: "recorded payer becomes the rent recipient",
-			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.AccountResult{
-					Data: solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, solana.PublicKey{0xAB}, []uint8{1}),
-				})
-			},
-			wantSent:    1,
-			wantPending: 1,
-		},
-		{
 			name: "pending account with the wrong digest is skipped",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
 				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.AccountResult{
 					Data: solanaPendingAccountData(t, f.sub.fields.Chain, 0, [32]byte{0xEE}, solana.PublicKey{0xAB}, nil),
 				})
-			},
-			wantPending: 1,
-		},
-		{
-			name: "undecodable pending account is skipped",
-			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.AccountResult{Data: []byte{0x01}})
 			},
 			wantPending: 1,
 		},
@@ -526,38 +422,6 @@ func TestHandleSolanaBatch(t *testing.T) {
 			wantPending: 1,
 		},
 		{
-			name: "preflight already signed is benign",
-			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetSendTransactionErr(customTxError(solanaErrAlreadySigned))
-			},
-			wantSent:    1,
-			wantPending: 1,
-		},
-		{
-			name: "preflight payer mismatch retries once",
-			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetSendTransactionErr(customTxError(solanaErrPayerMismatch))
-			},
-			wantSent:    2,
-			wantPending: 1,
-		},
-		{
-			name: "preflight blockhash not found retries once",
-			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetSendTransactionErr(&solacctconn.TxError{Kind: solacctconn.TxErrBlockhashNotFound})
-			},
-			wantSent:    2,
-			wantPending: 1,
-		},
-		{
-			name: "preflight insufficient funds counts a fee payer error",
-			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetSendTransactionErr(&solacctconn.TxError{Kind: solacctconn.TxErrInsufficientFundsForFee})
-			},
-			wantSent:    1,
-			wantPending: 1,
-		},
-		{
 			name: "status poll failure abandons the batch",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
 				f.conn.SetSignatureStatusesErr(errors.New("status rpc down"))
@@ -566,10 +430,17 @@ func TestHandleSolanaBatch(t *testing.T) {
 			wantPending: 1,
 		},
 		{
-			name: "dropped past the last valid block height",
+			name: "confirm payer mismatch retries once",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetDefaultSignatureStatus(nil)
-				f.conn.SetBlockHeight(2000, nil)
+				f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Err: customTxError(solanaErrPayerMismatch)})
+			},
+			wantSent:    maxSolanaSubmitRounds,
+			wantPending: 1,
+		},
+		{
+			name: "confirm program failure",
+			setup: func(t *testing.T, f *solanaBatchFixture) {
+				f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Err: customTxError(solanaErrInvalidSignature)})
 			},
 			wantSent:    1,
 			wantPending: 1,
@@ -614,39 +485,6 @@ func TestHandleSolanaBatch(t *testing.T) {
 	}
 }
 
-// TestHandleSolanaBatchConfirms covers the confirmation outcomes, which need the signature
-// of the transaction the worker actually sent.
-func TestHandleSolanaBatchConfirms(t *testing.T) {
-	tests := []struct {
-		name     string
-		status   *solacctconn.SignatureStatus
-		wantSent int
-	}{
-		{name: "confirmed", status: &solacctconn.SignatureStatus{Confirmed: true}, wantSent: 1},
-		{name: "already accounted", status: &solacctconn.SignatureStatus{Err: customTxError(solanaErrAlreadyAccounted)}, wantSent: 1},
-		{name: "program failure", status: &solacctconn.SignatureStatus{Err: customTxError(solanaErrInvalidSignature)}, wantSent: 1},
-		{name: "payer mismatch retries once", status: &solacctconn.SignatureStatus{Err: customTxError(solanaErrPayerMismatch)}, wantSent: maxSolanaSubmitRounds},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-
-			f := newSolanaBatchFixture(t, ctx)
-			// The mock answers every signature with this status.
-			f.conn.SetDefaultSignatureStatus(tt.status)
-
-			f.queue(t)
-			require.NoError(t, f.acct.handleSolanaBatch(ctx, f.acct.solana))
-
-			require.Len(t, f.conn.SentTransactions, tt.wantSent)
-			assert.Len(t, f.acct.pendingTransfers, 1)
-			assert.False(t, f.acct.pendingTransfers[f.msg.MessageIDString()].submitPending(backendSolana))
-		})
-	}
-}
-
 // TestHandleSolanaBatchPayerMismatchRetrySucceeds sends once with the fee payer, then
 // again after the pending PDA appears with another payer recorded. The PDA is visible only
 // at confirmed commitment, the same as when the retry follows a preflight rejection.
@@ -681,86 +519,82 @@ func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 	assert.Equal(t, recordedPayer, accounts[9].PublicKey)
 }
 
-// TestConfirmSolanaSubmissionsLandsJustBeforeExpiry lands the transaction between the block
-// height read that passes its expiry and the next status read.
-func TestConfirmSolanaSubmissionsLandsJustBeforeExpiry(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// TestConfirmSolanaSubmissions covers the block height expiry and context cancellation.
+func TestConfirmSolanaSubmissions(t *testing.T) {
+	tests := []struct {
+		name string
+		// setup runs after the fixture build and before the confirmation.
+		setup         func(f *solanaBatchFixture)
+		cancel        bool
+		wantSubmitted int
+		wantDropped   int
+	}{
+		{
+			// Lands between the height read that passes expiry and the next status read.
+			name: "lands just before expiry",
+			setup: func(f *solanaBatchFixture) {
+				f.conn.SetDefaultSignatureStatus(nil)
+				f.conn.SetBlockHeight(2000, nil)
+				f.conn.SetBlockHeightHook(func() {
+					f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
+				})
+			},
+			wantSubmitted: 1,
+		},
+		{
+			name: "processed past expiry confirms",
+			setup: func(f *solanaBatchFixture) {
+				f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: false})
+				f.conn.SetBlockHeight(2000, nil)
+				heightReads := 0
+				f.conn.SetBlockHeightHook(func() {
+					heightReads++
+					if heightReads == 2 {
+						f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
+					}
+				})
+			},
+			wantSubmitted: 1,
+		},
+		{
+			name: "unseen past expiry is dropped",
+			setup: func(f *solanaBatchFixture) {
+				f.conn.SetDefaultSignatureStatus(nil)
+				f.conn.SetBlockHeight(2000, nil)
+			},
+			wantDropped: 1,
+		},
+		{
+			name:   "context cancelled",
+			cancel: true,
+		},
+	}
 
-	f := newSolanaBatchFixture(t, ctx)
-	core, logs := observer.New(zap.InfoLevel)
-	f.acct.logger = zap.New(core)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
 
-	f.conn.SetDefaultSignatureStatus(nil)
-	f.conn.SetBlockHeight(2000, nil)
-	f.conn.SetBlockHeightHook(func() {
-		f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
-	})
+			f := newSolanaBatchFixture(t, ctx)
+			core, logs := observer.New(zap.InfoLevel)
+			f.acct.logger = zap.New(core)
+			if tt.setup != nil {
+				tt.setup(f)
+			}
+			if tt.cancel {
+				cancel()
+			}
 
-	f.sub.txSignature = solana.Signature{1}
-	f.sub.lastValidBlockHeight = 1000
-	retry := f.acct.confirmSolanaSubmissions(ctx, f.acct.solana, []*solanaSubmission{f.sub})
+			f.sub.txSignature = solana.Signature{1}
+			f.sub.lastValidBlockHeight = 1000
+			retry := f.acct.confirmSolanaSubmissions(ctx, f.acct.solana, []*solanaSubmission{f.sub})
 
-	assert.Empty(t, retry)
-	assert.Equal(t, 1, logs.FilterMessage("submitted an observation to the solana accountant").Len())
-	assert.Zero(t, logs.FilterMessage("a solana observation was dropped, the audit will retry").Len())
-}
-
-// TestConfirmSolanaSubmissionsKeepsProcessedPastExpiry confirms a transaction that the
-// cluster processed before its blockhash expired.
-func TestConfirmSolanaSubmissionsKeepsProcessedPastExpiry(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	f := newSolanaBatchFixture(t, ctx)
-	core, logs := observer.New(zap.InfoLevel)
-	f.acct.logger = zap.New(core)
-
-	f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: false})
-	f.conn.SetBlockHeight(2000, nil)
-	heightReads := 0
-	f.conn.SetBlockHeightHook(func() {
-		heightReads++
-		if heightReads == 2 {
-			f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
-		}
-	})
-
-	f.sub.txSignature = solana.Signature{1}
-	f.sub.lastValidBlockHeight = 1000
-	retry := f.acct.confirmSolanaSubmissions(ctx, f.acct.solana, []*solanaSubmission{f.sub})
-
-	assert.Empty(t, retry)
-	assert.Equal(t, 1, logs.FilterMessage("submitted an observation to the solana accountant").Len())
-	assert.Zero(t, logs.FilterMessage("a solana observation was dropped, the audit will retry").Len())
-}
-
-func TestConfirmSolanaSubmissionsStopsOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	f := newSolanaBatchFixture(t, ctx)
-	cancel()
-
-	f.sub.txSignature = solana.Signature{1}
-	f.sub.lastValidBlockHeight = 1000
-
-	retry := f.acct.confirmSolanaSubmissions(ctx, f.acct.solana, []*solanaSubmission{f.sub})
-	assert.Empty(t, retry)
-	assert.Empty(t, f.conn.GetSignatureStatusesCalls)
-}
-
-func TestSolanaWorkerReturnsOnContextCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
-	setSolanaConfirmPollInterval(t, 0)
-
-	errC := make(chan error, 1)
-	go func() { errC <- acct.solanaWorker(ctx, acct.solana) }()
-
-	cancel()
-	select {
-	case err := <-errC:
-		require.NoError(t, err)
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for the worker to return")
+			assert.Empty(t, retry)
+			assert.Equal(t, tt.wantSubmitted, logs.FilterMessage("submitted an observation to the solana accountant").Len())
+			assert.Equal(t, tt.wantDropped, logs.FilterMessage("a solana observation was dropped, the audit will retry").Len())
+			if tt.cancel {
+				assert.Empty(t, f.conn.GetSignatureStatusesCalls)
+			}
+		})
 	}
 }

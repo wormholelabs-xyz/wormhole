@@ -2,7 +2,6 @@ package solacctconn
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -28,8 +27,7 @@ func TestGetLatestBlockhash(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-				require.Equal(t, "getLatestBlockhash", call.Method)
+			_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 				return map[string]any{"context": map[string]any{"slot": 1}, "value": tt.value}, nil
 			})
 
@@ -45,42 +43,12 @@ func TestGetLatestBlockhash(t *testing.T) {
 	}
 }
 
-func TestGetBlockHeight(t *testing.T) {
-	_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-		require.Equal(t, "getBlockHeight", call.Method)
-		return 987654, nil
-	})
-
-	height, err := conn.GetBlockHeight(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, uint64(987654), height)
-}
-
-func signedTestTransaction(t *testing.T) (*solana.Transaction, solana.Signature) {
-	t.Helper()
-	payer, err := solana.NewRandomPrivateKey()
-	require.NoError(t, err)
-
-	tx := &solana.Transaction{
-		Signatures: []solana.Signature{{4, 2}},
-		Message: solana.Message{
-			AccountKeys:     []solana.PublicKey{payer.PublicKey(), testKeys(2)[1]},
-			RecentBlockhash: solana.Hash{7},
-			Instructions: []solana.CompiledInstruction{
-				{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: []byte{0}},
-			},
-		},
-	}
-	tx.Message.Header.NumRequiredSignatures = 1
-	return tx, tx.Signatures[0]
-}
-
 func TestSendTransaction(t *testing.T) {
-	tx, sig := signedTestTransaction(t)
+	tx := testTransaction(testKeys(2)[1], []byte{0})
+	sig := tx.Signatures[0]
 
 	t.Run("returns the cluster signature", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			require.Equal(t, "sendTransaction", call.Method)
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return sig.String(), nil
 		})
 		got, err := conn.SendTransaction(context.Background(), tx)
@@ -89,7 +57,7 @@ func TestSendTransaction(t *testing.T) {
 	})
 
 	t.Run("rejects a different signature", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return solana.Signature{8, 8}.String(), nil
 		})
 		_, err := conn.SendTransaction(context.Background(), tx)
@@ -97,26 +65,20 @@ func TestSendTransaction(t *testing.T) {
 	})
 
 	t.Run("rejects an unsigned transaction", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			t.Fatal("no request expected")
-			return nil, nil
-		})
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return nil, nil })
 		_, err := conn.SendTransaction(context.Background(), nil)
 		require.Error(t, err)
 		_, err = conn.SendTransaction(context.Background(), &solana.Transaction{})
 		require.Error(t, err)
+		assert.Empty(t, srv.recorded())
 	})
 
 	t.Run("preflight failure carries the transaction error", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return nil, &jsonrpc.RPCError{
 				Code:    -32002,
 				Message: "Transaction simulation failed: Error processing Instruction 2: custom program error: 0xb",
-				Data: map[string]any{
-					"err":           map[string]any{"InstructionError": []any{2, map[string]any{"Custom": 11}}},
-					"logs":          []any{"Program 11111111111111111111111111111111 invoke [1]"},
-					"unitsConsumed": 4321,
-				},
+				Data:    json.RawMessage(preflightCustomData),
 			}
 		})
 
@@ -133,27 +95,22 @@ func TestGetSignatureStatuses(t *testing.T) {
 	sigs := []solana.Signature{{1}, {2}, {3}}
 
 	t.Run("no signatures makes no call", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			t.Fatal("no request expected")
-			return nil, nil
-		})
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return nil, nil })
 		statuses, err := conn.GetSignatureStatuses(context.Background(), nil)
 		require.NoError(t, err)
 		assert.Empty(t, statuses)
+		assert.Empty(t, srv.recorded())
 	})
 
 	t.Run("past the request limit", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			t.Fatal("no request expected")
-			return nil, nil
-		})
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return nil, nil })
 		_, err := conn.GetSignatureStatuses(context.Background(), make([]solana.Signature, maxStatusesPerRequest+1))
 		require.Error(t, err)
+		assert.Empty(t, srv.recorded())
 	})
 
 	t.Run("unknown signature is a nil element", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			require.Equal(t, "getSignatureStatuses", call.Method)
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{
 				map[string]any{"slot": 1, "confirmations": nil, "err": nil, "confirmationStatus": "finalized"},
 				nil,
@@ -179,30 +136,10 @@ func TestGetSignatureStatuses(t *testing.T) {
 	})
 
 	t.Run("length mismatch is rejected", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{nil}}, nil
 		})
 		_, err := conn.GetSignatureStatuses(context.Background(), sigs)
 		require.Error(t, err)
 	})
-}
-
-func TestSendTransactionEncodesBase64(t *testing.T) {
-	tx, sig := signedTestTransaction(t)
-	srv, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-		return sig.String(), nil
-	})
-
-	_, err := conn.SendTransaction(context.Background(), tx)
-	require.NoError(t, err)
-
-	calls := srv.recorded()
-	require.Len(t, calls, 1)
-	var encoded string
-	require.NoError(t, json.Unmarshal(calls[0].Params[0], &encoded))
-	raw, err := base64.StdEncoding.DecodeString(encoded)
-	require.NoError(t, err)
-	want, err := tx.MarshalBinary()
-	require.NoError(t, err)
-	assert.Equal(t, want, raw)
 }

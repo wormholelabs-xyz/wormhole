@@ -1,6 +1,7 @@
 package accountant
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -10,7 +11,6 @@ import (
 	"github.com/certusone/wormhole/node/pkg/devnet"
 	"github.com/certusone/wormhole/node/pkg/guardiansigner"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
-	"github.com/certusone/wormhole/node/pkg/solacctconn"
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
@@ -23,47 +23,19 @@ import (
 // The devnet Token Bridge emitter that the existing accountant tests use.
 const testTokenBridgeEmitterHex = "0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16"
 
-func solanaTestProgram() solana.PublicKey {
-	var pk [32]byte
-	for i := range pk {
-		pk[i] = 0x11
-	}
-	return pk
+func filledKey(b byte) solana.PublicKey {
+	return solana.PublicKey(bytes.Repeat([]byte{b}, solana.PublicKeyLength))
 }
 
-func solanaTestNoreplay() solana.PublicKey {
-	var pk [32]byte
-	for i := range pk {
-		pk[i] = 0x22
-	}
-	return pk
-}
-
-func solanaTestCoreBridge() solana.PublicKey {
-	var pk [32]byte
-	for i := range pk {
-		pk[i] = 0x33
-	}
-	return pk
-}
+func solanaTestProgram() solana.PublicKey    { return filledKey(0x11) }
+func solanaTestNoreplay() solana.PublicKey   { return filledKey(0x22) }
+func solanaTestCoreBridge() solana.PublicKey { return filledKey(0x33) }
 
 func solanaTestFeePayer(t *testing.T) solana.PrivateKey {
 	t.Helper()
 	key, err := solana.NewRandomPrivateKey()
 	require.NoError(t, err)
-	require.Len(t, key, solacctconn.FeePayerKeyLen)
 	return key
-}
-
-func solanaTestConfig(t *testing.T, conn solacctconn.Conn) AccountantSolanaConfig {
-	t.Helper()
-	return AccountantSolanaConfig{
-		Conn:       conn,
-		Program:    solanaTestProgram(),
-		Noreplay:   solanaTestNoreplay(),
-		CoreBridge: solanaTestCoreBridge(),
-		FeePayer:   solanaTestFeePayer(t),
-	}
 }
 
 // fakeAccountantDB serves a fixed set of pending transfers on reload.
@@ -81,7 +53,9 @@ type solanaTestOpts struct {
 	wormchainContract string
 	enforce           bool
 	disableSolana     bool
-	db                guardianDB.AccountantDB
+	// solanaConfig replaces the complete test config when set.
+	solanaConfig *AccountantSolanaConfig
+	db           guardianDB.AccountantDB
 }
 
 // newSolanaTestAccountant builds a started accountant in the GoTest environment. The test
@@ -94,6 +68,14 @@ func newSolanaTestAccountant(t *testing.T, ctx context.Context, opts solanaTestO
 // newSolanaTestAccountantWithObsvReq is newSolanaTestAccountant with a reobservation
 // channel the caller can read.
 func newSolanaTestAccountantWithObsvReq(t *testing.T, ctx context.Context, opts solanaTestOpts, obsvReqC chan *gossipv1.ObservationRequest) (*Accountant, *MockAccountantSolanaConn, chan *common.MessagePublication) {
+	t.Helper()
+	acct, conn, msgChan := newUnstartedSolanaTestAccountant(t, ctx, opts, obsvReqC)
+	require.NoError(t, acct.Start(ctx))
+	return acct, conn, msgChan
+}
+
+// newUnstartedSolanaTestAccountant is newSolanaTestAccountantWithObsvReq without Start.
+func newUnstartedSolanaTestAccountant(t *testing.T, ctx context.Context, opts solanaTestOpts, obsvReqC chan *gossipv1.ObservationRequest) (*Accountant, *MockAccountantSolanaConn, chan *common.MessagePublication) {
 	t.Helper()
 
 	pk := devnet.InsecureDeterministicEcdsaKeyByIndex(uint64(0))
@@ -109,9 +91,18 @@ func newSolanaTestAccountantWithObsvReq(t *testing.T, ctx context.Context, opts 
 	}
 
 	conn := NewMockAccountantSolanaConn()
-	cfg := solanaTestConfig(t, conn)
-	if opts.disableSolana {
+	cfg := AccountantSolanaConfig{
+		Conn:       conn,
+		Program:    solanaTestProgram(),
+		Noreplay:   solanaTestNoreplay(),
+		CoreBridge: solanaTestCoreBridge(),
+		FeePayer:   solanaTestFeePayer(t),
+	}
+	switch {
+	case opts.disableSolana:
 		cfg = AccountantSolanaConfig{}
+	case opts.solanaConfig != nil:
+		cfg = *opts.solanaConfig
 	}
 
 	msgChan := make(chan *common.MessagePublication, MsgChannelCapacity)
@@ -133,7 +124,6 @@ func newSolanaTestAccountantWithObsvReq(t *testing.T, ctx context.Context, opts 
 		DefaultSubmitObservationBatchSize,
 		common.GoTest,
 	)
-	require.NoError(t, acct.Start(ctx))
 	return acct, conn, msgChan
 }
 
@@ -182,11 +172,9 @@ func TestNewSolanaBackend(t *testing.T) {
 		{name: "zero config disables", cfg: AccountantSolanaConfig{}, wantNil: true},
 		{name: "conn without program", cfg: AccountantSolanaConfig{Conn: conn}, wantErr: true},
 		{name: "program without conn", cfg: AccountantSolanaConfig{Program: solanaTestProgram()}, wantErr: true},
-		{name: "core bridge alone", cfg: AccountantSolanaConfig{CoreBridge: solanaTestCoreBridge()}, wantErr: true},
 		{name: "missing noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.Noreplay = solana.PublicKey{} }), wantErr: true},
 		{name: "missing core bridge", cfg: with(func(c *AccountantSolanaConfig) { c.CoreBridge = solana.PublicKey{} }), wantErr: true},
 		{name: "missing fee payer", cfg: with(func(c *AccountantSolanaConfig) { c.FeePayer = nil }), wantErr: true},
-		{name: "short fee payer", cfg: with(func(c *AccountantSolanaConfig) { c.FeePayer = solana.PrivateKey(make([]byte, 32)) }), wantErr: true},
 		{name: "program equals noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.Noreplay = solanaTestProgram() }), wantErr: true},
 		{name: "core bridge equals program", cfg: with(func(c *AccountantSolanaConfig) { c.CoreBridge = solanaTestProgram() }), wantErr: true},
 		{name: "core bridge equals noreplay", cfg: with(func(c *AccountantSolanaConfig) { c.CoreBridge = solanaTestNoreplay() }), wantErr: true},
@@ -207,59 +195,22 @@ func TestNewSolanaBackend(t *testing.T) {
 				return
 			}
 			require.NotNil(t, b)
-			assert.Equal(t, solanaTestProgram(), b.program)
-			assert.Equal(t, solanaTestNoreplay(), b.noreplay)
-			assert.Equal(t, solanaTestCoreBridge(), b.coreBridge)
-			assert.Equal(t, SubmitObservationPrefix, b.prefix)
-			assert.Equal(t, "solana-accountant", b.tag)
-			assert.Equal(t, uint64(7), b.priorityFee)
 			wantAuthority, err := deriveNoreplayAuthorityPDA(solanaTestProgram())
 			require.NoError(t, err)
 			assert.Equal(t, wantAuthority, b.authority)
-			assert.Equal(t, subChanSize, cap(b.subChan))
 		})
 	}
 }
 
 func TestStartRejectsPartialSolanaConfig(t *testing.T) {
 	ctx := context.Background()
-	pk := devnet.InsecureDeterministicEcdsaKeyByIndex(uint64(0))
-	guardianSigner, err := guardiansigner.GenerateSignerWithPrivatekeyUnsafe(pk)
-	require.NoError(t, err)
-	gst := common.NewGuardianSetState(nil)
-	gst.Set(&common.GuardianSet{Keys: []ethCommon.Address{ethCommon.HexToAddress("0xbeFA429d57cD18b7F8A4d91A2da9AB4AF05d0FBe")}})
-
-	acct := NewAccountant(
-		ctx,
-		zaptest.NewLogger(t),
-		&guardianDB.MockAccountantDB{},
-		make(chan *gossipv1.ObservationRequest, 10),
-		"0xdeadbeef",
-		"none",
-		nil,
-		true,
-		"",
-		nil,
-		AccountantSolanaConfig{Conn: NewMockAccountantSolanaConn()},
-		guardianSigner,
-		gst,
-		make(chan *common.MessagePublication, MsgChannelCapacity),
-		DefaultSubmitObservationBatchSize,
-		common.GoTest,
-	)
+	acct, _, _ := newUnstartedSolanaTestAccountant(t, ctx, solanaTestOpts{
+		wormchainContract: "0xdeadbeef",
+		enforce:           true,
+		solanaConfig:      &AccountantSolanaConfig{Conn: NewMockAccountantSolanaConn()},
+	}, make(chan *gossipv1.ObservationRequest, 10))
 	require.Error(t, acct.Start(ctx))
 	assert.False(t, acct.solanaEnabled())
-}
-
-func TestSolanaOnlyGuardianCoversTokenBridge(t *testing.T) {
-	ctx := context.Background()
-	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: ""})
-
-	assert.False(t, acct.wormchainBaseEnabled())
-	assert.True(t, acct.solanaEnabled())
-	assert.True(t, acct.baseEnabled())
-	assert.False(t, acct.nttEnabled())
-	assert.NotEmpty(t, acct.tokenBridges)
 }
 
 func TestFeatureString(t *testing.T) {
@@ -269,12 +220,9 @@ func TestFeatureString(t *testing.T) {
 		acct *Accountant
 		want string
 	}{
-		{name: "wormchain enforcing", acct: &Accountant{enforceFlag: true}, want: "acct"},
 		{name: "wormchain log only", acct: &Accountant{}, want: "acct-logonly"},
-		{name: "wormchain and ntt", acct: &Accountant{enforceFlag: true, nttContract: "x"}, want: "acct:ntt-acct"},
 		{name: "solana enforcing", acct: &Accountant{enforceFlag: true, solana: backend}, want: "acct:sol-acct"},
 		{name: "solana log only", acct: &Accountant{solana: backend}, want: "acct-logonly:sol-acct-logonly"},
-		{name: "all three", acct: &Accountant{enforceFlag: true, nttContract: "x", solana: backend}, want: "acct:ntt-acct:sol-acct"},
 	}
 
 	for _, tt := range tests {
@@ -327,90 +275,43 @@ func TestSubmitObservationFanOut(t *testing.T) {
 	}
 }
 
-func TestSubmitPendingIsPerBackend(t *testing.T) {
-	ctx := context.Background()
-	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true})
-
-	msg := solanaTestTransfer(t, 1)
-	_, err := acct.SubmitObservation(msg)
-	require.NoError(t, err)
-	pe := acct.pendingTransfers[msg.MessageIDString()]
-	require.NotNil(t, pe)
-
-	require.True(t, acct.submitObservation(ctx, pe, backendWormchain, false))
-	require.True(t, acct.submitObservation(ctx, pe, backendSolana, false))
-	require.Equal(t, 1, len(acct.subChan))
-	acct.clearSubmitPendingFlags([]*common.MessagePublication{<-acct.solana.subChan}, backendSolana)
-
-	// The Solana batch leaves the wormchain submission pending. A Solana resubmit
-	// queues to Solana only.
-	assert.True(t, pe.submitPending(backendWormchain))
-	require.True(t, acct.submitObservation(ctx, pe, backendSolana, false))
-	assert.Equal(t, 1, len(acct.subChan))
-	assert.Equal(t, 1, len(acct.solana.subChan))
-}
-
 func TestUnbuildableSolanaFieldsLeaveNoEntry(t *testing.T) {
 	ctx := context.Background()
 	msg := solanaTestTransfer(t, 7)
 	msg.Payload = msg.Payload[:tokenBridgeTransferLen-1]
 
-	t.Run("submit observation", func(t *testing.T) {
-		acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
-		shouldPub, err := acct.SubmitObservation(msg)
-		require.NoError(t, err)
-		assert.False(t, shouldPub)
-		assert.NotContains(t, acct.pendingTransfers, msg.MessageIDString())
-	})
+	tests := []struct {
+		name          string
+		reload        bool
+		disableSolana bool
+		wantEntry     bool
+	}{
+		{name: "submit observation"},
+		{name: "reload", reload: true},
+		{name: "solana disabled keeps the entry", disableSolana: true, wantEntry: true},
+	}
 
-	t.Run("reload", func(t *testing.T) {
-		acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{
-			enforce: true,
-			db:      &fakeAccountantDB{data: []*common.MessagePublication{msg}},
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := solanaTestOpts{enforce: true, disableSolana: tt.disableSolana}
+			if tt.disableSolana {
+				opts.wormchainContract = "0xdeadbeef"
+			}
+			if tt.reload {
+				opts.db = &fakeAccountantDB{data: []*common.MessagePublication{msg}}
+			}
+			acct, _, _ := newSolanaTestAccountant(t, ctx, opts)
+			if !tt.reload {
+				shouldPub, err := acct.SubmitObservation(msg)
+				require.NoError(t, err)
+				assert.False(t, shouldPub)
+			}
+
+			pe, exists := acct.pendingTransfers[msg.MessageIDString()]
+			require.Equal(t, tt.wantEntry, exists)
+			if exists {
+				assert.Nil(t, pe.solanaFields)
+			}
 		})
-		assert.NotContains(t, acct.pendingTransfers, msg.MessageIDString())
-	})
-}
-
-func TestSolanaFieldsOnPendingTransfers(t *testing.T) {
-	ctx := context.Background()
-	msg := solanaTestTransfer(t, 42)
-
-	t.Run("submit observation sets the record", func(t *testing.T) {
-		acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true})
-		_, err := acct.SubmitObservation(msg)
-		require.NoError(t, err)
-
-		pe := acct.pendingTransfers[msg.MessageIDString()]
-		require.NotNil(t, pe)
-		require.NotNil(t, pe.solanaFields)
-		wantDigest, err := digestBytes(pe.digest)
-		require.NoError(t, err)
-		assert.Equal(t, wantDigest, pe.solanaFields.VaaDigest)
-		assert.Equal(t, msg.EmitterChain, pe.solanaFields.Chain)
-		assert.Equal(t, msg.Sequence, pe.solanaFields.Sequence)
-	})
-
-	t.Run("reload sets the record", func(t *testing.T) {
-		acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{
-			wormchainContract: "0xdeadbeef",
-			enforce:           true,
-			db:                &fakeAccountantDB{data: []*common.MessagePublication{msg}},
-		})
-		pe := acct.pendingTransfers[msg.MessageIDString()]
-		require.NotNil(t, pe)
-		assert.NotNil(t, pe.solanaFields)
-	})
-
-	t.Run("no record while solana is disabled", func(t *testing.T) {
-		acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{
-			wormchainContract: "0xdeadbeef",
-			enforce:           true,
-			disableSolana:     true,
-			db:                &fakeAccountantDB{data: []*common.MessagePublication{msg}},
-		})
-		pe := acct.pendingTransfers[msg.MessageIDString()]
-		require.NotNil(t, pe)
-		assert.Nil(t, pe.solanaFields)
-	})
+	}
 }

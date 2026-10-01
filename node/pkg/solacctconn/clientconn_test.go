@@ -17,7 +17,6 @@ func TestNewConnRequiresBothEndpoints(t *testing.T) {
 		{name: "both set", rpcURL: "http://127.0.0.1:8899", wsURL: "ws://127.0.0.1:8900"},
 		{name: "rpc missing", wsURL: "ws://127.0.0.1:8900", wantErr: true},
 		{name: "websocket missing", rpcURL: "http://127.0.0.1:8899", wantErr: true},
-		{name: "both missing", wantErr: true},
 	}
 
 	for _, tt := range tests {

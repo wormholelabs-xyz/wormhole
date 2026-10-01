@@ -133,12 +133,6 @@ func (c *AuditMockWormchainConn) QueryCount() int {
 	return len(c.queries)
 }
 
-type MockGetProgramAccountsByTagCall struct {
-	Program  solana.PublicKey
-	Tag      byte
-	DataSize uint64
-}
-
 type MockGetSignaturesForAddressCall struct {
 	Addr  solana.PublicKey
 	Limit int
@@ -148,8 +142,6 @@ type MockGetSignaturesForAddressCall struct {
 type MockAccountantSolanaConn struct {
 	mu sync.Mutex
 
-	closed bool
-
 	accounts    map[solana.PublicKey]*solacctconn.AccountResult
 	accountsErr error
 	// Only confirmed reads see these. They take precedence over accounts.
@@ -158,11 +150,9 @@ type MockAccountantSolanaConn struct {
 	programAccounts    []solacctconn.ProgramAccount
 	programAccountsErr error
 
-	signatures    map[solana.PublicKey][]solana.Signature
-	signaturesErr error
+	signatures map[solana.PublicKey][]solana.Signature
 
-	transactions    map[solana.Signature]*solacctconn.TransactionResult
-	transactionsErr error
+	transactions map[solana.Signature]*solacctconn.TransactionResult
 
 	logEvents        chan solacctconn.LogEvent
 	subscribeLogsErr error
@@ -177,21 +167,15 @@ type MockAccountantSolanaConn struct {
 	sendTransactionErr  error
 	sendTransactionHook func(tx *solana.Transaction) error
 
-	signatureStatuses         map[solana.Signature]*solacctconn.SignatureStatus
-	signatureStatusesErr      error
-	defaultSignatureStatus    *solacctconn.SignatureStatus
-	defaultSignatureStatusSet bool
+	signatureStatusesErr   error
+	defaultSignatureStatus *solacctconn.SignatureStatus
 
 	balance    uint64
 	balanceErr error
 
 	GetMultipleAccountsCalls       [][]solana.PublicKey
 	GetMultipleAccountsCommitments []solacctconn.Commitment
-	GetProgramAccountsByTagCalls   []MockGetProgramAccountsByTagCall
 	GetSignaturesForAddressCalls   []MockGetSignaturesForAddressCall
-	GetTransactionCalls            []solana.Signature
-	GetLatestBlockhashCalls        int
-	GetBlockHeightCalls            int
 	SentTransactions               []*solana.Transaction
 	GetSignatureStatusesCalls      [][]solana.Signature
 	GetBalanceCalls                []solana.PublicKey
@@ -205,23 +189,12 @@ func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 		confirmedAccounts: make(map[solana.PublicKey]*solacctconn.AccountResult),
 		signatures:        make(map[solana.PublicKey][]solana.Signature),
 		transactions:      make(map[solana.Signature]*solacctconn.TransactionResult),
-		signatureStatuses: make(map[solana.Signature]*solacctconn.SignatureStatus),
 		// Buffered so tests can queue events before the reader starts.
 		logEvents: make(chan solacctconn.LogEvent, 16),
 	}
 }
 
-func (c *MockAccountantSolanaConn) Close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.closed = true
-}
-
-func (c *MockAccountantSolanaConn) Closed() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.closed
-}
+func (c *MockAccountantSolanaConn) Close() {}
 
 // A nil result marks an absent account.
 func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *solacctconn.AccountResult) {
@@ -271,9 +244,6 @@ func (c *MockAccountantSolanaConn) SetProgramAccounts(accounts []solacctconn.Pro
 func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]solacctconn.ProgramAccount, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.GetProgramAccountsByTagCalls = append(c.GetProgramAccountsByTagCalls, MockGetProgramAccountsByTagCall{
-		Program: program, Tag: tag, DataSize: dataSize,
-	})
 	if c.programAccountsErr != nil {
 		return nil, c.programAccountsErr
 	}
@@ -286,21 +256,12 @@ func (c *MockAccountantSolanaConn) SetSignaturesForAddress(addr solana.PublicKey
 	c.signatures[addr] = sigs
 }
 
-func (c *MockAccountantSolanaConn) SetSignaturesForAddressErr(err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.signaturesErr = err
-}
-
 func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, limit int) ([]solana.Signature, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetSignaturesForAddressCalls = append(c.GetSignaturesForAddressCalls, MockGetSignaturesForAddressCall{
 		Addr: addr, Limit: limit,
 	})
-	if c.signaturesErr != nil {
-		return nil, c.signaturesErr
-	}
 	return c.signatures[addr], nil
 }
 
@@ -310,19 +271,9 @@ func (c *MockAccountantSolanaConn) SetTransaction(sig solana.Signature, tx *sola
 	c.transactions[sig] = tx
 }
 
-func (c *MockAccountantSolanaConn) SetTransactionErr(err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.transactionsErr = err
-}
-
 func (c *MockAccountantSolanaConn) GetTransaction(ctx context.Context, sig solana.Signature) (*solacctconn.TransactionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.GetTransactionCalls = append(c.GetTransactionCalls, sig)
-	if c.transactionsErr != nil {
-		return nil, c.transactionsErr
-	}
 	tx, ok := c.transactions[sig]
 	if !ok {
 		return nil, fmt.Errorf("mock accountant solana conn: no transaction set up for signature %s", sig)
@@ -364,7 +315,6 @@ func (c *MockAccountantSolanaConn) SetLatestBlockhash(bh solacctconn.Blockhash, 
 func (c *MockAccountantSolanaConn) GetLatestBlockhash(ctx context.Context) (solacctconn.Blockhash, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.GetLatestBlockhashCalls++
 	if c.latestBlockhashErr != nil {
 		return solacctconn.Blockhash{}, c.latestBlockhashErr
 	}
@@ -388,7 +338,6 @@ func (c *MockAccountantSolanaConn) SetBlockHeightHook(hook func()) {
 
 func (c *MockAccountantSolanaConn) GetBlockHeight(ctx context.Context) (uint64, error) {
 	c.mu.Lock()
-	c.GetBlockHeightCalls++
 	height, err, hook := c.blockHeight, c.blockHeightErr, c.blockHeightHook
 	c.mu.Unlock()
 
@@ -436,20 +385,11 @@ func (c *MockAccountantSolanaConn) SendTransaction(ctx context.Context, tx *sola
 	return tx.Signatures[0], nil
 }
 
-// SetDefaultSignatureStatus answers every signature that SetSignatureStatus did not name.
-// A nil status marks them unknown.
+// SetDefaultSignatureStatus answers every signature. A nil status marks them unknown.
 func (c *MockAccountantSolanaConn) SetDefaultSignatureStatus(status *solacctconn.SignatureStatus) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.defaultSignatureStatus = status
-	c.defaultSignatureStatusSet = true
-}
-
-// A nil status marks an unknown signature.
-func (c *MockAccountantSolanaConn) SetSignatureStatus(sig solana.Signature, status *solacctconn.SignatureStatus) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.signatureStatuses[sig] = status
 }
 
 func (c *MockAccountantSolanaConn) SetSignatureStatusesErr(err error) {
@@ -466,12 +406,8 @@ func (c *MockAccountantSolanaConn) GetSignatureStatuses(ctx context.Context, sig
 		return nil, c.signatureStatusesErr
 	}
 	out := make([]*solacctconn.SignatureStatus, len(sigs))
-	for i, sig := range sigs {
-		status, exists := c.signatureStatuses[sig]
-		if !exists && c.defaultSignatureStatusSet {
-			status = c.defaultSignatureStatus
-		}
-		out[i] = status
+	for i := range sigs {
+		out[i] = c.defaultSignatureStatus
 	}
 	return out, nil
 }
