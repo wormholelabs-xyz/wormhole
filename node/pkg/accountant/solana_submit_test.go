@@ -196,9 +196,9 @@ func newSolanaBatchFixture(t *testing.T, ctx context.Context) *solanaBatchFixtur
 	sub, err := acct.solana.deriveSolanaSubmission(0, msg, pe.solanaFields)
 	require.NoError(t, err)
 
-	conn.SetLatestBlockhash(solacctconn.Blockhash{Hash: solana.Hash{9}, LastValidBlockHeight: 1000}, nil)
-	conn.SetBlockHeight(900, nil)
-	conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
+	conn.LatestBlockhash = solacctconn.Blockhash{Hash: solana.Hash{9}, LastValidBlockHeight: 1000}
+	conn.BlockHeight = 900
+	conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Confirmed: true}
 
 	return &solanaBatchFixture{acct: acct, conn: conn, msg: msg, pe: pe, sub: sub}
 }
@@ -402,21 +402,21 @@ func TestHandleSolanaBatch(t *testing.T) {
 		{
 			name: "account read failure abandons the batch",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetGetMultipleAccountsErr(errors.New("rpc down"))
+				f.conn.GetMultipleAccountsErr = errors.New("rpc down")
 			},
 			wantPending: 1,
 		},
 		{
 			name: "blockhash failure abandons the batch",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetLatestBlockhash(solacctconn.Blockhash{}, errors.New("no blockhash"))
+				f.conn.LatestBlockhashErr = errors.New("no blockhash")
 			},
 			wantPending: 1,
 		},
 		{
 			name: "transport error on send",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetSendTransactionErr(errors.New("connection reset"))
+				f.conn.SendTransactionErr = errors.New("connection reset")
 			},
 			wantSent:    1,
 			wantPending: 1,
@@ -424,7 +424,7 @@ func TestHandleSolanaBatch(t *testing.T) {
 		{
 			name: "status poll failure abandons the batch",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetSignatureStatusesErr(errors.New("status rpc down"))
+				f.conn.SignatureStatusesErr = errors.New("status rpc down")
 			},
 			wantSent:    1,
 			wantPending: 1,
@@ -432,7 +432,7 @@ func TestHandleSolanaBatch(t *testing.T) {
 		{
 			name: "confirm payer mismatch retries once",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Err: customTxError(solanaErrPayerMismatch)})
+				f.conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Err: customTxError(solanaErrPayerMismatch)}
 			},
 			wantSent:    maxSolanaSubmitRounds,
 			wantPending: 1,
@@ -440,7 +440,7 @@ func TestHandleSolanaBatch(t *testing.T) {
 		{
 			name: "confirm program failure",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Err: customTxError(solanaErrInvalidSignature)})
+				f.conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Err: customTxError(solanaErrInvalidSignature)}
 			},
 			wantSent:    1,
 			wantPending: 1,
@@ -506,7 +506,7 @@ func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 		}
 		return nil
 	})
-	f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
+	f.conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Confirmed: true}
 
 	f.queue(t)
 	require.NoError(t, f.acct.handleSolanaBatch(ctx, f.acct.solana))
@@ -533,10 +533,10 @@ func TestConfirmSolanaSubmissions(t *testing.T) {
 			// Lands between the height read that passes expiry and the next status read.
 			name: "lands just before expiry",
 			setup: func(f *solanaBatchFixture) {
-				f.conn.SetDefaultSignatureStatus(nil)
-				f.conn.SetBlockHeight(2000, nil)
+				f.conn.DefaultSignatureStatus = nil
+				f.conn.BlockHeight = 2000
 				f.conn.SetBlockHeightHook(func() {
-					f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
+					f.conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Confirmed: true}
 				})
 			},
 			wantSubmitted: 1,
@@ -544,13 +544,13 @@ func TestConfirmSolanaSubmissions(t *testing.T) {
 		{
 			name: "processed past expiry confirms",
 			setup: func(f *solanaBatchFixture) {
-				f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: false})
-				f.conn.SetBlockHeight(2000, nil)
+				f.conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Confirmed: false}
+				f.conn.BlockHeight = 2000
 				heightReads := 0
 				f.conn.SetBlockHeightHook(func() {
 					heightReads++
 					if heightReads == 2 {
-						f.conn.SetDefaultSignatureStatus(&solacctconn.SignatureStatus{Confirmed: true})
+						f.conn.DefaultSignatureStatus = &solacctconn.SignatureStatus{Confirmed: true}
 					}
 				})
 			},
@@ -559,8 +559,8 @@ func TestConfirmSolanaSubmissions(t *testing.T) {
 		{
 			name: "unseen past expiry is dropped",
 			setup: func(f *solanaBatchFixture) {
-				f.conn.SetDefaultSignatureStatus(nil)
-				f.conn.SetBlockHeight(2000, nil)
+				f.conn.DefaultSignatureStatus = nil
+				f.conn.BlockHeight = 2000
 			},
 			wantDropped: 1,
 		},

@@ -433,7 +433,7 @@ func TestSolanaWatcherLoop(t *testing.T) {
 		ctx := context.Background()
 		acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
 		want := errors.New("dial failed")
-		conn.SetSubscribeLogsErr(want)
+		conn.SubscribeLogsErr = want
 
 		err := acct.solanaWatcher(ctx, acct.solana)
 		require.ErrorIs(t, err, want)

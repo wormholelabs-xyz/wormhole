@@ -45,7 +45,7 @@ func newSolanaAuditFixture(t *testing.T, ctx context.Context) *solanaAuditFixtur
 
 	obsvReq := make(chan *gossipv1.ObservationRequest, 10)
 	acct, conn, msgChan := newSolanaTestAccountantWithObsvReq(t, ctx, solanaTestOpts{enforce: true}, obsvReq)
-	conn.SetBalance(1_000_000, nil)
+	conn.Balance = 1_000_000
 
 	msg := solanaTestTransfer(t, 31)
 	_, err := acct.SubmitObservation(msg)
@@ -153,7 +153,7 @@ func TestPublishSolanaFeePayerBalance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
-			conn.SetBalance(tt.lamports, tt.err)
+			conn.Balance, conn.BalanceErr = tt.lamports, tt.err
 			solanaFeePayerLamports.Set(7)
 			errorsBefore := testutil.ToFloat64(solanaFeePayerErrors)
 
@@ -363,10 +363,10 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 		{
 			name: "own transfer the own-transfer pass left unresolved resubmits",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.conn.SetGetMultipleAccountsErr(errors.New("rpc down"))
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.GetMultipleAccountsErr = errors.New("rpc down")
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, f.pending, f.pe.solanaFields.Chain, 0, f.pe.solanaFields.contentDigest, nil),
-				}, nil)
+				}
 			},
 			wantResubmitted: true,
 			wantAuditErrors: 2,
@@ -374,18 +374,18 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 		{
 			name: "own transfer the own-transfer pass reconciled is skipped",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, f.pending, f.pe.solanaFields.Chain, 0, f.pe.solanaFields.contentDigest, nil),
-				}, nil)
+				}
 			},
 		},
 		{
 			name: "own transfer whose account reports another set index is skipped",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.conn.SetGetMultipleAccountsErr(errors.New("rpc down"))
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.GetMultipleAccountsErr = errors.New("rpc down")
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, f.pending, f.pe.solanaFields.Chain, 9, f.pe.solanaFields.contentDigest, nil),
-				}, nil)
+				}
 			},
 			wantAuditErrors: 2,
 		},
@@ -396,9 +396,9 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 				f.conn.SetAccount(live, &solacctconn.AccountResult{
 					Data: solanaPendingAccountData(t, f.pe.solanaFields.Chain, 1, f.pe.solanaFields.contentDigest, solana.PublicKey{1}, []uint8{0}),
 				})
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, previous, f.pe.solanaFields.Chain, 0, f.pe.solanaFields.contentDigest, nil),
-				}, nil)
+				}
 			},
 		},
 		{
@@ -410,9 +410,9 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 				tx := solanaSubmitTransaction(t, f.acct.solana.program, recoveryTxID, fields)
 				tx.Instructions = append(otherTx.Instructions, tx.Instructions...)
 
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, pda, fields.Chain, 0, fields.contentDigest, nil),
-				}, nil)
+				}
 				f.conn.SetSignaturesForAddress(pda, []solana.Signature{{2}})
 				f.conn.SetTransaction(solana.Signature{2}, tx)
 			},
@@ -424,9 +424,9 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 			name: "unknown pending account with a 64-byte tx id is reobserved with the full id",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
 				fields, pda := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDSolana, 7)
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, pda, fields.Chain, 0, fields.contentDigest, nil),
-				}, nil)
+				}
 				f.conn.SetSignaturesForAddress(pda, []solana.Signature{{2}})
 				f.conn.SetTransaction(solana.Signature{2}, solanaSubmitTransaction(t, f.acct.solana.program, recoverySignatureTxID, fields))
 			},
@@ -438,9 +438,9 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 			name: "unknown pending account without an accountant instruction is not reobserved",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
 				fields, pda := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDEthereum, 7)
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
 					solanaProgramAccountFor(t, pda, fields.Chain, 0, fields.contentDigest, nil),
-				}, nil)
+				}
 				f.conn.SetSignaturesForAddress(pda, []solana.Signature{{2}})
 				f.conn.SetTransaction(solana.Signature{2}, &solacctconn.TransactionResult{
 					Instructions: []solacctconn.Instruction{{ProgramID: foreignProgram(), Data: []byte{0x00}}},
@@ -452,14 +452,14 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 		{
 			name: "undecodable pending account is skipped",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.conn.SetProgramAccounts([]solacctconn.ProgramAccount{{Address: solana.PublicKey{0x77}, Data: []byte{0x01}}}, nil)
+				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{{Address: solana.PublicKey{0x77}, Data: []byte{0x01}}}
 			},
 			wantAuditErrors: 1,
 		},
 		{
 			name: "program account query error ends the pass",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.conn.SetProgramAccounts(nil, errors.New("rpc down"))
+				f.conn.ProgramAccountsErr = errors.New("rpc down")
 			},
 			wantAuditErrors: 1,
 		},
@@ -516,7 +516,7 @@ func TestAuditSolanaProgramPendingAccountsBoundsAccountsRead(t *testing.T) {
 		accounts[idx] = solanaProgramAccountFor(t, addr, vaa.ChainIDEthereum, 0, [32]byte{0x12}, []uint8{0})
 	}
 	accounts[maxSolanaProgramPendingAccountsPerAudit] = solanaProgramAccountFor(t, solana.PublicKey{0xFF}, vaa.ChainIDEthereum, 0, [32]byte{0x12}, nil)
-	f.conn.SetProgramAccounts(accounts, nil)
+	f.conn.ProgramAccounts = accounts
 
 	f.acct.runSolanaAudit(ctx, f.acct.solana)
 	assert.Empty(t, f.conn.GetSignaturesForAddressCalls)
@@ -533,7 +533,7 @@ func TestAuditSolanaProgramPendingAccountsBoundsReobservationSearches(t *testing
 		binary.LittleEndian.PutUint32(addr[:4], uint32(idx)) // #nosec G115 -- idx < 101
 		accounts[idx] = solanaProgramAccountFor(t, addr, vaa.ChainIDEthereum, 0, [32]byte{0x34}, nil)
 	}
-	f.conn.SetProgramAccounts(accounts, nil)
+	f.conn.ProgramAccounts = accounts
 
 	f.acct.runSolanaAudit(ctx, f.acct.solana)
 	assert.Len(t, f.conn.GetSignaturesForAddressCalls, maxSolanaReobservationSearchesPerAudit)
