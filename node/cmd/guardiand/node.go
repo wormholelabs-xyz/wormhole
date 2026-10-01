@@ -1163,13 +1163,15 @@ func runNode(cmd *cobra.Command, args []string) {
 
 	// Other, non-chain specific parameters go here.
 	rpcMap["accountantWS"] = *accountantWS
-	rpcMap["accountantSolanaRPC"] = *accountantSolanaRPC
-	rpcMap["accountantSolanaWS"] = *accountantSolanaWS
 	rpcMap["gatewayWS"] = *gatewayWS
 	rpcMap["gatewayLCD"] = *gatewayLCD
 	rpcMap["ibcBlockHeightURL"] = *ibcBlockHeightURL
 	rpcMap["ibcLCD"] = *ibcLCD
 	rpcMap["ibcWS"] = *ibcWS
+	if *accountantSolanaContract != "" {
+		rpcMap["accountantSolanaRPC"] = *accountantSolanaRPC
+		rpcMap["accountantSolanaWS"] = *accountantSolanaWS
+	}
 
 	// Handle SIGTERM
 	sigterm := make(chan os.Signal, 1)

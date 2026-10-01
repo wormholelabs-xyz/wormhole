@@ -193,8 +193,26 @@ func (acct *Accountant) processPendingTransfer(xfer *WasmObservation, tag string
 
 	msgId := msg.MessageIDString()
 
-	// The wormchain contract commits the VAA digest. Same bytes CreateDigest hex-encodes.
-	if acct.processCommittedDigest(msgId, msg.CreateVAA(0).SigningDigest(), false, tag) {
+	pe, exists := acct.pendingTransfers[msgId]
+	if exists {
+		digest := msg.CreateDigest()
+		if pe.digest != digest {
+			digestMismatches.Inc()
+			acct.logger.Error("acctwatch: digest mismatch, dropping transfer",
+				zap.String("msgID", msgId),
+				zap.String("oldDigest", pe.digest),
+				zap.String("newDigest", digest),
+			)
+
+			acct.deletePendingTransferAlreadyLocked(msgId)
+			return
+		}
+		acct.logger.Info("acctwatch: pending transfer has been approved", zap.String("msgId", msgId))
+		acct.publishTransferAlreadyLocked(pe)
 		transfersApproved.Inc()
+	} else {
+		// This log will be emitted by the Guardians that submit to the Accountant after the transfer has already been confirmed.
+		// These transfers are already processed in submit_obs.go and so when the watcher sees the event it is no longer in the pendingTransfers map.
+		acct.logger.Info("acctwatch: unknown transfer has been approved, ignoring it", zap.String("msgId", msgId))
 	}
 }

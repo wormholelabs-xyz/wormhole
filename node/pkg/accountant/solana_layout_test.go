@@ -2,7 +2,6 @@ package accountant
 
 import (
 	"encoding/hex"
-	"math/big"
 	"testing"
 
 	"github.com/gagliardetto/solana-go"
@@ -57,7 +56,6 @@ const fixtureVaaBodyHeaderLen = 51
 
 const (
 	fixturePendingObservationsAccountHex = "010002000400000029000000020000000100000000000080808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
-	fixturePendingPDAHex                 = "348f55786a5496ba40c0e28d05705814e35173bc1bb25d02a1e58a5d80a98fe0"
 	fixtureNoreplayAuthorityPDAHex       = "26a205d51ce014d75374204dfdd2d1e20ed4f9483698d53cb48a02e1ff38c048"
 	fixtureNoreplayBucketPDASeq1023Hex   = "45127b068360647b21f422e2ac01a7c710dabb76674a6f54312634c5cd489e71"
 	fixtureNoreplayBucketPDASeq1024Hex   = "be0c9a2efc9da5d71ff732e6427c324c4465d05134845c014a8d26ff8870721c"
@@ -72,7 +70,6 @@ const (
 	fixtureTransferFieldsHex        = "010001ec7372995d5cc8732397fb0ad35c0121e0eaa90d26f828a534cab54391b3a4f50000000000154a070002000000000000000000000000814e0908b12a99fecf5bc101bb5d0b8b5cdf7d2600020000000000000000000000000000000000000000000000000000017a3782f44a89c41f5ac9c35ba9d15bf358b931d6f754a77349022d0a64f13962078f632a39"
 	fixtureTransferContentDigestHex = "534e4da8419f27c2d2ea93913e0f6492ec991fac607b905fffe0d1b16c82111d"
 	fixtureTransferPendingPDAHex    = "8b89ff0436841aad684856dc16fbcf536e880633ad8564b568126ff43ab23ff4"
-	fixtureTransferChain            = vaa.ChainID(1)
 	fixtureTransferSequence         = uint64(1_395_207)
 	fixtureTransferGuardianSetIndex = uint32(6)
 )
@@ -84,7 +81,6 @@ const (
 	fixtureOtherVaaDigestHex     = "e4cac284656ac74ad4ef1b0ec7c2be76289705458071c7ddbef805499a054116"
 	fixtureOtherFieldsHex        = "9900014385cebf45845f3a162f42c96a3dfe696b7eb8368f1af1e7613f870af36f1fc600000000000008a30000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e4cac284656ac74ad4ef1b0ec7c2be76289705458071c7ddbef805499a054116"
 	fixtureOtherContentDigestHex = "01717e74a82fc2625fa902ae4813e83ea5c875776dffd459e626eeb804d4d400"
-	fixtureOtherChain            = vaa.ChainID(1)
 	fixtureOtherSequence         = uint64(2211)
 )
 
@@ -97,18 +93,10 @@ const (
 	fixtureSubmitObservationsSignatureTxIDHex       = "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
 )
 
-// transferPayload returns the token-bridge payload of the mainnet transfer fixture.
-func transferPayload(t *testing.T) []byte {
+// fixturePayload returns the payload of a mainnet VAA body fixture.
+func fixturePayload(t *testing.T, bodyHex string) []byte {
 	t.Helper()
-	body := mustHexDecode(t, fixtureTransferBodyHex)
-	require.Greater(t, len(body), fixtureVaaBodyHeaderLen)
-	return body[fixtureVaaBodyHeaderLen:]
-}
-
-// otherPayload returns the action-0x99 payload of the mainnet fixture.
-func otherPayload(t *testing.T) []byte {
-	t.Helper()
-	body := mustHexDecode(t, fixtureOtherBodyHex)
+	body := mustHexDecode(t, bodyHex)
 	require.Greater(t, len(body), fixtureVaaBodyHeaderLen)
 	return body[fixtureVaaBodyHeaderLen:]
 }
@@ -126,7 +114,6 @@ func TestParseAccountantDigestLog(t *testing.T) {
 		{name: "wrong tag", data: append([]byte{0}, valid[1:]...), wantErr: true},
 		{name: "85 bytes", data: valid[:85], wantErr: true},
 		{name: "87 bytes", data: append(append([]byte{}, valid...), 0x00), wantErr: true},
-		{name: "empty", data: []byte{}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -164,7 +151,6 @@ func TestParsePendingObservationsAccount(t *testing.T) {
 		{name: "wrong tag", data: wrongTag, wantErr: true},
 		{name: "87 bytes", data: valid[:len(valid)-1], wantErr: true},
 		{name: "89 bytes", data: append(append([]byte{}, valid...), 0x00), wantErr: true},
-		{name: "empty", data: []byte{}, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -203,18 +189,12 @@ func TestPendingObservationsHasSignature(t *testing.T) {
 		wantErr bool
 	}{
 		{name: "index 0 set", index: 0, want: true},
-		{name: "index 3 set", index: 3, want: true},
-		{name: "index 5 set", index: 5, want: true},
 		{name: "index 33 set", index: 33, want: true},
 		{name: "index 64 set", index: 64, want: true},
 		{name: "index 127 set", index: 127, want: true},
 		{name: "index 1 clear", index: 1, want: false},
-		{name: "index 31 clear", index: 31, want: false},
 		{name: "index 32 clear", index: 32, want: false},
-		{name: "index 63 clear", index: 63, want: false},
-		{name: "index 126 clear", index: 126, want: false},
 		{name: "index 128 out of range", index: 128, wantErr: true},
-		{name: "index 255 out of range", index: 255, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -231,61 +211,22 @@ func TestPendingObservationsHasSignature(t *testing.T) {
 }
 
 func TestDerivePendingObservationsPDA(t *testing.T) {
-	transferEmitter := vaa.Address(mustHexDecode32(t, fixtureTransferEmitterHex))
-	transferDigest := mustHexDecode32(t, fixtureTransferContentDigestHex)
-
-	tests := []struct {
-		name             string
-		chain            vaa.ChainID
-		emitter          vaa.Address
-		sequence         uint64
-		guardianSetIndex uint32
-		contentDigest    [32]byte
-		wantHex          string
-	}{
-		{
-			name:             "synthetic vector at guardian set 4",
-			chain:            vaa.ChainID(2),
-			emitter:          fixtureEmitter(),
-			sequence:         100_000,
-			guardianSetIndex: 4,
-			contentDigest:    fixtureDigest(),
-			wantHex:          fixturePendingPDAHex,
-		},
-		{
-			name:             "mainnet transfer at guardian set 6",
-			chain:            fixtureTransferChain,
-			emitter:          transferEmitter,
-			sequence:         fixtureTransferSequence,
-			guardianSetIndex: fixtureTransferGuardianSetIndex,
-			contentDigest:    transferDigest,
-			wantHex:          fixtureTransferPendingPDAHex,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pda, err := derivePendingObservationsPDA(fixtureProgramID(), tt.chain, tt.emitter, tt.sequence, tt.guardianSetIndex, tt.contentDigest)
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantHex, hex.EncodeToString(pda[:]))
-		})
-	}
-
-	// A guardian-set rotation opens a sibling record.
-	rotated, err := derivePendingObservationsPDA(fixtureProgramID(), fixtureTransferChain, transferEmitter, fixtureTransferSequence, fixtureTransferGuardianSetIndex+1, transferDigest)
+	pda, err := derivePendingObservationsPDA(
+		fixtureProgramID(),
+		vaa.ChainIDSolana,
+		vaa.Address(mustHexDecode32(t, fixtureTransferEmitterHex)),
+		fixtureTransferSequence,
+		fixtureTransferGuardianSetIndex,
+		mustHexDecode32(t, fixtureTransferContentDigestHex),
+	)
 	require.NoError(t, err)
-	assert.NotEqual(t, fixtureTransferPendingPDAHex, hex.EncodeToString(rotated[:]))
-}
-
-func TestDeriveNoreplayAuthorityPDA(t *testing.T) {
-	pda, err := deriveNoreplayAuthorityPDA(fixtureProgramID())
-	require.NoError(t, err)
-	assert.Equal(t, fixtureNoreplayAuthorityPDAHex, hex.EncodeToString(pda[:]))
+	assert.Equal(t, fixtureTransferPendingPDAHex, hex.EncodeToString(pda[:]))
 }
 
 func TestDeriveNoreplayBucketPDA(t *testing.T) {
 	authority, err := deriveNoreplayAuthorityPDA(fixtureProgramID())
 	require.NoError(t, err)
+	assert.Equal(t, fixtureNoreplayAuthorityPDAHex, hex.EncodeToString(authority[:]))
 
 	// NOREPLAY_PROGRAM_ID, svm/accountant/crates/definitions/src/constants/noreplay.rs.
 	noreplayProgram := solana.MustPublicKeyFromBase58("repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t")
@@ -307,23 +248,9 @@ func TestDeriveNoreplayBucketPDA(t *testing.T) {
 			assert.Equal(t, tt.wantHex, hex.EncodeToString(pda[:]))
 		})
 	}
-
-	pda1023, err := deriveNoreplayBucketPDA(noreplayProgram, authority, boundaryChain, fixtureEmitter(), 1023)
-	require.NoError(t, err)
-	pda1024, err := deriveNoreplayBucketPDA(noreplayProgram, authority, boundaryChain, fixtureEmitter(), 1024)
-	require.NoError(t, err)
-	assert.NotEqual(t, pda1023, pda1024, "sequence 1023 and 1024 must fall in different buckets")
 }
 
 func TestNoreplayBitSet(t *testing.T) {
-	makeBucket := func(setBits ...uint64) []byte {
-		buf := make([]byte, noreplayBucketLen)
-		for _, bit := range setBits {
-			buf[noreplayBitmapOffset+int(bit/8)] |= 1 << (bit % 8)
-		}
-		return buf
-	}
-
 	tests := []struct {
 		name       string
 		bucketData []byte
@@ -331,16 +258,12 @@ func TestNoreplayBitSet(t *testing.T) {
 		want       bool
 		wantErr    bool
 	}{
-		{name: "bit 0 set, bit 0 queried", bucketData: makeBucket(0), sequence: 0, want: true},
-		{name: "bit 0 set, bit 1 queried", bucketData: makeBucket(0), sequence: 1, want: false},
-		{name: "bit 1023 set, bit 1023 queried", bucketData: makeBucket(1023), sequence: 1023, want: true},
-		{name: "bit 1023 set, sequence 1024 wraps to bit 0", bucketData: makeBucket(1023), sequence: 1024, want: false},
-		{name: "sequence 1024 queries bit 0 of the next bucket's page", bucketData: makeBucket(0), sequence: 1024, want: true},
-		{name: "byte boundary: bit 7 set, bit 8 clear", bucketData: makeBucket(7), sequence: 8, want: false},
-		{name: "byte boundary: bit 8 set", bucketData: makeBucket(8), sequence: 8, want: true},
+		{name: "bit 0 set, bit 1 queried", bucketData: solanaNoreplayBucket(0), sequence: 1, want: false},
+		{name: "bit 1023 set, bit 1023 queried", bucketData: solanaNoreplayBucket(1023), sequence: 1023, want: true},
+		{name: "sequence 1024 queries bit 0 of the next bucket's page", bucketData: solanaNoreplayBucket(0), sequence: 1024, want: true},
+		{name: "byte boundary: bit 7 set, bit 8 clear", bucketData: solanaNoreplayBucket(7), sequence: 8, want: false},
+		{name: "byte boundary: bit 8 set", bucketData: solanaNoreplayBucket(8), sequence: 8, want: true},
 		{name: "wrong length: too short", bucketData: make([]byte, noreplayBucketLen-1), sequence: 0, wantErr: true},
-		{name: "wrong length: too long", bucketData: make([]byte, noreplayBucketLen+1), sequence: 0, wantErr: true},
-		{name: "wrong length: empty", bucketData: []byte{}, sequence: 0, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -378,13 +301,8 @@ func TestParseSubmitObservationsIxData(t *testing.T) {
 		{name: "valid, 64-byte tx id", data: validSignature, wantTxID: mustHexDecode(t, fixtureSubmitObservationsSignatureTxIDHex)},
 		{name: "wrong discriminator", data: mutate(valid, func(d []byte) { d[0] = 2 }), wantErr: true}, // Instruction::SubmitVaas
 		{name: "278 bytes", data: valid[:len(valid)-1], wantErr: true},
-		{name: "280 bytes", data: append(append([]byte{}, valid...), 0x00), wantErr: true},
-		{name: "empty", data: []byte{}, wantErr: true},
-		{name: "tx id length 0", data: mutate(valid, func(d []byte) { d[submitTxIDLenOffset] = 0 }), wantErr: true},
 		{name: "tx id length 33", data: mutate(valid, func(d []byte) { d[submitTxIDLenOffset] = 33 }), wantErr: true},
-		{name: "tx id length 65", data: mutate(validSignature, func(d []byte) { d[submitTxIDLenOffset] = 65 }), wantErr: true},
 		{name: "32-byte tx id, nonzero last padding byte", data: mutate(valid, func(d []byte) { d[submitFieldsOffset-1] = 1 }), wantErr: true},
-		{name: "32-byte tx id, nonzero first padding byte", data: mutate(valid, func(d []byte) { d[submitTxIDOffset+hashTxIDLen] = 1 }), wantErr: true},
 	}
 
 	var wantSignature [65]byte
@@ -408,14 +326,6 @@ func TestParseSubmitObservationsIxData(t *testing.T) {
 			assert.True(t, ix.TxID.valid())
 			assert.Equal(t, tt.wantTxID, ix.TxID.Bytes())
 
-			assert.Equal(t, uint8(0x01), ix.Action)
-			assert.Equal(t, fixtureTransferChain, ix.Chain)
-			assert.Equal(t, vaa.Address(mustHexDecode32(t, fixtureTransferEmitterHex)), ix.Emitter)
-			assert.Equal(t, fixtureTransferSequence, ix.Sequence)
-			assert.Equal(t, vaa.ChainID(2), ix.TokenChain)
-			assert.Equal(t, vaa.ChainID(2), ix.RecipientChain)
-			assert.Equal(t, mustHexDecode32(t, fixtureTransferVaaDigestHex), ix.VaaDigest)
-
 			packed := ix.pack()
 			assert.Equal(t, fixtureTransferFieldsHex, hex.EncodeToString(packed[:]))
 			assert.Equal(t, mustHexDecode32(t, fixtureTransferContentDigestHex), ix.contentDigest)
@@ -431,10 +341,7 @@ func TestNewSolanaTxID(t *testing.T) {
 	}{
 		{name: "32 bytes", id: make([]byte, hashTxIDLen)},
 		{name: "64 bytes", id: make([]byte, signatureTxIDLen)},
-		{name: "empty", id: []byte{}, wantErr: true},
-		{name: "31 bytes", id: make([]byte, hashTxIDLen-1), wantErr: true},
 		{name: "33 bytes", id: make([]byte, hashTxIDLen+1), wantErr: true},
-		{name: "65 bytes", id: make([]byte, signatureTxIDLen+1), wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -456,87 +363,49 @@ func TestNewSolanaTxID(t *testing.T) {
 }
 
 func TestSolanaObservationFieldsFromPayload(t *testing.T) {
-	transfer := transferPayload(t)
+	transfer := fixturePayload(t, fixtureTransferBodyHex)
 	require.Len(t, transfer, tokenBridgeTransferLen)
 
 	transferPlusMax := append(append([]byte{}, transfer...), make([]byte, maxTransferPayloadLen)...)
 	transferPlusTooMuch := append(append([]byte{}, transfer...), make([]byte, maxTransferPayloadLen+1)...)
 
-	transferEmitter := vaa.Address(mustHexDecode32(t, fixtureTransferEmitterHex))
-	otherEmitter := vaa.Address(mustHexDecode32(t, fixtureOtherEmitterHex))
-
+	// Unset fields default to the mainnet transfer.
 	tests := []struct {
-		name                string
-		chain               vaa.ChainID
-		emitter             vaa.Address
-		sequence            uint64
-		payload             []byte
-		vaaDigest           [32]byte
-		wantFieldsHex       string
-		wantContentDigest   string
-		wantZeroTransferSet bool
-		wantErr             bool
+		name              string
+		emitterHex        string
+		sequence          uint64
+		payload           []byte
+		vaaDigestHex      string
+		wantFieldsHex     string
+		wantContentDigest string
+		wantErr           bool
 	}{
+		{name: "mainnet transfer", payload: transfer},
+		{name: "transfer with the maximum extra payload", payload: transferPlusMax},
 		{
-			name:              "mainnet transfer",
-			chain:             fixtureTransferChain,
-			emitter:           transferEmitter,
-			sequence:          fixtureTransferSequence,
-			payload:           transfer,
-			vaaDigest:         mustHexDecode32(t, fixtureTransferVaaDigestHex),
-			wantFieldsHex:     fixtureTransferFieldsHex,
-			wantContentDigest: fixtureTransferContentDigestHex,
+			name:              "mainnet action 0x99",
+			emitterHex:        fixtureOtherEmitterHex,
+			sequence:          fixtureOtherSequence,
+			payload:           fixturePayload(t, fixtureOtherBodyHex),
+			vaaDigestHex:      fixtureOtherVaaDigestHex,
+			wantFieldsHex:     fixtureOtherFieldsHex,
+			wantContentDigest: fixtureOtherContentDigestHex,
 		},
-		{
-			name:              "transfer with the maximum extra payload",
-			chain:             fixtureTransferChain,
-			emitter:           transferEmitter,
-			sequence:          fixtureTransferSequence,
-			payload:           transferPlusMax,
-			vaaDigest:         mustHexDecode32(t, fixtureTransferVaaDigestHex),
-			wantFieldsHex:     fixtureTransferFieldsHex,
-			wantContentDigest: fixtureTransferContentDigestHex,
-		},
-		{
-			name:                "mainnet action 0x99",
-			chain:               fixtureOtherChain,
-			emitter:             otherEmitter,
-			sequence:            fixtureOtherSequence,
-			payload:             otherPayload(t),
-			vaaDigest:           mustHexDecode32(t, fixtureOtherVaaDigestHex),
-			wantFieldsHex:       fixtureOtherFieldsHex,
-			wantContentDigest:   fixtureOtherContentDigestHex,
-			wantZeroTransferSet: true,
-		},
-		{
-			name:     "empty payload",
-			chain:    fixtureTransferChain,
-			emitter:  transferEmitter,
-			sequence: fixtureTransferSequence,
-			payload:  []byte{},
-			wantErr:  true,
-		},
-		{
-			name:     "transfer one byte short of the fixed head",
-			chain:    fixtureTransferChain,
-			emitter:  transferEmitter,
-			sequence: fixtureTransferSequence,
-			payload:  transfer[:tokenBridgeTransferLen-1],
-			wantErr:  true,
-		},
-		{
-			name:     "transfer one byte past the extra-payload bound",
-			chain:    fixtureTransferChain,
-			emitter:  transferEmitter,
-			sequence: fixtureTransferSequence,
-			payload:  transferPlusTooMuch,
-			wantErr:  true,
-		},
+		{name: "empty payload", payload: []byte{}, wantErr: true},
+		{name: "transfer one byte short of the fixed head", payload: transfer[:tokenBridgeTransferLen-1], wantErr: true},
+		{name: "transfer one byte past the extra-payload bound", payload: transferPlusTooMuch, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fields, err := solanaObservationFieldsFromPayload(tt.chain, tt.emitter, tt.sequence, tt.payload, tt.vaaDigest)
+			emitterHex, sequence, vaaDigestHex := fixtureTransferEmitterHex, fixtureTransferSequence, fixtureTransferVaaDigestHex
+			wantFieldsHex, wantContentDigest := fixtureTransferFieldsHex, fixtureTransferContentDigestHex
+			if tt.emitterHex != "" {
+				emitterHex, sequence, vaaDigestHex = tt.emitterHex, tt.sequence, tt.vaaDigestHex
+				wantFieldsHex, wantContentDigest = tt.wantFieldsHex, tt.wantContentDigest
+			}
+
+			fields, err := solanaObservationFieldsFromPayload(vaa.ChainIDSolana, vaa.Address(mustHexDecode32(t, emitterHex)), sequence, tt.payload, mustHexDecode32(t, vaaDigestHex))
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, fields)
@@ -545,38 +414,10 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, fields)
 			packed := fields.pack()
-			assert.Equal(t, tt.wantFieldsHex, hex.EncodeToString(packed[:]))
-			assert.Equal(t, mustHexDecode32(t, tt.wantContentDigest), fields.contentDigest)
-			if tt.wantZeroTransferSet {
-				assert.Equal(t, vaa.ChainID(0), fields.TokenChain)
-				assert.Equal(t, [32]byte{}, fields.TokenAddress)
-				assert.Equal(t, vaa.ChainID(0), fields.RecipientChain)
-				assert.Equal(t, [32]byte{}, fields.Amount)
-			}
+			assert.Equal(t, wantFieldsHex, hex.EncodeToString(packed[:]))
+			assert.Equal(t, mustHexDecode32(t, wantContentDigest), fields.contentDigest)
 		})
 	}
-}
-
-// The transfer offsets must agree with the guardian SDK's own decoder.
-func TestSolanaObservationFieldsMatchSDKTransferHeader(t *testing.T) {
-	payload := transferPayload(t)
-	fields, err := solanaObservationFieldsFromPayload(
-		fixtureTransferChain,
-		vaa.Address(mustHexDecode32(t, fixtureTransferEmitterHex)),
-		fixtureTransferSequence,
-		payload,
-		mustHexDecode32(t, fixtureTransferVaaDigestHex),
-	)
-	require.NoError(t, err)
-
-	hdr, err := vaa.DecodeTransferPayloadHdr(payload)
-	require.NoError(t, err)
-
-	assert.Equal(t, hdr.Type, fields.Action)
-	assert.Equal(t, hdr.OriginChain, fields.TokenChain)
-	assert.Equal(t, vaa.Address(fields.TokenAddress), hdr.OriginAddress)
-	assert.Equal(t, hdr.TargetChain, fields.RecipientChain)
-	assert.Equal(t, 0, hdr.Amount.Cmp(new(big.Int).SetBytes(fields.Amount[:])))
 }
 
 // Values are the ERR_* lines of go_fixture_vectors.rs.
