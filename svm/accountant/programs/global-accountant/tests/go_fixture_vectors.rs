@@ -1,7 +1,7 @@
 //! Prints golden fixtures for `node/pkg/accountant/solana_layout.go` from the program code paths.
 //!
-//! Run: `just go-fixtures` (the recipe supplies the compile-time addresses)
-//! and copy the hex into `solana_layout_test.go`.
+//! Run `just go-fixtures`. The recipe supplies the compile-time addresses.
+//! Copy the hex into `solana_layout_test.go`.
 
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
@@ -18,7 +18,7 @@ use common::{content_digest, noreplay_authority_pda, observation_ix_from_body};
 /// Guardian indices covering every word of the 128-bit bitmap.
 const SET_BITS: [u8; 6] = [0, 3, 5, 33, 64, 127];
 
-/// Fields and content digests exclude the tx id, so the real-data vectors use a zero one.
+/// Fields and content digests exclude the tx id. Thus the real-data vectors use a zero tx id.
 const ZERO_TX_ID: TxId<'static> = TxId::Hash(&[0u8; 32]);
 
 fn hex(bytes: &[u8]) -> String {

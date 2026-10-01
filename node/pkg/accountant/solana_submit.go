@@ -1,6 +1,7 @@
 // Submission worker for the svm/accountant program. It signs each pending observation
-// with the guardian key, builds one submit_observations transaction per observation, pays
-// the fee from the configured Solana keypair, sends it and confirms it.
+// with the guardian key. It builds one submit_observations transaction per observation.
+// The configured Solana keypair pays the fee. The worker sends each transaction and
+// confirms it.
 
 package accountant
 
@@ -29,7 +30,7 @@ const (
 	// Round two covers the recorded-payer race and a stale blockhash.
 	maxSolanaSubmitRounds = 2
 
-	// Status polls before a round is left to the audit.
+	// Status polls before the audit takes over a round.
 	maxSolanaConfirmPolls = 300
 
 	// submit_observations.rs.
@@ -148,8 +149,8 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 	if fields == nil {
 		return nil, errors.New("solana submission: no observation fields")
 	}
-	// SECURITY: the cached content digest seeds the pending PDA; a stale one derives the
-	// address of another observation.
+	// SECURITY: the cached content digest seeds the pending PDA. A stale digest derives the
+	// address of a different observation.
 	if fields.contentDigest != fields.computeContentDigest() {
 		return nil, errors.New("solana submission: the content digest does not match the fields")
 	}
@@ -177,8 +178,8 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 		return nil, err
 	}
 
-	// The program reads the balance slots only for a transfer; the on-chain tests fill
-	// them with the authority PDA otherwise.
+	// The program reads the balance slots only for a transfer. For other actions, the
+	// on-chain tests fill them with the authority PDA.
 	if !vaa.IsTransfer([]byte{fields.Action}) {
 		sub.sourceBalance = b.authority
 		sub.destBalance = b.authority
@@ -281,7 +282,8 @@ func (acct *Accountant) deriveSolanaSubmissions(b *solanaBackend, msgs []*common
 }
 
 // submitSolanaRound sends and confirms one transaction per observation. It returns the
-// observations a fresh read may still land: the recorded-payer race and a stale blockhash.
+// observations that can still land after a fresh read. These are the recorded-payer race
+// and a stale blockhash.
 func (acct *Accountant) submitSolanaRound(ctx context.Context, b *solanaBackend, guardian solanaGuardianIdentity, work []*solanaSubmission) []*solanaSubmission {
 	ready := acct.resolveSolanaRentRecipients(ctx, b, guardian.guardianIndex, work)
 	if len(ready) == 0 {
@@ -322,11 +324,11 @@ func (acct *Accountant) submitSolanaRound(ctx context.Context, b *solanaBackend,
 }
 
 // resolveSolanaRentRecipients reads each pending PDA and returns the observations still
-// worth sending. An absent PDA makes the fee payer the rent recipient; a present PDA
-// records its own payer, and this guardian's bit being set means the work is done.
+// worth sending. If the PDA is absent, the fee payer is the rent recipient. If the PDA is
+// present, it records its own payer. If this guardian's bit is set, the work is done.
 //
-// The read is at confirmed commitment, as preflight is: a PDA another guardian created in
-// the previous round is visible before it finalizes.
+// The read uses confirmed commitment, the same as preflight. Thus a PDA that another
+// guardian created in the previous round is visible before it finalizes.
 func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *solanaBackend, guardianIndex uint8, work []*solanaSubmission) []*solanaSubmission {
 	if len(work) == 0 {
 		return nil
@@ -376,9 +378,8 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 	return ready
 }
 
-// buildSolanaSubmitTx builds the legacy transaction that carries the observation, signing
-// the observation on first use. The compute budget instructions come first, as the runtime
-// requires.
+// buildSolanaSubmitTx builds the legacy transaction that carries the observation. It signs
+// the observation on first use. The runtime requires the compute budget instructions first.
 func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBackend, guardian solanaGuardianIdentity, sub *solanaSubmission, blockhash solana.Hash) (*solana.Transaction, error) {
 	if sub.guardianSignature == nil {
 		digest, err := solanaObservationSigningDigest(b.prefix, sub.txID, sub.fields)
@@ -460,8 +461,8 @@ func (acct *Accountant) confirmSolanaSubmissions(ctx context.Context, b *solanaB
 		default:
 		}
 
-		// The height is read before the statuses, so a signature still unknown after a
-		// height past its expiry can no longer land.
+		// The loop reads the height before the statuses. Thus a signature that is still unknown
+		// after a height past its expiry cannot land.
 		height, heightErr := b.conn.GetBlockHeight(ctx)
 		if heightErr != nil {
 			acct.logger.Warn("failed to read the solana block height", zap.String("backend", b.tag), zap.Error(heightErr))
@@ -511,7 +512,7 @@ func (acct *Accountant) confirmSolanaSubmissions(ctx context.Context, b *solanaB
 			break
 		}
 
-		// A processed transaction may still confirm, so only unseen ones are dropped.
+		// A processed transaction can still confirm, so the loop drops only unseen transactions.
 		if heightErr == nil && height > minLastValidBlockHeight {
 			for _, sig := range unseen {
 				sub := outstanding[sig]

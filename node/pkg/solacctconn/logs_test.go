@@ -65,7 +65,7 @@ func notificationFrame(sig solana.Signature, logs []string, txErr any) string {
 }
 
 // wsServer serves one logsSubscribe connection. send runs after the subscription frame
-// arrives and returns when the server should close.
+// arrives. It returns when the server must close.
 type wsServer struct {
 	url string
 

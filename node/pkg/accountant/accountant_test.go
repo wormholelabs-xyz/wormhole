@@ -152,7 +152,7 @@ type MockAccountantSolanaConn struct {
 
 	accounts    map[solana.PublicKey]*solacctconn.AccountResult
 	accountsErr error
-	// Visible to confirmed reads only; takes precedence over accounts.
+	// Only confirmed reads see these. They take precedence over accounts.
 	confirmedAccounts map[solana.PublicKey]*solacctconn.AccountResult
 
 	programAccounts    []solacctconn.ProgramAccount
@@ -379,7 +379,7 @@ func (c *MockAccountantSolanaConn) SetBlockHeight(height uint64, err error) {
 }
 
 // SetBlockHeightHook runs hook after each block height read. It runs without the mock
-// lock, so the hook may call back into the mock.
+// lock, so the hook can call back into the mock.
 func (c *MockAccountantSolanaConn) SetBlockHeightHook(hook func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -408,7 +408,7 @@ func (c *MockAccountantSolanaConn) SetSendTransactionErr(err error) {
 }
 
 // SetSendTransactionHook answers each send from hook. It runs without the mock lock, so
-// the hook may call back into the mock.
+// the hook can call back into the mock.
 func (c *MockAccountantSolanaConn) SetSendTransactionHook(hook func(tx *solana.Transaction) error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

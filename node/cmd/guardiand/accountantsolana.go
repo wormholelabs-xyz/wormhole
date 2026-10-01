@@ -7,11 +7,10 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-// REVIEW: opinions wanted on this cap. It guards the fee payer against an operator typo;
-// mainnet priority fees usually stay below 1,000,000. Is 10,000,000 the right bound?
+// REVIEW: what should this cap be?
 //
 // maxAccountantSolanaPriorityFee caps --accountantSolanaPriorityFee in micro-lamports per compute unit.
-// At the 150k compute unit submit limit this is at most 0.0015 SOL per transaction.
+// At the 150k compute unit submit limit, the maximum cost is 0.0015 SOL per transaction.
 const maxAccountantSolanaPriorityFee = 10_000_000
 
 type accountantSolanaProgramIDs struct {
@@ -22,10 +21,10 @@ type accountantSolanaProgramIDs struct {
 
 // parseAccountantSolanaProgramIDs decodes the WTT accountant, NoReplay and Core Bridge program ids.
 //
-// SECURITY: the three ids are non-zero and pairwise distinct; one id in two slots
-// would make every derived PDA wrong.
-func parseAccountantSolanaProgramIDs(contract string, noreplayContract string, coreBridgeContract string) (accountantSolanaProgramIDs, error) {
-	program, err := parseSolanaProgramID("accountantSolanaContract", contract)
+// SECURITY: each id must not be the zero address. The three ids must be different from each other.
+// If one id fills two slots, every derived PDA is wrong.
+func parseAccountantSolanaProgramIDs(globalAccountantContract string, noreplayContract string, coreBridgeContract string) (accountantSolanaProgramIDs, error) {
+	globalAccountantProgram, err := parseSolanaProgramID("accountantSolanaContract", globalAccountantContract)
 	if err != nil {
 		return accountantSolanaProgramIDs{}, err
 	}
@@ -38,20 +37,20 @@ func parseAccountantSolanaProgramIDs(contract string, noreplayContract string, c
 		return accountantSolanaProgramIDs{}, err
 	}
 
-	if program.Equals(noreplay) {
+	if globalAccountantProgram.Equals(noreplay) {
 		return accountantSolanaProgramIDs{}, errors.New("accountantSolanaContract and accountantSolanaNoreplayContract are the same address")
 	}
-	if coreBridge.Equals(program) {
+	if coreBridge.Equals(globalAccountantProgram) {
 		return accountantSolanaProgramIDs{}, errors.New("solanaContract and accountantSolanaContract are the same address")
 	}
 	if coreBridge.Equals(noreplay) {
 		return accountantSolanaProgramIDs{}, errors.New("solanaContract and accountantSolanaNoreplayContract are the same address")
 	}
 
-	return accountantSolanaProgramIDs{program: program, noreplay: noreplay, coreBridge: coreBridge}, nil
+	return accountantSolanaProgramIDs{program: globalAccountantProgram, noreplay: noreplay, coreBridge: coreBridge}, nil
 }
 
-// parseSolanaProgramID decodes one non-zero program id; flag names it in errors.
+// parseSolanaProgramID decodes one program id that must not be the zero address. Errors include flag.
 func parseSolanaProgramID(flag string, value string) (solana.PublicKey, error) {
 	key, err := solana.PublicKeyFromBase58(value)
 	if err != nil {
@@ -63,8 +62,8 @@ func parseSolanaProgramID(flag string, value string) (solana.PublicKey, error) {
 	return key, nil
 }
 
-// checkAccountantSolanaConnFlags validates the endpoint and fee flags of an enabled Solana WTT accountant.
-// RegisterFlagWithValidationOrFail skips scheme validation for "none", so "none" is rejected here.
+// checkAccountantSolanaConnFlags checks the endpoint and fee flags of an enabled Solana WTT accountant.
+// RegisterFlagWithValidationOrFail skips the scheme check for "none", so this function rejects "none".
 func checkAccountantSolanaConnFlags(rpcURL string, wsURL string, priorityFee uint64) error {
 	if rpcURL == "" || rpcURL == "none" {
 		return fmt.Errorf("accountantSolanaRPC %q is not an RPC URL", rpcURL)

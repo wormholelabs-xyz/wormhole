@@ -11,7 +11,7 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
-// Fixtures are printed by svm/accountant/programs/global-accountant/tests/go_fixture_vectors.rs:
+// svm/accountant/programs/global-accountant/tests/go_fixture_vectors.rs prints the fixtures:
 //
 //	cd svm/accountant && just go-fixtures
 func mustHexDecode(t *testing.T, s string) []byte {

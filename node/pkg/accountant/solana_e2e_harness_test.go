@@ -59,9 +59,9 @@ const (
 	guardianSetFooterLen = 8
 )
 
-// surfpoolWatchdogScript runs surfpool as a child of sh and kills it once sh reads EOF on
-// stdin. The test holds the write end, so surfpool stops when the test process exits by
-// any path, including a timeout panic or a signal that skips t.Cleanup.
+// surfpoolWatchdogScript runs surfpool as a child of sh. It kills surfpool when sh reads EOF
+// on stdin. The test holds the write end. Thus surfpool stops when the test process exits by
+// any path. This includes a timeout panic or a signal that skips t.Cleanup.
 const surfpoolWatchdogScript = `"$@" </dev/null & child=$!; read -r _; kill "$child" 2>/dev/null; wait "$child"`
 
 // surfpoolHarness is one running surfpool instance and its JSON-RPC client.
@@ -111,9 +111,9 @@ func readCommittedProgram(t *testing.T, path string) []byte {
 	return elf
 }
 
-// freeLoopbackPorts reserves n distinct loopback ports. All listeners stay open until
-// every port is chosen, so no two are equal; each port is free again before surfpool
-// binds it.
+// freeLoopbackPorts reserves n different loopback ports. All listeners stay open until the
+// function has all n ports, so no two ports are equal. Each port is free again before
+// surfpool binds it.
 func freeLoopbackPorts(t *testing.T, n int) []int {
 	t.Helper()
 	require.Positive(t, n)
@@ -315,7 +315,7 @@ func (h *surfpoolHarness) setAccount(key solana.PublicKey, lamports uint64, owne
 // key count LE u32, 20-byte keys, creation_time LE u32, expiration_time LE u32. Mirrors
 // guardian_set_account in tests/common/guardians.rs.
 //
-// SECURITY: precondition len(keys) > 0; a set with no keys has no quorum.
+// SECURITY: precondition len(keys) > 0. A set with no keys has no quorum.
 func guardianSetAccountData(t *testing.T, index uint32, keys [][guardianSetKeyLen]byte, creationTime uint32, expirationTime uint32) []byte {
 	t.Helper()
 	require.NotEmpty(t, keys)

@@ -17,7 +17,7 @@ func testKeys(n int) []solana.PublicKey {
 	for i := range keys {
 		keys[i][0] = byte(i % 256)
 		keys[i][1] = byte(i / 256)
-		// Keep every key distinct and non-zero.
+		// No key can be the zero address. The keys must be different from each other.
 		keys[i][31] = 0x01
 	}
 	return keys

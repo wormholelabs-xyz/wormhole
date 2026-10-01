@@ -17,10 +17,10 @@ const (
 
 // LoadFeePayer reads a solana-keygen JSON keypair.
 //
-// SECURITY: the file, after symlink resolution, must not be readable by group or world, and
-// the key is exactly FeePayerKeyLen bytes.
+// SECURITY: after symlink resolution, group and world must not have read access to the file.
+// The key is exactly FeePayerKeyLen bytes.
 func LoadFeePayer(path string) (solana.PrivateKey, error) {
-	// Opening a FIFO blocks, so the type is checked before the open as well as after.
+	// Opening a FIFO blocks, so the function checks the type before the open and after it.
 	pre, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("fee payer key: %w", err)
@@ -35,7 +35,7 @@ func LoadFeePayer(path string) (solana.PrivateKey, error) {
 	}
 	defer f.Close()
 
-	// Mode is read from the open handle so the checked file is the one read.
+	// The function reads the mode from the open handle, so it checks the same file that it reads.
 	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("fee payer key: %w", err)

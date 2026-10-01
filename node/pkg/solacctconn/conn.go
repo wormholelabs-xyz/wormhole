@@ -42,7 +42,7 @@ type Conn interface {
 }
 
 // Commitment is the commitment level of an account read. Use CommitmentConfirmed or
-// CommitmentFinalized; the zero value is rejected.
+// CommitmentFinalized. GetMultipleAccounts returns an error for the zero value.
 type Commitment struct {
 	level rpc.CommitmentType
 }
@@ -70,7 +70,7 @@ type AccountResult struct {
 	Data []byte
 }
 
-// ProgramAccount is owned by the queried program.
+// ProgramAccount is an account that the queried program owns.
 type ProgramAccount struct {
 	Address solana.PublicKey
 	Data    []byte

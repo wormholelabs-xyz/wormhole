@@ -1,9 +1,9 @@
-// Classification of Solana transaction errors. Two shapes reach the guardian: the
-// TransactionError of a signature status, and the same value under the "err" key of the
-// Data field of a preflight *jsonrpc.RPCError.
+// Classification of Solana transaction errors. Two shapes reach the guardian. The first is
+// the TransactionError of a signature status. The second is the same value under the "err"
+// key of the Data field of a preflight *jsonrpc.RPCError.
 //
-// Unit variants of the Rust TransactionError enum serialize as a bare string; some RPC
-// providers wrap them as a single-key object with a null value. Both are accepted.
+// Unit variants of the Rust TransactionError enum serialize as a bare string. Some RPC
+// providers wrap them as a single-key object with a null value. The parser accepts both.
 
 package solacctconn
 
@@ -28,8 +28,8 @@ const (
 	TxErrInsufficientFundsForFee
 )
 
-// TxError is a classified TransactionError. HasCustomCode is set for an
-// InstructionError::Custom; code 0 is a valid program error.
+// TxError is a classified TransactionError. HasCustomCode is true for an
+// InstructionError::Custom. Code 0 is a valid program error.
 type TxError struct {
 	Kind          TxErrKind
 	CustomCode    uint32
@@ -86,8 +86,8 @@ func preflightTxError(err error) *TxError {
 	return parseTxError(data["err"])
 }
 
-// customProgramError returns the program error code carried by an InstructionError. The
-// instruction index is ignored, because the accountant instruction is the only one in the
+// customProgramError returns the program error code that an InstructionError carries. It
+// ignores the instruction index. The accountant instruction is the only instruction in the
 // transaction that raises a custom code.
 func customProgramError(v any) (uint32, bool) {
 	inner, ok := v.(map[string]any)
@@ -127,8 +127,8 @@ func unitVariant(v any) string {
 	return ""
 }
 
-// asUint64 reads a JSON number. The RPC client decodes preflight data with UseNumber and
-// signature statuses without it, so both json.Number and float64 occur.
+// asUint64 reads a JSON number. The RPC client decodes preflight data with UseNumber. It
+// decodes signature statuses without UseNumber. Thus both json.Number and float64 occur.
 func asUint64(v any) (uint64, bool) {
 	switch n := v.(type) {
 	case json.Number:

@@ -20,8 +20,8 @@ type ClientConn struct {
 // NewConn creates a connection to the Solana RPC endpoint at rpcURL and records the
 // websocket endpoint at wsURL for log subscriptions.
 //
-// SECURITY: both endpoints are required. The flag layer also checks that both are set and
-// checks their schemes. The first request opens the connection.
+// SECURITY: both endpoints must be set. The flag layer also checks that both are set.
+// It also checks their schemes. The first request opens the connection.
 func NewConn(rpcURL string, wsURL string) (*ClientConn, error) {
 	if rpcURL == "" {
 		return nil, errors.New("solana accountant connection: the rpc endpoint is required")
