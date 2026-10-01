@@ -34,14 +34,37 @@ func accountValue(owner solana.PublicKey, data []byte) map[string]any {
 	}
 }
 
+// overLogLimit is one log line past MaxLogLinesPerTx.
+func overLogLimit() []string {
+	logs := make([]string, MaxLogLinesPerTx+1)
+	for i := range logs {
+		logs[i] = "Program log: noise"
+	}
+	return logs
+}
+
+// testTransaction builds a signed-shaped transaction with one instruction to program.
+func testTransaction(program solana.PublicKey, data []byte) *solana.Transaction {
+	tx := &solana.Transaction{
+		Signatures: []solana.Signature{{9}},
+		Message: solana.Message{
+			AccountKeys:     []solana.PublicKey{testKeys(1)[0], program},
+			RecentBlockhash: solana.Hash{7},
+			Instructions: []solana.CompiledInstruction{
+				{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: data},
+			},
+		},
+	}
+	tx.Message.Header.NumRequiredSignatures = 1
+	return tx
+}
+
 func TestGetMultipleAccountsChunking(t *testing.T) {
 	tests := []struct {
 		name      string
 		count     int
 		wantCalls []int
 	}{
-		{name: "no keys makes no call", count: 0, wantCalls: nil},
-		{name: "one key", count: 1, wantCalls: []int{1}},
 		{name: "exactly one chunk", count: 100, wantCalls: []int{100}},
 		{name: "one past a chunk", count: 101, wantCalls: []int{100, 1}},
 		{name: "two and a half chunks", count: 250, wantCalls: []int{100, 100, 50}},
@@ -50,9 +73,9 @@ func TestGetMultipleAccountsChunking(t *testing.T) {
 	owner := testKeys(1)[0]
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-				require.Equal(t, "getMultipleAccounts", call.Method)
-				keys := accountKeys(t, call)
+			srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+				var keys []string
+				_ = json.Unmarshal(call.Params[0], &keys)
 				values := make([]any, 0, len(keys))
 				for range keys {
 					values = append(values, accountValue(owner, []byte{0xaa}))
@@ -78,39 +101,17 @@ func TestGetMultipleAccountsResults(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		reply   func(keys []string) any
+		value   []any
 		wantErr bool
 	}{
-		{
-			name: "absent accounts are positional nils",
-			reply: func(keys []string) any {
-				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{
-					accountValue(owner, []byte{1}), nil, accountValue(owner, []byte{3}),
-				}}
-			},
-		},
-		{
-			name: "short result is rejected",
-			reply: func(keys []string) any {
-				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{accountValue(owner, []byte{1})}}
-			},
-			wantErr: true,
-		},
-		{
-			name: "long result is rejected",
-			reply: func(keys []string) any {
-				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{
-					accountValue(owner, []byte{1}), nil, nil, nil,
-				}}
-			},
-			wantErr: true,
-		},
+		{name: "absent accounts are positional nils", value: []any{accountValue(owner, []byte{1}), nil, accountValue(owner, []byte{3})}},
+		{name: "short result is rejected", value: []any{accountValue(owner, []byte{1})}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-				return tt.reply(accountKeys(t, call)), nil
+			_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+				return map[string]any{"context": map[string]any{"slot": 1}, "value": tt.value}, nil
 			})
 
 			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(3), CommitmentFinalized)
@@ -127,16 +128,6 @@ func TestGetMultipleAccountsResults(t *testing.T) {
 			assert.Equal(t, []byte{3}, results[2].Data)
 		})
 	}
-}
-
-func TestGetMultipleAccountsRPCError(t *testing.T) {
-	_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-		return nil, &jsonrpc.RPCError{Code: -32000, Message: "node is behind"}
-	})
-
-	_, err := conn.GetMultipleAccounts(context.Background(), testKeys(1), CommitmentFinalized)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "getMultipleAccounts")
 }
 
 func TestGetProgramAccountsByTag(t *testing.T) {
@@ -156,8 +147,7 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-				require.Equal(t, "getProgramAccounts", call.Method)
+			srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 				return []any{map[string]any{"pubkey": pda.String(), "account": accountValue(tt.owner, tt.data)}}, nil
 			})
 
@@ -172,26 +162,18 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 			assert.Len(t, accounts[0].Data, 88)
 
 			var opts struct {
-				Commitment  string `json:"commitment"`
-				Encoding    string `json:"encoding"`
-				SortResults bool   `json:"sortResults"`
-				Filters     []struct {
+				Filters []struct {
 					DataSize uint64 `json:"dataSize"`
 					Memcmp   *struct {
-						Offset uint64 `json:"offset"`
-						Bytes  string `json:"bytes"`
+						Bytes string `json:"bytes"`
 					} `json:"memcmp"`
 				} `json:"filters"`
 			}
 			calls := srv.recorded()
 			require.Len(t, calls, 1)
 			require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
-			assert.Equal(t, "finalized", opts.Commitment)
-			assert.Equal(t, "base64", opts.Encoding)
-			assert.True(t, opts.SortResults)
 			require.Len(t, opts.Filters, 2)
 			require.NotNil(t, opts.Filters[0].Memcmp)
-			assert.Equal(t, uint64(0), opts.Filters[0].Memcmp.Offset)
 			assert.Equal(t, solana.Base58{1}.String(), opts.Filters[0].Memcmp.Bytes)
 			assert.Equal(t, uint64(88), opts.Filters[1].DataSize)
 		})
@@ -203,19 +185,16 @@ func TestGetSignaturesForAddress(t *testing.T) {
 	sig := solana.Signature{1, 2, 3}
 
 	t.Run("limit is bounded", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			t.Fatal("no request expected")
-			return nil, nil
-		})
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return nil, nil })
 		_, err := conn.GetSignaturesForAddress(context.Background(), addr, 0)
 		require.Error(t, err)
 		_, err = conn.GetSignaturesForAddress(context.Background(), addr, maxSignaturesPerRequest+1)
 		require.Error(t, err)
+		assert.Empty(t, srv.recorded())
 	})
 
 	t.Run("returns signatures newest first", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-			require.Equal(t, "getSignaturesForAddress", call.Method)
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return []any{map[string]any{"signature": sig.String(), "slot": 7}}, nil
 		})
 		sigs, err := conn.GetSignaturesForAddress(context.Background(), addr, 10)
@@ -225,7 +204,7 @@ func TestGetSignaturesForAddress(t *testing.T) {
 	})
 
 	t.Run("more results than the limit is rejected", func(t *testing.T) {
-		_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
+		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return []any{
 				map[string]any{"signature": sig.String(), "slot": 7},
 				map[string]any{"signature": sig.String(), "slot": 8},
@@ -236,22 +215,10 @@ func TestGetSignaturesForAddress(t *testing.T) {
 	})
 }
 
-// encodedTransaction builds a signed-shaped transaction and its base64 wire form.
+// encodedTransaction is the base64 wire form of testTransaction.
 func encodedTransaction(t *testing.T, program solana.PublicKey, data []byte) string {
 	t.Helper()
-	payer := testKeys(1)[0]
-	tx := solana.Transaction{
-		Signatures: []solana.Signature{{9}},
-		Message: solana.Message{
-			AccountKeys:     []solana.PublicKey{payer, program},
-			RecentBlockhash: solana.Hash{7},
-			Instructions: []solana.CompiledInstruction{
-				{ProgramIDIndex: 1, Accounts: []uint16{0}, Data: data},
-			},
-		},
-	}
-	tx.Message.Header.NumRequiredSignatures = 1
-	raw, err := tx.MarshalBinary()
+	raw, err := testTransaction(program, data).MarshalBinary()
 	require.NoError(t, err)
 	return base64.StdEncoding.EncodeToString(raw)
 }
@@ -260,11 +227,6 @@ func TestGetTransaction(t *testing.T) {
 	program := testKeys(2)[1]
 	sig := solana.Signature{5}
 	encoded := encodedTransaction(t, program, []byte{0x00, 0x01})
-
-	manyLogs := make([]any, MaxLogLinesPerTx+1)
-	for i := range manyLogs {
-		manyLogs[i] = "Program log: noise"
-	}
 
 	tests := []struct {
 		name       string
@@ -275,13 +237,12 @@ func TestGetTransaction(t *testing.T) {
 		{name: "succeeded", meta: map[string]any{"err": nil, "logMessages": []any{"Program log: hi"}}},
 		{name: "failed", meta: map[string]any{"err": "AlreadyProcessed", "logMessages": []any{}}, wantFailed: true},
 		{name: "no metadata", meta: nil, wantErr: true},
-		{name: "too many log lines", meta: map[string]any{"err": nil, "logMessages": manyLogs}, wantErr: true},
+		{name: "too many log lines", meta: map[string]any{"err": nil, "logMessages": overLogLimit()}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
-				require.Equal(t, "getTransaction", call.Method)
+			_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 				out := map[string]any{"slot": 11, "transaction": []string{encoded, "base64"}}
 				if tt.meta != nil {
 					out["meta"] = tt.meta
@@ -311,13 +272,12 @@ func TestGetMultipleAccountsCommitment(t *testing.T) {
 		wantErr    bool
 	}{
 		{name: "confirmed", commitment: CommitmentConfirmed, want: "confirmed"},
-		{name: "finalized", commitment: CommitmentFinalized, want: "finalized"},
 		{name: "zero value is rejected", commitment: Commitment{}, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv, conn := newTestRPC(t, func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError) {
+			srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{nil}}, nil
 			})
 

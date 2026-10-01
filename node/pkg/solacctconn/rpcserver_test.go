@@ -18,28 +18,32 @@ type rpcCall struct {
 	ID     any               `json:"id"`
 }
 
-// testRPC is a JSON-RPC server that records every call and answers from handler.
+// testRPC is a JSON-RPC server that records every call and answers from handler. The
+// handler runs on the server goroutine, so it must not call t.Fatal or require.
 type testRPC struct {
 	server  *httptest.Server
-	handler func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError)
+	handler func(call rpcCall) (any, *jsonrpc.RPCError)
 
 	mu    sync.Mutex
 	calls []rpcCall
 }
 
-func newTestRPC(t *testing.T, handler func(t *testing.T, call rpcCall) (any, *jsonrpc.RPCError)) (*testRPC, *ClientConn) {
+func newTestRPC(t *testing.T, handler func(call rpcCall) (any, *jsonrpc.RPCError)) (*testRPC, *ClientConn) {
 	t.Helper()
 
 	srv := &testRPC{handler: handler}
 	srv.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var call rpcCall
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&call))
+		if err := json.NewDecoder(r.Body).Decode(&call); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		srv.mu.Lock()
 		srv.calls = append(srv.calls, call)
 		srv.mu.Unlock()
 
-		result, fault := srv.handler(t, call)
+		result, fault := srv.handler(call)
 		body := map[string]any{"jsonrpc": "2.0", "id": call.ID}
 		if fault != nil {
 			body["error"] = fault
@@ -47,7 +51,7 @@ func newTestRPC(t *testing.T, handler func(t *testing.T, call rpcCall) (any, *js
 			body["result"] = result
 		}
 		w.Header().Set("Content-Type", "application/json")
-		require.NoError(t, json.NewEncoder(w).Encode(body))
+		_ = json.NewEncoder(w).Encode(body)
 	}))
 	t.Cleanup(srv.server.Close)
 
