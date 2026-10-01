@@ -7,7 +7,6 @@ package accountant
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"math"
@@ -109,12 +108,11 @@ func solanaObservationSigningDigest(prefix []byte, txID solanaTxID, fields *sola
 	if fields == nil {
 		return ethCommon.Hash{}, errors.New("observation signing digest: no observation fields")
 	}
-	id := txID.Bytes()
-	packed := fields.pack()
-	body := make([]byte, 0, len(id)+len(packed))
-	body = append(body, id...)
-	body = append(body, packed[:]...)
-	return vaa.MessageSigningDigest(prefix, body)
+	packed, err := fields.pack()
+	if err != nil {
+		return ethCommon.Hash{}, fmt.Errorf("observation signing digest: %w", err)
+	}
+	return vaa.MessageSigningDigest(prefix, append(txID.Bytes(), packed...))
 }
 
 // encodeSubmitObservationsIxData is the inverse of parseSubmitObservationsIxData.
@@ -132,16 +130,17 @@ func encodeSubmitObservationsIxData(guardianSetIndex uint32, guardianIndex uint8
 		return nil, errors.New("submit_observations instruction data: no observation fields")
 	}
 
-	out := make([]byte, submitObservationsDispatchLen+submitObservationsIxDataLen)
-	out[0] = submitObservationsDiscriminator
-	binary.LittleEndian.PutUint32(out[submitGuardianSetIndexOffset:submitGuardianSetIndexOffset+4], guardianSetIndex)
-	out[submitGuardianIndexOffset] = guardianIndex
-	copy(out[submitSignatureOffset:submitSignatureOffset+submitSignatureLen], signature)
-	out[submitTxIDLenOffset] = txID.length
-	copy(out[submitTxIDOffset:submitFieldsOffset], txID.padded[:])
-	packed := fields.pack()
-	copy(out[submitFieldsOffset:], packed[:])
-	return out, nil
+	return encodeWire(&submitObservationsInstructionWire{
+		Discriminator: submitObservationsDiscriminator,
+		Data: submitObservationsIxDataWire{
+			GuardianSetIndex: guardianSetIndex,
+			GuardianIndex:    guardianIndex,
+			Signature:        [submitSignatureLen]byte(signature),
+			TxIDLen:          txID.length,
+			TxID:             txID.padded,
+			Fields:           fields.wire(),
+		},
+	})
 }
 
 // deriveSolanaSubmission resolves every account one observation touches.
@@ -151,7 +150,11 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 	}
 	// SECURITY: the cached content digest seeds the pending PDA. A stale digest derives the
 	// address of a different observation.
-	if fields.contentDigest != fields.computeContentDigest() {
+	digest, err := fields.computeContentDigest()
+	if err != nil {
+		return nil, fmt.Errorf("solana submission: %w", err)
+	}
+	if fields.contentDigest != digest {
 		return nil, errors.New("solana submission: the content digest does not match the fields")
 	}
 

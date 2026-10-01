@@ -3,7 +3,6 @@ package accountant
 import (
 	"context"
 	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"slices"
@@ -20,14 +19,14 @@ import (
 
 // encodeAccountantDigestLog is the inverse of parseAccountantDigestLog.
 func encodeAccountantDigestLog(evt solanaCommitEvent) []byte {
-	out := make([]byte, accountantDigestLogLen)
-	copy(out[:8], accountantDigestLogTag[:])
-	binary.BigEndian.PutUint16(out[8:10], uint16(evt.Chain))
-	copy(out[10:42], evt.Emitter[:])
-	binary.BigEndian.PutUint64(out[42:50], evt.Sequence)
-	copy(out[50:82], evt.Digest[:])
-	binary.LittleEndian.PutUint32(out[82:86], evt.GuardianSetIndex)
-	return out
+	return mustEncodeWire(&accountantDigestLogWire{
+		Tag:              accountantDigestLogTag,
+		Chain:            newBE16(uint16(evt.Chain)),
+		Emitter:          evt.Emitter,
+		Sequence:         newBE64(evt.Sequence),
+		Digest:           evt.Digest,
+		GuardianSetIndex: evt.GuardianSetIndex,
+	})
 }
 
 func programDataLine(payload []byte) string {

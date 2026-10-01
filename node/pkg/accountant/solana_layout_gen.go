@@ -10,20 +10,21 @@ const accountantDigestLogLen = 86
 // ACCOUNTANT_DIGEST_LOG_TAG.
 var accountantDigestLogTag = [8]byte{0x41, 0x43, 0x43, 0x44, 0x47, 0x53, 0x54, 0x00}
 
-// Big-endian.
-const accountantDigestLogChainOffset = 8
+// accountantDigestLogWire is AccountantDigestLog.
+type accountantDigestLogWire struct {
+	Tag              [8]byte
+	Chain            be16
+	Emitter          [32]byte
+	Sequence         be64
+	Digest           [32]byte
+	GuardianSetIndex uint32
+}
 
-const accountantDigestLogEmitterOffset = 10
+func (accountantDigestLogWire) wireLen() int { return accountantDigestLogLen }
 
-// Big-endian.
-const accountantDigestLogSequenceOffset = 42
+func (accountantDigestLogWire) wireName() string { return "accountant digest log" }
 
-const accountantDigestLogDigestOffset = 50
-
-// Little-endian.
-const accountantDigestLogGuardianSetIndexOffset = 82
-
-// PendingObservationsLayout, state.rs. Integers are little-endian.
+// PendingObservationsLayout, state.rs.
 
 // PendingObservationsLayout::LEN.
 const pendingObservationsLen = 88
@@ -37,30 +38,78 @@ const pendingObservationsMaxGuardians = 128
 // u32 words in the signature bitmap.
 const pendingObservationsSignatureWords = 4
 
-const pendingObservationsChainOffset = 2
+// pendingObservationsWire is PendingObservationsLayout.
+type pendingObservationsWire struct {
+	Tag              uint8
+	_                [1]byte
+	Chain            uint16
+	GuardianSetIndex uint32
+	Signatures       [4]uint32
+	ContentDigest    [32]byte
+	Payer            [32]byte
+}
 
-const pendingObservationsGuardianSetIndexOffset = 4
+func (pendingObservationsWire) wireLen() int { return pendingObservationsLen }
 
-const pendingObservationsSignaturesOffset = 8
+func (pendingObservationsWire) wireName() string { return "pending observations account" }
 
-const pendingObservationsContentDigestOffset = 24
-
-const pendingObservationsPayerOffset = 56
-
-// solana-noreplay bucket, constants/noreplay.rs.
+// solana-noreplay, constants/noreplay.rs.
 
 // NoReplayBitmapAccount::LEN.
 const noreplayBucketLen = 129
 
-const noreplayBitmapOffset = 1
-
 // NOREPLAY_BITS_PER_BUCKET.
 const noreplayBitsPerBucket = 1024
 
-// submit_observations instruction data, ix_data.rs. Offsets include the discriminator.
+// NoReplayNamespace::LEN.
+const noreplayNamespaceLen = 34
 
-// One u8 discriminator.
-const submitObservationsDispatchLen = 1
+// NoReplayNamespace::seed_chunks split point.
+const noreplayNamespaceSeedSplit = 32
+
+// noreplayBucketWire is NoReplayBitmapAccount.
+type noreplayBucketWire struct {
+	Bump   uint8
+	Bitmap [128]byte
+}
+
+func (noreplayBucketWire) wireLen() int { return noreplayBucketLen }
+
+func (noreplayBucketWire) wireName() string { return "noreplay bucket account" }
+
+// noreplayNamespaceWire is NoReplayNamespace.
+type noreplayNamespaceWire struct {
+	Chain   be16
+	Emitter [32]byte
+}
+
+func (noreplayNamespaceWire) wireLen() int { return noreplayNamespaceLen }
+
+func (noreplayNamespaceWire) wireName() string { return "noreplay namespace" }
+
+// ObservationFieldsAndDigest, ix_data.rs: the hashed record.
+
+// Length of the hashed record.
+const observationFieldsLen = 143
+
+// observationFieldsWire is the tail of SubmitObservationsIxData from action.
+type observationFieldsWire struct {
+	Action         uint8
+	Chain          be16
+	Emitter        [32]byte
+	Sequence       be64
+	TokenChain     be16
+	TokenAddress   [32]byte
+	RecipientChain be16
+	Amount         [32]byte
+	VaaDigest      [32]byte
+}
+
+func (observationFieldsWire) wireLen() int { return observationFieldsLen }
+
+func (observationFieldsWire) wireName() string { return "observation fields" }
+
+// submit_observations instruction, ix_data.rs.
 
 // Instruction::SubmitObservations.
 const submitObservationsDiscriminator = 0
@@ -68,24 +117,11 @@ const submitObservationsDiscriminator = 0
 // SubmitObservationsIxData::LEN.
 const submitObservationsIxDataLen = 278
 
-// Little-endian.
-const submitGuardianSetIndexOffset = 1
-
-const submitGuardianIndexOffset = 5
-
-const submitSignatureOffset = 6
+// One u8 discriminator plus the data.
+const submitObservationsInstructionLen = 279
 
 // r ‖ s ‖ recovery_id.
 const submitSignatureLen = 65
-
-const submitTxIDLenOffset = 71
-
-const submitTxIDOffset = 72
-
-// Start of the hashed record.
-const submitFieldsOffset = 136
-
-// TxId, ix_data.rs.
 
 // HASH_TX_ID_LEN.
 const hashTxIDLen = 32
@@ -93,28 +129,31 @@ const hashTxIDLen = 32
 // SIGNATURE_TX_ID_LEN.
 const signatureTxIDLen = 64
 
-// ObservationFieldsAndDigest, ix_data.rs. Integers are big-endian.
+// submitObservationsIxDataWire is SubmitObservationsIxData.
+type submitObservationsIxDataWire struct {
+	GuardianSetIndex uint32
+	GuardianIndex    uint8
+	Signature        [65]byte
+	TxIDLen          uint8
+	TxID             [64]byte
+	Fields           observationFieldsWire
+}
 
-// Length of the hashed record.
-const observationFieldsLen = 143
+func (submitObservationsIxDataWire) wireLen() int { return submitObservationsIxDataLen }
 
-const fieldsActionOffset = 0
+func (submitObservationsIxDataWire) wireName() string { return "submit_observations instruction data" }
 
-const fieldsChainOffset = 1
+// submitObservationsInstructionWire is the discriminator and SubmitObservationsIxData.
+type submitObservationsInstructionWire struct {
+	Discriminator uint8
+	Data          submitObservationsIxDataWire
+}
 
-const fieldsEmitterOffset = 3
+func (submitObservationsInstructionWire) wireLen() int { return submitObservationsInstructionLen }
 
-const fieldsSequenceOffset = 35
-
-const fieldsTokenChainOffset = 43
-
-const fieldsTokenAddressOffset = 45
-
-const fieldsRecipientChainOffset = 77
-
-const fieldsAmountOffset = 79
-
-const fieldsVaaDigestOffset = 111
+func (submitObservationsInstructionWire) wireName() string {
+	return "submit_observations instruction data"
+}
 
 // Token Bridge transfer payload, vaa.rs.
 
@@ -123,6 +162,21 @@ const tokenBridgeTransferLen = 133
 
 // MAX_TRANSFER_PAYLOAD_LEN.
 const maxTransferPayloadLen = 2000
+
+// tokenBridgeTransferWire is TokenBridgeTransfer, the fixed head of a transfer payload.
+type tokenBridgeTransferWire struct {
+	Action         uint8
+	Amount         [32]byte
+	TokenAddress   [32]byte
+	TokenChain     be16
+	Recipient      [32]byte
+	RecipientChain be16
+	Fee            [32]byte
+}
+
+func (tokenBridgeTransferWire) wireLen() int { return tokenBridgeTransferLen }
+
+func (tokenBridgeTransferWire) wireName() string { return "token bridge transfer" }
 
 // PDA seed prefixes, constants/seeds.rs.
 

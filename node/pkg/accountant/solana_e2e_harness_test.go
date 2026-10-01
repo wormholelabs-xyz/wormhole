@@ -48,10 +48,6 @@ const (
 	surfpoolAccountantSOPath = "../../../svm/accountant/target/deploy/global_accountant.so"
 	surfpoolNoreplaySOPath   = "../../../svm/accountant/crates/test-fixtures/data/solana_noreplay.so"
 
-	// ChainRegistrationLayout::LEN and AccountTag::ChainRegistration, state.rs.
-	chainRegistrationLen = 64
-	chainRegistrationTag = 3
-
 	// Core Bridge GuardianSet: index and key count, 20-byte keys, creation and expiration time.
 	guardianSetHeaderLen = 8
 	guardianSetKeyLen    = 20
@@ -293,17 +289,15 @@ func guardianSetAccountData(t *testing.T, index uint32, keys [][guardianSetKeyLe
 	return out
 }
 
-// chainRegistrationAccountData builds a ChainRegistrationLayout account body: tag(1),
-// pad(1), chain LE u16, governance_sequence LE u64, pad(20), emitter(32).
+// chainRegistrationAccountData builds a ChainRegistrationLayout account body.
 func chainRegistrationAccountData(t *testing.T, chain vaa.ChainID, emitter vaa.Address, governanceSequence uint64) []byte {
 	t.Helper()
-
-	out := make([]byte, chainRegistrationLen)
-	out[0] = chainRegistrationTag
-	binary.LittleEndian.PutUint16(out[2:4], uint16(chain))
-	binary.LittleEndian.PutUint64(out[4:12], governanceSequence)
-	copy(out[32:64], emitter[:])
-
-	require.Len(t, out, chainRegistrationLen)
+	out, err := encodeWire(&chainRegistrationWire{
+		Tag:                chainRegistrationTag,
+		Chain:              uint16(chain),
+		GovernanceSequence: governanceSequence,
+		EmitterAddress:     emitter,
+	})
+	require.NoError(t, err)
 	return out
 }

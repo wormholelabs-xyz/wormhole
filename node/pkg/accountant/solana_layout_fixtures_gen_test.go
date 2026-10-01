@@ -5,6 +5,28 @@ package accountant
 // VaaBodyHeader::LEN, vaa.rs. The payload follows it.
 const fixtureVaaBodyHeaderLen = 51
 
+// ChainRegistrationLayout, state.rs.
+
+// ChainRegistrationLayout::LEN.
+const chainRegistrationLen = 64
+
+// ChainRegistrationLayout::TAG.
+const chainRegistrationTag = 3
+
+// chainRegistrationWire is ChainRegistrationLayout.
+type chainRegistrationWire struct {
+	Tag                uint8
+	_                  [1]byte
+	Chain              uint16
+	GovernanceSequence uint64
+	_                  [20]byte
+	EmitterAddress     [32]byte
+}
+
+func (chainRegistrationWire) wireLen() int { return chainRegistrationLen }
+
+func (chainRegistrationWire) wireName() string { return "chain registration account" }
+
 // Index-derived vectors: program id 0x00.., emitter 0x40.., digest 0x80.., payer 0xC0...
 
 // Chain 2, set index 4, bits 0, 3, 5, 33, 64 and 127.
