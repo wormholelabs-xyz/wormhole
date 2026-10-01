@@ -18,12 +18,15 @@ import (
 )
 
 // solanaNoreplayBucket builds a bucket account, with the bit for each sequence set.
-func solanaNoreplayBucket(marked ...uint64) []byte {
-	data := make([]byte, noreplayBucketLen)
+func solanaNoreplayBucket(t *testing.T, marked ...uint64) []byte {
+	t.Helper()
+	var wire noreplayBucketWire
 	for _, sequence := range marked {
-		bit := sequence % noreplayBitsPerBucket
-		data[noreplayBitmapOffset+int(bit/8)] |= byte(1) << (bit % 8)
+		index, mask := noreplayBitLocation(sequence)
+		wire.Bitmap[index] |= mask
 	}
+	data, err := encodeWire(&wire)
+	require.NoError(t, err)
 	return data
 }
 
@@ -76,8 +79,9 @@ func (f *solanaAuditFixture) pendingAccount(t *testing.T, signedBy []uint8) *sol
 }
 
 // markAccounted sets the NoReplay bit of the fixture transfer.
-func (f *solanaAuditFixture) markAccounted() {
-	f.conn.SetAccount(f.bucket, &solacctconn.AccountResult{Data: solanaNoreplayBucket(f.pe.solanaFields.Sequence)})
+func (f *solanaAuditFixture) markAccounted(t *testing.T) {
+	t.Helper()
+	f.conn.SetAccount(f.bucket, &solacctconn.AccountResult{Data: solanaNoreplayBucket(t, f.pe.solanaFields.Sequence)})
 }
 
 // commitTransaction is a transaction whose logs carry one commit for the fixture transfer.
@@ -106,7 +110,7 @@ func solanaUnknownTransfer(t *testing.T, program solana.PublicKey, chain vaa.Cha
 	fields := *fixtureTransferFields(t)
 	fields.Chain = chain
 	fields.Sequence = sequence
-	fields.setContentDigest()
+	require.NoError(t, fields.setContentDigest())
 	pda, err := derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, 0, fields.contentDigest)
 	require.NoError(t, err)
 	return fields, pda
@@ -241,7 +245,7 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 			name: "present without own signature but accounted searches instead of resubmitting",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
 				f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{1}))
-				f.markAccounted()
+				f.markAccounted(t)
 			},
 			wantPending: 1,
 		},
@@ -257,7 +261,7 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 		{
 			name: "absent and accounted with a content digest match publishes",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.markAccounted()
+				f.markAccounted(t)
 				f.conn.SetSignaturesForAddress(f.pending, []solana.Signature{{1}})
 				f.conn.SetTransaction(solana.Signature{1}, f.commitTransaction(f.pe.solanaFields.contentDigest))
 			},
@@ -266,7 +270,7 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 		{
 			name: "absent and accounted without a commit transaction retries",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.markAccounted()
+				f.markAccounted(t)
 				f.conn.SetSignaturesForAddress(f.pending, nil)
 			},
 			wantPending: 1,
@@ -274,7 +278,7 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 		{
 			name: "absent and accounted with a failed commit transaction retries",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.markAccounted()
+				f.markAccounted(t)
 				f.conn.SetSignaturesForAddress(f.pending, []solana.Signature{{1}})
 				failed := f.commitTransaction(f.pe.solanaFields.contentDigest)
 				failed.Failed = true
@@ -285,7 +289,7 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 		{
 			name: "absent with the noreplay bit clear resubmits",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				f.conn.SetAccount(f.bucket, &solacctconn.AccountResult{Data: solanaNoreplayBucket()})
+				f.conn.SetAccount(f.bucket, &solacctconn.AccountResult{Data: solanaNoreplayBucket(t)})
 			},
 			wantResubmitted: true,
 			wantPending:     1,
@@ -335,7 +339,7 @@ func TestAuditSolanaOwnPendingTransfersAccountedWhileCurrentPendingAccountExists
 	f.conn.SetAccount(current, &solacctconn.AccountResult{
 		Data: solanaPendingAccountData(t, f.pe.solanaFields.Chain, 1, f.pe.solanaFields.contentDigest, solana.PublicKey{1}, []uint8{0}),
 	})
-	f.markAccounted()
+	f.markAccounted(t)
 	f.conn.SetSignaturesForAddress(previous, []solana.Signature{{3}})
 	f.conn.SetTransaction(solana.Signature{3}, f.commitTransaction(f.pe.solanaFields.contentDigest))
 
@@ -556,7 +560,7 @@ func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {
 		marked = append(marked, sequence)
 	}
 	// Sequences below 1024 share the fixture bucket.
-	f.conn.SetAccount(f.bucket, &solacctconn.AccountResult{Data: solanaNoreplayBucket(marked...)})
+	f.conn.SetAccount(f.bucket, &solacctconn.AccountResult{Data: solanaNoreplayBucket(t, marked...)})
 	require.Len(t, f.acct.pendingTransfers, maxSolanaCommitSearchesPerAudit+1)
 
 	f.acct.runSolanaAudit(ctx, f.acct.solana)

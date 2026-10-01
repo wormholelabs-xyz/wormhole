@@ -1,6 +1,8 @@
 package accountant
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"testing"
 
@@ -68,8 +70,8 @@ func TestParseAccountantDigestLog(t *testing.T) {
 	}{
 		{name: "valid", data: valid, wantErr: false},
 		{name: "wrong tag", data: append([]byte{0}, valid[1:]...), wantErr: true},
-		{name: "85 bytes", data: valid[:85], wantErr: true},
-		{name: "87 bytes", data: append(append([]byte{}, valid...), 0x00), wantErr: true},
+		{name: "one byte short", data: valid[:len(valid)-1], wantErr: true},
+		{name: "one byte long", data: append(bytes.Clone(valid), 0x00), wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -214,11 +216,11 @@ func TestNoreplayBitSet(t *testing.T) {
 		want       bool
 		wantErr    bool
 	}{
-		{name: "bit 0 set, bit 1 queried", bucketData: solanaNoreplayBucket(0), sequence: 1, want: false},
-		{name: "bit 1023 set, bit 1023 queried", bucketData: solanaNoreplayBucket(1023), sequence: 1023, want: true},
-		{name: "sequence 1024 queries bit 0 of the next bucket's page", bucketData: solanaNoreplayBucket(0), sequence: 1024, want: true},
-		{name: "byte boundary: bit 7 set, bit 8 clear", bucketData: solanaNoreplayBucket(7), sequence: 8, want: false},
-		{name: "byte boundary: bit 8 set", bucketData: solanaNoreplayBucket(8), sequence: 8, want: true},
+		{name: "bit 0 set, bit 1 queried", bucketData: solanaNoreplayBucket(t, 0), sequence: 1, want: false},
+		{name: "bit 1023 set, bit 1023 queried", bucketData: solanaNoreplayBucket(t, 1023), sequence: 1023, want: true},
+		{name: "sequence 1024 queries bit 0 of the next bucket's page", bucketData: solanaNoreplayBucket(t, 0), sequence: 1024, want: true},
+		{name: "byte boundary: bit 7 set, bit 8 clear", bucketData: solanaNoreplayBucket(t, 7), sequence: 8, want: false},
+		{name: "byte boundary: bit 8 set", bucketData: solanaNoreplayBucket(t, 8), sequence: 8, want: true},
 		{name: "wrong length: too short", bucketData: make([]byte, noreplayBucketLen-1), sequence: 0, wantErr: true},
 	}
 
@@ -237,13 +239,16 @@ func TestNoreplayBitSet(t *testing.T) {
 
 func TestParseSubmitObservationsIxData(t *testing.T) {
 	valid := mustHexDecode(t, fixtureSubmitObservationsIxDataHex)
-	require.Len(t, valid, submitObservationsDispatchLen+submitObservationsIxDataLen)
+	require.Len(t, valid, submitObservationsInstructionLen)
 	validSignature := mustHexDecode(t, fixtureSubmitObservationsSignatureTxIDIxDataHex)
-	require.Len(t, validSignature, submitObservationsDispatchLen+submitObservationsIxDataLen)
+	require.Len(t, validSignature, submitObservationsInstructionLen)
 
-	mutate := func(data []byte, edit func([]byte)) []byte {
-		out := append([]byte{}, data...)
-		edit(out)
+	mutate := func(data []byte, edit func(*submitObservationsInstructionWire)) []byte {
+		var wire submitObservationsInstructionWire
+		require.NoError(t, decodeWire(data, &wire))
+		edit(&wire)
+		out, err := encodeWire(&wire)
+		require.NoError(t, err)
 		return out
 	}
 
@@ -255,13 +260,13 @@ func TestParseSubmitObservationsIxData(t *testing.T) {
 	}{
 		{name: "valid, 32-byte tx id", data: valid, wantTxID: mustHexDecode(t, fixtureSubmitObservationsTxIDHex)},
 		{name: "valid, 64-byte tx id", data: validSignature, wantTxID: mustHexDecode(t, fixtureSubmitObservationsSignatureTxIDHex)},
-		{name: "wrong discriminator", data: mutate(valid, func(d []byte) { d[0] = 2 }), wantErr: true}, // Instruction::SubmitVaas
-		{name: "278 bytes", data: valid[:len(valid)-1], wantErr: true},
-		{name: "tx id length 33", data: mutate(valid, func(d []byte) { d[submitTxIDLenOffset] = 33 }), wantErr: true},
-		{name: "32-byte tx id, nonzero last padding byte", data: mutate(valid, func(d []byte) { d[submitFieldsOffset-1] = 1 }), wantErr: true},
+		{name: "wrong discriminator", data: mutate(valid, func(w *submitObservationsInstructionWire) { w.Discriminator = 2 }), wantErr: true}, // Instruction::SubmitVaas
+		{name: "one byte short", data: valid[:len(valid)-1], wantErr: true},
+		{name: "tx id length between the two forms", data: mutate(valid, func(w *submitObservationsInstructionWire) { w.Data.TxIDLen = hashTxIDLen + 1 }), wantErr: true},
+		{name: "32-byte tx id, nonzero last padding byte", data: mutate(valid, func(w *submitObservationsInstructionWire) { w.Data.TxID[signatureTxIDLen-1] = 1 }), wantErr: true},
 	}
 
-	var wantSignature [65]byte
+	var wantSignature [submitSignatureLen]byte
 	for i := range wantSignature {
 		wantSignature[i] = byte(i)
 	}
@@ -282,8 +287,9 @@ func TestParseSubmitObservationsIxData(t *testing.T) {
 			assert.True(t, ix.TxID.valid())
 			assert.Equal(t, tt.wantTxID, ix.TxID.Bytes())
 
-			packed := ix.pack()
-			assert.Equal(t, fixtureTransferFieldsHex, hex.EncodeToString(packed[:]))
+			packed, err := ix.pack()
+			require.NoError(t, err)
+			assert.Equal(t, fixtureTransferFieldsHex, hex.EncodeToString(packed))
 			assert.Equal(t, mustHexDecode32(t, fixtureTransferContentDigestHex), ix.contentDigest)
 		})
 	}
@@ -369,14 +375,15 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, fields)
-			packed := fields.pack()
-			assert.Equal(t, wantFieldsHex, hex.EncodeToString(packed[:]))
+			packed, err := fields.pack()
+			require.NoError(t, err)
+			assert.Equal(t, wantFieldsHex, hex.EncodeToString(packed))
 			assert.Equal(t, mustHexDecode32(t, wantContentDigest), fields.contentDigest)
 		})
 	}
 }
 
-// Values are the ERR_* lines of go_fixture_vectors.rs.
+// Pins the generated error codes the submit path branches on.
 func TestSolanaErrorCodesMatchProgram(t *testing.T) {
 	tests := []struct {
 		name string
@@ -397,4 +404,109 @@ func TestSolanaErrorCodesMatchProgram(t *testing.T) {
 			assert.Equal(t, tc.want, tc.got)
 		})
 	}
+}
+
+// mustEncodeWire encodes v for a test fixture. A fixed-size wire struct fails to encode only
+// when the generated layout is wrong, which TestSolanaWireLayouts reports.
+func mustEncodeWire[T wireLayout](v *T) []byte {
+	out, err := encodeWire(v)
+	if err != nil {
+		panic(err)
+	}
+	return out
+}
+
+// checkWireLayout requires binary.Size of T to equal its generated length, data to survive
+// a decode and encode round trip, and a decode of one byte less or more to fail.
+func checkWireLayout[T wireLayout](t *testing.T, data []byte) {
+	t.Helper()
+	var zero T
+	require.Equal(t, zero.wireLen(), binary.Size(zero), "binary.Size")
+	require.Len(t, data, zero.wireLen())
+
+	var decoded T
+	require.NoError(t, decodeWire(data, &decoded))
+	encoded, err := encodeWire(&decoded)
+	require.NoError(t, err)
+	assert.Equal(t, data, encoded, "round trip")
+
+	var short, long T
+	require.Error(t, decodeWire(data[:len(data)-1], &short))
+	require.Error(t, decodeWire(append(bytes.Clone(data), 0), &long))
+}
+
+// patternedBytes is n bytes of 0x01, 0x02, ... for layouts without padding.
+func patternedBytes(n int) []byte {
+	out := make([]byte, n)
+	for i := range out {
+		out[i] = byte(i + 1)
+	}
+	return out
+}
+
+func TestSolanaWireLayouts(t *testing.T) {
+	transferPayload := fixturePayload(t, fixtureTransferBodyHex)
+	submitInstruction := mustHexDecode(t, fixtureSubmitObservationsIxDataHex)
+	chainRegistration, err := encodeWire(&chainRegistrationWire{
+		Tag:                chainRegistrationTag,
+		Chain:              uint16(vaa.ChainIDEthereum),
+		GovernanceSequence: 7,
+		EmitterAddress:     fixtureEmitter(),
+	})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name  string
+		check func(t *testing.T)
+	}{
+		{"accountant digest log", func(t *testing.T) {
+			checkWireLayout[accountantDigestLogWire](t, mustHexDecode(t, fixtureACCDGSTLogHex))
+		}},
+		{"pending observations", func(t *testing.T) {
+			checkWireLayout[pendingObservationsWire](t, mustHexDecode(t, fixturePendingObservationsAccountHex))
+		}},
+		{"noreplay bucket", func(t *testing.T) {
+			checkWireLayout[noreplayBucketWire](t, patternedBytes(noreplayBucketLen))
+		}},
+		{"noreplay namespace", func(t *testing.T) {
+			checkWireLayout[noreplayNamespaceWire](t, patternedBytes(noreplayNamespaceLen))
+		}},
+		{"observation fields", func(t *testing.T) {
+			checkWireLayout[observationFieldsWire](t, mustHexDecode(t, fixtureTransferFieldsHex))
+		}},
+		{"submit_observations instruction", func(t *testing.T) {
+			checkWireLayout[submitObservationsInstructionWire](t, submitInstruction)
+		}},
+		{"submit_observations instruction data", func(t *testing.T) {
+			checkWireLayout[submitObservationsIxDataWire](t, submitInstruction[submitObservationsInstructionLen-submitObservationsIxDataLen:])
+		}},
+		{"token bridge transfer", func(t *testing.T) {
+			checkWireLayout[tokenBridgeTransferWire](t, transferPayload[:tokenBridgeTransferLen])
+		}},
+		{"chain registration", func(t *testing.T) {
+			checkWireLayout[chainRegistrationWire](t, chainRegistration)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, tc.check)
+	}
+}
+
+// TestTokenBridgeTransferWireMatchesSDK checks the wire decode against the guardian SDK parser.
+func TestTokenBridgeTransferWireMatchesSDK(t *testing.T) {
+	payload := fixturePayload(t, fixtureTransferBodyHex)
+	var wire tokenBridgeTransferWire
+	require.NoError(t, decodeWire(payload[:tokenBridgeTransferLen], &wire))
+
+	hdr, err := vaa.DecodeTransferPayloadHdr(payload)
+	require.NoError(t, err)
+	var amount [32]byte
+	hdr.Amount.FillBytes(amount[:])
+
+	assert.Equal(t, hdr.Type, wire.Action)
+	assert.Equal(t, amount, wire.Amount)
+	assert.Equal(t, hdr.OriginAddress, vaa.Address(wire.TokenAddress))
+	assert.Equal(t, hdr.OriginChain, vaa.ChainID(wire.TokenChain.Uint16()))
+	assert.Equal(t, hdr.TargetAddress, vaa.Address(wire.Recipient))
+	assert.Equal(t, hdr.TargetChain, vaa.ChainID(wire.RecipientChain.Uint16()))
 }

@@ -25,6 +25,17 @@ const (
 	maxSolanaInvokeDepth = 16
 )
 
+// Field positions in "Program <id> <verb> [<depth>]". The verb line is the shortest one
+// the parser reads. An invoke line carries the depth.
+const (
+	programLineKeywordField = 0
+	programLineIDField      = 1
+	programLineVerbField    = 2
+	programLineDepthField   = 3
+	programLineMinFields    = programLineVerbField + 1
+	programInvokeLineFields = programLineDepthField + 1
+)
+
 // Runtime lines whose second field is a keyword, not a program id. `Program log: success`
 // must not pop a frame. Thus the parser skips these lines before it reads the frame keywords.
 var solanaProgramOutputPrefixes = [...]string{
@@ -210,26 +221,25 @@ func parseSolanaCommitLogs(logs []string, program solana.PublicKey) ([]solanaCom
 			continue
 		}
 
-		// "Program <id> <verb> ..." is the shortest program line the parser reads.
 		fields := strings.Fields(line)
-		if len(fields) < 3 || fields[0] != "Program" {
+		if len(fields) < programLineMinFields || fields[programLineKeywordField] != "Program" {
 			continue
 		}
-		verb := fields[2]
+		verb := fields[programLineVerbField]
 		if verb != "invoke" && verb != "success" && verb != "failed:" {
 			continue
 		}
 
-		frame, err := solana.PublicKeyFromBase58(fields[1])
+		frame, err := solana.PublicKeyFromBase58(fields[programLineIDField])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("log line %d: %q program id %q: %w", idx, verb, fields[1], err))
+			errs = append(errs, fmt.Errorf("log line %d: %q program id %q: %w", idx, verb, fields[programLineIDField], err))
 			return commits, errors.Join(errs...)
 		}
 		if verb == "invoke" {
-			if len(fields) != 4 {
-				err = fmt.Errorf("invoke line has %d fields, want 4", len(fields))
+			if len(fields) != programInvokeLineFields {
+				err = fmt.Errorf("invoke line has %d fields, want %d", len(fields), programInvokeLineFields)
 			} else {
-				err = stack.push(frame, fields[3])
+				err = stack.push(frame, fields[programLineDepthField])
 			}
 		} else {
 			err = stack.pop(frame)
@@ -255,13 +265,9 @@ func parseSolanaProgramDataCommit(rest string) (*solanaCommitEvent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("program data: %w", err)
 	}
-	tagLen := len(accountantDigestLogTag)
-	if len(payload) < tagLen {
+	const tagLen = len(accountantDigestLogTag)
+	if len(payload) < tagLen || [tagLen]byte(payload[:tagLen]) != accountantDigestLogTag {
 		return nil, nil
 	}
-	if [8]byte(payload[:tagLen]) != accountantDigestLogTag {
-		return nil, nil
-	}
-
 	return parseAccountantDigestLog(payload)
 }

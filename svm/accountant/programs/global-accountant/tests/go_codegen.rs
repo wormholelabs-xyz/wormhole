@@ -1,22 +1,25 @@
-//! Generates the layout constants and test fixtures of `node/pkg/accountant` from the
+//! Generates the wire layouts, constants and test fixtures of `node/pkg/accountant` from the
 //! program types and code paths. Fails when a checked-in Go file differs.
 //!
-//! `just go-codegen` writes the files. `just test` checks them.
+//! `just go-codegen` writes the files. `just test` checks them. Both need `gofmt` on PATH.
 
 use core::mem::{offset_of, size_of_val};
 use std::fmt::{Display, Write as _};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::support::quorum::derive_pending_pda;
 use accountant_test_fixtures::{Vaa, MAINNET_OTHER_SEQ2211, MAINNET_TRANSFER_SEQ1395207};
 use bytemuck::Zeroable;
 use global_accountant_definitions::{
-    AccountantDigestLog, GlobalAccountantError, Instruction, NoReplayBitmapAccount,
-    PendingObservationsLayout, SubmitObservationsIxData, TokenBridgeTransfer, TxId, VaaBodyHeader,
-    ACCOUNTANT_DIGEST_LOG_TAG, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
-    GUARDIAN_SET_SEED, HASH_TX_ID_LEN, MAX_TRANSFER_PAYLOAD_LEN, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    NOREPLAY_BITS_PER_BUCKET, PENDING_OBSERVATIONS_SEED_PREFIX, SIGNATURE_TX_ID_LEN,
+    AccountantDigestLog, ChainRegistrationLayout, GlobalAccountantError, Instruction,
+    NoReplayBitmapAccount, NoReplayNamespace, PendingObservationsLayout, SubmitObservationsIxData,
+    TokenBridgeTransfer, TxId, VaaBodyHeader, ACCOUNTANT_DIGEST_LOG_TAG, ACCOUNT_SEED_PREFIX,
+    CHAIN_REGISTRATION_SEED_PREFIX, GUARDIAN_SET_SEED, HASH_TX_ID_LEN, MAX_TRANSFER_PAYLOAD_LEN,
+    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, PENDING_OBSERVATIONS_SEED_PREFIX,
+    SIGNATURE_TX_ID_LEN,
 };
 use solana_pubkey::Pubkey;
 
@@ -55,7 +58,70 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A Go source file. Each declaration is its own statement, so the output is gofmt-formatted.
+/// Go field type of a wire struct. Plain integers are little-endian, as `decodeWire` reads
+/// them. `Be*` are the big-endian byte-array types of `solana_wire.go`.
+#[derive(Clone, Copy)]
+enum GoType {
+    U8,
+    U16,
+    U32,
+    U64,
+    Be16,
+    Be64,
+    Bytes(usize),
+    Words(usize),
+    Wire(&'static str, usize),
+}
+
+impl GoType {
+    fn size(self) -> usize {
+        match self {
+            Self::U8 => 1,
+            Self::U16 | Self::Be16 => 2,
+            Self::U32 => 4,
+            Self::U64 | Self::Be64 => 8,
+            Self::Bytes(len) => len,
+            Self::Words(len) => 4 * len,
+            Self::Wire(_, len) => len,
+        }
+    }
+
+    fn name(self) -> String {
+        match self {
+            Self::U8 => "uint8".to_owned(),
+            Self::U16 => "uint16".to_owned(),
+            Self::U32 => "uint32".to_owned(),
+            Self::U64 => "uint64".to_owned(),
+            Self::Be16 => "be16".to_owned(),
+            Self::Be64 => "be64".to_owned(),
+            Self::Bytes(len) => format!("[{len}]byte"),
+            Self::Words(len) => format!("[{len}]uint32"),
+            Self::Wire(name, _) => name.to_owned(),
+        }
+    }
+}
+
+/// One field of a wire struct, with its offset and size in the Rust layout.
+struct Field {
+    go_name: &'static str,
+    ty: GoType,
+    offset: usize,
+    size: usize,
+}
+
+/// A field of a `Zeroable` Rust layout, mapped to a Go type.
+macro_rules! field {
+    ($layout:ty, $field:ident, $go_name:literal, $ty:expr) => {
+        Field {
+            go_name: $go_name,
+            ty: $ty,
+            offset: offset_of!($layout, $field),
+            size: size_of_val(&<$layout as Zeroable>::zeroed().$field),
+        }
+    };
+}
+
+/// A Go source file. `finish` formats it with gofmt.
 struct GoFile(String);
 
 impl GoFile {
@@ -67,7 +133,7 @@ impl GoFile {
     }
 
     fn finish(self) -> String {
-        self.0
+        gofmt(&self.0)
     }
 
     fn section(&mut self, title: &str) {
@@ -123,6 +189,81 @@ impl GoFile {
             writeln!(self.0, "var {name} = []byte(\"{text}\")").unwrap();
         }
     }
+
+    /// A Go struct with the byte layout of a Rust layout of `len` bytes. `base` is the Rust
+    /// offset of the first field. A gap between fields becomes a blank `_` field.
+    ///
+    /// SECURITY: asserts field order, each field size against its Go type, and the total
+    /// length. Thus `binary.Decode` reads every field at its Rust offset.
+    #[allow(clippy::too_many_arguments)]
+    fn wire_struct(
+        &mut self,
+        doc: &str,
+        name: &str,
+        label: &str,
+        len_const: &str,
+        len: usize,
+        base: usize,
+        fields: &[Field],
+    ) {
+        assert!(!fields.is_empty(), "{name} has no fields");
+        let mut body = String::new();
+        let mut cursor = 0;
+        for field in fields {
+            let offset = field.offset - base;
+            assert!(
+                offset >= cursor,
+                "{name}.{}: field out of order",
+                field.go_name
+            );
+            assert_eq!(
+                field.size,
+                field.ty.size(),
+                "{name}.{}: Rust size and Go type size differ",
+                field.go_name
+            );
+            if offset > cursor {
+                writeln!(body, "\t_ [{}]byte", offset - cursor).unwrap();
+            }
+            writeln!(body, "\t{} {}", field.go_name, field.ty.name()).unwrap();
+            cursor = offset + field.size;
+        }
+        assert!(cursor <= len, "{name}: fields end past {len}");
+        if cursor < len {
+            writeln!(body, "\t_ [{}]byte", len - cursor).unwrap();
+        }
+
+        self.doc(doc);
+        write!(
+            self.0,
+            "type {name} struct {{\n{body}}}\n\nfunc ({name}) wireLen() int {{ return {len_const} }}\n\nfunc ({name}) wireName() string {{ return \"{label}\" }}\n"
+        )
+        .unwrap();
+    }
+}
+
+/// Formats Go source with gofmt, which aligns struct fields.
+fn gofmt(source: &str) -> String {
+    let mut child = Command::new("gofmt")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|err| panic!("run gofmt: {err}. Put the Go toolchain on PATH."));
+    // gofmt reads all input before it writes, so the pipes cannot deadlock.
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(source.as_bytes())
+        .expect("write gofmt stdin");
+    let output = child.wait_with_output().expect("wait for gofmt");
+    assert!(
+        output.status.success(),
+        "gofmt: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("gofmt output is UTF-8")
 }
 
 /// Lossless widening of a layout size or offset.
@@ -144,35 +285,35 @@ fn layout_file() -> String {
         "accountantDigestLogTag",
         &ACCOUNTANT_DIGEST_LOG_TAG,
     );
-    go.constants(&[
-        (
-            "Big-endian.",
-            "accountantDigestLogChainOffset",
-            n(offset_of!(AccountantDigestLog, chain)),
-        ),
-        (
-            "",
-            "accountantDigestLogEmitterOffset",
-            n(offset_of!(AccountantDigestLog, emitter)),
-        ),
-        (
-            "Big-endian.",
-            "accountantDigestLogSequenceOffset",
-            n(offset_of!(AccountantDigestLog, sequence)),
-        ),
-        (
-            "",
-            "accountantDigestLogDigestOffset",
-            n(offset_of!(AccountantDigestLog, digest)),
-        ),
-        (
-            "Little-endian.",
-            "accountantDigestLogGuardianSetIndexOffset",
-            n(offset_of!(AccountantDigestLog, guardian_set_index)),
-        ),
-    ]);
+    go.wire_struct(
+        "accountantDigestLogWire is AccountantDigestLog.",
+        "accountantDigestLogWire",
+        "accountant digest log",
+        "accountantDigestLogLen",
+        AccountantDigestLog::LEN,
+        0,
+        &[
+            field!(
+                AccountantDigestLog,
+                tag,
+                "Tag",
+                GoType::Bytes(ACCOUNTANT_DIGEST_LOG_TAG.len())
+            ),
+            field!(AccountantDigestLog, chain, "Chain", GoType::Be16),
+            field!(AccountantDigestLog, emitter, "Emitter", GoType::Bytes(32)),
+            field!(AccountantDigestLog, sequence, "Sequence", GoType::Be64),
+            field!(AccountantDigestLog, digest, "Digest", GoType::Bytes(32)),
+            field!(
+                AccountantDigestLog,
+                guardian_set_index,
+                "GuardianSetIndex",
+                GoType::U32
+            ),
+        ],
+    );
 
-    go.section("PendingObservationsLayout, state.rs. Integers are little-endian.");
+    let signature_words = PendingObservationsLayout::zeroed().signatures.len();
+    go.section("PendingObservationsLayout, state.rs.");
     go.constants(&[
         (
             "PendingObservationsLayout::LEN.",
@@ -192,36 +333,45 @@ fn layout_file() -> String {
         (
             "u32 words in the signature bitmap.",
             "pendingObservationsSignatureWords",
-            n(PendingObservationsLayout::zeroed().signatures.len()),
-        ),
-        (
-            "",
-            "pendingObservationsChainOffset",
-            n(offset_of!(PendingObservationsLayout, chain)),
-        ),
-        (
-            "",
-            "pendingObservationsGuardianSetIndexOffset",
-            n(offset_of!(PendingObservationsLayout, guardian_set_index)),
-        ),
-        (
-            "",
-            "pendingObservationsSignaturesOffset",
-            n(offset_of!(PendingObservationsLayout, signatures)),
-        ),
-        (
-            "",
-            "pendingObservationsContentDigestOffset",
-            n(offset_of!(PendingObservationsLayout, content_digest)),
-        ),
-        (
-            "",
-            "pendingObservationsPayerOffset",
-            n(offset_of!(PendingObservationsLayout, payer)),
+            n(signature_words),
         ),
     ]);
+    go.wire_struct(
+        "pendingObservationsWire is PendingObservationsLayout.",
+        "pendingObservationsWire",
+        "pending observations account",
+        "pendingObservationsLen",
+        PendingObservationsLayout::LEN,
+        0,
+        &[
+            field!(PendingObservationsLayout, tag, "Tag", GoType::U8),
+            field!(PendingObservationsLayout, chain, "Chain", GoType::U16),
+            field!(
+                PendingObservationsLayout,
+                guardian_set_index,
+                "GuardianSetIndex",
+                GoType::U32
+            ),
+            field!(
+                PendingObservationsLayout,
+                signatures,
+                "Signatures",
+                GoType::Words(signature_words)
+            ),
+            field!(
+                PendingObservationsLayout,
+                content_digest,
+                "ContentDigest",
+                GoType::Bytes(32)
+            ),
+            field!(PendingObservationsLayout, payer, "Payer", GoType::Bytes(32)),
+        ],
+    );
 
-    go.section("solana-noreplay bucket, constants/noreplay.rs.");
+    let bitmap_bytes = NoReplayBitmapAccount::zeroed().bitmap.len();
+    let namespace = NoReplayNamespace::new(0, [0; 32]);
+    let (namespace_seed_a, _) = namespace.seed_chunks();
+    go.section("solana-noreplay, constants/noreplay.rs.");
     go.constants(&[
         (
             "NoReplayBitmapAccount::LEN.",
@@ -229,30 +379,115 @@ fn layout_file() -> String {
             n(NoReplayBitmapAccount::LEN),
         ),
         (
-            "",
-            "noreplayBitmapOffset",
-            n(offset_of!(NoReplayBitmapAccount, bitmap)),
-        ),
-        (
             "NOREPLAY_BITS_PER_BUCKET.",
             "noreplayBitsPerBucket",
             NOREPLAY_BITS_PER_BUCKET,
         ),
+        (
+            "NoReplayNamespace::LEN.",
+            "noreplayNamespaceLen",
+            n(NoReplayNamespace::LEN),
+        ),
+        (
+            "NoReplayNamespace::seed_chunks split point.",
+            "noreplayNamespaceSeedSplit",
+            n(namespace_seed_a.len()),
+        ),
     ]);
+    go.wire_struct(
+        "noreplayBucketWire is NoReplayBitmapAccount.",
+        "noreplayBucketWire",
+        "noreplay bucket account",
+        "noreplayBucketLen",
+        NoReplayBitmapAccount::LEN,
+        0,
+        &[
+            field!(NoReplayBitmapAccount, bump, "Bump", GoType::U8),
+            field!(
+                NoReplayBitmapAccount,
+                bitmap,
+                "Bitmap",
+                GoType::Bytes(bitmap_bytes)
+            ),
+        ],
+    );
+    go.wire_struct(
+        "noreplayNamespaceWire is NoReplayNamespace.",
+        "noreplayNamespaceWire",
+        "noreplay namespace",
+        "noreplayNamespaceLen",
+        NoReplayNamespace::LEN,
+        0,
+        &[
+            field!(NoReplayNamespace, chain, "Chain", GoType::Be16),
+            field!(NoReplayNamespace, emitter, "Emitter", GoType::Bytes(32)),
+        ],
+    );
+
+    let fields_len = SubmitObservationsIxData::LEN - FIELDS_START;
+    go.section("ObservationFieldsAndDigest, ix_data.rs: the hashed record.");
+    go.constant(
+        "Length of the hashed record.",
+        "observationFieldsLen",
+        fields_len,
+    );
+    go.wire_struct(
+        "observationFieldsWire is the tail of SubmitObservationsIxData from action.",
+        "observationFieldsWire",
+        "observation fields",
+        "observationFieldsLen",
+        fields_len,
+        FIELDS_START,
+        &[
+            field!(SubmitObservationsIxData, action, "Action", GoType::U8),
+            field!(SubmitObservationsIxData, chain, "Chain", GoType::Be16),
+            field!(
+                SubmitObservationsIxData,
+                emitter,
+                "Emitter",
+                GoType::Bytes(32)
+            ),
+            field!(SubmitObservationsIxData, sequence, "Sequence", GoType::Be64),
+            field!(
+                SubmitObservationsIxData,
+                token_chain,
+                "TokenChain",
+                GoType::Be16
+            ),
+            field!(
+                SubmitObservationsIxData,
+                token_address,
+                "TokenAddress",
+                GoType::Bytes(32)
+            ),
+            field!(
+                SubmitObservationsIxData,
+                recipient_chain,
+                "RecipientChain",
+                GoType::Be16
+            ),
+            field!(
+                SubmitObservationsIxData,
+                amount,
+                "Amount",
+                GoType::Bytes(32)
+            ),
+            field!(
+                SubmitObservationsIxData,
+                digest,
+                "VaaDigest",
+                GoType::Bytes(32)
+            ),
+        ],
+    );
 
     assert_eq!(
         size_of_val(&SubmitObservationsIxData::zeroed().tx_id),
         SIGNATURE_TX_ID_LEN
     );
-    go.section(
-        "submit_observations instruction data, ix_data.rs. Offsets include the discriminator.",
-    );
+    let instruction_len = DISPATCH_LEN + SubmitObservationsIxData::LEN;
+    go.section("submit_observations instruction, ix_data.rs.");
     go.constants(&[
-        (
-            "One u8 discriminator.",
-            "submitObservationsDispatchLen",
-            n(DISPATCH_LEN),
-        ),
         (
             "Instruction::SubmitObservations.",
             "submitObservationsDiscriminator",
@@ -264,44 +499,15 @@ fn layout_file() -> String {
             n(SubmitObservationsIxData::LEN),
         ),
         (
-            "Little-endian.",
-            "submitGuardianSetIndexOffset",
-            n(DISPATCH_LEN + offset_of!(SubmitObservationsIxData, guardian_set_index)),
-        ),
-        (
-            "",
-            "submitGuardianIndexOffset",
-            n(DISPATCH_LEN + offset_of!(SubmitObservationsIxData, guardian_index)),
-        ),
-        (
-            "",
-            "submitSignatureOffset",
-            n(DISPATCH_LEN + offset_of!(SubmitObservationsIxData, signature)),
+            "One u8 discriminator plus the data.",
+            "submitObservationsInstructionLen",
+            n(instruction_len),
         ),
         (
             "r ‖ s ‖ recovery_id.",
             "submitSignatureLen",
             n(size_of_val(&SubmitObservationsIxData::zeroed().signature)),
         ),
-        (
-            "",
-            "submitTxIDLenOffset",
-            n(DISPATCH_LEN + offset_of!(SubmitObservationsIxData, tx_id_len)),
-        ),
-        (
-            "",
-            "submitTxIDOffset",
-            n(DISPATCH_LEN + offset_of!(SubmitObservationsIxData, tx_id)),
-        ),
-        (
-            "Start of the hashed record.",
-            "submitFieldsOffset",
-            n(DISPATCH_LEN + FIELDS_START),
-        ),
-    ]);
-
-    go.section("TxId, ix_data.rs.");
-    go.constants(&[
         ("HASH_TX_ID_LEN.", "hashTxIDLen", n(HASH_TX_ID_LEN)),
         (
             "SIGNATURE_TX_ID_LEN.",
@@ -309,60 +515,72 @@ fn layout_file() -> String {
             n(SIGNATURE_TX_ID_LEN),
         ),
     ]);
-
-    go.section("ObservationFieldsAndDigest, ix_data.rs. Integers are big-endian.");
-    go.constants(&[
-        (
-            "Length of the hashed record.",
-            "observationFieldsLen",
-            n(SubmitObservationsIxData::LEN - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsActionOffset",
-            n(offset_of!(SubmitObservationsIxData, action) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsChainOffset",
-            n(offset_of!(SubmitObservationsIxData, chain) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsEmitterOffset",
-            n(offset_of!(SubmitObservationsIxData, emitter) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsSequenceOffset",
-            n(offset_of!(SubmitObservationsIxData, sequence) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsTokenChainOffset",
-            n(offset_of!(SubmitObservationsIxData, token_chain) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsTokenAddressOffset",
-            n(offset_of!(SubmitObservationsIxData, token_address) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsRecipientChainOffset",
-            n(offset_of!(SubmitObservationsIxData, recipient_chain) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsAmountOffset",
-            n(offset_of!(SubmitObservationsIxData, amount) - FIELDS_START),
-        ),
-        (
-            "",
-            "fieldsVaaDigestOffset",
-            n(offset_of!(SubmitObservationsIxData, digest) - FIELDS_START),
-        ),
-    ]);
+    go.wire_struct(
+        "submitObservationsIxDataWire is SubmitObservationsIxData.",
+        "submitObservationsIxDataWire",
+        "submit_observations instruction data",
+        "submitObservationsIxDataLen",
+        SubmitObservationsIxData::LEN,
+        0,
+        &[
+            field!(
+                SubmitObservationsIxData,
+                guardian_set_index,
+                "GuardianSetIndex",
+                GoType::U32
+            ),
+            field!(
+                SubmitObservationsIxData,
+                guardian_index,
+                "GuardianIndex",
+                GoType::U8
+            ),
+            field!(
+                SubmitObservationsIxData,
+                signature,
+                "Signature",
+                GoType::Bytes(65)
+            ),
+            field!(SubmitObservationsIxData, tx_id_len, "TxIDLen", GoType::U8),
+            field!(
+                SubmitObservationsIxData,
+                tx_id,
+                "TxID",
+                GoType::Bytes(SIGNATURE_TX_ID_LEN)
+            ),
+            Field {
+                go_name: "Fields",
+                ty: GoType::Wire("observationFieldsWire", fields_len),
+                offset: FIELDS_START,
+                size: fields_len,
+            },
+        ],
+    );
+    go.wire_struct(
+        "submitObservationsInstructionWire is the discriminator and SubmitObservationsIxData.",
+        "submitObservationsInstructionWire",
+        "submit_observations instruction data",
+        "submitObservationsInstructionLen",
+        instruction_len,
+        0,
+        &[
+            Field {
+                go_name: "Discriminator",
+                ty: GoType::U8,
+                offset: 0,
+                size: DISPATCH_LEN,
+            },
+            Field {
+                go_name: "Data",
+                ty: GoType::Wire(
+                    "submitObservationsIxDataWire",
+                    SubmitObservationsIxData::LEN,
+                ),
+                offset: DISPATCH_LEN,
+                size: SubmitObservationsIxData::LEN,
+            },
+        ],
+    );
 
     go.section("Token Bridge transfer payload, vaa.rs.");
     go.constants(&[
@@ -377,6 +595,38 @@ fn layout_file() -> String {
             n(MAX_TRANSFER_PAYLOAD_LEN),
         ),
     ]);
+    go.wire_struct(
+        "tokenBridgeTransferWire is TokenBridgeTransfer, the fixed head of a transfer payload.",
+        "tokenBridgeTransferWire",
+        "token bridge transfer",
+        "tokenBridgeTransferLen",
+        TokenBridgeTransfer::LEN,
+        0,
+        &[
+            field!(TokenBridgeTransfer, action, "Action", GoType::U8),
+            field!(TokenBridgeTransfer, amount, "Amount", GoType::Bytes(32)),
+            field!(
+                TokenBridgeTransfer,
+                token_address,
+                "TokenAddress",
+                GoType::Bytes(32)
+            ),
+            field!(TokenBridgeTransfer, token_chain, "TokenChain", GoType::Be16),
+            field!(
+                TokenBridgeTransfer,
+                recipient,
+                "Recipient",
+                GoType::Bytes(32)
+            ),
+            field!(
+                TokenBridgeTransfer,
+                recipient_chain,
+                "RecipientChain",
+                GoType::Be16
+            ),
+            field!(TokenBridgeTransfer, fee, "Fee", GoType::Bytes(32)),
+        ],
+    );
 
     go.section("PDA seed prefixes, constants/seeds.rs.");
     go.seeds(&[
@@ -511,6 +761,44 @@ fn fixtures_file() -> String {
         "VaaBodyHeader::LEN, vaa.rs. The payload follows it.",
         "fixtureVaaBodyHeaderLen",
         VaaBodyHeader::LEN,
+    );
+
+    go.section("ChainRegistrationLayout, state.rs.");
+    go.constants(&[
+        (
+            "ChainRegistrationLayout::LEN.",
+            "chainRegistrationLen",
+            n(ChainRegistrationLayout::LEN),
+        ),
+        (
+            "ChainRegistrationLayout::TAG.",
+            "chainRegistrationTag",
+            u64::from(ChainRegistrationLayout::TAG),
+        ),
+    ]);
+    go.wire_struct(
+        "chainRegistrationWire is ChainRegistrationLayout.",
+        "chainRegistrationWire",
+        "chain registration account",
+        "chainRegistrationLen",
+        ChainRegistrationLayout::LEN,
+        0,
+        &[
+            field!(ChainRegistrationLayout, tag, "Tag", GoType::U8),
+            field!(ChainRegistrationLayout, chain, "Chain", GoType::U16),
+            field!(
+                ChainRegistrationLayout,
+                governance_sequence,
+                "GovernanceSequence",
+                GoType::U64
+            ),
+            field!(
+                ChainRegistrationLayout,
+                emitter_address,
+                "EmitterAddress",
+                GoType::Bytes(32)
+            ),
+        ],
     );
 
     go.section(

@@ -1,6 +1,7 @@
 package solacctconn
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"os"
 
@@ -9,8 +10,9 @@ import (
 )
 
 const (
-	// FeePayerKeyLen is the length of an ed25519 keypair as solana-keygen writes it.
-	FeePayerKeyLen = 64
+	// FeePayerKeyLen is the length of an ed25519 keypair as solana-keygen writes it: seed and
+	// public key.
+	FeePayerKeyLen = ed25519.PrivateKeySize
 
 	groupOrWorldPermBits = 0o077
 )

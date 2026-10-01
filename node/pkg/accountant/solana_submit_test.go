@@ -45,7 +45,7 @@ func TestEncodeSubmitObservationsIxDataRoundTrip(t *testing.T) {
 
 		got, err := encodeSubmitObservationsIxData(parsed.GuardianSetIndex, parsed.GuardianIndex, parsed.Signature[:], parsed.TxID, &parsed.solanaObservationFields)
 		require.NoError(t, err)
-		require.Len(t, got, submitObservationsDispatchLen+submitObservationsIxDataLen)
+		require.Len(t, got, submitObservationsInstructionLen)
 		assert.Equal(t, want, got)
 	}
 }
@@ -144,22 +144,18 @@ func TestClassifySolanaTxError(t *testing.T) {
 // solanaPendingAccountData builds a PendingObservationsLayout account for a submission.
 func solanaPendingAccountData(t *testing.T, chain vaa.ChainID, guardianSetIndex uint32, contentDigest [32]byte, payer solana.PublicKey, signedBy []uint8) []byte {
 	t.Helper()
-	data := make([]byte, pendingObservationsLen)
-	data[0] = pendingObservationsTag
-	data[2] = byte(uint16(chain))
-	data[3] = byte(uint16(chain) >> 8)
-	data[4] = byte(guardianSetIndex)
-	data[5] = byte(guardianSetIndex >> 8)
-	data[6] = byte(guardianSetIndex >> 16)
-	data[7] = byte(guardianSetIndex >> 24)
-	for _, index := range signedBy {
-		word := int(index) / 32
-		bit := uint(index) % 32
-		offset := 8 + word*4 + int(bit/8)
-		data[offset] |= byte(1) << (bit % 8)
+	wire := pendingObservationsWire{
+		Tag:              pendingObservationsTag,
+		Chain:            uint16(chain),
+		GuardianSetIndex: guardianSetIndex,
+		ContentDigest:    contentDigest,
+		Payer:            payer,
 	}
-	copy(data[24:56], contentDigest[:])
-	copy(data[56:88], payer[:])
+	for _, index := range signedBy {
+		wire.Signatures[index/pendingObservationsBitsPerWord] |= 1 << (index % pendingObservationsBitsPerWord)
+	}
+	data, err := encodeWire(&wire)
+	require.NoError(t, err)
 	return data
 }
 
