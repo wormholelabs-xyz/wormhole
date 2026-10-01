@@ -36,8 +36,8 @@ type solanaOwnPendingTransfer struct {
 	previousSetPendingPDA *solana.PublicKey
 }
 
-// solanaPendingAccountState is the live-set pending account of a transfer, as this
-// guardian sees it.
+// solanaPendingAccountState is the state of the current guardian-set pending account of a
+// transfer, from a finalized read, relative to this guardian's signature bit.
 type solanaPendingAccountState uint8
 
 const (
@@ -54,27 +54,27 @@ const (
 	solanaOwnTransferSearchCommit
 )
 
-// decideSolanaOwnTransferAction maps the live-set pending account and the NoReplay bit of
-// one transfer to the audit action.
+// decideSolanaOwnTransferAction maps the current guardian-set pending account and the
+// NoReplay bit of one transfer to the audit action.
 //
 // SECURITY: only a commit sets the NoReplay bit. This applies to both submit paths and to
 // all guardian set indices. If the bit is set, no resubmission can land. This is true also
-// when the live-set pending account still exists as a losing sibling.
-func decideSolanaOwnTransferAction(live solanaPendingAccountState, accounted bool) (solanaOwnTransferAction, error) {
+// when the current guardian-set pending account still exists as a losing sibling.
+func decideSolanaOwnTransferAction(current solanaPendingAccountState, accounted bool) (solanaOwnTransferAction, error) {
 	if accounted {
 		return solanaOwnTransferSearchCommit, nil
 	}
-	switch live {
+	switch current {
 	case solanaPendingAccountAbsent, solanaPendingAccountLacksOwnSignature:
 		return solanaOwnTransferResubmit, nil
 	case solanaPendingAccountHasOwnSignature:
 		return solanaOwnTransferAwaitQuorum, nil
 	}
-	return 0, fmt.Errorf("unknown pending account state %d", live)
+	return 0, fmt.Errorf("unknown pending account state %d", current)
 }
 
-// classifySolanaPendingAccount decodes a GetMultipleAccounts result for the live-set
-// pending account of a transfer.
+// classifySolanaPendingAccount decodes a GetMultipleAccounts result for the current
+// guardian-set pending account of a transfer.
 func classifySolanaPendingAccount(account *solacctconn.AccountResult, contentDigest [32]byte, guardianIndex uint8) (solanaPendingAccountState, error) {
 	if account == nil {
 		return solanaPendingAccountAbsent, nil
@@ -92,12 +92,12 @@ func classifySolanaPendingAccount(account *solacctconn.AccountResult, contentDig
 // solanaCommitSearchPDAs lists the pending accounts whose transactions can carry the
 // commit of an accounted transfer.
 //
-// SECURITY: a commit closes its pending account in the same transaction, so a live-set
-// pending account that still exists did not commit.
-func solanaCommitSearchPDAs(livePDA solana.PublicKey, live solanaPendingAccountState, transfer solanaOwnPendingTransfer) []solana.PublicKey {
+// SECURITY: a commit closes its pending account in the same transaction, so a current
+// guardian-set pending account that still exists did not commit.
+func solanaCommitSearchPDAs(currentPDA solana.PublicKey, current solanaPendingAccountState, transfer solanaOwnPendingTransfer) []solana.PublicKey {
 	pdas := make([]solana.PublicKey, 0, 2)
-	if live == solanaPendingAccountAbsent {
-		pdas = append(pdas, livePDA)
+	if current == solanaPendingAccountAbsent {
+		pdas = append(pdas, currentPDA)
 	}
 	if transfer.previousSetPendingPDA != nil {
 		pdas = append(pdas, *transfer.previousSetPendingPDA)
@@ -149,8 +149,8 @@ func (acct *Accountant) publishSolanaFeePayerBalance(ctx context.Context, b *sol
 	}
 }
 
-// snapshotSolanaOwnPendingTransfers keys the Token Bridge pending transfers by their
-// live-set pending account. It grabs the pending transfer lock only for the copy.
+// snapshotSolanaOwnPendingTransfers keys the Token Bridge pending transfers by their current
+// guardian-set pending account. It grabs the pending transfer lock only for the copy.
 func (acct *Accountant) snapshotSolanaOwnPendingTransfers(b *solanaBackend, guardianSetIndex uint32) map[solana.PublicKey]solanaOwnPendingTransfer {
 	acct.pendingTransfersLock.Lock()
 	entries := make([]*pendingEntry, 0, len(acct.pendingTransfers))
@@ -176,10 +176,10 @@ func (acct *Accountant) snapshotSolanaOwnPendingTransfers(b *solanaBackend, guar
 			acct.logger.Error("a transfer has been in the submit pending state for too long", zap.String("msgId", pe.msgId), zap.Stringer("lastUpdateTime", pe.updTime()))
 		}
 
-		live, err := solanaPendingPDAAtSet(b, pe, guardianSetIndex)
+		current, err := solanaPendingPDAAtSet(b, pe, guardianSetIndex)
 		if err != nil {
 			solanaAuditErrors.Inc()
-			acct.logger.Error("failed to derive the live-set pending account", zap.String("msgId", pe.msgId), zap.Error(err))
+			acct.logger.Error("failed to derive the current guardian-set pending account", zap.String("msgId", pe.msgId), zap.Error(err))
 			continue
 		}
 		transfer := solanaOwnPendingTransfer{pe: pe}
@@ -192,7 +192,7 @@ func (acct *Accountant) snapshotSolanaOwnPendingTransfers(b *solanaBackend, guar
 				transfer.previousSetPendingPDA = &previous
 			}
 		}
-		out[live] = transfer
+		out[current] = transfer
 	}
 	return out
 }
@@ -205,9 +205,9 @@ func solanaPendingPDAAtSet(b *solanaBackend, pe *pendingEntry, guardianSetIndex 
 	return derivePendingObservationsPDA(b.program, f.Chain, f.Emitter, f.Sequence, guardianSetIndex, f.contentDigest)
 }
 
-// auditSolanaOwnPendingTransfers reads the live-set pending account and the NoReplay bit
-// of each own transfer, then resubmits, waits, or searches for the commit. It returns the
-// live-set pending accounts it reconciled.
+// auditSolanaOwnPendingTransfers reads the current guardian-set pending account and the
+// NoReplay bit of each own transfer, then resubmits, waits, or searches for the commit. It
+// returns the current guardian-set pending accounts it reconciled.
 func (acct *Accountant) auditSolanaOwnPendingTransfers(ctx context.Context, b *solanaBackend, guardianIndex uint8, own map[solana.PublicKey]solanaOwnPendingTransfer) map[solana.PublicKey]struct{} {
 	reconciled := make(map[solana.PublicKey]struct{}, len(own))
 	if len(own) == 0 {
@@ -352,9 +352,9 @@ func (acct *Accountant) readSolanaNoreplayBits(ctx context.Context, b *solanaBac
 }
 
 // resubmitToSolana queues a fresh observation for the Solana backend only.
-func (acct *Accountant) resubmitToSolana(ctx context.Context, b *solanaBackend, pe *pendingEntry, live solanaPendingAccountState) {
+func (acct *Accountant) resubmitToSolana(ctx context.Context, b *solanaBackend, pe *pendingEntry, current solanaPendingAccountState) {
 	reason := "the pending account lacks this guardian's signature"
-	if live == solanaPendingAccountAbsent {
+	if current == solanaPendingAccountAbsent {
 		reason = "the pending account and the noreplay bit are absent"
 	}
 	if acct.submitObservation(ctx, pe, backendSolana, true) {
@@ -439,7 +439,7 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 	}
 
 	// During the 24-hour grace period an own transfer can also have a previous-set pending
-	// account. The guardian resubmits at the live set instead.
+	// account. The guardian resubmits at the current guardian set instead.
 	previousSetPDAs := make(map[solana.PublicKey]struct{}, len(own))
 	for _, transfer := range own {
 		if transfer.previousSetPendingPDA != nil {
@@ -475,7 +475,7 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 			// the one derived for the transfer.
 			if obs.GuardianSetIndex != guardianSetIndex {
 				solanaAuditErrors.Inc()
-				acct.logger.Error("a live-set pending account reports another guardian set index", zap.String("msgId", transfer.pe.msgId), zap.Uint32("accountSetIndex", obs.GuardianSetIndex), zap.Uint32("liveSetIndex", guardianSetIndex))
+				acct.logger.Error("a current guardian-set pending account reports another guardian set index", zap.String("msgId", transfer.pe.msgId), zap.Uint32("accountSetIndex", obs.GuardianSetIndex), zap.Uint32("currentGuardianSetIndex", guardianSetIndex))
 				continue
 			}
 			acct.resubmitToSolana(ctx, b, transfer.pe, solanaPendingAccountLacksOwnSignature)
@@ -508,6 +508,10 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 // That request checks the transaction on chain again before it enters the signing pipeline.
 // An instruction counts only when its fields derive pda. One transaction can carry
 // observations of several transfers.
+//
+// The audit snapshot stays fixed while the audit runs. A transfer that SubmitObservation adds
+// after the snapshot, before its signature finalizes, gets a spurious request. If this becomes
+// a problem, check the live pending transfer map before the request.
 func (acct *Accountant) reobserveUnknownSolanaPendingAccount(ctx context.Context, b *solanaBackend, pda solana.PublicKey) {
 	found := acct.visitSolanaTransactions(ctx, b, pda, maxSolanaReobservationSearchSignatures, func(sig solana.Signature, tx *solacctconn.TransactionResult) bool {
 		for _, ix := range tx.Instructions {
