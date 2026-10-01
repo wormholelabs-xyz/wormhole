@@ -13,6 +13,8 @@ import (
 )
 
 // solanaConfirmPollInterval is how often the submission worker polls signature statuses.
+// Matches batchTimeout. Each poll costs two RPC calls per batch. The block height check
+// decides when a transaction is dropped.
 var solanaConfirmPollInterval = 2 * time.Second
 
 // AccountantSolanaConfig configures the Solana accountant. The zero value disables it.
