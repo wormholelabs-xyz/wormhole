@@ -1,8 +1,5 @@
-// Layout decoders and PDA derivations for the svm/accountant program.
-// Constants mirror svm/accountant/crates/definitions/src: state.rs,
-// instructions/ix_data.rs, vaa.rs, constants/log.rs, constants/noreplay.rs,
-// constants/seeds.rs. Fixtures in solana_layout_test.go come from
-// programs/global-accountant/tests/go_fixture_vectors.rs.
+// Layout decoders and PDA derivations for the svm/accountant program. The layout constants
+// and test fixtures are generated: run `just go-codegen` in svm/accountant.
 
 package accountant
 
@@ -17,93 +14,12 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
-const (
-	// AccountantDigestLog::LEN, constants/log.rs.
-	accountantDigestLogLen = 8 + 2 + 32 + 8 + 32 + 4
-
-	// PendingObservationsLayout LEN, TAG and MAX_GUARDIANS, state.rs.
-	pendingObservationsLen          = 88
-	pendingObservationsTag          = 1
-	pendingObservationsMaxGuardians = 128
-
-	// solana-noreplay bucket: bump(1) + bitmap(128), constants/noreplay.rs.
-	noreplayBucketLen     = 129
-	noreplayBitmapOffset  = 1
-	noreplayBitsPerBucket = 1024
-
-	// Instruction::SubmitObservations and SubmitObservationsIxData::LEN, ix_data.rs.
-	submitObservationsDispatchLen   = 1
-	submitObservationsDiscriminator = 0
-	submitObservationsIxDataLen     = 278
-
-	// HASH_TX_ID_LEN and SIGNATURE_TX_ID_LEN, ix_data.rs.
-	hashTxIDLen      = 32
-	signatureTxIDLen = 64
-
-	// ObservationFieldsAndDigest, ix_data.rs. The hashed record.
-	observationFieldsLen = 143
-
-	// TokenBridgeTransfer::LEN and MAX_TRANSFER_PAYLOAD_LEN, vaa.rs.
-	tokenBridgeTransferLen = 133
-	maxTransferPayloadLen  = 2000
-)
-
-// Field offsets inside the 143-byte hashed record, ix_data.rs
-// ObservationFieldsAndDigest.
-const (
-	fieldsActionOffset         = 0
-	fieldsChainOffset          = 1
-	fieldsEmitterOffset        = 3
-	fieldsSequenceOffset       = 35
-	fieldsTokenChainOffset     = 43
-	fieldsTokenAddressOffset   = 45
-	fieldsRecipientChainOffset = 77
-	fieldsAmountOffset         = 79
-	fieldsVaaDigestOffset      = 111
-)
-
-// Field offsets inside submit_observations instruction data, past the
-// 1-byte discriminator. SubmitObservationsIxData, ix_data.rs.
-const (
-	submitGuardianSetIndexOffset = 1
-	submitGuardianIndexOffset    = 5
-	submitSignatureOffset        = 6
-	submitSignatureLen           = 65
-	submitTxIDLenOffset          = 71
-	submitTxIDOffset             = 72
-	submitFieldsOffset           = 136
-)
-
 // Compile-time equalities: tx_id fills the gap before the fields, and the fields end the data.
 const (
 	_ = uint(submitFieldsOffset - submitTxIDOffset - signatureTxIDLen)
 	_ = uint(submitTxIDOffset + signatureTxIDLen - submitFieldsOffset)
 	_ = uint(submitFieldsOffset + observationFieldsLen - submitObservationsDispatchLen - submitObservationsIxDataLen)
 	_ = uint(submitObservationsDispatchLen + submitObservationsIxDataLen - submitFieldsOffset - observationFieldsLen)
-)
-
-// ACCOUNTANT_DIGEST_LOG_TAG, constants/log.rs.
-var accountantDigestLogTag = [8]byte{'A', 'C', 'C', 'D', 'G', 'S', 'T', 0}
-
-// constants/seeds.rs. GUARDIAN_SET_SEED is the Core Bridge's own seed.
-var (
-	pendingObservationsSeedPrefix = []byte("pending")
-	noreplayAuthoritySeedPrefix   = []byte("noreplay_authority")
-	balanceAccountSeedPrefix      = []byte("account")
-	chainRegistrationSeedPrefix   = []byte("chain_registration")
-	guardianSetSeedPrefix         = []byte("GuardianSet")
-)
-
-// GlobalAccountantError codes returned as ProgramError::Custom, error.rs. Do not renumber.
-const (
-	solanaErrPayerMismatch            = 4
-	solanaErrAlreadyAccounted         = 7
-	solanaErrInvalidSignature         = 9
-	solanaErrInvalidGuardianIndex     = 10
-	solanaErrAlreadySigned            = 11
-	solanaErrExpiredGuardianSet       = 12
-	solanaErrMissingChainRegistration = 19
-	solanaErrUnregisteredEmitter      = 20
 )
 
 // solanaCommitEvent is a decoded ACCDGST commit log. Digest is the content digest from
@@ -121,19 +37,17 @@ func parseAccountantDigestLog(data []byte) (*solanaCommitEvent, error) {
 	if len(data) != accountantDigestLogLen {
 		return nil, fmt.Errorf("accountant digest log: want %d bytes, got %d", accountantDigestLogLen, len(data))
 	}
-	var tag [8]byte
-	copy(tag[:], data[:8])
-	if tag != accountantDigestLogTag {
+	if tag := [len(accountantDigestLogTag)]byte(data[:len(accountantDigestLogTag)]); tag != accountantDigestLogTag {
 		return nil, fmt.Errorf("accountant digest log: tag mismatch, got %x", tag)
 	}
 
 	evt := &solanaCommitEvent{
-		Chain:            vaa.ChainID(binary.BigEndian.Uint16(data[8:10])),
-		Sequence:         binary.BigEndian.Uint64(data[42:50]),
-		GuardianSetIndex: binary.LittleEndian.Uint32(data[82:86]),
+		Chain:            vaa.ChainID(binary.BigEndian.Uint16(data[accountantDigestLogChainOffset:])),
+		Sequence:         binary.BigEndian.Uint64(data[accountantDigestLogSequenceOffset:]),
+		GuardianSetIndex: binary.LittleEndian.Uint32(data[accountantDigestLogGuardianSetIndexOffset:]),
 	}
-	copy(evt.Emitter[:], data[10:42])
-	copy(evt.Digest[:], data[50:82])
+	copy(evt.Emitter[:], data[accountantDigestLogEmitterOffset:])
+	copy(evt.Digest[:], data[accountantDigestLogDigestOffset:])
 	return evt, nil
 }
 
@@ -142,8 +56,8 @@ func parseAccountantDigestLog(data []byte) (*solanaCommitEvent, error) {
 type solanaPendingObs struct {
 	Chain            vaa.ChainID
 	GuardianSetIndex uint32
-	// 128-bit signature bitmap as four little-endian words.
-	Signatures    [4]uint32
+	// 128-bit signature bitmap as little-endian words.
+	Signatures    [pendingObservationsSignatureWords]uint32
 	ContentDigest [32]byte
 	Payer         solana.PublicKey
 }
@@ -158,15 +72,14 @@ func parsePendingObservationsAccount(data []byte) (*solanaPendingObs, error) {
 	}
 
 	obs := &solanaPendingObs{
-		Chain:            vaa.ChainID(binary.LittleEndian.Uint16(data[2:4])),
-		GuardianSetIndex: binary.LittleEndian.Uint32(data[4:8]),
+		Chain:            vaa.ChainID(binary.LittleEndian.Uint16(data[pendingObservationsChainOffset:])),
+		GuardianSetIndex: binary.LittleEndian.Uint32(data[pendingObservationsGuardianSetIndexOffset:]),
 	}
 	for word := range obs.Signatures {
-		start := 8 + word*4
-		obs.Signatures[word] = binary.LittleEndian.Uint32(data[start : start+4])
+		obs.Signatures[word] = binary.LittleEndian.Uint32(data[pendingObservationsSignaturesOffset+word*4:])
 	}
-	copy(obs.ContentDigest[:], data[24:56])
-	copy(obs.Payer[:], data[56:88])
+	copy(obs.ContentDigest[:], data[pendingObservationsContentDigestOffset:])
+	copy(obs.Payer[:], data[pendingObservationsPayerOffset:])
 	return obs, nil
 }
 
