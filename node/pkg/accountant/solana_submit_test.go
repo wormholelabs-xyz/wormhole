@@ -25,8 +25,8 @@ import (
 )
 
 // TRANSFER_SIGNING_DIGEST and TRANSFER_SIGNATURE_TX_ID_SIGNING_DIGEST from svm/accountant
-// go_fixture_vectors.rs: the digest each guardian signs for the transfer fixture under
-// SUBMIT_OBSERVATIONS_IX_DATA_TX_ID and SUBMIT_OBSERVATIONS_SIGNATURE_TX_ID.
+// go_fixture_vectors.rs. Each is the digest a guardian signs for the transfer fixture.
+// The tx ids are SUBMIT_OBSERVATIONS_IX_DATA_TX_ID and SUBMIT_OBSERVATIONS_SIGNATURE_TX_ID.
 const (
 	fixtureTransferSigningDigestHex              = "58958c01d8a5db371a118b7a7d75b9d0aedae479b3f41837e583302d812b554d"
 	fixtureTransferSignatureTxIDSigningDigestHex = "e7a88aabdbccd270b421ac030d94e004d6b221bdbc1e9693b31751c16b14216c"
@@ -156,7 +156,7 @@ func TestSolanaObservationSignatureRecovers(t *testing.T) {
 		})
 	}
 
-	// The guardian signer produces the same 65-byte signature the program verifies.
+	// The guardian signer produces the same 65-byte signature that the program checks.
 	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
 	digest, err := solanaObservationSigningDigest(SubmitObservationPrefix, mustSolanaTxID(t, fixtureSubmitObservationsTxIDHex), fields)
 	require.NoError(t, err)
@@ -452,9 +452,9 @@ func TestBuildSolanaSubmitTx(t *testing.T) {
 func TestHandleSolanaBatch(t *testing.T) {
 	tests := []struct {
 		name string
-		// setup runs after the fixture is built and before the batch is handled.
+		// setup runs after the fixture build and before the batch handler.
 		setup func(t *testing.T, f *solanaBatchFixture)
-		// deleteEntry drops the pending entry before the batch is handled.
+		// deleteEntry drops the pending entry before the batch handler runs.
 		deleteEntry bool
 		noGuardian  bool
 		wantSent    int
@@ -648,8 +648,8 @@ func TestHandleSolanaBatchConfirms(t *testing.T) {
 }
 
 // TestHandleSolanaBatchPayerMismatchRetrySucceeds sends once with the fee payer, then
-// again after the pending PDA appears with another payer recorded. The PDA is only
-// confirmed, as it is when the retry follows a preflight rejection.
+// again after the pending PDA appears with another payer recorded. The PDA is visible only
+// at confirmed commitment, the same as when the retry follows a preflight rejection.
 func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -706,8 +706,8 @@ func TestConfirmSolanaSubmissionsLandsJustBeforeExpiry(t *testing.T) {
 	assert.Zero(t, logs.FilterMessage("a solana observation was dropped, the audit will retry").Len())
 }
 
-// TestConfirmSolanaSubmissionsKeepsProcessedPastExpiry confirms a transaction that was
-// processed before its blockhash expired.
+// TestConfirmSolanaSubmissionsKeepsProcessedPastExpiry confirms a transaction that the
+// cluster processed before its blockhash expired.
 func TestConfirmSolanaSubmissionsKeepsProcessedPastExpiry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

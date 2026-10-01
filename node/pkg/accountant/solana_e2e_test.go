@@ -1,8 +1,8 @@
 //go:build surfpool
 
-// End-to-end test of the Solana accountant against a live surfpool: the submission
-// worker signs and sends an observation, the program reaches quorum, and the watcher
-// releases the transfer from the commit log. The second scenario drives the audit.
+// End-to-end test of the Solana accountant against a live surfpool. In the first scenario,
+// the submission worker signs and sends an observation. The program reaches quorum. The
+// watcher releases the transfer from the commit log. The second scenario drives the audit.
 
 package accountant
 
@@ -37,7 +37,7 @@ const (
 	surfpoolEmitterChain       = vaa.ChainIDEthereum
 	surfpoolTokenBridgeEmitter = "0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16"
 
-	// Core Bridge the program is built against, TEST_BRIDGE_ADDRESS in svm/accountant/justfile.
+	// Core Bridge id in the program build, TEST_BRIDGE_ADDRESS in svm/accountant/justfile.
 	surfpoolCoreBridgeProgramID = "worm2ZoG2kUd4vFXhvjh93UUH596ayRfgQ2MgjNMTth"
 
 	// Both land in one NoReplay bucket, so the audit scenario reads an existing bucket
@@ -61,7 +61,7 @@ const (
 	surfpoolWaitPoll     = 250 * time.Millisecond
 	surfpoolMaxWaitPolls = 1000
 
-	// Time for the supervisor tree to stop logging after the context is cancelled.
+	// Time for the supervisor tree to stop logging after the context ends.
 	surfpoolShutdownDrain = 500 * time.Millisecond
 )
 
@@ -114,7 +114,7 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 	h.writeProgram(program, accountantELF)
 	h.writeProgram(noreplay, noreplayELF)
 
-	// The program verifies the GuardianSet PDA against its build-time Core Bridge id.
+	// The program checks the GuardianSet PDA against its build-time Core Bridge id.
 	coreBridge := solana.MustPublicKeyFromBase58(surfpoolCoreBridgeProgramID)
 
 	guardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(uint64(0))
@@ -233,8 +233,8 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 		requireCommitOnChain(t, rootCtx, conn, program, noreplay, authority, msg)
 		requireCounterDeltas(t, before, 1, 1)
 
-		// The transfer is accounted and its pending account is closed, so this cycle has
-		// to resolve the digest from the closed account's signatures.
+		// The transfer is accounted and its pending account is closed. Thus this cycle must
+		// resolve the digest from the signatures of the closed account.
 		before = readSolanaCounters()
 		insertPendingTransfer(t, acct, msg)
 		acct.runAudit(rootCtx)
@@ -256,8 +256,8 @@ func surfpoolTokenBridgeTransfer(t *testing.T, sequence uint64) *common.MessageP
 	txID := make([]byte, digestLen)
 	binary.BigEndian.PutUint64(txID[digestLen-8:], sequence)
 
-	// buildMockTransferPayloadBytes stops at the recipient chain; the 32-byte fee
-	// completes the 133-byte TokenBridgeTransfer the Solana program parses.
+	// buildMockTransferPayloadBytes stops at the recipient chain. The 32-byte fee
+	// completes the 133-byte TokenBridgeTransfer that the Solana program parses.
 	payload := append(buildMockTransferPayloadBytes(1,
 		vaa.ChainIDEthereum,
 		"0x707f9118e33a9b8998bea41dd0d46f38bb963fc8",
@@ -323,9 +323,8 @@ func requirePendingEmpty(t *testing.T, acct *Accountant) {
 	})
 }
 
-// requireCommitOnChain asserts the chain state the quorum-closing transaction leaves: the
-// NoReplay bit is set and the pending account was created and closed by exactly one
-// transaction.
+// requireCommitOnChain asserts the chain state that the quorum-closing transaction leaves.
+// The NoReplay bit is set. Exactly one transaction created the pending account and closed it.
 func requireCommitOnChain(t *testing.T, ctx context.Context, conn solacctconn.Conn, program solana.PublicKey, noreplay solana.PublicKey, authority solana.PublicKey, msg *common.MessagePublication) {
 	t.Helper()
 	fields := surfpoolObservationFields(t, msg)

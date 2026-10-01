@@ -20,14 +20,14 @@ import (
 const (
 	logsAckTimeout = 30 * time.Second
 
-	// A mentions filter is silent while the program is idle, so liveness comes from pings,
-	// not from notification traffic.
+	// A mentions filter is silent while the program is idle. Thus pings, not notification
+	// traffic, show that the connection is live.
 	logsPingInterval = 30 * time.Second
 	logsPongTimeout  = 30 * time.Second
 
 	logEventBufferLen = 256
 
-	// Agave truncates the log buffer at 10 KiB per transaction; the rest is JSON envelope.
+	// Agave truncates the log buffer at 10 KiB per transaction. The JSON envelope uses the rest.
 	maxLogsFrameBytes = 1 << 20
 
 	// One subscription per connection.
@@ -112,8 +112,8 @@ func (c *ClientConn) subscribeLogs(ctx context.Context, program solana.PublicKey
 }
 
 // pumpLogs reads the acknowledgement, then forwards notifications until a read or decode
-// fails. It owns the connection and the channel, so it is the only writer and the only
-// closer.
+// fails. It owns the connection and the channel. Thus it is the only writer and the only
+// closer of the channel.
 func pumpLogs(ctx context.Context, conn *websocket.Conn, events chan<- LogEvent, timeouts logsTimeouts) {
 	pumpCtx, cancel := context.WithCancel(ctx)
 	var pinger sync.WaitGroup
@@ -123,8 +123,8 @@ func pumpLogs(ctx context.Context, conn *websocket.Conn, events chan<- LogEvent,
 		pingUntilUnresponsive(pumpCtx, conn, timeouts)
 	}()
 
-	// Close the channel first: a close handshake with an unresponsive peer blocks, and the
-	// watcher must see the end of the subscription at once.
+	// Close the channel first. A close handshake with an unresponsive peer blocks. The
+	// watcher must see the end of the subscription immediately.
 	defer conn.Close(websocket.StatusNormalClosure, "")
 	defer pinger.Wait()
 	defer cancel()
@@ -179,8 +179,8 @@ func pingUntilUnresponsive(ctx context.Context, conn *websocket.Conn, timeouts l
 
 // readLogsSubscribeAck returns the subscription id the server assigned.
 //
-// SECURITY: the acknowledgement must be the first frame and arrive within ackTimeout, so a
-// subscription the server never set up ends instead of staying silent behind live pings.
+// SECURITY: the acknowledgement must be the first frame. It must arrive within ackTimeout.
+// Thus a subscription that the server did not set up ends. Live pings cannot hide it.
 func readLogsSubscribeAck(ctx context.Context, conn *websocket.Conn, ackTimeout time.Duration) (uint64, error) {
 	ackCtx, cancel := context.WithTimeout(ctx, ackTimeout)
 	defer cancel()
@@ -213,8 +213,8 @@ func decodeLogsSubscribeAck(raw []byte) (uint64, error) {
 
 // decodeLogsNotification turns one frame of subscription subscriptionID into an event.
 //
-// SECURITY: a frame the guardian cannot parse ends the subscription rather than being
-// skipped, because a skipped commit stalls a transfer until the next audit cycle.
+// SECURITY: a frame that the guardian cannot parse ends the subscription. The guardian must
+// not skip it, because a skipped commit stalls a transfer until the next audit cycle.
 func decodeLogsNotification(raw []byte, subscriptionID uint64) (LogEvent, error) {
 	var frame logsNotificationFrame
 	if err := json.Unmarshal(raw, &frame); err != nil {

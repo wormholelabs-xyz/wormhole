@@ -255,8 +255,8 @@ func deriveNoreplayBucketPDA(noreplayProgram, authority solana.PublicKey, chain 
 	return pda, nil
 }
 
-// deriveBalanceAccountPDA mirrors accounts/balance.rs derive_pda. chain is the side of
-// the transfer the balance belongs to: the emitter chain for the source, the recipient
+// deriveBalanceAccountPDA mirrors accounts/balance.rs derive_pda. chain is the side of the
+// transfer that owns the balance. Use the emitter chain for the source. Use the recipient
 // chain for the destination.
 func deriveBalanceAccountPDA(program solana.PublicKey, chain vaa.ChainID, tokenChain vaa.ChainID, tokenAddress [32]byte) (solana.PublicKey, error) {
 	var chainBE [2]byte
@@ -329,11 +329,11 @@ type solanaObservationFields struct {
 	RecipientChain vaa.ChainID
 	// Big-endian Uint256.
 	Amount [32]byte
-	// keccak256(keccak256(body)); equals the pending entry's inner digest field.
+	// keccak256(keccak256(body)). Equals the inner digest field of the pending entry.
 	VaaDigest [32]byte
 
-	// keccak256(keccak256(pack())): the pending-PDA seed and the commit-log digest. Set by
-	// the constructors.
+	// keccak256(keccak256(pack())): the pending-PDA seed and the commit-log digest. The
+	// constructors set it.
 	contentDigest [32]byte
 }
 
@@ -382,9 +382,9 @@ func unpackObservationFields(data []byte) (solanaObservationFields, error) {
 	return f, nil
 }
 
-// solanaObservationFieldsFromPayload builds the record a guardian submits, mirroring
+// solanaObservationFieldsFromPayload builds the record a guardian submits. It mirrors
 // ix.rs observation_ix_from_body and vaa.rs parse_token_bridge_payload. payload is the
-// VAA body past its 51-byte header; vaaDigest is keccak256(keccak256(body)).
+// VAA body after its 51-byte header. vaaDigest is keccak256(keccak256(body)).
 //
 // SECURITY: a transfer action requires a 133-byte fixed head and at most
 // maxTransferPayloadLen trailing bytes. Any other action carries zeroed transfer fields.
@@ -441,8 +441,8 @@ func newSolanaTxID(id []byte) (solanaTxID, error) {
 
 // parseSolanaTxID mirrors ix_data.rs TxId::parse over the tx_id_len byte and the padded field.
 //
-// SECURITY: the length is exactly 32 or 64 and every byte past it is zero, so one id has one
-// encoding.
+// SECURITY: the length is exactly 32 or 64. Every byte after the length is zero. Thus one id
+// has one encoding.
 func parseSolanaTxID(length uint8, padded []byte) (solanaTxID, error) {
 	var txID solanaTxID
 	if len(padded) != signatureTxIDLen {
@@ -472,7 +472,7 @@ func (t solanaTxID) valid() bool {
 	return t.length == hashTxIDLen || t.length == signatureTxIDLen
 }
 
-// solanaSubmitObservationsIx is decoded submit_observations instruction data. The
+// solanaSubmitObservationsIx holds decoded submit_observations instruction data. The
 // audit path reads TxID, Chain, Emitter and Sequence from this one record.
 type solanaSubmitObservationsIx struct {
 	GuardianSetIndex uint32

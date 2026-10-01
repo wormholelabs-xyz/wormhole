@@ -1,7 +1,7 @@
-// Audit of the pending transfer map against the svm/accountant program, in both
-// directions: from the guardian's own pending transfers, then from the program's pending
-// accounts. Reads are at finalized commitment while the submission worker confirms at
-// confirmed, so a resubmission that the program answers with AlreadySigned is expected.
+// Audit of the pending transfer map against the svm/accountant program, in two directions.
+// The first pass starts from the guardian's own pending transfers. The second pass starts
+// from the program's pending accounts. Reads use finalized commitment. The submission worker
+// confirms at confirmed commitment. Thus the program can answer a resubmission with AlreadySigned.
 
 package accountant
 
@@ -57,9 +57,9 @@ const (
 // decideSolanaOwnTransferAction maps the live-set pending account and the NoReplay bit of
 // one transfer to the audit action.
 //
-// SECURITY: the NoReplay bit is set only at commit, on either submit path and at any
-// guardian set index. A set bit means no resubmission can land, even when the live-set
-// pending account still exists as a losing sibling.
+// SECURITY: only a commit sets the NoReplay bit. This applies to both submit paths and to
+// all guardian set indices. If the bit is set, no resubmission can land. This is true also
+// when the live-set pending account still exists as a losing sibling.
 func decideSolanaOwnTransferAction(live solanaPendingAccountState, accounted bool) (solanaOwnTransferAction, error) {
 	if accounted {
 		return solanaOwnTransferSearchCommit, nil
@@ -288,15 +288,15 @@ func (acct *Accountant) auditSolanaOwnPendingTransfers(ctx context.Context, b *s
 	return reconciled
 }
 
-// readSolanaNoreplayBits reads the NoReplay bit of each transfer in addrs. A transfer
-// whose bucket fails to derive or decode is left out of the result.
+// readSolanaNoreplayBits reads the NoReplay bit of each transfer in addrs. The result
+// omits a transfer whose bucket fails to derive or decode.
 func (acct *Accountant) readSolanaNoreplayBits(ctx context.Context, b *solanaBackend, addrs []solana.PublicKey, own map[solana.PublicKey]solanaOwnPendingTransfer) (map[solana.PublicKey]bool, error) {
 	accounted := make(map[solana.PublicKey]bool, len(addrs))
 	if len(addrs) == 0 {
 		return accounted, nil
 	}
 
-	// Transfers from one emitter share a bucket, so the query is deduped.
+	// Transfers from one emitter share a bucket, so the query reads each bucket once.
 	bucketOf := make(map[solana.PublicKey]solana.PublicKey, len(addrs))
 	buckets := make([]solana.PublicKey, 0, len(addrs))
 	seen := make(map[solana.PublicKey]struct{}, len(addrs))
@@ -366,8 +366,8 @@ func (acct *Accountant) resubmitToSolana(ctx context.Context, b *solanaBackend, 
 }
 
 // searchSolanaCommit finds the commit log of an accounted transfer in the transactions of
-// its pending accounts and applies it. The pending account is in few transactions; the
-// shared NoReplay bucket is in thousands.
+// its pending accounts, then applies it. Few transactions mention the pending account.
+// Thousands mention the shared NoReplay bucket.
 func (acct *Accountant) searchSolanaCommit(ctx context.Context, b *solanaBackend, transfer solanaOwnPendingTransfer, pdas []solana.PublicKey) {
 	f := transfer.pe.solanaFields
 	for _, pda := range pdas {
@@ -422,9 +422,9 @@ func (acct *Accountant) visitSolanaTransactions(ctx context.Context, b *solanaBa
 	return false
 }
 
-// auditSolanaProgramPendingAccounts reads the program's pending accounts and acts on each
-// one whose bitmap bit for this guardian is clear: an own transfer the own-transfer pass
-// did not reconcile is resubmitted, an unknown one is reobserved.
+// auditSolanaProgramPendingAccounts reads the program's pending accounts. It acts on each
+// account whose bitmap bit for this guardian is clear. It resubmits an own transfer that the
+// own-transfer pass did not reconcile. It reobserves an unknown transfer.
 func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b *solanaBackend, guardianSetIndex uint32, guardianIndex uint8, own map[solana.PublicKey]solanaOwnPendingTransfer, reconciled map[solana.PublicKey]struct{}) {
 	accounts, err := b.conn.GetProgramAccountsByTag(ctx, b.program, pendingObservationsTag, pendingObservationsLen)
 	if err != nil {
@@ -504,9 +504,9 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 // reobserveUnknownSolanaPendingAccount finds the submit_observations instruction that
 // created or signed pda and asks the local watcher to reobserve its source transaction.
 //
-// SECURITY: the recovered chain and transaction id only drive a reobservation request,
-// which re-verifies the transaction on chain before it enters the signing pipeline. An
-// instruction counts only when its fields derive pda, since one transaction can carry
+// SECURITY: the recovered chain and transaction id only drive a reobservation request.
+// That request checks the transaction on chain again before it enters the signing pipeline.
+// An instruction counts only when its fields derive pda. One transaction can carry
 // observations of several transfers.
 func (acct *Accountant) reobserveUnknownSolanaPendingAccount(ctx context.Context, b *solanaBackend, pda solana.PublicKey) {
 	found := acct.visitSolanaTransactions(ctx, b, pda, maxSolanaReobservationSearchSignatures, func(sig solana.Signature, tx *solacctconn.TransactionResult) bool {

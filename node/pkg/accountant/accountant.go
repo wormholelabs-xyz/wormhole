@@ -60,8 +60,8 @@ type (
 		isNTT       bool
 		enforceFlag bool
 
-		// solanaFields is the record the Solana accountant program hashes. It is set for
-		// Token Bridge entries while the Solana backend is enabled.
+		// solanaFields is the record the Solana accountant program hashes. newPendingEntry sets it
+		// on Token Bridge entries while the Solana backend is enabled.
 		solanaFields *solanaObservationFields
 
 		// stateLock is used to protect the contents of the state struct.
@@ -72,8 +72,8 @@ type (
 			// updTime is the time that the state struct was last updated.
 			updTime time.Time
 
-			// submitPending indicates, per backend, if the observation is either in the channel waiting to be submitted or in an
-			// outstanding transaction. The audit should not resubmit to a backend whose flag is set.
+			// submitPending shows, per backend, that the observation waits in the channel or is in an outstanding transaction.
+			// The audit must not resubmit to a backend whose flag is set.
 			submitPending [numAccountantBackends]bool
 		}
 	}
@@ -83,7 +83,7 @@ type (
 type accountantBackend uint8
 
 const (
-	// The wormchain contract; NTT entries use this slot for the NTT contract.
+	// The wormchain contract. NTT entries use this slot for the NTT contract.
 	backendWormchain accountantBackend = iota
 	backendSolana
 	numAccountantBackends
@@ -117,7 +117,7 @@ type Accountant struct {
 	nttSubChan        chan *common.MessagePublication
 
 	solanaCfg AccountantSolanaConfig
-	// solana is built from solanaCfg by Start. A nil value disables the Solana backend.
+	// Start builds solana from solanaCfg. A nil value disables the Solana backend.
 	solana *solanaBackend
 }
 
@@ -137,7 +137,7 @@ func (acct *Accountant) solanaEnabled() bool {
 	return acct.solana != nil
 }
 
-// baseEnabled returns true if Token Bridge transfers are covered by any backend.
+// baseEnabled returns true if any backend covers Token Bridge transfers.
 func (acct *Accountant) baseEnabled() bool {
 	return acct.wormchainBaseEnabled() || acct.solanaEnabled()
 }
@@ -474,10 +474,10 @@ func digestBytes(digest string) ([digestLen]byte, error) {
 	return [digestLen]byte(raw), nil
 }
 
-// processCommittedDigest is the publish-or-drop decision for a transfer that a backend
-// reports as committed under digest got. Every backend runs this one branch. The VAA digest
-// always matches; acceptContent also accepts the Solana content digest, which
-// submit_observations commits. It returns true when the transfer is published.
+// processCommittedDigest publishes or drops a transfer that a backend reports as committed
+// under digest got. Every backend uses this one branch. The VAA digest always matches.
+// If acceptContent is true, the Solana content digest also matches. submit_observations
+// commits that digest. It returns true when it publishes the transfer.
 //
 // SECURITY: the caller holds pendingTransfersLock.
 // SECURITY: precondition msgId != "". A violation leaves the transfer pending.
@@ -489,8 +489,8 @@ func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, accep
 
 	pe, exists := acct.pendingTransfers[msgId]
 	if !exists {
-		// This log will be emitted by the Guardians that submit to the Accountant after the transfer has already been confirmed.
-		// These transfers are already processed in submit_obs.go and so when the watcher sees the event it is no longer in the pendingTransfers map.
+		// Guardians that submit to the Accountant after the transfer confirms emit this log.
+		// submit_obs.go already processed these transfers. Thus the watcher event finds no entry in the pendingTransfers map.
 		acct.logger.Info("acctwatch: unknown transfer has been approved, ignoring it", zap.String("msgId", msgId), zap.String("source", source))
 		return false
 	}
@@ -610,12 +610,13 @@ func (acct *Accountant) loadPendingTransfers() error {
 	return nil
 }
 
-// submitObservation sends an observation request to the worker of one backend so it can be submitted to the contract. If the
-// backend does not cover the transfer, or the transfer is already marked as "submit pending" for it, this function returns false
-// without doing anything. Otherwise it returns true. The return value can be used to avoid unnecessary error logging. If blocking
-// is false and writing to the channel would block, this function returns without doing anything, assuming the pending transfer
-// will be handled on the next audit interval. If blocking is true, it will block until the channel has space, a timeout occurs,
-// or the context is cancelled. This function grabs the state lock.
+// submitObservation sends an observation request to the worker of one backend, which submits it to the contract.
+// If the backend does not cover the transfer, this function returns false and does nothing.
+// If the transfer already has the "submit pending" mark for that backend, this function returns false and does nothing.
+// Otherwise it returns true. Use the return value to avoid unnecessary error logs.
+// If blocking is false and a channel write would block, this function returns. The next audit interval handles the transfer.
+// If blocking is true, it blocks until the channel has space, a timeout occurs, or the context ends.
+// This function grabs the state lock.
 func (acct *Accountant) submitObservation(ctx context.Context, pe *pendingEntry, backend accountantBackend, blocking bool) bool {
 	subChan, tag, covered := acct.backendChannel(pe, backend)
 	if !covered {
@@ -659,7 +660,7 @@ func (acct *Accountant) backendChannel(pe *pendingEntry, backend accountantBacke
 }
 
 // submitToChannel submits an observation to the specified channel. If blocking is false and the channel is full,
-// it marks the transfer as no longer pending for backend so it will be resubmitted by the audit. If blocking is true, it will
+// it clears the pending mark of the transfer for backend, so the audit resubmits it. If blocking is true, it will
 // block until the channel has space, a timeout occurs, or the context is cancelled.
 func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, backend accountantBackend, subChan chan *common.MessagePublication, tag string, blocking bool, timeout time.Duration) {
 	if blocking {
@@ -688,8 +689,8 @@ func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, b
 	}
 }
 
-// clearSubmitPendingFlags is called after a batch is finished being submitted to backend (success or fail). It clears the
-// backend's submit pending flag for everything in the batch. It grabs the pending transfer and state locks.
+// clearSubmitPendingFlags runs after the submission of a batch to backend ends, with success or failure. It clears the
+// backend's submit pending flag for each entry in the batch. It grabs the pending transfer lock and the state locks.
 func (acct *Accountant) clearSubmitPendingFlags(msgs []*common.MessagePublication, backend accountantBackend) {
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()

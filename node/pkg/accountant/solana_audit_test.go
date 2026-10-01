@@ -681,8 +681,8 @@ func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {
 	ctx := context.Background()
 	f := newSolanaAuditFixture(t, ctx)
 
-	// Every transfer is accounted with an absent live-set pending account at set index 0,
-	// so each commit search reads one signature list.
+	// Every transfer is accounted and has no live-set pending account at set index 0.
+	// Thus each commit search reads one signature list.
 	marked := make([]uint64, 0, maxSolanaCommitSearchesPerAudit+1)
 	marked = append(marked, f.pe.solanaFields.Sequence)
 	for idx := range maxSolanaCommitSearchesPerAudit {

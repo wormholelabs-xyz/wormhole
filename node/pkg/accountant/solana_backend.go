@@ -42,9 +42,9 @@ type solanaBackend struct {
 // newSolanaBackend builds the Token Bridge Solana backend. A zero configuration returns a
 // nil backend, which disables the Solana accountant.
 //
-// SECURITY: a partially populated configuration is an error. The checks cover the shape of
-// the configuration: every field set, program ids distinct. Reachability, deployment, and
-// fee payer funds surface at run time as errors and metrics.
+// SECURITY: a partial configuration is an error. The checks cover the shape of the
+// configuration. Every field must be set. The program ids must be different from each other.
+// Reachability, deployment and fee payer funds show at run time as errors and metrics.
 func newSolanaBackend(cfg AccountantSolanaConfig) (*solanaBackend, error) {
 	if cfg.Conn == nil && cfg.Program.IsZero() && cfg.Noreplay.IsZero() && cfg.CoreBridge.IsZero() && len(cfg.FeePayer) == 0 {
 		return nil, nil

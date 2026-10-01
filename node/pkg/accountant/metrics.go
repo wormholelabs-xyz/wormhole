@@ -65,8 +65,8 @@ var (
 )
 
 // Solana accountant counters. digestMismatches and transfersOutstanding stay shared with
-// the wormchain backend; the rest are separate so operators can tell the backends apart
-// during a dual run.
+// the wormchain backend. The other counters are separate, so operators can tell the
+// backends apart during a dual run.
 var (
 	solanaEventsReceived = promauto.NewCounter(
 		prometheus.CounterOpts{

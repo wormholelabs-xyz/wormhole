@@ -20,7 +20,7 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
-// The devnet token bridge emitter the existing accountant tests use.
+// The devnet Token Bridge emitter that the existing accountant tests use.
 const testTokenBridgeEmitterHex = "0000000000000000000000000290fb167208af455bb137780163b7b7a9a10c16"
 
 func solanaTestProgram() solana.PublicKey {
@@ -84,8 +84,8 @@ type solanaTestOpts struct {
 	db                guardianDB.AccountantDB
 }
 
-// newSolanaTestAccountant builds a started accountant in the GoTest environment, so no
-// runnable is launched and the test drives the code paths directly.
+// newSolanaTestAccountant builds a started accountant in the GoTest environment. The test
+// drives the code paths directly.
 func newSolanaTestAccountant(t *testing.T, ctx context.Context, opts solanaTestOpts) (*Accountant, *MockAccountantSolanaConn, chan *common.MessagePublication) {
 	t.Helper()
 	return newSolanaTestAccountantWithObsvReq(t, ctx, opts, make(chan *gossipv1.ObservationRequest, 10))
@@ -137,7 +137,7 @@ func newSolanaTestAccountantWithObsvReq(t *testing.T, ctx context.Context, opts 
 	return acct, conn, msgChan
 }
 
-// solanaTestTransfer returns a token bridge transfer from a devnet emitter.
+// solanaTestTransfer returns a Token Bridge transfer from a devnet emitter.
 func solanaTestTransfer(t *testing.T, sequence uint64) *common.MessagePublication {
 	t.Helper()
 	emitterAddr, err := vaa.StringToAddress(testTokenBridgeEmitterHex)
@@ -151,8 +151,8 @@ func solanaTestTransfer(t *testing.T, sequence uint64) *common.MessagePublicatio
 		EmitterChain:     vaa.ChainIDEthereum,
 		EmitterAddress:   emitterAddr,
 		ConsistencyLevel: uint8(32),
-		// buildMockTransferPayloadBytes stops at the recipient chain; the 32-byte fee
-		// completes the 133-byte TokenBridgeTransfer the Solana program parses.
+		// buildMockTransferPayloadBytes stops at the recipient chain. The 32-byte fee
+		// completes the 133-byte TokenBridgeTransfer that the Solana program parses.
 		Payload: append(buildMockTransferPayloadBytes(1,
 			vaa.ChainIDEthereum,
 			"0x707f9118e33a9b8998bea41dd0d46f38bb963fc8",
@@ -342,7 +342,7 @@ func TestSubmitPendingIsPerBackend(t *testing.T) {
 	require.Equal(t, 1, len(acct.subChan))
 	acct.clearSubmitPendingFlags([]*common.MessagePublication{<-acct.solana.subChan}, backendSolana)
 
-	// The Solana batch leaves the wormchain submission pending, and a Solana resubmit
+	// The Solana batch leaves the wormchain submission pending. A Solana resubmit
 	// queues to Solana only.
 	assert.True(t, pe.submitPending(backendWormchain))
 	require.True(t, acct.submitObservation(ctx, pe, backendSolana, false))

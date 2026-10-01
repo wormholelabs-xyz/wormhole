@@ -25,8 +25,8 @@ const (
 	maxSolanaInvokeDepth = 16
 )
 
-// Runtime lines whose second field is a keyword rather than a program id. `Program log:
-// success` must not pop a frame, so these are skipped before the frame keywords are read.
+// Runtime lines whose second field is a keyword, not a program id. `Program log: success`
+// must not pop a frame. Thus the parser skips these lines before it reads the frame keywords.
 var solanaProgramOutputPrefixes = [...]string{
 	"Program log: ",
 	"Program return: ",
@@ -118,8 +118,8 @@ func (acct *Accountant) processSolanaCommitEvent(evt *solanaCommitEvent, sig sol
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
 
-	// submit_observations commits the content digest; submit_vaas and the backfill commit
-	// the VAA digest. Either one releases the transfer.
+	// submit_observations commits the content digest. submit_vaas and the backfill commit
+	// the VAA digest. Either digest releases the transfer.
 	if acct.processCommittedDigest(msgId, evt.Digest, true, tag) {
 		solanaTransfersApproved.Inc()
 	}
@@ -169,13 +169,13 @@ func (s *solanaInvokeStack) pop(program solana.PublicKey) error {
 // parseSolanaCommitLogs returns the ACCDGST commits program emitted, in log order.
 //
 // SECURITY: a logsSubscribe mentions filter returns every transaction that references the
-// program, so a foreign program in the same transaction can emit a byte-perfect commit
-// line. A `Program data:` line counts only while program is the innermost frame. Lines
-// with program-controlled text are skipped before the frame keywords are read.
+// program. Thus a foreign program in the same transaction can emit a byte-perfect commit line.
+// A `Program data:` line counts only while program is the innermost frame. The parser skips
+// lines with program-controlled text before it reads the frame keywords.
 //
-// A malformed commit under our own frame is joined into err; the well-formed commits are
-// still returned. A broken invoke stack ends the scan, because frames can no longer be
-// attributed.
+// The parser joins a malformed commit under the frame of program into err. It still returns
+// the well-formed commits. A broken invoke stack ends the scan, because the parser cannot
+// attribute frames after that.
 func parseSolanaCommitLogs(logs []string, program solana.PublicKey) ([]solanaCommitEvent, error) {
 	if len(logs) > solacctconn.MaxLogLinesPerTx {
 		return nil, fmt.Errorf("transaction logs: %d lines is past the %d line limit", len(logs), solacctconn.MaxLogLinesPerTx)
@@ -243,8 +243,8 @@ func parseSolanaCommitLogs(logs []string, program solana.PublicKey) ([]solanaCom
 	return commits, errors.Join(errs...)
 }
 
-// parseSolanaProgramDataCommit decodes the payload of a `Program data:` line emitted under
-// our own frame. A payload without the ACCDGST tag yields a nil event.
+// parseSolanaProgramDataCommit decodes the payload of a `Program data:` line from the frame
+// of the accountant program. A payload without the ACCDGST tag gives a nil event.
 func parseSolanaProgramDataCommit(rest string) (*solanaCommitEvent, error) {
 	fields := strings.Fields(rest)
 	if len(fields) != 1 {

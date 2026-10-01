@@ -21,8 +21,8 @@ const (
 	MaxLogLinesPerTx = 2048
 )
 
-// GetMultipleAccounts reads accounts at commitment. Results are positional with addrs and
-// a nil element marks an absent account. Requests are chunked at maxAccountsPerRequest.
+// GetMultipleAccounts reads accounts at commitment. Results are positional with addrs.
+// A nil element marks an absent account. Each request holds at most maxAccountsPerRequest keys.
 func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment Commitment) ([]*AccountResult, error) {
 	if commitment != CommitmentConfirmed && commitment != CommitmentFinalized {
 		return nil, fmt.Errorf("getMultipleAccounts: unsupported commitment %q", commitment)
