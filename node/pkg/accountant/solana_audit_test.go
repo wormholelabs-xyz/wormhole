@@ -66,7 +66,8 @@ func newSolanaAuditFixture(t *testing.T, ctx context.Context) *solanaAuditFixtur
 	}
 }
 
-// pendingAccount is the live-set pending account of the fixture transfer at set index 0.
+// pendingAccount is the current guardian-set pending account of the fixture transfer at set
+// index 0.
 func (f *solanaAuditFixture) pendingAccount(t *testing.T, signedBy []uint8) *solacctconn.AccountResult {
 	t.Helper()
 	return &solacctconn.AccountResult{
@@ -85,17 +86,17 @@ func (f *solanaAuditFixture) commitTransaction(digest [32]byte) *solacctconn.Tra
 	return &solacctconn.TransactionResult{LogMessages: commitLogs(f.acct.solana.program, commit)}
 }
 
-// moveToGuardianSetOne makes set index 1 live and returns the fixture transfer's live-set
-// and previous-set pending accounts.
-func (f *solanaAuditFixture) moveToGuardianSetOne(t *testing.T) (live solana.PublicKey, previous solana.PublicKey) {
+// moveToGuardianSetOne makes set index 1 current and returns the fixture transfer's current
+// guardian-set and previous-set pending accounts.
+func (f *solanaAuditFixture) moveToGuardianSetOne(t *testing.T) (current solana.PublicKey, previous solana.PublicKey) {
 	t.Helper()
 	gs := f.acct.gst.Get()
 	f.acct.gst.Set(&common.GuardianSet{Index: 1, Keys: gs.Keys})
 
-	live, err := solanaPendingPDAAtSet(f.acct.solana, f.pe, 1)
+	current, err := solanaPendingPDAAtSet(f.acct.solana, f.pe, 1)
 	require.NoError(t, err)
-	require.NotEqual(t, live, f.pending)
-	return live, f.pending
+	require.NotEqual(t, current, f.pending)
+	return current, f.pending
 }
 
 // solanaUnknownTransfer is a transfer outside the pending map with its pending account at
@@ -172,7 +173,7 @@ func TestDecideSolanaOwnTransferAction(t *testing.T) {
 }
 
 func TestSolanaCommitSearchPDAs(t *testing.T) {
-	live := solana.PublicKey{0x01}
+	current := solana.PublicKey{0x01}
 	previous := solana.PublicKey{0x02}
 
 	tests := []struct {
@@ -181,15 +182,15 @@ func TestSolanaCommitSearchPDAs(t *testing.T) {
 		previous *solana.PublicKey
 		want     []solana.PublicKey
 	}{
-		{name: "live absent with a previous set", state: solanaPendingAccountAbsent, previous: &previous, want: []solana.PublicKey{live, previous}},
-		{name: "live absent at set zero", state: solanaPendingAccountAbsent, want: []solana.PublicKey{live}},
-		{name: "live present with a previous set", state: solanaPendingAccountHasOwnSignature, previous: &previous, want: []solana.PublicKey{previous}},
-		{name: "live present at set zero", state: solanaPendingAccountLacksOwnSignature, want: []solana.PublicKey{}},
+		{name: "current absent with a previous set", state: solanaPendingAccountAbsent, previous: &previous, want: []solana.PublicKey{current, previous}},
+		{name: "current absent at set zero", state: solanaPendingAccountAbsent, want: []solana.PublicKey{current}},
+		{name: "current present with a previous set", state: solanaPendingAccountHasOwnSignature, previous: &previous, want: []solana.PublicKey{previous}},
+		{name: "current present at set zero", state: solanaPendingAccountLacksOwnSignature, want: []solana.PublicKey{}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := solanaCommitSearchPDAs(live, tt.state, solanaOwnPendingTransfer{previousSetPendingPDA: tt.previous})
+			got := solanaCommitSearchPDAs(current, tt.state, solanaOwnPendingTransfer{previousSetPendingPDA: tt.previous})
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -324,14 +325,14 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 	}
 }
 
-// TestAuditSolanaOwnPendingTransfersAccountedWhileLivePendingAccountExists covers a commit
-// at the previous set after the audit resubmitted at the live set.
-func TestAuditSolanaOwnPendingTransfersAccountedWhileLivePendingAccountExists(t *testing.T) {
+// TestAuditSolanaOwnPendingTransfersAccountedWhileCurrentPendingAccountExists covers a commit
+// at the previous set after the audit resubmitted at the current guardian set.
+func TestAuditSolanaOwnPendingTransfersAccountedWhileCurrentPendingAccountExists(t *testing.T) {
 	ctx := context.Background()
 	f := newSolanaAuditFixture(t, ctx)
-	live, previous := f.moveToGuardianSetOne(t)
+	current, previous := f.moveToGuardianSetOne(t)
 
-	f.conn.SetAccount(live, &solacctconn.AccountResult{
+	f.conn.SetAccount(current, &solacctconn.AccountResult{
 		Data: solanaPendingAccountData(t, f.pe.solanaFields.Chain, 1, f.pe.solanaFields.contentDigest, solana.PublicKey{1}, []uint8{0}),
 	})
 	f.markAccounted()
@@ -392,8 +393,8 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 		{
 			name: "previous-set account of an own transfer is skipped",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				live, previous := f.moveToGuardianSetOne(t)
-				f.conn.SetAccount(live, &solacctconn.AccountResult{
+				current, previous := f.moveToGuardianSetOne(t)
+				f.conn.SetAccount(current, &solacctconn.AccountResult{
 					Data: solanaPendingAccountData(t, f.pe.solanaFields.Chain, 1, f.pe.solanaFields.contentDigest, solana.PublicKey{1}, []uint8{0}),
 				})
 				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
@@ -544,7 +545,7 @@ func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {
 	ctx := context.Background()
 	f := newSolanaAuditFixture(t, ctx)
 
-	// Every transfer is accounted and has no live-set pending account at set index 0.
+	// Every transfer is accounted and has no current guardian-set pending account at set index 0.
 	// Thus each commit search reads one signature list.
 	marked := make([]uint64, 0, maxSolanaCommitSearchesPerAudit+1)
 	marked = append(marked, f.pe.solanaFields.Sequence)
