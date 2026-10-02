@@ -53,7 +53,9 @@ serde_json.workspace = true
 # name it to assert builtin error codes (e.g. `InvalidAccountData`) via the full
 # `u64` encoding.
 solana-program-error = "=3.0.1"
-# Captures `PayerMismatch` log lines through `Mollusk::logger`.
+# `ACCPAYR\0` payer-log records reach mollusk through `Mollusk::logger` as
+# `Program data: <base64>` lines.
+base64 = "=0.22.1"
 solana-svm-log-collector = { version = "=4.0.0-rc.0", features = ["agave-unstable-api"] }
 
 [lints]

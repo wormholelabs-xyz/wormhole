@@ -1,8 +1,8 @@
 use accountant_operational_core::accounts::balance;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant_definitions::{
-    BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, TxId, Uint256,
-    PAYER_MISMATCH_LOG,
+    AccountantPayerLog, BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout,
+    TxId, Uint256, ACCOUNTANT_PAYER_LOG_TAG,
 };
 use mollusk_svm::Mollusk;
 use solana_account::Account;
@@ -35,12 +35,20 @@ fn submit(
     mollusk.process_instruction(&ix, &accounts)
 }
 
-/// Lines that follow each `PayerMismatch` marker; each is the recorded payer.
-fn payer_mismatch_logs(messages: &[String]) -> Vec<String> {
+/// `Program data: <base64>` payloads that carry the payer-log tag.
+fn accpayr_logs(messages: &[String]) -> Vec<AccountantPayerLog> {
+    use base64::Engine;
+
     messages
-        .windows(2)
-        .filter(|pair| pair[0].strip_prefix("Program log: ") == Some(PAYER_MISMATCH_LOG))
-        .map(|pair| pair[1].clone())
+        .iter()
+        .filter_map(|line| line.strip_prefix("Program data: "))
+        .filter_map(|b64| {
+            base64::engine::general_purpose::STANDARD
+                .decode(b64.trim())
+                .ok()
+        })
+        .filter(|bytes| bytes.len() >= 8 && bytes[..8] == ACCOUNTANT_PAYER_LOG_TAG)
+        .map(|bytes| *AccountantPayerLog::from_bytes(&bytes).expect("ACCPAYR framing"))
         .collect()
 }
 
@@ -96,8 +104,11 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
         "rent recipient must be the recorded payer",
     );
     assert_eq!(
-        payer_mismatch_logs(mismatch_logs.borrow().get_recorded_content()),
-        [format!("Program log: {SUBMITTER}")],
+        accpayr_logs(mismatch_logs.borrow().get_recorded_content()),
+        [AccountantPayerLog::new(
+            scenario.pending_pda.to_bytes(),
+            SUBMITTER.to_bytes()
+        )],
         "mismatch logs the recorded payer once"
     );
 
@@ -107,7 +118,7 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
     let committed = submit(&mollusk, accounts, scenario.ix_data(12), metas);
     assert_success(&committed, "quorum commit");
     assert!(
-        payer_mismatch_logs(commit_logs.borrow().get_recorded_content()).is_empty(),
+        accpayr_logs(commit_logs.borrow().get_recorded_content()).is_empty(),
         "matching recipient logs no payer"
     );
     mollusk.logger = None;

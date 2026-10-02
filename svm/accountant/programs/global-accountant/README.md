@@ -48,7 +48,7 @@ part of the signing digest, not of the pending PDA key.
 | 6 | NoReplay authority PDA | | | This program's NoReplay CPI authority. |
 | 7 | source-chain balance PDA | W | | Any account before quorum; checked on quorum. |
 | 8 | destination-chain balance PDA | W | | As above. |
-| 9 | rent recipient | W | | Must equal the pending PDA's recorded payer. |
+| 9 | rent recipient | W | | Must equal the pending PDA's recorded payer. On a mismatch, the program logs an `ACCPAYR\0` entry with the recorded payer. |
 | 10 | `ChainRegistration` PDA | | | Must match the VAA's emitter. |
 
 ### 1. `close_pending`

@@ -88,7 +88,7 @@ registered relayer of its chain. The sender must have a hub.
 | 6 | NoReplay authority PDA | | | This program's NoReplay CPI authority. |
 | 7 | source-chain balance PDA | W | | For the hub token; checked on quorum. |
 | 8 | recipient-chain balance PDA | W | | As above. |
-| 9 | rent recipient | W | | Must equal the pending PDA's recorded payer. |
+| 9 | rent recipient | W | | Must equal the pending PDA's recorded payer. On a mismatch, the program logs an `ACCPAYR\0` entry with the recorded payer. |
 | 10 | relayer `ChainRegistration` PDA | | | For the emitter chain; can be absent. |
 | 11 | `TransceiverHub` PDA | | | At `(chain, sender)`; must exist. |
 | 12 | `TransceiverPeer` PDA | | | At `(chain, sender, recipient_chain)`. |

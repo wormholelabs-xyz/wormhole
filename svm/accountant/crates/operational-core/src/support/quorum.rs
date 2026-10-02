@@ -8,12 +8,11 @@ use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
 use crate::definitions::{
     GlobalAccountantError, PendingObservationsKey, PendingObservationsLayout, TxId,
-    PAYER_MISMATCH_LOG,
 };
 use crate::err;
 use crate::hash::{double_keccak256, keccak256, observation_signing_digest};
 use crate::support::guardian_set::{self, GUARDIAN_PUBKEY_LEN};
-use crate::support::pda;
+use crate::support::{payer_log, pda};
 
 /// The two digests of one observation over `fields = ix.fields_and_digest()`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,8 +206,7 @@ pub fn close_pending_pda(
     recorded_payer: &[u8; 32],
 ) -> crate::ProgramResult {
     if rent_recipient.key.to_bytes() != *recorded_payer {
-        msg!(PAYER_MISMATCH_LOG);
-        Pubkey::new_from_array(*recorded_payer).log();
+        payer_log::emit(&pending_pda.key.to_bytes(), recorded_payer);
         return Err(err(GlobalAccountantError::PayerMismatch));
     }
     let lamports = pending_pda.lamports();

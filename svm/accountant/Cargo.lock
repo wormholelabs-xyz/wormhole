@@ -2237,6 +2237,7 @@ dependencies = [
  "accountant-test-fixtures",
  "accountant-test-harness",
  "anchor-lang",
+ "base64 0.22.1",
  "bytemuck",
  "global-accountant",
  "global-accountant-definitions",

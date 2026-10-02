@@ -1,11 +1,8 @@
 //! Commit-log entry emitted on quorum in `submit_observations` and on every successful
-//! `submit_vaas`. Off-chain indexers filter on the tag prefix. Also the `PayerMismatch`
-//! log marker.
+//! `submit_vaas`, and the payer-log entry of a failed quorum close. Off-chain indexers
+//! filter on the tag prefix.
 
 use bytemuck::{Pod, Zeroable};
-
-/// Logged on `PayerMismatch`; the next log line is the recorded payer in base58.
-pub const PAYER_MISMATCH_LOG: &str = "PayerMismatch: rent recipient must be";
 
 /// 8-byte tag on every commit log entry.
 pub const ACCOUNTANT_DIGEST_LOG_TAG: [u8; 8] = *b"ACCDGST\0";
@@ -84,9 +81,73 @@ impl AccountantDigestLog {
     }
 }
 
+/// 8-byte tag on every payer log entry.
+pub const ACCOUNTANT_PAYER_LOG_TAG: [u8; 8] = *b"ACCPAYR\0";
+
+/// Payer log entry (72 bytes), emitted by a quorum close that fails with `PayerMismatch`.
+/// `recorded_payer` is the rent recipient that `pending_pda` requires.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
+pub struct AccountantPayerLog {
+    pub tag: [u8; 8],
+    pub pending_pda: [u8; 32],
+    pub recorded_payer: [u8; 32],
+}
+
+const _: () = {
+    use core::mem::offset_of;
+    assert!(AccountantPayerLog::LEN == 72);
+    assert!(offset_of!(AccountantPayerLog, pending_pda) == 8);
+    assert!(offset_of!(AccountantPayerLog, recorded_payer) == 40);
+};
+
+impl AccountantPayerLog {
+    pub const LEN: usize = core::mem::size_of::<Self>();
+
+    pub fn new(pending_pda: [u8; 32], recorded_payer: [u8; 32]) -> Self {
+        Self {
+            tag: ACCOUNTANT_PAYER_LOG_TAG,
+            pending_pda,
+            recorded_payer,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        bytemuck::bytes_of(self)
+    }
+
+    /// Exact-length view; `None` on wrong length or tag.
+    pub fn from_bytes(bytes: &[u8]) -> Option<&Self> {
+        let entry: &Self = bytemuck::try_from_bytes(bytes).ok()?;
+        (entry.tag == ACCOUNTANT_PAYER_LOG_TAG).then_some(entry)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payer_log_round_trips_and_rejects_bad_framing() {
+        let entry = AccountantPayerLog::new([0xAA; 32], [0xBB; 32]);
+        let bytes = entry.as_bytes();
+        assert_eq!(bytes.len(), AccountantPayerLog::LEN);
+        assert_eq!(&bytes[..8], b"ACCPAYR\0");
+        assert_eq!(bytes[8..40], [0xAA; 32]);
+        assert_eq!(bytes[40..72], [0xBB; 32]);
+        assert_eq!(AccountantPayerLog::from_bytes(bytes), Some(&entry));
+
+        let mut bad_tag = bytes.to_vec();
+        bad_tag[0] ^= 1;
+        let cases: [(&str, std::vec::Vec<u8>); 3] = [
+            ("one byte short", bytes[..71].to_vec()),
+            ("one byte long", [bytes, &[0]].concat()),
+            ("wrong tag", bad_tag),
+        ];
+        for (name, bytes) in cases {
+            assert!(AccountantPayerLog::from_bytes(&bytes).is_none(), "{name}");
+        }
+    }
 
     #[test]
     fn round_trips_and_rejects_bad_framing() {
