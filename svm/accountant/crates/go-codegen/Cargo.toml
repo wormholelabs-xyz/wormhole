@@ -15,7 +15,7 @@ accountant-test-fixtures.workspace = true
 accountant-test-harness.workspace = true
 bytemuck.workspace = true
 global-accountant-definitions.workspace = true
-solana-pubkey = { workspace = true, features = ["curve25519"] }
+solana-pubkey.workspace = true
 
 [lints]
 workspace = true
