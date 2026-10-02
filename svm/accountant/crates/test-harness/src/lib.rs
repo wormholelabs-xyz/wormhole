@@ -1,6 +1,7 @@
 //! Test harness shared by the accountant program suites: program ids, pinned sibling
 //! program fixtures, synthetic guardian sets, mollusk setup, generic VAA body and
-//! instruction-data builders, result assertions, and surfpool process control.
+//! instruction-data builders, WTT observation ix-data builders, result assertions, and
+//! surfpool process control.
 //! Product-specific scenarios stay in each program's `tests/common`.
 
 pub mod accounts;
