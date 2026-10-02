@@ -245,6 +245,17 @@ func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend)
 	// Every exit below leaves the batch retryable by the audit.
 	defer acct.clearSubmitPendingFlags(msgs, backendSolana)
 
+	// confirmSolanaSubmissions reads the status of every transaction of the batch in one call.
+	if len(msgs) > solacctconn.MaxStatusesPerCall {
+		solanaSubmitFailures.Add(float64(len(msgs) - solacctconn.MaxStatusesPerCall))
+		acct.logger.Warn("the solana batch is past the status read limit, the audit will retry the rest",
+			zap.String("backend", b.tag),
+			zap.Int("numMsgs", len(msgs)),
+			zap.Int("limit", solacctconn.MaxStatusesPerCall),
+		)
+		msgs = msgs[:solacctconn.MaxStatusesPerCall]
+	}
+
 	gs, index, err := acct.guardianIndex()
 	if err != nil {
 		acct.failSolanaBatch(b, msgs, err)

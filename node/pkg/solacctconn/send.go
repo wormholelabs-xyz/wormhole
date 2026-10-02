@@ -9,8 +9,13 @@ import (
 	"github.com/gagliardetto/solana-go/rpc"
 )
 
-// getSignatureStatuses caps a request at 256 signatures.
-const maxStatusesPerRequest = 256
+const (
+	// getSignatureStatuses caps a request at 256 signatures.
+	maxStatusesPerRequest = 256
+
+	// MaxStatusesPerCall bounds one GetSignatureStatuses call, which pages through requests.
+	MaxStatusesPerCall = 1000
+)
 
 // GetLatestBlockhash reads the latest blockhash at confirmed commitment.
 func (c *ClientConn) GetLatestBlockhash(ctx context.Context) (Blockhash, error) {
@@ -70,37 +75,47 @@ func (c *ClientConn) SendTransaction(ctx context.Context, tx *solana.Transaction
 }
 
 // GetSignatureStatuses reads statuses positionally with sigs. A nil element marks a
-// signature the cluster does not know.
+// signature the cluster does not know. Each request holds at most maxStatusesPerRequest
+// signatures.
 //
-// SECURITY: precondition len(sigs) <= maxStatusesPerRequest.
+// SECURITY: precondition len(sigs) <= MaxStatusesPerCall.
 func (c *ClientConn) GetSignatureStatuses(ctx context.Context, sigs []solana.Signature) ([]*SignatureStatus, error) {
 	if len(sigs) == 0 {
 		return nil, nil
 	}
-	if len(sigs) > maxStatusesPerRequest {
-		return nil, fmt.Errorf("getSignatureStatuses: %d signatures is past the limit of %d", len(sigs), maxStatusesPerRequest)
+	if len(sigs) > MaxStatusesPerCall {
+		return nil, fmt.Errorf("getSignatureStatuses: %d signatures is past the limit of %d", len(sigs), MaxStatusesPerCall)
 	}
 
-	res, err := c.rpc.GetSignatureStatuses(ctx, false, sigs...)
-	if err != nil {
-		return nil, fmt.Errorf("getSignatureStatuses: %w", err)
-	}
-	if res == nil || res.Value == nil {
-		return nil, errors.New("getSignatureStatuses: empty response")
-	}
-	if len(res.Value) != len(sigs) {
-		return nil, fmt.Errorf("getSignatureStatuses: want %d results, got %d", len(sigs), len(res.Value))
+	out := make([]*SignatureStatus, 0, len(sigs))
+	for start := 0; start < len(sigs); start += maxStatusesPerRequest {
+		chunk := sigs[start:min(start+maxStatusesPerRequest, len(sigs))]
+
+		res, err := c.rpc.GetSignatureStatuses(ctx, false, chunk...)
+		if err != nil {
+			return nil, fmt.Errorf("getSignatureStatuses: %w", err)
+		}
+		if res == nil || res.Value == nil {
+			return nil, errors.New("getSignatureStatuses: empty response")
+		}
+		if len(res.Value) != len(chunk) {
+			return nil, fmt.Errorf("getSignatureStatuses: want %d results, got %d", len(chunk), len(res.Value))
+		}
+
+		for _, status := range res.Value {
+			if status == nil {
+				out = append(out, nil)
+				continue
+			}
+			out = append(out, &SignatureStatus{
+				Confirmed: status.ConfirmationStatus == rpc.ConfirmationStatusConfirmed || status.ConfirmationStatus == rpc.ConfirmationStatusFinalized,
+				Err:       parseTxError(status.Err),
+			})
+		}
 	}
 
-	out := make([]*SignatureStatus, len(sigs))
-	for idx, status := range res.Value {
-		if status == nil {
-			continue
-		}
-		out[idx] = &SignatureStatus{
-			Confirmed: status.ConfirmationStatus == rpc.ConfirmationStatusConfirmed || status.ConfirmationStatus == rpc.ConfirmationStatusFinalized,
-			Err:       parseTxError(status.Err),
-		}
+	if len(out) != len(sigs) {
+		return nil, fmt.Errorf("getSignatureStatuses: want %d results, got %d", len(sigs), len(out))
 	}
 	return out, nil
 }

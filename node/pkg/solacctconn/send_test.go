@@ -102,11 +102,34 @@ func TestGetSignatureStatuses(t *testing.T) {
 		assert.Empty(t, srv.recorded())
 	})
 
-	t.Run("past the request limit", func(t *testing.T) {
+	t.Run("past the call limit", func(t *testing.T) {
 		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return nil, nil })
-		_, err := conn.GetSignatureStatuses(context.Background(), make([]solana.Signature, maxStatusesPerRequest+1))
+		_, err := conn.GetSignatureStatuses(context.Background(), make([]solana.Signature, MaxStatusesPerCall+1))
 		require.Error(t, err)
 		assert.Empty(t, srv.recorded())
+	})
+
+	t.Run("pages at the request limit", func(t *testing.T) {
+		// One unknown status per requested signature.
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+			var keys []string
+			if len(call.Params) == 0 || json.Unmarshal(call.Params[0], &keys) != nil {
+				return nil, &jsonrpc.RPCError{Code: -32602, Message: "bad params"}
+			}
+			return map[string]any{"context": map[string]any{"slot": 1}, "value": make([]any, len(keys))}, nil
+		})
+
+		statuses, err := conn.GetSignatureStatuses(context.Background(), make([]solana.Signature, MaxStatusesPerCall))
+		require.NoError(t, err)
+		assert.Len(t, statuses, MaxStatusesPerCall)
+
+		calls := srv.recorded()
+		require.Len(t, calls, 4)
+		for idx, want := range []int{maxStatusesPerRequest, maxStatusesPerRequest, maxStatusesPerRequest, MaxStatusesPerCall - 3*maxStatusesPerRequest} {
+			var keys []string
+			require.NoError(t, json.Unmarshal(calls[idx].Params[0], &keys))
+			assert.Len(t, keys, want, "request %d", idx)
+		}
 	})
 
 	t.Run("unknown signature is a nil element", func(t *testing.T) {
