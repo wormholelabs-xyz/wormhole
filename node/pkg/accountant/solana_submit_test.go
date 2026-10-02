@@ -507,6 +507,44 @@ func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 	assert.Equal(t, recordedPayer, accounts[9].PublicKey)
 }
 
+// TestHandleSolanaBatchPayerMismatchUsesLoggedPayer takes the recorded payer from the
+// ACCPAYR entry of the preflight logs. The mock reports the pending PDA as absent, so a
+// round-two read would pick the fee payer instead.
+func TestHandleSolanaBatchPayerMismatchUsesLoggedPayer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	f := newSolanaBatchFixture(t, ctx)
+	program := f.acct.solana.program
+	recordedPayer := solana.PublicKey{0xCD}
+
+	sends := 0
+	f.conn.SetSendTransactionHook(func(tx *solana.Transaction) error {
+		sends++
+		if sends == 1 {
+			txErr := customTxError(solanaErrPayerMismatch)
+			txErr.Logs = []string{
+				invokeLine(program, 1),
+				programDataLine(encodeAccountantPayerLog(f.sub.pendingPDA, recordedPayer)),
+				failedLine(program),
+			}
+			return txErr
+		}
+		return nil
+	})
+
+	f.queue(t)
+	require.NoError(t, f.acct.handleSolanaBatch(ctx, f.acct.solana))
+
+	require.Len(t, f.conn.SentTransactions, 2)
+	second := f.conn.SentTransactions[1]
+	accounts, err := second.Message.Instructions[1].ResolveInstructionAccounts(&second.Message)
+	require.NoError(t, err)
+	require.Len(t, accounts, submitObservationsAccountCount)
+	assert.Equal(t, recordedPayer, accounts[9].PublicKey)
+	assert.Len(t, f.conn.GetMultipleAccountsCommitments, 1, "only round one reads the pending PDA")
+}
+
 // TestConfirmSolanaSubmissions covers the block height expiry and context cancellation.
 func TestConfirmSolanaSubmissions(t *testing.T) {
 	tests := []struct {

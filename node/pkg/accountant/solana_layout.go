@@ -51,6 +51,27 @@ func parseAccountantDigestLog(data []byte) (*solanaCommitEvent, error) {
 	}, nil
 }
 
+// solanaPayerLog is a decoded ACCPAYR payer log.
+type solanaPayerLog struct {
+	PendingPDA    solana.PublicKey
+	RecordedPayer solana.PublicKey
+}
+
+// parseAccountantPayerLog decodes an ACCPAYR payer log.
+func parseAccountantPayerLog(data []byte) (*solanaPayerLog, error) {
+	var wire accountantPayerLogWire
+	if err := decodeWire(data, &wire); err != nil {
+		return nil, err
+	}
+	if wire.Tag != accountantPayerLogTag {
+		return nil, fmt.Errorf("accountant payer log: tag mismatch, got %x", wire.Tag)
+	}
+	return &solanaPayerLog{
+		PendingPDA:    solana.PublicKey(wire.PendingPDA),
+		RecordedPayer: solana.PublicKey(wire.RecordedPayer),
+	}, nil
+}
+
 // solanaPendingObs is a decoded PendingObservationsLayout account.
 // Emitter and sequence exist only in the PDA seeds.
 type solanaPendingObs struct {

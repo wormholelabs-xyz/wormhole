@@ -462,6 +462,9 @@ func TestSolanaWireLayouts(t *testing.T) {
 		{"accountant digest log", func(t *testing.T) {
 			checkWireLayout[accountantDigestLogWire](t, mustHexDecode(t, fixtureACCDGSTLogHex))
 		}},
+		{"accountant payer log", func(t *testing.T) {
+			checkWireLayout[accountantPayerLogWire](t, mustHexDecode(t, fixtureACCPAYRLogHex))
+		}},
 		{"pending observations", func(t *testing.T) {
 			checkWireLayout[pendingObservationsWire](t, mustHexDecode(t, fixturePendingObservationsAccountHex))
 		}},

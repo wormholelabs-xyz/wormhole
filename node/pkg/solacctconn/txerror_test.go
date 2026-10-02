@@ -91,6 +91,16 @@ func TestParseTxError(t *testing.T) {
 }
 
 func TestPreflightTxError(t *testing.T) {
+	tooManyLines := make([]string, MaxLogLinesPerTx+1)
+	for idx := range tooManyLines {
+		tooManyLines[idx] = "Program log: x"
+	}
+	tooManyLinesJSON, err := json.Marshal(tooManyLines)
+	require.NoError(t, err)
+	customWithLogs := func(logsJSON string) string {
+		return `{"err": {"InstructionError": [2, {"Custom": 11}]}, "logs": ` + logsJSON + `}`
+	}
+
 	tests := []struct {
 		name string
 		err  func(t *testing.T) error
@@ -99,6 +109,19 @@ func TestPreflightTxError(t *testing.T) {
 		{
 			name: "wrapped",
 			err:  func(t *testing.T) error { return fmt.Errorf("send: %w", preflightError(t, preflightCustomData)) },
+			want: &TxError{CustomCode: 11, HasCustomCode: true, Logs: []string{
+				"Program 11111111111111111111111111111111 invoke [1]",
+				"Program log: AlreadySigned",
+			}},
+		},
+		{
+			name: "logs past the line limit are dropped",
+			err:  func(t *testing.T) error { return preflightError(t, customWithLogs(string(tooManyLinesJSON))) },
+			want: &TxError{CustomCode: 11, HasCustomCode: true},
+		},
+		{
+			name: "logs with a non-string line are dropped",
+			err:  func(t *testing.T) error { return preflightError(t, customWithLogs(`["Program log: x", 7]`)) },
 			want: &TxError{CustomCode: 11, HasCustomCode: true},
 		},
 		{name: "no err key", err: func(t *testing.T) error { return preflightError(t, `{"logs": []}`) }},
@@ -117,6 +140,7 @@ func TestPreflightTxError(t *testing.T) {
 			assert.Equal(t, tt.want.Kind, got.Kind)
 			assert.Equal(t, tt.want.HasCustomCode, got.HasCustomCode)
 			assert.Equal(t, tt.want.CustomCode, got.CustomCode)
+			assert.Equal(t, tt.want.Logs, got.Logs)
 		})
 	}
 }

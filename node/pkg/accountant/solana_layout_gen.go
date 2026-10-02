@@ -24,6 +24,25 @@ func (accountantDigestLogWire) wireLen() int { return accountantDigestLogLen }
 
 func (accountantDigestLogWire) wireName() string { return "accountant digest log" }
 
+// AccountantPayerLog, constants/log.rs.
+
+// AccountantPayerLog::LEN.
+const accountantPayerLogLen = 72
+
+// ACCOUNTANT_PAYER_LOG_TAG.
+var accountantPayerLogTag = [8]byte{0x41, 0x43, 0x43, 0x50, 0x41, 0x59, 0x52, 0x00}
+
+// accountantPayerLogWire is AccountantPayerLog.
+type accountantPayerLogWire struct {
+	Tag           [8]byte
+	PendingPDA    [32]byte
+	RecordedPayer [32]byte
+}
+
+func (accountantPayerLogWire) wireLen() int { return accountantPayerLogLen }
+
+func (accountantPayerLogWire) wireName() string { return "accountant payer log" }
+
 // PendingObservationsLayout, state.rs.
 
 // PendingObservationsLayout::LEN.

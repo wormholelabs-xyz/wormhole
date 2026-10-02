@@ -11,12 +11,12 @@ use accountant_test_harness::{
 };
 use bytemuck::Zeroable;
 use global_accountant_definitions::{
-    AccountantDigestLog, ChainRegistrationLayout, GlobalAccountantError, Instruction,
-    NoReplayBitmapAccount, NoReplayNamespace, PendingObservationsLayout, SubmitObservationsIxData,
-    TokenBridgeTransfer, TxId, VaaBodyHeader, ACCOUNTANT_DIGEST_LOG_TAG, ACCOUNT_SEED_PREFIX,
-    CHAIN_REGISTRATION_SEED_PREFIX, GUARDIAN_SET_SEED, HASH_TX_ID_LEN, MAX_TRANSFER_PAYLOAD_LEN,
-    NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET, PENDING_OBSERVATIONS_SEED_PREFIX,
-    SIGNATURE_TX_ID_LEN,
+    AccountantDigestLog, AccountantPayerLog, ChainRegistrationLayout, GlobalAccountantError,
+    Instruction, NoReplayBitmapAccount, NoReplayNamespace, PendingObservationsLayout,
+    SubmitObservationsIxData, TokenBridgeTransfer, TxId, VaaBodyHeader, ACCOUNTANT_DIGEST_LOG_TAG,
+    ACCOUNTANT_PAYER_LOG_TAG, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
+    GUARDIAN_SET_SEED, HASH_TX_ID_LEN, MAX_TRANSFER_PAYLOAD_LEN, NOREPLAY_AUTHORITY_SEED_PREFIX,
+    NOREPLAY_BITS_PER_BUCKET, PENDING_OBSERVATIONS_SEED_PREFIX, SIGNATURE_TX_ID_LEN,
 };
 use solana_pubkey::Pubkey;
 
@@ -75,6 +75,46 @@ pub(crate) fn layout_file() -> String {
                 guardian_set_index,
                 "GuardianSetIndex",
                 GoType::U32
+            ),
+        ],
+    );
+
+    go.section("AccountantPayerLog, constants/log.rs.");
+    go.constant(
+        "AccountantPayerLog::LEN.",
+        "accountantPayerLogLen",
+        AccountantPayerLog::LEN,
+    );
+    go.byte_array(
+        "ACCOUNTANT_PAYER_LOG_TAG.",
+        "accountantPayerLogTag",
+        &ACCOUNTANT_PAYER_LOG_TAG,
+    );
+    go.wire_struct(
+        "accountantPayerLogWire is AccountantPayerLog.",
+        "accountantPayerLogWire",
+        "accountant payer log",
+        "accountantPayerLogLen",
+        AccountantPayerLog::LEN,
+        0,
+        &[
+            field!(
+                AccountantPayerLog,
+                tag,
+                "Tag",
+                GoType::Bytes(ACCOUNTANT_PAYER_LOG_TAG.len())
+            ),
+            field!(
+                AccountantPayerLog,
+                pending_pda,
+                "PendingPDA",
+                GoType::Bytes(32)
+            ),
+            field!(
+                AccountantPayerLog,
+                recorded_payer,
+                "RecordedPayer",
+                GoType::Bytes(32)
             ),
         ],
     );
@@ -508,6 +548,7 @@ pub(crate) fn fixtures_file() -> String {
     assert_eq!(PendingObservationsLayout::LEN, 88);
     assert_eq!(SubmitObservationsIxData::LEN, 278);
     assert_eq!(AccountantDigestLog::LEN, 86);
+    assert_eq!(AccountantPayerLog::LEN, 72);
 
     // Index-derived bytes make byte-order bugs in the Go decoder visible.
     let program_id_bytes: [u8; 32] = core::array::from_fn(|i| i as u8);
@@ -619,6 +660,14 @@ pub(crate) fn fixtures_file() -> String {
         "Chain 2, sequence 100000, set index 4.",
         "fixtureACCDGSTLogHex",
         commit_log.as_bytes(),
+    );
+
+    let payer_log = AccountantPayerLog::new(digest, payer);
+    assert_eq!(payer_log.as_bytes().len(), AccountantPayerLog::LEN);
+    go.hex_constant(
+        "Pending PDA 0x80.., recorded payer 0xC0...",
+        "fixtureACCPAYRLogHex",
+        payer_log.as_bytes(),
     );
 
     go.section(&format!(

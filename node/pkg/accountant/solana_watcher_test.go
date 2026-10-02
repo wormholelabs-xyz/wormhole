@@ -240,6 +240,93 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 	}
 }
 
+func encodeAccountantPayerLog(pendingPDA, payer solana.PublicKey) []byte {
+	return mustEncodeWire(&accountantPayerLogWire{
+		Tag:           accountantPayerLogTag,
+		PendingPDA:    pendingPDA,
+		RecordedPayer: payer,
+	})
+}
+
+func TestParseSolanaPayerLog(t *testing.T) {
+	program := solanaTestProgram()
+	foreign := foreignProgram()
+	fixture := mustHexDecode(t, fixtureACCPAYRLogHex)
+	// fixtureACCPAYRLogHex: pending PDA 0x80.., recorded payer 0xC0...
+	pendingPDA := solana.PublicKey(fixture[8:40])
+	payer := solana.PublicKey(fixture[40:72])
+	commit := encodeAccountantDigestLog(newSolanaCommitEvent(vaa.ChainIDEthereum, fixtureEmitter(), 7, fixtureDigest(), 4))
+	mismatch := func(lines ...string) []string {
+		logs := append([]string{invokeLine(program, 1), programDataLine(commit)}, lines...)
+		return append(logs, failedLine(program))
+	}
+
+	tests := []struct {
+		name      string
+		logs      []string
+		wantPayer solana.PublicKey
+		wantErr   bool
+	}{
+		{
+			name:      "payer after the rolled-back commit",
+			logs:      mismatch(programDataLine(fixture)),
+			wantPayer: payer,
+		},
+		{
+			name:    "other pending PDA",
+			logs:    mismatch(programDataLine(encodeAccountantPayerLog(filledKey(0x44), payer))),
+			wantErr: true,
+		},
+		{
+			name:    "two entries",
+			logs:    mismatch(programDataLine(fixture), programDataLine(fixture)),
+			wantErr: true,
+		},
+		{
+			name: "entry from a foreign frame",
+			logs: mismatch(
+				invokeLine(foreign, 2),
+				programDataLine(fixture),
+				successLine(foreign),
+			),
+			wantErr: true,
+		},
+		{
+			name:    "no entry",
+			logs:    mismatch(),
+			wantErr: true,
+		},
+		{
+			name:    "zero payer",
+			logs:    mismatch(programDataLine(encodeAccountantPayerLog(pendingPDA, solana.PublicKey{}))),
+			wantErr: true,
+		},
+		{
+			name:    "entry one byte short",
+			logs:    mismatch(programDataLine(fixture[:accountantPayerLogLen-1])),
+			wantErr: true,
+		},
+		{
+			name:    "broken invoke stack",
+			logs:    []string{invokeLine(program, 2), programDataLine(fixture), failedLine(program)},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseSolanaPayerLog(tt.logs, program, pendingPDA)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Equal(t, solana.PublicKey{}, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantPayer, got)
+		})
+	}
+}
+
 // nestedCommitLogs emits payload from program at invoke height depth, under depth-1 foreign frames.
 func nestedCommitLogs(program, foreign solana.PublicKey, depth int, payload []byte) []string {
 	logs := make([]string, 0, 2*depth+1)

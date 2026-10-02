@@ -34,6 +34,9 @@ type TxError struct {
 	Kind          TxErrKind
 	CustomCode    uint32
 	HasCustomCode bool
+	// Simulation logs of a preflight failure, at most MaxLogLinesPerTx lines. Nil on a
+	// signature status.
+	Logs []string
 
 	detailJSON string
 }
@@ -83,7 +86,30 @@ func preflightTxError(err error) *TxError {
 	if !ok {
 		return nil
 	}
-	return parseTxError(data["err"])
+	txErr := parseTxError(data["err"])
+	if txErr == nil {
+		return nil
+	}
+	txErr.Logs = preflightLogs(data["logs"])
+	return txErr
+}
+
+// preflightLogs returns the simulation log lines, or nil when v is not a list of at most
+// MaxLogLinesPerTx strings.
+func preflightLogs(v any) []string {
+	raw, ok := v.([]any)
+	if !ok || len(raw) > MaxLogLinesPerTx {
+		return nil
+	}
+	logs := make([]string, 0, len(raw))
+	for _, line := range raw {
+		s, ok := line.(string)
+		if !ok {
+			return nil
+		}
+		logs = append(logs, s)
+	}
+	return logs
 }
 
 // customProgramError returns the program error code that an InstructionError carries. It

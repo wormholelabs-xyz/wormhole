@@ -26,7 +26,8 @@ const (
 	// Twice MAX_QUORUM_BRANCH_CU, mollusk submit_observations.rs.
 	solanaSubmitComputeUnitLimit = 150_000
 
-	// Round two covers the recorded-payer race and a stale blockhash.
+	// Round two covers the recorded-payer race and a stale blockhash. A preflight
+	// PayerMismatch carries the recorded payer, which round two uses directly.
 	maxSolanaSubmitRounds = 2
 
 	// Status polls before the audit takes over a round.
@@ -69,6 +70,9 @@ type solanaSubmission struct {
 	// The payer recorded in the pending PDA, or the fee payer when the PDA is absent. The
 	// program checks it on the quorum-closing call.
 	rentRecipient solana.PublicKey
+	// The recorded payer from the ACCPAYR entry of a PayerMismatch preflight. The next round
+	// uses it in place of a pending PDA read, then clears it.
+	loggedPayer *solana.PublicKey
 
 	// Set on the first build and reused by the retry round.
 	guardianSignature []byte
@@ -357,6 +361,7 @@ func (acct *Accountant) submitSolanaRound(ctx context.Context, b *solanaBackend,
 		sig, err := b.conn.SendTransaction(ctx, tx)
 		if err != nil {
 			if acct.handleSolanaTxError(b, sub, err, "send") == solanaTxRetryNextRound {
+				acct.recordSolanaLoggedPayer(b, sub, err)
 				retry = append(retry, sub)
 			}
 			continue
@@ -370,9 +375,25 @@ func (acct *Accountant) submitSolanaRound(ctx context.Context, b *solanaBackend,
 	return append(retry, acct.confirmSolanaSubmissions(ctx, b, sent)...)
 }
 
+// recordSolanaLoggedPayer keeps the recorded payer from the ACCPAYR entry of a preflight
+// PayerMismatch. A parse failure leaves the next round to read the pending PDA.
+func (acct *Accountant) recordSolanaLoggedPayer(b *solanaBackend, sub *solanaSubmission, err error) {
+	var txErr *solacctconn.TxError
+	if !errors.As(err, &txErr) || !txErr.HasCustomCode || txErr.CustomCode != solanaErrPayerMismatch || txErr.Logs == nil {
+		return
+	}
+	payer, parseErr := parseSolanaPayerLog(txErr.Logs, b.program, sub.pendingPDA)
+	if parseErr != nil {
+		acct.logger.Warn("failed to read the recorded payer from a solana preflight, the next round reads the pending account", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Error(parseErr))
+		return
+	}
+	sub.loggedPayer = &payer
+}
+
 // resolveSolanaRentRecipients reads each pending PDA and returns the observations still
 // worth sending. If the PDA is absent, the fee payer is the rent recipient. If the PDA is
 // present, it records its own payer. If this guardian's bit is set, the work is done.
+// An observation with a logged payer takes it directly and joins the result unread.
 //
 // The read uses confirmed commitment, the same as preflight. Thus a PDA that another
 // guardian created in the previous round is visible before it finalizes.
@@ -381,26 +402,42 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 		return nil
 	}
 
-	addrs := make([]solana.PublicKey, len(work))
-	for idx, sub := range work {
+	ready := make([]*solanaSubmission, 0, len(work))
+	unread := make([]*solanaSubmission, 0, len(work))
+	for _, sub := range work {
+		// SECURITY: the PayerMismatch rolled back this guardian's bit, so the signed check
+		// below cannot apply. A parallel quorum gives AlreadyAccounted, a done result.
+		if sub.loggedPayer != nil {
+			sub.rentRecipient = *sub.loggedPayer
+			sub.loggedPayer = nil
+			ready = append(ready, sub)
+			continue
+		}
+		unread = append(unread, sub)
+	}
+	if len(unread) == 0 {
+		return ready
+	}
+
+	addrs := make([]solana.PublicKey, len(unread))
+	for idx, sub := range unread {
 		addrs[idx] = sub.pendingPDA
 	}
 
 	accounts, err := b.conn.GetMultipleAccounts(ctx, addrs, solacctconn.CommitmentConfirmed)
 	if err != nil {
-		solanaSubmitFailures.Add(float64(len(work)))
-		acct.logger.Error("failed to read the solana pending accounts", zap.String("backend", b.tag), zap.Int("numMsgs", len(work)), zap.Error(err))
-		return nil
+		solanaSubmitFailures.Add(float64(len(unread)))
+		acct.logger.Error("failed to read the solana pending accounts", zap.String("backend", b.tag), zap.Int("numMsgs", len(unread)), zap.Error(err))
+		return ready
 	}
-	if len(accounts) != len(work) {
-		solanaSubmitFailures.Add(float64(len(work)))
-		acct.logger.Error("the solana pending account read returned the wrong number of results", zap.String("backend", b.tag), zap.Int("want", len(work)), zap.Int("got", len(accounts)))
-		return nil
+	if len(accounts) != len(unread) {
+		solanaSubmitFailures.Add(float64(len(unread)))
+		acct.logger.Error("the solana pending account read returned the wrong number of results", zap.String("backend", b.tag), zap.Int("want", len(unread)), zap.Int("got", len(accounts)))
+		return ready
 	}
 
 	feePayer := b.feePayer.PublicKey()
-	ready := make([]*solanaSubmission, 0, len(work))
-	for idx, sub := range work {
+	for idx, sub := range unread {
 		account := accounts[idx]
 		if account == nil {
 			sub.rentRecipient = feePayer
