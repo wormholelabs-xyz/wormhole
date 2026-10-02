@@ -1,14 +1,19 @@
-//! VAA body builders for governance payloads, and instructions of sibling programs.
+//! VAA body builders for governance payloads, WTT observation ix data, and instructions of
+//! sibling programs.
 
+use accountant_operational_core::support::quorum::{observation_digests, ObservationDigests};
 use global_accountant_definitions::{
-    GovernanceHeader, GovernanceModule, ModifyBalancePayload, PostSignaturesIxData,
-    RegisterChainPayload, TxId, Uint256, UpgradeContractPayload, VaaBodyHeader,
+    parse_token_bridge_payload, GovernanceHeader, GovernanceModule, Instruction,
+    ModifyBalancePayload, PostSignaturesIxData, RegisterChainPayload, SubmitObservationsIxData,
+    TokenBridgeAction, TxId, Uint256, UpgradeContractPayload, VaaBodyHeader, SIGNATURE_TX_ID_LEN,
+    SUBMIT_OBSERVATION_PREFIX,
 };
 use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
 use solana_pubkey::Pubkey;
 
 use crate::guardians::GUARDIAN_SIGNATURE_LENGTH;
 use crate::ids::{shim_program_id, system_program_id};
+use crate::wire;
 
 pub use accountant_operational_core::hash::double_keccak256;
 
@@ -17,6 +22,98 @@ pub const TX_ID: TxId<'static> = TxId::Hash(&[0xA9u8; 32]);
 pub fn vaa_header(emitter_chain: u16, emitter_address: [u8; 32], sequence: u64) -> Vec<u8> {
     let header = VaaBodyHeader::new(0, 0, emitter_chain, emitter_address, sequence, 0);
     bytemuck::bytes_of(&header).to_vec()
+}
+
+/// Builds the `SubmitObservationsIxData` a guardian would send for `body`.
+pub fn observation_ix_from_body(
+    guardian_set_index: u32,
+    guardian_index: u8,
+    signature: [u8; 65],
+    tx_id: TxId<'_>,
+    body: &[u8],
+) -> SubmitObservationsIxData {
+    let tx_id_bytes = tx_id.as_bytes();
+    let mut tx_id_padded = [0u8; SIGNATURE_TX_ID_LEN];
+    tx_id_padded[..tx_id_bytes.len()].copy_from_slice(tx_id_bytes);
+    let (header, payload) = VaaBodyHeader::split(body).expect("test body has a valid VAA header");
+    let key = header.namespace_key();
+    let action_byte = *payload.first().expect("test body has a non-empty payload");
+    let (token_chain, token_address, recipient_chain, amount) =
+        match parse_token_bridge_payload(body).expect("test body has a valid token bridge payload")
+        {
+            TokenBridgeAction::Transfer {
+                amount,
+                token_chain,
+                token_address,
+                recipient_chain,
+            } => (token_chain, token_address, recipient_chain, amount),
+            TokenBridgeAction::Attest | TokenBridgeAction::Other(_) => {
+                (0, [0u8; 32], 0, Uint256::ZERO)
+            }
+        };
+    SubmitObservationsIxData {
+        guardian_set_index: guardian_set_index.to_le_bytes(),
+        guardian_index,
+        signature,
+        tx_id_len: u8::try_from(tx_id_bytes.len()).expect("tx id length fits u8"),
+        tx_id: tx_id_padded,
+        action: action_byte,
+        chain: key.chain.to_be_bytes(),
+        emitter: key.emitter,
+        sequence: key.sequence.to_be_bytes(),
+        token_chain: token_chain.to_be_bytes(),
+        token_address,
+        recipient_chain: recipient_chain.to_be_bytes(),
+        amount,
+        digest: double_keccak256(body),
+    }
+}
+
+fn digests_with_tx_id(tx_id: TxId<'_>, body: &[u8]) -> ObservationDigests {
+    let ix = observation_ix_from_body(0, 0, [0u8; 65], tx_id, body);
+    observation_digests(SUBMIT_OBSERVATION_PREFIX, tx_id, &ix.fields_and_digest())
+}
+
+pub fn content_digest(body: &[u8]) -> [u8; 32] {
+    digests_with_tx_id(TX_ID, body).content
+}
+
+pub fn signing_digest(body: &[u8]) -> [u8; 32] {
+    signing_digest_with_tx_id(TX_ID, body)
+}
+
+pub fn signing_digest_with_tx_id(tx_id: TxId<'_>, body: &[u8]) -> [u8; 32] {
+    digests_with_tx_id(tx_id, body).signing
+}
+
+pub fn submit_observations_ix_data(
+    guardian_set_index: u32,
+    guardian_index: u8,
+    signature: [u8; 65],
+    body: &[u8],
+) -> Vec<u8> {
+    submit_observations_ix_data_with_tx_id(
+        guardian_set_index,
+        guardian_index,
+        signature,
+        TX_ID,
+        body,
+    )
+}
+
+pub fn submit_observations_ix_data_with_tx_id(
+    guardian_set_index: u32,
+    guardian_index: u8,
+    signature: [u8; 65],
+    tx_id: TxId<'_>,
+    body: &[u8],
+) -> Vec<u8> {
+    let ix = observation_ix_from_body(guardian_set_index, guardian_index, signature, tx_id, body);
+    wire::framed(
+        Instruction::SubmitObservations as u8,
+        bytemuck::bytes_of(&ix),
+        &[],
+    )
 }
 
 /// Near-miss modules for rejection tests.
