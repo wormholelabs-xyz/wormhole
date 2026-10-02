@@ -30,6 +30,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "accountant-go-codegen"
+version = "0.1.0"
+dependencies = [
+ "accountant-operational-core",
+ "accountant-test-fixtures",
+ "accountant-test-harness",
+ "bytemuck",
+ "global-accountant-definitions",
+ "solana-pubkey 4.2.0",
+]
+
+[[package]]
 name = "accountant-operational-core"
 version = "0.1.0"
 dependencies = [
