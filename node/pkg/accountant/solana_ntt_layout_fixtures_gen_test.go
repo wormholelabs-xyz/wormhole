@@ -67,6 +67,8 @@ const fixtureNttPendingPDAHex = "950ae0f9f200e87027be12cc7eb36c5a465f2609712358b
 
 const fixtureNttGuardianSetIndex = uint32(4)
 
+const fixtureNttGuardianIndex = uint8(3)
+
 const fixtureNttHubPDAHex = "d439568f69ef2baf76b9429c6648e900fb6d5a2d642446c5fff13f0eb60e084d"
 
 const fixtureNttPeerSrcPDAHex = "6874a582946195aef04c0afff472f16c2cceacb9fae43137406b0b8707656d3c"

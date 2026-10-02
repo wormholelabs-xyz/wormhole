@@ -497,6 +497,11 @@ pub(crate) fn fixtures_file() -> String {
         "fixtureNttGuardianSetIndex",
         format!("uint32({GUARDIAN_SET_INDEX})"),
     );
+    go.constant(
+        "",
+        "fixtureNttGuardianIndex",
+        format!("uint8({guardian_index})"),
+    );
     let hub_key = TransceiverHubKey::new(obs.chain, obs.sender);
     go.hex_constant(
         "",
