@@ -2,11 +2,13 @@ use accountant_operational_core::accounts::balance;
 use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use global_accountant_definitions::{
     BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout, TxId, Uint256,
+    PAYER_MISMATCH_LOG,
 };
 use mollusk_svm::Mollusk;
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
 use solana_pubkey::Pubkey;
+use solana_svm_log_collector::LogCollector;
 
 use crate::common::*;
 
@@ -33,9 +35,18 @@ fn submit(
     mollusk.process_instruction(&ix, &accounts)
 }
 
+/// Lines that follow each `PayerMismatch` marker; each is the recorded payer.
+fn payer_mismatch_logs(messages: &[String]) -> Vec<String> {
+    messages
+        .windows(2)
+        .filter(|pair| pair[0].strip_prefix("Program log: ") == Some(PAYER_MISMATCH_LOG))
+        .map(|pair| pair[1].clone())
+        .collect()
+}
+
 #[test]
 fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
-    let mollusk = mollusk();
+    let mut mollusk = mollusk();
     let scenario = ObsScenario::transfer(
         GUARDIAN_SET_INDEX,
         0x44,
@@ -71,6 +82,8 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
     let mut metas = scenario.account_metas();
     metas[0] = AccountMeta::new(bob, true);
     metas[9] = AccountMeta::new(bob, false);
+    let mismatch_logs = LogCollector::new_ref();
+    mollusk.logger = Some(mismatch_logs.clone());
     let wrong_recipient = submit(
         &mollusk,
         accounts.clone(),
@@ -82,10 +95,22 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
         GlobalAccountantError::PayerMismatch as u64,
         "rent recipient must be the recorded payer",
     );
+    assert_eq!(
+        payer_mismatch_logs(mismatch_logs.borrow().get_recorded_content()),
+        [format!("Program log: {SUBMITTER}")],
+        "mismatch logs the recorded payer once"
+    );
 
     metas[9] = AccountMeta::new(SUBMITTER, false);
+    let commit_logs = LogCollector::new_ref();
+    mollusk.logger = Some(commit_logs.clone());
     let committed = submit(&mollusk, accounts, scenario.ix_data(12), metas);
     assert_success(&committed, "quorum commit");
+    assert!(
+        payer_mismatch_logs(commit_logs.borrow().get_recorded_content()).is_empty(),
+        "matching recipient logs no payer"
+    );
+    mollusk.logger = None;
     let after = &committed.resulting_accounts;
     assert_closed(find_account(after, &scenario.pending_pda), "pending closed");
     assert_bucket_marked(

@@ -1,7 +1,11 @@
 //! Commit-log entry emitted on quorum in `submit_observations` and on every successful
-//! `submit_vaas`. Off-chain indexers filter on the tag prefix.
+//! `submit_vaas`. Off-chain indexers filter on the tag prefix. Also the `PayerMismatch`
+//! log marker.
 
 use bytemuck::{Pod, Zeroable};
+
+/// Logged on `PayerMismatch`; the next log line is the recorded payer in base58.
+pub const PAYER_MISMATCH_LOG: &str = "PayerMismatch: rent recipient must be";
 
 /// 8-byte tag on every commit log entry.
 pub const ACCOUNTANT_DIGEST_LOG_TAG: [u8; 8] = *b"ACCDGST\0";
