@@ -1,0 +1,160 @@
+//! `submit_observations`: WTT quorum tracker over
+//! [`accountant_operational_core::support::quorum`].
+//!
+//! A `(chain, emitter, sequence, guardian_set_index, digest)` pending PDA accumulates
+//! guardian signatures. The quorum-completing observation marks NoReplay, emits the
+//! commit log, applies balances, and closes the pending PDA. Another guardian set or
+//! another digest uses its own sibling PDA; `close_pending` reclaims the losers.
+
+use anchor_lang::prelude::*;
+use anchor_lang::solana_program::program_error::ProgramError;
+
+use accountant_operational_core::cpi::noreplay;
+use accountant_operational_core::support::commit_log;
+use accountant_operational_core::support::quorum::{self, ParsedObservation};
+use accountant_operational_core::ProgramResult;
+
+use crate::definitions::{
+    is_attest_action, is_transfer_action, GlobalAccountantError, NoReplayNamespace,
+    PendingObservationsLayout, SubmitObservationsIxData, SUBMIT_OBSERVATION_PREFIX,
+};
+use crate::err;
+use accountant_operational_core::accounts::chain_registration;
+use accountant_operational_core::transfer;
+
+/// `data`: `SubmitObservationsIxData`, 278 bytes fixed.
+///
+/// ```text
+/// 0    4   guardian_set_index (LE u32)
+/// 4    1   guardian_index
+/// 5    65  signature (r ‖ s ‖ recovery_id)
+/// 70   1   tx_id_len (32 or 64)
+/// 71   64  tx_id (zero-padded past tx_id_len)
+/// 135  1   action
+/// 136  2   chain (BE u16)
+/// 138  32  emitter
+/// 170  8   sequence (BE u64)
+/// 178  2   token_chain (BE u16)
+/// 180  32  token_address
+/// 212  2   recipient_chain (BE u16)
+/// 214  32  amount (BE Uint256)
+/// 246  32  digest
+/// ```
+pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    let ix = SubmitObservationsIxData::from_bytes(data).map_err(err)?;
+    let tx_id = ix.tx_id().map_err(err)?;
+    let fields = ix.fields_and_digest();
+    let digests = quorum::observation_digests(SUBMIT_OBSERVATION_PREFIX, tx_id, &fields);
+
+    let parsed = ParsedObservation {
+        content_digest: digests.content,
+        chain: ix.chain(),
+        emitter: ix.emitter,
+        sequence: ix.sequence(),
+        guardian_set_index: ix.guardian_set_index(),
+        guardian_index: ix.guardian_index,
+        signature: ix.signature,
+    };
+
+    // Accounts:
+    //   0. `[WRITE, SIGNER]` submitter (rent payer)
+    //   1. `[WRITE]`         pending PDA
+    //   2. `[]`              Core Bridge `GuardianSet` PDA
+    //   3. `[WRITE]`         NoReplay bitmap PDA
+    //   4. `[]`              system program
+    //   5. `[]`              NoReplay program
+    //   6. `[]`              NoReplay authority PDA
+    //   7. `[WRITE]`         source-chain balance PDA (any account before quorum)
+    //   8. `[WRITE]`         destination-chain balance PDA (as 7)
+    //   9. `[WRITE]`         rent recipient; must equal the recorded payer
+    //  10. `[]`              `ChainRegistration` PDA
+    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, _noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, rent_recipient, chain_registration_pda] =
+        accounts
+    else {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    };
+
+    if !submitter.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    noreplay::reject_if_marked(
+        noreplay_bucket,
+        program_id,
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+    )?;
+
+    // SECURITY: a signed observation from an unregistered emitter must not move balances.
+    chain_registration::verify(
+        program_id,
+        chain_registration_pda,
+        parsed.chain,
+        &parsed.emitter,
+    )?;
+
+    // Quorum derives from the live set size; governance can resize the set.
+    let num_guardians = quorum::verify_signature(
+        guardian_set,
+        parsed.guardian_set_index,
+        parsed.guardian_index,
+        &digests.signing,
+        &parsed.signature,
+    )?;
+    let quorum_threshold = PendingObservationsLayout::quorum_for(num_guardians);
+
+    let action = quorum::decide_pending_action(program_id, pending_pda, &parsed)?;
+    let (layout, quorum_reached) = quorum::apply_action_and_accumulate(
+        program_id,
+        submitter,
+        pending_pda,
+        &parsed,
+        action,
+        quorum_threshold,
+    )?;
+
+    if !quorum_reached {
+        return Ok(());
+    }
+
+    // Commit: NoReplay mark, commit log, balances, pending close. Any error rolls back all.
+    noreplay::mark_used(
+        submitter,
+        noreplay_bucket,
+        noreplay_authority,
+        system_program_acc,
+        program_id,
+        &NoReplayNamespace::new(parsed.chain, parsed.emitter),
+        parsed.sequence,
+    )?;
+
+    commit_log::emit(
+        parsed.chain,
+        &parsed.emitter,
+        parsed.sequence,
+        &parsed.content_digest,
+        parsed.guardian_set_index,
+    );
+
+    // An unknown action fails here, rolling back the NoReplay mark above.
+    if is_transfer_action(ix.action) {
+        transfer::apply_transfer(
+            program_id,
+            submitter,
+            source_account_pda,
+            dest_account_pda,
+            parsed.chain,
+            ix.recipient_chain(),
+            ix.token_chain(),
+            &ix.token_address,
+            ix.amount,
+        )?;
+    } else if !is_attest_action(ix.action) {
+        return Err(err(GlobalAccountantError::UnknownTokenBridgePayload));
+    }
+
+    let recorded_payer = layout.payer;
+    quorum::close_pending_pda(pending_pda, rent_recipient, &recorded_payer)?;
+    Ok(())
+}

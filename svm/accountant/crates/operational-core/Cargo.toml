@@ -1,0 +1,33 @@
+[package]
+name = "accountant-operational-core"
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anchor-lang.workspace = true
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+solana-secp256k1-recover.workspace = true
+# Keccak256: syscall on-chain, `sha3` on host (`hash.rs`).
+solana-keccak-hasher.workspace = true
+# `curve25519` gives `find_program_address` its host implementation. Major `3` unifies with
+# anchor-lang's own `solana-pubkey`.
+solana-pubkey = { version = "3", features = ["curve25519"] }
+# `CreateAccountAllowPrefund` (SIMD-0312) for `pda_init::create_pda_allow_prefund`.
+# `#[account(init)]` uses plain `CreateAccount`, which fails on a prefunded PDA, and
+# anchor-lang's transitive `solana-system-interface` 2.x predates the instruction.
+# `bincode` enables the instruction builders.
+solana-system-interface = { workspace = true, features = ["bincode"] }
+
+[dev-dependencies]
+solana-address.workspace = true
+solana-noreplay.workspace = true
+# Parity reference for `support::guardian_set::is_active`.
+wormhole-svm-definitions.workspace = true
+
+[lints]
+workspace = true
