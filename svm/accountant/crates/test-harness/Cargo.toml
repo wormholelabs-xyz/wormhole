@@ -9,7 +9,8 @@ repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
-# Dev-only: programs list this crate under `[dev-dependencies]`. Every dependency below is
+# Host-only: programs list this crate under `[dev-dependencies]`; `accountant-go-codegen` is a
+# host bin. Every dependency below is
 # already pinned in the workspace lockfile via the program crates' own dev-dependencies.
 [dependencies]
 accountant-operational-core.workspace = true

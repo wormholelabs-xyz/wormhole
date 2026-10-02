@@ -21,6 +21,7 @@ import (
 
 	"sync/atomic"
 
+	"github.com/certusone/wormhole/node/pkg/accountant"
 	"github.com/certusone/wormhole/node/pkg/adminrpc"
 	"github.com/certusone/wormhole/node/pkg/common"
 	guardianDB "github.com/certusone/wormhole/node/pkg/db"
@@ -920,13 +921,14 @@ func TestGuardianConfigs(t *testing.T) {
 			name: "unfulfilled-dependency",
 			opts: []*GuardianOption{
 				GuardianOptionAccountant(
-					"",    // websocket
-					"",    // contract
-					false, // enforcing
-					nil,   // wormchainConn
-					"",    // nttContract
-					nil,   // nttWormchainConn
-					100,   // submitObservationBatchSize
+					"",                                  // websocket
+					"",                                  // contract
+					false,                               // enforcing
+					nil,                                 // wormchainConn
+					"",                                  // nttContract
+					nil,                                 // nttWormchainConn
+					accountant.AccountantSolanaConfig{}, // solanaCfg
+					100,                                 // submitObservationBatchSize
 				),
 			},
 			err: ComponentDependencyError{componentName: "accountant", dependencyName: "db"}.Error(),
@@ -936,13 +938,14 @@ func TestGuardianConfigs(t *testing.T) {
 			opts: []*GuardianOption{
 				GuardianOptionDatabase(nil),
 				GuardianOptionAccountant(
-					"",    // websocket
-					"",    // contract
-					false, // enforcing
-					nil,   // wormchainConn
-					"",    // nttContract
-					nil,   // nttWormchainConn
-					0,     // submitObservationBatchSize
+					"",                                  // websocket
+					"",                                  // contract
+					false,                               // enforcing
+					nil,                                 // wormchainConn
+					"",                                  // nttContract
+					nil,                                 // nttWormchainConn
+					accountant.AccountantSolanaConfig{}, // solanaCfg
+					0,                                   // submitObservationBatchSize
 				),
 			},
 			err: "accountantSubmitObservationBatchSize must be greater than zero",

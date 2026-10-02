@@ -134,6 +134,13 @@ build-prod: build
 test: build-devnet
     {{test_env}} cargo test
 
+# A bare `cargo test` fails to compile, because the `env!` addresses need values.
+# The recipe supplies them. `just test` checks the written files.
+
+[doc("Write the Go layout constants and fixtures of node/pkg/accountant from the WTT accountant.")]
+go-codegen:
+    {{test_env}} cargo run -p accountant-go-codegen --locked
+
 # Verify a deploy-ready `.so` enforces a specific operator authority pubkey, independent of
 # the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
 # gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the
@@ -268,6 +275,15 @@ e2e-upgrade-deploy program="global-accountant": build-devnet
 [doc("upgrade_contract e2e step 2: sign and submit the UpgradeContract VAA against the running surfpool.")]
 e2e-upgrade-submit program="global-accountant":
     {{test_env}} cargo test -p {{program}} --test surfpool upgrade_contract::submit_upgrade_vaa -- --ignored --exact --nocapture
+
+# The guardian e2e is node/pkg/accountant/solana_e2e_test.go, behind the `surfpool`
+# build tag. It starts its own surfpool. It deploys this `.so` and the NoReplay fixture.
+# It seeds the GuardianSet and ChainRegistration accounts. Then it drives the guardian's
+# submission worker, log watcher and audit. It skips when `surfpool` is missing.
+
+[doc("Guardian e2e of the WTT accountant against surfpool: builds the .so, then runs the Go surfpool-tagged test.")]
+e2e-guardian: build-devnet
+    cd ../../node && go test -tags surfpool -count=1 -run '^TestSurfpool' -v ./pkg/accountant/
 
 [doc("upgrade_contract e2e: kill the surfpool from step 1.")]
 e2e-upgrade-stop program="global-accountant":

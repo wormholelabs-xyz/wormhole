@@ -215,7 +215,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 
 		submitFailures.Add(float64(len(msgs)))
-		acct.clearSubmitPendingFlags(msgs)
+		acct.clearSubmitPendingFlags(msgs, backendWormchain)
 		return
 	}
 
@@ -228,7 +228,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 
 		submitFailures.Add(float64(len(msgs)))
-		acct.clearSubmitPendingFlags(msgs)
+		acct.clearSubmitPendingFlags(msgs, backendWormchain)
 		return
 	}
 
@@ -240,7 +240,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 
 		submitFailures.Add(float64(len(msgs)))
-		acct.clearSubmitPendingFlags(msgs)
+		acct.clearSubmitPendingFlags(msgs, backendWormchain)
 		return
 	}
 
@@ -270,7 +270,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 	}
 
-	acct.clearSubmitPendingFlags(msgs)
+	acct.clearSubmitPendingFlags(msgs, backendWormchain)
 }
 
 // handleCommittedTransfer updates the pending map and publishes a committed transfer. It grabs the lock.

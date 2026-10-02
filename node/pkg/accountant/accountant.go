@@ -8,6 +8,7 @@ package accountant
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -58,6 +59,12 @@ type (
 		isNTT       bool
 		enforceFlag bool
 
+		// vaaDigest is the decoded digest. newPendingEntry sets it while the Solana backend is enabled.
+		vaaDigest [digestLen]byte
+		// solanaFields is the record the Solana accountant program hashes. newPendingEntry sets it
+		// on Token Bridge entries while the Solana backend is enabled.
+		solanaFields *solanaObservationFields
+
 		// stateLock is used to protect the contents of the state struct.
 		stateLock sync.Mutex
 
@@ -66,11 +73,21 @@ type (
 			// updTime is the time that the state struct was last updated.
 			updTime time.Time
 
-			// submitPending indicates if the observation is either in the channel waiting to be submitted or in an outstanding transaction.
-			// The audit should not resubmit anything where submitPending is set to true.
-			submitPending bool
+			// submitPending shows, per backend, that the observation waits in the channel or is in an outstanding transaction.
+			// The audit must not resubmit to a backend whose flag is set.
+			submitPending [numAccountantBackends]bool
 		}
 	}
+)
+
+// accountantBackend indexes the per-backend submission state of a pending entry.
+type accountantBackend uint8
+
+const (
+	// The wormchain contract. NTT entries use this slot for the NTT contract.
+	backendWormchain accountantBackend = iota
+	backendSolana
+	numAccountantBackends
 )
 
 // Accountant is the object that manages the interface to the wormchain accountant smart contract.
@@ -99,6 +116,10 @@ type Accountant struct {
 	nttDirectEmitters validEmitters
 	nttArEmitters     validEmitters
 	nttSubChan        chan *common.MessagePublication
+
+	solanaCfg AccountantSolanaConfig
+	// Start builds solana from solanaCfg. A nil value disables the Solana backend.
+	solana *solanaBackend
 }
 
 // On startup, there can be a large number of re-submission requests.
@@ -107,9 +128,19 @@ const subChanSize = 5000
 // auditSubmitTimeout is the timeout for blocking channel writes during audit.
 const auditSubmitTimeout = 30 * time.Second
 
-// baseEnabled returns true if the base accountant is enabled, false if not.
-func (acct *Accountant) baseEnabled() bool {
+// wormchainBaseEnabled returns true if the wormchain base accountant is enabled.
+func (acct *Accountant) wormchainBaseEnabled() bool {
 	return acct.contract != ""
+}
+
+// solanaEnabled returns true if the Solana base accountant is enabled.
+func (acct *Accountant) solanaEnabled() bool {
+	return acct.solana != nil
+}
+
+// baseEnabled returns true if any backend covers Token Bridge transfers.
+func (acct *Accountant) baseEnabled() bool {
+	return acct.wormchainBaseEnabled() || acct.solanaEnabled()
 }
 
 // NewAccountant creates a new instance of the Accountant object.
@@ -124,6 +155,7 @@ func NewAccountant(
 	enforceFlag bool, // whether or not accountant should be enforced
 	nttContract string, // the address of the NTT smart contract on wormchain
 	nttWormchainConn AccountantWormchainConn, // used for communicating with the NTT smart contract
+	solanaCfg AccountantSolanaConfig, // the Solana accountant backend; the zero value disables it
 	guardianSigner guardiansigner.GuardianSigner, // the guardian signer used for signing observation requests
 	gst *common.GuardianSetState, // used to get the current guardian set index when sending observation requests
 	msgChan chan<- *common.MessagePublication, // the channel where transfers received by the accountant runnable should be published
@@ -158,6 +190,8 @@ func NewAccountant(
 		nttDirectEmitters: make(validEmitters),
 		nttArEmitters:     make(validEmitters),
 		nttSubChan:        make(chan *common.MessagePublication, subChanSize),
+
+		solanaCfg: solanaCfg,
 	}
 }
 
@@ -166,6 +200,15 @@ func (acct *Accountant) Start(ctx context.Context) error {
 	acct.logger.Debug("entering Start", zap.Bool("enforceFlag", acct.enforceFlag), zap.Bool("baseEnabled", acct.baseEnabled()), zap.Bool("nttEnabled", acct.nttEnabled()), zap.Int("submitObservationBatchSize", acct.submitObservationBatchSize))
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
+
+	solBackend, err := newSolanaBackend(acct.solanaCfg)
+	if err != nil {
+		return fmt.Errorf("failed to configure the solana accountant: %w", err)
+	}
+	acct.solana = solBackend
+	if acct.solanaEnabled() {
+		acct.logger.Debug("solana accountant enabled", zap.Bool("baseEnabled", acct.baseEnabled()))
+	}
 
 	if !acct.baseEnabled() && !acct.nttEnabled() {
 		return fmt.Errorf("start should not be called when neither base nor NTT accountant are enabled")
@@ -210,7 +253,7 @@ func (acct *Accountant) Start(ctx context.Context) error {
 	}
 
 	// Start the watcher to listen to transfer events from the smart contract.
-	if acct.baseEnabled() {
+	if acct.wormchainBaseEnabled() {
 		if acct.env == common.AccountantMock {
 			// We're not in a runnable context, so we can't use supervisor.
 			go func() {
@@ -225,6 +268,16 @@ func (acct *Accountant) Start(ctx context.Context) error {
 				return fmt.Errorf("failed to start watcher: %w", err)
 			}
 
+		}
+	}
+
+	if acct.solanaEnabled() && acct.env != common.AccountantMock && acct.env != common.GoTest {
+		if err := supervisor.Run(ctx, "acctsolworker", common.WrapWithScissors(acct.solanaBaseWorker, "acctsolworker")); err != nil {
+			return fmt.Errorf("failed to start solana submit observation worker: %w", err)
+		}
+
+		if err := supervisor.Run(ctx, "acctsolwatcher", common.WrapWithScissors(acct.solanaBaseWatcher, "acctsolwatcher")); err != nil {
+			return fmt.Errorf("failed to start solana watcher: %w", err)
 		}
 	}
 
@@ -247,6 +300,10 @@ func (acct *Accountant) Close() {
 		acct.nttWormchainConn.Close()
 		acct.nttWormchainConn = nil
 	}
+	if acct.solana != nil {
+		acct.solana.conn.Close()
+		acct.solana = nil
+	}
 }
 
 func (acct *Accountant) FeatureString() string {
@@ -261,6 +318,16 @@ func (acct *Accountant) FeatureString() string {
 			ret += ":"
 		}
 		ret += "ntt-acct"
+	}
+	if acct.solanaEnabled() {
+		if ret != "" {
+			ret += ":"
+		}
+		if !acct.enforceFlag {
+			ret += "sol-acct-logonly"
+		} else {
+			ret += "sol-acct"
+		}
 	}
 
 	return ret
@@ -350,7 +417,12 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 	} else {
 		// Add it to the pending map and the database.
 		// We only add it if it is not already present.
-		pe = &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}
+		// SECURITY: an error here comes from the emitted message, so it must not restart the processor.
+		var err error
+		if pe, err = acct.newPendingEntry(msg, msgId, digest, isNTT, enforceFlag); err != nil {
+			acct.logger.Error("failed to build the pending transfer, dropping it", zap.String("msgID", msgId), zap.Bool("enforcing", enforceFlag), zap.Error(err))
+			return !enforceFlag, nil
+		}
 		if err := acct.addPendingTransferAlreadyLocked(pe); err != nil {
 			acct.logger.Error("failed to persist pending transfer, blocking publishing", zap.String("msgID", msgId), zap.Error(err))
 			return false, err
@@ -364,7 +436,9 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 			tag = "ntt-accountant"
 		}
 		acct.logger.Info(fmt.Sprintf("submitting transfer to %s for approval", tag), zap.String("msgID", msgId), zap.Bool("canPublish", !enforceFlag))
-		_ = acct.submitObservation(acct.ctx, pe, false) // Non-blocking from processor
+		for backend := range numAccountantBackends {
+			_ = acct.submitObservation(acct.ctx, pe, backend, false) // Non-blocking from processor
+		}
 	}
 
 	// If we are not enforcing accountant, the event can be published. Otherwise we have to wait to hear back from the contract.
@@ -383,6 +457,91 @@ func (acct *Accountant) publishTransferAlreadyLocked(pe *pendingEntry) {
 	}
 
 	acct.deletePendingTransferAlreadyLocked(pe.msgId)
+}
+
+// digestLen is the length of a VAA digest and of a Solana content digest.
+const digestLen = 32
+
+// digestBytes decodes the hex digest recorded on a pending entry.
+//
+// SECURITY: a digest is exactly digestLen bytes.
+func digestBytes(digest string) ([digestLen]byte, error) {
+	var out [digestLen]byte
+	raw, err := hex.DecodeString(digest)
+	if err != nil {
+		return out, fmt.Errorf("digest is not hex: %w", err)
+	}
+	if len(raw) != digestLen {
+		return out, fmt.Errorf("digest: want %d bytes, got %d", digestLen, len(raw))
+	}
+	return [digestLen]byte(raw), nil
+}
+
+// processCommittedDigest publishes or drops a transfer that the Solana backend reports as
+// committed under digest got. The VAA digest always matches. If acceptContent is true, the
+// Solana content digest also matches. submit_observations commits that digest. It returns
+// true when it publishes the transfer.
+//
+// SECURITY: the caller holds pendingTransfersLock.
+// SECURITY: precondition: the Solana backend is enabled, so newPendingEntry set vaaDigest and solanaFields.
+// SECURITY: precondition msgId != "". A violation leaves the transfer pending.
+func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, acceptContent bool, source string) bool {
+	if msgId == "" {
+		acct.logger.Error("acctwatch: committed digest with an empty message id", zap.String("source", source))
+		return false
+	}
+
+	pe, exists := acct.pendingTransfers[msgId]
+	if !exists {
+		// Guardians that submit to the Accountant after the transfer confirms emit this log.
+		// submit_obs.go already processed these transfers. Thus the watcher event finds no entry in the pendingTransfers map.
+		acct.logger.Info("acctwatch: unknown transfer has been approved, ignoring it", zap.String("msgId", msgId), zap.String("source", source))
+		return false
+	}
+
+	// A Token Bridge entry carries solanaFields while Solana is enabled.
+	if got == pe.vaaDigest || (acceptContent && !pe.isNTT && got == pe.solanaFields.contentDigest) {
+		acct.logger.Info("acctwatch: pending transfer has been approved", zap.String("msgId", msgId), zap.String("source", source))
+		acct.publishTransferAlreadyLocked(pe)
+		return true
+	}
+
+	digestMismatches.Inc()
+	acct.logger.Error("acctwatch: digest mismatch, dropping transfer",
+		zap.String("msgID", msgId),
+		zap.String("source", source),
+		zap.String("oldDigest", pe.digest),
+		zap.String("newDigest", hex.EncodeToString(got[:])),
+	)
+	acct.deletePendingTransferAlreadyLocked(msgId)
+	return false
+}
+
+// newPendingEntry builds a pending transfer. While Solana is enabled, it decodes the VAA
+// digest of every entry and builds the Solana observation record of a Token Bridge entry.
+//
+// SECURITY: postcondition: while Solana is enabled, every entry has vaaDigest and a Token
+// Bridge entry has solanaFields. processCommittedDigest compares against both.
+// An error comes from the message itself and occurs only while Solana is enabled.
+func (acct *Accountant) newPendingEntry(msg *common.MessagePublication, msgId string, digest string, isNTT bool, enforceFlag bool) (*pendingEntry, error) {
+	if !acct.solanaEnabled() {
+		return &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}, nil
+	}
+
+	vaaDigest, err := digestBytes(digest)
+	if err != nil {
+		return nil, err
+	}
+	pe := &pendingEntry{msg: msg, msgId: msgId, digest: digest, vaaDigest: vaaDigest, isNTT: isNTT, enforceFlag: enforceFlag}
+	if isNTT {
+		return pe, nil
+	}
+
+	pe.solanaFields, err = solanaObservationFieldsFromPayload(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, msg.Payload, vaaDigest)
+	if err != nil {
+		return nil, err
+	}
+	return pe, nil
 }
 
 // addPendingTransferAlreadyLocked adds a pending transfer to both the map and the database. It assumes the caller holds the lock.
@@ -438,7 +597,14 @@ func (acct *Accountant) loadPendingTransfers() error {
 		acct.logger.Info("reloaded pending transfer", zap.String("msgID", msgId))
 
 		digest := msg.CreateDigest()
-		pe := &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}
+		pe, err := acct.newPendingEntry(msg, msgId, digest, isNTT, enforceFlag)
+		if err != nil {
+			acct.logger.Error("dropping reloaded pending transfer because it cannot be built", zap.String("msgID", msgId), zap.Error(err))
+			if err := acct.db.AcctDeletePendingTransfer(msgId); err != nil {
+				acct.logger.Error("failed to delete pending transfer from the db", zap.String("msgId", msgId), zap.Error(err))
+			}
+			continue
+		}
 		pe.setUpdTime()
 		acct.pendingTransfers[msgId] = pe
 	}
@@ -453,20 +619,25 @@ func (acct *Accountant) loadPendingTransfers() error {
 	return nil
 }
 
-// submitObservation sends an observation request to the worker so it can be submitted to the contract.  If the transfer is already
-// marked as "submit pending", this function returns false without doing anything. Otherwise it returns true. The return value can
-// be used to avoid unnecessary error logging. If blocking is false and writing to the channel would block, this function returns
-// without doing anything, assuming the pending transfer will be handled on the next audit interval. If blocking is true, it will
-// block until the channel has space, a timeout occurs, or the context is cancelled. This function grabs the state lock.
-func (acct *Accountant) submitObservation(ctx context.Context, pe *pendingEntry, blocking bool) bool {
-	pe.stateLock.Lock()
-
-	if pe.state.submitPending {
-		pe.stateLock.Unlock()
+// submitObservation sends an observation request to the worker of one backend, which submits it to the contract.
+// If the backend does not cover the transfer, this function returns false and does nothing.
+// If the transfer already has the "submit pending" mark for that backend, this function returns false and does nothing.
+// Otherwise it returns true. Use the return value to avoid unnecessary error logs.
+// If blocking is false and a channel write would block, this function returns. The next audit interval handles the transfer.
+// If blocking is true, it blocks until the channel has space, a timeout occurs, or the context ends.
+// This function grabs the state lock.
+func (acct *Accountant) submitObservation(ctx context.Context, pe *pendingEntry, backend accountantBackend, blocking bool) bool {
+	subChan, tag, covered := acct.backendChannel(pe, backend)
+	if !covered {
 		return false
 	}
 
-	pe.state.submitPending = true
+	pe.stateLock.Lock()
+	if pe.state.submitPending[backend] {
+		pe.stateLock.Unlock()
+		return false
+	}
+	pe.state.submitPending[backend] = true
 	pe.state.updTime = time.Now()
 	pe.stateLock.Unlock()
 
@@ -474,20 +645,33 @@ func (acct *Accountant) submitObservation(ctx context.Context, pe *pendingEntry,
 	if blocking {
 		timeout = auditSubmitTimeout
 	}
-
-	if pe.isNTT {
-		acct.submitToChannel(ctx, pe, acct.nttSubChan, "ntt-accountant", blocking, timeout)
-	} else {
-		acct.submitToChannel(ctx, pe, acct.subChan, "accountant", blocking, timeout)
-	}
-
+	acct.submitToChannel(ctx, pe, backend, subChan, tag, blocking, timeout)
 	return true
 }
 
+// backendChannel returns the submission channel and log tag of backend for pe. The final
+// return is false when the backend does not cover pe.
+func (acct *Accountant) backendChannel(pe *pendingEntry, backend accountantBackend) (chan *common.MessagePublication, string, bool) {
+	switch backend {
+	case backendWormchain:
+		if pe.isNTT {
+			return acct.nttSubChan, "ntt-accountant", true
+		}
+		if acct.wormchainBaseEnabled() {
+			return acct.subChan, "accountant", true
+		}
+	case backendSolana:
+		if !pe.isNTT && acct.solanaEnabled() {
+			return acct.solana.subChan, acct.solana.tag, true
+		}
+	}
+	return nil, "", false
+}
+
 // submitToChannel submits an observation to the specified channel. If blocking is false and the channel is full,
-// it marks the transfer as no longer pending so it will be resubmitted by the audit. If blocking is true, it will
+// it clears the pending mark of the transfer for backend, so the audit resubmits it. If blocking is true, it will
 // block until the channel has space, a timeout occurs, or the context is cancelled.
-func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, subChan chan *common.MessagePublication, tag string, blocking bool, timeout time.Duration) {
+func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, backend accountantBackend, subChan chan *common.MessagePublication, tag string, blocking bool, timeout time.Duration) {
 	if blocking {
 		select {
 		case subChan <- pe.msg:
@@ -497,14 +681,10 @@ func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, s
 			acct.logger.Warn(fmt.Sprintf("timeout submitting observation to %s channel, will retry next audit", tag),
 				zap.String("msgId", pe.msgId),
 				zap.Duration("timeout", timeout))
-			pe.stateLock.Lock()
-			pe.state.submitPending = false
-			pe.stateLock.Unlock()
+			pe.setSubmitPending(backend, false)
 		case <-ctx.Done():
 			acct.logger.Warn(fmt.Sprintf("context cancelled while submitting to %s channel", tag), zap.String("msgId", pe.msgId))
-			pe.stateLock.Lock()
-			pe.state.submitPending = false
-			pe.stateLock.Unlock()
+			pe.setSubmitPending(backend, false)
 		}
 	} else {
 		// Non-blocking write
@@ -513,38 +693,36 @@ func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, s
 			acct.logger.Debug(fmt.Sprintf("submitted observation to channel for %s", tag), zap.String("msgId", pe.msgId))
 		default:
 			acct.logger.Error(fmt.Sprintf("unable to submit observation to %s because the channel is full, will try next interval", tag), zap.String("msgId", pe.msgId))
-			pe.stateLock.Lock()
-			pe.state.submitPending = false
-			pe.stateLock.Unlock()
+			pe.setSubmitPending(backend, false)
 		}
 	}
 }
 
-// clearSubmitPendingFlags is called after a batch is finished being submitted (success or fail). It clears the submit pending flag for everything in the batch.
-// It grabs the pending transfer and state locks.
-func (acct *Accountant) clearSubmitPendingFlags(msgs []*common.MessagePublication) {
+// clearSubmitPendingFlags runs after the submission of a batch to backend ends, with success or failure. It clears the
+// backend's submit pending flag for each entry in the batch. It grabs the pending transfer lock and the state locks.
+func (acct *Accountant) clearSubmitPendingFlags(msgs []*common.MessagePublication, backend accountantBackend) {
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
 	for _, msg := range msgs {
 		if pe, exists := acct.pendingTransfers[msg.MessageIDString()]; exists {
-			pe.setSubmitPending(false)
+			pe.setSubmitPending(backend, false)
 		}
 	}
 }
 
 // setSubmitPending sets the submit pending flag on the pending transfer object to the specified value. It grabs the state lock.
-func (pe *pendingEntry) setSubmitPending(val bool) {
+func (pe *pendingEntry) setSubmitPending(backend accountantBackend, val bool) {
 	pe.stateLock.Lock()
 	defer pe.stateLock.Unlock()
-	pe.state.submitPending = val
+	pe.state.submitPending[backend] = val
 	pe.state.updTime = time.Now()
 }
 
 // submitPending returns the "submit pending" flag from the pending transfer object. It grabs the state lock.
-func (pe *pendingEntry) submitPending() bool {
+func (pe *pendingEntry) submitPending(backend accountantBackend) bool {
 	pe.stateLock.Lock()
 	defer pe.stateLock.Unlock()
-	return pe.state.submitPending
+	return pe.state.submitPending[backend]
 }
 
 // setUpdTime sets the last update time on the pending transfer object to the current time. It grabs the state lock.
