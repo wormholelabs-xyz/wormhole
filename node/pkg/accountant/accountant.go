@@ -120,6 +120,8 @@ type Accountant struct {
 	solanaCfg AccountantSolanaConfig
 	// Start builds solana from solanaCfg. A nil value disables the Solana backend.
 	solana *solanaBackend
+	// Capacity 1, so requests that arrive during an audit coalesce into one more audit.
+	solanaAuditRequests chan struct{}
 }
 
 // On startup, there can be a large number of re-submission requests.
@@ -191,7 +193,8 @@ func NewAccountant(
 		nttArEmitters:     make(validEmitters),
 		nttSubChan:        make(chan *common.MessagePublication, subChanSize),
 
-		solanaCfg: solanaCfg,
+		solanaCfg:           solanaCfg,
+		solanaAuditRequests: make(chan struct{}, 1),
 	}
 }
 

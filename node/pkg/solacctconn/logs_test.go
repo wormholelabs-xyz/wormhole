@@ -211,7 +211,8 @@ func TestSubscribeLogsEvents(t *testing.T) {
 	}
 }
 
-// TestSubscribeLogsChannelCloses covers every path that ends the subscription.
+// TestSubscribeLogsChannelCloses covers every path that ends the subscription. A failure
+// before the acknowledgement is an error from subscribeLogs.
 func TestSubscribeLogsChannelCloses(t *testing.T) {
 	sig := testLogsSignature
 
@@ -219,10 +220,13 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 		name      string
 		serve     func(t *testing.T, conn *websocket.Conn, subscribe string)
 		cancelCtx bool
+		// wantErr fails the subscribe call before any channel exists.
+		wantErr bool
 	}{
 		{
-			name:  "server closes the connection",
-			serve: func(t *testing.T, conn *websocket.Conn, subscribe string) {},
+			name:    "server closes the connection",
+			serve:   func(t *testing.T, conn *websocket.Conn, subscribe string) {},
+			wantErr: true,
 		},
 		{
 			name:      "context cancelled",
@@ -230,12 +234,14 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 			cancelCtx: true,
 		},
 		{
-			name:  "malformed frame",
-			serve: writeFrames("not json"),
+			name:    "malformed frame",
+			serve:   writeFrames("not json"),
+			wantErr: true,
 		},
 		{
-			name:  "server error reply",
-			serve: writeFrames(`{"jsonrpc":"2.0","error":{"code":-32602,"message":"bad params"},"id":1}`),
+			name:    "server error reply",
+			serve:   writeFrames(`{"jsonrpc":"2.0","error":{"code":-32602,"message":"bad params"},"id":1}`),
+			wantErr: true,
 		},
 		{
 			name:  "notification without params",
@@ -250,20 +256,24 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 			serve: writeFrames(testAck, notificationFrame(sig, overLogLimit(), nil)),
 		},
 		{
-			name:  "no acknowledgement",
-			serve: answerPingsAfter(0),
+			name:    "no acknowledgement",
+			serve:   answerPingsAfter(0),
+			wantErr: true,
 		},
 		{
-			name:  "notification before the acknowledgement",
-			serve: writeFrames(notificationFrame(sig, nil, nil)),
+			name:    "notification before the acknowledgement",
+			serve:   writeFrames(notificationFrame(sig, nil, nil)),
+			wantErr: true,
 		},
 		{
-			name:  "acknowledgement for another request id",
-			serve: writeFrames(`{"jsonrpc":"2.0","result":7,"id":2}`),
+			name:    "acknowledgement for another request id",
+			serve:   writeFrames(`{"jsonrpc":"2.0","result":7,"id":2}`),
+			wantErr: true,
 		},
 		{
-			name:  "acknowledgement without a subscription id",
-			serve: writeFrames(`{"jsonrpc":"2.0","id":1}`),
+			name:    "acknowledgement without a subscription id",
+			serve:   writeFrames(`{"jsonrpc":"2.0","id":1}`),
+			wantErr: true,
 		},
 		{
 			name:  "notification for another subscription",
@@ -288,6 +298,11 @@ func TestSubscribeLogsChannelCloses(t *testing.T) {
 			defer cancel()
 
 			events, err := conn.subscribeLogs(ctx, testLogsProgram, testLogsTimeouts)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, events)
+				return
+			}
 			require.NoError(t, err)
 
 			if tt.cancelCtx {

@@ -61,9 +61,18 @@ func (acct *Accountant) solanaBaseWatcher(ctx context.Context) error {
 	return acct.solanaWatcher(ctx, acct.solana)
 }
 
-// solanaWatcher subscribes to the accountant program's logs and drains them. It returns on
-// context cancellation, on a subscribe failure, and when the subscription closes, so the
-// supervisor restarts it.
+// requestSolanaAudit asks the audit goroutine for one Solana audit. A request already queued
+// covers this one.
+func (acct *Accountant) requestSolanaAudit() {
+	select {
+	case acct.solanaAuditRequests <- struct{}{}:
+	default:
+	}
+}
+
+// solanaWatcher subscribes to the accountant program's logs, requests one audit, and drains
+// the logs. It returns on context cancellation, on a subscribe failure, and when the
+// subscription closes, so the supervisor restarts it.
 func (acct *Accountant) solanaWatcher(ctx context.Context, b *solanaBackend) error {
 	acct.logger.Info("acctwatch: creating solana watcher", zap.String("backend", b.tag), zap.Stringer("program", b.program))
 
@@ -72,6 +81,9 @@ func (acct *Accountant) solanaWatcher(ctx context.Context, b *solanaBackend) err
 		solanaConnectionErrors.Inc()
 		return fmt.Errorf("failed to subscribe to %s logs: %w", b.tag, err)
 	}
+	// SECURITY: the live path misses commits that finalized while no subscription was open.
+	// The audit recovers them.
+	acct.requestSolanaAudit()
 
 	for {
 		select {

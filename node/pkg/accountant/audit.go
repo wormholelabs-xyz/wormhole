@@ -138,7 +138,8 @@ func hasGuardianSigned(signatures string, guardianIndex int) bool {
 	return sigInt.Bit(guardianIndex) == 1
 }
 
-// audit is the runnable that executes the audit each interval.
+// audit is the runnable that executes the audit each interval, and a Solana audit on each
+// request from the Solana watcher.
 func (acct *Accountant) audit(ctx context.Context) error {
 	ticker := time.NewTicker(auditInterval)
 	defer ticker.Stop()
@@ -149,6 +150,10 @@ func (acct *Accountant) audit(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			acct.runAudit(ctx)
+		case <-acct.solanaAuditRequests:
+			if acct.solanaEnabled() {
+				acct.runSolanaAudit(ctx, acct.solana)
+			}
 		}
 	}
 }

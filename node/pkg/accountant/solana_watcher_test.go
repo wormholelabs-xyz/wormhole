@@ -547,3 +547,26 @@ func TestSolanaWatcherLoop(t *testing.T) {
 		require.ErrorIs(t, err, want)
 	})
 }
+
+// TestSolanaWatcherSubscribeStartsAudit releases a transfer whose commit landed while no
+// subscription was open. No log event arrives, and the audit ticker is 15 minutes away, so
+// only the audit that the subscribe requests can release it.
+func TestSolanaWatcherSubscribeStartsAudit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	f := newSolanaAuditFixture(t, ctx)
+	f.markAccounted(t)
+	f.conn.SetSignaturesForAddress(f.pending, []solana.Signature{{4}})
+	f.conn.SetTransaction(solana.Signature{4}, f.commitTransaction(f.pe.solanaFields.contentDigest))
+
+	go func() { _ = f.acct.audit(ctx) }()
+	go func() { _ = f.acct.solanaWatcher(ctx, f.acct.solana) }()
+
+	select {
+	case published := <-f.msgChan:
+		assert.Equal(t, f.msg.MessageIDString(), published.MessageIDString())
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the subscribe audit to publish")
+	}
+}

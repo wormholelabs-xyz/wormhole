@@ -77,8 +77,9 @@ type logsNotificationValue struct {
 }
 
 // SubscribeLogs opens a logsSubscribe subscription on the transactions that mention
-// program, at finalized commitment. The channel closes on any read, decode, keepalive or
-// context error, and the supervisor restarts the watcher.
+// program, at finalized commitment. It returns after the server acknowledges the
+// subscription. The channel closes on any read, decode, keepalive or context error, and the
+// supervisor restarts the watcher.
 func (c *ClientConn) SubscribeLogs(ctx context.Context, program solana.PublicKey) (<-chan LogEvent, error) {
 	return c.subscribeLogs(ctx, program, productionLogsTimeouts)
 }
@@ -106,15 +107,22 @@ func (c *ClientConn) subscribeLogs(ctx context.Context, program solana.PublicKey
 		return nil, fmt.Errorf("logsSubscribe: write subscription: %w", err)
 	}
 
+	// SECURITY: an audit after this return reads state the subscription already covers.
+	subscriptionID, err := readLogsSubscribeAck(ctx, conn, timeouts.ackTimeout)
+	if err != nil {
+		_ = conn.CloseNow()
+		return nil, err
+	}
+
 	events := make(chan LogEvent, logEventBufferLen)
-	go pumpLogs(ctx, conn, events, timeouts)
+	go pumpLogs(ctx, conn, subscriptionID, events, timeouts)
 	return events, nil
 }
 
-// pumpLogs reads the acknowledgement, then forwards notifications until a read or decode
-// fails. It owns the connection and the channel. Thus it is the only writer and the only
-// closer of the channel.
-func pumpLogs(ctx context.Context, conn *websocket.Conn, events chan<- LogEvent, timeouts logsTimeouts) {
+// pumpLogs forwards the notifications of subscriptionID until a read or decode fails. It
+// owns the connection and the channel. Thus it is the only writer and the only closer of the
+// channel.
+func pumpLogs(ctx context.Context, conn *websocket.Conn, subscriptionID uint64, events chan<- LogEvent, timeouts logsTimeouts) {
 	pumpCtx, cancel := context.WithCancel(ctx)
 	var pinger sync.WaitGroup
 	pinger.Add(1)
@@ -129,11 +137,6 @@ func pumpLogs(ctx context.Context, conn *websocket.Conn, events chan<- LogEvent,
 	defer pinger.Wait()
 	defer cancel()
 	defer close(events)
-
-	subscriptionID, err := readLogsSubscribeAck(pumpCtx, conn, timeouts.ackTimeout)
-	if err != nil {
-		return
-	}
 
 	for {
 		_, raw, err := conn.Read(pumpCtx)
