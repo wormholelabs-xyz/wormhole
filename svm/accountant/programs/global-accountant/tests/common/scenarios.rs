@@ -245,6 +245,7 @@ impl ObsScenario {
             self.sequence,
             self.guardian_set_index,
             &self.content_digest,
+            TX_ID,
         )
         .0;
         self.body = body;

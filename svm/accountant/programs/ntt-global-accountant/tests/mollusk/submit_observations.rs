@@ -1,5 +1,5 @@
 //! `submit_observations`: guardian observations accumulate per `(chain, emitter, sequence,
-//! guardian set, digest)` and commit at quorum, routed by the sender's hub.
+//! guardian set, digest, tx_id)` and commit at quorum, routed by the sender's hub.
 
 use accountant_test_fixtures::NttCorpus;
 use global_accountant_definitions::{
@@ -52,6 +52,7 @@ fn quorum_commit_routes_by_hub_marks_noreplay_and_refunds_payer() {
         s.guardian_set_index,
         s.obs.content_digest(),
         SUBMITTER.to_bytes(),
+        TX_ID,
     );
     expected.signatures = [0b1, 0, 0, 0];
     assert_eq!(pending_layout(pending), expected);
@@ -121,17 +122,27 @@ fn relayed_observation_commits_under_the_inner_sender() {
     assert_balance(&after, &s.dest_balance, Uint256::ZERO);
 }
 
-/// `tx_id` is in the signing digest but not in the content digest, so observations of one
-/// message under different `tx_id` values share a pending PDA. The second id is a 64-byte
-/// Solana-family signature.
+/// `tx_id` seeds the pending PDA, so observations of one message under different `tx_id`
+/// values open sibling PDAs. The second id is a 64-byte Solana-family signature.
 #[test]
-fn tx_id_does_not_split_the_pending_pda() {
+fn tx_id_splits_the_pending_pda() {
     let mollusk = mollusk();
     let s = hub_to_spoke(8);
     let first = s.submit_once(&mollusk, s.initial_accounts(), 0);
     assert_success(&first, "guardian 0, default 32-byte tx_id");
 
     let other_tx_id = TxId::Signature(&[0x5Au8; 64]);
+    let sibling = accountant_operational_core::support::quorum::derive_pending_pda(
+        &program_id(),
+        s.obs.chain,
+        &s.obs.emitter,
+        s.obs.sequence,
+        s.guardian_set_index,
+        &s.obs.content_digest(),
+        other_tx_id,
+    )
+    .0;
+    assert_ne!(sibling, s.pending_pda);
     let signature = sign_digest(
         &s.guardians[1],
         &s.obs.signing_digest_with(
@@ -139,19 +150,34 @@ fn tx_id_does_not_split_the_pending_pda() {
             other_tx_id,
         ),
     );
-    let second = s.submit_with(
+    let ix_data = s.ix_data_signed(1, signature, other_tx_id);
+
+    let mismatch = s.submit_with(
         &mollusk,
-        first.resulting_accounts,
-        s.ix_data_signed(1, signature, other_tx_id),
+        first.resulting_accounts.clone(),
+        ix_data.clone(),
         s.account_metas(),
     );
-    assert_success(&second, "guardian 1, 64-byte tx_id");
-    let pending = pending_layout(find_account(&second.resulting_accounts, &s.pending_pda));
-    assert_eq!(
-        pending.num_signatures(),
-        2,
-        "both observations in one pending PDA"
+    assert_error(
+        &mismatch,
+        GlobalAccountantError::InvalidPda as u64,
+        "64-byte tx_id against the 32-byte tx_id PDA",
     );
+
+    let mut accounts = first.resulting_accounts;
+    accounts.push((sibling, uninitialised_pda_account()));
+    let mut metas = s.account_metas();
+    metas[1] = AccountMeta::new(sibling, false);
+    let second = s.submit_with(&mollusk, accounts, ix_data, metas);
+    assert_success(&second, "guardian 1, 64-byte tx_id");
+    let after = &second.resulting_accounts;
+    assert_eq!(
+        pending_layout(find_account(after, &s.pending_pda)).num_signatures(),
+        1
+    );
+    let sibling_layout = pending_layout(find_account(after, &sibling));
+    assert_eq!(sibling_layout.num_signatures(), 1);
+    assert_eq!(sibling_layout.tx_id(), Ok(other_tx_id));
 }
 
 #[test]

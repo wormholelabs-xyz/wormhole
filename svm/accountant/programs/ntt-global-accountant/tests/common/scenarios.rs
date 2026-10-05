@@ -428,6 +428,7 @@ impl ObsScenario {
                 obs.sequence,
                 guardian_set_index,
                 &obs.content_digest(),
+                TX_ID,
             )
             .0,
             guardian_set: derive_guardian_set_pda(guardian_set_index, &core_bridge_program_id()).0,

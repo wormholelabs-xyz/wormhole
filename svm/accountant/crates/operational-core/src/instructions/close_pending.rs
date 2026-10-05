@@ -51,6 +51,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
         sequence,
         layout.guardian_set_index,
         layout.content_digest,
+        layout.tx_id().map_err(err)?,
     );
     pda::check(program_id, pending_pda, &key)?;
 

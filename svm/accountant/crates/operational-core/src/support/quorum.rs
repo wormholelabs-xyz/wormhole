@@ -49,9 +49,12 @@ pub const SECP256K1_SIGNATURE_LEN: usize = 65;
 
 /// Observation fields the quorum path reads; product fields stay on each program's ix.
 #[derive(Clone, Copy)]
-pub struct ParsedObservation {
+pub struct ParsedObservation<'a> {
     /// Pending-PDA seed and commit-log key.
     pub content_digest: [u8; 32],
+    /// Pending-PDA seed. One sibling PDA per source transaction id, as wormchain keys
+    /// pending data on `(digest, tx_hash)`.
+    pub tx_id: TxId<'a>,
     pub chain: u16,
     pub emitter: [u8; 32],
     pub sequence: u64,
@@ -68,9 +71,8 @@ pub enum PendingAction {
     Continue,
 }
 
-/// One record per `(chain, emitter, sequence, guardian_set_index, content_digest)`. A
-/// rotation or a fork opens a sibling, keeping each guardian set's signatures in its own
-/// record.
+/// One record per `(chain, emitter, sequence, guardian_set_index, content_digest, tx_id)`.
+/// A rotation, a fork, or another source transaction id opens a sibling.
 pub fn derive_pending_pda(
     program_id: &Pubkey,
     chain: u16,
@@ -78,6 +80,7 @@ pub fn derive_pending_pda(
     sequence: u64,
     guardian_set_index: u32,
     content_digest: &[u8; 32],
+    tx_id: TxId<'_>,
 ) -> (Pubkey, u8) {
     let key = PendingObservationsKey::new(
         chain,
@@ -85,30 +88,20 @@ pub fn derive_pending_pda(
         sequence,
         guardian_set_index,
         *content_digest,
+        tx_id,
     );
     pda::derive(program_id, &key)
 }
 
-/// `InvalidPda` unless `pending_pda` is at the address for
-/// `(chain, emitter, sequence, guardian_set_index, content_digest)`.
-fn verify_pending_pda_address(
-    program_id: &Pubkey,
-    pending_pda: &AccountInfo,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-    guardian_set_index: u32,
-    content_digest: &[u8; 32],
-) -> crate::ProgramResult {
-    let key = PendingObservationsKey::new(
-        chain,
-        *emitter,
-        sequence,
-        guardian_set_index,
-        *content_digest,
-    );
-    pda::check(program_id, pending_pda, &key)?;
-    Ok(())
+fn pending_key(parsed: &ParsedObservation) -> PendingObservationsKey {
+    PendingObservationsKey::new(
+        parsed.chain,
+        parsed.emitter,
+        parsed.sequence,
+        parsed.guardian_set_index,
+        parsed.content_digest,
+        parsed.tx_id,
+    )
 }
 
 /// Choose the [`PendingAction`] for this observation.
@@ -124,22 +117,17 @@ pub fn decide_pending_action(
         return Ok(PendingAction::Create);
     }
 
-    verify_pending_pda_address(
-        program_id,
-        pending_pda,
-        parsed.chain,
-        &parsed.emitter,
-        parsed.sequence,
-        parsed.guardian_set_index,
-        &parsed.content_digest,
-    )?;
+    pda::check(program_id, pending_pda, &pending_key(parsed))?;
 
-    // Redundant with the address check: the seeds already fix both fields.
+    // Redundant with the address check: the seeds already fix these fields.
     let existing = accounts::load::<PendingObservationsLayout>(pending_pda)?;
     if existing.guardian_set_index != parsed.guardian_set_index {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     if existing.content_digest != parsed.content_digest {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
+    if existing.tx_id().map_err(err)? != parsed.tx_id {
         return Err(err(GlobalAccountantError::InvalidPda));
     }
     Ok(PendingAction::Continue)
@@ -186,19 +174,18 @@ fn create_pending_pda<'info>(
     pending_pda: &AccountInfo<'info>,
     parsed: &ParsedObservation,
 ) -> crate::ProgramResult {
-    let key = PendingObservationsKey::new(
-        parsed.chain,
-        parsed.emitter,
-        parsed.sequence,
-        parsed.guardian_set_index,
-        parsed.content_digest,
-    );
-    let (_expected, canonical_bump) = pda::derive(program_id, &key);
+    let key = pending_key(parsed);
+    let (expected, canonical_bump) = pda::derive(program_id, &key);
+    // Redundant with the runtime signer check of the create CPI; gives a precise error.
+    if *pending_pda.key != expected {
+        return Err(err(GlobalAccountantError::InvalidPda));
+    }
     let layout = PendingObservationsLayout::new(
         parsed.chain,
         parsed.guardian_set_index,
         parsed.content_digest,
         submitter.key.to_bytes(),
+        parsed.tx_id,
     );
     pda::create(
         program_id,

@@ -15,7 +15,7 @@ use crate::common::{
     accountant_image, assert_bucket_marked, attest_body, chain_registration_account,
     content_digest, emitter, make_guardians, noreplay_authority_pda, sign_digest, signing_digest,
     submit_observations_ix_data, system_program_id, Guardian, GUARDIAN_COUNT, GUARDIAN_SET_INDEX,
-    NOREPLAY_PROGRAM_ID, QUORUM,
+    NOREPLAY_PROGRAM_ID, QUORUM, TX_ID,
 };
 use crate::harness::{
     assert_canonical_log_in_tx, deploy_programs, fund, send, send_expect_error, set_account,
@@ -106,6 +106,7 @@ fn surfpool_submit_observations_real_noreplay() {
             SEQUENCE,
             GUARDIAN_SET_INDEX,
             &digest,
+            TX_ID,
         )
         .0,
         guardian_set,

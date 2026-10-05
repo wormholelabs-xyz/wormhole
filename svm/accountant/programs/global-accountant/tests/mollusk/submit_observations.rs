@@ -70,6 +70,7 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
         scenario.guardian_set_index,
         scenario.content_digest,
         SUBMITTER.to_bytes(),
+        TX_ID,
     );
     expected.signatures = [0b1, 0, 0, 0];
     assert_eq!(pending_layout(pending), expected);
@@ -149,45 +150,139 @@ fn quorum_commit_marks_noreplay_moves_balances_and_refunds_payer() {
     );
 }
 
-/// `tx_id` is in the signing digest but not in the body, so it is not part of message
-/// identity: observations of one body under different `tx_id` values share a pending PDA.
-#[test]
-fn tx_id_does_not_split_the_pending_pda() {
-    let mollusk = mollusk();
-    let s = ObsScenario::attest(GUARDIAN_COUNT, GUARDIAN_SET_INDEX, 0x51);
-    let first = submit(
-        &mollusk,
-        s.initial_accounts(),
-        s.ix_data(0),
-        s.account_metas(),
-    );
-    assert_success(&first, "guardian 0, default tx_id");
+/// Pending PDA oracle, independent of the program derivation: `tx_id` seeds as
+/// `[len]`, `padded[..32]`, `padded[32..]`.
+fn pending_pda_with_tx_id(s: &ObsScenario, tx_id: TxId<'_>) -> Pubkey {
+    let id = tx_id.as_bytes();
+    let mut padded = [0u8; 64];
+    padded[..id.len()].copy_from_slice(id);
+    let len = [u8::try_from(id.len()).expect("tx_id length fits u8")];
+    Pubkey::find_program_address(
+        &[
+            b"pending",
+            &s.chain.to_be_bytes(),
+            &s.emitter,
+            &s.sequence.to_be_bytes(),
+            &s.guardian_set_index.to_be_bytes(),
+            &s.content_digest,
+            &len,
+            &padded[..32],
+            &padded[32..],
+        ],
+        &program_id(),
+    )
+    .0
+}
 
-    let other_tx_id = TxId::Hash(&[0x5Au8; 32]);
+fn submit_with_tx_id(
+    mollusk: &Mollusk,
+    s: &ObsScenario,
+    accounts: Vec<(Pubkey, Account)>,
+    pending: Pubkey,
+    tx_id: TxId<'_>,
+    guardian_index: u8,
+) -> mollusk_svm::result::InstructionResult {
     let signature = sign_digest(
-        &s.guardians[1],
-        &signing_digest_with_tx_id(other_tx_id, &s.body),
+        &s.guardians[usize::from(guardian_index)],
+        &signing_digest_with_tx_id(tx_id, &s.body),
     );
     let ix_data = submit_observations_ix_data_with_tx_id(
         s.guardian_set_index,
-        1,
+        guardian_index,
         signature,
-        other_tx_id,
+        tx_id,
         &s.body,
     );
-    let second = submit(
-        &mollusk,
-        first.resulting_accounts,
-        ix_data,
-        s.account_metas(),
-    );
-    assert_success(&second, "guardian 1, other tx_id");
+    let mut metas = s.account_metas();
+    metas[1] = AccountMeta::new(pending, false);
+    submit(mollusk, accounts, ix_data, metas)
+}
 
-    let pending = pending_layout(find_account(&second.resulting_accounts, &s.pending_pda));
+/// `tx_id` seeds the pending PDA, matching wormchain's `(digest, tx_hash)` pending entries.
+/// The first sibling at quorum commits. NoReplay rejects the other sibling, and
+/// `close_pending` reclaims it.
+#[test]
+fn tx_id_splits_the_pending_pda_and_first_quorum_commits() {
+    const CLOSER: Pubkey = Pubkey::new_from_array([0x22u8; 32]);
+    let mollusk = mollusk();
+    let s = ObsScenario::attest(GUARDIAN_COUNT, GUARDIAN_SET_INDEX, 0x51);
+    let account_tx_id = TX_ID;
+    let close_signature = [0x5Au8; 64];
+    let close_tx_id = TxId::Signature(&close_signature);
+    let account_pda = pending_pda_with_tx_id(&s, account_tx_id);
+    let close_pda = pending_pda_with_tx_id(&s, close_tx_id);
+    assert_ne!(account_pda, close_pda);
+
+    let mut accounts = s.initial_accounts();
+    accounts.push((account_pda, uninitialised_pda_account()));
+    accounts.push((close_pda, uninitialised_pda_account()));
+    accounts.push((CLOSER, system_owned_account(1_000_000_000)));
+
+    let mismatch = submit_with_tx_id(&mollusk, &s, accounts.clone(), close_pda, account_tx_id, 0);
+    assert_error(
+        &mismatch,
+        GlobalAccountantError::InvalidPda as u64,
+        "account tx_id against the close sibling",
+    );
+
+    let first = submit_with_tx_id(&mollusk, &s, accounts, account_pda, account_tx_id, 0);
+    assert_success(&first, "guardian 0, account tx_id");
+    let mut accounts = first.resulting_accounts;
     assert_eq!(
-        pending.num_signatures(),
-        2,
-        "both observations in one pending PDA"
+        pending_layout(find_account(&accounts, &account_pda)).tx_id(),
+        Ok(account_tx_id)
+    );
+
+    for i in 1..=QUORUM {
+        let result = submit_with_tx_id(&mollusk, &s, accounts, close_pda, close_tx_id, i);
+        assert_success(&result, &format!("guardian {i}, close tx_id"));
+        accounts = result.resulting_accounts;
+    }
+    assert_closed(find_account(&accounts, &close_pda), "close sibling commits");
+    assert_bucket_marked(find_account(&accounts, &s.noreplay_bucket), s.sequence);
+    let stranded = find_account(&accounts, &account_pda);
+    assert_eq!(stranded.owner, program_id());
+    assert_eq!(pending_layout(stranded).num_signatures(), 1);
+
+    let late = submit_with_tx_id(
+        &mollusk,
+        &s,
+        accounts.clone(),
+        account_pda,
+        account_tx_id,
+        1,
+    );
+    assert_error(
+        &late,
+        GlobalAccountantError::AlreadyAccounted as u64,
+        "account sibling after the commit",
+    );
+
+    let stranded_lamports = find_account(&accounts, &account_pda).lamports;
+    let payer_lamports = find_account(&accounts, &SUBMITTER).lamports;
+    let close = mollusk.process_instruction(
+        &Instruction::new_with_bytes(
+            program_id(),
+            &close_pending_ix_data(s.emitter, s.sequence),
+            vec![
+                AccountMeta::new(CLOSER, true),
+                AccountMeta::new(account_pda, false),
+                AccountMeta::new(SUBMITTER, false),
+                AccountMeta::new_readonly(s.guardian_set, false),
+                AccountMeta::new_readonly(s.noreplay_bucket, false),
+            ],
+        ),
+        &accounts,
+    );
+    assert_success(&close, "close_pending reclaims the account sibling");
+    assert_eq!(
+        find_account(&close.resulting_accounts, &account_pda).lamports,
+        0
+    );
+    assert_eq!(
+        find_account(&close.resulting_accounts, &SUBMITTER).lamports,
+        payer_lamports + stranded_lamports,
+        "payer refunded"
     );
 }
 
@@ -202,6 +297,7 @@ fn routing_comes_from_body_not_caller_prefix() {
         0x9999,
         GUARDIAN_SET_INDEX,
         &scenario.content_digest,
+        TX_ID,
     )
     .0;
     assert_ne!(attacker_pending, scenario.pending_pda);
@@ -217,10 +313,10 @@ fn routing_comes_from_body_not_caller_prefix() {
     metas[1] = AccountMeta::new(attacker_pending, false);
 
     let result = submit(&mollusk, accounts, scenario.ix_data(0), metas);
-    assert!(
-        format!("{:?}", result.program_result).contains("PrivilegeEscalation"),
-        "{:?}",
-        result.program_result
+    assert_error(
+        &result,
+        GlobalAccountantError::InvalidPda as u64,
+        "attacker pending address",
     );
     assert_eq!(
         find_account(&result.resulting_accounts, &attacker_pending).owner,
@@ -628,6 +724,7 @@ fn guardian_set_rotation_opens_sibling_pending_and_tracks_live_size() {
         old.sequence,
         5,
         &old.content_digest,
+        TX_ID,
     )
     .0;
     assert_ne!(sibling, old.pending_pda);

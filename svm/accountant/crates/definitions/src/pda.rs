@@ -2,9 +2,13 @@
 //! derivation, address checks and creation all read one seed list per PDA kind.
 
 use crate::constants::seeds::*;
+use crate::instructions::{TxId, HASH_TX_ID_LEN, SIGNATURE_TX_ID_LEN};
 
 /// Largest seed count of any key ([`PendingObservationsKey`]).
-pub const MAX_SEEDS: usize = 6;
+pub const MAX_SEEDS: usize = 9;
+
+// Runtime limit: 16 seeds including the bump.
+const _: () = assert!(MAX_SEEDS < 16);
 
 /// Seed slices of one PDA, without the bump.
 #[derive(Clone, Copy)]
@@ -120,7 +124,9 @@ impl PdaSeeds for ModifyBalanceKey {
     }
 }
 
-/// `(b"pending", chain_be, emitter, sequence_be, guardian_set_index_be, content_digest)`.
+/// `(b"pending", chain_be, emitter, sequence_be, guardian_set_index_be, content_digest,
+/// tx_id_len, tx_id[..32], tx_id[32..])`. `tx_id` is zero-padded to 64 bytes; the length
+/// seed keeps a 32-byte id distinct from a 64-byte id with 32 trailing zero bytes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PendingObservationsKey {
     chain: [u8; 2],
@@ -128,6 +134,8 @@ pub struct PendingObservationsKey {
     sequence: [u8; 8],
     guardian_set_index: [u8; 4],
     content_digest: [u8; 32],
+    tx_id_len: [u8; 1],
+    tx_id: [u8; SIGNATURE_TX_ID_LEN],
 }
 
 impl PendingObservationsKey {
@@ -137,19 +145,25 @@ impl PendingObservationsKey {
         sequence: u64,
         guardian_set_index: u32,
         content_digest: [u8; 32],
+        tx_id: TxId<'_>,
     ) -> Self {
+        let (tx_id_len, tx_id) = tx_id.to_padded();
         Self {
             chain: chain.to_be_bytes(),
             emitter,
             sequence: sequence.to_be_bytes(),
             guardian_set_index: guardian_set_index.to_be_bytes(),
             content_digest,
+            tx_id_len: [tx_id_len],
+            tx_id,
         }
     }
 }
 
 impl PdaSeeds for PendingObservationsKey {
     fn seeds(&self) -> Seeds<'_> {
+        // Seeds have a maximum of 32 bytes each.
+        let (tx_id_head, tx_id_tail) = self.tx_id.split_at(HASH_TX_ID_LEN);
         Seeds::new([
             PENDING_OBSERVATIONS_SEED_PREFIX,
             &self.chain,
@@ -157,6 +171,9 @@ impl PdaSeeds for PendingObservationsKey {
             &self.sequence,
             &self.guardian_set_index,
             &self.content_digest,
+            &self.tx_id_len,
+            tx_id_head,
+            tx_id_tail,
         ])
     }
 }
@@ -254,7 +271,9 @@ mod tests {
         let emitter = [0xAA; 32];
         let digest = [0xBB; 32];
         let token = [0xCC; 32];
-        let cases: [Case; 7] = [
+        let hash_id = [0xDD; 32];
+        let signature_id = [0xEE; 64];
+        let cases: [Case; 8] = [
             (
                 "chain registration",
                 owned(&ChainRegistrationKey::new(2)),
@@ -281,8 +300,15 @@ mod tests {
                 vec![b"modify_balance".to_vec(), 9u64.to_be_bytes().to_vec()],
             ),
             (
-                "pending",
-                owned(&PendingObservationsKey::new(2, emitter, 5, 4, digest)),
+                "pending, hash tx id",
+                owned(&PendingObservationsKey::new(
+                    2,
+                    emitter,
+                    5,
+                    4,
+                    digest,
+                    TxId::Hash(&hash_id),
+                )),
                 vec![
                     b"pending".to_vec(),
                     2u16.to_be_bytes().to_vec(),
@@ -290,6 +316,31 @@ mod tests {
                     5u64.to_be_bytes().to_vec(),
                     4u32.to_be_bytes().to_vec(),
                     digest.to_vec(),
+                    vec![32],
+                    hash_id.to_vec(),
+                    vec![0; 32],
+                ],
+            ),
+            (
+                "pending, signature tx id",
+                owned(&PendingObservationsKey::new(
+                    2,
+                    emitter,
+                    5,
+                    4,
+                    digest,
+                    TxId::Signature(&signature_id),
+                )),
+                vec![
+                    b"pending".to_vec(),
+                    2u16.to_be_bytes().to_vec(),
+                    emitter.to_vec(),
+                    5u64.to_be_bytes().to_vec(),
+                    4u32.to_be_bytes().to_vec(),
+                    digest.to_vec(),
+                    vec![64],
+                    signature_id[..32].to_vec(),
+                    signature_id[32..].to_vec(),
                 ],
             ),
             (

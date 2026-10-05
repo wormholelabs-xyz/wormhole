@@ -49,6 +49,7 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
 
     let parsed = ParsedObservation {
         content_digest: digests.content,
+        tx_id,
         chain: ix.chain(),
         emitter: ix.emitter,
         sequence: ix.sequence(),

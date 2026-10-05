@@ -3,6 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::error::GlobalAccountantError;
+use crate::instructions::{TxId, SIGNATURE_TX_ID_LEN};
 use crate::pda::{
     BalanceAccountKey, BelongsToHub, ChainRegistrationKey, ModifyBalanceKey, RegisterChainKey,
     TransceiverHubKey, TransceiverPeerKey,
@@ -43,17 +44,19 @@ impl ModificationKind {
     }
 }
 
-/// Pending-quorum PDA for one `(chain, emitter, sequence)`. 88 bytes, 4-byte aligned.
+/// Pending-quorum PDA for one `(chain, emitter, sequence, tx_id)`. 152 bytes, 4-byte
+/// aligned.
 ///
 /// | offset | size | field              |
 /// |--------|------|--------------------|
 /// | 0      | 1    | tag ([`AccountTag::PendingObservations`]) |
-/// | 1      | 1    | _pad0              |
+/// | 1      | 1    | tx_id_len (32 or 64) |
 /// | 2      | 2    | chain              |
 /// | 4      | 4    | guardian_set_index |
 /// | 8      | 16   | signatures (128-bit bitmap as 4 LE `u32` words; bit N == guardian-index N signed) |
 /// | 24     | 32   | content_digest     |
 /// | 56     | 32   | payer              |
+/// | 88     | 64   | tx_id (zero-padded past tx_id_len) |
 ///
 /// The bitmap caps the guardian set at [`Self::MAX_GUARDIANS`], as wormchain's `u128`
 /// `Data.signatures` does. `[u32; 4]` keeps 4-byte alignment; `u128` would need 16.
@@ -62,12 +65,15 @@ impl ModificationKind {
 pub struct PendingObservationsLayout {
     /// Always [`AccountTag::PendingObservations`].
     pub tag: u8,
-    pub(crate) _pad0: u8,
+    /// Read through [`Self::tx_id`].
+    pub tx_id_len: u8,
     pub chain: u16,
     pub guardian_set_index: u32,
     pub signatures: [u32; 4],
     pub content_digest: [u8; 32],
     pub payer: Pubkey,
+    /// Read through [`Self::tx_id`].
+    pub tx_id: [u8; SIGNATURE_TX_ID_LEN],
 }
 
 pub trait AccountLayout: Pod {
@@ -109,16 +115,24 @@ impl PendingObservationsLayout {
         guardian_set_index: u32,
         content_digest: [u8; 32],
         payer: Pubkey,
+        tx_id: TxId<'_>,
     ) -> Self {
+        let (tx_id_len, tx_id) = tx_id.to_padded();
         Self {
             tag: Self::TAG,
-            _pad0: 0,
+            tx_id_len,
             chain,
             guardian_set_index,
             signatures: [0; 4],
             content_digest,
             payer,
+            tx_id,
         }
+    }
+
+    /// The `tx_id` seed of this PDA. `InvalidInstructionData` for a malformed record.
+    pub fn tx_id(&self) -> Result<TxId<'_>, GlobalAccountantError> {
+        TxId::parse(self.tx_id_len, &self.tx_id)
     }
 
     /// Layout length; also the allocation size.
@@ -163,12 +177,14 @@ impl PendingObservationsLayout {
 const _: () = {
     use core::mem::offset_of;
     assert!(offset_of!(PendingObservationsLayout, tag) == 0);
+    assert!(offset_of!(PendingObservationsLayout, tx_id_len) == 1);
     assert!(offset_of!(PendingObservationsLayout, chain) == 2);
     assert!(offset_of!(PendingObservationsLayout, guardian_set_index) == 4);
     assert!(offset_of!(PendingObservationsLayout, signatures) == 8);
     assert!(offset_of!(PendingObservationsLayout, content_digest) == 24);
     assert!(offset_of!(PendingObservationsLayout, payer) == 56);
-    assert!(PendingObservationsLayout::LEN == 88);
+    assert!(offset_of!(PendingObservationsLayout, tx_id) == 88);
+    assert!(PendingObservationsLayout::LEN == 152);
     assert!(PendingObservationsLayout::MAX_GUARDIANS == 32 * 4);
 };
 

@@ -109,6 +109,20 @@ impl<'a> TxId<'a> {
             TxId::Signature(id) => id.as_slice(),
         }
     }
+
+    /// `(len, zero-padded id)`; the inverse of [`Self::parse`].
+    pub fn to_padded(&self) -> (u8, [u8; SIGNATURE_TX_ID_LEN]) {
+        const { assert!(SIGNATURE_TX_ID_LEN <= u8::MAX as usize) }
+        let id = self.as_bytes();
+        let mut padded = [0u8; SIGNATURE_TX_ID_LEN];
+        padded[..id.len()].copy_from_slice(id);
+        let len = match self {
+            TxId::Hash(_) => HASH_TX_ID_LEN as u8,
+            TxId::Signature(_) => SIGNATURE_TX_ID_LEN as u8,
+        };
+        debug_assert!(TxId::parse(len, &padded) == Ok(*self));
+        (len, padded)
+    }
 }
 
 impl SubmitObservationsIxData {
