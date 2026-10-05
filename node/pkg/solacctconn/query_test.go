@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc/jsonrpc"
@@ -184,7 +185,7 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 				return []any{map[string]any{"pubkey": pda.String(), "account": accountValue(tt.owner, tt.data)}}, nil
 			})
 
-			accounts, err := conn.GetProgramAccountsByTag(context.Background(), program, 1, 88)
+			accounts, err := conn.GetProgramAccountsByTag(context.Background(), program, 1, 88, 0x04030201)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -198,17 +199,59 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 				Filters []struct {
 					DataSize uint64 `json:"dataSize"`
 					Memcmp   *struct {
-						Bytes string `json:"bytes"`
+						Offset uint64 `json:"offset"`
+						Bytes  string `json:"bytes"`
 					} `json:"memcmp"`
 				} `json:"filters"`
 			}
 			calls := srv.recorded()
 			require.Len(t, calls, 1)
 			require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
-			require.Len(t, opts.Filters, 2)
+			require.Len(t, opts.Filters, 3)
 			require.NotNil(t, opts.Filters[0].Memcmp)
+			assert.Equal(t, uint64(0), opts.Filters[0].Memcmp.Offset)
 			assert.Equal(t, solana.Base58{1}.String(), opts.Filters[0].Memcmp.Bytes)
-			assert.Equal(t, uint64(88), opts.Filters[1].DataSize)
+			require.NotNil(t, opts.Filters[1].Memcmp)
+			assert.Equal(t, uint64(4), opts.Filters[1].Memcmp.Offset)
+			assert.Equal(t, solana.Base58{0x01, 0x02, 0x03, 0x04}.String(), opts.Filters[1].Memcmp.Bytes, "little-endian set index")
+			assert.Equal(t, uint64(88), opts.Filters[2].DataSize)
+		})
+	}
+}
+
+func TestClientConnRejectsOversizedResponse(t *testing.T) {
+	program := testKeys(1)[0]
+	pda := testKeys(2)[1]
+	const limit = 4096
+
+	tests := []struct {
+		name    string
+		accts   int
+		wantErr bool
+	}{
+		{name: "body under the limit", accts: 1},
+		{name: "body over the limit", accts: 64, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _ := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+				rows := make([]any, 0, tt.accts)
+				for range tt.accts {
+					rows = append(rows, map[string]any{"pubkey": pda.String(), "account": accountValue(program, make([]byte, 88))})
+				}
+				return rows, nil
+			})
+			conn, err := newConn(srv.server.URL, "ws://127.0.0.1:1", limit)
+			require.NoError(t, err)
+			t.Cleanup(conn.Close)
+
+			_, err = conn.GetProgramAccountsByTag(context.Background(), program, 0, 88, 0)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }
@@ -216,24 +259,53 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 func TestGetSignaturesForAddress(t *testing.T) {
 	addr := testKeys(1)[0]
 	sig := solana.Signature{1, 2, 3}
+	before := solana.Signature{9, 9}
 
 	t.Run("limit is bounded", func(t *testing.T) {
 		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return nil, nil })
-		_, err := conn.GetSignaturesForAddress(context.Background(), addr, 0)
+		_, err := conn.GetSignaturesForAddress(context.Background(), addr, solana.Signature{}, 0)
 		require.Error(t, err)
-		_, err = conn.GetSignaturesForAddress(context.Background(), addr, maxSignaturesPerRequest+1)
+		_, err = conn.GetSignaturesForAddress(context.Background(), addr, solana.Signature{}, maxSignaturesPerRequest+1)
 		require.Error(t, err)
 		assert.Empty(t, srv.recorded())
 	})
 
-	t.Run("returns signatures newest first", func(t *testing.T) {
+	t.Run("returns entries newest first", func(t *testing.T) {
 		_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
 			return []any{map[string]any{"signature": sig.String(), "slot": 7}}, nil
 		})
-		sigs, err := conn.GetSignaturesForAddress(context.Background(), addr, 10)
+		entries, err := conn.GetSignaturesForAddress(context.Background(), addr, solana.Signature{}, 10)
 		require.NoError(t, err)
-		require.Len(t, sigs, 1)
-		assert.Equal(t, sig, sigs[0])
+		assert.Equal(t, []SignatureEntry{{Signature: sig}}, entries)
+	})
+
+	t.Run("before is sent and failed follows err", func(t *testing.T) {
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+			return []any{
+				map[string]any{"signature": sig.String(), "slot": 7, "blockTime": 1_700_000_000, "err": map[string]any{"InstructionError": []any{0, map[string]any{"Custom": 1}}}},
+				map[string]any{"signature": before.String(), "slot": 6, "err": nil},
+			}, nil
+		})
+		entries, err := conn.GetSignaturesForAddress(context.Background(), addr, before, 10)
+		require.NoError(t, err)
+		assert.Equal(t, []SignatureEntry{{Signature: sig, Failed: true, BlockTime: time.Unix(1_700_000_000, 0)}, {Signature: before}}, entries)
+
+		calls := srv.recorded()
+		require.Len(t, calls, 1)
+		var opts struct {
+			Before string `json:"before"`
+		}
+		require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
+		assert.Equal(t, before.String(), opts.Before)
+	})
+
+	t.Run("zero before is omitted", func(t *testing.T) {
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return []any{}, nil })
+		_, err := conn.GetSignaturesForAddress(context.Background(), addr, solana.Signature{}, 10)
+		require.NoError(t, err)
+		calls := srv.recorded()
+		require.Len(t, calls, 1)
+		assert.NotContains(t, string(calls[0].Params[1]), "before")
 	})
 
 	t.Run("more results than the limit is rejected", func(t *testing.T) {
@@ -243,7 +315,7 @@ func TestGetSignaturesForAddress(t *testing.T) {
 				map[string]any{"signature": sig.String(), "slot": 8},
 			}, nil
 		})
-		_, err := conn.GetSignaturesForAddress(context.Background(), addr, 1)
+		_, err := conn.GetSignaturesForAddress(context.Background(), addr, solana.Signature{}, 1)
 		require.Error(t, err)
 	})
 }

@@ -2,6 +2,7 @@ package solacctconn
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -15,6 +16,9 @@ const (
 
 	// getSignaturesForAddress caps a request at 1000 signatures.
 	maxSignaturesPerRequest = 1000
+
+	// offset_of!(PendingObservationsLayout, guardian_set_index), state.rs. Little-endian u32.
+	pendingGuardianSetIndexOffset = 4
 
 	// MaxLogLinesPerTx bounds the log lines of one transaction. The agave log buffer is
 	// 10 KiB per transaction.
@@ -91,13 +95,15 @@ func classifyOwnedAccount(account *rpc.Account, owner solana.PublicKey) (OwnedAc
 
 // GetProgramAccountsByTag reads the accounts of program whose first byte is tag and whose
 // length is exactly dataSize, at finalized commitment.
-func (c *ClientConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]ProgramAccount, error) {
+func (c *ClientConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32) ([]ProgramAccount, error) {
 	sortResults := true
+	setIndex := binary.LittleEndian.AppendUint32(nil, guardianSetIndex)
 	res, err := c.rpc.GetProgramAccountsWithOpts(ctx, program, &rpc.GetProgramAccountsOpts{
 		Encoding:   solana.EncodingBase64,
 		Commitment: rpc.CommitmentFinalized,
 		Filters: []rpc.RPCFilter{
 			{Memcmp: &rpc.RPCFilterMemcmp{Offset: 0, Bytes: solana.Base58{tag}}},
+			{Memcmp: &rpc.RPCFilterMemcmp{Offset: pendingGuardianSetIndexOffset, Bytes: solana.Base58(setIndex)}},
 			{DataSize: dataSize},
 		},
 		SortResults: &sortResults,
@@ -123,18 +129,23 @@ func (c *ClientConn) GetProgramAccountsByTag(ctx context.Context, program solana
 	return out, nil
 }
 
-// GetSignaturesForAddress reads signatures that mention addr, newest first.
+// GetSignaturesForAddress reads the signatures that mention addr, newest first. A non-zero
+// before starts the page below that signature.
 //
 // SECURITY: precondition 0 < limit <= maxSignaturesPerRequest.
-func (c *ClientConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, limit int) ([]solana.Signature, error) {
+func (c *ClientConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, before solana.Signature, limit int) ([]SignatureEntry, error) {
 	if limit <= 0 || limit > maxSignaturesPerRequest {
 		return nil, fmt.Errorf("getSignaturesForAddress: limit %d is outside 1..%d", limit, maxSignaturesPerRequest)
 	}
 
-	res, err := c.rpc.GetSignaturesForAddressWithOpts(ctx, addr, &rpc.GetSignaturesForAddressOpts{
+	opts := &rpc.GetSignaturesForAddressOpts{
 		Limit:      &limit,
 		Commitment: rpc.CommitmentFinalized,
-	})
+	}
+	if !before.IsZero() {
+		opts.Before = before
+	}
+	res, err := c.rpc.GetSignaturesForAddressWithOpts(ctx, addr, opts)
 	if err != nil {
 		return nil, fmt.Errorf("getSignaturesForAddress: %w", err)
 	}
@@ -142,17 +153,26 @@ func (c *ClientConn) GetSignaturesForAddress(ctx context.Context, addr solana.Pu
 		return nil, fmt.Errorf("getSignaturesForAddress: want at most %d results, got %d", limit, len(res))
 	}
 
-	out := make([]solana.Signature, 0, len(res))
+	out := make([]SignatureEntry, 0, len(res))
 	for _, sig := range res {
 		if sig == nil {
 			return nil, errors.New("getSignaturesForAddress: empty entry in the result")
 		}
-		out = append(out, sig.Signature)
+		if sig.Signature.IsZero() {
+			return nil, errors.New("getSignaturesForAddress: zero signature in the result")
+		}
+		entry := SignatureEntry{Signature: sig.Signature, Failed: sig.Err != nil}
+		if sig.BlockTime != nil {
+			entry.BlockTime = sig.BlockTime.Time()
+		}
+		out = append(out, entry)
 	}
 	return out, nil
 }
 
 // GetTransaction reads a finalized transaction and flattens its top-level instructions.
+// submit_observations fails with CpiInvocation below the top level, so top-level
+// instructions hold every observation.
 func (c *ClientConn) GetTransaction(ctx context.Context, sig solana.Signature) (*TransactionResult, error) {
 	maxVersion := uint64(0)
 	res, err := c.rpc.GetTransaction(ctx, sig, &rpc.GetTransactionOpts{

@@ -2,6 +2,7 @@ package solacctconn
 
 import (
 	"context"
+	"time"
 
 	"github.com/gagliardetto/solana-go"
 	"github.com/gagliardetto/solana-go/rpc"
@@ -14,11 +15,11 @@ type Conn interface {
 	// Results are positional with addrs. owner must not be the system program.
 	GetOwnedAccounts(ctx context.Context, addrs []solana.PublicKey, owner solana.PublicKey, commitment Commitment) ([]OwnedAccount, error)
 
-	// Filters: memcmp(offset 0, tag) and dataSize.
-	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]ProgramAccount, error)
+	// Filters: memcmp(offset 0, tag), memcmp(offset 4, guardianSetIndex LE) and dataSize.
+	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32) ([]ProgramAccount, error)
 
-	// Newest first.
-	GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, limit int) ([]solana.Signature, error)
+	// Newest first, older than before. A zero before starts at the newest entry.
+	GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, before solana.Signature, limit int) ([]SignatureEntry, error)
 
 	GetTransaction(ctx context.Context, sig solana.Signature) (*TransactionResult, error)
 
@@ -80,6 +81,14 @@ const (
 type OwnedAccount struct {
 	State AccountState
 	Data  []byte
+}
+
+// SignatureEntry is one getSignaturesForAddress result. Failed is true when the transaction
+// failed. BlockTime is zero when the node does not know it.
+type SignatureEntry struct {
+	Signature solana.Signature
+	Failed    bool
+	BlockTime time.Time
 }
 
 // ProgramAccount is an account that the queried program owns.

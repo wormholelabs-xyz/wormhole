@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
@@ -177,26 +179,31 @@ func TestDecideSolanaOwnTransferAction(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestSolanaCommitSearchPDAs(t *testing.T) {
-	current := solana.PublicKey{0x01}
-	previous := solana.PublicKey{0x02}
+func TestSolanaCommitSearchSetIndices(t *testing.T) {
+	const capped = olderGuardianSetsSearchedForCommitLog + 5
+	cappedWant := make([]uint32, 0, olderGuardianSetsSearchedForCommitLog+1)
+	for index := uint32(capped); index >= capped-olderGuardianSetsSearchedForCommitLog; index-- {
+		cappedWant = append(cappedWant, index)
+	}
 
 	tests := []struct {
-		name     string
-		state    solanaPendingAccountState
-		previous *solana.PublicKey
-		want     []solana.PublicKey
+		name    string
+		current uint32
+		state   solanaPendingAccountState
+		want    []uint32
 	}{
-		{name: "current absent with a previous set", state: solanaPendingAccountAbsent, previous: &previous, want: []solana.PublicKey{current, previous}},
-		{name: "current absent at set zero", state: solanaPendingAccountAbsent, want: []solana.PublicKey{current}},
-		{name: "current present with a previous set", state: solanaPendingAccountHasOwnSignature, previous: &previous, want: []solana.PublicKey{previous}},
-		{name: "current present at set zero", state: solanaPendingAccountLacksOwnSignature, want: []solana.PublicKey{}},
+		{name: "set 0, current absent", current: 0, state: solanaPendingAccountAbsent, want: []uint32{0}},
+		{name: "set 0, current present", current: 0, state: solanaPendingAccountLacksOwnSignature, want: []uint32{}},
+		{name: "set 1, current absent", current: 1, state: solanaPendingAccountAbsent, want: []uint32{1, 0}},
+		{name: "set 1, current present", current: 1, state: solanaPendingAccountHasOwnSignature, want: []uint32{0}},
+		{name: "set 3, current absent", current: 3, state: solanaPendingAccountAbsent, want: []uint32{3, 2, 1, 0}},
+		{name: "set 3, current present", current: 3, state: solanaPendingAccountLacksOwnSignature, want: []uint32{2, 1, 0}},
+		{name: "lookback cap", current: capped, state: solanaPendingAccountAbsent, want: cappedWant},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := solanaCommitSearchPDAs(current, tt.state, solanaOwnPendingTransfer{previousSetPendingPDA: tt.previous})
-			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.want, commitLogSearchGuardianSetIndices(tt.current, tt.state))
 		})
 	}
 }
@@ -327,6 +334,132 @@ func TestAuditSolanaOwnPendingTransfers(t *testing.T) {
 				return
 			}
 			assert.Empty(t, f.acct.solana.subChan)
+		})
+	}
+}
+
+// TestSolanaCommitSearchFindsVaaPathCommitInNoreplayBucket puts the commit only in the
+// NoReplay bucket history, as a submit_vaas or backfill commit leaves it.
+func TestSolanaCommitSearchFindsVaaPathCommitInNoreplayBucket(t *testing.T) {
+	commitSig := solana.Signature{0xC1}
+	tests := []struct {
+		name string
+		// ownSigned leaves a losing sibling with this guardian's bit at the current set.
+		ownSigned     bool
+		digest        func(f *solanaAuditFixture) [32]byte
+		sequence      func(f *solanaAuditFixture) uint64
+		blockTimeAge  time.Duration
+		wantPublished int
+		wantPending   int
+	}{
+		{name: "current absent, vaa digest", wantPublished: 1},
+		{name: "losing sibling, vaa digest", ownSigned: true, wantPublished: 1},
+		{name: "current absent, other digest", digest: func(*solanaAuditFixture) [32]byte { return [32]byte{0xEE} }},
+		{name: "other sequence in the bucket", sequence: func(f *solanaAuditFixture) uint64 { return f.pe.solanaFields.Sequence + 1 }, wantPending: 1},
+		{name: "commit below the timestamp floor", blockTimeAge: noreplayBucketSearchTimestampMargin + time.Hour, wantPending: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newSolanaAuditFixture(t, ctx)
+			f.markAccounted(t)
+			if tt.ownSigned {
+				f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
+			}
+
+			digest := f.pe.vaaDigest
+			if tt.digest != nil {
+				digest = tt.digest(f)
+			}
+			sequence := f.pe.solanaFields.Sequence
+			if tt.sequence != nil {
+				sequence = tt.sequence(f)
+			}
+			commit := newSolanaCommitEvent(f.pe.solanaFields.Chain, f.pe.solanaFields.Emitter, sequence, digest, 0)
+			f.conn.SetTransaction(commitSig, &solacctconn.TransactionResult{LogMessages: commitLogs(f.acct.solana.program, commit)})
+			entry := solacctconn.SignatureEntry{Signature: commitSig}
+			if tt.blockTimeAge != 0 {
+				entry.BlockTime = f.msg.Timestamp.Add(-tt.blockTimeAge)
+			}
+			f.conn.SetSignatureEntries(f.bucket, []solacctconn.SignatureEntry{entry})
+
+			f.acct.runSolanaAudit(ctx, f.acct.solana)
+
+			assert.Len(t, f.msgChan, tt.wantPublished)
+			assert.Len(t, f.acct.pendingTransfers, tt.wantPending)
+			calls := f.conn.GetSignaturesForAddressCalls
+			require.NotEmpty(t, calls)
+			assert.Equal(t, f.bucket, calls[len(calls)-1].Addr)
+		})
+	}
+}
+
+// TestSolanaCommitSearchPagesPastSignatureSpam puts the commit below N spam entries in the
+// pending account history. Each audit resumes below the oldest entry the last one examined.
+func TestSolanaCommitSearchPagesPastSignatureSpam(t *testing.T) {
+	commitSig := solana.Signature{0xC0}
+	tests := []struct {
+		name      string
+		spam      int
+		failed    bool
+		wantAudit int
+	}{
+		{name: "no spam", spam: 0, wantAudit: 1},
+		{name: "spam fills all but one fetch", spam: 19, wantAudit: 1},
+		{name: "spam fills one audit", spam: 20, wantAudit: 2},
+		{name: "spam fills two audits and part of a third", spam: 45, wantAudit: 3},
+		{name: "failed spam costs no fetch", spam: 45, failed: true, wantAudit: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newSolanaAuditFixture(t, ctx)
+			f.markAccounted(t)
+
+			entries := make([]solacctconn.SignatureEntry, 0, tt.spam+1)
+			for idx := range tt.spam {
+				sig := solana.Signature{0xA0, byte(idx)}
+				entries = append(entries, solacctconn.SignatureEntry{Signature: sig, Failed: tt.failed})
+				f.conn.SetTransaction(sig, &solacctconn.TransactionResult{})
+			}
+			entries = append(entries, solacctconn.SignatureEntry{Signature: commitSig})
+			f.conn.SetSignatureEntries(f.pending, entries)
+			f.conn.SetTransaction(commitSig, f.commitTransaction(f.pe.solanaFields.contentDigest))
+
+			published := 0
+			for audit := 1; audit <= tt.spam/pendingAccountCommitLogSearchLimits.maxTransactionFetchesPerAddress+2 && published == 0; audit++ {
+				fetchesBefore := len(f.conn.GetTransactionCalls)
+				f.acct.runSolanaAudit(ctx, f.acct.solana)
+				assert.LessOrEqual(t, len(f.conn.GetTransactionCalls)-fetchesBefore, pendingAccountCommitLogSearchLimits.maxTransactionFetchesPerAddress, "audit %d fetches", audit)
+				if len(f.acct.pendingTransfers) == 0 {
+					published = audit
+				}
+			}
+
+			assert.Equal(t, tt.wantAudit, published)
+			assert.Len(t, f.msgChan, 1)
+			// A missed audit also scans the NoReplay bucket. Count the pending account reads.
+			pendingCalls := make([]MockGetSignaturesForAddressCall, 0, tt.wantAudit)
+			for _, call := range f.conn.GetSignaturesForAddressCalls {
+				if call.Addr == f.pending {
+					pendingCalls = append(pendingCalls, call)
+				}
+			}
+			require.Len(t, pendingCalls, tt.wantAudit)
+			for idx, call := range pendingCalls {
+				assert.Equal(t, getSignaturesForAddressPageLength, call.Limit)
+				if idx == 0 {
+					assert.Equal(t, solana.Signature{}, call.Before)
+					continue
+				}
+				oldestExamined := entries[idx*pendingAccountCommitLogSearchLimits.maxTransactionFetchesPerAddress-1].Signature
+				assert.Equal(t, oldestExamined, call.Before, "list call %d resumes below the last audit", idx)
+			}
+			if tt.failed {
+				assert.Equal(t, []solana.Signature{commitSig}, f.conn.GetTransactionCalls)
+			}
 		})
 	}
 }
@@ -515,23 +648,68 @@ func TestRunSolanaAuditSkipsAGuardianOutsideTheSet(t *testing.T) {
 	assert.Empty(t, f.conn.GetBalanceCalls)
 }
 
-func TestAuditSolanaProgramPendingAccountsBoundsAccountsRead(t *testing.T) {
-	ctx := context.Background()
-	f := newSolanaAuditFixture(t, ctx)
-	f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
-
-	// Only the account past the bound needs a reobservation search.
-	accounts := make([]solacctconn.ProgramAccount, maxSolanaProgramPendingAccountsPerAudit+1)
-	for idx := range accounts {
+// TestAuditSolanaProgramPendingAccountsVisitsEveryAccount rotates the program-account pass,
+// so every unknown account gets a source transaction id search within a bounded number of audits.
+func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
+	address := func(idx int) solana.PublicKey {
 		var addr solana.PublicKey
-		binary.LittleEndian.PutUint32(addr[:4], uint32(idx)) // #nosec G115 -- idx < 10_001
-		accounts[idx] = solanaProgramAccountFor(t, addr, vaa.ChainIDEthereum, 0, [32]byte{0x12}, []uint8{0})
+		binary.BigEndian.PutUint32(addr[:4], uint32(idx)) // #nosec G115 -- idx <= 10_001
+		addr[31] = 0x01
+		return addr
 	}
-	accounts[maxSolanaProgramPendingAccountsPerAudit] = solanaProgramAccountFor(t, solana.PublicKey{0xFF}, vaa.ChainIDEthereum, 0, [32]byte{0x12}, nil)
-	f.conn.ProgramAccounts = accounts
+	tests := []struct {
+		name     string
+		total    int
+		unknownN func(idx int) bool
+		// reverse hands the accounts over in descending address order.
+		reverse bool
+	}{
+		{name: "more unknown accounts than one audit searches", total: 250, unknownN: func(int) bool { return true }, reverse: true},
+		{
+			name:     "unknown account past the read cap",
+			total:    maxPendingAccountsReadPerAudit + 1,
+			unknownN: func(idx int) bool { return idx == maxPendingAccountsReadPerAudit },
+		},
+	}
 
-	f.acct.runSolanaAudit(ctx, f.acct.solana)
-	assert.Empty(t, f.conn.GetSignaturesForAddressCalls)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newSolanaAuditFixture(t, ctx)
+			f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
+
+			accounts := make([]solacctconn.ProgramAccount, tt.total)
+			unknown := make(map[solana.PublicKey]struct{})
+			for idx := range accounts {
+				var signedBy []uint8
+				if tt.unknownN(idx) {
+					unknown[address(idx)] = struct{}{}
+				} else {
+					signedBy = []uint8{0}
+				}
+				accounts[idx] = solanaProgramAccountFor(t, address(idx), vaa.ChainIDEthereum, 0, [32]byte{0x12}, signedBy)
+			}
+			if tt.reverse {
+				slices.Reverse(accounts)
+			}
+			f.conn.ProgramAccounts = accounts
+
+			readAudits := (tt.total + maxPendingAccountsReadPerAudit - 1) / maxPendingAccountsReadPerAudit
+			searchAudits := (len(unknown) + pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit - 1) / pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit
+			audits := max(readAudits, searchAudits) + 1
+			searched := make(map[solana.PublicKey]struct{})
+			for audit := 1; audit <= audits; audit++ {
+				before := len(f.conn.GetSignaturesForAddressCalls)
+				f.acct.runSolanaAudit(ctx, f.acct.solana)
+				calls := f.conn.GetSignaturesForAddressCalls[before:]
+				assert.LessOrEqual(t, len(calls), pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit, "audit %d searches", audit)
+				for _, call := range calls {
+					searched[call.Addr] = struct{}{}
+				}
+			}
+			assert.Equal(t, unknown, searched)
+		})
+	}
 }
 
 func TestAuditSolanaProgramPendingAccountsBoundsReobservationSearches(t *testing.T) {
@@ -539,7 +717,7 @@ func TestAuditSolanaProgramPendingAccountsBoundsReobservationSearches(t *testing
 	f := newSolanaAuditFixture(t, ctx)
 	f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
 
-	accounts := make([]solacctconn.ProgramAccount, maxSolanaReobservationSearchesPerAudit+1)
+	accounts := make([]solacctconn.ProgramAccount, pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit+1)
 	for idx := range accounts {
 		var addr solana.PublicKey
 		binary.LittleEndian.PutUint32(addr[:4], uint32(idx)) // #nosec G115 -- idx < 101
@@ -548,7 +726,7 @@ func TestAuditSolanaProgramPendingAccountsBoundsReobservationSearches(t *testing
 	f.conn.ProgramAccounts = accounts
 
 	f.acct.runSolanaAudit(ctx, f.acct.solana)
-	assert.Len(t, f.conn.GetSignaturesForAddressCalls, maxSolanaReobservationSearchesPerAudit)
+	assert.Len(t, f.conn.GetSignaturesForAddressCalls, pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit)
 	assert.Empty(t, f.obsvReq)
 }
 
@@ -557,10 +735,10 @@ func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {
 	f := newSolanaAuditFixture(t, ctx)
 
 	// Every transfer is accounted and has no current guardian-set pending account at set index 0.
-	// Thus each commit search reads one signature list.
-	marked := make([]uint64, 0, maxSolanaCommitSearchesPerAudit+1)
+	// Thus each commit log search reads one signature list.
+	marked := make([]uint64, 0, pendingAccountCommitLogSearchLimits.maxSearchesPerAudit+1)
 	marked = append(marked, f.pe.solanaFields.Sequence)
-	for idx := range maxSolanaCommitSearchesPerAudit {
+	for idx := range pendingAccountCommitLogSearchLimits.maxSearchesPerAudit {
 		sequence := uint64(100 + idx) // #nosec G115 -- idx < 100
 		_, err := f.acct.SubmitObservation(solanaTestTransfer(t, sequence))
 		require.NoError(t, err)
@@ -568,9 +746,18 @@ func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {
 	}
 	// Sequences below 1024 share the fixture bucket.
 	f.conn.SetAccount(f.bucket, &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: solanaNoreplayBucket(t, marked...)})
-	require.Len(t, f.acct.pendingTransfers, maxSolanaCommitSearchesPerAudit+1)
+	require.Len(t, f.acct.pendingTransfers, pendingAccountCommitLogSearchLimits.maxSearchesPerAudit+1)
 
 	f.acct.runSolanaAudit(ctx, f.acct.solana)
-	assert.Len(t, f.conn.GetSignaturesForAddressCalls, maxSolanaCommitSearchesPerAudit)
+	bucketCalls := 0
+	for _, call := range f.conn.GetSignaturesForAddressCalls {
+		if call.Addr == f.bucket {
+			bucketCalls++
+		}
+	}
+	// The missed transfers share one bucket, so one NoReplay bucket search follows the pending
+	// account searches.
+	assert.Equal(t, 1, bucketCalls)
+	assert.Len(t, f.conn.GetSignaturesForAddressCalls, pendingAccountCommitLogSearchLimits.maxSearchesPerAudit+bucketCalls)
 	assert.Empty(t, f.acct.solana.subChan)
 }

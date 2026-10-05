@@ -39,6 +39,10 @@ type solanaBackend struct {
 	subChan     chan *common.MessagePublication
 	feePayer    solana.PrivateKey
 	priorityFee uint64
+	// The audit goroutine owns it.
+	historyCursors solanaHistoryCursors
+	// Address after which the next program-account pass starts. The audit goroutine owns it.
+	programAuditCursor solana.PublicKey
 }
 
 // newSolanaBackend builds the Token Bridge Solana backend. A zero configuration returns a

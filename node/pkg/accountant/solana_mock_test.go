@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/certusone/wormhole/node/pkg/solacctconn"
@@ -16,8 +17,9 @@ type MockGetOwnedAccountsCall struct {
 }
 
 type MockGetSignaturesForAddressCall struct {
-	Addr  solana.PublicKey
-	Limit int
+	Addr   solana.PublicKey
+	Before solana.Signature
+	Limit  int
 }
 
 // MockAccountantSolanaConn is the solacctconn.Conn test double. Set the exported fields
@@ -40,6 +42,8 @@ type MockAccountantSolanaConn struct {
 
 	GetOwnedAccountsCalls        []MockGetOwnedAccountsCall
 	GetSignaturesForAddressCalls []MockGetSignaturesForAddressCall
+	GetTransactionCalls          []solana.Signature
+	ProgramAccountsSetIndices    []uint32
 	SentTransactions             []*solana.Transaction
 	GetSignatureStatusesCalls    [][]solana.Signature
 	GetBalanceCalls              []solana.PublicKey
@@ -48,7 +52,7 @@ type MockAccountantSolanaConn struct {
 	accounts map[solana.PublicKey]*solacctconn.OwnedAccount
 	// Only confirmed reads see these. They take precedence over accounts.
 	confirmedAccounts   map[solana.PublicKey]*solacctconn.OwnedAccount
-	signatures          map[solana.PublicKey][]solana.Signature
+	signatures          map[solana.PublicKey][]solacctconn.SignatureEntry
 	transactions        map[solana.Signature]*solacctconn.TransactionResult
 	logEvents           chan solacctconn.LogEvent
 	blockHeightHook     func()
@@ -61,7 +65,7 @@ func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 	return &MockAccountantSolanaConn{
 		accounts:          make(map[solana.PublicKey]*solacctconn.OwnedAccount),
 		confirmedAccounts: make(map[solana.PublicKey]*solacctconn.OwnedAccount),
-		signatures:        make(map[solana.PublicKey][]solana.Signature),
+		signatures:        make(map[solana.PublicKey][]solacctconn.SignatureEntry),
 		transactions:      make(map[solana.Signature]*solacctconn.TransactionResult),
 		// Buffered so tests can queue events before the reader starts.
 		logEvents: make(chan solacctconn.LogEvent, 16),
@@ -105,28 +109,54 @@ func (c *MockAccountantSolanaConn) GetOwnedAccounts(ctx context.Context, addrs [
 	return results, nil
 }
 
-func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]solacctconn.ProgramAccount, error) {
+// GetProgramAccountsByTag returns ProgramAccounts without the set-index filter, so tests can
+// exercise the second check on the account's own set index.
+func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32) ([]solacctconn.ProgramAccount, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.ProgramAccountsSetIndices = append(c.ProgramAccountsSetIndices, guardianSetIndex)
 	if c.ProgramAccountsErr != nil {
 		return nil, c.ProgramAccountsErr
 	}
 	return c.ProgramAccounts, nil
 }
 
+// SetSignaturesForAddress sets the history of addr, newest first, with successful entries.
 func (c *MockAccountantSolanaConn) SetSignaturesForAddress(addr solana.PublicKey, sigs []solana.Signature) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.signatures[addr] = sigs
+	entries := make([]solacctconn.SignatureEntry, 0, len(sigs))
+	for _, sig := range sigs {
+		entries = append(entries, solacctconn.SignatureEntry{Signature: sig})
+	}
+	c.SetSignatureEntries(addr, entries)
 }
 
-func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, limit int) ([]solana.Signature, error) {
+// SetSignatureEntries sets the history of addr, newest first.
+func (c *MockAccountantSolanaConn) SetSignatureEntries(addr solana.PublicKey, entries []solacctconn.SignatureEntry) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.signatures[addr] = entries
+}
+
+// GetSignaturesForAddress returns at most limit entries older than before.
+func (c *MockAccountantSolanaConn) GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, before solana.Signature, limit int) ([]solacctconn.SignatureEntry, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.GetSignaturesForAddressCalls = append(c.GetSignaturesForAddressCalls, MockGetSignaturesForAddressCall{
-		Addr: addr, Limit: limit,
+		Addr: addr, Before: before, Limit: limit,
 	})
-	return c.signatures[addr], nil
+	history := c.signatures[addr]
+	start := 0
+	if !before.IsZero() {
+		start = len(history)
+		for idx, entry := range history {
+			if entry.Signature == before {
+				start = idx + 1
+				break
+			}
+		}
+	}
+	end := min(start+limit, len(history))
+	return slices.Clone(history[start:end]), nil
 }
 
 func (c *MockAccountantSolanaConn) SetTransaction(sig solana.Signature, tx *solacctconn.TransactionResult) {
@@ -138,6 +168,7 @@ func (c *MockAccountantSolanaConn) SetTransaction(sig solana.Signature, tx *sola
 func (c *MockAccountantSolanaConn) GetTransaction(ctx context.Context, sig solana.Signature) (*solacctconn.TransactionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.GetTransactionCalls = append(c.GetTransactionCalls, sig)
 	tx, ok := c.transactions[sig]
 	if !ok {
 		return nil, fmt.Errorf("mock accountant solana conn: no transaction set up for signature %s", sig)
