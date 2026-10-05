@@ -179,9 +179,6 @@ func (submitObservationsInstructionWire) wireName() string {
 // TokenBridgeTransfer::LEN.
 const tokenBridgeTransferLen = 133
 
-// MAX_TRANSFER_PAYLOAD_LEN.
-const maxTransferPayloadLen = 2000
-
 // tokenBridgeTransferWire is TokenBridgeTransfer, the fixed head of a transfer payload.
 type tokenBridgeTransferWire struct {
 	Action         uint8

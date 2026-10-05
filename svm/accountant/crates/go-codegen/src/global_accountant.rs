@@ -15,8 +15,8 @@ use global_accountant_definitions::{
     Instruction, NoReplayBitmapAccount, NoReplayNamespace, PendingObservationsLayout,
     SubmitObservationsIxData, TokenBridgeTransfer, TxId, VaaBodyHeader, ACCOUNTANT_DIGEST_LOG_TAG,
     ACCOUNTANT_PAYER_LOG_TAG, ACCOUNT_SEED_PREFIX, CHAIN_REGISTRATION_SEED_PREFIX,
-    GUARDIAN_SET_SEED, HASH_TX_ID_LEN, MAX_TRANSFER_PAYLOAD_LEN, NOREPLAY_AUTHORITY_SEED_PREFIX,
-    NOREPLAY_BITS_PER_BUCKET, PENDING_OBSERVATIONS_SEED_PREFIX, SIGNATURE_TX_ID_LEN,
+    GUARDIAN_SET_SEED, HASH_TX_ID_LEN, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
+    PENDING_OBSERVATIONS_SEED_PREFIX, SIGNATURE_TX_ID_LEN,
 };
 use solana_pubkey::Pubkey;
 
@@ -390,18 +390,11 @@ pub(crate) fn layout_file() -> String {
     );
 
     go.section("Token Bridge transfer payload, vaa.rs.");
-    go.constants(&[
-        (
-            "TokenBridgeTransfer::LEN.",
-            "tokenBridgeTransferLen",
-            n(TokenBridgeTransfer::LEN),
-        ),
-        (
-            "MAX_TRANSFER_PAYLOAD_LEN.",
-            "maxTransferPayloadLen",
-            n(MAX_TRANSFER_PAYLOAD_LEN),
-        ),
-    ]);
+    go.constants(&[(
+        "TokenBridgeTransfer::LEN.",
+        "tokenBridgeTransferLen",
+        n(TokenBridgeTransfer::LEN),
+    )]);
     go.wire_struct(
         "tokenBridgeTransferWire is TokenBridgeTransfer, the fixed head of a transfer payload.",
         "tokenBridgeTransferWire",

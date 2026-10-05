@@ -275,6 +275,38 @@ func TestSubmitObservationFanOut(t *testing.T) {
 	}
 }
 
+// TestSubmitObservationAcceptsLargeTransferPayload holds a TransferWithPayload of any
+// length. submit_observations carries the body digest, so payload length is unbounded.
+func TestSubmitObservationAcceptsLargeTransferPayload(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name  string
+		extra int
+	}{
+		{name: "2000 extra bytes", extra: 2000},
+		{name: "2001 extra bytes", extra: 2001},
+		{name: "10000 extra bytes", extra: 10_000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true, wormchainContract: "0xdeadbeef"})
+			msg := solanaTestTransfer(t, 7)
+			msg.Payload[0] = 3
+			msg.Payload = append(msg.Payload, make([]byte, tt.extra)...)
+
+			shouldPub, err := acct.SubmitObservation(msg)
+			require.NoError(t, err)
+			assert.False(t, shouldPub)
+
+			pe, exists := acct.pendingTransfers[msg.MessageIDString()]
+			require.True(t, exists)
+			require.NotNil(t, pe.solanaFields)
+			assert.Equal(t, uint8(3), pe.solanaFields.Action)
+		})
+	}
+}
+
 func TestUnbuildableSolanaFieldsLeaveNoEntry(t *testing.T) {
 	ctx := context.Background()
 	msg := solanaTestTransfer(t, 7)

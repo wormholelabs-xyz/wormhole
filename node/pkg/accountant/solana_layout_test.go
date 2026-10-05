@@ -328,8 +328,7 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 	transfer := fixturePayload(t, fixtureTransferBodyHex)
 	require.Len(t, transfer, tokenBridgeTransferLen)
 
-	transferPlusMax := append(append([]byte{}, transfer...), make([]byte, maxTransferPayloadLen)...)
-	transferPlusTooMuch := append(append([]byte{}, transfer...), make([]byte, maxTransferPayloadLen+1)...)
+	transferPlusLarge := append(append([]byte{}, transfer...), make([]byte, 10_000)...)
 
 	// Unset fields default to the mainnet transfer.
 	tests := []struct {
@@ -343,7 +342,7 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 		wantErr           bool
 	}{
 		{name: "mainnet transfer", payload: transfer},
-		{name: "transfer with the maximum extra payload", payload: transferPlusMax},
+		{name: "transfer with a large extra payload", payload: transferPlusLarge},
 		{
 			name:              "mainnet action 0x99",
 			emitterHex:        fixtureOtherEmitterHex,
@@ -355,7 +354,6 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 		},
 		{name: "empty payload", payload: []byte{}, wantErr: true},
 		{name: "transfer one byte short of the fixed head", payload: transfer[:tokenBridgeTransferLen-1], wantErr: true},
-		{name: "transfer one byte past the extra-payload bound", payload: transferPlusTooMuch, wantErr: true},
 	}
 
 	for _, tt := range tests {

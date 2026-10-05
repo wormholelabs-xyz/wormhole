@@ -330,8 +330,9 @@ func unpackObservationFields(data []byte) (solanaObservationFields, error) {
 // ix.rs observation_ix_from_body and vaa.rs parse_token_bridge_payload. payload is the
 // VAA body after its 51-byte header. vaaDigest is keccak256(keccak256(body)).
 //
-// SECURITY: a transfer action requires a 133-byte fixed head and at most
-// maxTransferPayloadLen trailing bytes. Any other action carries zeroed transfer fields.
+// SECURITY: a transfer action requires a 133-byte fixed head. The trailing payload enters
+// only vaaDigest, so its length is unbounded here. Any other action carries zeroed transfer
+// fields.
 func solanaObservationFieldsFromPayload(chain vaa.ChainID, emitter vaa.Address, sequence uint64, payload []byte, vaaDigest [32]byte) (*solanaObservationFields, error) {
 	if len(payload) == 0 {
 		return nil, errors.New("observation fields: empty payload")
@@ -353,9 +354,6 @@ func solanaObservationFieldsFromPayload(chain vaa.ChainID, emitter vaa.Address, 
 
 	if len(payload) < tokenBridgeTransferLen {
 		return nil, fmt.Errorf("observation fields: transfer payload wants at least %d bytes, got %d", tokenBridgeTransferLen, len(payload))
-	}
-	if extra := len(payload) - tokenBridgeTransferLen; extra > maxTransferPayloadLen {
-		return nil, fmt.Errorf("observation fields: transfer payload carries %d extra bytes, limit %d", extra, maxTransferPayloadLen)
 	}
 
 	// TestTokenBridgeTransferWireMatchesSDK checks this layout against vaa.DecodeTransferPayloadHdr.
