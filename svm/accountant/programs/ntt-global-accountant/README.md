@@ -66,6 +66,8 @@ sequence, guardian_set_index, digest)`. The observation that reaches quorum
 commits the transfer, marks NoReplay, and closes the pending PDA.
 `submit_vaas` shares this NoReplay state: each `(chain, emitter, sequence)`
 commits once through either path.
+The instruction runs only at the top level of a transaction. A CPI call fails
+with `CpiInvocation`.
 
 The observation is a fixed 252-byte struct. The source transaction id is 32
 or 64 bytes; a Solana-family id is the 64-byte transaction signature. The
@@ -117,9 +119,14 @@ guardian signatures. The program resolves the transceiver, parses the
 the hub token's balances after the peer checks.
 
 `submit_vaas`, `register_hub` and `register_peer` carry the full VAA body
-inline. The body and the account keys must fit one transaction packet
-(`PACKET_DATA_SIZE`, 1232 bytes), which is less than `MAX_NTT_PAYLOAD_LEN`. A
-larger transfer settles through `submit_observations` only.
+inline, so the body and the account keys must fit one transaction. A
+transaction v1 (4096 bytes) fits a payload of `MAX_NTT_PAYLOAD_LEN` (2000
+bytes). A legacy or v0 transaction (1232 bytes) fits less. The instructions
+reject a longer payload with `NttPayloadTooLarge`.
+
+`submit_observations` carries only the resolved transfer fields, so it has no
+payload limit. A transfer past `MAX_NTT_PAYLOAD_LEN` settles through
+`submit_observations` only.
 
 The transfer parser is stricter than the wormchain reader. It checks every
 nested length field and rejects trailing bytes, as the EVM receivers do.

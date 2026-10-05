@@ -80,6 +80,8 @@ build-devnet:
     for p in "${all[@]}"; do
         args+=(-p "${p}")
     done
+    # Test-only CPI forwarder for the mollusk tests. The deploy `build` omits it.
+    args+=(-p test-cpi-forwarder)
     {{test_env}} cargo build-sbf -- "${args[@]}"
 
 # Deploy build. Every compile-time address and key comes from the caller's

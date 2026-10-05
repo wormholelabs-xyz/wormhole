@@ -4,6 +4,7 @@ use global_accountant_definitions::{
     AccountantPayerLog, BalanceAccountLayout, GlobalAccountantError, PendingObservationsLayout,
     TxId, Uint256, ACCOUNTANT_PAYER_LOG_TAG,
 };
+use mollusk_svm::program::create_program_account_loader_v3;
 use mollusk_svm::Mollusk;
 use solana_account::Account;
 use solana_instruction::{AccountMeta, Instruction};
@@ -817,3 +818,31 @@ fn quorum_branch_cu_below_ceiling() {
 
 const _: () =
     assert!(QUORUM as u32 == PendingObservationsLayout::quorum_for(GUARDIAN_COUNT as u32));
+
+#[test]
+fn submit_observations_rejects_cpi_invocation() {
+    let forwarder = Pubkey::new_from_array([0xF0u8; 32]);
+    let mut mollusk = mollusk();
+    mollusk.add_program(&forwarder, "test_cpi_forwarder");
+    let scenario = ObsScenario::transfer(
+        GUARDIAN_SET_INDEX,
+        0x51,
+        Transfer::new(0, ETHEREUM, SOLANA, 500_000),
+    );
+
+    let mut metas = vec![AccountMeta::new_readonly(program_id(), false)];
+    metas.extend(scenario.account_metas());
+    let mut accounts = scenario.initial_accounts();
+    accounts.push((
+        program_id(),
+        create_program_account_loader_v3(&program_id()),
+    ));
+    let ix = Instruction::new_with_bytes(forwarder, &scenario.ix_data(0), metas);
+    let result = mollusk.process_instruction(&ix, &accounts);
+
+    assert_error(
+        &result,
+        GlobalAccountantError::CpiInvocation as u64,
+        "submit_observations through CPI",
+    );
+}

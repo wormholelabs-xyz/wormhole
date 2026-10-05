@@ -2,6 +2,7 @@
 //! check, pending-PDA lifecycle, bitmap accumulation, and close.
 
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::instruction::{get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT};
 use anchor_lang::solana_program::program_error::ProgramError;
 
 use crate::account_util::{add_lamports, close_account};
@@ -31,6 +32,16 @@ pub fn observation_digests(prefix: &[u8], tx_id: TxId<'_>, fields: &[u8]) -> Obs
         signing: observation_signing_digest(prefix, tx_id, fields),
         content: double_keccak256(fields),
     }
+}
+
+/// Reject a CPI call. Guardians find observations in top-level instructions only.
+///
+/// SECURITY: the host stub of `get_stack_height` returns 0, so this fails on the host.
+pub fn require_transaction_level() -> crate::ProgramResult {
+    if get_stack_height() != TRANSACTION_LEVEL_STACK_HEIGHT {
+        return Err(err(GlobalAccountantError::CpiInvocation));
+    }
+    Ok(())
 }
 
 /// `r (32) ‖ s (32) ‖ recovery_id (1)`.

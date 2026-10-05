@@ -41,6 +41,7 @@ use accountant_operational_core::transfer;
 /// 246  32  digest
 /// ```
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    quorum::require_transaction_level()?;
     let ix = SubmitObservationsIxData::from_bytes(data).map_err(err)?;
     let tx_id = ix.tx_id().map_err(err)?;
     let fields = ix.fields_and_digest();

@@ -32,6 +32,8 @@ sequence, guardian_set_index, digest)`. The observation that reaches quorum
 commits the transfer, marks NoReplay, and closes the pending PDA.
 `submit_vaas` shares this NoReplay state: each `(chain, emitter, sequence)`
 commits once through either path.
+The instruction runs only at the top level of a transaction. A CPI call fails
+with `CpiInvocation`.
 
 The observation is a fixed 278-byte struct. The source transaction id is 32
 or 64 bytes; a Solana-family id is the 64-byte transaction signature. The id is
@@ -75,9 +77,13 @@ governance VAA is always rejected here: its emitter is never a registered
 Token Bridge contract, so the `ChainRegistration` check fails before any
 balance changes.
 
-The instruction carries the full VAA body inline. The body and the account keys
-must fit one transaction packet (`PACKET_DATA_SIZE`, 1232 bytes), which is less
-than `MAX_TRANSFER_PAYLOAD_LEN`. A larger `TransferWithPayload` settles through
+The instruction carries the full VAA body inline, so the body and the account
+keys must fit one transaction. A transaction v1 (4096 bytes) fits a payload of
+`MAX_TRANSFER_PAYLOAD_LEN` (2000 bytes). A legacy or v0 transaction (1232 bytes)
+fits less. The instruction rejects a longer payload with `TransferPayloadTooLarge`.
+
+`submit_observations` carries only a digest of the VAA body, so it has no payload
+limit. A `TransferWithPayload` past `MAX_TRANSFER_PAYLOAD_LEN` settles through
 `submit_observations` only.
 
 | # | Account | W | S | Purpose |

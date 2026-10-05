@@ -26,6 +26,7 @@ use crate::instructions::ntt_transfer;
 
 /// `data`: [`NttSubmitObservationsIxData`], 252 bytes fixed.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
+    quorum::require_transaction_level()?;
     let ix = NttSubmitObservationsIxData::from_bytes(data).map_err(err)?;
     let tx_id = ix.tx_id().map_err(err)?;
     let fields = ix.fields_and_digest();

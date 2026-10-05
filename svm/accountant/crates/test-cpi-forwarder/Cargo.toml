@@ -1,0 +1,19 @@
+[package]
+name = "test-cpi-forwarder"
+description = "Test-only SBF program that forwards its instruction to another program through CPI."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+anchor-lang.workspace = true
+
+[lints]
+workspace = true

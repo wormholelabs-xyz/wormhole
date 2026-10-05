@@ -99,6 +99,8 @@ pub enum GlobalAccountantError {
     MissingDestinationPeer = 47,
     /// NTT only. The peer's entry for the sender's chain names another transceiver.
     PeersNotCrossRegistered = 48,
+    /// `submit_observations` runs only as a top-level instruction.
+    CpiInvocation = 49,
 }
 
 impl From<GlobalAccountantError> for u32 {
