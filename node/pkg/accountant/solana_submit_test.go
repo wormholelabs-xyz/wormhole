@@ -144,12 +144,33 @@ func TestClassifySolanaTxError(t *testing.T) {
 // solanaPendingAccountData builds a PendingObservationsLayout account for a submission.
 func solanaPendingAccountData(t *testing.T, chain vaa.ChainID, guardianSetIndex uint32, contentDigest [32]byte, payer solana.PublicKey, signedBy []uint8) []byte {
 	t.Helper()
+	return solanaPendingAccountDataWithTxID(t, chain, guardianSetIndex, contentDigest, payer, solanaTestTxID(t), signedBy)
+}
+
+// solanaTestTxID is the tx id of solanaTestTransfer.
+func solanaTestTxID(t *testing.T) solanaTxID {
+	t.Helper()
+	return mustSolanaTxIDBytes(t, solanaTestTransfer(t, 0).TxID)
+}
+
+func mustSolanaTxIDBytes(t *testing.T, id []byte) solanaTxID {
+	t.Helper()
+	txID, err := newSolanaTxID(id)
+	require.NoError(t, err)
+	return txID
+}
+
+func solanaPendingAccountDataWithTxID(t *testing.T, chain vaa.ChainID, guardianSetIndex uint32, contentDigest [32]byte, payer solana.PublicKey, txID solanaTxID, signedBy []uint8) []byte {
+	t.Helper()
+	require.True(t, txID.valid())
 	wire := pendingObservationsWire{
 		Tag:              pendingObservationsTag,
+		TxIDLen:          txID.length,
 		Chain:            uint16(chain),
 		GuardianSetIndex: guardianSetIndex,
 		ContentDigest:    contentDigest,
 		Payer:            payer,
+		TxID:             txID.padded,
 	}
 	for _, index := range signedBy {
 		wire.Signatures[index/pendingObservationsBitsPerWord] |= 1 << (index % pendingObservationsBitsPerWord)
@@ -213,7 +234,7 @@ func TestDeriveSolanaSubmission(t *testing.T) {
 		sub, err := b.deriveSolanaSubmission(3, msg, fields)
 		require.NoError(t, err)
 
-		wantPending, err := derivePendingObservationsPDA(b.program, fields.Chain, fields.Emitter, fields.Sequence, 3, fields.contentDigest)
+		wantPending, err := derivePendingObservationsPDA(b.program, fields.Chain, fields.Emitter, fields.Sequence, 3, fields.contentDigest, mustSolanaTxIDBytes(t, msg.TxID))
 		require.NoError(t, err)
 		assert.Equal(t, wantPending, sub.pendingPDA)
 

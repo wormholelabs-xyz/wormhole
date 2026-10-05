@@ -152,6 +152,7 @@ pub(crate) fn layout_file() -> String {
         0,
         &[
             field!(PendingObservationsLayout, tag, "Tag", GoType::U8),
+            field!(PendingObservationsLayout, tx_id_len, "TxIDLen", GoType::U8),
             field!(PendingObservationsLayout, chain, "Chain", GoType::U16),
             field!(
                 PendingObservationsLayout,
@@ -172,6 +173,7 @@ pub(crate) fn layout_file() -> String {
                 GoType::Bytes(32)
             ),
             field!(PendingObservationsLayout, payer, "Payer", GoType::Bytes(32)),
+            field!(PendingObservationsLayout, tx_id, "TxID", GoType::Bytes(64)),
         ],
     );
 
@@ -538,7 +540,7 @@ fn real_vectors(go: &mut GoFile, label: &str, vaa: &Vaa) -> VaaBodyHeader {
 
 pub(crate) fn fixtures_file() -> String {
     // The hex fixtures below embed these lengths.
-    assert_eq!(PendingObservationsLayout::LEN, 88);
+    assert_eq!(PendingObservationsLayout::LEN, 152);
     assert_eq!(SubmitObservationsIxData::LEN, 278);
     assert_eq!(AccountantDigestLog::LEN, 86);
     assert_eq!(AccountantPayerLog::LEN, 72);
@@ -605,7 +607,13 @@ pub(crate) fn fixtures_file() -> String {
     go.section(
         "Index-derived vectors: program id 0x00.., emitter 0x40.., digest 0x80.., payer 0xC0...",
     );
-    let mut pending = PendingObservationsLayout::new(chain, guardian_set_index, digest, payer);
+    let mut pending = PendingObservationsLayout::new(
+        chain,
+        guardian_set_index,
+        digest,
+        payer,
+        TxId::Signature(&signature_tx_id),
+    );
     for index in SET_BITS {
         pending
             .set_signature(index)
@@ -615,7 +623,7 @@ pub(crate) fn fixtures_file() -> String {
     let pending_bytes = bytemuck::bytes_of(&pending);
     assert_eq!(pending_bytes.len(), PendingObservationsLayout::LEN);
     go.hex_constant(
-        "Chain 2, set index 4, bits 0, 3, 5, 33, 64 and 127.",
+        "Chain 2, set index 4, bits 0, 3, 5, 33, 64 and 127, signature tx id 0xA0...",
         "fixturePendingObservationsAccountHex",
         pending_bytes,
     );
@@ -675,9 +683,10 @@ pub(crate) fn fixtures_file() -> String {
         transfer_header.sequence(),
         MAINNET_GUARDIAN_SET,
         &content_digest(transfer_body),
+        TxId::Hash(&hash_tx_id),
     );
     go.hex_constant(
-        "",
+        "Hash tx id 0xE0...",
         "fixtureTransferPendingPDAHex",
         transfer_pending_pda.as_array(),
     );

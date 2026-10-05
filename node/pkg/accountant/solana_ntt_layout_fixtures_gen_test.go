@@ -90,8 +90,8 @@ const fixtureNttRelayedHubAddressHex = "cf5f3614e2cd9b374558f35c7618b25f0d306d5e
 
 const fixtureNttPeerHex = "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
 
-// Guardian set index 4.
-const fixtureNttPendingPDAHex = "950ae0f9f200e87027be12cc7eb36c5a465f2609712358bd761dd82597cf9dc3"
+// Guardian set index 4, hash tx id 0xE0...
+const fixtureNttPendingPDAHex = "8be1d24c1a24044202a9ebe125e59a078ba7e1cb106da380f1aa62f2a861e2cc"
 
 const fixtureNttGuardianSetIndex = uint32(4)
 

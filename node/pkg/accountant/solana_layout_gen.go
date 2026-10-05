@@ -46,7 +46,7 @@ func (accountantPayerLogWire) wireName() string { return "accountant payer log" 
 // PendingObservationsLayout, state.rs.
 
 // PendingObservationsLayout::LEN.
-const pendingObservationsLen = 88
+const pendingObservationsLen = 152
 
 // PendingObservationsLayout::TAG.
 const pendingObservationsTag = 1
@@ -60,12 +60,13 @@ const pendingObservationsSignatureWords = 4
 // pendingObservationsWire is PendingObservationsLayout.
 type pendingObservationsWire struct {
 	Tag              uint8
-	_                [1]byte
+	TxIDLen          uint8
 	Chain            uint16
 	GuardianSetIndex uint32
 	Signatures       [4]uint32
 	ContentDigest    [32]byte
 	Payer            [32]byte
+	TxID             [64]byte
 }
 
 func (pendingObservationsWire) wireLen() int { return pendingObservationsLen }

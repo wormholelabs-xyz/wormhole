@@ -81,6 +81,8 @@ type solanaPendingObs struct {
 	Signatures    [pendingObservationsSignatureWords]uint32
 	ContentDigest [32]byte
 	Payer         solana.PublicKey
+	// TxID is a PDA seed: one sibling account per source transaction id.
+	TxID solanaTxID
 }
 
 // parsePendingObservationsAccount decodes a PendingObservationsLayout account.
@@ -92,12 +94,17 @@ func parsePendingObservationsAccount(data []byte) (*solanaPendingObs, error) {
 	if wire.Tag != pendingObservationsTag {
 		return nil, fmt.Errorf("pending observations account: tag mismatch, want %d got %d", pendingObservationsTag, wire.Tag)
 	}
+	txID, err := parseSolanaTxID(wire.TxIDLen, wire.TxID)
+	if err != nil {
+		return nil, fmt.Errorf("pending observations account: %w", err)
+	}
 	return &solanaPendingObs{
 		Chain:            vaa.ChainID(wire.Chain),
 		GuardianSetIndex: wire.GuardianSetIndex,
 		Signatures:       wire.Signatures,
 		ContentDigest:    wire.ContentDigest,
 		Payer:            wire.Payer,
+		TxID:             txID,
 	}, nil
 }
 
@@ -112,17 +119,21 @@ func (o *solanaPendingObs) hasSignature(index uint8) (bool, error) {
 }
 
 // checkPendingObservationsAccount decodes a pending account, requires its content digest
-// to equal wantDigest, and reports whether guardianIndex signed it.
+// to equal wantDigest and its tx id to equal wantTxID, and reports whether guardianIndex
+// signed it.
 //
-// SECURITY: the content digest is a PDA seed, so a mismatch means the address is not the
-// one derived for the transfer.
-func checkPendingObservationsAccount(data []byte, wantDigest [32]byte, guardianIndex uint8) (*solanaPendingObs, bool, error) {
+// SECURITY: the content digest and the tx id are PDA seeds, so a mismatch means the address
+// is not the one derived for the transfer.
+func checkPendingObservationsAccount(data []byte, wantDigest [32]byte, wantTxID solanaTxID, guardianIndex uint8) (*solanaPendingObs, bool, error) {
 	obs, err := parsePendingObservationsAccount(data)
 	if err != nil {
 		return nil, false, err
 	}
 	if obs.ContentDigest != wantDigest {
 		return nil, false, errors.New("pending observations account: content digest mismatch")
+	}
+	if obs.TxID != wantTxID {
+		return nil, false, errors.New("pending observations account: tx id mismatch")
 	}
 	signed, err := obs.hasSignature(guardianIndex)
 	if err != nil {
@@ -131,8 +142,12 @@ func checkPendingObservationsAccount(data []byte, wantDigest [32]byte, guardianI
 	return obs, signed, nil
 }
 
-// derivePendingObservationsPDA mirrors quorum.rs derive_pending_pda.
-func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, emitter vaa.Address, sequence uint64, guardianSetIndex uint32, contentDigest [32]byte) (solana.PublicKey, error) {
+// derivePendingObservationsPDA mirrors quorum.rs derive_pending_pda. The padded tx id splits
+// into two seeds, because one seed holds at most solana.MaxSeedLength bytes.
+func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, emitter vaa.Address, sequence uint64, guardianSetIndex uint32, contentDigest [32]byte, txID solanaTxID) (solana.PublicKey, error) {
+	if !txID.valid() {
+		return solana.PublicKey{}, errors.New("derive pending observations PDA: invalid tx id")
+	}
 	pda, _, err := solana.FindProgramAddress([][]byte{
 		pendingObservationsSeedPrefix,
 		newBE16(uint16(chain)).bytes(),
@@ -140,6 +155,9 @@ func derivePendingObservationsPDA(program solana.PublicKey, chain vaa.ChainID, e
 		newBE64(sequence).bytes(),
 		newBE32(guardianSetIndex).bytes(),
 		contentDigest[:],
+		{txID.length},
+		txID.padded[:hashTxIDLen],
+		txID.padded[hashTxIDLen:],
 	}, program)
 	if err != nil {
 		return solana.PublicKey{}, fmt.Errorf("derive pending observations PDA: %w", err)

@@ -676,9 +676,10 @@ pub(crate) fn fixtures_file() -> String {
         obs.sequence,
         GUARDIAN_SET_INDEX,
         &content,
+        TxId::Hash(&hash_tx_id),
     );
     go.hex_constant(
-        "Guardian set index 4.",
+        "Guardian set index 4, hash tx id 0xE0...",
         "fixtureNttPendingPDAHex",
         pending_pda.as_array(),
     );

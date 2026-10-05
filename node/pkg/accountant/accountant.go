@@ -7,9 +7,11 @@
 package accountant
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -80,9 +82,18 @@ type (
 			// submitPending shows, per backend, that the observation waits in the channel or is in an outstanding transaction.
 			// The audit must not resubmit to a backend whose flag is set.
 			submitPending [numAccountantBackends]bool
+
+			// solanaSiblingTxIDs are reobserved source transaction ids of msg other than
+			// msg.TxID. Each one seeds its own Solana pending account. At most
+			// maxSolanaSiblingTxIDs entries.
+			solanaSiblingTxIDs []solanaTxID
 		}
 	}
 )
+
+// maxSolanaSiblingTxIDs bounds the extra tx ids of one transfer. A Core Bridge message has
+// at most two ids: its message account and the signature of the transaction that closes it.
+const maxSolanaSiblingTxIDs = 1
 
 // accountantBackend indexes the per-backend submission state of a pending entry.
 type accountantBackend uint8
@@ -481,6 +492,14 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 			return !enforceFlag, nil
 		}
 		pe = oldEntry
+		if acct.solanaEnabled() || acct.solanaNttEnabled() {
+			added, err := pe.addSolanaSiblingTxID(msg.TxID)
+			if err != nil {
+				acct.logger.Error("unable to add a sibling tx id to a pending transfer", zap.String("msgID", msgId), zap.String("txID", msg.TxIDString()), zap.Error(err))
+			} else if added {
+				acct.logger.Info("a reobservation added a sibling tx id to a pending transfer", zap.String("msgID", msgId), zap.String("txID", msg.TxIDString()))
+			}
+		}
 	} else {
 		// Add it to the pending map and the database.
 		// We only add it if it is not already present.
@@ -762,29 +781,47 @@ func (acct *Accountant) backendChannel(pe *pendingEntry, backend accountantBacke
 // it clears the pending mark of the transfer for backend, so the audit resubmits it. If blocking is true, it will
 // block until the channel has space, a timeout occurs, or the context is cancelled.
 func (acct *Accountant) submitToChannel(ctx context.Context, pe *pendingEntry, backend accountantBackend, subChan chan *common.MessagePublication, tag string, blocking bool, timeout time.Duration) {
+	msgs := []*common.MessagePublication{pe.msg}
+	if backend == backendSolana || backend == backendSolanaNTT {
+		// One observation for each tx id, because each tx id seeds its own pending account.
+		msgs = pe.solanaSubmissionMsgs()
+	}
+	for _, msg := range msgs {
+		if !acct.submitMsgToChannel(ctx, pe, backend, msg, subChan, tag, blocking, timeout) {
+			return
+		}
+	}
+}
+
+// submitMsgToChannel writes one observation of pe to subChan. It returns false, and clears the
+// pending mark of pe for backend, when the write fails.
+func (acct *Accountant) submitMsgToChannel(ctx context.Context, pe *pendingEntry, backend accountantBackend, msg *common.MessagePublication, subChan chan *common.MessagePublication, tag string, blocking bool, timeout time.Duration) bool {
 	if blocking {
 		select {
-		case subChan <- pe.msg:
+		case subChan <- msg:
 			acct.logger.Debug(fmt.Sprintf("submitted observation to channel for %s", tag), zap.String("msgId", pe.msgId))
+			return true
 		case <-time.After(timeout):
 			channelSubmitTimeouts.Inc()
 			acct.logger.Warn(fmt.Sprintf("timeout submitting observation to %s channel, will retry next audit", tag),
 				zap.String("msgId", pe.msgId),
 				zap.Duration("timeout", timeout))
 			pe.setSubmitPending(backend, false)
+			return false
 		case <-ctx.Done():
 			acct.logger.Warn(fmt.Sprintf("context cancelled while submitting to %s channel", tag), zap.String("msgId", pe.msgId))
 			pe.setSubmitPending(backend, false)
+			return false
 		}
-	} else {
-		// Non-blocking write
-		select {
-		case subChan <- pe.msg:
-			acct.logger.Debug(fmt.Sprintf("submitted observation to channel for %s", tag), zap.String("msgId", pe.msgId))
-		default:
-			acct.logger.Error(fmt.Sprintf("unable to submit observation to %s because the channel is full, will try next interval", tag), zap.String("msgId", pe.msgId))
-			pe.setSubmitPending(backend, false)
-		}
+	}
+	select {
+	case subChan <- msg:
+		acct.logger.Debug(fmt.Sprintf("submitted observation to channel for %s", tag), zap.String("msgId", pe.msgId))
+		return true
+	default:
+		acct.logger.Error(fmt.Sprintf("unable to submit observation to %s because the channel is full, will try next interval", tag), zap.String("msgId", pe.msgId))
+		pe.setSubmitPending(backend, false)
+		return false
 	}
 }
 
@@ -827,4 +864,57 @@ func (pe *pendingEntry) updTime() time.Time {
 	pe.stateLock.Lock()
 	defer pe.stateLock.Unlock()
 	return pe.state.updTime
+}
+
+// addSolanaSiblingTxID records txID, from a reobservation of pe.msg, as a sibling tx id. It
+// returns true when it adds txID. It grabs the state lock.
+//
+// SECURITY: precondition: the watcher observed pe.msg in txID, and the digests match.
+// SECURITY: postcondition: at most maxSolanaSiblingTxIDs siblings. pe.msg.TxID and the
+// siblings are pairwise distinct.
+func (pe *pendingEntry) addSolanaSiblingTxID(txID []byte) (bool, error) {
+	pe.stateLock.Lock()
+	defer pe.stateLock.Unlock()
+	// Raw comparison first: a repeat of msg.TxID is routine, whatever its length.
+	if bytes.Equal(txID, pe.msg.TxID) {
+		return false, nil
+	}
+	id, err := newSolanaTxID(txID)
+	if err != nil {
+		return false, err
+	}
+	if slices.Contains(pe.state.solanaSiblingTxIDs, id) {
+		return false, nil
+	}
+	if len(pe.state.solanaSiblingTxIDs) == maxSolanaSiblingTxIDs {
+		return false, fmt.Errorf("the transfer already has %d sibling tx ids", maxSolanaSiblingTxIDs)
+	}
+	pe.state.solanaSiblingTxIDs = append(pe.state.solanaSiblingTxIDs, id)
+	return true, nil
+}
+
+// solanaTxIDs returns pe.msg.TxID, then the sibling tx ids. It grabs the state lock.
+func (pe *pendingEntry) solanaTxIDs() ([]solanaTxID, error) {
+	first, err := newSolanaTxID(pe.msg.TxID)
+	if err != nil {
+		return nil, err
+	}
+	pe.stateLock.Lock()
+	defer pe.stateLock.Unlock()
+	return append([]solanaTxID{first}, pe.state.solanaSiblingTxIDs...), nil
+}
+
+// solanaSubmissionMsgs returns pe.msg, then one copy of pe.msg for each sibling tx id. It
+// grabs the state lock.
+func (pe *pendingEntry) solanaSubmissionMsgs() []*common.MessagePublication {
+	pe.stateLock.Lock()
+	defer pe.stateLock.Unlock()
+	msgs := make([]*common.MessagePublication, 0, 1+len(pe.state.solanaSiblingTxIDs))
+	msgs = append(msgs, pe.msg)
+	for _, txID := range pe.state.solanaSiblingTxIDs {
+		sibling := *pe.msg
+		sibling.TxID = txID.Bytes()
+		msgs = append(msgs, &sibling)
+	}
+	return msgs
 }

@@ -176,6 +176,7 @@ func TestDerivePendingObservationsPDA(t *testing.T) {
 		fixtureTransferSequence,
 		fixtureTransferGuardianSetIndex,
 		mustHexDecode32(t, fixtureTransferContentDigestHex),
+		mustSolanaTxID(t, fixtureSubmitObservationsTxIDHex),
 	)
 	require.NoError(t, err)
 	assert.Equal(t, fixtureTransferPendingPDAHex, hex.EncodeToString(pda[:]))

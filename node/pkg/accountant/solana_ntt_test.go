@@ -283,7 +283,7 @@ func TestSolanaNttSubmitTransaction(t *testing.T) {
 
 			guardianSet, err := deriveGuardianSetPDA(f.b.coreBridge, 0)
 			require.NoError(t, err)
-			pending, err := derivePendingObservationsPDA(f.b.program, f.fields.Chain, f.fields.Emitter, f.fields.Sequence, 0, f.fields.contentDigest)
+			pending, err := derivePendingObservationsPDA(f.b.program, f.fields.Chain, f.fields.Emitter, f.fields.Sequence, 0, f.fields.contentDigest, mustSolanaTxIDBytes(t, f.msg.TxID))
 			require.NoError(t, err)
 			bucket, err := deriveNoreplayBucketPDA(f.b.noreplay, f.b.authority, f.fields.Chain, f.fields.Emitter, f.fields.Sequence)
 			require.NoError(t, err)
@@ -559,7 +559,7 @@ func TestAuditSolanaNttOwnPendingTransfers(t *testing.T) {
 // pendingAccount is the live-set NTT pending account of the fixture transfer at set index 0.
 func (f *solanaNttFixture) pendingAccount(t *testing.T, signedBy []uint8) *solacctconn.OwnedAccount {
 	t.Helper()
-	return &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: solanaPendingAccountData(t, f.fields.Chain, 0, f.fields.contentDigest, f.b.feePayer.PublicKey(), signedBy)}
+	return &solacctconn.OwnedAccount{State: solacctconn.AccountInitialised, Data: solanaPendingAccountDataWithTxID(t, f.fields.Chain, 0, f.fields.contentDigest, f.b.feePayer.PublicKey(), mustSolanaTxIDBytes(t, f.msg.TxID), signedBy)}
 }
 
 func TestReobserveUnknownSolanaNttPendingAccount(t *testing.T) {
@@ -569,29 +569,15 @@ func TestReobserveUnknownSolanaNttPendingAccount(t *testing.T) {
 	unknown := *f.fields
 	unknown.Sequence = 9_999
 	unknown.setContentDigest()
-	pda, err := derivePendingObservationsPDA(f.b.program, unknown.Chain, unknown.Emitter, unknown.Sequence, 0, unknown.contentDigest)
-	require.NoError(t, err)
-
 	signatureTxID := make([]byte, signatureTxIDLen)
 	for i := range signatureTxID {
 		signatureTxID[i] = 0xA0 + byte(i)
 	}
-	txID, err := newSolanaTxID(signatureTxID)
-	require.NoError(t, err)
-	wttData, err := encodeSubmitObservationsIxData(0, 0, make([]byte, submitSignatureLen), txID, fixtureTransferFields(t))
-	require.NoError(t, err)
-	nttData, err := encodeSubmitObservationsIxData(0, 0, make([]byte, submitSignatureLen), txID, &unknown)
+	txID := mustSolanaTxIDBytes(t, signatureTxID)
+	pda, err := derivePendingObservationsPDA(f.b.program, unknown.Chain, unknown.Emitter, unknown.Sequence, 0, unknown.contentDigest, txID)
 	require.NoError(t, err)
 
-	sig := solana.Signature{0x77}
-	f.conn.SetSignaturesForAddress(pda, []solana.Signature{sig})
-	f.conn.SetTransaction(sig, &solacctconn.TransactionResult{Instructions: []solacctconn.Instruction{
-		// A WTT-layout instruction under the NTT program fails to decode and is skipped.
-		{ProgramID: f.b.program, Data: wttData},
-		{ProgramID: f.b.program, Data: nttData},
-	}})
-
-	f.conn.ProgramAccounts = []solacctconn.ProgramAccount{{Address: pda, Data: solanaPendingAccountData(t, unknown.Chain, 0, unknown.contentDigest, solana.PublicKey{0x01}, nil)}}
+	f.conn.ProgramAccounts = []solacctconn.ProgramAccount{{Address: pda, Data: solanaPendingAccountDataWithTxID(t, unknown.Chain, 0, unknown.contentDigest, solana.PublicKey{0x01}, txID, nil)}}
 	own := f.acct.snapshotSolanaOwnPendingTransfers(f.b, 0)
 	f.acct.auditSolanaProgramPendingAccounts(ctx, f.b, 0, 0, own, map[solana.PublicKey]struct{}{})
 
@@ -599,4 +585,5 @@ func TestReobserveUnknownSolanaNttPendingAccount(t *testing.T) {
 	req := <-f.obsvReq
 	assert.Equal(t, uint32(unknown.Chain), req.ChainId)
 	assert.Equal(t, signatureTxID, req.TxHash)
+	assert.Empty(t, f.conn.GetSignaturesForAddressCalls)
 }

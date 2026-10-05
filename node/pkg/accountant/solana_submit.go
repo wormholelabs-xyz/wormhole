@@ -209,7 +209,7 @@ func (b *solanaBackend) deriveSolanaSubmission(guardianSetIndex uint32, msg *com
 		txID:   txID,
 	}
 
-	if sub.pendingPDA, err = derivePendingObservationsPDA(b.program, chain, emitter, sequence, guardianSetIndex, contentDigest); err != nil {
+	if sub.pendingPDA, err = derivePendingObservationsPDA(b.program, chain, emitter, sequence, guardianSetIndex, contentDigest, txID); err != nil {
 		return nil, err
 	}
 	if sub.noreplayBucket, err = deriveNoreplayBucketPDA(b.noreplay, b.authority, chain, emitter, sequence); err != nil {
@@ -526,7 +526,7 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 			continue
 		}
 
-		obs, signed, err := checkPendingObservationsAccount(account.Data, sub.record.committedDigest(), guardianIndex)
+		obs, signed, err := checkPendingObservationsAccount(account.Data, sub.record.committedDigest(), sub.txID, guardianIndex)
 		if err != nil {
 			b.metrics.submitFailures.Inc()
 			acct.logger.Error("failed to check a solana pending account", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Stringer("pendingPda", sub.pendingPDA), zap.Error(err))

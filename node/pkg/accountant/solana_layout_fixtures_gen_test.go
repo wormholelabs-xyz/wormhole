@@ -29,8 +29,8 @@ func (chainRegistrationWire) wireName() string { return "chain registration acco
 
 // Index-derived vectors: program id 0x00.., emitter 0x40.., digest 0x80.., payer 0xC0...
 
-// Chain 2, set index 4, bits 0, 3, 5, 33, 64 and 127.
-const fixturePendingObservationsAccountHex = "010002000400000029000000020000000100000000000080808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
+// Chain 2, set index 4, bits 0, 3, 5, 33, 64 and 127, signature tx id 0xA0...
+const fixturePendingObservationsAccountHex = "014002000400000029000000020000000100000000000080808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf"
 
 const fixtureNoreplayAuthorityPDAHex = "26a205d51ce014d75374204dfdd2d1e20ed4f9483698d53cb48a02e1ff38c048"
 
@@ -60,7 +60,8 @@ const fixtureTransferContentDigestHex = "534e4da8419f27c2d2ea93913e0f6492ec991fa
 
 const fixtureTransferSequence = uint64(1395207)
 
-const fixtureTransferPendingPDAHex = "8b89ff0436841aad684856dc16fbcf536e880633ad8564b568126ff43ab23ff4"
+// Hash tx id 0xE0...
+const fixtureTransferPendingPDAHex = "e5dff6e53dd27fc6f23b933ae8c95beb0c857f3e61b5d2b41268859d16b61388"
 
 const fixtureTransferGuardianSetIndex = uint32(6)
 

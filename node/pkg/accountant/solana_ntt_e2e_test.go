@@ -261,7 +261,7 @@ func requireNttCommitOnChain(t *testing.T, ctx context.Context, acct *Accountant
 	require.NoError(t, err)
 	require.True(t, marked, "the noreplay bit of sequence %d is set", fields.Sequence)
 
-	pending, err := derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, surfpoolGuardianSetIndex, fields.contentDigest)
+	pending, err := derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, surfpoolGuardianSetIndex, fields.contentDigest, mustSolanaTxIDBytes(t, msg.TxID))
 	require.NoError(t, err)
 	var sigs []solacctconn.SignatureEntry
 	require.Eventually(t, func() bool {

@@ -217,7 +217,7 @@ func TestDeriveSolanaNttPDAs(t *testing.T) {
 
 	derive := map[string]func() (solana.PublicKey, error){
 		"pending": func() (solana.PublicKey, error) {
-			return derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, fixtureNttGuardianSetIndex, fields.contentDigest)
+			return derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, fixtureNttGuardianSetIndex, fields.contentDigest, mustSolanaTxID(t, fixtureNttHashTxIDHex))
 		},
 		"hub": func() (solana.PublicKey, error) {
 			return deriveTransceiverHubPDA(program, fields.Chain, fields.Sender)

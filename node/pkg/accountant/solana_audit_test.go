@@ -48,7 +48,7 @@ type solanaAuditFixture struct {
 func newSolanaAuditFixture(t *testing.T, ctx context.Context) *solanaAuditFixture {
 	t.Helper()
 
-	obsvReq := make(chan *gossipv1.ObservationRequest, 10)
+	obsvReq := make(chan *gossipv1.ObservationRequest, 2*maxReobservationRequestsPerAudit)
 	acct, conn, msgChan := newSolanaTestAccountantWithObsvReq(t, ctx, solanaTestOpts{enforce: true}, obsvReq)
 	conn.Balance = 1_000_000
 
@@ -60,7 +60,7 @@ func newSolanaAuditFixture(t *testing.T, ctx context.Context) *solanaAuditFixtur
 	require.NotNil(t, pe.solanaFields)
 
 	b := acct.solana
-	pending, err := solanaPendingPDAAtSet(b, pe.solanaFields, 0)
+	pending, err := solanaPendingPDAAtSet(b, pe.solanaFields, 0, mustSolanaTxIDBytes(t, msg.TxID))
 	require.NoError(t, err)
 	bucket, err := deriveNoreplayBucketPDA(b.noreplay, b.authority, pe.solanaFields.Chain, pe.solanaFields.Emitter, pe.solanaFields.Sequence)
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func (f *solanaAuditFixture) moveToGuardianSetOne(t *testing.T) (current solana.
 	gs := f.acct.gst.Get()
 	f.acct.gst.Set(&common.GuardianSet{Index: 1, Keys: gs.Keys})
 
-	current, err := solanaPendingPDAAtSet(f.acct.solana, f.pe.solanaFields, 1)
+	current, err := solanaPendingPDAAtSet(f.acct.solana, f.pe.solanaFields, 1, mustSolanaTxIDBytes(t, f.msg.TxID))
 	require.NoError(t, err)
 	require.NotEqual(t, current, f.pending)
 	return current, f.pending
@@ -114,33 +114,23 @@ func solanaUnknownTransfer(t *testing.T, program solana.PublicKey, chain vaa.Cha
 	fields.Chain = chain
 	fields.Sequence = sequence
 	require.NoError(t, fields.setContentDigest())
-	pda, err := derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, 0, fields.contentDigest)
+	pda, err := derivePendingObservationsPDA(program, fields.Chain, fields.Emitter, fields.Sequence, 0, fields.contentDigest, solanaTestTxID(t))
 	require.NoError(t, err)
 	return fields, pda
 }
 
-// solanaProgramAccountFor builds a getProgramAccounts result row.
+// solanaProgramAccountFor builds a getProgramAccounts result row with solanaTestTxID.
 func solanaProgramAccountFor(t *testing.T, addr solana.PublicKey, chain vaa.ChainID, guardianSetIndex uint32, digest [32]byte, signedBy []uint8) solacctconn.ProgramAccount {
+	t.Helper()
+	return solanaProgramAccountForTxID(t, addr, chain, guardianSetIndex, digest, solanaTestTxID(t), signedBy)
+}
+
+func solanaProgramAccountForTxID(t *testing.T, addr solana.PublicKey, chain vaa.ChainID, guardianSetIndex uint32, digest [32]byte, txID solanaTxID, signedBy []uint8) solacctconn.ProgramAccount {
 	t.Helper()
 	return solacctconn.ProgramAccount{
 		Address: addr,
-		Data:    solanaPendingAccountData(t, chain, guardianSetIndex, digest, solana.PublicKey{0x01}, signedBy),
+		Data:    solanaPendingAccountDataWithTxID(t, chain, guardianSetIndex, digest, solana.PublicKey{0x01}, txID, signedBy),
 	}
-}
-
-// solanaSubmitTransaction is a transaction with one submit_observations instruction per
-// record, each carrying txHash.
-func solanaSubmitTransaction(t *testing.T, program solana.PublicKey, txIDBytes []byte, records ...solanaObservationFields) *solacctconn.TransactionResult {
-	t.Helper()
-	txID, err := newSolanaTxID(txIDBytes)
-	require.NoError(t, err)
-	tx := &solacctconn.TransactionResult{}
-	for idx := range records {
-		data, err := encodeSubmitObservationsIxData(0, 0, make([]byte, submitSignatureLen), txID, &records[idx])
-		require.NoError(t, err)
-		tx.Instructions = append(tx.Instructions, solacctconn.Instruction{ProgramID: program, Data: data})
-	}
-	return tx
 }
 
 func TestPublishSolanaFeePayerBalance(t *testing.T) {
@@ -499,7 +489,6 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 		name               string
 		setup              func(t *testing.T, f *solanaAuditFixture)
 		wantResubmitted    bool
-		wantSearches       int
 		wantReobserveChain vaa.ChainID
 		wantReobserveTxID  []byte
 		wantAuditErrors    float64
@@ -547,52 +536,47 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 			},
 		},
 		{
-			name: "unknown pending account uses the instruction that derives it",
+			name: "unknown pending account is reobserved with its stored tx id",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				fields, pda := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDEthereum, 7)
-				other, _ := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDEthereum, 8)
-				otherTx := solanaSubmitTransaction(t, f.acct.solana.program, bytes.Repeat([]byte{0x01}, hashTxIDLen), other)
-				tx := solanaSubmitTransaction(t, f.acct.solana.program, recoveryTxID, fields)
-				tx.Instructions = append(otherTx.Instructions, tx.Instructions...)
-
+				fields, _ := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDEthereum, 7)
+				txID := mustSolanaTxIDBytes(t, recoveryTxID)
+				pda, err := derivePendingObservationsPDA(f.acct.solana.program, fields.Chain, fields.Emitter, fields.Sequence, 0, fields.contentDigest, txID)
+				require.NoError(t, err)
 				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
-					solanaProgramAccountFor(t, pda, fields.Chain, 0, fields.contentDigest, nil),
+					solanaProgramAccountForTxID(t, pda, fields.Chain, 0, fields.contentDigest, txID, nil),
 				}
-				f.conn.SetSignaturesForAddress(pda, []solana.Signature{{2}})
-				f.conn.SetTransaction(solana.Signature{2}, tx)
 			},
-			wantSearches:       1,
 			wantReobserveChain: vaa.ChainIDEthereum,
 			wantReobserveTxID:  recoveryTxID,
 		},
 		{
 			name: "unknown pending account with a 64-byte tx id is reobserved with the full id",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				fields, pda := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDSolana, 7)
+				fields, _ := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDSolana, 7)
+				txID := mustSolanaTxIDBytes(t, recoverySignatureTxID)
+				pda, err := derivePendingObservationsPDA(f.acct.solana.program, fields.Chain, fields.Emitter, fields.Sequence, 0, fields.contentDigest, txID)
+				require.NoError(t, err)
 				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
-					solanaProgramAccountFor(t, pda, fields.Chain, 0, fields.contentDigest, nil),
+					solanaProgramAccountForTxID(t, pda, fields.Chain, 0, fields.contentDigest, txID, nil),
 				}
-				f.conn.SetSignaturesForAddress(pda, []solana.Signature{{2}})
-				f.conn.SetTransaction(solana.Signature{2}, solanaSubmitTransaction(t, f.acct.solana.program, recoverySignatureTxID, fields))
 			},
-			wantSearches:       1,
 			wantReobserveChain: vaa.ChainIDSolana,
 			wantReobserveTxID:  recoverySignatureTxID,
 		},
 		{
-			name: "unknown pending account without an accountant instruction is not reobserved",
+			name: "sibling tx id of an own transfer is reobserved",
 			setup: func(t *testing.T, f *solanaAuditFixture) {
-				fields, pda := solanaUnknownTransfer(t, f.acct.solana.program, vaa.ChainIDEthereum, 7)
+				fields := f.pe.solanaFields
+				txID := mustSolanaTxIDBytes(t, recoverySignatureTxID)
+				sibling, err := derivePendingObservationsPDA(f.acct.solana.program, fields.Chain, fields.Emitter, fields.Sequence, 0, fields.contentDigest, txID)
+				require.NoError(t, err)
+				require.NotEqual(t, f.pending, sibling)
 				f.conn.ProgramAccounts = []solacctconn.ProgramAccount{
-					solanaProgramAccountFor(t, pda, fields.Chain, 0, fields.contentDigest, nil),
+					solanaProgramAccountForTxID(t, sibling, fields.Chain, 0, fields.contentDigest, txID, []uint8{1}),
 				}
-				f.conn.SetSignaturesForAddress(pda, []solana.Signature{{2}})
-				f.conn.SetTransaction(solana.Signature{2}, &solacctconn.TransactionResult{
-					Instructions: []solacctconn.Instruction{{ProgramID: foreignProgram(), Data: []byte{0x00}}},
-				})
 			},
-			wantSearches:    1,
-			wantAuditErrors: 1,
+			wantReobserveChain: vaa.ChainIDEthereum,
+			wantReobserveTxID:  recoverySignatureTxID,
 		},
 		{
 			name: "undecodable pending account is skipped",
@@ -621,7 +605,7 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 			f.acct.runSolanaAudit(ctx, f.acct.solana)
 
 			assert.Equal(t, tt.wantAuditErrors, testutil.ToFloat64(solanaAuditErrors)-errorsBefore)
-			assert.Len(t, f.conn.GetSignaturesForAddressCalls, tt.wantSearches)
+			assert.Empty(t, f.conn.GetSignaturesForAddressCalls)
 			if tt.wantReobserveTxID != nil {
 				require.Len(t, f.obsvReq, 1)
 				req := <-f.obsvReq
@@ -649,7 +633,7 @@ func TestRunSolanaAuditSkipsAGuardianOutsideTheSet(t *testing.T) {
 }
 
 // TestAuditSolanaProgramPendingAccountsVisitsEveryAccount rotates the program-account pass,
-// so every unknown account gets a source transaction id search within a bounded number of audits.
+// so every unknown account gets a reobservation request within a bounded number of audits.
 func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
 	address := func(idx int) solana.PublicKey {
 		var addr solana.PublicKey
@@ -664,7 +648,7 @@ func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
 		// reverse hands the accounts over in descending address order.
 		reverse bool
 	}{
-		{name: "more unknown accounts than one audit searches", total: 250, unknownN: func(int) bool { return true }, reverse: true},
+		{name: "more unknown accounts than one audit requests", total: 250, unknownN: func(int) bool { return true }, reverse: true},
 		{
 			name:     "unknown account past the read cap",
 			total:    maxPendingAccountsReadPerAudit + 1,
@@ -678,6 +662,7 @@ func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
 			f := newSolanaAuditFixture(t, ctx)
 			f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
 
+			// Each account stores its own address as its tx id, so a request names its account.
 			accounts := make([]solacctconn.ProgramAccount, tt.total)
 			unknown := make(map[solana.PublicKey]struct{})
 			for idx := range accounts {
@@ -687,7 +672,8 @@ func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
 				} else {
 					signedBy = []uint8{0}
 				}
-				accounts[idx] = solanaProgramAccountFor(t, address(idx), vaa.ChainIDEthereum, 0, [32]byte{0x12}, signedBy)
+				addr := address(idx)
+				accounts[idx] = solanaProgramAccountForTxID(t, addr, vaa.ChainIDEthereum, 0, [32]byte{0x12}, mustSolanaTxIDBytes(t, addr[:]), signedBy)
 			}
 			if tt.reverse {
 				slices.Reverse(accounts)
@@ -695,29 +681,28 @@ func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
 			f.conn.ProgramAccounts = accounts
 
 			readAudits := (tt.total + maxPendingAccountsReadPerAudit - 1) / maxPendingAccountsReadPerAudit
-			searchAudits := (len(unknown) + pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit - 1) / pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit
-			audits := max(readAudits, searchAudits) + 1
-			searched := make(map[solana.PublicKey]struct{})
+			requestAudits := (len(unknown) + maxReobservationRequestsPerAudit - 1) / maxReobservationRequestsPerAudit
+			audits := max(readAudits, requestAudits) + 1
+			requested := make(map[solana.PublicKey]struct{})
 			for audit := 1; audit <= audits; audit++ {
-				before := len(f.conn.GetSignaturesForAddressCalls)
 				f.acct.runSolanaAudit(ctx, f.acct.solana)
-				calls := f.conn.GetSignaturesForAddressCalls[before:]
-				assert.LessOrEqual(t, len(calls), pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit, "audit %d searches", audit)
-				for _, call := range calls {
-					searched[call.Addr] = struct{}{}
+				assert.LessOrEqual(t, len(f.obsvReq), maxReobservationRequestsPerAudit, "audit %d requests", audit)
+				for len(f.obsvReq) > 0 {
+					requested[solana.PublicKeyFromBytes((<-f.obsvReq).TxHash)] = struct{}{}
 				}
 			}
-			assert.Equal(t, unknown, searched)
+			assert.Equal(t, unknown, requested)
+			assert.Empty(t, f.conn.GetSignaturesForAddressCalls)
 		})
 	}
 }
 
-func TestAuditSolanaProgramPendingAccountsBoundsReobservationSearches(t *testing.T) {
+func TestAuditSolanaProgramPendingAccountsBoundsReobservationRequests(t *testing.T) {
 	ctx := context.Background()
 	f := newSolanaAuditFixture(t, ctx)
 	f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
 
-	accounts := make([]solacctconn.ProgramAccount, pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit+1)
+	accounts := make([]solacctconn.ProgramAccount, maxReobservationRequestsPerAudit+1)
 	for idx := range accounts {
 		var addr solana.PublicKey
 		binary.LittleEndian.PutUint32(addr[:4], uint32(idx)) // #nosec G115 -- idx < 101
@@ -726,8 +711,7 @@ func TestAuditSolanaProgramPendingAccountsBoundsReobservationSearches(t *testing
 	f.conn.ProgramAccounts = accounts
 
 	f.acct.runSolanaAudit(ctx, f.acct.solana)
-	assert.Len(t, f.conn.GetSignaturesForAddressCalls, pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit)
-	assert.Empty(t, f.obsvReq)
+	assert.Len(t, f.obsvReq, maxReobservationRequestsPerAudit)
 }
 
 func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {

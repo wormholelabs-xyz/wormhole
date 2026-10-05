@@ -22,6 +22,9 @@ const (
 	getSignaturesForAddressPageLength     = 1000
 	maxPendingAccountsReadPerAudit        = 10_000
 	olderGuardianSetsSearchedForCommitLog = 4
+	// maxReobservationRequestsPerAudit bounds the requests for pending accounts this guardian
+	// did not sign and does not hold.
+	maxReobservationRequestsPerAudit = 100
 	// The NoReplay bucket search stops at block times older than the oldest source message
 	// timestamp, because a commit cannot predate its message. Source-chain clocks can run
 	// ahead of Solana block time, so the stop point moves back by this margin.
@@ -48,7 +51,7 @@ func (l solanaHistorySearchLimits) maxAddressesPerAudit() int {
 var (
 	pendingAccountCommitLogSearchLimits = solanaHistorySearchLimits{
 		maxSearchesPerAudit:             100,
-		maxAddressesPerSearch:           1 + olderGuardianSetsSearchedForCommitLog,
+		maxAddressesPerSearch:           (1 + olderGuardianSetsSearchedForCommitLog) * (1 + maxSolanaSiblingTxIDs),
 		maxTransactionFetchesPerAddress: 20,
 	}
 	noreplayBucketCommitLogSearchLimits = solanaHistorySearchLimits{
@@ -56,15 +59,9 @@ var (
 		maxAddressesPerSearch:           1,
 		maxTransactionFetchesPerAddress: 100,
 	}
-	pendingAccountSourceTxIDSearchLimits = solanaHistorySearchLimits{
-		maxSearchesPerAudit:             100,
-		maxAddressesPerSearch:           1,
-		maxTransactionFetchesPerAddress: 10,
-	}
 
 	maxHistoryCursors = pendingAccountCommitLogSearchLimits.maxAddressesPerAudit() +
-		noreplayBucketCommitLogSearchLimits.maxAddressesPerAudit() +
-		pendingAccountSourceTxIDSearchLimits.maxAddressesPerAudit()
+		noreplayBucketCommitLogSearchLimits.maxAddressesPerAudit()
 )
 
 // solanaHistoryCursors resumes each address history search below the oldest entry that the
@@ -100,11 +97,13 @@ func (c *solanaHistoryCursors) rotate() {
 	c.next = nil
 }
 
-// solanaOwnPendingTransfer is a pending transfer the backend's program accounts, with its
-// record and pending accounts.
+// solanaOwnPendingTransfer is one tx id of a pending transfer the backend's program
+// accounts, with its record and pending accounts.
 type solanaOwnPendingTransfer struct {
 	pe     *pendingEntry
 	record solanaObservationRecord
+	// txID seeds the pending accounts below.
+	txID solanaTxID
 	// Nil at guardian set index zero.
 	previousSetPendingPDA *solana.PublicKey
 }
@@ -149,7 +148,7 @@ func decideSolanaOwnTransferAction(current solanaPendingAccountState, accounted 
 // classifySolanaPendingAccount decodes a GetOwnedAccounts result for the current
 // guardian-set pending account of a transfer. A prefunded account counts as absent, because
 // submit_observations creates over it.
-func classifySolanaPendingAccount(account solacctconn.OwnedAccount, contentDigest [32]byte, guardianIndex uint8) (solanaPendingAccountState, error) {
+func classifySolanaPendingAccount(account solacctconn.OwnedAccount, contentDigest [32]byte, txID solanaTxID, guardianIndex uint8) (solanaPendingAccountState, error) {
 	switch account.State {
 	case solacctconn.AccountAbsent, solacctconn.AccountUninitialised:
 		return solanaPendingAccountAbsent, nil
@@ -157,7 +156,7 @@ func classifySolanaPendingAccount(account solacctconn.OwnedAccount, contentDiges
 	default:
 		return 0, fmt.Errorf("unknown account state %d", account.State)
 	}
-	_, signed, err := checkPendingObservationsAccount(account.Data, contentDigest, guardianIndex)
+	_, signed, err := checkPendingObservationsAccount(account.Data, contentDigest, txID, guardianIndex)
 	if err != nil {
 		return 0, err
 	}
@@ -232,8 +231,8 @@ func (acct *Accountant) publishSolanaFeePayerBalance(ctx context.Context, b *sol
 }
 
 // snapshotSolanaOwnPendingTransfers keys the pending transfers the backend's program
-// accounts by their current guardian-set pending account. It grabs the pending transfer
-// lock only for the copy.
+// accounts by their current guardian-set pending account, one per tx id. It grabs the
+// pending transfer lock only for the copy.
 func (acct *Accountant) snapshotSolanaOwnPendingTransfers(b *solanaBackend, guardianSetIndex uint32) map[solana.PublicKey]solanaOwnPendingTransfer {
 	acct.pendingTransfersLock.Lock()
 	entries := make([]*pendingEntry, 0, len(acct.pendingTransfers))
@@ -260,31 +259,40 @@ func (acct *Accountant) snapshotSolanaOwnPendingTransfers(b *solanaBackend, guar
 			acct.logger.Error("a transfer has been in the submit pending state for too long", zap.String("msgId", pe.msgId), zap.Stringer("lastUpdateTime", pe.updTime()))
 		}
 
-		current, err := solanaPendingPDAAtSet(b, record, guardianSetIndex)
+		txIDs, err := pe.solanaTxIDs()
 		if err != nil {
 			b.metrics.auditErrors.Inc()
-			acct.logger.Error("failed to derive the current guardian-set pending account", zap.String("msgId", pe.msgId), zap.Error(err))
+			acct.logger.Error("a transfer has a tx id the solana accountant does not accept", zap.String("msgId", pe.msgId), zap.Error(err))
 			continue
 		}
-		transfer := solanaOwnPendingTransfer{pe: pe, record: record}
-		if guardianSetIndex > 0 {
-			previous, err := solanaPendingPDAAtSet(b, record, guardianSetIndex-1)
+		for _, txID := range txIDs {
+			current, err := solanaPendingPDAAtSet(b, record, guardianSetIndex, txID)
 			if err != nil {
 				b.metrics.auditErrors.Inc()
-				acct.logger.Error("failed to derive the previous-set pending account", zap.String("msgId", pe.msgId), zap.Error(err))
-			} else {
-				transfer.previousSetPendingPDA = &previous
+				acct.logger.Error("failed to derive the current guardian-set pending account", zap.String("msgId", pe.msgId), zap.Error(err))
+				continue
 			}
+			transfer := solanaOwnPendingTransfer{pe: pe, record: record, txID: txID}
+			if guardianSetIndex > 0 {
+				previous, err := solanaPendingPDAAtSet(b, record, guardianSetIndex-1, txID)
+				if err != nil {
+					b.metrics.auditErrors.Inc()
+					acct.logger.Error("failed to derive the previous-set pending account", zap.String("msgId", pe.msgId), zap.Error(err))
+				} else {
+					transfer.previousSetPendingPDA = &previous
+				}
+			}
+			out[current] = transfer
 		}
-		out[current] = transfer
 	}
 	return out
 }
 
-// solanaPendingPDAAtSet derives the pending account of record under one guardian set index.
-func solanaPendingPDAAtSet(b *solanaBackend, record solanaObservationRecord, guardianSetIndex uint32) (solana.PublicKey, error) {
+// solanaPendingPDAAtSet derives the pending account of record and txID under one guardian
+// set index.
+func solanaPendingPDAAtSet(b *solanaBackend, record solanaObservationRecord, guardianSetIndex uint32, txID solanaTxID) (solana.PublicKey, error) {
 	chain, emitter, sequence := record.identity()
-	return derivePendingObservationsPDA(b.program, chain, emitter, sequence, guardianSetIndex, record.committedDigest())
+	return derivePendingObservationsPDA(b.program, chain, emitter, sequence, guardianSetIndex, record.committedDigest(), txID)
 }
 
 // auditSolanaOwnPendingTransfers reads the current guardian-set pending account and the
@@ -315,7 +323,7 @@ func (acct *Accountant) auditSolanaOwnPendingTransfers(ctx context.Context, b *s
 	classified := make([]solana.PublicKey, 0, len(addrs))
 	for idx, addr := range addrs {
 		pe := own[addr].pe
-		state, err := classifySolanaPendingAccount(accounts[idx], own[addr].record.committedDigest(), guardianIndex)
+		state, err := classifySolanaPendingAccount(accounts[idx], own[addr].record.committedDigest(), own[addr].txID, guardianIndex)
 		if err != nil {
 			b.metrics.auditErrors.Inc()
 			acct.logger.Error("failed to check a solana pending account", zap.String("backend", b.tag), zap.String("msgId", pe.msgId), zap.Stringer("pendingPda", addr), zap.Error(err))
@@ -333,6 +341,8 @@ func (acct *Accountant) auditSolanaOwnPendingTransfers(ctx context.Context, b *s
 
 	commitSearches := 0
 	skippedCommitSearches := 0
+	// Sibling tx ids of one transfer share one commit, so each transfer searches once.
+	commitSearched := make(map[string]struct{}, len(classified))
 	// Transfers whose pending accounts held no commit log, grouped by NoReplay bucket in
 	// first-seen order.
 	missedBuckets := make([]solana.PublicKey, 0, noreplayBucketCommitLogSearchLimits.maxSearchesPerAudit)
@@ -358,12 +368,16 @@ func (acct *Accountant) auditSolanaOwnPendingTransfers(ctx context.Context, b *s
 		case solanaOwnTransferResubmit:
 			acct.resubmitToSolana(ctx, b, transfer.pe, state)
 		case solanaOwnTransferSearchForCommitLog:
+			if _, done := commitSearched[transfer.pe.msgId]; done {
+				continue
+			}
+			commitSearched[transfer.pe.msgId] = struct{}{}
 			if commitSearches == pendingAccountCommitLogSearchLimits.maxSearchesPerAudit {
 				skippedCommitSearches++
 				continue
 			}
 			commitSearches++
-			if acct.searchPendingAccountsForCommitLog(ctx, b, transfer, acct.commitLogSearchPendingAccounts(b, transfer.pe, transfer.record, guardianSetIndex, state)) {
+			if acct.searchPendingAccountsForCommitLog(ctx, b, transfer, acct.commitLogSearchPendingAccounts(b, transfer, guardianSetIndex, state)) {
 				continue
 			}
 			bucket := bucketOf[addr]
@@ -480,18 +494,39 @@ func (acct *Accountant) resubmitToSolana(ctx context.Context, b *solanaBackend, 
 }
 
 // commitLogSearchPendingAccounts derives the pending accounts of
-// commitLogSearchGuardianSetIndices. It logs and skips an index whose derivation fails.
-func (acct *Accountant) commitLogSearchPendingAccounts(b *solanaBackend, pe *pendingEntry, record solanaObservationRecord, guardianSetIndex uint32, state solanaPendingAccountState) []solana.PublicKey {
-	indices := commitLogSearchGuardianSetIndices(guardianSetIndex, state)
-	pdas := make([]solana.PublicKey, 0, len(indices))
-	for _, index := range indices {
-		pda, err := solanaPendingPDAAtSet(b, record, index)
-		if err != nil {
-			b.metrics.auditErrors.Inc()
-			acct.logger.Error("failed to derive a pending account for a commit log search", zap.String("msgId", pe.msgId), zap.Uint32("guardianSetIndex", index), zap.Error(err))
-			continue
+// commitLogSearchGuardianSetIndices for each tx id of transfer. The commit closes only the
+// sibling that reached quorum, so the search covers every sibling. state is the current
+// guardian-set account state of transfer.txID; the other siblings include the current set.
+// It logs and skips a pending account whose derivation fails.
+//
+// SECURITY: postcondition: at most pendingAccountCommitLogSearchLimits.maxAddressesPerSearch accounts.
+func (acct *Accountant) commitLogSearchPendingAccounts(b *solanaBackend, transfer solanaOwnPendingTransfer, guardianSetIndex uint32, state solanaPendingAccountState) []solana.PublicKey {
+	txIDs, err := transfer.pe.solanaTxIDs()
+	if err != nil {
+		b.metrics.auditErrors.Inc()
+		acct.logger.Error("a transfer has a tx id the solana accountant does not accept", zap.String("msgId", transfer.pe.msgId), zap.Error(err))
+		return nil
+	}
+	pdas := make([]solana.PublicKey, 0, pendingAccountCommitLogSearchLimits.maxAddressesPerSearch)
+	for _, txID := range txIDs {
+		txState := solanaPendingAccountAbsent
+		if txID == transfer.txID {
+			txState = state
 		}
-		pdas = append(pdas, pda)
+		for _, index := range commitLogSearchGuardianSetIndices(guardianSetIndex, txState) {
+			pda, err := solanaPendingPDAAtSet(b, transfer.record, index, txID)
+			if err != nil {
+				b.metrics.auditErrors.Inc()
+				acct.logger.Error("failed to derive a pending account for a commit log search", zap.String("msgId", transfer.pe.msgId), zap.Uint32("guardianSetIndex", index), zap.Error(err))
+				continue
+			}
+			pdas = append(pdas, pda)
+		}
+	}
+	if len(pdas) > pendingAccountCommitLogSearchLimits.maxAddressesPerSearch {
+		b.metrics.auditErrors.Inc()
+		acct.logger.Error("a commit log search exceeds its address limit", zap.String("msgId", transfer.pe.msgId), zap.Int("got", len(pdas)), zap.Int("limit", pendingAccountCommitLogSearchLimits.maxAddressesPerSearch))
+		return pdas[:pendingAccountCommitLogSearchLimits.maxAddressesPerSearch]
 	}
 	return pdas
 }
@@ -639,7 +674,8 @@ func (acct *Accountant) visitAddressTransactions(ctx context.Context, b *solanaB
 
 // auditSolanaProgramPendingAccounts reads the program's pending accounts. It acts on each
 // account whose bitmap bit for this guardian is clear. It resubmits an own transfer that the
-// own-transfer pass did not reconcile. It reobserves an unknown transfer.
+// own-transfer pass did not reconcile. It requests a reobservation of the stored tx id of any
+// other account: an unknown transfer, or a sibling tx id of an own transfer.
 func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b *solanaBackend, guardianSetIndex uint32, guardianIndex uint8, own map[solana.PublicKey]solanaOwnPendingTransfer, reconciled map[solana.PublicKey]struct{}) {
 	accounts, err := b.conn.GetProgramAccountsByTag(ctx, b.program, pendingObservationsTag, pendingObservationsLen, guardianSetIndex)
 	if err != nil {
@@ -662,7 +698,7 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 		return 1
 	})
 	examine := min(len(accounts), maxPendingAccountsReadPerAudit)
-	var lastExamined, lastSearched solana.PublicKey
+	var lastExamined, lastRequested solana.PublicKey
 
 	// During the 24-hour grace period an own transfer can also have a previous-set pending
 	// account. The guardian resubmits at the current guardian set instead.
@@ -673,8 +709,8 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 		}
 	}
 
-	reobservationSearches := 0
-	skippedReobservationSearches := 0
+	reobservationRequests := 0
+	skippedReobservationRequests := 0
 	for step := range examine {
 		account := &accounts[(start+step)%len(accounts)]
 		lastExamined = account.Address
@@ -714,107 +750,32 @@ func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b
 			continue
 		}
 
-		if reobservationSearches == pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit {
-			skippedReobservationSearches++
+		if reobservationRequests == maxReobservationRequestsPerAudit {
+			skippedReobservationRequests++
 			continue
 		}
-		reobservationSearches++
-		lastSearched = account.Address
-		acct.reobserveUnknownSolanaPendingAccount(ctx, b, account.Address)
+		reobservationRequests++
+		lastRequested = account.Address
+		// SECURITY: the stored chain and tx id only drive a reobservation request. The watcher
+		// checks the transaction on chain again before it enters the signing pipeline.
+		// The audit snapshot stays fixed while the audit runs. A transfer that SubmitObservation
+		// adds after the snapshot, before its signature finalizes, gets a spurious request.
+		acct.handleMissingObservation(MissingObservation{ChainId: uint16(obs.Chain), TxHash: obs.TxID.Bytes()})
 	}
 
 	switch {
-	case skippedReobservationSearches > 0:
-		b.programAuditCursor = lastSearched
+	case skippedReobservationRequests > 0:
+		b.programAuditCursor = lastRequested
 	case len(accounts) > examine:
 		b.programAuditCursor = lastExamined
 	default:
 		b.programAuditCursor = solana.PublicKey{}
 	}
 
-	if skippedReobservationSearches > 0 {
+	if skippedReobservationRequests > 0 {
 		b.metrics.auditErrors.Inc()
-		acct.logger.Error("the solana accountant has more unknown pending accounts than one audit searches, the rest wait for the next audit", zap.String("backend", b.tag), zap.Int("skipped", skippedReobservationSearches), zap.Int("limit", pendingAccountSourceTxIDSearchLimits.maxSearchesPerAudit))
+		acct.logger.Error("the solana accountant has more unknown pending accounts than one audit requests, the rest wait for the next audit", zap.String("backend", b.tag), zap.Int("skipped", skippedReobservationRequests), zap.Int("limit", maxReobservationRequestsPerAudit))
 	}
-}
-
-// reobserveUnknownSolanaPendingAccount finds the submit_observations instruction that
-// created or signed pda and asks the local watcher to reobserve its source transaction.
-//
-// SECURITY: the recovered chain and transaction id only drive a reobservation request.
-// That request checks the transaction on chain again before it enters the signing pipeline.
-// An instruction counts only when its fields derive pda. One transaction can carry
-// observations of several transfers.
-//
-// The audit snapshot stays fixed while the audit runs. A transfer that SubmitObservation adds
-// after the snapshot, before its signature finalizes, gets a spurious request. If this becomes
-// a problem, check the live pending transfer map before the request.
-func (acct *Accountant) reobserveUnknownSolanaPendingAccount(ctx context.Context, b *solanaBackend, pda solana.PublicKey) {
-	found := acct.visitAddressTransactions(ctx, b, pda, pendingAccountSourceTxIDSearchLimits.maxTransactionFetchesPerAddress, time.Time{}, func(sig solana.Signature, tx *solacctconn.TransactionResult) bool {
-		for _, ix := range tx.Instructions {
-			if ix.ProgramID != b.program {
-				continue
-			}
-			if len(ix.Data) == 0 || ix.Data[0] != submitObservationsDiscriminator {
-				continue
-			}
-
-			parsed, err := b.parseSubmitObservationsIx(ix.Data)
-			if err != nil {
-				b.metrics.auditErrors.Inc()
-				acct.logger.Error("failed to decode a submit_observations instruction while searching for a reobservation", zap.String("backend", b.tag), zap.Stringer("signature", sig), zap.Error(err))
-				continue
-			}
-			chain, emitter, sequence := parsed.record.identity()
-			derived, err := derivePendingObservationsPDA(b.program, chain, emitter, sequence, parsed.guardianSetIndex, parsed.record.committedDigest())
-			if err != nil {
-				b.metrics.auditErrors.Inc()
-				acct.logger.Error("failed to derive the pending account of a submit_observations instruction", zap.Stringer("signature", sig), zap.Error(err))
-				continue
-			}
-			if derived != pda {
-				continue
-			}
-
-			acct.handleMissingObservation(MissingObservation{ChainId: uint16(chain), TxHash: parsed.txID.Bytes()})
-			return true
-		}
-		return false
-	})
-	if found {
-		return
-	}
-
-	b.metrics.auditErrors.Inc()
-	acct.logger.Error("failed to find the source transaction of an unknown pending account", zap.Stringer("pendingPda", pda))
-}
-
-// solanaParsedSubmitIx is the part of a decoded submit_observations instruction the
-// reobservation search reads, for either program family.
-type solanaParsedSubmitIx struct {
-	guardianSetIndex uint32
-	txID             solanaTxID
-	record           solanaObservationRecord
-}
-
-// parseSubmitObservationsIx decodes submit_observations instruction data in the layout of
-// the backend's program family.
-func (b *solanaBackend) parseSubmitObservationsIx(data []byte) (solanaParsedSubmitIx, error) {
-	switch b.family {
-	case solanaFamilyWTT:
-		ix, err := parseSubmitObservationsIxData(data)
-		if err != nil {
-			return solanaParsedSubmitIx{}, err
-		}
-		return solanaParsedSubmitIx{guardianSetIndex: ix.GuardianSetIndex, txID: ix.TxID, record: &ix.solanaObservationFields}, nil
-	case solanaFamilyNTT:
-		ix, err := parseNttSubmitObservationsIxData(data)
-		if err != nil {
-			return solanaParsedSubmitIx{}, err
-		}
-		return solanaParsedSubmitIx{guardianSetIndex: ix.GuardianSetIndex, txID: ix.TxID, record: &ix.solanaNttObservationFields}, nil
-	}
-	return solanaParsedSubmitIx{}, fmt.Errorf("unknown program family %s", b.family)
 }
 
 // logUnresolvedSolanaTransfers logs a failed query and every transfer in addrs whose
