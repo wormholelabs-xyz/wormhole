@@ -179,11 +179,20 @@ func (s *solanaInvokeStack) pop(program solana.PublicKey) error {
 
 // parseSolanaCommitLogs returns the ACCDGST commits program emitted, in log order.
 //
+// SECURITY: a `failed:` line in any frame rejects the transaction with nil commits. The
+// runtime fails the whole transaction when a frame fails, so a successful transaction with a
+// failed frame is malformed.
+//
 // The parser joins a malformed commit under the frame of program into err. It still returns
 // the well-formed commits.
 func parseSolanaCommitLogs(logs []string, program solana.PublicKey) ([]solanaCommitEvent, error) {
 	commits := make([]solanaCommitEvent, 0, 1)
-	err := walkSolanaProgramData(logs, program, func(idx int, rest string) (bool, error) {
+	failed := false
+	rejectFailed := func(idx int, frame solana.PublicKey) error {
+		failed = true
+		return fmt.Errorf("log line %d: frame of %s failed", idx, frame)
+	}
+	err := walkSolanaProgramData(logs, program, rejectFailed, func(idx int, rest string) (bool, error) {
 		evt, err := parseSolanaProgramDataCommit(rest)
 		if err != nil {
 			return false, fmt.Errorf("log line %d: %w", idx, err)
@@ -197,6 +206,9 @@ func parseSolanaCommitLogs(logs []string, program solana.PublicKey) ([]solanaCom
 		commits = append(commits, *evt)
 		return false, nil
 	})
+	if failed {
+		return nil, err
+	}
 	return commits, err
 }
 
@@ -209,7 +221,8 @@ func parseSolanaCommitLogs(logs []string, program solana.PublicKey) ([]solanaCom
 // pendingPDA, with a non-zero payer. Any other shape is an error.
 func parseSolanaPayerLog(logs []string, program, pendingPDA solana.PublicKey) (solana.PublicKey, error) {
 	var found *solanaPayerLog
-	err := walkSolanaProgramData(logs, program, func(idx int, rest string) (bool, error) {
+	// The accountant frame of a PayerMismatch ends in `failed:`.
+	err := walkSolanaProgramData(logs, program, nil, func(idx int, rest string) (bool, error) {
 		entry, err := parseSolanaProgramDataPayer(rest)
 		if err != nil {
 			return true, fmt.Errorf("log line %d: %w", idx, err)
@@ -240,6 +253,8 @@ func parseSolanaPayerLog(logs []string, program, pendingPDA solana.PublicKey) (s
 
 // walkSolanaProgramData calls visit with the payload of each `Program data:` line that
 // program emitted, in log order, until visit returns stop. It joins the errors of visit.
+// A non-nil onFailed runs on each `failed:` line before the frame pops. An error from it ends
+// the walk.
 //
 // SECURITY: a logsSubscribe mentions filter returns every transaction that references the
 // program. Thus a foreign program in the same transaction can emit a byte-perfect data line.
@@ -247,7 +262,7 @@ func parseSolanaPayerLog(logs []string, program, pendingPDA solana.PublicKey) (s
 // lines with program-controlled text before it reads the frame keywords.
 //
 // A broken invoke stack ends the walk, because frames after that cannot be attributed.
-func walkSolanaProgramData(logs []string, program solana.PublicKey, visit func(idx int, rest string) (stop bool, err error)) error {
+func walkSolanaProgramData(logs []string, program solana.PublicKey, onFailed func(idx int, frame solana.PublicKey) error, visit func(idx int, rest string) (stop bool, err error)) error {
 	if len(logs) > solacctconn.MaxLogLinesPerTx {
 		return fmt.Errorf("transaction logs: %d lines is past the %d line limit", len(logs), solacctconn.MaxLogLinesPerTx)
 	}
@@ -295,6 +310,12 @@ func walkSolanaProgramData(logs []string, program solana.PublicKey, visit func(i
 				err = stack.push(frame, fields[programLineDepthField])
 			}
 		} else {
+			if verb == "failed:" && onFailed != nil {
+				if err := onFailed(idx, frame); err != nil {
+					errs = append(errs, err)
+					return errors.Join(errs...)
+				}
+			}
 			err = stack.pop(frame)
 		}
 		if err != nil {

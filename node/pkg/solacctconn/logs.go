@@ -251,8 +251,9 @@ func decodeLogsNotification(raw []byte, subscriptionID uint64) (LogEvent, error)
 }
 
 func isJSONNull(raw json.RawMessage) bool {
+	// SECURITY: a missing field counts as not null, so a notification without "err" is failed.
 	if len(raw) == 0 {
-		return true
+		return false
 	}
 	var v any
 	if err := json.Unmarshal(raw, &v); err != nil {

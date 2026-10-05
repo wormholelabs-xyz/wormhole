@@ -36,8 +36,14 @@ var (
 )
 
 // notificationFrame is a logsNotification as the cluster sends it.
+// omitErrField as the txErr of notificationFrame leaves the "err" key out of the value.
+type omitErrField struct{}
+
 func notificationFrame(sig solana.Signature, logs []string, txErr any) string {
 	value := map[string]any{"signature": sig.String(), "err": txErr, "logs": logs}
+	if _, omit := txErr.(omitErrField); omit {
+		delete(value, "err")
+	}
 	frame := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  logsNotificationMethod,
@@ -178,6 +184,7 @@ func TestSubscribeLogsEvents(t *testing.T) {
 	}{
 		{name: "one notification after the acknowledgement"},
 		{name: "failed transaction is flagged", txErr: map[string]any{"InstructionError": []any{0, map[string]any{"Custom": 7}}}, wantFailed: true},
+		{name: "missing err field is flagged", txErr: omitErrField{}, wantFailed: true},
 	}
 
 	for _, tt := range tests {

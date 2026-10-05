@@ -112,13 +112,35 @@ func TestParseSolanaCommitLogs(t *testing.T) {
 			},
 		},
 		{
-			name: "failed child pops the frame",
+			name: "failed child rejects the transaction",
 			logs: []string{
 				invokeLine(program, 1),
 				invokeLine(foreign, 2),
 				failedLine(foreign),
 				programDataLine(payload),
 				successLine(program),
+			},
+			wantErr: true,
+		},
+		{
+			name: "accountant frame fails after its commit",
+			logs: []string{
+				invokeLine(foreign, 1),
+				invokeLine(program, 2),
+				programDataLine(payload),
+				failedLine(program),
+				successLine(foreign),
+			},
+			wantErr: true,
+		},
+		{
+			name: "wrapper cpi, accountant succeeds",
+			logs: []string{
+				invokeLine(foreign, 1),
+				invokeLine(program, 2),
+				programDataLine(payload),
+				successLine(program),
+				successLine(foreign),
 			},
 			wantCommits: []solanaCommitEvent{commit},
 		},
