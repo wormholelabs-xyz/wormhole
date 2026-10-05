@@ -424,7 +424,7 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 		addrs[idx] = sub.pendingPDA
 	}
 
-	accounts, err := b.conn.GetMultipleAccounts(ctx, addrs, solacctconn.CommitmentConfirmed)
+	accounts, err := b.conn.GetOwnedAccounts(ctx, addrs, b.program, solacctconn.CommitmentConfirmed)
 	if err != nil {
 		solanaSubmitFailures.Add(float64(len(unread)))
 		acct.logger.Error("failed to read the solana pending accounts", zap.String("backend", b.tag), zap.Int("numMsgs", len(unread)), zap.Error(err))
@@ -439,9 +439,21 @@ func (acct *Accountant) resolveSolanaRentRecipients(ctx context.Context, b *sola
 	feePayer := b.feePayer.PublicKey()
 	for idx, sub := range unread {
 		account := accounts[idx]
-		if account == nil {
+		switch account.State {
+		case solacctconn.AccountAbsent:
 			sub.rentRecipient = feePayer
 			ready = append(ready, sub)
+			continue
+		case solacctconn.AccountUninitialised:
+			// SECURITY: create_pending_pda records the submitter as payer over a prefund.
+			acct.logger.Warn("a solana pending account is prefunded, creating it", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Stringer("pendingPda", sub.pendingPDA))
+			sub.rentRecipient = feePayer
+			ready = append(ready, sub)
+			continue
+		case solacctconn.AccountInitialised:
+		default:
+			solanaSubmitFailures.Inc()
+			acct.logger.Error("a solana pending account read returned an unknown state", zap.String("backend", b.tag), zap.String("msgId", sub.msgId), zap.Uint8("state", uint8(account.State)))
 			continue
 		}
 

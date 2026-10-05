@@ -370,10 +370,19 @@ func TestHandleSolanaBatch(t *testing.T) {
 			wantPending: 1,
 		},
 		{
+			name: "prefunded pending pda confirms",
+			setup: func(t *testing.T, f *solanaBatchFixture) {
+				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{State: solacctconn.AccountUninitialised})
+			},
+			wantSent:    1,
+			wantPending: 1,
+		},
+		{
 			name: "own bit set sends nothing",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.AccountResult{
-					Data: solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, f.acct.solana.feePayer.PublicKey(), []uint8{0}),
+				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{
+					State: solacctconn.AccountInitialised,
+					Data:  solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, f.acct.solana.feePayer.PublicKey(), []uint8{0}),
 				})
 			},
 			wantPending: 1,
@@ -381,8 +390,9 @@ func TestHandleSolanaBatch(t *testing.T) {
 		{
 			name: "pending account with the wrong digest is skipped",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.AccountResult{
-					Data: solanaPendingAccountData(t, f.sub.fields.Chain, 0, [32]byte{0xEE}, solana.PublicKey{0xAB}, nil),
+				f.conn.SetAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{
+					State: solacctconn.AccountInitialised,
+					Data:  solanaPendingAccountData(t, f.sub.fields.Chain, 0, [32]byte{0xEE}, solana.PublicKey{0xAB}, nil),
 				})
 			},
 			wantPending: 1,
@@ -390,7 +400,7 @@ func TestHandleSolanaBatch(t *testing.T) {
 		{
 			name: "account read failure abandons the batch",
 			setup: func(t *testing.T, f *solanaBatchFixture) {
-				f.conn.GetMultipleAccountsErr = errors.New("rpc down")
+				f.conn.GetOwnedAccountsErr = errors.New("rpc down")
 			},
 			wantPending: 1,
 		},
@@ -487,8 +497,9 @@ func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 	f.conn.SetSendTransactionHook(func(tx *solana.Transaction) error {
 		sends++
 		if sends == 1 {
-			f.conn.SetConfirmedAccount(f.sub.pendingPDA, &solacctconn.AccountResult{
-				Data: solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, recordedPayer, []uint8{1}),
+			f.conn.SetConfirmedAccount(f.sub.pendingPDA, &solacctconn.OwnedAccount{
+				State: solacctconn.AccountInitialised,
+				Data:  solanaPendingAccountData(t, f.sub.fields.Chain, 0, f.sub.fields.contentDigest, recordedPayer, []uint8{1}),
 			})
 			return customTxError(solanaErrPayerMismatch)
 		}
@@ -542,7 +553,7 @@ func TestHandleSolanaBatchPayerMismatchUsesLoggedPayer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, accounts, submitObservationsAccountCount)
 	assert.Equal(t, recordedPayer, accounts[9].PublicKey)
-	assert.Len(t, f.conn.GetMultipleAccountsCommitments, 1, "only round one reads the pending PDA")
+	assert.Len(t, f.conn.GetOwnedAccountsCalls, 1, "only round one reads the pending PDA")
 }
 
 // TestConfirmSolanaSubmissions covers the block height expiry and context cancellation.

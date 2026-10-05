@@ -11,8 +11,8 @@ import (
 type Conn interface {
 	Close()
 
-	// Results are positional with addrs. A nil element marks an absent account.
-	GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment Commitment) ([]*AccountResult, error)
+	// Results are positional with addrs. owner must not be the system program.
+	GetOwnedAccounts(ctx context.Context, addrs []solana.PublicKey, owner solana.PublicKey, commitment Commitment) ([]OwnedAccount, error)
 
 	// Filters: memcmp(offset 0, tag) and dataSize.
 	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64) ([]ProgramAccount, error)
@@ -42,7 +42,7 @@ type Conn interface {
 }
 
 // Commitment is the commitment level of an account read. Use CommitmentConfirmed or
-// CommitmentFinalized. GetMultipleAccounts returns an error for the zero value.
+// CommitmentFinalized. GetOwnedAccounts returns an error for the zero value.
 type Commitment struct {
 	level rpc.CommitmentType
 }
@@ -66,8 +66,20 @@ type SignatureStatus struct {
 	Err       *TxError
 }
 
-type AccountResult struct {
-	Data []byte
+// AccountState is the lifecycle state of a program-derived account. The zero value is invalid.
+type AccountState uint8
+
+const (
+	AccountAbsent AccountState = iota + 1
+	// System-owned with zero data, such as a prefunded PDA.
+	AccountUninitialised
+	AccountInitialised
+)
+
+// OwnedAccount is one GetOwnedAccounts result. Data is set for AccountInitialised only.
+type OwnedAccount struct {
+	State AccountState
+	Data  []byte
 }
 
 // ProgramAccount is an account that the queried program owns.

@@ -10,6 +10,11 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
+type MockGetOwnedAccountsCall struct {
+	Owner      solana.PublicKey
+	Commitment solacctconn.Commitment
+}
+
 type MockGetSignaturesForAddressCall struct {
 	Addr  solana.PublicKey
 	Limit int
@@ -18,31 +23,31 @@ type MockGetSignaturesForAddressCall struct {
 // MockAccountantSolanaConn is the solacctconn.Conn test double. Set the exported fields
 // before the code under test runs.
 type MockAccountantSolanaConn struct {
-	GetMultipleAccountsErr error
-	ProgramAccounts        []solacctconn.ProgramAccount
-	ProgramAccountsErr     error
-	SubscribeLogsErr       error
-	LatestBlockhash        solacctconn.Blockhash
-	LatestBlockhashErr     error
-	BlockHeight            uint64
-	BlockHeightErr         error
-	SendTransactionErr     error
+	GetOwnedAccountsErr error
+	ProgramAccounts     []solacctconn.ProgramAccount
+	ProgramAccountsErr  error
+	SubscribeLogsErr    error
+	LatestBlockhash     solacctconn.Blockhash
+	LatestBlockhashErr  error
+	BlockHeight         uint64
+	BlockHeightErr      error
+	SendTransactionErr  error
 	// DefaultSignatureStatus answers every signature. A nil status marks them unknown.
 	DefaultSignatureStatus *solacctconn.SignatureStatus
 	SignatureStatusesErr   error
 	Balance                uint64
 	BalanceErr             error
 
-	GetMultipleAccountsCommitments []solacctconn.Commitment
-	GetSignaturesForAddressCalls   []MockGetSignaturesForAddressCall
-	SentTransactions               []*solana.Transaction
-	GetSignatureStatusesCalls      [][]solana.Signature
-	GetBalanceCalls                []solana.PublicKey
+	GetOwnedAccountsCalls        []MockGetOwnedAccountsCall
+	GetSignaturesForAddressCalls []MockGetSignaturesForAddressCall
+	SentTransactions             []*solana.Transaction
+	GetSignatureStatusesCalls    [][]solana.Signature
+	GetBalanceCalls              []solana.PublicKey
 
 	mu       sync.Mutex
-	accounts map[solana.PublicKey]*solacctconn.AccountResult
+	accounts map[solana.PublicKey]*solacctconn.OwnedAccount
 	// Only confirmed reads see these. They take precedence over accounts.
-	confirmedAccounts   map[solana.PublicKey]*solacctconn.AccountResult
+	confirmedAccounts   map[solana.PublicKey]*solacctconn.OwnedAccount
 	signatures          map[solana.PublicKey][]solana.Signature
 	transactions        map[solana.Signature]*solacctconn.TransactionResult
 	logEvents           chan solacctconn.LogEvent
@@ -54,8 +59,8 @@ var _ solacctconn.Conn = (*MockAccountantSolanaConn)(nil)
 
 func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 	return &MockAccountantSolanaConn{
-		accounts:          make(map[solana.PublicKey]*solacctconn.AccountResult),
-		confirmedAccounts: make(map[solana.PublicKey]*solacctconn.AccountResult),
+		accounts:          make(map[solana.PublicKey]*solacctconn.OwnedAccount),
+		confirmedAccounts: make(map[solana.PublicKey]*solacctconn.OwnedAccount),
 		signatures:        make(map[solana.PublicKey][]solana.Signature),
 		transactions:      make(map[solana.Signature]*solacctconn.TransactionResult),
 		// Buffered so tests can queue events before the reader starts.
@@ -65,32 +70,36 @@ func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 
 func (c *MockAccountantSolanaConn) Close() {}
 
-// A nil result marks an absent account.
-func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *solacctconn.AccountResult) {
+// A nil result, or an address that was never set, reads as AccountAbsent.
+func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *solacctconn.OwnedAccount) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.accounts[addr] = result
 }
 
 // SetConfirmedAccount sets an account that only confirmed reads see.
-func (c *MockAccountantSolanaConn) SetConfirmedAccount(addr solana.PublicKey, result *solacctconn.AccountResult) {
+func (c *MockAccountantSolanaConn) SetConfirmedAccount(addr solana.PublicKey, result *solacctconn.OwnedAccount) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.confirmedAccounts[addr] = result
 }
 
-func (c *MockAccountantSolanaConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment solacctconn.Commitment) ([]*solacctconn.AccountResult, error) {
+func (c *MockAccountantSolanaConn) GetOwnedAccounts(ctx context.Context, addrs []solana.PublicKey, owner solana.PublicKey, commitment solacctconn.Commitment) ([]solacctconn.OwnedAccount, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.GetMultipleAccountsCommitments = append(c.GetMultipleAccountsCommitments, commitment)
-	if c.GetMultipleAccountsErr != nil {
-		return nil, c.GetMultipleAccountsErr
+	c.GetOwnedAccountsCalls = append(c.GetOwnedAccountsCalls, MockGetOwnedAccountsCall{Owner: owner, Commitment: commitment})
+	if c.GetOwnedAccountsErr != nil {
+		return nil, c.GetOwnedAccountsErr
 	}
-	results := make([]*solacctconn.AccountResult, len(addrs))
+	results := make([]solacctconn.OwnedAccount, len(addrs))
 	for i, addr := range addrs {
-		results[i] = c.accounts[addr]
+		result := c.accounts[addr]
 		if confirmed, ok := c.confirmedAccounts[addr]; ok && commitment == solacctconn.CommitmentConfirmed {
-			results[i] = confirmed
+			result = confirmed
+		}
+		results[i] = solacctconn.OwnedAccount{State: solacctconn.AccountAbsent}
+		if result != nil {
+			results[i] = *result
 		}
 	}
 	return results, nil

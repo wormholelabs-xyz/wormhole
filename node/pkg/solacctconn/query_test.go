@@ -59,7 +59,7 @@ func testTransaction(program solana.PublicKey, data []byte) *solana.Transaction 
 	return tx
 }
 
-func TestGetMultipleAccountsChunking(t *testing.T) {
+func TestGetOwnedAccountsChunking(t *testing.T) {
 	tests := []struct {
 		name      string
 		count     int
@@ -83,7 +83,7 @@ func TestGetMultipleAccountsChunking(t *testing.T) {
 				return map[string]any{"context": map[string]any{"slot": 1}, "value": values}, nil
 			})
 
-			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(tt.count), CommitmentFinalized)
+			results, err := conn.GetOwnedAccounts(context.Background(), testKeys(tt.count), owner, CommitmentFinalized)
 			require.NoError(t, err)
 			require.Len(t, results, tt.count)
 
@@ -96,16 +96,58 @@ func TestGetMultipleAccountsChunking(t *testing.T) {
 	}
 }
 
-func TestGetMultipleAccountsResults(t *testing.T) {
+func TestGetOwnedAccountsClassifiesOwner(t *testing.T) {
 	owner := testKeys(1)[0]
+	third := testKeys(3)[2]
+	pending := make([]byte, 88)
+	pending[0] = 0x07
+	prefunded := accountValue(solana.SystemProgramID, nil)
+	prefunded["lamports"] = 650_240
+	executable := accountValue(owner, pending)
+	executable["executable"] = true
 
 	tests := []struct {
 		name    string
-		value   []any
+		value   any
+		want    OwnedAccount
 		wantErr bool
 	}{
-		{name: "absent accounts are positional nils", value: []any{accountValue(owner, []byte{1}), nil, accountValue(owner, []byte{3})}},
-		{name: "short result is rejected", value: []any{accountValue(owner, []byte{1})}, wantErr: true},
+		{name: "absent", value: nil, want: OwnedAccount{State: AccountAbsent}},
+		{name: "prefunded system account is uninitialised", value: prefunded, want: OwnedAccount{State: AccountUninitialised}},
+		{name: "owned account is initialised", value: accountValue(owner, pending), want: OwnedAccount{State: AccountInitialised, Data: pending}},
+		{name: "system account with data", value: accountValue(solana.SystemProgramID, pending), wantErr: true},
+		{name: "third-party owner", value: accountValue(third, pending), wantErr: true},
+		{name: "executable owned account", value: executable, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{tt.value}}, nil
+			})
+
+			results, err := conn.GetOwnedAccounts(context.Background(), testKeys(1), owner, CommitmentFinalized)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, results)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, results, 1)
+			assert.Equal(t, tt.want, results[0])
+		})
+	}
+}
+
+func TestGetOwnedAccountsRejects(t *testing.T) {
+	owner := testKeys(1)[0]
+	tests := []struct {
+		name  string
+		owner solana.PublicKey
+		value []any
+	}{
+		{name: "short result", owner: owner, value: []any{accountValue(owner, []byte{1})}},
+		{name: "system program as owner", owner: solana.SystemProgramID, value: []any{nil, nil, nil}},
 	}
 
 	for _, tt := range tests {
@@ -114,18 +156,9 @@ func TestGetMultipleAccountsResults(t *testing.T) {
 				return map[string]any{"context": map[string]any{"slot": 1}, "value": tt.value}, nil
 			})
 
-			results, err := conn.GetMultipleAccounts(context.Background(), testKeys(3), CommitmentFinalized)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-			require.Len(t, results, 3)
-			require.NotNil(t, results[0])
-			assert.Equal(t, []byte{1}, results[0].Data)
-			assert.Nil(t, results[1])
-			require.NotNil(t, results[2])
-			assert.Equal(t, []byte{3}, results[2].Data)
+			results, err := conn.GetOwnedAccounts(context.Background(), testKeys(3), tt.owner, CommitmentFinalized)
+			require.Error(t, err)
+			assert.Nil(t, results)
 		})
 	}
 }
@@ -264,7 +297,7 @@ func TestGetTransaction(t *testing.T) {
 	}
 }
 
-func TestGetMultipleAccountsCommitment(t *testing.T) {
+func TestGetOwnedAccountsCommitment(t *testing.T) {
 	tests := []struct {
 		name       string
 		commitment Commitment
@@ -281,7 +314,7 @@ func TestGetMultipleAccountsCommitment(t *testing.T) {
 				return map[string]any{"context": map[string]any{"slot": 1}, "value": []any{nil}}, nil
 			})
 
-			_, err := conn.GetMultipleAccounts(context.Background(), testKeys(1), tt.commitment)
+			_, err := conn.GetOwnedAccounts(context.Background(), testKeys(1), testKeys(2)[1], tt.commitment)
 			if tt.wantErr {
 				require.Error(t, err)
 				assert.Empty(t, srv.recorded())

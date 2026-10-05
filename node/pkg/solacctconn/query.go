@@ -21,13 +21,19 @@ const (
 	MaxLogLinesPerTx = 2048
 )
 
-// GetMultipleAccounts reads accounts at commitment. Results are positional with addrs.
-// A nil element marks an absent account. Each request holds at most maxAccountsPerRequest keys.
-func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.PublicKey, commitment Commitment) ([]*AccountResult, error) {
+// GetOwnedAccounts reads accounts at commitment and classifies each against owner. Results
+// are positional with addrs. Each request holds at most maxAccountsPerRequest keys.
+//
+// SECURITY: precondition owner != the system program, whose zero-data account is the
+// uninitialised state. A classification error fails the whole read.
+func (c *ClientConn) GetOwnedAccounts(ctx context.Context, addrs []solana.PublicKey, owner solana.PublicKey, commitment Commitment) ([]OwnedAccount, error) {
 	if commitment != CommitmentConfirmed && commitment != CommitmentFinalized {
 		return nil, fmt.Errorf("getMultipleAccounts: unsupported commitment %q", commitment)
 	}
-	out := make([]*AccountResult, 0, len(addrs))
+	if owner == solana.SystemProgramID {
+		return nil, errors.New("getMultipleAccounts: owner is the system program")
+	}
+	out := make([]OwnedAccount, 0, len(addrs))
 
 	for start := 0; start < len(addrs); start += maxAccountsPerRequest {
 		chunk := addrs[start:min(start+maxAccountsPerRequest, len(addrs))]
@@ -46,12 +52,12 @@ func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.Pub
 			return nil, fmt.Errorf("getMultipleAccounts: want %d results, got %d", len(chunk), len(resp.Value))
 		}
 
-		for _, account := range resp.Value {
-			if account == nil {
-				out = append(out, nil)
-				continue
+		for idx, account := range resp.Value {
+			owned, err := classifyOwnedAccount(account, owner)
+			if err != nil {
+				return nil, fmt.Errorf("getMultipleAccounts: account %s: %w", chunk[idx], err)
 			}
-			out = append(out, &AccountResult{Data: account.Data.GetBinary()})
+			out = append(out, owned)
 		}
 	}
 
@@ -59,6 +65,28 @@ func (c *ClientConn) GetMultipleAccounts(ctx context.Context, addrs []solana.Pub
 		return nil, fmt.Errorf("getMultipleAccounts: want %d results, got %d", len(addrs), len(out))
 	}
 	return out, nil
+}
+
+// classifyOwnedAccount mirrors pda.rs is_initialised and quorum.rs decide_pending_action.
+// A system-owned zero-data account is a prefunded PDA that the program creates over.
+func classifyOwnedAccount(account *rpc.Account, owner solana.PublicKey) (OwnedAccount, error) {
+	if account == nil {
+		return OwnedAccount{State: AccountAbsent}, nil
+	}
+	data := account.Data.GetBinary()
+	switch account.Owner {
+	case solana.SystemProgramID:
+		if len(data) != 0 {
+			return OwnedAccount{}, fmt.Errorf("system-owned account holds %d bytes, want 0", len(data))
+		}
+		return OwnedAccount{State: AccountUninitialised}, nil
+	case owner:
+		if account.Executable {
+			return OwnedAccount{}, errors.New("owned account is executable")
+		}
+		return OwnedAccount{State: AccountInitialised, Data: data}, nil
+	}
+	return OwnedAccount{}, fmt.Errorf("owner %s, want %s or the system program", account.Owner, owner)
 }
 
 // GetProgramAccountsByTag reads the accounts of program whose first byte is tag and whose

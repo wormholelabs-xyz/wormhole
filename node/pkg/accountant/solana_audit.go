@@ -73,11 +73,16 @@ func decideSolanaOwnTransferAction(current solanaPendingAccountState, accounted 
 	return 0, fmt.Errorf("unknown pending account state %d", current)
 }
 
-// classifySolanaPendingAccount decodes a GetMultipleAccounts result for the current
-// guardian-set pending account of a transfer.
-func classifySolanaPendingAccount(account *solacctconn.AccountResult, contentDigest [32]byte, guardianIndex uint8) (solanaPendingAccountState, error) {
-	if account == nil {
+// classifySolanaPendingAccount decodes a GetOwnedAccounts result for the current
+// guardian-set pending account of a transfer. A prefunded account counts as absent, because
+// submit_observations creates over it.
+func classifySolanaPendingAccount(account solacctconn.OwnedAccount, contentDigest [32]byte, guardianIndex uint8) (solanaPendingAccountState, error) {
+	switch account.State {
+	case solacctconn.AccountAbsent, solacctconn.AccountUninitialised:
 		return solanaPendingAccountAbsent, nil
+	case solacctconn.AccountInitialised:
+	default:
+		return 0, fmt.Errorf("unknown account state %d", account.State)
 	}
 	_, signed, err := checkPendingObservationsAccount(account.Data, contentDigest, guardianIndex)
 	if err != nil {
@@ -219,7 +224,7 @@ func (acct *Accountant) auditSolanaOwnPendingTransfers(ctx context.Context, b *s
 		addrs = append(addrs, addr)
 	}
 
-	accounts, err := b.conn.GetMultipleAccounts(ctx, addrs, solacctconn.CommitmentFinalized)
+	accounts, err := b.conn.GetOwnedAccounts(ctx, addrs, b.program, solacctconn.CommitmentFinalized)
 	if err != nil {
 		acct.logUnresolvedSolanaTransfers(b, addrs, own, err)
 		return reconciled
@@ -319,17 +324,22 @@ func (acct *Accountant) readSolanaNoreplayBits(ctx context.Context, b *solanaBac
 		return accounted, nil
 	}
 
-	results, err := b.conn.GetMultipleAccounts(ctx, buckets, solacctconn.CommitmentFinalized)
+	results, err := b.conn.GetOwnedAccounts(ctx, buckets, b.noreplay, solacctconn.CommitmentFinalized)
 	if err != nil {
 		return nil, err
 	}
 	if len(results) != len(buckets) {
 		return nil, fmt.Errorf("want %d results, got %d", len(buckets), len(results))
 	}
+	// An absent or prefunded bucket reads as all bits clear.
 	bucketData := make(map[solana.PublicKey][]byte, len(buckets))
 	for idx, bucket := range buckets {
-		if results[idx] != nil {
+		switch results[idx].State {
+		case solacctconn.AccountAbsent, solacctconn.AccountUninitialised:
+		case solacctconn.AccountInitialised:
 			bucketData[bucket] = results[idx].Data
+		default:
+			return nil, fmt.Errorf("noreplay bucket %s: unknown account state %d", bucket, results[idx].State)
 		}
 	}
 
