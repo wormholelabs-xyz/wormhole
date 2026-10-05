@@ -336,6 +336,71 @@ func TestSubmitObservationFanOut(t *testing.T) {
 	}
 }
 
+// TestSubmitObservationSiblingTxIDs covers a reobservation that returns another tx id for a
+// pending transfer. The Solana backend submits each checked tx id, up to the bound. The
+// wormchain backend submits the first tx id only.
+func TestSubmitObservationSiblingTxIDs(t *testing.T) {
+	ctx := context.Background()
+	accountTxID := bytes.Repeat([]byte{0xA1}, 32)
+	closeTxID := bytes.Repeat([]byte{0xC1}, 64)
+	shimTxID := bytes.Repeat([]byte{0xD1}, 64)
+
+	type observation struct {
+		txID         []byte
+		changeDigest bool
+	}
+	tests := []struct {
+		name          string
+		wormchain     string
+		observations  []observation
+		wantSolana    [][]byte
+		wantWormchain [][]byte
+	}{
+		{name: "one tx id", observations: []observation{{txID: accountTxID}}, wantSolana: [][]byte{accountTxID}},
+		{name: "same tx id twice", observations: []observation{{txID: accountTxID}, {txID: accountTxID}}, wantSolana: [][]byte{accountTxID}},
+		{name: "sibling tx id", observations: []observation{{txID: accountTxID}, {txID: closeTxID}}, wantSolana: [][]byte{accountTxID, closeTxID}},
+		{name: "third tx id exceeds the bound", observations: []observation{{txID: accountTxID}, {txID: closeTxID}, {txID: shimTxID}}, wantSolana: [][]byte{accountTxID, closeTxID}},
+		{name: "changed digest adds no tx id", observations: []observation{{txID: accountTxID}, {txID: closeTxID, changeDigest: true}}, wantSolana: [][]byte{accountTxID}},
+		{name: "wormchain keeps the first tx id", wormchain: "0xdeadbeef", observations: []observation{{txID: accountTxID}, {txID: closeTxID}}, wantSolana: [][]byte{accountTxID, closeTxID}, wantWormchain: [][]byte{accountTxID}},
+	}
+
+	drain := func(ch chan *common.MessagePublication) [][]byte {
+		var got [][]byte
+		for len(ch) > 0 {
+			got = append(got, (<-ch).TxID)
+		}
+		return got
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NotEmpty(t, tt.observations)
+			acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: tt.wormchain, enforce: true})
+
+			var msgId string
+			for _, o := range tt.observations {
+				msg := solanaTestTransfer(t, 1)
+				msg.TxID = o.txID
+				if o.changeDigest {
+					msg.Nonce++
+				}
+				_, err := acct.SubmitObservation(msg)
+				require.NoError(t, err)
+				msgId = msg.MessageIDString()
+			}
+
+			pe, exists := acct.pendingTransfers[msgId]
+			require.True(t, exists)
+			for backend := range numAccountantBackends {
+				acct.submitObservation(ctx, pe, backend, false)
+			}
+
+			assert.Equal(t, tt.wantSolana, drain(acct.solana.subChan))
+			assert.Equal(t, tt.wantWormchain, drain(acct.subChan))
+		})
+	}
+}
+
 // TestSubmitObservationAcceptsLargeTransferPayload holds a TransferWithPayload of any
 // length. submit_observations carries the body digest, so payload length is unbounded.
 func TestSubmitObservationAcceptsLargeTransferPayload(t *testing.T) {
