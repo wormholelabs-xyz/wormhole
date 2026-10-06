@@ -119,8 +119,8 @@ caps an instruction trace at 64 entries, so a larger batch would abort mid-write
 with `MaxInstructionTraceLengthExceeded`. `BackfillRelayerChainRegistration`
 creates two PDAs per entry, so its cap is `MAX_CHAIN_REGISTRATION_ENTRIES`,
 which is 31. The 32 KiB program heap gives a lower ceiling: `BackfillBalance` and
-`BackfillModifyBalance` pass mollusk at 58 entries and fail at 59. The
-transaction packet gives a lower practical ceiling still. The cost probes
+`BackfillModifyBalance` pass mollusk at 58 entries and fail at 59. A
+transaction v1 (4096 bytes) gives a lower practical ceiling still. The cost probes
 measure that ceiling per arm against a real validator.
 
 `BackfillBalance` entry, 68 bytes. Sort key `(chain, token_chain,

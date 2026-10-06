@@ -124,6 +124,7 @@ fn surfpool_submit_observations_real_noreplay() {
             &rpc,
             &format!("submit_observations[{index}]"),
             &[ix],
+            None,
             &[&submitter],
         ));
     }
@@ -148,6 +149,7 @@ fn surfpool_submit_observations_real_noreplay() {
         &rpc,
         "submit_observations after quorum",
         &[extra],
+        None,
         &[&submitter],
         GlobalAccountantError::AlreadyAccounted,
     );

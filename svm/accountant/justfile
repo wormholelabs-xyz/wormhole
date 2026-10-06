@@ -221,7 +221,7 @@ check *programs:
 
 [doc("Clippy against the host build.")]
 clippy:
-    {{test_env}} cargo clippy --all-targets -- -D warnings
+    {{test_env}} cargo clippy --locked --all-targets -- -D warnings
 
 # Surfpool e2e suite (tests/surfpool/, one binary, all tests `#[ignore]`).
 # Single-threaded: each test spawns its own surfpool plus program deploys.

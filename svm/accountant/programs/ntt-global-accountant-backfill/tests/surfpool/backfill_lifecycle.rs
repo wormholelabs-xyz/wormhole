@@ -128,6 +128,7 @@ fn surfpool_ntt_backfill_lifecycle() {
             accounts,
             data: wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, &transfers),
         }],
+        None,
         &[&authority],
     );
 
@@ -196,6 +197,7 @@ fn surfpool_ntt_backfill_lifecycle() {
             accounts,
             data: wire::encode_balance_batch(Arm::BackfillBalance as u8, &balances),
         }],
+        None,
         &[&authority],
     );
     for entry in &balances {
@@ -238,6 +240,7 @@ fn surfpool_ntt_backfill_lifecycle() {
                 &[modification],
             ),
         }],
+        None,
         &[&authority],
     );
     assert_written(
@@ -282,6 +285,7 @@ fn surfpool_ntt_backfill_lifecycle() {
                 &registrations,
             ),
         }],
+        None,
         &[&authority],
     );
     for entry in &registrations {
@@ -324,6 +328,7 @@ fn surfpool_ntt_backfill_lifecycle() {
             accounts,
             data: wire::encode_transceiver_hub_batch(Arm::BackfillTransceiverHub as u8, &hubs),
         }],
+        None,
         &[&authority],
     );
     for entry in &hubs {
@@ -357,6 +362,7 @@ fn surfpool_ntt_backfill_lifecycle() {
             accounts,
             data: wire::encode_transceiver_peer_batch(Arm::BackfillTransceiverPeer as u8, &peers),
         }],
+        None,
         &[&authority],
     );
     for entry in &peers {
@@ -387,6 +393,7 @@ fn surfpool_ntt_backfill_lifecycle() {
                 &[stranger_hub],
             ),
         }],
+        None,
         &[&stranger],
         GlobalAccountantError::UnauthorizedCaller,
     );

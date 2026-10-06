@@ -14,33 +14,42 @@ use global_accountant_definitions::{
 use solana_account::Account;
 use solana_client::client_error::ClientError;
 use solana_client::rpc_client::RpcClient;
-use solana_client::rpc_config::{RpcTransactionConfig, UiTransactionEncoding};
 use solana_client::rpc_request::RpcRequest;
 use solana_commitment_config::CommitmentConfig;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_loader_v3_interface::instruction::upgrade as loader_upgrade_ix;
 use solana_loader_v3_interface::state::UpgradeableLoaderState;
+use solana_message_v1::{v1, v1::TransactionConfig, Hash as V1Hash, VersionedMessage};
 use solana_pubkey::Pubkey;
 use solana_signature::Signature;
 use solana_signer::Signer;
-use solana_transaction::Transaction;
+use solana_transaction_v1::versioned::VersionedTransaction;
 
 use crate::accounts::{
     loader_account_data, loader_state, program_data_address, upgradeable_buffer_account,
 };
 use crate::fixtures::fixture_elf;
 use crate::guardians::{derive_guardian_set_pda, guardian_set_account, Guardian};
-use crate::ids::{core_bridge_program_id, loader_v3_id, shim_program_id, NOREPLAY_PROGRAM_ID};
+use crate::ids::{
+    compute_budget_program_id, core_bridge_program_id, loader_v3_id, shim_program_id,
+    NOREPLAY_PROGRAM_ID,
+};
 use crate::scenario::guardian_keys;
 
 const SURFPOOL_BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 const RPC_READY_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const TX_INDEX_TIMEOUT: Duration = Duration::from_secs(5);
+const TX_INDEX_TIMEOUT: Duration = Duration::from_secs(10);
 const TX_INDEX_POLL_INTERVAL: Duration = Duration::from_millis(150);
 /// Program-data lamports floor for [`loader_upgrade`]; the loader charges rent for the
 /// resized account and spills the remainder.
 const PROGRAM_DATA_LAMPORTS: u64 = 10_000_000_000;
+const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(30);
+const CONFIRMATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Runtime ceiling on loaded account data per transaction (64 MiB).
+const MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES: u32 = 64 * 1024 * 1024;
+/// SIMD-0385 `enable_tx_v1`.
+const ENABLE_TX_V1_FEATURE: &str = "txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL";
 
 /// Launch options for one surfpool instance.
 ///
@@ -224,7 +233,9 @@ pub fn start_surfpool(opts: SurfpoolOptions) -> SurfpoolGuard {
         .arg("--slot-time")
         .arg("100")
         .arg("--log-level")
-        .arg("warn");
+        .arg("warn")
+        .arg("--feature")
+        .arg(ENABLE_TX_V1_FEATURE);
 
     match &opts.datasource_rpc_url {
         Some(url) => {
@@ -437,6 +448,7 @@ pub fn loader_upgrade(rpc: &RpcClient, program_id: &Pubkey, elf: &[u8], authorit
             &authority.pubkey(),
             &spill,
         )],
+        None,
         &[authority],
     );
 
@@ -555,25 +567,129 @@ pub fn fund(rpc: &RpcClient, key: &Pubkey, lamports: u64) {
         .unwrap_or_else(|e| panic!("airdrop {key} confirm: {e}"));
 }
 
-/// Sign `ixs` with `signers` (first signer pays), send, and wait for confirmation.
+/// Compute unit limit carried in a v1 message's config.
+#[derive(Clone, Copy, Debug)]
+pub struct ComputeUnitLimit(u32);
+
+impl ComputeUnitLimit {
+    /// Runtime ceiling per transaction.
+    pub const MAX: u32 = 1_400_000;
+
+    pub fn new(units: u32) -> Self {
+        assert!(units > 0, "compute unit limit is zero");
+        assert!(
+            units <= Self::MAX,
+            "compute unit limit {units} exceeds {}",
+            Self::MAX
+        );
+        Self(units)
+    }
+}
+
+/// Sign `ixs` with `signers` (first signer pays) as a transaction v1. Returns the signature
+/// and the wire bytes. `cu_limit: None` requests [`ComputeUnitLimit::MAX`]; the loaded
+/// accounts limit is always the runtime maximum.
+///
+/// Panics on a ComputeBudget instruction: v1 ignores it for configuration.
+pub fn build_v1(
+    blockhash: [u8; 32],
+    ixs: &[Instruction],
+    cu_limit: Option<ComputeUnitLimit>,
+    signers: &[&Keypair],
+) -> (Signature, Vec<u8>) {
+    assert!(!ixs.is_empty(), "transaction has no instructions");
+    for ix in ixs {
+        assert_ne!(
+            ix.program_id,
+            compute_budget_program_id(),
+            "ComputeBudget instruction in a v1 transaction; pass `cu_limit`"
+        );
+    }
+    let payer = signers.first().expect("at least one signer").pubkey();
+    // SIMD-0385: an omitted limit is 0, not the legacy default.
+    let config = TransactionConfig::empty()
+        .with_compute_unit_limit(cu_limit.map_or(ComputeUnitLimit::MAX, |limit| limit.0))
+        .with_loaded_accounts_data_size_limit(MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES);
+    let message = v1::Message::try_compile_with_config(
+        &payer,
+        ixs,
+        V1Hash::new_from_array(blockhash),
+        config,
+    )
+    .unwrap_or_else(|e| panic!("compile v1 message: {e:?}"));
+    let tx = VersionedTransaction::try_new(VersionedMessage::V1(message), signers)
+        .unwrap_or_else(|e| panic!("sign v1 transaction: {e}"));
+    let bytes = wincode::serialize(&tx).expect("serialize v1 transaction");
+    assert_eq!(bytes[0], v1::V1_PREFIX, "v1 version byte");
+    assert!(
+        bytes.len() <= v1::MAX_TRANSACTION_SIZE,
+        "v1 transaction is {} bytes, over {}",
+        bytes.len(),
+        v1::MAX_TRANSACTION_SIZE
+    );
+    let signature = Signature::from(<[u8; 64]>::from(tx.signatures[0]));
+    (signature, bytes)
+}
+
+/// Sign `ixs` with `signers` (first signer pays), send as a transaction v1, and wait for
+/// confirmation.
 ///
 /// Panics with `label` when the transaction fails preflight or execution.
-pub fn send(rpc: &RpcClient, label: &str, ixs: &[Instruction], signers: &[&Keypair]) -> Signature {
-    let sig = try_send(rpc, ixs, signers).unwrap_or_else(|e| panic!("{label} send: {e}"));
+pub fn send(
+    rpc: &RpcClient,
+    label: &str,
+    ixs: &[Instruction],
+    cu_limit: Option<ComputeUnitLimit>,
+    signers: &[&Keypair],
+) -> Signature {
+    let sig = try_send(rpc, ixs, cu_limit, signers).unwrap_or_else(|e| panic!("{label} send: {e}"));
     eprintln!("[surfpool] {label} tx={sig}");
     sig
 }
 
 /// [`send`] for callers that tally failures instead of stopping at the first one.
+///
+/// `solana-client` 3.x cannot serialize a v1 transaction, so the wire bytes go out through
+/// a raw `sendTransaction` call.
 pub fn try_send(
     rpc: &RpcClient,
     ixs: &[Instruction],
+    cu_limit: Option<ComputeUnitLimit>,
     signers: &[&Keypair],
 ) -> Result<Signature, ClientError> {
-    let payer = signers.first().expect("at least one signer").pubkey();
+    use base64::Engine;
+
     let blockhash = rpc.get_latest_blockhash()?;
-    let tx = Transaction::new_signed_with_payer(ixs, Some(&payer), signers, blockhash);
-    rpc.send_and_confirm_transaction(&tx)
+    let (sig, bytes) = build_v1(blockhash.to_bytes(), ixs, cu_limit, signers);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let returned: String = rpc.send(
+        RpcRequest::SendTransaction,
+        serde_json::json!([
+            encoded,
+            { "encoding": "base64", "preflightCommitment": "confirmed" }
+        ]),
+    )?;
+    assert_eq!(returned, sig.to_string(), "sendTransaction signature");
+    await_confirmation(rpc, &sig)?;
+    Ok(sig)
+}
+
+/// Poll the status of `sig` until it confirms or fails.
+///
+/// Returns the execution error as a [`ClientError`], so callers read preflight and
+/// execution failures the same way. Panics when `sig` stays unconfirmed past
+/// `CONFIRMATION_TIMEOUT`.
+fn await_confirmation(rpc: &RpcClient, sig: &Signature) -> Result<(), ClientError> {
+    let deadline = Instant::now() + CONFIRMATION_TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(result) =
+            rpc.get_signature_status_with_commitment(sig, CommitmentConfig::confirmed())?
+        {
+            return result.map_err(ClientError::from);
+        }
+        thread::sleep(CONFIRMATION_POLL_INTERVAL);
+    }
+    panic!("{sig} not confirmed within {CONFIRMATION_TIMEOUT:?}");
 }
 
 /// Send `ixs` and require the accountant to reject with `expected`.
@@ -583,16 +699,11 @@ pub fn send_expect_error(
     rpc: &RpcClient,
     label: &str,
     ixs: &[Instruction],
+    cu_limit: Option<ComputeUnitLimit>,
     signers: &[&Keypair],
     expected: GlobalAccountantError,
 ) {
-    let payer = signers.first().expect("at least one signer").pubkey();
-    let blockhash = rpc
-        .get_latest_blockhash()
-        .unwrap_or_else(|e| panic!("{label} blockhash: {e}"));
-    let tx = Transaction::new_signed_with_payer(ixs, Some(&payer), signers, blockhash);
-    let err = rpc
-        .send_and_confirm_transaction(&tx)
+    let err = try_send(rpc, ixs, cu_limit, signers)
         .expect_err(&format!(
             "{label}: expected error {expected:?}, but tx confirmed"
         ))
@@ -636,33 +747,49 @@ pub fn accdgst_logs_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<AccountantDig
     entries
 }
 
-/// `meta.logMessages` of transaction `sig`, polled until surfpool indexes it.
+/// `getTransaction` result for v1 transaction `sig` as raw JSON, polled until surfpool
+/// indexes it. `None` when it stays unindexed past `TX_INDEX_TIMEOUT`.
 ///
-/// Panics when the transaction stays unindexed past `TX_INDEX_TIMEOUT`, or when
-/// the response carries no meta or no log messages.
-fn log_messages_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<String> {
-    let config = RpcTransactionConfig {
-        encoding: Some(UiTransactionEncoding::Json),
-        commitment: Some(CommitmentConfig::confirmed()),
-        max_supported_transaction_version: Some(0),
-    };
-    let deadline = Instant::now() + TX_INDEX_TIMEOUT;
-    let confirmed = loop {
-        match rpc.get_transaction_with_config(sig, config) {
-            Ok(tx) => break tx,
-            Err(e) if Instant::now() < deadline => {
-                let _ = e;
-                thread::sleep(TX_INDEX_POLL_INTERVAL);
-            }
-            Err(e) => panic!("getTransaction {sig} not indexed within {TX_INDEX_TIMEOUT:?}: {e}"),
+/// Raw JSON, because the `solana-client` 3.x response types predate transaction v1.
+/// Panics when the indexed transaction is not v1.
+pub fn v1_transaction_json(rpc: &RpcClient, sig: &Signature) -> Option<serde_json::Value> {
+    let params = serde_json::json!([
+        sig.to_string(),
+        {
+            "encoding": "json",
+            "commitment": "confirmed",
+            "maxSupportedTransactionVersion": 1
         }
-    };
-    let meta = confirmed
-        .transaction
-        .meta
-        .unwrap_or_else(|| panic!("getTransaction {sig} returned no meta"));
-    let logs: Option<Vec<String>> = meta.log_messages.into();
-    logs.unwrap_or_else(|| panic!("getTransaction {sig} returned no logMessages"))
+    ]);
+    let deadline = Instant::now() + TX_INDEX_TIMEOUT;
+    while Instant::now() < deadline {
+        match rpc.send::<serde_json::Value>(RpcRequest::GetTransaction, params.clone()) {
+            Ok(tx) if !tx.is_null() => {
+                assert_eq!(tx["version"], 1, "getTransaction {sig} version");
+                return Some(tx);
+            }
+            Ok(_) | Err(_) => thread::sleep(TX_INDEX_POLL_INTERVAL),
+        }
+    }
+    None
+}
+
+/// `meta.logMessages` of v1 transaction `sig`.
+///
+/// Panics when the transaction stays unindexed or carries no log messages.
+fn log_messages_in_tx(rpc: &RpcClient, sig: &Signature) -> Vec<String> {
+    let tx = v1_transaction_json(rpc, sig)
+        .unwrap_or_else(|| panic!("getTransaction {sig} not indexed within {TX_INDEX_TIMEOUT:?}"));
+    tx["meta"]["logMessages"]
+        .as_array()
+        .unwrap_or_else(|| panic!("getTransaction {sig} returned no logMessages"))
+        .iter()
+        .map(|line| {
+            line.as_str()
+                .unwrap_or_else(|| panic!("getTransaction {sig}: non-string log line"))
+                .to_owned()
+        })
+        .collect()
 }
 
 /// Assert that transaction `sig` emitted exactly one accountant commit-log

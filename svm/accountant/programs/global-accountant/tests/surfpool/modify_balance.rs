@@ -15,12 +15,13 @@ use solana_signer::Signer;
 
 use crate::common::{
     accountant_image, balance_of, double_keccak256, governance_header, layout, make_guardians,
-    modify_balance_body, modify_balance_ix_data, post_signatures_ix, set_compute_unit_limit_ix,
-    shim_program_id, signature_block, signatures_for, system_program_id, ETHEREUM, GUARDIAN_COUNT,
+    modify_balance_body, modify_balance_ix_data, post_signatures_ix, shim_program_id,
+    signature_block, signatures_for, system_program_id, ETHEREUM, GUARDIAN_COUNT,
     GUARDIAN_SET_INDEX, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
-    deploy_programs, fund, send, send_expect_error, start_surfpool, ProgramImage, SurfpoolOptions,
+    deploy_programs, fund, send, send_expect_error, start_surfpool, ComputeUnitLimit, ProgramImage,
+    SurfpoolOptions,
 };
 
 const PAYER_LAMPORTS: u64 = 20_000_000_000;
@@ -85,6 +86,7 @@ fn surfpool_modify_balance_create_delta_and_replay() {
                     QUORUM,
                     &signature_block(&signatures_for(&guardians, &digest, QUORUM)),
                 )],
+                None,
                 &[&payer, &guardian_signatures],
             );
             let (modify_balance_pda, _) = derive_modify_balance_pda(&program_id, payload_sequence);
@@ -136,7 +138,8 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     send(
         &rpc,
         "modify_balance[create]",
-        &[set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT), create],
+        &[create],
+        Some(ComputeUnitLimit::new(MODIFY_BALANCE_CU_LIMIT)),
         &[&payer],
     );
     assert_balance(1_000_000, "create");
@@ -146,7 +149,8 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     send(
         &rpc,
         "modify_balance[add]",
-        &[set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT), add],
+        &[add],
+        Some(ComputeUnitLimit::new(MODIFY_BALANCE_CU_LIMIT)),
         &[&payer],
     );
     assert_balance(1_000_500, "add");
@@ -155,7 +159,8 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     send(
         &rpc,
         "modify_balance[subtract]",
-        &[set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT), subtract],
+        &[subtract],
+        Some(ComputeUnitLimit::new(MODIFY_BALANCE_CU_LIMIT)),
         &[&payer],
     );
     assert_balance(999_000, "subtract");
@@ -166,10 +171,8 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     send_expect_error(
         &rpc,
         "modify_balance[subtract] underflow",
-        &[
-            set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT),
-            overdraft,
-        ],
+        &[overdraft],
+        Some(ComputeUnitLimit::new(MODIFY_BALANCE_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::ModifyBalanceUnderflow,
     );
@@ -180,7 +183,8 @@ fn surfpool_modify_balance_create_delta_and_replay() {
     send_expect_error(
         &rpc,
         "modify_balance[create] replay",
-        &[set_compute_unit_limit_ix(MODIFY_BALANCE_CU_LIMIT), replay],
+        &[replay],
+        Some(ComputeUnitLimit::new(MODIFY_BALANCE_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::DuplicateModifyBalance,
     );

@@ -12,16 +12,14 @@ use crate::common::*;
 /// Label, accountant instruction, initial accounts.
 type Case = (&'static str, Instruction, Vec<(Pubkey, Account)>);
 
-#[test]
-fn rejects_second_instruction() {
-    let mollusk = mollusk();
+fn cases() -> [Case; 2] {
     let vaa = VaaScenario::transfer(Transfer::new(0xD0, ETHEREUM, SOLANA, 100));
     let obs = ObsScenario::transfer(
         GUARDIAN_SET_INDEX,
         0xD1,
         Transfer::new(0, ETHEREUM, SOLANA, 100),
     );
-    let cases: [Case; 2] = [
+    [
         (
             "submit_vaas",
             Instruction::new_with_bytes(
@@ -36,13 +34,40 @@ fn rejects_second_instruction() {
             Instruction::new_with_bytes(program_id(), &obs.ix_data(0), obs.account_metas()),
             obs.initial_accounts(),
         ),
-    ];
-    for (label, ix, accounts) in cases {
+    ]
+}
+
+#[test]
+fn rejects_second_instruction() {
+    let mollusk = mollusk();
+    for (label, ix, accounts) in cases() {
         let result = process_as_second_instruction(&mollusk, &ix, &accounts);
         assert_tx_error(
             &result,
             1,
             GlobalAccountantError::InstructionNotFirst as u64,
+            label,
+        );
+    }
+}
+
+#[test]
+fn rejects_wrong_instructions_sysvar() {
+    let mollusk = mollusk();
+    let impostor = Pubkey::new_from_array([0x15u8; 32]);
+    for (label, mut ix, mut accounts) in cases() {
+        let last = ix.accounts.last_mut().expect("sysvar slot");
+        assert_eq!(
+            last.pubkey,
+            instructions_sysvar_id(),
+            "{label}: sysvar is last"
+        );
+        last.pubkey = impostor;
+        accounts.push((impostor, system_owned_account(1_000_000)));
+        let result = mollusk.process_instruction(&ix, &accounts);
+        assert_error(
+            &result,
+            u64::from(solana_program_error::ProgramError::UnsupportedSysvar),
             label,
         );
     }

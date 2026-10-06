@@ -22,13 +22,13 @@ use solana_signer::Signer;
 use crate::common::{
     accountant_image, balance_account, balance_of, double_keccak256, governance_header,
     instructions_sysvar_meta, layout, make_guardians, noreplay_authority_pda, post_signatures_ix,
-    register_chain_body, register_chain_ix_data, set_compute_unit_limit_ix, shim_program_id,
-    signature_block, signatures_for, submit_vaas_ix_data, system_program_id, transfer_body,
-    ETHEREUM, GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
+    register_chain_body, register_chain_ix_data, shim_program_id, signature_block, signatures_for,
+    submit_vaas_ix_data, system_program_id, transfer_body, ETHEREUM, GUARDIAN_COUNT,
+    GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
-    deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ProgramImage,
-    SurfpoolOptions,
+    deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ComputeUnitLimit,
+    ProgramImage, SurfpoolOptions,
 };
 
 const PAYER_LAMPORTS: u64 = 20_000_000_000;
@@ -96,6 +96,7 @@ fn surfpool_register_chain_rotate_and_replay() {
                 QUORUM,
                 &signature_block(&signatures_for(&guardians, &digest, QUORUM)),
             )],
+            None,
             &[&payer, &guardian_signatures],
         );
         let (register_chain_pda, _) = derive_register_chain_pda(&program_id, sequence);
@@ -143,6 +144,7 @@ fn surfpool_register_chain_rotate_and_replay() {
                 QUORUM,
                 &signature_block(&signatures_for(&guardians, &digest, QUORUM)),
             )],
+            None,
             &[&payer, &guardian_signatures],
         );
         let (bucket, _) = derive_bucket_pda(&noreplay_authority, ETHEREUM, &emitter, sequence);
@@ -173,7 +175,8 @@ fn surfpool_register_chain_rotate_and_replay() {
     send(
         &rpc,
         "register_chain[a]",
-        &[set_compute_unit_limit_ix(REGISTER_CHAIN_CU_LIMIT), ix_a],
+        &[ix_a],
+        Some(ComputeUnitLimit::new(REGISTER_CHAIN_CU_LIMIT)),
         &[&payer],
     );
 
@@ -221,10 +224,8 @@ fn surfpool_register_chain_rotate_and_replay() {
     send(
         &rpc,
         "submit_vaas[registered emitter]",
-        &[
-            transfer_before,
-            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
-        ],
+        &[transfer_before],
+        Some(ComputeUnitLimit::new(SUBMIT_VAAS_CU_LIMIT)),
         &[&payer],
     );
     let source_after_transfer = rpc.get_account(&source).expect("source balance PDA exists");
@@ -245,7 +246,8 @@ fn surfpool_register_chain_rotate_and_replay() {
     send(
         &rpc,
         "register_chain[rotate]",
-        &[set_compute_unit_limit_ix(REGISTER_CHAIN_CU_LIMIT), ix_b],
+        &[ix_b],
+        Some(ComputeUnitLimit::new(REGISTER_CHAIN_CU_LIMIT)),
         &[&payer],
     );
     let rotated = rpc
@@ -262,10 +264,8 @@ fn surfpool_register_chain_rotate_and_replay() {
     send_expect_error(
         &rpc,
         "submit_vaas[unregistered emitter]",
-        &[
-            transfer_after,
-            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
-        ],
+        &[transfer_after],
+        Some(ComputeUnitLimit::new(SUBMIT_VAAS_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::UnregisteredEmitter,
     );
@@ -287,7 +287,8 @@ fn surfpool_register_chain_rotate_and_replay() {
     send_expect_error(
         &rpc,
         "register_chain[a] replay",
-        &[set_compute_unit_limit_ix(REGISTER_CHAIN_CU_LIMIT), replay],
+        &[replay],
+        Some(ComputeUnitLimit::new(REGISTER_CHAIN_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::DuplicateRegisterChain,
     );

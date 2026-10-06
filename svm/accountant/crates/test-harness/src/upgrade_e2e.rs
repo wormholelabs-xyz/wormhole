@@ -36,14 +36,11 @@ use crate::ids::{
     clock_sysvar_id, core_bridge_program_id, loader_v3_id, rent_sysvar_id, shim_program_id,
     system_program_id, NOREPLAY_PROGRAM_ID,
 };
-use crate::ix::{
-    double_keccak256, governance_header, post_signatures_ix, set_compute_unit_limit_ix,
-    upgrade_contract_body,
-};
+use crate::ix::{double_keccak256, governance_header, post_signatures_ix, upgrade_contract_body};
 use crate::scenario::{signatures_for, GUARDIAN_COUNT, GUARDIAN_SET_INDEX, QUORUM};
 use crate::surfpool::{
     deploy_guardian_set, deploy_programs, fund, rpc_client, send, send_expect_error, set_account,
-    so_path, start_surfpool, ProgramImage, SurfpoolOptions,
+    so_path, start_surfpool, ComputeUnitLimit, ProgramImage, SurfpoolOptions,
 };
 use crate::wire;
 
@@ -269,6 +266,7 @@ impl UpgradeE2e {
                 QUORUM,
                 &signature_block(&signatures_for(&guardians, &digest, QUORUM)),
             )],
+            None,
             &[&payer, &guardian_signatures],
         );
 
@@ -306,7 +304,8 @@ impl UpgradeE2e {
         send(
             &rpc,
             "upgrade_contract",
-            &[set_compute_unit_limit_ix(UPGRADE_CU_LIMIT), upgrade_ix()],
+            &[upgrade_ix()],
+            Some(ComputeUnitLimit::new(UPGRADE_CU_LIMIT)),
             &[&payer],
         );
 
@@ -359,7 +358,8 @@ impl UpgradeE2e {
         send_expect_error(
             &rpc,
             "upgrade_contract replay",
-            &[set_compute_unit_limit_ix(UPGRADE_CU_LIMIT), upgrade_ix()],
+            &[upgrade_ix()],
+            Some(ComputeUnitLimit::new(UPGRADE_CU_LIMIT)),
             &[&payer],
             GlobalAccountantError::AlreadyAccounted,
         );

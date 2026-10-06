@@ -29,7 +29,8 @@ use solana_signer::Signer;
 use crate::common::*;
 use crate::harness::{
     assert_canonical_log_in_tx, deploy_guardian_set, deploy_programs, fund, send,
-    send_expect_error, set_account, start_surfpool, ProgramImage, SurfpoolOptions,
+    send_expect_error, set_account, start_surfpool, ComputeUnitLimit, ProgramImage,
+    SurfpoolOptions,
 };
 
 const PAYER_LAMPORTS: u64 = 20_000_000_000;
@@ -82,6 +83,7 @@ fn surfpool_ntt_lifecycle() {
                 QUORUM,
                 &signature_block(&signatures_for(&guardians, &digest, QUORUM)),
             )],
+            None,
             &[&payer, &guardian_signatures],
         );
         vec![
@@ -91,7 +93,6 @@ fn surfpool_ntt_lifecycle() {
             AccountMeta::new_readonly(guardian_signatures.pubkey(), false),
         ]
     };
-    let with_budget = |ix: Instruction| [ix, set_compute_unit_limit_ix(SHIM_CU_LIMIT)];
 
     let noreplay_authority = noreplay_authority_pda(&id);
     let noreplay_tail = |bucket: Pubkey| {
@@ -124,11 +125,12 @@ fn surfpool_ntt_lifecycle() {
     send(
         &rpc,
         "register_hub",
-        &with_budget(Instruction {
+        &[Instruction {
             program_id: id,
             accounts,
             data: register_hub_ix_data(guardian_set_bump, &body),
-        }),
+        }],
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
     );
     assert_eq!(
@@ -169,11 +171,12 @@ fn surfpool_ntt_lifecycle() {
         send(
             &rpc,
             label,
-            &with_budget(Instruction {
+            &[Instruction {
                 program_id: id,
                 accounts,
                 data: register_peer_ix_data(guardian_set_bump, &body),
-            }),
+            }],
+            Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
             &[&payer],
         );
     };
@@ -221,11 +224,12 @@ fn surfpool_ntt_lifecycle() {
     send(
         &rpc,
         "register_relayer_chain",
-        &with_budget(Instruction {
+        &[Instruction {
             program_id: id,
             accounts,
             data: register_relayer_chain_ix_data(guardian_set_bump, &body),
-        }),
+        }],
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
     );
     assert_eq!(
@@ -282,7 +286,8 @@ fn surfpool_ntt_lifecycle() {
     let sig = send(
         &rpc,
         "submit_vaas[relayed spoke -> hub]",
-        &with_budget(submit_vaas_ix("submit_vaas")),
+        &[submit_vaas_ix("submit_vaas")],
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
     );
     assert_canonical_log_in_tx(
@@ -307,7 +312,8 @@ fn surfpool_ntt_lifecycle() {
     send_expect_error(
         &rpc,
         "submit_vaas[replay]",
-        &with_budget(submit_vaas_ix("submit_vaas replay")),
+        &[submit_vaas_ix("submit_vaas replay")],
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::AlreadyAccounted,
     );
@@ -329,6 +335,7 @@ fn surfpool_ntt_lifecycle() {
                 accounts: metas.clone(),
                 data: obs.ix_data(index),
             }],
+            None,
             &[&payer],
         ));
     }
@@ -362,6 +369,7 @@ fn surfpool_ntt_lifecycle() {
             accounts: metas.clone(),
             data: obs.ix_data(QUORUM),
         }],
+        None,
         &[&payer],
         GlobalAccountantError::AlreadyAccounted,
     );
@@ -400,7 +408,8 @@ fn surfpool_ntt_lifecycle() {
     send(
         &rpc,
         "modify_balance[add]",
-        &with_budget(modify_ix("modify_balance")),
+        &[modify_ix("modify_balance")],
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
     );
     assert_eq!(
@@ -411,7 +420,8 @@ fn surfpool_ntt_lifecycle() {
     send_expect_error(
         &rpc,
         "modify_balance[replay]",
-        &with_budget(modify_ix("modify_balance replay")),
+        &[modify_ix("modify_balance replay")],
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::DuplicateModifyBalance,
     );

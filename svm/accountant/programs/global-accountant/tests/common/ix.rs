@@ -6,7 +6,7 @@ use accountant_test_harness::{double_keccak256, vaa_header, TX_ID};
 use global_accountant_definitions::{
     parse_token_bridge_payload, Instruction, SubmitObservationsIxData, TokenBridgeAction,
     TokenBridgeTransfer, TxId, Uint256, VaaBodyHeader, ACTION_ATTEST, ACTION_TRANSFER,
-    SIGNATURE_TX_ID_LEN, SUBMIT_OBSERVATION_PREFIX,
+    ACTION_TRANSFER_WITH_PAYLOAD, SIGNATURE_TX_ID_LEN, SUBMIT_OBSERVATION_PREFIX,
 };
 
 pub const RECIPIENT: [u8; 32] = [0xAB; 32];
@@ -37,6 +37,20 @@ pub fn transfer_body(
     );
     let mut body = vaa_header(emitter_chain, emitter_address, sequence);
     body.extend_from_slice(bytemuck::bytes_of(&transfer));
+    body
+}
+
+/// Turns a `transfer_body` into action `0x03` with `payload` appended. The fee field
+/// becomes `from_address`.
+pub fn with_transfer_payload(mut body: Vec<u8>, payload: &[u8]) -> Vec<u8> {
+    assert_eq!(
+        body.len(),
+        VaaBodyHeader::LEN + TokenBridgeTransfer::LEN,
+        "input is a bare transfer body"
+    );
+    assert_eq!(body[VaaBodyHeader::LEN], ACTION_TRANSFER, "input action");
+    body[VaaBodyHeader::LEN] = ACTION_TRANSFER_WITH_PAYLOAD;
+    body.extend_from_slice(payload);
     body
 }
 

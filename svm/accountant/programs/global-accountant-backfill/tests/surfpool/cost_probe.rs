@@ -17,7 +17,6 @@ use global_accountant_definitions::{
     BackfillBalanceEntry, NoReplayBitmapAccount, NOREPLAY_PROGRAM_ID,
 };
 use solana_instruction::{AccountMeta, Instruction};
-use solana_packet::PACKET_DATA_SIZE;
 use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 
@@ -39,10 +38,13 @@ const FULL_MODIFICATION_COUNT: u64 = 6;
 const TRANSFER_SAMPLE: usize = 100;
 const ACCOUNT_SAMPLE: usize = 50;
 
-/// Entries per transaction. Both sit below `PACKET_DATA_SIZE` once the account metas and the
-/// instruction data are added up; the builders below assert the data half.
-const TRANSFER_BATCH: usize = 10;
-const ACCOUNT_BATCH: usize = 8;
+/// `BackfillNoReplay` entries per transaction v1: one `(chain, emitter)` group across up to
+/// three buckets fits 91 entries in 4096 bytes. [`chunk_by_emitter`] keeps one group per
+/// transaction.
+pub(crate) const TRANSFER_BATCH: usize = 91;
+/// `BackfillBalance` entries per transaction v1: 38 fit in 4096 bytes, under the 58-entry
+/// heap bound and `MAX_BATCH_ENTRIES`.
+const ACCOUNT_BATCH: usize = 38;
 
 const PAYER_LAMPORTS: u64 = 1_000_000_000_000;
 
@@ -89,12 +91,6 @@ pub(crate) fn noreplay_ix(
     ];
     accounts.extend(bucket_metas(noreplay_authority, entries));
     let data = wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, entries);
-    debug_assert!(
-        data.len() < PACKET_DATA_SIZE,
-        "BackfillNoReplay ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
-        data.len(),
-        PACKET_DATA_SIZE
-    );
     Instruction {
         program_id: *program_id,
         accounts,
@@ -122,17 +118,32 @@ fn balance_ix(
         AccountMeta::new(pda, false)
     }));
     let data = wire::encode_balance_batch(Arm::BackfillBalance as u8, entries);
-    debug_assert!(
-        data.len() < PACKET_DATA_SIZE,
-        "BackfillBalance ix data alone ({} bytes) exceeds PACKET_DATA_SIZE ({})",
-        data.len(),
-        PACKET_DATA_SIZE
-    );
     Instruction {
         program_id: *program_id,
         accounts,
         data,
     }
+}
+
+/// Split into transactions: a new chunk starts at the batch size or at an emitter
+/// change, because crossing emitters costs another 35-byte group header.
+pub(crate) fn chunk_by_emitter(transfers: &[wire::NoReplayEntry]) -> Vec<Vec<wire::NoReplayEntry>> {
+    let mut chunks: Vec<Vec<wire::NoReplayEntry>> = Vec::new();
+    let mut current: Vec<wire::NoReplayEntry> = Vec::new();
+    let mut emitter: Option<(u16, [u8; 32])> = None;
+    for entry in transfers {
+        let key = (entry.chain, entry.emitter);
+        let crossed = emitter.is_some() && emitter != Some(key);
+        if !current.is_empty() && (crossed || current.len() >= TRANSFER_BATCH) {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push(*entry);
+        emitter = Some(key);
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
 }
 
 /// First `TRANSFER_SAMPLE` transfer rows and `ACCOUNT_SAMPLE` account rows of the
@@ -202,7 +213,7 @@ fn surfpool_cost_probe() {
     let noreplay_authority = noreplay_authority_pda(&id);
 
     let mut transfer_agg = Aggregate::default();
-    for chunk in transfers.chunks(TRANSFER_BATCH) {
+    for chunk in chunk_by_emitter(&transfers) {
         let sig = send(
             &rpc,
             "backfill_noreplay",
@@ -210,8 +221,9 @@ fn surfpool_cost_probe() {
                 &id,
                 &payer.pubkey(),
                 &noreplay_authority,
-                chunk,
+                &chunk,
             )],
+            None,
             &[&payer],
         );
         let mut cost = measure_tx(&rpc, &sig).expect("BackfillNoReplay meta");
@@ -229,6 +241,7 @@ fn surfpool_cost_probe() {
             &rpc,
             "backfill_balance",
             &[balance_ix(&id, &payer.pubkey(), chunk)],
+            None,
             &[&payer],
         );
         let mut cost = measure_tx(&rpc, &sig).expect("BackfillBalance meta");

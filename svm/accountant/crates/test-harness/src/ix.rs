@@ -2,14 +2,13 @@
 
 use global_accountant_definitions::{
     GovernanceHeader, GovernanceModule, ModifyBalancePayload, PostSignaturesIxData,
-    RegisterChainPayload, SetComputeUnitLimitData, TxId, Uint256, UpgradeContractPayload,
-    VaaBodyHeader,
+    RegisterChainPayload, TxId, Uint256, UpgradeContractPayload, VaaBodyHeader,
 };
 use solana_instruction::{AccountMeta, Instruction as SvmInstruction};
 use solana_pubkey::Pubkey;
 
 use crate::guardians::GUARDIAN_SIGNATURE_LENGTH;
-use crate::ids::{compute_budget_program_id, shim_program_id, system_program_id};
+use crate::ids::{shim_program_id, system_program_id};
 
 pub use accountant_operational_core::hash::double_keccak256;
 
@@ -107,15 +106,6 @@ pub fn upgrade_contract_body(
     let mut body = vaa_header(emitter_chain, emitter_address, sequence);
     body.extend_from_slice(bytemuck::bytes_of(&payload));
     body
-}
-
-/// Compute Budget `SetComputeUnitLimit`.
-pub fn set_compute_unit_limit_ix(units: u32) -> SvmInstruction {
-    SvmInstruction {
-        program_id: compute_budget_program_id(),
-        accounts: vec![],
-        data: SetComputeUnitLimitData::new(units).as_bytes().to_vec(),
-    }
 }
 
 /// Verify VAA Shim `post_signatures`. `signature_block` is `guardian_index ‖ signature`

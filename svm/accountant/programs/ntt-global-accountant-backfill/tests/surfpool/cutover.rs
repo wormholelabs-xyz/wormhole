@@ -41,7 +41,7 @@ use solana_signer::Signer;
 use crate::common::*;
 use crate::harness::{
     deploy_guardian_set, deploy_programs, fund, loader_upgrade, send, send_expect_error,
-    start_surfpool, ProgramImage, SurfpoolOptions,
+    start_surfpool, ComputeUnitLimit, ProgramImage, SurfpoolOptions,
 };
 use crate::ntt_ix::submit_vaas_ix_data;
 
@@ -157,6 +157,7 @@ fn surfpool_ntt_cutover_rehearsal() {
             ),
             &[hub_pda],
         )],
+        None,
         &[&operator],
     );
 
@@ -176,6 +177,7 @@ fn surfpool_ntt_cutover_rehearsal() {
             wire::encode_transceiver_peer_batch(Arm::BackfillTransceiverPeer as u8, &peer_entries),
             &peer_pdas,
         )],
+        None,
         &[&operator],
     );
 
@@ -208,6 +210,7 @@ fn surfpool_ntt_cutover_rehearsal() {
             wire::encode_balance_batch(Arm::BackfillBalance as u8, &balance_entries),
             &balance_pdas,
         )],
+        None,
         &[&operator],
     );
 
@@ -240,6 +243,7 @@ fn surfpool_ntt_cutover_rehearsal() {
                 }],
             ),
         }],
+        None,
         &[&operator],
     );
 
@@ -292,6 +296,7 @@ fn surfpool_ntt_cutover_rehearsal() {
                 QUORUM,
                 &signature_block(&signatures_for(&guardians, &digest, QUORUM)),
             )],
+            None,
             &[&payer, &guardian_signatures],
         );
         vec![
@@ -306,14 +311,11 @@ fn surfpool_ntt_cutover_rehearsal() {
         let mut accounts = shim_metas(label, body);
         accounts.extend(tail);
         accounts.push(instructions_sysvar_meta());
-        vec![
-            Instruction {
-                program_id: id,
-                accounts,
-                data: submit_vaas_ix_data(guardian_set_bump, body),
-            },
-            set_compute_unit_limit_ix(SHIM_CU_LIMIT),
-        ]
+        vec![Instruction {
+            program_id: id,
+            accounts,
+            data: submit_vaas_ix_data(guardian_set_bump, body),
+        }]
     };
     let submit_tail = |v: &NttVector,
                        source: Pubkey,
@@ -349,6 +351,7 @@ fn surfpool_ntt_cutover_rehearsal() {
                 peer_dst_pda,
             ),
         ),
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
     );
 
@@ -408,6 +411,7 @@ fn surfpool_ntt_cutover_rehearsal() {
                 .0,
             ),
         ),
+        Some(ComputeUnitLimit::new(SHIM_CU_LIMIT)),
         &[&payer],
         GlobalAccountantError::AlreadyAccounted,
     );

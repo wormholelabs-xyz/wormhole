@@ -4,20 +4,14 @@
 
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::thread;
-use std::time::{Duration, Instant};
 
+use accountant_test_harness::surfpool::v1_transaction_json;
 use solana_client::rpc_client::RpcClient;
-use solana_client::rpc_config::{RpcTransactionConfig, UiTransactionEncoding};
-use solana_commitment_config::CommitmentConfig;
 use solana_signature::Signature;
 
 /// Snapshot catalogue the probes sample. Produced by the snapshot tool outside
 /// this workspace; the probes skip when it is absent.
 pub const CATALOGUE_PATH: &str = "/tmp/wormchain-mainnet-snapshot/catalogue.jsonl";
-
-const TX_INDEX_TIMEOUT: Duration = Duration::from_secs(10);
-const TX_INDEX_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Headline conversion for the printed figures.
 pub const SOL_USD: f64 = 230.0;
@@ -62,35 +56,22 @@ pub struct TxCost {
 
 /// Fee, compute units and rent of transaction `sig`, from `meta`.
 ///
-/// Polls `getTransaction` until surfpool indexes the transaction, then reads
-/// `meta.fee`, `meta.compute_units_consumed` and the payer's balance delta. The
-/// payer is account index 0: sole signer and fee payer in every probe
-/// transaction. Returns `None` when the transaction stays unindexed.
+/// Reads `meta.fee`, `meta.computeUnitsConsumed` and the payer's balance delta. The
+/// payer is account index 0: sole signer and fee payer in every probe transaction.
+/// Returns `None` when the transaction stays unindexed or `meta` is incomplete.
 pub fn measure_tx(rpc: &RpcClient, sig: &Signature) -> Option<TxCost> {
-    let config = RpcTransactionConfig {
-        encoding: Some(UiTransactionEncoding::Json),
-        commitment: Some(CommitmentConfig::confirmed()),
-        max_supported_transaction_version: Some(0),
+    let Some(tx) = v1_transaction_json(rpc, sig) else {
+        eprintln!("[cost-probe] getTransaction {sig}: not indexed");
+        return None;
     };
-    let deadline = Instant::now() + TX_INDEX_TIMEOUT;
-    let confirmed = loop {
-        match rpc.get_transaction_with_config(sig, config) {
-            Ok(tx) => break tx,
-            Err(_) if Instant::now() < deadline => thread::sleep(TX_INDEX_POLL_INTERVAL),
-            Err(e) => {
-                eprintln!("[cost-probe] getTransaction {sig}: {e}");
-                return None;
-            }
-        }
-    };
-    let meta = confirmed.transaction.meta?;
-    let cu: Option<u64> = meta.compute_units_consumed.into();
-    let pre = *meta.pre_balances.first()?;
-    let post = *meta.post_balances.first()?;
+    let meta = &tx["meta"];
+    let fee = meta["fee"].as_u64()?;
+    let pre = meta["preBalances"].get(0)?.as_u64()?;
+    let post = meta["postBalances"].get(0)?.as_u64()?;
     Some(TxCost {
-        fee_lamports: meta.fee,
-        cu_consumed: cu.unwrap_or(0),
-        rent_lamports: pre.saturating_sub(post + meta.fee),
+        fee_lamports: fee,
+        cu_consumed: meta["computeUnitsConsumed"].as_u64().unwrap_or(0),
+        rent_lamports: pre.saturating_sub(post + fee),
         entry_count: 0,
     })
 }

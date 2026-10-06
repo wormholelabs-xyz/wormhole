@@ -11,4 +11,5 @@ mod modify_balance;
 mod register_chain;
 mod submit_observations;
 mod submit_vaas;
+mod submit_vaas_max_payload;
 mod upgrade_contract;

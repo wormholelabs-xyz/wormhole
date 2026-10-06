@@ -28,6 +28,9 @@ solana-client.workspace = true
 solana-keypair.workspace = true
 solana-signer.workspace = true
 solana-transaction.workspace = true
+solana-message-v1.workspace = true
+solana-transaction-v1.workspace = true
+wincode.workspace = true
 solana-commitment-config.workspace = true
 solana-signature = "=3.4.1"
 serde_json.workspace = true

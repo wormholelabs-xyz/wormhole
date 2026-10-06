@@ -125,6 +125,7 @@ fn surfpool_backfill_lifecycle() {
             accounts,
             data: wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, &transfers),
         }],
+        None,
         &[&authority],
     );
 
@@ -193,6 +194,7 @@ fn surfpool_backfill_lifecycle() {
             accounts,
             data: wire::encode_balance_batch(Arm::BackfillBalance as u8, &balances),
         }],
+        None,
         &[&authority],
     );
     for entry in &balances {
@@ -237,6 +239,7 @@ fn surfpool_backfill_lifecycle() {
                 &registrations,
             ),
         }],
+        None,
         &[&authority],
     );
     for entry in &registrations {
@@ -286,6 +289,7 @@ fn surfpool_backfill_lifecycle() {
                 &[modification],
             ),
         }],
+        None,
         &[&authority],
     );
     assert_written(
@@ -320,6 +324,7 @@ fn surfpool_backfill_lifecycle() {
             accounts,
             data: wire::encode_noreplay_batch(Arm::BackfillNoReplay as u8, &stranger_transfer),
         }],
+        None,
         &[&stranger],
         GlobalAccountantError::UnauthorizedCaller,
     );
@@ -336,6 +341,7 @@ fn surfpool_backfill_lifecycle() {
             accounts,
             data: wire::encode_balance_batch(Arm::BackfillBalance as u8, &[stranger_balance]),
         }],
+        None,
         &[&stranger],
         GlobalAccountantError::UnauthorizedCaller,
     );

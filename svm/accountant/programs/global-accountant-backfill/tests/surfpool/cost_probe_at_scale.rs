@@ -19,17 +19,12 @@ use tokio::sync::Semaphore;
 
 use crate::common::probe::{catalogue_lines, cost_line, measure_tx, parse_hex32, TxCost};
 use crate::common::*;
-use crate::cost_probe::noreplay_ix;
+use crate::cost_probe::{chunk_by_emitter, noreplay_ix, TRANSFER_BATCH};
 use crate::harness::{
     deploy_programs, fund, rpc_client, start_surfpool, try_send, ProgramImage, SurfpoolOptions,
 };
 
 const TARGET_TRANSFERS: usize = 100_000;
-
-/// Entries per transaction. The emitter-grouped wire format fits 22 single-bucket
-/// entries, but a chunk that crosses a 1024-sequence boundary needs one more
-/// 32-byte account meta; 18 stays inside one packet even across three buckets.
-const TRANSFER_BATCH: usize = 18;
 
 /// Sequences taken from one emitter before moving to the next: four buckets.
 const PER_EMITTER: usize = 4 * 1024;
@@ -90,27 +85,6 @@ fn read_in_order_transfers(target: usize, per_emitter: usize) -> Option<Vec<wire
         }
     }
     Some(out)
-}
-
-/// Split into transactions: a new chunk starts at the batch size or at an emitter
-/// change, because crossing emitters costs another 35-byte group header.
-fn chunk_by_emitter(transfers: &[wire::NoReplayEntry]) -> Vec<Vec<wire::NoReplayEntry>> {
-    let mut chunks: Vec<Vec<wire::NoReplayEntry>> = Vec::new();
-    let mut current: Vec<wire::NoReplayEntry> = Vec::new();
-    let mut emitter: Option<(u16, [u8; 32])> = None;
-    for entry in transfers {
-        let key = (entry.chain, entry.emitter);
-        let crossed = emitter.is_some() && emitter != Some(key);
-        if !current.is_empty() && (crossed || current.len() >= TRANSFER_BATCH) {
-            chunks.push(std::mem::take(&mut current));
-        }
-        current.push(*entry);
-        emitter = Some(key);
-    }
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-    chunks
 }
 
 #[derive(Default)]
@@ -182,7 +156,7 @@ fn surfpool_cost_probe_at_scale() {
                 let _permit = permit;
                 let rpc = rpc_client(&rpc_url);
                 let ix = noreplay_ix(&program_id, &payer.pubkey(), &noreplay_authority, &chunk);
-                match try_send(&rpc, &[ix], &[&payer]) {
+                match try_send(&rpc, &[ix], None, &[&payer]) {
                     Ok(sig) => {
                         let sampled = i.is_multiple_of(METADATA_SAMPLE_STRIDE);
                         let cost = sampled.then(|| measure_tx(&rpc, &sig)).flatten();

@@ -18,12 +18,12 @@ use crate::common::{
     accountant_image, assert_bucket_marked, balance_account, balance_of,
     chain_registration_account, core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
     guardian_set_with_expiration, instructions_sysvar_meta, noreplay_authority_pda,
-    post_signatures_ix, set_compute_unit_limit_ix, shim_program_id, submit_vaas_ix_data,
-    system_program_id, NOREPLAY_PROGRAM_ID,
+    post_signatures_ix, shim_program_id, submit_vaas_ix_data, system_program_id,
+    NOREPLAY_PROGRAM_ID,
 };
 use crate::harness::{
     assert_canonical_log_in_tx, deploy_programs, fund, send, set_account, start_surfpool,
-    ProgramImage, SurfpoolOptions,
+    ComputeUnitLimit, ProgramImage, SurfpoolOptions,
 };
 
 const SUBMIT_VAAS_CU_LIMIT: u32 = 400_000;
@@ -99,6 +99,7 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
             vaa.signature_count(),
             vaa.signatures(),
         )],
+        None,
         &[&payer, &guardian_signatures],
     );
 
@@ -160,7 +161,8 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
     let sig = send(
         &rpc,
         "submit_vaas",
-        &[submit, set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT)],
+        &[submit],
+        Some(ComputeUnitLimit::new(SUBMIT_VAAS_CU_LIMIT)),
         &[&payer],
     );
 
