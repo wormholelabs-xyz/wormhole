@@ -16,7 +16,6 @@ import (
 	"github.com/certusone/wormhole/node/pkg/solacctconn"
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	"github.com/gagliardetto/solana-go"
-	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 
 	"go.uber.org/zap"
@@ -27,6 +26,9 @@ const (
 	// is 71,026 CU (ntt-global-accountant benches/compute_units.md), so one limit covers both.
 	solanaSubmitComputeUnitLimit = 150_000
 
+	// Runtime ceiling (64 MiB). A v1 config without this field allows 0 bytes.
+	solanaSubmitLoadedAccountsDataSizeLimit = 64 * 1024 * 1024
+
 	// Round two covers the recorded-payer race and a stale blockhash. A preflight
 	// PayerMismatch carries the recorded payer, which round two uses directly.
 	maxSolanaSubmitRounds = 2
@@ -35,8 +37,9 @@ const (
 	maxSolanaConfirmPolls = 300
 
 	// submit_observations.rs of each program.
-	submitObservationsAccountCount    = 11
-	nttSubmitObservationsAccountCount = 14
+	sharedSubmitAccountCount          = 11
+	submitObservationsAccountCount    = 12
+	nttSubmitObservationsAccountCount = 15
 )
 
 // solanaTxDisposition is what the worker does with one transaction result.
@@ -567,16 +570,26 @@ func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBacken
 	}
 	feePayer := b.feePayer.PublicKey()
 
-	instructions := make([]solana.Instruction, 0, 3)
-	instructions = append(instructions, computebudget.NewSetComputeUnitLimitInstruction(solanaSubmitComputeUnitLimit).Build())
-	if b.priorityFee > 0 {
-		instructions = append(instructions, computebudget.NewSetComputeUnitPriceInstruction(b.priorityFee).Build())
-	}
-	instructions = append(instructions, solana.NewInstruction(b.program, accounts, data))
-
-	tx, err := solana.NewTransaction(instructions, blockhash, solana.TransactionPayer(feePayer))
+	// SECURITY: the program requires instruction index 0, so the accountant instruction is
+	// the only one. A v1 config field left unset means 0, so every limit is set.
+	config := solana.TransactionConfig{}.
+		WithComputeUnitLimit(solanaSubmitComputeUnitLimit).
+		WithLoadedAccountsDataSizeLimit(solanaSubmitLoadedAccountsDataSizeLimit).
+		WithPriorityFee(b.priorityFee)
+	tx, err := solana.NewTransaction(
+		[]solana.Instruction{solana.NewInstruction(b.program, accounts, data)},
+		blockhash,
+		solana.TransactionPayer(feePayer),
+		solana.TransactionV1Config(config),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build the transaction: %w", err)
+	}
+	if version := tx.Message.GetVersion(); version != solana.MessageVersionV1 {
+		return nil, fmt.Errorf("built a transaction of message version %d, want v1", version)
+	}
+	if len(tx.Message.Instructions) != 1 {
+		return nil, fmt.Errorf("built a transaction with %d instructions, want 1", len(tx.Message.Instructions))
 	}
 	if _, err := tx.Sign(func(key solana.PublicKey) *solana.PrivateKey {
 		if key.Equals(feePayer) {
@@ -586,14 +599,22 @@ func (acct *Accountant) buildSolanaSubmitTx(ctx context.Context, b *solanaBacken
 	}); err != nil {
 		return nil, fmt.Errorf("failed to sign the transaction: %w", err)
 	}
+	wire, err := tx.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize the transaction: %w", err)
+	}
+	if len(wire) > solana.MaxTransactionSizeV1 {
+		return nil, fmt.Errorf("transaction is %d bytes, over the v1 limit of %d", len(wire), solana.MaxTransactionSizeV1)
+	}
 	return tx, nil
 }
 
 // submitAccountMetas lists the submit_observations accounts of sub. Order and writability
-// match the account list in each program's submit_observations.rs. Slots 0 to 10 are shared.
+// match the account list in each program's submit_observations.rs. Slots 0 to 10 are shared,
+// and the instructions sysvar is last.
 func (b *solanaBackend) submitAccountMetas(guardian solanaGuardianIdentity, sub *solanaSubmission) ([]*solana.AccountMeta, error) {
 	feePayer := b.feePayer.PublicKey()
-	shared := [submitObservationsAccountCount]*solana.AccountMeta{
+	shared := [sharedSubmitAccountCount]*solana.AccountMeta{
 		solana.NewAccountMeta(feePayer, true, true),
 		solana.NewAccountMeta(sub.pendingPDA, true, false),
 		solana.NewAccountMeta(guardian.guardianSetPDA, false, false),
@@ -612,7 +633,10 @@ func (b *solanaBackend) submitAccountMetas(guardian solanaGuardianIdentity, sub 
 		if sub.nttRoute != nil {
 			return nil, errors.New("solana submission: an NTT route on a WTT observation")
 		}
-		return shared[:], nil
+		var metas [submitObservationsAccountCount]*solana.AccountMeta
+		copy(metas[:], shared[:])
+		metas[11] = solana.NewAccountMeta(solana.SysVarInstructionsPubkey, false, false)
+		return metas[:], nil
 	case solanaFamilyNTT:
 		// SECURITY: an unresolved route has zero balance and slot 13 keys.
 		if sub.nttRoute == nil || !sub.nttRoute.resolved {
@@ -623,6 +647,7 @@ func (b *solanaBackend) submitAccountMetas(guardian solanaGuardianIdentity, sub 
 		metas[11] = solana.NewAccountMeta(sub.nttRoute.hubPDA, false, false)
 		metas[12] = solana.NewAccountMeta(sub.nttRoute.peerSrcPDA, false, false)
 		metas[13] = solana.NewAccountMeta(sub.nttRoute.peerDstPDA, false, false)
+		metas[14] = solana.NewAccountMeta(solana.SysVarInstructionsPubkey, false, false)
 		return metas[:], nil
 	}
 	return nil, fmt.Errorf("solana submission: unknown program family %s", b.family)
@@ -804,6 +829,10 @@ func classifySolanaTxError(err error) (solanaTxDisposition, string) {
 			return solanaTxFailed, "the peer has no entry for the source chain"
 		case solanaErrPeersNotCrossRegistered:
 			return solanaTxFailed, "the peers are not cross-registered"
+		case solanaErrInstructionNotFirst:
+			return solanaTxFailed, "transaction build defect: the accountant instruction is not at index 0"
+		case solanaErrCpiInvocation:
+			return solanaTxFailed, "transaction build defect: the accountant instruction is not top-level"
 		}
 		return solanaTxFailed, fmt.Sprintf("custom program error %d", txErr.CustomCode)
 	}

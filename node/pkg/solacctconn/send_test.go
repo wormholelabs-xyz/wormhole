@@ -2,6 +2,7 @@ package solacctconn
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
@@ -54,6 +55,34 @@ func TestSendTransaction(t *testing.T) {
 		got, err := conn.SendTransaction(context.Background(), tx)
 		require.NoError(t, err)
 		assert.Equal(t, sig, got)
+	})
+
+	t.Run("sends a transaction v1 unchanged", func(t *testing.T) {
+		v1 := testTransaction(testKeys(2)[1], []byte{0})
+		_, err := v1.Message.SetVersion(solana.MessageVersionV1)
+		require.NoError(t, err)
+		want, err := v1.MarshalBinary()
+		require.NoError(t, err)
+
+		srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+			return v1.Signatures[0].String(), nil
+		})
+		_, err = conn.SendTransaction(context.Background(), v1)
+		require.NoError(t, err)
+
+		calls := srv.recorded()
+		require.Len(t, calls, 1)
+		var encoded string
+		require.NoError(t, json.Unmarshal(calls[0].Params[0], &encoded))
+		var opts struct {
+			Encoding string `json:"encoding"`
+		}
+		require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
+		require.Equal(t, "base64", opts.Encoding)
+		got, err := base64.StdEncoding.DecodeString(encoded)
+		require.NoError(t, err)
+		assert.Equal(t, byte(0x81), got[0], "v1 version prefix")
+		assert.Equal(t, want, got)
 	})
 
 	t.Run("rejects a different signature", func(t *testing.T) {

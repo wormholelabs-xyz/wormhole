@@ -379,6 +379,41 @@ func TestGetTransaction(t *testing.T) {
 	}
 }
 
+// TestGetTransactionV1 reads a transaction v1. The RPC rejects a v1 transaction unless the
+// request allows message version 1.
+func TestGetTransactionV1(t *testing.T) {
+	program := testKeys(2)[1]
+	tx := testTransaction(program, []byte{0x00, 0x01})
+	_, err := tx.Message.SetVersion(solana.MessageVersionV1)
+	require.NoError(t, err)
+	raw, err := tx.MarshalBinary()
+	require.NoError(t, err)
+	require.Equal(t, byte(0x81), raw[0], "v1 version prefix")
+
+	srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
+		return map[string]any{
+			"slot":        11,
+			"transaction": []string{base64.StdEncoding.EncodeToString(raw), "base64"},
+			"meta":        map[string]any{"err": nil, "logMessages": []any{}},
+		}, nil
+	})
+
+	res, err := conn.GetTransaction(context.Background(), solana.Signature{5})
+	require.NoError(t, err)
+	require.Len(t, res.Instructions, 1)
+	assert.Equal(t, program, res.Instructions[0].ProgramID)
+	assert.Equal(t, []byte{0x00, 0x01}, res.Instructions[0].Data)
+
+	calls := srv.recorded()
+	require.Len(t, calls, 1)
+	var opts struct {
+		MaxSupportedTransactionVersion *uint64 `json:"maxSupportedTransactionVersion"`
+	}
+	require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
+	require.NotNil(t, opts.MaxSupportedTransactionVersion)
+	assert.Equal(t, uint64(1), *opts.MaxSupportedTransactionVersion)
+}
+
 func TestGetOwnedAccountsCommitment(t *testing.T) {
 	tests := []struct {
 		name       string

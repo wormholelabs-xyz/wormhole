@@ -265,7 +265,9 @@ func TestSolanaNttSubmitTransaction(t *testing.T) {
 			assert.False(t, f.pe.submitPending(backendSolanaNTT))
 
 			tx := f.conn.SentTransactions[0]
-			ix := tx.Message.Instructions[len(tx.Message.Instructions)-1]
+			require.Equal(t, solana.MessageVersionV1, tx.Message.GetVersion())
+			require.Len(t, tx.Message.Instructions, 1)
+			ix := tx.Message.Instructions[0]
 			program, err := tx.Message.Program(ix.ProgramIDIndex)
 			require.NoError(t, err)
 			require.Equal(t, f.b.program, program)
@@ -320,6 +322,7 @@ func TestSolanaNttSubmitTransaction(t *testing.T) {
 				{hubPDA, false, false},
 				{peerSrc, false, false},
 				{peerDst, false, false},
+				{solana.SysVarInstructionsPubkey, false, false},
 			}
 			accounts, err := ix.ResolveInstructionAccounts(&tx.Message)
 			require.NoError(t, err)

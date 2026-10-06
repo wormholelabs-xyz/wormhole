@@ -40,6 +40,9 @@ const (
 	// A 100 ms slot confirms a transaction in well under a second.
 	surfpoolSlotTimeMillis = "100"
 
+	// SIMD-0385 `enable_tx_v1`; the guardian sends transaction v1.
+	surfpoolEnableTxV1Feature = "txv1aq4pp281K9um3tnPgkfX8UqtFT6wcVW3hNezGLL"
+
 	// TEST_GLOBAL_ACCOUNTANT_PROGRAM_ID and TEST_NOREPLAY_PROGRAM_ID in svm/accountant/justfile.
 	surfpoolAccountantProgramID = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
 	surfpoolNoreplayProgramID   = "repMHgR5BEpGLeZvM5iGoNNDPw4eu2BS6sXJzaC8K4t"
@@ -151,6 +154,7 @@ func startSurfpool(t *testing.T) *surfpoolHarness {
 		"--slot-time", surfpoolSlotTimeMillis,
 		"--log-level", "warn",
 		"--offline",
+		"--feature", surfpoolEnableTxV1Feature,
 	)
 	cmd.Dir = workdir
 	cmd.Stdout = logFile

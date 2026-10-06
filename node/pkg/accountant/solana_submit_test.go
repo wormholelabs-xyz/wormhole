@@ -13,7 +13,6 @@ import (
 	ethCommon "github.com/ethereum/go-ethereum/common"
 	ethCrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/gagliardetto/solana-go"
-	computebudget "github.com/gagliardetto/solana-go/programs/compute-budget"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -120,7 +119,11 @@ func TestClassifySolanaTxError(t *testing.T) {
 		name            string
 		txErr           error
 		wantDisposition solanaTxDisposition
+		// wantReason, when set, is a substring of the reason.
+		wantReason string
 	}{
+		{name: "not the first instruction", txErr: customTxError(solanaErrInstructionNotFirst), wantDisposition: solanaTxFailed, wantReason: "transaction build defect"},
+		{name: "cpi invocation", txErr: customTxError(solanaErrCpiInvocation), wantDisposition: solanaTxFailed, wantReason: "transaction build defect"},
 		{name: "already signed", txErr: customTxError(solanaErrAlreadySigned), wantDisposition: solanaTxAlreadyDone},
 		{name: "payer mismatch", txErr: customTxError(solanaErrPayerMismatch), wantDisposition: solanaTxRetryNextRound},
 		{name: "invalid signature", txErr: customTxError(solanaErrInvalidSignature), wantDisposition: solanaTxFailed},
@@ -137,6 +140,7 @@ func TestClassifySolanaTxError(t *testing.T) {
 			disposition, reason := classifySolanaTxError(tt.txErr)
 			assert.Equal(t, tt.wantDisposition, disposition)
 			assert.NotEmpty(t, reason)
+			assert.Contains(t, reason, tt.wantReason)
 		})
 	}
 }
@@ -301,21 +305,36 @@ func TestBuildSolanaSubmitTx(t *testing.T) {
 	require.NoError(t, err)
 	guardian := solanaGuardianIdentity{guardianSetPDA: guardianSet}
 
-	t.Run("no priority fee", func(t *testing.T) {
+	t.Run("v1 transaction with the accountant instruction alone", func(t *testing.T) {
 		tx, err := f.acct.buildSolanaSubmitTx(ctx, b, guardian, f.sub, solana.Hash{7})
 		require.NoError(t, err)
-		require.Len(t, tx.Message.Instructions, 2)
+		require.Equal(t, solana.MessageVersionV1, tx.Message.GetVersion())
+		// The program requires instruction index 0.
+		require.Len(t, tx.Message.Instructions, 1)
 		require.Len(t, tx.Signatures, 1)
 
-		budget, err := tx.Message.Program(tx.Message.Instructions[0].ProgramIDIndex)
-		require.NoError(t, err)
-		assert.Equal(t, computebudget.ProgramID, budget)
+		config := tx.Message.TransactionConfig
+		require.NotNil(t, config.ComputeUnitLimit)
+		assert.Equal(t, uint32(solanaSubmitComputeUnitLimit), *config.ComputeUnitLimit)
+		require.NotNil(t, config.LoadedAccountsDataSizeLimit)
+		assert.Equal(t, uint32(solanaSubmitLoadedAccountsDataSizeLimit), *config.LoadedAccountsDataSizeLimit)
+		require.NotNil(t, config.PriorityFee)
+		assert.Equal(t, uint64(0), *config.PriorityFee)
 
-		program, err := tx.Message.Program(tx.Message.Instructions[1].ProgramIDIndex)
+		wire, err := tx.MarshalBinary()
+		require.NoError(t, err)
+		assert.Equal(t, byte(0x81), wire[0], "v1 version prefix")
+		assert.LessOrEqual(t, len(wire), solana.MaxTransactionSizeV1)
+		decoded, err := solana.TransactionFromBytes(wire)
+		require.NoError(t, err)
+		assert.Equal(t, solana.MessageVersionV1, decoded.Message.GetVersion())
+		require.NoError(t, decoded.VerifySignatures())
+
+		program, err := tx.Message.Program(tx.Message.Instructions[0].ProgramIDIndex)
 		require.NoError(t, err)
 		assert.Equal(t, b.program, program)
 
-		parsed, err := parseSubmitObservationsIxData(tx.Message.Instructions[1].Data)
+		parsed, err := parseSubmitObservationsIxData(tx.Message.Instructions[0].Data)
 		require.NoError(t, err)
 		// secp256k1_recover takes a recovery id of 0 or 1, not 27 or 28.
 		assert.Contains(t, []uint8{0, 1}, parsed.Signature[64])
@@ -344,8 +363,9 @@ func TestBuildSolanaSubmitTx(t *testing.T) {
 			{f.sub.destBalance, true, false},
 			{f.sub.rentRecipient, true, false},
 			{f.sub.chainRegistrationPDA, false, false},
+			{solana.SysVarInstructionsPubkey, false, false},
 		}
-		accounts, err := tx.Message.Instructions[1].ResolveInstructionAccounts(&tx.Message)
+		accounts, err := tx.Message.Instructions[0].ResolveInstructionAccounts(&tx.Message)
 		require.NoError(t, err)
 		require.Len(t, accounts, submitObservationsAccountCount)
 		for idx, w := range want {
@@ -355,18 +375,15 @@ func TestBuildSolanaSubmitTx(t *testing.T) {
 		}
 	})
 
-	t.Run("priority fee adds a second budget instruction", func(t *testing.T) {
+	t.Run("priority fee goes in the v1 config", func(t *testing.T) {
 		b.priorityFee = 25
 		t.Cleanup(func() { b.priorityFee = 0 })
 
 		tx, err := f.acct.buildSolanaSubmitTx(ctx, b, guardian, f.sub, solana.Hash{7})
 		require.NoError(t, err)
-		require.Len(t, tx.Message.Instructions, 3)
-		for idx := range 2 {
-			program, err := tx.Message.Program(tx.Message.Instructions[idx].ProgramIDIndex)
-			require.NoError(t, err)
-			assert.Equal(t, computebudget.ProgramID, program)
-		}
+		require.Len(t, tx.Message.Instructions, 1)
+		require.NotNil(t, tx.Message.TransactionConfig.PriorityFee)
+		assert.Equal(t, uint64(25), *tx.Message.TransactionConfig.PriorityFee)
 	})
 }
 
@@ -533,7 +550,7 @@ func TestHandleSolanaBatchPayerMismatchRetrySucceeds(t *testing.T) {
 
 	require.Len(t, f.conn.SentTransactions, 2)
 	second := f.conn.SentTransactions[1]
-	accounts, err := second.Message.Instructions[1].ResolveInstructionAccounts(&second.Message)
+	accounts, err := second.Message.Instructions[0].ResolveInstructionAccounts(&second.Message)
 	require.NoError(t, err)
 	require.Len(t, accounts, submitObservationsAccountCount)
 	assert.Equal(t, recordedPayer, accounts[9].PublicKey)
@@ -570,7 +587,7 @@ func TestHandleSolanaBatchPayerMismatchUsesLoggedPayer(t *testing.T) {
 
 	require.Len(t, f.conn.SentTransactions, 2)
 	second := f.conn.SentTransactions[1]
-	accounts, err := second.Message.Instructions[1].ResolveInstructionAccounts(&second.Message)
+	accounts, err := second.Message.Instructions[0].ResolveInstructionAccounts(&second.Message)
 	require.NoError(t, err)
 	require.Len(t, accounts, submitObservationsAccountCount)
 	assert.Equal(t, recordedPayer, accounts[9].PublicKey)

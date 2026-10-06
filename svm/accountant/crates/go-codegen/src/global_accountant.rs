@@ -493,6 +493,14 @@ pub(crate) fn layout_file() -> String {
             "solanaErrUnregisteredEmitter",
             GlobalAccountantError::UnregisteredEmitter,
         ),
+        (
+            "solanaErrCpiInvocation",
+            GlobalAccountantError::CpiInvocation,
+        ),
+        (
+            "solanaErrInstructionNotFirst",
+            GlobalAccountantError::InstructionNotFirst,
+        ),
     ] {
         go.constant(
             &format!("GlobalAccountantError::{code:?}."),

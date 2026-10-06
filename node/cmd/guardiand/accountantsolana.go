@@ -9,9 +9,9 @@ import (
 
 // REVIEW: what should this cap be?
 //
-// maxAccountantSolanaPriorityFee caps --accountantSolanaPriorityFee in micro-lamports per compute unit.
-// At the 150k compute unit submit limit, the maximum cost is 0.0015 SOL per transaction, for either program.
-const maxAccountantSolanaPriorityFee = 10_000_000
+// maxAccountantSolanaPriorityFee caps --accountantSolanaPriorityFee, the total priority fee in lamports
+// of one transaction v1: 0.0015 SOL per transaction, for either program.
+const maxAccountantSolanaPriorityFee = 1_500_000
 
 type accountantSolanaProgramIDs struct {
 	program    solana.PublicKey // zero when --accountantSolanaContract is unset
@@ -117,7 +117,7 @@ func checkAccountantSolanaConnFlags(rpcURL string, wsURL string, priorityFee uin
 		return fmt.Errorf("accountantSolanaWS %q is not a websocket URL", wsURL)
 	}
 	if priorityFee > maxAccountantSolanaPriorityFee {
-		return fmt.Errorf("accountantSolanaPriorityFee %d exceeds the maximum of %d micro-lamports per compute unit", priorityFee, maxAccountantSolanaPriorityFee)
+		return fmt.Errorf("accountantSolanaPriorityFee %d exceeds the maximum of %d lamports per transaction", priorityFee, maxAccountantSolanaPriorityFee)
 	}
 	return nil
 }

@@ -187,7 +187,8 @@ func (c *ClientConn) GetSignaturesForAddress(ctx context.Context, addr solana.Pu
 // submit_observations fails with CpiInvocation below the top level, so top-level
 // instructions hold every observation.
 func (c *ClientConn) GetTransaction(ctx context.Context, sig solana.Signature) (*TransactionResult, error) {
-	maxVersion := uint64(0)
+	// Transaction v1 (SIMD-0385). The RPC rejects a transaction above this version.
+	maxVersion := uint64(1)
 	res, err := c.rpc.GetTransaction(ctx, sig, &rpc.GetTransactionOpts{
 		Encoding:                       solana.EncodingBase64,
 		Commitment:                     rpc.CommitmentFinalized,

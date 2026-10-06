@@ -28,7 +28,7 @@ type AccountantSolanaConfig struct {
 	Noreplay    solana.PublicKey
 	CoreBridge  solana.PublicKey // Core Bridge program that owns the GuardianSet accounts
 	FeePayer    solana.PrivateKey
-	PriorityFee uint64 // micro-lamports per compute unit; 0 omits the price instruction
+	PriorityFee uint64 // total lamports per transaction v1
 }
 
 // solanaProgramFamily selects the accountant program a backend talks to.

@@ -237,3 +237,9 @@ const solanaErrMissingChainRegistration = 19
 
 // GlobalAccountantError::UnregisteredEmitter.
 const solanaErrUnregisteredEmitter = 20
+
+// GlobalAccountantError::CpiInvocation.
+const solanaErrCpiInvocation = 49
+
+// GlobalAccountantError::InstructionNotFirst.
+const solanaErrInstructionNotFirst = 50

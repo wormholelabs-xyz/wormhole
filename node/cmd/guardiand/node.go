@@ -433,7 +433,7 @@ func init() {
 	accountantSolanaNttContract = NodeCmd.Flags().String("accountantSolanaNttContract", "", "Address of the Solana NTT accountant program")
 	accountantSolanaNoreplayContract = NodeCmd.Flags().String("accountantSolanaNoreplayContract", "", "Address of the NoReplay program the Solana WTT and NTT accountants use")
 	accountantSolanaKeyPath = NodeCmd.Flags().String("accountantSolanaKeyPath", "", "path to the solana-keygen JSON keypair that pays Solana WTT and NTT accountant fees")
-	accountantSolanaPriorityFee = NodeCmd.Flags().Uint64("accountantSolanaPriorityFee", 0, "priority fee in micro-lamports per compute unit for Solana WTT and NTT accountant transactions")
+	accountantSolanaPriorityFee = NodeCmd.Flags().Uint64("accountantSolanaPriorityFee", 0, "total priority fee in lamports per Solana WTT and NTT accountant transaction")
 
 	aptosRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "aptosRPC", "Aptos RPC URL", "http://aptos:8080", []string{"http", "https"})
 	aptosAccount = NodeCmd.Flags().String("aptosAccount", "", "aptos account")
