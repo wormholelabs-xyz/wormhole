@@ -134,6 +134,12 @@ payload limit. A transfer past `MAX_NTT_PAYLOAD_LEN` settles through
 
 `submit_vaas` has the same first-instruction rule as `submit_observations`.
 
+Both instructions create an absent balance PDA, with two exceptions. A wrapped-token
+source must have a balance PDA, or the transfer fails with `MissingWrappedAccount`. A
+native-token destination must have a balance PDA, or the transfer fails with
+`MissingNativeAccount`. These checks run before the balance change, so a zero amount
+also fails.
+
 The transfer parser is stricter than the wormchain reader. It checks every
 nested length field and rejects trailing bytes, as the EVM receivers do.
 

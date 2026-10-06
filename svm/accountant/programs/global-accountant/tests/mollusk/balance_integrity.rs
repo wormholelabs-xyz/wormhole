@@ -84,9 +84,9 @@ fn same_account_in_both_slots() {
             Ok(Uint256::from_u128(1_000)),
         ),
         (
-            "same-chain wrapped, unfunded: burn underflows",
+            "same-chain wrapped, underfunded: burn underflows",
             Transfer::new(0xB5, SOLANA, SOLANA, 500),
-            None,
+            Some(Uint256::from_u128(499)),
             Err(GlobalAccountantError::BalanceUnderflow),
         ),
         (

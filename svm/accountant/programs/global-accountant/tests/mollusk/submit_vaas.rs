@@ -62,7 +62,7 @@ fn signatures_for_another_body_are_rejected() {
 fn rejects() {
     let mollusk = mollusk();
     type Mutate = fn(&mut VaaScenario, &mut Vec<(Pubkey, Account)>) -> Option<Vec<u8>>;
-    let cases: [(&str, VaaScenario, Mutate, GlobalAccountantError); 6] = [
+    let cases: [(&str, VaaScenario, Mutate, GlobalAccountantError); 8] = [
         (
             "pre-marked noreplay leaves state untouched",
             VaaScenario::transfer(Transfer::new(0xA1, ETHEREUM, SOLANA, 100)),
@@ -79,8 +79,27 @@ fn rejects() {
         (
             "wrapped source underflow",
             VaaScenario::transfer(Transfer::new(0xA2, SOLANA, ETHEREUM, 1_000)),
-            |_, _| None,
+            |s, accounts| {
+                seed_balance(accounts, &s.source_account, SOLANA, 999);
+                seed_balance(accounts, &s.dest_account, ETHEREUM, 999);
+                None
+            },
             GlobalAccountantError::BalanceUnderflow,
+        ),
+        (
+            "missing wrapped source at zero amount",
+            VaaScenario::transfer(Transfer::new(0xA7, SOLANA, ETHEREUM, 0)),
+            |_, _| None,
+            GlobalAccountantError::MissingWrappedAccount,
+        ),
+        (
+            "missing native destination at zero amount",
+            VaaScenario::transfer(Transfer::new(0xA8, SOLANA, ETHEREUM, 0)),
+            |s, accounts| {
+                seed_balance(accounts, &s.source_account, SOLANA, 999);
+                None
+            },
+            GlobalAccountantError::MissingNativeAccount,
         ),
         (
             "missing chain registration",
@@ -142,4 +161,13 @@ fn rejects() {
             "{label}: state untouched"
         );
     }
+}
+
+/// Replace `key` with an initialised `TOKEN_ADDRESS` balance of `amount` on `chain`.
+fn seed_balance(accounts: &mut [(Pubkey, Account)], key: &Pubkey, chain: u16, amount: u128) {
+    replace_account(
+        accounts,
+        key,
+        balance_account(chain, ETHEREUM, TOKEN_ADDRESS, Uint256::from_u128(amount)),
+    );
 }

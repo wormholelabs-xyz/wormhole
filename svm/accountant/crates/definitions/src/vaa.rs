@@ -205,15 +205,14 @@ pub enum TokenBridgeAction {
 ///
 /// Layouts: [`VaaBodyHeader`], [`TokenBridgeTransfer`].
 ///
-/// SECURITY: precondition `body.len() >= 52`; transfer actions require
-/// `payload.len() >= 133` and `payload.len() - 133 <= MAX_TRANSFER_PAYLOAD_LEN`. Short
-/// input returns `InvalidInstructionData`; oversized input returns
-/// `TransferPayloadTooLarge`. Every field read is bounds-checked; the function cannot
-/// panic.
+/// SECURITY: precondition `body.len() >= 52`. Action 0x01 requires `payload.len() == 133`;
+/// action 0x03 requires `payload.len() >= 133` and `payload.len() - 133 <=
+/// MAX_TRANSFER_PAYLOAD_LEN`. A wrong length returns `InvalidInstructionData`; an oversized
+/// 0x03 payload returns `TransferPayloadTooLarge`. Every field read is bounds-checked; the
+/// function cannot panic.
 ///
-/// SECURITY: the guardian accountant accepts action 0x01 payloads by the same
-/// `>= 133` rule. Do not tighten to `== 133`: a stricter parser here would
-/// reject a VAA the network already accounted and fork balance state.
+/// SECURITY: wormchain parses action 0x01 with `serde_wormhole::from_slice`, which rejects
+/// trailing bytes, so it never accounted a longer 0x01 payload.
 pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
     let (_header, payload) = VaaBodyHeader::split(body)?;
     let action = *payload
@@ -225,6 +224,9 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
             let head = payload
                 .get(..TokenBridgeTransfer::LEN)
                 .ok_or(GlobalAccountantError::InvalidInstructionData)?;
+            if action == ACTION_TRANSFER && payload.len() != TokenBridgeTransfer::LEN {
+                return Err(GlobalAccountantError::InvalidInstructionData);
+            }
             if payload.len() - TokenBridgeTransfer::LEN > MAX_TRANSFER_PAYLOAD_LEN {
                 return Err(GlobalAccountantError::TransferPayloadTooLarge);
             }
@@ -349,8 +351,8 @@ mod tests {
         let transfer_03 = transfer_body(0x03, amount, token_address, 2, 10);
         let mut transfer_03_extra = [0xEEu8; TRANSFER_BODY + 40];
         transfer_03_extra[..TRANSFER_BODY].copy_from_slice(&transfer_03);
-        // The guardian SDK (`DecodeTransferPayloadHdr`) requires >= 101 bytes and sets no
-        // upper bound, so trailing bytes after an action 0x01 payload parse too.
+        // Wormchain parses action 0x01 with `serde_wormhole::from_slice`, which rejects
+        // trailing bytes.
         let mut transfer_01_extra = [0xEEu8; TRANSFER_BODY + 40];
         transfer_01_extra[..TRANSFER_BODY].copy_from_slice(&transfer_01);
         let mut transfer_03_at_cap = [0xEEu8; TRANSFER_BODY + MAX_TRANSFER_PAYLOAD_LEN];
@@ -368,7 +370,7 @@ mod tests {
             (
                 "action 0x01 with trailing payload",
                 &transfer_01_extra,
-                Ok(expected_transfer),
+                Err(E::InvalidInstructionData),
             ),
             (
                 "action 0x03 decodes as 0x01",

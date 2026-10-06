@@ -1,3 +1,14 @@
+#### 2026-10-06 17:53:13.719226 UTC
+
+Solana CLI Version: solana-cli 3.1.7 (src:9873bc41; feat:1620780344, client:Agave)
+
+| Name | CUs | Delta |
+|------|------|-------|
+| submit_vaas: direct transfer | 373505 | +19 |
+| submit_vaas: relayed transfer | 371274 | +83 |
+| submit_observations: single guardian | 50476 | -- |
+| submit_observations: quorum-closing | 68853 | +19 |
+
 #### 2026-10-06 16:05:31.027901 UTC
 
 Solana CLI Version: solana-cli 3.1.7 (src:9873bc41; feat:1620780344, client:Agave)

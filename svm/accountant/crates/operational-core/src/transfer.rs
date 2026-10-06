@@ -10,7 +10,8 @@ use crate::{err, ProgramResult};
 
 /// Source `lock_or_burn`, then destination `unlock_or_mint`. Both PDAs are derived from
 /// `(chain, token_chain, token_address)` and checked before any write. A same-chain
-/// transfer applies both operations to one in-memory layout.
+/// transfer applies both operations to one in-memory layout. A wrapped source or a native
+/// destination must already have a balance account.
 ///
 /// The caller supplies the accounted token identity: the Token Bridge token for WTT, the
 /// hub token for NTT.
@@ -32,6 +33,26 @@ pub fn apply_transfer<'info>(
         &BalanceAccountKey::new(source_chain, token_chain, *token_address),
         GlobalAccountantError::InvalidAccountPda,
     )?;
+    // Destination PDA is derived from the payload; the check runs on every path.
+    let dst_bump = pda::check_or(
+        program_id,
+        dest_account,
+        &BalanceAccountKey::new(recipient_chain, token_chain, *token_address),
+        GlobalAccountantError::InvalidAccountPda,
+    )?;
+
+    // Wormchain parity: both run before the arithmetic, so a zero amount fails too. A
+    // same-chain transfer has one account and only the source check.
+    if source_chain != token_chain && !pda::is_initialised(program_id, source_account)? {
+        return Err(err(GlobalAccountantError::MissingWrappedAccount));
+    }
+    if source_chain != recipient_chain
+        && recipient_chain == token_chain
+        && !pda::is_initialised(program_id, dest_account)?
+    {
+        return Err(err(GlobalAccountantError::MissingNativeAccount));
+    }
+
     balance::init_if_needed(
         program_id,
         payer,
@@ -43,14 +64,6 @@ pub fn apply_transfer<'info>(
     )?;
     let mut src = accounts::load::<BalanceAccountLayout>(source_account)?;
     src.lock_or_burn(amount).map_err(err)?;
-
-    // Destination PDA is derived from the payload; the check runs on every path.
-    let dst_bump = pda::check_or(
-        program_id,
-        dest_account,
-        &BalanceAccountKey::new(recipient_chain, token_chain, *token_address),
-        GlobalAccountantError::InvalidAccountPda,
-    )?;
 
     // Same chain: both PDAs are one account. Burn-then-mint must still underflow when the
     // balance is below `amount`, so apply both to one in-memory layout.

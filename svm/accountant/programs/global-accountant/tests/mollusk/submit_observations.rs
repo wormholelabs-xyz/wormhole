@@ -860,7 +860,17 @@ fn wrapped_source_underflow_rejects_at_quorum() {
         0x61,
         Transfer::new(0, SOLANA, ETHEREUM, 1_000),
     );
-    let accounts = scenario.submit_n(&mollusk, 12);
+    let mut accounts = scenario.submit_n(&mollusk, 12);
+    for (key, chain) in [
+        (scenario.source_account, SOLANA),
+        (scenario.dest_account, ETHEREUM),
+    ] {
+        replace_account(
+            &mut accounts,
+            &key,
+            balance_account(chain, ETHEREUM, TOKEN_ADDRESS, Uint256::from_u128(999)),
+        );
+    }
     let result = scenario.submit_once(&mollusk, accounts, 12);
     assert_error(
         &result,

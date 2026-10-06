@@ -104,6 +104,10 @@ pub enum GlobalAccountantError {
     /// `submit_observations` and `submit_vaas` run only as the first instruction, so that the
     /// commit log is inside the transaction log limit.
     InstructionNotFirst = 50,
+    /// Transfer source holds a wrapped token and has no balance account.
+    MissingWrappedAccount = 51,
+    /// Transfer destination holds the native token and has no balance account.
+    MissingNativeAccount = 52,
 }
 
 impl From<GlobalAccountantError> for u32 {

@@ -92,6 +92,12 @@ limit. A `TransferWithPayload` past `MAX_TRANSFER_PAYLOAD_LEN` settles through
 
 `submit_vaas` has the same first-instruction rule as `submit_observations`.
 
+Both instructions create an absent balance PDA, with two exceptions. A wrapped-token
+source must have a balance PDA, or the transfer fails with `MissingWrappedAccount`. A
+native-token destination must have a balance PDA, or the transfer fails with
+`MissingNativeAccount`. These checks run before the balance change, so a zero amount
+also fails.
+
 | # | Account | W | S | Purpose |
 |---|---------|---|---|---------|
 | 0 | submitter | W | S | Pays rent for a new NoReplay bucket. |

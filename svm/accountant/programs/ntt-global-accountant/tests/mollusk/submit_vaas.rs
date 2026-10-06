@@ -198,7 +198,11 @@ fn rejects() {
                 SOLANA_HUB,
                 &transfer_payload(DECIMALS, AMOUNT, SOLANA),
             ),
-            VaaAccounts::registered(ETHEREUM, SPOKE, SOLANA, HUB, SOLANA_HUB),
+            VaaAccounts {
+                source_balance: balance_account(ETHEREUM, SOLANA, HUB, Uint256::ZERO),
+                dest_balance: balance_account(SOLANA, SOLANA, HUB, Uint256::ZERO),
+                ..VaaAccounts::registered(ETHEREUM, SPOKE, SOLANA, HUB, SOLANA_HUB)
+            },
             None,
             GlobalAccountantError::BalanceUnderflow,
         ),

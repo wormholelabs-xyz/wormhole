@@ -379,7 +379,14 @@ fn rejects() {
                     HUB,
                     SOLANA_HUB,
                 );
-                let accounts = s.submit_n(m, 12);
+                let mut accounts = s.submit_n(m, 12);
+                for (key, chain) in [(s.source_balance, ETHEREUM), (s.dest_balance, SOLANA)] {
+                    replace_account(
+                        &mut accounts,
+                        &key,
+                        balance_account(chain, SOLANA, HUB, Uint256::ZERO),
+                    );
+                }
                 let ix = s.ix_data(12);
                 (s, accounts, ix)
             },
