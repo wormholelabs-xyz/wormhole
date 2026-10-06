@@ -37,6 +37,7 @@ dependencies = [
  "bytemuck",
  "global-accountant-definitions",
  "solana-address 2.6.0",
+ "solana-instructions-sysvar 3.0.1",
  "solana-keccak-hasher 3.1.0",
  "solana-noreplay",
  "solana-pubkey 3.0.0",

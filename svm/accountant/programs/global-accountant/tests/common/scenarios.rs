@@ -117,6 +117,7 @@ impl VaaScenario {
             AccountMeta::new(self.dest_account, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(self.chain_registration, false),
+            instructions_sysvar_meta(),
         ]);
         metas
     }
@@ -264,6 +265,7 @@ impl ObsScenario {
             AccountMeta::new(self.dest_account, false),
             AccountMeta::new(SUBMITTER, false),
             AccountMeta::new_readonly(self.chain_registration, false),
+            instructions_sysvar_meta(),
         ]
     }
 

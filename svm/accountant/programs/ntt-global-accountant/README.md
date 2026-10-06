@@ -66,8 +66,11 @@ sequence, guardian_set_index, digest)`. The observation that reaches quorum
 commits the transfer, marks NoReplay, and closes the pending PDA.
 `submit_vaas` shares this NoReplay state: each `(chain, emitter, sequence)`
 commits once through either path.
-The instruction runs only at the top level of a transaction. A CPI call fails
-with `CpiInvocation`.
+The instruction runs only as the first top-level instruction of a transaction.
+Put ComputeBudget instructions after it. A CPI call fails with
+`CpiInvocation`. A call at a later instruction index fails with
+`InstructionNotFirst`. This rule keeps the commit log inside the log limit of
+the transaction.
 
 The observation is a fixed 252-byte struct. The source transaction id is 32
 or 64 bytes; a Solana-family id is the 64-byte transaction signature. The
@@ -95,6 +98,7 @@ registered relayer of its chain. The sender must have a hub.
 | 11 | `TransceiverHub` PDA | | | At `(chain, sender)`; must exist. |
 | 12 | `TransceiverPeer` PDA | | | At `(chain, sender, recipient_chain)`. |
 | 13 | `TransceiverPeer` PDA | | | At `(recipient_chain, peer, chain)`; must name the sender. |
+| 14 | instructions sysvar | | | Checks the instruction index. |
 
 ### 1. `close_pending`
 
@@ -128,6 +132,8 @@ reject a longer payload with `NttPayloadTooLarge`.
 payload limit. A transfer past `MAX_NTT_PAYLOAD_LEN` settles through
 `submit_observations` only.
 
+`submit_vaas` has the same first-instruction rule as `submit_observations`.
+
 The transfer parser is stricter than the wormchain reader. It checks every
 nested length field and rejects trailing bytes, as the EVM receivers do.
 
@@ -147,6 +153,7 @@ nested length field and rejects trailing bytes, as the EVM receivers do.
 | 11 | `TransceiverHub` PDA | | | At `(chain, sender)`; must exist. |
 | 12 | `TransceiverPeer` PDA | | | At `(chain, sender, recipient_chain)`. |
 | 13 | `TransceiverPeer` PDA | | | At `(recipient_chain, peer, chain)`; must name the sender. |
+| 14 | instructions sysvar | | | Checks the instruction index. |
 
 ### 3. `register_relayer_chain`
 

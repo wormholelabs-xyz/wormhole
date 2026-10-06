@@ -27,6 +27,7 @@ fn transfer_commits_and_marks_noreplay() {
             (false, true),
             (false, false),
             (false, false),
+            (false, false),
         ]
     );
 

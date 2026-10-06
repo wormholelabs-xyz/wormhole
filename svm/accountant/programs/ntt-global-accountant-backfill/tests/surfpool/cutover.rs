@@ -305,13 +305,14 @@ fn surfpool_ntt_cutover_rehearsal() {
         let body = v.body();
         let mut accounts = shim_metas(label, body);
         accounts.extend(tail);
+        accounts.push(instructions_sysvar_meta());
         vec![
-            set_compute_unit_limit_ix(SHIM_CU_LIMIT),
             Instruction {
                 program_id: id,
                 accounts,
                 data: submit_vaas_ix_data(guardian_set_bump, body),
             },
+            set_compute_unit_limit_ix(SHIM_CU_LIMIT),
         ]
     };
     let submit_tail = |v: &NttVector,

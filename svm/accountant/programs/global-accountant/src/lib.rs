@@ -57,6 +57,7 @@ pub mod global_accountant {
                 dest_account_pda,
                 rent_recipient,
                 chain_registration_pda,
+                instructions_sysvar,
             ]
         );
         crate::instructions::submit_observations::process(ctx.program_id, &accounts, &ix_data.0)?;
@@ -97,6 +98,7 @@ pub mod global_accountant {
                 dest_account_pda,
                 system_program,
                 chain_registration_pda,
+                instructions_sysvar,
             ]
         );
         crate::instructions::submit_vaas::process(ctx.program_id, &accounts, &ix_data.0)?;

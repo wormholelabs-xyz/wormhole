@@ -17,9 +17,9 @@ use solana_signer::Signer;
 use crate::common::{
     accountant_image, assert_bucket_marked, balance_account, balance_of,
     chain_registration_account, core_bridge_program_id, derive_guardian_set_pda, double_keccak256,
-    guardian_set_with_expiration, noreplay_authority_pda, post_signatures_ix,
-    set_compute_unit_limit_ix, shim_program_id, submit_vaas_ix_data, system_program_id,
-    NOREPLAY_PROGRAM_ID,
+    guardian_set_with_expiration, instructions_sysvar_meta, noreplay_authority_pda,
+    post_signatures_ix, set_compute_unit_limit_ix, shim_program_id, submit_vaas_ix_data,
+    system_program_id, NOREPLAY_PROGRAM_ID,
 };
 use crate::harness::{
     assert_canonical_log_in_tx, deploy_programs, fund, send, set_account, start_surfpool,
@@ -153,13 +153,14 @@ fn surfpool_submit_vaas_token_bridge_transfer() {
             AccountMeta::new(dest, false),
             AccountMeta::new_readonly(system_program_id(), false),
             AccountMeta::new_readonly(chain_registration_pda, false),
+            instructions_sysvar_meta(),
         ],
         data: submit_vaas_ix_data(guardian_set_bump, body),
     };
     let sig = send(
         &rpc,
         "submit_vaas",
-        &[set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT), submit],
+        &[submit, set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT)],
         &[&payer],
     );
 

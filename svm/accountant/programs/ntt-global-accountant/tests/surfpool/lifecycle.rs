@@ -91,7 +91,7 @@ fn surfpool_ntt_lifecycle() {
             AccountMeta::new_readonly(guardian_signatures.pubkey(), false),
         ]
     };
-    let with_budget = |ix: Instruction| [set_compute_unit_limit_ix(SHIM_CU_LIMIT), ix];
+    let with_budget = |ix: Instruction| [ix, set_compute_unit_limit_ix(SHIM_CU_LIMIT)];
 
     let noreplay_authority = noreplay_authority_pda(&id);
     let noreplay_tail = |bucket: Pubkey| {
@@ -271,6 +271,7 @@ fn surfpool_ntt_lifecycle() {
             AccountMeta::new_readonly(spoke_hub_pda, false),
             AccountMeta::new_readonly(spoke_peer_pda, false),
             AccountMeta::new_readonly(hub_peer_pda, false),
+            instructions_sysvar_meta(),
         ]);
         Instruction {
             program_id: id,

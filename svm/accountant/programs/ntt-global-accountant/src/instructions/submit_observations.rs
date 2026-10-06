@@ -26,7 +26,6 @@ use crate::instructions::ntt_transfer;
 
 /// `data`: [`NttSubmitObservationsIxData`], 252 bytes fixed.
 pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
-    quorum::require_transaction_level()?;
     let ix = NttSubmitObservationsIxData::from_bytes(data).map_err(err)?;
     let tx_id = ix.tx_id().map_err(err)?;
     let fields = ix.fields_and_digest();
@@ -59,11 +58,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //  11. `[]`              `TransceiverHub` PDA at `(chain, sender)`
     //  12. `[]`              `TransceiverPeer` PDA at `(chain, sender, recipient_chain)`
     //  13. `[]`              `TransceiverPeer` PDA at `(recipient_chain, source_peer, chain)`
-    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, _noreplay_program, noreplay_authority, source_balance, dest_balance, rent_recipient, relayer_registration_pda, hub_pda, peer_src_pda, peer_dst_pda] =
+    //  14. `[]`              instructions sysvar
+    let [submitter, pending_pda, guardian_set, noreplay_bucket, system_program_acc, _noreplay_program, noreplay_authority, source_balance, dest_balance, rent_recipient, relayer_registration_pda, hub_pda, peer_src_pda, peer_dst_pda, instructions_sysvar] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
+    quorum::require_first_top_level_instruction(instructions_sysvar)?;
     if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }

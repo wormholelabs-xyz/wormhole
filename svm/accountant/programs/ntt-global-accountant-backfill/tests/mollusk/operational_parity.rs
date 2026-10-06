@@ -8,7 +8,7 @@ use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
 use accountant_operational_core::instructions::register_chain::derive_register_chain_pda;
 use accountant_operational_core::support::pda;
 use accountant_test_fixtures::NttCorpus;
-use accountant_test_harness::mollusk_with_fixtures;
+use accountant_test_harness::{instructions_sysvar_meta, mollusk_with_fixtures};
 use global_accountant_definitions::ntt_global_accountant_backfill::Instruction;
 use global_accountant_definitions::{
     parse_delivery_instruction, BelongsToHub, TransceiverHubKey, TransceiverHubLayout,
@@ -326,6 +326,7 @@ fn backfilled_state_settles_mainnet_transfers_through_submit_vaas() {
                 AccountMeta::new_readonly(hub_pda, false),
                 AccountMeta::new_readonly(peer_src_pda, false),
                 AccountMeta::new_readonly(peer_dst_pda, false),
+                instructions_sysvar_meta(),
             ],
             vec![
                 (noreplay_bucket, noreplay_bucket_unmarked()),

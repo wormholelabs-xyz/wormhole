@@ -5,6 +5,7 @@ use global_accountant_definitions::{
     NOREPLAY_PROGRAM_ID as NOREPLAY_PROGRAM_ID_BYTES, VERIFY_VAA_SHIM_PROGRAM_ID,
 };
 use mollusk_svm::program::{keyed_account_for_system_program, loader_keys::LOADER_V3};
+use solana_instruction::AccountMeta;
 use solana_pubkey::Pubkey;
 
 pub const NOREPLAY_PROGRAM_ID: Pubkey = Pubkey::new_from_array(NOREPLAY_PROGRAM_ID_BYTES);
@@ -31,6 +32,15 @@ pub fn compute_budget_program_id() -> Pubkey {
 
 pub fn loader_v3_id() -> Pubkey {
     LOADER_V3
+}
+
+pub fn instructions_sysvar_id() -> Pubkey {
+    Pubkey::from_str_const("Sysvar1nstructions1111111111111111111111111")
+}
+
+/// Last account of `submit_observations` and `submit_vaas`.
+pub fn instructions_sysvar_meta() -> AccountMeta {
+    AccountMeta::new_readonly(instructions_sysvar_id(), false)
 }
 
 pub fn rent_sysvar_id() -> Pubkey {

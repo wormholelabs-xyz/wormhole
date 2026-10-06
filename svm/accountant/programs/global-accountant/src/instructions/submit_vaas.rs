@@ -7,7 +7,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::commit_log;
+use accountant_operational_core::support::{commit_log, quorum};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
@@ -41,11 +41,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //   8. `[WRITE]`         destination-chain balance PDA (as 7)
     //   9. `[]`              system program
     //  10. `[]`              `ChainRegistration` PDA
-    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, _noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda] =
+    //  11. `[]`              instructions sysvar
+    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, _noreplay_program, noreplay_authority, source_account_pda, dest_account_pda, _system_program, chain_registration_pda, instructions_sysvar] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
+    quorum::require_first_top_level_instruction(instructions_sysvar)?;
 
     if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);

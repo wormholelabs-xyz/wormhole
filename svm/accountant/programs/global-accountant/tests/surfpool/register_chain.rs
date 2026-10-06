@@ -20,11 +20,11 @@ use solana_keypair::Keypair;
 use solana_signer::Signer;
 
 use crate::common::{
-    accountant_image, balance_account, balance_of, double_keccak256, governance_header, layout,
-    make_guardians, noreplay_authority_pda, post_signatures_ix, register_chain_body,
-    register_chain_ix_data, set_compute_unit_limit_ix, shim_program_id, signature_block,
-    signatures_for, submit_vaas_ix_data, system_program_id, transfer_body, ETHEREUM,
-    GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
+    accountant_image, balance_account, balance_of, double_keccak256, governance_header,
+    instructions_sysvar_meta, layout, make_guardians, noreplay_authority_pda, post_signatures_ix,
+    register_chain_body, register_chain_ix_data, set_compute_unit_limit_ix, shim_program_id,
+    signature_block, signatures_for, submit_vaas_ix_data, system_program_id, transfer_body,
+    ETHEREUM, GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TOKEN_ADDRESS,
 };
 use crate::harness::{
     deploy_programs, fund, send, send_expect_error, set_account, start_surfpool, ProgramImage,
@@ -160,6 +160,7 @@ fn surfpool_register_chain_rotate_and_replay() {
                 AccountMeta::new(dest, false),
                 AccountMeta::new_readonly(system_program_id(), false),
                 AccountMeta::new_readonly(registration_pda, false),
+                instructions_sysvar_meta(),
             ],
             data: submit_vaas_ix_data(guardian_set_bump, &body),
         }
@@ -221,8 +222,8 @@ fn surfpool_register_chain_rotate_and_replay() {
         &rpc,
         "submit_vaas[registered emitter]",
         &[
-            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
             transfer_before,
+            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
         ],
         &[&payer],
     );
@@ -262,8 +263,8 @@ fn surfpool_register_chain_rotate_and_replay() {
         &rpc,
         "submit_vaas[unregistered emitter]",
         &[
-            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
             transfer_after,
+            set_compute_unit_limit_ix(SUBMIT_VAAS_CU_LIMIT),
         ],
         &[&payer],
         GlobalAccountantError::UnregisteredEmitter,

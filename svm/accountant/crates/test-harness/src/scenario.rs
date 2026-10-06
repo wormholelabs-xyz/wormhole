@@ -3,6 +3,7 @@
 
 use std::ops::Range;
 
+use mollusk_svm::result::types::{TransactionProgramResult, TransactionResult};
 use mollusk_svm::result::{InstructionResult, ProgramResult};
 use mollusk_svm::Mollusk;
 use solana_account::Account;
@@ -13,7 +14,7 @@ use crate::guardians::{
     derive_guardian_set_pda, guardian_set_account, guardian_signatures_account, make_guardians,
     sign_digest, Guardian, GUARDIAN_PUBKEY_LENGTH,
 };
-use crate::ids::{core_bridge_program_id, shim_program_id};
+use crate::ids::{core_bridge_program_id, shim_program_id, system_program_id};
 use crate::ix::double_keccak256;
 use crate::mollusk::{keyed_account_for_verify_vaa_shim_program, system_owned_account};
 
@@ -54,6 +55,40 @@ pub fn assert_error(result: &InstructionResult, expected: u64, label: &str) {
         "{label}: {:?}",
         result.program_result
     );
+}
+
+/// System `Transfer` of 0 lamports from `SUBMITTER` to itself.
+pub fn noop_transfer_ix() -> Instruction {
+    const TRANSFER: u32 = 2;
+    let mut data = TRANSFER.to_le_bytes().to_vec();
+    data.extend_from_slice(&0u64.to_le_bytes());
+    Instruction::new_with_bytes(
+        system_program_id(),
+        &data,
+        vec![
+            AccountMeta::new(SUBMITTER, true),
+            AccountMeta::new(SUBMITTER, false),
+        ],
+    )
+}
+
+/// Run `ix` as top-level instruction 1, after [`noop_transfer_ix`].
+pub fn process_as_second_instruction(
+    mollusk: &Mollusk,
+    ix: &Instruction,
+    accounts: &[(Pubkey, Account)],
+) -> TransactionResult {
+    mollusk.process_transaction_instructions(&[noop_transfer_ix(), ix.clone()], accounts)
+}
+
+pub fn assert_tx_error(result: &TransactionResult, ix_index: usize, expected: u64, label: &str) {
+    match &result.program_result {
+        TransactionProgramResult::Failure(index, err) => {
+            assert_eq!(*index, ix_index, "{label}: failing instruction index");
+            assert_eq!(u64::from(err.clone()), expected, "{label}: error code");
+        }
+        other => panic!("{label}: {other:?}"),
+    }
 }
 
 pub fn signatures_for(guardians: &[Guardian], digest: &[u8; 32], count: u8) -> Vec<(u8, [u8; 65])> {

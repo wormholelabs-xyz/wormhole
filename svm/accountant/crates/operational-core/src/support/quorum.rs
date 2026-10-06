@@ -4,6 +4,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT};
 use anchor_lang::solana_program::program_error::ProgramError;
+use solana_instructions_sysvar::load_current_index_checked;
 
 use crate::account_util::{add_lamports, close_account};
 use crate::accounts;
@@ -40,6 +41,23 @@ pub fn observation_digests(prefix: &[u8], tx_id: TxId<'_>, fields: &[u8]) -> Obs
 pub fn require_transaction_level() -> crate::ProgramResult {
     if get_stack_height() != TRANSACTION_LEVEL_STACK_HEIGHT {
         return Err(err(GlobalAccountantError::CpiInvocation));
+    }
+    Ok(())
+}
+
+/// Reject a call that is not the first top-level instruction of the transaction.
+///
+/// SECURITY: the runtime caps each transaction's log, and an earlier instruction can fill it
+/// and drop the commit log. Under a CPI the sysvar reports the parent's index, so the stack
+/// height check is also necessary.
+pub fn require_first_top_level_instruction(
+    instructions_sysvar: &AccountInfo,
+) -> crate::ProgramResult {
+    require_transaction_level()?;
+    // Also checks the sysvar address.
+    let index = load_current_index_checked(instructions_sysvar)?;
+    if index != 0 {
+        return Err(err(GlobalAccountantError::InstructionNotFirst));
     }
     Ok(())
 }

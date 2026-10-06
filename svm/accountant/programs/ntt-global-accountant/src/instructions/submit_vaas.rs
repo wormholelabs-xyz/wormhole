@@ -8,7 +8,7 @@ use anchor_lang::solana_program::program_error::ProgramError;
 
 use accountant_operational_core::cpi::{noreplay, shim};
 use accountant_operational_core::hash::double_keccak256;
-use accountant_operational_core::support::{commit_log, pda};
+use accountant_operational_core::support::{commit_log, pda, quorum};
 use accountant_operational_core::ProgramResult;
 
 use crate::definitions::{
@@ -42,11 +42,13 @@ pub fn process(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> Pr
     //  11. `[]`              `TransceiverHub` PDA at `(chain, sender)`
     //  12. `[]`              `TransceiverPeer` PDA at `(chain, sender, recipient_chain)`
     //  13. `[]`              `TransceiverPeer` PDA at `(recipient_chain, source_peer, chain)`
-    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, _noreplay_program, noreplay_authority, source_balance, dest_balance, system_program_acc, relayer_registration_pda, hub_pda, peer_src_pda, peer_dst_pda] =
+    //  14. `[]`              instructions sysvar
+    let [submitter, _verify_vaa_shim_program, guardian_set, guardian_signatures, noreplay_bucket, _noreplay_program, noreplay_authority, source_balance, dest_balance, system_program_acc, relayer_registration_pda, hub_pda, peer_src_pda, peer_dst_pda, instructions_sysvar] =
         accounts
     else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
+    quorum::require_first_top_level_instruction(instructions_sysvar)?;
     if !submitter.is_signer {
         return Err(ProgramError::MissingRequiredSignature);
     }

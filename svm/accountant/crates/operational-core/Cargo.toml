@@ -22,6 +22,9 @@ solana-pubkey = { version = "3", features = ["curve25519"] }
 # anchor-lang's transitive `solana-system-interface` 2.x predates the instruction.
 # `bincode` enables the instruction builders.
 solana-system-interface = { workspace = true, features = ["bincode"] }
+# `load_current_index_checked` for `quorum::require_first_top_level_instruction`. Same
+# version as anchor-lang's own dependency.
+solana-instructions-sysvar = "=3.0.1"
 
 [dev-dependencies]
 solana-address.workspace = true

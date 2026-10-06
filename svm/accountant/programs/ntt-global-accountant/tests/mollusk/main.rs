@@ -6,6 +6,7 @@ mod common;
 
 mod close_pending;
 mod cross_path_replay;
+mod first_instruction;
 mod modify_balance;
 mod program_id;
 mod register_hub;

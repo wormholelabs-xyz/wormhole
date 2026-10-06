@@ -13,9 +13,9 @@ use solana_signer::Signer;
 
 use crate::common::{
     accountant_image, assert_bucket_marked, attest_body, chain_registration_account,
-    content_digest, emitter, make_guardians, noreplay_authority_pda, sign_digest, signing_digest,
-    submit_observations_ix_data, system_program_id, Guardian, GUARDIAN_COUNT, GUARDIAN_SET_INDEX,
-    NOREPLAY_PROGRAM_ID, QUORUM, TX_ID,
+    content_digest, emitter, instructions_sysvar_meta, make_guardians, noreplay_authority_pda,
+    sign_digest, signing_digest, submit_observations_ix_data, system_program_id, Guardian,
+    GUARDIAN_COUNT, GUARDIAN_SET_INDEX, NOREPLAY_PROGRAM_ID, QUORUM, TX_ID,
 };
 use crate::harness::{
     assert_canonical_log_in_tx, deploy_programs, fund, send, send_expect_error, set_account,
@@ -56,6 +56,7 @@ impl Observation {
                 AccountMeta::new(self.noreplay_authority, false),
                 AccountMeta::new(self.submitter, false),
                 AccountMeta::new_readonly(self.chain_registration, false),
+                instructions_sysvar_meta(),
             ],
             data: submit_observations_ix_data(
                 GUARDIAN_SET_INDEX,

@@ -5,7 +5,7 @@
 
 use anchor_lang::prelude::*;
 
-/// Accounts for `submit_observations` (14 accounts). Slots 0-10 match the WTT program; slot 10
+/// Accounts for `submit_observations` (15 accounts). Slots 0-10 match the WTT program; slot 10
 /// is the Standard Relayer registration for the emitter chain.
 #[derive(Accounts)]
 pub struct SubmitObservations<'info> {
@@ -42,6 +42,8 @@ pub struct SubmitObservations<'info> {
     pub peer_src_pda: UncheckedAccount<'info>,
     /// CHECK: address checked in `pda::check`; the peer's entry for the sender's chain.
     pub peer_dst_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `quorum::require_first_top_level_instruction`.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
 /// Accounts for `close_pending` (5 accounts). Handler:
@@ -61,7 +63,7 @@ pub struct ClosePending<'info> {
     pub noreplay_bucket: UncheckedAccount<'info>,
 }
 
-/// Accounts for `submit_vaas` (14 accounts). Slots 0-10 match the WTT program; slot 10 is the
+/// Accounts for `submit_vaas` (15 accounts). Slots 0-10 match the WTT program; slot 10 is the
 /// Standard Relayer registration for the emitter chain.
 #[derive(Accounts)]
 pub struct SubmitVaas<'info> {
@@ -96,6 +98,8 @@ pub struct SubmitVaas<'info> {
     pub peer_src_pda: UncheckedAccount<'info>,
     /// CHECK: address checked in `pda::check`; the peer's entry for the sender's chain.
     pub peer_dst_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `quorum::require_first_top_level_instruction`.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
 /// Accounts for `register_relayer_chain` (7 accounts). The registration PDA holds the

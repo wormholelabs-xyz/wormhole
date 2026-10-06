@@ -32,8 +32,11 @@ sequence, guardian_set_index, digest)`. The observation that reaches quorum
 commits the transfer, marks NoReplay, and closes the pending PDA.
 `submit_vaas` shares this NoReplay state: each `(chain, emitter, sequence)`
 commits once through either path.
-The instruction runs only at the top level of a transaction. A CPI call fails
-with `CpiInvocation`.
+The instruction runs only as the first top-level instruction of a transaction.
+Put ComputeBudget instructions after it. A CPI call fails with
+`CpiInvocation`. A call at a later instruction index fails with
+`InstructionNotFirst`. This rule keeps the commit log inside the log limit of
+the transaction.
 
 The observation is a fixed 278-byte struct. The source transaction id is 32
 or 64 bytes; a Solana-family id is the 64-byte transaction signature. The id is
@@ -52,6 +55,7 @@ part of the signing digest, not of the pending PDA key.
 | 8 | destination-chain balance PDA | W | | As above. |
 | 9 | rent recipient | W | | Must equal the pending PDA's recorded payer. On a mismatch, the program logs an `ACCPAYR\0` entry with the recorded payer. |
 | 10 | `ChainRegistration` PDA | | | Must match the VAA's emitter. |
+| 11 | instructions sysvar | | | Checks the instruction index. |
 
 ### 1. `close_pending`
 
@@ -86,6 +90,8 @@ fits less. The instruction rejects a longer payload with `TransferPayloadTooLarg
 limit. A `TransferWithPayload` past `MAX_TRANSFER_PAYLOAD_LEN` settles through
 `submit_observations` only.
 
+`submit_vaas` has the same first-instruction rule as `submit_observations`.
+
 | # | Account | W | S | Purpose |
 |---|---------|---|---|---------|
 | 0 | submitter | W | S | Pays rent for a new NoReplay bucket. |
@@ -99,6 +105,7 @@ limit. A `TransferWithPayload` past `MAX_TRANSFER_PAYLOAD_LEN` settles through
 | 8 | destination-chain balance PDA | W | | As above. |
 | 9 | system program | | | |
 | 10 | `ChainRegistration` PDA | | | Must match the VAA's emitter. |
+| 11 | instructions sysvar | | | Checks the instruction index. |
 
 ### 3. `register_chain`
 

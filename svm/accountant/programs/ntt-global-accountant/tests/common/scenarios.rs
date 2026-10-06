@@ -173,6 +173,7 @@ impl VaaScenario {
             AccountMeta::new_readonly(self.hub_pda, false),
             AccountMeta::new_readonly(self.peer_src_pda, false),
             AccountMeta::new_readonly(self.peer_dst_pda, false),
+            instructions_sysvar_meta(),
         ]
     }
 
@@ -463,6 +464,7 @@ impl ObsScenario {
             AccountMeta::new_readonly(self.hub_pda, false),
             AccountMeta::new_readonly(self.peer_src_pda, false),
             AccountMeta::new_readonly(self.peer_dst_pda, false),
+            instructions_sysvar_meta(),
         ]
     }
 

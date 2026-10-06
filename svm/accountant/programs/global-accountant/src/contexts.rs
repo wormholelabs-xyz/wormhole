@@ -5,7 +5,7 @@
 
 use anchor_lang::prelude::*;
 
-/// Accounts for `submit_observations` (11 accounts).
+/// Accounts for `submit_observations` (12 accounts).
 #[derive(Accounts)]
 pub struct SubmitObservations<'info> {
     #[account(mut)]
@@ -35,9 +35,11 @@ pub struct SubmitObservations<'info> {
     pub rent_recipient: UncheckedAccount<'info>,
     /// CHECK: address and emitter checked in `chain_registration::verify`.
     pub chain_registration_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `quorum::require_first_top_level_instruction`.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
-/// Accounts for `submit_vaas` (11 accounts).
+/// Accounts for `submit_vaas` (12 accounts).
 #[derive(Accounts)]
 pub struct SubmitVaas<'info> {
     #[account(mut)]
@@ -65,6 +67,8 @@ pub struct SubmitVaas<'info> {
     pub system_program: UncheckedAccount<'info>,
     /// CHECK: address and emitter checked in `chain_registration::verify`.
     pub chain_registration_pda: UncheckedAccount<'info>,
+    /// CHECK: address checked in `quorum::require_first_top_level_instruction`.
+    pub instructions_sysvar: UncheckedAccount<'info>,
 }
 
 /// Accounts for `register_chain` (7 accounts).

@@ -54,6 +54,7 @@ pub mod ntt_global_accountant {
                 hub_pda,
                 peer_src_pda,
                 peer_dst_pda,
+                instructions_sysvar,
             ]
         );
         crate::instructions::submit_observations::process(ctx.program_id, &accounts, &ix_data.0)?;
@@ -97,6 +98,7 @@ pub mod ntt_global_accountant {
                 hub_pda,
                 peer_src_pda,
                 peer_dst_pda,
+                instructions_sysvar,
             ]
         );
         crate::instructions::submit_vaas::process(ctx.program_id, &accounts, &ix_data.0)?;
