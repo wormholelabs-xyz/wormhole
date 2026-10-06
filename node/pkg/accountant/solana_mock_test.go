@@ -28,12 +28,15 @@ type MockAccountantSolanaConn struct {
 	GetOwnedAccountsErr error
 	ProgramAccounts     []solacctconn.ProgramAccount
 	ProgramAccountsErr  error
-	SubscribeLogsErr    error
-	LatestBlockhash     solacctconn.Blockhash
-	LatestBlockhashErr  error
-	BlockHeight         uint64
-	BlockHeightErr      error
-	SendTransactionErr  error
+	// ProgramAccountsMaxResults models the RPC response size limit. Zero disables it.
+	ProgramAccountsMaxResults int
+	ProgramAccountsPartitions []solacctconn.TxIDPartition
+	SubscribeLogsErr          error
+	LatestBlockhash           solacctconn.Blockhash
+	LatestBlockhashErr        error
+	BlockHeight               uint64
+	BlockHeightErr            error
+	SendTransactionErr        error
 	// DefaultSignatureStatus answers every signature. A nil status marks them unknown.
 	DefaultSignatureStatus *solacctconn.SignatureStatus
 	SignatureStatusesErr   error
@@ -110,15 +113,28 @@ func (c *MockAccountantSolanaConn) GetOwnedAccounts(ctx context.Context, addrs [
 }
 
 // GetProgramAccountsByTag returns ProgramAccounts without the set-index filter, so tests can
-// exercise the second check on the account's own set index.
-func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32) ([]solacctconn.ProgramAccount, error) {
+// exercise the second check on the account's own set index. It applies the tx id partition.
+func (c *MockAccountantSolanaConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32, partition solacctconn.TxIDPartition) ([]solacctconn.ProgramAccount, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.ProgramAccountsSetIndices = append(c.ProgramAccountsSetIndices, guardianSetIndex)
+	c.ProgramAccountsPartitions = append(c.ProgramAccountsPartitions, partition)
 	if c.ProgramAccountsErr != nil {
 		return nil, c.ProgramAccountsErr
 	}
-	return c.ProgramAccounts, nil
+	out := c.ProgramAccounts
+	if firstByte, partitioned := partition.FirstByte(); partitioned {
+		out = nil
+		for _, account := range c.ProgramAccounts {
+			if len(account.Data) > solacctconn.PendingTxIDOffset && account.Data[solacctconn.PendingTxIDOffset] == firstByte {
+				out = append(out, account)
+			}
+		}
+	}
+	if c.ProgramAccountsMaxResults > 0 && len(out) > c.ProgramAccountsMaxResults {
+		return nil, fmt.Errorf("getProgramAccounts: %w", solacctconn.ErrResponseTooLarge)
+	}
+	return out, nil
 }
 
 // SetSignaturesForAddress sets the history of addr, newest first, with successful entries.

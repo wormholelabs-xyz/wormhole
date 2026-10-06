@@ -610,7 +610,12 @@ func TestNttParseTransceiverTransfer(t *testing.T) {
 		{name: "additional len off", payload: mutate(withAdditional, func(b []byte) []byte { b[NTT_PREFIX_OFFSET+nttNativeTokenTransferLen+1]++; return b }), wantErr: true},
 		{name: "trailing byte", payload: append(build(), 0x99), wantErr: true},
 		{name: "decimals past the program's normalization", payload: nttTestTransferPayload(maxNttTrimmedDecimals+1, 1, 10, nil, nil), wantErr: true},
-		{name: "over cap", payload: nttTestTransferPayload(8, 12_345, 10, make([]byte, 1900), nil), wantErr: true},
+		// The payload cap is submit_vaas-only. submit_observations carries resolved fields.
+		{name: "past the submit_vaas payload cap", payload: func() []byte {
+			b := nttTestTransferPayload(8, 12_345, 10, make([]byte, 1900), nil)
+			require.Greater(t, len(b), maxNttPayloadLen)
+			return b
+		}(), want: ok},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4,6 +4,7 @@
 package solacctconn
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,8 +16,8 @@ import (
 )
 
 const (
-	// Bounds one decoded RPC response body. getProgramAccounts at 88-byte pending accounts
-	// fits about 100,000 accounts, ten times the audit read cap.
+	// Bounds one decoded RPC response body. getProgramAccounts at 152-byte pending accounts
+	// fits about 90,000 accounts.
 	maxRPCResponseBytes = 32 << 20
 
 	// Bounds one RPC request, as the solana-go default does.
@@ -24,6 +25,9 @@ const (
 )
 
 var _ Conn = (*ClientConn)(nil)
+
+// ErrResponseTooLarge marks an RPC response body past the size limit.
+var ErrResponseTooLarge = errors.New("rpc response body is past the size limit")
 
 // ClientConn is a connection to one Solana cluster.
 type ClientConn struct {
@@ -65,7 +69,8 @@ func (c *ClientConn) Close() {
 	}
 }
 
-// limitedHTTPClient fails the read of a response body past maxBytes.
+// limitedHTTPClient reads each response body in full, up to maxBytes. A body past maxBytes
+// fails Do with ErrResponseTooLarge.
 type limitedHTTPClient struct {
 	inner    *http.Client
 	maxBytes int64
@@ -76,38 +81,19 @@ func (c *limitedHTTPClient) Do(req *http.Request) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp.Body = &limitedBody{body: resp.Body, limit: c.maxBytes, remaining: c.maxBytes}
+	defer resp.Body.Close()
+	// Read one byte past the limit to tell an exact fit from an overflow.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, c.maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > c.maxBytes {
+		return nil, fmt.Errorf("%w: %d bytes", ErrResponseTooLarge, c.maxBytes)
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
 	return resp, nil
 }
 
 func (c *limitedHTTPClient) CloseIdleConnections() {
 	c.inner.CloseIdleConnections()
-}
-
-// limitedBody returns an error once a read passes the limit. A silent truncation would
-// surface as a confusing JSON decode error.
-type limitedBody struct {
-	body      io.ReadCloser
-	limit     int64
-	remaining int64
-}
-
-func (b *limitedBody) Read(p []byte) (int, error) {
-	if b.remaining < 0 {
-		return 0, fmt.Errorf("rpc response body is past the %d-byte size limit", b.limit)
-	}
-	// Read one byte past the limit to tell an exact fit from an overflow.
-	if int64(len(p)) > b.remaining+1 {
-		p = p[:b.remaining+1]
-	}
-	n, err := b.body.Read(p)
-	b.remaining -= int64(n)
-	if b.remaining < 0 {
-		return 0, fmt.Errorf("rpc response body is past the %d-byte size limit", b.limit)
-	}
-	return n, err
-}
-
-func (b *limitedBody) Close() error {
-	return b.body.Close()
 }

@@ -20,6 +20,9 @@ const (
 	// offset_of!(PendingObservationsLayout, guardian_set_index), state.rs. Little-endian u32.
 	pendingGuardianSetIndexOffset = 4
 
+	// offset_of!(PendingObservationsLayout, tx_id), state.rs.
+	PendingTxIDOffset = 88
+
 	// MaxLogLinesPerTx bounds the log lines of one transaction. The agave log buffer is
 	// 10 KiB per transaction.
 	MaxLogLinesPerTx = 2048
@@ -94,18 +97,28 @@ func classifyOwnedAccount(account *rpc.Account, owner solana.PublicKey) (OwnedAc
 }
 
 // GetProgramAccountsByTag reads the accounts of program whose first byte is tag and whose
-// length is exactly dataSize, at finalized commitment.
-func (c *ClientConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32) ([]ProgramAccount, error) {
+// length is exactly dataSize, at finalized commitment. A set partition also matches the first
+// tx id byte.
+//
+// SECURITY: precondition: a set partition requires dataSize > PendingTxIDOffset.
+func (c *ClientConn) GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32, partition TxIDPartition) ([]ProgramAccount, error) {
 	sortResults := true
 	setIndex := binary.LittleEndian.AppendUint32(nil, guardianSetIndex)
+	filters := []rpc.RPCFilter{
+		{Memcmp: &rpc.RPCFilterMemcmp{Offset: 0, Bytes: solana.Base58{tag}}},
+		{Memcmp: &rpc.RPCFilterMemcmp{Offset: pendingGuardianSetIndexOffset, Bytes: solana.Base58(setIndex)}},
+		{DataSize: dataSize},
+	}
+	if firstByte, partitioned := partition.FirstByte(); partitioned {
+		if dataSize <= PendingTxIDOffset {
+			return nil, fmt.Errorf("getProgramAccounts: data size %d holds no tx id at offset %d", dataSize, PendingTxIDOffset)
+		}
+		filters = append(filters, rpc.RPCFilter{Memcmp: &rpc.RPCFilterMemcmp{Offset: PendingTxIDOffset, Bytes: solana.Base58{firstByte}}})
+	}
 	res, err := c.rpc.GetProgramAccountsWithOpts(ctx, program, &rpc.GetProgramAccountsOpts{
-		Encoding:   solana.EncodingBase64,
-		Commitment: rpc.CommitmentFinalized,
-		Filters: []rpc.RPCFilter{
-			{Memcmp: &rpc.RPCFilterMemcmp{Offset: 0, Bytes: solana.Base58{tag}}},
-			{Memcmp: &rpc.RPCFilterMemcmp{Offset: pendingGuardianSetIndexOffset, Bytes: solana.Base58(setIndex)}},
-			{DataSize: dataSize},
-		},
+		Encoding:    solana.EncodingBase64,
+		Commitment:  rpc.CommitmentFinalized,
+		Filters:     filters,
 		SortResults: &sortResults,
 	})
 	if err != nil {

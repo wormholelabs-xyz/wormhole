@@ -112,7 +112,9 @@ type solanaBackend struct {
 	historyCursors solanaHistoryCursors
 	// Address after which the next program-account pass starts. The audit goroutine owns it.
 	programAuditCursor solana.PublicKey
-	metrics            solanaBackendMetrics
+	// First tx id byte at which the next partitioned read starts. The audit goroutine owns it.
+	programAuditPartition uint8
+	metrics               solanaBackendMetrics
 }
 
 // covers reports whether the backend's program accounts pe.

@@ -1170,7 +1170,7 @@ func runNode(cmd *cobra.Command, args []string) {
 	rpcMap["ibcBlockHeightURL"] = *ibcBlockHeightURL
 	rpcMap["ibcLCD"] = *ibcLCD
 	rpcMap["ibcWS"] = *ibcWS
-	if *accountantSolanaContract != "" {
+	if *accountantSolanaContract != "" || *accountantSolanaNttContract != "" {
 		rpcMap["accountantSolanaRPC"] = *accountantSolanaRPC
 		rpcMap["accountantSolanaWS"] = *accountantSolanaWS
 	}
@@ -1304,7 +1304,6 @@ func runNode(cmd *cobra.Command, args []string) {
 		}
 
 		logger.Info("Connecting to solana for the accountant",
-			zap.String("accountantSolanaRPC", *accountantSolanaRPC),
 			zap.String("keyPath", keyPathName),
 			zap.Stringer("program", programIDs.program),
 			zap.Stringer("nttProgram", programIDs.nttProgram),

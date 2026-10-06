@@ -697,6 +697,46 @@ func TestAuditSolanaProgramPendingAccountsVisitsEveryAccount(t *testing.T) {
 	}
 }
 
+// Partition 0 fills the read cap, partition 1 is past the response limit, partition 2 holds
+// one unknown account.
+func TestAuditSolanaProgramPendingAccountsReadsTxIDPartitions(t *testing.T) {
+	ctx := context.Background()
+	f := newSolanaAuditFixture(t, ctx)
+	f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
+
+	account := func(partition uint8, idx int, signedBy []uint8) solacctconn.ProgramAccount {
+		var addr solana.PublicKey
+		addr[0] = partition
+		binary.BigEndian.PutUint32(addr[1:5], uint32(idx)) // #nosec G115 -- idx <= 10_000
+		addr[31] = 0x01
+		acc := solanaProgramAccountForTxID(t, addr, vaa.ChainIDEthereum, 0, [32]byte{0x56}, mustSolanaTxIDBytes(t, addr[:]), signedBy)
+		require.Equal(t, partition, acc.Data[solacctconn.PendingTxIDOffset])
+		return acc
+	}
+	accounts := make([]solacctconn.ProgramAccount, 0, 2*maxPendingAccountsReadPerAudit+2)
+	for idx := range maxPendingAccountsReadPerAudit {
+		accounts = append(accounts, account(0, idx, []uint8{0}))
+	}
+	for idx := range maxPendingAccountsReadPerAudit + 1 {
+		accounts = append(accounts, account(1, idx, nil))
+	}
+	unknown := account(2, 0, nil)
+	accounts = append(accounts, unknown)
+	f.conn.ProgramAccounts = accounts
+	f.conn.ProgramAccountsMaxResults = maxPendingAccountsReadPerAudit
+
+	f.acct.runSolanaAudit(ctx, f.acct.solana)
+	assert.Equal(t, []solacctconn.TxIDPartition{solacctconn.AllTxIDs, solacctconn.TxIDsStartingWith(0)}, f.conn.ProgramAccountsPartitions)
+	assert.Empty(t, f.obsvReq)
+
+	f.conn.ProgramAccountsPartitions = nil
+	f.acct.runSolanaAudit(ctx, f.acct.solana)
+	require.Len(t, f.conn.ProgramAccountsPartitions, 1+256)
+	assert.Equal(t, solacctconn.TxIDsStartingWith(1), f.conn.ProgramAccountsPartitions[1])
+	require.Len(t, f.obsvReq, 1)
+	assert.Equal(t, unknown.Address.Bytes(), (<-f.obsvReq).TxHash)
+}
+
 func TestAuditSolanaProgramPendingAccountsBoundsReobservationRequests(t *testing.T) {
 	ctx := context.Background()
 	f := newSolanaAuditFixture(t, ctx)

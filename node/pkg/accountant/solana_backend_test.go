@@ -259,19 +259,22 @@ func TestStartRejectsPartialSolanaConfig(t *testing.T) {
 	assert.False(t, acct.solanaEnabled())
 }
 
+// The p2p options read the feature string before Start, so each case is an unstarted accountant.
 func TestFeatureString(t *testing.T) {
-	backend := &solanaBackend{}
+	wtt := AccountantSolanaConfig{Program: solanaTestProgram()}
+	ntt := AccountantSolanaConfig{NttProgram: solanaTestNttProgram()}
+	both := AccountantSolanaConfig{Program: solanaTestProgram(), NttProgram: solanaTestNttProgram()}
 	tests := []struct {
 		name string
 		acct *Accountant
 		want string
 	}{
 		{name: "wormchain log only", acct: &Accountant{}, want: "acct-logonly"},
-		{name: "solana enforcing", acct: &Accountant{enforceFlag: true, solana: backend}, want: "acct:sol-acct"},
-		{name: "solana log only", acct: &Accountant{solana: backend}, want: "acct-logonly:sol-acct-logonly"},
-		{name: "solana ntt enforcing", acct: &Accountant{enforceFlag: true, solanaNtt: backend}, want: "acct:sol-ntt-acct"},
-		{name: "solana ntt log only", acct: &Accountant{solanaNtt: backend}, want: "acct-logonly:sol-ntt-acct-logonly"},
-		{name: "all four", acct: &Accountant{enforceFlag: true, nttContract: "x", solana: backend, solanaNtt: backend}, want: "acct:ntt-acct:sol-acct:sol-ntt-acct"},
+		{name: "solana enforcing", acct: &Accountant{enforceFlag: true, solanaCfg: wtt}, want: "acct:sol-acct"},
+		{name: "solana log only", acct: &Accountant{solanaCfg: wtt}, want: "acct-logonly:sol-acct-logonly"},
+		{name: "solana ntt enforcing", acct: &Accountant{enforceFlag: true, solanaCfg: ntt}, want: "acct:sol-ntt-acct"},
+		{name: "solana ntt log only", acct: &Accountant{solanaCfg: ntt}, want: "acct-logonly:sol-ntt-acct-logonly"},
+		{name: "all four", acct: &Accountant{enforceFlag: true, nttContract: "x", solanaCfg: both}, want: "acct:ntt-acct:sol-acct:sol-ntt-acct"},
 	}
 
 	for _, tt := range tests {

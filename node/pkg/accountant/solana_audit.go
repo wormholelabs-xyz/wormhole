@@ -8,6 +8,7 @@ package accountant
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -19,8 +20,10 @@ import (
 )
 
 const (
-	getSignaturesForAddressPageLength     = 1000
-	maxPendingAccountsReadPerAudit        = 10_000
+	getSignaturesForAddressPageLength = 1000
+	maxPendingAccountsReadPerAudit    = 10_000
+	// One partition per value of the first tx id byte.
+	txIDPartitions                        = 256
 	olderGuardianSetsSearchedForCommitLog = 4
 	// maxReobservationRequestsPerAudit bounds the requests for pending accounts this guardian
 	// did not sign and does not hold.
@@ -672,12 +675,51 @@ func (acct *Accountant) visitAddressTransactions(ctx context.Context, b *solanaB
 	return false
 }
 
+// readSolanaPendingAccounts reads the program's pending accounts at guardianSetIndex. A
+// response past the RPC size limit falls back to tx id partitions. The partitioned read starts
+// at programAuditPartition and adds whole partitions up to the read cap. A first partition
+// past the cap is read alone.
+//
+// SECURITY: a partition past the size limit is skipped, so a flood of accounts in one
+// partition cannot hold the others. Honest tx ids spread across all partitions.
+func (acct *Accountant) readSolanaPendingAccounts(ctx context.Context, b *solanaBackend, guardianSetIndex uint32) ([]solacctconn.ProgramAccount, error) {
+	accounts, err := b.conn.GetProgramAccountsByTag(ctx, b.program, pendingObservationsTag, pendingObservationsLen, guardianSetIndex, solacctconn.AllTxIDs)
+	if !errors.Is(err, solacctconn.ErrResponseTooLarge) {
+		return accounts, err
+	}
+	b.metrics.auditErrors.Inc()
+	acct.logger.Error("the solana pending accounts exceed one rpc response, reading them by tx id partition", zap.String("backend", b.tag), zap.Uint8("startPartition", b.programAuditPartition))
+
+	accounts = nil
+	for range txIDPartitions {
+		if len(accounts) >= maxPendingAccountsReadPerAudit {
+			break
+		}
+		partition := b.programAuditPartition
+		b.programAuditPartition++ // wraps at txIDPartitions
+		part, err := b.conn.GetProgramAccountsByTag(ctx, b.program, pendingObservationsTag, pendingObservationsLen, guardianSetIndex, solacctconn.TxIDsStartingWith(partition))
+		if err != nil {
+			b.metrics.auditErrors.Inc()
+			acct.logger.Error("failed to read a tx id partition of the solana pending accounts", zap.String("backend", b.tag), zap.Uint8("partition", partition), zap.Error(err))
+			continue
+		}
+		// The next audit starts at a partition that would pass the read cap, so every account
+		// read is examined.
+		if len(accounts) > 0 && len(accounts)+len(part) > maxPendingAccountsReadPerAudit {
+			b.programAuditPartition = partition
+			break
+		}
+		accounts = append(accounts, part...)
+	}
+	return accounts, nil
+}
+
 // auditSolanaProgramPendingAccounts reads the program's pending accounts. It acts on each
 // account whose bitmap bit for this guardian is clear. It resubmits an own transfer that the
 // own-transfer pass did not reconcile. It requests a reobservation of the stored tx id of any
 // other account: an unknown transfer, or a sibling tx id of an own transfer.
 func (acct *Accountant) auditSolanaProgramPendingAccounts(ctx context.Context, b *solanaBackend, guardianSetIndex uint32, guardianIndex uint8, own map[solana.PublicKey]solanaOwnPendingTransfer, reconciled map[solana.PublicKey]struct{}) {
-	accounts, err := b.conn.GetProgramAccountsByTag(ctx, b.program, pendingObservationsTag, pendingObservationsLen, guardianSetIndex)
+	accounts, err := acct.readSolanaPendingAccounts(ctx, b, guardianSetIndex)
 	if err != nil {
 		b.metrics.auditErrors.Inc()
 		acct.logger.Error("failed to read the solana pending accounts", zap.String("backend", b.tag), zap.Error(err))

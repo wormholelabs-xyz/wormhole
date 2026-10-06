@@ -374,6 +374,7 @@ func (acct *Accountant) Close() {
 	}
 }
 
+// FeatureString reads the static configuration. The p2p options call it before Start builds the backends.
 func (acct *Accountant) FeatureString() string {
 	var ret string
 	if !acct.enforceFlag {
@@ -387,7 +388,7 @@ func (acct *Accountant) FeatureString() string {
 		}
 		ret += "ntt-acct"
 	}
-	if acct.solanaEnabled() {
+	if !acct.solanaCfg.Program.IsZero() {
 		if ret != "" {
 			ret += ":"
 		}
@@ -397,7 +398,7 @@ func (acct *Accountant) FeatureString() string {
 			ret += "sol-acct"
 		}
 	}
-	if acct.solanaNttEnabled() {
+	if !acct.solanaCfg.NttProgram.IsZero() {
 		if ret != "" {
 			ret += ":"
 		}

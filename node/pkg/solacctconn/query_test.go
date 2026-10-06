@@ -169,14 +169,16 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 	pda := testKeys(2)[1]
 
 	tests := []struct {
-		name    string
-		data    []byte
-		owner   solana.PublicKey
-		wantErr bool
+		name      string
+		data      []byte
+		owner     solana.PublicKey
+		partition TxIDPartition
+		wantErr   bool
 	}{
-		{name: "matching account", data: make([]byte, 88), owner: program},
-		{name: "wrong data size", data: make([]byte, 87), owner: program, wantErr: true},
-		{name: "wrong owner", data: make([]byte, 88), owner: pda, wantErr: true},
+		{name: "matching account", data: make([]byte, 152), owner: program},
+		{name: "tx id partition", data: make([]byte, 152), owner: program, partition: TxIDsStartingWith(0xab)},
+		{name: "wrong data size", data: make([]byte, 151), owner: program, wantErr: true},
+		{name: "wrong owner", data: make([]byte, 152), owner: pda, wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -185,7 +187,7 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 				return []any{map[string]any{"pubkey": pda.String(), "account": accountValue(tt.owner, tt.data)}}, nil
 			})
 
-			accounts, err := conn.GetProgramAccountsByTag(context.Background(), program, 1, 88, 0x04030201)
+			accounts, err := conn.GetProgramAccountsByTag(context.Background(), program, 1, 152, 0x04030201, tt.partition)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
@@ -193,7 +195,7 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, accounts, 1)
 			assert.Equal(t, pda, accounts[0].Address)
-			assert.Len(t, accounts[0].Data, 88)
+			assert.Len(t, accounts[0].Data, 152)
 
 			var opts struct {
 				Filters []struct {
@@ -207,14 +209,22 @@ func TestGetProgramAccountsByTag(t *testing.T) {
 			calls := srv.recorded()
 			require.Len(t, calls, 1)
 			require.NoError(t, json.Unmarshal(calls[0].Params[1], &opts))
-			require.Len(t, opts.Filters, 3)
+			firstByte, partitioned := tt.partition.FirstByte()
+			if partitioned {
+				require.Len(t, opts.Filters, 4)
+				require.NotNil(t, opts.Filters[3].Memcmp)
+				assert.Equal(t, uint64(PendingTxIDOffset), opts.Filters[3].Memcmp.Offset)
+				assert.Equal(t, solana.Base58{firstByte}.String(), opts.Filters[3].Memcmp.Bytes)
+			} else {
+				require.Len(t, opts.Filters, 3)
+			}
 			require.NotNil(t, opts.Filters[0].Memcmp)
 			assert.Equal(t, uint64(0), opts.Filters[0].Memcmp.Offset)
 			assert.Equal(t, solana.Base58{1}.String(), opts.Filters[0].Memcmp.Bytes)
 			require.NotNil(t, opts.Filters[1].Memcmp)
 			assert.Equal(t, uint64(4), opts.Filters[1].Memcmp.Offset)
 			assert.Equal(t, solana.Base58{0x01, 0x02, 0x03, 0x04}.String(), opts.Filters[1].Memcmp.Bytes, "little-endian set index")
-			assert.Equal(t, uint64(88), opts.Filters[2].DataSize)
+			assert.Equal(t, uint64(152), opts.Filters[2].DataSize)
 		})
 	}
 }
@@ -246,9 +256,9 @@ func TestClientConnRejectsOversizedResponse(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(conn.Close)
 
-			_, err = conn.GetProgramAccountsByTag(context.Background(), program, 0, 88, 0)
+			_, err = conn.GetProgramAccountsByTag(context.Background(), program, 0, 88, 0, AllTxIDs)
 			if tt.wantErr {
-				require.Error(t, err)
+				require.ErrorIs(t, err, ErrResponseTooLarge)
 				return
 			}
 			require.NoError(t, err)

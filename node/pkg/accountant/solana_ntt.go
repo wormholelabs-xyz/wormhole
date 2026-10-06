@@ -43,9 +43,6 @@ func nttSplitU16Prefixed(b []byte) ([]byte, []byte, bool) {
 // after the transceiver payload, as the program requires. Decimals the program cannot
 // normalize are rejected here, since an observation carrying them fails at quorum.
 func nttParseTransceiverTransfer(payload []byte) (nttTransfer, error) {
-	if len(payload) > maxNttPayloadLen {
-		return nttTransfer{}, fmt.Errorf("ntt transfer: %d bytes is past the %d byte limit", len(payload), maxNttPayloadLen)
-	}
 	if len(payload) < nttMinTransferLen {
 		return nttTransfer{}, fmt.Errorf("%w: %d bytes, want at least %d", errMalformedNttTransfer, len(payload), nttMinTransferLen)
 	}

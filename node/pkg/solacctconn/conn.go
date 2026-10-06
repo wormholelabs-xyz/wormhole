@@ -15,8 +15,10 @@ type Conn interface {
 	// Results are positional with addrs. owner must not be the system program.
 	GetOwnedAccounts(ctx context.Context, addrs []solana.PublicKey, owner solana.PublicKey, commitment Commitment) ([]OwnedAccount, error)
 
-	// Filters: memcmp(offset 0, tag), memcmp(offset 4, guardianSetIndex LE) and dataSize.
-	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32) ([]ProgramAccount, error)
+	// Filters: memcmp(offset 0, tag), memcmp(offset 4, guardianSetIndex LE), dataSize and,
+	// for a set partition, memcmp(PendingTxIDOffset, first tx id byte). A response past the
+	// size limit returns ErrResponseTooLarge.
+	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32, partition TxIDPartition) ([]ProgramAccount, error)
 
 	// Newest first, older than before. A zero before starts at the newest entry.
 	GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, before solana.Signature, limit int) ([]SignatureEntry, error)
@@ -89,6 +91,24 @@ type SignatureEntry struct {
 	Signature solana.Signature
 	Failed    bool
 	BlockTime time.Time
+}
+
+// TxIDPartition selects pending accounts by the first byte of their tx id. The zero value,
+// AllTxIDs, selects every account.
+type TxIDPartition struct {
+	firstByte uint8
+	set       bool
+}
+
+var AllTxIDs = TxIDPartition{}
+
+func TxIDsStartingWith(firstByte uint8) TxIDPartition {
+	return TxIDPartition{firstByte: firstByte, set: true}
+}
+
+// FirstByte returns the selected first tx id byte. The bool is false for AllTxIDs.
+func (p TxIDPartition) FirstByte() (uint8, bool) {
+	return p.firstByte, p.set
 }
 
 // ProgramAccount is an account that the queried program owns.
