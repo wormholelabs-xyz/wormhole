@@ -841,7 +841,8 @@ func classifySolanaTxError(err error) (solanaTxDisposition, string) {
 	case solacctconn.TxErrBlockhashNotFound:
 		return solanaTxRetryNextRound, "the blockhash expired"
 	case solacctconn.TxErrAlreadyProcessed:
-		return solanaTxAlreadyDone, "the transaction was already processed"
+		// The earlier transaction can have failed on chain.
+		return solanaTxRetryNextRound, "the transaction was already processed"
 	case solacctconn.TxErrAccountNotFound:
 		return solanaTxFeePayerCannotPay, "the fee payer account does not exist"
 	case solacctconn.TxErrInsufficientFundsForFee:

@@ -129,7 +129,7 @@ func TestClassifySolanaTxError(t *testing.T) {
 		{name: "invalid signature", txErr: customTxError(solanaErrInvalidSignature), wantDisposition: solanaTxFailed},
 		{name: "unmapped custom code", txErr: customTxError(29), wantDisposition: solanaTxFailed},
 		{name: "blockhash not found", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrBlockhashNotFound}, wantDisposition: solanaTxRetryNextRound},
-		{name: "already processed", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrAlreadyProcessed}, wantDisposition: solanaTxAlreadyDone},
+		{name: "already processed", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrAlreadyProcessed}, wantDisposition: solanaTxRetryNextRound},
 		{name: "insufficient funds for fee", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrInsufficientFundsForFee}, wantDisposition: solanaTxFeePayerCannotPay},
 		{name: "other transaction error", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrOther}, wantDisposition: solanaTxFailed},
 		{name: "transport error", txErr: errors.New("connection reset"), wantDisposition: solanaTxFailed},
