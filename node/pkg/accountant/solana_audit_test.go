@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"math"
 	"slices"
 	"testing"
 	"time"
@@ -143,7 +144,8 @@ func TestPublishSolanaFeePayerBalance(t *testing.T) {
 		wantGauge  float64
 		wantErrors float64
 	}{
-		{name: "funded", lamports: 5_000_000, wantGauge: 5_000_000},
+		{name: "funded", lamports: 2_000_000_000, wantGauge: 2_000_000_000},
+		{name: "low", lamports: 5_000_000, wantGauge: 5_000_000},
 		{name: "empty", lamports: 0, wantGauge: 0, wantErrors: 1},
 		{name: "query error", err: errors.New("rpc down"), wantGauge: 7, wantErrors: 1},
 	}
@@ -161,6 +163,22 @@ func TestPublishSolanaFeePayerBalance(t *testing.T) {
 			assert.Equal(t, tt.wantGauge, testutil.ToFloat64(solanaFeePayerLamports.WithLabelValues("wtt")))
 			assert.Equal(t, tt.wantErrors, testutil.ToFloat64(solanaFeePayerErrors.WithLabelValues("wtt"))-errorsBefore)
 		})
+	}
+}
+
+func TestSolanaFeePayerBalanceLevel(t *testing.T) {
+	tests := []struct {
+		lamports uint64
+		want     solanaFeePayerLevel
+	}{
+		{lamports: 0, want: solanaFeePayerEmpty},
+		{lamports: 1, want: solanaFeePayerLow},
+		{lamports: solanaFeePayerLowBalanceLamports - 1, want: solanaFeePayerLow},
+		{lamports: solanaFeePayerLowBalanceLamports, want: solanaFeePayerFunded},
+		{lamports: math.MaxUint64, want: solanaFeePayerFunded},
+	}
+	for _, tt := range tests {
+		assert.Equal(t, tt.want, solanaFeePayerBalanceLevel(tt.lamports), "lamports %d", tt.lamports)
 	}
 }
 

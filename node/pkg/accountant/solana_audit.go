@@ -227,9 +227,35 @@ func (acct *Accountant) publishSolanaFeePayerBalance(ctx context.Context, b *sol
 	}
 
 	b.metrics.feePayerLamports.Set(float64(lamports))
-	if lamports == 0 {
+	switch solanaFeePayerBalanceLevel(lamports) {
+	case solanaFeePayerEmpty:
 		b.metrics.feePayerErrors.Inc()
 		acct.logger.Error("the solana fee payer is empty", zap.String("backend", b.tag), zap.Stringer("feePayer", feePayer))
+	case solanaFeePayerLow:
+		acct.logger.Warn("the solana fee payer balance is low", zap.String("backend", b.tag), zap.Stringer("feePayer", feePayer), zap.Uint64("lamports", lamports), zap.Uint64("threshold", solanaFeePayerLowBalanceLamports))
+	case solanaFeePayerFunded:
+	}
+}
+
+// solanaFeePayerLowBalanceLamports is 1 SOL: about 9,500 transactions at the priority fee cap.
+const solanaFeePayerLowBalanceLamports = 1_000_000_000
+
+type solanaFeePayerLevel uint8
+
+const (
+	solanaFeePayerEmpty solanaFeePayerLevel = iota + 1
+	solanaFeePayerLow
+	solanaFeePayerFunded
+)
+
+func solanaFeePayerBalanceLevel(lamports uint64) solanaFeePayerLevel {
+	switch {
+	case lamports == 0:
+		return solanaFeePayerEmpty
+	case lamports < solanaFeePayerLowBalanceLamports:
+		return solanaFeePayerLow
+	default:
+		return solanaFeePayerFunded
 	}
 }
 

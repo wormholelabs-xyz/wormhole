@@ -7,11 +7,9 @@ import (
 	"github.com/gagliardetto/solana-go"
 )
 
-// REVIEW: what should this cap be?
-//
 // maxAccountantSolanaPriorityFee caps --accountantSolanaPriorityFee, the total priority fee in lamports
-// of one transaction v1: 0.0015 SOL per transaction, for either program.
-const maxAccountantSolanaPriorityFee = 1_500_000
+// of one transaction v1: 0.0001 SOL per transaction, for either program.
+const maxAccountantSolanaPriorityFee = 100_000
 
 type accountantSolanaProgramIDs struct {
 	program    solana.PublicKey // zero when --accountantSolanaContract is unset
