@@ -23,6 +23,13 @@ const (
 	_ = uint(pendingObservationsMaxGuardians - pendingObservationsBitsPerWord*pendingObservationsSignatureWords)
 )
 
+// Token Bridge transfer actions, and the 0x03 minimum: the fixed head plus the 32-byte from_address.
+const (
+	tokenBridgeActionTransfer            = 0x01
+	tokenBridgeActionTransferWithPayload = 0x03
+	tokenBridgeTransferWithPayloadMinLen = tokenBridgeTransferLen + 32
+)
+
 // solanaCommitEvent is a decoded ACCDGST commit log. Digest is the content digest from
 // submit_observations, or the VAA digest from submit_vaas and the backfill.
 type solanaCommitEvent struct {
@@ -393,8 +400,18 @@ func solanaObservationFieldsFromPayload(chain vaa.ChainID, emitter vaa.Address, 
 		return fields, nil
 	}
 
-	if len(payload) < tokenBridgeTransferLen {
-		return nil, fmt.Errorf("observation fields: transfer payload wants at least %d bytes, got %d", tokenBridgeTransferLen, len(payload))
+	// SECURITY: wormchain parity. 0x01 has no trailing bytes. 0x03 carries a 32-byte from_address.
+	switch payload[0] {
+	case tokenBridgeActionTransfer:
+		if len(payload) != tokenBridgeTransferLen {
+			return nil, fmt.Errorf("observation fields: transfer payload wants exactly %d bytes, got %d", tokenBridgeTransferLen, len(payload))
+		}
+	case tokenBridgeActionTransferWithPayload:
+		if len(payload) < tokenBridgeTransferWithPayloadMinLen {
+			return nil, fmt.Errorf("observation fields: transfer with payload wants at least %d bytes, got %d", tokenBridgeTransferWithPayloadMinLen, len(payload))
+		}
+	default:
+		return nil, fmt.Errorf("observation fields: action %d is not a transfer", payload[0])
 	}
 
 	// TestTokenBridgeTransferWireMatchesSDK checks this layout against vaa.DecodeTransferPayloadHdr.

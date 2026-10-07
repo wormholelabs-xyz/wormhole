@@ -325,11 +325,45 @@ func TestNewSolanaTxID(t *testing.T) {
 	assert.False(t, solanaTxID{}.valid(), "the zero value is not a tx id")
 }
 
+// Wormchain decodes 0x01 with no trailing bytes, and 0x03 with a 32-byte from_address.
+func TestSolanaObservationFieldsTransferLengths(t *testing.T) {
+	transfer := fixturePayload(t, fixtureTransferBodyHex)
+	require.Equal(t, byte(0x01), transfer[0])
+	withPayload := func(extra int) []byte {
+		p := append(append([]byte{}, transfer...), make([]byte, extra)...)
+		p[0] = 0x03
+		return p
+	}
+
+	tests := []struct {
+		name    string
+		payload []byte
+		wantErr bool
+	}{
+		{name: "0x01 exact head", payload: transfer},
+		{name: "0x01 one trailing byte", payload: append(append([]byte{}, transfer...), 0), wantErr: true},
+		{name: "0x03 head only", payload: withPayload(0), wantErr: true},
+		{name: "0x03 one byte short of from_address", payload: withPayload(31), wantErr: true},
+		{name: "0x03 from_address and no payload", payload: withPayload(32)},
+		{name: "0x03 large payload", payload: withPayload(10_000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields, err := solanaObservationFieldsFromPayload(vaa.ChainIDSolana, vaa.Address(mustHexDecode32(t, fixtureTransferEmitterHex)), fixtureTransferSequence, tt.payload, mustHexDecode32(t, fixtureTransferVaaDigestHex))
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, fields)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.payload[0], fields.Action)
+		})
+	}
+}
+
 func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 	transfer := fixturePayload(t, fixtureTransferBodyHex)
 	require.Len(t, transfer, tokenBridgeTransferLen)
-
-	transferPlusLarge := append(append([]byte{}, transfer...), make([]byte, 10_000)...)
 
 	// Unset fields default to the mainnet transfer.
 	tests := []struct {
@@ -343,7 +377,6 @@ func TestSolanaObservationFieldsFromPayload(t *testing.T) {
 		wantErr           bool
 	}{
 		{name: "mainnet transfer", payload: transfer},
-		{name: "transfer with a large extra payload", payload: transferPlusLarge},
 		{
 			name:              "mainnet action 0x99",
 			emitterHex:        fixtureOtherEmitterHex,
