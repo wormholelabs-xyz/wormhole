@@ -26,8 +26,11 @@ const (
 	// is 71,026 CU (ntt-global-accountant benches/compute_units.md), so one limit covers both.
 	solanaSubmitComputeUnitLimit = 150_000
 
-	// Runtime ceiling (64 MiB). A v1 config without this field allows 0 bytes.
-	solanaSubmitLoadedAccountsDataSizeLimit = 64 * 1024 * 1024
+	// The accountant and NoReplay program data at the 10 MiB runtime maximum each, plus 1 MiB
+	// for the other accounts, so it holds after any upgrade. The cost model charges the
+	// requested limit. An unset v1 field means 0 bytes.
+	solanaProgramDataMaxBytes               = 10 * 1024 * 1024
+	solanaSubmitLoadedAccountsDataSizeLimit = 2*solanaProgramDataMaxBytes + 1024*1024
 
 	// Round two covers the recorded-payer race and a stale blockhash. A preflight
 	// PayerMismatch carries the recorded payer, which round two uses directly.
