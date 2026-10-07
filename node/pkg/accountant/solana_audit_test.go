@@ -166,6 +166,41 @@ func TestPublishSolanaFeePayerBalance(t *testing.T) {
 	}
 }
 
+// A transaction that never resolves must not pin the history search of its address.
+func TestSolanaHistorySearchSkipsPersistentFetchFailure(t *testing.T) {
+	ctx := context.Background()
+	f := newSolanaAuditFixture(t, ctx)
+	f.markAccounted(t)
+	// {4} has no transaction, so every fetch fails. {5} is older and holds the commit.
+	f.conn.SetSignaturesForAddress(f.pending, []solana.Signature{{4}, {5}})
+	f.conn.SetTransaction(solana.Signature{5}, f.commitTransaction(f.pe.solanaFields.contentDigest))
+
+	for audit := 1; audit < maxSolanaTransactionFetchFailures; audit++ {
+		f.acct.runSolanaAudit(ctx, f.acct.solana)
+		require.Empty(t, f.msgChan, "audit %d released before the failure limit", audit)
+	}
+
+	f.acct.runSolanaAudit(ctx, f.acct.solana)
+	require.Len(t, f.msgChan, 1)
+	assert.Equal(t, f.msg.MessageIDString(), (<-f.msgChan).MessageIDString())
+}
+
+func TestSolanaHistoryCursorsFetchFailures(t *testing.T) {
+	addr, other := solana.PublicKey{1}, solana.PublicKey{2}
+	sig, newer := solana.Signature{4}, solana.Signature{5}
+	var c solanaHistoryCursors
+
+	for i := 1; i < maxSolanaTransactionFetchFailures; i++ {
+		require.False(t, c.recordFetchFailure(addr, sig), "failure %d", i)
+	}
+	assert.False(t, c.recordFetchFailure(other, sig), "counts are per address")
+	assert.False(t, c.recordFetchFailure(addr, newer), "a new signature restarts the count")
+	for i := 2; i < maxSolanaTransactionFetchFailures; i++ {
+		require.False(t, c.recordFetchFailure(addr, newer), "failure %d", i)
+	}
+	assert.True(t, c.recordFetchFailure(addr, newer))
+}
+
 func TestSolanaFeePayerBalanceLevel(t *testing.T) {
 	tests := []struct {
 		lamports uint64

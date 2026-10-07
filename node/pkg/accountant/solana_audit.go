@@ -67,6 +67,10 @@ var (
 		noreplayBucketCommitLogSearchLimits.maxAddressesPerAudit()
 )
 
+// maxSolanaTransactionFetchFailures is the number of consecutive failed fetches of one
+// history entry before the search counts it as examined.
+const maxSolanaTransactionFetchFailures = 3
+
 // solanaHistoryCursors resumes each address history search below the oldest entry that the
 // previous audit examined. Spam that lands after a search is newer than its cursor.
 //
@@ -75,6 +79,34 @@ var (
 type solanaHistoryCursors struct {
 	previous map[solana.PublicKey]solana.Signature
 	next     map[solana.PublicKey]solana.Signature
+	// failures holds the failed fetches of the entry at each cursor. rotate keeps the
+	// addresses that keep a cursor, so it holds at most maxHistoryCursors entries.
+	failures map[solana.PublicKey]solanaFetchFailures
+}
+
+// solanaFetchFailures counts the consecutive failed fetches of one history entry.
+type solanaFetchFailures struct {
+	signature solana.Signature
+	count     int
+}
+
+// recordFetchFailure records one failed fetch of sig in the history of addr. It returns true
+// when the search counts sig as examined.
+func (c *solanaHistoryCursors) recordFetchFailure(addr solana.PublicKey, sig solana.Signature) bool {
+	if c.failures == nil {
+		c.failures = make(map[solana.PublicKey]solanaFetchFailures, maxHistoryCursors)
+	}
+	f := c.failures[addr]
+	if f.signature != sig {
+		f = solanaFetchFailures{signature: sig}
+	}
+	f.count++
+	if f.count == maxSolanaTransactionFetchFailures {
+		delete(c.failures, addr)
+		return true
+	}
+	c.failures[addr] = f
+	return false
 }
 
 // before is the page start for addr. The zero signature starts at the newest entry.
@@ -98,6 +130,11 @@ func (c *solanaHistoryCursors) save(addr solana.PublicKey, oldest solana.Signatu
 func (c *solanaHistoryCursors) rotate() {
 	c.previous = c.next
 	c.next = nil
+	for addr := range c.failures {
+		if _, kept := c.previous[addr]; !kept {
+			delete(c.failures, addr)
+		}
+	}
 }
 
 // solanaOwnPendingTransfer is one tx id of a pending transfer the backend's program
@@ -673,10 +710,16 @@ func (acct *Accountant) visitAddressTransactions(ctx context.Context, b *solanaB
 		fetched++
 		tx, err := b.conn.GetTransaction(ctx, entry.Signature)
 		if err != nil {
-			// The next audit retries this entry.
 			b.metrics.auditErrors.Inc()
 			acct.logger.Error("failed to read a transaction of a pending account", zap.Stringer("pendingPda", addr), zap.Stringer("signature", entry.Signature), zap.Error(err))
-			break
+			if !b.historyCursors.recordFetchFailure(addr, entry.Signature) {
+				// The next audit retries this entry.
+				break
+			}
+			acct.logger.Error("skipping a history entry after repeated fetch failures", zap.Stringer("address", addr), zap.Stringer("signature", entry.Signature), zap.Int("failures", maxSolanaTransactionFetchFailures))
+			oldest = entry.Signature
+			examined++
+			continue
 		}
 		oldest = entry.Signature
 		examined++
