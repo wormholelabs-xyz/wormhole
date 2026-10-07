@@ -24,6 +24,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/watchers/cosmwasm"
 
 	managerxrpl "github.com/certusone/wormhole/node/pkg/manager/xrpl"
+	"github.com/certusone/wormhole/node/pkg/solacctconn"
 	"github.com/certusone/wormhole/node/pkg/watchers/algorand"
 	"github.com/certusone/wormhole/node/pkg/watchers/aptos"
 	"github.com/certusone/wormhole/node/pkg/watchers/evm"
@@ -140,6 +141,14 @@ var (
 	accountantNttContract      *string
 	accountantNttKeyPath       *string
 	accountantNttKeyPassPhrase *string
+
+	accountantSolanaRPC              *string
+	accountantSolanaWS               *string
+	accountantSolanaContract         *string
+	accountantSolanaNttContract      *string
+	accountantSolanaNoreplayContract *string
+	accountantSolanaKeyPath          *string
+	accountantSolanaPriorityFee      *uint64
 
 	aptosRPC     *string
 	aptosAccount *string
@@ -417,6 +426,14 @@ func init() {
 	accountantNttContract = NodeCmd.Flags().String("accountantNttContract", "", "Address of the NTT accountant smart contract on wormchain")
 	accountantNttKeyPath = NodeCmd.Flags().String("accountantNttKeyPath", "", "path to NTT accountant private key for signing transactions")
 	accountantNttKeyPassPhrase = NodeCmd.Flags().String("accountantNttKeyPassPhrase", "", "pass phrase used to unarmor the NTT accountant key file")
+
+	accountantSolanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "accountantSolanaRPC", "RPC URL of the cluster hosting the Solana WTT and NTT accountant programs", "http://solana-devnet:8899", []string{"http", "https"})
+	accountantSolanaWS = node.RegisterFlagWithValidationOrFail(NodeCmd, "accountantSolanaWS", "Websocket URL of the cluster hosting the Solana WTT and NTT accountant programs", "ws://solana-devnet:8900", []string{"ws", "wss"})
+	accountantSolanaContract = NodeCmd.Flags().String("accountantSolanaContract", "", "Address of the Solana WTT accountant program")
+	accountantSolanaNttContract = NodeCmd.Flags().String("accountantSolanaNttContract", "", "Address of the Solana NTT accountant program")
+	accountantSolanaNoreplayContract = NodeCmd.Flags().String("accountantSolanaNoreplayContract", "", "Address of the NoReplay program the Solana WTT and NTT accountants use")
+	accountantSolanaKeyPath = NodeCmd.Flags().String("accountantSolanaKeyPath", "", "path to the solana-keygen JSON keypair that pays Solana WTT and NTT accountant fees")
+	accountantSolanaPriorityFee = NodeCmd.Flags().Uint64("accountantSolanaPriorityFee", 0, "total priority fee in lamports per Solana WTT and NTT accountant transaction")
 
 	aptosRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "aptosRPC", "Aptos RPC URL", "http://aptos:8080", []string{"http", "https"})
 	aptosAccount = NodeCmd.Flags().String("aptosAccount", "", "aptos account")
@@ -1153,6 +1170,10 @@ func runNode(cmd *cobra.Command, args []string) {
 	rpcMap["ibcBlockHeightURL"] = *ibcBlockHeightURL
 	rpcMap["ibcLCD"] = *ibcLCD
 	rpcMap["ibcWS"] = *ibcWS
+	if *accountantSolanaContract != "" || *accountantSolanaNttContract != "" {
+		rpcMap["accountantSolanaRPC"] = *accountantSolanaRPC
+		rpcMap["accountantSolanaWS"] = *accountantSolanaWS
+	}
 
 	// Handle SIGTERM
 	sigterm := make(chan os.Signal, 1)
@@ -1247,6 +1268,69 @@ func runNode(cmd *cobra.Command, args []string) {
 		accountantNttWormchainConn, err = wormconn.NewConn(*wormchainURL, wormchainKey, wormchainId)
 		if err != nil {
 			logger.Fatal("failed to connect to wormchain for NTT accountant", zap.Error(err), zap.String("component", "gacct"))
+		}
+	}
+
+	var accountantSolanaCfg accountant.AccountantSolanaConfig
+	if err := checkAccountantSolanaFlagPresence(*accountantSolanaContract, *accountantSolanaNttContract, *accountantSolanaNoreplayContract, *accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaKeyPath, *accountantSolanaPriorityFee); err != nil {
+		logger.Fatal("invalid solana accountant flags", zap.Error(err), zap.String("component", "gacct"))
+	}
+	if *accountantSolanaContract != "" || *accountantSolanaNttContract != "" {
+		if *solanaContract == "" {
+			logger.Fatal("if accountantSolanaContract or accountantSolanaNttContract is specified, solanaContract is required as the Core Bridge program id", zap.String("component", "gacct"))
+		}
+
+		if err := checkAccountantSolanaConnFlags(env, *accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaPriorityFee); err != nil {
+			logger.Fatal("invalid solana accountant flag", zap.Error(err), zap.String("component", "gacct"))
+		}
+
+		programIDs, err := parseAccountantSolanaProgramIDs(*accountantSolanaContract, *accountantSolanaNttContract, *accountantSolanaNoreplayContract, *solanaContract)
+		if err != nil {
+			logger.Fatal("invalid solana accountant program id", zap.Error(err), zap.String("component", "gacct"))
+		}
+
+		keyPathName := *accountantSolanaKeyPath
+		if env == common.UnsafeDevNet {
+			idx, err := devnet.GetDevnetIndex()
+			if err != nil {
+				logger.Fatal("failed to get devnet index", zap.Error(err), zap.String("component", "gacct"))
+			}
+			keyPathName = fmt.Sprint(*accountantSolanaKeyPath, idx)
+		}
+
+		feePayer, err := solacctconn.LoadFeePayer(keyPathName)
+		if err != nil {
+			logger.Fatal("failed to load the solana accountant fee payer key", zap.Error(err), zap.String("component", "gacct"))
+		}
+
+		logger.Info("Connecting to solana for the accountant",
+			zap.String("keyPath", keyPathName),
+			zap.Stringer("program", programIDs.program),
+			zap.Stringer("nttProgram", programIDs.nttProgram),
+			zap.Stringer("noreplay", programIDs.noreplay),
+			zap.Stringer("coreBridge", programIDs.coreBridge),
+			zap.Stringer("feePayer", feePayer.PublicKey()),
+			zap.String("component", "gacct"),
+		)
+		solanaConn, err := solacctconn.NewConn(*accountantSolanaRPC, *accountantSolanaWS)
+		if err != nil {
+			logger.Fatal("failed to create the solana accountant connection", zap.Error(err), zap.String("component", "gacct"))
+		}
+		genesisHash, err := readAccountantSolanaGenesisHash(rootCtx, env, solanaConn)
+		if err != nil {
+			logger.Fatal("failed to read the solana accountant genesis hash", zap.Error(err), zap.String("component", "gacct"))
+		}
+		if err := checkAccountantSolanaDeployment(env, programIDs, genesisHash, accountantSolanaDeployments); err != nil {
+			logger.Fatal("the solana accountant configuration does not match the deployment", zap.Error(err), zap.String("component", "gacct"))
+		}
+		accountantSolanaCfg = accountant.AccountantSolanaConfig{
+			Conn:        solanaConn,
+			Program:     programIDs.program,
+			NttProgram:  programIDs.nttProgram,
+			Noreplay:    programIDs.noreplay,
+			CoreBridge:  programIDs.coreBridge,
+			FeePayer:    feePayer,
+			PriorityFee: *accountantSolanaPriorityFee,
 		}
 	}
 
@@ -2094,7 +2178,7 @@ func runNode(cmd *cobra.Command, args []string) {
 	guardianOptions := []*node.GuardianOption{
 		node.GuardianOptionDatabase(db),
 		node.GuardianOptionWatchers(watcherConfigs, ibcWatcherConfig),
-		node.GuardianOptionAccountant(*accountantWS, *accountantContract, *accountantCheckEnabled, accountantWormchainConn, *accountantNttContract, accountantNttWormchainConn, *accountantSubmitObservationBatchSize),
+		node.GuardianOptionAccountant(*accountantWS, *accountantContract, *accountantCheckEnabled, accountantWormchainConn, *accountantNttContract, accountantNttWormchainConn, accountantSolanaCfg, *accountantSubmitObservationBatchSize),
 		node.GuardianOptionGovernor(*chainGovernorEnabled, *governorFlowCancelEnabled, *coinGeckoApiKey),
 		node.GuardianOptionNotary(*notaryEnabled),
 		node.GuardianOptionManagerService(*managerServiceEnabled, managerSigners, *ethRPC),

@@ -34,62 +34,6 @@ pub fn peer_payload(dest_chain: u16, peer: [u8; 32]) -> Vec<u8> {
     bytemuck::bytes_of(&registration).to_vec()
 }
 
-/// VAA body published directly by `emitter` on `chain`.
-pub fn direct_body(chain: u16, emitter: [u8; 32], sequence: u64, payload: &[u8]) -> Vec<u8> {
-    let mut body = vaa_header(chain, emitter, sequence);
-    body.extend_from_slice(payload);
-    body
-}
-
-/// VAA body published by `relayer` on `chain`, wrapping `payload` from `sender`.
-pub fn relayed_body(
-    chain: u16,
-    relayer: [u8; 32],
-    sequence: u64,
-    sender: [u8; 32],
-    payload: &[u8],
-) -> Vec<u8> {
-    direct_body(
-        chain,
-        relayer,
-        sequence,
-        &wire::delivery_instruction(sender, payload),
-    )
-}
-
-/// `TransceiverMessage` carrying a `NativeTokenTransfer` of `amount` at `decimals` to
-/// `to_chain`, with empty additional and transceiver payloads.
-pub fn transfer_payload(decimals: u8, amount: u64, to_chain: u16) -> Vec<u8> {
-    let transfer = NativeTokenTransfer {
-        prefix: NATIVE_TOKEN_TRANSFER_PREFIX,
-        decimals,
-        amount: amount.to_be_bytes(),
-        source_token: [0x33; 32],
-        to: [0x44; 32],
-        to_chain: to_chain.to_be_bytes(),
-    };
-    let manager = ManagerHead {
-        id: [0x55; 32],
-        sender: [0x66; 32],
-        payload_len: (size_of::<NativeTokenTransfer>() as u16).to_be_bytes(),
-    };
-    let head = TransceiverHead {
-        prefix: TRANSCEIVER_MESSAGE_PREFIX,
-        source_ntt_manager: [0x11; 32],
-        recipient_ntt_manager: [0x22; 32],
-        ntt_manager_payload_len: ((size_of::<ManagerHead>() + size_of::<NativeTokenTransfer>())
-            as u16)
-            .to_be_bytes(),
-    };
-    [
-        bytemuck::bytes_of(&head),
-        bytemuck::bytes_of(&manager),
-        bytemuck::bytes_of(&transfer),
-        &0u16.to_be_bytes(),
-    ]
-    .concat()
-}
-
 pub fn submit_vaas_ix_data(guardian_set_bump: u8, body: &[u8]) -> Vec<u8> {
     wire::submit_vaas(Instruction::SubmitVaas as u8, guardian_set_bump, body)
 }

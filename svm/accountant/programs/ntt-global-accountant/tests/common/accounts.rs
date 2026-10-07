@@ -8,27 +8,6 @@ use solana_pubkey::Pubkey;
 use super::ids::program_id;
 use super::*;
 
-pub fn hub_layout(
-    chain: u16,
-    address: [u8; 32],
-    hub_chain: u16,
-    hub: [u8; 32],
-) -> TransceiverHubLayout {
-    TransceiverHubLayout::new(
-        TransceiverHubKey::new(chain, address),
-        BelongsToHub(TransceiverHubKey::new(hub_chain, hub)),
-    )
-}
-
-pub fn peer_layout(
-    chain: u16,
-    address: [u8; 32],
-    dest_chain: u16,
-    peer: [u8; 32],
-) -> TransceiverPeerLayout {
-    TransceiverPeerLayout::new(TransceiverPeerKey::new(chain, address, dest_chain), peer)
-}
-
 pub fn hub_account(layout: &TransceiverHubLayout) -> Account {
     Account {
         lamports: 1_000_000,
