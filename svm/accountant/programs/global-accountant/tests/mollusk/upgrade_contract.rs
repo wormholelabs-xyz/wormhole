@@ -1,0 +1,259 @@
+use accountant_operational_core::cpi::loader::derive_upgrade_authority;
+use accountant_operational_core::cpi::noreplay::derive_bucket_pda;
+use global_accountant_definitions::{
+    GlobalAccountantError, GovernanceHeader, ACCOUNTANT_GOVERNANCE_MODULE, GOVERNANCE_EMITTER,
+    MODIFY_BALANCE_ACTION, SOLANA_CHAIN_ID, TOKEN_BRIDGE_GOVERNANCE_MODULE,
+    UPGRADE_CONTRACT_ACTION,
+};
+use mollusk_svm::program::keyed_account_for_system_program;
+use mollusk_svm::result::InstructionResult;
+use mollusk_svm::Mollusk;
+use solana_account::Account;
+use solana_instruction::{AccountMeta, Instruction};
+use solana_pubkey::Pubkey;
+
+use crate::common::*;
+
+const NEW_CONTRACT: [u8; 32] = [0xC4; 32];
+
+fn solana_target() -> GovernanceHeader {
+    governance_header(
+        ACCOUNTANT_GOVERNANCE_MODULE,
+        UPGRADE_CONTRACT_ACTION,
+        SOLANA_CHAIN_ID,
+    )
+}
+
+#[derive(Clone)]
+struct Upgrade {
+    sequence: u64,
+    vaa: SignedVaa,
+    noreplay_bucket: Pubkey,
+    noreplay_authority: Pubkey,
+    upgrade_authority: Pubkey,
+    spill: Pubkey,
+    buffer: Pubkey,
+    program_data: Pubkey,
+    buffer_state: Account,
+    program_data_state: Account,
+}
+
+impl Upgrade {
+    fn new(sequence: u64) -> Self {
+        Self::with_body(
+            sequence,
+            upgrade_contract_body(
+                SOLANA_CHAIN_ID,
+                GOVERNANCE_EMITTER,
+                sequence,
+                solana_target(),
+                NEW_CONTRACT,
+            ),
+        )
+    }
+
+    fn with_body(sequence: u64, body: Vec<u8>) -> Self {
+        let noreplay_authority = noreplay_authority_pda(&program_id());
+        let (upgrade_authority, _) = derive_upgrade_authority(&program_id());
+        let elf = deployed_elf(PROGRAM_NAME);
+        Self {
+            sequence,
+            vaa: SignedVaa::new(body),
+            noreplay_bucket: derive_bucket_pda(
+                &noreplay_authority,
+                SOLANA_CHAIN_ID,
+                &GOVERNANCE_EMITTER,
+                sequence,
+            )
+            .0,
+            noreplay_authority,
+            upgrade_authority,
+            spill: Pubkey::new_unique(),
+            buffer: Pubkey::new_from_array(NEW_CONTRACT),
+            program_data: program_data_address(&program_id()),
+            buffer_state: upgradeable_buffer_account(&upgrade_authority, &elf),
+            program_data_state: upgradeable_program_data_account(&upgrade_authority, elf.len()),
+        }
+    }
+
+    fn account_metas(&self) -> Vec<AccountMeta> {
+        let mut metas = self.vaa.shim_metas();
+        metas.extend([
+            AccountMeta::new(self.noreplay_bucket, false),
+            AccountMeta::new_readonly(noreplay_program_id(), false),
+            AccountMeta::new_readonly(self.noreplay_authority, false),
+            AccountMeta::new_readonly(system_program_id(), false),
+            AccountMeta::new_readonly(self.upgrade_authority, false),
+            AccountMeta::new(self.spill, false),
+            AccountMeta::new(self.buffer, false),
+            AccountMeta::new(self.program_data, false),
+            AccountMeta::new(program_id(), false),
+            AccountMeta::new_readonly(rent_sysvar_id(), false),
+            AccountMeta::new_readonly(clock_sysvar_id(), false),
+            AccountMeta::new_readonly(loader_v3_id(), false),
+        ]);
+        metas
+    }
+
+    fn accounts(&self, mollusk: &Mollusk, bucket: Account) -> Vec<(Pubkey, Account)> {
+        let mut accounts = self.vaa.shim_accounts();
+        accounts.extend([
+            (self.noreplay_bucket, bucket),
+            keyed_account_for_noreplay_program(),
+            (self.noreplay_authority, system_owned_account(0)),
+            keyed_account_for_system_program(),
+            (self.upgrade_authority, system_owned_account(0)),
+            (self.spill, system_owned_account(0)),
+            (self.buffer, self.buffer_state.clone()),
+            (self.program_data, self.program_data_state.clone()),
+            (
+                program_id(),
+                upgradeable_program_account(&self.program_data),
+            ),
+            mollusk.sysvars.keyed_account_for_rent_sysvar(),
+            mollusk.sysvars.keyed_account_for_clock_sysvar(),
+            keyed_account_for_loader_v3(),
+        ]);
+        accounts
+    }
+
+    fn submit(&self, mollusk: &Mollusk, accounts: Vec<(Pubkey, Account)>) -> InstructionResult {
+        let ix = Instruction::new_with_bytes(
+            program_id(),
+            &upgrade_contract_ix_data(self.vaa.guardian_set_bump, &self.vaa.body),
+            self.account_metas(),
+        );
+        mollusk.process_instruction(&ix, &accounts)
+    }
+}
+
+#[test]
+fn upgrade_replaces_program_data_and_marks_noreplay() {
+    let mollusk = mollusk();
+    let upgrade = Upgrade::new(20);
+    let accounts = upgrade.accounts(&mollusk, noreplay_bucket_unmarked());
+    let result = upgrade.submit(&mollusk, accounts);
+    assert_success(&result, "upgrade");
+
+    let program_data = find_account(&result.resulting_accounts, &upgrade.program_data);
+    assert_eq!(
+        u32::from_le_bytes(program_data.data[..4].try_into().unwrap()),
+        3
+    );
+    assert_eq!(
+        u64::from_le_bytes(program_data.data[4..12].try_into().unwrap()),
+        0,
+        "program data slot moves to the upgrade slot"
+    );
+    let elf = deployed_elf(PROGRAM_NAME);
+    let metadata_len = program_data_metadata_len();
+    assert_eq!(
+        &program_data.data[metadata_len..metadata_len + elf.len()],
+        &elf[..]
+    );
+    assert_bucket_marked(
+        find_account(&result.resulting_accounts, &upgrade.noreplay_bucket),
+        upgrade.sequence,
+    );
+    let spill = find_account(&result.resulting_accounts, &upgrade.spill);
+    assert!(spill.lamports > 0, "spill receives the freed lamports");
+}
+
+#[test]
+fn rejects() {
+    let mollusk = mollusk();
+
+    let body = |header: GovernanceHeader, emitter_chain: u16, sequence: u64| {
+        upgrade_contract_body(
+            emitter_chain,
+            GOVERNANCE_EMITTER,
+            sequence,
+            header,
+            NEW_CONTRACT,
+        )
+    };
+    let mut wrong_module = solana_target();
+    wrong_module.module = TOKEN_BRIDGE_GOVERNANCE_MODULE;
+    let mut modify_action = solana_target();
+    modify_action.action = MODIFY_BALANCE_ACTION;
+    let mut any_target = solana_target();
+    any_target.target_chain = [0; 2];
+
+    let mut wrong_authority = Upgrade::new(25);
+    wrong_authority.upgrade_authority = Pubkey::new_unique();
+    let mut wrong_buffer = Upgrade::new(26);
+    wrong_buffer.buffer = Pubkey::new_unique();
+    let mut wrong_program_data = Upgrade::new(27);
+    wrong_program_data.program_data = Pubkey::new_unique();
+    let mut truncated = Upgrade::new(28);
+    truncated.vaa.body.pop();
+
+    let cases: [(&str, Upgrade, Account, u64); 9] = [
+        (
+            "wrong module",
+            Upgrade::with_body(21, body(wrong_module, SOLANA_CHAIN_ID, 21)),
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidGovernanceModule as u64,
+        ),
+        (
+            "modify_balance action",
+            Upgrade::with_body(22, body(modify_action, SOLANA_CHAIN_ID, 22)),
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidGovernanceAction as u64,
+        ),
+        (
+            "any target chain",
+            Upgrade::with_body(23, body(any_target, SOLANA_CHAIN_ID, 23)),
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::GovernanceChainMismatch as u64,
+        ),
+        (
+            "wrong governance emitter chain",
+            Upgrade::with_body(24, body(solana_target(), 2, 24)),
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidGovernanceEmitter as u64,
+        ),
+        (
+            "pre-marked noreplay",
+            Upgrade::new(30),
+            noreplay_bucket_marked(30),
+            GlobalAccountantError::AlreadyAccounted as u64,
+        ),
+        (
+            "wrong upgrade authority pda",
+            wrong_authority,
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidPda as u64,
+        ),
+        (
+            "buffer not new contract",
+            wrong_buffer,
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidPda as u64,
+        ),
+        (
+            "wrong program data address",
+            wrong_program_data,
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidPda as u64,
+        ),
+        (
+            "body one byte short",
+            truncated,
+            noreplay_bucket_unmarked(),
+            GlobalAccountantError::InvalidInstructionData as u64,
+        ),
+    ];
+
+    for (label, upgrade, bucket, expected) in cases {
+        let bucket_before = bucket.data.clone();
+        let accounts = upgrade.accounts(&mollusk, bucket);
+        let result = upgrade.submit(&mollusk, accounts);
+        assert_error(&result, expected, label);
+        assert_eq!(
+            find_account(&result.resulting_accounts, &upgrade.noreplay_bucket).data,
+            bucket_before,
+            "{label}: replay slot must be unchanged"
+        );
+    }
+}

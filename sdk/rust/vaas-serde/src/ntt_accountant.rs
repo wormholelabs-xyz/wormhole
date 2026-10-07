@@ -1,7 +1,8 @@
 //! Parsers for NTT Accountant Actions.
 //!
 //! NTT Accountant is a security mechanism for the NTT locking hubs.
-//! It needs a modify_balance message to be able to correct for unforeseen events.
+//! It needs a modify_balance message to be able to correct for unforeseen events, and an
+//! upgrade_contract message to replace its code.
 
 use bstr::BString;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,9 @@ pub enum Action {
         #[serde(with = "crate::arraystring")]
         reason: BString,
     },
+    // Upgrade the NTT accountant contract on the target chain
+    #[serde(rename = "2")]
+    UpgradeContract { new_contract: Address },
 }
 
 /// Represents the payload for a governance VAA targeted at the Accountant.
@@ -95,6 +99,11 @@ mod governance_packet_impl {
         reason: bstr::BString,
     }
 
+    #[derive(Serialize, Deserialize)]
+    struct UpgradeContract {
+        new_contract: Address,
+    }
+
     impl Serialize for GovernancePacket {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
@@ -129,6 +138,11 @@ mod governance_packet_impl {
                             reason,
                         },
                     )?;
+                }
+                Action::UpgradeContract { new_contract } => {
+                    seq.serialize_field("action", &2u8)?;
+                    seq.serialize_field("chain", &self.chain)?;
+                    seq.serialize_field("payload", &UpgradeContract { new_contract })?;
                 }
             }
 
@@ -185,9 +199,15 @@ mod governance_packet_impl {
                         reason,
                     }
                 }
+                2 => {
+                    let UpgradeContract { new_contract } = seq
+                        .next_element()?
+                        .ok_or_else(|| Error::invalid_length(3, &EXPECTING))?;
+                    Action::UpgradeContract { new_contract }
+                }
                 v => {
                     return Err(Error::custom(format_args!(
-                        "invalid value {v}, expected one of 1"
+                        "invalid value {v}, expected one of 1, 2"
                     )))
                 }
             };
@@ -266,9 +286,14 @@ mod governance_packet_impl {
                                     reason,
                                 }
                             }
+                            2 => {
+                                let UpgradeContract { new_contract } = map.next_value()?;
+
+                                Action::UpgradeContract { new_contract }
+                            }
                             v => {
                                 return Err(Error::custom(format_args!(
-                                    "invalid action: {v}, expected one of: 1"
+                                    "invalid action: {v}, expected one of: 1, 2"
                                 )))
                             }
                         };
@@ -374,5 +399,25 @@ mod test {
 
         let encoded = serde_json::to_string(&vaa).unwrap();
         assert_eq!(vaa, serde_json::from_str(&encoded).unwrap());
+    }
+
+    #[test]
+    fn upgrade_contract() {
+        let new_contract = Address([0xc4; 32]);
+        let mut buf = MODULE.to_vec();
+        buf.push(2);
+        buf.extend_from_slice(&u16::from(Chain::Solana).to_be_bytes());
+        buf.extend_from_slice(&new_contract.0);
+
+        let packet = GovernancePacket {
+            chain: Chain::Solana,
+            action: Action::UpgradeContract { new_contract },
+        };
+
+        assert_eq!(buf, serde_wormhole::to_vec(&packet).unwrap());
+        assert_eq!(packet, serde_wormhole::from_slice(&buf).unwrap());
+
+        let encoded = serde_json::to_string(&packet).unwrap();
+        assert_eq!(packet, serde_json::from_str(&encoded).unwrap());
     }
 }

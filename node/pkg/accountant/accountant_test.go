@@ -165,6 +165,7 @@ func newAccountantForTest(
 		accountantCheckEnabled,
 		"",
 		nil,
+		AccountantSolanaConfig{},
 		guardianSigner,
 		gst,
 		acctWriteC,
@@ -794,6 +795,7 @@ func newAccountantForAuditModeTest(
 		true, // enforceFlag
 		nttContract,
 		nttWormchainConn,
+		AccountantSolanaConfig{},
 		guardianSigner,
 		gst,
 		acctWriteC,
@@ -904,7 +906,7 @@ func TestPerformAuditResubmitsUnsignedTransfer(t *testing.T) {
 	assert.Equal(t, 0, len(tmpMap), "expected tmpMap to be empty")
 
 	// Verify: submitPending flag should be set
-	assert.True(t, pe.submitPending(), "expected submitPending to be true")
+	assert.True(t, pe.submitPending(backendWormchain), "expected submitPending to be true")
 
 	// Drain channels
 	drainMsgChannel(acct.subChan)
@@ -1114,7 +1116,7 @@ func TestPerformAuditPhase2Unknown(t *testing.T) {
 	assert.Equal(t, 1, len(acct.subChan), "expected 1 message in subChan")
 
 	// Verify: submitPending flag should be set
-	assert.True(t, pe.submitPending(), "expected submitPending to be true")
+	assert.True(t, pe.submitPending(backendWormchain), "expected submitPending to be true")
 
 	// Verify: tmpMap still contains the entry because phase 2 never deletes from tmpMap.
 	// The contract returned null status (unknown), so the entry was resubmitted, but

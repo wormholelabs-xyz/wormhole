@@ -1,0 +1,130 @@
+package solacctconn
+
+import (
+	"context"
+	"time"
+
+	"github.com/gagliardetto/solana-go"
+	"github.com/gagliardetto/solana-go/rpc"
+)
+
+// Conn is the RPC surface of the Solana accountant program.
+type Conn interface {
+	Close()
+
+	// Results are positional with addrs. owner must not be the system program.
+	GetOwnedAccounts(ctx context.Context, addrs []solana.PublicKey, owner solana.PublicKey, commitment Commitment) ([]OwnedAccount, error)
+
+	// Filters: memcmp(offset 0, tag), memcmp(offset 4, guardianSetIndex LE), dataSize and,
+	// for a set partition, memcmp(PendingTxIDOffset, first tx id byte). A response past the
+	// size limit returns ErrResponseTooLarge.
+	GetProgramAccountsByTag(ctx context.Context, program solana.PublicKey, tag byte, dataSize uint64, guardianSetIndex uint32, partition TxIDPartition) ([]ProgramAccount, error)
+
+	// Newest first, older than before. A zero before starts at the newest entry.
+	GetSignaturesForAddress(ctx context.Context, addr solana.PublicKey, before solana.Signature, limit int) ([]SignatureEntry, error)
+
+	GetTransaction(ctx context.Context, sig solana.Signature) (*TransactionResult, error)
+
+	// The channel closes on disconnect.
+	SubscribeLogs(ctx context.Context, program solana.PublicKey) (<-chan LogEvent, error)
+
+	// At confirmed commitment.
+	GetLatestBlockhash(ctx context.Context) (Blockhash, error)
+
+	// At confirmed commitment.
+	GetBlockHeight(ctx context.Context) (uint64, error)
+
+	// Preflight runs at confirmed commitment. A preflight failure is a *TxError.
+	SendTransaction(ctx context.Context, tx *solana.Transaction) (solana.Signature, error)
+
+	// Results are positional with sigs. A nil element marks an unknown signature.
+	GetSignatureStatuses(ctx context.Context, sigs []solana.Signature) ([]*SignatureStatus, error)
+
+	// Lamport balance at confirmed commitment.
+	GetBalance(ctx context.Context, addr solana.PublicKey) (uint64, error)
+}
+
+// Commitment is the commitment level of an account read. Use CommitmentConfirmed or
+// CommitmentFinalized. GetOwnedAccounts returns an error for the zero value.
+type Commitment struct {
+	level rpc.CommitmentType
+}
+
+var (
+	CommitmentConfirmed = Commitment{level: rpc.CommitmentConfirmed}
+	CommitmentFinalized = Commitment{level: rpc.CommitmentFinalized}
+)
+
+func (c Commitment) String() string {
+	return string(c.level)
+}
+
+type Blockhash struct {
+	Hash                 solana.Hash
+	LastValidBlockHeight uint64
+}
+
+type SignatureStatus struct {
+	Confirmed bool
+	Err       *TxError
+}
+
+// AccountState is the lifecycle state of a program-derived account. The zero value is invalid.
+type AccountState uint8
+
+const (
+	AccountAbsent AccountState = iota + 1
+	// System-owned with zero data, such as a prefunded PDA.
+	AccountUninitialised
+	AccountInitialised
+)
+
+// OwnedAccount is one GetOwnedAccounts result. Data is set for AccountInitialised only.
+type OwnedAccount struct {
+	State AccountState
+	Data  []byte
+}
+
+// SignatureEntry is one getSignaturesForAddress result. Failed is true when the transaction
+// failed. BlockTime is zero when the node does not know it.
+type SignatureEntry struct {
+	Signature solana.Signature
+	Failed    bool
+	BlockTime time.Time
+}
+
+// TxIDPartition selects pending accounts by the first byte of their tx id. The zero value,
+// AllTxIDs, selects every account.
+type TxIDPartition struct {
+	firstByte uint8
+	set       bool
+}
+
+var AllTxIDs = TxIDPartition{}
+
+func TxIDsStartingWith(firstByte uint8) TxIDPartition {
+	return TxIDPartition{firstByte: firstByte, set: true}
+}
+
+// FirstByte returns the selected first tx id byte. The bool is false for AllTxIDs.
+func (p TxIDPartition) FirstByte() (uint8, bool) {
+	return p.firstByte, p.set
+}
+
+// ProgramAccount is an account that the queried program owns.
+type ProgramAccount struct {
+	Address solana.PublicKey
+	Data    []byte
+}
+
+type TransactionResult struct {
+	LogMessages []string
+	// Do not parse LogMessages when Failed is true.
+	Failed bool
+}
+
+type LogEvent struct {
+	Signature solana.Signature
+	Logs      []string
+	Failed    bool
+}
