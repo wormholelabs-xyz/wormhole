@@ -5,10 +5,13 @@ package solacctconn
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gagliardetto/solana-go/rpc"
@@ -31,8 +34,9 @@ var ErrResponseTooLarge = errors.New("rpc response body is past the size limit")
 
 // ClientConn is a connection to one Solana cluster.
 type ClientConn struct {
-	rpc   *rpc.Client
-	wsURL string
+	rpc      *rpc.Client
+	wsURL    string
+	redactor endpointRedactor
 }
 
 // NewConn creates a connection to the Solana RPC endpoint at rpcURL and records the
@@ -59,8 +63,12 @@ func newConn(rpcURL string, wsURL string, maxResponseBytes int64) (*ClientConn, 
 		inner:    &http.Client{Timeout: rpcRequestTimeout},
 		maxBytes: maxResponseBytes,
 	}
-	rpcClient := jsonrpc.NewClientWithOpts(rpcURL, &jsonrpc.RPCClientOpts{HTTPClient: httpClient})
-	return &ClientConn{rpc: rpc.NewWithCustomRPCClient(rpcClient), wsURL: wsURL}, nil
+	redactor := newEndpointRedactor(rpcURL, wsURL)
+	rpcClient := &redactingRPCClient{
+		inner:    jsonrpc.NewClientWithOpts(rpcURL, &jsonrpc.RPCClientOpts{HTTPClient: httpClient}),
+		redactor: redactor,
+	}
+	return &ClientConn{rpc: rpc.NewWithCustomRPCClient(rpcClient), wsURL: wsURL, redactor: redactor}, nil
 }
 
 func (c *ClientConn) Close() {
@@ -96,4 +104,86 @@ func (c *limitedHTTPClient) Do(req *http.Request) (*http.Response, error) {
 
 func (c *limitedHTTPClient) CloseIdleConnections() {
 	c.inner.CloseIdleConnections()
+}
+
+const redactedEndpointPart = "<redacted>"
+
+// endpointRedactor removes the path, query, userinfo and fragment of the endpoints from
+// error text. Providers put API keys there. It matches the parts because a websocket dial
+// error reports the http scheme.
+type endpointRedactor struct {
+	secrets []string
+}
+
+func newEndpointRedactor(endpoints ...string) endpointRedactor {
+	var r endpointRedactor
+	for _, endpoint := range endpoints {
+		u, err := url.Parse(endpoint)
+		if err != nil {
+			// An endpoint that does not parse is redacted whole.
+			r.secrets = append(r.secrets, endpoint)
+			continue
+		}
+		for _, part := range []string{u.EscapedPath(), u.Path, u.RawQuery, u.Fragment} {
+			if len(part) > 1 {
+				r.secrets = append(r.secrets, part)
+			}
+		}
+		if u.User != nil {
+			r.secrets = append(r.secrets, u.User.String())
+		}
+	}
+	return r
+}
+
+// redact returns err with each endpoint secret replaced. errors.Is and errors.As still
+// reach err.
+func (r endpointRedactor) redact(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	clean := msg
+	for _, secret := range r.secrets {
+		clean = strings.ReplaceAll(clean, secret, redactedEndpointPart)
+	}
+	if clean == msg {
+		return err
+	}
+	return &redactedError{msg: clean, err: err}
+}
+
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
+// redactingRPCClient redacts endpoint secrets from every error. solana-go writes the
+// endpoint URL into its error text.
+type redactingRPCClient struct {
+	inner    jsonrpc.RPCClient
+	redactor endpointRedactor
+}
+
+func (c *redactingRPCClient) CallForInto(ctx context.Context, out any, method string, params []any) error {
+	return c.redactor.redact(c.inner.CallForInto(ctx, out, method, params))
+}
+
+func (c *redactingRPCClient) CallWithCallback(ctx context.Context, method string, params []any, callback func(*http.Request, *http.Response) error) error {
+	return c.redactor.redact(c.inner.CallWithCallback(ctx, method, params, callback))
+}
+
+func (c *redactingRPCClient) CallBatch(ctx context.Context, requests jsonrpc.RPCRequests) (jsonrpc.RPCResponses, error) {
+	res, err := c.inner.CallBatch(ctx, requests)
+	return res, c.redactor.redact(err)
+}
+
+func (c *redactingRPCClient) Close() error {
+	if closer, ok := c.inner.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
 }

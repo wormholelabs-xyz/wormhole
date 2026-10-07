@@ -94,7 +94,7 @@ func (c *ClientConn) subscribeLogs(ctx context.Context, program solana.PublicKey
 		resp.Body.Close()
 	}
 	if err != nil {
-		return nil, fmt.Errorf("logsSubscribe: dial %s: %w", c.wsURL, err)
+		return nil, c.redactor.redact(fmt.Errorf("logsSubscribe: dial: %w", err))
 	}
 	conn.SetReadLimit(maxLogsFrameBytes)
 
