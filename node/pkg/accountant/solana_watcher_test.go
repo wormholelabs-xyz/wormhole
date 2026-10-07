@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -558,8 +559,13 @@ func TestSolanaWatcherSubscribeStartsAudit(t *testing.T) {
 	f.conn.SetSignaturesForAddress(f.pending, []solana.Signature{{4}})
 	f.conn.SetTransaction(solana.Signature{4}, f.commitTransaction(f.pe.solanaFields.contentDigest))
 
-	go func() { _ = f.acct.audit(ctx) }()
-	go func() { _ = f.acct.solanaWatcher(ctx, f.acct.solana) }()
+	// The goroutines log through the test logger, so they must exit before the test ends.
+	var wg sync.WaitGroup
+	defer wg.Wait()
+	defer cancel()
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = f.acct.audit(ctx) }()
+	go func() { defer wg.Done(); _ = f.acct.solanaWatcher(ctx, f.acct.solana) }()
 
 	select {
 	case published := <-f.msgChan:
