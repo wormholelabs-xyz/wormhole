@@ -260,8 +260,18 @@ func (acct *Accountant) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to configure the solana accountant: %w", err)
 	}
+	// SECURITY: Start sets the Solana backends once, and they close with ctx. The processor
+	// calls Close on each supervisor restart.
 	acct.solana = solBackend
 	acct.solanaNtt = solNttBackend
+	if backends := acct.solanaBackends(); len(backends) != 0 {
+		// Both Solana backends share one connection.
+		conn := backends[0].conn
+		go func() {
+			<-ctx.Done()
+			conn.Close()
+		}()
+	}
 	if len(acct.solanaBackends()) != 0 {
 		acct.logger.Debug("solana accountant enabled", zap.Bool("baseEnabled", acct.baseEnabled()), zap.Bool("solanaNttEnabled", acct.solanaNttEnabled()))
 	}
@@ -365,12 +375,6 @@ func (acct *Accountant) Close() {
 	if acct.nttWormchainConn != nil {
 		acct.nttWormchainConn.Close()
 		acct.nttWormchainConn = nil
-	}
-	// Both Solana backends share one connection.
-	if backends := acct.solanaBackends(); len(backends) != 0 {
-		backends[0].conn.Close()
-		acct.solana = nil
-		acct.solanaNtt = nil
 	}
 }
 

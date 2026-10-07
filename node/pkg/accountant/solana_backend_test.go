@@ -476,3 +476,21 @@ func TestUnbuildableSolanaFieldsLeaveNoEntry(t *testing.T) {
 		})
 	}
 }
+
+// The processor calls Close when the supervisor restarts it. The Solana backends must
+// outlive that, and close only with the context Start received.
+func TestSolanaBackendsOutliveProcessorClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{})
+
+	acct.Close()
+
+	require.True(t, acct.solanaEnabled())
+	_, _, ok := acct.backendChannel(&pendingEntry{}, backendSolana)
+	assert.True(t, ok)
+	assert.False(t, conn.closed.Load())
+
+	cancel()
+	require.Eventually(t, conn.closed.Load, 5*time.Second, 10*time.Millisecond)
+}

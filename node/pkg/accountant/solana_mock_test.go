@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 
 	"github.com/certusone/wormhole/node/pkg/solacctconn"
 	"github.com/gagliardetto/solana-go"
@@ -60,6 +61,7 @@ type MockAccountantSolanaConn struct {
 	logEvents           chan solacctconn.LogEvent
 	blockHeightHook     func()
 	sendTransactionHook func(tx *solana.Transaction) error
+	closed              atomic.Bool
 }
 
 var _ solacctconn.Conn = (*MockAccountantSolanaConn)(nil)
@@ -75,7 +77,7 @@ func NewMockAccountantSolanaConn() *MockAccountantSolanaConn {
 	}
 }
 
-func (c *MockAccountantSolanaConn) Close() {}
+func (c *MockAccountantSolanaConn) Close() { c.closed.Store(true) }
 
 // A nil result, or an address that was never set, reads as AccountAbsent.
 func (c *MockAccountantSolanaConn) SetAccount(addr solana.PublicKey, result *solacctconn.OwnedAccount) {
