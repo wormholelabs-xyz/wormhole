@@ -183,9 +183,7 @@ func (c *ClientConn) GetSignaturesForAddress(ctx context.Context, addr solana.Pu
 	return out, nil
 }
 
-// GetTransaction reads a finalized transaction and flattens its top-level instructions.
-// submit_observations fails with CpiInvocation below the top level, so top-level
-// instructions hold every observation.
+// GetTransaction reads the logs and status of a finalized transaction.
 func (c *ClientConn) GetTransaction(ctx context.Context, sig solana.Signature) (*TransactionResult, error) {
 	// Transaction v1 (SIMD-0385). The RPC rejects a transaction above this version.
 	maxVersion := uint64(1)
@@ -207,27 +205,8 @@ func (c *ClientConn) GetTransaction(ctx context.Context, sig solana.Signature) (
 		return nil, fmt.Errorf("getTransaction %s: %d log lines is past the %d line limit", sig, len(res.Meta.LogMessages), MaxLogLinesPerTx)
 	}
 
-	tx, err := res.Transaction.GetTransaction()
-	if err != nil {
-		return nil, fmt.Errorf("getTransaction %s: decode: %w", sig, err)
-	}
-	if tx == nil {
-		return nil, fmt.Errorf("getTransaction %s: empty transaction", sig)
-	}
-
-	instructions := make([]Instruction, 0, len(tx.Message.Instructions))
-	for idx, ix := range tx.Message.Instructions {
-		// Program ids are static keys, so Message.Program resolves them directly.
-		programID, err := tx.Message.Program(ix.ProgramIDIndex)
-		if err != nil {
-			return nil, fmt.Errorf("getTransaction %s: instruction %d: %w", sig, idx, err)
-		}
-		instructions = append(instructions, Instruction{ProgramID: programID, Data: ix.Data})
-	}
-
 	return &TransactionResult{
-		Instructions: instructions,
-		LogMessages:  res.Meta.LogMessages,
-		Failed:       res.Meta.Err != nil,
+		LogMessages: res.Meta.LogMessages,
+		Failed:      res.Meta.Err != nil,
 	}, nil
 }

@@ -344,12 +344,15 @@ func TestGetTransaction(t *testing.T) {
 	encoded := encodedTransaction(t, program, []byte{0x00, 0x01})
 
 	tests := []struct {
-		name       string
-		meta       any
-		wantErr    bool
-		wantFailed bool
+		name        string
+		transaction string
+		meta        any
+		wantErr     bool
+		wantFailed  bool
 	}{
 		{name: "succeeded", meta: map[string]any{"err": nil, "logMessages": []any{"Program log: hi"}}},
+		// The audit reads only logs, so the message decoder cannot stall it.
+		{name: "undecodable message", transaction: base64.StdEncoding.EncodeToString([]byte{0xff, 0xff, 0xff}), meta: map[string]any{"err": nil, "logMessages": []any{"Program log: hi"}}},
 		{name: "failed", meta: map[string]any{"err": "AlreadyProcessed", "logMessages": []any{}}, wantFailed: true},
 		{name: "no metadata", meta: nil, wantErr: true},
 		{name: "too many log lines", meta: map[string]any{"err": nil, "logMessages": overLogLimit()}, wantErr: true},
@@ -358,7 +361,11 @@ func TestGetTransaction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) {
-				out := map[string]any{"slot": 11, "transaction": []string{encoded, "base64"}}
+				transaction := encoded
+				if tt.transaction != "" {
+					transaction = tt.transaction
+				}
+				out := map[string]any{"slot": 11, "transaction": []string{transaction, "base64"}}
 				if tt.meta != nil {
 					out["meta"] = tt.meta
 				}
@@ -372,9 +379,7 @@ func TestGetTransaction(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantFailed, res.Failed)
-			require.Len(t, res.Instructions, 1)
-			assert.Equal(t, program, res.Instructions[0].ProgramID)
-			assert.Equal(t, []byte{0x00, 0x01}, res.Instructions[0].Data)
+			assert.Equal(t, tt.meta.(map[string]any)["logMessages"], anySlice(res.LogMessages))
 		})
 	}
 }
@@ -398,11 +403,8 @@ func TestGetTransactionV1(t *testing.T) {
 		}, nil
 	})
 
-	res, err := conn.GetTransaction(context.Background(), solana.Signature{5})
+	_, err = conn.GetTransaction(context.Background(), solana.Signature{5})
 	require.NoError(t, err)
-	require.Len(t, res.Instructions, 1)
-	assert.Equal(t, program, res.Instructions[0].ProgramID)
-	assert.Equal(t, []byte{0x00, 0x01}, res.Instructions[0].Data)
 
 	calls := srv.recorded()
 	require.Len(t, calls, 1)
@@ -448,4 +450,12 @@ func TestGetOwnedAccountsCommitment(t *testing.T) {
 			assert.Equal(t, tt.want, opts.Commitment)
 		})
 	}
+}
+
+func anySlice(lines []string) []any {
+	out := make([]any, len(lines))
+	for i, line := range lines {
+		out[i] = line
+	}
+	return out
 }

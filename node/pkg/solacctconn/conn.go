@@ -117,14 +117,8 @@ type ProgramAccount struct {
 	Data    []byte
 }
 
-type Instruction struct {
-	ProgramID solana.PublicKey
-	Data      []byte
-}
-
 type TransactionResult struct {
-	Instructions []Instruction
-	LogMessages  []string
+	LogMessages []string
 	// Do not parse LogMessages when Failed is true.
 	Failed bool
 }
