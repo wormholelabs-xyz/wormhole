@@ -112,6 +112,9 @@ pub struct TokenBridgeTransfer {
 /// Maximum arbitrary payload past the fixed 133-byte head, for `TransferWithPayload`.
 pub const MAX_TRANSFER_PAYLOAD_LEN: usize = 2000;
 
+/// Minimum `TransferWithPayload` length: the 133-byte head plus the 32-byte `from_address`.
+pub const TRANSFER_WITH_PAYLOAD_MIN_LEN: usize = TokenBridgeTransfer::LEN + 32;
+
 const _: () = {
     use core::mem::offset_of;
     assert!(TokenBridgeTransfer::LEN == 133);
@@ -206,13 +209,14 @@ pub enum TokenBridgeAction {
 /// Layouts: [`VaaBodyHeader`], [`TokenBridgeTransfer`].
 ///
 /// SECURITY: precondition `body.len() >= 52`. Action 0x01 requires `payload.len() == 133`;
-/// action 0x03 requires `payload.len() >= 133` and `payload.len() - 133 <=
+/// action 0x03 requires `payload.len() >= 165` and `payload.len() - 133 <=
 /// MAX_TRANSFER_PAYLOAD_LEN`. A wrong length returns `InvalidInstructionData`; an oversized
 /// 0x03 payload returns `TransferPayloadTooLarge`. Every field read is bounds-checked; the
 /// function cannot panic.
 ///
 /// SECURITY: wormchain parses action 0x01 with `serde_wormhole::from_slice`, which rejects
-/// trailing bytes, so it never accounted a longer 0x01 payload.
+/// trailing bytes, so it never accounted a longer 0x01 payload. Its 0x03 decode reads
+/// `from_address`, so it never accounted a 0x03 payload shorter than 165 bytes.
 pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
     let (_header, payload) = VaaBodyHeader::split(body)?;
     let action = *payload
@@ -225,6 +229,11 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
                 .get(..TokenBridgeTransfer::LEN)
                 .ok_or(GlobalAccountantError::InvalidInstructionData)?;
             if action == ACTION_TRANSFER && payload.len() != TokenBridgeTransfer::LEN {
+                return Err(GlobalAccountantError::InvalidInstructionData);
+            }
+            if action == ACTION_TRANSFER_WITH_PAYLOAD
+                && payload.len() < TRANSFER_WITH_PAYLOAD_MIN_LEN
+            {
                 return Err(GlobalAccountantError::InvalidInstructionData);
             }
             if payload.len() - TokenBridgeTransfer::LEN > MAX_TRANSFER_PAYLOAD_LEN {
@@ -351,6 +360,11 @@ mod tests {
         let transfer_03 = transfer_body(0x03, amount, token_address, 2, 10);
         let mut transfer_03_extra = [0xEEu8; TRANSFER_BODY + 40];
         transfer_03_extra[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        // Wormchain decodes `from_address` (32 bytes) after the head of action 0x03.
+        let mut transfer_03_from_only = [0xEEu8; TRANSFER_BODY + 32];
+        transfer_03_from_only[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        let mut transfer_03_short_from = [0xEEu8; TRANSFER_BODY + 31];
+        transfer_03_short_from[..TRANSFER_BODY].copy_from_slice(&transfer_03);
         // Wormchain parses action 0x01 with `serde_wormhole::from_slice`, which rejects
         // trailing bytes.
         let mut transfer_01_extra = [0xEEu8; TRANSFER_BODY + 40];
@@ -365,7 +379,7 @@ mod tests {
             token_address,
             recipient_chain: 10,
         };
-        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 16] = [
+        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 18] = [
             ("action 0x01 exact 133", &transfer_01, Ok(expected_transfer)),
             (
                 "action 0x01 with trailing payload",
@@ -373,8 +387,18 @@ mod tests {
                 Err(E::InvalidInstructionData),
             ),
             (
-                "action 0x03 decodes as 0x01",
+                "action 0x03 without from_address",
                 &transfer_03,
+                Err(E::InvalidInstructionData),
+            ),
+            (
+                "action 0x03 one byte short of from_address",
+                &transfer_03_short_from,
+                Err(E::InvalidInstructionData),
+            ),
+            (
+                "action 0x03 with from_address and no payload",
+                &transfer_03_from_only,
                 Ok(expected_transfer),
             ),
             (

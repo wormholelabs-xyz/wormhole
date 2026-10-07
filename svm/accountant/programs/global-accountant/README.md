@@ -81,6 +81,10 @@ governance VAA is always rejected here: its emitter is never a registered
 Token Bridge contract, so the `ChainRegistration` check fails before any
 balance changes.
 
+A `Transfer` payload must be exactly 133 bytes. A `TransferWithPayload` payload
+must be at least 165 bytes: the 133-byte head and the 32-byte sender address.
+These limits agree with wormchain. Other lengths fail with `InvalidInstructionData`.
+
 The instruction carries the full VAA body inline, so the body and the account
 keys must fit one transaction. A transaction v1 (4096 bytes) fits a payload of
 `MAX_TRANSFER_PAYLOAD_LEN` (2000 bytes). A legacy or v0 transaction (1232 bytes)
