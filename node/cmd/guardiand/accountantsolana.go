@@ -1,9 +1,13 @@
 package guardiand
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
+	"time"
 
+	"github.com/certusone/wormhole/node/pkg/common"
 	"github.com/gagliardetto/solana-go"
 )
 
@@ -107,15 +111,102 @@ func parseSolanaProgramID(flag string, value string) (solana.PublicKey, error) {
 
 // checkAccountantSolanaConnFlags checks the endpoint and fee flags of an enabled Solana accountant.
 // RegisterFlagWithValidationOrFail skips the scheme check for "none", so this function rejects "none".
-func checkAccountantSolanaConnFlags(rpcURL string, wsURL string, priorityFee uint64) error {
+//
+// SECURITY: mainnet and testnet require https and wss. The endpoints decide which transfers release.
+func checkAccountantSolanaConnFlags(env common.Environment, rpcURL string, wsURL string, priorityFee uint64) error {
 	if rpcURL == "" || rpcURL == "none" {
 		return fmt.Errorf("accountantSolanaRPC %q is not an RPC URL", rpcURL)
 	}
 	if wsURL == "" || wsURL == "none" {
 		return fmt.Errorf("accountantSolanaWS %q is not a websocket URL", wsURL)
 	}
+	if accountantSolanaPinnedEnv(env) {
+		for _, endpoint := range [...]struct{ flag, value, scheme string }{
+			{"accountantSolanaRPC", rpcURL, "https"},
+			{"accountantSolanaWS", wsURL, "wss"},
+		} {
+			u, err := url.Parse(endpoint.value)
+			if err != nil {
+				return fmt.Errorf("%s is not a URL: %w", endpoint.flag, err)
+			}
+			if u.Scheme != endpoint.scheme {
+				return fmt.Errorf("%s must use %s in %s", endpoint.flag, endpoint.scheme, env)
+			}
+		}
+	}
 	if priorityFee > maxAccountantSolanaPriorityFee {
 		return fmt.Errorf("accountantSolanaPriorityFee %d exceeds the maximum of %d lamports per transaction", priorityFee, maxAccountantSolanaPriorityFee)
+	}
+	return nil
+}
+
+// accountantSolanaDeployment is the expected cluster and program ids of one environment.
+type accountantSolanaDeployment struct {
+	ids         accountantSolanaProgramIDs
+	genesisHash solana.Hash
+}
+
+// accountantSolanaDeployments holds the deployment of each pinned environment. A release adds
+// the mainnet and testnet entries with the program deployments.
+var accountantSolanaDeployments = map[common.Environment]accountantSolanaDeployment{}
+
+// accountantSolanaPinnedEnv reports if env takes its program ids and cluster from
+// accountantSolanaDeployments. Other environments take them from the flags.
+func accountantSolanaPinnedEnv(env common.Environment) bool {
+	return env == common.MainNet || env == common.TestNet
+}
+
+const accountantSolanaGenesisTimeout = 30 * time.Second
+
+// readAccountantSolanaGenesisHash reads the RPC genesis hash in a pinned environment. It
+// returns the zero hash in other environments.
+func readAccountantSolanaGenesisHash(ctx context.Context, env common.Environment, conn interface {
+	GetGenesisHash(ctx context.Context) (solana.Hash, error)
+}) (solana.Hash, error) {
+	if !accountantSolanaPinnedEnv(env) {
+		return solana.Hash{}, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, accountantSolanaGenesisTimeout)
+	defer cancel()
+	return conn.GetGenesisHash(ctx)
+}
+
+// checkAccountantSolanaDeployment checks the flag program ids and the RPC genesis hash against
+// the deployment of env.
+//
+// SECURITY: any Solana user can deploy a program. In a pinned environment, an id or a cluster
+// from a wrong configuration must stop the node.
+func checkAccountantSolanaDeployment(env common.Environment, ids accountantSolanaProgramIDs, genesisHash solana.Hash, deployments map[common.Environment]accountantSolanaDeployment) error {
+	if !accountantSolanaPinnedEnv(env) {
+		return nil
+	}
+	want, exists := deployments[env]
+	if !exists {
+		return fmt.Errorf("the solana accountant has no deployment in %s", env)
+	}
+	if genesisHash != want.genesisHash {
+		return fmt.Errorf("the solana accountant rpc genesis hash is %s, want %s in %s", genesisHash, want.genesisHash, env)
+	}
+	for _, check := range [...]struct {
+		flag      string
+		got, want solana.PublicKey
+		optional  bool
+	}{
+		{"accountantSolanaContract", ids.program, want.ids.program, true},
+		{"accountantSolanaNttContract", ids.nttProgram, want.ids.nttProgram, true},
+		{"accountantSolanaNoreplayContract", ids.noreplay, want.ids.noreplay, false},
+		{"solanaContract", ids.coreBridge, want.ids.coreBridge, false},
+	} {
+		// An unset accountant flag disables that program.
+		if check.optional && check.got.IsZero() {
+			continue
+		}
+		if check.want.IsZero() {
+			return fmt.Errorf("%s has no deployment in %s", check.flag, env)
+		}
+		if !check.got.Equals(check.want) {
+			return fmt.Errorf("%s is %s, want %s in %s", check.flag, check.got, check.want, env)
+		}
 	}
 	return nil
 }

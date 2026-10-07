@@ -3,6 +3,7 @@ package guardiand
 import (
 	"testing"
 
+	"github.com/certusone/wormhole/node/pkg/common"
 	"github.com/gagliardetto/solana-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -121,22 +122,80 @@ func TestCheckAccountantSolanaConnFlags(t *testing.T) {
 	rpcURL := "http://solana-devnet:8899"
 	wsURL := "ws://solana-devnet:8900"
 
+	tlsRPC := "https://rpc.example.com/mainnet/solana"
+	tlsWS := "wss://rpc.example.com/mainnet/solana"
+
 	tests := []struct {
 		name        string
+		env         common.Environment
 		rpcURL      string
 		wsURL       string
 		priorityFee uint64
 		wantErr     bool
 	}{
-		{name: "valid at the fee cap", rpcURL: rpcURL, wsURL: wsURL, priorityFee: maxAccountantSolanaPriorityFee},
-		{name: "fee one above the cap", rpcURL: rpcURL, wsURL: wsURL, priorityFee: maxAccountantSolanaPriorityFee + 1, wantErr: true},
-		{name: "rpc is none", rpcURL: "none", wsURL: wsURL, wantErr: true},
-		{name: "ws is none", rpcURL: rpcURL, wsURL: "none", wantErr: true},
+		{name: "valid at the fee cap", env: common.UnsafeDevNet, rpcURL: rpcURL, wsURL: wsURL, priorityFee: maxAccountantSolanaPriorityFee},
+		{name: "fee one above the cap", env: common.UnsafeDevNet, rpcURL: rpcURL, wsURL: wsURL, priorityFee: maxAccountantSolanaPriorityFee + 1, wantErr: true},
+		{name: "rpc is none", env: common.UnsafeDevNet, rpcURL: "none", wsURL: wsURL, wantErr: true},
+		{name: "ws is none", env: common.UnsafeDevNet, rpcURL: rpcURL, wsURL: "none", wantErr: true},
+		{name: "mainnet tls", env: common.MainNet, rpcURL: tlsRPC, wsURL: tlsWS},
+		{name: "testnet tls", env: common.TestNet, rpcURL: tlsRPC, wsURL: tlsWS},
+		{name: "mainnet plaintext rpc", env: common.MainNet, rpcURL: rpcURL, wsURL: tlsWS, wantErr: true},
+		{name: "mainnet plaintext ws", env: common.MainNet, rpcURL: tlsRPC, wsURL: wsURL, wantErr: true},
+		{name: "testnet plaintext rpc", env: common.TestNet, rpcURL: rpcURL, wsURL: tlsWS, wantErr: true},
+		{name: "testnet plaintext ws", env: common.TestNet, rpcURL: tlsRPC, wsURL: wsURL, wantErr: true},
+		{name: "mainnet rpc with a ws scheme", env: common.MainNet, rpcURL: tlsWS, wsURL: tlsWS, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkAccountantSolanaConnFlags(tt.rpcURL, tt.wsURL, tt.priorityFee)
+			err := checkAccountantSolanaConnFlags(tt.env, tt.rpcURL, tt.wsURL, tt.priorityFee)
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestCheckAccountantSolanaDeployment(t *testing.T) {
+	acct := solana.MustPublicKeyFromBase58(testSolanaAccountantProgram)
+	ntt := solana.MustPublicKeyFromBase58(testSolanaNttAccountantProgram)
+	norep := solana.MustPublicKeyFromBase58(testSolanaNoreplayProgram)
+	core := solana.MustPublicKeyFromBase58(testSolanaCoreBridgeProgram)
+	other := solana.PublicKey{9}
+	genesis := solana.Hash{1}
+
+	deployments := map[common.Environment]accountantSolanaDeployment{
+		common.TestNet: {ids: accountantSolanaProgramIDs{program: acct, noreplay: norep, coreBridge: core}, genesisHash: genesis},
+	}
+	wtt := accountantSolanaProgramIDs{program: acct, noreplay: norep, coreBridge: core}
+	with := func(edit func(ids *accountantSolanaProgramIDs)) accountantSolanaProgramIDs {
+		ids := wtt
+		edit(&ids)
+		return ids
+	}
+
+	tests := []struct {
+		name    string
+		env     common.Environment
+		ids     accountantSolanaProgramIDs
+		genesis solana.Hash
+		wantErr bool
+	}{
+		{name: "devnet takes the flags", env: common.UnsafeDevNet, ids: with(func(ids *accountantSolanaProgramIDs) { ids.program = other })},
+		{name: "testnet deployment", env: common.TestNet, ids: wtt, genesis: genesis},
+		{name: "mainnet has no deployment", env: common.MainNet, ids: wtt, genesis: genesis, wantErr: true},
+		{name: "testnet program differs", env: common.TestNet, ids: with(func(ids *accountantSolanaProgramIDs) { ids.program = other }), genesis: genesis, wantErr: true},
+		{name: "testnet ntt is not deployed", env: common.TestNet, ids: with(func(ids *accountantSolanaProgramIDs) { ids.nttProgram = ntt }), genesis: genesis, wantErr: true},
+		{name: "testnet noreplay differs", env: common.TestNet, ids: with(func(ids *accountantSolanaProgramIDs) { ids.noreplay = other }), genesis: genesis, wantErr: true},
+		{name: "testnet core bridge differs", env: common.TestNet, ids: with(func(ids *accountantSolanaProgramIDs) { ids.coreBridge = other }), genesis: genesis, wantErr: true},
+		{name: "testnet genesis differs", env: common.TestNet, ids: wtt, genesis: solana.Hash{2}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkAccountantSolanaDeployment(tt.env, tt.ids, tt.genesis, deployments)
 			if tt.wantErr {
 				require.Error(t, err)
 				return

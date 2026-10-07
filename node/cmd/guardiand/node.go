@@ -1280,7 +1280,7 @@ func runNode(cmd *cobra.Command, args []string) {
 			logger.Fatal("if accountantSolanaContract or accountantSolanaNttContract is specified, solanaContract is required as the Core Bridge program id", zap.String("component", "gacct"))
 		}
 
-		if err := checkAccountantSolanaConnFlags(*accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaPriorityFee); err != nil {
+		if err := checkAccountantSolanaConnFlags(env, *accountantSolanaRPC, *accountantSolanaWS, *accountantSolanaPriorityFee); err != nil {
 			logger.Fatal("invalid solana accountant flag", zap.Error(err), zap.String("component", "gacct"))
 		}
 
@@ -1315,6 +1315,13 @@ func runNode(cmd *cobra.Command, args []string) {
 		solanaConn, err := solacctconn.NewConn(*accountantSolanaRPC, *accountantSolanaWS)
 		if err != nil {
 			logger.Fatal("failed to create the solana accountant connection", zap.Error(err), zap.String("component", "gacct"))
+		}
+		genesisHash, err := readAccountantSolanaGenesisHash(rootCtx, env, solanaConn)
+		if err != nil {
+			logger.Fatal("failed to read the solana accountant genesis hash", zap.Error(err), zap.String("component", "gacct"))
+		}
+		if err := checkAccountantSolanaDeployment(env, programIDs, genesisHash, accountantSolanaDeployments); err != nil {
+			logger.Fatal("the solana accountant configuration does not match the deployment", zap.Error(err), zap.String("component", "gacct"))
 		}
 		accountantSolanaCfg = accountant.AccountantSolanaConfig{
 			Conn:        solanaConn,

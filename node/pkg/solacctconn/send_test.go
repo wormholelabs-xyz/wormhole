@@ -195,3 +195,33 @@ func TestGetSignatureStatuses(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestGetGenesisHash(t *testing.T) {
+	hash := solana.Hash{7, 8, 9}
+
+	tests := []struct {
+		name    string
+		result  any
+		wantErr bool
+	}{
+		{name: "hash", result: hash.String()},
+		{name: "not base58", result: "not-a-hash", wantErr: true},
+		{name: "zero hash", result: solana.Hash{}.String(), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, conn := newTestRPC(t, func(call rpcCall) (any, *jsonrpc.RPCError) { return tt.result, nil })
+
+			got, err := conn.GetGenesisHash(context.Background())
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, hash, got)
+			calls := srv.recorded()
+			require.Len(t, calls, 1)
+			assert.Equal(t, "getGenesisHash", calls[0].Method)
+		})
+	}
+}

@@ -131,3 +131,15 @@ func (c *ClientConn) GetBalance(ctx context.Context, addr solana.PublicKey) (uin
 	}
 	return res.Value, nil
 }
+
+// GetGenesisHash reads the genesis hash of the RPC cluster.
+func (c *ClientConn) GetGenesisHash(ctx context.Context) (solana.Hash, error) {
+	hash, err := c.rpc.GetGenesisHash(ctx)
+	if err != nil {
+		return solana.Hash{}, fmt.Errorf("getGenesisHash: %w", err)
+	}
+	if hash.IsZero() {
+		return solana.Hash{}, errors.New("getGenesisHash: zero hash")
+	}
+	return hash, nil
+}
