@@ -1,385 +1,356 @@
-//! Build `solana_instruction::Instruction` values from chunk plans.
+//! Build `solana_instruction::Instruction` values from batch plans.
 //!
-//! Wire formats mirror the program's parsers byte-for-byte. Discriminator
-//! constants are pinned to the program's `Instruction` enum via a test
-//! (`tests/tx_builder.rs::discriminators_match_program_enum`) so a renumber
-//! on the program side surfaces as a test failure rather than silent
-//! mis-routing.
+//! Entries are encoded through the definitions entry types
+//! (`global_accountant_definitions::backfill_ix_data`), the types the program
+//! parses with. [`build_ix`] then parses the data back with the program's own
+//! batch parser and measures the exact legacy wire size, so a malformed batch
+//! fails here, before any transaction is sent.
 
-use std::str::FromStr;
-
+use anyhow::{anyhow, ensure, Result};
+use bytemuck::Pod;
+use solana_hash::Hash;
 use solana_instruction::{AccountMeta, Instruction};
+use solana_message::Message;
 use solana_pubkey::Pubkey;
+use solana_transaction::Transaction;
 
-use crate::catalogue::{
-    AccountRecord, RelayerChainRegistrationRecord, TransceiverHubRecord, TransceiverPeerRecord,
-    TransferRecord,
-};
-
-use global_accountant_backfill::{Instruction as ProgramIx, BACKFILL_AUTHORITY};
 use global_accountant_definitions::{
-    ACCOUNT_SEED_PREFIX, NOREPLAY_AUTHORITY_SEED_PREFIX, NOREPLAY_BITS_PER_BUCKET,
-    NOREPLAY_PROGRAM_ID, RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, TRANSCEIVER_HUB_SEED_PREFIX,
-    TRANSCEIVER_PEER_SEED_PREFIX,
+    BackfillBalanceEntry, BackfillChainRegistrationEntry, BackfillModifyBalanceEntry,
+    BackfillNoReplayEntry, BackfillNoReplayGroupHeader, BackfillTransceiverHubEntry,
+    BackfillTransceiverPeerEntry, BalanceAccountKey, BalanceBatch, ChainRegistrationBatch,
+    ChainRegistrationKey, GlobalAccountantError, ModifyBalanceBatch, ModifyBalanceKey,
+    NoReplayBatch, RegisterChainKey, TransceiverHubBatch, TransceiverHubKey, TransceiverPeerBatch,
+    TransceiverPeerKey, Uint256, NOREPLAY_PROGRAM_ID,
 };
-use ntt_global_accountant_backfill::Instruction as NttProgramIx;
 
-/// Instruction discriminator for `BackfillNoReplay`. Mirrored from the
-/// program's enum via const cast; the equality check lives in the test.
-pub const BACKFILL_NOREPLAY_DISC: u8 = ProgramIx::BackfillNoReplay as u8;
-/// Instruction discriminator for `BackfillBalance`.
-pub const BACKFILL_BALANCE_DISC: u8 = ProgramIx::BackfillBalance as u8;
-/// Instruction discriminator for `BackfillRelayerRegistration` (NTT program).
-/// Sourced from the NTT program's `Instruction` enum, same as the WTT discs;
-/// the equality check lives in `tests/tx_builder.rs`.
-pub const BACKFILL_RELAYER_REGISTRATION_DISC: u8 = NttProgramIx::BackfillRelayerRegistration as u8;
-/// Instruction discriminator for `BackfillTransceiverHub` (NTT program).
-pub const BACKFILL_TRANSCEIVER_HUB_DISC: u8 = NttProgramIx::BackfillTransceiverHub as u8;
-/// Instruction discriminator for `BackfillTransceiverPeer` (NTT program).
-pub const BACKFILL_TRANSCEIVER_PEER_DISC: u8 = NttProgramIx::BackfillTransceiverPeer as u8;
+use crate::accountant::{Accountant, Discriminators};
+use crate::batcher::{TxBatch, PACKET_DATA_SIZE};
+use crate::expected_accounts::derive_pda;
+use crate::noreplay::{bucket_of, derive_bucket_pda, derive_noreplay_authority_pda, BucketId};
+use crate::snapshot::{
+    BalanceRow, ChainRegistrationRow, ModifyBalanceRow, TransceiverHubRow, TransceiverPeerRow,
+    TransferRow,
+};
 
-/// Pubkey baked into the program's `.so` as `BACKFILL_AUTHORITY`. Re-exported
-/// so the orchestrator can sanity-check the configured signer matches at
-/// startup — otherwise every tx would hit `UnauthorizedCaller` on-chain.
-pub fn backfill_authority_pubkey() -> Pubkey {
-    Pubkey::new_from_array(BACKFILL_AUTHORITY)
-}
-
-/// Common context for every backfill ix: program id, payer, and the two
-/// program-id constants the orchestrator needs to thread through.
+/// Common context for every backfill ix.
 ///
-/// **Invariant**: `payer` MUST equal [`backfill_authority_pubkey`] — the
-/// program's `require_authority` check rejects every other signer with
-/// `UnauthorizedCaller`. Callers construct `BackfillCtx` via [`BackfillCtx::new`]
-/// which enforces this at construction time.
+/// **Invariant**: `program_id` equals the accountant's `declare_id!` address and
+/// `payer` equals the accountant's backfill authority. [`BackfillTarget::try_new`]
+/// checks both; the program rejects any other value.
 #[derive(Debug, Clone)]
-pub struct BackfillCtx {
+pub struct BackfillTarget {
+    pub accountant: Accountant,
     pub program_id: Pubkey,
     pub payer: Pubkey,
     pub system_program: Pubkey,
     pub noreplay_program: Pubkey,
+    /// `noreplay_authority` PDA of `program_id`.
+    pub noreplay_authority: Pubkey,
+    discriminators: Discriminators,
 }
 
-impl BackfillCtx {
-    /// Construct a context. Panics if `payer` does not match the program's
-    /// compile-time `BACKFILL_AUTHORITY` const — sending txs with any other
-    /// signer is guaranteed to fail on-chain, so we surface the misconfig as
-    /// soon as it can be detected.
-    pub fn new(program_id: Pubkey, payer: Pubkey) -> Self {
-        assert_eq!(
-            payer,
-            backfill_authority_pubkey(),
-            "payer {payer} does not match BACKFILL_AUTHORITY {}; the on-chain program will reject every tx",
-            backfill_authority_pubkey()
+impl BackfillTarget {
+    /// Fails on a program id or payer the `.so` would reject: every transaction
+    /// would fail on-chain, so the misconfiguration states before any fee is paid.
+    pub fn try_new(accountant: Accountant, program_id: Pubkey, payer: Pubkey) -> Result<Self> {
+        ensure!(
+            program_id == accountant.program_id(),
+            "--program-id {program_id} is not the {accountant} backfill `declare_id!` {}",
+            accountant.program_id()
         );
-        Self {
+        ensure!(
+            payer == accountant.authority(),
+            "payer {payer} is not the {accountant} backfill authority {}; the program rejects every tx",
+            accountant.authority()
+        );
+        Ok(Self {
+            accountant,
             program_id,
             payer,
-            system_program: Pubkey::from_str("11111111111111111111111111111111")
-                .expect("hardcoded system program id parses"),
+            system_program: Pubkey::new_from_array([0u8; 32]),
             noreplay_program: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-        }
+            noreplay_authority: derive_noreplay_authority_pda(&program_id),
+            discriminators: accountant.discriminators(),
+        })
+    }
+
+    /// [`Self::try_new`] for fixed test values. Panics on a mismatch.
+    pub fn new(accountant: Accountant, program_id: Pubkey, payer: Pubkey) -> Self {
+        Self::try_new(accountant, program_id, payer).unwrap_or_else(|e| panic!("{e:#}"))
+    }
+
+    /// `Some` on NTT only: the transceiver maps are NTT state.
+    fn transceiver_disc(&self, disc: Option<u8>, kind: &str) -> Result<u8> {
+        disc.ok_or_else(|| anyhow!("{kind} rows on a {} accountant", self.accountant))
     }
 }
 
-// ============================================================================
-// PDA derivations
-// ============================================================================
-
-pub fn derive_noreplay_authority_pda(program_id: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[NOREPLAY_AUTHORITY_SEED_PREFIX], program_id).0
+/// Build, parse back and size-check the instruction for `batch`.
+pub fn build_ix(target: &BackfillTarget, batch: &TxBatch) -> Result<Instruction> {
+    let ix = match batch {
+        TxBatch::BackfillNoReplay(e) => build_backfill_noreplay_ix(target, e),
+        TxBatch::BackfillBalance(e) => build_backfill_balance_ix(target, e),
+        TxBatch::BackfillModifyBalance(e) => build_backfill_modify_balance_ix(target, e),
+        TxBatch::BackfillChainRegistration(e) => build_backfill_chain_registration_ix(target, e),
+        TxBatch::BackfillTransceiverHub(e) => build_backfill_transceiver_hub_ix(target, e)?,
+        TxBatch::BackfillTransceiverPeer(e) => build_backfill_transceiver_peer_ix(target, e)?,
+    };
+    check_ix(target, batch, &ix)?;
+    Ok(ix)
 }
 
-/// Derive the canonical noreplay bitmap PDA for `(authority, chain, emitter,
-/// sequence)`. Mirrors `solana_noreplay::pda::BitmapPdaSeeds`:
-/// namespace = `chain_be ‖ emitter` (34 bytes), split at 32 for the cw-style
-/// two-chunk seed structure; the fourth seed is `(sequence / 1024).to_le_bytes()`.
-pub fn derive_noreplay_bucket(
-    authority: &Pubkey,
-    chain: u16,
-    emitter: &[u8; 32],
-    sequence: u64,
-) -> Pubkey {
-    let mut namespace = [0u8; 34];
-    namespace[..2].copy_from_slice(&chain.to_be_bytes());
-    namespace[2..].copy_from_slice(emitter);
-    let bucket_index = (sequence / NOREPLAY_BITS_PER_BUCKET).to_le_bytes();
-    Pubkey::find_program_address(
-        &[
-            authority.as_ref(),
-            &namespace[..32],
-            &namespace[32..],
-            &bucket_index,
-        ],
-        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-    )
-    .0
+/// SECURITY: second decode of every instruction through the program's parser,
+/// plus the account count each handler requires and the exact wire size.
+fn check_ix(target: &BackfillTarget, batch: &TxBatch, ix: &Instruction) -> Result<()> {
+    let kind = batch.kind();
+    ensure!(
+        ix.program_id == target.program_id,
+        "ix program id {}",
+        ix.program_id
+    );
+    let (&disc, body) = ix
+        .data
+        .split_first()
+        .ok_or_else(|| anyhow!("empty ix data"))?;
+    let d = &target.discriminators;
+    let (want_disc, parsed): (Option<u8>, Result<usize, GlobalAccountantError>) = match batch {
+        TxBatch::BackfillNoReplay(_) => (
+            Some(d.noreplay),
+            NoReplayBatch::parse(body).map(|b| b.groups().map(|g| g.entries.len()).sum()),
+        ),
+        TxBatch::BackfillBalance(_) => (
+            Some(d.balance),
+            BalanceBatch::parse(body).map(|b| b.entries().len()),
+        ),
+        TxBatch::BackfillModifyBalance(_) => (
+            Some(d.modify_balance),
+            ModifyBalanceBatch::parse(body).map(|b| b.entries().len()),
+        ),
+        TxBatch::BackfillChainRegistration(_) => (
+            Some(d.chain_registration),
+            ChainRegistrationBatch::parse(body).map(|b| b.entries().len()),
+        ),
+        TxBatch::BackfillTransceiverHub(_) => (
+            d.transceiver_hub,
+            TransceiverHubBatch::parse(body).map(|b| b.entries().len()),
+        ),
+        TxBatch::BackfillTransceiverPeer(_) => (
+            d.transceiver_peer,
+            TransceiverPeerBatch::parse(body).map(|b| b.entries().len()),
+        ),
+    };
+    ensure!(
+        Some(disc) == want_disc,
+        "{kind} disc {disc}, want {want_disc:?}"
+    );
+    let parsed =
+        parsed.map_err(|e| anyhow!("definitions parser rejects the {kind} batch: {e:?}"))?;
+    ensure!(
+        parsed == batch.len(),
+        "{kind} parsed {parsed} entries, batch holds {}",
+        batch.len()
+    );
+    let want_accounts = match batch {
+        TxBatch::BackfillNoReplay(e) => 4 + noreplay_buckets(e).len(),
+        TxBatch::BackfillChainRegistration(e) => 2 + 2 * e.len(),
+        _ => 2 + batch.len(),
+    };
+    ensure!(
+        ix.accounts.len() == want_accounts,
+        "{kind} carries {} accounts, want {want_accounts}",
+        ix.accounts.len()
+    );
+    let size = legacy_wire_size(ix, &target.payer);
+    ensure!(
+        size <= PACKET_DATA_SIZE,
+        "{kind} tx is {size} bytes, over {PACKET_DATA_SIZE}"
+    );
+    Ok(())
 }
 
-pub fn derive_balance_pda(
-    program_id: &Pubkey,
-    chain: u16,
-    token_chain: u16,
-    token_address: &[u8; 32],
-) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            ACCOUNT_SEED_PREFIX,
-            &chain.to_be_bytes(),
-            &token_chain.to_be_bytes(),
-            token_address,
-        ],
-        program_id,
-    )
-    .0
+/// Serialized size of a one-signature legacy transaction carrying `ix`.
+pub fn legacy_wire_size(ix: &Instruction, payer: &Pubkey) -> usize {
+    let message =
+        Message::new_with_blockhash(std::slice::from_ref(ix), Some(payer), &Hash::default());
+    bincode::serialize(&Transaction::new_unsigned(message))
+        .expect("serializing a well-formed Transaction cannot fail")
+        .len()
 }
 
-/// Derive the canonical relayer-chain-registration PDA. Seeds:
-/// `(RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, chain_be)`.
-pub fn derive_relayer_registration_pda(program_id: &Pubkey, chain: u16) -> Pubkey {
-    Pubkey::find_program_address(
-        &[RELAYER_CHAIN_REGISTRATION_SEED_PREFIX, &chain.to_be_bytes()],
-        program_id,
-    )
-    .0
+/// Distinct buckets of a sorted transfer batch, in order. One writable meta each.
+fn noreplay_buckets(transfers: &[TransferRow]) -> Vec<BucketId> {
+    let mut buckets: Vec<BucketId> = transfers.iter().map(bucket_of).collect();
+    buckets.dedup();
+    buckets
 }
 
-/// Derive the canonical transceiver-hub PDA. Seeds:
-/// `(TRANSCEIVER_HUB_SEED_PREFIX, chain_be, address)`.
-pub fn derive_transceiver_hub_pda(program_id: &Pubkey, chain: u16, address: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(
-        &[TRANSCEIVER_HUB_SEED_PREFIX, &chain.to_be_bytes(), address],
-        program_id,
-    )
-    .0
+fn entry_count(len: usize) -> u8 {
+    u8::try_from(len).expect("batch caps are below 256")
 }
 
-/// Derive the canonical transceiver-peer PDA. Seeds:
-/// `(TRANSCEIVER_PEER_SEED_PREFIX, chain_be, address, dest_chain_be)`.
-pub fn derive_transceiver_peer_pda(
-    program_id: &Pubkey,
-    chain: u16,
-    address: &[u8; 32],
-    dest_chain: u16,
-) -> Pubkey {
-    Pubkey::find_program_address(
-        &[
-            TRANSCEIVER_PEER_SEED_PREFIX,
-            &chain.to_be_bytes(),
-            address,
-            &dest_chain.to_be_bytes(),
-        ],
-        program_id,
-    )
-    .0
-}
-
-// ============================================================================
-// Instruction builders
-// ============================================================================
-
-/// Build a `BackfillNoReplay` ix from a slice of transfers. Groups
-/// consecutively-equal `(chain, emitter)` runs into the program's compact
-/// emitter-grouped wire format. Account list includes one bucket PDA per
-/// unique `(chain, emitter, sequence/1024)` encountered, in walk order.
-///
-/// Caller responsibility (NOT enforced here): the chunker must already have
-/// constrained the input to be safe under the wire-size budget — see the
-/// `MAX_NOREPLAY_ENTRIES_PER_CHUNK` empirical limit in `chunker.rs`.
-pub fn build_backfill_noreplay_ix(ctx: &BackfillCtx, transfers: &[TransferRecord]) -> Instruction {
-    // ----- Group by (chain, emitter) preserving order -----
-    let mut groups: Vec<Vec<&TransferRecord>> = Vec::new();
-    let mut current: Vec<&TransferRecord> = Vec::new();
-    let mut current_key: Option<(u16, [u8; 32])> = None;
-    for t in transfers {
-        let key = (t.chain, t.emitter);
-        if current_key != Some(key) {
-            if !current.is_empty() {
-                groups.push(std::mem::take(&mut current));
-            }
-            current_key = Some(key);
-        }
-        current.push(t);
+/// `count (u8) ‖ count × entry` batches. Accounts: payer, system program, then
+/// the `N` writable PDAs of each entry, in entry order.
+fn build_batch<T, E: Pod, const N: usize>(
+    target: &BackfillTarget,
+    disc: u8,
+    rows: &[T],
+    encode: impl Fn(&T) -> (E, [Pubkey; N]),
+) -> Instruction {
+    let mut data = Vec::with_capacity(2 + rows.len() * std::mem::size_of::<E>());
+    data.extend([disc, entry_count(rows.len())]);
+    let mut accounts = Vec::with_capacity(2 + rows.len() * N);
+    accounts.push(AccountMeta::new(target.payer, true));
+    accounts.push(AccountMeta::new_readonly(target.system_program, false));
+    for row in rows {
+        let (entry, pdas) = encode(row);
+        data.extend_from_slice(bytemuck::bytes_of(&entry));
+        accounts.extend(pdas.into_iter().map(|pda| AccountMeta::new(pda, false)));
     }
-    if !current.is_empty() {
-        groups.push(current);
-    }
-
-    // ----- Wire data: [disc][group_count] [chain emitter ec [seq digest]...]... -----
-    let mut data = Vec::with_capacity(2 + groups.iter().map(|g| 35 + g.len() * 40).sum::<usize>());
-    data.push(BACKFILL_NOREPLAY_DISC);
-    data.push(groups.len() as u8);
-    for g in &groups {
-        let first = g[0];
-        data.extend_from_slice(&first.chain.to_be_bytes());
-        data.extend_from_slice(&first.emitter);
-        data.push(g.len() as u8);
-        for t in g {
-            data.extend_from_slice(&t.sequence.to_be_bytes());
-            data.extend_from_slice(&t.digest);
-        }
-    }
-
-    // ----- Accounts: 4 fixed + N unique bucket PDAs -----
-    let noreplay_auth = derive_noreplay_authority_pda(&ctx.program_id);
-    let mut accounts = vec![
-        AccountMeta::new(ctx.payer, true),
-        AccountMeta::new_readonly(ctx.noreplay_program, false),
-        AccountMeta::new_readonly(noreplay_auth, false),
-        AccountMeta::new_readonly(ctx.system_program, false),
-    ];
-    let mut prev_bucket: Option<(u16, [u8; 32], u64)> = None;
-    for t in transfers {
-        let bucket_idx = t.sequence / NOREPLAY_BITS_PER_BUCKET;
-        let cur = (t.chain, t.emitter, bucket_idx);
-        if Some(cur) != prev_bucket {
-            let pda = derive_noreplay_bucket(&noreplay_auth, t.chain, &t.emitter, t.sequence);
-            accounts.push(AccountMeta::new(pda, false));
-            prev_bucket = Some(cur);
-        }
-    }
-
     Instruction {
-        program_id: ctx.program_id,
+        program_id: target.program_id,
         accounts,
         data,
     }
 }
 
-/// Build a `BackfillBalance` ix from a slice of account records. Wire is
-/// flat: each entry repeats `(chain, token_chain, token_address, balance)`
-/// since balance PDAs are inherently per-entry unique (no dedup possible).
-pub fn build_backfill_balance_ix(ctx: &BackfillCtx, accounts: &[AccountRecord]) -> Instruction {
-    let mut data = Vec::with_capacity(2 + accounts.len() * 68);
-    data.push(BACKFILL_BALANCE_DISC);
-    data.push(accounts.len() as u8);
-    for a in accounts {
-        data.extend_from_slice(&a.chain.to_be_bytes());
-        data.extend_from_slice(&a.token_chain.to_be_bytes());
-        data.extend_from_slice(&a.token_address);
-        data.extend_from_slice(&a.balance);
-    }
-
-    let mut metas = vec![
-        AccountMeta::new(ctx.payer, true),
-        AccountMeta::new_readonly(ctx.system_program, false),
-    ];
-    for a in accounts {
-        let pda = derive_balance_pda(&ctx.program_id, a.chain, a.token_chain, &a.token_address);
-        metas.push(AccountMeta::new(pda, false));
-    }
-
-    Instruction {
-        program_id: ctx.program_id,
-        accounts: metas,
-        data,
-    }
-}
-
-/// Build a `BackfillRelayerRegistration` ix from a slice of relayer
-/// registrations. Wire is flat: `[disc][count]` then per entry `chain(2 BE) ‖
-/// emitter_address(32)` (34 B/entry). One writable registration PDA meta per
-/// entry, in entry order.
-///
-/// Caller responsibility (NOT enforced here): the chunker must supply a batch
-/// within `MAX_RELAYER_REGISTRATION_ENTRIES_PER_CHUNK` that is strictly
-/// ascending by `chain` — the on-chain handler rejects non-increasing keys.
-pub fn build_backfill_relayer_registration_ix(
-    ctx: &BackfillCtx,
-    entries: &[RelayerChainRegistrationRecord],
+/// `BackfillNoReplay`: each `(chain, emitter)` run becomes one group.
+/// Accounts: payer, NoReplay program, NoReplay authority, system program, then
+/// one bucket PDA per distinct bucket in order.
+pub fn build_backfill_noreplay_ix(
+    target: &BackfillTarget,
+    transfers: &[TransferRow],
 ) -> Instruction {
-    let mut data = Vec::with_capacity(2 + entries.len() * 34);
-    data.push(BACKFILL_RELAYER_REGISTRATION_DISC);
-    data.push(entries.len() as u8);
-    for e in entries {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.registered_emitter);
+    let groups: Vec<&[TransferRow]> = transfers
+        .chunk_by(|a, b| (a.chain, a.emitter) == (b.chain, b.emitter))
+        .collect();
+    let mut data = vec![target.discriminators.noreplay, entry_count(groups.len())];
+    for group in &groups {
+        let (chain, emitter) = (group[0].chain, group[0].emitter);
+        let header = BackfillNoReplayGroupHeader::new(chain, emitter, entry_count(group.len()));
+        data.extend_from_slice(bytemuck::bytes_of(&header));
+        for t in *group {
+            let entry = BackfillNoReplayEntry::new(t.sequence, t.digest);
+            data.extend_from_slice(bytemuck::bytes_of(&entry));
+        }
     }
 
-    let mut metas = vec![
-        AccountMeta::new(ctx.payer, true),
-        AccountMeta::new_readonly(ctx.system_program, false),
+    let mut accounts = vec![
+        AccountMeta::new(target.payer, true),
+        AccountMeta::new_readonly(target.noreplay_program, false),
+        AccountMeta::new_readonly(target.noreplay_authority, false),
+        AccountMeta::new_readonly(target.system_program, false),
     ];
-    for e in entries {
-        let pda = derive_relayer_registration_pda(&ctx.program_id, e.chain);
-        metas.push(AccountMeta::new(pda, false));
-    }
-
+    accounts.extend(noreplay_buckets(transfers).iter().map(|bucket| {
+        let pda = derive_bucket_pda(&target.noreplay_program, &target.noreplay_authority, bucket);
+        AccountMeta::new(pda, false)
+    }));
     Instruction {
-        program_id: ctx.program_id,
-        accounts: metas,
+        program_id: target.program_id,
+        accounts,
         data,
     }
 }
 
-/// Build a `BackfillTransceiverHub` ix. Wire: `[disc][count]` then per entry
-/// `chain(2 BE) ‖ address(32) ‖ hub_chain(2 BE) ‖ hub_address(32)` (68
-/// B/entry). One writable hub PDA meta per entry, in entry order.
-///
-/// Caller responsibility: batch within `MAX_TRANSCEIVER_HUB_ENTRIES_PER_CHUNK`,
-/// strictly ascending by `(chain, address)`.
+/// `BackfillBalance`: one Balance PDA per entry.
+pub fn build_backfill_balance_ix(target: &BackfillTarget, rows: &[BalanceRow]) -> Instruction {
+    build_batch(target, target.discriminators.balance, rows, |a| {
+        let balance = Uint256::from_be_bytes(a.balance);
+        let key = BalanceAccountKey::new(a.chain, a.token_chain, a.token_address);
+        (
+            BackfillBalanceEntry::new(a.chain, a.token_chain, a.token_address, balance),
+            [derive_pda(&target.program_id, &key)],
+        )
+    })
+}
+
+/// `BackfillModifyBalance`: one `ModifyBalance` record PDA per entry.
+pub fn build_backfill_modify_balance_ix(
+    target: &BackfillTarget,
+    rows: &[ModifyBalanceRow],
+) -> Instruction {
+    build_batch(target, target.discriminators.modify_balance, rows, |m| {
+        let entry = BackfillModifyBalanceEntry::new(
+            m.modify_kind as u8,
+            m.chain_id,
+            m.token_chain,
+            m.sequence,
+            m.token_address,
+            Uint256::from_be_bytes(m.amount),
+            m.reason,
+        );
+        let key = ModifyBalanceKey::new(m.sequence);
+        (entry, [derive_pda(&target.program_id, &key)])
+    })
+}
+
+/// `BackfillChainRegistration` (WTT) / `BackfillRelayerChainRegistration` (NTT):
+/// per entry, the `ChainRegistration` PDA then the `RegisterChain` record PDA.
+pub fn build_backfill_chain_registration_ix(
+    target: &BackfillTarget,
+    rows: &[ChainRegistrationRow],
+) -> Instruction {
+    build_batch(
+        target,
+        target.discriminators.chain_registration,
+        rows,
+        |r| {
+            (
+                BackfillChainRegistrationEntry::new(r.chain, r.sequence, r.registered_emitter),
+                [
+                    derive_pda(&target.program_id, &ChainRegistrationKey::new(r.chain)),
+                    derive_pda(&target.program_id, &RegisterChainKey::new(r.sequence)),
+                ],
+            )
+        },
+    )
+}
+
+/// `BackfillTransceiverHub` (NTT only): one hub PDA per entry.
 pub fn build_backfill_transceiver_hub_ix(
-    ctx: &BackfillCtx,
-    entries: &[TransceiverHubRecord],
-) -> Instruction {
-    let mut data = Vec::with_capacity(2 + entries.len() * 68);
-    data.push(BACKFILL_TRANSCEIVER_HUB_DISC);
-    data.push(entries.len() as u8);
-    for e in entries {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.address);
-        data.extend_from_slice(&e.hub_chain.to_be_bytes());
-        data.extend_from_slice(&e.hub_address);
-    }
-
-    let mut metas = vec![
-        AccountMeta::new(ctx.payer, true),
-        AccountMeta::new_readonly(ctx.system_program, false),
-    ];
-    for e in entries {
-        let pda = derive_transceiver_hub_pda(&ctx.program_id, e.chain, &e.address);
-        metas.push(AccountMeta::new(pda, false));
-    }
-
-    Instruction {
-        program_id: ctx.program_id,
-        accounts: metas,
-        data,
-    }
+    target: &BackfillTarget,
+    rows: &[TransceiverHubRow],
+) -> Result<Instruction> {
+    let disc = target.transceiver_disc(target.discriminators.transceiver_hub, "transceiver_hub")?;
+    Ok(build_batch(target, disc, rows, |h| {
+        let key = TransceiverHubKey::new(h.chain, h.address);
+        (
+            BackfillTransceiverHubEntry::new(h.chain, h.address, h.hub_chain, h.hub_address),
+            [derive_pda(&target.program_id, &key)],
+        )
+    }))
 }
 
-/// Build a `BackfillTransceiverPeer` ix. Wire: `[disc][count]` then per entry
-/// `chain(2 BE) ‖ address(32) ‖ dest_chain(2 BE) ‖ peer_address(32)` (68
-/// B/entry). One writable peer PDA meta per entry, in entry order.
-///
-/// Caller responsibility: batch within `MAX_TRANSCEIVER_PEER_ENTRIES_PER_CHUNK`,
-/// strictly ascending by `(chain, address, dest_chain)`.
+/// `BackfillTransceiverPeer` (NTT only): one peer PDA per entry.
 pub fn build_backfill_transceiver_peer_ix(
-    ctx: &BackfillCtx,
-    entries: &[TransceiverPeerRecord],
-) -> Instruction {
-    let mut data = Vec::with_capacity(2 + entries.len() * 68);
-    data.push(BACKFILL_TRANSCEIVER_PEER_DISC);
-    data.push(entries.len() as u8);
-    for e in entries {
-        data.extend_from_slice(&e.chain.to_be_bytes());
-        data.extend_from_slice(&e.address);
-        data.extend_from_slice(&e.dest_chain.to_be_bytes());
-        data.extend_from_slice(&e.peer_address);
-    }
+    target: &BackfillTarget,
+    rows: &[TransceiverPeerRow],
+) -> Result<Instruction> {
+    let disc =
+        target.transceiver_disc(target.discriminators.transceiver_peer, "transceiver_peer")?;
+    Ok(build_batch(target, disc, rows, |p| {
+        let key = TransceiverPeerKey::new(p.chain, p.address, p.dest_chain);
+        (
+            BackfillTransceiverPeerEntry::new(p.chain, p.address, p.dest_chain, p.peer_address),
+            [derive_pda(&target.program_id, &key)],
+        )
+    }))
+}
 
-    let mut metas = vec![
-        AccountMeta::new(ctx.payer, true),
-        AccountMeta::new_readonly(ctx.system_program, false),
-    ];
-    for e in entries {
-        let pda = derive_transceiver_peer_pda(&ctx.program_id, e.chain, &e.address, e.dest_chain);
-        metas.push(AccountMeta::new(pda, false));
+/// Build and check every batch's instruction, and fingerprint the plan:
+/// SHA-256 over `(data_len_be ‖ data ‖ account keys)` per instruction, in
+/// plan order. Fails on the first batch `build_ix` rejects.
+pub fn batches_hash(target: &BackfillTarget, batches: &[TxBatch]) -> Result<[u8; 32]> {
+    use anyhow::Context;
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for (i, batch) in batches.iter().enumerate() {
+        let ix =
+            build_ix(target, batch).with_context(|| format!("batch {i} ({})", batch.kind()))?;
+        hasher.update((ix.data.len() as u64).to_be_bytes());
+        hasher.update(&ix.data);
+        for meta in &ix.accounts {
+            hasher.update(meta.pubkey.as_ref());
+        }
     }
-
-    Instruction {
-        program_id: ctx.program_id,
-        accounts: metas,
-        data,
-    }
+    Ok(hasher.finalize().into())
 }

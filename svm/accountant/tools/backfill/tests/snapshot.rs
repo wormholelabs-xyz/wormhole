@@ -1,33 +1,33 @@
-//! Integration tests for the catalogue reader.
+//! Integration tests for the snapshot reader.
 
-use ga_backfill::catalogue::{CatalogueError, CatalogueReader, ModifyKind, Record};
+use ga_backfill::snapshot::{ModificationKind, SnapshotError, SnapshotReader, SnapshotRow};
 
 fn fixture_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sample_catalogue.jsonl")
+        .join("tests/fixtures/sample_snapshot.jsonl")
 }
 
 fn ntt_fixture_path() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sample_ntt_catalogue.jsonl")
+        .join("tests/fixtures/sample_ntt_snapshot.jsonl")
 }
 
 #[test]
 fn parses_all_four_kinds() {
-    let reader = CatalogueReader::open(fixture_path()).expect("open fixture");
-    let records: Vec<Record> = reader
+    let reader = SnapshotReader::open(fixture_path()).expect("open fixture");
+    let rows: Vec<SnapshotRow> = reader
         .collect::<Result<Vec<_>, _>>()
         .expect("all records parse");
 
-    assert_eq!(records.len(), 5, "fixture has 5 records");
+    assert_eq!(rows.len(), 5, "fixture has 5 records");
 
     let mut counts = [0usize; 4]; // transfer, account, modification, registration
-    for r in &records {
+    for r in &rows {
         match r {
-            Record::Transfer(_) => counts[0] += 1,
-            Record::Account(_) => counts[1] += 1,
-            Record::Modification(_) => counts[2] += 1,
-            Record::Registration(_) => counts[3] += 1,
+            SnapshotRow::Transfer(_) => counts[0] += 1,
+            SnapshotRow::Balance(_) => counts[1] += 1,
+            SnapshotRow::ModifyBalance(_) => counts[2] += 1,
+            SnapshotRow::TokenBridgeRegistration(_) => counts[3] += 1,
             other => panic!("unexpected NTT record kind in TB fixture: {other:?}"),
         }
     }
@@ -40,10 +40,10 @@ fn parses_all_four_kinds() {
 
 #[test]
 fn transfer_record_fields_round_trip() {
-    let reader = CatalogueReader::open(fixture_path()).expect("open");
+    let reader = SnapshotReader::open(fixture_path()).expect("open");
     let transfer = reader
         .filter_map(|r| match r {
-            Ok(Record::Transfer(t)) => Some(t),
+            Ok(SnapshotRow::Transfer(t)) => Some(t),
             _ => None,
         })
         .next()
@@ -62,10 +62,10 @@ fn transfer_record_fields_round_trip() {
 
 #[test]
 fn account_record_fields_round_trip() {
-    let reader = CatalogueReader::open(fixture_path()).expect("open");
+    let reader = SnapshotReader::open(fixture_path()).expect("open");
     let account = reader
         .filter_map(|r| match r {
-            Ok(Record::Account(a)) => Some(a),
+            Ok(SnapshotRow::Balance(a)) => Some(a),
             _ => None,
         })
         .next()
@@ -82,10 +82,10 @@ fn account_record_fields_round_trip() {
 
 #[test]
 fn modification_record_fields_round_trip() {
-    let reader = CatalogueReader::open(fixture_path()).expect("open");
+    let reader = SnapshotReader::open(fixture_path()).expect("open");
     let m = reader
         .filter_map(|r| match r {
-            Ok(Record::Modification(m)) => Some(m),
+            Ok(SnapshotRow::ModifyBalance(m)) => Some(m),
             _ => None,
         })
         .next()
@@ -94,16 +94,18 @@ fn modification_record_fields_round_trip() {
     assert_eq!(m.sequence, 1);
     assert_eq!(m.chain_id, 2);
     assert_eq!(m.token_chain, 2);
-    assert_eq!(m.modify_kind, ModifyKind::Add);
-    assert_eq!(m.reason, "smoke test");
+    assert_eq!(m.modify_kind, ModificationKind::Add);
+    let mut reason = [0u8; 32];
+    reason[22..].copy_from_slice(b"smoke test");
+    assert_eq!(m.reason, reason);
 }
 
 #[test]
 fn registration_record_fields_round_trip() {
-    let reader = CatalogueReader::open(fixture_path()).expect("open");
+    let reader = SnapshotReader::open(fixture_path()).expect("open");
     let r = reader
         .filter_map(|r| match r {
-            Ok(Record::Registration(r)) => Some(r),
+            Ok(SnapshotRow::TokenBridgeRegistration(r)) => Some(r),
             _ => None,
         })
         .next()
@@ -111,22 +113,23 @@ fn registration_record_fields_round_trip() {
 
     assert_eq!(r.chain, 2);
     assert_eq!(r.registered_emitter[31], 0x85);
+    assert_eq!(r.sequence, 18_159_247_149_180_908_832);
 }
 
 #[test]
 fn parses_all_three_ntt_kinds() {
-    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open ntt fixture");
-    let records: Vec<Record> = reader
+    let reader = SnapshotReader::open(ntt_fixture_path()).expect("open ntt fixture");
+    let rows: Vec<SnapshotRow> = reader
         .collect::<Result<Vec<_>, _>>()
         .expect("all records parse");
-    assert_eq!(records.len(), 5, "ntt fixture has 5 records");
+    assert_eq!(rows.len(), 5, "ntt fixture has 5 records");
 
     let mut counts = [0usize; 3]; // relayer, hub, peer
-    for r in &records {
+    for r in &rows {
         match r {
-            Record::RelayerChainRegistration(_) => counts[0] += 1,
-            Record::TransceiverHub(_) => counts[1] += 1,
-            Record::TransceiverPeer(_) => counts[2] += 1,
+            SnapshotRow::RelayerChainRegistration(_) => counts[0] += 1,
+            SnapshotRow::TransceiverHub(_) => counts[1] += 1,
+            SnapshotRow::TransceiverPeer(_) => counts[2] += 1,
             other => panic!("unexpected record kind in ntt fixture: {other:?}"),
         }
     }
@@ -135,24 +138,25 @@ fn parses_all_three_ntt_kinds() {
 
 #[test]
 fn relayer_chain_registration_fields_round_trip() {
-    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open");
+    let reader = SnapshotReader::open(ntt_fixture_path()).expect("open");
     let r = reader
         .filter_map(|r| match r {
-            Ok(Record::RelayerChainRegistration(r)) => Some(r),
+            Ok(SnapshotRow::RelayerChainRegistration(r)) => Some(r),
             _ => None,
         })
         .next()
         .expect("one relayer registration");
     assert_eq!(r.chain, 2);
     assert_eq!(r.registered_emitter[31], 0x85);
+    assert_eq!(r.sequence, 3_710_971_193_224_645_800);
 }
 
 #[test]
 fn transceiver_hub_fields_round_trip() {
-    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open");
+    let reader = SnapshotReader::open(ntt_fixture_path()).expect("open");
     let h = reader
         .filter_map(|r| match r {
-            Ok(Record::TransceiverHub(h)) => Some(h),
+            Ok(SnapshotRow::TransceiverHub(h)) => Some(h),
             _ => None,
         })
         .next()
@@ -165,10 +169,10 @@ fn transceiver_hub_fields_round_trip() {
 
 #[test]
 fn transceiver_peer_fields_round_trip() {
-    let reader = CatalogueReader::open(ntt_fixture_path()).expect("open");
+    let reader = SnapshotReader::open(ntt_fixture_path()).expect("open");
     let p = reader
         .filter_map(|r| match r {
-            Ok(Record::TransceiverPeer(p)) => Some(p),
+            Ok(SnapshotRow::TransceiverPeer(p)) => Some(p),
             _ => None,
         })
         .next()
@@ -179,15 +183,15 @@ fn transceiver_peer_fields_round_trip() {
     assert_eq!(p.peer_address[31], 0x77);
 }
 
-// One malformed/truncated-row test per `CatalogueError` variant. `parse_record`
+// One malformed/truncated-row test per `SnapshotError` variant. `parse_record`
 // is private, so these go through the public entry point: write a single bad
-// line to a temp file, open it with `CatalogueReader`, and inspect the error.
+// line to a temp file, open it with `SnapshotReader`, and inspect the error.
 
-fn parse_one_line(line: &str) -> CatalogueError {
+fn parse_one_line(line: &str) -> SnapshotError {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let path = tmp.path().join("bad.jsonl");
     std::fs::write(&path, format!("{line}\n")).expect("write");
-    CatalogueReader::open(&path)
+    SnapshotReader::open(&path)
         .expect("open")
         .next()
         .expect("one record")
@@ -196,21 +200,21 @@ fn parse_one_line(line: &str) -> CatalogueError {
 
 #[test]
 fn io_error_on_missing_file() {
-    let result = CatalogueReader::open("/nonexistent/path/that/should/not/exist.jsonl");
-    assert!(matches!(result, Err(CatalogueError::Io(_))));
+    let result = SnapshotReader::open("/nonexistent/path/that/should/not/exist.jsonl");
+    assert!(matches!(result, Err(SnapshotError::Io(_))));
 }
 
 #[test]
 fn json_error_on_malformed_json() {
     let err = parse_one_line("{ this is not valid json");
-    assert!(matches!(err, CatalogueError::Json { .. }), "got: {err:?}");
+    assert!(matches!(err, SnapshotError::Json { .. }), "got: {err:?}");
 }
 
 #[test]
 fn missing_field_error_when_kind_absent() {
     let err = parse_one_line(r#"{"chain":1}"#);
     assert!(
-        matches!(err, CatalogueError::MissingField { field: "kind", .. }),
+        matches!(err, SnapshotError::MissingField { field: "kind", .. }),
         "got: {err:?}"
     );
 }
@@ -222,7 +226,7 @@ fn missing_field_error_when_kind_specific_field_absent() {
         r#"{"kind":"transfer","emitter":"0x0000000000000000000000000000000000000000000000000000000000000001","sequence":1,"digest":"0x0000000000000000000000000000000000000000000000000000000000000001","amount":"0x0000000000000000000000000000000000000000000000000000000000000001","token_chain":1,"token_address":"0x0000000000000000000000000000000000000000000000000000000000000001","recipient_chain":1}"#,
     );
     assert!(
-        matches!(err, CatalogueError::MissingField { field: "chain", .. }),
+        matches!(err, SnapshotError::MissingField { field: "chain", .. }),
         "got: {err:?}"
     );
 }
@@ -231,16 +235,25 @@ fn missing_field_error_when_kind_specific_field_absent() {
 fn unknown_kind_error() {
     let err = parse_one_line(r#"{"kind":"not_a_real_kind"}"#);
     assert!(
-        matches!(err, CatalogueError::UnknownKind { ref kind, .. } if kind == "not_a_real_kind"),
+        matches!(err, SnapshotError::UnknownKind { ref kind, .. } if kind == "not_a_real_kind"),
         "got: {err:?}"
     );
 }
 
 #[test]
 fn bad_type_error_on_non_numeric_chain() {
-    let err = parse_one_line(r#"{"kind":"registration","chain":"not-a-number","registered_emitter":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#);
+    let err = parse_one_line(
+        r#"{"kind":"registration","chain":"not-a-number","registered_emitter":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#,
+    );
     assert!(
-        matches!(err, CatalogueError::BadType { field: "chain", expected: "u64", .. }),
+        matches!(
+            err,
+            SnapshotError::BadType {
+                field: "chain",
+                expected: "u64",
+                ..
+            }
+        ),
         "got: {err:?}"
     );
 }
@@ -250,16 +263,30 @@ fn invalid_hex_error_on_wrong_length() {
     // `registered_emitter` should be 64 hex chars (32 bytes); this is short.
     let err = parse_one_line(r#"{"kind":"registration","chain":1,"registered_emitter":"0xaabb"}"#);
     assert!(
-        matches!(err, CatalogueError::InvalidHex { field: "registered_emitter", .. }),
+        matches!(
+            err,
+            SnapshotError::InvalidHex {
+                field: "registered_emitter",
+                ..
+            }
+        ),
         "got: {err:?}"
     );
 }
 
 #[test]
 fn invalid_hex_error_on_non_hex_characters() {
-    let err = parse_one_line(r#"{"kind":"registration","chain":1,"registered_emitter":"0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}"#);
+    let err = parse_one_line(
+        r#"{"kind":"registration","chain":1,"registered_emitter":"0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}"#,
+    );
     assert!(
-        matches!(err, CatalogueError::InvalidHex { field: "registered_emitter", .. }),
+        matches!(
+            err,
+            SnapshotError::InvalidHex {
+                field: "registered_emitter",
+                ..
+            }
+        ),
         "got: {err:?}"
     );
 }
@@ -267,18 +294,30 @@ fn invalid_hex_error_on_non_hex_characters() {
 #[test]
 fn out_of_range_error_when_u64_does_not_fit_u16() {
     // `chain` is parsed as u16; 99999 overflows it.
-    let err = parse_one_line(r#"{"kind":"registration","chain":99999,"registered_emitter":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#);
+    let err = parse_one_line(
+        r#"{"kind":"registration","chain":99999,"registered_emitter":"0x0000000000000000000000000000000000000000000000000000000000000001"}"#,
+    );
     assert!(
-        matches!(err, CatalogueError::OutOfRange { field: "chain", value: 99999, expected: "u16", .. }),
+        matches!(
+            err,
+            SnapshotError::OutOfRange {
+                field: "chain",
+                value: 99999,
+                expected: "u16",
+                ..
+            }
+        ),
         "got: {err:?}"
     );
 }
 
 #[test]
 fn bad_modify_kind_error() {
-    let err = parse_one_line(r#"{"kind":"modification","sequence":1,"chain_id":1,"token_chain":1,"token_address":"0x0000000000000000000000000000000000000000000000000000000000000001","amount":"0x0000000000000000000000000000000000000000000000000000000000000001","reason":"x","modify_kind":"multiply"}"#);
+    let err = parse_one_line(
+        r#"{"kind":"modification","sequence":1,"chain_id":1,"token_chain":1,"token_address":"0x0000000000000000000000000000000000000000000000000000000000000001","amount":"0x0000000000000000000000000000000000000000000000000000000000000001","reason":"x","modify_kind":"multiply"}"#,
+    );
     assert!(
-        matches!(err, CatalogueError::BadModifyKind { ref value, .. } if value == "multiply"),
+        matches!(err, SnapshotError::BadModifyKind { ref value, .. } if value == "multiply"),
         "got: {err:?}"
     );
 }
@@ -287,7 +326,7 @@ fn bad_modify_kind_error() {
 fn streaming_reader_does_not_load_whole_file() {
     // Sanity-check the iterator pattern — calling open() does not yet parse
     // any records. `next()` is the first parse trigger.
-    let reader = CatalogueReader::open(fixture_path()).expect("open");
+    let reader = SnapshotReader::open(fixture_path()).expect("open");
     // Reader is a struct, not a Vec; size_of compatible with a few file
     // handles + small line buffer, not 5 records' worth of memory.
     assert!(std::mem::size_of_val(&reader) < 1024);

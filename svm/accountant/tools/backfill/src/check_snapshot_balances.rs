@@ -1,21 +1,21 @@
-//! CLI shim for [`ga_backfill::balance_reconcile`] — see that module for the
-//! reconciliation logic and sign rule.
+//! CLI shim for [`ga_backfill::snapshot_balance_check`] — see that module for the
+//! balance check and sign rule.
 //!
-//!   reconcile_balances --catalogue <path> [--label NTT|WTT]
+//!   check_snapshot_balances --snapshot <path> [--label NTT|WTT]
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 
-use ga_backfill::balance_reconcile::reconcile;
-use ga_backfill::catalogue::CatalogueReader;
+use ga_backfill::snapshot::SnapshotReader;
+use ga_backfill::snapshot_balance_check::check_snapshot_balances;
 
 #[derive(Parser)]
 #[command(about = "Reconcile committed accountant balances against the transfer history.")]
 struct Cli {
-    /// Path to the decoded snapshot catalogue (JSONL). For NTT this is the
-    /// decoded `ntt-raw-dump.jsonl`; for WTT the workstream-A catalogue.
+    /// Path to the decoded snapshot (JSONL). For NTT this is the
+    /// decoded `ntt-raw-dump.jsonl`; for WTT the wormchain-snapshot.
     #[arg(long)]
-    catalogue: std::path::PathBuf,
+    snapshot: std::path::PathBuf,
     /// Label for output only (e.g. NTT, WTT).
     #[arg(long, default_value = "")]
     label: String,
@@ -29,9 +29,9 @@ fn main() -> Result<()> {
         format!("[{}] ", cli.label)
     };
 
-    let reader = CatalogueReader::open(&cli.catalogue)
-        .with_context(|| format!("open catalogue {}", cli.catalogue.display()))?;
-    let report = reconcile(reader)?;
+    let reader = SnapshotReader::open(&cli.snapshot)
+        .with_context(|| format!("open snapshot {}", cli.snapshot.display()))?;
+    let report = check_snapshot_balances(reader)?;
 
     println!(
         "{tag}replayed {} transfers + {} modifications against {} committed balances",

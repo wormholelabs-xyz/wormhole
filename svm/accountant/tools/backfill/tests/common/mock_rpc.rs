@@ -1,7 +1,7 @@
-//! Minimal hand-rolled JSON-RPC HTTP mock server for `submitter::submit_chunks`
+//! Minimal hand-rolled JSON-RPC HTTP mock server for `submitter::submit_batches`
 //! orchestration tests.
 //!
-//! `submit_chunks` always constructs its own `RpcClient::new_with_commitment`
+//! `submit_batches` always constructs its own `RpcClient::new_with_commitment`
 //! internally, which always wires up the real `HttpSender` — there is no
 //! injection point for a fake `RpcSender`. Exercising the orchestration loop
 //! (retry/backoff, halt behavior, concurrent stats aggregation) therefore
@@ -23,8 +23,8 @@ use solana_signature::Signature;
 
 /// Scripted behavior for the Nth `sendTransaction` call the server receives,
 /// consumed FIFO across ALL connections (the submitter may have several
-/// chunks in flight concurrently, so there is no per-chunk correlation —
-/// tests that care which chunk gets which behavior should use
+/// batches in flight concurrently, so there is no per-batch correlation —
+/// tests that care which batch gets which behavior should use
 /// `concurrency: 1`).
 #[derive(Clone, Debug)]
 pub enum SendTxBehavior {
@@ -35,7 +35,7 @@ pub enum SendTxBehavior {
     Success,
     /// A JSON-RPC error whose message embeds `custom program error: 0x{code:x}`
     /// — drives `classify()`'s `AlreadyAccounted` (code 7) / `Halt` (any other
-    /// code) branches exactly as a real preflight failure would.
+    /// code) branches exactly as a real on-chain check failure would.
     CustomProgramError(u32),
     /// A generic RPC-shaped error with no custom-program-error substring —
     /// drives `classify()`'s `Retry` branch.
@@ -114,7 +114,11 @@ impl MockRpc {
 /// data: [base64, "base64"], owner, executable, rentEpoch}}`. `owner` need not
 /// be the real backfill program id — `UiAccount::decode()` just parses it as
 /// a `Pubkey`, it doesn't cross-check the request's target program.
-pub fn keyed_account_json(pubkey: &solana_pubkey::Pubkey, owner: &solana_pubkey::Pubkey, data: &[u8]) -> Value {
+pub fn keyed_account_json(
+    pubkey: &solana_pubkey::Pubkey,
+    owner: &solana_pubkey::Pubkey,
+    data: &[u8],
+) -> Value {
     json!({
         "pubkey": pubkey.to_string(),
         "account": {

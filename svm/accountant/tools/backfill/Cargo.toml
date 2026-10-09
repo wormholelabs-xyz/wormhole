@@ -7,7 +7,7 @@ name = "ga-backfill"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Off-chain orchestrator for the wormchain → SVM Global Accountant migration: reads the snapshot catalogue and drives the backfill program at scale."
+description = "Off-chain orchestrator for the wormchain → SVM Global Accountant migration: reads the snapshot and drives the backfill program at scale."
 
 [lib]
 name = "ga_backfill"
@@ -17,13 +17,13 @@ path = "src/lib.rs"
 name = "ga-backfill"
 path = "src/main.rs"
 
-# Balance-reconciliation tool (see `just reconcile-ntt|wtt`). Kept out of
+# Snapshot balance check (`check_snapshot_balances --snapshot <path>`). Kept out of
 # `src/bin/` because the repo `.gitignore` excludes any `bin` directory.
 [[bin]]
-name = "reconcile_balances"
-path = "src/reconcile_balances.rs"
+name = "check_snapshot_balances"
+path = "src/check_snapshot_balances.rs"
 
-# Per CLAUDE.md: every dependency pinned exact. Versions chosen to match the
+# Every dependency pinned exact, with a committed lockfile. Versions chosen to match the
 # snapshot tool's already-audited dep set where overlap exists.
 [dependencies]
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -31,9 +31,9 @@ serde_json = "=1.0.150"
 hex = "=0.4.3"
 thiserror = "=1.0.69"
 clap = { version = "=4.5.50", features = ["derive"] }
-anyhow = "=1.0.102"
+anyhow = "=1.0.103"
 
-# Async submitter (Phase 4). Pinned exact; versions match what the operational
+# Async submitter. Pinned exact; versions match what the operational
 # program's Cargo.lock resolves to.
 tokio = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 solana-client = "=3.1.14"
@@ -50,7 +50,7 @@ tracing-subscriber = { version = "=0.3.20", features = ["env-filter"] }
 solana-pubkey = { version = "=4.2.0", features = ["curve25519"] }
 solana-instruction = "=3.4.0"
 solana-address = { version = "=2.6.0", features = ["curve25519"] }
-# Exact wire-size probing for the chunker's packet-limit bound (fix #1 in the
+# Exact wire-size probing for the batcher's packet-limit bound (fix #1 in the
 # backfill hardening pass): building a throwaway `Message`/`Transaction` and
 # measuring its real serialized length reuses the actual short_vec-encoded
 # wire format instead of a hand-derived byte-counting formula. Already
@@ -59,9 +59,12 @@ solana-address = { version = "=2.6.0", features = ["curve25519"] }
 # resolution.
 solana-message = "=3.1.0"
 bincode = "=1.3.3"
-# Catalogue content-hash for the cursor's resume identity check (`run`
+# Snapshot content-hash for the progress_file's resume identity check (`run`
 # subcommand). Already resolved transitively at this exact version.
 sha2 = "=0.10.9"
+# Definitions layouts and wire entries are `bytemuck::Pod`. Already resolved
+# transitively at this exact version.
+bytemuck = "=1.25.2"
 
 # Path deps to share program-level constants (instruction discriminators,
 # PDA seed prefixes, layout sizes). Host-buildable — both the program and

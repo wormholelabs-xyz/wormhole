@@ -1,8 +1,8 @@
-//! Reconcile committed accountant balances against the transfer history.
+//! Check the snapshot's committed balances against its own transfer history.
 //!
-//! Sums every `transfer` (and `modification`) row in a snapshot catalogue into
+//! Sums every `transfer` (and `modification`) row in a snapshot into
 //! per-account credits/debits using the program's accounting sign rule, then
-//! checks the net against the committed `account` rows in the same catalogue.
+//! checks the net against the committed `account` rows in the same snapshot.
 //! A clean run proves the committed transfer history nets to the committed
 //! balances — i.e. the on-chain accounting logic, fed this real data, would
 //! reproduce the wormchain-committed balances.
@@ -15,21 +15,21 @@
 //!   - modification: credit on Add, debit on Subtract.
 //!
 //! We accumulate net credits/debits rather than applying the program's per-step
-//! `checked_sub` directly, because the catalogue is sorted by
+//! `checked_sub` directly, because the snapshot is sorted by
 //! `(kind, chain, emitter, sequence)`, NOT globally chronological — a wrapped
 //! burn can appear before the credit that funds it, which would trip an
 //! intermediate (and spurious) underflow that never occurred on-chain. The net
 //! is order-independent and is what must equal the committed balance.
 //!
-//! Both NTT and the WTT (Token Bridge) accountant share this catalogue schema
+//! Both NTT and the WTT (Token Bridge) accountant share this snapshot schema
 //! and balance arithmetic, so one tool covers both — point it at the respective
-//! catalogue.
+//! snapshot.
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::catalogue::{CatalogueError, ModifyKind, Record};
+use crate::snapshot::{ModificationKind, SnapshotError, SnapshotRow};
 use global_accountant_definitions::Uint256;
 
 /// Balance-account key: `(chain, token_chain, token_address)`.
@@ -44,7 +44,10 @@ struct Net {
 
 impl Net {
     fn credit(&mut self, amount: Uint256) -> Result<()> {
-        self.credits = self.credits.checked_add(amount).context("credit overflow")?;
+        self.credits = self
+            .credits
+            .checked_add(amount)
+            .context("credit overflow")?;
         Ok(())
     }
     fn debit(&mut self, amount: Uint256) -> Result<()> {
@@ -58,10 +61,10 @@ impl Net {
     }
 }
 
-/// Result of replaying a catalogue's transfer/modification history against
+/// Result of replaying a snapshot's transfer/modification history against
 /// its committed balances.
 #[derive(Debug, Default)]
-pub struct ReconcileReport {
+pub struct SnapshotBalanceReport {
     pub transfers: u64,
     pub modifications: u64,
     pub accounts: u64,
@@ -73,7 +76,7 @@ pub struct ReconcileReport {
     pub mismatches: Vec<String>,
 }
 
-impl ReconcileReport {
+impl SnapshotBalanceReport {
     /// No discrepancies — every committed balance reconciles.
     pub fn is_clean(&self) -> bool {
         self.mismatches.is_empty()
@@ -83,20 +86,22 @@ impl ReconcileReport {
 /// Replay `records` and reconcile committed `account` balances against the
 /// net of `transfer`/`modification` activity touching the same
 /// `(chain, token_chain, token_address)` key.
-pub fn reconcile(
-    records: impl Iterator<Item = Result<Record, CatalogueError>>,
-) -> Result<ReconcileReport> {
+pub fn check_snapshot_balances(
+    rows: impl Iterator<Item = Result<SnapshotRow, SnapshotError>>,
+) -> Result<SnapshotBalanceReport> {
     let mut net: HashMap<Key, Net> = HashMap::new();
     let mut committed: HashMap<Key, Uint256> = HashMap::new();
-    let mut report = ReconcileReport::default();
+    let mut report = SnapshotBalanceReport::default();
 
-    for (i, record) in records.enumerate() {
-        let record = record.with_context(|| format!("parse catalogue line {}", i + 1))?;
-        match record {
-            Record::Transfer(t) => {
+    for (i, row) in rows.enumerate() {
+        let row = row.with_context(|| format!("parse snapshot line {}", i + 1))?;
+        match row {
+            SnapshotRow::Transfer(t) => {
                 report.transfers += 1;
                 let amount = Uint256::from_be_bytes(t.amount);
-                let src = net.entry((t.chain, t.token_chain, t.token_address)).or_default();
+                let src = net
+                    .entry((t.chain, t.token_chain, t.token_address))
+                    .or_default();
                 if t.chain == t.token_chain {
                     src.credit(amount)?; // native lock
                 } else {
@@ -111,16 +116,18 @@ pub fn reconcile(
                     dst.credit(amount)?; // wrapped mint
                 }
             }
-            Record::Modification(m) => {
+            SnapshotRow::ModifyBalance(m) => {
                 report.modifications += 1;
                 let amount = Uint256::from_be_bytes(m.amount);
-                let acc = net.entry((m.chain_id, m.token_chain, m.token_address)).or_default();
+                let acc = net
+                    .entry((m.chain_id, m.token_chain, m.token_address))
+                    .or_default();
                 match m.modify_kind {
-                    ModifyKind::Add => acc.credit(amount)?,
-                    ModifyKind::Subtract => acc.debit(amount)?,
+                    ModificationKind::Add => acc.credit(amount)?,
+                    ModificationKind::Subtract => acc.debit(amount)?,
                 }
             }
-            Record::Account(a) => {
+            SnapshotRow::Balance(a) => {
                 report.accounts += 1;
                 committed.insert(
                     (a.chain, a.token_chain, a.token_address),
@@ -132,17 +139,26 @@ pub fn reconcile(
         }
     }
 
-    let fmt = |k: &Key| format!("chain={} token_chain={} token=0x{}", k.0, k.1, hex::encode(k.2));
+    let fmt = |k: &Key| {
+        format!(
+            "chain={} token_chain={} token=0x{}",
+            k.0,
+            k.1,
+            hex::encode(k.2)
+        )
+    };
 
     for (key, want) in &committed {
         match net.get(key).and_then(Net::balance) {
             Some(got) if got == *want => report.matched += 1,
-            Some(got) => report
-                .mismatches
-                .push(format!("MISMATCH {} committed={want:?} net={got:?}", fmt(key))),
-            None => report
-                .mismatches
-                .push(format!("MISMATCH {} committed={want:?} net=<negative>", fmt(key))),
+            Some(got) => report.mismatches.push(format!(
+                "MISMATCH {} committed={want:?} net={got:?}",
+                fmt(key)
+            )),
+            None => report.mismatches.push(format!(
+                "MISMATCH {} committed={want:?} net=<negative>",
+                fmt(key)
+            )),
         }
     }
     // Accounts with transfer activity but no committed balance row (should net to zero).
@@ -154,9 +170,10 @@ pub fn reconcile(
     unexpected.sort();
     for k in &unexpected {
         let got = net.get(k).and_then(Net::balance);
-        report
-            .mismatches
-            .push(format!("UNEXPECTED {} net={got:?} (no committed balance)", fmt(k)));
+        report.mismatches.push(format!(
+            "UNEXPECTED {} net={got:?} (no committed balance)",
+            fmt(k)
+        ));
     }
 
     Ok(report)

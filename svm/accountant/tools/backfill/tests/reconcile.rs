@@ -1,20 +1,25 @@
 //! Unit tests for the reconciliation comparison logic.
 //!
-//! The on-chain fetch path (gPA) against a *real validator* is
-//! integration-tested via Phase 9's surfpool e2e. The NTT decode-closure
-//! tests further down exercise the same fetch path's byte-offset parsing
-//! against a mock RPC instead, since surfpool e2e coverage is `#[ignore]`d
-//! and heavy — these give fast, always-on coverage of the parsing itself.
+//! The on-chain fetch path (gPA) against a *real validator* is covered by the
+//! surfpool e2e suites. The layout fetch tests further down drive the same
+//! path against a mock RPC for fast, always-on coverage of the parsing.
 
 mod common;
 
 use std::collections::HashMap;
 
+use ga_backfill::expected_accounts::derive_pda;
+use ga_backfill::expected_accounts::{
+    chain_registration_account, transceiver_hub_account, transceiver_peer_account,
+};
 use ga_backfill::reconcile::{
-    compare_balances, compare_maps, fetch_on_chain_relayer_registrations,
-    fetch_on_chain_transceiver_hubs, fetch_on_chain_transceiver_peers, load_expected_balances,
-    load_expected_relayer_registrations, load_expected_transceiver_hubs,
-    load_expected_transceiver_peers, BalanceKey, BalanceValue,
+    compare_balances, compare_maps, fetch_layouts, load_expected_balances, load_expected_layouts,
+    BalanceKey, BalanceValue,
+};
+use ga_backfill::snapshot::SnapshotRow;
+use global_accountant_definitions::{
+    BelongsToHub, ChainRegistrationKey, ChainRegistrationLayout, TransceiverHubKey,
+    TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout,
 };
 
 fn key(chain: u16, token_chain: u16, addr_seed: u8) -> BalanceKey {
@@ -87,7 +92,7 @@ fn value_mismatch_flagged() {
     assert_eq!(report.mismatched.len(), 1);
     let m = &report.mismatched[0];
     assert_eq!(m.key, key(1, 2, 0xAA));
-    assert_eq!(m.catalogue_balance, value(10));
+    assert_eq!(m.snapshot_balance, value(10));
     assert_eq!(m.on_chain_balance, value(99));
 }
 
@@ -113,7 +118,7 @@ fn mixed_diff_types() {
 #[test]
 fn load_expected_from_sample_fixture() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sample_catalogue.jsonl");
+        .join("tests/fixtures/sample_snapshot.jsonl");
     let expected = load_expected_balances(&path).expect("load");
     // Sample fixture has one account record.
     assert_eq!(expected.len(), 1);
@@ -156,7 +161,7 @@ fn load_expected_from_sample_fixture() {
 
 fn ntt_fixture() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sample_ntt_catalogue.jsonl")
+        .join("tests/fixtures/sample_ntt_snapshot.jsonl")
 }
 
 #[test]
@@ -182,32 +187,41 @@ fn compare_maps_generic_verdict() {
 #[test]
 fn loads_ntt_maps_from_fixture() {
     let path = ntt_fixture();
-    let relayers = load_expected_relayer_registrations(&path).expect("relayers");
-    assert_eq!(relayers.len(), 2);
-    assert_eq!(relayers[&2u16][31], 0x85);
-
-    let hubs = load_expected_transceiver_hubs(&path).expect("hubs");
-    assert_eq!(hubs.len(), 2);
-    let (hub_chain, hub_address) = hubs[&(2u16, {
+    let program_id = solana_pubkey::Pubkey::new_unique();
+    let addr = |seed: u8| {
         let mut a = [0u8; 32];
-        a[31] = 0x22;
+        a[31] = seed;
         a
-    })];
-    assert_eq!(hub_chain, 1);
-    assert_eq!(hub_address[31], 0x33);
+    };
 
-    let peers = load_expected_transceiver_peers(&path).expect("peers");
+    let registrations = load_expected_layouts(&path, &program_id, |r| match r {
+        SnapshotRow::RelayerChainRegistration(x) => vec![chain_registration_account(x)],
+        _ => vec![],
+    })
+    .expect("registrations");
+    assert_eq!(registrations.len(), 2);
+    let chain_2 = &registrations[&derive_pda(&program_id, &ChainRegistrationKey::new(2))];
+    assert_eq!(chain_2.emitter_address[31], 0x85);
+    assert_eq!(chain_2.governance_sequence(), 3_710_971_193_224_645_800);
+
+    let hubs = load_expected_layouts(&path, &program_id, |r| match r {
+        SnapshotRow::TransceiverHub(h) => vec![transceiver_hub_account(h)],
+        _ => vec![],
+    })
+    .expect("hubs");
+    assert_eq!(hubs.len(), 2);
+    let hub = &hubs[&derive_pda(&program_id, &TransceiverHubKey::new(2, addr(0x22)))];
+    assert_eq!(hub.hub_chain, 1);
+    assert_eq!(hub.hub_address[31], 0x33);
+
+    let peers = load_expected_layouts(&path, &program_id, |r| match r {
+        SnapshotRow::TransceiverPeer(p) => vec![transceiver_peer_account(p)],
+        _ => vec![],
+    })
+    .expect("peers");
     assert_eq!(peers.len(), 1);
-    let peer_address = peers[&(
-        2u16,
-        {
-            let mut a = [0u8; 32];
-            a[31] = 0x66;
-            a
-        },
-        4u16,
-    )];
-    assert_eq!(peer_address[31], 0x77);
+    let peer = &peers[&derive_pda(&program_id, &TransceiverPeerKey::new(2, addr(0x66), 4))];
+    assert_eq!(peer.peer_address[31], 0x77);
 }
 
 // Loads a real file into `load_expected_balances`, then compares it against
@@ -228,7 +242,7 @@ fn load_expected_balances_from_real_file_does_not_miskey_or_collide_similar_reco
         "{\"kind\":\"account\",\"chain\":2,\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"balance\":\"0x00000000000000000000000000000000000000000000000000000000000000c8\"}\n",
         "{\"kind\":\"account\",\"chain\":1,\"token_chain\":2,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000bb\",\"balance\":\"0x00000000000000000000000000000000000000000000000000000000000001f4\"}\n",
     );
-    std::fs::write(&path, jsonl).expect("write catalogue");
+    std::fs::write(&path, jsonl).expect("write snapshot");
 
     let expected = load_expected_balances(&path).expect("load");
     assert_eq!(
@@ -252,7 +266,7 @@ fn load_expected_balances_from_real_file_does_not_miskey_or_collide_similar_reco
     let mut actual = HashMap::new();
     actual.insert((1u16, 2u16, addr(0xaa)), value(0x64)); // matches
     actual.insert((2u16, 1u16, addr(0xaa)), value(0xFF)); // wrong value
-    // (1, 2, 0xbb) missing entirely from "on-chain" state.
+                                                          // (1, 2, 0xbb) missing entirely from "on-chain" state.
 
     let report = compare_balances(&expected, &actual);
     assert_eq!(report.matched, 1);
@@ -262,103 +276,66 @@ fn load_expected_balances_from_real_file_does_not_miskey_or_collide_similar_reco
     assert!(report.unexpected_on_chain.is_empty());
 }
 
-// NTT decode-closure byte-offset parsing, via a mock `getProgramAccounts`.
-// `fetch_on_chain_relayer_registrations` / `_transceiver_hubs` / `_peers`
-// each embed their decode logic as an inline closure with no standalone
-// testable function, so these drive the real public fetch functions
-// against `tests/common/mock_rpc.rs` rather than reimplementing the
-// byte-offset parsing a second time in the test.
+// Layout fetch via a mock `getProgramAccounts`. Each account sits at the PDA
+// its layout key derives, as `fetch_layouts` requires.
 
-fn le16(v: u16) -> [u8; 2] {
-    v.to_le_bytes()
+async fn fetch_one<L>(
+    layout: L,
+    key: &impl global_accountant_definitions::PdaSeeds,
+) -> HashMap<solana_pubkey::Pubkey, L>
+where
+    L: global_accountant_definitions::AccountLayout + ga_backfill::expected_accounts::PdaAccount,
+{
+    let program_id = solana_pubkey::Pubkey::new_unique();
+    let pda = derive_pda(&program_id, key);
+    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
+        common::mock_rpc::keyed_account_json(&pda, &program_id, bytemuck::bytes_of(&layout)),
+    ]);
+    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
+    let map = fetch_layouts::<L>(&rpc, &program_id).await.expect("fetch");
+    assert_eq!(map.len(), 1);
+    assert!(map.contains_key(&pda), "keyed by the canonical PDA");
+    map
 }
 
 #[tokio::test]
-async fn fetch_relayer_registrations_decodes_real_byte_layout() {
-    // Layout (64B): tag@0, _pad0@1, chain@2 (LE u16), _padding@4 (28B),
-    // emitter_address@32 (32B).
-    let mut data = vec![0u8; 64];
-    data[0] = 5; // AccountTag::RelayerChainRegistration
-    data[2..4].copy_from_slice(&le16(42));
-    data[32..64].fill(0x9); // recognisable emitter pattern
-    data[63] = 0x77; // distinguishable tail byte
-
-    let program_id = solana_pubkey::Pubkey::new_unique();
-    let pda = solana_pubkey::Pubkey::new_unique();
-    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
-        common::mock_rpc::keyed_account_json(&pda, &program_id, &data),
-    ]);
-    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
-
-    let map = fetch_on_chain_relayer_registrations(&rpc, &program_id)
-        .await
-        .expect("fetch");
-    assert_eq!(map.len(), 1);
-    let emitter = map.get(&42u16).expect("chain 42 present");
-    assert_eq!(emitter[0], 0x9);
-    assert_eq!(emitter[31], 0x77);
+async fn fetch_chain_registrations_decodes_real_byte_layout() {
+    let mut emitter = [0x9u8; 32];
+    emitter[31] = 0x77;
+    let layout = ChainRegistrationLayout::new(42, emitter, 7);
+    let map = fetch_one(layout, &ChainRegistrationKey::new(42)).await;
+    let got = map.values().next().expect("one entry");
+    assert_eq!(got.chain, 42);
+    assert_eq!(got.emitter_address, emitter);
+    assert_eq!(got.governance_sequence(), 7);
 }
 
 #[tokio::test]
 async fn fetch_transceiver_hubs_decodes_real_byte_layout() {
-    // Layout (70B): tag@0, _pad0@1, chain@2 (LE u16), hub_chain@4 (LE u16),
-    // address@6 (32B), hub_address@38 (32B).
-    let mut data = vec![0u8; 70];
-    data[0] = 6; // AccountTag::TransceiverHub
-    data[2..4].copy_from_slice(&le16(11));
-    data[4..6].copy_from_slice(&le16(22));
-    data[6..38].fill(0xAB);
-    data[6] = 0x01; // distinguish first byte of address from fill pattern
-    data[38..70].fill(0xCD);
-    data[69] = 0x02;
-
-    let program_id = solana_pubkey::Pubkey::new_unique();
-    let pda = solana_pubkey::Pubkey::new_unique();
-    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
-        common::mock_rpc::keyed_account_json(&pda, &program_id, &data),
-    ]);
-    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
-
-    let map = fetch_on_chain_transceiver_hubs(&rpc, &program_id)
-        .await
-        .expect("fetch");
-    assert_eq!(map.len(), 1);
-    let mut expected_address = [0xABu8; 32];
-    expected_address[0] = 0x01;
-    let (hub_chain, hub_address) = map
-        .get(&(11u16, expected_address))
-        .expect("(chain=11, address) present");
-    assert_eq!(*hub_chain, 22);
-    assert_eq!(hub_address[0], 0xCD);
-    assert_eq!(hub_address[31], 0x02);
+    let mut address = [0xABu8; 32];
+    address[0] = 0x01;
+    let mut hub_address = [0xCDu8; 32];
+    hub_address[31] = 0x02;
+    let key = TransceiverHubKey::new(11, address);
+    let layout =
+        TransceiverHubLayout::new(key, BelongsToHub(TransceiverHubKey::new(22, hub_address)));
+    let map = fetch_one(layout, &key).await;
+    let got = map.values().next().expect("one entry");
+    assert_eq!(got.chain, 11);
+    assert_eq!(got.address, address);
+    assert_eq!(got.hub_chain, 22);
+    assert_eq!(got.hub_address, hub_address);
 }
 
 #[tokio::test]
 async fn fetch_transceiver_peers_decodes_real_byte_layout() {
-    // Layout (70B): tag@0, _pad0@1, chain@2 (LE u16), dest_chain@4 (LE u16),
-    // address@6 (32B), peer_address@38 (32B).
-    let mut data = vec![0u8; 70];
-    data[0] = 7; // AccountTag::TransceiverPeer
-    data[2..4].copy_from_slice(&le16(3));
-    data[4..6].copy_from_slice(&le16(4));
-    data[6..38].fill(0xEE);
-    data[38..70].fill(0xFA);
-    data[69] = 0x55;
-
-    let program_id = solana_pubkey::Pubkey::new_unique();
-    let pda = solana_pubkey::Pubkey::new_unique();
-    let mock = common::mock_rpc::MockRpc::start_with_program_accounts(vec![
-        common::mock_rpc::keyed_account_json(&pda, &program_id, &data),
-    ]);
-    let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(mock.url());
-
-    let map = fetch_on_chain_transceiver_peers(&rpc, &program_id)
-        .await
-        .expect("fetch");
-    assert_eq!(map.len(), 1);
-    let peer_address = map
-        .get(&(3u16, [0xEEu8; 32], 4u16))
-        .expect("(chain=3, address, dest_chain=4) present");
-    assert_eq!(peer_address[0], 0xFA);
-    assert_eq!(peer_address[31], 0x55);
+    let mut peer_address = [0xFAu8; 32];
+    peer_address[31] = 0x55;
+    let key = TransceiverPeerKey::new(3, [0xEEu8; 32], 4);
+    let layout = TransceiverPeerLayout::new(key, peer_address);
+    let map = fetch_one(layout, &key).await;
+    let got = map.values().next().expect("one entry");
+    assert_eq!((got.chain, got.dest_chain), (3, 4));
+    assert_eq!(got.address, [0xEEu8; 32]);
+    assert_eq!(got.peer_address, peer_address);
 }

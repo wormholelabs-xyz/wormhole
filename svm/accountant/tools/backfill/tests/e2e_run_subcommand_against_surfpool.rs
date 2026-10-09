@@ -5,12 +5,12 @@
 //! Spawns the real binary (`env!("CARGO_BIN_EXE_ga-backfill")`) as a
 //! subprocess twice:
 //!
-//! 1. First invocation, against the full test catalogue: let it run for a
+//! 1. First invocation, against the full test snapshot: let it run for a
 //!    bounded time, then `SIGKILL` it mid-flight — a real process crash.
-//! 2. Second invocation, identical arguments (same catalogue, same cursor
+//! 2. Second invocation, identical arguments (same snapshot, same progress file
 //!    file, same program): the resume. It must complete cleanly — reconcile
 //!    runs by default and a non-clean reconciliation is a hard failure
-//!    (non-zero exit) — proving no chunk was silently lost and nothing was
+//!    (non-zero exit) — proving no batch was silently lost and nothing was
 //!    catastrophically double-applied.
 //!
 //! ## Timing note
@@ -19,23 +19,23 @@
 //! wall-clock race. To make that race wide and reliable, this test starts
 //! surfpool with a slowed slot time (see
 //! `SurfpoolOptions::offline_with_slot_time_ms`) so a short, fixed sleep
-//! reliably lands mid-run. The catalogue is ordered so the single
-//! `BackfillBalance` chunk (the only chunk kind that is NOT safely
-//! idempotent to resubmit — see `preflight.rs`'s doc) is first and is
-//! virtually certain to have landed before the kill, so the chunk(s)
+//! reliably lands mid-run. The snapshot is ordered so the single
+//! `BackfillBalance` batch (the only batch kind that is NOT safely
+//! idempotent to resubmit — see `onchain_check.rs`'s doc) is first and is
+//! virtually certain to have landed before the kill, so the batch(s)
 //! actually caught in-flight are `BackfillNoReplay` ones, safe (if
 //! wasteful) to resubmit.
 //!
-//! Note: `run`'s verify-before-skip preflight only re-checks the
-//! cursor-claimed prefix, not chunks still in flight beyond it — a
-//! `BackfillBalance`/NTT-map chunk that lands on-chain but crashes before
-//! its cursor flush is durably written could hit a hard `InvalidPda` halt
-//! on resume. This test's catalogue ordering sidesteps that case rather
+//! Note: `run`'s verify-before-skip check only re-checks the
+//! progress file-claimed prefix, not batches still in flight beyond it — a
+//! `BackfillBalance`/NTT-map batch that lands on-chain but crashes before
+//! its progress file flush is durably written could hit a hard `InvalidPda` halt
+//! on resume. This test's snapshot ordering sidesteps that case rather
 //! than exercising it.
 //!
 //! `#[ignore]` by default — heavy and requires the backfill `.so` to be
 //! built first. Run with:
-//!   `just build && cargo test --test e2e_run_subcommand_against_surfpool -- --ignored --nocapture`
+//!   `just tools-e2e` (or, from the tool directory, the test-env prefix in `justfile` then `cargo test --locked --test e2e_run_subcommand_against_surfpool -- --ignored`)
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
@@ -53,16 +53,18 @@ use ga_backfill::reconcile::reconcile_balances;
 use global_accountant_definitions::NOREPLAY_PROGRAM_ID;
 
 mod common;
-use common::surfpool::{deploy_program, noreplay_so_path, parent_so_path, start_surfpool, SurfpoolOptions};
+use common::surfpool::{
+    deploy_program, noreplay_so_path, parent_so_path, start_surfpool, SurfpoolOptions,
+};
 
 const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
 
-/// 2 accounts → 1 `BackfillBalance` chunk (first, per catalogue sort order),
+/// 2 accounts → 1 `BackfillBalance` batch (first, per snapshot sort order),
 /// then 10 distinct-emitter single-transfer records → 10 separate
-/// `BackfillNoReplay` chunks (the chunker closes a chunk on every emitter
-/// change). 11 chunks total — enough to give a wide, real window between
+/// `BackfillNoReplay` batches (the batcher closes a batch on every emitter
+/// change). 11 batches total — enough to give a wide, real window between
 /// "some work done" and "all work done" at `concurrency: 1`.
-fn build_test_catalogue() -> String {
+fn build_test_snapshot() -> String {
     let mut out = String::new();
     out.push_str(
         "{\"kind\":\"account\",\"chain\":1,\"token_chain\":2,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"balance\":\"0x0000000000000000000000000000000000000000000000000000000000001234\"}\n",
@@ -72,7 +74,7 @@ fn build_test_catalogue() -> String {
     );
     for i in 0u8..10 {
         out.push_str(&format!(
-            "{{\"kind\":\"transfer\",\"chain\":1,\"emitter\":\"0x{:062x}{:02x}\",\"sequence\":1,\"digest\":\"0x{:062x}{:02x}\",\"amount\":\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"recipient_chain\":2}}\n",
+            "{{\"kind\":\"transfer\",\"chain\":2,\"emitter\":\"0x{:062x}{:02x}\",\"sequence\":1,\"digest\":\"0x{:062x}{:02x}\",\"amount\":\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"recipient_chain\":2}}\n",
             0, i, 0, i
         ));
     }
@@ -100,17 +102,17 @@ fn pump(mut child: std::process::Child, tag: &'static str) -> std::process::Chil
     child
 }
 
-/// Read `last_confirmed_chunk_index` out of a cursor.json without needing
-/// to reconstruct the exact catalogue-content-hash the binary computed
+/// Read `batches_done` out of a progress.json without needing
+/// to reconstruct the exact snapshot-content-hash the binary computed
 /// internally (private to `main.rs`) — this only needs the raw counter.
-fn cursor_skip_count(cursor_path: &std::path::Path) -> Option<u64> {
-    let bytes = std::fs::read(cursor_path).ok()?;
+fn progress_skip_count(progress_path: &std::path::Path) -> Option<u64> {
+    let bytes = std::fs::read(progress_path).ok()?;
     let v: Value = serde_json::from_slice(&bytes).ok()?;
-    v.get("last_confirmed_chunk_index")?.as_u64()
+    v.get("batches_done")?.as_u64()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "spawns surfpool + ga-backfill subprocesses; deploys real .so; requires `just build` first"]
+#[ignore = "spawns surfpool + ga-backfill subprocesses; deploys real .so; run via `just tools-e2e`"]
 async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
     let bin_path = env!("CARGO_BIN_EXE_ga-backfill");
 
@@ -118,7 +120,7 @@ async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
     let backfill_so_path = parent_so_path(BACKFILL_PROGRAM_NAME);
     let backfill_bytes = std::fs::read(&backfill_so_path).unwrap_or_else(|e| {
         panic!(
-            "missing {}: {e}. Run `just build` in the parent workspace first.",
+            "missing {}: {e}. Run `just build-devnet` in the parent workspace first.",
             backfill_so_path.display()
         )
     });
@@ -140,39 +142,46 @@ async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
     // private key for it is known.
     let program_id = Pubkey::new_from_array(global_accountant_backfill::ID.to_bytes());
     deploy_program(&rpc_url, &program_id, &backfill_bytes);
-    deploy_program(&rpc_url, &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID), &noreplay_bytes);
+    deploy_program(
+        &rpc_url,
+        &Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+        &noreplay_bytes,
+    );
     eprintln!("[run-e2e] program_id={program_id}");
 
     // ---------- Fund payer (must equal BACKFILL_AUTHORITY) ----------
     let payer = Keypair::new_from_array([1u8; 32]);
-    let async_rpc = AsyncRpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::confirmed());
+    let async_rpc =
+        AsyncRpcClient::new_with_commitment(rpc_url.clone(), CommitmentConfig::confirmed());
     async_rpc
         .request_airdrop(&payer.pubkey(), 10_000_000_000_000)
         .await
         .expect("airdrop");
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // ---------- Write catalogue + payer keypair file ----------
+    // ---------- Write snapshot + payer keypair file ----------
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let catalogue_path = tmp.path().join("catalogue.jsonl");
-    std::fs::write(&catalogue_path, build_test_catalogue()).expect("write catalogue");
-    let cursor_path = tmp.path().join("cursor.json");
+    let snapshot_path = tmp.path().join("catalogue.jsonl");
+    std::fs::write(&snapshot_path, build_test_snapshot()).expect("write snapshot");
+    let progress_path = tmp.path().join("progress.json");
     let payer_path = tmp.path().join("payer.json");
     solana_keypair::write_keypair_file(&payer, &payer_path).expect("write payer keypair file");
 
     let common_args = |no_reconcile: bool| -> Vec<String> {
         let mut args = vec![
             "run".to_string(),
-            "--catalogue".to_string(),
-            catalogue_path.to_string_lossy().into_owned(),
+            "--snapshot".to_string(),
+            snapshot_path.to_string_lossy().into_owned(),
+            "--accountant".to_string(),
+            "wtt".to_string(),
             "--program-id".to_string(),
             program_id.to_string(),
             "--payer".to_string(),
             payer_path.to_string_lossy().into_owned(),
             "--rpc-url".to_string(),
             rpc_url.clone(),
-            "--cursor".to_string(),
-            cursor_path.to_string_lossy().into_owned(),
+            "--progress-file".to_string(),
+            progress_path.to_string_lossy().into_owned(),
             "--concurrency".to_string(),
             "1".to_string(),
             "--max-retries".to_string(),
@@ -204,14 +213,14 @@ async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
     let _ = child.kill();
     let _ = child.wait();
 
-    let after_kill = cursor_skip_count(&cursor_path);
-    eprintln!("[run-e2e] cursor after SIGKILL: {after_kill:?} (11 total chunks)");
+    let after_kill = progress_skip_count(&progress_path);
+    eprintln!("[run-e2e] progress_file after SIGKILL: {after_kill:?} (11 total batches)");
     // Best-effort timing assertion — see the module doc's timing note.
     if let Some(n) = after_kill {
         assert!(
             n < 11,
             "expected the kill to interrupt the run before completion, but \
-             the cursor already shows all 11 chunks confirmed — the sleep \
+             the progress file already shows all 11 batches confirmed — the sleep \
              before SIGKILL needs to be shorter (or the slot time slower) \
              for this test's timing margin to hold"
         );
@@ -237,14 +246,15 @@ async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
          final state; got exit status {status:?}"
     );
 
-    let after_resume = cursor_skip_count(&cursor_path).expect("cursor exists after resume");
+    let after_resume =
+        progress_skip_count(&progress_path).expect("progress_file exists after resume");
     assert_eq!(
         after_resume, 11,
-        "cursor must reflect all 11 chunks confirmed after the resume completes"
+        "progress_file must reflect all 11 batches confirmed after the resume completes"
     );
 
     // ---------- Independent, out-of-process confirmation ----------
-    let report = reconcile_balances(&async_rpc, &program_id, &catalogue_path)
+    let report = reconcile_balances(&async_rpc, &program_id, &snapshot_path)
         .await
         .expect("independent reconcile");
     eprintln!(
@@ -254,8 +264,14 @@ async fn run_subcommand_survives_a_real_crash_mid_run_and_resumes_cleanly() {
         report.missing_from_chain.len(),
         report.unexpected_on_chain.len()
     );
-    assert!(report.is_clean(), "independent reconcile found diffs: {report:#?}");
-    assert_eq!(report.matched, 2, "both Balance entries present and correct");
+    assert!(
+        report.is_clean(),
+        "independent reconcile found findings: {report:#?}"
+    );
+    assert_eq!(
+        report.matched, 2,
+        "both Balance entries present and correct"
+    );
 
     eprintln!("[run-e2e] crash-mid-run -> resume -> reconcile cycle completed cleanly");
 }

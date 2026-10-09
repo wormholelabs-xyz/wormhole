@@ -1,14 +1,14 @@
 //! End-to-end orchestrator integration test against a real surfpool validator.
 //!
 //! Spins up surfpool, deploys the backfill program + noreplay, writes a tiny
-//! handcrafted catalogue file, then drives the full orchestrator path:
-//! catalogue read → chunker → tx_builder → submitter → cursor → reconcile.
-//! Asserts on-chain state matches the catalogue and the `BACKFILL_AUTHORITY`
+//! handcrafted snapshot file, then drives the full orchestrator path:
+//! snapshot read → batcher → tx_builder → submitter → progress file → reconcile.
+//! Asserts on-chain state matches the snapshot and the `BACKFILL_AUTHORITY`
 //! const-check rejects a tx signed by a stranger.
 //!
 //! `#[ignore]` by default — heavy and requires the backfill `.so` to be
 //! built first. Run with:
-//!   `just build && cargo test --test e2e_against_surfpool -- --ignored --nocapture`
+//!   `just tools-e2e` (or, from the tool directory, the test-env prefix in `justfile` then `cargo test --locked --test e2e_against_surfpool -- --ignored`)
 
 #![allow(clippy::too_many_arguments)]
 
@@ -22,12 +22,13 @@ use solana_pubkey::Pubkey;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
 
-use ga_backfill::catalogue::CatalogueReader;
-use ga_backfill::chunker::Chunker;
-use ga_backfill::cursor::Cursor;
+use ga_backfill::accountant::Accountant;
+use ga_backfill::batcher::Batcher;
+use ga_backfill::progress::ProgressFile;
 use ga_backfill::reconcile::reconcile_balances;
-use ga_backfill::submitter::{submit_chunks, SubmitterConfig};
-use ga_backfill::tx_builder::{build_backfill_noreplay_ix, BackfillCtx};
+use ga_backfill::snapshot::SnapshotReader;
+use ga_backfill::submitter::{submit_batches, SubmitterConfig};
+use ga_backfill::tx_builder::{build_backfill_noreplay_ix, BackfillTarget};
 use global_accountant_definitions::NOREPLAY_PROGRAM_ID;
 
 mod common;
@@ -37,33 +38,33 @@ use common::surfpool::{
 
 const BACKFILL_PROGRAM_NAME: &str = "global_accountant_backfill";
 
-const TEST_CATALOGUE: &str = concat!(
-    // 2 accounts so we get one Balance chunk
+const TEST_SNAPSHOT: &str = concat!(
+    // 2 accounts so we get one Balance batch
     "{\"kind\":\"account\",\"chain\":1,\"token_chain\":2,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"balance\":\"0x0000000000000000000000000000000000000000000000000000000000001234\"}\n",
     "{\"kind\":\"account\",\"chain\":1,\"token_chain\":2,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000bb\",\"balance\":\"0x0000000000000000000000000000000000000000000000000000000000005678\"}\n",
-    // 1 registration — orchestrator will skip (Phase 7)
-    "{\"kind\":\"registration\",\"chain\":2,\"registered_emitter\":\"0x0000000000000000000000000000000000000000000000000000000000000001\"}\n",
-    // 3 transfers same emitter → 1 BackfillNoReplay chunk
+    // 1 registration → 1 BackfillChainRegistration batch
+    "{\"kind\":\"registration\",\"chain\":2,\"registered_emitter\":\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"sequence\":18159247149180908832}\n",
+    // 3 transfers same emitter → 1 BackfillNoReplay batch
     "{\"kind\":\"transfer\",\"chain\":1,\"emitter\":\"0x00000000000000000000000000000000000000000000000000000000000000ec\",\"sequence\":5,\"digest\":\"0x000000000000000000000000000000000000000000000000000000000000aaaa\",\"amount\":\"0x0000000000000000000000000000000000000000000000000000000000000001\",\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"recipient_chain\":2}\n",
     "{\"kind\":\"transfer\",\"chain\":1,\"emitter\":\"0x00000000000000000000000000000000000000000000000000000000000000ec\",\"sequence\":6,\"digest\":\"0x000000000000000000000000000000000000000000000000000000000000bbbb\",\"amount\":\"0x0000000000000000000000000000000000000000000000000000000000000002\",\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"recipient_chain\":2}\n",
     "{\"kind\":\"transfer\",\"chain\":1,\"emitter\":\"0x00000000000000000000000000000000000000000000000000000000000000ec\",\"sequence\":7,\"digest\":\"0x000000000000000000000000000000000000000000000000000000000000cccc\",\"amount\":\"0x0000000000000000000000000000000000000000000000000000000000000003\",\"token_chain\":1,\"token_address\":\"0x00000000000000000000000000000000000000000000000000000000000000aa\",\"recipient_chain\":2}\n",
 );
 
-fn write_test_catalogue() -> (tempfile::TempDir, PathBuf) {
+fn write_test_snapshot() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let path = tmp.path().join("test_catalogue.jsonl");
-    std::fs::write(&path, TEST_CATALOGUE).expect("write catalogue");
+    let path = tmp.path().join("test_snapshot.jsonl");
+    std::fs::write(&path, TEST_SNAPSHOT).expect("write snapshot");
     (tmp, path)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "spawns surfpool subprocess; deploys real .so; requires `just build` first"]
+#[ignore = "spawns surfpool subprocess; deploys real .so; run via `just tools-e2e`"]
 async fn e2e_orchestrator_full_lifecycle() {
     // ---------- Boot surfpool + deploy ----------
     let backfill_so_path = parent_so_path(BACKFILL_PROGRAM_NAME);
     let backfill_bytes = std::fs::read(&backfill_so_path).unwrap_or_else(|e| {
         panic!(
-            "missing {}: {e}. Run `just build` in the parent workspace first.",
+            "missing {}: {e}. Run `just build-devnet` in the parent workspace first.",
             backfill_so_path.display()
         )
     });
@@ -105,32 +106,36 @@ async fn e2e_orchestrator_full_lifecycle() {
     tokio::time::sleep(Duration::from_millis(500)).await;
     eprintln!("[e2e] payer={}", payer.pubkey());
 
-    // ---------- Build catalogue + cursor ----------
-    let (_tmp, catalogue_path) = write_test_catalogue();
-    let catalogue_hash = "0xe2e-test-content-hash";
-    let cursor_path = catalogue_path.with_file_name("cursor.json");
-    let cursor = Cursor::load_or_init(
-        cursor_path.clone(),
-        &catalogue_path,
-        catalogue_hash,
+    // ---------- Build snapshot + progress file ----------
+    let (_tmp, snapshot_path) = write_test_snapshot();
+    let snapshot_hash = "0xe2e-test-content-hash";
+    let progress_path = snapshot_path.with_file_name("progress.json");
+    let progress_file = ProgressFile::load_or_init(
+        progress_path.clone(),
+        &snapshot_path,
+        snapshot_hash,
         &program_id.to_string(),
     )
-    .expect("init cursor");
-    assert_eq!(cursor.skip_count(), 0, "fresh cursor must skip 0");
+    .expect("init progress_file");
+    assert_eq!(
+        progress_file.batches_done(),
+        0,
+        "fresh progress_file must skip 0"
+    );
 
-    // ---------- Plan chunks ----------
-    let chunks: Vec<_> = Chunker::new(
-        CatalogueReader::open(&catalogue_path)
-            .expect("open catalogue")
+    // ---------- Plan batches ----------
+    let batches: Vec<_> = Batcher::new(
+        SnapshotReader::open(&snapshot_path)
+            .expect("open snapshot")
             .filter_map(Result::ok),
     )
     .collect();
-    eprintln!("[e2e] planned {} chunks", chunks.len());
-    // Expect: 1 BackfillBalance + 1 DeferredRegistration + 1 BackfillNoReplay = 3
-    assert_eq!(chunks.len(), 3);
+    eprintln!("[e2e] planned {} batches", batches.len());
+    // Expect: 1 BackfillBalance + 1 BackfillChainRegistration + 1 BackfillNoReplay = 3
+    assert_eq!(batches.len(), 3);
 
     // ---------- Run orchestrator submitter ----------
-    let ctx = BackfillCtx::new(program_id, payer.pubkey());
+    let target = BackfillTarget::new(Accountant::Wtt, program_id, payer.pubkey());
     let payer_clone = payer.insecure_clone();
     let config = SubmitterConfig {
         rpc_url: rpc_url.clone(),
@@ -139,17 +144,16 @@ async fn e2e_orchestrator_full_lifecycle() {
         initial_retry_delay_ms: 200,
         max_retry_delay_ms: 2_000,
     };
-    let stats = submit_chunks(ctx.clone(), payer_clone, config, chunks)
+    let stats = submit_batches(target.clone(), payer_clone, config, batches)
         .await
-        .expect("submit_chunks");
+        .expect("submit_batches");
     eprintln!("[e2e] submission stats: {stats:?}");
-    // 2 backfill txs (1 NoReplay + 1 Balance) submitted, 1 deferred (registration) skipped.
-    assert_eq!(stats.submitted, 2);
-    assert_eq!(stats.deferred_skipped, 1);
-    assert_eq!(stats.already_accounted, 0);
+    // 3 backfill txs: NoReplay, Balance, ChainRegistration.
+    assert_eq!(stats.submitted, 3);
+    assert_eq!(stats.already_written, 0);
 
     // ---------- Reconcile ----------
-    let report = reconcile_balances(&async_rpc, &program_id, &catalogue_path)
+    let report = reconcile_balances(&async_rpc, &program_id, &snapshot_path)
         .await
         .expect("reconcile");
     eprintln!(
@@ -159,15 +163,14 @@ async fn e2e_orchestrator_full_lifecycle() {
         report.missing_from_chain.len(),
         report.unexpected_on_chain.len()
     );
-    assert!(report.is_clean(), "reconcile diffs: {report:#?}");
+    assert!(report.is_clean(), "reconcile findings: {report:#?}");
     assert_eq!(report.matched, 2);
 
     // ---------- Wrong-signer control: stranger must be rejected ----------
     //
     // Builds the same `BackfillNoReplay` ix the authority sends, but signs
     // with a fresh keypair. The program's `require_authority` check must
-    // reject with `UnauthorizedCaller` (Custom(3)) — that's the only thing
-    // standing between an attacker and arbitrary state writes.
+    // reject with `UnauthorizedCaller` (Custom(33)).
     let stranger = Keypair::new();
     async_rpc
         .request_airdrop(&stranger.pubkey(), 1_000_000_000)
@@ -175,7 +178,7 @@ async fn e2e_orchestrator_full_lifecycle() {
         .expect("airdrop stranger");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let replay_chunk = vec![ga_backfill::catalogue::TransferRecord {
+    let replay_batch = vec![ga_backfill::snapshot::TransferRow {
         chain: 1,
         emitter: {
             let mut e = [0u8; 32];
@@ -193,15 +196,10 @@ async fn e2e_orchestrator_full_lifecycle() {
         },
         recipient_chain: 2,
     }];
-    // Bypass `BackfillCtx::new`'s assertion — we deliberately want a ctx
-    // whose payer != BACKFILL_AUTHORITY so we can hit the on-chain check.
-    let stranger_ctx = BackfillCtx {
-        program_id,
-        payer: stranger.pubkey(),
-        system_program: ctx.system_program,
-        noreplay_program: ctx.noreplay_program,
-    };
-    let stranger_ix = build_backfill_noreplay_ix(&stranger_ctx, &replay_chunk);
+    // Swap the payer meta after building, bypassing `BackfillTarget::new`'s
+    // assertion so the on-chain authority check is what rejects the tx.
+    let mut stranger_ix = build_backfill_noreplay_ix(&target, &replay_batch);
+    stranger_ix.accounts[0].pubkey = stranger.pubkey();
     let blockhash = async_rpc.get_latest_blockhash().await.expect("blockhash");
     let stranger_tx = Transaction::new_signed_with_payer(
         std::slice::from_ref(&stranger_ix),
@@ -214,8 +212,8 @@ async fn e2e_orchestrator_full_lifecycle() {
     assert!(result.is_err(), "wrong-signer submission must fail");
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
-        err_msg.contains("0x3"),
-        "expected UnauthorizedCaller (custom error 3) in error message; got: {err_msg}"
+        err_msg.contains("0x21"),
+        "expected UnauthorizedCaller (custom error 33) in error message; got: {err_msg}"
     );
 
     eprintln!("[e2e] all phases green");

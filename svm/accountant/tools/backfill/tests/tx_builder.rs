@@ -1,35 +1,39 @@
 //! Integration tests for the tx builder.
 
-use ga_backfill::catalogue::{
-    AccountRecord, RelayerChainRegistrationRecord, TransceiverHubRecord, TransceiverPeerRecord,
-    TransferRecord,
+use ga_backfill::accountant::Accountant;
+use ga_backfill::expected_accounts::derive_pda;
+use ga_backfill::noreplay::{derive_noreplay_authority_pda, derive_noreplay_bucket};
+use ga_backfill::snapshot::{
+    BalanceRow, ChainRegistrationRow, TransceiverHubRow, TransceiverPeerRow, TransferRow,
 };
 use ga_backfill::tx_builder::{
-    backfill_authority_pubkey, build_backfill_balance_ix, build_backfill_noreplay_ix,
-    build_backfill_relayer_registration_ix, build_backfill_transceiver_hub_ix,
-    build_backfill_transceiver_peer_ix, derive_balance_pda, derive_noreplay_authority_pda,
-    derive_noreplay_bucket, derive_relayer_registration_pda, derive_transceiver_hub_pda,
-    derive_transceiver_peer_pda, BackfillCtx, BACKFILL_BALANCE_DISC, BACKFILL_NOREPLAY_DISC,
-    BACKFILL_RELAYER_REGISTRATION_DISC, BACKFILL_TRANSCEIVER_HUB_DISC,
-    BACKFILL_TRANSCEIVER_PEER_DISC,
+    build_backfill_balance_ix, build_backfill_chain_registration_ix, build_backfill_noreplay_ix,
+    build_backfill_transceiver_hub_ix, build_backfill_transceiver_peer_ix, BackfillTarget,
 };
+use global_accountant_definitions::{
+    BalanceAccountKey, ChainRegistrationKey, RegisterChainKey, TransceiverHubKey,
+    TransceiverPeerKey,
+};
+use solana_keypair::Keypair;
 use solana_pubkey::Pubkey;
+use solana_signer::Signer;
 
-fn make_relayer(chain: u16, emitter_seed: u8) -> RelayerChainRegistrationRecord {
+fn make_relayer(chain: u16, emitter_seed: u8) -> ChainRegistrationRow {
     let mut registered_emitter = [0u8; 32];
     registered_emitter[31] = emitter_seed;
-    RelayerChainRegistrationRecord {
+    ChainRegistrationRow {
         chain,
         registered_emitter,
+        sequence: 0x0102_0304_0506_0700 | u64::from(chain),
     }
 }
 
-fn make_hub(chain: u16, addr_seed: u8, hub_chain: u16, hub_seed: u8) -> TransceiverHubRecord {
+fn make_hub(chain: u16, addr_seed: u8, hub_chain: u16, hub_seed: u8) -> TransceiverHubRow {
     let mut address = [0u8; 32];
     address[31] = addr_seed;
     let mut hub_address = [0u8; 32];
     hub_address[31] = hub_seed;
-    TransceiverHubRecord {
+    TransceiverHubRow {
         chain,
         address,
         hub_chain,
@@ -37,12 +41,12 @@ fn make_hub(chain: u16, addr_seed: u8, hub_chain: u16, hub_seed: u8) -> Transcei
     }
 }
 
-fn make_peer(chain: u16, addr_seed: u8, dest_chain: u16, peer_seed: u8) -> TransceiverPeerRecord {
+fn make_peer(chain: u16, addr_seed: u8, dest_chain: u16, peer_seed: u8) -> TransceiverPeerRow {
     let mut address = [0u8; 32];
     address[31] = addr_seed;
     let mut peer_address = [0u8; 32];
     peer_address[31] = peer_seed;
-    TransceiverPeerRecord {
+    TransceiverPeerRow {
         chain,
         address,
         dest_chain,
@@ -50,26 +54,39 @@ fn make_peer(chain: u16, addr_seed: u8, dest_chain: u16, peer_seed: u8) -> Trans
     }
 }
 
-/// The orchestrator's signer must match the program's compile-time
-/// `BACKFILL_AUTHORITY` const. `BackfillCtx::new` asserts this; the tests use
-/// the same pubkey throughout.
-fn payer() -> Pubkey {
-    backfill_authority_pubkey()
+/// The signer must match the accountant's compile-time backfill authority;
+/// `BackfillTarget::new` asserts this. Test authorities: `[1u8; 32]` (WTT),
+/// `[2u8; 32]` (NTT).
+fn payer(accountant: Accountant) -> Pubkey {
+    let seed = match accountant {
+        Accountant::Wtt => 1u8,
+        Accountant::Ntt => 2u8,
+    };
+    Keypair::new_from_array([seed; 32]).pubkey()
 }
 
-fn ctx() -> BackfillCtx {
-    BackfillCtx::new(
-        Pubkey::new_from_array([7u8; 32]), // program_id
-        payer(),
+fn target() -> BackfillTarget {
+    BackfillTarget::new(
+        Accountant::Wtt,
+        Accountant::Wtt.program_id(),
+        payer(Accountant::Wtt),
     )
 }
 
-fn make_transfer(chain: u16, emitter_seed: u8, sequence: u64) -> TransferRecord {
+fn ntt_ctx() -> BackfillTarget {
+    BackfillTarget::new(
+        Accountant::Ntt,
+        Accountant::Ntt.program_id(),
+        payer(Accountant::Ntt),
+    )
+}
+
+fn make_transfer(chain: u16, emitter_seed: u8, sequence: u64) -> TransferRow {
     let mut emitter = [0u8; 32];
     emitter[31] = emitter_seed;
     let mut digest = [0u8; 32];
     digest[31] = (sequence & 0xff) as u8;
-    TransferRecord {
+    TransferRow {
         chain,
         emitter,
         sequence,
@@ -81,12 +98,12 @@ fn make_transfer(chain: u16, emitter_seed: u8, sequence: u64) -> TransferRecord 
     }
 }
 
-fn make_account(chain: u16, token_chain: u16, addr_seed: u8, balance_low: u8) -> AccountRecord {
+fn make_account(chain: u16, token_chain: u16, addr_seed: u8, balance_low: u8) -> BalanceRow {
     let mut token_address = [0u8; 32];
     token_address[31] = addr_seed;
     let mut balance = [0u8; 32];
     balance[31] = balance_low;
-    AccountRecord {
+    BalanceRow {
         chain,
         token_chain,
         token_address,
@@ -100,7 +117,7 @@ fn make_account(chain: u16, token_chain: u16, addr_seed: u8, balance_low: u8) ->
 
 #[test]
 fn pda_derivations_are_deterministic() {
-    let c = ctx();
+    let c = target();
     let np_auth = derive_noreplay_authority_pda(&c.program_id);
     let np_auth2 = derive_noreplay_authority_pda(&c.program_id);
     assert_eq!(np_auth, np_auth2);
@@ -108,11 +125,12 @@ fn pda_derivations_are_deterministic() {
 
 #[test]
 fn noreplay_bucket_changes_at_1024_boundary() {
-    let np_auth = derive_noreplay_authority_pda(&ctx().program_id);
+    let np_auth = derive_noreplay_authority_pda(&target().program_id);
     let emitter = [0xAAu8; 32];
-    let bucket_0 = derive_noreplay_bucket(&np_auth, 1, &emitter, 0);
-    let bucket_0b = derive_noreplay_bucket(&np_auth, 1, &emitter, 1023);
-    let bucket_1 = derive_noreplay_bucket(&np_auth, 1, &emitter, 1024);
+    let noreplay = target().noreplay_program;
+    let bucket_0 = derive_noreplay_bucket(&noreplay, &np_auth, 1, &emitter, 0);
+    let bucket_0b = derive_noreplay_bucket(&noreplay, &np_auth, 1, &emitter, 1023);
+    let bucket_1 = derive_noreplay_bucket(&noreplay, &np_auth, 1, &emitter, 1024);
     assert_eq!(
         bucket_0, bucket_0b,
         "sequences 0..1023 must hit the same bucket"
@@ -122,24 +140,25 @@ fn noreplay_bucket_changes_at_1024_boundary() {
 
 #[test]
 fn balance_pda_depends_on_full_triple() {
-    let c = ctx();
-    let pda_a = derive_balance_pda(&c.program_id, 1, 2, &[0u8; 32]);
-    let pda_b = derive_balance_pda(&c.program_id, 1, 2, &[1u8; 32]); // diff token_address
-    let pda_c = derive_balance_pda(&c.program_id, 1, 3, &[0u8; 32]); // diff token_chain
-    let pda_d = derive_balance_pda(&c.program_id, 2, 2, &[0u8; 32]); // diff chain
+    let c = target();
+    let pda_a = derive_pda(&c.program_id, &BalanceAccountKey::new(1, 2, [0u8; 32]));
+    let pda_b = derive_pda(&c.program_id, &BalanceAccountKey::new(1, 2, [1u8; 32])); // diff token_address
+    let pda_c = derive_pda(&c.program_id, &BalanceAccountKey::new(1, 3, [0u8; 32])); // diff token_chain
+    let pda_d = derive_pda(&c.program_id, &BalanceAccountKey::new(2, 2, [0u8; 32])); // diff chain
     assert_ne!(pda_a, pda_b);
     assert_ne!(pda_a, pda_c);
     assert_ne!(pda_a, pda_d);
 }
 
 #[test]
-#[should_panic(expected = "does not match BACKFILL_AUTHORITY")]
+#[should_panic(expected = "is not the wtt backfill authority")]
 fn ctx_new_rejects_wrong_payer() {
-    // Any pubkey other than `BACKFILL_AUTHORITY` must trip the assertion;
-    // otherwise the orchestrator would silently send txs that get rejected
-    // on-chain with `UnauthorizedCaller`.
-    BackfillCtx::new(
-        Pubkey::new_from_array([7u8; 32]),
+    // Any pubkey other than the backfill authority must trip the assertion;
+    // otherwise the orchestrator would send txs that the program rejects
+    // with `UnauthorizedCaller`.
+    BackfillTarget::new(
+        Accountant::Wtt,
+        Accountant::Wtt.program_id(),
         Pubkey::new_from_array([0xDEu8; 32]),
     );
 }
@@ -150,11 +169,11 @@ fn ctx_new_rejects_wrong_payer() {
 
 #[test]
 fn backfill_noreplay_single_entry_wire() {
-    let c = ctx();
+    let c = target();
     let ix = build_backfill_noreplay_ix(&c, &[make_transfer(2, 0xAA, 42)]);
 
     // Wire: [disc][group_count][chain emitter entry_count [seq digest]]
-    assert_eq!(ix.data[0], BACKFILL_NOREPLAY_DISC);
+    assert_eq!(ix.data[0], c.accountant.discriminators().noreplay);
     assert_eq!(ix.data[1], 1, "one group");
     // group 0: chain (BE 2)
     assert_eq!(&ix.data[2..4], &[0x00, 0x02]);
@@ -172,7 +191,7 @@ fn backfill_noreplay_single_entry_wire() {
 #[test]
 fn backfill_noreplay_groups_by_emitter() {
     // 2 from emitter AA, 3 from emitter BB. Builder should emit 2 groups.
-    let c = ctx();
+    let c = target();
     let transfers = vec![
         make_transfer(1, 0xAA, 5),
         make_transfer(1, 0xAA, 6),
@@ -198,7 +217,7 @@ fn backfill_noreplay_groups_by_emitter() {
 #[test]
 fn backfill_noreplay_account_list_shape() {
     // 3 transfers in 1 bucket → fixed 4 + 1 bucket pda = 5 accounts
-    let c = ctx();
+    let c = target();
     let transfers = vec![
         make_transfer(1, 0xAA, 5),
         make_transfer(1, 0xAA, 6),
@@ -229,7 +248,7 @@ fn backfill_noreplay_account_list_shape() {
 #[test]
 fn backfill_noreplay_buckets_span_1024_boundary() {
     // Transfers spanning sequences 1022..1025 produce 2 unique bucket PDAs.
-    let c = ctx();
+    let c = target();
     let transfers = vec![
         make_transfer(1, 0xAA, 1022),
         make_transfer(1, 0xAA, 1023),
@@ -247,11 +266,11 @@ fn backfill_noreplay_buckets_span_1024_boundary() {
 
 #[test]
 fn backfill_balance_single_entry_wire() {
-    let c = ctx();
+    let c = target();
     let ix = build_backfill_balance_ix(&c, &[make_account(1, 2, 0xCC, 0x42)]);
 
     // Wire: [disc][count] [chain token_chain token_address balance]
-    assert_eq!(ix.data[0], BACKFILL_BALANCE_DISC);
+    assert_eq!(ix.data[0], c.accountant.discriminators().balance);
     assert_eq!(ix.data[1], 1);
     assert_eq!(&ix.data[2..4], &[0x00, 0x01]); // chain
     assert_eq!(&ix.data[4..6], &[0x00, 0x02]); // token_chain
@@ -262,7 +281,7 @@ fn backfill_balance_single_entry_wire() {
 
 #[test]
 fn backfill_balance_bulk_entries_in_order() {
-    let c = ctx();
+    let c = target();
     let accounts = vec![
         make_account(1, 2, 0xAA, 1),
         make_account(1, 2, 0xBB, 2),
@@ -280,7 +299,7 @@ fn backfill_balance_bulk_entries_in_order() {
 
 #[test]
 fn backfill_balance_account_list_shape() {
-    let c = ctx();
+    let c = target();
     let accounts = vec![make_account(1, 2, 0xAA, 1), make_account(1, 2, 0xBB, 2)];
     let ix = build_backfill_balance_ix(&c, &accounts);
 
@@ -294,11 +313,17 @@ fn backfill_balance_account_list_shape() {
     assert!(ix.accounts[3].is_writable);
     assert_eq!(
         ix.accounts[2].pubkey,
-        derive_balance_pda(&c.program_id, 1, 2, &accounts[0].token_address)
+        derive_pda(
+            &c.program_id,
+            &BalanceAccountKey::new(1, 2, accounts[0].token_address)
+        )
     );
     assert_eq!(
         ix.accounts[3].pubkey,
-        derive_balance_pda(&c.program_id, 1, 2, &accounts[1].token_address)
+        derive_pda(
+            &c.program_id,
+            &BalanceAccountKey::new(1, 2, accounts[1].token_address)
+        )
     );
 }
 
@@ -308,87 +333,90 @@ fn backfill_balance_account_list_shape() {
 
 #[test]
 fn discriminators_match_program_enum() {
-    // The orchestrator's discriminator constants MUST match the program's
-    // `Instruction` enum. Drift here would silently route txs to the wrong
-    // handler.
+    // Drift here would route txs to the wrong handler.
     use global_accountant_backfill::Instruction as PI;
-    assert_eq!(BACKFILL_NOREPLAY_DISC, PI::BackfillNoReplay as u8);
-    assert_eq!(BACKFILL_BALANCE_DISC, PI::BackfillBalance as u8);
+    let d = Accountant::Wtt.discriminators();
+    assert_eq!(d.noreplay, PI::BackfillNoReplay as u8);
+    assert_eq!(d.balance, PI::BackfillBalance as u8);
+    assert_eq!(d.modify_balance, PI::BackfillModifyBalance as u8);
+    assert_eq!(d.chain_registration, PI::BackfillChainRegistration as u8);
+    assert_eq!(d.transceiver_hub, None);
+    assert_eq!(d.transceiver_peer, None);
 }
 
 #[test]
 fn ntt_discriminators_match_program_enum() {
-    // The NTT-native disc constants MUST match the NTT program's enum, sourced
-    // the same way as the WTT discs.
     use ntt_global_accountant_backfill::Instruction as NI;
+    let d = Accountant::Ntt.discriminators();
+    assert_eq!(d.noreplay, NI::BackfillNoReplay as u8);
+    assert_eq!(d.balance, NI::BackfillBalance as u8);
+    assert_eq!(d.modify_balance, NI::BackfillModifyBalance as u8);
     assert_eq!(
-        BACKFILL_RELAYER_REGISTRATION_DISC,
-        NI::BackfillRelayerRegistration as u8
+        d.chain_registration,
+        NI::BackfillRelayerChainRegistration as u8
     );
-    assert_eq!(
-        BACKFILL_TRANSCEIVER_HUB_DISC,
-        NI::BackfillTransceiverHub as u8
-    );
-    assert_eq!(
-        BACKFILL_TRANSCEIVER_PEER_DISC,
-        NI::BackfillTransceiverPeer as u8
-    );
-    // Sanity: the literal wire values per the program handlers.
-    assert_eq!(BACKFILL_RELAYER_REGISTRATION_DISC, 2);
-    assert_eq!(BACKFILL_TRANSCEIVER_HUB_DISC, 3);
-    assert_eq!(BACKFILL_TRANSCEIVER_PEER_DISC, 4);
+    assert_eq!(d.transceiver_hub, Some(NI::BackfillTransceiverHub as u8));
+    assert_eq!(d.transceiver_peer, Some(NI::BackfillTransceiverPeer as u8));
+    // Literal wire values per the program's `#[instruction(discriminator = N)]`.
+    assert_eq!(d.chain_registration, 3);
+    assert_eq!(d.transceiver_hub, Some(4));
+    assert_eq!(d.transceiver_peer, Some(5));
 }
 
 // ============================================================================
-// BackfillRelayerRegistration tx builder
+// BackfillRelayerChainRegistration tx builder
 // ============================================================================
 
 #[test]
 fn relayer_registration_single_entry_wire() {
-    let c = ctx();
-    let ix = build_backfill_relayer_registration_ix(&c, &[make_relayer(2, 0x85)]);
-    // Wire: [disc][count] [chain(BE 2) emitter_address(32)]
-    assert_eq!(ix.data[0], BACKFILL_RELAYER_REGISTRATION_DISC);
+    let c = ntt_ctx();
+    let entry = make_relayer(2, 0x85);
+    let ix = build_backfill_chain_registration_ix(&c, std::slice::from_ref(&entry));
+    // Wire: [disc][count] [chain(BE 2) sequence(BE 8) emitter(32)]
+    assert_eq!(ix.data[0], c.accountant.discriminators().chain_registration);
     assert_eq!(ix.data[1], 1);
     assert_eq!(&ix.data[2..4], &[0x00, 0x02]); // chain BE
-    assert_eq!(ix.data[35], 0x85); // emitter last byte
-    assert_eq!(ix.data.len(), 2 + 34);
+    assert_eq!(&ix.data[4..12], &entry.sequence.to_be_bytes()); // sequence BE
+    assert_eq!(ix.data[43], 0x85); // emitter last byte
+    assert_eq!(ix.data.len(), 2 + 42);
 }
 
 #[test]
 fn relayer_registration_bulk_wire_and_pdas() {
-    let c = ctx();
+    let c = ntt_ctx();
     let entries = vec![make_relayer(2, 0xAA), make_relayer(5, 0xBB)];
-    let ix = build_backfill_relayer_registration_ix(&c, &entries);
+    let ix = build_backfill_chain_registration_ix(&c, &entries);
     assert_eq!(ix.data[1], 2);
-    assert_eq!(ix.data.len(), 2 + 2 * 34);
-    // entry 1 starts at 2 + 34 = 36
-    assert_eq!(&ix.data[36..38], &[0x00, 0x05]);
-    assert_eq!(ix.data[36 + 33], 0xBB);
+    assert_eq!(ix.data.len(), 2 + 2 * 42);
+    // entry 1 starts at 2 + 42 = 44
+    assert_eq!(&ix.data[44..46], &[0x00, 0x05]);
+    assert_eq!(ix.data[44 + 41], 0xBB);
 
-    // Account list: payer (signer/writable) + system + 2 PDAs (writable, in order)
-    assert_eq!(ix.accounts.len(), 4);
+    // payer + system + per entry (ChainRegistration, RegisterChain), writable, in order
+    assert_eq!(ix.accounts.len(), 6);
     assert_eq!(ix.accounts[0].pubkey, c.payer);
     assert!(ix.accounts[0].is_signer && ix.accounts[0].is_writable);
     assert_eq!(ix.accounts[1].pubkey, c.system_program);
     assert!(!ix.accounts[1].is_writable);
-    assert!(ix.accounts[2].is_writable);
-    assert_eq!(
-        ix.accounts[2].pubkey,
-        derive_relayer_registration_pda(&c.program_id, 2)
-    );
-    assert_eq!(
-        ix.accounts[3].pubkey,
-        derive_relayer_registration_pda(&c.program_id, 5)
-    );
+    assert!(ix.accounts[2..].iter().all(|m| m.is_writable));
+    for (i, e) in entries.iter().enumerate() {
+        assert_eq!(
+            ix.accounts[2 + 2 * i].pubkey,
+            derive_pda(&c.program_id, &ChainRegistrationKey::new(e.chain))
+        );
+        assert_eq!(
+            ix.accounts[3 + 2 * i].pubkey,
+            derive_pda(&c.program_id, &RegisterChainKey::new(e.sequence))
+        );
+    }
 }
 
 #[test]
 fn relayer_registration_pda_depends_on_chain() {
-    let c = ctx();
+    let c = ntt_ctx();
     assert_ne!(
-        derive_relayer_registration_pda(&c.program_id, 2),
-        derive_relayer_registration_pda(&c.program_id, 3)
+        derive_pda(&c.program_id, &ChainRegistrationKey::new(2)),
+        derive_pda(&c.program_id, &ChainRegistrationKey::new(3))
     );
 }
 
@@ -398,10 +426,13 @@ fn relayer_registration_pda_depends_on_chain() {
 
 #[test]
 fn transceiver_hub_single_entry_wire() {
-    let c = ctx();
-    let ix = build_backfill_transceiver_hub_ix(&c, &[make_hub(2, 0x22, 1, 0x33)]);
+    let c = ntt_ctx();
+    let ix = build_backfill_transceiver_hub_ix(&c, &[make_hub(2, 0x22, 1, 0x33)]).expect("ntt");
     // Wire: [disc][count] [chain(2) address(32) hub_chain(2) hub_address(32)]
-    assert_eq!(ix.data[0], BACKFILL_TRANSCEIVER_HUB_DISC);
+    assert_eq!(
+        Some(ix.data[0]),
+        c.accountant.discriminators().transceiver_hub
+    );
     assert_eq!(ix.data[1], 1);
     // Entry at offset 2: chain@2..4, address@4..36, hub_chain@36..38, hub_address@38..70.
     assert_eq!(&ix.data[2..4], &[0x00, 0x02]); // chain BE
@@ -413,9 +444,9 @@ fn transceiver_hub_single_entry_wire() {
 
 #[test]
 fn transceiver_hub_bulk_wire_and_pdas() {
-    let c = ctx();
+    let c = ntt_ctx();
     let entries = vec![make_hub(2, 0x22, 1, 0x33), make_hub(2, 0x44, 1, 0x55)];
-    let ix = build_backfill_transceiver_hub_ix(&c, &entries);
+    let ix = build_backfill_transceiver_hub_ix(&c, &entries).expect("ntt");
     assert_eq!(ix.data[1], 2);
     assert_eq!(ix.data.len(), 2 + 2 * 68);
     // entry 1 starts at 2+68=70; address occupies 70+2..70+34, last byte @ 70+33 = 103
@@ -427,20 +458,26 @@ fn transceiver_hub_bulk_wire_and_pdas() {
     assert!(ix.accounts[2].is_writable);
     assert_eq!(
         ix.accounts[2].pubkey,
-        derive_transceiver_hub_pda(&c.program_id, 2, &entries[0].address)
+        derive_pda(
+            &c.program_id,
+            &TransceiverHubKey::new(2, entries[0].address)
+        )
     );
     assert_eq!(
         ix.accounts[3].pubkey,
-        derive_transceiver_hub_pda(&c.program_id, 2, &entries[1].address)
+        derive_pda(
+            &c.program_id,
+            &TransceiverHubKey::new(2, entries[1].address)
+        )
     );
 }
 
 #[test]
 fn transceiver_hub_pda_depends_on_chain_and_address() {
-    let c = ctx();
-    let a = derive_transceiver_hub_pda(&c.program_id, 2, &[1u8; 32]);
-    let b = derive_transceiver_hub_pda(&c.program_id, 2, &[2u8; 32]); // diff address
-    let d = derive_transceiver_hub_pda(&c.program_id, 3, &[1u8; 32]); // diff chain
+    let c = target();
+    let a = derive_pda(&c.program_id, &TransceiverHubKey::new(2, [1u8; 32]));
+    let b = derive_pda(&c.program_id, &TransceiverHubKey::new(2, [2u8; 32])); // diff address
+    let d = derive_pda(&c.program_id, &TransceiverHubKey::new(3, [1u8; 32])); // diff chain
     assert_ne!(a, b);
     assert_ne!(a, d);
 }
@@ -451,10 +488,13 @@ fn transceiver_hub_pda_depends_on_chain_and_address() {
 
 #[test]
 fn transceiver_peer_single_entry_wire() {
-    let c = ctx();
-    let ix = build_backfill_transceiver_peer_ix(&c, &[make_peer(2, 0x66, 4, 0x77)]);
+    let c = ntt_ctx();
+    let ix = build_backfill_transceiver_peer_ix(&c, &[make_peer(2, 0x66, 4, 0x77)]).expect("ntt");
     // Wire: [disc][count] [chain(2) address(32) dest_chain(2) peer_address(32)]
-    assert_eq!(ix.data[0], BACKFILL_TRANSCEIVER_PEER_DISC);
+    assert_eq!(
+        Some(ix.data[0]),
+        c.accountant.discriminators().transceiver_peer
+    );
     assert_eq!(ix.data[1], 1);
     // Entry at offset 2: chain@2..4, address@4..36, dest_chain@36..38, peer_address@38..70.
     assert_eq!(&ix.data[2..4], &[0x00, 0x02]); // chain BE
@@ -466,9 +506,9 @@ fn transceiver_peer_single_entry_wire() {
 
 #[test]
 fn transceiver_peer_bulk_wire_and_pdas() {
-    let c = ctx();
+    let c = ntt_ctx();
     let entries = vec![make_peer(2, 0x66, 4, 0x77), make_peer(2, 0x66, 5, 0x88)];
-    let ix = build_backfill_transceiver_peer_ix(&c, &entries);
+    let ix = build_backfill_transceiver_peer_ix(&c, &entries).expect("ntt");
     assert_eq!(ix.data[1], 2);
     assert_eq!(ix.data.len(), 2 + 2 * 68);
     // entry 1 dest_chain at 2 + 68 + 34 = 104
@@ -480,21 +520,27 @@ fn transceiver_peer_bulk_wire_and_pdas() {
     assert!(ix.accounts[2].is_writable);
     assert_eq!(
         ix.accounts[2].pubkey,
-        derive_transceiver_peer_pda(&c.program_id, 2, &entries[0].address, 4)
+        derive_pda(
+            &c.program_id,
+            &TransceiverPeerKey::new(2, entries[0].address, 4)
+        )
     );
     assert_eq!(
         ix.accounts[3].pubkey,
-        derive_transceiver_peer_pda(&c.program_id, 2, &entries[1].address, 5)
+        derive_pda(
+            &c.program_id,
+            &TransceiverPeerKey::new(2, entries[1].address, 5)
+        )
     );
 }
 
 #[test]
 fn transceiver_peer_pda_depends_on_full_triple() {
-    let c = ctx();
-    let a = derive_transceiver_peer_pda(&c.program_id, 2, &[1u8; 32], 4);
-    let b = derive_transceiver_peer_pda(&c.program_id, 2, &[1u8; 32], 5); // diff dest_chain
-    let d = derive_transceiver_peer_pda(&c.program_id, 2, &[2u8; 32], 4); // diff address
-    let e = derive_transceiver_peer_pda(&c.program_id, 3, &[1u8; 32], 4); // diff chain
+    let c = target();
+    let a = derive_pda(&c.program_id, &TransceiverPeerKey::new(2, [1u8; 32], 4));
+    let b = derive_pda(&c.program_id, &TransceiverPeerKey::new(2, [1u8; 32], 5)); // diff dest_chain
+    let d = derive_pda(&c.program_id, &TransceiverPeerKey::new(2, [2u8; 32], 4)); // diff address
+    let e = derive_pda(&c.program_id, &TransceiverPeerKey::new(3, [1u8; 32], 4)); // diff chain
     assert_ne!(a, b);
     assert_ne!(a, d);
     assert_ne!(a, e);
@@ -502,9 +548,15 @@ fn transceiver_peer_pda_depends_on_full_triple() {
 
 #[test]
 fn backfill_authority_pubkey_matches_program_const() {
-    // Sanity: the orchestrator's view of `BACKFILL_AUTHORITY` matches the
-    // program crate's compile-time const. If you bumped the const but forgot
-    // to bump the test-suite default keypair, this fails first.
+    // The test keypairs must match the authorities compiled into the program
+    // crates; a bumped const without a bumped keypair fails here first.
     use global_accountant_backfill::BACKFILL_AUTHORITY;
-    assert_eq!(backfill_authority_pubkey().to_bytes(), BACKFILL_AUTHORITY);
+    use ntt_global_accountant_backfill::NTT_BACKFILL_AUTHORITY;
+    assert_eq!(Accountant::Wtt.authority().to_bytes(), BACKFILL_AUTHORITY);
+    assert_eq!(payer(Accountant::Wtt).to_bytes(), BACKFILL_AUTHORITY);
+    assert_eq!(
+        Accountant::Ntt.authority().to_bytes(),
+        NTT_BACKFILL_AUTHORITY
+    );
+    assert_eq!(payer(Accountant::Ntt).to_bytes(), NTT_BACKFILL_AUTHORITY);
 }

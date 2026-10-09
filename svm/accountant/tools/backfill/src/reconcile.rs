@@ -1,41 +1,34 @@
 //! Post-backfill reconciliation.
 //!
-//! Walks the on-chain Balance PDAs (via `getProgramAccounts` filtered by data
-//! size) and compares them against the catalogue's Account records. Mismatches
-//! get logged for human review; missing/extra entries are flagged separately.
+//! Walks the program's accounts per class (`getProgramAccounts` filtered by
+//! the offset-0 tag and the exact layout size) and compares them against the
+//! snapshot. Balances keep a per-key report; every other class compares whole
+//! layouts keyed by PDA address, so a field, padding or tag difference is a
+//! mismatch and an account at a non-canonical address is an error.
 //!
 //! The fetch + parse are split from the comparison so the comparison logic
-//! is unit-testable without a real RPC. Phase 9's surfpool e2e exercises the
-//! full path.
+//! is unit-testable without a real RPC.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
-use global_accountant_definitions::{
-    AccountTag, BalanceAccountLayout, RelayerChainRegistrationLayout, TransceiverHubLayout,
-    TransceiverPeerLayout,
-};
+use anyhow::{bail, Context, Result};
+use global_accountant_definitions::{AccountLayout, BalanceAccountLayout};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
 use solana_client::rpc_filter::{Memcmp, RpcFilterType};
 use solana_pubkey::Pubkey;
 
-use crate::catalogue::{CatalogueReader, Record};
+use crate::expected_accounts::PdaAccount;
+use crate::noreplay::{fetch_buckets, group_by_bucket, BucketAccount};
+use crate::snapshot::{SnapshotReader, SnapshotRow};
+use crate::tx_builder::BackfillTarget;
 
-/// Balance layout size on disk. Sourced from the shared definitions crate so it
-/// can never drift from the on-chain layout (currently 70 bytes: tag (1) +
-/// _pad0 (1) + chain (2) + token_chain (2) + token_address (32) + balance (32)).
-pub const BALANCE_LAYOUT_LEN: u64 = BalanceAccountLayout::LEN as u64;
+/// Rows per account class, both sides. Mainnet: 17,367 balances, tens of the others.
+pub const MAX_RECONCILE_ROWS: usize = 100_000;
 
-/// RelayerChainRegistration layout size on disk (64 bytes).
-pub const RELAYER_REGISTRATION_LAYOUT_LEN: u64 = RelayerChainRegistrationLayout::LEN as u64;
-
-/// TransceiverHub layout size on disk (70 bytes).
-pub const TRANSCEIVER_HUB_LAYOUT_LEN: u64 = TransceiverHubLayout::LEN as u64;
-
-/// TransceiverPeer layout size on disk (70 bytes).
-pub const TRANSCEIVER_PEER_LAYOUT_LEN: u64 = TransceiverPeerLayout::LEN as u64;
+/// Snapshot transfers checked for NoReplay marks. Mainnet: 5,516,669.
+pub const MAX_RECONCILE_TRANSFERS: usize = 16_000_000;
 
 /// Identity of one Balance entry — `(chain, token_chain, token_address)`.
 pub type BalanceKey = (u16, u16, [u8; 32]);
@@ -66,13 +59,13 @@ impl ReconciliationReport {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Mismatch {
     pub key: BalanceKey,
-    pub catalogue_balance: BalanceValue,
+    pub snapshot_balance: BalanceValue,
     pub on_chain_balance: BalanceValue,
 }
 
 /// Schema-neutral map comparison verdict — counts of matches and the three
-/// diff classes, without binding to a concrete key/value type. Used to
-/// reconcile the NTT-native maps, whose key/value shapes differ from Balance.
+/// diff classes, without binding to a concrete key/value type. Used for every
+/// non-balance account class.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct MapVerdict {
     pub matched: usize,
@@ -91,8 +84,8 @@ impl MapVerdict {
     }
 }
 
-/// Pure comparison over any keyed map — no I/O. The two HashMaps come from
-/// independent sources (catalogue file, on-chain gPA fetch).
+/// Pure comparison over any keyed map. The two HashMaps come from
+/// independent sources (snapshot file, on-chain gPA fetch).
 pub fn compare_maps<K, V>(expected: &HashMap<K, V>, actual: &HashMap<K, V>) -> MapVerdict
 where
     K: std::cmp::Eq + std::hash::Hash,
@@ -114,69 +107,59 @@ where
     verdict
 }
 
-/// Pure comparison — no I/O. The two HashMaps come from independent sources
-/// (catalogue file, on-chain gPA fetch). Retains the Balance-specific report
-/// (with per-key mismatch detail) that the WTT reconcile path consumes.
+/// Pure comparison. The two HashMaps come from independent sources
+/// (snapshot file, on-chain gPA fetch). Retains the Balance-specific report
+/// (with per-key mismatch detail) that `run` prints.
 pub fn compare_balances(
     expected: &HashMap<BalanceKey, BalanceValue>,
     actual: &HashMap<BalanceKey, BalanceValue>,
 ) -> ReconciliationReport {
     let mut report = ReconciliationReport::default();
-    let actual_keys: HashSet<&BalanceKey> = actual.keys().collect();
     for (key, expected_value) in expected {
         match actual.get(key) {
             Some(actual_value) if actual_value == expected_value => report.matched += 1,
             Some(actual_value) => report.mismatched.push(Mismatch {
                 key: *key,
-                catalogue_balance: *expected_value,
+                snapshot_balance: *expected_value,
                 on_chain_balance: *actual_value,
             }),
             None => report.missing_from_chain.push(*key),
         }
     }
-    for actual_key in actual_keys {
-        if !expected.contains_key(actual_key) {
-            report.unexpected_on_chain.push(*actual_key);
-        }
-    }
+    report
+        .unexpected_on_chain
+        .extend(actual.keys().filter(|k| !expected.contains_key(*k)));
     report
 }
 
-/// Walk the catalogue once and build the expected balance map.
+/// Walk the snapshot once and build the expected balance map.
 pub fn load_expected_balances(path: &Path) -> Result<HashMap<BalanceKey, BalanceValue>> {
     let mut out = HashMap::new();
-    for record in CatalogueReader::open(path).context("open catalogue")? {
-        if let Record::Account(a) = record? {
-            out.insert((a.chain, a.token_chain, a.token_address), a.balance);
+    for row in SnapshotReader::open(path).context("open snapshot")? {
+        if let SnapshotRow::Balance(a) = row? {
+            if out.len() == MAX_RECONCILE_ROWS {
+                bail!("account rows exceed MAX_RECONCILE_ROWS ({MAX_RECONCILE_ROWS})");
+            }
+            let key = (a.chain, a.token_chain, a.token_address);
+            if out.insert(key, a.balance).is_some() {
+                bail!("snapshot holds two account rows for {key:?}");
+            }
         }
     }
     Ok(out)
 }
 
-/// Fetch every PDA of one account class from the backfill program via
-/// `getProgramAccounts`, discriminated by the offset-0 account `tag` — the
-/// canonical filter every consumer uses — plus a `dataSize` belt-and-suspenders.
-///
-/// The `(tag, layout_len)` pair parameterizes the filter so the same fetch
-/// drives every map: Balance (`AccountTag::Balance`, 70), and the three
-/// NTT-native maps (`RelayerChainRegistration`/5/64, `TransceiverHub`/6/70,
-/// `TransceiverPeer`/7/70). Each returned account is validated to the exact
-/// `layout_len` before its raw bytes are handed to `decode`.
-pub async fn fetch_tagged_accounts<K, V, F>(
-    rpc: &RpcClient,
-    program_id: &Pubkey,
-    tag: AccountTag,
-    layout_len: u64,
-    decode: F,
-) -> Result<HashMap<K, V>>
+/// Every program account of layout `L`, keyed by address. Each account is
+/// parsed through the definitions layout, its tag is checked, and its address
+/// must be the PDA its own key derives; any other address is an error.
+pub async fn fetch_layouts<L>(rpc: &RpcClient, program_id: &Pubkey) -> Result<HashMap<Pubkey, L>>
 where
-    K: std::cmp::Eq + std::hash::Hash,
-    F: Fn(&[u8]) -> (K, V),
+    L: AccountLayout + PdaAccount,
 {
     let config = RpcProgramAccountsConfig {
         filters: Some(vec![
-            RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, vec![tag as u8])),
-            RpcFilterType::DataSize(layout_len),
+            RpcFilterType::Memcmp(Memcmp::new_raw_bytes(0, vec![<L as AccountLayout>::TAG])),
+            RpcFilterType::DataSize(<L as AccountLayout>::LEN as u64),
         ]),
         ..Default::default()
     };
@@ -184,186 +167,161 @@ where
     let accounts = rpc
         .get_program_accounts_with_config(program_id, config)
         .await
-        .with_context(|| format!("getProgramAccounts(tag={}, len={layout_len})", tag as u8))?;
+        .with_context(|| format!("getProgramAccounts(tag={})", <L as AccountLayout>::TAG))?;
+    if accounts.len() > MAX_RECONCILE_ROWS {
+        bail!(
+            "{} accounts with tag {} exceed MAX_RECONCILE_ROWS",
+            accounts.len(),
+            <L as AccountLayout>::TAG
+        );
+    }
     let mut out = HashMap::with_capacity(accounts.len());
-    for (_pubkey, acc) in accounts {
-        if acc.data.len() != layout_len as usize {
-            return Err(anyhow!(
-                "unexpected account data length {} (want {layout_len})",
-                acc.data.len(),
-            ));
+    for (address, account) in accounts {
+        if account.data.len() != <L as AccountLayout>::LEN {
+            bail!(
+                "account {address}: {} bytes under the size filter",
+                account.data.len()
+            );
         }
-        let (k, v) = decode(&acc.data);
-        out.insert(k, v);
+        let layout: L = bytemuck::pod_read_unaligned(&account.data);
+        if layout.tag() != <L as AccountLayout>::TAG {
+            bail!(
+                "account {address}: tag {} under filter {}",
+                layout.tag(),
+                <L as AccountLayout>::TAG
+            );
+        }
+        let canonical = layout.address(program_id);
+        if canonical != address {
+            bail!("account {address}: layout key derives {canonical}");
+        }
+        if out.insert(address, layout).is_some() {
+            bail!("getProgramAccounts returned {address} twice");
+        }
     }
     Ok(out)
 }
 
-/// Fetch every Balance PDA from the backfill program. Thin wrapper over
-/// [`fetch_tagged_accounts`] with the Balance tag/size and decoder.
+/// Snapshot rows mapped to the layouts the backfill writes, keyed by PDA address.
+pub fn load_expected_layouts<L>(
+    path: &Path,
+    program_id: &Pubkey,
+    layouts: impl Fn(&SnapshotRow) -> Vec<L>,
+) -> Result<HashMap<Pubkey, L>>
+where
+    L: PdaAccount,
+{
+    let mut out = HashMap::new();
+    for row in SnapshotReader::open(path).context("open snapshot")? {
+        for layout in layouts(&row?) {
+            if out.len() == MAX_RECONCILE_ROWS {
+                bail!("snapshot rows exceed MAX_RECONCILE_ROWS ({MAX_RECONCILE_ROWS})");
+            }
+            let address = layout.address(program_id);
+            if out.insert(address, layout).is_some() {
+                bail!("snapshot maps two rows to PDA {address}");
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Every Balance PDA, keyed by `(chain, token_chain, token_address)`.
 pub async fn fetch_on_chain_balances(
     rpc: &RpcClient,
     program_id: &Pubkey,
 ) -> Result<HashMap<BalanceKey, BalanceValue>> {
-    fetch_tagged_accounts(
-        rpc,
-        program_id,
-        AccountTag::Balance,
-        BALANCE_LAYOUT_LEN,
-        |data| {
-            // Layout: tag@0, _pad0@1, chain@2, token_chain@4, token_address@6, balance@38.
-            let chain = u16::from_le_bytes([data[2], data[3]]);
-            let token_chain = u16::from_le_bytes([data[4], data[5]]);
-            let mut token_address = [0u8; 32];
-            token_address.copy_from_slice(&data[6..38]);
-            let mut balance = [0u8; 32];
-            balance.copy_from_slice(&data[38..70]);
-            ((chain, token_chain, token_address), balance)
-        },
-    )
-    .await
+    let layouts = fetch_layouts::<BalanceAccountLayout>(rpc, program_id).await?;
+    Ok(layouts
+        .into_values()
+        .map(|l| ((l.chain, l.token_chain, l.token_address), l.balance.0))
+        .collect())
 }
 
-/// End-to-end balance reconciliation: load catalogue, fetch on-chain state,
+/// End-to-end balance reconciliation: load snapshot, fetch on-chain state,
 /// compare.
 pub async fn reconcile_balances(
     rpc: &RpcClient,
     program_id: &Pubkey,
-    catalogue_path: &Path,
+    snapshot_path: &Path,
 ) -> Result<ReconciliationReport> {
-    let expected = load_expected_balances(catalogue_path)?;
+    let expected = load_expected_balances(snapshot_path)?;
     let actual = fetch_on_chain_balances(rpc, program_id).await?;
     Ok(compare_balances(&expected, &actual))
 }
 
-// ============================================================================
-// NTT-native maps
-// ============================================================================
-//
-// Each map reuses the schema-neutral `compare_balances` comparison over a
-// `(key, value)` HashMap — the report's "balance" field names read as generic
-// "value" here. Keys mirror the program's PDA seed tuples; values are the
-// remaining stored fields.
-
-/// Identity of one RelayerChainRegistration entry — `chain`.
-pub type RelayerRegistrationKey = u16;
-/// Stored value — the 32-byte registered emitter address.
-pub type RelayerRegistrationValue = [u8; 32];
-
-/// Identity of one TransceiverHub entry — `(chain, address)`.
-pub type TransceiverHubKey = (u16, [u8; 32]);
-/// Stored value — `(hub_chain, hub_address)`.
-pub type TransceiverHubValue = (u16, [u8; 32]);
-
-/// Identity of one TransceiverPeer entry — `(chain, address, dest_chain)`.
-pub type TransceiverPeerKey = (u16, [u8; 32], u16);
-/// Stored value — the 32-byte peer address.
-pub type TransceiverPeerValue = [u8; 32];
-
-/// Walk the catalogue once and build the expected relayer-registration map.
-pub fn load_expected_relayer_registrations(
-    path: &Path,
-) -> Result<HashMap<RelayerRegistrationKey, RelayerRegistrationValue>> {
-    let mut out = HashMap::new();
-    for record in CatalogueReader::open(path).context("open catalogue")? {
-        if let Record::RelayerChainRegistration(r) = record? {
-            out.insert(r.chain, r.registered_emitter);
-        }
-    }
-    Ok(out)
-}
-
-/// Walk the catalogue once and build the expected transceiver-hub map.
-pub fn load_expected_transceiver_hubs(
-    path: &Path,
-) -> Result<HashMap<TransceiverHubKey, TransceiverHubValue>> {
-    let mut out = HashMap::new();
-    for record in CatalogueReader::open(path).context("open catalogue")? {
-        if let Record::TransceiverHub(h) = record? {
-            out.insert((h.chain, h.address), (h.hub_chain, h.hub_address));
-        }
-    }
-    Ok(out)
-}
-
-/// Walk the catalogue once and build the expected transceiver-peer map.
-pub fn load_expected_transceiver_peers(
-    path: &Path,
-) -> Result<HashMap<TransceiverPeerKey, TransceiverPeerValue>> {
-    let mut out = HashMap::new();
-    for record in CatalogueReader::open(path).context("open catalogue")? {
-        if let Record::TransceiverPeer(p) = record? {
-            out.insert((p.chain, p.address, p.dest_chain), p.peer_address);
-        }
-    }
-    Ok(out)
-}
-
-/// Fetch every RelayerChainRegistration PDA (tag 5, 64 bytes).
-pub async fn fetch_on_chain_relayer_registrations(
+/// End-to-end reconciliation of one non-balance account class.
+pub async fn reconcile_layouts<L>(
     rpc: &RpcClient,
     program_id: &Pubkey,
-) -> Result<HashMap<RelayerRegistrationKey, RelayerRegistrationValue>> {
-    fetch_tagged_accounts(
-        rpc,
-        program_id,
-        AccountTag::RelayerChainRegistration,
-        RELAYER_REGISTRATION_LAYOUT_LEN,
-        |data| {
-            // Layout: tag@0, _pad0@1, chain@2, _padding@4 (28), emitter_address@32.
-            let chain = u16::from_le_bytes([data[2], data[3]]);
-            let mut emitter = [0u8; 32];
-            emitter.copy_from_slice(&data[32..64]);
-            (chain, emitter)
-        },
-    )
-    .await
+    snapshot_path: &Path,
+    layouts: impl Fn(&SnapshotRow) -> Vec<L>,
+) -> Result<MapVerdict>
+where
+    L: AccountLayout + PdaAccount + PartialEq,
+{
+    let expected = load_expected_layouts(snapshot_path, program_id, layouts)?;
+    let actual = fetch_layouts::<L>(rpc, program_id).await?;
+    Ok(compare_maps(&expected, &actual))
 }
 
-/// Fetch every TransceiverHub PDA (tag 6, 70 bytes).
-pub async fn fetch_on_chain_transceiver_hubs(
-    rpc: &RpcClient,
-    program_id: &Pubkey,
-) -> Result<HashMap<TransceiverHubKey, TransceiverHubValue>> {
-    fetch_tagged_accounts(
-        rpc,
-        program_id,
-        AccountTag::TransceiverHub,
-        TRANSCEIVER_HUB_LAYOUT_LEN,
-        |data| {
-            // Layout: tag@0, _pad0@1, chain@2, hub_chain@4, address@6, hub_address@38.
-            let chain = u16::from_le_bytes([data[2], data[3]]);
-            let hub_chain = u16::from_le_bytes([data[4], data[5]]);
-            let mut address = [0u8; 32];
-            address.copy_from_slice(&data[6..38]);
-            let mut hub_address = [0u8; 32];
-            hub_address.copy_from_slice(&data[38..70]);
-            ((chain, address), (hub_chain, hub_address))
-        },
-    )
-    .await
+/// NoReplay marks for the snapshot transfers. Extra marks are ga-parity's job.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct NoReplayVerdict {
+    pub marked: usize,
+    pub unmarked: usize,
+    /// Buckets that do not exist, or are not a NoReplay bitmap account.
+    pub missing_buckets: usize,
 }
 
-/// Fetch every TransceiverPeer PDA (tag 7, 70 bytes).
-pub async fn fetch_on_chain_transceiver_peers(
+impl NoReplayVerdict {
+    pub fn is_clean(&self) -> bool {
+        self.unmarked == 0 && self.missing_buckets == 0
+    }
+}
+
+/// Check that every snapshot transfer's NoReplay bit is set. Buckets are
+/// owned by the NoReplay program, so they are fetched by derived address.
+pub async fn reconcile_noreplay(
     rpc: &RpcClient,
-    program_id: &Pubkey,
-) -> Result<HashMap<TransceiverPeerKey, TransceiverPeerValue>> {
-    fetch_tagged_accounts(
+    target: &BackfillTarget,
+    snapshot_path: &Path,
+) -> Result<NoReplayVerdict> {
+    let mut transfers = Vec::new();
+    for row in SnapshotReader::open(snapshot_path).context("open snapshot")? {
+        if let SnapshotRow::Transfer(t) = row? {
+            if transfers.len() == MAX_RECONCILE_TRANSFERS {
+                bail!("transfers exceed MAX_RECONCILE_TRANSFERS ({MAX_RECONCILE_TRANSFERS})");
+            }
+            transfers.push(t);
+        }
+    }
+    let grouped = group_by_bucket(&transfers);
+    let buckets: Vec<_> = grouped.keys().copied().collect();
+    let fetched = fetch_buckets(
         rpc,
-        program_id,
-        AccountTag::TransceiverPeer,
-        TRANSCEIVER_PEER_LAYOUT_LEN,
-        |data| {
-            // Layout: tag@0, _pad0@1, chain@2, dest_chain@4, address@6, peer_address@38.
-            let chain = u16::from_le_bytes([data[2], data[3]]);
-            let dest_chain = u16::from_le_bytes([data[4], data[5]]);
-            let mut address = [0u8; 32];
-            address.copy_from_slice(&data[6..38]);
-            let mut peer_address = [0u8; 32];
-            peer_address.copy_from_slice(&data[38..70]);
-            ((chain, address, dest_chain), peer_address)
-        },
+        &target.noreplay_program,
+        &target.noreplay_authority,
+        &buckets,
     )
-    .await
+    .await?;
+
+    let mut verdict = NoReplayVerdict::default();
+    for (sequences, (_, state)) in grouped.values().zip(fetched) {
+        let BucketAccount::Bitmap(bitmap) = state else {
+            verdict.missing_buckets += 1;
+            verdict.unmarked += sequences.len();
+            continue;
+        };
+        let marked = sequences.iter().filter(|&&s| bitmap.is_marked(s)).count();
+        verdict.marked += marked;
+        verdict.unmarked += sequences.len() - marked;
+    }
+    let transfers = transfers.len();
+    assert_eq!(
+        verdict.marked + verdict.unmarked,
+        transfers,
+        "every transfer counted once"
+    );
+    Ok(verdict)
 }
