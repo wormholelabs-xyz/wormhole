@@ -8,16 +8,20 @@
 
 mod common;
 
-use ga_backfill::accountant::Accountant;
-use ga_backfill::batcher::TxBatch;
-use ga_backfill::snapshot::{
+use global_accountant_definitions::Uint256;
+use std::sync::Arc;
+use svm_accountant_backfill::batcher::TxBatch;
+use svm_accountant_backfill::submitter::{
+    parse_custom_error_code, submit_batches, SubmitterConfig, ALREADY_ACCOUNTED_ERROR_CODE,
+    UNAUTHORIZED_CALLER_ERROR_CODE,
+};
+use svm_accountant_backfill::target::BackfillTarget;
+use svm_accountant_tools_common::accountant::Accountant;
+use svm_accountant_tools_common::ids::{Address, ChainId, Digest, Sequence};
+use svm_accountant_tools_common::snapshot::{
     BalanceRow, ChainRegistrationRow, ModificationKind, ModifyBalanceRow, TransferRow,
 };
-use ga_backfill::submitter::{
-    extract_custom_program_error, submit_batches, SubmitterConfig, ALREADY_ACCOUNTED_CUSTOM,
-    UNAUTHORIZED_CALLER_CUSTOM,
-};
-use ga_backfill::tx_builder::BackfillTarget;
+
 use solana_keypair::Keypair;
 
 use common::mock_rpc::{MockRpc, SendTxBehavior};
@@ -26,10 +30,10 @@ use common::mock_rpc::{MockRpc, SendTxBehavior};
 fn extracts_already_accounted_hex_code() {
     // ALREADY_ACCOUNTED = 7 → 0x7
     let msg = "RpcError(\"Transaction simulation failed: Error processing Instruction 0: custom program error: 0x7\")";
-    assert_eq!(extract_custom_program_error(msg), Some(7));
+    assert_eq!(parse_custom_error_code(msg), Some(7));
     assert_eq!(
-        extract_custom_program_error(msg),
-        Some(ALREADY_ACCOUNTED_CUSTOM)
+        parse_custom_error_code(msg),
+        Some(ALREADY_ACCOUNTED_ERROR_CODE)
     );
 }
 
@@ -38,25 +42,25 @@ fn extracts_unauthorized_caller_hex_code() {
     // UNAUTHORIZED_CALLER = 33 → 0x21
     let msg =
         "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x21";
-    assert_eq!(extract_custom_program_error(msg), Some(33));
+    assert_eq!(parse_custom_error_code(msg), Some(33));
     assert_eq!(
-        extract_custom_program_error(msg),
-        Some(UNAUTHORIZED_CALLER_CUSTOM)
+        parse_custom_error_code(msg),
+        Some(UNAUTHORIZED_CALLER_ERROR_CODE)
     );
 }
 
 #[test]
 fn extracts_arbitrary_hex_codes() {
     assert_eq!(
-        extract_custom_program_error("custom program error: 0x1"),
+        parse_custom_error_code("custom program error: 0x1"),
         Some(1)
     );
     assert_eq!(
-        extract_custom_program_error("custom program error: 0x1a"),
+        parse_custom_error_code("custom program error: 0x1a"),
         Some(26)
     );
     assert_eq!(
-        extract_custom_program_error("custom program error: 0xff"),
+        parse_custom_error_code("custom program error: 0xff"),
         Some(255)
     );
 }
@@ -64,42 +68,41 @@ fn extracts_arbitrary_hex_codes() {
 #[test]
 fn returns_none_for_non_program_errors() {
     assert_eq!(
-        extract_custom_program_error("transport error: connection refused"),
+        parse_custom_error_code("transport error: connection refused"),
         None
     );
-    assert_eq!(extract_custom_program_error(""), None);
-    assert_eq!(extract_custom_program_error("blockhash not found"), None);
+    assert_eq!(parse_custom_error_code(""), None);
+    assert_eq!(parse_custom_error_code("blockhash not found"), None);
 }
 
 #[test]
 fn stops_at_non_hex_character() {
     // Hex parsing stops at the first non-hex char.
     let msg = "custom program error: 0x7; logs: [...]";
-    assert_eq!(extract_custom_program_error(msg), Some(7));
+    assert_eq!(parse_custom_error_code(msg), Some(7));
 }
 
 #[test]
 fn handles_multi_digit_codes_in_context() {
     // Real Solana RPC error wrapping with surrounding context.
     let msg = r#"RpcResponseError { code: -32002, message: "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x1d", data: ... }"#;
-    assert_eq!(extract_custom_program_error(msg), Some(0x1d));
+    assert_eq!(parse_custom_error_code(msg), Some(0x1d));
 }
 
 // Orchestration tests against a hand-rolled mock JSON-RPC server
 // (`tests/common/mock_rpc.rs`): drive the actual `submit_batches` async loop
 // (retry/backoff, halt behavior, concurrent stats aggregation) over a real
-// local HTTP endpoint, since `submit_batches` always constructs a real
-// `HttpSender`-backed `RpcClient` internally.
+// local HTTP endpoint.
 
 fn authority_keypair() -> Keypair {
-    // Must equal the WTT backfill authority — `BackfillTarget::new` asserts this.
+    // Must equal the WTT backfill authority — `BackfillTarget::try_new` checks this.
     // Same fixed keypair the surfpool e2e tests use.
     Keypair::new_from_array([1u8; 32])
 }
 
-fn wtt_ctx() -> BackfillTarget {
+fn wtt_target() -> BackfillTarget {
     use solana_signer::Signer;
-    BackfillTarget::new(
+    common::target(
         Accountant::Wtt,
         Accountant::Wtt.program_id(),
         authority_keypair().pubkey(),
@@ -108,11 +111,11 @@ fn wtt_ctx() -> BackfillTarget {
 
 fn modification_batch() -> TxBatch {
     TxBatch::BackfillModifyBalance(vec![ModifyBalanceRow {
-        sequence: 1,
-        chain_id: 1,
-        token_chain: 1,
-        token_address: [0u8; 32],
-        amount: [0u8; 32],
+        sequence: Sequence(1),
+        chain_id: ChainId(1),
+        token_chain: ChainId(1),
+        token_address: Address([0u8; 32]),
+        amount: Uint256([0u8; 32]),
         reason: [0u8; 32],
         modify_kind: ModificationKind::Add,
     }])
@@ -120,35 +123,35 @@ fn modification_batch() -> TxBatch {
 
 fn noreplay_batch(sequence: u64) -> TxBatch {
     TxBatch::BackfillNoReplay(vec![TransferRow {
-        chain: 1,
-        emitter: {
+        chain: ChainId(1),
+        emitter: Address({
             let mut e = [0u8; 32];
             e[31] = 0xec;
             e
-        },
-        sequence,
-        digest: [0xaa; 32],
-        amount: [0u8; 32],
-        token_chain: 1,
-        token_address: {
+        }),
+        sequence: Sequence(sequence),
+        digest: Digest([0xaa; 32]),
+        amount: Uint256([0u8; 32]),
+        token_chain: ChainId(1),
+        token_address: Address({
             let mut a = [0u8; 32];
             a[31] = 0xaa;
             a
-        },
-        recipient_chain: 2,
+        }),
+        recipient_chain: ChainId(2),
     }])
 }
 
 fn balance_batch(addr_seed: u8) -> TxBatch {
     TxBatch::BackfillBalance(vec![BalanceRow {
-        chain: 1,
-        token_chain: 2,
-        token_address: {
+        chain: ChainId(1),
+        token_chain: ChainId(2),
+        token_address: Address({
             let mut a = [0u8; 32];
             a[31] = addr_seed;
             a
-        },
-        balance: [0u8; 32],
+        }),
+        balance: Uint256([0u8; 32]),
     }])
 }
 
@@ -159,20 +162,25 @@ async fn retries_on_transient_error_then_succeeds() {
         SendTxBehavior::TransientError,
         SendTxBehavior::Success,
     ]);
-    let target = wtt_ctx();
+    let target = wtt_target();
     let config = SubmitterConfig {
-        rpc_url: mock.url(),
         concurrency: 1,
         max_retries: 5,
         initial_retry_delay_ms: 1,
         max_retry_delay_ms: 5,
     };
 
-    let stats = submit_batches(target, authority_keypair(), config, vec![noreplay_batch(1)])
-        .await
-        .expect("eventually succeeds after retrying transient errors");
+    let stats = submit_batches(
+        Arc::new(mock.client()),
+        target,
+        authority_keypair(),
+        config,
+        vec![noreplay_batch(1)],
+    )
+    .await
+    .expect("eventually succeeds after retrying transient errors");
 
-    assert_eq!(stats.submitted, 1);
+    assert_eq!(stats.confirmed, 1);
     assert_eq!(stats.already_written, 0);
     assert_eq!(
         mock.send_transaction_calls(),
@@ -201,9 +209,8 @@ async fn halt_on_unrecoverable_error_stops_dispatch_of_remaining_batches() {
         SendTxBehavior::Success,
         SendTxBehavior::Success,
     ]);
-    let target = wtt_ctx();
+    let target = wtt_target();
     let config = SubmitterConfig {
-        rpc_url: mock.url(),
         concurrency: 1,
         max_retries: 3,
         initial_retry_delay_ms: 1,
@@ -217,7 +224,14 @@ async fn halt_on_unrecoverable_error_stops_dispatch_of_remaining_batches() {
         balance_batch(3),
         balance_batch(4),
     ];
-    let result = submit_batches(target, authority_keypair(), config, batches).await;
+    let result = submit_batches(
+        Arc::new(mock.client()),
+        target,
+        authority_keypair(),
+        config,
+        batches,
+    )
+    .await;
 
     assert!(
         result.is_err(),
@@ -239,9 +253,8 @@ async fn halt_on_unrecoverable_error_stops_dispatch_of_remaining_batches() {
 #[tokio::test]
 async fn concurrent_submission_aggregates_stats_across_all_tasks_not_just_the_last() {
     let mock = MockRpc::start(vec![SendTxBehavior::Success; 10]);
-    let target = wtt_ctx();
+    let target = wtt_target();
     let config = SubmitterConfig {
-        rpc_url: mock.url(),
         concurrency: 4,
         max_retries: 3,
         initial_retry_delay_ms: 1,
@@ -253,18 +266,24 @@ async fn concurrent_submission_aggregates_stats_across_all_tasks_not_just_the_la
     batches.push(modification_batch());
     batches.push(TxBatch::BackfillChainRegistration(vec![
         ChainRegistrationRow {
-            chain: 2,
-            registered_emitter: [0u8; 32],
-            sequence: 1,
+            chain: ChainId(2),
+            registered_emitter: Address([0u8; 32]),
+            sequence: Sequence(1),
         },
     ]));
 
-    let stats = submit_batches(target, authority_keypair(), config, batches)
-        .await
-        .expect("all batches succeed");
+    let stats = submit_batches(
+        Arc::new(mock.client()),
+        target,
+        authority_keypair(),
+        config,
+        batches,
+    )
+    .await
+    .expect("all batches succeed");
 
     assert_eq!(
-        stats.submitted, 10,
+        stats.confirmed, 10,
         "every concurrent batch counted, not just the last"
     );
     assert_eq!(stats.already_written, 0);
@@ -280,9 +299,8 @@ async fn halt_awaits_already_in_flight_work_instead_of_abandoning_it() {
         SendTxBehavior::CustomProgramError(99),
         SendTxBehavior::Success,
     ]);
-    let target = wtt_ctx();
+    let target = wtt_target();
     let config = SubmitterConfig {
-        rpc_url: mock.url(),
         concurrency: 3,
         max_retries: 3,
         initial_retry_delay_ms: 1,
@@ -290,7 +308,14 @@ async fn halt_awaits_already_in_flight_work_instead_of_abandoning_it() {
     };
 
     let batches: Vec<TxBatch> = (0..6u64).map(noreplay_batch).collect();
-    let result = submit_batches(target, authority_keypair(), config, batches).await;
+    let result = submit_batches(
+        Arc::new(mock.client()),
+        target,
+        authority_keypair(),
+        config,
+        batches,
+    )
+    .await;
 
     assert!(result.is_err(), "one unrecoverable error must kind as Err");
     assert_eq!(
@@ -307,9 +332,8 @@ async fn progress_channel_reports_every_batch_with_its_original_index() {
     // identifying which original batch a completion belongs to, since
     // concurrent completion order need not match dispatch order.
     let mock = MockRpc::start(vec![SendTxBehavior::Success; 5]);
-    let target = wtt_ctx();
+    let target = wtt_target();
     let config = SubmitterConfig {
-        rpc_url: mock.url(),
         concurrency: 4,
         max_retries: 3,
         initial_retry_delay_ms: 1,
@@ -321,7 +345,8 @@ async fn progress_channel_reports_every_batch_with_its_original_index() {
     // batches: [noreplay0, noreplay1, modify(idx 2), noreplay2, noreplay3]
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let stats = ga_backfill::submitter::submit_batches_with_progress(
+    let stats = svm_accountant_backfill::submitter::submit_batches_with_progress(
+        Arc::new(mock.client()),
         target,
         authority_keypair(),
         config,
@@ -331,13 +356,13 @@ async fn progress_channel_reports_every_batch_with_its_original_index() {
     .await
     .expect("all batches succeed");
 
-    assert_eq!(stats.submitted, 5);
+    assert_eq!(stats.confirmed, 5);
 
     let mut seen: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
     while let Ok(p) = rx.try_recv() {
         let kind = match p.outcome {
-            ga_backfill::submitter::BatchOutcome::Confirmed(_) => "confirmed",
-            ga_backfill::submitter::BatchOutcome::AlreadyWritten => "already_written",
+            svm_accountant_backfill::submitter::BatchOutcome::Confirmed(_) => "confirmed",
+            svm_accountant_backfill::submitter::BatchOutcome::AlreadyWritten => "already_written",
         };
         seen.insert(p.index, kind.to_string());
     }

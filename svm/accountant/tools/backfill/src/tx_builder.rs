@@ -6,13 +6,11 @@
 //! batch parser and measures the exact legacy wire size, so a malformed batch
 //! fails here, before any transaction is sent.
 
-use anyhow::{anyhow, ensure, Result};
+use anyhow::{anyhow, ensure, Context, Result};
 use bytemuck::Pod;
-use solana_hash::Hash;
+use sha2::{Digest, Sha256};
 use solana_instruction::{AccountMeta, Instruction};
-use solana_message::Message;
 use solana_pubkey::Pubkey;
-use solana_transaction::Transaction;
 
 use global_accountant_definitions::{
     BackfillBalanceEntry, BackfillChainRegistrationEntry, BackfillModifyBalanceEntry,
@@ -20,70 +18,20 @@ use global_accountant_definitions::{
     BackfillTransceiverPeerEntry, BalanceAccountKey, BalanceBatch, ChainRegistrationBatch,
     ChainRegistrationKey, GlobalAccountantError, ModifyBalanceBatch, ModifyBalanceKey,
     NoReplayBatch, RegisterChainKey, TransceiverHubBatch, TransceiverHubKey, TransceiverPeerBatch,
-    TransceiverPeerKey, Uint256, NOREPLAY_PROGRAM_ID,
+    TransceiverPeerKey,
 };
 
-use crate::accountant::{Accountant, Discriminators};
-use crate::batcher::{TxBatch, PACKET_DATA_SIZE};
-use crate::expected_accounts::derive_pda;
-use crate::noreplay::{bucket_of, derive_bucket_pda, derive_noreplay_authority_pda, BucketId};
-use crate::snapshot::{
+use svm_accountant_tools_common::ids::BucketId;
+use svm_accountant_tools_common::layouts::derive_pda;
+use svm_accountant_tools_common::noreplay::{bucket_id, derive_bucket_pda};
+use svm_accountant_tools_common::snapshot::{
     BalanceRow, ChainRegistrationRow, ModifyBalanceRow, TransceiverHubRow, TransceiverPeerRow,
     TransferRow,
 };
 
-/// Common context for every backfill ix.
-///
-/// **Invariant**: `program_id` equals the accountant's `declare_id!` address and
-/// `payer` equals the accountant's backfill authority. [`BackfillTarget::try_new`]
-/// checks both; the program rejects any other value.
-#[derive(Debug, Clone)]
-pub struct BackfillTarget {
-    pub accountant: Accountant,
-    pub program_id: Pubkey,
-    pub payer: Pubkey,
-    pub system_program: Pubkey,
-    pub noreplay_program: Pubkey,
-    /// `noreplay_authority` PDA of `program_id`.
-    pub noreplay_authority: Pubkey,
-    discriminators: Discriminators,
-}
-
-impl BackfillTarget {
-    /// Fails on a program id or payer the `.so` would reject: every transaction
-    /// would fail on-chain, so the misconfiguration states before any fee is paid.
-    pub fn try_new(accountant: Accountant, program_id: Pubkey, payer: Pubkey) -> Result<Self> {
-        ensure!(
-            program_id == accountant.program_id(),
-            "--program-id {program_id} is not the {accountant} backfill `declare_id!` {}",
-            accountant.program_id()
-        );
-        ensure!(
-            payer == accountant.authority(),
-            "payer {payer} is not the {accountant} backfill authority {}; the program rejects every tx",
-            accountant.authority()
-        );
-        Ok(Self {
-            accountant,
-            program_id,
-            payer,
-            system_program: Pubkey::new_from_array([0u8; 32]),
-            noreplay_program: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
-            noreplay_authority: derive_noreplay_authority_pda(&program_id),
-            discriminators: accountant.discriminators(),
-        })
-    }
-
-    /// [`Self::try_new`] for fixed test values. Panics on a mismatch.
-    pub fn new(accountant: Accountant, program_id: Pubkey, payer: Pubkey) -> Self {
-        Self::try_new(accountant, program_id, payer).unwrap_or_else(|e| panic!("{e:#}"))
-    }
-
-    /// `Some` on NTT only: the transceiver maps are NTT state.
-    fn transceiver_disc(&self, disc: Option<u8>, kind: &str) -> Result<u8> {
-        disc.ok_or_else(|| anyhow!("{kind} rows on a {} accountant", self.accountant))
-    }
-}
+use crate::batcher::TxBatch;
+use crate::target::BackfillTarget;
+use crate::wire::{legacy_wire_size, PACKET_DATA_SIZE};
 
 /// Build, parse back and size-check the instruction for `batch`.
 pub fn build_ix(target: &BackfillTarget, batch: &TxBatch) -> Result<Instruction> {
@@ -95,16 +43,16 @@ pub fn build_ix(target: &BackfillTarget, batch: &TxBatch) -> Result<Instruction>
         TxBatch::BackfillTransceiverHub(e) => build_backfill_transceiver_hub_ix(target, e)?,
         TxBatch::BackfillTransceiverPeer(e) => build_backfill_transceiver_peer_ix(target, e)?,
     };
-    check_ix(target, batch, &ix)?;
+    verify_ix(target, batch, &ix)?;
     Ok(ix)
 }
 
 /// SECURITY: second decode of every instruction through the program's parser,
 /// plus the account count each handler requires and the exact wire size.
-fn check_ix(target: &BackfillTarget, batch: &TxBatch, ix: &Instruction) -> Result<()> {
-    let kind = batch.kind();
+fn verify_ix(target: &BackfillTarget, batch: &TxBatch, ix: &Instruction) -> Result<()> {
+    let kind = batch.ix_name();
     ensure!(
-        ix.program_id == target.program_id,
+        ix.program_id == target.program_id(),
         "ix program id {}",
         ix.program_id
     );
@@ -112,36 +60,37 @@ fn check_ix(target: &BackfillTarget, batch: &TxBatch, ix: &Instruction) -> Resul
         .data
         .split_first()
         .ok_or_else(|| anyhow!("empty ix data"))?;
-    let d = &target.discriminators;
-    let (want_disc, parsed): (Option<u8>, Result<usize, GlobalAccountantError>) = match batch {
-        TxBatch::BackfillNoReplay(_) => (
-            Some(d.noreplay),
-            NoReplayBatch::parse(body).map(|b| b.groups().map(|g| g.entries.len()).sum()),
-        ),
-        TxBatch::BackfillBalance(_) => (
-            Some(d.balance),
-            BalanceBatch::parse(body).map(|b| b.entries().len()),
-        ),
-        TxBatch::BackfillModifyBalance(_) => (
-            Some(d.modify_balance),
-            ModifyBalanceBatch::parse(body).map(|b| b.entries().len()),
-        ),
-        TxBatch::BackfillChainRegistration(_) => (
-            Some(d.chain_registration),
-            ChainRegistrationBatch::parse(body).map(|b| b.entries().len()),
-        ),
-        TxBatch::BackfillTransceiverHub(_) => (
-            d.transceiver_hub,
-            TransceiverHubBatch::parse(body).map(|b| b.entries().len()),
-        ),
-        TxBatch::BackfillTransceiverPeer(_) => (
-            d.transceiver_peer,
-            TransceiverPeerBatch::parse(body).map(|b| b.entries().len()),
-        ),
-    };
+    let d = target.discriminators();
+    let (want_discriminator, parsed): (Option<u8>, Result<usize, GlobalAccountantError>) =
+        match batch {
+            TxBatch::BackfillNoReplay(_) => (
+                Some(d.noreplay),
+                NoReplayBatch::parse(body).map(|b| b.groups().map(|g| g.entries.len()).sum()),
+            ),
+            TxBatch::BackfillBalance(_) => (
+                Some(d.balance),
+                BalanceBatch::parse(body).map(|b| b.entries().len()),
+            ),
+            TxBatch::BackfillModifyBalance(_) => (
+                Some(d.modify_balance),
+                ModifyBalanceBatch::parse(body).map(|b| b.entries().len()),
+            ),
+            TxBatch::BackfillChainRegistration(_) => (
+                Some(d.chain_registration),
+                ChainRegistrationBatch::parse(body).map(|b| b.entries().len()),
+            ),
+            TxBatch::BackfillTransceiverHub(_) => (
+                d.transceiver_hub,
+                TransceiverHubBatch::parse(body).map(|b| b.entries().len()),
+            ),
+            TxBatch::BackfillTransceiverPeer(_) => (
+                d.transceiver_peer,
+                TransceiverPeerBatch::parse(body).map(|b| b.entries().len()),
+            ),
+        };
     ensure!(
-        Some(disc) == want_disc,
-        "{kind} disc {disc}, want {want_disc:?}"
+        Some(disc) == want_discriminator,
+        "{kind} disc {disc}, want {want_discriminator:?}"
     );
     let parsed =
         parsed.map_err(|e| anyhow!("definitions parser rejects the {kind} batch: {e:?}"))?;
@@ -160,7 +109,7 @@ fn check_ix(target: &BackfillTarget, batch: &TxBatch, ix: &Instruction) -> Resul
         "{kind} carries {} accounts, want {want_accounts}",
         ix.accounts.len()
     );
-    let size = legacy_wire_size(ix, &target.payer);
+    let size = legacy_wire_size(ix, &target.payer());
     ensure!(
         size <= PACKET_DATA_SIZE,
         "{kind} tx is {size} bytes, over {PACKET_DATA_SIZE}"
@@ -168,18 +117,12 @@ fn check_ix(target: &BackfillTarget, batch: &TxBatch, ix: &Instruction) -> Resul
     Ok(())
 }
 
-/// Serialized size of a one-signature legacy transaction carrying `ix`.
-pub fn legacy_wire_size(ix: &Instruction, payer: &Pubkey) -> usize {
-    let message =
-        Message::new_with_blockhash(std::slice::from_ref(ix), Some(payer), &Hash::default());
-    bincode::serialize(&Transaction::new_unsigned(message))
-        .expect("serializing a well-formed Transaction cannot fail")
-        .len()
-}
-
 /// Distinct buckets of a sorted transfer batch, in order. One writable meta each.
 fn noreplay_buckets(transfers: &[TransferRow]) -> Vec<BucketId> {
-    let mut buckets: Vec<BucketId> = transfers.iter().map(bucket_of).collect();
+    let mut buckets: Vec<BucketId> = transfers
+        .iter()
+        .map(|t| bucket_id(t.emitter_key(), t.sequence))
+        .collect();
     buckets.dedup();
     buckets
 }
@@ -199,15 +142,15 @@ fn build_batch<T, E: Pod, const N: usize>(
     let mut data = Vec::with_capacity(2 + rows.len() * std::mem::size_of::<E>());
     data.extend([disc, entry_count(rows.len())]);
     let mut accounts = Vec::with_capacity(2 + rows.len() * N);
-    accounts.push(AccountMeta::new(target.payer, true));
-    accounts.push(AccountMeta::new_readonly(target.system_program, false));
+    accounts.push(AccountMeta::new(target.payer(), true));
+    accounts.push(AccountMeta::new_readonly(target.system_program(), false));
     for row in rows {
         let (entry, pdas) = encode(row);
         data.extend_from_slice(bytemuck::bytes_of(&entry));
         accounts.extend(pdas.into_iter().map(|pda| AccountMeta::new(pda, false)));
     }
     Instruction {
-        program_id: target.program_id,
+        program_id: target.program_id(),
         accounts,
         data,
     }
@@ -221,31 +164,39 @@ pub fn build_backfill_noreplay_ix(
     transfers: &[TransferRow],
 ) -> Instruction {
     let groups: Vec<&[TransferRow]> = transfers
-        .chunk_by(|a, b| (a.chain, a.emitter) == (b.chain, b.emitter))
+        .chunk_by(|a, b| a.emitter_key() == b.emitter_key())
         .collect();
-    let mut data = vec![target.discriminators.noreplay, entry_count(groups.len())];
+    let mut data = vec![target.discriminators().noreplay, entry_count(groups.len())];
     for group in &groups {
-        let (chain, emitter) = (group[0].chain, group[0].emitter);
-        let header = BackfillNoReplayGroupHeader::new(chain, emitter, entry_count(group.len()));
+        let emitter = group[0].emitter_key();
+        let header = BackfillNoReplayGroupHeader::new(
+            emitter.chain.0,
+            emitter.emitter.0,
+            entry_count(group.len()),
+        );
         data.extend_from_slice(bytemuck::bytes_of(&header));
         for t in *group {
-            let entry = BackfillNoReplayEntry::new(t.sequence, t.digest);
+            let entry = BackfillNoReplayEntry::new(t.sequence.0, t.digest.0);
             data.extend_from_slice(bytemuck::bytes_of(&entry));
         }
     }
 
     let mut accounts = vec![
-        AccountMeta::new(target.payer, true),
-        AccountMeta::new_readonly(target.noreplay_program, false),
-        AccountMeta::new_readonly(target.noreplay_authority, false),
-        AccountMeta::new_readonly(target.system_program, false),
+        AccountMeta::new(target.payer(), true),
+        AccountMeta::new_readonly(target.noreplay_program(), false),
+        AccountMeta::new_readonly(target.noreplay_authority(), false),
+        AccountMeta::new_readonly(target.system_program(), false),
     ];
     accounts.extend(noreplay_buckets(transfers).iter().map(|bucket| {
-        let pda = derive_bucket_pda(&target.noreplay_program, &target.noreplay_authority, bucket);
+        let pda = derive_bucket_pda(
+            &target.noreplay_program(),
+            &target.noreplay_authority(),
+            bucket,
+        );
         AccountMeta::new(pda, false)
     }));
     Instruction {
-        program_id: target.program_id,
+        program_id: target.program_id(),
         accounts,
         data,
     }
@@ -253,12 +204,12 @@ pub fn build_backfill_noreplay_ix(
 
 /// `BackfillBalance`: one Balance PDA per entry.
 pub fn build_backfill_balance_ix(target: &BackfillTarget, rows: &[BalanceRow]) -> Instruction {
-    build_batch(target, target.discriminators.balance, rows, |a| {
-        let balance = Uint256::from_be_bytes(a.balance);
-        let key = BalanceAccountKey::new(a.chain, a.token_chain, a.token_address);
+    build_batch(target, target.discriminators().balance, rows, |a| {
+        let (chain, token_chain, token_address) = (a.chain.0, a.token_chain.0, a.token_address.0);
+        let key = BalanceAccountKey::new(chain, token_chain, token_address);
         (
-            BackfillBalanceEntry::new(a.chain, a.token_chain, a.token_address, balance),
-            [derive_pda(&target.program_id, &key)],
+            BackfillBalanceEntry::new(chain, token_chain, token_address, a.balance),
+            [derive_pda(&target.program_id(), &key)],
         )
     })
 }
@@ -268,18 +219,18 @@ pub fn build_backfill_modify_balance_ix(
     target: &BackfillTarget,
     rows: &[ModifyBalanceRow],
 ) -> Instruction {
-    build_batch(target, target.discriminators.modify_balance, rows, |m| {
+    build_batch(target, target.discriminators().modify_balance, rows, |m| {
         let entry = BackfillModifyBalanceEntry::new(
             m.modify_kind as u8,
-            m.chain_id,
-            m.token_chain,
-            m.sequence,
-            m.token_address,
-            Uint256::from_be_bytes(m.amount),
+            m.chain_id.0,
+            m.token_chain.0,
+            m.sequence.0,
+            m.token_address.0,
+            m.amount,
             m.reason,
         );
-        let key = ModifyBalanceKey::new(m.sequence);
-        (entry, [derive_pda(&target.program_id, &key)])
+        let key = ModifyBalanceKey::new(m.sequence.0);
+        (entry, [derive_pda(&target.program_id(), &key)])
     })
 }
 
@@ -291,14 +242,18 @@ pub fn build_backfill_chain_registration_ix(
 ) -> Instruction {
     build_batch(
         target,
-        target.discriminators.chain_registration,
+        target.discriminators().chain_registration,
         rows,
         |r| {
             (
-                BackfillChainRegistrationEntry::new(r.chain, r.sequence, r.registered_emitter),
+                BackfillChainRegistrationEntry::new(
+                    r.chain.0,
+                    r.sequence.0,
+                    r.registered_emitter.0,
+                ),
                 [
-                    derive_pda(&target.program_id, &ChainRegistrationKey::new(r.chain)),
-                    derive_pda(&target.program_id, &RegisterChainKey::new(r.sequence)),
+                    derive_pda(&target.program_id(), &ChainRegistrationKey::new(r.chain.0)),
+                    derive_pda(&target.program_id(), &RegisterChainKey::new(r.sequence.0)),
                 ],
             )
         },
@@ -310,12 +265,18 @@ pub fn build_backfill_transceiver_hub_ix(
     target: &BackfillTarget,
     rows: &[TransceiverHubRow],
 ) -> Result<Instruction> {
-    let disc = target.transceiver_disc(target.discriminators.transceiver_hub, "transceiver_hub")?;
+    let disc = target
+        .transceiver_discriminator(target.discriminators().transceiver_hub, "transceiver_hub")?;
     Ok(build_batch(target, disc, rows, |h| {
-        let key = TransceiverHubKey::new(h.chain, h.address);
+        let key = TransceiverHubKey::new(h.chain.0, h.address.0);
         (
-            BackfillTransceiverHubEntry::new(h.chain, h.address, h.hub_chain, h.hub_address),
-            [derive_pda(&target.program_id, &key)],
+            BackfillTransceiverHubEntry::new(
+                h.chain.0,
+                h.address.0,
+                h.hub_chain.0,
+                h.hub_address.0,
+            ),
+            [derive_pda(&target.program_id(), &key)],
         )
     }))
 }
@@ -325,13 +286,18 @@ pub fn build_backfill_transceiver_peer_ix(
     target: &BackfillTarget,
     rows: &[TransceiverPeerRow],
 ) -> Result<Instruction> {
-    let disc =
-        target.transceiver_disc(target.discriminators.transceiver_peer, "transceiver_peer")?;
+    let disc = target
+        .transceiver_discriminator(target.discriminators().transceiver_peer, "transceiver_peer")?;
     Ok(build_batch(target, disc, rows, |p| {
-        let key = TransceiverPeerKey::new(p.chain, p.address, p.dest_chain);
+        let key = TransceiverPeerKey::new(p.chain.0, p.address.0, p.dest_chain.0);
         (
-            BackfillTransceiverPeerEntry::new(p.chain, p.address, p.dest_chain, p.peer_address),
-            [derive_pda(&target.program_id, &key)],
+            BackfillTransceiverPeerEntry::new(
+                p.chain.0,
+                p.address.0,
+                p.dest_chain.0,
+                p.peer_address.0,
+            ),
+            [derive_pda(&target.program_id(), &key)],
         )
     }))
 }
@@ -339,13 +305,11 @@ pub fn build_backfill_transceiver_peer_ix(
 /// Build and check every batch's instruction, and fingerprint the plan:
 /// SHA-256 over `(data_len_be ‖ data ‖ account keys)` per instruction, in
 /// plan order. Fails on the first batch `build_ix` rejects.
-pub fn batches_hash(target: &BackfillTarget, batches: &[TxBatch]) -> Result<[u8; 32]> {
-    use anyhow::Context;
-    use sha2::{Digest, Sha256};
+pub fn plan_hash(target: &BackfillTarget, batches: &[TxBatch]) -> Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     for (i, batch) in batches.iter().enumerate() {
         let ix =
-            build_ix(target, batch).with_context(|| format!("batch {i} ({})", batch.kind()))?;
+            build_ix(target, batch).with_context(|| format!("batch {i} ({})", batch.ix_name()))?;
         hasher.update((ix.data.len() as u64).to_be_bytes());
         hasher.update(&ix.data);
         for meta in &ix.accounts {

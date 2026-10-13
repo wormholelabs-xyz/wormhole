@@ -1,15 +1,10 @@
-//! Minimal hand-rolled JSON-RPC HTTP mock server for `submitter::submit_batches`
-//! orchestration tests.
-//!
-//! `submit_batches` always constructs its own `RpcClient::new_with_commitment`
-//! internally, which always wires up the real `HttpSender` — there is no
-//! injection point for a fake `RpcSender`. Exercising the orchestration loop
-//! (retry/backoff, halt behavior, concurrent stats aggregation) therefore
-//! needs a real HTTP endpoint. `HttpSender::send` only requires a POST to a
-//! single fixed URL returning HTTP 200 with a `"result"`/`"error"` JSON body
-//! — little enough to hand-roll rather than pull in a server framework.
+//! Minimal hand-rolled JSON-RPC HTTP mock server for the submitter and
+//! resume-check tests. The real `HttpSender` talks to it, so the tests cover
+//! the request and response encoding too. `HttpSender::send` only requires a
+//! POST to a single fixed URL returning HTTP 200 with a `"result"`/`"error"`
+//! JSON body — little enough to hand-roll rather than pull in a server framework.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,11 +41,12 @@ pub enum SendTxBehavior {
 struct Inner {
     script: Mutex<VecDeque<SendTxBehavior>>,
     send_transaction_calls: AtomicUsize,
-    /// Pre-built `RpcKeyedAccount`-shaped JSON values served verbatim as the
-    /// `getProgramAccounts` result — used by the NTT decode-closure tests in
-    /// `tests/reconcile.rs`, which need `fetch_tagged_accounts`'s real gPA
-    /// round trip (not just a hand-copied byte-offset reimplementation).
+    /// `RpcKeyedAccount`-shaped JSON values served verbatim as the
+    /// `getProgramAccounts` result.
     program_accounts: Vec<Value>,
+    /// `(owner, data)` per base58 key for `getMultipleAccounts`; absent keys are `null`.
+    accounts: HashMap<String, (solana_pubkey::Pubkey, Vec<u8>)>,
+    get_multiple_accounts_calls: AtomicUsize,
 }
 
 pub struct MockRpc {
@@ -64,7 +60,18 @@ impl MockRpc {
     /// is exhausted, further calls default to `Success` (so tests only need
     /// to script the calls they care about).
     pub fn start(script: Vec<SendTxBehavior>) -> Self {
-        Self::start_inner(script, Vec::new())
+        Self::start_inner(script, Vec::new(), HashMap::new())
+    }
+
+    /// Start a server whose `getMultipleAccounts` serves `accounts` by key.
+    pub fn start_with_accounts(
+        accounts: HashMap<solana_pubkey::Pubkey, (solana_pubkey::Pubkey, Vec<u8>)>,
+    ) -> Self {
+        let accounts = accounts
+            .into_iter()
+            .map(|(key, account)| (key.to_string(), account))
+            .collect();
+        Self::start_inner(Vec::new(), Vec::new(), accounts)
     }
 
     /// Start a server whose `getProgramAccounts` responses are exactly
@@ -73,16 +80,22 @@ impl MockRpc {
     /// it just returns the whole scripted set, matching how narrowly these
     /// tests are scoped (one account class at a time).
     pub fn start_with_program_accounts(accounts: Vec<Value>) -> Self {
-        Self::start_inner(Vec::new(), accounts)
+        Self::start_inner(Vec::new(), accounts, HashMap::new())
     }
 
-    fn start_inner(script: Vec<SendTxBehavior>, program_accounts: Vec<Value>) -> Self {
+    fn start_inner(
+        script: Vec<SendTxBehavior>,
+        program_accounts: Vec<Value>,
+        accounts: HashMap<String, (solana_pubkey::Pubkey, Vec<u8>)>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
         let addr = listener.local_addr().expect("local_addr");
         let inner = Arc::new(Inner {
             script: Mutex::new(script.into()),
             send_transaction_calls: AtomicUsize::new(0),
             program_accounts,
+            accounts,
+            get_multiple_accounts_calls: AtomicUsize::new(0),
         });
         let accept_inner = inner.clone();
         thread::spawn(move || {
@@ -108,6 +121,20 @@ impl MockRpc {
     pub fn send_transaction_calls(&self) -> usize {
         self.inner.send_transaction_calls.load(Ordering::SeqCst)
     }
+
+    pub fn get_multiple_accounts_calls(&self) -> usize {
+        self.inner
+            .get_multiple_accounts_calls
+            .load(Ordering::SeqCst)
+    }
+
+    /// A `confirmed` client for this server.
+    pub fn client(&self) -> solana_client::nonblocking::rpc_client::RpcClient {
+        solana_client::nonblocking::rpc_client::RpcClient::new_with_commitment(
+            self.url(),
+            solana_commitment_config::CommitmentConfig::confirmed(),
+        )
+    }
 }
 
 /// Build one `RpcKeyedAccount`-shaped JSON value: `{pubkey, account: {lamports,
@@ -121,14 +148,18 @@ pub fn keyed_account_json(
 ) -> Value {
     json!({
         "pubkey": pubkey.to_string(),
-        "account": {
-            "lamports": 1_000_000,
-            "data": [STANDARD.encode(data), "base64"],
-            "owner": owner.to_string(),
-            "executable": false,
-            "rentEpoch": 0,
-            "space": data.len(),
-        },
+        "account": ui_account_json(owner, data),
+    })
+}
+
+fn ui_account_json(owner: &solana_pubkey::Pubkey, data: &[u8]) -> Value {
+    json!({
+        "lamports": 1_000_000,
+        "data": [STANDARD.encode(data), "base64"],
+        "owner": owner.to_string(),
+        "executable": false,
+        "rentEpoch": 0,
+        "space": data.len(),
     })
 }
 
@@ -213,6 +244,31 @@ fn dispatch(method: &str, params: &Value, inner: &Inner) -> Value {
                 .pop_front()
                 .unwrap_or(SendTxBehavior::Success);
             send_transaction_response(params, behavior)
+        }
+        "getMultipleAccounts" => {
+            inner
+                .get_multiple_accounts_calls
+                .fetch_add(1, Ordering::SeqCst);
+            let keys = params
+                .get(0)
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let value: Vec<Value> = keys
+                .iter()
+                .map(|key| {
+                    let key = key.as_str().expect("base58 key");
+                    match inner.accounts.get(key) {
+                        None => Value::Null,
+                        Some((owner, data)) => ui_account_json(owner, data),
+                    }
+                })
+                .collect();
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"context": {"slot": 1}, "value": value},
+            })
         }
         "getProgramAccounts" => json!({
             "jsonrpc": "2.0",

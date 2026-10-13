@@ -14,7 +14,7 @@
 //!
 //! ## Granularity
 //!
-//! The progress file flushes every `persist_stride` events. On a crash, batches after
+//! The progress file flushes every `flush_stride` events. On a crash, batches after
 //! the last flush are resubmitted on resume; the program rejects each as
 //! already written, and the submitter counts it done only after verifying the
 //! whole batch on chain.
@@ -33,8 +33,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Default flush stride — persist the progress file every N observed events.
-pub const DEFAULT_PERSIST_STRIDE: u64 = 100;
+/// Default flush stride — write the progress file every N observed events.
+pub const DEFAULT_FLUSH_STRIDE: u64 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgressState {
@@ -50,8 +50,9 @@ pub struct ProgressState {
     /// Number of snapshot batches confirmed so far. The orchestrator skips
     /// this many batches before resuming submission.
     pub batches_done: u64,
-    /// Successful batch submissions (Confirmed outcome).
-    pub submitted: u64,
+    /// Batches whose transaction confirmed.
+    #[serde(alias = "submitted")]
+    pub confirmed: u64,
     /// Batches the program rejected as already written and that verified
     /// fully written on chain.
     pub already_written: u64,
@@ -77,19 +78,19 @@ impl ProgressState {
     fn require(&self, want: &RunIdentity) -> Result<()> {
         ensure!(
             self.snapshot_sha256 == want.snapshot_sha256,
-            "progress_file snapshot_sha256 mismatch: stored {} != current {}; refusing to resume against a different snapshot",
+            "progress file snapshot_sha256 mismatch: stored {} != current {}; refusing to resume against a different snapshot",
             self.snapshot_sha256,
             want.snapshot_sha256
         );
         ensure!(
             self.batches_hash == want.batches_hash,
-            "progress_file batches_hash mismatch: stored {} != current {}; refusing to resume under a different batch plan. A new progress_file halts at the first batch that straddles written and unwritten entries",
+            "progress file batches_hash mismatch: stored {} != current {}; refusing to resume under a different batch plan. A new progress file halts at the first batch that straddles written and unwritten entries",
             self.batches_hash,
             want.batches_hash
         );
         ensure!(
             self.program_id == want.program_id,
-            "progress_file program_id mismatch: stored {} != current {}; refusing to resume against a different accountant",
+            "progress file program_id mismatch: stored {} != current {}; refusing to resume against a different accountant",
             self.program_id,
             want.program_id
         );
@@ -101,55 +102,27 @@ impl ProgressState {
 pub struct ProgressFile {
     state: ProgressState,
     path: PathBuf,
-    persist_stride: u64,
-    events_since_persist: u64,
+    flush_stride: u64,
+    events_since_flush: u64,
 }
 
 impl ProgressFile {
-    /// Load existing progress file or initialise fresh. Uses the default flush stride.
-    pub fn load_or_init(
-        path: PathBuf,
-        snapshot_path: &Path,
-        snapshot_sha256: &str,
-        program_id: &str,
-    ) -> Result<Self> {
-        Self::load_or_init_with_stride(
-            path,
-            snapshot_path,
-            snapshot_sha256,
-            program_id,
-            DEFAULT_PERSIST_STRIDE,
-        )
-    }
-
-    /// As [`load_or_init`] but with a caller-chosen persist stride. Lower
-    /// strides write more often (less crash loss, more disk thrash).
-    pub fn load_or_init_with_stride(
-        path: PathBuf,
-        snapshot_path: &Path,
-        snapshot_sha256: &str,
-        program_id: &str,
-        persist_stride: u64,
-    ) -> Result<Self> {
-        let identity = RunIdentity {
-            snapshot_sha256: snapshot_sha256.to_owned(),
-            batches_hash: String::new(),
-            program_id: program_id.to_owned(),
-        };
-        Self::open(path, snapshot_path, &identity, persist_stride)
-    }
-
     /// Load the progress file at `path` and require `identity`, or start a fresh one.
     pub fn open(
         path: PathBuf,
         snapshot_path: &Path,
         identity: &RunIdentity,
-        persist_stride: u64,
+        flush_stride: u64,
     ) -> Result<Self> {
+        ensure!(flush_stride > 0, "flush stride must be positive");
+        ensure!(
+            !identity.batches_hash.is_empty(),
+            "run identity has no batch-plan hash"
+        );
         let (state, fresh) = match fs::read(&path) {
             Ok(bytes) => {
                 let state: ProgressState =
-                    serde_json::from_slice(&bytes).context("parse progress_file JSON")?;
+                    serde_json::from_slice(&bytes).context("parse progress file JSON")?;
                 state.require(identity)?;
                 (state, false)
             }
@@ -161,7 +134,7 @@ impl ProgressFile {
                     batches_hash: identity.batches_hash.clone(),
                     program_id: identity.program_id.clone(),
                     batches_done: 0,
-                    submitted: 0,
+                    confirmed: 0,
                     already_written: 0,
                     fees_lamports: 0,
                     last_tx_sig: None,
@@ -175,8 +148,8 @@ impl ProgressFile {
         let mut me = Self {
             state,
             path,
-            persist_stride: persist_stride.max(1),
-            events_since_persist: 0,
+            flush_stride,
+            events_since_flush: 0,
         };
         // Persist a fresh progress file so a subsequent run can verify identity
         // without an empty-file race.
@@ -200,7 +173,7 @@ impl ProgressFile {
     /// stride threshold is reached.
     pub fn observe_confirmed(&mut self, sig: Option<&str>, fee_lamports: u64) -> Result<()> {
         self.state.batches_done += 1;
-        self.state.submitted += 1;
+        self.state.confirmed += 1;
         self.state.fees_lamports += fee_lamports;
         if let Some(s) = sig {
             self.state.last_tx_sig = Some(s.to_owned());
@@ -220,13 +193,13 @@ impl ProgressFile {
     /// Force-flush to disk regardless of stride. Call at end of run.
     pub fn flush(&mut self) -> Result<()> {
         self.write_to_disk()?;
-        self.events_since_persist = 0;
+        self.events_since_flush = 0;
         Ok(())
     }
 
     fn tick(&mut self) -> Result<()> {
-        self.events_since_persist += 1;
-        if self.events_since_persist >= self.persist_stride {
+        self.events_since_flush += 1;
+        if self.events_since_flush >= self.flush_stride {
             self.flush()?;
         }
         Ok(())
@@ -234,22 +207,22 @@ impl ProgressFile {
 
     fn write_to_disk(&mut self) -> Result<()> {
         self.state.last_updated_at_epoch_secs = now_epoch_secs();
-        let bytes = serde_json::to_vec_pretty(&self.state).context("serialise progress_file")?;
+        let bytes = serde_json::to_vec_pretty(&self.state).context("serialise progress file")?;
 
         // Temp file lives next to the target so the rename is intra-directory
         // (intra-filesystem) and POSIX-atomic.
         let parent = self
             .path
             .parent()
-            .ok_or_else(|| anyhow!("progress_file path has no parent: {}", self.path.display()))?;
+            .ok_or_else(|| anyhow!("progress file path has no parent: {}", self.path.display()))?;
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).with_context(|| format!("mkdir -p {}", parent.display()))?;
         }
         let tmp = self.path.with_extension("json.tmp");
         {
             let mut f = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-            f.write_all(&bytes).context("write progress_file body")?;
-            f.sync_all().context("fsync progress_file body")?;
+            f.write_all(&bytes).context("write progress file body")?;
+            f.sync_all().context("fsync progress file body")?;
         }
         fs::rename(&tmp, &self.path)
             .with_context(|| format!("rename {} → {}", tmp.display(), self.path.display()))?;
@@ -260,6 +233,6 @@ impl ProgressFile {
 fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .expect("system clock before unix epoch")
+        .as_secs()
 }

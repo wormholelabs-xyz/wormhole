@@ -315,29 +315,28 @@ e2e-upgrade-stop program="global-accountant":
 bench: build-devnet
     {{test_env}} cargo bench
 
-# Off-chain tools. `tools/backfill` (ga-backfill) and `tools/parity` (ga-parity) are
-# standalone workspaces that link `crates/definitions` and the backfill program crates,
-# so they read the same compile-time addresses and keys as the programs.
-TOOLS := "tools/backfill tools/parity"
+# Off-chain tools: `tools/` is one Cargo workspace (svm-accountant-backfill, svm-accountant-parity
+# and the shared svm-accountant-tools-common) with one lockfile. It links `crates/definitions` and
+# the backfill program crates, so the tools target the compile-time addresses and keys of the
+# programs. Runtime settings come from svm-accountant.toml (see tools/svm-accountant.example.toml).
+TOOLS_DIR := "tools"
 
 [doc("Clippy and tests for the off-chain tools, with the test values.")]
 tools-check:
     #!/usr/bin/env bash
     set -euo pipefail
-    for t in {{TOOLS}}; do
-        (cd "${t}" && {{test_env}} cargo clippy --locked --all-targets -- -D warnings)
-        (cd "${t}" && {{test_env}} cargo test --locked)
-    done
+    cd {{TOOLS_DIR}}
+    {{test_env}} cargo clippy --locked --workspace --all-targets -- -D warnings
+    {{test_env}} cargo test --locked --workspace
 
 [doc("Surfpool e2e for the off-chain tools against the build-devnet artifacts.")]
 tools-e2e: build-devnet
     #!/usr/bin/env bash
     set -euo pipefail
-    for t in {{TOOLS}}; do
-        (cd "${t}" && {{test_env}} cargo test --locked -- --ignored --test-threads=1)
-    done
+    cd {{TOOLS_DIR}}
+    {{test_env}} cargo test --locked --workspace -- --ignored --test-threads=1
 
-# ga-backfill signs as, and targets, the addresses compiled into it, so a release build
+# svm-accountant-backfill signs as, and targets, the addresses compiled into it, so a release build
 # takes them from the caller's environment exactly like `build`.
 [doc("Release build of the off-chain tools. Every address and key must be set in the environment.")]
 tools-build:
@@ -357,17 +356,12 @@ tools-build:
     for v in {{DEPLOY_VARS}}; do
         printf '  %s=%s\n' "${v}" "${!v}"
     done
-    for t in {{TOOLS}}; do
-        (cd "${t}" && cargo build --locked --release)
-    done
+    cd {{TOOLS_DIR}}
+    cargo build --locked --release --workspace
 
-[doc("Audit the off-chain tool lockfiles against the RustSec advisory database.")]
+[doc("Audit the off-chain tools lockfile against the RustSec advisory database.")]
 tools-audit:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for t in {{TOOLS}}; do
-        (cd "${t}" && cargo audit)
-    done
+    cd {{TOOLS_DIR}} && cargo audit
 
 [doc("Audit Cargo.lock against the RustSec advisory database.")]
 audit:

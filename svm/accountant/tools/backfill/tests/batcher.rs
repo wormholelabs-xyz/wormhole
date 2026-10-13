@@ -1,45 +1,43 @@
 //! Integration tests for the snapshot → batch planner.
 
-use ga_backfill::accountant::Accountant;
-use ga_backfill::batcher::{
+mod common;
+
+use global_accountant_definitions::Uint256;
+use svm_accountant_backfill::batcher::{
     Batcher, TxBatch, MAX_BALANCE_ENTRIES_PER_BATCH, MAX_CHAIN_REGISTRATION_ENTRIES_PER_BATCH,
     MAX_MODIFY_BALANCE_ENTRIES_PER_BATCH, MAX_NOREPLAY_ENTRIES_PER_BATCH,
     MAX_TRANSCEIVER_HUB_ENTRIES_PER_BATCH, MAX_TRANSCEIVER_PEER_ENTRIES_PER_BATCH,
 };
-use ga_backfill::snapshot::{
+use svm_accountant_backfill::target::{AccountantProgram, BackfillTarget};
+use svm_accountant_tools_common::accountant::Accountant;
+use svm_accountant_tools_common::ids::{Address, BalanceKey, ChainId, Digest, Sequence};
+use svm_accountant_tools_common::snapshot::{
     BalanceRow, ChainRegistrationRow, ModificationKind, ModifyBalanceRow, SnapshotRow,
     TransceiverHubRow, TransceiverPeerRow, TransferRow,
 };
-use ga_backfill::tx_builder::BackfillTarget;
 
 fn make_relayer(chain: u16) -> ChainRegistrationRow {
     let mut registered_emitter = [0u8; 32];
     registered_emitter[31] = (chain & 0xff) as u8;
     ChainRegistrationRow {
-        chain,
-        registered_emitter,
-        sequence: u64::from(chain),
+        chain: ChainId(chain),
+        registered_emitter: Address(registered_emitter),
+        sequence: Sequence(u64::from(chain)),
     }
 }
 
 fn target(accountant: Accountant) -> BackfillTarget {
-    use solana_signer::Signer;
-    let seed = match accountant {
-        Accountant::Wtt => 1u8,
-        Accountant::Ntt => 2u8,
-    };
-    let payer = solana_keypair::Keypair::new_from_array([seed; 32]).pubkey();
-    BackfillTarget::new(accountant, accountant.program_id(), payer)
+    common::target(accountant, accountant.program_id(), accountant.authority())
 }
 
 fn make_hub(chain: u16, addr_seed: u8) -> TransceiverHubRow {
     let mut address = [0u8; 32];
     address[31] = addr_seed;
     TransceiverHubRow {
-        chain,
-        address,
-        hub_chain: 1,
-        hub_address: [0u8; 32],
+        chain: ChainId(chain),
+        address: Address(address),
+        hub_chain: ChainId(1),
+        hub_address: Address([0u8; 32]),
     }
 }
 
@@ -47,10 +45,10 @@ fn make_peer(chain: u16, addr_seed: u8, dest_chain: u16) -> TransceiverPeerRow {
     let mut address = [0u8; 32];
     address[31] = addr_seed;
     TransceiverPeerRow {
-        chain,
-        address,
-        dest_chain,
-        peer_address: [0u8; 32],
+        chain: ChainId(chain),
+        address: Address(address),
+        dest_chain: ChainId(dest_chain),
+        peer_address: Address([0u8; 32]),
     }
 }
 
@@ -60,25 +58,25 @@ fn make_transfer(chain: u16, emitter_seed: u8, sequence: u64) -> TransferRow {
     let mut digest = [0u8; 32];
     digest[31] = (sequence & 0xff) as u8;
     TransferRow {
-        chain,
-        emitter,
-        sequence,
-        digest,
-        amount: [0u8; 32],
-        token_chain: 1,
-        token_address: [0u8; 32],
-        recipient_chain: 2,
+        chain: ChainId(chain),
+        emitter: Address(emitter),
+        sequence: Sequence(sequence),
+        digest: Digest(digest),
+        amount: Uint256::ZERO,
+        token_chain: ChainId(1),
+        token_address: Address([0u8; 32]),
+        recipient_chain: ChainId(2),
     }
 }
 
-fn make_account(chain: u16, token_chain: u16, addr_seed: u8) -> BalanceRow {
+fn make_balance(chain: u16, token_chain: u16, addr_seed: u8) -> BalanceRow {
     let mut token_address = [0u8; 32];
     token_address[31] = addr_seed;
     BalanceRow {
-        chain,
-        token_chain,
-        token_address,
-        balance: [0u8; 32],
+        chain: ChainId(chain),
+        token_chain: ChainId(token_chain),
+        token_address: Address(token_address),
+        balance: Uint256::ZERO,
     }
 }
 
@@ -111,7 +109,7 @@ fn same_emitter_transfers_pack_up_to_max() {
         assert_eq!(entries.len(), MAX_NOREPLAY_ENTRIES_PER_BATCH);
         // Sequences preserved in order
         for (i, e) in entries.iter().enumerate() {
-            assert_eq!(e.sequence, i as u64);
+            assert_eq!(e.sequence, Sequence(i as u64));
         }
     } else {
         panic!("expected BackfillNoReplay");
@@ -132,7 +130,10 @@ fn same_emitter_overflow_splits_at_max() {
     }
     if let TxBatch::BackfillNoReplay(second) = &batches[1] {
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].sequence, MAX_NOREPLAY_ENTRIES_PER_BATCH as u64);
+        assert_eq!(
+            second[0].sequence,
+            Sequence(MAX_NOREPLAY_ENTRIES_PER_BATCH as u64)
+        );
     }
 }
 
@@ -150,11 +151,11 @@ fn different_emitters_each_become_own_batch() {
     assert_eq!(batches.len(), 2);
     if let TxBatch::BackfillNoReplay(a) = &batches[0] {
         assert_eq!(a.len(), 5);
-        assert_eq!(a[0].emitter[31], 0xAA);
+        assert_eq!(a[0].emitter.0[31], 0xAA);
     }
     if let TxBatch::BackfillNoReplay(b) = &batches[1] {
         assert_eq!(b.len(), 5);
-        assert_eq!(b[0].emitter[31], 0xBB);
+        assert_eq!(b[0].emitter.0[31], 0xBB);
     }
 }
 
@@ -170,9 +171,9 @@ fn different_chains_same_emitter_seed_split() {
 }
 
 #[test]
-fn accounts_pack_up_to_max() {
+fn balances_pack_up_to_max() {
     let input: Vec<SnapshotRow> = (0..MAX_BALANCE_ENTRIES_PER_BATCH as u8)
-        .map(|i| SnapshotRow::Balance(make_account(1, 2, i)))
+        .map(|i| SnapshotRow::Balance(make_balance(1, 2, i)))
         .collect();
     let batches: Vec<TxBatch> = Batcher::new(input.into_iter()).collect();
     assert_eq!(batches.len(), 1);
@@ -184,10 +185,10 @@ fn accounts_pack_up_to_max() {
 }
 
 #[test]
-fn accounts_overflow_splits_at_max() {
+fn balances_overflow_splits_at_max() {
     let count = MAX_BALANCE_ENTRIES_PER_BATCH + 2;
     let input: Vec<SnapshotRow> = (0..count as u8)
-        .map(|i| SnapshotRow::Balance(make_account(1, 2, i)))
+        .map(|i| SnapshotRow::Balance(make_balance(1, 2, i)))
         .collect();
     let batches: Vec<TxBatch> = Batcher::new(input.into_iter()).collect();
     assert_eq!(batches.len(), 2);
@@ -200,7 +201,7 @@ fn accounts_overflow_splits_at_max() {
 }
 
 #[test]
-fn accounts_sorted_into_handler_order_across_batches() {
+fn balances_sorted_into_handler_order_across_batches() {
     // The snapshot groups accounts by `(chain, token_address, token_chain)`,
     // which does NOT match the `BackfillBalance` handler's required order
     // `(chain, token_chain, token_address)`. Feed one chain's accounts with
@@ -211,27 +212,22 @@ fn accounts_sorted_into_handler_order_across_batches() {
     let n = MAX_BALANCE_ENTRIES_PER_BATCH + 1; // force a split
     let input: Vec<SnapshotRow> = (0..n as u16)
         .rev() // descending token_chain: n-1, n-2, …, 0
-        .map(|tc| SnapshotRow::Balance(make_account(1, tc, 0)))
+        .map(|tc| SnapshotRow::Balance(make_balance(1, tc, 0)))
         .collect();
     let batches: Vec<TxBatch> = Batcher::new(input.into_iter()).collect();
 
-    let mut flat: Vec<(u16, u16, [u8; 32])> = Vec::new();
+    let mut flat: Vec<BalanceKey> = Vec::new();
     for batch in &batches {
         let TxBatch::BackfillBalance(entries) = batch else {
             panic!("expected BackfillBalance");
         };
         for w in entries.windows(2) {
-            let a = (w[0].chain, w[0].token_chain, w[0].token_address);
-            let b = (w[1].chain, w[1].token_chain, w[1].token_address);
+            let (a, b) = (w[0].key(), w[1].key());
             assert!(a < b, "batch not strictly ascending: {a:?} !< {b:?}");
         }
-        flat.extend(
-            entries
-                .iter()
-                .map(|e| (e.chain, e.token_chain, e.token_address)),
-        );
+        flat.extend(entries.iter().map(BalanceRow::key));
     }
-    assert_eq!(flat.len(), n, "all accounts must be emitted exactly once");
+    assert_eq!(flat.len(), n, "all balances must be emitted exactly once");
     for w in flat.windows(2) {
         assert!(
             w[0] < w[1],
@@ -246,9 +242,9 @@ fn accounts_sorted_into_handler_order_across_batches() {
 fn kind_transition_closes_current_batch() {
     // 3 accounts, then 1 transfer → 2 batches, not 1
     let input = vec![
-        SnapshotRow::Balance(make_account(1, 2, 0)),
-        SnapshotRow::Balance(make_account(1, 2, 1)),
-        SnapshotRow::Balance(make_account(1, 2, 2)),
+        SnapshotRow::Balance(make_balance(1, 2, 0)),
+        SnapshotRow::Balance(make_balance(1, 2, 1)),
+        SnapshotRow::Balance(make_balance(1, 2, 2)),
         SnapshotRow::Transfer(make_transfer(1, 0xAA, 0)),
     ];
     let batches: Vec<TxBatch> = Batcher::new(input.into_iter()).collect();
@@ -259,11 +255,11 @@ fn kind_transition_closes_current_batch() {
 
 fn make_modification(sequence: u64) -> ModifyBalanceRow {
     ModifyBalanceRow {
-        sequence,
-        chain_id: 2,
-        token_chain: 2,
-        token_address: [0u8; 32],
-        amount: [0u8; 32],
+        sequence: Sequence(sequence),
+        chain_id: ChainId(2),
+        token_chain: ChainId(2),
+        token_address: Address([0u8; 32]),
+        amount: Uint256([0u8; 32]),
         reason: [0u8; 32],
         modify_kind: ModificationKind::Add,
     }
@@ -285,16 +281,17 @@ fn modifications_sorted_by_sequence_and_split_at_max() {
     assert!(first.windows(2).all(|w| w[0].sequence < w[1].sequence));
     assert!(matches!(&batches[1], TxBatch::BackfillModifyBalance(e) if e.len() == 1));
     for batch in &batches {
-        ga_backfill::tx_builder::build_ix(&target(Accountant::Wtt), batch).expect("valid batch");
+        svm_accountant_backfill::tx_builder::build_ix(&target(Accountant::Wtt), batch)
+            .expect("valid batch");
     }
 }
 
 #[test]
 fn registrations_yield_chain_registration_batch() {
     let r = ChainRegistrationRow {
-        chain: 2,
-        registered_emitter: [0u8; 32],
-        sequence: 1,
+        chain: ChainId(2),
+        registered_emitter: Address([0u8; 32]),
+        sequence: Sequence(1),
     };
     let batches: Vec<TxBatch> =
         Batcher::new(std::iter::once(SnapshotRow::TokenBridgeRegistration(r))).collect();
@@ -307,21 +304,21 @@ fn snapshot_order_walkthrough() {
     // Mirrors the real snapshot's sort order:
     // accounts → modifications → registrations → transfers
     let input = vec![
-        SnapshotRow::Balance(make_account(1, 2, 0)),
-        SnapshotRow::Balance(make_account(1, 2, 1)),
+        SnapshotRow::Balance(make_balance(1, 2, 0)),
+        SnapshotRow::Balance(make_balance(1, 2, 1)),
         SnapshotRow::ModifyBalance(ModifyBalanceRow {
-            sequence: 1,
-            chain_id: 0,
-            token_chain: 0,
-            token_address: [0u8; 32],
-            amount: [0u8; 32],
+            sequence: Sequence(1),
+            chain_id: ChainId(0),
+            token_chain: ChainId(0),
+            token_address: Address([0u8; 32]),
+            amount: Uint256([0u8; 32]),
             reason: [0u8; 32],
             modify_kind: ModificationKind::Subtract,
         }),
         SnapshotRow::TokenBridgeRegistration(ChainRegistrationRow {
-            chain: 2,
-            registered_emitter: [0u8; 32],
-            sequence: 1,
+            chain: ChainId(2),
+            registered_emitter: Address([0u8; 32]),
+            sequence: Sequence(1),
         }),
         SnapshotRow::Transfer(make_transfer(1, 0xAA, 5)),
         SnapshotRow::Transfer(make_transfer(1, 0xAA, 6)),
@@ -408,9 +405,9 @@ fn relayer_registrations_sorted_and_duplicate_chain_rejected_before_send() {
     assert_eq!(sorted.len(), 1);
     assert!(matches!(
         &sorted[0],
-        TxBatch::BackfillChainRegistration(e) if e[0].chain == 3 && e[1].chain == 5
+        TxBatch::BackfillChainRegistration(e) if e[0].chain == ChainId(3) && e[1].chain == ChainId(5)
     ));
-    ga_backfill::tx_builder::build_ix(&target(Accountant::Ntt), &sorted[0])
+    svm_accountant_backfill::tx_builder::build_ix(&target(Accountant::Ntt), &sorted[0])
         .expect("ascending batch");
 
     let duplicate: Vec<TxBatch> = Batcher::new(
@@ -423,7 +420,8 @@ fn relayer_registrations_sorted_and_duplicate_chain_rejected_before_send() {
     .collect();
     assert_eq!(duplicate.len(), 1);
     assert!(
-        ga_backfill::tx_builder::build_ix(&target(Accountant::Ntt), &duplicate[0]).is_err(),
+        svm_accountant_backfill::tx_builder::build_ix(&target(Accountant::Ntt), &duplicate[0])
+            .is_err(),
         "duplicate chain must fail the definitions parser"
     );
 }
@@ -476,7 +474,7 @@ fn transceiver_hubs_sorted_and_duplicate_key_rejected_before_send() {
     ];
     let batches: Vec<TxBatch> = Batcher::new(input.into_iter()).collect();
     assert_eq!(batches.len(), 1);
-    assert!(ga_backfill::batcher::check_batch_order(&batches).is_err());
+    assert!(svm_accountant_backfill::batcher::check_batch_order(&batches).is_err());
 }
 
 // ----- transceiver peer -----
@@ -529,7 +527,7 @@ fn transceiver_peers_sorted_and_duplicate_key_rejected_before_send() {
     ];
     let batches: Vec<TxBatch> = Batcher::new(input.into_iter()).collect();
     assert_eq!(batches.len(), 1);
-    assert!(ga_backfill::batcher::check_batch_order(&batches).is_err());
+    assert!(svm_accountant_backfill::batcher::check_batch_order(&batches).is_err());
 }
 
 // ============================================================================
@@ -539,21 +537,21 @@ fn transceiver_peers_sorted_and_duplicate_key_rejected_before_send() {
 // ============================================================================
 
 #[test]
-fn eighteen_entries_spanning_eighteen_buckets_is_the_untested_wire_size_edge() {
-    use ga_backfill::batcher::PACKET_DATA_SIZE;
-    use ga_backfill::tx_builder::build_backfill_noreplay_ix;
+fn eighteen_entries_in_eighteen_buckets_split_below_packet_limit() {
     use global_accountant_definitions::NOREPLAY_BITS_PER_BUCKET;
     use solana_hash::Hash;
     use solana_keypair::Keypair;
     use solana_signer::Signer;
     use solana_transaction::Transaction;
+    use svm_accountant_backfill::tx_builder::build_backfill_noreplay_ix;
+    use svm_accountant_backfill::wire::PACKET_DATA_SIZE;
 
     // 18 entries, same (chain, emitter), each in its own bucket — the
     // maximum possible bucket span for an 18-entry same-emitter batch.
     let input: Vec<SnapshotRow> = (0..MAX_NOREPLAY_ENTRIES_PER_BATCH as u64)
         .map(|i| {
             let mut t = make_transfer(1, 0xAA, i * NOREPLAY_BITS_PER_BUCKET);
-            t.digest[0] = i as u8; // distinguish entries
+            t.digest.0[0] = i as u8; // distinguish entries
             SnapshotRow::Transfer(t)
         })
         .collect();

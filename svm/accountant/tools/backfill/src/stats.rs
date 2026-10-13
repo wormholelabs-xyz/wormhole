@@ -1,4 +1,4 @@
-//! `ga-backfill stats` — walk the snapshot and report row counts,
+//! `svm-accountant-backfill stats` — walk the snapshot and report row counts,
 //! batching projection, and cost estimate.
 //!
 //! Fees: 5,000 lamports per tx. Rent: `rent_exempt_lamports` over each
@@ -15,15 +15,16 @@ use global_accountant_definitions::{
     RegisterChainLayout, TransceiverHubLayout, TransceiverPeerLayout,
 };
 
+use svm_accountant_tools_common::ids::{BucketId, EmitterKey};
+use svm_accountant_tools_common::noreplay::bucket_id;
+use svm_accountant_tools_common::snapshot::{SnapshotReader, SnapshotRow};
+
 use crate::batcher::{
     Batcher, TxBatch, MAX_BALANCE_ENTRIES_PER_BATCH, MAX_CHAIN_REGISTRATION_ENTRIES_PER_BATCH,
     MAX_MODIFY_BALANCE_ENTRIES_PER_BATCH, MAX_TRANSCEIVER_HUB_ENTRIES_PER_BATCH,
     MAX_TRANSCEIVER_PEER_ENTRIES_PER_BATCH,
 };
-use crate::snapshot::{SnapshotReader, SnapshotRow};
-
-/// Base Solana tx fee for a single-signature tx. Deterministic on mainnet.
-pub const TX_FEE_LAMPORTS: u64 = 5_000;
+use crate::wire::TX_FEE_LAMPORTS;
 
 /// Rent-exempt minimum for `len` data bytes: `3480 × (128 + len) × 2`.
 pub const fn rent_exempt_lamports(len: usize) -> u64 {
@@ -58,7 +59,7 @@ pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 #[derive(Debug, Default, Clone)]
 pub struct SnapshotStats {
     pub transfers: u64,
-    pub accounts: u64,
+    pub balances: u64,
     pub modifications: u64,
     pub registrations: u64,
     pub governance: u64,
@@ -76,9 +77,9 @@ pub struct SnapshotStats {
 }
 
 impl SnapshotStats {
-    pub fn total_records(&self) -> u64 {
+    pub fn total_rows(&self) -> u64 {
         self.transfers
-            + self.accounts
+            + self.balances
             + self.modifications
             + self.registrations
             + self.governance
@@ -104,7 +105,7 @@ impl SnapshotStats {
     /// Total rent in lamports across all PDA classes.
     pub fn rent_lamports(&self) -> u64 {
         self.unique_buckets as u64 * NOREPLAY_BUCKET_RENT_LAMPORTS
-            + self.accounts * BALANCE_ACCOUNT_RENT_LAMPORTS
+            + self.balances * BALANCE_ACCOUNT_RENT_LAMPORTS
             + self.modifications * MODIFY_BALANCE_RENT_LAMPORTS
             + (self.registrations + self.relayer_registrations) * REGISTRATION_RENT_LAMPORTS
             + self.transceiver_hubs * TRANSCEIVER_HUB_RENT_LAMPORTS
@@ -117,32 +118,28 @@ impl SnapshotStats {
 }
 
 #[derive(Default)]
-struct Counters {
+struct RowCounters {
     transfers: u64,
-    accounts: u64,
+    balances: u64,
     modifications: u64,
     registrations: u64,
     governance: u64,
     relayer_registrations: u64,
     transceiver_hubs: u64,
     transceiver_peers: u64,
-    buckets: HashSet<(u16, [u8; 32], u64)>,
-    emitters: HashSet<(u16, [u8; 32])>,
+    buckets: HashSet<BucketId>,
+    emitters: HashSet<EmitterKey>,
 }
 
-impl Counters {
-    fn observe(&mut self, rec: &SnapshotRow) {
-        match rec {
+impl RowCounters {
+    fn observe(&mut self, row: &SnapshotRow) {
+        match row {
             SnapshotRow::Transfer(t) => {
                 self.transfers += 1;
-                self.buckets.insert((
-                    t.chain,
-                    t.emitter,
-                    NoReplayBitmapAccount::bucket_index(t.sequence),
-                ));
-                self.emitters.insert((t.chain, t.emitter));
+                self.buckets.insert(bucket_id(t.emitter_key(), t.sequence));
+                self.emitters.insert(t.emitter_key());
             }
-            SnapshotRow::Balance(_) => self.accounts += 1,
+            SnapshotRow::Balance(_) => self.balances += 1,
             SnapshotRow::ModifyBalance(_) => self.modifications += 1,
             SnapshotRow::TokenBridgeRegistration(_) => self.registrations += 1,
             SnapshotRow::Governance(_) => self.governance += 1,
@@ -157,13 +154,13 @@ impl Counters {
 /// modulo the bucket/emitter HashSets (~80 bytes per entry, expected ~5,500
 /// entries = ~440 KB peak).
 pub fn compute(path: &Path) -> Result<SnapshotStats> {
-    let counters = RefCell::new(Counters::default());
+    let counters = RefCell::new(RowCounters::default());
     let reader = SnapshotReader::open(path).context("open snapshot")?;
 
     let iter = reader.filter_map(|r| match r {
-        Ok(rec) => {
-            counters.borrow_mut().observe(&rec);
-            Some(rec)
+        Ok(row) => {
+            counters.borrow_mut().observe(&row);
+            Some(row)
         }
         Err(e) => {
             eprintln!("warning: skipping malformed line: {e}");
@@ -191,7 +188,7 @@ pub fn compute(path: &Path) -> Result<SnapshotStats> {
     let c = counters.into_inner();
     Ok(SnapshotStats {
         transfers: c.transfers,
-        accounts: c.accounts,
+        balances: c.balances,
         modifications: c.modifications,
         registrations: c.registrations,
         governance: c.governance,
@@ -226,9 +223,9 @@ fn lamports_to_usd(l: u64, sol_usd: f64) -> f64 {
 
 fn print_report(path: &Path, s: &SnapshotStats, sol_usd: f64) {
     println!("snapshot:               {}", path.display());
-    println!("total records:           {}", s.total_records());
+    println!("total rows:              {}", s.total_rows());
     println!("  transfer:              {}", s.transfers);
-    println!("  account:               {}", s.accounts);
+    println!("  balance:               {}", s.balances);
     println!("  modification:          {}", s.modifications);
     println!("  registration:          {}", s.registrations);
     println!("  governance:            {} (not backfilled)", s.governance);

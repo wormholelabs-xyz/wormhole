@@ -1,46 +1,55 @@
-//! `ga-parity` CLI. `check` runs one point-in-time parity check between a
-//! snapshot and the deployed program; `report` replays a ledger.
+//! `svm-accountant-parity` CLI. `check` runs one point-in-time parity check between a
+//! snapshot and the deployed program; `report` reads a ledger back.
 
 use std::collections::BTreeMap;
-use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use ga_backfill::accountant::Accountant;
-use ga_backfill::snapshot::file_sha256;
+use solana_commitment_config::CommitmentConfig;
 use solana_pubkey::Pubkey;
 
-use ga_parity::compare::{compare, Finding};
-use ga_parity::expected_state::SkippedRows;
-use ga_parity::ledger::{
-    append, latest_check, replay, report_at, CheckResult, StateTotals, MAX_FINDING_LINES,
-    SCHEMA_VERSION,
+use global_accountant_definitions::NOREPLAY_PROGRAM_ID;
+
+use svm_accountant_parity::ledger::{
+    append_check, latest_check, read_events, report_at, CheckRecord, StateTotals,
+    MAX_FINDING_LINES, SCHEMA_VERSION,
 };
-use ga_parity::onchain_state::ScanFindings;
-use ga_parity::state::{hex32, ChainState, ComparedState};
-use ga_parity::time::{now_unix, parse_at, unix_to_rfc3339};
-use ga_parity::{expected_state, onchain_state, rpc};
+use svm_accountant_parity::time::{now_unix, parse_at, unix_to_rfc3339};
+use svm_accountant_tools_common::accountant::Accountant;
+use svm_accountant_tools_common::config::{LoadedConfig, DEFAULT_CONFIG_PATH};
+use svm_accountant_tools_common::hash::{file_sha256, hex32};
+use svm_accountant_tools_common::parity::compare::Finding;
+use svm_accountant_tools_common::parity::expected_state::from_snapshot_non_empty;
+use svm_accountant_tools_common::parity::findings::{
+    compared_states, sample, CheckTarget, Mode, MAX_SETTLE_SECONDS,
+};
+use svm_accountant_tools_common::parity::state::StateKind;
+use svm_accountant_tools_common::rpc;
+use svm_accountant_tools_common::snapshot::read_rows;
 
-/// Longest `--settle` interval.
-const MAX_SETTLE_SECONDS: u64 = 3_600;
-
+/// Settings come from the config file (`--config`, default `svm-accountant.toml`).
+/// Program addresses come from the build.
 #[derive(Parser, Debug)]
-#[command(name = "ga-parity", version, about)]
+#[command(name = "svm-accountant-parity", version, about)]
 struct Cli {
+    /// Config file with the RPC endpoint and each accountant's files.
+    #[arg(long, global = true, default_value = DEFAULT_CONFIG_PATH)]
+    config: PathBuf,
     #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
-enum Commands {
+enum Command {
     /// One point-in-time parity check: snapshot vs deployed program.
     /// Exit 0 when clean, 1 on any finding.
     Check(CheckArgs),
-    /// Replay a ledger and print the check state at an instant.
+    /// Read the accountant's ledger and print the check state at an instant.
     Report {
-        #[arg(long)]
-        ledger: PathBuf,
+        /// Accountant whose ledger to read.
+        #[arg(value_enum)]
+        accountant: Accountant,
         /// Unix seconds or `YYYY-MM-DDTHH:MM:SSZ`. Defaults to the latest check.
         #[arg(long)]
         at: Option<String>,
@@ -49,29 +58,11 @@ enum Commands {
 
 #[derive(Args, Debug)]
 struct CheckArgs {
-    /// Snapshot file (`catalogue.jsonl`) produced by the wormchain-snapshot tool.
-    #[arg(long)]
-    snapshot: PathBuf,
-    /// Accountant the snapshot belongs to. Selects the compared states.
-    #[arg(long, value_enum)]
+    /// Accountant to check. Selects the config table, the program and the compared states.
+    #[arg(value_enum)]
     accountant: Accountant,
-    /// Base58 pubkey of the deployed accountant program.
-    #[arg(long)]
-    program_id: Pubkey,
-    /// Base58 pubkey of the NoReplay program the accountant CPIs into.
-    #[arg(long)]
-    noreplay_program_id: Pubkey,
-    /// JSON-RPC endpoint.
-    #[arg(long, default_value = "http://127.0.0.1:8899")]
-    rpc_url: String,
-    /// `Origin` header for every RPC request (the internal proxy needs one).
-    #[arg(long)]
-    origin: Option<String>,
     #[command(flatten)]
     mode: ModeArgs,
-    /// JSONL ledger to append this check (and its findings) to.
-    #[arg(long)]
-    ledger: Option<PathBuf>,
     /// Write the check and its findings as JSON.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -92,30 +83,16 @@ struct ModeArgs {
     settle: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum Mode {
-    Strict,
-    Settle(u64),
-}
-
-impl From<&ModeArgs> for Mode {
-    fn from(args: &ModeArgs) -> Self {
-        args.settle.map_or(Mode::Strict, Mode::Settle)
-    }
-}
-
-impl fmt::Display for Mode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Mode::Strict => f.write_str("strict"),
-            Mode::Settle(seconds) => write!(f, "settle:{seconds}s"),
-        }
+impl ModeArgs {
+    fn mode(&self) -> Mode {
+        self.settle.map_or(Mode::Strict, Mode::Settle)
     }
 }
 
 /// Exit 0: clean. Exit 1: findings. Exit 2: the check did not complete.
-fn main() {
-    match run() {
+#[tokio::main]
+async fn main() {
+    match run().await {
         Ok(clean) => std::process::exit(if clean { 0 } else { 1 }),
         Err(e) => {
             eprintln!("Error: {e:?}");
@@ -125,31 +102,49 @@ fn main() {
 }
 
 /// `Ok(true)` when the reported check is clean.
-fn run() -> Result<bool> {
-    match Cli::parse().command {
-        Commands::Check(args) => check(&args),
-        Commands::Report { ledger, at } => report(&ledger, at.as_deref()),
+async fn run() -> Result<bool> {
+    let cli = Cli::parse();
+    let config = LoadedConfig::load(&cli.config)?;
+    match cli.command {
+        Command::Check(args) => cmd_check(&config, &args).await,
+        Command::Report { accountant, at } => cmd_report(&config, accountant, at.as_deref()),
     }
 }
 
-fn check(args: &CheckArgs) -> Result<bool> {
-    let head = match &args.ledger {
-        Some(path) if path.exists() => latest_check(&replay(path)?)?,
+/// The deployed program a check reads: the build's addresses for `accountant`.
+fn check_target(accountant: Accountant) -> CheckTarget {
+    CheckTarget {
+        accountant,
+        program_id: accountant.program_id(),
+        noreplay_program: Pubkey::new_from_array(NOREPLAY_PROGRAM_ID),
+    }
+}
+
+async fn cmd_check(config: &LoadedConfig, args: &CheckArgs) -> Result<bool> {
+    let ledger = config.accountant(args.accountant)?.ledger.as_deref();
+    let target = check_target(args.accountant);
+    let ledger_head = match ledger {
+        Some(path) if path.exists() => latest_check(&read_events(path)?)?,
         _ => None,
     };
-    if let Some(h) = &head {
+    if let Some(head) = &ledger_head {
         ensure!(
-            h.accountant == args.accountant && h.program_id == args.program_id.to_string(),
-            "ledger holds {} {}; use one ledger per accountant and program",
-            h.accountant,
-            h.program_id
+            head.accountant == args.accountant,
+            "ledger holds accountant {}; use one ledger per accountant and program",
+            head.accountant
+        );
+        ensure!(
+            head.program_id == target.program_id.to_string(),
+            "ledger holds program {}; use one ledger per accountant and program",
+            head.program_id
         );
     }
-    let (check, findings) = run_check(args, head.map(|h| h.check_id))?;
+    let (check, findings) =
+        run_check(config, args, &target, ledger_head.map(|h| h.check_id)).await?;
 
     print_summary(&check, &findings);
-    if let Some(path) = &args.ledger {
-        append(path, &check, &findings).context("append ledger")?;
+    if let Some(path) = ledger {
+        append_check(path, &check, &findings).context("append ledger")?;
     }
     if let Some(path) = &args.out {
         let shown = &findings[..findings.len().min(MAX_FINDING_LINES)];
@@ -160,11 +155,24 @@ fn check(args: &CheckArgs) -> Result<bool> {
     Ok(check.clean)
 }
 
-fn report(ledger: &Path, at: Option<&str>) -> Result<bool> {
+fn cmd_report(config: &LoadedConfig, accountant: Accountant, at: Option<&str>) -> Result<bool> {
+    let Some(ledger) = config.accountant(accountant)?.ledger.as_deref() else {
+        bail!(
+            "config {} has no ledger for [{accountant}]",
+            config.path.display()
+        );
+    };
     // No `--at`: the latest check, whatever its id.
     let at_unix = at.map(parse_at).transpose()?.unwrap_or(u64::MAX);
-    let events = replay(ledger)?;
-    latest_check(&events)?;
+    let events = read_events(ledger)?;
+    if let Some(head) = latest_check(&events)? {
+        ensure!(
+            head.accountant == accountant,
+            "ledger {} holds accountant {}, not {accountant}",
+            ledger.display(),
+            head.accountant
+        );
+    }
     let Some((check, findings)) = report_at(&events, at_unix) else {
         bail!(
             "ledger {} holds no check at or before {}",
@@ -174,11 +182,16 @@ fn report(ledger: &Path, at: Option<&str>) -> Result<bool> {
     };
     require_equal_states(&check)?;
     ensure!(
-        check.clean == (check.finding_count == 0)
-            && findings.len() == check.finding_count.min(MAX_FINDING_LINES),
-        "ledger check {} is inconsistent: clean={} finding_count={} diff lines={}",
+        check.clean == (check.finding_count == 0),
+        "ledger check {} is inconsistent: clean={} finding_count={}",
         check.check_id,
         check.clean,
+        check.finding_count,
+    );
+    ensure!(
+        findings.len() == check.finding_count.min(MAX_FINDING_LINES),
+        "ledger check {} is inconsistent: finding_count={} finding lines={}",
+        check.check_id,
         check.finding_count,
         findings.len()
     );
@@ -186,148 +199,75 @@ fn report(ledger: &Path, at: Option<&str>) -> Result<bool> {
     Ok(check.clean)
 }
 
-/// States compared for `accountant`, in report order.
-fn compared_states(accountant: Accountant) -> Vec<ComparedState> {
-    let mut out = vec![
-        ComparedState::Balances,
-        ComparedState::ReplayMarks,
-        ComparedState::ModifyBalanceRecords,
-        ComparedState::ChainRegistrations,
-        ComparedState::RegisterChainRecords,
-    ];
-    if accountant == Accountant::Ntt {
-        out.extend([
-            ComparedState::TransceiverHubs,
-            ComparedState::TransceiverPeers,
-        ]);
-    }
-    out
-}
-
-/// All findings of one sample: state differences, malformed accounts, and in
-/// `--strict` a non-zero pending count.
-fn collect_findings(
-    expected: &ChainState,
-    actual: &ChainState,
-    scan: &ScanFindings,
-    strict: bool,
-) -> Vec<Finding> {
-    let mut out = compare(expected, actual);
-    out.extend(scan.malformed.iter().cloned());
-    if strict && scan.pending != 0 {
-        out.push(Finding {
-            kind: ComparedState::PendingObservations,
-            key: "count".to_string(),
-            wormchain: Some("0".to_string()),
-            solana: Some(scan.pending.to_string()),
-        });
-    }
-    out
-}
-
-/// Expected state from the snapshot. Empty Balances or Replay is fatal: a
-/// truncated or wrong snapshot against an empty program would compare clean.
-fn load_expected(args: &CheckArgs) -> Result<(ChainState, SkippedRows)> {
-    let (expected, skipped) =
-        expected_state::expected_state_from_snapshot(&args.snapshot, args.accountant)?;
-    for kind in [ComparedState::Balances, ComparedState::ReplayMarks] {
-        ensure!(
-            expected.state_len(kind) != 0,
-            "snapshot {} holds no {kind} rows",
-            args.snapshot.display()
-        );
-    }
+async fn run_check(
+    config: &LoadedConfig,
+    args: &CheckArgs,
+    target: &CheckTarget,
+    previous_check_id: Option<u64>,
+) -> Result<(CheckRecord, Vec<Finding>)> {
+    let mode = args.mode.mode();
+    let snapshot = &config.accountant(args.accountant)?.snapshot;
+    let rpc_url = &config.config.rpc_url;
+    let snapshot_hash =
+        file_sha256(snapshot).with_context(|| format!("hash {}", snapshot.display()))?;
+    let rows = read_rows(snapshot)?;
+    let (expected, skipped) = from_snapshot_non_empty(&rows, args.accountant)
+        .with_context(|| format!("expected state of {}", snapshot.display()))?;
+    drop(rows);
     eprintln!(
         "[parity] snapshot: {} balances, {} replay marks, {} governance rows (not backfilled)",
-        expected.state_len(ComparedState::Balances),
-        expected.state_len(ComparedState::ReplayMarks),
-        skipped.governance_digests,
+        expected.len_of(StateKind::BALANCES),
+        expected.len_of(StateKind::ReplayMarks),
+        skipped.governance_rows,
     );
-    Ok((expected, skipped))
-}
 
-/// Sample Solana per `mode`; in settle mode the second sample is reported.
-/// A finding gone by the second sample was lag; one new in it is current.
-fn sample(
-    args: &CheckArgs,
-    mode: Mode,
-    expected: &ChainState,
-) -> Result<(ChainState, ScanFindings, Vec<Finding>)> {
-    let runtime = tokio::runtime::Runtime::new().context("build tokio runtime")?;
-    let client = rpc::client(&args.rpc_url, args.origin.as_deref())?;
-    let strict = matches!(mode, Mode::Strict);
-    let take = || -> Result<_> {
-        let (actual, scan) = runtime.block_on(onchain_state::fetch_onchain_state(
-            &client,
-            &args.program_id,
-            &args.noreplay_program_id,
-            args.accountant,
-            &expected.replay,
-        ))?;
-        let findings = collect_findings(expected, &actual, &scan, strict);
-        Ok((actual, scan, findings))
-    };
-    let first = take()?;
-    let Mode::Settle(seconds) = mode else {
-        return Ok(first);
-    };
-    eprintln!(
-        "[parity] settle: {} finding(s) in the first sample; resampling in {seconds}s",
-        first.2.len(),
-    );
-    std::thread::sleep(std::time::Duration::from_secs(seconds));
-    take()
-}
-
-fn run_check(
-    args: &CheckArgs,
-    previous_check_id: Option<u64>,
-) -> Result<(CheckResult, Vec<Finding>)> {
-    let mode = Mode::from(&args.mode);
-    let snapshot_hash =
-        file_sha256(&args.snapshot).with_context(|| format!("hash {}", args.snapshot.display()))?;
-    let (expected, skipped) = load_expected(args)?;
-    let (actual, scan, findings) = sample(args, mode, &expected)?;
-    if !matches!(mode, Mode::Strict) && scan.pending != 0 {
-        eprintln!(
-            "[parity] warning: {} PendingObservations account(s)",
-            scan.pending
-        );
+    let client = rpc::client(
+        rpc_url,
+        config.config.origin.as_deref(),
+        CommitmentConfig::finalized(),
+    )?;
+    let result = sample(&client, target, &expected, mode).await?;
+    let pending = result.solana_only.pending_observations;
+    if mode != Mode::Strict && pending != 0 {
+        eprintln!("[parity] warning: {pending} PendingObservations account(s)");
     }
     ensure!(
-        file_sha256(&args.snapshot)? == snapshot_hash,
+        file_sha256(snapshot)? == snapshot_hash,
         "snapshot {} changed during the check",
-        args.snapshot.display()
+        snapshot.display()
     );
 
-    let states: BTreeMap<ComparedState, StateTotals> = compared_states(args.accountant)
+    let states: BTreeMap<StateKind, StateTotals> = compared_states(args.accountant)
         .into_iter()
         .map(|kind| {
             let summary = StateTotals {
-                wormchain_count: expected.state_len(kind),
-                wormchain_hash: hex32(&expected.state_hash(kind)),
-                solana_count: actual.state_len(kind),
-                solana_hash: hex32(&actual.state_hash(kind)),
+                wormchain_count: expected.len_of(kind),
+                wormchain_hash: hex32(&expected.hash_of(kind)),
+                solana_count: result.actual.len_of(kind),
+                solana_hash: hex32(&result.actual.hash_of(kind)),
             };
             (kind, summary)
         })
         .collect();
     let now = now_unix();
-    let check = CheckResult {
+    let findings = result.findings;
+    let check = CheckRecord {
         schema_version: SCHEMA_VERSION,
         // Unique and increasing per ledger: `report` groups finding lines by check id.
         check_id: previous_check_id.map_or(now, |previous| now.max(previous + 1)),
         ts: unix_to_rfc3339(now),
         mode: mode.to_string(),
         accountant: args.accountant,
-        snapshot: args.snapshot.display().to_string(),
+        snapshot: snapshot.display().to_string(),
         snapshot_sha256: hex32(&snapshot_hash),
-        rpc_url: args.rpc_url.clone(),
-        program_id: args.program_id.to_string(),
-        noreplay_program_id: args.noreplay_program_id.to_string(),
+        config: config.path.display().to_string(),
+        config_sha256: hex32(&config.sha256),
+        rpc_url: rpc_url.clone(),
+        program_id: target.program_id.to_string(),
+        noreplay_program_id: target.noreplay_program.to_string(),
         states,
-        governance_digests: skipped.governance_digests,
-        pending: scan.pending,
+        governance_digests: skipped.governance_rows,
+        pending,
         finding_count: findings.len(),
         clean: findings.is_empty(),
     };
@@ -336,21 +276,26 @@ fn run_check(
 }
 
 /// SECURITY: a clean check must show equal count and hash on every compared state.
-fn require_equal_states(check: &CheckResult) -> Result<()> {
+fn require_equal_states(check: &CheckRecord) -> Result<()> {
     if !check.clean {
         return Ok(());
     }
     for (kind, s) in &check.states {
         ensure!(
-            s.wormchain_hash == s.solana_hash && s.wormchain_count == s.solana_count,
-            "check {} is clean but {kind} differs: {s:?}",
+            s.wormchain_hash == s.solana_hash,
+            "check {} is clean but the {kind} hash differs: {s:?}",
+            check.check_id
+        );
+        ensure!(
+            s.wormchain_count == s.solana_count,
+            "check {} is clean but the {kind} count differs: {s:?}",
             check.check_id
         );
     }
     Ok(())
 }
 
-fn print_summary(check: &CheckResult, findings: &[Finding]) {
+fn print_summary(check: &CheckRecord, findings: &[Finding]) {
     println!(
         "check {} ({}) mode={} accountant={}",
         check.check_id, check.ts, check.mode, check.accountant
@@ -363,6 +308,7 @@ fn print_summary(check: &CheckResult, findings: &[Finding]) {
         "  snapshot {} sha256 {}",
         check.snapshot, check.snapshot_sha256
     );
+    println!("  config {} sha256 {}", check.config, check.config_sha256);
     for (kind, s) in &check.states {
         println!(
             "  {:<18} wormchain {:>8} ({}) vs solana {:>8} ({})",
@@ -379,13 +325,13 @@ fn print_summary(check: &CheckResult, findings: &[Finding]) {
         return;
     }
     println!("  PARITY: {} finding(s)", check.finding_count);
-    for entry in findings.iter().take(MAX_FINDING_LINES) {
+    for finding in findings.iter().take(MAX_FINDING_LINES) {
         println!(
             "    [{}] {} wormchain={} solana={}",
-            entry.kind,
-            entry.key,
-            entry.wormchain.as_deref().unwrap_or("absent"),
-            entry.solana.as_deref().unwrap_or("absent"),
+            finding.kind,
+            finding.key,
+            finding.expected.as_deref().unwrap_or("absent"),
+            finding.actual.as_deref().unwrap_or("absent"),
         );
     }
 }

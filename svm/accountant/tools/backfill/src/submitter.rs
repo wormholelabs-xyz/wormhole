@@ -2,7 +2,7 @@
 //!
 //! ## Policy
 //!
-//! - **AlreadyAccounted (custom 7) / InvalidPda (custom 2)** → re-verify.
+//! - **AlreadyAccounted (custom 7) / InvalidPda (custom 2)** → verify written.
 //!   A replayed batch fails at its first already-written entry: NoReplay with
 //!   7, every PDA-creating kind with 2. Either code proves one entry only, so
 //!   the batch counts as done only if `onchain_check::batch_is_written`
@@ -38,7 +38,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use solana_client::client_error::{ClientError, ClientErrorKind};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
@@ -51,19 +50,19 @@ use global_accountant_definitions::GlobalAccountantError;
 
 use crate::batcher::TxBatch;
 use crate::onchain_check::batch_is_written;
-use crate::tx_builder::{build_ix, BackfillTarget};
+use crate::target::BackfillTarget;
+use crate::tx_builder::build_ix;
 
 /// `GlobalAccountantError::AlreadyAccounted`: a replayed `BackfillNoReplay` entry.
-pub const ALREADY_ACCOUNTED_CUSTOM: u32 = GlobalAccountantError::AlreadyAccounted as u32;
+pub const ALREADY_ACCOUNTED_ERROR_CODE: u32 = GlobalAccountantError::AlreadyAccounted as u32;
 /// `GlobalAccountantError::InvalidPda`: among others, a create on an account that holds data.
-pub const INVALID_PDA_CUSTOM: u32 = GlobalAccountantError::InvalidPda as u32;
+pub const INVALID_PDA_ERROR_CODE: u32 = GlobalAccountantError::InvalidPda as u32;
 /// `GlobalAccountantError::UnauthorizedCaller` — signer mismatch vs the
 /// program's compile-time backfill authority; halt for operator inspection.
-pub const UNAUTHORIZED_CALLER_CUSTOM: u32 = GlobalAccountantError::UnauthorizedCaller as u32;
+pub const UNAUTHORIZED_CALLER_ERROR_CODE: u32 = GlobalAccountantError::UnauthorizedCaller as u32;
 
 #[derive(Debug, Clone)]
 pub struct SubmitterConfig {
-    pub rpc_url: String,
     pub concurrency: usize,
     pub max_retries: u32,
     pub initial_retry_delay_ms: u64,
@@ -72,7 +71,8 @@ pub struct SubmitterConfig {
 
 #[derive(Debug, Default, Clone)]
 pub struct SubmissionStats {
-    pub submitted: u64,
+    /// Batches whose transaction confirmed.
+    pub confirmed: u64,
     pub already_written: u64,
     pub retries: u64,
 }
@@ -101,8 +101,9 @@ pub struct BatchProgress {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ErrorDecision {
     Retry,
-    /// The program rejected an entry as already written. Done only after on-chain verification.
-    AlreadyAccounted,
+    /// The program rejected an entry as already written. Verify the whole
+    /// batch on chain before counting it done.
+    VerifyWritten,
     Halt(&'static str),
 }
 
@@ -113,7 +114,7 @@ pub enum ErrorDecision {
 /// the string is awkward but lets the orchestrator stay agnostic to the
 /// exact ClientError variant layout (which has shifted across solana-client
 /// versions).
-pub fn extract_custom_program_error(msg: &str) -> Option<u32> {
+pub fn parse_custom_error_code(msg: &str) -> Option<u32> {
     let needle = "custom program error: 0x";
     let start = msg.find(needle)?;
     let hex = &msg[start + needle.len()..];
@@ -126,10 +127,10 @@ pub fn extract_custom_program_error(msg: &str) -> Option<u32> {
 /// Decide how to react to a `ClientError` from `send_and_confirm_transaction`.
 pub fn classify(err: &ClientError) -> ErrorDecision {
     let msg = err.to_string();
-    if let Some(code) = extract_custom_program_error(&msg) {
+    if let Some(code) = parse_custom_error_code(&msg) {
         return match code {
-            ALREADY_ACCOUNTED_CUSTOM | INVALID_PDA_CUSTOM => ErrorDecision::AlreadyAccounted,
-            UNAUTHORIZED_CALLER_CUSTOM => ErrorDecision::Halt("UnauthorizedCaller"),
+            ALREADY_ACCOUNTED_ERROR_CODE | INVALID_PDA_ERROR_CODE => ErrorDecision::VerifyWritten,
+            UNAUTHORIZED_CALLER_ERROR_CODE => ErrorDecision::Halt("UnauthorizedCaller"),
             _ => ErrorDecision::Halt("custom program error (logic)"),
         };
     }
@@ -148,15 +149,15 @@ pub fn classify(err: &ClientError) -> ErrorDecision {
 /// Live counters behind [`SubmissionStats`].
 #[derive(Default)]
 struct Counters {
-    submitted: AtomicU64,
+    confirmed: AtomicU64,
     already_written: AtomicU64,
     retries: AtomicU64,
 }
 
 impl Counters {
-    fn snapshot(&self) -> SubmissionStats {
+    fn to_stats(&self) -> SubmissionStats {
         SubmissionStats {
-            submitted: self.submitted.load(Ordering::SeqCst),
+            confirmed: self.confirmed.load(Ordering::SeqCst),
             already_written: self.already_written.load(Ordering::SeqCst),
             retries: self.retries.load(Ordering::SeqCst),
         }
@@ -186,7 +187,7 @@ impl Backoff {
 struct Submitter {
     target: BackfillTarget,
     payer: Keypair,
-    rpc: RpcClient,
+    rpc: Arc<RpcClient>,
     config: SubmitterConfig,
     /// Updated as events happen, regardless of a batch's eventual outcome.
     counters: Counters,
@@ -198,7 +199,7 @@ impl Submitter {
         let outcome = self.submit_ix_with_retries(&batch, ix).await?;
         match &outcome {
             BatchOutcome::Confirmed(sig) => {
-                self.counters.submitted.fetch_add(1, Ordering::SeqCst);
+                self.counters.confirmed.fetch_add(1, Ordering::SeqCst);
                 debug!(sig = %sig, "tx confirmed");
             }
             BatchOutcome::AlreadyWritten => {
@@ -247,14 +248,14 @@ impl Submitter {
                 Err(e) => e,
             };
             match classify(&e) {
-                ErrorDecision::AlreadyAccounted => {
+                ErrorDecision::VerifyWritten => {
                     // SECURITY: the error names one entry; every entry must be on chain.
                     if self.verify_with_retries(batch).await? {
                         return Ok(BatchOutcome::AlreadyWritten);
                     }
                     return Err(anyhow!(
                         "halt: {} rejected as already written, but on-chain state does not hold the whole batch: {e}",
-                        batch.kind()
+                        batch.ix_name()
                     ));
                 }
                 ErrorDecision::Halt(what) => return Err(anyhow!("halt: {what}: {e}")),
@@ -275,8 +276,9 @@ impl Submitter {
 /// module doc's "Halt semantics" section for the precise halt behavior.
 /// Equivalent to [`submit_batches_with_progress`] with no progress channel —
 /// use that variant when per-batch completion needs to be observed, e.g.
-/// to persist progress file progress as batches land.
+/// to advance the progress file as batches land.
 pub async fn submit_batches<I>(
+    rpc: Arc<RpcClient>,
     target: BackfillTarget,
     payer: Keypair,
     config: SubmitterConfig,
@@ -285,7 +287,7 @@ pub async fn submit_batches<I>(
 where
     I: IntoIterator<Item = TxBatch>,
 {
-    submit_batches_with_progress(target, payer, config, batches, None).await
+    submit_batches_with_progress(rpc, target, payer, config, batches, None).await
 }
 
 /// As [`submit_batches`], but additionally reports each batch's terminal
@@ -294,8 +296,9 @@ where
 /// concurrency; callers that need an ordered "confirmed up to index N"
 /// notion (e.g. a resumable progress file) must track a completion set keyed by
 /// `BatchProgress::index` and compute the longest confirmed prefix
-/// themselves — see `main.rs`'s `run` orchestrator.
+/// themselves — see `run::submit_remaining_batches`.
 pub async fn submit_batches_with_progress<I>(
+    rpc: Arc<RpcClient>,
     target: BackfillTarget,
     payer: Keypair,
     config: SubmitterConfig,
@@ -305,16 +308,16 @@ pub async fn submit_batches_with_progress<I>(
 where
     I: IntoIterator<Item = TxBatch>,
 {
-    let rpc = RpcClient::new_with_commitment(config.rpc_url.clone(), CommitmentConfig::confirmed());
     let concurrency = config.concurrency;
-    let shared = Arc::new(Submitter {
+    assert!(concurrency > 0, "concurrency must be positive");
+    let submitter = Arc::new(Submitter {
         target,
         payer,
         rpc,
         config,
         counters: Counters::default(),
     });
-    let sem = Arc::new(Semaphore::new(concurrency));
+    let permits = Arc::new(Semaphore::new(concurrency));
     // Set as soon as any dispatched batch hits an unrecoverable error; see
     // the module doc's "Halt semantics" section.
     let halt = Arc::new(AtomicBool::new(false));
@@ -337,19 +340,19 @@ where
         if halt.load(Ordering::SeqCst) {
             break;
         }
-        let permit = sem.clone().acquire_owned().await.expect("semaphore");
+        let permit = permits.clone().acquire_owned().await.expect("semaphore");
         // Re-check: the flag may have flipped while this iteration waited
         // on the semaphore.
         if halt.load(Ordering::SeqCst) {
             break;
         }
 
-        let shared = shared.clone();
+        let submitter = submitter.clone();
         let halt = halt.clone();
         let progress = progress.clone();
         tasks.spawn(async move {
             let _permit = permit;
-            match shared.submit_batch(batch).await {
+            match submitter.submit_batch(batch).await {
                 Ok(outcome) => {
                     if let Some(tx) = &progress {
                         let _ = tx.send(BatchProgress { index, outcome });
@@ -370,7 +373,7 @@ where
         note(joined);
     }
 
-    let final_stats = shared.counters.snapshot();
+    let final_stats = submitter.counters.to_stats();
     match first_err {
         Some(e) => Err(e.context(format!(
             "halted after unrecoverable error; partial stats: {final_stats:?}"

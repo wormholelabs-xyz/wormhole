@@ -10,29 +10,28 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-use ga_backfill::accountant::Accountant;
-
-use crate::compare::Finding;
-use crate::state::ComparedState;
+use svm_accountant_tools_common::accountant::Accountant;
+use svm_accountant_tools_common::parity::compare::Finding;
+use svm_accountant_tools_common::parity::state::StateKind;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum LedgerEvent {
-    Check(CheckResult),
+    Check(CheckRecord),
     Finding(FindingRecord),
 }
 
 /// Ledger length bound: one check line plus its finding lines per run.
 pub const MAX_LEDGER_LINES: usize = 10_000_000;
 
-/// Diff lines written per check; `finding_count` keeps the full total.
+/// Finding lines written per check; `finding_count` keeps the full total.
 pub const MAX_FINDING_LINES: usize = 10_000;
 
 /// `check` line schema. Lines with any other version are rejected.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CheckResult {
+pub struct CheckRecord {
     pub schema_version: u32,
     /// Id the `finding` lines point at: unix seconds, raised to stay unique and
     /// increasing within one ledger.
@@ -45,11 +44,15 @@ pub struct CheckResult {
     pub snapshot: String,
     /// SHA-256 of the snapshot file. Guardians compare it out-of-band.
     pub snapshot_sha256: String,
+    /// Config file the check ran with.
+    pub config: String,
+    /// SHA-256 of the config file.
+    pub config_sha256: String,
     pub rpc_url: String,
     pub program_id: String,
     pub noreplay_program_id: String,
     /// Count and content hash per compared state.
-    pub states: BTreeMap<ComparedState, StateTotals>,
+    pub states: BTreeMap<StateKind, StateTotals>,
     /// Snapshot `governance` rows, excluded from the backfill.
     pub governance_digests: usize,
     /// `PendingObservations` accounts in the last sample.
@@ -73,7 +76,7 @@ pub struct FindingRecord {
     pub entry: Finding,
 }
 
-pub fn append(path: &Path, check: &CheckResult, findings: &[Finding]) -> Result<()> {
+pub fn append_check(path: &Path, check: &CheckRecord, findings: &[Finding]) -> Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -93,7 +96,7 @@ pub fn append(path: &Path, check: &CheckResult, findings: &[Finding]) -> Result<
     file.flush().context("flush ledger")
 }
 
-pub fn replay(path: &Path) -> Result<Vec<LedgerEvent>> {
+pub fn read_events(path: &Path) -> Result<Vec<LedgerEvent>> {
     let file =
         std::fs::File::open(path).with_context(|| format!("open ledger {}", path.display()))?;
     let mut out = Vec::new();
@@ -170,7 +173,7 @@ pub fn latest_check(events: &[LedgerEvent]) -> Result<Option<LatestCheck>> {
 }
 
 /// The latest check at or before `at_unix`, with its findings.
-pub fn report_at(events: &[LedgerEvent], at_unix: u64) -> Option<(CheckResult, Vec<Finding>)> {
+pub fn report_at(events: &[LedgerEvent], at_unix: u64) -> Option<(CheckRecord, Vec<Finding>)> {
     let check = events
         .iter()
         .filter_map(|event| match event {
@@ -182,8 +185,8 @@ pub fn report_at(events: &[LedgerEvent], at_unix: u64) -> Option<(CheckResult, V
     let findings = events
         .iter()
         .filter_map(|event| match event {
-            LedgerEvent::Finding(diff) if diff.check_id == check.check_id => {
-                Some(diff.entry.clone())
+            LedgerEvent::Finding(record) if record.check_id == check.check_id => {
+                Some(record.entry.clone())
             }
             _ => None,
         })
@@ -194,26 +197,29 @@ pub fn report_at(events: &[LedgerEvent], at_unix: u64) -> Option<(CheckResult, V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use svm_accountant_tools_common::parity::state::FindingKind;
 
-    fn check(check_id: u64, clean: bool) -> CheckResult {
+    fn check(check_id: u64, clean: bool) -> CheckRecord {
         let summary = StateTotals {
             wormchain_count: 1,
             wormchain_hash: "0xaa".into(),
             solana_count: 1,
             solana_hash: "0xaa".into(),
         };
-        CheckResult {
+        CheckRecord {
             schema_version: SCHEMA_VERSION,
             check_id,
             ts: crate::time::unix_to_rfc3339(check_id),
             mode: "strict".into(),
             accountant: Accountant::Wtt,
-            snapshot: "catalogue.jsonl".into(),
+            snapshot: "snapshot.jsonl".into(),
             snapshot_sha256: "0x00".into(),
+            config: "svm-accountant.toml".into(),
+            config_sha256: "0x00".into(),
             rpc_url: "http://localhost".into(),
             program_id: "prog".into(),
             noreplay_program_id: "noreplay".into(),
-            states: BTreeMap::from([(ComparedState::Balances, summary)]),
+            states: BTreeMap::from([(StateKind::BALANCES, summary)]),
             governance_digests: 0,
             pending: 0,
             finding_count: usize::from(!clean),
@@ -223,23 +229,23 @@ mod tests {
 
     fn entry() -> Finding {
         Finding {
-            kind: ComparedState::ReplayMarks,
+            kind: FindingKind::State(StateKind::ReplayMarks),
             key: "chain=2 emitter=0xee sequence=5".into(),
-            wormchain: Some("marked".into()),
-            solana: None,
+            expected: Some("marked".into()),
+            actual: None,
         }
     }
 
     #[test]
-    fn append_replay_and_report_at() {
+    fn append_read_and_report_at() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.jsonl");
 
-        append(&path, &check(100, false), &[entry()]).unwrap();
-        append(&path, &check(200, true), &[]).unwrap();
+        append_check(&path, &check(100, false), &[entry()]).unwrap();
+        append_check(&path, &check(200, true), &[]).unwrap();
 
-        let events = replay(&path).unwrap();
-        assert_eq!(events.len(), 3, "two checks + one diff");
+        let events = read_events(&path).unwrap();
+        assert_eq!(events.len(), 3, "two checks + one finding");
 
         assert!(report_at(&events, 99).is_none(), "before the first check");
 
@@ -255,10 +261,10 @@ mod tests {
     }
 
     #[test]
-    fn replay_rejects_garbage_lines() {
+    fn read_events_rejects_garbage_lines() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ledger.jsonl");
         std::fs::write(&path, "{\"event\":\"nonsense\"}\n").unwrap();
-        assert!(replay(&path).is_err());
+        assert!(read_events(&path).is_err());
     }
 }

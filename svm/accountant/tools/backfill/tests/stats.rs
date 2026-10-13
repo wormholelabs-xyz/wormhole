@@ -1,10 +1,10 @@
-//! Tests for `ga-backfill stats`.
+//! Tests for `svm-accountant-backfill stats`.
 
-use ga_backfill::stats::{compute, TX_FEE_LAMPORTS};
+use svm_accountant_backfill::stats::compute;
+use svm_accountant_backfill::wire::TX_FEE_LAMPORTS;
 
 fn fixture_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/sample_snapshot.jsonl")
+    svm_accountant_tools_common::test_support::fixture_path("wtt_sample_snapshot.jsonl")
 }
 
 #[test]
@@ -14,10 +14,10 @@ fn compute_against_sample_fixture() {
     // Sample snapshot: 1 account + 1 modification + 1 registration + 2 transfers
     // = 5 records total.
     assert_eq!(stats.transfers, 2);
-    assert_eq!(stats.accounts, 1);
+    assert_eq!(stats.balances, 1);
     assert_eq!(stats.modifications, 1);
     assert_eq!(stats.registrations, 1);
-    assert_eq!(stats.total_records(), 5);
+    assert_eq!(stats.total_rows(), 5);
 
     // Both transfers from chain=1, same emitter, sequences 5 and 6 — same
     // bucket (sequence / 1024 = 0) and same emitter group.
@@ -51,10 +51,10 @@ fn rent_includes_all_pda_classes() {
 }
 
 #[test]
-fn total_records_matches_sum() {
+fn total_rows_matches_sum() {
     let stats = compute(&fixture_path()).expect("compute");
     assert_eq!(
-        stats.total_records(),
-        stats.transfers + stats.accounts + stats.modifications + stats.registrations
+        stats.total_rows(),
+        stats.transfers + stats.balances + stats.modifications + stats.registrations
     );
 }

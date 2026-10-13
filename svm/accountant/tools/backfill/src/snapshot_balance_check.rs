@@ -29,11 +29,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::snapshot::{ModificationKind, SnapshotError, SnapshotRow};
 use global_accountant_definitions::Uint256;
-
-/// Balance-account key: `(chain, token_chain, token_address)`.
-type Key = (u16, u16, [u8; 32]);
+use svm_accountant_tools_common::ids::BalanceKey;
+use svm_accountant_tools_common::snapshot::{ModificationKind, SnapshotError, SnapshotRow};
 
 /// Net accumulator for one account.
 #[derive(Default, Clone, Copy)]
@@ -61,46 +59,50 @@ impl Net {
     }
 }
 
-/// Result of replaying a snapshot's transfer/modification history against
+/// Result of netting a snapshot's transfer/modification history against
 /// its committed balances.
 #[derive(Debug, Default)]
 pub struct SnapshotBalanceReport {
     pub transfers: u64,
     pub modifications: u64,
-    pub accounts: u64,
+    pub balances: u64,
     /// Committed balances whose replayed net matched exactly.
     pub matched: usize,
     /// One line per discrepancy: either a committed balance that didn't
     /// match its replayed net (`MISMATCH`), or replayed activity with no
     /// committed balance row and a non-zero net (`UNEXPECTED`).
-    pub mismatches: Vec<String>,
+    pub discrepancies: Vec<String>,
 }
 
 impl SnapshotBalanceReport {
-    /// No discrepancies — every committed balance reconciles.
+    /// No discrepancies: every committed balance equals its net.
     pub fn is_clean(&self) -> bool {
-        self.mismatches.is_empty()
+        self.discrepancies.is_empty()
     }
 }
 
-/// Replay `records` and reconcile committed `account` balances against the
-/// net of `transfer`/`modification` activity touching the same
+/// Net `rows` and check each committed balance against the net of the
+/// `transfer`/`modification` activity on the same
 /// `(chain, token_chain, token_address)` key.
 pub fn check_snapshot_balances(
     rows: impl Iterator<Item = Result<SnapshotRow, SnapshotError>>,
 ) -> Result<SnapshotBalanceReport> {
-    let mut net: HashMap<Key, Net> = HashMap::new();
-    let mut committed: HashMap<Key, Uint256> = HashMap::new();
+    let mut net: HashMap<BalanceKey, Net> = HashMap::new();
+    let mut committed: HashMap<BalanceKey, Uint256> = HashMap::new();
     let mut report = SnapshotBalanceReport::default();
 
-    for (i, row) in rows.enumerate() {
-        let row = row.with_context(|| format!("parse snapshot line {}", i + 1))?;
+    for row in rows {
+        let row = row.context("parse snapshot")?;
         match row {
             SnapshotRow::Transfer(t) => {
                 report.transfers += 1;
-                let amount = Uint256::from_be_bytes(t.amount);
+                let amount = t.amount;
                 let src = net
-                    .entry((t.chain, t.token_chain, t.token_address))
+                    .entry(BalanceKey {
+                        chain: t.chain,
+                        token_chain: t.token_chain,
+                        token_address: t.token_address,
+                    })
                     .or_default();
                 if t.chain == t.token_chain {
                     src.credit(amount)?; // native lock
@@ -108,7 +110,11 @@ pub fn check_snapshot_balances(
                     src.debit(amount)?; // wrapped burn
                 }
                 let dst = net
-                    .entry((t.recipient_chain, t.token_chain, t.token_address))
+                    .entry(BalanceKey {
+                        chain: t.recipient_chain,
+                        token_chain: t.token_chain,
+                        token_address: t.token_address,
+                    })
                     .or_default();
                 if t.recipient_chain == t.token_chain {
                     dst.debit(amount)?; // native unlock
@@ -118,9 +124,13 @@ pub fn check_snapshot_balances(
             }
             SnapshotRow::ModifyBalance(m) => {
                 report.modifications += 1;
-                let amount = Uint256::from_be_bytes(m.amount);
+                let amount = m.amount;
                 let acc = net
-                    .entry((m.chain_id, m.token_chain, m.token_address))
+                    .entry(BalanceKey {
+                        chain: m.chain_id,
+                        token_chain: m.token_chain,
+                        token_address: m.token_address,
+                    })
                     .or_default();
                 match m.modify_kind {
                     ModificationKind::Add => acc.credit(amount)?,
@@ -128,41 +138,29 @@ pub fn check_snapshot_balances(
                 }
             }
             SnapshotRow::Balance(a) => {
-                report.accounts += 1;
-                committed.insert(
-                    (a.chain, a.token_chain, a.token_address),
-                    Uint256::from_be_bytes(a.balance),
-                );
+                report.balances += 1;
+                if committed.insert(a.key(), a.balance).is_some() {
+                    anyhow::bail!("two committed balance rows for {}", a.key());
+                }
             }
             // Registration / hub / peer rows carry no balance effect.
             _ => {}
         }
     }
 
-    let fmt = |k: &Key| {
-        format!(
-            "chain={} token_chain={} token=0x{}",
-            k.0,
-            k.1,
-            hex::encode(k.2)
-        )
-    };
-
     for (key, want) in &committed {
         match net.get(key).and_then(Net::balance) {
             Some(got) if got == *want => report.matched += 1,
-            Some(got) => report.mismatches.push(format!(
-                "MISMATCH {} committed={want:?} net={got:?}",
-                fmt(key)
-            )),
-            None => report.mismatches.push(format!(
-                "MISMATCH {} committed={want:?} net=<negative>",
-                fmt(key)
-            )),
+            Some(got) => report
+                .discrepancies
+                .push(format!("MISMATCH {key} committed={want:?} net={got:?}")),
+            None => report
+                .discrepancies
+                .push(format!("MISMATCH {key} committed={want:?} net=<negative>")),
         }
     }
     // Accounts with transfer activity but no committed balance row (should net to zero).
-    let mut unexpected: Vec<Key> = net
+    let mut unexpected: Vec<BalanceKey> = net
         .iter()
         .filter(|(k, n)| !committed.contains_key(*k) && n.balance() != Some(Uint256::ZERO))
         .map(|(k, _)| *k)
@@ -170,10 +168,9 @@ pub fn check_snapshot_balances(
     unexpected.sort();
     for k in &unexpected {
         let got = net.get(k).and_then(Net::balance);
-        report.mismatches.push(format!(
-            "UNEXPECTED {} net={got:?} (no committed balance)",
-            fmt(k)
-        ));
+        report
+            .discrepancies
+            .push(format!("UNEXPECTED {k} net={got:?} (no committed balance)"));
     }
 
     Ok(report)

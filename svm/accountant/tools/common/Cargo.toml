@@ -1,0 +1,36 @@
+[package]
+name = "svm-accountant-tools-common"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Read model shared by svm-accountant-backfill and svm-accountant-parity: snapshot parser, account layouts, RPC reads and the parity comparison."
+
+[lib]
+name = "svm_accountant_tools_common"
+path = "src/lib.rs"
+
+[features]
+# Surfpool subprocess helper for the e2e suites.
+test-support = []
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+clap.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+solana-client.workspace = true
+solana-commitment-config.workspace = true
+solana-pubkey.workspace = true
+solana-rpc-client.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+toml.workspace = true
+global-accountant-definitions.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true

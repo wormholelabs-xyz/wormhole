@@ -1,4 +1,4 @@
-//! Group snapshot records into tx-sized batches for the backfill program.
+//! Group snapshot rows into tx-sized batches for the backfill program.
 //!
 //! ## Wire budget primer
 //!
@@ -49,17 +49,13 @@ use global_accountant_definitions::{
     MAX_CHAIN_REGISTRATION_ENTRIES,
 };
 
-use crate::tx_builder::legacy_wire_size;
-
-use crate::snapshot::{
+use svm_accountant_tools_common::ids::{Address, BalanceKey, ChainId, EmitterKey, Sequence};
+use svm_accountant_tools_common::snapshot::{
     BalanceRow, ChainRegistrationRow, ModifyBalanceRow, SnapshotRow, TransceiverHubRow,
     TransceiverPeerRow, TransferRow,
 };
 
-/// Solana's raw transaction wire limit. Any transaction larger than this is
-/// rejected outright by every validator — this is the hard ceiling the
-/// batcher's `BackfillNoReplay` packing must never cross.
-pub const PACKET_DATA_SIZE: usize = 1232;
+use crate::wire::{legacy_wire_size, PACKET_DATA_SIZE};
 
 /// Backstop cap on `BackfillNoReplay` entries per tx, from the at-scale
 /// probe's common case (few buckets per emitter). The binding bound is the
@@ -84,7 +80,7 @@ const NOREPLAY_ENTRY_DATA_BYTES: usize = 8 + 32;
 
 /// Exact `BackfillNoReplay` ix-data length for `entry_count` entries packed
 /// into a single group (see [`NOREPLAY_GROUP_HEADER_BYTES`]).
-const fn noreplay_data_len(entry_count: usize) -> usize {
+const fn noreplay_data_bytes(entry_count: usize) -> usize {
     NOREPLAY_FIXED_DATA_HEADER_BYTES
         + NOREPLAY_GROUP_HEADER_BYTES
         + entry_count * NOREPLAY_ENTRY_DATA_BYTES
@@ -102,8 +98,12 @@ fn noreplay_wire_size(bucket_count: usize, entry_count: usize) -> usize {
     const N: usize = MAX_NOREPLAY_ENTRIES_PER_BATCH + 1;
     static SIZES: OnceLock<[[usize; N]; N]> = OnceLock::new();
     assert!(
-        bucket_count < N && entry_count < N,
-        "at most one bucket per entry"
+        bucket_count < N,
+        "bucket count {bucket_count} over the entry cap"
+    );
+    assert!(
+        entry_count < N,
+        "entry count {entry_count} over the entry cap"
     );
     SIZES.get_or_init(|| {
         let mut sizes = [[0; N]; N];
@@ -129,7 +129,7 @@ fn measure_noreplay_wire_size(bucket_count: usize, entry_count: usize) -> usize 
     let ix = Instruction {
         program_id: Pubkey::new_from_array([0xFFu8; 32]),
         accounts,
-        data: vec![0u8; noreplay_data_len(entry_count)],
+        data: vec![0u8; noreplay_data_bytes(entry_count)],
     };
     legacy_wire_size(&ix, &payer)
 }
@@ -242,7 +242,7 @@ impl TxBatch {
         self.len() == 0
     }
 
-    pub fn kind(&self) -> &'static str {
+    pub fn ix_name(&self) -> &'static str {
         match self {
             Self::BackfillNoReplay(_) => "BackfillNoReplay",
             Self::BackfillBalance(_) => "BackfillBalance",
@@ -255,21 +255,21 @@ impl TxBatch {
 }
 
 /// Longest buffered run (one row kind). Mainnet: 17,367 `account` rows.
-pub const MAX_BUFFERED_RUN: usize = 100_000;
+pub const MAX_BUFFERED_RUN_ROWS: usize = 100_000;
 
 /// Per-kind key order across the whole plan. Each handler requires strictly
 /// ascending keys within one batch; this extends the rule across batch
 /// boundaries, so a duplicate or out-of-order row fails before any send.
 /// `RegisterChain` sequences must also be unique.
-pub fn check_batch_order(plan: &[TxBatch]) -> Result<()> {
+pub fn check_batch_order(batches: &[TxBatch]) -> Result<()> {
     #[derive(Default)]
     struct Last {
-        noreplay: Option<(u16, [u8; 32], u64)>,
-        balance: Option<(u16, u16, [u8; 32])>,
-        modify: Option<u64>,
-        registration: Option<u16>,
-        hub: Option<(u16, [u8; 32])>,
-        peer: Option<(u16, [u8; 32], u16)>,
+        noreplay: Option<(EmitterKey, Sequence)>,
+        balance: Option<BalanceKey>,
+        modify: Option<Sequence>,
+        registration: Option<ChainId>,
+        hub: Option<(ChainId, Address)>,
+        peer: Option<(ChainId, Address, ChainId)>,
     }
     fn ascend<K: Ord + Copy + std::fmt::Debug>(
         last: &mut Option<K>,
@@ -287,25 +287,15 @@ pub fn check_batch_order(plan: &[TxBatch]) -> Result<()> {
     }
     let mut last = Last::default();
     let mut register_chain_sequences = HashSet::new();
-    for (i, batch) in plan.iter().enumerate() {
-        let kind = batch.kind();
+    for (i, batch) in batches.iter().enumerate() {
+        let kind = batch.ix_name();
         match batch {
             TxBatch::BackfillNoReplay(e) => e.iter().try_for_each(|t| {
-                ascend(
-                    &mut last.noreplay,
-                    (t.chain, t.emitter, t.sequence),
-                    i,
-                    kind,
-                )
+                ascend(&mut last.noreplay, (t.emitter_key(), t.sequence), i, kind)
             })?,
-            TxBatch::BackfillBalance(e) => e.iter().try_for_each(|a| {
-                ascend(
-                    &mut last.balance,
-                    (a.chain, a.token_chain, a.token_address),
-                    i,
-                    kind,
-                )
-            })?,
+            TxBatch::BackfillBalance(e) => e
+                .iter()
+                .try_for_each(|a| ascend(&mut last.balance, a.key(), i, kind))?,
             TxBatch::BackfillModifyBalance(e) => e
                 .iter()
                 .try_for_each(|m| ascend(&mut last.modify, m.sequence, i, kind))?,
@@ -356,7 +346,7 @@ impl<I: Iterator<Item = SnapshotRow>> Iterator for Batcher<I> {
     type Item = TxBatch;
 
     fn next(&mut self) -> Option<TxBatch> {
-        // Bounded: each pass consumes one record or returns.
+        // Bounded: each pass consumes one row or returns.
         loop {
             if let Some(batch) = self.buffered.pop_front() {
                 return Some(batch);
@@ -370,7 +360,7 @@ impl<I: Iterator<Item = SnapshotRow>> Iterator for Batcher<I> {
                     let run = drain_run!(self, first, SnapshotRow::Balance);
                     self.buffer_sorted(
                         run,
-                        |a| (a.chain, a.token_chain, a.token_address),
+                        BalanceRow::key,
                         MAX_BALANCE_ENTRIES_PER_BATCH,
                         TxBatch::BackfillBalance,
                     );
@@ -416,14 +406,14 @@ impl<I: Iterator<Item = SnapshotRow>> Iterator for Batcher<I> {
 }
 
 /// `first` plus every directly following `$variant` record. Panics past
-/// [`MAX_BUFFERED_RUN`].
+/// [`MAX_BUFFERED_RUN_ROWS`].
 macro_rules! drain_run {
     ($self:ident, $first:ident, $variant:path) => {{
         let mut run = vec![$first];
         while let Some($variant(next)) = $self.source.next_if(|r| matches!(r, $variant(_))) {
             assert!(
-                run.len() < MAX_BUFFERED_RUN,
-                "sorted run exceeds MAX_BUFFERED_RUN ({MAX_BUFFERED_RUN})"
+                run.len() < MAX_BUFFERED_RUN_ROWS,
+                "sorted run exceeds MAX_BUFFERED_RUN_ROWS ({MAX_BUFFERED_RUN_ROWS})"
             );
             run.push(next);
         }
@@ -443,18 +433,17 @@ impl<I: Iterator<Item = SnapshotRow>> Batcher<I> {
     /// ([`noreplay_wire_size`]). Sequences ascend within a run, so a new
     /// bucket is a change of bucket index.
     fn collect_transfers(&mut self, first: TransferRow) -> Vec<TransferRow> {
-        let key = (first.chain, first.emitter);
-        let mut last_bucket = NoReplayBitmapAccount::bucket_index(first.sequence);
+        let key = first.emitter_key();
+        let mut last_bucket = NoReplayBitmapAccount::bucket_index(first.sequence.0);
         let mut bucket_count = 1;
         let mut batch = Vec::with_capacity(MAX_NOREPLAY_ENTRIES_PER_BATCH);
         batch.push(first);
         while batch.len() < MAX_NOREPLAY_ENTRIES_PER_BATCH {
             let entries = batch.len() + 1;
             let fits = |t: &TransferRow| {
-                let bucket = NoReplayBitmapAccount::bucket_index(t.sequence);
+                let bucket = NoReplayBitmapAccount::bucket_index(t.sequence.0);
                 let buckets = bucket_count + usize::from(bucket != last_bucket);
-                (t.chain, t.emitter) == key
-                    && noreplay_wire_size(buckets, entries) <= PACKET_DATA_SIZE
+                t.emitter_key() == key && noreplay_wire_size(buckets, entries) <= PACKET_DATA_SIZE
             };
             let Some(SnapshotRow::Transfer(next)) = self
                 .source
@@ -462,7 +451,7 @@ impl<I: Iterator<Item = SnapshotRow>> Batcher<I> {
             else {
                 break;
             };
-            let bucket = NoReplayBitmapAccount::bucket_index(next.sequence);
+            let bucket = NoReplayBitmapAccount::bucket_index(next.sequence.0);
             if bucket != last_bucket {
                 bucket_count += 1;
                 last_bucket = bucket;

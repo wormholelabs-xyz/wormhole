@@ -1,0 +1,31 @@
+# Config for svm-accountant-backfill and svm-accountant-parity.
+# Copy to svm-accountant.toml, or pass --config <path>.
+# Relative paths resolve against the directory of this file.
+# Program addresses come from the build, not from this file.
+
+# JSON-RPC endpoint.
+rpc_url = "https://rpc.labsapis.com/mainnet/solana"
+# Origin header. The internal RPC proxy rejects requests without an allow-listed one.
+origin = "https://portalbridge.com"
+
+# svm-accountant-backfill run. Every key is optional; the values below are the defaults.
+[backfill]
+concurrency = 16
+max_retries = 5
+initial_retry_delay_ms = 500
+max_retry_delay_ms = 30000
+
+[wtt]
+snapshot = "snapshots/wtt-snapshot.jsonl"
+# Parity ledger: `check wtt` appends to it, `report wtt` reads it.
+ledger = "ledgers/wtt-parity.jsonl"
+# Defaults to progress.json next to the snapshot.
+progress_file = "progress/wtt.json"
+# Backfill authority keypair. Required by `run wtt`.
+payer = "keys/wtt-backfill-authority.json"
+
+[ntt]
+snapshot = "snapshots/ntt-snapshot.jsonl"
+ledger = "ledgers/ntt-parity.jsonl"
+progress_file = "progress/ntt.json"
+payer = "keys/ntt-backfill-authority.json"

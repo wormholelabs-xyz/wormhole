@@ -1,0 +1,41 @@
+# Off-chain tools. One workspace and one lockfile, outside the parent SBF workspace.
+[workspace]
+resolver = "2"
+members = ["backfill", "common", "parity"]
+
+# Every dependency pinned exact, with the committed lockfile.
+[workspace.dependencies]
+anyhow = "=1.0.103"
+base64 = "=0.22.1"
+bincode = "=1.3.3"
+bytemuck = "=1.25.2"
+clap = { version = "=4.5.50", features = ["derive"] }
+hex = "=0.4.3"
+reqwest = { version = "=0.12.28", default-features = false }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.10.9"
+solana-address = { version = "=2.6.0", features = ["curve25519"] }
+solana-client = "=3.1.14"
+solana-commitment-config = "=3.1.1"
+solana-hash = "=3.1.0"
+solana-instruction = "=3.4.0"
+solana-keypair = "=3.1.2"
+solana-message = "=3.1.0"
+solana-pubkey = { version = "=4.2.0", features = ["curve25519"] }
+solana-rpc-client = "=3.1.14"
+solana-signature = "=3.4.1"
+solana-signer = "=3.0.0"
+solana-transaction = "=3.1.0"
+tempfile = "=3.14.0"
+thiserror = "=1.0.69"
+tokio = "=1.48.0"
+# Config file parser. No `display`: the tools read TOML and never write it.
+toml = { version = "=1.1.3", default-features = false, features = ["std", "serde", "parse"] }
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter"] }
+
+global-accountant-definitions = { path = "../crates/definitions" }
+global-accountant-backfill = { path = "../programs/global-accountant-backfill", default-features = false }
+ntt-global-accountant-backfill = { path = "../programs/ntt-global-accountant-backfill", default-features = false }
+svm-accountant-tools-common = { path = "common" }
