@@ -381,3 +381,47 @@ async fn progress_channel_reports_every_batch_with_its_original_index() {
     assert_eq!(seen[&3], "confirmed");
     assert_eq!(seen[&4], "confirmed");
 }
+
+/// A program failure in preflight is not transient: the submitter halts after
+/// one attempt instead of retrying the same failing transaction.
+#[tokio::test]
+async fn preflight_instruction_error_halts_without_retry() {
+    let cases = [
+        (
+            "non-custom instruction error",
+            serde_json::json!({"InstructionError": [0, "InvalidInstructionData"]}),
+            "instruction error",
+        ),
+        (
+            "unknown custom error",
+            serde_json::json!({"InstructionError": [0, {"Custom": 99}]}),
+            "custom program error",
+        ),
+        (
+            "unauthorized caller",
+            serde_json::json!({"InstructionError": [0, {"Custom": UNAUTHORIZED_CALLER_ERROR_CODE}]}),
+            "UnauthorizedCaller",
+        ),
+    ];
+    for (name, err, want) in cases {
+        let mock = MockRpc::start(vec![SendTxBehavior::PreflightFailure(err)]);
+        let config = SubmitterConfig {
+            concurrency: 1,
+            max_retries: 5,
+            initial_retry_delay_ms: 1,
+            max_retry_delay_ms: 5,
+        };
+        let result = submit_batches(
+            Arc::new(mock.client()),
+            wtt_target(),
+            authority_keypair(),
+            config,
+            vec![modification_batch()],
+        )
+        .await;
+        let error = format!("{:#}", result.expect_err(name));
+        assert!(error.contains(want), "{name}: {error}");
+        assert!(error.contains("retries: 0"), "{name}: no retry: {error}");
+        assert_eq!(mock.send_transaction_calls(), 1, "{name}: one attempt");
+    }
+}

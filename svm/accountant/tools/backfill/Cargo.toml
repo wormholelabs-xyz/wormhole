@@ -33,6 +33,7 @@ solana-message.workspace = true
 solana-pubkey.workspace = true
 solana-signer.workspace = true
 solana-transaction.workspace = true
+solana-transaction-error.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

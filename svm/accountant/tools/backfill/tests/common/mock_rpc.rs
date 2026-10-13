@@ -35,6 +35,10 @@ pub enum SendTxBehavior {
     /// A generic RPC-shaped error with no custom-program-error substring —
     /// drives `classify()`'s `Retry` branch.
     TransientError,
+    /// A -32002 preflight failure whose `data.err` is this `TransactionError`
+    /// JSON, as a validator returns it: e.g.
+    /// `{"InstructionError": [0, "InvalidInstructionData"]}`.
+    PreflightFailure(Value),
 }
 
 #[derive(Default)]
@@ -327,6 +331,15 @@ fn send_transaction_response(params: &Value, behavior: SendTxBehavior) -> Value 
                 "message": format!(
                     "Transaction simulation failed: Error processing Instruction 0: custom program error: 0x{code:x}"
                 ),
+            },
+        }),
+        SendTxBehavior::PreflightFailure(err) => json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32002,
+                "message": "Transaction simulation failed: Error processing Instruction 0",
+                "data": {"err": err, "logs": ["Program log: scripted failure"]},
             },
         }),
         SendTxBehavior::TransientError => json!({

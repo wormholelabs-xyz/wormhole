@@ -5129,6 +5129,7 @@ dependencies = [
  "solana-signature",
  "solana-signer",
  "solana-transaction",
+ "solana-transaction-error",
  "svm-accountant-tools-common",
  "tempfile",
  "tokio",

@@ -10,11 +10,17 @@
 //! - **UnauthorizedCaller (custom 33)** → halt. The configured signer does
 //!   not match the program's compile-time backfill authority — operator
 //!   misconfig, no point retrying.
-//! - **Other custom program errors** → halt. Logic errors are unrecoverable
-//!   in the orchestrator's frame — the operator needs to inspect.
-//! - **RPC / I/O / blockhash-expired / transient errors** → retry with
+//! - **Other custom program errors, and any other instruction error** → halt.
+//!   A preflight simulation that fails in the program fails again on retry;
+//!   the operator needs to inspect.
+//! - **AlreadyProcessed** → verify written, as above.
+//! - **BlockhashNotFound, RPC / I/O / transient errors** → retry with
 //!   exponential backoff, capped attempts, incrementing
 //!   `SubmissionStats::retries` for every retry actually taken.
+//! - **Any other transaction error** → halt.
+//!
+//! The typed `TransactionError` of a preflight failure decides first. The
+//! `custom program error: 0x..` text is the fallback for responses without one.
 //!
 //! Each tx fetches its own blockhash before signing. Concurrent submission
 //! through a `tokio::sync::Semaphore`; the empirical 16-way concurrency from
@@ -38,10 +44,12 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use solana_client::client_error::{ClientError, ClientErrorKind};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_instruction::error::InstructionError;
 use solana_instruction::Instruction;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 use solana_transaction::Transaction;
+use solana_transaction_error::TransactionError;
 use tokio::sync::{mpsc::UnboundedSender, Semaphore};
 use tokio::task::{JoinError, JoinSet};
 use tracing::{debug, warn};
@@ -124,15 +132,31 @@ pub fn parse_custom_error_code(msg: &str) -> Option<u32> {
     u32::from_str_radix(&hex[..end], 16).ok()
 }
 
+/// Decision for a custom program error code.
+fn classify_custom(code: u32) -> ErrorDecision {
+    match code {
+        ALREADY_ACCOUNTED_ERROR_CODE | INVALID_PDA_ERROR_CODE => ErrorDecision::VerifyWritten,
+        UNAUTHORIZED_CALLER_ERROR_CODE => ErrorDecision::Halt("UnauthorizedCaller"),
+        _ => ErrorDecision::Halt("custom program error (logic)"),
+    }
+}
+
 /// Decide how to react to a `ClientError` from `send_and_confirm_transaction`.
 pub fn classify(err: &ClientError) -> ErrorDecision {
-    let msg = err.to_string();
-    if let Some(code) = parse_custom_error_code(&msg) {
-        return match code {
-            ALREADY_ACCOUNTED_ERROR_CODE | INVALID_PDA_ERROR_CODE => ErrorDecision::VerifyWritten,
-            UNAUTHORIZED_CALLER_ERROR_CODE => ErrorDecision::Halt("UnauthorizedCaller"),
-            _ => ErrorDecision::Halt("custom program error (logic)"),
-        };
+    match err.get_transaction_error() {
+        Some(TransactionError::InstructionError(_, InstructionError::Custom(code))) => {
+            return classify_custom(code)
+        }
+        Some(TransactionError::InstructionError(..)) => {
+            return ErrorDecision::Halt("instruction error")
+        }
+        Some(TransactionError::AlreadyProcessed) => return ErrorDecision::VerifyWritten,
+        Some(TransactionError::BlockhashNotFound) => return ErrorDecision::Retry,
+        Some(_) => return ErrorDecision::Halt("transaction error"),
+        None => {}
+    }
+    if let Some(code) = parse_custom_error_code(&err.to_string()) {
+        return classify_custom(code);
     }
     match err.kind() {
         // Network / RPC transient
