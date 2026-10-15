@@ -179,15 +179,11 @@ pub async fn run(config: RunConfig) -> Result<()> {
             finding.actual.as_deref().unwrap_or("absent"),
         );
     }
-    let fatal = findings.iter().filter(|f| fails_the_run(f)).count();
-    if fatal == 0 {
-        println!(
-            "[parity] {} finding(s), none fatal to the run",
-            findings.len()
-        );
-        return Ok(());
-    }
-    bail!("parity check found {fatal} fatal finding(s); do not consider this migration complete")
+    // Same rule as the cutover gate, `svm-accountant-parity check --strict`.
+    bail!(
+        "parity check found {} finding(s); do not consider this migration complete",
+        findings.len()
+    )
 }
 
 /// Verify every batch the progress file claims against chain state, and resubmit
@@ -322,12 +318,4 @@ async fn wait_for_finalization(confirmed: &RpcClient, finalized: &RpcClient) -> 
 /// Parity mode of the post-run check.
 fn post_run_parity_mode() -> Mode {
     Mode::Strict
-}
-
-/// Whether `finding` fails `svm-accountant-backfill run`. The cutover gate is
-/// `svm-accountant-parity check --strict`, which fails on every finding.
-fn fails_the_run(finding: &Finding) -> bool {
-    // TODO(human): decide which finding kinds fail the post-run check.
-    let _ = finding;
-    true
 }

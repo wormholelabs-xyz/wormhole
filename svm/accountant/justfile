@@ -359,6 +359,17 @@ tools-build:
     cd {{TOOLS_DIR}}
     cargo build --locked --release --workspace
 
+# Both tools as separate processes against one long-running surfpool, driven by a config file.
+# Steps and files: tools/localnet.sh, tools/.localnet/.
+[doc("Localnet run of the off-chain tools: surfpool, real programs, backfill then parity check for WTT and NTT. LOCALNET_KEEP=1 leaves surfpool running.")]
+tools-localnet: build-devnet
+    cd {{TOOLS_DIR}} && {{test_env}} cargo build --locked --workspace
+    {{test_env}} {{TOOLS_DIR}}/localnet.sh
+
+[doc("Stop the surfpool that `LOCALNET_KEEP=1 just tools-localnet` left running.")]
+tools-localnet-stop:
+    {{TOOLS_DIR}}/localnet.sh stop
+
 [doc("Audit the off-chain tools lockfile against the RustSec advisory database.")]
 tools-audit:
     cd {{TOOLS_DIR}} && cargo audit
