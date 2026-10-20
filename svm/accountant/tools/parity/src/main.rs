@@ -231,6 +231,7 @@ async fn run_check(
     if mode != Mode::Strict && pending != 0 {
         eprintln!("[parity] warning: {pending} PendingObservations account(s)");
     }
+    result.solana_only.log_foreign_accounts();
     ensure!(
         file_sha256(snapshot)? == snapshot_hash,
         "snapshot {} changed during the check",

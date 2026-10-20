@@ -294,6 +294,7 @@ pub async fn parity_findings(
         "[parity] mode={mode} pending observations={}",
         result.solana_only.pending_observations
     );
+    result.solana_only.log_foreign_accounts();
     Ok(result.findings)
 }
 

@@ -140,6 +140,7 @@ mod tests {
         let solana_only = SolanaOnlyFindings {
             malformed: vec![],
             pending_observations: 2,
+            foreign_accounts: vec![],
         };
         let cases = [(Mode::Strict, 1), (Mode::Settle(1), 0)];
         for (mode, want) in cases {

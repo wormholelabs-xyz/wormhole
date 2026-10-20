@@ -4,7 +4,8 @@
 //! sample is one view and accounts of every tag are seen. Each account is
 //! parsed through its definitions layout, re-encoded with `Layout::new`, and
 //! must equal the original bytes and sit at the PDA its own key derives.
-//! Anything else is a [`FindingKind::MalformedAccounts`] finding.
+//! An all-zero account is a foreign account, logged only. Anything else is a
+//! [`FindingKind::MalformedAccounts`] finding.
 //!
 //! NoReplay bucket PDAs are one-way, so they cannot be listed; coverage is the
 //! `(chain, emitter, bucket)` universe of the expected replay set, fetched with
@@ -36,11 +37,44 @@ use crate::parity::state::{ChainState, FindingKind, ReplayMarks};
 /// plus live `PendingObservations` after the cutover.
 pub const MAX_PROGRAM_ACCOUNTS: usize = 2_000_000;
 
-/// Findings from Solana alone: malformed program accounts and the pending count.
+/// Foreign account addresses printed per sample; the count is always printed.
+pub const MAX_LOGGED_FOREIGN_ACCOUNTS: usize = 100;
+
+/// Findings from Solana alone: malformed program accounts, the pending count,
+/// and foreign accounts.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SolanaOnlyFindings {
     pub malformed: Vec<Finding>,
     pub pending_observations: usize,
+    /// All-zero program accounts. Bounded by [`MAX_PROGRAM_ACCOUNTS`].
+    pub foreign_accounts: Vec<Pubkey>,
+}
+
+impl SolanaOnlyFindings {
+    /// Print the foreign account count and up to [`MAX_LOGGED_FOREIGN_ACCOUNTS`] addresses.
+    pub fn log_foreign_accounts(&self) {
+        let count = self.foreign_accounts.len();
+        if count == 0 {
+            return;
+        }
+        eprintln!(
+            "[parity] warning: {count} foreign account(s): all-zero, owned by the program; \
+             not findings"
+        );
+        for address in self
+            .foreign_accounts
+            .iter()
+            .take(MAX_LOGGED_FOREIGN_ACCOUNTS)
+        {
+            eprintln!("[parity]   foreign {address}");
+        }
+        if count > MAX_LOGGED_FOREIGN_ACCOUNTS {
+            eprintln!(
+                "[parity]   ... {} more",
+                count - MAX_LOGGED_FOREIGN_ACCOUNTS
+            );
+        }
+    }
 }
 
 /// One sample of the program's state.
@@ -129,8 +163,19 @@ fn decode_account_tag(byte: u8) -> Option<AccountTag> {
     TAGS.into_iter().find(|tag| *tag as u8 == byte)
 }
 
-/// Put one program account into its keyed state, count it as pending, or
-/// record it as malformed. `Err` is a fatal state error (duplicate, cap).
+/// SECURITY: only the owner writes account data, and every program write sets a
+/// non-zero tag in the instruction that creates the account. An all-zero account
+/// therefore comes from the System program (`CreateAccount`, `*WithSeed`, `Assign`)
+/// or another program's PDA, at any address on or off the curve. Anyone can make
+/// one, so it must not fail a check. A record PDA left unwritten still fails the
+/// state comparison as a missing key.
+fn is_foreign_account(data: &[u8]) -> bool {
+    data.iter().all(|byte| *byte == 0)
+}
+
+/// Put one program account into its keyed state, count it as pending, record
+/// it as foreign, or record it as malformed. `Err` is a fatal state error
+/// (duplicate, cap).
 pub fn classify_account(
     state: &mut ChainState,
     solana_only: &mut SolanaOnlyFindings,
@@ -139,6 +184,10 @@ pub fn classify_account(
     address: &Pubkey,
     data: &[u8],
 ) -> Result<()> {
+    if is_foreign_account(data) {
+        solana_only.foreign_accounts.push(*address);
+        return Ok(());
+    }
     let malformed_before = solana_only.malformed.len();
     let description =
         match decode_layout(state, solana_only, program_id, accountant, address, data)? {
@@ -161,9 +210,7 @@ fn decode_layout(
     address: &Pubkey,
     data: &[u8],
 ) -> Result<Option<String>> {
-    let Some(&tag_byte) = data.first() else {
-        return Ok(Some("empty account".to_string()));
-    };
+    let tag_byte = *data.first().expect("an empty account is foreign");
     let insert_as = match decode_account_tag(tag_byte) {
         Some(AccountTag::PendingObservations) => {
             if data.len() != PendingObservationsLayout::LEN {
@@ -318,12 +365,48 @@ mod tests {
         }))
     }
 
+    /// An off-curve address: a PDA of the program.
+    fn pda() -> Pubkey {
+        let (pda, _) = Pubkey::find_program_address(&[b"unrelated"], &program());
+        assert!(!pda.is_on_curve());
+        pda
+    }
+
+    /// An on-curve address: the compressed ed25519 base point, as a keypair address.
+    fn keypair_address() -> Pubkey {
+        let mut bytes = [0x66; 32];
+        bytes[0] = 0x58;
+        let address = Pubkey::new_from_array(bytes);
+        assert!(address.is_on_curve());
+        address
+    }
+
+    /// An off-curve `CreateAccountWithSeed` address owned by the program:
+    /// `sha256(base ‖ seed ‖ owner)`, signed for by `base` alone.
+    fn off_curve_seed_address() -> Pubkey {
+        use sha2::{Digest, Sha256};
+        const MAX_SEED_ATTEMPTS: u32 = 256;
+        let base = keypair_address();
+        for attempt in 0..MAX_SEED_ATTEMPTS {
+            let mut hasher = Sha256::new();
+            hasher.update(base.as_ref());
+            hasher.update(attempt.to_string().as_bytes());
+            hasher.update(program().as_ref());
+            let address = Pubkey::new_from_array(hasher.finalize().into());
+            if !address.is_on_curve() {
+                return address;
+            }
+        }
+        panic!("no off-curve seed address in {MAX_SEED_ATTEMPTS} attempts");
+    }
+
     /// `(name, accountant, (account bytes, address), expected outcome)`.
     type Case = (&'static str, Accountant, (Vec<u8>, Pubkey), Want);
 
     enum Want {
         Kept(StateKind),
         Pending,
+        Foreign,
         Malformed(&'static str),
     }
 
@@ -399,15 +482,51 @@ mod tests {
                 Want::Pending,
             ),
             (
-                "empty",
+                "empty at a keypair address",
                 Accountant::Wtt,
-                (vec![], Pubkey::new_unique()),
-                Want::Malformed("empty account"),
+                (vec![], keypair_address()),
+                Want::Foreign,
             ),
             (
-                "unknown tag",
+                "zero-filled at a keypair address",
+                Accountant::Ntt,
+                (vec![0; 70], keypair_address()),
+                Want::Foreign,
+            ),
+            (
+                "empty at a pda",
                 Accountant::Wtt,
-                (vec![0xEE; 70], Pubkey::new_unique()),
+                (vec![], pda()),
+                Want::Foreign,
+            ),
+            (
+                "zero-filled at a pda",
+                Accountant::Wtt,
+                (vec![0; 70], pda()),
+                Want::Foreign,
+            ),
+            (
+                "zero-filled at an off-curve seed address",
+                Accountant::Wtt,
+                (vec![0; 70], off_curve_seed_address()),
+                Want::Foreign,
+            ),
+            (
+                "tag 0 with data at a pda",
+                Accountant::Wtt,
+                ([vec![0; 69], vec![1]].concat(), pda()),
+                Want::Malformed("tag 0 with 70 bytes is not wtt state"),
+            ),
+            (
+                "unknown tag at a pda",
+                Accountant::Wtt,
+                (vec![0xEE; 70], pda()),
+                Want::Malformed("tag 238 with 70 bytes is not wtt state"),
+            ),
+            (
+                "unknown tag at a keypair address",
+                Accountant::Wtt,
+                (vec![0xEE; 70], keypair_address()),
                 Want::Malformed("tag 238 with 70 bytes is not wtt state"),
             ),
             (
@@ -479,15 +598,37 @@ mod tests {
                     assert_eq!(kept, 1, "{name}: kept once");
                     assert!(solana_only.malformed.is_empty(), "{name}: no finding");
                     assert_eq!(solana_only.pending_observations, 0, "{name}: not pending");
+                    assert!(
+                        solana_only.foreign_accounts.is_empty(),
+                        "{name}: not foreign"
+                    );
                 }
                 Want::Pending => {
                     assert_eq!(kept, 0, "{name}: not kept");
                     assert!(solana_only.malformed.is_empty(), "{name}: no finding");
                     assert_eq!(solana_only.pending_observations, 1, "{name}: pending");
+                    assert!(
+                        solana_only.foreign_accounts.is_empty(),
+                        "{name}: not foreign"
+                    );
+                }
+                Want::Foreign => {
+                    assert_eq!(kept, 0, "{name}: not kept");
+                    assert!(solana_only.malformed.is_empty(), "{name}: no finding");
+                    assert_eq!(solana_only.pending_observations, 0, "{name}: not pending");
+                    assert_eq!(
+                        solana_only.foreign_accounts,
+                        vec![address],
+                        "{name}: foreign"
+                    );
                 }
                 Want::Malformed(text) => {
                     assert_eq!(kept, 0, "{name}: not kept");
                     assert_eq!(solana_only.pending_observations, 0, "{name}: not pending");
+                    assert!(
+                        solana_only.foreign_accounts.is_empty(),
+                        "{name}: not foreign"
+                    );
                     assert_eq!(solana_only.malformed.len(), 1, "{name}: one finding");
                     let finding = &solana_only.malformed[0];
                     assert_eq!(finding.kind, FindingKind::MalformedAccounts, "{name}: kind");
