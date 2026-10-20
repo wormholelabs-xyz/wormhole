@@ -66,6 +66,18 @@ pub struct TransferRow {
     pub recipient_chain: ChainId,
 }
 
+impl GovernanceRow {
+    pub fn message_id(&self) -> MessageId {
+        MessageId {
+            emitter: EmitterKey {
+                chain: self.chain,
+                emitter: self.emitter,
+            },
+            sequence: self.sequence,
+        }
+    }
+}
+
 impl TransferRow {
     pub fn emitter_key(&self) -> EmitterKey {
         EmitterKey {
@@ -133,8 +145,9 @@ pub struct ChainRegistrationRow {
 }
 
 /// `kind: "governance"` — one wormchain `DIGESTS` row under
-/// `(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER)`. Not backfilled: a governance
-/// sequence is random, and a marked bit would pre-burn it for `upgrade_contract`.
+/// `(SOLANA_CHAIN_ID, GOVERNANCE_EMITTER)`. Not backfilled: the VAA targeted
+/// wormchain, so a Solana mark protects nothing, and its bit is the key
+/// `upgrade_contract` checks. Parity requires the bit unset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceRow {
     pub chain: ChainId,
@@ -334,8 +347,8 @@ fn parse_transfer(line: usize, v: &Value) -> Result<TransferRow, SnapshotError> 
         token_address: field_address(line, v, "token_address")?,
         recipient_chain: field_chain(line, v, "recipient_chain")?,
     };
-    // SECURITY: a governance digest backfilled as a transfer would pre-burn its
-    // NoReplay bit, which `upgrade_contract` consults.
+    // SECURITY: a governance digest backfilled as a transfer would mark its
+    // NoReplay bit, the key `upgrade_contract` checks.
     if is_governance_emitter(row.chain, &row.emitter) {
         return Err(SnapshotError::WrongEmitterKind {
             line,

@@ -215,10 +215,10 @@ async fn run_check(
         .with_context(|| format!("expected state of {}", snapshot.display()))?;
     drop(rows);
     eprintln!(
-        "[parity] snapshot: {} balances, {} replay marks, {} governance rows (not backfilled)",
+        "[parity] snapshot: {} balances, {} replay marks, {} governance rows (must be unmarked)",
         expected.len_of(StateKind::BALANCES),
         expected.len_of(StateKind::ReplayMarks),
-        skipped.governance_rows,
+        skipped.governance.len(),
     );
 
     let client = rpc::client(
@@ -226,7 +226,7 @@ async fn run_check(
         config.config.origin.as_deref(),
         CommitmentConfig::finalized(),
     )?;
-    let result = sample(&client, target, &expected, mode).await?;
+    let result = sample(&client, target, &expected, &skipped.governance, mode).await?;
     let pending = result.solana_only.pending_observations;
     if mode != Mode::Strict && pending != 0 {
         eprintln!("[parity] warning: {pending} PendingObservations account(s)");
@@ -267,7 +267,7 @@ async fn run_check(
         program_id: target.program_id.to_string(),
         noreplay_program_id: target.noreplay_program.to_string(),
         states,
-        governance_digests: skipped.governance_rows,
+        governance_digests: skipped.governance.len(),
         pending,
         finding_count: findings.len(),
         clean: findings.is_empty(),

@@ -8,12 +8,15 @@
 //! [`FindingKind::MalformedAccounts`] finding.
 //!
 //! NoReplay bucket PDAs are one-way, so they cannot be listed; coverage is the
-//! `(chain, emitter, bucket)` universe of the expected replay set, fetched with
-//! batched `getMultipleAccounts`. Every set bit of a fetched bucket is read
-//! back, so an extra mark inside that universe is a finding.
+//! `(chain, emitter, bucket)` universe of the expected replay set and the
+//! governance rows, fetched with batched `getMultipleAccounts`. Every set bit of
+//! a fetched bucket is read back, so an extra mark inside that universe,
+//! including a governance mark, is a finding.
 //!
 //! [`MAX_PROGRAM_ACCOUNTS`] bounds processing. The whole `getProgramAccounts`
 //! response is in memory when the bound is checked.
+
+use std::collections::BTreeSet;
 
 use anyhow::{bail, Context, Result};
 use global_accountant_definitions::{
@@ -77,13 +80,15 @@ impl SolanaOnlyFindings {
     }
 }
 
-/// One sample of the program's state.
+/// One sample of the program's state. Reads the buckets of `expected_marks`
+/// and `unmarked`; a set bit of `unmarked` becomes an extra actual mark.
 pub async fn fetch(
     rpc: &RpcClient,
     program_id: &Pubkey,
     noreplay_program: &Pubkey,
     accountant: Accountant,
-    replay_universe: &ReplayMarks,
+    expected_marks: &ReplayMarks,
+    unmarked: &ReplayMarks,
 ) -> Result<(ChainState, SolanaOnlyFindings)> {
     let mut state = ChainState::default();
     let mut solana_only = SolanaOnlyFindings::default();
@@ -120,7 +125,8 @@ pub async fn fetch(
         rpc,
         program_id,
         noreplay_program,
-        replay_universe,
+        expected_marks,
+        unmarked,
         &mut state,
         &mut solana_only,
     )
@@ -283,17 +289,25 @@ fn check_and_insert<L: ComparedAccount>(
     Ok(None)
 }
 
-/// Read the buckets of `universe` and store their marks.
+/// Read the buckets of `expected_marks` and `unmarked`, and store their marks.
 async fn fetch_replay_marks(
     rpc: &RpcClient,
     program_id: &Pubkey,
     noreplay_program: &Pubkey,
-    universe: &ReplayMarks,
+    expected_marks: &ReplayMarks,
+    unmarked: &ReplayMarks,
     state: &mut ChainState,
     solana_only: &mut SolanaOnlyFindings,
 ) -> Result<()> {
     let authority = derive_noreplay_authority_pda(program_id);
-    let buckets: Vec<BucketId> = universe.buckets().keys().copied().collect();
+    let buckets: Vec<BucketId> = expected_marks
+        .buckets()
+        .keys()
+        .chain(unmarked.buckets().keys())
+        .copied()
+        .collect::<BTreeSet<BucketId>>()
+        .into_iter()
+        .collect();
     let fetched = fetch_bucket_states(rpc, noreplay_program, &authority, &buckets).await?;
     for (bucket, (pda, bucket_state)) in buckets.into_iter().zip(fetched) {
         let description = match bucket_state {

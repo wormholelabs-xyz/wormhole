@@ -20,7 +20,7 @@ pub async fn parity_findings(
     snapshot: &std::path::Path,
 ) -> Vec<svm_accountant_tools_common::parity::compare::Finding> {
     let rows = svm_accountant_tools_common::snapshot::read_rows(snapshot).expect("read snapshot");
-    let (expected, _) = svm_accountant_tools_common::parity::expected_state::from_snapshot(
+    let (expected, skipped) = svm_accountant_tools_common::parity::expected_state::from_snapshot(
         &rows,
         target.accountant(),
     )
@@ -29,9 +29,11 @@ pub async fn parity_findings(
         rpc_url.to_string(),
         solana_commitment_config::CommitmentConfig::confirmed(),
     );
-    svm_accountant_backfill::run::parity_findings(&confirmed, rpc_url, None, target, &expected)
-        .await
-        .expect("parity check")
+    svm_accountant_backfill::run::parity_findings(
+        &confirmed, rpc_url, None, target, &expected, &skipped,
+    )
+    .await
+    .expect("parity check")
 }
 
 /// A `confirmed` async client for a surfpool instance.

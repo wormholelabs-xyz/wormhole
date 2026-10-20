@@ -9,14 +9,15 @@ use crate::layouts::{
     balance_layout, chain_registration_layout, modify_balance_layout, register_chain_layout,
     transceiver_hub_layout, transceiver_peer_layout,
 };
-use crate::parity::state::{ChainState, StateKind};
+use crate::parity::state::{ChainState, ReplayMarks, StateKind};
 use crate::snapshot::SnapshotRow;
 
-/// Snapshot rows not compared on Solana.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// Snapshot rows not backfilled.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SkippedRows {
-    /// `governance` rows: wormchain digests of governance VAAs, excluded from the backfill.
-    pub governance_rows: usize,
+    /// `governance` rows: wormchain digests of governance VAAs. Their NoReplay
+    /// bits must stay unset on Solana.
+    pub governance: ReplayMarks,
 }
 
 /// Expected state of `rows`. Fails on a row of the other accountant and on a duplicate key.
@@ -36,7 +37,7 @@ pub fn from_snapshot(
         match row {
             SnapshotRow::Balance(a) => state.insert_account(&balance_layout(a))?,
             SnapshotRow::Transfer(t) => state.replay_marks.insert(t.message_id())?,
-            SnapshotRow::Governance(_) => skipped.governance_rows += 1,
+            SnapshotRow::Governance(g) => skipped.governance.insert(g.message_id())?,
             SnapshotRow::ModifyBalance(m) => state.insert_account(&modify_balance_layout(m))?,
             SnapshotRow::TokenBridgeRegistration(r) | SnapshotRow::RelayerChainRegistration(r) => {
                 state.insert_account(&chain_registration_layout(r))?;

@@ -25,7 +25,7 @@ use solana_signer::Signer;
 use svm_accountant_tools_common::accountant::Accountant;
 use svm_accountant_tools_common::hash::{file_sha256, hex32};
 use svm_accountant_tools_common::parity::compare::Finding;
-use svm_accountant_tools_common::parity::expected_state::from_snapshot_non_empty;
+use svm_accountant_tools_common::parity::expected_state::{from_snapshot_non_empty, SkippedRows};
 use svm_accountant_tools_common::parity::findings::{sample, CheckTarget, Mode};
 use svm_accountant_tools_common::parity::state::ChainState;
 use svm_accountant_tools_common::rpc;
@@ -97,7 +97,7 @@ pub async fn run(config: RunConfig) -> Result<()> {
     );
     // Built before the rows move into the batcher; the expected state is compact.
     let expected = if config.parity_check {
-        Some(from_snapshot_non_empty(&rows, config.accountant)?.0)
+        Some(from_snapshot_non_empty(&rows, config.accountant)?)
     } else {
         None
     };
@@ -154,7 +154,7 @@ pub async fn run(config: RunConfig) -> Result<()> {
         progress_file.batches_done()
     );
 
-    let Some(expected) = expected else {
+    let Some((expected, skipped)) = expected else {
         println!("[run] --no-parity-check set; skipping the post-run parity check");
         return Ok(());
     };
@@ -164,6 +164,7 @@ pub async fn run(config: RunConfig) -> Result<()> {
         config.origin.as_deref(),
         &target,
         &expected,
+        &skipped,
     )
     .await?;
     if findings.is_empty() {
@@ -280,6 +281,7 @@ pub async fn parity_findings(
     origin: Option<&str>,
     target: &BackfillTarget,
     expected: &ChainState,
+    skipped: &SkippedRows,
 ) -> Result<Vec<Finding>> {
     let finalized = rpc::client(rpc_url, origin, CommitmentConfig::finalized())?;
     wait_for_finalization(confirmed, &finalized).await?;
@@ -289,7 +291,14 @@ pub async fn parity_findings(
         noreplay_program: target.noreplay_program(),
     };
     let mode = post_run_parity_mode();
-    let result = sample(&finalized, &check_target, expected, mode).await?;
+    let result = sample(
+        &finalized,
+        &check_target,
+        expected,
+        &skipped.governance,
+        mode,
+    )
+    .await?;
     println!(
         "[parity] mode={mode} pending observations={}",
         result.solana_only.pending_observations

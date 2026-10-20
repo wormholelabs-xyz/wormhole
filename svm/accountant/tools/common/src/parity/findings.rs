@@ -11,7 +11,7 @@ use solana_pubkey::Pubkey;
 use crate::accountant::Accountant;
 use crate::parity::compare::{compare, Finding};
 use crate::parity::onchain_state::{self, SolanaOnlyFindings};
-use crate::parity::state::{ChainState, FindingKind, KeyedKind, StateKind};
+use crate::parity::state::{ChainState, FindingKind, KeyedKind, ReplayMarks, StateKind};
 
 /// Longest settle interval.
 pub const MAX_SETTLE_SECONDS: u64 = 3_600;
@@ -90,10 +90,12 @@ pub fn collect_findings(
 
 /// Sample Solana per `mode`; in settle mode the second sample is reported.
 /// A finding gone by the second sample was lag; one new in it is current.
+/// A set bit of `unmarked` is a finding.
 pub async fn sample(
     rpc: &RpcClient,
     target: &CheckTarget,
     expected: &ChainState,
+    unmarked: &ReplayMarks,
     mode: Mode,
 ) -> Result<Sample> {
     if let Mode::Settle(seconds) = mode {
@@ -109,6 +111,7 @@ pub async fn sample(
             &target.noreplay_program,
             target.accountant,
             &expected.replay_marks,
+            unmarked,
         )
         .await?;
         let findings = collect_findings(expected, &actual, &solana_only, mode);

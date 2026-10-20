@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use global_accountant_definitions::{
-    BalanceAccountKey, BalanceAccountLayout, NoReplayBitmapAccount, Uint256, NOREPLAY_BITMAP_BYTES,
-    NOREPLAY_PROGRAM_ID,
+    BalanceAccountKey, BalanceAccountLayout, NoReplayBitmapAccount, Uint256, GOVERNANCE_EMITTER,
+    NOREPLAY_BITMAP_BYTES, NOREPLAY_PROGRAM_ID, SOLANA_CHAIN_ID,
 };
 use solana_pubkey::Pubkey;
 use svm_accountant_tools_common::accountant::Accountant;
@@ -38,6 +38,8 @@ const EMITTER_BYTE: u8 = 0xEE;
 const TOKEN_A: u8 = 0xAA;
 const TOKEN_B: u8 = 0xAB;
 const SEQUENCES: [u64; 3] = [5, 6, 1025];
+/// Governance VAA sequences are random 64-bit values.
+const GOVERNANCE_SEQUENCE: u64 = 0x0123_4567_89AB_CDEF;
 
 fn snapshot_line_account(token_byte: u8, balance_byte: u8) -> String {
     format!(
@@ -54,6 +56,27 @@ fn snapshot_line_transfer(sequence: u64) -> String {
         digest = hex::encode([0xDD; 32]),
         amount = hex::encode([0x01; 32]),
         token = hex::encode([TOKEN_A; 32]),
+    )
+}
+
+fn snapshot_line_governance(sequence: u64) -> String {
+    format!(
+        r#"{{"kind":"governance","chain":{SOLANA_CHAIN_ID},"emitter":"0x{emitter}","sequence":{sequence},"digest":"0x{digest}"}}"#,
+        emitter = hex::encode(GOVERNANCE_EMITTER),
+        digest = hex::encode([0xD0; 32]),
+    )
+}
+
+/// Bucket PDA holding the governance `sequence`.
+fn governance_bucket_pda(noreplay_program: &Pubkey, authority: &Pubkey, sequence: u64) -> Pubkey {
+    let emitter = EmitterKey {
+        chain: ChainId(SOLANA_CHAIN_ID),
+        emitter: Address(GOVERNANCE_EMITTER),
+    };
+    derive_bucket_pda(
+        noreplay_program,
+        authority,
+        &bucket_id(emitter, Sequence(sequence)),
     )
 }
 
@@ -189,6 +212,7 @@ fn write_snapshot(dir: &Path, extra_lines: &[String]) {
     for sequence in SEQUENCES {
         writeln!(file, "{}", snapshot_line_transfer(sequence)).unwrap();
     }
+    writeln!(file, "{}", snapshot_line_governance(GOVERNANCE_SEQUENCE)).unwrap();
     for line in extra_lines {
         writeln!(file, "{line}").unwrap();
     }
@@ -228,7 +252,8 @@ fn strict_check_detects_seeded_state_and_mutations() {
     );
 
     // Mutations: one balance value drifts, one replay mark disappears, one
-    // extra mark appears inside the covered bucket universe.
+    // extra mark appears inside the covered bucket universe, and the
+    // governance sequence is marked.
     let (_, drifted_b) = balance_layout(&program_id, TOKEN_B, 0x0A);
     set_account(&rpc_url, &balance_b, &program_id, 10_000_000, &drifted_b);
     set_account(
@@ -238,11 +263,23 @@ fn strict_check_detects_seeded_state_and_mutations() {
         10_000_000,
         &bucket_data(&[5, 7]),
     );
+    let governance_bucket = governance_bucket_pda(
+        &noreplay_program,
+        &derive_noreplay_authority_pda(&program_id),
+        GOVERNANCE_SEQUENCE,
+    );
+    set_account(
+        &rpc_url,
+        &governance_bucket,
+        &noreplay_program,
+        10_000_000,
+        &bucket_data(&[GOVERNANCE_SEQUENCE]),
+    );
 
     let dirty = run_check(&config, Accountant::Wtt, &["--strict"]);
     assert_eq!(dirty.exit_code, 1, "mutated state must fail");
     let findings = dirty.report["findings"].as_array().unwrap();
-    assert_eq!(findings.len(), 3, "one per mutation: {findings:?}");
+    assert_eq!(findings.len(), 4, "one per mutation: {findings:?}");
     assert_eq!(findings[0]["kind"], "balances");
     assert!(findings[0]["key"]
         .as_str()
@@ -256,12 +293,19 @@ fn strict_check_detects_seeded_state_and_mutations() {
         .as_str()
         .unwrap()
         .contains(&hex::encode([0x0Au8])));
+    // Bucket order: the governance emitter's chain 1 sorts before CHAIN.
     assert_eq!(findings[1]["kind"], "replay_marks");
-    assert!(findings[1]["key"].as_str().unwrap().contains("sequence=6"));
-    assert!(findings[1]["solana"].is_null());
+    assert!(findings[1]["key"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("sequence={GOVERNANCE_SEQUENCE}")));
+    assert!(findings[1]["wormchain"].is_null());
     assert_eq!(findings[2]["kind"], "replay_marks");
-    assert!(findings[2]["key"].as_str().unwrap().contains("sequence=7"));
-    assert!(findings[2]["wormchain"].is_null());
+    assert!(findings[2]["key"].as_str().unwrap().contains("sequence=6"));
+    assert!(findings[2]["solana"].is_null());
+    assert_eq!(findings[3]["kind"], "replay_marks");
+    assert!(findings[3]["key"].as_str().unwrap().contains("sequence=7"));
+    assert!(findings[3]["wormchain"].is_null());
 
     // Settle: the mutations are static, so the second sample carries them.
     let settled = run_check(&config, Accountant::Wtt, &["--settle", "1"]);
@@ -269,13 +313,13 @@ fn strict_check_detects_seeded_state_and_mutations() {
         settled.exit_code, 1,
         "persistent findings survive the settle margin"
     );
-    assert_eq!(settled.report["findings"].as_array().unwrap().len(), 3);
+    assert_eq!(settled.report["findings"].as_array().unwrap().len(), 4);
 
     // Every check appended to the configured ledger; `report` reads the latest.
     let (code, stdout) = run_report(&config, Accountant::Wtt);
     assert_eq!(code, Some(1), "report exits 1 on a dirty check");
     assert!(
-        stdout.contains("PARITY: 3 finding(s)"),
+        stdout.contains("PARITY: 4 finding(s)"),
         "report reads the check back: {stdout}"
     );
     assert!(
