@@ -325,7 +325,7 @@ func TestNewSolanaTxID(t *testing.T) {
 	assert.False(t, solanaTxID{}.valid(), "the zero value is not a tx id")
 }
 
-// Wormchain decodes 0x01 with no trailing bytes, and 0x03 with a 32-byte from_address.
+// Wormchain decodes 0x01 as exactly the head, and 0x03 as the head and an arbitrary payload of any length.
 func TestSolanaObservationFieldsTransferLengths(t *testing.T) {
 	transfer := fixturePayload(t, fixtureTransferBodyHex)
 	require.Equal(t, byte(0x01), transfer[0])
@@ -342,9 +342,11 @@ func TestSolanaObservationFieldsTransferLengths(t *testing.T) {
 	}{
 		{name: "0x01 exact head", payload: transfer},
 		{name: "0x01 one trailing byte", payload: append(append([]byte{}, transfer...), 0), wantErr: true},
-		{name: "0x03 head only", payload: withPayload(0), wantErr: true},
-		{name: "0x03 one byte short of from_address", payload: withPayload(31), wantErr: true},
-		{name: "0x03 from_address and no payload", payload: withPayload(32)},
+		{name: "0x03 one byte short of head", payload: withPayload(0)[:tokenBridgeTransferLen-1], wantErr: true},
+		{name: "0x03 head only", payload: withPayload(0)},
+		{name: "0x03 1-byte payload", payload: withPayload(1)},
+		{name: "0x03 31-byte payload", payload: withPayload(31)},
+		{name: "0x03 32-byte payload", payload: withPayload(32)},
 		{name: "0x03 large payload", payload: withPayload(10_000)},
 	}
 	for _, tt := range tests {

@@ -42,6 +42,25 @@ fn transfer_commits_and_marks_noreplay() {
     assert_balance(after, &scenario.dest_account, Uint256::from_u128(500_000));
 }
 
+/// An empty-payload `TransferWithPayload` is the 133-byte head; wormchain accounts it.
+#[test]
+fn transfer_with_empty_payload_commits() {
+    let mollusk = mollusk();
+    let transfer = Transfer::new(0xA9, ETHEREUM, SOLANA, 500_000);
+    let mut scenario = VaaScenario::transfer(transfer);
+    scenario.vaa.body = with_transfer_payload(transfer.body(), &[]);
+
+    let result = scenario.submit(&mollusk, scenario.accounts());
+    assert_success(&result, "transfer with empty payload");
+    let after = &result.resulting_accounts;
+    assert_bucket_marked(
+        find_account(after, &scenario.noreplay_bucket),
+        scenario.sequence,
+    );
+    assert_balance(after, &scenario.source_account, Uint256::from_u128(500_000));
+    assert_balance(after, &scenario.dest_account, Uint256::from_u128(500_000));
+}
+
 /// Signatures posted for one body do not verify another: the Shim recovers each signature
 /// against the digest the accountant computes from the instruction body.
 #[test]

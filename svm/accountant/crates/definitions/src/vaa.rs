@@ -94,8 +94,8 @@ impl VaaBodyHeader {
     }
 }
 
-/// Zero-copy view of the fixed 133-byte head of a Token Bridge transfer
-/// payload (action 0x01 is exactly this; 0x03 appends an arbitrary payload).
+/// Zero-copy view of the 133-byte head shared by both Token Bridge transfer actions
+/// (action 0x01 is exactly this; 0x03 appends an arbitrary payload of any length).
 /// Layout per `sdk/vaa/structs.go` `DecodeTransferPayloadHdr`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Pod, Zeroable)]
@@ -106,14 +106,12 @@ pub struct TokenBridgeTransfer {
     pub token_chain: [u8; 2],
     pub recipient: [u8; 32],
     pub recipient_chain: [u8; 2],
-    pub fee: [u8; 32],
+    /// 0x01: relayer fee. 0x03: sender address.
+    pub fee_or_from_address: [u8; 32],
 }
 
 /// Maximum arbitrary payload past the fixed 133-byte head, for `TransferWithPayload`.
 pub const MAX_TRANSFER_PAYLOAD_LEN: usize = 2000;
-
-/// Minimum `TransferWithPayload` length: the 133-byte head plus the 32-byte `from_address`.
-pub const TRANSFER_WITH_PAYLOAD_MIN_LEN: usize = TokenBridgeTransfer::LEN + 32;
 
 const _: () = {
     use core::mem::offset_of;
@@ -124,7 +122,7 @@ const _: () = {
     assert!(offset_of!(TokenBridgeTransfer, recipient) == 67);
     assert!(offset_of!(TokenBridgeTransfer, recipient_chain) == 99);
     // Guardian SDK `DecodeTransferPayloadHdr` requires 101 bytes; 133 is a superset.
-    assert!(offset_of!(TokenBridgeTransfer, fee) == 101);
+    assert!(offset_of!(TokenBridgeTransfer, fee_or_from_address) == 101);
 };
 
 impl TokenBridgeTransfer {
@@ -138,7 +136,7 @@ impl TokenBridgeTransfer {
         token_chain: u16,
         recipient: [u8; 32],
         recipient_chain: u16,
-        fee: Uint256,
+        fee_or_from_address: [u8; 32],
     ) -> Self {
         Self {
             action,
@@ -147,7 +145,7 @@ impl TokenBridgeTransfer {
             token_chain: token_chain.to_be_bytes(),
             recipient,
             recipient_chain: recipient_chain.to_be_bytes(),
-            fee: fee.0,
+            fee_or_from_address,
         }
     }
 
@@ -209,14 +207,14 @@ pub enum TokenBridgeAction {
 /// Layouts: [`VaaBodyHeader`], [`TokenBridgeTransfer`].
 ///
 /// SECURITY: precondition `body.len() >= 52`. Action 0x01 requires `payload.len() == 133`;
-/// action 0x03 requires `payload.len() >= 165` and `payload.len() - 133 <=
+/// action 0x03 requires `payload.len() >= 133` and `payload.len() - 133 <=
 /// MAX_TRANSFER_PAYLOAD_LEN`. A wrong length returns `InvalidInstructionData`; an oversized
 /// 0x03 payload returns `TransferPayloadTooLarge`. Every field read is bounds-checked; the
 /// function cannot panic.
 ///
 /// SECURITY: wormchain parses action 0x01 with `serde_wormhole::from_slice`, which rejects
 /// trailing bytes, so it never accounted a longer 0x01 payload. Its 0x03 decode reads
-/// `from_address`, so it never accounted a 0x03 payload shorter than 165 bytes.
+/// `from_address` inside the head; the arbitrary payload after it may be empty.
 pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, GlobalAccountantError> {
     let (_header, payload) = VaaBodyHeader::split(body)?;
     let action = *payload
@@ -229,11 +227,6 @@ pub fn parse_token_bridge_payload(body: &[u8]) -> Result<TokenBridgeAction, Glob
                 .get(..TokenBridgeTransfer::LEN)
                 .ok_or(GlobalAccountantError::InvalidInstructionData)?;
             if action == ACTION_TRANSFER && payload.len() != TokenBridgeTransfer::LEN {
-                return Err(GlobalAccountantError::InvalidInstructionData);
-            }
-            if action == ACTION_TRANSFER_WITH_PAYLOAD
-                && payload.len() < TRANSFER_WITH_PAYLOAD_MIN_LEN
-            {
                 return Err(GlobalAccountantError::InvalidInstructionData);
             }
             if payload.len() - TokenBridgeTransfer::LEN > MAX_TRANSFER_PAYLOAD_LEN {
@@ -285,7 +278,7 @@ mod tests {
             token_chain,
             recipient,
             recipient_chain,
-            Uint256::ZERO,
+            [0u8; 32],
         );
         let mut body = [0u8; TRANSFER_BODY];
         body[HDR..].copy_from_slice(bytemuck::bytes_of(&transfer));
@@ -360,11 +353,10 @@ mod tests {
         let transfer_03 = transfer_body(0x03, amount, token_address, 2, 10);
         let mut transfer_03_extra = [0xEEu8; TRANSFER_BODY + 40];
         transfer_03_extra[..TRANSFER_BODY].copy_from_slice(&transfer_03);
-        // Wormchain decodes `from_address` (32 bytes) after the head of action 0x03.
-        let mut transfer_03_from_only = [0xEEu8; TRANSFER_BODY + 32];
-        transfer_03_from_only[..TRANSFER_BODY].copy_from_slice(&transfer_03);
-        let mut transfer_03_short_from = [0xEEu8; TRANSFER_BODY + 31];
-        transfer_03_short_from[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        let mut transfer_03_one_payload_byte = [0xEEu8; TRANSFER_BODY + 1];
+        transfer_03_one_payload_byte[..TRANSFER_BODY].copy_from_slice(&transfer_03);
+        let mut transfer_03_31_payload_bytes = [0xEEu8; TRANSFER_BODY + 31];
+        transfer_03_31_payload_bytes[..TRANSFER_BODY].copy_from_slice(&transfer_03);
         // Wormchain parses action 0x01 with `serde_wormhole::from_slice`, which rejects
         // trailing bytes.
         let mut transfer_01_extra = [0xEEu8; TRANSFER_BODY + 40];
@@ -379,7 +371,7 @@ mod tests {
             token_address,
             recipient_chain: 10,
         };
-        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 18] = [
+        let payload_cases: [(&str, &[u8], Result<TokenBridgeAction, E>); 19] = [
             ("action 0x01 exact 133", &transfer_01, Ok(expected_transfer)),
             (
                 "action 0x01 with trailing payload",
@@ -387,18 +379,23 @@ mod tests {
                 Err(E::InvalidInstructionData),
             ),
             (
-                "action 0x03 without from_address",
+                "action 0x03 head only, empty payload",
                 &transfer_03,
+                Ok(expected_transfer),
+            ),
+            (
+                "action 0x03 one byte short of the head",
+                &transfer_03[..TRANSFER_BODY - 1],
                 Err(E::InvalidInstructionData),
             ),
             (
-                "action 0x03 one byte short of from_address",
-                &transfer_03_short_from,
-                Err(E::InvalidInstructionData),
+                "action 0x03 with a 1-byte payload",
+                &transfer_03_one_payload_byte,
+                Ok(expected_transfer),
             ),
             (
-                "action 0x03 with from_address and no payload",
-                &transfer_03_from_only,
+                "action 0x03 with a 31-byte payload",
+                &transfer_03_31_payload_bytes,
                 Ok(expected_transfer),
             ),
             (
@@ -452,7 +449,7 @@ mod tests {
                 Ok(TokenBridgeAction::Other(0xFF)),
             ),
             (
-                "transfer payload 132 bytes",
+                "action 0x01 one byte short of the head",
                 &transfer_01[..TRANSFER_BODY - 1],
                 Err(E::InvalidInstructionData),
             ),
@@ -499,6 +496,88 @@ mod tests {
         assert_eq!(
             parse_token_bridge_payload(other),
             Ok(TokenBridgeAction::Other(0x99))
+        );
+    }
+
+    /// Oracle: wormchain's decode type. The in-repo `wormhole-vaas-serde` has the same 0x03
+    /// wire format as the crates.io 0.1.0 that wormchain pins.
+    #[test]
+    fn transfer_with_payload_lengths_match_wormchain_decode() {
+        use serde_wormhole::RawMessage;
+        use std::vec::Vec;
+        use wormhole_sdk::{token, Address, Amount, Chain};
+
+        const SENDER_ADDRESS: [u8; 32] = [0x44; 32];
+
+        fn decode_like_wormchain(
+            payload: &[u8],
+        ) -> Result<token::Message<&RawMessage>, serde_wormhole::Error> {
+            serde_wormhole::from_slice(payload)
+        }
+        let parse_with_vaa_header = |payload: &[u8]| {
+            let mut body = Vec::from(header_body(2, [0x11; 32], 7));
+            body.extend_from_slice(payload);
+            parse_token_bridge_payload(&body)
+        };
+
+        let mut amount_bytes = [0u8; 32];
+        amount_bytes[31] = 0x2A;
+        let token_address = [0x22; 32];
+        let encode_transfer_with_payload = |arbitrary_payload: &[u8]| {
+            serde_wormhole::to_vec(&token::Message::TransferWithPayload {
+                amount: Amount(amount_bytes),
+                token_address: Address(token_address),
+                token_chain: Chain::Ethereum,
+                recipient: Address([0x33; 32]),
+                recipient_chain: Chain::Fantom,
+                sender_address: Address(SENDER_ADDRESS),
+                payload: RawMessage::new(arbitrary_payload),
+            })
+            .expect("encode TransferWithPayload")
+        };
+        let expected_transfer = TokenBridgeAction::Transfer {
+            amount: Uint256::from_be_bytes(amount_bytes),
+            token_chain: 2,
+            token_address,
+            recipient_chain: 10,
+        };
+
+        for arbitrary_payload_len in [0usize, 1, 31, 32, 33, 200, MAX_TRANSFER_PAYLOAD_LEN] {
+            let arbitrary_payload = std::vec![0xEEu8; arbitrary_payload_len];
+            let encoded = encode_transfer_with_payload(&arbitrary_payload);
+            assert_eq!(
+                encoded.len(),
+                TokenBridgeTransfer::LEN + arbitrary_payload_len,
+                "sender_address is inside the head"
+            );
+
+            let token::Message::TransferWithPayload {
+                sender_address,
+                payload,
+                ..
+            } = decode_like_wormchain(&encoded).expect("wormchain decodes")
+            else {
+                panic!("wormchain decoded another action");
+            };
+            assert_eq!(sender_address, Address(SENDER_ADDRESS));
+            assert_eq!(payload.len(), arbitrary_payload_len);
+            let head: &TokenBridgeTransfer =
+                bytemuck::from_bytes(&encoded[..TokenBridgeTransfer::LEN]);
+            assert_eq!(head.fee_or_from_address, SENDER_ADDRESS);
+
+            assert_eq!(
+                parse_with_vaa_header(&encoded),
+                Ok(expected_transfer),
+                "parser accepts payload len {arbitrary_payload_len}"
+            );
+        }
+
+        let encoded_head_only = encode_transfer_with_payload(&[]);
+        let one_byte_short_of_head = &encoded_head_only[..TokenBridgeTransfer::LEN - 1];
+        assert!(decode_like_wormchain(one_byte_short_of_head).is_err());
+        assert_eq!(
+            parse_with_vaa_header(one_byte_short_of_head),
+            Err(GlobalAccountantError::InvalidInstructionData)
         );
     }
 

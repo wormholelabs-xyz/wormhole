@@ -31,15 +31,15 @@ pub fn transfer_body(
         token_chain,
         RECIPIENT,
         recipient_chain,
-        Uint256::ZERO,
+        [0u8; 32],
     );
     let mut body = vaa_header(emitter_chain, emitter_address, sequence);
     body.extend_from_slice(bytemuck::bytes_of(&transfer));
     body
 }
 
-/// Turns a `transfer_body` into action `0x03` with `payload` appended. The fee field
-/// becomes `from_address`.
+/// Turns a `transfer_body` into action `0x03` with `payload` appended. The
+/// `fee_or_from_address` field becomes `from_address`.
 pub fn with_transfer_payload(mut body: Vec<u8>, payload: &[u8]) -> Vec<u8> {
     assert_eq!(
         body.len(),

@@ -147,8 +147,8 @@ func solanaTestTransfer(t *testing.T, sequence uint64) *common.MessagePublicatio
 		EmitterChain:     vaa.ChainIDEthereum,
 		EmitterAddress:   emitterAddr,
 		ConsistencyLevel: uint8(32),
-		// buildMockTransferPayloadBytes stops at the recipient chain. The 32-byte fee
-		// completes the 133-byte TokenBridgeTransfer that the Solana program parses.
+		// buildMockTransferPayloadBytes stops at the recipient chain. The 32-byte
+		// fee_or_from_address slot completes the 133-byte head.
 		Payload: append(buildMockTransferPayloadBytes(1,
 			vaa.ChainIDEthereum,
 			"0x707f9118e33a9b8998bea41dd0d46f38bb963fc8",
@@ -404,14 +404,18 @@ func TestSubmitObservationSiblingTxIDs(t *testing.T) {
 	}
 }
 
-// TestSubmitObservationAcceptsLargeTransferPayload holds a TransferWithPayload of any
-// length. submit_observations carries the body digest, so payload length is unbounded.
-func TestSubmitObservationAcceptsLargeTransferPayload(t *testing.T) {
+// TestSubmitObservationAcceptsAnyTransferWithPayloadLength holds a TransferWithPayload with
+// an arbitrary payload of any length, from empty to unbounded. submit_observations carries
+// the body digest.
+func TestSubmitObservationAcceptsAnyTransferWithPayloadLength(t *testing.T) {
 	ctx := context.Background()
 	tests := []struct {
 		name  string
 		extra int
 	}{
+		{name: "empty payload", extra: 0},
+		{name: "1 extra byte", extra: 1},
+		{name: "31 extra bytes", extra: 31},
 		{name: "2000 extra bytes", extra: 2000},
 		{name: "2001 extra bytes", extra: 2001},
 		{name: "10000 extra bytes", extra: 10_000},

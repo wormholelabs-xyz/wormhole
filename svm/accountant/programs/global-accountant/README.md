@@ -82,7 +82,8 @@ Token Bridge contract, so the `ChainRegistration` check fails before any
 balance changes.
 
 A `Transfer` payload must be exactly 133 bytes. A `TransferWithPayload` payload
-must be at least 165 bytes: the 133-byte head and the 32-byte sender address.
+must be at least 133 bytes: the head, which includes the sender address, and an
+arbitrary payload of any length.
 These limits agree with wormchain. Other lengths fail with `InvalidInstructionData`.
 
 The instruction carries the full VAA body inline, so the body and the account

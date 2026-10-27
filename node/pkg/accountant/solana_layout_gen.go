@@ -182,13 +182,13 @@ const tokenBridgeTransferLen = 133
 
 // tokenBridgeTransferWire is TokenBridgeTransfer, the fixed head of a transfer payload.
 type tokenBridgeTransferWire struct {
-	Action         uint8
-	Amount         [32]byte
-	TokenAddress   [32]byte
-	TokenChain     be16
-	Recipient      [32]byte
-	RecipientChain be16
-	Fee            [32]byte
+	Action           uint8
+	Amount           [32]byte
+	TokenAddress     [32]byte
+	TokenChain       be16
+	Recipient        [32]byte
+	RecipientChain   be16
+	FeeOrFromAddress [32]byte
 }
 
 func (tokenBridgeTransferWire) wireLen() int { return tokenBridgeTransferLen }

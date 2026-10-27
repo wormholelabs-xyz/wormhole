@@ -426,7 +426,12 @@ pub(crate) fn layout_file() -> String {
                 "RecipientChain",
                 GoType::Be16
             ),
-            field!(TokenBridgeTransfer, fee, "Fee", GoType::Bytes(32)),
+            field!(
+                TokenBridgeTransfer,
+                fee_or_from_address,
+                "FeeOrFromAddress",
+                GoType::Bytes(32)
+            ),
         ],
     );
 
