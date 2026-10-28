@@ -1,0 +1,27 @@
+# Anchor workspace manifest for the Wormhole Global Accountant programs.
+#
+# The test suite is the Rust mollusk and surfpool flow in `justfile`. `[scripts] test`
+# points `anchor test` at `just test`. The build path is `just build-devnet` or `just build`.
+
+[toolchain]
+anchor_version = "1.1.2"
+
+[features]
+resolution = true
+skip-lint = true
+
+[programs.localnet]
+global_accountant = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+ntt_global_accountant = "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+global_accountant_backfill = "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+ntt_global_accountant_backfill = "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "just test"

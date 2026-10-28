@@ -74,7 +74,7 @@ func (acct *Accountant) handleBatch(ctx context.Context, subChan chan *common.Me
 	}
 
 	if len(msgs) != 0 {
-		msgs = acct.removeCompleted(msgs)
+		msgs = acct.removeCompleted(msgs, backendWormchain)
 	}
 
 	if len(msgs) == 0 {
@@ -100,15 +100,15 @@ func (acct *Accountant) handleBatch(ctx context.Context, subChan chan *common.Me
 	return nil
 }
 
-// removeCompleted drops any messages that are no longer in the pending transfer map. This is to handle the case where the contract reports
-// that a transfer is committed while it is in the channel. There is no point in submitting the observation once the transfer is committed.
-func (acct *Accountant) removeCompleted(msgs []*common.MessagePublication) []*common.MessagePublication {
+// removeCompleted drops any messages that are no longer in the pending transfer map, or for which backend is settled. This is to handle
+// the case where the backend reports that a transfer is committed while it is in the channel.
+func (acct *Accountant) removeCompleted(msgs []*common.MessagePublication, backend accountantBackend) []*common.MessagePublication {
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
 
 	out := make([]*common.MessagePublication, 0, len(msgs))
 	for _, msg := range msgs {
-		if _, exists := acct.pendingTransfers[msg.MessageIDString()]; exists {
+		if pe, exists := acct.pendingTransfers[msg.MessageIDString()]; exists && !pe.backendSettled(backend) {
 			out = append(out, msg)
 		}
 	}
@@ -215,7 +215,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 
 		submitFailures.Add(float64(len(msgs)))
-		acct.clearSubmitPendingFlags(msgs)
+		acct.clearSubmitPendingFlags(msgs, backendWormchain)
 		return
 	}
 
@@ -228,7 +228,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 
 		submitFailures.Add(float64(len(msgs)))
-		acct.clearSubmitPendingFlags(msgs)
+		acct.clearSubmitPendingFlags(msgs, backendWormchain)
 		return
 	}
 
@@ -240,7 +240,7 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 
 		submitFailures.Add(float64(len(msgs)))
-		acct.clearSubmitPendingFlags(msgs)
+		acct.clearSubmitPendingFlags(msgs, backendWormchain)
 		return
 	}
 
@@ -270,17 +270,19 @@ func (acct *Accountant) submitObservationsToContract(msgs []*common.MessagePubli
 		}
 	}
 
-	acct.clearSubmitPendingFlags(msgs)
+	acct.clearSubmitPendingFlags(msgs, backendWormchain)
 }
 
-// handleCommittedTransfer updates the pending map and publishes a committed transfer. It grabs the lock.
+// handleCommittedTransfer records that wormchain committed a transfer. It grabs the lock.
+// The submit response carries no digest. Once it settles wormchain, the audit skips the
+// digest check, so a wormchain mirror counts a divergence only from a watcher event or an error.
 func (acct *Accountant) handleCommittedTransfer(msgId string) {
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
 	pe, exists := acct.pendingTransfers[msgId]
 	if exists {
-		acct.logger.Info("transfer has been committed, publishing it", zap.String("msgId", msgId))
-		acct.publishTransferAlreadyLocked(pe)
+		acct.logger.Info("transfer has been committed on wormchain", zap.String("msgId", msgId))
+		acct.recordBackendCommitAlreadyLocked(pe, backendWormchain, "wormchain")
 		transfersApproved.Inc()
 	} else {
 		acct.logger.Debug("transfer has been committed but it is no longer in our map", zap.String("msgId", msgId))
@@ -291,8 +293,8 @@ func (acct *Accountant) handleCommittedTransfer(msgId string) {
 func (acct *Accountant) handleTransferError(msgId string, errText string, logText string) {
 	if strings.Contains(errText, "insufficient balance") {
 		balanceErrors.Inc()
-		acct.logger.Error("insufficient balance error detected, dropping transfer", zap.String("msgId", msgId), zap.String("text", errText))
-		acct.deletePendingTransfer(msgId)
+		acct.logger.Error("insufficient balance error detected", zap.String("msgId", msgId), zap.String("text", errText))
+		acct.handleRejectedTransfer(msgId, backendWormchain, "insufficient balance")
 	} else {
 		// This will get retried next audit interval.
 		acct.logger.Error(logText, zap.String("msgId", msgId), zap.String("text", errText))

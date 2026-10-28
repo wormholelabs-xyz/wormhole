@@ -62,4 +62,86 @@ var (
 			Name: "global_accountant_channel_submit_timeouts",
 			Help: "Total number of channel submit timeouts during audit",
 		})
+	mirrorPendingTransfers = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "global_accountant_mirror_pending_transfers",
+			Help: "Current number of transfers the active ledger released that wait for a mirror ledger",
+		})
+)
+
+// Mirror ledger counters, labelled by backend tag.
+var (
+	mirrorDivergences = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_mirror_divergences_total",
+			Help: "Total number of transfers on which a mirror ledger and the active ledger disagree",
+		}, []string{"backend"})
+	mirrorSynced = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_mirror_synced_total",
+			Help: "Total number of transfers a mirror ledger committed",
+		}, []string{"backend"})
+	mirrorTimeouts = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_mirror_timeouts_total",
+			Help: "Total number of released transfers a mirror ledger did not commit before the deadline",
+		}, []string{"backend"})
+)
+
+// Solana accountant counters, labelled by program family (wtt, ntt). digestMismatches and
+// transfersOutstanding stay shared with the wormchain backend. The other counters are
+// separate, so operators can tell the backends apart during a dual run.
+var solanaMetricLabels = []string{"program"}
+
+var (
+	solanaEventsReceived = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_events_received",
+			Help: "Total number of solana accountant log events received",
+		}, solanaMetricLabels)
+	solanaTransfersApproved = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_transfer_vaas_approved",
+			Help: "Total number of transfer vaas approved by the solana accountant",
+		}, solanaMetricLabels)
+	solanaTransfersSubmitted = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_transfer_vaas_submitted",
+			Help: "Total number of transfer vaas submitted to the solana accountant",
+		}, solanaMetricLabels)
+	solanaSubmitFailures = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_submit_failures",
+			Help: "Total number of solana accountant submit failures",
+		}, solanaMetricLabels)
+	solanaFeePayerErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_fee_payer_errors",
+			Help: "Total number of solana accountant fee payer errors",
+		}, solanaMetricLabels)
+	solanaFeePayerLamports = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "global_accountant_solana_fee_payer_lamports",
+			Help: "Balance of the solana accountant fee payer, refreshed each audit cycle",
+		}, solanaMetricLabels)
+	solanaMalformedLogs = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_malformed_logs_total",
+			Help: "Total number of solana accountant transactions with malformed logs",
+		}, solanaMetricLabels)
+	solanaFailedTxSkipped = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_failed_tx_skipped_total",
+			Help: "Total number of failed solana transactions skipped by the accountant watcher",
+		}, solanaMetricLabels)
+	solanaConnectionErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_connection_errors_total",
+			Help: "Total number of solana accountant connection errors",
+		}, solanaMetricLabels)
+	solanaAuditErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_solana_audit_errors_total",
+			Help: "Total number of audit errors detected by the solana accountant",
+		}, solanaMetricLabels)
 )
