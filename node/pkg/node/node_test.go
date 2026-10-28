@@ -928,6 +928,7 @@ func TestGuardianConfigs(t *testing.T) {
 					"",                                  // nttContract
 					nil,                                 // nttWormchainConn
 					accountant.AccountantSolanaConfig{}, // solanaCfg
+					accountant.ActiveLedgers{},          // activeLedgers
 					100,                                 // submitObservationBatchSize
 				),
 			},
@@ -945,6 +946,7 @@ func TestGuardianConfigs(t *testing.T) {
 					"",                                  // nttContract
 					nil,                                 // nttWormchainConn
 					accountant.AccountantSolanaConfig{}, // solanaCfg
+					accountant.ActiveLedgers{},          // activeLedgers
 					0,                                   // submitObservationBatchSize
 				),
 			},

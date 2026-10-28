@@ -139,6 +139,7 @@ func TestSurfpoolSolanaNttAccountant(t *testing.T) {
 			CoreBridge: coreBridge,
 			FeePayer:   feePayer,
 		},
+		ActiveLedgers{},
 		guardianSigner,
 		gst,
 		msgChan,

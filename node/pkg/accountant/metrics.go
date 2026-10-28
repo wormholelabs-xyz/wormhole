@@ -62,6 +62,30 @@ var (
 			Name: "global_accountant_channel_submit_timeouts",
 			Help: "Total number of channel submit timeouts during audit",
 		})
+	mirrorPendingTransfers = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "global_accountant_mirror_pending_transfers",
+			Help: "Current number of transfers the active ledger released that wait for a mirror ledger",
+		})
+)
+
+// Mirror ledger counters, labelled by backend tag.
+var (
+	mirrorDivergences = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_mirror_divergences_total",
+			Help: "Total number of transfers on which a mirror ledger and the active ledger disagree",
+		}, []string{"backend"})
+	mirrorSynced = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_mirror_synced_total",
+			Help: "Total number of transfers a mirror ledger committed",
+		}, []string{"backend"})
+	mirrorTimeouts = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "global_accountant_mirror_timeouts_total",
+			Help: "Total number of released transfers a mirror ledger did not commit before the deadline",
+		}, []string{"backend"})
 )
 
 // Solana accountant counters, labelled by program family (wtt, ntt). digestMismatches and

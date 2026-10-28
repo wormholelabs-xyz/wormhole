@@ -303,7 +303,7 @@ func (acct *Accountant) snapshotSolanaOwnPendingTransfers(b *solanaBackend, guar
 	acct.pendingTransfersLock.Lock()
 	entries := make([]*pendingEntry, 0, len(acct.pendingTransfers))
 	for _, pe := range acct.pendingTransfers {
-		if pe == nil || !b.covers(pe) {
+		if pe == nil || !b.covers(pe) || pe.backendSettled(b.backend) {
 			continue
 		}
 		entries = append(entries, pe)

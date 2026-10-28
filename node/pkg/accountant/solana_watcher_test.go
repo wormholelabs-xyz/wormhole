@@ -382,7 +382,7 @@ func TestProcessCommittedDigest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			acct, _, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true})
+			acct, _, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true, activeLedgers: ActiveLedgers{WTT: LedgerSolana}})
 
 			msg := solanaTestTransfer(t, 5)
 			_, err := acct.SubmitObservation(msg)

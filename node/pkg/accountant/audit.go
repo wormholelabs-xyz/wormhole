@@ -160,6 +160,8 @@ func (acct *Accountant) audit(ctx context.Context) error {
 
 // runAudit is the entry point for the audit of the pending transfer map. It creates a temporary map of all pending transfers and invokes the main audit function.
 func (acct *Accountant) runAudit(ctx context.Context) {
+	acct.expireStalledMirrors()
+
 	if acct.wormchainBaseEnabled() {
 		knownPendingTransferMap := acct.createAuditMap(false)
 		acct.logger.Debug("in AuditPendingTransfers: starting base audit", zap.Int("numPending", numPendingEntries(knownPendingTransferMap)))
@@ -210,7 +212,7 @@ func (acct *Accountant) createAuditMap(isNTT bool) map[string][]*pendingEntry {
 		if pe == nil {
 			continue
 		}
-		if pe.isNTT == isNTT {
+		if pe.isNTT == isNTT && !pe.backendSettled(backendWormchain) {
 			if pe.hasBeenPendingForTooLong(backendWormchain) {
 				auditErrors.Inc()
 				acct.logger.Error("transfer has been in the submit pending state for too long", zap.Stringer("lastUpdateTime", pe.updTime()))
@@ -371,12 +373,12 @@ func (acct *Accountant) performAudit(ctx context.Context, knownPendingTransferMa
 		} else if status.Committed != nil {
 			digest := hex.EncodeToString(status.Committed.Digest)
 			if pe.digest == digest {
-				acct.logger.Warn("audit determined that transfer has been committed, publishing it", zap.String("msgId", pe.msgId))
+				acct.logger.Warn("audit determined that transfer has been committed", zap.String("msgId", pe.msgId))
 				acct.handleCommittedTransfer(pe.msgId)
 			} else {
 				digestMismatches.Inc()
-				acct.logger.Error("audit detected a digest mismatch, dropping transfer", zap.String("msgId", pe.msgId), zap.String("ourDigest", pe.digest), zap.String("reportedDigest", digest))
-				acct.deletePendingTransfer(pe.msgId)
+				acct.logger.Error("audit detected a digest mismatch", zap.String("msgId", pe.msgId), zap.String("ourDigest", pe.digest), zap.String("reportedDigest", digest))
+				acct.handleRejectedTransfer(pe.msgId, backendWormchain, "digest mismatch")
 			}
 		} else if status.Pending != nil {
 			acct.logger.Debug("contract says transfer is still pending", zap.String("msgId", pe.msgId))

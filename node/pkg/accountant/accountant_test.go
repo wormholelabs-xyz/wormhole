@@ -166,6 +166,7 @@ func newAccountantForTest(
 		"",
 		nil,
 		AccountantSolanaConfig{},
+		ActiveLedgers{},
 		guardianSigner,
 		gst,
 		acctWriteC,
@@ -311,8 +312,8 @@ func TestInterestingTransferShouldNotBeBlockedWhenNotEnforcingAccountant(t *test
 	require.Equal(t, true, exists)
 	require.NotNil(t, pe)
 
-	// PublishTransfer should not publish to the channel but it should remove it from the map.
-	acct.publishTransferAlreadyLocked(pe)
+	// A wormchain commit should not publish to the channel but it should remove it from the map.
+	acct.recordBackendCommitAlreadyLocked(pe, backendWormchain, "test")
 	assert.Equal(t, 0, len(acct.msgChan))
 	assert.Equal(t, 0, len(acct.pendingTransfers))
 }
@@ -362,8 +363,8 @@ func TestInterestingTransferShouldBeBlockedWhenEnforcingAccountant(t *testing.T)
 	require.Equal(t, true, exists)
 	require.NotNil(t, pe)
 
-	// PublishTransfer should publish to the channel and remove it from the map.
-	acct.publishTransferAlreadyLocked(pe)
+	// A wormchain commit should publish to the channel and remove it from the map.
+	acct.recordBackendCommitAlreadyLocked(pe, backendWormchain, "test")
 	assert.Equal(t, 1, len(acct.msgChan))
 	assert.Equal(t, 0, len(acct.pendingTransfers))
 }
@@ -796,6 +797,7 @@ func newAccountantForAuditModeTest(
 		nttContract,
 		nttWormchainConn,
 		AccountantSolanaConfig{},
+		ActiveLedgers{},
 		guardianSigner,
 		gst,
 		acctWriteC,

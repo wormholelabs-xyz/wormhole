@@ -57,8 +57,9 @@ type solanaTestOpts struct {
 	// solanaConfig replaces the complete test config when set.
 	solanaConfig *AccountantSolanaConfig
 	// solanaNtt enables the Solana NTT program beside the WTT one.
-	solanaNtt bool
-	db        guardianDB.AccountantDB
+	solanaNtt     bool
+	db            guardianDB.AccountantDB
+	activeLedgers ActiveLedgers
 }
 
 // newSolanaTestAccountant builds a started accountant in the GoTest environment. The test
@@ -124,6 +125,7 @@ func newUnstartedSolanaTestAccountant(t *testing.T, ctx context.Context, opts so
 		opts.nttContract,
 		nil,
 		cfg,
+		opts.activeLedgers,
 		guardianSigner,
 		gst,
 		msgChan,
@@ -275,6 +277,9 @@ func TestFeatureString(t *testing.T) {
 		{name: "solana ntt enforcing", acct: &Accountant{enforceFlag: true, solanaCfg: ntt}, want: "acct:sol-ntt-acct"},
 		{name: "solana ntt log only", acct: &Accountant{solanaCfg: ntt}, want: "acct-logonly:sol-ntt-acct-logonly"},
 		{name: "all four", acct: &Accountant{enforceFlag: true, nttContract: "x", solanaCfg: both}, want: "acct:ntt-acct:sol-acct:sol-ntt-acct"},
+		{name: "solana active", acct: &Accountant{enforceFlag: true, solanaCfg: wtt, activeLedgers: ActiveLedgers{WTT: LedgerSolana}}, want: "acct:sol-acct-active"},
+		{name: "solana active log only", acct: &Accountant{solanaCfg: wtt, activeLedgers: ActiveLedgers{WTT: LedgerSolana}}, want: "acct-logonly:sol-acct-active-logonly"},
+		{name: "solana ntt active", acct: &Accountant{enforceFlag: true, solanaCfg: ntt, activeLedgers: ActiveLedgers{NTT: LedgerSolana}}, want: "acct:sol-ntt-acct-active"},
 	}
 
 	for _, tt := range tests {

@@ -270,7 +270,7 @@ func (b *solanaBackend) deriveWTTBalances(sub *solanaSubmission, fields *solanaO
 
 // readBatch reads up to submitObservationBatchSize messages within batchTimeout and drops
 // those no longer pending.
-func (acct *Accountant) readBatch(ctx context.Context, subChan chan *common.MessagePublication, tag string) ([]*common.MessagePublication, error) {
+func (acct *Accountant) readBatch(ctx context.Context, subChan chan *common.MessagePublication, tag string, backend accountantBackend) ([]*common.MessagePublication, error) {
 	readCtx, cancel := context.WithTimeout(ctx, batchTimeout)
 	defer cancel()
 
@@ -281,7 +281,7 @@ func (acct *Accountant) readBatch(ctx context.Context, subChan chan *common.Mess
 	if len(msgs) == 0 {
 		return nil, nil
 	}
-	return acct.removeCompleted(msgs), nil
+	return acct.removeCompleted(msgs, backend), nil
 }
 
 // guardianIndex returns the live guardian set and this guardian's index in it. Callers
@@ -304,7 +304,7 @@ func (acct *Accountant) guardianIndex() (*common.GuardianSet, int, error) {
 // handleSolanaBatch reads one batch from the backend channel and submits each observation
 // as its own transaction.
 func (acct *Accountant) handleSolanaBatch(ctx context.Context, b *solanaBackend) error {
-	msgs, err := acct.readBatch(ctx, b.subChan, b.tag)
+	msgs, err := acct.readBatch(ctx, b.subChan, b.tag, b.backend)
 	if err != nil {
 		return err
 	}
@@ -380,8 +380,8 @@ func (acct *Accountant) deriveSolanaSubmissions(b *solanaBackend, msgs []*common
 	acct.pendingTransfersLock.Lock()
 	for _, msg := range msgs {
 		pe, exists := acct.pendingTransfers[msg.MessageIDString()]
-		if !exists {
-			acct.logger.Debug("skipping a solana observation, the transfer is no longer pending", zap.String("backend", b.tag), zap.String("msgId", msg.MessageIDString()))
+		if !exists || pe.backendSettled(b.backend) {
+			acct.logger.Debug("skipping a solana observation, the transfer is no longer pending on this backend", zap.String("backend", b.tag), zap.String("msgId", msg.MessageIDString()))
 			continue
 		}
 		record := pe.solanaRecord(b.family)

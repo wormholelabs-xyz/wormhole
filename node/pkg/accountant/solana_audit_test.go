@@ -653,11 +653,11 @@ func TestAuditSolanaProgramPendingAccounts(t *testing.T) {
 			f := newSolanaAuditFixture(t, ctx)
 			f.conn.SetAccount(f.pending, f.pendingAccount(t, []uint8{0}))
 			tt.setup(t, f)
-			errorsBefore := testutil.ToFloat64(solanaAuditErrors)
+			errorsBefore := testutil.ToFloat64(solanaAuditErrors.WithLabelValues("wtt"))
 
 			f.acct.runSolanaAudit(ctx, f.acct.solana)
 
-			assert.Equal(t, tt.wantAuditErrors, testutil.ToFloat64(solanaAuditErrors)-errorsBefore)
+			assert.Equal(t, tt.wantAuditErrors, testutil.ToFloat64(solanaAuditErrors.WithLabelValues("wtt"))-errorsBefore)
 			assert.Empty(t, f.conn.GetSignaturesForAddressCalls)
 			if tt.wantReobserveTxID != nil {
 				require.Len(t, f.obsvReq, 1)

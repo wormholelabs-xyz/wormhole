@@ -150,6 +150,9 @@ var (
 	accountantSolanaKeyPath          *string
 	accountantSolanaPriorityFee      *uint64
 
+	accountantWttActiveLedger *string
+	accountantNttActiveLedger *string
+
 	aptosRPC     *string
 	aptosAccount *string
 	aptosHandle  *string
@@ -434,6 +437,9 @@ func init() {
 	accountantSolanaNoreplayContract = NodeCmd.Flags().String("accountantSolanaNoreplayContract", "", "Address of the NoReplay program the Solana WTT and NTT accountants use")
 	accountantSolanaKeyPath = NodeCmd.Flags().String("accountantSolanaKeyPath", "", "path to the solana-keygen JSON keypair that pays Solana WTT and NTT accountant fees")
 	accountantSolanaPriorityFee = NodeCmd.Flags().Uint64("accountantSolanaPriorityFee", 0, "total priority fee in lamports per Solana WTT and NTT accountant transaction")
+
+	accountantWttActiveLedger = NodeCmd.Flags().String("accountantWttActiveLedger", "", "Ledger that releases WTT transfers: wormchain or solana. Empty selects the only enabled ledger, or wormchain if both are enabled")
+	accountantNttActiveLedger = NodeCmd.Flags().String("accountantNttActiveLedger", "", "Ledger that releases NTT transfers: wormchain or solana. Empty selects the only enabled ledger, or wormchain if both are enabled")
 
 	aptosRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "aptosRPC", "Aptos RPC URL", "http://aptos:8080", []string{"http", "https"})
 	aptosAccount = NodeCmd.Flags().String("aptosAccount", "", "aptos account")
@@ -1334,6 +1340,16 @@ func runNode(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	wttActiveLedger, err := accountant.ParseLedger(*accountantWttActiveLedger)
+	if err != nil {
+		logger.Fatal("invalid accountantWttActiveLedger", zap.Error(err), zap.String("component", "gacct"))
+	}
+	nttActiveLedger, err := accountant.ParseLedger(*accountantNttActiveLedger)
+	if err != nil {
+		logger.Fatal("invalid accountantNttActiveLedger", zap.Error(err), zap.String("component", "gacct"))
+	}
+	accountantActiveLedgers := accountant.ActiveLedgers{WTT: wttActiveLedger, NTT: nttActiveLedger}
+
 	var gatewayRelayerWormchainConn *wormconn.ClientConn
 	if *gatewayRelayerContract != "" {
 		if *wormchainURL == "" {
@@ -2178,7 +2194,7 @@ func runNode(cmd *cobra.Command, args []string) {
 	guardianOptions := []*node.GuardianOption{
 		node.GuardianOptionDatabase(db),
 		node.GuardianOptionWatchers(watcherConfigs, ibcWatcherConfig),
-		node.GuardianOptionAccountant(*accountantWS, *accountantContract, *accountantCheckEnabled, accountantWormchainConn, *accountantNttContract, accountantNttWormchainConn, accountantSolanaCfg, *accountantSubmitObservationBatchSize),
+		node.GuardianOptionAccountant(*accountantWS, *accountantContract, *accountantCheckEnabled, accountantWormchainConn, *accountantNttContract, accountantNttWormchainConn, accountantSolanaCfg, accountantActiveLedgers, *accountantSubmitObservationBatchSize),
 		node.GuardianOptionGovernor(*chainGovernorEnabled, *governorFlowCancelEnabled, *coinGeckoApiKey),
 		node.GuardianOptionNotary(*notaryEnabled),
 		node.GuardianOptionManagerService(*managerServiceEnabled, managerSigners, *ethRPC),

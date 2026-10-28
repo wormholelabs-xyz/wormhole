@@ -83,6 +83,15 @@ type (
 			// The audit must not resubmit to a backend whose flag is set.
 			submitPending [numAccountantBackends]bool
 
+			// outcome is what each backend reported. Submission to a backend stops when it is settled.
+			// SECURITY: written only while holding pendingTransfersLock and then stateLock.
+			outcome [numAccountantBackends]backendOutcome
+
+			// releasedByActiveLedger is set when the active ledger commits the transfer and the guardian publishes it.
+			// The entry stays until every covering backend is settled, so the mirror ledger stays in sync.
+			releasedByActiveLedger bool
+			releasedAt             time.Time
+
 			// solanaSiblingTxIDs are reobserved source transaction ids of msg other than
 			// msg.TxID. Each one seeds its own Solana pending account. At most
 			// maxSolanaSiblingTxIDs entries.
@@ -152,6 +161,10 @@ type Accountant struct {
 	nttSubChan        chan *common.MessagePublication
 
 	solanaCfg AccountantSolanaConfig
+	// activeLedgers is resolved from the configuration in NewAccountant.
+	activeLedgers ActiveLedgers
+	// releasedEntryCount is the number of released entries in pendingTransfers. They wait for a mirror ledger.
+	releasedEntryCount int
 	// Start builds solana and solanaNtt from solanaCfg. A nil value disables that Solana backend.
 	solana    *solanaBackend
 	solanaNtt *solanaBackend
@@ -210,6 +223,7 @@ func NewAccountant(
 	nttContract string, // the address of the NTT smart contract on wormchain
 	nttWormchainConn AccountantWormchainConn, // used for communicating with the NTT smart contract
 	solanaCfg AccountantSolanaConfig, // the Solana accountant backend; the zero value disables it
+	requestedActiveLedgers ActiveLedgers, // the ledger that releases transfers, per program family
 	guardianSigner guardiansigner.GuardianSigner, // the guardian signer used for signing observation requests
 	gst *common.GuardianSetState, // used to get the current guardian set index when sending observation requests
 	msgChan chan<- *common.MessagePublication, // the channel where transfers received by the accountant runnable should be published
@@ -220,7 +234,7 @@ func NewAccountant(
 		submitObservationBatchSize = DefaultSubmitObservationBatchSize
 	}
 
-	return &Accountant{
+	acct := &Accountant{
 		ctx:                        ctx,
 		logger:                     logger.With(zap.String("component", "gacct")),
 		db:                         db,
@@ -248,6 +262,8 @@ func NewAccountant(
 		solanaCfg:           solanaCfg,
 		solanaAuditRequests: make(chan struct{}, 1),
 	}
+	acct.activeLedgers = acct.resolveActiveLedgersFromConfig(requestedActiveLedgers)
+	return acct
 }
 
 // Start initializes the accountant and starts the worker and watcher runnables.
@@ -255,6 +271,11 @@ func (acct *Accountant) Start(ctx context.Context) error {
 	acct.logger.Debug("entering Start", zap.Bool("enforceFlag", acct.enforceFlag), zap.Bool("baseEnabled", acct.baseEnabled()), zap.Bool("nttEnabled", acct.nttEnabled()), zap.Int("submitObservationBatchSize", acct.submitObservationBatchSize))
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
+
+	if err := acct.checkActiveLedgersEnabled(); err != nil {
+		return err
+	}
+	acct.logger.Info("accountant active ledgers", zap.Stringer("wtt", acct.activeLedgers.WTT), zap.Stringer("ntt", acct.activeLedgers.NTT))
 
 	solBackend, solNttBackend, err := newSolanaBackends(acct.solanaCfg)
 	if err != nil {
@@ -396,20 +417,24 @@ func (acct *Accountant) FeatureString() string {
 		if ret != "" {
 			ret += ":"
 		}
+		ret += "sol-acct"
+		if acct.activeLedgers.WTT == LedgerSolana {
+			ret += "-active"
+		}
 		if !acct.enforceFlag {
-			ret += "sol-acct-logonly"
-		} else {
-			ret += "sol-acct"
+			ret += "-logonly"
 		}
 	}
 	if !acct.solanaCfg.NttProgram.IsZero() {
 		if ret != "" {
 			ret += ":"
 		}
+		ret += "sol-ntt-acct"
+		if acct.activeLedgers.NTT == LedgerSolana {
+			ret += "-active"
+		}
 		if !acct.enforceFlag {
-			ret += "sol-ntt-acct-logonly"
-		} else {
-			ret += "sol-ntt-acct"
+			ret += "-logonly"
 		}
 	}
 
@@ -480,6 +505,7 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 	defer acct.pendingTransfersLock.Unlock()
 
 	var pe *pendingEntry
+	released := false
 
 	// If there is a digest mismatch, don't send it again.
 	// Otherwise resubmit it and rely on the submitPending flag to prevent duplicate submissions to the contract.
@@ -497,6 +523,8 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 			return !enforceFlag, nil
 		}
 		pe = oldEntry
+		// The active ledger committed it, so a reobservation publishes it again.
+		released = pe.isReleasedByActiveLedger()
 		if acct.solanaEnabled() || acct.solanaNttEnabled() {
 			added, err := pe.addSolanaSiblingTxID(msg.TxID)
 			if err != nil {
@@ -532,22 +560,8 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 		}
 	}
 
-	// If we are not enforcing accountant, the event can be published. Otherwise we have to wait to hear back from the contract.
-	return !enforceFlag, nil
-}
-
-// publishTransferAlreadyLocked publishes a pending transfer to the accountant channel and deletes it from the pending map. It assumes the caller holds the lock.
-func (acct *Accountant) publishTransferAlreadyLocked(pe *pendingEntry) {
-	if pe.enforceFlag {
-		select {
-		case acct.msgChan <- pe.msg:
-			acct.logger.Debug("published transfer to channel", zap.String("msgId", pe.msgId))
-		default:
-			acct.logger.Error("unable to publish transfer because the channel is full", zap.String("msgId", pe.msgId))
-		}
-	}
-
-	acct.deletePendingTransferAlreadyLocked(pe.msgId)
+	// If we are not enforcing accountant, the event can be published. Otherwise we have to wait to hear back from the active ledger.
+	return !enforceFlag || released, nil
 }
 
 // digestLen is the length of a VAA digest and of a Solana content digest.
@@ -568,10 +582,10 @@ func digestBytes(digest string) ([digestLen]byte, error) {
 	return [digestLen]byte(raw), nil
 }
 
-// processCommittedDigest publishes or drops a transfer that a Solana backend reports as
-// committed under digest got. The VAA digest always matches. The content digest of the
-// record of the reporting program family also matches. submit_observations commits that
-// digest. It returns true when it publishes the transfer.
+// processCommittedDigest records a commit or a rejection of a transfer that a Solana backend
+// reports as committed under digest got. The VAA digest always matches. The content digest of
+// the record of the reporting program family also matches. submit_observations commits that
+// digest. It returns true when the digest matches.
 //
 // SECURITY: the caller holds pendingTransfersLock.
 // SECURITY: precondition: a Solana backend is enabled, so newPendingEntry set vaaDigest and the record of the family.
@@ -600,18 +614,18 @@ func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, famil
 
 	if got == pe.vaaDigest || got == record.committedDigest() {
 		acct.logger.Info("acctwatch: pending transfer has been approved", zap.String("msgId", msgId), zap.String("source", source))
-		acct.publishTransferAlreadyLocked(pe)
+		acct.recordBackendCommitAlreadyLocked(pe, solanaFamilyBackend(family), source)
 		return true
 	}
 
 	digestMismatches.Inc()
-	acct.logger.Error("acctwatch: digest mismatch, dropping transfer",
+	acct.logger.Error("acctwatch: digest mismatch",
 		zap.String("msgID", msgId),
 		zap.String("source", source),
 		zap.String("oldDigest", pe.digest),
 		zap.String("newDigest", hex.EncodeToString(got[:])),
 	)
-	acct.deletePendingTransferAlreadyLocked(msgId)
+	acct.recordBackendRejectionAlreadyLocked(pe, solanaFamilyBackend(family), "digest mismatch")
 	return false
 }
 
@@ -659,7 +673,7 @@ func (acct *Accountant) addPendingTransferAlreadyLocked(pe *pendingEntry) error 
 	}
 
 	acct.pendingTransfers[pe.msgId] = pe
-	transfersOutstanding.Set(float64(len(acct.pendingTransfers)))
+	acct.publishPendingGaugesAlreadyLocked()
 	return nil
 }
 
@@ -673,9 +687,12 @@ func (acct *Accountant) deletePendingTransfer(msgId string) {
 // deletePendingTransferAlreadyLocked deletes the transfer from both the map and the database. It assumes the caller holds the lock.
 func (acct *Accountant) deletePendingTransferAlreadyLocked(msgId string) {
 	acct.logger.Debug("deletePendingTransfer", zap.String("msgId", msgId))
-	if _, exists := acct.pendingTransfers[msgId]; exists {
+	if pe, exists := acct.pendingTransfers[msgId]; exists {
+		if pe.isReleasedByActiveLedger() {
+			acct.releasedEntryCount--
+		}
 		delete(acct.pendingTransfers, msgId)
-		transfersOutstanding.Set(float64(len(acct.pendingTransfers)))
+		acct.publishPendingGaugesAlreadyLocked()
 	}
 	if err := acct.db.AcctDeletePendingTransfer(msgId); err != nil {
 		acct.logger.Error("failed to delete pending transfer from the db", zap.String("msgId", msgId), zap.Error(err))
@@ -716,7 +733,7 @@ func (acct *Accountant) loadPendingTransfers() error {
 		acct.pendingTransfers[msgId] = pe
 	}
 
-	transfersOutstanding.Set(float64(len(acct.pendingTransfers)))
+	acct.publishPendingGaugesAlreadyLocked()
 	if len(acct.pendingTransfers) != 0 {
 		acct.logger.Info("reloaded pending transfers", zap.Int("total", len(acct.pendingTransfers)))
 	} else {
@@ -728,7 +745,7 @@ func (acct *Accountant) loadPendingTransfers() error {
 
 // submitObservation sends an observation request to the worker of one backend, which submits it to the contract.
 // If the backend does not cover the transfer, this function returns false and does nothing.
-// If the transfer already has the "submit pending" mark for that backend, this function returns false and does nothing.
+// If the transfer already has the "submit pending" mark for that backend, or the backend is settled, this function returns false and does nothing.
 // Otherwise it returns true. Use the return value to avoid unnecessary error logs.
 // If blocking is false and a channel write would block, this function returns. The next audit interval handles the transfer.
 // If blocking is true, it blocks until the channel has space, a timeout occurs, or the context ends.
@@ -740,7 +757,7 @@ func (acct *Accountant) submitObservation(ctx context.Context, pe *pendingEntry,
 	}
 
 	pe.stateLock.Lock()
-	if pe.state.submitPending[backend] {
+	if pe.state.submitPending[backend] || pe.state.outcome[backend] != backendOutcomePending {
 		pe.stateLock.Unlock()
 		return false
 	}

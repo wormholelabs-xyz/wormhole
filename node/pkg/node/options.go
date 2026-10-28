@@ -190,6 +190,7 @@ func GuardianOptionAccountant(
 	nttContract string,
 	nttWormchainConn *wormconn.ClientConn,
 	solanaCfg accountant.AccountantSolanaConfig,
+	activeLedgers accountant.ActiveLedgers,
 	submitObservationBatchSize int,
 ) *GuardianOption {
 	return &GuardianOption{
@@ -242,6 +243,7 @@ func GuardianOptionAccountant(
 				nttContract,
 				nttWormchainConn,
 				solanaCfg,
+				activeLedgers,
 				g.guardianSigner,
 				g.gst,
 				g.acctC.writeC,

@@ -162,7 +162,7 @@ func parseEvent[T any](logger *zap.Logger, event tmAbci.Event, name string, cont
 	return evt, nil
 }
 
-// processPendingTransfer takes a WasmObservation event, determines if we are expecting it, and if so, publishes it.
+// processPendingTransfer takes a WasmObservation event, determines if we are expecting it, and if so, records the wormchain commit.
 func (acct *Accountant) processPendingTransfer(xfer *WasmObservation, tag string) {
 	acct.pendingTransfersLock.Lock()
 	defer acct.pendingTransfersLock.Unlock()
@@ -198,17 +198,17 @@ func (acct *Accountant) processPendingTransfer(xfer *WasmObservation, tag string
 		digest := msg.CreateDigest()
 		if pe.digest != digest {
 			digestMismatches.Inc()
-			acct.logger.Error("acctwatch: digest mismatch, dropping transfer",
+			acct.logger.Error("acctwatch: digest mismatch",
 				zap.String("msgID", msgId),
 				zap.String("oldDigest", pe.digest),
 				zap.String("newDigest", digest),
 			)
 
-			acct.deletePendingTransferAlreadyLocked(msgId)
+			acct.recordBackendRejectionAlreadyLocked(pe, backendWormchain, "digest mismatch")
 			return
 		}
 		acct.logger.Info("acctwatch: pending transfer has been approved", zap.String("msgId", msgId))
-		acct.publishTransferAlreadyLocked(pe)
+		acct.recordBackendCommitAlreadyLocked(pe, backendWormchain, tag)
 		transfersApproved.Inc()
 	} else {
 		// This log will be emitted by the Guardians that submit to the Accountant after the transfer has already been confirmed.
