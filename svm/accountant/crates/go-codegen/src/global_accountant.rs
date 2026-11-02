@@ -491,6 +491,14 @@ pub(crate) fn layout_file() -> String {
             GlobalAccountantError::ExpiredGuardianSet,
         ),
         (
+            "solanaErrBalanceOverflow",
+            GlobalAccountantError::BalanceOverflow,
+        ),
+        (
+            "solanaErrBalanceUnderflow",
+            GlobalAccountantError::BalanceUnderflow,
+        ),
+        (
             "solanaErrMissingChainRegistration",
             GlobalAccountantError::MissingChainRegistration,
         ),

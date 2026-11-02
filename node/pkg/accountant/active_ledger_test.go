@@ -338,3 +338,84 @@ func TestParseLedger(t *testing.T) {
 		})
 	}
 }
+
+func TestSolanaBalanceErrorRejectsTransfer(t *testing.T) {
+	for _, f := range activeLedgerFamilies() {
+		for _, active := range []Ledger{LedgerSolana, LedgerWormchain} {
+			t.Run(f.name+"/active "+active.String(), func(t *testing.T) {
+				ctx := context.Background()
+				acct, _, msgChan := newSolanaTestAccountant(t, ctx, f.withActiveLedger(active))
+				pe := submitTestPendingTransfer(t, acct, f.transfer(t, 51))
+				balanceErrorsBefore := testutil.ToFloat64(balanceErrors)
+				divergencesBefore := testutil.ToFloat64(mirrorDivergences.WithLabelValues(f.solanaTag))
+
+				solana := acct.solana
+				if f.isNTT {
+					solana = acct.solanaNtt
+				}
+				disposition := acct.handleSolanaTxError(solana, &solanaSubmission{msgId: pe.msgId, msg: pe.msg}, customTxError(solanaErrBalanceUnderflow), "confirm")
+
+				assert.Equal(t, solanaTxInsufficientBalance, disposition)
+				assert.Equal(t, 1.0, testutil.ToFloat64(balanceErrors)-balanceErrorsBefore)
+				assert.Empty(t, msgChan)
+				if active == LedgerSolana {
+					assert.NotContains(t, acct.pendingTransfers, pe.msgId)
+					return
+				}
+				require.Contains(t, acct.pendingTransfers, pe.msgId)
+				assert.Equal(t, backendOutcomeRejected, pe.backendOutcome(f.solanaBackend))
+				assert.Equal(t, 1.0, testutil.ToFloat64(mirrorDivergences.WithLabelValues(f.solanaTag))-divergencesBefore)
+			})
+		}
+	}
+}
+
+// transferRejectedBySolanaParser is a covered Token Bridge transfer with one byte past the
+// 133-byte head, which the Solana record build rejects.
+func transferRejectedBySolanaParser(t *testing.T, sequence uint64) *common.MessagePublication {
+	t.Helper()
+	msg := solanaTestTransfer(t, sequence)
+	msg.Payload = append(msg.Payload, 0)
+	return msg
+}
+
+func TestSolanaRecordBuildFailureKeepsWormchain(t *testing.T) {
+	ctx := context.Background()
+	acct, _, msgChan := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true})
+	divergencesBefore := testutil.ToFloat64(mirrorDivergences.WithLabelValues("solana-accountant"))
+
+	pe := submitTestPendingTransfer(t, acct, transferRejectedBySolanaParser(t, 52))
+	assert.Equal(t, backendOutcomeRejected, pe.backendOutcome(backendSolana))
+	assert.Equal(t, 1.0, testutil.ToFloat64(mirrorDivergences.WithLabelValues("solana-accountant"))-divergencesBefore)
+	assert.False(t, acct.submitObservation(ctx, pe, backendSolana, false))
+
+	acct.handleCommittedTransfer(pe.msgId)
+	require.Len(t, msgChan, 1)
+	assert.NotContains(t, acct.pendingTransfers, pe.msgId)
+}
+
+func TestSolanaRecordBuildFailureDropsWhenSolanaActive(t *testing.T) {
+	ctx := context.Background()
+	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{wormchainContract: "0xdeadbeef", enforce: true, activeLedgers: ActiveLedgers{WTT: LedgerSolana}})
+	msg := transferRejectedBySolanaParser(t, 53)
+
+	shouldPublish, err := acct.SubmitObservation(msg)
+	require.NoError(t, err)
+	assert.False(t, shouldPublish)
+	assert.NotContains(t, acct.pendingTransfers, msg.MessageIDString())
+}
+
+func TestLoadPendingTransfersKeepsEntryWithoutSolanaRecord(t *testing.T) {
+	ctx := context.Background()
+	msg := transferRejectedBySolanaParser(t, 54)
+	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{
+		wormchainContract: "0xdeadbeef",
+		enforce:           true,
+		db:                &fakeAccountantDB{data: []*common.MessagePublication{msg}},
+	})
+
+	pe := acct.pendingTransfers[msg.MessageIDString()]
+	require.NotNil(t, pe)
+	assert.Equal(t, backendOutcomeRejected, pe.backendOutcome(backendSolana))
+	assert.Equal(t, backendOutcomePending, pe.backendOutcome(backendWormchain))
+}

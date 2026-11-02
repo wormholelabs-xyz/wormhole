@@ -127,6 +127,8 @@ func TestClassifySolanaTxError(t *testing.T) {
 		{name: "already signed", txErr: customTxError(solanaErrAlreadySigned), wantDisposition: solanaTxAlreadyDone},
 		{name: "payer mismatch", txErr: customTxError(solanaErrPayerMismatch), wantDisposition: solanaTxRetryNextRound},
 		{name: "invalid signature", txErr: customTxError(solanaErrInvalidSignature), wantDisposition: solanaTxFailed},
+		{name: "balance overflow", txErr: customTxError(solanaErrBalanceOverflow), wantDisposition: solanaTxInsufficientBalance, wantReason: "insufficient balance"},
+		{name: "balance underflow", txErr: customTxError(solanaErrBalanceUnderflow), wantDisposition: solanaTxInsufficientBalance, wantReason: "insufficient balance"},
 		{name: "unmapped custom code", txErr: customTxError(29), wantDisposition: solanaTxFailed},
 		{name: "blockhash not found", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrBlockhashNotFound}, wantDisposition: solanaTxRetryNextRound},
 		{name: "already processed", txErr: &solacctconn.TxError{Kind: solacctconn.TxErrAlreadyProcessed}, wantDisposition: solanaTxRetryNextRound},

@@ -234,8 +234,9 @@ func surfpoolNttTransfer(t *testing.T, transceiver vaa.Address, sequence uint64)
 // insertNttPendingTransfer adds one NTT pending entry straight to the map.
 func insertNttPendingTransfer(t *testing.T, acct *Accountant, msg *common.MessagePublication) {
 	t.Helper()
-	pe, err := acct.newPendingEntry(msg, msg.MessageIDString(), msg.CreateDigest(), true, true)
+	pe, solanaRecordErr, err := acct.newPendingEntry(msg, msg.MessageIDString(), msg.CreateDigest(), true, true)
 	require.NoError(t, err)
+	require.NoError(t, solanaRecordErr)
 	require.NotNil(t, pe.solanaNttFields)
 
 	acct.pendingTransfersLock.Lock()

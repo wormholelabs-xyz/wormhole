@@ -210,8 +210,9 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 // insertPendingTransfer adds one pending entry straight to the map.
 func insertPendingTransfer(t *testing.T, acct *Accountant, msg *common.MessagePublication) {
 	t.Helper()
-	pe, err := acct.newPendingEntry(msg, msg.MessageIDString(), msg.CreateDigest(), false, true)
+	pe, solanaRecordErr, err := acct.newPendingEntry(msg, msg.MessageIDString(), msg.CreateDigest(), false, true)
 	require.NoError(t, err)
+	require.NoError(t, solanaRecordErr)
 	require.NotNil(t, pe.solanaFields)
 
 	acct.pendingTransfersLock.Lock()

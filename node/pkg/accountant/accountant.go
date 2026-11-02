@@ -64,11 +64,12 @@ type (
 		// vaaDigest is the decoded digest. newPendingEntry sets it while the Solana backend is enabled.
 		vaaDigest [digestLen]byte
 		// solanaFields is the record the Solana WTT accountant program hashes. newPendingEntry sets
-		// it on Token Bridge entries while the Solana WTT backend is enabled.
+		// it on Token Bridge entries while the Solana WTT backend is enabled. Nil if the record
+		// cannot be built, and the Solana outcome is then Rejected.
 		solanaFields *solanaObservationFields
 
 		// solanaNttFields is the record the Solana NTT accountant program hashes. It is set
-		// for NTT entries while the Solana NTT backend is enabled.
+		// for NTT entries while the Solana NTT backend is enabled, the same as solanaFields.
 		solanaNttFields *solanaNttObservationFields
 
 		// stateLock is used to protect the contents of the state struct.
@@ -537,14 +538,22 @@ func (acct *Accountant) SubmitObservation(msg *common.MessagePublication) (bool,
 		// Add it to the pending map and the database.
 		// We only add it if it is not already present.
 		// SECURITY: an error here comes from the emitted message, so it must not restart the processor.
-		var err error
-		if pe, err = acct.newPendingEntry(msg, msgId, digest, isNTT, enforceFlag); err != nil {
+		newEntry, solanaRecordErr, err := acct.newPendingEntry(msg, msgId, digest, isNTT, enforceFlag)
+		if err != nil {
 			acct.logger.Error("failed to build the pending transfer, dropping it", zap.String("msgID", msgId), zap.Bool("enforcing", enforceFlag), zap.Error(err))
+			return !enforceFlag, nil
+		}
+		pe = newEntry
+		if solanaRecordErr != nil && acct.isActiveBackend(pe, solanaRecordBackend(pe)) {
+			acct.logger.Error("the active solana ledger cannot account the transfer, dropping it", zap.String("msgID", msgId), zap.Bool("enforcing", enforceFlag), zap.Error(solanaRecordErr))
 			return !enforceFlag, nil
 		}
 		if err := acct.addPendingTransferAlreadyLocked(pe); err != nil {
 			acct.logger.Error("failed to persist pending transfer, blocking publishing", zap.String("msgID", msgId), zap.Error(err))
 			return false, err
+		}
+		if solanaRecordErr != nil {
+			acct.rejectUnbuildableSolanaRecordAlreadyLocked(pe, solanaRecordErr)
 		}
 	}
 
@@ -634,35 +643,53 @@ func (acct *Accountant) processCommittedDigest(msgId string, got [32]byte, famil
 // backend that accounts the entry.
 //
 // SECURITY: postcondition: while a Solana backend is enabled, every entry has vaaDigest.
-// While Solana WTT is enabled, a Token Bridge entry has solanaFields. While Solana NTT is
-// enabled, an NTT entry has solanaNttFields. processCommittedDigest compares against both.
-// An error comes from the message itself and occurs only while a Solana backend is enabled.
-func (acct *Accountant) newPendingEntry(msg *common.MessagePublication, msgId string, digest string, isNTT bool, enforceFlag bool) (*pendingEntry, error) {
+// solanaRecordErr is the failure to build the Solana record, and pe then has no record for
+// that family. err is a digest decode failure, and pe is then nil. Both come from the
+// message itself.
+func (acct *Accountant) newPendingEntry(msg *common.MessagePublication, msgId string, digest string, isNTT bool, enforceFlag bool) (pe *pendingEntry, solanaRecordErr error, err error) {
 	if len(acct.solanaBackends()) == 0 {
-		return &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}, nil
+		return &pendingEntry{msg: msg, msgId: msgId, digest: digest, isNTT: isNTT, enforceFlag: enforceFlag}, nil, nil
 	}
 
 	vaaDigest, err := digestBytes(digest)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	pe := &pendingEntry{msg: msg, msgId: msgId, digest: digest, vaaDigest: vaaDigest, isNTT: isNTT, enforceFlag: enforceFlag}
+	pe = &pendingEntry{msg: msg, msgId: msgId, digest: digest, vaaDigest: vaaDigest, isNTT: isNTT, enforceFlag: enforceFlag}
 
 	if isNTT {
 		if acct.solanaNttEnabled() {
-			if pe.solanaNttFields, err = acct.solanaNttObservationFieldsFromMessage(msg, vaaDigest); err != nil {
-				return nil, err
+			if fields, recordErr := acct.solanaNttObservationFieldsFromMessage(msg, vaaDigest); recordErr != nil {
+				solanaRecordErr = recordErr
+			} else {
+				pe.solanaNttFields = fields
 			}
 		}
-		return pe, nil
+		return pe, solanaRecordErr, nil
 	}
 
 	if acct.solanaEnabled() {
-		if pe.solanaFields, err = solanaObservationFieldsFromPayload(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, msg.Payload, vaaDigest); err != nil {
-			return nil, err
+		if fields, recordErr := solanaObservationFieldsFromPayload(msg.EmitterChain, msg.EmitterAddress, msg.Sequence, msg.Payload, vaaDigest); recordErr != nil {
+			solanaRecordErr = recordErr
+		} else {
+			pe.solanaFields = fields
 		}
 	}
-	return pe, nil
+	return pe, solanaRecordErr, nil
+}
+
+// solanaRecordBackend returns the Solana backend that accounts pe.
+func solanaRecordBackend(pe *pendingEntry) accountantBackend {
+	if pe.isNTT {
+		return backendSolanaNTT
+	}
+	return backendSolana
+}
+
+// rejectUnbuildableSolanaRecordAlreadyLocked settles the Solana mirror of pe as rejected. The
+// caller holds pendingTransfersLock and has added pe to the map.
+func (acct *Accountant) rejectUnbuildableSolanaRecordAlreadyLocked(pe *pendingEntry, solanaRecordErr error) {
+	acct.recordBackendRejectionAlreadyLocked(pe, solanaRecordBackend(pe), "the solana record cannot be built: "+solanaRecordErr.Error())
 }
 
 // addPendingTransferAlreadyLocked adds a pending transfer to both the map and the database. It assumes the caller holds the lock.
@@ -721,7 +748,10 @@ func (acct *Accountant) loadPendingTransfers() error {
 		acct.logger.Info("reloaded pending transfer", zap.String("msgID", msgId))
 
 		digest := msg.CreateDigest()
-		pe, err := acct.newPendingEntry(msg, msgId, digest, isNTT, enforceFlag)
+		pe, solanaRecordErr, err := acct.newPendingEntry(msg, msgId, digest, isNTT, enforceFlag)
+		if err == nil && solanaRecordErr != nil && acct.isActiveBackend(pe, solanaRecordBackend(pe)) {
+			err = solanaRecordErr
+		}
 		if err != nil {
 			acct.logger.Error("dropping reloaded pending transfer because it cannot be built", zap.String("msgID", msgId), zap.Error(err))
 			if err := acct.db.AcctDeletePendingTransfer(msgId); err != nil {
@@ -731,6 +761,9 @@ func (acct *Accountant) loadPendingTransfers() error {
 		}
 		pe.setUpdTime()
 		acct.pendingTransfers[msgId] = pe
+		if solanaRecordErr != nil {
+			acct.rejectUnbuildableSolanaRecordAlreadyLocked(pe, solanaRecordErr)
+		}
 	}
 
 	acct.publishPendingGaugesAlreadyLocked()

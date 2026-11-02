@@ -232,6 +232,12 @@ const solanaErrAlreadySigned = 11
 // GlobalAccountantError::ExpiredGuardianSet.
 const solanaErrExpiredGuardianSet = 12
 
+// GlobalAccountantError::BalanceOverflow.
+const solanaErrBalanceOverflow = 15
+
+// GlobalAccountantError::BalanceUnderflow.
+const solanaErrBalanceUnderflow = 16
+
 // GlobalAccountantError::MissingChainRegistration.
 const solanaErrMissingChainRegistration = 19
 

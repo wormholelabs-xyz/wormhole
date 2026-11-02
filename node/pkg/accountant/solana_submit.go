@@ -53,6 +53,7 @@ const (
 	solanaTxAlreadyDone
 	solanaTxRetryNextRound
 	solanaTxFeePayerCannotPay
+	solanaTxInsufficientBalance
 )
 
 // solanaGuardianIdentity is the guardian set and index one batch submits under.
@@ -787,6 +788,10 @@ func (acct *Accountant) handleSolanaTxError(b *solanaBackend, sub *solanaSubmiss
 	case solanaTxFeePayerCannotPay:
 		b.metrics.feePayerErrors.Inc()
 		acct.logger.Error("the solana fee payer cannot pay", append(fields, zap.Stringer("feePayer", b.feePayer.PublicKey()))...)
+	case solanaTxInsufficientBalance:
+		balanceErrors.Inc()
+		acct.logger.Error("insufficient balance error detected", fields...)
+		acct.handleRejectedTransfer(sub.msgId, b.backend, "insufficient balance")
 	case solanaTxFailed:
 		b.metrics.submitFailures.Inc()
 		acct.logger.Error("a solana observation failed", fields...)
@@ -810,6 +815,9 @@ func classifySolanaTxError(err error) (solanaTxDisposition, string) {
 			return solanaTxAlreadyDone, "the transfer reached quorum without this observation"
 		case solanaErrPayerMismatch:
 			return solanaTxRetryNextRound, "the recorded payer changed"
+		case solanaErrBalanceOverflow, solanaErrBalanceUnderflow:
+			// SECURITY: wormchain parity. Both are "insufficient balance" there, which drops the transfer.
+			return solanaTxInsufficientBalance, "insufficient balance"
 		case solanaErrExpiredGuardianSet:
 			return solanaTxFailed, "the guardian set expired"
 		case solanaErrInvalidGuardianIndex:
