@@ -143,6 +143,10 @@ test: build-devnet
 go-codegen:
     {{test_env}} cargo run -p accountant-go-codegen --locked
 
+# Check that the generated Go files match the programs. CI runs this; it needs no SBF build.
+go-codegen-check:
+    {{test_env}} cargo test -p accountant-go-codegen --locked
+
 # Verify a deploy-ready `.so` enforces a specific operator authority pubkey, independent of
 # the `BACKFILL_AUTHORITY` compiled into this source tree. Runs the target `.so`'s authority
 # gate inside a mollusk-hosted SBF VM. Run it against the production artifact and the
