@@ -200,7 +200,7 @@ func TestSurfpoolSolanaAccountant(t *testing.T) {
 		// The transfer is accounted and its pending account is closed. Thus the audit must
 		// resolve the digest from the signatures of the closed account.
 		insertPendingTransfer(t, acct, msg)
-		acct.runAudit(rootCtx)
+		acct.runSolanaAudit(rootCtx, acct.solana)
 
 		requirePublication(t, msgChan, msg, surfpoolReadTimeout)
 		requireCounterDeltas(0, 1)

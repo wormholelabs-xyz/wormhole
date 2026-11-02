@@ -62,15 +62,6 @@ func (acct *Accountant) solanaBaseWatcher(ctx context.Context) error {
 	return acct.solanaWatcher(ctx, acct.solana)
 }
 
-// requestSolanaAudit asks the audit goroutine for one Solana audit. A request already queued
-// covers this one.
-func (acct *Accountant) requestSolanaAudit() {
-	select {
-	case acct.solanaAuditRequests <- struct{}{}:
-	default:
-	}
-}
-
 // solanaNttWatcher is the entry point for the NTT Solana watcher.
 func (acct *Accountant) solanaNttWatcher(ctx context.Context) error {
 	if acct.solanaNtt == nil {
@@ -92,7 +83,7 @@ func (acct *Accountant) solanaWatcher(ctx context.Context, b *solanaBackend) err
 	}
 	// SECURITY: the live path misses commits that finalized while no subscription was open.
 	// The audit recovers them.
-	acct.requestSolanaAudit()
+	b.requestAudit()
 
 	for {
 		select {

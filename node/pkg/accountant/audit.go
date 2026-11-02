@@ -138,8 +138,7 @@ func hasGuardianSigned(signatures string, guardianIndex int) bool {
 	return sigInt.Bit(guardianIndex) == 1
 }
 
-// audit is the runnable that executes the audit each interval, and a Solana audit on each
-// request from the Solana watcher.
+// audit is the runnable that executes the wormchain audits each interval.
 func (acct *Accountant) audit(ctx context.Context) error {
 	ticker := time.NewTicker(auditInterval)
 	defer ticker.Stop()
@@ -150,15 +149,33 @@ func (acct *Accountant) audit(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			acct.runAudit(ctx)
-		case <-acct.solanaAuditRequests:
-			for _, b := range acct.solanaBackends() {
-				acct.runSolanaAudit(ctx, b)
-			}
 		}
 	}
 }
 
-// runAudit is the entry point for the audit of the pending transfer map. It creates a temporary map of all pending transfers and invokes the main audit function.
+// solanaAudit is the runnable that audits one Solana backend each interval and on each
+// request from its watcher. A slow Solana RPC delays only this backend.
+func (acct *Accountant) solanaAudit(ctx context.Context, b *solanaBackend) error {
+	ticker := time.NewTicker(auditInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		case <-b.auditRequests:
+			if !b.requestedAuditIsDue(time.Now()) {
+				acct.logger.Debug("skipping a requested solana audit, the last one started recently", zap.String("backend", b.tag))
+				continue
+			}
+		}
+		b.lastAuditStartedAt = time.Now()
+		acct.runSolanaAudit(ctx, b)
+	}
+}
+
+// runAudit is the entry point for the wormchain audits of the pending transfer map. It creates a temporary map of all pending transfers and invokes the main audit function.
 func (acct *Accountant) runAudit(ctx context.Context) {
 	acct.expireStalledMirrors()
 
@@ -167,14 +184,6 @@ func (acct *Accountant) runAudit(ctx context.Context) {
 		acct.logger.Debug("in AuditPendingTransfers: starting base audit", zap.Int("numPending", numPendingEntries(knownPendingTransferMap)))
 		acct.performAudit(ctx, knownPendingTransferMap, acct.wormchainConn, acct.contract)
 		acct.logger.Debug("in AuditPendingTransfers: finished base audit")
-	}
-
-	if acct.solanaEnabled() {
-		acct.runSolanaAudit(ctx, acct.solana)
-	}
-
-	if acct.solanaNttEnabled() {
-		acct.runSolanaAudit(ctx, acct.solanaNtt)
 	}
 
 	if acct.wormchainNttEnabled() {

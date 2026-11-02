@@ -74,7 +74,7 @@ const maxSolanaTransactionFetchFailures = 3
 // solanaHistoryCursors resumes each address history search below the oldest entry that the
 // previous audit examined. Spam that lands after a search is newer than its cursor.
 //
-// SECURITY: precondition: only the audit goroutine uses it. Each audit reads the cursors of
+// SECURITY: precondition: only the audit goroutine of its backend uses it. Each audit reads the cursors of
 // the previous audit and writes at most maxHistoryCursors new ones.
 type solanaHistoryCursors struct {
 	previous map[solana.PublicKey]solana.Signature

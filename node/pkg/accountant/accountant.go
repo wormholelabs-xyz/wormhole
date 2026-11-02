@@ -169,8 +169,6 @@ type Accountant struct {
 	// Start builds solana and solanaNtt from solanaCfg. A nil value disables that Solana backend.
 	solana    *solanaBackend
 	solanaNtt *solanaBackend
-	// Capacity 1, so requests that arrive during an audit coalesce into one more audit.
-	solanaAuditRequests chan struct{}
 }
 
 // On startup, there can be a large number of re-submission requests.
@@ -260,8 +258,7 @@ func NewAccountant(
 		nttArEmitters:     make(validEmitters),
 		nttSubChan:        make(chan *common.MessagePublication, subChanSize),
 
-		solanaCfg:           solanaCfg,
-		solanaAuditRequests: make(chan struct{}, 1),
+		solanaCfg: solanaCfg,
 	}
 	acct.activeLedgers = acct.resolveActiveLedgersFromConfig(requestedActiveLedgers)
 	return acct
@@ -367,6 +364,10 @@ func (acct *Accountant) Start(ctx context.Context) error {
 		if err := supervisor.Run(ctx, "acctsolwatcher", common.WrapWithScissors(acct.solanaBaseWatcher, "acctsolwatcher")); err != nil {
 			return fmt.Errorf("failed to start solana watcher: %w", err)
 		}
+
+		if err := supervisor.Run(ctx, "acctsolaudit", common.WrapWithScissors(func(ctx context.Context) error { return acct.solanaAudit(ctx, acct.solana) }, "acctsolaudit")); err != nil {
+			return fmt.Errorf("failed to start solana audit worker: %w", err)
+		}
 	}
 
 	if acct.solanaNttEnabled() && acct.env != common.AccountantMock && acct.env != common.GoTest {
@@ -377,10 +378,14 @@ func (acct *Accountant) Start(ctx context.Context) error {
 		if err := supervisor.Run(ctx, "acctsolnttwatcher", common.WrapWithScissors(acct.solanaNttWatcher, "acctsolnttwatcher")); err != nil {
 			return fmt.Errorf("failed to start solana NTT watcher: %w", err)
 		}
+
+		if err := supervisor.Run(ctx, "acctsolnttaudit", common.WrapWithScissors(func(ctx context.Context) error { return acct.solanaAudit(ctx, acct.solanaNtt) }, "acctsolnttaudit")); err != nil {
+			return fmt.Errorf("failed to start solana NTT audit worker: %w", err)
+		}
 	}
 
-	// Start the audit worker if not mocking/testing and either Global or NTT accountant are enabled
-	if acct.env != common.AccountantMock && acct.env != common.GoTest && (acct.baseEnabled() || acct.nttEnabled()) {
+	// Start the wormchain audit worker if not mocking/testing and a wormchain accountant is enabled
+	if acct.env != common.AccountantMock && acct.env != common.GoTest && (acct.wormchainBaseEnabled() || acct.wormchainNttEnabled()) {
 		if err := supervisor.Run(ctx, "acctaudit", common.WrapWithScissors(acct.audit, "acctaudit")); err != nil {
 			return fmt.Errorf("failed to start audit worker: %w", err)
 		}

@@ -108,13 +108,37 @@ type solanaBackend struct {
 	subChan     chan *common.MessagePublication
 	feePayer    solana.PrivateKey
 	priorityFee uint64
-	// The audit goroutine owns it.
+	// The audit goroutine of this backend owns it.
 	historyCursors solanaHistoryCursors
-	// Address after which the next program-account pass starts. The audit goroutine owns it.
+	// Address after which the next program-account pass starts. The audit goroutine of this
+	// backend owns it.
 	programAuditCursor solana.PublicKey
-	// First tx id byte at which the next partitioned read starts. The audit goroutine owns it.
+	// First tx id byte at which the next partitioned read starts. The audit goroutine of this
+	// backend owns it.
 	programAuditPartition uint8
-	metrics               solanaBackendMetrics
+	// Capacity 1, so requests that arrive during an audit coalesce into one more audit.
+	auditRequests chan struct{}
+	// The audit goroutine of this backend owns it.
+	lastAuditStartedAt time.Time
+	metrics            solanaBackendMetrics
+}
+
+// minSolanaRequestedAuditSpacing bounds how often watcher restarts can start an audit.
+const minSolanaRequestedAuditSpacing = time.Minute
+
+// requestAudit asks the audit goroutine of b for one audit. A request already queued covers
+// this one.
+func (b *solanaBackend) requestAudit() {
+	select {
+	case b.auditRequests <- struct{}{}:
+	default:
+	}
+}
+
+// requestedAuditIsDue returns true if an audit request at now is at least
+// minSolanaRequestedAuditSpacing after the start of the last audit.
+func (b *solanaBackend) requestedAuditIsDue(now time.Time) bool {
+	return now.Sub(b.lastAuditStartedAt) >= minSolanaRequestedAuditSpacing
 }
 
 // covers reports whether the backend's program accounts pe.
@@ -189,16 +213,17 @@ func newSolanaBackend(cfg AccountantSolanaConfig, family solanaProgramFamily, pr
 	}
 
 	b := &solanaBackend{
-		family:      family,
-		conn:        cfg.Conn,
-		program:     program,
-		noreplay:    cfg.Noreplay,
-		coreBridge:  cfg.CoreBridge,
-		authority:   authority,
-		subChan:     make(chan *common.MessagePublication, subChanSize),
-		feePayer:    cfg.FeePayer,
-		priorityFee: cfg.PriorityFee,
-		metrics:     newSolanaBackendMetrics(family),
+		family:        family,
+		conn:          cfg.Conn,
+		program:       program,
+		noreplay:      cfg.Noreplay,
+		coreBridge:    cfg.CoreBridge,
+		authority:     authority,
+		subChan:       make(chan *common.MessagePublication, subChanSize),
+		feePayer:      cfg.FeePayer,
+		priorityFee:   cfg.PriorityFee,
+		auditRequests: make(chan struct{}, 1),
+		metrics:       newSolanaBackendMetrics(family),
 	}
 	switch family {
 	case solanaFamilyWTT:

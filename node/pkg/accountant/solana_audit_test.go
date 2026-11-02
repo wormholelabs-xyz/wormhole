@@ -838,3 +838,33 @@ func TestAuditSolanaOwnPendingTransfersBoundsCommitSearches(t *testing.T) {
 	assert.Len(t, f.conn.GetSignaturesForAddressCalls, pendingAccountCommitLogSearchLimits.maxSearchesPerAudit+bucketCalls)
 	assert.Empty(t, f.acct.solana.subChan)
 }
+
+func TestRunAuditLeavesSolanaToItsOwnGoroutine(t *testing.T) {
+	ctx := context.Background()
+	acct, conn, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true, solanaNtt: true})
+
+	acct.runAudit(ctx)
+	assert.Empty(t, conn.GetBalanceCalls, "the wormchain audit does not run a solana audit")
+}
+
+func TestSolanaAuditRequestReachesOnlyItsBackend(t *testing.T) {
+	ctx := context.Background()
+	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true, solanaNtt: true})
+
+	acct.solana.requestAudit()
+	acct.solana.requestAudit()
+	assert.Len(t, acct.solana.auditRequests, 1, "requests coalesce")
+	assert.Empty(t, acct.solanaNtt.auditRequests)
+}
+
+func TestSolanaRequestedAuditSpacing(t *testing.T) {
+	ctx := context.Background()
+	acct, _, _ := newSolanaTestAccountant(t, ctx, solanaTestOpts{enforce: true})
+	b := acct.solana
+	start := time.Unix(1_700_000_000, 0)
+
+	assert.True(t, b.requestedAuditIsDue(start), "the first request runs")
+	b.lastAuditStartedAt = start
+	assert.False(t, b.requestedAuditIsDue(start.Add(minSolanaRequestedAuditSpacing-time.Second)))
+	assert.True(t, b.requestedAuditIsDue(start.Add(minSolanaRequestedAuditSpacing)))
+}

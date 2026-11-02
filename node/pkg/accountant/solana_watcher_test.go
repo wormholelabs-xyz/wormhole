@@ -564,7 +564,7 @@ func TestSolanaWatcherSubscribeStartsAudit(t *testing.T) {
 	defer wg.Wait()
 	defer cancel()
 	wg.Add(2)
-	go func() { defer wg.Done(); _ = f.acct.audit(ctx) }()
+	go func() { defer wg.Done(); _ = f.acct.solanaAudit(ctx, f.acct.solana) }()
 	go func() { defer wg.Done(); _ = f.acct.solanaWatcher(ctx, f.acct.solana) }()
 
 	select {

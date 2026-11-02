@@ -195,7 +195,7 @@ func TestSurfpoolSolanaNttAccountant(t *testing.T) {
 
 		// The audit is the only path that reaches the submission channel here.
 		insertNttPendingTransfer(t, acct, msg)
-		acct.runAudit(rootCtx)
+		acct.runSolanaAudit(rootCtx, acct.solanaNtt)
 
 		requirePublication(t, msgChan, msg, surfpoolCommitTimeout)
 		requireNttCommitOnChain(t, rootCtx, acct, conn, program, noreplay, authority, msg)
@@ -206,7 +206,7 @@ func TestSurfpoolSolanaNttAccountant(t *testing.T) {
 		// to resolve the digest from the closed account's signatures.
 		requireCounterDeltas = trackSolanaCounters(t, solanaFamilyNTT)
 		insertNttPendingTransfer(t, acct, msg)
-		acct.runAudit(rootCtx)
+		acct.runSolanaAudit(rootCtx, acct.solanaNtt)
 
 		requirePublication(t, msgChan, msg, surfpoolReadTimeout)
 		requireCounterDeltas(0, 1)
