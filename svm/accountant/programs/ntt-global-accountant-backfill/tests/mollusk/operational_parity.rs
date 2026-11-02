@@ -11,8 +11,9 @@ use accountant_test_fixtures::NttCorpus;
 use accountant_test_harness::{instructions_sysvar_meta, mollusk_with_fixtures};
 use global_accountant_definitions::ntt_global_accountant_backfill::Instruction;
 use global_accountant_definitions::{
-    parse_delivery_instruction, BelongsToHub, TransceiverHubKey, TransceiverHubLayout,
-    TransceiverPeerKey, TransceiverPeerLayout, Uint256, VaaBodyHeader,
+    parse_delivery_instruction, BelongsToHub, ChainRegistrationLayout, GlobalAccountantError,
+    TransceiverHubKey, TransceiverHubLayout, TransceiverPeerKey, TransceiverPeerLayout, Uint256,
+    VaaBodyHeader, GOVERNANCE_EMITTER, REGISTER_CHAIN_ACTION, RELAYER_GOVERNANCE_MODULE,
 };
 use mollusk_svm::program::keyed_account_for_system_program;
 use mollusk_svm::Mollusk;
@@ -21,7 +22,9 @@ use solana_instruction::{AccountMeta, Instruction as SolanaInstruction};
 use solana_pubkey::Pubkey;
 
 use crate::common::*;
-use crate::ntt_ix::{peer_payload, register_peer_ix_data, submit_vaas_ix_data};
+use crate::ntt_ix::{
+    peer_payload, register_peer_ix_data, register_relayer_chain_ix_data, submit_vaas_ix_data,
+};
 use accountant_test_harness::ntt::direct_body;
 
 /// The NTT operational program's `.so` under `SBF_OUT_DIR`, at the shared program id.
@@ -362,4 +365,103 @@ fn backfilled_state_settles_mainnet_transfers_through_submit_vaas() {
             );
         }
     }
+}
+
+/// Registration sequence that installed the current relayer emitter on wormchain.
+const CURRENT_REGISTRATION_SEQUENCE: u64 = 7;
+/// Earlier registration sequence for the same chain, superseded on wormchain.
+const SUPERSEDED_REGISTRATION_SEQUENCE: u64 = 5;
+const CURRENT_RELAYER_EMITTER: [u8; 32] = [0x71u8; 32];
+const RETIRED_RELAYER_EMITTER: [u8; 32] = [0x55u8; 32];
+
+/// A superseded `RegisterChain` VAA, still signed by an accepted guardian set, cannot
+/// restore the retired emitter after the cutover once its sequence is backfilled as a record.
+#[test]
+fn backfilled_superseded_record_blocks_register_relayer_chain_replay() {
+    let id = program_id();
+    let backfill_mollusk = mollusk();
+    let registration_pda = chain_registration::derive_pda(&id, ETHEREUM).0;
+    let current_record_pda = derive_register_chain_pda(&id, CURRENT_REGISTRATION_SEQUENCE).0;
+    let superseded_record_pda = derive_register_chain_pda(&id, SUPERSEDED_REGISTRATION_SEQUENCE).0;
+
+    // Phase 1: the backfill `.so` writes the current registration and the superseded record.
+    let current = wire::chain_registration_entry(
+        ETHEREUM,
+        CURRENT_REGISTRATION_SEQUENCE,
+        CURRENT_RELAYER_EMITTER,
+    );
+    let backfilled_registration = backfill(
+        &backfill_mollusk,
+        &wire::encode_chain_registration_batch(
+            Instruction::BackfillRelayerChainRegistration as u8,
+            &[current],
+        ),
+        &[registration_pda, current_record_pda],
+        "backfill current registration",
+    );
+    let superseded = wire::chain_registration_entry(
+        ETHEREUM,
+        SUPERSEDED_REGISTRATION_SEQUENCE,
+        RETIRED_RELAYER_EMITTER,
+    );
+    let backfilled_superseded_record = backfill(
+        &backfill_mollusk,
+        &wire::encode_register_chain_record_batch(
+            Instruction::BackfillRelayerRegisterChainRecord as u8,
+            &[superseded],
+        ),
+        &[superseded_record_pda],
+        "backfill superseded record",
+    );
+    let registration_account = backfilled_registration[0].1.clone();
+
+    // Phase 2: the operational `.so` receives the superseded VAA.
+    let vaa = SignedVaa::new(register_chain_body(
+        SOLANA,
+        GOVERNANCE_EMITTER,
+        SUPERSEDED_REGISTRATION_SEQUENCE,
+        governance_header(RELAYER_GOVERNANCE_MODULE, REGISTER_CHAIN_ACTION, 0),
+        ETHEREUM,
+        RETIRED_RELAYER_EMITTER,
+    ));
+    let operational = mollusk_with_fixtures(&id, OPERATIONAL_PROGRAM_NAME);
+    let replay = |record: Account| {
+        vaa.submit(
+            &operational,
+            id,
+            &register_relayer_chain_ix_data(vaa.guardian_set_bump, &vaa.body),
+            vec![
+                AccountMeta::new(registration_pda, false),
+                AccountMeta::new_readonly(system_program_id(), false),
+                AccountMeta::new(superseded_record_pda, false),
+            ],
+            vec![
+                (registration_pda, registration_account.clone()),
+                keyed_account_for_system_program(),
+                (superseded_record_pda, record),
+            ],
+        )
+    };
+
+    let without_record = replay(uninitialised_pda_account());
+    assert_success(&without_record, "control: no record, the old VAA applies");
+    assert_eq!(
+        layout::<ChainRegistrationLayout>(find_account(
+            &without_record.resulting_accounts,
+            &registration_pda
+        )),
+        ChainRegistrationLayout::new(
+            ETHEREUM,
+            RETIRED_RELAYER_EMITTER,
+            SUPERSEDED_REGISTRATION_SEQUENCE
+        ),
+        "control: the retired emitter is restored"
+    );
+
+    let with_record = replay(backfilled_superseded_record[0].1.clone());
+    assert_error(
+        &with_record,
+        GlobalAccountantError::DuplicateRegisterChain as u64,
+        "superseded sequence backfilled as a record",
+    );
 }

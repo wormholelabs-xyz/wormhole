@@ -14,6 +14,9 @@ pub enum Instruction {
     BackfillModifyBalance = 2,
     /// Write the `ChainRegistration` PDA and the `RegisterChain` record PDA per registration.
     BackfillChainRegistration = 3,
+    /// Write `RegisterChain` record PDAs for superseded registration sequences, so their VAAs
+    /// cannot apply after the cutover.
+    BackfillRegisterChainRecord = 4,
 }
 
 impl Instruction {
@@ -23,6 +26,7 @@ impl Instruction {
             1 => Some(Self::BackfillBalance),
             2 => Some(Self::BackfillModifyBalance),
             3 => Some(Self::BackfillChainRegistration),
+            4 => Some(Self::BackfillRegisterChainRecord),
             _ => None,
         }
     }
@@ -34,12 +38,13 @@ mod tests {
 
     #[test]
     fn from_u8_covers_every_discriminator() {
-        let cases: [(u8, Option<Instruction>); 5] = [
+        let cases: [(u8, Option<Instruction>); 6] = [
             (0, Some(Instruction::BackfillNoReplay)),
             (1, Some(Instruction::BackfillBalance)),
             (2, Some(Instruction::BackfillModifyBalance)),
             (3, Some(Instruction::BackfillChainRegistration)),
-            (4, None),
+            (4, Some(Instruction::BackfillRegisterChainRecord)),
+            (5, None),
         ];
         for (value, expected) in cases {
             assert_eq!(Instruction::from_u8(value), expected, "{value}");

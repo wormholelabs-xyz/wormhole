@@ -5,7 +5,8 @@
 //!    one `ACCDGST\0` record per entry reaches `meta.logMessages` over real RPC.
 //! 2. `BackfillBalance`: two `BalanceAccountLayout` PDAs at the operational seeds.
 //! 3. `BackfillChainRegistration`: two chains, each writing the `ChainRegistration`
-//!    PDA and the `RegisterChain` record.
+//!    PDA and the `RegisterChain` record. `BackfillRegisterChainRecord` then records a
+//!    superseded sequence of one chain and leaves its registration unchanged.
 //! 4. `BackfillModifyBalance`: one `ModifyBalanceLayout` record.
 //! 5. A stranger signs `BackfillNoReplay` and `BackfillBalance`: both reject with
 //!    `UnauthorizedCaller`, and `getAccountInfo` on the target balance PDA errors.
@@ -263,6 +264,41 @@ fn surfpool_backfill_lifecycle() {
             "register chain record",
         );
     }
+
+    // 3b. BackfillRegisterChainRecord: a superseded sequence of ETHEREUM, record only.
+    let superseded = wire::chain_registration_entry(ETHEREUM, 1_000, [0x50u8; 32]);
+    let superseded_record = derive_register_chain_pda(&id, superseded.sequence()).0;
+    let mut accounts = write_head(&authority.pubkey());
+    accounts.push(AccountMeta::new(superseded_record, false));
+    send(
+        &rpc,
+        "backfill_register_chain_record",
+        &[Instruction {
+            program_id: id,
+            accounts,
+            data: wire::encode_register_chain_record_batch(
+                Arm::BackfillRegisterChainRecord as u8,
+                &[superseded],
+            ),
+        }],
+        None,
+        &[&authority],
+    );
+    assert_written(
+        &rpc.get_account(&superseded_record)
+            .expect("superseded RegisterChain PDA"),
+        &id,
+        RegisterChainLayout::new(ETHEREUM, superseded.emitter, superseded.sequence()),
+        "superseded register chain record",
+    );
+    let current = registrations[0];
+    assert_written(
+        &rpc.get_account(&chain_registration::derive_pda(&id, ETHEREUM).0)
+            .expect("ChainRegistration PDA"),
+        &id,
+        ChainRegistrationLayout::new(ETHEREUM, current.emitter, current.sequence()),
+        "registration unchanged by the record-only arm",
+    );
 
     // 4. BackfillModifyBalance: the record that arms `modify_balance`'s replay guard.
     let reason: [u8; 32] = *b"wormchain modification sequence ";

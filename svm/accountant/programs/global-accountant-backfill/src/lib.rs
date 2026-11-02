@@ -1,15 +1,15 @@
 //! Wormhole Global Accountant (WTT) Backfill Solana program, anchor-lang 1.1.2.
 //!
-//! One-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records and
-//! ChainRegistration state from a wormchain `query_all_accounts` snapshot. It occupies the
-//! operational program's account and is upgraded out via `solana program upgrade` once
-//! `global-accountant` takes over.
+//! One-shot migration `.so` that seeds NoReplay bits, Balance PDAs, ModifyBalance records,
+//! ChainRegistration state and superseded RegisterChain records from a wormchain
+//! `query_all_accounts` snapshot. It occupies the operational program's account and is
+//! upgraded out via `solana program upgrade` once `global-accountant` takes over.
 //!
 //! Wire-format constraints; keep these when you change the program:
 //!
 //! - Account discriminator is the 1-byte `AccountTag` at offset 0. Load state with
 //!   `UncheckedAccount` + `bytemuck`; do not use `#[account(zero_copy)]`.
-//! - Instruction discriminator is 1 byte (`0..=3`) through `#[instruction(discriminator = N)]`.
+//! - Instruction discriminator is 1 byte (`0..=4`) through `#[instruction(discriminator = N)]`.
 //! - PDA creation uses `CreateAccountAllowPrefund` through `pda_init`; `#[account(init)]`
 //!   fails on a prefunded PDA.
 //! - Errors map to `ProgramError::Custom(code)`; `#[error_code]` would add Anchor's `+6000` offset.
@@ -117,6 +117,22 @@ pub mod global_accountant_backfill {
     ) -> Result<()> {
         let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
         backfill::backfill_chain_registration::process(
+            ctx.program_id,
+            &accounts,
+            &ix_data.0,
+            &BACKFILL_AUTHORITY,
+        )?;
+        Ok(())
+    }
+
+    /// See `accountant_backfill_core::instructions::backfill_register_chain_record`.
+    #[instruction(discriminator = 4)]
+    pub fn backfill_register_chain_record<'info>(
+        ctx: Context<'info, BackfillRegisterChainRecordAccounts<'info>>,
+        ix_data: RawIxData,
+    ) -> Result<()> {
+        let accounts = flatten_accounts!(ctx, [payer, system_program], remaining);
+        backfill::backfill_register_chain_record::process(
             ctx.program_id,
             &accounts,
             &ix_data.0,

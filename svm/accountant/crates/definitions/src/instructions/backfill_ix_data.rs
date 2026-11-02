@@ -56,6 +56,9 @@
 //! `ChainRegistrationBatch` wire: `count (u8) ‖ count × entry`, entries strictly ascending
 //! by `chain`.
 //!
+//! `RegisterChainRecordBatch` wire: the same entry, `count (u8) ‖ count × entry`, entries
+//! strictly ascending by `sequence`. A chain can repeat.
+//!
 //! `BackfillTransceiverHubEntry` (68 bytes):
 //!
 //! | offset | size | field          |
@@ -493,6 +496,35 @@ impl<'a> ChainRegistrationBatch<'a> {
         let mut previous_sort_key: Option<u16> = None;
         for entry in entries {
             let sort_key = entry.chain();
+            if let Some(previous) = previous_sort_key {
+                if sort_key <= previous {
+                    return Err(GlobalAccountantError::InvalidInstructionData);
+                }
+            }
+            previous_sort_key = Some(sort_key);
+        }
+
+        Ok(Self(entries))
+    }
+
+    pub fn entries(&self) -> &'a [BackfillChainRegistrationEntry] {
+        self.0
+    }
+}
+
+/// Superseded `RegisterChain` sequences, strictly ascending by `sequence`. One PDA create per
+/// entry, so the `MAX_BATCH_ENTRIES` bound of `parse_batch` applies. `parse` is the only
+/// constructor.
+pub struct RegisterChainRecordBatch<'a>(&'a [BackfillChainRegistrationEntry]);
+
+impl<'a> RegisterChainRecordBatch<'a> {
+    /// Wire: `count (u8) ‖ count × BackfillChainRegistrationEntry`.
+    pub fn parse(data: &'a [u8]) -> Result<Self, GlobalAccountantError> {
+        let entries: &[BackfillChainRegistrationEntry] = parse_batch(data)?;
+
+        let mut previous_sort_key: Option<u64> = None;
+        for entry in entries {
+            let sort_key = entry.sequence();
             if let Some(previous) = previous_sort_key {
                 if sort_key <= previous {
                     return Err(GlobalAccountantError::InvalidInstructionData);
@@ -1124,6 +1156,79 @@ mod tests {
             let batch =
                 ChainRegistrationBatch::parse(&data).unwrap_or_else(|e| panic!("{name}: {e:?}"));
             assert_eq!(batch.entries(), entries.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn register_chain_record_batch_parses_positive_cases() {
+        let one = [chain_registration_entry(2, 100)];
+        let superseded_across_chains = [
+            chain_registration_entry(2, 5),
+            chain_registration_entry(4, 6),
+            chain_registration_entry(2, 9),
+        ];
+        let max_count: std::vec::Vec<BackfillChainRegistrationEntry> = (0..MAX_BATCH_ENTRIES
+            as u16)
+            .map(|i| chain_registration_entry(2, i as u64))
+            .collect();
+
+        let cases: [(&str, std::vec::Vec<BackfillChainRegistrationEntry>); 3] = [
+            ("one entry", one.to_vec()),
+            (
+                "a repeated chain, chains unordered",
+                superseded_across_chains.to_vec(),
+            ),
+            ("MAX_BATCH_ENTRIES entries", max_count),
+        ];
+        for (name, entries) in cases {
+            let data = encode_chain_registration_batch(&entries);
+            let batch =
+                RegisterChainRecordBatch::parse(&data).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+            assert_eq!(batch.entries(), entries.as_slice(), "{name}");
+        }
+    }
+
+    #[test]
+    fn register_chain_record_batch_rejects_malformed_wire() {
+        let ok_data = encode_chain_registration_batch(&[
+            chain_registration_entry(2, 100),
+            chain_registration_entry(2, 101),
+        ]);
+        let over_bound: std::vec::Vec<BackfillChainRegistrationEntry> =
+            (0..MAX_BATCH_ENTRIES as u16 + 1)
+                .map(|i| chain_registration_entry(2, i as u64))
+                .collect();
+
+        let cases: [(&str, std::vec::Vec<u8>); 7] = [
+            ("empty data", std::vec::Vec::new()),
+            ("zero count", std::vec![0u8]),
+            ("one byte short", ok_data[..ok_data.len() - 1].to_vec()),
+            ("one byte long", [ok_data.as_slice(), &[0u8]].concat()),
+            (
+                "duplicate sequence",
+                encode_chain_registration_batch(&[
+                    chain_registration_entry(2, 100),
+                    chain_registration_entry(4, 100),
+                ]),
+            ),
+            (
+                "descending sequence",
+                encode_chain_registration_batch(&[
+                    chain_registration_entry(2, 101),
+                    chain_registration_entry(2, 100),
+                ]),
+            ),
+            (
+                "one entry above MAX_BATCH_ENTRIES",
+                encode_chain_registration_batch(&over_bound),
+            ),
+        ];
+        for (name, data) in cases {
+            assert_eq!(
+                RegisterChainRecordBatch::parse(&data).err(),
+                Some(GlobalAccountantError::InvalidInstructionData),
+                "{name}"
+            );
         }
     }
 

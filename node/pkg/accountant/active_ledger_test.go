@@ -419,3 +419,30 @@ func TestLoadPendingTransfersKeepsEntryWithoutSolanaRecord(t *testing.T) {
 	assert.Equal(t, backendOutcomeRejected, pe.backendOutcome(backendSolana))
 	assert.Equal(t, backendOutcomePending, pe.backendOutcome(backendWormchain))
 }
+
+// anchorInstructionFallbackNotFound is the error the backfill image returns for an
+// operational instruction.
+const anchorInstructionFallbackNotFound = 101
+
+func TestSolanaFailedSubmissionStaysPendingForMirror(t *testing.T) {
+	for _, f := range activeLedgerFamilies() {
+		t.Run(f.name, func(t *testing.T) {
+			ctx := context.Background()
+			acct, _, msgChan := newSolanaTestAccountant(t, ctx, f.opts)
+			pe := submitTestPendingTransfer(t, acct, f.transfer(t, 55))
+			acct.handleCommittedTransfer(pe.msgId)
+			require.Len(t, msgChan, 1)
+
+			solana := acct.solana
+			if f.isNTT {
+				solana = acct.solanaNtt
+			}
+			disposition := acct.handleSolanaTxError(solana, &solanaSubmission{msgId: pe.msgId, msg: pe.msg}, customTxError(anchorInstructionFallbackNotFound), "confirm")
+
+			assert.Equal(t, solanaTxFailed, disposition)
+			require.Contains(t, acct.pendingTransfers, pe.msgId)
+			assert.Equal(t, backendOutcomePending, pe.backendOutcome(f.solanaBackend))
+			assert.Len(t, acct.deriveSolanaSubmissions(solana, []*common.MessagePublication{pe.msg}, 0), 1, "the next round submits the transfer again")
+		})
+	}
+}

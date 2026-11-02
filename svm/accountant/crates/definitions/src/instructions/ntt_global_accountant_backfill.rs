@@ -22,6 +22,10 @@ pub enum Instruction {
     BackfillTransceiverHub = 4,
     /// Write `TransceiverPeer` PDAs from the `transceiver_peers` map.
     BackfillTransceiverPeer = 5,
+    /// Write `RegisterChain` record PDAs for superseded Standard Relayer registration
+    /// sequences. Shares the handler and the wire format with the WTT backfill's
+    /// `BackfillRegisterChainRecord`.
+    BackfillRelayerRegisterChainRecord = 6,
 }
 
 impl Instruction {
@@ -33,6 +37,7 @@ impl Instruction {
             3 => Some(Self::BackfillRelayerChainRegistration),
             4 => Some(Self::BackfillTransceiverHub),
             5 => Some(Self::BackfillTransceiverPeer),
+            6 => Some(Self::BackfillRelayerRegisterChainRecord),
             _ => None,
         }
     }
@@ -44,14 +49,15 @@ mod tests {
 
     #[test]
     fn from_u8_covers_every_discriminator() {
-        let cases: [(u8, Option<Instruction>); 7] = [
+        let cases: [(u8, Option<Instruction>); 8] = [
             (0, Some(Instruction::BackfillNoReplay)),
             (1, Some(Instruction::BackfillBalance)),
             (2, Some(Instruction::BackfillModifyBalance)),
             (3, Some(Instruction::BackfillRelayerChainRegistration)),
             (4, Some(Instruction::BackfillTransceiverHub)),
             (5, Some(Instruction::BackfillTransceiverPeer)),
-            (6, None),
+            (6, Some(Instruction::BackfillRelayerRegisterChainRecord)),
+            (7, None),
         ];
         for (value, expected) in cases {
             assert_eq!(Instruction::from_u8(value), expected, "{value}");

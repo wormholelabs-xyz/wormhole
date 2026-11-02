@@ -52,9 +52,11 @@ its handler in `accountant_backfill_core::instructions`.
 | 1 | `backfill_balance` | `backfill_balance` | One `BalanceAccount` |
 | 2 | `backfill_modify_balance` | `backfill_modify_balance` | One `ModifyBalance` |
 | 3 | `backfill_chain_registration` | `backfill_chain_registration` | Two: `ChainRegistration`, then `RegisterChain` |
+| 4 | `backfill_register_chain_record` | `backfill_register_chain_record` | One `RegisterChain` |
 
-The sibling `ntt-global-accountant-backfill` program shares these four handlers
-at the same discriminators. It adds two NTT-only arms at 4 and 5.
+The sibling `ntt-global-accountant-backfill` program shares these five handlers.
+Arms 0 to 3 use the same discriminators. It adds two NTT-only arms at 4 and 5,
+and it puts the `backfill_register_chain_record` handler at 6.
 
 ### PDAs
 
@@ -89,7 +91,7 @@ ride in `ctx.remaining_accounts`, in wire order.
 | 3 | system program | | | |
 | 4.. | NoReplay bitmap bucket | W | | One per bucket, in walk order. |
 
-The other three instructions:
+The other four instructions:
 
 | # | Account | W | S | Purpose |
 |---|---------|---|---|---------|
@@ -155,6 +157,10 @@ to 28 are zero. Copy the 32 bytes out of the original VAA payload.
 
 `emitter` is the Token Bridge emitter address on `chain`. The handler writes
 both the `ChainRegistration` PDA and the `RegisterChain` record for one entry.
+
+`BackfillRegisterChainRecord` entry, the same 42 bytes. Sort key `sequence`. A
+chain can occur in more than one entry. The handler writes the `RegisterChain`
+record only. It does not change the `ChainRegistration` PDA.
 
 ### NoReplay batches
 
@@ -274,15 +280,19 @@ Handlers read state with `UncheckedAccount` plus `bytemuck`, not Anchor's
 ## Snapshot tooling contract
 
 The snapshot tooling lives outside this repository. It reads the wormchain dump
-and emits the four batch formats above. The wire formats are the contract
+and emits the five batch formats above. The wire formats are the contract
 between that tooling and this program. The rules below complete that contract.
 Each rule is an item for the off-chain parity check.
 
-**One `RegisterChain` VAA per chain.** Exactly one `RegisterChain` VAA per chain
-must have succeeded on wormchain. Check this against the VAA archive before the
-backfill. The backfill arms one `RegisterChain` record per chain. An earlier
-accepted registration for the same chain would stay replayable, because
-`register_chain` overwrites the `ChainRegistration` PDA on any unused sequence.
+**Superseded `RegisterChain` sequences.** `register_chain` overwrites the
+`ChainRegistration` PDA on any sequence that has no record. Wormchain can have
+applied more than one `RegisterChain` VAA for a chain. For each such chain, put
+the installing sequence into `BackfillChainRegistration`. Put every other
+applied sequence into `BackfillRegisterChainRecord`. Find the applied sequences
+in the wormchain `DIGESTS` rows of the governance emitter, and read each payload
+from the VAA archive. Without this record, an earlier VAA can restore a retired
+emitter after the cutover. Put each sequence into one batch only. A
+sequence in both batches makes the second batch fail with `InvalidPda`.
 
 **`BackfillNoReplay` source.** The entries come from the wormchain `DIGESTS`
 map. Exclude every row whose key is `(chain 1, GOVERNANCE_EMITTER)`. A
@@ -324,41 +334,62 @@ issued against Wormchain after the snapshot cut therefore has no path onto
 Solana. The freeze in step 1 is what stops such a VAA from existing. Keep the
 freeze until the operational image is live.
 
+The freeze does not stop transfers. Wormchain commits transfers after the
+snapshot, and `BackfillBalance` cannot update a balance that it created. The
+guardians therefore run the Solana accountant as the mirror ledger during the
+migration. A guardian keeps each released transfer pending for the mirror for
+24 hours. While the backfill image occupies the program account, mirror
+submissions fail, and the audit sends them again. After the upgrade, the operational program applies
+each transfer that the snapshot does not hold. A transfer that the snapshot holds
+returns `AlreadyAccounted`, and the guardian marks it as done.
+
+CAUTION: Complete steps 3 to 19 in less than 24 hours. A transfer that wormchain
+commits after the snapshot, and that the mirror does not apply in 24 hours, is
+lost to Solana. A guardian logs each timeout with its message ID, and
+`global_accountant_mirror_timeouts_total` increases.
+
 CAUTION: `solana program upgrade` fails when the program-data account is too
 small for the new image. Size the account at the first deploy.
 
 Procedure:
 
 1. Freeze accountant governance on Wormchain.
-2. Take the Wormchain snapshot.
-3. Put every governance VAA that landed before the freeze into the batches below.
-4. Build the deploy artifact with `just build`.
-5. Check the artifact with `just verify-authority`, against the operator key.
-6. Measure both images with `ls -l target/deploy/*.so`.
-7. Deploy the backfill artifact at the WTT program id. Give `--max-len` at least
+2. Make sure that a quorum of guardians runs the Solana WTT accountant as the
+   mirror: `--accountantWttActiveLedger` is `wormchain` or empty, and the
+   feature string contains `sol-acct` without `-active`.
+3. Take the Wormchain snapshot. Record the time.
+4. Put every governance VAA that landed before the freeze into the batches below.
+5. Build the deploy artifact with `just build`.
+6. Check the artifact with `just verify-authority`, against the operator key.
+7. Measure both images with `ls -l target/deploy/*.so`.
+8. Deploy the backfill artifact at the WTT program id. Give `--max-len` at least
    the size of the operational image.
-8. Send the `BackfillNoReplay` batches.
-9. Send the `BackfillBalance` batches.
-10. Send the `BackfillModifyBalance` batches.
-11. Send the `BackfillChainRegistration` batches.
-12. Run the off-chain parity check as the operator.
-13. Collect a parity result from every guardian.
-14. Upgrade the account to `global_accountant.so` with `solana program upgrade`.
-15. Move upgrade authority to the program's `[b"upgrade"]` PDA with
+9. Send the `BackfillNoReplay` batches.
+10. Send the `BackfillBalance` batches.
+11. Send the `BackfillModifyBalance` batches.
+12. Send the `BackfillChainRegistration` batches.
+13. Send the `BackfillRegisterChainRecord` batches.
+14. Run the off-chain parity check as the operator.
+15. Collect a parity result from every guardian.
+16. Upgrade the account to `global_accountant.so` with `solana program upgrade`.
+17. Move upgrade authority to the program's `[b"upgrade"]` PDA with
     `solana program set-upgrade-authority`.
-16. Lift the governance freeze. A new VAA targets Solana.
-17. Tell the guardians to start signing.
+18. Lift the governance freeze. A new VAA targets Solana.
+19. Wait until `global_accountant_mirror_pending_transfers` is 0 on a quorum of
+    guardians. If `global_accountant_mirror_timeouts_total` increased, find each
+    message ID in the guardian timeout logs. Make sure that the snapshot holds
+    each of these transfers.
+20. Tell the guardians to set `--accountantWttActiveLedger=solana`.
 
-After step 15 the deploy key can no longer upgrade the program. Each later
+After step 17 the deploy key can no longer upgrade the program. Each later
 upgrade needs a guardian-signed `UpgradeContract` VAA, through the program's own
 `upgrade_contract` instruction.
 
 At this commit the two images measure 147,776 bytes (backfill) and 238,880 bytes
-(operational). Both numbers move with every code change, so step 6 measures them
+(operational). Both numbers move with every code change, so step 7 measures them
 again.
 
-Steps 8 to 11 are independent of each other. The order above is the order the
-surfpool lifecycle test uses.
+Steps 9 to 13 are independent of each other, so you can send them in any order.
 
 ## Scale
 
@@ -393,10 +424,10 @@ Anchor raises three more codes before a handler runs:
 ## Testing
 
 - `just test` — the mollusk suites and the unit tests. The suites cover the wire
-  parsers, all four handlers, and the program-id pin. The artifact check runs
+  parsers, all five handlers, and the program-id pin. The artifact check runs
   the built `.so`'s authority gate in an SBF VM: the artifact accepts the
   compiled-in key and rejects every other key.
-- `just e2e-backfill` — the surfpool lifecycle. All four instructions run
+- `just e2e-backfill` — the surfpool lifecycle. All five instructions run
   against a real validator and the real NoReplay program. The test checks every
   write for owner, length, rent and layout. It also checks that a stranger's
   instruction rejects with `UnauthorizedCaller` and writes nothing.
@@ -412,4 +443,4 @@ Anchor raises three more codes before a handler runs:
   here.
 - [`ntt-global-accountant-backfill`](../ntt-global-accountant-backfill/README.md)
   — the sibling migration image for the NTT Global Accountant. It shares these
-  four handlers and adds two NTT-only arms.
+  five handlers and adds two NTT-only arms.

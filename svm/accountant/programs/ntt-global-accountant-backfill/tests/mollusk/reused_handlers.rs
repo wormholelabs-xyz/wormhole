@@ -153,6 +153,24 @@ fn relayer_chain_registration_case(signer: Pubkey) -> Case {
     }
 }
 
+fn relayer_register_chain_record_case(signer: Pubkey) -> Case {
+    let entry = wire::chain_registration_entry(ETHEREUM, SEQUENCE, EMITTER);
+    let record = derive_register_chain_pda(&program_id(), SEQUENCE).0;
+    let (accounts, metas) = simple_invocation(signer, &[record]);
+    Case {
+        label: "BackfillRelayerRegisterChainRecord",
+        data: wire::encode_register_chain_record_batch(
+            Instruction::BackfillRelayerRegisterChainRecord as u8,
+            &[entry],
+        ),
+        accounts,
+        metas,
+        written: vec![(record, RegisterChainLayout::TAG)],
+        marked_bucket: None,
+        accdgst_logs: 0,
+    }
+}
+
 /// `Program data: <base64>` lines whose payload carries the accountant commit-log tag.
 fn accdgst_log_count(messages: &[String]) -> usize {
     use base64::Engine;
@@ -172,11 +190,12 @@ fn accdgst_log_count(messages: &[String]) -> usize {
 #[test]
 fn every_shared_handler_writes_through_the_ntt_program_id() {
     let signer = ntt_test_authority_pubkey();
-    let cases: [Case; 4] = [
+    let cases: [Case; 5] = [
         noreplay_case(signer),
         balance_case(signer),
         modify_balance_case(signer),
         relayer_chain_registration_case(signer),
+        relayer_register_chain_record_case(signer),
     ];
 
     let mut mollusk = mollusk();

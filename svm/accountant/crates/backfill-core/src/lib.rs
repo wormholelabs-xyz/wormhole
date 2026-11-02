@@ -1,6 +1,7 @@
 //! Migration-only backfill handlers shared by the accountant backfill programs:
 //! `BackfillNoReplay`, `BackfillBalance`, `BackfillModifyBalance`,
-//! `BackfillChainRegistration`, the bulk NoReplay CPI, and the backfill authority check.
+//! `BackfillChainRegistration`, `BackfillRegisterChainRecord`, the bulk NoReplay CPI, and the
+//! backfill authority check.
 //!
 //! Layering: `definitions <- operational-core <- backfill-core <- backfill program shells`.
 //! Every PDA write goes through `operational-core`, so backfilled bytes equal the bytes the

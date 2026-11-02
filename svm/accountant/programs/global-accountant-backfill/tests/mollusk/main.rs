@@ -8,4 +8,5 @@ mod backfill_balance;
 mod backfill_chain_registration;
 mod backfill_modify_balance;
 mod backfill_noreplay;
+mod backfill_register_chain_record;
 mod program_id;

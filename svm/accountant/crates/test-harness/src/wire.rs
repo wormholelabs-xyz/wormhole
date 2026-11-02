@@ -192,6 +192,13 @@ pub fn encode_chain_registration_batch(
     encode_batch(discriminator, entries)
 }
 
+pub fn encode_register_chain_record_batch(
+    discriminator: u8,
+    entries: &[BackfillChainRegistrationEntry],
+) -> Vec<u8> {
+    encode_batch(discriminator, entries)
+}
+
 pub fn encode_transceiver_hub_batch(
     discriminator: u8,
     entries: &[BackfillTransceiverHubEntry],
@@ -263,7 +270,7 @@ mod tests {
     use super::*;
     use global_accountant_definitions::{
         BalanceBatch, ChainRegistrationBatch, ModifyBalanceBatch, NoReplayBatch,
-        TransceiverHubBatch, TransceiverPeerBatch,
+        RegisterChainRecordBatch, TransceiverHubBatch, TransceiverPeerBatch,
     };
 
     /// Any byte: these encoders frame a batch, the discriminator names the program's arm.
@@ -302,6 +309,18 @@ mod tests {
         let data = encode_chain_registration_batch(DISC, &entries);
         assert_eq!(data[0], DISC);
         let batch = ChainRegistrationBatch::parse(&data[1..]).unwrap();
+        assert_eq!(batch.entries(), entries.as_slice());
+    }
+
+    #[test]
+    fn register_chain_record_batch_round_trips_through_the_parser() {
+        let entries = [
+            chain_registration_entry(2, 5, [0x11; 32]),
+            chain_registration_entry(2, 9, [0x22; 32]),
+        ];
+        let data = encode_register_chain_record_batch(DISC, &entries);
+        assert_eq!(data[0], DISC);
+        let batch = RegisterChainRecordBatch::parse(&data[1..]).unwrap();
         assert_eq!(batch.entries(), entries.as_slice());
     }
 
