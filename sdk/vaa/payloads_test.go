@@ -119,6 +119,26 @@ func TestBodyTokenBridgeUpgradeContractSerialize(t *testing.T) {
 	assert.Equal(t, expected, hex.EncodeToString(serializedBodyTokenBridgeUpgradeContract))
 }
 
+// TestBodyTokenBridgeUpgradeContractForAccountantModules checks that the token bridge
+// upgrade template makes the 67-byte UpgradeContractPayload of the Solana accountant
+// programs: module (right-aligned) ‖ action 2 ‖ chain 1 (Solana) ‖ buffer address.
+func TestBodyTokenBridgeUpgradeContractForAccountantModules(t *testing.T) {
+	buffer := Address{0xb0, 0xb1, 0xb2}
+	for _, module := range []string{"GlobalAccountant", "NTTGlobalAccountant"} {
+		t.Run(module, func(t *testing.T) {
+			body := BodyTokenBridgeUpgradeContract{Module: module, TargetChainID: ChainIDSolana, NewContract: buffer}
+			serialized, err := body.Serialize()
+			require.NoError(t, err)
+
+			expected := append(bytes.Repeat([]byte{0}, 32-len(module)), module...)
+			expected = append(expected, 0x02, 0x00, 0x01)
+			expected = append(expected, buffer[:]...)
+			require.Len(t, expected, 67)
+			assert.Equal(t, expected, serialized)
+		})
+	}
+}
+
 func TestBodyTokenBridgeSetPauserAddressesSerialize(t *testing.T) {
 	// "TokenBridge" left-padded to 32 bytes.
 	const tokenBridgeModule = "000000000000000000000000000000000000000000546f6b656e427269646765"

@@ -23,6 +23,9 @@ pub enum Action {
         #[serde(with = "crate::arraystring")]
         reason: BString,
     },
+    // Upgrade the accountant contract on the target chain
+    #[serde(rename = "2")]
+    UpgradeContract { new_contract: Address },
 }
 
 /// Represents the payload for a governance VAA targeted at the Accountant.
@@ -95,6 +98,11 @@ mod governance_packet_impl {
         reason: bstr::BString,
     }
 
+    #[derive(Serialize, Deserialize)]
+    struct UpgradeContract {
+        new_contract: Address,
+    }
+
     impl Serialize for GovernancePacket {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where
@@ -129,6 +137,11 @@ mod governance_packet_impl {
                             reason,
                         },
                     )?;
+                }
+                Action::UpgradeContract { new_contract } => {
+                    seq.serialize_field("action", &2u8)?;
+                    seq.serialize_field("chain", &self.chain)?;
+                    seq.serialize_field("payload", &UpgradeContract { new_contract })?;
                 }
             }
 
@@ -185,9 +198,15 @@ mod governance_packet_impl {
                         reason,
                     }
                 }
+                2 => {
+                    let UpgradeContract { new_contract } = seq
+                        .next_element()?
+                        .ok_or_else(|| Error::invalid_length(3, &EXPECTING))?;
+                    Action::UpgradeContract { new_contract }
+                }
                 v => {
                     return Err(Error::custom(format_args!(
-                        "invalid value {v}, expected one of 1"
+                        "invalid value {v}, expected one of 1, 2"
                     )))
                 }
             };
@@ -266,9 +285,14 @@ mod governance_packet_impl {
                                     reason,
                                 }
                             }
+                            2 => {
+                                let UpgradeContract { new_contract } = map.next_value()?;
+
+                                Action::UpgradeContract { new_contract }
+                            }
                             v => {
                                 return Err(Error::custom(format_args!(
-                                    "invalid action: {v}, expected one of: 1"
+                                    "invalid action: {v}, expected one of: 1, 2"
                                 )))
                             }
                         };
@@ -374,5 +398,33 @@ mod test {
 
         let encoded = serde_json::to_string(&vaa).unwrap();
         assert_eq!(vaa, serde_json::from_str(&encoded).unwrap());
+    }
+
+    /// Expected wire bytes, assembled independently of the serializer:
+    /// `module ‖ action ‖ target_chain (u16 BE) ‖ payload`.
+    fn governance_packet_bytes(action: u8, chain: Chain, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(MODULE.len() + 3 + payload.len());
+        buf.extend_from_slice(&MODULE);
+        buf.push(action);
+        buf.extend_from_slice(&u16::from(chain).to_be_bytes());
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    #[test]
+    fn upgrade_contract() {
+        let new_contract = Address([0xc4; 32]);
+        let buf = governance_packet_bytes(2, Chain::Solana, &new_contract.0);
+
+        let packet = GovernancePacket {
+            chain: Chain::Solana,
+            action: Action::UpgradeContract { new_contract },
+        };
+
+        assert_eq!(buf, serde_wormhole::to_vec(&packet).unwrap());
+        assert_eq!(packet, serde_wormhole::from_slice(&buf).unwrap());
+
+        let encoded = serde_json::to_string(&packet).unwrap();
+        assert_eq!(packet, serde_json::from_str(&encoded).unwrap());
     }
 }

@@ -11,12 +11,18 @@ import (
 	"go.uber.org/zap"
 )
 
-// nttEnabled returns true if NTT is enabled, false if not.
-func (acct *Accountant) nttEnabled() bool {
+// wormchainNttEnabled returns true if the wormchain NTT accountant is enabled.
+func (acct *Accountant) wormchainNttEnabled() bool {
 	return acct.nttContract != ""
 }
 
-// nttStart initializes the NTT accountant and starts the NTT specific worker and watcher runnables.
+// nttEnabled returns true if NTT transfers are covered by any backend.
+func (acct *Accountant) nttEnabled() bool {
+	return acct.wormchainNttEnabled() || acct.solanaNttEnabled()
+}
+
+// nttStart initializes the NTT emitters and starts the wormchain NTT worker and watcher
+// runnables when the wormchain NTT accountant is enabled.
 func (acct *Accountant) nttStart(ctx context.Context) error {
 	acct.logger.Debug("entering nttStart")
 
@@ -36,6 +42,10 @@ func (acct *Accountant) nttStart(ctx context.Context) error {
 
 	for emitter := range acct.nttArEmitters {
 		acct.logger.Info("will monitor AR emitter for NTT", zap.Stringer("emitterChainId", emitter.emitterChainId), zap.Stringer("emitterAddr", emitter.emitterAddr))
+	}
+
+	if !acct.wormchainNttEnabled() {
+		return nil
 	}
 
 	// Start the watcher to listen to transfer events from the smart contract.

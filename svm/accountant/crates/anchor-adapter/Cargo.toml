@@ -1,0 +1,16 @@
+[package]
+name = "accountant-anchor-adapter"
+description = "Anchor #[program] boundary types for the accountant programs."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+borsh.workspace = true
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 acala
 Acala
+ACCDGST
 Acks
 Alertmanager
 algod
@@ -28,6 +29,7 @@ borsh
 bscscan
 BUILDKIT
 bytecodes
+bytemuck
 callstack
 ccqlistener
 CCTP
@@ -53,6 +55,7 @@ Cosmwasm
 counterparty
 cpus
 crosschain
+cutover
 Cyfrin
 datagram
 denoms
@@ -108,6 +111,7 @@ ints
 Ints
 IPFS
 journalctl
+justfile
 karura
 Karura
 Keccak
@@ -147,8 +151,10 @@ moonscan
 moretags
 multichecker
 Neodyme
+newtype
 nhooyr
 nolint
+noreplay
 obsv
 Obsv
 OP_CHECKMULTISIG
@@ -167,6 +173,7 @@ Polkachu
 Polkadot
 Positionals
 postconditions
+prefund
 prefunded
 promauto
 proto
@@ -192,6 +199,7 @@ Reobservation
 reobservations
 Reobservations
 reobserved
+replayable
 repoint
 RLUSD
 runtimes
@@ -224,6 +232,8 @@ Subdenoms
 suitypes
 supermajority
 superminority
+surfpool
+sysvar
 tendermint
 Tendermint
 terrad
@@ -255,6 +265,7 @@ unpausable
 unpauser
 unrepresentable
 Unrepresentable
+unroutable
 untampered
 upserted
 usize
@@ -262,6 +273,7 @@ utest
 UTXO
 uusd
 uvarint
+vaas
 varint
 varints
 vimdiff

@@ -1,0 +1,62 @@
+[package]
+name = "global-accountant"
+description = "Wormhole Global Accountant Solana program (Anchor)."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+# Anchor convention: the entrypoint is present by default; `no-entrypoint` suppresses it for
+# library and test consumption. `idl-build` stays off: the 1-byte account tags and bytemuck
+# layouts have no faithful IDL.
+default = []
+no-entrypoint = []
+
+[dependencies]
+accountant-anchor-adapter.workspace = true
+accountant-operational-core.workspace = true
+anchor-lang.workspace = true
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+
+[[bench]]
+name = "compute_units"
+harness = false
+
+[dev-dependencies]
+accountant-test-fixtures.workspace = true
+accountant-test-harness.workspace = true
+wormhole-svm-definitions.workspace = true
+mollusk-svm.workspace = true
+mollusk-svm-bencher.workspace = true
+solana-account.workspace = true
+solana-instruction.workspace = true
+solana-keccak-hasher.workspace = true
+solana-pubkey = { workspace = true, features = ["curve25519"] }
+global-accountant = { path = ".", features = ["no-entrypoint"] }
+# Surfpool e2e: talks to a subprocess `surfpool start` over JSON-RPC.
+solana-client.workspace = true
+solana-keypair.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+solana-commitment-config.workspace = true
+solana-system-interface.workspace = true
+serde_json.workspace = true
+# `ProgramResult::Failure` carries a `solana_program_error::ProgramError`; tests
+# name it to assert builtin error codes (e.g. `InvalidAccountData`) via the full
+# `u64` encoding.
+solana-program-error = "=3.0.1"
+# `ACCPAYR\0` payer-log records reach mollusk through `Mollusk::logger` as
+# `Program data: <base64>` lines.
+base64 = "=0.22.1"
+solana-svm-log-collector = { version = "=4.0.0-rc.0", features = ["agave-unstable-api"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "accountant-go-codegen"
+description = "Generates the Go wire layouts and fixtures of node/pkg/accountant from the accountant programs."
+publish = false
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+accountant-operational-core.workspace = true
+accountant-test-fixtures.workspace = true
+accountant-test-harness.workspace = true
+bytemuck.workspace = true
+global-accountant-definitions.workspace = true
+solana-pubkey.workspace = true
+
+[lints]
+workspace = true
