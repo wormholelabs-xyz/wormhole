@@ -183,6 +183,16 @@ keyed on the fixed governance emitter's address and chain.
 | 14 | clock sysvar | | | |
 | 15 | BPF upgradeable loader | | | |
 
+To make the governance message, use the token bridge upgrade template with the
+`GlobalAccountant` module. The payload has the same 67-byte layout:
+
+```sh
+guardiand template token-bridge-upgrade-contract \
+  --module GlobalAccountant --chain-id solana --new-address <buffer>
+```
+
+`<buffer>` is the address of the buffer account, as hex or base58.
+
 ## Security model
 
 **Governance gating.** `register_chain`, `modify_balance`, and
