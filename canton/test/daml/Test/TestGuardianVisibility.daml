@@ -12,6 +12,7 @@ import DA.Assert ((===))
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import Wormhole.Core.State
+import Wormhole.Core.Setup (mkInitialEmitterRegistry)
 import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
 
 -- | Alice owns the emitter; guardianGovernance sees it after a publish.
@@ -72,7 +73,38 @@ testGovernanceHasNoEmitterAuthority = do
     exerciseCmd emitterId PublishMessage with
       nonce = 1, payload = "00", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = None
+  -- guardianGovernance as payer: only the owner's authority is missing.
+  submitMustFail guardianGovernance do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, payer = guardianGovernance, feeAllocation = None
   submitMustFail guardianGovernance do archiveCmd emitterId
 
   (_, msg) <- publishVia operator csId alice emitterId 7 "dead" 0
   msg.sequence === 0
+
+-- | An Emitter from a registry under a rogue guardianGovernance is visible to
+-- that rogue party only, and publishing it against the real CoreState aborts
+-- on the guardianGovernance pin.
+testRogueGovernanceEmitterCannotPublishOnRealCoreState : Script ()
+testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
+  (operator, guardianGovernance, csId) <- setup
+  rogueGovernance <- allocateParty "RogueGovernance"
+  alice <- allocateParty "Alice"
+  rogueRegistryCid <- submit operator do
+    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
+  (_, rogueEmitterCid) <- submit (actAs alice <> disclose rogueRegistryDisclosure) do
+    exerciseCmd rogueRegistryCid RegisterEmitter with
+      requester = alice, payer = alice, coreStateCid = None, feeAllocation = None
+
+  Some rogueEmitter <- queryContractId rogueGovernance rogueEmitterCid
+  rogueEmitter.guardianGovernance === rogueGovernance
+  realGovernanceView <- queryContractId guardianGovernance rogueEmitterCid
+  realGovernanceView === None
+
+  csDisclosure <- fromSome <$> queryDisclosure operator csId
+  submitMustFail (actAs alice <> disclose csDisclosure) do
+    exerciseCmd rogueEmitterCid PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, payer = alice, feeAllocation = None

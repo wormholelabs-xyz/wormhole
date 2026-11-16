@@ -61,6 +61,15 @@ func (wc *WatcherConfig) Create(
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
 	}
 
+	// SECURITY: outside unsafe dev mode the stream MUST be narrowed to the
+	// guardianGovernance party. Every Emitter it observes pins that same party
+	// in PublishMessage's CoreState check, so only publishes against the real
+	// CoreState reach the watcher. A wildcard stream would also carry publishes
+	// witnessed by any other party hosted on the participant.
+	if !devMode && wc.ReadAsParty == "" {
+		return nil, nil, fmt.Errorf("canton: ReadAsParty must be set to the guardianGovernance party outside unsafe dev mode")
+	}
+
 	// OAuth is all-or-nothing: a partial config would silently dial without
 	// credentials (or with an unusable token source) and fail at runtime.
 	if wc.Auth.enabled() && !wc.Auth.complete() {

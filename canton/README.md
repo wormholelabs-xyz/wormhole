@@ -255,12 +255,13 @@ registry and the loser retries with the fresh cid:
 template EmitterRegistry with
     operator           : Party
     guardianGovernance : Party    -- carried into each new Emitter
+    registrationFee    : Int      -- 10^-10 feeInstrument units; 0 for free
     nextId             : Int
   where
     signatory operator            -- id allocation stays operator-private
     -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
-    --   with requester : Party
-    --   controller requester   -- operator authority inherited; no crank
+    --   with requester, payer : Party; coreStateCid, feeAllocation : Optional ...
+    --   controller requester, payer -- operator authority inherited; no crank
 
 template Emitter
   with
@@ -1137,15 +1138,21 @@ of every `Emitter`, it is an informee of every `PublishMessage` and
 `SubmitGovernanceVAA` exercise, so each guardian's participant independently
 receives and validates every attestation-bearing transaction, and an invalid one
 never appears on that participant's Ledger API — so a watcher cannot sign it.
-Hosting changes are signed by the `guardianGovernance` decentralized-namespace
-threshold, so no single key can remove a guardian from observation.
+Hosting changes need the `guardianGovernance` decentralized-namespace threshold,
+except that a participant can always drop its own hosting; so no single key can
+remove another guardian from observation.
 
 Consequences of hosting a signatory party on guardian participants:
 
-- **Confirmation.** `guardianGovernance` is a confirming party wherever it signs
-  (`CoreState` reads on every publish, NTT managers). Its confirmation threshold
-  across guardian participants decides whether a guardian outage delays Canton
-  transactions; it is an open deployment parameter (§11).
+- **Hosting permission (mainnet gate).** Host `guardianGovernance` at
+  `Confirmation` on every guardian participant, never at `Submission`: a
+  submission-permission host could submit on its behalf alone. Set its
+  confirmation threshold k > 1, so one compromised guardian participant cannot
+  confirm for it.
+- **Confirmation latency.** `guardianGovernance` is a confirming party wherever
+  it signs (`CoreState` reads on every publish, NTT managers), so every publish
+  waits for k guardian participants. Sizing k against guardian availability is
+  an open deployment parameter (§11).
 - **Package vetting.** A transaction runs only on packages vetted by every
   participant hosting an informee, so each guardian operator's vetting decision
   gates which code runs with `guardianGovernance` authority.
@@ -1164,8 +1171,9 @@ every publish, a deliberate throughput/liveness trade recorded in Open
 Questions.
 
 **What a compromised operator can and cannot do.** It can degrade **liveness**
-(stop serving disclosures, evict observers — all fail-safe: transactions stop
-constructing, guardians simply stop seeing and stop signing). It **cannot** produce
+(stop serving disclosures — fail-safe: transactions stop constructing,
+guardians simply stop seeing and stop signing). Guardian hosting is governed by
+the `guardianGovernance` threshold, not the operator. It **cannot** produce
 anything guardians would wrongly attest: emitting under an existing address
 requires that owner's signature (§4.2), so an outbound forge is either an invalid
 transaction (rejected in replay, never observed) or a valid contract with a
