@@ -4,11 +4,15 @@ package cantonclient
 // match. Rewrite them after a deliberate change with:
 //
 //	CANTON_VECTORGEN=write go test -count=1 ./pkg/cantonclient/ -run TestCantonDamlFixtures
+//
+// The fixture file is outside the node module, so the Go test cache does not
+// track it: run this guard with -count=1.
 
 import (
 	"encoding/binary"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 	"time"
@@ -50,6 +54,11 @@ func damlTopLevelHexPattern(binding string) *regexp.Regexp {
 	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(binding) + ` = "([0-9a-f]+)"$`)
 }
 
+// Matches the "=== \"<hex>\"" assertion within the indented body of binding.
+func damlIndentedBodyHexPattern(binding string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(binding) + ` =\n(?: [^\n]*\n)*? +=== "([0-9a-f]{64})"$`)
+}
+
 func damlHexFixtures() []damlHexFixture {
 	return []damlHexFixture{
 		{
@@ -77,7 +86,7 @@ func damlHexFixtures() []damlHexFixture {
 		},
 		{
 			name:               "testAddressVector",
-			damlLiteralPattern: regexp.MustCompile(`(?s)\ntestAddressVector =.*?=== "([0-9a-f]{64})"`),
+			damlLiteralPattern: damlIndentedBodyHexPattern("testAddressVector"),
 			generateHex:        generateAddressVectorHex,
 		},
 	}
@@ -159,8 +168,27 @@ func TestCantonDamlFixtures(t *testing.T) {
 	}
 
 	if rewriteFixtures {
-		damlFileInfo, err := os.Stat(damlTestCorePath)
-		require.NoError(t, err)
-		require.NoError(t, os.WriteFile(damlTestCorePath, []byte(damlSource), damlFileInfo.Mode().Perm()))
+		require.False(t, t.Failed(), "refusing to rewrite %s after a failed fixture", damlTestCorePath)
+		writeFileAtomically(t, damlTestCorePath, []byte(damlSource))
 	}
+}
+
+// writeFileAtomically replaces path via a same-directory temp file and rename, keeping path's mode.
+func writeFileAtomically(t *testing.T, path string, contents []byte) {
+	t.Helper()
+	originalInfo, err := os.Stat(path)
+	require.NoError(t, err)
+	tempFile, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	require.NoError(t, err)
+	tempPath := tempFile.Name()
+	t.Cleanup(func() { _ = os.Remove(tempPath) })
+
+	_, writeErr := tempFile.Write(contents)
+	syncErr := tempFile.Sync()
+	closeErr := tempFile.Close()
+	require.NoError(t, writeErr)
+	require.NoError(t, syncErr)
+	require.NoError(t, closeErr)
+	require.NoError(t, os.Chmod(tempPath, originalInfo.Mode().Perm()))
+	require.NoError(t, os.Rename(tempPath, path))
 }
