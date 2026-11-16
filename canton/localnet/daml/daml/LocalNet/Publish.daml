@@ -1,0 +1,65 @@
+-- | LocalNet smoke test for the Wormhole core bridge.
+module LocalNet.Publish where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Wormhole.Core.VAA ()
+import Test.TestCore (devnetGuardian, devnetGuardianPubKey, govSetFeeVAA, publishVia, registerEmitter)
+
+data SmokePublishResult = SmokePublishResult with
+    operator : Party
+    guardianGovernance : Party
+    emitterOwner : Party
+    coreStateCid : ContractId CoreState
+    publishedSequences : [Int]
+    verifiedVaaSequence : Int
+  deriving (Eq, Show)
+
+-- | 'Test.TestCore.setup' with run-labelled party hints.
+-- Precondition: the submitting user can act and read as any party on the participant.
+bootstrapCoreBridge : Text -> Script (Party, Party, ContractId CoreState)
+bootstrapCoreBridge runLabel = do
+  operator <- allocateParty ("Operator-" <> runLabel)
+  guardianGovernance <- allocateParty ("GuardianGovernance-" <> runLabel)
+  let unusedFeeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  coreStateCid <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian]
+                 unusedFeeInstrument guardianGovernance)
+  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
+  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
+  pure (operator, guardianGovernance, coreStateCid)
+
+-- | Bootstrap, register one emitter, publish sequences 0 and 1 by threaded cid,
+-- then verify a guardian-signed VAA as an external party (keccak256 and secp256k1 builtins).
+bootstrapPublishAndVerify : Text -> Script SmokePublishResult
+bootstrapPublishAndVerify runLabel = do
+  assertMsg "runLabel must be non-empty" (runLabel /= "")
+  (operator, guardianGovernance, coreStateCid) <- bootstrapCoreBridge runLabel
+  emitterOwner <- allocateParty ("SmokeEmitter-" <> runLabel)
+  emitterCid <- registerEmitter operator emitterOwner
+  (successorEmitterCid, firstMessage) <- publishVia operator coreStateCid emitterOwner emitterCid 42 "11223344" 0
+  (_, secondMessage) <- publishVia operator coreStateCid emitterOwner successorEmitterCid 43 "55667788" 0
+  firstMessage.sequence === 0
+  secondMessage.sequence === 1
+  firstMessage.owner === emitterOwner
+  firstMessage.registrar === operator
+  secondMessage.payload === "55667788"
+  externalVerifier <- allocateParty ("SmokeVerifier-" <> runLabel)
+  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+  verifiedVaa <- submit (actAs externalVerifier <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid ParseAndVerifyVAA with
+      verifier = externalVerifier
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  verifiedVaa.guardianSetIndex === 0
+  verifiedVaa.emitterChain === 1
+  verifiedVaa.sequence === 1
+  pure SmokePublishResult with
+    operator, guardianGovernance, emitterOwner, coreStateCid
+    publishedSequences = [firstMessage.sequence, secondMessage.sequence]
+    verifiedVaaSequence = verifiedVaa.sequence

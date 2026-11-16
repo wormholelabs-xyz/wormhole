@@ -1,0 +1,21 @@
+# Pins every Splice 0.10.2 image to the digest recorded in images.lock.
+# postgres and nginx are already pinned by digest in the Splice compose.env.
+services:
+  canton:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/canton:0.10.2@sha256:cfffb5da55ee34e18a6c9683d792d61e3f666292101fde68cb6a2596fe53e429"
+  splice:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/splice-app:0.10.2@sha256:31851f5a6ef976f5d11067be8ad3141f9579e7cf0233f0530c1b63270ad6a555"
+  wallet-web-ui-app-user:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/wallet-web-ui:0.10.2@sha256:2659b2518c8a98547f45a76ad41e2b55011887f9fd18454cc00acbb53879bb58"
+  wallet-web-ui-app-provider:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/wallet-web-ui:0.10.2@sha256:2659b2518c8a98547f45a76ad41e2b55011887f9fd18454cc00acbb53879bb58"
+  wallet-web-ui-sv:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/wallet-web-ui:0.10.2@sha256:2659b2518c8a98547f45a76ad41e2b55011887f9fd18454cc00acbb53879bb58"
+  ans-web-ui-app-user:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/ans-web-ui:0.10.2@sha256:b30c29c665d0bb4b8fdb6b2c15ff7e776ab8c03e3576ef6e1b7a9923c477e3fa"
+  ans-web-ui-app-provider:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/ans-web-ui:0.10.2@sha256:b30c29c665d0bb4b8fdb6b2c15ff7e776ab8c03e3576ef6e1b7a9923c477e3fa"
+  sv-web-ui:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/sv-web-ui:0.10.2@sha256:430d5b55fc4f5ea5975d970047d715611627d0f547f4877f5167fb19663f7669"
+  scan-web-ui:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/scan-web-ui:0.10.2@sha256:e201c9f939e16b40c07f561bfbd56bd9d737145d801306327f8c88aa0ce84324"
