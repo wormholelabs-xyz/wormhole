@@ -201,10 +201,9 @@ testIntegratorRedeem = do
   -- consumption run.
   fakeOperator <- allocateParty "FakeOperator"
   fakeGovernance <- allocateParty "FakeGovernance"
-  fakeObserver <- allocateParty "FakeObserver"
   fakeCsId <- submit (actAs fakeOperator <> actAs fakeGovernance) do
     createCmd (mkInitialCoreState fakeOperator fakeGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] fakeObserver
+                 defaultGovernanceContract [devnetGuardian]
                  (InstrumentId with admin = fakeGovernance, id = "UNUSED") fakeGovernance)
   fakeDisc <- fromSome <$> queryDisclosure fakeOperator fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
