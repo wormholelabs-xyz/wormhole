@@ -45,7 +45,7 @@ const (
 // emitterAddressTag is the domain-separation tag for emitter addresses. It MUST
 // match Wormhole.Core.State.emitterAddressTag; the encoding is pinned across
 // both languages by the shared vector in
-// node/pkg/cantonclient/vectorgen_test.go (TestGenerateAddressVectors),
+// node/pkg/cantonclient/vectorgen_test.go (TestCantonDamlFixtures),
 // Test.TestCore:testAddressVector, and TestDeriveEmitterAddressMatchesVector.
 const emitterAddressTag = "wormhole:emitter:v1"
 

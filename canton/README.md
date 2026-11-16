@@ -937,7 +937,7 @@ canton/
 node/pkg/cantonclient/           ← Ledger API v2 gRPC client
   proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.5.5)
   proto/gen/                     ← generated Go stubs (buf generate)
-  vectorgen_test.go              ← regenerates the signed-VAA test vector (GEN_CANTON_VECTORS=1)
+  vectorgen_test.go              ← Daml fixture drift guard (CANTON_VECTORGEN=write rewrites)
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
   watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
   core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)

@@ -14,7 +14,7 @@ See [`canton/README.md`](../../../canton/README.md) for the full design.
 | --- | --- | --- |
 | `cantonclient.go` | `CantonClient` interface, domain types, offset⇄TxID codec |
 | `cantonclient_test.go` | unit tests for the offset codec |
-| `vectorgen_test.go` | regenerates the Daml signed-VAA test vector (`GEN_CANTON_VECTORS=1`; skipped otherwise) |
+| `vectorgen_test.go` | asserts the Daml hex fixtures match the generator; `CANTON_VECTORGEN=write` rewrites them |
 | `cantongrpc.go` | the gRPC client against the generated stubs |
 | `proto/com/daml/ledger/api/v2/*.proto` | vendored Ledger API v2 protos (the State+Update closure) from **Canton 3.5.5** |
 | `proto/gen/...` | generated Go stubs (committed; see below) |
