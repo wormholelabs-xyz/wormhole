@@ -1,5 +1,6 @@
 -- | Ledger fixtures for the Go watcher integration test that reads as the real
--- @guardianGovernance@ (node/pkg/watchers/canton/watcher_integration_test.go).
+-- @guardianGovernance@
+-- (node/pkg/watchers/canton/watcher_governance_reader_integration_test.go).
 --
 -- 'integrationGovernanceReaderSetup' runs before the watchers start; its JSON
 -- output is the @--input-file@ of 'integrationGovernanceReaderPublish', which
@@ -29,6 +30,7 @@ data GovernanceReaderPublishes = GovernanceReaderPublishes with
     trustedSequence : Int
     rogueOwner : Party
     rogueGovernance : Party
+    rogueEmitterId : Int
     rogueShadowSequence : Int
   deriving (Eq, Show)
 
@@ -96,6 +98,7 @@ integrationGovernanceReaderPublish bridge = do
     trustedSequence = trustedMessage.sequence
     rogueOwner
     rogueGovernance
+    rogueEmitterId = rogueShadowMessage.emitterId
     rogueShadowSequence = rogueShadowMessage.sequence
 
 -- | Runs both fixtures in one script so `dpm test` covers them.
@@ -105,6 +108,7 @@ testGovernanceReaderFixtures = do
   publishes <- integrationGovernanceReaderPublish bridge
   publishes.trustedEmitterId === 0
   publishes.trustedSequence === 0
+  publishes.rogueEmitterId === 0
   publishes.rogueShadowSequence === 0
 
   [(_, trustedEmitter)] <- query @Emitter bridge.guardianGovernance

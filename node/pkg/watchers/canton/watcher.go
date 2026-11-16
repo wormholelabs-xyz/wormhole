@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -106,15 +107,17 @@ func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
 	return nil
 }
 
-// cantonDialOpts returns the non-transport dial options: OAuth per-RPC
-// credentials when the Ledger API is behind an identity provider. Bearer tokens
-// require transport security, so this stays empty in dev mode (plaintext). The
-// ctx bounds token fetches and must outlive the connection (Run's ctx).
+// cantonDialOpts returns the non-transport dial options: extraLedgerDialOpts,
+// then OAuth per-RPC credentials when the Ledger API is behind an identity
+// provider. Bearer tokens require transport security, so OAuth is omitted in
+// dev mode (plaintext). The ctx bounds token fetches and must outlive the
+// connection (Run's ctx).
 func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
+	dialOpts := slices.Clone(e.extraLedgerDialOpts)
 	if !e.unsafeDevMode && e.auth.complete() {
-		return []grpc.DialOption{cantonclient.NewOAuthDialOption(ctx, e.auth.TokenURL, e.auth.ClientID, e.auth.ClientSecret)}
+		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, e.auth.TokenURL, e.auth.ClientID, e.auth.ClientSecret))
 	}
-	return nil
+	return dialOpts
 }
 
 type Watcher struct {
@@ -139,6 +142,10 @@ type Watcher struct {
 	// cantonClient is an interface; a nil check is fine for "not injected".
 	// Tests inject a fake; in production Run creates a gRPC client.
 	cantonClient cantonclient.CantonClient
+
+	// extraLedgerDialOpts are passed to the gRPC client Run creates. Integration
+	// tests set a stream interceptor here to observe the production client.
+	extraLedgerDialOpts []grpc.DialOption
 }
 
 var (

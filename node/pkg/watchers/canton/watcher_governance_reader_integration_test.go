@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
+	apiv2 "github.com/certusone/wormhole/node/pkg/cantonclient/proto/gen/com/daml/ledger/api/v2"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
@@ -27,7 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc"
 )
 
 // Mirrors Test.WatcherGovernanceReader.
@@ -37,9 +39,11 @@ const (
 	rogueShadowNonce         = uint32(66)
 	rogueShadowPayloadHex    = "deadbeef"
 
-	// Extra wait after the expected messages, before checking for unexpected ones.
-	governanceReaderQuietWindow = 15 * time.Second
+	// Bounds the in-process hop from a recorded stream offset to msgC.
+	unexpectedEmissionWindow = 2 * time.Second
 )
+
+var getUpdatesFullMethod = "/" + apiv2.UpdateService_ServiceDesc.ServiceName + "/GetUpdates"
 
 // realBridge is the JSON output of Test.WatcherGovernanceReader:integrationGovernanceReaderSetup.
 type realBridge struct {
@@ -56,6 +60,7 @@ type governanceReaderPublishes struct {
 	TrustedSequence     json.RawMessage `json:"trustedSequence"`
 	RogueOwner          string          `json:"rogueOwner"`
 	RogueGovernance     string          `json:"rogueGovernance"`
+	RogueEmitterID      json.RawMessage `json:"rogueEmitterId"`
 	RogueShadowSequence json.RawMessage `json:"rogueShadowSequence"`
 }
 
@@ -68,20 +73,64 @@ type observedPublish struct {
 	Payload        []byte
 }
 
-// subscriptionSignalingClient closes subscribed once the watcher's update
-// stream has its start offset fixed.
-type subscriptionSignalingClient struct {
-	cantonclient.CantonClient
-	subscribed chan struct{}
-	once       sync.Once
+// updateStreamRecorder is a gRPC stream interceptor on the watcher's own
+// Ledger API connection. It closes subscribed when GetUpdates opens and records
+// the offset of every transaction the stream delivers, before the client-side
+// template and package filter.
+type updateStreamRecorder struct {
+	subscribed    chan struct{}
+	subscribeOnce sync.Once
+
+	mutex            sync.Mutex
+	deliveredOffsets map[int64]struct{}
 }
 
-func (c *subscriptionSignalingClient) SubscribeUpdates(ctx context.Context, beginExclusive int64, tmpl cantonclient.TemplateID, choiceName string, out chan<- cantonclient.CantonMessageEvent) (*cantonclient.Subscription, error) {
-	subscription, err := c.CantonClient.SubscribeUpdates(ctx, beginExclusive, tmpl, choiceName, out)
-	if err == nil {
-		c.once.Do(func() { close(c.subscribed) })
+const maxRecordedUpdateOffsets = 4096
+
+func newUpdateStreamRecorder() *updateStreamRecorder {
+	return &updateStreamRecorder{subscribed: make(chan struct{}), deliveredOffsets: make(map[int64]struct{})}
+}
+
+func (r *updateStreamRecorder) interceptGetUpdates(ctx context.Context, desc *grpc.StreamDesc, conn *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
+	stream, err := streamer(ctx, desc, conn, method, opts...)
+	if err != nil || method != getUpdatesFullMethod {
+		return stream, err
 	}
-	return subscription, err
+	r.subscribeOnce.Do(func() { close(r.subscribed) })
+	return &offsetRecordingStream{ClientStream: stream, recorder: r}, nil
+}
+
+func (r *updateStreamRecorder) recordDeliveredOffset(offset int64) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	if len(r.deliveredOffsets) >= maxRecordedUpdateOffsets {
+		panic("updateStreamRecorder: offset capacity exceeded")
+	}
+	r.deliveredOffsets[offset] = struct{}{}
+}
+
+func (r *updateStreamRecorder) hasDeliveredOffset(offset int64) bool {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	_, delivered := r.deliveredOffsets[offset]
+	return delivered
+}
+
+type offsetRecordingStream struct {
+	grpc.ClientStream
+	recorder *updateStreamRecorder
+}
+
+func (s *offsetRecordingStream) RecvMsg(message any) error {
+	if err := s.ClientStream.RecvMsg(message); err != nil {
+		return err
+	}
+	if response, isUpdatesResponse := message.(*apiv2.GetUpdatesResponse); isUpdatesResponse {
+		if transaction := response.GetTransaction(); transaction != nil {
+			s.recorder.recordDeliveredOffset(transaction.GetOffset())
+		}
+	}
+	return nil
 }
 
 // parseDamlUint64 accepts the Daml-LF JSON Int64 encoding (quoted or bare).
@@ -97,6 +146,19 @@ func decodeHexPayload(t *testing.T, payloadHex string) []byte {
 	payload, err := hex.DecodeString(payloadHex)
 	require.NoError(t, err)
 	return payload
+}
+
+var damlProjectVersionPattern = regexp.MustCompile(`(?m)^version: (\S+)$`)
+
+// coreDarPath returns the wormhole-core DAR built from canton/core/daml.yaml's version.
+func coreDarPath(t *testing.T, cantonDir string) string {
+	t.Helper()
+	coreDir := filepath.Join(cantonDir, "core")
+	damlYAML, err := os.ReadFile(filepath.Join(coreDir, "daml.yaml"))
+	require.NoError(t, err)
+	versionMatches := damlProjectVersionPattern.FindAllSubmatch(damlYAML, -1)
+	require.Len(t, versionMatches, 1, "canton/core/daml.yaml must declare exactly one version")
+	return filepath.Join(coreDir, ".daml", "dist", "wormhole-core-"+string(versionMatches[0][1])+".dar")
 }
 
 // readDarMainPackageID returns the main package id of a DAR via `dpm damlc inspect-dar`.
@@ -131,25 +193,29 @@ func runDamlScript(t *testing.T, dpm, dar, port, scriptName, inputPath string, r
 	require.NoErrorf(t, json.Unmarshal(raw, result), "decode %s output: %s", scriptName, raw)
 }
 
-func collectObservedPublishes(t *testing.T, caseName string, msgC <-chan *common.MessagePublication, wantCount int, deadline <-chan time.Time) []observedPublish {
+func toObservedPublish(msg *common.MessagePublication) observedPublish {
+	return observedPublish{
+		EmitterChain:   msg.EmitterChain,
+		EmitterAddress: msg.EmitterAddress,
+		Sequence:       msg.Sequence,
+		Nonce:          msg.Nonce,
+		Payload:        msg.Payload,
+	}
+}
+
+func collectMessagePublications(t *testing.T, caseName string, msgC <-chan *common.MessagePublication, wantCount int, deadline <-chan time.Time) []*common.MessagePublication {
 	t.Helper()
-	observed := make([]observedPublish, 0, wantCount)
-	for len(observed) < wantCount {
+	collected := make([]*common.MessagePublication, 0, wantCount)
+	for len(collected) < wantCount {
 		select {
 		case msg := <-msgC:
 			require.Falsef(t, msg.IsReobservation, "%s: live observation flagged as reobservation", caseName)
-			observed = append(observed, observedPublish{
-				EmitterChain:   msg.EmitterChain,
-				EmitterAddress: msg.EmitterAddress,
-				Sequence:       msg.Sequence,
-				Nonce:          msg.Nonce,
-				Payload:        msg.Payload,
-			})
+			collected = append(collected, msg)
 		case <-deadline:
-			t.Fatalf("%s: received %d of %d expected messages before the deadline", caseName, len(observed), wantCount)
+			t.Fatalf("%s: received %d of %d expected messages before the deadline", caseName, len(collected), wantCount)
 		}
 	}
-	return observed
+	return collected
 }
 
 func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
@@ -161,7 +227,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 
 	cantonDir, err := filepath.Abs("../../../../canton")
 	require.NoError(t, err)
-	corePackageID := readDarMainPackageID(t, dpm, filepath.Join(cantonDir, "core", ".daml", "dist", "wormhole-core-0.6.0.dar"))
+	corePackageID := readDarMainPackageID(t, dpm, coreDarPath(t, cantonDir))
 	testPackageID := readDarMainPackageID(t, dpm, testDar)
 	require.NotEqual(t, corePackageID, testPackageID)
 
@@ -200,16 +266,16 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	}
 
 	msgChannels := make([]chan *common.MessagePublication, len(cases))
+	streamRecorders := make([]*updateStreamRecorder, len(cases))
 	for caseIndex, tc := range cases {
 		msgC := make(chan *common.MessagePublication, 16)
 		msgChannels[caseIndex] = msgC
-		grpcClient, err := cantonclient.NewCantonGrpcClient(ledgerAddr, tc.readAsParty, zap.NewNop(), insecure.NewCredentials())
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = grpcClient.Close() })
-		signalingClient := &subscriptionSignalingClient{CantonClient: grpcClient, subscribed: make(chan struct{})}
+		streamRecorder := newUpdateStreamRecorder()
+		streamRecorders[caseIndex] = streamRecorder
 
+		// Run builds the gRPC client from NewWatcher's readAsParty.
 		w := NewWatcher(ledgerAddr, tc.packageID, tc.readAsParty, AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
-		w.cantonClient = signalingClient
+		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
 			if err := supervisor.Run(ctx, "canton", w.Run); err != nil {
 				return err
@@ -219,7 +285,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		}, supervisor.WithPropagatePanic)
 
 		select {
-		case <-signalingClient.subscribed:
+		case <-streamRecorder.subscribed:
 		case <-time.After(60 * time.Second):
 			t.Fatalf("%s: watcher did not subscribe within 60s", tc.name)
 		}
@@ -243,7 +309,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	}
 	rogueShadowPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.RogueOwner, 0),
+		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.RogueShadowSequence),
 		Nonce:          rogueShadowNonce,
 		Payload:        decodeHexPayload(t, rogueShadowPayloadHex),
@@ -251,6 +317,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	require.NotEqual(t, trustedPublish.EmitterAddress, rogueShadowPublish.EmitterAddress)
 
 	deadline := time.After(90 * time.Second)
+	trustedPublishOffset := int64(-1)
 	for caseIndex, tc := range cases {
 		var wantPublishes []observedPublish
 		if tc.wantRogueShadow {
@@ -259,11 +326,35 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		if tc.wantTrustedPublish {
 			wantPublishes = append(wantPublishes, trustedPublish)
 		}
-		observed := collectObservedPublishes(t, tc.name, msgChannels[caseIndex], len(wantPublishes), deadline)
+		collected := collectMessagePublications(t, tc.name, msgChannels[caseIndex], len(wantPublishes), deadline)
+		observed := make([]observedPublish, 0, len(collected))
+		for _, msg := range collected {
+			observed = append(observed, toObservedPublish(msg))
+			if msg.Nonce == trustedPublishNonce {
+				offset, err := cantonclient.TxIDToOffset(msg.TxID)
+				require.NoError(t, err)
+				require.Positive(t, offset)
+				trustedPublishOffset = offset
+			}
+		}
 		assert.ElementsMatchf(t, wantPublishes, observed, "%s", tc.name)
 	}
+	require.Positive(t, trustedPublishOffset, "no case emitted the trusted publish")
 
-	<-time.After(governanceReaderQuietWindow)
+	// Every stream, including the wrong-package one, received the trusted publish.
+	for caseIndex, tc := range cases {
+		require.Eventuallyf(t, func() bool {
+			return streamRecorders[caseIndex].hasDeliveredOffset(trustedPublishOffset)
+		}, 30*time.Second, 100*time.Millisecond, "%s: stream never delivered offset %d", tc.name, trustedPublishOffset)
+	}
+	assert.Never(t, func() bool {
+		for _, msgC := range msgChannels {
+			if len(msgC) > 0 {
+				return true
+			}
+		}
+		return false
+	}, unexpectedEmissionWindow, 50*time.Millisecond, "a watcher emitted a message after its expected ones")
 	for caseIndex, tc := range cases {
 		select {
 		case extra := <-msgChannels[caseIndex]:

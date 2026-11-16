@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 // Emitter key components and the address they must derive to. These are the
@@ -275,4 +276,33 @@ func TestHandleReobservationWrongChainPanics(t *testing.T) {
 			TxHash:  cantonclient.OffsetToTxID(1),
 		})
 	})
+}
+
+func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
+	extraLedgerDialOpt := grpc.WithUserAgent("canton-watcher-test")
+	completeAuth := AuthConfig{TokenURL: "https://idp.example/token", ClientID: "watcher", ClientSecret: "secret"}
+	cases := []struct {
+		name              string
+		unsafeDevMode     bool
+		auth              AuthConfig
+		extraDialOpts     []grpc.DialOption
+		wantDialOptsCount int
+	}{
+		{name: "dev mode without extras", unsafeDevMode: true, wantDialOptsCount: 0},
+		{name: "dev mode with one extra", unsafeDevMode: true, extraDialOpts: []grpc.DialOption{extraLedgerDialOpt}, wantDialOptsCount: 1},
+		{name: "oauth without extras", auth: completeAuth, wantDialOptsCount: 1},
+		{name: "oauth with one extra", auth: completeAuth, extraDialOpts: []grpc.DialOption{extraLedgerDialOpt}, wantDialOptsCount: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := NewWatcher("localhost:0", "", "", tc.auth, tc.unsafeDevMode, nil, nil)
+			w.extraLedgerDialOpts = tc.extraDialOpts
+			dialOpts := w.cantonDialOpts(context.Background())
+			require.Len(t, dialOpts, tc.wantDialOptsCount)
+			if len(tc.extraDialOpts) == 1 {
+				assert.Same(t, extraLedgerDialOpt, dialOpts[0])
+			}
+			assert.Len(t, w.extraLedgerDialOpts, len(tc.extraDialOpts), "cantonDialOpts must not grow the watcher's extras")
+		})
+	}
 }
