@@ -490,9 +490,22 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 ### Guardian watcher harness
 
 The harness is `node/pkg/watchers/canton/watcher_localnet_test.go`, with the build tag `localnet`.
-It runs `Watcher.Run` with the pinned `wormhole-core` package id.
+It makes the watcher with `WatcherConfig.Create` in the TestNet environment.
+Thus `Create` requires the pinned `wormhole-core` package id and the read-as party.
+The harness also checks that `Create` rejects a configuration without one of them.
 It reads the update stream of `guardianGovernance` on `app-provider`.
-LocalNet uses a static JWT on plaintext gRPC. Thus the harness gives the watcher a gRPC client with that token.
+
+The harness authenticates as the Ledger API user `wormhole-watcher`.
+`watcher_harness_lib.sh` makes this user with only the right `CanReadAs(guardianGovernance)`.
+The script stops if the user has a different set of rights.
+The script removes the token file when the harness streams.
+
+LocalNet uses a static JWT on plaintext gRPC.
+The harness sets this transport through `WatcherConfig.ledgerTransportForTest`.
+Only tests of the `canton` package can set this field.
+
+When the harness stops, it writes the counts of `wormhole_canton_unpinned_publish_messages_total` to `<name>.metrics.json`.
+A script that fails stops each harness that it started.
 
 `ntt_watcher.sh check` compares each live observation with the `WormholeMessage` of the transaction.
 Each observation has chain 75.
@@ -518,20 +531,25 @@ The update id is the same on each participant.
 ## Core package upgrade rehearsal
 
 `core_upgrade_rehearsal.sh` does the `wormhole-core` upgrade from 0.6.0 to 0.7.0 on LocalNet.
-It follows section 7.5 of `canton/README.md`.
+It follows the procedure of section 7.5 of `canton/README.md`.
+The unvet of the old versions occurs immediately before the switch of the watcher pin.
 The three `guardianGovernance` hosts are `app-provider`, `sv` and `app-user`.
+They are also the only informee participants.
 
-| Version | Package id | DAR |
+| Package | Package id | DAR |
 | --- | --- | --- |
-| 0.6.0 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` | `canton/dars/wormhole-core-0.6.0.dar` |
-| 0.7.0 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` | `canton/core/.daml/dist/wormhole-core-0.7.0.dar` |
+| `wormhole-core` 0.6.0 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` | `canton/dars/wormhole-core-0.6.0.dar` |
+| `wormhole-core` 0.7.0 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` | Build output of `canton/core` |
+| `ntt` 0.2.0 | `8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a` | Uploaded earlier. NTT commit `1db4b3c`. |
+| `ntt` 0.3.0 | `291fcf920b971d50956845c2690723fb321f0a5b141a44caa5a16910f6ffa1a6` | `ntt/canton/ntt/.daml/dist/ntt-0.3.0.dar` |
 
-The script stops if a DAR has a different package id.
+The script stops if a core DAR has a different package id.
 
 ### Prerequisites
 
 - The `guardianGovernance` rehearsal ran. The `CoreState` message fee is 0.
-- The NTT end-to-end run ran one time.
+- The `ntt` 0.3.0 DAR exists. It calls `wormhole-core` 0.7.0.
+- LocalNet has the `ntt` 0.2.0 package and a burn/mint `NttManager` that `ntt` 0.2.0 created. `ntt-keys` holds its admin key.
 - Guardian set 2 with devnet keys 2, 3 and 4 is the current guardian set.
   Set `CURRENT_GUARDIAN_SET_INDEX` and `CURRENT_GUARDIAN_KEY_INDICES` for a different set.
 - The 0.7.0 DAR exists. Run `dpm build --all` in `canton`.
@@ -547,41 +565,63 @@ The script stops if a DAR has a different package id.
 2. Make sure that the last line of the output is `core_upgrade_rehearsal.sh all: PASS`.
 
 To run one step only, give the step name. Run the steps in the sequence of the table.
+The watchers `v6` and `canary` continue to run between steps.
 
 | Step | Name | Result |
 | --- | --- | --- |
-| 0 | `prepare` | Each host vets 0.6.0. No host vets 0.7.0. |
-| 1 | `observe-v6` | A watcher pinned to 0.6.0 observes a 0.6.0 `PublishMessage`. The watcher continues to run. |
-| 2 | `vet-v7` | Each host vets 0.6.0 and 0.7.0. The upload of 0.7.0 passes the upgrade check. |
-| 3 | `publish-v7` | A 0.7.0 `PublishMessage` on an `Emitter` from 0.6.0 commits. The 0.6.0 watcher drops it. |
-| 4 | `reobserve-v7` | A watcher pinned to 0.7.0 observes the dropped message from a reobservation request with its update id. |
-| 5 | `enforce-v7` | 0.7.0 rejects a nonce above `uint32`. 0.6.0 accepts it. After the unvet of 0.6.0, a 0.6.0 submission fails. |
-| 6 | `ntt` | NTT fails without 0.6.0. After the script vets 0.6.0 again, `ntt_e2e.sh` passes. |
+| 0 | `prepare` | Each host vets core 0.6.0 and `ntt` 0.2.0. No host vets core 0.7.0 or `ntt` 0.3.0. |
+| 1 | `observe-v6` | The guardian watcher `v6`, pinned to 0.6.0, observes a 0.6.0 `PublishMessage`. |
+| 2 | `vet-v7` | The script records the start offset. Each host vets core 0.7.0, then `ntt` 0.3.0. |
+| 3 | `publish-v7` | One 0.7.0 `PublishMessage` and one 0.6.0 `PublishMessage` commit. `v6` observes the 0.6.0 message. `v6` drops the 0.7.0 message with a WARN log. The `canary`, pinned to 0.7.0, does the opposite. |
+| 4 | `ntt` | `ntt_e2e.sh` passes with `ntt` 0.3.0. Each NTT `PublishMessage` runs under 0.7.0 on each host. |
+| 5 | `gate` | The `canary` counter shows one 0.6.0 publish: the publish of step 3. |
+| 6 | `unvet-v6` | Each host unvets core 0.6.0 and `ntt` 0.2.0 in one topology transaction. A 0.6.0 publish and an `ntt` 0.2.0 exercise fail at prepare. `v6` drops a 0.7.0 publish. |
+| 7 | `switch-v7` | `v6` stops. The WARN logs, a scan from the start offset and the `v6` counter give the same dropped update ids. `v7` reobserves each of them. |
+| 8 | `enforce-v7` | 0.7.0 rejects a nonce above `uint32`. 0.6.0 accepts it while vetted, and fails after the unvet. The step can run again. |
+| 9 | `post-unvet` | Contracts from core 0.6.0 work under core 0.7.0. Contracts from `ntt` 0.2.0 work under `ntt` 0.3.0. `ntt_e2e.sh` passes. |
 
 The evidence log is `$LOCALNET_STATE_DIR/evidence/core_upgrade_rehearsal-<time>.log`.
-The directory with the same name holds the watcher observations and the watcher logs.
-`$LOCALNET_STATE_DIR/core-upgrade.json` holds the update id of step 3 for step 4.
+The directory with the same name holds the watcher observations, logs, counters and the dropped update ids.
+`$LOCALNET_STATE_DIR/core-upgrade.json` holds the offsets and update ids that later steps use.
+
+### Checks
+
+- Each negative watcher check has a positive control in the same window.
+  The same watcher observes a message of its pinned package.
+- Each drop has a WARN log with its update id and the executing package id.
+- Each watcher log has no `canton_fetch_obvs_req failed`, `invalid txID` or `returned a different update`.
+- A rejection for an unvetted package must have `INVALID_PRESCRIBED_SYNCHRONIZER_ID`.
+  It must also have `has not vetted <package id>` once for each host.
+- A Daml rejection must have `DAML_FAILURE` and the assertion message.
+- The script checks the package that created the `CoreState` (0.6.0).
+  It also checks the package that executed the choice (0.7.0).
 
 ### Results
 
 - The `ExercisedEvent` of `PublishMessage` shows the package that ran the choice.
   It is the same on the three participants. The participant offsets are different.
+- A `PublishMessage` re-creates the `Emitter` under the package that runs the choice.
 - A submission with the package name selects 0.7.0 when each host vets 0.6.0 and 0.7.0.
-- After the unvet of 0.6.0, the prepare step rejects a 0.6.0 submission with `INVALID_PRESCRIBED_SYNCHRONIZER_ID`.
-  The error names each host with `has not vetted`.
-- After the unvet of 0.6.0, contracts from 0.6.0 work under 0.7.0.
+- After the unvet, a 0.6.0 submission fails at prepare. The `Emitter` does not change.
+- After the unvet, contracts from 0.6.0 work under 0.7.0.
   The script checks `PublishMessage` on an `Emitter` and `ParseAndVerifyVAA` on the `CoreState`.
-- Step 0 unvets 0.7.0. Then a 0.6.0 `PublishMessage` on an `Emitter` from 0.7.0 commits.
-- The `ntt` 0.2.0 package calls `wormhole-core` 0.6.0 by package id.
-  Thus each NTT `PublishMessage` runs under 0.6.0, also when each host vets 0.7.0.
-- Without 0.6.0, the NTT `RegisterManager` fails with `required dependencies not vetted`.
-- A watcher pinned to 0.7.0 drops each NTT message.
+- After the unvet, `SetPaused` by package name on an `NttManager` from `ntt` 0.2.0 runs under `ntt` 0.3.0.
+  Thus `ntt` 0.3.0 is a valid upgrade of `ntt` 0.2.0, and `ntt` 0.2.0 managers need no migration.
+- The `prepare` step unvets 0.7.0. Then a 0.6.0 `PublishMessage` on an `Emitter` from 0.7.0 commits.
+- The `ntt` 0.2.0 package calls 0.6.0. Thus each `ntt` 0.2.0 `PublishMessage` runs under 0.6.0.
+  An earlier run unvetted 0.6.0 but kept `ntt` 0.2.0.
+  Then the `ntt` 0.2.0 `RegisterManager` failed with `required dependencies not vetted`.
+- The scan as `wormhole-watcher` finds each dropped update. Thus the right `CanReadAs(guardianGovernance)` is enough.
 
 WARNING: Do not unvet 0.6.0 and do not pin the watchers to 0.7.0 while `ntt` 0.2.0 is in use.
 The NTT messages then stop. First build NTT on `wormhole-core` 0.7.0.
 
 CAUTION: While each host vets 0.6.0, a submitter can select 0.6.0 and skip the 0.7.0 checks.
 
-NOTE: `ntt_upload_dars.sh` vets each package in the NTT DAR, `wormhole-core` 0.6.0 included.
-Step 6 sets `NTT_UPLOAD_DARS=false`.
-Canton rejects a second `ntt` 0.2.0 package with a different package id (`KNOWN_PACKAGE_VERSION`).
+Final LocalNet state after `post-unvet`:
+
+| Host | `wormhole-core` | `ntt` | `token-cip0056` |
+| --- | --- | --- | --- |
+| `app-provider` | 0.7.0 `7a22a1c4` | 0.3.0 `291fcf92` | 0.2.0 `0a624d6a` |
+| `sv` | 0.7.0 `7a22a1c4` | 0.3.0 `291fcf92` | 0.2.0 `0a624d6a` |
+| `app-user` | 0.7.0 `7a22a1c4` | 0.3.0 `291fcf92` | 0.2.0 `0a624d6a` |

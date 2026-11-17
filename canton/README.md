@@ -1264,64 +1264,123 @@ Each informee participant must vet the package that runs the choice.
 `guardianGovernance` is an informee of each `PublishMessage` (§10). Thus a
 package that no guardian participant vets cannot run `PublishMessage`.
 
-**Procedure: upgrade from 0.6.0 to 0.7.0.** This order makes sure that a
-submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
+**Dependent packages.** A package that calls `wormhole-core` keeps the core
+package id of its build. Example: `ntt` 0.2.0 calls 0.6.0, also when each
+participant vets 0.7.0. Thus each dependent package needs a new build on 0.7.0
+before the switch.
 
-1. Upload and vet the 0.7.0 DAR on all guardian participants.
-2. Upload and vet the 0.7.0 DAR on the operator participant.
-3. Tell integrators to submit with the 0.7.0 package id.
-4. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
-   pinned to the 0.7.0 package id. Continue only when the counter shows zero
-   new 0.6.0 publishes.
-5. Set `--cantonPackageID` to the 0.7.0 package id on each guardian.
-6. Restart each guardian in one coordinated window.
-7. Send reobservation requests for the 0.7.0 messages of steps 3 to 6. The
-   WARN logs of the 0.6.0 watchers give their update ids.
-8. Unvet 0.6.0 on all guardian participants.
+- The new build must be a valid smart contract upgrade of the old build. Then
+  contracts of the old build work under the new build. Set `upgrades:` in the
+  `daml.yaml` of the dependent package to the old DAR.
+- If the new build is not a valid upgrade, contracts of the old build stop at
+  the unvet. Migrate them to the new build before the unvet.
+- Third-party packages can call `wormhole-core` by package id. Their owners
+  must also rebuild them on 0.7.0. Guardians cannot list these packages. The
+  canary counter of step 5 shows their messages: these run under 0.6.0.
 
-> **WARNING:** Do not unvet 0.6.0 before step 6 is complete on all guardians.
-> A guardian pinned to 0.6.0 then sees no message that it can sign.
+`ntt` 0.3.0 (`291fcf92`) is a valid upgrade of the deployed `ntt` 0.2.0
+(`8b9c3ee1`, NTT commit `1db4b3c`). `damlc` accepts the build of `ntt` 0.3.0
+with `upgrades:` set to that DAR. NTT commit `90a6b99` removed the `minter`
+field before `8b9c3ee1`. Thus `ntt` 0.2.0 managers need no migration. The LocalNet
+rehearsal runs `SetPaused` on such a manager under `ntt` 0.3.0. Older `ntt`
+0.2.0 builds with `minter` (for example `36a58282`) are not valid upgrades.
+Their contracts need migration.
 
-> **CAUTION:** Between step 1 and step 6, the watchers drop each 0.7.0
-> message. Reobservation by update id recovers these messages after step 6.
+> **NOTE:** The `ntt` package has no `upgrades:` field, and different builds
+> have the version 0.2.0. Add `upgrades:` and change the version on each
+> release.
 
-> **CAUTION:** Between step 6 and step 8, the watchers drop each 0.6.0
-> message. These messages are not recoverable. Their sequence numbers stay
-> unused. Step 4 makes sure that integrators stopped the use of 0.6.0. Keep
-> this window short.
+**Procedure: upgrade from 0.6.0 to 0.7.0.** In this order, the unvet of 0.6.0
+occurs immediately before the switch of the watcher pin. Thus no 0.6.0 message
+commits after the guardians stop the observation of 0.6.0.
 
-> **NOTE:** A restarted watcher starts at the ledger end. Messages from the
-> restart window need reobservation requests.
-
-**LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` runs this
-procedure on three `guardianGovernance` hosts (`localnet/README.md`). Results:
-
-- After the unvet of 0.6.0, contracts that 0.6.0 created work under 0.7.0.
-  `PublishMessage` on such an `Emitter` and `ParseAndVerifyVAA` on such a
-  `CoreState` commit. Thus the unvet of 0.6.0 does not need new contracts.
-- After the unvet, the prepare step rejects a submission that selects 0.6.0.
-  The error is `INVALID_PRESCRIBED_SYNCHRONIZER_ID` with `has not vetted`.
-- A package that calls `wormhole-core` by package id keeps that version. The
-  NTT package `ntt` 0.2.0 calls 0.6.0. Its `PublishMessage` runs under 0.6.0,
-  also when each host vets 0.7.0. A watcher pinned to 0.7.0 drops these
-  messages. Without 0.6.0, each `ntt` 0.2.0 transaction that uses
-  `wormhole-core` fails with `required dependencies not vetted`.
-- `ntt` 0.3.0 calls 0.7.0. Each `ntt` 0.3.0 `PublishMessage` runs under
-  0.7.0 on the three hosts. A watcher pinned to 0.7.0 observes these
-  messages, live and from reobservation requests by update id.
-- After the unvet of 0.6.0 and `ntt` 0.2.0, a submission that selects
-  `ntt` 0.2.0 fails with `has not vetted`. `ntt` 0.3.0 continues to work.
-
-**Dependent packages first.** Each dependent package (NTT included) must
-move to 0.7.0 before the guardians move.
-
-1. Build the dependent package on the 0.7.0 DAR.
-2. Before step 4, upload and vet the new package on each guardian
+1. On a guardian participant, record the ledger end offset. This is the start
+   offset.
+2. Upload and vet 0.7.0 on each informee participant: the guardians, the
+   operator, the integrators and the users.
+3. Build each dependent package on 0.7.0. Upload and vet the new build on each
+   informee participant.
+4. Tell integrators to submit with the 0.7.0 package id and the new dependent
+   package ids.
+5. Run a canary watcher pinned to 0.7.0. Monitor
+   `wormhole_canton_unpinned_publish_messages_total` with the 0.6.0 package id
+   as `executing_package_id`.
+6. Continue only when the canary counter shows no new 0.6.0 publish for the
+   agreed time. Record the ledger end offset. This is the gate offset.
+7. In one coordinated window, unvet 0.6.0 and each old dependent package on
+   each guardian participant. Use one topology transaction for each
    participant.
-3. In step 7, unvet 0.6.0 and the old dependent package together.
+8. Make sure that each guardian participant vets 0.7.0 and does not vet 0.6.0.
+9. Wait 60 seconds. Then set `--cantonPackageID` to the 0.7.0 package id on
+   each guardian, and restart each guardian.
+10. Get the dropped update ids. Refer to "Dropped update ids" below.
+11. Send a reobservation request for each dropped update id.
+12. Tell the other informee participants to unvet 0.6.0 and the old dependent
+    packages.
+
+> **WARNING:** Do not unvet 0.6.0 outside step 7. One participant that unvets
+> 0.6.0 stops each `guardianGovernance` transaction on 0.6.0 (§10).
 
 > **WARNING:** Do not do step 7 while a vetted dependent package calls 0.6.0.
 > Each transaction of that package then fails.
+
+**Message loss analysis.** These rules apply to a guardian that does the
+procedure in this order.
+
+- A 0.6.0 message that commits before the unvet takes effect: the watchers
+  pinned to 0.6.0 observe it. They still run.
+- A 0.6.0 submission after the unvet: the prepare step or the confirmation
+  step rejects it. The transaction does not commit. No value moves, and the
+  emitter sequence number does not change.
+- A 0.7.0 message from step 2 to step 9: the watchers pinned to 0.6.0 drop it.
+  The ledger keeps it. Reobservation in step 11 recovers it.
+- A 0.7.0 message from the restart window: the restarted watcher starts at the
+  ledger end. Reobservation in step 11 recovers it.
+- A 0.6.0 message that commits before the unvet, but that a watcher did not
+  read before the restart: a watcher pinned to 0.7.0 cannot recover it. The
+  wait of step 9 makes this window small. The 0.6.0 scan below finds such
+  messages.
+
+**Dropped update ids.** Use two sources and compare them.
+
+1. The WARN log `canton: dropped PublishMessage executed by a package other
+   than the pinned package` of each watcher pinned to 0.6.0. Its `updateId`
+   field holds the update id. Its `executingPackageId` field holds the 0.7.0
+   package id.
+2. A scan of the ledger. Read the updates from the start offset to the current
+   ledger end as `guardianGovernance`. Use `UpdateService.GetUpdates` with the
+   ledger effects shape. Keep each update with a `PublishMessage`
+   `ExercisedEvent` whose template package id is the 0.7.0 package id.
+
+The scan also covers the restart window. A user with only
+`CanReadAs(guardianGovernance)` can do the scan. Also scan for 0.6.0
+`PublishMessage` updates from the gate offset to the current ledger end. Make
+sure that a VAA exists for each of them.
+
+**LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` runs this
+procedure on three `guardianGovernance` hosts (`localnet/README.md`). Each
+LocalNet participant hosts `guardianGovernance`, so each participant is a
+guardian participant and an informee participant. Results:
+
+- Before the unvet, a 0.6.0 publish and a 0.7.0 publish commit in the same
+  window. The watcher pinned to 0.6.0 observes the 0.6.0 message, and drops,
+  counts and logs the 0.7.0 message. The canary pinned to 0.7.0 does the
+  opposite.
+- The unvet of 0.6.0 and `ntt` 0.2.0 occurs in one topology transaction on
+  each host. Then a 0.6.0 `PublishMessage` and an `ntt` 0.2.0 `SetPaused`
+  fail with `INVALID_PRESCRIBED_SYNCHRONIZER_ID`. The error names each host
+  with `has not vetted`. The `Emitter` does not change.
+- The WARN logs, the scan and the counter of the 0.6.0 watcher agree on 8
+  dropped 0.7.0 updates. The watcher pinned to 0.7.0 recovers each of them by
+  reobservation.
+- After the unvet, contracts that 0.6.0 created work under 0.7.0.
+  `PublishMessage` on such an `Emitter` and `ParseAndVerifyVAA` on such a
+  `CoreState` commit. A contract that `ntt` 0.2.0 created works under `ntt`
+  0.3.0.
+- Each `ntt` 0.3.0 `PublishMessage` runs under 0.7.0 on the three hosts.
+- An earlier rehearsal unvetted 0.6.0 but kept `ntt` 0.2.0. Then each `ntt`
+  0.2.0 transaction that uses `wormhole-core` failed with `required
+  dependencies not vetted`.
 
 > **NOTE:** `localnet/ntt_upload_dars.sh` vets only the packages of the NTT
 > DAR that are not vetted. It stops if the NTT DAR calls a `wormhole-core`
@@ -1596,6 +1655,7 @@ Known limits:
 > on a test network before you use this rollback.
 
 ---
+
 
 ## 10. Trust model & deployment topology
 
