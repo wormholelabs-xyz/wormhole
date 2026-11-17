@@ -10,8 +10,11 @@ readonly OPERATOR="Operator::1220bb"
 readonly OWNER_A="OwnerA::1220cc"
 readonly OWNER_B="OwnerB::1220dd"
 readonly ROGUE_GG="RogueGovernance::1220ee"
-readonly CORE_V7="7a22a1c4"
-readonly CORE_V8="0b0b0b0b"
+readonly CORE_V6="6666666666666666666666666666666666666666666666666666666666666666"
+readonly CORE_V7="7777777777777777777777777777777777777777777777777777777777777777"
+readonly CORE_V8="8888888888888888888888888888888888888888888888888888888888888888"
+readonly CORE_TEST_PACKAGE="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+readonly PARTICIPANT="PAR::1220ff"
 readonly MOCK_READY_SECONDS=10
 
 work_dir="$(mktemp -d)"
@@ -39,11 +42,19 @@ registry_event() {
       createArgument: {operator: $operator, guardianGovernance: $gg, registrationFee: "0", nextId: $next}}}'
 }
 
-# write_fixture <name> <rights-json> <updates-json> <active-events-json> [<response-delay-seconds>]
+# vetted_package <package-id> <package-name>: one VettedPackage of the participant.
+vetted_package() {
+  jq -nc --arg packageId "$1" --arg packageName "$2" '{packageId: $packageId, packageName: $packageName, packageVersion: "0.0.0"}'
+}
+only_core_v8_vetted="[$(vetted_package "$CORE_V8" wormhole-core)]"
+
+# write_fixture <name> <rights-json> <updates-json> <active-events-json> [<response-delay-seconds>] [<vetted-packages-json>]
 write_fixture() {
   jq -n --argjson rights "$2" --argjson updates "$3" --argjson active "$4" --argjson delaySeconds "${5:-0}" \
+    --argjson vettedPackages "${6:-$only_core_v8_vetted}" --arg participantId "$PARTICIPANT" \
     '{rights: $rights, ledgerEnd: ([$updates[].offset] + [0] | max), updates: $updates,
-      activeContracts: [$active[] | .CreatedEvent], delaySeconds: $delaySeconds}' > "$work_dir/$1.json"
+      activeContracts: [$active[] | .CreatedEvent], delaySeconds: $delaySeconds,
+      participantId: $participantId, vettedPackages: $vettedPackages}' > "$work_dir/$1.json"
 }
 
 # update_at <offset> <event-json>...: one transaction with these events.
@@ -107,6 +118,13 @@ write_fixture lookalike_package_ignored "$read_only_rights" \
   "$(jq -c --argjson extra "$(update_at 4 "$emitter_lookalike_package")" '. + [$extra]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$emitter_lookalike_package]"
 write_fixture slow_api "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]" 3
+write_fixture core_v6_also_vetted "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]" 0 \
+  "[$(vetted_package "$CORE_V8" wormhole-core),$(vetted_package "$CORE_V6" wormhole-core)]"
+write_fixture core_v7_vetted "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]" 0 \
+  "[$(vetted_package "$CORE_V7" wormhole-core)]"
+write_fixture core_not_vetted "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]" 0 "[]"
+write_fixture core_test_package_vetted "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]" 0 \
+  "[$(vetted_package "$CORE_V8" wormhole-core),$(vetted_package "$CORE_TEST_PACKAGE" wormhole-core-test)]"
 write_fixture rogue_gg_ignored "$read_only_rights" \
   "$(jq -c --argjson extra "$(update_at 4 "$emitter_rogue_gg")" '. + [$extra]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$emitter_rogue_gg]"
@@ -131,7 +149,7 @@ stop_mock() {
 }
 
 # Columns: case name | fixture | page size | begin offset | baseline | expected active registries | expected exit | expected output
-#          | curl max time seconds (empty: the scan default)
+#          | curl max time seconds (empty: the scan default) | expected core package id (empty: CORE_V8; "unset": not set)
 test_cases=(
   "clean history passes|clean|200|0||0|0|\"firstId\":2"
   "duplicate active emitter fails|duplicate|200|0||0|1|duplicate (operator, owner, emitterId)"
@@ -155,17 +173,29 @@ test_cases=(
   "baseline above maxEmitterId is refused|clean|200|3|9007199254740992|0|2|baseline"
   "look-alike package emitter is ignored|lookalike_package_ignored|200|0||0|0|\"firstId\":2"
   "a Ledger API response slower than the curl timeout fails|slow_api|200|0||0|1|timed out|1"
+  "an older wormhole-core vetted next to the expected one fails|core_v6_also_vetted|200|0||0|1|unexpected vetted wormhole-core"
+  "only an older wormhole-core vetted fails|core_v7_vetted|200|0||0|1|unexpected vetted wormhole-core"
+  "expected wormhole-core not vetted fails|core_not_vetted|200|0||0|1|is not vetted"
+  "a vetted wormhole-core-test package is ignored|core_test_package_vetted|200|0||0|0|\"firstId\":2"
+  "EXPECTED_CORE_PACKAGE_ID is required|clean|200|0||0|2|EXPECTED_CORE_PACKAGE_ID||unset"
+  "EXPECTED_CORE_PACKAGE_ID must be a package id|clean|200|0||0|2|EXPECTED_CORE_PACKAGE_ID||0b0b"
 )
 
 failed_cases=0
 for test_case in "${test_cases[@]}"; do
   IFS='|' read -r case_name fixture_name page_size begin_offset baseline expected_registries expected_exit expected_output \
-    curl_max_time_seconds <<< "$test_case"
+    curl_max_time_seconds expected_core_package_id <<< "$test_case"
   start_mock "$fixture_name"
   scan_arguments=("http://127.0.0.1:$(cat "$work_dir/port")" "$work_dir/token" "$GG" "$OPERATOR" "$begin_offset")
   [[ -z "$baseline" ]] || scan_arguments+=("$baseline")
+  scan_environment=()
+  case "$expected_core_package_id" in
+    "") scan_environment+=("EXPECTED_CORE_PACKAGE_ID=$CORE_V8") ;;
+    unset) ;;
+    *) scan_environment+=("EXPECTED_CORE_PACKAGE_ID=$expected_core_package_id") ;;
+  esac
   set +e
-  SCAN_PAGE_SIZE="$page_size" EXPECT_ACTIVE_REGISTRIES="$expected_registries" \
+  env -u EXPECTED_CORE_PACKAGE_ID "${scan_environment[@]}" SCAN_PAGE_SIZE="$page_size" EXPECT_ACTIVE_REGISTRIES="$expected_registries" \
     CURL_MAX_TIME_SECONDS="${curl_max_time_seconds:-60}" \
     "$TOOLS_DIR/emitter_id_scan.sh" "${scan_arguments[@]}" > "$work_dir/out" 2>&1
   actual_exit=$?
