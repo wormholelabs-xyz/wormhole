@@ -39,9 +39,10 @@ Set `DB_PORT` to use a different port.
 | File | Purpose |
 | --- | --- |
 | `env.sh` | Shared settings. The other scripts read this file. |
-| `compose.digests.yaml` | Pins each Splice image to its digest. |
+| `compose.digests.yaml` | Pins each image to its digest. |
 | `images.lock` | Image names, tags and digests. |
-| `start.sh` | Starts LocalNet and waits for the Ledger APIs. |
+| `image_lock_lib.sh` | Compares the images that compose resolves with `images.lock`. `start.sh` uses it. |
+| `start.sh` | Starts LocalNet and waits for the Ledger APIs. Stops first if an image is not in `images.lock`. |
 | `stop.sh` | Stops LocalNet. |
 | `token.sh` | Prints a JWT for the Ledger API. |
 | `upload_dars.sh` | Uploads the core DAR and the test DAR. Vets all their packages. |
@@ -70,6 +71,7 @@ The script tests do not need Docker or LocalNet. Run each test from the reposito
 
 ```bash
 canton/localnet/test/bounded_run_test.sh
+canton/localnet/test/image_lock_test.sh
 ```
 
 ## Prerequisites

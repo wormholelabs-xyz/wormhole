@@ -3,6 +3,8 @@
 set -euo pipefail
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+# shellcheck source=image_lock_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/image_lock_lib.sh"
 
 readonly READY_TIMEOUT_SECONDS=900
 
@@ -41,6 +43,13 @@ wait_for_json_api() {
 }
 
 ensure_splice_checkout
+resolved_images_file="$(mktemp)"
+trap 'rm -f "$resolved_images_file"' EXIT
+"${LOCALNET_COMPOSE[@]}" config --images | sort -u > "$resolved_images_file"
+if ! check_compose_images_are_locked "$resolved_images_file" "$LOCALNET_SCRIPT_DIR/images.lock"; then
+  echo "Compose resolves images that images.lock does not list. Do not start LocalNet." >&2
+  exit 1
+fi
 "${LOCALNET_COMPOSE[@]}" up -d --wait --wait-timeout "$READY_TIMEOUT_SECONDS"
 for validator_name in sv app-provider app-user; do
   wait_for_json_api "$validator_name"
