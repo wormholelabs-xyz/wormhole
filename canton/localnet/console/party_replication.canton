@@ -50,7 +50,8 @@ val protocolVersion = physicalSynchronizerId.protocolVersion
 def hostingOf(partyId: PartyId): Option[HostingParticipant] =
   referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).find(_.item.partyId == partyId)
     .flatMap(_.item.participants.find(_.participantId == target.id))
-def awaitCondition(description: String, maxAttempts: Int = 120)(condition: => Boolean): Unit = {
+val awaitMaxAttempts = sys.env.getOrElse("REPLICATION_AWAIT_MAX_ATTEMPTS", "120").toInt
+def awaitCondition(description: String, maxAttempts: Int = awaitMaxAttempts)(condition: => Boolean): Unit = {
   var attempt = 0
   while (!condition) {
     attempt += 1
@@ -100,14 +101,17 @@ def externalSign(owner: OwnerKey, hash: Hash): Signature = Signature.fromExterna
 def currentMappingOf(partyId: PartyId) =
   referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).find(_.item.partyId == partyId)
     .getOrElse(throw new RuntimeException(s"no PartyToParticipant for $partyId"))
-// Replace the PartyToParticipant of a party; two owner keys sign it.
+// REPLICATION_SIGNER_COUNT (default 2): the number of owner keys that sign a replacement. 1 is the negative check.
+val replacementSignerCount = sys.env.getOrElse("REPLICATION_SIGNER_COUNT", "2").toInt
+require(replacementSignerCount == 1 || replacementSignerCount == 2, "REPLICATION_SIGNER_COUNT must be 1 or 2")
+// Replace the PartyToParticipant of a party; the owner keys sign it.
 def replaceMapping(partyId: PartyId, hosts: Seq[HostingParticipant], confirmationThreshold: Int): Unit = {
   val current = currentMappingOf(partyId)
   val replacement = PartyToParticipant.create(partyId, com.digitalasset.canton.config.RequireTypes.PositiveInt.tryCreate(confirmationThreshold), hosts,
     current.item.partySigningKeysWithThreshold).fold(error => sys.error(s"PartyToParticipant: $error"), identity)
   val unsigned = referenceParticipant.topology.transactions.generate(
     Seq(com.digitalasset.canton.admin.api.client.commands.TopologyAdminCommands.Write.GenerateTransactions.Proposal(replacement, synchronizerStore))).head
-  val ownerSignatures = ownerSigners.map(externalSign(_, unsigned.hash.hash))
+  val ownerSignatures = ownerSigners.take(replacementSignerCount).map(externalSign(_, unsigned.hash.hash))
   val signed = ownerSignatures.tail.foldLeft(
     SignedTopologyTransaction.withSignature(unsigned, ownerSignatures.head, isProposal = false, protocolVersion))(_.addSingleSignature(_))
   referenceParticipant.topology.transactions.load(Seq(signed), synchronizerStore)
@@ -206,6 +210,17 @@ phase match {
       println(s"REPLICATION remove-host ${partyId.uid.identifier} ${describeMapping(partyId)}")
     }
     println("REPLICATION remove-host done")
+
+  // REPLICATION_ADDED_HOST: a console participant name. The party signs; the participant does not consent.
+  case "add-host-without-consent" =>
+    val addedHost = participantNamed(requiredEnvironmentVariable("REPLICATION_ADDED_HOST"))
+    partiesWithSource.foreach { case (partyId, _) =>
+      val current = currentMappingOf(partyId).item
+      require(!current.participants.exists(_.participantId == addedHost.id), s"${addedHost.name} already hosts $partyId")
+      replaceMapping(partyId, current.participants :+ HostingParticipant(addedHost.id, ParticipantPermission.Confirmation), current.threshold.value)
+      println(s"REPLICATION add-host-without-consent ${partyId.uid.identifier} ${describeMapping(partyId)}")
+    }
+    println("REPLICATION add-host-without-consent done")
 
   // REPLICATION_CONFIRMATION_THRESHOLD: the new confirmation threshold. Keeps the hosts.
   case "set-threshold" =>
