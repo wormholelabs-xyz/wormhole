@@ -60,6 +60,38 @@ check_case "exercise_result with two matches" 5 - "found 2" \
 check_case "exercise_result with no match" 5 - "found 0" \
   exercise_result "{\"events\": [$FACTORY_TRANSFER_EVENT]}" ":Wormhole.Ntt.Manager:NttManager" Transfer
 
+# Columns: case | decimal text | decimals | expected units ("-" for an error)
+readonly DECIMAL_TO_UNITS_CASES=(
+  "fraction|2.5|10|25000000000"
+  "integer|3|10|30000000000"
+  "smallest unit|0.0000000001|10|1"
+  "all fraction digits|1.5000000000|10|15000000000"
+  "zero|0|10|0"
+  "zero decimals|7|0|7"
+  "largest 18-digit amount|99999999.9999999999|10|999999999999999999"
+  "too many fraction digits|1.00000000001|10|-"
+  "negative|-1|10|-"
+  "exponent|1e3|10|-"
+  "empty||10|-"
+  "leading dot|.5|10|-"
+  "trailing dot|5.|10|-"
+  "above 18 digits|100000000|10|-"
+  "decimals not a number|1|ten|-"
+)
+for decimal_case in "${DECIMAL_TO_UNITS_CASES[@]}"; do
+  IFS='|' read -r case_name decimal_text decimals expected_units <<<"$decimal_case"
+  if [[ "$expected_units" == "-" ]]; then
+    check_case "decimal_to_units $case_name" 1 - - decimal_to_units "$decimal_text" "$decimals"
+  else
+    check_case "decimal_to_units $case_name" 0 "$expected_units" - decimal_to_units "$decimal_text" "$decimals"
+  fi
+done
+check_case "decimal_texts_total_units 0.1 + 0.2" 0 3000000000 - decimal_texts_total_units 10 0.1 0.2
+check_case "decimal_texts_total_units of no amounts" 0 0 - decimal_texts_total_units 10
+check_case "decimal_texts_total_units with a bad amount" 1 - - decimal_texts_total_units 10 0.1 1e3
+check_case "decimal_texts_total_units above 18 digits" 1 - "18 digits" \
+  decimal_texts_total_units 10 99999999.9999999999 0.0000000001
+
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
 readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
