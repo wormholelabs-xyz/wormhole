@@ -429,8 +429,8 @@ func init() {
 	suiMoveEventType = NodeCmd.Flags().String("suiMoveEventType", "", "Sui move event type for publish_message")
 
 	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
-	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (empty matches any package version)")
-	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton party to narrow the watcher's update stream to; production guardians set the guardianGovernance party. Empty observes all parties (devnet default)")
+	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id. Required outside --unsafeDevMode; empty (dev mode only) matches any package")
+	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton guardianGovernance party the watcher reads as. Required outside --unsafeDevMode; empty (dev mode only) observes all parties on the participant")
 	cantonAuthTokenURL = NodeCmd.Flags().String("cantonAuthTokenURL", "", "OAuth2 token endpoint for a Keycloak-fronted Canton Ledger API (.../realms/<realm>/protocol/openid-connect/token). Set together with cantonAuthClientID and cantonAuthClientSecret, or not at all")
 	cantonAuthClientID = NodeCmd.Flags().String("cantonAuthClientID", "", "OAuth2 client id for the Canton Ledger API (client-credentials grant)")
 	cantonAuthClientSecret = NodeCmd.Flags().String("cantonAuthClientSecret", "", "OAuth2 client secret for the Canton Ledger API. Prefer the GUARDIAND_CANTONAUTHCLIENTSECRET environment variable over the flag so the secret never appears in process arguments")
@@ -1005,8 +1005,8 @@ func runNode(cmd *cobra.Command, args []string) {
 		logger.Fatal("Either --suiRPC and --suiMoveEventType must all be set or all unset")
 	}
 
-	// --cantonRPC alone enables the Canton watcher; --cantonReadAsParty is
-	// optional (empty observes all parties on the participant).
+	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create requires
+	// --cantonPackageID and --cantonReadAsParty outside --unsafeDevMode.
 
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {
 		logger.Fatal("Either --xrplRPC and --xrplContract must all be set or all unset")

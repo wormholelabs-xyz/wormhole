@@ -54,7 +54,8 @@ design:
 | Calling a method          | `CALL` to an address                        | **Exercising a choice** on a contract                                                                                                                  |
 | Identity / "address"      | 20-byte account/contract address            | **Party ID** (a string `hint::fingerprint`) and **contract IDs**                                                                                       |
 | Event log                 | `LOG`/`event` topics                        | Ledger-API **events** (`CreatedEvent`, `ExercisedEvent`) in the transaction stream                                                                     |
-| Block / height            | block number                                | **participant offset** (monotone `int64`) into the update stream                                                                                       |
+| Block / height            | block number                                | **participant offset** (monotone `int64`) into the update stream. Each participant assigns its own offsets.                                            |
+| Transaction hash          | 32-byte transaction hash                    | **update id**: a SHA2-256 multihash as lowercase hex. It is the same on every participant (§7.2).                                                      |
 | Finality                  | probabilistic (reorgs) → consistency levels | deterministic: once a transaction is committed by the sequencer/mediator it is final. No reorgs.                                                       |
 | Node API the watcher uses | JSON-RPC / `eth_getLogs`                    | **Ledger API v2** (gRPC), `UpdateService` streaming                                                                                                    |
 | Crypto available on-chain | `ecrecover`, `keccak256` precompiles        | Daml `keccak256` and `secp256k1` built-ins (see §5)                                                                                                    |
@@ -107,7 +108,7 @@ flowchart TD
 
     subgraph gd["guardiand"]
         direction TB
-        client["node/pkg/cantonclient (gRPC client)<br/>• GetLedgerEnd → readiness / height<br/>• GetUpdates (stream) → WormholeMessage events<br/>• GetUpdateByOffset → reobservation"]
+        client["node/pkg/cantonclient (gRPC client)<br/>• GetLedgerEnd → readiness / height<br/>• GetUpdates (stream) → WormholeMessage events<br/>• GetUpdateById → reobservation"]
         watcher["node/pkg/watchers/canton (Watcher)<br/>decode event → common.MessagePublication → msgC"]
         client --> watcher
     end
@@ -817,8 +818,9 @@ type CantonClient interface {
     // delivering each Wormhole message-publish event found in them.
     SubscribeUpdates(ctx context.Context, beginExclusive int64, templateID TemplateID, choiceName string, out chan<- CantonMessageEvent) (Subscription, error)
 
-    // GetUpdateByOffset fetches a single transaction by offset (reobservation).
-    GetUpdateByOffset(ctx context.Context, offset int64) (CantonTransaction, error)
+    // GetTransactionByUpdateID fetches a single transaction by update id
+    // (reobservation), with the same party filter and template filter as SubscribeUpdates.
+    GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, templateID TemplateID, choiceName string) (CantonTransaction, error)
 
     Close() error
 }
@@ -830,7 +832,7 @@ Mapping to Ledger API v2 RPCs:
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | height / readiness  | `StateService.GetLedgerEnd` → `offset (int64)`                                                                                      |
 | live message stream | `UpdateService.GetUpdates` (server stream); filter `Transaction.events[].exercised` by `template_id` + `choice == "PublishMessage"` |
-| reobservation       | `UpdateService.GetUpdateByOffset` (or `GetTransactionByOffset`) for the offset encoded in the reobservation request                 |
+| reobservation       | `UpdateService.GetUpdateById` for the update id encoded in the reobservation request; same `UpdateFormat` as the stream             |
 
 The Wormhole message comes from the **`ExercisedEvent`** of the `PublishMessage`
 choice: `exercise_result` is the `WormholeMessage` record (§4.2), decoded from
@@ -840,31 +842,66 @@ using the canonical encoding in §4.2 (see `deriveEmitterAddress` in
 [`watcher.go`](../node/pkg/watchers/canton/watcher.go)); the encoding is pinned
 against the Daml side by a shared cross-language test vector.
 
-**Party filter.** The `GetUpdates` request uses an `UpdateFormat` with a wildcard
-template filter under **`filters_for_any_party`** by default — the watcher
-observes `PublishMessage` from _every_ emitter on the participant and needs no
-operator party id. For **production guardians**, set `--cantonReadAsParty` to the
-**`guardianGovernance`** party (§4.1): it is a stakeholder of every `Emitter`
-and of `CoreState`, so the narrowed `filters_by_party` stream still carries every
-`PublishMessage`, and it makes the trust boundary explicit. The **devnet**
-sandbox is a single participant, so it keeps the wildcard default.
+**Party filter.** The `GetUpdates` and `GetUpdateById` requests use one
+`UpdateFormat` with a wildcard template filter. Outside unsafe dev mode,
+`--cantonReadAsParty` is required. Set it to the **`guardianGovernance`** party
+(§4.1). This party is a stakeholder of every `Emitter` and of `CoreState`, so the
+narrowed `filters_by_party` stream carries every `PublishMessage`. In unsafe dev
+mode an empty `--cantonReadAsParty` selects **`filters_for_any_party`**. The
+**devnet** sandbox uses this wildcard.
 `TRANSACTION_SHAPE_LEDGER_EFFECTS` is required so `ExercisedEvent`s — which carry
 the choice result — are included.
 
 ### 7.2 `TxID` and offsets
 
-The Ledger API has no 32-byte transaction hash. We use the **participant offset**
-(`int64`) as the canonical transaction identifier:
+The `MessagePublication.TxID` is the transaction's **update id**. The
+participant offset is not the `TxID`.
 
-- `MessagePublication.TxID` = the transaction's offset, big-endian, left-padded
-  to 32 bytes (so it round-trips through the 32-byte `tx_hash` reobservation
-  field).
-- Reobservation decodes those 32 bytes back to an `int64` offset and calls
-  `GetUpdateByOffset`.
+Each participant assigns its own offsets. On LocalNet, one update has offset
+590, 762, and 1381 on three participants. Each guardian reads its own
+participant. Thus an offset from one guardian identifies a different update, or
+no update, on the participant of a different guardian. The update id is the same
+on every participant that hosts the transaction.
 
-The Daml `update_id` (a string) is carried in logs for human correlation but is
-not the `TxID`, because reobservation plumbing (`gossipv1.ObservationRequest`)
-uses raw bytes and offsets are the stable, range-queryable key.
+Encoding:
+
+- The Ledger API `update_id` is 68 lowercase hex characters. It is a SHA2-256
+  multihash: the header `1220`, then the 32-byte digest.
+- `TxID` is the hex-decoded update id: exactly 34 bytes, with the first two bytes
+  `0x12 0x20`. This length is in the `MessagePublication` bounds (32 to 255
+  bytes). A compile-time assertion in the watcher checks this.
+- `TxIDString()` is `0x` followed by the update id. An operator can give the
+  update id directly to `guardiand admin send-observation-request 74 <update id>`.
+- `cantonclient.ParseUpdateID` and `cantonclient.UpdateIDFromTxID` reject all
+  other forms: a different length, uppercase hex, or a different multihash
+  header. A stream transaction with Wormhole messages and a malformed update id
+  stops the subscription.
+
+Reobservation:
+
+1. The watcher decodes `ObservationRequest.tx_hash` with `UpdateIDFromTxID`.
+2. The watcher calls `UpdateService.GetUpdateById` with that update id.
+3. The request uses the same `UpdateFormat` as the stream: the
+   `--cantonReadAsParty` party filter. The watcher then applies the same template,
+   choice, and `--cantonPackageID` filter.
+4. The watcher rejects a response with a different update id.
+
+The participant offset stays in use for one purpose: the stream resume point
+after a restart (`lastOffset`). It is local to the participant, so it does not
+leave the guardian.
+
+**Mixed guardian versions.** Earlier versions used a 32-byte left-padded offset
+as the `TxID`. The two encodings are not compatible:
+
+- A guardian on this version rejects a 32-byte offset `tx_hash` (length is not 34).
+- An earlier guardian rejects a 34-byte `tx_hash` (length is more than 32).
+- The global accountant matches observations on `tx_hash`. Guardians on
+  different versions submit different `tx_hash` values for one message, so their
+  signatures do not combine. Offset `TxID`s also differ between participants, so
+  the earlier version did not combine them either.
+
+Upgrade all guardians that observe Canton before you enable the accountant for
+Canton.
 
 ### 7.3 `Run` loop (three goroutines, mirrors Sui)
 
@@ -874,7 +911,7 @@ flowchart TD
     init --> ready["supervisor.Signal(healthy); readiness.SetReady"]
     ready --> pump["RunWithScissors: canton_data_pump<br/>SubscribeUpdates(from end) → decode → msgC"]
     ready --> height["RunWithScissors: canton_block_height<br/>every 5s: GetLedgerEnd → SetNetworkStats + readiness"]
-    ready --> reobs["RunWithScissors: canton_fetch_obvs_req<br/>obsvReqC → GetUpdateByOffset → re-emit (IsReobservation=true)"]
+    ready --> reobs["RunWithScissors: canton_fetch_obvs_req<br/>obsvReqC → GetUpdateById → re-emit (IsReobservation=true)"]
     pump --> sel{"select: ctx.Done / errC"}
     height --> sel
     reobs --> sel
@@ -894,16 +931,18 @@ type WatcherConfig struct {
     NetworkID   watchers.NetworkID
     ChainID     vaa.ChainID        // ChainIDCanton
     Rpc         string             // host:port of the Ledger API
-    PackageID   string             // package-id of wormhole-core (template filter)
-    ReadAsParty string             // optional; production guardians set the guardianGovernance party
+    PackageID   string             // package-id of wormhole-core; required outside unsafe dev mode
+    ReadAsParty string             // guardianGovernance party; required outside unsafe dev mode
 }
 ```
 
 Wired into the guardian via
 [`node/pkg/node/options.go`](../node/pkg/node/options.go) and a `--cantonRPC` /
 `--cantonPackageID` flag pair in `node/cmd/guardiand`, following the Sui pattern.
-`--cantonReadAsParty` populates `ReadAsParty`; production guardians set it to the
-`guardianGovernance` party (§4.1, §7.1), and devnet leaves it empty (wildcard).
+`--cantonReadAsParty` populates `ReadAsParty`. `WatcherConfig.Create` requires
+`--cantonPackageID` and `--cantonReadAsParty` outside `--unsafeDevMode`. Set
+`--cantonReadAsParty` to the `guardianGovernance` party (§4.1, §7.1). Devnet runs
+in unsafe dev mode and leaves both empty (wildcard).
 
 ---
 
@@ -1206,7 +1245,7 @@ makes it a `guardianGovernance` host.
 ## 11. Open Questions & Validation Items
 
 1. **Ledger API v2 RPC surface.** The exact message/field names of
-   `UpdateService.GetUpdates` / `GetUpdateByOffset` / `StateService.GetLedgerEnd`
+   `UpdateService.GetUpdates` / `GetUpdateById` / `StateService.GetLedgerEnd`
    shift slightly across Canton releases (e.g. `begin_exclusive`/`end_inclusive`,
    `Update` one-of members). The vendored proto subset targets a specific release
    — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
