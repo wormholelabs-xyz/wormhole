@@ -3,8 +3,9 @@
 // Upgrade window (canton/README.md section 7.5, proposal U3): a watcher with a
 // current and a retiring wormhole-core package id emits publishes executed
 // under either version while the retiring deadline is in the future, including
-// a current-core publish on an emitter the retiring core created, and drops a
-// look-alike package. After the deadline it drops and counts retiring-core
+// a current-core publish on an emitter the retiring core created and a
+// retiring-core publish on the emitter the current core wrote last, and drops
+// a look-alike package. After the deadline it drops and counts retiring-core
 // publishes. Single-id watchers drop and count the other version.
 //
 //	go test -tags integration -run TestCantonWatcherUpgradeWindow ./pkg/watchers/canton -v
@@ -48,8 +49,9 @@ type upgradeWindowPublishInput struct {
 
 // existingEmitterPublishInput is the input of Test.WatcherUpgradeWindow:integrationPublishOnExistingEmitter.
 type existingEmitterPublishInput struct {
-	Bridge realBridge `json:"bridge"`
-	Owner  string     `json:"owner"`
+	Bridge                 realBridge `json:"bridge"`
+	Owner                  string     `json:"owner"`
+	PreferredCorePackageID *string    `json:"preferredCorePackageId"`
 }
 
 // upgradeWindowPublish is the JSON output of both fixtures.
@@ -127,10 +129,11 @@ func runUpgradeWindowPublish(t *testing.T, dpm, dar, port string, bridge realBri
 }
 
 // runPublishOnExistingEmitter publishes on the owner's existing emitter, executed by the core version dar depends on.
-func runPublishOnExistingEmitter(t *testing.T, dpm, dar, port string, bridge realBridge, owner string) upgradeWindowPublish {
+// A nil preferredCorePackageID lets Daml Script pick the newest vetted core.
+func runPublishOnExistingEmitter(t *testing.T, dpm, dar, port string, bridge realBridge, owner string, preferredCorePackageID *string) upgradeWindowPublish {
 	t.Helper()
 	inputPath := filepath.Join(t.TempDir(), "existing-emitter-input.json")
-	inputJSON, err := json.Marshal(existingEmitterPublishInput{Bridge: bridge, Owner: owner})
+	inputJSON, err := json.Marshal(existingEmitterPublishInput{Bridge: bridge, Owner: owner, PreferredCorePackageID: preferredCorePackageID})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(inputPath, inputJSON, 0o600))
 	var published upgradeWindowPublish
@@ -183,15 +186,15 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	runDamlScript(t, dpm, testDar, port, "Test.WatcherGovernanceReader:integrationGovernanceReaderSetup", "", &bridge)
 
 	type watcherCase struct {
-		name                     string
-		acceptedPackageIDs       cantonclient.AcceptedPackageIDs
-		wantRetiringCorePublish  bool
-		wantCurrentCorePublishes bool
+		name                      string
+		acceptedPackageIDs        cantonclient.AcceptedPackageIDs
+		wantRetiringCorePublishes bool
+		wantCurrentCorePublishes  bool
 	}
 	const upgradeWindowCaseIndex = 0
 	cases := []watcherCase{
-		{name: "upgrade window accepts the current and the retiring core", acceptedPackageIDs: upgradeWindowPackageIDs, wantRetiringCorePublish: true, wantCurrentCorePublishes: true},
-		{name: "retiring-only pin drops the current core", acceptedPackageIDs: retiringOnlyPackageIDs, wantRetiringCorePublish: true},
+		{name: "upgrade window accepts the current and the retiring core", acceptedPackageIDs: upgradeWindowPackageIDs, wantRetiringCorePublishes: true, wantCurrentCorePublishes: true},
+		{name: "retiring-only pin drops the current core", acceptedPackageIDs: retiringOnlyPackageIDs, wantRetiringCorePublishes: true},
 		{name: "current-only pin drops the retiring core", acceptedPackageIDs: currentOnlyPackageIDs, wantCurrentCorePublishes: true},
 		{name: "window after the deadline drops the retiring core", acceptedPackageIDs: expiredWindowPackageIDs, wantCurrentCorePublishes: true},
 	}
@@ -231,8 +234,11 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	currentCorePublish := runUpgradeWindowPublish(t, dpm, currentTestDar, port, bridge, "CurrentCoreOwner")
 	require.NotEqual(t, retiringCorePublish.Owner, currentCorePublish.Owner)
 	// Production case: once the current core is vetted, existing emitters publish under it.
-	currentCoreOnRetiringEmitterPublish := runPublishOnExistingEmitter(t, dpm, currentTestDar, port, bridge, retiringCorePublish.Owner)
+	currentCoreOnRetiringEmitterPublish := runPublishOnExistingEmitter(t, dpm, currentTestDar, port, bridge, retiringCorePublish.Owner, nil)
 	require.Equal(t, retiringCorePublish.Owner, currentCoreOnRetiringEmitterPublish.Owner)
+	// The retiring core publishes again on the emitter the current core wrote last.
+	retiringCoreOnCurrentWrittenEmitterPublish := runPublishOnExistingEmitter(t, dpm, testDar, port, bridge, retiringCorePublish.Owner, &retiringCorePackageID)
+	require.Equal(t, retiringCorePublish.Owner, retiringCoreOnCurrentWrittenEmitterPublish.Owner)
 
 	lookalikeInputPath := filepath.Join(t.TempDir(), "lookalike-target.json")
 	lookalikeJSON, err := json.Marshal(lookalikeTarget{
@@ -262,20 +268,23 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	require.NotEqual(t, wantRetiringCorePublish.EmitterAddress, wantCurrentCorePublish.EmitterAddress)
 	require.Equal(t, wantRetiringCorePublish.EmitterAddress, wantCurrentCoreOnRetiringEmitterPublish.EmitterAddress)
 	require.Equal(t, wantRetiringCorePublish.Sequence+1, wantCurrentCoreOnRetiringEmitterPublish.Sequence)
+	wantRetiringCoreOnCurrentWrittenEmitterPublish := toExpectedPublish(retiringCoreOnCurrentWrittenEmitterPublish)
+	require.Equal(t, wantRetiringCorePublish.EmitterAddress, wantRetiringCoreOnCurrentWrittenEmitterPublish.EmitterAddress)
+	require.Equal(t, wantRetiringCorePublish.Sequence+2, wantRetiringCoreOnCurrentWrittenEmitterPublish.Sequence)
 
 	deadline := time.After(90 * time.Second)
 	type emitterSequence struct {
 		emitterAddress vaa.Address
 		sequence       uint64
 	}
-	updateIDsByEmitterSequence := make(map[emitterSequence]cantonclient.UpdateID, 3)
+	updateIDsByEmitterSequence := make(map[emitterSequence]cantonclient.UpdateID, 4)
 	updateIDOf := func(publish observedPublish) cantonclient.UpdateID {
 		return updateIDsByEmitterSequence[emitterSequence{emitterAddress: publish.EmitterAddress, sequence: publish.Sequence}]
 	}
 	for caseIndex, tc := range cases {
 		var wantPublishes []observedPublish
-		if tc.wantRetiringCorePublish {
-			wantPublishes = append(wantPublishes, wantRetiringCorePublish)
+		if tc.wantRetiringCorePublishes {
+			wantPublishes = append(wantPublishes, wantRetiringCorePublish, wantRetiringCoreOnCurrentWrittenEmitterPublish)
 		}
 		if tc.wantCurrentCorePublishes {
 			wantPublishes = append(wantPublishes, wantCurrentCorePublish, wantCurrentCoreOnRetiringEmitterPublish)
@@ -296,15 +305,18 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	retiringCorePublishUpdateID := updateIDOf(wantRetiringCorePublish)
 	currentCorePublishUpdateID := updateIDOf(wantCurrentCorePublish)
 	currentCoreOnRetiringEmitterUpdateID := updateIDOf(wantCurrentCoreOnRetiringEmitterPublish)
+	retiringCoreOnCurrentWrittenEmitterUpdateID := updateIDOf(wantRetiringCoreOnCurrentWrittenEmitterPublish)
 	require.False(t, retiringCorePublishUpdateID.IsZero(), "the upgrade-window watcher never emitted the retiring-core publish")
 	require.False(t, currentCorePublishUpdateID.IsZero(), "the upgrade-window watcher never emitted the current-core publish")
 	require.False(t, currentCoreOnRetiringEmitterUpdateID.IsZero(), "the upgrade-window watcher never emitted the current-core publish on the retiring-core emitter")
+	require.False(t, retiringCoreOnCurrentWrittenEmitterUpdateID.IsZero(), "the upgrade-window watcher never emitted the retiring-core publish on the emitter the current core wrote last")
 
 	// The upgrade-window watcher emitted each publish under the package id that executed it.
 	executingPackageIDByUpdateID := map[cantonclient.UpdateID]string{
-		retiringCorePublishUpdateID:          retiringCorePackageID,
-		currentCorePublishUpdateID:           currentCorePackageID,
-		currentCoreOnRetiringEmitterUpdateID: currentCorePackageID,
+		retiringCorePublishUpdateID:                 retiringCorePackageID,
+		currentCorePublishUpdateID:                  currentCorePackageID,
+		currentCoreOnRetiringEmitterUpdateID:        currentCorePackageID,
+		retiringCoreOnCurrentWrittenEmitterUpdateID: retiringCorePackageID,
 	}
 	for updateID, wantExecutingPackageID := range executingPackageIDByUpdateID {
 		assert.Equalf(t, []string{wantExecutingPackageID}, streamRecorders[upgradeWindowCaseIndex].publishExecutingPackageIDs(updateID),
@@ -332,10 +344,10 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	}, unexpectedEmissionWindow, 50*time.Millisecond, "a watcher emitted a message after its expected ones")
 	assert.Equal(t, currentCoreUnpinnedCountBefore+2, unpinnedPublishCount(t, currentCorePackageID),
 		"only the retiring-only watcher must count the two current-core publishes")
-	assert.Equal(t, retiringCoreUnpinnedCountBefore+1, unpinnedPublishCount(t, retiringCorePackageID),
-		"only the current-only watcher must count the retiring-core publish")
-	assert.Equal(t, retiringAfterDeadlineCountBefore+1, retiringPackagePublishAfterDeadlineCount(t),
-		"only the expired-window watcher must count the retiring-core publish after the deadline")
+	assert.Equal(t, retiringCoreUnpinnedCountBefore+2, unpinnedPublishCount(t, retiringCorePackageID),
+		"only the current-only watcher must count the two retiring-core publishes")
+	assert.Equal(t, retiringAfterDeadlineCountBefore+2, retiringPackagePublishAfterDeadlineCount(t),
+		"only the expired-window watcher must count the two retiring-core publishes after the deadline")
 
 	// Reobservation uses the same accepted package ids as the stream.
 	for caseIndex, tc := range cases {
@@ -348,20 +360,22 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	}
 	assert.Equal(t, currentCoreUnpinnedCountBefore+3, unpinnedPublishCount(t, currentCorePackageID),
 		"retiring-only reobservation must count the current-core publish again")
-	assert.Equal(t, retiringCoreUnpinnedCountBefore+1, unpinnedPublishCount(t, retiringCorePackageID),
+	assert.Equal(t, retiringCoreUnpinnedCountBefore+2, unpinnedPublishCount(t, retiringCorePackageID),
 		"reobserving a current-core publish must not count the retiring core")
 
 	// After the deadline, reobservation of a retiring-core publish follows its record time.
 	for caseIndex, tc := range cases {
 		reobserved := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], retiringCorePublishUpdateID.TxID(), reobservationWindow)
 		var wantReobserved []observedPublish
-		if tc.wantRetiringCorePublish {
+		if tc.wantRetiringCorePublishes {
 			wantReobserved = []observedPublish{wantRetiringCorePublish}
 		}
 		assert.Equalf(t, wantReobserved, toObservedPublishes(reobserved), "%s: retiring-core publish reobservation", tc.name)
 	}
-	assert.Equal(t, retiringAfterDeadlineCountBefore+2, retiringPackagePublishAfterDeadlineCount(t),
+	assert.Equal(t, retiringAfterDeadlineCountBefore+3, retiringPackagePublishAfterDeadlineCount(t),
 		"the expired-window watcher must count the reobserved retiring-core publish again")
+	assert.Equal(t, retiringCoreUnpinnedCountBefore+3, unpinnedPublishCount(t, retiringCorePackageID),
+		"the current-only watcher must count the reobserved retiring-core publish again")
 }
 
 func retiringPackagePublishAfterDeadlineCount(t *testing.T) float64 {
