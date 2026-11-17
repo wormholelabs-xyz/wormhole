@@ -156,6 +156,12 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	lookalikeDar := filepath.Join(cantonDir, "test-lookalike", ".daml", "dist", "wormhole-core-lookalike-0.1.0.dar")
 	lookalikePackageID := readDarMainPackageID(t, dpm, lookalikeDar)
 	require.NotEqual(t, retiringCorePackageID, currentCorePackageID)
+	// The core built from this tree is the one guardiand approves.
+	approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
+	builtCoreAccepted, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: retiringCorePackageID, Version: retiringCoreVersion}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, approvedCorePackages.CheckAcceptedPackageIDsApproved(builtCoreAccepted),
+		"update node/pkg/cantonclient/approved_core_packages.json for the built core")
 	require.NotEqual(t, retiringCorePackageID, lookalikePackageID)
 	require.NotEqual(t, currentCorePackageID, lookalikePackageID)
 

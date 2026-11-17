@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/stretchr/testify/assert"
@@ -44,9 +45,20 @@ type corePackageFlags struct {
 	retiringPackageVersion       string
 }
 
+// testApprovedCorePackages approves the test current and retiring ids at their test versions.
+func testApprovedCorePackages(t *testing.T) *cantonclient.ApprovedCorePackages {
+	t.Helper()
+	approved, err := cantonclient.ParseApprovedCorePackages([]byte(`[` +
+		`{"packageId":"` + testCurrentPackageID + `","version":"` + testCurrentPackageVersion + `"},` +
+		`{"packageId":"` + testRetiringPackageID + `","version":"` + testRetiringPackageVersion + `"}]`))
+	require.NoError(t, err)
+	return &approved
+}
+
 func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty string, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
+		approvedCorePackages:         testApprovedCorePackages(t),
 		NetworkID:                    "canton",
 		ChainID:                      vaa.ChainIDCanton,
 		Rpc:                          "canton:6865",
@@ -141,6 +153,10 @@ func TestCreateValidatesCorePackageIDs(t *testing.T) {
 		{name: "malformed retiring version", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, retiringPackageVersion: "0.8.0.1"}, env: common.MainNet, wantErr: "MAJOR.MINOR.PATCH"},
 		{name: "retiring version without retiring id", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion, retiringPackageVersion: testRetiringPackageVersion}, env: common.MainNet, wantErr: "requires a retiring core package id"},
 		{name: "window without versions in dev mode", flags: withoutVersions(window(testRetiringPackageID, inOneDay)), env: common.UnsafeDevNet},
+		{name: "unapproved current outside dev mode", flags: withCurrentID(current, testOtherPackageID), env: common.MainNet, wantErr: "not in the approved"},
+		{name: "current at an unapproved version outside dev mode", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: "0.8.9"}, env: common.TestNet, wantErr: "approved as"},
+		{name: "unapproved retiring outside dev mode", flags: window(testOtherPackageID, inOneDay), env: common.MainNet, wantErr: "not in the approved"},
+		{name: "unapproved current in dev mode", flags: withCurrentID(current, testOtherPackageID), env: common.UnsafeDevNet},
 		{name: "wildcard in dev mode", env: common.UnsafeDevNet},
 	}
 	for _, tc := range cases {
@@ -173,13 +189,14 @@ func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
 func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		NetworkID:      "canton",
-		ChainID:        vaa.ChainIDCanton,
-		Rpc:            "canton:6865",
-		PackageID:      testCurrentPackageID,
-		PackageVersion: testCurrentPackageVersion,
-		ReadAsParty:    testGovernanceParty,
-		Auth:           auth,
+		approvedCorePackages: testApprovedCorePackages(t),
+		NetworkID:            "canton",
+		ChainID:              vaa.ChainIDCanton,
+		Rpc:                  "canton:6865",
+		PackageID:            testCurrentPackageID,
+		PackageVersion:       testCurrentPackageVersion,
+		ReadAsParty:          testGovernanceParty,
+		Auth:                 auth,
 	}
 	_, _, err := wc.Create(
 		make(chan *common.MessagePublication, 1),
