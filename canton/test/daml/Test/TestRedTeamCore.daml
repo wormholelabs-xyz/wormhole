@@ -11,6 +11,7 @@ import DA.Action (foldlA, void)
 import DA.Assert ((===))
 import DA.Exception (GeneralError(..), throw)
 import DA.Foldable (forA_)
+import DA.List (sort)
 import DA.Optional (fromSome)
 import DA.Text qualified as T
 import DA.Time (microseconds, seconds)
@@ -525,34 +526,49 @@ testRedTeamA14OperatorCannotForgeThirdPartyEmitter = do
       forgeResult <- trySubmit forgerAuthority do createCmd forgedVictimEmitter
       checkAttackFailedWith ("A14 " <> forgers <> " creates the victim's emitter") "Authorization failure" forgeResult
 
--- | Blast radius of operator + owner collusion: the owner's OWN address can
--- repeat a sequence; guardians observe both emitters; other owners are unaffected.
-testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress : Script ()
-testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress = do
+-- | guardianGovernance co-signs every 'Emitter' (A14-2), so no subset of
+-- operator, owner, and guardianGovernance can create one outside
+-- 'RegisterEmitter': a rewound duplicate of an issued identity is refused.
+testRedTeamA14ColludingOwnerCannotDuplicateEmitter : Script ()
+testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
   (operator, guardianGovernance, coreStateCid) <- setup
   colludingOwner <- allocateParty "RedTeamColludingOwner"
-  bystander <- allocateParty "RedTeamBystander"
   colludingEmitterCid <- registerEmitter operator colludingOwner
-  bystanderEmitterCid <- registerEmitter operator bystander
+  operatorEmitterCid <- registerEmitter operator operator
   (_, firstMessage) <- publishVia operator coreStateCid colludingOwner colludingEmitterCid 1 "aa" 0
-
-  rewoundEmitterCid <- submit (actAs operator <> actAs colludingOwner) do
-    createCmd Emitter with
-      operator, guardianGovernance, owner = colludingOwner
-      emitterId = firstMessage.emitterId
-      emitterAddress = emitterAddressFor operator colludingOwner firstMessage.emitterId
-      sequence = firstMessage.sequence
-  (_, repeatedMessage) <- publishVia operator coreStateCid colludingOwner rewoundEmitterCid 2 "bb" 0
-  (repeatedMessage.registrar, repeatedMessage.owner, repeatedMessage.emitterId, repeatedMessage.sequence)
-    === (firstMessage.registrar, firstMessage.owner, firstMessage.emitterId, firstMessage.sequence)
-  assert (repeatedMessage.payload /= firstMessage.payload)
+  (_, operatorMessage) <- publishVia operator coreStateCid operator operatorEmitterCid 2 "bb" 0
+  let rewoundEmitterOf owner message = Emitter with
+        operator, guardianGovernance, owner
+        emitterId = message.emitterId
+        emitterAddress = emitterAddressFor operator owner message.emitterId
+        sequence = message.sequence
+      duplicateAttempts =
+        [ ("operator and owner", actAs operator <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("operator as its own owner", actAs operator, rewoundEmitterOf operator operatorMessage)
+        , ("operator and guardianGovernance", actAs operator <> actAs guardianGovernance,
+            rewoundEmitterOf colludingOwner firstMessage)
+        ]
+  forA_ duplicateAttempts \(colluders, colluderAuthority, rewoundEmitter) -> do
+    duplicateResult <- trySubmit colluderAuthority do createCmd rewoundEmitter
+    checkAttackFailedWith ("A14 " <> colluders <> " duplicates an issued emitter") "Authorization failure" duplicateResult
   guardianVisibleEmitters <- query @Emitter guardianGovernance
-  length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 2
+  length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 1
+  length (filter (\(_, emitter) -> emitter.owner == operator) guardianVisibleEmitters) === 1
 
-  (_, bystanderMessage) <- publishVia operator coreStateCid bystander bystanderEmitterCid 3 "cc" 0
-  bystanderMessage.sequence === 0
-  assert (emitterAddressFor operator bystander bystanderMessage.emitterId
-            /= emitterAddressFor operator colludingOwner firstMessage.emitterId)
+-- | Exactly operator, owner, and guardianGovernance sign an 'Emitter': all
+-- three together can create one directly.
+testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance : Script ()
+testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance = do
+  (operator, guardianGovernance, _) <- setup
+  owner <- allocateParty "RedTeamSignatoryOwner"
+  emitterCid <- submit (actAs operator <> actAs owner <> actAs guardianGovernance) do
+    createCmd Emitter with
+      operator, guardianGovernance, owner
+      emitterId = 0
+      emitterAddress = emitterAddressFor operator owner 0
+      sequence = 0
+  Some emitter <- queryContractId guardianGovernance emitterCid
+  sort (signatory emitter) === sort [operator, owner, guardianGovernance]
 
 -- | A registry reset with a reused id would give an honest owner's second
 -- emitter the address and sequence 0 of its first. 'EmitterRegistry' is

@@ -184,7 +184,7 @@ testAddressVector =
 -- behavioral — but address integrity is not.
 testImpersonationBlocked : Script ()
 testImpersonationBlocked = do
-  (operator, _, _) <- setup
+  (operator, guardianGovernance, _) <- setup
   alice <- allocateParty "VictimAlice"
   mallory <- allocateParty "Mallory"
   aliceEm <- registerEmitter operator alice
@@ -197,8 +197,15 @@ testImpersonationBlocked = do
       emitterId = 0
       emitterAddress = a.emitterAddress, sequence = 0
 
-  -- (b) Operator + Mallory can create a same-id emitter, but its address differs.
-  malloryEm <- submit (actAs operator <> actAs mallory) do
+  -- (b) Operator + Mallory without guardianGovernance cannot create an emitter.
+  submitMustFail (actAs operator <> actAs mallory) do
+    createCmd Emitter with
+      operator, guardianGovernance = a.guardianGovernance, owner = mallory
+      emitterId = 0
+      emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
+
+  -- (c) With guardianGovernance, a same-id emitter for Mallory has a different address.
+  malloryEm <- submit (actAs operator <> actAs mallory <> actAs guardianGovernance) do
     createCmd Emitter with
       operator, guardianGovernance = a.guardianGovernance, owner = mallory
       emitterId = 0
