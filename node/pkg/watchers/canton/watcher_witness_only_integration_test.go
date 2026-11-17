@@ -115,7 +115,9 @@ func TestCantonWatcherDropsWitnessOnlyPublish(t *testing.T) {
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
 	streamRecorder := newUpdateStreamRecorder()
 	witnessOnlyRecorder := &witnessOnlyPublishRecorder{}
-	w := NewWatcher(ledgerAddr, corePackageID, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(corePackageID, "")
+	require.NoError(t, err)
+	w := NewWatcher(ledgerAddr, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
 	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithChainStreamInterceptor(
 		streamRecorder.interceptGetUpdates, witnessOnlyRecorder.interceptGetUpdates)}
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {

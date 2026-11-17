@@ -193,6 +193,17 @@ func readDarMainPackageID(t *testing.T, dpm, darPath string) string {
 	return inspected.MainPackageID
 }
 
+// acceptedPackageIDsOrAny pins primaryPackageID, or matches any package when it is empty.
+func acceptedPackageIDsOrAny(t *testing.T, primaryPackageID string) cantonclient.AcceptedPackageIDs {
+	t.Helper()
+	if primaryPackageID == "" {
+		return cantonclient.AcceptAnyPackageID()
+	}
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(primaryPackageID, "")
+	require.NoError(t, err)
+	return accepted
+}
+
 // runDamlScript runs scriptName from the test DAR and decodes its JSON output
 // into result. inputPath is the script argument file, or "" for none.
 func runDamlScript(t *testing.T, dpm, dar, port, scriptName, inputPath string, result any) {
@@ -296,7 +307,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		streamRecorders[caseIndex] = streamRecorder
 
 		// Run builds the gRPC client from NewWatcher's readAsParty.
-		w := NewWatcher(ledgerAddr, tc.packageID, tc.readAsParty, AuthConfig{}, true, msgC, obsvReqC)
+		w := NewWatcher(ledgerAddr, acceptedPackageIDsOrAny(t, tc.packageID), tc.readAsParty, AuthConfig{}, true, msgC, obsvReqC)
 		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
 			if err := supervisor.Run(ctx, "canton", w.Run); err != nil {

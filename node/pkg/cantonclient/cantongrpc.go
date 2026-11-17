@@ -209,7 +209,7 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 		}
 		if !templateMatches(ex.GetTemplateId(), tmpl) {
 			if templateNameMatches(ex.GetTemplateId(), tmpl) {
-				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.PackageID, logger)
+				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.AcceptedPackageIDs, logger)
 			}
 			continue
 		}
@@ -232,14 +232,14 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 	return out
 }
 
-// templateMatches compares an event's template id against the configured filter.
-// PackageID may be empty in the filter to match any package version (Daml
-// package upgrades change the package id while preserving module/entity).
+// templateMatches compares an event's template id against the configured
+// filter. The event carries the executing package id, which a Daml package
+// upgrade changes while module and entity stay the same.
 func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 	if id == nil {
 		return false
 	}
-	if tmpl.PackageID != "" && id.GetPackageId() != tmpl.PackageID {
+	if !tmpl.AcceptedPackageIDs.Accepts(id.GetPackageId()) {
 		return false
 	}
 	return templateNameMatches(id, tmpl)

@@ -10,7 +10,12 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
-const testGovernanceParty = "guardianGovernance::1220abcd"
+const (
+	testGovernanceParty  = "guardianGovernance::1220abcd"
+	testPrimaryPackageID = "1111111111111111111111111111111111111111111111111111111111111111"
+	testNextPackageID    = "2222222222222222222222222222222222222222222222222222222222222222"
+	testOtherPackageID   = "3333333333333333333333333333333333333333333333333333333333333333"
+)
 
 func createWith(t *testing.T, pkgID string, env common.Environment) error {
 	t.Helper()
@@ -19,12 +24,18 @@ func createWith(t *testing.T, pkgID string, env common.Environment) error {
 
 func createWithReadAs(t *testing.T, pkgID string, readAsParty string, env common.Environment) error {
 	t.Helper()
+	return createWithPackageIDs(t, pkgID, "", readAsParty, env)
+}
+
+func createWithPackageIDs(t *testing.T, primaryPackageID string, nextPackageID string, readAsParty string, env common.Environment) error {
+	t.Helper()
 	wc := &WatcherConfig{
-		NetworkID:   "canton",
-		ChainID:     vaa.ChainIDCanton,
-		Rpc:         "canton:6865",
-		PackageID:   pkgID,
-		ReadAsParty: readAsParty,
+		NetworkID:     "canton",
+		ChainID:       vaa.ChainIDCanton,
+		Rpc:           "canton:6865",
+		PackageID:     primaryPackageID,
+		PackageIDNext: nextPackageID,
+		ReadAsParty:   readAsParty,
 	}
 	_, _, err := wc.Create(
 		make(chan *common.MessagePublication, 1),
@@ -50,22 +61,57 @@ func TestCreateRequiresPackageIDOutsideDevMode(t *testing.T) {
 
 	// A pinned package id is accepted everywhere.
 	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWith(t, "abc123", env), "pinned packageID must be accepted in %s", env)
+		require.NoError(t, createWith(t, testPrimaryPackageID, env), "pinned packageID must be accepted in %s", env)
+	}
+}
+
+func TestCreateValidatesCorePackageIDs(t *testing.T) {
+	cases := []struct {
+		name             string
+		primaryPackageID string
+		nextPackageID    string
+		env              common.Environment
+		wantErr          string
+	}{
+		{name: "valid single", primaryPackageID: testPrimaryPackageID, env: common.MainNet},
+		{name: "valid pair", primaryPackageID: testPrimaryPackageID, nextPackageID: testNextPackageID, env: common.MainNet},
+		{name: "valid pair in dev mode", primaryPackageID: testPrimaryPackageID, nextPackageID: testNextPackageID, env: common.UnsafeDevNet},
+		{name: "duplicate", primaryPackageID: testPrimaryPackageID, nextPackageID: testPrimaryPackageID, env: common.MainNet, wantErr: "must differ"},
+		{name: "malformed primary", primaryPackageID: "abc123", env: common.MainNet, wantErr: "primary core package id"},
+		{name: "malformed primary in dev mode", primaryPackageID: "pkg", env: common.UnsafeDevNet, wantErr: "primary core package id"},
+		{name: "uppercase primary", primaryPackageID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", env: common.MainNet, wantErr: "primary core package id"},
+		{name: "malformed next", primaryPackageID: testPrimaryPackageID, nextPackageID: "abc123", env: common.MainNet, wantErr: "next core package id"},
+		{name: "three ids", primaryPackageID: testPrimaryPackageID, nextPackageID: testNextPackageID + "," + testOtherPackageID, env: common.MainNet, wantErr: "next core package id"},
+		{name: "three ids in primary", primaryPackageID: testPrimaryPackageID + "," + testNextPackageID, nextPackageID: testOtherPackageID, env: common.MainNet, wantErr: "primary core package id"},
+		{name: "missing primary outside dev mode", nextPackageID: testNextPackageID, env: common.MainNet, wantErr: "PackageID must be set"},
+		{name: "missing primary in testnet", nextPackageID: testNextPackageID, env: common.TestNet, wantErr: "PackageID must be set"},
+		{name: "next without primary in dev mode", nextPackageID: testNextPackageID, env: common.UnsafeDevNet, wantErr: "primary core package id"},
+		{name: "wildcard in dev mode", env: common.UnsafeDevNet},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := createWithPackageIDs(t, tc.primaryPackageID, tc.nextPackageID, testGovernanceParty, tc.env)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
 	}
 }
 
 // TestCreateRequiresReadAsPartyOutsideDevMode: the wildcard stream is dev-only.
 func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
 	for _, env := range []common.Environment{common.MainNet, common.TestNet} {
-		err := createWithReadAs(t, "abc123", "", env)
+		err := createWithReadAs(t, testPrimaryPackageID, "", env)
 		require.Error(t, err, "empty readAsParty must be rejected in %s", env)
 		assert.Contains(t, err.Error(), "ReadAsParty")
 	}
 
-	require.NoError(t, createWithReadAs(t, "abc123", "", common.UnsafeDevNet))
+	require.NoError(t, createWithReadAs(t, testPrimaryPackageID, "", common.UnsafeDevNet))
 
 	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWithReadAs(t, "abc123", testGovernanceParty, env), "readAsParty must be accepted in %s", env)
+		require.NoError(t, createWithReadAs(t, testPrimaryPackageID, testGovernanceParty, env), "readAsParty must be accepted in %s", env)
 	}
 }
 
@@ -75,7 +121,7 @@ func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error
 		NetworkID:   "canton",
 		ChainID:     vaa.ChainIDCanton,
 		Rpc:         "canton:6865",
-		PackageID:   "pkg",
+		PackageID:   testPrimaryPackageID,
 		ReadAsParty: testGovernanceParty,
 		Auth:        auth,
 	}

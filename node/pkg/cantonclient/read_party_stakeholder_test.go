@@ -12,7 +12,7 @@ import (
 func TestReadPartySignsExercisedEmitter(t *testing.T) {
 	realTransientEmitter := emitterCreatedEvent("emitter-transient", pinnedPackageID, "Emitter", realEmitterSignatories, nil).GetCreated()
 	unpinnedTmpl := pinnedTmpl
-	unpinnedTmpl.PackageID = ""
+	unpinnedTmpl.AcceptedPackageIDs = AcceptAnyPackageID()
 	cases := []struct {
 		name          string
 		consuming     bool

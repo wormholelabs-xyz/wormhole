@@ -16,11 +16,12 @@ import (
 )
 
 // TemplateID identifies a Daml template (or the template whose choice we filter
-// for) on the Ledger API. It maps to com.daml.ledger.api.v2.Identifier.
+// for) on the Ledger API: module and entity, executed by one of
+// AcceptedPackageIDs. It maps to com.daml.ledger.api.v2.Identifier.
 type TemplateID struct {
-	PackageID  string
-	ModuleName string
-	EntityName string
+	AcceptedPackageIDs AcceptedPackageIDs
+	ModuleName         string
+	EntityName         string
 }
 
 // MaxEmitterID is Wormhole.Core.State.maxEmitterId (2^53 - 1), pinned by TestMaxEmitterIDMatchesDaml.

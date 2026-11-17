@@ -67,6 +67,7 @@ type fakeClient struct {
 	byUpdateID             map[cantonclient.UpdateID]cantonclient.CantonTransaction
 	getTransactionErr      error
 	getTransactionRequests []cantonclient.UpdateID
+	getTransactionTmpl     cantonclient.TemplateID // template filter of the latest GetTransactionByUpdateID
 
 	subCalls   int
 	subBegin   int64                   // beginExclusive of the latest SubscribeUpdates
@@ -114,10 +115,11 @@ func (f *fakeClient) SubscribeUpdates(_ context.Context, begin int64, tmpl canto
 	return sub, nil
 }
 
-func (f *fakeClient) GetTransactionByUpdateID(_ context.Context, updateID cantonclient.UpdateID, _ cantonclient.TemplateID, _ string) (cantonclient.CantonTransaction, error) {
+func (f *fakeClient) GetTransactionByUpdateID(_ context.Context, updateID cantonclient.UpdateID, tmpl cantonclient.TemplateID, _ string) (cantonclient.CantonTransaction, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.getTransactionRequests = append(f.getTransactionRequests, updateID)
+	f.getTransactionTmpl = tmpl
 	if f.getTransactionErr != nil {
 		return cantonclient.CantonTransaction{}, f.getTransactionErr
 	}
@@ -126,6 +128,12 @@ func (f *fakeClient) GetTransactionByUpdateID(_ context.Context, updateID canton
 		return cantonclient.CantonTransaction{}, fmt.Errorf("GetUpdateById(%s): UPDATE_NOT_FOUND", updateID)
 	}
 	return transaction, nil
+}
+
+func (f *fakeClient) latestGetTransactionTmpl() cantonclient.TemplateID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.getTransactionTmpl
 }
 
 func (f *fakeClient) getTransactionRequestCount() int {
@@ -177,7 +185,7 @@ func (f *fakeClient) subscribeArgs() (int64, cantonclient.TemplateID, string) {
 }
 
 func testWatcher(msgC chan<- *common.MessagePublication) *Watcher {
-	return NewWatcher("canton:5011", "pkg123", "Operator::ns", AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+	return NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), "Operator::ns", AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
 }
 
 func TestProcessMessageBuildsObservation(t *testing.T) {
@@ -393,7 +401,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewWatcher("localhost:0", "", "", tc.auth, tc.unsafeDevMode, nil, nil)
+			w := NewWatcher("localhost:0", cantonclient.AcceptAnyPackageID(), "", tc.auth, tc.unsafeDevMode, nil, nil)
 			w.extraLedgerDialOpts = tc.extraDialOpts
 			dialOpts := w.cantonDialOpts(context.Background())
 			require.Len(t, dialOpts, tc.wantDialOptsCount)

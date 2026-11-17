@@ -59,7 +59,7 @@ func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEven
 	if exercised.GetAcsDelta() {
 		return true
 	}
-	if readAsParty == "" || tmpl.PackageID == "" {
+	if readAsParty == "" || tmpl.AcceptedPackageIDs.MatchesAnyPackage() {
 		return false
 	}
 	created := createdEvents[exercised.GetContractId()]

@@ -23,7 +23,7 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w := NewWatcher("canton:0", "pkg", "", AuthConfig{}, true, msgC, obsvReqC)
+	w := NewWatcher("canton:0", testUpgradeWindowPackageIDs(t), "", AuthConfig{}, true, msgC, obsvReqC)
 	w.cantonClient = fake // inject the fake via the DI seam
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -36,6 +36,13 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 		return nil
 	})
 	return msgC, obsvReqC
+}
+
+func testUpgradeWindowPackageIDs(t *testing.T) cantonclient.AcceptedPackageIDs {
+	t.Helper()
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(testPrimaryPackageID, testNextPackageID)
+	require.NoError(t, err)
+	return accepted
 }
 
 func sampleEvent(participantOffset int64) cantonclient.CantonMessageEvent {
@@ -67,7 +74,7 @@ func TestRunEmitsObservation(t *testing.T) {
 	begin, tmpl, choice := fake.subscribeArgs()
 	assert.Equal(t, int64(77), begin)
 	assert.Equal(t, "PublishMessage", choice)
-	assert.Equal(t, cantonclient.TemplateID{PackageID: "pkg", ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}, tmpl)
+	assert.Equal(t, cantonclient.TemplateID{AcceptedPackageIDs: testUpgradeWindowPackageIDs(t), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}, tmpl)
 
 	fake.pushEvent(sampleEvent(100))
 
@@ -118,6 +125,8 @@ func TestRunReobservation(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no reobservation emitted")
 	}
+	_, streamTmpl, _ := fake.subscribeArgs()
+	assert.Equal(t, streamTmpl, fake.latestGetTransactionTmpl(), "reobservation must use the stream's accepted package ids")
 }
 
 // TestRunResubscribesOnStreamError proves a terminal subscription error (which

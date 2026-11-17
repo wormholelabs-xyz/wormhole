@@ -127,10 +127,10 @@ func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
 }
 
 type Watcher struct {
-	cantonRPC   string
-	packageID   string
-	readAsParty string
-	auth        AuthConfig
+	cantonRPC          string
+	acceptedPackageIDs cantonclient.AcceptedPackageIDs
+	readAsParty        string
+	auth               AuthConfig
 
 	unsafeDevMode bool
 
@@ -170,7 +170,7 @@ var (
 // NewWatcher creates a new Canton watcher.
 func NewWatcher(
 	cantonRPC string,
-	packageID string,
+	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
 	readAsParty string,
 	auth AuthConfig,
 	unsafeDevMode bool,
@@ -178,23 +178,24 @@ func NewWatcher(
 	obsvReqC <-chan *gossipv1.ObservationRequest,
 ) *Watcher {
 	return &Watcher{
-		cantonRPC:     cantonRPC,
-		packageID:     packageID,
-		readAsParty:   readAsParty,
-		auth:          auth,
-		unsafeDevMode: unsafeDevMode,
-		msgChan:       msgC,
-		obsvReqC:      obsvReqC,
-		readinessSync: common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
+		cantonRPC:          cantonRPC,
+		acceptedPackageIDs: acceptedPackageIDs,
+		readAsParty:        readAsParty,
+		auth:               auth,
+		unsafeDevMode:      unsafeDevMode,
+		msgChan:            msgC,
+		obsvReqC:           obsvReqC,
+		readinessSync:      common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
 	}
 }
 
-// templateID is the Ledger API filter for the core bridge's Emitter template.
+// templateID is the filter for the core bridge's Emitter template, shared by
+// the stream and reobservation.
 func (e *Watcher) templateID() cantonclient.TemplateID {
 	return cantonclient.TemplateID{
-		PackageID:  e.packageID,
-		ModuleName: publishMessageModule,
-		EntityName: publishMessageEntity,
+		AcceptedPackageIDs: e.acceptedPackageIDs,
+		ModuleName:         publishMessageModule,
+		EntityName:         publishMessageEntity,
 	}
 }
 
@@ -321,7 +322,7 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 
 func (e *Watcher) Run(ctx context.Context) error {
 	p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
-		ContractAddress: e.packageID,
+		ContractAddress: e.acceptedPackageIDs.PrimaryPackageIDHex(),
 	})
 
 	logger := supervisor.Logger(ctx)
@@ -329,7 +330,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	logger.Info("Starting watcher",
 		zap.String("watcher_name", "canton"),
 		zap.String("cantonRPC", e.cantonRPC),
-		zap.String("packageID", e.packageID),
+		zap.Stringer("acceptedPackageIDs", e.acceptedPackageIDs),
 		zap.String("readAsParty", e.readAsParty),
 		zap.Bool("unsafeDevMode", e.unsafeDevMode),
 	)
@@ -418,7 +419,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 					logger.Debug("canton_getLedgerEnd", zap.Int64("result", offset))
 					p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
 						Height:          offset,
-						ContractAddress: e.packageID,
+						ContractAddress: e.acceptedPackageIDs.PrimaryPackageIDHex(),
 					})
 				}
 				readiness.SetReady(e.readinessSync)

@@ -15,13 +15,22 @@ import (
 )
 
 const (
-	pinnedPackageID    = "core-package"
-	lookalikePackageID = "lookalike-package"
-	governanceParty    = "guardianGovernance::1220abcd"
-	otherUpdateIDHex   = "122053276773593cd4d44463b8a459f24fa089e5abd4a4b0b0103153e5898d59f072"
+	pinnedPackageID     = "1111111111111111111111111111111111111111111111111111111111111111"
+	nextPinnedPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
+	lookalikePackageID  = "9999999999999999999999999999999999999999999999999999999999999999"
+	governanceParty     = "guardianGovernance::1220abcd"
+	otherUpdateIDHex    = "122053276773593cd4d44463b8a459f24fa089e5abd4a4b0b0103153e5898d59f072"
 )
 
-var pinnedTmpl = TemplateID{PackageID: pinnedPackageID, ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+var pinnedTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(pinnedPackageID, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+
+func mustParseAcceptedPackageIDs(primaryHex string, nextHex string) AcceptedPackageIDs {
+	accepted, err := ParseAcceptedPackageIDs(primaryHex, nextHex)
+	if err != nil {
+		panic(err)
+	}
+	return accepted
+}
 
 // fakeUpdateByIDService records the GetUpdateById request and returns a scripted response.
 type fakeUpdateByIDService struct {
@@ -51,6 +60,26 @@ func transactionResponse(updateIDHex string, offset int64, events ...*apiv2.Even
 		Offset:   offset,
 		Events:   events,
 	}}}
+}
+
+func TestGetTransactionByUpdateIDAcceptsBothWindowPackages(t *testing.T) {
+	updateID, err := ParseUpdateID(sampleUpdateIDHex)
+	require.NoError(t, err)
+	service := &fakeUpdateByIDService{response: transactionResponse(sampleUpdateIDHex, 590,
+		publishMessageEvent(pinnedPackageID, 5),
+		publishMessageEvent(nextPinnedPackageID, 6),
+		publishMessageEvent(lookalikePackageID, 7),
+	)}
+	client := &grpcClient{update: service, readAsParty: governanceParty, logger: zap.NewNop()}
+	countBefore := unpinnedPublishCount(lookalikePackageID)
+
+	transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, upgradeWindowTmpl, "PublishMessage")
+	require.NoError(t, err)
+
+	require.Len(t, transaction.Messages, 2, "only the look-alike package event must be filtered")
+	assert.Equal(t, uint64(5), transaction.Messages[0].Sequence)
+	assert.Equal(t, uint64(6), transaction.Messages[1].Sequence)
+	assert.Equal(t, float64(1), unpinnedPublishCount(lookalikePackageID)-countBefore)
 }
 
 func TestGetTransactionByUpdateIDAppliesPartyFilterAndPackagePin(t *testing.T) {

@@ -3,6 +3,7 @@ package canton
 import (
 	"fmt"
 
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/query"
@@ -22,6 +23,11 @@ type WatcherConfig struct {
 	// spoofing risk, so Create REQUIRES it outside unsafe dev mode. (Daml
 	// package upgrades change the package-id, so it must be updated on upgrade.)
 	PackageID string
+	// PackageIDNext is a second accepted wormhole-core package id for the
+	// upgrade window (canton/README.md section 7.5). Empty outside the window.
+	// SECURITY: it must be a guardian-approved, vetted core version; messages
+	// it executes are signed.
+	PackageIDNext string
 	// ReadAsParty narrows the update stream and reobservation lookups to the
 	// guardianGovernance party (signatory of CoreState, observer of every
 	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
@@ -60,6 +66,13 @@ func (wc *WatcherConfig) Create(
 	if !devMode && wc.PackageID == "" {
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
 	}
+	acceptedPackageIDs, err := wc.acceptedPackageIDs()
+	if err != nil {
+		return nil, nil, err
+	}
+	if !devMode && acceptedPackageIDs.MatchesAnyPackage() {
+		return nil, nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
+	}
 
 	// SECURITY: outside unsafe dev mode the stream MUST be narrowed to the
 	// guardianGovernance party. Every Emitter it observes pins that same party
@@ -82,7 +95,7 @@ func (wc *WatcherConfig) Create(
 
 	watcher := NewWatcher(
 		wc.Rpc,
-		wc.PackageID,
+		acceptedPackageIDs,
 		wc.ReadAsParty,
 		wc.Auth,
 		devMode,
@@ -91,4 +104,17 @@ func (wc *WatcherConfig) Create(
 	)
 
 	return watcher.Run, nil, nil
+}
+
+// acceptedPackageIDs is the dev-mode wildcard when both ids are empty; Create
+// rejects that case outside unsafe dev mode before calling it.
+func (wc *WatcherConfig) acceptedPackageIDs() (cantonclient.AcceptedPackageIDs, error) {
+	if wc.PackageID == "" && wc.PackageIDNext == "" {
+		return cantonclient.AcceptAnyPackageID(), nil
+	}
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(wc.PackageID, wc.PackageIDNext)
+	if err != nil {
+		return cantonclient.AcceptedPackageIDs{}, fmt.Errorf("canton: %w", err)
+	}
+	return acceptedPackageIDs, nil
 }
