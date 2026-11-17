@@ -15,6 +15,7 @@ import DA.Optional (fromSome)
 import DA.Text qualified as T
 import DA.Time (seconds)
 import Wormhole.Core.Bytes
+import Wormhole.Core.Governance
 import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
 import Wormhole.Core.Setup
 import Wormhole.Core.State
@@ -334,6 +335,64 @@ testRedTeamA9GovernancePayloadExactLength = do
       encodedVAA = rtGuardianSetUpgradeTrailingByte, pubKeys = set0PubKeys
   checkNoAttackAccepted "A9 governance payload with a trailing byte"
     ([ "SetMessageFee" | isAttackAccepted setFeeResult ] <> [ "GuardianSetUpgrade" | isAttackAccepted upgradeResult ])
+
+-- | Runs 'parseGovernance' in a transaction so its abort is a submit error.
+template GovernancePacketParser
+  with
+    parser : Party
+  where
+    signatory parser
+
+    nonconsuming choice ParseGovernancePacket : GovernanceAction
+      with
+        packet : Bytes
+      controller parser
+      do pure (parseGovernance packet)
+
+coreGovernanceHeader : Int -> Bytes
+coreGovernanceHeader action = coreModule <> intToBytesN action 1 <> intToBytesN 75 2
+
+guardianSetUpgradePacket : Int -> [Bytes20] -> Bytes
+guardianSetUpgradePacket declaredKeyCount guardianKeys =
+  coreGovernanceHeader 2 <> intToBytesN 1 4 <> intToBytesN declaredKeyCount 1 <> mconcat guardianKeys
+
+-- | Exact packet lengths of sdk/vaa/payloads.go: ContractUpgrade 67,
+-- GuardianSetUpgrade 40 + 20 * keys, SetMessageFee 67, TransferFees 99.
+testParseGovernanceRequiresExactPacketLength : Script ()
+testParseGovernanceRequiresExactPacketLength = do
+  parser <- allocateParty "GovernancePacketParser"
+  parserCid <- submit parser do createCmd GovernancePacketParser with parser
+  let guardianKeyA = mconcat (replicate 20 "aa")
+      guardianKeyB = mconcat (replicate 20 "bb")
+      contractUpgrade = coreGovernanceHeader 1 <> mconcat (replicate 32 "c1")
+      setMessageFee = coreGovernanceHeader 3 <> intToBytesN 7 32
+      transferFees = coreGovernanceHeader 4 <> intToBytesN 9 32 <> mconcat (replicate 32 "d4")
+      parsePacket packet = trySubmit parser do exerciseCmd parserCid ParseGovernancePacket with packet
+      acceptedCases =
+        [ (contractUpgrade, ContractUpgrade with chain = 75, newContract = mconcat (replicate 32 "c1"))
+        , (guardianSetUpgradePacket 1 [guardianKeyA], GuardianSetUpgrade with chain = 75, newIndex = 1, newKeys = [guardianKeyA])
+        , (guardianSetUpgradePacket 2 [guardianKeyA, guardianKeyB], GuardianSetUpgrade with chain = 75, newIndex = 1, newKeys = [guardianKeyA, guardianKeyB])
+        , (setMessageFee, SetMessageFee with chain = 75, fee = 7)
+        , (transferFees, TransferFees with chain = 75, amount = 9, recipient = mconcat (replicate 32 "d4"))
+        ]
+      rejectedCases =
+        [ ("ContractUpgrade plus one byte", "ContractUpgrade packet must be 67 bytes", contractUpgrade <> "00")
+        , ("ContractUpgrade minus one byte", "sliceBytes", T.take (66 * 2) contractUpgrade)
+        , ("GuardianSetUpgrade plus one byte", "GuardianSetUpgrade packet must be 60 bytes", guardianSetUpgradePacket 1 [guardianKeyA] <> "00")
+        , ("GuardianSetUpgrade plus one undeclared key", "GuardianSetUpgrade packet must be 60 bytes", guardianSetUpgradePacket 1 [guardianKeyA, guardianKeyB])
+        , ("GuardianSetUpgrade missing a declared key", "sliceBytes", guardianSetUpgradePacket 2 [guardianKeyA])
+        , ("SetMessageFee plus one byte", "SetMessageFee packet must be 67 bytes", setMessageFee <> "00")
+        , ("SetMessageFee plus one nibble", "SetMessageFee packet must be 67 bytes", setMessageFee <> "0")
+        , ("SetMessageFee minus one byte", "sliceBytes", T.take (66 * 2) setMessageFee)
+        , ("TransferFees plus one byte", "TransferFees packet must be 99 bytes", transferFees <> "00")
+        , ("TransferFees minus one byte", "sliceBytes", T.take (98 * 2) transferFees)
+        ]
+  forA_ acceptedCases \(packet, expectedAction) -> do
+    parsedAction <- submit parser do exerciseCmd parserCid ParseGovernancePacket with packet
+    parsedAction === expectedAction
+  forA_ rejectedCases \(attack, expectedSubstring, packet) -> do
+    parseResult <- parsePacket packet
+    checkAttackFailedWith attack expectedSubstring parseResult
 
 -- | An uppercase re-encoding of a consumed VAA has the same digest: a replay
 -- on both the governance and the integrator path.

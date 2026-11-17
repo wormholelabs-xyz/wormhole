@@ -480,7 +480,10 @@ VAA and dispatches on the parsed action. Module identifier is **`"Core"`**
 4. `chain == chainId` (or `0` for chain-independent actions);
 5. `digest ∉ consumedGovernance` — then it is inserted (replay protection).
 
-Supported actions (parity with `GovernanceStructs.sol`):
+Supported actions (parity with `GovernanceStructs.sol`). Each packet must have
+the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
+ContractUpgrade and SetMessageFee, `40 + 20·len` for GuardianSetUpgrade, and 99
+for TransferFees.
 
 | Action                 | ID  | Payload (after 32-byte module + 1-byte action)   | Behavior                                                                                                                                                                                   |
 | ---------------------- | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
