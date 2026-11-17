@@ -47,21 +47,41 @@ const RetiringPackageDeadlineLayout = "2006-01-02T15:04:05Z"
 // transactions with a record time strictly before acceptedBeforeRecordTime.
 type RetiringPackageID struct {
 	packageID                PackageID
+	expectedVersion          CorePackageVersion
 	acceptedBeforeRecordTime time.Time
 }
 
 func (retiring RetiringPackageID) PackageID() PackageID { return retiring.packageID }
+
+func (retiring RetiringPackageID) ExpectedVersion() CorePackageVersion {
+	return retiring.expectedVersion
+}
 
 // AcceptedBeforeRecordTime is the exclusive UTC deadline.
 func (retiring RetiringPackageID) AcceptedBeforeRecordTime() time.Time {
 	return retiring.acceptedBeforeRecordTime
 }
 
-// RetiringPackageConfig is the operator input for the retiring id. Both fields
-// are empty outside an upgrade window.
+// CurrentPackageConfig is the operator input for the current id. Version is
+// empty only in unsafe dev mode.
+type CurrentPackageConfig struct {
+	PackageIDHex string
+	Version      string
+}
+
+// RetiringPackageConfig is the operator input for the retiring id. Every field
+// is empty outside an upgrade window. Version is empty only in unsafe dev mode.
 type RetiringPackageConfig struct {
 	PackageIDHex     string
 	AcceptedUntilUTC string
+	Version          string
+}
+
+// PinnedCorePackage is one pinned id with the version its vetting metadata must show.
+type PinnedCorePackage struct {
+	Role            AcceptedPackageRole
+	PackageID       PackageID
+	ExpectedVersion CorePackageVersion
 }
 
 // AcceptedPackageIDs is the set of wormhole-core package ids whose
@@ -87,8 +107,9 @@ func (anyPackageSet) verdictForPublish(string, time.Time) PublishPackageVerdict 
 
 // pinnedPackageSet is a current id plus, during an upgrade window, one retiring id.
 type pinnedPackageSet struct {
-	current  PackageID
-	retiring *RetiringPackageID
+	current                PackageID
+	currentExpectedVersion CorePackageVersion
+	retiring               *RetiringPackageID
 }
 
 func (pinned pinnedPackageSet) verdictForPublish(executingPackageIDHex string, recordTime time.Time) PublishPackageVerdict {
@@ -162,17 +183,21 @@ func (verdict PublishPackageVerdict) AcceptedRole() (AcceptedPackageRole, bool) 
 // upgrade window; otherwise it is a second id with an accepted-until deadline
 // no more than MaxRetiringPackageWindow after startupWallClock. A deadline in
 // the past is valid: it keeps pre-deadline messages recoverable.
-func ParseAcceptedPackageIDs(currentHex string, retiring RetiringPackageConfig, startupWallClock time.Time) (AcceptedPackageIDs, error) {
-	current, err := ParsePackageID(currentHex)
+func ParseAcceptedPackageIDs(currentConfig CurrentPackageConfig, retiring RetiringPackageConfig, startupWallClock time.Time) (AcceptedPackageIDs, error) {
+	current, err := ParsePackageID(currentConfig.PackageIDHex)
 	if err != nil {
 		return AcceptedPackageIDs{}, fmt.Errorf("current core package id: %w", err)
 	}
-	pinned := pinnedPackageSet{current: current}
-	if retiring.PackageIDHex == "" && retiring.AcceptedUntilUTC == "" {
+	currentExpectedVersion, err := parseOptionalCorePackageVersion(currentConfig.Version)
+	if err != nil {
+		return AcceptedPackageIDs{}, fmt.Errorf("current core package version: %w", err)
+	}
+	pinned := pinnedPackageSet{current: current, currentExpectedVersion: currentExpectedVersion}
+	if retiring == (RetiringPackageConfig{}) {
 		return AcceptedPackageIDs{set: pinned}, nil
 	}
 	if retiring.PackageIDHex == "" {
-		return AcceptedPackageIDs{}, fmt.Errorf("an accepted-until deadline requires a retiring core package id")
+		return AcceptedPackageIDs{}, fmt.Errorf("an accepted-until deadline or a version requires a retiring core package id")
 	}
 	if retiring.AcceptedUntilUTC == "" {
 		return AcceptedPackageIDs{}, fmt.Errorf("a retiring core package id requires an accepted-until deadline")
@@ -188,12 +213,24 @@ func ParseAcceptedPackageIDs(currentHex string, retiring RetiringPackageConfig, 
 	if err != nil {
 		return AcceptedPackageIDs{}, err
 	}
+	retiringExpectedVersion, err := parseOptionalCorePackageVersion(retiring.Version)
+	if err != nil {
+		return AcceptedPackageIDs{}, fmt.Errorf("retiring core package version: %w", err)
+	}
 	if acceptedBeforeRecordTime.Sub(startupWallClock) > MaxRetiringPackageWindow {
 		return AcceptedPackageIDs{}, fmt.Errorf("accepted-until deadline %s is more than %s after startup %s",
 			retiring.AcceptedUntilUTC, MaxRetiringPackageWindow, startupWallClock.UTC().Format(RetiringPackageDeadlineLayout))
 	}
-	pinned.retiring = &RetiringPackageID{packageID: retiringPackageID, acceptedBeforeRecordTime: acceptedBeforeRecordTime}
+	pinned.retiring = &RetiringPackageID{packageID: retiringPackageID, expectedVersion: retiringExpectedVersion, acceptedBeforeRecordTime: acceptedBeforeRecordTime}
 	return AcceptedPackageIDs{set: pinned}, nil
+}
+
+// parseOptionalCorePackageVersion maps "" to the zero version.
+func parseOptionalCorePackageVersion(versionText string) (CorePackageVersion, error) {
+	if versionText == "" {
+		return CorePackageVersion{}, nil
+	}
+	return ParseCorePackageVersion(versionText)
 }
 
 // parseRetiringPackageDeadline accepts exactly RetiringPackageDeadlineLayout.
@@ -238,6 +275,19 @@ func (accepted AcceptedPackageIDs) CurrentPackageID() (PackageID, bool) {
 		return PackageID{}, false
 	}
 	return pinned.current, true
+}
+
+// PinnedCorePackages lists the current id, then the retiring id; empty for the wildcard and the zero value.
+func (accepted AcceptedPackageIDs) PinnedCorePackages() []PinnedCorePackage {
+	pinned, isPinned := accepted.set.(pinnedPackageSet)
+	if !isPinned {
+		return nil
+	}
+	pinnedPackages := []PinnedCorePackage{{Role: AcceptedPackageRoleCurrent, PackageID: pinned.current, ExpectedVersion: pinned.currentExpectedVersion}}
+	if pinned.retiring != nil {
+		pinnedPackages = append(pinnedPackages, PinnedCorePackage{Role: AcceptedPackageRoleRetiring, PackageID: pinned.retiring.packageID, ExpectedVersion: pinned.retiring.expectedVersion})
+	}
+	return pinnedPackages
 }
 
 // RetiringPackageID is false outside an upgrade window.

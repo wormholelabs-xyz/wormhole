@@ -146,6 +146,11 @@ type CantonClient interface {
 	// SubscribeUpdates. Used for reobservation. Maps to UpdateService.GetUpdateById.
 	GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error)
 
+	// ListVettedPackageMetadata returns the vetting entries of packageIDs on
+	// every synchronizer this participant knows. Maps to
+	// PackageService.ListVettedPackages.
+	ListVettedPackageMetadata(ctx context.Context, packageIDs []PackageID) ([]VettedPackageMetadata, error)
+
 	// Close releases the underlying gRPC connection.
 	Close() error
 }

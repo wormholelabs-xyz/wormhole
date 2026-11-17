@@ -10,6 +10,7 @@ package canton
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -145,6 +146,9 @@ type Watcher struct {
 	// window. Written only by the data-pump goroutine.
 	lastOffset atomic.Int64
 
+	// packageMetadata holds which pinned roles passed the vetting metadata check.
+	packageMetadata packageMetadataVerification
+
 	// cantonClient is an interface; a nil check is fine for "not injected".
 	// Tests inject a fake; in production Run creates a gRPC client.
 	cantonClient cantonclient.CantonClient
@@ -234,6 +238,14 @@ func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPack
 	}
 	if acceptedPackageIDs.IsEmpty() {
 		return fmt.Errorf("canton: no accepted core package ids")
+	}
+	if unsafeDevMode {
+		return nil
+	}
+	for _, pinned := range acceptedPackageIDs.PinnedCorePackages() {
+		if pinned.ExpectedVersion.IsZero() {
+			return fmt.Errorf("canton: the %s core package id needs an expected version outside unsafe dev mode", pinned.Role)
+		}
 	}
 	return nil
 }
@@ -404,6 +416,12 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 	}
 
 	for _, msg := range txn.Messages {
+		if err := e.checkPublishPackageVerified(ctx, logger, client, msg.AcceptedPackageRole); err != nil {
+			logger.Error("canton_fetch_obvs_req dropped a message from an unverified core package",
+				zap.Stringer("updateId", updateID), zap.Error(err))
+			p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+			continue
+		}
 		e.processMessage(logger, cantonclient.CantonMessageEvent{
 			ParticipantOffset: txn.ParticipantOffset,
 			UpdateID:          txn.UpdateID,
@@ -461,6 +479,10 @@ func (e *Watcher) Run(ctx context.Context) error {
 	}
 	currentCantonHeight.Set(float64(ledgerEnd))
 
+	if err := e.refreshPackageMetadata(ctx, logger, client); err != nil {
+		return err
+	}
+
 	// First run streams from the current ledger end. Restarted runs resume from
 	// the last processed offset: Canton ends streams whose access token expired
 	// (~minutes with Keycloak), and resuming from ledger end would silently
@@ -498,6 +520,11 @@ func (e *Watcher) Run(ctx context.Context) error {
 			case subErr := <-subscription.Err():
 				return fmt.Errorf("canton_data_pump subscription error: %w", subErr)
 			case ev := <-eventChan:
+				// SECURITY: fail closed; the next Run resubscribes before this event.
+				if err := e.checkPublishPackageVerified(ctx, logger, client, ev.Message.AcceptedPackageRole); err != nil {
+					e.rewindResumeOffsetBefore(ev.ParticipantOffset)
+					return fmt.Errorf("canton_data_pump stopped at offset %d: %w", ev.ParticipantOffset, err)
+				}
 				e.processMessage(logger, ev, false)
 			}
 		}
@@ -505,6 +532,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 
 	// Ledger-offset poll: report height + readiness every 5s.
 	common.RunWithScissors(ctx, errC, "canton_block_height", func(ctx context.Context) error {
+		ticksSinceMetadataCheck := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -523,6 +551,17 @@ func (e *Watcher) Run(ctx context.Context) error {
 					})
 				}
 				readiness.SetReady(e.readinessSync)
+				ticksSinceMetadataCheck++
+				if ticksSinceMetadataCheck < packageMetadataRecheckTicks {
+					continue
+				}
+				ticksSinceMetadataCheck = 0
+				if err := e.refreshPackageMetadata(ctx, logger, client); err != nil {
+					if errors.Is(err, errPackageMetadataMismatched) {
+						return err
+					}
+					logger.Error("canton package metadata recheck failed", zap.Error(err))
+				}
 			}
 		}
 	})

@@ -32,6 +32,11 @@ type WatcherConfig struct {
 	// RetiringPackageAcceptedUntil is the exclusive record-time deadline for
 	// RetiringPackageID (RFC 3339 UTC, whole seconds). Required with it.
 	RetiringPackageAcceptedUntil string
+	// PackageVersion and RetiringPackageVersion are the wormhole-core versions
+	// (MAJOR.MINOR.PATCH) the participant's vetting metadata must show for
+	// PackageID and RetiringPackageID. Required outside unsafe dev mode.
+	PackageVersion         string
+	RetiringPackageVersion string
 	// ReadAsParty narrows the update stream and reobservation lookups to the
 	// guardianGovernance party (signatory of CoreState, observer of every
 	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
@@ -69,6 +74,12 @@ func (wc *WatcherConfig) Create(
 	// package id closes that spoofing surface.
 	if !devMode && wc.PackageID == "" {
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
+	}
+	if !devMode && wc.PackageID != "" && wc.PackageVersion == "" {
+		return nil, nil, fmt.Errorf("canton: PackageVersion must be set with PackageID outside unsafe dev mode")
+	}
+	if !devMode && wc.RetiringPackageID != "" && wc.RetiringPackageVersion == "" {
+		return nil, nil, fmt.Errorf("canton: RetiringPackageVersion must be set with RetiringPackageID outside unsafe dev mode")
 	}
 	acceptedPackageIDs, err := wc.acceptedPackageIDs(time.Now())
 	if err != nil {
@@ -116,14 +127,19 @@ func (wc *WatcherConfig) Create(
 // acceptedPackageIDs is the dev-mode wildcard when every package flag is
 // empty; Create rejects that case outside unsafe dev mode before calling it.
 func (wc *WatcherConfig) acceptedPackageIDs(startupWallClock time.Time) (cantonclient.AcceptedPackageIDs, error) {
+	current := cantonclient.CurrentPackageConfig{
+		PackageIDHex: wc.PackageID,
+		Version:      wc.PackageVersion,
+	}
 	retiring := cantonclient.RetiringPackageConfig{
 		PackageIDHex:     wc.RetiringPackageID,
 		AcceptedUntilUTC: wc.RetiringPackageAcceptedUntil,
+		Version:          wc.RetiringPackageVersion,
 	}
-	if wc.PackageID == "" && retiring == (cantonclient.RetiringPackageConfig{}) {
+	if current == (cantonclient.CurrentPackageConfig{}) && retiring == (cantonclient.RetiringPackageConfig{}) {
 		return cantonclient.AcceptAnyPackageID(), nil
 	}
-	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(wc.PackageID, retiring, startupWallClock)
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(current, retiring, startupWallClock)
 	if err != nil {
 		return cantonclient.AcceptedPackageIDs{}, fmt.Errorf("canton: %w", err)
 	}

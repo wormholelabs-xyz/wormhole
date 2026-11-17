@@ -36,10 +36,10 @@ func publishWithoutRecordTimeCount() float64 {
 }
 
 // upgradeWindowTmpl accepts pinnedPackageID and, before testRetiringDeadline, retiringPinnedPackageID.
-var upgradeWindowTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: pinnedPackageID}, retiringPinnedPackageID), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+var upgradeWindowTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(pinnedPackageID, retiringPinnedPackageID), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
 // rollbackTmpl is a rollback: the retiring id of upgradeWindowTmpl is current again.
-var rollbackTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: retiringPinnedPackageID}, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+var rollbackTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(retiringPinnedPackageID, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
 func TestMessagesFromTxCountsUnpinnedPublishes(t *testing.T) {
 	cases := []struct {

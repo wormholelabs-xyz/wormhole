@@ -24,6 +24,7 @@ type grpcClient struct {
 	conn        *grpc.ClientConn
 	state       apiv2.StateServiceClient
 	update      apiv2.UpdateServiceClient
+	packages    apiv2.PackageServiceClient
 	readAsParty string
 	logger      *zap.Logger
 }
@@ -52,6 +53,7 @@ func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, tra
 		conn:        conn,
 		state:       apiv2.NewStateServiceClient(conn),
 		update:      apiv2.NewUpdateServiceClient(conn),
+		packages:    apiv2.NewPackageServiceClient(conn),
 		readAsParty: readAsParty,
 		logger:      logger,
 	}, nil
@@ -74,6 +76,58 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("GetLedgerEnd: %w", err)
 	}
 	return resp.GetOffset(), nil
+}
+
+// maxVettedPackagePages bounds one ListVettedPackageMetadata call.
+const maxVettedPackagePages = 16
+
+func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs []PackageID) ([]VettedPackageMetadata, error) {
+	// An empty filter matches every vetted package.
+	if len(packageIDs) == 0 {
+		return nil, fmt.Errorf("ListVettedPackages: at least one package id is required")
+	}
+	packageIDHexes := make([]string, 0, len(packageIDs))
+	for _, packageID := range packageIDs {
+		if packageID.isZero() {
+			return nil, fmt.Errorf("ListVettedPackages: empty package id")
+		}
+		packageIDHexes = append(packageIDHexes, packageID.hexID)
+	}
+	var entries []VettedPackageMetadata
+	pageToken := ""
+	for pageIndex := 0; pageIndex < maxVettedPackagePages; pageIndex++ {
+		response, err := c.listVettedPackagesPage(ctx, packageIDHexes, pageToken)
+		if err != nil {
+			return nil, err
+		}
+		for _, vettedPackages := range response.GetVettedPackages() {
+			for _, vettedPackage := range vettedPackages.GetPackages() {
+				entries = append(entries, VettedPackageMetadata{
+					PackageID:      vettedPackage.GetPackageId(),
+					PackageName:    vettedPackage.GetPackageName(),
+					PackageVersion: vettedPackage.GetPackageVersion(),
+				})
+			}
+		}
+		pageToken = response.GetNextPageToken()
+		if pageToken == "" {
+			return entries, nil
+		}
+	}
+	return nil, fmt.Errorf("ListVettedPackages: more than %d pages", maxVettedPackagePages)
+}
+
+func (c *grpcClient) listVettedPackagesPage(ctx context.Context, packageIDHexes []string, pageToken string) (*apiv2.ListVettedPackagesResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
+	defer cancel()
+	response, err := c.packages.ListVettedPackages(ctx, &apiv2.ListVettedPackagesRequest{
+		PackageMetadataFilter: &apiv2.PackageMetadataFilter{PackageIds: packageIDHexes},
+		PageToken:             pageToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ListVettedPackages: %w", err)
+	}
+	return response, nil
 }
 
 // updateFormat builds the v2 UpdateFormat that selects transactions in

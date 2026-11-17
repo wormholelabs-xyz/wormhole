@@ -153,7 +153,9 @@ var (
 
 	cantonRPC                          *string
 	cantonPackageID                    *string
+	cantonPackageVersion               *string
 	cantonRetiringPackageID            *string
+	cantonRetiringPackageVersion       *string
 	cantonRetiringPackageAcceptedUntil *string
 	cantonReadAsParty                  *string
 	cantonAuthTokenURL                 *string
@@ -432,6 +434,8 @@ func init() {
 
 	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
 	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (64 lowercase hex). Required outside --unsafeDevMode; empty (dev mode only) matches any package")
+	cantonPackageVersion = NodeCmd.Flags().String("cantonPackageVersion", "", "wormhole-core version (MAJOR.MINOR.PATCH) that the participant's vetting metadata must show for --cantonPackageID. Required with it outside --unsafeDevMode")
+	cantonRetiringPackageVersion = NodeCmd.Flags().String("cantonRetiringPackageVersion", "", "wormhole-core version (MAJOR.MINOR.PATCH) that the participant's vetting metadata must show for --cantonRetiringPackageID. Required with it outside --unsafeDevMode")
 	cantonRetiringPackageID = NodeCmd.Flags().String("cantonRetiringPackageID", "", "Retiring wormhole-core package id (64 lowercase hex). Needs --cantonRetiringPackageAcceptedUntil. Guardian-approved ids only")
 	cantonRetiringPackageAcceptedUntil = NodeCmd.Flags().String("cantonRetiringPackageAcceptedUntil", "", "Exclusive record-time deadline for --cantonRetiringPackageID (RFC 3339 UTC, whole seconds, for example 2026-12-01T00:00:00Z). At most 7 days after startup")
 	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton guardianGovernance party the watcher reads as. Required outside --unsafeDevMode; empty (dev mode only) observes all parties on the participant")
@@ -1813,7 +1817,9 @@ func runNode(cmd *cobra.Command, args []string) {
 			ChainID:                      vaa.ChainIDCanton,
 			Rpc:                          *cantonRPC,
 			PackageID:                    *cantonPackageID,
+			PackageVersion:               *cantonPackageVersion,
 			RetiringPackageID:            *cantonRetiringPackageID,
+			RetiringPackageVersion:       *cantonRetiringPackageVersion,
 			RetiringPackageAcceptedUntil: *cantonRetiringPackageAcceptedUntil,
 			ReadAsParty:                  *cantonReadAsParty,
 			Auth: canton.AuthConfig{

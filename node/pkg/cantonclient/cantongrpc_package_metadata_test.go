@@ -47,7 +47,7 @@ func TestListVettedPackageMetadataPaginates(t *testing.T) {
 	retiringPackageID, err := ParsePackageID(retiringPackageIDHex)
 	require.NoError(t, err)
 	twoPages := map[string]*apiv2.ListVettedPackagesResponse{
-		"":      vettedPage("page-2", &apiv2.VettedPackage{PackageId: currentPackageIDHex, PackageName: CorePackageName, PackageVersion: "0.8.1"}),
+		"":       vettedPage("page-2", &apiv2.VettedPackage{PackageId: currentPackageIDHex, PackageName: CorePackageName, PackageVersion: "0.8.1"}),
 		"page-2": vettedPage("", &apiv2.VettedPackage{PackageId: retiringPackageIDHex, PackageName: CorePackageName, PackageVersion: "0.8.0"}),
 	}
 	endlessPages := map[string]*apiv2.ListVettedPackagesResponse{}

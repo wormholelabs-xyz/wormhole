@@ -437,7 +437,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := NewWatcher("localhost:0", testUpgradeWindowPackageIDs(t), "", tc.auth, tc.unsafeDevMode, nil, nil)
+			w, err := NewWatcher("localhost:0", testVersionedWindowPackageIDs(t), "", tc.auth, tc.unsafeDevMode, nil, nil)
 			require.NoError(t, err)
 			w.extraLedgerDialOpts = tc.extraDialOpts
 			dialOpts := w.cantonDialOpts(context.Background())
@@ -451,7 +451,9 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 }
 
 func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
-	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID, Version: testCurrentPackageVersion}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	currentOnlyWithoutVersion, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	cases := []struct {
 		name               string
@@ -461,8 +463,11 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 	}{
 		{name: "wildcard in dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), unsafeDevMode: true},
 		{name: "wildcard outside dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), wantErr: "unsafe dev mode only"},
-		{name: "pinned outside dev mode", acceptedPackageIDs: primaryOnlyPackageIDs},
-		{name: "upgrade window outside dev mode", acceptedPackageIDs: testUpgradeWindowPackageIDs(t)},
+		{name: "pinned outside dev mode", acceptedPackageIDs: currentOnlyPackageIDs},
+		{name: "upgrade window outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t)},
+		{name: "pinned without version outside dev mode", acceptedPackageIDs: currentOnlyWithoutVersion, wantErr: "needs an expected version"},
+		{name: "upgrade window without versions outside dev mode", acceptedPackageIDs: testUpgradeWindowPackageIDs(t), wantErr: "needs an expected version"},
+		{name: "pinned without version in dev mode", acceptedPackageIDs: currentOnlyWithoutVersion, unsafeDevMode: true},
 		{name: "empty set outside dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, wantErr: "no accepted"},
 		{name: "empty set in dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, unsafeDevMode: true, wantErr: "no accepted"},
 	}
