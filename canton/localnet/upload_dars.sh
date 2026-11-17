@@ -7,7 +7,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 readonly CANTON_PROJECT_DIR="${CANTON_PROJECT_DIR:-$REPO_ROOT/canton}"
 readonly DAR_PATHS=(
-  "$CANTON_PROJECT_DIR/core/.daml/dist/wormhole-core-0.6.0.dar"
+  "$CANTON_PROJECT_DIR/core/.daml/dist/wormhole-core-0.7.0.dar"
   "$CANTON_PROJECT_DIR/test/.daml/dist/wormhole-core-test-0.1.0.dar"
 )
 
