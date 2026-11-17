@@ -19,7 +19,7 @@ readonly HARNESS_STOP_SECONDS=60
 mkdir -p "$WATCHER_DIR"
 
 build_harness() {
-  (cd "$REPO_ROOT/node" && GOFLAGS=-mod=mod GOPROXY=off go test -c -tags localnet -o "$HARNESS_BINARY" ./pkg/watchers/canton)
+  (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go test -c -tags localnet -o "$HARNESS_BINARY" ./pkg/watchers/canton)
 }
 
 # run_harness <name> <reobserve-offsets> <max-seconds>: run in the background; files go to $WATCHER_DIR/<name>.*
