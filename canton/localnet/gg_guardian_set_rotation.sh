@@ -47,7 +47,7 @@ current_core_state() {
     | jq -ec 'if length == 1 then .[0].createArgument else error("expected one CoreState") end'
 }
 
-old_set_index="$(current_core_state | jq -r .guardianSetIndex)"
+old_set_index="$(current_core_state | jq -er .guardianSetIndex)"
 new_set_index=$((old_set_index + 1))
 run_sequence="$(date +%s)"
 echo "Rotate guardian set $old_set_index (keys $old_key_indices) to $new_set_index (keys $new_key_indices)"
@@ -55,16 +55,16 @@ echo "Rotate guardian set $old_set_index (keys $old_key_indices) to $new_set_ind
 upgrade_vaa="$(generate_vaa -kind guardian-set-upgrade -signing-set-index "$old_set_index" \
   -signing-key-indices "$old_key_indices" -new-set-index "$new_set_index" -new-key-indices "$new_key_indices" \
   -sequence "$run_sequence")"
-echo "Step 1: SubmitGovernanceVAA (GuardianSetUpgrade, digest $(jq -r .digestHex <<<"$upgrade_vaa"))"
+echo "Step 1: SubmitGovernanceVAA (GuardianSetUpgrade, digest $(jq -er .digestHex <<<"$upgrade_vaa"))"
 upgrade_transaction="$(submit_governance_vaa "guardian-set-upgrade-$run_sequence" \
-  "$(jq -r .vaaHex <<<"$upgrade_vaa")" "$(vaa_pub_keys_json "$upgrade_vaa")")"
+  "$(jq -er .vaaHex <<<"$upgrade_vaa")" "$(vaa_pub_keys_json "$upgrade_vaa")")"
 created_contract_id "$upgrade_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
-upgrade_record_time="$(jq -r .recordTime <<<"$upgrade_transaction")"
+upgrade_record_time="$(jq -er .recordTime <<<"$upgrade_transaction")"
 upgraded_state="$(current_core_state)"
 echo "  record time $upgrade_record_time"
-echo "  guardianSetIndex $(jq -r .guardianSetIndex <<<"$upgraded_state")"
+echo "  guardianSetIndex $(jq -er .guardianSetIndex <<<"$upgraded_state")"
 echo "  guardianSets $(jq -c .guardianSets <<<"$upgraded_state")"
-if [[ "$(jq -r .guardianSetIndex <<<"$upgraded_state")" != "$new_set_index" ]]; then
+if [[ "$(jq -er .guardianSetIndex <<<"$upgraded_state")" != "$new_set_index" ]]; then
   echo "FAIL: guardianSetIndex is not $new_set_index" >&2
   exit 1
 fi
@@ -73,7 +73,7 @@ echo "PASS: set $new_set_index is current; set $old_set_index expires at $old_se
 
 expect_verified() {
   local label="$1" vaa_json="$2" expected_set_index="$3" verify_transaction verified_set_index
-  verify_transaction="$(verify_vaa_as_operator "$label-$run_sequence" "$(jq -r .vaaHex <<<"$vaa_json")" "$(vaa_pub_keys_json "$vaa_json")")"
+  verify_transaction="$(verify_vaa_as_operator "$label-$run_sequence" "$(jq -er .vaaHex <<<"$vaa_json")" "$(vaa_pub_keys_json "$vaa_json")")"
   verified_set_index="$(jq -r '[.events[] | .ExercisedEvent? // empty | select(.choice == "ParseAndVerifyVAA") | .exerciseResult.guardianSetIndex][0]' <<<"$verify_transaction")"
   if [[ "$verified_set_index" != "$expected_set_index" ]]; then
     echo "FAIL: $label verified with guardianSetIndex $verified_set_index, expected $expected_set_index" >&2
@@ -114,13 +114,13 @@ echo "Step 4: governance VAA signed by the old set"
 old_set_governance="$(generate_vaa -kind set-message-fee -fee 0 -signing-set-index "$old_set_index" \
   -signing-key-indices "$old_key_indices" -sequence "$((run_sequence + 1))")"
 expect_rejected old-set-governance "governance: not signed by current guardian set" submit_governance_vaa "old-set-governance-$run_sequence" \
-  "$(jq -r .vaaHex <<<"$old_set_governance")" "$(vaa_pub_keys_json "$old_set_governance")"
+  "$(jq -er .vaaHex <<<"$old_set_governance")" "$(vaa_pub_keys_json "$old_set_governance")"
 
 echo "Step 5: VAA that names the new set, with old key $first_old_key at guardian index 0 (keys $forged_key_indices)"
 forged_new_set="$(generate_vaa -kind message -signing-set-index "$new_set_index" -signing-key-indices "$forged_key_indices" -sequence "$run_sequence")"
 expect_rejected new-set-index-old-keys "public key does not match guardian address at index 0" \
   verify_vaa_as_operator "new-set-index-old-keys-$run_sequence" \
-  "$(jq -r .vaaHex <<<"$forged_new_set")" "$(vaa_pub_keys_json "$forged_new_set")"
+  "$(jq -er .vaaHex <<<"$forged_new_set")" "$(vaa_pub_keys_json "$forged_new_set")"
 
 if [[ "$new_set_quorum" -lt 2 ]]; then
   echo "Step 6: skipped. The new set has $new_set_size guardian; quorum $new_set_quorum leaves no quorum - 1 case."
@@ -136,4 +136,4 @@ below_quorum_vaa="$(generate_vaa -kind message -signing-set-index "$new_set_inde
   -signer-positions "$below_quorum_positions" -sequence "$run_sequence")"
 expect_rejected new-set-below-quorum "no quorum: have $below_quorum_signers, need $new_set_quorum" \
   verify_vaa_as_operator "new-set-below-quorum-$run_sequence" \
-  "$(jq -r .vaaHex <<<"$below_quorum_vaa")" "$(vaa_pub_keys_json "$below_quorum_vaa")"
+  "$(jq -er .vaaHex <<<"$below_quorum_vaa")" "$(vaa_pub_keys_json "$below_quorum_vaa")"

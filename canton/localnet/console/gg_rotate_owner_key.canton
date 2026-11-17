@@ -3,11 +3,12 @@
 // Environment:
 //   GG_PARTY_ID                      guardianGovernance party id.
 //   GG_KEPT_OWNER_PUBKEY_1/2         DER SPKI Ed25519 public keys of the two owners that stay.
-//   GG_KEPT_OWNER_SIGN_CMD_1/2       Signer commands of those owners: "<CMD> <hashHex>" prints a hex signature.
+//   GG_KEPT_OWNER_SIGN_ARGV_1/2      Signer commands of those owners, each a JSON array of strings. The hash hex
+//                                    is appended as the last argument; stdout is a hex signature.
 //   GG_REMOVED_OWNER_PUBKEY          Public key of the owner to remove.
-//   GG_REMOVED_OWNER_SIGN_CMD        Signer command of that owner (used only for the negative check).
+//   GG_REMOVED_OWNER_SIGN_ARGV       Signer command of that owner (used only for the negative check).
 //   GG_ADDED_OWNER_PUBKEY            Public key of the new owner.
-//   GG_ADDED_OWNER_SIGN_CMD          Signer command of the new owner.
+//   GG_ADDED_OWNER_SIGN_ARGV         Signer command of the new owner.
 //   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS  Optional. "true" fails the rotation after the namespace change
 //                                    (rehearsal of a half-applied rotation and --resume).
 // A rerun after a partial failure skips the steps that are already effective.
@@ -23,26 +24,49 @@ import scala.sys.process._
 import scala.collection.immutable.Set
 import java.nio.file.{Files, Paths}
 
-def env(name: String): String =
+def requiredEnvironmentVariable(name: String): String =
   sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
 def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
-case class OwnerKey(publicKey: SigningPublicKey, signCmd: String) {
+// BEGIN owner signer block (same text in devnet/guardian_governance.canton and localnet/console/gg_rotate_owner_key.canton)
+val ed25519SignatureLengthBytes = 64
+val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
+def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
+  require(ed25519SignatureHexPattern.matches(signatureHex),
+    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
+  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
+  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
+  signatureBytes
+}
+// The signer argv is a JSON array: the program, then its arguments. The hash hex is appended as the last argument.
+def parseSignerArgv(variableName: String): Seq[String] = {
+  val signerArgv = io.circe.parser.decode[Vector[String]](requiredEnvironmentVariable(variableName)).fold(
+    decodeError => throw new RuntimeException(s"$variableName must be a JSON array of strings: ${decodeError.getMessage}"),
+    identity)
+  require(signerArgv.nonEmpty, s"$variableName is an empty array")
+  require(signerArgv.forall(_.nonEmpty), s"$variableName holds an empty argument")
+  signerArgv
+}
+def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String): ByteString =
+  parseEd25519SignatureHex((signerArgv :+ hashHex).!!.trim, signerDescription)
+// END owner signer block
+
+case class OwnerKey(publicKey: SigningPublicKey, signerArgv: Seq[String]) {
   val namespace: Namespace = Namespace(publicKey.fingerprint)
 }
-def loadOwner(pubVar: String, signVar: String): OwnerKey = {
-  val der = ByteString.copyFrom(Files.readAllBytes(Paths.get(env(pubVar))))
+def loadOwner(publicKeyVariable: String, signerArgvVariable: String): OwnerKey = {
+  val publicKeyDer = ByteString.copyFrom(Files.readAllBytes(Paths.get(requiredEnvironmentVariable(publicKeyVariable))))
   val publicKey = SigningPublicKey
-    .create(CryptoKeyFormat.DerX509Spki, der, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
-    .getOrElse(sys.error(s"invalid owner public key in $pubVar"))
-  OwnerKey(publicKey, env(signVar))
+    .create(CryptoKeyFormat.DerX509Spki, publicKeyDer, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .getOrElse(sys.error(s"invalid owner public key in $publicKeyVariable"))
+  OwnerKey(publicKey, parseSignerArgv(signerArgvVariable))
 }
 
-val partyId = PartyId.tryFromProtoPrimitive(env("GG_PARTY_ID"))
-val keptOwners = Seq(loadOwner("GG_KEPT_OWNER_PUBKEY_1", "GG_KEPT_OWNER_SIGN_CMD_1"), loadOwner("GG_KEPT_OWNER_PUBKEY_2", "GG_KEPT_OWNER_SIGN_CMD_2"))
-val removedOwner = loadOwner("GG_REMOVED_OWNER_PUBKEY", "GG_REMOVED_OWNER_SIGN_CMD")
-val addedOwner = loadOwner("GG_ADDED_OWNER_PUBKEY", "GG_ADDED_OWNER_SIGN_CMD")
+val partyId = PartyId.tryFromProtoPrimitive(requiredEnvironmentVariable("GG_PARTY_ID"))
+val keptOwners = Seq(loadOwner("GG_KEPT_OWNER_PUBKEY_1", "GG_KEPT_OWNER_SIGN_ARGV_1"), loadOwner("GG_KEPT_OWNER_PUBKEY_2", "GG_KEPT_OWNER_SIGN_ARGV_2"))
+val removedOwner = loadOwner("GG_REMOVED_OWNER_PUBKEY", "GG_REMOVED_OWNER_SIGN_ARGV")
+val addedOwner = loadOwner("GG_ADDED_OWNER_PUBKEY", "GG_ADDED_OWNER_SIGN_ARGV")
 require(keptOwners.map(_.namespace).distinct.size == 2, "kept owners must differ")
 require(!keptOwners.map(_.namespace).contains(removedOwner.namespace), "removed owner is also a kept owner")
 require(!(keptOwners :+ removedOwner).map(_.namespace).contains(addedOwner.namespace), "added owner is already an owner")
@@ -54,10 +78,10 @@ val store = TopologyStoreId.Synchronizer(synchronizerId)
 val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
 
 def externalSign(owner: OwnerKey, hash: Hash): Signature = {
-  val sigHex = (owner.signCmd + " " + bytesToHex(hash.getCryptographicEvidence.toByteArray)).!!.trim
+  val hashHex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
   Signature.fromExternalSigning(
     SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
-    ByteString.copyFrom(hexToBytes(sigHex)),
+    runOwnerSigner(owner.signerArgv, hashHex, owner.namespace.fingerprint.toProtoPrimitive),
     owner.namespace.fingerprint,
     SigningAlgorithmSpec.Ed25519,
   )

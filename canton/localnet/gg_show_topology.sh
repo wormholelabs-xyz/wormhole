@@ -5,6 +5,7 @@ set -euo pipefail
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-GG_PARTY_ID="$(jq -r .partyId "$LOCALNET_STATE_DIR/gg-artifacts.json")" \
+gg_party_id="$(jq -er .partyId "$LOCALNET_STATE_DIR/gg-artifacts.json")"
+GG_PARTY_ID="$gg_party_id" \
   "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/gg_show_topology.canton" 2>&1 \
   | grep -E '^TOPOLOGY|ERROR|error'

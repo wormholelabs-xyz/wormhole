@@ -68,14 +68,15 @@ fi
 # 32-byte Ed25519 key (the last 32 bytes of the DER SPKI).
 new_owner_fingerprint="1220$( (printf '\x00\x00\x00\x0c'; tail -c 32 "$GG_KEY_DIR/$new_owner.pub") | openssl dgst -sha256 -r | cut -d' ' -f1)"
 
-owner_sign_cmd() { echo "node $KEY_TOOL sign $GG_KEY_DIR/$1.key"; }
+# owner_signer_argv <owner>: JSON argv of the signer of that owner key; a space in the path stays in one argument.
+owner_signer_argv() { jq -cn --arg tool "$KEY_TOOL" --arg key "$GG_KEY_DIR/$1.key" '["node", $tool, "sign", $key]'; }
 rotation_console_status=0
 rotation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GG_PARTY_ID="$GG_PARTY" \
-GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_CMD_1="$(owner_sign_cmd "$kept_owner_1")" \
-GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_CMD_2="$(owner_sign_cmd "$kept_owner_2")" \
-GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" GG_REMOVED_OWNER_SIGN_CMD="$(owner_sign_cmd "$removed_owner")" \
-GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_CMD="$(owner_sign_cmd "$new_owner")" \
+GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_ARGV_1="$(owner_signer_argv "$kept_owner_1")" \
+GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_ARGV_2="$(owner_signer_argv "$kept_owner_2")" \
+GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" GG_REMOVED_OWNER_SIGN_ARGV="$(owner_signer_argv "$removed_owner")" \
+GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_ARGV="$(owner_signer_argv "$new_owner")" \
   "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/gg_rotate_owner_key.canton" \
   > "$gg_work_dir/rotation.log" 2>&1 || rotation_console_status=$?
 grep -E '^ROTATION' "$gg_work_dir/rotation.log" || true
@@ -114,8 +115,13 @@ if [[ -z "$removed_owner_rejection" ]]; then
 fi
 echo "  participant log, trace id $removed_owner_trace_id: $removed_owner_rejection"
 echo "PASS: removed-owner namespace change rejected with TOPOLOGY_UNAUTHORIZED_TRANSACTION"
-updated_fingerprints="$(jq --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" '.[$file] = $fp' "$EXTRA_FINGERPRINTS" 2>/dev/null \
-  || jq -n --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" '{($file): $fp}')"
+if [[ -f "$EXTRA_FINGERPRINTS" ]]; then
+  updated_fingerprints="$(jq -e --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" \
+    'if type == "object" then .[$file] = $fp else error("not a JSON object") end' "$EXTRA_FINGERPRINTS")" \
+    || { echo "FAIL: $EXTRA_FINGERPRINTS is damaged. Fix or remove it, then rerun with --resume." >&2; exit 1; }
+else
+  updated_fingerprints="$(jq -n --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" '{($file): $fp}')"
+fi
 printf '%s\n' "$updated_fingerprints" > "$EXTRA_FINGERPRINTS"
 echo "PASS: $removed_owner replaced by $new_owner ($new_owner_fingerprint)"
 

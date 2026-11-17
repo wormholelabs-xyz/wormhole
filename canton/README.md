@@ -1128,12 +1128,14 @@ only then submitted (`topology.transactions.load`) — the participant never hol
 an owner's private key, matching real guardian custody (HSM/KMS/offline signer).
 `devnet/guardian_key_tool.js` is a small Ed25519 keypair/signing helper (Node's
 built-in `crypto` module only, no dependencies) that stands in for that custody
-system locally; production wires `GG_OWNER_SIGN_CMD_1/2/3` to the real one
-instead (see the script's header for the full environment-variable contract).
+system locally; production wires `GG_OWNER_SIGN_ARGV_1/2/3` to the real one
+instead. Each is a JSON array of strings (program, then arguments), so no shell
+splits a key path (see the script's header for the full environment-variable contract).
 
 [`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
-exercises the resulting party: it prepares a `create CoreState` command
-co-signed by an external `operator` party and `guardianGovernance` (the
+exercises the resulting party: it prepares a `create CoreState` and a
+`create EmitterRegistry` command, one prepared transaction each (the prepare
+endpoint takes one command), co-signed by an external `operator` party and `guardianGovernance` (the
 interactive-submission equivalent of `Test.TestCore:setup`'s
 `submit (actAs operator <> actAs guardianGovernance)`), has owners sign the
 prepared

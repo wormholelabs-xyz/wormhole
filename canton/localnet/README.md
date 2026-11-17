@@ -72,6 +72,7 @@ The script tests do not need Docker or LocalNet. Run each test from the reposito
 ```bash
 canton/localnet/test/bounded_run_test.sh
 canton/localnet/test/image_lock_test.sh
+canton/localnet/test/owner_signer_block_test.sh
 ```
 
 ## Prerequisites

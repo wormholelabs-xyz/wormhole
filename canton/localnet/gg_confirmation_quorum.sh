@@ -62,7 +62,7 @@ echo "Current guardian set $current_set_index, signing keys $current_set_key_ind
 # Governance replay protection is keyed by digest, so each run uses a new sequence.
 fee_zero_vaa="$(generate_vaa -kind set-message-fee -fee 0 -signing-set-index "$current_set_index" \
   -signing-key-indices "$current_set_key_indices" -sequence "$(date +%s)")"
-fee_zero_vaa_hex="$(jq -r .vaaHex <<<"$fee_zero_vaa")"
+fee_zero_vaa_hex="$(jq -er .vaaHex <<<"$fee_zero_vaa")"
 set_zero_keys="$(vaa_pub_keys_json "$fee_zero_vaa")"
 read_only_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" \
   -signing-key-indices "$current_set_key_indices" -sequence 1)"
@@ -81,7 +81,7 @@ check_timeout_rejection "$gg_work_dir/1a"
 
 echo "Step 1b: ParseAndVerifyVAA with one confirming host"
 SUBMIT_AWAIT_COMPLETION=true verify_vaa_as_operator "quorum-read-one-host-$(date +%s)" \
-  "$(jq -r .vaaHex <<<"$read_only_vaa")" "$(vaa_pub_keys_json "$read_only_vaa")" > "$gg_work_dir/1b.out" 2> "$gg_work_dir/1b.err" || true
+  "$(jq -er .vaaHex <<<"$read_only_vaa")" "$(vaa_pub_keys_json "$read_only_vaa")" > "$gg_work_dir/1b.out" 2> "$gg_work_dir/1b.err" || true
 check_timeout_rejection "$gg_work_dir/1b"
 
 echo "Step 2: reconnect app-user (two confirming hosts)"

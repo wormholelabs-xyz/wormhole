@@ -41,7 +41,7 @@ echo "SubmitGovernanceVAA (SetMessageFee 1000)"
 # Governance replay protection is keyed by digest, so each run uses a new sequence.
 set_fee_vaa="$(generate_vaa -kind set-message-fee -fee 1000 -signing-set-index 0 -signing-key-indices 0 -sequence "$(date +%s)")"
 governance_transaction="$(submit_governance_vaa "governance-set-fee-$(date +%s)" \
-  "$(jq -r .vaaHex <<<"$set_fee_vaa")" "$(vaa_pub_keys_json "$set_fee_vaa")")"
+  "$(jq -er .vaaHex <<<"$set_fee_vaa")" "$(vaa_pub_keys_json "$set_fee_vaa")")"
 created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 
 for validator_name in app-provider sv app-user; do

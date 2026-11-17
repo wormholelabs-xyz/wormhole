@@ -24,11 +24,20 @@ for required_file in "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS"; do
   fi
 done
 
-GG_PARTY="$(jq -r .partyId "$GG_ARTIFACTS")"
-OPERATOR_PARTY="$(jq -r .partyId "$OPERATOR_ARTIFACTS")"
-SYNCHRONIZER_ID="$(jq -r .synchronizerId "$GG_ARTIFACTS")"
+GG_PARTY="$(jq -er .partyId "$GG_ARTIFACTS")"
+OPERATOR_PARTY="$(jq -er .partyId "$OPERATOR_ARTIFACTS")"
+SYNCHRONIZER_ID="$(jq -er .synchronizerId "$GG_ARTIFACTS")"
+# Physical synchronizer id: <name>::<namespace>::<protocol>-<serial>.
+if [[ ! "$SYNCHRONIZER_ID" =~ ^[^:]+::[0-9a-f]+::[0-9]+-[0-9]+$ ]]; then
+  echo "synchronizerId in $GG_ARTIFACTS is not <name>::<namespace>::<protocol>-<serial>: $SYNCHRONIZER_ID" >&2
+  exit 1
+fi
 # The Ledger API takes the logical synchronizer id, without the "::<protocol>-<serial>" suffix.
 LOGICAL_SYNCHRONIZER_ID="$(sed -E 's/::[0-9]+-[0-9]+$//' <<<"$SYNCHRONIZER_ID")"
+if [[ "$LOGICAL_SYNCHRONIZER_ID" == "$SYNCHRONIZER_ID" ]]; then
+  echo "cannot strip the protocol suffix from $SYNCHRONIZER_ID" >&2
+  exit 1
+fi
 
 gg_work_dir="$(mktemp -d)"
 trap 'rm -rf "$gg_work_dir"' EXIT
@@ -44,8 +53,10 @@ signer_json() {
   local public_key_file="$1" fingerprint
   fingerprint="$(jq -r --arg file "$public_key_file" \
     '[.owners[] | select(.publicKeyFile == $file) | .namespace][0] // empty' "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS" | head -n 1)"
-  if [[ -z "$fingerprint" ]]; then
-    fingerprint="$(jq -r --arg file "$public_key_file" '.[$file] // empty' "$LOCALNET_STATE_DIR/extra-key-fingerprints.json" 2>/dev/null || true)"
+  if [[ -z "$fingerprint" && -f "$LOCALNET_STATE_DIR/extra-key-fingerprints.json" ]]; then
+    fingerprint="$(jq -er --arg file "$public_key_file" 'if type == "object" then (.[$file] // "") else error("not a JSON object") end' \
+      "$LOCALNET_STATE_DIR/extra-key-fingerprints.json")" \
+      || { echo "$LOCALNET_STATE_DIR/extra-key-fingerprints.json is damaged" >&2; return 1; }
   fi
   if [[ -z "$fingerprint" ]]; then
     echo "No fingerprint known for $public_key_file" >&2
@@ -147,7 +158,7 @@ readonly EMITTER_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
 # active_contracts <validator> <party> <qualified-template-suffix>: active contracts of that template that the party sees there.
 active_contracts() {
   local validator_name="$1" party="$2" template_suffix="$3" ledger_end
-  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -r .offset)"
+  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
   curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{

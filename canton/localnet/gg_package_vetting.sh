@@ -87,8 +87,9 @@ create_vetting_probe() {
     "$(operator_signers_json)"
 }
 
-created_package_version_label() {
-  jq -r '[.events[] | .CreatedEvent? // empty | .templateId][0]' <<<"$1"
+# created_template_id <transaction-json>: template id of the one created contract of the transaction.
+created_template_id() {
+  jq -er '[.events[] | .CreatedEvent? // empty | .templateId] | if length == 1 then .[0] else error("expected one created contract, found \(length)") end' <<<"$1"
 }
 
 echo "Step 1: vet $PROBE_PACKAGE_NAME 1.0.0 on all hosts"
@@ -111,9 +112,17 @@ await_vetting_state app-user '["1.0.0"]'
 for validator_name in app-provider sv app-user; do
   echo "  $validator_name vets $(vetted_probe_versions "$validator_name")"
 done
-v2_package_id="$(curl -sSf -X POST "$(json_api_url app-provider)/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" \
-  -H 'Content-Type: application/json' -d "$(jq -n --arg prefix "$PROBE_PACKAGE_NAME" '{packageMetadataFilter: {packageNamePrefixes: [$prefix]}}')" \
-  | jq -er '[.vettedPackages[].packages[] | select(.packageVersion == "2.0.0") | .packageId] | unique | if length == 1 then .[0] else error("expected one 2.0.0 package id") end')"
+# vetted_probe_package_id <version>: the one package id of that probe version vetted on app-provider.
+vetted_probe_package_id() {
+  curl -sSf -X POST "$(json_api_url app-provider)/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" \
+    -H 'Content-Type: application/json' -d "$(jq -n --arg prefix "$PROBE_PACKAGE_NAME" '{packageMetadataFilter: {packageNamePrefixes: [$prefix]}}')" \
+    | jq -er --arg version "$1" '[.vettedPackages[].packages[] | select(.packageVersion == $version) | .packageId] | unique
+      | if length == 1 then .[0] else error("expected one \($version) package id, found \(length)") end'
+}
+v1_package_id="$(vetted_probe_package_id 1.0.0)"
+v2_package_id="$(vetted_probe_package_id 2.0.0)"
+readonly PROBE_TEMPLATE_SUFFIX=":VettingProbe:VettingProbe"
+echo "  1.0.0 package id $v1_package_id"
 echo "  2.0.0 package id $v2_package_id"
 
 v2_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7", revision: "2"}')"
@@ -161,7 +170,7 @@ for validator_name in app-provider sv app-user; do
 done
 
 echo "Step 3: create VettingProbe on 2.0.0 by package id (vetted on app-provider only)"
-if create_vetting_probe "vetting-v2-one-host-$(date +%s)" "$v2_package_id:VettingProbe:VettingProbe" "$v2_arguments" \
+if create_vetting_probe "vetting-v2-one-host-$(date +%s)" "$v2_package_id$PROBE_TEMPLATE_SUFFIX" "$v2_arguments" \
     > "$gg_work_dir/3.out" 2> "$gg_work_dir/3.err"; then
   echo "FAIL: 2.0.0 committed while only app-provider vets it" >&2
   exit 1
@@ -170,18 +179,18 @@ expect_not_vetted_rejection "$gg_work_dir/3" "app-provider" "sv app-user"
 
 echo "Step 4: create VettingProbe by package name"
 by_name_transaction="$(create_vetting_probe "vetting-by-name-$(date +%s)" "#$PROBE_PACKAGE_NAME:VettingProbe:VettingProbe" "$v1_arguments")"
-selected_template="$(created_package_version_label "$by_name_transaction")"
-if [[ "$selected_template" == "$v2_package_id:"* ]]; then
-  echo "FAIL: package-name selection picked 2.0.0" >&2
+selected_template="$(created_template_id "$by_name_transaction")"
+if [[ "$selected_template" != "$v1_package_id$PROBE_TEMPLATE_SUFFIX" ]]; then
+  echo "FAIL: expected a create on 1.0.0 ($v1_package_id$PROBE_TEMPLATE_SUFFIX), got $selected_template" >&2
   exit 1
 fi
-echo "PASS: committed on $selected_template (not 2.0.0)"
+echo "PASS: committed on 1.0.0: $selected_template"
 
 echo "Step 5: vet 2.0.0 on sv (2 of 3 hosts), then repeat step 3"
 upload_and_vet sv "$v2_dar"
 await_vetting_state sv '["1.0.0","2.0.0"]'
 await_vetting_state app-user '["1.0.0"]'
-if create_vetting_probe "vetting-v2-two-hosts-$(date +%s)" "$v2_package_id:VettingProbe:VettingProbe" "$v2_arguments" \
+if create_vetting_probe "vetting-v2-two-hosts-$(date +%s)" "$v2_package_id$PROBE_TEMPLATE_SUFFIX" "$v2_arguments" \
     > "$gg_work_dir/5.out" 2> "$gg_work_dir/5.err"; then
   echo "FAIL: 2.0.0 committed while app-user does not vet it" >&2
   exit 1
@@ -191,10 +200,10 @@ expect_not_vetted_rejection "$gg_work_dir/5" "app-provider sv" "app-user"
 echo "Step 6: vet 2.0.0 on app-user, then repeat step 3"
 upload_and_vet app-user "$v2_dar"
 await_vetting_state app-user '["1.0.0","2.0.0"]'
-v2_transaction="$(create_vetting_probe "vetting-v2-all-hosts-$(date +%s)" "$v2_package_id:VettingProbe:VettingProbe" "$v2_arguments")"
-selected_template="$(created_package_version_label "$v2_transaction")"
-if [[ "$selected_template" != "$v2_package_id:"* ]]; then
-  echo "FAIL: expected a create on 2.0.0, got $selected_template" >&2
+v2_transaction="$(create_vetting_probe "vetting-v2-all-hosts-$(date +%s)" "$v2_package_id$PROBE_TEMPLATE_SUFFIX" "$v2_arguments")"
+selected_template="$(created_template_id "$v2_transaction")"
+if [[ "$selected_template" != "$v2_package_id$PROBE_TEMPLATE_SUFFIX" ]]; then
+  echo "FAIL: expected a create on 2.0.0 ($v2_package_id$PROBE_TEMPLATE_SUFFIX), got $selected_template" >&2
   exit 1
 fi
-echo "PASS: committed on $selected_template"
+echo "PASS: committed on 2.0.0: $selected_template"

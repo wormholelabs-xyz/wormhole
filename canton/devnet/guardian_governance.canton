@@ -11,12 +11,12 @@
 // EXTERNAL SIGNING FLOW: every owner-authorized topology transaction is built
 // in three explicit steps -- generated UNSIGNED (`topology.transactions.generate`),
 // signed by each owner's external signer over the transaction hash
-// (GG_OWNER_SIGN_CMD_*, wrapped via `Signature.fromExternalSigning`), and only
+// (GG_OWNER_SIGN_ARGV_*, wrapped via `Signature.fromExternalSigning`), and only
 // then submitted fully signed (`topology.transactions.load`). The participant
 // only ever handles hashes, public keys, and signatures; owner private keys
 // stay inside guardian custody (HSM/KMS/offline signer) and never touch the
 // participant host. Production uses this exact code path -- local/test and
-// production differ only in what GG_OWNER_SIGN_CMD_* points at (this repo's
+// production differ only in what GG_OWNER_SIGN_ARGV_* points at (this repo's
 // `guardian_key_tool.js` vs. a real custody CLI), not in the
 // topology-construction code.
 //
@@ -40,11 +40,13 @@
 //                           format `openssl` and Node's `crypto` module
 //                           produce, and what `guardian_key_tool.js generate`
 //                           writes as `<prefix>.pub`). Required.
-//   GG_OWNER_SIGN_CMD_1/2/3 Shell command that signs a hex-encoded hash and
-//                           prints a hex-encoded raw Ed25519 signature to
-//                           stdout, invoked as `<CMD> <hashHex>` (the command
-//                           string may itself contain arguments, e.g.
-//                           "node guardian_key_tool.js sign owner1.key").
+//   GG_OWNER_SIGN_ARGV_1/2/3
+//                           Signer command as a JSON array of strings: the
+//                           program, then its arguments, for example
+//                           ["node", "guardian_key_tool.js", "sign", "owner1.key"].
+//                           The script appends the hex-encoded hash as the last
+//                           argument, with no shell, and reads 64 bytes of raw
+//                           Ed25519 signature as lowercase hex from stdout.
 //                           This is the pluggable custody boundary: locally it
 //                           runs guardian_key_tool.js against a same-host key
 //                           file; in production it should invoke a real
@@ -83,19 +85,41 @@ import scala.sys.process._
 import scala.collection.immutable.Set
 import java.nio.file.{Files, Paths}
 
-def env(name: String): String =
+def requiredEnvironmentVariable(name: String): String =
   sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
-def envOr(name: String, default: String): String = sys.env.getOrElse(name, default)
-
-val ownerPubkeyFiles = Seq(env("GG_OWNER_PUBKEY_1"), env("GG_OWNER_PUBKEY_2"), env("GG_OWNER_PUBKEY_3"))
-val ownerSignCmds = Seq(env("GG_OWNER_SIGN_CMD_1"), env("GG_OWNER_SIGN_CMD_2"), env("GG_OWNER_SIGN_CMD_3"))
-val threshold = PositiveInt.tryCreate(envOr("GG_THRESHOLD", "2").toInt)
-val partyName = envOr("GG_PARTY_NAME", "guardianGovernance")
-val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
-val artifactsFile = envOr("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
-
+def environmentVariableOrDefault(name: String, default: String): String = sys.env.getOrElse(name, default)
 def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+
+// BEGIN owner signer block (same text in devnet/guardian_governance.canton and localnet/console/gg_rotate_owner_key.canton)
+val ed25519SignatureLengthBytes = 64
+val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
+def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
+  require(ed25519SignatureHexPattern.matches(signatureHex),
+    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
+  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
+  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
+  signatureBytes
+}
+// The signer argv is a JSON array: the program, then its arguments. The hash hex is appended as the last argument.
+def parseSignerArgv(variableName: String): Seq[String] = {
+  val signerArgv = io.circe.parser.decode[Vector[String]](requiredEnvironmentVariable(variableName)).fold(
+    decodeError => throw new RuntimeException(s"$variableName must be a JSON array of strings: ${decodeError.getMessage}"),
+    identity)
+  require(signerArgv.nonEmpty, s"$variableName is an empty array")
+  require(signerArgv.forall(_.nonEmpty), s"$variableName holds an empty argument")
+  signerArgv
+}
+def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String): ByteString =
+  parseEd25519SignatureHex((signerArgv :+ hashHex).!!.trim, signerDescription)
+// END owner signer block
+
+val ownerPubkeyFiles = Seq(requiredEnvironmentVariable("GG_OWNER_PUBKEY_1"), requiredEnvironmentVariable("GG_OWNER_PUBKEY_2"), requiredEnvironmentVariable("GG_OWNER_PUBKEY_3"))
+val ownerSignerArgvs = Seq(parseSignerArgv("GG_OWNER_SIGN_ARGV_1"), parseSignerArgv("GG_OWNER_SIGN_ARGV_2"), parseSignerArgv("GG_OWNER_SIGN_ARGV_3"))
+val threshold = PositiveInt.tryCreate(environmentVariableOrDefault("GG_THRESHOLD", "2").toInt)
+val partyName = environmentVariableOrDefault("GG_PARTY_NAME", "guardianGovernance")
+val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
+val artifactsFile = environmentVariableOrDefault("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
 
 val hostingParticipantNames: Seq[String] = sys.env.get("GG_HOSTING_PARTICIPANTS") match {
   case Some(names) => names.split(",").toSeq.map(_.trim).filter(_.nonEmpty)
@@ -161,29 +185,16 @@ def loadOwnerKey(pubFile: String): SigningPublicKey = {
 val ownerPubkeys = ownerPubkeyFiles.map(loadOwnerKey)
 val ownerNamespaces = ownerPubkeys.map(k => Namespace(k.fingerprint))
 
-// Invoke this owner's external signer (GG_OWNER_SIGN_CMD_i) over the given
+// Invoke this owner's external signer (GG_OWNER_SIGN_ARGV_i) over the given
 // topology-transaction hash and wrap the raw signature bytes it returns as a
 // Canton `Signature`. The signer never runs inside this JVM process and this
 // script never sees (or could see) any owner's private key material.
-// BEGIN owner signature parser (same text in localnet/console/gg_rotate_owner_key.canton)
-val ed25519SignatureLengthBytes = 64
-val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
-def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
-  require(ed25519SignatureHexPattern.matches(signatureHex),
-    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
-  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
-  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
-  signatureBytes
-}
-// END owner signature parser
-
-def externalSign(signCmd: String, hash: Hash, fingerprint: Fingerprint): Signature = {
-  val hex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
-  val sigHex = (signCmd + " " + hex).!!.trim
-  val sigBytes = parseEd25519SignatureHex(sigHex, fingerprint.toProtoPrimitive)
+def externalSign(signerArgv: Seq[String], hash: Hash, fingerprint: Fingerprint): Signature = {
+  val hashHex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
+  val signatureBytes = runOwnerSigner(signerArgv, hashHex, fingerprint.toProtoPrimitive)
   Signature.fromExternalSigning(
     SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
-    sigBytes,
+    signatureBytes,
     fingerprint,
     SigningAlgorithmSpec.Ed25519,
   )
@@ -215,12 +226,12 @@ println(s"[guardian-governance] owner namespaces: ${ownerNamespaces.mkString(", 
 // on record before Canton will accept further signatures "as" that namespace
 // (this bootstraps the namespace's root of trust, the same way a node's own
 // identity key does).
-val rootDelegations = (ownerNamespaces, ownerPubkeys, ownerSignCmds).zipped.map { (ns, pub, signCmd) =>
+val rootDelegations = (ownerNamespaces, ownerPubkeys, ownerSignerArgvs).zipped.map { (ns, pub, signerArgv) =>
   val mapping = NamespaceDelegation
     .create(ns, pub, DelegationRestriction.CanSignAllMappings)
     .getOrElse(sys.error(s"failed to build NamespaceDelegation for $ns"))
   val unsigned = generateUnsigned(mapping)
-  val sig = externalSign(signCmd, unsigned.hash.hash, ns.fingerprint)
+  val sig = externalSign(signerArgv, unsigned.hash.hash, ns.fingerprint)
   SignedTopologyTransaction.withSignature(unsigned, sig, isProposal = false, protocolVersion)
 }
 participant.topology.transactions.load(rootDelegations, store)
@@ -240,8 +251,8 @@ val ownerNamespaceSet: Set[Namespace] = ownerNamespaces.toSet
 val dnNamespace = DecentralizedNamespaceDefinition.computeNamespace(ownerNamespaceSet)
 val dn = DecentralizedNamespaceDefinition.tryCreate(dnNamespace, threshold, ownerNamespaceSet)
 val unsignedDn = generateUnsigned(dn)
-val dnSignatures = (ownerNamespaces, ownerSignCmds).zipped.map { (ns, signCmd) =>
-  externalSign(signCmd, unsignedDn.hash.hash, ns.fingerprint)
+val dnSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
+  externalSign(signerArgv, unsignedDn.hash.hash, ns.fingerprint)
 }
 val signedDn = dnSignatures.tail.foldLeft(
   SignedTopologyTransaction.withSignature(unsignedDn, dnSignatures.head, isProposal = false, protocolVersion)
@@ -267,8 +278,8 @@ val partyToParticipant = PartyToParticipant
   )
   .getOrElse(sys.error("failed to build PartyToParticipant"))
 val unsignedPtp = generateUnsigned(partyToParticipant)
-val ptpOwnerSignatures = (ownerNamespaces, ownerSignCmds).zipped.map { (ns, signCmd) =>
-  externalSign(signCmd, unsignedPtp.hash.hash, ns.fingerprint)
+val ptpOwnerSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
+  externalSign(signerArgv, unsignedPtp.hash.hash, ns.fingerprint)
 }
 val signedPtpOwnersOnly = ptpOwnerSignatures.tail.foldLeft(
   SignedTopologyTransaction.withSignature(unsignedPtp, ptpOwnerSignatures.head, isProposal = false, protocolVersion)

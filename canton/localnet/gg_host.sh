@@ -34,6 +34,12 @@ node "$KEY_TOOL" generate "$LOCALNET_STATE_DIR/operator-keys/owner1" >/dev/null
 readonly CONSOLE_SCRIPT="$LOCALNET_STATE_DIR/guardian_governance.canton"
 sed 's/^import com\.daml\.nonempty\.NonEmpty$/import com.digitalasset.nonempty.NonEmpty/' \
   "$DEVNET_DIR/guardian_governance.canton" > "$CONSOLE_SCRIPT"
+grep -qx 'import com.digitalasset.nonempty.NonEmpty' "$CONSOLE_SCRIPT" \
+  || { echo "the NonEmpty import patch did not apply to $CONSOLE_SCRIPT" >&2; exit 1; }
+if grep -q 'com\.daml\.nonempty' "$CONSOLE_SCRIPT"; then
+  echo "$CONSOLE_SCRIPT still imports com.daml.nonempty" >&2
+  exit 1
+fi
 
 run_party_setup() {
   local party_name="$1" key_dir="$2" key_prefixes=("$3" "$4" "$5") threshold="$6" hosts="$7"
@@ -41,7 +47,8 @@ run_party_setup() {
   local owner_slot
   for owner_slot in 1 2 3; do
     export "GG_OWNER_PUBKEY_$owner_slot=$key_dir/${key_prefixes[$((owner_slot - 1))]}.pub"
-    export "GG_OWNER_SIGN_CMD_$owner_slot=node $KEY_TOOL sign $key_dir/${key_prefixes[$((owner_slot - 1))]}.key"
+    export "GG_OWNER_SIGN_ARGV_$owner_slot=$(jq -cn --arg tool "$KEY_TOOL" \
+      --arg key "$key_dir/${key_prefixes[$((owner_slot - 1))]}.key" '["node", $tool, "sign", $key]')"
   done
   GG_PARTY_NAME="$party_name" GG_THRESHOLD="$threshold" GG_HOSTING_PARTICIPANTS="$hosts" \
     GG_CONFIRMATION_THRESHOLD="$confirmation_threshold" GG_SYNCHRONIZER_ALIAS=global \
