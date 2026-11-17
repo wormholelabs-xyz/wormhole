@@ -157,6 +157,11 @@ for hosting_case in "${HOSTING_CASES[@]}"; do
   expect_setup_rejected "${case_name}" "${expected_message}" "${hosting_variables[@]}"
 done
 
+# key_tool_signer_argv <private-key-file>: GG_OWNER_SIGN_ARGV value that signs with guardian_key_tool.js.
+key_tool_signer_argv() {
+  jq -cn --arg tool "${SCRIPT_DIR}/guardian_key_tool.js" --arg key "$1" '["node", $tool, "sign", $key]'
+}
+
 # Owner-1 signer stubs print a malformed signature. Owners 2 and 3 are never asked: owner 1 signs first.
 STUB_KEY_DIR="${WORK_DIR}/stub-signer-keys"
 STUB_SIGNER_DIR="${WORK_DIR}/stub-signers"
@@ -184,14 +189,31 @@ for signature_case in "${SIGNATURE_CASES[@]}"; do
   chmod +x "${stub_signer}"
   expect_setup_rejected "${case_name}" "${expected_message}" GG_GENERATE_TEST_KEYS=0 \
     GG_OWNER_PUBKEY_1="${STUB_KEY_DIR}/owner1.pub" GG_OWNER_PUBKEY_2="${STUB_KEY_DIR}/owner2.pub" \
-    GG_OWNER_PUBKEY_3="${STUB_KEY_DIR}/owner3.pub" GG_OWNER_SIGN_CMD_1="${stub_signer}" \
-    GG_OWNER_SIGN_CMD_2="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${STUB_KEY_DIR}/owner2.key" \
-    GG_OWNER_SIGN_CMD_3="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${STUB_KEY_DIR}/owner3.key"
+    GG_OWNER_PUBKEY_3="${STUB_KEY_DIR}/owner3.pub" GG_OWNER_SIGN_ARGV_1="$(jq -cn --arg stub "${stub_signer}" '[$stub]')" \
+    GG_OWNER_SIGN_ARGV_2="$(key_tool_signer_argv "${STUB_KEY_DIR}/owner2.key")" \
+    GG_OWNER_SIGN_ARGV_3="$(key_tool_signer_argv "${STUB_KEY_DIR}/owner3.key")"
+done
+
+# Columns: case | GG_OWNER_SIGN_ARGV_1 | expected message
+SIGNER_ARGV_CASES=(
+  "signer-argv-not-json|node sign owner1.key|GG_OWNER_SIGN_ARGV_1 must be a JSON array of strings"
+  "signer-argv-not-strings|[1, 2]|GG_OWNER_SIGN_ARGV_1 must be a JSON array of strings"
+  "signer-argv-empty-array|[]|GG_OWNER_SIGN_ARGV_1 is an empty array"
+  "signer-argv-empty-argument|[\"node\", \"\"]|GG_OWNER_SIGN_ARGV_1 holds an empty argument"
+)
+for signer_argv_case in "${SIGNER_ARGV_CASES[@]}"; do
+  IFS='|' read -r case_name signer_argv expected_message <<<"${signer_argv_case}"
+  expect_setup_rejected "${case_name}" "${expected_message}" GG_GENERATE_TEST_KEYS=0 \
+    GG_OWNER_PUBKEY_1="${STUB_KEY_DIR}/owner1.pub" GG_OWNER_PUBKEY_2="${STUB_KEY_DIR}/owner2.pub" \
+    GG_OWNER_PUBKEY_3="${STUB_KEY_DIR}/owner3.pub" GG_OWNER_SIGN_ARGV_1="${signer_argv}" \
+    GG_OWNER_SIGN_ARGV_2="$(key_tool_signer_argv "${STUB_KEY_DIR}/owner2.key")" \
+    GG_OWNER_SIGN_ARGV_3="$(key_tool_signer_argv "${STUB_KEY_DIR}/owner3.key")"
 done
 
 # --- Set up the 2-of-3 guardianGovernance party. ---
 export GG_GENERATE_TEST_KEYS=1
-export GG_KEY_DIR="${WORK_DIR}/guardian-keys"
+# A space in the key path: each signer argument stays one argument.
+export GG_KEY_DIR="${WORK_DIR}/guardian keys"
 export GG_ARTIFACTS_FILE="${WORK_DIR}/guardian-artifacts.json"
 export GG_THRESHOLD=2
 export GG_PARTY_NAME=guardianGovernance
@@ -216,9 +238,10 @@ export GG_GENERATE_TEST_KEYS=0
 export GG_OWNER_PUBKEY_1="${GG_KEY_DIR}/owner1.pub"
 export GG_OWNER_PUBKEY_2="${GG_KEY_DIR}/owner1.pub"
 export GG_OWNER_PUBKEY_3="${GG_KEY_DIR}/owner1.pub"
-export GG_OWNER_SIGN_CMD_1="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${GG_KEY_DIR}/owner1.key"
-export GG_OWNER_SIGN_CMD_2="${GG_OWNER_SIGN_CMD_1}"
-export GG_OWNER_SIGN_CMD_3="${GG_OWNER_SIGN_CMD_1}"
+GG_OWNER_SIGN_ARGV_1="$(key_tool_signer_argv "${GG_KEY_DIR}/owner1.key")"
+export GG_OWNER_SIGN_ARGV_1
+export GG_OWNER_SIGN_ARGV_2="${GG_OWNER_SIGN_ARGV_1}"
+export GG_OWNER_SIGN_ARGV_3="${GG_OWNER_SIGN_ARGV_1}"
 log "running setup_guardian_governance.sh (Operator, 1-of-1)"
 if ! "${SCRIPT_DIR}/setup_guardian_governance.sh" > "${WORK_DIR}/setup_op.log" 2>&1; then
   fail "setup_guardian_governance.sh (Operator) exited non-zero"
