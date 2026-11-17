@@ -193,14 +193,17 @@ testRegistrationFee = do
   submitMustFail (actAs bob <> disclose regDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   submitMustFail (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = None
+      expectedGuardianGovernance = None
   -- Paid registration succeeds; the fee lands with the recipient.
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
   (regCid', emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+      expectedGuardianGovernance = None
   Some em <- queryContractId bob emCid
   em.owner === bob
   bal <- mockBalance mockAdmin feeRecipient inst
@@ -217,6 +220,7 @@ testRegistrationFee = do
   (_, emCid2) <- submit (actAs dave <> actAs regPayer <> disclose regDisc' <> disclose csDisc) do
     exerciseCmd regCid' RegisterEmitter with
       requester = dave, payer = regPayer, coreStateCid = Some csId, feeAllocation = Some payerFeePay
+      expectedGuardianGovernance = None
   Some em2 <- queryContractId dave emCid2
   em2.owner === dave
   bal2 <- mockBalance mockAdmin feeRecipient inst
@@ -281,10 +285,12 @@ testSetRegistrationFee = do
   submitMustFail (actAs bob <> disclose regDisc) do
     exerciseCmd feeRegCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
   (_, emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd feeRegCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+      expectedGuardianGovernance = None
   Some em <- queryContractId bob emCid
   em.emitterId === 2
 
@@ -415,6 +421,7 @@ testRegisterEmitterPinsGuardianGovernance = do
       payer = bob
       coreStateCid = Some fakeCsId
       feeAllocation = Some feePay
+      expectedGuardianGovernance = None
   case res of
     Left (FailureStatusError fs) ->
       assertMsg ("expected a guardianGovernance pin failure, got: " <> fs.message)

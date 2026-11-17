@@ -450,8 +450,14 @@ template EmitterRegistry
         payer         : Party  -- funds registrationFee; = requester for a direct registration
         coreStateCid  : Optional (ContractId CoreState)  -- required iff fee > 0
         feeAllocation : Optional (ContractId Allocation, ExtraArgs)
+        -- Some gg: the registration aborts unless this registry's
+        -- guardianGovernance is gg. Clients pass Some (README §4.7).
+        expectedGuardianGovernance : Optional Party
       controller requester, payer
       do
+        case expectedGuardianGovernance of
+          None -> pure ()
+          Some expected -> assertMsg "registry guardianGovernance mismatch" (expected == guardianGovernance)
         -- Zero-fee registrations never touch the CoreState; fee'd ones charge
         -- through it. The gg pin runs BEFORE the charge: pinning
         -- @guardianGovernance@ (not just @operator@, which a forged CoreState

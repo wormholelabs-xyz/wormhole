@@ -74,6 +74,7 @@ registerEmitter operator owner = do
       payer = owner    -- direct registration: own payer, controller set collapses
       coreStateCid = None
       feeAllocation = None
+      expectedGuardianGovernance = None
   pure emCid
 
 -- | Publish with the referenced 'CoreState' disclosed (the fee read is on
@@ -270,12 +271,14 @@ testEmitterIdBounds = do
   (exhaustedRegistryCid, lastEmitterCid) <- submit (actAs owner <> disclose lastIdRegistryDisclosure) do
     exerciseCmd lastIdRegistryCid RegisterEmitter with
       requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   Some lastEmitter <- queryContractId owner lastEmitterCid
   lastEmitter.emitterId === maxEmitterIdLiteral
   exhaustedRegistryDisclosure <- fromSome <$> queryDisclosure operator exhaustedRegistryCid
   exhaustedResult <- trySubmit (actAs owner <> disclose exhaustedRegistryDisclosure) do
     exerciseCmd exhaustedRegistryCid RegisterEmitter with
       requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   checkCreateOutcome "registration after maxEmitterId" False exhaustedResult
 
 -- | Genesis needs both the operator and guardianGovernance signatures.

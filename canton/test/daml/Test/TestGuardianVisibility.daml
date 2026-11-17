@@ -114,6 +114,7 @@ testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
   (_, rogueEmitterCid) <- submit (actAs alice <> disclose rogueRegistryDisclosure) do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = alice, payer = alice, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
 
   Some rogueEmitter <- queryContractId rogueGovernance rogueEmitterCid
   rogueEmitter.guardianGovernance === rogueGovernance

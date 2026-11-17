@@ -195,6 +195,7 @@ testRedTeamA1FeeCannotBeSkipped = do
   registerResult <- trySubmit (actAs registrant <> disclose feeRegistryDisclosure) do
     exerciseCmd feeRegistryCid RegisterEmitter with
       requester = registrant, payer = registrant, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   checkAttackFailedWith "A1 RegisterEmitter without CoreState" "registration fee due" registerResult
 
   feeRootRegistryCid <- submit operator do
