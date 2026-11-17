@@ -75,7 +75,7 @@ Set `DB_PORT` to use a different port.
 | `allocate_external_party.js` | Allocates a 1-of-1 Ed25519 external party. |
 | `watcher_harness_lib.sh` | Shared functions that start and stop the guardian watcher harness. |
 | `core_upgrade_rehearsal.sh` | Rehearses the `wormhole-core` upgrade from 0.6.0 to 0.7.0, and the rollback. |
-| `publish_message_scan.sh` | Lists each `PublishMessage` of a participant in an offset range. The canary scan of a production guardian. |
+| `core_upgrade_package_ids.sh` | Package ids and DARs of the core upgrade rehearsal. |
 
 ## Script tests
 
@@ -86,6 +86,7 @@ canton/localnet/test/bounded_run_test.sh
 canton/localnet/test/image_lock_test.sh
 canton/localnet/test/owner_signer_block_test.sh
 canton/localnet/test/ntt_lib_test.sh
+canton/localnet/test/core_upgrade_package_ids_test.sh
 ```
 
 ## Prerequisites

@@ -1344,7 +1344,7 @@ removes old updates, and then a reobservation request fails.
   step 0 to the last reobservation request.
 
 **Canary.** In production, the canary is the ledger scan
-`localnet/publish_message_scan.sh`. The scan has no guardian key and no gossip.
+`tools/publish_message_scan.sh`. The scan has no guardian key and no gossip.
 It needs only `curl` and `jq`. A guardian runs it on its own participant:
 
 1. Make a Ledger API user with only the right `CanReadAs(guardianGovernance)`.
@@ -1458,7 +1458,7 @@ procedure in this order.
    than the pinned package` of each watcher pinned to 0.6.0. Its `updateId`
    field holds the update id. Its `executingPackageId` field holds the 0.7.0
    package id.
-2. A scan of the ledger with `localnet/publish_message_scan.sh` from the start
+2. A scan of the ledger with `tools/publish_message_scan.sh` from the start
    offset to the current ledger end. Keep each line with the 0.7.0 package id.
 
 The scan also covers the restart window. A user with only

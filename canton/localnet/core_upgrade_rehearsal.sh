@@ -281,7 +281,7 @@ scan_publishes() {
   local scan_token_file="$gg_work_dir/watcher-scan.jwt"
   ensure_watcher_user "$1" >&2
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$scan_token_file")
-  "$LOCALNET_SCRIPT_DIR/publish_message_scan.sh" "$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3"
+  "$REPO_ROOT/canton/tools/publish_message_scan.sh" "$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3"
 }
 
 # scan_publish_update_ids <validator> <begin-exclusive> <end-inclusive> <executing-package-id>: sorted update ids
