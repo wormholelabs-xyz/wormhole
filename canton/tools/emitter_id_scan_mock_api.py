@@ -1,12 +1,14 @@
 """JSON Ledger API stub for emitter_id_scan_test.sh. Serves one fixture file on 127.0.0.1.
 
 Usage: python3 -I emitter_id_scan_mock_api.py <fixture.json> <port-file>
-The fixture holds: rights, ledgerEnd, updates (each with an offset), activeContracts.
+The fixture holds: rights, ledgerEnd, updates (each with an offset), activeContracts, delaySeconds.
+Each response waits delaySeconds first.
 The server writes its port to <port-file> when it listens.
 """
 
 import json
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 MAX_REQUEST_BYTES = 65536
@@ -23,12 +25,17 @@ def make_handler(fixture):
             pass
 
         def send_json(self, body):
+            time.sleep(fixture["delaySeconds"])
             encoded = json.dumps(body).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+            except (BrokenPipeError, ConnectionResetError):
+                # The client timed out first.
+                pass
 
         def read_request_json(self):
             length = int(self.headers.get("Content-Length", "0"))

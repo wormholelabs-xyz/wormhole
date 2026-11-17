@@ -23,11 +23,11 @@ cleanup() {
 trap cleanup EXIT
 printf 'unused-token\n' > "$work_dir/token"
 
-# emitter_event <contract-id> <owner> <emitter-id> [<guardian-governance>]: a CreatedEvent of a 0.7.0 Emitter.
+# emitter_event <contract-id> <owner> <emitter-id> [<guardian-governance>] [<package-name>]: a CreatedEvent of a 0.7.0 Emitter.
 emitter_event() {
-  jq -nc --arg cid "$1" --arg owner "$2" --arg id "$3" --arg gg "${4:-$GG}" --arg operator "$OPERATOR" \
-    --arg template "$CORE_V7:Wormhole.Core.State:Emitter" \
-    '{CreatedEvent: {contractId: $cid, templateId: $template,
+  jq -nc --arg cid "$1" --arg owner "$2" --arg id "$3" --arg gg "${4:-$GG}" --arg packageName "${5:-wormhole-core}" \
+    --arg operator "$OPERATOR" --arg template "$CORE_V7:Wormhole.Core.State:Emitter" \
+    '{CreatedEvent: {contractId: $cid, templateId: $template, packageName: $packageName,
       createArgument: {operator: $operator, guardianGovernance: $gg, owner: $owner, emitterId: $id, sequence: "0"}}}'
 }
 
@@ -35,15 +35,15 @@ emitter_event() {
 registry_event() {
   jq -nc --arg cid "$1" --arg next "$2" --arg gg "$GG" --arg operator "$OPERATOR" \
     --arg template "$CORE_V8:Wormhole.Core.State:EmitterRegistry" \
-    '{CreatedEvent: {contractId: $cid, templateId: $template,
+    '{CreatedEvent: {contractId: $cid, templateId: $template, packageName: "wormhole-core",
       createArgument: {operator: $operator, guardianGovernance: $gg, registrationFee: "0", nextId: $next}}}'
 }
 
-# write_fixture <name> <rights-json> <updates-json> <active-events-json>
+# write_fixture <name> <rights-json> <updates-json> <active-events-json> [<response-delay-seconds>]
 write_fixture() {
-  jq -n --argjson rights "$2" --argjson updates "$3" --argjson active "$4" \
+  jq -n --argjson rights "$2" --argjson updates "$3" --argjson active "$4" --argjson delaySeconds "${5:-0}" \
     '{rights: $rights, ledgerEnd: ([$updates[].offset] + [0] | max), updates: $updates,
-      activeContracts: [$active[] | .CreatedEvent]}' > "$work_dir/$1.json"
+      activeContracts: [$active[] | .CreatedEvent], delaySeconds: $delaySeconds}' > "$work_dir/$1.json"
 }
 
 # update_at <offset> <event-json>...: one transaction with these events.
@@ -102,6 +102,11 @@ write_history_emitter_fixture emitter_id_above_max 9007199254740992
 write_history_emitter_fixture emitter_id_int64_max 9223372036854775807
 write_history_emitter_fixture emitter_id_leading_zero 01
 write_history_emitter_fixture emitter_id_negative -1
+emitter_lookalike_package="$(emitter_event lookalike "$OWNER_A" 50 "$GG" wormhole-core-lookalike)"
+write_fixture lookalike_package_ignored "$read_only_rights" \
+  "$(jq -c --argjson extra "$(update_at 4 "$emitter_lookalike_package")" '. + [$extra]' <<< "$base_history")" \
+  "[$emitter_a0_successor,$emitter_b1,$emitter_lookalike_package]"
+write_fixture slow_api "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]" 3
 write_fixture rogue_gg_ignored "$read_only_rights" \
   "$(jq -c --argjson extra "$(update_at 4 "$emitter_rogue_gg")" '. + [$extra]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$emitter_rogue_gg]"
@@ -126,6 +131,7 @@ stop_mock() {
 }
 
 # Columns: case name | fixture | page size | begin offset | baseline | expected active registries | expected exit | expected output
+#          | curl max time seconds (empty: the scan default)
 test_cases=(
   "clean history passes|clean|200|0||0|0|\"firstId\":2"
   "duplicate active emitter fails|duplicate|200|0||0|1|duplicate (operator, owner, emitterId)"
@@ -147,16 +153,20 @@ test_cases=(
   "emitter id with a leading zero fails|emitter_id_leading_zero|200|0||0|1|outside 0..maxEmitterId"
   "negative emitter id fails|emitter_id_negative|200|0||0|1|outside 0..maxEmitterId"
   "baseline above maxEmitterId is refused|clean|200|3|9007199254740992|0|2|baseline"
+  "look-alike package emitter is ignored|lookalike_package_ignored|200|0||0|0|\"firstId\":2"
+  "a Ledger API response slower than the curl timeout fails|slow_api|200|0||0|1|timed out|1"
 )
 
 failed_cases=0
 for test_case in "${test_cases[@]}"; do
-  IFS='|' read -r case_name fixture_name page_size begin_offset baseline expected_registries expected_exit expected_output <<< "$test_case"
+  IFS='|' read -r case_name fixture_name page_size begin_offset baseline expected_registries expected_exit expected_output \
+    curl_max_time_seconds <<< "$test_case"
   start_mock "$fixture_name"
   scan_arguments=("http://127.0.0.1:$(cat "$work_dir/port")" "$work_dir/token" "$GG" "$OPERATOR" "$begin_offset")
   [[ -z "$baseline" ]] || scan_arguments+=("$baseline")
   set +e
   SCAN_PAGE_SIZE="$page_size" EXPECT_ACTIVE_REGISTRIES="$expected_registries" \
+    CURL_MAX_TIME_SECONDS="${curl_max_time_seconds:-60}" \
     "$TOOLS_DIR/emitter_id_scan.sh" "${scan_arguments[@]}" > "$work_dir/out" 2>&1
   actual_exit=$?
   set -e
