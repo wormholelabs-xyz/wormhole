@@ -8,6 +8,8 @@
 //   GG_REMOVED_OWNER_SIGN_CMD        Signer command of that owner (used only for the negative check).
 //   GG_ADDED_OWNER_PUBKEY            Public key of the new owner.
 //   GG_ADDED_OWNER_SIGN_CMD          Signer command of the new owner.
+//   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS  Optional. "true" fails the rotation after the namespace change
+//                                    (rehearsal of a half-applied rotation and --resume).
 // A rerun after a partial failure skips the steps that are already effective.
 import com.digitalasset.canton.topology._
 import com.digitalasset.canton.topology.transaction._
@@ -130,6 +132,8 @@ if (ptpHasNewSigningKeys()) {
   println("ROTATION PTP signing keys already rotated")
 } else {
   val ptpRotation = scala.util.Try {
+    if (sys.env.get("GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS").contains("true"))
+      sys.error("injected fault: GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true")
     val ptpBefore = currentPtp()
     val signingThreshold = ptpBefore.item.partySigningKeysWithThreshold.map(_.threshold).getOrElse(sys.error("party has no signing keys"))
     val newSigningKeys = SigningKeysWithThreshold(NonEmpty.mk(Set, keptOwners.head.publicKey, keptOwners(1).publicKey, addedOwner.publicKey), signingThreshold)
@@ -149,17 +153,16 @@ println(s"ROTATION after: PTP serial=${ptpAfter.context.serial} confirmationThre
   s"signingKeys=${ptpAfter.item.partySigningKeysWithThreshold.map(k => s"${k.threshold}-of-${k.keys.size}").getOrElse("none")}")
 
 // Step 4 (negative): the removed owner plus one kept owner cannot authorize a namespace change.
-val expectedUnauthorizedCode = "TOPOLOGY_UNAUTHORIZED_TRANSACTION"
+// The Admin API redacts TOPOLOGY_UNAUTHORIZED_TRANSACTION as security-sensitive; gg_rotate_owner_key.sh
+// matches the error code in the participant log by the trace id of this request.
 val probeDn = DecentralizedNamespaceDefinition.tryCreate(partyId.namespace, dnAfter.item.threshold, newOwnerSet + removedOwner.namespace)
 val removedOwnerAttempt = scala.util.Try(
   participant.topology.transactions.load(Seq(signedBy(generateUnsigned(probeDn), Seq(keptOwners.head, removedOwner))), store))
 Thread.sleep(5000)
 val ownersAfterAttempt = currentDn().item.owners.toSet
-val removedOwnerAttemptError = removedOwnerAttempt.failed.toOption.map(_.getMessage).getOrElse("")
 println(s"ROTATION removed-owner attempt: load=${removedOwnerAttempt.fold(e => "rejected: " + e.getMessage.linesIterator.take(3).mkString(" "), _ => "accepted by API")} " +
   s"ownersUnchanged=${ownersAfterAttempt == newOwnerSet}")
 require(ownersAfterAttempt == newOwnerSet, "removed owner changed the namespace")
-require(removedOwnerAttemptError.contains(expectedUnauthorizedCode),
-  s"removed-owner attempt: expected $expectedUnauthorizedCode, got ${if (removedOwnerAttempt.isSuccess) "acceptance by the API" else removedOwnerAttemptError}")
-println(s"ROTATION removed-owner attempt rejected with $expectedUnauthorizedCode")
+require(removedOwnerAttempt.isFailure, "removed-owner attempt: accepted by the API")
+println("ROTATION removed-owner attempt rejected by the API")
 println("ROTATION done")

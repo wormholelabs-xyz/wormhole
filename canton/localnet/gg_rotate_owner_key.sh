@@ -10,6 +10,7 @@
 #      c. The removed owner alone. Expect FAILED_TO_EXECUTE_TRANSACTION (0 valid signatures).
 # Usage: gg_rotate_owner_key.sh [--resume] <removed-owner> <kept-owner> <kept-owner> <new-owner>
 #   --resume finishes an interrupted rotation with the existing key of <new-owner>.
+#   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true stops the rotation after the namespace change, to rehearse --resume.
 #   Owner names are key file prefixes under $LOCALNET_STATE_DIR/gg-keys, for example: owner3 owner1 owner2 owner4
 # Precondition: gg_host.sh and gg_package_vetting.sh ran.
 set -euo pipefail
@@ -69,6 +70,7 @@ new_owner_fingerprint="1220$( (printf '\x00\x00\x00\x0c'; tail -c 32 "$GG_KEY_DI
 
 owner_sign_cmd() { echo "node $KEY_TOOL sign $GG_KEY_DIR/$1.key"; }
 rotation_console_status=0
+rotation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GG_PARTY_ID="$GG_PARTY" \
 GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_CMD_1="$(owner_sign_cmd "$kept_owner_1")" \
 GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_CMD_2="$(owner_sign_cmd "$kept_owner_2")" \
@@ -91,10 +93,26 @@ if ! grep -q "ROTATION after: DN .*$new_owner_fingerprint" "$gg_work_dir/rotatio
   echo "FAIL: computed fingerprint $new_owner_fingerprint of $new_owner is not in the namespace" >&2
   exit 1
 fi
-if ! grep -q '^ROTATION removed-owner attempt rejected with TOPOLOGY_UNAUTHORIZED_TRANSACTION' "$gg_work_dir/rotation.log"; then
-  echo "FAIL: the removed-owner namespace change was not rejected with TOPOLOGY_UNAUTHORIZED_TRANSACTION" >&2
+if ! grep -q '^ROTATION removed-owner attempt rejected by the API' "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the removed-owner namespace change was not rejected" >&2
   exit 1
 fi
+# The Admin API returns the rejection redacted, with the request trace id. The removed-owner attempt is the
+# last failed request of the console run.
+removed_owner_trace_id="$(grep -oE 'inquire about the request [0-9a-f]{32}' "$gg_work_dir/rotation.log" | tail -n 1 | awk '{print $NF}')"
+if [[ ! "$removed_owner_trace_id" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "FAIL: no trace id of the removed-owner rejection in the console output" >&2
+  exit 1
+fi
+removed_owner_rejection="$(docker logs canton --since "$rotation_started_at" 2>&1 \
+  | grep -F "\"trace-id\":\"$removed_owner_trace_id\"" \
+  | grep -F '"error-code":"TOPOLOGY_UNAUTHORIZED_TRANSACTION' \
+  | jq -r '.message' || true)"
+if [[ -z "$removed_owner_rejection" ]]; then
+  echo "FAIL: the participant log has no TOPOLOGY_UNAUTHORIZED_TRANSACTION for trace id $removed_owner_trace_id" >&2
+  exit 1
+fi
+echo "  participant log, trace id $removed_owner_trace_id: $removed_owner_rejection"
 echo "PASS: removed-owner namespace change rejected with TOPOLOGY_UNAUTHORIZED_TRANSACTION"
 updated_fingerprints="$(jq --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" '.[$file] = $fp' "$EXTRA_FINGERPRINTS" 2>/dev/null \
   || jq -n --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" '{($file): $fp}')"

@@ -353,6 +353,8 @@ The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` moves the time
    - The kept owners and the new owner change the namespace.
    - The removed owner and one kept owner cannot change the namespace.
      The change fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
+     The Admin API does not show this error code to the client. It shows a trace id.
+     The script finds the error code with this trace id in the log of the `canton` container.
    - A `guardianGovernance` transaction with one kept key and the new key succeeds.
    - A transaction with one kept key and the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
      The error shows 1 valid signature and 1 invalid signature.
@@ -373,6 +375,16 @@ The script shows `ROTATION HALF-APPLIED` and a recovery command.
    The script uses the existing key of the new owner.
    It does not do the changes that are already effective.
    Then it does the checks of step 2.
+
+4. To rehearse the recovery, set `GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true` for one rotation:
+
+   ```bash
+   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true \
+     canton/localnet/gg_rotate_owner_key.sh owner3 owner1 owner2 owner4
+   ```
+
+   The rotation stops after the namespace change and shows `ROTATION HALF-APPLIED`.
+   Then do step 3 without the variable.
 
 ### Limits of the rehearsal
 
