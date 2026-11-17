@@ -6,7 +6,8 @@
 # The script reads each update of guardianGovernance in (<begin>, <ledger end>], and the active contracts at <ledger end>.
 # A begin offset above 0 needs <baseline-max-emitter-id>: the historyMaxEmitterId of an earlier scan that ended at <begin>.
 # Use -1 as the baseline when no Emitter existed at <begin>.
-# Output: one JSON summary line on stdout, with firstId = the nextId of the new EmitterRegistry.
+# Output: one JSON summary line on stdout, with firstId = historyMaxEmitterId + 1, the nextId of the new EmitterRegistry.
+# Each active EmitterRegistry must have nextId == firstId; historyMaxRegistryNextId is reported only.
 # Exit 0: no duplicate. Exit 1: a duplicate (operator, owner, emitterId) among active Emitters, or a check failed.
 # EXPECT_ACTIVE_REGISTRIES (default 0) is the number of active EmitterRegistry contracts of the pair that the scan requires.
 # The script uses only curl and jq, thus a guardian can run it against a production participant.
@@ -149,7 +150,9 @@ jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
         else null end),
       activeDuplicates: ($activeEmitters | group_by([.owner, .emitterId]) | map(select(length > 1)
         | {owner: .[0].owner, emitterId: .[0].emitterId, contractIds: map(.contractId)})),
-      firstId: ([$historyMaxEmitterId + 1, $historyMaxRegistryNextId] | max),
+      activeRegistriesWithWrongNextId: ($activeRegistries | map(select(.nextId != ($historyMaxEmitterId + 1)))
+        | map({contractId, nextId})),
+      firstId: ($historyMaxEmitterId + 1),
       expectedActiveRegistries: $expectedRegistries
     }' "$work_dir/history.jsonl" > "$work_dir/summary.json"
 cat "$work_dir/summary.json"
@@ -164,6 +167,8 @@ failures=()
   || failures+=("an active Emitter has an emitterId at or above firstId")
 [[ "$(jq '.activeRegistries' "$work_dir/summary.json")" -eq "$EXPECT_ACTIVE_REGISTRIES" ]] \
   || failures+=("active EmitterRegistry count is not $EXPECT_ACTIVE_REGISTRIES")
+[[ "$(jq '.activeRegistriesWithWrongNextId | length' "$work_dir/summary.json")" -eq 0 ]] \
+  || failures+=("an active EmitterRegistry has nextId other than historyMaxEmitterId + 1")
 if [[ ${#failures[@]} -gt 0 ]]; then
   printf 'emitter_id_scan: FAIL: %s\n' "${failures[@]}" >&2
   exit 1
