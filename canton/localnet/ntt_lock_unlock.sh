@@ -83,7 +83,7 @@ register_transaction="$(submit_local app-provider "ntt-register-lock-unlock-$run
     "$(operator_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
-register_result="$(exercise_result "$register_transaction" RegisterManager)"
+register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -r ._2 <<<"$register_result")"
 ledger_cid="$(jq -r ._4 <<<"$register_result")"
 manager_json="$(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Manager:NttManager")"
@@ -105,8 +105,8 @@ set_peer_transaction="$(submit_local app-provider "ntt-lock-unlock-set-peer-$run
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $admin, feeAllocation: null}')")" \
   "$(json_array "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
-manager_cid="$(exercise_result "$set_peer_transaction" SetPeer | jq -r ._1)"
-echo "TransceiverRegistration message $(message_summary "$(exercise_result "$set_peer_transaction" SetPeer | jq -c ._2)")"
+manager_cid="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -r ._1)"
+echo "TransceiverRegistration message $(message_summary "$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -c ._2)")"
 
 echo "== 4. Locker locks $LOCK_AMOUNT CC with Transfer"
 custodian_before_lock="$(amulet_total app-provider "$custodian_party")"
@@ -129,7 +129,7 @@ lock_transaction="$(submit_local app-user "ntt-lock-$run_label" "$(jq -n --arg p
     "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
     "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$ledger_cid")")")")"
-lock_message="$(exercise_result "$lock_transaction" Transfer)"
+lock_message="$(exercise_result "$lock_transaction" :Wormhole.Ntt.Manager:NttManager Transfer)"
 echo "outbound NTT message $(message_summary "$lock_message") update $(jq -r .updateId <<<"$lock_transaction")"
 ledger_after_lock="$(created_contract_argument "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 ledger_cid="$(created_contract_id "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
@@ -185,7 +185,7 @@ release_transaction="$(submit_local sv "ntt-release-$run_label" "$(jq -n --arg r
     "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$replay_node_cid")" \
     "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$ledger_cid")" \
     "$(disclosed_contract app-provider "$custodian_party" :Splice.Amulet:Amulet "$pot_cid")")")")"
-release_result="$(exercise_result "$release_transaction" Release)"
+release_result="$(exercise_result "$release_transaction" :Wormhole.Ntt.Manager:NttManager Release)"
 ledger_after_release="$(created_contract_argument "$release_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 recipient_after_release="$(amulet_total app-user "$recipient_party")"
 echo "Release decoded transfer $(jq -c '._2 | {decimals, amount, recipientChain}' <<<"$release_result")"

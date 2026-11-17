@@ -35,17 +35,24 @@ record_ntt_contract nttGovernance "$root_cid"
 
 existing_factories="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Token.CIP0056.CoinFactory:CoinFactory" \
   | jq --arg gg "$GG_PARTY" '[.[] | select(.createArgument.admin == $gg)]')"
-if [[ "$(jq length <<<"$existing_factories")" -ge 1 ]]; then
-  factory_cid="$(jq -r '.[0].contractId' <<<"$existing_factories")"
-  echo "CoinFactory exists: $factory_cid"
-else
-  echo "Create CoinFactory: guardianGovernance ${NTT_GG_SIGNING_OWNERS[*]}"
-  factory_transaction="$(submit_interactive "ntt-coin-factory-$(date +%s)" "$(jq -n --arg gg "$GG_PARTY" '[$gg]')" \
-    "$(create_command "$COIN_FACTORY_TEMPLATE" "$(jq -n --arg gg "$GG_PARTY" '{admin: $gg}')")" \
-    "$(gg_ceremony_signers_json)")"
-  factory_cid="$(created_contract_id "$factory_transaction" ":Token.CIP0056.CoinFactory:CoinFactory")"
-  echo "CoinFactory $factory_cid (update $(jq -r .updateId <<<"$factory_transaction"))"
-fi
+case "$(jq length <<<"$existing_factories")" in
+  0)
+    echo "Create CoinFactory: guardianGovernance ${NTT_GG_SIGNING_OWNERS[*]}"
+    factory_transaction="$(submit_interactive "ntt-coin-factory-$(date +%s)" "$(jq -n --arg gg "$GG_PARTY" '[$gg]')" \
+      "$(create_command "$COIN_FACTORY_TEMPLATE" "$(jq -n --arg gg "$GG_PARTY" '{admin: $gg}')")" \
+      "$(gg_ceremony_signers_json)")"
+    factory_cid="$(created_contract_id "$factory_transaction" ":Token.CIP0056.CoinFactory:CoinFactory")"
+    echo "CoinFactory $factory_cid (update $(jq -er .updateId <<<"$factory_transaction"))"
+    ;;
+  1)
+    factory_cid="$(jq -er '.[0].contractId' <<<"$existing_factories")"
+    echo "CoinFactory exists: $factory_cid"
+    ;;
+  *)
+    echo "Found $(jq length <<<"$existing_factories") CoinFactory contracts with admin guardianGovernance; expected at most one" >&2
+    exit 1
+    ;;
+esac
 record_ntt_contract coinFactory "$factory_cid"
 
 for validator_name in app-provider sv app-user; do

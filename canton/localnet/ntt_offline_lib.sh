@@ -38,10 +38,12 @@ create_command() {
     '{CreateCommand: {templateId: $templateId, createArguments: $createArguments}}'
 }
 
-# exercise_result <transaction-json> <choice>: the exercise result of the one exercised event of that choice.
+# exercise_result <transaction-json> <qualified-template-suffix> <choice>: the result of the one exercise of
+# that choice on that template.
 exercise_result() {
-  jq -ec --arg choice "$2" '[.events[] | .ExercisedEvent? // empty | select(.choice == $choice) | .exerciseResult]
-    | if length >= 1 then .[0] else error("no \($choice) exercise") end' <<<"$1"
+  jq -ec --arg suffix "$2" --arg choice "$3" '[.events[] | .ExercisedEvent? // empty
+      | select(.choice == $choice and (.templateId | endswith($suffix))) | .exerciseResult]
+    | if length == 1 then .[0] else error("expected exactly one \($suffix) \($choice) exercise, found \(length)") end' <<<"$1"
 }
 
 # message_summary <wormhole-message-json>: the WormholeMessage fields the watcher reads.

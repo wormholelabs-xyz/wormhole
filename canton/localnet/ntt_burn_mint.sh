@@ -60,7 +60,7 @@ register_transaction="$(submit_interactive "ntt-register-burn-mint-$run_label" \
     "$(operator_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
-register_result="$(exercise_result "$register_transaction" RegisterManager)"
+register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -r ._2 <<<"$register_result")"
 init_message="$(jq -c ._5 <<<"$register_result")"
 manager_json="$(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Manager:NttManager")"
@@ -86,7 +86,7 @@ set_peer_transaction="$(submit_interactive "ntt-burn-mint-set-peer-$run_label" "
   "$(admin_only_signers)" \
   "$(json_array "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
-set_peer_result="$(exercise_result "$set_peer_transaction" SetPeer)"
+set_peer_result="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer)"
 manager_cid="$(jq -r ._1 <<<"$set_peer_result")"
 echo "TransceiverRegistration message $(message_summary "$(jq -c ._2 <<<"$set_peer_result")")"
 
@@ -119,7 +119,7 @@ mint_transaction="$(submit_local sv "ntt-mint-$run_label" "$(jq -n --arg relayer
     "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$replay_node_cid")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Ntt.Deposit:DepositPreapproval "$preapproval_cid")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")")")"
-echo "Mint decoded transfer $(exercise_result "$mint_transaction" Mint | jq -c '{decimals, amount, recipientChain}')"
+echo "Mint decoded transfer $(exercise_result "$mint_transaction" :Wormhole.Ntt.Manager:NttManager Mint | jq -c '{decimals, amount, recipientChain}')"
 user_coins="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[] | {contractId, amount: .createArgument.amount}]')"
 echo "user coins after Mint: $(jq -c '[.[].amount]' <<<"$user_coins")"
 if ! jq -e --argjson expected "$MINT_AMOUNT" 'map(.amount | tonumber) | add == $expected' <<<"$user_coins" >/dev/null; then
@@ -142,7 +142,7 @@ burn_transaction="$(submit_local app-user "ntt-burn-$run_label" "$user_only" \
     "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")")")"
-burn_message="$(exercise_result "$burn_transaction" Transfer)"
+burn_message="$(exercise_result "$burn_transaction" :Wormhole.Ntt.Manager:NttManager Transfer)"
 echo "outbound NTT message $(message_summary "$burn_message") update $(jq -r .updateId <<<"$burn_transaction")"
 echo "payload $(jq -r .payload <<<"$burn_message")"
 user_change="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument.amount]')"
