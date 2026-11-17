@@ -34,9 +34,10 @@ quorum n = (n * 2) / 3 + 1
 keyAt : GuardianSet -> Int -> Optional Bytes20
 keyAt gs index = gs.keys !! index
 
--- | A set is usable at @now@ if it is the current set (no expiry) or has not yet
--- expired. Matches the EVM check @guardianSet.expirationTime < block.timestamp@.
+-- | A set is usable at @now@ if it is the current set (no expiry) or @now@ is
+-- at or before its expiry. EVM @Messages.sol:80@ rejects only when
+-- @expirationTime < block.timestamp@, so the expiry second itself is accepted.
 isActiveAt : GuardianSet -> Time -> Bool
 isActiveAt gs now = case gs.expirationTime of
   None -> True
-  Some exp -> now < exp
+  Some exp -> now <= exp

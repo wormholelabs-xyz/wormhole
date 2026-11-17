@@ -15,6 +15,7 @@ import DA.Optional (fromSome)
 import DA.Text qualified as T
 import DA.Time (seconds)
 import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
 import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (VAA)
@@ -254,6 +255,8 @@ testRedTeamA6QuorumAndSignerOrder = do
     [(0, redTeamGuardianPubKey3), (1, redTeamGuardianPubKey1), (2, redTeamGuardianPubKey2)]
   checkGovernanceRejectedWith "A6 signer index out of range" "guardian index out of range"
     operator set1CoreStateCid rtSetMessageFeeBySet1IndexOutOfRange (set1PubKeys <> [(7, redTeamGuardianPubKey3)])
+  supersededSetVAA <- verifyVAA operator set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
+  supersededSetVAA.guardianSetIndex === 0
   checkGovernanceRejectedWith "A6 governance by the superseded set" "not signed by current guardian set"
     operator set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
 
@@ -261,15 +264,17 @@ testRedTeamA6QuorumAndSignerOrder = do
   Some feeCoreState <- queryContractId operator feeCoreStateCid
   feeCoreState.messageFee === 7
 
--- | The superseded set verifies application VAAs for exactly 86400 seconds.
+-- | The superseded set verifies application VAAs through the expiry second
+-- inclusive (EVM @Messages.sol@: rejects only when @expirationTime < block.timestamp@).
 testRedTeamA6ExpiredGuardianSet : Script ()
 testRedTeamA6ExpiredGuardianSet = do
   (operator, _, coreStateCid) <- setup
   set1CoreStateCid <- upgradeToSet1 operator coreStateCid
   verifiedAtUpgrade <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
   verifiedAtUpgrade.guardianSetIndex === 0
-  passTime (seconds 86399)
-  _ <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  passTime (seconds guardianSetExpirySeconds)
+  verifiedAtExpiry <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtExpiry.guardianSetIndex === 0
   passTime (seconds 1)
   checkVerifyRejectedWith "A6 VAA signed by an expired set" "guardian set has expired"
     operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys

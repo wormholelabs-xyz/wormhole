@@ -504,8 +504,9 @@ governance action whose mechanism differs most from EVM — see Open Questions.
 
 Matches EVM (`Setters.sol`): when a new set is installed, the previous set's
 `expirationTime` is set to `effectiveTime + 86400` (1 day). `verifyVAA` accepts a
-non-current set only while `effectiveTime < expirationTime`. The current set
-never expires.
+non-current set while `effectiveTime <= expirationTime`, as EVM
+`Messages.sol:80` rejects only when `expirationTime < block.timestamp`. The
+current set never expires.
 
 ### 4.6 Replay protection for integrators: a trie of consumed digests
 
