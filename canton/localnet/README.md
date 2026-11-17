@@ -87,6 +87,13 @@ Set `DB_PORT` to use a different port.
 | `watcher_harness_lib.sh` | Shared functions that start and stop the guardian watcher harness. |
 | `core_upgrade_rehearsal.sh` | Rehearses the `wormhole-core` upgrade from 0.6.0 to 0.7.0, and the rollback. |
 | `core_upgrade_package_ids.sh` | Package ids and DARs of the core upgrade rehearsal. |
+| `guardian4.sh` | Starts or removes the temporary participant `guardian4` and its PostgreSQL container. |
+| `party_replication.sh` | Replicates `guardianGovernance` and `nttCustody` to `guardian4` offline. Removes a host. Sets the confirmation threshold. |
+| `gg_hosting_change_check.sh` | Checks the hosts, the threshold and the ACS of `guardian4` after a hosting change. |
+| `gg_hosting_change_live_check.sh` | Checks that a `PublishMessage` commits with `guardian4` as a confirmer, also with `sv` disconnected. |
+| `gg_hosting_change_negative_check.sh` | Checks that the synchronizer rejects a hosting change with one owner key or without host consent. |
+| `forge_coin_contract.sh` | Makes invented `Coin` contracts with valid contract IDs for the snapshot forgery test. LocalNet only. |
+| `snapshot_forgery_poc.sh` | Runs the snapshot forgery test: import, attack, controls, watcher. LocalNet only. |
 
 ## Script tests
 

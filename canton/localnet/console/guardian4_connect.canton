@@ -1,4 +1,6 @@
 // Connect guardian4 to the global synchronizer and vet every DAR that app-provider has.
+// app-provider also has packages without a DAR (on 2026-11-17: ntt 0.3.0 291fcf92, ntt 0.2.0 8b9c3ee1). Upload them by hand
+// before the ACS import, or the import cannot validate their contracts.
 val synchronizerAlias = "global"
 val guardian4 = participants.remote.find(_.name == "guardian4").getOrElse(throw new RuntimeException("guardian4 not bound"))
 val appProvider = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))

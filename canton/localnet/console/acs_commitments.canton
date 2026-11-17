@@ -1,0 +1,18 @@
+// Print the ACS commitments that each participant in COMMITMENT_PARTICIPANTS received from the others, with their state.
+// Environment: COMMITMENT_PARTICIPANTS (comma-separated console names).
+import com.digitalasset.canton.admin.api.client.commands.ParticipantAdminCommands.Inspection.SynchronizerTimeRange
+
+val participantNames = sys.env("COMMITMENT_PARTICIPANTS").split(",").toSeq.map(_.trim).filter(_.nonEmpty)
+val selectedParticipants = participantNames.map(name => participants.remote.find(_.name == name).getOrElse(throw new RuntimeException(s"unknown participant $name")))
+val participantNameById = participants.remote.map(host => host.id -> host.name).toMap
+selectedParticipants.foreach { host =>
+  val synchronizerId = host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+    .getOrElse(throw new RuntimeException(s"${host.name} is not connected to global")).physicalSynchronizerId.logical
+  val counterParticipants = selectedParticipants.filterNot(_.id == host.id).map(_.id)
+  scala.util.Try(host.commitments.lookup_received_acs_commitments(Seq(SynchronizerTimeRange(synchronizerId, None)), counterParticipants, Seq.empty, false))
+    .fold(error => { println(s"COMMITMENT ${host.name} lookup failed: ${error.getMessage.linesIterator.take(2).mkString(" ")}"); Seq.empty }, _.values.flatten.toSeq).sortBy(_.receivedCmtPeriod.toInclusive.toInstant).foreach { received =>
+      println(s"COMMITMENT ${host.name} from=${participantNameById.getOrElse(received.originCounterParticipant, received.originCounterParticipant.toString)} " +
+        s"period=${received.receivedCmtPeriod.fromExclusive}..${received.receivedCmtPeriod.toInclusive} state=${received.state} " +
+        s"equal=${received.receivedCommitment.isDefined && received.receivedCommitment == received.localCommitment}")
+    }
+}
