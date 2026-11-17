@@ -128,10 +128,9 @@ testFeeValidationMatrix = do
   -- A fabricated fee-0 CoreState cannot waive the fee: the operator pin fires.
   fakeOp <- allocateParty "MatrixFakeOp"
   fakeGov <- allocateParty "MatrixFakeGov"
-  fakeObs <- allocateParty "MatrixFakeObs"
   fakeCsId <- submit (actAs fakeOp <> actAs fakeGov) do
     createCmd (mkInitialCoreState fakeOp fakeGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] fakeObs inst fakeGov)
+                 defaultGovernanceContract [devnetGuardian] inst fakeGov)
   fakeDisc <- fromSome <$> queryDisclosure fakeOp fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
@@ -186,7 +185,7 @@ testRegistrationFee = do
   Some cs <- queryContractId operator csId
   bob <- allocateParty "RegFeeBob"
   regCid <- submit operator do
-    createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance cs.guardianObserver 500)
+    createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance 500)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   csDisc <- fromSome <$> queryDisclosure operator csId
   -- Fee due: no CoreState / no allocation both rejected.
@@ -301,13 +300,12 @@ testPublishPinsGuardianGovernance = do
   (operator, mockAdmin, _realCsId, inst, _realRecipient) <- setupFees
   alice <- allocateParty "PinPublishAlice"
   rogueGov <- allocateParty "RoguePublishGov"
-  rogueObserver <- allocateParty "RoguePublishObserver"
   emId <- registerEmitter operator alice
   -- The shadow CoreState: co-signed by the REAL operator and a throwaway gg it
   -- controls, with rogueGov as both guardianGovernance and feeRecipient.
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] rogueObserver inst rogueGov)
+                 defaultGovernanceContract [devnetGuardian] inst rogueGov)
   fakeCsId' <- submit operator do
     exerciseCmd fakeCsId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
@@ -335,14 +333,13 @@ testRegisterEmitterPinsGuardianGovernance = do
   Some cs <- queryContractId operator realCsId
   bob <- allocateParty "PinRegBob"
   rogueGov <- allocateParty "RogueRegGov"
-  rogueObserver <- allocateParty "RogueRegObserver"
   -- A real, nonzero-fee registry pinned to the REAL guardianGovernance.
   regCid <- submit operator do
-    createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance cs.guardianObserver 500)
+    createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance 500)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] rogueObserver inst rogueGov)
+                 defaultGovernanceContract [devnetGuardian] inst rogueGov)
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
   feePay <- mintAndAllocate mockAdmin bob rogueGov inst (feeToDecimal 500)
   res <- trySubmit (actAs bob <> disclose regDisc <> disclose fakeDisc) do
@@ -367,13 +364,12 @@ testClaimReplayRootPinsGuardianGovernance = do
   Some cs <- queryContractId operator realCsId
   carol <- allocateParty "PinClaimCarol"
   rogueGov <- allocateParty "RogueClaimGov"
-  rogueObserver <- allocateParty "RogueClaimObserver"
   regCid <- submit operator do
     createCmd (mkInitialReplayRootRegistry operator cs.guardianGovernance 300)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] rogueObserver inst rogueGov)
+                 defaultGovernanceContract [devnetGuardian] inst rogueGov)
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
   feePay <- mintAndAllocate mockAdmin carol rogueGov inst (feeToDecimal 300)
   res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do

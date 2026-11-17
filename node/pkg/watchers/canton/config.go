@@ -23,9 +23,9 @@ type WatcherConfig struct {
 	// package upgrades change the package-id, so it must be updated on upgrade.)
 	PackageID string
 	// ReadAsParty optionally narrows the update stream to a single Canton party.
-	// Production guardians set this to the read-only guardianObserver party (an
-	// observer on the Emitter/CoreState attestation surface). Empty observes
-	// every party on the participant (the devnet default).
+	// Production guardians set this to the guardianGovernance party (signatory of
+	// CoreState, observer of every Emitter). Empty observes every party on the
+	// participant (the devnet default).
 	ReadAsParty string
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
 	// All three fields set enables per-RPC bearer tokens; all empty disables
@@ -59,6 +59,15 @@ func (wc *WatcherConfig) Create(
 	// package id closes that spoofing surface.
 	if !devMode && wc.PackageID == "" {
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
+	}
+
+	// SECURITY: outside unsafe dev mode the stream MUST be narrowed to the
+	// guardianGovernance party. Every Emitter it observes pins that same party
+	// in PublishMessage's CoreState check, so only publishes against the real
+	// CoreState reach the watcher. A wildcard stream would also carry publishes
+	// witnessed by any other party hosted on the participant.
+	if !devMode && wc.ReadAsParty == "" {
+		return nil, nil, fmt.Errorf("canton: ReadAsParty must be set to the guardianGovernance party outside unsafe dev mode")
 	}
 
 	// OAuth is all-or-nothing: a partial config would silently dial without
