@@ -140,6 +140,8 @@ rotationPartyIds.foreach { party =>
     s"signingKeys=${partyToParticipantAfter.item.partySigningKeysWithThreshold.map(signingKeys => s"${signingKeys.threshold}-of-${signingKeys.keys.size}").getOrElse("none")}")
 }
 require(rotationPartyIds.forall(partyHasNewSigningKeys), s"signing keys not rotated: ${rotationState()}")
+checkNamespaceIsGuardianPolicy(currentDecentralizedNamespace().item)
+rotationPartyIds.foreach(party => checkHostingIsGuardianPolicy(currentPartyToParticipant(party).item))
 
 // Step 4 (negative): the removed owner plus one kept owner cannot authorize a namespace change.
 // The Admin API redacts TOPOLOGY_UNAUTHORIZED_TRANSACTION as security-sensitive; gg_rotate_owner_key.sh

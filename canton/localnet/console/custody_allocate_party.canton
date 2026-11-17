@@ -39,6 +39,8 @@ val guardianGovernanceSigningKeys = guardianGovernancePartyToParticipant.item.pa
   .getOrElse(sys.error("guardianGovernance has no party signing keys"))
 require(guardianGovernanceSigningKeys.keys.map(_.fingerprint).toSet == ownerFingerprints,
   "guardianGovernance signing keys are not the namespace owner keys")
+checkNamespaceIsGuardianPolicy(decentralizedNamespace.item)
+checkHostingIsGuardianPolicy(guardianGovernancePartyToParticipant.item)
 println(s"CUSTODY DN namespace=${guardianGovernancePartyId.namespace.fingerprint.toProtoPrimitive} serial=${decentralizedNamespace.context.serial} " +
   s"threshold=${decentralizedNamespace.item.threshold} owners=${sortedFingerprintText(ownerFingerprints)}")
 
@@ -72,10 +74,14 @@ findPartyToParticipant(custodyPartyId) match {
     println(s"CUSTODY party allocated: ${custodyPartyId.toProtoPrimitive}")
 }
 
-// Postcondition: same namespace, hosts, confirmation threshold and signing keys as guardianGovernance.
+// Postcondition: the mapping read back has the guardian policy and the hosts, thresholds and signing keys of
+// guardianGovernance.
 val custodyPartyToParticipantAfterAllocation = findPartyToParticipant(custodyPartyId)
   .getOrElse(throw new RuntimeException("custody PartyToParticipant not found"))
-require(custodyPartyId.namespace == guardianGovernancePartyId.namespace, "custody party is outside the guardian namespace")
+require(custodyPartyToParticipantAfterAllocation.item.partyId == custodyPartyId, "custody PartyToParticipant names another party")
+require(custodyPartyToParticipantAfterAllocation.item.partyId.namespace == guardianGovernancePartyId.namespace,
+  "custody party is outside the guardian namespace")
+checkHostingIsGuardianPolicy(custodyPartyToParticipantAfterAllocation.item)
 require(custodyPartyToParticipantAfterAllocation.item.participants.toSet == guardianGovernancePartyToParticipant.item.participants.toSet,
   "custody hosting differs from guardianGovernance")
 require(custodyPartyToParticipantAfterAllocation.item.threshold == guardianGovernancePartyToParticipant.item.threshold,
