@@ -28,7 +28,9 @@ readonly RELEASE_TRIMMED_AMOUNT=200000000
 readonly LEDGER_BALANCE_AFTER_RELEASE="3.0"
 readonly TAP_AMOUNT_USD="10.0"
 readonly OUTBOUND_NONCE=8
-# NTT_RELEASE_AFTER_ROUNDS > 0 releases from a custody pot that is that many mining rounds old.
+# NTT_RELEASE_AFTER_ROUNDS > 0 releases from a custody pot that is that many mining rounds old. Token-standard
+# transfers use the round of ExternalPartyConfigState, which the DSO updates each 24 hours; a pot from round 0
+# makes the option have no effect.
 if ! check_release_after_rounds "${NTT_RELEASE_AFTER_ROUNDS:-0}"; then
   echo "NTT_RELEASE_AFTER_ROUNDS must be a decimal integer from 0 to $MAX_RELEASE_AFTER_ROUNDS, got '${NTT_RELEASE_AFTER_ROUNDS:-}'" >&2
   exit 1

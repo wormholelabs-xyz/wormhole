@@ -506,8 +506,9 @@ The update id is the same on each participant.
 
 - The peer on chain 2 is not a real deployment. The devnet guardian key signs the inbound VAAs.
 - By default, the lock and the release occur in the same mining round.
-  Set `NTT_RELEASE_AFTER_ROUNDS` to release from a custody pot that is that number of rounds old.
-  Token-standard transfers use the round of `ExternalPartyConfigState`, and the DSO updates this round one time each 24 hours.
-  Thus a new pot can be from round 0, and the script does not wait.
+  Set `NTT_RELEASE_AFTER_ROUNDS` (0 to 24) to release from a custody pot that is that number of rounds old.
+  Token-standard transfers use the round of `ExternalPartyConfigState`.
+  The DSO updates this round one time each 24 hours.
+  Thus the custody pot can be from round 0, and then the option has no effect.
 - The message fee is 0. The `Transfer` commands do not include a fee allocation.
 - Each run makes new deployments. The `NttGovernance` root and the `CoinFactory` stay the same.
