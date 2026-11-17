@@ -58,7 +58,7 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
 -- | The emitter-id registry created alongside the 'CoreState' in the genesis
 -- ceremony (sequential ids from 0). Co-signed: creation needs the @operator@
 -- and @guardianGovernance@ signatures. @guardianGovernance@ is also the
--- fee-custody anchor pinned by 'RegisterEmitter' and the observer of each
+-- fee-custody anchor pinned by 'RegisterEmitter' and a signatory of each
 -- 'Emitter'. Pass the same @guardianGovernance@ the 'CoreState' was created
 -- with.
 mkInitialEmitterRegistry : Party -> Party -> Int -> EmitterRegistry

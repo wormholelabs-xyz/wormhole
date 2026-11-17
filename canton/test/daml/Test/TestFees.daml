@@ -193,14 +193,17 @@ testRegistrationFee = do
   submitMustFail (actAs bob <> disclose regDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   submitMustFail (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = None
+      expectedGuardianGovernance = None
   -- Paid registration succeeds; the fee lands with the recipient.
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
   (regCid', emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+      expectedGuardianGovernance = None
   Some em <- queryContractId bob emCid
   em.owner === bob
   bal <- mockBalance mockAdmin feeRecipient inst
@@ -217,13 +220,14 @@ testRegistrationFee = do
   (_, emCid2) <- submit (actAs dave <> actAs regPayer <> disclose regDisc' <> disclose csDisc) do
     exerciseCmd regCid' RegisterEmitter with
       requester = dave, payer = regPayer, coreStateCid = Some csId, feeAllocation = Some payerFeePay
+      expectedGuardianGovernance = None
   Some em2 <- queryContractId dave emCid2
   em2.owner === dave
   bal2 <- mockBalance mockAdmin feeRecipient inst
   bal2 === feeToDecimal 1000
 
 -- | 'SetRegistrationFee' needs the operator and guardianGovernance, keeps
--- @nextId@, and rejects a negative fee. The next registration pays the new fee.
+-- @nextId@, and rejects a negative fee or one above maxRegistrationFee. The next registration pays the new fee.
 testSetRegistrationFee : Script ()
 testSetRegistrationFee = do
   (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
@@ -256,6 +260,15 @@ testSetRegistrationFee = do
     Left otherError -> abort ("unexpected error: " <> show otherError)
     Right _ -> abort "SetRegistrationFee accepted a negative fee"
 
+  oversizedFeeResult <- trySubmit (actAs operator <> actAs cs.guardianGovernance) do
+    exerciseCmd regCid SetRegistrationFee with newRegistrationFee = 10000000000000001
+  case oversizedFeeResult of
+    Left (FailureStatusError failureStatus) ->
+      assertMsg ("unexpected error: " <> failureStatus.message)
+        ("registration fee exceeds maxRegistrationFee" `isInfixOf` failureStatus.message)
+    Left otherError -> abort ("unexpected error: " <> show otherError)
+    Right _ -> abort "SetRegistrationFee accepted a fee above maxRegistrationFee"
+
   feeRegCid <- submit (actAs operator <> actAs cs.guardianGovernance) do
     exerciseCmd regCid SetRegistrationFee with newRegistrationFee = 500
   Some feeReg <- queryContractId operator feeRegCid
@@ -272,10 +285,12 @@ testSetRegistrationFee = do
   submitMustFail (actAs bob <> disclose regDisc) do
     exerciseCmd feeRegCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
   (_, emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
     exerciseCmd feeRegCid RegisterEmitter with
       requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+      expectedGuardianGovernance = None
   Some em <- queryContractId bob emCid
   em.emitterId === 2
 
@@ -406,12 +421,51 @@ testRegisterEmitterPinsGuardianGovernance = do
       payer = bob
       coreStateCid = Some fakeCsId
       feeAllocation = Some feePay
+      expectedGuardianGovernance = None
   case res of
     Left (FailureStatusError fs) ->
       assertMsg ("expected a guardianGovernance pin failure, got: " <> fs.message)
         ("guardianGovernance mismatch" `isInfixOf` fs.message)
     Left err -> abort ("expected a guardianGovernance pin failure, got: " <> show err)
     Right _ -> abort "RegisterEmitter accepted a shadow CoreState under a rogue guardianGovernance"
+
+-- | A requester pins the registry's guardianGovernance with
+-- @expectedGuardianGovernance@; 'None' skips the check.
+testRegisterEmitterChecksExpectedGuardianGovernance : Script ()
+testRegisterEmitterChecksExpectedGuardianGovernance = do
+  (operator, _, realCsId, _, _) <- setupFees
+  Some cs <- queryContractId operator realCsId
+  let realGovernance = cs.guardianGovernance
+  rogueGovernance <- allocateParty "ExpectedGovRogue"
+  requester <- allocateParty "ExpectedGovRequester"
+  _ <- submit (actAs operator <> actAs rogueGovernance) do
+    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
+  -- Columns: case name | guardianGovernance of the registry | expectedGuardianGovernance | expected failure
+  let registrationCases =
+        [ ("None on the real registry", realGovernance, None, None)
+        , ("the real guardianGovernance on the real registry", realGovernance, Some realGovernance, None)
+        , ("a rogue guardianGovernance on the real registry", realGovernance, Some rogueGovernance,
+            Some "registry guardianGovernance mismatch")
+        , ("the real guardianGovernance on a rogue registry", rogueGovernance, Some realGovernance,
+            Some "registry guardianGovernance mismatch")
+        ]
+  forA_ registrationCases \(caseName, registryGovernance, expectedGuardianGovernance, expectedFailure) -> do
+    [(currentRegistryCid, _)] <- filter (\(_, registry) -> registry.guardianGovernance == registryGovernance)
+      <$> query @EmitterRegistry operator
+    registryDisclosure <- fromSome <$> queryDisclosure operator currentRegistryCid
+    registrationResult <- trySubmit (actAs requester <> disclose registryDisclosure) do
+      exerciseCmd currentRegistryCid RegisterEmitter with
+        requester, payer = requester, coreStateCid = None, feeAllocation = None
+        expectedGuardianGovernance
+    case (expectedFailure, registrationResult) of
+      (None, Right _) -> pure ()
+      (None, Left registrationError) -> abort (caseName <> ": rejected: " <> show registrationError)
+      (Some _, Right _) -> abort (caseName <> ": accepted")
+      (Some failureText, Left (FailureStatusError failureStatus)) ->
+        assertMsg (caseName <> ": expected '" <> failureText <> "', got: " <> failureStatus.message)
+          (failureText `isInfixOf` failureStatus.message)
+      (Some failureText, Left registrationError) ->
+        abort (caseName <> ": expected '" <> failureText <> "', got: " <> show registrationError)
 
 -- | 'ClaimReplayRoot' pins the registry's guardianGovernance anchor. Same
 -- forgery, routing the @claimFee@ to @rogueGov@; the pin rejects it before the

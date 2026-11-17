@@ -7,7 +7,12 @@
 # Test.TestCore:setup's
 # `submit (actAs operator <> actAs guardianGovernance)` but via interactive
 # submission instead of Daml Script), have owners sign the prepared hash, and
-# execute.
+# execute. The prepare endpoint takes one command, so each create is its own
+# prepared transaction. CoreState is created first; when it is not committed,
+# the script exits without the EmitterRegistry create. A create whose contract
+# is already active for the (operator, guardianGovernance) pair is skipped, so
+# a rerun creates only what is missing. Prints
+# "RESULT <template> committed|rejected|exists" for each create it reaches.
 #
 # This is a THIN orchestration layer over the JSON Ledger API's interactive
 # submission endpoints (prepare/execute) -- see
@@ -45,6 +50,13 @@
 #   CANTON_HOST / CANTON_LEDGER_API_PORT / CANTON_JSON_API_PORT
 #                           Default localhost / 6865 / 6864 (sandbox
 #                           defaults).
+#
+# Optional environment:
+#   GENESIS_LAST_CREATE     CoreState or EmitterRegistry (default). The
+#                           script stops after this create.
+#   CURL_MAX_TIME_SECONDS / CURL_CONNECT_TIMEOUT_SECONDS
+#                           Time limits of each JSON Ledger API call.
+#                           Default 60 / 10.
 set -euo pipefail
 
 MODE="${1:?usage: genesis_guardian_governance.sh <happy|threshold|forge>}"
@@ -53,6 +65,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOST="${CANTON_HOST:-localhost}"
 JSON_PORT="${CANTON_JSON_API_PORT:-6864}"
 BASE_URL="http://${HOST}:${JSON_PORT}"
+CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-60}"
+CURL_CONNECT_TIMEOUT_SECONDS="${CURL_CONNECT_TIMEOUT_SECONDS:-10}"
+GENESIS_LAST_CREATE="${GENESIS_LAST_CREATE:-EmitterRegistry}"
+case "${GENESIS_LAST_CREATE}" in
+  CoreState | EmitterRegistry) ;;
+  *) echo "GENESIS_LAST_CREATE must be CoreState or EmitterRegistry, got: ${GENESIS_LAST_CREATE}" >&2; exit 2 ;;
+esac
 
 : "${GG_ARTIFACTS_FILE:?GG_ARTIFACTS_FILE is required}"
 : "${GG_OPERATOR_ARTIFACTS_FILE:?GG_OPERATOR_ARTIFACTS_FILE is required}"
@@ -95,7 +114,6 @@ sig_json() {
 
 # --- Build the genesis create commands, matching mkInitialCoreState's and
 # mkInitialEmitterRegistry's devnet values (Test.TestCore.setup). ---
-COMMAND_ID="guardian-governance-genesis-${MODE}-$$"
 CORE_STATE_ARGS="$(jq -n \
   --arg operator "${OP_PARTY}" \
   --arg gg "${GG_PARTY}" \
@@ -122,107 +140,154 @@ EMITTER_REGISTRY_ARGS="$(jq -n \
     nextId: "0"
   }')"
 
-PREPARE_REQUEST="$(jq -n \
-  --arg cmdId "${COMMAND_ID}" \
-  --arg op "${OP_PARTY}" \
-  --arg gg "${GG_PARTY}" \
-  --arg synchronizerId "${LOGICAL_SYNCHRONIZER_ID}" \
-  --arg coreStateTemplateId "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:CoreState" \
-  --arg emitterRegistryTemplateId "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:EmitterRegistry" \
-  --argjson coreStateArgs "${CORE_STATE_ARGS}" \
-  --argjson emitterRegistryArgs "${EMITTER_REGISTRY_ARGS}" \
-  '{
-    commandId: $cmdId,
-    actAs: [$op, $gg],
-    synchronizerId: $synchronizerId,
-    packageIdSelectionPreference: [],
-    verboseHashing: false,
-    hashingSchemeVersion: "HASHING_SCHEME_VERSION_V3",
-    userId: "participant_admin",
-    commands: [
-      { CreateCommand: { templateId: $coreStateTemplateId, createArguments: $coreStateArgs } },
-      { CreateCommand: { templateId: $emitterRegistryTemplateId, createArguments: $emitterRegistryArgs } }
-    ]
-  }')"
-
-echo "[genesis:${MODE}] preparing CoreState and EmitterRegistry create commands..." >&2
-PREPARE_RESPONSE="$(curl -sf -X POST "${BASE_URL}/v2/interactive-submission/prepare" \
-  -H 'Content-Type: application/json' -d "${PREPARE_REQUEST}")"
-PREPARED_TX="$(echo "${PREPARE_RESPONSE}" | jq -r '.preparedTransaction')"
-HASH_B64="$(echo "${PREPARE_RESPONSE}" | jq -r '.preparedTransactionHash')"
-HSV="$(echo "${PREPARE_RESPONSE}" | jq -r '.hashingSchemeVersion')"
-HASH_HEX="$(b64_to_hex "${HASH_B64}")"
-
-OP_SIG_HEX="$(sign_hash "${OP_KEYFILE}" "${HASH_HEX}")"
-OP_SIG_JSON="$(sig_json "${OP_SIG_HEX}" "${OP_FINGERPRINT}")"
-
-GG_SIGNATURES="[]"
-case "${MODE}" in
-  happy)
-    # Sign with the first GG_THRESHOLD_VALUE owners -- exactly meets threshold.
-    for i in $(seq 0 $((GG_THRESHOLD_VALUE - 1))); do
-      fp="$(jq -r ".owners[$i].namespace" "${GG_ARTIFACTS_FILE}")"
-      pubfile="$(jq -r ".owners[$i].publicKeyFile" "${GG_ARTIFACTS_FILE}")"
-      keyfile="${pubfile%.pub}.key"
-      sig_hex="$(sign_hash "${keyfile}" "${HASH_HEX}")"
-      GG_SIGNATURES="$(echo "${GG_SIGNATURES}" | jq --argjson s "$(sig_json "${sig_hex}" "${fp}")" '. + [$s]')"
-    done
-    ;;
-  threshold)
-    # One signature only -- below threshold, must be rejected.
-    fp="$(jq -r '.owners[0].namespace' "${GG_ARTIFACTS_FILE}")"
-    pubfile="$(jq -r '.owners[0].publicKeyFile' "${GG_ARTIFACTS_FILE}")"
-    keyfile="${pubfile%.pub}.key"
-    sig_hex="$(sign_hash "${keyfile}" "${HASH_HEX}")"
-    GG_SIGNATURES="[$(sig_json "${sig_hex}" "${fp}")]"
-    ;;
-  forge)
-    # No guardianGovernance signature at all -- operator alone must not be
-    # able to forge the CoreState.
-    GG_SIGNATURES="[]"
-    ;;
-  *)
-    echo "unknown mode: ${MODE}" >&2
-    exit 2
-    ;;
-esac
-
-PARTY_SIGNATURES="$(jq -n \
-  --arg op "${OP_PARTY}" --argjson opSig "[${OP_SIG_JSON}]" \
-  --arg gg "${GG_PARTY}" --argjson ggSig "${GG_SIGNATURES}" \
-  'if ($ggSig | length) > 0 then
-     { signatures: [ {party: $op, signatures: $opSig}, {party: $gg, signatures: $ggSig} ] }
-   else
-     { signatures: [ {party: $op, signatures: $opSig} ] }
-   end')"
-
-EXECUTE_REQUEST="$(jq -n \
-  --arg prepared "${PREPARED_TX}" \
-  --argjson partySignatures "${PARTY_SIGNATURES}" \
-  --arg submissionId "${COMMAND_ID}-exec" \
-  --arg hsv "${HSV}" \
-  '{
-    preparedTransaction: $prepared,
-    partySignatures: $partySignatures,
-    submissionId: $submissionId,
-    userId: "participant_admin",
-    hashingSchemeVersion: $hsv,
-    deduplicationPeriod: { Empty: {} }
-  }')"
-
-OWNER_COUNT="$(jq '.owners | length' "${GG_ARTIFACTS_FILE}")"
-echo "[genesis:${MODE}] executing with $(echo "${GG_SIGNATURES}" | jq 'length')-of-${OWNER_COUNT} guardianGovernance signature(s) (threshold ${GG_THRESHOLD_VALUE})..." >&2
+GG_OWNER_COUNT="$(jq '.owners | length' "${GG_ARTIFACTS_FILE}")"
 EXEC_RESPONSE_FILE="$(mktemp)"
 trap 'rm -f "${EXEC_RESPONSE_FILE}"' EXIT
-HTTP_CODE="$(curl -s -o "${EXEC_RESPONSE_FILE}" -w '%{http_code}' -X POST \
-  "${BASE_URL}/v2/interactive-submission/execute" -H 'Content-Type: application/json' -d "${EXECUTE_REQUEST}")"
 
-echo "[genesis:${MODE}] HTTP ${HTTP_CODE}" >&2
-cat "${EXEC_RESPONSE_FILE}"
-echo
+# gg_signatures_json <hash-hex>: the guardianGovernance owner signatures that MODE prescribes.
+gg_signatures_json() {
+  local hash_hex="$1" signatures="[]" owner_position fingerprint public_key_file signature_hex
+  local signer_count
+  case "${MODE}" in
+    happy) signer_count="${GG_THRESHOLD_VALUE}" ;;  # exactly meets the threshold
+    threshold) signer_count=1 ;;                    # below the threshold
+    forge) signer_count=0 ;;                        # the operator alone
+    *) echo "unknown mode: ${MODE}" >&2; return 2 ;;
+  esac
+  for ((owner_position = 0; owner_position < signer_count; owner_position++)); do
+    fingerprint="$(jq -er ".owners[${owner_position}].namespace" "${GG_ARTIFACTS_FILE}")"
+    public_key_file="$(jq -er ".owners[${owner_position}].publicKeyFile" "${GG_ARTIFACTS_FILE}")"
+    signature_hex="$(sign_hash "${public_key_file%.pub}.key" "${hash_hex}")"
+    signatures="$(jq --argjson signature "$(sig_json "${signature_hex}" "${fingerprint}")" '. + [$signature]' <<<"${signatures}")"
+  done
+  printf '%s' "${signatures}"
+}
 
-if [ "${HTTP_CODE}" = "200" ]; then
-  exit 0
-else
+# submit_genesis_create <label> <template-id> <create-arguments-json>: one prepared transaction with one
+# CreateCommand, actAs Operator and guardianGovernance. The prepare endpoint accepts one command only.
+# Prints "RESULT <label> committed" or "RESULT <label> rejected". Returns non-zero unless committed.
+submit_genesis_create() {
+  local label="$1" template_id="$2" create_arguments="$3"
+  local command_id="guardian-governance-genesis-${MODE}-${label}-$$"
+  local prepare_request prepare_response prepared_transaction hash_hex hashing_scheme_version
+  local operator_signature gg_signatures party_signatures execute_request http_code
+  prepare_request="$(jq -n \
+    --arg cmdId "${command_id}" \
+    --arg op "${OP_PARTY}" \
+    --arg gg "${GG_PARTY}" \
+    --arg synchronizerId "${LOGICAL_SYNCHRONIZER_ID}" \
+    --arg templateId "${template_id}" \
+    --argjson createArguments "${create_arguments}" \
+    '{
+      commandId: $cmdId,
+      actAs: [$op, $gg],
+      synchronizerId: $synchronizerId,
+      packageIdSelectionPreference: [],
+      verboseHashing: false,
+      hashingSchemeVersion: "HASHING_SCHEME_VERSION_V3",
+      userId: "participant_admin",
+      commands: [ { CreateCommand: { templateId: $templateId, createArguments: $createArguments } } ]
+    }')"
+
+  echo "[genesis:${MODE}] preparing the ${label} create command..." >&2
+  if ! prepare_response="$(curl -sS --fail-with-body --max-time "${CURL_MAX_TIME_SECONDS}" \
+      --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" -X POST "${BASE_URL}/v2/interactive-submission/prepare" \
+      -H 'Content-Type: application/json' -d "${prepare_request}")"; then
+    echo "[genesis:${MODE}] prepare of ${label} failed: ${prepare_response}" >&2
+    echo "RESULT ${label} rejected"
+    return 1
+  fi
+  prepared_transaction="$(jq -er '.preparedTransaction' <<<"${prepare_response}")"
+  hashing_scheme_version="$(jq -er '.hashingSchemeVersion' <<<"${prepare_response}")"
+  hash_hex="$(b64_to_hex "$(jq -er '.preparedTransactionHash' <<<"${prepare_response}")")"
+  if [ "${#hash_hex}" -ne 64 ]; then
+    echo "[genesis:${MODE}] prepared hash of ${label} has ${#hash_hex} hex characters, expected 64" >&2
+    return 1
+  fi
+
+  operator_signature="$(sig_json "$(sign_hash "${OP_KEYFILE}" "${hash_hex}")" "${OP_FINGERPRINT}")"
+  gg_signatures="$(gg_signatures_json "${hash_hex}")"
+  party_signatures="$(jq -n \
+    --arg op "${OP_PARTY}" --argjson opSig "[${operator_signature}]" \
+    --arg gg "${GG_PARTY}" --argjson ggSig "${gg_signatures}" \
+    'if ($ggSig | length) > 0 then
+       { signatures: [ {party: $op, signatures: $opSig}, {party: $gg, signatures: $ggSig} ] }
+     else
+       { signatures: [ {party: $op, signatures: $opSig} ] }
+     end')"
+  execute_request="$(jq -n \
+    --arg prepared "${prepared_transaction}" \
+    --argjson partySignatures "${party_signatures}" \
+    --arg submissionId "${command_id}-exec" \
+    --arg hsv "${hashing_scheme_version}" \
+    '{
+      preparedTransaction: $prepared,
+      partySignatures: $partySignatures,
+      submissionId: $submissionId,
+      userId: "participant_admin",
+      hashingSchemeVersion: $hsv,
+      deduplicationPeriod: { Empty: {} }
+    }')"
+
+  echo "[genesis:${MODE}] executing ${label} with $(jq 'length' <<<"${gg_signatures}")-of-${GG_OWNER_COUNT} guardianGovernance signature(s) (threshold ${GG_THRESHOLD_VALUE})..." >&2
+  http_code="$(curl -s --max-time "${CURL_MAX_TIME_SECONDS}" --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" \
+    -o "${EXEC_RESPONSE_FILE}" -w '%{http_code}' -X POST \
+    "${BASE_URL}/v2/interactive-submission/executeAndWait" -H 'Content-Type: application/json' -d "${execute_request}")" \
+    || http_code="curl-failed"
+  echo "[genesis:${MODE}] ${label}: HTTP ${http_code}" >&2
+  cat "${EXEC_RESPONSE_FILE}" >&2
+  echo >&2
+  if [ "${http_code}" = "200" ]; then
+    echo "RESULT ${label} committed"
+    return 0
+  fi
+  echo "RESULT ${label} rejected"
+  return 1
+}
+
+# count_active_genesis_contracts <template>: active wormhole-core contracts of the template for the
+# (operator, guardianGovernance) pair, of any package version. Read as guardianGovernance.
+count_active_genesis_contracts() {
+  local template="$1" ledger_end active_contracts
+  ledger_end="$(curl -sS --fail-with-body --max-time "${CURL_MAX_TIME_SECONDS}" \
+    --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" "${BASE_URL}/v2/state/ledger-end" | jq -er .offset)" || return 1
+  active_contracts="$(curl -sS --fail-with-body --max-time "${CURL_MAX_TIME_SECONDS}" \
+    --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" -X POST "${BASE_URL}/v2/state/active-contracts" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --argjson end "${ledger_end}" --arg gg "${GG_PARTY}" \
+      --arg templateId "#wormhole-core:Wormhole.Core.State:${template}" '{
+      activeAtOffset: $end,
+      eventFormat: {filtersByParty: {($gg): {cumulative: [
+        {identifierFilter: {TemplateFilter: {value: {templateId: $templateId, includeCreatedEventBlob: false}}}}]}},
+        verbose: false}}')")" || return 1
+  jq -er --arg operator "${OP_PARTY}" --arg gg "${GG_PARTY}" '
+    [.[] | .contractEntry.JsActiveContract?.createdEvent // empty
+     | select(.packageName == "wormhole-core")
+     | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)]
+    | length' <<<"${active_contracts}"
+}
+
+# create_genesis_contract_if_missing <label> <template-id> <create-arguments-json>: skips the create when one
+# contract of the template is active for the pair. Returns non-zero when more than one is active, or when the
+# create is not committed.
+create_genesis_contract_if_missing() {
+  local label="$1" active_count
+  active_count="$(count_active_genesis_contracts "${label}")" || {
+    echo "[genesis:${MODE}] the active ${label} query failed" >&2
+    return 1
+  }
+  case "${active_count}" in
+    0) submit_genesis_create "$@" ;;
+    1) echo "RESULT ${label} exists" ;;
+    *) echo "[genesis:${MODE}] ${active_count} active ${label} contracts for the pair, expected at most 1" >&2; return 1 ;;
+  esac
+}
+
+create_genesis_contract_if_missing CoreState "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:CoreState" "${CORE_STATE_ARGS}" || {
+  echo "[genesis:${MODE}] CoreState is not active; the EmitterRegistry create is not submitted" >&2
   exit 1
+}
+if [ "${GENESIS_LAST_CREATE}" = "CoreState" ]; then
+  exit 0
 fi
+create_genesis_contract_if_missing EmitterRegistry "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:EmitterRegistry" "${EMITTER_REGISTRY_ARGS}"

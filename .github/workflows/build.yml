@@ -238,6 +238,36 @@ jobs:
       - name: Run the Daml tests (dpm test)
         run: docker run --rm --workdir /canton-build/test canton-daml-build dpm test
 
+  # Canton watcher sandbox tests (go test -tags integration) in the canton build image with Go added
+  canton-watcher-integration:
+    name: Canton watcher integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build the watcher integration image
+        run: docker build --target watcher-integration --tag canton-watcher-integration canton
+
+      - name: Run the watcher sandbox tests
+        run: docker run --rm --volume "$PWD:/src" --workdir /src/node canton-watcher-integration go test -tags integration -timeout 60m ./pkg/watchers/canton/...
+
+  # Table test of the emitter id scan against its in-repo Ledger API mock (bash, curl, jq, python3 from the runner image)
+  canton-tools:
+    name: Canton tools
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run the emitter id scan table test
+        run: bash canton/tools/emitter_id_scan_test.sh
+
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
     runs-on: ubuntu-24.04

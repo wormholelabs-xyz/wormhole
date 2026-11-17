@@ -12,10 +12,11 @@ version: 0.8.0
 source: daml
 # Compile-time SCU check against the previous release (package id and
 # provenance in ../dars/README.md). Same package name, so 0.8.0 stays on the
-# wormhole-core upgrade line. The EmitterRegistry signatory change (A14-3)
-# passes this check with the warning upgraded-template-expression-changed;
-# 0.7.0 registries cannot run under 0.8.0, so the move needs the registry
-# migration in ../A14_EMITTER_ID_UNIQUENESS.md.
+# wormhole-core upgrade line. The EmitterRegistry (A14-3) and Emitter (A14-2)
+# signatory changes pass this check with the warning
+# upgraded-template-expression-changed; 0.7.0 registries and emitters cannot
+# run under 0.8.0, so 0.8.0 starts from a fresh genesis
+# (../A14_EMITTER_ID_UNIQUENESS.md).
 upgrades: ../dars/wormhole-core-0.7.0.dar
 dependencies:
   - daml-prim
