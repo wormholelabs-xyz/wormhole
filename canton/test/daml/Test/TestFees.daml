@@ -223,7 +223,7 @@ testRegistrationFee = do
   bal2 === feeToDecimal 1000
 
 -- | 'SetRegistrationFee' needs the operator and guardianGovernance, keeps
--- @nextId@, and rejects a negative fee. The next registration pays the new fee.
+-- @nextId@, and rejects a negative fee or one above maxRegistrationFee. The next registration pays the new fee.
 testSetRegistrationFee : Script ()
 testSetRegistrationFee = do
   (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
@@ -255,6 +255,15 @@ testSetRegistrationFee = do
         ("registration fee must not be negative" `isInfixOf` failureStatus.message)
     Left otherError -> abort ("unexpected error: " <> show otherError)
     Right _ -> abort "SetRegistrationFee accepted a negative fee"
+
+  oversizedFeeResult <- trySubmit (actAs operator <> actAs cs.guardianGovernance) do
+    exerciseCmd regCid SetRegistrationFee with newRegistrationFee = 10000000000000001
+  case oversizedFeeResult of
+    Left (FailureStatusError failureStatus) ->
+      assertMsg ("unexpected error: " <> failureStatus.message)
+        ("registration fee exceeds maxRegistrationFee" `isInfixOf` failureStatus.message)
+    Left otherError -> abort ("unexpected error: " <> show otherError)
+    Right _ -> abort "SetRegistrationFee accepted a fee above maxRegistrationFee"
 
   feeRegCid <- submit (actAs operator <> actAs cs.guardianGovernance) do
     exerciseCmd regCid SetRegistrationFee with newRegistrationFee = 500

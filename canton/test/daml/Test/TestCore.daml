@@ -7,8 +7,10 @@ module Test.TestCore where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.Foldable (forA_)
 import DA.Map qualified as Map
 import DA.Optional (fromOptional, fromSome)
+import DA.Text qualified as T
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
@@ -203,6 +205,71 @@ testImpersonationBlocked = do
       emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
   Some m <- queryContractId mallory malloryEm
   assert (m.emitterAddress /= a.emitterAddress)
+
+-- | Range bounds of 'EmitterRegistry' and 'Emitter': ids stay below 2^53, so
+-- every tool reads them exactly; the sequence successor fits Int.
+testEmitterIdBounds : Script ()
+testEmitterIdBounds = do
+  (operator, guardianGovernance, _) <- setup
+  owner <- allocateParty "BoundsOwner"
+  let maxEmitterIdLiteral = 9007199254740991
+      maxEmitterSequenceLiteral = 9223372036854775806
+      maxRegistrationFeeLiteral = 10000000000000000
+      allSignatories = actAs operator <> actAs owner <> actAs guardianGovernance
+      registryWith registrationFee nextId = EmitterRegistry with operator, guardianGovernance, registrationFee, nextId
+      emitterWith emitterId sequence = Emitter with
+        operator, guardianGovernance, owner, emitterId
+        -- emitterAddressFor rejects a negative id; the ensure clause is under test.
+        emitterAddress = emitterAddressFor operator owner (max 0 emitterId)
+        sequence
+      registryCases =
+        [ ("registry nextId -1", registryWith 0 (-1), False)
+        , ("registry nextId 0", registryWith 0 0, True)
+        , ("registry nextId maxEmitterId + 1", registryWith 0 (maxEmitterIdLiteral + 1), True)
+        , ("registry nextId maxEmitterId + 2", registryWith 0 (maxEmitterIdLiteral + 2), False)
+        , ("registration fee -1", registryWith (-1) 0, False)
+        , ("registration fee 0", registryWith 0 0, True)
+        , ("registration fee maxRegistrationFee", registryWith maxRegistrationFeeLiteral 0, True)
+        , ("registration fee maxRegistrationFee + 1", registryWith (maxRegistrationFeeLiteral + 1) 0, False)
+        ]
+      emitterCases =
+        [ ("emitter id -1", emitterWith (-1) 0, False)
+        , ("emitter id 0", emitterWith 0 0, True)
+        , ("emitter id maxEmitterId", emitterWith maxEmitterIdLiteral 0, True)
+        , ("emitter id maxEmitterId + 1", emitterWith (maxEmitterIdLiteral + 1) 0, False)
+        , ("sequence -1", emitterWith 0 (-1), False)
+        , ("sequence 0", emitterWith 0 0, True)
+        , ("sequence maxEmitterSequence", emitterWith 0 maxEmitterSequenceLiteral, True)
+        , ("sequence maxEmitterSequence + 1", emitterWith 0 (maxEmitterSequenceLiteral + 1), False)
+        ]
+      checkCreateOutcome caseName expectAccepted createResult = case (expectAccepted, createResult) of
+        (True, Right _) -> pure ()
+        (True, Left createError) -> abort (caseName <> ": rejected: " <> show createError)
+        (False, Right _) -> abort (caseName <> ": accepted")
+        (False, Left createError) ->
+          assertMsg (caseName <> ": expected a template precondition failure, got: " <> show createError)
+            ("precondition" `T.isInfixOf` show createError)
+  forA_ registryCases \(caseName, registry, expectAccepted) -> do
+    createResult <- trySubmit allSignatories do createCmd registry
+    checkCreateOutcome caseName expectAccepted createResult
+  forA_ emitterCases \(caseName, emitter, expectAccepted) -> do
+    createResult <- trySubmit allSignatories do createCmd emitter
+    checkCreateOutcome caseName expectAccepted createResult
+
+  -- The last id is issued; the registry then holds maxEmitterId + 1 and issues no more.
+  lastIdRegistryCid <- submit (actAs operator <> actAs guardianGovernance) do
+    createCmd (registryWith 0 maxEmitterIdLiteral)
+  lastIdRegistryDisclosure <- fromSome <$> queryDisclosure operator lastIdRegistryCid
+  (exhaustedRegistryCid, lastEmitterCid) <- submit (actAs owner <> disclose lastIdRegistryDisclosure) do
+    exerciseCmd lastIdRegistryCid RegisterEmitter with
+      requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
+  Some lastEmitter <- queryContractId owner lastEmitterCid
+  lastEmitter.emitterId === maxEmitterIdLiteral
+  exhaustedRegistryDisclosure <- fromSome <$> queryDisclosure operator exhaustedRegistryCid
+  exhaustedResult <- trySubmit (actAs owner <> disclose exhaustedRegistryDisclosure) do
+    exerciseCmd exhaustedRegistryCid RegisterEmitter with
+      requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
+  checkCreateOutcome "registration after maxEmitterId" False exhaustedResult
 
 -- | Genesis needs both the operator and guardianGovernance signatures.
 testGenesisRequiresOperatorAndGovernance : Script ()
