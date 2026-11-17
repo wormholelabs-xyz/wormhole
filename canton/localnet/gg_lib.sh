@@ -58,15 +58,17 @@ gg_signers_json() {
 
 # submit_interactive <command-id> <act-as-json-array> <command-json> <signers-json> [disclosed-json] [package-preference-json]
 # Prints the transaction JSON. Returns non-zero on rejection; the error text goes to stderr.
+# With SUBMIT_AWAIT_COMPLETION=true, prints the command completion (status included) instead.
 submit_interactive() {
   local command_id="$1" act_as="$2" command="$3" signers="$4"
-  local disclosed="${5:-[]}" package_preference="${6:-[]}"
+  local disclosed="${5:-[]}" package_preference="${6:-[]}" await_completion="${SUBMIT_AWAIT_COMPLETION:-false}"
   local spec_file="$gg_work_dir/$command_id.spec.json"
   jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
     --argjson signers "$signers" --argjson disclosed "$disclosed" --argjson preference "$package_preference" \
-    --arg synchronizerId "$LOGICAL_SYNCHRONIZER_ID" \
+    --arg synchronizerId "$LOGICAL_SYNCHRONIZER_ID" --argjson awaitCompletion "$await_completion" \
     '{commandId: $commandId, actAs: $actAs, commands: [$command], signers: $signers,
-      disclosedContracts: $disclosed, packageIdSelectionPreference: $preference, synchronizerId: $synchronizerId}' \
+      disclosedContracts: $disclosed, packageIdSelectionPreference: $preference, synchronizerId: $synchronizerId,
+      awaitCompletion: $awaitCompletion}' \
     > "$spec_file"
   node "$LOCALNET_SCRIPT_DIR/interactive_submit.js" \
     "$(json_api_url "$SUBMITTING_VALIDATOR")" "$gg_work_dir/script.jwt" "$spec_file"
@@ -86,8 +88,20 @@ exercise_command() {
     '{ExerciseCommand: {templateId: $templateId, contractId: $contractId, choice: $choice, choiceArgument: $choiceArgument}}'
 }
 
+# core_contract_id <name>: CoreState and Emitter resolve from the app-provider ACS (exactly one each);
+# a submission that commits late can replace them. Other names come from core-contracts.json.
 core_contract_id() {
-  jq -er --arg name "$1" '.[$name]' "$CORE_CONTRACTS"
+  local template_suffix=""
+  case "$1" in
+    coreState) template_suffix=":Wormhole.Core.State:CoreState" ;;
+    emitter) template_suffix=":Wormhole.Core.State:Emitter" ;;
+  esac
+  if [[ -n "$template_suffix" ]]; then
+    active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" "$template_suffix" \
+      | jq -er --arg name "$1" 'if length == 1 then .[0].contractId else error("expected one active \($name), found \(length)") end'
+  else
+    jq -er --arg name "$1" '.[$name]' "$CORE_CONTRACTS"
+  fi
 }
 
 record_core_contract_id() {
@@ -117,4 +131,69 @@ active_contracts() {
       activeAtOffset: $offset}')" \
     | jq -c --arg suffix "$template_suffix" \
       '[.[] | .contractEntry.JsActiveContract.createdEvent? // empty | select(.templateId | endswith($suffix))]'
+}
+
+# set_participant_connection <disconnect|reconnect> <comma-separated validator names>
+set_participant_connection() {
+  PARTICIPANT_ACTION="$1" PARTICIPANT_NAMES="$2" \
+    "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/participant_connection.canton" 2>&1 \
+    | grep -E '^CONNECTION|ERROR' || true
+}
+
+# verify_vaa_as_operator <command-id> <vaa-hex> <pub-keys-json>: ParseAndVerifyVAA on the current CoreState.
+# guardianGovernance is a CoreState signatory, so its hosts confirm this transaction.
+verify_vaa_as_operator() {
+  submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
+    "$(exercise_command "$CORE_STATE_TEMPLATE" "$(core_contract_id coreState)" ParseAndVerifyVAA \
+      "$(jq -n --arg op "$OPERATOR_PARTY" --arg vaa "$2" --argjson keys "$3" '{verifier: $op, encodedVAA: $vaa, pubKeys: $keys}')")" \
+    "$(operator_signers_json)"
+}
+
+# generate_vaa <canton_localnet_vaa flags...>: prints the JSON {vaaHex, digestHex, pubKeys} of a devnet-key VAA.
+generate_vaa() {
+  (cd "$REPO_ROOT/node" && GOFLAGS=-mod=mod GOPROXY=off go run ./hack/canton_localnet_vaa "$@")
+}
+
+# Daml [(Int, Bytes)] public-key hints from generate_vaa output.
+vaa_pub_keys_json() {
+  jq -c '[.pubKeys[] | {_1: (.guardianIndex | tostring), _2: .publicKeyHex}]' <<<"$1"
+}
+
+# submit_governance_vaa <command-id> <vaa-hex> <pub-keys-json>: SubmitGovernanceVAA on the current CoreState.
+submit_governance_vaa() {
+  submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
+    "$(exercise_command "$CORE_STATE_TEMPLATE" "$(core_contract_id coreState)" SubmitGovernanceVAA \
+      "$(jq -n --arg vaa "$2" --argjson keys "$3" '{encodedVAA: $vaa, pubKeys: $keys}')")" \
+    "$(operator_signers_json)"
+}
+
+# publish_message <command-id> <payload-hex>: PublishMessage on the recorded Emitter at fee 0.
+publish_message() {
+  submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
+    "$(exercise_command "$EMITTER_TEMPLATE" "$(core_contract_id emitter)" PublishMessage \
+      "$(jq -n --arg op "$OPERATOR_PARTY" --arg cs "$(core_contract_id coreState)" --arg payload "$2" \
+        '{nonce: "2", payload: $payload, consistencyLevel: "0", coreStateCid: $cs, payer: $op, feeAllocation: null}')")" \
+    "$(operator_signers_json)"
+}
+
+# completion_summary <completion-output-file>: elapsed time, status code and message of an awaited completion.
+completion_summary() {
+  jq -c '{elapsedMs, code: (.completion.status.code // 0), message: (.completion.status.message // ""),
+          unresponsiveParties: ([.completion.status.details[]?.valueDecoded.metadata.unresponsiveParties? // empty] | first)}' "$1"
+}
+
+# start_clock_ticker <seconds>: run the synchronizer clock ticker in the background; sets clock_ticker_pid.
+start_clock_ticker() {
+  CLOCK_TICKER_SECONDS="$1" "$LOCALNET_SCRIPT_DIR/canton_console.sh" \
+    "$LOCALNET_SCRIPT_DIR/console/synchronizer_clock_ticker.canton" > "$gg_work_dir/clock-ticker.log" 2>&1 &
+  clock_ticker_pid=$!
+}
+
+stop_clock_ticker() {
+  if [[ -n "${clock_ticker_pid:-}" ]]; then
+    pkill -P "$clock_ticker_pid" 2>/dev/null || true
+    kill "$clock_ticker_pid" 2>/dev/null || true
+    wait "$clock_ticker_pid" 2>/dev/null || true
+    clock_ticker_pid=""
+  fi
 }

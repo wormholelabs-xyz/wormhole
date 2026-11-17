@@ -1,0 +1,17 @@
+// Disconnect or reconnect LocalNet participants from the global synchronizer, then print the connection state.
+// Environment: PARTICIPANT_ACTION (disconnect | reconnect), PARTICIPANT_NAMES (comma-separated console names).
+val synchronizerAlias = "global"
+val action = sys.env("PARTICIPANT_ACTION")
+val names = sys.env("PARTICIPANT_NAMES").split(",").toSeq.map(_.trim).filter(_.nonEmpty)
+require(names.nonEmpty, "PARTICIPANT_NAMES is empty")
+val selected = names.map(name => participants.remote.find(_.name == name).getOrElse(throw new RuntimeException(s"unknown participant $name")))
+selected.foreach { host =>
+  action match {
+    case "disconnect" => host.synchronizers.disconnect(synchronizerAlias)
+    case "reconnect" => host.synchronizers.reconnect(synchronizerAlias)
+    case other => throw new RuntimeException(s"unknown PARTICIPANT_ACTION $other")
+  }
+}
+participants.remote.foreach { host =>
+  println(s"CONNECTION ${host.name} connected=${host.synchronizers.list_connected().exists(_.synchronizerAlias.unwrap == synchronizerAlias)}")
+}

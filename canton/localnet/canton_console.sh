@@ -14,5 +14,9 @@ if [[ ! -f "$CANTON_CONSOLE_JAR" ]]; then
   docker cp "canton:/app/lib/$(basename "$CANTON_CONSOLE_JAR")" "$CANTON_CONSOLE_JAR"
 fi
 
+bootstrap_script="$(cd "$(dirname "$bootstrap_script")" && pwd)/$(basename "$bootstrap_script")"
+# The console writes log/ and compiled script files to its working directory.
+mkdir -p "$LOCALNET_STATE_DIR/console-work"
+cd "$LOCALNET_STATE_DIR/console-work"
 java "-Xmx$CONSOLE_HEAP" -jar "$CANTON_CONSOLE_JAR" --no-tty \
   -c "$CANTON_CONSOLE_CONFIG" --bootstrap "$bootstrap_script" < /dev/null

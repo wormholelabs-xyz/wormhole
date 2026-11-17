@@ -1,0 +1,19 @@
+// Advance the global synchronizer clock with time-proof requests from app-provider.
+// With two participants offline, LocalNet traffic is too low to move sequencer time, so mediator timeouts do not fire.
+// Environment: CLOCK_TICKER_SECONDS (run time; bounded to 900).
+import com.digitalasset.canton.SynchronizerAlias
+import com.digitalasset.canton.config.NonNegativeDuration
+import scala.concurrent.duration._
+
+val tickerMaxSeconds = 900
+val tickIntervalMillis = 2000L
+val tickTimeout = NonNegativeDuration.tryFromDuration(30.seconds)
+val globalAlias = SynchronizerAlias.tryCreate("global")
+val tickerSeconds = sys.env.getOrElse("CLOCK_TICKER_SECONDS", "300").toInt
+require(tickerSeconds > 0 && tickerSeconds <= tickerMaxSeconds, s"CLOCK_TICKER_SECONDS must be 1..$tickerMaxSeconds")
+val ticker = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))
+val deadlineMillis = System.currentTimeMillis() + tickerSeconds * 1000L
+while (System.currentTimeMillis() < deadlineMillis) {
+  println(s"TICK ${ticker.testing.fetch_synchronizer_time(globalAlias, tickTimeout)}")
+  Thread.sleep(tickIntervalMillis)
+}
