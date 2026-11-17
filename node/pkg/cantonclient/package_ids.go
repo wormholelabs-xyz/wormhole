@@ -2,6 +2,7 @@ package cantonclient
 
 import (
 	"fmt"
+	"time"
 )
 
 // PackageIDHexLen is the length of a Daml package id: a lowercase hex SHA-256.
@@ -30,6 +31,39 @@ func (id PackageID) String() string { return id.hexID }
 
 func (id PackageID) isZero() bool { return id.hexID == "" }
 
+// MaxRetiringPackageWindow bounds a retiring id's deadline minus the guardian's startup wall clock.
+const MaxRetiringPackageWindow = 7 * 24 * time.Hour
+
+// The window is at least one hour and at most 30 days (typed-constant underflow fails to compile).
+const (
+	_ = uint64(MaxRetiringPackageWindow - time.Hour)
+	_ = uint64(30*24*time.Hour - MaxRetiringPackageWindow)
+)
+
+// RetiringPackageDeadlineLayout is RFC 3339 in UTC with whole seconds.
+const RetiringPackageDeadlineLayout = "2006-01-02T15:04:05Z"
+
+// RetiringPackageID is a core package id the watcher accepts only for
+// transactions with a record time strictly before acceptedBeforeRecordTime.
+type RetiringPackageID struct {
+	packageID                PackageID
+	acceptedBeforeRecordTime time.Time
+}
+
+func (retiring RetiringPackageID) PackageID() PackageID { return retiring.packageID }
+
+// AcceptedBeforeRecordTime is the exclusive UTC deadline.
+func (retiring RetiringPackageID) AcceptedBeforeRecordTime() time.Time {
+	return retiring.acceptedBeforeRecordTime
+}
+
+// RetiringPackageConfig is the operator input for the retiring id. Both fields
+// are empty outside an upgrade window.
+type RetiringPackageConfig struct {
+	PackageIDHex     string
+	AcceptedUntilUTC string
+}
+
 // AcceptedPackageIDs is the set of wormhole-core package ids whose
 // PublishMessage exercises the watcher emits. The zero value accepts nothing.
 //
@@ -41,50 +75,105 @@ type AcceptedPackageIDs struct {
 
 // acceptedPackageSet is anyPackageSet or pinnedPackageSet; nil accepts nothing.
 type acceptedPackageSet interface {
-	acceptsPackageID(executingPackageIDHex string) bool
+	verdictForPublish(executingPackageIDHex string, recordTime time.Time) PublishPackageVerdict
 }
 
 // anyPackageSet matches every package (unsafe dev mode only).
 type anyPackageSet struct{}
 
-func (anyPackageSet) acceptsPackageID(string) bool { return true }
+func (anyPackageSet) verdictForPublish(string, time.Time) PublishPackageVerdict {
+	return PublishPackageVerdictAcceptedCurrent
+}
 
-// pinnedPackageSet is a primary id plus, during an upgrade window, one next id.
+// pinnedPackageSet is a current id plus, during an upgrade window, one retiring id.
 type pinnedPackageSet struct {
-	primary PackageID
-	next    *PackageID
+	current  PackageID
+	retiring *RetiringPackageID
 }
 
-func (pinned pinnedPackageSet) acceptsPackageID(executingPackageIDHex string) bool {
+func (pinned pinnedPackageSet) verdictForPublish(executingPackageIDHex string, recordTime time.Time) PublishPackageVerdict {
 	if executingPackageIDHex == "" {
-		return false
+		return PublishPackageVerdictRejectedUnpinned
 	}
-	if executingPackageIDHex == pinned.primary.hexID {
-		return true
+	if executingPackageIDHex == pinned.current.hexID {
+		return PublishPackageVerdictAcceptedCurrent
 	}
-	return pinned.next != nil && executingPackageIDHex == pinned.next.hexID
+	if pinned.retiring == nil || executingPackageIDHex != pinned.retiring.packageID.hexID {
+		return PublishPackageVerdictRejectedUnpinned
+	}
+	// SECURITY: record time is sequencer-assigned; effective time is submitter-chosen.
+	if recordTime.IsZero() {
+		return PublishPackageVerdictRejectedMissingRecordTime
+	}
+	if !recordTime.Before(pinned.retiring.acceptedBeforeRecordTime) {
+		return PublishPackageVerdictRejectedRetiringAfterDeadline
+	}
+	return PublishPackageVerdictAcceptedRetiring
 }
 
-// ParseAcceptedPackageIDs requires a primary id. nextHex is empty outside an
-// upgrade window; otherwise it is a second id that differs from the primary.
-func ParseAcceptedPackageIDs(primaryHex string, nextHex string) (AcceptedPackageIDs, error) {
-	primary, err := ParsePackageID(primaryHex)
+// PublishPackageVerdict is the watcher's decision for one PublishMessage exercise.
+type PublishPackageVerdict int
+
+const (
+	PublishPackageVerdictAcceptedCurrent PublishPackageVerdict = iota + 1
+	PublishPackageVerdictAcceptedRetiring
+	PublishPackageVerdictRejectedUnpinned
+	PublishPackageVerdictRejectedRetiringAfterDeadline
+	PublishPackageVerdictRejectedMissingRecordTime
+)
+
+func (verdict PublishPackageVerdict) IsAccepted() bool {
+	return verdict == PublishPackageVerdictAcceptedCurrent || verdict == PublishPackageVerdictAcceptedRetiring
+}
+
+// ParseAcceptedPackageIDs requires a current id. retiring is empty outside an
+// upgrade window; otherwise it is a second id with an accepted-until deadline
+// no more than MaxRetiringPackageWindow after startupWallClock. A deadline in
+// the past is valid: it keeps pre-deadline messages recoverable.
+func ParseAcceptedPackageIDs(currentHex string, retiring RetiringPackageConfig, startupWallClock time.Time) (AcceptedPackageIDs, error) {
+	current, err := ParsePackageID(currentHex)
 	if err != nil {
-		return AcceptedPackageIDs{}, fmt.Errorf("primary core package id: %w", err)
+		return AcceptedPackageIDs{}, fmt.Errorf("current core package id: %w", err)
 	}
-	pinned := pinnedPackageSet{primary: primary}
-	if nextHex == "" {
+	pinned := pinnedPackageSet{current: current}
+	if retiring.PackageIDHex == "" && retiring.AcceptedUntilUTC == "" {
 		return AcceptedPackageIDs{set: pinned}, nil
 	}
-	next, err := ParsePackageID(nextHex)
+	if retiring.PackageIDHex == "" {
+		return AcceptedPackageIDs{}, fmt.Errorf("an accepted-until deadline requires a retiring core package id")
+	}
+	if retiring.AcceptedUntilUTC == "" {
+		return AcceptedPackageIDs{}, fmt.Errorf("a retiring core package id requires an accepted-until deadline")
+	}
+	retiringPackageID, err := ParsePackageID(retiring.PackageIDHex)
 	if err != nil {
-		return AcceptedPackageIDs{}, fmt.Errorf("next core package id: %w", err)
+		return AcceptedPackageIDs{}, fmt.Errorf("retiring core package id: %w", err)
 	}
-	if next == primary {
-		return AcceptedPackageIDs{}, fmt.Errorf("next core package id must differ from the primary core package id %s", primary)
+	if retiringPackageID == current {
+		return AcceptedPackageIDs{}, fmt.Errorf("retiring core package id must differ from the current core package id %s", current)
 	}
-	pinned.next = &next
+	acceptedBeforeRecordTime, err := parseRetiringPackageDeadline(retiring.AcceptedUntilUTC)
+	if err != nil {
+		return AcceptedPackageIDs{}, err
+	}
+	if acceptedBeforeRecordTime.Sub(startupWallClock) > MaxRetiringPackageWindow {
+		return AcceptedPackageIDs{}, fmt.Errorf("accepted-until deadline %s is more than %s after startup %s",
+			retiring.AcceptedUntilUTC, MaxRetiringPackageWindow, startupWallClock.UTC().Format(RetiringPackageDeadlineLayout))
+	}
+	pinned.retiring = &RetiringPackageID{packageID: retiringPackageID, acceptedBeforeRecordTime: acceptedBeforeRecordTime}
 	return AcceptedPackageIDs{set: pinned}, nil
+}
+
+// parseRetiringPackageDeadline accepts exactly RetiringPackageDeadlineLayout.
+func parseRetiringPackageDeadline(deadlineText string) (time.Time, error) {
+	deadline, err := time.Parse(RetiringPackageDeadlineLayout, deadlineText)
+	if err != nil || deadline.Format(RetiringPackageDeadlineLayout) != deadlineText {
+		return time.Time{}, fmt.Errorf("accepted-until deadline %q must be RFC 3339 UTC with whole seconds (%s)", deadlineText, RetiringPackageDeadlineLayout)
+	}
+	if deadline.Location() != time.UTC {
+		return time.Time{}, fmt.Errorf("accepted-until deadline %q must be UTC", deadlineText)
+	}
+	return deadline, nil
 }
 
 // AcceptAnyPackageID matches every package that declares the watched template.
@@ -93,12 +182,13 @@ func AcceptAnyPackageID() AcceptedPackageIDs {
 	return AcceptedPackageIDs{set: anyPackageSet{}}
 }
 
-// Accepts reports whether executingPackageIDHex is in the set.
-func (accepted AcceptedPackageIDs) Accepts(executingPackageIDHex string) bool {
+// VerdictForPublish decides one exercise from ledger data only:
+// executingPackageIDHex is the event's raw package id, recordTime its transaction's record time.
+func (accepted AcceptedPackageIDs) VerdictForPublish(executingPackageIDHex string, recordTime time.Time) PublishPackageVerdict {
 	if accepted.set == nil {
-		return false
+		return PublishPackageVerdictRejectedUnpinned
 	}
-	return accepted.set.acceptsPackageID(executingPackageIDHex)
+	return accepted.set.verdictForPublish(executingPackageIDHex, recordTime)
 }
 
 func (accepted AcceptedPackageIDs) MatchesAnyPackage() bool {
@@ -109,34 +199,34 @@ func (accepted AcceptedPackageIDs) MatchesAnyPackage() bool {
 // IsEmpty reports the zero value, which accepts nothing.
 func (accepted AcceptedPackageIDs) IsEmpty() bool { return accepted.set == nil }
 
-// PrimaryPackageID is the primary id; false for the wildcard and the zero value.
-func (accepted AcceptedPackageIDs) PrimaryPackageID() (PackageID, bool) {
+// CurrentPackageID is false for the wildcard and the zero value.
+func (accepted AcceptedPackageIDs) CurrentPackageID() (PackageID, bool) {
 	pinned, isPinned := accepted.set.(pinnedPackageSet)
 	if !isPinned {
 		return PackageID{}, false
 	}
-	return pinned.primary, true
+	return pinned.current, true
 }
 
-// NextPackageID is the upgrade-window id; false outside a window.
-func (accepted AcceptedPackageIDs) NextPackageID() (PackageID, bool) {
+// RetiringPackageID is false outside an upgrade window.
+func (accepted AcceptedPackageIDs) RetiringPackageID() (RetiringPackageID, bool) {
 	pinned, isPinned := accepted.set.(pinnedPackageSet)
-	if !isPinned || pinned.next == nil {
-		return PackageID{}, false
+	if !isPinned || pinned.retiring == nil {
+		return RetiringPackageID{}, false
 	}
-	return *pinned.next, true
+	return *pinned.retiring, true
 }
 
-// String is "*" for the wildcard, "primary" or "primary,next" otherwise.
+// String is "*" for the wildcard, "current" or "current,retiring" otherwise.
 func (accepted AcceptedPackageIDs) String() string {
 	switch set := accepted.set.(type) {
 	case anyPackageSet:
 		return "*"
 	case pinnedPackageSet:
-		if set.next == nil {
-			return set.primary.hexID
+		if set.retiring == nil {
+			return set.current.hexID
 		}
-		return set.primary.hexID + "," + set.next.hexID
+		return set.current.hexID + "," + set.retiring.packageID.hexID
 	default:
 		return ""
 	}

@@ -151,13 +151,14 @@ var (
 	suiRPC           *string
 	suiMoveEventType *string
 
-	cantonRPC              *string
-	cantonPackageID        *string
-	cantonPackageIDNext    *string
-	cantonReadAsParty      *string
-	cantonAuthTokenURL     *string
-	cantonAuthClientID     *string
-	cantonAuthClientSecret *string
+	cantonRPC                          *string
+	cantonPackageID                    *string
+	cantonRetiringPackageID            *string
+	cantonRetiringPackageAcceptedUntil *string
+	cantonReadAsParty                  *string
+	cantonAuthTokenURL                 *string
+	cantonAuthClientID                 *string
+	cantonAuthClientSecret             *string
 
 	solanaRPC          *string
 	solanaContract     *string
@@ -431,7 +432,8 @@ func init() {
 
 	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
 	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (64 lowercase hex). Required outside --unsafeDevMode; empty (dev mode only) matches any package")
-	cantonPackageIDNext = NodeCmd.Flags().String("cantonPackageIDNext", "", "Second accepted Canton wormhole-core Daml package id (64 lowercase hex) for a core upgrade window. Requires --cantonPackageID and must differ from it. Set it only to a vetted, guardian-approved core version; remove it after the old core is unvetted")
+	cantonRetiringPackageID = NodeCmd.Flags().String("cantonRetiringPackageID", "", "Retiring wormhole-core package id (64 lowercase hex). Needs --cantonRetiringPackageAcceptedUntil. Guardian-approved ids only")
+	cantonRetiringPackageAcceptedUntil = NodeCmd.Flags().String("cantonRetiringPackageAcceptedUntil", "", "Exclusive record-time deadline for --cantonRetiringPackageID (RFC 3339 UTC, whole seconds, for example 2026-12-01T00:00:00Z). At most 7 days after startup")
 	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton guardianGovernance party the watcher reads as. Required outside --unsafeDevMode; empty (dev mode only) observes all parties on the participant")
 	cantonAuthTokenURL = NodeCmd.Flags().String("cantonAuthTokenURL", "", "OAuth2 token endpoint for a Keycloak-fronted Canton Ledger API (.../realms/<realm>/protocol/openid-connect/token). Set together with cantonAuthClientID and cantonAuthClientSecret, or not at all")
 	cantonAuthClientID = NodeCmd.Flags().String("cantonAuthClientID", "", "OAuth2 client id for the Canton Ledger API (client-credentials grant)")
@@ -1009,9 +1011,12 @@ func runNode(cmd *cobra.Command, args []string) {
 
 	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create requires
 	// --cantonPackageID and --cantonReadAsParty outside --unsafeDevMode and
-	// validates --cantonPackageIDNext.
-	if *cantonRPC == "" && *cantonPackageIDNext != "" {
-		logger.Fatal("If --cantonRPC is not set, --cantonPackageIDNext may not be set")
+	// validates the retiring package flags.
+	if *cantonRPC == "" && *cantonRetiringPackageID != "" {
+		logger.Fatal("If --cantonRPC is not set, --cantonRetiringPackageID may not be set")
+	}
+	if *cantonRPC == "" && *cantonRetiringPackageAcceptedUntil != "" {
+		logger.Fatal("If --cantonRPC is not set, --cantonRetiringPackageAcceptedUntil may not be set")
 	}
 
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {
@@ -1804,12 +1809,13 @@ func runNode(cmd *cobra.Command, args []string) {
 
 	if shouldStart(cantonRPC) {
 		wc := &canton.WatcherConfig{
-			NetworkID:     "canton",
-			ChainID:       vaa.ChainIDCanton,
-			Rpc:           *cantonRPC,
-			PackageID:     *cantonPackageID,
-			PackageIDNext: *cantonPackageIDNext,
-			ReadAsParty:   *cantonReadAsParty,
+			NetworkID:                    "canton",
+			ChainID:                      vaa.ChainIDCanton,
+			Rpc:                          *cantonRPC,
+			PackageID:                    *cantonPackageID,
+			RetiringPackageID:            *cantonRetiringPackageID,
+			RetiringPackageAcceptedUntil: *cantonRetiringPackageAcceptedUntil,
+			ReadAsParty:                  *cantonReadAsParty,
 			Auth: canton.AuthConfig{
 				TokenURL:     *cantonAuthTokenURL,
 				ClientID:     *cantonAuthClientID,

@@ -20,7 +20,7 @@ const unpinnedPackageOverflowLabel = "other"
 var unpinnedPublishMessages = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "wormhole_canton_unpinned_publish_messages_total",
-		Help: "PublishMessage exercises on the pinned template that the watcher dropped because a package other than --cantonPackageID or --cantonPackageIDNext executed them",
+		Help: "PublishMessage exercises on the pinned template that the watcher dropped because a package other than --cantonPackageID or --cantonRetiringPackageID executed them",
 	}, []string{"executing_package_id"})
 
 // unpinnedPackageLabels assigns each executing package id its own label until

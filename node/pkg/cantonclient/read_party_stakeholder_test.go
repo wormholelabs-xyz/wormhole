@@ -64,7 +64,7 @@ func TestReadPartySignsExercisedEmitter(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			exercised := &apiv2.ExercisedEvent{ContractId: tc.contractID, Consuming: tc.consuming, AcsDelta: tc.acsDelta}
-			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, tc.createdEvents, tc.tmpl, tc.readAsParty))
+			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, tc.createdEvents, tc.tmpl, sampleRecordTime, tc.readAsParty))
 		})
 	}
 }

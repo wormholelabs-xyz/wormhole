@@ -181,16 +181,17 @@ func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclien
 		acceptedPackageIDsGauge.WithLabelValues("primary", "*").Set(1)
 		return
 	}
-	primaryPackageID, _ := acceptedPackageIDs.PrimaryPackageID()
-	acceptedPackageIDsGauge.WithLabelValues("primary", primaryPackageID.String()).Set(1)
-	nextPackageID, hasNext := acceptedPackageIDs.NextPackageID()
-	if !hasNext {
+	currentPackageID, _ := acceptedPackageIDs.CurrentPackageID()
+	acceptedPackageIDsGauge.WithLabelValues("primary", currentPackageID.String()).Set(1)
+	retiringPackageID, hasRetiring := acceptedPackageIDs.RetiringPackageID()
+	if !hasRetiring {
 		return
 	}
-	acceptedPackageIDsGauge.WithLabelValues("next", nextPackageID.String()).Set(1)
-	logger.Warn("canton core upgrade window is open: two core package ids are accepted; remove the next id after promotion",
-		zap.Stringer("primaryPackageId", primaryPackageID),
-		zap.Stringer("nextPackageId", nextPackageID))
+	acceptedPackageIDsGauge.WithLabelValues("next", retiringPackageID.PackageID().String()).Set(1)
+	logger.Warn("canton core upgrade window is open: the retiring core package id is accepted before its record-time deadline; remove it at a later restart",
+		zap.Stringer("currentPackageId", currentPackageID),
+		zap.Stringer("retiringPackageId", retiringPackageID.PackageID()),
+		zap.Time("retiringPackageAcceptedBeforeRecordTime", retiringPackageID.AcceptedBeforeRecordTime()))
 }
 
 // checkAcceptedPackageIDsAllowed rejects an empty set, and the any-package
@@ -208,10 +209,10 @@ func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPack
 	return nil
 }
 
-// heartbeatContractAddress is the primary core package id, or empty for the wildcard.
+// heartbeatContractAddress is the current core package id, or empty for the wildcard.
 func (e *Watcher) heartbeatContractAddress() string {
-	primaryPackageID, _ := e.acceptedPackageIDs.PrimaryPackageID()
-	return primaryPackageID.String()
+	currentPackageID, _ := e.acceptedPackageIDs.CurrentPackageID()
+	return currentPackageID.String()
 }
 
 // NewWatcher creates a new Canton watcher.

@@ -111,7 +111,7 @@ func TestMessagesFromTxAppliesRetiringDeadline(t *testing.T) {
 			unpinnedBefore := unpinnedPublishCount(tc.executingPackageID)
 			tx := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(tc.executingPackageID, 3)}}, sampleEffectiveAt, tc.recordTime)
 
-			messages := messagesFromTx(tx, upgradeWindowTmpl, "PublishMessage", zap.New(core))
+			messages := messagesFromTx(tx, upgradeWindowTmpl, "PublishMessage", governanceParty, zap.New(core))
 
 			assert.Len(t, messages, tc.wantMessages)
 			assert.Equal(t, tc.wantAfterDeadlineIncrement, retiringPackagePublishAfterDeadlineCount()-afterDeadlineBefore)

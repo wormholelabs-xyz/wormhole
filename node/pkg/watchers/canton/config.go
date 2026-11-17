@@ -2,6 +2,7 @@ package canton
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
@@ -23,11 +24,14 @@ type WatcherConfig struct {
 	// spoofing risk, so Create REQUIRES it outside unsafe dev mode. (Daml
 	// package upgrades change the package-id, so it must be updated on upgrade.)
 	PackageID string
-	// PackageIDNext is a second accepted wormhole-core package id for the
+	// RetiringPackageID is the previous wormhole-core package id during an
 	// upgrade window (canton/README.md section 7.5). Empty outside the window.
 	// SECURITY: it must be a guardian-approved, vetted core version; messages
-	// it executes are signed.
-	PackageIDNext string
+	// it executes before RetiringPackageAcceptedUntil are signed.
+	RetiringPackageID string
+	// RetiringPackageAcceptedUntil is the exclusive record-time deadline for
+	// RetiringPackageID (RFC 3339 UTC, whole seconds). Required with it.
+	RetiringPackageAcceptedUntil string
 	// ReadAsParty narrows the update stream and reobservation lookups to the
 	// guardianGovernance party (signatory of CoreState, observer of every
 	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
@@ -66,7 +70,7 @@ func (wc *WatcherConfig) Create(
 	if !devMode && wc.PackageID == "" {
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
 	}
-	acceptedPackageIDs, err := wc.acceptedPackageIDs()
+	acceptedPackageIDs, err := wc.acceptedPackageIDs(time.Now())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,13 +113,17 @@ func (wc *WatcherConfig) Create(
 	return watcher.Run, nil, nil
 }
 
-// acceptedPackageIDs is the dev-mode wildcard when both ids are empty; Create
-// rejects that case outside unsafe dev mode before calling it.
-func (wc *WatcherConfig) acceptedPackageIDs() (cantonclient.AcceptedPackageIDs, error) {
-	if wc.PackageID == "" && wc.PackageIDNext == "" {
+// acceptedPackageIDs is the dev-mode wildcard when every package flag is
+// empty; Create rejects that case outside unsafe dev mode before calling it.
+func (wc *WatcherConfig) acceptedPackageIDs(startupWallClock time.Time) (cantonclient.AcceptedPackageIDs, error) {
+	retiring := cantonclient.RetiringPackageConfig{
+		PackageIDHex:     wc.RetiringPackageID,
+		AcceptedUntilUTC: wc.RetiringPackageAcceptedUntil,
+	}
+	if wc.PackageID == "" && retiring == (cantonclient.RetiringPackageConfig{}) {
 		return cantonclient.AcceptAnyPackageID(), nil
 	}
-	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(wc.PackageID, wc.PackageIDNext)
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(wc.PackageID, retiring, startupWallClock)
 	if err != nil {
 		return cantonclient.AcceptedPackageIDs{}, fmt.Errorf("canton: %w", err)
 	}

@@ -196,8 +196,11 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 }
 
 // messagesFromTx extracts every Wormhole message from a transaction: each
-// ExercisedEvent of `choiceName` on `tmpl` that readPartySignsExercisedEmitter
-// accepts and whose exercise_result decodes to a WormholeMessage record.
+// consuming ExercisedEvent of `choiceName` on `tmpl` that the accepted package
+// ids admit at the transaction's record time and that
+// readPartySignsExercisedEmitter accepts, whose exercise_result decodes to a
+// WormholeMessage record. The event's package id is the package that executed
+// the choice, which a Daml upgrade changes.
 func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, readAsParty string, logger *zap.Logger) []CantonMessage {
 	createdEvents := createdEventsByContractID(tx)
 	var out []CantonMessage
@@ -209,15 +212,25 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 		if ex.GetChoice() != choiceName {
 			continue
 		}
-		if !templateMatches(ex.GetTemplateId(), tmpl) {
-			if templateNameMatches(ex.GetTemplateId(), tmpl) {
-				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.AcceptedPackageIDs, logger)
-			}
+		if !templateNameMatches(ex.GetTemplateId(), tmpl) {
+			continue
+		}
+		executingPackageID := ex.GetTemplateId().GetPackageId()
+		switch tmpl.AcceptedPackageIDs.VerdictForPublish(executingPackageID, protoTime(tx.GetRecordTime())) {
+		case PublishPackageVerdictAcceptedCurrent, PublishPackageVerdictAcceptedRetiring:
+		case PublishPackageVerdictRejectedRetiringAfterDeadline:
+			recordRetiringPackagePublishAfterDeadline(tx.GetUpdateId(), executingPackageID, protoTime(tx.GetRecordTime()), logger)
+			continue
+		case PublishPackageVerdictRejectedMissingRecordTime:
+			recordPublishWithoutRecordTime(tx.GetUpdateId(), executingPackageID, logger)
+			continue
+		default:
+			recordUnpinnedPublish(tx.GetUpdateId(), executingPackageID, tmpl.AcceptedPackageIDs, logger)
 			continue
 		}
 		// SECURITY: guardianGovernance signs every real Emitter, so a publish
 		// on an Emitter it does not sign is on an Emitter of another registry.
-		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, readAsParty) {
+		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, protoTime(tx.GetRecordTime()), readAsParty) {
 			recordPublishWithoutReadPartyStakeholder(tx.GetUpdateId(), logger)
 			continue
 		}
@@ -232,19 +245,6 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 		out = append(out, msg)
 	}
 	return out
-}
-
-// templateMatches compares an event's template id against the configured
-// filter. The event carries the executing package id, which a Daml package
-// upgrade changes while module and entity stay the same.
-func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
-	if id == nil {
-		return false
-	}
-	if !tmpl.AcceptedPackageIDs.Accepts(id.GetPackageId()) {
-		return false
-	}
-	return templateNameMatches(id, tmpl)
 }
 
 // templateNameMatches compares module and entity only, ignoring the package id.

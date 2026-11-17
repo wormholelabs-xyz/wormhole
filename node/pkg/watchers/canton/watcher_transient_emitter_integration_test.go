@@ -71,7 +71,7 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
 	streamRecorder := newUpdateStreamRecorder()
 	transientPublishRecorder := &witnessOnlyPublishRecorder{}
-	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(corePackageID, "")
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(corePackageID, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	w, err := NewWatcher("localhost:"+port, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
 	require.NoError(t, err)
