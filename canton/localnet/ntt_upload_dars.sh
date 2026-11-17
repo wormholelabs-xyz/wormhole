@@ -65,5 +65,5 @@ for validator_name in app-provider sv app-user; do
       exit 1
     fi
   done
-  echo "$validator_name: uploaded ${#NTT_DAR_PATHS[@]} DARs; ntt $ntt_package_id , wormhole-core and token-cip0056 vetted"
+  echo "$validator_name: uploaded ${#NTT_DAR_PATHS[@]} DARs; ntt $ntt_package_id, wormhole-core and token-cip0056 vetted"
 done
