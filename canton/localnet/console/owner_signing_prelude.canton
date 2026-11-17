@@ -37,8 +37,37 @@ def parseSignerArgv(variableName: String): Seq[String] = {
   require(signerArgv.forall(_.nonEmpty), s"$variableName holds an empty argument")
   signerArgv
 }
-def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String): ByteString =
-  parseEd25519SignatureHex((signerArgv :+ hashHex).!!.trim, signerDescription)
+val ownerSignerMaxSeconds = 30
+val ownerSignerMaxOutputCharacters = 1024
+// runOwnerSigner: stdout is the signature; stderr goes to the console stderr. A signer that runs longer than
+// maxSeconds is stopped and the call fails. The signer runs without other JVM threads: a script lambda on another
+// thread blocks on the class initialization of the running script.
+def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String,
+    maxSeconds: Int = ownerSignerMaxSeconds): ByteString = {
+  require(maxSeconds > 0 && maxSeconds <= ownerSignerMaxSeconds, s"signer time limit $maxSeconds s is outside 1..$ownerSignerMaxSeconds")
+  val signerOutputFile = Files.createTempFile("owner-signer-", ".out")
+  try {
+    val signerProcess =
+      try new java.lang.ProcessBuilder(java.util.Arrays.asList((signerArgv :+ hashHex): _*))
+        .redirectInput(java.lang.ProcessBuilder.Redirect.from(new java.io.File("/dev/null")))
+        .redirectOutput(signerOutputFile.toFile)
+        .redirectError(java.lang.ProcessBuilder.Redirect.INHERIT)
+        .start()
+      catch {
+        case startError: java.io.IOException =>
+          throw new RuntimeException(s"signer of $signerDescription could not start: ${startError.getMessage}")
+      }
+    if (!signerProcess.waitFor(maxSeconds.toLong, java.util.concurrent.TimeUnit.SECONDS)) {
+      signerProcess.destroyForcibly()
+      signerProcess.waitFor(5L, java.util.concurrent.TimeUnit.SECONDS)
+      throw new RuntimeException(s"signer of $signerDescription did not finish in $maxSeconds s and was stopped")
+    }
+    require(signerProcess.exitValue == 0, s"signer of $signerDescription exited with ${signerProcess.exitValue}")
+    require(Files.size(signerOutputFile) <= ownerSignerMaxOutputCharacters,
+      s"signer of $signerDescription printed more than $ownerSignerMaxOutputCharacters characters")
+    parseEd25519SignatureHex(new String(Files.readAllBytes(signerOutputFile), "US-ASCII").trim, signerDescription)
+  } finally Files.deleteIfExists(signerOutputFile)
+}
 // END owner signer block
 
 case class OwnerKey(publicKey: SigningPublicKey, signerArgv: Seq[String]) {
