@@ -39,7 +39,7 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A9-5 | Replay a VAA in uppercase hex. | Held. | `testRedTeamA9HexCaseReplay`. | None. | None. |
 | A14-1 | The operator creates an emitter for a third party. | Held. | `testRedTeamA14OperatorCannotForgeThirdPartyEmitter`. | None. | None. |
 | A14-2 | The operator and the owner rewind the owner sequence. | Broken by design. | `testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress` passes. | Low. | Record the limit. |
-| A14-3 | The operator resets the registry counter. | Fixed on branch `canton/overnight-u2` (decision U2). | `testRedTeamA14OperatorCannotResetEmitterRegistry`; `testRogueGovernanceEmitterCannotPublishOnRealCoreState`. | Medium. | Approve U2. Migrate to 0.8.0 ([A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md)). |
+| A14-3 | The operator resets the registry counter. | Fixed on `canton/overnight-u2` (U2). | `testRedTeamA14OperatorCannotResetEmitterRegistry`; `testSetRegistrationFee`; scan test; LocalNet rehearsal. | Medium. | Approve U2. Migrate ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
 | R1 | Publish inside `try` and roll back. | Held. | `testRedTeamR1RollbackOfPublishRejected`. | None. | None. |
 | R2 | Run attacker code in the fee charge. | Held. | `TestFees.testFeeValidationMatrix`. | None. | None. |
 | R3 | Vet a malicious upgrade of `wormhole-core`. | Not tested. | None. | High if it occurs. | Control package vetting. |
@@ -130,11 +130,22 @@ Both emitters start at sequence 0.
 Integrators that use the sequence for ordering or replay protection can fail.
 
 Fix (proposal branch `canton/overnight-u2`, `wormhole-core` 0.8.0): `guardianGovernance` co-signs `EmitterRegistry` (`State.daml:398`).
-The operator alone cannot create a registry.
+The operator alone cannot create, archive, or re-price a registry.
+`SetRegistrationFee` keeps `nextId`.
 A registry under a rogue `guardianGovernance` cannot publish against the real `CoreState`.
-The fix changes a signatory, so it is not a smart contract upgrade.
-The migration needs a guardian ceremony and an unvet of 0.7.0.
-[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the options, the change, and the migration.
+It can publish against a shadow `CoreState` of the same rogue party.
+The real `guardianGovernance` is not an informee of that publish, so the guardian watchers do not see it.
+The fix changes a signatory, so a 0.7.0 registry cannot continue under 0.8.0.
+The migration needs an unvet of 0.7.0, then a guardian-side scan, then a guardian ceremony.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the options, the change, the migration, and the LocalNet rehearsal.
+
+Open item (not checked): the watcher does not check that `guardianGovernance` is a stakeholder of the exercised `Emitter`.
+`messagesFromTx` (`node/pkg/cantonclient/cantongrpc.go:196-230`) accepts each matching `PublishMessage` in the stream of `guardianGovernance`.
+That stream also has events that `guardianGovernance` only witnesses.
+`guardianGovernance` witnesses each node below a node where it is an informee.
+Thus a `PublishMessage` on a rogue-`guardianGovernance` `Emitter` below such a node can reach the watcher.
+No test shows this case or shows that no choice body creates it.
+A candidate fix: drop a `PublishMessage` event when the read-as party is not a stakeholder of the `Emitter`.
 
 ### R1: Rolled-back publish
 

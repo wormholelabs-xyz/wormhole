@@ -267,6 +267,9 @@ template EmitterRegistry with
     -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
     --   with requester, payer : Party; coreStateCid, feeAllocation : Optional ...
     --   controller requester, payer -- operator + gg authority inherited; no crank
+    -- choice SetRegistrationFee : ContractId EmitterRegistry
+    --   with newRegistrationFee : Int
+    --   controller operator, guardianGovernance -- keeps nextId
 
 template Emitter
   with
@@ -290,8 +293,8 @@ over the emitter (§4.1, §10).
 `guardianGovernance` is a signatory of the registry. Thus its hosting
 participants confirm each `RegisterEmitter`, and a registration needs the
 confirmation threshold of `guardianGovernance`. A change of `registrationFee`
-needs a guardian ceremony. See
-[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md).
+needs a guardian ceremony that runs `SetRegistrationFee`. The choice keeps
+`nextId`. See [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md).
 
 **Emitter address derivation.** The 32-byte Wormhole emitter address is
 
@@ -1163,13 +1166,17 @@ covered by the integration test in §9.
 
 ### 7.5 Core package upgrades
 
-`wormhole-core` 0.8.0 is not a smart contract upgrade of 0.7.0.
-It adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
-Thus `core/daml.yaml` has no `upgrades:` field for 0.8.0.
-The move from 0.7.0 needs a registry migration and an unvet of 0.7.0.
-[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the procedure.
-Releases after 0.8.0 set `upgrades:` to the vendored 0.8.0 DAR.
-`damlc` then rejects a build that is not a valid smart contract upgrade of it.
+`core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
+`damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+For 0.8.0, the baseline is `dars/wormhole-core-0.7.0.dar`.
+
+0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
+`damlc` reports this change only as a warning.
+A 0.7.0 `EmitterRegistry` cannot run under 0.8.0.
+All other 0.7.0 contracts continue under 0.8.0.
+Thus the move from 0.7.0 needs a registry migration and an unvet of 0.7.0.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the procedure, the scan, and the integrator cutover.
+The procedure below applies to the other steps of that migration.
 
 **Event package ids.** The watcher compares the package id of each
 `PublishMessage` `ExercisedEvent` with `--cantonPackageID` (`templateMatches`

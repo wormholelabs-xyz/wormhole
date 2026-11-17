@@ -34,10 +34,10 @@ Go watcher's configured packageID changes with the new build.
 `core/daml.yaml` sets `upgrades:` to the DAR of the previous release.
 `damlc` then checks that the new version is a valid smart contract upgrade (SCU).
 
-| DAR | Baseline for | Source | Main package id |
+| DAR | Baseline for | Source commit of `canton/core` | Main package id |
 | --- | --- | --- | --- |
-| `wormhole-core-0.6.0.dar` | 0.7.0 | commit `926e55310`, `canton/core`, SDK 3.5.1 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` |
-| `wormhole-core-0.7.0.dar` | 0.8.0 | commit `cfff39977`, `canton/core`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
+| `wormhole-core-0.6.0.dar` | 0.7.0 | `926e55310`, SDK 3.5.1 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` |
+| `wormhole-core-0.7.0.dar` | 0.8.0 | `cfff39977`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
 `damlc` reports this change as the warning `upgraded-template-expression-changed`.
