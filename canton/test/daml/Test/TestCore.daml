@@ -31,8 +31,9 @@ govSetFeeVAA : Bytes
 govSetFeeVAA = "01000000000100797d5065f8fef799fdfb8e1042eccc143a77b35a4d9d2689474cdbf8500bffe46678c27b114d015c45f175fb5bd687cff92c4238d31035bacb65ddf8ae99b6f8006553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000010000000000000000000000000000000000000000000000000000000000436f726503004b00000000000000000000000000000000000000000000000000000000000003e8"
 
 -- | Bootstrap a devnet 'CoreState', 'EmitterRegistry', and 'ReplayRootRegistry'.
--- The 'CoreState' is co-signed by @operator@ and @guardianGovernance@ (a single
--- party here; a k-of-n threshold party in production), so genesis needs both.
+-- The 'CoreState' and 'EmitterRegistry' are co-signed by @operator@ and
+-- @guardianGovernance@ (a single party here; a k-of-n threshold party in
+-- production), so genesis creates both in one transaction with both parties.
 -- Returns @(operator, guardianGovernance, coreState)@; @operator@ stays FIRST
 -- for bootstrap.sh's party extraction, and @guardianGovernance@ second is the
 -- watcher's --cantonReadAsParty.
@@ -48,11 +49,11 @@ setupWithInstrument mInstrument = do
   operator <- allocateParty "Operator"
   guardianGovernance <- allocateParty "GuardianGovernance"
   let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
-  csId <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian]
-                 feeInstrument guardianGovernance)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
+  (csId, _) <- submit (actAs operator <> actAs guardianGovernance) do
+    (,) <$> createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+                         defaultGovernanceContract [devnetGuardian]
+                         feeInstrument guardianGovernance)
+        <*> createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
   pure (operator, guardianGovernance, csId)
 
@@ -355,5 +356,7 @@ testArchives = do
   -- Emitter now has two signatories (operator + owner), so both must authorize.
   submit (actAs operator <> actAs bob) do archiveCmd emId   -- Archive Emitter
   [(regId, _)] <- query @EmitterRegistry operator
-  submit operator do archiveCmd regId           -- Archive EmitterRegistry
+  -- EmitterRegistry is co-signed, so archiving needs operator + guardianGovernance.
+  submitMustFail operator do archiveCmd regId
+  submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd regId
   pure ()

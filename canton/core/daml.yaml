@@ -8,11 +8,13 @@
 # Canton keys are non-unique (see State.daml and README §4).
 sdk-version: 3.5.1
 name: wormhole-core
-version: 0.7.0
+version: 0.8.0
 source: daml
-# Compile-time SCU check against the previous release (package id and
-# provenance in ../dars/README.md).
-upgrades: ../dars/wormhole-core-0.6.0.dar
+# No `upgrades:` field: 0.8.0 adds guardianGovernance as an EmitterRegistry
+# signatory (A14-3). A signatory change is not a smart contract upgrade, so
+# 0.8.0 starts a new deployment line with a registry migration
+# (../A14_EMITTER_ID_UNIQUENESS.md). Restore the field with the 0.8.0 DAR as
+# the baseline for the next release.
 dependencies:
   - daml-prim
   - daml-stdlib

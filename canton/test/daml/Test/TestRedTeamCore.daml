@@ -187,7 +187,7 @@ testRedTeamA1FeeCannotBeSkipped = do
   (operator, guardianGovernance, coreStateCid) <- setup
   registrant <- allocateParty "RedTeamFeeRegistrant"
   emitterCid <- registerEmitter operator registrant
-  feeRegistryCid <- submit operator do
+  feeRegistryCid <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance 500)
   feeRegistryDisclosure <- fromSome <$> queryDisclosure operator feeRegistryCid
   registerResult <- trySubmit (actAs registrant <> disclose feeRegistryDisclosure) do
@@ -566,7 +566,7 @@ testRedTeamA14OperatorCannotResetEmitterRegistry = do
   firstEmitterCid <- registerEmitter operator honestOwner
   resetResult <- trySubmit (actAs operator) do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
-  checkAttackFailedWith "A14 operator alone resets the EmitterRegistry" "" resetResult
+  checkAttackFailedWith "A14 operator alone resets the EmitterRegistry" "Authorization failure" resetResult
 
   secondEmitterCid <- registerEmitter operator honestOwner
   (_, firstMessage) <- publishVia operator coreStateCid honestOwner firstEmitterCid 1 "aa" 0

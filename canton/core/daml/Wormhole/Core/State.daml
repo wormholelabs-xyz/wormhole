@@ -377,27 +377,34 @@ emitterAddressFor : Party -> Party -> Int -> Bytes32
 emitterAddressFor registrar owner emitterId =
   derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId)
 
--- | Allocates monotonically increasing emitter ids, one registry per operator.
--- Sequential-id discipline is operator-behavioral; what a rogue operator cannot
--- do is reuse an id to impersonate an existing emitter — that address includes
--- the owner, whose signature it lacks (see 'Emitter').
+-- | Allocates monotonically increasing emitter ids, one registry per
+-- (operator, guardianGovernance). Created with 'CoreState' in the genesis
+-- ceremony.
+--
+-- SECURITY: guardianGovernance co-signs, so the operator alone cannot create a
+-- registry with a reused @nextId@ (A14-3). A reused id gives an honest owner's
+-- second 'Emitter' the address of its first, both at sequence 0. A registry
+-- under a rogue guardianGovernance cannot publish: 'PublishMessage' pins the
+-- real 'CoreState' guardianGovernance.
 template EmitterRegistry
   with
     operator           : Party
-    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
-                                -- signatory) in RegisterEmitter's fee charge
+    guardianGovernance : Party  -- co-signer; also pinned in RegisterEmitter's
+                                -- fee charge
     registrationFee    : Int    -- onboarding fee, 10^-10 feeInstrument units;
-                                -- operator-set at creation, 0 for free
+                                -- fixed at creation, 0 for free
     nextId             : Int
   where
-    signatory operator
+    signatory operator, guardianGovernance
 
     -- | Direct, requester-submitted registration: allocates the next id and
     -- creates the co-signed 'Emitter' in one transaction, no operator crank —
-    -- the flexible controller brings the @requester@'s signature, the operator's
-    -- is inherited from this contract. Permissionless (EVM/Sui parity); the
-    -- requester needs this registry disclosed (README §4.7), plus the 'CoreState'
-    -- disclosure and a fee allocation when @registrationFee > 0@ (README §4.2).
+    -- the flexible controller brings the @requester@'s signature; the operator's
+    -- and guardianGovernance's are inherited from this contract, so
+    -- guardianGovernance's hosts confirm every registration. Permissionless
+    -- (EVM/Sui parity); the requester needs this registry disclosed (README
+    -- §4.7), plus the 'CoreState' disclosure and a fee allocation when
+    -- @registrationFee > 0@ (README §4.2).
     -- Consuming, so racing registrations contend here — the loser re-resolves
     -- and retries.
     --

@@ -54,13 +54,16 @@ testOutsiderSeesNoMessage = do
   emitters <- query @Emitter outsider
   assertMsg "outsider must not see the emitter" (null emitters)
 
--- | EmitterRegistry stakeholders: operator only.
-testGovernanceDoesNotSeeRegistry : Script ()
-testGovernanceDoesNotSeeRegistry = do
+-- | EmitterRegistry stakeholders: operator and guardianGovernance (co-signers).
+testGovernanceSeesRegistry : Script ()
+testGovernanceSeesRegistry = do
   (operator, guardianGovernance, _) <- setup
-  [(regId, _)] <- query @EmitterRegistry operator
-  regView <- queryContractId guardianGovernance regId
-  regView === None
+  outsider <- allocateParty "RegistryOutsider"
+  [(regId, operatorView)] <- query @EmitterRegistry operator
+  governanceView <- queryContractId guardianGovernance regId
+  governanceView === Some operatorView
+  outsiderView <- queryContractId outsider regId
+  outsiderView === None
 
 -- | Publish and archive of an integrator's emitter require the owner.
 testGovernanceHasNoEmitterAuthority : Script ()
@@ -91,7 +94,7 @@ testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
   (operator, guardianGovernance, csId) <- setup
   rogueGovernance <- allocateParty "RogueGovernance"
   alice <- allocateParty "Alice"
-  rogueRegistryCid <- submit operator do
+  rogueRegistryCid <- submit (actAs operator <> actAs rogueGovernance) do
     createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
   rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
   (_, rogueEmitterCid) <- submit (actAs alice <> disclose rogueRegistryDisclosure) do
