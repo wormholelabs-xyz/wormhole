@@ -124,6 +124,34 @@ check_case "subject header file holds the header" 0 "Authorization: Bearer stub-
 check_case "subject header file is reused" 0 "$subject_header_file" - subject_auth_header_file ntt-locker-1
 check_case "subject header file of a path subject" 1 - "subject" subject_auth_header_file ../escape
 
+# Columns: case | NTT_RELEASE_AFTER_ROUNDS text | expected status
+readonly RELEASE_AFTER_ROUNDS_CASES=(
+  "zero|0|0"
+  "maximum|24|0"
+  "above the maximum|25|1"
+  "leading zero is decimal|08|0"
+  "arithmetic expression|1+1|1"
+  "command substitution|a[\$(id)]|1"
+  "empty||1"
+  "negative|-1|1"
+  "four digits|9999|1"
+)
+for release_case in "${RELEASE_AFTER_ROUNDS_CASES[@]}"; do
+  IFS='|' read -r case_name rounds_text expected_status <<<"$release_case"
+  check_case "check_release_after_rounds $case_name" "$expected_status" - - check_release_after_rounds "$rounds_text"
+done
+
+NTT_CONTRACTS="$work_dir/contracts/ntt-contracts.json"
+mkdir -p "$work_dir/contracts"
+check_case "record_ntt_json without a contracts file" 1 - "does not exist" record_ntt_json burnMint '{"user": "u"}'
+check_case "record_ntt_contract creates the file" 0 - - record_ntt_contract coinFactory "00cid"
+check_case "record_ntt_json keeps other keys" 0 - - record_ntt_json burnMint '{"user": "u"}'
+check_case "contracts file after two records" 0 '{"burnMint":{"user":"u"},"coinFactory":"00cid"}' - jq -cS . "$NTT_CONTRACTS"
+check_case "record_ntt_json with invalid JSON" 1 - - record_ntt_json lockUnlock '{not json'
+check_case "contracts file unchanged after invalid JSON" 0 '{"burnMint":{"user":"u"},"coinFactory":"00cid"}' - \
+  jq -cS . "$NTT_CONTRACTS"
+check_case "no temporary contracts file stays" 0 "ntt-contracts.json" - ls "$work_dir/contracts"
+
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
 readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
