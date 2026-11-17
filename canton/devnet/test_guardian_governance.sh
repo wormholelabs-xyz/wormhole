@@ -4,6 +4,8 @@
 # Starts (or reuses) a `dpm sandbox`, runs setup_guardian_governance.sh, then
 # asserts:
 #
+#   - Rejected setups (hosting participants, confirmation threshold, owner
+#     signature shape) fail before the first topology load.
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
 #     2-of-3 party signing keys.
@@ -107,6 +109,86 @@ fi
 log "uploaded wormhole-core DAR, package id ${GG_CORE_PACKAGE_ID}"
 export GG_CORE_PACKAGE_ID
 
+# --- Rejected setups: each case must fail before the first topology load. ---
+# expect_setup_rejected <case> <expected-message> <NAME=value>...: runs setup_guardian_governance.sh with
+# only the given hosting and owner variables set, and expects a non-zero exit, the message in its output,
+# and no artifacts file.
+expect_setup_rejected() {
+  local case_name="$1" expected_message="$2"
+  shift 2
+  local case_dir="${WORK_DIR}/rejected-setup/${case_name}"
+  mkdir -p "${case_dir}"
+  if env -u GG_HOSTING_PARTICIPANTS -u GG_CONFIRMATION_THRESHOLD -u GG_GENERATE_TEST_KEYS \
+      GG_KEY_DIR="${case_dir}/keys" GG_ARTIFACTS_FILE="${case_dir}/artifacts.json" "$@" \
+      "${SCRIPT_DIR}/setup_guardian_governance.sh" > "${case_dir}/setup.log" 2>&1; then
+    fail "${case_name}: setup_guardian_governance.sh succeeded"
+    return
+  fi
+  if ! grep -qF -- "${expected_message}" "${case_dir}/setup.log"; then
+    fail "${case_name}: output does not contain: ${expected_message}"
+    grep -E 'RuntimeException|requirement failed|ERROR' "${case_dir}/setup.log" | head -n 5
+    return
+  fi
+  if [ -e "${case_dir}/artifacts.json" ]; then
+    fail "${case_name}: artifacts file written"
+    return
+  fi
+  pass "${case_name}: rejected with: ${expected_message}"
+}
+
+# The sandbox binds one participant, `sandbox`; `ghost` and `ghost2` are not bound.
+# Columns: case | GG_HOSTING_PARTICIPANTS | GG_CONFIRMATION_THRESHOLD ("unset" leaves it unset) | expected message
+HOSTING_CASES=(
+  "many-hosts-no-threshold|sandbox,ghost|unset|GG_CONFIRMATION_THRESHOLD is required when 2 participants host the party"
+  "threshold-above-host-count|sandbox,ghost|3|confirmation threshold 3 exceeds 2 hosting participants"
+  "threshold-not-majority-of-two|sandbox,ghost|1|confirmation threshold 1 is not a majority of 2 hosting participants"
+  "threshold-not-majority-of-three|sandbox,ghost,ghost2|1|confirmation threshold 1 is not a majority of 3 hosting participants"
+  "threshold-zero|sandbox|0|GG_CONFIRMATION_THRESHOLD must be a positive integer, got '0'"
+  "threshold-not-a-number|sandbox|two|GG_CONFIRMATION_THRESHOLD must be a positive integer, got 'two'"
+  "duplicate-host-name|sandbox,sandbox|2|duplicate hosting participant"
+  "valid-threshold-unbound-host|sandbox,ghost|2|participant 'ghost' is not bound in this console session"
+)
+for hosting_case in "${HOSTING_CASES[@]}"; do
+  IFS='|' read -r case_name hosting_participants confirmation_threshold expected_message <<<"${hosting_case}"
+  hosting_variables=(GG_GENERATE_TEST_KEYS=1 GG_HOSTING_PARTICIPANTS="${hosting_participants}")
+  if [ "${confirmation_threshold}" != "unset" ]; then
+    hosting_variables+=(GG_CONFIRMATION_THRESHOLD="${confirmation_threshold}")
+  fi
+  expect_setup_rejected "${case_name}" "${expected_message}" "${hosting_variables[@]}"
+done
+
+# Owner-1 signer stubs print a malformed signature. Owners 2 and 3 are never asked: owner 1 signs first.
+STUB_KEY_DIR="${WORK_DIR}/stub-signer-keys"
+STUB_SIGNER_DIR="${WORK_DIR}/stub-signers"
+mkdir -p "${STUB_KEY_DIR}" "${STUB_SIGNER_DIR}"
+for owner_index in 1 2 3; do
+  node "${SCRIPT_DIR}/guardian_key_tool.js" generate "${STUB_KEY_DIR}/owner${owner_index}" >/dev/null
+done
+# repeat_text <text> <count>
+repeat_text() { local repeated="" _; for _ in $(seq 1 "$2"); do repeated="${repeated}$1"; done; printf '%s' "${repeated}"; }
+# Columns: case | stub output | expected message
+SIGNATURE_CASES=(
+  "signature-63-bytes|$(repeat_text ab 63)|printed 126 hex characters, expected 128"
+  "signature-65-bytes|$(repeat_text ab 65)|printed 130 hex characters, expected 128"
+  "signature-uppercase-hex|$(repeat_text AB 64)|expected 128 lowercase hex"
+  "signature-empty|EMPTY|printed 0 hex characters"
+)
+for signature_case in "${SIGNATURE_CASES[@]}"; do
+  IFS='|' read -r case_name stub_output expected_message <<<"${signature_case}"
+  stub_signer="${STUB_SIGNER_DIR}/${case_name}.sh"
+  if [ "${stub_output}" = "EMPTY" ]; then
+    printf '#!/bin/sh\nexit 0\n' > "${stub_signer}"
+  else
+    printf '#!/bin/sh\necho %s\n' "${stub_output}" > "${stub_signer}"
+  fi
+  chmod +x "${stub_signer}"
+  expect_setup_rejected "${case_name}" "${expected_message}" GG_GENERATE_TEST_KEYS=0 \
+    GG_OWNER_PUBKEY_1="${STUB_KEY_DIR}/owner1.pub" GG_OWNER_PUBKEY_2="${STUB_KEY_DIR}/owner2.pub" \
+    GG_OWNER_PUBKEY_3="${STUB_KEY_DIR}/owner3.pub" GG_OWNER_SIGN_CMD_1="${stub_signer}" \
+    GG_OWNER_SIGN_CMD_2="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${STUB_KEY_DIR}/owner2.key" \
+    GG_OWNER_SIGN_CMD_3="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${STUB_KEY_DIR}/owner3.key"
+done
+
 # --- Set up the 2-of-3 guardianGovernance party. ---
 export GG_GENERATE_TEST_KEYS=1
 export GG_KEY_DIR="${WORK_DIR}/guardian-keys"
@@ -157,6 +239,10 @@ DN_ID="$(jq -r '.decentralizedNamespace' "${GG_ARTIFACTS_FILE}")"
 if [ "${OWNER_COUNT}" = "3" ]; then pass "decentralized namespace has 3 owners"; else fail "expected 3 owners, got ${OWNER_COUNT}"; fi
 if [ "${THRESHOLD_VALUE}" = "2" ]; then pass "decentralized namespace threshold is 2"; else fail "expected threshold 2, got ${THRESHOLD_VALUE}"; fi
 if [ "${HOSTING_PERMISSION}" = "Confirmation" ]; then pass "party hosted at Confirmation"; else fail "expected Confirmation, got ${HOSTING_PERMISSION}"; fi
+CONFIRMATION_THRESHOLD_VALUE="$(jq -r '.confirmationThreshold' "${GG_ARTIFACTS_FILE}")"
+HOSTING_PARTICIPANT_COUNT="$(jq '.hostingParticipants | length' "${GG_ARTIFACTS_FILE}")"
+if [ "${CONFIRMATION_THRESHOLD_VALUE}" = "1" ]; then pass "one host: confirmation threshold defaults to 1"; else fail "expected confirmation threshold 1, got ${CONFIRMATION_THRESHOLD_VALUE}"; fi
+if [ "${HOSTING_PARTICIPANT_COUNT}" = "1" ]; then pass "party hosted on one participant"; else fail "expected 1 hosting participant, got ${HOSTING_PARTICIPANT_COUNT}"; fi
 if [ "${PARTY_ID}" = "guardianGovernance::${DN_ID}" ]; then
   pass "party id is guardianGovernance::<dn namespace>"
 else
