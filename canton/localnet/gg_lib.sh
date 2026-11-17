@@ -88,14 +88,26 @@ operator_signers_json() {
     '{($party): [$signer]}'
 }
 
-# gg_signers_json <owner-name>... : signatures of guardianGovernance owner keys under gg-keys/.
-gg_signers_json() {
-  local owner_name signers="[]"
+# namespace_party_signers_json <party-id> <owner-name>... : signatures of owner keys under gg-keys/ for one
+# party of the guardian decentralized namespace.
+namespace_party_signers_json() {
+  local party_id="$1" owner_name signers="[]"
+  shift
   for owner_name in "$@"; do
     signers="$(jq --argjson signer "$(build_signer_json "$LOCALNET_STATE_DIR/gg-keys/$owner_name.pub")" '. + [$signer]' <<<"$signers")"
   done
-  jq -n --arg party "$GG_PARTY" --argjson signers "$signers" '{($party): $signers}'
+  jq -n --arg party "$party_id" --argjson signers "$signers" '{($party): $signers}'
 }
+
+# gg_signers_json <owner-name>... : signatures of guardianGovernance owner keys under gg-keys/.
+gg_signers_json() {
+  namespace_party_signers_json "$GG_PARTY" "$@"
+}
+
+# Second party under the guardian decentralized namespace (custody_host.sh). Empty until it exists.
+CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"
+# shellcheck disable=SC2034 # used by the scripts that source this file
+CUSTODY_PARTY="$(if [[ -f "$CUSTODY_ARTIFACTS" ]]; then jq -er .partyId "$CUSTODY_ARTIFACTS"; fi)"
 
 # submit_interactive <command-id> <act-as-json-array> <command-json> <signers-json> [disclosed-json] [package-preference-json]
 # Prints the transaction JSON. Returns non-zero on rejection; the error text goes to stderr.

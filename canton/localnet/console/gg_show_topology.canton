@@ -1,4 +1,5 @@
-// Print the guardianGovernance decentralized namespace and PartyToParticipant mapping as each LocalNet participant sees them.
+// Print the guardianGovernance decentralized namespace and the PartyToParticipant mapping of each party in it
+// (guardianGovernance, nttCustody) as each LocalNet participant sees them.
 import com.digitalasset.canton.topology._
 import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
 
@@ -10,8 +11,9 @@ participants.remote.foreach { host =>
   host.topology.decentralized_namespaces.list(synchronizerTopologyStore).filter(_.item.namespace == partyId.namespace).foreach { namespaceDefinition =>
     println(s"TOPOLOGY ${host.name} DN serial=${namespaceDefinition.context.serial} threshold=${namespaceDefinition.item.threshold} owners=${namespaceDefinition.item.owners.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")}")
   }
-  host.topology.party_to_participant_mappings.list(synchronizerTopologyStore).filter(_.item.partyId == partyId).foreach { partyToParticipant =>
-    println(s"TOPOLOGY ${host.name} PTP serial=${partyToParticipant.context.serial} confirmationThreshold=${partyToParticipant.item.threshold} " +
+  host.topology.party_to_participant_mappings.list(synchronizerTopologyStore).filter(_.item.partyId.namespace == partyId.namespace)
+    .sortBy(_.item.partyId.toProtoPrimitive).foreach { partyToParticipant =>
+    println(s"TOPOLOGY ${host.name} PTP party=${partyToParticipant.item.partyId.uid.identifier} serial=${partyToParticipant.context.serial} confirmationThreshold=${partyToParticipant.item.threshold} " +
       s"hosts=${partyToParticipant.item.participants.map(h => s"${h.participantId.uid.identifier}:${h.participantId.uid.namespace.fingerprint.toProtoPrimitive.take(12)}/${h.permission}").mkString(",")} " +
       s"signingKeys=${partyToParticipant.item.partySigningKeysWithThreshold.map(k => s"${k.threshold}-of-${k.keys.size}:" + k.keys.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")).getOrElse("none")}")
   }
