@@ -51,6 +51,13 @@ readonly OBSERVATION_WAIT_SECONDS=60
 # Time that a watcher gets to show that it drops a message.
 readonly DROP_WINDOW_SECONDS=15
 readonly NONCE_ABOVE_UINT32=4294967296
+# <nonce>|<expected: commit or the DAML_FAILURE assertion message>: both sides of each bound of the 0.7.0 nonce check.
+readonly V7_NONCE_CASES=(
+  "-1|nonce is negative"
+  "0|commit"
+  "4294967295|commit"
+  "4294967296|nonce exceeds uint32"
+)
 # Length of the quiet window of the canary gate. Production uses the agreed time.
 readonly QUIET_WINDOW_SECONDS="${QUIET_WINDOW_SECONDS:-20}"
 # Maximum canary time of the rehearsal. Production uses the time that the coordinator announces.
@@ -863,14 +870,25 @@ step_switch_v7() {
 }
 
 step_enforce_v7() {
-  echo "### 8. Nonce $NONCE_ABOVE_UINT32 (above uint32): 0.7.0 rejects it; 0.6.0 commits it only while vetted"
-  local payload_hex summary validator_name v6_vetted_hosts=0
+  echo "### 8. The 0.7.0 nonce check on both sides of 0 and 2^32; 0.6.0 commits nonce $NONCE_ABOVE_UINT32 only while vetted"
+  local payload_hex summary validator_name v6_vetted_hosts=0 nonce_case nonce expected_result
   payload_hex="$(hex_of "core upgrade nonce check")"
-  if publish_on_operator_emitter "core-upgrade-nonce-v7-$(date +%s)" "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" \
-      "$NONCE_ABOVE_UINT32" "$payload_hex" > "$gg_work_dir/nonce-v7.out" 2> "$gg_work_dir/nonce-v7.err"; then
-    fail "0.7.0 committed a nonce above uint32"
-  fi
-  expect_daml_failure "$gg_work_dir/nonce-v7" "nonce exceeds uint32" "0.7.0 PublishMessage with nonce $NONCE_ABOVE_UINT32"
+  for nonce_case in "${V7_NONCE_CASES[@]}"; do
+    IFS='|' read -r nonce expected_result <<<"$nonce_case"
+    if [[ "$expected_result" == commit ]]; then
+      summary="$(publish_summary "$(publish_on_operator_emitter "core-upgrade-nonce-v7-$nonce-$(date +%s)" \
+        "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$nonce" "$payload_hex")")"
+      [[ "$(jq -r .executingPackageId <<<"$summary")" == "$CORE_V7_PACKAGE_ID" ]] || fail "nonce $nonce did not execute under 0.7.0: $summary"
+      [[ "$(jq -r .nonce <<<"$summary")" == "$nonce" ]] || fail "nonce $nonce committed as $(jq -r .nonce <<<"$summary")"
+      echo "  PASS: 0.7.0 PublishMessage with nonce $nonce committed"
+    else
+      if publish_on_operator_emitter "core-upgrade-nonce-v7-$nonce-$(date +%s)" "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" \
+          "$nonce" "$payload_hex" > "$gg_work_dir/nonce-v7.out" 2> "$gg_work_dir/nonce-v7.err"; then
+        fail "0.7.0 committed nonce $nonce"
+      fi
+      expect_daml_failure "$gg_work_dir/nonce-v7" "$expected_result" "0.7.0 PublishMessage with nonce $nonce"
+    fi
+  done
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     if package_is_vetted "$validator_name" wormhole-core "$CORE_V6_PACKAGE_ID"; then v6_vetted_hosts=$((v6_vetted_hosts + 1)); fi
   done
