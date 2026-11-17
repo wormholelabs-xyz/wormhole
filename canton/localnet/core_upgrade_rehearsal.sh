@@ -38,8 +38,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 # shellcheck source=core_upgrade_package_ids.sh
 source "$LOCALNET_SCRIPT_DIR/core_upgrade_package_ids.sh"
 
-# Each LocalNet participant hosts guardianGovernance. Thus each participant is a guardian host and an informee host.
-readonly GUARDIAN_HOSTS=(app-provider sv app-user)
 readonly UPGRADE_STATE="$LOCALNET_STATE_DIR/core-upgrade.json"
 readonly WATCHER_DIR="$LOCALNET_STATE_DIR/core-upgrade-watcher"
 readonly OBSERVATION_WAIT_SECONDS=60
@@ -59,11 +57,6 @@ readonly CURRENT_GUARDIAN_KEY_INDICES="${CURRENT_GUARDIAN_KEY_INDICES:-2,3,4}"
 source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 mkdir -p "$WATCHER_DIR"
 [[ -f "$UPGRADE_STATE" ]] || echo '{}' > "$UPGRADE_STATE"
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
 
 record_state() {
   local updated

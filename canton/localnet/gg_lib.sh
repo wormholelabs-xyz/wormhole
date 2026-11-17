@@ -17,6 +17,14 @@ OPERATOR_ARTIFACTS="$LOCALNET_STATE_DIR/operator-artifacts.json"
 CORE_CONTRACTS="$LOCALNET_STATE_DIR/core-contracts.json"
 # Interactive submissions go through the participant that hosts the Operator party.
 SUBMITTING_VALIDATOR="app-provider"
+# Each LocalNet participant hosts guardianGovernance. Thus each participant is a guardian host and an informee host.
+# shellcheck disable=SC2034 # used by the scripts that source this file
+readonly GUARDIAN_HOSTS=(app-provider sv app-user)
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
 
 for required_file in "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS"; do
   if [[ ! -f "$required_file" ]]; then
