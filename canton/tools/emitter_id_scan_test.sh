@@ -195,7 +195,7 @@ for test_case in "${test_cases[@]}"; do
     *) scan_environment+=("EXPECTED_CORE_PACKAGE_ID=$expected_core_package_id") ;;
   esac
   set +e
-  env -u EXPECTED_CORE_PACKAGE_ID "${scan_environment[@]}" SCAN_PAGE_SIZE="$page_size" EXPECT_ACTIVE_REGISTRIES="$expected_registries" \
+  env -u EXPECTED_CORE_PACKAGE_ID ${scan_environment[@]+"${scan_environment[@]}"} SCAN_PAGE_SIZE="$page_size" EXPECT_ACTIVE_REGISTRIES="$expected_registries" \
     CURL_MAX_TIME_SECONDS="${curl_max_time_seconds:-60}" \
     "$TOOLS_DIR/emitter_id_scan.sh" "${scan_arguments[@]}" > "$work_dir/out" 2>&1
   actual_exit=$?
