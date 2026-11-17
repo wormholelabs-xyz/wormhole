@@ -422,6 +422,44 @@ testRegisterEmitterPinsGuardianGovernance = do
     Left err -> abort ("expected a guardianGovernance pin failure, got: " <> show err)
     Right _ -> abort "RegisterEmitter accepted a shadow CoreState under a rogue guardianGovernance"
 
+-- | A requester pins the registry's guardianGovernance with
+-- @expectedGuardianGovernance@; 'None' skips the check.
+testRegisterEmitterChecksExpectedGuardianGovernance : Script ()
+testRegisterEmitterChecksExpectedGuardianGovernance = do
+  (operator, _, realCsId, _, _) <- setupFees
+  Some cs <- queryContractId operator realCsId
+  let realGovernance = cs.guardianGovernance
+  rogueGovernance <- allocateParty "ExpectedGovRogue"
+  requester <- allocateParty "ExpectedGovRequester"
+  _ <- submit (actAs operator <> actAs rogueGovernance) do
+    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
+  -- Columns: case name | guardianGovernance of the registry | expectedGuardianGovernance | expected failure
+  let registrationCases =
+        [ ("None on the real registry", realGovernance, None, None)
+        , ("the real guardianGovernance on the real registry", realGovernance, Some realGovernance, None)
+        , ("a rogue guardianGovernance on the real registry", realGovernance, Some rogueGovernance,
+            Some "registry guardianGovernance mismatch")
+        , ("the real guardianGovernance on a rogue registry", rogueGovernance, Some realGovernance,
+            Some "registry guardianGovernance mismatch")
+        ]
+  forA_ registrationCases \(caseName, registryGovernance, expectedGuardianGovernance, expectedFailure) -> do
+    [(currentRegistryCid, _)] <- filter (\(_, registry) -> registry.guardianGovernance == registryGovernance)
+      <$> query @EmitterRegistry operator
+    registryDisclosure <- fromSome <$> queryDisclosure operator currentRegistryCid
+    registrationResult <- trySubmit (actAs requester <> disclose registryDisclosure) do
+      exerciseCmd currentRegistryCid RegisterEmitter with
+        requester, payer = requester, coreStateCid = None, feeAllocation = None
+        expectedGuardianGovernance
+    case (expectedFailure, registrationResult) of
+      (None, Right _) -> pure ()
+      (None, Left registrationError) -> abort (caseName <> ": rejected: " <> show registrationError)
+      (Some _, Right _) -> abort (caseName <> ": accepted")
+      (Some failureText, Left (FailureStatusError failureStatus)) ->
+        assertMsg (caseName <> ": expected '" <> failureText <> "', got: " <> failureStatus.message)
+          (failureText `isInfixOf` failureStatus.message)
+      (Some failureText, Left registrationError) ->
+        abort (caseName <> ": expected '" <> failureText <> "', got: " <> show registrationError)
+
 -- | 'ClaimReplayRoot' pins the registry's guardianGovernance anchor. Same
 -- forgery, routing the @claimFee@ to @rogueGov@; the pin rejects it before the
 -- charge.
