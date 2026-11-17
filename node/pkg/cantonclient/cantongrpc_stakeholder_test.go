@@ -75,7 +75,7 @@ func TestMessagesFromTxRequiresReadPartyStakeholder(t *testing.T) {
 				publishMessageEventWithStakeholderFlags(tc.consuming, tc.acsDelta, 5),
 			}}
 
-			messages := messagesFromTx(tx, pinnedTmpl, "PublishMessage", zap.New(core))
+			messages := messagesFromTx(tx, pinnedTmpl, "PublishMessage", governanceParty, zap.New(core))
 
 			checkReadPartyStakeholderOutcome(t, tc, messages, publishWithoutReadPartyStakeholderCount(t)-countBefore, logs)
 		})

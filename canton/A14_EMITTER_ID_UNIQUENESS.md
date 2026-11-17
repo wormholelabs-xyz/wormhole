@@ -225,8 +225,12 @@ Use option 3 only if a guardian ceremony for the registry is not possible.
   - `maxEmitterId` is 2^53 - 1, so every tool reads an id exactly. `maxEmitterSequence` is one below the `Int` maximum.
   - `maxRegistrationFee` is 10^16 units of 10^-10, that is 10^6 fee-instrument units.
   - A registry at `maxEmitterId + 1` issues no more ids: the next registration fails on the `Emitter` `ensure` clause.
-- The watcher drops each `PublishMessage` event that is not consuming or has `acs_delta` false.
-  On a stream filtered by the read-as party, the participant sets `acs_delta` on a consuming exercise only when that party is a stakeholder.
+- The watcher drops each `PublishMessage` event that is not consuming.
+  It accepts a consuming event with `acs_delta` true. The participant sets `acs_delta` only when the read-as party is a stakeholder of a contract that existed before the transaction.
+  The participant also sets `acs_delta` false when the same transaction creates the `Emitter`, for example two publishes in one transaction, or `RegisterEmitter` and a publish.
+  For such an event, the watcher finds the `CreatedEvent` with the same contract id in the transaction.
+  The watcher accepts the event only if that `CreatedEvent` is of the pinned `Emitter` template and package, and its signatories include the read-as party.
+  The ledger effects shape of the stream and of `GetUpdateById` includes these `CreatedEvent`s.
   Each drop increments `wormhole_canton_publish_without_read_party_stakeholder_total` and writes a WARN log with the update id.
   The check applies to the stream and to reobservation.
 - The watcher rejects an `emitterId` above `cantonclient.MaxEmitterID` (2^53 - 1).
@@ -272,6 +276,12 @@ The core governance actions in `sdk/vaa/payloads.go` have no registration fee ac
   `guardianGovernance` is a stakeholder of the registry. An outsider is not.
 - `testArchives` (`Test/TestCore.daml`). The operator alone cannot archive the registry.
 - `TestMessagesFromTxRequiresReadPartyStakeholder` and `TestGetTransactionByUpdateIDRequiresReadPartyStakeholder` (`node/pkg/cantonclient`).
+- `TestReadPartySignsExercisedEmitter`, `TestGetTransactionByUpdateIDOnTransientEmitters`, and `TestSubscribeUpdatesOnTransientEmitters` (`node/pkg/cantonclient`).
+  A `CreatedEvent` of another package, of another template, of another contract id, or without the read-as party as a signatory does not unlock a publish.
+- `TestCantonWatcherPublishesOnTransientEmitters` (`node/pkg/watchers/canton`, tag `integration`, fixture `Test/WatcherTransientEmitter.daml`).
+  Two publishes on one `Emitter` in one transaction, and `RegisterEmitter` and a publish in one transaction.
+  The watcher emits each message with its sequence, on the stream and on reobservation.
+  The same transaction shape on a rogue registry is dropped, on the stream and on reobservation.
 - `TestCantonWatcherDropsWitnessOnlyPublish` (`node/pkg/watchers/canton`, tag `integration`).
   The real `guardianGovernance` witnesses a nested publish on an `Emitter` of a rogue registry.
   The forged message has the identity and sequence of a trusted emitter.

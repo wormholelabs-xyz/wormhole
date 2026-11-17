@@ -45,7 +45,7 @@ func TestMessagesFromTxCountsUnpinnedPublishes(t *testing.T) {
 			countBefore := unpinnedPublishCount(tc.executingPackageID)
 			tx := &apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{tc.event}}
 
-			messages := messagesFromTx(tx, pinnedTmpl, "PublishMessage", zap.New(core))
+			messages := messagesFromTx(tx, pinnedTmpl, "PublishMessage", governanceParty, zap.New(core))
 
 			assert.Len(t, messages, tc.wantMessages)
 			assert.Equal(t, tc.wantUnpinnedIncrement, unpinnedPublishCount(tc.executingPackageID)-countBefore)
@@ -69,7 +69,7 @@ func TestMessagesFromTxWithoutPinCountsNothing(t *testing.T) {
 	countBefore := unpinnedPublishCount(lookalikePackageID)
 	tx := &apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(lookalikePackageID, 7)}}
 
-	messages := messagesFromTx(tx, unpinnedTmpl, "PublishMessage", zap.New(core))
+	messages := messagesFromTx(tx, unpinnedTmpl, "PublishMessage", governanceParty, zap.New(core))
 
 	assert.Len(t, messages, 1)
 	assert.Zero(t, unpinnedPublishCount(lookalikePackageID)-countBefore)

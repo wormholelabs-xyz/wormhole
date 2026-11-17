@@ -140,9 +140,10 @@ The fix changes signatories, so a 0.7.0 registry or `Emitter` cannot continue un
 
 A14-4: `guardianGovernance` witnesses each node below a node where it is an informee.
 Thus a `PublishMessage` on a rogue-`guardianGovernance` `Emitter` below such a node reaches the stream of `guardianGovernance`.
-`messagesFromTx` (`node/pkg/cantonclient/cantongrpc.go`) drops each `PublishMessage` event that is not consuming or has `acs_delta` false.
-On a stream filtered by the read-as party, `acs_delta` is set on a consuming exercise only when that party is a stakeholder of the contract.
-`TestCantonWatcherDropsWitnessOnlyPublish` confirms this on SDK 3.5.1 (fixture `Test/WatcherWitnessOnly.daml`).
+`messagesFromTx` (`node/pkg/cantonclient/cantongrpc.go`) accepts a consuming `PublishMessage` event only when the read-as party is a stakeholder of the `Emitter`.
+`acs_delta` true shows this for an `Emitter` that existed before the transaction.
+For an `Emitter` that the same transaction creates, `acs_delta` is false. Then the `CreatedEvent` of that contract id, of the pinned package, must list the read-as party as a signatory.
+`TestCantonWatcherDropsWitnessOnlyPublish` and `TestCantonWatcherPublishesOnTransientEmitters` confirm this on SDK 3.5.1 (fixtures `Test/WatcherWitnessOnly.daml` and `Test/WatcherTransientEmitter.daml`).
 
 ### R1: Rolled-back publish
 

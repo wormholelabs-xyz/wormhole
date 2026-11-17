@@ -299,11 +299,15 @@ stakeholder of every publish exercise (and its `WormholeMessage` result) and of
 the sequence-bumped successor `Emitter` create, for every owner (§4.1, §10).
 `guardianGovernance` alone cannot publish or archive: each needs the owner too.
 
-The watcher accepts a `PublishMessage` event only if its read-as party is a
-stakeholder of the exercised `Emitter` (consuming exercise with `acs_delta`
-set). An exercise that `guardianGovernance` only witnesses, for example a
-publish on an `Emitter` of a registry under another `guardianGovernance`
-nested in a contract that the real party observes, is dropped. Each drop
+The watcher accepts a consuming `PublishMessage` event only if its read-as
+party is a stakeholder of the exercised `Emitter`. `acs_delta` set shows this
+for an `Emitter` that existed before the transaction. For an `Emitter` that the
+same transaction creates, `acs_delta` is false: then the `CreatedEvent` of that
+contract id in the transaction must be of the pinned package and must list the
+read-as party as a signatory. An exercise that `guardianGovernance` only
+witnesses, for example a publish on an `Emitter` of a registry under another
+`guardianGovernance` nested in a contract that the real party observes, is
+dropped. Each drop
 increments `wormhole_canton_publish_without_read_party_stakeholder_total` and
 writes a WARN log with the update id. The watcher also rejects an `emitterId`
 above `maxEmitterId` (2^53 - 1), so every off-ledger tool reads ids exactly.
