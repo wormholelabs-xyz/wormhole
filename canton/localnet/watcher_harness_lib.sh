@@ -20,35 +20,35 @@ build_harness() {
   (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go test -c -tags localnet -o "$(harness_binary)" ./pkg/watchers/canton)
 }
 
-# watcher_user_rights_json: the rights of WATCHER_USER_ID on SUBMITTING_VALIDATOR, as a sorted JSON array.
+# watcher_user_rights_json <validator>: the rights of WATCHER_USER_ID on that participant, as a sorted JSON array.
 watcher_user_rights_json() {
-  curl -sSf "$(json_api_url "$SUBMITTING_VALIDATOR")/v2/users/$WATCHER_USER_ID/rights" -H "@$ADMIN_AUTH_HEADER" \
+  curl -sSf "$(json_api_url "$1")/v2/users/$WATCHER_USER_ID/rights" -H "@$ADMIN_AUTH_HEADER" \
     | jq -c '[.rights[].kind | to_entries[0] | {right: .key, party: (.value.value.party // null)}] | sort_by(.right, .party)'
 }
 
-# ensure_watcher_user: create WATCHER_USER_ID with CanReadAs(guardianGovernance), and check that this is
-# its only right.
+# ensure_watcher_user <validator>: create WATCHER_USER_ID with CanReadAs(guardianGovernance) on that participant, and
+# check that this is its only right.
 ensure_watcher_user() {
-  local http_status expected_rights
+  local validator_name="$1" http_status expected_rights
   # shellcheck disable=SC2154 # gg_lib.sh sets gg_work_dir
   http_status="$(curl -sS -o "$gg_work_dir/watcher-user.out" -w '%{http_code}' -X POST \
-    "$(json_api_url "$SUBMITTING_VALIDATOR")/v2/users" -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/json' \
+    "$(json_api_url "$validator_name")/v2/users" -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg id "$WATCHER_USER_ID" --arg gg "$GG_PARTY" '{
       user: {id: $id, primaryParty: "", isDeactivated: false, identityProviderId: ""},
       rights: [{kind: {CanReadAs: {value: {party: $gg}}}}]}')")"
   case "$http_status" in
     200 | 409) ;;
     *)
-      echo "create user $WATCHER_USER_ID: HTTP $http_status $(cat "$gg_work_dir/watcher-user.out")" >&2
+      echo "create user $WATCHER_USER_ID on $validator_name: HTTP $http_status $(cat "$gg_work_dir/watcher-user.out")" >&2
       return 1
       ;;
   esac
   expected_rights="$(jq -nc --arg gg "$GG_PARTY" '[{right: "CanReadAs", party: $gg}]')"
-  if [[ "$(watcher_user_rights_json)" != "$expected_rights" ]]; then
-    echo "user $WATCHER_USER_ID has rights $(watcher_user_rights_json), expected $expected_rights" >&2
+  if [[ "$(watcher_user_rights_json "$validator_name")" != "$expected_rights" ]]; then
+    echo "user $WATCHER_USER_ID on $validator_name has rights $(watcher_user_rights_json "$validator_name"), expected $expected_rights" >&2
     return 1
   fi
-  echo "watcher user $WATCHER_USER_ID on $SUBMITTING_VALIDATOR: rights $(watcher_user_rights_json | jq -c 'map(.right)')"
+  echo "watcher user $WATCHER_USER_ID on $validator_name: rights $(watcher_user_rights_json "$validator_name" | jq -c 'map(.right)')"
 }
 
 harness_pid_is_harness() {
@@ -90,17 +90,22 @@ forget_started_harness() {
   STARTED_HARNESS_NAMES=("${kept_names[@]}")
 }
 
-# run_harness <name> <core-package-id> <reobserve-update-ids> <max-seconds>: start in the background as
-# WATCHER_USER_ID on app-provider, read as guardianGovernance, pinned to <core-package-id>.
-# Returns when the harness streams. The token file is removed when the harness is ready.
+# run_harness <name> <core-package-id> <reobserve-update-ids> <max-seconds>: run_harness_on SUBMITTING_VALIDATOR.
 run_harness() {
-  local name="$1" core_package_id="$2" reobserve_update_ids="$3" max_seconds="$4" waited_seconds
+  run_harness_on "$SUBMITTING_VALIDATOR" "$@"
+}
+
+# run_harness_on <validator> <name> <core-package-id> <reobserve-update-ids> <max-seconds>: start in the background
+# as WATCHER_USER_ID on the Ledger API of that participant, read as guardianGovernance, pinned to <core-package-id>.
+# Returns when the harness streams. The token file is removed when the harness is ready.
+run_harness_on() {
+  local validator_name="$1" name="$2" core_package_id="$3" reobserve_update_ids="$4" max_seconds="$5" waited_seconds
   local token_file="$WATCHER_DIR/$name.jwt"
-  ensure_watcher_user
+  ensure_watcher_user "$validator_name"
   rm -f "$WATCHER_DIR/$name.ready" "$WATCHER_DIR/$name.stop" "$WATCHER_DIR/$name.jsonl" "$WATCHER_DIR/$name.metrics.json" \
     "$WATCHER_DIR/watcher.jwt"
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$token_file")
-  CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$SUBMITTING_VALIDATOR")" \
+  CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
   CANTON_LOCALNET_TOKEN_FILE="$token_file" \
   CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
   CANTON_LOCALNET_CORE_PACKAGE_ID="$core_package_id" \
@@ -116,7 +121,7 @@ run_harness() {
   for ((waited_seconds = 0; waited_seconds < HARNESS_READY_SECONDS; waited_seconds++)); do
     if [[ -f "$WATCHER_DIR/$name.ready" ]]; then
       rm -f "$token_file"
-      echo "watcher harness $name streams from $SUBMITTING_VALIDATOR as $WATCHER_USER_ID, pinned to ${core_package_id:0:12} (pid $(cat "$WATCHER_DIR/$name.pid"))"
+      echo "watcher harness $name streams from $validator_name as $WATCHER_USER_ID, pinned to ${core_package_id:0:12} (pid $(cat "$WATCHER_DIR/$name.pid"))"
       return 0
     fi
     if ! kill -0 "$(cat "$WATCHER_DIR/$name.pid")" 2>/dev/null; then

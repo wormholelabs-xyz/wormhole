@@ -16,8 +16,9 @@
 //
 // The harness writes one JSON line per observation (live and reobserved). It stops when the stop
 // file exists and each requested update id was reobserved, after it writes the queued observations.
-// At the stop it writes the wormhole_canton_unpinned_publish_messages_total counts by executing package id
-// to the metrics file. It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json.
+// Every 500 ms and at the stop, it replaces the metrics file with the
+// wormhole_canton_unpinned_publish_messages_total counts by executing package id.
+// It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json.
 // canton/localnet/watcher_harness_lib.sh drives it.
 package canton
 
@@ -181,6 +182,7 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 		case observation := <-msgC:
 			require.NoError(t, writeObservation(observation))
 		case <-stopTicker.C:
+			writeUnpinnedPublishCounts(t, metricsFile)
 			if _, err := os.Stat(stopFile); err == nil && reobservedUpdates.allRequestedUpdatesObserved() {
 				_, err := drainPublications(msgC, cap(msgC), writeObservation)
 				require.NoError(t, err)
@@ -205,7 +207,8 @@ func checkCreateRejectsAnUnpinnedConfig(t *testing.T, watcherConfig WatcherConfi
 	require.ErrorContains(t, err, "ReadAsParty must be set")
 }
 
-// writeUnpinnedPublishCounts writes {executing package id: count} of the unpinned-publish counter.
+// writeUnpinnedPublishCounts replaces the metrics file with {executing package id: count} of the
+// unpinned-publish counter. The rename keeps each read of the file complete.
 func writeUnpinnedPublishCounts(t *testing.T, metricsFile string) {
 	t.Helper()
 	metricFamilies, err := prometheus.DefaultGatherer.Gather()
@@ -225,5 +228,7 @@ func writeUnpinnedPublishCounts(t *testing.T, metricsFile string) {
 	}
 	encodedCounts, err := json.Marshal(countsByExecutingPackageID)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(metricsFile, append(encodedCounts, '\n'), 0o600))
+	partialFile := metricsFile + ".partial"
+	require.NoError(t, os.WriteFile(partialFile, append(encodedCounts, '\n'), 0o600))
+	require.NoError(t, os.Rename(partialFile, metricsFile))
 }

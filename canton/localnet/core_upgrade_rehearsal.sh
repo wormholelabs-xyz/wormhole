@@ -1,24 +1,32 @@
 #!/usr/bin/env bash
 # Rehearse the wormhole-core 0.6.0 to 0.7.0 upgrade (canton/README.md section 7.5) on LocalNet, in the
 # procedure order: dependents first, unvet the old versions immediately before the watcher switch.
+# Each guardian watcher runs as three harnesses, one on each participant, each read as guardianGovernance there.
 # Steps (run one, or "all" in order):
 #   prepare       Start state: core 0.6.0 and ntt 0.2.0 vetted, core 0.7.0 and ntt 0.3.0 not vetted, on each participant.
-#   observe-v6    Start the guardian watcher v6, pinned to 0.6.0. Publish under 0.6.0. Expect an observation.
-#   vet-v7        Record the upgrade start offset. Upload and vet core 0.7.0, then ntt 0.3.0, on each participant.
+#   observe-v6    Start the guardian watchers v6-<host>, pinned to 0.6.0. Publish under 0.6.0. Expect three observations.
+#   vet-v7        Record the start offset on each participant. Upload and vet core 0.7.0, then ntt 0.3.0, on each one.
 #   publish-v7    Start the canary watcher, pinned to 0.7.0. Publish under 0.7.0 and under 0.6.0 in one window.
 #                 Expect each watcher to observe one message, and to drop and count the other.
 #   ntt           ntt_e2e.sh with ntt 0.3.0. Expect each NTT PublishMessage to run under 0.7.0 on each host.
-#   gate          Stop the canary. Expect its counter to show the one 0.6.0 publish of publish-v7 and no other.
-#   unvet-v6      With v6 still pinned to 0.6.0: unvet core 0.6.0 and ntt 0.2.0 together on each participant.
-#                 Expect 0.6.0 and ntt 0.2.0 submissions to fail at prepare. Publish under 0.7.0; v6 drops it.
-#   switch-v7     Stop v6 (the coordinated restart). Enumerate the dropped update ids from the v6 WARN logs and
-#                 from a scan since the start offset; expect equal sets. Start v7, pinned to 0.7.0, with those
-#                 reobservation requests. Expect each dropped update and one live 0.7.0 publish.
+#   gate          Quiet window: the canary counter sum over all labels does not change, the canary observes a control
+#                 publish after the window, and a scan on each participant finds no publish under another package.
+#   unvet-v6      With v6-<host> still pinned to 0.6.0: unvet core 0.6.0 and ntt 0.2.0 together on each participant.
+#                 Expect 0.6.0 and ntt 0.2.0 submissions to fail at prepare. Then the deterministic drain gate: wait the
+#                 synchronizer timeouts, publish a 0.7.0 control that each v6-<host> drops, and scan each participant
+#                 for a 0.6.0 publish that its v6 watcher did not observe.
+#   switch-v7     Stop v6-<host> (the coordinated restart). On each participant, the WARN logs and a scan since its
+#                 start offset give equal dropped update id sets. Start v7-<host>, pinned to 0.7.0, with those
+#                 reobservation requests. Expect each dropped update and one live 0.7.0 publish on each host.
 #   enforce-v7    A nonce above uint32: 0.7.0 rejects it. 0.6.0 commits it while vetted, and fails after the unvet.
 #   post-unvet    Contracts that 0.6.0 and ntt 0.2.0 created work under 0.7.0 and ntt 0.3.0; ntt_e2e.sh passes.
+#   rollback      With 0.6.0 unvetted, a watcher pinned to 0.6.0 reobserves an old 0.6.0 update. Then re-vet core 0.6.0
+#                 and ntt 0.2.0 on each participant. Expect 0.6.0 and ntt 0.2.0 exercises on contracts that 0.7.0 and
+#                 ntt 0.3.0 created to commit, and the watchers rollback-v6-<host> to observe the 0.6.0 publish.
+#   restore       Unvet core 0.6.0 and ntt 0.2.0 again on each participant. Expect a 0.6.0 publish to fail at prepare.
 # Usage: core_upgrade_rehearsal.sh <step>|all
-# A step that fails stops each watcher harness that it started. A step that passes leaves v6 (observe-v6) and the
-# canary (publish-v7) running for the next steps.
+# A step that fails stops each watcher harness that it started. A step that passes leaves v6-<host> (observe-v6) and
+# the canary (publish-v7) running for the next steps.
 # Precondition: gg_publish_and_govern.sh ran; the CoreState message fee is 0; the 0.7.0 core DAR and the ntt 0.3.0
 # DAR are built; LocalNet has the ntt 0.2.0 package 8b9c3ee1 and a burn/mint NttManager that it created.
 set -euo pipefail
@@ -41,7 +49,11 @@ readonly OBSERVATION_WAIT_SECONDS=60
 # Time that a watcher gets to show that it drops a message.
 readonly DROP_WINDOW_SECONDS=15
 readonly NONCE_ABOVE_UINT32=4294967296
-readonly SCAN_UPDATE_LIMIT=1000
+# Length of the quiet window of the canary gate. Production uses the agreed time.
+readonly QUIET_WINDOW_SECONDS="${QUIET_WINDOW_SECONDS:-20}"
+# Added to the synchronizer timeouts in the drain gate after the unvet.
+readonly DRAIN_MARGIN_SECONDS=30
+readonly UPDATE_LOOKUP_ATTEMPTS=30
 readonly UNVETTED_ERROR_CODE="INVALID_PRESCRIBED_SYNCHRONIZER_ID"
 # Current guardian set of the LocalNet CoreState (after gg_guardian_set_rotation.sh 1 2).
 readonly CURRENT_GUARDIAN_SET_INDEX="${CURRENT_GUARDIAN_SET_INDEX:-2}"
@@ -72,6 +84,27 @@ read_state() {
   jq -er --arg key "$1" '.[$key]' "$UPGRADE_STATE"
 }
 
+# record_host_offset <key> <validator> <offset>: offsets are per participant.
+record_host_offset() {
+  local updated
+  updated="$(jq --arg key "$1" --arg host "$2" --arg offset "$3" '.[$key][$host] = $offset' "$UPGRADE_STATE")"
+  printf '%s\n' "$updated" > "$UPGRADE_STATE"
+}
+
+read_host_offset() {
+  jq -er --arg key "$1" --arg host "$2" '.[$key][$host]' "$UPGRADE_STATE"
+}
+
+# record_ledger_end_of_each_host <key>
+record_ledger_end_of_each_host() {
+  local validator_name offset
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    offset="$(ledger_end_of "$validator_name")"
+    record_host_offset "$1" "$validator_name" "$offset"
+    echo "  $1 on $validator_name: $offset"
+  done
+}
+
 dar_main_package_id() {
   PATH="$DPM_BIN_DIR:$PATH" dpm damlc inspect-dar --json "$1" 2>/dev/null | jq -er .main_package_id
 }
@@ -98,6 +131,15 @@ vetted_versions() {
     -d "$(jq -n --arg pid "$(participant_id_of "$1")" --arg name "$2" \
       '{packageMetadataFilter: {packageNamePrefixes: [$name]}, topologyStateFilter: {participantIds: [$pid]}}')" \
     | jq -c --arg name "$2" '[.vettedPackages[]?.packages[] | select(.packageName == $name) | "\(.packageVersion) \(.packageId)"] | unique'
+}
+
+# vetted_package_ids <validator> <package-name>: package ids of each vetted version, one per line.
+vetted_package_ids() {
+  vetted_versions "$1" "$2" | jq -r '.[] | split(" ")[1]'
+}
+
+package_is_uploaded() {
+  curl -sSf "$(json_api_url "$1")/v2/packages" -H "@$ADMIN_AUTH_HEADER" | jq -e --arg id "$2" '.packageIds | index($id) != null' > /dev/null
 }
 
 package_is_vetted() {
@@ -196,15 +238,35 @@ publish_and_check() {
   echo "$summary"
 }
 
-# publish_package_on <validator> <update-id>: package id of the PublishMessage event and the participant offset, as guardianGovernance sees them there.
-publish_package_on() {
+# update_by_id_on <validator> <update-id>: the transaction as guardianGovernance sees it on that participant. Retries
+# while the participant has not yet published the update.
+update_by_id_on() {
+  local attempt
+  for ((attempt = 1; attempt <= UPDATE_LOOKUP_ATTEMPTS; attempt++)); do
+    if fetch_update_by_id_on "$1" "$2"; then return 0; fi
+    sleep 1
+  done
+  fail "$1 has no update $2 after $UPDATE_LOOKUP_ATTEMPTS attempts"
+}
+
+fetch_update_by_id_on() {
   curl -sSf -X POST "$(json_api_url "$1")/v2/updates/update-by-id" -H "@$SCRIPT_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg id "$2" --arg gg "$GG_PARTY" '{updateId: $id, updateFormat: {includeTransactions: {
       eventFormat: {filtersByParty: {($gg): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
-      transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')" \
-    | jq -er '.update.Transaction.value
-      | ([.events[] | .ExercisedEvent? // empty | select(.choice == "PublishMessage") | .templateId | split(":")[0]] | unique) as $packages
+      transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')" 2>/dev/null \
+    | jq -ec '.update.Transaction.value'
+}
+
+# update_offset_on <validator> <update-id>: the participant offset of the update.
+update_offset_on() {
+  update_by_id_on "$1" "$2" | jq -er .offset
+}
+
+# publish_package_on <validator> <update-id>: package id of the PublishMessage event and the participant offset, as guardianGovernance sees them there.
+publish_package_on() {
+  update_by_id_on "$1" "$2" \
+    | jq -er '([.events[] | .ExercisedEvent? // empty | select(.choice == "PublishMessage") | .templateId | split(":")[0]] | unique) as $packages
       | if ($packages | length) != 1 then error("expected one PublishMessage package, found \($packages)")
         else "\($packages[0]) (participant offset \(.offset))" end'
 }
@@ -219,21 +281,38 @@ check_publish_package_on_each_host() {
   echo "  each host reports PublishMessage package ${2:0:12} for $1"
 }
 
-# scan_publish_update_ids <begin-exclusive-offset> <end-inclusive-offset> <executing-package-id>: sorted update ids
-# that carry a PublishMessage event of that package, as the watcher user reads them for guardianGovernance.
+# scan_publishes <validator> <begin-exclusive-offset> <end-inclusive-offset>: publish_message_scan.sh as the watcher
+# user on that participant. One JSON line per PublishMessage of any package.
+scan_publishes() {
+  local scan_token_file="$gg_work_dir/watcher-scan.jwt"
+  ensure_watcher_user "$1" >&2
+  (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$scan_token_file")
+  "$LOCALNET_SCRIPT_DIR/publish_message_scan.sh" "$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3"
+}
+
+# scan_publish_update_ids <validator> <begin-exclusive> <end-inclusive> <executing-package-id>: sorted update ids
+# with a PublishMessage event of that package.
 scan_publish_update_ids() {
-  local scan_header="$gg_work_dir/watcher-scan.auth" updates
-  write_auth_header_file "$scan_header" "$WATCHER_USER_ID"
-  updates="$(curl -sSf -X POST "$(json_api_url "$SUBMITTING_VALIDATOR")/v2/updates?limit=$SCAN_UPDATE_LIMIT" -H "@$scan_header" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -n --argjson begin "$1" --argjson end "$2" --arg gg "$GG_PARTY" '{beginExclusive: $begin, endInclusive: $end,
-      updateFormat: {includeTransactions: {
-        eventFormat: {filtersByParty: {($gg): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
-        transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')")"
-  [[ "$(jq length <<<"$updates")" -lt "$SCAN_UPDATE_LIMIT" ]] || fail "the scan reached $SCAN_UPDATE_LIMIT updates; scan a shorter offset range"
-  jq -r --arg package "$3" '.[] | .update.Transaction?.value // empty
-    | select(any(.events[]; (.ExercisedEvent? // {}) | .choice == "PublishMessage" and (.templateId | split(":")[0]) == $package))
-    | .updateId' <<<"$updates" | sort -u
+  scan_publishes "$1" "$2" "$3" | jq -r --arg package "$4" 'select(.executingPackageId == $package) | .updateId' | sort -u
+}
+
+# scan_publish_update_ids_not_under <validator> <begin-exclusive> <end-inclusive> <package-id>: sorted update ids with
+# a PublishMessage event of any other package. This is the scan equivalent of the counter sum over all labels.
+scan_publish_update_ids_not_under() {
+  scan_publishes "$1" "$2" "$3" | jq -r --arg package "$4" 'select(.executingPackageId != $package) | .updateId' | sort -u
+}
+
+# observed_update_ids <harness-name>: sorted update ids of the live observations of the harness.
+observed_update_ids() {
+  if [[ -s "$WATCHER_DIR/$1.jsonl" ]]; then
+    jq -r 'select(.isReobservation | not) | .updateId' "$WATCHER_DIR/$1.jsonl" | sort -u
+  fi
+}
+
+# unpinned_publish_total <harness-name>: sum of the unpinned-publish counter over all executing_package_id labels,
+# "other" included. The harness rewrites the metrics file every 500 ms.
+unpinned_publish_total() {
+  jq -e 'add // 0' "$WATCHER_DIR/$1.metrics.json"
 }
 
 # await_observation <harness-name> <sequence> <payload-hex> <reobservation true|false>
@@ -252,6 +331,20 @@ await_observation() {
   fail "watcher $1 has no observation of sequence $sequence (reobservation $reobserved) after ${OBSERVATION_WAIT_SECONDS}s"
 }
 
+# await_observation_of_update <harness-name> <update-id> <reobservation true|false>
+await_observation_of_update() {
+  local observations_file="$WATCHER_DIR/$1.jsonl" waited_seconds
+  for ((waited_seconds = 0; waited_seconds < OBSERVATION_WAIT_SECONDS; waited_seconds++)); do
+    if [[ -s "$observations_file" ]] && jq -se --arg id "$2" --argjson reobserved "$3" \
+        'any(.[]; .updateId == $id and .isReobservation == $reobserved)' "$observations_file" > /dev/null; then
+      echo "  watcher $1 observed update $2 (reobservation $3)"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "watcher $1 has no observation of update $2 (reobservation $3) after ${OBSERVATION_WAIT_SECONDS}s"
+}
+
 # check_no_observation <harness-name> <update-id>
 check_no_observation() {
   if [[ -s "$WATCHER_DIR/$1.jsonl" ]] && jq -se --arg id "$2" 'any(.[]; .updateId == $id)' "$WATCHER_DIR/$1.jsonl" > /dev/null; then
@@ -260,10 +353,77 @@ check_no_observation() {
   echo "  PASS: watcher $1 has no observation of update $2"
 }
 
-# check_drop_logged <harness-name> <update-id> <executing-package-id>
+# check_drop_logged <harness-name> <update-id> <executing-package-id>: waits up to OBSERVATION_WAIT_SECONDS.
 check_drop_logged() {
-  harness_dropped_update_ids "$1" "$3" | grep -qxF "$2" || fail "watcher $1 has no WARN log for the drop of $2 (${3:0:12})"
-  echo "  PASS: watcher $1 WARN log: dropped $2, executing package ${3:0:12}"
+  local waited_seconds
+  for ((waited_seconds = 0; waited_seconds < OBSERVATION_WAIT_SECONDS; waited_seconds++)); do
+    if harness_dropped_update_ids "$1" "$3" | grep -qxF "$2"; then
+      echo "  PASS: watcher $1 WARN log: dropped $2, executing package ${3:0:12}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "watcher $1 has no WARN log for the drop of $2 (${3:0:12})"
+}
+
+# v6_watchers_run: each v6-<host> runs.
+v6_watchers_run() {
+  local validator_name
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    harness_is_running "v6-$validator_name" || return 1
+  done
+}
+
+# start_watcher_on_each_host <name-prefix> <core-package-id> <reobserve-update-ids> <max-seconds>
+start_watcher_on_each_host() {
+  local validator_name
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    if harness_is_running "$1-$validator_name"; then stop_harness "$1-$validator_name"; fi
+    run_harness_on "$validator_name" "$1-$validator_name" "$2" "$3" "$4"
+  done
+}
+
+# stop_watcher_on_each_host <name-prefix>
+stop_watcher_on_each_host() {
+  local validator_name
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    stop_harness "$1-$validator_name"
+    check_harness_reobservation_errors "$1-$validator_name"
+  done
+}
+
+# check_watchers_agree <name-prefix>: the three harnesses have equal sets of (update id, reobservation) observations.
+check_watchers_agree() {
+  local validator_name reference_set="" observation_set
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    observation_set="$(jq -r '"\(.updateId) \(.isReobservation)"' "$WATCHER_DIR/$1-$validator_name.jsonl" | sort -u)"
+    if [[ -z "$reference_set" ]]; then
+      reference_set="$observation_set"
+    elif [[ "$observation_set" != "$reference_set" ]]; then
+      fail "watchers $1-* differ: $1-$validator_name has $(wc -l <<<"$observation_set" | tr -d ' ') observations: $(diff <(echo "$reference_set") <(echo "$observation_set") | tr '\n' ' ')"
+    fi
+  done
+  echo "  PASS: $1-{$(IFS=,; echo "${GUARDIAN_HOSTS[*]}")} agree on $(wc -l <<<"$reference_set" | tr -d ' ') observations (update id, reobservation)"
+}
+
+# drain_seconds_from_synchronizer_parameters: confirmation response timeout + mediator reaction timeout + ledger time
+# record time tolerance + DRAIN_MARGIN_SECONDS, read from the dynamic synchronizer parameters of each participant.
+drain_seconds_from_synchronizer_parameters() {
+  local console_output parameter_name parameter_values total_seconds="$DRAIN_MARGIN_SECONDS" value_seconds
+  console_output="$("$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/synchronizer_parameters.canton" 2>&1)" \
+    || { echo "$console_output" >&2; fail "synchronizer_parameters.canton failed"; }
+  for parameter_name in "confirmation response timeout" "mediator reaction timeout" "ledger time record time tolerance"; do
+    parameter_values="$(grep -oE "^ *$parameter_name = [0-9]+[smh]," <<<"$console_output" | sed -E 's/.* = ([0-9]+[smh]),/\1/' | sort -u)"
+    [[ "$(grep -c . <<<"$parameter_values")" -eq 1 ]] || fail "expected one value of '$parameter_name' on the participants, found: $parameter_values"
+    case "$parameter_values" in
+      *s) value_seconds="${parameter_values%s}" ;;
+      *m) value_seconds="$((${parameter_values%m} * 60))" ;;
+      *h) value_seconds="$((${parameter_values%h} * 3600))" ;;
+    esac
+    echo "  synchronizer parameter: $parameter_name = $parameter_values" >&2
+    total_seconds=$((total_seconds + value_seconds))
+  done
+  echo "$total_seconds"
 }
 
 harness_is_running() {
@@ -292,10 +452,15 @@ step_prepare() {
   echo "### prepare: core 0.6.0 and ntt 0.2.0 vetted; core 0.7.0 and ntt 0.3.0 not vetted; on each participant"
   check_dar_package_ids
   local validator_name newer_packages
+  local package_id
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     newer_packages=()
-    package_is_vetted "$validator_name" ntt "$NTT_V3_PACKAGE_ID" && newer_packages+=("$NTT_V3_PACKAGE_ID")
-    package_is_vetted "$validator_name" wormhole-core "$CORE_V7_PACKAGE_ID" && newer_packages+=("$CORE_V7_PACKAGE_ID")
+    for package_id in $(vetted_package_ids "$validator_name" ntt); do
+      [[ "$package_id" == "$NTT_V2_PACKAGE_ID" ]] || newer_packages+=("$package_id")
+    done
+    for package_id in $(vetted_package_ids "$validator_name" wormhole-core); do
+      [[ "$package_id" == "$CORE_V6_PACKAGE_ID" ]] || newer_packages+=("$package_id")
+    done
     if [[ "${#newer_packages[@]}" -gt 0 ]]; then
       change_vetting "$validator_name" Unvet "${newer_packages[@]}"
     fi
@@ -310,44 +475,61 @@ step_prepare() {
 }
 
 step_observe_v6() {
-  echo "### 1. Guardian watcher v6, pinned to 0.6.0, observes a 0.6.0 PublishMessage"
+  echo "### 1. Guardian watchers v6-<host>, pinned to 0.6.0, one on each participant, observe a 0.6.0 PublishMessage"
   build_harness
-  if harness_is_running v6; then stop_harness v6; fi
-  run_harness v6 "$CORE_V6_PACKAGE_ID" "" 3600
+  start_watcher_on_each_host v6 "$CORE_V6_PACKAGE_ID" "" 3600
   check_input_contract_created_under CoreState "$CORE_V6_PACKAGE_ID"
-  local summary
+  local summary validator_name
   summary="$(publish_and_check v6-baseline "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
-  await_observation v6 "$(jq -r .sequence <<<"$summary")" "$(jq -r .payload <<<"$summary")" false
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_observation "v6-$validator_name" "$(jq -r .sequence <<<"$summary")" "$(jq -r .payload <<<"$summary")" false
+  done
 }
 
 step_vet_v7() {
-  echo "### 2. Record the upgrade start offset. Vet core 0.7.0, then ntt 0.3.0, on each participant"
+  echo "### 2. Step 0: record the start offset on each participant. Vet core 0.7.0, then ntt 0.3.0, on each participant"
   check_dar_package_ids
-  local validator_name start_offset
-  start_offset="$(ledger_end_of "$SUBMITTING_VALIDATOR")"
-  record_state upgradeStartOffset "$start_offset"
-  echo "  upgrade start offset on $SUBMITTING_VALIDATOR: $start_offset"
+  local validator_name
+  record_ledger_end_of_each_host startOffset
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     upload_and_vet "$validator_name" "$CORE_V7_DAR"
   done
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     await_vetting "$validator_name" wormhole-core "$(versions_json "0.6.0 $CORE_V6_PACKAGE_ID" "0.7.0 $CORE_V7_PACKAGE_ID")"
   done
-  "$LOCALNET_SCRIPT_DIR/ntt_upload_dars.sh"
+  vet_ntt_v3_on_each_host
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     await_vetting "$validator_name" ntt "$(versions_json "0.2.0 $NTT_V2_PACKAGE_ID" "0.3.0 $NTT_V3_PACKAGE_ID")"
   done
 }
 
+# vet_ntt_v3_on_each_host: vet NTT_V3_PACKAGE_ID by id where the participant has it. Otherwise ntt_upload_dars.sh
+# uploads the NTT DAR, which must be that package.
+vet_ntt_v3_on_each_host() {
+  local validator_name ntt_dar
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    package_is_uploaded "$validator_name" "$NTT_V3_PACKAGE_ID" || break
+  done
+  if package_is_uploaded "$validator_name" "$NTT_V3_PACKAGE_ID"; then
+    for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+      change_vetting "$validator_name" Vet "$NTT_V3_PACKAGE_ID"
+    done
+    return 0
+  fi
+  ntt_dar="${NTT_REPO_DIR:-$REPO_ROOT/../ntt}/canton/ntt/.daml/dist/ntt-0.3.0.dar"
+  [[ "$(dar_main_package_id "$ntt_dar")" == "$NTT_V3_PACKAGE_ID" ]] || fail "$ntt_dar is not $NTT_V3_PACKAGE_ID"
+  "$LOCALNET_SCRIPT_DIR/ntt_upload_dars.sh"
+}
+
 step_publish_v7() {
   echo "### 3. Canary watcher pinned to 0.7.0. One 0.7.0 and one 0.6.0 publish on the 0.6.0 Emitter and CoreState"
-  harness_is_running v6 || fail "the guardian watcher v6 does not run; run observe-v6 first"
+  v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   [[ -x "$(harness_binary)" ]] || build_harness
   if harness_is_running canary; then stop_harness canary; fi
   run_harness canary "$CORE_V7_PACKAGE_ID" "" 3600
   check_input_contract_created_under CoreState "$CORE_V6_PACKAGE_ID"
   check_input_contract_created_under Emitter "$CORE_V6_PACKAGE_ID"
-  local v7_summary v6_summary v7_update_id v6_update_id
+  local v7_summary v6_summary v7_update_id v6_update_id validator_name
   v7_summary="$(publish_and_check v7-during-migration "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
   v6_summary="$(publish_and_check v6-legacy-integrator "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
   v7_update_id="$(jq -r .updateId <<<"$v7_summary")"
@@ -356,12 +538,16 @@ step_publish_v7() {
   append_state_list v7DroppedUpdateIds "$v7_update_id"
   record_state canaryLegacyUpdateId "$v6_update_id"
   echo "  positive controls in the same window:"
-  await_observation v6 "$(jq -r .sequence <<<"$v6_summary")" "$(jq -r .payload <<<"$v6_summary")" false
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_observation "v6-$validator_name" "$(jq -r .sequence <<<"$v6_summary")" "$(jq -r .payload <<<"$v6_summary")" false
+  done
   await_observation canary "$(jq -r .sequence <<<"$v7_summary")" "$(jq -r .payload <<<"$v7_summary")" false
   sleep "$DROP_WINDOW_SECONDS"
-  check_no_observation v6 "$v7_update_id"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    check_no_observation "v6-$validator_name" "$v7_update_id"
+    check_drop_logged "v6-$validator_name" "$v7_update_id" "$CORE_V7_PACKAGE_ID"
+  done
   check_no_observation canary "$v6_update_id"
-  check_drop_logged v6 "$v7_update_id" "$CORE_V7_PACKAGE_ID"
   check_drop_logged canary "$v6_update_id" "$CORE_V6_PACKAGE_ID"
 }
 
@@ -380,29 +566,56 @@ run_ntt_e2e_under_v7() {
 
 step_ntt() {
   echo "### 4. ntt_e2e.sh with ntt 0.3.0 and its watcher pinned to 0.7.0"
-  harness_is_running v6 || fail "the guardian watcher v6 does not run; run observe-v6 first"
+  v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   run_ntt_e2e_under_v7 false
 }
 
 step_gate() {
-  echo "### 5. Gate: the canary counts the one legacy 0.6.0 publish and no other"
+  echo "### 5. Canary gate: a quiet window with a positive control, backed by a scan on each participant"
   harness_is_running canary || fail "the canary watcher does not run; run publish-v7 first"
+  v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
+  local legacy_update_id counter_total_before counter_total_after control_summary control_update_id validator_name
+  local control_offset old_package_update_ids
+  legacy_update_id="$(read_state canaryLegacyUpdateId)"
+  counter_total_before="$(unpinned_publish_total canary)"
+  echo "  canary counter before the window: $(jq -c . "$WATCHER_DIR/canary.metrics.json"), sum over all labels $counter_total_before"
+  [[ "$counter_total_before" -eq 1 ]] || fail "the canary counter sum is $counter_total_before, expected 1 (the publish-v7 legacy publish)"
+  record_ledger_end_of_each_host quietWindowStartOffset
+  echo "  quiet window: $QUIET_WINDOW_SECONDS seconds"
+  sleep "$QUIET_WINDOW_SECONDS"
+
+  echo "  positive control: a 0.7.0 publish after the window. The canary must observe it"
+  control_summary="$(publish_and_check canary-gate-control "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
+  control_update_id="$(jq -r .updateId <<<"$control_summary")"
+  append_state_list v7DroppedUpdateIds "$control_update_id"
+  await_observation canary "$(jq -r .sequence <<<"$control_summary")" "$(jq -r .payload <<<"$control_summary")" false
+  counter_total_after="$(unpinned_publish_total canary)"
+  [[ "$counter_total_after" -eq "$counter_total_before" ]] \
+    || fail "the canary counter sum changed in the quiet window: $counter_total_before -> $counter_total_after $(cat "$WATCHER_DIR/canary.metrics.json")"
+  echo "  PASS: the canary observed the control; its counter sum over all labels stays $counter_total_after"
+
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    control_offset="$(update_offset_on "$validator_name" "$control_update_id")"
+    record_host_offset canaryGateOffset "$validator_name" "$control_offset"
+    old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID")"
+    [[ "$old_package_update_ids" == "$legacy_update_id" ]] \
+      || fail "$validator_name: scan ($(read_host_offset startOffset "$validator_name"), $control_offset] finds publishes not under 0.7.0: $(tr '\n' ' ' <<<"$old_package_update_ids"), expected only $legacy_update_id"
+    old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset quietWindowStartOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID")"
+    [[ -z "$old_package_update_ids" ]] || fail "$validator_name: publishes not under 0.7.0 in the quiet window: $(tr '\n' ' ' <<<"$old_package_update_ids")"
+    echo "  PASS: $validator_name scan as $WATCHER_USER_ID: one publish not under 0.7.0 since the start offset (the legacy one), none in the quiet window up to offset $control_offset"
+  done
   stop_harness canary
   check_harness_reobservation_errors canary
-  local expected_counts
-  expected_counts="$(jq -cn --arg v6 "$CORE_V6_PACKAGE_ID" '{($v6): 1}')"
-  [[ "$(jq -c . "$WATCHER_DIR/canary.metrics.json")" == "$expected_counts" ]] \
-    || fail "canary unpinned-publish counts $(cat "$WATCHER_DIR/canary.metrics.json"), expected $expected_counts"
-  [[ "$(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID")" == "$(read_state canaryLegacyUpdateId)" ]] \
-    || fail "the canary WARN logs name $(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID" | tr '\n' ' '), expected $(read_state canaryLegacyUpdateId)"
-  echo "  PASS: canary counter {0.6.0 ${CORE_V6_PACKAGE_ID:0:12}: 1}; WARN log names the legacy update $(read_state canaryLegacyUpdateId)"
-  echo "  the NTT run of step 4 added no 0.6.0 publish"
+  [[ "$(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID")" == "$legacy_update_id" ]] \
+    || fail "the canary WARN logs name $(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID" | tr '\n' ' '), expected $legacy_update_id"
+  echo "  PASS: canary WARN log names only the legacy update $legacy_update_id; the NTT run of step 4 added no 0.6.0 publish"
 }
 
-# managers_created_by_ntt_v2: burn/mint NttManagers that ntt 0.2.0 created, whose admin key LocalNet holds, as JSON.
-managers_created_by_ntt_v2() {
+# managers_created_under <ntt-package-id>: burn/mint NttManagers that this package created, whose admin is a LocalNet
+# burn/mint admin, as JSON.
+managers_created_under() {
   active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Ntt.Manager:NttManager" \
-    | jq -c --arg ntt2 "$NTT_V2_PACKAGE_ID" '[.[] | select((.templateId | startswith($ntt2 + ":")) and (.createArgument.admin | startswith("NttBurnMintAdmin-")))]'
+    | jq -c --arg package "$1" '[.[] | select((.templateId | startswith($package + ":")) and (.createArgument.admin | startswith("NttBurnMintAdmin-")))]'
 }
 
 # set_paused_on_manager <command-id> <template-id> <manager-created-event-json>: SetPaused with the current value.
@@ -416,9 +629,10 @@ set_paused_on_manager() {
     "$(external_party_signers_json "$admin_party" "$NTT_KEY_DIR/burn-mint-admin-$admin_label.key" "${admin_party#*::}")"
 }
 
-ntt_v2_manager_with_admin_key() {
+# manager_with_admin_key_created_under <ntt-package-id>
+manager_with_admin_key_created_under() {
   local manager_index managers admin_label
-  managers="$(managers_created_by_ntt_v2)"
+  managers="$(managers_created_under "$1")"
   for ((manager_index = 0; manager_index < $(jq length <<<"$managers"); manager_index++)); do
     admin_label="$(jq -r --argjson index "$manager_index" '.[$index].createArgument.admin' <<<"$managers" | sed -E 's/^NttBurnMintAdmin-([0-9]+)::.*/\1/')"
     if [[ -f "$NTT_KEY_DIR/burn-mint-admin-$admin_label.key" ]]; then
@@ -426,14 +640,14 @@ ntt_v2_manager_with_admin_key() {
       return 0
     fi
   done
-  fail "no NttManager created by ntt 0.2.0 with a burn/mint admin key in $NTT_KEY_DIR"
+  fail "no NttManager created by ${1:0:12} with a burn/mint admin key in $NTT_KEY_DIR"
 }
 
 step_unvet_v6() {
   echo "### 6. Unvet core 0.6.0 and ntt 0.2.0 together on each participant, immediately before the switch"
-  harness_is_running v6 || fail "the guardian watcher v6 does not run; run observe-v6 first"
+  v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   harness_is_running canary && fail "the canary runs; run the gate step first"
-  local validator_name emitter_before emitter_after manager v7_summary v7_update_id
+  local validator_name emitter_before emitter_after manager drain_seconds
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     change_vetting "$validator_name" Unvet "$NTT_V2_PACKAGE_ID" "$CORE_V6_PACKAGE_ID"
   done
@@ -441,7 +655,8 @@ step_unvet_v6() {
     await_vetting "$validator_name" wormhole-core "$(versions_json "0.7.0 $CORE_V7_PACKAGE_ID")"
     await_vetting "$validator_name" ntt "$(versions_json "0.3.0 $NTT_V3_PACKAGE_ID")"
   done
-  record_state unvetOffset "$(ledger_end_of "$SUBMITTING_VALIDATOR")"
+  record_ledger_end_of_each_host unvetOffset
+  record_state unvetTime "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   echo "### 6a. A 0.6.0 PublishMessage fails at prepare and changes no contract"
   emitter_before="$(operator_core_contract Emitter | jq -c '{contractId, sequence: .createArgument.sequence}')"
@@ -455,7 +670,7 @@ step_unvet_v6() {
   echo "  PASS: the Operator Emitter is unchanged: $(jq -c '{contractId: .contractId[0:16], sequence}' <<<"$emitter_after")"
 
   echo "### 6b. An ntt 0.2.0 exercise on an NttManager fails at prepare"
-  manager="$(ntt_v2_manager_with_admin_key)"
+  manager="$(manager_with_admin_key_created_under "$NTT_V2_PACKAGE_ID")"
   record_state nttV2ManagerContractId "$(jq -r .contractId <<<"$manager")"
   if set_paused_on_manager "core-upgrade-unvetted-ntt-v2-$(date +%s)" "$NTT_V2_PACKAGE_ID:Wormhole.Ntt.Manager:NttManager" "$manager" \
       > "$gg_work_dir/unvetted-ntt-v2.out" 2> "$gg_work_dir/unvetted-ntt-v2.err"; then
@@ -463,58 +678,80 @@ step_unvet_v6() {
   fi
   expect_unvetted_rejection "$gg_work_dir/unvetted-ntt-v2" "$NTT_V2_PACKAGE_ID" "ntt 0.2.0 SetPaused after the unvet"
 
-  echo "### 6c. A 0.7.0 publish on the Emitter that 0.6.0 created, before the switch: v6 drops it"
-  check_input_contract_created_under Emitter "$CORE_V6_PACKAGE_ID"
+  echo "### 6c. Drain gate: wait the synchronizer timeouts. Then a 0.7.0 control publish that each v6-<host> drops"
+  drain_seconds="$(drain_seconds_from_synchronizer_parameters)"
+  record_state drainSeconds "$drain_seconds"
+  echo "  drain wait: $drain_seconds seconds (the three parameters plus a margin of $DRAIN_MARGIN_SECONDS seconds)"
+  sleep "$drain_seconds"
   check_input_contract_created_under CoreState "$CORE_V6_PACKAGE_ID"
-  v7_summary="$(publish_and_check v7-before-switch "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
-  v7_update_id="$(jq -r .updateId <<<"$v7_summary")"
-  append_state_list v7DroppedUpdateIds "$v7_update_id"
-  sleep "$DROP_WINDOW_SECONDS"
-  check_no_observation v6 "$v7_update_id"
-  check_drop_logged v6 "$v7_update_id" "$CORE_V7_PACKAGE_ID"
+  check_drain_gate "$(publish_and_check v7-drain-control "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
+}
+
+# check_drain_gate <control-publish-summary>: the WARN log of the control drop shows that each v6-<host> processed
+# its participant up to the control offset. A scan of each participant to that offset finds each 0.6.0 publish in the
+# observations of the v6 watcher of that participant.
+check_drain_gate() {
+  local control_update_id validator_name gate_offset v6_scan_update_ids v6_observed_update_ids missing_update_ids
+  control_update_id="$(jq -r .updateId <<<"$1")"
+  append_state_list v7DroppedUpdateIds "$control_update_id"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    check_drop_logged "v6-$validator_name" "$control_update_id" "$CORE_V7_PACKAGE_ID"
+    gate_offset="$(update_offset_on "$validator_name" "$control_update_id")"
+    record_host_offset gateOffset "$validator_name" "$gate_offset"
+    v6_scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$gate_offset" "$CORE_V6_PACKAGE_ID")"
+    [[ -n "$v6_scan_update_ids" ]] || fail "$validator_name: the scan found no 0.6.0 PublishMessage update; publish-v7 makes one"
+    v6_observed_update_ids="$(observed_update_ids "v6-$validator_name")"
+    missing_update_ids="$(comm -23 <(echo "$v6_scan_update_ids") <(echo "$v6_observed_update_ids"))"
+    [[ -z "$missing_update_ids" ]] || fail "$validator_name: 0.6.0 publishes that v6-$validator_name did not observe: $(tr '\n' ' ' <<<"$missing_update_ids")"
+    echo "  PASS: $validator_name gate offset $gate_offset: v6-$validator_name dropped the control, and observed each of the $(wc -l <<<"$v6_scan_update_ids" | tr -d ' ') 0.6.0 publishes of the scan ($(read_host_offset startOffset "$validator_name"), $gate_offset]"
+  done
 }
 
 step_switch_v7() {
-  echo "### 7. Coordinated restart: stop v6, enumerate the dropped updates, start v7 with reobservation requests"
-  harness_is_running v6 || fail "the guardian watcher v6 does not run; run observe-v6 first"
-  stop_harness v6
-  check_harness_reobservation_errors v6
-  local switch_offset warn_update_ids scan_update_ids live_summary update_id expected_v6_drops
-  local v6_scan_update_ids v6_observed_update_ids
-  switch_offset="$(ledger_end_of "$SUBMITTING_VALIDATOR")"
-  record_state switchOffset "$switch_offset"
-  warn_update_ids="$(harness_dropped_update_ids v6 "$CORE_V7_PACKAGE_ID")"
-  scan_update_ids="$(scan_publish_update_ids "$(read_state upgradeStartOffset)" "$switch_offset" "$CORE_V7_PACKAGE_ID")"
-  echo "  v6 WARN logs: $(wc -l <<<"$warn_update_ids" | tr -d ' ') dropped 0.7.0 updates"
-  echo "  scan as $WATCHER_USER_ID, offsets ($(read_state upgradeStartOffset), $switch_offset]: $(wc -l <<<"$scan_update_ids" | tr -d ' ') 0.7.0 PublishMessage updates"
-  [[ -n "$scan_update_ids" ]] || fail "the scan found no 0.7.0 PublishMessage update"
-  [[ "$warn_update_ids" == "$scan_update_ids" ]] || fail "the WARN logs and the scan differ: $(diff <(echo "$warn_update_ids") <(echo "$scan_update_ids") | tr '\n' ' ')"
-  for update_id in $(jq -r '.v7DroppedUpdateIds[]' "$UPGRADE_STATE"); do
-    grep -qxF "$update_id" <<<"$scan_update_ids" || fail "the scan does not list $update_id"
+  echo "### 7. Coordinated restart: stop v6-<host>, enumerate the dropped updates, start v7-<host> with reobservation requests"
+  v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
+  stop_watcher_on_each_host v6
+  local validator_name switch_offset warn_update_ids scan_update_ids reference_update_ids="" live_summary update_id
+  local dropped_count late_old_update_ids
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    switch_offset="$(ledger_end_of "$validator_name")"
+    record_host_offset switchOffset "$validator_name" "$switch_offset"
+    warn_update_ids="$(harness_dropped_update_ids "v6-$validator_name" "$CORE_V7_PACKAGE_ID")"
+    scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$switch_offset" "$CORE_V7_PACKAGE_ID")"
+    [[ -n "$scan_update_ids" ]] || fail "$validator_name: the scan found no 0.7.0 PublishMessage update"
+    [[ "$warn_update_ids" == "$scan_update_ids" ]] \
+      || fail "$validator_name: the WARN logs and the scan differ: $(diff <(echo "$warn_update_ids") <(echo "$scan_update_ids") | tr '\n' ' ')"
+    for update_id in $(jq -r '.v7DroppedUpdateIds[]' "$UPGRADE_STATE"); do
+      grep -qxF "$update_id" <<<"$scan_update_ids" || fail "$validator_name: the scan does not list $update_id"
+    done
+    dropped_count="$(wc -l <<<"$scan_update_ids" | tr -d ' ')"
+    [[ "$(jq -c . "$WATCHER_DIR/v6-$validator_name.metrics.json")" == "$(jq -cn --arg v7 "$CORE_V7_PACKAGE_ID" --argjson count "$dropped_count" '{($v7): $count}')" ]] \
+      || fail "v6-$validator_name unpinned-publish counts $(cat "$WATCHER_DIR/v6-$validator_name.metrics.json"), expected $dropped_count for 0.7.0"
+    late_old_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset gateOffset "$validator_name")" "$switch_offset" "$CORE_V7_PACKAGE_ID")"
+    [[ -z "$late_old_update_ids" ]] || fail "$validator_name: publishes not under 0.7.0 after the gate offset: $(tr '\n' ' ' <<<"$late_old_update_ids")"
+    echo "  PASS: $validator_name ($(read_host_offset startOffset "$validator_name"), $switch_offset]: WARN logs, scan and counter of v6-$validator_name agree on $dropped_count dropped 0.7.0 updates; no publish under another package after the gate offset"
+    if [[ -z "$reference_update_ids" ]]; then
+      reference_update_ids="$scan_update_ids"
+    else
+      [[ "$scan_update_ids" == "$reference_update_ids" ]] || fail "$validator_name: the dropped update ids differ from those of ${GUARDIAN_HOSTS[0]}"
+    fi
   done
-  expected_v6_drops="$(wc -l <<<"$scan_update_ids" | tr -d ' ')"
-  [[ "$(jq -c . "$WATCHER_DIR/v6.metrics.json")" == "$(jq -cn --arg v7 "$CORE_V7_PACKAGE_ID" --argjson count "$expected_v6_drops" '{($v7): $count}')" ]] \
-    || fail "v6 unpinned-publish counts $(cat "$WATCHER_DIR/v6.metrics.json"), expected $expected_v6_drops for 0.7.0"
-  echo "  PASS: WARN logs, scan and v6 counter agree: $expected_v6_drops dropped 0.7.0 updates, the recorded ones included"
-  printf '%s\n' "$scan_update_ids" > "$WATCHER_DIR/dropped-update-ids.txt"
-  v6_scan_update_ids="$(scan_publish_update_ids "$(read_state upgradeStartOffset)" "$switch_offset" "$CORE_V6_PACKAGE_ID")"
-  v6_observed_update_ids="$(jq -r 'select(.isReobservation | not) | .updateId' "$WATCHER_DIR/v6.jsonl" \
-    | grep -xF -f <(printf '%s\n' "$v6_scan_update_ids") | sort -u || true)"
-  [[ -n "$v6_scan_update_ids" ]] || fail "the scan found no 0.6.0 PublishMessage update; publish-v7 makes one"
-  [[ "$v6_observed_update_ids" == "$v6_scan_update_ids" ]] \
-    || fail "0.6.0 updates in the scan that v6 did not observe: $(comm -23 <(echo "$v6_scan_update_ids") <(echo "$v6_observed_update_ids") | tr '\n' ' ')"
-  echo "  PASS: v6 observed each of the $(wc -l <<<"$v6_scan_update_ids" | tr -d ' ') 0.6.0 PublishMessage updates of the scan before it stopped"
+  echo "  PASS: the three participants give the same $dropped_count dropped update ids"
+  printf '%s\n' "$reference_update_ids" > "$WATCHER_DIR/dropped-update-ids.txt"
 
-  if harness_is_running v7; then stop_harness v7; fi
-  run_harness v7 "$CORE_V7_PACKAGE_ID" "$(paste -sd, - <<<"$scan_update_ids")" 900
+  start_watcher_on_each_host v7 "$CORE_V7_PACKAGE_ID" "$(paste -sd, - <<<"$reference_update_ids")" 900
   live_summary="$(publish_and_check v7-after-switch "$EMITTER_TEMPLATE" "$CORE_V7_PACKAGE_ID")"
-  await_observation v7 "$(jq -r .sequence <<<"$live_summary")" "$(jq -r .payload <<<"$live_summary")" false
-  stop_harness v7
-  check_harness_reobservation_errors v7
-  [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v7.jsonl")" == "$scan_update_ids" ]] \
-    || fail "v7 reobserved $(jq -sc '[.[] | select(.isReobservation) | .updateId] | unique' "$WATCHER_DIR/v7.jsonl"), expected each scanned update"
-  [[ "$(jq -c . "$WATCHER_DIR/v7.metrics.json")" == "{}" ]] || fail "v7 dropped publishes: $(cat "$WATCHER_DIR/v7.metrics.json")"
-  echo "  PASS: v7 reobserved each of the $expected_v6_drops dropped updates, observed the live publish, and dropped none"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_observation "v7-$validator_name" "$(jq -r .sequence <<<"$live_summary")" "$(jq -r .payload <<<"$live_summary")" false
+  done
+  stop_watcher_on_each_host v7
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v7-$validator_name.jsonl")" == "$reference_update_ids" ]] \
+      || fail "v7-$validator_name reobserved $(jq -sc '[.[] | select(.isReobservation) | .updateId] | unique' "$WATCHER_DIR/v7-$validator_name.jsonl"), expected each dropped update"
+    [[ "$(jq -c . "$WATCHER_DIR/v7-$validator_name.metrics.json")" == "{}" ]] || fail "v7-$validator_name dropped publishes: $(cat "$WATCHER_DIR/v7-$validator_name.metrics.json")"
+  done
+  check_watchers_agree v7
+  echo "  PASS: each v7-<host> reobserved each of the $dropped_count dropped updates, observed the live publish, and dropped none"
 }
 
 step_enforce_v7() {
@@ -570,7 +807,7 @@ step_post_unvet() {
   echo "  PASS: $(jq -c '.executingPackageId |= .[0:12]' <<<"$verify_event")"
 
   echo "### 9d. SetPaused by package name on an NttManager that ntt 0.2.0 created executes under ntt 0.3.0"
-  manager="$(ntt_v2_manager_with_admin_key)"
+  manager="$(manager_with_admin_key_created_under "$NTT_V2_PACKAGE_ID")"
   echo "  input NttManager $(jq -r '.contractId[0:16]' <<<"$manager") created under ntt 0.2.0 $(jq -r '.templateId[0:12]' <<<"$manager")"
   transaction="$(set_paused_on_manager "core-upgrade-ntt-v2-manager-$(date +%s)" "$NTT_MANAGER_TEMPLATE" "$manager")"
   [[ "$(jq -r '[.events[] | .ExercisedEvent? // empty | select(.choice == "SetPaused") | .templateId | split(":")[0]] | unique | .[]' <<<"$transaction")" == "$NTT_V3_PACKAGE_ID" ]] \
@@ -580,7 +817,76 @@ step_post_unvet() {
   echo "  PASS: SetPaused executed under ntt 0.3.0 ${NTT_V3_PACKAGE_ID:0:12}; the successor NttManager is an ntt 0.3.0 contract"
 
   echo "### 9e. ntt_e2e.sh with ntt 0.3.0 and a watcher pinned to 0.7.0"
-  run_ntt_e2e_under_v7 true
+  run_ntt_e2e_under_v7 false
+}
+
+step_rollback() {
+  echo "### 10a. Recovery without a re-vet: 0.6.0 is unvetted. A watcher pinned to 0.6.0 reobserves an old 0.6.0 update"
+  local validator_name legacy_update_id summary manager transaction
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_vetting "$validator_name" wormhole-core "$(versions_json "0.7.0 $CORE_V7_PACKAGE_ID")"
+    await_vetting "$validator_name" ntt "$(versions_json "0.3.0 $NTT_V3_PACKAGE_ID")"
+  done
+  [[ -x "$(harness_binary)" ]] || build_harness
+  legacy_update_id="$(read_state canaryLegacyUpdateId)"
+  check_publish_package_on_each_host "$legacy_update_id" "$CORE_V6_PACKAGE_ID"
+  if harness_is_running v6-recovery; then stop_harness v6-recovery; fi
+  run_harness v6-recovery "$CORE_V6_PACKAGE_ID" "$legacy_update_id" 300
+  await_observation_of_update v6-recovery "$legacy_update_id" true
+  stop_harness v6-recovery
+  check_harness_reobservation_errors v6-recovery
+  echo "  PASS: a watcher pinned to 0.6.0 reobserved the 0.6.0 update $legacy_update_id while no participant vets 0.6.0"
+
+  echo "### 10b. Rollback: re-vet core 0.6.0 and ntt 0.2.0 together on each participant"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    change_vetting "$validator_name" Vet "$NTT_V2_PACKAGE_ID" "$CORE_V6_PACKAGE_ID"
+  done
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_vetting "$validator_name" wormhole-core "$(versions_json "0.6.0 $CORE_V6_PACKAGE_ID" "0.7.0 $CORE_V7_PACKAGE_ID")"
+    await_vetting "$validator_name" ntt "$(versions_json "0.2.0 $NTT_V2_PACKAGE_ID" "0.3.0 $NTT_V3_PACKAGE_ID")"
+  done
+  start_watcher_on_each_host rollback-v6 "$CORE_V6_PACKAGE_ID" "" 900
+
+  echo "### 10c. A 0.6.0 PublishMessage on the Emitter that 0.7.0 created"
+  check_input_contract_created_under Emitter "$CORE_V7_PACKAGE_ID"
+  summary="$(publish_and_check v6-rollback "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
+  check_publish_package_on_each_host "$(jq -r .updateId <<<"$summary")" "$CORE_V6_PACKAGE_ID"
+  check_input_contract_created_under Emitter "$CORE_V6_PACKAGE_ID"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_observation "rollback-v6-$validator_name" "$(jq -r .sequence <<<"$summary")" "$(jq -r .payload <<<"$summary")" false
+  done
+  echo "  PASS: 0.6.0 ran PublishMessage on the 0.7.0 Emitter; each rollback-v6-<host> observed it"
+
+  echo "### 10d. An ntt 0.2.0 SetPaused on an NttManager that ntt 0.3.0 created"
+  manager="$(manager_with_admin_key_created_under "$NTT_V3_PACKAGE_ID")"
+  echo "  input NttManager $(jq -r '.contractId[0:16]' <<<"$manager") created under ntt 0.3.0 $(jq -r '.templateId[0:12]' <<<"$manager")"
+  transaction="$(set_paused_on_manager "core-upgrade-rollback-ntt-v2-$(date +%s)" "$NTT_V2_PACKAGE_ID:Wormhole.Ntt.Manager:NttManager" "$manager")"
+  [[ "$(jq -r '[.events[] | .ExercisedEvent? // empty | select(.choice == "SetPaused") | .templateId | split(":")[0]] | unique | .[]' <<<"$transaction")" == "$NTT_V2_PACKAGE_ID" ]] \
+    || fail "SetPaused did not execute under ntt 0.2.0"
+  [[ "$(jq -r '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith(":Wormhole.Ntt.Manager:NttManager")) | .templateId | split(":")[0]] | .[]' <<<"$transaction")" == "$NTT_V2_PACKAGE_ID" ]] \
+    || fail "the successor NttManager was not created under ntt 0.2.0"
+  echo "  PASS: ntt 0.2.0 ran SetPaused on the ntt 0.3.0 NttManager; the successor is an ntt 0.2.0 contract"
+  stop_watcher_on_each_host rollback-v6
+  check_watchers_agree rollback-v6
+}
+
+step_restore() {
+  echo "### 11. Restore the final state: unvet core 0.6.0 and ntt 0.2.0 together on each participant"
+  local validator_name
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    change_vetting "$validator_name" Unvet "$NTT_V2_PACKAGE_ID" "$CORE_V6_PACKAGE_ID"
+  done
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_vetting "$validator_name" wormhole-core "$(versions_json "0.7.0 $CORE_V7_PACKAGE_ID")"
+    await_vetting "$validator_name" ntt "$(versions_json "0.3.0 $NTT_V3_PACKAGE_ID")"
+  done
+  if publish_on_operator_emitter "core-upgrade-restored-v6-$(date +%s)" "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" \
+      1 "$(hex_of "core upgrade after the restore")" > "$gg_work_dir/restored-v6.out" 2> "$gg_work_dir/restored-v6.err"; then
+    fail "a 0.6.0 PublishMessage committed after the restore"
+  fi
+  expect_unvetted_rejection "$gg_work_dir/restored-v6" "$CORE_V6_PACKAGE_ID" "0.6.0 PublishMessage after the restore"
+  echo "  the 0.6.0 Emitter of the rollback works under 0.7.0:"
+  publish_and_check after-restore "$EMITTER_TEMPLATE" "$CORE_V7_PACKAGE_ID" > /dev/null
 }
 
 copy_harness_evidence() {
@@ -609,6 +915,8 @@ case "${1:-}" in
   switch-v7) step_switch_v7 ;;
   enforce-v7) step_enforce_v7 ;;
   post-unvet) step_post_unvet ;;
+  rollback) step_rollback ;;
+  restore) step_restore ;;
   all)
     step_prepare
     step_observe_v6
@@ -620,9 +928,11 @@ case "${1:-}" in
     step_switch_v7
     step_enforce_v7
     step_post_unvet
+    step_rollback
+    step_restore
     ;;
   *)
-    echo "usage: core_upgrade_rehearsal.sh prepare|observe-v6|vet-v7|publish-v7|ntt|gate|unvet-v6|switch-v7|enforce-v7|post-unvet|all" >&2
+    echo "usage: core_upgrade_rehearsal.sh prepare|observe-v6|vet-v7|publish-v7|ntt|gate|unvet-v6|switch-v7|enforce-v7|post-unvet|rollback|restore|all" >&2
     exit 2
     ;;
 esac

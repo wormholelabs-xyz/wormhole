@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Read the updates of a party on one participant and print each wormhole-core PublishMessage exercise, of any package.
+# Usage: publish_message_scan.sh <json-api-url> <token-file> <read-as-party> <begin-exclusive-offset> [<end-inclusive-offset>]
+# Output: one JSON line per PublishMessage event: {offset, recordTime, updateId, executingPackageId, sequence}.
+# The token file holds a Ledger API JWT of a user with only CanReadAs(<read-as-party>). The default end is the ledger end.
+# The JSON Ledger API rejects a request with more matching updates than its node limit (200 on LocalNet). The script
+# reads pages of SCAN_PAGE_SIZE updates and continues after the last offset of each full page.
+# The script uses only curl and jq, thus a guardian can run it against a production participant.
+set -euo pipefail
+
+readonly SCAN_PAGE_SIZE="${SCAN_PAGE_SIZE:-200}"
+readonly EMITTER_TEMPLATE_SUFFIX=":Wormhole.Core.State:Emitter"
+
+if [[ $# -lt 4 || $# -gt 5 ]]; then
+  echo "usage: publish_message_scan.sh <json-api-url> <token-file> <read-as-party> <begin-exclusive-offset> [<end-inclusive-offset>]" >&2
+  exit 2
+fi
+json_api_url="$1"
+token_file="$2"
+read_as_party="$3"
+begin_exclusive="$4"
+[[ -r "$token_file" ]] || { echo "cannot read token file $token_file" >&2; exit 2; }
+[[ "$begin_exclusive" =~ ^[0-9]+$ ]] || { echo "begin offset is not a non-negative integer: $begin_exclusive" >&2; exit 2; }
+[[ "$SCAN_PAGE_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "SCAN_PAGE_SIZE is not a positive integer: $SCAN_PAGE_SIZE" >&2; exit 2; }
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+readonly auth_header="$work_dir/auth"
+(umask 077 && printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < "$token_file")" > "$auth_header")
+
+if [[ $# -eq 5 ]]; then
+  end_inclusive="$5"
+else
+  end_inclusive="$(curl -sSf "$json_api_url/v2/state/ledger-end" -H "@$auth_header" | jq -er .offset)"
+fi
+[[ "$end_inclusive" =~ ^[0-9]+$ ]] || { echo "end offset is not a non-negative integer: $end_inclusive" >&2; exit 2; }
+[[ "$begin_exclusive" -le "$end_inclusive" ]] || { echo "begin offset $begin_exclusive is after end offset $end_inclusive" >&2; exit 2; }
+
+# read_update_page <begin-exclusive>: one page of updates, as a JSON array.
+read_update_page() {
+  curl -sS -X POST "$json_api_url/v2/updates?limit=$SCAN_PAGE_SIZE" -H "@$auth_header" -H 'Content-Type: application/json' \
+    -d "$(jq -n --argjson begin "$1" --argjson end "$end_inclusive" --arg party "$read_as_party" '{beginExclusive: $begin, endInclusive: $end,
+      updateFormat: {includeTransactions: {
+        eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
+        transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')"
+}
+
+page_begin="$begin_exclusive"
+# Each page advances the begin offset by at least one, thus the loop ends after at most end - begin pages.
+while [[ "$page_begin" -lt "$end_inclusive" ]]; do
+  read_update_page "$page_begin" > "$work_dir/page.json"
+  if ! jq -e 'type == "array"' "$work_dir/page.json" > /dev/null; then
+    echo "update read after offset $page_begin failed: $(jq -c '{code, cause}' "$work_dir/page.json" 2>/dev/null || cat "$work_dir/page.json")" >&2
+    exit 1
+  fi
+  jq -c --arg suffix "$EMITTER_TEMPLATE_SUFFIX" '.[] | .update.Transaction?.value // empty
+    | . as $transaction
+    | .events[] | .ExercisedEvent? // empty
+    | select(.choice == "PublishMessage" and (.templateId | endswith($suffix)))
+    | {offset: $transaction.offset, recordTime: $transaction.recordTime, updateId: $transaction.updateId,
+       executingPackageId: (.templateId | split(":")[0]), sequence: (.exerciseResult._2.sequence? // null)}' "$work_dir/page.json"
+  page_length="$(jq length "$work_dir/page.json")"
+  [[ "$page_length" -le "$SCAN_PAGE_SIZE" ]] || { echo "the participant returned $page_length updates for a page of $SCAN_PAGE_SIZE" >&2; exit 1; }
+  if [[ "$page_length" -lt "$SCAN_PAGE_SIZE" ]]; then
+    break
+  fi
+  page_last_offset="$(jq -er '.[-1].update | to_entries[0].value.value.offset' "$work_dir/page.json")"
+  [[ "$page_last_offset" -gt "$page_begin" && "$page_last_offset" -le "$end_inclusive" ]] \
+    || { echo "page offset $page_last_offset is outside ($page_begin, $end_inclusive]" >&2; exit 1; }
+  page_begin="$page_last_offset"
+done
