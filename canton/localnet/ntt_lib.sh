@@ -173,6 +173,21 @@ amulet_holdings() {
         | {contractId, amount: .createArgument.amount.initialAmount}]'
 }
 
+# amulet_holdings_with_round <validator> <party>: [{contractId, amount, createdRound}] of the party's unlocked Amulets.
+amulet_holdings_with_round() {
+  active_contracts "$1" "$2" ":Splice.Amulet:Amulet" \
+    | jq -c --arg owner "$2" '[.[] | select(.createArgument.owner == $owner)
+        | {contractId, amount: .createArgument.amount.initialAmount, createdRound: (.createArgument.amount.createdAt.number | tonumber)}]'
+}
+
+# latest_open_round: the highest open mining round number that Scan reports.
+latest_open_round() {
+  curl -sSf -X POST -H "$SCAN_HOST_HEADER" -H 'Content-Type: application/json' \
+    "$SCAN_URL/api/scan/v0/open-and-issuing-mining-rounds" \
+    -d '{"cached_open_mining_round_contract_ids": [], "cached_issuing_round_contract_ids": []}' \
+    | jq -er '[.open_mining_rounds[].contract.payload.round.number | tonumber] | max'
+}
+
 # covering_replay_node <namespace> <digest-hex>: the active ReplayNode of guardianGovernance that covers the digest.
 covering_replay_node() {
   active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.Replay:ReplayNode" \

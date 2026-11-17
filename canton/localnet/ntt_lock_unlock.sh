@@ -27,6 +27,10 @@ readonly RELEASE_TRIMMED_AMOUNT=200000000
 readonly LEDGER_BALANCE_AFTER_RELEASE="3.0"
 readonly TAP_AMOUNT_USD="10.0"
 readonly OUTBOUND_NONCE=8
+# NTT_RELEASE_AFTER_ROUNDS > 0 releases from a custody pot that is that many mining rounds old.
+readonly RELEASE_AFTER_ROUNDS="${NTT_RELEASE_AFTER_ROUNDS:-0}"
+readonly RELEASE_WAIT_POLL_SECONDS=30
+readonly RELEASE_WAIT_MAX_POLLS=$(( (RELEASE_AFTER_ROUNDS + 2) * 24 ))
 
 run_label="$(date +%s)"
 
@@ -138,8 +142,29 @@ if ! jq -ne --argjson balance "$(jq -r .balance <<<"$ledger_after_lock")" --argj
   exit 1
 fi
 
+pot_created_round="$(amulet_holdings_with_round app-provider "$custodian_party" \
+  | jq -er --arg pot "$pot_cid" '.[] | select(.contractId == $pot) | .createdRound')"
+echo "custody pot created in round $pot_created_round"
+if (( RELEASE_AFTER_ROUNDS > 0 )); then
+  release_round=$(( pot_created_round + RELEASE_AFTER_ROUNDS ))
+  echo "== 4a. Wait until open round $release_round (at most $RELEASE_WAIT_MAX_POLLS polls of ${RELEASE_WAIT_POLL_SECONDS}s)"
+  for (( poll = 1; poll <= RELEASE_WAIT_MAX_POLLS; poll++ )); do
+    open_round="$(latest_open_round)"
+    if (( open_round >= release_round )); then
+      break
+    fi
+    sleep "$RELEASE_WAIT_POLL_SECONDS"
+  done
+  if (( open_round < release_round )); then
+    echo "open round $open_round did not reach $release_round" >&2
+    exit 1
+  fi
+  echo "latest open round $open_round"
+fi
+
 echo "== 5. Relayer on sv delivers the inbound transfer with Release"
 recipient_before_release="$(amulet_total app-user "$recipient_party")"
+custodian_before_release="$(amulet_holdings_with_round app-provider "$custodian_party")"
 release_vaa="$(ntt_transfer_vaa -sequence "$run_label" -emitter-chain "$PEER_CHAIN_ID" \
   -emitter-address "$PEER_TRANSCEIVER_ADDRESS" -source-manager "$PEER_MANAGER_ADDRESS" -recipient-manager "$manager_address" \
   -source-token "$PEER_TOKEN_ADDRESS" -recipient-party "$recipient_party" -ntt-message-id "$run_label" \
@@ -166,6 +191,9 @@ recipient_after_release="$(amulet_total app-user "$recipient_party")"
 echo "Release decoded transfer $(jq -c '._2 | {decimals, amount, recipientChain}' <<<"$release_result")"
 echo "LockedLedger balance $(jq -r .balance <<<"$ledger_after_release"), custody pot $(jq -r '.custodyHoldingCid // "none" | .[0:16]' <<<"$ledger_after_release")"
 echo "recipient CC $recipient_before_release -> $recipient_after_release"
+custodian_after_release="$(amulet_holdings_with_round app-provider "$custodian_party")"
+echo "custodian Amulets before release $custodian_before_release"
+echo "custodian Amulets after release  $custodian_after_release"
 if ! jq -ne --argjson balance "$(jq -r .balance <<<"$ledger_after_release")" --argjson expected "$LEDGER_BALANCE_AFTER_RELEASE" '$balance == $expected' >/dev/null; then
   echo "expected LockedLedger balance $LEDGER_BALANCE_AFTER_RELEASE after the release" >&2
   exit 1
