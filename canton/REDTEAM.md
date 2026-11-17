@@ -65,6 +65,8 @@ The signature tests use fewer than quorum, a duplicate index, and an out-of-orde
 They also use a wrong key, an index out of range, and the superseded set for governance.
 The superseded set checks VAAs through second 86400 and fails at second 86401.
 EVM `Messages.sol:80` also accepts the expiry second.
+The check truncates both times to whole seconds, as EVM `block.timestamp` does.
+Thus a VAA at expiry plus 999999 microseconds passes.
 Before a66170ea7, Canton failed at second 86400.
 
 ### A9: Malformed encodings

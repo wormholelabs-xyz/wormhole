@@ -567,9 +567,10 @@ template Emitter
       do
         -- Before the fee charge: a message the watcher drops must not consume
         -- a sequence or a fee.
+        -- Length bound first: caps the cost of the hex scan.
+        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
         assertMsg "payload is not lowercase hex" (isLowerHex payload)
         assertMsg "payload has an odd hex length" (T.length payload % 2 == 0)
-        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
         assertMsg "nonce is negative" (nonce >= 0)
         assertMsg "nonce exceeds uint32" (nonce <= maxNonceUint32)
         assertMsg "consistency level is negative" (consistencyLevel >= 0)

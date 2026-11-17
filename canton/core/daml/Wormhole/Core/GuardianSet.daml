@@ -3,7 +3,9 @@
 -- in @Setters.sol@.
 module Wormhole.Core.GuardianSet where
 
+import DA.Date (Month(Jan), date)
 import DA.List.Total ((!!))
+import DA.Time (convertMicrosecondsToRelTime, convertRelTimeToMicroseconds, subTime, time, addRelTime)
 import Wormhole.Core.Bytes
 
 -- | One day, matching the EVM @GUARDIAN_SET_EXPIRY@ (86400 seconds). After a new
@@ -35,9 +37,23 @@ keyAt : GuardianSet -> Int -> Optional Bytes20
 keyAt gs index = gs.keys !! index
 
 -- | A set is usable at @now@ if it is the current set (no expiry) or @now@ is
--- at or before its expiry. EVM @Messages.sol:80@ rejects only when
--- @expirationTime < block.timestamp@, so the expiry second itself is accepted.
+-- in or before its expiry second. EVM @Messages.sol:80@ rejects only when
+-- @expirationTime < block.timestamp@ in whole seconds, so both sides are
+-- truncated to the second: the whole expiry second is accepted.
 isActiveAt : GuardianSet -> Time -> Bool
 isActiveAt gs now = case gs.expirationTime of
   None -> True
-  Some exp -> now <= exp
+  Some expiry -> truncateToWholeSecond now <= truncateToWholeSecond expiry
+
+microsecondsPerSecond : Int
+microsecondsPerSecond = 1000000
+
+-- | Floors @t@ to its whole second; Daml 'Time' has microsecond resolution.
+truncateToWholeSecond : Time -> Time
+truncateToWholeSecond t =
+  let unixEpoch = time (date 1970 Jan 1) 0 0 0
+      microsecondsSinceEpoch = convertRelTimeToMicroseconds (subTime t unixEpoch)
+      subSecondMicroseconds = microsecondsSinceEpoch % microsecondsPerSecond
+      flooredSubSecondMicroseconds =
+        if subSecondMicroseconds < 0 then subSecondMicroseconds + microsecondsPerSecond else subSecondMicroseconds
+  in addRelTime unixEpoch (convertMicrosecondsToRelTime (microsecondsSinceEpoch - flooredSubSecondMicroseconds))
