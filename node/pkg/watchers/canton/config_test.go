@@ -1,6 +1,7 @@
 package canton
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -78,22 +79,36 @@ func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty st
 	return err
 }
 
-// TestCreateRequiresPackageIDOutsideDevMode locks in the anti-spoofing guard:
-// an empty package id (which matches any package) is rejected outside dev mode.
+// TestCreateRequiresPackageIDOutsideDevMode locks in the anti-spoofing guard: outside dev mode the package id is
+// exactly 64 lowercase hex characters. Dev mode also accepts the empty (wildcard) package id.
 func TestCreateRequiresPackageIDOutsideDevMode(t *testing.T) {
-	// Empty package id is rejected outside dev mode.
-	for _, env := range []common.Environment{common.MainNet, common.TestNet} {
-		err := createWith(t, "", env)
-		require.Error(t, err, "empty packageID must be rejected in %s", env)
-		assert.Contains(t, err.Error(), "PackageID")
+	testCases := []struct {
+		name                 string
+		packageIDText        string
+		environment          common.Environment
+		expectedErrorMessage string
+	}{
+		{name: "MainNet empty", packageIDText: "", environment: common.MainNet, expectedErrorMessage: "PackageID must be set"},
+		{name: "TestNet empty", packageIDText: "", environment: common.TestNet, expectedErrorMessage: "PackageID must be set"},
+		{name: "MainNet short", packageIDText: "abc123", environment: common.MainNet, expectedErrorMessage: "got 6 characters"},
+		{name: "TestNet short", packageIDText: "abc123", environment: common.TestNet, expectedErrorMessage: "got 6 characters"},
+		{name: "MainNet 63 hex", packageIDText: testCurrentPackageID[:63], environment: common.MainNet, expectedErrorMessage: "got 63 characters"},
+		{name: "MainNet uppercase", packageIDText: strings.Repeat("A", 64), environment: common.MainNet, expectedErrorMessage: "found 'A'"},
+		{name: "MainNet 64 hex", packageIDText: testCurrentPackageID, environment: common.MainNet},
+		{name: "TestNet 64 hex", packageIDText: testCurrentPackageID, environment: common.TestNet},
+		{name: "UnsafeDevNet empty", packageIDText: "", environment: common.UnsafeDevNet},
+		{name: "UnsafeDevNet 64 hex", packageIDText: testCurrentPackageID, environment: common.UnsafeDevNet},
+		{name: "UnsafeDevNet short", packageIDText: "abc123", environment: common.UnsafeDevNet, expectedErrorMessage: "got 6 characters"},
 	}
-
-	// Empty package id is allowed in unsafe dev mode (devnet wildcard).
-	require.NoError(t, createWith(t, "", common.UnsafeDevNet))
-
-	// A pinned package id is accepted everywhere.
-	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWith(t, testCurrentPackageID, env), "pinned packageID must be accepted in %s", env)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := createWith(t, testCase.packageIDText, testCase.environment)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				return
+			}
+			require.NoError(t, err)
+		})
 	}
 }
 
