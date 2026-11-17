@@ -466,6 +466,10 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 - `RegisterManager` publishes `TransceiverInit`. `SetPeer` publishes `TransceiverRegistration`.
 - The user on `app-user` creates a `DepositPreapproval`.
 - The relayer on `sv` submits `Mint` with a VAA from the current guardian set.
+- The script makes sure that `guardianGovernance` is the instrument admin of each minted `Coin`.
+- The relayer submits the same `Mint` VAA again. The ledger rejects it with `digest already consumed`.
+- The relayer submits a `Mint` VAA that devnet key 9 signs for guardian 0.
+  The ledger rejects it with `public key does not match guardian address at index 0`.
 - The user submits `Transfer`. The canonical `CoinFactory` burns the token.
 
 ### Lock/unlock deployment of Canton Coin
@@ -477,6 +481,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 - The factory and the choice context come from the Amulet registry API of Scan.
 - The locker submits `Transfer`. The custodian receives the Canton Coin.
 - The relayer on `sv` submits `Release`. The recipient receives Canton Coin through its `TransferPreapproval`.
+- The relayer submits the same `Release` VAA again. The ledger rejects it with `digest already consumed`.
 - The relayer is not a stakeholder of the recipient holdings.
   `Release` checks the amount on the custodian side.
 

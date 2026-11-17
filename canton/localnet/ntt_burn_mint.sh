@@ -5,6 +5,7 @@
 #   3. SetPeer for the Ethereum peer (chain 2). It publishes TransceiverRegistration.
 #   4. A user on app-user creates a DepositPreapproval.
 #   5. A relayer on sv delivers a guardian-signed inbound transfer VAA with Mint. The user receives the token.
+#      Negative checks: the same Mint VAA again, and a Mint VAA with a key outside the guardian set.
 #   6. The user burns part of the token with Transfer. The transceiver publishes the outbound NTT message.
 # Usage: ntt_burn_mint.sh
 # Precondition: ntt_governance.sh ran. Output: the "burnMint" entry of $LOCALNET_STATE_DIR/ntt-contracts.json.
@@ -26,6 +27,8 @@ readonly MINT_AMOUNT="2.5"
 readonly BURN_RAW_AMOUNT=100000000
 readonly CHANGE_AMOUNT="1.5"
 readonly OUTBOUND_NONCE=7
+# Devnet key that signs the negative Mint VAA in place of guardian 0.
+readonly WRONG_GUARDIAN_KEY_INDEX=9
 
 run_label="$(date +%s)"
 admin_only_signers() { external_party_signers_json "$admin_party" "$admin_key_file" "$admin_fingerprint"; }
@@ -103,32 +106,72 @@ echo "user $user_party preapproval $preapproval_cid"
 
 echo "== 5. Relayer on sv delivers the inbound transfer with Mint"
 relayer_party="$(allocate_local_party sv "NttRelayer-$run_label")"
+# mint_disclosures <replay-node-cid>
+mint_disclosures() {
+  json_array \
+    "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
+    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
+    "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$1")" \
+    "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Ntt.Deposit:DepositPreapproval "$preapproval_cid")" \
+    "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")"
+}
+# mint_command <vaa-json> <replay-node-cid>
+mint_command() {
+  exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Mint "$(jq -n --arg relayer "$relayer_party" \
+    --arg coreState "$core_state_cid" --arg replayNode "$2" --arg vaa "$(jq -r .vaaHex <<<"$1")" \
+    --argjson keys "$(vaa_pub_keys_json "$1")" --arg user "$user_party" --arg preapproval "$preapproval_cid" \
+    --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+      recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')"
+}
+relayer_only="$(jq -n --arg relayer "$relayer_party" '[$relayer]')"
 mint_vaa="$(ntt_transfer_vaa -sequence "$run_label" -emitter-chain "$PEER_CHAIN_ID" \
   -emitter-address "$PEER_TRANSCEIVER_ADDRESS" -source-manager "$PEER_MANAGER_ADDRESS" -recipient-manager "$manager_address" \
   -source-token "$PEER_TOKEN_ADDRESS" -recipient-party "$user_party" -ntt-message-id "$run_label" \
   -trimmed-decimals 8 -trimmed-amount "$MINT_TRIMMED_AMOUNT")"
 replay_node_cid="$(covering_replay_node "$manager_namespace" "$(jq -r .digestHex <<<"$mint_vaa")")"
-mint_transaction="$(submit_local sv "ntt-mint-$run_label" "$(jq -n --arg relayer "$relayer_party" '[$relayer]')" \
-  "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Mint "$(jq -n --arg relayer "$relayer_party" \
-    --arg coreState "$core_state_cid" --arg replayNode "$replay_node_cid" --arg vaa "$(jq -r .vaaHex <<<"$mint_vaa")" \
-    --argjson keys "$(vaa_pub_keys_json "$mint_vaa")" --arg user "$user_party" --arg preapproval "$preapproval_cid" \
-    --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
-      recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')")" \
-  "$(json_array \
-    "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
-    "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$replay_node_cid")" \
-    "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Ntt.Deposit:DepositPreapproval "$preapproval_cid")" \
-    "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")")")"
+mint_transaction="$(submit_local sv "ntt-mint-$run_label" "$relayer_only" \
+  "$(mint_command "$mint_vaa" "$replay_node_cid")" "$(mint_disclosures "$replay_node_cid")")"
 echo "Mint decoded transfer $(exercise_result "$mint_transaction" :Wormhole.Ntt.Manager:NttManager Mint | jq -c '{decimals, amount, recipientChain}')"
-user_coins="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[] | {contractId, amount: .createArgument.amount}]')"
+user_coins="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" \
+  | jq -c '[.[] | {contractId, amount: .createArgument.amount, owner: .createArgument.owner, instrumentId: .createArgument.instrumentId}]')"
 echo "user coins after Mint: $(jq -c '[.[].amount]' <<<"$user_coins")"
+# guardianGovernance must be the instrument admin, thus a signatory, of each minted Coin.
+if ! jq -e --arg gg "$GG_PARTY" --arg id "$instrument_id" --arg user "$user_party" \
+  'length == 1 and all(.[]; .instrumentId.admin == $gg and .instrumentId.id == $id and .owner == $user)' \
+  <<<"$user_coins" >/dev/null; then
+  echo "expected one Coin of instrument {admin: guardianGovernance, id: $instrument_id} owned by the user: $user_coins" >&2
+  exit 1
+fi
 user_coin_units="$(json_decimal_array_total_units "$DAML_DECIMAL_FRACTION_DIGITS" "$(jq -c 'map(.amount)' <<<"$user_coins")")"
 if [[ "$user_coin_units" != "$(decimal_to_units "$MINT_AMOUNT" "$DAML_DECIMAL_FRACTION_DIGITS")" ]]; then
   echo "expected the user to hold $MINT_AMOUNT after Mint, holds $user_coin_units units" >&2
   exit 1
 fi
+
+echo "== 5a. The same Mint VAA again is rejected"
+replay_node_cid="$(covering_replay_node "$manager_namespace" "$(jq -r .digestHex <<<"$mint_vaa")")"
+submit_local_expect_rejection sv "ntt-mint-replay-$run_label" "$relayer_only" \
+  "$(mint_command "$mint_vaa" "$replay_node_cid")" "$(mint_disclosures "$replay_node_cid")" "digest already consumed"
+
+echo "== 5b. A Mint VAA signed by devnet key $WRONG_GUARDIAN_KEY_INDEX for guardian 0 is rejected"
+IFS=, read -r -a wrong_signing_key_indices <<<"$NTT_GUARDIAN_KEY_INDICES"
+for key_index in "${wrong_signing_key_indices[@]}"; do
+  if [[ "$key_index" == "$WRONG_GUARDIAN_KEY_INDEX" ]]; then
+    echo "NTT_GUARDIAN_KEY_INDICES contains $WRONG_GUARDIAN_KEY_INDEX; the negative case needs a key outside the set" >&2
+    exit 1
+  fi
+done
+wrong_signing_key_indices[0]="$WRONG_GUARDIAN_KEY_INDEX"
+wrong_key_vaa="$(generate_vaa -kind ntt-transfer -signing-set-index "$NTT_GUARDIAN_SET_INDEX" \
+  -signing-key-indices "$(IFS=,; echo "${wrong_signing_key_indices[*]}")" -sequence "$((run_label + 1))" \
+  -emitter-chain "$PEER_CHAIN_ID" -emitter-address "$PEER_TRANSCEIVER_ADDRESS" -source-manager "$PEER_MANAGER_ADDRESS" \
+  -recipient-manager "$manager_address" -source-token "$PEER_TOKEN_ADDRESS" -recipient-party "$user_party" \
+  -ntt-message-id "$((run_label + 1))" -trimmed-decimals 8 -trimmed-amount "$MINT_TRIMMED_AMOUNT")"
+replay_node_cid="$(covering_replay_node "$manager_namespace" "$(jq -r .digestHex <<<"$wrong_key_vaa")")"
+submit_local_expect_rejection sv "ntt-mint-wrong-key-$run_label" "$relayer_only" \
+  "$(mint_command "$wrong_key_vaa" "$replay_node_cid")" "$(mint_disclosures "$replay_node_cid")" \
+  "public key does not match guardian address at index 0"
 
 echo "== 6. User burns with Transfer to chain $PEER_CHAIN_ID"
 emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"
@@ -148,8 +191,14 @@ burn_transaction="$(submit_local app-user "ntt-burn-$run_label" "$user_only" \
 burn_message="$(exercise_result "$burn_transaction" :Wormhole.Ntt.Manager:NttManager Transfer)"
 echo "outbound NTT message $(message_summary "$burn_message") update $(jq -r .updateId <<<"$burn_transaction")"
 echo "payload $(jq -r .payload <<<"$burn_message")"
-user_change="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument.amount]')"
+user_change_coins="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument]')"
+user_change="$(jq -c 'map(.amount)' <<<"$user_change_coins")"
 echo "user coins after burn: $user_change"
+if ! jq -e --arg gg "$GG_PARTY" --arg id "$instrument_id" \
+  'length >= 1 and all(.[]; .instrumentId.admin == $gg and .instrumentId.id == $id)' <<<"$user_change_coins" >/dev/null; then
+  echo "expected change Coins of instrument {admin: guardianGovernance, id: $instrument_id}: $user_change_coins" >&2
+  exit 1
+fi
 user_change_units="$(json_decimal_array_total_units "$DAML_DECIMAL_FRACTION_DIGITS" "$user_change")"
 if [[ "$user_change_units" != "$(decimal_to_units "$CHANGE_AMOUNT" "$DAML_DECIMAL_FRACTION_DIGITS")" ]]; then
   echo "expected the user to hold $CHANGE_AMOUNT after the burn, holds $user_change_units units" >&2

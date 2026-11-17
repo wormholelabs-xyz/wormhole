@@ -216,3 +216,27 @@ readonly MAX_RELEASE_AFTER_ROUNDS=24
 check_release_after_rounds() {
   [[ "$1" =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= MAX_RELEASE_AFTER_ROUNDS ))
 }
+
+# classify_submit_response <response-body-and-status> <expected-error-text>: succeeds only for a non-200
+# response whose body has the expected text. The last line of the response is the HTTP status.
+classify_submit_response() {
+  local response="$1" expected_error_text="$2" http_status response_body
+  if [[ -z "$expected_error_text" ]]; then
+    echo "classify_submit_response: the expected text is empty" >&2
+    return 1
+  fi
+  http_status="$(tail -n 1 <<<"$response")"
+  if [[ ! "$http_status" =~ ^[0-9]{3}$ ]]; then
+    echo "the last line of the response is not an HTTP status: $http_status" >&2
+    return 1
+  fi
+  response_body="$(sed '$d' <<<"$response")"
+  if [[ "$http_status" == "200" ]]; then
+    echo "the command was accepted; expected a rejection with '$expected_error_text'" >&2
+    return 1
+  fi
+  if ! grep -qF -- "$expected_error_text" <<<"$response_body"; then
+    echo "HTTP $http_status rejection lacks '$expected_error_text': $response_body" >&2
+    return 1
+  fi
+}

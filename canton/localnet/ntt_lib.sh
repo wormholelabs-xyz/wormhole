@@ -61,11 +61,11 @@ disclosed_contract() {
           else error("contract \($cid) is not active for the party") end'
 }
 
-# submit_local <validator> <command-id> <act-as-json-array> <command-json> [disclosed-json]
-# Submits as local parties of that participant. Prints the transaction JSON.
-submit_local() {
-  local validator_name="$1" command_id="$2" act_as="$3" command="$4" disclosed="${5:-[]}" response
-  response="$(curl -sS -X POST "$(json_api_url "$validator_name")/v2/commands/submit-and-wait-for-transaction" \
+# submit_local_response <validator> <command-id> <act-as-json-array> <command-json> [disclosed-json]
+# Submits as local parties of that participant. Prints the response body, then the HTTP status on the last line.
+submit_local_response() {
+  local validator_name="$1" command_id="$2" act_as="$3" command="$4" disclosed="${5:-[]}"
+  curl -sS -X POST "$(json_api_url "$validator_name")/v2/commands/submit-and-wait-for-transaction" \
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -w '\n%{http_code}' \
     -d "$(jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
@@ -74,12 +74,28 @@ submit_local() {
                  disclosedContracts: $disclosed, synchronizerId: $synchronizerId},
       transactionFormat: {
         eventFormat: {filtersByParty: ($actAs | map({key: ., value: {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}) | from_entries), verbose: true},
-        transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}')")"
+        transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}')"
+}
+
+# submit_local <validator> <command-id> <act-as-json-array> <command-json> [disclosed-json]
+# Submits as local parties of that participant. Prints the transaction JSON.
+submit_local() {
+  local validator_name="$1" command_id="$2" response
+  response="$(submit_local_response "$@")" || return 1
   if [[ "$(tail -n 1 <<<"$response")" != "200" ]]; then
     echo "submit $command_id on $validator_name failed: $(sed '$d' <<<"$response")" >&2
     return 1
   fi
   sed '$d' <<<"$response" | jq -c .transaction
+}
+
+# submit_local_expect_rejection <validator> <command-id> <act-as-json-array> <command-json> <disclosed-json> <expected-error-text>
+# Fails if the participant accepts the command, or if the rejection lacks the expected text.
+submit_local_expect_rejection() {
+  local response
+  response="$(submit_local_response "$1" "$2" "$3" "$4" "$5")" || return 1
+  classify_submit_response "$response" "$6" || return 1
+  echo "$2 rejected on $1 with '$6'"
 }
 
 # Wallet (validator) API, as the wallet user. validator_api_url <validator>

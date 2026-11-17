@@ -7,6 +7,7 @@
 #   4. The locker locks Canton Coin with Transfer. The custodian receives it and the LockedLedger is credited.
 #   5. A relayer on sv delivers a guardian-signed inbound transfer VAA with Release. The recipient receives
 #      Canton Coin through its TransferPreapproval and the LockedLedger is debited.
+#      Negative check: the same Release VAA again.
 # Usage: ntt_lock_unlock.sh
 # Precondition: ntt_governance.sh ran. Output: the "lockUnlock" entry of $LOCALNET_STATE_DIR/ntt-contracts.json.
 set -euo pipefail
@@ -188,19 +189,28 @@ release_vaa="$(ntt_transfer_vaa -sequence "$run_label" -emitter-chain "$PEER_CHA
 replay_node_cid="$(covering_replay_node "$manager_namespace" "$(jq -r .digestHex <<<"$release_vaa")")"
 release_registry="$(amulet_transfer_factory "$custodian_party" "$recipient_party" "$RELEASE_AMOUNT" "$(jq -n --arg pot "$pot_cid" '[$pot]')")"
 echo "custodian-to-recipient kind $(jq -r .transferKind <<<"$release_registry")"
-release_transaction="$(submit_local sv "ntt-release-$run_label" "$(jq -n --arg relayer "$relayer_party" '[$relayer]')" \
-  "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Release "$(jq -n --arg relayer "$relayer_party" \
-    --arg coreState "$core_state_cid" --arg replayNode "$replay_node_cid" --arg vaa "$(jq -r .vaaHex <<<"$release_vaa")" \
-    --argjson keys "$(vaa_pub_keys_json "$release_vaa")" --arg recipient "$recipient_party" --arg ledger "$ledger_cid" \
-    --argjson extraArgs "$(registry_extra_args "$release_registry")" '{
+# release_command <vaa-json> <replay-node-cid> <ledger-cid> <registry-json>
+release_command() {
+  exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Release "$(jq -n --arg relayer "$relayer_party" \
+    --arg coreState "$core_state_cid" --arg replayNode "$2" --arg vaa "$(jq -r .vaaHex <<<"$1")" \
+    --argjson keys "$(vaa_pub_keys_json "$1")" --arg recipient "$recipient_party" --arg ledger "$3" \
+    --argjson extraArgs "$(registry_extra_args "$4")" '{
       executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
-      recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')")" \
-  "$(jq -c '. + $registry' --argjson registry "$(registry_disclosures "$release_registry")" <<<"$(json_array \
+      recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')"
+}
+# release_disclosures <replay-node-cid> <ledger-cid> <custody-pot-cid> <registry-json>
+release_disclosures() {
+  jq -c '. + $registry' --argjson registry "$(registry_disclosures "$4")" <<<"$(json_array \
     "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
-    "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$replay_node_cid")" \
-    "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$ledger_cid")" \
-    "$(disclosed_contract app-provider "$custodian_party" :Splice.Amulet:Amulet "$pot_cid")")")")"
+    "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$1")" \
+    "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$2")" \
+    "$(disclosed_contract app-provider "$custodian_party" :Splice.Amulet:Amulet "$3")")"
+}
+relayer_only="$(jq -n --arg relayer "$relayer_party" '[$relayer]')"
+release_transaction="$(submit_local sv "ntt-release-$run_label" "$relayer_only" \
+  "$(release_command "$release_vaa" "$replay_node_cid" "$ledger_cid" "$release_registry")" \
+  "$(release_disclosures "$replay_node_cid" "$ledger_cid" "$pot_cid" "$release_registry")")"
 release_result="$(exercise_result "$release_transaction" :Wormhole.Ntt.Manager:NttManager Release)"
 ledger_after_release="$(created_contract_argument "$release_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 recipient_after_release_units="$(amulet_total_units app-user "$recipient_party")"
@@ -218,6 +228,15 @@ if (( recipient_after_release_units - recipient_before_release_units != $(decima
   echo "expected the recipient to receive $RELEASE_AMOUNT CC" >&2
   exit 1
 fi
+
+echo "== 5a. The same Release VAA again is rejected"
+ledger_cid="$(created_contract_id "$release_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
+pot_cid="$(jq -er .custodyHoldingCid <<<"$ledger_after_release")"
+replay_node_cid="$(covering_replay_node "$manager_namespace" "$(jq -r .digestHex <<<"$release_vaa")")"
+replay_registry="$(amulet_transfer_factory "$custodian_party" "$recipient_party" "$RELEASE_AMOUNT" "$(jq -n --arg pot "$pot_cid" '[$pot]')")"
+submit_local_expect_rejection sv "ntt-release-replay-$run_label" "$relayer_only" \
+  "$(release_command "$release_vaa" "$replay_node_cid" "$ledger_cid" "$replay_registry")" \
+  "$(release_disclosures "$replay_node_cid" "$ledger_cid" "$pot_cid" "$replay_registry")" "digest already consumed"
 
 record_ntt_json lockUnlock "$(jq -nc --arg custodian "$custodian_party" --arg manager "$manager_cid" \
   --arg managerAddress "$manager_address" --arg emitterId "$emitter_id" --arg emitterAddress "$emitter_address" \
