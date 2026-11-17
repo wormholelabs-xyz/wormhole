@@ -542,20 +542,38 @@ They are also the only informee participants.
 | Package | Package id | DAR |
 | --- | --- | --- |
 | `wormhole-core` 0.6.0 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` | `canton/dars/wormhole-core-0.6.0.dar` |
-| `wormhole-core` 0.7.0 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` | Build output of `canton/core` |
-| `ntt` 0.2.0 | `8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a` | Uploaded earlier. NTT commit `1db4b3c`. |
-| `ntt` 0.3.0 | `291fcf920b971d50956845c2690723fb321f0a5b141a44caa5a16910f6ffa1a6` | `ntt/canton/ntt/.daml/dist/ntt-0.3.0.dar` |
+| `wormhole-core` 0.7.0 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` | `canton/dars/wormhole-core-0.7.0.dar` |
+| `ntt` 0.2.0 | `8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a` | `ntt/canton/dars/ntt-0.2.0.dar`. NTT commit `1db4b3c`. |
+| `ntt` 0.3.0 | `291fcf920b971d50956845c2690723fb321f0a5b141a44caa5a16910f6ffa1a6` | `NTT_V3_DAR`. Build NTT commit `a1aa515`. |
 
-The script stops if a core DAR has a different package id.
+`core_upgrade_package_ids.sh` holds these package ids and DAR paths.
+The script stops if a DAR has a different package id.
+`test/core_upgrade_package_ids_test.sh` checks the DARs without LocalNet.
+
+### Scope with `wormhole-core` 0.8.0
+
+The rehearsal keeps the versions 0.6.0 and 0.7.0.
+The procedure of section 7.5 applies only to an upgrade that keeps the signatories of each template.
+0.6.0 and 0.7.0 are the only pair of released versions with this property.
+0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` and `Emitter`.
+
+The rehearsal cannot run on a LocalNet with the 0.8.0 genesis:
+
+- The 0.8.0 `CoreState`, `EmitterRegistry` and `Emitter` cannot run under 0.6.0 or 0.7.0.
+- `ntt_e2e.sh` follows the `ntt` 0.3.2 and `wormhole-core` 0.8.0 pins of `ntt_lib.sh`.
+  Thus the steps `ntt` and `post-unvet` fail with `ntt` 0.3.0.
+
+The `prepare` step stops before it changes the vetting state if the Operator `CoreState` is not a 0.6.0 contract.
+Use the rehearsal again for the first upgrade from 0.8.0.
+Then change the package ids and DARs in `core_upgrade_package_ids.sh`.
 
 ### Prerequisites
 
-- The `guardianGovernance` rehearsal ran. The `CoreState` message fee is 0.
-- The `ntt` 0.3.0 DAR exists. It calls `wormhole-core` 0.7.0.
+- The Operator `CoreState` is a 0.6.0 contract. The `CoreState` message fee is 0.
+- `NTT_V3_DAR` is the `ntt` 0.3.0 DAR. It calls `wormhole-core` 0.7.0.
 - LocalNet has the `ntt` 0.2.0 package and a burn/mint `NttManager` that `ntt` 0.2.0 created. `ntt-keys` holds its admin key.
 - Guardian set 2 with devnet keys 2, 3 and 4 is the current guardian set.
   Set `CURRENT_GUARDIAN_SET_INDEX` and `CURRENT_GUARDIAN_KEY_INDICES` for a different set.
-- The 0.7.0 DAR exists. Run `dpm build --all` in `canton`.
 
 ### Procedure
 
@@ -587,8 +605,8 @@ Each harness reads as `guardianGovernance` on its own participant.
 | 10 | `rollback` | A watcher pinned to 0.6.0 reobserves a 0.6.0 update while no host vets 0.6.0. Then each host vets 0.6.0 and `ntt` 0.2.0 again. 0.6.0 exercises an `Emitter` from 0.7.0. `ntt` 0.2.0 exercises an `NttManager` from `ntt` 0.3.0. |
 | 11 | `restore` | Each host unvets core 0.6.0 and `ntt` 0.2.0 again. A 0.6.0 publish fails at prepare. |
 
-The `vet-v7` step vets `ntt` 0.3.0 `291fcf92` by package id when each host has it.
-Otherwise it uploads the NTT DAR, and stops if the DAR is a different package.
+The `vet-v7` step vets `ntt` 0.3.0 `291fcf92` by package id on each host that has it.
+On each other host, it uploads `NTT_V3_DAR`. It stops if the DAR is a different package.
 
 The evidence log is `$LOCALNET_STATE_DIR/evidence/core_upgrade_rehearsal-<time>.log`.
 The directory with the same name holds the watcher observations, logs, counters and the dropped update ids.

@@ -27,20 +27,17 @@
 # Usage: core_upgrade_rehearsal.sh <step>|all
 # A step that fails stops each watcher harness that it started. A step that passes leaves v6-<host> (observe-v6) and
 # the canary (publish-v7) running for the next steps.
-# Precondition: gg_publish_and_govern.sh ran; the CoreState message fee is 0; the 0.7.0 core DAR and the ntt 0.3.0
-# DAR are built; LocalNet has the ntt 0.2.0 package 8b9c3ee1 and a burn/mint NttManager that it created.
+# Precondition: the LocalNet CoreState was created under core 0.6.0 (a LocalNet from before the 0.8.0 genesis);
+# gg_publish_and_govern.sh ran; the CoreState message fee is 0; NTT_V3_DAR is an ntt 0.3.0 build on core 0.7.0;
+# LocalNet has the ntt 0.2.0 package 8b9c3ee1 and a burn/mint NttManager that it created.
+# A LocalNet with the 0.8.0 genesis cannot run this rehearsal: its contracts cannot run under 0.6.0 or 0.7.0.
+# The prepare step stops on such a LocalNet before it changes the vetting state.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
+# shellcheck source=core_upgrade_package_ids.sh
+source "$LOCALNET_SCRIPT_DIR/core_upgrade_package_ids.sh"
 
-readonly CORE_V6_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
-readonly CORE_V7_PACKAGE_ID="7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb"
-# ntt 0.2.0 calls core 0.6.0 by package id. ntt 0.3.0 calls core 0.7.0 and is an upgrade of ntt 0.2.0.
-readonly NTT_V2_PACKAGE_ID="8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a"
-readonly NTT_V3_PACKAGE_ID="291fcf920b971d50956845c2690723fb321f0a5b141a44caa5a16910f6ffa1a6"
-readonly CORE_V6_DAR="$REPO_ROOT/canton/dars/wormhole-core-0.6.0.dar"
-readonly CORE_V7_DAR="$REPO_ROOT/canton/core/.daml/dist/wormhole-core-0.7.0.dar"
-readonly DPM_BIN_DIR="${DPM_BIN_DIR:-$HOME/.dpm/bin}"
 # Each LocalNet participant hosts guardianGovernance. Thus each participant is a guardian host and an informee host.
 readonly GUARDIAN_HOSTS=(app-provider sv app-user)
 readonly UPGRADE_STATE="$LOCALNET_STATE_DIR/core-upgrade.json"
@@ -105,14 +102,18 @@ record_ledger_end_of_each_host() {
   done
 }
 
-dar_main_package_id() {
-  PATH="$DPM_BIN_DIR:$PATH" dpm damlc inspect-dar --json "$1" 2>/dev/null | jq -er .main_package_id
+check_dar_package_ids() {
+  check_rehearsal_dar "$CORE_V6_DAR" "wormhole-core 0.6.0" "$CORE_V6_PACKAGE_ID" || fail "core 0.6.0 DAR check failed"
+  check_rehearsal_dar "$CORE_V7_DAR" "wormhole-core 0.7.0" "$CORE_V7_PACKAGE_ID" || fail "core 0.7.0 DAR check failed"
 }
 
-check_dar_package_ids() {
-  [[ "$(dar_main_package_id "$CORE_V6_DAR")" == "$CORE_V6_PACKAGE_ID" ]] || fail "$CORE_V6_DAR is not $CORE_V6_PACKAGE_ID"
-  [[ -f "$CORE_V7_DAR" ]] || fail "$CORE_V7_DAR not found; run 'dpm build --all' in canton/"
-  [[ "$(dar_main_package_id "$CORE_V7_DAR")" == "$CORE_V7_PACKAGE_ID" ]] || fail "$CORE_V7_DAR is not $CORE_V7_PACKAGE_ID"
+# check_ledger_predates_core_v8: the Operator CoreState is a 0.6.0 contract. A 0.8.0 genesis CoreState fails here.
+check_ledger_predates_core_v8() {
+  local created_package
+  created_package="$(operator_core_contract CoreState | jq -r '.templateId | split(":")[0]')"
+  [[ "$created_package" == "$CORE_V6_PACKAGE_ID" ]] \
+    || fail "the Operator CoreState was created under ${created_package:0:12}, expected core 0.6.0 ${CORE_V6_PACKAGE_ID:0:12}. This rehearsal needs a LocalNet from before the 0.8.0 genesis (localnet/README.md)"
+  echo "  the Operator CoreState is a core 0.6.0 contract"
 }
 
 participant_id_of() {
@@ -451,6 +452,7 @@ expect_daml_failure() {
 step_prepare() {
   echo "### prepare: core 0.6.0 and ntt 0.2.0 vetted; core 0.7.0 and ntt 0.3.0 not vetted; on each participant"
   check_dar_package_ids
+  check_ledger_predates_core_v8
   local validator_name newer_packages
   local package_id
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
@@ -503,22 +505,19 @@ step_vet_v7() {
   done
 }
 
-# vet_ntt_v3_on_each_host: vet NTT_V3_PACKAGE_ID by id where the participant has it. Otherwise ntt_upload_dars.sh
-# uploads the NTT DAR, which must be that package.
+# vet_ntt_v3_on_each_host: vet NTT_V3_PACKAGE_ID by id on each participant that has it. Upload and vet NTT_V3_DAR
+# on each other participant.
 vet_ntt_v3_on_each_host() {
-  local validator_name ntt_dar
+  local validator_name
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    package_is_uploaded "$validator_name" "$NTT_V3_PACKAGE_ID" || break
-  done
-  if package_is_uploaded "$validator_name" "$NTT_V3_PACKAGE_ID"; then
-    for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    if package_is_uploaded "$validator_name" "$NTT_V3_PACKAGE_ID"; then
       change_vetting "$validator_name" Vet "$NTT_V3_PACKAGE_ID"
-    done
-    return 0
-  fi
-  ntt_dar="${NTT_REPO_DIR:-$REPO_ROOT/../ntt}/canton/ntt/.daml/dist/ntt-0.3.0.dar"
-  [[ "$(dar_main_package_id "$ntt_dar")" == "$NTT_V3_PACKAGE_ID" ]] || fail "$ntt_dar is not $NTT_V3_PACKAGE_ID"
-  "$LOCALNET_SCRIPT_DIR/ntt_upload_dars.sh"
+    else
+      [[ -n "$NTT_V3_DAR" ]] || fail "$validator_name does not have ntt 0.3.0 ${NTT_V3_PACKAGE_ID:0:12}; set NTT_V3_DAR"
+      check_rehearsal_dar "$NTT_V3_DAR" "ntt 0.3.0" "$NTT_V3_PACKAGE_ID" || fail "ntt 0.3.0 DAR check failed"
+      upload_and_vet "$validator_name" "$NTT_V3_DAR"
+    fi
+  done
 }
 
 step_publish_v7() {

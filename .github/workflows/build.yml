@@ -272,6 +272,9 @@ jobs:
       - name: Run the NTT LocalNet library table test
         run: bash canton/localnet/test/ntt_lib_test.sh
 
+      - name: Run the core upgrade rehearsal package id table test
+        run: bash canton/localnet/test/core_upgrade_package_ids_test.sh
+
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
     runs-on: ubuntu-24.04
