@@ -968,12 +968,15 @@ Each observed event becomes a `common.MessagePublication`
 
 ```go
 type WatcherConfig struct {
-    NetworkID   watchers.NetworkID
-    ChainID     vaa.ChainID        // ChainIDCanton
-    Rpc         string             // host:port of the Ledger API
-    PackageID     string           // package-id of wormhole-core; required outside unsafe dev mode
-    PackageIDNext string           // second accepted core package-id for an upgrade window (§7.5)
-    ReadAsParty   string           // guardianGovernance party; required outside unsafe dev mode
+    NetworkID                    watchers.NetworkID
+    ChainID                      vaa.ChainID // ChainIDCanton
+    Rpc                          string // host:port of the Ledger API
+    PackageID                    string // current wormhole-core package-id; required outside unsafe dev mode
+    PackageVersion               string // its version (MAJOR.MINOR.PATCH); required outside unsafe dev mode
+    RetiringPackageID            string // retiring core package-id during an upgrade window (§7.5)
+    RetiringPackageAcceptedUntil string // exclusive record-time deadline of RetiringPackageID (RFC 3339 UTC)
+    RetiringPackageVersion       string // its version; required with it outside unsafe dev mode
+    ReadAsParty                  string // guardianGovernance party; required outside unsafe dev mode
 }
 ```
 
@@ -983,8 +986,9 @@ Wired into the guardian via
 `--cantonReadAsParty` populates `ReadAsParty`. `WatcherConfig.Create` requires
 `--cantonPackageID` and `--cantonReadAsParty` outside `--unsafeDevMode`. Set
 `--cantonReadAsParty` to the `guardianGovernance` party (§4.1, §7.1). Devnet runs
-in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageIDNext`
-populates `PackageIDNext` (§7.5).
+in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
+`--cantonRetiringPackageID`, `--cantonRetiringPackageAcceptedUntil`, and
+`--cantonRetiringPackageVersion` populate the other fields (§7.5).
 
 ---
 
@@ -1237,8 +1241,9 @@ Consequences for a watcher pinned to one package id:
 - A dropped exercise uses the emitter sequence number. The ledger keeps it.
 
 The sandbox test `TestCantonWatcherUpgradeWindow` covers these rules. A
-publish under the next core on an emitter that the primary core created shows
-the next package id.
+publish under the current core on an emitter that the retiring core created
+shows the current package id. A publish under the retiring core on an emitter
+that the current core wrote last shows the retiring package id.
 
 **Dropped-message metric.** The watcher counts each dropped `PublishMessage`
 in `wormhole_canton_unpinned_publish_messages_total`. The
@@ -1300,126 +1305,218 @@ submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
 > **NOTE:** This is a proposal for an owner decision. Compare it with the
 > single-pin procedure above.
 
-The watcher accepts a maximum of two core package ids. `--cantonPackageID` is
-the primary id. `--cantonPackageIDNext` is the next id. It is empty outside an
-upgrade window.
+**Scope.** Use the window only for a core upgrade that keeps the signatories
+and observers of each template. `damlc` reports a signatory change only as a
+warning, so read the SCU warnings of each build. An example is 0.8.0 to 0.8.1.
+The window cannot apply to 0.7.0 to 0.8.0, because 0.7.0 contracts do not run
+under 0.8.0.
 
-The watcher applies these rules:
+**Roles.** The watcher accepts a maximum of two core package ids:
+
+- `--cantonPackageID` is the current id. The watcher accepts it with no time
+  limit.
+- `--cantonRetiringPackageID` is the retiring id. The watcher accepts it only
+  for a transaction with a record time before
+  `--cantonRetiringPackageAcceptedUntil`.
+
+The forward upgrade sets the new version as the current id and the old version
+as the retiring id. A rollback swaps the two versions. Thus each role always
+matches its effect.
+
+**Rules for the ids and the deadline.**
 
 - Each id has exactly 64 lowercase hex characters.
-- The next id is different from the primary id.
-- The next id needs a primary id, also in unsafe dev mode.
-- Outside unsafe dev mode, the primary id is mandatory.
-- The watcher emits each `PublishMessage` that a package in the set executes.
+- The retiring id is different from the current id.
+- The retiring id needs a current id, also in unsafe dev mode.
+- The retiring id needs a deadline. A deadline needs a retiring id.
+- The deadline has the format `YYYY-MM-DDTHH:MM:SSZ`: RFC 3339, UTC, whole
+  seconds.
+- The deadline is a maximum of 7 days after the startup of the guardian
+  (`MaxRetiringPackageWindow`). A longer window stops the guardian at startup.
+- A deadline in the past is valid. It keeps the messages from before the
+  deadline recoverable. The guardian writes a WARN log at startup.
+- Each canton flag without `--cantonRPC` stops the guardian at startup.
+
+**Rules for each publish.**
+
+- The watcher compares the deadline with the `record_time` of the
+  transaction. The sequencer of the synchronizer sets the record time. The
+  submitter cannot change it. The VAA timestamp stays `effective_at`.
+- The deadline is exclusive. The watcher drops a retiring-id publish at or
+  after the deadline. It increments
+  `wormhole_canton_retiring_package_publish_after_deadline_total`.
+- The watcher drops a retiring-id publish without a record time. It
+  increments `wormhole_canton_publish_without_record_time_total`.
 - The watcher drops each other `PublishMessage` on the core template. The
   dropped-message metric counts it.
-- Reobservation uses the same set of package ids.
-- The heartbeat contract address shows the primary id only.
-- The gauge `wormhole_canton_accepted_package_ids` has one series for each
-  accepted id, with the value 1. The `role` label is `primary` or `next`. The
-  `package_id` label holds the id. Thus the gauge has a maximum of two series.
-- With a next id, the watcher writes a WARN log at startup. The log
-  shows that the upgrade window is open.
-- Outside unsafe dev mode, `NewWatcher` and `Run` return an error for the
-  any-package wildcard.
-- `--cantonPackageIDNext` without `--cantonRPC` stops the guardian at startup.
+- Reobservation uses the same rules and the record time of the original
+  transaction. Thus a message from before the deadline stays recoverable after
+  the deadline. Each guardian uses only ledger data, so all guardians make the
+  same decision.
 
-Two flags give each id one role. Thus a third id has no flag, and a list
-parser is not necessary. To promote the next id, move one value to the other
-flag.
+**Approved versions.**
 
-> **WARNING:** Set the next id only to a core version that the guardians
-> approved. The watcher signs each message that a package in the set executes.
+- Outside unsafe dev mode, each pinned id needs a version:
+  `--cantonPackageVersion` and `--cantonRetiringPackageVersion`
+  (`MAJOR.MINOR.PATCH`).
+- Outside unsafe dev mode, each pair of id and version must be in
+  `node/pkg/cantonclient/approved_core_packages.json`. guardiand compiles this
+  file in. Thus a new core version needs a guardiand release.
+- At startup and every 60 seconds, the watcher reads the vetting metadata of
+  each pinned id from its participant (`PackageService.ListVettedPackages`).
+  The package name must be `wormhole-core`. The package version must be equal
+  to the version flag.
+- A different name or version stops the watcher with an error. The supervisor
+  restarts it, and the check runs again.
+- If the participant has no metadata for an id, the gauge
+  `wormhole_canton_package_metadata_verified` for that role is 0. A publish
+  from that id starts a new check. If the check fails again, the watcher
+  stops. It then starts again before the offset of that publish. No message is
+  lost.
 
-**Procedure: upgrade from 0.6.0 to 0.7.0 with a two-package window.**
+> **CAUTION:** The metadata check finds an operator copy error. It is not a
+> security boundary, because the author of a package sets its name and
+> version. The approved list in guardiand is the security boundary.
 
-1. Record the ledger end offset of one guardian participant. Step 14 uses
-   this offset on the same participant.
-2. On each guardian, set `--cantonPackageIDNext` to the 0.7.0 package id.
-3. Restart the guardians one at a time. Coordination is not necessary.
-4. Make sure that the startup log of each guardian shows both ids in
-   `acceptedPackageIDs`.
-5. Make sure that each guardian exports
-   `wormhole_canton_accepted_package_ids{role="next"}` with the 0.7.0 package
-   id.
-6. Continue only when all guardians confirm step 5.
-7. Upload the 0.7.0 core DAR and its dependent DARs to all guardian
-   participants.
-8. Vet these DARs on all guardian participants.
-9. Upload and vet the same DARs on the operator participant.
-10. Tell integrators to submit with the 0.7.0 package id.
-11. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
-    pinned to the 0.7.0 package id only.
-12. Continue when the counter shows zero new 0.6.0 publishes.
-13. Unvet the 0.6.0 core DAR and its dependent DARs on all participants in
-    one planned window.
-14. Read the update stream as `guardianGovernance` from the offset of step 1.
-    Find each `PublishMessage` that the 0.6.0 package executed.
-15. For each of these messages, find the VAA by emitter address and sequence.
-16. Send a reobservation request for each message that has no VAA.
-17. Continue only when each 0.6.0 message of step 14 has a VAA.
-18. On each guardian, set `--cantonPackageID` to the 0.7.0 package id.
-19. On each guardian, remove `--cantonPackageIDNext`.
-20. Restart the guardians one at a time. Coordination is not necessary.
+**Metrics and heartbeat.**
 
-> **WARNING:** Do not do step 7 before all guardians confirm step 5. A
-> guardian without the 0.7.0 id drops each 0.7.0 message.
+- `wormhole_canton_accepted_package_ids` has one series for each accepted id,
+  with the value 1. The `role` label is `current` or `retiring`.
+- `wormhole_canton_retiring_package_accepted_until_seconds` is the deadline
+  in Unix seconds. It is 0 outside a window.
+- `wormhole_canton_accepted_publish_messages_total` counts the stream
+  publishes that the watcher emits. The `role` label is `current` or
+  `retiring`. Reobservations are not in this counter.
+- The heartbeat contract address is `current` or `current,retiring`.
 
-> **WARNING:** Do not remove the 0.6.0 id before step 17 is complete. After
-> the removal, reobservation cannot recover a 0.6.0 message.
+**Rule for a security fix.** If the new core corrects a security defect, set
+the deadline to a maximum of 24 hours after step 13. Alternatively, use the
+single-pin procedure. Until the deadline or the unvet, the guardians sign
+old-core messages under the old checks.
 
-> **CAUTION:** Until step 13, the guardians sign 0.6.0 messages. The 0.6.0
-> checks apply to these messages. If 0.7.0 corrects a 0.6.0 security defect,
-> do step 13 soon after step 10.
+**Procedure: upgrade from 0.8.0 to 0.8.1 with a two-package window.**
 
-> **NOTE:** Step 2 comes before step 7. Thus no guardian drops a 0.7.0
-> message. An id that no participant vets cannot execute a choice.
+Prepare the guardians:
+
+1. Add the 0.8.1 package id and version to `approved_core_packages.json`.
+2. Release guardiand with this change. Install it on each guardian.
+3. Record the ledger end offset and the participant id of one guardian
+   participant. Write both values in the upgrade record.
+4. Select the deadline. Use a maximum of 7 days after step 6. For a security
+   fix, use the rule above.
+5. On each guardian, set these flags:
+   - `--cantonPackageID` to the 0.8.1 package id.
+   - `--cantonPackageVersion=0.8.1`.
+   - `--cantonRetiringPackageID` to the 0.8.0 package id.
+   - `--cantonRetiringPackageVersion=0.8.0`.
+   - `--cantonRetiringPackageAcceptedUntil` to the deadline.
+6. Restart the guardians one at a time. Coordination is not necessary.
+7. Make sure that each guardian exports
+   `wormhole_canton_accepted_package_ids` with the 0.8.1 id as `current` and
+   the 0.8.0 id as `retiring`.
+8. Make sure that each guardian exports the deadline in
+   `wormhole_canton_retiring_package_accepted_until_seconds`.
+9. Continue only when all guardians confirm steps 7 and 8.
+
+Upgrade the ledger:
+
+10. Upload the 0.8.1 core DAR and its dependent DARs to all guardian
+    participants.
+11. Vet these DARs on all guardian participants.
+12. Upload and vet the same DARs on the operator participant.
+13. Tell integrators to submit with the 0.8.1 package id.
+14. On each guardian participant, set the vetting of the 0.8.0 core DAR to
+    end at the deadline. Use `PackageManagementService.UpdateVettedPackages`
+    with `new_valid_until_exclusive`.
+15. Monitor `wormhole_canton_accepted_publish_messages_total{role="retiring"}`.
+16. Continue when the counter shows no new publishes.
+17. Before the deadline, unvet the 0.8.0 core DAR and its dependent DARs on
+    all participants.
+
+Recover the old-core messages:
+
+18. On the participant of step 3, run `guardiand admin canton-list-publishes`.
+    Set `--fromOffset` to the offset of step 3. Set `--executingPackageID` to
+    the 0.8.0 package id.
+19. For each output line, find the VAA by emitter chain, emitter address, and
+    sequence.
+20. For each line without a VAA, run
+    `guardiand admin send-observation-request 75 <txId>`.
+21. Continue only when each line of step 18 has a VAA.
+
+Close the window:
+
+22. At a later restart, remove the three retiring flags from each guardian.
+
+> **WARNING:** Do not do step 10 before all guardians confirm step 9. A
+> guardian without the 0.8.1 id drops each 0.8.1 message.
+
+> **WARNING:** Do not remove the retiring flags before step 21 is complete.
+> After the removal, reobservation cannot recover a 0.8.0 message.
+
+> **CAUTION:** Until the deadline or the unvet, the guardians sign 0.8.0
+> messages. The 0.8.0 checks apply to these messages.
+
+> **NOTE:** Step 5 comes before step 10. An id that no participant vets cannot
+> execute a choice. Thus no guardian drops a 0.8.1 message.
+
+> **NOTE:** Step 14 makes the ledger enforce the deadline too. The watcher
+> enforces it also without step 14.
+
+> **NOTE:** `canton-list-publishes` reads as `guardianGovernance` with the
+> watcher filter, from `--fromOffset` (exclusive) to the ledger end at its
+> start. It stops with an error after 100000 publishes. Each guardian operator
+> runs steps 18 to 21 on its own participant.
 
 > **NOTE:** A restarted guardian does not see the messages of its restart
 > period. The other guardians keep the quorum. Reobservation by update id
 > recovers these messages for the restarted guardian. This recovery works
-> only while the executing package id is in the set of that guardian.
+> only while that guardian accepts the executing package id.
 
 > **NOTE:** A reobservation request for a message that the watcher drops also
-> increments `wormhole_canton_unpinned_publish_messages_total`. On a watcher
-> pinned to 0.7.0 only, the requests of step 16 increment the counter. These
-> increments do not show new 0.6.0 publishes.
+> increments the dropped-message counter. These increments do not show new
+> publishes.
 
 This procedure removes these blockers of the single-pin procedure:
 
-- **Late-message period.** The single-pin procedure loses each 0.6.0 message
-  between its steps 6 and 8. Here the guardians remove the 0.6.0 id after the
-  unvet. Thus no 0.6.0 message can occur after the removal.
-- **Signing outage.** The single-pin procedure drops each 0.7.0 message
+- **Late-message period.** The single-pin procedure loses each old-core
+  message between its steps 6 and 8. Here the deadline ends the retiring id,
+  and messages from before the deadline stay recoverable.
+- **Signing outage.** The single-pin procedure drops each new-core message
   until the coordinated switch. Here each guardian signs both versions during
   the window.
-- **Coordinated restart.** Each flag change here is a rolling restart. Only
-  the unvet in step 13 needs a planned window.
+- **Coordinated restart.** Each flag change here is a rolling restart.
+- **Open-ended window.** The deadline ends the window also if an operator
+  does not remove the flags.
 
 These items stay:
 
-- The 0.6.0 checks apply to 0.6.0 messages until the unvet in step 13.
-- To roll back before step 13, tell integrators to use 0.6.0 again.
-- The open item about contracts that 0.6.0 created stays open.
+- The 0.8.0 checks apply to 0.8.0 messages until the deadline or the unvet.
+- The open item about contracts that an earlier version created stays open.
 
-**Rollback after step 13.**
+**Rollback.**
 
-1. If the guardians removed the 0.6.0 id, set it again as the next id on
-   each guardian.
-2. Restart the guardians one at a time.
-3. Make sure that each guardian exports the 0.6.0 id in
-   `wormhole_canton_accepted_package_ids`.
-4. Continue only when all guardians confirm step 3.
-5. Vet 0.6.0 again on all participants.
-6. Remove the 0.6.0 id only after a new unvet of 0.6.0.
+1. On each guardian, set `--cantonPackageID` to the 0.8.0 id and
+   `--cantonPackageVersion=0.8.0`.
+2. On each guardian, set `--cantonRetiringPackageID` to the 0.8.1 id and
+   `--cantonRetiringPackageVersion=0.8.1`.
+3. Set `--cantonRetiringPackageAcceptedUntil` to a new deadline.
+4. Restart the guardians one at a time.
+5. Make sure that each guardian exports the 0.8.0 id as `current` and the
+   0.8.1 id as `retiring`.
+6. Continue only when all guardians confirm step 5.
+7. If step 17 is complete, vet 0.8.0 again on all participants.
+8. Tell integrators to submit with the 0.8.0 package id.
+9. Before the new deadline, unvet 0.8.1 on all participants.
+10. Recover the 0.8.1 messages with steps 18 to 21. Use the 0.8.1 package id.
 
-> **WARNING:** Do not vet 0.6.0 again before the 0.6.0 id is in the set of
-> each guardian. A guardian without the id drops each 0.6.0 message.
+> **WARNING:** Do not vet 0.8.0 again before 0.8.0 is the current id on each
+> guardian. A guardian without the id drops each 0.8.0 message.
 
-> **CAUTION:** This document does not check that 0.6.0 can use a contract
-> that 0.7.0 wrote last. An example is an `Emitter` that a 0.7.0 publish
-> created again. Do a rollback test on a test network before you use this
-> rollback.
+> **CAUTION:** The sandbox test `TestCantonWatcherUpgradeWindow` shows that
+> the retiring core can publish on an emitter that the current core wrote
+> last. The two versions in that test have the same code. Do a rollback test
+> on a test network before you use this rollback.
 
 ---
 
