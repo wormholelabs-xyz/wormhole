@@ -65,6 +65,8 @@ type CantonMessageEvent struct {
 	UpdateID UpdateID
 	// EffectiveAt is the transaction's ledger effective time.
 	EffectiveAt time.Time
+	// RecordTime is the sequencer-assigned record time; zero if the participant omitted it.
+	RecordTime time.Time
 	// Message is the decoded Wormhole message.
 	Message CantonMessage
 }
@@ -75,6 +77,7 @@ type CantonTransaction struct {
 	ParticipantOffset int64
 	UpdateID          UpdateID
 	EffectiveAt       time.Time
+	RecordTime        time.Time
 	Messages          []CantonMessage
 }
 

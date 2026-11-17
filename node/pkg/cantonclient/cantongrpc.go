@@ -155,6 +155,7 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 					ParticipantOffset: tx.GetOffset(),
 					UpdateID:          updateID,
 					EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+					RecordTime:        protoTime(tx.GetRecordTime()),
 					Message:           msg,
 				}:
 				}
@@ -189,6 +190,7 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 		ParticipantOffset: tx.GetOffset(),
 		UpdateID:          returnedUpdateID,
 		EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+		RecordTime:        protoTime(tx.GetRecordTime()),
 		Messages:          messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger),
 	}, nil
 }

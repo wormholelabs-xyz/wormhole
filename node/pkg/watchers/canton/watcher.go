@@ -358,6 +358,7 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 			ParticipantOffset: txn.ParticipantOffset,
 			UpdateID:          txn.UpdateID,
 			EffectiveAt:       txn.EffectiveAt,
+			RecordTime:        txn.RecordTime,
 			Message:           msg,
 		}, true)
 	}
