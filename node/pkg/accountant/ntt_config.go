@@ -61,57 +61,9 @@ func nttGetEmitters(env common.Environment) (validEmitters, validEmitters, error
 		arEmitterConfig = sdk.KnownDevnetAutomaticRelayerEmitters
 	}
 
-	cantonEmitters := cantonNttTransceiverEmitters(env)
-	if err := checkEmittersAreOnCanton(cantonEmitters); err != nil {
-		return nil, nil, err
-	}
-	directEmitterConfig = append(directEmitterConfig, cantonEmitters...)
-
-	return nttParseEmitters(directEmitterConfig, arEmitterConfig)
-}
-
-// cantonNttTransceiverEmitters returns the Canton NTT transceiver emitters monitored in env.
-// Derive each address with canton.NttTransceiverEmitterAddress (pkg/watchers/canton); procedure in canton/ACCOUNTANT.md.
-// Add an entry only after the deployment's hub and peer registrations exist on the NTT accountant.
-func cantonNttTransceiverEmitters(env common.Environment) emitterConfig {
-	switch env {
-	case common.MainNet:
-		return emitterConfig{}
-	case common.TestNet:
-		return emitterConfig{}
-	default:
-		return emitterConfig{}
-	}
-}
-
-// checkEmittersAreOnCanton rejects a Canton emitter list that contains an entry for another chain.
-func checkEmittersAreOnCanton(cantonEmitters emitterConfig) error {
-	for _, emitter := range cantonEmitters {
-		if emitter.chainId != vaa.ChainIDCanton {
-			return fmt.Errorf(`canton NTT emitter "%s" has chain %s, want %s`, emitter.addr, emitter.chainId.String(), vaa.ChainIDCanton.String())
-		}
-	}
-	return nil
-}
-
-// nttEmitterAddressHexLen is the length of a 32-byte emitter address in hex without a 0x prefix.
-const nttEmitterAddressHexLen = 64
-
-// nttParseEmitters builds the direct NTT and AR emitter maps. Every direct emitter must be on a known chain and
-// have a full 32-byte hex address.
-func nttParseEmitters(directEmitterConfig emitterConfig, arEmitterConfig []struct {
-	ChainId vaa.ChainID
-	Addr    string
-}) (validEmitters, validEmitters, error) {
 	// Build the direct emitter map, setting the payload based on whether or not the config says it should be log only.
 	directEmitters := make(validEmitters)
 	for _, emitter := range directEmitterConfig {
-		if _, err := vaa.KnownChainIDFromNumber(uint16(emitter.chainId)); err != nil {
-			return nil, nil, fmt.Errorf(`direct emitter "%s" is on an unknown chain: %w`, emitter.addr, err)
-		}
-		if len(emitter.addr) != nttEmitterAddressHexLen {
-			return nil, nil, fmt.Errorf(`direct emitter address "%s" has %d hex characters, want %d`, emitter.addr, len(emitter.addr), nttEmitterAddressHexLen)
-		}
 		addr, err := vaa.StringToAddress(emitter.addr)
 		if err != nil {
 			return nil, nil, fmt.Errorf(`failed to parse direct emitter address "%s": %w`, emitter.addr, err)
