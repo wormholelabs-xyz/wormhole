@@ -971,8 +971,9 @@ type WatcherConfig struct {
     NetworkID   watchers.NetworkID
     ChainID     vaa.ChainID        // ChainIDCanton
     Rpc         string             // host:port of the Ledger API
-    PackageID   string             // package-id of wormhole-core; required outside unsafe dev mode
-    ReadAsParty string             // guardianGovernance party; required outside unsafe dev mode
+    PackageID     string           // package-id of wormhole-core; required outside unsafe dev mode
+    PackageIDNext string           // second accepted core package-id for an upgrade window (§7.5)
+    ReadAsParty   string           // guardianGovernance party; required outside unsafe dev mode
 }
 ```
 
@@ -982,7 +983,8 @@ Wired into the guardian via
 `--cantonReadAsParty` populates `ReadAsParty`. `WatcherConfig.Create` requires
 `--cantonPackageID` and `--cantonReadAsParty` outside `--unsafeDevMode`. Set
 `--cantonReadAsParty` to the `guardianGovernance` party (§4.1, §7.1). Devnet runs
-in unsafe dev mode and leaves both empty (wildcard).
+in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageIDNext`
+populates `PackageIDNext` (§7.5).
 
 ---
 
@@ -1237,8 +1239,8 @@ Consequences for a watcher pinned to one package id:
 **Dropped-message metric.** The watcher counts each dropped `PublishMessage`
 in `wormhole_canton_unpinned_publish_messages_total`. The
 `executing_package_id` label holds the package id of the event. Each drop also
-writes a WARN log with the update id, the executing package id, and the pinned
-package id. The watcher still drops the message. Thus the pin stays a security
+writes a WARN log with the update id, the executing package id, and the accepted
+package ids. The watcher still drops the message. Thus the pin stays a security
 boundary.
 
 The counter labels a maximum of 8 package ids. Other package ids use the label
@@ -1285,10 +1287,89 @@ submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
   contract too. Before step 8, make sure on a test network that contracts that
   0.6.0 created still work under 0.7.0 after the unvet. These contracts are
   `CoreState`, `EmitterRegistry`, `Emitter`, and the replay contracts.
-- Proposed watcher change, not implemented: accept a set of package ids during
-  the migration window. Each guardian accepts 0.6.0 and 0.7.0 before step 1,
-  and removes 0.6.0 after step 8. No message is then lost, and no coordinated
-  restart is necessary. 0.6.0 messages keep the 0.6.0 checks until step 8.
+- The two-package window below replaces this procedure if the owner approves
+  proposal U3.
+
+#### Upgrade with a two-package window (proposal U3)
+
+> **NOTE:** This is a proposal for an owner decision. Compare it with the
+> single-pin procedure above.
+
+The watcher accepts a maximum of two core package ids. `--cantonPackageID` is
+the primary id. `--cantonPackageIDNext` is the next id. It is empty outside an
+upgrade window.
+
+The watcher applies these rules:
+
+- Each id has exactly 64 lowercase hex characters.
+- The next id is different from the primary id.
+- The next id needs a primary id, also in unsafe dev mode.
+- Outside unsafe dev mode, the primary id is mandatory.
+- The watcher emits each `PublishMessage` that a package in the set executes.
+- The watcher drops each other `PublishMessage` on the core template. The
+  dropped-message metric counts it.
+- Reobservation uses the same set of package ids.
+- The heartbeat contract address shows the primary id only.
+
+Two flags give each id one role. Thus a third id has no flag, and a list
+parser is not necessary. To promote the next id, move one value to the other
+flag.
+
+> **WARNING:** Set the next id only to a core version that the guardians
+> approved. The watcher signs each message that a package in the set executes.
+
+**Procedure: upgrade from 0.6.0 to 0.7.0 with a two-package window.**
+
+1. On each guardian, set `--cantonPackageIDNext` to the 0.7.0 package id.
+2. Restart the guardians one at a time. Coordination is not necessary.
+3. Make sure that the startup log of each guardian shows both ids in
+   `acceptedPackageIDs`.
+4. Upload the 0.7.0 core DAR and its dependent DARs to all guardian
+   participants.
+5. Vet these DARs on all guardian participants.
+6. Upload and vet the same DARs on the operator participant.
+7. Tell integrators to submit with the 0.7.0 package id.
+8. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
+   pinned to the 0.7.0 package id only.
+9. Continue when the counter shows zero new 0.6.0 publishes.
+10. Unvet the 0.6.0 core DAR and its dependent DARs on all participants in
+    one planned window.
+11. On each guardian, set `--cantonPackageID` to the 0.7.0 package id.
+12. On each guardian, remove `--cantonPackageIDNext`.
+13. Restart the guardians one at a time. Coordination is not necessary.
+
+> **WARNING:** Do not remove the 0.6.0 id before step 10 is complete on all
+> participants. Each 0.6.0 message from that period is then lost.
+
+> **CAUTION:** Until step 10, the guardians sign 0.6.0 messages. The 0.6.0
+> checks apply to these messages. If 0.7.0 corrects a 0.6.0 security defect,
+> do step 10 soon after step 7.
+
+> **NOTE:** Step 1 comes before step 4. Thus no guardian drops a 0.7.0
+> message. An id that no participant vets cannot execute a choice.
+
+> **NOTE:** A restarted guardian does not see the messages of its restart
+> period. The other guardians keep the quorum. Reobservation by update id
+> recovers these messages for the restarted guardian.
+
+This procedure removes these blockers of the single-pin procedure:
+
+- **Late-message period.** The single-pin procedure loses each 0.6.0 message
+  between its steps 6 and 8. Here the guardians remove the 0.6.0 id after the
+  unvet. Thus no 0.6.0 message can occur after the removal.
+- **Signing outage.** The single-pin procedure drops each 0.7.0 message
+  until the coordinated switch. Here each guardian signs both versions during
+  the window.
+- **Coordinated restart.** Each flag change here is a rolling restart. Only
+  the unvet in step 10 needs a planned window.
+
+These items stay:
+
+- The 0.6.0 checks apply to 0.6.0 messages until the unvet in step 10.
+- To roll back before step 10, tell integrators to use 0.6.0 again.
+- To roll back after step 10, vet 0.6.0 again. Keep the 0.6.0 id in the set,
+  or set it again as the next id. Remove it only after a new unvet.
+- The open item about contracts that 0.6.0 created stays open.
 
 ---
 
