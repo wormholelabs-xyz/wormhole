@@ -152,6 +152,7 @@ expect_not_vetted_rejection() {
       exit 1
     fi
   done
+  grep -oE 'Participant PAR::[^ ]+ has not vetted [0-9a-f]+' "$output_prefix.err" | sort -u | sed 's/^/  /'
   echo "PASS: rejected; not vetted on: $missing_validators"
 }
 
