@@ -152,6 +152,22 @@ check_case "contracts file unchanged after invalid JSON" 0 '{"burnMint":{"user":
   jq -cS . "$NTT_CONTRACTS"
 check_case "no temporary contracts file stays" 0 "ntt-contracts.json" - ls "$work_dir/contracts"
 
+readonly REJECTED_REPLAY_RESPONSE=$'{"code": "DAML_FAILURE", "cause": "... digest already consumed ..."}\n400'
+readonly REJECTED_QUORUM_RESPONSE=$'{"code": "DAML_FAILURE", "cause": "no quorum"}\n400'
+readonly ACCEPTED_RESPONSE=$'{"transaction": {"updateId": "1220ab"}}\n200'
+check_case "classify_submit_response with the expected rejection" 0 - - \
+  classify_submit_response "$REJECTED_REPLAY_RESPONSE" "digest already consumed"
+check_case "classify_submit_response with another rejection" 1 - "lacks 'digest already consumed'" \
+  classify_submit_response "$REJECTED_QUORUM_RESPONSE" "digest already consumed"
+check_case "classify_submit_response with an accepted command" 1 - "was accepted" \
+  classify_submit_response "$ACCEPTED_RESPONSE" "digest already consumed"
+check_case "classify_submit_response with an empty body" 1 - "lacks" \
+  classify_submit_response $'\n500' "digest already consumed"
+check_case "classify_submit_response with no status line" 1 - "HTTP status" \
+  classify_submit_response "digest already consumed" "digest already consumed"
+check_case "classify_submit_response with an empty expected text" 1 - "expected text" \
+  classify_submit_response "$REJECTED_REPLAY_RESPONSE" ""
+
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
 readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
