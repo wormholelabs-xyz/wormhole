@@ -1,11 +1,10 @@
 //go:build localnet
 
-// LocalNet harness for the Canton watcher. It builds the watcher with WatcherConfig.Create in the TestNet
-// environment, so the mandatory package-id and read-as-party checks run, and supervises the returned
-// Runnable against a Splice LocalNet participant. The Ledger API user of the token holds only
-// CanReadAs(guardianGovernance) (canton/localnet/watcher_harness_lib.sh creates it). LocalNet serves
-// plaintext gRPC with a static HS256 JWT; the harness supplies that transport through
-// WatcherConfig.ledgerTransportForTest, which only package tests can set.
+// LocalNet harness for the Canton watcher. It builds the watcher with WatcherConfig.buildWatcher in the TestNet
+// environment, so the checks of Create run, and supervises Watcher.Run against a Splice LocalNet participant.
+// The Ledger API user of the token holds only CanReadAs(guardianGovernance) (canton/localnet/watcher_harness_lib.sh
+// creates it). LocalNet serves plaintext gRPC with a static HS256 JWT; the harness injects a client with that
+// transport through Watcher.cantonClient.
 //
 //	CANTON_LOCALNET_GRPC=localhost:3901 CANTON_LOCALNET_TOKEN_FILE=<jwt> \
 //	CANTON_LOCALNET_READ_AS_PARTY=<guardianGovernance> CANTON_LOCALNET_CORE_PACKAGE_ID=<core package id> \
@@ -120,16 +119,20 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 		PackageID:      corePackageID,
 		PackageVersion: corePackageVersion,
 		ReadAsParty:    readAsParty,
-		ledgerTransportForTest: &ledgerTransportOverride{
-			transportCreds: insecure.NewCredentials(),
-			dialOpts:       []grpc.DialOption{grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))})},
-		},
 	}
 	checkCreateRejectsAnUnpinnedConfig(t, watcherConfig, msgC, obsvReqC)
-	runWatcher, reobserver, err := watcherConfig.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
+	productionRunnable, reobserver, err := watcherConfig.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
 	require.NoError(t, err)
-	require.NotNil(t, runWatcher)
+	require.NotNil(t, productionRunnable)
 	require.Nil(t, reobserver)
+	watcher, err := watcherConfig.buildWatcher(cantonclient.DefaultApprovedCorePackages(), msgC, obsvReqC, common.TestNet)
+	require.NoError(t, err)
+	localNetClient, err := cantonclient.NewCantonGrpcClient(rpcAddress, readAsParty, logger, insecure.NewCredentials(),
+		grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))}))
+	require.NoError(t, err)
+	defer localNetClient.Close()
+	watcher.cantonClient = localNetClient
+	runWatcher := watcher.Run
 
 	supervisor.New(rootCtx, logger, func(ctx context.Context) error {
 		if err := supervisor.Run(ctx, "canton", runWatcher); err != nil {

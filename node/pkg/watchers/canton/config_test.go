@@ -2,6 +2,8 @@ package canton
 
 import (
 	"context"
+	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -62,7 +64,6 @@ func testApprovedCorePackages(t *testing.T) *cantonclient.ApprovedCorePackages {
 func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty string, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		approvedCorePackages:         testApprovedCorePackages(t),
 		NetworkID:                    "canton",
 		ChainID:                      vaa.ChainIDCanton,
 		Rpc:                          "canton:6865",
@@ -73,10 +74,10 @@ func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty st
 		RetiringPackageVersion:       flags.retiringPackageVersion,
 		ReadAsParty:                  readAsParty,
 	}
-	_, _, err := wc.Create(
+	_, err := wc.buildWatcher(
+		*testApprovedCorePackages(t),
 		make(chan *common.MessagePublication, 1),
 		make(chan *gossipv1.ObservationRequest, 1),
-		nil, nil, nil,
 		env,
 	)
 	return err
@@ -207,19 +208,18 @@ func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
 func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		approvedCorePackages: testApprovedCorePackages(t),
-		NetworkID:            "canton",
-		ChainID:              vaa.ChainIDCanton,
-		Rpc:                  "canton:6865",
-		PackageID:            testCurrentPackageID,
-		PackageVersion:       testCurrentPackageVersion,
-		ReadAsParty:          testGovernanceParty,
-		Auth:                 auth,
+		NetworkID:      "canton",
+		ChainID:        vaa.ChainIDCanton,
+		Rpc:            "canton:6865",
+		PackageID:      testCurrentPackageID,
+		PackageVersion: testCurrentPackageVersion,
+		ReadAsParty:    testGovernanceParty,
+		Auth:           auth,
 	}
-	_, _, err := wc.Create(
+	_, err := wc.buildWatcher(
+		*testApprovedCorePackages(t),
 		make(chan *common.MessagePublication, 1),
 		make(chan *gossipv1.ObservationRequest, 1),
-		nil, nil, nil,
 		env,
 	)
 	return err
@@ -263,7 +263,53 @@ func TestWatcherConfigFieldsAreExactlyTheFlagFields(t *testing.T) {
 	for fieldIndex := 0; fieldIndex < configType.NumField(); fieldIndex++ {
 		fieldNames = append(fieldNames, configType.Field(fieldIndex).Name)
 	}
-	require.ElementsMatch(t, []string{"NetworkID", "ChainID", "Rpc", "PackageID", "ReadAsParty", "Auth"}, fieldNames)
+	require.ElementsMatch(t, []string{
+		"NetworkID", "ChainID", "Rpc", "PackageID", "RetiringPackageID", "RetiringPackageAcceptedUntil",
+		"PackageVersion", "RetiringPackageVersion", "ReadAsParty", "Auth",
+	}, fieldNames)
+}
+
+// TestCreateChecksTheCompiledApprovedList: Create approves only the ids in approved_core_packages.json.
+func TestCreateChecksTheCompiledApprovedList(t *testing.T) {
+	approvedListJSON, err := os.ReadFile("../../cantonclient/approved_core_packages.json")
+	require.NoError(t, err)
+	var compiledApprovedPackages []struct {
+		PackageID string `json:"packageId"`
+		Version   string `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(approvedListJSON, &compiledApprovedPackages))
+	require.NotEmpty(t, compiledApprovedPackages)
+	testCases := []struct {
+		name                 string
+		packageID            string
+		packageVersion       string
+		expectedErrorMessage string
+	}{
+		{name: "compiled id at its version", packageID: compiledApprovedPackages[0].PackageID, packageVersion: compiledApprovedPackages[0].Version},
+		{name: "test id outside the compiled list", packageID: testCurrentPackageID, packageVersion: testCurrentPackageVersion, expectedErrorMessage: "not in the approved"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			watcherConfig := &WatcherConfig{
+				NetworkID:      "canton",
+				ChainID:        vaa.ChainIDCanton,
+				Rpc:            "canton:6865",
+				PackageID:      testCase.packageID,
+				PackageVersion: testCase.packageVersion,
+				ReadAsParty:    testGovernanceParty,
+			}
+			runnable, reobserver, err := watcherConfig.Create(make(chan *common.MessagePublication, 1),
+				make(chan *gossipv1.ObservationRequest, 1), nil, nil, nil, common.MainNet)
+			require.Nil(t, reobserver)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, runnable)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, runnable)
+		})
+	}
 }
 
 func TestBuildWatcherSelectsTransportByEnvironment(t *testing.T) {
@@ -285,14 +331,15 @@ func TestBuildWatcherSelectsTransportByEnvironment(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			watcherConfig := &WatcherConfig{
-				NetworkID:   "canton",
-				ChainID:     vaa.ChainIDCanton,
-				Rpc:         "canton:6865",
-				PackageID:   testCorePackageID,
-				ReadAsParty: testGovernanceParty,
-				Auth:        testCase.auth,
+				NetworkID:      "canton",
+				ChainID:        vaa.ChainIDCanton,
+				Rpc:            "canton:6865",
+				PackageID:      testCurrentPackageID,
+				PackageVersion: testCurrentPackageVersion,
+				ReadAsParty:    testGovernanceParty,
+				Auth:           testCase.auth,
 			}
-			watcher, err := watcherConfig.buildWatcher(make(chan *common.MessagePublication, 1),
+			watcher, err := watcherConfig.buildWatcher(*testApprovedCorePackages(t), make(chan *common.MessagePublication, 1),
 				make(chan *gossipv1.ObservationRequest, 1), testCase.environment)
 			if testCase.expectedErrorMessage != "" {
 				require.ErrorContains(t, err, testCase.expectedErrorMessage)
@@ -306,7 +353,9 @@ func TestBuildWatcherSelectsTransportByEnvironment(t *testing.T) {
 				require.Nil(t, watcher.cantonTransportCreds())
 			}
 			require.Len(t, watcher.cantonDialOpts(context.Background()), testCase.expectedDialOptionCount)
-			require.Equal(t, testCorePackageID, watcher.packageID.String())
+			currentPackageID, isPinned := watcher.acceptedPackageIDs.CurrentPackageID()
+			require.True(t, isPinned)
+			require.Equal(t, testCurrentPackageID, currentPackageID.String())
 		})
 	}
 }

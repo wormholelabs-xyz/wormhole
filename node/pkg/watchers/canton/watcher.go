@@ -108,9 +108,6 @@ func (a AuthConfig) complete() bool {
 // participant serves plaintext; everything else is TLS (nil defers to
 // cantonclient's TLS default).
 func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
-	if e.transportCredsOverride != nil {
-		return e.transportCredsOverride
-	}
 	if e.unsafeDevMode {
 		return insecure.NewCredentials()
 	}
@@ -168,10 +165,6 @@ type Watcher struct {
 	// extraLedgerDialOpts are passed to the gRPC client Run creates. Integration
 	// tests set a stream interceptor here to observe the production client.
 	extraLedgerDialOpts []grpc.DialOption
-
-	// transportCredsOverride replaces the transport that unsafeDevMode selects. Set only through
-	// WatcherConfig.ledgerTransportForTest.
-	transportCredsOverride credentials.TransportCredentials
 }
 
 var (

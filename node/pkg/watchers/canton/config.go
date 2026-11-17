@@ -12,8 +12,6 @@ import (
 	"github.com/certusone/wormhole/node/pkg/watchers"
 	"github.com/certusone/wormhole/node/pkg/watchers/interfaces"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 )
 
 type WatcherConfig struct {
@@ -44,22 +42,11 @@ type WatcherConfig struct {
 	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
 	// party on the participant.
 	ReadAsParty string
-	// approvedCorePackages overrides cantonclient.DefaultApprovedCorePackages in tests.
-	approvedCorePackages *cantonclient.ApprovedCorePackages
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
 	// All three fields set enables per-RPC bearer tokens; all empty disables
 	// authentication; anything else is a configuration error. Requires TLS,
 	// so it is incompatible with unsafe dev mode (plaintext).
 	Auth AuthConfig
-
-	// ledgerTransportForTest replaces the TLS transport and adds dial options. Set only by package tests.
-	ledgerTransportForTest *ledgerTransportOverride
-}
-
-// ledgerTransportOverride connects to a plaintext test participant, for example Splice LocalNet with a static JWT.
-type ledgerTransportOverride struct {
-	transportCreds credentials.TransportCredentials
-	dialOpts       []grpc.DialOption
 }
 
 func (wc *WatcherConfig) GetNetworkID() watchers.NetworkID {
@@ -78,6 +65,21 @@ func (wc *WatcherConfig) Create(
 	_ chan<- *common.GuardianSet,
 	env common.Environment,
 ) (supervisor.Runnable, interfaces.Reobserver, error) {
+	watcher, err := wc.buildWatcher(cantonclient.DefaultApprovedCorePackages(), msgC, obsvReqC, env)
+	if err != nil {
+		return nil, nil, err
+	}
+	return watcher.Run, nil, nil
+}
+
+// buildWatcher runs the checks of Create and returns the Watcher. Package tests call it to inject a client or an
+// approved list.
+func (wc *WatcherConfig) buildWatcher(
+	approvedCorePackages cantonclient.ApprovedCorePackages,
+	msgC chan<- *common.MessagePublication,
+	obsvReqC <-chan *gossipv1.ObservationRequest,
+	env common.Environment,
+) (*Watcher, error) {
 	devMode := (env == common.UnsafeDevNet)
 
 	// Outside unsafe dev mode the package id MUST be pinned. With an empty
@@ -86,30 +88,26 @@ func (wc *WatcherConfig) Create(
 	// and have forged messages observed and signed. Pinning the core bridge's
 	// package id closes that spoofing surface.
 	if !devMode && wc.PackageID == "" {
-		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
+		return nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
 	}
 	if !devMode && wc.PackageID != "" && wc.PackageVersion == "" {
-		return nil, nil, fmt.Errorf("canton: PackageVersion must be set with PackageID outside unsafe dev mode")
+		return nil, fmt.Errorf("canton: PackageVersion must be set with PackageID outside unsafe dev mode")
 	}
 	if !devMode && wc.RetiringPackageID != "" && wc.RetiringPackageVersion == "" {
-		return nil, nil, fmt.Errorf("canton: RetiringPackageVersion must be set with RetiringPackageID outside unsafe dev mode")
+		return nil, fmt.Errorf("canton: RetiringPackageVersion must be set with RetiringPackageID outside unsafe dev mode")
 	}
 	acceptedPackageIDs, err := wc.acceptedPackageIDs(time.Now())
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	// Redundant with the PackageID check above.
 	if !devMode && acceptedPackageIDs.MatchesAnyPackage() {
-		return nil, nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
-	}
-	approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
-	if wc.approvedCorePackages != nil {
-		approvedCorePackages = *wc.approvedCorePackages
+		return nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
 	}
 	// SECURITY: outside unsafe dev mode only reviewed core releases can be pinned.
 	if !devMode {
 		if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
-			return nil, nil, fmt.Errorf("canton: %w", err)
+			return nil, fmt.Errorf("canton: %w", err)
 		}
 	}
 
@@ -119,20 +117,20 @@ func (wc *WatcherConfig) Create(
 	// CoreState reach the watcher. A wildcard stream would also carry publishes
 	// witnessed by any other party hosted on the participant.
 	if !devMode && wc.ReadAsParty == "" {
-		return nil, nil, fmt.Errorf("canton: ReadAsParty must be set to the guardianGovernance party outside unsafe dev mode")
+		return nil, fmt.Errorf("canton: ReadAsParty must be set to the guardianGovernance party outside unsafe dev mode")
 	}
 
 	// OAuth is all-or-nothing: a partial config would silently dial without
 	// credentials (or with an unusable token source) and fail at runtime.
 	if wc.Auth.enabled() && !wc.Auth.complete() {
-		return nil, nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
+		return nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
 	}
 	// Bearer credentials require transport security; dev mode is plaintext.
 	if wc.Auth.enabled() && devMode {
-		return nil, nil, fmt.Errorf("canton: OAuth auth requires TLS and cannot be used in unsafe dev mode")
+		return nil, fmt.Errorf("canton: OAuth auth requires TLS and cannot be used in unsafe dev mode")
 	}
 
-	watcher, err := newWatcherWithApprovedList(
+	return newWatcherWithApprovedList(
 		approvedCorePackages,
 		wc.Rpc,
 		acceptedPackageIDs,
@@ -142,16 +140,6 @@ func (wc *WatcherConfig) Create(
 		msgC,
 		obsvReqC,
 	)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	if wc.ledgerTransportForTest != nil {
-		watcher.transportCredsOverride = wc.ledgerTransportForTest.transportCreds
-		watcher.extraLedgerDialOpts = wc.ledgerTransportForTest.dialOpts
-	}
-
-	return watcher.Run, nil, nil
 }
 
 // acceptedPackageIDs is the dev-mode wildcard when every package flag is
