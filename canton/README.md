@@ -873,7 +873,7 @@ Encoding:
   `0x12 0x20`. This length is in the `MessagePublication` bounds (32 to 255
   bytes). A compile-time assertion in the watcher checks this.
 - `TxIDString()` is `0x` followed by the update id. An operator can give the
-  update id directly to `guardiand admin send-observation-request 74 <update id>`.
+  update id directly to `guardiand admin send-observation-request 75 <update id>`.
 - `cantonclient.ParseUpdateID` and `cantonclient.UpdateIDFromTxID` reject all
   other forms: a different length, uppercase hex, or a different multihash
   header. A stream transaction with Wormhole messages and a malformed update id
