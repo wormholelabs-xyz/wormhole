@@ -77,6 +77,13 @@ func deriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.
 	return a
 }
 
+// NttTransceiverEmitterAddress returns the Wormhole emitter address of a Canton NTT deployment's
+// transceiver Emitter: registrar = core operator, owner = guardianGovernance, emitterID =
+// NttManager.transceiverEmitterId. This is the value for the NTT accountant config and for peer registration.
+func NttTransceiverEmitterAddress(operator string, guardianGovernance string, transceiverEmitterID uint64) vaa.Address {
+	return deriveEmitterAddress(operator, guardianGovernance, transceiverEmitterID)
+}
+
 // AuthConfig carries OAuth2 client-credentials parameters for a
 // Keycloak-fronted Ledger API. All fields set enables per-RPC bearer tokens;
 // all empty disables authentication. Partial configs are rejected by
