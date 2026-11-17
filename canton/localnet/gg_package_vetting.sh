@@ -120,11 +120,12 @@ v2_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator
 v1_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7"}')"
 
 # Canton abbreviates ids in the error text: "Participant PAR::<name>::<first 12 fingerprint chars>... has not vetted <first 12 package id chars>...".
+# participant_id_of returns "<name>::<fingerprint>" without the PAR:: type prefix.
 not_vetted_error_line() {
-  local participant_id="$1" participant_prefix participant_fingerprint
-  participant_prefix="${participant_id%::*}"
+  local participant_id="${1#PAR::}" participant_name participant_fingerprint
+  participant_name="${participant_id%::*}"
   participant_fingerprint="${participant_id##*::}"
-  echo "Participant $participant_prefix::${participant_fingerprint:0:12}... has not vetted ${v2_package_id:0:12}"
+  echo "Participant PAR::$participant_name::${participant_fingerprint:0:12}... has not vetted ${v2_package_id:0:12}"
 }
 
 # expect_not_vetted_rejection <output-prefix> <validators that vet 2.0.0> <validators that do not>
