@@ -237,8 +237,10 @@ Use option 3 only if a guardian ceremony for the registry is not possible.
   `TestMaxEmitterIDMatchesDaml` pins it to `maxEmitterId`.
 - `Test.TestCore:setup` creates `CoreState` and `EmitterRegistry` in one transaction.
   The operator and `guardianGovernance` sign that transaction.
-- `canton/devnet/genesis_guardian_governance.sh` puts both create commands in one prepared transaction.
-  The guardian owners sign it with the threshold.
+- `canton/devnet/genesis_guardian_governance.sh` prepares each create command as its own transaction, `CoreState` first.
+  The guardian owners sign each one with the threshold.
+  The script stops before the `EmitterRegistry` create when `CoreState` is not committed.
+  It skips a create whose contract is already active for the pair, so a rerun creates only the missing contract.
 - The NTT package code does not change.
   The NTT tests change (refer to [NTT](#ntt)).
 
@@ -341,6 +343,7 @@ No message id of 0.8.0 can then be equal to a message id of an earlier deploymen
    Do not vet an earlier `wormhole-core` version on a guardian participant.
 5. Run the genesis ceremony (`canton/devnet/genesis_guardian_governance.sh`).
    It creates `CoreState`, then an `EmitterRegistry` with `nextId = 0`, as two co-signed prepared transactions.
+   If the `CoreState` create fails, the script stops. Run it again: it creates only the missing contracts.
 6. Run the scan (refer to [Scan](#scan)) on each guardian participant.
    Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.8.0 package id.
    Each scan must pass with `firstId` 0. Stop if a scan fails.
