@@ -171,6 +171,12 @@ var (
 			Name: "wormhole_canton_accepted_package_ids",
 			Help: "Accepted wormhole-core package ids (value 1). A role=retiring series means the upgrade window is open",
 		}, []string{"role", "package_id"})
+	// Two series: role current and role retiring.
+	acceptedPublishMessages = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wormhole_canton_accepted_publish_messages_total",
+			Help: "PublishMessage exercises the watcher emitted from the stream, by the role of the executing core package id",
+		}, []string{"role"})
 	retiringPackageAcceptedUntilGauge = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "wormhole_canton_retiring_package_accepted_until_seconds",
@@ -291,6 +297,13 @@ func (e *Watcher) templateID() cantonclient.TemplateID {
 // every participant, so guardians agree on it and reobservation can look it up
 // on any participant.
 func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessageEvent, isReobservation bool) {
+	if !ev.Message.AcceptedPackageRole.IsKnown() {
+		logger.Error("dropping Canton message with an unknown accepted package role",
+			zap.Stringer("updateId", ev.UpdateID))
+		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+		return
+	}
+
 	// Both key parties must be present to derive the address; a missing one means
 	// a malformed record we must not turn into an observation.
 	if ev.Message.Registrar == "" || ev.Message.Owner == "" {
@@ -350,11 +363,14 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 	cantonMessagesConfirmed.Inc()
 	if isReobservation {
 		watchers.ReobservationsByChain.WithLabelValues("canton", "std").Inc()
+	} else {
+		acceptedPublishMessages.WithLabelValues(ev.Message.AcceptedPackageRole.String()).Inc()
 	}
 
 	logger.Info("message observed", observation.ZapFields(
 		zap.Stringer("updateId", ev.UpdateID),
-		zap.Int64("participantOffset", ev.ParticipantOffset))...)
+		zap.Int64("participantOffset", ev.ParticipantOffset),
+		zap.Stringer("acceptedPackageRole", ev.Message.AcceptedPackageRole))...)
 }
 
 // handleReobservation fetches the transaction whose update id the

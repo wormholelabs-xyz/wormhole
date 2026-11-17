@@ -216,7 +216,8 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 			continue
 		}
 		executingPackageID := ex.GetTemplateId().GetPackageId()
-		switch tmpl.AcceptedPackageIDs.VerdictForPublish(executingPackageID, protoTime(tx.GetRecordTime())) {
+		verdict := tmpl.AcceptedPackageIDs.VerdictForPublish(executingPackageID, protoTime(tx.GetRecordTime()))
+		switch verdict {
 		case PublishPackageVerdictAcceptedCurrent, PublishPackageVerdictAcceptedRetiring:
 		case PublishPackageVerdictRejectedRetiringAfterDeadline:
 			recordRetiringPackagePublishAfterDeadline(tx.GetUpdateId(), executingPackageID, protoTime(tx.GetRecordTime()), logger)
@@ -242,6 +243,11 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 			}
 			continue
 		}
+		acceptedPackageRole, isAccepted := verdict.AcceptedRole()
+		if !isAccepted {
+			panic("canton: rejected publish verdict reached decoding")
+		}
+		msg.AcceptedPackageRole = acceptedPackageRole
 		out = append(out, msg)
 	}
 	return out

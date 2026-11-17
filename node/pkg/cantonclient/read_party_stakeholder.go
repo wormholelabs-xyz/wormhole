@@ -70,7 +70,7 @@ func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEven
 	if !templateNameMatches(created.GetTemplateId(), tmpl) {
 		return false
 	}
-	if !tmpl.AcceptedPackageIDs.VerdictForPublish(created.GetTemplateId().GetPackageId(), recordTime).IsAccepted() {
+	if _, isAccepted := tmpl.AcceptedPackageIDs.VerdictForPublish(created.GetTemplateId().GetPackageId(), recordTime).AcceptedRole(); !isAccepted {
 		return false
 	}
 	return slices.Contains(created.GetSignatories(), readAsParty)

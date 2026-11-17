@@ -52,6 +52,8 @@ type CantonMessage struct {
 	ConsistencyLevel uint8
 	// Payload is the raw message payload.
 	Payload []byte
+	// AcceptedPackageRole is the role of the package id that executed the publish.
+	AcceptedPackageRole AcceptedPackageRole
 }
 
 // CantonMessageEvent pairs a decoded message with the metadata of the

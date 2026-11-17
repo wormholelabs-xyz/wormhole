@@ -167,7 +167,7 @@ func TestMessagesFromTxSetsAcceptedPackageRole(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(tc.executingPackageID, 4)}}, sampleEffectiveAt, testRetiringDeadline.Add(-time.Second))
 
-			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", zap.NewNop())
+			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", governanceParty, zap.NewNop())
 
 			require.Len(t, messages, 1)
 			assert.Equal(t, tc.wantRole, messages[0].AcceptedPackageRole)

@@ -122,8 +122,40 @@ const (
 	PublishPackageVerdictRejectedMissingRecordTime
 )
 
-func (verdict PublishPackageVerdict) IsAccepted() bool {
-	return verdict == PublishPackageVerdictAcceptedCurrent || verdict == PublishPackageVerdictAcceptedRetiring
+// AcceptedPackageRole is the role of the package id that executed an accepted publish.
+type AcceptedPackageRole int
+
+const (
+	AcceptedPackageRoleCurrent AcceptedPackageRole = iota + 1
+	AcceptedPackageRoleRetiring
+)
+
+// String is the metric label: "current", "retiring", or "unknown".
+func (role AcceptedPackageRole) String() string {
+	switch role {
+	case AcceptedPackageRoleCurrent:
+		return "current"
+	case AcceptedPackageRoleRetiring:
+		return "retiring"
+	default:
+		return "unknown"
+	}
+}
+
+func (role AcceptedPackageRole) IsKnown() bool {
+	return role == AcceptedPackageRoleCurrent || role == AcceptedPackageRoleRetiring
+}
+
+// AcceptedRole is the role of an accepted verdict; false for a rejection.
+func (verdict PublishPackageVerdict) AcceptedRole() (AcceptedPackageRole, bool) {
+	switch verdict {
+	case PublishPackageVerdictAcceptedCurrent:
+		return AcceptedPackageRoleCurrent, true
+	case PublishPackageVerdictAcceptedRetiring:
+		return AcceptedPackageRoleRetiring, true
+	default:
+		return 0, false
+	}
 }
 
 // ParseAcceptedPackageIDs requires a current id. retiring is empty outside an
