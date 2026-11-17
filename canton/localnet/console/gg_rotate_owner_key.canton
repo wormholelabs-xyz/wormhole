@@ -94,7 +94,7 @@ def currentSerials(): Seq[(String, PositiveInt)] =
   rotationPartyIds.map(party => partyName(party) -> currentPartyToParticipant(party).context.serial) :+
     (namespaceRotationTargetName -> currentDecentralizedNamespace().context.serial)
 
-// Safety stop, before any signer call or change. party_to_participant_mappings.list has no result limit parameter.
+// Safety stop, before any signer call or change.
 checkRotationSafetyStop(currentDecentralizedNamespace().item.owners.forgetNE.map(_.fingerprint),
   participant.topology.party_to_participant_mappings.list(synchronizerTopologyStore).map(_.item)
     .filter(_.partyId.namespace == guardianGovernancePartyId.namespace),
@@ -132,7 +132,7 @@ def checkStored(storedTransactions: Seq[GenericSignedTopologyTransaction]): Unit
   checkStoredRotationTransactions(storedTransactions, rotationPartyIds, guardianGovernancePartyId.namespace, newOwnerSet,
     newSigningFingerprints, addedOwner.publicKey)
 
-// Sign phase. Nothing is loaded before each change has its signatures.
+// Sign phase: each change gets its signatures before the first load.
 val signedTransactions: Seq[GenericSignedTopologyTransaction] = rotationMode match {
   case "fresh" =>
     require(classifyRotationOutcome(targetsBefore) == RotationOutcome.NotApplied,
