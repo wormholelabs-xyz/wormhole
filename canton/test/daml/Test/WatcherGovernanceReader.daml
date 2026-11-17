@@ -1,0 +1,117 @@
+-- | Ledger fixtures for the Go watcher integration test that reads as the real
+-- @guardianGovernance@
+-- (node/pkg/watchers/canton/watcher_governance_reader_integration_test.go).
+--
+-- 'integrationGovernanceReaderSetup' runs before the watchers start; its JSON
+-- output is the @--input-file@ of 'integrationGovernanceReaderPublish', which
+-- runs after the watchers subscribe.
+module Test.WatcherGovernanceReader where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.State
+import Wormhole.Core.Setup
+import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian)
+
+-- | The real bridge: 'CoreState' co-signed by @operator@ and @guardianGovernance@.
+data RealBridge = RealBridge with
+    operator : Party
+    guardianGovernance : Party
+    coreStateCid : ContractId CoreState
+  deriving (Eq, Show)
+
+-- | Published messages. Only the trusted one is against the real 'CoreState'.
+data GovernanceReaderPublishes = GovernanceReaderPublishes with
+    trustedOwner : Party
+    trustedEmitterId : Int
+    trustedSequence : Int
+    rogueOwner : Party
+    rogueGovernance : Party
+    rogueEmitterId : Int
+    rogueShadowSequence : Int
+  deriving (Eq, Show)
+
+trustedNonce : Int
+trustedNonce = 42
+
+trustedPayload : Bytes
+trustedPayload = "11223344"
+
+rogueShadowNonce : Int
+rogueShadowNonce = 66
+
+rogueShadowPayload : Bytes
+rogueShadowPayload = "deadbeef"
+
+integrationGovernanceReaderSetup : Script RealBridge
+integrationGovernanceReaderSetup = do
+  (operator, guardianGovernance, coreStateCid) <- setup
+  pure RealBridge with operator, guardianGovernance, coreStateCid
+
+-- | In ledger order:
+--   1. A rogue-governance emitter fails to publish against the real 'CoreState'.
+--   2. It publishes against a shadow 'CoreState' co-signed by operator + rogue.
+--   3. A non-governance owner publishes through the real registry and 'CoreState'.
+integrationGovernanceReaderPublish : RealBridge -> Script GovernanceReaderPublishes
+integrationGovernanceReaderPublish bridge = do
+  let operator = bridge.operator
+  -- Registered before the rogue registry exists: 'registerEmitter' expects one.
+  trustedOwner <- allocateParty "TrustedEmitterOwner"
+  trustedEmitterCid <- registerEmitter operator trustedOwner
+
+  rogueGovernance <- allocateParty "RogueGovernance"
+  rogueOwner <- allocateParty "RogueEmitterOwner"
+  rogueRegistryCid <- submit (actAs operator <> actAs rogueGovernance) do
+    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
+  (_, rogueEmitterCid) <- submit (actAs rogueOwner <> disclose rogueRegistryDisclosure) do
+    exerciseCmd rogueRegistryCid RegisterEmitter with
+      requester = rogueOwner, payer = rogueOwner, coreStateCid = None, feeAllocation = None
+
+  realCoreStateDisclosure <- fromSome <$> queryDisclosure operator bridge.coreStateCid
+  submitMustFail (actAs rogueOwner <> disclose realCoreStateDisclosure) do
+    exerciseCmd rogueEmitterCid PublishMessage with
+      nonce = rogueShadowNonce, payload = rogueShadowPayload, consistencyLevel = 0
+      coreStateCid = bridge.coreStateCid, payer = rogueOwner, feeAllocation = None
+
+  let shadowFeeInstrument = InstrumentId with admin = rogueGovernance, id = "UNUSED"
+  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance) do
+    createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
+                 defaultGovernanceContract [devnetGuardian]
+                 shadowFeeInstrument rogueGovernance)
+  (_, rogueShadowMessage) <- publishVia operator shadowCoreStateCid rogueOwner rogueEmitterCid
+                               rogueShadowNonce rogueShadowPayload 0
+  rogueShadowMessage.owner === rogueOwner
+
+  (_, trustedMessage) <- publishVia operator bridge.coreStateCid trustedOwner trustedEmitterCid
+                           trustedNonce trustedPayload 0
+  trustedMessage.owner === trustedOwner
+  assertMsg "trusted owner must differ from guardianGovernance"
+    (trustedOwner /= bridge.guardianGovernance)
+
+  pure GovernanceReaderPublishes with
+    trustedOwner
+    trustedEmitterId = trustedMessage.emitterId
+    trustedSequence = trustedMessage.sequence
+    rogueOwner
+    rogueGovernance
+    rogueEmitterId = rogueShadowMessage.emitterId
+    rogueShadowSequence = rogueShadowMessage.sequence
+
+-- | Runs both fixtures in one script so `dpm test` covers them.
+testGovernanceReaderFixtures : Script ()
+testGovernanceReaderFixtures = do
+  bridge <- integrationGovernanceReaderSetup
+  publishes <- integrationGovernanceReaderPublish bridge
+  publishes.trustedEmitterId === 0
+  publishes.trustedSequence === 0
+  publishes.rogueEmitterId === 0
+  publishes.rogueShadowSequence === 0
+
+  [(_, trustedEmitter)] <- query @Emitter bridge.guardianGovernance
+  trustedEmitter.owner === publishes.trustedOwner
+  [(_, rogueEmitter)] <- query @Emitter publishes.rogueGovernance
+  rogueEmitter.owner === publishes.rogueOwner

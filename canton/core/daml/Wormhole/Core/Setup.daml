@@ -55,10 +55,12 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
     feeRecipient
     consumedGovernance = Set.empty
 
--- | The emitter-id registry the operator creates alongside the 'CoreState' at
--- setup (sequential ids). Carries @guardianGovernance@ (the fee-custody anchor,
--- pinned by 'RegisterEmitter', and the observer of each 'Emitter'). Pass the
--- same @guardianGovernance@ the 'CoreState' was created with.
+-- | The emitter-id registry created alongside the 'CoreState' in the genesis
+-- ceremony (sequential ids from 0). Co-signed: creation needs the @operator@
+-- and @guardianGovernance@ signatures. @guardianGovernance@ is also the
+-- fee-custody anchor pinned by 'RegisterEmitter' and the observer of each
+-- 'Emitter'. Pass the same @guardianGovernance@ the 'CoreState' was created
+-- with.
 mkInitialEmitterRegistry : Party -> Party -> Int -> EmitterRegistry
 mkInitialEmitterRegistry operator guardianGovernance registrationFee =
   EmitterRegistry with operator, guardianGovernance, registrationFee, nextId = 0

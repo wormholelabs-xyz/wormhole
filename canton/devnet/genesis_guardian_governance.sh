@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
 # Demonstrate that the guardianGovernance external party, bootstrapped by
-# setup_guardian_governance.sh, can actually co-sign a transaction: prepare a
-# `create CoreState` command (co-signed by an external `operator` party and
-# guardianGovernance, mirroring Test.TestCore:setup's
+# setup_guardian_governance.sh, can actually co-sign a transaction: prepare the
+# genesis `create CoreState` and `create EmitterRegistry` commands (both
+# co-signed by an external `operator` party and guardianGovernance, mirroring
+# Test.TestCore:setup's
 # `submit (actAs operator <> actAs guardianGovernance)` but via interactive
 # submission instead of Daml Script), have owners sign the prepared hash, and
 # execute.
@@ -26,7 +27,7 @@
 #     forge      Operator signs alone; guardianGovernance provides NO
 #                signature at all. Expected: rejected (the anti-forgery
 #                crux property -- the operator cannot fabricate the
-#                guardian-anchored CoreState).
+#                guardian-anchored CoreState or EmitterRegistry).
 #
 # Required environment:
 #   GG_ARTIFACTS_FILE       Artifacts JSON from setup_guardian_governance.sh.
@@ -92,10 +93,10 @@ sig_json() {
     '{format: "SIGNATURE_FORMAT_CONCAT", signature: $sig, signedBy: $fp, signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"}'
 }
 
-# --- Build the create-CoreState command, matching mkInitialCoreState's devnet
-# values (Test.TestCore.setup / TestCore.daml). ---
+# --- Build the genesis create commands, matching mkInitialCoreState's and
+# mkInitialEmitterRegistry's devnet values (Test.TestCore.setup). ---
 COMMAND_ID="guardian-governance-genesis-${MODE}-$$"
-CREATE_ARGS="$(jq -n \
+CORE_STATE_ARGS="$(jq -n \
   --arg operator "${OP_PARTY}" \
   --arg gg "${GG_PARTY}" \
   '{
@@ -105,9 +106,20 @@ CREATE_ARGS="$(jq -n \
     governanceChainId: "1",
     governanceContract: "0000000000000000000000000000000000000000000000000000000000000004",
     guardianSetIndex: "0",
-    guardianSets: [["0", {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"]}]],
+    guardianSets: [["0", {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"], "expirationTime": null}]],
     messageFee: "0",
+    feeInstrument: {admin: $gg, id: "UNUSED"},
+    feeRecipient: $gg,
     consumedGovernance: {"map": []}
+  }')"
+EMITTER_REGISTRY_ARGS="$(jq -n \
+  --arg operator "${OP_PARTY}" \
+  --arg gg "${GG_PARTY}" \
+  '{
+    operator: $operator,
+    guardianGovernance: $gg,
+    registrationFee: "0",
+    nextId: "0"
   }')"
 
 PREPARE_REQUEST="$(jq -n \
@@ -115,8 +127,10 @@ PREPARE_REQUEST="$(jq -n \
   --arg op "${OP_PARTY}" \
   --arg gg "${GG_PARTY}" \
   --arg synchronizerId "${LOGICAL_SYNCHRONIZER_ID}" \
-  --arg templateId "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:CoreState" \
-  --argjson createArgs "${CREATE_ARGS}" \
+  --arg coreStateTemplateId "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:CoreState" \
+  --arg emitterRegistryTemplateId "${GG_CORE_PACKAGE_ID}:Wormhole.Core.State:EmitterRegistry" \
+  --argjson coreStateArgs "${CORE_STATE_ARGS}" \
+  --argjson emitterRegistryArgs "${EMITTER_REGISTRY_ARGS}" \
   '{
     commandId: $cmdId,
     actAs: [$op, $gg],
@@ -125,10 +139,13 @@ PREPARE_REQUEST="$(jq -n \
     verboseHashing: false,
     hashingSchemeVersion: "HASHING_SCHEME_VERSION_V3",
     userId: "participant_admin",
-    commands: [ { CreateCommand: { templateId: $templateId, createArguments: $createArgs } } ]
+    commands: [
+      { CreateCommand: { templateId: $coreStateTemplateId, createArguments: $coreStateArgs } },
+      { CreateCommand: { templateId: $emitterRegistryTemplateId, createArguments: $emitterRegistryArgs } }
+    ]
   }')"
 
-echo "[genesis:${MODE}] preparing CoreState create command..." >&2
+echo "[genesis:${MODE}] preparing CoreState and EmitterRegistry create commands..." >&2
 PREPARE_RESPONSE="$(curl -sf -X POST "${BASE_URL}/v2/interactive-submission/prepare" \
   -H 'Content-Type: application/json' -d "${PREPARE_REQUEST}")"
 PREPARED_TX="$(echo "${PREPARE_RESPONSE}" | jq -r '.preparedTransaction')"

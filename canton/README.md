@@ -54,7 +54,8 @@ design:
 | Calling a method          | `CALL` to an address                        | **Exercising a choice** on a contract                                                                                                                  |
 | Identity / "address"      | 20-byte account/contract address            | **Party ID** (a string `hint::fingerprint`) and **contract IDs**                                                                                       |
 | Event log                 | `LOG`/`event` topics                        | Ledger-API **events** (`CreatedEvent`, `ExercisedEvent`) in the transaction stream                                                                     |
-| Block / height            | block number                                | **participant offset** (monotone `int64`) into the update stream                                                                                       |
+| Block / height            | block number                                | **participant offset** (monotone `int64`) into the update stream. Each participant assigns its own offsets.                                            |
+| Transaction hash          | 32-byte transaction hash                    | **update id**: a SHA2-256 multihash as lowercase hex. It is the same on every participant (§7.2).                                                      |
 | Finality                  | probabilistic (reorgs) → consistency levels | deterministic: once a transaction is committed by the sequencer/mediator it is final. No reorgs.                                                       |
 | Node API the watcher uses | JSON-RPC / `eth_getLogs`                    | **Ledger API v2** (gRPC), `UpdateService` streaming                                                                                                    |
 | Crypto available on-chain | `ecrecover`, `keccak256` precompiles        | Daml `keccak256` and `secp256k1` built-ins (see §5)                                                                                                    |
@@ -107,7 +108,7 @@ flowchart TD
 
     subgraph gd["guardiand"]
         direction TB
-        client["node/pkg/cantonclient (gRPC client)<br/>• GetLedgerEnd → readiness / height<br/>• GetUpdates (stream) → WormholeMessage events<br/>• GetUpdateByOffset → reobservation"]
+        client["node/pkg/cantonclient (gRPC client)<br/>• GetLedgerEnd → readiness / height<br/>• GetUpdates (stream) → WormholeMessage events<br/>• GetUpdateById → reobservation"]
         watcher["node/pkg/watchers/canton (Watcher)<br/>decode event → common.MessagePublication → msgC"]
         client --> watcher
     end
@@ -241,27 +242,34 @@ Mirrors `publishMessage(nonce, payload, consistencyLevel)` from
 `Implementation.sol:15` and whitepaper 0004.
 
 An integrator first registers an emitter — **directly, with no operator
-involvement**. The operator runs an `EmitterRegistry` (created at setup); the
+involvement**. The operator and `guardianGovernance` co-sign an
+`EmitterRegistry`, created with the `CoreState` in the genesis ceremony; the
 requester exercises `RegisterEmitter` on it, holding only the registry's
 disclosure (§4.7). The flexible controller brings the requester's signature;
 the operator's co-signature on the created `Emitter` is _inherited_ from the
-registry's signatory — the same authority-inheritance that powers
+registry's signatories — the same authority-inheritance that powers
 `VerifyAndConsumeVAA`. Registration is permissionless (EVM/Sui parity: anyone
 may emit); the choice is consuming, so racing registrations contend on the
 registry and the loser retries with the fresh cid:
 
 ```haskell
--- One per operator; allocates monotonically increasing emitter ids.
+-- One per (operator, guardianGovernance); allocates monotonically increasing
+-- emitter ids.
 template EmitterRegistry with
     operator           : Party
     guardianGovernance : Party    -- carried into each new Emitter
     registrationFee    : Int      -- 10^-10 feeInstrument units; 0 for free
     nextId             : Int
   where
-    signatory operator            -- id allocation stays operator-private
+    signatory operator, guardianGovernance
+                                  -- gg co-signs: the operator alone cannot reset
+                                  -- nextId (A14-3)
     -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
     --   with requester, payer : Party; coreStateCid, feeAllocation : Optional ...
-    --   controller requester, payer -- operator authority inherited; no crank
+    --   controller requester, payer -- operator + gg authority inherited; no crank
+    -- choice SetRegistrationFee : ContractId EmitterRegistry
+    --   with newRegistrationFee : Int
+    --   controller operator, guardianGovernance -- keeps nextId
 
 template Emitter
   with
@@ -281,6 +289,12 @@ template Emitter
 informee of every publish exercise (and its `WormholeMessage` result) plus the
 sequence-bumped successor `Emitter` create — for every owner, with no authority
 over the emitter (§4.1, §10).
+
+`guardianGovernance` is a signatory of the registry. Thus its hosting
+participants confirm each `RegisterEmitter`, and a registration needs the
+confirmation threshold of `guardianGovernance`. A change of `registrationFee`
+needs a guardian ceremony that runs `SetRegistrationFee`. The choice keeps
+`nextId`. See [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md).
 
 **Emitter address derivation.** The 32-byte Wormhole emitter address is
 
@@ -308,8 +322,8 @@ a different owner derives a **different**, untrusted address. This is the
 invariant guardians verify — "the transaction is Daml-valid under the vetted
 package" — with no bespoke watcher logic (see [§10](#10-trust-model--deployment-topology)).
 Registry-allocated ids give per-owner uniqueness and let one party hold **many**
-emitters, matching Sui's multiple `EmitterCap`s; id-sequence discipline is
-operator-behavioral, but address integrity is not.
+emitters, matching Sui's multiple `EmitterCap`s. `guardianGovernance` co-signs
+the registry, so the operator alone cannot reset the id sequence (A14-3).
 
 Publishing — a choice on the **`Emitter`** (controller = `owner`), so it needs
 no operator authority:
@@ -320,16 +334,16 @@ no operator authority:
 -- so callers never re-resolve it off-ledger.
 choice PublishMessage : (ContractId Emitter, WormholeMessage)
   with
-    nonce            : Int            -- uint32
-    payload          : Bytes          -- <= 750 bytes (whitepaper 0004)
-    consistencyLevel : Int            -- uint8; see §6
+    nonce            : Int            -- 0 .. 2^32-1
+    payload          : Bytes          -- even-length lowercase hex, <= 750 bytes (whitepaper 0004)
+    consistencyLevel : Int            -- 0 .. 255; see §6
     coreStateCid     : ContractId CoreState                       -- fee read (§ Fees)
     payer            : Party          -- funds messageFee; = owner for a direct publish
     feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
   controller owner, payer
   do
-    -- 1. charge the current messageFee to payer through CoreState (§ Fees)
-    -- 2. assert payload length <= 750
+    -- 1. assert the field ranges and the payload encoding and length
+    -- 2. charge the current messageFee to payer through CoreState (§ Fees)
     -- 3. archive self; create the successor Emitter with sequence = sequence + 1
     -- 4. return WormholeMessage{registrar, owner, emitterId, sequence, nonce,
     --      payload, consistencyLevel} -- watcher derives the address
@@ -480,7 +494,10 @@ VAA and dispatches on the parsed action. Module identifier is **`"Core"`**
 4. `chain == chainId` (or `0` for chain-independent actions);
 5. `digest ∉ consumedGovernance` — then it is inserted (replay protection).
 
-Supported actions (parity with `GovernanceStructs.sol`):
+Supported actions (parity with `GovernanceStructs.sol`). Each packet must have
+the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
+ContractUpgrade and SetMessageFee, `40 + 20·len` for GuardianSetUpgrade, and 99
+for TransferFees.
 
 | Action                 | ID  | Payload (after 32-byte module + 1-byte action)   | Behavior                                                                                                                                                                                   |
 | ---------------------- | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -502,10 +519,13 @@ governance action whose mechanism differs most from EVM — see Open Questions.
 
 ### 4.5 Guardian-set expiry
 
-Matches EVM (`Setters.sol`): when a new set is installed, the previous set's
-`expirationTime` is set to `effectiveTime + 86400` (1 day). `verifyVAA` accepts a
-non-current set only while `effectiveTime < expirationTime`. The current set
-never expires.
+This logic matches EVM `Setters.sol`. A `GuardianSetUpgrade` sets the
+`expirationTime` of the previous set to `effectiveTime + 86400` (1 day).
+`verifyVAA` accepts a non-current set while `effectiveTime <= expirationTime`.
+EVM `Messages.sol:80` rejects only when `expirationTime < block.timestamp`.
+`isActiveAt` truncates both times to whole seconds, as `block.timestamp` does.
+Thus `verifyVAA` accepts the set until the end of its expiry second. The
+current set never expires.
 
 ### 4.6 Replay protection for integrators: a trie of consumed digests
 
@@ -671,7 +691,7 @@ disclosure blob) for X". The complete inventory it must serve:
 | ---------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `CoreState`                              | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers)                      | per governance action (rare)                               |
 | `ReplayNode`                             | (consumer, namespace, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem             | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
-| `EmitterRegistry`                        | operator                           | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated on operator fee change |
+| `EmitterRegistry`                        | (operator, guardianGovernance)     | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated by a guardian ceremony on fee change |
 | `ReplayRootRegistry`                     | operator                           | `ClaimReplayRoot`                                                      | yes — the consumer submits (cacheable blob)                                       | only on operator fee change                                |
 | `Emitter`                                | (operator, owner, emitterId)       | `PublishMessage`                                                       | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
 | token-registry context                   | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures            | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service                  | registry-defined                                           |
@@ -813,8 +833,9 @@ type CantonClient interface {
     // delivering each Wormhole message-publish event found in them.
     SubscribeUpdates(ctx context.Context, beginExclusive int64, templateID TemplateID, choiceName string, out chan<- CantonMessageEvent) (Subscription, error)
 
-    // GetUpdateByOffset fetches a single transaction by offset (reobservation).
-    GetUpdateByOffset(ctx context.Context, offset int64) (CantonTransaction, error)
+    // GetTransactionByUpdateID fetches a single transaction by update id
+    // (reobservation), with the same party filter and template filter as SubscribeUpdates.
+    GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, templateID TemplateID, choiceName string) (CantonTransaction, error)
 
     Close() error
 }
@@ -826,7 +847,7 @@ Mapping to Ledger API v2 RPCs:
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
 | height / readiness  | `StateService.GetLedgerEnd` → `offset (int64)`                                                                                      |
 | live message stream | `UpdateService.GetUpdates` (server stream); filter `Transaction.events[].exercised` by `template_id` + `choice == "PublishMessage"` |
-| reobservation       | `UpdateService.GetUpdateByOffset` (or `GetTransactionByOffset`) for the offset encoded in the reobservation request                 |
+| reobservation       | `UpdateService.GetUpdateById` for the update id encoded in the reobservation request; same `UpdateFormat` as the stream             |
 
 The Wormhole message comes from the **`ExercisedEvent`** of the `PublishMessage`
 choice: `exercise_result` is the `WormholeMessage` record (§4.2), decoded from
@@ -836,31 +857,62 @@ using the canonical encoding in §4.2 (see `deriveEmitterAddress` in
 [`watcher.go`](../node/pkg/watchers/canton/watcher.go)); the encoding is pinned
 against the Daml side by a shared cross-language test vector.
 
-**Party filter.** The `GetUpdates` request uses an `UpdateFormat` with a wildcard
-template filter under **`filters_for_any_party`** by default — the watcher
-observes `PublishMessage` from _every_ emitter on the participant and needs no
-operator party id. For **production guardians**, set `--cantonReadAsParty` to the
-**`guardianGovernance`** party (§4.1): it is a stakeholder of every `Emitter`
-and of `CoreState`, so the narrowed `filters_by_party` stream still carries every
-`PublishMessage`, and it makes the trust boundary explicit. The **devnet**
-sandbox is a single participant, so it keeps the wildcard default.
+**Party filter.** The `GetUpdates` and `GetUpdateById` requests use one
+`UpdateFormat` with a wildcard template filter. Outside unsafe dev mode,
+`--cantonReadAsParty` is required. Set it to the **`guardianGovernance`** party
+(§4.1). This party is a stakeholder of every `Emitter` and of `CoreState`, so the
+narrowed `filters_by_party` stream carries every `PublishMessage`. In unsafe dev
+mode an empty `--cantonReadAsParty` selects **`filters_for_any_party`**. The
+**devnet** sandbox uses this wildcard.
 `TRANSACTION_SHAPE_LEDGER_EFFECTS` is required so `ExercisedEvent`s — which carry
 the choice result — are included.
 
 ### 7.2 `TxID` and offsets
 
-The Ledger API has no 32-byte transaction hash. We use the **participant offset**
-(`int64`) as the canonical transaction identifier:
+The `MessagePublication.TxID` is the transaction's **update id**. The
+participant offset is not the `TxID`.
 
-- `MessagePublication.TxID` = the transaction's offset, big-endian, left-padded
-  to 32 bytes (so it round-trips through the 32-byte `tx_hash` reobservation
-  field).
-- Reobservation decodes those 32 bytes back to an `int64` offset and calls
-  `GetUpdateByOffset`.
+Each participant assigns its own offsets. On LocalNet, one update has offset
+590, 762, and 1381 on three participants. Each guardian reads its own
+participant. Thus an offset from one guardian identifies a different update, or
+no update, on the participant of a different guardian. The update id is the same
+on every participant that hosts the transaction.
 
-The Daml `update_id` (a string) is carried in logs for human correlation but is
-not the `TxID`, because reobservation plumbing (`gossipv1.ObservationRequest`)
-uses raw bytes and offsets are the stable, range-queryable key.
+Encoding:
+
+- The Ledger API `update_id` is 68 lowercase hex characters. It is a SHA2-256
+  multihash: the header `1220`, then the 32-byte digest.
+- `TxID` is the hex-decoded update id: exactly 34 bytes, with the first two bytes
+  `0x12 0x20`. This length is in the `MessagePublication` bounds (32 to 255
+  bytes). A compile-time assertion in the watcher checks this.
+- `TxIDString()` is `0x` followed by the update id. An operator can give the
+  update id directly to `guardiand admin send-observation-request 75 <update id>`.
+- `cantonclient.ParseUpdateID` and `cantonclient.UpdateIDFromTxID` reject all
+  other forms: a different length, uppercase hex, or a different multihash
+  header. A stream transaction with Wormhole messages and a malformed update id
+  stops the subscription.
+
+Reobservation:
+
+1. The watcher decodes `ObservationRequest.tx_hash` with `UpdateIDFromTxID`.
+2. The watcher calls `UpdateService.GetUpdateById` with that update id.
+3. The request uses the same `UpdateFormat` as the stream: the
+   `--cantonReadAsParty` party filter. The watcher then applies the same template,
+   choice, and `--cantonPackageID` filter.
+4. The watcher rejects a response with a different update id.
+
+The participant offset stays in use for one purpose: the stream resume point
+after a restart (`lastOffset`). It is local to the participant, so it does not
+leave the guardian.
+
+**Mixed guardian versions.** Earlier versions used a 32-byte left-padded offset
+as the `TxID`. The two encodings are not compatible:
+
+- A guardian on this version rejects a 32-byte offset `tx_hash` (length is not 34).
+- An earlier guardian rejects a 34-byte `tx_hash` (length is more than 32).
+
+Upgrade all guardians that observe Canton together, because the old and new
+TxID formats reject each other's reobservation requests.
 
 ### 7.3 `Run` loop (three goroutines, mirrors Sui)
 
@@ -870,7 +922,7 @@ flowchart TD
     init --> ready["supervisor.Signal(healthy); readiness.SetReady"]
     ready --> pump["RunWithScissors: canton_data_pump<br/>SubscribeUpdates(from end) → decode → msgC"]
     ready --> height["RunWithScissors: canton_block_height<br/>every 5s: GetLedgerEnd → SetNetworkStats + readiness"]
-    ready --> reobs["RunWithScissors: canton_fetch_obvs_req<br/>obsvReqC → GetUpdateByOffset → re-emit (IsReobservation=true)"]
+    ready --> reobs["RunWithScissors: canton_fetch_obvs_req<br/>obsvReqC → GetUpdateById → re-emit (IsReobservation=true)"]
     pump --> sel{"select: ctx.Done / errC"}
     height --> sel
     reobs --> sel
@@ -890,16 +942,18 @@ type WatcherConfig struct {
     NetworkID   watchers.NetworkID
     ChainID     vaa.ChainID        // ChainIDCanton
     Rpc         string             // host:port of the Ledger API
-    PackageID   string             // package-id of wormhole-core (template filter)
-    ReadAsParty string             // optional; production guardians set the guardianGovernance party
+    PackageID   string             // package-id of wormhole-core; required outside unsafe dev mode
+    ReadAsParty string             // guardianGovernance party; required outside unsafe dev mode
 }
 ```
 
 Wired into the guardian via
 [`node/pkg/node/options.go`](../node/pkg/node/options.go) and a `--cantonRPC` /
 `--cantonPackageID` flag pair in `node/cmd/guardiand`, following the Sui pattern.
-`--cantonReadAsParty` populates `ReadAsParty`; production guardians set it to the
-`guardianGovernance` party (§4.1, §7.1), and devnet leaves it empty (wildcard).
+`--cantonReadAsParty` populates `ReadAsParty`. `WatcherConfig.Create` requires
+`--cantonPackageID` and `--cantonReadAsParty` outside `--unsafeDevMode`. Set
+`--cantonReadAsParty` to the `guardianGovernance` party (§4.1, §7.1). Devnet runs
+in unsafe dev mode and leaves both empty (wildcard).
 
 ---
 
@@ -937,7 +991,7 @@ canton/
 node/pkg/cantonclient/           ← Ledger API v2 gRPC client
   proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.5.5)
   proto/gen/                     ← generated Go stubs (buf generate)
-  vectorgen_test.go              ← regenerates the signed-VAA test vector (GEN_CANTON_VECTORS=1)
+  vectorgen_test.go              ← Daml fixture drift guard (CANTON_VECTORGEN=write rewrites)
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
   watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
   core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
@@ -1110,6 +1164,93 @@ Today `--canton` stands up the **chain + contracts** for Daml-side development
 (iterating on the templates, `dpm test`); the watcher↔ledger path itself is
 covered by the integration test in §9.
 
+### 7.5 Core package upgrades
+
+`core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
+`damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+For 0.8.0, the baseline is `dars/wormhole-core-0.7.0.dar`.
+
+0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
+`damlc` reports this change only as a warning.
+A 0.7.0 `EmitterRegistry` cannot run under 0.8.0.
+All other 0.7.0 contracts continue under 0.8.0.
+Thus the move from 0.7.0 needs a registry migration and an unvet of 0.7.0.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the procedure, the scan, and the integrator cutover.
+The procedure below applies to the other steps of that migration.
+
+**Event package ids.** The watcher compares the package id of each
+`PublishMessage` `ExercisedEvent` with `--cantonPackageID` (`templateMatches`
+in `cantongrpc.go`). The Ledger API `event.proto` defines
+`ExercisedEvent.template_id` as "the template that defines the executed
+choice". The proto adds that this package id can differ from the package id
+of the target contract. Thus the event shows the package that executed the choice. The package that
+created the `Emitter` has no effect on the match. A `CreatedEvent` shows the
+package that created the contract.
+
+Consequences for a watcher pinned to one package id:
+
+- A watcher pinned to 0.6.0 drops each 0.7.0 `PublishMessage`, also on
+  emitters that 0.6.0 created.
+- A watcher pinned to 0.7.0 drops each 0.6.0 `PublishMessage`, also on
+  emitters that 0.7.0 created.
+- A dropped exercise uses the emitter sequence number. The ledger keeps it.
+
+**Dropped-message metric.** The watcher counts each dropped `PublishMessage`
+in `wormhole_canton_unpinned_publish_messages_total`. The
+`executing_package_id` label holds the package id of the event. Each drop also
+writes a WARN log with the update id, the executing package id, and the pinned
+package id. The watcher still drops the message. Thus the pin stays a security
+boundary.
+
+The counter labels a maximum of 8 package ids. Other package ids use the label
+`other`. A participant can upload a package with the same module and template
+names, so the package ids are not under guardian control. Use the WARN log to
+find the package id and update id of an `other` count.
+
+Each informee participant must vet the package that runs the choice.
+`guardianGovernance` is an informee of each `PublishMessage` (§10). Thus a
+package that no guardian participant vets cannot run `PublishMessage`.
+
+**Procedure: upgrade from 0.6.0 to 0.7.0.** This order makes sure that a
+submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
+
+1. Upload and vet the 0.7.0 DAR on all guardian participants.
+2. Upload and vet the 0.7.0 DAR on the operator participant.
+3. Tell integrators to submit with the 0.7.0 package id.
+4. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
+   pinned to the 0.7.0 package id. Continue only when the counter shows zero
+   new 0.6.0 publishes.
+5. Set `--cantonPackageID` to the 0.7.0 package id on each guardian.
+6. Restart each guardian in one coordinated window.
+7. Send reobservation requests for the 0.7.0 messages of steps 3 to 6. The
+   WARN logs of the 0.6.0 watchers give their update ids.
+8. Unvet 0.6.0 on all guardian participants.
+
+> **WARNING:** Do not unvet 0.6.0 before step 6 is complete on all guardians.
+> A guardian pinned to 0.6.0 then sees no message that it can sign.
+
+> **CAUTION:** Between step 1 and step 6, the watchers drop each 0.7.0
+> message. Reobservation by update id recovers these messages after step 6.
+
+> **CAUTION:** Between step 6 and step 8, the watchers drop each 0.6.0
+> message. These messages are not recoverable. Their sequence numbers stay
+> unused. Step 4 makes sure that integrators stopped the use of 0.6.0. Keep
+> this window short.
+
+> **NOTE:** A restarted watcher starts at the ledger end. Messages from the
+> restart window need reobservation requests.
+
+**Open items.**
+
+- The docs say that vetting applies to the package that created an input
+  contract too. Before step 8, make sure on a test network that contracts that
+  0.6.0 created still work under 0.7.0 after the unvet. These contracts are
+  `CoreState`, `EmitterRegistry`, `Emitter`, and the replay contracts.
+- Proposed watcher change, not implemented: accept a set of package ids during
+  the migration window. Each guardian accepts 0.6.0 and 0.7.0 before step 1,
+  and removes 0.6.0 after step 8. No message is then lost, and no coordinated
+  restart is necessary. 0.6.0 messages keep the 0.6.0 checks until step 8.
+
 ---
 
 ## 10. Trust model & deployment topology
@@ -1202,7 +1343,7 @@ makes it a `guardianGovernance` host.
 ## 11. Open Questions & Validation Items
 
 1. **Ledger API v2 RPC surface.** The exact message/field names of
-   `UpdateService.GetUpdates` / `GetUpdateByOffset` / `StateService.GetLedgerEnd`
+   `UpdateService.GetUpdates` / `GetUpdateById` / `StateService.GetLedgerEnd`
    shift slightly across Canton releases (e.g. `begin_exclusive`/`end_inclusive`,
    `Update` one-of members). The vendored proto subset targets a specific release
    — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
