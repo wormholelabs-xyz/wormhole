@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline table tests of the guardian-namespace console code (console/test/*_test.canton).
-# Each test runs after owner_signing_prelude.canton, table_test_prelude.canton and topology_fixtures.canton.
+# Each test runs after owner_signing_prelude.canton, owner_key_rotation_lib.canton, table_test_prelude.canton and
+# topology_fixtures.canton.
 # Each test prints one TABLE line.
 # Needs the console jar (console_test_lib.sh). Needs no LocalNet.
 # Usage: canton/localnet/test/console_table_test.sh [<table-name>...]
@@ -14,6 +15,7 @@ readonly CONSOLE_DIR="$LOCALNET_SCRIPT_DIR/console"
 readonly CONSOLE_TABLES=(
   "owner-signer owner_signer_test.canton 16"
   "hosting-policy hosting_policy_test.canton 18"
+  "owner-key-rotation owner_key_rotation_test.canton 32"
 )
 
 work_dir="$(mktemp -d)"
@@ -34,7 +36,8 @@ for table_row in "${CONSOLE_TABLES[@]}"; do
   console_status=0
   run_offline_console "$work_dir/$table_name.out" \
     OWNER_SIGNER_STUB_IN_DIRECTORY_WITH_SPACE="$work_dir/directory with space/signer" -- \
-    "$CONSOLE_DIR/owner_signing_prelude.canton" "$CONSOLE_DIR/test/table_test_prelude.canton" \
+    "$CONSOLE_DIR/owner_signing_prelude.canton" "$CONSOLE_DIR/owner_key_rotation_lib.canton" \
+    "$CONSOLE_DIR/test/table_test_prelude.canton" \
     "$CONSOLE_DIR/test/topology_fixtures.canton" "$CONSOLE_DIR/test/$test_file" \
     || console_status=$?
   grep -E '^CASE ' "$work_dir/$table_name.out" || true
