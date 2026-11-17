@@ -57,3 +57,11 @@ grpc_ledger_api_port() {
   port_prefix="$(validator_port_prefix "$1")"
   echo "${port_prefix}901"
 }
+
+# Keys, artifacts and contract ids that the guardianGovernance rehearsal scripts share.
+LOCALNET_STATE_DIR="${LOCALNET_STATE_DIR:-$(cd "$REPO_ROOT/.." && pwd)/localnet-state}"
+
+# Canton console of the same release as the LocalNet `canton` image (copied out of the container).
+CANTON_RELEASE="3.7.3"
+CANTON_CONSOLE_JAR="$VENDOR_DIR/canton-$CANTON_RELEASE/canton-open-source-$CANTON_RELEASE.jar"
+CANTON_CONSOLE_CONFIG="$LOCALNET_SCRIPT_DIR/console/remote-participants.conf"

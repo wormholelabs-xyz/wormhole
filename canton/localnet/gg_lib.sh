@@ -1,0 +1,120 @@
+# Shared functions for the guardianGovernance rehearsal scripts. Source this file; do not run it.
+# shellcheck shell=bash
+# shellcheck source=env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+
+GG_ARTIFACTS="$LOCALNET_STATE_DIR/gg-artifacts.json"
+OPERATOR_ARTIFACTS="$LOCALNET_STATE_DIR/operator-artifacts.json"
+CORE_CONTRACTS="$LOCALNET_STATE_DIR/core-contracts.json"
+# Interactive submissions go through the participant that hosts the Operator party.
+SUBMITTING_VALIDATOR="app-provider"
+
+for required_file in "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS"; do
+  if [[ ! -f "$required_file" ]]; then
+    echo "Missing $required_file. Run gg_host.sh first." >&2
+    exit 1
+  fi
+done
+
+GG_PARTY="$(jq -r .partyId "$GG_ARTIFACTS")"
+OPERATOR_PARTY="$(jq -r .partyId "$OPERATOR_ARTIFACTS")"
+SYNCHRONIZER_ID="$(jq -r .synchronizerId "$GG_ARTIFACTS")"
+# The Ledger API takes the logical synchronizer id, without the "::<protocol>-<serial>" suffix.
+LOGICAL_SYNCHRONIZER_ID="$(sed -E 's/::[0-9]+-[0-9]+$//' <<<"$SYNCHRONIZER_ID")"
+
+gg_work_dir="$(mktemp -d)"
+trap 'rm -rf "$gg_work_dir"' EXIT
+"$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$gg_work_dir/script.jwt"
+
+# Signer JSON for one owner key: signer_json <public-key-file>.
+signer_json() {
+  local public_key_file="$1" fingerprint
+  fingerprint="$(jq -r --arg file "$public_key_file" \
+    '[.owners[] | select(.publicKeyFile == $file) | .namespace][0] // empty' "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS" | head -n 1)"
+  if [[ -z "$fingerprint" ]]; then
+    fingerprint="$(jq -r --arg file "$public_key_file" '.[$file] // empty' "$LOCALNET_STATE_DIR/extra-key-fingerprints.json" 2>/dev/null || true)"
+  fi
+  if [[ -z "$fingerprint" ]]; then
+    echo "No fingerprint known for $public_key_file" >&2
+    return 1
+  fi
+  jq -n --arg keyFile "${public_key_file%.pub}.key" --arg fingerprint "$fingerprint" \
+    '{keyFile: $keyFile, fingerprint: $fingerprint}'
+}
+
+operator_signers_json() {
+  jq -n --arg party "$OPERATOR_PARTY" --argjson signer "$(signer_json "$LOCALNET_STATE_DIR/operator-keys/owner1.pub")" \
+    '{($party): [$signer]}'
+}
+
+# gg_signers_json <owner-name>... : signatures of guardianGovernance owner keys under gg-keys/.
+gg_signers_json() {
+  local owner_name signers="[]"
+  for owner_name in "$@"; do
+    signers="$(jq --argjson signer "$(signer_json "$LOCALNET_STATE_DIR/gg-keys/$owner_name.pub")" '. + [$signer]' <<<"$signers")"
+  done
+  jq -n --arg party "$GG_PARTY" --argjson signers "$signers" '{($party): $signers}'
+}
+
+# submit_interactive <command-id> <act-as-json-array> <command-json> <signers-json> [disclosed-json] [package-preference-json]
+# Prints the transaction JSON. Returns non-zero on rejection; the error text goes to stderr.
+submit_interactive() {
+  local command_id="$1" act_as="$2" command="$3" signers="$4"
+  local disclosed="${5:-[]}" package_preference="${6:-[]}"
+  local spec_file="$gg_work_dir/$command_id.spec.json"
+  jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
+    --argjson signers "$signers" --argjson disclosed "$disclosed" --argjson preference "$package_preference" \
+    --arg synchronizerId "$LOGICAL_SYNCHRONIZER_ID" \
+    '{commandId: $commandId, actAs: $actAs, commands: [$command], signers: $signers,
+      disclosedContracts: $disclosed, packageIdSelectionPreference: $preference, synchronizerId: $synchronizerId}' \
+    > "$spec_file"
+  node "$LOCALNET_SCRIPT_DIR/interactive_submit.js" \
+    "$(json_api_url "$SUBMITTING_VALIDATOR")" "$gg_work_dir/script.jwt" "$spec_file"
+}
+
+# created_contract_id <transaction-json> <qualified-template-suffix>, e.g. ":Wormhole.Core.State:CoreState".
+created_contract_id() {
+  jq -er --arg suffix "$2" \
+    '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith($suffix)) | .contractId] | if length == 1 then .[0] else error("expected exactly one created \($suffix), found \(length)") end' \
+    <<<"$1"
+}
+
+exercise_command() {
+  local template_id="$1" contract_id="$2" choice="$3" choice_argument="$4"
+  jq -n --arg templateId "$template_id" --arg contractId "$contract_id" --arg choice "$choice" \
+    --argjson choiceArgument "$choice_argument" \
+    '{ExerciseCommand: {templateId: $templateId, contractId: $contractId, choice: $choice, choiceArgument: $choiceArgument}}'
+}
+
+core_contract_id() {
+  jq -er --arg name "$1" '.[$name]' "$CORE_CONTRACTS"
+}
+
+record_core_contract_id() {
+  local name="$1" contract_id="$2" updated
+  if [[ -f "$CORE_CONTRACTS" ]]; then
+    updated="$(jq --arg name "$name" --arg cid "$contract_id" '.[$name] = $cid' "$CORE_CONTRACTS")"
+  else
+    updated="$(jq -n --arg name "$name" --arg cid "$contract_id" '{($name): $cid}')"
+  fi
+  printf '%s\n' "$updated" > "$CORE_CONTRACTS"
+}
+
+readonly CORE_STATE_TEMPLATE="#wormhole-core:Wormhole.Core.State:CoreState"
+readonly EMITTER_REGISTRY_TEMPLATE="#wormhole-core:Wormhole.Core.State:EmitterRegistry"
+readonly REPLAY_ROOT_REGISTRY_TEMPLATE="#wormhole-core:Wormhole.Core.State:ReplayRootRegistry"
+readonly EMITTER_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
+
+# active_contracts <validator> <party> <qualified-template-suffix>: active contracts of that template that the party sees there.
+active_contracts() {
+  local validator_name="$1" party="$2" template_suffix="$3" ledger_end admin_token
+  admin_token="$(cat "$gg_work_dir/script.jwt")"
+  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "Authorization: Bearer $admin_token" | jq -r .offset)"
+  curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
+    -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
+      eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
+      activeAtOffset: $offset}')" \
+    | jq -c --arg suffix "$template_suffix" \
+      '[.[] | .contractEntry.JsActiveContract.createdEvent? // empty | select(.templateId | endswith($suffix))]'
+}

@@ -59,18 +59,17 @@
 //   GG_ARTIFACTS_FILE       Output path for the artifacts JSON (party id,
 //                           namespace id, owner fingerprints/pubkey paths,
 //                           threshold). Default "guardian-governance-artifacts.json".
-//
-// This script assumes exactly one participant is bound in the console
-// session (true for `dpm canton-console` against sandbox, and for a
-// single-participant production console session) and hosts the party on that
-// participant at Confirmation permission. Multi-participant hosting (the
-// production censorship-resistance requirement) is a straightforward
-// extension of the `HostingParticipant` sequence built below -- add entries
-// for the other participants' ids -- and the same externally-signed-load
-// pattern applies to their consent-to-host signatures.
+//   GG_HOSTING_PARTICIPANTS Comma-separated console names of the participants
+//                           that host the party at Confirmation. The first
+//                           one submits the topology. Default: the sole
+//                           participant bound in the console session.
+//   GG_CONFIRMATION_THRESHOLD
+//                           PartyToParticipant confirmation threshold across
+//                           the hosting participants. Default 1.
 
 import com.digitalasset.canton.topology._
 import com.digitalasset.canton.topology.transaction._
+import com.digitalasset.canton.topology.transaction.SignedTopologyTransaction.GenericSignedTopologyTransaction
 import com.digitalasset.canton.config.RequireTypes.PositiveInt
 import com.digitalasset.canton.crypto._
 import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
@@ -91,15 +90,30 @@ val threshold = PositiveInt.tryCreate(envOr("GG_THRESHOLD", "2").toInt)
 val partyName = envOr("GG_PARTY_NAME", "guardianGovernance")
 val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
 val artifactsFile = envOr("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
+val confirmationThreshold = PositiveInt.tryCreate(envOr("GG_CONFIRMATION_THRESHOLD", "1").toInt)
 
 def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
-val participant = consoleEnvironment.participants.all match {
-  case Seq(single) => single
-  case other => throw new RuntimeException(
-    s"expected exactly one participant bound in this console session, found ${other.size}")
+val hostingParticipants = sys.env.get("GG_HOSTING_PARTICIPANTS") match {
+  case Some(names) =>
+    names.split(",").toSeq.map(_.trim).filter(_.nonEmpty).map { name =>
+      consoleEnvironment.participants.all
+        .find(_.name == name)
+        .getOrElse(throw new RuntimeException(s"participant '$name' is not bound in this console session"))
+    }
+  case None =>
+    consoleEnvironment.participants.all match {
+      case Seq(single) => Seq(single)
+      case other => throw new RuntimeException(
+        s"expected exactly one participant bound in this console session, found ${other.size}; set GG_HOSTING_PARTICIPANTS")
+    }
 }
+require(hostingParticipants.nonEmpty, "GG_HOSTING_PARTICIPANTS is empty")
+require(hostingParticipants.map(_.id).distinct.size == hostingParticipants.size, "duplicate hosting participant")
+require(confirmationThreshold.value <= hostingParticipants.size,
+  s"confirmation threshold ${confirmationThreshold.value} exceeds ${hostingParticipants.size} hosting participants")
+val participant = hostingParticipants.head
 
 val connected = participant.synchronizers.list_connected()
 val targetSynchronizer = synchronizerAliasOpt match {
@@ -153,6 +167,19 @@ def generateUnsigned[M <: TopologyMapping](mapping: M): TopologyTransaction[Topo
     .head
     .asInstanceOf[TopologyTransaction[TopologyChangeOp, M]]
 
+// Bounded wait for a loaded topology transaction to become effective on the synchronizer.
+// A follow-up transaction that depends on it fails with "No root certificate found" before then.
+val topologyEffectiveMaxAttempts = 120
+def awaitTopology(description: String)(isEffective: => Boolean): Unit = {
+  var attempt = 0
+  while (!isEffective) {
+    attempt += 1
+    if (attempt >= topologyEffectiveMaxAttempts)
+      throw new RuntimeException(s"topology not effective after $topologyEffectiveMaxAttempts attempts: $description")
+    Thread.sleep(500)
+  }
+}
+
 println(s"[guardian-governance] owner namespaces: ${ownerNamespaces.mkString(", ")}")
 
 // --- Step 1: each owner's root NamespaceDelegation, self-signed externally. ---
@@ -169,6 +196,10 @@ val rootDelegations = (ownerNamespaces, ownerPubkeys, ownerSignCmds).zipped.map 
   SignedTopologyTransaction.withSignature(unsigned, sig, isProposal = false, protocolVersion)
 }
 participant.topology.transactions.load(rootDelegations, store)
+awaitTopology("owner root namespace delegations") {
+  val effective = participant.topology.namespace_delegations.list(store).map(_.item.namespace).toSet
+  ownerNamespaces.forall(effective.contains)
+}
 println("[guardian-governance] root namespace delegations loaded")
 
 // --- Step 2: DecentralizedNamespaceDefinition, threshold-of-3, all 3 owners externally sign. ---
@@ -188,6 +219,9 @@ val signedDn = dnSignatures.tail.foldLeft(
   SignedTopologyTransaction.withSignature(unsignedDn, dnSignatures.head, isProposal = false, protocolVersion)
 )(_.addSingleSignature(_))
 participant.topology.transactions.load(Seq(signedDn), store)
+awaitTopology("decentralized namespace definition") {
+  participant.topology.decentralized_namespaces.list(store).exists(_.item.namespace == dnNamespace)
+}
 println(s"[guardian-governance] decentralized namespace created: $dnNamespace (threshold ${threshold.value}-of-${ownerNamespaces.size})")
 
 // --- Step 3: allocate the party under the decentralized namespace, host it at
@@ -199,8 +233,8 @@ val signingKeys = SigningKeysWithThreshold(NonEmpty.mk(Set, ownerPubkeys.head, o
 val partyToParticipant = PartyToParticipant
   .create(
     partyId,
-    PositiveInt.one, // confirmation threshold across hosting participants (single participant locally)
-    Seq(HostingParticipant(participant.id, ParticipantPermission.Confirmation)),
+    confirmationThreshold,
+    hostingParticipants.map(p => HostingParticipant(p.id, ParticipantPermission.Confirmation)),
     Some(signingKeys),
   )
   .getOrElse(sys.error("failed to build PartyToParticipant"))
@@ -211,13 +245,25 @@ val ptpOwnerSignatures = (ownerNamespaces, ownerSignCmds).zipped.map { (ns, sign
 val signedPtpOwnersOnly = ptpOwnerSignatures.tail.foldLeft(
   SignedTopologyTransaction.withSignature(unsignedPtp, ptpOwnerSignatures.head, isProposal = false, protocolVersion)
 )(_.addSingleSignature(_))
-// The hosting participant must also consent to host the party; that is a
-// LOCAL signature (this participant's own identity key), added via the
+// Each hosting participant must also consent to host the party; that is a
+// LOCAL signature (that participant's own identity key), added via its
 // vault-backed `transactions.sign`, not an external one.
-val signedPtp = participant.topology.transactions
-  .sign(Seq(signedPtpOwnersOnly), store, signedBy = Seq(participant.id.uid.namespace.fingerprint))
-  .head
+val signedPtp = hostingParticipants.foldLeft(signedPtpOwnersOnly: GenericSignedTopologyTransaction) { (signedSoFar, host) =>
+  host.topology.transactions
+    .sign(Seq(signedSoFar), store, signedBy = Seq(host.id.uid.namespace.fingerprint))
+    .head
+}
 participant.topology.transactions.load(Seq(signedPtp), store)
+awaitTopology("party to participant mapping") {
+  hostingParticipants.forall(host =>
+    host.topology.party_to_participant_mappings.is_known(
+      synchronizerId.logical,
+      partyId,
+      hostingParticipants.map(_.id),
+      Some(ParticipantPermission.Confirmation),
+      Some(confirmationThreshold),
+    ))
+}
 println(s"[guardian-governance] party allocated and hosted: $partyId")
 
 // --- Artifacts: the handoff to (a) the local test harness's assertions and
@@ -236,7 +282,8 @@ val artifactsJson =
      |$ownersJson
      |  ],
      |  "synchronizerId": ${jsonString(synchronizerId.toProtoPrimitive)},
-     |  "hostingParticipant": ${jsonString(participant.id.toProtoPrimitive)},
+     |  "hostingParticipants": [${hostingParticipants.map(p => jsonString(p.id.toProtoPrimitive)).mkString(", ")}],
+     |  "confirmationThreshold": ${confirmationThreshold.value},
      |  "hostingPermission": "Confirmation"
      |}
      |""".stripMargin

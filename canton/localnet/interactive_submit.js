@@ -1,0 +1,93 @@
+#!/usr/bin/env node
+// Prepare, externally sign and execute one Ledger API interactive submission (JSON Ledger API v2).
+// Usage: interactive_submit.js <json-api-url> <token-file> <submission-spec.json>
+// Spec: { commandId, actAs: [party], commands: [Command], disclosedContracts?: [DisclosedContract],
+//         synchronizerId?, packageIdSelectionPreference?: [packageId],
+//         signers: { <party>: [ { keyFile: <PKCS8 DER Ed25519 key>, fingerprint } ] } }
+// Prints the committed transaction as JSON. On failure prints the API error and exits 1.
+'use strict';
+const crypto = require('crypto');
+const fs = require('fs');
+
+const REQUEST_TIMEOUT_MS = 300000;
+
+function signHashEd25519(keyFile, hashBytes) {
+  const privateKey = crypto.createPrivateKey({ key: fs.readFileSync(keyFile), format: 'der', type: 'pkcs8' });
+  return crypto.sign(null, hashBytes, privateKey);
+}
+
+// LEDGER_EFFECTS keeps exercised events, so callers can read choice results such as the WormholeMessage.
+function ledgerEffectsFormat(parties) {
+  const wildcard = { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: false } } } }] };
+  return {
+    eventFormat: { filtersByParty: Object.fromEntries(parties.map((party) => [party, wildcard])), verbose: true },
+    transactionShape: 'TRANSACTION_SHAPE_LEDGER_EFFECTS',
+  };
+}
+
+async function postJson(baseUrl, token, path, body) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    process.stderr.write(`${path} failed with HTTP ${response.status}: ${text}\n`);
+    process.exit(1);
+  }
+  return JSON.parse(text);
+}
+
+async function main() {
+  const [, , baseUrl, tokenFile, specFile] = process.argv;
+  if (!baseUrl || !tokenFile || !specFile) {
+    process.stderr.write('usage: interactive_submit.js <json-api-url> <token-file> <submission-spec.json>\n');
+    process.exit(2);
+  }
+  const token = fs.readFileSync(tokenFile, 'utf8').trim();
+  const spec = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+  if (!Array.isArray(spec.actAs) || spec.actAs.length === 0) throw new Error('spec.actAs must be non-empty');
+  if (!Array.isArray(spec.commands) || spec.commands.length !== 1) throw new Error('spec.commands must hold exactly one command');
+
+  const prepared = await postJson(baseUrl, token, '/v2/interactive-submission/prepare', {
+    commandId: spec.commandId,
+    actAs: spec.actAs,
+    readAs: [],
+    commands: spec.commands,
+    disclosedContracts: spec.disclosedContracts || [],
+    synchronizerId: spec.synchronizerId || '',
+    packageIdSelectionPreference: spec.packageIdSelectionPreference || [],
+    verboseHashing: false,
+    prefetchContractKeys: [],
+  });
+  const hashBytes = Buffer.from(prepared.preparedTransactionHash, 'base64');
+  if (hashBytes.length !== 32) throw new Error(`prepared hash has ${hashBytes.length} bytes, expected 32`);
+  process.stderr.write(`prepared ${spec.commandId}: hash ${hashBytes.toString('hex')}\n`);
+
+  const partySignatures = Object.entries(spec.signers || {}).map(([party, partySigners]) => ({
+    party,
+    signatures: partySigners.map((signer) => ({
+      format: 'SIGNATURE_FORMAT_CONCAT',
+      signature: signHashEd25519(signer.keyFile, hashBytes).toString('base64'),
+      signedBy: signer.fingerprint,
+      signingAlgorithmSpec: 'SIGNING_ALGORITHM_SPEC_ED25519',
+    })),
+  }));
+
+  const executed = await postJson(baseUrl, token, '/v2/interactive-submission/executeAndWaitForTransaction', {
+    preparedTransaction: prepared.preparedTransaction,
+    partySignatures: { signatures: partySignatures },
+    submissionId: `${spec.commandId}-${crypto.randomUUID()}`,
+    hashingSchemeVersion: prepared.hashingSchemeVersion,
+    deduplicationPeriod: { Empty: {} },
+    transactionFormat: ledgerEffectsFormat(spec.actAs),
+  });
+  process.stdout.write(JSON.stringify(executed.transaction) + '\n');
+}
+
+main().catch((error) => {
+  process.stderr.write(`${error.stack || error}\n`);
+  process.exit(1);
+});
