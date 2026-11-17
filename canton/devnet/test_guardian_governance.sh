@@ -28,21 +28,45 @@ log() { echo "[test-guardian-governance] $*"; }
 pass() { log "PASS: $*"; }
 fail() { log "FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 
+# Max process-tree depth walked under the started `dpm` process.
+MAX_SANDBOX_TREE_DEPTH=8
+
+# Prints SANDBOX_PID and its descendants, parents first.
+# shellcheck disable=SC2329 # invoked from cleanup (trap)
+list_sandbox_process_tree() {
+  local frontier="${SANDBOX_PID}" next_frontier pid
+  for _ in $(seq 1 "${MAX_SANDBOX_TREE_DEPTH}"); do
+    [ -n "${frontier}" ] || return 0
+    echo "${frontier}"
+    next_frontier=""
+    for pid in ${frontier}; do
+      next_frontier="${next_frontier} $(pgrep -P "${pid}" | tr '\n' ' ')"
+    done
+    frontier="$(echo "${next_frontier}" | xargs)"
+  done
+  [ -z "${frontier}" ] || log "WARNING: sandbox process tree deeper than ${MAX_SANDBOX_TREE_DEPTH}; not stopping: ${frontier}"
+}
+
+# shellcheck disable=SC2329 # invoked via trap
 cleanup() {
   if [ -n "${SANDBOX_PID}" ]; then
-    log "stopping sandbox (pid ${SANDBOX_PID})"
-    kill "${SANDBOX_PID}" 2>/dev/null || true
+    # `dpm sandbox` forks the JVM as a child; collect the tree before the
+    # parent dies and the JVM is reparented to init.
+    local sandbox_pids
+    sandbox_pids="$(list_sandbox_process_tree | xargs)"
+    log "stopping sandbox process tree (pids ${sandbox_pids})"
+    # shellcheck disable=SC2086
+    kill ${sandbox_pids} 2>/dev/null || true
     wait "${SANDBOX_PID}" 2>/dev/null || true
-    # `dpm sandbox` forks the actual JVM as a child rather than exec-ing into
-    # it, so killing $! (the `dpm` process) can leave the java process
-    # running, reparented to init. Belt and suspenders: also reap any
-    # sandbox JVM still listening on our target ports.
-    pkill -f "canton-open-source.*sandbox" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
 if [ "${GG_TEST_REUSE_SANDBOX:-0}" != "1" ]; then
+  if lsof -nP -iTCP:6865 -sTCP:LISTEN >/dev/null 2>&1; then
+    log "port 6865 is already in use; stop that ledger or set GG_TEST_REUSE_SANDBOX=1"
+    exit 1
+  fi
   log "starting dpm sandbox in ${WORK_DIR}"
   (cd "${WORK_DIR}" && exec dpm sandbox --no-tty -C canton.participants.sandbox.ledger-api.address=0.0.0.0) \
     > "${WORK_DIR}/sandbox.log" 2>&1 &
@@ -127,9 +151,9 @@ HOSTING_PERMISSION="$(jq -r '.hostingPermission' "${GG_ARTIFACTS_FILE}")"
 PARTY_ID="$(jq -r '.partyId' "${GG_ARTIFACTS_FILE}")"
 DN_ID="$(jq -r '.decentralizedNamespace' "${GG_ARTIFACTS_FILE}")"
 
-[ "${OWNER_COUNT}" = "3" ] && pass "decentralized namespace has 3 owners" || fail "expected 3 owners, got ${OWNER_COUNT}"
-[ "${THRESHOLD_VALUE}" = "2" ] && pass "decentralized namespace threshold is 2" || fail "expected threshold 2, got ${THRESHOLD_VALUE}"
-[ "${HOSTING_PERMISSION}" = "Confirmation" ] && pass "party hosted at Confirmation" || fail "expected Confirmation, got ${HOSTING_PERMISSION}"
+if [ "${OWNER_COUNT}" = "3" ]; then pass "decentralized namespace has 3 owners"; else fail "expected 3 owners, got ${OWNER_COUNT}"; fi
+if [ "${THRESHOLD_VALUE}" = "2" ]; then pass "decentralized namespace threshold is 2"; else fail "expected threshold 2, got ${THRESHOLD_VALUE}"; fi
+if [ "${HOSTING_PERMISSION}" = "Confirmation" ]; then pass "party hosted at Confirmation"; else fail "expected Confirmation, got ${HOSTING_PERMISSION}"; fi
 if [ "${PARTY_ID}" = "guardianGovernance::${DN_ID}" ]; then
   pass "party id is guardianGovernance::<dn namespace>"
 else
