@@ -19,6 +19,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -54,6 +55,8 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 	lookalikeDar := filepath.Join(cantonDir, "test-lookalike", ".daml", "dist", "wormhole-core-lookalike-0.1.0.dar")
 	lookalikePackageID := readDarMainPackageID(t, dpm, lookalikeDar)
 	require.NotEqual(t, corePackageID, lookalikePackageID)
+
+	unpinnedPublishCountBefore := unpinnedPublishCount(t, lookalikePackageID)
 
 	var bridge realBridge
 	runDamlScript(t, dpm, testDar, port, "Test.WatcherGovernanceReader:integrationGovernanceReaderSetup", "", &bridge)
@@ -159,6 +162,8 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 	assert.Never(t, func() bool {
 		return len(msgChannels[0]) > 0
 	}, unexpectedEmissionWindow, 50*time.Millisecond, "pinned watcher emitted a message after the trusted publish")
+	assert.Equal(t, unpinnedPublishCountBefore+1, unpinnedPublishCount(t, lookalikePackageID),
+		"the pinned stream must count the look-alike publish exactly once")
 
 	// Reobservation by update id keeps the package pin.
 	for caseIndex, tc := range cases {
@@ -169,4 +174,26 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 		}
 		assert.Equalf(t, wantReobserved, toObservedPublishes(reobserved), "%s: forged publish reobservation", tc.name)
 	}
+	assert.Equal(t, unpinnedPublishCountBefore+2, unpinnedPublishCount(t, lookalikePackageID),
+		"pinned reobservation must count the look-alike publish again")
+}
+
+// unpinnedPublishCount reads wormhole_canton_unpinned_publish_messages_total for one executing package id.
+func unpinnedPublishCount(t *testing.T, executingPackageID string) float64 {
+	t.Helper()
+	metricFamilies, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, metricFamily := range metricFamilies {
+		if metricFamily.GetName() != "wormhole_canton_unpinned_publish_messages_total" {
+			continue
+		}
+		for _, metric := range metricFamily.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "executing_package_id" && label.GetValue() == executingPackageID {
+					return metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return 0
 }

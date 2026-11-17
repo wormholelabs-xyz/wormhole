@@ -200,7 +200,13 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, l
 		if ex == nil {
 			continue
 		}
-		if ex.GetChoice() != choiceName || !templateMatches(ex.GetTemplateId(), tmpl) {
+		if ex.GetChoice() != choiceName {
+			continue
+		}
+		if !templateMatches(ex.GetTemplateId(), tmpl) {
+			if templateNameMatches(ex.GetTemplateId(), tmpl) {
+				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.PackageID, logger)
+			}
 			continue
 		}
 		msg, err := decodeWormholeMessage(ex.GetExerciseResult())
@@ -224,6 +230,14 @@ func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
 		return false
 	}
 	if tmpl.PackageID != "" && id.GetPackageId() != tmpl.PackageID {
+		return false
+	}
+	return templateNameMatches(id, tmpl)
+}
+
+// templateNameMatches compares module and entity only, ignoring the package id.
+func templateNameMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
+	if id == nil {
 		return false
 	}
 	return id.GetModuleName() == tmpl.ModuleName && id.GetEntityName() == tmpl.EntityName
