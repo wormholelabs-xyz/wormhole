@@ -19,7 +19,7 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 | Apply the package vetting policy | 6 | On each new package version |
 | Do the core package upgrade procedure | 6.7 | On each new `wormhole-core` version |
 | Configure and monitor the Canton watcher in `guardiand` | 8 | Continuous |
-| Upgrade `guardiand` before the accountant monitors Canton | 9 | Once, before the accountant monitors Canton |
+| Upgrade all guardians that observe Canton together | 8.1 | On each `TxID` format change |
 | Consolidate idle Canton Coin custody pots (custodians) | 10.4 | Before the expiry round of each pot |
 
 ## 2. Parties
@@ -502,9 +502,8 @@ It applies the same party, template and `--cantonPackageID` filters as the strea
 
 Earlier `guardiand` versions used a 32-byte participant offset as the `TxID`.
 A guardian on one encoding rejects the reobservation requests of a guardian on the other encoding.
-The global accountant does not combine their observations of one message.
 
-WARNING: Upgrade all guardians that observe Canton before the accountant monitors Canton (Section 9).
+WARNING: Upgrade all guardians that observe Canton together, because the old and new `TxID` formats reject each other's reobservation requests.
 
 ### 8.2 Failure behavior
 
@@ -520,37 +519,9 @@ This failure is safe: it delays messages, but it does not cause an incorrect sig
 4. Monitor the watcher for errors.
 5. Monitor the watcher for a stopped offset.
 
-## 9. Global accountant
+## 9. Cross-chain limits
 
-The NTT global accountant limits what one chain can send out.
-Canton NTT emitters must be in the accountant configuration before MainNet.
-
-**Status:** the Canton lists in `cantonNttTransceiverEmitters` are empty for MainNet, TestNet and DevNet.
-Thus the NTT accountant does not limit transfers out of Canton.
-Each list gets entries after the Canton NTT deployments on that network.
-The procedure is in `canton/ACCOUNTANT.md` on `canton/overnight-core`.
-
-### 9.1 Rules
-
-- At startup, `guardiand` checks each Canton entry.
-  With `--accountantNttContract`, a malformed entry makes `guardiand` exit at startup.
-- The accountant keeps the first peer of each emitter. A later Canton `SetPeer` has no effect on it.
-  Thus a Canton peer change needs a new deployment with a new transceiver emitter.
-- Guardians on the old offset `TxID` and on the update ID `TxID` do not combine observations (Section 8.1).
-  Thus upgrade all guardians that observe Canton before the accountant monitors Canton.
-
-### 9.2 Release a build with Canton entries
-
-1. Make sure that each guardian that observes Canton uses the update ID `TxID` (Section 8.1).
-2. Make sure that each new entry has `logOnly: true` for the first release.
-3. Run `go test ./pkg/accountant/...` in `node/`. This step is mandatory.
-4. If a test fails, stop the release.
-5. Release the build to the guardians of that network.
-6. Monitor the NTT accountant logs for the Canton emitter.
-7. Remove `logOnly: true` in a subsequent release to enforce the limits.
-
-WARNING: Do not skip step 3.
-A malformed entry stops `guardiand` at startup on each guardian that enables the NTT accountant.
+Canton has no accountant coverage. Peer chains must set NTT inbound rate limits for Canton peers as the cross-chain bound.
 
 ## 10. Open items and decisions
 
@@ -603,7 +574,6 @@ Until a decision, use the procedure in Section 6.7.
 | Production tool to decode and hash prepared transactions | 5.3 |
 | Automatic vetting of Amulet on guardian participants | 6.2 |
 | Contracts of the old core version after the unvet | 6.7 |
-| Canton entries in the NTT global accountant | 9 |
 | U1: `gg` custody of third-party token registries | 10.1 |
 | U2: emitter address uniqueness against a compromised operator | 10.1 |
 | U3: a set of package IDs in the watcher for the upgrade period | 10.1 |
