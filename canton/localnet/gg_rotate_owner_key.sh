@@ -18,6 +18,7 @@
 #   GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF=<party name>    The load sends the change of that party without the
 #                                                          signature of the added owner (measurement R4).
 #   GG_ROTATION_MEASURE_SINGLE_LOAD=true                   The root delegation goes into the same load call (R5).
+#   GG_ROTATION_FAULT_PARTY_IDS=<party id>,...             Replaces the rotation party list (safety stop SS1, SS3).
 # Precondition: gg_host.sh and gg_package_vetting.sh ran.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
@@ -91,10 +92,14 @@ printf '%s\n' "$updated_fingerprints" > "$EXTRA_FINGERPRINTS"
 
 # Load order: nttCustody (holds the reserves) first, guardianGovernance last.
 rotation_party_ids=()
-if [[ -n "$CUSTODY_PARTY" ]]; then
-  rotation_party_ids+=("$CUSTODY_PARTY")
+if [[ -n "${GG_ROTATION_FAULT_PARTY_IDS:-}" ]]; then
+  IFS=, read -r -a rotation_party_ids <<<"$GG_ROTATION_FAULT_PARTY_IDS"
+else
+  if [[ -n "$CUSTODY_PARTY" ]]; then
+    rotation_party_ids+=("$CUSTODY_PARTY")
+  fi
+  rotation_party_ids+=("$GG_PARTY")
 fi
-rotation_party_ids+=("$GG_PARTY")
 expected_party_order="$(for party_id in "${rotation_party_ids[@]}"; do echo "${party_id%%::*}"; done | paste -sd, -)"
 echo "Parties to rotate, in load order: $expected_party_order"
 
@@ -119,6 +124,10 @@ GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_ARGV="$(o
   > "$gg_work_dir/rotation.log" 2>&1 || rotation_console_status=$?
 grep -E '^ROTATION' "$gg_work_dir/rotation.log" || true
 recovery_command="$0 --resume $removed_owner $kept_owner_1 $kept_owner_2 $new_owner"
+if grep -q 'SAFETY STOP:' "$gg_work_dir/rotation.log"; then
+  echo "FAIL: safety stop before any change. $(grep -oE 'SAFETY STOP:.*' "$gg_work_dir/rotation.log" | head -n 1)" >&2
+  exit 1
+fi
 if grep -q '^ROTATION NOT STARTED' "$gg_work_dir/rotation.log"; then
   echo "FAIL: the sign phase failed. The topology did not change. Run again with a new owner name." >&2
   exit 1

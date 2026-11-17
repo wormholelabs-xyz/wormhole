@@ -25,11 +25,12 @@
 //   GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF=<party name>   Load 2 sends that PartyToParticipant without the
 //                                                         signature of the added owner.
 //   GG_ROTATION_MEASURE_SINGLE_LOAD=true                  The root delegation goes into load 2.
+//   GG_ROTATION_FAULT_PARTY_IDS                           Acts in gg_rotate_owner_key.sh (GG_ROTATION_PARTY_IDS).
 import com.digitalasset.canton.topology.ForceFlags
 import com.digitalasset.canton.config.NonNegativeDuration
 
 val rotationFaultVariableNames = Seq("GG_ROTATION_FAULT_SIGNER_OF", "GG_ROTATION_FAULT_OMIT_PARTY_OF",
-  "GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF", "GG_ROTATION_MEASURE_SINGLE_LOAD")
+  "GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF", "GG_ROTATION_MEASURE_SINGLE_LOAD", "GG_ROTATION_FAULT_PARTY_IDS")
 rotationFaultVariableNames.foreach(variableName => sys.env.get(variableName).filter(_.nonEmpty)
   .foreach(variableValue => println(s"ROTATION FAULT INJECTION ACTIVE: $variableName=$variableValue")))
 val omittedPartyName: Option[String] = sys.env.get("GG_ROTATION_FAULT_OMIT_PARTY_OF").filter(_.nonEmpty)
@@ -93,14 +94,12 @@ def currentSerials(): Seq[(String, PositiveInt)] =
   rotationPartyIds.map(party => partyName(party) -> currentPartyToParticipant(party).context.serial) :+
     (namespaceRotationTargetName -> currentDecentralizedNamespace().context.serial)
 
-// Precondition: the run covers every party under the namespace that the old or the new owner keys sign for.
-val ownerKeyPartiesInNamespace = participant.topology.party_to_participant_mappings.list(synchronizerTopologyStore)
-  .filter(_.item.partyId.namespace == guardianGovernancePartyId.namespace)
-  .filter(mapping => Set(oldSigningFingerprints, newSigningFingerprints).contains(signingFingerprintsOf(mapping.item)))
-  .map(_.item.partyId).toSet
-require(ownerKeyPartiesInNamespace == rotationPartyIds.toSet,
-  s"owner-key parties in the namespace ${ownerKeyPartiesInNamespace.map(partyName).toSeq.sorted.mkString(",")} " +
-    s"differ from GG_ROTATION_PARTY_IDS ${rotationPartyIds.map(partyName).mkString(",")}")
+// Safety stop, before any signer call or change. party_to_participant_mappings.list has no result limit parameter.
+checkRotationSafetyStop(currentDecentralizedNamespace().item.owners.forgetNE.map(_.fingerprint),
+  participant.topology.party_to_participant_mappings.list(synchronizerTopologyStore).map(_.item)
+    .filter(_.partyId.namespace == guardianGovernancePartyId.namespace),
+  rotationPartyIds, oldSigningFingerprints, newSigningFingerprints)
+println("ROTATION safety stop passed")
 
 val decentralizedNamespaceBefore = currentDecentralizedNamespace()
 checkNamespaceIsGuardianPolicy(decentralizedNamespaceBefore.item)

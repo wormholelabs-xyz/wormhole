@@ -132,3 +132,24 @@ def checkSameEffectiveTime(effectiveTimes: Seq[(String, java.time.Instant)]): Un
   require(effectiveTimes.map(_._2).distinct.size == 1,
     s"effective times differ: ${effectiveTimes.map { case (name, effectiveTime) => s"$name=$effectiveTime" }.mkString(" ")}")
 }
+
+// checkRotationSafetyStop: runs before any change. The rotation parties are exactly the parties with a
+// PartyToParticipant in the namespace. The namespace owners and the signing keys of each such party are the old or
+// the new key set of this rotation.
+def checkRotationSafetyStop(namespaceOwnerFingerprints: Set[Fingerprint], namespacePartyMappings: Seq[PartyToParticipant],
+    rotationPartyIds: Seq[PartyId], oldFingerprints: Set[Fingerprint], newFingerprints: Set[Fingerprint]): Unit = {
+  val namespacePartyIds = namespacePartyMappings.map(_.partyId)
+  namespacePartyIds.diff(namespacePartyIds.distinct).headOption.foreach(party =>
+    throw new IllegalArgumentException(s"SAFETY STOP: more than one PartyToParticipant of ${partyName(party)}"))
+  require(namespacePartyIds.toSet == rotationPartyIds.toSet,
+    s"SAFETY STOP: PartyToParticipant parties in the namespace ${namespacePartyIds.map(partyName).sorted.mkString(",")} " +
+      s"differ from GG_ROTATION_PARTY_IDS ${rotationPartyIds.map(partyName).mkString(",")}")
+  require(namespaceOwnerFingerprints == oldFingerprints || namespaceOwnerFingerprints == newFingerprints,
+    s"SAFETY STOP: namespace owners ${sortedFingerprintText(namespaceOwnerFingerprints)} are neither the old set nor the new set")
+  namespacePartyMappings.sortBy(mapping => partyName(mapping.partyId)).foreach { mapping =>
+    val signingFingerprints = signingFingerprintsOf(mapping)
+    val signingFingerprintText = if (signingFingerprints.isEmpty) "none" else sortedFingerprintText(signingFingerprints)
+    require(signingFingerprints == oldFingerprints || signingFingerprints == newFingerprints,
+      s"SAFETY STOP: ${partyName(mapping.partyId)} signing keys $signingFingerprintText are neither the old set nor the new set")
+  }
+}

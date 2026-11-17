@@ -7,6 +7,7 @@ readonly ROTATION_FAULT_VARIABLES=(
   GG_ROTATION_FAULT_OMIT_PARTY_OF
   GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF
   GG_ROTATION_MEASURE_SINGLE_LOAD
+  GG_ROTATION_FAULT_PARTY_IDS
 )
 
 # check_owner_names_are_safe <owner-name>...: each name is a key file prefix of [A-Za-z0-9_-] only.
