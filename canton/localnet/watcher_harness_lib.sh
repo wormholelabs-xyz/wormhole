@@ -22,7 +22,7 @@ build_harness() {
 
 # watcher_user_rights_json <validator>: the rights of WATCHER_USER_ID on that participant, as a sorted JSON array.
 watcher_user_rights_json() {
-  curl -sSf "$(json_api_url "$1")/v2/users/$WATCHER_USER_ID/rights" -H "@$ADMIN_AUTH_HEADER" \
+  curl_bounded -sSf "$(json_api_url "$1")/v2/users/$WATCHER_USER_ID/rights" -H "@$ADMIN_AUTH_HEADER" \
     | jq -c '[.rights[].kind | to_entries[0] | {right: .key, party: (.value.value.party // null)}] | sort_by(.right, .party)'
 }
 
@@ -31,7 +31,7 @@ watcher_user_rights_json() {
 ensure_watcher_user() {
   local validator_name="$1" http_status expected_rights
   # shellcheck disable=SC2154 # gg_lib.sh sets gg_work_dir
-  http_status="$(curl -sS -o "$gg_work_dir/watcher-user.out" -w '%{http_code}' -X POST \
+  http_status="$(curl_bounded -sS -o "$gg_work_dir/watcher-user.out" -w '%{http_code}' -X POST \
     "$(json_api_url "$validator_name")/v2/users" -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg id "$WATCHER_USER_ID" --arg gg "$GG_PARTY" '{
       user: {id: $id, primaryParty: "", isDeactivated: false, identityProviderId: ""},

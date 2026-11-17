@@ -87,6 +87,7 @@ canton/localnet/test/image_lock_test.sh
 canton/localnet/test/owner_signer_block_test.sh
 canton/localnet/test/ntt_lib_test.sh
 canton/localnet/test/core_upgrade_package_ids_test.sh
+canton/localnet/test/curl_calls_are_bounded_test.sh
 ```
 
 ## Prerequisites

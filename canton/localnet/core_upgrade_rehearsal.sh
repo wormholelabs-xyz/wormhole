@@ -49,6 +49,7 @@ readonly QUIET_WINDOW_SECONDS="${QUIET_WINDOW_SECONDS:-20}"
 # Added to the synchronizer timeouts in the drain gate after the unvet.
 readonly DRAIN_MARGIN_SECONDS=30
 readonly UPDATE_LOOKUP_ATTEMPTS=30
+readonly DAR_UPLOAD_MAX_SECONDS=120
 readonly UNVETTED_ERROR_CODE="INVALID_PRESCRIBED_SYNCHRONIZER_ID"
 # Current guardian set of the LocalNet CoreState (after gg_guardian_set_rotation.sh 1 2).
 readonly CURRENT_GUARDIAN_SET_INDEX="${CURRENT_GUARDIAN_SET_INDEX:-2}"
@@ -110,17 +111,17 @@ check_ledger_predates_core_v8() {
 }
 
 participant_id_of() {
-  curl -sSf "$(json_api_url "$1")/v2/parties/participant-id" -H "@$ADMIN_AUTH_HEADER" | jq -er .participantId
+  curl_bounded -sSf "$(json_api_url "$1")/v2/parties/participant-id" -H "@$ADMIN_AUTH_HEADER" | jq -er .participantId
 }
 
 ledger_end_of() {
-  curl -sSf "$(json_api_url "$1")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset
+  curl_bounded -sSf "$(json_api_url "$1")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset
 }
 
 # vetted_versions <validator> <package-name>: "<version> <package id>" of each version that the participant of
 # that validator vets, as a sorted JSON array.
 vetted_versions() {
-  curl -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" \
+  curl_bounded -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg pid "$(participant_id_of "$1")" --arg name "$2" \
       '{packageMetadataFilter: {packageNamePrefixes: [$name]}, topologyStateFilter: {participantIds: [$pid]}}')" \
@@ -133,7 +134,7 @@ vetted_package_ids() {
 }
 
 package_is_uploaded() {
-  curl -sSf "$(json_api_url "$1")/v2/packages" -H "@$ADMIN_AUTH_HEADER" | jq -e --arg id "$2" '.packageIds | index($id) != null' > /dev/null
+  curl_bounded -sSf "$(json_api_url "$1")/v2/packages" -H "@$ADMIN_AUTH_HEADER" | jq -e --arg id "$2" '.packageIds | index($id) != null' > /dev/null
 }
 
 package_is_vetted() {
@@ -160,7 +161,7 @@ versions_json() {
 # upload_and_vet <validator> <dar>: the participant checks upgrade compatibility with each vetted version on upload.
 upload_and_vet() {
   local validator_name="$1" dar_path="$2" http_status
-  http_status="$(curl -sS -o "$gg_work_dir/upload.out" -w '%{http_code}' -X POST \
+  http_status="$(curl_bounded --max-time "$DAR_UPLOAD_MAX_SECONDS" -sS -o "$gg_work_dir/upload.out" -w '%{http_code}' -X POST \
     "$(json_api_url "$validator_name")/v2/dars?vetAllPackages=true" \
     -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/octet-stream' --data-binary "@$dar_path")"
   [[ "$http_status" == "200" ]] || fail "upload of $(basename "$dar_path") to $validator_name: HTTP $http_status $(cat "$gg_work_dir/upload.out")"
@@ -171,7 +172,7 @@ upload_and_vet() {
 change_vetting() {
   local validator_name="$1" operation="$2"
   shift 2
-  curl -sSf -X POST "$(json_api_url "$validator_name")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
+  curl_bounded -sSf -X POST "$(json_api_url "$validator_name")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg operation "$operation" --arg sync "$LOGICAL_SYNCHRONIZER_ID" '{
       changes: [{operation: {($operation): {value: {packages: [$ARGS.positional[] | {packageId: .}]}}}}],
@@ -244,7 +245,7 @@ update_by_id_on() {
 }
 
 fetch_update_by_id_on() {
-  curl -sSf -X POST "$(json_api_url "$1")/v2/updates/update-by-id" -H "@$SCRIPT_AUTH_HEADER" \
+  curl_bounded -sSf -X POST "$(json_api_url "$1")/v2/updates/update-by-id" -H "@$SCRIPT_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg id "$2" --arg gg "$GG_PARTY" '{updateId: $id, updateFormat: {includeTransactions: {
       eventFormat: {filtersByParty: {($gg): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},

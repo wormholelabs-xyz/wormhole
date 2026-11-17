@@ -9,6 +9,8 @@
 set -euo pipefail
 
 readonly SCAN_PAGE_SIZE="${SCAN_PAGE_SIZE:-200}"
+readonly SCAN_CURL_MAX_SECONDS="${SCAN_CURL_MAX_SECONDS:-60}"
+readonly SCAN_CURL_CONNECT_SECONDS=10
 readonly EMITTER_TEMPLATE_SUFFIX=":Wormhole.Core.State:Emitter"
 
 if [[ $# -lt 4 || $# -gt 5 ]]; then
@@ -22,6 +24,7 @@ begin_exclusive="$4"
 [[ -r "$token_file" ]] || { echo "cannot read token file $token_file" >&2; exit 2; }
 [[ "$begin_exclusive" =~ ^[0-9]+$ ]] || { echo "begin offset is not a non-negative integer: $begin_exclusive" >&2; exit 2; }
 [[ "$SCAN_PAGE_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "SCAN_PAGE_SIZE is not a positive integer: $SCAN_PAGE_SIZE" >&2; exit 2; }
+[[ "$SCAN_CURL_MAX_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "SCAN_CURL_MAX_SECONDS is not a positive integer: $SCAN_CURL_MAX_SECONDS" >&2; exit 2; }
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
@@ -31,14 +34,14 @@ readonly auth_header="$work_dir/auth"
 if [[ $# -eq 5 ]]; then
   end_inclusive="$5"
 else
-  end_inclusive="$(curl -sSf "$json_api_url/v2/state/ledger-end" -H "@$auth_header" | jq -er .offset)"
+  end_inclusive="$(curl --connect-timeout "$SCAN_CURL_CONNECT_SECONDS" --max-time "$SCAN_CURL_MAX_SECONDS" -sSf "$json_api_url/v2/state/ledger-end" -H "@$auth_header" | jq -er .offset)"
 fi
 [[ "$end_inclusive" =~ ^[0-9]+$ ]] || { echo "end offset is not a non-negative integer: $end_inclusive" >&2; exit 2; }
 [[ "$begin_exclusive" -le "$end_inclusive" ]] || { echo "begin offset $begin_exclusive is after end offset $end_inclusive" >&2; exit 2; }
 
 # read_update_page <begin-exclusive>: one page of updates, as a JSON array.
 read_update_page() {
-  curl -sS -X POST "$json_api_url/v2/updates?limit=$SCAN_PAGE_SIZE" -H "@$auth_header" -H 'Content-Type: application/json' \
+  curl --connect-timeout "$SCAN_CURL_CONNECT_SECONDS" --max-time "$SCAN_CURL_MAX_SECONDS" -sS -X POST "$json_api_url/v2/updates?limit=$SCAN_PAGE_SIZE" -H "@$auth_header" -H 'Content-Type: application/json' \
     -d "$(jq -n --argjson begin "$1" --argjson end "$end_inclusive" --arg party "$read_as_party" '{beginExclusive: $begin, endInclusive: $end,
       updateFormat: {includeTransactions: {
         eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},

@@ -26,6 +26,14 @@ fail() {
   exit 1
 }
 
+readonly CURL_CONNECT_SECONDS=10
+readonly CURL_MAX_SECONDS=30
+# curl_bounded <curl arguments...>: curl with a connect timeout and a maximum time. A later --max-time argument
+# replaces CURL_MAX_SECONDS.
+curl_bounded() {
+  curl --connect-timeout "$CURL_CONNECT_SECONDS" --max-time "$CURL_MAX_SECONDS" "$@"
+}
+
 for required_file in "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS"; do
   if [[ ! -f "$required_file" ]]; then
     echo "Missing $required_file. Run gg_host.sh first." >&2
