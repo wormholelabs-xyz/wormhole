@@ -126,7 +126,7 @@ lock_transaction="$(submit_local app-user "ntt-lock-$run_label" "$(jq -n --arg p
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
     "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$ledger_cid")")")")"
 lock_message="$(exercise_result "$lock_transaction" Transfer)"
-echo "outbound NTT message $(message_summary "$lock_message") offset $(jq -r .offset <<<"$lock_transaction")"
+echo "outbound NTT message $(message_summary "$lock_message") update $(jq -r .updateId <<<"$lock_transaction")"
 ledger_after_lock="$(created_contract_argument "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 ledger_cid="$(created_contract_id "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 pot_cid="$(jq -er .custodyHoldingCid <<<"$ledger_after_lock")"
@@ -178,9 +178,9 @@ fi
 
 record_ntt_json lockUnlock "$(jq -nc --arg custodian "$custodian_party" --arg manager "$manager_cid" \
   --arg managerAddress "$manager_address" --arg emitterId "$emitter_id" --arg emitterAddress "$emitter_address" \
-  --arg recipient "$recipient_party" --arg relayer "$relayer_party" --arg lockOffset "$(jq -r .offset <<<"$lock_transaction")" \
+  --arg recipient "$recipient_party" --arg relayer "$relayer_party" --arg lockUpdateId "$(jq -r .updateId <<<"$lock_transaction")" \
   --arg releaseUpdateId "$(jq -r .updateId <<<"$release_transaction")" --argjson lockMessage "$lock_message" '{
     custodian: $custodian, managerCid: $manager, managerAddress: $managerAddress, emitterId: $emitterId,
-    emitterAddress: $emitterAddress, recipient: $recipient, relayer: $relayer, lockOffset: $lockOffset,
+    emitterAddress: $emitterAddress, recipient: $recipient, relayer: $relayer, lockUpdateId: $lockUpdateId,
     releaseUpdateId: $releaseUpdateId, lockMessage: $lockMessage}')"
 echo "lock/unlock deployment recorded in $NTT_CONTRACTS"

@@ -1,0 +1,176 @@
+//go:build localnet
+
+// LocalNet harness for the Canton watcher: runs watcher.Run with the production settings (pinned core
+// package id, update stream narrowed to guardianGovernance, unsafeDevMode false) against a Splice
+// LocalNet participant. LocalNet authenticates with a static HS256 JWT over plaintext gRPC, so the
+// harness injects a gRPC client that carries that token.
+//
+//	CANTON_LOCALNET_GRPC=localhost:3901 CANTON_LOCALNET_TOKEN_FILE=<jwt> \
+//	CANTON_LOCALNET_READ_AS_PARTY=<guardianGovernance> CANTON_LOCALNET_CORE_PACKAGE_ID=<core package id> \
+//	CANTON_LOCALNET_OBSERVATIONS_FILE=<out.jsonl> CANTON_LOCALNET_READY_FILE=<path> CANTON_LOCALNET_STOP_FILE=<path> \
+//	CANTON_LOCALNET_REOBSERVE_OFFSETS=<offset,...> \
+//	go test -tags localnet -run TestCantonWatcherLocalNet ./pkg/watchers/canton -v -timeout 15m
+//
+// The harness writes one JSON line per observation (live and reobserved). It stops when the stop
+// file exists and all requested reobservations arrived. It fails at CANTON_LOCALNET_MAX_SECONDS.
+// canton/localnet/ntt_watcher.sh drives it.
+package canton
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
+	"github.com/certusone/wormhole/node/pkg/common"
+	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	"github.com/certusone/wormhole/node/pkg/supervisor"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/require"
+	"github.com/wormhole-foundation/wormhole/sdk/vaa"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+)
+
+const (
+	localNetDefaultMaxSeconds = 300
+	localNetMaxReobservations = 64
+	localNetStopPollInterval  = 500 * time.Millisecond
+)
+
+// localNetBearerToken sends a static LocalNet JWT on every RPC. LocalNet serves plaintext gRPC.
+type localNetBearerToken struct{ jwt string }
+
+func (token localNetBearerToken) GetRequestMetadata(context.Context, ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + token.jwt}, nil
+}
+
+func (localNetBearerToken) RequireTransportSecurity() bool { return false }
+
+type localNetObservation struct {
+	EmitterChain     uint16 `json:"emitterChain"`
+	EmitterAddress   string `json:"emitterAddress"`
+	Sequence         uint64 `json:"sequence"`
+	Nonce            uint32 `json:"nonce"`
+	ConsistencyLevel uint8  `json:"consistencyLevel"`
+	PayloadHex       string `json:"payloadHex"`
+	Offset           int64  `json:"offset"`
+	IsReobservation  bool   `json:"isReobservation"`
+	Timestamp        string `json:"timestamp"`
+}
+
+func requiredEnv(t *testing.T, name string) string {
+	t.Helper()
+	value := os.Getenv(name)
+	if value == "" {
+		t.Skipf("%s is not set; skipping the LocalNet watcher harness", name)
+	}
+	return value
+}
+
+func parseReobserveOffsets(t *testing.T, offsetList string) []int64 {
+	t.Helper()
+	var offsets []int64
+	for _, field := range strings.Split(offsetList, ",") {
+		if strings.TrimSpace(field) == "" {
+			continue
+		}
+		offset, err := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
+		require.NoError(t, err)
+		require.Positive(t, offset)
+		offsets = append(offsets, offset)
+	}
+	require.LessOrEqual(t, len(offsets), localNetMaxReobservations)
+	return offsets
+}
+
+func TestCantonWatcherLocalNet(t *testing.T) {
+	rpcAddress := requiredEnv(t, "CANTON_LOCALNET_GRPC")
+	jwtBytes, err := os.ReadFile(requiredEnv(t, "CANTON_LOCALNET_TOKEN_FILE"))
+	require.NoError(t, err)
+	readAsParty := requiredEnv(t, "CANTON_LOCALNET_READ_AS_PARTY")
+	corePackageID := requiredEnv(t, "CANTON_LOCALNET_CORE_PACKAGE_ID")
+	require.Len(t, corePackageID, 64)
+	observationsFile := requiredEnv(t, "CANTON_LOCALNET_OBSERVATIONS_FILE")
+	readyFile := requiredEnv(t, "CANTON_LOCALNET_READY_FILE")
+	stopFile := requiredEnv(t, "CANTON_LOCALNET_STOP_FILE")
+	reobserveOffsets := parseReobserveOffsets(t, os.Getenv("CANTON_LOCALNET_REOBSERVE_OFFSETS"))
+	maxSeconds := localNetDefaultMaxSeconds
+	if value := os.Getenv("CANTON_LOCALNET_MAX_SECONDS"); value != "" {
+		maxSeconds, err = strconv.Atoi(value)
+		require.NoError(t, err)
+		require.Positive(t, maxSeconds)
+	}
+
+	rootCtx, cancel := context.WithTimeout(context.Background(), time.Duration(maxSeconds)*time.Second)
+	defer cancel()
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+
+	client, err := cantonclient.NewCantonGrpcClient(rpcAddress, readAsParty, logger, insecure.NewCredentials(),
+		grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))}))
+	require.NoError(t, err)
+	defer client.Close()
+
+	msgC := make(chan *common.MessagePublication, 64)
+	obsvReqC := make(chan *gossipv1.ObservationRequest, localNetMaxReobservations)
+	watcher := NewWatcher(rpcAddress, corePackageID, readAsParty, AuthConfig{}, false, msgC, obsvReqC)
+	watcher.cantonClient = client
+
+	supervisor.New(rootCtx, logger, func(ctx context.Context) error {
+		if err := supervisor.Run(ctx, "canton", watcher.Run); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return nil
+	}, supervisor.WithPropagatePanic)
+
+	require.Eventually(t, func() bool { return testutil.ToFloat64(currentCantonHeight) > 0 }, 60*time.Second, time.Second,
+		"watcher did not read the ledger end")
+	require.NoError(t, os.WriteFile(readyFile, []byte("ready\n"), 0o600))
+	for _, offset := range reobserveOffsets {
+		obsvReqC <- &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: cantonclient.OffsetToTxID(offset)}
+	}
+
+	output, err := os.Create(observationsFile)
+	require.NoError(t, err)
+	defer output.Close()
+	encoder := json.NewEncoder(output)
+	stopTicker := time.NewTicker(localNetStopPollInterval)
+	defer stopTicker.Stop()
+	reobservationsSeen := 0
+	for {
+		select {
+		case <-rootCtx.Done():
+			t.Fatalf("harness reached CANTON_LOCALNET_MAX_SECONDS=%d without the stop file", maxSeconds)
+		case observation := <-msgC:
+			require.Equal(t, vaa.ChainIDCanton, observation.EmitterChain)
+			offset, err := cantonclient.TxIDToOffset(observation.TxID)
+			require.NoError(t, err)
+			require.NoError(t, encoder.Encode(localNetObservation{
+				EmitterChain:     uint16(observation.EmitterChain),
+				EmitterAddress:   hex.EncodeToString(observation.EmitterAddress[:]),
+				Sequence:         observation.Sequence,
+				Nonce:            observation.Nonce,
+				ConsistencyLevel: observation.ConsistencyLevel,
+				PayloadHex:       hex.EncodeToString(observation.Payload),
+				Offset:           offset,
+				IsReobservation:  observation.IsReobservation,
+				Timestamp:        observation.Timestamp.UTC().Format(time.RFC3339Nano),
+			}))
+			if observation.IsReobservation {
+				reobservationsSeen++
+			}
+		case <-stopTicker.C:
+			if _, err := os.Stat(stopFile); err == nil && reobservationsSeen >= len(reobserveOffsets) {
+				return
+			}
+		}
+	}
+}

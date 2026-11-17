@@ -143,7 +143,7 @@ burn_transaction="$(submit_local app-user "ntt-burn-$run_label" "$user_only" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")")")"
 burn_message="$(exercise_result "$burn_transaction" Transfer)"
-echo "outbound NTT message $(message_summary "$burn_message") offset $(jq -r .offset <<<"$burn_transaction")"
+echo "outbound NTT message $(message_summary "$burn_message") update $(jq -r .updateId <<<"$burn_transaction")"
 echo "payload $(jq -r .payload <<<"$burn_message")"
 user_change="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument.amount]')"
 echo "user coins after burn: $user_change"
@@ -154,7 +154,7 @@ fi
 
 record_ntt_json burnMint "$(jq -nc --arg admin "$admin_party" --arg manager "$manager_cid" \
   --arg managerAddress "$manager_address" --arg emitterId "$emitter_id" --arg emitterAddress "$emitter_address" \
-  --arg user "$user_party" --arg burnOffset "$(jq -r .offset <<<"$burn_transaction")" \
+  --arg user "$user_party" --arg burnUpdateId "$(jq -r .updateId <<<"$burn_transaction")" \
   --argjson burnMessage "$burn_message" '{admin: $admin, managerCid: $manager, managerAddress: $managerAddress,
-    emitterId: $emitterId, emitterAddress: $emitterAddress, user: $user, burnOffset: $burnOffset, burnMessage: $burnMessage}')"
+    emitterId: $emitterId, emitterAddress: $emitterAddress, user: $user, burnUpdateId: $burnUpdateId, burnMessage: $burnMessage}')"
 echo "burn/mint deployment recorded in $NTT_CONTRACTS"
