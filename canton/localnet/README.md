@@ -74,7 +74,8 @@ Set `DB_PORT` to use a different port.
 | `ntt_offline_lib.sh` | NTT functions that `test/ntt_lib_test.sh` tests without LocalNet. |
 | `allocate_external_party.js` | Allocates a 1-of-1 Ed25519 external party. |
 | `watcher_harness_lib.sh` | Shared functions that start and stop the guardian watcher harness. |
-| `core_upgrade_rehearsal.sh` | Rehearses the `wormhole-core` upgrade from 0.6.0 to 0.7.0. |
+| `core_upgrade_rehearsal.sh` | Rehearses the `wormhole-core` upgrade from 0.6.0 to 0.7.0, and the rollback. |
+| `publish_message_scan.sh` | Lists each `PublishMessage` of a participant in an offset range. The canary scan of a production guardian. |
 
 ## Script tests
 
@@ -494,9 +495,10 @@ It makes the watcher with `WatcherConfig.Create` in the TestNet environment.
 Thus `Create` requires the pinned `wormhole-core` package id and the read-as party.
 The harness also checks that `Create` rejects a configuration without one of them.
 It reads the update stream of `guardianGovernance` on `app-provider`.
+`run_harness_on` starts a harness on the Ledger API of a different participant.
 
 The harness authenticates as the Ledger API user `wormhole-watcher`.
-`watcher_harness_lib.sh` makes this user with only the right `CanReadAs(guardianGovernance)`.
+`watcher_harness_lib.sh` makes this user on each participant with only the right `CanReadAs(guardianGovernance)`.
 The script stops if the user has a different set of rights.
 The script removes the token file when the harness streams.
 
@@ -504,7 +506,8 @@ LocalNet uses a static JWT on plaintext gRPC.
 The harness sets this transport through `WatcherConfig.ledgerTransportForTest`.
 Only tests of the `canton` package can set this field.
 
-When the harness stops, it writes the counts of `wormhole_canton_unpinned_publish_messages_total` to `<name>.metrics.json`.
+Each 500 ms and at the stop, the harness writes the counts of `wormhole_canton_unpinned_publish_messages_total` to `<name>.metrics.json`.
+Thus a script can read the counter of a harness that runs.
 A script that fails stops each harness that it started.
 
 `ntt_watcher.sh check` compares each live observation with the `WormholeMessage` of the transaction.
@@ -565,20 +568,27 @@ The script stops if a core DAR has a different package id.
 2. Make sure that the last line of the output is `core_upgrade_rehearsal.sh all: PASS`.
 
 To run one step only, give the step name. Run the steps in the sequence of the table.
-The watchers `v6` and `canary` continue to run between steps.
+The watchers `v6-<host>` and `canary` continue to run between steps.
+Each guardian watcher runs as three harnesses, one on each participant.
+Each harness reads as `guardianGovernance` on its own participant.
 
 | Step | Name | Result |
 | --- | --- | --- |
-| 0 | `prepare` | Each host vets core 0.6.0 and `ntt` 0.2.0. No host vets core 0.7.0 or `ntt` 0.3.0. |
-| 1 | `observe-v6` | The guardian watcher `v6`, pinned to 0.6.0, observes a 0.6.0 `PublishMessage`. |
-| 2 | `vet-v7` | The script records the start offset. Each host vets core 0.7.0, then `ntt` 0.3.0. |
-| 3 | `publish-v7` | One 0.7.0 `PublishMessage` and one 0.6.0 `PublishMessage` commit. `v6` observes the 0.6.0 message. `v6` drops the 0.7.0 message with a WARN log. The `canary`, pinned to 0.7.0, does the opposite. |
+| 0 | `prepare` | Each host vets core 0.6.0 and `ntt` 0.2.0. No host vets a different core or `ntt` version. |
+| 1 | `observe-v6` | The guardian watchers `v6-<host>`, pinned to 0.6.0, observe a 0.6.0 `PublishMessage`. |
+| 2 | `vet-v7` | The script records the start offset of each host. Each host vets core 0.7.0, then `ntt` 0.3.0. |
+| 3 | `publish-v7` | One 0.7.0 `PublishMessage` and one 0.6.0 `PublishMessage` commit. Each `v6-<host>` observes the 0.6.0 message and drops the 0.7.0 message with a WARN log. The `canary`, pinned to 0.7.0, does the opposite. |
 | 4 | `ntt` | `ntt_e2e.sh` passes with `ntt` 0.3.0. Each NTT `PublishMessage` runs under 0.7.0 on each host. |
-| 5 | `gate` | The `canary` counter shows one 0.6.0 publish: the publish of step 3. |
-| 6 | `unvet-v6` | Each host unvets core 0.6.0 and `ntt` 0.2.0 in one topology transaction. A 0.6.0 publish and an `ntt` 0.2.0 exercise fail at prepare. `v6` drops a 0.7.0 publish. |
-| 7 | `switch-v7` | `v6` stops. The WARN logs, a scan from the start offset and the `v6` counter give the same dropped update ids. `v7` reobserves each of them. |
+| 5 | `gate` | Canary gate. The `canary` counter sum over all labels does not change in a quiet window of `QUIET_WINDOW_SECONDS` (20). The `canary` observes a control publish after the window. A scan of each host finds only the 0.6.0 publish of step 3. |
+| 6 | `unvet-v6` | Each host unvets core 0.6.0 and `ntt` 0.2.0 in one topology transaction. A 0.6.0 publish and an `ntt` 0.2.0 exercise fail at prepare. Drain gate: the script reads the synchronizer timeouts and waits. Each `v6-<host>` drops a 0.7.0 control publish. A scan of each host finds no 0.6.0 publish that its `v6` watcher did not observe. |
+| 7 | `switch-v7` | Each `v6-<host>` stops. On each host, the WARN logs, a scan from its start offset and the counter give the same dropped update ids. Each `v7-<host>` reobserves each of them. The three `v7` watchers agree. |
 | 8 | `enforce-v7` | 0.7.0 rejects a nonce above `uint32`. 0.6.0 accepts it while vetted, and fails after the unvet. The step can run again. |
 | 9 | `post-unvet` | Contracts from core 0.6.0 work under core 0.7.0. Contracts from `ntt` 0.2.0 work under `ntt` 0.3.0. `ntt_e2e.sh` passes. |
+| 10 | `rollback` | A watcher pinned to 0.6.0 reobserves a 0.6.0 update while no host vets 0.6.0. Then each host vets 0.6.0 and `ntt` 0.2.0 again. 0.6.0 exercises an `Emitter` from 0.7.0. `ntt` 0.2.0 exercises an `NttManager` from `ntt` 0.3.0. |
+| 11 | `restore` | Each host unvets core 0.6.0 and `ntt` 0.2.0 again. A 0.6.0 publish fails at prepare. |
+
+The `vet-v7` step vets `ntt` 0.3.0 `291fcf92` by package id when each host has it.
+Otherwise it uploads the NTT DAR, and stops if the DAR is a different package.
 
 The evidence log is `$LOCALNET_STATE_DIR/evidence/core_upgrade_rehearsal-<time>.log`.
 The directory with the same name holds the watcher observations, logs, counters and the dropped update ids.

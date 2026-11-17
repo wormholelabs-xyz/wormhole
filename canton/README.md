@@ -1276,7 +1276,7 @@ before the switch.
   the unvet. Migrate them to the new build before the unvet.
 - Third-party packages can call `wormhole-core` by package id. Their owners
   must also rebuild them on 0.7.0. Guardians cannot list these packages. The
-  canary counter of step 5 shows their messages: these run under 0.6.0.
+  canary of step 4 shows their messages: these run under 0.6.0.
 
 `ntt` 0.3.0 (`291fcf92`) is a valid upgrade of the deployed `ntt` 0.2.0
 (`8b9c3ee1`, NTT commit `1db4b3c`). `damlc` accepts the build of `ntt` 0.3.0
@@ -1291,55 +1291,166 @@ Their contracts need migration.
 > release.
 
 **Procedure: upgrade from 0.6.0 to 0.7.0.** In this order, the unvet of 0.6.0
-occurs immediately before the switch of the watcher pin. Thus no 0.6.0 message
-commits after the guardians stop the observation of 0.6.0.
+occurs immediately before the switch of the watcher pin. A drain gate between
+the unvet and the switch makes sure that the watchers pinned to 0.6.0 read each
+0.6.0 message.
 
-1. On a guardian participant, record the ledger end offset. This is the start
-   offset.
-2. Upload and vet 0.7.0 on each informee participant: the guardians, the
+0. On each guardian participant, record the ledger end offset. This is the
+   start offset of that participant. Each participant has different offsets.
+1. Upload and vet 0.7.0 on each informee participant: the guardians, the
    operator, the integrators and the users.
-3. Build each dependent package on 0.7.0. Upload and vet the new build on each
+2. Build each dependent package on 0.7.0. Upload and vet the new build on each
    informee participant.
-4. Tell integrators to submit with the 0.7.0 package id and the new dependent
-   package ids.
-5. Run a canary watcher pinned to 0.7.0. Monitor
-   `wormhole_canton_unpinned_publish_messages_total` with the 0.6.0 package id
-   as `executing_package_id`.
-6. Continue only when the canary counter shows no new 0.6.0 publish for the
-   agreed time. Record the ledger end offset. This is the gate offset.
-7. In one coordinated window, unvet 0.6.0 and each old dependent package on
+3. Tell integrators to submit with the 0.7.0 package id and the new dependent
+   package ids. Tell them the time of step 6. Refer to "Failure branches".
+4. Start the canary. Refer to "Canary" below.
+5. Do the canary gate. Refer to "Canary gate" below.
+6. In one coordinated window, unvet 0.6.0 and each old dependent package on
    each guardian participant. Use one topology transaction for each
-   participant.
-8. Make sure that each guardian participant vets 0.7.0 and does not vet 0.6.0.
-9. Wait 60 seconds. Then set `--cantonPackageID` to the 0.7.0 package id on
-   each guardian, and restart each guardian.
+   participant. Do not start this step in an LSU freeze window.
+7. Make sure that each guardian participant vets 0.7.0 and does not vet 0.6.0.
+8. Do the drain gate. Refer to "Drain gate" below. Keep each watcher pinned to
+   0.6.0 until the gate passes.
+9. Set `--cantonPackageID` to the 0.7.0 package id on each guardian, and
+   restart each guardian.
 10. Get the dropped update ids. Refer to "Dropped update ids" below.
 11. Send a reobservation request for each dropped update id.
 12. Tell the other informee participants to unvet 0.6.0 and the old dependent
     packages.
 
-> **WARNING:** Do not unvet 0.6.0 outside step 7. One participant that unvets
+> **WARNING:** Do not unvet 0.6.0 outside step 6. One participant that unvets
 > 0.6.0 stops each `guardianGovernance` transaction on 0.6.0 (§10).
 
-> **WARNING:** Do not do step 7 while a vetted dependent package calls 0.6.0.
+> **WARNING:** Do not do step 6 while a vetted dependent package calls 0.6.0.
 > Each transaction of that package then fails.
+
+**Signing outage in the canary window.** From step 1 to step 9, the guardian
+watchers stay pinned to 0.6.0. Thus no guardian signs a 0.7.0 message of this
+window. This includes each message of a dependent package on 0.7.0. The
+messages get VAAs only at step 11. Integrators see a delay, not a loss. Plan
+steps 1 to 11 as one short coordinated session. Decision U3 removes this
+outage. Refer to "Alternative" below.
+
+Step 11 needs each update on the participant ledger. Participant pruning
+removes old updates, and then a reobservation request fails.
+
+- On LocalNet, no participant has a pruning schedule.
+  `localnet/console/synchronizer_parameters.canton` shows `schedule=None` and
+  `participantSchedule=None` on the three participants.
+- A Splice validator prunes only when its operator sets the Helm value
+  `participantPruningSchedule`. The Canton Network documentation recommends
+  pruning. Its example has a retention of 30 days.
+- The retention of each guardian participant must be longer than the time from
+  step 0 to the last reobservation request.
+
+**Canary.** In production, the canary is the ledger scan
+`localnet/publish_message_scan.sh`. The scan has no guardian key and no gossip.
+It needs only `curl` and `jq`. A guardian runs it on its own participant:
+
+1. Make a Ledger API user with only the right `CanReadAs(guardianGovernance)`.
+2. Get a JWT for this user from the identity provider of the participant.
+   Write the JWT to a file with mode 0600.
+3. Run `publish_message_scan.sh <json-api-url> <token-file>
+   <guardianGovernance-party> <start-offset>`.
+4. Keep each output line whose `executingPackageId` is not the 0.7.0 package
+   id.
+
+> **WARNING:** Do not start a second `guardiand` with the guardian key as a
+> canary. That node signs the messages of a package that the quorum did not
+> agree to. It also uses the gossip identity of the main node.
+
+**Canary gate.** Continue to step 6 only when each condition is true:
+
+1. Quiet window: for the agreed time, the canary finds no new publish under a
+   package other than 0.7.0. A canary watcher uses the sum of
+   `wormhole_canton_unpinned_publish_messages_total` over all labels.
+   This sum includes the label `other`.
+2. Positive control: after the window, the coordinator publishes a control
+   message under 0.7.0. The canary must find it. Thus the canary read the
+   ledger up to the end of the window.
+3. A scan from the start offset to the control message lists each publish
+   under a package other than 0.7.0. A VAA exists for each of them.
+
+**Drain gate.** A request with a sequencing time before the unvet can commit
+after the unvet. The participant gives it an offset after the unvet. The
+watchers pinned to 0.6.0 must read it before the restart. If the guardians
+switch first, no watcher reads it. The gate replaces a fixed wait:
+
+1. After step 7, record the ledger end of each guardian participant. This is
+   the unvet offset.
+2. Read the dynamic synchronizer parameters with the Canton Console command
+   `topology.synchronizer_parameters.get_dynamic_synchronizer_parameters`.
+3. Add `confirmation response timeout`, `mediator reaction timeout` and
+   `ledger time record time tolerance`. Add a margin of 30 seconds. Wait for
+   this time.
+4. Publish a control message under 0.7.0.
+5. On each guardian, find the WARN log for the drop of the control message.
+   The watcher reads the stream in offset order. Thus it read each update
+   before the control message.
+6. On each guardian participant, record the offset of the control message.
+   This is the gate offset.
+7. Scan from the start offset to the gate offset. Keep each publish under
+   0.6.0. Make sure that the guardian observed each of them.
+
+The values on LocalNet (Canton 3.7.3, Splice 0.10.2) are:
+
+| Parameter | Value |
+| - | - |
+| `confirmation response timeout` | 30s |
+| `mediator reaction timeout` | 30s |
+| `ledger time record time tolerance` | 1m |
+| `preparation time record time tolerance` | 24h |
+
+Thus the LocalNet wait is 150 seconds. The mediator decides each request
+before the sum of the two timeouts after its sequencing time. The ledger time
+tolerance limits the delay between the ledger time and the sequencing time.
+Thus the wait applies if Canton checks the vetting at the sequencing time or
+at the ledger time. Get the values of the Global Synchronizer before the
+upgrade.
+
+**Recovery: a 0.6.0 message without a VAA after the switch.** No re-vet is
+necessary. A reobservation reads a committed update, and the read does not
+use the vetting state.
+
+1. A quorum of guardians sets `--cantonPackageID` to the 0.6.0 package id and
+   restarts.
+2. Send a reobservation request for each 0.6.0 update id without a VAA.
+3. When each VAA exists, set `--cantonPackageID` to the 0.7.0 package id and
+   restart.
+4. Scan for the 0.7.0 updates from step 1 to step 3. Send a reobservation
+   request for each of them.
+
+The LocalNet `rollback` step shows this: a watcher pinned to 0.6.0 reobserves
+a 0.6.0 update while no participant vets 0.6.0.
+
+**Failure branches.**
+
+- A guardian is late or fails after step 6. A 0.7.0 message gets a VAA only
+  when a quorum of guardians observes it. After each guardian restarts, send
+  the reobservation requests of step 11 again.
+- An LSU freeze window starts during step 6. Then some participants vet 0.6.0,
+  and others do not. One participant that does not vet 0.6.0 stops each 0.6.0
+  transaction. Start the drain gate at the first unvet. Complete the unvet
+  after the upgrade time.
+- An informee participant does not vet 0.7.0 before step 6. After step 6,
+  each transaction with an informee on that participant fails. Its contracts
+  stay frozen until it vets 0.7.0. Tell each integrator about this risk at
+  step 3.
 
 **Message loss analysis.** These rules apply to a guardian that does the
 procedure in this order.
 
-- A 0.6.0 message that commits before the unvet takes effect: the watchers
-  pinned to 0.6.0 observe it. They still run.
+- A 0.6.0 message that commits before the gate offset: the watchers pinned to
+  0.6.0 observe it. The drain gate checks this.
 - A 0.6.0 submission after the unvet: the prepare step or the confirmation
   step rejects it. The transaction does not commit. No value moves, and the
   emitter sequence number does not change.
-- A 0.7.0 message from step 2 to step 9: the watchers pinned to 0.6.0 drop it.
+- A 0.7.0 message from step 1 to step 9: the watchers pinned to 0.6.0 drop it.
   The ledger keeps it. Reobservation in step 11 recovers it.
 - A 0.7.0 message from the restart window: the restarted watcher starts at the
   ledger end. Reobservation in step 11 recovers it.
-- A 0.6.0 message that commits before the unvet, but that a watcher did not
-  read before the restart: a watcher pinned to 0.7.0 cannot recover it. The
-  wait of step 9 makes this window small. The 0.6.0 scan below finds such
-  messages.
+- A 0.6.0 message that a watcher did not observe: the scan of the drain gate
+  finds it before the switch. After the switch, use the recovery procedure.
 
 **Dropped update ids.** Use two sources and compare them.
 
@@ -1347,15 +1458,52 @@ procedure in this order.
    than the pinned package` of each watcher pinned to 0.6.0. Its `updateId`
    field holds the update id. Its `executingPackageId` field holds the 0.7.0
    package id.
-2. A scan of the ledger. Read the updates from the start offset to the current
-   ledger end as `guardianGovernance`. Use `UpdateService.GetUpdates` with the
-   ledger effects shape. Keep each update with a `PublishMessage`
-   `ExercisedEvent` whose template package id is the 0.7.0 package id.
+2. A scan of the ledger with `localnet/publish_message_scan.sh` from the start
+   offset to the current ledger end. Keep each line with the 0.7.0 package id.
 
 The scan also covers the restart window. A user with only
 `CanReadAs(guardianGovernance)` can do the scan. Also scan for 0.6.0
-`PublishMessage` updates from the gate offset to the current ledger end. Make
-sure that a VAA exists for each of them.
+`PublishMessage` updates from the gate offset to the current ledger end. The
+result must be empty.
+
+After a stream error, the watcher continues from the offset of its last
+observation. Thus it reads the drops after that offset again. The WARN log
+and the counter then count such a drop two times. Compare the sets of update
+ids, not the counter values.
+
+**Scan paging.** The JSON Ledger API rejects a request when more updates match
+than its node limit. The LocalNet limit is 200: `The number of matching
+elements (201) is greater than the node limit (200)`. The script reads pages
+of `SCAN_PAGE_SIZE` updates (default 200). It continues after the last offset
+of each full page. Set `SCAN_PAGE_SIZE` to a value that is not more than the
+node limit of your participant.
+
+**Rollback.** A rollback to 0.6.0 is the same procedure with the two versions
+in the opposite roles. The guardians re-vet 0.6.0 and the old dependent
+packages, and pin the watchers to 0.6.0. The LocalNet `rollback` step starts
+after the unvet of 0.6.0 and `ntt` 0.2.0. Results:
+
+- The re-vet of 0.6.0 and `ntt` 0.2.0 is one topology transaction on each
+  participant.
+- A 0.6.0 `PublishMessage` on an `Emitter` that 0.7.0 created commits. The
+  three watchers pinned to 0.6.0 observe it.
+- An `ntt` 0.2.0 `SetPaused` on an `NttManager` that `ntt` 0.3.0 created
+  commits. The new `NttManager` is an `ntt` 0.2.0 contract.
+- The `prepare` step unvets 0.7.0 and `ntt` 0.3.0. Then 0.6.0 publishes on
+  contracts that 0.7.0 created commit.
+- The `restore` step unvets 0.6.0 and `ntt` 0.2.0 again. Then a 0.6.0
+  publish fails at prepare.
+
+**Point of no return.** The 0.6.0 and 0.7.0 templates have the same fields,
+and `ntt` 0.2.0 reads each `ntt` 0.3.0 contract. Thus this upgrade has no
+technical point of no return. These limits apply:
+
+- A later version can add an optional field. When a contract gets a value in
+  that field, the old version cannot use the contract. That contract is the
+  point of no return.
+- A rollback restores the 0.6.0 defects that 0.7.0 corrects. An example is
+  the nonce above `uint32`.
+- A rollback causes the signing outage again, for the 0.7.0 messages.
 
 **LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` runs this
 procedure on three `guardianGovernance` hosts (`localnet/README.md`). Each
@@ -1370,9 +1518,18 @@ guardian participant and an informee participant. Results:
   each host. Then a 0.6.0 `PublishMessage` and an `ntt` 0.2.0 `SetPaused`
   fail with `INVALID_PRESCRIBED_SYNCHRONIZER_ID`. The error names each host
   with `has not vetted`. The `Emitter` does not change.
-- The WARN logs, the scan and the counter of the 0.6.0 watcher agree on 8
-  dropped 0.7.0 updates. The watcher pinned to 0.7.0 recovers each of them by
-  reobservation.
+- The canary gate: in a quiet window of 20 seconds, the canary counter sum
+  over all labels stays 1. The canary observes the control publish after the
+  window. A scan of each participant finds only the 0.6.0 publish of the
+  same window.
+- The drain gate reads the timeouts above and waits 150 seconds. Each of the
+  three watchers pinned to 0.6.0 drops the control publish. On each
+  participant, the scan to the gate offset finds one 0.6.0 publish, and the
+  watcher of that participant observed it.
+- One watcher runs on each of the three participants. On each participant, the
+  WARN logs, the scan and the counter agree on 9 dropped 0.7.0 updates. The
+  three participants give the same update ids. The three watchers pinned to
+  0.7.0 recover each of them by reobservation, and agree on 10 observations.
 - After the unvet, contracts that 0.6.0 created work under 0.7.0.
   `PublishMessage` on such an `Emitter` and `ParseAndVerifyVAA` on such a
   `CoreState` commit. A contract that `ntt` 0.2.0 created works under `ntt`
@@ -1386,10 +1543,9 @@ guardian participant and an informee participant. Results:
 > DAR that are not vetted. It stops if the NTT DAR calls a `wormhole-core`
 > version that is not the newest vetted version.
 
-**Open item.**
-
-- The two-package window below replaces this procedure if the owner approves
-  proposal U3.
+**Alternative.** Decision U3 is a watcher that accepts two package ids in the
+migration window. The next section gives that procedure. Then the upgrade has
+no signing outage, no drain gate and no coordinated restart.
 
 #### Upgrade with a two-package window (proposal U3)
 
