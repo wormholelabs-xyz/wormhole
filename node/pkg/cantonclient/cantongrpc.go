@@ -315,6 +315,9 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	if emitterID < 0 || seq < 0 || nonce < 0 || nonce > math.MaxUint32 || cl < 0 || cl > math.MaxUint8 {
 		return CantonMessage{}, fmt.Errorf("field out of range (emitterId=%d seq=%d nonce=%d cl=%d)", emitterID, seq, nonce, cl)
 	}
+	if emitterID > MaxEmitterID {
+		return CantonMessage{}, fmt.Errorf("emitterId exceeds MaxEmitterID (emitterId=%d)", emitterID)
+	}
 	return CantonMessage{
 		Registrar:        registrar,
 		Owner:            owner,

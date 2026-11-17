@@ -23,6 +23,9 @@ type TemplateID struct {
 	EntityName string
 }
 
+// MaxEmitterID is Wormhole.Core.State.maxEmitterId (2^53 - 1), pinned by TestMaxEmitterIDMatchesDaml.
+const MaxEmitterID = 1<<53 - 1
+
 // CantonMessage is the decoded Wormhole.Core.State.WormholeMessage record
 // produced by the PublishMessage choice. Field types match the Daml definition:
 // hex Text becomes []byte here, Daml Int becomes the appropriately-sized Go int.
