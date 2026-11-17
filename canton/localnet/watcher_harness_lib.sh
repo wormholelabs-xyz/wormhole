@@ -102,7 +102,7 @@ run_harness_on() {
   local validator_name="$1" name="$2" core_package_id="$3" reobserve_update_ids="$4" max_seconds="$5" waited_seconds
   local token_file="$WATCHER_DIR/$name.jwt"
   ensure_watcher_user "$validator_name"
-  rm -f "$WATCHER_DIR/$name".{ready,stop,jsonl,metrics.json,pid,exit} "$WATCHER_DIR/watcher.jwt"
+  rm -f "$WATCHER_DIR/$name".{ready,stop,jsonl,metrics.json,pid,exit,requests} "$WATCHER_DIR/watcher.jwt"
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$token_file")
   (
     CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
@@ -114,6 +114,7 @@ run_harness_on() {
     CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
     CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \
     CANTON_LOCALNET_REOBSERVE_UPDATE_IDS="$reobserve_update_ids" \
+    CANTON_LOCALNET_REOBSERVE_REQUEST_FILE="$WATCHER_DIR/$name.requests" \
     CANTON_LOCALNET_MAX_SECONDS="$max_seconds" \
       nohup "$(harness_binary)" -test.run TestCantonWatcherLocalNet -test.v > "$WATCHER_DIR/$name.log" 2>&1 &
     echo $! > "$WATCHER_DIR/$name.pid"
@@ -207,4 +208,13 @@ canary_gate_decision() {
   else
     echo waiting
   fi
+}
+
+# request_reobservations <name> <update-ids, one per line>: a reobservation request to the running harness <name>.
+# The harness reads the request file every 500 ms. The rename keeps each read of the file complete.
+request_reobservations() {
+  local request_file="$WATCHER_DIR/$1.requests" partial_file
+  partial_file="$(mktemp "$request_file.XXXXXX")"
+  { [[ ! -f "$request_file" ]] || cat "$request_file"; printf '%s\n' "$2"; } > "$partial_file"
+  mv -f "$partial_file" "$request_file"
 }

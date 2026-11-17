@@ -15,6 +15,9 @@ import (
 
 const localNetMaxReobservations = 64
 
+// localNetMaxReobservationRequestFileBytes allows one 68-character update id and a line end per request.
+const localNetMaxReobservationRequestFileBytes = localNetMaxReobservations * 70
+
 // parseReobserveUpdateIDs parses a comma-separated list of Ledger API update ids.
 func parseReobserveUpdateIDs(updateIDList string) ([]cantonclient.UpdateID, error) {
 	var updateIDs []cantonclient.UpdateID
@@ -68,6 +71,38 @@ func (tracker *reobservedUpdateTracker) recordReobservation(updateID cantonclien
 
 func (tracker reobservedUpdateTracker) allRequestedUpdatesObserved() bool {
 	return len(tracker.observed) == len(tracker.requested)
+}
+
+// readNewReobservationRequestIDs returns the update ids of a request file (one per line) that the tracker has not
+// requested yet, in file order, and adds them to the requested set. On an error the requested set stays unchanged.
+func (tracker *reobservedUpdateTracker) readNewReobservationRequestIDs(fileContent string) ([]cantonclient.UpdateID, error) {
+	var newUpdateIDs []cantonclient.UpdateID
+	newUpdateIDSet := make(map[cantonclient.UpdateID]struct{})
+	for _, line := range strings.Split(fileContent, "\n") {
+		updateIDText := strings.TrimSpace(line)
+		if updateIDText == "" {
+			continue
+		}
+		updateID, err := cantonclient.ParseUpdateID(updateIDText)
+		if err != nil {
+			return nil, err
+		}
+		if _, requested := tracker.requested[updateID]; requested {
+			continue
+		}
+		if _, duplicate := newUpdateIDSet[updateID]; duplicate {
+			continue
+		}
+		newUpdateIDSet[updateID] = struct{}{}
+		newUpdateIDs = append(newUpdateIDs, updateID)
+		if len(tracker.requested)+len(newUpdateIDs) > localNetMaxReobservations {
+			return nil, fmt.Errorf("at most %d requested update ids, got more", localNetMaxReobservations)
+		}
+	}
+	for _, updateID := range newUpdateIDs {
+		tracker.requested[updateID] = struct{}{}
+	}
+	return newUpdateIDs, nil
 }
 
 // drainPublications writes each queued publication, at most maxDrained, and returns the count.

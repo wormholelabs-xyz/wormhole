@@ -12,6 +12,7 @@
 //	CANTON_LOCALNET_CORE_PACKAGE_VERSION=<core package version> \
 //	CANTON_LOCALNET_OBSERVATIONS_FILE=<out.jsonl> CANTON_LOCALNET_READY_FILE=<path> CANTON_LOCALNET_STOP_FILE=<path> \
 //	CANTON_LOCALNET_METRICS_FILE=<out.json> CANTON_LOCALNET_REOBSERVE_UPDATE_IDS=<update id,...> \
+//	CANTON_LOCALNET_REOBSERVE_REQUEST_FILE=<path> \
 //	go test -tags localnet -run TestCantonWatcherLocalNet ./pkg/watchers/canton -v -timeout 15m
 //
 // The harness writes one JSON line per observation (live and reobserved). It stops when the stop
@@ -26,6 +27,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -96,6 +98,7 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	stopFile := requiredEnv(t, "CANTON_LOCALNET_STOP_FILE")
 	reobserveUpdateIDs, err := parseReobserveUpdateIDs(os.Getenv("CANTON_LOCALNET_REOBSERVE_UPDATE_IDS"))
 	require.NoError(t, err)
+	reobserveRequestFile := os.Getenv("CANTON_LOCALNET_REOBSERVE_REQUEST_FILE")
 	maxSeconds := localNetDefaultMaxSeconds
 	if value := os.Getenv("CANTON_LOCALNET_MAX_SECONDS"); value != "" {
 		maxSeconds, err = strconv.Atoi(value)
@@ -183,6 +186,9 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 			require.NoError(t, writeObservation(observation))
 		case <-stopTicker.C:
 			writeUnpinnedPublishCounts(t, metricsFile)
+			for _, updateID := range readReobservationRequestFile(t, reobserveRequestFile, &reobservedUpdates) {
+				obsvReqC <- &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: updateID.TxID()}
+			}
 			if _, err := os.Stat(stopFile); err == nil && reobservedUpdates.allRequestedUpdatesObserved() {
 				_, err := drainPublications(msgC, cap(msgC), writeObservation)
 				require.NoError(t, err)
@@ -191,6 +197,26 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 			}
 		}
 	}
+}
+
+// readReobservationRequestFile returns the update ids of the request file that the harness has not requested yet.
+// It models a reobservation request to a running guardian. An empty path or an absent file has no requests.
+func readReobservationRequestFile(t *testing.T, requestFile string, reobservedUpdates *reobservedUpdateTracker) []cantonclient.UpdateID {
+	t.Helper()
+	if requestFile == "" {
+		return nil
+	}
+	fileInfo, err := os.Stat(requestFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+	require.LessOrEqual(t, fileInfo.Size(), int64(localNetMaxReobservationRequestFileBytes), "reobservation request file too large")
+	fileContent, err := os.ReadFile(requestFile)
+	require.NoError(t, err)
+	newUpdateIDs, err := reobservedUpdates.readNewReobservationRequestIDs(string(fileContent))
+	require.NoError(t, err)
+	return newUpdateIDs
 }
 
 // checkCreateRejectsAnUnpinnedConfig: outside unsafe dev mode, Create refuses an empty package id or read-as party.
