@@ -91,6 +91,17 @@ write_fixture archived_registry_high "$read_only_rights" \
   "$(jq -c --argjson first "$(update_at 4 "$registry_next_10")" --argjson second "$(update_at 5 "$registry_next_2")" \
     '. + [$first, $second]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$registry_next_2]"
+# write_history_emitter_fixture <name> <emitter-id>: the clean history plus an archived Emitter with this id.
+write_history_emitter_fixture() {
+  write_fixture "$1" "$read_only_rights" \
+    "$(jq -c --argjson extra "$(update_at 4 "$(emitter_event "id$2" "$OWNER_B" "$2")")" '. + [$extra]' <<< "$base_history")" \
+    "[$emitter_a0_successor,$emitter_b1]"
+}
+write_history_emitter_fixture emitter_id_max 9007199254740991
+write_history_emitter_fixture emitter_id_above_max 9007199254740992
+write_history_emitter_fixture emitter_id_int64_max 9223372036854775807
+write_history_emitter_fixture emitter_id_leading_zero 01
+write_history_emitter_fixture emitter_id_negative -1
 write_fixture rogue_gg_ignored "$read_only_rights" \
   "$(jq -c --argjson extra "$(update_at 4 "$emitter_rogue_gg")" '. + [$extra]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$emitter_rogue_gg]"
@@ -130,6 +141,12 @@ test_cases=(
   "rogue guardianGovernance emitter is ignored|rogue_gg_ignored|200|0||0|0|\"firstId\":2"
   "begin offset without baseline is refused|clean|200|2||0|2|needs <baseline-max-emitter-id>"
   "begin offset with baseline keeps the baseline|clean|200|3|7|0|0|\"firstId\":8"
+  "emitter id 2^53 - 1 gives an exact firstId|emitter_id_max|200|0||0|0|\"firstId\":9007199254740992"
+  "emitter id 2^53 fails|emitter_id_above_max|200|0||0|1|outside 0..maxEmitterId"
+  "emitter id 2^63 - 1 fails|emitter_id_int64_max|200|0||0|1|outside 0..maxEmitterId"
+  "emitter id with a leading zero fails|emitter_id_leading_zero|200|0||0|1|outside 0..maxEmitterId"
+  "negative emitter id fails|emitter_id_negative|200|0||0|1|outside 0..maxEmitterId"
+  "baseline above maxEmitterId is refused|clean|200|3|9007199254740992|0|2|baseline"
 )
 
 failed_cases=0
