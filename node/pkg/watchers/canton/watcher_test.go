@@ -12,6 +12,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -482,47 +483,98 @@ func acceptedPackageIDSeries(t *testing.T) map[string]string {
 	return series
 }
 
+func windowPackageIDs(t *testing.T, acceptedUntil time.Time, startupWallClock time.Time) cantonclient.AcceptedPackageIDs {
+	t.Helper()
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{
+		PackageIDHex:     testRetiringPackageID,
+		AcceptedUntilUTC: acceptedUntil.Format(cantonclient.RetiringPackageDeadlineLayout),
+	}, startupWallClock)
+	require.NoError(t, err)
+	return accepted
+}
+
 func TestReportAcceptedPackageIDs(t *testing.T) {
-	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	reportWallClock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	futureDeadline := reportWallClock.Add(24 * time.Hour)
+	pastDeadline := reportWallClock.Add(-time.Hour)
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, reportWallClock)
 	require.NoError(t, err)
 	cases := []struct {
-		name                     string
-		acceptedPackageIDs       cantonclient.AcceptedPackageIDs
-		wantSeries               map[string]string
-		wantUpgradeWindowWarning bool
+		name                string
+		acceptedPackageIDs  cantonclient.AcceptedPackageIDs
+		wantSeries          map[string]string
+		wantDeadlineSeconds float64
+		wantWarningMessages []string
 	}{
 		{
-			name:                     "upgrade window",
-			acceptedPackageIDs:       testUpgradeWindowPackageIDs(t),
-			wantSeries:               map[string]string{"primary": testCurrentPackageID, "next": testRetiringPackageID},
-			wantUpgradeWindowWarning: true,
+			name:                "upgrade window",
+			acceptedPackageIDs:  windowPackageIDs(t, futureDeadline, reportWallClock),
+			wantSeries:          map[string]string{"current": testCurrentPackageID, "retiring": testRetiringPackageID},
+			wantDeadlineSeconds: float64(futureDeadline.Unix()),
+			wantWarningMessages: []string{upgradeWindowOpenMessage},
 		},
 		{
-			name:               "primary only replaces the window series",
-			acceptedPackageIDs: primaryOnlyPackageIDs,
-			wantSeries:         map[string]string{"primary": testCurrentPackageID},
+			name:                "upgrade window after its deadline",
+			acceptedPackageIDs:  windowPackageIDs(t, pastDeadline, reportWallClock),
+			wantSeries:          map[string]string{"current": testCurrentPackageID, "retiring": testRetiringPackageID},
+			wantDeadlineSeconds: float64(pastDeadline.Unix()),
+			wantWarningMessages: []string{upgradeWindowOpenMessage, retiringDeadlinePassedMessage},
+		},
+		{
+			name:               "current only replaces the window series",
+			acceptedPackageIDs: currentOnlyPackageIDs,
+			wantSeries:         map[string]string{"current": testCurrentPackageID},
 		},
 		{
 			name:               "dev-mode wildcard",
 			acceptedPackageIDs: cantonclient.AcceptAnyPackageID(),
-			wantSeries:         map[string]string{"primary": "*"},
+			wantSeries:         map[string]string{"current": "*"},
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			core, logs := observer.New(zapcore.WarnLevel)
 
-			reportAcceptedPackageIDs(zap.New(core), tc.acceptedPackageIDs)
+			reportAcceptedPackageIDs(zap.New(core), tc.acceptedPackageIDs, reportWallClock)
 
 			assert.Equal(t, tc.wantSeries, acceptedPackageIDSeries(t))
-			if !tc.wantUpgradeWindowWarning {
-				assert.Zero(t, logs.Len())
+			assert.Equal(t, tc.wantDeadlineSeconds, testutil.ToFloat64(retiringPackageAcceptedUntilGauge))
+			messages := make([]string, 0, logs.Len())
+			for _, entry := range logs.All() {
+				messages = append(messages, entry.Message)
+			}
+			assert.Equal(t, len(tc.wantWarningMessages), len(messages))
+			for index, wantMessage := range tc.wantWarningMessages {
+				assert.Equal(t, wantMessage, messages[index])
+			}
+			if len(tc.wantWarningMessages) == 0 {
 				return
 			}
-			require.Equal(t, 1, logs.Len())
 			fields := logs.All()[0].ContextMap()
 			assert.Equal(t, testCurrentPackageID, fields["currentPackageId"])
 			assert.Equal(t, testRetiringPackageID, fields["retiringPackageId"])
+		})
+	}
+}
+
+func TestHeartbeatContractAddress(t *testing.T) {
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	cases := []struct {
+		name               string
+		acceptedPackageIDs cantonclient.AcceptedPackageIDs
+		want               string
+	}{
+		{name: "current only", acceptedPackageIDs: currentOnlyPackageIDs, want: testCurrentPackageID},
+		{name: "upgrade window", acceptedPackageIDs: windowPackageIDs(t, time.Now().Add(time.Hour), time.Now()), want: testCurrentPackageID + "," + testRetiringPackageID},
+		{name: "dev-mode wildcard", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), want: "*"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &Watcher{acceptedPackageIDs: tc.acceptedPackageIDs}
+			contractAddress := w.heartbeatContractAddress()
+			assert.Equal(t, tc.want, contractAddress)
+			assert.LessOrEqual(t, len(contractAddress), maxHeartbeatContractAddressLen)
 		})
 	}
 }
