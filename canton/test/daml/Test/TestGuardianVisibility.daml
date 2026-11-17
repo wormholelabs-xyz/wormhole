@@ -1,0 +1,110 @@
+-- | Guardian visibility of the attestation surface through @guardianGovernance@.
+--
+-- Every guardian participant hosts @guardianGovernance@, so it is the party
+-- that makes guardians informees of each 'PublishMessage'. Script-level proxy
+-- for "informee of the consuming exercise": the successor contract is visible
+-- to the party ('query' / 'queryContractId'). The Go integration test covers
+-- the update stream.
+module Test.TestGuardianVisibility where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import Wormhole.Core.State
+import Wormhole.Core.Setup (mkInitialEmitterRegistry)
+import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
+
+-- | Alice owns the emitter; guardianGovernance sees it after a publish.
+testGovernanceSeesThirdPartyPublishedMessage : Script ()
+testGovernanceSeesThirdPartyPublishedMessage = do
+  (operator, guardianGovernance, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter operator alice
+  _ <- publishVia operator csId alice emitterId 7 "deadbeef" 0
+
+  [(_, em)] <- query @Emitter guardianGovernance
+  em.owner === alice
+  em.sequence === 1
+
+-- | guardianGovernance sees the successor CoreState after a governance VAA.
+testGovernanceSeesCoreStateTransitions : Script ()
+testGovernanceSeesCoreStateTransitions = do
+  (operator, guardianGovernance, csId) <- setup
+  Some cs <- queryContractId guardianGovernance csId
+  cs.guardianSetIndex === 0
+  (fromSome (Map.lookup 0 cs.guardianSets)).keys === [devnetGuardian]
+
+  newCsId <- submit operator do
+    exerciseCmd csId SubmitGovernanceVAA with
+      encodedVAA = govSetFeeVAA
+      pubKeys = [(0, devnetGuardianPubKey)]
+  Some cs' <- queryContractId guardianGovernance newCsId
+  cs'.messageFee === 1000
+
+-- | Emitter stakeholders are operator, owner and guardianGovernance only.
+testOutsiderSeesNoMessage : Script ()
+testOutsiderSeesNoMessage = do
+  (operator, _, csId) <- setup
+  alice <- allocateParty "Alice"
+  outsider <- allocateParty "Outsider"
+  emitterId <- registerEmitter operator alice
+  _ <- publishVia operator csId alice emitterId 7 "deadbeef" 0
+
+  emitters <- query @Emitter outsider
+  assertMsg "outsider must not see the emitter" (null emitters)
+
+-- | EmitterRegistry stakeholders: operator only.
+testGovernanceDoesNotSeeRegistry : Script ()
+testGovernanceDoesNotSeeRegistry = do
+  (operator, guardianGovernance, _) <- setup
+  [(regId, _)] <- query @EmitterRegistry operator
+  regView <- queryContractId guardianGovernance regId
+  regView === None
+
+-- | Publish and archive of an integrator's emitter require the owner.
+testGovernanceHasNoEmitterAuthority : Script ()
+testGovernanceHasNoEmitterAuthority = do
+  (operator, guardianGovernance, csId) <- setup
+  alice <- allocateParty "Alice"
+  emitterId <- registerEmitter operator alice
+
+  submitMustFail guardianGovernance do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, payer = alice, feeAllocation = None
+  -- guardianGovernance as payer: only the owner's authority is missing.
+  submitMustFail guardianGovernance do
+    exerciseCmd emitterId PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, payer = guardianGovernance, feeAllocation = None
+  submitMustFail guardianGovernance do archiveCmd emitterId
+
+  (_, msg) <- publishVia operator csId alice emitterId 7 "dead" 0
+  msg.sequence === 0
+
+-- | An Emitter from a registry under a rogue guardianGovernance is visible to
+-- that rogue party only, and publishing it against the real CoreState aborts
+-- on the guardianGovernance pin.
+testRogueGovernanceEmitterCannotPublishOnRealCoreState : Script ()
+testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
+  (operator, guardianGovernance, csId) <- setup
+  rogueGovernance <- allocateParty "RogueGovernance"
+  alice <- allocateParty "Alice"
+  rogueRegistryCid <- submit operator do
+    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
+  (_, rogueEmitterCid) <- submit (actAs alice <> disclose rogueRegistryDisclosure) do
+    exerciseCmd rogueRegistryCid RegisterEmitter with
+      requester = alice, payer = alice, coreStateCid = None, feeAllocation = None
+
+  Some rogueEmitter <- queryContractId rogueGovernance rogueEmitterCid
+  rogueEmitter.guardianGovernance === rogueGovernance
+  realGovernanceView <- queryContractId guardianGovernance rogueEmitterCid
+  realGovernanceView === None
+
+  csDisclosure <- fromSome <$> queryDisclosure operator csId
+  submitMustFail (actAs alice <> disclose csDisclosure) do
+    exerciseCmd rogueEmitterCid PublishMessage with
+      nonce = 1, payload = "00", consistencyLevel = 0
+      coreStateCid = csId, payer = alice, feeAllocation = None

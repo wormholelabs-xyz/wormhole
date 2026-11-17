@@ -38,15 +38,13 @@ mkInitialCoreState :
   -> Int          -- ^ governance chain id
   -> Bytes32      -- ^ governance contract
   -> [Bytes20]    -- ^ initial guardian addresses (set 0)
-  -> Party        -- ^ guardianObserver (read-only guardian observer party)
   -> InstrumentId -- ^ fee instrument (CC on mainnet)
   -> Party        -- ^ fee recipient (guardianGovernance in production)
   -> CoreState
-mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians guardianObserver feeInstrument feeRecipient =
+mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians feeInstrument feeRecipient =
   CoreState with
     operator
     guardianGovernance
-    guardianObserver
     chainId = cantonChainId
     governanceChainId = govChain
     governanceContract = normalizeHex govContract
@@ -59,11 +57,11 @@ mkInitialCoreState operator guardianGovernance govChain govContract initialGuard
 
 -- | The emitter-id registry the operator creates alongside the 'CoreState' at
 -- setup (sequential ids). Carries @guardianGovernance@ (the fee-custody anchor,
--- pinned by 'RegisterEmitter') and @guardianObserver@, both threaded into each
--- 'Emitter'. Pass the same @guardianGovernance@ the 'CoreState' was created with.
-mkInitialEmitterRegistry : Party -> Party -> Party -> Int -> EmitterRegistry
-mkInitialEmitterRegistry operator guardianGovernance guardianObserver registrationFee =
-  EmitterRegistry with operator, guardianGovernance, guardianObserver, registrationFee, nextId = 0
+-- pinned by 'RegisterEmitter', and the observer of each 'Emitter'). Pass the
+-- same @guardianGovernance@ the 'CoreState' was created with.
+mkInitialEmitterRegistry : Party -> Party -> Int -> EmitterRegistry
+mkInitialEmitterRegistry operator guardianGovernance registrationFee =
+  EmitterRegistry with operator, guardianGovernance, registrationFee, nextId = 0
 
 -- | The replay-root registry (the stateless claim anchor) the operator creates
 -- alongside the 'CoreState' at setup; hands a 'ReplayNode' trie root to any

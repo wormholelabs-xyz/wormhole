@@ -35,17 +35,17 @@ dpm script \
   --ledger-port "${PORT}" \
   --output-file "${RESULT}"
 
-# The setup script returns a tuple {"_1": <Operator>, "_2": <GuardianObserver>,
+# The setup script returns a tuple {"_1": <Operator>, "_2": <GuardianGovernance>,
 # "_3": <ContractId>} as JSON. Party ids are the quoted values containing "::"
 # (the namespace separator); the contract id has none. The parties appear in
-# result order, so _1 is the operator and _2 is the read-only guardianObserver
-# (the party a production guardian reads as via --cantonReadAsParty). The devnet
+# result order, so _1 is the operator and _2 is guardianGovernance (the party a
+# production guardian reads as via --cantonReadAsParty). The devnet
 # sandbox is a single participant, so no topology work is needed; both ids are
 # surfaced for information / wiring only.
 OPERATOR_PARTY="$(grep -oE '"[^"]*::[^"]*"' "${RESULT}" | sed -n '1p' | tr -d '"')"
-OBSERVER_PARTY="$(grep -oE '"[^"]*::[^"]*"' "${RESULT}" | sed -n '2p' | tr -d '"')"
+GOVERNANCE_PARTY="$(grep -oE '"[^"]*::[^"]*"' "${RESULT}" | sed -n '2p' | tr -d '"')"
 echo "[canton] setup complete; Operator party: ${OPERATOR_PARTY}"
-echo "[canton] guardianObserver party (read-only; --cantonReadAsParty): ${OBSERVER_PARTY}"
+echo "[canton] guardianGovernance party (--cantonReadAsParty): ${GOVERNANCE_PARTY}"
 
 touch /canton/success
 echo "[canton] bootstrap done; sleeping"
