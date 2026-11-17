@@ -402,22 +402,25 @@ Step 16 reads each update from your participant.
 Participant pruning removes old updates, and then the reobservation request fails.
 Make sure that the retention of your participant is longer than the time from step 2 to step 16.
 
-**Open item:** contracts that the old version created, after the unvet of the old version.
-Vetting can also apply to the package that created an input contract.
-Before step 10, test this on a test network.
-The contracts are `CoreState`, `EmitterRegistry`, `Emitter` and the replay contracts.
+After the unvet, contracts that the old version created work under the new version.
+The LocalNet rehearsal of the upgrade from 0.6.0 to 0.7.0 shows this for `CoreState` and `Emitter`.
+`canton/localnet/README.md` gives the rehearsal and its limits.
+The rehearsal needs a LocalNet from before the 0.8.0 genesis.
 
-**Open item:** a LocalNet rehearsal of this procedure.
+**Open item:** a LocalNet run of the abort procedure (Section 6.7.4).
 
 #### 6.7.1 Get the dropped update IDs
 
-1. After step 14, do the canary scan (Section 6.7.2) from the start offset to the ledger end.
-2. Keep each `PublishMessage` with the new core package ID as the executing package ID.
-3. Compare the update IDs with the WARN logs of your watcher.
+1. After step 14, record the ledger end offset of your participant. This is the restart offset.
+2. Do the canary scan (Section 6.7.2) from the start offset to the restart offset.
+3. Keep each `PublishMessage` with the new core package ID as the executing package ID.
+4. Compare the update IDs with the WARN logs of your watcher.
    The log text is `canton: dropped PublishMessage executed by a package other than the pinned package`.
    The `updateId` field of each log is a dropped update ID.
-4. If the two lists are different, use the scan list. Tell the coordinator about the difference.
-5. Scan from the gate offset of Section 6.7.3 to the ledger end.
+5. Make sure that the scan list contains each update ID of the WARN logs.
+   The other update IDs of the scan list are messages of the restart period.
+6. If a WARN log update ID is not in the scan list, tell the coordinator.
+7. Scan from the gate offset of Section 6.7.3 to the restart offset.
    Make sure that no `PublishMessage` has the old core package ID.
 
 After a stream error, the watcher continues from the offset of its last observation.
@@ -428,13 +431,26 @@ Compare the sets of update IDs, not the counter values.
 #### 6.7.2 Canary scan and canary gate
 
 The canary scan is a read of the ledger with a Ledger API user that has no right to submit.
+The tool is [`publish_message_scan.sh`](../canton/tools/publish_message_scan.sh). It needs only `curl` and `jq`.
 
 1. Make a Ledger API user with only the right `CanReadAs` for `guardianGovernance`.
-2. Read the updates of `guardianGovernance` from the start offset with `UpdateService.GetUpdates`.
-   Use the ledger effects transaction shape.
-3. Keep each `ExercisedEvent` of the choice `PublishMessage` on the `Emitter` template.
-4. Read the executing package ID from the `template_id` of each event.
-5. Record the offset, the update ID and the executing package ID of each event.
+2. Get a JWT for this user. Write the JWT to a file with mode 0600.
+3. Run the scan:
+
+   ```
+   publish_message_scan.sh <json-api-url> <token-file> <gg-party> <start-offset> [<end-offset> [<required-update-id>]]
+   ```
+
+4. Read the output. Each line is one `PublishMessage`, with its offset, update ID and executing package ID.
+
+Give a required update ID with each end offset.
+Use the update ID of the control message at the end offset.
+The scan fails if its output does not contain that update.
+A Ledger API response can end before the end offset, and the offsets alone do not show this.
+
+The scan reads pages of `SCAN_PAGE_SIZE` updates (default 200).
+Set `SCAN_PAGE_SIZE` to the node limit of your participant or less.
+Each `curl` call stops after `SCAN_CURL_MAX_SECONDS` (default 60).
 
 WARNING: Do not start a second `guardiand` with your guardian key as a canary.
 That node signs the messages of a package that the quorum did not agree to.
@@ -468,7 +484,8 @@ Your watcher, still pinned to the old core package ID, must observe it before th
 6. Wait for the control message of the coordinator under the new core package ID.
 7. Find the WARN log for the drop of the control message. Thus your watcher read each update before it.
 8. Record the offset of the control message on your participant. This is the gate offset.
-9. Scan from the start offset to the gate offset. Keep each `PublishMessage` with the old core package ID.
+9. Scan from the start offset to the gate offset, with the control message as the required update ID.
+   Keep each `PublishMessage` with the old core package ID.
 10. Make sure that your guardian observed each of these messages.
 11. Tell the coordinator the result.
 
@@ -483,7 +500,8 @@ Your watcher, still pinned to the old core package ID, must observe it before th
 4. Wait for the control message of the coordinator under the old core package ID.
 5. Make sure that your watcher observes the control message.
 6. Record the offset of the control message on your participant. This is the abort offset.
-7. Scan from the start offset to the abort offset. Keep each `PublishMessage` with the new core package ID.
+7. Scan from the start offset to the abort offset, with the control message as the required update ID.
+   Keep each `PublishMessage` with the new core package ID.
 8. With a quorum of guardians, set `--cantonPackageID` to the new core package ID and restart `guardiand`.
 9. Send a reobservation request for each update ID of step 7.
 10. When each VAA exists, set `--cantonPackageID` to the old core package ID and restart `guardiand`.
@@ -928,8 +946,7 @@ If you do not set the retiring flags, the procedure in Section 6.7 applies with 
 | Location, writer and authentication of each trust source | 6.0 |
 | `ContractUpgrade` governance VAA before a core package upgrade | 6.0 |
 | Automatic vetting of Amulet on guardian participants | 6.2 |
-| Contracts of the old core version after the unvet | 6.7 |
-| LocalNet rehearsal of the core package upgrade | 6.7 |
+| LocalNet run of the core upgrade abort procedure | 6.7 |
 | Measured behavior of a partial load in the owner key rotation | 7.4 |
 | Rehearsals with `wormhole-core` 0.8.0 | 7.5 |
 | Mapping from the 32-byte `recipient` to a Canton party | 7.6 |
@@ -955,3 +972,5 @@ If you do not set the retiring flags, the procedure in Section 6.7 applies with 
 | `TxID` on different participants | The `TxID` is the update ID, the same on each participant (Section 8.1). |
 | U2: emitter address uniqueness against a compromised operator | `gg` co-signs `EmitterRegistry` and `Emitter` from `wormhole-core` 0.8.0 (Section 7.2). |
 | Confirmation threshold of a multi-host `gg` | The devnet setup script requires a majority of the hosts (Section 4.1). |
+| Contracts of the old core version after the unvet | They work under the new version. LocalNet rehearsal of 0.6.0 to 0.7.0 at commit `395103f5e` (Section 6.7). |
+| LocalNet rehearsal of the core package upgrade | Passed for 0.6.0 to 0.7.0 at commit `395103f5e`, before the maximum canary time and the abort procedure (Section 6.7). |
