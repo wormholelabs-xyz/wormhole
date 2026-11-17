@@ -414,6 +414,14 @@ Results of that run that still apply:
   The operator and one owner key could not create it (`FAILED_TO_EXECUTE_TRANSACTION`).
   The operator and two of three owner keys created it.
 
+### Open items
+
+These items need a Daml change, thus a new `wormhole-core` package id. They are not in 0.8.0.
+
+- Make `expectedGuardianGovernance` of `RegisterEmitter` a mandatory `Party`. With `Optional`, a client can skip the pin.
+- `TestRedTeamCore.daml` "A9 signature count zero" expects `ArithmeticError`, not the `no quorum` check of `verifyVAA`.
+  Add a case that also removes the signature bytes, and expect `no quorum`.
+
 ## Related operator-only contracts
 
 | Contract | Signatories | Same class as A14-3 | Severity | Action |
