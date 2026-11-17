@@ -3,7 +3,8 @@
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
-# Every run appends its stdout and stderr to an evidence log. The logs hold no tokens or private keys.
+# Every run appends its stdout and stderr to an evidence log. Tokens go only to mode 0600 files in $gg_work_dir,
+# private keys only to mode 0600 key files.
 readonly EVIDENCE_DIR="$LOCALNET_STATE_DIR/evidence"
 mkdir -p "$EVIDENCE_DIR"
 EVIDENCE_LOG="$EVIDENCE_DIR/$(basename "$0" .sh)-$(date -u +%Y%m%dT%H%M%SZ).log"
@@ -48,8 +49,8 @@ ADMIN_AUTH_HEADER="$gg_work_dir/admin.auth"
 write_auth_header_file "$SCRIPT_AUTH_HEADER" "$SCRIPT_USER_ID"
 write_auth_header_file "$ADMIN_AUTH_HEADER"
 
-# Signer JSON for one owner key: signer_json <public-key-file>.
-signer_json() {
+# Signer JSON for one owner key: build_signer_json <public-key-file>.
+build_signer_json() {
   local public_key_file="$1" fingerprint
   fingerprint="$(jq -r --arg file "$public_key_file" \
     '[.owners[] | select(.publicKeyFile == $file) | .namespace][0] // empty' "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS" | head -n 1)"
@@ -67,7 +68,7 @@ signer_json() {
 }
 
 operator_signers_json() {
-  jq -n --arg party "$OPERATOR_PARTY" --argjson signer "$(signer_json "$LOCALNET_STATE_DIR/operator-keys/owner1.pub")" \
+  jq -n --arg party "$OPERATOR_PARTY" --argjson signer "$(build_signer_json "$LOCALNET_STATE_DIR/operator-keys/owner1.pub")" \
     '{($party): [$signer]}'
 }
 
@@ -75,7 +76,7 @@ operator_signers_json() {
 gg_signers_json() {
   local owner_name signers="[]"
   for owner_name in "$@"; do
-    signers="$(jq --argjson signer "$(signer_json "$LOCALNET_STATE_DIR/gg-keys/$owner_name.pub")" '. + [$signer]' <<<"$signers")"
+    signers="$(jq --argjson signer "$(build_signer_json "$LOCALNET_STATE_DIR/gg-keys/$owner_name.pub")" '. + [$signer]' <<<"$signers")"
   done
   jq -n --arg party "$GG_PARTY" --argjson signers "$signers" '{($party): $signers}'
 }

@@ -74,6 +74,10 @@ async function postJson(baseUrl, token, path, body) {
 }
 
 async function main() {
+  if (typeof fetch !== 'function') {
+    process.stderr.write(`interactive_submit.js needs Node.js 18 or later (built-in fetch); this is ${process.version}\n`);
+    process.exit(2);
+  }
   const [, , baseUrl, tokenFile, specFile] = process.argv;
   if (!baseUrl || !tokenFile || !specFile) {
     process.stderr.write('usage: interactive_submit.js <json-api-url> <token-file> <submission-spec.json>\n');

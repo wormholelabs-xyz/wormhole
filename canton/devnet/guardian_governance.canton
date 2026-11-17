@@ -168,7 +168,7 @@ val targetSynchronizer = synchronizerAliasOpt match {
     }
 }
 val synchronizerId = targetSynchronizer.physicalSynchronizerId
-val store: TopologyStoreId = TopologyStoreId.Synchronizer(synchronizerId)
+val synchronizerTopologyStore: TopologyStoreId = TopologyStoreId.Synchronizer(synchronizerId)
 val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
 
 // --- Load the three owner public keys and give Canton their exact fingerprint/namespace. ---
@@ -177,9 +177,9 @@ val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
 // `keys.public.upload` would compute server-side for the same bytes, so the
 // namespace derivation below is correct without needing a round trip.
 def loadOwnerKey(pubFile: String): SigningPublicKey = {
-  val der = ByteString.copyFrom(Files.readAllBytes(Paths.get(pubFile)))
+  val publicKeyDer = ByteString.copyFrom(Files.readAllBytes(Paths.get(pubFile)))
   SigningPublicKey
-    .create(CryptoKeyFormat.DerX509Spki, der, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .create(CryptoKeyFormat.DerX509Spki, publicKeyDer, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
     .getOrElse(sys.error(s"invalid owner public key at $pubFile"))
 }
 val ownerPubkeys = ownerPubkeyFiles.map(loadOwnerKey)
@@ -202,7 +202,7 @@ def externalSign(signerArgv: Seq[String], hash: Hash, fingerprint: Fingerprint):
 
 def generateUnsigned[M <: TopologyMapping](mapping: M): TopologyTransaction[TopologyChangeOp, M] =
   participant.topology.transactions
-    .generate(Seq(Proposal(mapping, store)))
+    .generate(Seq(Proposal(mapping, synchronizerTopologyStore)))
     .head
     .asInstanceOf[TopologyTransaction[TopologyChangeOp, M]]
 
@@ -231,12 +231,12 @@ val rootDelegations = (ownerNamespaces, ownerPubkeys, ownerSignerArgvs).zipped.m
     .create(ns, pub, DelegationRestriction.CanSignAllMappings)
     .getOrElse(sys.error(s"failed to build NamespaceDelegation for $ns"))
   val unsigned = generateUnsigned(mapping)
-  val sig = externalSign(signerArgv, unsigned.hash.hash, ns.fingerprint)
-  SignedTopologyTransaction.withSignature(unsigned, sig, isProposal = false, protocolVersion)
+  val ownerSignature = externalSign(signerArgv, unsigned.hash.hash, ns.fingerprint)
+  SignedTopologyTransaction.withSignature(unsigned, ownerSignature, isProposal = false, protocolVersion)
 }
-participant.topology.transactions.load(rootDelegations, store)
+participant.topology.transactions.load(rootDelegations, synchronizerTopologyStore)
 awaitTopology("owner root namespace delegations") {
-  val effective = participant.topology.namespace_delegations.list(store).map(_.item.namespace).toSet
+  val effective = participant.topology.namespace_delegations.list(synchronizerTopologyStore).map(_.item.namespace).toSet
   ownerNamespaces.forall(effective.contains)
 }
 println("[guardian-governance] root namespace delegations loaded")
@@ -248,26 +248,26 @@ println("[guardian-governance] root namespace delegations loaded")
 // effect for everything that references the namespace afterwards -- including
 // amending this very definition later (owner rotation).
 val ownerNamespaceSet: Set[Namespace] = ownerNamespaces.toSet
-val dnNamespace = DecentralizedNamespaceDefinition.computeNamespace(ownerNamespaceSet)
-val dn = DecentralizedNamespaceDefinition.tryCreate(dnNamespace, threshold, ownerNamespaceSet)
-val unsignedDn = generateUnsigned(dn)
-val dnSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
-  externalSign(signerArgv, unsignedDn.hash.hash, ns.fingerprint)
+val decentralizedNamespace = DecentralizedNamespaceDefinition.computeNamespace(ownerNamespaceSet)
+val decentralizedNamespaceDefinition = DecentralizedNamespaceDefinition.tryCreate(decentralizedNamespace, threshold, ownerNamespaceSet)
+val unsignedDecentralizedNamespace = generateUnsigned(decentralizedNamespaceDefinition)
+val decentralizedNamespaceSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
+  externalSign(signerArgv, unsignedDecentralizedNamespace.hash.hash, ns.fingerprint)
 }
-val signedDn = dnSignatures.tail.foldLeft(
-  SignedTopologyTransaction.withSignature(unsignedDn, dnSignatures.head, isProposal = false, protocolVersion)
+val signedDecentralizedNamespace = decentralizedNamespaceSignatures.tail.foldLeft(
+  SignedTopologyTransaction.withSignature(unsignedDecentralizedNamespace, decentralizedNamespaceSignatures.head, isProposal = false, protocolVersion)
 )(_.addSingleSignature(_))
-participant.topology.transactions.load(Seq(signedDn), store)
+participant.topology.transactions.load(Seq(signedDecentralizedNamespace), synchronizerTopologyStore)
 awaitTopology("decentralized namespace definition") {
-  participant.topology.decentralized_namespaces.list(store).exists(_.item.namespace == dnNamespace)
+  participant.topology.decentralized_namespaces.list(synchronizerTopologyStore).exists(_.item.namespace == decentralizedNamespace)
 }
-println(s"[guardian-governance] decentralized namespace created: $dnNamespace (threshold ${threshold.value}-of-${ownerNamespaces.size})")
+println(s"[guardian-governance] decentralized namespace created: $decentralizedNamespace (threshold ${threshold.value}-of-${ownerNamespaces.size})")
 
 // --- Step 3: allocate the party under the decentralized namespace, host it at
 // Confirmation, and register the same owner keys as its threshold signing
 // keys (PartyToParticipant.partySigningKeys -- the modern replacement for the
 // deprecated standalone PartyToKeyMapping). ---
-val partyId = PartyId.tryCreate(partyName, dnNamespace)
+val partyId = PartyId.tryCreate(partyName, decentralizedNamespace)
 val signingKeys = SigningKeysWithThreshold(NonEmpty.mk(Set, ownerPubkeys.head, ownerPubkeys.tail: _*), threshold)
 val partyToParticipant = PartyToParticipant
   .create(
@@ -277,22 +277,22 @@ val partyToParticipant = PartyToParticipant
     Some(signingKeys),
   )
   .getOrElse(sys.error("failed to build PartyToParticipant"))
-val unsignedPtp = generateUnsigned(partyToParticipant)
-val ptpOwnerSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
-  externalSign(signerArgv, unsignedPtp.hash.hash, ns.fingerprint)
+val unsignedPartyToParticipant = generateUnsigned(partyToParticipant)
+val partyToParticipantOwnerSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
+  externalSign(signerArgv, unsignedPartyToParticipant.hash.hash, ns.fingerprint)
 }
-val signedPtpOwnersOnly = ptpOwnerSignatures.tail.foldLeft(
-  SignedTopologyTransaction.withSignature(unsignedPtp, ptpOwnerSignatures.head, isProposal = false, protocolVersion)
+val signedPartyToParticipantOwnersOnly = partyToParticipantOwnerSignatures.tail.foldLeft(
+  SignedTopologyTransaction.withSignature(unsignedPartyToParticipant, partyToParticipantOwnerSignatures.head, isProposal = false, protocolVersion)
 )(_.addSingleSignature(_))
 // Each hosting participant must also consent to host the party; that is a
 // LOCAL signature (that participant's own identity key), added via its
 // vault-backed `transactions.sign`, not an external one.
-val signedPtp = hostingParticipants.foldLeft(signedPtpOwnersOnly: GenericSignedTopologyTransaction) { (signedSoFar, host) =>
+val signedPartyToParticipant = hostingParticipants.foldLeft(signedPartyToParticipantOwnersOnly: GenericSignedTopologyTransaction) { (signedSoFar, host) =>
   host.topology.transactions
-    .sign(Seq(signedSoFar), store, signedBy = Seq(host.id.uid.namespace.fingerprint))
+    .sign(Seq(signedSoFar), synchronizerTopologyStore, signedBy = Seq(host.id.uid.namespace.fingerprint))
     .head
 }
-participant.topology.transactions.load(Seq(signedPtp), store)
+participant.topology.transactions.load(Seq(signedPartyToParticipant), synchronizerTopologyStore)
 awaitTopology("party to participant mapping") {
   hostingParticipants.forall(host =>
     host.topology.party_to_participant_mappings.is_known(
@@ -315,7 +315,7 @@ val ownersJson = (ownerNamespaces, ownerPubkeyFiles).zipped.map { (ns, pubFile) 
 val artifactsJson =
   s"""{
      |  "partyId": ${jsonString(partyId.toProtoPrimitive)},
-     |  "decentralizedNamespace": ${jsonString(dnNamespace.fingerprint.toProtoPrimitive)},
+     |  "decentralizedNamespace": ${jsonString(decentralizedNamespace.fingerprint.toProtoPrimitive)},
      |  "threshold": ${threshold.value},
      |  "owners": [
      |$ownersJson

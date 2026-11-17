@@ -211,14 +211,14 @@ Use it on LocalNet only.
 Each `gg_*.sh` script that uses `gg_lib.sh` writes its output to a log file.
 The log file is `../localnet-state/evidence/<script>-<UTC time>.log`.
 The first line shows the arguments and the Git commit.
-The logs do not contain tokens or private keys.
+The scripts write tokens and private keys only to files with mode 0600. Thus you can share the logs.
 Keep the logs as the evidence of each run.
 
 ### Prerequisites
 
 - LocalNet is running.
 - You built the DARs. Refer to the procedure above.
-- `node`, `jq`, `java` 21 and `go` are on the `PATH`.
+- `node` 18 or later (`interactive_submit.js` uses the built-in `fetch`), `jq`, `java` 21 and `go` are on the `PATH`.
 
 ### Host the parties and run genesis
 

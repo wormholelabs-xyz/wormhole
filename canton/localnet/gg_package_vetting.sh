@@ -42,14 +42,14 @@ upload_and_vet() {
   fi
 }
 
-participant_id_of() {
+read_participant_id() {
   curl -sSf "$(json_api_url "$1")/v2/parties/participant-id" -H "@$ADMIN_AUTH_HEADER" | jq -er .participantId
 }
 
 # vetted_probe_versions <validator>: probe versions vetted by that validator's own participant.
 vetted_probe_versions() {
   local participant_id
-  participant_id="$(participant_id_of "$1")"
+  participant_id="$(read_participant_id "$1")"
   curl -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --arg prefix "$PROBE_PACKAGE_NAME" --arg pid "$participant_id" \
@@ -129,7 +129,7 @@ v2_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator
 v1_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7"}')"
 
 # Canton abbreviates ids in the error text: "Participant PAR::<name>::<first 12 fingerprint chars>... has not vetted <first 12 package id chars>...".
-# participant_id_of returns "<name>::<fingerprint>" without the PAR:: type prefix.
+# read_participant_id returns "<name>::<fingerprint>" without the PAR:: type prefix.
 not_vetted_error_line() {
   local participant_id="${1#PAR::}" participant_name participant_fingerprint
   participant_name="${participant_id%::*}"
@@ -147,7 +147,7 @@ expect_not_vetted_rejection() {
     exit 1
   fi
   for validator_name in $missing_validators; do
-    error_line="$(not_vetted_error_line "$(participant_id_of "$validator_name")")"
+    error_line="$(not_vetted_error_line "$(read_participant_id "$validator_name")")"
     if ! grep -qF "$error_line" "$output_prefix.err"; then
       echo "FAIL: the error does not contain: $error_line" >&2
       cat "$output_prefix.err" >&2
@@ -155,7 +155,7 @@ expect_not_vetted_rejection() {
     fi
   done
   for validator_name in $vetting_validators; do
-    error_line="$(not_vetted_error_line "$(participant_id_of "$validator_name")")"
+    error_line="$(not_vetted_error_line "$(read_participant_id "$validator_name")")"
     if grep -qF "$error_line" "$output_prefix.err"; then
       echo "FAIL: the error names $validator_name, which vets 2.0.0: $error_line" >&2
       exit 1
@@ -166,7 +166,7 @@ expect_not_vetted_rejection() {
 }
 
 for validator_name in app-provider sv app-user; do
-  echo "  $validator_name is $(participant_id_of "$validator_name")"
+  echo "  $validator_name is $(read_participant_id "$validator_name")"
 done
 
 echo "Step 3: create VettingProbe on 2.0.0 by package id (vetted on app-provider only)"

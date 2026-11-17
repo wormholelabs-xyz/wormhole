@@ -6,13 +6,13 @@ val partyId = PartyId.tryFromProtoPrimitive(sys.env("GG_PARTY_ID"))
 participants.remote.foreach { host =>
   val synchronizer = host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
     .getOrElse(throw new RuntimeException(s"${host.name} is not connected to global"))
-  val store = TopologyStoreId.Synchronizer(synchronizer.physicalSynchronizerId)
-  host.topology.decentralized_namespaces.list(store).filter(_.item.namespace == partyId.namespace).foreach { dn =>
-    println(s"TOPOLOGY ${host.name} DN serial=${dn.context.serial} threshold=${dn.item.threshold} owners=${dn.item.owners.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")}")
+  val synchronizerTopologyStore = TopologyStoreId.Synchronizer(synchronizer.physicalSynchronizerId)
+  host.topology.decentralized_namespaces.list(synchronizerTopologyStore).filter(_.item.namespace == partyId.namespace).foreach { namespaceDefinition =>
+    println(s"TOPOLOGY ${host.name} DN serial=${namespaceDefinition.context.serial} threshold=${namespaceDefinition.item.threshold} owners=${namespaceDefinition.item.owners.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")}")
   }
-  host.topology.party_to_participant_mappings.list(store).filter(_.item.partyId == partyId).foreach { ptp =>
-    println(s"TOPOLOGY ${host.name} PTP serial=${ptp.context.serial} confirmationThreshold=${ptp.item.threshold} " +
-      s"hosts=${ptp.item.participants.map(h => s"${h.participantId.uid.identifier}:${h.participantId.uid.namespace.fingerprint.toProtoPrimitive.take(12)}/${h.permission}").mkString(",")} " +
-      s"signingKeys=${ptp.item.partySigningKeysWithThreshold.map(k => s"${k.threshold}-of-${k.keys.size}:" + k.keys.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")).getOrElse("none")}")
+  host.topology.party_to_participant_mappings.list(synchronizerTopologyStore).filter(_.item.partyId == partyId).foreach { partyToParticipant =>
+    println(s"TOPOLOGY ${host.name} PTP serial=${partyToParticipant.context.serial} confirmationThreshold=${partyToParticipant.item.threshold} " +
+      s"hosts=${partyToParticipant.item.participants.map(h => s"${h.participantId.uid.identifier}:${h.participantId.uid.namespace.fingerprint.toProtoPrimitive.take(12)}/${h.permission}").mkString(",")} " +
+      s"signingKeys=${partyToParticipant.item.partySigningKeysWithThreshold.map(k => s"${k.threshold}-of-${k.keys.size}:" + k.keys.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")).getOrElse("none")}")
   }
 }
