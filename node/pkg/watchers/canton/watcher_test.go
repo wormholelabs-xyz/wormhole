@@ -489,14 +489,45 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 	}
 }
 
-func TestRunRefusesWildcardOutsideDevMode(t *testing.T) {
-	fake := newFakeClient()
-	w := &Watcher{acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), unsafeDevMode: false, cantonClient: fake}
+func TestRunRefusesDisallowedPackageSets(t *testing.T) {
+	currentOnlyWithoutVersion, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	cases := []struct {
+		name               string
+		acceptedPackageIDs cantonclient.AcceptedPackageIDs
+		unsafeDevMode      bool
+		wantErr            string
+	}{
+		{name: "wildcard outside dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), wantErr: "unsafe dev mode only"},
+		{name: "zero value outside dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, wantErr: "no accepted"},
+		{name: "zero value in dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, unsafeDevMode: true, wantErr: "no accepted"},
+		{name: "pinned without version outside dev mode", acceptedPackageIDs: currentOnlyWithoutVersion, wantErr: "needs an expected version"},
+		{name: "window without versions outside dev mode", acceptedPackageIDs: testUpgradeWindowPackageIDs(t), wantErr: "needs an expected version"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeClient()
+			w := &Watcher{acceptedPackageIDs: tc.acceptedPackageIDs, unsafeDevMode: tc.unsafeDevMode, cantonClient: fake}
 
-	err := w.Run(context.Background())
+			err := w.Run(context.Background())
 
-	require.ErrorContains(t, err, "unsafe dev mode only")
-	assert.Zero(t, fake.subscribeCount())
+			require.ErrorContains(t, err, tc.wantErr)
+			assert.Zero(t, fake.subscribeCount())
+			assert.Zero(t, fake.vettedPackageMetadataCallCount())
+		})
+	}
+}
+
+// A retiring id without a current id has no constructor; the parser rejects it.
+func TestRetiringOnlyPackageSetIsUnconstructible(t *testing.T) {
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{}, cantonclient.RetiringPackageConfig{
+		PackageIDHex:     testRetiringPackageID,
+		AcceptedUntilUTC: retiringDeadlineFromNow(time.Hour),
+		Version:          testRetiringPackageVersion,
+	}, time.Now())
+
+	require.ErrorContains(t, err, "current core package id")
+	assert.True(t, accepted.IsEmpty())
 }
 
 // acceptedPackageIDSeries returns wormhole_canton_accepted_package_ids as role -> package id for series set to 1.
