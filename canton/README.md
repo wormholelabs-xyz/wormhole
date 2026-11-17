@@ -1304,13 +1304,28 @@ procedure on three `guardianGovernance` hosts (`localnet/README.md`). Results:
 - A package that calls `wormhole-core` by package id keeps that version. The
   NTT package `ntt` 0.2.0 calls 0.6.0. Its `PublishMessage` runs under 0.6.0,
   also when each host vets 0.7.0. A watcher pinned to 0.7.0 drops these
-  messages.
-- Without 0.6.0, each NTT transaction that uses `wormhole-core` fails with
-  `required dependencies not vetted`.
+  messages. Without 0.6.0, each `ntt` 0.2.0 transaction that uses
+  `wormhole-core` fails with `required dependencies not vetted`.
+- `ntt` 0.3.0 calls 0.7.0. Each `ntt` 0.3.0 `PublishMessage` runs under
+  0.7.0 on the three hosts. A watcher pinned to 0.7.0 observes these
+  messages, live and from reobservation requests by update id.
+- After the unvet of 0.6.0 and `ntt` 0.2.0, a submission that selects
+  `ntt` 0.2.0 fails with `has not vetted`. `ntt` 0.3.0 continues to work.
 
-> **WARNING:** Before step 4, build each dependent package (NTT included) on
-> 0.7.0, and vet it on each guardian participant. Do not do step 7 before
-> each dependent package uses 0.7.0.
+**Dependent packages first.** Each dependent package (NTT included) must
+move to 0.7.0 before the guardians move.
+
+1. Build the dependent package on the 0.7.0 DAR.
+2. Before step 4, upload and vet the new package on each guardian
+   participant.
+3. In step 7, unvet 0.6.0 and the old dependent package together.
+
+> **WARNING:** Do not do step 7 while a vetted dependent package calls 0.6.0.
+> Each transaction of that package then fails.
+
+> **NOTE:** `localnet/ntt_upload_dars.sh` vets only the packages of the NTT
+> DAR that are not vetted. It stops if the NTT DAR calls a `wormhole-core`
+> version that is not the newest vetted version.
 
 **Open item.**
 

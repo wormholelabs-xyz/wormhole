@@ -6,19 +6,23 @@
 #   vet-v7        Upload the 0.7.0 DAR to all three hosts and vet it. The upload runs the upgrade check.
 #   publish-v7    Publish under 0.7.0 on an Emitter that 0.6.0 created. Expect the 0.6.0 watcher to drop it.
 #   reobserve-v7  Start a watcher pinned to 0.7.0. Reobserve the dropped message by update id.
-#   enforce-v7    A nonce above uint32: 0.7.0 rejects it, 0.6.0 commits it. Unvet 0.6.0. Expect 0.6.0
-#                 submissions to fail and contracts that 0.6.0 created to work under 0.7.0.
-#   ntt           Run the NTT burn/mint deployment with 0.6.0 unvetted. Vet 0.6.0 again and run ntt_e2e.sh.
-#                 Expect a watcher pinned to 0.7.0 to drop the NTT messages.
+#   ntt           Upload ntt 0.3.0, which calls 0.7.0. Run ntt_e2e.sh with a watcher pinned to 0.7.0.
+#                 Expect each NTT PublishMessage to run under 0.7.0 on each host.
+#   enforce-v7    A nonce above uint32: 0.7.0 rejects it, 0.6.0 commits it. Unvet 0.6.0 and ntt 0.2.0.
+#   post-unvet    Expect 0.6.0 and ntt 0.2.0 submissions to fail, contracts that 0.6.0 created to work
+#                 under 0.7.0, and ntt_e2e.sh to pass with ntt 0.3.0.
 # Usage: core_upgrade_rehearsal.sh <step>|all
-# Precondition: gg_publish_and_govern.sh and ntt_e2e.sh ran; the CoreState message fee is 0;
-# canton/core/.daml/dist/wormhole-core-0.7.0.dar is built.
+# Precondition: gg_publish_and_govern.sh ran; the CoreState message fee is 0;
+# canton/core/.daml/dist/wormhole-core-0.7.0.dar and the ntt 0.3.0 DAR are built.
+# The prepare step unvets 0.7.0. ntt 0.3.0 then fails until the vet-v7 step.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 
 readonly CORE_V6_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
 readonly CORE_V7_PACKAGE_ID="7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb"
+# ntt 0.2.0 calls 0.6.0 by package id. ntt 0.3.0 calls 0.7.0.
+readonly NTT_V2_PACKAGE_ID="8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a"
 readonly CORE_V6_DAR="$REPO_ROOT/canton/dars/wormhole-core-0.6.0.dar"
 readonly CORE_V7_DAR="$REPO_ROOT/canton/core/.daml/dist/wormhole-core-0.7.0.dar"
 readonly DPM_BIN_DIR="${DPM_BIN_DIR:-$HOME/.dpm/bin}"
@@ -75,6 +79,15 @@ vetted_core_versions() {
     | jq -c '[.vettedPackages[]?.packages[] | select(.packageName == "wormhole-core") | "\(.packageVersion) \(.packageId[0:12])"] | unique'
 }
 
+# vetted_ntt_versions <validator>: ntt versions vetted by that validator's own participant, as JSON.
+vetted_ntt_versions() {
+  curl -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg pid "$(participant_id_of "$1")" \
+      '{packageMetadataFilter: {packageNamePrefixes: ["ntt"]}, topologyStateFilter: {participantIds: [$pid]}}')" \
+    | jq -c '[.vettedPackages[]?.packages[] | select(.packageName == "ntt") | "\(.packageVersion) \(.packageId[0:12])"] | unique'
+}
+
 await_core_vetting() {
   local validator_name="$1" expected_versions="$2" attempt
   for attempt in $(seq 1 60); do
@@ -97,7 +110,7 @@ upload_and_vet() {
   echo "  $validator_name: uploaded and vetted $(basename "$dar_path") (HTTP 200)"
 }
 
-unvet_core_package() {
+unvet_package() {
   local validator_name="$1" package_id="$2"
   curl -sSf -X POST "$(json_api_url "$validator_name")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
@@ -107,7 +120,7 @@ unvet_core_package() {
   echo "  $validator_name: unvetted ${package_id:0:12}"
 }
 
-vet_core_package() {
+vet_package() {
   local validator_name="$1" package_id="$2"
   curl -sSf -X POST "$(json_api_url "$validator_name")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
@@ -191,7 +204,7 @@ step_prepare() {
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     upload_and_vet "$validator_name" "$CORE_V6_DAR"
     if [[ "$(vetted_core_versions "$validator_name")" == *"${CORE_V7_PACKAGE_ID:0:12}"* ]]; then
-      unvet_core_package "$validator_name" "$CORE_V7_PACKAGE_ID"
+      unvet_package "$validator_name" "$CORE_V7_PACKAGE_ID"
     fi
   done
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
@@ -275,7 +288,7 @@ step_reobserve_v7() {
 
 step_enforce_v7() {
   echo "### 5a. Nonce $NONCE_ABOVE_UINT32 (above uint32): rejected under 0.7.0, committed under 0.6.0"
-  local payload_hex transaction summary validator_name emitter_template verified_vaa
+  local payload_hex transaction summary validator_name
   payload_hex="$(hex_of "core upgrade nonce check")"
   if publish_on_operator_emitter "core-upgrade-nonce-v7-$(date +%s)" "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" \
       "$NONCE_ABOVE_UINT32" "$payload_hex" > "$gg_work_dir/nonce-v7.out" 2> "$gg_work_dir/nonce-v7.err"; then
@@ -288,22 +301,57 @@ step_enforce_v7() {
   [[ "$(jq -r .executingPackageId <<<"$summary")" == "$CORE_V6_PACKAGE_ID" ]] || fail "the nonce publish did not execute under 0.6.0"
   echo "  committed under 0.6.0: $summary"
 
-  echo "### 5b. Unvet 0.6.0 on each guardianGovernance host"
+  echo "### 5b. Unvet 0.6.0 and ntt 0.2.0 on each guardianGovernance host"
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    unvet_core_package "$validator_name" "$CORE_V6_PACKAGE_ID"
+    [[ "$(vetted_ntt_versions "$validator_name")" == *'"0.3.0 '* ]] || fail "$validator_name does not vet ntt 0.3.0; run the ntt step first"
+    unvet_package "$validator_name" "$CORE_V6_PACKAGE_ID"
+    if [[ "$(vetted_ntt_versions "$validator_name")" == *"${NTT_V2_PACKAGE_ID:0:12}"* ]]; then
+      unvet_package "$validator_name" "$NTT_V2_PACKAGE_ID"
+    fi
   done
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     await_core_vetting "$validator_name" "[\"0.7.0 ${CORE_V7_PACKAGE_ID:0:12}\"]"
+    echo "  $validator_name vets ntt $(vetted_ntt_versions "$validator_name")"
+  done
+}
+
+# create_deposit_preapproval <command-id> <template-id>: a DepositPreapproval of the Operator party. Prints the transaction JSON.
+create_deposit_preapproval() {
+  submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
+    "$(jq -n --arg templateId "$2" --arg op "$OPERATOR_PARTY" \
+      '{CreateCommand: {templateId: $templateId, createArguments: {owner: $op, instrumentId: {admin: $op, id: "core-upgrade-rehearsal"}}}}')" \
+    "$(operator_signers_json)"
+}
+
+step_post_unvet() {
+  echo "### 7a. Each host vets only 0.7.0 of wormhole-core and does not vet ntt 0.2.0"
+  local payload_hex transaction summary validator_name emitter_template verified_vaa
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_core_vetting "$validator_name" "[\"0.7.0 ${CORE_V7_PACKAGE_ID:0:12}\"]"
+    [[ "$(vetted_ntt_versions "$validator_name")" != *"${NTT_V2_PACKAGE_ID:0:12}"* ]] || fail "$validator_name vets ntt 0.2.0"
+    echo "  $validator_name vets ntt $(vetted_ntt_versions "$validator_name")"
   done
 
-  echo "### 5c. A submission that selects 0.6.0 is rejected"
+  echo "### 7b. A submission that selects 0.6.0 is rejected"
+  payload_hex="$(hex_of "core upgrade nonce check")"
   if publish_on_operator_emitter "core-upgrade-unvetted-v6-$(date +%s)" "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" \
       1 "$payload_hex" > "$gg_work_dir/unvetted-v6.out" 2> "$gg_work_dir/unvetted-v6.err"; then
     fail "a 0.6.0 PublishMessage committed after the unvet"
   fi
   expect_rejection "$gg_work_dir/unvetted-v6" "${CORE_V6_PACKAGE_ID:0:12}" "0.6.0 PublishMessage after the unvet"
 
-  echo "### 5d. Contracts that 0.6.0 created work under 0.7.0"
+  echo "### 7c. A submission that selects ntt 0.2.0 is rejected; the package name selects ntt 0.3.0"
+  if create_deposit_preapproval "core-upgrade-unvetted-ntt-v2-$(date +%s)" "$NTT_V2_PACKAGE_ID:Wormhole.Ntt.Deposit:DepositPreapproval" \
+      > "$gg_work_dir/unvetted-ntt-v2.out" 2> "$gg_work_dir/unvetted-ntt-v2.err"; then
+    fail "an ntt 0.2.0 DepositPreapproval committed after the unvet"
+  fi
+  expect_rejection "$gg_work_dir/unvetted-ntt-v2" "${NTT_V2_PACKAGE_ID:0:12}" "ntt 0.2.0 DepositPreapproval after the unvet"
+  transaction="$(create_deposit_preapproval "core-upgrade-ntt-by-name-$(date +%s)" "#ntt:Wormhole.Ntt.Deposit:DepositPreapproval")"
+  echo "  PASS: DepositPreapproval by package name: $(jq -c '[.events[] | .CreatedEvent? // empty | {templateId: (.templateId | split(":")[0])}][0]' <<<"$transaction")"
+  [[ "$(jq -r '[.events[] | .CreatedEvent? // empty | .templateId][0]' <<<"$transaction")" != "$NTT_V2_PACKAGE_ID:"* ]] \
+    || fail "the package name selected ntt 0.2.0"
+
+  echo "### 7d. Contracts that 0.6.0 created work under 0.7.0"
   emitter_template="$(operator_emitter_template_id)"
   echo "  input Emitter template: $emitter_template"
   [[ "$emitter_template" == "$CORE_V6_PACKAGE_ID:"* ]] || fail "the Operator Emitter was not created under 0.6.0"
@@ -318,46 +366,37 @@ step_enforce_v7() {
   transaction="$(verify_vaa_as_operator "core-upgrade-verify-$(date +%s)" "$(jq -r .vaaHex <<<"$verified_vaa")" "$(vaa_pub_keys_json "$verified_vaa")")"
   echo "  PASS: ParseAndVerifyVAA on the 0.6.0 CoreState: $(jq -c '[.events[] | .ExercisedEvent? // empty | select(.choice == "ParseAndVerifyVAA")
     | {templateId: (.templateId | split(":")[0]), guardianSetIndex: .exerciseResult.guardianSetIndex}][0]' <<<"$transaction")"
+
+  echo "### 7e. ntt_e2e.sh with ntt 0.3.0 and a watcher pinned to 0.7.0"
+  run_ntt_e2e_under_v7 true
+}
+
+# run_ntt_e2e_under_v7 <upload-dars: true|false>: ntt_e2e.sh with the watcher pinned to 0.7.0, then the package
+# that ran each NTT PublishMessage, as each host sees it.
+run_ntt_e2e_under_v7() {
+  local deployment_key update_id validator_name event_package
+  NTT_UPLOAD_DARS="$1" NTT_CORE_PACKAGE_ID="$CORE_V7_PACKAGE_ID" NTT_GUARDIAN_SET_INDEX="$CURRENT_GUARDIAN_SET_INDEX" \
+    NTT_GUARDIAN_KEY_INDICES="$CURRENT_GUARDIAN_KEY_INDICES" "$LOCALNET_SCRIPT_DIR/ntt_e2e.sh"
+  for deployment_key in burnMint.burnUpdateId lockUnlock.lockUpdateId; do
+    update_id="$(jq -er ".$deployment_key" "$LOCALNET_STATE_DIR/ntt-contracts.json")"
+    for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+      event_package="$(publish_package_on "$validator_name" "$update_id")"
+      echo "  $validator_name: NTT $deployment_key $update_id: PublishMessage event package id $event_package"
+      [[ "$event_package" == "$CORE_V7_PACKAGE_ID "* ]] || fail "the NTT PublishMessage did not execute under 0.7.0 on $validator_name"
+    done
+  done
+  echo "  PASS: each NTT outbound PublishMessage ran under ${CORE_V7_PACKAGE_ID:0:12} on each host"
 }
 
 step_ntt() {
-  echo "### 6a. NTT burn/mint deployment with 0.6.0 unvetted"
-  local validator_name burn_update_id event_package ntt_status=0
+  echo "### 6a. Upload ntt 0.3.0, which calls 0.7.0"
+  local validator_name
+  "$LOCALNET_SCRIPT_DIR/ntt_upload_dars.sh"
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    echo "  $validator_name vets wormhole-core $(vetted_core_versions "$validator_name")"
+    echo "  $validator_name vets wormhole-core $(vetted_core_versions "$validator_name"), ntt $(vetted_ntt_versions "$validator_name")"
   done
-  NTT_GUARDIAN_SET_INDEX="$CURRENT_GUARDIAN_SET_INDEX" NTT_GUARDIAN_KEY_INDICES="$CURRENT_GUARDIAN_KEY_INDICES" \
-    "$LOCALNET_SCRIPT_DIR/ntt_burn_mint.sh" > "$gg_work_dir/ntt-unvetted.out" 2> "$gg_work_dir/ntt-unvetted.err" || ntt_status=$?
-  if [[ "$ntt_status" -eq 0 ]]; then
-    echo "  NTT burn/mint passed with 0.6.0 unvetted"
-  else
-    grep -E '^== ' "$gg_work_dir/ntt-unvetted.out" | tail -n 1 | sed 's/^/  last NTT step: /'
-    expect_rejection "$gg_work_dir/ntt-unvetted" "${CORE_V6_PACKAGE_ID:0:12}" "NTT with 0.6.0 unvetted"
-  fi
-
-  echo "### 6b. Vet 0.6.0 again, then run ntt_e2e.sh with the vetted NTT package"
-  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    vet_core_package "$validator_name" "$CORE_V6_PACKAGE_ID"
-  done
-  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    await_core_vetting "$validator_name" "[\"0.6.0 ${CORE_V6_PACKAGE_ID:0:12}\",\"0.7.0 ${CORE_V7_PACKAGE_ID:0:12}\"]"
-  done
-  NTT_UPLOAD_DARS="${NTT_UPLOAD_DARS:-false}" NTT_GUARDIAN_SET_INDEX="$CURRENT_GUARDIAN_SET_INDEX" \
-    NTT_GUARDIAN_KEY_INDICES="$CURRENT_GUARDIAN_KEY_INDICES" "$LOCALNET_SCRIPT_DIR/ntt_e2e.sh"
-  burn_update_id="$(jq -er .burnMint.burnUpdateId "$LOCALNET_STATE_DIR/ntt-contracts.json")"
-  event_package="$(publish_package_on "$SUBMITTING_VALIDATOR" "$burn_update_id")"
-  echo "  NTT outbound burn $burn_update_id: PublishMessage event package id $event_package"
-  [[ "$event_package" == "$CORE_V6_PACKAGE_ID "* ]] || fail "the NTT PublishMessage did not execute under 0.6.0"
-
-  echo "### 6c. A watcher pinned to 0.7.0 drops the NTT outbound burn"
-  [[ -x "$(harness_binary)" ]] || build_harness
-  run_harness ntt-v7 "$CORE_V7_PACKAGE_ID" "$burn_update_id" 300
-  sleep "$DROP_WINDOW_SECONDS"
-  kill "$(cat "$WATCHER_DIR/ntt-v7.pid")" 2>/dev/null || true
-  if [[ -s "$WATCHER_DIR/ntt-v7.jsonl" ]]; then
-    fail "the 0.7.0 watcher observed the NTT burn: $(cat "$WATCHER_DIR/ntt-v7.jsonl")"
-  fi
-  echo "  PASS: the 0.7.0 watcher has no observation of the NTT burn after ${DROP_WINDOW_SECONDS}s (reobservation by update id)"
+  echo "### 6b. ntt_e2e.sh with a watcher pinned to 0.7.0"
+  run_ntt_e2e_under_v7 false
 }
 
 copy_harness_evidence() {
@@ -376,17 +415,19 @@ case "${1:-}" in
   reobserve-v7) step_reobserve_v7 ;;
   enforce-v7) step_enforce_v7 ;;
   ntt) step_ntt ;;
+  post-unvet) step_post_unvet ;;
   all)
     step_prepare
     step_observe_v6
     step_vet_v7
     step_publish_v7
     step_reobserve_v7
-    step_enforce_v7
     step_ntt
+    step_enforce_v7
+    step_post_unvet
     ;;
   *)
-    echo "usage: core_upgrade_rehearsal.sh prepare|observe-v6|vet-v7|publish-v7|reobserve-v7|enforce-v7|ntt|all" >&2
+    echo "usage: core_upgrade_rehearsal.sh prepare|observe-v6|vet-v7|publish-v7|reobserve-v7|ntt|enforce-v7|post-unvet|all" >&2
     exit 2
     ;;
 esac
