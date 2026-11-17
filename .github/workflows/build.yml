@@ -242,6 +242,7 @@ jobs:
   canton-watcher-integration:
     name: Canton watcher integration
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

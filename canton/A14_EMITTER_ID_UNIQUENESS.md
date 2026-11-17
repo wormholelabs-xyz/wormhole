@@ -422,6 +422,11 @@ These items need a Daml change, thus a new `wormhole-core` package id. They are 
 - `TestRedTeamCore.daml` "A9 signature count zero" expects `ArithmeticError`, not the `no quorum` check of `verifyVAA`.
   Add a case that also removes the signature bytes, and expect `no quorum`.
 
+These items need no Daml change:
+
+- `canton/devnet/genesis_guardian_governance.sh` skips a create when a contract already exists. It does not compare the arguments of that contract. Before the ceremony, compare each argument of an existing `CoreState` and `EmitterRegistry` with the expected value. Do not run two genesis runs at the same time.
+- The Tilt devnet watcher has no read-as party and no package pin. It drops each publish on an `Emitter` that the same transaction creates. Production requires both values.
+
 ## Related operator-only contracts
 
 | Contract | Signatories | Same class as A14-3 | Severity | Action |

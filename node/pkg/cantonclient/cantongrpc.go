@@ -80,8 +80,9 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 // LEDGER_EFFECTS shape (so ExercisedEvents — which carry choice results — are
 // included).
 // SECURITY: LEDGER_EFFECTS also carries the CreatedEvent of a contract that the
-// same transaction archives; readPartySignsExercisedEmitter relies on it. A wildcard template filter matches every template; the watcher
-// narrows to the core-bridge template/choice in Go. When readAsParty is empty
+// same transaction archives; readPartySignsExercisedEmitter relies on it.
+// A wildcard template filter matches every template; the watcher narrows to
+// the core-bridge template/choice in Go. When readAsParty is empty
 // the events of every party hosted on the participant are streamed
 // (filters_for_any_party); otherwise the stream is narrowed to that one party.
 // GetUpdates and GetUpdateById share it, so reobservation sees what the stream sees.
