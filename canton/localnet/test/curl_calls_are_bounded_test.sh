@@ -18,9 +18,10 @@ readonly CHECKED_FILES=(
 
 failure_count=0
 
-# curl_command_lines <file>: "<line number>:<text>" of each line outside a comment that runs curl.
+# curl_command_lines <file>: "<line number>:<text>" of each line outside a comment that runs curl. A curl command has
+# an option or a line continuation after the word curl.
 curl_command_lines() {
-  grep -nE '(^|[^A-Za-z0-9_-])curl([[:space:]]|$)' "$1" | grep -vE '^[0-9]+:[[:space:]]*#'
+  grep -nE '(^|[^A-Za-z0-9_-])curl[[:space:]]+(-|\\$)' "$1" | grep -vE '^[0-9]+:[[:space:]]*#'
 }
 
 # check_file <file> <helper|standalone>
@@ -73,11 +74,12 @@ check_file() {
 detector_sample="$(mktemp)"
 trap 'rm -f "$detector_sample"' EXIT
 # shellcheck disable=SC2016,SC1003 # literal sample lines
-printf '%s\n' '# curl in a comment' 'curl_bounded -sS x' 'value="$(curl -sS x)"' '  curl -sS y \' > "$detector_sample"
-if [[ "$(curl_command_lines "$detector_sample" | cut -d: -f1 | paste -sd, -)" == "3,4" ]]; then
-  echo "ok: the detector finds lines 3 and 4 of the sample"
+printf '%s\n' '# curl in a comment' 'curl_bounded -sS x' 'value="$(curl -sS x)"' '  curl -sS y \' \
+  'echo "read failed with curl status 7"' '  curl \' > "$detector_sample"
+if [[ "$(curl_command_lines "$detector_sample" | cut -d: -f1 | paste -sd, -)" == "3,4,6" ]]; then
+  echo "ok: the detector finds lines 3, 4 and 6 of the sample"
 else
-  echo "FAIL: the detector finds lines '$(curl_command_lines "$detector_sample" | cut -d: -f1 | paste -sd, -)', expected 3,4" >&2
+  echo "FAIL: the detector finds lines '$(curl_command_lines "$detector_sample" | cut -d: -f1 | paste -sd, -)', expected 3,4,6" >&2
   failure_count=$((failure_count + 1))
 fi
 

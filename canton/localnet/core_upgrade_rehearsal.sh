@@ -276,25 +276,29 @@ check_publish_package_on_each_host() {
   echo "  each host reports PublishMessage package ${2:0:12} for $1"
 }
 
-# scan_publishes <validator> <begin-exclusive-offset> <end-inclusive-offset>: publish_message_scan.sh as the watcher
-# user on that participant. One JSON line per PublishMessage of any package.
+# scan_publishes <validator> <begin-exclusive-offset> <end-inclusive-offset> [<required-update-id>]:
+# publish_message_scan.sh as the watcher user on that participant. One JSON line per PublishMessage of any package.
+# The scan fails when its output does not contain the required update.
 scan_publishes() {
   local scan_token_file="$gg_work_dir/watcher-scan.jwt"
+  local scan_arguments=("$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3")
+  if [[ -n "${4:-}" ]]; then scan_arguments+=("$4"); fi
   ensure_watcher_user "$1" >&2
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$scan_token_file")
-  "$REPO_ROOT/canton/tools/publish_message_scan.sh" "$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3"
+  "$REPO_ROOT/canton/tools/publish_message_scan.sh" "${scan_arguments[@]}"
 }
 
-# scan_publish_update_ids <validator> <begin-exclusive> <end-inclusive> <executing-package-id>: sorted update ids
-# with a PublishMessage event of that package.
+# scan_publish_update_ids <validator> <begin-exclusive> <end-inclusive> <executing-package-id> [<required-update-id>]:
+# sorted update ids with a PublishMessage event of that package.
 scan_publish_update_ids() {
-  scan_publishes "$1" "$2" "$3" | jq -r --arg package "$4" 'select(.executingPackageId == $package) | .updateId' | sort -u
+  scan_publishes "$1" "$2" "$3" "${5:-}" | jq -r --arg package "$4" 'select(.executingPackageId == $package) | .updateId' | sort -u
 }
 
-# scan_publish_update_ids_not_under <validator> <begin-exclusive> <end-inclusive> <package-id>: sorted update ids with
-# a PublishMessage event of any other package. This is the scan equivalent of the counter sum over all labels.
+# scan_publish_update_ids_not_under <validator> <begin-exclusive> <end-inclusive> <package-id> [<required-update-id>]:
+# sorted update ids with a PublishMessage event of any other package. This is the scan equivalent of the counter sum
+# over all labels.
 scan_publish_update_ids_not_under() {
-  scan_publishes "$1" "$2" "$3" | jq -r --arg package "$4" 'select(.executingPackageId != $package) | .updateId' | sort -u
+  scan_publishes "$1" "$2" "$3" "${5:-}" | jq -r --arg package "$4" 'select(.executingPackageId != $package) | .updateId' | sort -u
 }
 
 # observed_update_ids <harness-name>: sorted update ids of the live observations of the harness.
@@ -590,10 +594,10 @@ step_gate() {
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     control_offset="$(update_offset_on "$validator_name" "$control_update_id")"
     record_host_offset canaryGateOffset "$validator_name" "$control_offset"
-    old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID")"
+    old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID" "$control_update_id")"
     [[ "$old_package_update_ids" == "$legacy_update_id" ]] \
       || fail "$validator_name: scan ($(read_host_offset startOffset "$validator_name"), $control_offset] finds publishes not under 0.7.0: $(tr '\n' ' ' <<<"$old_package_update_ids"), expected only $legacy_update_id"
-    old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset quietWindowStartOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID")"
+    old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset quietWindowStartOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID" "$control_update_id")"
     [[ -z "$old_package_update_ids" ]] || fail "$validator_name: publishes not under 0.7.0 in the quiet window: $(tr '\n' ' ' <<<"$old_package_update_ids")"
     echo "  PASS: $validator_name scan as $WATCHER_USER_ID: one publish not under 0.7.0 since the start offset (the legacy one), none in the quiet window up to offset $control_offset"
   done
@@ -691,7 +695,7 @@ check_drain_gate() {
     check_drop_logged "v6-$validator_name" "$control_update_id" "$CORE_V7_PACKAGE_ID"
     gate_offset="$(update_offset_on "$validator_name" "$control_update_id")"
     record_host_offset gateOffset "$validator_name" "$gate_offset"
-    v6_scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$gate_offset" "$CORE_V6_PACKAGE_ID")"
+    v6_scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$gate_offset" "$CORE_V6_PACKAGE_ID" "$control_update_id")"
     [[ -n "$v6_scan_update_ids" ]] || fail "$validator_name: the scan found no 0.6.0 PublishMessage update; publish-v7 makes one"
     v6_observed_update_ids="$(observed_update_ids "v6-$validator_name")"
     missing_update_ids="$(comm -23 <(echo "$v6_scan_update_ids") <(echo "$v6_observed_update_ids"))"

@@ -269,6 +269,9 @@ jobs:
       - name: Run the emitter id scan table test
         run: bash canton/tools/emitter_id_scan_test.sh
 
+      - name: Run the publish scan table test
+        run: bash canton/tools/publish_message_scan_test.sh
+
       - name: Run the NTT LocalNet library table test
         run: bash canton/localnet/test/ntt_lib_test.sh
 
