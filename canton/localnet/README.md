@@ -46,6 +46,19 @@ Set `DB_PORT` to use a different port.
 | `create_script_user.sh` | Creates the user that Daml Script uses. |
 | `run_smoke.sh` | Runs the smoke script. |
 | `daml/` | The smoke script package `wormhole-localnet-smoke`. |
+| `canton_console.sh` | Runs a Canton console script against the three participants. |
+| `console/` | Console configuration and console scripts. |
+| `interactive_submit.js` | Prepares, signs and executes one external-party submission. |
+| `gg_lib.sh` | Shared functions for the `gg_*.sh` scripts. |
+| `gg_host.sh` | Hosts `guardianGovernance` and `Operator`. Vets the core DARs on all participants. |
+| `gg_show_topology.sh` | Shows the namespace and the hosting on each participant. |
+| `gg_genesis.sh` | Creates the `CoreState` and the two registries. |
+| `gg_publish_and_govern.sh` | Publishes one message. Applies one governance VAA. |
+| `gg_confirmation_quorum.sh` | Checks the confirmation threshold with two hosts offline. |
+| `gg_package_vetting.sh` | Checks the package vetting gate. |
+| `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
+| `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
+| `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. |
 
 ## Prerequisites
 
@@ -149,3 +162,147 @@ Thus it runs only one time on each participant.
 Each package name and version can have only one package ID on a participant.
 If you change the smoke script, increase its version in `daml/daml.yaml`.
 A new version must be a valid upgrade of the old version.
+
+## guardianGovernance rehearsal on three participants
+
+These scripts rehearse the production topology of `guardianGovernance`.
+The party is a decentralized-namespace external party.
+Three Ed25519 owner keys control it, with a threshold of 2.
+All three participants host it at `Confirmation` permission.
+The confirmation threshold is 2.
+
+The scripts keep keys, artifacts and contract ids in `../localnet-state`.
+Set `LOCALNET_STATE_DIR` to use a different directory.
+The console scripts use the Canton 3.7.3 console jar from the `canton` container.
+`canton_console.sh` copies the jar to `../vendor/canton-3.7.3` on the first run.
+
+NOTE: The owner keys are files on the host. Production keeps them in guardian custody.
+
+### Prerequisites
+
+- LocalNet is running.
+- You built the DARs. Refer to the procedure above.
+- `node`, `jq`, `java` 21 and `go` are on the `PATH`.
+
+### Host the parties and run genesis
+
+1. Host `guardianGovernance` and `Operator`:
+
+   ```bash
+   canton/localnet/gg_host.sh
+   ```
+
+   The script uploads the core DARs to `app-provider`, `sv` and `app-user`.
+   Each participant vets the DARs.
+   It hosts `guardianGovernance` on the three participants.
+   It hosts `Operator` on `app-provider` only.
+
+2. Show the topology on each participant:
+
+   ```bash
+   canton/localnet/gg_show_topology.sh
+   ```
+
+   Each participant shows `threshold=2`, three hosts at `Confirmation` and `signingKeys=2-of-3`.
+
+3. Create the `CoreState`:
+
+   ```bash
+   canton/localnet/gg_genesis.sh
+   ```
+
+   `Operator` and two owner keys sign the `CoreState`.
+
+4. Publish one message and apply one governance VAA:
+
+   ```bash
+   canton/localnet/gg_publish_and_govern.sh
+   ```
+
+   The governance VAA sets the message fee to 1000.
+   All three participants show the new `CoreState`.
+
+### Check the confirmation threshold
+
+1. Run the check:
+
+   ```bash
+   canton/localnet/gg_confirmation_quorum.sh
+   ```
+
+   The script disconnects `sv` and `app-user` from the synchronizer.
+   Only `app-provider` can then confirm for `guardianGovernance`.
+   A governance VAA, a VAA check and a publish each fail with `MEDIATOR_SAYS_TX_TIMED_OUT`.
+   With `app-user` connected again, the governance VAA succeeds.
+   It sets the message fee to 0 again.
+   At the end, the script connects all participants again.
+
+NOTE: The mediator timeout uses sequencer time.
+With two participants offline, sequencer time can stop.
+The script requests time proofs from `app-provider` to move the time.
+
+CAUTION: Without the time proofs, a transaction can wait for many minutes.
+A host that connects again in that period can still confirm it.
+
+### Check the package vetting gate
+
+1. Run the check:
+
+   ```bash
+   canton/localnet/gg_package_vetting.sh
+   ```
+
+   Only `app-provider` vets version 2.0.0 of the probe package.
+   A create on 2.0.0 fails with `INVALID_PRESCRIBED_SYNCHRONIZER_ID`.
+   The error names `sv` and `app-user` as the participants that did not vet the package.
+   A create by package name selects version 1.0.0.
+   With 2.0.0 vetted on all participants, the create on 2.0.0 succeeds.
+
+### Rotate the Wormhole guardian set
+
+1. Rotate from the current set to a set of devnet key 1:
+
+   ```bash
+   canton/localnet/gg_guardian_set_rotation.sh 0 1
+   ```
+
+   The arguments are the key indices of the current set and of the new set.
+   The keys come from `node/pkg/devnet`.
+   `node/hack/canton_localnet_vaa` makes and signs the VAAs.
+
+2. Make sure that the output shows these results:
+   - A VAA of the new set passes `ParseAndVerifyVAA`.
+   - A VAA of the old set passes until the expiry time.
+   - A governance VAA of the old set fails.
+
+The expiry time of the old set is the ledger time of the upgrade plus 86400 seconds.
+LocalNet uses the clock time, thus the expiry does not occur during the check.
+The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` moves the time and checks the expiry.
+
+### Replace a guardianGovernance owner key
+
+1. Replace `owner3` with a new key `owner4`:
+
+   ```bash
+   canton/localnet/gg_rotate_owner_key.sh owner3 owner1 owner2 owner4
+   ```
+
+   The arguments are the removed owner, the two kept owners and the new owner.
+   The script changes the decentralized namespace and the party signing keys.
+   The threshold stays at 2 of 3.
+
+2. Make sure that the output shows these results:
+   - The kept owners and the new owner change the namespace.
+   - The removed owner and one kept owner cannot change the namespace.
+   - A `guardianGovernance` transaction with one kept key and the new key succeeds.
+   - A transaction with one kept key and the removed key fails.
+
+### Limits of the rehearsal
+
+- One container runs all three participants and the synchronizer.
+  The check does not show a fault of a separate host or network.
+- The checks disconnect participants from the synchronizer.
+  They do not stop the participant processes.
+- The vetting check fails at the submitting participant.
+  It does not show the check on the other hosts for a submission that skips this check.
+- Each script changes the ledger state. Run each script in the order of this section.
