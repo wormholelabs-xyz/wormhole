@@ -3,6 +3,14 @@
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
+# Every run appends its stdout and stderr to an evidence log. The logs hold no tokens or private keys.
+readonly EVIDENCE_DIR="$LOCALNET_STATE_DIR/evidence"
+mkdir -p "$EVIDENCE_DIR"
+EVIDENCE_LOG="$EVIDENCE_DIR/$(basename "$0" .sh)-$(date -u +%Y%m%dT%H%M%SZ).log"
+exec > >(tee -a "$EVIDENCE_LOG") 2> >(tee -a "$EVIDENCE_LOG" >&2)
+echo "Run $(basename "$0") $* at $(date -u +%Y-%m-%dT%H:%M:%SZ), commit $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "Evidence log: $EVIDENCE_LOG"
+
 GG_ARTIFACTS="$LOCALNET_STATE_DIR/gg-artifacts.json"
 OPERATOR_ARTIFACTS="$LOCALNET_STATE_DIR/operator-artifacts.json"
 CORE_CONTRACTS="$LOCALNET_STATE_DIR/core-contracts.json"
@@ -24,7 +32,12 @@ LOGICAL_SYNCHRONIZER_ID="$(sed -E 's/::[0-9]+-[0-9]+$//' <<<"$SYNCHRONIZER_ID")"
 
 gg_work_dir="$(mktemp -d)"
 trap 'rm -rf "$gg_work_dir"' EXIT
-"$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$gg_work_dir/script.jwt"
+(umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$gg_work_dir/script.jwt")
+# curl -H @file headers: Daml Script user and the ledger-api-user administrator.
+SCRIPT_AUTH_HEADER="$gg_work_dir/script.auth"
+ADMIN_AUTH_HEADER="$gg_work_dir/admin.auth"
+write_auth_header_file "$SCRIPT_AUTH_HEADER" "$SCRIPT_USER_ID"
+write_auth_header_file "$ADMIN_AUTH_HEADER"
 
 # Signer JSON for one owner key: signer_json <public-key-file>.
 signer_json() {
@@ -115,17 +128,18 @@ record_core_contract_id() {
 }
 
 readonly CORE_STATE_TEMPLATE="#wormhole-core:Wormhole.Core.State:CoreState"
+# shellcheck disable=SC2034 # used by the scripts that source this file
 readonly EMITTER_REGISTRY_TEMPLATE="#wormhole-core:Wormhole.Core.State:EmitterRegistry"
+# shellcheck disable=SC2034
 readonly REPLAY_ROOT_REGISTRY_TEMPLATE="#wormhole-core:Wormhole.Core.State:ReplayRootRegistry"
 readonly EMITTER_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
 
 # active_contracts <validator> <party> <qualified-template-suffix>: active contracts of that template that the party sees there.
 active_contracts() {
-  local validator_name="$1" party="$2" template_suffix="$3" ledger_end admin_token
-  admin_token="$(cat "$gg_work_dir/script.jwt")"
-  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "Authorization: Bearer $admin_token" | jq -r .offset)"
+  local validator_name="$1" party="$2" template_suffix="$3" ledger_end
+  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -r .offset)"
   curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
-    -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+    -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
       eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
       activeAtOffset: $offset}')" \
@@ -134,10 +148,34 @@ active_contracts() {
 }
 
 # set_participant_connection <disconnect|reconnect> <comma-separated validator names>
+# Returns non-zero unless each named participant reports the expected connection state afterwards.
 set_participant_connection() {
-  PARTICIPANT_ACTION="$1" PARTICIPANT_NAMES="$2" \
-    "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/participant_connection.canton" 2>&1 \
-    | grep -E '^CONNECTION|ERROR' || true
+  local action="$1" participant_names="$2" expected_connected console_output console_status=0 participant_name
+  local -a participant_list
+  case "$action" in
+    disconnect) expected_connected=false ;;
+    reconnect) expected_connected=true ;;
+    *) echo "set_participant_connection: unknown action $action" >&2; return 2 ;;
+  esac
+  IFS=, read -ra participant_list <<<"$participant_names"
+  if [[ ${#participant_list[@]} -eq 0 ]]; then
+    echo "set_participant_connection: no participant names" >&2
+    return 2
+  fi
+  console_output="$(PARTICIPANT_ACTION="$action" PARTICIPANT_NAMES="$participant_names" \
+    "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/participant_connection.canton" 2>&1)" \
+    || console_status=$?
+  grep -E '^CONNECTION|ERROR' <<<"$console_output" || true
+  if [[ "$console_status" -ne 0 ]]; then
+    echo "FAIL: participant_connection.canton exited with status $console_status" >&2
+    return 1
+  fi
+  for participant_name in "${participant_list[@]}"; do
+    if ! grep -qE "^CONNECTION $participant_name connected=$expected_connected\$" <<<"$console_output"; then
+      echo "FAIL: $participant_name does not report connected=$expected_connected after $action" >&2
+      return 1
+    fi
+  done
 }
 
 # verify_vaa_as_operator <command-id> <vaa-hex> <pub-keys-json>: ParseAndVerifyVAA on the current CoreState.
@@ -151,7 +189,7 @@ verify_vaa_as_operator() {
 
 # generate_vaa <canton_localnet_vaa flags...>: prints the JSON {vaaHex, digestHex, pubKeys} of a devnet-key VAA.
 generate_vaa() {
-  (cd "$REPO_ROOT/node" && GOFLAGS=-mod=mod GOPROXY=off go run ./hack/canton_localnet_vaa "$@")
+  (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go run ./hack/canton_localnet_vaa "$@")
 }
 
 # Daml [(Int, Bytes)] public-key hints from generate_vaa output.

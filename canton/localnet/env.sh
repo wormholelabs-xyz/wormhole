@@ -18,6 +18,8 @@ export IMAGE_TAG="$SPLICE_VERSION"
 export DB_PORT="${DB_PORT:-5440}"
 # Stable protocol version only; set to env/alpha-protocol-version.env for alpha PVs.
 export ALPHA_PROTOCOL_VERSION_ENV="${ALPHA_PROTOCOL_VERSION_ENV:-}"
+# Pinned, not inherited: LocalNet uses the `unsafe` JWT secret, so its ports stay on loopback.
+export HOST_BIND_IP="127.0.0.1"
 
 COMPOSE_PROJECT="canton-localnet"
 
@@ -56,6 +58,14 @@ grpc_ledger_api_port() {
   local port_prefix
   port_prefix="$(validator_port_prefix "$1")"
   echo "${port_prefix}901"
+}
+
+# write_auth_header_file <header-file> [subject]: writes "Authorization: Bearer <jwt>" with mode 0600.
+# Pass the file to curl as -H "@<header-file>", so the token stays out of the process arguments.
+write_auth_header_file() {
+  local header_file="$1" subject="${2:-ledger-api-user}" bearer_token
+  bearer_token="$("$LOCALNET_SCRIPT_DIR/token.sh" "$subject")" || return 1
+  (umask 077 && printf 'Authorization: Bearer %s\n' "$bearer_token" > "$header_file")
 }
 
 # Keys, artifacts and contract ids that the guardianGovernance rehearsal scripts share.

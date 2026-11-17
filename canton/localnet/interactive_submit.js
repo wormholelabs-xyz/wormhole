@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+// WARNING: LocalNet only. This is not a production signer. It signs the preparedTransactionHash that the
+// participant returns and does not recompute it from preparedTransaction, so it trusts the participant
+// to describe the transaction correctly. A production signer must decode preparedTransaction, check its
+// content, and compute the hash itself (Canton transaction hashing scheme) before it signs.
 // Prepare, externally sign and execute one Ledger API interactive submission (JSON Ledger API v2).
 // Usage: interactive_submit.js <json-api-url> <token-file> <submission-spec.json>
 // Spec: { commandId, actAs: [party], commands: [Command], disclosedContracts?: [DisclosedContract],
@@ -90,6 +94,7 @@ async function main() {
     verboseHashing: false,
     prefetchContractKeys: [],
   });
+  // Trusts the participant's hash; see the warning at the top of this file.
   const hashBytes = Buffer.from(prepared.preparedTransactionHash, 'base64');
   if (hashBytes.length !== 32) throw new Error(`prepared hash has ${hashBytes.length} bytes, expected 32`);
   process.stderr.write(`prepared ${spec.commandId}: hash ${hashBytes.toString('hex')}\n`);

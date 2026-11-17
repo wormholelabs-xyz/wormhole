@@ -4,9 +4,12 @@
 #   2. ParseAndVerifyVAA with a VAA signed by the new set. Expect success.
 #   3. ParseAndVerifyVAA with a VAA signed by the old set. Expect success until the old set expires.
 #   4. SubmitGovernanceVAA signed by the old set. Expect rejection (current set only).
-#   5. ParseAndVerifyVAA naming the new set but signed by an old key. Expect rejection.
+#   5. ParseAndVerifyVAA naming the new set, with an old key at guardian index 0. Expect rejection.
+#   6. New set of 2 or more guardians only: ParseAndVerifyVAA signed by quorum - 1 new guardians.
+#      Expect "no quorum".
 # Usage: gg_guardian_set_rotation.sh <old-set-key-indices> <new-set-key-indices>
-#   Key indices are deterministic devnet keys (node/pkg/devnet), for example: 0 1
+#   Key indices are comma-separated deterministic devnet keys (node/pkg/devnet) in guardian order.
+#   One-guardian sets: 0 1. Three-guardian new set (quorum 3): 1 2,3,4
 # Precondition: gg_genesis.sh ran. The old set is the current CoreState set.
 # LocalNet runs on wall-clock time, so it cannot reach the 86400 s expiry. The Daml Script test
 # Test.TestCore:testGuardianSetUpgradeExpiry covers the expiry with passTime.
@@ -16,6 +19,26 @@ source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 
 old_key_indices="${1:?usage: gg_guardian_set_rotation.sh <old-set-key-indices> <new-set-key-indices>}"
 new_key_indices="${2:?usage: gg_guardian_set_rotation.sh <old-set-key-indices> <new-set-key-indices>}"
+for key_indices in "$old_key_indices" "$new_key_indices"; do
+  if [[ ! "$key_indices" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "key indices must be comma-separated integers: $key_indices" >&2
+    exit 2
+  fi
+done
+IFS=, read -ra new_keys <<<"$new_key_indices"
+first_old_key="${old_key_indices%%,*}"
+if [[ "$first_old_key" == "${new_keys[0]}" ]]; then
+  echo "the first old key and the first new key must differ (step 5 puts the old key at index 0)" >&2
+  exit 2
+fi
+new_set_size="${#new_keys[@]}"
+# Wormhole quorum: floor(2n/3) + 1 (sdk/vaa CalculateQuorum).
+new_set_quorum=$((new_set_size * 2 / 3 + 1))
+# Step 5 signer list: the first old key in place of new guardian 0, then the other new keys.
+forged_key_indices="$first_old_key"
+for new_key in "${new_keys[@]:1}"; do
+  forged_key_indices+=",$new_key"
+done
 
 current_core_state() {
   active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" :Wormhole.Core.State:CoreState \
@@ -57,14 +80,22 @@ expect_verified() {
   echo "PASS: $label verified (guardianSetIndex $verified_set_index)"
 }
 
+# expect_rejected <label> <expected-assertion-message> <command...>: the command must fail with
+# DAML_FAILURE and the Daml AssertionFailed message.
 expect_rejected() {
-  local label="$1"
-  shift
+  local label="$1" expected_message="$2"
+  shift 2
   if "$@" > "$gg_work_dir/$label.out" 2> "$gg_work_dir/$label.err"; then
     echo "FAIL: $label committed" >&2
     exit 1
   fi
-  echo "PASS: $label rejected: $(grep -oE '"cause":"[^"]*"' "$gg_work_dir/$label.err" | head -n 1)"
+  if ! grep -qF 'DAML_FAILURE' "$gg_work_dir/$label.err" \
+      || ! grep -qF "AssertionFailed (error category 9): $expected_message" "$gg_work_dir/$label.err"; then
+    echo "FAIL: $label: expected DAML_FAILURE with \"$expected_message\"" >&2
+    cat "$gg_work_dir/$label.err" >&2
+    exit 1
+  fi
+  echo "PASS: $label rejected: DAML_FAILURE $expected_message"
 }
 
 echo "Step 2: VAA signed by the new set"
@@ -80,10 +111,27 @@ expect_verified old-set-message \
 echo "Step 4: governance VAA signed by the old set"
 old_set_governance="$(generate_vaa -kind set-message-fee -fee 0 -signing-set-index "$old_set_index" \
   -signing-key-indices "$old_key_indices" -sequence "$((run_sequence + 1))")"
-expect_rejected old-set-governance submit_governance_vaa "old-set-governance-$run_sequence" \
+expect_rejected old-set-governance "governance: not signed by current guardian set" submit_governance_vaa "old-set-governance-$run_sequence" \
   "$(jq -r .vaaHex <<<"$old_set_governance")" "$(vaa_pub_keys_json "$old_set_governance")"
 
-echo "Step 5: VAA that names the new set but carries old-set signatures"
-forged_new_set="$(generate_vaa -kind message -signing-set-index "$new_set_index" -signing-key-indices "$old_key_indices" -sequence "$run_sequence")"
-expect_rejected new-set-index-old-keys verify_vaa_as_operator "new-set-index-old-keys-$run_sequence" \
+echo "Step 5: VAA that names the new set, with old key $first_old_key at guardian index 0 (keys $forged_key_indices)"
+forged_new_set="$(generate_vaa -kind message -signing-set-index "$new_set_index" -signing-key-indices "$forged_key_indices" -sequence "$run_sequence")"
+expect_rejected new-set-index-old-keys "public key does not match guardian address at index 0" \
+  verify_vaa_as_operator "new-set-index-old-keys-$run_sequence" \
   "$(jq -r .vaaHex <<<"$forged_new_set")" "$(vaa_pub_keys_json "$forged_new_set")"
+
+if [[ "$new_set_quorum" -lt 2 ]]; then
+  echo "Step 6: skipped. The new set has $new_set_size guardian; quorum $new_set_quorum leaves no quorum - 1 case."
+  exit 0
+fi
+below_quorum_signers=$((new_set_quorum - 1))
+below_quorum_positions="0"
+for ((position = 1; position < below_quorum_signers; position++)); do
+  below_quorum_positions+=",$position"
+done
+echo "Step 6: VAA of the new set signed by $below_quorum_signers of $new_set_size guardians (positions $below_quorum_positions, quorum $new_set_quorum)"
+below_quorum_vaa="$(generate_vaa -kind message -signing-set-index "$new_set_index" -signing-key-indices "$new_key_indices" \
+  -signer-positions "$below_quorum_positions" -sequence "$run_sequence")"
+expect_rejected new-set-below-quorum "no quorum: have $below_quorum_signers, need $new_set_quorum" \
+  verify_vaa_as_operator "new-set-below-quorum-$run_sequence" \
+  "$(jq -r .vaaHex <<<"$below_quorum_vaa")" "$(vaa_pub_keys_json "$below_quorum_vaa")"

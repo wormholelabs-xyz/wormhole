@@ -13,7 +13,10 @@ readonly DAR_PATHS=(
 
 validator_name="${1:-app-provider}"
 ledger_json_url="$(json_api_url "$validator_name")"
-access_token="$("$LOCALNET_SCRIPT_DIR/token.sh")"
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+auth_header_file="$work_dir/admin.auth"
+write_auth_header_file "$auth_header_file"
 
 for dar_path in "${DAR_PATHS[@]}"; do
   if [[ ! -f "$dar_path" ]]; then
@@ -26,7 +29,7 @@ for dar_path in "${DAR_PATHS[@]}"; do
   echo "Upload $(basename "$dar_path") to $validator_name ($ledger_json_url)"
   http_status="$(curl -sS -o /dev/stderr -w '%{http_code}' \
     -X POST "$ledger_json_url/v2/dars?vetAllPackages=true" \
-    -H "Authorization: Bearer $access_token" \
+    -H "@$auth_header_file" \
     -H 'Content-Type: application/octet-stream' \
     --data-binary "@$dar_path")"
   echo

@@ -2,12 +2,12 @@
 # A8 rehearsal: guardianGovernance is hosted on 3 participants with confirmation threshold 2.
 #   1. Disconnect sv and app-user, so only app-provider can confirm for guardianGovernance.
 #      a. SubmitGovernanceVAA (consumes the gg-signed CoreState). Expect MEDIATOR_SAYS_TX_TIMED_OUT.
-#      b. ParseAndVerifyVAA (nonconsuming; gg signs the used CoreState). Expect a timeout rejection.
+#      b. ParseAndVerifyVAA (nonconsuming; gg signs the used CoreState). Expect MEDIATOR_SAYS_TX_TIMED_OUT.
 #   2. Reconnect app-user. Repeat 1a. Expect commit with two confirming hosts.
-#   3. Disconnect app-user again. PublishMessage at fee 0. Expect a timeout rejection.
+#   3. Disconnect app-user again. PublishMessage at fee 0. Expect MEDIATOR_SAYS_TX_TIMED_OUT.
+# Each timeout rejection must name guardianGovernance, and only it, as the unresponsive party.
 # The mediator timeout runs on sequencer time. With two hosts offline, LocalNet traffic is too low to
-# move it, so a background ticker requests time proofs. A rejection shows MEDIATOR_SAYS_TX_TIMED_OUT
-# or LOCAL_VERDICT_TIMEOUT.
+# move it, so a background ticker requests time proofs.
 # Usage: gg_confirmation_quorum.sh
 # Precondition: gg_publish_and_govern.sh ran. The EXIT trap reconnects all participants.
 set -euo pipefail
@@ -17,21 +17,36 @@ source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 readonly QUORUM_TICKER_SECONDS=600
 
 reconnect_all() {
+  local exit_status=$?
   stop_clock_ticker
   echo "Reconnect sv and app-user"
-  set_participant_connection reconnect sv,app-user
+  if ! set_participant_connection reconnect sv,app-user; then
+    echo "ERROR: a participant stays disconnected from the global synchronizer. LocalNet is degraded." >&2
+    echo "ERROR: recover with: PARTICIPANT_ACTION=reconnect PARTICIPANT_NAMES=sv,app-user $LOCALNET_SCRIPT_DIR/canton_console.sh $LOCALNET_SCRIPT_DIR/console/participant_connection.canton" >&2
+    exit_status=1
+  fi
   rm -rf "$gg_work_dir"
+  exit "$exit_status"
 }
 trap reconnect_all EXIT
 
-# check_timeout_rejection <output-prefix>: <prefix>.out must hold a completion rejected for missing confirmations.
+# check_timeout_rejection <output-prefix>: <prefix>.out must hold a completion rejected with
+# MEDIATOR_SAYS_TX_TIMED_OUT whose unresponsive parties are exactly guardianGovernance.
 check_timeout_rejection() {
-  if ! jq -e '.completion.status.message | test("^(MEDIATOR_SAYS_TX_TIMED_OUT|LOCAL_VERDICT_TIMEOUT)")' "$1.out" >/dev/null 2>&1; then
-    echo "FAIL: expected a confirmation timeout rejection" >&2
+  local summary
+  summary="$(completion_summary "$1.out" 2>/dev/null || echo '{}')"
+  if ! jq -e '.message | test("^MEDIATOR_SAYS_TX_TIMED_OUT")' <<<"$summary" >/dev/null 2>&1; then
+    echo "FAIL: expected MEDIATOR_SAYS_TX_TIMED_OUT" >&2
     cat "$1.out" "$1.err" >&2
     exit 1
   fi
-  echo "PASS: rejected. $(completion_summary "$1.out")"
+  if ! jq -e --arg gg "$GG_PARTY" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$gg]' \
+      <<<"$summary" >/dev/null 2>&1; then
+    echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY" >&2
+    cat "$1.out" "$1.err" >&2
+    exit 1
+  fi
+  echo "PASS: rejected. $summary"
 }
 
 # Governance replay protection is keyed by digest, so each run uses a new sequence.

@@ -15,8 +15,7 @@ if [[ -f "$CORE_CONTRACTS" ]]; then
   exit 1
 fi
 
-admin_token="$("$LOCALNET_SCRIPT_DIR/token.sh")"
-dso_party="$(curl -sSf "$(json_api_url sv)/v2/parties?pageSize=1000" -H "Authorization: Bearer $admin_token" \
+dso_party="$(curl -sSf "$(json_api_url sv)/v2/parties?pageSize=1000" -H "@$ADMIN_AUTH_HEADER" \
   | jq -er '[.partyDetails[].party | select(startswith("DSO::"))] | if length == 1 then .[0] else error("expected one DSO party") end')"
 
 core_state_arguments="$(jq -n --arg operator "$OPERATOR_PARTY" --arg gg "$GG_PARTY" --arg dso "$dso_party" \
@@ -37,7 +36,6 @@ core_state_cid="$(created_contract_id "$genesis_transaction" ":Wormhole.Core.Sta
 record_core_contract_id coreState "$core_state_cid"
 echo "CoreState $core_state_cid (update $(jq -r .updateId <<<"$genesis_transaction"))"
 
-operator_only='[]'
 operator_only="$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')"
 emitter_registry_arguments="$(jq -n --arg operator "$OPERATOR_PARTY" --arg gg "$GG_PARTY" \
   '{operator: $operator, guardianGovernance: $gg, registrationFee: "0", nextId: "0"}')"
