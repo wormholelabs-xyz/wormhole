@@ -38,11 +38,11 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 	return msgC, obsvReqC
 }
 
-func sampleEvent(offset int64) cantonclient.CantonMessageEvent {
+func sampleEvent(participantOffset int64) cantonclient.CantonMessageEvent {
 	return cantonclient.CantonMessageEvent{
-		Offset:      offset,
-		UpdateID:    "u",
-		EffectiveAt: time.Unix(1_700_000_000, 0).UTC(),
+		ParticipantOffset: participantOffset,
+		UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
+		EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
 		Message: cantonclient.CantonMessage{
 			Registrar: sampleRegistrar,
 			Owner:     sampleOwner,
@@ -79,21 +79,21 @@ func TestRunEmitsObservation(t *testing.T) {
 		assert.Equal(t, uint32(42), mp.Nonce)
 		assert.Equal(t, []byte{0x11, 0x22}, mp.Payload)
 		assert.Equal(t, wantAddr(t), mp.EmitterAddress)
-		assert.Equal(t, cantonclient.OffsetToTxID(100), mp.TxID)
+		assert.Equal(t, mustParseUpdateID(sampleUpdateIDHex).TxID(), mp.TxID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no observation emitted")
 	}
 }
 
 // TestRunReobservation proves an ObservationRequest on obsvReqC drives
-// GetUpdateByOffset and re-emits with IsReobservation=true.
+// GetTransactionByUpdateID and re-emits with IsReobservation=true.
 func TestRunReobservation(t *testing.T) {
 	fake := newFakeClient()
-	const offset int64 = 555
-	fake.byOffset[offset] = cantonclient.CantonTransaction{
-		Offset:      offset,
-		UpdateID:    "reobs",
-		EffectiveAt: time.Unix(1_700_000_001, 0).UTC(),
+	reobsUpdateID := mustParseUpdateID(reobsUpdateIDHex)
+	fake.byUpdateID[reobsUpdateID] = cantonclient.CantonTransaction{
+		ParticipantOffset: 555,
+		UpdateID:          reobsUpdateID,
+		EffectiveAt:       time.Unix(1_700_000_001, 0).UTC(),
 		Messages: []cantonclient.CantonMessage{{
 			Registrar: sampleRegistrar,
 			Owner:     sampleOwner,
@@ -107,14 +107,14 @@ func TestRunReobservation(t *testing.T) {
 
 	obsvReqC <- &gossipv1.ObservationRequest{
 		ChainId: uint32(vaa.ChainIDCanton),
-		TxHash:  cantonclient.OffsetToTxID(offset),
+		TxHash:  reobsUpdateID.TxID(),
 	}
 
 	select {
 	case mp := <-msgC:
 		assert.True(t, mp.IsReobservation)
 		assert.Equal(t, uint64(9), mp.Sequence)
-		assert.Equal(t, cantonclient.OffsetToTxID(offset), mp.TxID)
+		assert.Equal(t, reobsUpdateID.TxID(), mp.TxID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no reobservation emitted")
 	}
@@ -136,17 +136,17 @@ func TestRunResubscribesOnStreamError(t *testing.T) {
 	}, 15*time.Second, 100*time.Millisecond, "watcher did not re-subscribe after a stream error")
 }
 
-// TestRunReobservationErrorDoesNotEmit proves a GetUpdateByOffset failure is
+// TestRunReobservationErrorDoesNotEmit proves a GetTransactionByUpdateID failure is
 // handled gracefully — no publication, no crash.
 func TestRunReobservationErrorDoesNotEmit(t *testing.T) {
 	fake := newFakeClient()
-	fake.getUpdateErr = errors.New("not found")
+	fake.getTransactionErr = errors.New("not found")
 	msgC, obsvReqC := startWatcher(t, fake)
 	fake.waitSubscribed(t)
 
 	obsvReqC <- &gossipv1.ObservationRequest{
 		ChainId: uint32(vaa.ChainIDCanton),
-		TxHash:  cantonclient.OffsetToTxID(1),
+		TxHash:  mustParseUpdateID(sampleUpdateIDHex).TxID(),
 	}
 
 	select {
@@ -178,9 +178,10 @@ func TestProcessMessageDropsZeroTimestamp(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
 	w := testWatcher(msgC)
 	w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
-		Offset:      1,
-		EffectiveAt: time.Time{}, // zero
-		Message:     cantonclient.CantonMessage{Registrar: sampleRegistrar, Owner: sampleOwner},
+		ParticipantOffset: 1,
+		UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
+		EffectiveAt:       time.Time{},
+		Message:           cantonclient.CantonMessage{Registrar: sampleRegistrar, Owner: sampleOwner},
 	}, false)
 
 	select {

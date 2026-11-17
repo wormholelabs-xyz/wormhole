@@ -39,8 +39,10 @@ const (
 	rogueShadowNonce         = uint32(66)
 	rogueShadowPayloadHex    = "deadbeef"
 
-	// Bounds the in-process hop from a recorded stream offset to msgC.
+	// Bounds the in-process hop from a recorded stream update id to msgC.
 	unexpectedEmissionWindow = 2 * time.Second
+	// Bounds one GetUpdateById round trip plus the hop to msgC.
+	reobservationWindow = 5 * time.Second
 )
 
 var getUpdatesFullMethod = "/" + apiv2.UpdateService_ServiceDesc.ServiceName + "/GetUpdates"
@@ -75,20 +77,20 @@ type observedPublish struct {
 
 // updateStreamRecorder is a gRPC stream interceptor on the watcher's own
 // Ledger API connection. It closes subscribed when GetUpdates opens and records
-// the offset of every transaction the stream delivers, before the client-side
-// template and package filter.
+// the update id of every transaction the stream delivers, before the
+// client-side template and package filter.
 type updateStreamRecorder struct {
 	subscribed    chan struct{}
 	subscribeOnce sync.Once
 
-	mutex            sync.Mutex
-	deliveredOffsets map[int64]struct{}
+	mutex              sync.Mutex
+	deliveredUpdateIDs map[string]struct{}
 }
 
-const maxRecordedUpdateOffsets = 4096
+const maxRecordedUpdateIDs = 4096
 
 func newUpdateStreamRecorder() *updateStreamRecorder {
-	return &updateStreamRecorder{subscribed: make(chan struct{}), deliveredOffsets: make(map[int64]struct{})}
+	return &updateStreamRecorder{subscribed: make(chan struct{}), deliveredUpdateIDs: make(map[string]struct{})}
 }
 
 func (r *updateStreamRecorder) interceptGetUpdates(ctx context.Context, desc *grpc.StreamDesc, conn *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
@@ -97,40 +99,57 @@ func (r *updateStreamRecorder) interceptGetUpdates(ctx context.Context, desc *gr
 		return stream, err
 	}
 	r.subscribeOnce.Do(func() { close(r.subscribed) })
-	return &offsetRecordingStream{ClientStream: stream, recorder: r}, nil
+	return &updateIDRecordingStream{ClientStream: stream, recorder: r}, nil
 }
 
-func (r *updateStreamRecorder) recordDeliveredOffset(offset int64) {
+func (r *updateStreamRecorder) recordDeliveredUpdateID(updateIDHex string) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	if len(r.deliveredOffsets) >= maxRecordedUpdateOffsets {
-		panic("updateStreamRecorder: offset capacity exceeded")
+	if len(r.deliveredUpdateIDs) >= maxRecordedUpdateIDs {
+		panic("updateStreamRecorder: update id capacity exceeded")
 	}
-	r.deliveredOffsets[offset] = struct{}{}
+	r.deliveredUpdateIDs[updateIDHex] = struct{}{}
 }
 
-func (r *updateStreamRecorder) hasDeliveredOffset(offset int64) bool {
+func (r *updateStreamRecorder) hasDeliveredUpdateID(updateID cantonclient.UpdateID) bool {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	_, delivered := r.deliveredOffsets[offset]
+	_, delivered := r.deliveredUpdateIDs[updateID.String()]
 	return delivered
 }
 
-type offsetRecordingStream struct {
+type updateIDRecordingStream struct {
 	grpc.ClientStream
 	recorder *updateStreamRecorder
 }
 
-func (s *offsetRecordingStream) RecvMsg(message any) error {
+func (s *updateIDRecordingStream) RecvMsg(message any) error {
 	if err := s.ClientStream.RecvMsg(message); err != nil {
 		return err
 	}
 	if response, isUpdatesResponse := message.(*apiv2.GetUpdatesResponse); isUpdatesResponse {
 		if transaction := response.GetTransaction(); transaction != nil {
-			s.recorder.recordDeliveredOffset(transaction.GetOffset())
+			s.recorder.recordDeliveredUpdateID(transaction.GetUpdateId())
 		}
 	}
 	return nil
+}
+
+// reobserveAndCollect sends a reobservation for txID and returns what the watcher emits within the window.
+func reobserveAndCollect(t *testing.T, obsvReqC chan<- *gossipv1.ObservationRequest, msgC <-chan *common.MessagePublication, txID []byte, window time.Duration) []*common.MessagePublication {
+	t.Helper()
+	obsvReqC <- &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: txID}
+	var emitted []*common.MessagePublication
+	deadline := time.After(window)
+	for {
+		select {
+		case msg := <-msgC:
+			require.True(t, msg.IsReobservation, "reobservation emission must be flagged")
+			emitted = append(emitted, msg)
+		case <-deadline:
+			return emitted
+		}
+	}
 }
 
 // parseDamlUint64 accepts the Daml-LF JSON Int64 encoding (quoted or bare).
@@ -266,15 +285,18 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	}
 
 	msgChannels := make([]chan *common.MessagePublication, len(cases))
+	obsvReqChannels := make([]chan *gossipv1.ObservationRequest, len(cases))
 	streamRecorders := make([]*updateStreamRecorder, len(cases))
 	for caseIndex, tc := range cases {
 		msgC := make(chan *common.MessagePublication, 16)
 		msgChannels[caseIndex] = msgC
+		obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
+		obsvReqChannels[caseIndex] = obsvReqC
 		streamRecorder := newUpdateStreamRecorder()
 		streamRecorders[caseIndex] = streamRecorder
 
 		// Run builds the gRPC client from NewWatcher's readAsParty.
-		w := NewWatcher(ledgerAddr, tc.packageID, tc.readAsParty, AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+		w := NewWatcher(ledgerAddr, tc.packageID, tc.readAsParty, AuthConfig{}, true, msgC, obsvReqC)
 		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
 			if err := supervisor.Run(ctx, "canton", w.Run); err != nil {
@@ -317,7 +339,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	require.NotEqual(t, trustedPublish.EmitterAddress, rogueShadowPublish.EmitterAddress)
 
 	deadline := time.After(90 * time.Second)
-	trustedPublishOffset := int64(-1)
+	var trustedPublishUpdateID, rogueShadowUpdateID cantonclient.UpdateID
 	for caseIndex, tc := range cases {
 		var wantPublishes []observedPublish
 		if tc.wantRogueShadow {
@@ -330,22 +352,26 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		observed := make([]observedPublish, 0, len(collected))
 		for _, msg := range collected {
 			observed = append(observed, toObservedPublish(msg))
-			if msg.Nonce == trustedPublishNonce {
-				offset, err := cantonclient.TxIDToOffset(msg.TxID)
-				require.NoError(t, err)
-				require.Positive(t, offset)
-				trustedPublishOffset = offset
+			updateID, err := cantonclient.UpdateIDFromTxID(msg.TxID)
+			require.NoError(t, err)
+			switch msg.Nonce {
+			case trustedPublishNonce:
+				trustedPublishUpdateID = updateID
+			case rogueShadowNonce:
+				rogueShadowUpdateID = updateID
 			}
 		}
 		assert.ElementsMatchf(t, wantPublishes, observed, "%s", tc.name)
 	}
-	require.Positive(t, trustedPublishOffset, "no case emitted the trusted publish")
+	require.False(t, trustedPublishUpdateID.IsZero(), "no case emitted the trusted publish")
+	require.False(t, rogueShadowUpdateID.IsZero(), "the wildcard control never emitted the rogue shadow publish")
+	require.NotEqual(t, trustedPublishUpdateID, rogueShadowUpdateID)
 
 	// Every stream, including the wrong-package one, received the trusted publish.
 	for caseIndex, tc := range cases {
 		require.Eventuallyf(t, func() bool {
-			return streamRecorders[caseIndex].hasDeliveredOffset(trustedPublishOffset)
-		}, 30*time.Second, 100*time.Millisecond, "%s: stream never delivered offset %d", tc.name, trustedPublishOffset)
+			return streamRecorders[caseIndex].hasDeliveredUpdateID(trustedPublishUpdateID)
+		}, 30*time.Second, 100*time.Millisecond, "%s: stream never delivered update %s", tc.name, trustedPublishUpdateID)
 	}
 	assert.Never(t, func() bool {
 		for _, msgC := range msgChannels {
@@ -363,4 +389,33 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		default:
 		}
 	}
+
+	// Reobservation by update id applies the same party filter and package pin as the stream.
+	for caseIndex, tc := range cases {
+		reobservedTrusted := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], trustedPublishUpdateID.TxID(), reobservationWindow)
+		reobservedRogue := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], rogueShadowUpdateID.TxID(), reobservationWindow)
+		var wantTrusted, wantRogue []observedPublish
+		if tc.wantTrustedPublish {
+			wantTrusted = []observedPublish{trustedPublish}
+		}
+		if tc.wantRogueShadow {
+			wantRogue = []observedPublish{rogueShadowPublish}
+		}
+		assert.Equalf(t, wantTrusted, toObservedPublishes(reobservedTrusted), "%s: trusted publish reobservation", tc.name)
+		assert.Equalf(t, wantRogue, toObservedPublishes(reobservedRogue), "%s: rogue shadow reobservation", tc.name)
+		for _, msg := range append(reobservedTrusted, reobservedRogue...) {
+			assert.Len(t, msg.TxID, cantonclient.UpdateIDTxIDLen)
+		}
+		if len(reobservedTrusted) == 1 {
+			assert.Equal(t, trustedPublishUpdateID.TxID(), reobservedTrusted[0].TxID)
+		}
+	}
+}
+
+func toObservedPublishes(msgs []*common.MessagePublication) []observedPublish {
+	var observed []observedPublish
+	for _, msg := range msgs {
+		observed = append(observed, toObservedPublish(msg))
+	}
+	return observed
 }

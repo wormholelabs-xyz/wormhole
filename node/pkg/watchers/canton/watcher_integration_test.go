@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 func findDpm(t *testing.T) string {
@@ -146,6 +148,8 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	// parties (wildcard); unsafeDevMode true ⇒ insecure gRPC to the local
 	// sandbox.
 	w := NewWatcher(addr, "", "", AuthConfig{}, true, msgC, obsvReqC)
+	streamRecorder := newUpdateStreamRecorder()
+	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 
 	// Start the real watcher exactly as guardiand does.
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
@@ -174,7 +178,12 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	assert.Equal(t, uint32(42), first.Nonce)
 	assert.Equal(t, []byte{0x11, 0x22, 0x33, 0x44}, first.Payload)
 	assert.NotEqual(t, vaa.Address{}, first.EmitterAddress, "derived emitter address must be non-zero")
-	require.Len(t, first.TxID, 32, "TxID is the 32-byte encoded participant offset")
+	// TxID is the hex-decoded update id the stream delivered, not the participant offset.
+	require.Len(t, first.TxID, cantonclient.UpdateIDTxIDLen)
+	firstUpdateID, err := cantonclient.UpdateIDFromTxID(first.TxID)
+	require.NoError(t, err)
+	assert.True(t, streamRecorder.hasDeliveredUpdateID(firstUpdateID), "TxID must decode to a streamed update id")
+	assert.Equal(t, "0x"+firstUpdateID.String(), first.TxIDString())
 
 	// 2. The block-height goroutine reports a non-zero ledger offset (the
 	//    readiness/height path), which advances once messages exist.
@@ -183,7 +192,7 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	}, 15*time.Second, time.Second, "height gauge never advanced")
 
 	// 3. Reobservation over the wire: a gossip ObservationRequest for the same
-	//    TxID drives GetUpdateByOffset and re-emits the message.
+	//    TxID drives GetUpdateById and re-emits the message.
 	obsvReqC <- &gossipv1.ObservationRequest{
 		ChainId: uint32(vaa.ChainIDCanton),
 		TxHash:  first.TxID,

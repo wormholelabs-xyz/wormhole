@@ -70,14 +70,17 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 	}
 
 	msgChannels := make([]chan *common.MessagePublication, len(cases))
+	obsvReqChannels := make([]chan *gossipv1.ObservationRequest, len(cases))
 	streamRecorders := make([]*updateStreamRecorder, len(cases))
 	for caseIndex, tc := range cases {
 		msgC := make(chan *common.MessagePublication, 16)
 		msgChannels[caseIndex] = msgC
+		obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
+		obsvReqChannels[caseIndex] = obsvReqC
 		streamRecorder := newUpdateStreamRecorder()
 		streamRecorders[caseIndex] = streamRecorder
 
-		w := NewWatcher(ledgerAddr, tc.packageID, bridge.GuardianGovernance, AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+		w := NewWatcher(ledgerAddr, tc.packageID, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
 		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
 			if err := supervisor.Run(ctx, "canton", w.Run); err != nil {
@@ -129,7 +132,7 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 	forgedPublish.Payload = decodeHexPayload(t, lookalikePayloadHex)
 
 	deadline := time.After(90 * time.Second)
-	forgedPublishOffset := int64(-1)
+	var forgedPublishUpdateID cantonclient.UpdateID
 	for caseIndex, tc := range cases {
 		wantPublishes := []observedPublish{trustedPublish}
 		if tc.wantForgedPublish {
@@ -140,20 +143,30 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 		for _, msg := range collected {
 			observed = append(observed, toObservedPublish(msg))
 			if msg.Nonce == lookalikeNonce {
-				offset, err := cantonclient.TxIDToOffset(msg.TxID)
+				updateID, err := cantonclient.UpdateIDFromTxID(msg.TxID)
 				require.NoError(t, err)
-				forgedPublishOffset = offset
+				forgedPublishUpdateID = updateID
 			}
 		}
 		assert.ElementsMatchf(t, wantPublishes, observed, "%s", tc.name)
 	}
-	require.Positive(t, forgedPublishOffset, "the unpinned control never emitted the forgery")
+	require.False(t, forgedPublishUpdateID.IsZero(), "the unpinned control never emitted the forgery")
 
 	// The pinned stream received the forged transaction and filtered it.
 	require.Eventually(t, func() bool {
-		return streamRecorders[0].hasDeliveredOffset(forgedPublishOffset)
-	}, 30*time.Second, 100*time.Millisecond, "pinned stream never delivered offset %d", forgedPublishOffset)
+		return streamRecorders[0].hasDeliveredUpdateID(forgedPublishUpdateID)
+	}, 30*time.Second, 100*time.Millisecond, "pinned stream never delivered update %s", forgedPublishUpdateID)
 	assert.Never(t, func() bool {
 		return len(msgChannels[0]) > 0
 	}, unexpectedEmissionWindow, 50*time.Millisecond, "pinned watcher emitted a message after the trusted publish")
+
+	// Reobservation by update id keeps the package pin.
+	for caseIndex, tc := range cases {
+		reobserved := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], forgedPublishUpdateID.TxID(), reobservationWindow)
+		var wantReobserved []observedPublish
+		if tc.wantForgedPublish {
+			wantReobserved = []observedPublish{forgedPublish}
+		}
+		assert.Equalf(t, wantReobserved, toObservedPublishes(reobserved), "%s: forged publish reobservation", tc.name)
+	}
 }
