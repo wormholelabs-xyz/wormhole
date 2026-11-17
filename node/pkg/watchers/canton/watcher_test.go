@@ -155,6 +155,10 @@ func (f *fakeClient) ListVettedPackageMetadata(_ context.Context, packageIDs []c
 	return f.vettedPackageMetadataResponses[responseIndex], nil
 }
 
+func (f *fakeClient) ReadPublishesInRange(context.Context, int64, int64, cantonclient.TemplateID, string) ([]cantonclient.CantonMessageEvent, error) {
+	return nil, fmt.Errorf("ReadPublishesInRange: not used by the watcher")
+}
+
 func (f *fakeClient) vettedPackageMetadataCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

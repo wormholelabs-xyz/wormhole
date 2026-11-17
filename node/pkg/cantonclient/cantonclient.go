@@ -146,6 +146,11 @@ type CantonClient interface {
 	// SubscribeUpdates. Used for reobservation. Maps to UpdateService.GetUpdateById.
 	GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error)
 
+	// ReadPublishesInRange returns every message event in (beginExclusive,
+	// endInclusive], filtered like SubscribeUpdates. Bounded by
+	// maxPublishesPerRange. Maps to UpdateService.GetUpdates with end_inclusive.
+	ReadPublishesInRange(ctx context.Context, beginExclusive int64, endInclusive int64, tmpl TemplateID, choiceName string) ([]CantonMessageEvent, error)
+
 	// ListVettedPackageMetadata returns the vetting entries of packageIDs on
 	// every synchronizer this participant knows. Maps to
 	// PackageService.ListVettedPackages.

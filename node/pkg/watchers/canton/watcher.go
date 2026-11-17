@@ -57,7 +57,7 @@ const (
 // Test.TestCore:testAddressVector, and TestDeriveEmitterAddressMatchesVector.
 const emitterAddressTag = "wormhole:emitter:v1"
 
-// deriveEmitterAddress computes the canonical 32-byte Wormhole emitter address
+// DeriveEmitterAddress computes the canonical 32-byte Wormhole emitter address
 // from an emitter's contract-key components:
 //
 //	keccak256( utf8(tag) ‖ lp(registrar) ‖ lp(owner) ‖ uint64be(emitterId) )
@@ -66,7 +66,7 @@ const emitterAddressTag = "wormhole:emitter:v1"
 // make the preimage injective across the two variable-length party ids; owner is
 // part of the preimage so a compromised operator cannot forge an existing
 // emitter's address (see Wormhole.Core.State).
-func deriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.Address {
+func DeriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.Address {
 	buf := make([]byte, 0, len(emitterAddressTag)+8+len(registrar)+len(owner)+8)
 	buf = append(buf, emitterAddressTag...)
 	var l [4]byte
@@ -284,21 +284,28 @@ func NewWatcher(
 	}, nil
 }
 
-// templateID is the filter for the core bridge's Emitter template, shared by
-// the stream and reobservation.
-func (e *Watcher) templateID() cantonclient.TemplateID {
+// PublishMessageChoice is the Emitter choice whose result the watcher observes.
+const PublishMessageChoice = publishMessageChoice
+
+// PublishMessageTemplateID is the filter for the core bridge's Emitter template.
+func PublishMessageTemplateID(acceptedPackageIDs cantonclient.AcceptedPackageIDs) cantonclient.TemplateID {
 	return cantonclient.TemplateID{
-		AcceptedPackageIDs: e.acceptedPackageIDs,
+		AcceptedPackageIDs: acceptedPackageIDs,
 		ModuleName:         publishMessageModule,
 		EntityName:         publishMessageEntity,
 	}
+}
+
+// templateID is the filter shared by the stream and reobservation.
+func (e *Watcher) templateID() cantonclient.TemplateID {
+	return PublishMessageTemplateID(e.acceptedPackageIDs)
 }
 
 // processMessage turns a decoded Canton message event into a
 // common.MessagePublication and publishes it to the message channel.
 //
 // The 32-byte emitter address is derived from the emitter's contract-key
-// components (registrar, owner, emitterId) via deriveEmitterAddress: the guardian
+// components (registrar, owner, emitterId) via DeriveEmitterAddress: the guardian
 // is the sole source of truth for the address (it is not stored on-ledger), and
 // because the owner is part of the preimage a compromised operator cannot forge
 // an existing emitter's address. See canton/README.md §4.2.
@@ -327,7 +334,7 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		return
 	}
 
-	emitter := deriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
+	emitter := DeriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
 
 	timestamp := ev.EffectiveAt
 	if timestamp.IsZero() {

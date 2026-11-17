@@ -7,7 +7,9 @@ package cantonclient
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"time"
@@ -217,6 +219,69 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 		}
 	}()
 	return sub, nil
+}
+
+// maxPublishesPerRange bounds one ReadPublishesInRange call.
+const maxPublishesPerRange = 100_000
+
+func (c *grpcClient) ReadPublishesInRange(ctx context.Context, beginExclusive int64, endInclusive int64, tmpl TemplateID, choiceName string) ([]CantonMessageEvent, error) {
+	if beginExclusive < 0 {
+		return nil, fmt.Errorf("GetUpdates: negative begin offset %d", beginExclusive)
+	}
+	if beginExclusive > endInclusive {
+		return nil, fmt.Errorf("GetUpdates: begin offset %d is after end offset %d", beginExclusive, endInclusive)
+	}
+	events := []CantonMessageEvent{}
+	if beginExclusive == endInclusive {
+		return events, nil
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := c.update.GetUpdates(streamCtx, &apiv2.GetUpdatesRequest{
+		BeginExclusive: beginExclusive,
+		EndInclusive:   &endInclusive,
+		UpdateFormat:   c.updateFormat(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GetUpdates: %w", err)
+	}
+	// Terminates: the participant ends the stream after endInclusive.
+	for {
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return events, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("GetUpdates(%d, %d]: %w", beginExclusive, endInclusive, err)
+		}
+		tx := response.GetTransaction()
+		if tx == nil {
+			continue
+		}
+		if tx.GetOffset() <= beginExclusive || tx.GetOffset() > endInclusive {
+			return nil, fmt.Errorf("GetUpdates(%d, %d]: transaction at offset %d is beyond the requested range", beginExclusive, endInclusive, tx.GetOffset())
+		}
+		messages := messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger)
+		if len(messages) == 0 {
+			continue
+		}
+		updateID, err := ParseUpdateID(tx.GetUpdateId())
+		if err != nil {
+			return nil, fmt.Errorf("GetUpdates: transaction at offset %d: %w", tx.GetOffset(), err)
+		}
+		if len(events)+len(messages) > maxPublishesPerRange {
+			return nil, fmt.Errorf("GetUpdates(%d, %d]: more than %d publishes", beginExclusive, endInclusive, maxPublishesPerRange)
+		}
+		for _, message := range messages {
+			events = append(events, CantonMessageEvent{
+				ParticipantOffset: tx.GetOffset(),
+				UpdateID:          updateID,
+				EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+				RecordTime:        protoTime(tx.GetRecordTime()),
+				Message:           message,
+			})
+		}
+	}
 }
 
 func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error) {
