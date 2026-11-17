@@ -354,14 +354,14 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 
 	trustedPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.TrustedSequence),
 		Nonce:          trustedPublishNonce,
 		Payload:        decodeHexPayload(t, trustedPublishPayloadHex),
 	}
 	rogueShadowPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.RogueShadowSequence),
 		Nonce:          rogueShadowNonce,
 		Payload:        decodeHexPayload(t, rogueShadowPayloadHex),

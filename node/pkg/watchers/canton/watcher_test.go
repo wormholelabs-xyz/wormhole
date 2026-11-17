@@ -284,16 +284,16 @@ func TestProcessMessageDropsMissingKeyParty(t *testing.T) {
 // cross-language vector and checks that each key component affects the address,
 // including that the length prefixes disambiguate the two variable-length parts.
 func TestDeriveEmitterAddressMatchesVector(t *testing.T) {
-	assert.Equal(t, wantAddr(t), deriveEmitterAddress(sampleRegistrar, sampleOwner, sampleEmitterID))
+	assert.Equal(t, wantAddr(t), DeriveEmitterAddress(sampleRegistrar, sampleOwner, sampleEmitterID))
 
-	base := deriveEmitterAddress(sampleRegistrar, sampleOwner, sampleEmitterID)
-	assert.NotEqual(t, base, deriveEmitterAddress(sampleRegistrar, sampleOwner, sampleEmitterID+1), "id must matter")
-	assert.NotEqual(t, base, deriveEmitterAddress(sampleOwner, sampleRegistrar, sampleEmitterID), "swapping parties must matter")
+	base := DeriveEmitterAddress(sampleRegistrar, sampleOwner, sampleEmitterID)
+	assert.NotEqual(t, base, DeriveEmitterAddress(sampleRegistrar, sampleOwner, sampleEmitterID+1), "id must matter")
+	assert.NotEqual(t, base, DeriveEmitterAddress(sampleOwner, sampleRegistrar, sampleEmitterID), "swapping parties must matter")
 
 	// Without length prefixes, ("a","bc") and ("ab","c") would collide.
 	assert.NotEqual(t,
-		deriveEmitterAddress("a", "bc", 0),
-		deriveEmitterAddress("ab", "c", 0),
+		DeriveEmitterAddress("a", "bc", 0),
+		DeriveEmitterAddress("ab", "c", 0),
 		"length prefixes must disambiguate the party boundary")
 }
 
