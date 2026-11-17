@@ -5,12 +5,12 @@ lint:
 
 .PHONY: test
 test: 
-	go test -v ./...
+	go test -count=1 -v ./...
 	timeout 5s go test -fuzz=FuzzMessagePublicationUnmarshalBinary -fuzztime=3s ./pkg/common || true
 
 .PHONY: test-fast
 test-fast:
-	go test -short ./...
+	go test -count=1 -short ./...
 
 .PHONY: test-coverage
 test-coverage:

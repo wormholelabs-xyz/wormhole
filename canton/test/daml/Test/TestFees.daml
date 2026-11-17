@@ -7,6 +7,7 @@ module Test.TestFees where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.Foldable (forA_)
 import DA.Optional (fromSome)
 import DA.Text (isInfixOf)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
@@ -184,7 +185,7 @@ testRegistrationFee = do
   (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
   Some cs <- queryContractId operator csId
   bob <- allocateParty "RegFeeBob"
-  regCid <- submit operator do
+  regCid <- submit (actAs operator <> actAs cs.guardianGovernance) do
     createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance 500)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   csDisc <- fromSome <$> queryDisclosure operator csId
@@ -220,6 +221,63 @@ testRegistrationFee = do
   em2.owner === dave
   bal2 <- mockBalance mockAdmin feeRecipient inst
   bal2 === feeToDecimal 1000
+
+-- | 'SetRegistrationFee' needs the operator and guardianGovernance, keeps
+-- @nextId@, and rejects a negative fee. The next registration pays the new fee.
+testSetRegistrationFee : Script ()
+testSetRegistrationFee = do
+  (operator, mockAdmin, csId, inst, feeRecipient) <- setupFees
+  Some cs <- queryContractId operator csId
+  outsider <- allocateParty "SetFeeOutsider"
+  _ <- registerEmitter operator outsider
+  _ <- registerEmitter operator outsider
+  [(regCid, reg)] <- query @EmitterRegistry operator
+  reg.nextId === 2
+  reg.registrationFee === 0
+
+  let unauthorizedSubmitters =
+        [ ("operator alone", actAs operator)
+        , ("guardianGovernance alone", actAs cs.guardianGovernance)
+        , ("outsider", actAs outsider)
+        ]
+  forA_ unauthorizedSubmitters \(submitterName, submitter) -> do
+    setFeeResult <- trySubmit submitter do
+      exerciseCmd regCid SetRegistrationFee with newRegistrationFee = 500
+    case setFeeResult of
+      Left _ -> pure ()
+      Right _ -> abort ("SetRegistrationFee accepted from " <> submitterName)
+
+  negativeFeeResult <- trySubmit (actAs operator <> actAs cs.guardianGovernance) do
+    exerciseCmd regCid SetRegistrationFee with newRegistrationFee = -1
+  case negativeFeeResult of
+    Left (FailureStatusError failureStatus) ->
+      assertMsg ("unexpected error: " <> failureStatus.message)
+        ("registration fee must not be negative" `isInfixOf` failureStatus.message)
+    Left otherError -> abort ("unexpected error: " <> show otherError)
+    Right _ -> abort "SetRegistrationFee accepted a negative fee"
+
+  feeRegCid <- submit (actAs operator <> actAs cs.guardianGovernance) do
+    exerciseCmd regCid SetRegistrationFee with newRegistrationFee = 500
+  Some feeReg <- queryContractId operator feeRegCid
+  feeReg.nextId === 2
+  feeReg.registrationFee === 500
+  feeReg.operator === operator
+  feeReg.guardianGovernance === cs.guardianGovernance
+  staleRegistry <- queryContractId operator regCid
+  staleRegistry === None
+
+  bob <- allocateParty "SetFeeBob"
+  regDisc <- fromSome <$> queryDisclosure operator feeRegCid
+  csDisc <- fromSome <$> queryDisclosure operator csId
+  submitMustFail (actAs bob <> disclose regDisc) do
+    exerciseCmd feeRegCid RegisterEmitter with
+      requester = bob, payer = bob, coreStateCid = None, feeAllocation = None
+  feePay <- mintAndAllocate mockAdmin bob feeRecipient inst (feeToDecimal 500)
+  (_, emCid) <- submit (actAs bob <> disclose regDisc <> disclose csDisc) do
+    exerciseCmd feeRegCid RegisterEmitter with
+      requester = bob, payer = bob, coreStateCid = Some csId, feeAllocation = Some feePay
+  Some em <- queryContractId bob emCid
+  em.emitterId === 2
 
 -- | Same for a nonzero-fee 'ReplayRootRegistry' claim.
 testClaimFee : Script ()
@@ -334,7 +392,7 @@ testRegisterEmitterPinsGuardianGovernance = do
   bob <- allocateParty "PinRegBob"
   rogueGov <- allocateParty "RogueRegGov"
   -- A real, nonzero-fee registry pinned to the REAL guardianGovernance.
-  regCid <- submit operator do
+  regCid <- submit (actAs operator <> actAs cs.guardianGovernance) do
     createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance 500)
   regDisc <- fromSome <$> queryDisclosure operator regCid
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do

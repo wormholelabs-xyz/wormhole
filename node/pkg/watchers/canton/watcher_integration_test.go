@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 func findDpm(t *testing.T) string {
@@ -54,57 +56,59 @@ func runCmd(t *testing.T, dir, name string, args ...string) {
 	}
 }
 
-// startSandbox builds the Daml packages and starts a Canton sandbox bound to
-// the ctx lifetime (the JVM child is killed when ctx is cancelled), returning
-// the dpm binary, the test DAR path, and the ledger port.
+const defaultSandboxLedgerAPIPort = "6865"
+
+// sandboxLedgerAPIPort is CANTON_SANDBOX_PORT, or defaultSandboxLedgerAPIPort when unset.
+func sandboxLedgerAPIPort() string {
+	if port := os.Getenv("CANTON_SANDBOX_PORT"); port != "" {
+		return port
+	}
+	return defaultSandboxLedgerAPIPort
+}
+
+// startSandbox builds the Daml packages and starts a Canton sandbox whose
+// Ledger API listens on sandboxLedgerAPIPort, returning the dpm binary, the
+// test DAR path, and that port. The sandbox process group is killed and reaped
+// at test cleanup, or killed earlier when ctx is cancelled.
 func startSandbox(t *testing.T, ctx context.Context) (dpm, dar, port string) {
 	t.Helper()
 	dpm = findDpm(t)
 
 	cantonDir, err := filepath.Abs("../../../../canton")
 	require.NoError(t, err)
-	// The test DAR carries Test.TestCore:integrationPublish and packs the core
-	// DALFs (data-dependency), so --upload-dar uploads+vets core too.
+	// The test DAR carries the integration scripts and packs the core DALFs
+	// (data-dependency), so --upload-dar uploads+vets core too.
 	dar = filepath.Join(cantonDir, "test", ".daml", "dist", "wormhole-core-test-0.1.0.dar")
+	port = sandboxLedgerAPIPort()
 
-	port = os.Getenv("CANTON_SANDBOX_PORT")
-	if port == "" {
-		port = "6865"
-	}
-
-	// Build both packages (core, then test).
 	runCmd(t, cantonDir, dpm, "build", "--all")
 
-	// Start the sandbox in its own process group (so we can kill the JVM child),
-	// from a clean directory: `dpm sandbox` auto-loads a `*.canton` bootstrap or
-	// daml.yaml init-script from its working dir, which we must avoid here.
-	// Canton's sandbox binds the gRPC Ledger API on 6865 by default (no --port).
+	// Own process group so the JVM child is killed with dpm. Clean working
+	// directory: `dpm sandbox` auto-loads a `*.canton` bootstrap or daml.yaml
+	// init-script from it.
 	sandboxDir := t.TempDir()
 	logPath := filepath.Join(sandboxDir, "sandbox.log")
 	logFile, err := os.Create(logPath)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = logFile.Close() })
 
-	sandbox := exec.CommandContext(ctx, dpm, "sandbox", "--no-tty")
+	sandbox := exec.CommandContext(ctx, dpm, "sandbox", "--no-tty", "--ledger-api-port", port)
 	sandbox.Dir = sandboxDir
 	sandbox.Stdout = logFile
 	sandbox.Stderr = logFile
 	sandbox.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	require.NoError(t, sandbox.Start())
 	t.Cleanup(func() {
-		if sandbox.Process != nil {
-			_ = syscall.Kill(-sandbox.Process.Pid, syscall.SIGKILL)
-		}
+		_ = syscall.Kill(-sandbox.Process.Pid, syscall.SIGKILL)
+		_ = sandbox.Wait()
 	})
 
-	// Wait for the sandbox to report ready (the gRPC + ledger are both up).
 	require.Eventually(t, func() bool {
 		b, _ := os.ReadFile(logPath)
 		return strings.Contains(string(b), "Canton sandbox is ready")
 	}, 180*time.Second, 2*time.Second, "sandbox never became ready")
-	// Belt-and-suspenders: confirm the port accepts connections.
 	conn, err := net.DialTimeout("tcp", "localhost:"+port, 5*time.Second)
-	require.NoError(t, err)
+	require.NoErrorf(t, err, "sandbox Ledger API not listening on port %s", port)
 	_ = conn.Close()
 	return dpm, dar, port
 }
@@ -144,6 +148,8 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	// parties (wildcard); unsafeDevMode true ⇒ insecure gRPC to the local
 	// sandbox.
 	w := NewWatcher(addr, "", "", AuthConfig{}, true, msgC, obsvReqC)
+	streamRecorder := newUpdateStreamRecorder()
+	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 
 	// Start the real watcher exactly as guardiand does.
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
@@ -172,7 +178,12 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	assert.Equal(t, uint32(42), first.Nonce)
 	assert.Equal(t, []byte{0x11, 0x22, 0x33, 0x44}, first.Payload)
 	assert.NotEqual(t, vaa.Address{}, first.EmitterAddress, "derived emitter address must be non-zero")
-	require.Len(t, first.TxID, 32, "TxID is the 32-byte encoded participant offset")
+	// TxID is the hex-decoded update id the stream delivered, not the participant offset.
+	require.Len(t, first.TxID, cantonclient.UpdateIDTxIDLen)
+	firstUpdateID, err := cantonclient.UpdateIDFromTxID(first.TxID)
+	require.NoError(t, err)
+	assert.True(t, streamRecorder.hasDeliveredUpdateID(firstUpdateID), "TxID must decode to a streamed update id")
+	assert.Equal(t, "0x"+firstUpdateID.String(), first.TxIDString())
 
 	// 2. The block-height goroutine reports a non-zero ledger offset (the
 	//    readiness/height path), which advances once messages exist.
@@ -181,7 +192,7 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	}, 15*time.Second, time.Second, "height gauge never advanced")
 
 	// 3. Reobservation over the wire: a gossip ObservationRequest for the same
-	//    TxID drives GetUpdateByOffset and re-emits the message.
+	//    TxID drives GetUpdateById and re-emits the message.
 	obsvReqC <- &gossipv1.ObservationRequest{
 		ChainId: uint32(vaa.ChainIDCanton),
 		TxHash:  first.TxID,

@@ -6,6 +6,7 @@
 -- >  module(32) ‖ action(1) ‖ chain(2) ‖ <action-specific>
 module Wormhole.Core.Governance where
 
+import DA.Text qualified as T
 import Wormhole.Core.Bytes
 
 -- | The "Core" module identifier: ASCII "Core" (0x436f7265) left-padded to 32
@@ -26,33 +27,84 @@ data GovernanceAction
       with chain : Int; amount : Int; recipient : Bytes32
   deriving (Eq, Show)
 
--- | Parse a governance packet. Verifies the module is "Core" and dispatches on
--- the action id. Aborts on unknown actions or malformed input.
+-- | Exact packet lengths in bytes, per the guardian serializers in
+-- @sdk/vaa/payloads.go@: @BodyContractUpgrade@ (386-399),
+-- @BodyGuardianSetUpdate@ (402-418), @BodyCoreBridgeSetMessageFee@ (621-631),
+-- @BodyCoreBridgeTransferFees@ (645-671).
+contractUpgradePacketBytes : Int
+contractUpgradePacketBytes = 67  -- header(35) ‖ newContract(32)
+
+guardianSetUpgradePacketBytes : Int -> Int
+guardianSetUpgradePacketBytes keyCount = 40 + 20 * keyCount  -- header(35) ‖ index(4) ‖ count(1) ‖ keys(20 each)
+
+setMessageFeePacketBytes : Int
+setMessageFeePacketBytes = 67  -- header(35) ‖ fee(32)
+
+transferFeesPacketBytes : Int
+transferFeesPacketBytes = 99  -- header(35) ‖ amount(32) ‖ recipient(32)
+
+-- | Common header: module(32) ‖ action(1) ‖ chain(2).
+governanceHeaderBytes : Int
+governanceHeaderBytes = 35
+
+-- | Header plus GuardianSetUpgrade index(4) ‖ count(1), needed to read the key count.
+guardianSetUpgradeFixedBytes : Int
+guardianSetUpgradeFixedBytes = 40
+
+-- | Runs @parseAction@ only if @payload@ is exactly @expectedBytes@ bytes, so
+-- a wrong-length packet aborts with this error before any slice. Compares hex
+-- characters, so an odd trailing nibble also fails.
+requirePacketByteLength : Text -> Int -> Bytes -> (() -> GovernanceAction) -> GovernanceAction
+requirePacketByteLength actionName expectedBytes payload parseAction =
+  if T.length payload == expectedBytes * 2
+    then parseAction ()
+    else error ("governance: " <> actionName <> " packet must be " <> show expectedBytes
+      <> " bytes, got " <> show (T.length payload) <> " hex chars")
+
+-- | Runs @parseAction@ only if @payload@ is at least @minimumBytes@ bytes.
+requireMinimumPacketByteLength : Text -> Int -> Bytes -> (() -> GovernanceAction) -> GovernanceAction
+requireMinimumPacketByteLength packetName minimumBytes payload parseAction =
+  if T.length payload >= minimumBytes * 2
+    then parseAction ()
+    else error ("governance: " <> packetName <> " packet must be at least " <> show minimumBytes
+      <> " bytes, got " <> show (T.length payload) <> " hex chars")
+
+-- | Parse a governance packet. Checks the packet length before every slice:
+-- the header first, then the exact length of the action. Verifies the module
+-- is "Core" and dispatches on the action id. Aborts on unknown actions or
+-- malformed input.
 parseGovernance : Bytes -> GovernanceAction
 parseGovernance payload =
-  let
-    moduleId = normalizeHex (sliceBytes 0 32 payload)
-    action = bytesToInt (sliceBytes 32 1 payload)
-    chain = bytesToInt (sliceBytes 33 2 payload)
-  in
-    if moduleId /= coreModule
-      then error "governance: not the Core module"
-      else case action of
-        1 -> ContractUpgrade with
-               chain
-               newContract = normalizeHex (sliceBytes 35 32 payload)
-        2 -> let newIndex = bytesToInt (sliceBytes 35 4 payload)
-                 len = bytesToInt (sliceBytes 39 1 payload)
-                 newKeys = parseKeys payload 40 len
-             in GuardianSetUpgrade with chain; newIndex; newKeys
-        3 -> SetMessageFee with
-               chain
-               fee = bytesToInt (sliceBytes 35 32 payload)
-        4 -> TransferFees with
-               chain
-               amount = bytesToInt (sliceBytes 35 32 payload)
-               recipient = normalizeHex (sliceBytes 67 32 payload)
-        _ -> error ("governance: unsupported action " <> show action)
+  requireMinimumPacketByteLength "Core governance" governanceHeaderBytes payload \_ ->
+    let
+      moduleId = normalizeHex (sliceBytes 0 32 payload)
+      action = bytesToInt (sliceBytes 32 1 payload)
+      chain = bytesToInt (sliceBytes 33 2 payload)
+    in
+      if moduleId /= coreModule
+        then error "governance: not the Core module"
+        else case action of
+          1 -> requirePacketByteLength "ContractUpgrade" contractUpgradePacketBytes payload \_ ->
+                 ContractUpgrade with
+                   chain
+                   newContract = normalizeHex (sliceBytes 35 32 payload)
+          2 -> requireMinimumPacketByteLength "GuardianSetUpgrade" guardianSetUpgradeFixedBytes payload \_ ->
+                 let keyCount = bytesToInt (sliceBytes 39 1 payload)
+                 in requirePacketByteLength "GuardianSetUpgrade" (guardianSetUpgradePacketBytes keyCount) payload \_ ->
+                      GuardianSetUpgrade with
+                        chain
+                        newIndex = bytesToInt (sliceBytes 35 4 payload)
+                        newKeys = parseKeys payload 40 keyCount
+          3 -> requirePacketByteLength "SetMessageFee" setMessageFeePacketBytes payload \_ ->
+                 SetMessageFee with
+                   chain
+                   fee = bytesToInt (sliceBytes 35 32 payload)
+          4 -> requirePacketByteLength "TransferFees" transferFeesPacketBytes payload \_ ->
+                 TransferFees with
+                   chain
+                   amount = bytesToInt (sliceBytes 35 32 payload)
+                   recipient = normalizeHex (sliceBytes 67 32 payload)
+          _ -> error ("governance: unsupported action " <> show action)
 
 -- | Parse @count@ consecutive 20-byte guardian addresses starting at byte
 -- @offset@.
