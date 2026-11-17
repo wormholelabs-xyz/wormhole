@@ -10,11 +10,15 @@
 # Each active EmitterRegistry must have nextId == firstId; historyMaxRegistryNextId is reported only.
 # Exit 0: no duplicate. Exit 1: a duplicate (operator, owner, emitterId) among active Emitters, or a check failed.
 # EXPECT_ACTIVE_REGISTRIES (default 0) is the number of active EmitterRegistry contracts of the pair that the scan requires.
+# CURL_MAX_TIME_SECONDS (default 60) bounds each Ledger API call.
 # The script uses only curl and jq, thus a guardian can run it against a production participant.
 set -euo pipefail
 
 readonly SCAN_PAGE_SIZE="${SCAN_PAGE_SIZE:-200}"
 readonly EXPECT_ACTIVE_REGISTRIES="${EXPECT_ACTIVE_REGISTRIES:-0}"
+readonly CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-60}"
+readonly CURL_CONNECT_TIMEOUT_SECONDS=10
+readonly CORE_PACKAGE_NAME="wormhole-core"
 readonly EMITTER_TEMPLATE_SUFFIX=":Wormhole.Core.State:Emitter"
 readonly REGISTRY_TEMPLATE_SUFFIX=":Wormhole.Core.State:EmitterRegistry"
 readonly EMITTER_PACKAGE_NAME_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
@@ -42,6 +46,7 @@ begin_exclusive="$5"
 [[ "$begin_exclusive" =~ ^[0-9]+$ ]] || { echo "begin offset is not a non-negative integer: $begin_exclusive" >&2; exit 2; }
 [[ "$SCAN_PAGE_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "SCAN_PAGE_SIZE is not a positive integer: $SCAN_PAGE_SIZE" >&2; exit 2; }
 [[ "$EXPECT_ACTIVE_REGISTRIES" =~ ^[0-9]+$ ]] || { echo "EXPECT_ACTIVE_REGISTRIES is not a non-negative integer" >&2; exit 2; }
+[[ "$CURL_MAX_TIME_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "CURL_MAX_TIME_SECONDS is not a positive integer" >&2; exit 2; }
 if [[ $# -eq 6 ]]; then
   baseline_max_emitter_id="$6"
   # At most 16 digits, thus the comparison is exact in bash 64-bit arithmetic.
@@ -61,23 +66,40 @@ trap 'rm -rf "$work_dir"' EXIT
 readonly auth_header="$work_dir/auth"
 (umask 077 && printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < "$token_file")" > "$auth_header")
 
+# curl_ledger_api <request-name> <output-file> <curl-argument>...: one Ledger API call with a time bound.
+# Exits 1 when curl fails, including a timeout.
+curl_ledger_api() {
+  local request_name="$1" output_file="$2" curl_exit=0
+  shift 2
+  curl -sS --max-time "$CURL_MAX_TIME_SECONDS" --connect-timeout "$CURL_CONNECT_TIMEOUT_SECONDS" \
+    -H "@$auth_header" -o "$output_file" "$@" || curl_exit=$?
+  if [[ "$curl_exit" -ne 0 ]]; then
+    echo "Ledger API request $request_name failed (curl exit $curl_exit; 28 is a timeout after ${CURL_MAX_TIME_SECONDS}s)" >&2
+    exit 1
+  fi
+}
+
 # SECURITY: the scan must not run with a right that can submit. Only CanReadAs(guardianGovernance) is accepted.
-user_id="$(curl -sSf "$json_api_url/v2/authenticated-user" -H "@$auth_header" | jq -er .user.id)"
-user_rights="$(curl -sSf "$json_api_url/v2/users/$user_id/rights" -H "@$auth_header" \
-  | jq -c '[.rights[].kind | to_entries[0] | {right: .key, party: (.value.value.party // null)}] | sort_by(.right, .party)')"
+curl_ledger_api authenticated-user "$work_dir/user.json" -f "$json_api_url/v2/authenticated-user"
+user_id="$(jq -er .user.id "$work_dir/user.json")"
+curl_ledger_api user-rights "$work_dir/rights.json" -f "$json_api_url/v2/users/$user_id/rights"
+user_rights="$(jq -c '[.rights[].kind | to_entries[0] | {right: .key, party: (.value.value.party // null)}] | sort_by(.right, .party)' \
+  "$work_dir/rights.json")"
 expected_rights="$(jq -nc --arg gg "$guardian_governance_party" '[{right: "CanReadAs", party: $gg}]')"
 if [[ "$user_rights" != "$expected_rights" ]]; then
   echo "user $user_id has rights $user_rights; the scan needs exactly $expected_rights" >&2
   exit 1
 fi
 
-end_inclusive="$(curl -sSf "$json_api_url/v2/state/ledger-end" -H "@$auth_header" | jq -er .offset)"
+curl_ledger_api ledger-end "$work_dir/ledger-end.json" -f "$json_api_url/v2/state/ledger-end"
+end_inclusive="$(jq -er .offset "$work_dir/ledger-end.json")"
 [[ "$end_inclusive" =~ ^[0-9]+$ ]] || { echo "ledger end is not a non-negative integer: $end_inclusive" >&2; exit 1; }
 [[ "$begin_exclusive" -le "$end_inclusive" ]] || { echo "begin offset $begin_exclusive is after ledger end $end_inclusive" >&2; exit 2; }
 
-# read_update_page <begin-exclusive>: one page of guardianGovernance updates, as a JSON array.
+# read_update_page <begin-exclusive>: one page of guardianGovernance updates, as a JSON array in page.json.
 read_update_page() {
-  curl -sS -X POST "$json_api_url/v2/updates?limit=$SCAN_PAGE_SIZE" -H "@$auth_header" -H 'Content-Type: application/json' \
+  curl_ledger_api updates "$work_dir/page.json" -X POST "$json_api_url/v2/updates?limit=$SCAN_PAGE_SIZE" \
+    -H 'Content-Type: application/json' \
     -d "$(jq -n --argjson begin "$1" --argjson end "$end_inclusive" --arg party "$guardian_governance_party" '{
       beginExclusive: $begin, endInclusive: $end,
       updateFormat: {includeTransactions: {
@@ -90,16 +112,17 @@ read_update_page() {
 page_begin="$begin_exclusive"
 # Each page advances the begin offset by at least one, thus the loop ends after at most end - begin pages.
 while [[ "$page_begin" -lt "$end_inclusive" ]]; do
-  read_update_page "$page_begin" > "$work_dir/page.json"
+  read_update_page "$page_begin"
   if ! jq -e 'type == "array"' "$work_dir/page.json" > /dev/null; then
     echo "update read after offset $page_begin failed: $(jq -c '{code, cause}' "$work_dir/page.json" 2>/dev/null || cat "$work_dir/page.json")" >&2
     exit 1
   fi
   jq -c --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" --arg registrySuffix "$REGISTRY_TEMPLATE_SUFFIX" \
-    --arg operator "$operator_party" --arg gg "$guardian_governance_party" \
+    --arg operator "$operator_party" --arg gg "$guardian_governance_party" --arg corePackageName "$CORE_PACKAGE_NAME" \
     --arg maxEmitterId "$MAX_EMITTER_ID" --arg maxRegistryNextId "$MAX_REGISTRY_NEXT_ID" "$JQ_EXACT_INTEGER"'
     .[] | .update.Transaction?.value // empty
     | . as $transaction | .events[] | .CreatedEvent? // empty
+    | select(.packageName == $corePackageName)
     | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)
     | if (.templateId | endswith($emitterSuffix)) then
         {kind: "Emitter", offset: $transaction.offset, contractId, owner: .createArgument.owner,
@@ -120,21 +143,24 @@ while [[ "$page_begin" -lt "$end_inclusive" ]]; do
 done
 
 # Active Emitter and EmitterRegistry contracts of all wormhole-core versions, at the same end offset.
-curl -sS -X POST "$json_api_url/v2/state/active-contracts" -H "@$auth_header" -H 'Content-Type: application/json' \
+curl_ledger_api active-contracts "$work_dir/acs.json" -X POST "$json_api_url/v2/state/active-contracts" \
+  -H 'Content-Type: application/json' \
   -d "$(jq -n --argjson end "$end_inclusive" --arg party "$guardian_governance_party" \
     --arg emitter "$EMITTER_PACKAGE_NAME_TEMPLATE" --arg registry "$REGISTRY_PACKAGE_NAME_TEMPLATE" '{
     activeAtOffset: $end,
     eventFormat: {filtersByParty: {($party): {cumulative: [
       {identifierFilter: {TemplateFilter: {value: {templateId: $emitter, includeCreatedEventBlob: false}}}},
       {identifierFilter: {TemplateFilter: {value: {templateId: $registry, includeCreatedEventBlob: false}}}}]}},
-      verbose: false}}')" > "$work_dir/acs.json"
+      verbose: false}}')"
 if ! jq -e 'type == "array"' "$work_dir/acs.json" > /dev/null; then
   echo "active contract read at offset $end_inclusive failed: $(jq -c '{code, cause}' "$work_dir/acs.json" 2>/dev/null || cat "$work_dir/acs.json")" >&2
   exit 1
 fi
 jq -c --arg operator "$operator_party" --arg gg "$guardian_governance_party" --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" \
+  --arg corePackageName "$CORE_PACKAGE_NAME" \
   --arg maxEmitterId "$MAX_EMITTER_ID" --arg maxRegistryNextId "$MAX_REGISTRY_NEXT_ID" "$JQ_EXACT_INTEGER"'
   .[] | .contractEntry.JsActiveContract?.createdEvent // empty
+  | select(.packageName == $corePackageName)
   | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)
   | if (.templateId | endswith($emitterSuffix)) then
       {kind: "Emitter", contractId, owner: .createArgument.owner,
