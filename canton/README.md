@@ -897,13 +897,9 @@ as the `TxID`. The two encodings are not compatible:
 
 - A guardian on this version rejects a 32-byte offset `tx_hash` (length is not 34).
 - An earlier guardian rejects a 34-byte `tx_hash` (length is more than 32).
-- The global accountant matches observations on `tx_hash`. Guardians on
-  different versions submit different `tx_hash` values for one message, so their
-  signatures do not combine. Offset `TxID`s also differ between participants, so
-  the earlier version did not combine them either.
 
-Upgrade all guardians that observe Canton before you enable the accountant for
-Canton.
+Upgrade all guardians that observe Canton together, because the old and new
+TxID formats reject each other's reobservation requests.
 
 ### 7.3 `Run` loop (three goroutines, mirrors Sui)
 
