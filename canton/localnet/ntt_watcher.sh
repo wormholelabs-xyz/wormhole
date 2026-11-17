@@ -18,6 +18,14 @@ readonly WATCHER_DIR="$LOCALNET_STATE_DIR/ntt-watcher"
 source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 mkdir -p "$WATCHER_DIR"
 
+# A failed run terminates the harness that it started. "start" leaves its harness running when it passes.
+on_exit() {
+  local exit_status=$?
+  if [[ "$exit_status" -ne 0 ]]; then stop_started_harnesses; fi
+  rm -rf "$gg_work_dir"
+}
+trap on_exit EXIT
+
 # check_deployment <observations-file> <deployment-key> <outbound-message-key> <reobserved: true|false>
 # The deployment emitter publishes TransceiverInit (sequence 0), TransceiverRegistration (1) and the transfer (2).
 check_deployment() {
@@ -56,6 +64,7 @@ case "${1:-}" in
     echo "reobservation update ids: burn $burn_update_id, lock $lock_update_id"
     run_harness reobserve "$CORE_PACKAGE_ID" "$burn_update_id,$lock_update_id" 300
     stop_harness reobserve
+    check_harness_reobservation_errors reobserve
     check_deployment "$WATCHER_DIR/reobserve.jsonl" burnMint burnMessage true
     check_deployment "$WATCHER_DIR/reobserve.jsonl" lockUnlock lockMessage true
     ;;

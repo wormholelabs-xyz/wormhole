@@ -12,6 +12,8 @@ import (
 	"github.com/certusone/wormhole/node/pkg/watchers"
 	"github.com/certusone/wormhole/node/pkg/watchers/interfaces"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 type WatcherConfig struct {
@@ -49,6 +51,15 @@ type WatcherConfig struct {
 	// authentication; anything else is a configuration error. Requires TLS,
 	// so it is incompatible with unsafe dev mode (plaintext).
 	Auth AuthConfig
+
+	// ledgerTransportForTest replaces the TLS transport and adds dial options. Set only by package tests.
+	ledgerTransportForTest *ledgerTransportOverride
+}
+
+// ledgerTransportOverride connects to a plaintext test participant, for example Splice LocalNet with a static JWT.
+type ledgerTransportOverride struct {
+	transportCreds credentials.TransportCredentials
+	dialOpts       []grpc.DialOption
 }
 
 func (wc *WatcherConfig) GetNetworkID() watchers.NetworkID {
@@ -133,6 +144,11 @@ func (wc *WatcherConfig) Create(
 	)
 	if err != nil {
 		return nil, nil, err
+	}
+
+	if wc.ledgerTransportForTest != nil {
+		watcher.transportCredsOverride = wc.ledgerTransportForTest.transportCreds
+		watcher.extraLedgerDialOpts = wc.ledgerTransportForTest.dialOpts
 	}
 
 	return watcher.Run, nil, nil
