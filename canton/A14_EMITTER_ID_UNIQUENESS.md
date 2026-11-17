@@ -330,7 +330,7 @@ No message id of 0.8.0 can then be equal to a message id of an earlier deploymen
 4. Vet these DARs on each of these participants.
    Do not vet an earlier `wormhole-core` version on a guardian participant.
 5. Run the genesis ceremony (`canton/devnet/genesis_guardian_governance.sh`).
-   It creates `CoreState` and an `EmitterRegistry` with `nextId = 0` in one transaction.
+   It creates `CoreState`, then an `EmitterRegistry` with `nextId = 0`, as two co-signed prepared transactions.
 6. Run the scan (refer to [Scan](#scan)) on each guardian participant.
    Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.8.0 package id.
    Each scan must pass with `firstId` 0. Stop if a scan fails.
