@@ -101,17 +101,20 @@ exercise_command() {
     '{ExerciseCommand: {templateId: $templateId, contractId: $contractId, choice: $choice, choiceArgument: $choiceArgument}}'
 }
 
-# core_contract_id <name>: CoreState and Emitter resolve from the app-provider ACS (exactly one each);
-# a submission that commits late can replace them. Other names come from core-contracts.json.
+# core_contract_id <name>: CoreState and the Operator-owned Emitter resolve from the app-provider ACS
+# (exactly one each); a submission that commits late can replace them. Other names come from core-contracts.json.
 core_contract_id() {
-  local template_suffix=""
+  local template_suffix="" required_owner=""
   case "$1" in
     coreState) template_suffix=":Wormhole.Core.State:CoreState" ;;
-    emitter) template_suffix=":Wormhole.Core.State:Emitter" ;;
+    # Other deployments (NTT) register guardianGovernance-owned Emitters on the same registry.
+    emitter) template_suffix=":Wormhole.Core.State:Emitter"; required_owner="$OPERATOR_PARTY" ;;
   esac
   if [[ -n "$template_suffix" ]]; then
     active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" "$template_suffix" \
-      | jq -er --arg name "$1" 'if length == 1 then .[0].contractId else error("expected one active \($name), found \(length)") end'
+      | jq -er --arg name "$1" --arg owner "$required_owner" \
+        '[.[] | select($owner == "" or .createArgument.owner == $owner)]
+         | if length == 1 then .[0].contractId else error("expected one active \($name), found \(length)") end'
   else
     jq -er --arg name "$1" '.[$name]' "$CORE_CONTRACTS"
   fi
