@@ -2,8 +2,10 @@
 
 ## Status
 
-This note is a design proposal. The fix is not in the code yet.
-The test `testRedTeamA14RegistryResetDuplicatesHonestOwnerAddress` fails until a fix lands.
+Option 1 is in the code on the proposal branch `canton/overnight-u2`.
+The owner must approve it before a merge (decision U2).
+The test `testRedTeamA14OperatorCannotResetEmitterRegistry` passes.
+The section [Implementation of option 1](#implementation-of-option-1) gives the change, the version decision, and the migration.
 
 ## Problem
 
@@ -14,13 +16,13 @@ The Canton emitter address is `keccak256(tag, registrar, owner, emitterId)`.
 `emitterAddressFor` computes it (`canton/core/daml/Wormhole/Core/State.daml:374-376`).
 The watcher computes the same value (`node/pkg/watchers/canton/watcher.go:62-80`).
 
-The `emitterId` comes from the `nextId` field of `EmitterRegistry` (`State.daml:382-441`).
-The operator is the only signatory of `EmitterRegistry` (`State.daml:391`).
-Thus the operator alone can create a new registry with any `nextId`.
-`mkInitialEmitterRegistry` starts each registry at 0 (`canton/core/daml/Wormhole/Core/Setup.daml:62-64`).
+The `emitterId` comes from the `nextId` field of `EmitterRegistry`.
+Before option 1, the operator was the only signatory of `EmitterRegistry`.
+Thus the operator alone could create a new registry with any `nextId`.
+`mkInitialEmitterRegistry` starts each registry at 0 (`canton/core/daml/Wormhole/Core/Setup.daml:64-66`).
 
 An honest owner that registers through the new registry gets an id that it already has.
-`RegisterEmitter` then creates an `Emitter` with the old address and sequence 0 (`State.daml:433-440`).
+`RegisterEmitter` then creates an `Emitter` with the old address and sequence 0 (`State.daml:442-450`).
 The owner co-signs the new `Emitter`, so the watcher accepts both emitters.
 Two messages with one message id then reach quorum.
 The processor signs each digest independently (`node/pkg/processor/message.go:36`).
@@ -186,3 +188,110 @@ Do it when the watcher has a persistent store.
 
 Do not use option 2. A shared NTT counter and duplicate counters of one owner are new failure modes.
 Use option 3 only if a guardian ceremony for the registry is not possible.
+
+## Implementation of option 1
+
+### Change
+
+- `EmitterRegistry` signatories are `operator, guardianGovernance` (`State.daml:398`).
+- `RegisterEmitter` keeps the controllers `requester, payer`.
+  The choice body inherits the operator and `guardianGovernance` signatures from the registry.
+  The body and the address formula do not change.
+- `Test.TestCore:setup` creates `CoreState` and `EmitterRegistry` in one transaction.
+  The operator and `guardianGovernance` sign that transaction.
+- `canton/devnet/genesis_guardian_governance.sh` puts both create commands in one prepared transaction.
+  The guardian owners sign it with the threshold.
+- The Go watcher, the NTT code, and the integration test helpers do not change.
+
+### Tests
+
+- `testRedTeamA14OperatorCannotResetEmitterRegistry` (`Test/TestRedTeamCore.daml`).
+  The operator alone tries to create a registry that names the real `guardianGovernance`.
+  The ledger rejects it with an authorization failure.
+  A second registration of the same owner gets emitter id 1 and a different address.
+- `testRogueGovernanceEmitterCannotPublishOnRealCoreState` (`Test/TestGuardianVisibility.daml`).
+  The operator and a rogue `guardianGovernance` can create a registry together.
+  An emitter from that registry cannot publish against the real `CoreState`.
+- `testGovernanceSeesRegistry` (`Test/TestGuardianVisibility.daml`).
+  `guardianGovernance` is a stakeholder of the registry. An outsider is not.
+- `testArchives` (`Test/TestCore.daml`). The operator alone cannot archive the registry.
+
+### Contention and liveness
+
+The registry stays one contract. Each `RegisterEmitter` consumes it.
+Thus the contention does not change.
+
+`guardianGovernance` is now a signatory of the consumed registry and of its successor.
+Thus each participant that hosts `guardianGovernance` is an informee of each `RegisterEmitter`.
+Each host with the confirmation permission is also a confirmer.
+A registration completes only when the confirmation threshold of `guardianGovernance` approves it.
+
+Effect on liveness:
+
+- If fewer guardian participants than the threshold are available, registrations stop.
+- Publishes already depend on the same threshold, because `PublishMessage` exercises choices on `CoreState`.
+- Before option 1, a registration with a zero fee did not need a guardian participant.
+- A change of `registrationFee` now needs a guardian ceremony. The ceremony archives the registry and creates a new one.
+
+### Version decision
+
+A change to the signatories of a template is not a smart contract upgrade (SCU).
+Canton recomputes the signatories when a choice runs on a contract under a newer package.
+For a 0.7.0 registry, the recomputed set includes `guardianGovernance`, but the stored set does not.
+Thus the choice fails. The old registry cannot continue under 0.8.0.
+
+`damlc` reports the change only as the warning `upgraded-template-expression-changed`.
+Thus the compile-time SCU check cannot show that 0.8.0 is compatible.
+
+Decisions:
+
+- `wormhole-core` is now version 0.8.0.
+- `core/daml.yaml` has no `upgrades:` field.
+  The 0.8.0 package starts a new deployment line with a registry migration.
+- When 0.8.0 ships, vendor its DAR in `canton/dars/` and set `upgrades:` to it for 0.9.0.
+- `Emitter`, `CoreState`, and the replay templates do not change.
+  Their 0.7.0 contracts continue under 0.8.0.
+
+### Migration from 0.7.0
+
+1. Upload the 0.8.0 DAR to all guardian participants and to the operator participant.
+   Vet it on each of these participants.
+2. Tell integrators the time when registrations stop.
+3. Record `nextId` of the 0.7.0 registry.
+   Archive the 0.7.0 registry with the operator signature. Registrations stop.
+4. Read the highest `emitterId` in the `Emitter` contracts that `guardianGovernance` observes (`State.daml:543`).
+   Set `firstId` to the larger value of (highest `emitterId` + 1) and the recorded `nextId`.
+5. Run a guardian ceremony. It creates a 0.8.0 `EmitterRegistry` with `nextId = firstId`.
+   The ceremony uses the same `registrationFee` as the 0.7.0 registry.
+6. Update the watcher pin: set `--cantonPackageID` to the 0.8.0 package id (README §7.5).
+7. Unvet 0.7.0 on all guardian participants.
+
+> **WARNING:** Do step 7. The watcher pin alone does not close A14-3.
+> `Emitter` does not change, so an `Emitter` from a 0.7.0 registry can publish through 0.8.0.
+> `guardianGovernance` observes each `Emitter`, so its participants are informees of the create.
+> When no guardian participant vets 0.7.0, a 0.7.0 `RegisterEmitter` fails.
+> This step has no test on more than one participant.
+
+> **CAUTION:** Step 4 must read the guardian view of all emitters.
+> A registry that starts at a used id repeats the A14-3 collision.
+
+### NTT
+
+NTT must be rebuilt on `wormhole-core` 0.8.0 before the core migration (NTT-first rule).
+The NTT DARs refer to the `EmitterRegistry` type of 0.7.0 (`wl-native-token-transfers/canton/ntt/daml.yaml:28`).
+`RegisterManager` and `RegisterManagerByVaa` need no code change.
+Their callers pass the cid of the 0.8.0 registry.
+
+## Related operator-only contracts
+
+| Contract | Signatories | Same class as A14-3 | Severity | Action |
+| - | - | - | - | - |
+| `CoreState` | operator, `guardianGovernance` | No. | None. | None. |
+| `ReplayRootRegistry` | operator | No. It has no counter. Each claim needs the consumer signature. A rogue registry at fee 0 gives the same result as the real one. | None. The operator alone can archive it and stop new claims (liveness). | None. |
+| `ReplayNode` | consumer, operator | No. The operator alone cannot create a root for a consumer. | None. | None. |
+| `Emitter` | operator, owner | No. The operator and the owner can rewind (A14-2). | Low. | Recorded as A14-2. |
+| NTT `NttGovernance` | `guardianGovernance`, operator | No. The `nextId` counter needs the `guardianGovernance` signature. | None. | None. |
+| NTT `NttManager`, `LockedLedger` | include `guardianGovernance` | No. Only `RegisterManager` creates them. | None. | None. |
+
+No other core contract has an operator-only counter.
+Thus this branch changes only `EmitterRegistry`.

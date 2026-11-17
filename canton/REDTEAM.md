@@ -39,7 +39,7 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A9-5 | Replay a VAA in uppercase hex. | Held. | `testRedTeamA9HexCaseReplay`. | None. | None. |
 | A14-1 | The operator creates an emitter for a third party. | Held. | `testRedTeamA14OperatorCannotForgeThirdPartyEmitter`. | None. | None. |
 | A14-2 | The operator and the owner rewind the owner sequence. | Broken by design. | `testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress` passes. | Low. | Record the limit. |
-| A14-3 | The operator resets the registry counter. | Open. | `testRedTeamA14RegistryResetDuplicatesHonestOwnerAddress` fails. | Medium. | See [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md). |
+| A14-3 | The operator resets the registry counter. | Fixed on branch `canton/overnight-u2` (decision U2). | `testRedTeamA14OperatorCannotResetEmitterRegistry`; `testRogueGovernanceEmitterCannotPublishOnRealCoreState`. | Medium. | Approve U2. Migrate to 0.8.0 ([A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md)). |
 | R1 | Publish inside `try` and roll back. | Held. | `testRedTeamR1RollbackOfPublishRejected`. | None. | None. |
 | R2 | Run attacker code in the fee charge. | Held. | `TestFees.testFeeValidationMatrix`. | None. | None. |
 | R3 | Vet a malicious upgrade of `wormhole-core`. | Not tested. | None. | High if it occurs. | Control package vetting. |
@@ -121,15 +121,20 @@ The watcher emits both messages.
 The processor (`node/pkg/processor/message.go:36`) signs each digest independently.
 Thus, two VAAs with one message id can reach quorum.
 
-The registry attack needs only a compromised operator.
-`EmitterRegistry` has the operator as its only signatory (`State.daml:382`).
+In 0.7.0, the registry attack needs only a compromised operator.
+`EmitterRegistry` has the operator as its only signatory.
 The operator can create a registry with any `nextId`.
 `RegisterEmitter` does not check that the owner already has the id.
 An honest owner that registers a second emitter can get the address of its first emitter.
 Both emitters start at sequence 0.
 Integrators that use the sequence for ordering or replay protection can fail.
-This finding is open.
-[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) compares four fixes and recommends one.
+
+Fix (proposal branch `canton/overnight-u2`, `wormhole-core` 0.8.0): `guardianGovernance` co-signs `EmitterRegistry` (`State.daml:398`).
+The operator alone cannot create a registry.
+A registry under a rogue `guardianGovernance` cannot publish against the real `CoreState`.
+The fix changes a signatory, so it is not a smart contract upgrade.
+The migration needs a guardian ceremony and an unvet of 0.7.0.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the options, the change, and the migration.
 
 ### R1: Rolled-back publish
 

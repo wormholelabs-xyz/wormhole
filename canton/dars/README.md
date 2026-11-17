@@ -31,9 +31,10 @@ Go watcher's configured packageID changes with the new build.
 
 ## Previous `wormhole-core` release (upgrade baseline)
 
-`wormhole-core-0.6.0.dar` is the baseline for the compile-time smart contract
-upgrade (SCU) check. `core/daml.yaml` references it in its `upgrades:` field.
-`damlc` rejects a `wormhole-core` build that is not upgrade-compatible with it.
+`wormhole-core-0.6.0.dar` was the baseline for the compile-time smart contract
+upgrade (SCU) check of 0.7.0. `core/daml.yaml` 0.8.0 has no `upgrades:` field,
+because 0.8.0 changes the `EmitterRegistry` signatories (A14-3). Vendor the
+0.8.0 DAR here when it ships and use it as the baseline for the next release.
 
 - Source: commit `926e55310`, `canton/core`, built with SDK 3.5.1.
 - Main package id: `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15`.

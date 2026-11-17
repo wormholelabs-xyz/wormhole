@@ -242,27 +242,31 @@ Mirrors `publishMessage(nonce, payload, consistencyLevel)` from
 `Implementation.sol:15` and whitepaper 0004.
 
 An integrator first registers an emitter — **directly, with no operator
-involvement**. The operator runs an `EmitterRegistry` (created at setup); the
+involvement**. The operator and `guardianGovernance` co-sign an
+`EmitterRegistry`, created with the `CoreState` in the genesis ceremony; the
 requester exercises `RegisterEmitter` on it, holding only the registry's
 disclosure (§4.7). The flexible controller brings the requester's signature;
 the operator's co-signature on the created `Emitter` is _inherited_ from the
-registry's signatory — the same authority-inheritance that powers
+registry's signatories — the same authority-inheritance that powers
 `VerifyAndConsumeVAA`. Registration is permissionless (EVM/Sui parity: anyone
 may emit); the choice is consuming, so racing registrations contend on the
 registry and the loser retries with the fresh cid:
 
 ```haskell
--- One per operator; allocates monotonically increasing emitter ids.
+-- One per (operator, guardianGovernance); allocates monotonically increasing
+-- emitter ids.
 template EmitterRegistry with
     operator           : Party
     guardianGovernance : Party    -- carried into each new Emitter
     registrationFee    : Int      -- 10^-10 feeInstrument units; 0 for free
     nextId             : Int
   where
-    signatory operator            -- id allocation stays operator-private
+    signatory operator, guardianGovernance
+                                  -- gg co-signs: the operator alone cannot reset
+                                  -- nextId (A14-3)
     -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
     --   with requester, payer : Party; coreStateCid, feeAllocation : Optional ...
-    --   controller requester, payer -- operator authority inherited; no crank
+    --   controller requester, payer -- operator + gg authority inherited; no crank
 
 template Emitter
   with
@@ -282,6 +286,12 @@ template Emitter
 informee of every publish exercise (and its `WormholeMessage` result) plus the
 sequence-bumped successor `Emitter` create — for every owner, with no authority
 over the emitter (§4.1, §10).
+
+`guardianGovernance` is a signatory of the registry. Thus its hosting
+participants confirm each `RegisterEmitter`, and a registration needs the
+confirmation threshold of `guardianGovernance`. A change of `registrationFee`
+needs a guardian ceremony. See
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md).
 
 **Emitter address derivation.** The 32-byte Wormhole emitter address is
 
@@ -309,8 +319,8 @@ a different owner derives a **different**, untrusted address. This is the
 invariant guardians verify — "the transaction is Daml-valid under the vetted
 package" — with no bespoke watcher logic (see [§10](#10-trust-model--deployment-topology)).
 Registry-allocated ids give per-owner uniqueness and let one party hold **many**
-emitters, matching Sui's multiple `EmitterCap`s; id-sequence discipline is
-operator-behavioral, but address integrity is not.
+emitters, matching Sui's multiple `EmitterCap`s. `guardianGovernance` co-signs
+the registry, so the operator alone cannot reset the id sequence (A14-3).
 
 Publishing — a choice on the **`Emitter`** (controller = `owner`), so it needs
 no operator authority:
@@ -678,7 +688,7 @@ disclosure blob) for X". The complete inventory it must serve:
 | ---------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `CoreState`                              | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers)                      | per governance action (rare)                               |
 | `ReplayNode`                             | (consumer, namespace, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem             | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
-| `EmitterRegistry`                        | operator                           | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated on operator fee change |
+| `EmitterRegistry`                        | (operator, guardianGovernance)     | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated by a guardian ceremony on fee change |
 | `ReplayRootRegistry`                     | operator                           | `ClaimReplayRoot`                                                      | yes — the consumer submits (cacheable blob)                                       | only on operator fee change                                |
 | `Emitter`                                | (operator, owner, emitterId)       | `PublishMessage`                                                       | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
 | token-registry context                   | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures            | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service                  | registry-defined                                           |
@@ -1153,9 +1163,13 @@ covered by the integration test in §9.
 
 ### 7.5 Core package upgrades
 
-The build checks upgrade compatibility. `core/daml.yaml` sets `upgrades:` to the
-vendored previous release, `dars/wormhole-core-0.6.0.dar`. `damlc` rejects a
-`wormhole-core` build that is not a valid smart contract upgrade of it.
+`wormhole-core` 0.8.0 is not a smart contract upgrade of 0.7.0.
+It adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
+Thus `core/daml.yaml` has no `upgrades:` field for 0.8.0.
+The move from 0.7.0 needs a registry migration and an unvet of 0.7.0.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the procedure.
+Releases after 0.8.0 set `upgrades:` to the vendored 0.8.0 DAR.
+`damlc` then rejects a build that is not a valid smart contract upgrade of it.
 
 **Event package ids.** The watcher compares the package id of each
 `PublishMessage` `ExercisedEvent` with `--cantonPackageID` (`templateMatches`
