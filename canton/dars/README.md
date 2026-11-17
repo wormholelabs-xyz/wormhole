@@ -29,17 +29,22 @@ NOTE: adding these dependencies (plus the new fee fields/args) makes
 0.1.0 will reject the upload. Fine pre-mainnet: devnet re-bootstraps, and the
 Go watcher's configured packageID changes with the new build.
 
-## Previous `wormhole-core` release (upgrade baseline)
+## Previous `wormhole-core` releases (upgrade baseline)
 
-`wormhole-core-0.6.0.dar` is the baseline for the compile-time smart contract
-upgrade (SCU) check. `core/daml.yaml` references it in its `upgrades:` field.
-`damlc` rejects a `wormhole-core` build that is not upgrade-compatible with it.
+`core/daml.yaml` sets `upgrades:` to the DAR of the previous release.
+`damlc` then checks that the new version is a valid smart contract upgrade (SCU).
 
-- Source: commit `926e55310`, `canton/core`, built with SDK 3.5.1.
-- Main package id: `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15`.
+| DAR | Baseline for | Source commit of `canton/core` | Main package id |
+| --- | --- | --- | --- |
+| `wormhole-core-0.6.0.dar` | 0.7.0 | `926e55310`, SDK 3.5.1 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` |
+| `wormhole-core-0.7.0.dar` | 0.8.0 | `cfff39977`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
+
+0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
+`damlc` reports this change as the warning `upgraded-template-expression-changed`.
+A 0.7.0 registry cannot run under 0.8.0.
+Thus the move to 0.8.0 needs the registry migration in `../A14_EMITTER_ID_UNIQUENESS.md`.
 
 To check the package id, run
-`dpm damlc inspect-dar --json dars/wormhole-core-0.6.0.dar` and read
-`main_package_id`. The DAR file hash is not reproducible across builds; the
-package id is reproducible. When a new `wormhole-core` version ships, vendor
-its DAR here and move the `upgrades:` field to it.
+`dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.
+The DAR file hash is not reproducible across builds; the package id is reproducible.
+When a new `wormhole-core` version ships, vendor its DAR here and move the `upgrades:` field to it.

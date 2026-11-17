@@ -7,7 +7,8 @@
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
 #     2-of-3 party signing keys.
-#   - 2-of-3 co-signs `CoreState` genesis via interactive submission: succeeds.
+#   - 2-of-3 co-signs `CoreState` + `EmitterRegistry` genesis via interactive
+#     submission: succeeds.
 #   - 1-of-3 co-signs: rejected (threshold enforced).
 #   - 0-of-3 (operator alone): rejected (anti-forgery -- the crux property).
 #

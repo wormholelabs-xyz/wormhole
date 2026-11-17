@@ -7,7 +7,7 @@
 module Test.TestRedTeamCore where
 
 import Daml.Script
-import DA.Action (foldlA)
+import DA.Action (foldlA, void)
 import DA.Assert ((===))
 import DA.Exception (GeneralError(..), throw)
 import DA.Foldable (forA_)
@@ -187,7 +187,7 @@ testRedTeamA1FeeCannotBeSkipped = do
   (operator, guardianGovernance, coreStateCid) <- setup
   registrant <- allocateParty "RedTeamFeeRegistrant"
   emitterCid <- registerEmitter operator registrant
-  feeRegistryCid <- submit operator do
+  feeRegistryCid <- submit (actAs operator <> actAs guardianGovernance) do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance 500)
   feeRegistryDisclosure <- fromSome <$> queryDisclosure operator feeRegistryCid
   registerResult <- trySubmit (actAs registrant <> disclose feeRegistryDisclosure) do
@@ -553,24 +553,42 @@ testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress = do
   assert (emitterAddressFor operator bystander bystanderMessage.emitterId
             /= emitterAddressFor operator colludingOwner firstMessage.emitterId)
 
--- | The operator ALONE re-creates an EmitterRegistry with a reused id. An
--- honest owner's second registration then derives the address of its first
--- emitter, and both emitters publish sequence 0 under that address.
-testRedTeamA14RegistryResetDuplicatesHonestOwnerAddress : Script ()
-testRedTeamA14RegistryResetDuplicatesHonestOwnerAddress = do
+-- | A registry reset with a reused id would give an honest owner's second
+-- emitter the address and sequence 0 of its first. 'EmitterRegistry' is
+-- co-signed by guardianGovernance, so the operator alone cannot create one that
+-- names the real guardianGovernance. A registry under a rogue guardianGovernance
+-- needs the rogue party's signature, and its emitters abort on the real
+-- 'CoreState' pin: Test.TestGuardianVisibility.testRogueGovernanceEmitterCannotPublishOnRealCoreState.
+testRedTeamA14OperatorCannotResetEmitterRegistry : Script ()
+testRedTeamA14OperatorCannotResetEmitterRegistry = do
   (operator, guardianGovernance, coreStateCid) <- setup
   honestOwner <- allocateParty "RedTeamHonestOwner"
   firstEmitterCid <- registerEmitter operator honestOwner
-  resetRegistryCid <- submit operator do
+  resetResult <- trySubmit (actAs operator) do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
-  resetRegistryDisclosure <- fromSome <$> queryDisclosure operator resetRegistryCid
-  (_, secondEmitterCid) <- submit (actAs honestOwner <> disclose resetRegistryDisclosure) do
-    exerciseCmd resetRegistryCid RegisterEmitter with
-      requester = honestOwner, payer = honestOwner, coreStateCid = None, feeAllocation = None
+  checkAttackFailedWith "A14 operator alone resets the EmitterRegistry" "Authorization failure" resetResult
+
+  [(realRegistryCid, realRegistry)] <- query @EmitterRegistry operator
+  realRegistry.nextId === 1
+  let operatorAloneAttacks =
+        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs operator) do archiveCmd realRegistryCid)
+        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs operator) do
+            exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
+        ]
+  forA_ operatorAloneAttacks \(attack, runAttack) -> do
+    attackResult <- runAttack
+    checkAttackFailedWith ("A14 operator alone " <> attack) "" attackResult
+  [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
+  survivingRegistryCid === realRegistryCid
+  survivingRegistry.nextId === 1
+
+  secondEmitterCid <- registerEmitter operator honestOwner
   (_, firstMessage) <- publishVia operator coreStateCid honestOwner firstEmitterCid 1 "aa" 0
   (_, secondMessage) <- publishVia operator coreStateCid honestOwner secondEmitterCid 2 "bb" 0
-  assertMsg "A14 registry reset: operator alone made two emitters of an honest owner share (address, sequence)"
-    ((secondMessage.emitterId, secondMessage.sequence) /= (firstMessage.emitterId, firstMessage.sequence))
+  firstMessage.emitterId === 0
+  secondMessage.emitterId === 1
+  assert (emitterAddressFor operator honestOwner secondMessage.emitterId
+            /= emitterAddressFor operator honestOwner firstMessage.emitterId)
 
 ----------------------------------------------------------------------
 -- R1: rolled-back publish

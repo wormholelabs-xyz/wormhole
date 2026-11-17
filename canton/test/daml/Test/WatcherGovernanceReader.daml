@@ -64,7 +64,7 @@ integrationGovernanceReaderPublish bridge = do
 
   rogueGovernance <- allocateParty "RogueGovernance"
   rogueOwner <- allocateParty "RogueEmitterOwner"
-  rogueRegistryCid <- submit operator do
+  rogueRegistryCid <- submit (actAs operator <> actAs rogueGovernance) do
     createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
   rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
   (_, rogueEmitterCid) <- submit (actAs rogueOwner <> disclose rogueRegistryDisclosure) do
