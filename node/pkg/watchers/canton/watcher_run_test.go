@@ -41,7 +41,7 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 
 func testUpgradeWindowPackageIDs(t *testing.T) cantonclient.AcceptedPackageIDs {
 	t.Helper()
-	accepted, err := cantonclient.ParseAcceptedPackageIDs(testPrimaryPackageID, testNextPackageID)
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{PackageIDHex: testRetiringPackageID, AcceptedUntilUTC: retiringDeadlineFromNow(24 * time.Hour)}, time.Now())
 	require.NoError(t, err)
 	return accepted
 }

@@ -2,6 +2,7 @@ package canton
 
 import (
 	"testing"
+	"time"
 
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
@@ -11,10 +12,10 @@ import (
 )
 
 const (
-	testGovernanceParty  = "guardianGovernance::1220abcd"
-	testPrimaryPackageID = "1111111111111111111111111111111111111111111111111111111111111111"
-	testNextPackageID    = "2222222222222222222222222222222222222222222222222222222222222222"
-	testOtherPackageID   = "3333333333333333333333333333333333333333333333333333333333333333"
+	testGovernanceParty   = "guardianGovernance::1220abcd"
+	testCurrentPackageID  = "1111111111111111111111111111111111111111111111111111111111111111"
+	testRetiringPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
+	testOtherPackageID    = "3333333333333333333333333333333333333333333333333333333333333333"
 )
 
 func createWith(t *testing.T, pkgID string, env common.Environment) error {
@@ -24,18 +25,19 @@ func createWith(t *testing.T, pkgID string, env common.Environment) error {
 
 func createWithReadAs(t *testing.T, pkgID string, readAsParty string, env common.Environment) error {
 	t.Helper()
-	return createWithPackageIDs(t, pkgID, "", readAsParty, env)
+	return createWithPackageIDs(t, pkgID, "", "", readAsParty, env)
 }
 
-func createWithPackageIDs(t *testing.T, primaryPackageID string, nextPackageID string, readAsParty string, env common.Environment) error {
+func createWithPackageIDs(t *testing.T, currentPackageID string, retiringPackageID string, retiringPackageAcceptedUntil string, readAsParty string, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		NetworkID:     "canton",
-		ChainID:       vaa.ChainIDCanton,
-		Rpc:           "canton:6865",
-		PackageID:     primaryPackageID,
-		PackageIDNext: nextPackageID,
-		ReadAsParty:   readAsParty,
+		NetworkID:                    "canton",
+		ChainID:                      vaa.ChainIDCanton,
+		Rpc:                          "canton:6865",
+		PackageID:                    currentPackageID,
+		RetiringPackageID:            retiringPackageID,
+		RetiringPackageAcceptedUntil: retiringPackageAcceptedUntil,
+		ReadAsParty:                  readAsParty,
 	}
 	_, _, err := wc.Create(
 		make(chan *common.MessagePublication, 1),
@@ -61,36 +63,49 @@ func TestCreateRequiresPackageIDOutsideDevMode(t *testing.T) {
 
 	// A pinned package id is accepted everywhere.
 	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWith(t, testPrimaryPackageID, env), "pinned packageID must be accepted in %s", env)
+		require.NoError(t, createWith(t, testCurrentPackageID, env), "pinned packageID must be accepted in %s", env)
 	}
 }
 
+// retiringDeadlineFromNow is a deadline offset from the wall clock, in the flag format.
+func retiringDeadlineFromNow(offset time.Duration) string {
+	return time.Now().UTC().Add(offset).Truncate(time.Second).Format("2006-01-02T15:04:05Z")
+}
+
 func TestCreateValidatesCorePackageIDs(t *testing.T) {
+	inOneDay := retiringDeadlineFromNow(24 * time.Hour)
 	cases := []struct {
-		name             string
-		primaryPackageID string
-		nextPackageID    string
-		env              common.Environment
-		wantErr          string
+		name                         string
+		currentPackageID             string
+		retiringPackageID            string
+		retiringPackageAcceptedUntil string
+		env                          common.Environment
+		wantErr                      string
 	}{
-		{name: "valid single", primaryPackageID: testPrimaryPackageID, env: common.MainNet},
-		{name: "valid pair", primaryPackageID: testPrimaryPackageID, nextPackageID: testNextPackageID, env: common.MainNet},
-		{name: "valid pair in dev mode", primaryPackageID: testPrimaryPackageID, nextPackageID: testNextPackageID, env: common.UnsafeDevNet},
-		{name: "duplicate", primaryPackageID: testPrimaryPackageID, nextPackageID: testPrimaryPackageID, env: common.MainNet, wantErr: "must differ"},
-		{name: "malformed primary", primaryPackageID: "abc123", env: common.MainNet, wantErr: "primary core package id"},
-		{name: "malformed primary in dev mode", primaryPackageID: "pkg", env: common.UnsafeDevNet, wantErr: "primary core package id"},
-		{name: "uppercase primary", primaryPackageID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", env: common.MainNet, wantErr: "primary core package id"},
-		{name: "malformed next", primaryPackageID: testPrimaryPackageID, nextPackageID: "abc123", env: common.MainNet, wantErr: "next core package id"},
-		{name: "three ids", primaryPackageID: testPrimaryPackageID, nextPackageID: testNextPackageID + "," + testOtherPackageID, env: common.MainNet, wantErr: "next core package id"},
-		{name: "three ids in primary", primaryPackageID: testPrimaryPackageID + "," + testNextPackageID, nextPackageID: testOtherPackageID, env: common.MainNet, wantErr: "primary core package id"},
-		{name: "missing primary outside dev mode", nextPackageID: testNextPackageID, env: common.MainNet, wantErr: "PackageID must be set"},
-		{name: "missing primary in testnet", nextPackageID: testNextPackageID, env: common.TestNet, wantErr: "PackageID must be set"},
-		{name: "next without primary in dev mode", nextPackageID: testNextPackageID, env: common.UnsafeDevNet, wantErr: "primary core package id"},
+		{name: "valid single", currentPackageID: testCurrentPackageID, env: common.MainNet},
+		{name: "valid window", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet},
+		{name: "valid window in dev mode", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.UnsafeDevNet},
+		{name: "window with a past deadline", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: retiringDeadlineFromNow(-time.Hour), env: common.MainNet},
+		{name: "window longer than the maximum", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: retiringDeadlineFromNow(8 * 24 * time.Hour), env: common.MainNet, wantErr: "more than"},
+		{name: "retiring id without deadline", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, env: common.MainNet, wantErr: "requires an accepted-until deadline"},
+		{name: "deadline without retiring id", currentPackageID: testCurrentPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "requires a retiring core package id"},
+		{name: "deadline with offset", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: "2026-11-18T13:00:00+01:00", env: common.MainNet, wantErr: "RFC 3339 UTC"},
+		{name: "duplicate", currentPackageID: testCurrentPackageID, retiringPackageID: testCurrentPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "must differ"},
+		{name: "malformed current", currentPackageID: "abc123", env: common.MainNet, wantErr: "current core package id"},
+		{name: "malformed current in dev mode", currentPackageID: "pkg", env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "uppercase current", currentPackageID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", env: common.MainNet, wantErr: "current core package id"},
+		{name: "malformed retiring", currentPackageID: testCurrentPackageID, retiringPackageID: "abc123", retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "retiring core package id"},
+		{name: "three ids", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID + "," + testOtherPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "retiring core package id"},
+		{name: "three ids in current", currentPackageID: testCurrentPackageID + "," + testRetiringPackageID, retiringPackageID: testOtherPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "current core package id"},
+		{name: "missing current outside dev mode", retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "PackageID must be set"},
+		{name: "missing current in testnet", retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.TestNet, wantErr: "PackageID must be set"},
+		{name: "retiring without current in dev mode", retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "deadline alone in dev mode", retiringPackageAcceptedUntil: inOneDay, env: common.UnsafeDevNet, wantErr: "current core package id"},
 		{name: "wildcard in dev mode", env: common.UnsafeDevNet},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := createWithPackageIDs(t, tc.primaryPackageID, tc.nextPackageID, testGovernanceParty, tc.env)
+			err := createWithPackageIDs(t, tc.currentPackageID, tc.retiringPackageID, tc.retiringPackageAcceptedUntil, testGovernanceParty, tc.env)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -103,15 +118,15 @@ func TestCreateValidatesCorePackageIDs(t *testing.T) {
 // TestCreateRequiresReadAsPartyOutsideDevMode: the wildcard stream is dev-only.
 func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
 	for _, env := range []common.Environment{common.MainNet, common.TestNet} {
-		err := createWithReadAs(t, testPrimaryPackageID, "", env)
+		err := createWithReadAs(t, testCurrentPackageID, "", env)
 		require.Error(t, err, "empty readAsParty must be rejected in %s", env)
 		assert.Contains(t, err.Error(), "ReadAsParty")
 	}
 
-	require.NoError(t, createWithReadAs(t, testPrimaryPackageID, "", common.UnsafeDevNet))
+	require.NoError(t, createWithReadAs(t, testCurrentPackageID, "", common.UnsafeDevNet))
 
 	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWithReadAs(t, testPrimaryPackageID, testGovernanceParty, env), "readAsParty must be accepted in %s", env)
+		require.NoError(t, createWithReadAs(t, testCurrentPackageID, testGovernanceParty, env), "readAsParty must be accepted in %s", env)
 	}
 }
 
@@ -121,7 +136,7 @@ func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error
 		NetworkID:   "canton",
 		ChainID:     vaa.ChainIDCanton,
 		Rpc:         "canton:6865",
-		PackageID:   testPrimaryPackageID,
+		PackageID:   testCurrentPackageID,
 		ReadAsParty: testGovernanceParty,
 		Auth:        auth,
 	}

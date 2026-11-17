@@ -421,7 +421,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 }
 
 func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
-	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testPrimaryPackageID, "")
+	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	cases := []struct {
 		name               string
@@ -483,7 +483,7 @@ func acceptedPackageIDSeries(t *testing.T) map[string]string {
 }
 
 func TestReportAcceptedPackageIDs(t *testing.T) {
-	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testPrimaryPackageID, "")
+	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	cases := []struct {
 		name                     string
@@ -494,13 +494,13 @@ func TestReportAcceptedPackageIDs(t *testing.T) {
 		{
 			name:                     "upgrade window",
 			acceptedPackageIDs:       testUpgradeWindowPackageIDs(t),
-			wantSeries:               map[string]string{"primary": testPrimaryPackageID, "next": testNextPackageID},
+			wantSeries:               map[string]string{"primary": testCurrentPackageID, "next": testRetiringPackageID},
 			wantUpgradeWindowWarning: true,
 		},
 		{
 			name:               "primary only replaces the window series",
 			acceptedPackageIDs: primaryOnlyPackageIDs,
-			wantSeries:         map[string]string{"primary": testPrimaryPackageID},
+			wantSeries:         map[string]string{"primary": testCurrentPackageID},
 		},
 		{
 			name:               "dev-mode wildcard",
@@ -521,8 +521,8 @@ func TestReportAcceptedPackageIDs(t *testing.T) {
 			}
 			require.Equal(t, 1, logs.Len())
 			fields := logs.All()[0].ContextMap()
-			assert.Equal(t, testPrimaryPackageID, fields["primaryPackageId"])
-			assert.Equal(t, testNextPackageID, fields["nextPackageId"])
+			assert.Equal(t, testCurrentPackageID, fields["currentPackageId"])
+			assert.Equal(t, testRetiringPackageID, fields["retiringPackageId"])
 		})
 	}
 }

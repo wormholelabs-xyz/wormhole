@@ -15,17 +15,22 @@ import (
 )
 
 const (
-	pinnedPackageID     = "1111111111111111111111111111111111111111111111111111111111111111"
-	nextPinnedPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
-	lookalikePackageID  = "9999999999999999999999999999999999999999999999999999999999999999"
-	governanceParty     = "guardianGovernance::1220abcd"
-	otherUpdateIDHex    = "122053276773593cd4d44463b8a459f24fa089e5abd4a4b0b0103153e5898d59f072"
+	pinnedPackageID         = "1111111111111111111111111111111111111111111111111111111111111111"
+	retiringPinnedPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
+	lookalikePackageID      = "9999999999999999999999999999999999999999999999999999999999999999"
+	governanceParty         = "guardianGovernance::1220abcd"
+	otherUpdateIDHex        = "122053276773593cd4d44463b8a459f24fa089e5abd4a4b0b0103153e5898d59f072"
 )
 
 var pinnedTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(pinnedPackageID, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
-func mustParseAcceptedPackageIDs(primaryHex string, nextHex string) AcceptedPackageIDs {
-	accepted, err := ParseAcceptedPackageIDs(primaryHex, nextHex)
+// mustParseAcceptedPackageIDs gives a non-empty retiring id the deadline testRetiringDeadline.
+func mustParseAcceptedPackageIDs(currentHex string, retiringHex string) AcceptedPackageIDs {
+	retiring := RetiringPackageConfig{}
+	if retiringHex != "" {
+		retiring = RetiringPackageConfig{PackageIDHex: retiringHex, AcceptedUntilUTC: testRetiringDeadlineText}
+	}
+	accepted, err := ParseAcceptedPackageIDs(currentHex, retiring, testStartupWallClock)
 	if err != nil {
 		panic(err)
 	}
@@ -65,11 +70,13 @@ func transactionResponse(updateIDHex string, offset int64, events ...*apiv2.Even
 func TestGetTransactionByUpdateIDAcceptsBothWindowPackages(t *testing.T) {
 	updateID, err := ParseUpdateID(sampleUpdateIDHex)
 	require.NoError(t, err)
-	service := &fakeUpdateByIDService{response: transactionResponse(sampleUpdateIDHex, 590,
+	response := transactionResponse(sampleUpdateIDHex, 590,
 		publishMessageEvent(pinnedPackageID, 5),
-		publishMessageEvent(nextPinnedPackageID, 6),
+		publishMessageEvent(retiringPinnedPackageID, 6),
 		publishMessageEvent(lookalikePackageID, 7),
-	)}
+	)
+	withLedgerTimes(response.GetTransaction(), sampleEffectiveAt, testRetiringDeadline.Add(-time.Second))
+	service := &fakeUpdateByIDService{response: response}
 	client := &grpcClient{update: service, readAsParty: governanceParty, logger: zap.NewNop()}
 	countBefore := unpinnedPublishCount(lookalikePackageID)
 
@@ -105,6 +112,47 @@ func TestGetTransactionByUpdateIDAppliesPartyFilterAndPackagePin(t *testing.T) {
 	assert.Equal(t, int64(590), transaction.ParticipantOffset)
 	require.Len(t, transaction.Messages, 1, "the look-alike package event must be filtered")
 	assert.Equal(t, uint64(5), transaction.Messages[0].Sequence)
+}
+
+// Reobservation decides by the transaction's record time, not the time of the request.
+func TestGetTransactionByUpdateIDAppliesRetiringDeadline(t *testing.T) {
+	updateID, err := ParseUpdateID(sampleUpdateIDHex)
+	require.NoError(t, err)
+	cases := []struct {
+		name                   string
+		recordTime             time.Time
+		wantSequences          []uint64
+		wantAfterDeadlineCount float64
+		wantMissingRecordTime  float64
+	}{
+		{name: "pre-deadline update reobserved after the deadline", recordTime: testRetiringDeadline.Add(-time.Second), wantSequences: []uint64{5, 6}},
+		{name: "update at the deadline", recordTime: testRetiringDeadline, wantSequences: []uint64{5}, wantAfterDeadlineCount: 1},
+		{name: "post-deadline update", recordTime: testRetiringDeadline.Add(time.Hour), wantSequences: []uint64{5}, wantAfterDeadlineCount: 1},
+		{name: "update without record time", wantSequences: []uint64{5}, wantMissingRecordTime: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			response := transactionResponse(sampleUpdateIDHex, 590,
+				publishMessageEvent(pinnedPackageID, 5),
+				publishMessageEvent(retiringPinnedPackageID, 6),
+			)
+			withLedgerTimes(response.GetTransaction(), sampleEffectiveAt, tc.recordTime)
+			client := &grpcClient{update: &fakeUpdateByIDService{response: response}, readAsParty: governanceParty, logger: zap.NewNop()}
+			afterDeadlineBefore := retiringPackagePublishAfterDeadlineCount()
+			missingRecordTimeBefore := publishWithoutRecordTimeCount()
+
+			transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, upgradeWindowTmpl, "PublishMessage")
+			require.NoError(t, err)
+
+			sequences := make([]uint64, 0, len(transaction.Messages))
+			for _, message := range transaction.Messages {
+				sequences = append(sequences, message.Sequence)
+			}
+			assert.Equal(t, tc.wantSequences, sequences)
+			assert.Equal(t, tc.wantAfterDeadlineCount, retiringPackagePublishAfterDeadlineCount()-afterDeadlineBefore)
+			assert.Equal(t, tc.wantMissingRecordTime, publishWithoutRecordTimeCount()-missingRecordTimeBefore)
+		})
+	}
 }
 
 func TestGetTransactionByUpdateIDRejectsBadResponse(t *testing.T) {

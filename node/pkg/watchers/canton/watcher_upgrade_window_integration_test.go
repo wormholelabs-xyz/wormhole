@@ -1,10 +1,11 @@
 //go:build integration
 
-// Upgrade window (canton/README.md section 7.5, proposal U3): a watcher that
-// accepts the primary and the next wormhole-core package ids emits publishes
-// executed under either version, including a next-core publish on an emitter
-// the primary core created, and drops a look-alike package. Single-id watchers
-// drop and count the other version.
+// Upgrade window (canton/README.md section 7.5, proposal U3): a watcher with a
+// current and a retiring wormhole-core package id emits publishes executed
+// under either version while the retiring deadline is in the future, including
+// a current-core publish on an emitter the retiring core created, and drops a
+// look-alike package. After the deadline it drops and counts retiring-core
+// publishes. Single-id watchers drop and count the other version.
 //
 //	go test -tags integration -run TestCantonWatcherUpgradeWindow ./pkg/watchers/canton -v
 package canton
@@ -23,6 +24,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -35,8 +37,8 @@ const (
 	upgradeWindowNonce      = uint32(43)
 	upgradeWindowPayloadHex = "55667788"
 	// Appended to the core version: an upgrade-compatible copy with a new package id.
-	nextCoreVersionSuffix = ".1"
-	nextTestPackageName   = "wormhole-core-test-upgrade-window"
+	currentCoreVersionSuffix = ".1"
+	currentTestPackageName   = "wormhole-core-test-upgrade-window"
 )
 
 // upgradeWindowPublishInput is the input of Test.WatcherUpgradeWindow:integrationUpgradeWindowPublish.
@@ -74,34 +76,34 @@ func copyDamlProject(t *testing.T, sourceDir, destinationDir string, rewriteDaml
 	require.NoError(t, os.WriteFile(filepath.Join(destinationDir, "daml.yaml"), []byte(rewriteDamlYAML(string(damlYAML))), 0o600))
 }
 
-// buildNextCoreVersion builds an upgrade-compatible copy of wormhole-core with
+// buildCurrentCoreVersion builds an upgrade-compatible copy of wormhole-core with
 // a higher version, and a copy of the test package against it. It returns the
-// next core DAR and the next test DAR.
-func buildNextCoreVersion(t *testing.T, dpm, cantonDir string) (nextCoreDar, nextTestDar string) {
+// current core DAR and the current test DAR.
+func buildCurrentCoreVersion(t *testing.T, dpm, cantonDir string) (currentCoreDar, currentTestDar string) {
 	t.Helper()
 	coreDar := coreDarPath(t, cantonDir)
 	coreVersion := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(coreDar), "wormhole-core-"), ".dar")
-	nextCoreVersion := coreVersion + nextCoreVersionSuffix
+	currentCoreVersion := coreVersion + currentCoreVersionSuffix
 	vendoredDarsDir := filepath.Join(cantonDir, "dars") + string(filepath.Separator)
 
-	nextCoreDir := filepath.Join(t.TempDir(), "core")
-	copyDamlProject(t, filepath.Join(cantonDir, "core"), nextCoreDir, func(damlYAML string) string {
-		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^version: \S+$`), "version: "+nextCoreVersion)
+	currentCoreDir := filepath.Join(t.TempDir(), "core")
+	copyDamlProject(t, filepath.Join(cantonDir, "core"), currentCoreDir, func(damlYAML string) string {
+		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^version: \S+$`), "version: "+currentCoreVersion)
 		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^upgrades: \S+$`), "upgrades: "+coreDar)
 		return strings.ReplaceAll(damlYAML, "../dars/", vendoredDarsDir)
 	})
-	runCmd(t, nextCoreDir, dpm, "build")
-	nextCoreDar = filepath.Join(nextCoreDir, ".daml", "dist", "wormhole-core-"+nextCoreVersion+".dar")
+	runCmd(t, currentCoreDir, dpm, "build")
+	currentCoreDar = filepath.Join(currentCoreDir, ".daml", "dist", "wormhole-core-"+currentCoreVersion+".dar")
 
 	nextTestDir := filepath.Join(t.TempDir(), "test")
 	copyDamlProject(t, filepath.Join(cantonDir, "test"), nextTestDir, func(damlYAML string) string {
-		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^name: wormhole-core-test$`), "name: "+nextTestPackageName)
-		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^  - \.\./core/\.daml/dist/\S+\.dar$`), "  - "+nextCoreDar)
+		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^name: wormhole-core-test$`), "name: "+currentTestPackageName)
+		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^  - \.\./core/\.daml/dist/\S+\.dar$`), "  - "+currentCoreDar)
 		return strings.ReplaceAll(damlYAML, "../dars/", vendoredDarsDir)
 	})
 	runCmd(t, nextTestDir, dpm, "build")
-	nextTestDar = filepath.Join(nextTestDir, ".daml", "dist", nextTestPackageName+"-0.1.0.dar")
-	return nextCoreDar, nextTestDar
+	currentTestDar = filepath.Join(nextTestDir, ".daml", "dist", currentTestPackageName+"-0.1.0.dar")
+	return currentCoreDar, currentTestDar
 }
 
 func runUpgradeWindowPublish(t *testing.T, dpm, dar, port string, bridge realBridge, ownerHint string) upgradeWindowPublish {
@@ -136,40 +138,51 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 
 	cantonDir, err := filepath.Abs("../../../../canton")
 	require.NoError(t, err)
-	primaryCorePackageID := readDarMainPackageID(t, dpm, coreDarPath(t, cantonDir))
-	nextCoreDar, nextTestDar := buildNextCoreVersion(t, dpm, cantonDir)
-	nextCorePackageID := readDarMainPackageID(t, dpm, nextCoreDar)
+	retiringCorePackageID := readDarMainPackageID(t, dpm, coreDarPath(t, cantonDir))
+	currentCoreDar, currentTestDar := buildCurrentCoreVersion(t, dpm, cantonDir)
+	currentCorePackageID := readDarMainPackageID(t, dpm, currentCoreDar)
 	lookalikeDar := filepath.Join(cantonDir, "test-lookalike", ".daml", "dist", "wormhole-core-lookalike-0.1.0.dar")
 	lookalikePackageID := readDarMainPackageID(t, dpm, lookalikeDar)
-	require.NotEqual(t, primaryCorePackageID, nextCorePackageID)
-	require.NotEqual(t, primaryCorePackageID, lookalikePackageID)
-	require.NotEqual(t, nextCorePackageID, lookalikePackageID)
+	require.NotEqual(t, retiringCorePackageID, currentCorePackageID)
+	require.NotEqual(t, retiringCorePackageID, lookalikePackageID)
+	require.NotEqual(t, currentCorePackageID, lookalikePackageID)
 
-	upgradeWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(primaryCorePackageID, nextCorePackageID)
+	startupWallClock := time.Now().UTC()
+	upgradeWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(currentCorePackageID, cantonclient.RetiringPackageConfig{
+		PackageIDHex:     retiringCorePackageID,
+		AcceptedUntilUTC: startupWallClock.Add(time.Hour).Format(cantonclient.RetiringPackageDeadlineLayout),
+	}, startupWallClock)
 	require.NoError(t, err)
-	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(primaryCorePackageID, "")
+	expiredWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(currentCorePackageID, cantonclient.RetiringPackageConfig{
+		PackageIDHex:     retiringCorePackageID,
+		AcceptedUntilUTC: startupWallClock.Add(-time.Minute).Format(cantonclient.RetiringPackageDeadlineLayout),
+	}, startupWallClock)
 	require.NoError(t, err)
-	nextOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(nextCorePackageID, "")
+	retiringOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(retiringCorePackageID, cantonclient.RetiringPackageConfig{}, startupWallClock)
+	require.NoError(t, err)
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(currentCorePackageID, cantonclient.RetiringPackageConfig{}, startupWallClock)
 	require.NoError(t, err)
 
-	primaryCoreUnpinnedCountBefore := unpinnedPublishCount(t, primaryCorePackageID)
-	nextCoreUnpinnedCountBefore := unpinnedPublishCount(t, nextCorePackageID)
+	retiringAfterDeadlineCountBefore := retiringPackagePublishAfterDeadlineCount(t)
+	retiringCoreUnpinnedCountBefore := unpinnedPublishCount(t, retiringCorePackageID)
+	currentCoreUnpinnedCountBefore := unpinnedPublishCount(t, currentCorePackageID)
 	lookalikeUnpinnedCountBefore := unpinnedPublishCount(t, lookalikePackageID)
 
 	var bridge realBridge
 	runDamlScript(t, dpm, testDar, port, "Test.WatcherGovernanceReader:integrationGovernanceReaderSetup", "", &bridge)
 
 	type watcherCase struct {
-		name                   string
-		acceptedPackageIDs     cantonclient.AcceptedPackageIDs
-		wantPrimaryCorePublish bool
-		wantNextCorePublishes  bool
+		name                     string
+		acceptedPackageIDs       cantonclient.AcceptedPackageIDs
+		wantRetiringCorePublish  bool
+		wantCurrentCorePublishes bool
 	}
 	const upgradeWindowCaseIndex = 0
 	cases := []watcherCase{
-		{name: "upgrade window accepts the primary and the next core", acceptedPackageIDs: upgradeWindowPackageIDs, wantPrimaryCorePublish: true, wantNextCorePublishes: true},
-		{name: "primary-only pin drops the next core", acceptedPackageIDs: primaryOnlyPackageIDs, wantPrimaryCorePublish: true},
-		{name: "next-only pin drops the primary core", acceptedPackageIDs: nextOnlyPackageIDs, wantNextCorePublishes: true},
+		{name: "upgrade window accepts the current and the retiring core", acceptedPackageIDs: upgradeWindowPackageIDs, wantRetiringCorePublish: true, wantCurrentCorePublishes: true},
+		{name: "retiring-only pin drops the current core", acceptedPackageIDs: retiringOnlyPackageIDs, wantRetiringCorePublish: true},
+		{name: "current-only pin drops the retiring core", acceptedPackageIDs: currentOnlyPackageIDs, wantCurrentCorePublishes: true},
+		{name: "window after the deadline drops the retiring core", acceptedPackageIDs: expiredWindowPackageIDs, wantCurrentCorePublishes: true},
 	}
 	require.Equal(t, upgradeWindowPackageIDs, cases[upgradeWindowCaseIndex].acceptedPackageIDs)
 
@@ -202,21 +215,21 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 		}
 	}
 
-	// The next core is uploaded only by the second run, so the first run executes under the primary core.
-	primaryCorePublish := runUpgradeWindowPublish(t, dpm, testDar, port, bridge, "PrimaryCoreOwner")
-	nextCorePublish := runUpgradeWindowPublish(t, dpm, nextTestDar, port, bridge, "NextCoreOwner")
-	require.NotEqual(t, primaryCorePublish.Owner, nextCorePublish.Owner)
-	// Production case: once the next core is vetted, existing emitters publish under it.
-	nextCoreOnPrimaryEmitterPublish := runPublishOnExistingEmitter(t, dpm, nextTestDar, port, bridge, primaryCorePublish.Owner)
-	require.Equal(t, primaryCorePublish.Owner, nextCoreOnPrimaryEmitterPublish.Owner)
+	// The current core is uploaded only by the second run, so the first run executes under the retiring core.
+	retiringCorePublish := runUpgradeWindowPublish(t, dpm, testDar, port, bridge, "RetiringCoreOwner")
+	currentCorePublish := runUpgradeWindowPublish(t, dpm, currentTestDar, port, bridge, "CurrentCoreOwner")
+	require.NotEqual(t, retiringCorePublish.Owner, currentCorePublish.Owner)
+	// Production case: once the current core is vetted, existing emitters publish under it.
+	currentCoreOnRetiringEmitterPublish := runPublishOnExistingEmitter(t, dpm, currentTestDar, port, bridge, retiringCorePublish.Owner)
+	require.Equal(t, retiringCorePublish.Owner, currentCoreOnRetiringEmitterPublish.Owner)
 
 	lookalikeInputPath := filepath.Join(t.TempDir(), "lookalike-target.json")
 	lookalikeJSON, err := json.Marshal(lookalikeTarget{
 		Operator:           bridge.Operator,
 		GuardianGovernance: bridge.GuardianGovernance,
-		VictimOwner:        primaryCorePublish.Owner,
-		VictimEmitterID:    primaryCorePublish.EmitterID,
-		VictimSequence:     primaryCorePublish.Sequence,
+		VictimOwner:        retiringCorePublish.Owner,
+		VictimEmitterID:    retiringCorePublish.EmitterID,
+		VictimSequence:     retiringCorePublish.Sequence,
 	})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(lookalikeInputPath, lookalikeJSON, 0o600))
@@ -232,12 +245,12 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 			Payload:        decodeHexPayload(t, upgradeWindowPayloadHex),
 		}
 	}
-	wantPrimaryCorePublish := toExpectedPublish(primaryCorePublish)
-	wantNextCorePublish := toExpectedPublish(nextCorePublish)
-	wantNextCoreOnPrimaryEmitterPublish := toExpectedPublish(nextCoreOnPrimaryEmitterPublish)
-	require.NotEqual(t, wantPrimaryCorePublish.EmitterAddress, wantNextCorePublish.EmitterAddress)
-	require.Equal(t, wantPrimaryCorePublish.EmitterAddress, wantNextCoreOnPrimaryEmitterPublish.EmitterAddress)
-	require.Equal(t, wantPrimaryCorePublish.Sequence+1, wantNextCoreOnPrimaryEmitterPublish.Sequence)
+	wantRetiringCorePublish := toExpectedPublish(retiringCorePublish)
+	wantCurrentCorePublish := toExpectedPublish(currentCorePublish)
+	wantCurrentCoreOnRetiringEmitterPublish := toExpectedPublish(currentCoreOnRetiringEmitterPublish)
+	require.NotEqual(t, wantRetiringCorePublish.EmitterAddress, wantCurrentCorePublish.EmitterAddress)
+	require.Equal(t, wantRetiringCorePublish.EmitterAddress, wantCurrentCoreOnRetiringEmitterPublish.EmitterAddress)
+	require.Equal(t, wantRetiringCorePublish.Sequence+1, wantCurrentCoreOnRetiringEmitterPublish.Sequence)
 
 	deadline := time.After(90 * time.Second)
 	type emitterSequence struct {
@@ -250,11 +263,11 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	}
 	for caseIndex, tc := range cases {
 		var wantPublishes []observedPublish
-		if tc.wantPrimaryCorePublish {
-			wantPublishes = append(wantPublishes, wantPrimaryCorePublish)
+		if tc.wantRetiringCorePublish {
+			wantPublishes = append(wantPublishes, wantRetiringCorePublish)
 		}
-		if tc.wantNextCorePublishes {
-			wantPublishes = append(wantPublishes, wantNextCorePublish, wantNextCoreOnPrimaryEmitterPublish)
+		if tc.wantCurrentCorePublishes {
+			wantPublishes = append(wantPublishes, wantCurrentCorePublish, wantCurrentCoreOnRetiringEmitterPublish)
 		}
 		collected := collectMessagePublications(t, tc.name, msgChannels[caseIndex], len(wantPublishes), deadline)
 		observed := make([]observedPublish, 0, len(collected))
@@ -269,18 +282,18 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 		}
 		assert.ElementsMatchf(t, wantPublishes, observed, "%s", tc.name)
 	}
-	primaryCorePublishUpdateID := updateIDOf(wantPrimaryCorePublish)
-	nextCorePublishUpdateID := updateIDOf(wantNextCorePublish)
-	nextCoreOnPrimaryEmitterUpdateID := updateIDOf(wantNextCoreOnPrimaryEmitterPublish)
-	require.False(t, primaryCorePublishUpdateID.IsZero(), "the upgrade-window watcher never emitted the primary-core publish")
-	require.False(t, nextCorePublishUpdateID.IsZero(), "the upgrade-window watcher never emitted the next-core publish")
-	require.False(t, nextCoreOnPrimaryEmitterUpdateID.IsZero(), "the upgrade-window watcher never emitted the next-core publish on the primary-core emitter")
+	retiringCorePublishUpdateID := updateIDOf(wantRetiringCorePublish)
+	currentCorePublishUpdateID := updateIDOf(wantCurrentCorePublish)
+	currentCoreOnRetiringEmitterUpdateID := updateIDOf(wantCurrentCoreOnRetiringEmitterPublish)
+	require.False(t, retiringCorePublishUpdateID.IsZero(), "the upgrade-window watcher never emitted the retiring-core publish")
+	require.False(t, currentCorePublishUpdateID.IsZero(), "the upgrade-window watcher never emitted the current-core publish")
+	require.False(t, currentCoreOnRetiringEmitterUpdateID.IsZero(), "the upgrade-window watcher never emitted the current-core publish on the retiring-core emitter")
 
 	// The upgrade-window watcher emitted each publish under the package id that executed it.
 	executingPackageIDByUpdateID := map[cantonclient.UpdateID]string{
-		primaryCorePublishUpdateID:       primaryCorePackageID,
-		nextCorePublishUpdateID:          nextCorePackageID,
-		nextCoreOnPrimaryEmitterUpdateID: nextCorePackageID,
+		retiringCorePublishUpdateID:          retiringCorePackageID,
+		currentCorePublishUpdateID:           currentCorePackageID,
+		currentCoreOnRetiringEmitterUpdateID: currentCorePackageID,
 	}
 	for updateID, wantExecutingPackageID := range executingPackageIDByUpdateID {
 		assert.Equalf(t, []string{wantExecutingPackageID}, streamRecorders[upgradeWindowCaseIndex].publishExecutingPackageIDs(updateID),
@@ -306,22 +319,48 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 		}
 		return false
 	}, unexpectedEmissionWindow, 50*time.Millisecond, "a watcher emitted a message after its expected ones")
-	assert.Equal(t, nextCoreUnpinnedCountBefore+2, unpinnedPublishCount(t, nextCorePackageID),
-		"only the primary-only watcher must count the two next-core publishes")
-	assert.Equal(t, primaryCoreUnpinnedCountBefore+1, unpinnedPublishCount(t, primaryCorePackageID),
-		"only the next-only watcher must count the primary-core publish")
+	assert.Equal(t, currentCoreUnpinnedCountBefore+2, unpinnedPublishCount(t, currentCorePackageID),
+		"only the retiring-only watcher must count the two current-core publishes")
+	assert.Equal(t, retiringCoreUnpinnedCountBefore+1, unpinnedPublishCount(t, retiringCorePackageID),
+		"only the current-only watcher must count the retiring-core publish")
+	assert.Equal(t, retiringAfterDeadlineCountBefore+1, retiringPackagePublishAfterDeadlineCount(t),
+		"only the expired-window watcher must count the retiring-core publish after the deadline")
 
 	// Reobservation uses the same accepted package ids as the stream.
 	for caseIndex, tc := range cases {
-		reobserved := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], nextCoreOnPrimaryEmitterUpdateID.TxID(), reobservationWindow)
+		reobserved := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], currentCoreOnRetiringEmitterUpdateID.TxID(), reobservationWindow)
 		var wantReobserved []observedPublish
-		if tc.wantNextCorePublishes {
-			wantReobserved = []observedPublish{wantNextCoreOnPrimaryEmitterPublish}
+		if tc.wantCurrentCorePublishes {
+			wantReobserved = []observedPublish{wantCurrentCoreOnRetiringEmitterPublish}
 		}
-		assert.Equalf(t, wantReobserved, toObservedPublishes(reobserved), "%s: next-core publish on the primary-core emitter reobservation", tc.name)
+		assert.Equalf(t, wantReobserved, toObservedPublishes(reobserved), "%s: current-core publish on the retiring-core emitter reobservation", tc.name)
 	}
-	assert.Equal(t, nextCoreUnpinnedCountBefore+3, unpinnedPublishCount(t, nextCorePackageID),
-		"primary-only reobservation must count the next-core publish again")
-	assert.Equal(t, primaryCoreUnpinnedCountBefore+1, unpinnedPublishCount(t, primaryCorePackageID),
-		"reobserving a next-core publish must not count the primary core")
+	assert.Equal(t, currentCoreUnpinnedCountBefore+3, unpinnedPublishCount(t, currentCorePackageID),
+		"retiring-only reobservation must count the current-core publish again")
+	assert.Equal(t, retiringCoreUnpinnedCountBefore+1, unpinnedPublishCount(t, retiringCorePackageID),
+		"reobserving a current-core publish must not count the retiring core")
+
+	// After the deadline, reobservation of a retiring-core publish follows its record time.
+	for caseIndex, tc := range cases {
+		reobserved := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], retiringCorePublishUpdateID.TxID(), reobservationWindow)
+		var wantReobserved []observedPublish
+		if tc.wantRetiringCorePublish {
+			wantReobserved = []observedPublish{wantRetiringCorePublish}
+		}
+		assert.Equalf(t, wantReobserved, toObservedPublishes(reobserved), "%s: retiring-core publish reobservation", tc.name)
+	}
+	assert.Equal(t, retiringAfterDeadlineCountBefore+2, retiringPackagePublishAfterDeadlineCount(t),
+		"the expired-window watcher must count the reobserved retiring-core publish again")
+}
+
+func retiringPackagePublishAfterDeadlineCount(t *testing.T) float64 {
+	t.Helper()
+	metricFamilies, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, metricFamily := range metricFamilies {
+		if metricFamily.GetName() == "wormhole_canton_retiring_package_publish_after_deadline_total" {
+			return metricFamily.GetMetric()[0].GetCounter().GetValue()
+		}
+	}
+	return 0
 }
