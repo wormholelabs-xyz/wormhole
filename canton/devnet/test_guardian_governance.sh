@@ -7,10 +7,10 @@
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
 #     2-of-3 party signing keys.
-#   - 2-of-3 co-signs `CoreState` + `EmitterRegistry` genesis via interactive
-#     submission: succeeds.
-#   - 1-of-3 co-signs: rejected (threshold enforced).
-#   - 0-of-3 (operator alone): rejected (anti-forgery -- the crux property).
+#   - 2-of-3 co-signs `CoreState` and `EmitterRegistry` genesis via interactive
+#     submission (one prepared transaction each): both commit.
+#   - 1-of-3 co-signs: both rejected (threshold enforced).
+#   - 0-of-3 (operator alone): both rejected (anti-forgery -- the crux property).
 #
 # Usage: test_guardian_governance.sh
 #   Assumes `dpm sandbox` is NOT already running on :6865/:6864 -- this script
@@ -165,28 +165,44 @@ fi
 export GG_ARTIFACTS_FILE
 export GG_OPERATOR_ARTIFACTS_FILE="${OP_ARTIFACTS_FILE}"
 
-log "genesis: 2-of-3 (happy path, expect success)"
-if "${SCRIPT_DIR}/genesis_guardian_governance.sh" happy > "${WORK_DIR}/genesis_happy.log" 2>&1; then
-  pass "2-of-3 co-signed CoreState genesis succeeded"
-else
-  fail "2-of-3 co-signed CoreState genesis was rejected"
-  cat "${WORK_DIR}/genesis_happy.log"
-fi
-
-log "genesis: 1-of-3 (expect rejection)"
-if "${SCRIPT_DIR}/genesis_guardian_governance.sh" threshold > "${WORK_DIR}/genesis_threshold.log" 2>&1; then
-  fail "1-of-3 co-signed CoreState genesis was accepted (threshold not enforced!)"
-else
-  pass "1-of-3 co-signed CoreState genesis was rejected"
-fi
-
-log "genesis: 0-of-3 / operator-only (anti-forgery, expect rejection)"
-if "${SCRIPT_DIR}/genesis_guardian_governance.sh" forge > "${WORK_DIR}/genesis_forge.log" 2>&1; then
-  fail "operator-only CoreState genesis was accepted (forgery not blocked!)"
-else
-  pass "operator-only CoreState genesis was rejected (forgery blocked)"
-fi
-
+# Columns: mode | expected result of each create | rejection reason ("-" for none) | description
+GENESIS_CASES=(
+  "happy|committed|-|2-of-3 co-signed genesis"
+  "threshold|rejected|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for guardianGovernance::|1-of-3 co-signed genesis (threshold)"
+  "forge|rejected|The following actAs parties did not provide an external signature: guardianGovernance::|operator-only genesis (anti-forgery)"
+)
+for genesis_case in "${GENESIS_CASES[@]}"; do
+  IFS='|' read -r genesis_mode expected_result rejection_reason description <<<"${genesis_case}"
+  log "genesis: ${description}, expect ${expected_result}"
+  "${SCRIPT_DIR}/genesis_guardian_governance.sh" "${genesis_mode}" > "${WORK_DIR}/genesis_${genesis_mode}.log" 2>&1
+  genesis_status=$?
+  if [ "${expected_result}" = "committed" ] && [ "${genesis_status}" -ne 0 ]; then
+    fail "${description}: exited ${genesis_status}"
+    cat "${WORK_DIR}/genesis_${genesis_mode}.log"
+    continue
+  fi
+  if [ "${expected_result}" = "rejected" ] && [ "${genesis_status}" -eq 0 ]; then
+    fail "${description}: exited 0"
+    cat "${WORK_DIR}/genesis_${genesis_mode}.log"
+    continue
+  fi
+  for genesis_template in CoreState EmitterRegistry; do
+    if grep -qx "RESULT ${genesis_template} ${expected_result}" "${WORK_DIR}/genesis_${genesis_mode}.log"; then
+      pass "${description}: ${genesis_template} ${expected_result}"
+    else
+      fail "${description}: no 'RESULT ${genesis_template} ${expected_result}'"
+      grep -E 'RESULT|failed|HTTP' "${WORK_DIR}/genesis_${genesis_mode}.log" | head -n 10
+    fi
+  done
+  if [ "${rejection_reason}" != "-" ]; then
+    rejection_reason_count="$(grep -cF -- "${rejection_reason}" "${WORK_DIR}/genesis_${genesis_mode}.log")"
+    if [ "${rejection_reason_count}" = "2" ]; then
+      pass "${description}: both rejections give: ${rejection_reason}"
+    else
+      fail "${description}: ${rejection_reason_count} of 2 rejections give: ${rejection_reason}"
+    fi
+  fi
+done
 echo
 if [ "${FAILURES}" -eq 0 ]; then
   log "ALL CHECKS PASSED"
