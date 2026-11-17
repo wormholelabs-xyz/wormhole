@@ -87,7 +87,7 @@ check_timeout_rejection "$gg_work_dir/1b"
 echo "Step 2: reconnect app-user (two confirming hosts)"
 set_participant_connection reconnect app-user
 governance_transaction="$(submit_governance_vaa "quorum-governance-two-hosts-$(date +%s)" "$fee_zero_vaa_hex" "$set_zero_keys")"
-record_core_contract_id coreState "$(created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState")"
+created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 echo "PASS: committed with two confirming hosts, update $(jq -r .updateId <<<"$governance_transaction"). messageFee is 0 again."
 
 echo "Step 3: disconnect app-user. PublishMessage with one confirming host"

@@ -58,7 +58,7 @@ upgrade_vaa="$(generate_vaa -kind guardian-set-upgrade -signing-set-index "$old_
 echo "Step 1: SubmitGovernanceVAA (GuardianSetUpgrade, digest $(jq -r .digestHex <<<"$upgrade_vaa"))"
 upgrade_transaction="$(submit_governance_vaa "guardian-set-upgrade-$run_sequence" \
   "$(jq -r .vaaHex <<<"$upgrade_vaa")" "$(vaa_pub_keys_json "$upgrade_vaa")")"
-record_core_contract_id coreState "$(created_contract_id "$upgrade_transaction" ":Wormhole.Core.State:CoreState")"
+created_contract_id "$upgrade_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 upgrade_record_time="$(jq -r .recordTime <<<"$upgrade_transaction")"
 upgraded_state="$(current_core_state)"
 echo "  record time $upgrade_record_time"

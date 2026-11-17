@@ -128,8 +128,15 @@ core_contract_id() {
   fi
 }
 
+# record_core_contract_id <name> <contract-id>: writes one entry of core-contracts.json.
 record_core_contract_id() {
   local name="$1" contract_id="$2" updated
+  case "$name" in
+    coreState|emitter)
+      echo "record_core_contract_id: $name resolves from the active contract set; do not record it" >&2
+      return 2
+      ;;
+  esac
   if [[ -f "$CORE_CONTRACTS" ]]; then
     updated="$(jq --arg name "$name" --arg cid "$contract_id" '.[$name] = $cid' "$CORE_CONTRACTS")"
   else
@@ -216,7 +223,7 @@ submit_governance_vaa() {
     "$(operator_signers_json)"
 }
 
-# publish_message <command-id> <payload-hex>: PublishMessage on the recorded Emitter at fee 0.
+# publish_message <command-id> <payload-hex>: PublishMessage on the active Operator-owned Emitter at fee 0.
 publish_message() {
   submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
     "$(exercise_command "$EMITTER_TEMPLATE" "$(core_contract_id emitter)" PublishMessage \

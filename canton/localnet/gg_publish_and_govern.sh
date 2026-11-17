@@ -34,7 +34,7 @@ publish_transaction="$(submit_interactive "publish-message-$(date +%s)" "$operat
     "$(jq -n --arg op "$OPERATOR_PARTY" --arg cs "$core_state_cid" --arg payload "$MESSAGE_PAYLOAD_HEX" \
       '{nonce: "1", payload: $payload, consistencyLevel: "0", coreStateCid: $cs, payer: $op, feeAllocation: null}')")" \
   "$(operator_signers_json)")"
-record_core_contract_id emitter "$(created_contract_id "$publish_transaction" ":Wormhole.Core.State:Emitter")"
+created_contract_id "$publish_transaction" ":Wormhole.Core.State:Emitter" >/dev/null
 echo "WormholeMessage: $(jq -c '[.events[] | .ExercisedEvent? // empty | select(.choice == "PublishMessage") | .exerciseResult._2][0]' <<<"$publish_transaction")"
 
 echo "SubmitGovernanceVAA (SetMessageFee 1000)"
@@ -42,8 +42,7 @@ echo "SubmitGovernanceVAA (SetMessageFee 1000)"
 set_fee_vaa="$(generate_vaa -kind set-message-fee -fee 1000 -signing-set-index 0 -signing-key-indices 0 -sequence "$(date +%s)")"
 governance_transaction="$(submit_governance_vaa "governance-set-fee-$(date +%s)" \
   "$(jq -r .vaaHex <<<"$set_fee_vaa")" "$(vaa_pub_keys_json "$set_fee_vaa")")"
-new_core_state_cid="$(created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState")"
-record_core_contract_id coreState "$new_core_state_cid"
+created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 
 for validator_name in app-provider sv app-user; do
   echo "$validator_name sees CoreState for guardianGovernance: $(active_contracts "$validator_name" "$GG_PARTY" :Wormhole.Core.State:CoreState \
