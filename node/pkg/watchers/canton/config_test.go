@@ -1,6 +1,8 @@
 package canton
 
 import (
+	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -250,4 +253,60 @@ func TestCreateAuthConfigValidation(t *testing.T) {
 	err := createWithAuth(t, full, common.UnsafeDevNet)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsafe dev mode")
+}
+
+// TestWatcherConfigFieldsAreExactlyTheFlagFields: each WatcherConfig field comes from a guardiand flag. A package
+// test cannot set a transport through the production config.
+func TestWatcherConfigFieldsAreExactlyTheFlagFields(t *testing.T) {
+	configType := reflect.TypeOf(WatcherConfig{})
+	fieldNames := make([]string, 0, configType.NumField())
+	for fieldIndex := 0; fieldIndex < configType.NumField(); fieldIndex++ {
+		fieldNames = append(fieldNames, configType.Field(fieldIndex).Name)
+	}
+	require.ElementsMatch(t, []string{"NetworkID", "ChainID", "Rpc", "PackageID", "ReadAsParty", "Auth"}, fieldNames)
+}
+
+func TestBuildWatcherSelectsTransportByEnvironment(t *testing.T) {
+	completeAuth := AuthConfig{TokenURL: "https://kc.example/token", ClientID: "cid", ClientSecret: "sec"}
+	testCases := []struct {
+		name                    string
+		environment             common.Environment
+		auth                    AuthConfig
+		expectedPlaintext       bool
+		expectedDialOptionCount int
+		expectedErrorMessage    string
+	}{
+		{name: "MainNet uses the TLS default", environment: common.MainNet},
+		{name: "TestNet uses the TLS default", environment: common.TestNet},
+		{name: "UnsafeDevNet uses plaintext", environment: common.UnsafeDevNet, expectedPlaintext: true},
+		{name: "MainNet with OAuth adds one dial option", environment: common.MainNet, auth: completeAuth, expectedDialOptionCount: 1},
+		{name: "UnsafeDevNet with OAuth fails", environment: common.UnsafeDevNet, auth: completeAuth, expectedErrorMessage: "unsafe dev mode"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			watcherConfig := &WatcherConfig{
+				NetworkID:   "canton",
+				ChainID:     vaa.ChainIDCanton,
+				Rpc:         "canton:6865",
+				PackageID:   testCorePackageID,
+				ReadAsParty: testGovernanceParty,
+				Auth:        testCase.auth,
+			}
+			watcher, err := watcherConfig.buildWatcher(make(chan *common.MessagePublication, 1),
+				make(chan *gossipv1.ObservationRequest, 1), testCase.environment)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, watcher)
+				return
+			}
+			require.NoError(t, err)
+			if testCase.expectedPlaintext {
+				require.Equal(t, insecure.NewCredentials().Info().SecurityProtocol, watcher.cantonTransportCreds().Info().SecurityProtocol)
+			} else {
+				require.Nil(t, watcher.cantonTransportCreds())
+			}
+			require.Len(t, watcher.cantonDialOpts(context.Background()), testCase.expectedDialOptionCount)
+			require.Equal(t, testCorePackageID, watcher.packageID.String())
+		})
+	}
 }
