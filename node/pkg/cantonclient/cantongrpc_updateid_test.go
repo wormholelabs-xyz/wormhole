@@ -22,7 +22,7 @@ const (
 	otherUpdateIDHex        = "122053276773593cd4d44463b8a459f24fa089e5abd4a4b0b0103153e5898d59f072"
 )
 
-var pinnedTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(pinnedPackageID, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+var pinnedTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: pinnedPackageID}, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
 // mustParseAcceptedPackageIDs gives a non-empty retiring id the deadline testRetiringDeadline.
 func mustParseAcceptedPackageIDs(currentHex string, retiringHex string) AcceptedPackageIDs {
@@ -30,7 +30,7 @@ func mustParseAcceptedPackageIDs(currentHex string, retiringHex string) Accepted
 	if retiringHex != "" {
 		retiring = RetiringPackageConfig{PackageIDHex: retiringHex, AcceptedUntilUTC: testRetiringDeadlineText}
 	}
-	accepted, err := ParseAcceptedPackageIDs(currentHex, retiring, testStartupWallClock)
+	accepted, err := ParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: currentHex}, retiring, testStartupWallClock)
 	if err != nil {
 		panic(err)
 	}

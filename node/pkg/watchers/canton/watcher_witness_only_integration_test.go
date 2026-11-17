@@ -115,7 +115,7 @@ func TestCantonWatcherDropsWitnessOnlyPublish(t *testing.T) {
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
 	streamRecorder := newUpdateStreamRecorder()
 	witnessOnlyRecorder := &witnessOnlyPublishRecorder{}
-	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(corePackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: corePackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	w, err := NewWatcher(ledgerAddr, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
 	require.NoError(t, err)

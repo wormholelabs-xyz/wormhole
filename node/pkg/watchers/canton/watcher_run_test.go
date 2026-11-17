@@ -20,10 +20,15 @@ import (
 // client, so the supervisor restarts Run on error just as guardiand does.
 func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublication, chan<- *gossipv1.ObservationRequest) {
 	t.Helper()
+	return startWatcherWith(t, fake, testUpgradeWindowPackageIDs(t))
+}
+
+func startWatcherWith(t *testing.T, fake *fakeClient, acceptedPackageIDs cantonclient.AcceptedPackageIDs) (<-chan *common.MessagePublication, chan<- *gossipv1.ObservationRequest) {
+	t.Helper()
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w, err := NewWatcher("canton:0", testUpgradeWindowPackageIDs(t), "", AuthConfig{}, true, msgC, obsvReqC)
+	w, err := NewWatcher("canton:0", acceptedPackageIDs, "", AuthConfig{}, true, msgC, obsvReqC)
 	require.NoError(t, err)
 	w.cantonClient = fake // inject the fake via the DI seam
 
@@ -41,7 +46,7 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 
 func testUpgradeWindowPackageIDs(t *testing.T) cantonclient.AcceptedPackageIDs {
 	t.Helper()
-	accepted, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{PackageIDHex: testRetiringPackageID, AcceptedUntilUTC: retiringDeadlineFromNow(24 * time.Hour)}, time.Now())
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{PackageIDHex: testRetiringPackageID, AcceptedUntilUTC: retiringDeadlineFromNow(24 * time.Hour)}, time.Now())
 	require.NoError(t, err)
 	return accepted
 }
@@ -227,4 +232,77 @@ func TestRunResumesFromLastOffset(t *testing.T) {
 	begin, _, _ := fake.subscribeArgs()
 	assert.Equal(t, int64(100), begin, "resume must start from the last processed offset, not ledger end")
 	require.GreaterOrEqual(t, fake.subscribeCount(), 2)
+}
+
+func testVersionedWindowPackageIDs(t *testing.T) cantonclient.AcceptedPackageIDs {
+	t.Helper()
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(
+		cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID, Version: testCurrentPackageVersion},
+		cantonclient.RetiringPackageConfig{PackageIDHex: testRetiringPackageID, AcceptedUntilUTC: retiringDeadlineFromNow(24 * time.Hour), Version: testRetiringPackageVersion},
+		time.Now())
+	require.NoError(t, err)
+	return accepted
+}
+
+func eventWithRole(participantOffset int64, role cantonclient.AcceptedPackageRole) cantonclient.CantonMessageEvent {
+	event := sampleEvent(participantOffset)
+	event.Message.AcceptedPackageRole = role
+	return event
+}
+
+func TestRunGatesPublishOnPackageMetadata(t *testing.T) {
+	currentVerified := cantonclient.VettedPackageMetadata{PackageID: testCurrentPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: testCurrentPackageVersion}
+	retiringVerified := cantonclient.VettedPackageMetadata{PackageID: testRetiringPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: testRetiringPackageVersion}
+	currentMismatched := cantonclient.VettedPackageMetadata{PackageID: testCurrentPackageID, PackageName: "wormhole-core-lookalike", PackageVersion: testCurrentPackageVersion}
+	cases := []struct {
+		name                  string
+		responses             [][]cantonclient.VettedPackageMetadata
+		metadataErr           error
+		event                 cantonclient.CantonMessageEvent
+		wantSubscribe         bool
+		wantEmitted           bool
+		wantResubscribeOffset int64
+	}{
+		{name: "verified emits", responses: [][]cantonclient.VettedPackageMetadata{{currentVerified, retiringVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
+		{name: "verified retiring emits", responses: [][]cantonclient.VettedPackageMetadata{{currentVerified, retiringVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantEmitted: true},
+		{name: "mismatched returns an error before subscribe", responses: [][]cantonclient.VettedPackageMetadata{{currentMismatched, retiringVerified}}},
+		{name: "metadata rpc error returns an error before subscribe", metadataErr: errors.New("unavailable")},
+		{name: "not yet vetted then a recheck that verifies emits", responses: [][]cantonclient.VettedPackageMetadata{{}, {currentVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
+		{name: "recheck still not vetted fails the pump and rewinds", responses: [][]cantonclient.VettedPackageMetadata{{}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantResubscribeOffset: 99},
+		{name: "unverified retiring with verified current fails the pump", responses: [][]cantonclient.VettedPackageMetadata{{currentVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantResubscribeOffset: 99},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeClient()
+			fake.ledgerEnd = 50
+			fake.vettedPackageMetadataResponses = tc.responses
+			fake.vettedPackageMetadataErr = tc.metadataErr
+			msgC, _ := startWatcherWith(t, fake, testVersionedWindowPackageIDs(t))
+
+			if !tc.wantSubscribe {
+				require.Eventually(t, func() bool { return fake.vettedPackageMetadataCallCount() >= 2 }, 15*time.Second, 50*time.Millisecond, "Run must retry the startup check")
+				assert.Zero(t, fake.subscribeCount())
+				return
+			}
+			fake.waitSubscribed(t)
+			fake.pushEvent(tc.event)
+			if tc.wantEmitted {
+				select {
+				case mp := <-msgC:
+					assert.Equal(t, uint64(5), mp.Sequence)
+				case <-time.After(5 * time.Second):
+					t.Fatal("no observation emitted")
+				}
+				return
+			}
+			fake.waitSubscribed(t)
+			begin, _, _ := fake.subscribeArgs()
+			assert.Equal(t, tc.wantResubscribeOffset, begin, "the pump must resume before the unverified event")
+			select {
+			case mp := <-msgC:
+				t.Fatalf("emitted a publish from an unverified package: %+v", mp)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
 }

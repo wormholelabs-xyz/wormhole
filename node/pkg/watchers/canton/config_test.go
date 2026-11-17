@@ -16,6 +16,9 @@ const (
 	testCurrentPackageID  = "1111111111111111111111111111111111111111111111111111111111111111"
 	testRetiringPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
 	testOtherPackageID    = "3333333333333333333333333333333333333333333333333333333333333333"
+
+	testCurrentPackageVersion  = "0.8.1"
+	testRetiringPackageVersion = "0.8.0"
 )
 
 func createWith(t *testing.T, pkgID string, env common.Environment) error {
@@ -25,18 +28,33 @@ func createWith(t *testing.T, pkgID string, env common.Environment) error {
 
 func createWithReadAs(t *testing.T, pkgID string, readAsParty string, env common.Environment) error {
 	t.Helper()
-	return createWithPackageIDs(t, pkgID, "", "", readAsParty, env)
+	flags := corePackageFlags{currentPackageID: pkgID}
+	if pkgID != "" {
+		flags.currentPackageVersion = testCurrentPackageVersion
+	}
+	return createWithPackageFlags(t, flags, readAsParty, env)
 }
 
-func createWithPackageIDs(t *testing.T, currentPackageID string, retiringPackageID string, retiringPackageAcceptedUntil string, readAsParty string, env common.Environment) error {
+// corePackageFlags mirrors the --cantonPackageID and --cantonRetiringPackage* flags.
+type corePackageFlags struct {
+	currentPackageID             string
+	currentPackageVersion        string
+	retiringPackageID            string
+	retiringPackageAcceptedUntil string
+	retiringPackageVersion       string
+}
+
+func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty string, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
 		NetworkID:                    "canton",
 		ChainID:                      vaa.ChainIDCanton,
 		Rpc:                          "canton:6865",
-		PackageID:                    currentPackageID,
-		RetiringPackageID:            retiringPackageID,
-		RetiringPackageAcceptedUntil: retiringPackageAcceptedUntil,
+		PackageID:                    flags.currentPackageID,
+		PackageVersion:               flags.currentPackageVersion,
+		RetiringPackageID:            flags.retiringPackageID,
+		RetiringPackageAcceptedUntil: flags.retiringPackageAcceptedUntil,
+		RetiringPackageVersion:       flags.retiringPackageVersion,
 		ReadAsParty:                  readAsParty,
 	}
 	_, _, err := wc.Create(
@@ -74,38 +92,60 @@ func retiringDeadlineFromNow(offset time.Duration) string {
 
 func TestCreateValidatesCorePackageIDs(t *testing.T) {
 	inOneDay := retiringDeadlineFromNow(24 * time.Hour)
+	current := corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion}
+	window := func(retiringPackageID string, retiringPackageAcceptedUntil string) corePackageFlags {
+		flags := current
+		flags.retiringPackageID = retiringPackageID
+		flags.retiringPackageAcceptedUntil = retiringPackageAcceptedUntil
+		flags.retiringPackageVersion = testRetiringPackageVersion
+		return flags
+	}
+	withoutVersions := func(flags corePackageFlags) corePackageFlags {
+		flags.currentPackageVersion = ""
+		flags.retiringPackageVersion = ""
+		return flags
+	}
+	withCurrentID := func(flags corePackageFlags, currentPackageID string) corePackageFlags {
+		flags.currentPackageID = currentPackageID
+		return flags
+	}
 	cases := []struct {
-		name                         string
-		currentPackageID             string
-		retiringPackageID            string
-		retiringPackageAcceptedUntil string
-		env                          common.Environment
-		wantErr                      string
+		name    string
+		flags   corePackageFlags
+		env     common.Environment
+		wantErr string
 	}{
-		{name: "valid single", currentPackageID: testCurrentPackageID, env: common.MainNet},
-		{name: "valid window", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet},
-		{name: "valid window in dev mode", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.UnsafeDevNet},
-		{name: "window with a past deadline", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: retiringDeadlineFromNow(-time.Hour), env: common.MainNet},
-		{name: "window longer than the maximum", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: retiringDeadlineFromNow(8 * 24 * time.Hour), env: common.MainNet, wantErr: "more than"},
-		{name: "retiring id without deadline", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, env: common.MainNet, wantErr: "requires an accepted-until deadline"},
-		{name: "deadline without retiring id", currentPackageID: testCurrentPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "requires a retiring core package id"},
-		{name: "deadline with offset", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: "2026-11-18T13:00:00+01:00", env: common.MainNet, wantErr: "RFC 3339 UTC"},
-		{name: "duplicate", currentPackageID: testCurrentPackageID, retiringPackageID: testCurrentPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "must differ"},
-		{name: "malformed current", currentPackageID: "abc123", env: common.MainNet, wantErr: "current core package id"},
-		{name: "malformed current in dev mode", currentPackageID: "pkg", env: common.UnsafeDevNet, wantErr: "current core package id"},
-		{name: "uppercase current", currentPackageID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", env: common.MainNet, wantErr: "current core package id"},
-		{name: "malformed retiring", currentPackageID: testCurrentPackageID, retiringPackageID: "abc123", retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "retiring core package id"},
-		{name: "three ids", currentPackageID: testCurrentPackageID, retiringPackageID: testRetiringPackageID + "," + testOtherPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "retiring core package id"},
-		{name: "three ids in current", currentPackageID: testCurrentPackageID + "," + testRetiringPackageID, retiringPackageID: testOtherPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "current core package id"},
-		{name: "missing current outside dev mode", retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.MainNet, wantErr: "PackageID must be set"},
-		{name: "missing current in testnet", retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.TestNet, wantErr: "PackageID must be set"},
-		{name: "retiring without current in dev mode", retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, env: common.UnsafeDevNet, wantErr: "current core package id"},
-		{name: "deadline alone in dev mode", retiringPackageAcceptedUntil: inOneDay, env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "valid single", flags: current, env: common.MainNet},
+		{name: "valid window", flags: window(testRetiringPackageID, inOneDay), env: common.MainNet},
+		{name: "valid window in dev mode", flags: window(testRetiringPackageID, inOneDay), env: common.UnsafeDevNet},
+		{name: "window with a past deadline", flags: window(testRetiringPackageID, retiringDeadlineFromNow(-time.Hour)), env: common.MainNet},
+		{name: "window longer than the maximum", flags: window(testRetiringPackageID, retiringDeadlineFromNow(8*24*time.Hour)), env: common.MainNet, wantErr: "more than"},
+		{name: "retiring id without deadline", flags: window(testRetiringPackageID, ""), env: common.MainNet, wantErr: "requires an accepted-until deadline"},
+		{name: "deadline without retiring id", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion, retiringPackageAcceptedUntil: inOneDay}, env: common.MainNet, wantErr: "requires a retiring core package id"},
+		{name: "deadline with offset", flags: window(testRetiringPackageID, "2026-11-18T13:00:00+01:00"), env: common.MainNet, wantErr: "RFC 3339 UTC"},
+		{name: "duplicate", flags: window(testCurrentPackageID, inOneDay), env: common.MainNet, wantErr: "must differ"},
+		{name: "malformed current", flags: withCurrentID(current, "abc123"), env: common.MainNet, wantErr: "current core package id"},
+		{name: "malformed current in dev mode", flags: withCurrentID(current, "pkg"), env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "uppercase current", flags: withCurrentID(current, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), env: common.MainNet, wantErr: "current core package id"},
+		{name: "malformed retiring", flags: window("abc123", inOneDay), env: common.MainNet, wantErr: "retiring core package id"},
+		{name: "three ids", flags: window(testRetiringPackageID+","+testOtherPackageID, inOneDay), env: common.MainNet, wantErr: "retiring core package id"},
+		{name: "three ids in current", flags: withCurrentID(window(testOtherPackageID, inOneDay), testCurrentPackageID+","+testRetiringPackageID), env: common.MainNet, wantErr: "current core package id"},
+		{name: "missing current outside dev mode", flags: withCurrentID(window(testRetiringPackageID, inOneDay), ""), env: common.MainNet, wantErr: "PackageID must be set"},
+		{name: "missing current in testnet", flags: withCurrentID(window(testRetiringPackageID, inOneDay), ""), env: common.TestNet, wantErr: "PackageID must be set"},
+		{name: "retiring without current in dev mode", flags: withCurrentID(window(testRetiringPackageID, inOneDay), ""), env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "deadline alone in dev mode", flags: corePackageFlags{retiringPackageAcceptedUntil: inOneDay}, env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "current version alone in dev mode", flags: corePackageFlags{currentPackageVersion: testCurrentPackageVersion}, env: common.UnsafeDevNet, wantErr: "current core package id"},
+		{name: "missing current version outside dev mode", flags: corePackageFlags{currentPackageID: testCurrentPackageID}, env: common.MainNet, wantErr: "PackageVersion must be set"},
+		{name: "missing retiring version outside dev mode", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay}, env: common.TestNet, wantErr: "RetiringPackageVersion must be set"},
+		{name: "malformed current version", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: "0.8"}, env: common.MainNet, wantErr: "MAJOR.MINOR.PATCH"},
+		{name: "malformed retiring version", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion, retiringPackageID: testRetiringPackageID, retiringPackageAcceptedUntil: inOneDay, retiringPackageVersion: "0.8.0.1"}, env: common.MainNet, wantErr: "MAJOR.MINOR.PATCH"},
+		{name: "retiring version without retiring id", flags: corePackageFlags{currentPackageID: testCurrentPackageID, currentPackageVersion: testCurrentPackageVersion, retiringPackageVersion: testRetiringPackageVersion}, env: common.MainNet, wantErr: "requires a retiring core package id"},
+		{name: "window without versions in dev mode", flags: withoutVersions(window(testRetiringPackageID, inOneDay)), env: common.UnsafeDevNet},
 		{name: "wildcard in dev mode", env: common.UnsafeDevNet},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := createWithPackageIDs(t, tc.currentPackageID, tc.retiringPackageID, tc.retiringPackageAcceptedUntil, testGovernanceParty, tc.env)
+			err := createWithPackageFlags(t, tc.flags, testGovernanceParty, tc.env)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -133,12 +173,13 @@ func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
 func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		NetworkID:   "canton",
-		ChainID:     vaa.ChainIDCanton,
-		Rpc:         "canton:6865",
-		PackageID:   testCurrentPackageID,
-		ReadAsParty: testGovernanceParty,
-		Auth:        auth,
+		NetworkID:      "canton",
+		ChainID:        vaa.ChainIDCanton,
+		Rpc:            "canton:6865",
+		PackageID:      testCurrentPackageID,
+		PackageVersion: testCurrentPackageVersion,
+		ReadAsParty:    testGovernanceParty,
+		Auth:           auth,
 	}
 	_, _, err := wc.Create(
 		make(chan *common.MessagePublication, 1),

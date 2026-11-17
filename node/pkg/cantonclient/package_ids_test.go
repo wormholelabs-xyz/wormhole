@@ -108,7 +108,7 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			accepted, err := ParseAcceptedPackageIDs(tc.currentHex, tc.retiring, testStartupWallClock)
+			accepted, err := ParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: tc.currentHex}, tc.retiring, testStartupWallClock)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Equal(t, AcceptedPackageIDs{}, accepted)
@@ -130,9 +130,9 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 }
 
 func TestVerdictForPublish(t *testing.T) {
-	window, err := ParseAcceptedPackageIDs(currentPackageIDHex, RetiringPackageConfig{PackageIDHex: retiringPackageIDHex, AcceptedUntilUTC: testRetiringDeadlineText}, testStartupWallClock)
+	window, err := ParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: currentPackageIDHex}, RetiringPackageConfig{PackageIDHex: retiringPackageIDHex, AcceptedUntilUTC: testRetiringDeadlineText}, testStartupWallClock)
 	require.NoError(t, err)
-	currentOnly, err := ParseAcceptedPackageIDs(currentPackageIDHex, RetiringPackageConfig{}, testStartupWallClock)
+	currentOnly, err := ParseAcceptedPackageIDs(CurrentPackageConfig{PackageIDHex: currentPackageIDHex}, RetiringPackageConfig{}, testStartupWallClock)
 	require.NoError(t, err)
 	beforeDeadline := testRetiringDeadline.Add(-time.Nanosecond)
 	cases := []struct {
@@ -183,4 +183,67 @@ func TestZeroAcceptedPackageIDsAcceptsNothing(t *testing.T) {
 	_, hasCurrent := accepted.CurrentPackageID()
 	assert.False(t, hasCurrent)
 	assert.Equal(t, "", accepted.String())
+}
+
+func TestParseAcceptedPackageIDsExpectedVersions(t *testing.T) {
+	cases := []struct {
+		name               string
+		current            CurrentPackageConfig
+		retiring           RetiringPackageConfig
+		wantErr            string
+		wantPinnedPackages []string
+	}{
+		{
+			name:               "both versions",
+			current:            CurrentPackageConfig{PackageIDHex: currentPackageIDHex, Version: "0.8.1"},
+			retiring:           RetiringPackageConfig{PackageIDHex: retiringPackageIDHex, AcceptedUntilUTC: testRetiringDeadlineText, Version: "0.8.0"},
+			wantPinnedPackages: []string{"current " + currentPackageIDHex + " 0.8.1", "retiring " + retiringPackageIDHex + " 0.8.0"},
+		},
+		{
+			name:               "no versions",
+			current:            CurrentPackageConfig{PackageIDHex: currentPackageIDHex},
+			retiring:           RetiringPackageConfig{PackageIDHex: retiringPackageIDHex, AcceptedUntilUTC: testRetiringDeadlineText},
+			wantPinnedPackages: []string{"current " + currentPackageIDHex + " ", "retiring " + retiringPackageIDHex + " "},
+		},
+		{
+			name:               "current only with version",
+			current:            CurrentPackageConfig{PackageIDHex: currentPackageIDHex, Version: "0.8.0"},
+			wantPinnedPackages: []string{"current " + currentPackageIDHex + " 0.8.0"},
+		},
+		{name: "malformed current version", current: CurrentPackageConfig{PackageIDHex: currentPackageIDHex, Version: "0.8"}, wantErr: "current core package version"},
+		{name: "current version without id", current: CurrentPackageConfig{Version: "0.8.0"}, wantErr: "current core package id"},
+		{
+			name:     "malformed retiring version",
+			current:  CurrentPackageConfig{PackageIDHex: currentPackageIDHex, Version: "0.8.1"},
+			retiring: RetiringPackageConfig{PackageIDHex: retiringPackageIDHex, AcceptedUntilUTC: testRetiringDeadlineText, Version: "v0.8.0"},
+			wantErr:  "retiring core package version",
+		},
+		{
+			name:     "retiring version without retiring id",
+			current:  CurrentPackageConfig{PackageIDHex: currentPackageIDHex, Version: "0.8.1"},
+			retiring: RetiringPackageConfig{Version: "0.8.0"},
+			wantErr:  "requires a retiring core package id",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			accepted, err := ParseAcceptedPackageIDs(tc.current, tc.retiring, testStartupWallClock)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, AcceptedPackageIDs{}, accepted)
+				return
+			}
+			require.NoError(t, err)
+			pinnedPackages := make([]string, 0, 2)
+			for _, pinned := range accepted.PinnedCorePackages() {
+				pinnedPackages = append(pinnedPackages, pinned.Role.String()+" "+pinned.PackageID.String()+" "+pinned.ExpectedVersion.String())
+			}
+			assert.Equal(t, tc.wantPinnedPackages, pinnedPackages)
+		})
+	}
+}
+
+func TestPinnedCorePackagesOfWildcardAndZeroValue(t *testing.T) {
+	assert.Empty(t, AcceptAnyPackageID().PinnedCorePackages())
+	assert.Empty(t, AcceptedPackageIDs{}.PinnedCorePackages())
 }

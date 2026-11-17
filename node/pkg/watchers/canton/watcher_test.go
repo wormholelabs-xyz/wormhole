@@ -73,6 +73,10 @@ type fakeClient struct {
 	getTransactionRequests []cantonclient.UpdateID
 	getTransactionTmpl     cantonclient.TemplateID // template filter of the latest GetTransactionByUpdateID
 
+	vettedPackageMetadataResponses [][]cantonclient.VettedPackageMetadata // consumed in order; the last repeats
+	vettedPackageMetadataErr       error
+	vettedPackageMetadataCalls     int
+
 	subCalls   int
 	subBegin   int64                   // beginExclusive of the latest SubscribeUpdates
 	subTmpl    cantonclient.TemplateID // template filter of the latest SubscribeUpdates
@@ -132,6 +136,29 @@ func (f *fakeClient) GetTransactionByUpdateID(_ context.Context, updateID canton
 		return cantonclient.CantonTransaction{}, fmt.Errorf("GetUpdateById(%s): UPDATE_NOT_FOUND", updateID)
 	}
 	return transaction, nil
+}
+
+func (f *fakeClient) ListVettedPackageMetadata(_ context.Context, packageIDs []cantonclient.PackageID) ([]cantonclient.VettedPackageMetadata, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(packageIDs) == 0 {
+		return nil, fmt.Errorf("ListVettedPackageMetadata: no package ids")
+	}
+	f.vettedPackageMetadataCalls++
+	if f.vettedPackageMetadataErr != nil {
+		return nil, f.vettedPackageMetadataErr
+	}
+	if len(f.vettedPackageMetadataResponses) == 0 {
+		return nil, nil
+	}
+	responseIndex := min(f.vettedPackageMetadataCalls, len(f.vettedPackageMetadataResponses)) - 1
+	return f.vettedPackageMetadataResponses[responseIndex], nil
+}
+
+func (f *fakeClient) vettedPackageMetadataCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.vettedPackageMetadataCalls
 }
 
 func (f *fakeClient) latestGetTransactionTmpl() cantonclient.TemplateID {
@@ -424,7 +451,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 }
 
 func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
-	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	cases := []struct {
 		name               string
@@ -487,7 +514,7 @@ func acceptedPackageIDSeries(t *testing.T) map[string]string {
 
 func windowPackageIDs(t *testing.T, acceptedUntil time.Time, startupWallClock time.Time) cantonclient.AcceptedPackageIDs {
 	t.Helper()
-	accepted, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{
 		PackageIDHex:     testRetiringPackageID,
 		AcceptedUntilUTC: acceptedUntil.Format(cantonclient.RetiringPackageDeadlineLayout),
 	}, startupWallClock)
@@ -499,7 +526,7 @@ func TestReportAcceptedPackageIDs(t *testing.T) {
 	reportWallClock := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 	futureDeadline := reportWallClock.Add(24 * time.Hour)
 	pastDeadline := reportWallClock.Add(-time.Hour)
-	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, reportWallClock)
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, reportWallClock)
 	require.NoError(t, err)
 	cases := []struct {
 		name                string
@@ -560,7 +587,7 @@ func TestReportAcceptedPackageIDs(t *testing.T) {
 }
 
 func TestHeartbeatContractAddress(t *testing.T) {
-	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testCurrentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	cases := []struct {
 		name               string

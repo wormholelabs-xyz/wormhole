@@ -217,7 +217,7 @@ func acceptedPackageIDsOrAny(t *testing.T, currentPackageID string) cantonclient
 	if currentPackageID == "" {
 		return cantonclient.AcceptAnyPackageID()
 	}
-	accepted, err := cantonclient.ParseAcceptedPackageIDs(currentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: currentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	return accepted
 }

@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,9 +37,7 @@ import (
 const (
 	upgradeWindowNonce      = uint32(43)
 	upgradeWindowPayloadHex = "55667788"
-	// Appended to the core version: an upgrade-compatible copy with a new package id.
-	currentCoreVersionSuffix = ".1"
-	currentTestPackageName   = "wormhole-core-test-upgrade-window"
+	currentTestPackageName  = "wormhole-core-test-upgrade-window"
 )
 
 // upgradeWindowPublishInput is the input of Test.WatcherUpgradeWindow:integrationUpgradeWindowPublish.
@@ -76,14 +75,24 @@ func copyDamlProject(t *testing.T, sourceDir, destinationDir string, rewriteDaml
 	require.NoError(t, os.WriteFile(filepath.Join(destinationDir, "daml.yaml"), []byte(rewriteDamlYAML(string(damlYAML))), 0o600))
 }
 
+// nextPatchVersion increments PATCH of a MAJOR.MINOR.PATCH version.
+func nextPatchVersion(t *testing.T, version string) string {
+	t.Helper()
+	versionParts := strings.Split(version, ".")
+	require.Lenf(t, versionParts, 3, "core version %q must be MAJOR.MINOR.PATCH", version)
+	patch, err := strconv.ParseUint(versionParts[2], 10, 32)
+	require.NoError(t, err)
+	return versionParts[0] + "." + versionParts[1] + "." + strconv.FormatUint(patch+1, 10)
+}
+
 // buildCurrentCoreVersion builds an upgrade-compatible copy of wormhole-core with
 // a higher version, and a copy of the test package against it. It returns the
 // current core DAR and the current test DAR.
-func buildCurrentCoreVersion(t *testing.T, dpm, cantonDir string) (currentCoreDar, currentTestDar string) {
+func buildCurrentCoreVersion(t *testing.T, dpm, cantonDir string) (retiringCoreVersion, currentCoreVersion, currentCoreDar, currentTestDar string) {
 	t.Helper()
 	coreDar := coreDarPath(t, cantonDir)
-	coreVersion := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(coreDar), "wormhole-core-"), ".dar")
-	currentCoreVersion := coreVersion + currentCoreVersionSuffix
+	retiringCoreVersion = strings.TrimSuffix(strings.TrimPrefix(filepath.Base(coreDar), "wormhole-core-"), ".dar")
+	currentCoreVersion = nextPatchVersion(t, retiringCoreVersion)
 	vendoredDarsDir := filepath.Join(cantonDir, "dars") + string(filepath.Separator)
 
 	currentCoreDir := filepath.Join(t.TempDir(), "core")
@@ -103,7 +112,7 @@ func buildCurrentCoreVersion(t *testing.T, dpm, cantonDir string) (currentCoreDa
 	})
 	runCmd(t, nextTestDir, dpm, "build")
 	currentTestDar = filepath.Join(nextTestDir, ".daml", "dist", currentTestPackageName+"-0.1.0.dar")
-	return currentCoreDar, currentTestDar
+	return retiringCoreVersion, currentCoreVersion, currentCoreDar, currentTestDar
 }
 
 func runUpgradeWindowPublish(t *testing.T, dpm, dar, port string, bridge realBridge, ownerHint string) upgradeWindowPublish {
@@ -139,7 +148,7 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	cantonDir, err := filepath.Abs("../../../../canton")
 	require.NoError(t, err)
 	retiringCorePackageID := readDarMainPackageID(t, dpm, coreDarPath(t, cantonDir))
-	currentCoreDar, currentTestDar := buildCurrentCoreVersion(t, dpm, cantonDir)
+	retiringCoreVersion, currentCoreVersion, currentCoreDar, currentTestDar := buildCurrentCoreVersion(t, dpm, cantonDir)
 	currentCorePackageID := readDarMainPackageID(t, dpm, currentCoreDar)
 	lookalikeDar := filepath.Join(cantonDir, "test-lookalike", ".daml", "dist", "wormhole-core-lookalike-0.1.0.dar")
 	lookalikePackageID := readDarMainPackageID(t, dpm, lookalikeDar)
@@ -148,19 +157,21 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	require.NotEqual(t, currentCorePackageID, lookalikePackageID)
 
 	startupWallClock := time.Now().UTC()
-	upgradeWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(currentCorePackageID, cantonclient.RetiringPackageConfig{
+	upgradeWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: currentCorePackageID, Version: currentCoreVersion}, cantonclient.RetiringPackageConfig{
 		PackageIDHex:     retiringCorePackageID,
 		AcceptedUntilUTC: startupWallClock.Add(time.Hour).Format(cantonclient.RetiringPackageDeadlineLayout),
+		Version:          retiringCoreVersion,
 	}, startupWallClock)
 	require.NoError(t, err)
-	expiredWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(currentCorePackageID, cantonclient.RetiringPackageConfig{
+	expiredWindowPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: currentCorePackageID, Version: currentCoreVersion}, cantonclient.RetiringPackageConfig{
 		PackageIDHex:     retiringCorePackageID,
 		AcceptedUntilUTC: startupWallClock.Add(-time.Minute).Format(cantonclient.RetiringPackageDeadlineLayout),
+		Version:          retiringCoreVersion,
 	}, startupWallClock)
 	require.NoError(t, err)
-	retiringOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(retiringCorePackageID, cantonclient.RetiringPackageConfig{}, startupWallClock)
+	retiringOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: retiringCorePackageID, Version: retiringCoreVersion}, cantonclient.RetiringPackageConfig{}, startupWallClock)
 	require.NoError(t, err)
-	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(currentCorePackageID, cantonclient.RetiringPackageConfig{}, startupWallClock)
+	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: currentCorePackageID, Version: currentCoreVersion}, cantonclient.RetiringPackageConfig{}, startupWallClock)
 	require.NoError(t, err)
 
 	retiringAfterDeadlineCountBefore := retiringPackagePublishAfterDeadlineCount(t)
