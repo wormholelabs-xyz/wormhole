@@ -33,7 +33,7 @@ for owner_name in "$@"; do
     fi
   done
   export "CUSTODY_OWNER_PUBKEY_$owner_slot=$GG_KEY_DIR/$owner_name.pub"
-  export "CUSTODY_OWNER_SIGN_CMD_$owner_slot=node $KEY_TOOL sign $GG_KEY_DIR/$owner_name.key"
+  export "CUSTODY_OWNER_SIGN_ARGV_$owner_slot=$(jq -cn --arg tool "$KEY_TOOL" --arg key "$GG_KEY_DIR/$owner_name.key" '["node", $tool, "sign", $key]')"
 done
 
 allocation_status=0

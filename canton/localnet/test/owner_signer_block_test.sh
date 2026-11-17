@@ -8,6 +8,7 @@ readonly CANTON_DIR
 readonly OWNER_SIGNER_BLOCK_FILES=(
   "$CANTON_DIR/devnet/guardian_governance.canton"
   "$CANTON_DIR/localnet/console/gg_rotate_owner_key.canton"
+  "$CANTON_DIR/localnet/console/custody_allocate_party.canton"
 )
 readonly BLOCK_BEGIN_LINE="// BEGIN owner signer block"
 readonly BLOCK_END_LINE="// END owner signer block"

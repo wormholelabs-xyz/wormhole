@@ -35,7 +35,7 @@ def requiredEnvironmentVariable(name: String): String =
 def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
-// BEGIN owner signer block (same text in devnet/guardian_governance.canton and localnet/console/gg_rotate_owner_key.canton)
+// BEGIN owner signer block (same text in each file of canton/localnet/test/owner_signer_block_test.sh)
 val ed25519SignatureLengthBytes = 64
 val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
 def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {

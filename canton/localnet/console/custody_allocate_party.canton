@@ -5,7 +5,8 @@
 //   GG_PARTY_ID                 guardianGovernance party id. Gives the DN and the hosting to copy.
 //   CUSTODY_PARTY_NAME          Name of the new party, for example nttCustody.
 //   CUSTODY_OWNER_PUBKEY_1/2/3  DER SPKI Ed25519 public keys of the current DN owners.
-//   CUSTODY_OWNER_SIGN_CMD_1/2/3  Signer commands of those owners: "<CMD> <hashHex>" prints a hex signature.
+//   CUSTODY_OWNER_SIGN_ARGV_1/2/3 Signer commands of those owners, each a JSON array of strings. The hash hex
+//                               is appended as the last argument; stdout is a hex signature.
 //   CUSTODY_ARTIFACTS_FILE      Output JSON: party id, DN, hosts, thresholds, signing-key fingerprints.
 // A rerun with an existing mapping only writes the artifacts.
 import com.digitalasset.canton.topology._
@@ -18,22 +19,45 @@ import com.google.protobuf.ByteString
 import scala.sys.process._
 import java.nio.file.{Files, Paths}
 
-def env(name: String): String =
+def requiredEnvironmentVariable(name: String): String =
   sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
 def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
-case class OwnerKey(publicKey: SigningPublicKey, signCmd: String)
+// BEGIN owner signer block (same text in each file of canton/localnet/test/owner_signer_block_test.sh)
+val ed25519SignatureLengthBytes = 64
+val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
+def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
+  require(ed25519SignatureHexPattern.matches(signatureHex),
+    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
+  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
+  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
+  signatureBytes
+}
+// The signer argv is a JSON array: the program, then its arguments. The hash hex is appended as the last argument.
+def parseSignerArgv(variableName: String): Seq[String] = {
+  val signerArgv = io.circe.parser.decode[Vector[String]](requiredEnvironmentVariable(variableName)).fold(
+    decodeError => throw new RuntimeException(s"$variableName must be a JSON array of strings: ${decodeError.getMessage}"),
+    identity)
+  require(signerArgv.nonEmpty, s"$variableName is an empty array")
+  require(signerArgv.forall(_.nonEmpty), s"$variableName holds an empty argument")
+  signerArgv
+}
+def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String): ByteString =
+  parseEd25519SignatureHex((signerArgv :+ hashHex).!!.trim, signerDescription)
+// END owner signer block
+
+case class OwnerKey(publicKey: SigningPublicKey, signerArgv: Seq[String])
 def loadOwner(slot: Int): OwnerKey = {
-  val der = ByteString.copyFrom(Files.readAllBytes(Paths.get(env(s"CUSTODY_OWNER_PUBKEY_$slot"))))
+  val publicKeyDer = ByteString.copyFrom(Files.readAllBytes(Paths.get(requiredEnvironmentVariable(s"CUSTODY_OWNER_PUBKEY_$slot"))))
   val publicKey = SigningPublicKey
-    .create(CryptoKeyFormat.DerX509Spki, der, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .create(CryptoKeyFormat.DerX509Spki, publicKeyDer, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
     .getOrElse(sys.error(s"invalid owner public key in CUSTODY_OWNER_PUBKEY_$slot"))
-  OwnerKey(publicKey, env(s"CUSTODY_OWNER_SIGN_CMD_$slot"))
+  OwnerKey(publicKey, parseSignerArgv(s"CUSTODY_OWNER_SIGN_ARGV_$slot"))
 }
 
-val ggPartyId = PartyId.tryFromProtoPrimitive(env("GG_PARTY_ID"))
-val custodyPartyId = PartyId.tryCreate(env("CUSTODY_PARTY_NAME"), ggPartyId.namespace)
+val ggPartyId = PartyId.tryFromProtoPrimitive(requiredEnvironmentVariable("GG_PARTY_ID"))
+val custodyPartyId = PartyId.tryCreate(requiredEnvironmentVariable("CUSTODY_PARTY_NAME"), ggPartyId.namespace)
 val owners = Seq(1, 2, 3).map(loadOwner)
 val ownerFingerprints = owners.map(_.publicKey.fingerprint).toSet
 require(ownerFingerprints.size == 3, "the three owner keys must differ")
@@ -46,10 +70,10 @@ val store = TopologyStoreId.Synchronizer(synchronizerId)
 val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
 
 def externalSign(owner: OwnerKey, hash: Hash): Signature = {
-  val sigHex = (owner.signCmd + " " + bytesToHex(hash.getCryptographicEvidence.toByteArray)).!!.trim
+  val hashHex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
   Signature.fromExternalSigning(
     SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
-    ByteString.copyFrom(hexToBytes(sigHex)),
+    runOwnerSigner(owner.signerArgv, hashHex, owner.publicKey.fingerprint.toProtoPrimitive),
     owner.publicKey.fingerprint,
     SigningAlgorithmSpec.Ed25519,
   )
@@ -125,5 +149,5 @@ val artifactsJson =
      |  "signingKeyFingerprints": [${fingerprintList(ownerFingerprints).split(",").map(jsonString).mkString(", ")}]
      |}
      |""".stripMargin
-Files.write(Paths.get(env("CUSTODY_ARTIFACTS_FILE")), artifactsJson.getBytes("UTF-8"))
+Files.write(Paths.get(requiredEnvironmentVariable("CUSTODY_ARTIFACTS_FILE")), artifactsJson.getBytes("UTF-8"))
 println("CUSTODY done")
