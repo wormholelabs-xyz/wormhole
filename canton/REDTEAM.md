@@ -5,7 +5,7 @@
 This document records attacks against the Canton core bridge and the guardian watcher.
 Each attack has a test that asserts the attack fails.
 A failing test identifies an open finding.
-The production code does not include fixes for these findings.
+The Results table gives the fix commit for each fixed finding.
 
 ## Test Locations
 
@@ -31,15 +31,15 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A2 | Forge a message from a look-alike package. | Held. | `TestCantonWatcherIgnoresLookalikePackage`. | None. | Keep the package-id pin. |
 | A6-1 | Send a bad guardian set upgrade. | Held. | `testRedTeamA6GuardianSetUpgradeRules`. | None. | None. |
 | A6-2 | Sign a VAA with bad signatures or the superseded set. | Held. | `testRedTeamA6QuorumAndSignerOrder`. | None. | None. |
-| A6-3 | Use an expired guardian set. | Held. | `testRedTeamA6ExpiredGuardianSet`. | None. | None. |
+| A6-3 | Use an expired guardian set. | Held. Fixed an off-by-one in a66170ea7. | `testRedTeamA6ExpiredGuardianSet`. | None. | None. |
 | A9-1 | Send a malformed VAA encoding. | Held. | `testRedTeamA9MalformedEncodings`; `testRedTeamA9MalformedGovernancePayloads`. | None. | None. |
-| A9-2 | Send a governance payload with a trailing byte. | Broken. | `testRedTeamA9GovernancePayloadExactLength` fails. | Low. | Check the exact length. |
-| A9-3 | Publish fields that the watcher drops. | Broken. | `testRedTeamA9PublishRejectsFieldsTheWatcherDrops` fails. | Low. | Check the fields on the ledger. |
+| A9-2 | Send a governance payload with a trailing byte. | Fixed in 15684243d. | `testRedTeamA9GovernancePayloadExactLength`; `testParseGovernanceRequiresExactPacketLength`. | Low. | None. |
+| A9-3 | Publish fields that the watcher drops. | Fixed in 4143b6c74. | `testRedTeamA9PublishRejectsFieldsTheWatcherDrops`; `testRedTeamA9PublishFieldBoundaries`. | Low. | None. |
 | A9-4 | Publish at the payload size limit. | Held. | `testRedTeamA9PublishPayloadBoundary`. | None. | None. |
 | A9-5 | Replay a VAA in uppercase hex. | Held. | `testRedTeamA9HexCaseReplay`. | None. | None. |
 | A14-1 | The operator creates an emitter for a third party. | Held. | `testRedTeamA14OperatorCannotForgeThirdPartyEmitter`. | None. | None. |
 | A14-2 | The operator and the owner rewind the owner sequence. | Broken by design. | `testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress` passes. | Low. | Record the limit. |
-| A14-3 | The operator resets the registry counter. | Broken. | `testRedTeamA14RegistryResetDuplicatesHonestOwnerAddress` fails. | Medium. | Use an owner-signed counter. |
+| A14-3 | The operator resets the registry counter. | Open. | `testRedTeamA14RegistryResetDuplicatesHonestOwnerAddress` fails. | Medium. | See [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md). |
 | R1 | Publish inside `try` and roll back. | Held. | `testRedTeamR1RollbackOfPublishRejected`. | None. | None. |
 | R2 | Run attacker code in the fee charge. | Held. | `TestFees.testFeeValidationMatrix`. | None. | None. |
 | R3 | Vet a malicious upgrade of `wormhole-core`. | Not tested. | None. | High if it occurs. | Control package vetting. |
@@ -63,7 +63,9 @@ The tests send these upgrades: a skipped, equal, or lower index.
 They also use a wrong emitter chain, emitter address, or target chain, and an empty set.
 The signature tests use fewer than quorum, a duplicate index, and an out-of-order index.
 They also use a wrong key, an index out of range, and the superseded set for governance.
-The superseded set checks VAAs for 86400 seconds and then fails.
+The superseded set checks VAAs through second 86400 and fails at second 86401.
+EVM `Messages.sol:80` also accepts the expiry second.
+Before a66170ea7, Canton failed at second 86400.
 
 ### A9: Malformed encodings
 
@@ -75,23 +77,34 @@ An uppercase replay fails with `action already consumed` or `digest already cons
 
 ### A9: Governance payload length
 
+Before 15684243d, `parseGovernance` read fixed offsets and ignored the bytes after them.
+A quorum of guardians must sign the packet, so the exposure was low.
+EVM rejects the packet, so the gap was a parity gap.
 
-`parseGovernance` reads fixed offsets and ignores the bytes after them.
-A quorum of guardians must sign the packet, so the exposure is low.
-The check is a parity gap with EVM, which rejects the packet.
-Fix: in `parseGovernance` (`Governance.daml:31-55`), assert the exact length for each action.
+Fix: `parseGovernance` (`Governance.daml`) requires the exact length of each action.
+The lengths come from the guardian serializers in `sdk/vaa/payloads.go`:
+
+- ContractUpgrade: 67 bytes (`payloads.go:386-399`).
+- GuardianSetUpgrade: 40 + 20 × key count bytes (`payloads.go:402-418`).
+- SetMessageFee: 67 bytes (`payloads.go:621-631`).
+- TransferFees: 99 bytes (`payloads.go:645-671`).
 
 ### A9: Fields that the watcher drops
 
-`PublishMessage` checks only `byteLength payload <= 750`.
-`byteLength` rounds down, so 1501 hex characters pass as 750 bytes.
+Before 4143b6c74, `PublishMessage` checked only `byteLength payload <= 750`.
+`byteLength` rounds down, so 1501 hex characters passed as 750 bytes.
 `decodeWormholeMessage` (`cantongrpc.go:233-290`) rejects the bad fields.
 `messagesFromTx` (`cantongrpc.go:191-198`) logs the error and drops the message.
-The emitter sequence increases, and the payer pays the fee.
-The guardians do not sign a VAA for that sequence.
-An integrator that passes user input to these fields can lose user funds.
-Fix: in `PublishMessage` (`State.daml:549-569`), assert even-length lowercase hex.
-Also assert `0 <= nonce < 2^32` and `0 <= consistencyLevel < 256`.
+The emitter sequence increased, and the payer paid the fee.
+The guardians did not sign a VAA for that sequence.
+An integrator that passed user input to these fields could lose user funds.
+
+Fix: `PublishMessage` (`State.daml`) checks these conditions before the fee charge:
+
+- The payload is lowercase hex with an even length.
+- The payload is 750 bytes or less.
+- The nonce is in the range 0 to 4294967295.
+- The consistency level is in the range 0 to 255.
 
 ### A14: Blast radius
 
@@ -113,8 +126,8 @@ The operator can create a registry with any `nextId`.
 An honest owner that registers a second emitter can get the address of its first emitter.
 Both emitters start at sequence 0.
 Integrators that use the sequence for ordering or replay protection can fail.
-Fix: replace the operator-signed counter with a counter that the owner co-signs.
-Alternative fix: the watcher refuses a second `Emitter` creation for one identity.
+This finding is open.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) compares four fixes and recommends one.
 
 ### R1: Rolled-back publish
 
