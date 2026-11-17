@@ -1,7 +1,7 @@
 package cantonclient
 
 // Generates the hex fixtures in canton/test/daml and asserts the Daml literals
-// match. Rewrite them after a deliberate change with:
+// match (TestCore.daml and TestRedTeamCore.daml). Rewrite them after a deliberate change with:
 //
 //	CANTON_VECTORGEN=write go test -count=1 ./pkg/cantonclient/ -run TestCantonDamlFixtures
 //
@@ -143,15 +143,30 @@ func generateAddressVectorHex(t *testing.T) string {
 }
 
 func TestCantonDamlFixtures(t *testing.T) {
-	damlSourceBytes, err := os.ReadFile(damlTestCorePath)
+	fixtureFiles := []struct {
+		damlPath string
+		fixtures []damlHexFixture
+	}{
+		{damlPath: damlTestCorePath, fixtures: damlHexFixtures()},
+		{damlPath: damlRedTeamCorePath, fixtures: redTeamDamlHexFixtures()},
+	}
+	for _, fixtureFile := range fixtureFiles {
+		t.Run(filepath.Base(fixtureFile.damlPath), func(t *testing.T) {
+			checkOrRewriteDamlFixtures(t, fixtureFile.damlPath, fixtureFile.fixtures)
+		})
+	}
+}
+
+func checkOrRewriteDamlFixtures(t *testing.T, damlPath string, fixtures []damlHexFixture) {
+	damlSourceBytes, err := os.ReadFile(damlPath)
 	require.NoError(t, err)
 	damlSource := string(damlSourceBytes)
 	rewriteFixtures := os.Getenv("CANTON_VECTORGEN") == "write"
 
-	for _, fixture := range damlHexFixtures() {
+	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
 			matches := fixture.damlLiteralPattern.FindAllStringSubmatchIndex(damlSource, -1)
-			require.Len(t, matches, 1, "fixture %s must appear exactly once in %s", fixture.name, damlTestCorePath)
+			require.Len(t, matches, 1, "fixture %s must appear exactly once in %s", fixture.name, damlPath)
 			literalStart, literalEnd := matches[0][2], matches[0][3]
 
 			generatedHex := fixture.generateHex(t)
@@ -168,8 +183,8 @@ func TestCantonDamlFixtures(t *testing.T) {
 	}
 
 	if rewriteFixtures {
-		require.False(t, t.Failed(), "refusing to rewrite %s after a failed fixture", damlTestCorePath)
-		writeFileAtomically(t, damlTestCorePath, []byte(damlSource))
+		require.False(t, t.Failed(), "refusing to rewrite %s after a failed fixture", damlPath)
+		writeFileAtomically(t, damlPath, []byte(damlSource))
 	}
 }
 
