@@ -65,6 +65,9 @@ check_case fault-banner-one 0 "ROTATION FAULT INJECTION ACTIVE: GG_ROTATION_FAUL
   "source '$LOCALNET_TEST_DIR/../owner_key_input_checks.sh' && print_active_rotation_faults"
 check_case fault-banner-empty-value 0 "" env GG_ROTATION_FAULT_SIGNER_OF= bash -c \
   "source '$LOCALNET_TEST_DIR/../owner_key_input_checks.sh' && print_active_rotation_faults"
+check_case fault-banner-party-ids 0 "ROTATION FAULT INJECTION ACTIVE: GG_ROTATION_FAULT_PARTY_IDS=guardianGovernance::1220ab" \
+  env GG_ROTATION_FAULT_PARTY_IDS=guardianGovernance::1220ab bash -c \
+  "source '$LOCALNET_TEST_DIR/../owner_key_input_checks.sh' && print_active_rotation_faults"
 check_case fault-banner-lists-each 0 "GG_ROTATION_MEASURE_SINGLE_LOAD=true" \
   env GG_ROTATION_FAULT_SIGNER_OF=owner4 GG_ROTATION_MEASURE_SINGLE_LOAD=true bash -c \
   "source '$LOCALNET_TEST_DIR/../owner_key_input_checks.sh' && print_active_rotation_faults | grep -c '^ROTATION FAULT INJECTION ACTIVE' | grep -qx 2 && print_active_rotation_faults"
