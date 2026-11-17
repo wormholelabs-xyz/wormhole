@@ -5,6 +5,8 @@
 //	go run ./hack/canton_localnet_vaa -kind guardian-set-upgrade -signing-set-index 0 -signing-key-indices 0 -new-key-indices 1 -sequence 100
 //	go run ./hack/canton_localnet_vaa -kind set-message-fee -fee 0 -sequence 101
 //	go run ./hack/canton_localnet_vaa -kind message -signing-set-index 1 -signing-key-indices 1 -sequence 1
+//	go run ./hack/canton_localnet_vaa -kind guardian-set-upgrade -signing-key-indices 1 -new-set-index 2 -new-key-indices 2,3,4 -sequence 102
+//	go run ./hack/canton_localnet_vaa -kind message -signing-set-index 2 -signing-key-indices 2,3,4 -signer-positions 0,1 -sequence 2
 package main
 
 import (
@@ -13,7 +15,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/holiman/uint256"
 	"os"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/certusone/wormhole/node/pkg/devnet"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
@@ -53,6 +55,33 @@ func parseDeterministicKeyIndices(flagValue string) ([]uint64, error) {
 		return nil, fmt.Errorf("need 1 to %d key indices, got %d", maxGuardianSetSize, len(keyIndices))
 	}
 	return keyIndices, nil
+}
+
+// parseSignerPositions returns the guardian positions that sign, strictly ascending and below setSize.
+// An empty flag value selects every position of the set.
+func parseSignerPositions(flagValue string, setSize int) ([]int, error) {
+	if flagValue == "" {
+		positions := make([]int, setSize)
+		for position := range positions {
+			positions[position] = position
+		}
+		return positions, nil
+	}
+	var positions []int
+	for _, field := range strings.Split(flagValue, ",") {
+		position, err := strconv.Atoi(strings.TrimSpace(field))
+		if err != nil {
+			return nil, fmt.Errorf("bad signer position %q: %w", field, err)
+		}
+		if position < 0 || position >= setSize {
+			return nil, fmt.Errorf("signer position %d is outside the %d-guardian set", position, setSize)
+		}
+		if len(positions) > 0 && position <= positions[len(positions)-1] {
+			return nil, fmt.Errorf("signer positions must be strictly ascending, got %d after %d", position, positions[len(positions)-1])
+		}
+		positions = append(positions, position)
+	}
+	return positions, nil
 }
 
 func deterministicKeys(keyIndices []uint64) []*ecdsa.PrivateKey {
@@ -93,12 +122,17 @@ func run() error {
 	messageFee := flag.Uint64("fee", 0, "set-message-fee only: the new fee in 10^-10 fee-instrument units")
 	signingSetIndex := flag.Uint("signing-set-index", 0, "guardian set index the VAA names")
 	signingKeyIndicesFlag := flag.String("signing-key-indices", "0", "deterministic key indices of the signing set, in guardian order")
+	signerPositionsFlag := flag.String("signer-positions", "", "guardian positions in the signing set that sign, ascending (default: all)")
 	newSetIndex := flag.Uint("new-set-index", 1, "guardian-set-upgrade only: the new set index")
 	newKeyIndicesFlag := flag.String("new-key-indices", "1", "guardian-set-upgrade only: deterministic key indices of the new set")
 	sequence := flag.Uint64("sequence", 0, "VAA sequence; governance replay protection is keyed by digest")
 	flag.Parse()
 
 	signingKeyIndices, err := parseDeterministicKeyIndices(*signingKeyIndicesFlag)
+	if err != nil {
+		return err
+	}
+	signerPositions, err := parseSignerPositions(*signerPositionsFlag, len(signingKeyIndices))
 	if err != nil {
 		return err
 	}
@@ -118,7 +152,9 @@ func run() error {
 		Payload:          payload,
 	}
 	output := signedVAAOutput{}
-	for guardianIndex, key := range deterministicKeys(signingKeyIndices) {
+	signingSetKeys := deterministicKeys(signingKeyIndices)
+	for _, guardianIndex := range signerPositions {
+		key := signingSetKeys[guardianIndex]
 		signedVAA.AddSignature(key, uint8(guardianIndex)) // #nosec G115 -- bounded by maxGuardianSetSize
 		output.PubKeys = append(output.PubKeys, publicKeyHint{
 			GuardianIndex: guardianIndex,
