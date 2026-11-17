@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Snapshot forgery proof of concept (L5): a guardianGovernance host gives a new host a snapshot with an invented Coin.
 # Usage:
-#   snapshot_forgery_poc.sh seed-source <forged-acs-file>         Repair-import the invented Coins on app-provider.
+#   snapshot_forgery_poc.sh seed-source <forged-acs-file>         Import the invented Coins on app-provider. The Splice
+#       participants have no repair service, thus the import uses the party management service without a party.
 #   snapshot_forgery_poc.sh purge <participant> <contract-id,...>  Repair-purge contracts on one participant.
+#   snapshot_forgery_poc.sh watch <participant> <update-id> <core-package-id>
+#       Run the guardian watcher harness on that participant as guardianGovernance, reobserving the update, and print
+#       its observations.
+#   snapshot_forgery_poc.sh import-on <participant> <acs-file>     Import contracts on one participant (party management
+#       service). Recovers an honest host that crashes on a mediator approval of a request that it rejected.
 #   snapshot_forgery_poc.sh attack <coin-contract-id> <label> <expected-outcome> [<owner-party> <participant> <raw-amount>]
 #       The owner (default: the attacker on app-provider) burns the Coin with NTT Transfer. <expected-outcome> is committed,
 #       rejected or any. The baseline burns a real Coin with the same command.
@@ -11,6 +17,9 @@
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
+# shellcheck source=watcher_harness_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/watcher_harness_lib.sh"
+WATCHER_DIR="$LOCALNET_STATE_DIR/guardian4/watcher"
 
 readonly GUARDIAN4_JSON_API_URL="http://localhost:5975"
 readonly PUBLISH_MESSAGE_SCAN="$REPO_ROOT/canton/tools/publish_message_scan.sh"
@@ -46,7 +55,7 @@ repair_on() {
   local repair_output
   repair_output="$(REPAIR_PARTICIPANT="$1" REPAIR_ACTION="$2" REPAIR_FILE="${3:-}" REPAIR_CONTRACT_IDS="${4:-}" \
     console_with_guardian4 "$LOCALNET_SCRIPT_DIR/console/repair_contracts.canton" 2>&1)" || true
-  grep -E '^REPAIR|ERROR' <<<"$repair_output" | head -n 20 || true
+  grep -E '^REPAIR|ERROR|cause|code = ' <<<"$repair_output" | head -n 20 || true
   grep -qE "^REPAIR $1 $2=accepted reconnected=true" <<<"$repair_output"
 }
 
@@ -107,7 +116,16 @@ attack_with_coin() {
 }
 
 case "${1:-}" in
-  seed-source) repair_on app-provider import "${2:?forged ACS file}" || fail "repair import on app-provider failed" ;;
+  seed-source) repair_on app-provider party-import "${2:?forged ACS file}" || fail "repair import on app-provider failed" ;;
+  watch)
+    [[ -x "$(harness_binary)" ]] || build_harness
+    trap 'stop_started_harnesses; rm -rf "$gg_work_dir"' EXIT
+    run_harness_on "${2:?participant}" "forgery-$2" "${4:?core package id}" "${3:?update id}" 300
+    stop_harness "forgery-$2"
+    echo "watcher observations on $2:"
+    jq -c '{updateId: (.updateId // null), emitterAddress, sequence, isReobservation, payloadPrefix: .payloadHex[0:80]}' "$WATCHER_DIR/forgery-$2.jsonl"
+    ;;
+  import-on) repair_on "${2:?participant}" party-import "${3:?ACS file}" || fail "import on $2 failed" ;;
   purge) repair_on "${2:?participant}" purge "" "${3:?contract ids}" || fail "repair purge on $2 failed" ;;
   attack) attack_with_coin "${2:?coin contract id}" "${3:?label}" "${4:?expected outcome}" "${5:-}" "${6:-app-provider}" "${7:-$FORGED_RAW_AMOUNT}" ;;
   *) echo "usage: snapshot_forgery_poc.sh <seed-source|purge|attack> ..." >&2; exit 2 ;;

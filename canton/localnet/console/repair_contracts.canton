@@ -1,5 +1,7 @@
-// Repair one participant: import contracts from an ACS file (REPAIR_ACTION=import) or purge contract IDs (REPAIR_ACTION=purge).
-// The participant disconnects from the global synchronizer for the repair and reconnects after it.
+// Repair one participant: import contracts from an ACS file (REPAIR_ACTION=import, repair service; party-import, party
+// management service without a party, for participants without the repair service) or purge contract IDs (REPAIR_ACTION=purge).
+// The participant disconnects from the global synchronizer for the repair and reconnects after it, with manualConnect=false.
+// A participant that is already disconnected (participant_hold_disconnected.canton) is repaired as it is.
 // Environment: REPAIR_PARTICIPANT, REPAIR_ACTION, REPAIR_FILE (import), REPAIR_CONTRACT_IDS (purge, comma-separated).
 import com.digitalasset.canton.participant.admin.data.ContractImportMode
 import com.digitalasset.daml.lf.value.Value.ContractId
@@ -7,21 +9,26 @@ import com.digitalasset.daml.lf.value.Value.ContractId
 val synchronizerAlias = "global"
 val participantName = sys.env("REPAIR_PARTICIPANT")
 val repairedParticipant = participants.remote.find(_.name == participantName).getOrElse(throw new RuntimeException(s"unknown participant $participantName"))
-val physicalSynchronizerId = repairedParticipant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == synchronizerAlias)
-  .getOrElse(throw new RuntimeException(s"$participantName is not connected to $synchronizerAlias")).physicalSynchronizerId
+val physicalSynchronizerId = participants.remote.flatMap(host => scala.util.Try(host.synchronizers.list_connected()).getOrElse(Seq.empty))
+  .find(_.synchronizerAlias.unwrap == synchronizerAlias)
+  .getOrElse(throw new RuntimeException(s"no participant is connected to $synchronizerAlias")).physicalSynchronizerId
 repairedParticipant.synchronizers.disconnect(synchronizerAlias)
 val repairResult = scala.util.Try {
   sys.env("REPAIR_ACTION") match {
     case "import" =>
       repairedParticipant.repair.import_acs(physicalSynchronizerId.logical, importFilePath = sys.env("REPAIR_FILE"),
         contractImportMode = ContractImportMode.Validation)
+    case "party-import" =>
+      repairedParticipant.parties.import_party_acs(physicalSynchronizerId.logical, party = None, importFilePath = sys.env("REPAIR_FILE"),
+        contractImportMode = ContractImportMode.Validation)
     case "purge" =>
       val contractIds = sys.env("REPAIR_CONTRACT_IDS").split(",").toSeq.map(_.trim).filter(_.nonEmpty).map(ContractId.assertFromString)
       require(contractIds.nonEmpty, "REPAIR_CONTRACT_IDS is empty")
-      repairedParticipant.repair.purge(repairedParticipant.synchronizers.list_registered().map(_._1.synchronizerAlias).find(_.unwrap == synchronizerAlias).get, contractIds)
+      repairedParticipant.repair.purge(com.digitalasset.canton.SynchronizerAlias.tryCreate(synchronizerAlias), contractIds)
     case other => throw new RuntimeException(s"unknown REPAIR_ACTION $other")
   }
 }
+repairedParticipant.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = false))
 repairedParticipant.synchronizers.reconnect(synchronizerAlias)
 println(s"REPAIR $participantName ${sys.env("REPAIR_ACTION")}=${repairResult.fold(error => "rejected: " + error.getMessage.linesIterator.take(6).mkString(" "), _ => "accepted")} reconnected=${repairedParticipant.synchronizers.active(synchronizerAlias)}")
 repairResult.get
