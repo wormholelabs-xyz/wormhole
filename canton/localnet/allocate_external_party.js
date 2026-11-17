@@ -2,7 +2,7 @@
 // Allocate a 1-of-1 Ed25519 external party on one participant through the JSON Ledger API v2.
 // Usage: allocate_external_party.js <json-api-url> <token-file> <synchronizer-id> <party-hint> <key-file-prefix>
 // Writes <key-file-prefix>.key (PKCS8 DER, the format interactive_submit.js reads) and <key-file-prefix>.pub
-// (SPKI DER). Prints {partyId, fingerprint, keyFile}. Fails if <key-file-prefix>.key exists.
+// (SPKI DER). Prints {partyId, fingerprint, keyFile}. Fails with EEXIST if either key file exists.
 'use strict';
 const crypto = require('crypto');
 const fs = require('fs');
@@ -29,13 +29,13 @@ async function main() {
     process.exit(2);
   }
   const keyFile = `${keyFilePrefix}.key`;
-  if (fs.existsSync(keyFile)) throw new Error(`${keyFile} exists; use a new key file prefix`);
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
 
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const publicKeyDer = publicKey.export({ format: 'der', type: 'spki' });
-  fs.writeFileSync(keyFile, privateKey.export({ format: 'der', type: 'pkcs8' }), { mode: 0o600 });
-  fs.writeFileSync(`${keyFilePrefix}.pub`, publicKeyDer);
+  // flag 'wx': EEXIST stops the run if a key file of this prefix exists.
+  fs.writeFileSync(keyFile, privateKey.export({ format: 'der', type: 'pkcs8' }), { mode: 0o600, flag: 'wx' });
+  fs.writeFileSync(`${keyFilePrefix}.pub`, publicKeyDer, { flag: 'wx' });
 
   const topology = await postJson(baseUrl, token, '/v2/parties/external/generate-topology', {
     synchronizer: synchronizerId,
@@ -50,6 +50,7 @@ async function main() {
     confirmationThreshold: 1,
     observingParticipantUids: [],
   });
+  // LocalNet only: signs the participant multiHash without recomputing it. Do not use on a production network.
   const multiHashSignature = crypto.sign(null, Buffer.from(topology.multiHash, 'base64'), privateKey);
   if (multiHashSignature.length !== ED25519_SIGNATURE_BYTES) {
     throw new Error(`signature has ${multiHashSignature.length} bytes, expected ${ED25519_SIGNATURE_BYTES}`);

@@ -5,20 +5,36 @@ ntt_contract() {
   jq -er --arg name "$1" '.[$name]' "$NTT_CONTRACTS"
 }
 
+# write_ntt_contracts_atomically <json>: write to a temporary file in the same directory, then rename.
+write_ntt_contracts_atomically() {
+  local temporary_file
+  jq -e . <<<"$1" > /dev/null || { echo "not JSON; $NTT_CONTRACTS stays unchanged" >&2; return 1; }
+  temporary_file="$(mktemp "$NTT_CONTRACTS.XXXXXX")" || return 1
+  if ! printf '%s\n' "$1" > "$temporary_file"; then
+    rm -f "$temporary_file"
+    return 1
+  fi
+  mv -f "$temporary_file" "$NTT_CONTRACTS"
+}
+
 record_ntt_contract() {
   local name="$1" contract_value="$2" updated
   if [[ -f "$NTT_CONTRACTS" ]]; then
-    updated="$(jq --arg name "$name" --arg value "$contract_value" '.[$name] = $value' "$NTT_CONTRACTS")"
+    updated="$(jq --arg name "$name" --arg value "$contract_value" '.[$name] = $value' "$NTT_CONTRACTS")" || return 1
   else
-    updated="$(jq -n --arg name "$name" --arg value "$contract_value" '{($name): $value}')"
+    updated="$(jq -n --arg name "$name" --arg value "$contract_value" '{($name): $value}')" || return 1
   fi
-  printf '%s\n' "$updated" > "$NTT_CONTRACTS"
+  write_ntt_contracts_atomically "$updated"
 }
 
 record_ntt_json() {
   local name="$1" json_value="$2" updated
-  updated="$(jq --arg name "$name" --argjson value "$json_value" '.[$name] = $value' "$NTT_CONTRACTS")"
-  printf '%s\n' "$updated" > "$NTT_CONTRACTS"
+  if [[ ! -f "$NTT_CONTRACTS" ]]; then
+    echo "$NTT_CONTRACTS does not exist; run ntt_governance.sh first" >&2
+    return 1
+  fi
+  updated="$(jq --arg name "$name" --argjson value "$json_value" '.[$name] = $value' "$NTT_CONTRACTS")" || return 1
+  write_ntt_contracts_atomically "$updated"
 }
 
 # created_contract_argument <transaction-json> <qualified-template-suffix>: create arguments of the one such created event.
@@ -192,4 +208,11 @@ subject_auth_header_file() {
     write_auth_header_file "$header_file" "$subject" || return 1
   fi
   echo "$header_file"
+}
+
+readonly MAX_RELEASE_AFTER_ROUNDS=24
+
+# check_release_after_rounds <text>: a decimal integer from 0 to MAX_RELEASE_AFTER_ROUNDS.
+check_release_after_rounds() {
+  [[ "$1" =~ ^[0-9]{1,3}$ ]] && (( 10#$1 <= MAX_RELEASE_AFTER_ROUNDS ))
 }

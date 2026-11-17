@@ -28,7 +28,11 @@ readonly LEDGER_BALANCE_AFTER_RELEASE="3.0"
 readonly TAP_AMOUNT_USD="10.0"
 readonly OUTBOUND_NONCE=8
 # NTT_RELEASE_AFTER_ROUNDS > 0 releases from a custody pot that is that many mining rounds old.
-readonly RELEASE_AFTER_ROUNDS="${NTT_RELEASE_AFTER_ROUNDS:-0}"
+if ! check_release_after_rounds "${NTT_RELEASE_AFTER_ROUNDS:-0}"; then
+  echo "NTT_RELEASE_AFTER_ROUNDS must be a decimal integer from 0 to $MAX_RELEASE_AFTER_ROUNDS, got '${NTT_RELEASE_AFTER_ROUNDS:-}'" >&2
+  exit 1
+fi
+readonly RELEASE_AFTER_ROUNDS=$((10#${NTT_RELEASE_AFTER_ROUNDS:-0}))
 readonly RELEASE_WAIT_POLL_SECONDS=30
 readonly RELEASE_WAIT_MAX_POLLS=$(( (RELEASE_AFTER_ROUNDS + 2) * 24 ))
 
