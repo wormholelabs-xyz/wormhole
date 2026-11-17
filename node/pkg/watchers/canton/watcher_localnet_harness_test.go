@@ -40,6 +40,52 @@ func parseReobserveUpdateIDs(updateIDList string) ([]cantonclient.UpdateID, erro
 	return updateIDs, nil
 }
 
+// reobservedUpdateTracker records which requested update ids produced a reobserved message.
+type reobservedUpdateTracker struct {
+	requested map[cantonclient.UpdateID]struct{}
+	observed  map[cantonclient.UpdateID]struct{}
+}
+
+func newReobservedUpdateTracker(requested []cantonclient.UpdateID) reobservedUpdateTracker {
+	tracker := reobservedUpdateTracker{
+		requested: make(map[cantonclient.UpdateID]struct{}, len(requested)),
+		observed:  make(map[cantonclient.UpdateID]struct{}, len(requested)),
+	}
+	for _, updateID := range requested {
+		tracker.requested[updateID] = struct{}{}
+	}
+	return tracker
+}
+
+// recordReobservation returns an error for an update id that was not requested.
+func (tracker *reobservedUpdateTracker) recordReobservation(updateID cantonclient.UpdateID) error {
+	if _, requested := tracker.requested[updateID]; !requested {
+		return fmt.Errorf("reobserved update %s was not requested", updateID)
+	}
+	tracker.observed[updateID] = struct{}{}
+	return nil
+}
+
+func (tracker reobservedUpdateTracker) allRequestedUpdatesObserved() bool {
+	return len(tracker.observed) == len(tracker.requested)
+}
+
+// drainPublications writes each queued publication, at most maxDrained, and returns the count.
+func drainPublications(msgC <-chan *common.MessagePublication, maxDrained int,
+	writePublication func(*common.MessagePublication) error) (int, error) {
+	for drainedCount := 0; drainedCount < maxDrained; drainedCount++ {
+		select {
+		case publication := <-msgC:
+			if err := writePublication(publication); err != nil {
+				return drainedCount, err
+			}
+		default:
+			return drainedCount, nil
+		}
+	}
+	return maxDrained, nil
+}
+
 func localNetTestUpdateIDText(index int) string {
 	return fmt.Sprintf("1220%064x", index+1)
 }

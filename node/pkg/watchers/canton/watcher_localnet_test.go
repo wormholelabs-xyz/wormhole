@@ -12,7 +12,8 @@
 //	go test -tags localnet -run TestCantonWatcherLocalNet ./pkg/watchers/canton -v -timeout 15m
 //
 // The harness writes one JSON line per observation (live and reobserved). It stops when the stop
-// file exists and all requested reobservations arrived. It fails at CANTON_LOCALNET_MAX_SECONDS.
+// file exists and each requested update id was reobserved, after it writes the queued observations.
+// It fails at CANTON_LOCALNET_MAX_SECONDS.
 // canton/localnet/ntt_watcher.sh drives it.
 package canton
 
@@ -20,6 +21,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -118,6 +120,7 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	require.Eventually(t, func() bool { return testutil.ToFloat64(currentCantonHeight) > 0 }, 60*time.Second, time.Second,
 		"watcher did not read the ledger end")
 	require.NoError(t, os.WriteFile(readyFile, []byte("ready\n"), 0o600))
+	reobservedUpdates := newReobservedUpdateTracker(reobserveUpdateIDs)
 	for _, updateID := range reobserveUpdateIDs {
 		obsvReqC <- &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: updateID.TxID()}
 	}
@@ -126,33 +129,43 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	require.NoError(t, err)
 	defer output.Close()
 	encoder := json.NewEncoder(output)
+	writeObservation := func(observation *common.MessagePublication) error {
+		if observation.EmitterChain != vaa.ChainIDCanton {
+			return fmt.Errorf("observation of chain %d, expected %d", observation.EmitterChain, vaa.ChainIDCanton)
+		}
+		updateID, err := cantonclient.UpdateIDFromTxID(observation.TxID)
+		if err != nil {
+			return err
+		}
+		if observation.IsReobservation {
+			if err := reobservedUpdates.recordReobservation(updateID); err != nil {
+				return err
+			}
+		}
+		return encoder.Encode(localNetObservation{
+			EmitterChain:     uint16(observation.EmitterChain),
+			EmitterAddress:   hex.EncodeToString(observation.EmitterAddress[:]),
+			Sequence:         observation.Sequence,
+			Nonce:            observation.Nonce,
+			ConsistencyLevel: observation.ConsistencyLevel,
+			PayloadHex:       hex.EncodeToString(observation.Payload),
+			UpdateID:         updateID.String(),
+			IsReobservation:  observation.IsReobservation,
+			Timestamp:        observation.Timestamp.UTC().Format(time.RFC3339Nano),
+		})
+	}
 	stopTicker := time.NewTicker(localNetStopPollInterval)
 	defer stopTicker.Stop()
-	reobservationsSeen := 0
 	for {
 		select {
 		case <-rootCtx.Done():
 			t.Fatalf("harness reached CANTON_LOCALNET_MAX_SECONDS=%d without the stop file", maxSeconds)
 		case observation := <-msgC:
-			require.Equal(t, vaa.ChainIDCanton, observation.EmitterChain)
-			updateID, err := cantonclient.UpdateIDFromTxID(observation.TxID)
-			require.NoError(t, err)
-			require.NoError(t, encoder.Encode(localNetObservation{
-				EmitterChain:     uint16(observation.EmitterChain),
-				EmitterAddress:   hex.EncodeToString(observation.EmitterAddress[:]),
-				Sequence:         observation.Sequence,
-				Nonce:            observation.Nonce,
-				ConsistencyLevel: observation.ConsistencyLevel,
-				PayloadHex:       hex.EncodeToString(observation.Payload),
-				UpdateID:         updateID.String(),
-				IsReobservation:  observation.IsReobservation,
-				Timestamp:        observation.Timestamp.UTC().Format(time.RFC3339Nano),
-			}))
-			if observation.IsReobservation {
-				reobservationsSeen++
-			}
+			require.NoError(t, writeObservation(observation))
 		case <-stopTicker.C:
-			if _, err := os.Stat(stopFile); err == nil && reobservationsSeen >= len(reobserveUpdateIDs) {
+			if _, err := os.Stat(stopFile); err == nil && reobservedUpdates.allRequestedUpdatesObserved() {
+				_, err := drainPublications(msgC, cap(msgC), writeObservation)
+				require.NoError(t, err)
 				return
 			}
 		}
