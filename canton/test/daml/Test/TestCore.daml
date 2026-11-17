@@ -427,8 +427,9 @@ testArchives = do
   submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
   bob <- allocateParty "ArchBob"
   emId <- registerEmitter operator bob
-  -- Emitter now has two signatories (operator + owner), so both must authorize.
-  submit (actAs operator <> actAs bob) do archiveCmd emId   -- Archive Emitter
+  -- Emitter is signed by operator, owner, and guardianGovernance; all three must authorize.
+  submitMustFail (actAs operator <> actAs bob) do archiveCmd emId
+  submit (actAs operator <> actAs bob <> actAs cs.guardianGovernance) do archiveCmd emId
   [(regId, _)] <- query @EmitterRegistry operator
   -- EmitterRegistry is co-signed, so archiving needs operator + guardianGovernance.
   submitMustFail operator do archiveCmd regId

@@ -394,12 +394,7 @@ emitterAddressFor registrar owner emitterId =
 -- ceremony.
 --
 -- SECURITY: guardianGovernance co-signs, so the operator alone cannot create,
--- archive, or re-price a registry, and cannot lower @nextId@ (A14-3). A reused
--- id gives an honest owner's second 'Emitter' the address of its first, both
--- at sequence 0. A registry under a rogue guardianGovernance can publish
--- against a shadow 'CoreState' of the same rogue party. The real
--- guardianGovernance is not an informee of those transactions, so the
--- guardian watchers do not see them.
+-- archive, or re-price a registry, or lower @nextId@ (A14-3).
 template EmitterRegistry
   with
     operator           : Party
@@ -473,7 +468,7 @@ template EmitterRegistry
               fee = registrationFee
               feeAllocation
             assertMsg "core state operator mismatch" (csOperator == operator)
-        reg' <- create this with nextId = nextId + 1
+        successorRegistryCid <- create this with nextId = nextId + 1
         emitter <- create Emitter with
           operator
           guardianGovernance
@@ -481,7 +476,7 @@ template EmitterRegistry
           emitterId = nextId
           emitterAddress = emitterAddressFor operator requester nextId
           sequence = 0
-        pure (reg', emitter)
+        pure (successorRegistryCid, emitter)
 
 -- | Hands out replay-trie roots to any consumer that asks — a stateless anchor
 -- whose one nonconsuming choice lends the operator's INHERITED co-signature to
@@ -560,8 +555,8 @@ template ReplayRootRegistry
 template Emitter
   with
     operator           : Party
-    guardianGovernance : Party  -- CoreState fee-custody anchor, pinned in
-                                -- PublishMessage's fee charge; observer
+    guardianGovernance : Party  -- co-signer; CoreState fee-custody anchor,
+                                -- pinned in PublishMessage's fee charge
     owner              : Party
     emitterId          : Int      -- registry-allocated
     emitterAddress     : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
@@ -569,12 +564,13 @@ template Emitter
   where
     -- Owner co-signs: only a transaction with the owner's authority can create a
     -- contract whose derived address is the owner's — the invariant guardians
-    -- verify by replay, and Canton's msg.sender analog. Also means the operator
-    -- alone cannot archive an emitter (Archive needs all signatories).
-    signatory operator, owner
-    -- Every guardian participant hosts guardianGovernance, so this makes
-    -- guardians informees of each PublishMessage, for every owner.
-    observer guardianGovernance
+    -- verify by replay, and Canton's msg.sender analog.
+    -- SECURITY: guardianGovernance co-signs, so operator and owner together
+    -- cannot create a second 'Emitter' of an issued identity outside
+    -- 'RegisterEmitter' (A14-2). Every guardian participant hosts
+    -- guardianGovernance, so guardians are stakeholders of each PublishMessage;
+    -- the watcher drops a publish where its read-as party is not one.
+    signatory operator, owner, guardianGovernance
     ensure emitterId >= 0 && emitterId <= maxEmitterId
       && sequence >= 0 && sequence <= maxEmitterSequence
 
@@ -583,7 +579,7 @@ template Emitter
     -- (decoded from @exercise_result@ — a wire contract with the Go watcher;
     -- do not change the 'WormholeMessage' shape), so the caller need not
     -- re-resolve the successor off-ledger. The successor is recreated with
-    -- both signatures inherited. Mirrors @Implementation.publishMessage@.
+    -- all three signatures inherited. Mirrors @Implementation.publishMessage@.
     --
     -- The 'messageFee' is charged through the referenced 'CoreState' (EVM parity:
     -- the current fee is read on every call), whose @guardianGovernance@ and
