@@ -1,11 +1,13 @@
 package canton
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
+	"github.com/certusone/wormhole/node/pkg/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,6 +81,99 @@ func TestParseReobserveUpdateIDs(t *testing.T) {
 			for position, updateID := range updateIDs {
 				require.Equal(t, testCase.expectedUpdateIDTexts[position], updateID.String())
 			}
+		})
+	}
+}
+
+func mustParseLocalNetTestUpdateID(t *testing.T, index int) cantonclient.UpdateID {
+	t.Helper()
+	updateID, err := cantonclient.ParseUpdateID(localNetTestUpdateIDText(index))
+	require.NoError(t, err)
+	return updateID
+}
+
+func TestReobservedUpdateTracker(t *testing.T) {
+	firstUpdateID := mustParseLocalNetTestUpdateID(t, 0)
+	secondUpdateID := mustParseLocalNetTestUpdateID(t, 1)
+	unrequestedUpdateID := mustParseLocalNetTestUpdateID(t, 2)
+	testCases := []struct {
+		name                 string
+		requested            []cantonclient.UpdateID
+		recorded             []cantonclient.UpdateID
+		expectedAllObserved  bool
+		expectedErrorMessage string
+	}{
+		{name: "no requests", expectedAllObserved: true},
+		{name: "one of two observed", requested: []cantonclient.UpdateID{firstUpdateID, secondUpdateID},
+			recorded: []cantonclient.UpdateID{firstUpdateID}, expectedAllObserved: false},
+		{name: "one update with two messages", requested: []cantonclient.UpdateID{firstUpdateID, secondUpdateID},
+			recorded: []cantonclient.UpdateID{firstUpdateID, firstUpdateID}, expectedAllObserved: false},
+		{name: "both observed", requested: []cantonclient.UpdateID{firstUpdateID, secondUpdateID},
+			recorded: []cantonclient.UpdateID{firstUpdateID, secondUpdateID}, expectedAllObserved: true},
+		{name: "unrequested id", requested: []cantonclient.UpdateID{firstUpdateID},
+			recorded: []cantonclient.UpdateID{unrequestedUpdateID}, expectedErrorMessage: "not requested"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tracker := newReobservedUpdateTracker(testCase.requested)
+			var recordErr error
+			for _, updateID := range testCase.recorded {
+				if recordErr = tracker.recordReobservation(updateID); recordErr != nil {
+					break
+				}
+			}
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, recordErr, testCase.expectedErrorMessage)
+				return
+			}
+			require.NoError(t, recordErr)
+			require.Equal(t, testCase.expectedAllObserved, tracker.allRequestedUpdatesObserved())
+		})
+	}
+}
+
+func TestDrainPublications(t *testing.T) {
+	writeFailure := errors.New("disk full")
+	testCases := []struct {
+		name                  string
+		queuedCount           int
+		maxDrained            int
+		failOnWrite           int
+		expectedDrainedCount  int
+		expectedRemainingSize int
+		expectedError         error
+	}{
+		{name: "empty channel", queuedCount: 0, maxDrained: 64, expectedDrainedCount: 0, expectedRemainingSize: 0},
+		{name: "three queued", queuedCount: 3, maxDrained: 64, expectedDrainedCount: 3, expectedRemainingSize: 0},
+		{name: "drain bound", queuedCount: 5, maxDrained: 2, expectedDrainedCount: 2, expectedRemainingSize: 3},
+		{name: "writer error", queuedCount: 3, maxDrained: 64, failOnWrite: 2, expectedDrainedCount: 1,
+			expectedRemainingSize: 1, expectedError: writeFailure},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			msgC := make(chan *common.MessagePublication, 64)
+			for sequence := 1; sequence <= testCase.queuedCount; sequence++ {
+				msgC <- &common.MessagePublication{Sequence: uint64(sequence)} // #nosec G115 -- small test count
+			}
+			var writtenSequences []uint64
+			drainedCount, err := drainPublications(msgC, testCase.maxDrained, func(publication *common.MessagePublication) error {
+				if len(writtenSequences)+1 == testCase.failOnWrite {
+					return writeFailure
+				}
+				writtenSequences = append(writtenSequences, publication.Sequence)
+				return nil
+			})
+			if testCase.expectedError != nil {
+				require.ErrorIs(t, err, testCase.expectedError)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, testCase.expectedDrainedCount, drainedCount)
+			require.Len(t, writtenSequences, testCase.expectedDrainedCount)
+			for position, sequence := range writtenSequences {
+				require.Equal(t, uint64(position+1), sequence) // #nosec G115 -- small test count
+			}
+			require.Len(t, msgC, testCase.expectedRemainingSize)
 		})
 	}
 }
