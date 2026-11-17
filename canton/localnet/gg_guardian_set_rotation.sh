@@ -27,10 +27,12 @@ for key_indices in "$old_key_indices" "$new_key_indices"; do
 done
 IFS=, read -ra new_keys <<<"$new_key_indices"
 first_old_key="${old_key_indices%%,*}"
-if [[ "$first_old_key" == "${new_keys[0]}" ]]; then
-  echo "the first old key and the first new key must differ (step 5 puts the old key at index 0)" >&2
-  exit 2
-fi
+for new_key in "${new_keys[@]}"; do
+  if [[ "$first_old_key" == "$new_key" ]]; then
+    echo "the first old key must not be a new key (step 5 signs with it at index 0)" >&2
+    exit 2
+  fi
+done
 new_set_size="${#new_keys[@]}"
 # Wormhole quorum: floor(2n/3) + 1 (sdk/vaa CalculateQuorum).
 new_set_quorum=$((new_set_size * 2 / 3 + 1))
