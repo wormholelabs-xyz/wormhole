@@ -1236,12 +1236,17 @@ Consequences for a watcher pinned to one package id:
   emitters that 0.7.0 created.
 - A dropped exercise uses the emitter sequence number. The ledger keeps it.
 
+The sandbox test `TestCantonWatcherUpgradeWindow` covers these rules. A
+publish under the next core on an emitter that the primary core created shows
+the next package id.
+
 **Dropped-message metric.** The watcher counts each dropped `PublishMessage`
 in `wormhole_canton_unpinned_publish_messages_total`. The
 `executing_package_id` label holds the package id of the event. Each drop also
 writes a WARN log with the update id, the executing package id, and the accepted
 package ids. The watcher still drops the message. Thus the pin stays a security
-boundary.
+boundary. A reobservation request for a dropped message increments the counter
+again.
 
 The counter labels a maximum of 8 package ids. Other package ids use the label
 `other`. A participant can upload a package with the same module and template
@@ -1310,6 +1315,14 @@ The watcher applies these rules:
   dropped-message metric counts it.
 - Reobservation uses the same set of package ids.
 - The heartbeat contract address shows the primary id only.
+- The gauge `wormhole_canton_accepted_package_ids` has one series for each
+  accepted id, with the value 1. The `role` label is `primary` or `next`. The
+  `package_id` label holds the id. Thus the gauge has a maximum of two series.
+- With a next id, the watcher writes a WARN log at startup. The log
+  shows that the upgrade window is open.
+- Outside unsafe dev mode, `NewWatcher` and `Run` return an error for the
+  any-package wildcard.
+- `--cantonPackageIDNext` without `--cantonRPC` stops the guardian at startup.
 
 Two flags give each id one role. Thus a third id has no flag, and a list
 parser is not necessary. To promote the next id, move one value to the other
@@ -1320,37 +1333,57 @@ flag.
 
 **Procedure: upgrade from 0.6.0 to 0.7.0 with a two-package window.**
 
-1. On each guardian, set `--cantonPackageIDNext` to the 0.7.0 package id.
-2. Restart the guardians one at a time. Coordination is not necessary.
-3. Make sure that the startup log of each guardian shows both ids in
+1. Record the ledger end offset of one guardian participant. Step 14 uses
+   this offset on the same participant.
+2. On each guardian, set `--cantonPackageIDNext` to the 0.7.0 package id.
+3. Restart the guardians one at a time. Coordination is not necessary.
+4. Make sure that the startup log of each guardian shows both ids in
    `acceptedPackageIDs`.
-4. Upload the 0.7.0 core DAR and its dependent DARs to all guardian
+5. Make sure that each guardian exports
+   `wormhole_canton_accepted_package_ids{role="next"}` with the 0.7.0 package
+   id.
+6. Continue only when all guardians confirm step 5.
+7. Upload the 0.7.0 core DAR and its dependent DARs to all guardian
    participants.
-5. Vet these DARs on all guardian participants.
-6. Upload and vet the same DARs on the operator participant.
-7. Tell integrators to submit with the 0.7.0 package id.
-8. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
-   pinned to the 0.7.0 package id only.
-9. Continue when the counter shows zero new 0.6.0 publishes.
-10. Unvet the 0.6.0 core DAR and its dependent DARs on all participants in
+8. Vet these DARs on all guardian participants.
+9. Upload and vet the same DARs on the operator participant.
+10. Tell integrators to submit with the 0.7.0 package id.
+11. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
+    pinned to the 0.7.0 package id only.
+12. Continue when the counter shows zero new 0.6.0 publishes.
+13. Unvet the 0.6.0 core DAR and its dependent DARs on all participants in
     one planned window.
-11. On each guardian, set `--cantonPackageID` to the 0.7.0 package id.
-12. On each guardian, remove `--cantonPackageIDNext`.
-13. Restart the guardians one at a time. Coordination is not necessary.
+14. Read the update stream as `guardianGovernance` from the offset of step 1.
+    Find each `PublishMessage` that the 0.6.0 package executed.
+15. For each of these messages, find the VAA by emitter address and sequence.
+16. Send a reobservation request for each message that has no VAA.
+17. Continue only when each 0.6.0 message of step 14 has a VAA.
+18. On each guardian, set `--cantonPackageID` to the 0.7.0 package id.
+19. On each guardian, remove `--cantonPackageIDNext`.
+20. Restart the guardians one at a time. Coordination is not necessary.
 
-> **WARNING:** Do not remove the 0.6.0 id before step 10 is complete on all
-> participants. Each 0.6.0 message from that period is then lost.
+> **WARNING:** Do not do step 7 before all guardians confirm step 5. A
+> guardian without the 0.7.0 id drops each 0.7.0 message.
 
-> **CAUTION:** Until step 10, the guardians sign 0.6.0 messages. The 0.6.0
+> **WARNING:** Do not remove the 0.6.0 id before step 17 is complete. After
+> the removal, reobservation cannot recover a 0.6.0 message.
+
+> **CAUTION:** Until step 13, the guardians sign 0.6.0 messages. The 0.6.0
 > checks apply to these messages. If 0.7.0 corrects a 0.6.0 security defect,
-> do step 10 soon after step 7.
+> do step 13 soon after step 10.
 
-> **NOTE:** Step 1 comes before step 4. Thus no guardian drops a 0.7.0
+> **NOTE:** Step 2 comes before step 7. Thus no guardian drops a 0.7.0
 > message. An id that no participant vets cannot execute a choice.
 
 > **NOTE:** A restarted guardian does not see the messages of its restart
 > period. The other guardians keep the quorum. Reobservation by update id
-> recovers these messages for the restarted guardian.
+> recovers these messages for the restarted guardian. This recovery works
+> only while the executing package id is in the set of that guardian.
+
+> **NOTE:** A reobservation request for a message that the watcher drops also
+> increments `wormhole_canton_unpinned_publish_messages_total`. On a watcher
+> pinned to 0.7.0 only, the requests of step 16 increment the counter. These
+> increments do not show new 0.6.0 publishes.
 
 This procedure removes these blockers of the single-pin procedure:
 
@@ -1361,15 +1394,32 @@ This procedure removes these blockers of the single-pin procedure:
   until the coordinated switch. Here each guardian signs both versions during
   the window.
 - **Coordinated restart.** Each flag change here is a rolling restart. Only
-  the unvet in step 10 needs a planned window.
+  the unvet in step 13 needs a planned window.
 
 These items stay:
 
-- The 0.6.0 checks apply to 0.6.0 messages until the unvet in step 10.
-- To roll back before step 10, tell integrators to use 0.6.0 again.
-- To roll back after step 10, vet 0.6.0 again. Keep the 0.6.0 id in the set,
-  or set it again as the next id. Remove it only after a new unvet.
+- The 0.6.0 checks apply to 0.6.0 messages until the unvet in step 13.
+- To roll back before step 13, tell integrators to use 0.6.0 again.
 - The open item about contracts that 0.6.0 created stays open.
+
+**Rollback after step 13.**
+
+1. If the guardians removed the 0.6.0 id, set it again as the next id on
+   each guardian.
+2. Restart the guardians one at a time.
+3. Make sure that each guardian exports the 0.6.0 id in
+   `wormhole_canton_accepted_package_ids`.
+4. Continue only when all guardians confirm step 3.
+5. Vet 0.6.0 again on all participants.
+6. Remove the 0.6.0 id only after a new unvet of 0.6.0.
+
+> **WARNING:** Do not vet 0.6.0 again before the 0.6.0 id is in the set of
+> each guardian. A guardian without the id drops each 0.6.0 message.
+
+> **CAUTION:** This document does not check that 0.6.0 can use a contract
+> that 0.7.0 wrote last. An example is an `Emitter` that a 0.7.0 publish
+> created again. Do a rollback test on a test network before you use this
+> rollback.
 
 ---
 
