@@ -1178,6 +1178,18 @@ Consequences for a watcher pinned to one package id:
   emitters that 0.7.0 created.
 - A dropped exercise uses the emitter sequence number. The ledger keeps it.
 
+**Dropped-message metric.** The watcher counts each dropped `PublishMessage`
+in `wormhole_canton_unpinned_publish_messages_total`. The
+`executing_package_id` label holds the package id of the event. Each drop also
+writes a WARN log with the update id, the executing package id, and the pinned
+package id. The watcher still drops the message. Thus the pin stays a security
+boundary.
+
+The counter labels a maximum of 8 package ids. Other package ids use the label
+`other`. A participant can upload a package with the same module and template
+names, so the package ids are not under guardian control. Use the WARN log to
+find the package id and update id of an `other` count.
+
 Each informee participant must vet the package that runs the choice.
 `guardianGovernance` is an informee of each `PublishMessage` (§10). Thus a
 package that no guardian participant vets cannot run `PublishMessage`.
@@ -1188,20 +1200,25 @@ submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
 1. Upload and vet the 0.7.0 DAR on all guardian participants.
 2. Upload and vet the 0.7.0 DAR on the operator participant.
 3. Tell integrators to submit with the 0.7.0 package id.
-4. Set `--cantonPackageID` to the 0.7.0 package id on each guardian.
-5. Restart each guardian in one coordinated window.
-6. Send reobservation requests for the 0.7.0 messages of steps 3 to 5.
-7. Unvet 0.6.0 on all guardian participants.
+4. Monitor `wormhole_canton_unpinned_publish_messages_total` on a watcher
+   pinned to the 0.7.0 package id. Continue only when the counter shows zero
+   new 0.6.0 publishes.
+5. Set `--cantonPackageID` to the 0.7.0 package id on each guardian.
+6. Restart each guardian in one coordinated window.
+7. Send reobservation requests for the 0.7.0 messages of steps 3 to 6. The
+   WARN logs of the 0.6.0 watchers give their update ids.
+8. Unvet 0.6.0 on all guardian participants.
 
-> **WARNING:** Do not unvet 0.6.0 before step 5 is complete on all guardians.
+> **WARNING:** Do not unvet 0.6.0 before step 6 is complete on all guardians.
 > A guardian pinned to 0.6.0 then sees no message that it can sign.
 
-> **CAUTION:** Between step 1 and step 5, the watchers drop each 0.7.0
-> message. Reobservation by update id recovers these messages after step 5.
+> **CAUTION:** Between step 1 and step 6, the watchers drop each 0.7.0
+> message. Reobservation by update id recovers these messages after step 6.
 
-> **CAUTION:** Between step 5 and step 7, the watchers drop each 0.6.0
+> **CAUTION:** Between step 6 and step 8, the watchers drop each 0.6.0
 > message. These messages are not recoverable. Their sequence numbers stay
-> unused. Keep this window short.
+> unused. Step 4 makes sure that integrators stopped the use of 0.6.0. Keep
+> this window short.
 
 > **NOTE:** A restarted watcher starts at the ledger end. Messages from the
 > restart window need reobservation requests.
@@ -1209,13 +1226,13 @@ submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
 **Open items.**
 
 - The docs say that vetting applies to the package that created an input
-  contract too. Before step 7, make sure on a test network that contracts that
+  contract too. Before step 8, make sure on a test network that contracts that
   0.6.0 created still work under 0.7.0 after the unvet. These contracts are
   `CoreState`, `EmitterRegistry`, `Emitter`, and the replay contracts.
 - Proposed watcher change, not implemented: accept a set of package ids during
   the migration window. Each guardian accepts 0.6.0 and 0.7.0 before step 1,
-  and removes 0.6.0 after step 7. No message is then lost, and no coordinated
-  restart is necessary. 0.6.0 messages keep the 0.6.0 checks until step 7.
+  and removes 0.6.0 after step 8. No message is then lost, and no coordinated
+  restart is necessary. 0.6.0 messages keep the 0.6.0 checks until step 8.
 
 ---
 
