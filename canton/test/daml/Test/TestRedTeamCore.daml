@@ -13,7 +13,7 @@ import DA.Exception (GeneralError(..), throw)
 import DA.Foldable (forA_)
 import DA.Optional (fromSome)
 import DA.Text qualified as T
-import DA.Time (seconds)
+import DA.Time (microseconds, seconds)
 import Wormhole.Core.Bytes
 import Wormhole.Core.Governance
 import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
@@ -265,8 +265,9 @@ testRedTeamA6QuorumAndSignerOrder = do
   Some feeCoreState <- queryContractId operator feeCoreStateCid
   feeCoreState.messageFee === 7
 
--- | The superseded set verifies application VAAs through the expiry second
--- inclusive (EVM @Messages.sol@: rejects only when @expirationTime < block.timestamp@).
+-- | The superseded set verifies application VAAs through the whole expiry second
+-- (EVM @Messages.sol@: rejects only when @expirationTime < block.timestamp@,
+-- with @block.timestamp@ in whole seconds).
 testRedTeamA6ExpiredGuardianSet : Script ()
 testRedTeamA6ExpiredGuardianSet = do
   (operator, _, coreStateCid) <- setup
@@ -276,7 +277,10 @@ testRedTeamA6ExpiredGuardianSet = do
   passTime (seconds guardianSetExpirySeconds)
   verifiedAtExpiry <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
   verifiedAtExpiry.guardianSetIndex === 0
-  passTime (seconds 1)
+  passTime (microseconds 999999)
+  verifiedAtLastMicrosecond <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtLastMicrosecond.guardianSetIndex === 0
+  passTime (microseconds 1)
   checkVerifyRejectedWith "A6 VAA signed by an expired set" "guardian set has expired"
     operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
 
@@ -314,9 +318,9 @@ testRedTeamA9MalformedGovernancePayloads = do
     operator coreStateCid rtSetMessageFeeWrongModule set0PubKeys
   checkGovernanceRejectedWith "A9 RecoverChainId action" "unsupported action 5"
     operator coreStateCid rtRecoverChainIDUnsupported set0PubKeys
-  checkGovernanceRejectedWith "A9 empty governance payload" "sliceBytes"
+  checkGovernanceRejectedWith "A9 empty governance payload" "packet must be at least 35 bytes"
     operator coreStateCid rtGovernanceEmptyPayload set0PubKeys
-  checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "sliceBytes"
+  checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "ContractUpgrade packet must be 67 bytes"
     operator coreStateCid rtContractUpgradeTruncated set0PubKeys
   checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" ""
     operator coreStateCid rtSetMessageFeeOverflowsInt64 set0PubKeys
@@ -377,15 +381,17 @@ testParseGovernanceRequiresExactPacketLength = do
         ]
       rejectedCases =
         [ ("ContractUpgrade plus one byte", "ContractUpgrade packet must be 67 bytes", contractUpgrade <> "00")
-        , ("ContractUpgrade minus one byte", "sliceBytes", T.take (66 * 2) contractUpgrade)
+        , ("ContractUpgrade minus one byte", "ContractUpgrade packet must be 67 bytes", T.take (66 * 2) contractUpgrade)
+        , ("header minus one byte", "packet must be at least 35 bytes", T.take (34 * 2) contractUpgrade)
+        , ("GuardianSetUpgrade without its key count", "GuardianSetUpgrade packet must be at least 40 bytes", T.take (39 * 2) (guardianSetUpgradePacket 1 []))
         , ("GuardianSetUpgrade plus one byte", "GuardianSetUpgrade packet must be 60 bytes", guardianSetUpgradePacket 1 [guardianKeyA] <> "00")
         , ("GuardianSetUpgrade plus one undeclared key", "GuardianSetUpgrade packet must be 60 bytes", guardianSetUpgradePacket 1 [guardianKeyA, guardianKeyB])
-        , ("GuardianSetUpgrade missing a declared key", "sliceBytes", guardianSetUpgradePacket 2 [guardianKeyA])
+        , ("GuardianSetUpgrade missing a declared key", "GuardianSetUpgrade packet must be 80 bytes", guardianSetUpgradePacket 2 [guardianKeyA])
         , ("SetMessageFee plus one byte", "SetMessageFee packet must be 67 bytes", setMessageFee <> "00")
         , ("SetMessageFee plus one nibble", "SetMessageFee packet must be 67 bytes", setMessageFee <> "0")
-        , ("SetMessageFee minus one byte", "sliceBytes", T.take (66 * 2) setMessageFee)
+        , ("SetMessageFee minus one byte", "SetMessageFee packet must be 67 bytes", T.take (66 * 2) setMessageFee)
         , ("TransferFees plus one byte", "TransferFees packet must be 99 bytes", transferFees <> "00")
-        , ("TransferFees minus one byte", "sliceBytes", T.take (98 * 2) transferFees)
+        , ("TransferFees minus one byte", "TransferFees packet must be 99 bytes", T.take (98 * 2) transferFees)
         ]
   forA_ acceptedCases \(packet, expectedAction) -> do
     parsedAction <- submit parser do exerciseCmd parserCid ParseGovernancePacket with packet
@@ -482,6 +488,7 @@ testRedTeamA9PublishFieldBoundaries = do
         , ("uppercase payload", "payload is not lowercase hex", 0, "AB", 0)
         , ("0x-prefixed payload", "payload is not lowercase hex", 0, "0x00", 0)
         , ("non-hex payload", "payload is not lowercase hex", 0, "zz", 0)
+        , ("751-byte non-hex payload", "payload exceeds 750 bytes", 0, mconcat (replicate 751 "zz"), 0)
         , ("nonce 2^32", "nonce exceeds uint32", 4294967296, "00", 0)
         , ("nonce -1", "nonce is negative", -1, "00", 0)
         , ("consistency level 256", "consistency level exceeds uint8", 0, "00", 256)
