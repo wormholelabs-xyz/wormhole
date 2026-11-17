@@ -456,7 +456,9 @@ testGuardianSetUpgradeExpiry = do
     exerciseCmd newCsId SubmitGovernanceVAA with
       encodedVAA = set0SetFeeZeroVAA
       pubKeys = [(0, devnetGuardianPubKey)]
-  passTime (seconds (guardianSetExpirySeconds - 1))
+  -- EVM boundary: accepted at exactly the expiry second, rejected one second later.
+  passTime (seconds guardianSetExpirySeconds)
+  getTime >>= (=== addRelTime upgradedAt (seconds guardianSetExpirySeconds))
   _ <- submit operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
   passTime (seconds 1)
   submitMustFail operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
