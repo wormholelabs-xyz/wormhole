@@ -87,6 +87,7 @@ func (wc *WatcherConfig) Create(
 	if err != nil {
 		return nil, nil, err
 	}
+	// Redundant with the PackageID check above.
 	if !devMode && acceptedPackageIDs.MatchesAnyPackage() {
 		return nil, nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
 	}

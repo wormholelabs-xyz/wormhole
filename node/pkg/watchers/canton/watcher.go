@@ -440,7 +440,7 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 }
 
 func (e *Watcher) Run(ctx context.Context) error {
-	// Defence in depth: NewWatcher already checked; a Watcher built any other way is checked here.
+	// Redundant with NewWatcher; covers a Watcher literal.
 	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode); err != nil {
 		return err
 	}
