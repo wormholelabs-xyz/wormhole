@@ -93,7 +93,7 @@ sig_json() {
 }
 
 # --- Build the create-CoreState command, matching mkInitialCoreState's devnet
-# values (Test.TestCore.setup / TestCore.daml). ---
+# values (Test.TestCore.setup). ---
 COMMAND_ID="guardian-governance-genesis-${MODE}-$$"
 CREATE_ARGS="$(jq -n \
   --arg operator "${OP_PARTY}" \
@@ -105,8 +105,10 @@ CREATE_ARGS="$(jq -n \
     governanceChainId: "1",
     governanceContract: "0000000000000000000000000000000000000000000000000000000000000004",
     guardianSetIndex: "0",
-    guardianSets: [["0", {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"]}]],
+    guardianSets: [["0", {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"], "expirationTime": null}]],
     messageFee: "0",
+    feeInstrument: {admin: $gg, id: "UNUSED"},
+    feeRecipient: $gg,
     consumedGovernance: {"map": []}
   }')"
 
