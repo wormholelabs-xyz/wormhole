@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Create the NttGovernance root (signatories Operator and guardianGovernance, 2-of-3 owner signatures)
-# and the canonical CoinFactory (admin guardianGovernance) for burn/mint deployments.
+# Create the NttGovernance root and the canonical guardianGovernance CoinFactory, or keep the existing ones.
 # Usage: ntt_governance.sh
 # Precondition: gg_genesis.sh and ntt_upload_dars.sh ran. Output: $LOCALNET_STATE_DIR/ntt-contracts.json.
-# A second run keeps the existing root and factory: guardians sign at most one root per operator.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"

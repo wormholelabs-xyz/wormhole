@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# Run the Wormhole NTT layer end to end on LocalNet:
-#   1. Upload the pinned ntt DAR on all three participants. Vet its packages that are still unvetted.
-#   2. Create the NttGovernance root and the canonical CoinFactory (guardianGovernance ceremony).
-#   3. Start the guardian watcher harness on app-provider as guardianGovernance.
-#   4. Burn/mint deployment: register, set the peer, relay a Mint, burn.
-#   5. Lock/unlock deployment of Canton Coin: register, set the peer, lock, relay a Release.
-#   6. Stop the watcher and check the live observations. Reobserve the two outbound transfers.
+# Run the NTT steps of README.md "NTT end-to-end run" in sequence.
 # Usage: ntt_e2e.sh
-# Precondition: LocalNet runs, gg_host.sh and gg_genesis.sh ran, and the NTT DARs are built.
-# The pins in ntt_lib.sh name the wormhole-core and ntt packages.
+# Precondition: LocalNet runs, gg_host.sh and gg_genesis.sh ran, and the NTT DARs at the pins of ntt_lib.sh are built.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR

@@ -11,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Helpers of the LocalNet harness (watcher_localnet_test.go). They carry no build tag, so CI tests them.
+// Helpers of the LocalNet harness (watcher_localnet_test.go). CI builds and tests this file.
 
 const localNetMaxReobservations = 64
 

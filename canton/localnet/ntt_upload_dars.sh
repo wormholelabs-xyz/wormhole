@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Upload the NTT DAR to all three LocalNet participants. On each participant, vet the DAR packages that are
-# still unvetted. guardianGovernance hosts must vet each NTT package.
-# Do not use this script to vet wormhole-core. upload_dars.sh (from gg_host.sh) vets it.
-# The script stops before the upload if a DAR differs from the pins in ntt_lib.sh, if the pinned wormhole-core
-# is unvetted on a participant, or if a participant vets a newer wormhole-core version.
+# Upload the pinned NTT DAR to all three LocalNet participants and vet its unvetted packages.
+# Stops if a DAR differs from the pins in ntt_lib.sh, or if a participant vets a wormhole-core other than the pin
+# as its newest core. Do not use this script to vet wormhole-core; upload_dars.sh vets it.
 # Usage: ntt_upload_dars.sh
-# Precondition: gg_host.sh ran; the NTT repo checkout (NTT_REPO_DIR) has a built ntt DAR at the pinned version.
+# Precondition: gg_host.sh ran; NTT_REPO_DIR (default ../ntt) has the built ntt DAR.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"

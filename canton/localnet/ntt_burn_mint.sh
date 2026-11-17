@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# NTT burn/mint deployment of a guardianGovernance-administered CIP-56 token on LocalNet:
-#   1. Allocate an external deployment admin on app-provider.
-#   2. RegisterManager (BurnMint) with the admin and the guardianGovernance ceremony. It publishes TransceiverInit.
-#   3. SetPeer for the Ethereum peer (chain 2). It publishes TransceiverRegistration.
-#   4. A user on app-user creates a DepositPreapproval.
-#   5. A relayer on sv delivers a guardian-signed inbound transfer VAA with Mint. The user receives the token.
-#      Negative checks: the same Mint VAA again, and a Mint VAA with a key outside the guardian set.
-#   6. The user burns part of the token with Transfer. The transceiver publishes the outbound NTT message.
+# Run an NTT burn/mint deployment of a guardianGovernance-administered CIP-56 token on LocalNet.
+# The "== N." lines of the output name the steps. README.md "NTT end-to-end run" describes them.
 # Usage: ntt_burn_mint.sh
 # Precondition: ntt_governance.sh ran. Output: the "burnMint" entry of $LOCALNET_STATE_DIR/ntt-contracts.json.
 set -euo pipefail

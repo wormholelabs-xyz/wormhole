@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
-# NTT lock/unlock deployment of Canton Coin (Amulet) on LocalNet. The deployment admin is the custodian.
-#   1. Onboard wallet users: the custodian (app-provider), a locker and a recipient (app-user). Each taps Canton Coin.
-#      The custodian and the recipient create Amulet TransferPreapprovals through the wallet API.
-#   2. RegisterManager (LockUnlock) by the custodian alone, with the Amulet registry transfer factory.
-#   3. SetPeer for the Ethereum peer (chain 2).
-#   4. The locker locks Canton Coin with Transfer. The custodian receives it and the LockedLedger is credited.
-#   5. A relayer on sv delivers a guardian-signed inbound transfer VAA with Release. The recipient receives
-#      Canton Coin through its TransferPreapproval and the LockedLedger is debited.
-#      Negative check: the same Release VAA again.
+# Run an NTT lock/unlock deployment of Canton Coin (Amulet) on LocalNet. The deployment admin is the custodian.
+# The "== N." lines of the output name the steps. README.md "NTT end-to-end run" describes them.
 # Usage: ntt_lock_unlock.sh
 # Precondition: ntt_governance.sh ran. Output: the "lockUnlock" entry of $LOCALNET_STATE_DIR/ntt-contracts.json.
 set -euo pipefail
