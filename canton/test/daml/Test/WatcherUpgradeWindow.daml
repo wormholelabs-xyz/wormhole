@@ -1,0 +1,56 @@
+-- | Ledger fixture for the Go watcher upgrade-window integration test
+-- (node/pkg/watchers/canton/watcher_upgrade_window_integration_test.go). The
+-- test runs 'integrationUpgradeWindowPublish' once from this DAR and once from
+-- a copy built against the next core version, so each publish executes under a
+-- different wormhole-core package id.
+module Test.WatcherUpgradeWindow where
+
+import Daml.Script
+import DA.Assert ((===))
+import Wormhole.Core.Bytes
+import Test.TestCore (registerEmitter, publishVia)
+import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
+
+data UpgradeWindowPublishInput = UpgradeWindowPublishInput with
+    bridge : RealBridge
+    ownerHint : Text
+  deriving (Eq, Show)
+
+data UpgradeWindowPublish = UpgradeWindowPublish with
+    owner : Party
+    emitterId : Int
+    sequence : Int
+  deriving (Eq, Show)
+
+upgradeWindowNonce : Int
+upgradeWindowNonce = 43
+
+upgradeWindowPayload : Bytes
+upgradeWindowPayload = "55667788"
+
+-- | Registers a fresh emitter for a new owner on the real bridge and publishes once.
+integrationUpgradeWindowPublish : UpgradeWindowPublishInput -> Script UpgradeWindowPublish
+integrationUpgradeWindowPublish input = do
+  let operator = input.bridge.operator
+  owner <- allocateParty input.ownerHint
+  emitterCid <- registerEmitter operator owner
+  (_, message) <- publishVia operator input.bridge.coreStateCid owner emitterCid
+                    upgradeWindowNonce upgradeWindowPayload 0
+  message.owner === owner
+  pure UpgradeWindowPublish with
+    owner
+    emitterId = message.emitterId
+    sequence = message.sequence
+
+-- | Runs the fixture twice on one bridge so `dpm test` covers it.
+testUpgradeWindowFixture : Script ()
+testUpgradeWindowFixture = do
+  bridge <- integrationGovernanceReaderSetup
+  primaryPublish <- integrationUpgradeWindowPublish UpgradeWindowPublishInput with
+    bridge, ownerHint = "PrimaryCoreOwner"
+  nextPublish <- integrationUpgradeWindowPublish UpgradeWindowPublishInput with
+    bridge, ownerHint = "NextCoreOwner"
+  primaryPublish.emitterId === 0
+  nextPublish.emitterId === 1
+  primaryPublish.sequence === 0
+  nextPublish.sequence === 0
