@@ -49,6 +49,17 @@ check_case "created_contract_argument of one created event" 0 '{"amount":"2.5"}'
 check_case "created_contract_argument with no match" 5 - "found 0" \
   created_contract_argument "$CREATED_COIN_TRANSACTION" ":Wormhole.Ntt.Ledger:LockedLedger"
 
+readonly MANAGER_TRANSFER_EVENT='{"ExercisedEvent": {"templateId": "pkg:Wormhole.Ntt.Manager:NttManager", "choice": "Transfer", "exerciseResult": {"sequence": "2"}}}'
+readonly FACTORY_TRANSFER_EVENT='{"ExercisedEvent": {"templateId": "pkg:Splice.Api.Token.TransferInstructionV1:TransferFactory", "choice": "Transfer", "exerciseResult": {"output": "completed"}}}'
+check_case "exercise_result with one match" 0 '{"sequence":"2"}' - \
+  exercise_result "{\"events\": [$MANAGER_TRANSFER_EVENT]}" ":Wormhole.Ntt.Manager:NttManager" Transfer
+check_case "exercise_result skips the same choice on another template" 0 '{"sequence":"2"}' - \
+  exercise_result "{\"events\": [$FACTORY_TRANSFER_EVENT, $MANAGER_TRANSFER_EVENT]}" ":Wormhole.Ntt.Manager:NttManager" Transfer
+check_case "exercise_result with two matches" 5 - "found 2" \
+  exercise_result "{\"events\": [$MANAGER_TRANSFER_EVENT, $MANAGER_TRANSFER_EVENT]}" ":Wormhole.Ntt.Manager:NttManager" Transfer
+check_case "exercise_result with no match" 5 - "found 0" \
+  exercise_result "{\"events\": [$FACTORY_TRANSFER_EVENT]}" ":Wormhole.Ntt.Manager:NttManager" Transfer
+
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
 readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
