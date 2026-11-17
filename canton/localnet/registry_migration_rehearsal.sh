@@ -16,6 +16,8 @@
 #                  operator with two of three owner keys creates it with nextId = firstId.
 #   register       A new external party registers on the 0.8.0 registry and publishes. Each v8-<host> observes the
 #                  message with emitterId firstId. The scan then passes with one active registry.
+#   scan-duplicate Operator and the new owner create a second Emitter with the same id (A14-2). The scan fails. They
+#                  archive it. The scan passes.
 # Usage: registry_migration_rehearsal.sh <step>|all
 # Environment: LOCALNET_SCRIPTS_DIR is the canton/localnet directory that holds ntt_lib.sh and watcher_harness_lib.sh
 # (default: this directory). NTT_V8_DAR is the ntt 0.4.0 DAR built on core 0.8.0.
@@ -427,6 +429,7 @@ step_register() {
   [[ "$(jq -r .emitterId <<<"$emitter_argument")" == "$first_id" ]] || fail "the new emitter has id $(jq -r .emitterId <<<"$emitter_argument")"
   [[ "$(jq -r '.events[] | .ExercisedEvent? // empty | select(.choice == "RegisterEmitter") | .templateId | split(":")[0]' <<<"$transaction")" == "$CORE_V8_PACKAGE_ID" ]] \
     || fail "RegisterEmitter did not run under 0.8.0"
+  record_state migrationEmitterAddress "$(jq -c .emitterAddress <<<"$emitter_argument")"
   echo "  PASS: RegisterEmitter under 0.8.0 created emitter id $first_id, address $(jq -r .emitterAddress <<<"$emitter_argument")"
   core_state_cid="$(core_contract_id coreState)"
   transaction="$(submit_interactive "registry-migration-publish-$(date +%s)" "$(jq -n --arg p "$owner_party" '[$p]')" \
@@ -450,6 +453,29 @@ step_register() {
   scan_summary="$(run_scan_on "$SUBMITTING_VALIDATOR" 1)" || fail "the post-ceremony scan failed"
   [[ "$(jq -r .firstId <<<"$scan_summary")" == "$((first_id + 1))" ]] || fail "post-ceremony scan: $scan_summary"
   echo "  PASS: post-ceremony scan with one active registry: $(jq -c '{historyMaxEmitterId, activeRegistries, activeDuplicates, firstId}' <<<"$scan_summary")"
+}
+
+step_scan_duplicate() {
+  echo "### 9. Scan negative: a colluding operator and owner duplicate an active Emitter (A14-2); the scan fails"
+  local first_id owner_party act_as signers transaction duplicate_cid scan_status=0 scan_summary
+  first_id="$(read_state firstId)"
+  owner_party="$(read_state migrationOwner | jq -r .partyId)"
+  act_as="$(jq -n --arg op "$OPERATOR_PARTY" --arg p "$owner_party" '[$op, $p]')"
+  signers="$(jq -n --argjson operator "$(operator_signers_json)" --argjson owner "$(migration_owner_signers_json)" '$operator * $owner')"
+  transaction="$(submit_interactive "registry-migration-duplicate-$(date +%s)" "$act_as" \
+    "$(create_command "$CORE_V8_PACKAGE_ID$EMITTER_SUFFIX" "$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" --arg p "$owner_party" \
+      --arg id "$first_id" --arg address "$(read_state migrationEmitterAddress)" \
+      '{operator: $op, guardianGovernance: $gg, owner: $p, emitterId: $id, emitterAddress: $address, sequence: "0"}')")" "$signers")"
+  duplicate_cid="$(created_contract_id "$transaction" "$EMITTER_SUFFIX")"
+  echo "  operator and owner created a duplicate Emitter id $first_id: ${duplicate_cid:0:24}"
+  scan_summary="$(run_scan_on "$SUBMITTING_VALIDATOR" 1 2> "$gg_work_dir/scan-duplicate.err")" || scan_status=$?
+  [[ "$scan_status" -eq 1 ]] || fail "the scan exited $scan_status with a duplicate active Emitter: $scan_summary"
+  grep -qF "duplicate (operator, owner, emitterId)" "$gg_work_dir/scan-duplicate.err" || fail "the scan failure does not name the duplicate"
+  echo "  PASS: the scan failed: $(grep -F 'emitter_id_scan: FAIL' "$gg_work_dir/scan-duplicate.err"); activeDuplicates $(jq -c '.activeDuplicates | map({emitterId, contractIds: (.contractIds | map(.[0:16]))})' <<<"$scan_summary")"
+  submit_interactive "registry-migration-duplicate-archive-$(date +%s)" "$act_as" \
+    "$(exercise_command "$CORE_V8_PACKAGE_ID$EMITTER_SUFFIX" "$duplicate_cid" Archive '{}')" "$signers" > /dev/null
+  scan_summary="$(run_scan_on "$SUBMITTING_VALIDATOR" 1)" || fail "the scan failed after the archive of the duplicate"
+  echo "  PASS: after the archive the scan passes: $(jq -c '{activeDuplicates, firstId}' <<<"$scan_summary")"
 }
 
 copy_harness_evidence() {
@@ -477,6 +503,7 @@ case "${1:-}" in
   scan) step_scan ;;
   ceremony) step_ceremony ;;
   register) step_register ;;
+  scan-duplicate) step_scan_duplicate ;;
   all)
     step_prepare
     step_vet_v8
@@ -486,9 +513,10 @@ case "${1:-}" in
     step_scan
     step_ceremony
     step_register
+    step_scan_duplicate
     ;;
   *)
-    echo "usage: registry_migration_rehearsal.sh prepare|vet-v8|cutover|switch-pin|unvet-v7|scan|ceremony|register|all" >&2
+    echo "usage: registry_migration_rehearsal.sh prepare|vet-v8|cutover|switch-pin|unvet-v7|scan|ceremony|register|scan-duplicate|all" >&2
     exit 2
     ;;
 esac
