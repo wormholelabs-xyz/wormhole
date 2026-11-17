@@ -7,10 +7,12 @@
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
 #     2-of-3 party signing keys.
-#   - 2-of-3 co-signs `CoreState` + `EmitterRegistry` genesis via interactive
-#     submission: succeeds.
-#   - 1-of-3 co-signs: rejected (threshold enforced).
-#   - 0-of-3 (operator alone): rejected (anti-forgery -- the crux property).
+#   - 1-of-3 co-signs: `CoreState` rejected (threshold enforced), and the
+#     script stops before the `EmitterRegistry` create.
+#   - 0-of-3 (operator alone): the same (anti-forgery -- the crux property).
+#   - 2-of-3 co-signs `CoreState` alone (GENESIS_LAST_CREATE=CoreState): commits.
+#   - A rerun skips the active `CoreState` and commits `EmitterRegistry`.
+#   - A second rerun skips both.
 #
 # Usage: test_guardian_governance.sh
 #   Assumes `dpm sandbox` is NOT already running on :6865/:6864 -- this script
@@ -165,28 +167,50 @@ fi
 export GG_ARTIFACTS_FILE
 export GG_OPERATOR_ARTIFACTS_FILE="${OP_ARTIFACTS_FILE}"
 
-log "genesis: 2-of-3 (happy path, expect success)"
-if "${SCRIPT_DIR}/genesis_guardian_governance.sh" happy > "${WORK_DIR}/genesis_happy.log" 2>&1; then
-  pass "2-of-3 co-signed CoreState genesis succeeded"
-else
-  fail "2-of-3 co-signed CoreState genesis was rejected"
-  cat "${WORK_DIR}/genesis_happy.log"
-fi
-
-log "genesis: 1-of-3 (expect rejection)"
-if "${SCRIPT_DIR}/genesis_guardian_governance.sh" threshold > "${WORK_DIR}/genesis_threshold.log" 2>&1; then
-  fail "1-of-3 co-signed CoreState genesis was accepted (threshold not enforced!)"
-else
-  pass "1-of-3 co-signed CoreState genesis was rejected"
-fi
-
-log "genesis: 0-of-3 / operator-only (anti-forgery, expect rejection)"
-if "${SCRIPT_DIR}/genesis_guardian_governance.sh" forge > "${WORK_DIR}/genesis_forge.log" 2>&1; then
-  fail "operator-only CoreState genesis was accepted (forgery not blocked!)"
-else
-  pass "operator-only CoreState genesis was rejected (forgery blocked)"
-fi
-
+# Columns: mode | GENESIS_LAST_CREATE | expected exit status | CoreState result | EmitterRegistry result
+# ("-": no RESULT line) | rejection reason ("-" for none) | description. The rows run in order on one ledger.
+GENESIS_CASES=(
+  "threshold|EmitterRegistry|1|rejected|-|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for guardianGovernance::|1-of-3 co-signed genesis (threshold)"
+  "forge|EmitterRegistry|1|rejected|-|The following actAs parties did not provide an external signature: guardianGovernance::|operator-only genesis (anti-forgery)"
+  "happy|CoreState|0|committed|-|-|2-of-3 co-signed CoreState alone"
+  "happy|EmitterRegistry|0|exists|committed|-|2-of-3 rerun creates only the missing EmitterRegistry"
+  "happy|EmitterRegistry|0|exists|exists|-|2-of-3 rerun creates nothing"
+)
+for genesis_case_index in "${!GENESIS_CASES[@]}"; do
+  IFS='|' read -r genesis_mode last_create expected_status core_state_result registry_result rejection_reason description \
+    <<<"${GENESIS_CASES[${genesis_case_index}]}"
+  genesis_log="${WORK_DIR}/genesis_${genesis_case_index}_${genesis_mode}.log"
+  log "genesis: ${description}, expect exit ${expected_status}"
+  GENESIS_LAST_CREATE="${last_create}" "${SCRIPT_DIR}/genesis_guardian_governance.sh" "${genesis_mode}" > "${genesis_log}" 2>&1
+  genesis_status=$?
+  if [ "${genesis_status}" -eq "${expected_status}" ]; then
+    pass "${description}: exit ${genesis_status}"
+  else
+    fail "${description}: exit ${genesis_status}, expected ${expected_status}"
+    cat "${genesis_log}"
+  fi
+  for genesis_template_result in "CoreState|${core_state_result}" "EmitterRegistry|${registry_result}"; do
+    IFS='|' read -r genesis_template expected_result <<<"${genesis_template_result}"
+    actual_results="$(grep -E "^RESULT ${genesis_template} " "${genesis_log}" | xargs)"
+    expected_results="-"
+    [ "${expected_result}" = "-" ] || expected_results="RESULT ${genesis_template} ${expected_result}"
+    [ -n "${actual_results}" ] || actual_results="-"
+    if [ "${actual_results}" = "${expected_results}" ]; then
+      pass "${description}: ${genesis_template} ${expected_result}"
+    else
+      fail "${description}: ${genesis_template} gave '${actual_results}', expected '${expected_results}'"
+      grep -E 'RESULT|failed|HTTP|genesis:' "${genesis_log}" | head -n 10
+    fi
+  done
+  if [ "${rejection_reason}" != "-" ]; then
+    rejection_reason_count="$(grep -cF -- "${rejection_reason}" "${genesis_log}")"
+    if [ "${rejection_reason_count}" = "1" ]; then
+      pass "${description}: the rejection gives: ${rejection_reason}"
+    else
+      fail "${description}: ${rejection_reason_count} of 1 rejection gives: ${rejection_reason}"
+    fi
+  fi
+done
 echo
 if [ "${FAILURES}" -eq 0 ]; then
   log "ALL CHECKS PASSED"

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"testing"
 	"time"
 
@@ -140,6 +141,19 @@ func generateAddressVectorHex(t *testing.T) string {
 	emitterAddress := crypto.Keccak256(preimage)
 	require.Len(t, emitterAddress, 32)
 	return hex.EncodeToString(emitterAddress)
+}
+
+const damlCoreStatePath = "../../../canton/core/daml/Wormhole/Core/State.daml"
+
+var damlMaxEmitterIDPattern = regexp.MustCompile(`(?m)^maxEmitterId = ([0-9]+)$`)
+
+// MaxEmitterID must equal Wormhole.Core.State.maxEmitterId. Run with -count=1 (see the file header).
+func TestMaxEmitterIDMatchesDaml(t *testing.T) {
+	damlSource, err := os.ReadFile(damlCoreStatePath)
+	require.NoError(t, err)
+	matches := damlMaxEmitterIDPattern.FindAllSubmatch(damlSource, -1)
+	require.Len(t, matches, 1)
+	require.Equal(t, strconv.FormatUint(MaxEmitterID, 10), string(matches[0][1]))
 }
 
 func TestCantonDamlFixtures(t *testing.T) {

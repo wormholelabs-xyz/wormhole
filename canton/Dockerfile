@@ -40,6 +40,17 @@ COPY test-lookalike ./test-lookalike
 # test/.daml/dist/wormhole-core-test-0.1.0.dar (which packs core's DALFs).
 RUN dpm install "${DAML_SDK_VERSION}" && dpm build --all
 
+# Go toolchain for the watcher sandbox tests; same image digest as node/Dockerfile.
+FROM docker.io/golang:1.25.10-bookworm@sha256:154bd7001b6eb339e88c964442c0ad6ed5e53f09844cc818a41ce4ecb3ce3b43 AS go-toolchain
+
+# Runs `go test -tags integration ./pkg/watchers/canton/...` with dpm, the SDK,
+# and a JDK. CI mounts the repository at /src; go.sum pins every module.
+FROM build AS watcher-integration
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}" GOFLAGS=-mod=readonly GOTOOLCHAIN=local
+
 FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS canton
 ARG DAML_SDK_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \

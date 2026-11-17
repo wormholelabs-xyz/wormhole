@@ -40,6 +40,8 @@ func publishMessageEvent(packageID string, sequence int64) *apiv2.Event {
 		TemplateId:     &apiv2.Identifier{PackageId: packageID, ModuleName: "Wormhole.Core.State", EntityName: "Emitter"},
 		Choice:         "PublishMessage",
 		ExerciseResult: tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{"sequence": int64Val(sequence)})),
+		Consuming:      true,
+		AcsDelta:       true,
 	}}}
 }
 

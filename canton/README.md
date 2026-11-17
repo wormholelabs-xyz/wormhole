@@ -183,13 +183,14 @@ template CoreState
 ```
 
 **Guardian visibility.** Every guardian participant hosts `guardianGovernance`
-(§10), so guardians see what that party sees: `CoreState` as a signatory, and
-every `Emitter` as a template `observer` (§4.2). The ledger-model rule that makes
+(§10), so guardians see what that party sees: `CoreState` and every `Emitter`
+as a signatory (§4.2). The ledger-model rule that makes
 this sufficient: **informees of a _consuming_ exercise include the contract's
 stakeholders**. `SubmitGovernanceVAA` and `PublishMessage` are both consuming, so
 guardians see every governance transition and the full message surface;
-nonconsuming `ParseAndVerifyVAA` (§4.3) is a pure read. Observing an `Emitter`
-gives `guardianGovernance` no authority over it (`TestGuardianVisibility`).
+nonconsuming `ParseAndVerifyVAA` (§4.3) is a pure read. Its `Emitter` signature
+gives `guardianGovernance` no publish or archive authority alone: each also
+needs the owner (`TestGuardianVisibility`).
 
 Every state-mutating choice is `controller`-checked (controller `operator`),
 archives the current `CoreState`, and `create`s the next one with updated fields.
@@ -264,9 +265,13 @@ template EmitterRegistry with
     signatory operator, guardianGovernance
                                   -- gg co-signs: the operator alone cannot reset
                                   -- nextId (A14-3)
+    ensure nextId >= 0 && nextId <= maxEmitterId + 1      -- maxEmitterId = 2^53 - 1
+      && registrationFee >= 0 && registrationFee <= maxRegistrationFee
     -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
     --   with requester, payer : Party; coreStateCid, feeAllocation : Optional ...
+    --        expectedGuardianGovernance : Optional Party -- Some gg pins the registry
     --   controller requester, payer -- operator + gg authority inherited; no crank
+    --   returns (successorRegistryCid, emitterCid)
     -- choice SetRegistrationFee : ContractId EmitterRegistry
     --   with newRegistrationFee : Int
     --   controller operator, guardianGovernance -- keeps nextId
@@ -274,21 +279,38 @@ template EmitterRegistry with
 template Emitter
   with
     operator           : Party
-    guardianGovernance : Party    -- fee-custody anchor; observer
+    guardianGovernance : Party    -- fee-custody anchor; co-signer
     owner              : Party
     emitterId          : Int      -- registry-allocated
     emitterAddress     : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
     sequence           : Int      -- next sequence to assign (per-emitter)
   where
-    signatory operator, owner   -- owner co-signs: the msg.sender analog
-    observer guardianGovernance -- guardians see PublishMessage (consuming)
+    signatory operator, owner, guardianGovernance
+                                -- owner co-signs: the msg.sender analog
+                                -- gg co-signs: no second Emitter of an issued
+                                -- identity outside RegisterEmitter (A14-2)
+    ensure emitterId >= 0 && emitterId <= maxEmitterId
+      && sequence >= 0 && sequence <= maxEmitterSequence
 ```
 
 `RegisterEmitter` copies the registry's `guardianGovernance` onto the created
-`Emitter`. Because `PublishMessage` is consuming, `guardianGovernance` is an
-informee of every publish exercise (and its `WormholeMessage` result) plus the
-sequence-bumped successor `Emitter` create — for every owner, with no authority
-over the emitter (§4.1, §10).
+`Emitter`. `guardianGovernance` is a signatory of every `Emitter`, thus a
+stakeholder of every publish exercise (and its `WormholeMessage` result) and of
+the sequence-bumped successor `Emitter` create, for every owner (§4.1, §10).
+`guardianGovernance` alone cannot publish or archive: each needs the owner too.
+
+The watcher accepts a consuming `PublishMessage` event only if its read-as
+party is a stakeholder of the exercised `Emitter`. `acs_delta` set shows this
+for an `Emitter` that existed before the transaction. For an `Emitter` that the
+same transaction creates, `acs_delta` is false: then the `CreatedEvent` of that
+contract id in the transaction must be of the pinned package and must list the
+read-as party as a signatory. An exercise that `guardianGovernance` only
+witnesses, for example a publish on an `Emitter` of a registry under another
+`guardianGovernance` nested in a contract that the real party observes, is
+dropped. Each drop
+increments `wormhole_canton_publish_without_read_party_stakeholder_total` and
+writes a WARN log with the update id. The watcher also rejects an `emitterId`
+above `maxEmitterId` (2^53 - 1), so every off-ledger tool reads ids exactly.
 
 `guardianGovernance` is a signatory of the registry. Thus its hosting
 participants confirm each `RegisterEmitter`, and a registration needs the
@@ -323,7 +345,9 @@ invariant guardians verify — "the transaction is Daml-valid under the vetted
 package" — with no bespoke watcher logic (see [§10](#10-trust-model--deployment-topology)).
 Registry-allocated ids give per-owner uniqueness and let one party hold **many**
 emitters, matching Sui's multiple `EmitterCap`s. `guardianGovernance` co-signs
-the registry, so the operator alone cannot reset the id sequence (A14-3).
+the registry, so the operator alone cannot reset the id sequence (A14-3). It
+also co-signs each `Emitter`, so the operator and an owner together cannot
+rewind an emitter of that owner (A14-2).
 
 Publishing — a choice on the **`Emitter`** (controller = `owner`), so it needs
 no operator authority:
@@ -707,6 +731,11 @@ Two properties make this safe to outsource:
   `VerifyAndConsumeVAA` plus the app-side operator pin (see
   `ExampleIntegrator.Redeem`). The service is trusted for _liveness_ only, like
   any RPC endpoint.
+- **Registry pin.** A client passes `expectedGuardianGovernance = Some gg` to
+  `RegisterEmitter`, with `gg` from its own configuration. A registry from the
+  service under another `guardianGovernance` then fails with "registry
+  guardianGovernance mismatch" before any fee charge. NTT `RegisterManager`
+  must pass `Some` too.
 - **One reader suffices.** A service reading as the operator (a stakeholder of
   `CoreState`, both registries, and — as co-signatory — every consumer's trie)
   can serve the whole table; integrators can equally run their own for their
@@ -1170,13 +1199,12 @@ covered by the integration test in §9.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
 For 0.8.0, the baseline is `dars/wormhole-core-0.7.0.dar`.
 
-0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
-`damlc` reports this change only as a warning.
-A 0.7.0 `EmitterRegistry` cannot run under 0.8.0.
-All other 0.7.0 contracts continue under 0.8.0.
-Thus the move from 0.7.0 needs a registry migration and an unvet of 0.7.0.
-[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the procedure, the scan, and the integrator cutover.
-The procedure below applies to the other steps of that migration.
+0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
+`damlc` reports these changes only as warnings.
+A 0.7.0 `EmitterRegistry` or `Emitter` cannot run under 0.8.0.
+No participant outside LocalNet vetted 0.7.0 or 0.8.0. Thus 0.8.0 starts from a fresh genesis with a new operator party, with no migration of 0.7.0 contracts.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
+The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
 **Event package ids.** The watcher compares the package id of each
 `PublishMessage` `ExercisedEvent` with `--cantonPackageID` (`templateMatches`
@@ -1274,8 +1302,8 @@ by two mechanisms:
 
 **Topology.** Each guardian runs a **participant node**, and
 **`guardianGovernance`** is **hosted on every guardian participant** in its
-`PartyToParticipant` topology mapping. As signatory of `CoreState` and observer
-of every `Emitter`, it is an informee of every `PublishMessage` and
+`PartyToParticipant` topology mapping. As signatory of `CoreState` and of every
+`Emitter`, it is an informee of every `PublishMessage` and
 `SubmitGovernanceVAA` exercise, so each guardian's participant independently
 receives and validates every attestation-bearing transaction, and an invalid one
 never appears on that participant's Ledger API — so a watcher cannot sign it.

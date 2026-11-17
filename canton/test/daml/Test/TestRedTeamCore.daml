@@ -11,6 +11,7 @@ import DA.Action (foldlA, void)
 import DA.Assert ((===))
 import DA.Exception (GeneralError(..), throw)
 import DA.Foldable (forA_)
+import DA.List (sort)
 import DA.Optional (fromSome)
 import DA.Text qualified as T
 import DA.Time (microseconds, seconds)
@@ -119,16 +120,17 @@ set1PubKeys : [(Int, Bytes)]
 set1PubKeys =
   [(0, devnetGuardianPubKey), (1, redTeamGuardianPubKey1), (2, redTeamGuardianPubKey2), (3, redTeamGuardianPubKey3)]
 
--- | Any failure matches the empty expected substring.
 checkAttackFailedWith : Text -> Text -> Either SubmitError a -> Script ()
-checkAttackFailedWith attack expectedSubstring submitResult = case submitResult of
-  Left (FailureStatusError failureStatus) ->
-    assertMsg (attack <> ": expected failure containing '" <> expectedSubstring <> "', got: " <> failureStatus.message)
-      (expectedSubstring `T.isInfixOf` failureStatus.message)
-  Left otherError ->
-    assertMsg (attack <> ": expected failure containing '" <> expectedSubstring <> "', got: " <> show otherError)
-      (expectedSubstring `T.isInfixOf` show otherError)
-  Right _ -> abort (attack <> ": attack succeeded")
+checkAttackFailedWith attack expectedSubstring submitResult = do
+  assertMsg (attack <> ": the expected failure text is empty") (expectedSubstring /= "")
+  case submitResult of
+    Left (FailureStatusError failureStatus) ->
+      assertMsg (attack <> ": expected failure containing '" <> expectedSubstring <> "', got: " <> failureStatus.message)
+        (expectedSubstring `T.isInfixOf` failureStatus.message)
+    Left otherError ->
+      assertMsg (attack <> ": expected failure containing '" <> expectedSubstring <> "', got: " <> show otherError)
+        (expectedSubstring `T.isInfixOf` show otherError)
+    Right _ -> abort (attack <> ": attack succeeded")
 
 isAttackAccepted : Either SubmitError a -> Bool
 isAttackAccepted submitResult = case submitResult of
@@ -193,6 +195,7 @@ testRedTeamA1FeeCannotBeSkipped = do
   registerResult <- trySubmit (actAs registrant <> disclose feeRegistryDisclosure) do
     exerciseCmd feeRegistryCid RegisterEmitter with
       requester = registrant, payer = registrant, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
   checkAttackFailedWith "A1 RegisterEmitter without CoreState" "registration fee due" registerResult
 
   feeRootRegistryCid <- submit operator do
@@ -294,17 +297,17 @@ testRedTeamA9MalformedEncodings = do
   _ <- verifyVAA operator coreStateCid govSetFeeVAA set0PubKeys
   let malformedCases =
         [ ("A9 truncated header", "sliceBytes", T.take 10 govSetFeeVAA)
-        , ("A9 truncated signature", "", T.take ((6 + 30) * 2) govSetFeeVAA)
-        , ("A9 body missing its last byte", "", T.take (T.length govSetFeeVAA - 2) govSetFeeVAA)
+        , ("A9 truncated signature", "sliceBytes: out of range", T.take ((6 + 30) * 2) govSetFeeVAA)
+        , ("A9 body missing its last byte", "invalid signature", T.take (T.length govSetFeeVAA - 2) govSetFeeVAA)
         , ("A9 extra trailing byte", "invalid signature", govSetFeeVAA <> "00")
-        , ("A9 signature count zero", "", replaceByteAt 5 "00" govSetFeeVAA)
-        , ("A9 signature count two", "", replaceByteAt 5 "02" govSetFeeVAA)
+        , ("A9 signature count zero", "ArithmeticError", replaceByteAt 5 "00" govSetFeeVAA)
+        , ("A9 signature count two", "invalid signature", replaceByteAt 5 "02" govSetFeeVAA)
         , ("A9 version two", "unsupported VAA version", replaceByteAt 0 "02" govSetFeeVAA)
         , ("A9 version zero", "unsupported VAA version", replaceByteAt 0 "00" govSetFeeVAA)
-        , ("A9 odd hex length", "", govSetFeeVAA <> "0")
-        , ("A9 0x prefix", "", "0x" <> govSetFeeVAA)
-        , ("A9 non-hex payload byte", "", T.take (T.length govSetFeeVAA - 2) govSetFeeVAA <> "zz")
-        , ("A9 empty input", "", "")
+        , ("A9 odd hex length", "not a hex string", govSetFeeVAA <> "0")
+        , ("A9 0x prefix", "invalid hex digit", "0x" <> govSetFeeVAA)
+        , ("A9 non-hex payload byte", "not a hex string", T.take (T.length govSetFeeVAA - 2) govSetFeeVAA <> "zz")
+        , ("A9 empty input", "sliceBytes: out of range", "")
         ]
   forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
     checkVerifyRejectedWith attack expectedSubstring operator coreStateCid encodedVAA set0PubKeys
@@ -322,7 +325,7 @@ testRedTeamA9MalformedGovernancePayloads = do
     operator coreStateCid rtGovernanceEmptyPayload set0PubKeys
   checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "ContractUpgrade packet must be 67 bytes"
     operator coreStateCid rtContractUpgradeTruncated set0PubKeys
-  checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" ""
+  checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" "ArithmeticError"
     operator coreStateCid rtSetMessageFeeOverflowsInt64 set0PubKeys
 
 -- | EVM GovernanceStructs.sol requires @encoded.length == index@ for every
@@ -522,36 +525,51 @@ testRedTeamA14OperatorCannotForgeThirdPartyEmitter = do
         , ("operator and guardianGovernance", actAs operator <> actAs guardianGovernance) ]
     \(forgers, forgerAuthority) -> do
       forgeResult <- trySubmit forgerAuthority do createCmd forgedVictimEmitter
-      checkAttackFailedWith ("A14 " <> forgers <> " creates the victim's emitter") "" forgeResult
+      checkAttackFailedWith ("A14 " <> forgers <> " creates the victim's emitter") "Authorization failure" forgeResult
 
--- | Blast radius of operator + owner collusion: the owner's OWN address can
--- repeat a sequence; guardians observe both emitters; other owners are unaffected.
-testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress : Script ()
-testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress = do
+-- | guardianGovernance co-signs every 'Emitter' (A14-2), so no subset of
+-- operator, owner, and guardianGovernance can create one outside
+-- 'RegisterEmitter': a rewound duplicate of an issued identity is refused.
+testRedTeamA14ColludingOwnerCannotDuplicateEmitter : Script ()
+testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
   (operator, guardianGovernance, coreStateCid) <- setup
   colludingOwner <- allocateParty "RedTeamColludingOwner"
-  bystander <- allocateParty "RedTeamBystander"
   colludingEmitterCid <- registerEmitter operator colludingOwner
-  bystanderEmitterCid <- registerEmitter operator bystander
+  operatorEmitterCid <- registerEmitter operator operator
   (_, firstMessage) <- publishVia operator coreStateCid colludingOwner colludingEmitterCid 1 "aa" 0
-
-  rewoundEmitterCid <- submit (actAs operator <> actAs colludingOwner) do
-    createCmd Emitter with
-      operator, guardianGovernance, owner = colludingOwner
-      emitterId = firstMessage.emitterId
-      emitterAddress = emitterAddressFor operator colludingOwner firstMessage.emitterId
-      sequence = firstMessage.sequence
-  (_, repeatedMessage) <- publishVia operator coreStateCid colludingOwner rewoundEmitterCid 2 "bb" 0
-  (repeatedMessage.registrar, repeatedMessage.owner, repeatedMessage.emitterId, repeatedMessage.sequence)
-    === (firstMessage.registrar, firstMessage.owner, firstMessage.emitterId, firstMessage.sequence)
-  assert (repeatedMessage.payload /= firstMessage.payload)
+  (_, operatorMessage) <- publishVia operator coreStateCid operator operatorEmitterCid 2 "bb" 0
+  let rewoundEmitterOf owner message = Emitter with
+        operator, guardianGovernance, owner
+        emitterId = message.emitterId
+        emitterAddress = emitterAddressFor operator owner message.emitterId
+        sequence = message.sequence
+      duplicateAttempts =
+        [ ("operator and owner", actAs operator <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("operator as its own owner", actAs operator, rewoundEmitterOf operator operatorMessage)
+        , ("operator and guardianGovernance", actAs operator <> actAs guardianGovernance,
+            rewoundEmitterOf colludingOwner firstMessage)
+        ]
+  forA_ duplicateAttempts \(colluders, colluderAuthority, rewoundEmitter) -> do
+    duplicateResult <- trySubmit colluderAuthority do createCmd rewoundEmitter
+    checkAttackFailedWith ("A14 " <> colluders <> " duplicates an issued emitter") "Authorization failure" duplicateResult
   guardianVisibleEmitters <- query @Emitter guardianGovernance
-  length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 2
+  length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 1
+  length (filter (\(_, emitter) -> emitter.owner == operator) guardianVisibleEmitters) === 1
 
-  (_, bystanderMessage) <- publishVia operator coreStateCid bystander bystanderEmitterCid 3 "cc" 0
-  bystanderMessage.sequence === 0
-  assert (emitterAddressFor operator bystander bystanderMessage.emitterId
-            /= emitterAddressFor operator colludingOwner firstMessage.emitterId)
+-- | Exactly operator, owner, and guardianGovernance sign an 'Emitter': all
+-- three together can create one directly.
+testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance : Script ()
+testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance = do
+  (operator, guardianGovernance, _) <- setup
+  owner <- allocateParty "RedTeamSignatoryOwner"
+  emitterCid <- submit (actAs operator <> actAs owner <> actAs guardianGovernance) do
+    createCmd Emitter with
+      operator, guardianGovernance, owner
+      emitterId = 0
+      emitterAddress = emitterAddressFor operator owner 0
+      sequence = 0
+  Some emitter <- queryContractId guardianGovernance emitterCid
+  sort (signatory emitter) === sort [operator, owner, guardianGovernance]
 
 -- | A registry reset with a reused id would give an honest owner's second
 -- emitter the address and sequence 0 of its first. 'EmitterRegistry' is
@@ -577,7 +595,7 @@ testRedTeamA14OperatorCannotResetEmitterRegistry = do
         ]
   forA_ operatorAloneAttacks \(attack, runAttack) -> do
     attackResult <- runAttack
-    checkAttackFailedWith ("A14 operator alone " <> attack) "" attackResult
+    checkAttackFailedWith ("A14 operator alone " <> attack) "Authorization failure" attackResult
   [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
   survivingRegistryCid === realRegistryCid
   survivingRegistry.nextId === 1
@@ -589,6 +607,27 @@ testRedTeamA14OperatorCannotResetEmitterRegistry = do
   secondMessage.emitterId === 1
   assert (emitterAddressFor operator honestOwner secondMessage.emitterId
             /= emitterAddressFor operator honestOwner firstMessage.emitterId)
+
+-- | guardianGovernance alone cannot create, archive, or re-price a registry:
+-- each needs the operator's signature too.
+testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry : Script ()
+testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry = do
+  (operator, guardianGovernance, _) <- setup
+  [(realRegistryCid, _)] <- query @EmitterRegistry operator
+  let governanceAloneAttacks =
+        [ ("creates an EmitterRegistry", void <$> trySubmit (actAs guardianGovernance) do
+            createCmd (mkInitialEmitterRegistry operator guardianGovernance 0))
+        , ("archives the real EmitterRegistry", void <$> trySubmit (actAs guardianGovernance) do
+            archiveCmd realRegistryCid)
+        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs guardianGovernance) do
+            exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
+        ]
+  forA_ governanceAloneAttacks \(attack, runAttack) -> do
+    attackResult <- runAttack
+    checkAttackFailedWith ("A14 guardianGovernance alone " <> attack) "Authorization failure" attackResult
+  [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
+  survivingRegistryCid === realRegistryCid
+  survivingRegistry.nextId === 0
 
 ----------------------------------------------------------------------
 -- R1: rolled-back publish

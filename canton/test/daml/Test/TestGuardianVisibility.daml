@@ -9,6 +9,7 @@ module Test.TestGuardianVisibility where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.List (sort)
 import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import Wormhole.Core.State
@@ -65,6 +66,19 @@ testGovernanceSeesRegistry = do
   outsiderView <- queryContractId outsider regId
   outsiderView === None
 
+-- | guardianGovernance signs every registered 'Emitter': operator and owner
+-- together cannot archive one.
+testGovernanceSignsEveryEmitter : Script ()
+testGovernanceSignsEveryEmitter = do
+  (operator, guardianGovernance, _) <- setup
+  alice <- allocateParty "Alice"
+  emitterCid <- registerEmitter operator alice
+  Some emitter <- queryContractId guardianGovernance emitterCid
+  sort (signatory emitter) === sort [operator, alice, guardianGovernance]
+  submitMustFail (actAs operator <> actAs alice) do archiveCmd emitterCid
+  Some _ <- queryContractId guardianGovernance emitterCid
+  pure ()
+
 -- | Publish and archive of an integrator's emitter require the owner.
 testGovernanceHasNoEmitterAuthority : Script ()
 testGovernanceHasNoEmitterAuthority = do
@@ -100,6 +114,7 @@ testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
   (_, rogueEmitterCid) <- submit (actAs alice <> disclose rogueRegistryDisclosure) do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = alice, payer = alice, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
 
   Some rogueEmitter <- queryContractId rogueGovernance rogueEmitterCid
   rogueEmitter.guardianGovernance === rogueGovernance

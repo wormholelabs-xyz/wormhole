@@ -54,6 +54,7 @@ Cosmwasm
 counterparty
 cpus
 crosschain
+cutover
 Cyfrin
 damlc
 dars
@@ -342,3 +343,12 @@ builtins
 informee
 informees
 runbook
+cantongrpc
+confirmer
+Effectful
+multihash
+redteam
+REDTEAM
+Robinhood
+unvet
+Unvet
