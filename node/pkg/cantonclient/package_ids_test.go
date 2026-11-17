@@ -98,8 +98,12 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 			}
 			assert.False(t, accepted.MatchesAnyPackage())
 			assert.Equal(t, tc.wantDescription, accepted.String())
-			assert.Equal(t, tc.wantPrimaryHex, accepted.PrimaryPackageIDHex())
-			assert.Equal(t, tc.wantNextHex, accepted.NextPackageIDHex())
+			primary, hasPrimary := accepted.PrimaryPackageID()
+			assert.True(t, hasPrimary)
+			assert.Equal(t, tc.wantPrimaryHex, primary.String())
+			next, hasNext := accepted.NextPackageID()
+			assert.Equal(t, tc.wantNextHex != "", hasNext)
+			assert.Equal(t, tc.wantNextHex, next.String())
 		})
 	}
 }
@@ -111,8 +115,10 @@ func TestAcceptAnyPackageID(t *testing.T) {
 	for _, packageIDHex := range []string{primaryPackageIDHex, otherPackageIDHex, "lookalike-package"} {
 		assert.Truef(t, accepted.Accepts(packageIDHex), "wildcard must accept %s", packageIDHex)
 	}
-	assert.Equal(t, "", accepted.PrimaryPackageIDHex())
-	assert.Equal(t, "", accepted.NextPackageIDHex())
+	_, hasPrimary := accepted.PrimaryPackageID()
+	assert.False(t, hasPrimary)
+	_, hasNext := accepted.NextPackageID()
+	assert.False(t, hasNext)
 	assert.Equal(t, "*", accepted.String())
 }
 
@@ -120,6 +126,7 @@ func TestZeroAcceptedPackageIDsAcceptsNothing(t *testing.T) {
 	var accepted AcceptedPackageIDs
 
 	assert.False(t, accepted.MatchesAnyPackage())
+	assert.True(t, accepted.IsEmpty())
 	for _, packageIDHex := range []string{primaryPackageIDHex, ""} {
 		assert.Falsef(t, accepted.Accepts(packageIDHex), "zero value must reject %q", packageIDHex)
 	}

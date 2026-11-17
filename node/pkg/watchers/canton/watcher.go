@@ -181,15 +181,16 @@ func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclien
 		acceptedPackageIDsGauge.WithLabelValues("primary", "*").Set(1)
 		return
 	}
-	acceptedPackageIDsGauge.WithLabelValues("primary", acceptedPackageIDs.PrimaryPackageIDHex()).Set(1)
-	nextPackageIDHex := acceptedPackageIDs.NextPackageIDHex()
-	if nextPackageIDHex == "" {
+	primaryPackageID, _ := acceptedPackageIDs.PrimaryPackageID()
+	acceptedPackageIDsGauge.WithLabelValues("primary", primaryPackageID.String()).Set(1)
+	nextPackageID, hasNext := acceptedPackageIDs.NextPackageID()
+	if !hasNext {
 		return
 	}
-	acceptedPackageIDsGauge.WithLabelValues("next", nextPackageIDHex).Set(1)
+	acceptedPackageIDsGauge.WithLabelValues("next", nextPackageID.String()).Set(1)
 	logger.Warn("canton core upgrade window is open: two core package ids are accepted; remove the next id after promotion",
-		zap.String("primaryPackageId", acceptedPackageIDs.PrimaryPackageIDHex()),
-		zap.String("nextPackageId", nextPackageIDHex))
+		zap.Stringer("primaryPackageId", primaryPackageID),
+		zap.Stringer("nextPackageId", nextPackageID))
 }
 
 // checkAcceptedPackageIDsAllowed rejects an empty set, and the any-package
@@ -201,10 +202,16 @@ func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPack
 		}
 		return nil
 	}
-	if acceptedPackageIDs.PrimaryPackageIDHex() == "" {
+	if acceptedPackageIDs.IsEmpty() {
 		return fmt.Errorf("canton: no accepted core package ids")
 	}
 	return nil
+}
+
+// heartbeatContractAddress is the primary core package id, or empty for the wildcard.
+func (e *Watcher) heartbeatContractAddress() string {
+	primaryPackageID, _ := e.acceptedPackageIDs.PrimaryPackageID()
+	return primaryPackageID.String()
 }
 
 // NewWatcher creates a new Canton watcher.
@@ -371,7 +378,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	}
 
 	p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
-		ContractAddress: e.acceptedPackageIDs.PrimaryPackageIDHex(),
+		ContractAddress: e.heartbeatContractAddress(),
 	})
 
 	logger := supervisor.Logger(ctx)
@@ -469,7 +476,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 					logger.Debug("canton_getLedgerEnd", zap.Int64("result", offset))
 					p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
 						Height:          offset,
-						ContractAddress: e.acceptedPackageIDs.PrimaryPackageIDHex(),
+						ContractAddress: e.heartbeatContractAddress(),
 					})
 				}
 				readiness.SetReady(e.readinessSync)

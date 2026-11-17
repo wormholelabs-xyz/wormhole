@@ -31,15 +31,38 @@ func (id PackageID) String() string { return id.hexID }
 func (id PackageID) isZero() bool { return id.hexID == "" }
 
 // AcceptedPackageIDs is the set of wormhole-core package ids whose
-// PublishMessage exercises the watcher emits: a primary id plus, during an
-// upgrade window, at most one next id. The zero value accepts nothing.
+// PublishMessage exercises the watcher emits. The zero value accepts nothing.
 //
 // SECURITY: every accepted id must be a guardian-approved, vetted core version.
 // Messages executed by any accepted id are signed under that version's checks.
 type AcceptedPackageIDs struct {
-	primary           PackageID
-	next              PackageID
-	matchesAnyPackage bool
+	set acceptedPackageSet
+}
+
+// acceptedPackageSet is anyPackageSet or pinnedPackageSet; nil accepts nothing.
+type acceptedPackageSet interface {
+	acceptsPackageID(executingPackageIDHex string) bool
+}
+
+// anyPackageSet matches every package (unsafe dev mode only).
+type anyPackageSet struct{}
+
+func (anyPackageSet) acceptsPackageID(string) bool { return true }
+
+// pinnedPackageSet is a primary id plus, during an upgrade window, one next id.
+type pinnedPackageSet struct {
+	primary PackageID
+	next    *PackageID
+}
+
+func (pinned pinnedPackageSet) acceptsPackageID(executingPackageIDHex string) bool {
+	if executingPackageIDHex == "" {
+		return false
+	}
+	if executingPackageIDHex == pinned.primary.hexID {
+		return true
+	}
+	return pinned.next != nil && executingPackageIDHex == pinned.next.hexID
 }
 
 // ParseAcceptedPackageIDs requires a primary id. nextHex is empty outside an
@@ -49,9 +72,9 @@ func ParseAcceptedPackageIDs(primaryHex string, nextHex string) (AcceptedPackage
 	if err != nil {
 		return AcceptedPackageIDs{}, fmt.Errorf("primary core package id: %w", err)
 	}
-	accepted := AcceptedPackageIDs{primary: primary}
+	pinned := pinnedPackageSet{primary: primary}
 	if nextHex == "" {
-		return accepted, nil
+		return AcceptedPackageIDs{set: pinned}, nil
 	}
 	next, err := ParsePackageID(nextHex)
 	if err != nil {
@@ -60,45 +83,61 @@ func ParseAcceptedPackageIDs(primaryHex string, nextHex string) (AcceptedPackage
 	if next == primary {
 		return AcceptedPackageIDs{}, fmt.Errorf("next core package id must differ from the primary core package id %s", primary)
 	}
-	accepted.next = next
-	return accepted, nil
+	pinned.next = &next
+	return AcceptedPackageIDs{set: pinned}, nil
 }
 
 // AcceptAnyPackageID matches every package that declares the watched template.
 // Unsafe dev mode only: a look-alike package can forge messages under it.
 func AcceptAnyPackageID() AcceptedPackageIDs {
-	return AcceptedPackageIDs{matchesAnyPackage: true}
+	return AcceptedPackageIDs{set: anyPackageSet{}}
 }
 
 // Accepts reports whether executingPackageIDHex is in the set.
 func (accepted AcceptedPackageIDs) Accepts(executingPackageIDHex string) bool {
-	if accepted.matchesAnyPackage {
-		return true
-	}
-	if executingPackageIDHex == "" {
+	if accepted.set == nil {
 		return false
 	}
-	if !accepted.primary.isZero() && executingPackageIDHex == accepted.primary.hexID {
-		return true
-	}
-	return !accepted.next.isZero() && executingPackageIDHex == accepted.next.hexID
+	return accepted.set.acceptsPackageID(executingPackageIDHex)
 }
 
-func (accepted AcceptedPackageIDs) MatchesAnyPackage() bool { return accepted.matchesAnyPackage }
+func (accepted AcceptedPackageIDs) MatchesAnyPackage() bool {
+	_, matchesAny := accepted.set.(anyPackageSet)
+	return matchesAny
+}
 
-// PrimaryPackageIDHex is the primary id, or empty for the dev-mode wildcard.
-func (accepted AcceptedPackageIDs) PrimaryPackageIDHex() string { return accepted.primary.hexID }
+// IsEmpty reports the zero value, which accepts nothing.
+func (accepted AcceptedPackageIDs) IsEmpty() bool { return accepted.set == nil }
 
-// NextPackageIDHex is the upgrade-window id, or empty outside a window.
-func (accepted AcceptedPackageIDs) NextPackageIDHex() string { return accepted.next.hexID }
+// PrimaryPackageID is the primary id; false for the wildcard and the zero value.
+func (accepted AcceptedPackageIDs) PrimaryPackageID() (PackageID, bool) {
+	pinned, isPinned := accepted.set.(pinnedPackageSet)
+	if !isPinned {
+		return PackageID{}, false
+	}
+	return pinned.primary, true
+}
+
+// NextPackageID is the upgrade-window id; false outside a window.
+func (accepted AcceptedPackageIDs) NextPackageID() (PackageID, bool) {
+	pinned, isPinned := accepted.set.(pinnedPackageSet)
+	if !isPinned || pinned.next == nil {
+		return PackageID{}, false
+	}
+	return *pinned.next, true
+}
 
 // String is "*" for the wildcard, "primary" or "primary,next" otherwise.
 func (accepted AcceptedPackageIDs) String() string {
-	if accepted.matchesAnyPackage {
+	switch set := accepted.set.(type) {
+	case anyPackageSet:
 		return "*"
+	case pinnedPackageSet:
+		if set.next == nil {
+			return set.primary.hexID
+		}
+		return set.primary.hexID + "," + set.next.hexID
+	default:
+		return ""
 	}
-	if accepted.next.isZero() {
-		return accepted.primary.hexID
-	}
-	return accepted.primary.hexID + "," + accepted.next.hexID
 }
