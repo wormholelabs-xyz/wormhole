@@ -64,6 +64,8 @@ emitter_b7_archived="$(emitter_event b7 "$OWNER_B" 7)"
 emitter_a0_duplicate="$(emitter_event a0dup "$OWNER_A" 0)"
 emitter_rogue_gg="$(emitter_event rogue "$OWNER_A" 50 "$ROGUE_GG")"
 registry_next_10="$(registry_event reg10 10)"
+registry_next_0="$(registry_event reg0 0)"
+registry_next_2="$(registry_event reg2 2)"
 
 base_history="$(jq -sc . <(update_at 1 "$emitter_a0") <(update_at 2 "$emitter_b1") <(update_at 3 "$emitter_a0_successor"))"
 write_fixture clean "$read_only_rights" "$base_history" "[$emitter_a0_successor,$emitter_b1]"
@@ -79,6 +81,16 @@ write_fixture active_not_in_history "$read_only_rights" "$base_history" \
 write_fixture registry_ahead "$read_only_rights" \
   "$(jq -c --argjson extra "$(update_at 4 "$registry_next_10")" '. + [$extra]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$registry_next_10]"
+write_fixture registry_low "$read_only_rights" \
+  "$(jq -c --argjson extra "$(update_at 4 "$registry_next_0")" '. + [$extra]' <<< "$base_history")" \
+  "[$emitter_a0_successor,$emitter_b1,$registry_next_0]"
+write_fixture registry_exact "$read_only_rights" \
+  "$(jq -c --argjson extra "$(update_at 4 "$registry_next_2")" '. + [$extra]' <<< "$base_history")" \
+  "[$emitter_a0_successor,$emitter_b1,$registry_next_2]"
+write_fixture archived_registry_high "$read_only_rights" \
+  "$(jq -c --argjson first "$(update_at 4 "$registry_next_10")" --argjson second "$(update_at 5 "$registry_next_2")" \
+    '. + [$first, $second]' <<< "$base_history")" \
+  "[$emitter_a0_successor,$emitter_b1,$registry_next_2]"
 write_fixture rogue_gg_ignored "$read_only_rights" \
   "$(jq -c --argjson extra "$(update_at 4 "$emitter_rogue_gg")" '. + [$extra]' <<< "$base_history")" \
   "[$emitter_a0_successor,$emitter_b1,$emitter_rogue_gg]"
@@ -110,7 +122,10 @@ test_cases=(
   "page size 1 gives the same firstId|archived_high_id|1|0||0|0|\"firstId\":8"
   "a submit right fails|submit_right|200|0||0|1|the scan needs exactly"
   "active emitter outside history fails|active_not_in_history|200|0||0|1|not in the update history"
-  "registry nextId above history sets firstId|registry_ahead|200|0||1|0|\"firstId\":10"
+  "registry nextId above history fails|registry_ahead|200|0||1|1|nextId other than historyMaxEmitterId + 1"
+  "registry nextId below history fails|registry_low|200|0||1|1|nextId other than historyMaxEmitterId + 1"
+  "registry nextId equal to history max plus one passes|registry_exact|200|0||1|0|\"firstId\":2"
+  "archived registry with a high nextId leaves firstId|archived_registry_high|200|0||1|0|\"firstId\":2"
   "unexpected active registry fails|registry_ahead|200|0||0|1|active EmitterRegistry count is not 0"
   "rogue guardianGovernance emitter is ignored|rogue_gg_ignored|200|0||0|0|\"firstId\":2"
   "begin offset without baseline is refused|clean|200|2||0|2|needs <baseline-max-emitter-id>"
