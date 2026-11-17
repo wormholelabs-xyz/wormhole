@@ -1013,14 +1013,10 @@ func runNode(cmd *cobra.Command, args []string) {
 		logger.Fatal("Either --suiRPC and --suiMoveEventType must all be set or all unset")
 	}
 
-	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create requires
-	// --cantonPackageID and --cantonReadAsParty outside --unsafeDevMode and
-	// validates the retiring package flags.
-	if *cantonRPC == "" && *cantonRetiringPackageID != "" {
-		logger.Fatal("If --cantonRPC is not set, --cantonRetiringPackageID may not be set")
-	}
-	if *cantonRPC == "" && *cantonRetiringPackageAcceptedUntil != "" {
-		logger.Fatal("If --cantonRPC is not set, --cantonRetiringPackageAcceptedUntil may not be set")
+	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create
+	// validates the canton flags themselves.
+	if err := checkCantonFlagsNeedRPC(*cantonRPC, cantonFlagValuesThatNeedRPC()); err != nil {
+		logger.Fatal(err.Error())
 	}
 
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {

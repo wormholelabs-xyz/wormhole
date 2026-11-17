@@ -41,10 +41,12 @@ func TestCheckCantonFlagsNeedRPC(t *testing.T) {
 		t.Run(flagName+" without rpc", func(t *testing.T) {
 			dependentFlags := allEmpty()
 			dependentFlags[flagName] = "value"
-			err := checkCantonFlagsNeedRPC("", dependentFlags)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "--"+flagName)
-			assert.Contains(t, err.Error(), "--cantonRPC")
+			for _, disabledRPC := range []string{"", "none"} {
+				err := checkCantonFlagsNeedRPC(disabledRPC, dependentFlags)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "--"+flagName)
+				assert.Contains(t, err.Error(), "--cantonRPC")
+			}
 		})
 	}
 	t.Run("every canton flag is checked", func(t *testing.T) {
