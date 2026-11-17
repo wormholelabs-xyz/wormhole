@@ -49,10 +49,13 @@ Set `DB_PORT` to use a different port.
 | `create_script_user.sh` | Creates the user that Daml Script uses. |
 | `run_smoke.sh` | Runs the smoke script. |
 | `daml/` | The smoke script package `wormhole-localnet-smoke`. |
-| `canton_console.sh` | Runs a Canton console script against the three participants. Stops it after `CANTON_CONSOLE_TIMEOUT_SECONDS` (default 600). |
+| `canton_console.sh` | Runs one or more Canton console scripts as one script against the three participants. Stops it after `CANTON_CONSOLE_TIMEOUT_SECONDS` (default 600). |
 | `bounded_run.sh` | Runs a command with a timeout. `canton_console.sh` uses it. |
 | `test/` | Script tests. They do not need Docker. |
 | `console/` | Console configuration and console scripts. |
+| `console/owner_signing_prelude.canton` | Shared console code of the owner-key scripts: external signer, owner keys, guardian policy checks. |
+| `console/owner_key_rotation_lib.canton` | Decisions of the owner-key rotation: party order, safety stop, outcome, stored signed changes. |
+| `owner_key_input_checks.sh` | Checks owner names and the custody artifacts file. Lists active rotation faults. |
 | `interactive_submit.js` | Prepares, signs and executes one external-party submission. LocalNet only. |
 | `gg_lib.sh` | Shared functions for the `gg_*.sh` scripts. |
 | `gg_host.sh` | Hosts `guardianGovernance` and `Operator`. Vets the core DARs on all participants. |
@@ -63,7 +66,9 @@ Set `DB_PORT` to use a different port.
 | `gg_package_vetting.sh` | Checks the package vetting gate. |
 | `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
-| `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. Also rotates `nttCustody` if it exists. |
+| `gg_rotate_owner_key.sh` | Replaces one owner key of the guardian namespace, for each party in the namespace. |
+| `gg_rotation_fault_check.sh` | Rehearses the rotation faults R1 to R6. |
+| `gg_rotation_safety_stop_check.sh` | Rehearses the rotation safety stop SS1 to SS4. |
 | `custody_host.sh` | Allocates `nttCustody` under the `guardianGovernance` namespace. |
 | `custody_authority_check.sh` | Checks that `guardianGovernance` and `nttCustody` have different authority. |
 | `ntt_e2e.sh` | Runs the NTT steps below in sequence. |
@@ -91,7 +96,16 @@ canton/localnet/test/ntt_lib_test.sh
 canton/localnet/test/core_upgrade_package_ids_test.sh
 canton/localnet/test/curl_calls_are_bounded_test.sh
 canton/localnet/test/canary_gate_decision_test.sh
+canton/localnet/test/owner_key_input_checks_test.sh
 canton/tools/publish_message_scan_test.sh
+```
+
+The console tests need the Canton console jar in `../vendor/canton-3.7.3/`.
+They do not need LocalNet. They use `console/test/offline-participant.conf`.
+
+```bash
+canton/localnet/test/console_scripts_compile_test.sh
+canton/localnet/test/console_table_test.sh
 ```
 
 ## Prerequisites
@@ -313,6 +327,17 @@ The script requests time proofs from `app-provider` to move the time.
 CAUTION: Without the time proofs, a transaction can wait for many minutes.
 A host that connects again in that period can still confirm it.
 
+4. After `custody_host.sh`, do the check for `nttCustody`:
+
+   ```bash
+   canton/localnet/gg_confirmation_quorum.sh --party "$(jq -r .partyId ../localnet-state/custody-artifacts.json)"
+   ```
+
+   With `app-user` disconnected, an `nttCustody` transaction succeeds with two confirming hosts.
+   With `sv` and `app-user` disconnected, it fails with `MEDIATOR_SAYS_TX_TIMED_OUT`.
+   The failure must name `nttCustody` as the only unresponsive party.
+   Give `--signing-owners <owner>,<owner>` after a rotation that removes `owner1` or `owner2`.
+
 ### Check the package vetting gate
 
 1. Run the check:
@@ -369,7 +394,35 @@ The old set is valid at the expiry time and not valid one second after it.
 LocalNet uses the clock time, thus the expiry does not occur during the check.
 The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` moves the time and checks the expiry.
 
-### Replace a guardianGovernance owner key
+### Replace an owner key of the guardian namespace
+
+The owner keys are the namespace owners and the signing keys of each party in the namespace.
+The parties are `guardianGovernance` and, after `custody_host.sh`, `nttCustody`.
+Thus a rotation changes the namespace and the `PartyToParticipant` mapping of each party in the namespace.
+
+The rotation has these phases:
+
+1. Safety stop. The script reads the namespace and each `PartyToParticipant` mapping in it.
+   It stops before any change if one of these conditions is true:
+   - A party in the namespace is not in the rotation list.
+   - A party in the rotation list is not in the namespace.
+   - The signing keys of a party are not the old key set or the new key set.
+   - The namespace owners are not the old key set or the new key set.
+2. Sign phase. Each owner signs each change. No change goes to the synchronizer.
+   The script keeps the signed changes in `../localnet-state/rotation-<new-owner>.signed.bin`.
+   If a signer fails, the script shows `ROTATION NOT STARTED`. The topology does not change.
+3. Load phase. If the new owner has no root namespace delegation, load 1 adds it.
+   This delegation alone gives no authority over the guardian namespace.
+   Load 2 is one load call with all other changes: `nttCustody` first, then `guardianGovernance`, then the namespace.
+   The script tries load 2 a maximum of 3 times. Each try loads only the changes that are not effective.
+4. Checks. The script finds one of these results:
+   - All changes are effective. The script shows `ROTATION effective time` for the changes and `ROTATION done`.
+   - No change is effective. The script shows `ROTATION NOT APPLIED`. Each mapping keeps its serial.
+   - Some changes are effective. The script shows `ROTATION HALF-APPLIED` and the parties that accept the removed key.
+
+The signer of each owner must finish in 30 seconds.
+The script stops a signer that runs longer.
+The signature must be exactly 64 bytes as 128 lowercase hex characters.
 
 1. Replace `owner3` with a new key `owner4`:
 
@@ -378,25 +431,24 @@ The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` moves the time
    ```
 
    The arguments are the removed owner, the two kept owners and the new owner.
-   The script changes the decentralized namespace and the party signing keys.
-   The threshold stays at 2 of 3.
+   The thresholds stay at 2 of 3.
 
 2. Make sure that the output shows these results:
-   - The kept owners and the new owner change the namespace.
+   - `ROTATION parties: nttCustody,guardianGovernance`, or `guardianGovernance` alone before `custody_host.sh`.
+   - `ROTATION protocol version: 37`.
+   - `ROTATION effective time: <time> (same for all 3 mappings)`.
    - The removed owner and one kept owner cannot change the namespace.
      The change fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
      The Admin API does not show this error code to the client. It shows a trace id.
      The script finds the error code with this trace id in the log of the `canton` container.
-   - A `guardianGovernance` transaction with one kept key and the new key succeeds.
-   - A transaction with one kept key and the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
+   - For each party, a transaction with one kept key and the new key succeeds.
+   - For each party, a transaction with one kept key and the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
      The error shows 1 valid signature and 1 invalid signature.
-   - A transaction with only the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
+   - For each party, a transaction with only the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
      The error shows 0 valid signatures and 1 invalid signature.
 
-The script changes the namespace first and the party signing keys second.
-If the second change fails, the rotation is half-applied.
-The new owner is then in the namespace, but its key cannot sign for `guardianGovernance`.
-The script shows `ROTATION HALF-APPLIED` and a recovery command.
+WARNING: In a half-applied rotation, the removed key and one kept key can sign for each party in the
+`ROTATION HALF-APPLIED` line. Do step 3 immediately.
 
 3. If the script shows `ROTATION HALF-APPLIED`, run the script again with `--resume` and the same owner names:
 
@@ -404,26 +456,22 @@ The script shows `ROTATION HALF-APPLIED` and a recovery command.
    canton/localnet/gg_rotate_owner_key.sh --resume owner3 owner1 owner2 owner4
    ```
 
-   The script uses the existing key of the new owner.
-   It does not do the changes that are already effective.
+   The script loads the stored signed changes. It calls no signer for them.
+   It does not load again the changes that are already effective.
    Then it does the checks of step 2.
 
-4. To rehearse the recovery, set `GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true` for one rotation:
+4. If the script shows `ROTATION NOT STARTED` or `ROTATION NOT APPLIED`, the removed key stays valid.
+   Run the script again with a different new owner name.
 
-   ```bash
-   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true \
-     canton/localnet/gg_rotate_owner_key.sh owner3 owner1 owner2 owner4
-   ```
-
-   The rotation stops after the namespace change and shows `ROTATION HALF-APPLIED`.
-   Then do step 3 without the variable.
+NOTE: The NTT scripts sign with `owner1` and `owner2`.
+After a rotation that removes one of them, set `NTT_GG_SIGNING_OWNERS` to two current owner names.
 
 ### Host nttCustody under the guardian namespace
 
-The `nttCustody` party holds the NTT lock/unlock reserves.
+The `nttCustody` party is the custody party of the NTT lock/unlock deployment (NTT PR 75).
+In this rehearsal, `nttCustody` holds no token.
 It has the same decentralized namespace as `guardianGovernance`.
 It has the same hosts, the same confirmation threshold and the same 2-of-3 signing keys.
-Thus one owner-key rotation changes the namespace and the signing keys of the two parties.
 
 1. Show the current owners:
 
@@ -440,8 +488,11 @@ Thus one owner-key rotation changes the namespace and the signing keys of the tw
    ```
 
    The script writes `../localnet-state/custody-artifacts.json`.
-   The output shows a `PTP party=nttCustody` line for each participant.
-   Make sure that these lines have the hosts and signing keys of the `PTP party=guardianGovernance` lines.
+   Before the load, the script checks that `guardianGovernance` has the guardian policy.
+   After the load, it reads the `nttCustody` mapping back and checks the same policy:
+   - Exactly 3 hosts, each with the `Confirmation` permission.
+   - A confirmation threshold of exactly 2.
+   - Exactly 3 signing keys with a threshold of exactly 2.
 
 4. Check the authority of the two parties. Use two current owner names:
 
@@ -456,38 +507,59 @@ Thus one owner-key rotation changes the namespace and the signing keys of the tw
      The error is `DAML_AUTHORIZATION_ERROR`.
    - An `nttCustody` submission with only `guardianGovernance` signatures fails.
    - A submission for the two parties with one pair of owner signatures succeeds.
+   - A submission for each party with one owner signature fails with `FAILED_TO_EXECUTE_TRANSACTION`.
+     The error shows 1 valid signature and 0 invalid signatures.
 
-After you allocate `nttCustody`, `gg_rotate_owner_key.sh` rotates the two parties in one run.
-The script stops before it makes a change if the namespace has a party that the script does not rotate.
-The script does the signing ceremony checks for each party.
+### Rehearse the rotation faults and the safety stop
 
-The script changes the signing keys of `guardianGovernance` first and of `nttCustody` second.
-If the second change fails, the rotation is half-applied for `nttCustody`.
+Do these rehearsals after `custody_host.sh` and `custody_authority_check.sh`.
+Each rehearsal uses new owner names with the prefix `rot-` or `stop-`.
+The last line of each rehearsal shows the current owner names.
 
-WARNING: In this half-applied state, the removed key and one kept key can sign for `nttCustody`.
-Do step 7 immediately.
-
-6. To rehearse this failure, set `GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS_OF=nttCustody` for one rotation:
+1. Run the fault rehearsal. Use the current owner names:
 
    ```bash
-   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS_OF=nttCustody \
-     canton/localnet/gg_rotate_owner_key.sh owner3 owner1 owner2 owner4
+   canton/localnet/gg_rotation_fault_check.sh owner3 owner1 owner2
    ```
 
-   The output shows `ROTATION HALF-APPLIED`.
-   It also shows one `HALF-APPLIED STATE` line for each party with each key pair.
+   The rehearsal runs these cases:
 
-7. Run the script again with `--resume` and the same owner names:
+   | Case | Fault | Expected result |
+   | - | - | - |
+   | R2 | The signer of the new owner fails. | `ROTATION NOT STARTED`. The topology does not change. |
+   | R1 | None. | `ROTATION done`. One effective time for the 3 mappings. |
+   | R3 | The load omits the `nttCustody` change. | `ROTATION HALF-APPLIED` names `nttCustody`. |
+   | R6 | None. Ceremony probes in the R3 state. | `nttCustody` accepts the removed key. `guardianGovernance` accepts the new key. |
+   | R3b | `--resume` of R3. The signer of the new owner fails. | `ROTATION done`. 0 signatures before the removed-owner check. |
+   | R4 | The `nttCustody` change has no signature of the new owner. | Measurement. |
+   | R5 | The root delegation is in load 2. | Measurement. |
+
+2. Record the `MEASURED` lines of R3, R4 and R5 in "Results of the rotation measurements".
+
+3. Run the safety stop rehearsal. Use the current owner names from the last line of step 1:
 
    ```bash
-   canton/localnet/gg_rotate_owner_key.sh --resume owner3 owner1 owner2 owner4
+   canton/localnet/gg_rotation_safety_stop_check.sh rot-r5-<time> owner1 owner2
    ```
 
-   The script does not change the namespace or the `guardianGovernance` signing keys again.
-   It changes the `nttCustody` signing keys. Then it does the checks for the two parties.
+   Each stop case must show `SAFETY STOP:`, and the topology must not change:
 
-NOTE: The NTT scripts sign with `owner1` and `owner2`.
-After a rotation that removes one of them, set `NTT_GG_SIGNING_OWNERS` to two current owner names.
+   | Case | State | Expected result |
+   | - | - | - |
+   | SS1 | The rotation list has only `guardianGovernance`. | Stop: the parties differ. |
+   | SS3 | The rotation list has an unknown party. | Stop: the parties differ. |
+   | SS2 | A half-applied rotation A. Rotation B starts without `--resume`. | Stop: the `nttCustody` keys are not the old or the new set. |
+   | SS4 | `--resume` of rotation A. | `ROTATION safety stop passed`, then `ROTATION done`. |
+
+#### Results of the rotation measurements
+
+**Open item:** run `gg_rotation_fault_check.sh` on LocalNet and record here:
+
+- R3: the mappings that changed.
+- R4: does the participant reject the complete load call, or apply a part of it?
+- R5: does Canton accept the root delegation and the namespace change in one load call?
+
+If R5 passes, the rotation can use one load call for all changes.
 
 ### Limits of the rehearsal
 
@@ -498,6 +570,12 @@ After a rotation that removes one of them, set `NTT_GG_SIGNING_OWNERS` to two cu
 - The vetting check fails at the submitting participant.
   It does not show the check on the other hosts for a submission that skips this check.
 - Each script changes the ledger state. Run each script in the order of this section.
+- Two owner keys and two confirming hosts can create any contract that has `nttCustody` as the only signatory.
+  Thus they can move each holding of `nttCustody` through the registry of that holding, without a VAA.
+  The VAA check is only in the NTT choices. Case 1 of `custody_authority_check.sh` shows this.
+- One owner key pair signs for the two parties in one submission.
+  The parties have separate Daml authority, but not separate key authority.
+  Case 5 of `custody_authority_check.sh` shows this.
 
 ## NTT end-to-end run
 
