@@ -10,6 +10,7 @@
 # Each active EmitterRegistry must have nextId == firstId; historyMaxRegistryNextId is reported only.
 # Exit 0: no duplicate. Exit 1: a duplicate (operator, owner, emitterId) among active Emitters, or a check failed.
 # EXPECT_ACTIVE_REGISTRIES (default 0) is the number of active EmitterRegistry contracts of the pair that the scan requires.
+# EXPECTED_CORE_PACKAGE_ID (required) is the only wormhole-core package id that this participant may vet.
 # CURL_MAX_TIME_SECONDS (default 60) bounds each Ledger API call.
 # The script uses only curl and jq, thus a guardian can run it against a production participant.
 set -euo pipefail
@@ -19,6 +20,7 @@ readonly EXPECT_ACTIVE_REGISTRIES="${EXPECT_ACTIVE_REGISTRIES:-0}"
 readonly CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-60}"
 readonly CURL_CONNECT_TIMEOUT_SECONDS=10
 readonly CORE_PACKAGE_NAME="wormhole-core"
+readonly VETTING_PAGE_SIZE=1000
 readonly EMITTER_TEMPLATE_SUFFIX=":Wormhole.Core.State:Emitter"
 readonly REGISTRY_TEMPLATE_SUFFIX=":Wormhole.Core.State:EmitterRegistry"
 readonly EMITTER_PACKAGE_NAME_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
@@ -47,6 +49,8 @@ begin_exclusive="$5"
 [[ "$SCAN_PAGE_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "SCAN_PAGE_SIZE is not a positive integer: $SCAN_PAGE_SIZE" >&2; exit 2; }
 [[ "$EXPECT_ACTIVE_REGISTRIES" =~ ^[0-9]+$ ]] || { echo "EXPECT_ACTIVE_REGISTRIES is not a non-negative integer" >&2; exit 2; }
 [[ "$CURL_MAX_TIME_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "CURL_MAX_TIME_SECONDS is not a positive integer" >&2; exit 2; }
+[[ "${EXPECTED_CORE_PACKAGE_ID:-}" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "EXPECTED_CORE_PACKAGE_ID is not set to a 64-character lowercase hex package id" >&2; exit 2; }
 if [[ $# -eq 6 ]]; then
   baseline_max_emitter_id="$6"
   # At most 16 digits, thus the comparison is exact in bash 64-bit arithmetic.
@@ -90,6 +94,20 @@ if [[ "$user_rights" != "$expected_rights" ]]; then
   echo "user $user_id has rights $user_rights; the scan needs exactly $expected_rights" >&2
   exit 1
 fi
+
+# SECURITY: an older wormhole-core vetted next to the expected one can still create Emitters outside the registry.
+curl_ledger_api participant-id "$work_dir/participant.json" -f "$json_api_url/v2/parties/participant-id"
+participant_id="$(jq -er .participantId "$work_dir/participant.json")"
+curl_ledger_api package-vetting "$work_dir/vetting.json" -f -X POST "$json_api_url/v2/package-vetting/list" \
+  -H 'Content-Type: application/json' \
+  -d "$(jq -n --arg packageName "$CORE_PACKAGE_NAME" --arg participant "$participant_id" --argjson pageSize "$VETTING_PAGE_SIZE" '{
+    packageMetadataFilter: {packageIds: [], packageNamePrefixes: [$packageName]},
+    topologyStateFilter: {participantIds: [$participant], synchronizerIds: []},
+    pageToken: "", pageSize: $pageSize}')"
+[[ "$(jq -r '.nextPageToken // ""' "$work_dir/vetting.json")" == "" ]] \
+  || { echo "the participant vets more than $VETTING_PAGE_SIZE wormhole-core* packages" >&2; exit 1; }
+vetted_core_package_ids="$(jq -c --arg packageName "$CORE_PACKAGE_NAME" \
+  '[.vettedPackages[].packages[] | select(.packageName == $packageName) | .packageId] | unique' "$work_dir/vetting.json")"
 
 curl_ledger_api ledger-end "$work_dir/ledger-end.json" -f "$json_api_url/v2/state/ledger-end"
 end_inclusive="$(jq -er .offset "$work_dir/ledger-end.json")"
@@ -172,7 +190,8 @@ jq -c --arg operator "$operator_party" --arg gg "$guardian_governance_party" --a
 
 jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
   --argjson baseline "$baseline_max_emitter_id" --argjson begin "$begin_exclusive" --argjson end "$end_inclusive" \
-  --argjson expectedRegistries "$EXPECT_ACTIVE_REGISTRIES" --arg operator "$operator_party" --arg gg "$guardian_governance_party" '
+  --argjson expectedRegistries "$EXPECT_ACTIVE_REGISTRIES" --arg operator "$operator_party" --arg gg "$guardian_governance_party" \
+  --arg expectedCorePackageId "$EXPECTED_CORE_PACKAGE_ID" --argjson vettedCorePackageIds "$vetted_core_package_ids" '
   . as $history | $active[0] as $active
   | ($history | map(select(.kind == "Emitter"))) as $historyEmitters
   | ($active | map(select(.kind == "Emitter"))) as $activeEmitters
@@ -201,7 +220,10 @@ jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
       activeRegistriesWithWrongNextId: ($activeRegistries | map(select(.nextId != ($historyMaxEmitterId + 1)))
         | map({contractId, nextId: .nextIdText})),
       firstId: ($historyMaxEmitterId + 1),
-      expectedActiveRegistries: $expectedRegistries
+      expectedActiveRegistries: $expectedRegistries,
+      expectedCorePackageId: $expectedCorePackageId,
+      unexpectedVettedCorePackageIds: ($vettedCorePackageIds - [$expectedCorePackageId]),
+      expectedCorePackageVetted: ($vettedCorePackageIds | index($expectedCorePackageId) != null)
     }' "$work_dir/history.jsonl" > "$work_dir/summary.json"
 cat "$work_dir/summary.json"
 
@@ -220,6 +242,10 @@ failures=()
   || failures+=("active EmitterRegistry count is not $EXPECT_ACTIVE_REGISTRIES")
 [[ "$(jq '.activeRegistriesWithWrongNextId | length' "$work_dir/summary.json")" -eq 0 ]] \
   || failures+=("an active EmitterRegistry has nextId other than historyMaxEmitterId + 1")
+[[ "$(jq '.unexpectedVettedCorePackageIds | length' "$work_dir/summary.json")" -eq 0 ]] \
+  || failures+=("unexpected vetted wormhole-core package ids: $(jq -c .unexpectedVettedCorePackageIds "$work_dir/summary.json")")
+[[ "$(jq '.expectedCorePackageVetted' "$work_dir/summary.json")" == "true" ]] \
+  || failures+=("the expected wormhole-core package $EXPECTED_CORE_PACKAGE_ID is not vetted")
 if [[ ${#failures[@]} -gt 0 ]]; then
   printf 'emitter_id_scan: FAIL: %s\n' "${failures[@]}" >&2
   exit 1
