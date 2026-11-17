@@ -1,100 +1,209 @@
 package cantonclient
 
-// Temporary generator for a Daml test vector: a governance VAA (SetMessageFee,
-// chain 72) signed by the well-known devnet guardian key. Run:
-//   go test ./pkg/cantonclient/ -run TestGenerateCantonVector -v
-// then copy the printed hex into canton/test/daml/Test/TestCore.daml. Not a real test.
+// Generates the hex fixtures in canton/test/daml and asserts the Daml literals
+// match (TestCore.daml and TestRedTeamCore.daml). Rewrite them after a deliberate change with:
+//
+//	CANTON_VECTORGEN=write go test -count=1 ./pkg/cantonclient/ -run TestCantonDamlFixtures
+//
+// The fixture file is outside the node module, so the Go test cache does not
+// track it: run this guard with -count=1.
 
 import (
 	"encoding/binary"
 	"encoding/hex"
 	"os"
+	"path/filepath"
+	"regexp"
 	"testing"
+	"time"
 
+	"github.com/certusone/wormhole/node/pkg/devnet"
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/holiman/uint256"
+	"github.com/stretchr/testify/require"
+	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
-func TestGenerateCantonVector(t *testing.T) {
-	if os.Getenv("GEN_CANTON_VECTORS") == "" {
-		t.Skip("set GEN_CANTON_VECTORS=1 to regenerate the Daml test vector")
-	}
-	// Well-known Wormhole devnet guardian key (address beFA429d...05d0FBe).
-	priv, err := crypto.HexToECDSA("cfb12303a19cde580bb4dd771639b0d26bc68353645571a8cff516ab2ee113a0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := crypto.PubkeyToAddress(priv.PublicKey)
-	pub := crypto.FromECDSAPub(&priv.PublicKey) // 65-byte uncompressed 0x04||X||Y
+const (
+	damlTestCorePath = "../../../canton/test/daml/Test/TestCore.daml"
 
-	// Governance packet: module "Core" (0x..436f7265) | action 3 (SetMessageFee)
-	// | chain 72 | fee (uint256 = 1000).
-	module, _ := hex.DecodeString("00000000000000000000000000000000000000000000000000000000436f7265")
-	payload := append([]byte{}, module...)
-	payload = append(payload, 3)                     // action
-	payload = append(payload, []byte{0x00, 0x48}...) // chain 72
-	fee := make([]byte, 32)
-	binary.BigEndian.PutUint64(fee[24:], 1000)
-	payload = append(payload, fee...)
+	devnetGuardianAddressHex = "befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
 
-	// VAA body.
-	gov, _ := hex.DecodeString("0000000000000000000000000000000000000000000000000000000000000004")
-	body := make([]byte, 0)
-	ts := make([]byte, 4)
-	binary.BigEndian.PutUint32(ts, 1700000000)
-	body = append(body, ts...)      // timestamp
-	body = append(body, 0, 0, 0, 0) // nonce 0
-	body = append(body, 0x00, 0x01) // emitterChain 1 (governance)
-	body = append(body, gov...)     // emitterAddress 0x..04
-	seq := make([]byte, 8)
-	binary.BigEndian.PutUint64(seq, 1)
-	body = append(body, seq...) // sequence 1
-	body = append(body, 0x00)   // consistencyLevel 0
-	body = append(body, payload...)
+	fixtureTimestampUnixSeconds = 1700000000
+	fixtureNonce                = uint32(0)
+	fixtureSequence             = uint64(1)
+	fixtureConsistencyLevel     = uint8(0)
+	fixtureGuardianSetIndex     = uint32(0)
+	fixtureSetMessageFeeAmount  = uint64(1000)
 
-	digest := crypto.Keccak256(crypto.Keccak256(body))
-	sig, err := crypto.Sign(digest, priv) // 65 bytes R||S||V
-	if err != nil {
-		t.Fatal(err)
-	}
+	addressVectorRegistrar = "vector-operator::1220deadbeef"
+	addressVectorOwner     = "vector-owner::1220cafebabe"
+	addressVectorEmitterID = uint64(7)
+	emitterAddressTag      = "wormhole:emitter:v1"
+)
 
-	vaa := []byte{0x01}           // version
-	vaa = append(vaa, 0, 0, 0, 0) // guardianSetIndex 0
-	vaa = append(vaa, 0x01)       // sig count
-	vaa = append(vaa, 0x00)       // guardian index 0
-	vaa = append(vaa, sig...)     // r||s||v
-	vaa = append(vaa, body...)
-
-	t.Logf("guardianAddr = %x", addr.Bytes())
-	t.Logf("pubKey       = %x", pub)
-	t.Logf("vaa          = %x", vaa)
-	t.Logf("innerHash    = %x", crypto.Keccak256(body))
-	t.Logf("digest       = %x", digest)
+type damlHexFixture struct {
+	name string
+	// First submatch is the hex literal.
+	damlLiteralPattern *regexp.Regexp
+	generateHex        func(t *testing.T) string
 }
 
-// TestGenerateAddressVectors prints the canonical registry-address test vector
-// shared with canton/test/daml/Test/TestCore.daml (testAddressVector) and pinned
-// on the Go side by pkg/watchers/canton/watcher_test.go. The preimage is
-//
-//	utf8(tag) ‖ uint32be(len(registrar)) ‖ utf8(registrar)
-//	          ‖ uint32be(len(owner))     ‖ utf8(owner) ‖ uint64be(id)
-//
-// keccak256 of which is the 32-byte Wormhole emitter address.
-func TestGenerateAddressVectors(t *testing.T) {
-	if os.Getenv("GEN_CANTON_VECTORS") == "" {
-		t.Skip("set GEN_CANTON_VECTORS=1 to regenerate the Daml test vector")
+func damlTopLevelHexPattern(binding string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(binding) + ` = "([0-9a-f]+)"$`)
+}
+
+// Matches the "=== \"<hex>\"" assertion within the indented body of binding.
+func damlIndentedBodyHexPattern(binding string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(binding) + ` =\n(?: [^\n]*\n)*? +=== "([0-9a-f]{64})"$`)
+}
+
+func damlHexFixtures() []damlHexFixture {
+	return []damlHexFixture{
+		{
+			name:               "devnetGuardian",
+			damlLiteralPattern: damlTopLevelHexPattern("devnetGuardian"),
+			generateHex: func(t *testing.T) string {
+				guardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(0)
+				guardianAddressHex := hex.EncodeToString(crypto.PubkeyToAddress(guardianKey.PublicKey).Bytes())
+				require.Equal(t, devnetGuardianAddressHex, guardianAddressHex)
+				return guardianAddressHex
+			},
+		},
+		{
+			name:               "devnetGuardianPubKey",
+			damlLiteralPattern: damlTopLevelHexPattern("devnetGuardianPubKey"),
+			generateHex: func(t *testing.T) string {
+				guardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(0)
+				return hex.EncodeToString(crypto.FromECDSAPub(&guardianKey.PublicKey))
+			},
+		},
+		{
+			name:               "govSetFeeVAA",
+			damlLiteralPattern: damlTopLevelHexPattern("govSetFeeVAA"),
+			generateHex:        generateGovSetMessageFeeVAAHex,
+		},
+		{
+			name:               "testAddressVector",
+			damlLiteralPattern: damlIndentedBodyHexPattern("testAddressVector"),
+			generateHex:        generateAddressVectorHex,
+		},
 	}
-	const registrar = "vector-operator::1220deadbeef"
-	const owner = "vector-owner::1220cafebabe"
-	const id = uint64(7)
-	lp := func(s string) []byte {
-		var l [4]byte
-		binary.BigEndian.PutUint32(l[:], uint32(len(s))) //nolint:gosec // fixture strings are short
-		return append(l[:], s...)
+}
+
+// SetMessageFee(chain = Canton, fee = 1000) from the governance emitter, signed by devnet guardian 0.
+func generateGovSetMessageFeeVAAHex(t *testing.T) string {
+	setMessageFeePayload, err := vaa.BodyCoreBridgeSetMessageFee{
+		ChainID:    vaa.ChainIDCanton,
+		MessageFee: uint256.NewInt(fixtureSetMessageFeeAmount),
+	}.Serialize()
+	require.NoError(t, err)
+
+	governanceVAA := &vaa.VAA{
+		Version:          vaa.SupportedVAAVersion,
+		GuardianSetIndex: fixtureGuardianSetIndex,
+		Timestamp:        time.Unix(fixtureTimestampUnixSeconds, 0),
+		Nonce:            fixtureNonce,
+		Sequence:         fixtureSequence,
+		ConsistencyLevel: fixtureConsistencyLevel,
+		EmitterChain:     vaa.GovernanceChain,
+		EmitterAddress:   vaa.GovernanceEmitter,
+		Payload:          setMessageFeePayload,
 	}
-	buf := append([]byte("wormhole:emitter:v1"), lp(registrar)...)
-	buf = append(buf, lp(owner)...)
-	var idb [8]byte
-	binary.BigEndian.PutUint64(idb[:], id)
-	buf = append(buf, idb[:]...)
-	t.Logf("emitter(%s, %s, %d) = %x", registrar, owner, id, crypto.Keccak256(buf))
+	guardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(0)
+	governanceVAA.AddSignature(guardianKey, 0)
+
+	require.NoError(t, governanceVAA.Verify([]common.Address{common.HexToAddress(devnetGuardianAddressHex)}))
+	otherGuardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(1)
+	require.Error(t, governanceVAA.Verify([]common.Address{crypto.PubkeyToAddress(otherGuardianKey.PublicKey)}))
+
+	encodedVAA, err := governanceVAA.Marshal()
+	require.NoError(t, err)
+	return hex.EncodeToString(encodedVAA)
+}
+
+// keccak256(utf8(tag) || lp(registrar) || lp(owner) || uint64be(emitterID)), lp = uint32be length prefix.
+func generateAddressVectorHex(t *testing.T) string {
+	appendLengthPrefixed := func(preimage []byte, partyID string) []byte {
+		var lengthPrefix [4]byte
+		binary.BigEndian.PutUint32(lengthPrefix[:], uint32(len(partyID))) //nolint:gosec // fixture strings are short
+		return append(append(preimage, lengthPrefix[:]...), partyID...)
+	}
+	preimage := []byte(emitterAddressTag)
+	preimage = appendLengthPrefixed(preimage, addressVectorRegistrar)
+	preimage = appendLengthPrefixed(preimage, addressVectorOwner)
+	var emitterIDBytes [8]byte
+	binary.BigEndian.PutUint64(emitterIDBytes[:], addressVectorEmitterID)
+	preimage = append(preimage, emitterIDBytes[:]...)
+
+	emitterAddress := crypto.Keccak256(preimage)
+	require.Len(t, emitterAddress, 32)
+	return hex.EncodeToString(emitterAddress)
+}
+
+func TestCantonDamlFixtures(t *testing.T) {
+	fixtureFiles := []struct {
+		damlPath string
+		fixtures []damlHexFixture
+	}{
+		{damlPath: damlTestCorePath, fixtures: damlHexFixtures()},
+		{damlPath: damlRedTeamCorePath, fixtures: redTeamDamlHexFixtures()},
+	}
+	for _, fixtureFile := range fixtureFiles {
+		t.Run(filepath.Base(fixtureFile.damlPath), func(t *testing.T) {
+			checkOrRewriteDamlFixtures(t, fixtureFile.damlPath, fixtureFile.fixtures)
+		})
+	}
+}
+
+func checkOrRewriteDamlFixtures(t *testing.T, damlPath string, fixtures []damlHexFixture) {
+	damlSourceBytes, err := os.ReadFile(damlPath)
+	require.NoError(t, err)
+	damlSource := string(damlSourceBytes)
+	rewriteFixtures := os.Getenv("CANTON_VECTORGEN") == "write"
+
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			matches := fixture.damlLiteralPattern.FindAllStringSubmatchIndex(damlSource, -1)
+			require.Len(t, matches, 1, "fixture %s must appear exactly once in %s", fixture.name, damlPath)
+			literalStart, literalEnd := matches[0][2], matches[0][3]
+
+			generatedHex := fixture.generateHex(t)
+			require.NotEmpty(t, generatedHex)
+
+			if rewriteFixtures {
+				damlSource = damlSource[:literalStart] + generatedHex + damlSource[literalEnd:]
+				t.Logf("%s = %s", fixture.name, generatedHex)
+				return
+			}
+			require.Equal(t, generatedHex, damlSource[literalStart:literalEnd],
+				"Daml fixture drifted; rerun with CANTON_VECTORGEN=write")
+		})
+	}
+
+	if rewriteFixtures {
+		require.False(t, t.Failed(), "refusing to rewrite %s after a failed fixture", damlPath)
+		writeFileAtomically(t, damlPath, []byte(damlSource))
+	}
+}
+
+// writeFileAtomically replaces path via a same-directory temp file and rename, keeping path's mode.
+func writeFileAtomically(t *testing.T, path string, contents []byte) {
+	t.Helper()
+	originalInfo, err := os.Stat(path)
+	require.NoError(t, err)
+	tempFile, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	require.NoError(t, err)
+	tempPath := tempFile.Name()
+	t.Cleanup(func() { _ = os.Remove(tempPath) })
+
+	_, writeErr := tempFile.Write(contents)
+	syncErr := tempFile.Sync()
+	closeErr := tempFile.Close()
+	require.NoError(t, writeErr)
+	require.NoError(t, syncErr)
+	require.NoError(t, closeErr)
+	require.NoError(t, os.Chmod(tempPath, originalInfo.Mode().Perm()))
+	require.NoError(t, os.Rename(tempPath, path))
 }

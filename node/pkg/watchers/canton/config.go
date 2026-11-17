@@ -22,10 +22,10 @@ type WatcherConfig struct {
 	// spoofing risk, so Create REQUIRES it outside unsafe dev mode. (Daml
 	// package upgrades change the package-id, so it must be updated on upgrade.)
 	PackageID string
-	// ReadAsParty optionally narrows the update stream to a single Canton party.
-	// Production guardians set this to the guardianGovernance party (signatory of
-	// CoreState, observer of every Emitter). Empty observes every party on the
-	// participant (the devnet default).
+	// ReadAsParty narrows the update stream and reobservation lookups to the
+	// guardianGovernance party (signatory of CoreState, observer of every
+	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
+	// party on the participant.
 	ReadAsParty string
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
 	// All three fields set enables per-RPC bearer tokens; all empty disables

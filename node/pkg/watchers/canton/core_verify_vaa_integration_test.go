@@ -17,72 +17,30 @@
 //	go test -tags integration -run TestCantonParseAndVerifyVAAExternalVerifierIntegration ./pkg/watchers/canton -v
 //
 // Requires `dpm` (PATH or ~/.dpm/bin) + a JDK; skipped otherwise. Slow (boots
-// a JVM sandbox), so it is excluded from the default build. findDpm/runCmd
-// are shared with watcher_integration_test.go.
+// a JVM sandbox), so it is excluded from the default build. startSandbox is
+// shared with watcher_integration_test.go.
 package canton
 
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
-	"syscall"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestCantonParseAndVerifyVAAExternalVerifierIntegration(t *testing.T) {
-	dpm := findDpm(t)
-
-	cantonDir, err := filepath.Abs("../../../../canton")
-	require.NoError(t, err)
-	dar := filepath.Join(cantonDir, "test", ".daml", "dist", "wormhole-core-test-0.1.0.dar")
-
-	port := os.Getenv("CANTON_SANDBOX_PORT")
-	if port == "" {
-		port = "6865"
-	}
-	addr := "localhost:" + port
-
-	runCmd(t, cantonDir, dpm, "build", "--all")
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sandboxDir := t.TempDir()
-	logPath := filepath.Join(sandboxDir, "sandbox.log")
-	logFile, err := os.Create(logPath)
-	require.NoError(t, err)
-	defer logFile.Close()
-
-	sandbox := exec.CommandContext(ctx, dpm, "sandbox", "--no-tty")
-	sandbox.Dir = sandboxDir
-	sandbox.Stdout = logFile
-	sandbox.Stderr = logFile
-	sandbox.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, sandbox.Start())
-	t.Cleanup(func() {
-		if sandbox.Process != nil {
-			_ = syscall.Kill(-sandbox.Process.Pid, syscall.SIGKILL)
-		}
-	})
-
-	require.Eventually(t, func() bool {
-		b, _ := os.ReadFile(logPath)
-		return strings.Contains(string(b), "Canton sandbox is ready")
-	}, 180*time.Second, 2*time.Second, "sandbox never became ready")
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	require.NoError(t, err)
-	_ = conn.Close()
+	dpm, dar, port := startSandbox(t, ctx)
 
 	// Upload+vet the DAR and run the scenario. All the real assertions (the
 	// verification succeeding, the decoded VAA fields matching) live inside the
 	// script; a non-zero exit here means one of them failed.
-	partyFile := filepath.Join(sandboxDir, "verifier.json")
+	partyFile := filepath.Join(t.TempDir(), "verifier.json")
 	out, err := exec.Command(dpm, "script", "--dar", dar, "--upload-dar", "yes",
 		"--script-name", "Test.TestCore:integrationParseAndVerifyVAAByExternalVerifier",
 		"--ledger-host", "localhost", "--ledger-port", port,

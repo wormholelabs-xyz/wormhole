@@ -49,6 +49,7 @@ import DA.Map qualified as Map
 import DA.Optional (fromSomeNote)
 import DA.Set (Set)
 import DA.Set qualified as Set
+import DA.Text qualified as T
 import DA.Time (addRelTime, seconds)
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import Splice.Api.Token.HoldingV1 (InstrumentId)
@@ -84,6 +85,16 @@ data WormholeMessage = WormholeMessage with
 -- | Maximum message payload size in bytes (whitepaper 0004).
 maxPayloadBytes : Int
 maxPayloadBytes = 750
+
+-- | Wire ranges of 'WormholeMessage' fields; the watcher drops a message
+-- outside them (@cantongrpc.go@ @decodeWormholeMessage@). The on-ledger payload
+-- check is stricter than the watcher's: the watcher also decodes uppercase and
+-- @0x@-prefixed hex (@hexField@); 'PublishMessage' accepts only lowercase hex.
+maxNonceUint32 : Int
+maxNonceUint32 = 4294967295
+
+maxConsistencyLevelUint8 : Int
+maxConsistencyLevelUint8 = 255
 
 ----------------------------------------------------------------------
 -- Core state singleton
@@ -366,27 +377,51 @@ emitterAddressFor : Party -> Party -> Int -> Bytes32
 emitterAddressFor registrar owner emitterId =
   derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId)
 
--- | Allocates monotonically increasing emitter ids, one registry per operator.
--- Sequential-id discipline is operator-behavioral; what a rogue operator cannot
--- do is reuse an id to impersonate an existing emitter — that address includes
--- the owner, whose signature it lacks (see 'Emitter').
+-- | Allocates monotonically increasing emitter ids, one registry per
+-- (operator, guardianGovernance). Created with 'CoreState' in the genesis
+-- ceremony.
+--
+-- SECURITY: guardianGovernance co-signs, so the operator alone cannot create,
+-- archive, or re-price a registry, and cannot lower @nextId@ (A14-3). A reused
+-- id gives an honest owner's second 'Emitter' the address of its first, both
+-- at sequence 0. A registry under a rogue guardianGovernance can publish
+-- against a shadow 'CoreState' of the same rogue party. The real
+-- guardianGovernance is not an informee of those transactions, so the
+-- guardian watchers do not see them.
 template EmitterRegistry
   with
     operator           : Party
-    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
-                                -- signatory) in RegisterEmitter's fee charge
+    guardianGovernance : Party  -- co-signer; also pinned in RegisterEmitter's
+                                -- fee charge
     registrationFee    : Int    -- onboarding fee, 10^-10 feeInstrument units;
-                                -- operator-set at creation, 0 for free
+                                -- 0 for free; changed by SetRegistrationFee
     nextId             : Int
   where
-    signatory operator
+    signatory operator, guardianGovernance
+
+    -- | Re-prices registration and keeps @nextId@, so a fee change never
+    -- re-enters the counter by hand. Controllers are the two signatories: the
+    -- core governance VAA set (sdk/vaa/payloads.go) has no registration-fee
+    -- action, and guardianGovernance is the guardian threshold party.
+    choice SetRegistrationFee : ContractId EmitterRegistry
+      with
+        newRegistrationFee : Int
+      controller operator, guardianGovernance
+      do
+        assertMsg "registration fee must not be negative" (newRegistrationFee >= 0)
+        successor <- create this with registrationFee = newRegistrationFee
+        successorRegistry <- fetch successor
+        assertMsg "SetRegistrationFee changed nextId" (successorRegistry.nextId == nextId)
+        pure successor
 
     -- | Direct, requester-submitted registration: allocates the next id and
     -- creates the co-signed 'Emitter' in one transaction, no operator crank —
-    -- the flexible controller brings the @requester@'s signature, the operator's
-    -- is inherited from this contract. Permissionless (EVM/Sui parity); the
-    -- requester needs this registry disclosed (README §4.7), plus the 'CoreState'
-    -- disclosure and a fee allocation when @registrationFee > 0@ (README §4.2).
+    -- the flexible controller brings the @requester@'s signature; the operator's
+    -- and guardianGovernance's are inherited from this contract, so
+    -- guardianGovernance's hosts confirm every registration. Permissionless
+    -- (EVM/Sui parity); the requester needs this registry disclosed (README
+    -- §4.7), plus the 'CoreState' disclosure and a fee allocation when
+    -- @registrationFee > 0@ (README §4.2).
     -- Consuming, so racing registrations contend here — the loser re-resolves
     -- and retries.
     --
@@ -556,6 +591,16 @@ template Emitter
         feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
       controller owner, payer
       do
+        -- Before the fee charge: a message the watcher drops must not consume
+        -- a sequence or a fee. The hex check is stricter than the watcher's.
+        -- Length bound first: caps the cost of the hex scan.
+        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
+        assertMsg "payload is not lowercase hex" (isLowerHex payload)
+        assertMsg "payload has an odd hex length" (T.length payload % 2 == 0)
+        assertMsg "nonce is negative" (nonce >= 0)
+        assertMsg "nonce exceeds uint32" (nonce <= maxNonceUint32)
+        assertMsg "consistency level is negative" (consistencyLevel >= 0)
+        assertMsg "consistency level exceeds uint8" (consistencyLevel <= maxConsistencyLevelUint8)
         -- Pin the fee-custody anchor BEFORE charging: @guardianGovernance@ (not
         -- just @operator@, which a forged CoreState would match) determines where
         -- the fee lands, so this check rejects a shadow CoreState under a rogue
@@ -566,7 +611,6 @@ template Emitter
           payer
           feeAllocation
         assertMsg "core state operator mismatch" (csOperator == operator)
-        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
         newEmitterCid <- create this with sequence = sequence + 1
         pure (newEmitterCid, WormholeMessage with
           registrar = operator
