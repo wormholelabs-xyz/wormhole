@@ -106,8 +106,7 @@ template CoreState
   with
     operator           : Party              -- advances the singleton; no power over outcomes
     guardianGovernance : Party              -- guardians' governance anchor (threshold party)
-    guardianObserver   : Party              -- read-only guardian observer
-    chainId            : Int                -- 72 (Canton)
+    chainId            : Int                -- 75 (Canton)
     governanceChainId  : Int                -- 1 (Solana)
     governanceContract : Bytes32            -- governance emitter address
     guardianSetIndex   : Int                -- index of the current set
@@ -127,8 +126,6 @@ template CoreState
     -- forging the guardian set (module header). Transitions inherit its
     -- authority from the archived contract, so it signs only at genesis.
     signatory operator, guardianGovernance
-    -- Lets guardians watch guardian-set / governance transitions.
-    observer guardianObserver
 
     -- | Read-only VAA verification against the CURRENT guardian set, for the
     -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
@@ -378,7 +375,6 @@ template EmitterRegistry
     operator           : Party
     guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
                                 -- signatory) in RegisterEmitter's fee charge
-    guardianObserver   : Party  -- threaded into each new Emitter by RegisterEmitter
     registrationFee    : Int    -- onboarding fee, 10^-10 feeInstrument units;
                                 -- operator-set at creation, 0 for free
     nextId             : Int
@@ -430,7 +426,6 @@ template EmitterRegistry
           operator
           guardianGovernance
           owner = requester
-          guardianObserver
           emitterId = nextId
           emitterAddress = emitterAddressFor operator requester nextId
           sequence = 0
@@ -513,10 +508,9 @@ template ReplayRootRegistry
 template Emitter
   with
     operator           : Party
-    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
-                                -- signatory) in PublishMessage's fee charge
+    guardianGovernance : Party  -- CoreState fee-custody anchor, pinned in
+                                -- PublishMessage's fee charge; observer
     owner              : Party
-    guardianObserver   : Party  -- read-only guardian observer
     emitterId          : Int      -- registry-allocated
     emitterAddress     : Bytes32  -- emitterAddressFor operator owner emitterId, set at creation
     sequence           : Int      -- next sequence to assign
@@ -526,8 +520,9 @@ template Emitter
     -- verify by replay, and Canton's msg.sender analog. Also means the operator
     -- alone cannot archive an emitter (Archive needs all signatories).
     signatory operator, owner
-    -- Lets guardians watch PublishMessage exercises and their results.
-    observer guardianObserver
+    -- Every guardian participant hosts guardianGovernance, so this makes
+    -- guardians informees of each PublishMessage, for every owner.
+    observer guardianGovernance
 
     -- | Publish a Wormhole message. Returns the sequence-bumped successor
     -- 'Emitter' cid alongside the 'WormholeMessage' the watcher observes

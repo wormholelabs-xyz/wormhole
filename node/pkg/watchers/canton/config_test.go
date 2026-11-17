@@ -10,13 +10,21 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 )
 
+const testGovernanceParty = "guardianGovernance::1220abcd"
+
 func createWith(t *testing.T, pkgID string, env common.Environment) error {
 	t.Helper()
+	return createWithReadAs(t, pkgID, testGovernanceParty, env)
+}
+
+func createWithReadAs(t *testing.T, pkgID string, readAsParty string, env common.Environment) error {
+	t.Helper()
 	wc := &WatcherConfig{
-		NetworkID: "canton",
-		ChainID:   vaa.ChainIDCanton,
-		Rpc:       "canton:6865",
-		PackageID: pkgID,
+		NetworkID:   "canton",
+		ChainID:     vaa.ChainIDCanton,
+		Rpc:         "canton:6865",
+		PackageID:   pkgID,
+		ReadAsParty: readAsParty,
 	}
 	_, _, err := wc.Create(
 		make(chan *common.MessagePublication, 1),
@@ -46,14 +54,30 @@ func TestCreateRequiresPackageIDOutsideDevMode(t *testing.T) {
 	}
 }
 
+// TestCreateRequiresReadAsPartyOutsideDevMode: the wildcard stream is dev-only.
+func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
+	for _, env := range []common.Environment{common.MainNet, common.TestNet} {
+		err := createWithReadAs(t, "abc123", "", env)
+		require.Error(t, err, "empty readAsParty must be rejected in %s", env)
+		assert.Contains(t, err.Error(), "ReadAsParty")
+	}
+
+	require.NoError(t, createWithReadAs(t, "abc123", "", common.UnsafeDevNet))
+
+	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
+		require.NoError(t, createWithReadAs(t, "abc123", testGovernanceParty, env), "readAsParty must be accepted in %s", env)
+	}
+}
+
 func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		NetworkID: "canton",
-		ChainID:   vaa.ChainIDCanton,
-		Rpc:       "canton:6865",
-		PackageID: "pkg",
-		Auth:      auth,
+		NetworkID:   "canton",
+		ChainID:     vaa.ChainIDCanton,
+		Rpc:         "canton:6865",
+		PackageID:   "pkg",
+		ReadAsParty: testGovernanceParty,
+		Auth:        auth,
 	}
 	_, _, err := wc.Create(
 		make(chan *common.MessagePublication, 1),

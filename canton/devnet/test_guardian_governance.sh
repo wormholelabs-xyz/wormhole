@@ -54,7 +54,8 @@ fi
 # --- Build and upload the production DAR (CoreState lives there). ---
 log "building wormhole-core DAR"
 (cd "${REPO_ROOT}/canton" && dpm build --all >/dev/null)
-CORE_DAR="${REPO_ROOT}/canton/core/.daml/dist/wormhole-core-0.1.0.dar"
+CORE_VERSION="$(awk '/^version:/ {print $2}' "${REPO_ROOT}/canton/core/daml.yaml")"
+CORE_DAR="${REPO_ROOT}/canton/core/.daml/dist/wormhole-core-${CORE_VERSION}.dar"
 
 UPLOAD_SCRIPT="${WORK_DIR}/upload_dar.canton"
 cat > "${UPLOAD_SCRIPT}" <<EOF
