@@ -446,7 +446,7 @@ testRedTeamA9PublishPayloadBoundary = do
       coreStateCid, payer = owner, feeAllocation = None
   checkAttackFailedWith "A9 751-byte payload" "payload exceeds 750 bytes" oversizeResult
 
--- | The watcher drops a message whose payload is not even-length lowercase hex
+-- | The watcher drops a message whose payload is not even-length hex
 -- or whose nonce / consistency level is outside uint32 / uint8
 -- (cantongrpc.go decodeWormholeMessage). PublishMessage must reject them:
 -- an accepted one consumes a sequence number the guardians never sign.
