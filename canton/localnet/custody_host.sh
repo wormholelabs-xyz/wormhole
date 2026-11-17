@@ -48,7 +48,11 @@ if [[ "$allocation_status" -ne 0 ]] || ! grep -q '^CUSTODY done' "$gg_work_dir/a
   grep -E 'ERROR|error|Exception' "$gg_work_dir/allocation.log" | head -n 20 >&2
   exit 1
 fi
-custody_party_id="$(jq -er .partyId "$CUSTODY_ARTIFACTS")"
+if ! grep -qxF 'CUSTODY protocol version: 37' "$gg_work_dir/allocation.log"; then
+  echo "FAIL: the allocation did not report protocol version 37" >&2
+  exit 1
+fi
+custody_party_id="$(read_custody_party_id "$CUSTODY_ARTIFACTS")"
 if [[ "${custody_party_id#*::}" != "${GG_PARTY#*::}" ]]; then
   echo "FAIL: $custody_party_id is outside the namespace of $GG_PARTY" >&2
   exit 1

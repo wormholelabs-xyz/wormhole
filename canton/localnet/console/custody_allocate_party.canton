@@ -21,7 +21,9 @@ val participant = participants.remote.find(_.name == "app-provider").getOrElse(t
 val synchronizerId = participant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
   .getOrElse(throw new RuntimeException("app-provider is not connected to global")).physicalSynchronizerId
 val synchronizerTopologyStore = TopologyStoreId.Synchronizer(synchronizerId)
-val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
+val protocolVersion = synchronizerId.protocolVersion
+println(s"CUSTODY protocol version: $protocolVersion")
+require(protocolVersion == com.digitalasset.canton.version.ProtocolVersion.v37, s"synchronizer protocol version $protocolVersion, expected 37")
 
 def findPartyToParticipant(party: PartyId) =
   participant.topology.party_to_participant_mappings.list(synchronizerTopologyStore).find(_.item.partyId == party)

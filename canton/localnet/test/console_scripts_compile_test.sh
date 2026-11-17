@@ -13,7 +13,7 @@ readonly PRELUDE="$CONSOLE_DIR/owner_signing_prelude.canton"
 readonly CASE_SEPARATOR=$'\x1f'
 # Row: <name> <scripts, space-separated> <expected runtime stop text>
 compile_cases=(
-  "rotation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/gg_rotate_owner_key.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
+  "rotation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/owner_key_rotation_lib.canton $CONSOLE_DIR/gg_rotate_owner_key.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
   "allocation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/custody_allocate_party.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
   "show-topology${CASE_SEPARATOR}$CONSOLE_DIR/gg_show_topology.canton${CASE_SEPARATOR}failed with an exception (GG_PARTY_ID)"
 )

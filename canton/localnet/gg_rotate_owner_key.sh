@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# G3 rehearsal: rotate one guardianGovernance owner key. The threshold stays 2 of 3.
+# G3 rehearsal: rotate one owner key of the guardian namespace. The thresholds stay 2 of 3.
 # The rotation covers guardianGovernance and, after custody_host.sh, nttCustody (same namespace, same keys).
-#   1. Generate a new owner key. Remove <removed-owner> and add the new key in the decentralized
-#      namespace and in the PartyToParticipant signing keys of each party (console/gg_rotate_owner_key.canton).
+#   1. Generate a new owner key. console/gg_rotate_owner_key.canton signs each change first (sign phase), stores the
+#      signed changes, then loads the PartyToParticipant of each party (nttCustody first) and the namespace in one call.
 #   2. Check that the removed owner and one kept owner cannot change the namespace
 #      (TOPOLOGY_UNAUTHORIZED_TRANSACTION).
 #   3. Signing ceremony, for each party: create GovernanceCeremonyProbe with that party as signatory.
@@ -10,14 +10,19 @@
 #      b. One kept owner + the removed owner. Expect FAILED_TO_EXECUTE_TRANSACTION (1 valid signature).
 #      c. The removed owner alone. Expect FAILED_TO_EXECUTE_TRANSACTION (0 valid signatures).
 # Usage: gg_rotate_owner_key.sh [--resume] <removed-owner> <kept-owner> <kept-owner> <new-owner>
-#   --resume finishes an interrupted rotation with the existing key of <new-owner>.
-#   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS=true stops the rotation after the namespace change, to rehearse --resume.
-#   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS_OF=nttCustody stops it after the guardianGovernance signing keys.
+#   --resume finishes a half-applied rotation. It loads the stored signed changes and calls no signer for them.
 #   Owner names are key file prefixes under $LOCALNET_STATE_DIR/gg-keys, for example: owner3 owner1 owner2 owner4
+# Rehearsal faults (each prints ROTATION FAULT INJECTION ACTIVE):
+#   GG_ROTATION_FAULT_SIGNER_OF=<owner name>               The signer of that owner exits 1.
+#   GG_ROTATION_FAULT_OMIT_PARTY_OF=<party name>           The load omits the change of that party.
+#   GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF=<party name>    The load sends the change of that party without the
+#                                                          signature of the added owner (measurement R4).
+#   GG_ROTATION_MEASURE_SINGLE_LOAD=true                   The root delegation goes into the same load call (R5).
 # Precondition: gg_host.sh and gg_package_vetting.sh ran.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
+print_active_rotation_faults >&2
 
 readonly KEY_TOOL="$REPO_ROOT/canton/devnet/guardian_key_tool.js"
 readonly GG_KEY_DIR="$LOCALNET_STATE_DIR/gg-keys"
@@ -34,6 +39,11 @@ if [[ $# -ne 4 ]]; then
   exit 2
 fi
 removed_owner="$1" kept_owner_1="$2" kept_owner_2="$3" new_owner="$4"
+signer_fault_owner="${GG_ROTATION_FAULT_SIGNER_OF:-}"
+if [[ -n "$signer_fault_owner" ]]; then
+  check_owner_names_are_safe "$signer_fault_owner"
+fi
+readonly SIGNED_ROTATION_TRANSACTIONS="$LOCALNET_STATE_DIR/rotation-$new_owner.signed.bin"
 check_owner_names_are_safe "$@"
 check_owner_names_differ "$@"
 for existing_owner in "$removed_owner" "$kept_owner_1" "$kept_owner_2"; do
@@ -45,14 +55,24 @@ for existing_owner in "$removed_owner" "$kept_owner_1" "$kept_owner_2"; do
   done
 done
 if [[ "$resume_rotation" == true ]]; then
+  rotation_mode=resume
   if [[ ! -f "$GG_KEY_DIR/$new_owner.key" || ! -f "$GG_KEY_DIR/$new_owner.pub" ]]; then
     echo "--resume needs the key of $new_owner from the interrupted run in $GG_KEY_DIR" >&2
     exit 1
   fi
-  echo "Resume the rotation with the existing key of $new_owner"
+  if [[ ! -f "$SIGNED_ROTATION_TRANSACTIONS" ]]; then
+    echo "--resume needs the signed changes $SIGNED_ROTATION_TRANSACTIONS of the interrupted run" >&2
+    exit 1
+  fi
+  echo "Resume the rotation from $SIGNED_ROTATION_TRANSACTIONS"
 else
+  rotation_mode=fresh
   if [[ -f "$GG_KEY_DIR/$new_owner.key" ]]; then
     echo "$GG_KEY_DIR/$new_owner.key exists. Choose a new owner name, or pass --resume to finish an interrupted rotation." >&2
+    exit 1
+  fi
+  if [[ -f "$SIGNED_ROTATION_TRANSACTIONS" ]]; then
+    echo "$SIGNED_ROTATION_TRANSACTIONS exists. Pass --resume, or choose a new owner name." >&2
     exit 1
   fi
   node "$KEY_TOOL" generate "$GG_KEY_DIR/$new_owner" >/dev/null
@@ -69,42 +89,65 @@ else
 fi
 printf '%s\n' "$updated_fingerprints" > "$EXTRA_FINGERPRINTS"
 
-rotation_party_ids=("$GG_PARTY")
+# Load order: nttCustody (holds the reserves) first, guardianGovernance last.
+rotation_party_ids=()
 if [[ -n "$CUSTODY_PARTY" ]]; then
   rotation_party_ids+=("$CUSTODY_PARTY")
 fi
-echo "Parties to rotate: ${rotation_party_ids[*]%%::*}"
+rotation_party_ids+=("$GG_PARTY")
+expected_party_order="$(for party_id in "${rotation_party_ids[@]}"; do echo "${party_id%%::*}"; done | paste -sd, -)"
+echo "Parties to rotate, in load order: $expected_party_order"
 
 # owner_signer_argv <owner>: JSON argv of the signer of that owner key; a space in the path stays in one argument.
-owner_signer_argv() { jq -cn --arg tool "$KEY_TOOL" --arg key "$GG_KEY_DIR/$1.key" '["node", $tool, "sign", $key]'; }
+owner_signer_argv() {
+  if [[ "$1" == "$signer_fault_owner" ]]; then
+    jq -cn --arg owner "$1" '["/bin/sh", "-c", "echo injected signer fault of \($owner) >&2; exit 1", "injected-signer-fault"]'
+  else
+    jq -cn --arg tool "$KEY_TOOL" --arg key "$GG_KEY_DIR/$1.key" '["node", $tool, "sign", $key]'
+  fi
+}
 rotation_console_status=0
 rotation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GG_PARTY_ID="$GG_PARTY" GG_ROTATION_PARTY_IDS="$(IFS=,; echo "${rotation_party_ids[*]}")" \
+GG_ROTATION_MODE="$rotation_mode" GG_ROTATION_SIGNED_TRANSACTIONS_FILE="$SIGNED_ROTATION_TRANSACTIONS" \
 GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_ARGV_1="$(owner_signer_argv "$kept_owner_1")" \
 GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_ARGV_2="$(owner_signer_argv "$kept_owner_2")" \
 GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" GG_REMOVED_OWNER_SIGN_ARGV="$(owner_signer_argv "$removed_owner")" \
 GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_ARGV="$(owner_signer_argv "$new_owner")" \
-  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/gg_rotate_owner_key.canton" \
+  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/owner_key_rotation_lib.canton" \
+  "$LOCALNET_SCRIPT_DIR/console/gg_rotate_owner_key.canton" \
   > "$gg_work_dir/rotation.log" 2>&1 || rotation_console_status=$?
 grep -E '^ROTATION' "$gg_work_dir/rotation.log" || true
+recovery_command="$0 --resume $removed_owner $kept_owner_1 $kept_owner_2 $new_owner"
+if grep -q '^ROTATION NOT STARTED' "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the sign phase failed. The topology did not change. Run again with a new owner name." >&2
+  exit 1
+fi
+if grep -q '^ROTATION NOT APPLIED' "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the participant applied no change. The removed key stays valid. Run again with a new owner name." >&2
+  exit 1
+fi
 if grep -q '^ROTATION HALF-APPLIED' "$gg_work_dir/rotation.log"; then
-  # Show which key pairs sign for each party in the half-applied state.
-  for party_id in "${rotation_party_ids[@]}"; do
-    for probe_owner in "$new_owner" "$removed_owner"; do
-      if create_ceremony_probe "$party_id" "half-applied-$probe_owner" "$kept_owner_1" "$probe_owner" > /dev/null 2> "$gg_work_dir/half-applied.err"; then
-        echo "HALF-APPLIED STATE: $kept_owner_1 + $probe_owner sign for ${party_id%%::*}: committed"
-      else
-        echo "HALF-APPLIED STATE: $kept_owner_1 + $probe_owner sign for ${party_id%%::*}: rejected: $(grep -oE 'Received [0-9]+ valid signatures[^.]*' "$gg_work_dir/half-applied.err" | head -n 1)"
-      fi
-    done
-  done
-  echo "FAIL: half-applied rotation. Recover with: $0 --resume $removed_owner $kept_owner_1 $kept_owner_2 $new_owner" >&2
+  echo "FAIL: half-applied rotation. The removed key stays valid for the parties in the ROTATION HALF-APPLIED line." >&2
+  echo "Recover now with: $recovery_command" >&2
   exit 1
 fi
 if [[ "$rotation_console_status" -ne 0 ]] || ! grep -q '^ROTATION done' "$gg_work_dir/rotation.log"; then
   echo "FAIL: owner-key rotation console script did not finish (status $rotation_console_status)" >&2
   grep -E 'ERROR|error|Exception' "$gg_work_dir/rotation.log" | head -n 20 >&2
-  echo "If the output shows 'ROTATION after: DN', recover with: $0 --resume $removed_owner $kept_owner_1 $kept_owner_2 $new_owner" >&2
+  echo "If the output shows a load attempt, check the topology with gg_show_topology.sh, then recover with: $recovery_command" >&2
+  exit 1
+fi
+if ! grep -qxF "ROTATION parties: $expected_party_order" "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the console did not rotate the parties in the order $expected_party_order" >&2
+  exit 1
+fi
+if ! grep -qxF "ROTATION protocol version: 37" "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the console did not report protocol version 37" >&2
+  exit 1
+fi
+if ! grep -qE '^ROTATION effective time(s \(loaded in more than one call\))?: ' "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the console did not report the effective time of the changes" >&2
   exit 1
 fi
 if ! grep -q "ROTATION after: DN .*$new_owner_fingerprint" "$gg_work_dir/rotation.log"; then
