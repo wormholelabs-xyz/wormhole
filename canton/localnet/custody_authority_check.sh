@@ -12,7 +12,6 @@ set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 
-readonly CEREMONY_TEMPLATE="#wormhole-localnet-vetting-probe:VettingProbe:GovernanceCeremonyProbe"
 if [[ -z "$CUSTODY_PARTY" ]]; then
   echo "Missing $CUSTODY_ARTIFACTS. Run custody_host.sh first." >&2
   exit 1
@@ -28,29 +27,34 @@ if [[ "${signing_owners[0]}" == "${signing_owners[1]}" ]]; then
 fi
 
 party_json_array() { jq -cn '$ARGS.positional' --args "$@"; }
-probe_create_command() {
-  jq -n --arg templateId "$CEREMONY_TEMPLATE" --arg signatory "$1" --arg label "$2" \
-    '{CreateCommand: {templateId: $templateId, createArguments: {guardianGovernance: $signatory, label: $label}}}'
-}
 custody_signers="$(namespace_party_signers_json "$CUSTODY_PARTY" "${signing_owners[@]}" | jq -c .)"
 gg_signers="$(gg_signers_json "${signing_owners[@]}" | jq -c .)"
 joint_signers="$(jq -cs add <<<"$custody_signers $gg_signers")"
 
-# case: <name>|<act-as json>|<signatory>|<signers json>|<expected: commit or an error text>
 readonly CASE_SEPARATOR=$'\x1f'
+# authority_case <name> <act-as-json> <signatory> <signers-json> <expected: commit or an error text>: one table row.
+authority_case() {
+  local IFS="$CASE_SEPARATOR"
+  echo "$*"
+}
+custody_only="$(party_json_array "$CUSTODY_PARTY")"
+gg_only="$(party_json_array "$GG_PARTY")"
 authority_cases=(
-  "1-custody-signs-for-custody${CASE_SEPARATOR}$(party_json_array "$CUSTODY_PARTY")${CASE_SEPARATOR}$CUSTODY_PARTY${CASE_SEPARATOR}$custody_signers${CASE_SEPARATOR}commit"
-  "2-gg-creates-custody-contract${CASE_SEPARATOR}$(party_json_array "$GG_PARTY")${CASE_SEPARATOR}$CUSTODY_PARTY${CASE_SEPARATOR}$gg_signers${CASE_SEPARATOR}DAML_AUTHORIZATION_ERROR"
-  "3-custody-creates-gg-contract${CASE_SEPARATOR}$(party_json_array "$CUSTODY_PARTY")${CASE_SEPARATOR}$GG_PARTY${CASE_SEPARATOR}$custody_signers${CASE_SEPARATOR}DAML_AUTHORIZATION_ERROR"
-  "4-gg-signatures-for-custody${CASE_SEPARATOR}$(party_json_array "$CUSTODY_PARTY")${CASE_SEPARATOR}$CUSTODY_PARTY${CASE_SEPARATOR}$gg_signers${CASE_SEPARATOR}did not provide an external signature: $CUSTODY_PARTY"
-  "5-joint-ceremony${CASE_SEPARATOR}$(party_json_array "$GG_PARTY" "$CUSTODY_PARTY")${CASE_SEPARATOR}$CUSTODY_PARTY${CASE_SEPARATOR}$joint_signers${CASE_SEPARATOR}commit"
+  "$(authority_case 1-custody-signs-for-custody "$custody_only" "$CUSTODY_PARTY" "$custody_signers" commit)"
+  "$(authority_case 2-gg-creates-custody-contract "$gg_only" "$CUSTODY_PARTY" "$gg_signers" DAML_AUTHORIZATION_ERROR)"
+  "$(authority_case 3-custody-creates-gg-contract "$custody_only" "$GG_PARTY" "$custody_signers" DAML_AUTHORIZATION_ERROR)"
+  "$(authority_case 4-gg-signatures-for-custody "$custody_only" "$CUSTODY_PARTY" "$gg_signers" \
+    "did not provide an external signature: $CUSTODY_PARTY")"
+  "$(authority_case 5-joint-ceremony "$(party_json_array "$GG_PARTY" "$CUSTODY_PARTY")" "$CUSTODY_PARTY" "$joint_signers" commit)"
 )
 for authority_case in "${authority_cases[@]}"; do
   IFS="$CASE_SEPARATOR" read -r case_name act_as signatory signers expected <<<"$authority_case"
-  echo "Case $case_name: actAs $(jq -r 'map(split("::")[0]) | join("+")' <<<"$act_as"), signatory ${signatory%%::*}, signatures for $(jq -r 'keys | map(split("::")[0]) | join("+")' <<<"$signers")"
+  act_as_names="$(jq -r 'map(split("::")[0]) | join("+")' <<<"$act_as")"
+  signer_party_names="$(jq -r 'keys | map(split("::")[0]) | join("+")' <<<"$signers")"
+  echo "Case $case_name: actAs $act_as_names, signatory ${signatory%%::*}, signatures for $signer_party_names"
   submission_status=0
-  submit_interactive "custody-$case_name-$(date +%s)" "$act_as" "$(probe_create_command "$signatory" "$case_name")" "$signers" \
-    > "$gg_work_dir/case.out" 2> "$gg_work_dir/case.err" || submission_status=$?
+  submit_interactive "custody-$case_name-$(date +%s)" "$act_as" "$(ceremony_probe_create_command "$signatory" "$case_name")" \
+    "$signers" > "$gg_work_dir/case.out" 2> "$gg_work_dir/case.err" || submission_status=$?
   if [[ "$expected" == commit ]]; then
     if [[ "$submission_status" -ne 0 ]]; then
       echo "FAIL: expected commit" >&2

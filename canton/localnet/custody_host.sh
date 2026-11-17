@@ -38,7 +38,7 @@ done
 
 allocation_status=0
 GG_PARTY_ID="$GG_PARTY" CUSTODY_ARTIFACTS_FILE="$CUSTODY_ARTIFACTS" \
-  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/custody_allocate_party.canton" \
+  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/custody_allocate_party.canton" \
   > "$gg_work_dir/allocation.log" 2>&1 || allocation_status=$?
 grep -E '^CUSTODY' "$gg_work_dir/allocation.log" || true
 if [[ "$allocation_status" -ne 0 ]] || ! grep -q '^CUSTODY done' "$gg_work_dir/allocation.log"; then

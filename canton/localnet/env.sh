@@ -85,4 +85,4 @@ LOCALNET_STATE_DIR="${LOCALNET_STATE_DIR:-$(cd "$REPO_ROOT/.." && pwd)/localnet-
 # Canton console of the same release as the LocalNet `canton` image (copied out of the container).
 CANTON_RELEASE="3.7.3"
 CANTON_CONSOLE_JAR="$VENDOR_DIR/canton-$CANTON_RELEASE/canton-open-source-$CANTON_RELEASE.jar"
-CANTON_CONSOLE_CONFIG="$LOCALNET_SCRIPT_DIR/console/remote-participants.conf"
+CANTON_CONSOLE_CONFIG="${CANTON_CONSOLE_CONFIG:-$LOCALNET_SCRIPT_DIR/console/remote-participants.conf}"

@@ -22,7 +22,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 readonly KEY_TOOL="$REPO_ROOT/canton/devnet/guardian_key_tool.js"
 readonly GG_KEY_DIR="$LOCALNET_STATE_DIR/gg-keys"
 readonly EXTRA_FINGERPRINTS="$LOCALNET_STATE_DIR/extra-key-fingerprints.json"
-readonly CEREMONY_TEMPLATE="#wormhole-localnet-vetting-probe:VettingProbe:GovernanceCeremonyProbe"
 
 readonly USAGE="usage: gg_rotate_owner_key.sh [--resume] <removed-owner> <kept-owner> <kept-owner> <new-owner>"
 resume_rotation=false
@@ -84,15 +83,6 @@ if [[ -n "$CUSTODY_PARTY" ]]; then
 fi
 echo "Parties to rotate: ${rotation_party_ids[*]%%::*}"
 
-create_ceremony_probe() {
-  local party_id="$1" label="$2"
-  shift 2
-  submit_interactive "ceremony-$label-$(date +%s)" "$(jq -n --arg party "$party_id" '[$party]')" \
-    "$(jq -n --arg templateId "$CEREMONY_TEMPLATE" --arg party "$party_id" --arg label "$label" \
-      '{CreateCommand: {templateId: $templateId, createArguments: {guardianGovernance: $party, label: $label}}}')" \
-    "$(namespace_party_signers_json "$party_id" "$@")"
-}
-
 # owner_signer_argv <owner>: JSON argv of the signer of that owner key; a space in the path stays in one argument.
 owner_signer_argv() { jq -cn --arg tool "$KEY_TOOL" --arg key "$GG_KEY_DIR/$1.key" '["node", $tool, "sign", $key]'; }
 rotation_console_status=0
@@ -102,7 +92,7 @@ GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_ARGV_1
 GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_ARGV_2="$(owner_signer_argv "$kept_owner_2")" \
 GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" GG_REMOVED_OWNER_SIGN_ARGV="$(owner_signer_argv "$removed_owner")" \
 GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_ARGV="$(owner_signer_argv "$new_owner")" \
-  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/gg_rotate_owner_key.canton" \
+  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/gg_rotate_owner_key.canton" \
   > "$gg_work_dir/rotation.log" 2>&1 || rotation_console_status=$?
 grep -E '^ROTATION' "$gg_work_dir/rotation.log" || true
 if grep -q '^ROTATION HALF-APPLIED' "$gg_work_dir/rotation.log"; then

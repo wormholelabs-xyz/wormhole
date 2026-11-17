@@ -104,6 +104,27 @@ gg_signers_json() {
   namespace_party_signers_json "$GG_PARTY" "$@"
 }
 
+# Console prelude of the owner-key scripts: canton_console.sh "$OWNER_SIGNING_PRELUDE" <script>.
+# shellcheck disable=SC2034 # used by the scripts that source this file
+readonly OWNER_SIGNING_PRELUDE="$LOCALNET_SCRIPT_DIR/console/owner_signing_prelude.canton"
+# Single-signatory probe of the vetting probe package. Its field `guardianGovernance` holds the signatory party.
+readonly CEREMONY_TEMPLATE="#wormhole-localnet-vetting-probe:VettingProbe:GovernanceCeremonyProbe"
+
+# ceremony_probe_create_command <signatory-party-id> <label>: CreateCommand JSON of one GovernanceCeremonyProbe.
+ceremony_probe_create_command() {
+  jq -n --arg templateId "$CEREMONY_TEMPLATE" --arg signatory "$1" --arg label "$2" \
+    '{CreateCommand: {templateId: $templateId, createArguments: {guardianGovernance: $signatory, label: $label}}}'
+}
+
+# create_ceremony_probe <party-id> <label> <owner-name>...: that party creates a probe as its only signatory,
+# signed by the given owner keys. Prints the transaction JSON.
+create_ceremony_probe() {
+  local party_id="$1" label="$2"
+  shift 2
+  submit_interactive "ceremony-$label-$(date +%s)" "$(jq -cn --arg party "$party_id" '[$party]')" \
+    "$(ceremony_probe_create_command "$party_id" "$label")" "$(namespace_party_signers_json "$party_id" "$@")"
+}
+
 # Second party under the guardian decentralized namespace (custody_host.sh). Empty until it exists.
 CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"
 # shellcheck disable=SC2034 # used by the scripts that source this file

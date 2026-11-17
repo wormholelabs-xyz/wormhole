@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The console scripts below each hold one copy of the owner signer block (console --bootstrap takes one file).
+# The devnet console script and the LocalNet console prelude each hold one copy of the owner signer block.
 # This test fails when the copies differ. Needs no Docker.
 # Usage: canton/localnet/test/owner_signer_block_test.sh
 set -euo pipefail
@@ -7,8 +7,7 @@ CANTON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly CANTON_DIR
 readonly OWNER_SIGNER_BLOCK_FILES=(
   "$CANTON_DIR/devnet/guardian_governance.canton"
-  "$CANTON_DIR/localnet/console/gg_rotate_owner_key.canton"
-  "$CANTON_DIR/localnet/console/custody_allocate_party.canton"
+  "$CANTON_DIR/localnet/console/owner_signing_prelude.canton"
 )
 readonly BLOCK_BEGIN_LINE="// BEGIN owner signer block"
 readonly BLOCK_END_LINE="// END owner signer block"
@@ -25,6 +24,12 @@ owner_signer_block() {
   sed -n "\\|^$BLOCK_BEGIN_LINE|,\\|^$BLOCK_END_LINE\$|p" "$1"
 }
 
+files_with_block="$(grep -rl --include='*.canton' "^$BLOCK_BEGIN_LINE" "$CANTON_DIR" | sort)"
+if [[ "$files_with_block" != "$(printf '%s\n' "${OWNER_SIGNER_BLOCK_FILES[@]}" | sort)" ]]; then
+  echo "FAIL: the files with the owner signer block are not the expected files:" >&2
+  printf '%s\n' "$files_with_block" >&2
+  exit 1
+fi
 reference_block="$(owner_signer_block "${OWNER_SIGNER_BLOCK_FILES[0]}")"
 if [[ "$(wc -l <<<"$reference_block" | tr -d ' ')" -lt 5 ]]; then
   echo "FAIL: the owner signer block of ${OWNER_SIGNER_BLOCK_FILES[0]} is shorter than 5 lines" >&2
