@@ -6,6 +6,8 @@
 #   3. actAs nttCustody, nttCustody signatures, signatory guardianGovernance. Expect DAML_AUTHORIZATION_ERROR.
 #   4. actAs nttCustody, guardianGovernance signatures only. Expect FAILED_TO_EXECUTE_TRANSACTION (no nttCustody signature).
 #   5. actAs both parties, one owner pair signs for each, signatory nttCustody. Expect commit (joint ceremony).
+#   6. actAs nttCustody, one owner key signs. Expect FAILED_TO_EXECUTE_TRANSACTION (1 valid signature of 2).
+#   7. actAs guardianGovernance, one owner key signs. Expect FAILED_TO_EXECUTE_TRANSACTION (1 valid signature of 2).
 # Usage: custody_authority_check.sh [<owner> <owner>]   Two current owner names (default owner1 owner2).
 # Precondition: custody_host.sh and gg_package_vetting.sh ran.
 set -euo pipefail
@@ -30,13 +32,20 @@ gg_signers="$(gg_signers_json "${signing_owners[@]}" | jq -c .)"
 joint_signers="$(jq -cs add <<<"$custody_signers $gg_signers")"
 
 readonly CASE_SEPARATOR=$'\x1f'
-# authority_case <name> <act-as-json> <signatory> <signers-json> <expected: commit or an error text>: one table row.
+readonly EXPECTED_TEXT_SEPARATOR=$'\x1e'
+# authority_case <name> <act-as-json> <signatory> <signers-json> <expected>: one table row. <expected> is commit, or
+# the error texts that the rejection must contain, joined with EXPECTED_TEXT_SEPARATOR.
 authority_case() {
   local IFS="$CASE_SEPARATOR"
   echo "$*"
 }
 custody_only="$(party_json_array "$CUSTODY_PARTY")"
 gg_only="$(party_json_array "$GG_PARTY")"
+# one_key_rejection <party-id>: the error texts of a submission with one valid owner signature for that party.
+one_key_rejection() {
+  printf '%s%s%s' FAILED_TO_EXECUTE_TRANSACTION "$EXPECTED_TEXT_SEPARATOR" \
+    "Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for ${1%%::*}::"
+}
 authority_cases=(
   "$(authority_case 1-custody-signs-for-custody "$custody_only" "$CUSTODY_PARTY" "$custody_signers" commit)"
   "$(authority_case 2-gg-creates-custody-contract "$gg_only" "$CUSTODY_PARTY" "$gg_signers" DAML_AUTHORIZATION_ERROR)"
@@ -44,6 +53,10 @@ authority_cases=(
   "$(authority_case 4-gg-signatures-for-custody "$custody_only" "$CUSTODY_PARTY" "$gg_signers" \
     "did not provide an external signature: $CUSTODY_PARTY")"
   "$(authority_case 5-joint-ceremony "$(party_json_array "$GG_PARTY" "$CUSTODY_PARTY")" "$CUSTODY_PARTY" "$joint_signers" commit)"
+  "$(authority_case 6-one-key-for-custody "$custody_only" "$CUSTODY_PARTY" \
+    "$(namespace_party_signers_json "$CUSTODY_PARTY" "${signing_owners[0]}" | jq -c .)" "$(one_key_rejection "$CUSTODY_PARTY")")"
+  "$(authority_case 7-one-key-for-gg "$gg_only" "$GG_PARTY" \
+    "$(gg_signers_json "${signing_owners[0]}" | jq -c .)" "$(one_key_rejection "$GG_PARTY")")"
 )
 for authority_case in "${authority_cases[@]}"; do
   IFS="$CASE_SEPARATOR" read -r case_name act_as signatory signers expected <<<"$authority_case"
@@ -70,13 +83,16 @@ for authority_case in "${authority_cases[@]}"; do
       echo "FAIL: committed, expected rejection with: $expected" >&2
       exit 1
     fi
-    if ! grep -qF -- "$expected" "$gg_work_dir/case.err"; then
-      echo "FAIL: expected rejection with: $expected" >&2
-      cat "$gg_work_dir/case.err" >&2
-      exit 1
-    fi
+    IFS="$EXPECTED_TEXT_SEPARATOR" read -r -a expected_texts <<<"$expected"
+    for expected_text in "${expected_texts[@]}"; do
+      if ! grep -qF -- "$expected_text" "$gg_work_dir/case.err"; then
+        echo "FAIL: expected rejection with: $expected_text" >&2
+        cat "$gg_work_dir/case.err" >&2
+        exit 1
+      fi
+    done
     echo "  $(grep -oE '"cause":"[^"]*"' "$gg_work_dir/case.err" | head -n 1)"
-    echo "PASS: rejected with $expected"
+    echo "PASS: rejected with ${expected_texts[*]}"
   fi
 done
 echo "PASS: all ${#authority_cases[@]} authority cases"
