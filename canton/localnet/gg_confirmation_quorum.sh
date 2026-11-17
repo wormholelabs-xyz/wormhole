@@ -8,13 +8,20 @@
 # Each timeout rejection must name guardianGovernance, and only it, as the unresponsive party.
 # The mediator timeout runs on sequencer time. With two hosts offline, LocalNet traffic is too low to
 # move it, so a background ticker requests time proofs.
-# Usage: gg_confirmation_quorum.sh
+# Usage: gg_confirmation_quorum.sh [<current-set-key-indices>]
+#   Comma-separated devnet key indices of the current CoreState guardian set (default 0). After
+#   gg_guardian_set_rotation.sh 0 1, pass 1.
 # Precondition: gg_publish_and_govern.sh ran. The EXIT trap reconnects all participants.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 
 readonly QUORUM_TICKER_SECONDS=600
+current_set_key_indices="${1:-0}"
+if [[ ! "$current_set_key_indices" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+  echo "key indices must be comma-separated integers: $current_set_key_indices" >&2
+  exit 2
+fi
 
 reconnect_all() {
   local exit_status=$?
@@ -49,11 +56,16 @@ check_timeout_rejection() {
   echo "PASS: rejected. $summary"
 }
 
+current_set_index="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" :Wormhole.Core.State:CoreState \
+  | jq -er 'if length == 1 then .[0].createArgument.guardianSetIndex else error("expected one CoreState") end')"
+echo "Current guardian set $current_set_index, signing keys $current_set_key_indices"
 # Governance replay protection is keyed by digest, so each run uses a new sequence.
-fee_zero_vaa="$(generate_vaa -kind set-message-fee -fee 0 -signing-set-index 0 -signing-key-indices 0 -sequence "$(date +%s)")"
+fee_zero_vaa="$(generate_vaa -kind set-message-fee -fee 0 -signing-set-index "$current_set_index" \
+  -signing-key-indices "$current_set_key_indices" -sequence "$(date +%s)")"
 fee_zero_vaa_hex="$(jq -r .vaaHex <<<"$fee_zero_vaa")"
 set_zero_keys="$(vaa_pub_keys_json "$fee_zero_vaa")"
-read_only_vaa="$(generate_vaa -kind message -signing-set-index 0 -signing-key-indices 0 -sequence 1)"
+read_only_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" \
+  -signing-key-indices "$current_set_key_indices" -sequence 1)"
 
 echo "Step 1: disconnect sv and app-user"
 set_participant_connection disconnect sv,app-user

@@ -253,6 +253,8 @@ Keep the logs as the evidence of each run.
    canton/localnet/gg_confirmation_quorum.sh
    ```
 
+   The argument is the key indices of the current guardian set. The default is 0.
+   After a rotation to a new set, give the key indices of that set, for example `1`.
    The script disconnects `sv` and `app-user` from the synchronizer.
    Only `app-provider` can then confirm for `guardianGovernance`.
    A governance VAA, a VAA check and a publish each fail with `MEDIATOR_SAYS_TX_TIMED_OUT`.
