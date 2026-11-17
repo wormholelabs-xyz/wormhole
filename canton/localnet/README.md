@@ -88,6 +88,8 @@ canton/localnet/test/owner_signer_block_test.sh
 canton/localnet/test/ntt_lib_test.sh
 canton/localnet/test/core_upgrade_package_ids_test.sh
 canton/localnet/test/curl_calls_are_bounded_test.sh
+canton/localnet/test/canary_gate_decision_test.sh
+canton/tools/publish_message_scan_test.sh
 ```
 
 ## Prerequisites

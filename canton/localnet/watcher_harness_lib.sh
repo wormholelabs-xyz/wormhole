@@ -181,3 +181,30 @@ harness_dropped_update_ids() {
   grep -F 'dropped PublishMessage executed by a package other than the pinned package' "$WATCHER_DIR/$1.log" \
     | grep -oE '\{.*\}' | jq -r --arg package "$2" 'select(.executingPackageId == $package) | .updateId' | sort -u
 }
+
+# canary_gate_decision <now-s> <gate-start-s> <window-start-s> <quiet-window-s> <maximum-s>: prints passed, waiting or
+# timed-out. The quiet window starts at the gate start and restarts at each publish under another package. The gate
+# passes when a complete quiet window ends at or before gate start + maximum. Exit status 2 on an invalid argument.
+canary_gate_decision() {
+  local argument
+  [[ $# -eq 5 ]] || { echo "canary_gate_decision: expected 5 arguments, got $#" >&2; return 2; }
+  for argument in "$@"; do
+    [[ "$argument" =~ ^(0|[1-9][0-9]*)$ ]] || { echo "canary_gate_decision: not a non-negative integer: $argument" >&2; return 2; }
+  done
+  local now_seconds="$1" gate_start_seconds="$2" window_start_seconds="$3" quiet_window_seconds="$4" maximum_seconds="$5"
+  [[ "$quiet_window_seconds" -gt 0 ]] || { echo "canary_gate_decision: the quiet window must be positive" >&2; return 2; }
+  [[ "$maximum_seconds" -ge "$quiet_window_seconds" ]] \
+    || { echo "canary_gate_decision: maximum $maximum_seconds is below the quiet window $quiet_window_seconds" >&2; return 2; }
+  [[ "$window_start_seconds" -ge "$gate_start_seconds" ]] \
+    || { echo "canary_gate_decision: window start $window_start_seconds is before the gate start $gate_start_seconds" >&2; return 2; }
+  [[ "$now_seconds" -ge "$window_start_seconds" ]] \
+    || { echo "canary_gate_decision: now $now_seconds is before the window start $window_start_seconds" >&2; return 2; }
+  if [[ $((now_seconds - window_start_seconds)) -ge "$quiet_window_seconds" \
+    && $((window_start_seconds + quiet_window_seconds)) -le $((gate_start_seconds + maximum_seconds)) ]]; then
+    echo passed
+  elif [[ "$now_seconds" -ge $((gate_start_seconds + maximum_seconds)) ]]; then
+    echo timed-out
+  else
+    echo waiting
+  fi
+}

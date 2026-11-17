@@ -281,6 +281,9 @@ jobs:
       - name: Run the curl maximum time table test of the core upgrade scripts
         run: bash canton/localnet/test/curl_calls_are_bounded_test.sh
 
+      - name: Run the canary gate decision table test
+        run: bash canton/localnet/test/canary_gate_decision_test.sh
+
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
     runs-on: ubuntu-24.04

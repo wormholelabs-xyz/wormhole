@@ -11,6 +11,7 @@
 #   ntt           ntt_e2e.sh with ntt 0.3.0. Expect each NTT PublishMessage to run under 0.7.0 on each host.
 #   gate          Quiet window: the canary counter sum over all labels does not change, the canary observes a control
 #                 publish after the window, and a scan on each participant finds no publish under another package.
+#                 A publish under another package restarts the window. The gate times out after CANARY_GATE_MAX_SECONDS.
 #   unvet-v6      With v6-<host> still pinned to 0.6.0: unvet core 0.6.0 and ntt 0.2.0 together on each participant.
 #                 Expect 0.6.0 and ntt 0.2.0 submissions to fail at prepare. Then the deterministic drain gate: wait the
 #                 synchronizer timeouts, publish a 0.7.0 control that each v6-<host> drops, and scan each participant
@@ -24,7 +25,12 @@
 #                 and ntt 0.2.0 on each participant. Expect 0.6.0 and ntt 0.2.0 exercises on contracts that 0.7.0 and
 #                 ntt 0.3.0 created to commit, and the watchers rollback-v6-<host> to observe the 0.6.0 publish.
 #   restore       Unvet core 0.6.0 and ntt 0.2.0 again on each participant. Expect a 0.6.0 publish to fail at prepare.
-# Usage: core_upgrade_rehearsal.sh <step>|all
+#   abort-v7      After a gate timeout: unvet core 0.7.0 and ntt 0.3.0 together, drain, publish a 0.6.0 control, scan for
+#                 the 0.7.0 publishes, reobserve them with watchers pinned to 0.7.0, restart the 0.6.0 watchers and
+#                 reobserve each 0.6.0 publish of the restart gap.
+# Sequences: all = prepare .. restore. abort-all = prepare observe-v6 vet-v7 publish-v7 gate (expect a timeout) abort-v7;
+# it needs CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS > 0.
+# Usage: core_upgrade_rehearsal.sh <step>|all|abort-all
 # A step that fails stops each watcher harness that it started. A step that passes leaves v6-<host> (observe-v6) and
 # the canary (publish-v7) running for the next steps.
 # Precondition: the LocalNet CoreState was created under core 0.6.0 (a LocalNet from before the 0.8.0 genesis);
@@ -46,6 +52,12 @@ readonly DROP_WINDOW_SECONDS=15
 readonly NONCE_ABOVE_UINT32=4294967296
 # Length of the quiet window of the canary gate. Production uses the agreed time.
 readonly QUIET_WINDOW_SECONDS="${QUIET_WINDOW_SECONDS:-20}"
+# Maximum canary time of the rehearsal. Production uses the time that the coordinator announces.
+readonly CANARY_GATE_MAX_SECONDS="${CANARY_GATE_MAX_SECONDS:-120}"
+# Rehearsal fault: a 0.6.0 publish every N seconds during the canary gate. 0 is off.
+readonly CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS="${CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS:-0}"
+# Added to CANARY_GATE_MAX_SECONDS for the timeout check of abort-all.
+readonly CANARY_GATE_TIMEOUT_TOLERANCE_SECONDS=5
 # Added to the synchronizer timeouts in the drain gate after the unvet.
 readonly DRAIN_MARGIN_SECONDS=30
 readonly UPDATE_LOOKUP_ATTEMPTS=30
@@ -56,6 +68,10 @@ readonly CURRENT_GUARDIAN_SET_INDEX="${CURRENT_GUARDIAN_SET_INDEX:-2}"
 readonly CURRENT_GUARDIAN_KEY_INDICES="${CURRENT_GUARDIAN_KEY_INDICES:-2,3,4}"
 # shellcheck source=watcher_harness_lib.sh
 source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
+[[ "$CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS" =~ ^(0|[1-9][0-9]*)$ ]] \
+  || { echo "CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS is not a non-negative integer" >&2; exit 2; }
+canary_gate_decision 0 0 0 "$QUIET_WINDOW_SECONDS" "$CANARY_GATE_MAX_SECONDS" > /dev/null \
+  || { echo "invalid QUIET_WINDOW_SECONDS $QUIET_WINDOW_SECONDS or CANARY_GATE_MAX_SECONDS $CANARY_GATE_MAX_SECONDS" >&2; exit 2; }
 mkdir -p "$WATCHER_DIR"
 [[ -f "$UPGRADE_STATE" ]] || echo '{}' > "$UPGRADE_STATE"
 
@@ -572,14 +588,18 @@ step_gate() {
   harness_is_running canary || fail "the canary watcher does not run; run publish-v7 first"
   v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   local legacy_update_id counter_total_before counter_total_after control_summary control_update_id validator_name
-  local control_offset old_package_update_ids
+  local control_offset old_package_update_ids expected_old_package_update_ids
   legacy_update_id="$(read_state canaryLegacyUpdateId)"
   counter_total_before="$(unpinned_publish_total canary)"
   echo "  canary counter before the window: $(jq -c . "$WATCHER_DIR/canary.metrics.json"), sum over all labels $counter_total_before"
   [[ "$counter_total_before" -eq 1 ]] || fail "the canary counter sum is $counter_total_before, expected 1 (the publish-v7 legacy publish)"
-  record_ledger_end_of_each_host quietWindowStartOffset
-  echo "  quiet window: $QUIET_WINDOW_SECONDS seconds"
-  sleep "$QUIET_WINDOW_SECONDS"
+  record_state canaryGateCounterBefore "$counter_total_before"
+  echo "  quiet window: $QUIET_WINDOW_SECONDS seconds; maximum canary time: $CANARY_GATE_MAX_SECONDS seconds"
+  await_canary_quiet_window "$counter_total_before"
+  if [[ "$(read_state canaryGateResult)" == timed-out ]]; then
+    echo "CANARY GATE TIMEOUT after ${CANARY_GATE_MAX_SECONDS}s: canary counter $(cat "$WATCHER_DIR/canary.metrics.json"). Run abort-v7."
+    return 0
+  fi
 
   echo "  positive control: a 0.7.0 publish after the window. The canary must observe it"
   control_summary="$(publish_and_check canary-gate-control "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
@@ -587,25 +607,102 @@ step_gate() {
   append_state_list v7DroppedUpdateIds "$control_update_id"
   await_observation canary "$(jq -r .sequence <<<"$control_summary")" "$(jq -r .payload <<<"$control_summary")" false
   counter_total_after="$(unpinned_publish_total canary)"
-  [[ "$counter_total_after" -eq "$counter_total_before" ]] \
-    || fail "the canary counter sum changed in the quiet window: $counter_total_before -> $counter_total_after $(cat "$WATCHER_DIR/canary.metrics.json")"
+  [[ "$counter_total_after" -eq "$(read_state canaryGateCounterAtPass)" ]] \
+    || fail "the canary counter sum changed after the quiet window: $(read_state canaryGateCounterAtPass) -> $counter_total_after $(cat "$WATCHER_DIR/canary.metrics.json")"
   echo "  PASS: the canary observed the control; its counter sum over all labels stays $counter_total_after"
+  expected_old_package_update_ids="$(old_package_update_ids_before_gate_pass)"
 
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     control_offset="$(update_offset_on "$validator_name" "$control_update_id")"
     record_host_offset canaryGateOffset "$validator_name" "$control_offset"
     old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID" "$control_update_id")"
-    [[ "$old_package_update_ids" == "$legacy_update_id" ]] \
-      || fail "$validator_name: scan ($(read_host_offset startOffset "$validator_name"), $control_offset] finds publishes not under 0.7.0: $(tr '\n' ' ' <<<"$old_package_update_ids"), expected only $legacy_update_id"
+    [[ "$old_package_update_ids" == "$expected_old_package_update_ids" ]] \
+      || fail "$validator_name: scan ($(read_host_offset startOffset "$validator_name"), $control_offset] finds publishes not under 0.7.0: $(tr '\n' ' ' <<<"$old_package_update_ids"), expected $(tr '\n' ' ' <<<"$expected_old_package_update_ids")"
     old_package_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset quietWindowStartOffset "$validator_name")" "$control_offset" "$CORE_V7_PACKAGE_ID" "$control_update_id")"
     [[ -z "$old_package_update_ids" ]] || fail "$validator_name: publishes not under 0.7.0 in the quiet window: $(tr '\n' ' ' <<<"$old_package_update_ids")"
-    echo "  PASS: $validator_name scan as $WATCHER_USER_ID: one publish not under 0.7.0 since the start offset (the legacy one), none in the quiet window up to offset $control_offset"
+    echo "  PASS: $validator_name scan as $WATCHER_USER_ID: $(grep -c . <<<"$expected_old_package_update_ids") publishes not under 0.7.0 since the start offset (legacy and injected), none in the quiet window up to offset $control_offset"
   done
   stop_harness canary
   check_harness_reobservation_errors canary
-  [[ "$(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID")" == "$legacy_update_id" ]] \
-    || fail "the canary WARN logs name $(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID" | tr '\n' ' '), expected $legacy_update_id"
-  echo "  PASS: canary WARN log names only the legacy update $legacy_update_id; the NTT run of step 4 added no 0.6.0 publish"
+  [[ "$(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID")" == "$expected_old_package_update_ids" ]] \
+    || fail "the canary WARN logs name $(harness_dropped_update_ids canary "$CORE_V6_PACKAGE_ID" | tr '\n' ' '), expected $(tr '\n' ' ' <<<"$expected_old_package_update_ids")"
+  echo "  PASS: canary WARN log names only the legacy update $legacy_update_id and the injected publishes; the NTT run of step 4 added no 0.6.0 publish"
+}
+
+# old_package_update_ids_before_gate_pass: sorted update ids of the publish-v7 legacy publish and of each injected
+# 0.6.0 publish of the gate.
+old_package_update_ids_before_gate_pass() {
+  { read_state canaryLegacyUpdateId; jq -r '.canaryGateInjectedUpdateIds // [] | .[]' "$UPGRADE_STATE"; } | sort -u
+}
+
+# inject_old_publish_if_due <gate-start-s> <now-s>: rehearsal fault. Publishes under 0.6.0 when the next injection
+# interval of CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS has started.
+inject_old_publish_if_due() {
+  local gate_start_seconds="$1" now_seconds="$2" injected_count summary
+  [[ "$CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS" -gt 0 ]] || return 0
+  injected_count="$(jq '.canaryGateInjectedUpdateIds // [] | length' "$UPGRADE_STATE")"
+  [[ $((now_seconds - gate_start_seconds)) -ge $(((injected_count + 1) * CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS)) ]] || return 0
+  summary="$(publish_and_check "canary-gate-injected-$((injected_count + 1))" "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
+  append_state_list canaryGateInjectedUpdateIds "$(jq -r .updateId <<<"$summary")"
+}
+
+# await_canary_quiet_window <counter-sum-at-gate-start>: waits for the first complete quiet window of the canary, at
+# most CANARY_GATE_MAX_SECONDS. A change of the canary counter sum restarts the window. Records canaryGateResult
+# (passed or timed-out), the start and end time, and the ledger end of each host at the start of the last window.
+await_canary_quiet_window() {
+  local last_counter_total="$1" counter_total gate_start_seconds window_start_seconds now_seconds decision iteration
+  gate_start_seconds="$(date +%s)"
+  window_start_seconds="$gate_start_seconds"
+  record_state canaryGateStartSeconds "$gate_start_seconds"
+  record_state canaryGateResult waiting
+  record_ledger_end_of_each_host quietWindowStartOffset
+  # Each iteration sleeps at least one second, thus CANARY_GATE_MAX_SECONDS + 1 iterations reach the maximum.
+  for iteration in $(seq 0 "$CANARY_GATE_MAX_SECONDS"); do
+    now_seconds="$(date +%s)"
+    inject_old_publish_if_due "$gate_start_seconds" "$now_seconds"
+    counter_total="$(unpinned_publish_total canary)"
+    if [[ "$counter_total" -ne "$last_counter_total" ]]; then
+      echo "  publish under another package at +$((now_seconds - gate_start_seconds))s: counter sum $last_counter_total -> $counter_total; the quiet window restarts"
+      last_counter_total="$counter_total"
+      window_start_seconds="$now_seconds"
+      record_ledger_end_of_each_host quietWindowStartOffset
+    fi
+    decision="$(canary_gate_decision "$now_seconds" "$gate_start_seconds" "$window_start_seconds" "$QUIET_WINDOW_SECONDS" "$CANARY_GATE_MAX_SECONDS")"
+    case "$decision" in
+      passed | timed-out)
+        record_state canaryGateResult "$decision"
+        record_state canaryGateEndSeconds "$now_seconds"
+        record_state canaryGateCounterAtPass "$counter_total"
+        echo "  canary gate $decision at +$((now_seconds - gate_start_seconds))s (iteration $iteration), counter sum $counter_total"
+        return 0
+        ;;
+      waiting) sleep 1 ;;
+      *) fail "canary_gate_decision printed '$decision'" ;;
+    esac
+  done
+  record_state canaryGateResult timed-out
+  record_state canaryGateEndSeconds "$(date +%s)"
+  record_state canaryGateCounterAtPass "$(unpinned_publish_total canary)"
+}
+
+# check_canary_gate_passed: for the sequence all and the step gate.
+check_canary_gate_passed() {
+  [[ "$(read_state canaryGateResult)" == passed ]] \
+    || fail "the canary gate result is $(read_state canaryGateResult), expected passed. Run abort-v7."
+}
+
+# check_canary_gate_timed_out: for abort-all. The gate timed out within CANARY_GATE_MAX_SECONDS plus the tolerance,
+# and the canary counter sum grew.
+check_canary_gate_timed_out() {
+  local gate_seconds
+  [[ "$(read_state canaryGateResult)" == timed-out ]] || fail "the canary gate result is $(read_state canaryGateResult), expected timed-out"
+  gate_seconds=$(($(read_state canaryGateEndSeconds) - $(read_state canaryGateStartSeconds)))
+  [[ "$gate_seconds" -ge "$CANARY_GATE_MAX_SECONDS" ]] || fail "the gate timed out after ${gate_seconds}s, before ${CANARY_GATE_MAX_SECONDS}s"
+  [[ "$gate_seconds" -le $((CANARY_GATE_MAX_SECONDS + CANARY_GATE_TIMEOUT_TOLERANCE_SECONDS)) ]] \
+    || fail "the gate timed out after ${gate_seconds}s, expected at most $((CANARY_GATE_MAX_SECONDS + CANARY_GATE_TIMEOUT_TOLERANCE_SECONDS))s"
+  [[ "$(read_state canaryGateCounterAtPass)" -gt "$(read_state canaryGateCounterBefore)" ]] \
+    || fail "the canary counter sum did not grow in the gate: $(read_state canaryGateCounterBefore) -> $(read_state canaryGateCounterAtPass)"
+  echo "  PASS: CANARY GATE TIMEOUT after ${gate_seconds}s; counter sum $(read_state canaryGateCounterBefore) -> $(read_state canaryGateCounterAtPass)"
 }
 
 # managers_created_under <ntt-package-id>: burn/mint NttManagers that this package created, whose admin is a LocalNet
@@ -886,6 +983,109 @@ step_restore() {
   publish_and_check after-restore "$EMITTER_TEMPLATE" "$CORE_V7_PACKAGE_ID" > /dev/null
 }
 
+step_abort_v7() {
+  echo "### A. Abort: the canary gate did not pass before the maximum canary time"
+  [[ "$(read_state canaryGateResult)" == timed-out ]] || fail "the canary gate result is $(read_state canaryGateResult), expected timed-out; run gate first"
+  v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
+  local validator_name manager control_summary control_update_id abort_offset scan_update_ids warn_update_ids
+  local reference_update_ids="" drain_seconds gap_summary gap_update_id restart_offset gap_scan_update_ids
+  local reference_gap_update_ids=""
+  if harness_is_running canary; then
+    stop_harness canary
+    check_harness_reobservation_errors canary
+  fi
+
+  echo "### A1. Unvet core 0.7.0 and ntt 0.3.0 in one topology transaction on each participant"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    change_vetting "$validator_name" Unvet "$NTT_V3_PACKAGE_ID" "$CORE_V7_PACKAGE_ID"
+  done
+
+  echo "### A2. Each participant vets core 0.6.0 and ntt 0.2.0, and no other version"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_vetting "$validator_name" wormhole-core "$(versions_json "0.6.0 $CORE_V6_PACKAGE_ID")"
+    await_vetting "$validator_name" ntt "$(versions_json "0.2.0 $NTT_V2_PACKAGE_ID")"
+  done
+  record_ledger_end_of_each_host abortUnvetOffset
+  if publish_on_operator_emitter "core-upgrade-aborted-v7-$(date +%s)" "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" \
+      1 "$(hex_of "core upgrade after the abort")" > "$gg_work_dir/aborted-v7.out" 2> "$gg_work_dir/aborted-v7.err"; then
+    fail "a 0.7.0 PublishMessage committed after the abort unvet"
+  fi
+  expect_unvetted_rejection "$gg_work_dir/aborted-v7" "$CORE_V7_PACKAGE_ID" "0.7.0 PublishMessage after the abort unvet"
+  manager="$(manager_with_admin_key_created_under "$NTT_V2_PACKAGE_ID")"
+  if set_paused_on_manager "core-upgrade-aborted-ntt-v3-$(date +%s)" "$NTT_V3_PACKAGE_ID:Wormhole.Ntt.Manager:NttManager" "$manager" \
+      > "$gg_work_dir/aborted-ntt-v3.out" 2> "$gg_work_dir/aborted-ntt-v3.err"; then
+    fail "an ntt 0.3.0 SetPaused committed after the abort unvet"
+  fi
+  expect_unvetted_rejection "$gg_work_dir/aborted-ntt-v3" "$NTT_V3_PACKAGE_ID" "ntt 0.3.0 SetPaused after the abort unvet"
+
+  echo "### A3. Drain: wait the synchronizer timeouts"
+  drain_seconds="$(drain_seconds_from_synchronizer_parameters)"
+  echo "  drain wait: $drain_seconds seconds (the three parameters plus a margin of $DRAIN_MARGIN_SECONDS seconds)"
+  sleep "$drain_seconds"
+
+  echo "### A4. A 0.6.0 control publish. Each v6-<host> observes it. Its offset on each participant is the abort offset"
+  control_summary="$(publish_and_check v6-abort-control "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
+  control_update_id="$(jq -r .updateId <<<"$control_summary")"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    await_observation "v6-$validator_name" "$(jq -r .sequence <<<"$control_summary")" "$(jq -r .payload <<<"$control_summary")" false
+    record_host_offset abortOffset "$validator_name" "$(update_offset_on "$validator_name" "$control_update_id")"
+  done
+
+  echo "### A5. Scan each participant from its start offset to the abort offset for 0.7.0 publishes"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    abort_offset="$(read_host_offset abortOffset "$validator_name")"
+    scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$abort_offset" "$CORE_V7_PACKAGE_ID" "$control_update_id")"
+    [[ -n "$scan_update_ids" ]] || fail "$validator_name: the scan found no 0.7.0 PublishMessage update; publish-v7 makes one"
+    warn_update_ids="$(harness_dropped_update_ids "v6-$validator_name" "$CORE_V7_PACKAGE_ID")"
+    [[ "$warn_update_ids" == "$scan_update_ids" ]] \
+      || fail "$validator_name: the WARN logs of v6-$validator_name and the scan differ: $(diff <(echo "$warn_update_ids") <(echo "$scan_update_ids") | tr '\n' ' ')"
+    if [[ -z "$reference_update_ids" ]]; then
+      reference_update_ids="$scan_update_ids"
+    else
+      [[ "$scan_update_ids" == "$reference_update_ids" ]] || fail "$validator_name: the 0.7.0 update ids differ from those of ${GUARDIAN_HOSTS[0]}"
+    fi
+    echo "  PASS: $validator_name ($(read_host_offset startOffset "$validator_name"), $abort_offset]: scan and WARN logs agree on $(grep -c . <<<"$scan_update_ids") 0.7.0 updates"
+  done
+  printf '%s\n' "$reference_update_ids" > "$WATCHER_DIR/abort-v7-update-ids.txt"
+
+  echo "### A6. A quorum pins 0.7.0, reobserves each 0.7.0 update, then pins 0.6.0 again"
+  stop_watcher_on_each_host v6
+  record_ledger_end_of_each_host abortRestartOffset
+  start_watcher_on_each_host v7-recovery "$CORE_V7_PACKAGE_ID" "$(paste -sd, - <<<"$reference_update_ids")" 900
+  echo "  restart gap: a 0.6.0 publish while no watcher pinned to 0.6.0 runs"
+  gap_summary="$(publish_and_check v6-abort-restart-gap "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
+  gap_update_id="$(jq -r .updateId <<<"$gap_summary")"
+  stop_watcher_on_each_host v7-recovery
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v7-recovery-$validator_name.jsonl")" == "$reference_update_ids" ]] \
+      || fail "v7-recovery-$validator_name reobserved $(jq -sc '[.[] | select(.isReobservation) | .updateId] | unique' "$WATCHER_DIR/v7-recovery-$validator_name.jsonl"), expected each 0.7.0 update"
+  done
+  check_watchers_agree v7-recovery
+  start_watcher_on_each_host v6-after-abort "$CORE_V6_PACKAGE_ID" "" 900
+
+  echo "### A7. Scan each participant from the A6 restart to its ledger end for 0.6.0 publishes, and reobserve each"
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    restart_offset="$(ledger_end_of "$validator_name")"
+    gap_scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset abortRestartOffset "$validator_name")" "$restart_offset" "$CORE_V6_PACKAGE_ID" "$gap_update_id")"
+    if [[ -z "$reference_gap_update_ids" ]]; then
+      reference_gap_update_ids="$gap_scan_update_ids"
+    else
+      [[ "$gap_scan_update_ids" == "$reference_gap_update_ids" ]] || fail "$validator_name: the restart gap update ids differ from those of ${GUARDIAN_HOSTS[0]}"
+    fi
+  done
+  start_watcher_on_each_host v6-gap-reobserve "$CORE_V6_PACKAGE_ID" "$(paste -sd, - <<<"$reference_gap_update_ids")" 300
+  stop_watcher_on_each_host v6-gap-reobserve
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v6-gap-reobserve-$validator_name.jsonl")" == "$reference_gap_update_ids" ]] \
+      || fail "v6-gap-reobserve-$validator_name did not reobserve each 0.6.0 update of the restart gap"
+  done
+  echo "  PASS: each host reobserved the $(grep -c . <<<"$reference_gap_update_ids") 0.6.0 publishes of the restart gap, the gap publish $gap_update_id included"
+  stop_watcher_on_each_host v6-after-abort
+
+  echo "### A8. Tell the integrators that the upgrade stopped. 0.7.0 submissions fail at prepare (A2)."
+  record_state abortResult completed
+}
+
 copy_harness_evidence() {
   local evidence_copy_dir="${EVIDENCE_LOG%.log}"
   mkdir -p "$evidence_copy_dir"
@@ -907,13 +1107,17 @@ case "${1:-}" in
   vet-v7) step_vet_v7 ;;
   publish-v7) step_publish_v7 ;;
   ntt) step_ntt ;;
-  gate) step_gate ;;
+  gate)
+    step_gate
+    check_canary_gate_passed
+    ;;
   unvet-v6) step_unvet_v6 ;;
   switch-v7) step_switch_v7 ;;
   enforce-v7) step_enforce_v7 ;;
   post-unvet) step_post_unvet ;;
   rollback) step_rollback ;;
   restore) step_restore ;;
+  abort-v7) step_abort_v7 ;;
   all)
     step_prepare
     step_observe_v6
@@ -921,6 +1125,7 @@ case "${1:-}" in
     step_publish_v7
     step_ntt
     step_gate
+    check_canary_gate_passed
     step_unvet_v6
     step_switch_v7
     step_enforce_v7
@@ -928,8 +1133,21 @@ case "${1:-}" in
     step_rollback
     step_restore
     ;;
+  abort-all)
+    [[ "$CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS" -gt 0 ]] \
+      || fail "abort-all needs CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS > 0 for a gate timeout"
+    [[ "$CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS" -lt "$QUIET_WINDOW_SECONDS" ]] \
+      || fail "CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS must be less than QUIET_WINDOW_SECONDS ($QUIET_WINDOW_SECONDS)"
+    step_prepare
+    step_observe_v6
+    step_vet_v7
+    step_publish_v7
+    step_gate
+    check_canary_gate_timed_out
+    step_abort_v7
+    ;;
   *)
-    echo "usage: core_upgrade_rehearsal.sh prepare|observe-v6|vet-v7|publish-v7|ntt|gate|unvet-v6|switch-v7|enforce-v7|post-unvet|rollback|restore|all" >&2
+    echo "usage: core_upgrade_rehearsal.sh prepare|observe-v6|vet-v7|publish-v7|ntt|gate|unvet-v6|switch-v7|enforce-v7|post-unvet|rollback|restore|abort-v7|all|abort-all" >&2
     exit 2
     ;;
 esac
