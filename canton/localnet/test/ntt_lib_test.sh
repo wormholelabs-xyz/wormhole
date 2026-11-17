@@ -92,6 +92,12 @@ check_case "decimal_texts_total_units with a bad amount" 1 - - decimal_texts_tot
 check_case "decimal_texts_total_units above 18 digits" 1 - "18 digits" \
   decimal_texts_total_units 10 99999999.9999999999 0.0000000001
 
+check_case "json_decimal_array_total_units of two amounts" 0 25000000000 - \
+  json_decimal_array_total_units 10 '["1.0000000000", "1.5"]'
+check_case "json_decimal_array_total_units of an empty array" 1 - "non-empty" json_decimal_array_total_units 10 '[]'
+check_case "json_decimal_array_total_units of a number" 1 - "non-empty" json_decimal_array_total_units 10 '[2.5]'
+check_case "json_decimal_array_total_units with a space in an amount" 1 - - json_decimal_array_total_units 10 '["1 2"]'
+
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
 readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"

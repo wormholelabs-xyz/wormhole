@@ -34,8 +34,20 @@ readonly RELEASE_WAIT_MAX_POLLS=$(( (RELEASE_AFTER_ROUNDS + 2) * 24 ))
 
 run_label="$(date +%s)"
 
-amulet_total() {
-  amulet_holdings "$1" "$2" | jq -r 'map(.amount | tonumber) | add // 0'
+# amulet_total_units <validator> <party>: the unlocked Amulet of the party, in units of 10^-10 CC.
+amulet_total_units() {
+  local amulet_amounts
+  amulet_amounts="$(amulet_holdings "$1" "$2" | jq -c 'map(.amount)')"
+  if [[ "$amulet_amounts" == "[]" ]]; then
+    echo 0
+    return 0
+  fi
+  json_decimal_array_total_units "$AMULET_DECIMALS" "$amulet_amounts"
+}
+
+# ledger_balance_units <locked-ledger-create-argument-json>
+ledger_balance_units() {
+  decimal_to_units "$(jq -er .balance <<<"$1")" "$AMULET_DECIMALS"
 }
 
 echo "== 1. Wallet users, Canton Coin and TransferPreapprovals"
@@ -109,7 +121,7 @@ manager_cid="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:Ntt
 echo "TransceiverRegistration message $(message_summary "$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -c ._2)")"
 
 echo "== 4. Locker locks $LOCK_AMOUNT CC with Transfer"
-custodian_before_lock="$(amulet_total app-provider "$custodian_party")"
+custodian_before_lock_units="$(amulet_total_units app-provider "$custodian_party")"
 lock_registry="$(amulet_transfer_factory "$locker_party" "$custodian_party" "$LOCK_AMOUNT" "$locker_inputs")"
 if [[ "$(jq -r .factoryId <<<"$lock_registry")" != "$transfer_factory_cid" ]]; then
   echo "the registry transfer factory changed after registration" >&2
@@ -134,10 +146,10 @@ echo "outbound NTT message $(message_summary "$lock_message") update $(jq -r .up
 ledger_after_lock="$(created_contract_argument "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 ledger_cid="$(created_contract_id "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
 pot_cid="$(jq -er .custodyHoldingCid <<<"$ledger_after_lock")"
-custodian_after_lock="$(amulet_total app-provider "$custodian_party")"
+custodian_after_lock_units="$(amulet_total_units app-provider "$custodian_party")"
 echo "LockedLedger balance $(jq -r .balance <<<"$ledger_after_lock"), custody pot ${pot_cid:0:16}"
-echo "custodian CC $custodian_before_lock -> $custodian_after_lock"
-if ! jq -ne --argjson balance "$(jq -r .balance <<<"$ledger_after_lock")" --argjson expected "$LOCK_AMOUNT" '$balance == $expected' >/dev/null; then
+echo "custodian units $custodian_before_lock_units -> $custodian_after_lock_units"
+if [[ "$(ledger_balance_units "$ledger_after_lock")" != "$(decimal_to_units "$LOCK_AMOUNT" "$AMULET_DECIMALS")" ]]; then
   echo "expected LockedLedger balance $LOCK_AMOUNT after the lock" >&2
   exit 1
 fi
@@ -163,7 +175,7 @@ if (( RELEASE_AFTER_ROUNDS > 0 )); then
 fi
 
 echo "== 5. Relayer on sv delivers the inbound transfer with Release"
-recipient_before_release="$(amulet_total app-user "$recipient_party")"
+recipient_before_release_units="$(amulet_total_units app-user "$recipient_party")"
 custodian_before_release="$(amulet_holdings_with_round app-provider "$custodian_party")"
 release_vaa="$(ntt_transfer_vaa -sequence "$run_label" -emitter-chain "$PEER_CHAIN_ID" \
   -emitter-address "$PEER_TRANSCEIVER_ADDRESS" -source-manager "$PEER_MANAGER_ADDRESS" -recipient-manager "$manager_address" \
@@ -187,19 +199,18 @@ release_transaction="$(submit_local sv "ntt-release-$run_label" "$(jq -n --arg r
     "$(disclosed_contract app-provider "$custodian_party" :Splice.Amulet:Amulet "$pot_cid")")")")"
 release_result="$(exercise_result "$release_transaction" :Wormhole.Ntt.Manager:NttManager Release)"
 ledger_after_release="$(created_contract_argument "$release_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
-recipient_after_release="$(amulet_total app-user "$recipient_party")"
+recipient_after_release_units="$(amulet_total_units app-user "$recipient_party")"
 echo "Release decoded transfer $(jq -c '._2 | {decimals, amount, recipientChain}' <<<"$release_result")"
 echo "LockedLedger balance $(jq -r .balance <<<"$ledger_after_release"), custody pot $(jq -r '.custodyHoldingCid // "none" | .[0:16]' <<<"$ledger_after_release")"
-echo "recipient CC $recipient_before_release -> $recipient_after_release"
+echo "recipient units $recipient_before_release_units -> $recipient_after_release_units"
 custodian_after_release="$(amulet_holdings_with_round app-provider "$custodian_party")"
 echo "custodian Amulets before release $custodian_before_release"
 echo "custodian Amulets after release  $custodian_after_release"
-if ! jq -ne --argjson balance "$(jq -r .balance <<<"$ledger_after_release")" --argjson expected "$LEDGER_BALANCE_AFTER_RELEASE" '$balance == $expected' >/dev/null; then
+if [[ "$(ledger_balance_units "$ledger_after_release")" != "$(decimal_to_units "$LEDGER_BALANCE_AFTER_RELEASE" "$AMULET_DECIMALS")" ]]; then
   echo "expected LockedLedger balance $LEDGER_BALANCE_AFTER_RELEASE after the release" >&2
   exit 1
 fi
-if ! jq -ne --argjson before "$recipient_before_release" --argjson after "$recipient_after_release" --argjson amount "$RELEASE_AMOUNT" \
-  '$after - $before == $amount' >/dev/null; then
+if (( recipient_after_release_units - recipient_before_release_units != $(decimal_to_units "$RELEASE_AMOUNT" "$AMULET_DECIMALS") )); then
   echo "expected the recipient to receive $RELEASE_AMOUNT CC" >&2
   exit 1
 fi

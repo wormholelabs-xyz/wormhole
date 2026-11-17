@@ -18,6 +18,8 @@ readonly PEER_TRANSCEIVER_ADDRESS="000000000000000000000000d1d1d1d1d1d1d1d1d1d1d
 readonly PEER_TOKEN_ADDRESS="000000000000000000000000c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
 readonly PEER_RECIPIENT_ADDRESS="000000000000000000000000b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
 readonly TOKEN_DECIMALS=8
+# Daml Decimal amounts have 10 fraction digits.
+readonly DAML_DECIMAL_FRACTION_DIGITS=10
 # Inbound 2.5 tokens (wire amount at 8 decimals); outbound burn of 1.0 token.
 readonly MINT_TRIMMED_AMOUNT=250000000
 readonly MINT_AMOUNT="2.5"
@@ -122,8 +124,9 @@ mint_transaction="$(submit_local sv "ntt-mint-$run_label" "$(jq -n --arg relayer
 echo "Mint decoded transfer $(exercise_result "$mint_transaction" :Wormhole.Ntt.Manager:NttManager Mint | jq -c '{decimals, amount, recipientChain}')"
 user_coins="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[] | {contractId, amount: .createArgument.amount}]')"
 echo "user coins after Mint: $(jq -c '[.[].amount]' <<<"$user_coins")"
-if ! jq -e --argjson expected "$MINT_AMOUNT" 'map(.amount | tonumber) | add == $expected' <<<"$user_coins" >/dev/null; then
-  echo "expected the user to hold $MINT_AMOUNT after Mint" >&2
+user_coin_units="$(json_decimal_array_total_units "$DAML_DECIMAL_FRACTION_DIGITS" "$(jq -c 'map(.amount)' <<<"$user_coins")")"
+if [[ "$user_coin_units" != "$(decimal_to_units "$MINT_AMOUNT" "$DAML_DECIMAL_FRACTION_DIGITS")" ]]; then
+  echo "expected the user to hold $MINT_AMOUNT after Mint, holds $user_coin_units units" >&2
   exit 1
 fi
 
@@ -147,8 +150,9 @@ echo "outbound NTT message $(message_summary "$burn_message") update $(jq -r .up
 echo "payload $(jq -r .payload <<<"$burn_message")"
 user_change="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument.amount]')"
 echo "user coins after burn: $user_change"
-if ! jq -e --argjson expected "$CHANGE_AMOUNT" 'map(tonumber) | add == $expected' <<<"$user_change" >/dev/null; then
-  echo "expected the user to hold $CHANGE_AMOUNT after the burn" >&2
+user_change_units="$(json_decimal_array_total_units "$DAML_DECIMAL_FRACTION_DIGITS" "$user_change")"
+if [[ "$user_change_units" != "$(decimal_to_units "$CHANGE_AMOUNT" "$DAML_DECIMAL_FRACTION_DIGITS")" ]]; then
+  echo "expected the user to hold $CHANGE_AMOUNT after the burn, holds $user_change_units units" >&2
   exit 1
 fi
 

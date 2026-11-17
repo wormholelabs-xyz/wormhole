@@ -119,3 +119,62 @@ check_core_package_id_of_dar() {
     return 1
   fi
 }
+
+# Amounts in units stay below 10^18, so a sum of two fits in a signed 64-bit bash integer.
+readonly MAX_UNITS_DIGITS=18
+
+# decimal_to_units <decimal-text> <decimals>: the amount in the smallest unit, as an integer string.
+decimal_to_units() {
+  local decimal_text="$1" decimals="$2" integer_digits fraction_digits units_text
+  if [[ ! "$decimals" =~ ^[0-9]{1,2}$ ]]; then
+    echo "decimals must be 0 to 99, got '$decimals'" >&2
+    return 1
+  fi
+  if [[ ! "$decimal_text" =~ ^([0-9]+)(\.([0-9]+))?$ ]]; then
+    echo "'$decimal_text' is not a non-negative decimal number" >&2
+    return 1
+  fi
+  integer_digits="${BASH_REMATCH[1]}"
+  fraction_digits="${BASH_REMATCH[3]}"
+  if (( ${#fraction_digits} > 10#$decimals )); then
+    echo "'$decimal_text' has more than $((10#$decimals)) fraction digits" >&2
+    return 1
+  fi
+  while (( ${#fraction_digits} < 10#$decimals )); do
+    fraction_digits="${fraction_digits}0"
+  done
+  units_text="$integer_digits$fraction_digits"
+  while [[ "${#units_text}" -gt 1 && "${units_text:0:1}" == "0" ]]; do
+    units_text="${units_text:1}"
+  done
+  if (( ${#units_text} > MAX_UNITS_DIGITS )); then
+    echo "'$decimal_text' has more than $MAX_UNITS_DIGITS digits in units" >&2
+    return 1
+  fi
+  echo "$units_text"
+}
+
+# decimal_texts_total_units <decimals> [<decimal-text>...]: the sum in the smallest unit.
+decimal_texts_total_units() {
+  local decimals="$1" decimal_text amount_units total_units=0
+  shift
+  for decimal_text in "$@"; do
+    amount_units="$(decimal_to_units "$decimal_text" "$decimals")" || return 1
+    total_units=$((total_units + amount_units))
+    if (( ${#total_units} > MAX_UNITS_DIGITS )); then
+      echo "the sum has more than $MAX_UNITS_DIGITS digits in units" >&2
+      return 1
+    fi
+  done
+  echo "$total_units"
+}
+
+# json_decimal_array_total_units <decimals> <json-array-of-decimal-texts>: the sum in the smallest unit.
+# The array must be non-empty.
+json_decimal_array_total_units() {
+  local decimals="$1" decimal_texts
+  decimal_texts="$(jq -er 'if type == "array" and length > 0 and all(.[]; type == "string" and test("^[0-9]+(\\.[0-9]+)?$"))
+      then join(" ") else error("expected a non-empty array of decimal strings") end' <<<"$2")" || return 1
+  # shellcheck disable=SC2086 # jq checked each word against [0-9.]
+  decimal_texts_total_units "$decimals" $decimal_texts
+}
