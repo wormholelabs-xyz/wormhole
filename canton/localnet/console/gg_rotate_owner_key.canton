@@ -1,0 +1,131 @@
+// Rotate one guardianGovernance owner key: remove GG_REMOVED_OWNER, add GG_ADDED_OWNER, keep the threshold.
+// Every owner signature comes from an external signer command; the console never holds owner keys.
+// Environment:
+//   GG_PARTY_ID                      guardianGovernance party id.
+//   GG_KEPT_OWNER_PUBKEY_1/2         DER SPKI Ed25519 public keys of the two owners that stay.
+//   GG_KEPT_OWNER_SIGN_CMD_1/2       Signer commands of those owners: "<CMD> <hashHex>" prints a hex signature.
+//   GG_REMOVED_OWNER_PUBKEY          Public key of the owner to remove.
+//   GG_REMOVED_OWNER_SIGN_CMD        Signer command of that owner (used only for the negative check).
+//   GG_ADDED_OWNER_PUBKEY            Public key of the new owner.
+//   GG_ADDED_OWNER_SIGN_CMD          Signer command of the new owner.
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.topology.transaction._
+import com.digitalasset.canton.config.RequireTypes.PositiveInt
+import com.digitalasset.canton.crypto._
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+import com.digitalasset.canton.admin.api.client.commands.TopologyAdminCommands.Write.GenerateTransactions.Proposal
+import com.google.protobuf.ByteString
+import com.digitalasset.nonempty.NonEmpty
+import scala.sys.process._
+import scala.collection.immutable.Set
+import java.nio.file.{Files, Paths}
+
+def env(name: String): String =
+  sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
+def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
+def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+
+case class OwnerKey(publicKey: SigningPublicKey, signCmd: String) {
+  val namespace: Namespace = Namespace(publicKey.fingerprint)
+}
+def loadOwner(pubVar: String, signVar: String): OwnerKey = {
+  val der = ByteString.copyFrom(Files.readAllBytes(Paths.get(env(pubVar))))
+  val publicKey = SigningPublicKey
+    .create(CryptoKeyFormat.DerX509Spki, der, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .getOrElse(sys.error(s"invalid owner public key in $pubVar"))
+  OwnerKey(publicKey, env(signVar))
+}
+
+val partyId = PartyId.tryFromProtoPrimitive(env("GG_PARTY_ID"))
+val keptOwners = Seq(loadOwner("GG_KEPT_OWNER_PUBKEY_1", "GG_KEPT_OWNER_SIGN_CMD_1"), loadOwner("GG_KEPT_OWNER_PUBKEY_2", "GG_KEPT_OWNER_SIGN_CMD_2"))
+val removedOwner = loadOwner("GG_REMOVED_OWNER_PUBKEY", "GG_REMOVED_OWNER_SIGN_CMD")
+val addedOwner = loadOwner("GG_ADDED_OWNER_PUBKEY", "GG_ADDED_OWNER_SIGN_CMD")
+require(keptOwners.map(_.namespace).distinct.size == 2, "kept owners must differ")
+require(!keptOwners.map(_.namespace).contains(removedOwner.namespace), "removed owner is also a kept owner")
+require(!(keptOwners :+ removedOwner).map(_.namespace).contains(addedOwner.namespace), "added owner is already an owner")
+
+val participant = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))
+val synchronizerId = participant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global")
+  .getOrElse(throw new RuntimeException("app-provider is not connected to global")).physicalSynchronizerId
+val store = TopologyStoreId.Synchronizer(synchronizerId)
+val protocolVersion = com.digitalasset.canton.version.ProtocolVersion.latest
+
+def externalSign(owner: OwnerKey, hash: Hash): Signature = {
+  val sigHex = (owner.signCmd + " " + bytesToHex(hash.getCryptographicEvidence.toByteArray)).!!.trim
+  Signature.fromExternalSigning(
+    SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
+    ByteString.copyFrom(hexToBytes(sigHex)),
+    owner.namespace.fingerprint,
+    SigningAlgorithmSpec.Ed25519,
+  )
+}
+def generateUnsigned[M <: TopologyMapping](mapping: M): TopologyTransaction[TopologyChangeOp, M] =
+  participant.topology.transactions.generate(Seq(Proposal(mapping, store))).head
+    .asInstanceOf[TopologyTransaction[TopologyChangeOp, M]]
+def signedBy[M <: TopologyMapping](unsigned: TopologyTransaction[TopologyChangeOp, M], signers: Seq[OwnerKey]): SignedTopologyTransaction[TopologyChangeOp, M] = {
+  val signatures = signers.map(externalSign(_, unsigned.hash.hash))
+  signatures.tail.foldLeft(SignedTopologyTransaction.withSignature(unsigned, signatures.head, isProposal = false, protocolVersion))(_.addSingleSignature(_))
+}
+val topologyEffectiveMaxAttempts = 120
+def awaitTopology(description: String)(isEffective: => Boolean): Unit = {
+  var attempt = 0
+  while (!isEffective) {
+    attempt += 1
+    if (attempt >= topologyEffectiveMaxAttempts) throw new RuntimeException(s"topology not effective: $description")
+    Thread.sleep(500)
+  }
+}
+def currentDn() = participant.topology.decentralized_namespaces.list(store).find(_.item.namespace == partyId.namespace)
+  .getOrElse(throw new RuntimeException("decentralized namespace not found"))
+def currentPtp() = participant.topology.party_to_participant_mappings.list(store).find(_.item.partyId == partyId)
+  .getOrElse(throw new RuntimeException("party to participant mapping not found"))
+
+val dnBefore = currentDn()
+val ownersBefore = dnBefore.item.owners.toSet
+require(ownersBefore == (keptOwners :+ removedOwner).map(_.namespace).toSet, s"current owners $ownersBefore differ from kept + removed owners")
+println(s"ROTATION before: DN serial=${dnBefore.context.serial} threshold=${dnBefore.item.threshold} owners=${ownersBefore.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")}")
+
+// Step 1: the new owner's self-signed root NamespaceDelegation.
+val addedRoot = signedBy(
+  generateUnsigned(NamespaceDelegation.create(addedOwner.namespace, addedOwner.publicKey, DelegationRestriction.CanSignAllMappings)
+    .getOrElse(sys.error("NamespaceDelegation"))),
+  Seq(addedOwner))
+participant.topology.transactions.load(Seq(addedRoot), store)
+awaitTopology("added owner root delegation") {
+  participant.topology.namespace_delegations.list(store).exists(_.item.namespace == addedOwner.namespace)
+}
+println("ROTATION added owner root delegation is effective")
+
+// Step 2: replace the owner set. Authorized by 2 of the current owners plus the added owner.
+val newOwnerSet: Set[Namespace] = (keptOwners :+ addedOwner).map(_.namespace).toSet
+val newDn = DecentralizedNamespaceDefinition.tryCreate(partyId.namespace, dnBefore.item.threshold, newOwnerSet)
+participant.topology.transactions.load(Seq(signedBy(generateUnsigned(newDn), keptOwners :+ addedOwner)), store)
+awaitTopology("decentralized namespace owner set") { currentDn().item.owners.toSet == newOwnerSet }
+val dnAfter = currentDn()
+println(s"ROTATION after: DN serial=${dnAfter.context.serial} threshold=${dnAfter.item.threshold} owners=${dnAfter.item.owners.map(_.fingerprint.toProtoPrimitive).toSeq.sorted.mkString(",")}")
+
+// Step 3: replace the party signing keys on PartyToParticipant. Hosting and confirmation threshold stay.
+val ptpBefore = currentPtp()
+val signingThreshold = ptpBefore.item.partySigningKeysWithThreshold.map(_.threshold).getOrElse(sys.error("party has no signing keys"))
+val newSigningKeys = SigningKeysWithThreshold(NonEmpty.mk(Set, keptOwners.head.publicKey, keptOwners(1).publicKey, addedOwner.publicKey), signingThreshold)
+val newPtp = PartyToParticipant.create(partyId, ptpBefore.item.threshold, ptpBefore.item.participants, Some(newSigningKeys))
+  .getOrElse(sys.error("PartyToParticipant"))
+participant.topology.transactions.load(Seq(signedBy(generateUnsigned(newPtp), keptOwners :+ addedOwner)), store)
+val newSigningFingerprints = (keptOwners :+ addedOwner).map(_.publicKey.fingerprint).toSet
+awaitTopology("party signing keys") {
+  currentPtp().item.partySigningKeysWithThreshold.exists(_.keys.map(_.fingerprint).toSet == newSigningFingerprints)
+}
+val ptpAfter = currentPtp()
+println(s"ROTATION after: PTP serial=${ptpAfter.context.serial} confirmationThreshold=${ptpAfter.item.threshold} hosts=${ptpAfter.item.participants.size} " +
+  s"signingKeys=${ptpAfter.item.partySigningKeysWithThreshold.map(k => s"${k.threshold}-of-${k.keys.size}").getOrElse("none")}")
+
+// Step 4 (negative): the removed owner plus one kept owner cannot authorize a namespace change.
+val probeDn = DecentralizedNamespaceDefinition.tryCreate(partyId.namespace, dnAfter.item.threshold, newOwnerSet + removedOwner.namespace)
+val removedOwnerAttempt = scala.util.Try(
+  participant.topology.transactions.load(Seq(signedBy(generateUnsigned(probeDn), Seq(keptOwners.head, removedOwner))), store))
+Thread.sleep(5000)
+val ownersAfterAttempt = currentDn().item.owners.toSet
+println(s"ROTATION removed-owner attempt: load=${removedOwnerAttempt.fold(e => "rejected: " + e.getMessage.linesIterator.take(3).mkString(" "), _ => "accepted by API")} " +
+  s"ownersUnchanged=${ownersAfterAttempt == newOwnerSet}")
+require(ownersAfterAttempt == newOwnerSet, "removed owner changed the namespace")
+println("ROTATION done")
