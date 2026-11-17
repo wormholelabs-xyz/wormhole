@@ -34,6 +34,7 @@ COPY multi-package.yaml ./
 COPY dars ./dars
 COPY core ./core
 COPY test ./test
+COPY test-lookalike ./test-lookalike
 # Multi-package build: core (templates) then test (scripts, data-dep on core
 # + the interface DARs). Produces core/.daml/dist/wormhole-core-<version>.dar and
 # test/.daml/dist/wormhole-core-test-0.1.0.dar (which packs core's DALFs).
