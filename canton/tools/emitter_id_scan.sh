@@ -19,6 +19,15 @@ readonly EMITTER_TEMPLATE_SUFFIX=":Wormhole.Core.State:Emitter"
 readonly REGISTRY_TEMPLATE_SUFFIX=":Wormhole.Core.State:EmitterRegistry"
 readonly EMITTER_PACKAGE_NAME_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
 readonly REGISTRY_PACKAGE_NAME_TEMPLATE="#wormhole-core:Wormhole.Core.State:EmitterRegistry"
+# Wormhole.Core.State.maxEmitterId (2^53 - 1): every id stays exact in jq doubles.
+readonly MAX_EMITTER_ID="9007199254740991"
+readonly MAX_REGISTRY_NEXT_ID="9007199254740992"
+# exact_integer($maxText): the number for a canonical decimal string in 0..$maxText, else null.
+# shellcheck disable=SC2016 # jq source
+readonly JQ_EXACT_INTEGER='def exact_integer($maxText):
+  if type == "string" and test("^(0|[1-9][0-9]{0,15})$")
+     and (length < ($maxText | length) or (length == ($maxText | length) and . <= $maxText))
+  then tonumber else null end;'
 
 if [[ $# -lt 5 || $# -gt 6 ]]; then
   echo "usage: emitter_id_scan.sh <json-api-url> <token-file> <guardian-governance-party> <operator-party> <begin-exclusive-offset> [<baseline-max-emitter-id>]" >&2
@@ -35,7 +44,11 @@ begin_exclusive="$5"
 [[ "$EXPECT_ACTIVE_REGISTRIES" =~ ^[0-9]+$ ]] || { echo "EXPECT_ACTIVE_REGISTRIES is not a non-negative integer" >&2; exit 2; }
 if [[ $# -eq 6 ]]; then
   baseline_max_emitter_id="$6"
-  [[ "$baseline_max_emitter_id" =~ ^(-1|[0-9]+)$ ]] || { echo "baseline is not -1 or a non-negative integer: $baseline_max_emitter_id" >&2; exit 2; }
+  # At most 16 digits, thus the comparison is exact in bash 64-bit arithmetic.
+  if [[ ! "$baseline_max_emitter_id" =~ ^(-1|0|[1-9][0-9]{0,15})$ ]] || (( baseline_max_emitter_id > MAX_EMITTER_ID )); then
+    echo "baseline is not -1 or a canonical integer in 0..$MAX_EMITTER_ID: $baseline_max_emitter_id" >&2
+    exit 2
+  fi
 elif [[ "$begin_exclusive" -eq 0 ]]; then
   baseline_max_emitter_id="-1"
 else
@@ -83,14 +96,17 @@ while [[ "$page_begin" -lt "$end_inclusive" ]]; do
     exit 1
   fi
   jq -c --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" --arg registrySuffix "$REGISTRY_TEMPLATE_SUFFIX" \
-    --arg operator "$operator_party" --arg gg "$guardian_governance_party" '.[] | .update.Transaction?.value // empty
+    --arg operator "$operator_party" --arg gg "$guardian_governance_party" \
+    --arg maxEmitterId "$MAX_EMITTER_ID" --arg maxRegistryNextId "$MAX_REGISTRY_NEXT_ID" "$JQ_EXACT_INTEGER"'
+    .[] | .update.Transaction?.value // empty
     | . as $transaction | .events[] | .CreatedEvent? // empty
     | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)
     | if (.templateId | endswith($emitterSuffix)) then
         {kind: "Emitter", offset: $transaction.offset, contractId, owner: .createArgument.owner,
-         emitterId: (.createArgument.emitterId | tonumber)}
+         emitterIdText: .createArgument.emitterId, emitterId: (.createArgument.emitterId | exact_integer($maxEmitterId))}
       elif (.templateId | endswith($registrySuffix)) then
-        {kind: "EmitterRegistry", offset: $transaction.offset, contractId, nextId: (.createArgument.nextId | tonumber)}
+        {kind: "EmitterRegistry", offset: $transaction.offset, contractId,
+         nextIdText: .createArgument.nextId, nextId: (.createArgument.nextId | exact_integer($maxRegistryNextId))}
       else empty end' "$work_dir/page.json" >> "$work_dir/history.jsonl"
   page_length="$(jq length "$work_dir/page.json")"
   [[ "$page_length" -le "$SCAN_PAGE_SIZE" ]] || { echo "the participant returned $page_length updates for a page of $SCAN_PAGE_SIZE" >&2; exit 1; }
@@ -117,12 +133,15 @@ if ! jq -e 'type == "array"' "$work_dir/acs.json" > /dev/null; then
   exit 1
 fi
 jq -c --arg operator "$operator_party" --arg gg "$guardian_governance_party" --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" \
-  '.[] | .contractEntry.JsActiveContract?.createdEvent // empty
+  --arg maxEmitterId "$MAX_EMITTER_ID" --arg maxRegistryNextId "$MAX_REGISTRY_NEXT_ID" "$JQ_EXACT_INTEGER"'
+  .[] | .contractEntry.JsActiveContract?.createdEvent // empty
   | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)
   | if (.templateId | endswith($emitterSuffix)) then
-      {kind: "Emitter", contractId, owner: .createArgument.owner, emitterId: (.createArgument.emitterId | tonumber)}
+      {kind: "Emitter", contractId, owner: .createArgument.owner,
+       emitterIdText: .createArgument.emitterId, emitterId: (.createArgument.emitterId | exact_integer($maxEmitterId))}
     else
-      {kind: "EmitterRegistry", contractId, nextId: (.createArgument.nextId | tonumber)}
+      {kind: "EmitterRegistry", contractId,
+       nextIdText: .createArgument.nextId, nextId: (.createArgument.nextId | exact_integer($maxRegistryNextId))}
     end' "$work_dir/acs.json" > "$work_dir/active.jsonl"
 
 jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
@@ -132,8 +151,8 @@ jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
   | ($history | map(select(.kind == "Emitter"))) as $historyEmitters
   | ($active | map(select(.kind == "Emitter"))) as $activeEmitters
   | ($active | map(select(.kind == "EmitterRegistry"))) as $activeRegistries
-  | ([$baseline] + ($historyEmitters | map(.emitterId)) | max) as $historyMaxEmitterId
-  | ([0] + ($history | map(select(.kind == "EmitterRegistry") | .nextId)) | max) as $historyMaxRegistryNextId
+  | ([$baseline] + ($historyEmitters | map(.emitterId | values)) | max) as $historyMaxEmitterId
+  | ([0] + ($history | map(select(.kind == "EmitterRegistry") | .nextId | values)) | max) as $historyMaxRegistryNextId
   | ($historyEmitters | map(.contractId)) as $historyEmitterIds
   | {
       operator: $operator, guardianGovernance: $gg, beginExclusiveOffset: $begin, endInclusiveOffset: $end,
@@ -142,16 +161,19 @@ jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
       historyMaxEmitterId: $historyMaxEmitterId,
       historyMaxRegistryNextId: $historyMaxRegistryNextId,
       activeEmitters: ($activeEmitters | length),
-      activeMaxEmitterId: ([-1] + ($activeEmitters | map(.emitterId)) | max),
+      activeMaxEmitterId: ([-1] + ($activeEmitters | map(.emitterId | values)) | max),
       activeRegistries: ($activeRegistries | length),
-      negativeEmitterIds: ([$historyEmitters[], $activeEmitters[]] | map(select(.emitterId < 0)) | length),
+      invalidEmitterIds: ([$historyEmitters[], $activeEmitters[]] | map(select(.emitterId == null))
+        | map({contractId, emitterId: .emitterIdText})),
+      invalidRegistryNextIds: ([($history | map(select(.kind == "EmitterRegistry")))[], $activeRegistries[]]
+        | map(select(.nextId == null)) | map({contractId, nextId: .nextIdText})),
       activeEmittersMissingFromHistory: (if $begin == 0
         then ($activeEmitters | map(select(.contractId as $cid | $historyEmitterIds | index($cid) | not)) | length)
         else null end),
       activeDuplicates: ($activeEmitters | group_by([.owner, .emitterId]) | map(select(length > 1)
         | {owner: .[0].owner, emitterId: .[0].emitterId, contractIds: map(.contractId)})),
       activeRegistriesWithWrongNextId: ($activeRegistries | map(select(.nextId != ($historyMaxEmitterId + 1)))
-        | map({contractId, nextId})),
+        | map({contractId, nextId: .nextIdText})),
       firstId: ($historyMaxEmitterId + 1),
       expectedActiveRegistries: $expectedRegistries
     }' "$work_dir/history.jsonl" > "$work_dir/summary.json"
@@ -160,7 +182,10 @@ cat "$work_dir/summary.json"
 failures=()
 [[ "$(jq '.activeDuplicates | length' "$work_dir/summary.json")" -eq 0 ]] \
   || failures+=("duplicate (operator, owner, emitterId) among active Emitters")
-[[ "$(jq '.negativeEmitterIds' "$work_dir/summary.json")" -eq 0 ]] || failures+=("an Emitter has a negative emitterId")
+[[ "$(jq '.invalidEmitterIds | length' "$work_dir/summary.json")" -eq 0 ]] \
+  || failures+=("an emitterId is outside 0..maxEmitterId ($MAX_EMITTER_ID) or not canonical: $(jq -c .invalidEmitterIds "$work_dir/summary.json")")
+[[ "$(jq '.invalidRegistryNextIds | length' "$work_dir/summary.json")" -eq 0 ]] \
+  || failures+=("a registry nextId is outside 0..$MAX_REGISTRY_NEXT_ID or not canonical: $(jq -c .invalidRegistryNextIds "$work_dir/summary.json")")
 [[ "$(jq '.activeEmittersMissingFromHistory // 0' "$work_dir/summary.json")" -eq 0 ]] \
   || failures+=("an active Emitter is not in the update history from genesis")
 [[ "$(jq '.activeMaxEmitterId < .firstId' "$work_dir/summary.json")" == "true" ]] \
