@@ -23,7 +23,8 @@ The guardian checks each entry when it starts:
 - The address must have exactly 64 hex characters, without a `0x` prefix.
 - Each pair of chain id and address must occur only one time.
 
-If one check fails, the guardian does not start the NTT accountant.
+If one check fails and the guardian has the `--accountantNttContract` flag, `guardiand` stops at startup.
+The accountant start returns an error, and `node.go` logs it as fatal.
 
 ## Values to supply after each Canton NTT deployment
 
@@ -91,7 +92,7 @@ Do these steps for each Canton NTT deployment, one environment at a time.
 8. Query `AllTransceiverPeers`. Make sure that each peer entry is in both directions.
 9. Add an entry to the list for that environment in `cantonNttTransceiverEmitters`.
 10. Set `logOnly: true` on the new entry for the first release.
-11. Run `go test ./pkg/accountant/...` in `node/`.
+11. Run `go test ./pkg/accountant/...` in `node/`. This step is mandatory. Do not release the build if a test fails.
 12. Release the guardian build to the guardians of that environment.
 13. Monitor the NTT accountant logs for the Canton emitter. Make sure that no transfer fails.
 14. Remove `logOnly: true` in a subsequent release to enforce the limits.
@@ -103,6 +104,8 @@ Use this format for the entry:
 ```
 
 > **WARNING:** Do not add an entry before step 8 is complete. An enforced entry without a hub registration stops all transfers from that emitter.
+
+> **WARNING:** Do not skip step 11. A malformed entry stops `guardiand` at startup on each guardian that enables the NTT accountant.
 
 > **CAUTION:** Do not copy the addresses from `ntt_canton_test.go`. These addresses are for tests only.
 
