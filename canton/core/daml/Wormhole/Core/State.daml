@@ -96,6 +96,18 @@ maxNonceUint32 = 4294967295
 maxConsistencyLevelUint8 : Int
 maxConsistencyLevelUint8 = 255
 
+-- | 2^53 - 1: emitter ids stay exact in every tool, including JSON doubles.
+maxEmitterId : Int
+maxEmitterId = 9007199254740991
+
+-- | One below Int max, so the successor's @sequence + 1@ cannot overflow.
+maxEmitterSequence : Int
+maxEmitterSequence = 9223372036854775806
+
+-- | 10^6 fee-instrument units, in 10^-10 units.
+maxRegistrationFee : Int
+maxRegistrationFee = 10000000000000000
+
 ----------------------------------------------------------------------
 -- Core state singleton
 ----------------------------------------------------------------------
@@ -398,6 +410,10 @@ template EmitterRegistry
     nextId             : Int
   where
     signatory operator, guardianGovernance
+    -- @nextId == maxEmitterId + 1@ is an exhausted registry: its next
+    -- registration fails on the 'Emitter' ensure.
+    ensure nextId >= 0 && nextId <= maxEmitterId + 1
+      && registrationFee >= 0 && registrationFee <= maxRegistrationFee
 
     -- | Re-prices registration and keeps @nextId@, so a fee change never
     -- re-enters the counter by hand. Controllers are the two signatories: the
@@ -409,6 +425,7 @@ template EmitterRegistry
       controller operator, guardianGovernance
       do
         assertMsg "registration fee must not be negative" (newRegistrationFee >= 0)
+        assertMsg "registration fee exceeds maxRegistrationFee" (newRegistrationFee <= maxRegistrationFee)
         successor <- create this with registrationFee = newRegistrationFee
         successorRegistry <- fetch successor
         assertMsg "SetRegistrationFee changed nextId" (successorRegistry.nextId == nextId)
@@ -558,6 +575,8 @@ template Emitter
     -- Every guardian participant hosts guardianGovernance, so this makes
     -- guardians informees of each PublishMessage, for every owner.
     observer guardianGovernance
+    ensure emitterId >= 0 && emitterId <= maxEmitterId
+      && sequence >= 0 && sequence <= maxEmitterSequence
 
     -- | Publish a Wormhole message. Returns the sequence-bumped successor
     -- 'Emitter' cid alongside the 'WormholeMessage' the watcher observes
