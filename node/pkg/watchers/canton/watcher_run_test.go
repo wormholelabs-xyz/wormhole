@@ -52,12 +52,13 @@ func sampleEvent(participantOffset int64) cantonclient.CantonMessageEvent {
 		UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
 		EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
 		Message: cantonclient.CantonMessage{
-			Registrar: sampleRegistrar,
-			Owner:     sampleOwner,
-			EmitterID: sampleEmitterID,
-			Sequence:  5,
-			Nonce:     42,
-			Payload:   []byte{0x11, 0x22},
+			AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent,
+			Registrar:           sampleRegistrar,
+			Owner:               sampleOwner,
+			EmitterID:           sampleEmitterID,
+			Sequence:            5,
+			Nonce:               42,
+			Payload:             []byte{0x11, 0x22},
 		},
 	}
 }
@@ -103,11 +104,12 @@ func TestRunReobservation(t *testing.T) {
 		UpdateID:          reobsUpdateID,
 		EffectiveAt:       time.Unix(1_700_000_001, 0).UTC(),
 		Messages: []cantonclient.CantonMessage{{
-			Registrar: sampleRegistrar,
-			Owner:     sampleOwner,
-			EmitterID: sampleEmitterID,
-			Sequence:  9,
-			Payload:   []byte{0xAB},
+			AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent,
+			Registrar:           sampleRegistrar,
+			Owner:               sampleOwner,
+			EmitterID:           sampleEmitterID,
+			Sequence:            9,
+			Payload:             []byte{0xAB},
 		}},
 	}
 	msgC, obsvReqC := startWatcher(t, fake)
@@ -191,7 +193,7 @@ func TestProcessMessageDropsZeroTimestamp(t *testing.T) {
 		ParticipantOffset: 1,
 		UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
 		EffectiveAt:       time.Time{},
-		Message:           cantonclient.CantonMessage{Registrar: sampleRegistrar, Owner: sampleOwner},
+		Message:           cantonclient.CantonMessage{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: sampleRegistrar, Owner: sampleOwner},
 	}, false)
 
 	select {

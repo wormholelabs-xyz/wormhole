@@ -151,3 +151,41 @@ func TestUnpinnedPackageLabelsCapDistinctValues(t *testing.T) {
 	assert.Equal(t, unpinnedPackageOverflowLabel, labels.labelForPackageID("package-overflow"))
 	assert.Len(t, labels.labeledPackageIDs, maxDistinctUnpinnedPackageLabels)
 }
+
+func TestMessagesFromTxSetsAcceptedPackageRole(t *testing.T) {
+	cases := []struct {
+		name               string
+		tmpl               TemplateID
+		executingPackageID string
+		wantRole           AcceptedPackageRole
+	}{
+		{name: "current id", tmpl: upgradeWindowTmpl, executingPackageID: pinnedPackageID, wantRole: AcceptedPackageRoleCurrent},
+		{name: "retiring id before the deadline", tmpl: upgradeWindowTmpl, executingPackageID: retiringPinnedPackageID, wantRole: AcceptedPackageRoleRetiring},
+		{name: "wildcard", tmpl: testTmpl, executingPackageID: lookalikePackageID, wantRole: AcceptedPackageRoleCurrent},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(tc.executingPackageID, 4)}}, sampleEffectiveAt, testRetiringDeadline.Add(-time.Second))
+
+			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", zap.NewNop())
+
+			require.Len(t, messages, 1)
+			assert.Equal(t, tc.wantRole, messages[0].AcceptedPackageRole)
+		})
+	}
+}
+
+func TestAcceptedPackageRoleString(t *testing.T) {
+	cases := []struct {
+		role AcceptedPackageRole
+		want string
+	}{
+		{role: AcceptedPackageRoleCurrent, want: "current"},
+		{role: AcceptedPackageRoleRetiring, want: "retiring"},
+		{role: AcceptedPackageRole(0), want: "unknown"},
+		{role: AcceptedPackageRole(3), want: "unknown"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, tc.role.String())
+	}
+}

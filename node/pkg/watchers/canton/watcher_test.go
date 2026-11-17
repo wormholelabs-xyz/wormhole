@@ -205,13 +205,14 @@ func TestProcessMessageBuildsObservation(t *testing.T) {
 		UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
 		EffectiveAt:       ts,
 		Message: cantonclient.CantonMessage{
-			Registrar:        sampleRegistrar,
-			Owner:            sampleOwner,
-			EmitterID:        sampleEmitterID,
-			Sequence:         7,
-			Nonce:            99,
-			ConsistencyLevel: 0,
-			Payload:          []byte{0xde, 0xad},
+			AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent,
+			Registrar:           sampleRegistrar,
+			Owner:               sampleOwner,
+			EmitterID:           sampleEmitterID,
+			Sequence:            7,
+			Nonce:               99,
+			ConsistencyLevel:    0,
+			Payload:             []byte{0xde, 0xad},
 		},
 	}, false)
 
@@ -229,8 +230,8 @@ func TestProcessMessageBuildsObservation(t *testing.T) {
 
 func TestProcessMessageDropsMissingKeyParty(t *testing.T) {
 	for name, msg := range map[string]cantonclient.CantonMessage{
-		"empty registrar": {Registrar: "", Owner: sampleOwner, EmitterID: 0},
-		"empty owner":     {Registrar: sampleRegistrar, Owner: "", EmitterID: 0},
+		"empty registrar": {AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: "", Owner: sampleOwner, EmitterID: 0},
+		"empty owner":     {AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: sampleRegistrar, Owner: "", EmitterID: 0},
 	} {
 		t.Run(name, func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 1)
@@ -278,7 +279,7 @@ func TestProcessMessageTxIDIsIndependentOfParticipantOffset(t *testing.T) {
 			ParticipantOffset: participantOffset,
 			UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
 			EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
-			Message:           cantonclient.CantonMessage{Registrar: sampleRegistrar, Owner: sampleOwner, EmitterID: sampleEmitterID},
+			Message:           cantonclient.CantonMessage{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: sampleRegistrar, Owner: sampleOwner, EmitterID: sampleEmitterID},
 		}, false)
 	}
 	wantTxID, err := hex.DecodeString(sampleUpdateIDHex)
@@ -294,7 +295,7 @@ func TestProcessMessageDropsZeroUpdateID(t *testing.T) {
 	w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
 		ParticipantOffset: 1,
 		EffectiveAt:       time.Unix(1, 0),
-		Message:           cantonclient.CantonMessage{Registrar: sampleRegistrar, Owner: sampleOwner},
+		Message:           cantonclient.CantonMessage{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: sampleRegistrar, Owner: sampleOwner},
 	}, false)
 
 	select {
@@ -315,11 +316,12 @@ func TestHandleReobservation(t *testing.T) {
 		UpdateID:          reobsUpdateID,
 		EffectiveAt:       time.Unix(1_700_000_001, 0).UTC(),
 		Messages: []cantonclient.CantonMessage{{
-			Registrar: sampleRegistrar,
-			Owner:     sampleOwner,
-			EmitterID: sampleEmitterID,
-			Sequence:  3,
-			Payload:   []byte{0x01},
+			AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent,
+			Registrar:           sampleRegistrar,
+			Owner:               sampleOwner,
+			EmitterID:           sampleEmitterID,
+			Sequence:            3,
+			Payload:             []byte{0x01},
 		}},
 	}
 
@@ -371,7 +373,7 @@ func TestHandleReobservationRejectsMismatchedUpdateID(t *testing.T) {
 	client.byUpdateID[requestedUpdateID] = cantonclient.CantonTransaction{
 		UpdateID:    mustParseUpdateID(sampleUpdateIDHex),
 		EffectiveAt: time.Unix(1_700_000_001, 0).UTC(),
-		Messages:    []cantonclient.CantonMessage{{Registrar: sampleRegistrar, Owner: sampleOwner, EmitterID: sampleEmitterID}},
+		Messages:    []cantonclient.CantonMessage{{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: sampleRegistrar, Owner: sampleOwner, EmitterID: sampleEmitterID}},
 	}
 
 	w.handleReobservation(context.Background(), zap.NewNop(), client, &gossipv1.ObservationRequest{
@@ -575,6 +577,48 @@ func TestHeartbeatContractAddress(t *testing.T) {
 			contractAddress := w.heartbeatContractAddress()
 			assert.Equal(t, tc.want, contractAddress)
 			assert.LessOrEqual(t, len(contractAddress), maxHeartbeatContractAddressLen)
+		})
+	}
+}
+
+func acceptedPublishCount(t *testing.T, role string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(acceptedPublishMessages.WithLabelValues(role))
+}
+
+func TestProcessMessageCountsAcceptedPublishByRole(t *testing.T) {
+	cases := []struct {
+		name                  string
+		role                  cantonclient.AcceptedPackageRole
+		isReobservation       bool
+		wantCurrentIncrement  float64
+		wantRetiringIncrement float64
+		wantEmitted           bool
+	}{
+		{name: "current", role: cantonclient.AcceptedPackageRoleCurrent, wantCurrentIncrement: 1, wantEmitted: true},
+		{name: "retiring", role: cantonclient.AcceptedPackageRoleRetiring, wantRetiringIncrement: 1, wantEmitted: true},
+		{name: "reobservation is not counted", role: cantonclient.AcceptedPackageRoleRetiring, isReobservation: true, wantEmitted: true},
+		{name: "unknown role is dropped", role: cantonclient.AcceptedPackageRole(0)},
+		{name: "out-of-range role is dropped", role: cantonclient.AcceptedPackageRole(3)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msgC := make(chan *common.MessagePublication, 1)
+			w := testWatcher(t, msgC)
+			currentBefore := acceptedPublishCount(t, "current")
+			retiringBefore := acceptedPublishCount(t, "retiring")
+			event := cantonclient.CantonMessageEvent{
+				ParticipantOffset: 1,
+				UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
+				EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
+				Message:           cantonclient.CantonMessage{AcceptedPackageRole: tc.role, Registrar: sampleRegistrar, Owner: sampleOwner, EmitterID: sampleEmitterID},
+			}
+
+			w.processMessage(zap.NewNop(), event, tc.isReobservation)
+
+			assert.Equal(t, tc.wantCurrentIncrement, acceptedPublishCount(t, "current")-currentBefore)
+			assert.Equal(t, tc.wantRetiringIncrement, acceptedPublishCount(t, "retiring")-retiringBefore)
+			assert.Equal(t, tc.wantEmitted, len(msgC) == 1)
 		})
 	}
 }
