@@ -506,10 +506,12 @@ governance action whose mechanism differs most from EVM — see Open Questions.
 
 ### 4.5 Guardian-set expiry
 
-Matches EVM (`Setters.sol`): when a new set is installed, the previous set's
-`expirationTime` is set to `effectiveTime + 86400` (1 day). `verifyVAA` accepts a
-non-current set while `effectiveTime <= expirationTime`, as EVM
-`Messages.sol:80` rejects only when `expirationTime < block.timestamp`. The
+This logic matches EVM `Setters.sol`. A `GuardianSetUpgrade` sets the
+`expirationTime` of the previous set to `effectiveTime + 86400` (1 day).
+`verifyVAA` accepts a non-current set while `effectiveTime <= expirationTime`.
+EVM `Messages.sol:80` rejects only when `expirationTime < block.timestamp`.
+`isActiveAt` truncates both times to whole seconds, as `block.timestamp` does.
+Thus `verifyVAA` accepts the set until the end of its expiry second. The
 current set never expires.
 
 ### 4.6 Replay protection for integrators: a trie of consumed digests
@@ -1152,6 +1154,68 @@ main item to finish is:
 Today `--canton` stands up the **chain + contracts** for Daml-side development
 (iterating on the templates, `dpm test`); the watcher↔ledger path itself is
 covered by the integration test in §9.
+
+### 7.5 Core package upgrades
+
+The build checks upgrade compatibility. `core/daml.yaml` sets `upgrades:` to the
+vendored previous release, `dars/wormhole-core-0.6.0.dar`. `damlc` rejects a
+`wormhole-core` build that is not a valid smart contract upgrade of it.
+
+**Event package ids.** The watcher compares the package id of each
+`PublishMessage` `ExercisedEvent` with `--cantonPackageID` (`templateMatches`
+in `cantongrpc.go`). The Ledger API `event.proto` defines
+`ExercisedEvent.template_id` as "the template that defines the executed
+choice". The proto adds that this package id can differ from the package id
+of the target contract. Thus the event shows the package that executed the choice. The package that
+created the `Emitter` has no effect on the match. A `CreatedEvent` shows the
+package that created the contract.
+
+Consequences for a watcher pinned to one package id:
+
+- A watcher pinned to 0.6.0 drops each 0.7.0 `PublishMessage`, also on
+  emitters that 0.6.0 created.
+- A watcher pinned to 0.7.0 drops each 0.6.0 `PublishMessage`, also on
+  emitters that 0.7.0 created.
+- A dropped exercise uses the emitter sequence number. The ledger keeps it.
+
+Each informee participant must vet the package that runs the choice.
+`guardianGovernance` is an informee of each `PublishMessage` (§10). Thus a
+package that no guardian participant vets cannot run `PublishMessage`.
+
+**Procedure: upgrade from 0.6.0 to 0.7.0.** This order makes sure that a
+submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
+
+1. Upload and vet the 0.7.0 DAR on all guardian participants.
+2. Upload and vet the 0.7.0 DAR on the operator participant.
+3. Tell integrators to submit with the 0.7.0 package id.
+4. Set `--cantonPackageID` to the 0.7.0 package id on each guardian.
+5. Restart each guardian in one coordinated window.
+6. Send reobservation requests for the 0.7.0 messages of steps 3 to 5.
+7. Unvet 0.6.0 on all guardian participants.
+
+> **WARNING:** Do not unvet 0.6.0 before step 5 is complete on all guardians.
+> A guardian pinned to 0.6.0 then sees no message that it can sign.
+
+> **CAUTION:** Between step 1 and step 5, the watchers drop each 0.7.0
+> message. Reobservation by update id recovers these messages after step 5.
+
+> **CAUTION:** Between step 5 and step 7, the watchers drop each 0.6.0
+> message. These messages are not recoverable. Their sequence numbers stay
+> unused. Keep this window short.
+
+> **NOTE:** A restarted watcher starts at the ledger end. Messages from the
+> restart window need reobservation requests.
+
+**Open items.**
+
+- The docs say that vetting applies to the package that created an input
+  contract too. Before step 7, make sure on a test network that contracts that
+  0.6.0 created still work under 0.7.0 after the unvet. These contracts are
+  `CoreState`, `EmitterRegistry`, `Emitter`, and the replay contracts.
+- Proposed watcher change, not implemented: accept a set of package ids during
+  the migration window. Each guardian accepts 0.6.0 and 0.7.0 before step 1,
+  and removes 0.6.0 after step 7. No message is then lost, and no coordinated
+  restart is necessary. 0.6.0 messages keep the 0.6.0 checks until step 7.
 
 ---
 

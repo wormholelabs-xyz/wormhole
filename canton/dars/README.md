@@ -38,7 +38,7 @@ upgrade (SCU) check. `core/daml.yaml` references it in its `upgrades:` field.
 - Source: commit `926e55310`, `canton/core`, built with SDK 3.5.1.
 - Main package id: `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15`.
 
-To verify the package id, run
+To check the package id, run
 `dpm damlc inspect-dar --json dars/wormhole-core-0.6.0.dar` and read
 `main_package_id`. The DAR file hash is not reproducible across builds; the
 package id is reproducible. When a new `wormhole-core` version ships, vendor
