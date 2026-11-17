@@ -11,7 +11,6 @@ set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 
-readonly CORE_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
 readonly WATCHER_DIR="$LOCALNET_STATE_DIR/ntt-watcher"
 readonly HARNESS_BINARY="$WATCHER_DIR/canton-watcher-localnet.test"
 readonly HARNESS_READY_SECONDS=120
@@ -31,7 +30,7 @@ run_harness() {
   CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
   CANTON_LOCALNET_TOKEN_FILE="$WATCHER_DIR/watcher.jwt" \
   CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
-  CANTON_LOCALNET_CORE_PACKAGE_ID="$CORE_PACKAGE_ID" \
+  CANTON_LOCALNET_CORE_PACKAGE_ID="$WORMHOLE_CORE_PACKAGE_ID" \
   CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
   CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
   CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \

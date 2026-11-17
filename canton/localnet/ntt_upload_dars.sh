@@ -1,69 +1,111 @@
 #!/usr/bin/env bash
-# Upload the NTT DAR, token-cip0056 and the vendored CIP-56 interface DARs to all three LocalNet
-# participants and vet every package in them. guardianGovernance hosts must vet each NTT package.
+# Upload the NTT DAR to all three LocalNet participants. On each participant, vet the DAR packages that are
+# still unvetted. guardianGovernance hosts must vet each NTT package.
+# Do not use this script to vet wormhole-core. upload_dars.sh (from gg_host.sh) vets it.
+# The script stops before the upload if a DAR differs from the pins in ntt_lib.sh, if the pinned wormhole-core
+# is unvetted on a participant, or if a participant vets a newer wormhole-core version.
 # Usage: ntt_upload_dars.sh
-# Precondition: the NTT repo checkout (NTT_REPO_DIR) has a built canton/ntt/.daml/dist/ntt-0.2.0.dar.
+# Precondition: gg_host.sh ran; the NTT repo checkout (NTT_REPO_DIR) has a built ntt DAR at the pinned version.
 set -euo pipefail
-# shellcheck source=env.sh
-source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+# shellcheck source=ntt_lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 
-readonly NTT_CANTON_DIR="${NTT_REPO_DIR:-$(cd "$REPO_ROOT/.." && pwd)/ntt}/canton"
-readonly NTT_DAR_PATHS=(
-  "$NTT_CANTON_DIR/dars/splice-api-token-metadata-v1-1.0.0.dar"
-  "$NTT_CANTON_DIR/dars/splice-api-token-holding-v1-1.0.0.dar"
-  "$NTT_CANTON_DIR/dars/splice-api-token-allocation-v1-1.0.0.dar"
-  "$NTT_CANTON_DIR/dars/splice-api-token-allocation-instruction-v1-1.0.0.dar"
-  "$NTT_CANTON_DIR/dars/splice-api-token-transfer-instruction-v1-1.0.0.dar"
-  "$NTT_CANTON_DIR/dars/splice-api-token-burn-mint-v1-1.0.0.dar"
-  "$NTT_CANTON_DIR/dars/token-cip0056-0.2.0.dar"
-  "$NTT_CANTON_DIR/ntt/.daml/dist/ntt-0.2.0.dar"
-)
-# Package id of the wormhole-core 0.6.0 DALF inside the NTT DAR. It must equal the core on LocalNet.
-readonly PINNED_CORE_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
-# Package id of token-cip0056 0.2.0, whose CoinFactory template is the canonical burn/mint factory.
-readonly PINNED_TOKEN_CIP0056_PACKAGE_ID="0a624d6a07264860159e881ca7ff6b349f58e95f393c8861529089f9cd8ba474"
+readonly GUARDIAN_HOSTS=(app-provider sv app-user)
 
-for dar_path in "${NTT_DAR_PATHS[@]}"; do
-  if [[ ! -f "$dar_path" ]]; then
-    echo "DAR not found: $dar_path (build it with 'dpm build --all' in $NTT_CANTON_DIR)" >&2
-    exit 1
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+localnet_core_dar="$(localnet_core_dar_path)"
+[[ -f "$localnet_core_dar" ]] || fail "DAR not found: $localnet_core_dar (build it with 'dpm build --all' in canton)"
+[[ "$(dar_main_package_name_and_version "$localnet_core_dar")" == "wormhole-core $WORMHOLE_CORE_VERSION" ]] \
+  || fail "$localnet_core_dar is not wormhole-core $WORMHOLE_CORE_VERSION"
+[[ "$(dar_main_package_id "$localnet_core_dar")" == "$WORMHOLE_CORE_PACKAGE_ID" ]] \
+  || fail "$localnet_core_dar is wormhole-core $(dar_main_package_id "$localnet_core_dar"), expected $WORMHOLE_CORE_PACKAGE_ID"
+
+[[ -f "$NTT_DAR" ]] || fail "DAR not found: $NTT_DAR (build it with 'dpm build --all' in $NTT_CANTON_DIR)"
+[[ "$(dar_main_package_name_and_version "$NTT_DAR")" == "ntt $NTT_VERSION" ]] \
+  || fail "the main package of $NTT_DAR is not ntt $NTT_VERSION"
+[[ "$(dar_main_package_id "$NTT_DAR")" == "$NTT_PACKAGE_ID" ]] \
+  || fail "$NTT_DAR is ntt $(dar_main_package_id "$NTT_DAR"), expected $NTT_PACKAGE_ID"
+check_core_package_id_of_dar "$NTT_DAR" "$WORMHOLE_CORE_PACKAGE_ID" || fail "$NTT_DAR does not call the pinned wormhole-core"
+[[ "$(dar_dependency_package_ids "$NTT_DAR" token-cip0056)" == "$TOKEN_CIP0056_PACKAGE_ID" ]] \
+  || fail "$NTT_DAR does not carry exactly token-cip0056 $TOKEN_CIP0056_PACKAGE_ID"
+dar_package_ids_json="$(dar_package_ids "$NTT_DAR" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+echo "NTT DAR: ntt $NTT_VERSION $NTT_PACKAGE_ID, wormhole-core $WORMHOLE_CORE_VERSION ${WORMHOLE_CORE_PACKAGE_ID:0:12}, $(jq length <<<"$dar_package_ids_json") packages"
+
+# vetted_packages <validator>: packages that the participant of <validator> vets, as [{packageId, name, version}].
+vetted_packages() {
+  local ledger_json_url participant_id
+  ledger_json_url="$(json_api_url "$1")"
+  participant_id="$(curl -sSf "$ledger_json_url/v2/parties/participant-id" -H "@$ADMIN_AUTH_HEADER" | jq -er .participantId)"
+  curl -sSf -X POST "$ledger_json_url/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/json' \
+    -d "$(jq -n --arg pid "$participant_id" '{topologyStateFilter: {participantIds: [$pid]}}')" \
+    | jq -ec '[.vettedPackages[]?.packages[] | {packageId, name: .packageName, version: .packageVersion}] | unique'
+}
+
+# unvetted_dar_package_ids <validator>: ids of the unvetted NTT DAR packages on the participant, as a JSON array.
+unvetted_dar_package_ids() {
+  jq -nc --argjson dar "$dar_package_ids_json" --argjson vetted "$(vetted_packages "$1")" \
+    '($vetted | map(.packageId)) as $vetted_ids | [$dar[] | select(. as $id | $vetted_ids | index($id) | not)]'
+}
+
+# check_core_vetting <validator>: the participant vets the pinned core and no newer core version.
+check_core_vetting() {
+  local validator_name="$1" vetted newest_vetted_core_version
+  vetted="$(vetted_packages "$validator_name")"
+  jq -e --arg id "$WORMHOLE_CORE_PACKAGE_ID" 'any(.[]; .packageId == $id)' <<<"$vetted" > /dev/null \
+    || fail "$validator_name does not vet wormhole-core ${WORMHOLE_CORE_PACKAGE_ID:0:12}; run upload_dars.sh first"
+  newest_vetted_core_version="$(jq -r '.[] | select(.name == "wormhole-core") | .version' <<<"$vetted" | sort -V | tail -n 1)"
+  [[ "$newest_vetted_core_version" == "$WORMHOLE_CORE_VERSION" ]] \
+    || fail "$validator_name vets wormhole-core $newest_vetted_core_version; the NTT DAR calls $WORMHOLE_CORE_VERSION"
+  echo "$validator_name vets wormhole-core $(jq -c '[.[] | select(.name == "wormhole-core") | "\(.version) \(.packageId[0:12])"]' <<<"$vetted")"
+}
+
+upload_without_vetting() {
+  local validator_name="$1" http_status
+  http_status="$(curl -sS -o "$gg_work_dir/upload.out" -w '%{http_code}' \
+    -X POST "$(json_api_url "$validator_name")/v2/dars?vetAllPackages=false" \
+    -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/octet-stream' --data-binary "@$NTT_DAR")"
+  [[ "$http_status" == "200" ]] || fail "upload of $(basename "$NTT_DAR") to $validator_name: HTTP $http_status $(cat "$gg_work_dir/upload.out")"
+}
+
+# vet_packages <validator> <package-ids-json>
+vet_packages() {
+  curl -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -n --argjson ids "$2" --arg sync "$LOGICAL_SYNCHRONIZER_ID" \
+      '{changes: [{operation: {Vet: {value: {packages: [$ids[] | {packageId: .}]}}}}], dryRun: false, synchronizerId: $sync}')" \
+    > /dev/null
+}
+
+# await_all_dar_packages_vetted <validator>: topology changes take effect asynchronously.
+await_all_dar_packages_vetted() {
+  local validator_name="$1" attempt
+  for attempt in $(seq 1 60); do
+    if [[ "$attempt" -gt 1 ]]; then sleep 1; fi
+    if [[ "$(unvetted_dar_package_ids "$validator_name" | jq length)" -eq 0 ]]; then
+      return 0
+    fi
+  done
+  fail "$validator_name does not vet each package of the NTT DAR after 60s"
+}
+
+for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+  check_core_vetting "$validator_name"
+done
+for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+  upload_without_vetting "$validator_name"
+  missing_package_ids="$(unvetted_dar_package_ids "$validator_name")"
+  if jq -e --arg core "$WORMHOLE_CORE_PACKAGE_ID" 'index($core) != null' <<<"$missing_package_ids" > /dev/null; then
+    fail "$validator_name: the NTT DAR needs an unvetted wormhole-core package"
   fi
+  if [[ "$(jq length <<<"$missing_package_ids")" -gt 0 ]]; then
+    vet_packages "$validator_name" "$missing_package_ids"
+  fi
+  await_all_dar_packages_vetted "$validator_name"
+  check_core_vetting "$validator_name"
+  echo "$validator_name: uploaded $(basename "$NTT_DAR"); vetted $(jq -c 'map(.[0:12])' <<<"$missing_package_ids")"
 done
-ntt_dar="${NTT_DAR_PATHS[${#NTT_DAR_PATHS[@]} - 1]}"
-if ! unzip -Z1 "$ntt_dar" | grep -q "wormhole-core-0.6.0-$PINNED_CORE_PACKAGE_ID.dalf"; then
-  echo "$ntt_dar does not carry wormhole-core $PINNED_CORE_PACKAGE_ID" >&2
-  exit 1
-fi
-ntt_package_id="$(unzip -Z1 "$ntt_dar" | sed -nE 's#^ntt-0\.2\.0-([0-9a-f]{64})/ntt-0\.2\.0-[0-9a-f]{64}\.dalf$#\1#p')"
-if [[ ! "$ntt_package_id" =~ ^[0-9a-f]{64}$ ]]; then
-  echo "Cannot read the ntt package id from $ntt_dar" >&2
-  exit 1
-fi
-
-access_token="$("$LOCALNET_SCRIPT_DIR/token.sh")"
-for validator_name in app-provider sv app-user; do
-  ledger_json_url="$(json_api_url "$validator_name")"
-  for dar_path in "${NTT_DAR_PATHS[@]}"; do
-    http_status="$(curl -sS -o /dev/null -w '%{http_code}' \
-      -X POST "$ledger_json_url/v2/dars?vetAllPackages=true" \
-      -H "Authorization: Bearer $access_token" \
-      -H 'Content-Type: application/octet-stream' \
-      --data-binary "@$dar_path")"
-    if [[ "$http_status" != "200" ]]; then
-      echo "Upload of $(basename "$dar_path") to $validator_name failed with HTTP $http_status" >&2
-      exit 1
-    fi
-  done
-  participant_id="$(curl -sSf "$ledger_json_url/v2/parties/participant-id" -H "Authorization: Bearer $access_token" | jq -r .participantId)"
-  for package_id in "$ntt_package_id" "$PINNED_CORE_PACKAGE_ID" "$PINNED_TOKEN_CIP0056_PACKAGE_ID"; do
-    vetted_count="$(curl -sSf -X POST "$ledger_json_url/v2/package-vetting/list" -H "Authorization: Bearer $access_token" \
-      -H 'Content-Type: application/json' \
-      -d "$(jq -n --arg pid "$participant_id" '{topologyStateFilter: {participantIds: [$pid]}}')" \
-      | jq --arg package_id "$package_id" '[.vettedPackages[]?.packages[] | select(.packageId == $package_id)] | length')"
-    if [[ "$vetted_count" -lt 1 ]]; then
-      echo "$validator_name does not vet package $package_id" >&2
-      exit 1
-    fi
-  done
-  echo "$validator_name: uploaded ${#NTT_DAR_PATHS[@]} DARs; ntt $ntt_package_id, wormhole-core and token-cip0056 vetted"
-done
+echo "ntt_upload_dars.sh: PASS"

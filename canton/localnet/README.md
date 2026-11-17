@@ -65,7 +65,7 @@ Set `DB_PORT` to use a different port.
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
 | `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. |
 | `ntt_e2e.sh` | Runs the NTT steps below in sequence. |
-| `ntt_upload_dars.sh` | Uploads and vets the NTT DARs on all participants. |
+| `ntt_upload_dars.sh` | Uploads the NTT DAR to all participants and vets its unvetted packages. |
 | `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
 | `ntt_burn_mint.sh` | Runs a burn/mint deployment of a `guardianGovernance` token. |
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
@@ -422,9 +422,11 @@ The script shows `ROTATION HALF-APPLIED` and a recovery command.
 ## NTT end-to-end run
 
 These scripts run the Wormhole NTT layer on LocalNet.
-The NTT packages come from the NTT repository, branch `canton/overnight-ntt`.
+The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `79d739b16`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.0, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
+`ntt_upload_dars.sh` stops if a DAR has a different package ID.
 
 ### Prerequisites
 
@@ -449,7 +451,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 
 | Step | Script | Result |
 | --- | --- | --- |
-| 1 | `ntt_upload_dars.sh` | Each participant vets `ntt`, `wormhole-core` and `token-cip0056`. |
+| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.8.0. |
 | 2 | `ntt_governance.sh` | One `NttGovernance` root and one `CoinFactory` exist. |
 | 3 | `ntt_watcher.sh start` | The watcher harness reads `app-provider`. |
 | 4 | `ntt_burn_mint.sh` | A relayer mints 2.5 tokens to a user. The user burns 1.0 token. |

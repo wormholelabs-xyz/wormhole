@@ -3,7 +3,19 @@
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 # shellcheck source=ntt_offline_lib.sh
-source "$LOCALNET_SCRIPT_DIR/ntt_offline_lib.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/ntt_offline_lib.sh"
+
+# Package pins of the NTT run. ntt_upload_dars.sh checks each DAR against them with ==.
+# wormhole-core 0.8.0: the LocalNet core DAR, the core DALF of the NTT DAR and the watcher filter.
+readonly WORMHOLE_CORE_VERSION="0.8.0"
+readonly WORMHOLE_CORE_PACKAGE_ID="03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
+# ntt 0.3.2: NTT repository, branch canton/overnight-ntt, commit 79d739b16.
+readonly NTT_VERSION="0.3.2"
+readonly NTT_PACKAGE_ID="f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71"
+# token-cip0056 0.2.0: its CoinFactory template is the canonical burn/mint factory.
+readonly TOKEN_CIP0056_PACKAGE_ID="0a624d6a07264860159e881ca7ff6b349f58e95f393c8861529089f9cd8ba474"
+readonly NTT_CANTON_DIR="${NTT_REPO_DIR:-$(cd "$REPO_ROOT/.." && pwd)/ntt}/canton"
+readonly NTT_DAR="$NTT_CANTON_DIR/ntt/.daml/dist/ntt-$NTT_VERSION.dar"
 
 NTT_CONTRACTS="$LOCALNET_STATE_DIR/ntt-contracts.json"
 NTT_KEY_DIR="$LOCALNET_STATE_DIR/ntt-keys"

@@ -54,3 +54,66 @@ message_summary() {
 json_array() {
   jq -sc '.' <<<"$(printf '%s\n' "$@")"
 }
+
+# dar_entries <dar>: the file names in the DAR archive.
+dar_entries() {
+  local entries
+  entries="$(unzip -Z1 "$1" 2>/dev/null)" || { echo "cannot list $1 as a DAR" >&2; return 1; }
+  printf '%s\n' "$entries"
+}
+
+# dar_main_package_directory <dar>: <name>-<version>-<package-id> of the main DALF, which is the only
+# DALF named after its directory.
+dar_main_package_directory() {
+  local entries
+  entries="$(dar_entries "$1")" || return 1
+  jq -Rsr --arg dar "$1" '[split("\n")[] | select(test("^[^/]+/[^/]+\\.dalf$")) | split("/")
+      | select(.[1] == .[0] + ".dalf") | .[0] | select(test("-[0-9a-f]{64}$"))]
+    | if length == 1 then .[0] else error("\($dar): expected one main DALF, found \(length)") end' <<<"$entries"
+}
+
+# dar_main_package_id <dar>
+dar_main_package_id() {
+  local main_directory
+  main_directory="$(dar_main_package_directory "$1")" || return 1
+  printf '%s\n' "${main_directory: -64}"
+}
+
+# dar_main_package_name_and_version <dar>: "<name> <version>" of the main package.
+dar_main_package_name_and_version() {
+  local main_directory
+  main_directory="$(dar_main_package_directory "$1")" || return 1
+  jq -Rr 'capture("^(?<name>.+)-(?<version>[0-9]+(\\.[0-9]+)*)-[0-9a-f]{64}$") | "\(.name) \(.version)"' <<<"$main_directory"
+}
+
+# dar_package_ids <dar>: the package id of each DALF in the DAR, one per line.
+dar_package_ids() {
+  local entries
+  entries="$(dar_entries "$1")" || return 1
+  jq -Rr 'select(test("^[^/]+/[^/]+-[0-9a-f]{64}\\.dalf$")) | capture("-(?<id>[0-9a-f]{64})\\.dalf$").id' <<<"$entries" | sort -u
+}
+
+# dar_dependency_package_ids <dar> <package-name>: ids of the DALFs <package-name>-<version>-<id>.dalf in the DAR.
+dar_dependency_package_ids() {
+  local entries
+  entries="$(dar_entries "$1")" || return 1
+  jq -Rr --arg name "$2" 'select(test("^[^/]+/[^/]+\\.dalf$")) | split("/")[1]
+      | select(startswith($name + "-")) | ltrimstr($name + "-")
+      | select(test("^[0-9]+(\\.[0-9]+)*-[0-9a-f]{64}\\.dalf$")) | capture("-(?<id>[0-9a-f]{64})\\.dalf$").id' <<<"$entries"
+}
+
+# check_core_package_id_of_dar <dar> <expected-package-id>: the DAR carries exactly one wormhole-core DALF,
+# with the expected id.
+check_core_package_id_of_dar() {
+  local dar="$1" expected_package_id="$2" core_package_ids core_package_count
+  core_package_ids="$(dar_dependency_package_ids "$dar" wormhole-core)" || return 1
+  core_package_count="$(grep -c . <<<"$core_package_ids")"
+  if [[ "$core_package_count" -ne 1 ]]; then
+    echo "$dar: expected one wormhole-core DALF, found $core_package_count" >&2
+    return 1
+  fi
+  if [[ "$core_package_ids" != "$expected_package_id" ]]; then
+    echo "$dar: wormhole-core $core_package_ids, expected $expected_package_id" >&2
+    return 1
+  fi
+}
