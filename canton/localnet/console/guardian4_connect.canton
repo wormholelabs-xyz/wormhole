@@ -1,0 +1,20 @@
+// Connect guardian4 to the global synchronizer and vet every DAR that app-provider has.
+val synchronizerAlias = "global"
+val guardian4 = participants.remote.find(_.name == "guardian4").getOrElse(throw new RuntimeException("guardian4 not bound"))
+val appProvider = participants.remote.find(_.name == "app-provider").getOrElse(throw new RuntimeException("app-provider not bound"))
+val darDirectory = sys.env("GUARDIAN4_DAR_DIR")
+if (!guardian4.synchronizers.list_connected().exists(_.synchronizerAlias.unwrap == synchronizerAlias))
+  guardian4.synchronizers.connect(synchronizerAlias, "http://canton:5008")
+utils.retry_until_true(guardian4.synchronizers.active(synchronizerAlias))
+val presentMainPackages = guardian4.dars.list(limit = PositiveInt.tryCreate(1000)).map(_.mainPackageId).toSet
+val missingDars = appProvider.dars.list(limit = PositiveInt.tryCreate(1000)).filterNot(dar => presentMainPackages.contains(dar.mainPackageId))
+missingDars.foreach { dar =>
+  appProvider.dars.download(dar.mainPackageId, darDirectory)
+}
+val downloadedDarFiles = new java.io.File(darDirectory).listFiles().filter(_.getName.endsWith(".dar")).map(_.getPath).toSeq
+downloadedDarFiles.foreach(darFile => guardian4.dars.upload(darFile, vetAllPackages = true, synchronizeVetting = true))
+println(s"GUARDIAN4 participant=${guardian4.id.toProtoPrimitive} connected=${guardian4.synchronizers.active(synchronizerAlias)} uploadedDars=${downloadedDarFiles.size} totalDars=${guardian4.dars.list(limit = PositiveInt.tryCreate(1000)).size}")
+// The rehearsal scripts read and submit as the Daml Script user (see create_script_user.sh).
+if (!guardian4.ledger_api.users.list(filterUser = "wormhole-script").users.exists(_.id == "wormhole-script"))
+  guardian4.ledger_api.users.create(id = "wormhole-script", participantAdmin = true, readAsAnyParty = true, actAsAnyParty = true)
+println(s"GUARDIAN4 script user=${guardian4.ledger_api.users.get("wormhole-script")}")

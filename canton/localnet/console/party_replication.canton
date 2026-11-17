@@ -1,0 +1,220 @@
+// Offline party replication of external parties to a target participant at Confirmation (Canton 3.7 procedure, 13 steps).
+// REPLICATION_PHASE=prepare: steps 2 to 7. The target consents with the onboarding flag and disconnects; two namespace
+//   owner keys sign the same PartyToParticipant; each source exports the party ACS at the activation offset.
+// REPLICATION_PHASE=complete: steps 10 to 13. The target imports each ACS (ContractImportMode.Validation), reconnects
+//   and clears the onboarding flag. Step 9 (backup) is not rehearsed: guardian4 is temporary.
+// REPLICATION_PHASE=remove-host or set-threshold: a PartyToParticipant replacement that two owner keys sign.
+// Environment:
+//   REPLICATION_PARTIES        Comma-separated <party-id>=<source participant name>.
+//   REPLICATION_TARGET         Target participant name.
+//   REPLICATION_DIR            Directory of the ACS files (<party identifier>.acs.gz) and the offsets file.
+//   OWNER_PUBKEY_1/2, OWNER_SIGN_ARGV_1/2   Two namespace owner keys and their signer commands.
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.topology.transaction._
+import com.digitalasset.canton.crypto._
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+import com.digitalasset.canton.participant.admin.data.ContractImportMode
+import com.digitalasset.canton.admin.api.client.data.{FlagNotSet, FlagSet}
+import com.google.protobuf.ByteString
+import scala.sys.process._
+import java.nio.file.{Files, Paths}
+
+def requiredEnvironmentVariable(name: String): String =
+  sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
+def bytesToHex(bytes: Array[Byte]): String = bytes.map("%02x".format(_)).mkString
+def hexToBytes(hex: String): Array[Byte] = hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
+def participantNamed(name: String) = participants.remote.find(_.name == name).getOrElse(throw new RuntimeException(s"unknown participant $name"))
+
+val synchronizerAlias = "global"
+val phase = requiredEnvironmentVariable("REPLICATION_PHASE")
+val target = participantNamed(requiredEnvironmentVariable("REPLICATION_TARGET"))
+val replicationDirectory = Paths.get(requiredEnvironmentVariable("REPLICATION_DIR"))
+val partiesWithSource: Seq[(PartyId, String)] = requiredEnvironmentVariable("REPLICATION_PARTIES").split(",").toSeq.map { entry =>
+  entry.split("=") match {
+    case Array(partyText, sourceName) => (PartyId.tryFromProtoPrimitive(partyText.trim), sourceName.trim)
+    case _ => throw new RuntimeException(s"REPLICATION_PARTIES entry is not <party>=<source>: $entry")
+  }
+}
+require(partiesWithSource.nonEmpty, "REPLICATION_PARTIES is empty")
+require(partiesWithSource.map(_._1).distinct.size == partiesWithSource.size, "REPLICATION_PARTIES names a party twice")
+def acsFileOf(partyId: PartyId): String = replicationDirectory.resolve(s"${partyId.uid.identifier}.acs.gz").toString
+val targetLedgerEndFile = replicationDirectory.resolve("target-ledger-end.txt")
+
+val referenceParticipant = participantNamed(partiesWithSource.head._2)
+val physicalSynchronizerId = referenceParticipant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == synchronizerAlias)
+  .getOrElse(throw new RuntimeException(s"${referenceParticipant.name} is not connected to $synchronizerAlias")).physicalSynchronizerId
+val synchronizerId = physicalSynchronizerId.logical
+val synchronizerStore = TopologyStoreId.Synchronizer(physicalSynchronizerId)
+val protocolVersion = physicalSynchronizerId.protocolVersion
+
+def hostingOf(partyId: PartyId): Option[HostingParticipant] =
+  referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).find(_.item.partyId == partyId)
+    .flatMap(_.item.participants.find(_.participantId == target.id))
+def awaitCondition(description: String, maxAttempts: Int = 120)(condition: => Boolean): Unit = {
+  var attempt = 0
+  while (!condition) {
+    attempt += 1
+    if (attempt >= maxAttempts) throw new RuntimeException(s"timed out: $description")
+    Thread.sleep(500)
+  }
+}
+
+// BEGIN owner signer block (same text in devnet/guardian_governance.canton and localnet/console/gg_rotate_owner_key.canton)
+val ed25519SignatureLengthBytes = 64
+val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
+def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
+  require(ed25519SignatureHexPattern.matches(signatureHex),
+    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
+  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
+  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
+  signatureBytes
+}
+def parseSignerArgv(variableName: String): Seq[String] = {
+  val signerArgv = io.circe.parser.decode[Vector[String]](requiredEnvironmentVariable(variableName)).fold(
+    decodeError => throw new RuntimeException(s"$variableName must be a JSON array of strings: ${decodeError.getMessage}"),
+    identity)
+  require(signerArgv.nonEmpty, s"$variableName is an empty array")
+  require(signerArgv.forall(_.nonEmpty), s"$variableName holds an empty argument")
+  signerArgv
+}
+def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String): ByteString =
+  parseEd25519SignatureHex((signerArgv :+ hashHex).!!.trim, signerDescription)
+// END owner signer block
+case class OwnerKey(publicKey: SigningPublicKey, signerArgv: Seq[String])
+def loadOwner(publicKeyVariable: String, signerArgvVariable: String): OwnerKey = {
+  val publicKeyDer = ByteString.copyFrom(Files.readAllBytes(Paths.get(requiredEnvironmentVariable(publicKeyVariable))))
+  val publicKey = SigningPublicKey.create(CryptoKeyFormat.DerX509Spki, publicKeyDer, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .getOrElse(sys.error(s"invalid owner public key in $publicKeyVariable"))
+  OwnerKey(publicKey, parseSignerArgv(signerArgvVariable))
+}
+lazy val ownerSigners = {
+  val loadedOwners = Seq(loadOwner("OWNER_PUBKEY_1", "OWNER_SIGN_ARGV_1"), loadOwner("OWNER_PUBKEY_2", "OWNER_SIGN_ARGV_2"))
+  require(loadedOwners.map(_.publicKey.fingerprint).distinct.size == 2, "the two owner keys must differ")
+  loadedOwners
+}
+def externalSign(owner: OwnerKey, hash: Hash): Signature = Signature.fromExternalSigning(
+  SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
+  runOwnerSigner(owner.signerArgv, bytesToHex(hash.getCryptographicEvidence.toByteArray), owner.publicKey.fingerprint.toProtoPrimitive),
+  owner.publicKey.fingerprint, SigningAlgorithmSpec.Ed25519)
+
+def currentMappingOf(partyId: PartyId) =
+  referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).find(_.item.partyId == partyId)
+    .getOrElse(throw new RuntimeException(s"no PartyToParticipant for $partyId"))
+// Replace the PartyToParticipant of a party; two owner keys sign it.
+def replaceMapping(partyId: PartyId, hosts: Seq[HostingParticipant], confirmationThreshold: Int): Unit = {
+  val current = currentMappingOf(partyId)
+  val replacement = PartyToParticipant.create(partyId, com.digitalasset.canton.config.RequireTypes.PositiveInt.tryCreate(confirmationThreshold), hosts,
+    current.item.partySigningKeysWithThreshold).fold(error => sys.error(s"PartyToParticipant: $error"), identity)
+  val unsigned = referenceParticipant.topology.transactions.generate(
+    Seq(com.digitalasset.canton.admin.api.client.commands.TopologyAdminCommands.Write.GenerateTransactions.Proposal(replacement, synchronizerStore))).head
+  val ownerSignatures = ownerSigners.map(externalSign(_, unsigned.hash.hash))
+  val signed = ownerSignatures.tail.foldLeft(
+    SignedTopologyTransaction.withSignature(unsigned, ownerSignatures.head, isProposal = false, protocolVersion))(_.addSingleSignature(_))
+  referenceParticipant.topology.transactions.load(Seq(signed), synchronizerStore)
+  awaitCondition(s"PartyToParticipant of $partyId replaced") {
+    val effective = currentMappingOf(partyId).item
+    effective.threshold.value == confirmationThreshold && effective.participants.map(_.participantId).toSet == hosts.map(_.participantId).toSet
+  }
+}
+def describeMapping(partyId: PartyId): String = {
+  val mapping = currentMappingOf(partyId)
+  s"serial=${mapping.context.serial} threshold=${mapping.item.threshold} hosts=${mapping.item.participants.map(hosting => s"${hosting.participantId.uid.identifier}::${hosting.participantId.fingerprint.toProtoPrimitive.take(8)}/${hosting.permission}${if (hosting.onboarding) "/onboarding" else ""}").mkString(",")}"
+}
+
+phase match {
+  case "prepare" =>
+    Files.createDirectories(replicationDirectory)
+    partiesWithSource.foreach { case (partyId, _) => require(hostingOf(partyId).isEmpty, s"${target.name} already hosts $partyId") }
+    // Step 2: data retention on each source.
+    partiesWithSource.map(_._2).distinct.foreach { sourceName =>
+      println(s"REPLICATION step2 $sourceName pruningSchedule=${participantNamed(sourceName).pruning.get_schedule()}")
+    }
+    // Step 3: the target consents with the onboarding flag.
+    partiesWithSource.foreach { case (partyId, _) =>
+      target.topology.party_to_participant_mappings.propose_delta(party = partyId, adds = Seq((target.id, ParticipantPermission.Confirmation)),
+        store = synchronizerStore, requiresPartyToBeOnboarded = true)
+    }
+    def targetProposalOf(partyId: PartyId) =
+      referenceParticipant.topology.transactions.list(synchronizerStore, proposals = true, filterAuthorizedKey = Some(target.id.fingerprint))
+        .result.map(_.transaction).find(signed => signed.mapping match {
+          case mapping: PartyToParticipant => mapping.partyId == partyId && mapping.participants.exists(hosting => hosting.participantId == target.id && hosting.onboarding)
+          case _ => false
+        })
+    partiesWithSource.foreach { case (partyId, _) => awaitCondition(s"target proposal for $partyId")(targetProposalOf(partyId).nonEmpty) }
+    println("REPLICATION step3 target proposals are on the synchronizer")
+    // Steps 4 and 5: the target disconnects and stays disconnected on restart.
+    target.synchronizers.disconnect_all()
+    target.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = true))
+    require(target.synchronizers.list_connected().isEmpty, s"${target.name} is still connected")
+    println(s"REPLICATION step4-5 ${target.name} disconnected, manualConnect=true")
+    // Step 6: two owner keys sign the PartyToParticipant that the target proposed.
+    val beforeActivationOffsets = partiesWithSource.map { case (partyId, sourceName) => partyId -> participantNamed(sourceName).ledger_api.state.end() }.toMap
+    partiesWithSource.foreach { case (partyId, _) =>
+      val proposal = targetProposalOf(partyId).getOrElse(sys.error(s"target proposal for $partyId disappeared"))
+      val ownerSignatures = ownerSigners.map(externalSign(_, proposal.transaction.hash.hash))
+      val partySigned = ownerSignatures.tail.foldLeft(
+        SignedTopologyTransaction.withSignature(proposal.transaction, ownerSignatures.head, isProposal = true, protocolVersion))(_.addSingleSignature(_))
+      referenceParticipant.topology.transactions.load(Seq(partySigned), synchronizerStore)
+    }
+    partiesWithSource.foreach { case (partyId, _) => awaitCondition(s"onboarding hosting of $partyId")(hostingOf(partyId).exists(_.onboarding)) }
+    partiesWithSource.foreach { case (partyId, _) => println(s"REPLICATION step6 ${partyId.uid.identifier} hosting=${hostingOf(partyId)}") }
+    // Step 7: each source exports the party ACS at the offset where the party becomes active on the target.
+    partiesWithSource.foreach { case (partyId, sourceName) =>
+      participantNamed(sourceName).parties.export_party_acs(party = partyId, synchronizerId = synchronizerId, targetParticipantId = target.id,
+        beginOffsetExclusive = beforeActivationOffsets(partyId), exportFilePath = acsFileOf(partyId))
+      println(s"REPLICATION step7 ${partyId.uid.identifier} exported from $sourceName to ${acsFileOf(partyId)} bytes=${Files.size(Paths.get(acsFileOf(partyId)))}")
+    }
+    println("REPLICATION prepare done")
+
+  case "complete" =>
+    partiesWithSource.foreach { case (partyId, _) => require(hostingOf(partyId).exists(_.onboarding), s"$partyId is not onboarding on ${target.name}") }
+    require(target.synchronizers.list_connected().isEmpty, s"${target.name} must be disconnected before the import")
+    // Step 10: the target imports each ACS with contract validation.
+    partiesWithSource.foreach { case (partyId, _) =>
+      val importResult = scala.util.Try(target.parties.import_party_acs(synchronizerId, party = Some(partyId), importFilePath = acsFileOf(partyId),
+        contractImportMode = ContractImportMode.Validation))
+      println(s"REPLICATION step10 ${partyId.uid.identifier} import=${importResult.fold(error => "rejected: " + error.getMessage.linesIterator.take(6).mkString(" "), _ => "accepted")}")
+      importResult.get
+    }
+    // Steps 11 and 12: reconnect and restore automatic reconnection.
+    val targetLedgerEnd = target.ledger_api.state.end()
+    Files.writeString(targetLedgerEndFile, targetLedgerEnd.toString)
+    target.synchronizers.reconnect(synchronizerAlias)
+    target.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = false))
+    println(s"REPLICATION step11-12 ${target.name} reconnected=${target.synchronizers.active(synchronizerAlias)} ledgerEnd=$targetLedgerEnd")
+    // Step 13: clear the onboarding flag once it is safe.
+    partiesWithSource.foreach { case (partyId, _) =>
+      utils.retry_until_true(timeout = 5.minutes, maxWaitPeriod = 10.seconds) {
+        target.parties.clear_party_onboarding_flag(partyId, synchronizerId, targetLedgerEnd) match {
+          case FlagNotSet => true
+          case FlagSet(_) => false
+        }
+      }
+      awaitCondition(s"onboarding flag of $partyId cleared")(hostingOf(partyId).exists(!_.onboarding))
+      println(s"REPLICATION step13 ${partyId.uid.identifier} hosting=${hostingOf(partyId)}")
+    }
+    println("REPLICATION complete done")
+
+  // REPLICATION_REMOVED_HOST: a participant id, or a console participant name. Keeps the confirmation threshold.
+  case "remove-host" =>
+    val removedHostText = requiredEnvironmentVariable("REPLICATION_REMOVED_HOST")
+    val removedHostId = participants.remote.find(_.name == removedHostText).map(_.id).getOrElse(ParticipantId.tryFromProtoPrimitive(removedHostText))
+    partiesWithSource.foreach { case (partyId, _) =>
+      val current = currentMappingOf(partyId).item
+      require(current.participants.exists(_.participantId == removedHostId), s"$removedHostId does not host $partyId")
+      replaceMapping(partyId, current.participants.filterNot(_.participantId == removedHostId), current.threshold.value)
+      println(s"REPLICATION remove-host ${partyId.uid.identifier} ${describeMapping(partyId)}")
+    }
+    println("REPLICATION remove-host done")
+
+  // REPLICATION_CONFIRMATION_THRESHOLD: the new confirmation threshold. Keeps the hosts.
+  case "set-threshold" =>
+    val confirmationThreshold = requiredEnvironmentVariable("REPLICATION_CONFIRMATION_THRESHOLD").toInt
+    partiesWithSource.foreach { case (partyId, _) =>
+      replaceMapping(partyId, currentMappingOf(partyId).item.participants, confirmationThreshold)
+      println(s"REPLICATION set-threshold ${partyId.uid.identifier} ${describeMapping(partyId)}")
+    }
+    println("REPLICATION set-threshold done")
+
+  case other => throw new RuntimeException(s"unknown REPLICATION_PHASE $other")
+}
