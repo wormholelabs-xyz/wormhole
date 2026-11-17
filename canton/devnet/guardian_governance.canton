@@ -65,7 +65,10 @@
 //                           participant bound in the console session.
 //   GG_CONFIRMATION_THRESHOLD
 //                           PartyToParticipant confirmation threshold across
-//                           the hosting participants. Default 1.
+//                           the hosting participants. Required when
+//                           GG_HOSTING_PARTICIPANTS names more than one
+//                           participant, and then a majority of them;
+//                           default 1 for one participant.
 
 import com.digitalasset.canton.topology._
 import com.digitalasset.canton.topology.transaction._
@@ -90,29 +93,42 @@ val threshold = PositiveInt.tryCreate(envOr("GG_THRESHOLD", "2").toInt)
 val partyName = envOr("GG_PARTY_NAME", "guardianGovernance")
 val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
 val artifactsFile = envOr("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
-val confirmationThreshold = PositiveInt.tryCreate(envOr("GG_CONFIRMATION_THRESHOLD", "1").toInt)
 
 def bytesToHex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 def hexToBytes(s: String): Array[Byte] = s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
-val hostingParticipants = sys.env.get("GG_HOSTING_PARTICIPANTS") match {
-  case Some(names) =>
-    names.split(",").toSeq.map(_.trim).filter(_.nonEmpty).map { name =>
-      consoleEnvironment.participants.all
-        .find(_.name == name)
-        .getOrElse(throw new RuntimeException(s"participant '$name' is not bound in this console session"))
-    }
+val hostingParticipantNames: Seq[String] = sys.env.get("GG_HOSTING_PARTICIPANTS") match {
+  case Some(names) => names.split(",").toSeq.map(_.trim).filter(_.nonEmpty)
   case None =>
     consoleEnvironment.participants.all match {
-      case Seq(single) => Seq(single)
+      case Seq(single) => Seq(single.name)
       case other => throw new RuntimeException(
         s"expected exactly one participant bound in this console session, found ${other.size}; set GG_HOSTING_PARTICIPANTS")
     }
 }
-require(hostingParticipants.nonEmpty, "GG_HOSTING_PARTICIPANTS is empty")
-require(hostingParticipants.map(_.id).distinct.size == hostingParticipants.size, "duplicate hosting participant")
-require(confirmationThreshold.value <= hostingParticipants.size,
-  s"confirmation threshold ${confirmationThreshold.value} exceeds ${hostingParticipants.size} hosting participants")
+require(hostingParticipantNames.nonEmpty, "GG_HOSTING_PARTICIPANTS is empty")
+require(hostingParticipantNames.distinct.size == hostingParticipantNames.size, "duplicate hosting participant")
+
+// SECURITY: a threshold below a majority lets a minority of hosts confirm for the party.
+val confirmationThreshold: PositiveInt = sys.env.get("GG_CONFIRMATION_THRESHOLD") match {
+  case None if hostingParticipantNames.size == 1 => PositiveInt.one
+  case None => throw new RuntimeException(
+    s"GG_CONFIRMATION_THRESHOLD is required when ${hostingParticipantNames.size} participants host the party")
+  case Some(thresholdText) =>
+    thresholdText.trim.toIntOption.flatMap(PositiveInt.create(_).toOption).getOrElse(
+      throw new RuntimeException(s"GG_CONFIRMATION_THRESHOLD must be a positive integer, got '$thresholdText'"))
+}
+require(confirmationThreshold.value <= hostingParticipantNames.size,
+  s"confirmation threshold ${confirmationThreshold.value} exceeds ${hostingParticipantNames.size} hosting participants")
+require(confirmationThreshold.value * 2 > hostingParticipantNames.size,
+  s"confirmation threshold ${confirmationThreshold.value} is not a majority of ${hostingParticipantNames.size} hosting participants")
+
+val hostingParticipants = hostingParticipantNames.map { name =>
+  consoleEnvironment.participants.all.find(_.name == name)
+    .getOrElse(throw new RuntimeException(s"participant '$name' is not bound in this console session"))
+}
+require(hostingParticipants.size == hostingParticipantNames.size, "hosting participant lookup changed the host count")
+require(hostingParticipants.map(_.id).distinct.size == hostingParticipants.size, "duplicate hosting participant id")
 val participant = hostingParticipants.head
 
 val connected = participant.synchronizers.list_connected()
@@ -149,10 +165,22 @@ val ownerNamespaces = ownerPubkeys.map(k => Namespace(k.fingerprint))
 // topology-transaction hash and wrap the raw signature bytes it returns as a
 // Canton `Signature`. The signer never runs inside this JVM process and this
 // script never sees (or could see) any owner's private key material.
+// BEGIN owner signature parser (same text in localnet/console/gg_rotate_owner_key.canton)
+val ed25519SignatureLengthBytes = 64
+val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
+def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
+  require(ed25519SignatureHexPattern.matches(signatureHex),
+    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
+  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
+  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
+  signatureBytes
+}
+// END owner signature parser
+
 def externalSign(signCmd: String, hash: Hash, fingerprint: Fingerprint): Signature = {
   val hex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
   val sigHex = (signCmd + " " + hex).!!.trim
-  val sigBytes = ByteString.copyFrom(hexToBytes(sigHex))
+  val sigBytes = parseEd25519SignatureHex(sigHex, fingerprint.toProtoPrimitive)
   Signature.fromExternalSigning(
     SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
     sigBytes,

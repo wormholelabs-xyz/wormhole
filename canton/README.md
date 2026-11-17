@@ -1171,6 +1171,11 @@ participants at `Confirmation` with a confirmation threshold of 2. The runbook
 also checks the confirmation quorum, the package vetting gate, a guardian set
 rotation and an owner key rotation.
 
+When `GG_HOSTING_PARTICIPANTS` names more than one participant,
+`GG_CONFIRMATION_THRESHOLD` is mandatory and must be a majority of the hosts.
+A threshold of 1 then lets one compromised host confirm for the party.
+With one host, the threshold is 1.
+
 Limits of the LocalNet rehearsal:
 
 - One container runs the three participants and the synchronizer.
