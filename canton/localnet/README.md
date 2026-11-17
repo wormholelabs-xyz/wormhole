@@ -73,6 +73,8 @@ Set `DB_PORT` to use a different port.
 | `ntt_lib.sh` | Shared functions for the `ntt_*.sh` scripts. |
 | `ntt_offline_lib.sh` | NTT functions that `test/ntt_lib_test.sh` tests without LocalNet. |
 | `allocate_external_party.js` | Allocates a 1-of-1 Ed25519 external party. |
+| `watcher_harness_lib.sh` | Shared functions that start and stop the guardian watcher harness. |
+| `core_upgrade_rehearsal.sh` | Rehearses the `wormhole-core` upgrade from 0.6.0 to 0.7.0. |
 
 ## Script tests
 
@@ -512,3 +514,74 @@ The update id is the same on each participant.
   Thus the custody pot can be from round 0, and then the option has no effect.
 - The message fee is 0. The `Transfer` commands do not include a fee allocation.
 - Each run makes new deployments. The `NttGovernance` root and the `CoinFactory` stay the same.
+
+## Core package upgrade rehearsal
+
+`core_upgrade_rehearsal.sh` does the `wormhole-core` upgrade from 0.6.0 to 0.7.0 on LocalNet.
+It follows section 7.5 of `canton/README.md`.
+The three `guardianGovernance` hosts are `app-provider`, `sv` and `app-user`.
+
+| Version | Package id | DAR |
+| --- | --- | --- |
+| 0.6.0 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` | `canton/dars/wormhole-core-0.6.0.dar` |
+| 0.7.0 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` | `canton/core/.daml/dist/wormhole-core-0.7.0.dar` |
+
+The script stops if a DAR has a different package id.
+
+### Prerequisites
+
+- The `guardianGovernance` rehearsal ran. The `CoreState` message fee is 0.
+- The NTT end-to-end run ran one time.
+- Guardian set 2 with devnet keys 2, 3 and 4 is the current guardian set.
+  Set `CURRENT_GUARDIAN_SET_INDEX` and `CURRENT_GUARDIAN_KEY_INDICES` for a different set.
+- The 0.7.0 DAR exists. Run `dpm build --all` in `canton`.
+
+### Procedure
+
+1. Run all steps:
+
+   ```bash
+   canton/localnet/core_upgrade_rehearsal.sh all
+   ```
+
+2. Make sure that the last line of the output is `core_upgrade_rehearsal.sh all: PASS`.
+
+To run one step only, give the step name. Run the steps in the sequence of the table.
+
+| Step | Name | Result |
+| --- | --- | --- |
+| 0 | `prepare` | Each host vets 0.6.0. No host vets 0.7.0. |
+| 1 | `observe-v6` | A watcher pinned to 0.6.0 observes a 0.6.0 `PublishMessage`. The watcher continues to run. |
+| 2 | `vet-v7` | Each host vets 0.6.0 and 0.7.0. The upload of 0.7.0 passes the upgrade check. |
+| 3 | `publish-v7` | A 0.7.0 `PublishMessage` on an `Emitter` from 0.6.0 commits. The 0.6.0 watcher drops it. |
+| 4 | `reobserve-v7` | A watcher pinned to 0.7.0 observes the dropped message from a reobservation request with its update id. |
+| 5 | `enforce-v7` | 0.7.0 rejects a nonce above `uint32`. 0.6.0 accepts it. After the unvet of 0.6.0, a 0.6.0 submission fails. |
+| 6 | `ntt` | NTT fails without 0.6.0. After the script vets 0.6.0 again, `ntt_e2e.sh` passes. |
+
+The evidence log is `$LOCALNET_STATE_DIR/evidence/core_upgrade_rehearsal-<time>.log`.
+The directory with the same name holds the watcher observations and the watcher logs.
+`$LOCALNET_STATE_DIR/core-upgrade.json` holds the update id of step 3 for step 4.
+
+### Results
+
+- The `ExercisedEvent` of `PublishMessage` shows the package that ran the choice.
+  It is the same on the three participants. The participant offsets are different.
+- A submission with the package name selects 0.7.0 when each host vets 0.6.0 and 0.7.0.
+- After the unvet of 0.6.0, the prepare step rejects a 0.6.0 submission with `INVALID_PRESCRIBED_SYNCHRONIZER_ID`.
+  The error names each host with `has not vetted`.
+- After the unvet of 0.6.0, contracts from 0.6.0 work under 0.7.0.
+  The script checks `PublishMessage` on an `Emitter` and `ParseAndVerifyVAA` on the `CoreState`.
+- Step 0 unvets 0.7.0. Then a 0.6.0 `PublishMessage` on an `Emitter` from 0.7.0 commits.
+- The `ntt` 0.2.0 package calls `wormhole-core` 0.6.0 by package id.
+  Thus each NTT `PublishMessage` runs under 0.6.0, also when each host vets 0.7.0.
+- Without 0.6.0, the NTT `RegisterManager` fails with `required dependencies not vetted`.
+- A watcher pinned to 0.7.0 drops each NTT message.
+
+WARNING: Do not unvet 0.6.0 and do not pin the watchers to 0.7.0 while `ntt` 0.2.0 is in use.
+The NTT messages then stop. First build NTT on `wormhole-core` 0.7.0.
+
+CAUTION: While each host vets 0.6.0, a submitter can select 0.6.0 and skip the 0.7.0 checks.
+
+NOTE: `ntt_upload_dars.sh` vets each package in the NTT DAR, `wormhole-core` 0.6.0 included.
+Step 6 sets `NTT_UPLOAD_DARS=false`.
+Canton rejects a second `ntt` 0.2.0 package with a different package id (`KNOWN_PACKAGE_VERSION`).

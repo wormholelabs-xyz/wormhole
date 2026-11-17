@@ -1293,12 +1293,27 @@ submitter cannot use 0.6.0 to bypass the 0.7.0 checks.
 > **NOTE:** A restarted watcher starts at the ledger end. Messages from the
 > restart window need reobservation requests.
 
-**Open items.**
+**LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` runs this
+procedure on three `guardianGovernance` hosts (`localnet/README.md`). Results:
 
-- The docs say that vetting applies to the package that created an input
-  contract too. Before step 8, make sure on a test network that contracts that
-  0.6.0 created still work under 0.7.0 after the unvet. These contracts are
-  `CoreState`, `EmitterRegistry`, `Emitter`, and the replay contracts.
+- After the unvet of 0.6.0, contracts that 0.6.0 created work under 0.7.0.
+  `PublishMessage` on such an `Emitter` and `ParseAndVerifyVAA` on such a
+  `CoreState` commit. Thus the unvet of 0.6.0 does not need new contracts.
+- After the unvet, the prepare step rejects a submission that selects 0.6.0.
+  The error is `INVALID_PRESCRIBED_SYNCHRONIZER_ID` with `has not vetted`.
+- A package that calls `wormhole-core` by package id keeps that version. The
+  NTT package `ntt` 0.2.0 calls 0.6.0. Its `PublishMessage` runs under 0.6.0,
+  also when each host vets 0.7.0. A watcher pinned to 0.7.0 drops these
+  messages.
+- Without 0.6.0, each NTT transaction that uses `wormhole-core` fails with
+  `required dependencies not vetted`.
+
+> **WARNING:** Before step 4, build each dependent package (NTT included) on
+> 0.7.0, and vet it on each guardian participant. Do not do step 7 before
+> each dependent package uses 0.7.0.
+
+**Open item.**
+
 - The two-package window below replaces this procedure if the owner approves
   proposal U3.
 
