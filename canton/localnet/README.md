@@ -63,7 +63,9 @@ Set `DB_PORT` to use a different port.
 | `gg_package_vetting.sh` | Checks the package vetting gate. |
 | `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
-| `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. |
+| `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. Also rotates `nttCustody` if it exists. |
+| `custody_host.sh` | Allocates `nttCustody` under the `guardianGovernance` namespace. |
+| `custody_authority_check.sh` | Checks that `guardianGovernance` and `nttCustody` have different authority. |
 | `ntt_e2e.sh` | Runs the NTT steps below in sequence. |
 | `ntt_upload_dars.sh` | Uploads the NTT DAR to all participants and vets its unvetted packages. |
 | `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
@@ -415,6 +417,77 @@ The script shows `ROTATION HALF-APPLIED` and a recovery command.
 
    The rotation stops after the namespace change and shows `ROTATION HALF-APPLIED`.
    Then do step 3 without the variable.
+
+### Host nttCustody under the guardian namespace
+
+The `nttCustody` party holds the NTT lock/unlock reserves.
+It has the same decentralized namespace as `guardianGovernance`.
+It has the same hosts, the same confirmation threshold and the same 2-of-3 signing keys.
+Thus one owner-key rotation changes the namespace and the signing keys of the two parties.
+
+1. Show the current owners:
+
+   ```bash
+   canton/localnet/gg_show_topology.sh
+   ```
+
+2. Find the owner name of each fingerprint in `extra-key-fingerprints.json` or `gg-artifacts.json`.
+
+3. Allocate `nttCustody`. Use the three current owner names:
+
+   ```bash
+   canton/localnet/custody_host.sh owner1 owner2 owner3
+   ```
+
+   The script writes `../localnet-state/custody-artifacts.json`.
+   The output shows a `PTP party=nttCustody` line for each participant.
+   Make sure that these lines have the hosts and signing keys of the `PTP party=guardianGovernance` lines.
+
+4. Check the authority of the two parties. Use two current owner names:
+
+   ```bash
+   canton/localnet/custody_authority_check.sh owner1 owner2
+   ```
+
+5. Make sure that the output shows these results:
+   - A `guardianGovernance` submission cannot create a contract that `nttCustody` signs.
+     The error is `DAML_AUTHORIZATION_ERROR`.
+   - An `nttCustody` submission cannot create a contract that `guardianGovernance` signs.
+     The error is `DAML_AUTHORIZATION_ERROR`.
+   - An `nttCustody` submission with only `guardianGovernance` signatures fails.
+   - A submission for the two parties with one pair of owner signatures succeeds.
+
+After you allocate `nttCustody`, `gg_rotate_owner_key.sh` rotates the two parties in one run.
+The script stops before it makes a change if the namespace has a party that the script does not rotate.
+The script does the signing ceremony checks for each party.
+
+The script changes the signing keys of `guardianGovernance` first and of `nttCustody` second.
+If the second change fails, the rotation is half-applied for `nttCustody`.
+
+WARNING: In this half-applied state, the removed key and one kept key can sign for `nttCustody`.
+Do step 7 immediately.
+
+6. To rehearse this failure, set `GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS_OF=nttCustody` for one rotation:
+
+   ```bash
+   GG_ROTATION_FAIL_BEFORE_SIGNING_KEYS_OF=nttCustody \
+     canton/localnet/gg_rotate_owner_key.sh owner3 owner1 owner2 owner4
+   ```
+
+   The output shows `ROTATION HALF-APPLIED`.
+   It also shows one `HALF-APPLIED STATE` line for each party with each key pair.
+
+7. Run the script again with `--resume` and the same owner names:
+
+   ```bash
+   canton/localnet/gg_rotate_owner_key.sh --resume owner3 owner1 owner2 owner4
+   ```
+
+   The script does not change the namespace or the `guardianGovernance` signing keys again.
+   It changes the `nttCustody` signing keys. Then it does the checks for the two parties.
+
+NOTE: The NTT scripts sign with `owner1` and `owner2`.
+After a rotation that removes one of them, set `NTT_GG_SIGNING_OWNERS` to two current owner names.
 
 ### Limits of the rehearsal
 
