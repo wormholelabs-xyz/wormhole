@@ -165,33 +165,56 @@ var (
 			Name: "wormhole_canton_current_height",
 			Help: "Current Canton ledger offset",
 		})
-	// At most two series: role primary and, during an upgrade window, role next.
+	// At most two series: role current and, during an upgrade window, role retiring.
 	acceptedPackageIDsGauge = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "wormhole_canton_accepted_package_ids",
-			Help: "Accepted wormhole-core package ids (value 1). A role=next series means the upgrade window is open",
+			Help: "Accepted wormhole-core package ids (value 1). A role=retiring series means the upgrade window is open",
 		}, []string{"role", "package_id"})
+	retiringPackageAcceptedUntilGauge = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "wormhole_canton_retiring_package_accepted_until_seconds",
+			Help: "Exclusive record-time deadline of the retiring wormhole-core package id (Unix seconds); 0 outside an upgrade window",
+		})
 )
+
+// Warning texts for an open upgrade window and a retiring id past its deadline.
+const (
+	upgradeWindowOpenMessage      = "canton core upgrade window is open: the retiring core package id is accepted before its record-time deadline; remove it at a later restart"
+	retiringDeadlinePassedMessage = "canton retiring core package deadline has passed: only pre-deadline messages of the retiring id are accepted; remove it at a later restart"
+)
+
+// maxHeartbeatContractAddressLen is "current,retiring": two package ids and a comma.
+const maxHeartbeatContractAddressLen = 2*cantonclient.PackageIDHexLen + 1
 
 // reportAcceptedPackageIDs replaces the accepted-package-id gauge series and
 // warns when an upgrade window is open, so a window left open stays visible.
-func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclient.AcceptedPackageIDs) {
+// wallClock only selects the past-deadline warning.
+func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclient.AcceptedPackageIDs, wallClock time.Time) {
 	acceptedPackageIDsGauge.Reset()
+	retiringPackageAcceptedUntilGauge.Set(0)
 	if acceptedPackageIDs.MatchesAnyPackage() {
-		acceptedPackageIDsGauge.WithLabelValues("primary", "*").Set(1)
+		acceptedPackageIDsGauge.WithLabelValues("current", "*").Set(1)
 		return
 	}
 	currentPackageID, _ := acceptedPackageIDs.CurrentPackageID()
-	acceptedPackageIDsGauge.WithLabelValues("primary", currentPackageID.String()).Set(1)
+	acceptedPackageIDsGauge.WithLabelValues("current", currentPackageID.String()).Set(1)
 	retiringPackageID, hasRetiring := acceptedPackageIDs.RetiringPackageID()
 	if !hasRetiring {
 		return
 	}
-	acceptedPackageIDsGauge.WithLabelValues("next", retiringPackageID.PackageID().String()).Set(1)
-	logger.Warn("canton core upgrade window is open: the retiring core package id is accepted before its record-time deadline; remove it at a later restart",
+	acceptedBeforeRecordTime := retiringPackageID.AcceptedBeforeRecordTime()
+	acceptedPackageIDsGauge.WithLabelValues("retiring", retiringPackageID.PackageID().String()).Set(1)
+	retiringPackageAcceptedUntilGauge.Set(float64(acceptedBeforeRecordTime.Unix()))
+	windowFields := []zap.Field{
 		zap.Stringer("currentPackageId", currentPackageID),
 		zap.Stringer("retiringPackageId", retiringPackageID.PackageID()),
-		zap.Time("retiringPackageAcceptedBeforeRecordTime", retiringPackageID.AcceptedBeforeRecordTime()))
+		zap.Time("retiringPackageAcceptedBeforeRecordTime", acceptedBeforeRecordTime),
+	}
+	logger.Warn(upgradeWindowOpenMessage, windowFields...)
+	if !wallClock.Before(acceptedBeforeRecordTime) {
+		logger.Warn(retiringDeadlinePassedMessage, windowFields...)
+	}
 }
 
 // checkAcceptedPackageIDsAllowed rejects an empty set, and the any-package
@@ -209,10 +232,13 @@ func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPack
 	return nil
 }
 
-// heartbeatContractAddress is the current core package id, or empty for the wildcard.
+// heartbeatContractAddress is "current", "current,retiring", or "*" for the wildcard.
 func (e *Watcher) heartbeatContractAddress() string {
-	currentPackageID, _ := e.acceptedPackageIDs.CurrentPackageID()
-	return currentPackageID.String()
+	contractAddress := e.acceptedPackageIDs.String()
+	if len(contractAddress) > maxHeartbeatContractAddressLen {
+		panic("canton heartbeat contract address exceeds two package ids")
+	}
+	return contractAddress
 }
 
 // NewWatcher creates a new Canton watcher.
@@ -391,7 +417,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 		zap.String("readAsParty", e.readAsParty),
 		zap.Bool("unsafeDevMode", e.unsafeDevMode),
 	)
-	reportAcceptedPackageIDs(logger, e.acceptedPackageIDs)
+	reportAcceptedPackageIDs(logger, e.acceptedPackageIDs, time.Now())
 
 	// Use an injected client (e.g. from tests) if present, otherwise create one
 	// for the lifetime of this Run. The client is kept local rather than stored

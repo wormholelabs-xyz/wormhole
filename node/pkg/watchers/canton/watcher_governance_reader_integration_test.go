@@ -211,13 +211,13 @@ func readDarMainPackageID(t *testing.T, dpm, darPath string) string {
 	return inspected.MainPackageID
 }
 
-// acceptedPackageIDsOrAny pins primaryPackageID, or matches any package when it is empty.
-func acceptedPackageIDsOrAny(t *testing.T, primaryPackageID string) cantonclient.AcceptedPackageIDs {
+// acceptedPackageIDsOrAny pins currentPackageID, or matches any package when it is empty.
+func acceptedPackageIDsOrAny(t *testing.T, currentPackageID string) cantonclient.AcceptedPackageIDs {
 	t.Helper()
-	if primaryPackageID == "" {
+	if currentPackageID == "" {
 		return cantonclient.AcceptAnyPackageID()
 	}
-	accepted, err := cantonclient.ParseAcceptedPackageIDs(primaryPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(currentPackageID, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
 	return accepted
 }
