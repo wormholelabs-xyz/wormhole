@@ -39,10 +39,10 @@ Go watcher's configured packageID changes with the new build.
 | `wormhole-core-0.6.0.dar` | 0.7.0 | `926e55310`, SDK 3.5.1 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` |
 | `wormhole-core-0.7.0.dar` | 0.8.0 | `cfff39977`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
 
-0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3).
-`damlc` reports this change as the warning `upgraded-template-expression-changed`.
-A 0.7.0 registry cannot run under 0.8.0.
-Thus the move to 0.8.0 needs the registry migration in `../A14_EMITTER_ID_UNIQUENESS.md`.
+0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
+`damlc` reports these changes as the warning `upgraded-template-expression-changed`.
+A 0.7.0 registry or `Emitter` cannot run under 0.8.0.
+Thus 0.8.0 starts from a fresh genesis (`../A14_EMITTER_ID_UNIQUENESS.md`, "Deployment of 0.8.0").
 
 To check the package id, run
 `dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.

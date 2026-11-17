@@ -11,7 +11,7 @@ The Results table gives the fix commit for each fixed finding.
 
 - Daml Script tests: `canton/test/daml/Test/TestRedTeamCore.daml`.
 - Signed VAA fixtures: `node/pkg/cantonclient/redteam_vectorgen_test.go`.
-- Watcher integration test: `node/pkg/watchers/canton/watcher_redteam_integration_test.go`.
+- Watcher integration tests: `node/pkg/watchers/canton/watcher_redteam_integration_test.go` and `watcher_witness_only_integration_test.go`.
 - Look-alike package: `canton/test-lookalike`.
 
 ## Procedure
@@ -19,7 +19,7 @@ The Results table gives the fix commit for each fixed finding.
 1. Run `dpm build --all` in `canton`.
 2. Run `dpm test` in `canton/test`.
 3. Run `go test -count=1 ./pkg/cantonclient/` in `node` to check the fixtures.
-4. Run `go test -count=1 -tags integration -run TestCantonWatcherIgnoresLookalikePackage ./pkg/watchers/canton` in `node`.
+4. Run `go test -count=1 -tags integration -run 'TestCantonWatcherIgnoresLookalikePackage|TestCantonWatcherDropsWitnessOnlyPublish' ./pkg/watchers/canton` in `node`.
 
 To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 
@@ -38,8 +38,9 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A9-4 | Publish at the payload size limit. | Held. | `testRedTeamA9PublishPayloadBoundary`. | None. | None. |
 | A9-5 | Replay a VAA in uppercase hex. | Held. | `testRedTeamA9HexCaseReplay`. | None. | None. |
 | A14-1 | The operator creates an emitter for a third party. | Held. | `testRedTeamA14OperatorCannotForgeThirdPartyEmitter`. | None. | None. |
-| A14-2 | The operator and the owner rewind the owner sequence. | Broken by design. | `testRedTeamA14ColludingOwnerDuplicatesOnlyOwnAddress` passes. | Low. | Record the limit. |
-| A14-3 | The operator resets the registry counter. | Fixed on `canton/overnight-u2` (U2). | `testRedTeamA14OperatorCannotResetEmitterRegistry`; `testSetRegistrationFee`; scan test; LocalNet rehearsal. | Medium. | Approve U2. Migrate ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
+| A14-2 | The operator and the owner rewind the owner sequence. | Fixed on `canton/overnight-u2-fixes`: `guardianGovernance` co-signs `Emitter`. | `testRedTeamA14ColludingOwnerCannotDuplicateEmitter`; `testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance`; `testGovernanceSignsEveryEmitter`. | Low. | Fresh genesis of 0.8.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
+| A14-3 | The operator resets the registry counter. | Fixed in #75. | `testRedTeamA14OperatorCannotResetEmitterRegistry`; `testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry`; `testSetRegistrationFee`; scan test. | Medium. | Fresh genesis of 0.8.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
+| A14-4 | Publish on a rogue-`guardianGovernance` `Emitter` inside a transaction that the real `guardianGovernance` witnesses. | Fixed on `canton/overnight-u2-fixes`: the watcher drops a publish where its read-as party is not a stakeholder. | `TestMessagesFromTxRequiresReadPartyStakeholder`; `TestCantonWatcherDropsWitnessOnlyPublish`. | Medium. | None. |
 | R1 | Publish inside `try` and roll back. | Held. | `testRedTeamR1RollbackOfPublishRejected`. | None. | None. |
 | R2 | Run attacker code in the fee charge. | Held. | `TestFees.testFeeValidationMatrix`. | None. | None. |
 | R3 | Vet a malicious upgrade of `wormhole-core`. | Not tested. | None. | High if it occurs. | Control package vetting. |
@@ -113,13 +114,11 @@ Fix: `PublishMessage` (`State.daml`) checks these conditions before the fee char
 The `Emitter` address is `keccak256(tag, registrar, owner, emitterId)`.
 The owner is a signatory, so the operator cannot make a third-party address alone.
 
-With the owner signature, the operator and the owner can repeat a sequence.
-The effect stays on the address of that owner.
-Other emitters do not change.
-`guardianGovernance` observes both `Emitter` contracts.
-The watcher emits both messages.
+In 0.7.0, the operator and the owner could create a second `Emitter` of the owner with a repeated sequence.
 The processor (`node/pkg/processor/message.go:36`) signs each digest independently.
-Thus, two VAAs with one message id can reach quorum.
+Thus, two VAAs with one message id could reach quorum.
+In 0.8.0, `guardianGovernance` co-signs each `Emitter` (`State.daml:579`).
+A second `Emitter` of an issued identity then needs the guardian threshold.
 
 In 0.7.0, the registry attack needs only a compromised operator.
 `EmitterRegistry` has the operator as its only signatory.
@@ -129,23 +128,22 @@ An honest owner that registers a second emitter can get the address of its first
 Both emitters start at sequence 0.
 Integrators that use the sequence for ordering or replay protection can fail.
 
-Fix (proposal branch `canton/overnight-u2`, `wormhole-core` 0.8.0): `guardianGovernance` co-signs `EmitterRegistry` (`State.daml:398`).
+Fix (`wormhole-core` 0.8.0): `guardianGovernance` co-signs `EmitterRegistry` (`State.daml:407`).
 The operator alone cannot create, archive, or re-price a registry.
+`guardianGovernance` alone cannot do these actions either.
 `SetRegistrationFee` keeps `nextId`.
 A registry under a rogue `guardianGovernance` cannot publish against the real `CoreState`.
 It can publish against a shadow `CoreState` of the same rogue party.
-The real `guardianGovernance` is not an informee of that publish, so the guardian watchers do not see it.
-The fix changes a signatory, so a 0.7.0 registry cannot continue under 0.8.0.
-The migration needs an unvet of 0.7.0, then a guardian-side scan, then a guardian ceremony.
-[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the options, the change, the migration, and the LocalNet rehearsal.
+The fix changes signatories, so a 0.7.0 registry or `Emitter` cannot continue under 0.8.0.
+0.8.0 starts from a fresh genesis with a new operator party.
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the options, the change, the deployment, and the scan.
 
-Open item (not checked): the watcher does not check that `guardianGovernance` is a stakeholder of the exercised `Emitter`.
-`messagesFromTx` (`node/pkg/cantonclient/cantongrpc.go:196-230`) accepts each matching `PublishMessage` in the stream of `guardianGovernance`.
-That stream also has events that `guardianGovernance` only witnesses.
-`guardianGovernance` witnesses each node below a node where it is an informee.
-Thus a `PublishMessage` on a rogue-`guardianGovernance` `Emitter` below such a node can reach the watcher.
-No test shows this case or shows that no choice body creates it.
-A candidate fix: drop a `PublishMessage` event when the read-as party is not a stakeholder of the `Emitter`.
+A14-4: `guardianGovernance` witnesses each node below a node where it is an informee.
+Thus a `PublishMessage` on a rogue-`guardianGovernance` `Emitter` below such a node reaches the stream of `guardianGovernance`.
+`messagesFromTx` (`node/pkg/cantonclient/cantongrpc.go`) accepts a consuming `PublishMessage` event only when the read-as party is a stakeholder of the `Emitter`.
+`acs_delta` true shows this for an `Emitter` that existed before the transaction.
+For an `Emitter` that the same transaction creates, `acs_delta` is false. Then the `CreatedEvent` of that contract id, of the pinned package, must list the read-as party as a signatory.
+`TestCantonWatcherDropsWitnessOnlyPublish` and `TestCantonWatcherPublishesOnTransientEmitters` confirm this on SDK 3.5.1 (fixtures `Test/WatcherWitnessOnly.daml` and `Test/WatcherTransientEmitter.daml`).
 
 ### R1: Rolled-back publish
 

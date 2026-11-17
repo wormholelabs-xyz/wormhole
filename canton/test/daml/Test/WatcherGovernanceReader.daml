@@ -70,6 +70,7 @@ integrationGovernanceReaderPublish bridge = do
   (_, rogueEmitterCid) <- submit (actAs rogueOwner <> disclose rogueRegistryDisclosure) do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = rogueOwner, payer = rogueOwner, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = None
 
   realCoreStateDisclosure <- fromSome <$> queryDisclosure operator bridge.coreStateCid
   submitMustFail (actAs rogueOwner <> disclose realCoreStateDisclosure) do

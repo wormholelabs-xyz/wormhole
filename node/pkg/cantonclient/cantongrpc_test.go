@@ -2,6 +2,7 @@ package cantonclient
 
 import (
 	"context"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -71,6 +72,32 @@ func TestDecodeWormholeMessageErrors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(overrides)))
 			assert.Error(t, err)
+		})
+	}
+}
+
+func TestDecodeWormholeMessageBounds(t *testing.T) {
+	cases := []struct {
+		name          string
+		emitterID     int64
+		wantEmitterID uint64
+		wantErr       bool
+	}{
+		{name: "emitterId 0", emitterID: 0, wantEmitterID: 0},
+		{name: "emitterId MaxEmitterID", emitterID: MaxEmitterID, wantEmitterID: MaxEmitterID},
+		{name: "emitterId MaxEmitterID + 1", emitterID: MaxEmitterID + 1, wantErr: true},
+		{name: "emitterId int64 max", emitterID: math.MaxInt64, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := decodeWormholeMessage(tupleResult("00deadbeef",
+				wormholeRecord(map[string]*apiv2.Value{"emitterId": int64Val(tc.emitterID)})))
+			if tc.wantErr {
+				require.ErrorContains(t, err, "emitterId exceeds MaxEmitterID")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantEmitterID, msg.EmitterID)
 		})
 	}
 }

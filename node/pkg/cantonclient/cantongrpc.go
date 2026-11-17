@@ -78,8 +78,11 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 
 // updateFormat builds the v2 UpdateFormat that selects transactions in
 // LEDGER_EFFECTS shape (so ExercisedEvents — which carry choice results — are
-// included). A wildcard template filter matches every template; the watcher
-// narrows to the core-bridge template/choice in Go. When readAsParty is empty
+// included).
+// SECURITY: LEDGER_EFFECTS also carries the CreatedEvent of a contract that the
+// same transaction archives; readPartySignsExercisedEmitter relies on it.
+// A wildcard template filter matches every template; the watcher narrows to
+// the core-bridge template/choice in Go. When readAsParty is empty
 // the events of every party hosted on the participant are streamed
 // (filters_for_any_party); otherwise the stream is narrowed to that one party.
 // GetUpdates and GetUpdateById share it, so reobservation sees what the stream sees.
@@ -135,7 +138,7 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 			if tx == nil {
 				continue // reassignment / checkpoint / topology — ignore
 			}
-			messages := messagesFromTx(tx, tmpl, choiceName, c.logger)
+			messages := messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger)
 			if len(messages) == 0 {
 				continue
 			}
@@ -186,14 +189,15 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 		ParticipantOffset: tx.GetOffset(),
 		UpdateID:          returnedUpdateID,
 		EffectiveAt:       protoTime(tx.GetEffectiveAt()),
-		Messages:          messagesFromTx(tx, tmpl, choiceName, c.logger),
+		Messages:          messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger),
 	}, nil
 }
 
 // messagesFromTx extracts every Wormhole message from a transaction: each
-// ExercisedEvent of `choiceName` on `tmpl` whose exercise_result decodes to a
-// WormholeMessage record.
-func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, logger *zap.Logger) []CantonMessage {
+// ExercisedEvent of `choiceName` on `tmpl` that readPartySignsExercisedEmitter
+// accepts and whose exercise_result decodes to a WormholeMessage record.
+func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, readAsParty string, logger *zap.Logger) []CantonMessage {
+	createdEvents := createdEventsByContractID(tx)
 	var out []CantonMessage
 	for _, ev := range tx.GetEvents() {
 		ex := ev.GetExercised()
@@ -207,6 +211,12 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, l
 			if templateNameMatches(ex.GetTemplateId(), tmpl) {
 				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.PackageID, logger)
 			}
+			continue
+		}
+		// SECURITY: guardianGovernance signs every real Emitter, so a publish
+		// on an Emitter it does not sign is on an Emitter of another registry.
+		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, readAsParty) {
+			recordPublishWithoutReadPartyStakeholder(tx.GetUpdateId(), logger)
 			continue
 		}
 		msg, err := decodeWormholeMessage(ex.GetExerciseResult())
@@ -306,6 +316,9 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	}
 	if emitterID < 0 || seq < 0 || nonce < 0 || nonce > math.MaxUint32 || cl < 0 || cl > math.MaxUint8 {
 		return CantonMessage{}, fmt.Errorf("field out of range (emitterId=%d seq=%d nonce=%d cl=%d)", emitterID, seq, nonce, cl)
+	}
+	if emitterID > MaxEmitterID {
+		return CantonMessage{}, fmt.Errorf("emitterId exceeds MaxEmitterID (emitterId=%d)", emitterID)
 	}
 	return CantonMessage{
 		Registrar:        registrar,
