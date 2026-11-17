@@ -28,3 +28,18 @@ NOTE: adding these dependencies (plus the new fee fields/args) makes
 `wormhole-core` 0.2.0 SCU-incompatible with 0.1.0 — a participant holding
 0.1.0 will reject the upload. Fine pre-mainnet: devnet re-bootstraps, and the
 Go watcher's configured packageID changes with the new build.
+
+## Previous `wormhole-core` release (upgrade baseline)
+
+`wormhole-core-0.6.0.dar` is the baseline for the compile-time smart contract
+upgrade (SCU) check. `core/daml.yaml` references it in its `upgrades:` field.
+`damlc` rejects a `wormhole-core` build that is not upgrade-compatible with it.
+
+- Source: commit `926e55310`, `canton/core`, built with SDK 3.5.1.
+- Main package id: `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15`.
+
+To verify the package id, run
+`dpm damlc inspect-dar --json dars/wormhole-core-0.6.0.dar` and read
+`main_package_id`. The DAR file hash is not reproducible across builds; the
+package id is reproducible. When a new `wormhole-core` version ships, vendor
+its DAR here and move the `upgrades:` field to it.

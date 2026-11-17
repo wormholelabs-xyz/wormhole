@@ -10,6 +10,9 @@ sdk-version: 3.5.1
 name: wormhole-core
 version: 0.7.0
 source: daml
+# Compile-time SCU check against the previous release (package id and
+# provenance in ../dars/README.md).
+upgrades: ../dars/wormhole-core-0.6.0.dar
 dependencies:
   - daml-prim
   - daml-stdlib
