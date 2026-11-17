@@ -381,21 +381,38 @@ emitterAddressFor registrar owner emitterId =
 -- (operator, guardianGovernance). Created with 'CoreState' in the genesis
 -- ceremony.
 --
--- SECURITY: guardianGovernance co-signs, so the operator alone cannot create a
--- registry with a reused @nextId@ (A14-3). A reused id gives an honest owner's
--- second 'Emitter' the address of its first, both at sequence 0. A registry
--- under a rogue guardianGovernance cannot publish: 'PublishMessage' pins the
--- real 'CoreState' guardianGovernance.
+-- SECURITY: guardianGovernance co-signs, so the operator alone cannot create,
+-- archive, or re-price a registry, and cannot lower @nextId@ (A14-3). A reused
+-- id gives an honest owner's second 'Emitter' the address of its first, both
+-- at sequence 0. A registry under a rogue guardianGovernance can publish
+-- against a shadow 'CoreState' of the same rogue party. The real
+-- guardianGovernance is not an informee of those transactions, so the
+-- guardian watchers do not see them.
 template EmitterRegistry
   with
     operator           : Party
     guardianGovernance : Party  -- co-signer; also pinned in RegisterEmitter's
                                 -- fee charge
     registrationFee    : Int    -- onboarding fee, 10^-10 feeInstrument units;
-                                -- fixed at creation, 0 for free
+                                -- 0 for free; changed by SetRegistrationFee
     nextId             : Int
   where
     signatory operator, guardianGovernance
+
+    -- | Re-prices registration and keeps @nextId@, so a fee change never
+    -- re-enters the counter by hand. Controllers are the two signatories: the
+    -- core governance VAA set (sdk/vaa/payloads.go) has no registration-fee
+    -- action, and guardianGovernance is the guardian threshold party.
+    choice SetRegistrationFee : ContractId EmitterRegistry
+      with
+        newRegistrationFee : Int
+      controller operator, guardianGovernance
+      do
+        assertMsg "registration fee must not be negative" (newRegistrationFee >= 0)
+        successor <- create this with registrationFee = newRegistrationFee
+        successorRegistry <- fetch successor
+        assertMsg "SetRegistrationFee changed nextId" (successorRegistry.nextId == nextId)
+        pure successor
 
     -- | Direct, requester-submitted registration: allocates the next id and
     -- creates the co-signed 'Emitter' in one transaction, no operator crank —

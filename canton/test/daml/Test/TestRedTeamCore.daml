@@ -7,7 +7,7 @@
 module Test.TestRedTeamCore where
 
 import Daml.Script
-import DA.Action (foldlA)
+import DA.Action (foldlA, void)
 import DA.Assert ((===))
 import DA.Exception (GeneralError(..), throw)
 import DA.Foldable (forA_)
@@ -567,6 +567,20 @@ testRedTeamA14OperatorCannotResetEmitterRegistry = do
   resetResult <- trySubmit (actAs operator) do
     createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
   checkAttackFailedWith "A14 operator alone resets the EmitterRegistry" "Authorization failure" resetResult
+
+  [(realRegistryCid, realRegistry)] <- query @EmitterRegistry operator
+  realRegistry.nextId === 1
+  let operatorAloneAttacks =
+        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs operator) do archiveCmd realRegistryCid)
+        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs operator) do
+            exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
+        ]
+  forA_ operatorAloneAttacks \(attack, runAttack) -> do
+    attackResult <- runAttack
+    checkAttackFailedWith ("A14 operator alone " <> attack) "" attackResult
+  [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
+  survivingRegistryCid === realRegistryCid
+  survivingRegistry.nextId === 1
 
   secondEmitterCid <- registerEmitter operator honestOwner
   (_, firstMessage) <- publishVia operator coreStateCid honestOwner firstEmitterCid 1 "aa" 0
