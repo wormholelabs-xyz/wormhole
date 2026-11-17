@@ -191,8 +191,8 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 }
 
 // messagesFromTx extracts every Wormhole message from a transaction: each
-// ExercisedEvent of `choiceName` on `tmpl` whose exercise_result decodes to a
-// WormholeMessage record.
+// consuming ExercisedEvent of `choiceName` on `tmpl` with acs_delta set whose
+// exercise_result decodes to a WormholeMessage record.
 func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, logger *zap.Logger) []CantonMessage {
 	var out []CantonMessage
 	for _, ev := range tx.GetEvents() {
@@ -207,6 +207,14 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, l
 			if templateNameMatches(ex.GetTemplateId(), tmpl) {
 				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.PackageID, logger)
 			}
+			continue
+		}
+		// SECURITY: on a stream filtered by the read-as party, acs_delta on a
+		// consuming exercise is set iff that party is a stakeholder of the
+		// exercised contract. guardianGovernance signs every real Emitter, so a
+		// publish it only witnesses is on an Emitter of another registry.
+		if !ex.GetConsuming() || !ex.GetAcsDelta() {
+			recordPublishWithoutReadPartyStakeholder(tx.GetUpdateId(), logger)
 			continue
 		}
 		msg, err := decodeWormholeMessage(ex.GetExerciseResult())
