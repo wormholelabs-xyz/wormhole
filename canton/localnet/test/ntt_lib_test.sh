@@ -4,6 +4,8 @@
 set -uo pipefail
 LOCALNET_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly LOCALNET_TEST_DIR
+# shellcheck source=SCRIPTDIR/../env.sh
+source "$LOCALNET_TEST_DIR/../env.sh"
 # shellcheck source=SCRIPTDIR/../ntt_offline_lib.sh
 source "$LOCALNET_TEST_DIR/../ntt_offline_lib.sh"
 
@@ -97,6 +99,30 @@ check_case "json_decimal_array_total_units of two amounts" 0 25000000000 - \
 check_case "json_decimal_array_total_units of an empty array" 1 - "non-empty" json_decimal_array_total_units 10 '[]'
 check_case "json_decimal_array_total_units of a number" 1 - "non-empty" json_decimal_array_total_units 10 '[2.5]'
 check_case "json_decimal_array_total_units with a space in an amount" 1 - - json_decimal_array_total_units 10 '["1 2"]'
+
+# file_mode_octal <file>: the permission bits, for example 600.
+file_mode_octal() {
+  if stat -f %Lp "$1" 2>/dev/null; then return 0; fi
+  stat -c %a "$1"
+}
+
+check_case "ntt scripts pass no bearer token as a command argument" 1 "" - \
+  grep -nE 'Authorization: Bearer \$' "$LOCALNET_TEST_DIR"/../ntt_*.sh
+mkdir -p "$work_dir/stub-localnet" "$work_dir/auth-headers"
+cat > "$work_dir/stub-localnet/token.sh" <<'STUB_TOKEN_SCRIPT'
+#!/usr/bin/env bash
+echo "stub-token-for-$1"
+STUB_TOKEN_SCRIPT
+chmod +x "$work_dir/stub-localnet/token.sh"
+# write_auth_header_file (env.sh) runs $LOCALNET_SCRIPT_DIR/token.sh.
+LOCALNET_SCRIPT_DIR="$work_dir/stub-localnet"
+gg_work_dir="$work_dir/auth-headers"
+subject_header_file="$(subject_auth_header_file ntt-locker-1 2> "$work_dir/stderr")" \
+  || echo "subject_auth_header_file failed: $(cat "$work_dir/stderr")" >&2
+check_case "subject header file has mode 600" 0 600 - file_mode_octal "$subject_header_file"
+check_case "subject header file holds the header" 0 "Authorization: Bearer stub-token-for-ntt-locker-1" - cat "$subject_header_file"
+check_case "subject header file is reused" 0 "$subject_header_file" - subject_auth_header_file ntt-locker-1
+check_case "subject header file of a path subject" 1 - "subject" subject_auth_header_file ../escape
 
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
