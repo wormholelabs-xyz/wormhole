@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Pre-ceremony scan of the EmitterRegistry migration (A14_EMITTER_ID_UNIQUENESS.md, "Migration from 0.7.0", step 5).
+# Scan of the Emitter and EmitterRegistry history of one (operator, guardianGovernance) pair
+# (A14_EMITTER_ID_UNIQUENESS.md, "Scan"; "Deployment of 0.8.0", step 6).
 # Usage: emitter_id_scan.sh <json-api-url> <token-file> <guardian-governance-party> <operator-party>
 #                           <begin-exclusive-offset> [<baseline-max-emitter-id>]
 # The token file holds a Ledger API JWT of a user with exactly one right: CanReadAs(<guardian-governance-party>).
