@@ -73,21 +73,13 @@ gg_signers_json() {
 # Prints the transaction JSON. Returns non-zero on rejection; the error text goes to stderr.
 # With SUBMIT_AWAIT_COMPLETION=true, prints the command completion (status included) instead.
 submit_interactive() {
-  local command_id="$1" act_as="$2" command="$3"
-  shift 3
-  submit_interactive_commands "$command_id" "$act_as" "$(jq -c -n --argjson command "$command" '[$command]')" "$@"
-}
-
-# submit_interactive_commands <command-id> <act-as-json-array> <commands-json-array> <signers-json> [disclosed-json] [package-preference-json]
-# submit_interactive with 1 or 2 commands in one atomic transaction.
-submit_interactive_commands() {
-  local command_id="$1" act_as="$2" commands="$3" signers="$4"
+  local command_id="$1" act_as="$2" command="$3" signers="$4"
   local disclosed="${5:-[]}" package_preference="${6:-[]}" await_completion="${SUBMIT_AWAIT_COMPLETION:-false}"
   local spec_file="$gg_work_dir/$command_id.spec.json"
-  jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson commands "$commands" \
+  jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
     --argjson signers "$signers" --argjson disclosed "$disclosed" --argjson preference "$package_preference" \
     --arg synchronizerId "$LOGICAL_SYNCHRONIZER_ID" --argjson awaitCompletion "$await_completion" \
-    '{commandId: $commandId, actAs: $actAs, commands: $commands, signers: $signers,
+    '{commandId: $commandId, actAs: $actAs, commands: [$command], signers: $signers,
       disclosedContracts: $disclosed, packageIdSelectionPreference: $preference, synchronizerId: $synchronizerId,
       awaitCompletion: $awaitCompletion}' \
     > "$spec_file"

@@ -4,9 +4,9 @@
 // to describe the transaction correctly. A production signer must decode preparedTransaction, check its
 // content, and compute the hash itself (Canton transaction hashing scheme) before it signs.
 // Prepare, externally sign and execute one Ledger API interactive submission (JSON Ledger API v2).
-// One submission holds 1 to MAX_COMMANDS_PER_SUBMISSION commands, which commit atomically.
+// The prepare endpoint takes exactly one command ("Preparing multiple commands is currently not supported").
 // Usage: interactive_submit.js <json-api-url> <token-file> <submission-spec.json>
-// Spec: { commandId, actAs: [party], commands: [Command, ...], disclosedContracts?: [DisclosedContract],
+// Spec: { commandId, actAs: [party], commands: [Command], disclosedContracts?: [DisclosedContract],
 //         synchronizerId?, packageIdSelectionPreference?: [packageId],
 //         signers: { <party>: [ { keyFile: <PKCS8 DER Ed25519 key>, fingerprint } ] },
 //         awaitCompletion?: true }
@@ -17,7 +17,6 @@
 const crypto = require('crypto');
 const fs = require('fs');
 
-const MAX_COMMANDS_PER_SUBMISSION = 2;
 const REQUEST_TIMEOUT_MS = 300000;
 const COMPLETION_POLL_MAX_ATTEMPTS = 180;
 const COMPLETION_STREAM_IDLE_TIMEOUT_MS = 5000;
@@ -83,10 +82,7 @@ async function main() {
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
   const spec = JSON.parse(fs.readFileSync(specFile, 'utf8'));
   if (!Array.isArray(spec.actAs) || spec.actAs.length === 0) throw new Error('spec.actAs must be non-empty');
-  if (!Array.isArray(spec.commands)) throw new Error('spec.commands must be an array');
-  if (spec.commands.length < 1 || spec.commands.length > MAX_COMMANDS_PER_SUBMISSION) {
-    throw new Error(`spec.commands must hold 1 to ${MAX_COMMANDS_PER_SUBMISSION} commands, got ${spec.commands.length}`);
-  }
+  if (!Array.isArray(spec.commands) || spec.commands.length !== 1) throw new Error('spec.commands must hold exactly one command');
 
   const prepared = await postJson(baseUrl, token, '/v2/interactive-submission/prepare', {
     commandId: spec.commandId,
