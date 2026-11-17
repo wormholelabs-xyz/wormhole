@@ -1,5 +1,5 @@
 # Shared functions for the NTT LocalNet scripts. Source this file; do not run it.
-# shellcheck shell=bash
+# shellcheck shell=bash disable=SC2034
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 

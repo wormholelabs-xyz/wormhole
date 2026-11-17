@@ -9,7 +9,8 @@
 # Usage: ntt_e2e.sh
 # Precondition: LocalNet runs, gg_host.sh and gg_genesis.sh ran, and the NTT DARs are built.
 set -euo pipefail
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 
 watcher_started=false
 stop_watcher_on_exit() {
