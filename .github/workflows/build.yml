@@ -284,6 +284,12 @@ jobs:
       - name: Run the canary gate decision table test
         run: bash canton/localnet/test/canary_gate_decision_test.sh
 
+      - name: Run the owner signer block copy test
+        run: bash canton/localnet/test/owner_signer_block_test.sh
+
+      - name: Run the owner key input check table test
+        run: bash canton/localnet/test/owner_key_input_checks_test.sh
+
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
     runs-on: ubuntu-24.04
