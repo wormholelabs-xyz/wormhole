@@ -48,9 +48,14 @@ setup = setupWithInstrument None
 -- validated because all fees default to 0). The fee recipient is
 -- @guardianGovernance@, matching production custody.
 setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
-setupWithInstrument mInstrument = do
-  operator <- allocateParty "Operator"
-  guardianGovernance <- allocateParty "GuardianGovernance"
+setupWithInstrument = setupWithPartyLabel ""
+
+-- | 'setupWithInstrument' with @partyLabel@ appended to each party hint, so a
+-- script can run again on one participant.
+setupWithPartyLabel : Text -> Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
+setupWithPartyLabel partyLabel mInstrument = do
+  operator <- allocateParty ("Operator" <> partyLabel)
+  guardianGovernance <- allocateParty ("GuardianGovernance" <> partyLabel)
   let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
   (csId, _) <- submit (actAs operator <> actAs guardianGovernance) do
     (,) <$> createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId

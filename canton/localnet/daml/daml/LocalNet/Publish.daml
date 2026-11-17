@@ -4,11 +4,9 @@ module LocalNet.Publish where
 import Daml.Script
 import DA.Assert ((===))
 import DA.Optional (fromSome)
-import Splice.Api.Token.HoldingV1 (InstrumentId(..))
-import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA ()
-import Test.TestCore (devnetGuardian, devnetGuardianPubKey, govSetFeeVAA, publishVia, registerEmitter)
+import Test.TestCore (devnetGuardianPubKey, govSetFeeVAA, publishVia, registerEmitter, setupWithPartyLabel)
 
 data SmokePublishResult = SmokePublishResult with
     operator : Party
@@ -19,27 +17,12 @@ data SmokePublishResult = SmokePublishResult with
     verifiedVaaSequence : Int
   deriving (Eq, Show)
 
--- | 'Test.TestCore.setup' with run-labelled party hints.
--- Precondition: the submitting user can act and read as any party on the participant.
-bootstrapCoreBridge : Text -> Script (Party, Party, ContractId CoreState)
-bootstrapCoreBridge runLabel = do
-  operator <- allocateParty ("Operator-" <> runLabel)
-  guardianGovernance <- allocateParty ("GuardianGovernance-" <> runLabel)
-  let unusedFeeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
-  coreStateCid <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian]
-                 unusedFeeInstrument guardianGovernance)
-  _ <- submit operator do createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
-  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
-  pure (operator, guardianGovernance, coreStateCid)
-
 -- | Bootstrap, register one emitter, publish sequences 0 and 1 by threaded cid,
 -- then verify a guardian-signed VAA as an external party (keccak256 and secp256k1 builtins).
 bootstrapPublishAndVerify : Text -> Script SmokePublishResult
 bootstrapPublishAndVerify runLabel = do
   assertMsg "runLabel must be non-empty" (runLabel /= "")
-  (operator, guardianGovernance, coreStateCid) <- bootstrapCoreBridge runLabel
+  (operator, guardianGovernance, coreStateCid) <- setupWithPartyLabel ("-" <> runLabel) None
   emitterOwner <- allocateParty ("SmokeEmitter-" <> runLabel)
   emitterCid <- registerEmitter operator emitterOwner
   (successorEmitterCid, firstMessage) <- publishVia operator coreStateCid emitterOwner emitterCid 42 "11223344" 0

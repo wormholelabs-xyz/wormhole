@@ -18,7 +18,8 @@ core_state_cid="$(core_contract_id coreState)"
 echo "RegisterEmitter (requester = payer = Operator)"
 register_transaction="$(submit_interactive "register-emitter-$(date +%s)" "$operator_only" \
   "$(exercise_command "$EMITTER_REGISTRY_TEMPLATE" "$(core_contract_id emitterRegistry)" RegisterEmitter \
-    "$(jq -n --arg op "$OPERATOR_PARTY" '{requester: $op, payer: $op, coreStateCid: null, feeAllocation: null}')")" \
+    "$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" \
+      '{requester: $op, payer: $op, coreStateCid: null, feeAllocation: null, expectedGuardianGovernance: $gg}')")" \
   "$(operator_signers_json)")"
 record_core_contract_id emitterRegistry "$(created_contract_id "$register_transaction" ":Wormhole.Core.State:EmitterRegistry")"
 emitter_cid="$(created_contract_id "$register_transaction" ":Wormhole.Core.State:Emitter")"

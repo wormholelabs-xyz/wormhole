@@ -54,7 +54,7 @@ Set `DB_PORT` to use a different port.
 | `gg_lib.sh` | Shared functions for the `gg_*.sh` scripts. |
 | `gg_host.sh` | Hosts `guardianGovernance` and `Operator`. Vets the core DARs on all participants. |
 | `gg_show_topology.sh` | Shows the namespace and the hosting on each participant. |
-| `gg_genesis.sh` | Creates the `CoreState` and the two registries. |
+| `gg_genesis.sh` | Creates the `CoreState` and the `EmitterRegistry` in one co-signed transaction, then the `ReplayRootRegistry`. |
 | `gg_publish_and_govern.sh` | Publishes one message. Applies one governance VAA. |
 | `gg_confirmation_quorum.sh` | Checks the confirmation threshold with two hosts offline. |
 | `gg_package_vetting.sh` | Checks the package vetting gate. |

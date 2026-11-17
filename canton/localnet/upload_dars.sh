@@ -6,8 +6,13 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 readonly CANTON_PROJECT_DIR="${CANTON_PROJECT_DIR:-$REPO_ROOT/canton}"
+core_version="$(awk '$1 == "version:" {print $2}' "$CANTON_PROJECT_DIR/core/daml.yaml")"
+if [[ ! "$core_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "cannot read the wormhole-core version from $CANTON_PROJECT_DIR/core/daml.yaml" >&2
+  exit 1
+fi
 readonly DAR_PATHS=(
-  "$CANTON_PROJECT_DIR/core/.daml/dist/wormhole-core-0.7.0.dar"
+  "$CANTON_PROJECT_DIR/core/.daml/dist/wormhole-core-$core_version.dar"
   "$CANTON_PROJECT_DIR/test/.daml/dist/wormhole-core-test-0.1.0.dar"
 )
 
