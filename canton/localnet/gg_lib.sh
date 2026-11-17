@@ -2,6 +2,8 @@
 # shellcheck shell=bash
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
+# shellcheck source=owner_key_input_checks.sh
+source "$(dirname "${BASH_SOURCE[0]}")/owner_key_input_checks.sh"
 
 # Every run appends its stdout and stderr to an evidence log. Tokens go only to mode 0600 files in $gg_work_dir,
 # private keys only to mode 0600 key files.
@@ -127,8 +129,11 @@ create_ceremony_probe() {
 
 # Second party under the guardian decentralized namespace (custody_host.sh). Empty until it exists.
 CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"
+if ! CUSTODY_PARTY="$(read_custody_party_id "$CUSTODY_ARTIFACTS")"; then
+  exit 1
+fi
 # shellcheck disable=SC2034 # used by the scripts that source this file
-CUSTODY_PARTY="$(if [[ -f "$CUSTODY_ARTIFACTS" ]]; then jq -er .partyId "$CUSTODY_ARTIFACTS"; fi)"
+readonly CUSTODY_PARTY
 
 # submit_interactive <command-id> <act-as-json-array> <command-json> <signers-json> [disclosed-json] [package-preference-json]
 # Prints the transaction JSON. Returns non-zero on rejection; the error text goes to stderr.

@@ -21,10 +21,8 @@ if [[ $# -ne 0 && $# -ne 2 ]]; then
   exit 2
 fi
 signing_owners=("${1:-owner1}" "${2:-owner2}")
-if [[ "${signing_owners[0]}" == "${signing_owners[1]}" ]]; then
-  echo "the two owner names must differ" >&2
-  exit 2
-fi
+check_owner_names_are_safe "${signing_owners[@]}"
+check_owner_names_differ "${signing_owners[@]}"
 
 party_json_array() { jq -cn '$ARGS.positional' --args "$@"; }
 custody_signers="$(namespace_party_signers_json "$CUSTODY_PARTY" "${signing_owners[@]}" | jq -c .)"

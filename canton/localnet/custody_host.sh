@@ -19,6 +19,8 @@ if [[ $# -ne 3 ]]; then
   echo "usage: custody_host.sh <owner> <owner> <owner>" >&2
   exit 2
 fi
+check_owner_names_are_safe "$@"
+check_owner_names_differ "$@"
 if [[ ! "$CUSTODY_PARTY_NAME" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
   echo "invalid party name: $CUSTODY_PARTY_NAME" >&2
   exit 2

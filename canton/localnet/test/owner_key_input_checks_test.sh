@@ -9,7 +9,8 @@ source "$LOCALNET_TEST_DIR/../owner_key_input_checks.sh"
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
-readonly VALID_PARTY_ID="nttCustody::1220$(printf 'ab%.0s' $(seq 1 32))"
+VALID_PARTY_ID="nttCustody::1220$(printf 'ab%.0s' $(seq 1 32))"
+readonly VALID_PARTY_ID
 failed_cases=0
 case_count=0
 

@@ -34,16 +34,8 @@ if [[ $# -ne 4 ]]; then
   exit 2
 fi
 removed_owner="$1" kept_owner_1="$2" kept_owner_2="$3" new_owner="$4"
-for owner_name in "$removed_owner" "$kept_owner_1" "$kept_owner_2" "$new_owner"; do
-  if [[ ! "$owner_name" =~ ^[A-Za-z0-9_-]+$ ]]; then
-    echo "owner name has characters outside [A-Za-z0-9_-]: $owner_name" >&2
-    exit 2
-  fi
-done
-if [[ "$(printf '%s\n' "$removed_owner" "$kept_owner_1" "$kept_owner_2" "$new_owner" | sort -u | wc -l | tr -d ' ')" != 4 ]]; then
-  echo "the four owner names must differ" >&2
-  exit 2
-fi
+check_owner_names_are_safe "$@"
+check_owner_names_differ "$@"
 for existing_owner in "$removed_owner" "$kept_owner_1" "$kept_owner_2"; do
   for key_file in "$GG_KEY_DIR/$existing_owner.pub" "$GG_KEY_DIR/$existing_owner.key"; do
     if [[ ! -f "$key_file" ]]; then
