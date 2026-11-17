@@ -41,11 +41,10 @@ gg_ceremony_signers_json() {
 
 # active_contracts_with_blobs <validator> <party> <qualified-template-suffix>: like active_contracts, with created event blobs.
 active_contracts_with_blobs() {
-  local validator_name="$1" party="$2" template_suffix="$3" ledger_end admin_token
-  admin_token="$(cat "$gg_work_dir/script.jwt")"
-  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "Authorization: Bearer $admin_token" | jq -r .offset)"
+  local validator_name="$1" party="$2" template_suffix="$3" ledger_end
+  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
   curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
-    -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+    -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
       eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: true}}}}]}}, verbose: false},
       activeAtOffset: $offset}')" \
@@ -67,7 +66,7 @@ disclosed_contract() {
 submit_local() {
   local validator_name="$1" command_id="$2" act_as="$3" command="$4" disclosed="${5:-[]}" response
   response="$(curl -sS -X POST "$(json_api_url "$validator_name")/v2/commands/submit-and-wait-for-transaction" \
-    -H "Authorization: Bearer $(cat "$gg_work_dir/script.jwt")" -H 'Content-Type: application/json' \
+    -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -w '\n%{http_code}' \
     -d "$(jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
       --argjson disclosed "$disclosed" --arg userId "$SCRIPT_USER_ID" --arg synchronizerId "$LOGICAL_SYNCHRONIZER_ID" '{
@@ -90,19 +89,19 @@ validator_api_url() {
 
 # wallet_onboard <validator> <user>: onboard the user and print its party id.
 wallet_onboard() {
-  curl -sSf -X POST "$(validator_api_url "$1")/register" -H "Authorization: Bearer $("$LOCALNET_SCRIPT_DIR/token.sh" "$2")" \
+  curl -sSf -X POST "$(validator_api_url "$1")/register" -H "@$(subject_auth_header_file "$2")" \
     -H 'Content-Type: application/json' -d '{}' | jq -er .party_id
 }
 
 wallet_tap() {
-  curl -sSf -X POST "$(validator_api_url "$1")/wallet/tap" -H "Authorization: Bearer $("$LOCALNET_SCRIPT_DIR/token.sh" "$2")" \
+  curl -sSf -X POST "$(validator_api_url "$1")/wallet/tap" -H "@$(subject_auth_header_file "$2")" \
     -H 'Content-Type: application/json' -d "$(jq -n --arg amount "$3" '{amount: $amount}')" >/dev/null
 }
 
 # wallet_create_transfer_preapproval <validator> <user>: print the TransferPreapproval contract id.
 wallet_create_transfer_preapproval() {
   curl -sSf -X POST "$(validator_api_url "$1")/wallet/transfer-preapproval" \
-    -H "Authorization: Bearer $("$LOCALNET_SCRIPT_DIR/token.sh" "$2")" -H 'Content-Type: application/json' -d '{}' \
+    -H "@$(subject_auth_header_file "$2")" -H 'Content-Type: application/json' -d '{}' \
     | jq -er .transfer_preapproval_contract_id
 }
 
@@ -176,7 +175,7 @@ ntt_transfer_vaa() {
 
 # allocate_local_party <validator> <party-hint>: allocate a party on that participant and print its id.
 allocate_local_party() {
-  curl -sSf -X POST "$(json_api_url "$1")/v2/parties" -H "Authorization: Bearer $("$LOCALNET_SCRIPT_DIR/token.sh")" \
+  curl -sSf -X POST "$(json_api_url "$1")/v2/parties" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' -d "$(jq -n --arg hint "$2" '{partyIdHint: $hint, identityProviderId: ""}')" \
     | jq -er .partyDetails.party
 }

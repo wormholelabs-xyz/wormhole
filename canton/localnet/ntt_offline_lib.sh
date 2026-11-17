@@ -178,3 +178,18 @@ json_decimal_array_total_units() {
   # shellcheck disable=SC2086 # jq checked each word against [0-9.]
   decimal_texts_total_units "$decimals" $decimal_texts
 }
+
+# subject_auth_header_file <subject>: path of a 0600 header file in $gg_work_dir with a token for that subject.
+subject_auth_header_file() {
+  local subject="$1" header_file
+  if [[ ! "$subject" =~ ^[A-Za-z0-9._-]+$ || "$subject" == .* ]]; then
+    echo "subject has characters outside [A-Za-z0-9._-] or starts with a dot: $subject" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2154 # gg_lib.sh or the test sets gg_work_dir
+  header_file="$gg_work_dir/subject-$subject.auth"
+  if [[ ! -f "$header_file" ]]; then
+    write_auth_header_file "$header_file" "$subject" || return 1
+  fi
+  echo "$header_file"
+}

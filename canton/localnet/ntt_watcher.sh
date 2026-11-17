@@ -26,7 +26,7 @@ build_harness() {
 run_harness() {
   local name="$1" validator_name="$2"
   rm -f "$WATCHER_DIR/$name.ready" "$WATCHER_DIR/$name.stop" "$WATCHER_DIR/$name.jsonl"
-  "$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$WATCHER_DIR/watcher.jwt"
+  (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$WATCHER_DIR/watcher.jwt")
   CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
   CANTON_LOCALNET_TOKEN_FILE="$WATCHER_DIR/watcher.jwt" \
   CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
