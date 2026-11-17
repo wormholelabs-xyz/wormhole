@@ -49,6 +49,7 @@ import DA.Map qualified as Map
 import DA.Optional (fromSomeNote)
 import DA.Set (Set)
 import DA.Set qualified as Set
+import DA.Text qualified as T
 import DA.Time (addRelTime, seconds)
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import Splice.Api.Token.HoldingV1 (InstrumentId)
@@ -84,6 +85,14 @@ data WormholeMessage = WormholeMessage with
 -- | Maximum message payload size in bytes (whitepaper 0004).
 maxPayloadBytes : Int
 maxPayloadBytes = 750
+
+-- | Wire ranges of 'WormholeMessage' fields; the watcher drops a message
+-- outside them (@cantongrpc.go@ @decodeWormholeMessage@).
+maxNonceUint32 : Int
+maxNonceUint32 = 4294967295
+
+maxConsistencyLevelUint8 : Int
+maxConsistencyLevelUint8 = 255
 
 ----------------------------------------------------------------------
 -- Core state singleton
@@ -556,6 +565,15 @@ template Emitter
         feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
       controller owner, payer
       do
+        -- Before the fee charge: a message the watcher drops must not consume
+        -- a sequence or a fee.
+        assertMsg "payload is not lowercase hex" (isLowerHex payload)
+        assertMsg "payload has an odd hex length" (T.length payload % 2 == 0)
+        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
+        assertMsg "nonce is negative" (nonce >= 0)
+        assertMsg "nonce exceeds uint32" (nonce <= maxNonceUint32)
+        assertMsg "consistency level is negative" (consistencyLevel >= 0)
+        assertMsg "consistency level exceeds uint8" (consistencyLevel <= maxConsistencyLevelUint8)
         -- Pin the fee-custody anchor BEFORE charging: @guardianGovernance@ (not
         -- just @operator@, which a forged CoreState would match) determines where
         -- the fee lands, so this check rejects a shadow CoreState under a rogue
@@ -566,7 +584,6 @@ template Emitter
           payer
           feeAllocation
         assertMsg "core state operator mismatch" (csOperator == operator)
-        assertMsg "payload exceeds 750 bytes" (byteLength payload <= maxPayloadBytes)
         newEmitterCid <- create this with sequence = sequence + 1
         pure (newEmitterCid, WormholeMessage with
           registrar = operator

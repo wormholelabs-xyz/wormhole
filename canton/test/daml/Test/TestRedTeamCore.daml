@@ -469,6 +469,35 @@ testRedTeamA9PublishRejectsFieldsTheWatcherDrops = do
   (_, acceptedAttacks) <- foldlA tryPublish (emitterCid, []) undecodableCases
   checkNoAttackAccepted "A9 PublishMessage fields the watcher drops" acceptedAttacks
 
+-- | Each field at its wire boundary publishes; one step past it aborts with a
+-- named reason, and a rejected publish does not advance the sequence.
+testRedTeamA9PublishFieldBoundaries : Script ()
+testRedTeamA9PublishFieldBoundaries = do
+  (operator, _, coreStateCid) <- setup
+  owner <- allocateParty "RedTeamFieldBoundaryOwner"
+  emitterCid <- registerEmitter operator owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+  let rejectedCases =
+        [ ("odd-length payload", "payload has an odd hex length", 0, "abc", 0)
+        , ("uppercase payload", "payload is not lowercase hex", 0, "AB", 0)
+        , ("0x-prefixed payload", "payload is not lowercase hex", 0, "0x00", 0)
+        , ("non-hex payload", "payload is not lowercase hex", 0, "zz", 0)
+        , ("nonce 2^32", "nonce exceeds uint32", 4294967296, "00", 0)
+        , ("nonce -1", "nonce is negative", -1, "00", 0)
+        , ("consistency level 256", "consistency level exceeds uint8", 0, "00", 256)
+        , ("consistency level -1", "consistency level is negative", 0, "00", -1)
+        ]
+  forA_ rejectedCases \(attack, expectedSubstring, nonce, payload, consistencyLevel) -> do
+    publishResult <- trySubmit (actAs owner <> disclose coreStateDisclosure) do
+      exerciseCmd emitterCid PublishMessage with
+        nonce, payload, consistencyLevel
+        coreStateCid, payer = owner, feeAllocation = None
+    checkAttackFailedWith ("A9 " <> attack) expectedSubstring publishResult
+  (emitterAfterMaxima, maximaMessage) <- publishVia operator coreStateCid owner emitterCid 4294967295 "00" 255
+  (maximaMessage.sequence, maximaMessage.nonce, maximaMessage.consistencyLevel) === (0, 4294967295, 255)
+  (_, minimaMessage) <- publishVia operator coreStateCid owner emitterAfterMaxima 0 "" 0
+  (minimaMessage.sequence, minimaMessage.nonce, minimaMessage.consistencyLevel) === (1, 0, 0)
+
 ----------------------------------------------------------------------
 -- A14: Emitter created outside RegisterEmitter
 ----------------------------------------------------------------------

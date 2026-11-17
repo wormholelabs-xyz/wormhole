@@ -320,16 +320,16 @@ no operator authority:
 -- so callers never re-resolve it off-ledger.
 choice PublishMessage : (ContractId Emitter, WormholeMessage)
   with
-    nonce            : Int            -- uint32
-    payload          : Bytes          -- <= 750 bytes (whitepaper 0004)
-    consistencyLevel : Int            -- uint8; see §6
+    nonce            : Int            -- 0 .. 2^32-1
+    payload          : Bytes          -- even-length lowercase hex, <= 750 bytes (whitepaper 0004)
+    consistencyLevel : Int            -- 0 .. 255; see §6
     coreStateCid     : ContractId CoreState                       -- fee read (§ Fees)
     payer            : Party          -- funds messageFee; = owner for a direct publish
     feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
   controller owner, payer
   do
-    -- 1. charge the current messageFee to payer through CoreState (§ Fees)
-    -- 2. assert payload length <= 750
+    -- 1. assert the field ranges and the payload encoding and length
+    -- 2. charge the current messageFee to payer through CoreState (§ Fees)
     -- 3. archive self; create the successor Emitter with sequence = sequence + 1
     -- 4. return WormholeMessage{registrar, owner, emitterId, sequence, nonce,
     --      payload, consistencyLevel} -- watcher derives the address
