@@ -71,6 +71,7 @@ Set `DB_PORT` to use a different port.
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
 | `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
 | `ntt_lib.sh` | Shared functions for the `ntt_*.sh` scripts. |
+| `ntt_offline_lib.sh` | NTT functions that `test/ntt_lib_test.sh` tests without LocalNet. |
 | `allocate_external_party.js` | Allocates a 1-of-1 Ed25519 external party. |
 
 ## Script tests
@@ -81,6 +82,7 @@ The script tests do not need Docker or LocalNet. Run each test from the reposito
 canton/localnet/test/bounded_run_test.sh
 canton/localnet/test/image_lock_test.sh
 canton/localnet/test/owner_signer_block_test.sh
+canton/localnet/test/ntt_lib_test.sh
 ```
 
 ## Prerequisites
