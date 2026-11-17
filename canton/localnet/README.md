@@ -601,13 +601,24 @@ Each harness reads as `guardianGovernance` on its own participant.
 | 2 | `vet-v7` | The script records the start offset of each host. Each host vets core 0.7.0, then `ntt` 0.3.0. |
 | 3 | `publish-v7` | One 0.7.0 `PublishMessage` and one 0.6.0 `PublishMessage` commit. Each `v6-<host>` observes the 0.6.0 message and drops the 0.7.0 message with a WARN log. The `canary`, pinned to 0.7.0, does the opposite. |
 | 4 | `ntt` | `ntt_e2e.sh` passes with `ntt` 0.3.0. Each NTT `PublishMessage` runs under 0.7.0 on each host. |
-| 5 | `gate` | Canary gate. The `canary` counter sum over all labels does not change in a quiet window of `QUIET_WINDOW_SECONDS` (20). The `canary` observes a control publish after the window. A scan of each host finds only the 0.6.0 publish of step 3. |
+| 5 | `gate` | Canary gate. The `canary` counter sum over all labels does not change in a quiet window of `QUIET_WINDOW_SECONDS` (20). A change starts the window again. The gate times out after `CANARY_GATE_MAX_SECONDS` (120). The `canary` observes a control publish after the window. A scan of each host to the control finds only the 0.6.0 publishes before the window. |
 | 6 | `unvet-v6` | Each host unvets core 0.6.0 and `ntt` 0.2.0 in one topology transaction. A 0.6.0 publish and an `ntt` 0.2.0 exercise fail at prepare. Drain gate: the script reads the synchronizer timeouts and waits. Each `v6-<host>` drops a 0.7.0 control publish. A scan of each host finds no 0.6.0 publish that its `v6` watcher did not observe. |
-| 7 | `switch-v7` | Each `v6-<host>` stops. On each host, the WARN logs, a scan from its start offset and the counter give the same dropped update ids. Each `v7-<host>` reobserves each of them. The three `v7` watchers agree. |
-| 8 | `enforce-v7` | 0.7.0 rejects a nonce above `uint32`. 0.6.0 accepts it while vetted, and fails after the unvet. The step can run again. |
+| 7 | `switch-v7` | Each `v6-<host>` stops. A 0.7.0 publish commits while no watcher runs. Each `v7-<host>` starts. On each host, a scan to the ledger end after the start gives the WARN log update ids and the gap publish. The counter labels are exactly 0.7.0. Each running `v7-<host>` gets these ids in its request file and reobserves each of them. The three `v7` watchers agree. |
+| 8 | `enforce-v7` | 0.7.0 rejects the nonces -1 and 4294967296. 0.7.0 commits the nonce 0. It also commits 4294967295. 0.6.0 accepts 4294967296 while vetted. After the unvet, it fails. The step can run again. |
 | 9 | `post-unvet` | Contracts from core 0.6.0 work under core 0.7.0. Contracts from `ntt` 0.2.0 work under `ntt` 0.3.0. `ntt_e2e.sh` passes. |
 | 10 | `rollback` | A watcher pinned to 0.6.0 reobserves a 0.6.0 update while no host vets 0.6.0. Then each host vets 0.6.0 and `ntt` 0.2.0 again. 0.6.0 exercises an `Emitter` from 0.7.0. `ntt` 0.2.0 exercises an `NttManager` from `ntt` 0.3.0. |
 | 11 | `restore` | Each host unvets core 0.6.0 and `ntt` 0.2.0 again. A 0.6.0 publish fails at prepare. |
+| A | `abort-v7` | After a gate timeout. Each host unvets core 0.7.0 and `ntt` 0.3.0 in one topology transaction. A 0.7.0 publish and an `ntt` 0.3.0 exercise fail at prepare. After the drain wait, each `v6-<host>` observes a 0.6.0 control. The scan to the control equals the WARN log ids of each `v6-<host>`. Each `v7-recovery-<host>` reobserves each 0.7.0 update. Each host reobserves the 0.6.0 publishes of the restart gap. |
+
+The sequence `abort-all` runs `prepare`, `observe-v6`, `vet-v7`, `publish-v7`, `gate` and `abort-v7`.
+The gate must time out at most 5 seconds after `CANARY_GATE_MAX_SECONDS`. The `canary` counter must grow.
+To get the timeout, set `CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS` to a value below `QUIET_WINDOW_SECONDS`:
+
+```bash
+CANARY_GATE_INJECTED_OLD_PUBLISH_INTERVAL_SECONDS=10 canton/localnet/core_upgrade_rehearsal.sh abort-all
+```
+
+The script then publishes under 0.6.0 every 10 seconds of the gate. This fault is for the rehearsal only.
 
 The `vet-v7` step vets `ntt` 0.3.0 `291fcf92` by package id on each host that has it.
 On each other host, it uploads `NTT_V3_DAR`. It stops if the DAR is a different package.

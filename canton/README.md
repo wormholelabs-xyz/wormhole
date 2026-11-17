@@ -992,226 +992,6 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 `--cantonRetiringPackageID`, `--cantonRetiringPackageAcceptedUntil`, and
 `--cantonRetiringPackageVersion` populate the other fields (§7.5).
 
----
-
-## 8. File map
-
-```
-canton/
-  README.md                      ← this document
-  multi-package.yaml             ← multi-package project (core + test)
-  Dockerfile                     ← devnet image (build DARs + run sandbox)
-  core/                          ← `wormhole-core` package (templates; NO daml-script)
-    daml.yaml
-    daml/Wormhole/Core/Bytes.daml
-    daml/Wormhole/Core/VAA.daml
-    daml/Wormhole/Core/GuardianSet.daml
-    daml/Wormhole/Core/State.daml
-    daml/Wormhole/Core/Replay.daml
-    daml/Wormhole/Core/Fees.daml ← CIP-0056 fee collection (chargeFee, §4.2)
-    daml/Wormhole/Core/Governance.daml
-    daml/Wormhole/Core/Setup.daml
-  dars/                          ← vendored token-standard interface DARs (provenance in dars/README.md)
-  test/                          ← `wormhole-core-test` package (Daml Scripts)
-    daml.yaml                    ← data-dependency on core's DAR + the interface DARs
-    daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
-    daml/Test/TestGuardianVisibility.daml ← guardianGovernance visibility/authority tests
-    daml/Test/TestReplay.daml    ← replay-trie tests + disclosure-service simulation (§4.6)
-    daml/Test/MockToken.daml     ← minimal CIP-0056 mock instrument for fee tests
-    daml/Test/TestFees.daml      ← fee-payment tests (§4.2)
-    daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
-  devnet/
-    start_sandbox.sh             ← starts the Ledger API v2 sandbox
-    bootstrap.sh                 ← allocates Operator + creates CoreState
-    wait_for_ledger.sh
-
-node/pkg/cantonclient/           ← Ledger API v2 gRPC client
-  proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.5.5)
-  proto/gen/                     ← generated Go stubs (buf generate)
-  vectorgen_test.go              ← Daml fixture drift guard (CANTON_VECTORGEN=write rewrites)
-node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
-  watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
-  core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
-sdk/vaa/structs.go               ← ChainIDCanton = 75
-devnet/canton-devnet.yaml        ← Tilt k8s manifest (sandbox + bootstrap)
-Tiltfile                         ← `canton` component (opt-in)
-```
-
-## 9. Local development
-
-This project uses the Canton Network
-[`dpm`](https://docs.canton.network/sdks-tools/cli-tools/dpm) toolchain (not the
-legacy `daml` assistant). It is a **multi-package** project
-([`multi-package.yaml`](multi-package.yaml)): `core` (the production
-`wormhole-core` templates — no `daml-script`) and `test` (`wormhole-core-test`,
-the Daml Scripts, with a data-dependency on core's DAR). Splitting keeps
-`daml-script` and the test code out of the production DAR.
-
-### Building & testing with `dpm`
-
-```bash
-# one-time: install the dpm CLI
-curl https://get.digitalasset.com/install/install.sh | sh
-
-cd canton
-dpm install 3.5.1                # fetch the pinned SDK (Daml-LF 2.3)
-dpm build --all                  # builds core, then test → *.daml/dist/*.dar
-cd test && dpm test --all --show-coverage   # run the Scripts + coverage
-```
-
-`dpm test` runs every `Script` in
-[`TestCore.daml`](test/daml/Test/TestCore.daml) on an in-memory ledger — no
-running sandbox required. The suite passes, including governance and VAA
-verification with a **real guardian-signed VAA** test vector (§5) and the
-owner-bound emitter address derivation pinned against the shared cross-language
-vector (`testAddressVector`). Note Daml coverage is **template/choice coverage
-only**; the pure parser / DER / governance
-helpers and the address encoding are additionally validated by Script
-_assertions_ and the signed-VAA / address vectors, not by the coverage metric.
-
-### Watcher integration test (dpm + Go)
-
-The watcher's real transport is covered end-to-end by a Go integration test,
-[`node/pkg/watchers/canton/watcher_integration_test.go`](../node/pkg/watchers/canton/watcher_integration_test.go)
-(`//go:build integration`):
-
-```
-go test -tags integration -run TestCantonWatcherIntegration ./pkg/watchers/canton -v
-```
-
-It builds the DAR, boots a `dpm sandbox`, publishes a message via
-`dpm script --upload-dar`, then connects the **real** `cantonclient` gRPC client
-(real Ledger API v2 protos) and asserts the published `WormholeMessage` is
-observed and mapped to a `common.MessagePublication`. It is skipped unless `dpm`
-(+ a JDK) is present and is excluded from the default build. Notes learned the
-hard way and baked into the test/devnet scripts: Canton's `sandbox` binds the
-Ledger API on **6865** and does not take `--dar`/`--port`; and `dpm script` needs
-**`--upload-dar`** so package vetting is synchronous (a bare upload races vetting
-→ `PACKAGE_SELECTION_FAILED`).
-
-### End-to-end with Tilt
-
-Canton is wired into [`Tiltfile`](../Tiltfile) as an **opt-in** component
-(`--canton`), mirroring the Sui setup:
-
-```
-tilt up -- --canton
-```
-
-This brings up:
-
-- a **`canton`** pod running a Canton **sandbox** (Ledger API v2 on `:6865`)
-  ([`devnet/start_sandbox.sh`](devnet/start_sandbox.sh));
-- a **`canton-contracts`** bootstrap step that uploads+vets the `wormhole-core`
-  DAR (`dpm script --upload-dar`), allocates the **Operator** party, and creates
-  the `CoreState` with the standard devnet guardian via `Test.TestCore:setup`
-  ([`devnet/bootstrap.sh`](devnet/bootstrap.sh)); and
-- the **guardian** configured with `--cantonRPC canton:6865` (no
-  `--cantonReadAsParty`: the watcher uses a wildcard "any party" filter, §7.1).
-
-### `guardianGovernance` external-party bootstrap
-
-[`devnet/setup_guardian_governance.sh`](devnet/setup_guardian_governance.sh) +
-[`devnet/guardian_governance.canton`](devnet/guardian_governance.canton) stand up
-`guardianGovernance` as an **external, decentralized-namespace party** — a
-namespace owned by three guardian keys with a 2-of-3 threshold, the same pattern
-the Canton Network DSO party uses (§10, §11 item 2). Concretely, the console
-script:
-
-1. self-signs a root `NamespaceDelegation` for each of the three owner keys;
-2. creates a `DecentralizedNamespaceDefinition` (2-of-3 threshold) over those
-   three owner namespaces, authorized by all three;
-3. allocates `guardianGovernance::<namespace>` under it and hosts it at
-   **Confirmation** permission, with the same three keys registered as its
-   threshold transaction-signing keys (`PartyToParticipant.partySigningKeys` —
-   the standalone `PartyToKeyMapping` was deprecated in Canton 3.4 in favor of
-   this); and
-4. writes an artifacts JSON (party id, decentralized-namespace id, owner
-   fingerprints/public-key paths, threshold) that is the handoff to submitting
-   the same topology to the CN global synchronizer later.
-
-Every topology transaction is built **unsigned**
-(`topology.transactions.generate`), signed by each owner's external signer, and
-only then submitted (`topology.transactions.load`) — the participant never holds
-an owner's private key, matching real guardian custody (HSM/KMS/offline signer).
-`devnet/guardian_key_tool.js` is a small Ed25519 keypair/signing helper (Node's
-built-in `crypto` module only, no dependencies) that stands in for that custody
-system locally; production wires `GG_OWNER_SIGN_ARGV_1/2/3` to the real one
-instead. Each is a JSON array of strings (program, then arguments), so no shell
-splits a key path (see the script's header for the full environment-variable contract).
-
-[`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
-exercises the resulting party: it prepares a `create CoreState` and a
-`create EmitterRegistry` command, one prepared transaction each (the prepare
-endpoint takes one command), co-signed by an external `operator` party and `guardianGovernance` (the
-interactive-submission equivalent of `Test.TestCore:setup`'s
-`submit (actAs operator <> actAs guardianGovernance)`), has owners sign the
-prepared
-transaction hash, and executes. It supports three modes — `happy` (2-of-3,
-succeeds), `threshold` (1-of-3, rejected), and `forge` (no guardianGovernance
-signature at all, rejected — the anti-forgery property from §10: a compromised
-operator cannot fabricate a `CoreState` bearing the real governance party).
-
-[`devnet/test_guardian_governance.sh`](devnet/test_guardian_governance.sh) runs
-all of the above against a fresh `dpm sandbox` and asserts the full table:
-namespace/threshold/hosting shape, and all three genesis modes' expected
-outcome.
-
-```bash
-canton/devnet/test_guardian_governance.sh
-```
-
-**Sandbox vs. CN fidelity.** The sandbox has no SVs or decentralized
-synchronizer, so "registering with the super-validators" cannot be exercised
-locally. That step is theoretical here by construction, not by omission: the
-decentralized namespace is guardian-owned, so SVs never approve it — CN
-"registration" is just (a) onboarding a participant to the CN global
-synchronizer (one-time, SV-sponsored validator onboarding) and (b) submitting
-the _same_ topology transactions this script builds to that synchronizer instead
-of the sandbox's, where they are sequenced and seen by all participants. The
-script is synchronizer-target-parameterized (`GG_SYNCHRONIZER_ALIAS`,
-`GG_CANTON_CONSOLE_CONFIG`) for exactly that reason, and the local run proves
-the namespace/party/threshold mechanics port unchanged.
-
-**Multi-participant hosting.** The dpm sandbox has one participant, so this
-script hosts the party on one participant only. The LocalNet runbook
-([`localnet/README.md`](localnet/README.md), section "guardianGovernance
-rehearsal on three participants") hosts `guardianGovernance` on three
-participants at `Confirmation` with a confirmation threshold of 2. The runbook
-also checks the confirmation quorum, the package vetting gate, a guardian set
-rotation and an owner key rotation.
-
-When `GG_HOSTING_PARTICIPANTS` names more than one participant,
-`GG_CONFIRMATION_THRESHOLD` is mandatory and must be a majority of the hosts.
-A threshold of 1 then lets one compromised host confirm for the party.
-With one host, the threshold is 1.
-
-Limits of the LocalNet rehearsal:
-
-- One container runs the three participants and the synchronizer.
-- The owner keys are files on the host, not keys in guardian custody.
-- The checks disconnect participants. They do not stop participant processes.
-
-### Status: opt-in while the k8s devnet path is validated
-
-Unlike Sui, the `canton` component is **not** enabled by `--ci`. The guardian
-builds the real client by default (no build tag) and the watcher needs no
-operator party id (wildcard filter), so there are no functional gates left — the
-main item to finish is:
-
-1. **Full k8s path validation.** Validated locally: the Go integration test (§9)
-   covers the watcher↔ledger path; the sandbox `0.0.0.0` bind
-   (`-C canton.participants.sandbox.ledger-api.address=0.0.0.0` → binds `*:6865`),
-   the bootstrap `dpm script --upload-dar` flow, and the same-pod localhost wiring
-   are all confirmed against a live `dpm sandbox`. What still needs a real cluster
-   run: the `canton-node` **image build** (`canton/Dockerfile`, which fetches dpm
-   and builds the DARs) and the **guardian connecting** to `canton:6865` across the
-   k8s Service.
-
-Today `--canton` stands up the **chain + contracts** for Daml-side development
-(iterating on the templates, `dpm test`); the watcher↔ledger path itself is
-covered by the integration test in §9.
-
 ### 7.5 Core package upgrades
 
 `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
@@ -1302,7 +1082,8 @@ the unvet and the switch makes sure that the watchers pinned to 0.6.0 read each
 2. Build each dependent package on 0.7.0. Upload and vet the new build on each
    informee participant.
 3. Tell integrators to submit with the 0.7.0 package id and the new dependent
-   package ids. Tell them the time of step 6. Refer to "Failure branches".
+   package ids. Tell them the time of step 6 and the maximum canary time.
+   Refer to "Failure branches" and "Maximum canary time".
 4. Start the canary. Refer to "Canary" below.
 5. Do the canary gate. Refer to "Canary gate" below.
 6. In one coordinated window, unvet 0.6.0 and each old dependent package on
@@ -1326,7 +1107,9 @@ the unvet and the switch makes sure that the watchers pinned to 0.6.0 read each
 
 **Signing outage in the canary window.** From step 1 to step 9, the guardian
 watchers stay pinned to 0.6.0. Thus no guardian signs a 0.7.0 message of this
-window. This includes each message of a dependent package on 0.7.0. The
+window. Step 1 starts the outage for each submission by package name, not only
+for dependent packages. A submission by package name selects 0.7.0 when each
+host vets 0.7.0. This includes each message of a dependent package on 0.7.0. The
 messages get VAAs only at step 11. Integrators see a delay, not a loss. Plan
 steps 1 to 11 as one short coordinated session. Decision U3 removes this
 outage. Refer to "Alternative" below.
@@ -1355,6 +1138,12 @@ It needs only `curl` and `jq`. A guardian runs it on its own participant:
 4. Keep each output line whose `executingPackageId` is not the 0.7.0 package
    id.
 
+The scan takes two more arguments: the end offset and a required update ID.
+Give the update ID of a control message at the end offset. The scan fails if
+its output does not contain the control message. A Ledger API response can end
+before the end offset, and the scan cannot see this from the offsets alone.
+Each `curl` call of the scan stops after `SCAN_CURL_MAX_SECONDS` (default 60).
+
 > **WARNING:** Do not start a second `guardiand` with the guardian key as a
 > canary. That node signs the messages of a package that the quorum did not
 > agree to. It also uses the gossip identity of the main node.
@@ -1369,7 +1158,43 @@ It needs only `curl` and `jq`. A guardian runs it on its own participant:
    message under 0.7.0. The canary must find it. Thus the canary read the
    ledger up to the end of the window.
 3. A scan from the start offset to the control message lists each publish
-   under a package other than 0.7.0. A VAA exists for each of them.
+   under a package other than 0.7.0. Give the control message as the required
+   update ID. A VAA exists for each publish of the list.
+
+A publish under a package other than 0.7.0 starts the quiet window again. The
+gate passes at the first complete quiet window that ends before the maximum
+canary time. If the maximum canary time ends first, the gate fails. Then do
+the abort procedure.
+
+**Maximum canary time.** The coordinator announces the maximum canary time at
+step 3. The time starts at step 1. Example: 72 hours. The maximum canary time
+must be shorter than the pruning retention of each guardian participant.
+
+**Abort procedure.** Use this procedure when the canary gate does not pass
+before the maximum canary time. The watchers stay pinned to 0.6.0.
+
+1. On each guardian participant, unvet 0.7.0 and each new dependent package in
+   one topology transaction. Keep 0.6.0 and the old dependent packages
+   vetted.
+2. Make sure that each guardian participant vets 0.6.0 and does not vet 0.7.0.
+3. Wait for the drain time of the drain gate: the sum of the three
+   synchronizer parameters and 30 seconds.
+4. Publish a control message under 0.6.0. Make sure that each guardian
+   watcher observes it. On each guardian participant, record its offset. This
+   is the abort offset.
+5. Scan from the start offset to the abort offset. Give the control message
+   as the required update ID. Keep each line with the 0.7.0 package id.
+6. A quorum of guardians sets `--cantonPackageID` to the 0.7.0 package id and
+   restarts. Send a reobservation request for each update ID of step 5.
+7. When each VAA exists, set `--cantonPackageID` to the 0.6.0 package id and
+   restart.
+8. Scan for 0.6.0 `PublishMessage` updates from the restart of step 6 to the
+   ledger end after step 7. Send a reobservation request for each of them.
+9. Tell the integrators that the upgrade stopped. A 0.7.0 submission now fails
+   at prepare.
+
+Contracts that 0.7.0 or a new dependent package created stay usable under
+0.6.0. The LocalNet `rollback` step shows this.
 
 **Drain gate.** A request with a sequencing time before the unvet can commit
 after the unvet. The participant gives it an offset after the unvet. The
@@ -1389,8 +1214,9 @@ switch first, no watcher reads it. The gate replaces a fixed wait:
    before the control message.
 6. On each guardian participant, record the offset of the control message.
    This is the gate offset.
-7. Scan from the start offset to the gate offset. Keep each publish under
-   0.6.0. Make sure that the guardian observed each of them.
+7. Scan from the start offset to the gate offset. Give the control message as
+   the required update ID. Keep each publish under 0.6.0. Make sure that the
+   guardian observed each of them.
 
 The values on LocalNet (Canton 3.7.3, Splice 0.10.2) are:
 
@@ -1459,9 +1285,11 @@ procedure in this order.
    field holds the update id. Its `executingPackageId` field holds the 0.7.0
    package id.
 2. A scan of the ledger with `tools/publish_message_scan.sh` from the start
-   offset to the current ledger end. Keep each line with the 0.7.0 package id.
+   offset to the ledger end after the restart of step 9. Keep each line with
+   the 0.7.0 package id.
 
-The scan also covers the restart window. A user with only
+The scan also covers the restart window. The scan set must contain the WARN
+log set. The difference is the 0.7.0 messages of the restart window. A user with only
 `CanReadAs(guardianGovernance)` can do the scan. Also scan for 0.6.0
 `PublishMessage` updates from the gate offset to the current ledger end. The
 result must be empty.
@@ -1477,6 +1305,11 @@ elements (201) is greater than the node limit (200)`. The script reads pages
 of `SCAN_PAGE_SIZE` updates (default 200). It continues after the last offset
 of each full page. Set `SCAN_PAGE_SIZE` to a value that is not more than the
 node limit of your participant.
+
+**Open item:** the behavior of the server when its stream idle timeout ends
+before the end offset. The LocalNet measurement with
+`stream_idle_timeout_ms=1` is not done. Until then, give a required update ID
+to each scan.
 
 **Rollback.** A rollback to 0.6.0 is the same procedure with the two versions
 in the opposite roles. The guardians re-vet 0.6.0 and the old dependent
@@ -1495,8 +1328,11 @@ after the unvet of 0.6.0 and `ntt` 0.2.0. Results:
   publish fails at prepare.
 
 **Point of no return.** The 0.6.0 and 0.7.0 templates have the same fields,
-and `ntt` 0.2.0 reads each `ntt` 0.3.0 contract. Thus this upgrade has no
-technical point of no return. These limits apply:
+and `ntt` 0.2.0 reads each `ntt` 0.3.0 contract. Thus the upgrade from 0.6.0
+to 0.7.0 has no technical point of no return. 0.8.0 is different: it starts
+from a fresh genesis, and a 0.8.0 `EmitterRegistry` or `Emitter` cannot run
+under 0.7.0. Thus no rollback from 0.8.0 to 0.7.0 exists. These limits apply
+to an upgrade that keeps the signatories:
 
 - A later version can add an optional field. When a contract gets a value in
   that field, the old version cannot use the contract. That contract is the
@@ -1508,7 +1344,12 @@ technical point of no return. These limits apply:
 **LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` runs this
 procedure on three `guardianGovernance` hosts (`localnet/README.md`). Each
 LocalNet participant hosts `guardianGovernance`, so each participant is a
-guardian participant and an informee participant. Results:
+guardian participant and an informee participant. The sequence `abort-all`
+runs the abort procedure. The rehearsal needs a LocalNet from before the 0.8.0
+genesis (`localnet/README.md`, "Scope with `wormhole-core` 0.8.0"). The results
+below are from the run at commit `395103f5e`. That run had no maximum canary
+time, no abort procedure, no required update ID and no publish in the restart
+window. Results:
 
 - Before the unvet, a 0.6.0 publish and a 0.7.0 publish commit in the same
   window. The watcher pinned to 0.6.0 observes the 0.6.0 message, and drops,
@@ -1544,8 +1385,9 @@ guardian participant and an informee participant. Results:
 > version that is not the newest vetted version.
 
 **Alternative.** Decision U3 is a watcher that accepts two package ids in the
-migration window. The next section gives that procedure. Then the upgrade has
-no signing outage, no drain gate and no coordinated restart.
+migration window. The next section gives that procedure. Each guardian accepts
+both versions before step 1. Then the upgrade has no signing outage, no drain
+gate and no coordinated restart.
 
 #### Upgrade with a two-package window (proposal U3)
 
@@ -1809,6 +1651,226 @@ Known limits:
 > the retiring core can publish on an emitter that the current core wrote
 > last. The two versions in that test have the same code. Do a rollback test
 > on a test network before you use this rollback.
+
+---
+
+## 8. File map
+
+```
+canton/
+  README.md                      ← this document
+  multi-package.yaml             ← multi-package project (core + test)
+  Dockerfile                     ← devnet image (build DARs + run sandbox)
+  core/                          ← `wormhole-core` package (templates; NO daml-script)
+    daml.yaml
+    daml/Wormhole/Core/Bytes.daml
+    daml/Wormhole/Core/VAA.daml
+    daml/Wormhole/Core/GuardianSet.daml
+    daml/Wormhole/Core/State.daml
+    daml/Wormhole/Core/Replay.daml
+    daml/Wormhole/Core/Fees.daml ← CIP-0056 fee collection (chargeFee, §4.2)
+    daml/Wormhole/Core/Governance.daml
+    daml/Wormhole/Core/Setup.daml
+  dars/                          ← vendored token-standard interface DARs (provenance in dars/README.md)
+  test/                          ← `wormhole-core-test` package (Daml Scripts)
+    daml.yaml                    ← data-dependency on core's DAR + the interface DARs
+    daml/Test/TestCore.daml      ← unit tests + devnet `setup` / `integrationPublish`
+    daml/Test/TestGuardianVisibility.daml ← guardianGovernance visibility/authority tests
+    daml/Test/TestReplay.daml    ← replay-trie tests + disclosure-service simulation (§4.6)
+    daml/Test/MockToken.daml     ← minimal CIP-0056 mock instrument for fee tests
+    daml/Test/TestFees.daml      ← fee-payment tests (§4.2)
+    daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
+  devnet/
+    start_sandbox.sh             ← starts the Ledger API v2 sandbox
+    bootstrap.sh                 ← allocates Operator + creates CoreState
+    wait_for_ledger.sh
+
+node/pkg/cantonclient/           ← Ledger API v2 gRPC client
+  proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.5.5)
+  proto/gen/                     ← generated Go stubs (buf generate)
+  vectorgen_test.go              ← Daml fixture drift guard (CANTON_VECTORGEN=write rewrites)
+node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
+  watcher_integration_test.go    ← dpm-driven end-to-end test (integration tag)
+  core_verify_vaa_integration_test.go ← ParseAndVerifyVAA by a non-stakeholder external party (integration tag)
+sdk/vaa/structs.go               ← ChainIDCanton = 75
+devnet/canton-devnet.yaml        ← Tilt k8s manifest (sandbox + bootstrap)
+Tiltfile                         ← `canton` component (opt-in)
+```
+
+## 9. Local development
+
+This project uses the Canton Network
+[`dpm`](https://docs.canton.network/sdks-tools/cli-tools/dpm) toolchain (not the
+legacy `daml` assistant). It is a **multi-package** project
+([`multi-package.yaml`](multi-package.yaml)): `core` (the production
+`wormhole-core` templates — no `daml-script`) and `test` (`wormhole-core-test`,
+the Daml Scripts, with a data-dependency on core's DAR). Splitting keeps
+`daml-script` and the test code out of the production DAR.
+
+### Building & testing with `dpm`
+
+```bash
+# one-time: install the dpm CLI
+curl https://get.digitalasset.com/install/install.sh | sh
+
+cd canton
+dpm install 3.5.1                # fetch the pinned SDK (Daml-LF 2.3)
+dpm build --all                  # builds core, then test → *.daml/dist/*.dar
+cd test && dpm test --all --show-coverage   # run the Scripts + coverage
+```
+
+`dpm test` runs every `Script` in
+[`TestCore.daml`](test/daml/Test/TestCore.daml) on an in-memory ledger — no
+running sandbox required. The suite passes, including governance and VAA
+verification with a **real guardian-signed VAA** test vector (§5) and the
+owner-bound emitter address derivation pinned against the shared cross-language
+vector (`testAddressVector`). Note Daml coverage is **template/choice coverage
+only**; the pure parser / DER / governance
+helpers and the address encoding are additionally validated by Script
+_assertions_ and the signed-VAA / address vectors, not by the coverage metric.
+
+### Watcher integration test (dpm + Go)
+
+The watcher's real transport is covered end-to-end by a Go integration test,
+[`node/pkg/watchers/canton/watcher_integration_test.go`](../node/pkg/watchers/canton/watcher_integration_test.go)
+(`//go:build integration`):
+
+```
+go test -tags integration -run TestCantonWatcherIntegration ./pkg/watchers/canton -v
+```
+
+It builds the DAR, boots a `dpm sandbox`, publishes a message via
+`dpm script --upload-dar`, then connects the **real** `cantonclient` gRPC client
+(real Ledger API v2 protos) and asserts the published `WormholeMessage` is
+observed and mapped to a `common.MessagePublication`. It is skipped unless `dpm`
+(+ a JDK) is present and is excluded from the default build. Notes learned the
+hard way and baked into the test/devnet scripts: Canton's `sandbox` binds the
+Ledger API on **6865** and does not take `--dar`/`--port`; and `dpm script` needs
+**`--upload-dar`** so package vetting is synchronous (a bare upload races vetting
+→ `PACKAGE_SELECTION_FAILED`).
+
+### End-to-end with Tilt
+
+Canton is wired into [`Tiltfile`](../Tiltfile) as an **opt-in** component
+(`--canton`), mirroring the Sui setup:
+
+```
+tilt up -- --canton
+```
+
+This brings up:
+
+- a **`canton`** pod running a Canton **sandbox** (Ledger API v2 on `:6865`)
+  ([`devnet/start_sandbox.sh`](devnet/start_sandbox.sh));
+- a **`canton-contracts`** bootstrap step that uploads+vets the `wormhole-core`
+  DAR (`dpm script --upload-dar`), allocates the **Operator** party, and creates
+  the `CoreState` with the standard devnet guardian via `Test.TestCore:setup`
+  ([`devnet/bootstrap.sh`](devnet/bootstrap.sh)); and
+- the **guardian** configured with `--cantonRPC canton:6865` (no
+  `--cantonReadAsParty`: the watcher uses a wildcard "any party" filter, §7.1).
+
+### `guardianGovernance` external-party bootstrap
+
+[`devnet/setup_guardian_governance.sh`](devnet/setup_guardian_governance.sh) +
+[`devnet/guardian_governance.canton`](devnet/guardian_governance.canton) stand up
+`guardianGovernance` as an **external, decentralized-namespace party** — a
+namespace owned by three guardian keys with a 2-of-3 threshold, the same pattern
+the Canton Network DSO party uses (§10, §11 item 2). Concretely, the console
+script:
+
+1. self-signs a root `NamespaceDelegation` for each of the three owner keys;
+2. creates a `DecentralizedNamespaceDefinition` (2-of-3 threshold) over those
+   three owner namespaces, authorized by all three;
+3. allocates `guardianGovernance::<namespace>` under it and hosts it at
+   **Confirmation** permission, with the same three keys registered as its
+   threshold transaction-signing keys (`PartyToParticipant.partySigningKeys` —
+   the standalone `PartyToKeyMapping` was deprecated in Canton 3.4 in favor of
+   this); and
+4. writes an artifacts JSON (party id, decentralized-namespace id, owner
+   fingerprints/public-key paths, threshold) that is the handoff to submitting
+   the same topology to the CN global synchronizer later.
+
+Every topology transaction is built **unsigned**
+(`topology.transactions.generate`), signed by each owner's external signer, and
+only then submitted (`topology.transactions.load`) — the participant never holds
+an owner's private key, matching real guardian custody (HSM/KMS/offline signer).
+`devnet/guardian_key_tool.js` is a small Ed25519 keypair/signing helper (Node's
+built-in `crypto` module only, no dependencies) that stands in for that custody
+system locally; production wires `GG_OWNER_SIGN_ARGV_1/2/3` to the real one
+instead. Each is a JSON array of strings (program, then arguments), so no shell
+splits a key path (see the script's header for the full environment-variable contract).
+
+[`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
+exercises the resulting party: it prepares a `create CoreState` and a
+`create EmitterRegistry` command, one prepared transaction each (the prepare
+endpoint takes one command), co-signed by an external `operator` party and `guardianGovernance` (the
+interactive-submission equivalent of `Test.TestCore:setup`'s
+`submit (actAs operator <> actAs guardianGovernance)`), has owners sign the
+prepared
+transaction hash, and executes. It supports three modes — `happy` (2-of-3,
+succeeds), `threshold` (1-of-3, rejected), and `forge` (no guardianGovernance
+signature at all, rejected — the anti-forgery property from §10: a compromised
+operator cannot fabricate a `CoreState` bearing the real governance party).
+
+[`devnet/test_guardian_governance.sh`](devnet/test_guardian_governance.sh) runs
+all of the above against a fresh `dpm sandbox` and asserts the full table:
+namespace/threshold/hosting shape, and all three genesis modes' expected
+outcome.
+
+```bash
+canton/devnet/test_guardian_governance.sh
+```
+
+**Sandbox vs. CN fidelity.** The sandbox has no SVs or decentralized
+synchronizer, so "registering with the super-validators" cannot be exercised
+locally. That step is theoretical here by construction, not by omission: the
+decentralized namespace is guardian-owned, so SVs never approve it — CN
+"registration" is just (a) onboarding a participant to the CN global
+synchronizer (one-time, SV-sponsored validator onboarding) and (b) submitting
+the _same_ topology transactions this script builds to that synchronizer instead
+of the sandbox's, where they are sequenced and seen by all participants. The
+script is synchronizer-target-parameterized (`GG_SYNCHRONIZER_ALIAS`,
+`GG_CANTON_CONSOLE_CONFIG`) for exactly that reason, and the local run proves
+the namespace/party/threshold mechanics port unchanged.
+
+**Multi-participant hosting.** The dpm sandbox has one participant, so this
+script hosts the party on one participant only. The LocalNet runbook
+([`localnet/README.md`](localnet/README.md), section "guardianGovernance
+rehearsal on three participants") hosts `guardianGovernance` on three
+participants at `Confirmation` with a confirmation threshold of 2. The runbook
+also checks the confirmation quorum, the package vetting gate, a guardian set
+rotation and an owner key rotation.
+
+When `GG_HOSTING_PARTICIPANTS` names more than one participant,
+`GG_CONFIRMATION_THRESHOLD` is mandatory and must be a majority of the hosts.
+A threshold of 1 then lets one compromised host confirm for the party.
+With one host, the threshold is 1.
+
+Limits of the LocalNet rehearsal:
+
+- One container runs the three participants and the synchronizer.
+- The owner keys are files on the host, not keys in guardian custody.
+- The checks disconnect participants. They do not stop participant processes.
+
+### Status: opt-in while the k8s devnet path is validated
+
+Unlike Sui, the `canton` component is **not** enabled by `--ci`. The guardian
+builds the real client by default (no build tag) and the watcher needs no
+operator party id (wildcard filter), so there are no functional gates left — the
+main item to finish is:
+
+1. **Full k8s path validation.** Validated locally: the Go integration test (§9)
+   covers the watcher↔ledger path; the sandbox `0.0.0.0` bind
+   (`-C canton.participants.sandbox.ledger-api.address=0.0.0.0` → binds `*:6865`),
+   the bootstrap `dpm script --upload-dar` flow, and the same-pod localhost wiring
+   are all confirmed against a live `dpm sandbox`. What still needs a real cluster
+   run: the `canton-node` **image build** (`canton/Dockerfile`, which fetches dpm
+   and builds the DARs) and the **guardian connecting** to `canton:6865` across the
+   k8s Service.
+
+Today `--canton` stands up the **chain + contracts** for Daml-side development
+(iterating on the templates, `dpm test`); the watcher↔ledger path itself is
+covered by the integration test in §9.
 
 ---
 
