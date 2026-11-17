@@ -102,31 +102,35 @@ run_harness_on() {
   local validator_name="$1" name="$2" core_package_id="$3" reobserve_update_ids="$4" max_seconds="$5" waited_seconds
   local token_file="$WATCHER_DIR/$name.jwt"
   ensure_watcher_user "$validator_name"
-  rm -f "$WATCHER_DIR/$name.ready" "$WATCHER_DIR/$name.stop" "$WATCHER_DIR/$name.jsonl" "$WATCHER_DIR/$name.metrics.json" \
-    "$WATCHER_DIR/watcher.jwt"
+  rm -f "$WATCHER_DIR/$name".{ready,stop,jsonl,metrics.json,pid,exit} "$WATCHER_DIR/watcher.jwt"
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$token_file")
-  CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
-  CANTON_LOCALNET_TOKEN_FILE="$token_file" \
-  CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
-  CANTON_LOCALNET_CORE_PACKAGE_ID="$core_package_id" \
-  CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
-  CANTON_LOCALNET_METRICS_FILE="$WATCHER_DIR/$name.metrics.json" \
-  CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
-  CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \
-  CANTON_LOCALNET_REOBSERVE_UPDATE_IDS="$reobserve_update_ids" \
-  CANTON_LOCALNET_MAX_SECONDS="$max_seconds" \
-    nohup "$(harness_binary)" -test.run TestCantonWatcherLocalNet -test.v > "$WATCHER_DIR/$name.log" 2>&1 &
-  echo $! > "$WATCHER_DIR/$name.pid"
+  (
+    CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
+    CANTON_LOCALNET_TOKEN_FILE="$token_file" \
+    CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
+    CANTON_LOCALNET_CORE_PACKAGE_ID="$core_package_id" \
+    CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
+    CANTON_LOCALNET_METRICS_FILE="$WATCHER_DIR/$name.metrics.json" \
+    CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
+    CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \
+    CANTON_LOCALNET_REOBSERVE_UPDATE_IDS="$reobserve_update_ids" \
+    CANTON_LOCALNET_MAX_SECONDS="$max_seconds" \
+      nohup "$(harness_binary)" -test.run TestCantonWatcherLocalNet -test.v > "$WATCHER_DIR/$name.log" 2>&1 &
+    echo $! > "$WATCHER_DIR/$name.pid"
+    harness_exit_status=0
+    wait $! || harness_exit_status=$?
+    echo "$harness_exit_status" > "$WATCHER_DIR/$name.exit"
+  ) &
   STARTED_HARNESS_NAMES+=("$name")
   for ((waited_seconds = 0; waited_seconds < HARNESS_READY_SECONDS; waited_seconds++)); do
     if [[ -f "$WATCHER_DIR/$name.ready" ]]; then
       rm -f "$token_file"
-      echo "watcher harness $name streams from $validator_name as $WATCHER_USER_ID, pinned to ${core_package_id:0:12} (pid $(cat "$WATCHER_DIR/$name.pid"))"
+      echo "watcher harness $name streams from $validator_name as $WATCHER_USER_ID, pinned to ${core_package_id:0:12} (pid $(cat "$WATCHER_DIR/$name.pid" 2>/dev/null))"
       return 0
     fi
-    if ! kill -0 "$(cat "$WATCHER_DIR/$name.pid")" 2>/dev/null; then
+    if [[ -f "$WATCHER_DIR/$name.exit" ]]; then
       rm -f "$token_file"
-      echo "watcher harness $name exited; log: $WATCHER_DIR/$name.log" >&2
+      echo "watcher harness $name exited with status $(cat "$WATCHER_DIR/$name.exit"); log: $WATCHER_DIR/$name.log" >&2
       tail -n 20 "$WATCHER_DIR/$name.log" >&2
       return 1
     fi
@@ -137,20 +141,20 @@ run_harness_on() {
   return 1
 }
 
-# stop_harness <name>: create the stop file and wait for a clean exit.
+# stop_harness <name>: create the stop file and wait for exit status 0 and a PASS line in the log.
 stop_harness() {
-  local name="$1" harness_pid waited_seconds
-  harness_pid="$(cat "$WATCHER_DIR/$name.pid")"
+  local name="$1" waited_seconds harness_exit_status
   touch "$WATCHER_DIR/$name.stop"
   for ((waited_seconds = 0; waited_seconds < HARNESS_STOP_SECONDS; waited_seconds++)); do
-    if ! kill -0 "$harness_pid" 2>/dev/null; then
+    if [[ -f "$WATCHER_DIR/$name.exit" ]]; then
       forget_started_harness "$name"
-      if grep -q '^--- PASS: TestCantonWatcherLocalNet' "$WATCHER_DIR/$name.log"; then
+      harness_exit_status="$(cat "$WATCHER_DIR/$name.exit")"
+      if [[ "$harness_exit_status" == "0" ]] && grep -q '^--- PASS: TestCantonWatcherLocalNet' "$WATCHER_DIR/$name.log"; then
         echo "watcher harness $name stopped: $(wc -l < "$WATCHER_DIR/$name.jsonl" | tr -d ' ') observations, unpinned publishes $(cat "$WATCHER_DIR/$name.metrics.json")"
         return 0
       fi
-      echo "watcher harness $name failed; log: $WATCHER_DIR/$name.log" >&2
-      grep -E -- '--- FAIL|Error' "$WATCHER_DIR/$name.log" | head -n 20 >&2
+      echo "watcher harness $name failed with status $harness_exit_status; log: $WATCHER_DIR/$name.log" >&2
+      grep -E -- '--- (FAIL|SKIP)|Error' "$WATCHER_DIR/$name.log" | head -n 20 >&2
       return 1
     fi
     sleep 1

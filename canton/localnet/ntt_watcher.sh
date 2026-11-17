@@ -5,7 +5,7 @@
 #   ntt_watcher.sh start      Build the harness and start it in the background. Returns when it streams.
 #   ntt_watcher.sh stop       Stop the background harness.
 #   ntt_watcher.sh check      Check the live observations against ntt-contracts.json.
-#   ntt_watcher.sh reobserve  Reobserve the recorded outbound transfers and check them.
+#   ntt_watcher.sh reobserve  Reobserve the recorded outbound transfers on app-provider and on sv, and check them.
 # Precondition for check and reobserve: ntt_burn_mint.sh and ntt_lock_unlock.sh ran.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
@@ -62,11 +62,14 @@ case "${1:-}" in
     burn_update_id="$(jq -er .burnMint.burnUpdateId "$NTT_CONTRACTS")"
     lock_update_id="$(jq -er .lockUnlock.lockUpdateId "$NTT_CONTRACTS")"
     echo "reobservation update ids: burn $burn_update_id, lock $lock_update_id"
-    run_harness reobserve "$CORE_PACKAGE_ID" "$burn_update_id,$lock_update_id" 300
-    stop_harness reobserve
-    check_harness_reobservation_errors reobserve
-    check_deployment "$WATCHER_DIR/reobserve.jsonl" burnMint burnMessage true
-    check_deployment "$WATCHER_DIR/reobserve.jsonl" lockUnlock lockMessage true
+    # The update id is the same on each participant, so a request from one guardian works on another.
+    for reobserving_validator in "$SUBMITTING_VALIDATOR" sv; do
+      run_harness_on "$reobserving_validator" "reobserve-$reobserving_validator" "$CORE_PACKAGE_ID" "$burn_update_id,$lock_update_id" 300
+      stop_harness "reobserve-$reobserving_validator"
+      check_harness_reobservation_errors "reobserve-$reobserving_validator"
+      check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" burnMint burnMessage true
+      check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" lockUnlock lockMessage true
+    done
     ;;
   *)
     echo "usage: ntt_watcher.sh start|stop|check|reobserve" >&2
