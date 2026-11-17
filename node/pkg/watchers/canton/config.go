@@ -42,6 +42,8 @@ type WatcherConfig struct {
 	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
 	// party on the participant.
 	ReadAsParty string
+	// approvedCorePackages overrides cantonclient.DefaultApprovedCorePackages in tests.
+	approvedCorePackages *cantonclient.ApprovedCorePackages
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
 	// All three fields set enables per-RPC bearer tokens; all empty disables
 	// authentication; anything else is a configuration error. Requires TLS,
@@ -87,6 +89,16 @@ func (wc *WatcherConfig) Create(
 	}
 	if !devMode && acceptedPackageIDs.MatchesAnyPackage() {
 		return nil, nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
+	}
+	// SECURITY: outside unsafe dev mode only reviewed core releases can be pinned.
+	if !devMode {
+		approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
+		if wc.approvedCorePackages != nil {
+			approvedCorePackages = *wc.approvedCorePackages
+		}
+		if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
+			return nil, nil, fmt.Errorf("canton: %w", err)
+		}
 	}
 
 	// SECURITY: outside unsafe dev mode the stream MUST be narrowed to the
