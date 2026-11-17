@@ -11,10 +11,13 @@ import (
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/grpc"
 )
 
@@ -184,13 +187,16 @@ func (f *fakeClient) subscribeArgs() (int64, cantonclient.TemplateID, string) {
 	return f.subBegin, f.subTmpl, f.subChoice
 }
 
-func testWatcher(msgC chan<- *common.MessagePublication) *Watcher {
-	return NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), "Operator::ns", AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+func testWatcher(t *testing.T, msgC chan<- *common.MessagePublication) *Watcher {
+	t.Helper()
+	w, err := NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), "Operator::ns", AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+	require.NoError(t, err)
+	return w
 }
 
 func TestProcessMessageBuildsObservation(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
-	w := testWatcher(msgC)
+	w := testWatcher(t, msgC)
 
 	ts := time.Unix(1_700_000_000, 0).UTC()
 	w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
@@ -227,7 +233,7 @@ func TestProcessMessageDropsMissingKeyParty(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 1)
-			w := testWatcher(msgC)
+			w := testWatcher(t, msgC)
 
 			w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
 				ParticipantOffset: 1,
@@ -265,7 +271,7 @@ func TestDeriveEmitterAddressMatchesVector(t *testing.T) {
 // Participants assign different offsets to one update; guardians must agree on its TxID.
 func TestProcessMessageTxIDIsIndependentOfParticipantOffset(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 3)
-	w := testWatcher(msgC)
+	w := testWatcher(t, msgC)
 	for _, participantOffset := range []int64{590, 762, 1381} {
 		w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
 			ParticipantOffset: participantOffset,
@@ -283,7 +289,7 @@ func TestProcessMessageTxIDIsIndependentOfParticipantOffset(t *testing.T) {
 
 func TestProcessMessageDropsZeroUpdateID(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
-	w := testWatcher(msgC)
+	w := testWatcher(t, msgC)
 	w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
 		ParticipantOffset: 1,
 		EffectiveAt:       time.Unix(1, 0),
@@ -299,7 +305,7 @@ func TestProcessMessageDropsZeroUpdateID(t *testing.T) {
 
 func TestHandleReobservation(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
-	w := testWatcher(msgC)
+	w := testWatcher(t, msgC)
 
 	reobsUpdateID := mustParseUpdateID(reobsUpdateIDHex)
 	client := newFakeClient()
@@ -344,7 +350,7 @@ func TestHandleReobservationRejectsMalformedTxHash(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 1)
-			w := testWatcher(msgC)
+			w := testWatcher(t, msgC)
 			client := newFakeClient()
 			w.handleReobservation(context.Background(), zap.NewNop(), client, &gossipv1.ObservationRequest{
 				ChainId: uint32(vaa.ChainIDCanton),
@@ -358,7 +364,7 @@ func TestHandleReobservationRejectsMalformedTxHash(t *testing.T) {
 
 func TestHandleReobservationRejectsMismatchedUpdateID(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
-	w := testWatcher(msgC)
+	w := testWatcher(t, msgC)
 	requestedUpdateID := mustParseUpdateID(reobsUpdateIDHex)
 	client := newFakeClient()
 	client.byUpdateID[requestedUpdateID] = cantonclient.CantonTransaction{
@@ -375,7 +381,7 @@ func TestHandleReobservationRejectsMismatchedUpdateID(t *testing.T) {
 }
 
 func TestHandleReobservationWrongChainPanics(t *testing.T) {
-	w := testWatcher(make(chan *common.MessagePublication, 1))
+	w := testWatcher(t, make(chan *common.MessagePublication, 1))
 	require.Panics(t, func() {
 		w.handleReobservation(context.Background(), zap.NewNop(), newFakeClient(), &gossipv1.ObservationRequest{
 			ChainId: uint32(vaa.ChainIDEthereum),
@@ -401,7 +407,8 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewWatcher("localhost:0", cantonclient.AcceptAnyPackageID(), "", tc.auth, tc.unsafeDevMode, nil, nil)
+			w, err := NewWatcher("localhost:0", testUpgradeWindowPackageIDs(t), "", tc.auth, tc.unsafeDevMode, nil, nil)
+			require.NoError(t, err)
 			w.extraLedgerDialOpts = tc.extraDialOpts
 			dialOpts := w.cantonDialOpts(context.Background())
 			require.Len(t, dialOpts, tc.wantDialOptsCount)
@@ -409,6 +416,113 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 				assert.Same(t, extraLedgerDialOpt, dialOpts[0])
 			}
 			assert.Len(t, w.extraLedgerDialOpts, len(tc.extraDialOpts), "cantonDialOpts must not grow the watcher's extras")
+		})
+	}
+}
+
+func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
+	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testPrimaryPackageID, "")
+	require.NoError(t, err)
+	cases := []struct {
+		name               string
+		acceptedPackageIDs cantonclient.AcceptedPackageIDs
+		unsafeDevMode      bool
+		wantErr            string
+	}{
+		{name: "wildcard in dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), unsafeDevMode: true},
+		{name: "wildcard outside dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), wantErr: "unsafe dev mode only"},
+		{name: "pinned outside dev mode", acceptedPackageIDs: primaryOnlyPackageIDs},
+		{name: "upgrade window outside dev mode", acceptedPackageIDs: testUpgradeWindowPackageIDs(t)},
+		{name: "empty set outside dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, wantErr: "no accepted"},
+		{name: "empty set in dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, unsafeDevMode: true, wantErr: "no accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, err := NewWatcher("canton:0", tc.acceptedPackageIDs, "", AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, w)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, w)
+		})
+	}
+}
+
+func TestRunRefusesWildcardOutsideDevMode(t *testing.T) {
+	fake := newFakeClient()
+	w := &Watcher{acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), unsafeDevMode: false, cantonClient: fake}
+
+	err := w.Run(context.Background())
+
+	require.ErrorContains(t, err, "unsafe dev mode only")
+	assert.Zero(t, fake.subscribeCount())
+}
+
+// acceptedPackageIDSeries returns wormhole_canton_accepted_package_ids as role -> package id for series set to 1.
+func acceptedPackageIDSeries(t *testing.T) map[string]string {
+	t.Helper()
+	metricFamilies, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	series := map[string]string{}
+	for _, metricFamily := range metricFamilies {
+		if metricFamily.GetName() != "wormhole_canton_accepted_package_ids" {
+			continue
+		}
+		for _, metric := range metricFamily.GetMetric() {
+			require.Equal(t, float64(1), metric.GetGauge().GetValue())
+			labels := map[string]string{}
+			for _, label := range metric.GetLabel() {
+				labels[label.GetName()] = label.GetValue()
+			}
+			series[labels["role"]] = labels["package_id"]
+		}
+	}
+	return series
+}
+
+func TestReportAcceptedPackageIDs(t *testing.T) {
+	primaryOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(testPrimaryPackageID, "")
+	require.NoError(t, err)
+	cases := []struct {
+		name                     string
+		acceptedPackageIDs       cantonclient.AcceptedPackageIDs
+		wantSeries               map[string]string
+		wantUpgradeWindowWarning bool
+	}{
+		{
+			name:                     "upgrade window",
+			acceptedPackageIDs:       testUpgradeWindowPackageIDs(t),
+			wantSeries:               map[string]string{"primary": testPrimaryPackageID, "next": testNextPackageID},
+			wantUpgradeWindowWarning: true,
+		},
+		{
+			name:               "primary only replaces the window series",
+			acceptedPackageIDs: primaryOnlyPackageIDs,
+			wantSeries:         map[string]string{"primary": testPrimaryPackageID},
+		},
+		{
+			name:               "dev-mode wildcard",
+			acceptedPackageIDs: cantonclient.AcceptAnyPackageID(),
+			wantSeries:         map[string]string{"primary": "*"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			core, logs := observer.New(zapcore.WarnLevel)
+
+			reportAcceptedPackageIDs(zap.New(core), tc.acceptedPackageIDs)
+
+			assert.Equal(t, tc.wantSeries, acceptedPackageIDSeries(t))
+			if !tc.wantUpgradeWindowWarning {
+				assert.Zero(t, logs.Len())
+				return
+			}
+			require.Equal(t, 1, logs.Len())
+			fields := logs.All()[0].ContextMap()
+			assert.Equal(t, testPrimaryPackageID, fields["primaryPackageId"])
+			assert.Equal(t, testNextPackageID, fields["nextPackageId"])
 		})
 	}
 }

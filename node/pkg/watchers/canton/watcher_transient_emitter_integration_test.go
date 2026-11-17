@@ -73,7 +73,8 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	transientPublishRecorder := &witnessOnlyPublishRecorder{}
 	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(corePackageID, "")
 	require.NoError(t, err)
-	w := NewWatcher("localhost:"+port, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	w, err := NewWatcher("localhost:"+port, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	require.NoError(t, err)
 	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithChainStreamInterceptor(
 		streamRecorder.interceptGetUpdates, transientPublishRecorder.interceptGetUpdates)}
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {

@@ -2,12 +2,15 @@
 -- (node/pkg/watchers/canton/watcher_upgrade_window_integration_test.go). The
 -- test runs 'integrationUpgradeWindowPublish' once from this DAR and once from
 -- a copy built against the next core version, so each publish executes under a
--- different wormhole-core package id.
+-- different wormhole-core package id. It then runs
+-- 'integrationPublishOnExistingEmitter' from the next-core copy on the emitter
+-- the primary core created: the production case after the next core is vetted.
 module Test.WatcherUpgradeWindow where
 
 import Daml.Script
 import DA.Assert ((===))
 import Wormhole.Core.Bytes
+import Wormhole.Core.State (Emitter(..))
 import Test.TestCore (registerEmitter, publishVia)
 import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
 
@@ -42,7 +45,30 @@ integrationUpgradeWindowPublish input = do
     emitterId = message.emitterId
     sequence = message.sequence
 
--- | Runs the fixture twice on one bridge so `dpm test` covers it.
+data ExistingEmitterPublishInput = ExistingEmitterPublishInput with
+    bridge : RealBridge
+    owner : Party
+  deriving (Eq, Show)
+
+-- | Publishes once on the owner's only emitter on the real bridge, whichever core version created it.
+integrationPublishOnExistingEmitter : ExistingEmitterPublishInput -> Script UpgradeWindowPublish
+integrationPublishOnExistingEmitter input = do
+  let operator = input.bridge.operator
+  let owner = input.owner
+  ownerEmitters <- filter (\(_, emitter) -> emitter.operator == operator && emitter.owner == owner)
+                     <$> query @Emitter owner
+  [(emitterCid, existingEmitter)] <- pure ownerEmitters
+  (_, message) <- publishVia operator input.bridge.coreStateCid owner emitterCid
+                    upgradeWindowNonce upgradeWindowPayload 0
+  message.owner === owner
+  message.emitterId === existingEmitter.emitterId
+  message.sequence === existingEmitter.sequence
+  pure UpgradeWindowPublish with
+    owner
+    emitterId = message.emitterId
+    sequence = message.sequence
+
+-- | Runs every fixture on one bridge so `dpm test` covers it.
 testUpgradeWindowFixture : Script ()
 testUpgradeWindowFixture = do
   bridge <- integrationGovernanceReaderSetup
@@ -54,3 +80,7 @@ testUpgradeWindowFixture = do
   nextPublish.emitterId === 1
   primaryPublish.sequence === 0
   nextPublish.sequence === 0
+  existingEmitterPublish <- integrationPublishOnExistingEmitter ExistingEmitterPublishInput with
+    bridge, owner = primaryPublish.owner
+  existingEmitterPublish.emitterId === primaryPublish.emitterId
+  existingEmitterPublish.sequence === 1

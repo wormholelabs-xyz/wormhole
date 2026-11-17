@@ -165,7 +165,47 @@ var (
 			Name: "wormhole_canton_current_height",
 			Help: "Current Canton ledger offset",
 		})
+	// At most two series: role primary and, during an upgrade window, role next.
+	acceptedPackageIDsGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wormhole_canton_accepted_package_ids",
+			Help: "Accepted wormhole-core package ids (value 1). A role=next series means the upgrade window is open",
+		}, []string{"role", "package_id"})
 )
+
+// reportAcceptedPackageIDs replaces the accepted-package-id gauge series and
+// warns when an upgrade window is open, so a window left open stays visible.
+func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclient.AcceptedPackageIDs) {
+	acceptedPackageIDsGauge.Reset()
+	if acceptedPackageIDs.MatchesAnyPackage() {
+		acceptedPackageIDsGauge.WithLabelValues("primary", "*").Set(1)
+		return
+	}
+	acceptedPackageIDsGauge.WithLabelValues("primary", acceptedPackageIDs.PrimaryPackageIDHex()).Set(1)
+	nextPackageIDHex := acceptedPackageIDs.NextPackageIDHex()
+	if nextPackageIDHex == "" {
+		return
+	}
+	acceptedPackageIDsGauge.WithLabelValues("next", nextPackageIDHex).Set(1)
+	logger.Warn("canton core upgrade window is open: two core package ids are accepted; remove the next id after promotion",
+		zap.String("primaryPackageId", acceptedPackageIDs.PrimaryPackageIDHex()),
+		zap.String("nextPackageId", nextPackageIDHex))
+}
+
+// checkAcceptedPackageIDsAllowed rejects an empty set, and the any-package
+// wildcard outside unsafe dev mode (a look-alike package could forge messages).
+func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPackageIDs, unsafeDevMode bool) error {
+	if acceptedPackageIDs.MatchesAnyPackage() {
+		if !unsafeDevMode {
+			return fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
+		}
+		return nil
+	}
+	if acceptedPackageIDs.PrimaryPackageIDHex() == "" {
+		return fmt.Errorf("canton: no accepted core package ids")
+	}
+	return nil
+}
 
 // NewWatcher creates a new Canton watcher.
 func NewWatcher(
@@ -176,7 +216,10 @@ func NewWatcher(
 	unsafeDevMode bool,
 	msgC chan<- *common.MessagePublication,
 	obsvReqC <-chan *gossipv1.ObservationRequest,
-) *Watcher {
+) (*Watcher, error) {
+	if err := checkAcceptedPackageIDsAllowed(acceptedPackageIDs, unsafeDevMode); err != nil {
+		return nil, err
+	}
 	return &Watcher{
 		cantonRPC:          cantonRPC,
 		acceptedPackageIDs: acceptedPackageIDs,
@@ -186,7 +229,7 @@ func NewWatcher(
 		msgChan:            msgC,
 		obsvReqC:           obsvReqC,
 		readinessSync:      common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
-	}
+	}, nil
 }
 
 // templateID is the filter for the core bridge's Emitter template, shared by
@@ -321,6 +364,11 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 }
 
 func (e *Watcher) Run(ctx context.Context) error {
+	// Defence in depth: NewWatcher already checked; a Watcher built any other way is checked here.
+	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode); err != nil {
+		return err
+	}
+
 	p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
 		ContractAddress: e.acceptedPackageIDs.PrimaryPackageIDHex(),
 	})
@@ -334,6 +382,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 		zap.String("readAsParty", e.readAsParty),
 		zap.Bool("unsafeDevMode", e.unsafeDevMode),
 	)
+	reportAcceptedPackageIDs(logger, e.acceptedPackageIDs)
 
 	// Use an injected client (e.g. from tests) if present, otherwise create one
 	// for the lifetime of this Run. The client is kept local rather than stored

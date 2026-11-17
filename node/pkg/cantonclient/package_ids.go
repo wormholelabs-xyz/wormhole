@@ -89,6 +89,9 @@ func (accepted AcceptedPackageIDs) MatchesAnyPackage() bool { return accepted.ma
 // PrimaryPackageIDHex is the primary id, or empty for the dev-mode wildcard.
 func (accepted AcceptedPackageIDs) PrimaryPackageIDHex() string { return accepted.primary.hexID }
 
+// NextPackageIDHex is the upgrade-window id, or empty outside a window.
+func (accepted AcceptedPackageIDs) NextPackageIDHex() string { return accepted.next.hexID }
+
 // String is "*" for the wildcard, "primary" or "primary,next" otherwise.
 func (accepted AcceptedPackageIDs) String() string {
 	if accepted.matchesAnyPackage {

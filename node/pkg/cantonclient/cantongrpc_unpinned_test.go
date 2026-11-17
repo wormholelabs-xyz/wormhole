@@ -28,6 +28,9 @@ func unpinnedPublishCount(executingPackageID string) float64 {
 
 var upgradeWindowTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(pinnedPackageID, nextPinnedPackageID), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
+// nextOnlyTmpl is a watcher promoted to the next core with the old core removed.
+var nextOnlyTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(nextPinnedPackageID, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+
 func TestMessagesFromTxCountsUnpinnedPublishes(t *testing.T) {
 	cases := []struct {
 		name                  string
@@ -47,6 +50,8 @@ func TestMessagesFromTxCountsUnpinnedPublishes(t *testing.T) {
 		{name: "window: other package is counted", tmpl: upgradeWindowTmpl, executingPackageID: lookalikePackageID, event: publishMessageEvent(lookalikePackageID, 7), wantUnpinnedIncrement: 1},
 		{name: "window: empty package id is counted", tmpl: upgradeWindowTmpl, executingPackageID: "", event: publishMessageEvent("", 8), wantUnpinnedIncrement: 1},
 		{name: "window: unrelated template under the next package is ignored", tmpl: upgradeWindowTmpl, executingPackageID: nextPinnedPackageID, event: unrelatedTemplateEvent(nextPinnedPackageID)},
+		{name: "next only: next package is emitted", tmpl: nextOnlyTmpl, executingPackageID: nextPinnedPackageID, event: publishMessageEvent(nextPinnedPackageID, 9), wantMessages: 1},
+		{name: "next only: old primary package is counted", tmpl: nextOnlyTmpl, executingPackageID: pinnedPackageID, event: publishMessageEvent(pinnedPackageID, 10), wantUnpinnedIncrement: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

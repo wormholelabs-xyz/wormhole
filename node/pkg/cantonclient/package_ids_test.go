@@ -52,6 +52,7 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 		wantAccepted    []string
 		wantDescription string
 		wantPrimaryHex  string
+		wantNextHex     string
 		wantNotAccepted []string
 	}{
 		{
@@ -61,6 +62,7 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 			wantNotAccepted: []string{nextPackageIDHex, otherPackageIDHex, ""},
 			wantDescription: primaryPackageIDHex,
 			wantPrimaryHex:  primaryPackageIDHex,
+			wantNextHex:     "",
 		},
 		{
 			name:            "primary and next",
@@ -70,6 +72,7 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 			wantNotAccepted: []string{otherPackageIDHex, ""},
 			wantDescription: primaryPackageIDHex + "," + nextPackageIDHex,
 			wantPrimaryHex:  primaryPackageIDHex,
+			wantNextHex:     nextPackageIDHex,
 		},
 		{name: "duplicate ids", primaryHex: primaryPackageIDHex, nextHex: primaryPackageIDHex, wantErr: "must differ"},
 		{name: "malformed primary", primaryHex: "pkg", wantErr: "primary"},
@@ -96,6 +99,7 @@ func TestParseAcceptedPackageIDs(t *testing.T) {
 			assert.False(t, accepted.MatchesAnyPackage())
 			assert.Equal(t, tc.wantDescription, accepted.String())
 			assert.Equal(t, tc.wantPrimaryHex, accepted.PrimaryPackageIDHex())
+			assert.Equal(t, tc.wantNextHex, accepted.NextPackageIDHex())
 		})
 	}
 }
@@ -108,6 +112,7 @@ func TestAcceptAnyPackageID(t *testing.T) {
 		assert.Truef(t, accepted.Accepts(packageIDHex), "wildcard must accept %s", packageIDHex)
 	}
 	assert.Equal(t, "", accepted.PrimaryPackageIDHex())
+	assert.Equal(t, "", accepted.NextPackageIDHex())
 	assert.Equal(t, "*", accepted.String())
 }
 

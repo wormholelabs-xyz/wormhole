@@ -1010,6 +1010,9 @@ func runNode(cmd *cobra.Command, args []string) {
 	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create requires
 	// --cantonPackageID and --cantonReadAsParty outside --unsafeDevMode and
 	// validates --cantonPackageIDNext.
+	if *cantonRPC == "" && *cantonPackageIDNext != "" {
+		logger.Fatal("If --cantonRPC is not set, --cantonPackageIDNext may not be set")
+	}
 
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {
 		logger.Fatal("Either --xrplRPC and --xrplContract must all be set or all unset")

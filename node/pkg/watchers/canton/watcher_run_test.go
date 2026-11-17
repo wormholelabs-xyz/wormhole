@@ -23,7 +23,8 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w := NewWatcher("canton:0", testUpgradeWindowPackageIDs(t), "", AuthConfig{}, true, msgC, obsvReqC)
+	w, err := NewWatcher("canton:0", testUpgradeWindowPackageIDs(t), "", AuthConfig{}, true, msgC, obsvReqC)
+	require.NoError(t, err)
 	w.cantonClient = fake // inject the fake via the DI seam
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -185,7 +186,7 @@ func TestRunFailsFastOnStartupError(t *testing.T) {
 // TestProcessMessageDropsZeroTimestamp covers the zero-effective-time guard.
 func TestProcessMessageDropsZeroTimestamp(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 1)
-	w := testWatcher(msgC)
+	w := testWatcher(t, msgC)
 	w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
 		ParticipantOffset: 1,
 		UpdateID:          mustParseUpdateID(sampleUpdateIDHex),

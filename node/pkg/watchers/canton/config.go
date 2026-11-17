@@ -93,7 +93,7 @@ func (wc *WatcherConfig) Create(
 		return nil, nil, fmt.Errorf("canton: OAuth auth requires TLS and cannot be used in unsafe dev mode")
 	}
 
-	watcher := NewWatcher(
+	watcher, err := NewWatcher(
 		wc.Rpc,
 		acceptedPackageIDs,
 		wc.ReadAsParty,
@@ -102,6 +102,9 @@ func (wc *WatcherConfig) Create(
 		msgC,
 		obsvReqC,
 	)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return watcher.Run, nil, nil
 }
