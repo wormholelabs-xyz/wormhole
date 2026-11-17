@@ -330,3 +330,5 @@ runbook
 confirmer
 Effectful
 redteam
+multipin
+unvets
