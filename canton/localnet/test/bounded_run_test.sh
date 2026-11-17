@@ -2,7 +2,7 @@
 # Table-driven test of run_with_timeout_seconds (bounded_run.sh). Needs no Docker.
 # Usage: canton/localnet/test/bounded_run_test.sh
 set -uo pipefail
-# shellcheck source=../bounded_run.sh
+# shellcheck source=SCRIPTDIR/../bounded_run.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../bounded_run.sh"
 
 failure_count=0

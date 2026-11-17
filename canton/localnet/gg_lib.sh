@@ -240,14 +240,18 @@ completion_summary() {
 
 # start_clock_ticker <seconds>: run the synchronizer clock ticker in the background; sets clock_ticker_pid.
 start_clock_ticker() {
-  CLOCK_TICKER_SECONDS="$1" "$LOCALNET_SCRIPT_DIR/canton_console.sh" \
+  CLOCK_TICKER_SECONDS="$1" CANTON_CONSOLE_TIMEOUT_SECONDS="$(($1 + 120))" "$LOCALNET_SCRIPT_DIR/canton_console.sh" \
     "$LOCALNET_SCRIPT_DIR/console/synchronizer_clock_ticker.canton" > "$gg_work_dir/clock-ticker.log" 2>&1 &
   clock_ticker_pid=$!
 }
 
+# stop_clock_ticker: stops canton_console.sh and the process groups of its children (java and the watchdog).
 stop_clock_ticker() {
+  local ticker_child_pid
   if [[ -n "${clock_ticker_pid:-}" ]]; then
-    pkill -P "$clock_ticker_pid" 2>/dev/null || true
+    for ticker_child_pid in $(pgrep -P "$clock_ticker_pid"); do
+      kill -TERM -- "-$ticker_child_pid" 2>/dev/null || kill -TERM "$ticker_child_pid" 2>/dev/null || true
+    done
     kill "$clock_ticker_pid" 2>/dev/null || true
     wait "$clock_ticker_pid" 2>/dev/null || true
     clock_ticker_pid=""

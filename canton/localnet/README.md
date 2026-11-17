@@ -48,7 +48,9 @@ Set `DB_PORT` to use a different port.
 | `create_script_user.sh` | Creates the user that Daml Script uses. |
 | `run_smoke.sh` | Runs the smoke script. |
 | `daml/` | The smoke script package `wormhole-localnet-smoke`. |
-| `canton_console.sh` | Runs a Canton console script against the three participants. |
+| `canton_console.sh` | Runs a Canton console script against the three participants. Stops it after `CANTON_CONSOLE_TIMEOUT_SECONDS` (default 600). |
+| `bounded_run.sh` | Runs a command with a timeout. `canton_console.sh` uses it. |
+| `test/` | Script tests. They do not need Docker. |
 | `console/` | Console configuration and console scripts. |
 | `interactive_submit.js` | Prepares, signs and executes one external-party submission. LocalNet only. |
 | `gg_lib.sh` | Shared functions for the `gg_*.sh` scripts. |
@@ -61,6 +63,14 @@ Set `DB_PORT` to use a different port.
 | `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
 | `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. |
+
+## Script tests
+
+The script tests do not need Docker or LocalNet. Run each test from the repository root:
+
+```bash
+canton/localnet/test/bounded_run_test.sh
+```
 
 ## Prerequisites
 
