@@ -237,6 +237,7 @@ jobs:
 
       - name: Run the Daml tests (dpm test)
         run: docker run --rm --workdir /canton-build/test canton-daml-build dpm test
+
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
     runs-on: ubuntu-24.04
