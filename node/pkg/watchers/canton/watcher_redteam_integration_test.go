@@ -59,8 +59,8 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 	runDamlScript(t, dpm, testDar, port, "Test.WatcherGovernanceReader:integrationGovernanceReaderSetup", "", &bridge)
 
 	type watcherCase struct {
-		name             string
-		packageID        string
+		name              string
+		packageID         string
 		wantForgedPublish bool
 	}
 	cases := []watcherCase{

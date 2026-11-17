@@ -85,7 +85,7 @@ func TestGetTransactionByUpdateIDRejectsBadResponse(t *testing.T) {
 	}{
 		{name: "different update id", response: transactionResponse(otherUpdateIDHex, 590, publishMessageEvent(pinnedPackageID, 5))},
 		{name: "malformed update id", response: transactionResponse("not-a-hash", 590, publishMessageEvent(pinnedPackageID, 5))},
-		{name: "not a transaction", response: &apiv2.GetUpdateResponse{Update: &apiv2.GetUpdateResponse_OffsetCheckpoint{OffsetCheckpoint: &apiv2.OffsetCheckpoint{}}}},
+		{name: "not a transaction", response: &apiv2.GetUpdateResponse{Update: &apiv2.GetUpdateResponse_Reassignment{Reassignment: &apiv2.Reassignment{}}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

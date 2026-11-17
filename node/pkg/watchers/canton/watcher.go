@@ -43,6 +43,12 @@ const (
 	publishMessageChoice = "PublishMessage"
 )
 
+// The Canton TxID must fit MessagePublication's TxID bounds (common.TxIDLenMin..255).
+const (
+	_ uint  = cantonclient.UpdateIDTxIDLen - common.TxIDLenMin
+	_ uint8 = cantonclient.UpdateIDTxIDLen
+)
+
 // emitterAddressTag is the domain-separation tag for emitter addresses. It MUST
 // match Wormhole.Core.State.emitterAddressTag; the encoding is pinned across
 // both languages by the shared vector in
@@ -210,8 +216,9 @@ func (e *Watcher) templateID() cantonclient.TemplateID {
 //
 // The VAA timestamp is taken from the transaction's ledger effective time
 // (whitepaper 0001/0004: the timestamp is block-derived). The TxID is the
-// participant offset encoded as 32 big-endian bytes, so reobservation can decode
-// it back into an offset.
+// hex-decoded update id (cantonclient.UpdateIDTxIDLen bytes), identical on
+// every participant, so guardians agree on it and reobservation can look it up
+// on any participant.
 func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessageEvent, isReobservation bool) {
 	// Both key parties must be present to derive the address; a missing one means
 	// a malformed record we must not turn into an observation.
@@ -219,7 +226,7 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		logger.Error("dropping Canton message with missing emitter key party",
 			zap.String("registrar", ev.Message.Registrar),
 			zap.String("owner", ev.Message.Owner),
-			zap.Int64("offset", ev.Offset))
+			zap.Stringer("updateId", ev.UpdateID))
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
@@ -231,13 +238,24 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		// Should not happen for a committed transaction, but never publish a
 		// zero timestamp.
 		logger.Error("dropping Canton message with zero effective time",
-			zap.Int64("offset", ev.Offset))
+			zap.Stringer("updateId", ev.UpdateID))
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
 
+	if ev.UpdateID.IsZero() {
+		logger.Error("dropping Canton message with zero update id",
+			zap.Int64("participantOffset", ev.ParticipantOffset))
+		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+		return
+	}
+	txID := ev.UpdateID.TxID()
+	if len(txID) != cantonclient.UpdateIDTxIDLen {
+		panic("canton TxID length differs from UpdateIDTxIDLen")
+	}
+
 	observation := &common.MessagePublication{
-		TxID:             cantonclient.OffsetToTxID(ev.Offset),
+		TxID:             txID,
 		Timestamp:        timestamp,
 		Nonce:            ev.Message.Nonce,
 		Sequence:         ev.Message.Sequence,
@@ -252,8 +270,8 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 	// Record the resume point before publishing so a restart can never skip an
 	// offset the processor already saw. Reobservations replay old offsets and
 	// must not move the stream's resume point backward.
-	if !isReobservation && ev.Offset > e.lastOffset.Load() {
-		e.lastOffset.Store(ev.Offset)
+	if !isReobservation && ev.ParticipantOffset > e.lastOffset.Load() {
+		e.lastOffset.Store(ev.ParticipantOffset)
 	}
 
 	e.msgChan <- observation //nolint:channelcheck // The channel to the processor is buffered and shared across chains, if it backs up we should stop processing new observations
@@ -263,12 +281,14 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		watchers.ReobservationsByChain.WithLabelValues("canton", "std").Inc()
 	}
 
-	logger.Info("message observed", observation.ZapFields(zap.String("updateId", ev.UpdateID))...)
+	logger.Info("message observed", observation.ZapFields(
+		zap.Stringer("updateId", ev.UpdateID),
+		zap.Int64("participantOffset", ev.ParticipantOffset))...)
 }
 
-// handleReobservation fetches the transaction identified by a re-observation
-// request (the TxID encodes a participant offset) and re-processes each Wormhole
-// message it produced.
+// handleReobservation fetches the transaction whose update id the
+// re-observation request's TxID encodes and re-processes each Wormhole message
+// it produced.
 func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, client cantonclient.CantonClient, r *gossipv1.ObservationRequest) {
 	// node/pkg/node/reobserve.go enforces a valid uint16 chain id and only
 	// writes to this chain's channel; anything else is a programming error.
@@ -276,26 +296,32 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 		panic("invalid chain ID")
 	}
 
-	offset, err := cantonclient.TxIDToOffset(r.TxHash)
+	updateID, err := cantonclient.UpdateIDFromTxID(r.TxHash)
 	if err != nil {
 		logger.Error("canton_fetch_obvs_req invalid txID", zap.Error(err))
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
 
-	txn, err := client.GetUpdateByOffset(ctx, offset, e.templateID(), publishMessageChoice)
+	txn, err := client.GetTransactionByUpdateID(ctx, updateID, e.templateID(), publishMessageChoice)
 	if err != nil {
-		logger.Error("canton_fetch_obvs_req failed", zap.Int64("offset", offset), zap.Error(err))
+		logger.Error("canton_fetch_obvs_req failed", zap.Stringer("updateId", updateID), zap.Error(err))
+		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+		return
+	}
+	if txn.UpdateID != updateID {
+		logger.Error("canton_fetch_obvs_req returned a different update",
+			zap.Stringer("requestedUpdateId", updateID), zap.Stringer("returnedUpdateId", txn.UpdateID))
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
 
 	for _, msg := range txn.Messages {
 		e.processMessage(logger, cantonclient.CantonMessageEvent{
-			Offset:      txn.Offset,
-			UpdateID:    txn.UpdateID,
-			EffectiveAt: txn.EffectiveAt,
-			Message:     msg,
+			ParticipantOffset: txn.ParticipantOffset,
+			UpdateID:          txn.UpdateID,
+			EffectiveAt:       txn.EffectiveAt,
+			Message:           msg,
 		}, true)
 	}
 }

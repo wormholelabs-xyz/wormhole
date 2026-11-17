@@ -12,8 +12,6 @@ package cantonclient
 
 import (
 	"context"
-	"encoding/binary"
-	"fmt"
 	"time"
 )
 
@@ -57,10 +55,10 @@ type CantonMessage struct {
 // as the VAA timestamp (whitepaper 0001/0004: the timestamp is block-derived,
 // not the message body's).
 type CantonMessageEvent struct {
-	// Offset is the participant offset of the transaction (the canonical TxID).
-	Offset int64
-	// UpdateID is the Daml update id (string), carried for human correlation.
-	UpdateID string
+	// ParticipantOffset is local to the reading participant: the stream resume point.
+	ParticipantOffset int64
+	// UpdateID is identical on every participant: the source of the TxID.
+	UpdateID UpdateID
 	// EffectiveAt is the transaction's ledger effective time.
 	EffectiveAt time.Time
 	// Message is the decoded Wormhole message.
@@ -68,12 +66,12 @@ type CantonMessageEvent struct {
 }
 
 // CantonTransaction holds every Wormhole message found in a single transaction,
-// used by reobservation (one offset may carry multiple PublishMessage choices).
+// used by reobservation (one transaction may carry multiple PublishMessage choices).
 type CantonTransaction struct {
-	Offset      int64
-	UpdateID    string
-	EffectiveAt time.Time
-	Messages    []CantonMessage
+	ParticipantOffset int64
+	UpdateID          UpdateID
+	EffectiveAt       time.Time
+	Messages          []CantonMessage
 }
 
 // Subscription is the handle returned by SubscribeUpdates. It mirrors
@@ -134,46 +132,11 @@ type CantonClient interface {
 	// UpdateService.GetUpdates.
 	SubscribeUpdates(ctx context.Context, beginExclusive int64, tmpl TemplateID, choiceName string, out chan<- CantonMessageEvent) (*Subscription, error)
 
-	// GetUpdateByOffset fetches the transaction at the given offset and returns
-	// every Wormhole message it produced. Used for reobservation. Maps to
-	// UpdateService.GetUpdateByOffset / GetTransactionByOffset.
-	GetUpdateByOffset(ctx context.Context, offset int64, tmpl TemplateID, choiceName string) (CantonTransaction, error)
+	// GetTransactionByUpdateID fetches the transaction with the given update id
+	// and returns every Wormhole message it produced, filtered like
+	// SubscribeUpdates. Used for reobservation. Maps to UpdateService.GetUpdateById.
+	GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error)
 
 	// Close releases the underlying gRPC connection.
 	Close() error
-}
-
-// offsetTxIDLen is the fixed width of a Canton TxID (a 32-byte, left-padded,
-// big-endian participant offset). 32 bytes so it round-trips through the
-// reobservation request's tx_hash field and matches other chains' hash width.
-const offsetTxIDLen = 32
-
-// OffsetToTxID encodes a participant offset as a 32-byte big-endian, left-padded
-// identifier for use as MessagePublication.TxID.
-func OffsetToTxID(offset int64) []byte {
-	b := make([]byte, offsetTxIDLen)
-	binary.BigEndian.PutUint64(b[offsetTxIDLen-8:], uint64(offset)) //nolint:gosec // offsets are non-negative and well within int64
-	return b
-}
-
-// TxIDToOffset decodes a TxID produced by OffsetToTxID back into a participant
-// offset. It tolerates any length <= 8 of trailing significant bytes as long as
-// the leading bytes are zero.
-func TxIDToOffset(txID []byte) (int64, error) {
-	if len(txID) > offsetTxIDLen {
-		return 0, fmt.Errorf("canton txID too long: %d bytes", len(txID))
-	}
-	// Right-align into an 8-byte window; any bytes above the low 8 must be zero.
-	var buf [offsetTxIDLen]byte
-	copy(buf[offsetTxIDLen-len(txID):], txID)
-	for _, b := range buf[:offsetTxIDLen-8] {
-		if b != 0 {
-			return 0, fmt.Errorf("canton txID out of int64 range")
-		}
-	}
-	v := binary.BigEndian.Uint64(buf[offsetTxIDLen-8:])
-	if v > 1<<62 { // sanity bound; offsets are small and well below this
-		return 0, fmt.Errorf("canton txID out of int64 range")
-	}
-	return int64(v), nil
 }

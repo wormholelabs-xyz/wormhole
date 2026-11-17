@@ -29,11 +29,9 @@ type grpcClient struct {
 }
 
 // NewCantonGrpcClient dials the Ledger API at rpc. readAsParty narrows the
-// update stream to a single party; leave it empty to observe every party hosted
-// on the participant (a wildcard "any party" filter), which is the default for
-// the core-bridge watcher — it should see PublishMessage from every emitter, and
-// it avoids depending on the operator party id (which carries a namespace
-// fingerprint not known until allocation).
+// update stream and GetUpdateById to a single party (the guardianGovernance
+// party in production); empty observes every party hosted on the participant
+// (filters_for_any_party, unsafe dev mode only).
 //
 // transportCreds selects the transport: pass nil for TLS (the production
 // default), or insecure credentials for a plaintext dev-mode participant. It is
@@ -84,6 +82,7 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 // narrows to the core-bridge template/choice in Go. When readAsParty is empty
 // the events of every party hosted on the participant are streamed
 // (filters_for_any_party); otherwise the stream is narrowed to that one party.
+// GetUpdates and GetUpdateById share it, so reobservation sees what the stream sees.
 func (c *grpcClient) updateFormat() *apiv2.UpdateFormat {
 	wildcard := &apiv2.Filters{
 		Cumulative: []*apiv2.CumulativeFilter{{
@@ -136,15 +135,24 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 			if tx == nil {
 				continue // reassignment / checkpoint / topology — ignore
 			}
-			for _, msg := range messagesFromTx(tx, tmpl, choiceName, c.logger) {
+			messages := messagesFromTx(tx, tmpl, choiceName, c.logger)
+			if len(messages) == 0 {
+				continue
+			}
+			updateID, err := ParseUpdateID(tx.GetUpdateId())
+			if err != nil {
+				sub.Fail(fmt.Errorf("GetUpdates: transaction at offset %d: %w", tx.GetOffset(), err))
+				return
+			}
+			for _, msg := range messages {
 				select {
 				case <-streamCtx.Done():
 					return
 				case out <- CantonMessageEvent{
-					Offset:      tx.GetOffset(),
-					UpdateID:    tx.GetUpdateId(),
-					EffectiveAt: protoTime(tx.GetEffectiveAt()),
-					Message:     msg,
+					ParticipantOffset: tx.GetOffset(),
+					UpdateID:          updateID,
+					EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+					Message:           msg,
 				}:
 				}
 			}
@@ -153,25 +161,32 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 	return sub, nil
 }
 
-func (c *grpcClient) GetUpdateByOffset(ctx context.Context, offset int64, tmpl TemplateID, choiceName string) (CantonTransaction, error) {
+func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error) {
 	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
 	defer cancel()
-	resp, err := c.update.GetUpdateByOffset(ctx, &apiv2.GetUpdateByOffsetRequest{
-		Offset:       offset,
+	resp, err := c.update.GetUpdateById(ctx, &apiv2.GetUpdateByIdRequest{
+		UpdateId:     updateID.String(),
 		UpdateFormat: c.updateFormat(),
 	})
 	if err != nil {
-		return CantonTransaction{}, fmt.Errorf("GetUpdateByOffset(%d): %w", offset, err)
+		return CantonTransaction{}, fmt.Errorf("GetUpdateById(%s): %w", updateID, err)
 	}
 	tx := resp.GetTransaction()
 	if tx == nil {
-		return CantonTransaction{}, fmt.Errorf("GetUpdateByOffset(%d): not a transaction", offset)
+		return CantonTransaction{}, fmt.Errorf("GetUpdateById(%s): not a transaction", updateID)
+	}
+	returnedUpdateID, err := ParseUpdateID(tx.GetUpdateId())
+	if err != nil {
+		return CantonTransaction{}, fmt.Errorf("GetUpdateById(%s): %w", updateID, err)
+	}
+	if returnedUpdateID != updateID {
+		return CantonTransaction{}, fmt.Errorf("GetUpdateById(%s): participant returned update %s", updateID, returnedUpdateID)
 	}
 	return CantonTransaction{
-		Offset:      tx.GetOffset(),
-		UpdateID:    tx.GetUpdateId(),
-		EffectiveAt: protoTime(tx.GetEffectiveAt()),
-		Messages:    messagesFromTx(tx, tmpl, choiceName, c.logger),
+		ParticipantOffset: tx.GetOffset(),
+		UpdateID:          returnedUpdateID,
+		EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+		Messages:          messagesFromTx(tx, tmpl, choiceName, c.logger),
 	}, nil
 }
 
