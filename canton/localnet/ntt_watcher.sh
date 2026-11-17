@@ -5,7 +5,7 @@
 #   ntt_watcher.sh start      Build the harness and start it in the background. Returns when it streams.
 #   ntt_watcher.sh stop       Stop the background harness.
 #   ntt_watcher.sh check      Check the live observations against ntt-contracts.json.
-#   ntt_watcher.sh reobserve  Reobserve the recorded outbound transfers and check them.
+#   ntt_watcher.sh reobserve  Reobserve the recorded outbound transfers on app-provider and on sv, and check them.
 # Precondition for check and reobserve: ntt_burn_mint.sh and ntt_lock_unlock.sh ran.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
@@ -22,26 +22,27 @@ build_harness() {
   (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go test -c -tags localnet -o "$HARNESS_BINARY" ./pkg/watchers/canton)
 }
 
-# run_harness <name> <reobserve-offsets> <max-seconds>: run in the background; files go to $WATCHER_DIR/<name>.*
+# run_harness <name> <validator> <reobserve-update-ids> <max-seconds>: run in the background against the
+# participant of <validator>; files go to $WATCHER_DIR/<name>.*
 run_harness() {
-  local name="$1"
+  local name="$1" validator_name="$2"
   rm -f "$WATCHER_DIR/$name.ready" "$WATCHER_DIR/$name.stop" "$WATCHER_DIR/$name.jsonl"
   "$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$WATCHER_DIR/watcher.jwt"
-  CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$SUBMITTING_VALIDATOR")" \
+  CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
   CANTON_LOCALNET_TOKEN_FILE="$WATCHER_DIR/watcher.jwt" \
   CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
   CANTON_LOCALNET_CORE_PACKAGE_ID="$CORE_PACKAGE_ID" \
   CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
   CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
   CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \
-  CANTON_LOCALNET_REOBSERVE_OFFSETS="$2" \
-  CANTON_LOCALNET_MAX_SECONDS="$3" \
+  CANTON_LOCALNET_REOBSERVE_UPDATE_IDS="$3" \
+  CANTON_LOCALNET_MAX_SECONDS="$4" \
     nohup "$HARNESS_BINARY" -test.run TestCantonWatcherLocalNet -test.v > "$WATCHER_DIR/$name.log" 2>&1 &
   echo $! > "$WATCHER_DIR/$name.pid"
   local waited_seconds
   for ((waited_seconds = 0; waited_seconds < HARNESS_READY_SECONDS; waited_seconds++)); do
     if [[ -f "$WATCHER_DIR/$name.ready" ]]; then
-      echo "watcher harness $name streams from app-provider (pid $(cat "$WATCHER_DIR/$name.pid"))"
+      echo "watcher harness $name streams from $validator_name (pid $(cat "$WATCHER_DIR/$name.pid"))"
       return 0
     fi
     if ! kill -0 "$(cat "$WATCHER_DIR/$name.pid")" 2>/dev/null; then
@@ -96,21 +97,10 @@ check_deployment() {
   echo "$deployment_key: watcher observed chain 75, emitter $(jq -r .emitterAddress <<<"$deployment"), sequence $(jq -r --arg key "$message_key" '.[$key].sequence' <<<"$deployment"), payload equal to the WormholeMessage (reobservation $reobserved)"
 }
 
-# participant_offset <validator> <update-id>: the offset of that update on the validator's participant.
-# Offsets are participant-local; the watcher TxID encodes the offset of the participant it reads.
-participant_offset() {
-  curl -sSf -X POST "$(json_api_url "$1")/v2/updates/update-by-id" -H "Authorization: Bearer $(cat "$gg_work_dir/script.jwt")" \
-    -H 'Content-Type: application/json' \
-    -d "$(jq -n --arg id "$2" --arg gg "$GG_PARTY" '{updateId: $id, updateFormat: {includeTransactions: {
-      eventFormat: {filtersByParty: {($gg): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
-      transactionShape: "TRANSACTION_SHAPE_ACS_DELTA"}}}')" \
-    | jq -er '.update.Transaction.value.offset'
-}
-
 case "${1:-}" in
   start)
     build_harness
-    run_harness live "" 1800
+    run_harness live "$SUBMITTING_VALIDATOR" "" 1800
     ;;
   stop)
     stop_harness live
@@ -121,13 +111,16 @@ case "${1:-}" in
     ;;
   reobserve)
     [[ -x "$HARNESS_BINARY" ]] || build_harness
-    burn_offset="$(participant_offset "$SUBMITTING_VALIDATOR" "$(jq -r .burnMint.burnUpdateId "$NTT_CONTRACTS")")"
-    lock_offset="$(participant_offset "$SUBMITTING_VALIDATOR" "$(jq -r .lockUnlock.lockUpdateId "$NTT_CONTRACTS")")"
-    echo "app-provider offsets: burn $burn_offset, lock $lock_offset"
-    run_harness reobserve "$burn_offset,$lock_offset" 300
-    stop_harness reobserve
-    check_deployment "$WATCHER_DIR/reobserve.jsonl" burnMint burnMessage true
-    check_deployment "$WATCHER_DIR/reobserve.jsonl" lockUnlock lockMessage true
+    burn_update_id="$(jq -er .burnMint.burnUpdateId "$NTT_CONTRACTS")"
+    lock_update_id="$(jq -er .lockUnlock.lockUpdateId "$NTT_CONTRACTS")"
+    echo "reobservation update ids: burn $burn_update_id, lock $lock_update_id"
+    # The update id is the same on each participant, so a request from one guardian works on another.
+    for reobserving_validator in "$SUBMITTING_VALIDATOR" sv; do
+      run_harness "reobserve-$reobserving_validator" "$reobserving_validator" "$burn_update_id,$lock_update_id" 300
+      stop_harness "reobserve-$reobserving_validator"
+      check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" burnMint burnMessage true
+      check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" lockUnlock lockMessage true
+    done
     ;;
   *)
     echo "usage: ntt_watcher.sh start|stop|check|reobserve" >&2

@@ -5,8 +5,38 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/stretchr/testify/require"
 )
+
+// Helpers of the LocalNet harness (watcher_localnet_test.go). They carry no build tag, so CI tests them.
+
+const localNetMaxReobservations = 64
+
+// parseReobserveUpdateIDs parses a comma-separated list of Ledger API update ids.
+func parseReobserveUpdateIDs(updateIDList string) ([]cantonclient.UpdateID, error) {
+	var updateIDs []cantonclient.UpdateID
+	seenUpdateIDs := make(map[cantonclient.UpdateID]struct{})
+	for _, field := range strings.Split(updateIDList, ",") {
+		updateIDText := strings.TrimSpace(field)
+		if updateIDText == "" {
+			continue
+		}
+		updateID, err := cantonclient.ParseUpdateID(updateIDText)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := seenUpdateIDs[updateID]; duplicate {
+			return nil, fmt.Errorf("duplicate update id %s", updateIDText)
+		}
+		seenUpdateIDs[updateID] = struct{}{}
+		updateIDs = append(updateIDs, updateID)
+		if len(updateIDs) > localNetMaxReobservations {
+			return nil, fmt.Errorf("at most %d update ids, got more", localNetMaxReobservations)
+		}
+	}
+	return updateIDs, nil
+}
 
 func localNetTestUpdateIDText(index int) string {
 	return fmt.Sprintf("1220%064x", index+1)

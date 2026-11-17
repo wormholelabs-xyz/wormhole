@@ -488,10 +488,10 @@ Each observation has chain 75.
 The emitter address that the watcher calculates is equal to the `emitterAddress` of the transceiver `Emitter`.
 
 `ntt_watcher.sh reobserve` sends a reobservation request for each outbound transfer.
+It sends the requests to a harness on `app-provider`, then to a harness on `sv`.
 
-NOTE: The transaction id of the watcher is the offset on the participant that the watcher reads.
-The same update has a different offset on each participant.
-The script gets the `app-provider` offset from the update id.
+NOTE: The transaction id of the watcher is the update id.
+The update id is the same on each participant.
 
 ### Limits of the NTT run
 
