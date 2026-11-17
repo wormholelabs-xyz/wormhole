@@ -35,6 +35,19 @@ record_ntt_contract() {
   printf '%s\n' "$updated" > "$NTT_CONTRACTS"
 }
 
+record_ntt_json() {
+  local name="$1" json_value="$2" updated
+  updated="$(jq --arg name "$name" --argjson value "$json_value" '.[$name] = $value' "$NTT_CONTRACTS")"
+  printf '%s\n' "$updated" > "$NTT_CONTRACTS"
+}
+
+# created_contract_argument <transaction-json> <qualified-template-suffix>: create arguments of the one such created event.
+created_contract_argument() {
+  jq -ec --arg suffix "$2" \
+    '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith($suffix)) | .createArgument]
+     | if length == 1 then .[0] else error("expected exactly one created \($suffix), found \(length)") end' <<<"$1"
+}
+
 gg_ceremony_signers_json() {
   gg_signers_json "${NTT_GG_SIGNING_OWNERS[@]}"
 }
@@ -164,8 +177,8 @@ amulet_holdings() {
 covering_replay_node() {
   active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.Replay:ReplayNode" \
     | jq -er --arg gg "$GG_PARTY" --arg ns "$1" --arg digest "$2" \
-      '[.[] | select(.createArgument.consumer == $gg and .createArgument.namespace == $ns
-                     and ($digest | startswith(.createArgument.prefix)))]
+      '[.[] | select(.createArgument.consumer == $gg and .createArgument.namespace == $ns)
+             | select(.createArgument.prefix as $prefix | $digest | startswith($prefix))]
        | if length == 1 then .[0].contractId else error("expected one covering replay node, found \(length)") end'
 }
 
@@ -179,4 +192,45 @@ ntt_transfer_vaa() {
 message_summary() {
   jq -c '{registrar: .registrar[0:24], owner: .owner[0:24], emitterId, sequence, nonce, consistencyLevel,
           payloadPrefix: .payload[0:8], payloadBytes: ((.payload | length) / 2)}' <<<"$1"
+}
+
+# allocate_local_party <validator> <party-hint>: allocate a party on that participant and print its id.
+allocate_local_party() {
+  curl -sSf -X POST "$(json_api_url "$1")/v2/parties" -H "Authorization: Bearer $("$LOCALNET_SCRIPT_DIR/token.sh")" \
+    -H 'Content-Type: application/json' -d "$(jq -n --arg hint "$2" '{partyIdHint: $hint, identityProviderId: ""}')" \
+    | jq -er .partyDetails.party
+}
+
+# allocate_external_party <validator> <party-hint> <key-file-prefix>: print {partyId, fingerprint, keyFile}.
+allocate_external_party() {
+  node "$LOCALNET_SCRIPT_DIR/allocate_external_party.js" "$(json_api_url "$1")" "$gg_work_dir/script.jwt" \
+    "$LOGICAL_SYNCHRONIZER_ID" "$2" "$3"
+}
+
+# current_emitter <emitter-id>: the active Emitter of guardianGovernance with that id, as created event JSON.
+current_emitter() {
+  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.State:Emitter" \
+    | jq -ec --arg gg "$GG_PARTY" --arg id "$1" '[.[] | select(.createArgument.owner == $gg and .createArgument.emitterId == $id)]
+        | if length == 1 then .[0] else error("expected one active emitter \($id), found \(length)") end'
+}
+
+current_ntt_governance() {
+  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Ntt.Governance:NttGovernance" \
+    | jq -er --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]
+        | if length == 1 then .[0].contractId else error("expected one NttGovernance, found \(length)") end'
+}
+
+current_emitter_registry() {
+  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.State:EmitterRegistry" \
+    | jq -er 'if length == 1 then .[0].contractId else error("expected one EmitterRegistry, found \(length)") end'
+}
+
+# operator_disclosure <qualified-template-suffix> <contract-id>: disclosure of a contract that Operator sees.
+operator_disclosure() {
+  disclosed_contract "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" "$1" "$2"
+}
+
+# json_array <json>...: one JSON array of the arguments.
+json_array() {
+  jq -sc '.' <<<"$(printf '%s\n' "$@")"
 }
