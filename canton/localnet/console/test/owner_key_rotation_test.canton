@@ -1,5 +1,5 @@
 // Table test of owner_key_rotation_lib.canton: party order, key sets, outcome, rotated mappings, the stored signed
-// transactions, the load order and the effective time. Run after owner_signing_prelude.canton,
+// transactions, the load order and the effective times. Run after owner_signing_prelude.canton,
 // owner_key_rotation_lib.canton, table_test_prelude.canton and topology_fixtures.canton.
 import com.digitalasset.canton.version.ProtocolVersion
 val keptKeys = testOwnerKeys.take(2)
@@ -155,14 +155,34 @@ checkTableCase("L1-load-order", None) {
     s"batch order ${loadOrder.namespaceAndPartyBatch.map(_.mapping.code)}")
 }
 
-val effectiveTime = java.time.Instant.parse("2026-11-17T12:00:00Z")
-checkTableCase("E1-same-effective-time", None) {
-  checkSameEffectiveTime(Seq("nttCustody" -> effectiveTime, "guardianGovernance" -> effectiveTime, namespaceRotationTargetName -> effectiveTime))
+val custodyEffectiveTime = java.time.Instant.parse("2026-11-18T11:52:49.327797Z")
+def effectiveTimesInLoadOrder(guardianGovernanceOffset: java.time.Duration, namespaceOffset: java.time.Duration) =
+  Seq("nttCustody" -> custodyEffectiveTime, "guardianGovernance" -> custodyEffectiveTime.plus(guardianGovernanceOffset),
+    namespaceRotationTargetName -> custodyEffectiveTime.plus(namespaceOffset))
+checkTableCase("E1-strictly-ordered-measured-spread", None) {
+  val spread = checkEffectiveTimesFollowLoadOrderWithinBound(
+    effectiveTimesInLoadOrder(java.time.Duration.ofNanos(415588000L), java.time.Duration.ofNanos(1003751000L)))
+  require(spread == java.time.Duration.ofNanos(1003751000L), s"spread $spread")
 }
-checkTableCase("E2-different-effective-time", Some("effective times differ")) {
-  checkSameEffectiveTime(Seq("nttCustody" -> effectiveTime.plusSeconds(1), "guardianGovernance" -> effectiveTime))
+checkTableCase("E2-equal-effective-times", Some("effective times are not strictly increasing in load order")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder(java.time.Duration.ZERO, java.time.Duration.ZERO))
 }
-checkTableCase("E3-no-effective-time", Some("no effective times")) {
-  checkSameEffectiveTime(Seq.empty)
+checkTableCase("E3-reversed-order", Some("effective times are not strictly increasing in load order")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(-1), java.time.Duration.ofSeconds(-2)))
+}
+checkTableCase("E4-guardian-governance-before-custody", Some("guardianGovernance=2026-11-18T11:52:48.327797Z is not after nttCustody")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(-1), java.time.Duration.ofSeconds(1)))
+}
+checkTableCase("E5-spread-at-bound", None) {
+  val spread = checkEffectiveTimesFollowLoadOrderWithinBound(
+    effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(1), maxRotationEffectiveTimeSpread))
+  require(spread == maxRotationEffectiveTimeSpread, s"spread $spread")
+}
+checkTableCase("E6-spread-above-bound", Some("effective time spread PT30.000001S is above the bound PT30S")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(
+    effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(1), maxRotationEffectiveTimeSpread.plusNanos(1000L)))
+}
+checkTableCase("E7-no-effective-time", Some("no effective times")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(Seq.empty)
 }
 finishTable("owner-key-rotation")
