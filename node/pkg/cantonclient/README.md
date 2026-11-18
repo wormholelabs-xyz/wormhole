@@ -34,7 +34,7 @@ closure (`state_service`, `update_service`, `transaction`, `transaction_filter`,
 `event`, `value`, `reassignment`, `topology_transaction`, `offset_checkpoint`,
 `trace_context`). `package_service` and `package_reference` (for
 `ListVettedPackages`) come from the `canton-open-source-3.5.6` jar. The ten
-files above are byte-identical in 3.5.5 and 3.5.6. `google/protobuf/*` come from buf's well-known types and
+files above are byte-identical in 3.5.5 and 3.5.6. `google/protobuf/*` come from the buf well-known types and
 `google/rpc/status` is mapped to `genproto` (see `buf.gen.yaml`) to avoid a
 duplicate proto-registration panic.
 
