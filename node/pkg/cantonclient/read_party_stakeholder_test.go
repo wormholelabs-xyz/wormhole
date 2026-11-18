@@ -2,6 +2,7 @@ package cantonclient
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,8 +64,54 @@ func TestReadPartySignsExercisedEmitter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			exercised := &apiv2.ExercisedEvent{ContractId: tc.contractID, Consuming: tc.consuming, AcsDelta: tc.acsDelta}
+			exercised := &apiv2.ExercisedEvent{ContractId: tc.contractID, TemplateId: emitterTemplateIDUnder(pinnedPackageID), Consuming: tc.consuming, AcsDelta: tc.acsDelta}
 			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, tc.createdEvents, tc.tmpl, sampleRecordTime, tc.readAsParty))
+		})
+	}
+}
+
+func emitterTemplateIDUnder(packageID string) *apiv2.Identifier {
+	return &apiv2.Identifier{PackageId: packageID, ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+}
+
+// A transient Emitter is accepted only when its CreatedEvent names the same
+// package id as the exercise, and that id is accepted at the record time.
+func TestReadPartySignsExercisedEmitterInUpgradeWindow(t *testing.T) {
+	beforeDeadline := testRetiringDeadline.Add(-time.Second)
+	afterDeadline := testRetiringDeadline.Add(time.Second)
+	cases := []struct {
+		name               string
+		createdPackageID   string
+		exercisedPackageID string
+		recordTime         time.Time
+		wantAccepted       bool
+	}{
+		{name: "current create, current exercise", createdPackageID: pinnedPackageID, exercisedPackageID: pinnedPackageID,
+			recordTime: beforeDeadline, wantAccepted: true},
+		{name: "retiring create, retiring exercise, before the deadline", createdPackageID: retiringPinnedPackageID, exercisedPackageID: retiringPinnedPackageID,
+			recordTime: beforeDeadline, wantAccepted: true},
+		{name: "current create, current exercise, after the deadline", createdPackageID: pinnedPackageID, exercisedPackageID: pinnedPackageID,
+			recordTime: afterDeadline, wantAccepted: true},
+		{name: "current create, retiring exercise, before the deadline", createdPackageID: pinnedPackageID, exercisedPackageID: retiringPinnedPackageID,
+			recordTime: beforeDeadline},
+		{name: "retiring create, current exercise, before the deadline", createdPackageID: retiringPinnedPackageID, exercisedPackageID: pinnedPackageID,
+			recordTime: beforeDeadline},
+		{name: "retiring create, current exercise, after the deadline", createdPackageID: retiringPinnedPackageID, exercisedPackageID: pinnedPackageID,
+			recordTime: afterDeadline},
+		{name: "retiring create, retiring exercise, at the deadline", createdPackageID: retiringPinnedPackageID, exercisedPackageID: retiringPinnedPackageID,
+			recordTime: testRetiringDeadline},
+		{name: "retiring create, retiring exercise, without record time", createdPackageID: retiringPinnedPackageID, exercisedPackageID: retiringPinnedPackageID},
+		{name: "look-alike create, look-alike exercise", createdPackageID: lookalikePackageID, exercisedPackageID: lookalikePackageID,
+			recordTime: beforeDeadline},
+		{name: "look-alike create, current exercise", createdPackageID: lookalikePackageID, exercisedPackageID: pinnedPackageID,
+			recordTime: beforeDeadline},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			created := emitterCreatedEvent("emitter-transient", tc.createdPackageID, "Emitter", realEmitterSignatories, nil).GetCreated()
+			exercised := &apiv2.ExercisedEvent{ContractId: "emitter-transient", TemplateId: emitterTemplateIDUnder(tc.exercisedPackageID), Consuming: true}
+			createdEvents := map[string]*apiv2.CreatedEvent{"emitter-transient": created}
+			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, createdEvents, upgradeWindowTmpl, tc.recordTime, governanceParty))
 		})
 	}
 }
