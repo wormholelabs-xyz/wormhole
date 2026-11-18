@@ -35,7 +35,6 @@ if [[ -n "${STUB_CURL_EXIT_STATUS:-}" ]]; then
   exit "$STUB_CURL_EXIT_STATUS"
 fi
 case "$request_url" in
-  */v2/state/ledger-end) printf '{"offset": %s}\n' "$STUB_LEDGER_END" ;;
   */v2/updates?limit=*)
     begin_exclusive="$(jq -r .beginExclusive <<<"$request_body")"
     printf '%s\n' "$begin_exclusive" >> "$STUB_DIR/begins.log"
@@ -74,7 +73,7 @@ write_page() {
 failure_count=0
 
 # run_case <case-name> <case-dir> <expected-status> <expected-stdout-line-count or "-"> <stderr-fragment or "-">
-#   <scan arguments...>. Environment of the stub: STUB_LEDGER_END, STUB_CURL_EXIT_STATUS, SCAN_PAGE_SIZE.
+#   <scan arguments...>. Environment of the stub: STUB_CURL_EXIT_STATUS, SCAN_PAGE_SIZE.
 run_case() {
   local case_name="$1" case_dir="$2" expected_status="$3" expected_line_count="$4" stderr_fragment="$5" actual_status=0
   shift 5
@@ -111,14 +110,14 @@ case_dir="$(new_case_dir s1)"
 write_page "$case_dir" 10 "$(publish_update 11 "$(update_id 1)" "$CORE_V6" 1)" "$(other_update 12 "$(update_id 2)")" \
   "$(publish_update 13 "$control_id" "$CORE_V7" 2)"
 SCAN_PAGE_SIZE=200 run_case "S1 one short page with the control" "$case_dir" 0 2 - \
-  "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
+  "$URL" "$work_dir/token" "$PARTY" 10 13 "$control_id"
 
 # S2: a full page, then a short page with the control. The second request begins at the last offset of page 1.
 case_dir="$(new_case_dir s2)"
 write_page "$case_dir" 10 "$(publish_update 11 "$(update_id 1)" "$CORE_V6" 1)" "$(other_update 12 "$(update_id 2)")"
 write_page "$case_dir" 12 "$(publish_update 15 "$control_id" "$CORE_V7" 2)"
 SCAN_PAGE_SIZE=2 run_case "S2 two pages, control on page 2" "$case_dir" 0 2 - \
-  "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
+  "$URL" "$work_dir/token" "$PARTY" 10 15 "$control_id"
 touch "$case_dir/begins.log"
 if [[ "$(paste -sd, - < "$case_dir/begins.log")" == "10,12" ]]; then
   echo "ok: S2 requests begin at 10, then at 12"
@@ -133,11 +132,18 @@ write_page "$case_dir" 10 "$(publish_update 11 "$(update_id 1)" "$CORE_V6" 1)"
 SCAN_PAGE_SIZE=200 run_case "S3 short page without the control" "$case_dir" 1 - "without the required update $control_id" \
   "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
 
-# S4: no required update id; a short page ends the scan.
+# S4: the required update id is mandatory.
 case_dir="$(new_case_dir s4)"
 write_page "$case_dir" 10 "$(publish_update 11 "$(update_id 1)" "$CORE_V6" 1)"
-SCAN_PAGE_SIZE=200 run_case "S4 no required id, short page" "$case_dir" 0 1 - \
+SCAN_PAGE_SIZE=200 run_case "S4 no required id" "$case_dir" 2 0 "usage" \
   "$URL" "$work_dir/token" "$PARTY" 10 20
+touch "$case_dir/calls.log"
+if [[ ! -s "$case_dir/calls.log" ]]; then
+  echo "ok: S4 makes no request"
+else
+  echo "FAIL: S4 made requests: $(paste -sd, - < "$case_dir/calls.log")" >&2
+  failure_count=$((failure_count + 1))
+fi
 
 # S5: an error body instead of a page.
 case_dir="$(new_case_dir s5)"
@@ -150,23 +156,19 @@ case_dir="$(new_case_dir s6)"
 write_page "$case_dir" 10 "$(other_update 11 "$(update_id 1)")" "$(other_update 12 "$(update_id 2)")" \
   "$(other_update 13 "$(update_id 3)")"
 SCAN_PAGE_SIZE=2 run_case "S6 page longer than the page size" "$case_dir" 1 - "returned 3 updates for a page of 2" \
-  "$URL" "$work_dir/token" "$PARTY" 10 20
+  "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
 
 # S7: a full page whose last offset is after the end offset.
 case_dir="$(new_case_dir s7)"
 write_page "$case_dir" 10 "$(other_update 11 "$(update_id 1)")" "$(other_update 25 "$(update_id 2)")"
 SCAN_PAGE_SIZE=2 run_case "S7 last offset outside the range" "$case_dir" 1 - "outside (10, 20]" \
-  "$URL" "$work_dir/token" "$PARTY" 10 20
+  "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
 
 # S8: curl times out.
 case_dir="$(new_case_dir s8)"
 STUB_CURL_EXIT_STATUS=28 SCAN_PAGE_SIZE=200 run_case "S8 curl timeout" "$case_dir" 1 - "curl status 28" \
   "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
 
-# S8b: curl fails on the ledger end read.
-case_dir="$(new_case_dir s8b)"
-STUB_CURL_EXIT_STATUS=7 SCAN_PAGE_SIZE=200 run_case "S8b curl failure on the ledger end" "$case_dir" 1 - "curl status 7" \
-  "$URL" "$work_dir/token" "$PARTY" 10
 
 # S9: argument errors.
 case_dir="$(new_case_dir s9)"
@@ -183,13 +185,26 @@ run_case "S9e required id with an empty end offset" "$case_dir" 2 - "end offset"
 run_case "S9f seven arguments" "$case_dir" 2 - "usage" \
   "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id" extra
 SCAN_CURL_MAX_SECONDS=0 run_case "S9g SCAN_CURL_MAX_SECONDS zero" "$case_dir" 2 - "SCAN_CURL_MAX_SECONDS" \
-  "$URL" "$work_dir/token" "$PARTY" 10 20
-
-# S10: without an end offset, the scan reads the ledger end first.
-case_dir="$(new_case_dir s10)"
-write_page "$case_dir" 10 "$(publish_update 11 "$control_id" "$CORE_V7" 1)"
-STUB_LEDGER_END=20 SCAN_PAGE_SIZE=200 run_case "S10 default end is the ledger end" "$case_dir" 0 1 - \
+  "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
+run_case "S9h four arguments" "$case_dir" 2 - "usage" \
   "$URL" "$work_dir/token" "$PARTY" 10
+run_case "S9i begin offset equal to the end offset" "$case_dir" 2 - "begin offset 13 is not before end offset 13" \
+  "$URL" "$work_dir/token" "$PARTY" 13 13 "$control_id"
+run_case "S9j end offset with a leading zero" "$case_dir" 2 - "end offset is not a non-negative integer" \
+  "$URL" "$work_dir/token" "$PARTY" 10 013 "$control_id"
+
+# S10: the control is in the output, but the end offset is after the control. A short page after the control would
+# then pass unseen.
+case_dir="$(new_case_dir s10)"
+write_page "$case_dir" 10 "$(publish_update 11 "$(update_id 1)" "$CORE_V6" 1)" "$(publish_update 13 "$control_id" "$CORE_V7" 2)"
+SCAN_PAGE_SIZE=200 run_case "S10 end offset after the control" "$case_dir" 1 - "required update $control_id is at offsets [13], not at the end offset 20" \
+  "$URL" "$work_dir/token" "$PARTY" 10 20 "$control_id"
+
+# S11: the end offset is before the control offset that a full page reports. The page check stops the scan.
+case_dir="$(new_case_dir s11)"
+write_page "$case_dir" 10 "$(publish_update 11 "$(update_id 1)" "$CORE_V6" 1)" "$(publish_update 13 "$control_id" "$CORE_V7" 2)"
+SCAN_PAGE_SIZE=2 run_case "S11 end offset before the control" "$case_dir" 1 - "outside (10, 12]" \
+  "$URL" "$work_dir/token" "$PARTY" 10 12 "$control_id"
 
 if [[ "$failure_count" -ne 0 ]]; then
   echo "publish_message_scan_test.sh: $failure_count failures" >&2
