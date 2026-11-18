@@ -102,8 +102,9 @@ check_case "json_decimal_array_total_units with a space in an amount" 1 - - json
 
 # file_mode_octal <file>: the permission bits, for example 600.
 file_mode_octal() {
-  if stat -f %Lp "$1" 2>/dev/null; then return 0; fi
-  stat -c %a "$1"
+  # GNU form first: GNU stat reads -f as file-system mode and prints to stdout.
+  if stat -c %a "$1" 2>/dev/null; then return 0; fi
+  stat -f %Lp "$1"
 }
 
 check_case "ntt scripts pass no bearer token as a command argument" 1 "" - \

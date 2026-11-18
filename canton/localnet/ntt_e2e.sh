@@ -2,6 +2,8 @@
 # Run the NTT steps of README.md "NTT end-to-end run" in sequence.
 # Usage: ntt_e2e.sh
 # Precondition: LocalNet runs, gg_host.sh and gg_genesis.sh ran, and the NTT DARs at the pins of ntt_lib.sh are built.
+# The VAAs use guardian set 1 with devnet key 1: run gg_guardian_set_rotation.sh 0 1 first,
+# or set NTT_GUARDIAN_SET_INDEX=0 NTT_GUARDIAN_KEY_INDICES=0 to use the genesis set.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR

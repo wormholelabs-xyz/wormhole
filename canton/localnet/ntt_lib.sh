@@ -42,8 +42,8 @@ gg_ceremony_signers_json() {
 # active_contracts_with_blobs <validator> <party> <qualified-template-suffix>: like active_contracts, with created event blobs.
 active_contracts_with_blobs() {
   local validator_name="$1" party="$2" template_suffix="$3" ledger_end
-  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
-  curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
+  ledger_end="$(curl --max-time 120 -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
+  curl --max-time 120 -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
       eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: true}}}}]}}, verbose: false},
@@ -65,7 +65,7 @@ disclosed_contract() {
 # Submits as local parties of that participant. Prints the response body, then the HTTP status on the last line.
 submit_local_response() {
   local validator_name="$1" command_id="$2" act_as="$3" command="$4" disclosed="${5:-[]}"
-  curl -sS -X POST "$(json_api_url "$validator_name")/v2/commands/submit-and-wait-for-transaction" \
+  curl --max-time 120 -sS -X POST "$(json_api_url "$validator_name")/v2/commands/submit-and-wait-for-transaction" \
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -w '\n%{http_code}' \
     -d "$(jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
@@ -105,24 +105,24 @@ validator_api_url() {
 
 # wallet_onboard <validator> <user>: onboard the user and print its party id.
 wallet_onboard() {
-  curl -sSf -X POST "$(validator_api_url "$1")/register" -H "@$(subject_auth_header_file "$2")" \
+  curl --max-time 120 -sSf -X POST "$(validator_api_url "$1")/register" -H "@$(subject_auth_header_file "$2")" \
     -H 'Content-Type: application/json' -d '{}' | jq -er .party_id
 }
 
 wallet_tap() {
-  curl -sSf -X POST "$(validator_api_url "$1")/wallet/tap" -H "@$(subject_auth_header_file "$2")" \
+  curl --max-time 120 -sSf -X POST "$(validator_api_url "$1")/wallet/tap" -H "@$(subject_auth_header_file "$2")" \
     -H 'Content-Type: application/json' -d "$(jq -n --arg amount "$3" '{amount: $amount}')" >/dev/null
 }
 
 # wallet_create_transfer_preapproval <validator> <user>: print the TransferPreapproval contract id.
 wallet_create_transfer_preapproval() {
-  curl -sSf -X POST "$(validator_api_url "$1")/wallet/transfer-preapproval" \
+  curl --max-time 120 -sSf -X POST "$(validator_api_url "$1")/wallet/transfer-preapproval" \
     -H "@$(subject_auth_header_file "$2")" -H 'Content-Type: application/json' -d '{}' \
     | jq -er .transfer_preapproval_contract_id
 }
 
 dso_party() {
-  curl -sSf -H "$SCAN_HOST_HEADER" "$SCAN_URL/api/scan/v0/dso-party-id" | jq -er .dso_party_id
+  curl --max-time 120 -sSf -H "$SCAN_HOST_HEADER" "$SCAN_URL/api/scan/v0/dso-party-id" | jq -er .dso_party_id
 }
 
 # amulet_transfer_factory <sender> <receiver> <amount> <input-holding-cids-json>: the registry's factory,
@@ -132,7 +132,7 @@ amulet_transfer_factory() {
   dso="$(dso_party)"
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   later="$(date -u -v+1H +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ)"
-  curl -sSf -X POST -H "$SCAN_HOST_HEADER" -H 'Content-Type: application/json' \
+  curl --max-time 120 -sSf -X POST -H "$SCAN_HOST_HEADER" -H 'Content-Type: application/json' \
     "$SCAN_URL/registry/transfer-instruction/v1/transfer-factory" \
     -d "$(jq -n --arg dso "$dso" --arg sender "$1" --arg receiver "$2" --arg amount "$3" --argjson inputs "$4" \
       --arg now "$now" --arg later "$later" '{
@@ -168,7 +168,7 @@ amulet_holdings_with_round() {
 
 # latest_open_round: the highest open mining round number that Scan reports.
 latest_open_round() {
-  curl -sSf -X POST -H "$SCAN_HOST_HEADER" -H 'Content-Type: application/json' \
+  curl --max-time 120 -sSf -X POST -H "$SCAN_HOST_HEADER" -H 'Content-Type: application/json' \
     "$SCAN_URL/api/scan/v0/open-and-issuing-mining-rounds" \
     -d '{"cached_open_mining_round_contract_ids": [], "cached_issuing_round_contract_ids": []}' \
     | jq -er '[.open_mining_rounds[].contract.payload.round.number | tonumber] | max'
@@ -191,7 +191,7 @@ ntt_transfer_vaa() {
 
 # allocate_local_party <validator> <party-hint>: allocate a party on that participant and print its id.
 allocate_local_party() {
-  curl -sSf -X POST "$(json_api_url "$1")/v2/parties" -H "@$ADMIN_AUTH_HEADER" \
+  curl --max-time 120 -sSf -X POST "$(json_api_url "$1")/v2/parties" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' -d "$(jq -n --arg hint "$2" '{partyIdHint: $hint, identityProviderId: ""}')" \
     | jq -er .partyDetails.party
 }

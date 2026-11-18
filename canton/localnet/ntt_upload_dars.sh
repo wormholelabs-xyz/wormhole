@@ -37,8 +37,8 @@ echo "NTT DAR: ntt $NTT_VERSION $NTT_PACKAGE_ID, wormhole-core $WORMHOLE_CORE_VE
 vetted_packages() {
   local ledger_json_url participant_id
   ledger_json_url="$(json_api_url "$1")"
-  participant_id="$(curl -sSf "$ledger_json_url/v2/parties/participant-id" -H "@$ADMIN_AUTH_HEADER" | jq -er .participantId)"
-  curl -sSf -X POST "$ledger_json_url/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/json' \
+  participant_id="$(curl --max-time 120 -sSf "$ledger_json_url/v2/parties/participant-id" -H "@$ADMIN_AUTH_HEADER" | jq -er .participantId)"
+  curl --max-time 120 -sSf -X POST "$ledger_json_url/v2/package-vetting/list" -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg pid "$participant_id" '{topologyStateFilter: {participantIds: [$pid]}}')" \
     | jq -ec '[.vettedPackages[]?.packages[] | {packageId, name: .packageName, version: .packageVersion}] | unique'
 }
@@ -63,7 +63,7 @@ check_core_vetting() {
 
 upload_without_vetting() {
   local validator_name="$1" http_status
-  http_status="$(curl -sS -o "$gg_work_dir/upload.out" -w '%{http_code}' \
+  http_status="$(curl --max-time 120 -sS -o "$gg_work_dir/upload.out" -w '%{http_code}' \
     -X POST "$(json_api_url "$validator_name")/v2/dars?vetAllPackages=false" \
     -H "@$ADMIN_AUTH_HEADER" -H 'Content-Type: application/octet-stream' --data-binary "@$NTT_DAR")"
   [[ "$http_status" == "200" ]] || fail "upload of $(basename "$NTT_DAR") to $validator_name: HTTP $http_status $(cat "$gg_work_dir/upload.out")"
@@ -71,7 +71,7 @@ upload_without_vetting() {
 
 # vet_packages <validator> <package-ids-json>
 vet_packages() {
-  curl -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
+  curl --max-time 120 -sSf -X POST "$(json_api_url "$1")/v2/package-vetting/update" -H "@$ADMIN_AUTH_HEADER" \
     -H 'Content-Type: application/json' \
     -d "$(jq -n --argjson ids "$2" --arg sync "$LOGICAL_SYNCHRONIZER_ID" \
       '{changes: [{operation: {Vet: {value: {packages: [$ids[] | {packageId: .}]}}}}], dryRun: false, synchronizerId: $sync}')" \
