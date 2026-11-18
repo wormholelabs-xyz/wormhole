@@ -48,6 +48,17 @@ validator_port_prefix() {
   esac
 }
 
+# localnet_core_dar_path: the wormhole-core DAR that upload_dars.sh uploads, at the version of core/daml.yaml.
+localnet_core_dar_path() {
+  local canton_project_dir="${CANTON_PROJECT_DIR:-$REPO_ROOT/canton}" core_version
+  core_version="$(awk '$1 == "version:" {print $2}' "$canton_project_dir/core/daml.yaml")"
+  if [[ ! "$core_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "cannot read the wormhole-core version from $canton_project_dir/core/daml.yaml" >&2
+    return 1
+  fi
+  echo "$canton_project_dir/core/.daml/dist/wormhole-core-$core_version.dar"
+}
+
 json_api_url() {
   local port_prefix
   port_prefix="$(validator_port_prefix "$1")"
