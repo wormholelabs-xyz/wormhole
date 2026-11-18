@@ -155,7 +155,7 @@ if ! grep -qxF "ROTATION protocol version: 37" "$gg_work_dir/rotation.log"; then
   echo "FAIL: the console did not report protocol version 37" >&2
   exit 1
 fi
-if ! grep -qE '^ROTATION effective time(s \(loaded in more than one call\))?: ' "$gg_work_dir/rotation.log"; then
+if ! grep -qE '^ROTATION effective times \((one load call|loaded in more than one call)\): ' "$gg_work_dir/rotation.log"; then
   echo "FAIL: the console did not report the effective time of the changes" >&2
   exit 1
 fi

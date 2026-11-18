@@ -127,11 +127,32 @@ def rotationLoadOrder(storedTransactions: Seq[GenericSignedTopologyTransaction],
   RotationLoadOrder(rootDelegations.headOption, partyChanges ++ namespaceChanges)
 }
 
-def checkSameEffectiveTime(effectiveTimes: Seq[(String, java.time.Instant)]): Unit = {
-  require(effectiveTimes.nonEmpty, "no effective times")
-  require(effectiveTimes.map(_._2).distinct.size == 1,
-    s"effective times differ: ${effectiveTimes.map { case (name, effectiveTime) => s"$name=$effectiveTime" }.mkString(" ")}")
+// Canton 3.7.3 gives each transaction of one load call its own effective time, in load order (LocalNet spread about
+// 1 s). Until the last mapping is effective, the later mappings accept the removed key. The bound turns a stalled
+// load into a failure.
+val maxRotationEffectiveTimeSpread = java.time.Duration.ofSeconds(30)
+
+// checkEffectiveTimesFollowLoadOrderWithinBound: each time is strictly after the time before it, and the last time
+// is at most maxRotationEffectiveTimeSpread after the first. Returns that spread.
+def checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder: Seq[(String, java.time.Instant)]): java.time.Duration = {
+  require(effectiveTimesInLoadOrder.nonEmpty, "no effective times")
+  effectiveTimesInLoadOrder.sliding(2).collect { case Seq(earlier, later) => (earlier, later) }.foreach {
+    case ((earlierName, earlierTime), (laterName, laterTime)) =>
+      require(laterTime.isAfter(earlierTime),
+        s"effective times are not strictly increasing in load order: $laterName=$laterTime is not after $earlierName=$earlierTime")
+  }
+  val spread = java.time.Duration.between(effectiveTimesInLoadOrder.head._2, effectiveTimesInLoadOrder.last._2)
+  require(!spread.isNegative, s"negative effective time spread $spread")
+  require(spread.compareTo(maxRotationEffectiveTimeSpread) <= 0,
+    s"effective time spread $spread is above the bound $maxRotationEffectiveTimeSpread")
+  spread
 }
+
+def effectiveTimesText(effectiveTimes: Seq[(String, java.time.Instant)]): String =
+  effectiveTimes.map { case (name, effectiveTime) => s"$name=$effectiveTime" }.mkString(" ")
+
+def spreadSecondsText(spread: java.time.Duration): String =
+  java.math.BigDecimal.valueOf(spread.toNanos, 9).setScale(3, java.math.RoundingMode.HALF_UP).toPlainString
 
 // checkRotationSafetyStop: runs before any change. The rotation parties are exactly the parties with a
 // PartyToParticipant in the namespace. The namespace owners and the signing keys of each such party are the old or

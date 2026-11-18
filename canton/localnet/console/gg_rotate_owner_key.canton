@@ -261,11 +261,12 @@ rotationPartyIds.foreach { party =>
 val effectiveTimes = rotationPartyIds.map(party => partyName(party) -> currentPartyToParticipant(party).context.validFrom) :+
   (namespaceRotationTargetName -> decentralizedNamespaceAfter.context.validFrom)
 if (completeBatchAcceptedInOneCall) {
-  checkSameEffectiveTime(effectiveTimes)
-  println(s"ROTATION effective time: ${effectiveTimes.head._2} (same for all ${effectiveTimes.size} mappings)")
+  println(s"ROTATION effective times (one load call): ${effectiveTimesText(effectiveTimes)}")
+  val effectiveTimeSpread = checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimes)
+  println(s"ROTATION effective times in load order, spread ${spreadSecondsText(effectiveTimeSpread)} s " +
+    s"(bound ${maxRotationEffectiveTimeSpread.getSeconds} s)")
 } else {
-  println(s"ROTATION effective times (loaded in more than one call): " +
-    effectiveTimes.map { case (name, effectiveTime) => s"$name=$effectiveTime" }.mkString(" "))
+  println(s"ROTATION effective times (loaded in more than one call): ${effectiveTimesText(effectiveTimes)}")
 }
 
 // The removed owner plus one kept owner cannot authorize a namespace change. The Admin API redacts

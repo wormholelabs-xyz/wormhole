@@ -2,8 +2,8 @@
 # Rotation fault rehearsal of gg_rotate_owner_key.sh with nttCustody and guardianGovernance in the namespace.
 # The cases run in this order. Each case after R2 starts from the owners that the case before it left.
 #   R2  Signer fault of the added owner. Expect ROTATION NOT STARTED and no topology change.
-#   R1  Full rotation. Expect the party order nttCustody,guardianGovernance, protocol version 37, one effective time
-#       for the 3 mappings, ROTATION done, and the ceremony checks of each party.
+#   R1  Full rotation. Expect the party order nttCustody,guardianGovernance, protocol version 37, effective times
+#       strictly in load order within the bound, ROTATION done, and the ceremony checks of each party.
 #   R3  nttCustody omitted from the load. Expect ROTATION HALF-APPLIED that names nttCustody only.
 #   R6  Ceremony probes in the R3 state, asserted:
 #         nttCustody:         kept + removed commits; kept + new is rejected (1 valid, 1 invalid).
@@ -133,7 +133,8 @@ run_rotation R1 -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "$r1_new_o
 [[ "$(cat "$gg_work_dir/R1.status")" -eq 0 ]] || fail "R1: the rotation exited $(cat "$gg_work_dir/R1.status")"
 expect_log_line R1 "ROTATION parties: nttCustody,guardianGovernance"
 expect_log_line R1 "ROTATION protocol version: 37"
-expect_log_line R1 "(same for all 3 mappings)"
+expect_log_line R1 "ROTATION effective times (one load call): nttCustody="
+expect_log_line R1 "ROTATION effective times in load order, spread "
 expect_log_line R1 "ROTATION done"
 echo "PASS R1: rotated $owner_to_remove to $r1_new_owner"
 owner_to_remove="$r1_new_owner"

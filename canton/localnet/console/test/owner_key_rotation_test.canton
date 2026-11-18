@@ -185,4 +185,8 @@ checkTableCase("E6-spread-above-bound", Some("effective time spread PT30.000001S
 checkTableCase("E7-no-effective-time", Some("no effective times")) {
   checkEffectiveTimesFollowLoadOrderWithinBound(Seq.empty)
 }
+checkTableCase("E8-spread-seconds-text", None) {
+  require(spreadSecondsText(java.time.Duration.ofNanos(1003751000L)) == "1.004", spreadSecondsText(java.time.Duration.ofNanos(1003751000L)))
+  require(spreadSecondsText(java.time.Duration.ofSeconds(30)) == "30.000", spreadSecondsText(java.time.Duration.ofSeconds(30)))
+}
 finishTable("owner-key-rotation")
