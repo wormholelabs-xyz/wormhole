@@ -17,7 +17,7 @@ readonly CONSOLE_TABLES=(
   "hosting-policy hosting_policy_test.canton 18"
   "owner-key-rotation owner_key_rotation_test.canton 51"
   "rotation-safety-stop rotation_safety_stop_test.canton 11"
-  "topology-cross-checks topology_cross_checks_test.canton 20"
+  "topology-cross-checks topology_cross_checks_test.canton 33"
 )
 
 work_dir="$(mktemp -d)"
