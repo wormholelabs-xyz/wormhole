@@ -351,7 +351,7 @@ Use this procedure for each new `wormhole-core` version that keeps the signatori
 The sequence prevents a submitter from using the old version to bypass the checks of the new version.
 
 NOTE: This procedure replaces the procedure in Section 7.5 of `canton/README.md`.
-That section still has the earlier sequence, which unvets the old package as the last step.
+That section still has the earlier sequence, which removes the vetting of the old package as the last step.
 Pull request #73 changes that section to agree with this procedure.
 Pull request #73 also adds a scan tool and a LocalNet rehearsal for this procedure.
 Until that merge, do the canary scan of Section 6.7.2 manually.
