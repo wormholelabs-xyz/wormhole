@@ -711,7 +711,13 @@ Procedure:
 7. For each party in the namespace, make sure that the signing keys contain the new owner key.
 8. For each party in the namespace, make sure that the signing keys do not contain the removed owner key.
 9. Make sure that the namespace threshold and the signing key threshold of each party did not change.
-10. Make sure that all the changes have the same effective time.
+10. Make sure that the effective times of the changes are in the load order: `nttCustody`, then `gg`, then the namespace.
+11. Make sure that the time from the first effective time to the last effective time is 30 seconds or less.
+
+Canton gives each change of one load call its own effective time.
+On LocalNet with Canton 3.7.3, the spread was about 1 s.
+In that window, `gg` and the namespace accept the removed key after the `nttCustody` change.
+This window is an input to decision U4 (Section 10.1).
 
 After the rotation, a signature from the removed key is not valid.
 A `gg` transaction with the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
@@ -728,7 +734,10 @@ Do not start a different ceremony before the rotation is complete.
 A signer failure and a load that the participant rejects completely leave the removed key valid for each party.
 The added key is then not valid for any party. Thus no party has a mixed key state.
 
-**Open item:** the measured behavior of a partial load on LocalNet.
+Measured behavior on LocalNet with Canton 3.7.3:
+
+- A load without the `nttCustody` change applies the other changes. The rotation is then half-applied.
+- A load in which one change has a missing owner signature fails completely. No mapping changes.
 
 #### Recovery from a half-applied rotation
 
@@ -738,7 +747,8 @@ It also shows the parties that still accept the removed key.
 1. Do not generate a new key for the new owner.
 2. Run the rotation again with `--resume`.
    `--resume` loads the changes that the owners signed in the sign phase. No owner signs again.
-3. Do steps 5 to 10 of the procedure again.
+3. Do steps 5 to 9 of the procedure again.
+   The changes of a `--resume` are in more than one load call. Thus steps 10 and 11 do not apply.
 
 If you start a new rotation instead of `--resume`, the safety stop stops it before any change.
 
@@ -748,7 +758,7 @@ LocalNet rehearsal: [`gg_rotate_owner_key.sh`](../canton/localnet/gg_rotate_owne
 The LocalNet script follows the three phases of this section.
 It keeps the signed changes in a file for `--resume`.
 On 2026-11-17, a live run of the earlier script passed. That script loaded each change in a separate load call.
-The rehearsals of the three phases are not run yet. See the open item in Section 7.5.
+On 2026-11-18, `gg_rotation_fault_check.sh` and `gg_rotation_safety_stop_check.sh` passed on LocalNet with Canton 3.7.3.
 
 ### 7.5 Rehearsal evidence
 
@@ -979,6 +989,8 @@ Two owner keys and two confirming hosts can move each holding of `nttCustody` wi
 `nttCustody` uses the owner keys and the threshold of `gg`: 2 of 3 on LocalNet.
 The guardian quorum for a VAA is 13 of 19.
 Decide the relation of the owner key threshold to the guardian quorum for `nttCustody` before MainNet.
+In a complete owner key rotation, `gg` and the namespace accept the removed key for up to about 1 s
+after the `nttCustody` change (Section 7.4).
 
 **U3: the two-id window for a core package upgrade.**
 The one-id procedure (Section 6.7) has a signing outage from step 5 to step 14 and a coordinated restart.
@@ -1005,7 +1017,6 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | `ContractUpgrade` governance VAA before a core package upgrade | 6.0 |
 | Automatic vetting of Amulet on guardian participants | 6.2 |
 | LocalNet run of the core upgrade abort procedure | 6.7 |
-| Measured behavior of a partial load in the owner key rotation | 7.4 |
 | Rehearsals with `wormhole-core` 0.8.0 | 7.5 |
 | Mapping from the 32-byte `recipient` to a Canton party | 7.6 |
 | Procedure for a participant key, OAuth2 client secret or `operator` party compromise | 7.7 |

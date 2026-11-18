@@ -419,7 +419,7 @@ The rotation has these phases:
    Load 2 is one load call with all other changes: `nttCustody` first, then `guardianGovernance`, then the namespace.
    The script tries load 2 a maximum of 3 times. Each try loads only the changes that are not effective.
 4. Checks. The script finds one of these results:
-   - All changes are effective. The script shows `ROTATION effective time` for the changes and `ROTATION done`.
+   - All changes are effective. The script shows `ROTATION effective times` for the changes and `ROTATION done`.
    - No change is effective. The script shows `ROTATION NOT APPLIED`. Each mapping keeps its serial.
    - Some changes are effective. The script shows `ROTATION HALF-APPLIED` and the parties that accept the removed key.
 
@@ -439,7 +439,11 @@ The signature must be exactly 64 bytes as 128 lowercase hex characters.
 2. Make sure that the output shows these results:
    - `ROTATION parties: nttCustody,guardianGovernance`, or `guardianGovernance` alone before `custody_host.sh`.
    - `ROTATION protocol version: 37`.
-   - `ROTATION effective time: <time> (same for all 3 mappings)`.
+   - `ROTATION effective times (one load call): nttCustody=<time> guardianGovernance=<time> namespace=<time>`.
+   - `ROTATION effective times in load order, spread <seconds> s (bound 30 s)`.
+     Canton gives each change of one load call its own effective time, in the load order.
+     The script stops if a time is not after the time before it.
+     The script also stops if the spread is more than 30 s.
    - The removed owner and one kept owner cannot change the namespace.
      The change fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
      The Admin API does not show this error code to the client. It shows a trace id.
@@ -530,7 +534,7 @@ The last line of each rehearsal shows the current owner names.
    | Case | Fault | Expected result |
    | - | - | - |
    | R2 | The signer of the new owner fails. | `ROTATION NOT STARTED`. The topology does not change. |
-   | R1 | None. | `ROTATION done`. One effective time for the 3 mappings. |
+   | R1 | None. | `ROTATION done`. The effective times are in the load order, with a spread of 30 s or less. |
    | R3 | The load omits the `nttCustody` change. | `ROTATION HALF-APPLIED` names `nttCustody`. |
    | R6 | None. Ceremony probes in the R3 state. | `nttCustody` accepts the removed key. `guardianGovernance` accepts the new key. |
    | R3b | `--resume` of R3. The signer of the new owner fails. | `ROTATION done`. 0 signatures before the removed-owner check. |
@@ -556,13 +560,23 @@ The last line of each rehearsal shows the current owner names.
 
 #### Results of the rotation measurements
 
-**Open item:** run `gg_rotation_fault_check.sh` on LocalNet and record here:
+Canton 3.7.3 on LocalNet, 2026-11-18, two runs:
 
-- R3: the mappings that changed.
-- R4: does the participant reject the complete load call, or apply a part of it?
-- R5: does Canton accept the root delegation and the namespace change in one load call?
+- R3: on each participant, the namespace and `guardianGovernance` changed. `nttCustody` did not change.
+- R4: the participant rejects the complete load call. No mapping changes.
+  The root delegation of load 1 stays effective. This delegation alone gives no authority.
+- R5: Canton accepts the root delegation and the namespace change in one load call. All mappings change.
+- R1 and R5: each change of one load call has its own effective time, in the load order.
 
-If R5 passes, the rotation can use one load call for all changes.
+| Run | Case | `nttCustody` | `guardianGovernance` | namespace | Spread |
+| - | - | - | - | - | - |
+| 1 | R1 | 11:52:49.327797Z | 11:52:49.743385Z | 11:52:50.331548Z | 1.004 s |
+| 1 | R5 | 11:54:55.628159Z | 11:54:56.097210Z | 11:54:56.458812Z | 0.831 s |
+| 2 | R1 | 12:03:54.931426Z | 12:03:55.348410Z | 12:03:55.941646Z | 1.010 s |
+| 2 | R5 | 12:05:08.695948Z | 12:05:09.171924Z | 12:05:09.775166Z | 1.079 s |
+
+WARNING: In a complete rotation, `guardianGovernance` and the namespace accept the removed key for up to about 1 s
+after the `nttCustody` change.
 
 ### Limits of the rehearsal
 
