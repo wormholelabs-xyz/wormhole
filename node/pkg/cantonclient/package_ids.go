@@ -181,8 +181,9 @@ func (verdict PublishPackageVerdict) AcceptedRole() (AcceptedPackageRole, bool) 
 
 // ParseAcceptedPackageIDs requires a current id. retiring is empty outside an
 // upgrade window; otherwise it is a second id with an accepted-until deadline
-// no more than MaxRetiringPackageWindow after startupWallClock. A deadline in
-// the past is valid: it keeps pre-deadline messages recoverable.
+// no more than MaxRetiringPackageWindow after startupWallClock. The bound
+// applies to each startup, so a later startup can set a later deadline. A
+// deadline in the past is valid: it keeps pre-deadline messages recoverable.
 func ParseAcceptedPackageIDs(currentConfig CurrentPackageConfig, retiring RetiringPackageConfig, startupWallClock time.Time) (AcceptedPackageIDs, error) {
 	current, err := ParsePackageID(currentConfig.PackageIDHex)
 	if err != nil {

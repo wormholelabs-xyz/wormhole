@@ -1331,10 +1331,14 @@ matches its effect.
 - The retiring id is different from the current id.
 - The retiring id needs a current id, also in unsafe dev mode.
 - The retiring id needs a deadline. A deadline needs a retiring id.
-- The deadline has the format `YYYY-MM-DDTHH:MM:SSZ`: RFC 3339, UTC, whole
-  seconds.
+- The deadline has the format RFC 3339, UTC, whole seconds. An example is
+  `2026-12-01T00:00:00Z`.
 - The deadline is a maximum of 7 days after the startup of the guardian
   (`MaxRetiringPackageWindow`). A longer window stops the guardian at startup.
+- The 7-day bound applies at each startup. The guardian keeps no record of the
+  deadline of an earlier startup. Thus a restart with a later deadline makes
+  the window longer. Keep the same deadline at each restart. Monitor
+  `wormhole_canton_retiring_package_accepted_until_seconds` for changes.
 - A deadline in the past is valid. It keeps the messages from before the
   deadline recoverable. The guardian writes a WARN log at startup.
 - Each canton flag without `--cantonRPC` stops the guardian at startup.
@@ -1369,12 +1373,24 @@ matches its effect.
   The package name must be `wormhole-core`. The package version must be equal
   to the version flag.
 - A different name or version stops the watcher with an error. The supervisor
-  restarts it, and the check runs again.
+  restarts it, and the check runs again. Only this result stops the watcher.
+  If the stream delivers a publish of that id, the next start reads again
+  from before the offset of that publish.
 - If the participant has no metadata for an id, the gauge
-  `wormhole_canton_package_metadata_verified` for that role is 0. A publish
-  from that id starts a new check. If the check fails again, the watcher
-  stops. It then starts again before the offset of that publish. No message is
-  lost.
+  `wormhole_canton_package_metadata_verified` for that role is 0. The watcher
+  writes a WARN log. This occurs before the vetting and after the unvet of
+  step 17.
+- Outside unsafe dev mode, the watcher continues to emit the publishes of an
+  id without metadata. The approved list binds each id to its version. Thus
+  the unvet does not stop the recovery of steps 18 to 21.
+- In unsafe dev mode, guardiand has no approved list. Thus each role needs one
+  match while the watcher runs. Before that match, the watcher drops each
+  publish of that role and increments the error count. The stream continues.
+  After a match, reobservation recovers the dropped messages. A match stays
+  valid after the unvet, because a package id is a hash of the package.
+- The reply of `ListVettedPackages` has one entry for each participant and
+  synchronizer that vets the id. The watcher reads a maximum of 16 pages. More
+  pages is an error. At startup, this error stops the watcher.
 
 > **CAUTION:** The metadata check finds an operator copy error. It is not a
 > security boundary, because the author of a package sets its name and
@@ -1389,7 +1405,8 @@ matches its effect.
 - `wormhole_canton_accepted_publish_messages_total` counts the stream
   publishes that the watcher emits. The `role` label is `current` or
   `retiring`. Reobservations are not in this counter.
-- The heartbeat contract address is `current` or `current,retiring`.
+- The heartbeat contract address is `current` or `current,retiring`. A
+  dashboard that reads this field must split it at the comma.
 
 **Rule for a security fix.** If the new core corrects a security defect, set
 the deadline to a maximum of 24 hours after step 13. Alternatively, use the
@@ -1426,7 +1443,8 @@ Upgrade the ledger:
     participants.
 11. Vet these DARs on all guardian participants.
 12. Upload and vet the same DARs on the operator participant.
-13. Tell integrators to submit with the 0.8.1 package id.
+13. Tell integrators to submit with the 0.8.1 package id. Tell them to use
+    one core version in each transaction.
 14. On each guardian participant, set the vetting of the 0.8.0 core DAR to
     end at the deadline. Use `PackageManagementService.UpdateVettedPackages`
     with `new_valid_until_exclusive`.
@@ -1470,6 +1488,11 @@ Close the window:
 > start. It stops with an error after 100000 publishes. Each guardian operator
 > runs steps 18 to 21 on its own participant.
 
+> **NOTE:** `canton-list-publishes` accepts `--executingPackageID` with no
+> deadline. Thus it also lists 0.8.0 publishes with a record time at or after
+> the deadline. The watcher drops the reobservation of these publishes. In
+> step 20, skip each line with a `recordTime` at or after the deadline.
+
 > **NOTE:** A restarted guardian does not see the messages of its restart
 > period. The other guardians keep the quorum. Reobservation by update id
 > recovers these messages for the restarted guardian. This recovery works
@@ -1495,6 +1518,23 @@ These items stay:
 
 - The 0.8.0 checks apply to 0.8.0 messages until the deadline or the unvet.
 - The open item about contracts that an earlier version created stays open.
+
+Known limits:
+
+- Two publishes on one emitter in one transaction make the second publish
+  transient. The watcher accepts the transient publish only if its emitter
+  create and its exercise have the same package id. Thus a transaction that
+  publishes under 0.8.0 and 0.8.1 on one emitter loses the second message.
+  The ledger keeps its sequence number. Reobservation applies the same rule.
+  The watcher increments
+  `wormhole_canton_publish_without_read_party_stakeholder_total`. Step 13
+  prevents this case.
+- The 7-day bound applies to each startup, not to the full window. Rules
+  for the ids and the deadline give the control.
+- The metadata check reads the vetting state of all participants, not only of
+  the guardian participant. A filter by participant needs `GetParticipantId`,
+  which needs the `ParticipantAdmin` right. The watcher user does not have
+  this right.
 
 **Rollback.**
 
