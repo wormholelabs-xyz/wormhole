@@ -115,7 +115,9 @@ submit_local_expect_rejection() {
 
 # Wallet (validator) API, as the wallet user. validator_api_url <validator>
 validator_api_url() {
-  echo "http://localhost:$(validator_port_prefix "$1")903/api/validator/v0"
+  local host_port
+  host_port="$(validator_api_port "$1")" || return 1
+  echo "http://localhost:$host_port/api/validator/v0"
 }
 
 # wallet_onboard <validator> <user>: onboard the user and print its party id.
