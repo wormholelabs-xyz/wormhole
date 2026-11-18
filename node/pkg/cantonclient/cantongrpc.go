@@ -80,7 +80,10 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 	return resp.GetOffset(), nil
 }
 
-// maxVettedPackagePages bounds one ListVettedPackageMetadata call.
+// maxVettedPackagePages bounds one ListVettedPackageMetadata call. The reply
+// has one entry for each participant and synchronizer that vets a requested
+// id: a participant filter needs GetParticipantId, which requires
+// ParticipantAdmin.
 const maxVettedPackagePages = 16
 
 func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs []PackageID) ([]VettedPackageMetadata, error) {
@@ -116,7 +119,7 @@ func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs [
 			return entries, nil
 		}
 	}
-	return nil, fmt.Errorf("ListVettedPackages: more than %d pages", maxVettedPackagePages)
+	return nil, fmt.Errorf("ListVettedPackages: more than %d pages (%d entries read); the reply lists every participant and synchronizer that vets the requested ids", maxVettedPackagePages, len(entries))
 }
 
 func (c *grpcClient) listVettedPackagesPage(ctx context.Context, packageIDHexes []string, pageToken string) (*apiv2.ListVettedPackagesResponse, error) {
@@ -492,8 +495,13 @@ func intField(fields map[string]*apiv2.Value, label string) (int64, error) {
 	return v.GetInt64(), nil
 }
 
+// protoTime is the zero time.Time for a missing, epoch-zero, or out-of-range
+// timestamp, so the callers' missing-time checks reject it.
 func protoTime(ts *timestamppb.Timestamp) time.Time {
-	if ts == nil {
+	if ts == nil || !ts.IsValid() {
+		return time.Time{}
+	}
+	if ts.GetSeconds() == 0 && ts.GetNanos() == 0 {
 		return time.Time{}
 	}
 	return ts.AsTime()
