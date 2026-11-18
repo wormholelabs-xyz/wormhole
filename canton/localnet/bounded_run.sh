@@ -6,11 +6,24 @@ readonly BOUNDED_RUN_MAX_SECONDS=3600
 readonly BOUNDED_RUN_TIMEOUT_STATUS=124
 readonly BOUNDED_RUN_KILL_GRACE_SECONDS=10
 
+# stop_bounded_run_on_caller_signal <signal> <command pid> <watchdog pid>: stops both process groups,
+# then delivers <signal> to the caller with its default action.
+stop_bounded_run_on_caller_signal() {
+  local caller_signal="$1" command_pid="$2" watchdog_pid="$3"
+  kill -KILL -- "-$watchdog_pid" 2>/dev/null || true
+  kill -TERM -- "-$command_pid" 2>/dev/null || true
+  sleep 1
+  kill -KILL -- "-$command_pid" 2>/dev/null || true
+  trap - "$caller_signal"
+  kill "-$caller_signal" "$$"
+}
+
 # run_with_timeout_seconds <seconds> <command...>: the command's exit status, or 124 after a stop at the deadline.
 # The command runs in its own process group. The stop sends TERM to that group, then KILL after
 # BOUNDED_RUN_KILL_GRACE_SECONDS, so children of the command stop too.
 run_with_timeout_seconds() {
   local timeout_seconds="$1" command_pid watchdog_pid deadline_reached_file command_status=0 job_control_was_on=false
+  local caller_signal_traps
   shift
   if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] || ((timeout_seconds > BOUNDED_RUN_MAX_SECONDS)); then
     echo "timeout must be 1 to $BOUNDED_RUN_MAX_SECONDS seconds, got '$timeout_seconds'" >&2
@@ -35,7 +48,16 @@ run_with_timeout_seconds() {
   ) &
   watchdog_pid=$!
   [[ "$job_control_was_on" == true ]] || set +m
+  # The command group does not get the caller's terminal signals, so forward them.
+  caller_signal_traps="$(trap -p INT TERM HUP)"
+  local caller_signal
+  for caller_signal in INT TERM HUP; do
+    # shellcheck disable=SC2064 # The pids are fixed when the trap is set.
+    trap "stop_bounded_run_on_caller_signal $caller_signal $command_pid $watchdog_pid" "$caller_signal"
+  done
   wait "$command_pid" || command_status=$?
+  trap - INT TERM HUP
+  eval "$caller_signal_traps"
   kill -KILL -- "-$watchdog_pid" 2>/dev/null || true
   wait "$watchdog_pid" 2>/dev/null || true
   if [[ ! -s "$deadline_reached_file" ]]; then
