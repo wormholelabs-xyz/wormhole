@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Table test of owner_key_input_checks.sh: owner names, the custody artifacts file and the rotation fault banner.
+# Table test of owner_key_input_checks.sh: owner names, the custody artifacts files, the rotation load order and the
+# rotation fault banner.
 # Needs no Docker and no LocalNet.
 # Usage: canton/localnet/test/owner_key_input_checks_test.sh
 set -euo pipefail
@@ -56,6 +57,25 @@ check_case custody-file-valid 0 "$VALID_PARTY_ID" read_custody_party_id "$work_d
 check_case custody-file-without-party 1 "$work_dir/no-party.json has no partyId" read_custody_party_id "$work_dir/no-party.json"
 check_case custody-file-malformed-party 1 "is not <name>::1220<64 hex>" read_custody_party_id "$work_dir/malformed-party.json"
 check_case custody-file-not-json 1 "$work_dir/not-json.json has no partyId" read_custody_party_id "$work_dir/not-json.json"
+
+check_case artifacts-of-ntt-custody 0 "custody-artifacts.json" custody_artifacts_file_name nttCustody
+check_case artifacts-of-fee-custody 0 "fee-custody-artifacts.json" custody_artifacts_file_name feeCustody
+check_case artifacts-of-guardian-governance 2 "unknown custody party name: guardianGovernance" \
+  custody_artifacts_file_name guardianGovernance
+check_case artifacts-of-empty-name 2 "unknown custody party name: " custody_artifacts_file_name ""
+check_case artifacts-without-name 2 "usage: custody_artifacts_file_name <party-name>" custody_artifacts_file_name
+
+FEE_CUSTODY_PARTY_ID="feeCustody::1220$(printf 'ab%.0s' $(seq 1 32))"
+GG_PARTY_ID="guardianGovernance::1220$(printf 'ab%.0s' $(seq 1 32))"
+check_case load-order-all-parties 0 "$VALID_PARTY_ID,$FEE_CUSTODY_PARTY_ID,$GG_PARTY_ID" \
+  rotation_party_ids_in_load_order "$VALID_PARTY_ID" "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID"
+check_case load-order-without-ntt-custody 0 "$FEE_CUSTODY_PARTY_ID,$GG_PARTY_ID" \
+  rotation_party_ids_in_load_order "" "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID"
+check_case load-order-guardian-governance-only 0 "$GG_PARTY_ID" rotation_party_ids_in_load_order "" "" "$GG_PARTY_ID"
+check_case load-order-without-guardian-governance 2 "guardianGovernance party id is empty" \
+  rotation_party_ids_in_load_order "$VALID_PARTY_ID" "$FEE_CUSTODY_PARTY_ID" ""
+check_case load-order-two-arguments 2 "usage: rotation_party_ids_in_load_order" \
+  rotation_party_ids_in_load_order "$VALID_PARTY_ID" "$GG_PARTY_ID"
 
 check_case fault-banner-none 0 "" env -u GG_ROTATION_FAULT_SIGNER_OF -u GG_ROTATION_FAULT_OMIT_PARTY_OF \
   -u GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF -u GG_ROTATION_MEASURE_SINGLE_LOAD bash -c \
