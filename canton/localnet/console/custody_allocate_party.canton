@@ -62,7 +62,8 @@ findPartyToParticipant(custodyPartyId) match {
     // A new mapping takes serial 1. Before any signer call, the console compares the change that app-provider
     // generates with the intended change.
     val intendedCustodyChange = IntendedTopologyChange(custodyPartyToParticipant, PositiveInt.one)
-    val generatedTransactions = participant.topology.transactions.generate(Seq(Proposal(custodyPartyToParticipant, synchronizerTopologyStore)))
+    val generatedTransactions = participant.topology.transactions.generate(
+      Seq(Proposal(custodyPartyToParticipant, synchronizerTopologyStore, TopologyChangeOp.Replace, Some(intendedCustodyChange.serial))))
     require(generatedTransactions.size == 1, s"app-provider generated ${generatedTransactions.size} transactions, expected 1")
     val unsigned = checkGeneratedTransactionIsIntended(generatedTransactions.head, intendedCustodyChange, protocolVersion,
       s"generated PartyToParticipant of ${partyName(custodyPartyId)}")

@@ -151,10 +151,12 @@ println(s"ROTATION before: added owner root delegation=${if (addedOwnerRootDeleg
 println(s"ROTATION before: ${targetsBefore.map(target => s"${target.name}=${target.keySet}").mkString(" ")}")
 
 var rotationSignatureCount = 0
-// generateIntendedTransaction: app-provider generates the change. Before any signer call, the console compares the
-// operation, the serial, the mapping and the hash with the intended change.
+// generateIntendedTransaction: app-provider generates the change at the intended serial. Without a serial, Canton
+// gives an unchanged mapping its current serial. Before any signer call, the console compares the operation, the
+// serial, the mapping and the hash with the intended change.
 def generateIntendedTransaction(intended: IntendedTopologyChange, description: String): TopologyTransaction[TopologyChangeOp, TopologyMapping] = {
-  val generatedTransactions = participant.topology.transactions.generate(Seq(Proposal(intended.mapping, synchronizerTopologyStore)))
+  val generatedTransactions = participant.topology.transactions.generate(
+    Seq(Proposal(intended.mapping, synchronizerTopologyStore, TopologyChangeOp.Replace, Some(intended.serial))))
   require(generatedTransactions.size == 1, s"$description: app-provider generated ${generatedTransactions.size} transactions, expected 1")
   checkGeneratedTransactionIsIntended(generatedTransactions.head, intended, protocolVersion, description)
 }
@@ -318,16 +320,18 @@ if (completeBatchAcceptedInOneCall) {
 Files.delete(Paths.get(signedTransactionsFile))
 println(s"ROTATION stored signed transactions removed: $signedTransactionsFile")
 
-// Removed-owner probe: the removed owner alone signs the current namespace definition again at the next serial.
-// Only the removed key signs it, and the definition is the current one: if other owners complete it, it changes
-// nothing. The Admin API redacts TOPOLOGY_UNAUTHORIZED_TRANSACTION; gg_rotate_owner_key.sh finds the error code in the
-// participant log by the trace id. The probe is not stored.
+// Removed-owner probe: the removed owner alone signs a namespace definition that adds it again, at the next serial.
+// The probe holds no signature of a current owner. Thus its completion needs the full namespace threshold of current
+// owners, as any other change. The Admin API redacts TOPOLOGY_UNAUTHORIZED_TRANSACTION; gg_rotate_owner_key.sh finds
+// the error code in the participant log by the trace id. The probe is not stored.
 println(s"ROTATION signatures before the removed-owner check: $rotationSignatureCount")
 val namespaceBeforeProbe = currentNamespaceDefinitionWithSerial()
 require(namespaceBeforeProbe.mapping.owners.forgetNE == newOwnerSet, "namespace owners are not the new owner set before the probe")
 require(!namespaceBeforeProbe.mapping.owners.forgetNE.contains(removedOwner.namespace), "removed owner is a namespace owner before the probe")
+val removedOwnerProbeMapping = DecentralizedNamespaceDefinition.tryCreate(namespaceBeforeProbe.mapping.namespace,
+  namespaceBeforeProbe.mapping.threshold, NonEmpty.from(newOwnerSet + removedOwner.namespace).getOrElse(sys.error("no owners")))
 val removedOwnerProbe = signedBy(generateIntendedTransaction(
-  IntendedTopologyChange(namespaceBeforeProbe.mapping, namespaceBeforeProbe.serial.tryAdd(1)), "generated removed-owner probe"), Seq(removedOwner))
+  IntendedTopologyChange(removedOwnerProbeMapping, namespaceBeforeProbe.serial.tryAdd(1)), "generated removed-owner probe"), Seq(removedOwner))
 val removedOwnerAttempt = scala.util.Try(participant.topology.transactions.load(Seq(removedOwnerProbe), synchronizerTopologyStore))
 Thread.sleep(5000)
 val namespaceAfterProbe = currentNamespaceDefinitionWithSerial()
