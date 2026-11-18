@@ -12,33 +12,51 @@ import (
 	"go.uber.org/zap"
 )
 
-var errPackageMetadataMismatched = errors.New("canton: vetted package metadata does not match the expected wormhole-core name and version")
+var (
+	errPackageMetadataMismatched = errors.New("canton: vetted package metadata does not match the expected wormhole-core name and version")
+	// errPackageMetadataNeverVerifiedInDevMode refuses one publish; the watcher keeps running.
+	errPackageMetadataNeverVerifiedInDevMode = errors.New("canton: unsafe dev mode emits a core package role only after one vetting metadata match")
+)
 
 var packageMetadataVerifiedGauge = promauto.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Name: "wormhole_canton_package_metadata_verified",
-		Help: "1 when the participant's vetting metadata for the pinned core package id of this role shows wormhole-core at the expected version; 0 while not yet vetted",
+		Help: "1 when the participant's vetting metadata for the pinned core package id of this role shows wormhole-core at the expected version; 0 while the participant does not vet the id (not yet, or after the unvet)",
 	}, []string{"role"})
 
-// packageMetadataVerification records which pinned roles passed the metadata check.
+// packageMetadataVerification records the latest metadata verdict of each
+// pinned role, and the roles that had a Verified verdict at least once.
 type packageMetadataVerification struct {
-	mu            sync.Mutex
-	verifiedRoles map[cantonclient.AcceptedPackageRole]bool
+	mu                sync.Mutex
+	latestVerdicts    map[cantonclient.AcceptedPackageRole]cantonclient.PackageMetadataVerdict
+	verifiedOnceRoles map[cantonclient.AcceptedPackageRole]bool
 }
 
-func (verification *packageMetadataVerification) setVerified(role cantonclient.AcceptedPackageRole, verified bool) {
+func (verification *packageMetadataVerification) recordVerdict(role cantonclient.AcceptedPackageRole, verdict cantonclient.PackageMetadataVerdict) {
 	verification.mu.Lock()
 	defer verification.mu.Unlock()
-	if verification.verifiedRoles == nil {
-		verification.verifiedRoles = make(map[cantonclient.AcceptedPackageRole]bool, 2)
+	if verification.latestVerdicts == nil {
+		verification.latestVerdicts = make(map[cantonclient.AcceptedPackageRole]cantonclient.PackageMetadataVerdict, 2)
+		verification.verifiedOnceRoles = make(map[cantonclient.AcceptedPackageRole]bool, 2)
 	}
-	verification.verifiedRoles[role] = verified
+	verification.latestVerdicts[role] = verdict
+	if verdict == cantonclient.PackageMetadataVerdictVerified {
+		verification.verifiedOnceRoles[role] = true
+	}
 }
 
-func (verification *packageMetadataVerification) isVerified(role cantonclient.AcceptedPackageRole) bool {
+// wasVerifiedOnce stays true after an unvet: a package id is the hash of the
+// package, so its name and version cannot change.
+func (verification *packageMetadataVerification) wasVerifiedOnce(role cantonclient.AcceptedPackageRole) bool {
 	verification.mu.Lock()
 	defer verification.mu.Unlock()
-	return verification.verifiedRoles[role]
+	return verification.verifiedOnceRoles[role]
+}
+
+func (verification *packageMetadataVerification) isMismatched(role cantonclient.AcceptedPackageRole) bool {
+	verification.mu.Lock()
+	defer verification.mu.Unlock()
+	return verification.latestVerdicts[role] == cantonclient.PackageMetadataVerdictMismatched
 }
 
 // refreshPackageMetadata checks every pinned id against the participant's
@@ -53,7 +71,7 @@ func (e *Watcher) refreshPackageMetadata(ctx context.Context, logger *zap.Logger
 			if !e.unsafeDevMode {
 				panic("canton: pinned core package id without an expected version outside unsafe dev mode")
 			}
-			e.packageMetadata.setVerified(pinned.Role, true)
+			e.packageMetadata.recordVerdict(pinned.Role, cantonclient.PackageMetadataVerdictVerified)
 			continue
 		}
 		packageIDsToCheck = append(packageIDsToCheck, pinned.PackageID)
@@ -70,19 +88,19 @@ func (e *Watcher) refreshPackageMetadata(ctx context.Context, logger *zap.Logger
 			continue
 		}
 		verdict := cantonclient.CheckVettedPackageMatchesExpected(entries, pinned.PackageID, pinned.ExpectedVersion)
+		e.packageMetadata.recordVerdict(pinned.Role, verdict)
 		switch verdict {
 		case cantonclient.PackageMetadataVerdictVerified:
-			e.packageMetadata.setVerified(pinned.Role, true)
 			packageMetadataVerifiedGauge.WithLabelValues(pinned.Role.String()).Set(1)
 		case cantonclient.PackageMetadataVerdictNotYetVetted:
-			e.packageMetadata.setVerified(pinned.Role, false)
 			packageMetadataVerifiedGauge.WithLabelValues(pinned.Role.String()).Set(0)
-			logger.Warn("canton: pinned core package id has no vetting metadata on this participant yet",
+			logger.Warn("canton: the participant has no vetting metadata for a pinned core package id (not vetted yet, or unvetted)",
 				zap.Stringer("role", pinned.Role),
 				zap.Stringer("packageId", pinned.PackageID),
-				zap.Stringer("expectedVersion", pinned.ExpectedVersion))
+				zap.Stringer("expectedVersion", pinned.ExpectedVersion),
+				zap.Bool("verifiedOnce", e.packageMetadata.wasVerifiedOnce(pinned.Role)),
+				zap.Bool("unsafeDevMode", e.unsafeDevMode))
 		case cantonclient.PackageMetadataVerdictMismatched:
-			e.packageMetadata.setVerified(pinned.Role, false)
 			packageMetadataVerifiedGauge.WithLabelValues(pinned.Role.String()).Set(0)
 			logger.Error("canton: pinned core package id is vetted with a different name or version",
 				zap.Stringer("role", pinned.Role),
@@ -97,19 +115,32 @@ func (e *Watcher) refreshPackageMetadata(ctx context.Context, logger *zap.Logger
 	return nil
 }
 
-// checkPublishPackageVerified admits a publish whose executing role passed
-// the metadata check, rechecking once if it has not. A publish that
-// guardianGovernance sees ran under a package vetted here, so its metadata
-// must exist on this participant.
-func (e *Watcher) checkPublishPackageVerified(ctx context.Context, logger *zap.Logger, client cantonclient.CantonClient, role cantonclient.AcceptedPackageRole) error {
-	if e.acceptedPackageIDs.MatchesAnyPackage() || e.packageMetadata.isVerified(role) {
+// checkPublishPackageAdmitted refuses a publish of a role whose metadata
+// mismatched. Outside unsafe dev mode a role without vetting metadata is
+// admitted: the approved list binds the id to its version, and the unvet must
+// keep pre-deadline messages recoverable (canton/README.md section 7.5).
+//
+// SECURITY: unsafe dev mode has no approved list. There a role needs one
+// Verified verdict in the life of this Watcher; until then the publish is
+// refused with errPackageMetadataNeverVerifiedInDevMode.
+func (e *Watcher) checkPublishPackageAdmitted(ctx context.Context, logger *zap.Logger, client cantonclient.CantonClient, role cantonclient.AcceptedPackageRole) error {
+	if e.acceptedPackageIDs.MatchesAnyPackage() {
+		return nil
+	}
+	if e.packageMetadata.isMismatched(role) {
+		return fmt.Errorf("%w: role %s", errPackageMetadataMismatched, role)
+	}
+	if e.packageMetadata.wasVerifiedOnce(role) {
+		return nil
+	}
+	if !e.unsafeDevMode {
 		return nil
 	}
 	if err := e.refreshPackageMetadata(ctx, logger, client); err != nil {
 		return err
 	}
-	if !e.packageMetadata.isVerified(role) {
-		return fmt.Errorf("canton: the %s core package id has no matching vetting metadata on this participant", role)
+	if !e.packageMetadata.wasVerifiedOnce(role) {
+		return fmt.Errorf("%w: role %s", errPackageMetadataNeverVerifiedInDevMode, role)
 	}
 	return nil
 }
@@ -119,7 +150,8 @@ func (e *Watcher) rewindResumeOffsetBefore(participantOffset int64) {
 	if participantOffset <= 0 {
 		panic("canton: participant offset of a streamed event must be positive")
 	}
-	if last := e.lastOffset.Load(); last == 0 || last >= participantOffset {
+	if !e.hasResumeOffset.Load() || e.lastOffset.Load() >= participantOffset {
 		e.lastOffset.Store(participantOffset - 1)
+		e.hasResumeOffset.Store(true)
 	}
 }

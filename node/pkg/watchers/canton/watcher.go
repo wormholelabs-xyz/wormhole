@@ -143,8 +143,10 @@ type Watcher struct {
 	// across supervisor restarts of Run (the Watcher instance persists). Canton
 	// ends streams whose access token expired, so Run resubscribes from here
 	// rather than the current ledger end to avoid dropping the reconnect
-	// window. Written only by the data-pump goroutine.
-	lastOffset atomic.Int64
+	// window. Valid only when hasResumeOffset is true; offset 0 is the ledger
+	// begin. Written only by the data-pump goroutine.
+	lastOffset      atomic.Int64
+	hasResumeOffset atomic.Bool
 
 	// packageMetadata holds which pinned roles passed the vetting metadata check.
 	packageMetadata packageMetadataVerification
@@ -234,9 +236,11 @@ func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclien
 	}
 }
 
-// checkAcceptedPackageIDsAllowed rejects an empty set, and the any-package
-// wildcard outside unsafe dev mode (a look-alike package could forge messages).
-func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPackageIDs, unsafeDevMode bool) error {
+// checkAcceptedPackageIDsAllowed rejects an empty set, the any-package
+// wildcard outside unsafe dev mode (a look-alike package could forge
+// messages), and outside unsafe dev mode a pinned (id, version) that is not in
+// approvedCorePackages.
+func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPackageIDs, unsafeDevMode bool, approvedCorePackages cantonclient.ApprovedCorePackages) error {
 	if acceptedPackageIDs.MatchesAnyPackage() {
 		if !unsafeDevMode {
 			return fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
@@ -253,6 +257,10 @@ func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPack
 		if pinned.ExpectedVersion.IsZero() {
 			return fmt.Errorf("canton: the %s core package id needs an expected version outside unsafe dev mode", pinned.Role)
 		}
+	}
+	// SECURITY: only reviewed core releases can be pinned.
+	if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
+		return fmt.Errorf("canton: %w", err)
 	}
 	return nil
 }
@@ -293,7 +301,7 @@ func newWatcherWithApprovedList(
 	msgC chan<- *common.MessagePublication,
 	obsvReqC <-chan *gossipv1.ObservationRequest,
 ) (*Watcher, error) {
-	if err := checkAcceptedPackageIDsAllowed(acceptedPackageIDs, unsafeDevMode); err != nil {
+	if err := checkAcceptedPackageIDsAllowed(acceptedPackageIDs, unsafeDevMode, approvedCorePackages); err != nil {
 		return nil, err
 	}
 	return &Watcher{
@@ -399,8 +407,9 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 	// Record the resume point before publishing so a restart can never skip an
 	// offset the processor already saw. Reobservations replay old offsets and
 	// must not move the stream's resume point backward.
-	if !isReobservation && ev.ParticipantOffset > e.lastOffset.Load() {
+	if !isReobservation && (!e.hasResumeOffset.Load() || ev.ParticipantOffset > e.lastOffset.Load()) {
 		e.lastOffset.Store(ev.ParticipantOffset)
+		e.hasResumeOffset.Store(true)
 	}
 
 	e.msgChan <- observation //nolint:channelcheck // The channel to the processor is buffered and shared across chains, if it backs up we should stop processing new observations
@@ -449,8 +458,8 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 	}
 
 	for _, msg := range txn.Messages {
-		if err := e.checkPublishPackageVerified(ctx, logger, client, msg.AcceptedPackageRole); err != nil {
-			logger.Error("canton_fetch_obvs_req dropped a message from an unverified core package",
+		if err := e.checkPublishPackageAdmitted(ctx, logger, client, msg.AcceptedPackageRole); err != nil {
+			logger.Error("canton_fetch_obvs_req dropped a message that the package metadata gate refused",
 				zap.Stringer("updateId", updateID), zap.Error(err))
 			p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 			continue
@@ -467,7 +476,7 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 
 func (e *Watcher) Run(ctx context.Context) error {
 	// Redundant with NewWatcher; covers a Watcher literal.
-	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode); err != nil {
+	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode, e.approvedCorePackages); err != nil {
 		return err
 	}
 	if e.packageMetadataRecheckInterval <= 0 {
@@ -524,7 +533,11 @@ func (e *Watcher) Run(ctx context.Context) error {
 	// (~minutes with Keycloak), and resuming from ledger end would silently
 	// drop anything published during the reconnect window.
 	beginExclusive := ledgerEnd
-	if last := e.lastOffset.Load(); last > 0 {
+	if e.hasResumeOffset.Load() {
+		last := e.lastOffset.Load()
+		if last < 0 {
+			panic("canton: negative resume offset")
+		}
 		beginExclusive = last
 		logger.Info("resuming update stream from last processed offset",
 			zap.Int64("lastOffset", last), zap.Int64("ledgerEnd", ledgerEnd))
@@ -558,10 +571,20 @@ func (e *Watcher) Run(ctx context.Context) error {
 			case subErr := <-subscription.Err():
 				return fmt.Errorf("canton_data_pump subscription error: %w", subErr)
 			case ev := <-eventChan:
-				// SECURITY: fail closed; the next Run resubscribes before this event.
-				if err := e.checkPublishPackageVerified(ctx, logger, client, ev.Message.AcceptedPackageRole); err != nil {
+				admitErr := e.checkPublishPackageAdmitted(ctx, logger, client, ev.Message.AcceptedPackageRole)
+				if errors.Is(admitErr, errPackageMetadataNeverVerifiedInDevMode) {
+					// Drop without a rewind, so later events still flow; reobservation recovers it after a match.
+					logger.Error("canton_data_pump dropped a message that the package metadata gate refused",
+						zap.Int64("participantOffset", ev.ParticipantOffset),
+						zap.Stringer("updateId", ev.UpdateID),
+						zap.Error(admitErr))
+					p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+					continue
+				}
+				if admitErr != nil {
+					// SECURITY: fail closed on a mismatch or an RPC failure; the next Run resubscribes before this event.
 					e.rewindResumeOffsetBefore(ev.ParticipantOffset)
-					return fmt.Errorf("canton_data_pump stopped at offset %d: %w", ev.ParticipantOffset, err)
+					return fmt.Errorf("canton_data_pump stopped at offset %d: %w", ev.ParticipantOffset, admitErr)
 				}
 				e.processMessage(logger, ev, false)
 			}
