@@ -64,8 +64,51 @@ for bounded_run_case in "${BOUNDED_RUN_CASES[@]}"; do
   fi
 done
 
+# Columns: case | signal sent to the caller
+readonly CALLER_SIGNAL_CASES=("caller gets TERM|TERM" "caller gets INT|INT" "caller gets HUP|HUP")
+bounded_run_library="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bounded_run.sh"
+
+for caller_signal_case in "${CALLER_SIGNAL_CASES[@]}"; do
+  IFS='|' read -r case_name caller_signal <<<"$caller_signal_case"
+  marker="bounded-run-signal-test-$$-$RANDOM"
+  child_pid_file="$work_dir/child.pid"
+  rm -f "$child_pid_file"
+  # Job control keeps INT deliverable: a non-interactive shell ignores INT in plain background jobs.
+  set -m
+  CHILD_PID_FILE="$child_pid_file" bash -c 'source "$1"; run_with_timeout_seconds 600 bash -c "sleep 300 & echo \$! > \"\$CHILD_PID_FILE\"; wait" "$2"' \
+    caller "$bounded_run_library" "$marker" 2>/dev/null &
+  caller_pid=$!
+  set +m
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [[ -s "$child_pid_file" ]] && break
+    sleep 0.5
+  done
+  kill "-$caller_signal" "$caller_pid" 2>/dev/null || true
+  wait "$caller_pid" 2>/dev/null || true
+  sleep 1
+  case_failed=false
+  if pgrep -f "$marker" >/dev/null; then
+    echo "FAIL: $case_name: the command still runs" >&2
+    pkill -KILL -f "$marker" || true
+    case_failed=true
+  fi
+  if [[ ! -s "$child_pid_file" ]]; then
+    echo "FAIL: $case_name: the command did not start" >&2
+    case_failed=true
+  elif kill -0 "$(cat "$child_pid_file")" 2>/dev/null; then
+    echo "FAIL: $case_name: a child of the command still runs" >&2
+    kill -KILL "$(cat "$child_pid_file")" 2>/dev/null || true
+    case_failed=true
+  fi
+  if [[ "$case_failed" == true ]]; then
+    failure_count=$((failure_count + 1))
+  else
+    echo "PASS: $case_name"
+  fi
+done
+
 if ((failure_count > 0)); then
   echo "$failure_count case(s) failed" >&2
   exit 1
 fi
-echo "All ${#BOUNDED_RUN_CASES[@]} cases passed"
+echo "All $((${#BOUNDED_RUN_CASES[@]} + ${#CALLER_SIGNAL_CASES[@]})) cases passed"
