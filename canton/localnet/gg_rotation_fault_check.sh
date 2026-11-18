@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# Rotation fault rehearsal of gg_rotate_owner_key.sh with nttCustody and guardianGovernance in the namespace.
+# Rotation fault rehearsal of gg_rotate_owner_key.sh with nttCustody, feeCustody and guardianGovernance in the
+# namespace.
 # The cases run in this order. Each case after R2 starts from the owners that the case before it left.
 #   R2  Signer fault of the added owner. Expect ROTATION NOT STARTED and no topology change.
-#   R1  Full rotation. Expect the party order nttCustody,guardianGovernance, protocol version 37, effective times
+#   R1  Full rotation. Expect the party order nttCustody,feeCustody,guardianGovernance, protocol version 37, effective times
 #       strictly in load order within the bound, ROTATION done, and the ceremony checks of each party.
 #   R3  nttCustody omitted from the load. Expect ROTATION HALF-APPLIED that names nttCustody only.
 #   R6  Ceremony probes in the R3 state, asserted:
 #         nttCustody:         kept + removed commits; kept + new is rejected (1 valid, 1 invalid).
 #         guardianGovernance: kept + new commits; kept + removed is rejected (1 valid, 1 invalid).
 #   R3b --resume of R3 with a signer fault of the added owner. Expect ROTATION done and 0 rotation signatures.
+#   R7  feeCustody omitted from the load. Expect ROTATION HALF-APPLIED that names feeCustody only. Then --resume.
+#       Expect ROTATION done.
 #   R4  Measurement: the nttCustody change in the load lacks the signature of the added owner.
 #       Prints MEASURED R4 with the outcome. A half-applied outcome is completed with --resume.
 #   R5  Measurement: the root delegation of the added owner goes into the same load call.
 #       Prints MEASURED R5 with the outcome. A half-applied outcome is completed with --resume.
 # Usage: gg_rotation_fault_check.sh <removed-owner> <kept-owner> <kept-owner>
 #   The current owner names, for example: owner3 owner1 owner2. New owner names are rot-<case>-<time>.
-# Precondition: custody_host.sh, gg_package_vetting.sh and custody_authority_check.sh ran.
+# Precondition: custody_host.sh for nttCustody and feeCustody, gg_package_vetting.sh and custody_authority_check.sh
+# ran.
 # Output: the last line names the current owners after the run.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
@@ -29,6 +33,9 @@ check_owner_names_are_safe "$@"
 check_owner_names_differ "$@"
 if [[ -z "$CUSTODY_PARTY" ]]; then
   fail "missing $CUSTODY_ARTIFACTS. Run custody_host.sh first."
+fi
+if [[ -z "$FEE_CUSTODY_PARTY" ]]; then
+  fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh first."
 fi
 owner_to_remove="$1" kept_owner_1="$2" kept_owner_2="$3"
 RUN_SUFFIX="$(date +%s)"
@@ -131,7 +138,7 @@ echo "== R1: full rotation"
 r1_new_owner="rot-r1-$RUN_SUFFIX"
 run_rotation R1 -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "$r1_new_owner"
 [[ "$(cat "$gg_work_dir/R1.status")" -eq 0 ]] || fail "R1: the rotation exited $(cat "$gg_work_dir/R1.status")"
-expect_log_line R1 "ROTATION parties: nttCustody,guardianGovernance"
+expect_log_line R1 "ROTATION parties: nttCustody,feeCustody,guardianGovernance"
 expect_log_line R1 "ROTATION protocol version: 37"
 expect_log_line R1 "ROTATION effective times (one load call): nttCustody="
 expect_log_line R1 "ROTATION effective times in load order, spread "
@@ -166,6 +173,19 @@ expect_log_line R3b "ROTATION done"
 echo "PASS R3b: resumed without signers"
 owner_to_remove="$r3_new_owner"
 
+echo "== R7: feeCustody omitted from the load"
+r7_new_owner="rot-r7-$RUN_SUFFIX"
+run_rotation R7 GG_ROTATION_FAULT_OMIT_PARTY_OF=feeCustody -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "$r7_new_owner"
+[[ "$(cat "$gg_work_dir/R7.status")" -ne 0 ]] || fail "R7: the rotation exited 0"
+[[ "$(rotation_outcome R7)" == half-applied ]] || fail "R7: expected ROTATION HALF-APPLIED"
+expect_log_line R7 "ROTATION HALF-APPLIED: still accept the removed key: feeCustody."
+expect_probe "$FEE_CUSTODY_PARTY" commit "$kept_owner_1" "$owner_to_remove"
+expect_probe "$FEE_CUSTODY_PARTY" rejected "$kept_owner_1" "$r7_new_owner"
+run_rotation R7-resume -- --resume "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "$r7_new_owner"
+[[ "$(rotation_outcome R7-resume)" == "done" ]] || fail "R7: --resume did not finish the rotation"
+echo "PASS R7: half-applied for feeCustody only, finished with --resume"
+owner_to_remove="$r7_new_owner"
+
 echo "== R4: measurement, nttCustody change without the signature of the added owner"
 r4_new_owner="rot-r4-$RUN_SUFFIX"
 run_rotation R4 GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF=nttCustody -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "$r4_new_owner"
@@ -176,5 +196,5 @@ r5_new_owner="rot-r5-$RUN_SUFFIX"
 run_rotation R5 GG_ROTATION_MEASURE_SINGLE_LOAD=true -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "$r5_new_owner"
 owner_to_remove="$(complete_measured_rotation R5 "$owner_to_remove" "$r5_new_owner")"
 
-echo "PASS: rotation fault cases R1, R2, R3, R3b, R6; measured R3, R4, R5"
+echo "PASS: rotation fault cases R1, R2, R3, R3b, R6, R7; measured R3, R4, R5"
 echo "Current owners: $kept_owner_1 $kept_owner_2 $owner_to_remove"

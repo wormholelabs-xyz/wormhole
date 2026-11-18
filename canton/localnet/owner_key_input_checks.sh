@@ -51,6 +51,42 @@ read_custody_party_id() {
   echo "$custody_party_id"
 }
 
+# custody_artifacts_file_name <party-name>: artifacts file name of a custody party of the guardian namespace.
+custody_artifacts_file_name() {
+  if [[ $# -ne 1 ]]; then
+    echo "usage: custody_artifacts_file_name <party-name>" >&2
+    return 2
+  fi
+  case "$1" in
+    nttCustody) echo "custody-artifacts.json" ;;
+    feeCustody) echo "fee-custody-artifacts.json" ;;
+    *)
+      echo "unknown custody party name: $1" >&2
+      return 2
+      ;;
+  esac
+}
+
+# rotation_party_ids_in_load_order <ntt-custody-id> <fee-custody-id> <guardian-governance-id>: comma-separated party
+# ids in load order. Custody parties first, guardianGovernance last. An empty custody id is left out.
+rotation_party_ids_in_load_order() {
+  if [[ $# -ne 3 ]]; then
+    echo "usage: rotation_party_ids_in_load_order <ntt-custody-id> <fee-custody-id> <guardian-governance-id>" >&2
+    return 2
+  fi
+  if [[ -z "$3" ]]; then
+    echo "guardianGovernance party id is empty" >&2
+    return 2
+  fi
+  local party_id party_ids=()
+  for party_id in "$@"; do
+    if [[ -n "$party_id" ]]; then
+      party_ids+=("$party_id")
+    fi
+  done
+  (IFS=,; echo "${party_ids[*]}")
+}
+
 # print_active_rotation_faults: one line for each rotation fault variable with a non-empty value.
 print_active_rotation_faults() {
   local fault_variable

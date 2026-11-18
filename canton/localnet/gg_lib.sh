@@ -127,13 +127,30 @@ create_ceremony_probe() {
     "$(ceremony_probe_create_command "$party_id" "$label")" "$(namespace_party_signers_json "$party_id" "$@")"
 }
 
-# Second party under the guardian decentralized namespace (custody_host.sh). Empty until it exists.
-CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"
+# Custody parties under the guardian decentralized namespace (custody_host.sh). Each is empty until it exists.
+# nttCustody owns the NTT reserves. feeCustody co-signs CoreState and receives the core fees.
+CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/$(custody_artifacts_file_name nttCustody)"
 if ! CUSTODY_PARTY="$(read_custody_party_id "$CUSTODY_ARTIFACTS")"; then
   exit 1
 fi
+FEE_CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/$(custody_artifacts_file_name feeCustody)"
+if ! FEE_CUSTODY_PARTY="$(read_custody_party_id "$FEE_CUSTODY_ARTIFACTS")"; then
+  exit 1
+fi
 # shellcheck disable=SC2034 # used by the scripts that source this file
-readonly CUSTODY_PARTY
+readonly CUSTODY_PARTY FEE_CUSTODY_PARTY
+
+# custody_party_id_of <party-name>: id of the custody party with that name, or empty until custody_host.sh ran.
+custody_party_id_of() {
+  case "$1" in
+    nttCustody) echo "$CUSTODY_PARTY" ;;
+    feeCustody) echo "$FEE_CUSTODY_PARTY" ;;
+    *)
+      echo "unknown custody party name: $1" >&2
+      return 2
+      ;;
+  esac
+}
 
 # submit_interactive <command-id> <act-as-json-array> <command-json> <signers-json> [disclosed-json] [package-preference-json]
 # Prints the transaction JSON. Returns non-zero on rejection; the error text goes to stderr.
