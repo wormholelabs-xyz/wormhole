@@ -253,3 +253,75 @@ def checkParticipantTopologyViewsAgree(views: Seq[NamespaceTopologyView]): Unit 
       s"SAFETY STOP: participant ${view.participantName} PartyToParticipant mappings differ from participant ${referenceView.participantName}")
   }
 }
+
+// The guardian-namespace topology that each participant of this console shows. Each party of the namespace has
+// exactly the console participants as hosts.
+final case class AgreedNamespaceTopology(namespaceDefinition: EffectiveTopologyMapping[DecentralizedNamespaceDefinition],
+    partyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]]) {
+  def partyMapping(party: PartyId): EffectiveTopologyMapping[PartyToParticipant] =
+    partyMappings.filter(_.mapping.partyId == party) match {
+      case Seq(partyToParticipant) => partyToParticipant
+      case other => throw new IllegalArgumentException(
+        s"expected one PartyToParticipant of ${partyName(party)} in the agreed topology, found ${other.size}")
+    }
+}
+
+// agreedNamespaceTopologyOf: runs in the safety stop. The views agree, and the host set of each party is the set of
+// console participants. Each rotation input comes from the result.
+def agreedNamespaceTopologyOf(views: Seq[NamespaceTopologyView], consoleParticipantIds: Seq[ParticipantId]): AgreedNamespaceTopology = {
+  require(consoleParticipantIds.size == expectedGuardianHostCount,
+    s"SAFETY STOP: ${consoleParticipantIds.size} console participants, expected $expectedGuardianHostCount")
+  require(consoleParticipantIds.distinct.size == consoleParticipantIds.size, "SAFETY STOP: a console participant is bound twice")
+  checkParticipantTopologyViewsAgree(views)
+  val referenceView = views.head
+  def hostNames(hostIds: Iterable[ParticipantId]): String = hostIds.map(_.uid.identifier.unwrap).toSeq.sorted.mkString(",")
+  referenceView.partyMappings.foreach { partyToParticipant =>
+    val hostIds = partyToParticipant.mapping.participants.map(_.participantId)
+    require(hostIds.toSet == consoleParticipantIds.toSet,
+      s"SAFETY STOP: ${partyName(partyToParticipant.mapping.partyId)} hosts ${hostNames(hostIds)} differ from the console participants " +
+        hostNames(consoleParticipantIds))
+  }
+  AgreedNamespaceTopology(referenceView.namespaceDefinition, referenceView.partyMappings)
+}
+
+// The change of each rotation party, in rotation order, and of the namespace definition.
+final case class IntendedRotationChanges(partyChanges: Seq[(PartyId, IntendedTopologyChange)], namespaceChange: IntendedTopologyChange)
+
+// intendedRotationChangesOf: each intended change of the agreed topology. Each intended mapping has the guardian
+// policy before any signer call.
+def intendedRotationChangesOf(agreedTopology: AgreedNamespaceTopology, rotationPartyIds: Seq[PartyId],
+    newSigningKeys: NonEmpty[Set[SigningPublicKey]], newOwnerNamespaces: Set[Namespace]): IntendedRotationChanges = {
+  require(agreedTopology.partyMappings.map(_.mapping.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
+    "agreed PartyToParticipant parties differ from the rotation parties")
+  val partyChanges = rotationPartyIds.map { party =>
+    val intendedChange = intendedPartyRotationChange(agreedTopology.partyMapping(party), newSigningKeys)
+    intendedChange.mapping match {
+      case partyToParticipant: PartyToParticipant => checkHostingIsGuardianPolicy(partyToParticipant)
+      case other => throw new IllegalStateException(s"intended change of ${partyName(party)} is a ${other.code}")
+    }
+    party -> intendedChange
+  }
+  val namespaceChange = intendedNamespaceRotationChange(agreedTopology.namespaceDefinition, newOwnerNamespaces)
+  namespaceChange.mapping match {
+    case namespaceDefinition: DecentralizedNamespaceDefinition => checkNamespaceIsGuardianPolicy(namespaceDefinition)
+    case other => throw new IllegalStateException(s"intended namespace change is a ${other.code}")
+  }
+  IntendedRotationChanges(partyChanges, namespaceChange)
+}
+
+// checkRemovedOwnerKeyIsInNoKeySet: the namespace owners are exactly the new owner set, and no PartyToParticipant
+// of the namespace has the removed key as a signing key. Thus the removed key signs for no namespace mapping and no
+// party.
+def checkRemovedOwnerKeyIsInNoKeySet(agreedTopology: AgreedNamespaceTopology, removedOwnerKey: SigningPublicKey,
+    newOwnerNamespaces: Set[Namespace]): Unit = {
+  val ownerNamespaces = agreedTopology.namespaceDefinition.mapping.owners.forgetNE
+  require(ownerNamespaces == newOwnerNamespaces,
+    s"namespace owners ${sortedFingerprintText(ownerNamespaces.map(_.fingerprint))} are not the new owner set " +
+      sortedFingerprintText(newOwnerNamespaces.map(_.fingerprint)))
+  require(!ownerNamespaces.contains(Namespace(removedOwnerKey.fingerprint)), "the removed owner is a namespace owner")
+  require(agreedTopology.partyMappings.nonEmpty, "agreed topology has no PartyToParticipant")
+  agreedTopology.partyMappings.foreach { partyToParticipant =>
+    require(!signingFingerprintsOf(partyToParticipant.mapping).contains(removedOwnerKey.fingerprint),
+      s"${partyName(partyToParticipant.mapping.partyId)} signing keys hold the removed owner key")
+  }
+}

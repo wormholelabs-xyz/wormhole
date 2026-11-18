@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # G3 rehearsal: rotate one owner key of the guardian namespace. The thresholds stay 2 of 3.
 # The rotation covers guardianGovernance and, after custody_host.sh, nttCustody (same namespace, same keys).
-#   1. Generate a new owner key. console/gg_rotate_owner_key.canton compares each generated change with the change
-#      that it computes, then signs each change (sign phase). It stores the signed changes (mode 0600), then loads the
-#      PartyToParticipant of each party (nttCustody first) and the namespace in one call. ROTATION done removes the
-#      stored file.
-#   2. Check that the removed owner alone cannot sign the namespace definition again
-#      (TOPOLOGY_UNAUTHORIZED_TRANSACTION).
+#   1. Generate a new owner key. console/gg_rotate_owner_key.canton computes each intended change from the topology
+#      that all console participants agree on. It compares each generated change with the intended change, then signs
+#      each change (sign phase). It stores the signed changes (mode 0600), then loads the PartyToParticipant of each
+#      party (nttCustody first) and the namespace in one call.
+#   2. The console reads all participants again. The namespace owners are the new set, and the removed key is in no
+#      key set of the namespace. ROTATION done removes the stored file.
 #   3. Signing ceremony, for each party: create GovernanceCeremonyProbe with that party as signatory.
 #      a. One kept owner + the new owner. Expect commit.
 #      b. One kept owner + the removed owner. Expect FAILED_TO_EXECUTE_TRANSACTION (1 valid signature).
@@ -30,8 +30,8 @@ print_active_rotation_faults >&2
 readonly KEY_TOOL="$REPO_ROOT/canton/devnet/guardian_key_tool.js"
 readonly GG_KEY_DIR="$LOCALNET_STATE_DIR/gg-keys"
 readonly EXTRA_FINGERPRINTS="$LOCALNET_STATE_DIR/extra-key-fingerprints.json"
-# Worst case of one console run is about 1030 s: 13 signer calls of 30 s, 60 s for the participant views to agree,
-# load 1 of 120 s, three load 2 tries of 120 s each with two 5 s pauses, and the removed-owner probe of 65 s.
+# Worst case of one console run is about 1030 s plus read time: 12 signer calls of 30 s, two reads of 60 s for the
+# participant views to agree, load 1 of 120 s, and three load 2 tries of 120 s each with two 5 s pauses.
 # canton_console.sh accepts at most 3600 s.
 readonly ROTATION_CONSOLE_TIMEOUT_SECONDS=1200
 
@@ -120,12 +120,11 @@ owner_signer_argv() {
   fi
 }
 rotation_console_status=0
-rotation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 GG_PARTY_ID="$GG_PARTY" GG_ROTATION_PARTY_IDS="$(IFS=,; echo "${rotation_party_ids[*]}")" \
 GG_ROTATION_MODE="$rotation_mode" GG_ROTATION_SIGNED_TRANSACTIONS_FILE="$SIGNED_ROTATION_TRANSACTIONS" \
 GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_ARGV_1="$(owner_signer_argv "$kept_owner_1")" \
 GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_ARGV_2="$(owner_signer_argv "$kept_owner_2")" \
-GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" GG_REMOVED_OWNER_SIGN_ARGV="$(owner_signer_argv "$removed_owner")" \
+GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" \
 GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_ARGV="$(owner_signer_argv "$new_owner")" \
 CANTON_CONSOLE_TIMEOUT_SECONDS="$ROTATION_CONSOLE_TIMEOUT_SECONDS" \
   "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/owner_key_rotation_lib.canton" \
@@ -133,7 +132,7 @@ CANTON_CONSOLE_TIMEOUT_SECONDS="$ROTATION_CONSOLE_TIMEOUT_SECONDS" \
   > "$gg_work_dir/rotation.log" 2>&1 || rotation_console_status=$?
 grep -E '^ROTATION' "$gg_work_dir/rotation.log" || true
 recovery_command="$0 --resume $removed_owner $kept_owner_1 $kept_owner_2 $new_owner"
-if grep -q 'SAFETY STOP:' "$gg_work_dir/rotation.log"; then
+if grep -q 'SAFETY STOP:' "$gg_work_dir/rotation.log" && ! grep -qxF 'ROTATION safety stop passed' "$gg_work_dir/rotation.log"; then
   echo "FAIL: safety stop before any change. $(grep -oE 'SAFETY STOP:.*' "$gg_work_dir/rotation.log" | head -n 1)" >&2
   exit 1
 fi
@@ -149,6 +148,13 @@ fi
 if grep -q '^ROTATION HALF-APPLIED' "$gg_work_dir/rotation.log"; then
   echo "FAIL: half-applied rotation. The removed key stays valid for the parties in the ROTATION HALF-APPLIED line." >&2
   echo "Recover now with: $recovery_command" >&2
+  exit 1
+fi
+if grep -q '^ROTATION applied' "$gg_work_dir/rotation.log" && ! grep -q '^ROTATION done' "$gg_work_dir/rotation.log"; then
+  echo "FAIL: each participant shows the new key sets, but a check after the load failed (status $rotation_console_status)." >&2
+  grep -E 'ERROR|error|Exception' "$gg_work_dir/rotation.log" | head -n 20 >&2
+  echo "Do not run --resume: it repeats the same checks. Examine the topology with gg_show_topology.sh." >&2
+  echo "Each change in $SIGNED_ROTATION_TRANSACTIONS is effective. Remove the file after the examination." >&2
   exit 1
 fi
 if [[ "$rotation_console_status" -ne 0 ]] || ! grep -q '^ROTATION done' "$gg_work_dir/rotation.log"; then
@@ -173,27 +179,10 @@ if ! grep -q "ROTATION after: DN .*$new_owner_fingerprint" "$gg_work_dir/rotatio
   echo "FAIL: computed fingerprint $new_owner_fingerprint of $new_owner is not in the namespace" >&2
   exit 1
 fi
-if ! grep -q '^ROTATION removed-owner attempt rejected by the API' "$gg_work_dir/rotation.log"; then
-  echo "FAIL: the removed-owner namespace change was not rejected" >&2
+if ! grep -qE "^ROTATION removed owner key [0-9a-f]+ is in no key set of the namespace$" "$gg_work_dir/rotation.log"; then
+  echo "FAIL: the console did not confirm that the removed key is in no key set of the namespace" >&2
   exit 1
 fi
-# The Admin API returns the rejection redacted, with the request trace id. The removed-owner attempt is the
-# last failed request of the console run.
-removed_owner_trace_id="$(grep -oE 'inquire about the request [0-9a-f]{32}' "$gg_work_dir/rotation.log" | tail -n 1 | awk '{print $NF}')"
-if [[ ! "$removed_owner_trace_id" =~ ^[0-9a-f]{32}$ ]]; then
-  echo "FAIL: no trace id of the removed-owner rejection in the console output" >&2
-  exit 1
-fi
-removed_owner_rejection="$(docker logs canton --since "$rotation_started_at" 2>&1 \
-  | grep -F "\"trace-id\":\"$removed_owner_trace_id\"" \
-  | grep -F '"error-code":"TOPOLOGY_UNAUTHORIZED_TRANSACTION' \
-  | jq -r '.message' || true)"
-if [[ -z "$removed_owner_rejection" ]]; then
-  echo "FAIL: the participant log has no TOPOLOGY_UNAUTHORIZED_TRANSACTION for trace id $removed_owner_trace_id" >&2
-  exit 1
-fi
-echo "  participant log, trace id $removed_owner_trace_id: $removed_owner_rejection"
-echo "PASS: removed-owner namespace change rejected with TOPOLOGY_UNAUTHORIZED_TRANSACTION"
 echo "PASS: $removed_owner replaced by $new_owner ($new_owner_fingerprint)"
 for party_id in "${rotation_party_ids[@]}"; do
   if ! grep -q "^ROTATION after: PTP party=${party_id%%::*} .*signingKeys=2-of-3" "$gg_work_dir/rotation.log"; then

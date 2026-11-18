@@ -73,13 +73,14 @@ def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: 
 case class OwnerKey(publicKey: SigningPublicKey, signerArgv: Seq[String]) {
   val namespace: Namespace = Namespace(publicKey.fingerprint)
 }
-def loadOwnerKey(publicKeyVariable: String, signerArgvVariable: String): OwnerKey = {
+def loadOwnerPublicKey(publicKeyVariable: String): SigningPublicKey = {
   val publicKeyDer = ByteString.copyFrom(Files.readAllBytes(Paths.get(requiredEnvironmentVariable(publicKeyVariable))))
-  val publicKey = SigningPublicKey
+  SigningPublicKey
     .create(CryptoKeyFormat.DerX509Spki, publicKeyDer, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
     .getOrElse(sys.error(s"invalid owner public key in $publicKeyVariable"))
-  OwnerKey(publicKey, parseSignerArgv(signerArgvVariable))
 }
+def loadOwnerKey(publicKeyVariable: String, signerArgvVariable: String): OwnerKey =
+  OwnerKey(loadOwnerPublicKey(publicKeyVariable), parseSignerArgv(signerArgvVariable))
 def signWithOwnerKey(owner: OwnerKey, hash: Hash): Signature = {
   val hashHex = bytesToHex(hash.getCryptographicEvidence.toByteArray)
   Signature.fromExternalSigning(
