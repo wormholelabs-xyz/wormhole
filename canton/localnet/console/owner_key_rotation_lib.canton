@@ -66,41 +66,95 @@ def rotatedPartyToParticipant(current: PartyToParticipant, newSigningKeys: NonEm
     .fold(error => throw new IllegalArgumentException(s"rotated PartyToParticipant of ${partyName(current.partyId)}: $error"), identity)
 }
 
-// checkStoredRotationTransactions: exactly the signed changes of one rotation. One namespace definition with the new
-// owners, one PartyToParticipant with the new signing keys for each rotation party, and at most the root delegation
-// of the added owner.
+// intendedPartyRotationChange: the rotated mapping at the next serial, or the current mapping and serial if it
+// already has the new signing keys (half-applied rotation).
+def intendedPartyRotationChange(current: EffectiveTopologyMapping[PartyToParticipant],
+    newSigningKeys: NonEmpty[Set[SigningPublicKey]]): IntendedTopologyChange =
+  if (signingFingerprintsOf(current.mapping) == newSigningKeys.forgetNE.map(_.fingerprint)) IntendedTopologyChange(current.mapping, current.serial)
+  else IntendedTopologyChange(rotatedPartyToParticipant(current.mapping, newSigningKeys), current.serial.tryAdd(1))
+
+// intendedNamespaceRotationChange: same namespace and threshold with the new owners at the next serial, or the
+// current definition and serial if it already has the new owners.
+def intendedNamespaceRotationChange(current: EffectiveTopologyMapping[DecentralizedNamespaceDefinition],
+    newOwnerNamespaces: Set[Namespace]): IntendedTopologyChange =
+  if (current.mapping.owners.forgetNE == newOwnerNamespaces) IntendedTopologyChange(current.mapping, current.serial)
+  else IntendedTopologyChange(DecentralizedNamespaceDefinition.tryCreate(current.mapping.namespace, current.mapping.threshold,
+    NonEmpty.from(newOwnerNamespaces).getOrElse(throw new IllegalArgumentException("no new owners"))), current.serial.tryAdd(1))
+
+// intendedAddedOwnerRootDelegation: the first root delegation of the added owner key. A key that had a root delegation
+// before needs a new key.
+def intendedAddedOwnerRootDelegation(addedOwnerKey: SigningPublicKey): IntendedTopologyChange =
+  IntendedTopologyChange(NamespaceDelegation.create(Namespace(addedOwnerKey.fingerprint), addedOwnerKey, DelegationRestriction.CanSignAllMappings)
+    .fold(error => throw new IllegalArgumentException(s"root delegation of the added owner: $error"), identity), PositiveInt.one)
+
+// checkStoredRotationTransactions: exactly the signed changes of one rotation, each equal to the intended change of
+// the current topology. One namespace definition with the new owners, one PartyToParticipant with the new signing
+// keys for each rotation party, and at most the root delegation of the added owner. Each stored mapping has the
+// guardian policy. Runs in fresh mode before the store and in resume mode before the load.
 def checkStoredRotationTransactions(storedTransactions: Seq[GenericSignedTopologyTransaction], rotationPartyIds: Seq[PartyId],
-    guardianNamespace: Namespace, newOwnerNamespaces: Set[Namespace], newSigningFingerprints: Set[Fingerprint],
-    addedOwnerKey: SigningPublicKey): Unit = {
+    guardianNamespace: Namespace, currentPartyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]],
+    currentNamespaceDefinition: EffectiveTopologyMapping[DecentralizedNamespaceDefinition], newOwnerNamespaces: Set[Namespace],
+    newSigningKeys: NonEmpty[Set[SigningPublicKey]], addedOwnerKey: SigningPublicKey): Unit = {
+  val newSigningFingerprints = newSigningKeys.forgetNE.map(_.fingerprint)
+  require(currentPartyMappings.map(_.mapping.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
+    "current PartyToParticipant parties differ from the rotation parties")
+  require(currentNamespaceDefinition.mapping.namespace == guardianNamespace, "current namespace definition is for another namespace")
   storedTransactions.foreach(transaction =>
     require(transaction.operation == TopologyChangeOp.Replace, s"stored ${transaction.mapping.code} is not a Replace"))
-  val namespaceDefinitions = storedTransactions.map(_.mapping).collect { case definition: DecentralizedNamespaceDefinition => definition }
+  val namespaceDefinitions = storedTransactions.filter(_.mapping.isInstanceOf[DecentralizedNamespaceDefinition])
   require(namespaceDefinitions.size == 1, s"expected exactly one stored namespace definition, found ${namespaceDefinitions.size}")
-  require(namespaceDefinitions.head.namespace == guardianNamespace, "stored namespace definition is for another namespace")
-  require(namespaceDefinitions.head.owners.forgetNE == newOwnerNamespaces, "stored namespace definition does not have the new owners")
-  val partyMappings = storedTransactions.map(_.mapping).collect { case mapping: PartyToParticipant => mapping }
+  val storedNamespaceDefinition = namespaceDefinitions.head.mapping.asInstanceOf[DecentralizedNamespaceDefinition]
+  require(storedNamespaceDefinition.namespace == guardianNamespace, "stored namespace definition is for another namespace")
+  require(storedNamespaceDefinition.owners.forgetNE == newOwnerNamespaces, "stored namespace definition does not have the new owners")
+  checkNamespaceIsGuardianPolicy(storedNamespaceDefinition)
+  require(storedNamespaceDefinition.threshold == currentNamespaceDefinition.mapping.threshold,
+    s"stored namespace threshold ${storedNamespaceDefinition.threshold.value} differs from the current threshold " +
+      s"${currentNamespaceDefinition.mapping.threshold.value}")
+  checkTransactionIsIntendedChange(namespaceDefinitions.head.transaction,
+    intendedNamespaceRotationChange(currentNamespaceDefinition, newOwnerNamespaces), "stored namespace definition")
+  val partyChanges = storedTransactions.filter(_.mapping.isInstanceOf[PartyToParticipant])
+  val partyMappings = partyChanges.map(_.mapping.asInstanceOf[PartyToParticipant])
   require(partyMappings.map(_.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
     s"stored PartyToParticipant parties ${partyMappings.map(mapping => partyName(mapping.partyId)).mkString(",")} " +
       s"differ from the rotation parties ${rotationPartyIds.map(partyName).mkString(",")}")
-  partyMappings.foreach(mapping => require(signingFingerprintsOf(mapping) == newSigningFingerprints,
-    s"stored PartyToParticipant of ${partyName(mapping.partyId)} does not have the new signing keys"))
-  val rootDelegations = storedTransactions.map(_.mapping).collect { case delegation: NamespaceDelegation => delegation }
+  partyChanges.foreach { partyChange =>
+    val mapping = partyChange.mapping.asInstanceOf[PartyToParticipant]
+    require(signingFingerprintsOf(mapping) == newSigningFingerprints,
+      s"stored PartyToParticipant of ${partyName(mapping.partyId)} does not have the new signing keys")
+    checkHostingIsGuardianPolicy(mapping)
+    val currentMapping = currentPartyMappings.find(_.mapping.partyId == mapping.partyId)
+      .getOrElse(throw new IllegalArgumentException(s"no current PartyToParticipant of ${partyName(mapping.partyId)}"))
+    checkTransactionIsIntendedChange(partyChange.transaction, intendedPartyRotationChange(currentMapping, newSigningKeys),
+      s"stored PartyToParticipant of ${partyName(mapping.partyId)}")
+  }
+  val rootDelegations = storedTransactions.filter(_.mapping.isInstanceOf[NamespaceDelegation])
   require(rootDelegations.size <= 1, s"expected at most one stored root delegation, found ${rootDelegations.size}")
-  rootDelegations.foreach(delegation => require(
-    delegation.namespace == Namespace(addedOwnerKey.fingerprint) && delegation.target == addedOwnerKey,
-    "stored root delegation is not the root delegation of the added owner"))
+  rootDelegations.foreach { rootDelegation =>
+    val delegation = rootDelegation.mapping.asInstanceOf[NamespaceDelegation]
+    require(delegation.namespace == Namespace(addedOwnerKey.fingerprint), "stored root delegation is not the root delegation of the added owner")
+    require(delegation.target == addedOwnerKey, "stored root delegation is not the root delegation of the added owner")
+    checkTransactionIsIntendedChange(rootDelegation.transaction, intendedAddedOwnerRootDelegation(addedOwnerKey),
+      "stored root delegation of the added owner")
+  }
   require(storedTransactions.size == namespaceDefinitions.size + partyMappings.size + rootDelegations.size,
     "stored transactions hold a mapping of another type")
 }
 
+// The stored file authorizes each change in it until another change takes its serial. Only the owner of the file
+// can read it.
+val signedRotationTransactionsFilePermissions = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")
 def writeSignedRotationTransactions(path: String, signedTransactions: Seq[GenericSignedTopologyTransaction],
     protocolVersion: ProtocolVersion): Unit = {
   require(signedTransactions.nonEmpty, "no signed rotation transactions to store")
-  SignedTopologyTransactions(signedTransactions, protocolVersion).writeToFile(path)
+  val storedFile = Files.createFile(Paths.get(path),
+    java.nio.file.attribute.PosixFilePermissions.asFileAttribute(signedRotationTransactionsFilePermissions))
+  Files.write(storedFile, SignedTopologyTransactions(signedTransactions, protocolVersion).toByteString.toByteArray)
+  require(Files.getPosixFilePermissions(storedFile) == signedRotationTransactionsFilePermissions, s"$path is not mode 0600")
 }
 def readSignedRotationTransactions(path: String, protocolVersion: ProtocolVersion): Seq[GenericSignedTopologyTransaction] = {
   val storedFile = Paths.get(path)
   require(Files.isRegularFile(storedFile), s"no signed rotation transactions file $path")
+  require(Files.getPosixFilePermissions(storedFile) == signedRotationTransactionsFilePermissions, s"$path is not mode 0600")
   require(Files.size(storedFile) <= maxSignedRotationTransactionsFileBytes, s"$path is larger than $maxSignedRotationTransactionsFileBytes bytes")
   SignedTopologyTransactions.fromByteString(ProtocolVersionValidation(protocolVersion),
       TopologyTransactionDeserializationContext(com.digitalasset.canton.protocol.SynchronizerLimits.default),
@@ -172,5 +226,30 @@ def checkRotationSafetyStop(namespaceOwnerFingerprints: Set[Fingerprint], namesp
     val signingFingerprintText = if (signingFingerprints.isEmpty) "none" else sortedFingerprintText(signingFingerprints)
     require(signingFingerprints == oldFingerprints || signingFingerprints == newFingerprints,
       s"SAFETY STOP: ${partyName(mapping.partyId)} signing keys $signingFingerprintText are neither the old set nor the new set")
+  }
+}
+
+// The guardian-namespace topology as one participant shows it.
+final case class NamespaceTopologyView(participantName: String,
+    namespaceDefinition: EffectiveTopologyMapping[DecentralizedNamespaceDefinition],
+    partyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]], partyToKeyMappingParties: Seq[PartyId])
+
+// checkParticipantTopologyViewsAgree: runs before any change. Each guardian host shows the same namespace definition
+// and the same PartyToParticipant mappings, each with the same serial. No party of the namespace has a
+// PartyToKeyMapping.
+def checkParticipantTopologyViewsAgree(views: Seq[NamespaceTopologyView]): Unit = {
+  require(views.size == expectedGuardianHostCount, s"SAFETY STOP: ${views.size} participant views, expected $expectedGuardianHostCount")
+  val participantNames = views.map(_.participantName)
+  participantNames.diff(participantNames.distinct).headOption.foreach(participantName =>
+    throw new IllegalArgumentException(s"SAFETY STOP: participant $participantName read twice"))
+  views.foreach(view => view.partyToKeyMappingParties.headOption.foreach(party =>
+    throw new IllegalArgumentException(s"SAFETY STOP: participant ${view.participantName} has a PartyToKeyMapping of ${partyName(party)}")))
+  val referenceView = views.head
+  def sortedPartyMappings(view: NamespaceTopologyView) = view.partyMappings.sortBy(_.mapping.partyId.toProtoPrimitive)
+  views.tail.foreach { view =>
+    require(view.namespaceDefinition == referenceView.namespaceDefinition,
+      s"SAFETY STOP: participant ${view.participantName} namespace definition differs from participant ${referenceView.participantName}")
+    require(sortedPartyMappings(view) == sortedPartyMappings(referenceView),
+      s"SAFETY STOP: participant ${view.participantName} PartyToParticipant mappings differ from participant ${referenceView.participantName}")
   }
 }

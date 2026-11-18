@@ -111,7 +111,11 @@ final case class RotationTestTopology(custody: (PartyToParticipant, Int), guardi
     namespace: (DecentralizedNamespaceDefinition, Int))
 val topologyBeforeRotation = RotationTestTopology((currentCustodyMapping, 1), (guardianGovernanceMapping, 2), (oldNamespace, 3))
 def checkBundle(storedTransactions: Seq[GenericSignedTopologyTransaction], currentTopology: RotationTestTopology = topologyBeforeRotation): Unit =
-  checkStoredRotationTransactions(storedTransactions, rotationPartyIds, testGuardianNamespace, newOwnerNamespaces, newFingerprints, addedKey)
+  checkStoredRotationTransactions(storedTransactions, rotationPartyIds, testGuardianNamespace,
+    Seq(currentTopology.custody, currentTopology.guardianGovernance).map { case (mapping, serial) =>
+      EffectiveTopologyMapping(mapping, PositiveInt.tryCreate(serial)) },
+    EffectiveTopologyMapping(currentTopology.namespace._1, PositiveInt.tryCreate(currentTopology.namespace._2)),
+    newOwnerNamespaces, NonEmpty.from(newKeys.toSet).get, addedKey)
 
 checkTableCase("B1-root-parties-namespace", None) {
   checkBundle(Seq(addedRoot, rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
@@ -134,15 +138,37 @@ checkTableCase("B6-two-namespace-definitions", Some("expected exactly one stored
 checkTableCase("B7-root-of-another-key", Some("stored root delegation is not the root delegation of the added owner")) {
   checkBundle(Seq(testSigned(addedRootDelegation(testOwnerKeys(4)), 1), rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
 }
+val signedBundle = Seq(addedRoot, rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction)
+def withStoredFileDirectory(body: java.nio.file.Path => Unit): Unit = {
+  val storedFileDirectory = Files.createTempDirectory("rotation-")
+  val storedFile = storedFileDirectory.resolve("rotation.signed.bin")
+  try body(storedFile) finally {
+    Files.deleteIfExists(storedFile)
+    Files.delete(storedFileDirectory)
+  }
+}
 checkTableCase("B8-file-roundtrip", None) {
-  val storedFile = Files.createTempFile("rotation-", ".signed.bin")
-  try {
-    val bundle = Seq(addedRoot, rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction)
-    writeSignedRotationTransactions(storedFile.toString, bundle, testProtocolVersion)
+  withStoredFileDirectory { storedFile =>
+    writeSignedRotationTransactions(storedFile.toString, signedBundle, testProtocolVersion)
+    require(Files.getPosixFilePermissions(storedFile) == java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"), "file mode")
     val readBack = readSignedRotationTransactions(storedFile.toString, testProtocolVersion)
-    require(readBack.map(_.hash) == bundle.map(_.hash), "hashes differ after the roundtrip")
-    require(readBack.map(_.signatures) == bundle.map(_.signatures), "signatures differ after the roundtrip")
-  } finally Files.deleteIfExists(storedFile)
+    require(readBack.map(_.hash) == signedBundle.map(_.hash), "hashes differ after the roundtrip")
+    require(readBack.map(_.signatures) == signedBundle.map(_.signatures), "signatures differ after the roundtrip")
+  }
+}
+checkTableCase("B8b-file-exists", Some("FileAlreadyExists")) {
+  withStoredFileDirectory { storedFile =>
+    Files.write(storedFile, Array.emptyByteArray)
+    try writeSignedRotationTransactions(storedFile.toString, signedBundle, testProtocolVersion)
+    catch { case error: java.nio.file.FileAlreadyExistsException => throw new RuntimeException(s"FileAlreadyExists: ${error.getMessage}") }
+  }
+}
+checkTableCase("B8c-file-readable-by-group", Some("is not mode 0600")) {
+  withStoredFileDirectory { storedFile =>
+    writeSignedRotationTransactions(storedFile.toString, signedBundle, testProtocolVersion)
+    Files.setPosixFilePermissions(storedFile, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"))
+    readSignedRotationTransactions(storedFile.toString, testProtocolVersion)
+  }
 }
 checkTableCase("B9-file-damaged", Some("cannot read the signed rotation transactions")) {
   val storedFile = Files.createTempFile("rotation-", ".signed.bin")

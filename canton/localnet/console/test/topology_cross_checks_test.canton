@@ -61,14 +61,19 @@ checkTableCase("T10-root-delegation-intended", None) {
 checkTableCase("T11-root-delegation-other-target", Some("generated root delegation has target")) {
   checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllMappings))
 }
-checkTableCase("T12-root-delegation-other-restriction", Some("generated root delegation has restriction")) {
-  checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys.head, DelegationRestriction.CanSignAllButNamespaceDelegations))
+// A root delegation must keep CanSignAllMappings; a delegation to another key shows the restriction comparison.
+checkTableCase("T12-delegation-other-restriction", Some("generated delegation has restriction")) {
+  checkGeneratedTransactionIsIntended(
+    generatedTransaction(TopologyChangeOp.Replace, 1,
+      rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllButNamespaceDelegations)),
+    IntendedTopologyChange(rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllMappings), PositiveInt.one),
+    testProtocolVersion, "generated delegation")
 }
 checkTableCase("T13-custody-other-signing-keys", Some(s"$custodyDescription has signing keys")) {
   checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys.take(2) :+ testOwnerKeys(4)), 2))
 }
 checkTableCase("T14-custody-onboarding-host", Some(s"$custodyDescription has hosts")) {
-  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts.head.copy(onboarding = true) +: threeConfirmingHosts.tail,
+  checkGeneratedCustody(generatedCustody(2, HostingParticipant(testHostIds.head, Confirmation, true) +: threeConfirmingHosts.tail,
     testSigningKeys(2, ownerKeys), 2))
 }
 

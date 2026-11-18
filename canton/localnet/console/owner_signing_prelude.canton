@@ -134,3 +134,60 @@ def checkNamespaceIsGuardianPolicy(namespaceDefinition: DecentralizedNamespaceDe
   require(namespaceDefinition.owners.size == expectedNamespaceOwnerCount,
     s"namespace has ${namespaceDefinition.owners.size} owners, expected $expectedNamespaceOwnerCount")
 }
+
+// A mapping as a participant shows it, with its serial.
+final case class EffectiveTopologyMapping[M <: TopologyMapping](mapping: M, serial: PositiveInt)
+// The Replace that the console computed, and the serial it must take.
+final case class IntendedTopologyChange(mapping: TopologyMapping, serial: PositiveInt)
+
+// checkTransactionIsIntendedChange: the transaction is exactly the intended Replace. Each field is compared alone for
+// a precise error, then the complete mapping.
+def checkTransactionIsIntendedChange(transaction: TopologyTransaction[TopologyChangeOp, TopologyMapping],
+    intended: IntendedTopologyChange, description: String): Unit = {
+  require(transaction.operation == TopologyChangeOp.Replace, s"$description is ${transaction.operation}, expected Replace")
+  require(transaction.serial == intended.serial, s"$description has serial ${transaction.serial.value}, expected ${intended.serial.value}")
+  (transaction.mapping, intended.mapping) match {
+    case (actual: PartyToParticipant, expected: PartyToParticipant) =>
+      require(actual.partyId == expected.partyId,
+        s"$description names party ${actual.partyId.toProtoPrimitive}, expected ${expected.partyId.toProtoPrimitive}")
+      require(actual.participants == expected.participants, s"$description has hosts ${actual.participants}, expected ${expected.participants}")
+      require(actual.threshold == expected.threshold,
+        s"$description has confirmation threshold ${actual.threshold.value}, expected ${expected.threshold.value}")
+      require(actual.partySigningKeysWithThreshold.map(_.threshold) == expected.partySigningKeysWithThreshold.map(_.threshold),
+        s"$description has signing key threshold ${actual.partySigningKeysWithThreshold.map(_.threshold.value).getOrElse("none")}, " +
+          s"expected ${expected.partySigningKeysWithThreshold.map(_.threshold.value).getOrElse("none")}")
+      require(actual.partySigningKeysWithThreshold.map(_.keys.forgetNE) == expected.partySigningKeysWithThreshold.map(_.keys.forgetNE),
+        s"$description has signing keys ${actual.partySigningKeysWithThreshold.map(keys => sortedFingerprintText(keys.keys.map(_.fingerprint)))}, " +
+          s"expected ${expected.partySigningKeysWithThreshold.map(keys => sortedFingerprintText(keys.keys.map(_.fingerprint)))}")
+    case (actual: DecentralizedNamespaceDefinition, expected: DecentralizedNamespaceDefinition) =>
+      require(actual.namespace == expected.namespace, s"$description names namespace ${actual.namespace}, expected ${expected.namespace}")
+      require(actual.threshold == expected.threshold,
+        s"$description has namespace threshold ${actual.threshold.value}, expected ${expected.threshold.value}")
+      require(actual.owners.forgetNE == expected.owners.forgetNE,
+        s"$description has owners ${sortedFingerprintText(actual.owners.map(_.fingerprint))}, " +
+          s"expected ${sortedFingerprintText(expected.owners.map(_.fingerprint))}")
+    case (actual: NamespaceDelegation, expected: NamespaceDelegation) =>
+      require(actual.namespace == expected.namespace, s"$description names namespace ${actual.namespace}, expected ${expected.namespace}")
+      require(actual.target == expected.target,
+        s"$description has target ${actual.target.fingerprint.toProtoPrimitive}, expected ${expected.target.fingerprint.toProtoPrimitive}")
+      require(actual.restriction == expected.restriction, s"$description has restriction ${actual.restriction}, expected ${expected.restriction}")
+    case (actual, expected) =>
+      throw new IllegalArgumentException(s"$description has mapping ${actual.code}, expected ${expected.code}")
+  }
+  require(transaction.mapping == intended.mapping, s"$description differs from the intended mapping")
+}
+
+// checkGeneratedTransactionIsIntended: a transaction that a participant generated is the intended Replace, and its
+// hash is the hash of the transaction that the console builds from the intended values. Returns the console-built
+// transaction. Each owner signs its hash.
+def checkGeneratedTransactionIsIntended(generated: TopologyTransaction[TopologyChangeOp, TopologyMapping], intended: IntendedTopologyChange,
+    protocolVersion: com.digitalasset.canton.version.ProtocolVersion, description: String): TopologyTransaction[TopologyChangeOp, TopologyMapping] = {
+  checkTransactionIsIntendedChange(generated, intended, description)
+  val intendedTransaction: TopologyTransaction[TopologyChangeOp, TopologyMapping] =
+    TopologyTransaction.create(TopologyChangeOp.Replace, intended.serial, intended.mapping, protocolVersion)
+      .fold(error => throw new IllegalArgumentException(s"$description: cannot build the intended transaction: $error"), identity)
+  checkTransactionIsIntendedChange(intendedTransaction, intended, s"console-built $description")
+  require(generated.hash == intendedTransaction.hash,
+    s"$description hash ${generated.hash.hash.toHexString} differs from the intended hash ${intendedTransaction.hash.hash.toHexString}")
+  intendedTransaction
+}
