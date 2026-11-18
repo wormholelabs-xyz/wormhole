@@ -54,6 +54,9 @@
 # Optional environment:
 #   GENESIS_LAST_CREATE     CoreState or EmitterRegistry (default). The
 #                           script stops after this create.
+#   GENESIS_GUARDIAN_SET_INDEX
+#                           Global index of the genesis guardian set
+#                           (default 0).
 #   CURL_MAX_TIME_SECONDS / CURL_CONNECT_TIMEOUT_SECONDS
 #                           Time limits of each JSON Ledger API call.
 #                           Default 60 / 10.
@@ -114,17 +117,24 @@ sig_json() {
 
 # --- Build the genesis create commands, matching mkInitialCoreState's and
 # mkInitialEmitterRegistry's devnet values (Test.TestCore.setup). ---
+# The global guardian set index of the genesis set; the CoreState precondition requires 0 to 4294967295.
+readonly GENESIS_GUARDIAN_SET_INDEX="${GENESIS_GUARDIAN_SET_INDEX:-0}"
+if [[ ! "${GENESIS_GUARDIAN_SET_INDEX}" =~ ^(0|[1-9][0-9]{0,9})$ ]] || (( GENESIS_GUARDIAN_SET_INDEX > 4294967295 )); then
+  echo "GENESIS_GUARDIAN_SET_INDEX must be a decimal integer from 0 to 4294967295, got: ${GENESIS_GUARDIAN_SET_INDEX}" >&2
+  exit 1
+fi
 CORE_STATE_ARGS="$(jq -n \
   --arg operator "${OP_PARTY}" \
   --arg gg "${GG_PARTY}" \
+  --arg guardianSetIndex "${GENESIS_GUARDIAN_SET_INDEX}" \
   '{
     operator: $operator,
     guardianGovernance: $gg,
     chainId: "75",
     governanceChainId: "1",
     governanceContract: "0000000000000000000000000000000000000000000000000000000000000004",
-    guardianSetIndex: "0",
-    guardianSets: [["0", {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"], "expirationTime": null}]],
+    guardianSetIndex: $guardianSetIndex,
+    guardianSets: [[$guardianSetIndex, {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"], "expirationTime": null}]],
     messageFee: "0",
     feeInstrument: {admin: $gg, id: "UNUSED"},
     feeRecipient: $gg,
