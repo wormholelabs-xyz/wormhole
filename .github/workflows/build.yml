@@ -269,8 +269,20 @@ jobs:
       - name: Run the emitter id scan table test
         run: bash canton/tools/emitter_id_scan_test.sh
 
+      - name: Run the publish scan table test
+        run: bash canton/tools/publish_message_scan_test.sh
+
       - name: Run the NTT LocalNet library table test
         run: bash canton/localnet/test/ntt_lib_test.sh
+
+      - name: Run the core upgrade rehearsal package id table test
+        run: bash canton/localnet/test/core_upgrade_package_ids_test.sh
+
+      - name: Run the curl maximum time table test of the core upgrade scripts
+        run: bash canton/localnet/test/curl_calls_are_bounded_test.sh
+
+      - name: Run the canary gate decision table test
+        run: bash canton/localnet/test/canary_gate_decision_test.sh
 
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:

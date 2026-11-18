@@ -17,6 +17,22 @@ OPERATOR_ARTIFACTS="$LOCALNET_STATE_DIR/operator-artifacts.json"
 CORE_CONTRACTS="$LOCALNET_STATE_DIR/core-contracts.json"
 # Interactive submissions go through the participant that hosts the Operator party.
 SUBMITTING_VALIDATOR="app-provider"
+# Each LocalNet participant hosts guardianGovernance. Thus each participant is a guardian host and an informee host.
+# shellcheck disable=SC2034 # used by the scripts that source this file
+readonly GUARDIAN_HOSTS=(app-provider sv app-user)
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+readonly CURL_CONNECT_SECONDS=10
+readonly CURL_MAX_SECONDS=30
+# curl_bounded <curl arguments...>: curl with a connect timeout and a maximum time. A later --max-time argument
+# replaces CURL_MAX_SECONDS.
+curl_bounded() {
+  curl --connect-timeout "$CURL_CONNECT_SECONDS" --max-time "$CURL_MAX_SECONDS" "$@"
+}
 
 for required_file in "$GG_ARTIFACTS" "$OPERATOR_ARTIFACTS"; do
   if [[ ! -f "$required_file" ]]; then
@@ -159,8 +175,8 @@ readonly EMITTER_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
 # active_contracts <validator> <party> <qualified-template-suffix>: active contracts of that template that the party sees there.
 active_contracts() {
   local validator_name="$1" party="$2" template_suffix="$3" ledger_end
-  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
-  curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
+  ledger_end="$(curl_bounded -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
+  curl_bounded -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
       eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},

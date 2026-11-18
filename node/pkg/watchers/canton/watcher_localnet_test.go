@@ -1,27 +1,33 @@
 //go:build localnet
 
-// LocalNet harness for the Canton watcher: runs watcher.Run with the production settings (pinned core
-// package id and version, update stream narrowed to guardianGovernance, unsafeDevMode false) against a Splice
-// LocalNet participant. LocalNet authenticates with a static HS256 JWT over plaintext gRPC, so the
-// harness injects a gRPC client that carries that token.
+// LocalNet harness for the Canton watcher. It builds the watcher with WatcherConfig.buildWatcher in the TestNet
+// environment, so the checks of Create run, and supervises Watcher.Run against a Splice LocalNet participant.
+// The Ledger API user of the token holds only CanReadAs(guardianGovernance) (canton/localnet/watcher_harness_lib.sh
+// creates it). LocalNet serves plaintext gRPC with a static HS256 JWT; the harness injects a client with that
+// transport through Watcher.cantonClient.
 //
 //	CANTON_LOCALNET_GRPC=localhost:3901 CANTON_LOCALNET_TOKEN_FILE=<jwt> \
 //	CANTON_LOCALNET_READ_AS_PARTY=<guardianGovernance> CANTON_LOCALNET_CORE_PACKAGE_ID=<core package id> \
 //	CANTON_LOCALNET_CORE_PACKAGE_VERSION=<core package version> \
 //	CANTON_LOCALNET_OBSERVATIONS_FILE=<out.jsonl> CANTON_LOCALNET_READY_FILE=<path> CANTON_LOCALNET_STOP_FILE=<path> \
-//	CANTON_LOCALNET_REOBSERVE_UPDATE_IDS=<update id,...> \
+//	CANTON_LOCALNET_METRICS_FILE=<out.json> CANTON_LOCALNET_REOBSERVE_UPDATE_IDS=<update id,...> \
+//	CANTON_LOCALNET_REOBSERVE_REQUEST_FILE=<path> CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE=<approved list> \
 //	go test -tags localnet -run TestCantonWatcherLocalNet ./pkg/watchers/canton -v -timeout 15m
 //
 // The harness writes one JSON line per observation (live and reobserved). It stops when the stop
 // file exists and each requested update id was reobserved, after it writes the queued observations.
-// It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json.
-// canton/localnet/ntt_watcher.sh drives it.
+// Every 500 ms and at the stop, it replaces the metrics file with the
+// wormhole_canton_unpinned_publish_messages_total counts by executing package id.
+// It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json, or in
+// CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE when it is set (LocalNet only, same format).
+// canton/localnet/watcher_harness_lib.sh drives it.
 package canton
 
 import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -33,6 +39,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -44,6 +51,7 @@ import (
 const (
 	localNetDefaultMaxSeconds = 300
 	localNetStopPollInterval  = 500 * time.Millisecond
+	unpinnedPublishMetricName = "wormhole_canton_unpinned_publish_messages_total"
 )
 
 // localNetBearerToken sends a static LocalNet JWT on every RPC. LocalNet serves plaintext gRPC.
@@ -85,10 +93,12 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	require.Len(t, corePackageID, 64)
 	corePackageVersion := requiredEnv(t, "CANTON_LOCALNET_CORE_PACKAGE_VERSION")
 	observationsFile := requiredEnv(t, "CANTON_LOCALNET_OBSERVATIONS_FILE")
+	metricsFile := requiredEnv(t, "CANTON_LOCALNET_METRICS_FILE")
 	readyFile := requiredEnv(t, "CANTON_LOCALNET_READY_FILE")
 	stopFile := requiredEnv(t, "CANTON_LOCALNET_STOP_FILE")
 	reobserveUpdateIDs, err := parseReobserveUpdateIDs(os.Getenv("CANTON_LOCALNET_REOBSERVE_UPDATE_IDS"))
 	require.NoError(t, err)
+	reobserveRequestFile := os.Getenv("CANTON_LOCALNET_REOBSERVE_REQUEST_FILE")
 	maxSeconds := localNetDefaultMaxSeconds
 	if value := os.Getenv("CANTON_LOCALNET_MAX_SECONDS"); value != "" {
 		maxSeconds, err = strconv.Atoi(value)
@@ -101,23 +111,40 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
 
-	client, err := cantonclient.NewCantonGrpcClient(rpcAddress, readAsParty, logger, insecure.NewCredentials(),
-		grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))}))
-	require.NoError(t, err)
-	defer client.Close()
-
 	msgC := make(chan *common.MessagePublication, 64)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, localNetMaxReobservations)
-	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(
-		cantonclient.CurrentPackageConfig{PackageIDHex: corePackageID, Version: corePackageVersion},
-		cantonclient.RetiringPackageConfig{}, time.Now())
+	watcherConfig := WatcherConfig{
+		NetworkID:      "canton",
+		ChainID:        vaa.ChainIDCanton,
+		Rpc:            rpcAddress,
+		PackageID:      corePackageID,
+		PackageVersion: corePackageVersion,
+		ReadAsParty:    readAsParty,
+	}
+	approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
+	if approvedCorePackagesFile := os.Getenv("CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE"); approvedCorePackagesFile != "" {
+		approvedCorePackagesJSON, err := os.ReadFile(approvedCorePackagesFile)
+		require.NoError(t, err)
+		approvedCorePackages, err = cantonclient.ParseApprovedCorePackages(approvedCorePackagesJSON)
+		require.NoError(t, err)
+	} else {
+		productionRunnable, reobserver, err := watcherConfig.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
+		require.NoError(t, err)
+		require.NotNil(t, productionRunnable)
+		require.Nil(t, reobserver)
+	}
+	checkBuildWatcherRejectsAnUnpinnedConfig(t, watcherConfig, approvedCorePackages, msgC, obsvReqC)
+	watcher, err := watcherConfig.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
 	require.NoError(t, err)
-	watcher, err := NewWatcher(rpcAddress, acceptedPackageIDs, readAsParty, AuthConfig{}, false, msgC, obsvReqC)
+	localNetClient, err := cantonclient.NewCantonGrpcClient(rpcAddress, readAsParty, logger, insecure.NewCredentials(),
+		grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))}))
 	require.NoError(t, err)
-	watcher.cantonClient = client
+	defer localNetClient.Close()
+	watcher.cantonClient = localNetClient
+	runWatcher := watcher.Run
 
 	supervisor.New(rootCtx, logger, func(ctx context.Context) error {
-		if err := supervisor.Run(ctx, "canton", watcher.Run); err != nil {
+		if err := supervisor.Run(ctx, "canton", runWatcher); err != nil {
 			return err
 		}
 		<-ctx.Done()
@@ -170,11 +197,82 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 		case observation := <-msgC:
 			require.NoError(t, writeObservation(observation))
 		case <-stopTicker.C:
+			writeUnpinnedPublishCounts(t, metricsFile)
+			for _, updateID := range readReobservationRequestFile(t, reobserveRequestFile, &reobservedUpdates) {
+				obsvReqC <- &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: updateID.TxID()}
+			}
 			if _, err := os.Stat(stopFile); err == nil && reobservedUpdates.allRequestedUpdatesObserved() {
 				_, err := drainPublications(msgC, cap(msgC), writeObservation)
 				require.NoError(t, err)
+				writeUnpinnedPublishCounts(t, metricsFile)
 				return
 			}
 		}
 	}
+}
+
+// readReobservationRequestFile returns the update ids of the request file that the harness has not requested yet.
+// It models a reobservation request to a running guardian. An empty path or an absent file has no requests.
+func readReobservationRequestFile(t *testing.T, requestFile string, reobservedUpdates *reobservedUpdateTracker) []cantonclient.UpdateID {
+	t.Helper()
+	if requestFile == "" {
+		return nil
+	}
+	fileInfo, err := os.Stat(requestFile)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	require.NoError(t, err)
+	require.LessOrEqual(t, fileInfo.Size(), int64(localNetMaxReobservationRequestFileBytes), "reobservation request file too large")
+	fileContent, err := os.ReadFile(requestFile)
+	require.NoError(t, err)
+	newUpdateIDs, err := reobservedUpdates.readNewReobservationRequestIDs(string(fileContent))
+	require.NoError(t, err)
+	return newUpdateIDs
+}
+
+// checkBuildWatcherRejectsAnUnpinnedConfig: outside unsafe dev mode, buildWatcher refuses an empty package id,
+// package version or read-as party.
+func checkBuildWatcherRejectsAnUnpinnedConfig(t *testing.T, watcherConfig WatcherConfig,
+	approvedCorePackages cantonclient.ApprovedCorePackages,
+	msgC chan<- *common.MessagePublication, obsvReqC <-chan *gossipv1.ObservationRequest) {
+	t.Helper()
+	withoutPackageID := watcherConfig
+	withoutPackageID.PackageID = ""
+	_, err := withoutPackageID.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
+	require.ErrorContains(t, err, "PackageID must be set")
+	withoutPackageVersion := watcherConfig
+	withoutPackageVersion.PackageVersion = ""
+	_, err = withoutPackageVersion.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
+	require.ErrorContains(t, err, "PackageVersion must be set")
+	withoutReadAsParty := watcherConfig
+	withoutReadAsParty.ReadAsParty = ""
+	_, err = withoutReadAsParty.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
+	require.ErrorContains(t, err, "ReadAsParty must be set")
+}
+
+// writeUnpinnedPublishCounts replaces the metrics file with {executing package id: count} of the
+// unpinned-publish counter. The rename keeps each read of the file complete.
+func writeUnpinnedPublishCounts(t *testing.T, metricsFile string) {
+	t.Helper()
+	metricFamilies, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	countsByExecutingPackageID := map[string]float64{}
+	for _, metricFamily := range metricFamilies {
+		if metricFamily.GetName() != unpinnedPublishMetricName {
+			continue
+		}
+		for _, metric := range metricFamily.GetMetric() {
+			for _, label := range metric.GetLabel() {
+				if label.GetName() == "executing_package_id" {
+					countsByExecutingPackageID[label.GetValue()] = metric.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	encodedCounts, err := json.Marshal(countsByExecutingPackageID)
+	require.NoError(t, err)
+	partialFile := metricsFile + ".partial"
+	require.NoError(t, os.WriteFile(partialFile, append(encodedCounts, '\n'), 0o600))
+	require.NoError(t, os.Rename(partialFile, metricsFile))
 }
