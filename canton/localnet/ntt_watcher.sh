@@ -11,8 +11,15 @@ set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 
-# The wormhole-core package that executes the NTT PublishMessage exercises. Default: the pin of ntt_lib.sh.
+# The wormhole-core package that executes the NTT PublishMessage exercises, and its version. Default: the pin of
+# ntt_lib.sh. Set both or neither.
+if [[ -n "${NTT_CORE_PACKAGE_ID:-}" && -z "${NTT_CORE_PACKAGE_VERSION:-}" ]] \
+  || [[ -z "${NTT_CORE_PACKAGE_ID:-}" && -n "${NTT_CORE_PACKAGE_VERSION:-}" ]]; then
+  echo "set NTT_CORE_PACKAGE_ID and NTT_CORE_PACKAGE_VERSION together" >&2
+  exit 2
+fi
 readonly CORE_PACKAGE_ID="${NTT_CORE_PACKAGE_ID:-$WORMHOLE_CORE_PACKAGE_ID}"
+readonly CORE_PACKAGE_VERSION="${NTT_CORE_PACKAGE_VERSION:-$WORMHOLE_CORE_VERSION}"
 readonly WATCHER_DIR="$LOCALNET_STATE_DIR/ntt-watcher"
 # shellcheck source=watcher_harness_lib.sh
 source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
@@ -48,7 +55,7 @@ check_deployment() {
 case "${1:-}" in
   start)
     build_harness
-    run_harness live "$CORE_PACKAGE_ID" "" 1800
+    run_harness live "$CORE_PACKAGE_ID" "$CORE_PACKAGE_VERSION" "" 1800
     ;;
   stop)
     stop_harness live
@@ -64,7 +71,8 @@ case "${1:-}" in
     echo "reobservation update ids: burn $burn_update_id, lock $lock_update_id"
     # The update id is the same on each participant, so a request from one guardian works on another.
     for reobserving_validator in "$SUBMITTING_VALIDATOR" sv; do
-      run_harness_on "$reobserving_validator" "reobserve-$reobserving_validator" "$CORE_PACKAGE_ID" "$burn_update_id,$lock_update_id" 300
+      run_harness_on "$reobserving_validator" "reobserve-$reobserving_validator" "$CORE_PACKAGE_ID" "$CORE_PACKAGE_VERSION" \
+        "$burn_update_id,$lock_update_id" 300
       stop_harness "reobserve-$reobserving_validator"
       check_harness_reobservation_errors "reobserve-$reobserving_validator"
       check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" burnMint burnMessage true

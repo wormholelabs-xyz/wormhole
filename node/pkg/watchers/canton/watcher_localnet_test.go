@@ -11,14 +11,15 @@
 //	CANTON_LOCALNET_CORE_PACKAGE_VERSION=<core package version> \
 //	CANTON_LOCALNET_OBSERVATIONS_FILE=<out.jsonl> CANTON_LOCALNET_READY_FILE=<path> CANTON_LOCALNET_STOP_FILE=<path> \
 //	CANTON_LOCALNET_METRICS_FILE=<out.json> CANTON_LOCALNET_REOBSERVE_UPDATE_IDS=<update id,...> \
-//	CANTON_LOCALNET_REOBSERVE_REQUEST_FILE=<path> \
+//	CANTON_LOCALNET_REOBSERVE_REQUEST_FILE=<path> CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE=<approved list> \
 //	go test -tags localnet -run TestCantonWatcherLocalNet ./pkg/watchers/canton -v -timeout 15m
 //
 // The harness writes one JSON line per observation (live and reobserved). It stops when the stop
 // file exists and each requested update id was reobserved, after it writes the queued observations.
 // Every 500 ms and at the stop, it replaces the metrics file with the
 // wormhole_canton_unpinned_publish_messages_total counts by executing package id.
-// It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json.
+// It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json, or in
+// CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE when it is set (LocalNet only, same format).
 // canton/localnet/watcher_harness_lib.sh drives it.
 package canton
 
@@ -120,12 +121,20 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 		PackageVersion: corePackageVersion,
 		ReadAsParty:    readAsParty,
 	}
-	checkCreateRejectsAnUnpinnedConfig(t, watcherConfig, msgC, obsvReqC)
-	productionRunnable, reobserver, err := watcherConfig.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
-	require.NoError(t, err)
-	require.NotNil(t, productionRunnable)
-	require.Nil(t, reobserver)
-	watcher, err := watcherConfig.buildWatcher(cantonclient.DefaultApprovedCorePackages(), msgC, obsvReqC, common.TestNet)
+	approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
+	if approvedCorePackagesFile := os.Getenv("CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE"); approvedCorePackagesFile != "" {
+		approvedCorePackagesJSON, err := os.ReadFile(approvedCorePackagesFile)
+		require.NoError(t, err)
+		approvedCorePackages, err = cantonclient.ParseApprovedCorePackages(approvedCorePackagesJSON)
+		require.NoError(t, err)
+	} else {
+		productionRunnable, reobserver, err := watcherConfig.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
+		require.NoError(t, err)
+		require.NotNil(t, productionRunnable)
+		require.Nil(t, reobserver)
+	}
+	checkBuildWatcherRejectsAnUnpinnedConfig(t, watcherConfig, approvedCorePackages, msgC, obsvReqC)
+	watcher, err := watcherConfig.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
 	require.NoError(t, err)
 	localNetClient, err := cantonclient.NewCantonGrpcClient(rpcAddress, readAsParty, logger, insecure.NewCredentials(),
 		grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))}))
@@ -222,17 +231,23 @@ func readReobservationRequestFile(t *testing.T, requestFile string, reobservedUp
 	return newUpdateIDs
 }
 
-// checkCreateRejectsAnUnpinnedConfig: outside unsafe dev mode, Create refuses an empty package id or read-as party.
-func checkCreateRejectsAnUnpinnedConfig(t *testing.T, watcherConfig WatcherConfig,
+// checkBuildWatcherRejectsAnUnpinnedConfig: outside unsafe dev mode, buildWatcher refuses an empty package id,
+// package version or read-as party.
+func checkBuildWatcherRejectsAnUnpinnedConfig(t *testing.T, watcherConfig WatcherConfig,
+	approvedCorePackages cantonclient.ApprovedCorePackages,
 	msgC chan<- *common.MessagePublication, obsvReqC <-chan *gossipv1.ObservationRequest) {
 	t.Helper()
 	withoutPackageID := watcherConfig
 	withoutPackageID.PackageID = ""
-	_, _, err := withoutPackageID.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
+	_, err := withoutPackageID.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
 	require.ErrorContains(t, err, "PackageID must be set")
+	withoutPackageVersion := watcherConfig
+	withoutPackageVersion.PackageVersion = ""
+	_, err = withoutPackageVersion.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
+	require.ErrorContains(t, err, "PackageVersion must be set")
 	withoutReadAsParty := watcherConfig
 	withoutReadAsParty.ReadAsParty = ""
-	_, _, err = withoutReadAsParty.Create(msgC, obsvReqC, nil, nil, nil, common.TestNet)
+	_, err = withoutReadAsParty.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
 	require.ErrorContains(t, err, "ReadAsParty must be set")
 }
 

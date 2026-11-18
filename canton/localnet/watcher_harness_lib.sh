@@ -1,6 +1,7 @@
 # Functions that build, start and stop the guardian watcher LocalNet harness
 # (node/pkg/watchers/canton/watcher_localnet_test.go). Source this file after gg_lib.sh; do not run it.
 # The caller sets WATCHER_DIR. Harness files go to $WATCHER_DIR/<name>.*
+# WATCHER_APPROVED_CORE_PACKAGES_FILE, when set, replaces the approved list compiled into guardiand (LocalNet only).
 # The harness authenticates as WATCHER_USER_ID, which holds only CanReadAs(guardianGovernance).
 # shellcheck shell=bash
 
@@ -90,16 +91,19 @@ forget_started_harness() {
   STARTED_HARNESS_NAMES=("${kept_names[@]}")
 }
 
-# run_harness <name> <core-package-id> <reobserve-update-ids> <max-seconds>: run_harness_on SUBMITTING_VALIDATOR.
+# run_harness <name> <core-package-id> <core-package-version> <reobserve-update-ids> <max-seconds>: run_harness_on
+# SUBMITTING_VALIDATOR.
 run_harness() {
   run_harness_on "$SUBMITTING_VALIDATOR" "$@"
 }
 
-# run_harness_on <validator> <name> <core-package-id> <reobserve-update-ids> <max-seconds>: start in the background
-# as WATCHER_USER_ID on the Ledger API of that participant, read as guardianGovernance, pinned to <core-package-id>.
+# run_harness_on <validator> <name> <core-package-id> <core-package-version> <reobserve-update-ids> <max-seconds>:
+# start in the background as WATCHER_USER_ID on the Ledger API of that participant, read as guardianGovernance,
+# pinned to <core-package-id> at <core-package-version>.
 # Returns when the harness streams. The token file is removed when the harness is ready.
 run_harness_on() {
-  local validator_name="$1" name="$2" core_package_id="$3" reobserve_update_ids="$4" max_seconds="$5" waited_seconds
+  local validator_name="$1" name="$2" core_package_id="$3" core_package_version="$4" reobserve_update_ids="$5"
+  local max_seconds="$6" waited_seconds
   local token_file="$WATCHER_DIR/$name.jwt"
   ensure_watcher_user "$validator_name"
   rm -f "$WATCHER_DIR/$name".{ready,stop,jsonl,metrics.json,pid,exit,requests} "$WATCHER_DIR/watcher.jwt"
@@ -109,6 +113,8 @@ run_harness_on() {
     CANTON_LOCALNET_TOKEN_FILE="$token_file" \
     CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
     CANTON_LOCALNET_CORE_PACKAGE_ID="$core_package_id" \
+    CANTON_LOCALNET_CORE_PACKAGE_VERSION="$core_package_version" \
+    CANTON_LOCALNET_APPROVED_CORE_PACKAGES_FILE="${WATCHER_APPROVED_CORE_PACKAGES_FILE:-}" \
     CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
     CANTON_LOCALNET_METRICS_FILE="$WATCHER_DIR/$name.metrics.json" \
     CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
@@ -126,7 +132,7 @@ run_harness_on() {
   for ((waited_seconds = 0; waited_seconds < HARNESS_READY_SECONDS; waited_seconds++)); do
     if [[ -f "$WATCHER_DIR/$name.ready" ]]; then
       rm -f "$token_file"
-      echo "watcher harness $name streams from $validator_name as $WATCHER_USER_ID, pinned to ${core_package_id:0:12} (pid $(cat "$WATCHER_DIR/$name.pid" 2>/dev/null))"
+      echo "watcher harness $name streams from $validator_name as $WATCHER_USER_ID, pinned to ${core_package_id:0:12} $core_package_version (pid $(cat "$WATCHER_DIR/$name.pid" 2>/dev/null))"
       return 0
     fi
     if [[ -f "$WATCHER_DIR/$name.exit" ]]; then

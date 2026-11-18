@@ -81,6 +81,8 @@ source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 canary_gate_decision 0 0 0 "$QUIET_WINDOW_SECONDS" "$CANARY_GATE_MAX_SECONDS" > /dev/null \
   || { echo "invalid QUIET_WINDOW_SECONDS $QUIET_WINDOW_SECONDS or CANARY_GATE_MAX_SECONDS $CANARY_GATE_MAX_SECONDS" >&2; exit 2; }
 mkdir -p "$WATCHER_DIR"
+readonly WATCHER_APPROVED_CORE_PACKAGES_FILE="$WATCHER_DIR/approved_core_packages.json"
+write_rehearsal_approved_core_packages "$WATCHER_APPROVED_CORE_PACKAGES_FILE"
 [[ -f "$UPGRADE_STATE" ]] || echo '{}' > "$UPGRADE_STATE"
 
 record_state() {
@@ -395,12 +397,12 @@ v6_watchers_run() {
   done
 }
 
-# start_watcher_on_each_host <name-prefix> <core-package-id> <reobserve-update-ids> <max-seconds>
+# start_watcher_on_each_host <name-prefix> <core-package-id> <core-package-version> <reobserve-update-ids> <max-seconds>
 start_watcher_on_each_host() {
   local validator_name
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     if harness_is_running "$1-$validator_name"; then stop_harness "$1-$validator_name"; fi
-    run_harness_on "$validator_name" "$1-$validator_name" "$2" "$3" "$4"
+    run_harness_on "$validator_name" "$1-$validator_name" "$2" "$3" "$4" "$5"
   done
 }
 
@@ -499,7 +501,7 @@ step_prepare() {
 step_observe_v6() {
   echo "### 1. Guardian watchers v6-<host>, pinned to 0.6.0, one on each participant, observe a 0.6.0 PublishMessage"
   build_harness
-  start_watcher_on_each_host v6 "$CORE_V6_PACKAGE_ID" "" 3600
+  start_watcher_on_each_host v6 "$CORE_V6_PACKAGE_ID" "$CORE_V6_VERSION" "" 3600
   check_input_contract_created_under CoreState "$CORE_V6_PACKAGE_ID"
   local summary validator_name
   summary="$(publish_and_check v6-baseline "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
@@ -545,7 +547,7 @@ step_publish_v7() {
   v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   [[ -x "$(harness_binary)" ]] || build_harness
   if harness_is_running canary; then stop_harness canary; fi
-  run_harness canary "$CORE_V7_PACKAGE_ID" "" 3600
+  run_harness canary "$CORE_V7_PACKAGE_ID" "$CORE_V7_VERSION" "" 3600
   check_input_contract_created_under CoreState "$CORE_V6_PACKAGE_ID"
   check_input_contract_created_under Emitter "$CORE_V6_PACKAGE_ID"
   local v7_summary v6_summary v7_update_id v6_update_id validator_name
@@ -574,7 +576,8 @@ step_publish_v7() {
 # that ran each NTT PublishMessage, as each host sees it.
 run_ntt_e2e_under_v7() {
   local deployment_key update_id
-  NTT_UPLOAD_DARS="$1" NTT_CORE_PACKAGE_ID="$CORE_V7_PACKAGE_ID" NTT_GUARDIAN_SET_INDEX="$CURRENT_GUARDIAN_SET_INDEX" \
+  NTT_UPLOAD_DARS="$1" NTT_CORE_PACKAGE_ID="$CORE_V7_PACKAGE_ID" NTT_CORE_PACKAGE_VERSION="$CORE_V7_VERSION" \
+    WATCHER_APPROVED_CORE_PACKAGES_FILE="$WATCHER_APPROVED_CORE_PACKAGES_FILE" NTT_GUARDIAN_SET_INDEX="$CURRENT_GUARDIAN_SET_INDEX" \
     NTT_GUARDIAN_KEY_INDICES="$CURRENT_GUARDIAN_KEY_INDICES" "$LOCALNET_SCRIPT_DIR/ntt_e2e.sh"
   for deployment_key in burnMint.burnUpdateId lockUnlock.lockUpdateId; do
     update_id="$(jq -er ".$deployment_key" "$NTT_CONTRACTS")"
@@ -819,7 +822,7 @@ step_switch_v7() {
   gap_summary="$(publish_and_check v7-restart-gap "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
   gap_update_id="$(jq -r .updateId <<<"$gap_summary")"
   record_state restartGapUpdateId "$gap_update_id"
-  start_watcher_on_each_host v7 "$CORE_V7_PACKAGE_ID" "" 900
+  start_watcher_on_each_host v7 "$CORE_V7_PACKAGE_ID" "$CORE_V7_VERSION" "" 900
 
   echo "  restart control: a 0.7.0 publish that each v7-<host> observes. Its offset on each participant is the restart offset"
   restart_control_summary="$(publish_and_check v7-restart-control "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
@@ -966,7 +969,7 @@ step_rollback() {
   legacy_update_id="$(read_state canaryLegacyUpdateId)"
   check_publish_package_on_each_host "$legacy_update_id" "$CORE_V6_PACKAGE_ID"
   if harness_is_running v6-recovery; then stop_harness v6-recovery; fi
-  run_harness v6-recovery "$CORE_V6_PACKAGE_ID" "$legacy_update_id" 300
+  run_harness v6-recovery "$CORE_V6_PACKAGE_ID" "$CORE_V6_VERSION" "$legacy_update_id" 300
   await_observation_of_update v6-recovery "$legacy_update_id" true
   stop_harness v6-recovery
   check_harness_reobservation_errors v6-recovery
@@ -980,7 +983,7 @@ step_rollback() {
     await_vetting "$validator_name" wormhole-core "$(versions_json "0.6.0 $CORE_V6_PACKAGE_ID" "0.7.0 $CORE_V7_PACKAGE_ID")"
     await_vetting "$validator_name" ntt "$(versions_json "0.2.0 $NTT_V2_PACKAGE_ID" "0.3.0 $NTT_V3_PACKAGE_ID")"
   done
-  start_watcher_on_each_host rollback-v6 "$CORE_V6_PACKAGE_ID" "" 900
+  start_watcher_on_each_host rollback-v6 "$CORE_V6_PACKAGE_ID" "$CORE_V6_VERSION" "" 900
 
   echo "### 10c. A 0.6.0 PublishMessage on the Emitter that 0.7.0 created"
   check_input_contract_created_under Emitter "$CORE_V7_PACKAGE_ID"
@@ -1094,14 +1097,14 @@ step_abort_v7() {
   echo "  restart gap: a 0.6.0 publish after the stop of each v6-<host>"
   gap_summary="$(publish_and_check v6-abort-restart-gap "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
   gap_update_id="$(jq -r .updateId <<<"$gap_summary")"
-  start_watcher_on_each_host v7-recovery "$CORE_V7_PACKAGE_ID" "$(paste -sd, - <<<"$reference_update_ids")" 900
+  start_watcher_on_each_host v7-recovery "$CORE_V7_PACKAGE_ID" "$CORE_V7_VERSION" "$(paste -sd, - <<<"$reference_update_ids")" 900
   stop_watcher_on_each_host v7-recovery
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v7-recovery-$validator_name.jsonl")" == "$reference_update_ids" ]] \
       || fail "v7-recovery-$validator_name reobserved $(jq -sc '[.[] | select(.isReobservation) | .updateId] | unique' "$WATCHER_DIR/v7-recovery-$validator_name.jsonl"), expected each 0.7.0 update"
   done
   check_watchers_agree v7-recovery
-  start_watcher_on_each_host v6-after-abort "$CORE_V6_PACKAGE_ID" "" 900
+  start_watcher_on_each_host v6-after-abort "$CORE_V6_PACKAGE_ID" "$CORE_V6_VERSION" "" 900
 
   echo "### A7. A second 0.6.0 control publish that each v6-after-abort-<host> observes. Scan from the abort offset to it, and reobserve each 0.6.0 publish"
   end_control_summary="$(publish_and_check v6-abort-end-control "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
@@ -1120,7 +1123,7 @@ step_abort_v7() {
     fi
   done
   gap_reobserve_update_ids="$(grep -vxF "$end_control_update_id" <<<"$reference_gap_update_ids")"
-  start_watcher_on_each_host v6-gap-reobserve "$CORE_V6_PACKAGE_ID" "$(paste -sd, - <<<"$gap_reobserve_update_ids")" 300
+  start_watcher_on_each_host v6-gap-reobserve "$CORE_V6_PACKAGE_ID" "$CORE_V6_VERSION" "$(paste -sd, - <<<"$gap_reobserve_update_ids")" 300
   stop_watcher_on_each_host v6-gap-reobserve
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v6-gap-reobserve-$validator_name.jsonl")" == "$gap_reobserve_update_ids" ]] \
