@@ -284,6 +284,33 @@ jobs:
       - name: Run the canary gate decision table test
         run: bash canton/localnet/test/canary_gate_decision_test.sh
 
+      - name: Run the owner signer block copy test
+        run: bash canton/localnet/test/owner_signer_block_test.sh
+
+      - name: Run the owner key input check table test
+        run: bash canton/localnet/test/owner_key_input_checks_test.sh
+
+      # The canton image is pinned by digest in images.lock; the script checks the SHA-256 of the copied jar.
+      - name: Copy the Canton console jar from the pinned canton image
+        env:
+          CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor
+        run: bash canton/localnet/console_jar_from_image.sh
+
+      # Java 21 of the runner image; the console jar needs Java 17 or later.
+      - name: Run the console script compile test
+        env:
+          CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor
+        run: |
+          test -x "$JAVA_HOME_21_X64/bin/java"
+          PATH="$JAVA_HOME_21_X64/bin:$PATH" bash canton/localnet/test/console_scripts_compile_test.sh
+
+      - name: Run the console table tests
+        env:
+          CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor
+        run: |
+          test -x "$JAVA_HOME_21_X64/bin/java"
+          PATH="$JAVA_HOME_21_X64/bin:$PATH" bash canton/localnet/test/console_table_test.sh
+
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
     runs-on: ubuntu-24.04

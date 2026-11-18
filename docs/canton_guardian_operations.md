@@ -29,6 +29,8 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 
 Each guardian participant hosts one Wormhole party: `guardianGovernance` (`gg`).
 No other guardian party exists.
+The proposed NTT custody deployment (decision U1) adds the party `nttCustody` in the `gg` namespace.
+`nttCustody` has the hosts, the confirmation threshold and the owner keys of `gg` (Section 7.4).
 
 | Property | Value |
 | - | - |
@@ -197,6 +199,7 @@ A threshold of owner keys signs each `gg` topology change and each `gg` submissi
 - The signer command is a JSON array of strings: the program, then its arguments.
 - The ceremony script adds the hex hash as the last argument and runs the program directly.
 - The signer writes the 64-byte Ed25519 signature to standard output as lowercase hex.
+- The signer must finish in 30 seconds. The ceremony script stops a signer that runs longer, and the ceremony fails.
 - The devnet scripts read the signer commands from `GG_OWNER_SIGN_ARGV_1`, `GG_OWNER_SIGN_ARGV_2` and `GG_OWNER_SIGN_ARGV_3`.
 - [`canton/devnet/guardian_key_tool.js`](../canton/devnet/guardian_key_tool.js) shows this contract for local tests only.
 
@@ -531,6 +534,11 @@ Your watcher, still pinned to the old core package ID, must observe it before th
 13. Scan from the abort offset to this offset, with the second control message as the required update ID.
 14. Send a reobservation request for each `PublishMessage` with the old core package ID that has no VAA.
 
+Steps 8 to 10 cause a second outage for messages under the old core package ID.
+From the restart of step 8 to the restart of step 10, the watchers of a quorum accept only the new core package ID.
+A new message under the old core package ID gets no VAA in this period.
+Steps 13 and 14 recover each of these messages. Thus the guardians lose no message.
+
 A reobservation reads a committed update. Thus step 8 needs no vetting of the new core package ID.
 After step 1, a submission under the new core package ID fails at prepare.
 The coordinator tells the integrators that the upgrade stopped.
@@ -676,69 +684,118 @@ The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` checks the exp
 ### 7.4 Owner key rotation
 
 An owner key rotation removes one owner key and adds a new owner key.
-The namespace threshold does not change.
+The namespace threshold and the signing key threshold of each party do not change.
 
 The owner keys are the namespace owners and the signing keys of each party in the namespace.
 Thus the rotation changes the decentralized namespace and the `PartyToParticipant` mapping of each party.
 If the namespace also has the `nttCustody` party of an NTT custody deployment, the rotation has three topology changes.
 
-The rotation has two phases:
+The rotation has three phases:
 
-1. Sign phase: each owner signs each topology change. No change goes to the synchronizer.
-2. Load phase: one load call submits all the changes. The `nttCustody` change is first, and the namespace change is last.
+1. Safety stop: the coordinator reads the namespace and each `PartyToParticipant` mapping in it on each host.
+   The rotation stops before any change if two hosts show different mappings or serials.
+   It also stops if a party in the namespace has a `PartyToKeyMapping`.
+   It also stops if the hosts of a party are not exactly the guardian hosts.
+   It also stops if the rotation list and the parties in the namespace differ.
+   It also stops if the keys of the namespace or of a party are not the old key set or the new key set.
+2. Sign phase: each owner signs each topology change. No change goes to the synchronizer.
+   Before the first signature, the coordinator compares each generated change with the change that it calculates.
+   The coordinator calculates each change from the views of the safety stop, which all hosts agree on.
+   Each calculated mapping must have the guardian policy before the first signature.
+   The coordinator keeps the signed changes in a file that only the coordinator can read.
+3. Load phase: one load call submits all the changes. The `nttCustody` change is first, and the namespace change is last.
 
 If the new owner has no root namespace delegation, the load phase loads it first.
 This delegation alone gives no authority over the `gg` namespace.
 A signer failure in the sign phase stops the rotation before the first load.
 The topology then does not change.
 
-NOTE: The sign phase, the one load call and the stored signatures come with pull request #76.
-The LocalNet script of this branch does not have them.
-That script signs and loads the namespace change first. Then it signs and loads the signing key change.
-Thus, with that script, a signer failure after the namespace change gives a half-applied rotation.
-With that script, `--resume` requests new signatures from the owners.
-
 Procedure:
 
 1. Make sure that the time is not in an LSU freeze window.
 2. Get the public key of the new owner in DER SubjectPublicKeyInfo format.
-3. Sign each topology change of the rotation with your owner key.
-4. After the load, make sure that the namespace contains the new owner key.
-5. Make sure that the namespace does not contain the removed owner key.
-6. For each party in the namespace, make sure that the signing keys contain the new owner key.
-7. For each party in the namespace, make sure that the signing keys do not contain the removed owner key.
-8. Make sure that the namespace threshold and the signing key threshold of each party did not change.
-9. Make sure that all the changes have the same effective time.
+3. Get the list of the parties in the namespace from the coordinator.
+   Make sure that the list has `nttCustody` if an NTT custody deployment exists.
+4. Before the signature, decode each topology change of the rotation.
+   Read the current mappings and serials from the participant that you operate, or from all hosts.
+   Do not use the values of the coordinator participant alone.
+   Compare each change with the rotation plan:
+   - The operation is `Replace`.
+   - The serial is the current serial plus 1. The root namespace delegation of the new owner is the only exception.
+   - The root namespace delegation of the new owner has the fingerprint of the new key as the namespace.
+     Its target is the new key, and its serial is 1. Only the new owner signs it.
+   - A `PartyToParticipant` change has the same party, hosts, host permissions and confirmation threshold as the current mapping.
+   - A `PartyToParticipant` change has the new signing keys and the current signing key threshold.
+   - The namespace change has the new owners and the current namespace threshold.
+
+   Do not sign a change that is different from the plan.
+   Section 5.3 has the same rule for a prepared transaction.
+5. Sign each topology change of the rotation with your owner key.
+6. After the load, make sure that the namespace contains the new owner key.
+7. Make sure that the namespace does not contain the removed owner key.
+8. For each party in the namespace, make sure that the signing keys contain the new owner key.
+9. For each party in the namespace, make sure that the signing keys do not contain the removed owner key.
+10. Make sure that the namespace threshold and the signing key threshold of each party did not change.
+11. Make sure that the effective times of the changes are in the load order: `nttCustody`, then `gg`, then the namespace.
+12. Make sure that the time from the first effective time to the last effective time is 30 seconds or less.
+
+Canton gives each change of one load call its own effective time.
+On LocalNet with Canton 3.7.3, the spread was about 1 s.
+In that window, `gg` and the namespace accept the removed key after the `nttCustody` change.
+This window is an input to decision U4 (Section 10.1).
 
 After the rotation, a signature from the removed key is not valid.
 A `gg` transaction with the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
-A namespace change that the removed key signs fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
+After the load, the LocalNet script reads all hosts.
+It makes sure that the namespace owners are exactly the new owner set.
+It also makes sure that no `PartyToParticipant` mapping of the namespace has the removed key.
+Without a key set, the removed key has no authority over the namespace or a party.
 
-WARNING: Canton validates each topology change of a load call alone.
+WARNING: The participant rejects a complete load call if one change fails its local check.
+After that check, the synchronizer applies each change alone, at its own effective time.
 Thus a load can apply only a part of the changes. The rotation is then half-applied.
 In that state, the signing keys of a party can still contain the removed owner key.
 The removed key then still counts for the signing threshold of that party.
+If that party is `nttCustody`, the removed key and one kept key can move the NTT reserves.
+If the `ROTATION HALF-APPLIED` line names `namespace`, the removed key and one kept key can change the mapping of each party in the namespace.
 Complete the rotation with `--resume` immediately.
 Do not start a different ceremony before the rotation is complete.
 
-**Open item:** the measured behavior of a partial load on LocalNet.
+A signer failure and a load that the participant rejects completely leave the removed key valid for each party.
+The added key is then not valid for any party. Thus no party has a mixed key state.
+
+WARNING: The signed changes are an authorization.
+Each signed change stays valid until a different change takes its serial.
+The coordinator must keep the file of the signed changes secret until the load.
+After a load attempt, the participant of the coordinator also has each signed change. The secrecy of the file does not remove that copy.
+After a stopped rotation, the file stays valid. The next change of each mapping makes it not valid.
+After a complete rotation, the coordinator removes the file.
+
+Measured behavior on LocalNet with Canton 3.7.3:
+
+- A load without the `nttCustody` change applies the other changes. The rotation is then half-applied.
+- A load in which one change has a missing owner signature fails completely. No mapping changes.
 
 #### Recovery from a half-applied rotation
 
 The rotation script shows `ROTATION HALF-APPLIED`.
-From pull request #76, it also shows the parties that still accept the removed key.
+It also shows the parties that still accept the removed key.
 
 1. Do not generate a new key for the new owner.
 2. Run the rotation again with `--resume`.
-   From pull request #76, `--resume` loads the changes that the owners signed in the sign phase.
-3. Do steps 4 to 9 of the procedure again.
+   `--resume` loads the changes that the owners signed in the sign phase. No owner signs again.
+3. Do steps 6 to 10 of the procedure again.
+   The changes of a `--resume` are in more than one load call. Thus steps 11 and 12 do not apply.
 
-LocalNet rehearsal: [`gg_rotate_owner_key.sh`](../canton/localnet/gg_rotate_owner_key.sh).
-The LocalNet script loads the namespace change and the signing key change in two load calls.
-For a half-applied rotation, the script shows `ROTATION HALF-APPLIED`.
-The `--resume` flag finishes the rotation with the existing key of the new owner.
-On 2026-11-17, a live run with an injected half-applied rotation passed.
-The `--resume` run then finished the rotation and passed all checks.
+If you start a new rotation instead of `--resume`, the safety stop stops it before any change.
+
+LocalNet rehearsal: [`gg_rotate_owner_key.sh`](../canton/localnet/gg_rotate_owner_key.sh),
+[`gg_rotation_fault_check.sh`](../canton/localnet/gg_rotation_fault_check.sh) and
+[`gg_rotation_safety_stop_check.sh`](../canton/localnet/gg_rotation_safety_stop_check.sh).
+The LocalNet script follows the three phases of this section.
+It keeps the signed changes in a file for `--resume`.
+On 2026-11-17, a live run of the earlier script passed. That script loaded each change in a separate load call.
+On 2026-11-18, `gg_rotation_fault_check.sh` and `gg_rotation_safety_stop_check.sh` passed on LocalNet with Canton 3.7.3.
 
 ### 7.5 Rehearsal evidence
 
@@ -758,6 +815,7 @@ These rehearsals passed live on 2026-11-17 with `wormhole-core` 0.6.0:
 | Owner key rotation with recovery (Section 7.4) | Passed after `--resume` | `dd01beeb0` | `gg_rotate_owner_key-20261117T031708Z.log`, `gg_rotate_owner_key-20261117T031721Z.log` |
 
 **Open item:** run these rehearsals again with `wormhole-core` 0.8.0.
+Include `gg_rotation_fault_check.sh` and `gg_rotation_safety_stop_check.sh` (Section 7.4).
 
 Limits of the rehearsal:
 
@@ -952,6 +1010,25 @@ The proposed fixes are:
 
 Until a decision, do not vet a third-party registry package for `gg` custody.
 
+The LocalNet rehearsal of the dedicated custody party:
+
+- [`custody_host.sh`](../canton/localnet/custody_host.sh) allocates `nttCustody` in the `gg` namespace.
+  `nttCustody` has the hosts, the confirmation threshold and the owner keys of `gg`.
+- [`custody_authority_check.sh`](../canton/localnet/custody_authority_check.sh) shows that `gg` and `nttCustody`
+  have separate Daml authority.
+- [`gg_rotate_owner_key.sh`](../canton/localnet/gg_rotate_owner_key.sh) rotates the owner keys of the two parties
+  in one run (Section 7.4).
+
+The custody party separates Daml authority. It does not separate key authority.
+Two owner keys and two confirming hosts can move each holding of `nttCustody` without a VAA.
+
+**U4: owner key threshold of `nttCustody`.**
+`nttCustody` uses the owner keys and the threshold of `gg`: 2 of 3 on LocalNet.
+The guardian quorum for a VAA is 13 of 19.
+Decide the relation of the owner key threshold to the guardian quorum for `nttCustody` before MainNet.
+In a complete owner key rotation, `gg` and the namespace accept the removed key for up to about 1 s
+after the `nttCustody` change (Section 7.4).
+
 **U3: the two-id window for a core package upgrade.**
 The one-id procedure (Section 6.7) has a signing outage from step 5 to step 14 and a coordinated restart.
 The watcher accepts an optional retiring package ID with a record-time deadline.
@@ -977,7 +1054,6 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | `ContractUpgrade` governance VAA before a core package upgrade | 6.0 |
 | Automatic vetting of Amulet on guardian participants | 6.2 |
 | LocalNet run of the core upgrade abort procedure | 6.7 |
-| Measured behavior of a partial load in the owner key rotation | 7.4 |
 | Rehearsals with `wormhole-core` 0.8.0 | 7.5 |
 | Mapping from the 32-byte `recipient` to a Canton party | 7.6 |
 | Procedure for a participant key, OAuth2 client secret or `operator` party compromise | 7.7 |
@@ -987,6 +1063,8 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Check of the inbound rate limits of each peer chain | 9.1 |
 | F4: expiry of idle Canton Coin custody pots | 9.2 |
 | U1: `gg` custody of third-party token registries | 10.1 |
+| U4: owner key threshold of `nttCustody` | 10.1 |
+| Owner key rotation of a party that holds reserves | 7.4 |
 | U3: a set of package IDs in the watcher for the upgrade period | 10.1 |
 
 ### 10.3 Resolved items
