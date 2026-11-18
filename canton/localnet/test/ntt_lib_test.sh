@@ -142,6 +142,22 @@ for release_case in "${RELEASE_AFTER_ROUNDS_CASES[@]}"; do
   check_case "check_release_after_rounds $case_name" "$expected_status" - - check_release_after_rounds "$rounds_text"
 done
 
+# name|version|expected status|expected package id
+readonly NTT_PIN_CASES=(
+  "ntt 0.3.2|0.3.2|0|f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71"
+  "ntt 0.4.0|0.4.0|0|83286199db9f6233f1a4d14854181a9d6e21c4f44cd96cf1700d232ce05b803f"
+  "unknown version|0.4.1|1|-"
+  "empty version||1|-"
+  "version with suffix|0.4.0-rc1|1|-"
+)
+for pin_case in "${NTT_PIN_CASES[@]}"; do
+  IFS='|' read -r case_name pin_version expected_status expected_package_id <<<"$pin_case"
+  check_case "ntt_pinned_package_id $case_name" "$expected_status" "$expected_package_id" - ntt_pinned_package_id "$pin_version"
+done
+check_case "ntt_pinned_package_id names the pinned versions" 1 - "0.3.2, 0.4.0" ntt_pinned_package_id 9.9.9
+check_case "ntt_requires_custody_party 0.3.2" 1 - - ntt_requires_custody_party 0.3.2
+check_case "ntt_requires_custody_party 0.4.0" 0 - - ntt_requires_custody_party 0.4.0
+
 NTT_CONTRACTS="$work_dir/contracts/ntt-contracts.json"
 mkdir -p "$work_dir/contracts"
 check_case "record_ntt_json without a contracts file" 1 - "does not exist" record_ntt_json burnMint '{"user": "u"}'
@@ -186,14 +202,14 @@ pinned_value_in_ntt_lib() {
 }
 pinned_core_package_id="$(pinned_value_in_ntt_lib WORMHOLE_CORE_PACKAGE_ID)" || failure_count=$((failure_count + 1))
 pinned_core_version="$(pinned_value_in_ntt_lib WORMHOLE_CORE_VERSION)" || failure_count=$((failure_count + 1))
-pinned_ntt_package_id="$(pinned_value_in_ntt_lib NTT_PACKAGE_ID)" || failure_count=$((failure_count + 1))
-pinned_ntt_version="$(pinned_value_in_ntt_lib NTT_VERSION)" || failure_count=$((failure_count + 1))
+pinned_ntt_version="$(sed -nE 's/^readonly NTT_VERSION="\$\{NTT_PIN_VERSION:-([0-9.]+)\}"$/\1/p' "$LOCALNET_TEST_DIR/../ntt_lib.sh")"
+pinned_ntt_package_id="$(ntt_pinned_package_id "$pinned_ntt_version")" || failure_count=$((failure_count + 1))
 check_case "pinned core id is 0.8.0 03a65dc3" 0 - - \
   test "$pinned_core_package_id" == "03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
 check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.8.0"
 check_case "pinned ntt id is 0.3.2 f77fe8a8" 0 - - \
   test "$pinned_ntt_package_id" == "f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71"
-check_case "pinned ntt version" 0 - - test "$pinned_ntt_version" == "0.3.2"
+check_case "default ntt pin version" 0 - - test "$pinned_ntt_version" == "0.3.2"
 
 echo "not a zip archive" > "$work_dir/not-a-dar.dar"
 check_case "core 0.7.0 main id" 0 "$CORE_0_7_0_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar"

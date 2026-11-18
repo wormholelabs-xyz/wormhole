@@ -240,3 +240,21 @@ classify_submit_response() {
     return 1
   fi
 }
+
+# ntt_pinned_package_id <ntt-version>: the package id that ntt_upload_dars.sh requires for that version.
+# 0.3.2: NTT branch canton/overnight-ntt, commit 79d739b16. 0.4.0: branch canton/overnight-ntt-custody, commit 7561a9b.
+ntt_pinned_package_id() {
+  case "$1" in
+    0.3.2) echo "f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71" ;;
+    0.4.0) echo "83286199db9f6233f1a4d14854181a9d6e21c4f44cd96cf1700d232ce05b803f" ;;
+    *)
+      echo "no ntt package pin for version '$1'; pinned versions: 0.3.2, 0.4.0" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ntt_requires_custody_party <ntt-version>: from 0.4.0, NttGovernance and NttManager have the signatory nttCustody.
+ntt_requires_custody_party() {
+  [[ "$1" == "0.4.0" ]]
+}
