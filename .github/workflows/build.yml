@@ -255,7 +255,8 @@ jobs:
       - name: Run the watcher sandbox tests
         run: docker run --rm --volume "$PWD:/src" --workdir /src/node canton-watcher-integration go test -tags integration -timeout 60m ./pkg/watchers/canton/...
 
-  # Table test of the emitter id scan against its in-repo Ledger API mock (bash, curl, jq, python3 from the runner image)
+  # Table tests of the emitter id scan (in-repo Ledger API mock) and of the NTT LocalNet library (bash, curl, jq,
+  # python3, unzip from the runner image)
   canton-tools:
     name: Canton tools
     runs-on: ubuntu-24.04
@@ -267,6 +268,9 @@ jobs:
 
       - name: Run the emitter id scan table test
         run: bash canton/tools/emitter_id_scan_test.sh
+
+      - name: Run the NTT LocalNet library table test
+        run: bash canton/localnet/test/ntt_lib_test.sh
 
   # NOTE: While Terra2 is deprecated, this job may be related to testing CosmWasm functionality in Wormchain.
   terra-2:
@@ -357,6 +361,8 @@ jobs:
         run: curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.8.0
       - name: Run linters
         run: make generate && golangci-lint --version && ./scripts/lint.sh -g lint
+      - name: Vet the Canton LocalNet watcher harness (build tag localnet)
+        run: cd node && go vet -tags localnet ./pkg/watchers/canton/
       - name: Ensure generated proto matches
         run: |
           rm -rf node/pkg/proto

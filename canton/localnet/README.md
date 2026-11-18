@@ -64,6 +64,15 @@ Set `DB_PORT` to use a different port.
 | `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
 | `gg_rotate_owner_key.sh` | Replaces one `guardianGovernance` owner key. |
+| `ntt_e2e.sh` | Runs the NTT steps below in sequence. |
+| `ntt_upload_dars.sh` | Uploads the NTT DAR to all participants and vets its unvetted packages. |
+| `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
+| `ntt_burn_mint.sh` | Runs a burn/mint deployment of a `guardianGovernance` token. |
+| `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
+| `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
+| `ntt_lib.sh` | Shared functions for the `ntt_*.sh` scripts. |
+| `ntt_offline_lib.sh` | NTT functions that `test/ntt_lib_test.sh` tests without LocalNet. |
+| `allocate_external_party.js` | Allocates a 1-of-1 Ed25519 external party. |
 
 ## Script tests
 
@@ -73,6 +82,7 @@ The script tests do not need Docker or LocalNet. Run each test from the reposito
 canton/localnet/test/bounded_run_test.sh
 canton/localnet/test/image_lock_test.sh
 canton/localnet/test/owner_signer_block_test.sh
+canton/localnet/test/ntt_lib_test.sh
 ```
 
 ## Prerequisites
@@ -408,3 +418,97 @@ The script shows `ROTATION HALF-APPLIED` and a recovery command.
 - The vetting check fails at the submitting participant.
   It does not show the check on the other hosts for a submission that skips this check.
 - Each script changes the ledger state. Run each script in the order of this section.
+
+## NTT end-to-end run
+
+These scripts run the Wormhole NTT layer on LocalNet.
+The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `79d739b16`.
+Set `NTT_REPO_DIR` to the root of that checkout.
+The default is `../ntt`, next to this repository.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.0, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
+`ntt_upload_dars.sh` stops if a DAR has a different package ID.
+
+### Prerequisites
+
+- The `guardianGovernance` rehearsal of the previous section ran.
+- The NTT DARs exist. Run `dpm build --all` in `canton` of the NTT checkout.
+- Guardian set 1 with devnet key 1 is the current guardian set.
+  Set `NTT_GUARDIAN_SET_INDEX` and `NTT_GUARDIAN_KEY_INDICES` for a different set.
+- The current owner keys include `owner1` and `owner2`.
+  Set `NTT_GG_SIGNING_OWNERS` for different owner keys.
+
+### Procedure
+
+1. Run all steps:
+
+   ```bash
+   canton/localnet/ntt_e2e.sh
+   ```
+
+2. Make sure that the last line of the output is `NTT end-to-end run passed`.
+
+To run one step only, use the step script. Run the steps in the sequence of the table.
+
+| Step | Script | Result |
+| --- | --- | --- |
+| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.8.0. |
+| 2 | `ntt_governance.sh` | One `NttGovernance` root and one `CoinFactory` exist. |
+| 3 | `ntt_watcher.sh start` | The watcher harness reads `app-provider`. |
+| 4 | `ntt_burn_mint.sh` | A relayer mints 2.5 tokens to a user. The user burns 1.0 token. |
+| 5 | `ntt_lock_unlock.sh` | A user locks 5 CC. A relayer releases 2 CC to a recipient. |
+| 6 | `ntt_watcher.sh stop`, `check` and `reobserve` | The watcher observed the two outbound transfers. |
+
+### Burn/mint deployment
+
+- The deployment admin is a new external party on `app-provider`.
+- `guardianGovernance` administers the token. The instrument id is bound to the admin.
+- The admin and two `guardianGovernance` owner keys sign `RegisterManager`.
+- `RegisterManager` publishes `TransceiverInit`. `SetPeer` publishes `TransceiverRegistration`.
+- The user on `app-user` creates a `DepositPreapproval`.
+- The relayer on `sv` submits `Mint` with a VAA from the current guardian set.
+- The script makes sure that `guardianGovernance` is the instrument admin of each minted `Coin`.
+- The relayer submits the same `Mint` VAA again. The ledger rejects it with `digest already consumed`.
+- The relayer submits a `Mint` VAA that devnet key 9 signs for guardian 0.
+  The ledger rejects it with `public key does not match guardian address at index 0`.
+- The user submits `Transfer`. The canonical `CoinFactory` burns the token.
+
+### Lock/unlock deployment of Canton Coin
+
+- The deployment admin is the custodian. It is a wallet user on `app-provider`.
+  `guardianGovernance` is not the custodian.
+- The custodian, the locker and the recipient get Canton Coin from the wallet tap.
+- The custodian and the recipient create Amulet `TransferPreapproval` contracts with the wallet API.
+- The factory and the choice context come from the Amulet registry API of Scan.
+- The locker submits `Transfer`. The custodian receives the Canton Coin.
+- The relayer on `sv` submits `Release`. The recipient receives Canton Coin through its `TransferPreapproval`.
+- The relayer submits the same `Release` VAA again. The ledger rejects it with `digest already consumed`.
+- The relayer is not a stakeholder of the recipient holdings.
+  `Release` checks the amount on the custodian side.
+
+### Guardian watcher harness
+
+The harness is `node/pkg/watchers/canton/watcher_localnet_test.go`, with the build tag `localnet`.
+It runs `Watcher.Run` with the pinned `wormhole-core` package id.
+It reads the update stream of `guardianGovernance` on `app-provider`.
+LocalNet uses a static JWT on plaintext gRPC. Thus the harness gives the watcher a gRPC client with that token.
+
+`ntt_watcher.sh check` compares each live observation with the `WormholeMessage` of the transaction.
+Each observation has chain 75.
+The emitter address that the watcher calculates is equal to the `emitterAddress` of the transceiver `Emitter`.
+
+`ntt_watcher.sh reobserve` sends a reobservation request for each outbound transfer.
+It sends the requests to a harness on `app-provider`, then to a harness on `sv`.
+
+NOTE: The transaction id of the watcher is the update id.
+The update id is the same on each participant.
+
+### Limits of the NTT run
+
+- The peer on chain 2 is not a real deployment. The devnet guardian key signs the inbound VAAs.
+- By default, the lock and the release occur in the same mining round.
+  Set `NTT_RELEASE_AFTER_ROUNDS` (0 to 24) to release from a custody pot that is that number of rounds old.
+  Token-standard transfers use the round of `ExternalPartyConfigState`.
+  The DSO updates this round one time each 24 hours.
+  Thus the custody pot can be from round 0, and then the option has no effect.
+- The message fee is 0. The `Transfer` commands do not include a fee allocation.
+- Each run makes new deployments. The `NttGovernance` root and the `CoinFactory` stay the same.

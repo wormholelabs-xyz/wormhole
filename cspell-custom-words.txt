@@ -171,6 +171,7 @@ Polkadot
 Positionals
 postconditions
 Preapproval
+Preapprovals
 prefunded
 promauto
 proto
@@ -265,6 +266,7 @@ Unrepresentable
 untampered
 unvet
 Unvet
+unvetted
 upserted
 usize
 utest
