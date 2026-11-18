@@ -50,6 +50,22 @@ check_case "the 0.6.0 and 0.7.0 ids differ" 1 - \
   test "$CORE_V6_PACKAGE_ID" == "$CORE_V7_PACKAGE_ID"
 check_case "the ntt 0.2.0 and 0.3.0 ids differ" 1 - \
   test "$NTT_V2_PACKAGE_ID" == "$NTT_V3_PACKAGE_ID"
+check_case "core 0.6.0 DAR has CORE_V6_VERSION" 0 - \
+  check_rehearsal_dar "$CORE_V6_DAR" "wormhole-core $CORE_V6_VERSION" "$CORE_V6_PACKAGE_ID"
+check_case "core 0.7.0 DAR has CORE_V7_VERSION" 0 - \
+  check_rehearsal_dar "$CORE_V7_DAR" "wormhole-core $CORE_V7_VERSION" "$CORE_V7_PACKAGE_ID"
+
+# check_approved_list_is_core_v6_and_v7 <file>
+check_approved_list_is_core_v6_and_v7() {
+  local expected_approved_list
+  expected_approved_list="$(jq -nc --arg v6 "$CORE_V6_PACKAGE_ID" --arg v7 "$CORE_V7_PACKAGE_ID" \
+    '[{packageId: $v6, version: "0.6.0"}, {packageId: $v7, version: "0.7.0"}]')"
+  write_rehearsal_approved_core_packages "$1" && [[ "$(jq -c . "$1")" == "$expected_approved_list" ]]
+}
+check_case "the rehearsal approved list has exactly core 0.6.0 and 0.7.0" 0 - \
+  check_approved_list_is_core_v6_and_v7 "$work_dir/approved.json"
+check_case "the rehearsal approved list rejects a missing directory" 1 - \
+  write_rehearsal_approved_core_packages "$work_dir/absent/approved.json"
 
 if [[ -f "$NTT_V2_DAR" ]]; then
   check_case "ntt 0.2.0 DAR is the pinned 0.2.0 package" 0 - \
