@@ -51,7 +51,8 @@ gg_ceremony_signers_json() {
 # ntt_custody_signers_json: nttCustody signatures. Its signing keys are the guardianGovernance owner keys.
 ntt_custody_signers_json() {
   [[ -n "$NTT_CUSTODY_PARTY" ]] || fail "ntt_custody_signers_json: ntt $NTT_VERSION has no nttCustody party"
-  gg_ceremony_signers_json | jq --arg party "$NTT_CUSTODY_PARTY" '{($party): (to_entries[0].value)}'
+  gg_ceremony_signers_json | jq -e --arg party "$NTT_CUSTODY_PARTY" \
+    'if length == 1 then {($party): (to_entries[0].value)} else error("expected one guardianGovernance signer entry, found \(length)") end'
 }
 
 # active_contracts_with_blobs <validator> <party> <qualified-template-suffix>: like active_contracts, with created event blobs.
@@ -115,9 +116,7 @@ submit_local_expect_rejection() {
 
 # Wallet (validator) API, as the wallet user. validator_api_url <validator>
 validator_api_url() {
-  local host_port
-  host_port="$(validator_api_port "$1")" || return 1
-  echo "http://localhost:$host_port/api/validator/v0"
+  echo "http://localhost:$(validator_port_prefix "$1")903/api/validator/v0"
 }
 
 # wallet_onboard <validator> <user>: onboard the user and print its party id.

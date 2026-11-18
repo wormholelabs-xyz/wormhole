@@ -73,16 +73,16 @@ register_transaction="$(submit_interactive "ntt-register-lock-unlock-gg-$run_lab
     "$(operator_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
-manager_cid="$(jq -r ._2 <<<"$register_result")"
+manager_cid="$(jq -er ._2 <<<"$register_result")"
 manager_json="$(created_contract_argument "$register_transaction" ":Wormhole.Ntt.Manager:NttManager")"
-manager_address="$(jq -r .managerAddress <<<"$manager_json")"
-emitter_id="$(jq -r .transceiverEmitterId <<<"$manager_json")"
+manager_address="$(jq -er .managerAddress <<<"$manager_json")"
+emitter_id="$(jq -er .transceiverEmitterId <<<"$manager_json")"
 [[ "$(jq -r .admin <<<"$manager_json")" == "$GG_PARTY" ]] || fail "manager admin is not guardianGovernance"
 [[ "$(jq -r .reserveCustodian <<<"$manager_json")" == "$NTT_CUSTODY_PARTY" ]] || fail "manager reserveCustodian is not nttCustody"
 echo "manager ${manager_cid:0:16} address $manager_address emitterId $emitter_id reserveCustodian nttCustody"
 
 echo "== 3. SetPeer chain $PEER_CHAIN_ID (guardianGovernance)"
-emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"
+emitter_cid="$(current_emitter "$emitter_id" | jq -er .contractId)"
 set_peer_transaction="$(submit_interactive "ntt-lock-unlock-gg-set-peer-$run_label" "$gg_only" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" SetPeer "$(jq -n --arg chain "$PEER_CHAIN_ID" \
     --arg manager "$PEER_MANAGER_ADDRESS" --arg transceiver "$PEER_TRANSCEIVER_ADDRESS" --arg emitter "$emitter_cid" \
@@ -92,11 +92,11 @@ set_peer_transaction="$(submit_interactive "ntt-lock-unlock-gg-set-peer-$run_lab
   "$(gg_ceremony_signers_json)" \
   "$(json_array "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
     "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
-manager_cid="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -r ._1)"
+manager_cid="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -er ._1)"
 
 record_ntt_json lockUnlockGg "$(jq -nc --arg manager "$manager_cid" --arg managerAddress "$manager_address" \
-  --arg emitterId "$emitter_id" --arg custody "$NTT_CUSTODY_PARTY" \
+  --arg emitterId "$emitter_id" --arg custody "$NTT_CUSTODY_PARTY" --argjson peerChainId "$PEER_CHAIN_ID" \
   --arg peerManager "$PEER_MANAGER_ADDRESS" --arg peerTransceiver "$PEER_TRANSCEIVER_ADDRESS" '{
     managerCid: $manager, managerAddress: $managerAddress, emitterId: $emitterId, reserveCustodian: $custody,
-    peerChainId: 2, peerManagerAddress: $peerManager, peerTransceiverAddress: $peerTransceiver}')"
+    peerChainId: $peerChainId, peerManagerAddress: $peerManager, peerTransceiverAddress: $peerTransceiver}')"
 echo "lock/unlock deployment with admin guardianGovernance recorded in $NTT_CONTRACTS"

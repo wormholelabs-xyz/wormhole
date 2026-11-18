@@ -8,8 +8,7 @@
 #   check          Runs the checks. Exits non-zero if one check fails.
 #   down           Removes the three containers and the two networks. LocalNet keeps running.
 #   ledger-user    Makes only the read-only ledger user and its token file $LOCALNET_STATE_DIR/gateway-t1/gateway.jwt.
-#   check-relayer  Runs checks C3 to C8 only, against the service at GATEWAY_T1_SERVICE_URL. The service and LocalNet
-#                  can be on other hosts (canton/localnet/aws/aws_t1_check.sh).
+#   check-relayer  Runs checks C3 to C8 only, against the service at GATEWAY_T1_SERVICE_URL.
 #
 # Layout:
 #   host relayer -> 127.0.0.1:7599 -> edge (gateway-edge-net, gateway-net)
@@ -240,9 +239,14 @@ fail_check() { echo "FAIL: $*" >&2; check_failures=$((check_failures + 1)); }
 
 # proxy_status <curl TLS flags...>: HTTP status of GET /v2/version through the ledger proxy, or "tls-failure".
 proxy_status() {
-  curl_bounded -s -o "$gg_work_dir/proxy-body" -w '%{http_code}' \
+  local http_status
+  if http_status="$(curl_bounded -s -o "$gg_work_dir/proxy-body" -w '%{http_code}' \
     --resolve "$PROXY_CONTAINER:$PROXY_PORT:127.0.0.1" --cacert "$GATEWAY_STATE_DIR/certs/ca.crt" "$@" \
-    "https://$PROXY_CONTAINER:$PROXY_PORT/v2/version" || echo "tls-failure"
+    "https://$PROXY_CONTAINER:$PROXY_PORT/v2/version")"; then
+    echo "$http_status"
+  else
+    echo "tls-failure"
+  fi
 }
 
 check_proxy_requires_client_certificate() {
@@ -320,14 +324,16 @@ check_service_endpoints() {
   else
     fail_check "C3 template outside the allow-list: $(tail -n 1 <<<"$response")"
   fi
+  local manager_count
   response="$(service_get "/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager")"
-  if [[ "$(tail -n 1 <<<"$response")" == "200" ]]; then
-    pass "C3 control NttManager template: HTTP 200, $(sed '$d' <<<"$response" | jq '[.. | .contractId? // empty] | length') contracts"
+  manager_count="$(sed '$d' <<<"$response" | jq '[.. | .contractId? // empty] | length' 2> /dev/null || echo 0)"
+  if [[ "$(tail -n 1 <<<"$response")" == "200" ]] && (( manager_count >= 1 )); then
+    pass "C3 control NttManager template: HTTP 200, $manager_count contracts"
   else
-    fail_check "C3 control NttManager template: $(tail -n 1 <<<"$response")"
+    fail_check "C3 control NttManager template: HTTP $(tail -n 1 <<<"$response"), $manager_count contracts"
   fi
   response="$(service_get "/v1/flows/register")"
-  if [[ "$(tail -n 1 <<<"$response")" != "200" ]] && grep -qF "ReplayRootRegistry" <<<"$response"; then
+  if [[ "$(tail -n 1 <<<"$response")" == "500" ]] && grep -qF "ReplayRootRegistry" <<<"$response"; then
     pass "C3 register flow without operator readAs: HTTP $(tail -n 1 <<<"$response") $(sed '$d' <<<"$response" | head -c 200)"
   else
     fail_check "C3 register flow: $(tail -n 1 <<<"$response") $(sed '$d' <<<"$response" | head -c 200)"
@@ -517,14 +523,16 @@ check_release_through_service() {
 }
 
 check_stale_disclosure_fails() {
-  local vaa response fresh_flow poll
+  local vaa response fresh_flow poll stale_ledger_cid fresh_ledger_cid
   echo "== C8. A stale set (LockedLedger and pot from before the release) fails; a fresh set succeeds"
+  [[ -n "$pre_release_flow" ]] || { fail_check "C8 needs the C7 release set"; return; }
+  stale_ledger_cid="$(flow_role_cid "$pre_release_flow" LockedLedger)" || { fail_check "C8 C7 set has no LockedLedger"; return; }
   vaa="$(release_vaa "$((run_label + 1))" "$SECOND_RELEASE_TRIMMED_AMOUNT")"
   response="$(submit_release_response "t1-release-stale-$run_label" "$vaa" "$pre_release_flow" "$SECOND_RELEASE_AMOUNT")"
   echo "stale response: HTTP $(tail -n 1 <<<"$response") $(sed '$d' <<<"$response" | jq -c '{code, cause: (.cause // "" | .[0:300])}' 2> /dev/null || sed '$d' <<<"$response" | head -c 300)"
   if [[ "$(tail -n 1 <<<"$response")" != "200" ]] \
       && [[ "$(sed '$d' <<<"$response" | jq -r '.code // empty' 2> /dev/null)" == "LOCAL_VERDICT_INACTIVE_CONTRACTS" ]]; then
-    pass "C8 stale LockedLedger $(flow_role_cid "$pre_release_flow" LockedLedger | cut -c1-16): LOCAL_VERDICT_INACTIVE_CONTRACTS"
+    pass "C8 stale set (LockedLedger ${stale_ledger_cid:0:16} and pot from before the release): LOCAL_VERDICT_INACTIVE_CONTRACTS"
   else
     fail_check "C8 stale set: HTTP $(tail -n 1 <<<"$response")"
   fi
@@ -532,20 +540,22 @@ check_stale_disclosure_fails() {
   for (( poll = 1; poll <= FRESH_SET_MAX_POLLS; poll++ )); do
     fresh_flow="$(flow_set release "manager=$lock_unlock_manager_address&digest=$(jq -er .digestHex <<<"$vaa")&recipient=$recipient_party")" \
       || { fail_check "C8 fresh release flow"; return; }
-    [[ "$(flow_role_cid "$fresh_flow" LockedLedger)" == "$(flow_role_cid "$pre_release_flow" LockedLedger)" ]] || break
+    fresh_ledger_cid="$(flow_role_cid "$fresh_flow" LockedLedger)" || { fail_check "C8 fresh set has no LockedLedger"; return; }
+    [[ "$fresh_ledger_cid" == "$stale_ledger_cid" ]] || break
     sleep 1
   done
-  if [[ "$(flow_role_cid "$fresh_flow" LockedLedger)" == "$(flow_role_cid "$pre_release_flow" LockedLedger)" ]]; then
+  if [[ "$fresh_ledger_cid" == "$stale_ledger_cid" ]]; then
     fail_check "C8 the service still returns the archived LockedLedger after $FRESH_SET_MAX_POLLS fetches"
     return
   fi
-  pass "C8 the service returns the new LockedLedger $(flow_role_cid "$fresh_flow" LockedLedger | cut -c1-16) at fetch $poll"
+  pass "C8 the service returns the new LockedLedger ${fresh_ledger_cid:0:16} at fetch $poll"
   check_release "C8 control" "t1-release-fresh-$run_label" "$vaa" "$fresh_flow" "$SECOND_RELEASE_AMOUNT"
 }
 
 # run_relayer_checks: C3 to C8. The relayer reads disclosure sets only from SERVICE_URL.
 run_relayer_checks() {
   run_label="$(date +%s)"
+  pre_release_flow=""
   lock_unlock_manager_address="$(ntt_contract lockUnlockGg | jq -er .managerAddress)"
   echo "service $SERVICE_URL"
   check_service_endpoints

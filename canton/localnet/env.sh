@@ -59,34 +59,16 @@ localnet_core_dar_path() {
   echo "$canton_project_dir/core/.daml/dist/wormhole-core-$core_version.dar"
 }
 
-# Added to each host port. A tunnel to a remote LocalNet sets it, so that its ports do not collide with a local LocalNet.
-LOCALNET_HOST_PORT_OFFSET="${LOCALNET_HOST_PORT_OFFSET-0}"
-readonly MAX_LOCALNET_HOST_PORT_OFFSET=60000
-if [[ ! "$LOCALNET_HOST_PORT_OFFSET" =~ ^(0|[1-9][0-9]{0,4})$ ]] \
-    || (( LOCALNET_HOST_PORT_OFFSET > MAX_LOCALNET_HOST_PORT_OFFSET )); then
-  echo "LOCALNET_HOST_PORT_OFFSET must be an integer from 0 to $MAX_LOCALNET_HOST_PORT_OFFSET: '$LOCALNET_HOST_PORT_OFFSET'" >&2
-  return 1
-fi
-
-# validator_host_port <validator> <api-port-suffix>: for example app-user 975 -> 2975 + LOCALNET_HOST_PORT_OFFSET.
-validator_host_port() {
-  local port_prefix
-  port_prefix="$(validator_port_prefix "$1")" || return 1
-  echo "$(( port_prefix * 1000 + $2 + LOCALNET_HOST_PORT_OFFSET ))"
-}
-
 json_api_url() {
-  local host_port
-  host_port="$(validator_host_port "$1" 975)" || return 1
-  echo "http://localhost:$host_port"
+  local port_prefix
+  port_prefix="$(validator_port_prefix "$1")"
+  echo "http://localhost:${port_prefix}975"
 }
 
 grpc_ledger_api_port() {
-  validator_host_port "$1" 901
-}
-
-validator_api_port() {
-  validator_host_port "$1" 903
+  local port_prefix
+  port_prefix="$(validator_port_prefix "$1")"
+  echo "${port_prefix}901"
 }
 
 # write_auth_header_file <header-file> [subject]: writes "Authorization: Bearer <jwt>" with mode 0600.
