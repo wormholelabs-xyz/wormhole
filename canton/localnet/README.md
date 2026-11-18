@@ -769,7 +769,11 @@ The watchers `v6-<host>` and `canary` continue to run between steps.
 Each guardian watcher runs as three harnesses, one on each participant.
 Each harness reads as `guardianGovernance` on its own participant.
 
-| Step | Name | Result |
+The table gives the expected result of each step.
+No LocalNet run of the steps `gate`, `switch-v7` and `abort-v7` exists at this commit.
+Section 7.5 of `canton/README.md` gives the results of the run at commit `395103f5e`.
+
+| Step | Name | Expected result |
 | --- | --- | --- |
 | 0 | `prepare` | Each host vets core 0.6.0 and `ntt` 0.2.0. No host vets a different core or `ntt` version. |
 | 1 | `observe-v6` | The guardian watchers `v6-<host>`, pinned to 0.6.0, observe a 0.6.0 `PublishMessage`. |

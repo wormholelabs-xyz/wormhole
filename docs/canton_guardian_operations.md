@@ -534,6 +534,11 @@ Your watcher, still pinned to the old core package ID, must observe it before th
 13. Scan from the abort offset to this offset, with the second control message as the required update ID.
 14. Send a reobservation request for each `PublishMessage` with the old core package ID that has no VAA.
 
+Steps 8 to 10 cause a second outage for messages under the old core package ID.
+From the restart of step 8 to the restart of step 10, the watchers of a quorum accept only the new core package ID.
+A new message under the old core package ID gets no VAA in this period.
+Steps 13 and 14 recover each of these messages. Thus the guardians lose no message.
+
 A reobservation reads a committed update. Thus step 8 needs no vetting of the new core package ID.
 After step 1, a submission under the new core package ID fails at prepare.
 The coordinator tells the integrators that the upgrade stopped.
