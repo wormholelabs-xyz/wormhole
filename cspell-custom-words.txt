@@ -185,6 +185,7 @@ Positionals
 postcondition
 postconditions
 Preapproval
+Preapprovals
 prefunded
 promauto
 proto
@@ -293,6 +294,7 @@ untampered
 unvalidated
 unvet
 Unvet
+unvetted
 upserted
 usize
 utest
