@@ -2,7 +2,9 @@ package canton
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/query"
@@ -22,11 +24,26 @@ type WatcherConfig struct {
 	// spoofing risk, so Create REQUIRES it outside unsafe dev mode. (Daml
 	// package upgrades change the package-id, so it must be updated on upgrade.)
 	PackageID string
+	// RetiringPackageID is the previous wormhole-core package id during an
+	// upgrade window (canton/README.md section 7.5). Empty outside the window.
+	// SECURITY: it must be a guardian-approved, vetted core version; messages
+	// it executes before RetiringPackageAcceptedUntil are signed.
+	RetiringPackageID string
+	// RetiringPackageAcceptedUntil is the exclusive record-time deadline for
+	// RetiringPackageID (RFC 3339 UTC, whole seconds). Required with it.
+	RetiringPackageAcceptedUntil string
+	// PackageVersion and RetiringPackageVersion are the wormhole-core versions
+	// (MAJOR.MINOR.PATCH) the participant's vetting metadata must show for
+	// PackageID and RetiringPackageID. Required outside unsafe dev mode.
+	PackageVersion         string
+	RetiringPackageVersion string
 	// ReadAsParty narrows the update stream and reobservation lookups to the
 	// guardianGovernance party (signatory of CoreState, observer of every
 	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
 	// party on the participant.
 	ReadAsParty string
+	// approvedCorePackages overrides cantonclient.DefaultApprovedCorePackages in tests.
+	approvedCorePackages *cantonclient.ApprovedCorePackages
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
 	// All three fields set enables per-RPC bearer tokens; all empty disables
 	// authentication; anything else is a configuration error. Requires TLS,
@@ -60,6 +77,30 @@ func (wc *WatcherConfig) Create(
 	if !devMode && wc.PackageID == "" {
 		return nil, nil, fmt.Errorf("canton: PackageID must be set outside unsafe dev mode (an empty package id matches any package and is a message-spoofing risk)")
 	}
+	if !devMode && wc.PackageID != "" && wc.PackageVersion == "" {
+		return nil, nil, fmt.Errorf("canton: PackageVersion must be set with PackageID outside unsafe dev mode")
+	}
+	if !devMode && wc.RetiringPackageID != "" && wc.RetiringPackageVersion == "" {
+		return nil, nil, fmt.Errorf("canton: RetiringPackageVersion must be set with RetiringPackageID outside unsafe dev mode")
+	}
+	acceptedPackageIDs, err := wc.acceptedPackageIDs(time.Now())
+	if err != nil {
+		return nil, nil, err
+	}
+	// Redundant with the PackageID check above.
+	if !devMode && acceptedPackageIDs.MatchesAnyPackage() {
+		return nil, nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
+	}
+	approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
+	if wc.approvedCorePackages != nil {
+		approvedCorePackages = *wc.approvedCorePackages
+	}
+	// SECURITY: outside unsafe dev mode only reviewed core releases can be pinned.
+	if !devMode {
+		if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
+			return nil, nil, fmt.Errorf("canton: %w", err)
+		}
+	}
 
 	// SECURITY: outside unsafe dev mode the stream MUST be narrowed to the
 	// guardianGovernance party. Every Emitter it observes pins that same party
@@ -80,15 +121,41 @@ func (wc *WatcherConfig) Create(
 		return nil, nil, fmt.Errorf("canton: OAuth auth requires TLS and cannot be used in unsafe dev mode")
 	}
 
-	watcher := NewWatcher(
+	watcher, err := newWatcherWithApprovedList(
+		approvedCorePackages,
 		wc.Rpc,
-		wc.PackageID,
+		acceptedPackageIDs,
 		wc.ReadAsParty,
 		wc.Auth,
 		devMode,
 		msgC,
 		obsvReqC,
 	)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return watcher.Run, nil, nil
+}
+
+// acceptedPackageIDs is the dev-mode wildcard when every package flag is
+// empty; Create rejects that case outside unsafe dev mode before calling it.
+func (wc *WatcherConfig) acceptedPackageIDs(startupWallClock time.Time) (cantonclient.AcceptedPackageIDs, error) {
+	current := cantonclient.CurrentPackageConfig{
+		PackageIDHex: wc.PackageID,
+		Version:      wc.PackageVersion,
+	}
+	retiring := cantonclient.RetiringPackageConfig{
+		PackageIDHex:     wc.RetiringPackageID,
+		AcceptedUntilUTC: wc.RetiringPackageAcceptedUntil,
+		Version:          wc.RetiringPackageVersion,
+	}
+	if current == (cantonclient.CurrentPackageConfig{}) && retiring == (cantonclient.RetiringPackageConfig{}) {
+		return cantonclient.AcceptAnyPackageID(), nil
+	}
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(current, retiring, startupWallClock)
+	if err != nil {
+		return cantonclient.AcceptedPackageIDs{}, fmt.Errorf("canton: %w", err)
+	}
+	return acceptedPackageIDs, nil
 }

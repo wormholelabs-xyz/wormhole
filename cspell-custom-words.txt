@@ -43,6 +43,7 @@ Chainlink
 chainlock
 channelcheck
 channellint
+codegen
 Coinspect
 collateralization
 colour
@@ -295,6 +296,7 @@ unvalidated
 unvet
 Unvet
 unvetted
+updateid
 upserted
 usize
 utest

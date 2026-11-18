@@ -153,12 +153,16 @@ var (
 	suiRPC           *string
 	suiMoveEventType *string
 
-	cantonRPC              *string
-	cantonPackageID        *string
-	cantonReadAsParty      *string
-	cantonAuthTokenURL     *string
-	cantonAuthClientID     *string
-	cantonAuthClientSecret *string
+	cantonRPC                          *string
+	cantonPackageID                    *string
+	cantonPackageVersion               *string
+	cantonRetiringPackageID            *string
+	cantonRetiringPackageVersion       *string
+	cantonRetiringPackageAcceptedUntil *string
+	cantonReadAsParty                  *string
+	cantonAuthTokenURL                 *string
+	cantonAuthClientID                 *string
+	cantonAuthClientSecret             *string
 
 	solanaRPC          *string
 	solanaContract     *string
@@ -442,7 +446,11 @@ func init() {
 	suiMoveEventType = NodeCmd.Flags().String("suiMoveEventType", "", "Sui move event type for publish_message")
 
 	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
-	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id. Required outside --unsafeDevMode; empty (dev mode only) matches any package")
+	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (64 lowercase hex). Required outside --unsafeDevMode; empty (dev mode only) matches any package")
+	cantonPackageVersion = NodeCmd.Flags().String("cantonPackageVersion", "", "wormhole-core version (MAJOR.MINOR.PATCH) that the participant's vetting metadata must show for --cantonPackageID. Required with it outside --unsafeDevMode")
+	cantonRetiringPackageVersion = NodeCmd.Flags().String("cantonRetiringPackageVersion", "", "wormhole-core version (MAJOR.MINOR.PATCH) that the participant's vetting metadata must show for --cantonRetiringPackageID. Required with it outside --unsafeDevMode")
+	cantonRetiringPackageID = NodeCmd.Flags().String("cantonRetiringPackageID", "", "Retiring wormhole-core package id (64 lowercase hex). Needs --cantonRetiringPackageAcceptedUntil. Guardian-approved ids only")
+	cantonRetiringPackageAcceptedUntil = NodeCmd.Flags().String("cantonRetiringPackageAcceptedUntil", "", "Exclusive record-time deadline for --cantonRetiringPackageID (RFC 3339 UTC, whole seconds, for example 2026-12-01T00:00:00Z). At most 7 days after this startup; the bound applies at each startup, so keep the same deadline at every restart")
 	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton guardianGovernance party the watcher reads as. Required outside --unsafeDevMode; empty (dev mode only) observes all parties on the participant")
 	cantonAuthTokenURL = NodeCmd.Flags().String("cantonAuthTokenURL", "", "OAuth2 token endpoint for a Keycloak-fronted Canton Ledger API (.../realms/<realm>/protocol/openid-connect/token). Set together with cantonAuthClientID and cantonAuthClientSecret, or not at all")
 	cantonAuthClientID = NodeCmd.Flags().String("cantonAuthClientID", "", "OAuth2 client id for the Canton Ledger API (client-credentials grant)")
@@ -1039,8 +1047,11 @@ func runNode(cmd *cobra.Command, args []string) {
 		logger.Fatal("Either --suiRPC and --suiMoveEventType must all be set or all unset")
 	}
 
-	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create requires
-	// --cantonPackageID and --cantonReadAsParty outside --unsafeDevMode.
+	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create
+	// validates the canton flags themselves.
+	if err := checkCantonFlagsNeedRPC(*cantonRPC, cantonFlagValuesThatNeedRPC()); err != nil {
+		logger.Fatal(err.Error())
+	}
 
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {
 		logger.Fatal("Either --xrplRPC and --xrplContract must all be set or all unset")
@@ -1885,11 +1896,15 @@ func runNode(cmd *cobra.Command, args []string) {
 
 	if shouldStart(cantonRPC) {
 		wc := &canton.WatcherConfig{
-			NetworkID:   "canton",
-			ChainID:     vaa.ChainIDCanton,
-			Rpc:         *cantonRPC,
-			PackageID:   *cantonPackageID,
-			ReadAsParty: *cantonReadAsParty,
+			NetworkID:                    "canton",
+			ChainID:                      vaa.ChainIDCanton,
+			Rpc:                          *cantonRPC,
+			PackageID:                    *cantonPackageID,
+			PackageVersion:               *cantonPackageVersion,
+			RetiringPackageID:            *cantonRetiringPackageID,
+			RetiringPackageVersion:       *cantonRetiringPackageVersion,
+			RetiringPackageAcceptedUntil: *cantonRetiringPackageAcceptedUntil,
+			ReadAsParty:                  *cantonReadAsParty,
 			Auth: canton.AuthConfig{
 				TokenURL:     *cantonAuthTokenURL,
 				ClientID:     *cantonAuthClientID,

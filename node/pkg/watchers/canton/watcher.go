@@ -10,6 +10,7 @@ package canton
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -56,7 +57,7 @@ const (
 // Test.TestCore:testAddressVector, and TestDeriveEmitterAddressMatchesVector.
 const emitterAddressTag = "wormhole:emitter:v1"
 
-// deriveEmitterAddress computes the canonical 32-byte Wormhole emitter address
+// DeriveEmitterAddress computes the canonical 32-byte Wormhole emitter address
 // from an emitter's contract-key components:
 //
 //	keccak256( utf8(tag) ‖ lp(registrar) ‖ lp(owner) ‖ uint64be(emitterId) )
@@ -65,7 +66,7 @@ const emitterAddressTag = "wormhole:emitter:v1"
 // make the preimage injective across the two variable-length party ids; owner is
 // part of the preimage so a compromised operator cannot forge an existing
 // emitter's address (see Wormhole.Core.State).
-func deriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.Address {
+func DeriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.Address {
 	buf := make([]byte, 0, len(emitterAddressTag)+8+len(registrar)+len(owner)+8)
 	buf = append(buf, emitterAddressTag...)
 	var l [4]byte
@@ -127,10 +128,10 @@ func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
 }
 
 type Watcher struct {
-	cantonRPC   string
-	packageID   string
-	readAsParty string
-	auth        AuthConfig
+	cantonRPC          string
+	acceptedPackageIDs cantonclient.AcceptedPackageIDs
+	readAsParty        string
+	auth               AuthConfig
 
 	unsafeDevMode bool
 
@@ -142,8 +143,20 @@ type Watcher struct {
 	// across supervisor restarts of Run (the Watcher instance persists). Canton
 	// ends streams whose access token expired, so Run resubscribes from here
 	// rather than the current ledger end to avoid dropping the reconnect
-	// window. Written only by the data-pump goroutine.
-	lastOffset atomic.Int64
+	// window. Valid only when hasResumeOffset is true; offset 0 is the ledger
+	// begin. Written only by the data-pump goroutine.
+	lastOffset      atomic.Int64
+	hasResumeOffset atomic.Bool
+
+	// packageMetadata holds which pinned roles passed the vetting metadata check.
+	packageMetadata packageMetadataVerification
+
+	// packageMetadataRecheckInterval is the period of the vetting metadata recheck.
+	packageMetadataRecheckInterval time.Duration
+
+	// approvedCorePackages is the reviewed (id, version) list that outside
+	// unsafe dev mode every pinned core package must match.
+	approvedCorePackages cantonclient.ApprovedCorePackages
 
 	// cantonClient is an interface; a nil check is fine for "not injected".
 	// Tests inject a fake; in production Run creates a gRPC client.
@@ -165,44 +178,168 @@ var (
 			Name: "wormhole_canton_current_height",
 			Help: "Current Canton ledger offset",
 		})
+	// At most two series: role current and, during an upgrade window, role retiring.
+	acceptedPackageIDsGauge = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "wormhole_canton_accepted_package_ids",
+			Help: "Accepted wormhole-core package ids (value 1). A role=retiring series means the upgrade window is open",
+		}, []string{"role", "package_id"})
+	// Two series: role current and role retiring.
+	acceptedPublishMessages = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "wormhole_canton_accepted_publish_messages_total",
+			Help: "PublishMessage exercises the watcher emitted from the stream, by the role of the executing core package id",
+		}, []string{"role"})
+	retiringPackageAcceptedUntilGauge = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "wormhole_canton_retiring_package_accepted_until_seconds",
+			Help: "Exclusive record-time deadline of the retiring wormhole-core package id (Unix seconds); 0 outside an upgrade window",
+		})
 )
 
-// NewWatcher creates a new Canton watcher.
+// Warning texts for an open upgrade window and a retiring id past its deadline.
+const (
+	upgradeWindowOpenMessage      = "canton core upgrade window is open: the retiring core package id is accepted before its record-time deadline; remove it at a later restart"
+	retiringDeadlinePassedMessage = "canton retiring core package deadline has passed: only pre-deadline messages of the retiring id are accepted; remove it at a later restart"
+)
+
+// maxHeartbeatContractAddressLen is "current,retiring": two package ids and a comma.
+const maxHeartbeatContractAddressLen = 2*cantonclient.PackageIDHexLen + 1
+
+// reportAcceptedPackageIDs replaces the accepted-package-id gauge series and
+// warns when an upgrade window is open, so a window left open stays visible.
+// wallClock only selects the past-deadline warning.
+func reportAcceptedPackageIDs(logger *zap.Logger, acceptedPackageIDs cantonclient.AcceptedPackageIDs, wallClock time.Time) {
+	acceptedPackageIDsGauge.Reset()
+	retiringPackageAcceptedUntilGauge.Set(0)
+	if acceptedPackageIDs.MatchesAnyPackage() {
+		acceptedPackageIDsGauge.WithLabelValues("current", "*").Set(1)
+		return
+	}
+	currentPackageID, _ := acceptedPackageIDs.CurrentPackageID()
+	acceptedPackageIDsGauge.WithLabelValues("current", currentPackageID.String()).Set(1)
+	retiringPackageID, hasRetiring := acceptedPackageIDs.RetiringPackageID()
+	if !hasRetiring {
+		return
+	}
+	acceptedBeforeRecordTime := retiringPackageID.AcceptedBeforeRecordTime()
+	acceptedPackageIDsGauge.WithLabelValues("retiring", retiringPackageID.PackageID().String()).Set(1)
+	retiringPackageAcceptedUntilGauge.Set(float64(acceptedBeforeRecordTime.Unix()))
+	windowFields := []zap.Field{
+		zap.Stringer("currentPackageId", currentPackageID),
+		zap.Stringer("retiringPackageId", retiringPackageID.PackageID()),
+		zap.Time("retiringPackageAcceptedBeforeRecordTime", acceptedBeforeRecordTime),
+	}
+	logger.Warn(upgradeWindowOpenMessage, windowFields...)
+	if !wallClock.Before(acceptedBeforeRecordTime) {
+		logger.Warn(retiringDeadlinePassedMessage, windowFields...)
+	}
+}
+
+// checkAcceptedPackageIDsAllowed rejects an empty set, the any-package
+// wildcard outside unsafe dev mode (a look-alike package could forge
+// messages), and outside unsafe dev mode a pinned (id, version) that is not in
+// approvedCorePackages.
+func checkAcceptedPackageIDsAllowed(acceptedPackageIDs cantonclient.AcceptedPackageIDs, unsafeDevMode bool, approvedCorePackages cantonclient.ApprovedCorePackages) error {
+	if acceptedPackageIDs.MatchesAnyPackage() {
+		if !unsafeDevMode {
+			return fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
+		}
+		return nil
+	}
+	if acceptedPackageIDs.IsEmpty() {
+		return fmt.Errorf("canton: no accepted core package ids")
+	}
+	if unsafeDevMode {
+		return nil
+	}
+	for _, pinned := range acceptedPackageIDs.PinnedCorePackages() {
+		if pinned.ExpectedVersion.IsZero() {
+			return fmt.Errorf("canton: the %s core package id needs an expected version outside unsafe dev mode", pinned.Role)
+		}
+	}
+	// SECURITY: only reviewed core releases can be pinned.
+	if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
+		return fmt.Errorf("canton: %w", err)
+	}
+	return nil
+}
+
+// heartbeatContractAddress is "current", "current,retiring", or "*" for the wildcard.
+func (e *Watcher) heartbeatContractAddress() string {
+	contractAddress := e.acceptedPackageIDs.String()
+	if len(contractAddress) > maxHeartbeatContractAddressLen {
+		panic("canton heartbeat contract address exceeds two package ids")
+	}
+	return contractAddress
+}
+
+// defaultPackageMetadataRecheckInterval is the vetting metadata recheck period in production.
+const defaultPackageMetadataRecheckInterval = 60 * time.Second
+
+// NewWatcher creates a new Canton watcher. Outside unsafe dev mode every
+// pinned core package must be in the approved list compiled into guardiand.
 func NewWatcher(
 	cantonRPC string,
-	packageID string,
+	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
 	readAsParty string,
 	auth AuthConfig,
 	unsafeDevMode bool,
 	msgC chan<- *common.MessagePublication,
 	obsvReqC <-chan *gossipv1.ObservationRequest,
-) *Watcher {
+) (*Watcher, error) {
+	return newWatcherWithApprovedList(cantonclient.DefaultApprovedCorePackages(), cantonRPC, acceptedPackageIDs, readAsParty, auth, unsafeDevMode, msgC, obsvReqC)
+}
+
+func newWatcherWithApprovedList(
+	approvedCorePackages cantonclient.ApprovedCorePackages,
+	cantonRPC string,
+	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
+	readAsParty string,
+	auth AuthConfig,
+	unsafeDevMode bool,
+	msgC chan<- *common.MessagePublication,
+	obsvReqC <-chan *gossipv1.ObservationRequest,
+) (*Watcher, error) {
+	if err := checkAcceptedPackageIDsAllowed(acceptedPackageIDs, unsafeDevMode, approvedCorePackages); err != nil {
+		return nil, err
+	}
 	return &Watcher{
-		cantonRPC:     cantonRPC,
-		packageID:     packageID,
-		readAsParty:   readAsParty,
-		auth:          auth,
-		unsafeDevMode: unsafeDevMode,
-		msgChan:       msgC,
-		obsvReqC:      obsvReqC,
-		readinessSync: common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
+		cantonRPC:                      cantonRPC,
+		acceptedPackageIDs:             acceptedPackageIDs,
+		readAsParty:                    readAsParty,
+		auth:                           auth,
+		unsafeDevMode:                  unsafeDevMode,
+		msgChan:                        msgC,
+		obsvReqC:                       obsvReqC,
+		readinessSync:                  common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
+		packageMetadataRecheckInterval: defaultPackageMetadataRecheckInterval,
+		approvedCorePackages:           approvedCorePackages,
+	}, nil
+}
+
+// PublishMessageChoice is the Emitter choice whose result the watcher observes.
+const PublishMessageChoice = publishMessageChoice
+
+// PublishMessageTemplateID is the filter for the core bridge's Emitter template.
+func PublishMessageTemplateID(acceptedPackageIDs cantonclient.AcceptedPackageIDs) cantonclient.TemplateID {
+	return cantonclient.TemplateID{
+		AcceptedPackageIDs: acceptedPackageIDs,
+		ModuleName:         publishMessageModule,
+		EntityName:         publishMessageEntity,
 	}
 }
 
-// templateID is the Ledger API filter for the core bridge's Emitter template.
+// templateID is the filter shared by the stream and reobservation.
 func (e *Watcher) templateID() cantonclient.TemplateID {
-	return cantonclient.TemplateID{
-		PackageID:  e.packageID,
-		ModuleName: publishMessageModule,
-		EntityName: publishMessageEntity,
-	}
+	return PublishMessageTemplateID(e.acceptedPackageIDs)
 }
 
 // processMessage turns a decoded Canton message event into a
 // common.MessagePublication and publishes it to the message channel.
 //
 // The 32-byte emitter address is derived from the emitter's contract-key
-// components (registrar, owner, emitterId) via deriveEmitterAddress: the guardian
+// components (registrar, owner, emitterId) via DeriveEmitterAddress: the guardian
 // is the sole source of truth for the address (it is not stored on-ledger), and
 // because the owner is part of the preimage a compromised operator cannot forge
 // an existing emitter's address. See canton/README.md §4.2.
@@ -213,6 +350,13 @@ func (e *Watcher) templateID() cantonclient.TemplateID {
 // every participant, so guardians agree on it and reobservation can look it up
 // on any participant.
 func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessageEvent, isReobservation bool) {
+	if !ev.Message.AcceptedPackageRole.IsKnown() {
+		logger.Error("dropping Canton message with an unknown accepted package role",
+			zap.Stringer("updateId", ev.UpdateID))
+		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+		return
+	}
+
 	// Both key parties must be present to derive the address; a missing one means
 	// a malformed record we must not turn into an observation.
 	if ev.Message.Registrar == "" || ev.Message.Owner == "" {
@@ -224,7 +368,7 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		return
 	}
 
-	emitter := deriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
+	emitter := DeriveEmitterAddress(ev.Message.Registrar, ev.Message.Owner, ev.Message.EmitterID)
 
 	timestamp := ev.EffectiveAt
 	if timestamp.IsZero() {
@@ -263,8 +407,9 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 	// Record the resume point before publishing so a restart can never skip an
 	// offset the processor already saw. Reobservations replay old offsets and
 	// must not move the stream's resume point backward.
-	if !isReobservation && ev.ParticipantOffset > e.lastOffset.Load() {
+	if !isReobservation && (!e.hasResumeOffset.Load() || ev.ParticipantOffset > e.lastOffset.Load()) {
 		e.lastOffset.Store(ev.ParticipantOffset)
+		e.hasResumeOffset.Store(true)
 	}
 
 	e.msgChan <- observation //nolint:channelcheck // The channel to the processor is buffered and shared across chains, if it backs up we should stop processing new observations
@@ -272,11 +417,14 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 	cantonMessagesConfirmed.Inc()
 	if isReobservation {
 		watchers.ReobservationsByChain.WithLabelValues("canton", "std").Inc()
+	} else {
+		acceptedPublishMessages.WithLabelValues(ev.Message.AcceptedPackageRole.String()).Inc()
 	}
 
 	logger.Info("message observed", observation.ZapFields(
 		zap.Stringer("updateId", ev.UpdateID),
-		zap.Int64("participantOffset", ev.ParticipantOffset))...)
+		zap.Int64("participantOffset", ev.ParticipantOffset),
+		zap.Stringer("acceptedPackageRole", ev.Message.AcceptedPackageRole))...)
 }
 
 // handleReobservation fetches the transaction whose update id the
@@ -310,18 +458,33 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 	}
 
 	for _, msg := range txn.Messages {
+		if err := e.checkPublishPackageAdmitted(ctx, logger, client, msg.AcceptedPackageRole); err != nil {
+			logger.Error("canton_fetch_obvs_req dropped a message that the package metadata gate refused",
+				zap.Stringer("updateId", updateID), zap.Error(err))
+			p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+			continue
+		}
 		e.processMessage(logger, cantonclient.CantonMessageEvent{
 			ParticipantOffset: txn.ParticipantOffset,
 			UpdateID:          txn.UpdateID,
 			EffectiveAt:       txn.EffectiveAt,
+			RecordTime:        txn.RecordTime,
 			Message:           msg,
 		}, true)
 	}
 }
 
 func (e *Watcher) Run(ctx context.Context) error {
+	// Redundant with NewWatcher; covers a Watcher literal.
+	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode, e.approvedCorePackages); err != nil {
+		return err
+	}
+	if e.packageMetadataRecheckInterval <= 0 {
+		return fmt.Errorf("canton: the package metadata recheck interval must be positive")
+	}
+
 	p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
-		ContractAddress: e.packageID,
+		ContractAddress: e.heartbeatContractAddress(),
 	})
 
 	logger := supervisor.Logger(ctx)
@@ -329,10 +492,11 @@ func (e *Watcher) Run(ctx context.Context) error {
 	logger.Info("Starting watcher",
 		zap.String("watcher_name", "canton"),
 		zap.String("cantonRPC", e.cantonRPC),
-		zap.String("packageID", e.packageID),
+		zap.Stringer("acceptedPackageIDs", e.acceptedPackageIDs),
 		zap.String("readAsParty", e.readAsParty),
 		zap.Bool("unsafeDevMode", e.unsafeDevMode),
 	)
+	reportAcceptedPackageIDs(logger, e.acceptedPackageIDs, time.Now())
 
 	// Use an injected client (e.g. from tests) if present, otherwise create one
 	// for the lifetime of this Run. The client is kept local rather than stored
@@ -360,12 +524,20 @@ func (e *Watcher) Run(ctx context.Context) error {
 	}
 	currentCantonHeight.Set(float64(ledgerEnd))
 
+	if err := e.refreshPackageMetadata(ctx, logger, client); err != nil {
+		return err
+	}
+
 	// First run streams from the current ledger end. Restarted runs resume from
 	// the last processed offset: Canton ends streams whose access token expired
 	// (~minutes with Keycloak), and resuming from ledger end would silently
 	// drop anything published during the reconnect window.
 	beginExclusive := ledgerEnd
-	if last := e.lastOffset.Load(); last > 0 {
+	if e.hasResumeOffset.Load() {
+		last := e.lastOffset.Load()
+		if last < 0 {
+			panic("canton: negative resume offset")
+		}
 		beginExclusive = last
 		logger.Info("resuming update stream from last processed offset",
 			zap.Int64("lastOffset", last), zap.Int64("ledgerEnd", ledgerEnd))
@@ -373,6 +545,8 @@ func (e *Watcher) Run(ctx context.Context) error {
 
 	timer := time.NewTicker(time.Second * 5)
 	defer timer.Stop()
+	packageMetadataRecheckTicker := time.NewTicker(e.packageMetadataRecheckInterval)
+	defer packageMetadataRecheckTicker.Stop()
 
 	errC := make(chan error)
 
@@ -397,12 +571,27 @@ func (e *Watcher) Run(ctx context.Context) error {
 			case subErr := <-subscription.Err():
 				return fmt.Errorf("canton_data_pump subscription error: %w", subErr)
 			case ev := <-eventChan:
+				admitErr := e.checkPublishPackageAdmitted(ctx, logger, client, ev.Message.AcceptedPackageRole)
+				if errors.Is(admitErr, errPackageMetadataNeverVerifiedInDevMode) {
+					// Drop without a rewind, so later events still flow; reobservation recovers it after a match.
+					logger.Error("canton_data_pump dropped a message that the package metadata gate refused",
+						zap.Int64("participantOffset", ev.ParticipantOffset),
+						zap.Stringer("updateId", ev.UpdateID),
+						zap.Error(admitErr))
+					p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+					continue
+				}
+				if admitErr != nil {
+					// SECURITY: fail closed on a mismatch or an RPC failure; the next Run resubscribes before this event.
+					e.rewindResumeOffsetBefore(ev.ParticipantOffset)
+					return fmt.Errorf("canton_data_pump stopped at offset %d: %w", ev.ParticipantOffset, admitErr)
+				}
 				e.processMessage(logger, ev, false)
 			}
 		}
 	})
 
-	// Ledger-offset poll: report height + readiness every 5s.
+	// Ledger-offset poll: report height + readiness every 5s; recheck vetting metadata.
 	common.RunWithScissors(ctx, errC, "canton_block_height", func(ctx context.Context) error {
 		for {
 			select {
@@ -418,10 +607,17 @@ func (e *Watcher) Run(ctx context.Context) error {
 					logger.Debug("canton_getLedgerEnd", zap.Int64("result", offset))
 					p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
 						Height:          offset,
-						ContractAddress: e.packageID,
+						ContractAddress: e.heartbeatContractAddress(),
 					})
 				}
 				readiness.SetReady(e.readinessSync)
+			case <-packageMetadataRecheckTicker.C:
+				if err := e.refreshPackageMetadata(ctx, logger, client); err != nil {
+					if errors.Is(err, errPackageMetadataMismatched) {
+						return err
+					}
+					logger.Error("canton package metadata recheck failed", zap.Error(err))
+				}
 			}
 		}
 	})

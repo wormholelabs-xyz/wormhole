@@ -41,7 +41,7 @@ func newTestGrpcClient(stream apiv2.UpdateService_GetUpdatesClient) *grpcClient 
 	}
 }
 
-var testTmpl = TemplateID{ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
+var testTmpl = TemplateID{AcceptedPackageIDs: AcceptAnyPackageID(), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
 // TestSubscribeUpdatesTerminalErrorFailsSubscription is the transport-layer
 // regression for the io.EOF silent-wedge bug: a terminal Recv error, including
