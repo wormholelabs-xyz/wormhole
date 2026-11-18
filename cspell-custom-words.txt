@@ -29,6 +29,8 @@ bscscan
 BUILDKIT
 bytecodes
 callstack
+CANTONAUTHCLIENTSECRET
+cantongrpc
 ccqlistener
 CCTP
 celestia
@@ -149,6 +151,7 @@ Metaplex
 mezo
 Mezo
 mindshare
+mktemp
 mlock
 moby
 monad
@@ -156,6 +159,7 @@ Monad
 moonscan
 moretags
 multichecker
+multihash
 Neodyme
 nhooyr
 nolint
@@ -180,6 +184,7 @@ Polkadot
 Positionals
 postcondition
 postconditions
+Preapproval
 prefunded
 promauto
 proto
@@ -196,9 +201,11 @@ pytest
 Pytest
 pythnet
 QUIC
+quickstart
 ramfs
 readyz
 refetched
+REDTEAM
 regen
 reinit
 relock
@@ -209,11 +216,13 @@ Reobservations
 reobserve
 reobserved
 reobserver
+reobserves
 repoint
 reposted
 reserialize
 reserialized
 RLUSD
+Robinhood
 runtimes
 rustup
 sarif
@@ -282,6 +291,8 @@ unrepresentable
 Unrepresentable
 untampered
 unvalidated
+unvet
+Unvet
 upserted
 usize
 utest
@@ -343,12 +354,6 @@ builtins
 informee
 informees
 runbook
-cantongrpc
 confirmer
 Effectful
-multihash
 redteam
-REDTEAM
-Robinhood
-unvet
-Unvet

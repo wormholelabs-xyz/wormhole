@@ -13,8 +13,9 @@
 #   0            Production-shaped: the caller supplies GG_OWNER_PUBKEY_1/2/3
 #                (DER-encoded Ed25519 public keys already exported from
 #                guardian custody -- HSM/KMS/offline signer) and
-#                GG_OWNER_SIGN_CMD_1/2/3 (a command per owner that signs a
-#                hex hash and prints a hex signature, backed by that same
+#                GG_OWNER_SIGN_ARGV_1/2/3 (a signer command per owner as a
+#                JSON array of strings; it gets the hex hash as its last
+#                argument and prints a hex signature, backed by that same
 #                custody system). No private key material is generated or
 #                touched by this script in this mode.
 set -euo pipefail
@@ -41,16 +42,17 @@ if [ "${GENERATE_TEST_KEYS}" = "1" ]; then
   export GG_OWNER_PUBKEY_1="${KEY_DIR}/owner1.pub"
   export GG_OWNER_PUBKEY_2="${KEY_DIR}/owner2.pub"
   export GG_OWNER_PUBKEY_3="${KEY_DIR}/owner3.pub"
-  export GG_OWNER_SIGN_CMD_1="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${KEY_DIR}/owner1.key"
-  export GG_OWNER_SIGN_CMD_2="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${KEY_DIR}/owner2.key"
-  export GG_OWNER_SIGN_CMD_3="node ${SCRIPT_DIR}/guardian_key_tool.js sign ${KEY_DIR}/owner3.key"
+  for i in 1 2 3; do
+    export "GG_OWNER_SIGN_ARGV_${i}=$(jq -cn --arg tool "${SCRIPT_DIR}/guardian_key_tool.js" \
+      --arg key "${KEY_DIR}/owner${i}.key" '["node", $tool, "sign", $key]')"
+  done
 else
   : "${GG_OWNER_PUBKEY_1:?GG_OWNER_PUBKEY_1 is required when GG_GENERATE_TEST_KEYS=0}"
   : "${GG_OWNER_PUBKEY_2:?GG_OWNER_PUBKEY_2 is required when GG_GENERATE_TEST_KEYS=0}"
   : "${GG_OWNER_PUBKEY_3:?GG_OWNER_PUBKEY_3 is required when GG_GENERATE_TEST_KEYS=0}"
-  : "${GG_OWNER_SIGN_CMD_1:?GG_OWNER_SIGN_CMD_1 is required when GG_GENERATE_TEST_KEYS=0}"
-  : "${GG_OWNER_SIGN_CMD_2:?GG_OWNER_SIGN_CMD_2 is required when GG_GENERATE_TEST_KEYS=0}"
-  : "${GG_OWNER_SIGN_CMD_3:?GG_OWNER_SIGN_CMD_3 is required when GG_GENERATE_TEST_KEYS=0}"
+  : "${GG_OWNER_SIGN_ARGV_1:?GG_OWNER_SIGN_ARGV_1 is required when GG_GENERATE_TEST_KEYS=0}"
+  : "${GG_OWNER_SIGN_ARGV_2:?GG_OWNER_SIGN_ARGV_2 is required when GG_GENERATE_TEST_KEYS=0}"
+  : "${GG_OWNER_SIGN_ARGV_3:?GG_OWNER_SIGN_ARGV_3 is required when GG_GENERATE_TEST_KEYS=0}"
 fi
 
 CONSOLE_CONFIG_ARGS=()
