@@ -15,9 +15,9 @@
 --
 -- SECURITY: the fee registry's execute body runs with the authority of these
 -- controllers. When a fee is due, neither the payer nor the receiver may be
--- guardianGovernance or the operator. Callers pin 'GetGuardianGovernance' against their own committed
--- anchor before charging, so a compromised operator can't redirect fees via
--- a shadow CoreState under a gg it controls.
+-- guardianGovernance or the operator. Callers pin 'GetGuardianGovernance'
+-- against their own committed anchor before charging, so a compromised
+-- operator can't redirect fees via a shadow CoreState under a gg it controls.
 --
 -- Allocation views are forgeable; authenticity is the instrument admin's
 -- signature on the allocation, checked in 'chargeFee'.
