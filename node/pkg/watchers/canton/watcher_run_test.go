@@ -25,11 +25,26 @@ func startWatcher(t *testing.T, fake *fakeClient) (<-chan *common.MessagePublica
 
 func startWatcherWith(t *testing.T, fake *fakeClient, acceptedPackageIDs cantonclient.AcceptedPackageIDs) (<-chan *common.MessagePublication, chan<- *gossipv1.ObservationRequest) {
 	t.Helper()
+	return startWatcherWithMode(t, fake, acceptedPackageIDs, true, defaultPackageMetadataRecheckInterval)
+}
+
+// startWatcherWithMode builds the watcher with the test approved list, so the
+// test package ids are allowed outside unsafe dev mode.
+func startWatcherWithMode(t *testing.T, fake *fakeClient, acceptedPackageIDs cantonclient.AcceptedPackageIDs, unsafeDevMode bool, packageMetadataRecheckInterval time.Duration) (<-chan *common.MessagePublication, chan<- *gossipv1.ObservationRequest) {
+	t.Helper()
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w, err := NewWatcher("canton:0", acceptedPackageIDs, "", AuthConfig{}, true, msgC, obsvReqC)
+	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", acceptedPackageIDs, "", AuthConfig{}, unsafeDevMode, msgC, obsvReqC)
 	require.NoError(t, err)
+	w.packageMetadataRecheckInterval = packageMetadataRecheckInterval
+	runWatcherUnderSupervisor(t, w, fake)
+	return msgC, obsvReqC
+}
+
+// runWatcherUnderSupervisor injects the fake client and runs w until the test ends.
+func runWatcherUnderSupervisor(t *testing.T, w *Watcher, fake *fakeClient) {
+	t.Helper()
 	w.cantonClient = fake // inject the fake via the DI seam
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -41,7 +56,6 @@ func startWatcherWith(t *testing.T, fake *fakeClient, acceptedPackageIDs cantonc
 		<-sctx.Done()
 		return nil
 	})
-	return msgC, obsvReqC
 }
 
 func testUpgradeWindowPackageIDs(t *testing.T) cantonclient.AcceptedPackageIDs {
@@ -250,26 +264,58 @@ func eventWithRole(participantOffset int64, role cantonclient.AcceptedPackageRol
 	return event
 }
 
+func requireEmittedSequence(t *testing.T, msgC <-chan *common.MessagePublication, wantSequence uint64, wantReobservation bool) {
+	t.Helper()
+	select {
+	case mp := <-msgC:
+		assert.Equal(t, wantSequence, mp.Sequence)
+		assert.Equal(t, wantReobservation, mp.IsReobservation)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no observation with sequence %d emitted", wantSequence)
+	}
+}
+
+func requireNothingEmitted(t *testing.T, msgC <-chan *common.MessagePublication) {
+	t.Helper()
+	select {
+	case mp := <-msgC:
+		t.Fatalf("emitted a publish the metadata gate must drop: %+v", mp)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+var (
+	testCurrentVerifiedMetadata    = cantonclient.VettedPackageMetadata{PackageID: testCurrentPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: testCurrentPackageVersion}
+	testRetiringVerifiedMetadata   = cantonclient.VettedPackageMetadata{PackageID: testRetiringPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: testRetiringPackageVersion}
+	testCurrentMismatchedMetadata  = cantonclient.VettedPackageMetadata{PackageID: testCurrentPackageID, PackageName: "wormhole-core-lookalike", PackageVersion: testCurrentPackageVersion}
+	testRetiringMismatchedMetadata = cantonclient.VettedPackageMetadata{PackageID: testRetiringPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: "9.9.9"}
+)
+
+// Only a name or version mismatch blocks. "Not vetted" blocks only an unsafe
+// dev mode role that never verified, and then drops the event without a rewind.
 func TestRunGatesPublishOnPackageMetadata(t *testing.T) {
-	currentVerified := cantonclient.VettedPackageMetadata{PackageID: testCurrentPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: testCurrentPackageVersion}
-	retiringVerified := cantonclient.VettedPackageMetadata{PackageID: testRetiringPackageID, PackageName: cantonclient.CorePackageName, PackageVersion: testRetiringPackageVersion}
-	currentMismatched := cantonclient.VettedPackageMetadata{PackageID: testCurrentPackageID, PackageName: "wormhole-core-lookalike", PackageVersion: testCurrentPackageVersion}
+	bothVerified := []cantonclient.VettedPackageMetadata{testCurrentVerifiedMetadata, testRetiringVerifiedMetadata}
 	cases := []struct {
-		name                  string
-		responses             [][]cantonclient.VettedPackageMetadata
-		metadataErr           error
-		event                 cantonclient.CantonMessageEvent
-		wantSubscribe         bool
-		wantEmitted           bool
-		wantResubscribeOffset int64
+		name          string
+		unsafeDevMode bool
+		responses     [][]cantonclient.VettedPackageMetadata
+		metadataErr   error
+		event         cantonclient.CantonMessageEvent
+		wantSubscribe bool
+		wantEmitted   bool
 	}{
-		{name: "verified emits", responses: [][]cantonclient.VettedPackageMetadata{{currentVerified, retiringVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
-		{name: "verified retiring emits", responses: [][]cantonclient.VettedPackageMetadata{{currentVerified, retiringVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantEmitted: true},
-		{name: "mismatched returns an error before subscribe", responses: [][]cantonclient.VettedPackageMetadata{{currentMismatched, retiringVerified}}},
-		{name: "metadata rpc error returns an error before subscribe", metadataErr: errors.New("unavailable")},
-		{name: "not yet vetted then a recheck that verifies emits", responses: [][]cantonclient.VettedPackageMetadata{{}, {currentVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
-		{name: "recheck still not vetted fails the pump and rewinds", responses: [][]cantonclient.VettedPackageMetadata{{}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantResubscribeOffset: 99},
-		{name: "unverified retiring with verified current fails the pump", responses: [][]cantonclient.VettedPackageMetadata{{currentVerified}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantResubscribeOffset: 99},
+		{name: "verified current emits", responses: [][]cantonclient.VettedPackageMetadata{bothVerified}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
+		{name: "verified retiring emits", responses: [][]cantonclient.VettedPackageMetadata{bothVerified}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantEmitted: true},
+		{name: "dev mode verified retiring emits", unsafeDevMode: true, responses: [][]cantonclient.VettedPackageMetadata{bothVerified}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantEmitted: true},
+		{name: "mismatched current stops before subscribe", responses: [][]cantonclient.VettedPackageMetadata{{testCurrentMismatchedMetadata, testRetiringVerifiedMetadata}}},
+		{name: "mismatched retiring stops before subscribe", responses: [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata, testRetiringMismatchedMetadata}}},
+		{name: "dev mode mismatched current stops before subscribe", unsafeDevMode: true, responses: [][]cantonclient.VettedPackageMetadata{{testCurrentMismatchedMetadata, testRetiringVerifiedMetadata}}},
+		{name: "metadata rpc error stops before subscribe", metadataErr: errors.New("unavailable")},
+		{name: "dev mode metadata rpc error stops before subscribe", unsafeDevMode: true, metadataErr: errors.New("unavailable")},
+		{name: "not vetted current emits", responses: [][]cantonclient.VettedPackageMetadata{{}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
+		{name: "not vetted retiring with verified current emits", responses: [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true, wantEmitted: true},
+		{name: "dev mode not vetted then verified on demand emits", unsafeDevMode: true, responses: [][]cantonclient.VettedPackageMetadata{{}, {testCurrentVerifiedMetadata}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent), wantSubscribe: true, wantEmitted: true},
+		{name: "dev mode never verified retiring drops without a rewind", unsafeDevMode: true, responses: [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata}}, event: eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring), wantSubscribe: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,7 +323,7 @@ func TestRunGatesPublishOnPackageMetadata(t *testing.T) {
 			fake.ledgerEnd = 50
 			fake.vettedPackageMetadataResponses = tc.responses
 			fake.vettedPackageMetadataErr = tc.metadataErr
-			msgC, _ := startWatcherWith(t, fake, testVersionedWindowPackageIDs(t))
+			msgC, _ := startWatcherWithMode(t, fake, testVersionedWindowPackageIDs(t), tc.unsafeDevMode, defaultPackageMetadataRecheckInterval)
 
 			if !tc.wantSubscribe {
 				require.Eventually(t, func() bool { return fake.vettedPackageMetadataCallCount() >= 2 }, 15*time.Second, 50*time.Millisecond, "Run must retry the startup check")
@@ -287,22 +333,87 @@ func TestRunGatesPublishOnPackageMetadata(t *testing.T) {
 			fake.waitSubscribed(t)
 			fake.pushEvent(tc.event)
 			if tc.wantEmitted {
-				select {
-				case mp := <-msgC:
-					assert.Equal(t, uint64(5), mp.Sequence)
-				case <-time.After(5 * time.Second):
-					t.Fatal("no observation emitted")
-				}
+				requireEmittedSequence(t, msgC, 5, false)
 				return
 			}
-			fake.waitSubscribed(t)
-			begin, _, _ := fake.subscribeArgs()
-			assert.Equal(t, tc.wantResubscribeOffset, begin, "the pump must resume before the unverified event")
-			select {
-			case mp := <-msgC:
-				t.Fatalf("emitted a publish from an unverified package: %+v", mp)
-			case <-time.After(300 * time.Millisecond):
-			}
+			requireNothingEmitted(t, msgC)
+			assert.Equal(t, 1, fake.subscribeCount(), "a dropped event must not restart the pump")
+			// The pump stays live for the verified role.
+			fake.pushEvent(eventWithRole(101, cantonclient.AcceptedPackageRoleCurrent))
+			requireEmittedSequence(t, msgC, 5, false)
+			assert.Equal(t, 1, fake.subscribeCount())
 		})
 	}
+}
+
+// After the unvet of a role that verified once, the recheck reports "not
+// vetted". Stream and reobservation still emit, and the stream does not rewind.
+func TestRunAdmitsPublishesAfterUnvet(t *testing.T) {
+	const packageMetadataRecheckIntervalForTest = 10 * time.Millisecond
+	for _, unsafeDevMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "production mode", true: "unsafe dev mode"}[unsafeDevMode], func(t *testing.T) {
+			fake := newFakeClient()
+			fake.ledgerEnd = 50
+			fake.vettedPackageMetadataResponses = [][]cantonclient.VettedPackageMetadata{
+				{testCurrentVerifiedMetadata, testRetiringVerifiedMetadata},
+				{testCurrentVerifiedMetadata},
+			}
+			retiringUpdateID := mustParseUpdateID(reobsUpdateIDHex)
+			retiringTransaction := cantonclient.CantonTransaction{
+				ParticipantOffset: 40,
+				UpdateID:          retiringUpdateID,
+				EffectiveAt:       time.Unix(1_700_000_001, 0).UTC(),
+				Messages:          []cantonclient.CantonMessage{eventWithRole(40, cantonclient.AcceptedPackageRoleRetiring).Message},
+			}
+			retiringTransaction.Messages[0].Sequence = 9
+			fake.byUpdateID[retiringUpdateID] = retiringTransaction
+			msgC, obsvReqC := startWatcherWithMode(t, fake, testVersionedWindowPackageIDs(t), unsafeDevMode, packageMetadataRecheckIntervalForTest)
+			fake.waitSubscribed(t)
+			require.Eventually(t, func() bool { return fake.vettedPackageMetadataCallCount() >= 3 }, 5*time.Second, 10*time.Millisecond, "the recheck must run after the unvet")
+
+			fake.pushEvent(eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring))
+			requireEmittedSequence(t, msgC, 5, false)
+
+			obsvReqC <- &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: retiringUpdateID.TxID()}
+			requireEmittedSequence(t, msgC, 9, true)
+
+			// No rewind: a stream restart resumes after the emitted event.
+			assert.Equal(t, 1, fake.subscribeCount())
+			fake.failSubscription(errors.New("stream ended: token expired"))
+			fake.waitSubscribed(t)
+			begin, _, _ := fake.subscribeArgs()
+			assert.Equal(t, int64(100), begin)
+			fake.pushEvent(eventWithRole(101, cantonclient.AcceptedPackageRoleRetiring))
+			requireEmittedSequence(t, msgC, 5, false)
+			assert.Equal(t, 2, fake.subscribeCount())
+		})
+	}
+}
+
+// A mismatch found by the recheck stops the watcher; restarts fail at the startup check.
+func TestRunStopsOnMismatchAtRecheck(t *testing.T) {
+	fake := newFakeClient()
+	fake.ledgerEnd = 50
+	fake.vettedPackageMetadataResponses = [][]cantonclient.VettedPackageMetadata{
+		{testCurrentVerifiedMetadata, testRetiringVerifiedMetadata},
+		{testCurrentVerifiedMetadata, testRetiringMismatchedMetadata},
+	}
+	_, _ = startWatcherWithMode(t, fake, testVersionedWindowPackageIDs(t), false, 10*time.Millisecond)
+	fake.waitSubscribed(t)
+	require.Eventually(t, func() bool { return fake.vettedPackageMetadataCallCount() >= 3 }, 15*time.Second, 10*time.Millisecond, "Run must restart and recheck at startup")
+	assert.Equal(t, 1, fake.subscribeCount(), "the watcher must not subscribe again after a mismatch")
+}
+
+// Offset 0 is a valid resume point (ledger begin), distinct from "no resume point" (ledger end).
+func TestRunResumesBeforeOffsetOne(t *testing.T) {
+	fake := newFakeClient()
+	fake.ledgerEnd = 77
+	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testUpgradeWindowPackageIDs(t), "", AuthConfig{}, true, make(chan *common.MessagePublication, 1), nil)
+	require.NoError(t, err)
+	w.rewindResumeOffsetBefore(1)
+	runWatcherUnderSupervisor(t, w, fake)
+	fake.waitSubscribed(t)
+
+	begin, _, _ := fake.subscribeArgs()
+	assert.Equal(t, int64(0), begin)
 }

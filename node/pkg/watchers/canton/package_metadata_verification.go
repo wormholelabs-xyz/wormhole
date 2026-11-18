@@ -12,9 +12,6 @@ import (
 	"go.uber.org/zap"
 )
 
-// packageMetadataRecheckTicks is the number of 5 s ledger-end ticks between metadata rechecks (60 s).
-const packageMetadataRecheckTicks = 12
-
 var errPackageMetadataMismatched = errors.New("canton: vetted package metadata does not match the expected wormhole-core name and version")
 
 var packageMetadataVerifiedGauge = promauto.NewGaugeVec(

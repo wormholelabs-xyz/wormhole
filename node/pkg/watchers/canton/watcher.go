@@ -149,6 +149,13 @@ type Watcher struct {
 	// packageMetadata holds which pinned roles passed the vetting metadata check.
 	packageMetadata packageMetadataVerification
 
+	// packageMetadataRecheckInterval is the period of the vetting metadata recheck.
+	packageMetadataRecheckInterval time.Duration
+
+	// approvedCorePackages is the reviewed (id, version) list that outside
+	// unsafe dev mode every pinned core package must match.
+	approvedCorePackages cantonclient.ApprovedCorePackages
+
 	// cantonClient is an interface; a nil check is fine for "not injected".
 	// Tests inject a fake; in production Run creates a gRPC client.
 	cantonClient cantonclient.CantonClient
@@ -259,8 +266,25 @@ func (e *Watcher) heartbeatContractAddress() string {
 	return contractAddress
 }
 
-// NewWatcher creates a new Canton watcher.
+// defaultPackageMetadataRecheckInterval is the vetting metadata recheck period in production.
+const defaultPackageMetadataRecheckInterval = 60 * time.Second
+
+// NewWatcher creates a new Canton watcher. Outside unsafe dev mode every
+// pinned core package must be in the approved list compiled into guardiand.
 func NewWatcher(
+	cantonRPC string,
+	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
+	readAsParty string,
+	auth AuthConfig,
+	unsafeDevMode bool,
+	msgC chan<- *common.MessagePublication,
+	obsvReqC <-chan *gossipv1.ObservationRequest,
+) (*Watcher, error) {
+	return newWatcherWithApprovedList(cantonclient.DefaultApprovedCorePackages(), cantonRPC, acceptedPackageIDs, readAsParty, auth, unsafeDevMode, msgC, obsvReqC)
+}
+
+func newWatcherWithApprovedList(
+	approvedCorePackages cantonclient.ApprovedCorePackages,
 	cantonRPC string,
 	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
 	readAsParty string,
@@ -273,14 +297,16 @@ func NewWatcher(
 		return nil, err
 	}
 	return &Watcher{
-		cantonRPC:          cantonRPC,
-		acceptedPackageIDs: acceptedPackageIDs,
-		readAsParty:        readAsParty,
-		auth:               auth,
-		unsafeDevMode:      unsafeDevMode,
-		msgChan:            msgC,
-		obsvReqC:           obsvReqC,
-		readinessSync:      common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
+		cantonRPC:                      cantonRPC,
+		acceptedPackageIDs:             acceptedPackageIDs,
+		readAsParty:                    readAsParty,
+		auth:                           auth,
+		unsafeDevMode:                  unsafeDevMode,
+		msgChan:                        msgC,
+		obsvReqC:                       obsvReqC,
+		readinessSync:                  common.MustConvertChainIdToReadinessSyncing(vaa.ChainIDCanton),
+		packageMetadataRecheckInterval: defaultPackageMetadataRecheckInterval,
+		approvedCorePackages:           approvedCorePackages,
 	}, nil
 }
 
@@ -444,6 +470,9 @@ func (e *Watcher) Run(ctx context.Context) error {
 	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode); err != nil {
 		return err
 	}
+	if e.packageMetadataRecheckInterval <= 0 {
+		return fmt.Errorf("canton: the package metadata recheck interval must be positive")
+	}
 
 	p2p.DefaultRegistry.SetNetworkStats(vaa.ChainIDCanton, &gossipv1.Heartbeat_Network{
 		ContractAddress: e.heartbeatContractAddress(),
@@ -503,6 +532,8 @@ func (e *Watcher) Run(ctx context.Context) error {
 
 	timer := time.NewTicker(time.Second * 5)
 	defer timer.Stop()
+	packageMetadataRecheckTicker := time.NewTicker(e.packageMetadataRecheckInterval)
+	defer packageMetadataRecheckTicker.Stop()
 
 	errC := make(chan error)
 
@@ -537,9 +568,8 @@ func (e *Watcher) Run(ctx context.Context) error {
 		}
 	})
 
-	// Ledger-offset poll: report height + readiness every 5s.
+	// Ledger-offset poll: report height + readiness every 5s; recheck vetting metadata.
 	common.RunWithScissors(ctx, errC, "canton_block_height", func(ctx context.Context) error {
-		ticksSinceMetadataCheck := 0
 		for {
 			select {
 			case <-ctx.Done():
@@ -558,11 +588,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 					})
 				}
 				readiness.SetReady(e.readinessSync)
-				ticksSinceMetadataCheck++
-				if ticksSinceMetadataCheck < packageMetadataRecheckTicks {
-					continue
-				}
-				ticksSinceMetadataCheck = 0
+			case <-packageMetadataRecheckTicker.C:
 				if err := e.refreshPackageMetadata(ctx, logger, client); err != nil {
 					if errors.Is(err, errPackageMetadataMismatched) {
 						return err

@@ -70,3 +70,27 @@ func TestMessageEventsCarryRecordTime(t *testing.T) {
 		})
 	}
 }
+
+// An unset, epoch-zero, or out-of-range timestamp is a missing ledger time.
+func TestProtoTimeTreatsInvalidTimestampsAsMissing(t *testing.T) {
+	cases := []struct {
+		name      string
+		timestamp *timestamppb.Timestamp
+		want      time.Time
+	}{
+		{name: "nil", timestamp: nil},
+		{name: "epoch zero", timestamp: &timestamppb.Timestamp{}},
+		{name: "negative nanos", timestamp: &timestamppb.Timestamp{Seconds: sampleRecordTime.Unix(), Nanos: -1}},
+		{name: "nanos of a full second", timestamp: &timestamppb.Timestamp{Seconds: sampleRecordTime.Unix(), Nanos: 1_000_000_000}},
+		{name: "seconds after year 9999", timestamp: &timestamppb.Timestamp{Seconds: 253402300800}},
+		{name: "valid", timestamp: timestamppb.New(sampleRecordTime), want: sampleRecordTime},
+		{name: "one nanosecond after epoch", timestamp: &timestamppb.Timestamp{Nanos: 1}, want: time.Unix(0, 1).UTC()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := protoTime(tc.timestamp)
+			assert.True(t, tc.want.Equal(got), "want %v, got %v", tc.want, got)
+			assert.Equal(t, tc.want.IsZero(), got.IsZero())
+		})
+	}
+}

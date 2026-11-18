@@ -3,7 +3,9 @@ package canton
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -441,7 +443,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := NewWatcher("localhost:0", testVersionedWindowPackageIDs(t), "", tc.auth, tc.unsafeDevMode, nil, nil)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "localhost:0", testVersionedWindowPackageIDs(t), "", tc.auth, tc.unsafeDevMode, nil, nil)
 			require.NoError(t, err)
 			w.extraLedgerDialOpts = tc.extraDialOpts
 			dialOpts := w.cantonDialOpts(context.Background())
@@ -459,12 +461,21 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 	require.NoError(t, err)
 	currentOnlyWithoutVersion, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)
+	retiringOnlyApproved, err := cantonclient.ParseApprovedCorePackages([]byte(`[{"packageId":"` + testRetiringPackageID + `","version":"` + testRetiringPackageVersion + `"}]`))
+	require.NoError(t, err)
+	currentApprovedAtOtherVersion, err := cantonclient.ParseApprovedCorePackages([]byte(`[{"packageId":"` + testCurrentPackageID + `","version":"9.9.9"},{"packageId":"` + testRetiringPackageID + `","version":"` + testRetiringPackageVersion + `"}]`))
+	require.NoError(t, err)
 	cases := []struct {
-		name               string
-		acceptedPackageIDs cantonclient.AcceptedPackageIDs
-		unsafeDevMode      bool
-		wantErr            string
+		name                 string
+		acceptedPackageIDs   cantonclient.AcceptedPackageIDs
+		approvedCorePackages *cantonclient.ApprovedCorePackages
+		unsafeDevMode        bool
+		wantErr              string
 	}{
+		{name: "current id outside the approved list outside dev mode", acceptedPackageIDs: currentOnlyPackageIDs, approvedCorePackages: &retiringOnlyApproved, wantErr: "not in the approved list"},
+		{name: "current id approved at another version outside dev mode", acceptedPackageIDs: currentOnlyPackageIDs, approvedCorePackages: &currentApprovedAtOtherVersion, wantErr: "is approved as 9.9.9"},
+		{name: "window with an unapproved current id outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), approvedCorePackages: &retiringOnlyApproved, wantErr: "not in the approved list"},
+		{name: "current id outside the approved list in dev mode", acceptedPackageIDs: currentOnlyPackageIDs, approvedCorePackages: &retiringOnlyApproved, unsafeDevMode: true},
 		{name: "wildcard in dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), unsafeDevMode: true},
 		{name: "wildcard outside dev mode", acceptedPackageIDs: cantonclient.AcceptAnyPackageID(), wantErr: "unsafe dev mode only"},
 		{name: "pinned outside dev mode", acceptedPackageIDs: currentOnlyPackageIDs},
@@ -474,6 +485,47 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 		{name: "pinned without version in dev mode", acceptedPackageIDs: currentOnlyWithoutVersion, unsafeDevMode: true},
 		{name: "empty set outside dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, wantErr: "no accepted"},
 		{name: "empty set in dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, unsafeDevMode: true, wantErr: "no accepted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			approvedCorePackages := testApprovedCorePackages(t)
+			if tc.approvedCorePackages != nil {
+				approvedCorePackages = tc.approvedCorePackages
+			}
+			w, err := newWatcherWithApprovedList(*approvedCorePackages, "canton:0", tc.acceptedPackageIDs, "", AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Nil(t, w)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, w)
+		})
+	}
+}
+
+// NewWatcher checks the approved list compiled into guardiand.
+func TestNewWatcherChecksCompiledApprovedList(t *testing.T) {
+	approvedFileJSON, err := os.ReadFile("../../cantonclient/approved_core_packages.json")
+	require.NoError(t, err)
+	var approvedFileEntries []struct {
+		PackageID string `json:"packageId"`
+		Version   string `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(approvedFileJSON, &approvedFileEntries))
+	require.NotEmpty(t, approvedFileEntries)
+	approvedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: approvedFileEntries[0].PackageID, Version: approvedFileEntries[0].Version}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+
+	cases := []struct {
+		name               string
+		acceptedPackageIDs cantonclient.AcceptedPackageIDs
+		unsafeDevMode      bool
+		wantErr            string
+	}{
+		{name: "approved id outside dev mode", acceptedPackageIDs: approvedPackageIDs},
+		{name: "unapproved test ids outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), wantErr: "not in the approved list"},
+		{name: "unapproved test ids in dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), unsafeDevMode: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

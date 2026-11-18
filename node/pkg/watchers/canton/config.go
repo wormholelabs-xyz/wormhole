@@ -91,12 +91,12 @@ func (wc *WatcherConfig) Create(
 	if !devMode && acceptedPackageIDs.MatchesAnyPackage() {
 		return nil, nil, fmt.Errorf("canton: the any-package wildcard is unsafe dev mode only")
 	}
+	approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
+	if wc.approvedCorePackages != nil {
+		approvedCorePackages = *wc.approvedCorePackages
+	}
 	// SECURITY: outside unsafe dev mode only reviewed core releases can be pinned.
 	if !devMode {
-		approvedCorePackages := cantonclient.DefaultApprovedCorePackages()
-		if wc.approvedCorePackages != nil {
-			approvedCorePackages = *wc.approvedCorePackages
-		}
 		if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
 			return nil, nil, fmt.Errorf("canton: %w", err)
 		}
@@ -121,7 +121,8 @@ func (wc *WatcherConfig) Create(
 		return nil, nil, fmt.Errorf("canton: OAuth auth requires TLS and cannot be used in unsafe dev mode")
 	}
 
-	watcher, err := NewWatcher(
+	watcher, err := newWatcherWithApprovedList(
+		approvedCorePackages,
 		wc.Rpc,
 		acceptedPackageIDs,
 		wc.ReadAsParty,
