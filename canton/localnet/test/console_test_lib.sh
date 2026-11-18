@@ -16,7 +16,8 @@ require_console_jar() {
 }
 
 # run_offline_console <output-file> <environment-assignment>... -- <console-script>...
-# Runs the scripts in a clean environment with only PATH, HOME and the given NAME=VALUE assignments.
+# Runs the scripts in a clean environment with only PATH, HOME, the vendor directory and the given NAME=VALUE
+# assignments. CANTON_CONSOLE_OFFLINE=true makes canton_console.sh fail on a missing jar instead of calling Docker.
 # Writes stdout and stderr to the output file. Returns the console exit status.
 run_offline_console() {
   local output_file="$1" console_state_dir
@@ -34,6 +35,7 @@ run_offline_console() {
   console_state_dir="$(mktemp -d)"
   local console_status=0
   env -i PATH="$PATH" HOME="$HOME" LOCALNET_STATE_DIR="$console_state_dir" CANTON_CONSOLE_CONFIG="$OFFLINE_CONSOLE_CONFIG" \
+    CANTON_VENDOR_DIR="$VENDOR_DIR" CANTON_CONSOLE_OFFLINE=true \
     CANTON_CONSOLE_TIMEOUT_SECONDS="$OFFLINE_CONSOLE_TIMEOUT_SECONDS" ${environment_assignments[@]+"${environment_assignments[@]}"} \
     "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$@" > "$output_file" 2>&1 || console_status=$?
   rm -rf "$console_state_dir"

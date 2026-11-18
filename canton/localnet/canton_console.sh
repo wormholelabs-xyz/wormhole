@@ -3,6 +3,7 @@
 # Usage: canton_console.sh <console-script>...
 #   Several scripts run as one bootstrap file, in argument order (for example a prelude, then the script).
 # The console jar is copied from the running `canton` container on first use, so it matches the node release.
+# CANTON_CONSOLE_OFFLINE=true: fail on a missing jar instead of the copy.
 # CANTON_CONSOLE_TIMEOUT_SECONDS (default 600, at most 3600) stops a console run that does not finish; exit status 124.
 set -euo pipefail
 # shellcheck source=env.sh
@@ -24,6 +25,10 @@ for console_script in "$@"; do
   fi
 done
 
+if [[ ! -f "$CANTON_CONSOLE_JAR" && "${CANTON_CONSOLE_OFFLINE:-}" == true ]]; then
+  echo "Missing $CANTON_CONSOLE_JAR. An offline run (CANTON_CONSOLE_OFFLINE=true) does not copy it from Docker." >&2
+  exit 2
+fi
 if [[ ! -f "$CANTON_CONSOLE_JAR" ]]; then
   mkdir -p "$(dirname "$CANTON_CONSOLE_JAR")"
   docker cp "canton:/app/lib/$(basename "$CANTON_CONSOLE_JAR")" "$CANTON_CONSOLE_JAR"
