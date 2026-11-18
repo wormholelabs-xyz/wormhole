@@ -1010,9 +1010,16 @@ The procedure below applies only to an upgrade that keeps the signatories and ob
 in `cantongrpc.go`). The Ledger API `event.proto` defines
 `ExercisedEvent.template_id` as "the template that defines the executed
 choice". The proto adds that this package id can differ from the package id
-of the target contract. Thus the event shows the package that executed the choice. The package that
-created the `Emitter` has no effect on the match. A `CreatedEvent` shows the
-package that created the contract.
+of the target contract. Thus the event shows the package that executed the choice. A `CreatedEvent`
+shows the package that created the contract. The match also depends on the
+origin of the `Emitter` (`readPartySignsExercisedEmitter` in
+`read_party_stakeholder.go`):
+
+- An `Emitter` from an earlier transaction: the package that created the
+  `Emitter` has no effect on the match.
+- An `Emitter` from the same transaction: the watcher accepts the publish only
+  if the pinned package created the `Emitter`, with `guardianGovernance` as a
+  signatory.
 
 Consequences for a watcher pinned to one package id:
 
@@ -1020,6 +1027,10 @@ Consequences for a watcher pinned to one package id:
   emitters that 0.6.0 created.
 - A watcher pinned to 0.7.0 drops each 0.6.0 `PublishMessage`, also on
   emitters that 0.7.0 created.
+- A transaction can create an `Emitter` under 0.6.0 and publish on it under
+  0.7.0. A watcher pinned to 0.6.0 drops the publish by the package id. A
+  watcher pinned to 0.7.0 drops it by the creating package. No pin signs this
+  message.
 - A dropped exercise uses the emitter sequence number. The ledger keeps it.
 
 The sandbox test `TestCantonWatcherUpgradeWindow` covers these rules. A
@@ -1094,7 +1105,8 @@ the unvet and the switch makes sure that the watchers pinned to 0.6.0 read each
    0.6.0 until the gate passes.
 9. Set `--cantonPackageID` to the 0.7.0 package id on each guardian, and
    restart each guardian.
-10. Get the dropped update ids. Refer to "Dropped update ids" below.
+10. Get the dropped update ids with a scan that ends at a restart control
+    message. Refer to "Dropped update ids" below.
 11. Send a reobservation request for each dropped update id.
 12. Tell the other informee participants to unvet 0.6.0 and the old dependent
     packages.
@@ -1134,13 +1146,13 @@ It needs only `curl` and `jq`. A guardian runs it on its own participant:
 2. Get a JWT for this user from the identity provider of the participant.
    Write the JWT to a file with mode 0600.
 3. Run `publish_message_scan.sh <json-api-url> <token-file>
-   <guardianGovernance-party> <start-offset>`.
+   <guardianGovernance-party> <start-offset> <end-offset> <required-update-id>`.
 4. Keep each output line whose `executingPackageId` is not the 0.7.0 package
    id.
 
-The scan takes two more arguments: the end offset and a required update ID.
-Give the update ID of a control message at the end offset. The scan fails if
-its output does not contain the control message. A Ledger API response can end
+The end offset is the offset of a control message. The required update ID is
+the update ID of that control message. The scan fails unless its output
+contains the control message at the end offset. A Ledger API response can end
 before the end offset, and the scan cannot see this from the offsets alone.
 Each `curl` call of the scan stops after `SCAN_CURL_MAX_SECONDS` (default 60).
 
@@ -1157,9 +1169,11 @@ Each `curl` call of the scan stops after `SCAN_CURL_MAX_SECONDS` (default 60).
 2. Positive control: after the window, the coordinator publishes a control
    message under 0.7.0. The canary must find it. Thus the canary read the
    ledger up to the end of the window.
-3. A scan from the start offset to the control message lists each publish
-   under a package other than 0.7.0. Give the control message as the required
-   update ID. A VAA exists for each publish of the list.
+3. A VAA exists for each publish under the old core package ID since the
+   start offset. Get the list with a scan from the start offset to the
+   control message. Give the control message as the required update ID.
+   Tell the coordinator about each publish under a package ID that is not the
+   old or the new core package ID.
 
 A publish under a package other than 0.7.0 starts the quiet window again. The
 gate passes at the first complete quiet window that ends before the maximum
@@ -1188,8 +1202,11 @@ before the maximum canary time. The watchers stay pinned to 0.6.0.
    restarts. Send a reobservation request for each update ID of step 5.
 7. When each VAA exists, set `--cantonPackageID` to the 0.6.0 package id and
    restart.
-8. Scan for 0.6.0 `PublishMessage` updates from the restart of step 6 to the
-   ledger end after step 7. Send a reobservation request for each of them.
+8. After step 7, the coordinator publishes a second control message under
+   0.6.0. Make sure that each guardian watcher observes it. Scan from the
+   abort offset to the offset of this message. Give this message as the
+   required update ID. Send a reobservation request for each 0.6.0
+   `PublishMessage` of the scan that has no VAA.
 9. Tell the integrators that the upgrade stopped. A 0.7.0 submission now fails
    at prepare.
 
@@ -1238,13 +1255,19 @@ upgrade.
 necessary. A reobservation reads a committed update, and the read does not
 use the vetting state.
 
-1. A quorum of guardians sets `--cantonPackageID` to the 0.6.0 package id and
+1. The coordinator publishes a control message under 0.7.0. Make sure that
+   each guardian watcher observes it. On each guardian participant, record its
+   offset. This is the recovery offset.
+2. A quorum of guardians sets `--cantonPackageID` to the 0.6.0 package id and
    restarts.
-2. Send a reobservation request for each 0.6.0 update id without a VAA.
-3. When each VAA exists, set `--cantonPackageID` to the 0.7.0 package id and
+3. Send a reobservation request for each 0.6.0 update id without a VAA.
+4. When each VAA exists, set `--cantonPackageID` to the 0.7.0 package id and
    restart.
-4. Scan for the 0.7.0 updates from step 1 to step 3. Send a reobservation
-   request for each of them.
+5. The coordinator publishes a second control message under 0.7.0. Make sure
+   that each guardian watcher observes it. Scan from the recovery offset to
+   the offset of this message. Give this message as the required update ID.
+   Send a reobservation request for each 0.7.0 `PublishMessage` of the scan
+   that has no VAA.
 
 The LocalNet `rollback` step shows this: a watcher pinned to 0.6.0 reobserves
 a 0.6.0 update while no participant vets 0.6.0.
@@ -1284,15 +1307,25 @@ procedure in this order.
    than the pinned package` of each watcher pinned to 0.6.0. Its `updateId`
    field holds the update id. Its `executingPackageId` field holds the 0.7.0
    package id.
-2. A scan of the ledger with `tools/publish_message_scan.sh` from the start
-   offset to the ledger end after the restart of step 9. Keep each line with
-   the 0.7.0 package id.
+2. After each guardian restarts, the coordinator publishes a control message
+   under 0.7.0. Each restarted watcher must observe it. On each guardian
+   participant, record its offset. This is the restart offset. Scan with
+   `tools/publish_message_scan.sh` from the start offset to the restart
+   offset. Give the control message as the required update ID. Keep each line
+   with the 0.7.0 package id.
 
 The scan also covers the restart window. The scan set must contain the WARN
-log set. The difference is the 0.7.0 messages of the restart window. A user with only
-`CanReadAs(guardianGovernance)` can do the scan. Also scan for 0.6.0
-`PublishMessage` updates from the gate offset to the current ledger end. The
-result must be empty.
+log set. The difference is the control message and the 0.7.0 messages of the
+restart window. A user with only `CanReadAs(guardianGovernance)` can do the
+scan. Also scan for 0.6.0 `PublishMessage` updates from the gate offset to the
+restart offset, with the same required update ID. The result must be empty.
+
+The scan lists each `PublishMessage` that `guardianGovernance` can see. The
+watcher also applies the stakeholder rule of "Event package ids". A scan line
+that gets no VAA after a reobservation request can be a publish that this rule
+drops. The watcher then writes a WARN log with its update id. The log text is
+`canton: dropped PublishMessage on an Emitter of which the read-as party is not
+a stakeholder`.
 
 After a stream error, the watcher continues from the offset of its last
 observation. Thus it reads the drops after that offset again. The WARN log
@@ -1308,8 +1341,8 @@ node limit of your participant.
 
 **Open item:** the behavior of the server when its stream idle timeout ends
 before the end offset. The LocalNet measurement with
-`stream_idle_timeout_ms=1` is not done. Until then, give a required update ID
-to each scan.
+`stream_idle_timeout_ms=1` is not done. The scan requires a control message
+at the end offset. Thus a short response causes a scan failure.
 
 **Rollback.** A rollback to 0.6.0 is the same procedure with the two versions
 in the opposite roles. The guardians re-vet 0.6.0 and the old dependent

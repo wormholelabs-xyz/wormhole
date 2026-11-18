@@ -495,8 +495,9 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 ### Guardian watcher harness
 
 The harness is `node/pkg/watchers/canton/watcher_localnet_test.go`, with the build tag `localnet`.
-It makes the watcher with `WatcherConfig.Create` in the TestNet environment.
-Thus `Create` requires the pinned `wormhole-core` package id and the read-as party.
+It makes the watcher with `WatcherConfig.buildWatcher` in the TestNet environment.
+`buildWatcher` runs the checks of `Create`.
+Thus the harness requires the pinned `wormhole-core` package id and the read-as party.
 The harness also checks that `Create` rejects a configuration without one of them.
 It reads the update stream of `guardianGovernance` on `app-provider`.
 `run_harness_on` starts a harness on the Ledger API of a different participant.
@@ -507,8 +508,8 @@ The script stops if the user has a different set of rights.
 The script removes the token file when the harness streams.
 
 LocalNet uses a static JWT on plaintext gRPC.
-The harness sets this transport through `WatcherConfig.ledgerTransportForTest`.
-Only tests of the `canton` package can set this field.
+The harness injects a client with this transport through `Watcher.cantonClient`.
+`WatcherConfig` has no transport field.
 
 Each 500 ms and at the stop, the harness writes the counts of `wormhole_canton_unpinned_publish_messages_total` to `<name>.metrics.json`.
 Thus a script can read the counter of a harness that runs.
@@ -603,12 +604,12 @@ Each harness reads as `guardianGovernance` on its own participant.
 | 4 | `ntt` | `ntt_e2e.sh` passes with `ntt` 0.3.0. Each NTT `PublishMessage` runs under 0.7.0 on each host. |
 | 5 | `gate` | Canary gate. The `canary` counter sum over all labels does not change in a quiet window of `QUIET_WINDOW_SECONDS` (20). A change starts the window again. The gate times out after `CANARY_GATE_MAX_SECONDS` (120). The `canary` observes a control publish after the window. A scan of each host to the control finds only the 0.6.0 publishes before the window. |
 | 6 | `unvet-v6` | Each host unvets core 0.6.0 and `ntt` 0.2.0 in one topology transaction. A 0.6.0 publish and an `ntt` 0.2.0 exercise fail at prepare. Drain gate: the script reads the synchronizer timeouts and waits. Each `v6-<host>` drops a 0.7.0 control publish. A scan of each host finds no 0.6.0 publish that its `v6` watcher did not observe. |
-| 7 | `switch-v7` | Each `v6-<host>` stops. A 0.7.0 publish commits while no watcher runs. Each `v7-<host>` starts. On each host, a scan to the ledger end after the start gives the WARN log update ids and the gap publish. The counter labels are exactly 0.7.0. Each running `v7-<host>` gets these ids in its request file and reobserves each of them. The three `v7` watchers agree. |
+| 7 | `switch-v7` | Each `v6-<host>` stops. A 0.7.0 publish commits while no watcher runs. Each `v7-<host>` starts and observes a 0.7.0 restart control. On each host, a scan to the restart control gives the WARN log update ids and the gap publish. The counter labels are exactly 0.7.0. Each running `v7-<host>` gets these ids in its request file and reobserves each of them. The three `v7` watchers agree. |
 | 8 | `enforce-v7` | 0.7.0 rejects the nonces -1 and 4294967296. 0.7.0 commits the nonce 0. It also commits 4294967295. 0.6.0 accepts 4294967296 while vetted. After the unvet, it fails. The step can run again. |
 | 9 | `post-unvet` | Contracts from core 0.6.0 work under core 0.7.0. Contracts from `ntt` 0.2.0 work under `ntt` 0.3.0. `ntt_e2e.sh` passes. |
 | 10 | `rollback` | A watcher pinned to 0.6.0 reobserves a 0.6.0 update while no host vets 0.6.0. Then each host vets 0.6.0 and `ntt` 0.2.0 again. 0.6.0 exercises an `Emitter` from 0.7.0. `ntt` 0.2.0 exercises an `NttManager` from `ntt` 0.3.0. |
 | 11 | `restore` | Each host unvets core 0.6.0 and `ntt` 0.2.0 again. A 0.6.0 publish fails at prepare. |
-| A | `abort-v7` | After a gate timeout. Each host unvets core 0.7.0 and `ntt` 0.3.0 in one topology transaction. A 0.7.0 publish and an `ntt` 0.3.0 exercise fail at prepare. After the drain wait, each `v6-<host>` observes a 0.6.0 control. The scan to the control equals the WARN log ids of each `v6-<host>`. Each `v7-recovery-<host>` reobserves each 0.7.0 update. Each host reobserves the 0.6.0 publishes of the restart gap. |
+| A | `abort-v7` | After a gate timeout. Each host unvets core 0.7.0 and `ntt` 0.3.0 in one topology transaction. A 0.7.0 publish and an `ntt` 0.3.0 exercise fail at prepare. After the drain wait, each `v6-<host>` observes a 0.6.0 control. The scan to the control equals the WARN log ids of each `v6-<host>`. Each `v6-<host>` stops. A 0.6.0 publish commits while no watcher pinned to 0.6.0 runs. Each `v7-recovery-<host>` reobserves each 0.7.0 update. Each `v6-after-abort-<host>` observes a second 0.6.0 control. On each host, a scan from the abort offset to the second control lists the gap publish. Each host reobserves the 0.6.0 publishes of this scan. |
 
 The sequence `abort-all` runs `prepare`, `observe-v6`, `vet-v7`, `publish-v7`, `gate` and `abort-v7`.
 The gate must time out at most 5 seconds after `CANARY_GATE_MAX_SECONDS`. The `canary` counter must grow.

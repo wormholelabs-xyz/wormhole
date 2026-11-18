@@ -309,8 +309,11 @@ Version 0.8.0 starts from a fresh genesis (Section 7.2).
 
 The watcher accepts a `PublishMessage` only from the package ID in `--cantonPackageID`.
 An `ExercisedEvent` carries the package ID of the package that executes the choice.
-The package that created the `Emitter` has no effect on this match.
+For an `Emitter` from an earlier transaction, the package that created the `Emitter` has no effect on this match.
+For an `Emitter` from the same transaction, the watcher accepts the publish only if the pinned package created the `Emitter`, with `gg` as a signatory.
+The rule is `readPartySignsExercisedEmitter` in `node/pkg/cantonclient/read_party_stakeholder.go`.
 Thus a watcher on one package ID drops each message that a different package version executes.
+A transaction that creates an `Emitter` under the old package and publishes on it under the new package gives a message that no pin accepts.
 A dropped message uses its emitter sequence number on the ledger.
 
 Each informee participant must vet the package that executes the choice.
@@ -376,7 +379,7 @@ Do these steps on your guardian:
 14. Restart `guardiand`.
 15. Get the dropped update IDs (Section 6.7.1).
 16. Send a reobservation request for each dropped update ID (Section 8.1).
-17. Make sure that the watcher shows messages from the new package ID.
+17. Make sure that a VAA exists for each dropped update ID.
 
 Each participant has different offsets. Use only the offsets of your participant.
 
@@ -407,17 +410,27 @@ The rehearsal needs a LocalNet from before the 0.8.0 genesis.
 
 #### 6.7.1 Get the dropped update IDs
 
-1. After step 14, record the ledger end offset of your participant. This is the restart offset.
-2. Do the canary scan (Section 6.7.2) from the start offset to the restart offset.
-3. Keep each `PublishMessage` with the new core package ID as the executing package ID.
-4. Compare the update IDs with the WARN logs of your watcher.
+1. Wait for the control message of the coordinator under the new core package ID.
+   The coordinator publishes it after each guardian completes step 14.
+2. Make sure that your watcher observes the control message.
+3. Record the offset of the control message on your participant. This is the restart offset.
+4. Do the canary scan (Section 6.7.2) from the start offset to the restart offset.
+   Give the control message as the required update ID.
+5. Keep each `PublishMessage` with the new core package ID as the executing package ID.
+6. Compare the update IDs with the WARN logs of your watcher.
    The log text is `canton: dropped PublishMessage executed by a package other than the pinned package`.
    The `updateId` field of each log is a dropped update ID.
-5. Make sure that the scan list contains each update ID of the WARN logs.
-   The other update IDs of the scan list are messages of the restart period.
-6. If a WARN log update ID is not in the scan list, tell the coordinator.
-7. Scan from the gate offset of Section 6.7.3 to the restart offset.
+7. Make sure that the scan list contains each update ID of the WARN logs.
+   The other update IDs of the scan list are the control message and the messages of the restart period.
+8. If a WARN log update ID is not in the scan list, tell the coordinator.
+9. Scan from the gate offset of Section 6.7.3 to the restart offset, with the control message as the required update ID.
    Make sure that no `PublishMessage` has the old core package ID.
+
+The scan lists each `PublishMessage` that `gg` can see.
+The watcher also applies the stakeholder rule of Section 6.4.
+A scan line that gets no VAA after a reobservation request can be a publish that this rule drops.
+The watcher then writes a WARN log with its update ID.
+The log text is `canton: dropped PublishMessage on an Emitter of which the read-as party is not a stakeholder`.
 
 After a stream error, the watcher continues from the offset of its last observation.
 Thus it reads the drops after that offset again.
@@ -434,14 +447,14 @@ The tool is [`publish_message_scan.sh`](../canton/tools/publish_message_scan.sh)
 3. Run the scan:
 
    ```
-   publish_message_scan.sh <json-api-url> <token-file> <gg-party> <start-offset> [<end-offset> [<required-update-id>]]
+   publish_message_scan.sh <json-api-url> <token-file> <gg-party> <start-offset> <end-offset> <required-update-id>
    ```
 
 4. Read the output. Each line is one `PublishMessage`, with its offset, update ID and executing package ID.
 
-Give a required update ID with each end offset.
-Use the update ID of the control message at the end offset.
-The scan fails if its output does not contain that update.
+The end offset is the offset of a control message.
+The required update ID is the update ID of that control message.
+The scan fails unless its output contains that update at the end offset.
 A Ledger API response can end before the end offset, and the offsets alone do not show this.
 
 The scan reads pages of `SCAN_PAGE_SIZE` updates (default 200).
@@ -463,6 +476,9 @@ The canary gate passes only when each condition is true:
 2. Positive control: after the quiet window, the coordinator publishes a control message under the new core package ID.
    The canary scan must find it.
 3. A VAA exists for each publish under the old core package ID since the start offset.
+   Get the list with a scan from the start offset to the control message.
+   Give the control message as the required update ID.
+   Tell the coordinator about each publish under a package ID that is not the old or the new core package ID.
 
 The gate passes at the first complete quiet window with the positive control.
 The gate fails if the maximum canary time ends first.
@@ -501,8 +517,10 @@ Your watcher, still pinned to the old core package ID, must observe it before th
 8. With a quorum of guardians, set `--cantonPackageID` to the new core package ID and restart `guardiand`.
 9. Send a reobservation request for each update ID of step 7.
 10. When each VAA exists, set `--cantonPackageID` to the old core package ID and restart `guardiand`.
-11. Scan from the restart of step 8 to the ledger end.
-12. Send a reobservation request for each `PublishMessage` with the old core package ID.
+11. Wait for the second control message of the coordinator under the old core package ID.
+12. Make sure that your watcher observes it. Record its offset on your participant.
+13. Scan from the abort offset to this offset, with the second control message as the required update ID.
+14. Send a reobservation request for each `PublishMessage` with the old core package ID that has no VAA.
 
 A reobservation reads a committed update. Thus step 8 needs no vetting of the new core package ID.
 After step 1, a submission under the new core package ID fails at prepare.
@@ -513,11 +531,16 @@ After each restart of a guardian, send the reobservation requests of step 16 aga
 
 **A message under the old core package ID has no VAA after step 14:**
 
-1. A quorum of guardians sets `--cantonPackageID` to the old core package ID again and restarts.
+1. Wait for the control message of the coordinator under the new core package ID.
+   Make sure that your watcher observes it. Record its offset on your participant. This is the recovery offset.
+2. A quorum of guardians sets `--cantonPackageID` to the old core package ID again and restarts.
    No vetting change is necessary. A reobservation reads a committed update.
-2. Send a reobservation request for each of these update IDs.
-3. When each VAA exists, set `--cantonPackageID` to the new core package ID again and restart.
-4. Send a reobservation request for each new message of this period.
+3. Send a reobservation request for each of these update IDs.
+4. When each VAA exists, set `--cantonPackageID` to the new core package ID again and restart.
+5. Wait for the second control message of the coordinator under the new core package ID.
+   Make sure that your watcher observes it. Record its offset on your participant.
+6. Scan from the recovery offset to this offset, with the second control message as the required update ID.
+7. Send a reobservation request for each `PublishMessage` with the new core package ID that has no VAA.
 
 **An LSU freeze window starts during step 10.** When one participant completes step 10, each transaction under the old core package ID stops.
 Start the drain gate at the first unvet. Complete the unvet after the upgrade time.
