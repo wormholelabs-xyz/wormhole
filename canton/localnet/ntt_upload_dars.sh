@@ -8,13 +8,6 @@ set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 
-readonly GUARDIAN_HOSTS=(app-provider sv app-user)
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
 localnet_core_dar="$(localnet_core_dar_path)"
 [[ -f "$localnet_core_dar" ]] || fail "DAR not found: $localnet_core_dar (build it with 'dpm build --all' in canton)"
 [[ "$(dar_main_package_name_and_version "$localnet_core_dar")" == "wormhole-core $WORMHOLE_CORE_VERSION" ]] \

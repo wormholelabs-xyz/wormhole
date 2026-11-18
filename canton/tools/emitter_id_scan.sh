@@ -21,7 +21,8 @@ readonly EXPECT_ACTIVE_REGISTRIES="${EXPECT_ACTIVE_REGISTRIES:-0}"
 readonly CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-60}"
 readonly CURL_CONNECT_TIMEOUT_SECONDS=10
 readonly CORE_PACKAGE_NAME="wormhole-core"
-readonly VETTING_PAGE_SIZE=1000
+# Canton 3.7.3 maximum for /v2/package-vetting/list.
+readonly VETTING_PAGE_SIZE=100
 readonly EMITTER_TEMPLATE_SUFFIX=":Wormhole.Core.State:Emitter"
 readonly REGISTRY_TEMPLATE_SUFFIX=":Wormhole.Core.State:EmitterRegistry"
 readonly EMITTER_PACKAGE_NAME_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"

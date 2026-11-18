@@ -11,76 +11,27 @@ set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 
+# The wormhole-core package that executes the NTT PublishMessage exercises, and its version. Default: the pin of
+# ntt_lib.sh. Set both or neither.
+if [[ -n "${NTT_CORE_PACKAGE_ID:-}" && -z "${NTT_CORE_PACKAGE_VERSION:-}" ]] \
+  || [[ -z "${NTT_CORE_PACKAGE_ID:-}" && -n "${NTT_CORE_PACKAGE_VERSION:-}" ]]; then
+  echo "set NTT_CORE_PACKAGE_ID and NTT_CORE_PACKAGE_VERSION together" >&2
+  exit 2
+fi
+readonly CORE_PACKAGE_ID="${NTT_CORE_PACKAGE_ID:-$WORMHOLE_CORE_PACKAGE_ID}"
+readonly CORE_PACKAGE_VERSION="${NTT_CORE_PACKAGE_VERSION:-$WORMHOLE_CORE_VERSION}"
 readonly WATCHER_DIR="$LOCALNET_STATE_DIR/ntt-watcher"
-readonly HARNESS_BINARY="$WATCHER_DIR/canton-watcher-localnet.test"
-readonly HARNESS_READY_SECONDS=120
-readonly HARNESS_STOP_SECONDS=60
+# shellcheck source=watcher_harness_lib.sh
+source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 mkdir -p "$WATCHER_DIR"
 
-build_harness() {
-  (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go test -c -tags localnet -o "$HARNESS_BINARY" ./pkg/watchers/canton)
+# A failed run terminates the harness that it started. "start" leaves its harness running when it passes.
+on_exit() {
+  local exit_status=$?
+  if [[ "$exit_status" -ne 0 ]]; then stop_started_harnesses; fi
+  rm -rf "$gg_work_dir"
 }
-
-# run_harness <name> <validator> <reobserve-update-ids> <max-seconds>: run in the background against the
-# participant of <validator>; files go to $WATCHER_DIR/<name>.*, the exit status to <name>.exit.
-run_harness() {
-  local name="$1" validator_name="$2" waited_seconds
-  rm -f "$WATCHER_DIR/$name".{ready,stop,jsonl,pid,exit}
-  (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$SCRIPT_USER_ID" > "$WATCHER_DIR/watcher.jwt")
-  (
-    CANTON_LOCALNET_GRPC="localhost:$(grpc_ledger_api_port "$validator_name")" \
-    CANTON_LOCALNET_TOKEN_FILE="$WATCHER_DIR/watcher.jwt" \
-    CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
-    CANTON_LOCALNET_CORE_PACKAGE_ID="$WORMHOLE_CORE_PACKAGE_ID" \
-    CANTON_LOCALNET_CORE_PACKAGE_VERSION="$WORMHOLE_CORE_VERSION" \
-    CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
-    CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
-    CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \
-    CANTON_LOCALNET_REOBSERVE_UPDATE_IDS="$3" \
-    CANTON_LOCALNET_MAX_SECONDS="$4" \
-      nohup "$HARNESS_BINARY" -test.run TestCantonWatcherLocalNet -test.v > "$WATCHER_DIR/$name.log" 2>&1 &
-    echo $! > "$WATCHER_DIR/$name.pid"
-    harness_exit_status=0
-    wait $! || harness_exit_status=$?
-    echo "$harness_exit_status" > "$WATCHER_DIR/$name.exit"
-  ) &
-  for ((waited_seconds = 0; waited_seconds < HARNESS_READY_SECONDS; waited_seconds++)); do
-    if [[ -f "$WATCHER_DIR/$name.ready" ]]; then
-      echo "watcher harness $name streams from $validator_name (pid $(cat "$WATCHER_DIR/$name.pid"))"
-      return 0
-    fi
-    if [[ -f "$WATCHER_DIR/$name.exit" ]]; then
-      echo "watcher harness $name exited with status $(cat "$WATCHER_DIR/$name.exit"); log: $WATCHER_DIR/$name.log" >&2
-      tail -n 20 "$WATCHER_DIR/$name.log" >&2
-      return 1
-    fi
-    sleep 1
-  done
-  echo "watcher harness $name is not ready after ${HARNESS_READY_SECONDS}s" >&2
-  return 1
-}
-
-# stop_harness <name>: create the stop file and wait for exit status 0 and a PASS line in the log.
-stop_harness() {
-  local name="$1" waited_seconds harness_exit_status
-  touch "$WATCHER_DIR/$name.stop"
-  for ((waited_seconds = 0; waited_seconds < HARNESS_STOP_SECONDS; waited_seconds++)); do
-    if [[ -f "$WATCHER_DIR/$name.exit" ]]; then
-      harness_exit_status="$(cat "$WATCHER_DIR/$name.exit")"
-      if [[ "$harness_exit_status" == "0" ]] && grep -q '^--- PASS: TestCantonWatcherLocalNet' "$WATCHER_DIR/$name.log"; then
-        echo "watcher harness $name stopped: $(wc -l < "$WATCHER_DIR/$name.jsonl" | tr -d ' ') observations"
-        return 0
-      fi
-      echo "watcher harness $name failed with status $harness_exit_status; log: $WATCHER_DIR/$name.log" >&2
-      grep -E -- '--- (FAIL|SKIP)|Error' "$WATCHER_DIR/$name.log" | head -n 20 >&2
-      return 1
-    fi
-    sleep 1
-  done
-  kill "$(cat "$WATCHER_DIR/$name.pid")" 2>/dev/null || true
-  echo "watcher harness $name did not stop after ${HARNESS_STOP_SECONDS}s" >&2
-  return 1
-}
+trap on_exit EXIT
 
 # check_deployment <observations-file> <deployment-key> <outbound-message-key> <reobserved: true|false>
 # The deployment emitter publishes TransceiverInit (sequence 0), TransceiverRegistration (1) and the transfer (2).
@@ -104,7 +55,7 @@ check_deployment() {
 case "${1:-}" in
   start)
     build_harness
-    run_harness live "$SUBMITTING_VALIDATOR" "" 1800
+    run_harness live "$CORE_PACKAGE_ID" "$CORE_PACKAGE_VERSION" "" 1800
     ;;
   stop)
     stop_harness live
@@ -114,14 +65,16 @@ case "${1:-}" in
     check_deployment "$WATCHER_DIR/live.jsonl" lockUnlock lockMessage false
     ;;
   reobserve)
-    [[ -x "$HARNESS_BINARY" ]] || build_harness
+    [[ -x "$(harness_binary)" ]] || build_harness
     burn_update_id="$(jq -er .burnMint.burnUpdateId "$NTT_CONTRACTS")"
     lock_update_id="$(jq -er .lockUnlock.lockUpdateId "$NTT_CONTRACTS")"
     echo "reobservation update ids: burn $burn_update_id, lock $lock_update_id"
     # The update id is the same on each participant, so a request from one guardian works on another.
     for reobserving_validator in "$SUBMITTING_VALIDATOR" sv; do
-      run_harness "reobserve-$reobserving_validator" "$reobserving_validator" "$burn_update_id,$lock_update_id" 300
+      run_harness_on "$reobserving_validator" "reobserve-$reobserving_validator" "$CORE_PACKAGE_ID" "$CORE_PACKAGE_VERSION" \
+        "$burn_update_id,$lock_update_id" 300
       stop_harness "reobserve-$reobserving_validator"
+      check_harness_reobservation_errors "reobserve-$reobserving_validator"
       check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" burnMint burnMessage true
       check_deployment "$WATCHER_DIR/reobserve-$reobserving_validator.jsonl" lockUnlock lockMessage true
     done
