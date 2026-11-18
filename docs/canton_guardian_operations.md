@@ -350,12 +350,8 @@ For the Canton Console commands, refer to <https://docs.canton.network/global-sy
 Use this procedure for each new `wormhole-core` version that keeps the signatories and observers of each template.
 The sequence prevents a submitter from using the old version to bypass the checks of the new version.
 
-NOTE: This procedure replaces the procedure in Section 7.5 of `canton/README.md`.
-That section still has the earlier sequence, which removes the vetting of the old package as the last step.
-Pull request #73 changes that section to agree with this procedure.
-Pull request #73 also adds a scan tool and a LocalNet rehearsal for this procedure.
-Until that merge, do the canary scan of Section 6.7.2 manually.
-Use the sequence of this document, not the sequence of that section.
+NOTE: Section 7.5 of `canton/README.md` gives the same sequence for the upgrade from 0.6.0 to 0.7.0.
+That section also gives the reasons for each gate and the results of the LocalNet rehearsal.
 
 The coordinator announces the time of step 10 and the maximum canary time.
 The maximum canary time starts at step 5.
