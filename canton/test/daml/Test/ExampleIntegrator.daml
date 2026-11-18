@@ -11,6 +11,8 @@
 --
 -- Guardian signatures prove the VAA is real, NOT that it is addressed to this
 -- app: 'Redeem' checks the emitter against the registered peer before acting.
+-- 'Redeem' pins the CoreState by @guardianGovernance@; copy that pin, not the
+-- operator pin alone.
 --
 -- Test package only; a template for integrator packages, not part of the core
 -- DAR.
@@ -74,11 +76,12 @@ template ExampleIntegrator
         pubKeys       : [(Int, Bytes)]
       controller redeemer
       do
-        -- Cids arrive from an untrusted submitter, so authenticate the PAYLOAD:
-        -- a redeemer must not point at a fabricated CoreState with an attacker
-        -- guardian set. A direct fetch is not authorized here (no CoreState
-        -- stakeholder among the authorizers), so the pin goes through the
-        -- 'GetOperator' read choice, which needs only its controller.
+        -- SECURITY: pin guardianGovernance first; the operator pin is redundant.
+        -- One operator key can co-sign a shadow CoreState under a throwaway gg;
+        -- it cannot sign as the real gg. Read choices, because no CoreState
+        -- stakeholder authorizes a fetch here.
+        csGuardianGovernance <- exercise coreStateCid GetGuardianGovernance with reader = redeemer
+        assertMsg "unexpected core guardianGovernance" (csGuardianGovernance == guardianGovernance)
         csOperator <- exercise coreStateCid GetOperator with reader = redeemer
         assertMsg "unexpected core operator" (csOperator == operator)
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
@@ -207,7 +210,7 @@ testIntegratorRedeem = do
   receipt2.manager === manager2
 
   -- A fabricated CoreState — attacker-signed, so its operator field cannot
-  -- name the real one — dies on the GetOperator pin before verification or
+  -- name the real one — dies on the guardianGovernance pin before verification or
   -- consumption run.
   fakeOperator <- allocateParty "FakeOperator"
   fakeGovernance <- allocateParty "FakeGovernance"
