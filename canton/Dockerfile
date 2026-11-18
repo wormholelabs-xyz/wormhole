@@ -35,10 +35,16 @@ COPY dars ./dars
 COPY core ./core
 COPY test ./test
 COPY test-lookalike ./test-lookalike
+# LocalNet smoke package (localnet/README.md); never uploaded outside LocalNet.
+COPY localnet/daml ./localnet/daml
 # Multi-package build: core (templates) then test (scripts, data-dep on core
 # + the interface DARs). Produces core/.daml/dist/wormhole-core-<version>.dar and
 # test/.daml/dist/wormhole-core-test-0.1.0.dar (which packs core's DALFs).
 RUN dpm install "${DAML_SDK_VERSION}" && dpm build --all
+# LocalNet vetting probes: one package name in two versions, which multi-package.yaml cannot hold.
+# Build each outside /canton-build, so dpm does not resolve them against multi-package.yaml.
+COPY localnet/vetting_probe /vetting-probe-build
+RUN cd /vetting-probe-build/v1 && dpm build && cd /vetting-probe-build/v2 && dpm build
 
 # Go toolchain for the watcher sandbox tests; same image digest as node/Dockerfile.
 FROM docker.io/golang:1.25.10-bookworm@sha256:154bd7001b6eb339e88c964442c0ad6ed5e53f09844cc818a41ce4ecb3ce3b43 AS go-toolchain

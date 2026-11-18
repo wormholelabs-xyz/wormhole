@@ -1,0 +1,20 @@
+-- | Rehearsal templates for LocalNet. 'VettingProbe' makes guardianGovernance an informee;
+-- 'GovernanceCeremonyProbe' needs the guardianGovernance signing-key threshold.
+module VettingProbe where
+
+template VettingProbe
+  with
+    operator           : Party
+    guardianGovernance : Party
+    label              : Text
+    revision           : Optional Int  -- added in 2.0.0
+  where
+    signatory operator
+    observer guardianGovernance
+
+template GovernanceCeremonyProbe
+  with
+    guardianGovernance : Party
+    label              : Text
+  where
+    signatory guardianGovernance

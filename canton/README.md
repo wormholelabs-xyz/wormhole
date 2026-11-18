@@ -1128,12 +1128,14 @@ only then submitted (`topology.transactions.load`) — the participant never hol
 an owner's private key, matching real guardian custody (HSM/KMS/offline signer).
 `devnet/guardian_key_tool.js` is a small Ed25519 keypair/signing helper (Node's
 built-in `crypto` module only, no dependencies) that stands in for that custody
-system locally; production wires `GG_OWNER_SIGN_CMD_1/2/3` to the real one
-instead (see the script's header for the full environment-variable contract).
+system locally; production wires `GG_OWNER_SIGN_ARGV_1/2/3` to the real one
+instead. Each is a JSON array of strings (program, then arguments), so no shell
+splits a key path (see the script's header for the full environment-variable contract).
 
 [`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
-exercises the resulting party: it prepares a `create CoreState` command
-co-signed by an external `operator` party and `guardianGovernance` (the
+exercises the resulting party: it prepares a `create CoreState` and a
+`create EmitterRegistry` command, one prepared transaction each (the prepare
+endpoint takes one command), co-signed by an external `operator` party and `guardianGovernance` (the
 interactive-submission equivalent of `Test.TestCore:setup`'s
 `submit (actAs operator <> actAs guardianGovernance)`), has owners sign the
 prepared
@@ -1163,15 +1165,24 @@ script is synchronizer-target-parameterized (`GG_SYNCHRONIZER_ALIAS`,
 `GG_CANTON_CONSOLE_CONFIG`) for exactly that reason, and the local run proves
 the namespace/party/threshold mechanics port unchanged.
 
-**Current limitation.** Party hosting is single-participant only
-(`HostingParticipant(participant.id, Confirmation)` for the one console-bound
-participant) — the sandbox has only one participant to host on, so
-multi-participant Confirmation hosting (the production censorship-resistance
-requirement) is not exercised locally. Extending the `Seq[HostingParticipant]`
-built in `guardian_governance.canton` to additional participant ids is
-mechanical; each additional participant's consent-to-host signature follows the
-same `transactions.sign(..., signedBy = Seq(<that participant's fingerprint>))`
-pattern already used for the first one.
+**Multi-participant hosting.** The dpm sandbox has one participant, so this
+script hosts the party on one participant only. The LocalNet runbook
+([`localnet/README.md`](localnet/README.md), section "guardianGovernance
+rehearsal on three participants") hosts `guardianGovernance` on three
+participants at `Confirmation` with a confirmation threshold of 2. The runbook
+also checks the confirmation quorum, the package vetting gate, a guardian set
+rotation and an owner key rotation.
+
+When `GG_HOSTING_PARTICIPANTS` names more than one participant,
+`GG_CONFIRMATION_THRESHOLD` is mandatory and must be a majority of the hosts.
+A threshold of 1 then lets one compromised host confirm for the party.
+With one host, the threshold is 1.
+
+Limits of the LocalNet rehearsal:
+
+- One container runs the three participants and the synchronizer.
+- The owner keys are files on the host, not keys in guardian custody.
+- The checks disconnect participants. They do not stop participant processes.
 
 ### Status: opt-in while the k8s devnet path is validated
 
@@ -1385,11 +1396,15 @@ makes it a `guardianGovernance` host.
    designed/parameterized here, not exercised — no CN localnet available), the
    topology-level rotation flow (add/remove guardian keys without touching
    `CoreState` — the decentralized namespace's own threshold governs this once
-   created, but rotation itself is untested), multi-participant Confirmation
-   hosting, and confirming consumers are configured with the correct anchor party
+   created; LocalNet rehearses owner-key rotation, see below), and confirming that consumers use the correct anchor party
    id. Note the `CoreState` singleton count ("exactly one") is still behavioral —
    confirm the genesis automation creates exactly one. (Emitter/manager
    **address** integrity is separately owner-bound and owner-co-signed, §4.2.)
+   _LocalNet rehearsal:_ three-participant `Confirmation` hosting (threshold 2),
+   the confirmation quorum with two hosts offline, the package vetting gate,
+   guardian set rotation, and owner-key rotation run on Splice LocalNet
+   ([`localnet/README.md`](localnet/README.md)). Caveats: one container runs all
+   participants, and the owner keys are host files.
 3. **Guardian hosting topology.** _Mechanism resolved:_ guardians observe
    through `guardianGovernance`, hosted on every guardian participant (§4.1,
    §10); `--cantonReadAsParty` maps to it (§7.1). **Residual (needs a human

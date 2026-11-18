@@ -8,3 +8,4 @@ packages:
   - ./test
   # Red-team fixture only (canton/REDTEAM.md, A2); never uploaded outside tests.
   - ./test-lookalike
+  - ./localnet/daml
