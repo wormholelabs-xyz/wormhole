@@ -692,11 +692,14 @@ If the namespace also has the `nttCustody` party of an NTT custody deployment, t
 
 The rotation has three phases:
 
-1. Safety stop: the coordinator reads the namespace and each `PartyToParticipant` mapping in it.
-   The rotation stops before any change if the rotation list and the parties in the namespace differ.
+1. Safety stop: the coordinator reads the namespace and each `PartyToParticipant` mapping in it on each host.
+   The rotation stops before any change if two hosts show different mappings or serials.
+   It also stops if a party in the namespace has a `PartyToKeyMapping`.
+   It also stops if the rotation list and the parties in the namespace differ.
    It also stops if the keys of the namespace or of a party are not the old key set or the new key set.
 2. Sign phase: each owner signs each topology change. No change goes to the synchronizer.
-   The coordinator keeps the signed changes.
+   Before the first signature, the coordinator compares each generated change with the change that it calculates.
+   The coordinator keeps the signed changes in a file that only the coordinator can read.
 3. Load phase: one load call submits all the changes. The `nttCustody` change is first, and the namespace change is last.
 
 If the new owner has no root namespace delegation, the load phase loads it first.
@@ -710,14 +713,24 @@ Procedure:
 2. Get the public key of the new owner in DER SubjectPublicKeyInfo format.
 3. Get the list of the parties in the namespace from the coordinator.
    Make sure that the list has `nttCustody` if an NTT custody deployment exists.
-4. Sign each topology change of the rotation with your owner key.
-5. After the load, make sure that the namespace contains the new owner key.
-6. Make sure that the namespace does not contain the removed owner key.
-7. For each party in the namespace, make sure that the signing keys contain the new owner key.
-8. For each party in the namespace, make sure that the signing keys do not contain the removed owner key.
-9. Make sure that the namespace threshold and the signing key threshold of each party did not change.
-10. Make sure that the effective times of the changes are in the load order: `nttCustody`, then `gg`, then the namespace.
-11. Make sure that the time from the first effective time to the last effective time is 30 seconds or less.
+4. Before the signature, decode each topology change of the rotation.
+   Compare each change with the rotation plan:
+   - The operation is `Replace`.
+   - The serial is the current serial plus 1.
+   - A `PartyToParticipant` change has the same party, hosts, host permissions and confirmation threshold as the current mapping.
+   - A `PartyToParticipant` change has the new signing keys and the current signing key threshold.
+   - The namespace change has the new owners and the current namespace threshold.
+
+   Do not sign a change that is different from the plan.
+   Section 5.3 has the same rule for a prepared transaction.
+5. Sign each topology change of the rotation with your owner key.
+6. After the load, make sure that the namespace contains the new owner key.
+7. Make sure that the namespace does not contain the removed owner key.
+8. For each party in the namespace, make sure that the signing keys contain the new owner key.
+9. For each party in the namespace, make sure that the signing keys do not contain the removed owner key.
+10. Make sure that the namespace threshold and the signing key threshold of each party did not change.
+11. Make sure that the effective times of the changes are in the load order: `nttCustody`, then `gg`, then the namespace.
+12. Make sure that the time from the first effective time to the last effective time is 30 seconds or less.
 
 Canton gives each change of one load call its own effective time.
 On LocalNet with Canton 3.7.3, the spread was about 1 s.
@@ -727,17 +740,27 @@ This window is an input to decision U4 (Section 10.1).
 After the rotation, a signature from the removed key is not valid.
 A `gg` transaction with the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
 A namespace change that the removed key signs fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
+The LocalNet probe of this rule has only the signature of the removed key.
+The probe has no signature of a current owner. Thus it gives no authority to a person who gets it.
 
-WARNING: Canton validates each topology change of a load call alone.
+WARNING: The participant rejects a complete load call if one change fails its local check.
+After that check, the synchronizer applies each change alone, at its own effective time.
 Thus a load can apply only a part of the changes. The rotation is then half-applied.
 In that state, the signing keys of a party can still contain the removed owner key.
 The removed key then still counts for the signing threshold of that party.
 If that party is `nttCustody`, the removed key and one kept key can move the NTT reserves.
+If the `ROTATION HALF-APPLIED` line names `namespace`, the removed key and one kept key can change the mapping of each party in the namespace.
 Complete the rotation with `--resume` immediately.
 Do not start a different ceremony before the rotation is complete.
 
 A signer failure and a load that the participant rejects completely leave the removed key valid for each party.
 The added key is then not valid for any party. Thus no party has a mixed key state.
+
+WARNING: The signed changes are an authorization.
+Each signed change stays valid until a different change takes its serial.
+The coordinator must keep the file of the signed changes secret until the load.
+After a stopped rotation, the file stays valid. The next change of each mapping makes it not valid.
+After a complete rotation, the coordinator removes the file.
 
 Measured behavior on LocalNet with Canton 3.7.3:
 
@@ -752,8 +775,8 @@ It also shows the parties that still accept the removed key.
 1. Do not generate a new key for the new owner.
 2. Run the rotation again with `--resume`.
    `--resume` loads the changes that the owners signed in the sign phase. No owner signs again.
-3. Do steps 5 to 9 of the procedure again.
-   The changes of a `--resume` are in more than one load call. Thus steps 10 and 11 do not apply.
+3. Do steps 6 to 10 of the procedure again.
+   The changes of a `--resume` are in more than one load call. Thus steps 11 and 12 do not apply.
 
 If you start a new rotation instead of `--resume`, the safety stop stops it before any change.
 
