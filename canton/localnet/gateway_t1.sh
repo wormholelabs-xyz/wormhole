@@ -3,10 +3,13 @@
 # through a mutual-TLS proxy. A relayer that is not a stakeholder completes Mint, Release and a Transfer with the
 # disclosure sets of the service. Docker on LocalNet only.
 #
-# Usage: gateway_t1.sh up|check|down
-#   up     Makes a throwaway CA and certificates, the read-only ledger user, the networks and three containers.
-#   check  Runs the checks. Exits non-zero if one check fails.
-#   down   Removes the three containers and the two networks. LocalNet keeps running.
+# Usage: gateway_t1.sh up|check|down|ledger-user|check-relayer
+#   up             Makes a throwaway CA and certificates, the read-only ledger user, the networks and three containers.
+#   check          Runs the checks. Exits non-zero if one check fails.
+#   down           Removes the three containers and the two networks. LocalNet keeps running.
+#   ledger-user    Makes only the read-only ledger user and its token file $LOCALNET_STATE_DIR/gateway-t1/gateway.jwt.
+#   check-relayer  Runs checks C3 to C8 only, against the service at GATEWAY_T1_SERVICE_URL. The service and LocalNet
+#                  can be on other hosts (canton/localnet/aws/aws_t1_check.sh).
 #
 # Layout:
 #   host relayer -> 127.0.0.1:7599 -> edge (gateway-edge-net, gateway-net)
@@ -32,7 +35,7 @@ readonly PROXY_PORT=7443
 readonly SERVICE_CONTAINER="t1-disclosure-gateway"
 readonly SERVICE_PORT=7599
 readonly EDGE_CONTAINER="t1-gateway-edge"
-readonly SERVICE_URL="http://127.0.0.1:$SERVICE_PORT"
+readonly SERVICE_URL="${GATEWAY_T1_SERVICE_URL:-http://127.0.0.1:$SERVICE_PORT}"
 readonly GATEWAY_LEDGER_USER="disclosure-gateway"
 readonly GATEWAY_STATE_DIR="$LOCALNET_STATE_DIR/gateway-t1"
 readonly CERT_DAYS=2
@@ -519,8 +522,9 @@ check_stale_disclosure_fails() {
   vaa="$(release_vaa "$((run_label + 1))" "$SECOND_RELEASE_TRIMMED_AMOUNT")"
   response="$(submit_release_response "t1-release-stale-$run_label" "$vaa" "$pre_release_flow" "$SECOND_RELEASE_AMOUNT")"
   echo "stale response: HTTP $(tail -n 1 <<<"$response") $(sed '$d' <<<"$response" | jq -c '{code, cause: (.cause // "" | .[0:300])}' 2> /dev/null || sed '$d' <<<"$response" | head -c 300)"
-  if [[ "$(tail -n 1 <<<"$response")" != "200" ]] && grep -qE "CONTRACT_NOT_FOUND|INACTIVE|not active|could not be found" <<<"$response"; then
-    pass "C8 stale LockedLedger $(flow_role_cid "$pre_release_flow" LockedLedger | cut -c1-16): rejected"
+  if [[ "$(tail -n 1 <<<"$response")" != "200" ]] \
+      && [[ "$(sed '$d' <<<"$response" | jq -r '.code // empty' 2> /dev/null)" == "LOCAL_VERDICT_INACTIVE_CONTRACTS" ]]; then
+    pass "C8 stale LockedLedger $(flow_role_cid "$pre_release_flow" LockedLedger | cut -c1-16): LOCAL_VERDICT_INACTIVE_CONTRACTS"
   else
     fail_check "C8 stale set: HTTP $(tail -n 1 <<<"$response")"
   fi
@@ -539,12 +543,11 @@ check_stale_disclosure_fails() {
   check_release "C8 control" "t1-release-fresh-$run_label" "$vaa" "$fresh_flow" "$SECOND_RELEASE_AMOUNT"
 }
 
-gateway_check() {
+# run_relayer_checks: C3 to C8. The relayer reads disclosure sets only from SERVICE_URL.
+run_relayer_checks() {
   run_label="$(date +%s)"
   lock_unlock_manager_address="$(ntt_contract lockUnlockGg | jq -er .managerAddress)"
-  container_exists "$SERVICE_CONTAINER" || fail "$SERVICE_CONTAINER does not run; run gateway_t1.sh up"
-  check_proxy_requires_client_certificate
-  check_gateway_network_isolation
+  echo "service $SERVICE_URL"
   check_service_endpoints
   echo "== C4. The relayer on app-user is not a stakeholder"
   relayer_party="$(allocate_local_party app-user "T1Relayer-$run_label")"
@@ -555,17 +558,31 @@ gateway_check() {
   check_transfer_through_service
   check_release_through_service
   check_stale_disclosure_fails
-  echo "gateway_t1.sh check: $check_passes passed, $check_failures failed"
+}
+
+# report_check_summary <subcommand>: exits non-zero if one check failed.
+report_check_summary() {
+  echo "gateway_t1.sh $1: $check_passes passed, $check_failures failed"
   if (( check_failures > 0 )); then
-    echo "gateway_t1.sh check: FAIL" >&2
+    echo "gateway_t1.sh $1: FAIL" >&2
     exit 1
   fi
-  echo "gateway_t1.sh check: PASS"
+  echo "gateway_t1.sh $1: PASS"
+}
+
+gateway_check() {
+  container_exists "$SERVICE_CONTAINER" || fail "$SERVICE_CONTAINER does not run; run gateway_t1.sh up"
+  check_proxy_requires_client_certificate
+  check_gateway_network_isolation
+  run_relayer_checks
+  report_check_summary check
 }
 
 case "${1:-}" in
   up) gateway_up ;;
   check) gateway_check ;;
   down) gateway_down ;;
-  *) echo "usage: gateway_t1.sh up|check|down" >&2; exit 2 ;;
+  ledger-user) ensure_gateway_ledger_user ;;
+  check-relayer) run_relayer_checks; report_check_summary check-relayer ;;
+  *) echo "usage: gateway_t1.sh up|check|down|ledger-user|check-relayer" >&2; exit 2 ;;
 esac
