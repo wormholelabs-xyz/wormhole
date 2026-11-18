@@ -7,14 +7,42 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.8.2 as built on canton/genesis-guardian-set-index.
-const deployedCorePackageIDHex = "132d32bfdba695df16b78b1c2250579d9369b13fe030d951973293f4e23b70c1"
+// deployedCorePackageIDHex is wormhole-core 0.8.3 (feeCustody receives fees).
+const deployedCorePackageIDHex = "b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69"
+
+// Withdrawn wormhole-core builds: their fee registry code runs as guardianGovernance.
+const (
+	withdrawnCore080PackageIDHex = "03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
+	withdrawnCore081PackageIDHex = "4a214c8015945441a74dcc2a702f0652b3136e8f7488ab13d8196313c4d47d89"
+	withdrawnCore082PackageIDHex = "132d32bfdba695df16b78b1c2250579d9369b13fe030d951973293f4e23b70c1"
+)
 
 func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 	approved := DefaultApprovedCorePackages()
+	require.Len(t, approved.entries, 1)
 
-	require.NotEmpty(t, approved.entries)
-	require.NoError(t, approved.CheckCorePackageApproved(mustParsePackageID(t, deployedCorePackageIDHex), mustParseCorePackageVersion(t, "0.8.2")))
+	cases := []struct {
+		name         string
+		packageIDHex string
+		version      string
+		wantErr      string
+	}{
+		{name: "deployed 0.8.3", packageIDHex: deployedCorePackageIDHex, version: "0.8.3"},
+		{name: "withdrawn 0.8.0", packageIDHex: withdrawnCore080PackageIDHex, version: "0.8.0", wantErr: "not in the approved"},
+		{name: "withdrawn 0.8.1", packageIDHex: withdrawnCore081PackageIDHex, version: "0.8.1", wantErr: "not in the approved"},
+		{name: "withdrawn 0.8.2", packageIDHex: withdrawnCore082PackageIDHex, version: "0.8.2", wantErr: "not in the approved"},
+		{name: "withdrawn 0.8.2 id as 0.8.3", packageIDHex: withdrawnCore082PackageIDHex, version: "0.8.3", wantErr: "not in the approved"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := approved.CheckCorePackageApproved(mustParsePackageID(t, tc.packageIDHex), mustParseCorePackageVersion(t, tc.version))
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
 }
 
 func TestParseApprovedCorePackages(t *testing.T) {
