@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # G3 rehearsal: rotate one owner key of the guardian namespace. The thresholds stay 2 of 3.
 # The rotation covers guardianGovernance and, after custody_host.sh, nttCustody (same namespace, same keys).
-#   1. Generate a new owner key. console/gg_rotate_owner_key.canton signs each change first (sign phase), stores the
-#      signed changes, then loads the PartyToParticipant of each party (nttCustody first) and the namespace in one call.
-#   2. Check that the removed owner and one kept owner cannot change the namespace
+#   1. Generate a new owner key. console/gg_rotate_owner_key.canton compares each generated change with the change
+#      that it computes, then signs each change (sign phase). It stores the signed changes (mode 0600), then loads the
+#      PartyToParticipant of each party (nttCustody first) and the namespace in one call. ROTATION done removes the
+#      stored file.
+#   2. Check that the removed owner alone cannot sign the namespace definition again
 #      (TOPOLOGY_UNAUTHORIZED_TRANSACTION).
 #   3. Signing ceremony, for each party: create GovernanceCeremonyProbe with that party as signatory.
 #      a. One kept owner + the new owner. Expect commit.
@@ -28,6 +30,10 @@ print_active_rotation_faults >&2
 readonly KEY_TOOL="$REPO_ROOT/canton/devnet/guardian_key_tool.js"
 readonly GG_KEY_DIR="$LOCALNET_STATE_DIR/gg-keys"
 readonly EXTRA_FINGERPRINTS="$LOCALNET_STATE_DIR/extra-key-fingerprints.json"
+# Worst case of one console run is about 1030 s: 13 signer calls of 30 s, 60 s for the participant views to agree,
+# load 1 of 120 s, three load 2 tries of 120 s each with two 5 s pauses, and the removed-owner probe of 65 s.
+# canton_console.sh accepts at most 3600 s.
+readonly ROTATION_CONSOLE_TIMEOUT_SECONDS=1200
 
 readonly USAGE="usage: gg_rotate_owner_key.sh [--resume] <removed-owner> <kept-owner> <kept-owner> <new-owner>"
 resume_rotation=false
@@ -88,7 +94,9 @@ if [[ -f "$EXTRA_FINGERPRINTS" ]]; then
 else
   updated_fingerprints="$(jq -n --arg file "$GG_KEY_DIR/$new_owner.pub" --arg fp "$new_owner_fingerprint" '{($file): $fp}')"
 fi
-printf '%s\n' "$updated_fingerprints" > "$EXTRA_FINGERPRINTS"
+fingerprints_temporary_file="$(mktemp "$EXTRA_FINGERPRINTS.XXXXXX")"
+printf '%s\n' "$updated_fingerprints" > "$fingerprints_temporary_file"
+mv -f "$fingerprints_temporary_file" "$EXTRA_FINGERPRINTS"
 
 # Load order: nttCustody (holds the reserves) first, guardianGovernance last.
 rotation_party_ids=()
@@ -119,6 +127,7 @@ GG_KEPT_OWNER_PUBKEY_1="$GG_KEY_DIR/$kept_owner_1.pub" GG_KEPT_OWNER_SIGN_ARGV_1
 GG_KEPT_OWNER_PUBKEY_2="$GG_KEY_DIR/$kept_owner_2.pub" GG_KEPT_OWNER_SIGN_ARGV_2="$(owner_signer_argv "$kept_owner_2")" \
 GG_REMOVED_OWNER_PUBKEY="$GG_KEY_DIR/$removed_owner.pub" GG_REMOVED_OWNER_SIGN_ARGV="$(owner_signer_argv "$removed_owner")" \
 GG_ADDED_OWNER_PUBKEY="$GG_KEY_DIR/$new_owner.pub" GG_ADDED_OWNER_SIGN_ARGV="$(owner_signer_argv "$new_owner")" \
+CANTON_CONSOLE_TIMEOUT_SECONDS="$ROTATION_CONSOLE_TIMEOUT_SECONDS" \
   "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/owner_key_rotation_lib.canton" \
   "$LOCALNET_SCRIPT_DIR/console/gg_rotate_owner_key.canton" \
   > "$gg_work_dir/rotation.log" 2>&1 || rotation_console_status=$?
@@ -134,6 +143,7 @@ if grep -q '^ROTATION NOT STARTED' "$gg_work_dir/rotation.log"; then
 fi
 if grep -q '^ROTATION NOT APPLIED' "$gg_work_dir/rotation.log"; then
   echo "FAIL: the participant applied no change. The removed key stays valid. Run again with a new owner name." >&2
+  echo "WARNING: $SIGNED_ROTATION_TRANSACTIONS stays loadable until another change takes its serials. Keep it secret." >&2
   exit 1
 fi
 if grep -q '^ROTATION HALF-APPLIED' "$gg_work_dir/rotation.log"; then
