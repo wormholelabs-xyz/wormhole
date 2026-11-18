@@ -15,15 +15,17 @@
 -- (README §4.7). Authenticity is checked on the PAYLOAD, never the resolution
 -- path: signatories cannot be forged, so a 'CoreState' whose @guardianGovernance@
 -- is the known anchor is authentic by construction — a compromised @operator@
--- cannot fabricate one. The fee-custody anchor is pinned this way: 'PublishMessage',
+-- cannot fabricate one. The authenticity anchor is pinned this way: 'PublishMessage',
 -- 'RegisterEmitter', and 'ClaimReplayRoot' exercise 'GetGuardianGovernance' and
 -- compare it against the @guardianGovernance@ committed on the emitter/registry
 -- before charging. Pinning @guardianGovernance@ (not @operator@) is what holds
--- against a compromised operator, which alone does not determine @feeRecipient@.
+-- against a compromised operator, which alone does not determine @feeRecipient@:
+-- guardianGovernance pins the 'CoreState', which pins @feeRecipient@.
 --
 -- Two invariants:
 --
---   * 'CoreState' singleton co-signed by @operator@ and @guardianGovernance@.
+--   * 'CoreState' singleton co-signed by @operator@, @guardianGovernance@ and
+--     @feeRecipient@ (feeCustody).
 --     The latter is the guardians' governance anchor — in production a
 --     decentralized-namespace external party under a k-of-n threshold of guardian
 --     keys (the Canton Network DSO pattern), rotated at the topology layer without
@@ -136,19 +138,21 @@ template CoreState
     feeInstrument      : InstrumentId       -- CIP-0056 instrument fees are paid in (CC on
                                             -- mainnet). Genesis-fixed: no governance action
                                             -- covers it.
-    feeRecipient       : Party              -- fee custody; guardianGovernance in production,
-                                            -- so fees move only via the k-of-n guardian
-                                            -- ceremony. Genesis-fixed.
+    feeRecipient       : Party              -- feeCustody: quorum party in the guardian namespace,
+                                            -- never guardianGovernance or operator. Genesis-fixed.
     consumedGovernance : Set Bytes32        -- governance-only replay protection, keyed by
                                             -- digest. App VAAs use the 'ReplayNode' trie.
   where
     -- Co-signed: guardianGovernance's signature is what stops the operator
     -- forging the guardian set (module header). Transitions inherit its
     -- authority from the archived contract, so it signs only at genesis.
-    signatory operator, guardianGovernance
+    -- SECURITY: feeRecipient co-signs so 'chargeFee' can supply the receiver
+    -- authority without guardianGovernance being an allocation controller.
+    signatory operator, guardianGovernance, feeRecipient
 
     -- Applies to genesis (raw creates from the LocalNet and devnet scripts) and to each governance re-create.
-    ensure checkGuardianSetsAreConsistent guardianSetIndex guardianSets
+    ensure feeRecipient /= guardianGovernance && feeRecipient /= operator
+      && checkGuardianSetsAreConsistent guardianSetIndex guardianSets
 
     -- | Read-only VAA verification against the CURRENT guardian set, for the
     -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
@@ -204,8 +208,8 @@ template CoreState
     -- | Charge the governance-set per-publish fee ('messageFee'). Lives here,
     -- not on 'Emitter': the fee amount is only knowable from this contract, and
     -- 'Allocation_ExecuteTransfer' needs the fee recipient's authority (sender ∧
-    -- receiver ∧ executor), inherited from this contract's signatories when
-    -- @feeRecipient = guardianGovernance@. Returns the operator so the caller can
+    -- receiver ∧ executor), inherited from @feeRecipient@'s signature on this
+    -- contract. Returns the operator so the caller can
     -- pin authenticity (a self-signed fee-0 fake must not waive the fee).
     -- Nonconsuming: a governance transition archiving this contract only makes
     -- racing publishes fail activeness transiently — re-resolve and retry.
@@ -215,7 +219,8 @@ template CoreState
         feeAllocation : Optional (ContractId Allocation, ExtraArgs)
       controller payer
       do
-        chargeFee payer feeRecipient feeInstrument messageFee feeAllocation
+        let parties = FeeChargeParties with operator, guardianGovernance, feeRecipient, payer
+        chargeFee parties feeInstrument messageFee feeAllocation
         pure operator
 
     -- | Charge a caller-specified amount — for the registries' onboarding
@@ -228,7 +233,8 @@ template CoreState
         feeAllocation : Optional (ContractId Allocation, ExtraArgs)
       controller payer
       do
-        chargeFee payer feeRecipient feeInstrument fee feeAllocation
+        let parties = FeeChargeParties with operator, guardianGovernance, feeRecipient, payer
+        chargeFee parties feeInstrument fee feeAllocation
         pure operator
 
     -- | Verify a VAA and record its consumption in @consumer@'s @namespace@
@@ -372,11 +378,12 @@ currentSetForUpgrade st =
   fromSomeNote "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
 
 -- | On-ledger record of a TransferFees action: the guardians' authorization to
--- move @amount@ of accrued fees to @recipient@. Fees live in feeRecipient's
--- (guardianGovernance's) holdings, and Canton tokens move only by their owner's
--- signature, so the outbound transfer is a k-of-n guardian ceremony; this
--- contract (signed by guardianGovernance, authority inherited from the consumed
--- 'CoreState') is the artifact that ceremony's custody policy matches against.
+-- move @amount@ of accrued fees to @recipient@. Fees live in feeCustody's
+-- holdings, and Canton tokens move only by their owner's signature, so the
+-- outbound transfer is a k-of-n guardian ceremony that signs as feeCustody for
+-- the transfer and as guardianGovernance for the archive of this contract
+-- (signed by guardianGovernance, authority inherited from the consumed
+-- 'CoreState'), the artifact that ceremony's custody policy matches against.
 -- @recipient@ is the VAA's 32-byte Wormhole address; mapping it to a Canton
 -- receiver is the custody layer's job. Archived by guardianGovernance when
 -- fulfilled.
@@ -524,7 +531,7 @@ template EmitterRegistry
 template ReplayRootRegistry
   with
     operator           : Party
-    guardianGovernance : Party  -- CoreState fee-custody anchor; pinned (not a
+    guardianGovernance : Party  -- CoreState authenticity anchor; pinned (not a
                                 -- signatory) in ClaimReplayRoot's fee charge
     claimFee           : Int    -- onboarding fee, 10^-10 feeInstrument units;
                                 -- operator-set at creation, 0 for free
@@ -583,7 +590,7 @@ template ReplayRootRegistry
 template Emitter
   with
     operator           : Party
-    guardianGovernance : Party  -- co-signer; CoreState fee-custody anchor,
+    guardianGovernance : Party  -- co-signer; CoreState authenticity anchor,
                                 -- pinned in PublishMessage's fee charge
     owner              : Party
     emitterId          : Int      -- registry-allocated
@@ -642,7 +649,7 @@ template Emitter
         assertMsg "nonce exceeds uint32" (nonce <= maxNonceUint32)
         assertMsg "consistency level is negative" (consistencyLevel >= 0)
         assertMsg "consistency level exceeds uint8" (consistencyLevel <= maxConsistencyLevelUint8)
-        -- Pin the fee-custody anchor BEFORE charging: @guardianGovernance@ (not
+        -- Pin the authenticity anchor BEFORE charging: @guardianGovernance@ (not
         -- just @operator@, which a forged CoreState would match) determines where
         -- the fee lands, so this check rejects a shadow CoreState under a rogue
         -- gg before the message fee can be redirected.

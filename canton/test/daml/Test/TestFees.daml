@@ -1,7 +1,7 @@
 -- | Fee-payment tests: 'chargeFee' consuming mock CIP-0056 allocations across
 -- all three charge points (publish / emitter registration / replay-root
 -- claim), the validation matrix, and the custody assertions (fees land in
--- feeRecipient's — guardianGovernance's — holdings; 'TransferFees' mints the
+-- feeRecipient's — feeCustody's — holdings; 'TransferFees' mints the
 -- withdrawal authorization).
 module Test.TestFees where
 
@@ -70,7 +70,7 @@ testMessageFeeLifecycle = do
       coreStateCid = csId', payer = alice, feeAllocation = None
 
   -- Exact allocation: publish succeeds, WormholeMessage unchanged, the fee
-  -- lands whole in feeRecipient's (guardianGovernance's) holdings.
+  -- lands whole in feeRecipient's (feeCustody's) holdings.
   feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal mockFee)
   (em1Cid, msg1) <- submit (actAs alice <> disclose csDisc) do
     exerciseCmd emId1 PublishMessage with
@@ -126,12 +126,28 @@ testFeeValidationMatrix = do
       allocation = mkAllocationSpec alice feeRecipient inst (feeToDecimal mockFee) now
   let fakePay = (toInterfaceContractId @Allocation fakeCid, emptyExtraArgs)
   submitMustFail (actAs alice <> disclose csDisc) do publishWith fakePay
+  -- Executor other than the payer.
+  let payerAllocationSpec = mkAllocationSpec alice feeRecipient inst (feeToDecimal mockFee) now
+  wrongExecutorCid <- submit (actAs alice <> actAs mockAdmin) do
+    createCmd MockAllocation with
+      admin = mockAdmin
+      allocation = payerAllocationSpec with
+        settlement = payerAllocationSpec.settlement with executor = mallory
+  wrongExecutorResult <- trySubmit (actAs alice <> disclose csDisc) do
+    publishWith (toInterfaceContractId @Allocation wrongExecutorCid, emptyExtraArgs)
+  case wrongExecutorResult of
+    Left (FailureStatusError failureStatus) ->
+      assertMsg ("unexpected error: " <> failureStatus.message)
+        ("fee allocation executor is not the payer" `isInfixOf` failureStatus.message)
+    Left otherError -> abort ("unexpected error: " <> show otherError)
+    Right _ -> abort "fee allocation with a foreign executor accepted"
   -- A fabricated fee-0 CoreState cannot waive the fee: the operator pin fires.
   fakeOp <- allocateParty "MatrixFakeOp"
   fakeGov <- allocateParty "MatrixFakeGov"
-  fakeCsId <- submit (actAs fakeOp <> actAs fakeGov) do
+  fakeFeeCustody <- allocateParty "MatrixFakeFeeCustody"
+  fakeCsId <- submit (actAs fakeOp <> actAs fakeGov <> actAs fakeFeeCustody) do
     createCmd (mkInitialCoreState fakeOp fakeGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst fakeGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst fakeFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure fakeOp fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
@@ -354,9 +370,10 @@ testNoSpuriousWithdrawalAuthorization = do
 ----------------------------------------------------------------------
 --
 -- The call sites once pinned only the @operator@ returned by 'ChargeFee' /
--- 'ChargeMessageFee', but @operator@ does NOT determine @feeRecipient@ (that is
--- @guardianGovernance@). A compromised operator can co-sign a second,
--- ledger-valid 'CoreState' under an attacker-controlled gg (= @feeRecipient@) —
+-- 'ChargeMessageFee', but @operator@ does NOT determine @feeRecipient@ (the
+-- @guardianGovernance@ signature pins it). A compromised operator can co-sign a
+-- second, ledger-valid 'CoreState' under an attacker-controlled gg and fee
+-- custody party —
 -- the operator field still matches, so an operator-only pin lets real fees flow
 -- to the attacker. Each call site now pins 'GetGuardianGovernance' against the
 -- gg committed on the emitter/registry before charging. Each test builds that
@@ -374,17 +391,18 @@ testPublishPinsGuardianGovernance = do
   alice <- allocateParty "PinPublishAlice"
   rogueGov <- allocateParty "RoguePublishGov"
   emId <- registerEmitter operator alice
-  -- The shadow CoreState: co-signed by the REAL operator and a throwaway gg it
-  -- controls, with rogueGov as both guardianGovernance and feeRecipient.
-  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+  -- The shadow CoreState: co-signed by the REAL operator and a throwaway gg and
+  -- fee custody party it controls.
+  rogueFeeCustody <- allocateParty "RoguePublishFeeCustody"
+  fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueFeeCustody)
   fakeCsId' <- submit operator do
     exerciseCmd fakeCsId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId'
-  feePay <- mintAndAllocate mockAdmin alice rogueGov inst (feeToDecimal mockFee)
+  feePay <- mintAndAllocate mockAdmin alice rogueFeeCustody inst (feeToDecimal mockFee)
   res <- trySubmit (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
       nonce = 1, payload = "aa", consistencyLevel = 0
@@ -398,7 +416,7 @@ testPublishPinsGuardianGovernance = do
 
 -- | 'RegisterEmitter' pins the registry's guardianGovernance anchor. The
 -- nonzero-fee registry is anchored to the real gg; the forged CoreState routes
--- its @registrationFee@ to @rogueGov@, and a fully-funded allocation is
+-- its @registrationFee@ to a rogue fee custody party, and a fully-funded allocation is
 -- attached — the pin rejects it before the charge.
 testRegisterEmitterPinsGuardianGovernance : Script ()
 testRegisterEmitterPinsGuardianGovernance = do
@@ -410,11 +428,12 @@ testRegisterEmitterPinsGuardianGovernance = do
   regCid <- submit (actAs operator <> actAs cs.guardianGovernance) do
     createCmd (mkInitialEmitterRegistry operator cs.guardianGovernance 500)
   regDisc <- fromSome <$> queryDisclosure operator regCid
-  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+  rogueFeeCustody <- allocateParty "RogueRegFeeCustody"
+  fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
-  feePay <- mintAndAllocate mockAdmin bob rogueGov inst (feeToDecimal 500)
+  feePay <- mintAndAllocate mockAdmin bob rogueFeeCustody inst (feeToDecimal 500)
   res <- trySubmit (actAs bob <> disclose regDisc <> disclose fakeDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = bob
@@ -468,7 +487,7 @@ testRegisterEmitterChecksExpectedGuardianGovernance = do
         abort (caseName <> ": expected '" <> failureText <> "', got: " <> show registrationError)
 
 -- | 'ClaimReplayRoot' pins the registry's guardianGovernance anchor. Same
--- forgery, routing the @claimFee@ to @rogueGov@; the pin rejects it before the
+-- forgery, routing the @claimFee@ to a rogue fee custody party; the pin rejects it before the
 -- charge.
 testClaimReplayRootPinsGuardianGovernance : Script ()
 testClaimReplayRootPinsGuardianGovernance = do
@@ -479,11 +498,12 @@ testClaimReplayRootPinsGuardianGovernance = do
   regCid <- submit operator do
     createCmd (mkInitialReplayRootRegistry operator cs.guardianGovernance 300)
   regDisc <- fromSome <$> queryDisclosure operator regCid
-  fakeCsId <- submit (actAs operator <> actAs rogueGov) do
+  rogueFeeCustody <- allocateParty "RogueClaimFeeCustody"
+  fakeCsId <- submit (actAs operator <> actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
-  feePay <- mintAndAllocate mockAdmin carol rogueGov inst (feeToDecimal 300)
+  feePay <- mintAndAllocate mockAdmin carol rogueFeeCustody inst (feeToDecimal 300)
   res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do
     exerciseCmd regCid ClaimReplayRoot with
       consumer = carol, namespace = "fees", splitThreshold = 4

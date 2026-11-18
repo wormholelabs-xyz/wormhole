@@ -916,7 +916,8 @@ testCoreStateFeeRecipientIsADistinctCustodyParty = do
     pure $ case (expectedOutcome, createResult) of
       (CoreStateCreateCommits, Right _) -> None
       (CoreStateCreateCommits, Left createError) -> Some (caseName <> ": rejected: " <> show createError)
-      (CoreStateCreateRejectedByEnsure, Left (TemplatePreconditionViolated)) -> None
+      (CoreStateCreateRejectedByEnsure, Left (FailureStatusError failureStatus))
+        | "PreconditionFailed" `T.isInfixOf` failureStatus.errorId -> None
       (CoreStateCreateRejectedForMissingAuthority, Left (AuthorizationError _)) -> None
       (_, Right _) -> Some (caseName <> ": accepted")
       (_, Left createError) -> Some (caseName <> ": expected " <> show expectedOutcome <> ", got: " <> show createError)
