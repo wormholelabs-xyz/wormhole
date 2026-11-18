@@ -40,6 +40,7 @@ certusone
 chainid
 ChainID
 Chainlink
+codegen
 Coinspect
 collateralization
 colour
@@ -267,6 +268,7 @@ untampered
 unvet
 Unvet
 unvetted
+updateid
 upserted
 usize
 utest

@@ -20,7 +20,7 @@ const unpinnedPackageOverflowLabel = "other"
 var unpinnedPublishMessages = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "wormhole_canton_unpinned_publish_messages_total",
-		Help: "PublishMessage exercises on the pinned template that the watcher dropped because a package other than --cantonPackageID executed them",
+		Help: "PublishMessage exercises on the pinned template that the watcher dropped because a package other than --cantonPackageID or --cantonRetiringPackageID executed them",
 	}, []string{"executing_package_id"})
 
 // unpinnedPackageLabels assigns each executing package id its own label until
@@ -50,15 +50,15 @@ func (labels *unpinnedPackageLabels) labelForPackageID(executingPackageID string
 var unpinnedPublishPackageLabels = newUnpinnedPackageLabels()
 
 // recordUnpinnedPublish logs and counts an exercise of the watched choice on
-// the pinned module and entity under another package id. Callers drop the
-// exercise: the package pin is a security boundary.
-func recordUnpinnedPublish(updateID string, executingPackageID string, pinnedPackageID string, logger *zap.Logger) {
+// the pinned module and entity under a package id outside the accepted set.
+// Callers drop the exercise: the package pin is a security boundary.
+func recordUnpinnedPublish(updateID string, executingPackageID string, acceptedPackageIDs AcceptedPackageIDs, logger *zap.Logger) {
 	unpinnedPublishMessages.WithLabelValues(unpinnedPublishPackageLabels.labelForPackageID(executingPackageID)).Inc()
 	if logger == nil {
 		return
 	}
-	logger.Warn("canton: dropped PublishMessage executed by a package other than the pinned package",
+	logger.Warn("canton: dropped PublishMessage executed by a package outside the accepted core package ids",
 		zap.String("updateId", updateID),
 		zap.String("executingPackageId", executingPackageID),
-		zap.String("pinnedPackageId", pinnedPackageID))
+		zap.Stringer("acceptedPackageIds", acceptedPackageIDs))
 }

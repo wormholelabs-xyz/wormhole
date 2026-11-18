@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the guardian watcher (node/pkg/watchers/canton) against app-provider as guardianGovernance with the
-# pinned wormhole-core package id, and check that it observes the NTT transceiver messages.
+# pinned wormhole-core package id and version, and check that it observes the NTT transceiver messages.
 # Usage:
 #   ntt_watcher.sh start      Build the harness and start it in the background. Returns when it streams.
 #   ntt_watcher.sh stop       Stop the background harness.
@@ -32,6 +32,7 @@ run_harness() {
     CANTON_LOCALNET_TOKEN_FILE="$WATCHER_DIR/watcher.jwt" \
     CANTON_LOCALNET_READ_AS_PARTY="$GG_PARTY" \
     CANTON_LOCALNET_CORE_PACKAGE_ID="$WORMHOLE_CORE_PACKAGE_ID" \
+    CANTON_LOCALNET_CORE_PACKAGE_VERSION="$WORMHOLE_CORE_VERSION" \
     CANTON_LOCALNET_OBSERVATIONS_FILE="$WATCHER_DIR/$name.jsonl" \
     CANTON_LOCALNET_READY_FILE="$WATCHER_DIR/$name.ready" \
     CANTON_LOCALNET_STOP_FILE="$WATCHER_DIR/$name.stop" \

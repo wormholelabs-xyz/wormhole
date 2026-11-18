@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -77,20 +78,22 @@ type observedPublish struct {
 
 // updateStreamRecorder is a gRPC stream interceptor on the watcher's own
 // Ledger API connection. It closes subscribed when GetUpdates opens and records
-// the update id of every transaction the stream delivers, before the
-// client-side template and package filter.
+// the update id of every transaction the stream delivers, and the executing
+// package ids of its PublishMessage exercises, before the client-side template
+// and package filter.
 type updateStreamRecorder struct {
 	subscribed    chan struct{}
 	subscribeOnce sync.Once
 
-	mutex              sync.Mutex
-	deliveredUpdateIDs map[string]struct{}
+	mutex sync.Mutex
+	// publishExecutingPackageIDsByUpdateID maps every delivered update id to the executing package ids of its PublishMessage exercises.
+	publishExecutingPackageIDsByUpdateID map[string][]string
 }
 
 const maxRecordedUpdateIDs = 4096
 
 func newUpdateStreamRecorder() *updateStreamRecorder {
-	return &updateStreamRecorder{subscribed: make(chan struct{}), deliveredUpdateIDs: make(map[string]struct{})}
+	return &updateStreamRecorder{subscribed: make(chan struct{}), publishExecutingPackageIDsByUpdateID: make(map[string][]string)}
 }
 
 func (r *updateStreamRecorder) interceptGetUpdates(ctx context.Context, desc *grpc.StreamDesc, conn *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
@@ -102,20 +105,35 @@ func (r *updateStreamRecorder) interceptGetUpdates(ctx context.Context, desc *gr
 	return &updateIDRecordingStream{ClientStream: stream, recorder: r}, nil
 }
 
-func (r *updateStreamRecorder) recordDeliveredUpdateID(updateIDHex string) {
+func (r *updateStreamRecorder) recordDeliveredTransaction(transaction *apiv2.Transaction) {
+	var publishExecutingPackageIDs []string
+	for _, event := range transaction.GetEvents() {
+		exercised := event.GetExercised()
+		if exercised == nil || exercised.GetChoice() != publishMessageChoice {
+			continue
+		}
+		publishExecutingPackageIDs = append(publishExecutingPackageIDs, exercised.GetTemplateId().GetPackageId())
+	}
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	if len(r.deliveredUpdateIDs) >= maxRecordedUpdateIDs {
+	if len(r.publishExecutingPackageIDsByUpdateID) >= maxRecordedUpdateIDs {
 		panic("updateStreamRecorder: update id capacity exceeded")
 	}
-	r.deliveredUpdateIDs[updateIDHex] = struct{}{}
+	r.publishExecutingPackageIDsByUpdateID[transaction.GetUpdateId()] = publishExecutingPackageIDs
 }
 
 func (r *updateStreamRecorder) hasDeliveredUpdateID(updateID cantonclient.UpdateID) bool {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
-	_, delivered := r.deliveredUpdateIDs[updateID.String()]
+	_, delivered := r.publishExecutingPackageIDsByUpdateID[updateID.String()]
 	return delivered
+}
+
+// publishExecutingPackageIDs returns the executing package ids of the update's PublishMessage exercises, in event order.
+func (r *updateStreamRecorder) publishExecutingPackageIDs(updateID cantonclient.UpdateID) []string {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return slices.Clone(r.publishExecutingPackageIDsByUpdateID[updateID.String()])
 }
 
 type updateIDRecordingStream struct {
@@ -129,7 +147,7 @@ func (s *updateIDRecordingStream) RecvMsg(message any) error {
 	}
 	if response, isUpdatesResponse := message.(*apiv2.GetUpdatesResponse); isUpdatesResponse {
 		if transaction := response.GetTransaction(); transaction != nil {
-			s.recorder.recordDeliveredUpdateID(transaction.GetUpdateId())
+			s.recorder.recordDeliveredTransaction(transaction)
 		}
 	}
 	return nil
@@ -191,6 +209,17 @@ func readDarMainPackageID(t *testing.T, dpm, darPath string) string {
 	require.NoError(t, json.Unmarshal(out, &inspected))
 	require.Len(t, inspected.MainPackageID, 64, "package id is a 64-char hex hash")
 	return inspected.MainPackageID
+}
+
+// acceptedPackageIDsOrAny pins currentPackageID, or matches any package when it is empty.
+func acceptedPackageIDsOrAny(t *testing.T, currentPackageID string) cantonclient.AcceptedPackageIDs {
+	t.Helper()
+	if currentPackageID == "" {
+		return cantonclient.AcceptAnyPackageID()
+	}
+	accepted, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: currentPackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	return accepted
 }
 
 // runDamlScript runs scriptName from the test DAR and decodes its JSON output
@@ -296,7 +325,8 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		streamRecorders[caseIndex] = streamRecorder
 
 		// Run builds the gRPC client from NewWatcher's readAsParty.
-		w := NewWatcher(ledgerAddr, tc.packageID, tc.readAsParty, AuthConfig{}, true, msgC, obsvReqC)
+		w, err := NewWatcher(ledgerAddr, acceptedPackageIDsOrAny(t, tc.packageID), tc.readAsParty, AuthConfig{}, true, msgC, obsvReqC)
+		require.NoError(t, err)
 		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
 			if err := supervisor.Run(ctx, "canton", w.Run); err != nil {
@@ -324,14 +354,14 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 
 	trustedPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.TrustedSequence),
 		Nonce:          trustedPublishNonce,
 		Payload:        decodeHexPayload(t, trustedPublishPayloadHex),
 	}
 	rogueShadowPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.RogueShadowSequence),
 		Nonce:          rogueShadowNonce,
 		Payload:        decodeHexPayload(t, rogueShadowPayloadHex),
