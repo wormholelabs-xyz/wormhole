@@ -417,3 +417,91 @@ func TestRunResumesBeforeOffsetOne(t *testing.T) {
 	begin, _, _ := fake.subscribeArgs()
 	assert.Equal(t, int64(0), begin)
 }
+
+// A refusal in the pump stops Run and rewinds to before the offset, so the restart redelivers the full transaction.
+func TestRunRewindsBeforeOffsetOnPumpRefusal(t *testing.T) {
+	bothVerified := []cantonclient.VettedPackageMetadata{testCurrentVerifiedMetadata, testRetiringVerifiedMetadata}
+	cases := []struct {
+		name              string
+		responses         [][]cantonclient.VettedPackageMetadata
+		errByCall         map[int]error
+		emittedBeforeStop []cantonclient.CantonMessageEvent
+		refusedEvent      cantonclient.CantonMessageEvent
+	}{
+		{
+			name:         "mismatch found on demand",
+			responses:    [][]cantonclient.VettedPackageMetadata{{}, {testCurrentMismatchedMetadata}, bothVerified},
+			refusedEvent: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent),
+		},
+		{
+			name:         "metadata rpc error on demand",
+			responses:    [][]cantonclient.VettedPackageMetadata{{}, {}, bothVerified},
+			errByCall:    map[int]error{2: errors.New("unavailable")},
+			refusedEvent: eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent),
+		},
+		{
+			name:              "second message of one offset mismatched after the first emitted",
+			responses:         [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata}, {testCurrentVerifiedMetadata, testRetiringMismatchedMetadata}, bothVerified},
+			emittedBeforeStop: []cantonclient.CantonMessageEvent{eventWithRole(100, cantonclient.AcceptedPackageRoleCurrent)},
+			refusedEvent:      eventWithRole(100, cantonclient.AcceptedPackageRoleRetiring),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeClient()
+			fake.ledgerEnd = 50
+			fake.vettedPackageMetadataResponses = tc.responses
+			fake.vettedPackageMetadataErrByCall = tc.errByCall
+			msgC, _ := startWatcherWithMode(t, fake, testVersionedWindowPackageIDs(t), true, defaultPackageMetadataRecheckInterval)
+			fake.waitSubscribed(t)
+			begin, _, _ := fake.subscribeArgs()
+			require.Equal(t, int64(50), begin)
+
+			for _, event := range tc.emittedBeforeStop {
+				fake.pushEvent(event)
+				requireEmittedSequence(t, msgC, 5, false)
+			}
+			fake.pushEvent(tc.refusedEvent)
+			fake.waitSubscribed(t)
+			requireNothingEmitted(t, msgC)
+
+			begin, _, _ = fake.subscribeArgs()
+			assert.Equal(t, tc.refusedEvent.ParticipantOffset-1, begin, "the restart must resubscribe before the refused offset")
+			assert.Equal(t, 2, fake.subscribeCount())
+			assert.Equal(t, 3, fake.vettedPackageMetadataCallCount())
+			fake.pushEvent(tc.refusedEvent)
+			requireEmittedSequence(t, msgC, 5, false)
+		})
+	}
+}
+
+// Reobservation drops the messages of a mismatched role and emits the other role of the same transaction.
+func TestHandleReobservationDropsMismatchedRole(t *testing.T) {
+	for _, unsafeDevMode := range []bool{false, true} {
+		t.Run(map[bool]string{false: "production mode", true: "unsafe dev mode"}[unsafeDevMode], func(t *testing.T) {
+			msgC := make(chan *common.MessagePublication, 4)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), "", AuthConfig{}, unsafeDevMode, msgC, nil)
+			require.NoError(t, err)
+			client := newFakeClient()
+			client.vettedPackageMetadataResponses = [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata, testRetiringMismatchedMetadata}}
+			require.ErrorIs(t, w.refreshPackageMetadata(context.Background(), zap.NewNop(), client), errPackageMetadataMismatched)
+
+			reobsUpdateID := mustParseUpdateID(reobsUpdateIDHex)
+			retiringMessage := eventWithRole(40, cantonclient.AcceptedPackageRoleRetiring).Message
+			retiringMessage.Sequence = 8
+			currentMessage := eventWithRole(40, cantonclient.AcceptedPackageRoleCurrent).Message
+			currentMessage.Sequence = 9
+			client.byUpdateID[reobsUpdateID] = cantonclient.CantonTransaction{
+				ParticipantOffset: 40,
+				UpdateID:          reobsUpdateID,
+				EffectiveAt:       time.Unix(1_700_000_001, 0).UTC(),
+				Messages:          []cantonclient.CantonMessage{retiringMessage, currentMessage},
+			}
+			w.handleReobservation(context.Background(), zap.NewNop(), client, &gossipv1.ObservationRequest{ChainId: uint32(vaa.ChainIDCanton), TxHash: reobsUpdateID.TxID()})
+
+			requireEmittedSequence(t, msgC, 9, true)
+			requireNothingEmitted(t, msgC)
+			assert.Equal(t, 1, client.vettedPackageMetadataCallCount(), "a known mismatch must refuse without a new RPC")
+		})
+	}
+}

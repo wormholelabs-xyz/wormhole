@@ -77,6 +77,7 @@ type fakeClient struct {
 
 	vettedPackageMetadataResponses [][]cantonclient.VettedPackageMetadata // consumed in order; the last repeats
 	vettedPackageMetadataErr       error
+	vettedPackageMetadataErrByCall map[int]error // keyed by 1-based call number
 	vettedPackageMetadataCalls     int
 
 	subCalls   int
@@ -149,6 +150,9 @@ func (f *fakeClient) ListVettedPackageMetadata(_ context.Context, packageIDs []c
 	f.vettedPackageMetadataCalls++
 	if f.vettedPackageMetadataErr != nil {
 		return nil, f.vettedPackageMetadataErr
+	}
+	if callErr := f.vettedPackageMetadataErrByCall[f.vettedPackageMetadataCalls]; callErr != nil {
+		return nil, callErr
 	}
 	if len(f.vettedPackageMetadataResponses) == 0 {
 		return nil, nil
