@@ -695,10 +695,13 @@ The rotation has three phases:
 1. Safety stop: the coordinator reads the namespace and each `PartyToParticipant` mapping in it on each host.
    The rotation stops before any change if two hosts show different mappings or serials.
    It also stops if a party in the namespace has a `PartyToKeyMapping`.
+   It also stops if the hosts of a party are not exactly the guardian hosts.
    It also stops if the rotation list and the parties in the namespace differ.
    It also stops if the keys of the namespace or of a party are not the old key set or the new key set.
 2. Sign phase: each owner signs each topology change. No change goes to the synchronizer.
    Before the first signature, the coordinator compares each generated change with the change that it calculates.
+   The coordinator calculates each change from the views of the safety stop, which all hosts agree on.
+   Each calculated mapping must have the guardian policy before the first signature.
    The coordinator keeps the signed changes in a file that only the coordinator can read.
 3. Load phase: one load call submits all the changes. The `nttCustody` change is first, and the namespace change is last.
 
@@ -714,9 +717,13 @@ Procedure:
 3. Get the list of the parties in the namespace from the coordinator.
    Make sure that the list has `nttCustody` if an NTT custody deployment exists.
 4. Before the signature, decode each topology change of the rotation.
+   Read the current mappings and serials from the participant that you operate, or from all hosts.
+   Do not use the values of the coordinator participant alone.
    Compare each change with the rotation plan:
    - The operation is `Replace`.
-   - The serial is the current serial plus 1.
+   - The serial is the current serial plus 1. The root namespace delegation of the new owner is the only exception.
+   - The root namespace delegation of the new owner has the fingerprint of the new key as the namespace.
+     Its target is the new key, and its serial is 1. Only the new owner signs it.
    - A `PartyToParticipant` change has the same party, hosts, host permissions and confirmation threshold as the current mapping.
    - A `PartyToParticipant` change has the new signing keys and the current signing key threshold.
    - The namespace change has the new owners and the current namespace threshold.
@@ -739,9 +746,10 @@ This window is an input to decision U4 (Section 10.1).
 
 After the rotation, a signature from the removed key is not valid.
 A `gg` transaction with the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
-A namespace change that the removed key signs fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
-The LocalNet probe of this rule has only the signature of the removed key.
-The probe has no signature of a current owner. Thus it gives no authority to a person who gets it.
+After the load, the LocalNet script reads all hosts.
+It makes sure that the namespace owners are exactly the new owner set.
+It also makes sure that no `PartyToParticipant` mapping of the namespace has the removed key.
+Without a key set, the removed key has no authority over the namespace or a party.
 
 WARNING: The participant rejects a complete load call if one change fails its local check.
 After that check, the synchronizer applies each change alone, at its own effective time.
@@ -759,6 +767,7 @@ The added key is then not valid for any party. Thus no party has a mixed key sta
 WARNING: The signed changes are an authorization.
 Each signed change stays valid until a different change takes its serial.
 The coordinator must keep the file of the signed changes secret until the load.
+After a load attempt, the participant of the coordinator also has each signed change. The secrecy of the file does not remove that copy.
 After a stopped rotation, the file stays valid. The next change of each mapping makes it not valid.
 After a complete rotation, the coordinator removes the file.
 

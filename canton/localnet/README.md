@@ -412,28 +412,35 @@ The rotation has these phases:
    It stops before any change if one of these conditions is true:
    - Two participants show a different namespace definition, a different mapping or a different serial.
    - A party in the namespace has a `PartyToKeyMapping`.
+   - The hosts of a party in the namespace are not exactly the participants of the console configuration.
    - A party in the namespace is not in the rotation list.
    - A party in the rotation list is not in the namespace.
    - The signing keys of a party are not the old key set or the new key set.
    - The namespace owners are not the old key set or the new key set.
+
+   The script calculates each intended change from the views of the safety stop, which all participants agree on.
+   Thus the hosts, the thresholds and the serials come from all participants. This is true in the `--resume` mode also.
+   Each intended mapping must have the guardian policy before the first signer call.
 2. Sign phase. `app-provider` generates each change.
-   Before the first signer call, the script compares each change with the change that it calculates.
+   Before the first signer call, the script compares each change with the intended change.
    The operation, the serial, the mapping and the hash must be equal.
    Then each owner signs each change. No change goes to the synchronizer.
    The script keeps the signed changes in `../localnet-state/rotation-<new-owner>.signed.bin`, with mode `0600`.
    If a signer fails, the script shows `ROTATION NOT STARTED`. The topology does not change.
    Before the load, in the fresh mode and in the `--resume` mode, the script checks each stored change:
    - Each `PartyToParticipant` change has the guardian policy.
-   - Each change is equal to the change that the current topology needs, with the next serial.
+   - Each change is equal to the change that the agreed topology of the safety stop needs, with the next serial.
    - A change that is already effective is equal to the current mapping, with the current serial.
    - The namespace change has the new owners and the current threshold.
 3. Load phase. If the new owner has no root namespace delegation, load 1 adds it.
    This delegation alone gives no authority over the guardian namespace.
    Load 2 is one load call with all other changes: `nttCustody` first, then `guardianGovernance`, then the namespace.
-   The script tries load 2 a maximum of 3 times. Each try loads only the changes that are not effective.
-4. Checks. The script finds one of these results:
-   - All changes are effective. The script shows `ROTATION effective times` for the changes and `ROTATION done`.
-     The script removes the file of the signed changes.
+   The script tries load 2 a maximum of 3 times. Each try loads only the changes that a participant does not show.
+4. Checks. The script reads all participants again. The views must agree. The script then finds one of these results:
+   - All changes are effective. The script shows `ROTATION applied`.
+     Then it checks the hosts, the thresholds and the key sets on the agreed views.
+     It shows `ROTATION effective times` for the changes and `ROTATION done`.
+     The script removes the file of the signed changes after these checks.
    - No change is effective. The script shows `ROTATION NOT APPLIED`. Each mapping keeps its serial.
    - Some changes are effective. The script shows `ROTATION HALF-APPLIED` and the parties that accept the removed key.
 
@@ -458,11 +465,12 @@ The signature must be exactly 64 bytes as 128 lowercase hex characters.
      Canton gives each change of one load call its own effective time, in the load order.
      The script stops if a time is not after the time before it.
      The script also stops if the spread is more than 30 s.
-   - The removed owner cannot add itself to the namespace again.
-     Only the removed owner signs this probe. Thus the probe has no signature of a current owner.
-     The change fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
-     The Admin API does not show this error code to the client. It shows a trace id.
-     The script finds the error code with this trace id in the log of the `canton` container.
+   - `ROTATION removed owner key <fingerprint> is in no key set of the namespace`.
+     On each participant, the namespace owners are exactly the new owner set.
+     No `PartyToParticipant` mapping of the namespace has the removed key.
+     Without a key set, the removed key has no authority. Thus these two checks show the removal.
+     An earlier version used a probe that only the removed key signed.
+     That probe fails in each state, because the namespace threshold is 2. Thus it did not show the removal.
    - For each party, a transaction with one kept key and the new key succeeds.
    - For each party, a transaction with one kept key and the removed key fails with `FAILED_TO_EXECUTE_TRANSACTION`.
      The error shows 1 valid signature and 1 invalid signature.
@@ -486,9 +494,16 @@ each party in the namespace. Do step 3 immediately.
 4. If the script shows `ROTATION NOT STARTED` or `ROTATION NOT APPLIED`, the removed key stays valid.
    Run the script again with a different new owner name.
 
+5. If the script shows `ROTATION applied` but not `ROTATION done`, a check after the load failed.
+   Do not use `--resume`. It does the same checks again.
+   Examine the topology with `gg_show_topology.sh`.
+   Each change in the file of the signed changes is effective. Remove the file after the examination.
+
 WARNING: After `ROTATION NOT APPLIED`, the file of the signed changes stays.
 Each change in it stays valid until a different change takes its serial.
 Keep the file secret. The next complete rotation takes each serial, and the file then has no effect.
+After a load attempt, `app-provider` also has each signed change. The secrecy of the file does not remove that copy.
+Only a later change of each mapping makes the signed changes not valid.
 To discard the file, run `gg_show_topology.sh` two times, 2 minutes apart.
 If the serials did not change, remove the file.
 
@@ -562,7 +577,7 @@ The last line of each rehearsal shows the current owner names.
    | R1 | None. | `ROTATION done`. The effective times are in the load order, with a spread of 30 s or less. |
    | R3 | The load omits the `nttCustody` change. | `ROTATION HALF-APPLIED` names `nttCustody`. |
    | R6 | None. Ceremony probes in the R3 state. | `nttCustody` accepts the removed key. `guardianGovernance` accepts the new key. |
-   | R3b | `--resume` of R3. The signer of the new owner fails. | `ROTATION done`. 0 signatures before the removed-owner check. |
+   | R3b | `--resume` of R3. The signer of the new owner fails. | `ROTATION done`. `ROTATION signatures in this run: 0`. |
    | R4 | The `nttCustody` change has no signature of the new owner. | Measurement. |
    | R5 | The root delegation is in load 2. | Measurement. |
 
@@ -624,8 +639,9 @@ after the `nttCustody` change.
   Case 5 of `custody_authority_check.sh` shows this.
 - The rotation safety stop reads the participants of the console configuration only. On LocalNet, these are the three hosts.
   It reads the `global` synchronizer only.
-- The comparison before the signature finds a changed change from `app-provider`.
-  The owners still trust the console for the intended values. A production owner decodes each change (operations document, Section 7.4).
+- The console calculates the intended values from the agreed views of all participants of the console configuration.
+  A change from `app-provider` that differs from these values fails the comparison before the signature.
+  The owners still trust the console for the calculation. A production owner decodes each change (operations document, Section 7.4).
 
 ## NTT end-to-end run
 
