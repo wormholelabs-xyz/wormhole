@@ -79,6 +79,7 @@ Set `DB_PORT` to use a different port.
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
 | `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. ntt 0.4.0 only. |
 | `gateway_t1.sh` | Runs the disclosure service on a separate gateway network behind a mutual-TLS proxy, and checks it. |
+| `registry_api_check.sh` | Checks the CIP-0056 registry API of the disclosure service with an offer transfer and a direct transfer. |
 | `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
 | `ntt_lib.sh` | Shared functions for the `ntt_*.sh` scripts. |
 | `ntt_offline_lib.sh` | NTT functions that `test/ntt_lib_test.sh` tests without LocalNet. |
@@ -829,6 +830,38 @@ The relayer gets these contracts and the choice context from the Amulet registry
 
 NOTE: The service keeps ledger reads for `--cache-ttl` (default 5 seconds).
 After a rejection for an inactive contract, get the set again after this time.
+
+### CIP-0056 registry API check
+
+`registry_api_check.sh` starts one disclosure service container on the `localnet` network.
+The service serves the CIP-0056 registry API (v1) for the instruments of `guardianGovernance`.
+The script removes the container when it stops.
+
+Prerequisites:
+
+- `NTT_PIN_VERSION=0.4.0`. `ntt_burn_mint.sh` ran.
+- The ledger user `disclosure-gateway` exists. Run `gateway_t1.sh ledger-user`.
+- `DISCLOSURE_SERVICE_IMAGE` names an image of the disclosure service with the registry API.
+- `NTT_GUARDIAN_SET_INDEX` and `NTT_GUARDIAN_KEY_INDICES` give the current guardian set of `CoreState`.
+
+Procedure:
+
+1. Run the check:
+
+   ```bash
+   DISCLOSURE_SERVICE_IMAGE=<image> NTT_PIN_VERSION=0.4.0 canton/localnet/registry_api_check.sh
+   ```
+
+2. Make sure that the last line of the output starts with `registry_api_check.sh: PASS`.
+
+The script does these steps:
+
+1. A relayer mints the bridged token to party A on `app-user` with the mint flow of the service.
+2. A is not a stakeholder of the `CoinFactory`.
+   A sends tokens to party B with only the responses of the registry API.
+3. The first transfer is an offer. B accepts it with the accept choice context.
+4. B creates a `TransferPreapproval`. The second transfer is direct.
+5. The script checks `totalSupply` before the mint, after the mint and after the transfers.
 
 ### T1 on AWS
 
