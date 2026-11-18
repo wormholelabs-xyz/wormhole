@@ -49,7 +49,7 @@ delete_network() {
   done
   for group_id in $(tagged_ids describe-security-groups '.SecurityGroups[].GroupId'); do
     echo "delete security group $group_id"
-    aws_ec2 delete-security-group --group-id "$group_id"
+    aws_ec2 delete-security-group --group-id "$group_id" > /dev/null
   done
   for route_table_id in $(tagged_ids describe-route-tables '.RouteTables[].RouteTableId'); do
     for association_id in $(aws_ec2 describe-route-tables --route-table-ids "$route_table_id" \

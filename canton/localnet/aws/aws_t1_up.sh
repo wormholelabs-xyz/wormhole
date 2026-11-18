@@ -272,6 +272,12 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 apt-get update -q
 apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin > /dev/null
 usermod -aG docker ubuntu
+if ! systemctl is-active --quiet docker; then
+  systemctl daemon-reload
+  systemctl reset-failed docker.service docker.socket || true
+  systemctl restart docker.socket docker.service
+fi
+systemctl is-active docker
 docker --version
 docker compose version
 EOF
@@ -296,7 +302,7 @@ build_participant_bundle() {
   printf 'wormhole %s\ncustody-lab %s\n' "$(git -C "$REPO_ROOT" rev-parse HEAD)" \
     "$(git -C "$CUSTODY_TREE" rev-parse "$CUSTODY_COMMIT")" > "$bundle_dir/commits.txt"
   cat "$bundle_dir/commits.txt"
-  COPYFILE_DISABLE=1 tar -czf "$AWS_T1_STATE_DIR/participant-bundle.tgz" -C "$bundle_dir" .
+  COPYFILE_DISABLE=1 tar --no-xattrs -czf "$AWS_T1_STATE_DIR/participant-bundle.tgz" -C "$bundle_dir" .
   rm -rf "$bundle_dir"
 }
 

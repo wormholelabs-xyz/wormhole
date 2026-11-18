@@ -830,6 +830,50 @@ The relayer gets these contracts and the choice context from the Amulet registry
 NOTE: The service keeps ledger reads for `--cache-ttl` (default 5 seconds).
 After a rejection for an inactive contract, get the set again after this time.
 
+### T1 on AWS
+
+The scripts in `aws/` run the T1 layout on two EC2 instances in a new VPC.
+The participant instance runs LocalNet and the mutual-TLS proxy on its private IP, port 7443.
+The gateway instance runs the disclosure service on its public IP, port 7599.
+Each resource has the tags `Project=canton-gateway-t1` and `Owner=claude-session`.
+Each instance stops 6 hours after its start. EC2 then deletes it.
+
+| Security group | Inbound |
+| --- | --- |
+| `gateway-sg` | Ports 22 and 7599 from the operator IP /32 |
+| `participant-sg` | Ports 22 and 7443 from `gateway-sg` |
+
+`LOCALNET_HOST_PORT_OFFSET` adds an offset to the Ledger, JSON and validator API host ports.
+The check uses offset 10000 for the SSH tunnel to the participant, so a local LocalNet keeps its ports.
+
+1. Set `AWS_T1_STATE_DIR` to a directory outside the repository.
+2. Create the resources. The script also starts LocalNet, the proxy and the service:
+
+   ```bash
+   canton/localnet/aws/aws_t1_up.sh all
+   ```
+
+3. Run the checks:
+
+   ```bash
+   canton/localnet/aws/aws_t1_check.sh
+   ```
+
+4. Delete each tagged resource. The last line must be `aws_t1_down.sh: 0 tagged resources remain`:
+
+   ```bash
+   canton/localnet/aws/aws_t1_down.sh
+   ```
+
+| Check | Result |
+| --- | --- |
+| A1 | A scan from the laptop finds no open port on the participant public IP. `participant-sg` admits only `gateway-sg`. |
+| A2 | The service answers `/v1/healthz` on the gateway public IP. |
+| A3 | From the gateway, only ports 22 and 7443 of the participant private IP accept a connection. |
+| A4 | The proxy refuses a client without a certificate, and a certificate of a different CA. |
+| A5 | The relayer on the laptop gets each set from the gateway public IP. It completes `Mint`, a Canton Coin `Transfer` lock and a `Release`. |
+| A6 | A `Release` with a stale set fails with `LOCAL_VERDICT_INACTIVE_CONTRACTS`. |
+
 ## Core package upgrade rehearsal
 
 `core_upgrade_rehearsal.sh` does the `wormhole-core` upgrade from 0.6.0 to 0.7.0 on LocalNet.
