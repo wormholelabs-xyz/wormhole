@@ -350,6 +350,13 @@ For the Canton Console commands, refer to <https://docs.canton.network/global-sy
 Use this procedure for each new `wormhole-core` version that keeps the signatories and observers of each template.
 The sequence prevents a submitter from using the old version to bypass the checks of the new version.
 
+NOTE: This procedure replaces the procedure in Section 7.5 of `canton/README.md`.
+That section still has the earlier sequence, which unvets the old package as the last step.
+Pull request #73 changes that section to agree with this procedure.
+Pull request #73 also adds a scan tool and a LocalNet rehearsal for this procedure.
+Until that merge, do the canary scan of Section 6.7.2 manually.
+Use the sequence of this document, not the sequence of that section.
+
 The coordinator announces the time of step 10 and the maximum canary time.
 The maximum canary time starts at step 5.
 It must be shorter than the pruning retention of each guardian participant.
@@ -556,11 +563,12 @@ Check the `CoreState` transaction:
 
 Check the `EmitterRegistry` transaction:
 
-1. Make sure that `operator` and `guardianGovernance` are the parties of the `CoreState`.
-2. Make sure that `nextId` is 0.
-3. Make sure that `registrationFee` is the agreed value.
-4. Make sure that the template package ID is the agreed `wormhole-core` package ID.
-5. Sign the prepared hash (Section 7.1).
+1. Make sure that your participant shows exactly one `CoreState` before you sign this transaction.
+2. Make sure that `operator` and `guardianGovernance` are the parties of the `CoreState`.
+3. Make sure that `nextId` is 0.
+4. Make sure that `registrationFee` is the agreed value.
+5. Make sure that the template package ID is the agreed `wormhole-core` package ID.
+6. Sign the prepared hash (Section 7.1).
 
 After genesis:
 
@@ -569,7 +577,11 @@ After genesis:
 3. Make sure that your participant shows exactly one `ReplayRootRegistry`.
 4. Run [`emitter_id_scan.sh`](../canton/tools/emitter_id_scan.sh) with begin offset 0 and `EXPECT_ACTIVE_REGISTRIES=1`.
    Set `EXPECTED_CORE_PACKAGE_ID` to the agreed `wormhole-core` package ID.
+   Use a Ledger API user that has only the right `CanReadAs` for `guardianGovernance`.
 5. Make sure that the scan passes with `firstId` 0.
+
+If the `CoreState` transaction fails, stop. Do not sign the `EmitterRegistry` transaction.
+Do the `CoreState` ceremony again.
 
 If the `EmitterRegistry` transaction fails, the `CoreState` exists without a registry.
 Do the `EmitterRegistry` ceremony again. Do not create a second `CoreState`.
@@ -634,6 +646,12 @@ This delegation alone gives no authority over the `gg` namespace.
 A signer failure in the sign phase stops the rotation before the first load.
 The topology then does not change.
 
+NOTE: The sign phase, the one load call and the stored signatures come with pull request #76.
+The LocalNet script of this branch does not have them.
+That script signs and loads the namespace change first. Then it signs and loads the signing key change.
+Thus, with that script, a signer failure after the namespace change gives a half-applied rotation.
+With that script, `--resume` requests new signatures from the owners.
+
 Procedure:
 
 1. Make sure that the time is not in an LSU freeze window.
@@ -661,11 +679,12 @@ Do not start a different ceremony before the rotation is complete.
 
 #### Recovery from a half-applied rotation
 
-The rotation script shows `ROTATION HALF-APPLIED` and the parties that still accept the removed key.
+The rotation script shows `ROTATION HALF-APPLIED`.
+From pull request #76, it also shows the parties that still accept the removed key.
 
 1. Do not generate a new key for the new owner.
 2. Run the rotation again with `--resume`.
-   `--resume` loads the changes that the owners signed in the sign phase.
+   From pull request #76, `--resume` loads the changes that the owners signed in the sign phase.
 3. Do steps 4 to 9 of the procedure again.
 
 LocalNet rehearsal: [`gg_rotate_owner_key.sh`](../canton/localnet/gg_rotate_owner_key.sh).
@@ -757,6 +776,10 @@ An empty party ID reads the updates of each party on the participant.
 The watcher drops a `PublishMessage` on an `Emitter` of which `gg` is not a stakeholder.
 The counter `wormhole_canton_publish_without_read_party_stakeholder_total` counts these drops.
 Each drop also writes a WARN log with the update ID.
+
+The same transaction can create an `Emitter` and publish on it.
+The watcher accepts such a publish only if the pinned package created the `Emitter` and `gg` signs it.
+In unsafe dev mode with an empty package ID or party ID, the watcher drops each such publish.
 
 The watcher uses `UpdateService.GetUpdates`.
 The watcher keeps the offset of the last message in memory.
@@ -883,7 +906,7 @@ The proposal lets the watcher accept a set of package IDs.
 Each guardian adds the new package ID before step 5.
 Each guardian removes the old package ID after step 10.
 Then no coordinated restart is necessary, and messages under the new package ID get VAAs without reobservation.
-The proposal is not merged.
+The proposal (pull request #74) is not merged.
 Until a decision, use the procedure in Section 6.7.
 
 ### 10.2 Open items
@@ -917,11 +940,11 @@ Until a decision, use the procedure in Section 6.7.
 
 | Item | Resolution |
 | - | - |
-| Multi-participant hosting of `gg` | Passed live on 2026-11-17 on three LocalNet participants at `Confirmation` with threshold 2 (Section 2.3). |
-| Vetting on a subset of hosts | Rejected at prepare. Each host must vet. Passed live on 2026-11-17 (Section 6.3). |
+| Multi-participant hosting of `gg` | Passed live on 2026-11-17 with `wormhole-core` 0.6.0 on three LocalNet participants at `Confirmation` with threshold 2 (Section 2.3). |
+| Vetting on a subset of hosts | Rejected at prepare. Each host must vet. Passed live on 2026-11-17 with `wormhole-core` 0.6.0 (Section 6.3). |
 | Mandatory `gg` party in the watcher | `--cantonReadAsParty` is mandatory outside unsafe dev mode (Section 8). |
-| Owner key rotation | Passed live on 2026-11-17, with recovery from a half-applied rotation (Section 7.4). |
-| Guardian set rotation to three guardians | Passed live on 2026-11-17, with the below-quorum rejection (Section 7.3). |
+| Owner key rotation | Passed live on 2026-11-17 with `wormhole-core` 0.6.0, with recovery from a half-applied rotation (Section 7.4). |
+| Guardian set rotation to three guardians | Passed live on 2026-11-17 with `wormhole-core` 0.6.0, with the below-quorum rejection (Section 7.3). |
 | Guardian set expiry boundary | The check compares whole seconds, `now <= expiry`, as on EVM (Section 7.3). |
 | `TxID` on different participants | The `TxID` is the update ID, the same on each participant (Section 8.1). |
 | U2: emitter address uniqueness against a compromised operator | `gg` co-signs `EmitterRegistry` and `Emitter` from `wormhole-core` 0.8.0 (Section 7.2). |
