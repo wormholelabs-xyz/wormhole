@@ -180,3 +180,85 @@ func TestSubscribeUpdatesOnTransientEmitters(t *testing.T) {
 		})
 	}
 }
+
+func publishUnderPackageOnContractEvent(contractID string, packageID string, sequence int64) *apiv2.Event {
+	event := publishMessageEvent(packageID, sequence)
+	event.GetExercised().ContractId = contractID
+	event.GetExercised().AcsDelta = false
+	return event
+}
+
+func TestMessagesFromTxOnTransientEmittersInUpgradeWindow(t *testing.T) {
+	beforeDeadline := testRetiringDeadline.Add(-time.Second)
+	cases := []struct {
+		name                       string
+		events                     []*apiv2.Event
+		recordTime                 time.Time
+		wantRoles                  []AcceptedPackageRole
+		wantDropped                float64
+		wantAfterDeadlineIncrement float64
+	}{
+		{
+			name: "retiring create and retiring publish before the deadline are emitted as retiring",
+			events: []*apiv2.Event{
+				emitterCreatedEvent("emitter-registered", retiringPinnedPackageID, "Emitter", realEmitterSignatories, nil),
+				publishUnderPackageOnContractEvent("emitter-registered", retiringPinnedPackageID, 0),
+			},
+			recordTime: beforeDeadline,
+			wantRoles:  []AcceptedPackageRole{AcceptedPackageRoleRetiring},
+		},
+		{
+			name: "current create and current publish are emitted as current",
+			events: []*apiv2.Event{
+				emitterCreatedEvent("emitter-registered", pinnedPackageID, "Emitter", realEmitterSignatories, nil),
+				publishUnderPackageOnContractEvent("emitter-registered", pinnedPackageID, 0),
+			},
+			recordTime: beforeDeadline,
+			wantRoles:  []AcceptedPackageRole{AcceptedPackageRoleCurrent},
+		},
+		{
+			name: "current create and retiring publish are dropped",
+			events: []*apiv2.Event{
+				emitterCreatedEvent("emitter-registered", pinnedPackageID, "Emitter", realEmitterSignatories, nil),
+				publishUnderPackageOnContractEvent("emitter-registered", retiringPinnedPackageID, 0),
+			},
+			recordTime:  beforeDeadline,
+			wantDropped: 1,
+		},
+		{
+			name: "retiring create and current publish are dropped",
+			events: []*apiv2.Event{
+				emitterCreatedEvent("emitter-registered", retiringPinnedPackageID, "Emitter", realEmitterSignatories, nil),
+				publishUnderPackageOnContractEvent("emitter-registered", pinnedPackageID, 0),
+			},
+			recordTime:  beforeDeadline,
+			wantDropped: 1,
+		},
+		{
+			name: "retiring create and retiring publish at the deadline are dropped by the deadline",
+			events: []*apiv2.Event{
+				emitterCreatedEvent("emitter-registered", retiringPinnedPackageID, "Emitter", realEmitterSignatories, nil),
+				publishUnderPackageOnContractEvent("emitter-registered", retiringPinnedPackageID, 0),
+			},
+			recordTime:                 testRetiringDeadline,
+			wantAfterDeadlineIncrement: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			droppedBefore := publishWithoutReadPartyStakeholderCount(t)
+			afterDeadlineBefore := retiringPackagePublishAfterDeadlineCount()
+			transaction := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: tc.events}, sampleEffectiveAt, tc.recordTime)
+
+			messages := messagesFromTx(transaction, upgradeWindowTmpl, "PublishMessage", governanceParty, zap.NewNop())
+
+			var roles []AcceptedPackageRole
+			for _, message := range messages {
+				roles = append(roles, message.AcceptedPackageRole)
+			}
+			assert.Equal(t, tc.wantRoles, roles)
+			assert.Equal(t, tc.wantDropped, publishWithoutReadPartyStakeholderCount(t)-droppedBefore)
+			assert.Equal(t, tc.wantAfterDeadlineIncrement, retiringPackagePublishAfterDeadlineCount()-afterDeadlineBefore)
+		})
+	}
+}

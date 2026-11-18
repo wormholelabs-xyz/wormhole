@@ -7,7 +7,9 @@ package cantonclient
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strings"
 	"time"
@@ -24,6 +26,7 @@ type grpcClient struct {
 	conn        *grpc.ClientConn
 	state       apiv2.StateServiceClient
 	update      apiv2.UpdateServiceClient
+	packages    apiv2.PackageServiceClient
 	readAsParty string
 	logger      *zap.Logger
 }
@@ -52,6 +55,7 @@ func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, tra
 		conn:        conn,
 		state:       apiv2.NewStateServiceClient(conn),
 		update:      apiv2.NewUpdateServiceClient(conn),
+		packages:    apiv2.NewPackageServiceClient(conn),
 		readAsParty: readAsParty,
 		logger:      logger,
 	}, nil
@@ -74,6 +78,61 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("GetLedgerEnd: %w", err)
 	}
 	return resp.GetOffset(), nil
+}
+
+// maxVettedPackagePages bounds one ListVettedPackageMetadata call. The reply
+// has one entry for each participant and synchronizer that vets a requested
+// id: a participant filter needs GetParticipantId, which requires
+// ParticipantAdmin.
+const maxVettedPackagePages = 16
+
+func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs []PackageID) ([]VettedPackageMetadata, error) {
+	// An empty filter matches every vetted package.
+	if len(packageIDs) == 0 {
+		return nil, fmt.Errorf("ListVettedPackages: at least one package id is required")
+	}
+	packageIDHexes := make([]string, 0, len(packageIDs))
+	for _, packageID := range packageIDs {
+		if packageID.isZero() {
+			return nil, fmt.Errorf("ListVettedPackages: empty package id")
+		}
+		packageIDHexes = append(packageIDHexes, packageID.hexID)
+	}
+	var entries []VettedPackageMetadata
+	pageToken := ""
+	for pageIndex := 0; pageIndex < maxVettedPackagePages; pageIndex++ {
+		response, err := c.listVettedPackagesPage(ctx, packageIDHexes, pageToken)
+		if err != nil {
+			return nil, err
+		}
+		for _, vettedPackages := range response.GetVettedPackages() {
+			for _, vettedPackage := range vettedPackages.GetPackages() {
+				entries = append(entries, VettedPackageMetadata{
+					PackageID:      vettedPackage.GetPackageId(),
+					PackageName:    vettedPackage.GetPackageName(),
+					PackageVersion: vettedPackage.GetPackageVersion(),
+				})
+			}
+		}
+		pageToken = response.GetNextPageToken()
+		if pageToken == "" {
+			return entries, nil
+		}
+	}
+	return nil, fmt.Errorf("ListVettedPackages: more than %d pages (%d entries read); the reply lists every participant and synchronizer that vets the requested ids", maxVettedPackagePages, len(entries))
+}
+
+func (c *grpcClient) listVettedPackagesPage(ctx context.Context, packageIDHexes []string, pageToken string) (*apiv2.ListVettedPackagesResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
+	defer cancel()
+	response, err := c.packages.ListVettedPackages(ctx, &apiv2.ListVettedPackagesRequest{
+		PackageMetadataFilter: &apiv2.PackageMetadataFilter{PackageIds: packageIDHexes},
+		PageToken:             pageToken,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("ListVettedPackages: %w", err)
+	}
+	return response, nil
 }
 
 // updateFormat builds the v2 UpdateFormat that selects transactions in
@@ -155,6 +214,7 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 					ParticipantOffset: tx.GetOffset(),
 					UpdateID:          updateID,
 					EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+					RecordTime:        protoTime(tx.GetRecordTime()),
 					Message:           msg,
 				}:
 				}
@@ -162,6 +222,69 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 		}
 	}()
 	return sub, nil
+}
+
+// maxPublishesPerRange bounds one ReadPublishesInRange call.
+const maxPublishesPerRange = 100_000
+
+func (c *grpcClient) ReadPublishesInRange(ctx context.Context, beginExclusive int64, endInclusive int64, tmpl TemplateID, choiceName string) ([]CantonMessageEvent, error) {
+	if beginExclusive < 0 {
+		return nil, fmt.Errorf("GetUpdates: negative begin offset %d", beginExclusive)
+	}
+	if beginExclusive > endInclusive {
+		return nil, fmt.Errorf("GetUpdates: begin offset %d is after end offset %d", beginExclusive, endInclusive)
+	}
+	events := []CantonMessageEvent{}
+	if beginExclusive == endInclusive {
+		return events, nil
+	}
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stream, err := c.update.GetUpdates(streamCtx, &apiv2.GetUpdatesRequest{
+		BeginExclusive: beginExclusive,
+		EndInclusive:   &endInclusive,
+		UpdateFormat:   c.updateFormat(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GetUpdates: %w", err)
+	}
+	// Terminates: the participant ends the stream after endInclusive.
+	for {
+		response, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return events, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("GetUpdates(%d, %d]: %w", beginExclusive, endInclusive, err)
+		}
+		tx := response.GetTransaction()
+		if tx == nil {
+			continue
+		}
+		if tx.GetOffset() <= beginExclusive || tx.GetOffset() > endInclusive {
+			return nil, fmt.Errorf("GetUpdates(%d, %d]: transaction at offset %d is beyond the requested range", beginExclusive, endInclusive, tx.GetOffset())
+		}
+		messages := messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger)
+		if len(messages) == 0 {
+			continue
+		}
+		updateID, err := ParseUpdateID(tx.GetUpdateId())
+		if err != nil {
+			return nil, fmt.Errorf("GetUpdates: transaction at offset %d: %w", tx.GetOffset(), err)
+		}
+		if len(events)+len(messages) > maxPublishesPerRange {
+			return nil, fmt.Errorf("GetUpdates(%d, %d]: more than %d publishes", beginExclusive, endInclusive, maxPublishesPerRange)
+		}
+		for _, message := range messages {
+			events = append(events, CantonMessageEvent{
+				ParticipantOffset: tx.GetOffset(),
+				UpdateID:          updateID,
+				EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+				RecordTime:        protoTime(tx.GetRecordTime()),
+				Message:           message,
+			})
+		}
+	}
 }
 
 func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error) {
@@ -189,13 +312,17 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 		ParticipantOffset: tx.GetOffset(),
 		UpdateID:          returnedUpdateID,
 		EffectiveAt:       protoTime(tx.GetEffectiveAt()),
+		RecordTime:        protoTime(tx.GetRecordTime()),
 		Messages:          messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger),
 	}, nil
 }
 
 // messagesFromTx extracts every Wormhole message from a transaction: each
-// ExercisedEvent of `choiceName` on `tmpl` that readPartySignsExercisedEmitter
-// accepts and whose exercise_result decodes to a WormholeMessage record.
+// consuming ExercisedEvent of `choiceName` on `tmpl` that the accepted package
+// ids admit at the transaction's record time and that
+// readPartySignsExercisedEmitter accepts, whose exercise_result decodes to a
+// WormholeMessage record. The event's package id is the package that executed
+// the choice, which a Daml upgrade changes.
 func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, readAsParty string, logger *zap.Logger) []CantonMessage {
 	createdEvents := createdEventsByContractID(tx)
 	var out []CantonMessage
@@ -207,15 +334,26 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 		if ex.GetChoice() != choiceName {
 			continue
 		}
-		if !templateMatches(ex.GetTemplateId(), tmpl) {
-			if templateNameMatches(ex.GetTemplateId(), tmpl) {
-				recordUnpinnedPublish(tx.GetUpdateId(), ex.GetTemplateId().GetPackageId(), tmpl.PackageID, logger)
-			}
+		if !templateNameMatches(ex.GetTemplateId(), tmpl) {
+			continue
+		}
+		executingPackageID := ex.GetTemplateId().GetPackageId()
+		verdict := tmpl.AcceptedPackageIDs.VerdictForPublish(executingPackageID, protoTime(tx.GetRecordTime()))
+		switch verdict {
+		case PublishPackageVerdictAcceptedCurrent, PublishPackageVerdictAcceptedRetiring:
+		case PublishPackageVerdictRejectedRetiringAfterDeadline:
+			recordRetiringPackagePublishAfterDeadline(tx.GetUpdateId(), executingPackageID, protoTime(tx.GetRecordTime()), logger)
+			continue
+		case PublishPackageVerdictRejectedMissingRecordTime:
+			recordPublishWithoutRecordTime(tx.GetUpdateId(), executingPackageID, logger)
+			continue
+		default:
+			recordUnpinnedPublish(tx.GetUpdateId(), executingPackageID, tmpl.AcceptedPackageIDs, logger)
 			continue
 		}
 		// SECURITY: guardianGovernance signs every real Emitter, so a publish
 		// on an Emitter it does not sign is on an Emitter of another registry.
-		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, readAsParty) {
+		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, protoTime(tx.GetRecordTime()), readAsParty) {
 			recordPublishWithoutReadPartyStakeholder(tx.GetUpdateId(), logger)
 			continue
 		}
@@ -227,22 +365,14 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 			}
 			continue
 		}
+		acceptedPackageRole, isAccepted := verdict.AcceptedRole()
+		if !isAccepted {
+			panic("canton: rejected publish verdict reached decoding")
+		}
+		msg.AcceptedPackageRole = acceptedPackageRole
 		out = append(out, msg)
 	}
 	return out
-}
-
-// templateMatches compares an event's template id against the configured filter.
-// PackageID may be empty in the filter to match any package version (Daml
-// package upgrades change the package id while preserving module/entity).
-func templateMatches(id *apiv2.Identifier, tmpl TemplateID) bool {
-	if id == nil {
-		return false
-	}
-	if tmpl.PackageID != "" && id.GetPackageId() != tmpl.PackageID {
-		return false
-	}
-	return templateNameMatches(id, tmpl)
 }
 
 // templateNameMatches compares module and entity only, ignoring the package id.
@@ -365,8 +495,13 @@ func intField(fields map[string]*apiv2.Value, label string) (int64, error) {
 	return v.GetInt64(), nil
 }
 
+// protoTime is the zero time.Time for a missing, epoch-zero, or out-of-range
+// timestamp, so the callers' missing-time checks reject it.
 func protoTime(ts *timestamppb.Timestamp) time.Time {
-	if ts == nil {
+	if ts == nil || !ts.IsValid() {
+		return time.Time{}
+	}
+	if ts.GetSeconds() == 0 && ts.GetNanos() == 0 {
 		return time.Time{}
 	}
 	return ts.AsTime()

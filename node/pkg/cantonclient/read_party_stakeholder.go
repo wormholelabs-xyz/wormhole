@@ -2,6 +2,7 @@ package cantonclient
 
 import (
 	"slices"
+	"time"
 
 	apiv2 "github.com/certusone/wormhole/node/pkg/cantonclient/proto/gen/com/daml/ledger/api/v2"
 	"github.com/prometheus/client_golang/prometheus"
@@ -52,21 +53,32 @@ func createdEventsByContractID(tx *apiv2.Transaction) map[string]*apiv2.CreatedE
 // contract that the same transaction creates, acs_delta is false, and the
 // CreatedEvent in createdEvents must show readAsParty as a signatory of the
 // pinned template. Emitter has no observers, so a stakeholder is a signatory.
-func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEvents map[string]*apiv2.CreatedEvent, tmpl TemplateID, readAsParty string) bool {
+// SECURITY: the CreatedEvent must name the exercise's package id, accepted at recordTime.
+func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEvents map[string]*apiv2.CreatedEvent, tmpl TemplateID, recordTime time.Time, readAsParty string) bool {
 	if !exercised.GetConsuming() {
 		return false
 	}
 	if exercised.GetAcsDelta() {
 		return true
 	}
-	if readAsParty == "" || tmpl.PackageID == "" {
+	if readAsParty == "" || tmpl.AcceptedPackageIDs.MatchesAnyPackage() {
 		return false
 	}
 	created := createdEvents[exercised.GetContractId()]
 	if created == nil {
 		return false
 	}
-	if !templateMatches(created.GetTemplateId(), tmpl) {
+	if !templateNameMatches(created.GetTemplateId(), tmpl) {
+		return false
+	}
+	createdPackageID := created.GetTemplateId().GetPackageId()
+	if createdPackageID == "" {
+		return false
+	}
+	if createdPackageID != exercised.GetTemplateId().GetPackageId() {
+		return false
+	}
+	if _, isAccepted := tmpl.AcceptedPackageIDs.VerdictForPublish(createdPackageID, recordTime).AcceptedRole(); !isAccepted {
 		return false
 	}
 	return slices.Contains(created.GetSignatories(), readAsParty)

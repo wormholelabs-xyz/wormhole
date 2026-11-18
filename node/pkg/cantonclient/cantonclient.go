@@ -16,11 +16,12 @@ import (
 )
 
 // TemplateID identifies a Daml template (or the template whose choice we filter
-// for) on the Ledger API. It maps to com.daml.ledger.api.v2.Identifier.
+// for) on the Ledger API: module and entity, executed by one of
+// AcceptedPackageIDs. It maps to com.daml.ledger.api.v2.Identifier.
 type TemplateID struct {
-	PackageID  string
-	ModuleName string
-	EntityName string
+	AcceptedPackageIDs AcceptedPackageIDs
+	ModuleName         string
+	EntityName         string
 }
 
 // MaxEmitterID is Wormhole.Core.State.maxEmitterId (2^53 - 1), pinned by TestMaxEmitterIDMatchesDaml.
@@ -51,6 +52,8 @@ type CantonMessage struct {
 	ConsistencyLevel uint8
 	// Payload is the raw message payload.
 	Payload []byte
+	// AcceptedPackageRole is the role of the package id that executed the publish.
+	AcceptedPackageRole AcceptedPackageRole
 }
 
 // CantonMessageEvent pairs a decoded message with the metadata of the
@@ -64,6 +67,8 @@ type CantonMessageEvent struct {
 	UpdateID UpdateID
 	// EffectiveAt is the transaction's ledger effective time.
 	EffectiveAt time.Time
+	// RecordTime is the sequencer-assigned record time; zero if the participant omitted it.
+	RecordTime time.Time
 	// Message is the decoded Wormhole message.
 	Message CantonMessage
 }
@@ -74,6 +79,7 @@ type CantonTransaction struct {
 	ParticipantOffset int64
 	UpdateID          UpdateID
 	EffectiveAt       time.Time
+	RecordTime        time.Time
 	Messages          []CantonMessage
 }
 
@@ -139,6 +145,16 @@ type CantonClient interface {
 	// and returns every Wormhole message it produced, filtered like
 	// SubscribeUpdates. Used for reobservation. Maps to UpdateService.GetUpdateById.
 	GetTransactionByUpdateID(ctx context.Context, updateID UpdateID, tmpl TemplateID, choiceName string) (CantonTransaction, error)
+
+	// ReadPublishesInRange returns every message event in (beginExclusive,
+	// endInclusive], filtered like SubscribeUpdates. Bounded by
+	// maxPublishesPerRange. Maps to UpdateService.GetUpdates with end_inclusive.
+	ReadPublishesInRange(ctx context.Context, beginExclusive int64, endInclusive int64, tmpl TemplateID, choiceName string) ([]CantonMessageEvent, error)
+
+	// ListVettedPackageMetadata returns the vetting entries of packageIDs on
+	// every synchronizer this participant knows. Maps to
+	// PackageService.ListVettedPackages.
+	ListVettedPackageMetadata(ctx context.Context, packageIDs []PackageID) ([]VettedPackageMetadata, error)
 
 	// Close releases the underlying gRPC connection.
 	Close() error

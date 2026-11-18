@@ -115,7 +115,10 @@ func TestCantonWatcherDropsWitnessOnlyPublish(t *testing.T) {
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
 	streamRecorder := newUpdateStreamRecorder()
 	witnessOnlyRecorder := &witnessOnlyPublishRecorder{}
-	w := NewWatcher(ledgerAddr, corePackageID, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: corePackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	w, err := NewWatcher(ledgerAddr, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	require.NoError(t, err)
 	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithChainStreamInterceptor(
 		streamRecorder.interceptGetUpdates, witnessOnlyRecorder.interceptGetUpdates)}
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
@@ -143,7 +146,7 @@ func TestCantonWatcherDropsWitnessOnlyPublish(t *testing.T) {
 
 	trustedPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.TrustedSequence),
 		Nonce:          trustedWitnessOnlyNonce,
 		Payload:        decodeHexPayload(t, trustedWitnessOnlyPayloadHex),

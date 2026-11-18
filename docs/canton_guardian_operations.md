@@ -909,6 +909,12 @@ Then no coordinated restart is necessary, and messages under the new package ID 
 The proposal (pull request #74) is not merged.
 Until a decision, use the procedure in Section 6.7.
 
+NOTE: Pull request #74 adds an optional retiring package ID to the watcher.
+The flags are `--cantonRetiringPackageID`, `--cantonRetiringPackageVersion` and `--cantonRetiringPackageAcceptedUntil`.
+With these flags, the watcher accepts two package IDs for a limited period.
+Section 7.5 of `canton/README.md` gives the procedure with two package IDs.
+If you do not set the retiring flags, the procedure in Section 6.7 applies with no change.
+
 ### 10.2 Open items
 
 | Item | Section |

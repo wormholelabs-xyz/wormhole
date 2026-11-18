@@ -1,19 +1,20 @@
 //go:build localnet
 
 // LocalNet harness for the Canton watcher: runs watcher.Run with the production settings (pinned core
-// package id, update stream narrowed to guardianGovernance, unsafeDevMode false) against a Splice
+// package id and version, update stream narrowed to guardianGovernance, unsafeDevMode false) against a Splice
 // LocalNet participant. LocalNet authenticates with a static HS256 JWT over plaintext gRPC, so the
 // harness injects a gRPC client that carries that token.
 //
 //	CANTON_LOCALNET_GRPC=localhost:3901 CANTON_LOCALNET_TOKEN_FILE=<jwt> \
 //	CANTON_LOCALNET_READ_AS_PARTY=<guardianGovernance> CANTON_LOCALNET_CORE_PACKAGE_ID=<core package id> \
+//	CANTON_LOCALNET_CORE_PACKAGE_VERSION=<core package version> \
 //	CANTON_LOCALNET_OBSERVATIONS_FILE=<out.jsonl> CANTON_LOCALNET_READY_FILE=<path> CANTON_LOCALNET_STOP_FILE=<path> \
 //	CANTON_LOCALNET_REOBSERVE_UPDATE_IDS=<update id,...> \
 //	go test -tags localnet -run TestCantonWatcherLocalNet ./pkg/watchers/canton -v -timeout 15m
 //
 // The harness writes one JSON line per observation (live and reobserved). It stops when the stop
 // file exists and each requested update id was reobserved, after it writes the queued observations.
-// It fails at CANTON_LOCALNET_MAX_SECONDS.
+// It fails at CANTON_LOCALNET_MAX_SECONDS. The id and version must be in approved_core_packages.json.
 // canton/localnet/ntt_watcher.sh drives it.
 package canton
 
@@ -82,6 +83,7 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	readAsParty := requiredEnv(t, "CANTON_LOCALNET_READ_AS_PARTY")
 	corePackageID := requiredEnv(t, "CANTON_LOCALNET_CORE_PACKAGE_ID")
 	require.Len(t, corePackageID, 64)
+	corePackageVersion := requiredEnv(t, "CANTON_LOCALNET_CORE_PACKAGE_VERSION")
 	observationsFile := requiredEnv(t, "CANTON_LOCALNET_OBSERVATIONS_FILE")
 	readyFile := requiredEnv(t, "CANTON_LOCALNET_READY_FILE")
 	stopFile := requiredEnv(t, "CANTON_LOCALNET_STOP_FILE")
@@ -106,7 +108,12 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 
 	msgC := make(chan *common.MessagePublication, 64)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, localNetMaxReobservations)
-	watcher := NewWatcher(rpcAddress, corePackageID, readAsParty, AuthConfig{}, false, msgC, obsvReqC)
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(
+		cantonclient.CurrentPackageConfig{PackageIDHex: corePackageID, Version: corePackageVersion},
+		cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	watcher, err := NewWatcher(rpcAddress, acceptedPackageIDs, readAsParty, AuthConfig{}, false, msgC, obsvReqC)
+	require.NoError(t, err)
 	watcher.cantonClient = client
 
 	supervisor.New(rootCtx, logger, func(ctx context.Context) error {

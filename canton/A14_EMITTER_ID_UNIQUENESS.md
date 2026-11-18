@@ -347,7 +347,7 @@ No message id of 0.8.0 can then be equal to a message id of an earlier deploymen
 6. Run the scan (refer to [Scan](#scan)) on each guardian participant.
    Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.8.0 package id.
    Each scan must pass with `firstId` 0. Stop if a scan fails.
-7. Set `--cantonPackageID` to the 0.8.0 package id on each guardian.
+7. Set `--cantonPackageID` to the 0.8.0 package id and `--cantonPackageVersion=0.8.0` on each guardian.
 8. Announce the new operator party, the 0.8.0 package id, and the registry to integrators (refer to [Integrator cutover](#integrator-cutover)).
 
 > **WARNING:** A guardian participant that vets an earlier `wormhole-core` version lets a submitter run choices under that version.

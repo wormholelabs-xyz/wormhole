@@ -71,7 +71,10 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
 	streamRecorder := newUpdateStreamRecorder()
 	transientPublishRecorder := &witnessOnlyPublishRecorder{}
-	w := NewWatcher("localhost:"+port, corePackageID, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	acceptedPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: corePackageID}, cantonclient.RetiringPackageConfig{}, time.Now())
+	require.NoError(t, err)
+	w, err := NewWatcher("localhost:"+port, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	require.NoError(t, err)
 	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithChainStreamInterceptor(
 		streamRecorder.interceptGetUpdates, transientPublishRecorder.interceptGetUpdates)}
 	supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {
@@ -100,7 +103,7 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	require.Equal(t, parseDamlUint64(t, publishes.DoublePublishEmitterID)+1, parseDamlUint64(t, publishes.RegisteredEmitterID))
 	require.NotEqual(t, bridge.GuardianGovernance, publishes.RogueGovernance)
 
-	doublePublishAddress := deriveEmitterAddress(bridge.Operator, publishes.Owner, parseDamlUint64(t, publishes.DoublePublishEmitterID))
+	doublePublishAddress := DeriveEmitterAddress(bridge.Operator, publishes.Owner, parseDamlUint64(t, publishes.DoublePublishEmitterID))
 	wantDoublePublish := []observedPublish{
 		{
 			EmitterChain:   vaa.ChainIDCanton,
@@ -119,7 +122,7 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	}
 	wantRegisterAndPublish := []observedPublish{{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: deriveEmitterAddress(bridge.Operator, publishes.Owner, parseDamlUint64(t, publishes.RegisteredEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.Owner, parseDamlUint64(t, publishes.RegisteredEmitterID)),
 		Sequence:       0,
 		Nonce:          registerAndPublishNonce,
 		Payload:        decodeHexPayload(t, registerAndPublishPayloadHex),
