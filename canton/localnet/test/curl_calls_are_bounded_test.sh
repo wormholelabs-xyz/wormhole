@@ -11,6 +11,7 @@ readonly CANTON_DIR="$LOCALNET_TEST_DIR/../.."
 
 # <file> <helper|standalone>
 readonly CHECKED_FILES=(
+  "$LOCALNET_DIR/gg_lib.sh standalone"
   "$LOCALNET_DIR/core_upgrade_rehearsal.sh helper"
   "$LOCALNET_DIR/watcher_harness_lib.sh helper"
   "$CANTON_DIR/tools/publish_message_scan.sh standalone"

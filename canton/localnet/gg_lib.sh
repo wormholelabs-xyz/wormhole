@@ -175,8 +175,8 @@ readonly EMITTER_TEMPLATE="#wormhole-core:Wormhole.Core.State:Emitter"
 # active_contracts <validator> <party> <qualified-template-suffix>: active contracts of that template that the party sees there.
 active_contracts() {
   local validator_name="$1" party="$2" template_suffix="$3" ledger_end
-  ledger_end="$(curl -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
-  curl -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
+  ledger_end="$(curl_bounded -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
+  curl_bounded -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
     -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
       eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false},
