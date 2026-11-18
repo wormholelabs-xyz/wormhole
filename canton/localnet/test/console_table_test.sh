@@ -15,8 +15,9 @@ readonly CONSOLE_DIR="$LOCALNET_SCRIPT_DIR/console"
 readonly CONSOLE_TABLES=(
   "owner-signer owner_signer_test.canton 16"
   "hosting-policy hosting_policy_test.canton 18"
-  "owner-key-rotation owner_key_rotation_test.canton 37"
+  "owner-key-rotation owner_key_rotation_test.canton 49"
   "rotation-safety-stop rotation_safety_stop_test.canton 11"
+  "topology-cross-checks topology_cross_checks_test.canton 20"
 )
 
 work_dir="$(mktemp -d)"

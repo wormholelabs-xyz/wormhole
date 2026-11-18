@@ -1,0 +1,102 @@
+// Table test of checkGeneratedTransactionIsIntended (each change that app-provider generates, before the first owner
+// signature) and checkParticipantTopologyViewsAgree (rotation safety stop). Run after owner_signing_prelude.canton,
+// owner_key_rotation_lib.canton, table_test_prelude.canton and topology_fixtures.canton.
+import com.digitalasset.canton.version.ProtocolVersion
+import ParticipantPermission.{Confirmation, Submission}
+val testProtocolVersion = ProtocolVersion.v37
+val ownerKeys = testOwnerKeys.take(3)
+val ownerNamespaces = ownerKeys.map(key => Namespace(key.fingerprint))
+val custodyDescription = "generated PartyToParticipant of nttCustody"
+val intendedCustodyMapping = testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys)))
+val intendedCustodyChange = IntendedTopologyChange(intendedCustodyMapping, PositiveInt.tryCreate(2))
+def generatedTransaction(operation: TopologyChangeOp, serial: Int, mapping: TopologyMapping): TopologyTransaction[TopologyChangeOp, TopologyMapping] =
+  TopologyTransaction.create(operation, PositiveInt.tryCreate(serial), mapping, testProtocolVersion).fold(error => sys.error(error), identity)
+def generatedCustody(confirmationThreshold: Int, hosts: Seq[HostingParticipant], signingKeys: SigningKeysWithThreshold, serial: Int) =
+  generatedTransaction(TopologyChangeOp.Replace, serial, testPartyToParticipant(testCustodyPartyId, confirmationThreshold, hosts, Some(signingKeys)))
+def checkGeneratedCustody(generated: TopologyTransaction[TopologyChangeOp, TopologyMapping]): Unit =
+  checkGeneratedTransactionIsIntended(generated, intendedCustodyChange, testProtocolVersion, custodyDescription)
+
+checkTableCase("T1-intended-custody-change", None) {
+  val generated = generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys), 2)
+  val checked = checkGeneratedTransactionIsIntended(generated, intendedCustodyChange, testProtocolVersion, custodyDescription)
+  require(checked.hash == generated.hash, "checked transaction has another hash")
+}
+checkTableCase("T2-custody-key-threshold-1", Some(s"$custodyDescription has signing key threshold 1, expected 2")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(1, ownerKeys), 2))
+}
+checkTableCase("T3-custody-one-submission-host", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedCustody(generatedCustody(1, testHosts(Submission), testSigningKeys(2, ownerKeys), 2))
+}
+checkTableCase("T4-custody-submission-host-confirmation-threshold-1", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedCustody(generatedCustody(1, testHosts(Submission, Confirmation, Confirmation), testSigningKeys(2, ownerKeys), 2))
+}
+checkTableCase("T5-namespace-threshold-1", Some("generated namespace definition has namespace threshold 1, expected 2")) {
+  checkGeneratedTransactionIsIntended(generatedTransaction(TopologyChangeOp.Replace, 4, testNamespaceDefinition(1, ownerNamespaces)),
+    IntendedTopologyChange(testNamespaceDefinition(2, ownerNamespaces), PositiveInt.tryCreate(4)), testProtocolVersion,
+    "generated namespace definition")
+}
+checkTableCase("T6-custody-serial-999", Some(s"$custodyDescription has serial 999, expected 2")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys), 999))
+}
+checkTableCase("T7-wrong-party", Some(s"$custodyDescription names party guardianGovernance::")) {
+  checkGeneratedCustody(generatedTransaction(TopologyChangeOp.Replace, 2,
+    testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys)))))
+}
+checkTableCase("T8-remove-operation", Some(s"$custodyDescription is Remove, expected Replace")) {
+  checkGeneratedCustody(generatedTransaction(TopologyChangeOp.Remove, 2, intendedCustodyMapping))
+}
+checkTableCase("T9-other-mapping-type", Some(s"$custodyDescription has mapping")) {
+  checkGeneratedCustody(generatedTransaction(TopologyChangeOp.Replace, 2, testNamespaceDefinition(2, ownerNamespaces)))
+}
+def rootDelegation(namespaceKey: SigningPublicKey, targetKey: SigningPublicKey, restriction: DelegationRestriction) =
+  NamespaceDelegation.create(Namespace(namespaceKey.fingerprint), targetKey, restriction).fold(error => sys.error(error), identity)
+val intendedRootDelegationChange =
+  IntendedTopologyChange(rootDelegation(ownerKeys.head, ownerKeys.head, DelegationRestriction.CanSignAllMappings), PositiveInt.one)
+def checkGeneratedRootDelegation(generatedMapping: NamespaceDelegation): Unit =
+  checkGeneratedTransactionIsIntended(generatedTransaction(TopologyChangeOp.Replace, 1, generatedMapping), intendedRootDelegationChange,
+    testProtocolVersion, "generated root delegation")
+checkTableCase("T10-root-delegation-intended", None) {
+  checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys.head, DelegationRestriction.CanSignAllMappings))
+}
+checkTableCase("T11-root-delegation-other-target", Some("generated root delegation has target")) {
+  checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllMappings))
+}
+checkTableCase("T12-root-delegation-other-restriction", Some("generated root delegation has restriction")) {
+  checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys.head, DelegationRestriction.CanSignAllButNamespaceDelegations))
+}
+checkTableCase("T13-custody-other-signing-keys", Some(s"$custodyDescription has signing keys")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys.take(2) :+ testOwnerKeys(4)), 2))
+}
+checkTableCase("T14-custody-onboarding-host", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts.head.copy(onboarding = true) +: threeConfirmingHosts.tail,
+    testSigningKeys(2, ownerKeys), 2))
+}
+
+val namespaceAtSerial3 = EffectiveTopologyMapping(testNamespaceDefinition(2, ownerNamespaces), PositiveInt.tryCreate(3))
+val partyMappingsOfNamespace = Seq(
+  EffectiveTopologyMapping(intendedCustodyMapping, PositiveInt.tryCreate(1)),
+  EffectiveTopologyMapping(testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys))),
+    PositiveInt.tryCreate(2)))
+def agreeingView(participantName: String) = NamespaceTopologyView(participantName, namespaceAtSerial3, partyMappingsOfNamespace, Seq.empty)
+val agreeingViews = Seq("app-provider", "sv", "app-user").map(agreeingView)
+checkTableCase("V1-views-agree", None) {
+  checkParticipantTopologyViewsAgree(agreeingViews)
+}
+checkTableCase("V2-namespace-serial-differs", Some("SAFETY STOP: participant sv namespace definition differs from participant app-provider")) {
+  checkParticipantTopologyViewsAgree(agreeingViews.updated(1, agreeingView("sv").copy(namespaceDefinition = namespaceAtSerial3.copy(serial = PositiveInt.tryCreate(4)))))
+}
+checkTableCase("V3-party-mapping-differs", Some("SAFETY STOP: participant app-user PartyToParticipant mappings differ from participant app-provider")) {
+  val custodyWithSubmissionHost = EffectiveTopologyMapping(testPartyToParticipant(testCustodyPartyId, 1, testHosts(Submission, Confirmation, Confirmation),
+    Some(testSigningKeys(2, ownerKeys))), PositiveInt.tryCreate(1))
+  checkParticipantTopologyViewsAgree(agreeingViews.updated(2, agreeingView("app-user").copy(partyMappings = custodyWithSubmissionHost +: partyMappingsOfNamespace.tail)))
+}
+checkTableCase("V4-party-to-key-mapping", Some("SAFETY STOP: participant sv has a PartyToKeyMapping of nttCustody")) {
+  checkParticipantTopologyViewsAgree(agreeingViews.updated(1, agreeingView("sv").copy(partyToKeyMappingParties = Seq(testCustodyPartyId))))
+}
+checkTableCase("V5-two-views", Some("SAFETY STOP: 2 participant views, expected 3")) {
+  checkParticipantTopologyViewsAgree(agreeingViews.take(2))
+}
+checkTableCase("V6-participant-read-twice", Some("SAFETY STOP: participant app-provider read twice")) {
+  checkParticipantTopologyViewsAgree(Seq(agreeingView("app-provider"), agreeingView("sv"), agreeingView("app-provider")))
+}
+finishTable("topology-cross-checks")

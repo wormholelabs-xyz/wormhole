@@ -106,7 +106,11 @@ val rotatedGuardianGovernance = testSigned(rotatedPartyToParticipant(guardianGov
 val rotatedNamespaceTransaction = testSigned(rotatedNamespace, 4)
 val addedRoot = testSigned(addedRootDelegation(addedKey), 1)
 val rotationPartyIds = Seq(testCustodyPartyId, testGuardianGovernancePartyId)
-def checkBundle(storedTransactions: Seq[GenericSignedTopologyTransaction]): Unit =
+// Effective mappings and serials when the bundle is checked.
+final case class RotationTestTopology(custody: (PartyToParticipant, Int), guardianGovernance: (PartyToParticipant, Int),
+    namespace: (DecentralizedNamespaceDefinition, Int))
+val topologyBeforeRotation = RotationTestTopology((currentCustodyMapping, 1), (guardianGovernanceMapping, 2), (oldNamespace, 3))
+def checkBundle(storedTransactions: Seq[GenericSignedTopologyTransaction], currentTopology: RotationTestTopology = topologyBeforeRotation): Unit =
   checkStoredRotationTransactions(storedTransactions, rotationPartyIds, testGuardianNamespace, newOwnerNamespaces, newFingerprints, addedKey)
 
 checkTableCase("B1-root-parties-namespace", None) {
@@ -146,6 +150,54 @@ checkTableCase("B9-file-damaged", Some("cannot read the signed rotation transact
     Files.write(storedFile, "not a topology transaction".getBytes("UTF-8"))
     readSignedRotationTransactions(storedFile.toString, testProtocolVersion)
   } finally Files.deleteIfExists(storedFile)
+}
+
+val rotatedCustodyMapping = rotatedPartyToParticipant(currentCustodyMapping, NonEmpty.from(newKeys.toSet).get)
+def storedCustody(confirmationThreshold: Int, hosts: Seq[HostingParticipant], signingKeys: SigningKeysWithThreshold, serial: Int) =
+  testSigned(testPartyToParticipant(testCustodyPartyId, confirmationThreshold, hosts, Some(signingKeys)), serial)
+checkTableCase("B10-custody-key-threshold-1", Some("nttCustody signing key threshold 1, expected 2")) {
+  checkBundle(Seq(storedCustody(2, threeConfirmingHosts, testSigningKeys(1, newKeys), 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B11-custody-one-submission-host", Some("nttCustody has 1 hosts, expected 3")) {
+  checkBundle(Seq(storedCustody(1, testHosts(ParticipantPermission.Submission), testSigningKeys(2, newKeys), 2),
+    rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B12-custody-submission-host-confirmation-threshold-1", Some("has Submission, expected Confirmation")) {
+  checkBundle(Seq(storedCustody(1, testHosts(ParticipantPermission.Submission, ParticipantPermission.Confirmation,
+    ParticipantPermission.Confirmation), testSigningKeys(2, newKeys), 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B13-namespace-threshold-1", Some("namespace threshold 1, expected 2")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, testSigned(testNamespaceDefinition(1, newOwnerNamespaces.toSeq), 4)))
+}
+checkTableCase("B14-custody-serial-999", Some("stored PartyToParticipant of nttCustody has serial 999, expected 2")) {
+  checkBundle(Seq(testSigned(rotatedCustodyMapping, 999), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B15-wrong-party", Some("stored PartyToParticipant parties")) {
+  val otherPartyMapping = testPartyToParticipant(PartyId.tryCreate("otherCustody", testGuardianNamespace), 2, threeConfirmingHosts,
+    Some(testSigningKeys(2, newKeys)))
+  checkBundle(Seq(testSigned(otherPartyMapping, 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B16-custody-other-confirming-hosts", Some("stored PartyToParticipant of nttCustody has hosts")) {
+  val otherConfirmingHosts = Seq(0, 1, 3).map(hostIndex => HostingParticipant(testHostIds(hostIndex), ParticipantPermission.Confirmation))
+  checkBundle(Seq(storedCustody(2, otherConfirmingHosts, testSigningKeys(2, newKeys), 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B17-namespace-serial-5", Some("stored namespace definition has serial 5, expected 4")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, testSigned(rotatedNamespace, 5)))
+}
+checkTableCase("B18-root-delegation-serial-2", Some("stored root delegation of the added owner has serial 2, expected 1")) {
+  checkBundle(Seq(testSigned(addedRootDelegation(addedKey), 2), rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+// Half-applied: the stored nttCustody change is effective at serial 2.
+val topologyAfterCustodyChange = topologyBeforeRotation.copy(custody = (rotatedCustodyMapping, 2))
+checkTableCase("B19-resume-custody-effective", None) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction), topologyAfterCustodyChange)
+}
+checkTableCase("B20-resume-custody-serial-3", Some("stored PartyToParticipant of nttCustody has serial 3, expected 2")) {
+  checkBundle(Seq(testSigned(rotatedCustodyMapping, 3), rotatedGuardianGovernance, rotatedNamespaceTransaction), topologyAfterCustodyChange)
+}
+// Another change took serial 2 of nttCustody after the sign phase.
+checkTableCase("B21-custody-serial-taken", Some("stored PartyToParticipant of nttCustody has serial 2, expected 3")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction), topologyBeforeRotation.copy(custody = (currentCustodyMapping, 2)))
 }
 
 checkTableCase("L1-load-order", None) {
