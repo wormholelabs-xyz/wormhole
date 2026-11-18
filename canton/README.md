@@ -303,8 +303,10 @@ The watcher accepts a consuming `PublishMessage` event only if its read-as
 party is a stakeholder of the exercised `Emitter`. `acs_delta` set shows this
 for an `Emitter` that existed before the transaction. For an `Emitter` that the
 same transaction creates, `acs_delta` is false: then the `CreatedEvent` of that
-contract id in the transaction must be of the pinned package and must list the
-read-as party as a signatory. An exercise that `guardianGovernance` only
+contract id in the transaction must be of the package id that executed the
+publish, and must list the read-as party as a signatory. In an upgrade window,
+a create under the current id does not unlock a publish under the retiring id,
+and the reverse is also true. An exercise that `guardianGovernance` only
 witnesses, for example a publish on an `Emitter` of a registry under another
 `guardianGovernance` nested in a contract that the real party observes, is
 dropped. Each drop
