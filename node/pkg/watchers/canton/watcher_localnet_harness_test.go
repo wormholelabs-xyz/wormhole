@@ -15,6 +15,9 @@ import (
 
 const localNetMaxReobservations = 64
 
+// localNetMaxReobservationRequestFileBytes allows one 68-character update id and a line end per request.
+const localNetMaxReobservationRequestFileBytes = localNetMaxReobservations * 70
+
 // parseReobserveUpdateIDs parses a comma-separated list of Ledger API update ids.
 func parseReobserveUpdateIDs(updateIDList string) ([]cantonclient.UpdateID, error) {
 	var updateIDs []cantonclient.UpdateID
@@ -68,6 +71,38 @@ func (tracker *reobservedUpdateTracker) recordReobservation(updateID cantonclien
 
 func (tracker reobservedUpdateTracker) allRequestedUpdatesObserved() bool {
 	return len(tracker.observed) == len(tracker.requested)
+}
+
+// readNewReobservationRequestIDs returns the update ids of a request file (one per line) that the tracker has not
+// requested yet, in file order, and adds them to the requested set. On an error the requested set stays unchanged.
+func (tracker *reobservedUpdateTracker) readNewReobservationRequestIDs(fileContent string) ([]cantonclient.UpdateID, error) {
+	var newUpdateIDs []cantonclient.UpdateID
+	newUpdateIDSet := make(map[cantonclient.UpdateID]struct{})
+	for _, line := range strings.Split(fileContent, "\n") {
+		updateIDText := strings.TrimSpace(line)
+		if updateIDText == "" {
+			continue
+		}
+		updateID, err := cantonclient.ParseUpdateID(updateIDText)
+		if err != nil {
+			return nil, err
+		}
+		if _, requested := tracker.requested[updateID]; requested {
+			continue
+		}
+		if _, duplicate := newUpdateIDSet[updateID]; duplicate {
+			continue
+		}
+		newUpdateIDSet[updateID] = struct{}{}
+		newUpdateIDs = append(newUpdateIDs, updateID)
+		if len(tracker.requested)+len(newUpdateIDs) > localNetMaxReobservations {
+			return nil, fmt.Errorf("at most %d requested update ids, got more", localNetMaxReobservations)
+		}
+	}
+	for _, updateID := range newUpdateIDs {
+		tracker.requested[updateID] = struct{}{}
+	}
+	return newUpdateIDs, nil
 }
 
 // drainPublications writes each queued publication, at most maxDrained, and returns the count.
@@ -222,4 +257,79 @@ func TestDrainPublications(t *testing.T) {
 			require.Len(t, msgC, testCase.expectedRemainingSize)
 		})
 	}
+}
+
+func TestReadNewReobservationRequestIDs(t *testing.T) {
+	updateIDTexts := make([]string, localNetMaxReobservations+1)
+	for index := range updateIDTexts {
+		updateIDTexts[index] = localNetTestUpdateIDText(index)
+	}
+	type requestFileRead struct {
+		fileContent           string
+		expectedUpdateIDTexts []string
+		expectedErrorMessage  string
+	}
+	testCases := []struct {
+		name             string
+		startUpdateIDs   []string
+		requestFileReads []requestFileRead
+	}{
+		{name: "empty file", requestFileReads: []requestFileRead{{fileContent: "", expectedUpdateIDTexts: nil}}},
+		{name: "two ids", requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\n" + updateIDTexts[1] + "\n", expectedUpdateIDTexts: updateIDTexts[0:2]}}},
+		{name: "same two ids again", requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\n" + updateIDTexts[1] + "\n", expectedUpdateIDTexts: updateIDTexts[0:2]},
+			{fileContent: updateIDTexts[0] + "\n" + updateIDTexts[1] + "\n", expectedUpdateIDTexts: nil}}},
+		{name: "appended id", requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\n", expectedUpdateIDTexts: updateIDTexts[0:1]},
+			{fileContent: updateIDTexts[0] + "\n" + updateIDTexts[1] + "\n", expectedUpdateIDTexts: updateIDTexts[1:2]}}},
+		{name: "start id skipped", startUpdateIDs: updateIDTexts[0:1], requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\n" + updateIDTexts[1] + "\n", expectedUpdateIDTexts: updateIDTexts[1:2]}}},
+		{name: "duplicate line", requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\n" + updateIDTexts[0] + "\n", expectedUpdateIDTexts: updateIDTexts[0:1]}}},
+		{name: "blank lines and spaces", requestFileReads: []requestFileRead{
+			{fileContent: "\n  " + updateIDTexts[0] + " \r\n\n", expectedUpdateIDTexts: updateIDTexts[0:1]}}},
+		{name: "invalid id", requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\n12345\n", expectedErrorMessage: "got 5 characters, want 68"}}},
+		{name: "invalid id leaves the state unchanged", requestFileReads: []requestFileRead{
+			{fileContent: updateIDTexts[0] + "\nnot-an-id\n", expectedErrorMessage: "want 68"},
+			{fileContent: updateIDTexts[0] + "\n", expectedUpdateIDTexts: updateIDTexts[0:1]}}},
+		{name: "more than the maximum", requestFileReads: []requestFileRead{
+			{fileContent: strings.Join(updateIDTexts, "\n"), expectedErrorMessage: "at most 64"}}},
+		{name: "maximum reached with the start ids", startUpdateIDs: updateIDTexts[0:localNetMaxReobservations],
+			requestFileReads: []requestFileRead{
+				{fileContent: updateIDTexts[localNetMaxReobservations], expectedErrorMessage: "at most 64"}}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			startUpdateIDs, err := parseReobserveUpdateIDs(strings.Join(testCase.startUpdateIDs, ","))
+			require.NoError(t, err)
+			tracker := newReobservedUpdateTracker(startUpdateIDs)
+			require.NotEmpty(t, testCase.requestFileReads)
+			for _, read := range testCase.requestFileReads {
+				newUpdateIDs, err := tracker.readNewReobservationRequestIDs(read.fileContent)
+				if read.expectedErrorMessage != "" {
+					require.ErrorContains(t, err, read.expectedErrorMessage)
+					require.Nil(t, newUpdateIDs)
+					continue
+				}
+				require.NoError(t, err)
+				require.Len(t, newUpdateIDs, len(read.expectedUpdateIDTexts))
+				for position, updateID := range newUpdateIDs {
+					require.Equal(t, read.expectedUpdateIDTexts[position], updateID.String())
+				}
+			}
+		})
+	}
+}
+
+func TestReobservationRequestFromFileMustBeObservedBeforeStop(t *testing.T) {
+	tracker := newReobservedUpdateTracker(nil)
+	require.True(t, tracker.allRequestedUpdatesObserved())
+	newUpdateIDs, err := tracker.readNewReobservationRequestIDs(localNetTestUpdateIDText(0) + "\n")
+	require.NoError(t, err)
+	require.Len(t, newUpdateIDs, 1)
+	require.False(t, tracker.allRequestedUpdatesObserved())
+	require.NoError(t, tracker.recordReobservation(newUpdateIDs[0]))
+	require.True(t, tracker.allRequestedUpdatesObserved())
 }

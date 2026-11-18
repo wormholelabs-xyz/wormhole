@@ -11,7 +11,7 @@ import DA.Foldable (forA_)
 import DA.Map qualified as Map
 import DA.Optional (fromOptional, fromSome)
 import DA.Text qualified as T
-import DA.Time (addRelTime, seconds)
+import DA.Time (addRelTime, microseconds, seconds)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
@@ -461,11 +461,13 @@ testGuardianSetUpgradeExpiry = do
     exerciseCmd newCsId SubmitGovernanceVAA with
       encodedVAA = set0SetFeeZeroVAA
       pubKeys = [(0, devnetGuardianPubKey)]
-  -- EVM boundary: accepted at exactly the expiry second, rejected one second later.
+  -- EVM boundary in whole seconds: accepted through the last microsecond of the expiry second.
   passTime (seconds guardianSetExpirySeconds)
   getTime >>= (=== addRelTime upgradedAt (seconds guardianSetExpirySeconds))
   _ <- submit operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
-  passTime (seconds 1)
+  passTime (microseconds 999999)
+  _ <- submit operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
+  passTime (microseconds 1)
   submitMustFail operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
   set1VaaAfterExpiry <- submit operator do verifyWith set1MessageVAA [(0, devnetGuardianSet1PubKey)]
   set1VaaAfterExpiry.guardianSetIndex === 1

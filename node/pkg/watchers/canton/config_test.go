@@ -1,6 +1,11 @@
 package canton
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 const (
@@ -58,7 +64,6 @@ func testApprovedCorePackages(t *testing.T) *cantonclient.ApprovedCorePackages {
 func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty string, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		approvedCorePackages:         testApprovedCorePackages(t),
 		NetworkID:                    "canton",
 		ChainID:                      vaa.ChainIDCanton,
 		Rpc:                          "canton:6865",
@@ -69,31 +74,45 @@ func createWithPackageFlags(t *testing.T, flags corePackageFlags, readAsParty st
 		RetiringPackageVersion:       flags.retiringPackageVersion,
 		ReadAsParty:                  readAsParty,
 	}
-	_, _, err := wc.Create(
+	_, err := wc.buildWatcher(
+		*testApprovedCorePackages(t),
 		make(chan *common.MessagePublication, 1),
 		make(chan *gossipv1.ObservationRequest, 1),
-		nil, nil, nil,
 		env,
 	)
 	return err
 }
 
-// TestCreateRequiresPackageIDOutsideDevMode locks in the anti-spoofing guard:
-// an empty package id (which matches any package) is rejected outside dev mode.
+// TestCreateRequiresPackageIDOutsideDevMode locks in the anti-spoofing guard: outside dev mode the package id is
+// exactly 64 lowercase hex characters. Dev mode also accepts the empty (wildcard) package id.
 func TestCreateRequiresPackageIDOutsideDevMode(t *testing.T) {
-	// Empty package id is rejected outside dev mode.
-	for _, env := range []common.Environment{common.MainNet, common.TestNet} {
-		err := createWith(t, "", env)
-		require.Error(t, err, "empty packageID must be rejected in %s", env)
-		assert.Contains(t, err.Error(), "PackageID")
+	testCases := []struct {
+		name                 string
+		packageIDText        string
+		environment          common.Environment
+		expectedErrorMessage string
+	}{
+		{name: "MainNet empty", packageIDText: "", environment: common.MainNet, expectedErrorMessage: "PackageID must be set"},
+		{name: "TestNet empty", packageIDText: "", environment: common.TestNet, expectedErrorMessage: "PackageID must be set"},
+		{name: "MainNet short", packageIDText: "abc123", environment: common.MainNet, expectedErrorMessage: "got 6 characters"},
+		{name: "TestNet short", packageIDText: "abc123", environment: common.TestNet, expectedErrorMessage: "got 6 characters"},
+		{name: "MainNet 63 hex", packageIDText: testCurrentPackageID[:63], environment: common.MainNet, expectedErrorMessage: "got 63 characters"},
+		{name: "MainNet uppercase", packageIDText: strings.Repeat("A", 64), environment: common.MainNet, expectedErrorMessage: "found 'A'"},
+		{name: "MainNet 64 hex", packageIDText: testCurrentPackageID, environment: common.MainNet},
+		{name: "TestNet 64 hex", packageIDText: testCurrentPackageID, environment: common.TestNet},
+		{name: "UnsafeDevNet empty", packageIDText: "", environment: common.UnsafeDevNet},
+		{name: "UnsafeDevNet 64 hex", packageIDText: testCurrentPackageID, environment: common.UnsafeDevNet},
+		{name: "UnsafeDevNet short", packageIDText: "abc123", environment: common.UnsafeDevNet, expectedErrorMessage: "got 6 characters"},
 	}
-
-	// Empty package id is allowed in unsafe dev mode (devnet wildcard).
-	require.NoError(t, createWith(t, "", common.UnsafeDevNet))
-
-	// A pinned package id is accepted everywhere.
-	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWith(t, testCurrentPackageID, env), "pinned packageID must be accepted in %s", env)
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := createWith(t, testCase.packageIDText, testCase.environment)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				return
+			}
+			require.NoError(t, err)
+		})
 	}
 }
 
@@ -189,19 +208,18 @@ func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
 func createWithAuth(t *testing.T, auth AuthConfig, env common.Environment) error {
 	t.Helper()
 	wc := &WatcherConfig{
-		approvedCorePackages: testApprovedCorePackages(t),
-		NetworkID:            "canton",
-		ChainID:              vaa.ChainIDCanton,
-		Rpc:                  "canton:6865",
-		PackageID:            testCurrentPackageID,
-		PackageVersion:       testCurrentPackageVersion,
-		ReadAsParty:          testGovernanceParty,
-		Auth:                 auth,
+		NetworkID:      "canton",
+		ChainID:        vaa.ChainIDCanton,
+		Rpc:            "canton:6865",
+		PackageID:      testCurrentPackageID,
+		PackageVersion: testCurrentPackageVersion,
+		ReadAsParty:    testGovernanceParty,
+		Auth:           auth,
 	}
-	_, _, err := wc.Create(
+	_, err := wc.buildWatcher(
+		*testApprovedCorePackages(t),
 		make(chan *common.MessagePublication, 1),
 		make(chan *gossipv1.ObservationRequest, 1),
-		nil, nil, nil,
 		env,
 	)
 	return err
@@ -235,4 +253,109 @@ func TestCreateAuthConfigValidation(t *testing.T) {
 	err := createWithAuth(t, full, common.UnsafeDevNet)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsafe dev mode")
+}
+
+// TestWatcherConfigFieldsAreExactlyTheFlagFields: each WatcherConfig field comes from a guardiand flag. A package
+// test cannot set a transport through the production config.
+func TestWatcherConfigFieldsAreExactlyTheFlagFields(t *testing.T) {
+	configType := reflect.TypeOf(WatcherConfig{})
+	fieldNames := make([]string, 0, configType.NumField())
+	for fieldIndex := 0; fieldIndex < configType.NumField(); fieldIndex++ {
+		fieldNames = append(fieldNames, configType.Field(fieldIndex).Name)
+	}
+	require.ElementsMatch(t, []string{
+		"NetworkID", "ChainID", "Rpc", "PackageID", "RetiringPackageID", "RetiringPackageAcceptedUntil",
+		"PackageVersion", "RetiringPackageVersion", "ReadAsParty", "Auth",
+	}, fieldNames)
+}
+
+// TestCreateChecksTheCompiledApprovedList: Create approves only the ids in approved_core_packages.json.
+func TestCreateChecksTheCompiledApprovedList(t *testing.T) {
+	approvedListJSON, err := os.ReadFile("../../cantonclient/approved_core_packages.json")
+	require.NoError(t, err)
+	var compiledApprovedPackages []struct {
+		PackageID string `json:"packageId"`
+		Version   string `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(approvedListJSON, &compiledApprovedPackages))
+	require.NotEmpty(t, compiledApprovedPackages)
+	testCases := []struct {
+		name                 string
+		packageID            string
+		packageVersion       string
+		expectedErrorMessage string
+	}{
+		{name: "compiled id at its version", packageID: compiledApprovedPackages[0].PackageID, packageVersion: compiledApprovedPackages[0].Version},
+		{name: "test id outside the compiled list", packageID: testCurrentPackageID, packageVersion: testCurrentPackageVersion, expectedErrorMessage: "not in the approved"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			watcherConfig := &WatcherConfig{
+				NetworkID:      "canton",
+				ChainID:        vaa.ChainIDCanton,
+				Rpc:            "canton:6865",
+				PackageID:      testCase.packageID,
+				PackageVersion: testCase.packageVersion,
+				ReadAsParty:    testGovernanceParty,
+			}
+			runnable, reobserver, err := watcherConfig.Create(make(chan *common.MessagePublication, 1),
+				make(chan *gossipv1.ObservationRequest, 1), nil, nil, nil, common.MainNet)
+			require.Nil(t, reobserver)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, runnable)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, runnable)
+		})
+	}
+}
+
+func TestBuildWatcherSelectsTransportByEnvironment(t *testing.T) {
+	completeAuth := AuthConfig{TokenURL: "https://kc.example/token", ClientID: "cid", ClientSecret: "sec"}
+	testCases := []struct {
+		name                    string
+		environment             common.Environment
+		auth                    AuthConfig
+		expectedPlaintext       bool
+		expectedDialOptionCount int
+		expectedErrorMessage    string
+	}{
+		{name: "MainNet uses the TLS default", environment: common.MainNet},
+		{name: "TestNet uses the TLS default", environment: common.TestNet},
+		{name: "UnsafeDevNet uses plaintext", environment: common.UnsafeDevNet, expectedPlaintext: true},
+		{name: "MainNet with OAuth adds one dial option", environment: common.MainNet, auth: completeAuth, expectedDialOptionCount: 1},
+		{name: "UnsafeDevNet with OAuth fails", environment: common.UnsafeDevNet, auth: completeAuth, expectedErrorMessage: "unsafe dev mode"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			watcherConfig := &WatcherConfig{
+				NetworkID:      "canton",
+				ChainID:        vaa.ChainIDCanton,
+				Rpc:            "canton:6865",
+				PackageID:      testCurrentPackageID,
+				PackageVersion: testCurrentPackageVersion,
+				ReadAsParty:    testGovernanceParty,
+				Auth:           testCase.auth,
+			}
+			watcher, err := watcherConfig.buildWatcher(*testApprovedCorePackages(t), make(chan *common.MessagePublication, 1),
+				make(chan *gossipv1.ObservationRequest, 1), testCase.environment)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, watcher)
+				return
+			}
+			require.NoError(t, err)
+			if testCase.expectedPlaintext {
+				require.Equal(t, insecure.NewCredentials().Info().SecurityProtocol, watcher.cantonTransportCreds().Info().SecurityProtocol)
+			} else {
+				require.Nil(t, watcher.cantonTransportCreds())
+			}
+			require.Len(t, watcher.cantonDialOpts(context.Background()), testCase.expectedDialOptionCount)
+			currentPackageID, isPinned := watcher.acceptedPackageIDs.CurrentPackageID()
+			require.True(t, isPinned)
+			require.Equal(t, testCurrentPackageID, currentPackageID.String())
+		})
+	}
 }

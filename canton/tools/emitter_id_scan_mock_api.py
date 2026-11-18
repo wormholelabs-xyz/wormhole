@@ -12,6 +12,9 @@ import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+# Canton 3.7.3 rejects /v2/package-vetting/list with pageSize above 100 (HTTP 400).
+CANTON_MAX_VETTING_PAGE_SIZE = 100
+
 MAX_REQUEST_BYTES = 65536
 
 
@@ -68,6 +71,9 @@ def make_handler(fixture):
                 ][:page_limit]
                 self.send_json(page)
             elif self.path == "/v2/package-vetting/list":
+                if not 1 <= request["pageSize"] <= CANTON_MAX_VETTING_PAGE_SIZE:
+                    self.send_error(400, "pageSize out of range")
+                    return
                 expected_filters = (
                     request["packageMetadataFilter"]["packageNamePrefixes"] == ["wormhole-core"]
                     and request["topologyStateFilter"]["participantIds"] == [fixture["participantId"]]
