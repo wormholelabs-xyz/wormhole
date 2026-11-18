@@ -652,10 +652,13 @@ These scripts run the Wormhole NTT layer on LocalNet.
 The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `79d739b16`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.0, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.1, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
+The `ntt` 0.3.2 DAR of commit `79d739b16` calls `wormhole-core` 0.8.0.
+Thus `ntt_upload_dars.sh` stops until an `ntt` DAR on `wormhole-core` 0.8.1 replaces it.
 
 Set `NTT_PIN_VERSION=0.4.0` to use `ntt` 0.4.0. Build it from NTT branch `canton/overnight-ntt-custody`, commit `7561a9b`.
+The `ntt` 0.4.0 DAR of commit `7561a9b` also calls `wormhole-core` 0.8.0.
 `ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each version.
 From 0.4.0, `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
 `ntt_lib.sh` then reads the `nttCustody` party from `custody-artifacts.json`.
@@ -684,7 +687,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 
 | Step | Script | Result |
 | --- | --- | --- |
-| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.8.0. |
+| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.8.1. |
 | 2 | `ntt_governance.sh` | One `NttGovernance` root and one `CoinFactory` exist. |
 | 3 | `ntt_watcher.sh start` | The watcher harness reads `app-provider`. |
 | 4 | `ntt_burn_mint.sh` | A relayer mints 2.5 tokens to a user. The user burns 1.0 token. |
@@ -897,7 +900,7 @@ The procedures of section 7.5 apply only to an upgrade that keeps the signatorie
 The rehearsal cannot run on a LocalNet with the 0.8.0 genesis:
 
 - The 0.8.0 `CoreState`, `EmitterRegistry` and `Emitter` cannot run under 0.6.0 or 0.7.0.
-- `ntt_e2e.sh` follows the `ntt` 0.3.2 and `wormhole-core` 0.8.0 pins of `ntt_lib.sh`.
+- `ntt_e2e.sh` follows the `ntt` 0.3.2 and `wormhole-core` 0.8.1 pins of `ntt_lib.sh`.
   Thus the steps `ntt` and `post-unvet` fail with `ntt` 0.3.0.
 
 The `prepare` step stops before it changes the vetting state if the Operator `CoreState` is not a 0.6.0 contract.

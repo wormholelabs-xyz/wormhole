@@ -289,6 +289,37 @@ testNamespaceScopes = do
   rootB.prefix === ""
   Set.size rootB.consumed === 1
 
+-- | A namespace has 1 to 128 characters, on both the direct create and the
+-- registry claim. An empty namespace would let two apps of one consumer share
+-- one trie.
+testReplayNamespaceLengthBounds : Script ()
+testReplayNamespaceLengthBounds = do
+  (operator, consumer, _) <- setupTrie 4
+  [(registryCid, _)] <- query @ReplayRootRegistry operator
+  registryDisclosure <- fromSome <$> queryDisclosure operator registryCid
+  let namespaceOfLength charCount = mconcat (replicate charCount "n")
+      namespaceCases =
+        [ ("", False)
+        , ("a", True)
+        , (namespaceOfLength 128, True)
+        , (namespaceOfLength 129, False)
+        ]
+  forA_ namespaceCases \(namespace, isAccepted) -> do
+    let createNode = createCmd ReplayNode with
+          consumer, operator, namespace, prefix = "", splitThreshold = 4, consumed = Set.empty
+        claimRoot = exerciseCmd registryCid ClaimReplayRoot with
+          consumer, namespace, splitThreshold = 4, payer = consumer
+          coreStateCid = None, feeAllocation = None
+    if isAccepted
+      then do
+        _ <- submit (actAs consumer <> actAs operator) createNode
+        rootCid <- submit (actAs consumer <> disclose registryDisclosure) claimRoot
+        Some root <- queryContractId consumer rootCid
+        root.namespace === namespace
+      else do
+        submitMustFail (actAs consumer <> actAs operator) createNode
+        submitMustFail (actAs consumer <> disclose registryDisclosure) claimRoot
+
 -- | Nodes are co-signed: neither the consumer nor the operator can archive
 -- (and so re-create-empty) a node alone.
 testNodeArchiveNeedsBoth : Script ()

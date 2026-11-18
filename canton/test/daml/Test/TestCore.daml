@@ -300,20 +300,17 @@ testGenesisRequiresOperatorAndGovernance = do
   _ <- submit (actAs operator <> actAs guardianGovernance) do createCmd genesisState
   pure ()
 
--- | Payloads larger than 750 bytes are rejected.
-testPayloadTooLarge : Script ()
-testPayloadTooLarge = do
+-- | A payload above the 750 bytes of whitepaper 0004 publishes (EVM parity).
+testPublishAcceptsPayloadAbove750Bytes : Script ()
+testPublishAcceptsPayloadAbove750Bytes = do
   (operator, _, csId) <- setup
   bob <- allocateParty "Bob"
   emitterId <- registerEmitter operator bob
-  csDisc <- fromSome <$> queryDisclosure operator csId
   -- 751 bytes = 1502 hex chars.
-  let bigPayload = mconcat (replicate 1502 "f")
-  submitMustFail (actAs bob <> disclose csDisc) do
-    exerciseCmd emitterId PublishMessage with
-      nonce = 0, payload = bigPayload, consistencyLevel = 0
-      coreStateCid = csId, payer = bob, feeAllocation = None
-  pure ()
+  let payloadOf751Bytes = mconcat (replicate 1502 "f")
+  (_, message) <- publishVia operator csId bob emitterId 0 payloadOf751Bytes 0
+  message.payload === payloadOf751Bytes
+  message.sequence === 0
 
 -- | Sanity check on quorum thresholds (EVM parity: floor(n*2/3)+1).
 testQuorum : Script ()

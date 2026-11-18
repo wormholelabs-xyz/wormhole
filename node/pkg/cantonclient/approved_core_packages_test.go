@@ -7,14 +7,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.8.0 as built on canton/overnight-u2-fixes.
-const deployedCorePackageIDHex = "03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
+// deployedCorePackageIDHex is wormhole-core 0.8.1 as built on canton/namespace-and-payload-cap.
+const deployedCorePackageIDHex = "4a214c8015945441a74dcc2a702f0652b3136e8f7488ab13d8196313c4d47d89"
 
 func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 	approved := DefaultApprovedCorePackages()
 
 	require.NotEmpty(t, approved.entries)
-	require.NoError(t, approved.CheckCorePackageApproved(mustParsePackageID(t, deployedCorePackageIDHex), mustParseCorePackageVersion(t, "0.8.0")))
+	require.NoError(t, approved.CheckCorePackageApproved(mustParsePackageID(t, deployedCorePackageIDHex), mustParseCorePackageVersion(t, "0.8.1")))
 }
 
 func TestParseApprovedCorePackages(t *testing.T) {
