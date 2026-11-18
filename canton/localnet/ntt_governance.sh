@@ -12,11 +12,18 @@ existing_roots="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":W
   | jq --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]')"
 case "$(jq length <<<"$existing_roots")" in
   0)
-    echo "Create NttGovernance: Operator + guardianGovernance ${NTT_GG_SIGNING_OWNERS[*]}"
-    root_transaction="$(submit_interactive "ntt-governance-root-$(date +%s)" "$operator_and_gg" \
-      "$(create_command "$NTT_GOVERNANCE_TEMPLATE" "$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" \
-        '{operator: $op, guardianGovernance: $gg, nextId: "0", consumedGovernance: {map: []}}')")" \
-      "$(jq -s 'add' <(operator_signers_json) <(gg_ceremony_signers_json))")"
+    root_signatories="$operator_and_gg"
+    root_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" \
+      '{operator: $op, guardianGovernance: $gg, nextId: "0", consumedGovernance: {map: []}}')"
+    root_signers="$(jq -s 'add' <(operator_signers_json) <(gg_ceremony_signers_json))"
+    if [[ -n "$NTT_CUSTODY_PARTY" ]]; then
+      root_signatories="$(jq -c --arg custody "$NTT_CUSTODY_PARTY" '. + [$custody]' <<<"$root_signatories")"
+      root_arguments="$(jq -c --arg custody "$NTT_CUSTODY_PARTY" '. + {nttCustody: $custody}' <<<"$root_arguments")"
+      root_signers="$(jq -s 'add' <(echo "$root_signers") <(ntt_custody_signers_json))"
+    fi
+    echo "Create NttGovernance (ntt $NTT_VERSION): $(jq -r 'map(split("::")[0]) | join(" + ")' <<<"$root_signatories"), owner keys ${NTT_GG_SIGNING_OWNERS[*]}"
+    root_transaction="$(submit_interactive "ntt-governance-root-$(date +%s)" "$root_signatories" \
+      "$(create_command "$NTT_GOVERNANCE_TEMPLATE" "$root_arguments")" "$root_signers")"
     root_cid="$(created_contract_id "$root_transaction" ":Wormhole.Ntt.Governance:NttGovernance")"
     echo "NttGovernance $root_cid (update $(jq -r .updateId <<<"$root_transaction"))"
     ;;
