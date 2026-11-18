@@ -1,0 +1,66 @@
+// Table test of checkRotationSafetyStop on in-memory namespace states. Run after owner_signing_prelude.canton,
+// owner_key_rotation_lib.canton, table_test_prelude.canton and topology_fixtures.canton.
+// Owners: keys 0 and 1 stay; rotation A removes key 2 and adds key 3; rotation B removes key 3 and adds key 4.
+val keptKeys = testOwnerKeys.take(2)
+def fingerprintsOf(keys: Seq[SigningPublicKey]): Set[Fingerprint] = keys.map(_.fingerprint).toSet
+val keysBeforeRotationA = keptKeys :+ testOwnerKeys(2)
+val keysAfterRotationA = keptKeys :+ testOwnerKeys(3)
+val keysAfterRotationB = keptKeys :+ testOwnerKeys(4)
+def partyMapping(party: PartyId, keys: Option[Seq[SigningPublicKey]]) =
+  testPartyToParticipant(party, 2, threeConfirmingHosts, keys.map(testSigningKeys(2, _)))
+val rotationParties = Seq(testCustodyPartyId, testGuardianGovernancePartyId)
+val ghostPartyId = PartyId.tryCreate("ghost", testGuardianNamespace)
+// checkRotationA / checkRotationB: the safety stop of rotation A (key 2 to key 3) or B (key 3 to key 4).
+def checkRotationA(namespaceOwnerKeys: Seq[SigningPublicKey], mappings: Seq[PartyToParticipant], parties: Seq[PartyId]): Unit =
+  checkRotationSafetyStop(fingerprintsOf(namespaceOwnerKeys), mappings, parties, fingerprintsOf(keysBeforeRotationA), fingerprintsOf(keysAfterRotationA))
+def checkRotationB(namespaceOwnerKeys: Seq[SigningPublicKey], mappings: Seq[PartyToParticipant], parties: Seq[PartyId]): Unit =
+  checkRotationSafetyStop(fingerprintsOf(namespaceOwnerKeys), mappings, parties, fingerprintsOf(keysAfterRotationA), fingerprintsOf(keysAfterRotationB))
+val mappingsBeforeRotationA = rotationParties.map(partyMapping(_, Some(keysBeforeRotationA)))
+
+checkTableCase("SS-a-all-parties-old-keys", None) {
+  checkRotationA(keysBeforeRotationA, mappingsBeforeRotationA, rotationParties)
+}
+checkTableCase("SS-b-party-omitted-from-list",
+    Some("SAFETY STOP: PartyToParticipant parties in the namespace guardianGovernance,nttCustody differ from GG_ROTATION_PARTY_IDS guardianGovernance")) {
+  checkRotationA(keysBeforeRotationA, mappingsBeforeRotationA, Seq(testGuardianGovernancePartyId))
+}
+// Rotation A left nttCustody with the keys from before A (half-applied); rotation B starts without --resume.
+checkTableCase("SS-c-half-applied-key-state", Some("SAFETY STOP: nttCustody signing keys")) {
+  checkRotationB(keysAfterRotationA,
+    Seq(partyMapping(testCustodyPartyId, Some(keysBeforeRotationA)), partyMapping(testGuardianGovernancePartyId, Some(keysAfterRotationA))),
+    rotationParties)
+}
+checkTableCase("SS-c2-half-applied-key-state-text", Some("are neither the old set nor the new set")) {
+  checkRotationB(keysAfterRotationA,
+    Seq(partyMapping(testCustodyPartyId, Some(keysBeforeRotationA)), partyMapping(testGuardianGovernancePartyId, Some(keysAfterRotationA))),
+    rotationParties)
+}
+checkTableCase("SS-d-unknown-party-in-list",
+    Some("SAFETY STOP: PartyToParticipant parties in the namespace guardianGovernance,nttCustody differ from GG_ROTATION_PARTY_IDS nttCustody,ghost,guardianGovernance")) {
+  checkRotationA(keysBeforeRotationA, mappingsBeforeRotationA, Seq(testCustodyPartyId, ghostPartyId, testGuardianGovernancePartyId))
+}
+checkTableCase("SS-e-party-without-signing-keys", Some("SAFETY STOP: nttCustody signing keys none are neither the old set nor the new set")) {
+  checkRotationA(keysBeforeRotationA, Seq(partyMapping(testCustodyPartyId, None), partyMapping(testGuardianGovernancePartyId, Some(keysBeforeRotationA))),
+    rotationParties)
+}
+// The half-applied state of rotation A, seen by --resume of rotation A: each party has the old or the new set.
+checkTableCase("SS-f-resume-of-half-applied-rotation", None) {
+  checkRotationA(keysAfterRotationA,
+    Seq(partyMapping(testCustodyPartyId, Some(keysBeforeRotationA)), partyMapping(testGuardianGovernancePartyId, Some(keysAfterRotationA))),
+    rotationParties)
+}
+checkTableCase("SS-g-namespace-owners-third-set", Some("SAFETY STOP: namespace owners")) {
+  checkRotationB(keysBeforeRotationA, rotationParties.map(partyMapping(_, Some(keysAfterRotationA))), rotationParties)
+}
+checkTableCase("SS-h-two-mappings-of-one-party", Some("SAFETY STOP: more than one PartyToParticipant of nttCustody")) {
+  checkRotationA(keysBeforeRotationA, mappingsBeforeRotationA :+ partyMapping(testCustodyPartyId, Some(keysBeforeRotationA)), rotationParties)
+}
+checkTableCase("SS-i-namespace-without-parties",
+    Some("SAFETY STOP: PartyToParticipant parties in the namespace  differ from GG_ROTATION_PARTY_IDS nttCustody,guardianGovernance")) {
+  checkRotationA(keysBeforeRotationA, Seq.empty, rotationParties)
+}
+checkTableCase("SS-j-ghost-party-in-namespace",
+    Some("SAFETY STOP: PartyToParticipant parties in the namespace ghost,guardianGovernance,nttCustody differ")) {
+  checkRotationA(keysBeforeRotationA, mappingsBeforeRotationA :+ partyMapping(ghostPartyId, Some(keysAfterRotationB)), rotationParties)
+}
+finishTable("rotation-safety-stop")

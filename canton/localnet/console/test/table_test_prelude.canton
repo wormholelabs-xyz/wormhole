@@ -1,0 +1,27 @@
+// Table test helpers of the offline console tests. Each case prints one CASE line; each table prints one TABLE line.
+var tableCaseCount = 0
+var tableFailedCount = 0
+// checkTableCase: the body must finish when expectedErrorText is None. Otherwise it must throw an exception whose
+// message contains expectedErrorText.
+def checkTableCase(caseName: String, expectedErrorText: Option[String])(body: => Unit): Unit = {
+  tableCaseCount += 1
+  val outcome = scala.util.Try(body)
+  val failureDetail: Option[String] = (outcome, expectedErrorText) match {
+    case (scala.util.Success(_), None) => None
+    case (scala.util.Success(_), Some(expectedText)) => Some(s"finished, expected an error with: $expectedText")
+    case (scala.util.Failure(error), None) => Some(s"unexpected error: ${error.getMessage}")
+    case (scala.util.Failure(error), Some(expectedText)) =>
+      val message = Option(error.getMessage).getOrElse(error.toString)
+      if (message.contains(expectedText)) None else Some(s"error '$message' does not contain '$expectedText'")
+  }
+  failureDetail match {
+    case None => println(s"CASE $caseName pass")
+    case Some(detail) =>
+      tableFailedCount += 1
+      println(s"CASE $caseName fail: $detail")
+  }
+}
+def finishTable(tableName: String): Unit = {
+  println(s"TABLE $tableName cases=$tableCaseCount failed=$tableFailedCount")
+  sys.exit(if (tableFailedCount == 0) 0 else 1)
+}

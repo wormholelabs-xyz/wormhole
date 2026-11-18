@@ -85,4 +85,6 @@ LOCALNET_STATE_DIR="${LOCALNET_STATE_DIR:-$(cd "$REPO_ROOT/.." && pwd)/localnet-
 # Canton console of the same release as the LocalNet `canton` image (copied out of the container).
 CANTON_RELEASE="3.7.3"
 CANTON_CONSOLE_JAR="$VENDOR_DIR/canton-$CANTON_RELEASE/canton-open-source-$CANTON_RELEASE.jar"
-CANTON_CONSOLE_CONFIG="$LOCALNET_SCRIPT_DIR/console/remote-participants.conf"
+# SHA-256 of /app/lib/canton-open-source-3.7.3.jar in the canton image of images.lock.
+CANTON_CONSOLE_JAR_SHA256="3824a19207b7be4aed3120006e0d48bbd5452196ef1d8b77b2d5ec2f086a9528"
+CANTON_CONSOLE_CONFIG="${CANTON_CONSOLE_CONFIG:-$LOCALNET_SCRIPT_DIR/console/remote-participants.conf}"

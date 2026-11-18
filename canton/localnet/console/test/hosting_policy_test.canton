@@ -1,0 +1,64 @@
+// Allocation assertion table: checkHostingIsGuardianPolicy and checkNamespaceIsGuardianPolicy on in-memory mappings.
+// Run after owner_signing_prelude.canton, table_test_prelude.canton and topology_fixtures.canton.
+import ParticipantPermission.{Confirmation, Observation, Submission}
+val oldOwnerKeys = testOwnerKeys.take(3)
+def custodyMapping(confirmationThreshold: Int, hosts: Seq[HostingParticipant], signingKeys: Option[SigningKeysWithThreshold]) =
+  testPartyToParticipant(testCustodyPartyId, confirmationThreshold, hosts, signingKeys)
+val policySigningKeys = Some(testSigningKeys(2, oldOwnerKeys))
+
+checkTableCase("H1-policy", None) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, threeConfirmingHosts, policySigningKeys))
+}
+checkTableCase("H2-submission-host", Some("has Submission, expected Confirmation")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, testHosts(Confirmation, Submission, Confirmation), policySigningKeys))
+}
+checkTableCase("H3-observation-host", Some("has Observation, expected Confirmation")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, testHosts(Confirmation, Confirmation, Observation), policySigningKeys))
+}
+checkTableCase("H4-two-hosts", Some("nttCustody has 2 hosts, expected 3")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, testHosts(Confirmation, Confirmation), policySigningKeys))
+}
+checkTableCase("H4b-four-hosts", Some("nttCustody has 4 hosts, expected 3")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, testHosts(Confirmation, Confirmation, Confirmation, Confirmation), policySigningKeys))
+}
+checkTableCase("H5-confirmation-threshold-1", Some("nttCustody confirmation threshold 1, expected 2")) {
+  checkHostingIsGuardianPolicy(custodyMapping(1, threeConfirmingHosts, policySigningKeys))
+}
+checkTableCase("H5b-confirmation-threshold-3", Some("nttCustody confirmation threshold 3, expected 2")) {
+  checkHostingIsGuardianPolicy(custodyMapping(3, threeConfirmingHosts, policySigningKeys))
+}
+checkTableCase("H6-signing-key-threshold-3", Some("nttCustody signing key threshold 3, expected 2")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, threeConfirmingHosts, Some(testSigningKeys(3, oldOwnerKeys))))
+}
+checkTableCase("H6b-signing-key-threshold-1", Some("nttCustody signing key threshold 1, expected 2")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, threeConfirmingHosts, Some(testSigningKeys(1, oldOwnerKeys))))
+}
+checkTableCase("H7-four-signing-keys", Some("nttCustody has 4 signing keys, expected 3")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, threeConfirmingHosts, Some(testSigningKeys(2, testOwnerKeys.take(4)))))
+}
+checkTableCase("H7b-two-signing-keys", Some("nttCustody has 2 signing keys, expected 3")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, threeConfirmingHosts, Some(testSigningKeys(2, testOwnerKeys.take(2)))))
+}
+checkTableCase("H8-no-signing-keys", Some("nttCustody has no party signing keys")) {
+  checkHostingIsGuardianPolicy(custodyMapping(2, threeConfirmingHosts, None))
+}
+checkTableCase("H9-onboarding-host", Some("is onboarding")) {
+  val onboardingHosts = threeConfirmingHosts.init :+ HostingParticipant(testHostIds(2), Confirmation, onboarding = true)
+  checkHostingIsGuardianPolicy(custodyMapping(2, onboardingHosts, policySigningKeys))
+}
+checkTableCase("N1-namespace-policy", None) {
+  checkNamespaceIsGuardianPolicy(testNamespaceDefinition(2, testOwnerNamespaces.take(3)))
+}
+checkTableCase("N2-namespace-threshold-1", Some("namespace threshold 1, expected 2")) {
+  checkNamespaceIsGuardianPolicy(testNamespaceDefinition(1, testOwnerNamespaces.take(3)))
+}
+checkTableCase("N3-namespace-threshold-3", Some("namespace threshold 3, expected 2")) {
+  checkNamespaceIsGuardianPolicy(testNamespaceDefinition(3, testOwnerNamespaces.take(3)))
+}
+checkTableCase("N4-namespace-four-owners", Some("namespace has 4 owners, expected 3")) {
+  checkNamespaceIsGuardianPolicy(testNamespaceDefinition(2, testOwnerNamespaces.take(4)))
+}
+checkTableCase("N5-namespace-two-owners", Some("namespace has 2 owners, expected 3")) {
+  checkNamespaceIsGuardianPolicy(testNamespaceDefinition(2, testOwnerNamespaces.take(2)))
+}
+finishTable("hosting-policy")
