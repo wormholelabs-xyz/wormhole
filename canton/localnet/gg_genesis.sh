@@ -5,10 +5,14 @@
 # A CoreState create with 1 of 3 owner signatures must fail first.
 # Rerun after a failure: the script creates only the missing contracts.
 # Usage: gg_genesis.sh
+# Then create the user wormhole-watcher with only CanReadAs(guardianGovernance) on each guardian host, for the
+# emitter id scan.
 # Precondition: gg_host.sh ran. Output: $LOCALNET_STATE_DIR/core-contracts.json.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
+# shellcheck source=watcher_harness_lib.sh
+source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 
 readonly DEVNET_GUARDIAN_ADDRESS="befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
 readonly GOVERNANCE_CONTRACT="0000000000000000000000000000000000000000000000000000000000000004"
@@ -122,3 +126,7 @@ case "$active_replay_root_registry_count" in
 esac
 
 jq . "$CORE_CONTRACTS"
+
+for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+  ensure_watcher_user "$validator_name"
+done

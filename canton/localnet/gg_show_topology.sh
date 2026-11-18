@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print the guardianGovernance namespace and hosting as each LocalNet participant sees them.
+# Print the guardianGovernance namespace and the hosting of each party in it as each LocalNet participant sees them.
 # Usage: gg_show_topology.sh
 set -euo pipefail
 # shellcheck source=env.sh

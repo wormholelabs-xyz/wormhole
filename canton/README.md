@@ -1223,6 +1223,11 @@ before the maximum canary time. The watchers stay pinned to 0.6.0.
 9. Tell the integrators that the upgrade stopped. A 0.7.0 submission now fails
    at prepare.
 
+Steps 6 and 7 cause a second outage for 0.6.0 messages. From the restart of
+step 6 to the restart of step 7, the watchers of a quorum accept only 0.7.0. A
+new 0.6.0 message gets no VAA in this period. Step 8 recovers each of these
+messages. Thus the guardians lose no message.
+
 Contracts that 0.7.0 or a new dependent package created stay usable under
 0.6.0. The LocalNet `rollback` step shows this.
 

@@ -1,0 +1,270 @@
+// Table test of owner_key_rotation_lib.canton: party order, key sets, outcome, rotated mappings, the stored signed
+// transactions, the load order and the effective times. Run after owner_signing_prelude.canton,
+// owner_key_rotation_lib.canton, table_test_prelude.canton and topology_fixtures.canton.
+import com.digitalasset.canton.version.ProtocolVersion
+val keptKeys = testOwnerKeys.take(2)
+val removedKey = testOwnerKeys(2)
+val addedKey = testOwnerKeys(3)
+val oldKeys = keptKeys :+ removedKey
+val newKeys = keptKeys :+ addedKey
+val oldFingerprints = oldKeys.map(_.fingerprint).toSet
+val newFingerprints = newKeys.map(_.fingerprint).toSet
+val otherFingerprints = (keptKeys :+ testOwnerKeys(4)).map(_.fingerprint).toSet
+val foreignPartyId = PartyId.tryCreate("nttCustody", Namespace(testOwnerKeys(5).fingerprint))
+
+checkTableCase("O1-custody-then-guardian-governance", None) {
+  checkRotationPartyOrder(Seq(testCustodyPartyId, testGuardianGovernancePartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O2-guardian-governance-only", None) {
+  checkRotationPartyOrder(Seq(testGuardianGovernancePartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O3-guardian-governance-first", Some("guardianGovernance must be the last rotation party")) {
+  checkRotationPartyOrder(Seq(testGuardianGovernancePartyId, testCustodyPartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O4-without-guardian-governance", Some("guardianGovernance must be the last rotation party")) {
+  checkRotationPartyOrder(Seq(testCustodyPartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O5-duplicate-party", Some("duplicate party")) {
+  checkRotationPartyOrder(Seq(testCustodyPartyId, testCustodyPartyId, testGuardianGovernancePartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O6-party-outside-namespace", Some("outside the guardian namespace")) {
+  checkRotationPartyOrder(Seq(foreignPartyId, testGuardianGovernancePartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O7-no-parties", Some("no rotation parties")) {
+  checkRotationPartyOrder(Seq.empty, testGuardianGovernancePartyId)
+}
+
+checkTableCase("K1-old-key-set", None) {
+  require(classifyRotationKeySet(oldFingerprints, oldFingerprints, newFingerprints) == RotationKeySet.OldKeySet)
+}
+checkTableCase("K2-new-key-set", None) {
+  require(classifyRotationKeySet(newFingerprints, oldFingerprints, newFingerprints) == RotationKeySet.NewKeySet)
+}
+checkTableCase("K3-other-key-set", None) {
+  require(classifyRotationKeySet(otherFingerprints, oldFingerprints, newFingerprints) == RotationKeySet.UnknownKeySet(otherFingerprints))
+}
+checkTableCase("K4-old-equals-new", Some("old and new key sets are equal")) {
+  classifyRotationKeySet(oldFingerprints, oldFingerprints, oldFingerprints)
+}
+
+def rotationTargets(namespaceKeySet: RotationKeySet, custodyKeySet: RotationKeySet, guardianGovernanceKeySet: RotationKeySet) =
+  Seq(RotationTarget("nttCustody", custodyKeySet), RotationTarget("guardianGovernance", guardianGovernanceKeySet),
+    RotationTarget(namespaceRotationTargetName, namespaceKeySet))
+checkTableCase("C1-all-new", None) {
+  val outcome = classifyRotationOutcome(rotationTargets(RotationKeySet.NewKeySet, RotationKeySet.NewKeySet, RotationKeySet.NewKeySet))
+  require(outcome == RotationOutcome.FullyApplied, s"outcome $outcome")
+}
+checkTableCase("C2-all-old", None) {
+  val outcome = classifyRotationOutcome(rotationTargets(RotationKeySet.OldKeySet, RotationKeySet.OldKeySet, RotationKeySet.OldKeySet))
+  require(outcome == RotationOutcome.NotApplied, s"outcome $outcome")
+}
+checkTableCase("C3-custody-omitted", None) {
+  val outcome = classifyRotationOutcome(rotationTargets(RotationKeySet.NewKeySet, RotationKeySet.OldKeySet, RotationKeySet.NewKeySet))
+  require(outcome == RotationOutcome.HalfApplied(Seq("nttCustody")), s"outcome $outcome")
+}
+checkTableCase("C4-namespace-not-applied", None) {
+  val outcome = classifyRotationOutcome(rotationTargets(RotationKeySet.OldKeySet, RotationKeySet.NewKeySet, RotationKeySet.NewKeySet))
+  require(outcome == RotationOutcome.HalfApplied(Seq(namespaceRotationTargetName)), s"outcome $outcome")
+}
+checkTableCase("C5-unknown-key-set", Some("nttCustody has a key set that is neither the old set nor the new set")) {
+  classifyRotationOutcome(rotationTargets(RotationKeySet.NewKeySet, RotationKeySet.UnknownKeySet(otherFingerprints), RotationKeySet.NewKeySet))
+}
+checkTableCase("C6-no-targets", Some("no rotation targets")) {
+  classifyRotationOutcome(Seq.empty)
+}
+
+val currentCustodyMapping = testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, oldKeys)))
+checkTableCase("M1-rotated-mapping-keeps-hosting-and-thresholds", None) {
+  val rotated = rotatedPartyToParticipant(currentCustodyMapping, NonEmpty.from(newKeys.toSet).get)
+  require(rotated.partyId == testCustodyPartyId)
+  require(rotated.participants == currentCustodyMapping.participants)
+  require(rotated.threshold == currentCustodyMapping.threshold)
+  require(rotated.partySigningKeysWithThreshold.map(_.threshold) == Some(PositiveInt.tryCreate(2)))
+  require(rotated.partySigningKeysWithThreshold.map(_.keys.map(_.fingerprint).toSet) == Some(newFingerprints))
+}
+checkTableCase("M2-rotated-mapping-without-keys", Some("nttCustody has no party signing keys")) {
+  rotatedPartyToParticipant(testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, None), NonEmpty.from(newKeys.toSet).get)
+}
+
+val testProtocolVersion = ProtocolVersion.v37
+def testSigned[M <: TopologyMapping](mapping: M, serial: Int): GenericSignedTopologyTransaction = {
+  val unsigned = TopologyTransaction.create(TopologyChangeOp.Replace, PositiveInt.tryCreate(serial), mapping, testProtocolVersion)
+    .fold(error => sys.error(error), identity)
+  val placeholderSignature = Signature.fromExternalSigning(SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
+    ByteString.copyFrom(new Array[Byte](64)), keptKeys.head.fingerprint, SigningAlgorithmSpec.Ed25519)
+  SignedTopologyTransaction.withSignature(unsigned, placeholderSignature, isProposal = false, testProtocolVersion)
+}
+val newOwnerNamespaces = newKeys.map(key => Namespace(key.fingerprint)).toSet
+val rotatedNamespace = DecentralizedNamespaceDefinition.tryCreate(testGuardianNamespace, PositiveInt.tryCreate(2), NonEmpty.from(newOwnerNamespaces).get)
+val oldNamespace = DecentralizedNamespaceDefinition.tryCreate(testGuardianNamespace, PositiveInt.tryCreate(2),
+  NonEmpty.from(oldKeys.map(key => Namespace(key.fingerprint)).toSet).get)
+def addedRootDelegation(key: SigningPublicKey) =
+  NamespaceDelegation.create(Namespace(key.fingerprint), key, DelegationRestriction.CanSignAllMappings).fold(error => sys.error(error), identity)
+val guardianGovernanceMapping = testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, oldKeys)))
+val rotatedCustody = testSigned(rotatedPartyToParticipant(currentCustodyMapping, NonEmpty.from(newKeys.toSet).get), 2)
+val rotatedGuardianGovernance = testSigned(rotatedPartyToParticipant(guardianGovernanceMapping, NonEmpty.from(newKeys.toSet).get), 3)
+val rotatedNamespaceTransaction = testSigned(rotatedNamespace, 4)
+val addedRoot = testSigned(addedRootDelegation(addedKey), 1)
+val rotationPartyIds = Seq(testCustodyPartyId, testGuardianGovernancePartyId)
+// Effective mappings and serials when the bundle is checked.
+final case class RotationTestTopology(custody: (PartyToParticipant, Int), guardianGovernance: (PartyToParticipant, Int),
+    namespace: (DecentralizedNamespaceDefinition, Int))
+val topologyBeforeRotation = RotationTestTopology((currentCustodyMapping, 1), (guardianGovernanceMapping, 2), (oldNamespace, 3))
+def checkBundle(storedTransactions: Seq[GenericSignedTopologyTransaction], currentTopology: RotationTestTopology = topologyBeforeRotation): Unit =
+  checkStoredRotationTransactions(storedTransactions, rotationPartyIds, testGuardianNamespace,
+    Seq(currentTopology.custody, currentTopology.guardianGovernance).map { case (mapping, serial) =>
+      EffectiveTopologyMapping(mapping, PositiveInt.tryCreate(serial)) },
+    EffectiveTopologyMapping(currentTopology.namespace._1, PositiveInt.tryCreate(currentTopology.namespace._2)),
+    newOwnerNamespaces, NonEmpty.from(newKeys.toSet).get, addedKey)
+
+checkTableCase("B1-root-parties-namespace", None) {
+  checkBundle(Seq(addedRoot, rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B2-without-root", None) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B3-party-with-old-keys", Some("stored PartyToParticipant of nttCustody does not have the new signing keys")) {
+  checkBundle(Seq(testSigned(currentCustodyMapping, 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B4-party-missing", Some("stored PartyToParticipant parties guardianGovernance differ from the rotation parties")) {
+  checkBundle(Seq(rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B5-namespace-with-old-owners", Some("stored namespace definition does not have the new owners")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, testSigned(oldNamespace, 4)))
+}
+checkTableCase("B6-two-namespace-definitions", Some("expected exactly one stored namespace definition, found 2")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction, rotatedNamespaceTransaction))
+}
+checkTableCase("B7-root-of-another-key", Some("stored root delegation is not the root delegation of the added owner")) {
+  checkBundle(Seq(testSigned(addedRootDelegation(testOwnerKeys(4)), 1), rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+val signedBundle = Seq(addedRoot, rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction)
+def withStoredFileDirectory(body: java.nio.file.Path => Unit): Unit = {
+  val storedFileDirectory = Files.createTempDirectory("rotation-")
+  val storedFile = storedFileDirectory.resolve("rotation.signed.bin")
+  try body(storedFile) finally {
+    Files.deleteIfExists(storedFile)
+    Files.delete(storedFileDirectory)
+  }
+}
+checkTableCase("B8-file-roundtrip", None) {
+  withStoredFileDirectory { storedFile =>
+    writeSignedRotationTransactions(storedFile.toString, signedBundle, testProtocolVersion)
+    require(Files.getPosixFilePermissions(storedFile) == java.nio.file.attribute.PosixFilePermissions.fromString("rw-------"), "file mode")
+    val readBack = readSignedRotationTransactions(storedFile.toString, testProtocolVersion)
+    require(readBack.map(_.hash) == signedBundle.map(_.hash), "hashes differ after the roundtrip")
+    require(readBack.map(_.signatures) == signedBundle.map(_.signatures), "signatures differ after the roundtrip")
+  }
+}
+checkTableCase("B8b-file-exists", Some("FileAlreadyExists")) {
+  withStoredFileDirectory { storedFile =>
+    Files.write(storedFile, Array.emptyByteArray)
+    try writeSignedRotationTransactions(storedFile.toString, signedBundle, testProtocolVersion)
+    catch { case error: java.nio.file.FileAlreadyExistsException => throw new RuntimeException(s"FileAlreadyExists: ${error.getMessage}") }
+  }
+}
+checkTableCase("B8c-file-readable-by-group", Some("is not mode 0600")) {
+  withStoredFileDirectory { storedFile =>
+    writeSignedRotationTransactions(storedFile.toString, signedBundle, testProtocolVersion)
+    Files.setPosixFilePermissions(storedFile, java.nio.file.attribute.PosixFilePermissions.fromString("rw-r--r--"))
+    readSignedRotationTransactions(storedFile.toString, testProtocolVersion)
+  }
+}
+checkTableCase("B9-file-damaged", Some("cannot read the signed rotation transactions")) {
+  val storedFile = Files.createTempFile("rotation-", ".signed.bin")
+  try {
+    Files.write(storedFile, "not a topology transaction".getBytes("UTF-8"))
+    readSignedRotationTransactions(storedFile.toString, testProtocolVersion)
+  } finally Files.deleteIfExists(storedFile)
+}
+
+val rotatedCustodyMapping = rotatedPartyToParticipant(currentCustodyMapping, NonEmpty.from(newKeys.toSet).get)
+def storedCustody(confirmationThreshold: Int, hosts: Seq[HostingParticipant], signingKeys: SigningKeysWithThreshold, serial: Int) =
+  testSigned(testPartyToParticipant(testCustodyPartyId, confirmationThreshold, hosts, Some(signingKeys)), serial)
+checkTableCase("B10-custody-key-threshold-1", Some("nttCustody signing key threshold 1, expected 2")) {
+  checkBundle(Seq(storedCustody(2, threeConfirmingHosts, testSigningKeys(1, newKeys), 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B11-custody-one-submission-host", Some("nttCustody has 1 hosts, expected 3")) {
+  checkBundle(Seq(storedCustody(1, testHosts(ParticipantPermission.Submission), testSigningKeys(2, newKeys), 2),
+    rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B12-custody-submission-host-confirmation-threshold-1", Some("has Submission, expected Confirmation")) {
+  checkBundle(Seq(storedCustody(1, testHosts(ParticipantPermission.Submission, ParticipantPermission.Confirmation,
+    ParticipantPermission.Confirmation), testSigningKeys(2, newKeys), 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B13-namespace-threshold-1", Some("namespace threshold 1, expected 2")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, testSigned(testNamespaceDefinition(1, newOwnerNamespaces.toSeq), 4)))
+}
+checkTableCase("B14-custody-serial-999", Some("stored PartyToParticipant of nttCustody has serial 999, expected 2")) {
+  checkBundle(Seq(testSigned(rotatedCustodyMapping, 999), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B15-wrong-party", Some("stored PartyToParticipant parties")) {
+  val otherPartyMapping = testPartyToParticipant(PartyId.tryCreate("otherCustody", testGuardianNamespace), 2, threeConfirmingHosts,
+    Some(testSigningKeys(2, newKeys)))
+  checkBundle(Seq(testSigned(otherPartyMapping, 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B16-custody-other-confirming-hosts", Some("stored PartyToParticipant of nttCustody has hosts")) {
+  val otherConfirmingHosts = Seq(0, 1, 3).map(hostIndex => HostingParticipant(testHostIds(hostIndex), ParticipantPermission.Confirmation))
+  checkBundle(Seq(storedCustody(2, otherConfirmingHosts, testSigningKeys(2, newKeys), 2), rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+checkTableCase("B17-namespace-serial-5", Some("stored namespace definition has serial 5, expected 4")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, testSigned(rotatedNamespace, 5)))
+}
+checkTableCase("B18-root-delegation-serial-2", Some("stored root delegation of the added owner has serial 2, expected 1")) {
+  checkBundle(Seq(testSigned(addedRootDelegation(addedKey), 2), rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction))
+}
+// Half-applied: the stored nttCustody change is effective at serial 2.
+val topologyAfterCustodyChange = topologyBeforeRotation.copy(custody = (rotatedCustodyMapping, 2))
+checkTableCase("B19-resume-custody-effective", None) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction), topologyAfterCustodyChange)
+}
+checkTableCase("B20-resume-custody-serial-3", Some("stored PartyToParticipant of nttCustody has serial 3, expected 2")) {
+  checkBundle(Seq(testSigned(rotatedCustodyMapping, 3), rotatedGuardianGovernance, rotatedNamespaceTransaction), topologyAfterCustodyChange)
+}
+// Another change took serial 2 of nttCustody after the sign phase.
+checkTableCase("B21-custody-serial-taken", Some("stored PartyToParticipant of nttCustody has serial 2, expected 3")) {
+  checkBundle(Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction), topologyBeforeRotation.copy(custody = (currentCustodyMapping, 2)))
+}
+
+checkTableCase("L1-load-order", None) {
+  val loadOrder = rotationLoadOrder(Seq(rotatedNamespaceTransaction, rotatedGuardianGovernance, addedRoot, rotatedCustody), rotationPartyIds)
+  require(loadOrder.rootDelegation == Some(addedRoot), "root delegation")
+  require(loadOrder.namespaceAndPartyBatch == Seq(rotatedCustody, rotatedGuardianGovernance, rotatedNamespaceTransaction),
+    s"batch order ${loadOrder.namespaceAndPartyBatch.map(_.mapping.code)}")
+}
+
+val custodyEffectiveTime = java.time.Instant.parse("2026-11-18T11:52:49.327797Z")
+def effectiveTimesInLoadOrder(guardianGovernanceOffset: java.time.Duration, namespaceOffset: java.time.Duration) =
+  Seq("nttCustody" -> custodyEffectiveTime, "guardianGovernance" -> custodyEffectiveTime.plus(guardianGovernanceOffset),
+    namespaceRotationTargetName -> custodyEffectiveTime.plus(namespaceOffset))
+checkTableCase("E1-strictly-ordered-measured-spread", None) {
+  val spread = checkEffectiveTimesFollowLoadOrderWithinBound(
+    effectiveTimesInLoadOrder(java.time.Duration.ofNanos(415588000L), java.time.Duration.ofNanos(1003751000L)))
+  require(spread == java.time.Duration.ofNanos(1003751000L), s"spread $spread")
+}
+checkTableCase("E2-equal-effective-times", Some("effective times are not strictly increasing in load order")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder(java.time.Duration.ZERO, java.time.Duration.ZERO))
+}
+checkTableCase("E3-reversed-order", Some("effective times are not strictly increasing in load order")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(-1), java.time.Duration.ofSeconds(-2)))
+}
+checkTableCase("E4-guardian-governance-before-custody", Some("guardianGovernance=2026-11-18T11:52:48.327797Z is not after nttCustody")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(-1), java.time.Duration.ofSeconds(1)))
+}
+checkTableCase("E5-spread-at-bound", None) {
+  val spread = checkEffectiveTimesFollowLoadOrderWithinBound(
+    effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(1), maxRotationEffectiveTimeSpread))
+  require(spread == maxRotationEffectiveTimeSpread, s"spread $spread")
+}
+checkTableCase("E6-spread-above-bound", Some("effective time spread PT30.000001S is above the bound PT30S")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(
+    effectiveTimesInLoadOrder(java.time.Duration.ofSeconds(1), maxRotationEffectiveTimeSpread.plusNanos(1000L)))
+}
+checkTableCase("E7-no-effective-time", Some("no effective times")) {
+  checkEffectiveTimesFollowLoadOrderWithinBound(Seq.empty)
+}
+checkTableCase("E8-spread-seconds-text", None) {
+  require(spreadSecondsText(java.time.Duration.ofNanos(1003751000L)) == "1.004", spreadSecondsText(java.time.Duration.ofNanos(1003751000L)))
+  require(spreadSecondsText(java.time.Duration.ofSeconds(30)) == "30.000", spreadSecondsText(java.time.Duration.ofSeconds(30)))
+}
+finishTable("owner-key-rotation")

@@ -11,12 +11,38 @@
 # Usage: gg_confirmation_quorum.sh [<current-set-key-indices>]
 #   Comma-separated devnet key indices of the current CoreState guardian set (default 0). After
 #   gg_guardian_set_rotation.sh 0 1, pass 1.
-# Precondition: gg_publish_and_govern.sh ran. The EXIT trap reconnects all participants.
+# Usage: gg_confirmation_quorum.sh --party <party-id> [--signing-owners <owner>,<owner>]
+#   Another party of the guardian namespace, for example nttCustody. Each case creates GovernanceCeremonyProbe as
+#   that party, signed by the two owners (default owner1,owner2):
+#     party-one-host-offline   app-user disconnected. Expect commit with two confirming hosts.
+#     party-two-hosts-offline  sv and app-user disconnected. Expect MEDIATOR_SAYS_TX_TIMED_OUT, and the party is
+#                              the only unresponsive party.
+# Precondition: gg_publish_and_govern.sh ran (--party: custody_host.sh and gg_package_vetting.sh ran).
+# The EXIT trap reconnects all participants.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 
 readonly QUORUM_TICKER_SECONDS=600
+quorum_party="$GG_PARTY"
+quorum_signing_owners=(owner1 owner2)
+while [[ $# -gt 0 && "$1" == --* ]]; do
+  case "$1" in
+    --party) quorum_party="${2:?--party needs a party id}"; shift 2 ;;
+    --signing-owners) IFS=, read -r -a quorum_signing_owners <<<"${2:?--signing-owners needs two owner names}"; shift 2 ;;
+    *) echo "unknown option $1" >&2; exit 2 ;;
+  esac
+done
+if [[ "${quorum_party#*::}" != "${GG_PARTY#*::}" ]]; then
+  echo "$quorum_party is outside the namespace of $GG_PARTY" >&2
+  exit 2
+fi
+if [[ ${#quorum_signing_owners[@]} -ne 2 ]]; then
+  echo "--signing-owners needs exactly two owner names" >&2
+  exit 2
+fi
+check_owner_names_are_safe "${quorum_signing_owners[@]}"
+check_owner_names_differ "${quorum_signing_owners[@]}"
 current_set_key_indices="${1:-0}"
 if [[ ! "$current_set_key_indices" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
   echo "key indices must be comma-separated integers: $current_set_key_indices" >&2
@@ -37,24 +63,54 @@ reconnect_all() {
 }
 trap reconnect_all EXIT
 
-# check_timeout_rejection <output-prefix>: <prefix>.out must hold a completion rejected with
-# MEDIATOR_SAYS_TX_TIMED_OUT whose unresponsive parties are exactly guardianGovernance.
+# check_timeout_rejection <output-prefix> [<party-id>]: <prefix>.out must hold a completion rejected with
+# MEDIATOR_SAYS_TX_TIMED_OUT whose unresponsive parties are exactly that party (default guardianGovernance).
 check_timeout_rejection() {
-  local summary
+  local expected_party="${2:-$GG_PARTY}" summary
   summary="$(completion_summary "$1.out" 2>/dev/null || echo '{}')"
   if ! jq -e '.message | test("^MEDIATOR_SAYS_TX_TIMED_OUT")' <<<"$summary" >/dev/null 2>&1; then
     echo "FAIL: expected MEDIATOR_SAYS_TX_TIMED_OUT" >&2
     cat "$1.out" "$1.err" >&2
     exit 1
   fi
-  if ! jq -e --arg gg "$GG_PARTY" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$gg]' \
+  if ! jq -e --arg party "$expected_party" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$party]' \
       <<<"$summary" >/dev/null 2>&1; then
-    echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY" >&2
+    echo "FAIL: expected unresponsiveParties to be exactly $expected_party" >&2
     cat "$1.out" "$1.err" >&2
     exit 1
   fi
   echo "PASS: rejected. $summary"
 }
+
+# run_party_quorum_case <case> <comma-separated disconnected hosts> <expected: commit or timeout>
+run_party_quorum_case() {
+  local case_name="$1" disconnected_hosts="$2" expected="$3" summary
+  echo "Case $case_name: disconnect $disconnected_hosts, ${quorum_party%%::*} creates a probe. Expect $expected"
+  set_participant_connection disconnect "$disconnected_hosts"
+  SUBMIT_AWAIT_COMPLETION=true create_ceremony_probe "$quorum_party" "quorum-$case_name" "${quorum_signing_owners[@]}" \
+    > "$gg_work_dir/$case_name.out" 2> "$gg_work_dir/$case_name.err" || true
+  case "$expected" in
+    commit)
+      summary="$(completion_summary "$gg_work_dir/$case_name.out" 2>/dev/null || echo '{}')"
+      if ! jq -e '.code == 0' <<<"$summary" >/dev/null 2>&1; then
+        echo "FAIL: expected commit. $summary" >&2
+        cat "$gg_work_dir/$case_name.err" >&2
+        exit 1
+      fi
+      echo "PASS: committed. $summary"
+      ;;
+    timeout) check_timeout_rejection "$gg_work_dir/$case_name" "$quorum_party" ;;
+  esac
+  set_participant_connection reconnect "$disconnected_hosts"
+}
+
+if [[ "$quorum_party" != "$GG_PARTY" ]]; then
+  start_clock_ticker "$QUORUM_TICKER_SECONDS"
+  run_party_quorum_case party-one-host-offline app-user commit
+  run_party_quorum_case party-two-hosts-offline sv,app-user timeout
+  echo "PASS: confirmation threshold 2 of 3 for ${quorum_party%%::*}"
+  exit 0
+fi
 
 current_set_index="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" :Wormhole.Core.State:CoreState \
   | jq -er 'if length == 1 then .[0].createArgument.guardianSetIndex else error("expected one CoreState") end')"

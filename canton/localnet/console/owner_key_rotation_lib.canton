@@ -1,0 +1,327 @@
+// Decisions of the owner-key rotation (console/gg_rotate_owner_key.canton) as functions of topology values.
+// Run after owner_signing_prelude.canton.
+import com.digitalasset.canton.version.{ProtocolVersion, ProtocolVersionValidation}
+
+val namespaceRotationTargetName = "namespace"
+val maxSignedRotationTransactionsFileBytes = 1L << 20
+
+// checkRotationPartyOrder: the parties of the guardian namespace in load order. guardianGovernance is last, so the
+// party that holds the reserves changes first.
+def checkRotationPartyOrder(rotationPartyIds: Seq[PartyId], guardianGovernancePartyId: PartyId): Unit = {
+  require(rotationPartyIds.nonEmpty, "no rotation parties")
+  require(rotationPartyIds.distinct.size == rotationPartyIds.size,
+    s"duplicate party in the rotation parties ${rotationPartyIds.map(partyName).mkString(",")}")
+  rotationPartyIds.foreach(party =>
+    require(party.namespace == guardianGovernancePartyId.namespace, s"${party.toProtoPrimitive} is outside the guardian namespace"))
+  require(rotationPartyIds.last == guardianGovernancePartyId,
+    s"guardianGovernance must be the last rotation party: ${rotationPartyIds.map(partyName).mkString(",")}")
+}
+
+// Key set of one rotation target: the namespace owners, or the signing keys of one party.
+sealed trait RotationKeySet
+object RotationKeySet {
+  case object OldKeySet extends RotationKeySet
+  case object NewKeySet extends RotationKeySet
+  final case class UnknownKeySet(fingerprints: Set[Fingerprint]) extends RotationKeySet
+}
+def classifyRotationKeySet(fingerprints: Set[Fingerprint], oldFingerprints: Set[Fingerprint],
+    newFingerprints: Set[Fingerprint]): RotationKeySet = {
+  require(oldFingerprints != newFingerprints, "old and new key sets are equal")
+  if (fingerprints == oldFingerprints) RotationKeySet.OldKeySet
+  else if (fingerprints == newFingerprints) RotationKeySet.NewKeySet
+  else RotationKeySet.UnknownKeySet(fingerprints)
+}
+
+final case class RotationTarget(name: String, keySet: RotationKeySet)
+sealed trait RotationOutcome
+object RotationOutcome {
+  case object FullyApplied extends RotationOutcome
+  case object NotApplied extends RotationOutcome
+  final case class HalfApplied(targetsThatAcceptTheRemovedKey: Seq[String]) extends RotationOutcome
+}
+def classifyRotationOutcome(targets: Seq[RotationTarget]): RotationOutcome = {
+  require(targets.nonEmpty, "no rotation targets")
+  require(targets.map(_.name).distinct.size == targets.size, s"duplicate rotation target in ${targets.map(_.name).mkString(",")}")
+  targets.foreach {
+    case RotationTarget(name, RotationKeySet.UnknownKeySet(fingerprints)) =>
+      throw new IllegalStateException(
+        s"$name has a key set that is neither the old set nor the new set: ${sortedFingerprintText(fingerprints)}")
+    case _ => ()
+  }
+  val targetsWithOldKeys = targets.filter(_.keySet == RotationKeySet.OldKeySet).map(_.name)
+  if (targetsWithOldKeys.isEmpty) RotationOutcome.FullyApplied
+  else if (targetsWithOldKeys.size == targets.size) RotationOutcome.NotApplied
+  else RotationOutcome.HalfApplied(targetsWithOldKeys)
+}
+
+def signingFingerprintsOf(mapping: PartyToParticipant): Set[Fingerprint] =
+  mapping.partySigningKeysWithThreshold.map(_.keys.forgetNE.map(_.fingerprint).toSet).getOrElse(Set.empty[Fingerprint])
+
+// rotatedPartyToParticipant: same party, hosts, confirmation threshold and signing key threshold; new signing keys.
+def rotatedPartyToParticipant(current: PartyToParticipant, newSigningKeys: NonEmpty[Set[SigningPublicKey]]): PartyToParticipant = {
+  val currentSigningKeys = current.partySigningKeysWithThreshold
+    .getOrElse(throw new IllegalArgumentException(s"${partyName(current.partyId)} has no party signing keys"))
+  PartyToParticipant.create(current.partyId, current.threshold, current.participants,
+      Some(SigningKeysWithThreshold(newSigningKeys, currentSigningKeys.threshold)))
+    .fold(error => throw new IllegalArgumentException(s"rotated PartyToParticipant of ${partyName(current.partyId)}: $error"), identity)
+}
+
+// intendedPartyRotationChange: the rotated mapping at the next serial, or the current mapping and serial if it
+// already has the new signing keys (half-applied rotation).
+def intendedPartyRotationChange(current: EffectiveTopologyMapping[PartyToParticipant],
+    newSigningKeys: NonEmpty[Set[SigningPublicKey]]): IntendedTopologyChange =
+  if (signingFingerprintsOf(current.mapping) == newSigningKeys.forgetNE.map(_.fingerprint)) IntendedTopologyChange(current.mapping, current.serial)
+  else IntendedTopologyChange(rotatedPartyToParticipant(current.mapping, newSigningKeys), current.serial.tryAdd(1))
+
+// intendedNamespaceRotationChange: same namespace and threshold with the new owners at the next serial, or the
+// current definition and serial if it already has the new owners.
+def intendedNamespaceRotationChange(current: EffectiveTopologyMapping[DecentralizedNamespaceDefinition],
+    newOwnerNamespaces: Set[Namespace]): IntendedTopologyChange =
+  if (current.mapping.owners.forgetNE == newOwnerNamespaces) IntendedTopologyChange(current.mapping, current.serial)
+  else IntendedTopologyChange(DecentralizedNamespaceDefinition.tryCreate(current.mapping.namespace, current.mapping.threshold,
+    NonEmpty.from(newOwnerNamespaces).getOrElse(throw new IllegalArgumentException("no new owners"))), current.serial.tryAdd(1))
+
+// intendedAddedOwnerRootDelegation: the first root delegation of the added owner key. A key that had a root delegation
+// before needs a new key.
+def intendedAddedOwnerRootDelegation(addedOwnerKey: SigningPublicKey): IntendedTopologyChange =
+  IntendedTopologyChange(NamespaceDelegation.create(Namespace(addedOwnerKey.fingerprint), addedOwnerKey, DelegationRestriction.CanSignAllMappings)
+    .fold(error => throw new IllegalArgumentException(s"root delegation of the added owner: $error"), identity), PositiveInt.one)
+
+// checkStoredRotationTransactions: exactly the signed changes of one rotation, each equal to the intended change of
+// the current topology. One namespace definition with the new owners, one PartyToParticipant with the new signing
+// keys for each rotation party, and at most the root delegation of the added owner. Each stored mapping has the
+// guardian policy. Runs in fresh mode before the store and in resume mode before the load.
+def checkStoredRotationTransactions(storedTransactions: Seq[GenericSignedTopologyTransaction], rotationPartyIds: Seq[PartyId],
+    guardianNamespace: Namespace, currentPartyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]],
+    currentNamespaceDefinition: EffectiveTopologyMapping[DecentralizedNamespaceDefinition], newOwnerNamespaces: Set[Namespace],
+    newSigningKeys: NonEmpty[Set[SigningPublicKey]], addedOwnerKey: SigningPublicKey): Unit = {
+  val newSigningFingerprints = newSigningKeys.forgetNE.map(_.fingerprint)
+  require(currentPartyMappings.map(_.mapping.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
+    "current PartyToParticipant parties differ from the rotation parties")
+  require(currentNamespaceDefinition.mapping.namespace == guardianNamespace, "current namespace definition is for another namespace")
+  storedTransactions.foreach(transaction =>
+    require(transaction.operation == TopologyChangeOp.Replace, s"stored ${transaction.mapping.code} is not a Replace"))
+  val namespaceDefinitions = storedTransactions.filter(_.mapping.isInstanceOf[DecentralizedNamespaceDefinition])
+  require(namespaceDefinitions.size == 1, s"expected exactly one stored namespace definition, found ${namespaceDefinitions.size}")
+  val storedNamespaceDefinition = namespaceDefinitions.head.mapping.asInstanceOf[DecentralizedNamespaceDefinition]
+  require(storedNamespaceDefinition.namespace == guardianNamespace, "stored namespace definition is for another namespace")
+  require(storedNamespaceDefinition.owners.forgetNE == newOwnerNamespaces, "stored namespace definition does not have the new owners")
+  checkNamespaceIsGuardianPolicy(storedNamespaceDefinition)
+  require(storedNamespaceDefinition.threshold == currentNamespaceDefinition.mapping.threshold,
+    s"stored namespace threshold ${storedNamespaceDefinition.threshold.value} differs from the current threshold " +
+      s"${currentNamespaceDefinition.mapping.threshold.value}")
+  checkTransactionIsIntendedChange(namespaceDefinitions.head.transaction,
+    intendedNamespaceRotationChange(currentNamespaceDefinition, newOwnerNamespaces), "stored namespace definition")
+  val partyChanges = storedTransactions.filter(_.mapping.isInstanceOf[PartyToParticipant])
+  val partyMappings = partyChanges.map(_.mapping.asInstanceOf[PartyToParticipant])
+  require(partyMappings.map(_.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
+    s"stored PartyToParticipant parties ${partyMappings.map(mapping => partyName(mapping.partyId)).mkString(",")} " +
+      s"differ from the rotation parties ${rotationPartyIds.map(partyName).mkString(",")}")
+  partyChanges.foreach { partyChange =>
+    val mapping = partyChange.mapping.asInstanceOf[PartyToParticipant]
+    require(signingFingerprintsOf(mapping) == newSigningFingerprints,
+      s"stored PartyToParticipant of ${partyName(mapping.partyId)} does not have the new signing keys")
+    checkHostingIsGuardianPolicy(mapping)
+    val currentMapping = currentPartyMappings.find(_.mapping.partyId == mapping.partyId)
+      .getOrElse(throw new IllegalArgumentException(s"no current PartyToParticipant of ${partyName(mapping.partyId)}"))
+    checkTransactionIsIntendedChange(partyChange.transaction, intendedPartyRotationChange(currentMapping, newSigningKeys),
+      s"stored PartyToParticipant of ${partyName(mapping.partyId)}")
+  }
+  val rootDelegations = storedTransactions.filter(_.mapping.isInstanceOf[NamespaceDelegation])
+  require(rootDelegations.size <= 1, s"expected at most one stored root delegation, found ${rootDelegations.size}")
+  rootDelegations.foreach { rootDelegation =>
+    val delegation = rootDelegation.mapping.asInstanceOf[NamespaceDelegation]
+    require(delegation.namespace == Namespace(addedOwnerKey.fingerprint), "stored root delegation is not the root delegation of the added owner")
+    require(delegation.target == addedOwnerKey, "stored root delegation is not the root delegation of the added owner")
+    checkTransactionIsIntendedChange(rootDelegation.transaction, intendedAddedOwnerRootDelegation(addedOwnerKey),
+      "stored root delegation of the added owner")
+  }
+  require(storedTransactions.size == namespaceDefinitions.size + partyMappings.size + rootDelegations.size,
+    "stored transactions hold a mapping of another type")
+}
+
+// The stored file authorizes each change in it until another change takes its serial. Only the owner of the file
+// can read it.
+val signedRotationTransactionsFilePermissions = java.nio.file.attribute.PosixFilePermissions.fromString("rw-------")
+def writeSignedRotationTransactions(path: String, signedTransactions: Seq[GenericSignedTopologyTransaction],
+    protocolVersion: ProtocolVersion): Unit = {
+  require(signedTransactions.nonEmpty, "no signed rotation transactions to store")
+  val storedFile = Files.createFile(Paths.get(path),
+    java.nio.file.attribute.PosixFilePermissions.asFileAttribute(signedRotationTransactionsFilePermissions))
+  Files.write(storedFile, SignedTopologyTransactions(signedTransactions, protocolVersion).toByteString.toByteArray)
+  require(Files.getPosixFilePermissions(storedFile) == signedRotationTransactionsFilePermissions, s"$path is not mode 0600")
+}
+def readSignedRotationTransactions(path: String, protocolVersion: ProtocolVersion): Seq[GenericSignedTopologyTransaction] = {
+  val storedFile = Paths.get(path)
+  require(Files.isRegularFile(storedFile), s"no signed rotation transactions file $path")
+  require(Files.getPosixFilePermissions(storedFile) == signedRotationTransactionsFilePermissions, s"$path is not mode 0600")
+  require(Files.size(storedFile) <= maxSignedRotationTransactionsFileBytes, s"$path is larger than $maxSignedRotationTransactionsFileBytes bytes")
+  SignedTopologyTransactions.fromByteString(ProtocolVersionValidation(protocolVersion),
+      TopologyTransactionDeserializationContext(com.digitalasset.canton.protocol.SynchronizerLimits.default),
+      ByteString.copyFrom(Files.readAllBytes(storedFile)))
+    .fold(error => throw new RuntimeException(s"cannot read the signed rotation transactions in $path: $error"), _.transactions)
+}
+
+// Load 1 holds the root delegation of the added owner. Load 2 holds the PartyToParticipant of each rotation party in
+// rotation order, then the namespace definition.
+final case class RotationLoadOrder(rootDelegation: Option[GenericSignedTopologyTransaction],
+    namespaceAndPartyBatch: Seq[GenericSignedTopologyTransaction])
+def rotationLoadOrder(storedTransactions: Seq[GenericSignedTopologyTransaction], rotationPartyIds: Seq[PartyId]): RotationLoadOrder = {
+  val rootDelegations = storedTransactions.filter(_.mapping.isInstanceOf[NamespaceDelegation])
+  require(rootDelegations.size <= 1, s"expected at most one root delegation, found ${rootDelegations.size}")
+  val partyChanges = rotationPartyIds.map(party => storedTransactions.filter(_.mapping match {
+    case mapping: PartyToParticipant => mapping.partyId == party
+    case _ => false
+  }) match {
+    case Seq(partyChange) => partyChange
+    case other => throw new IllegalArgumentException(s"expected one PartyToParticipant of ${partyName(party)}, found ${other.size}")
+  })
+  val namespaceChanges = storedTransactions.filter(_.mapping.isInstanceOf[DecentralizedNamespaceDefinition])
+  require(namespaceChanges.size == 1, s"expected one namespace definition, found ${namespaceChanges.size}")
+  RotationLoadOrder(rootDelegations.headOption, partyChanges ++ namespaceChanges)
+}
+
+// Canton 3.7.3 gives each transaction of one load call its own effective time, in load order (LocalNet spread about
+// 1 s). Until the last mapping is effective, the later mappings accept the removed key. The bound turns a stalled
+// load into a failure.
+val maxRotationEffectiveTimeSpread = java.time.Duration.ofSeconds(30)
+
+// checkEffectiveTimesFollowLoadOrderWithinBound: each time is strictly after the time before it, and the last time
+// is at most maxRotationEffectiveTimeSpread after the first. Returns that spread.
+def checkEffectiveTimesFollowLoadOrderWithinBound(effectiveTimesInLoadOrder: Seq[(String, java.time.Instant)]): java.time.Duration = {
+  require(effectiveTimesInLoadOrder.nonEmpty, "no effective times")
+  effectiveTimesInLoadOrder.sliding(2).collect { case Seq(earlier, later) => (earlier, later) }.foreach {
+    case ((earlierName, earlierTime), (laterName, laterTime)) =>
+      require(laterTime.isAfter(earlierTime),
+        s"effective times are not strictly increasing in load order: $laterName=$laterTime is not after $earlierName=$earlierTime")
+  }
+  val spread = java.time.Duration.between(effectiveTimesInLoadOrder.head._2, effectiveTimesInLoadOrder.last._2)
+  require(!spread.isNegative, s"negative effective time spread $spread")
+  require(spread.compareTo(maxRotationEffectiveTimeSpread) <= 0,
+    s"effective time spread $spread is above the bound $maxRotationEffectiveTimeSpread")
+  spread
+}
+
+def effectiveTimesText(effectiveTimes: Seq[(String, java.time.Instant)]): String =
+  effectiveTimes.map { case (name, effectiveTime) => s"$name=$effectiveTime" }.mkString(" ")
+
+def spreadSecondsText(spread: java.time.Duration): String =
+  java.math.BigDecimal.valueOf(spread.toNanos, 9).setScale(3, java.math.RoundingMode.HALF_UP).toPlainString
+
+// checkRotationSafetyStop: runs before any change. The rotation parties are exactly the parties with a
+// PartyToParticipant in the namespace. The namespace owners and the signing keys of each such party are the old or
+// the new key set of this rotation.
+def checkRotationSafetyStop(namespaceOwnerFingerprints: Set[Fingerprint], namespacePartyMappings: Seq[PartyToParticipant],
+    rotationPartyIds: Seq[PartyId], oldFingerprints: Set[Fingerprint], newFingerprints: Set[Fingerprint]): Unit = {
+  val namespacePartyIds = namespacePartyMappings.map(_.partyId)
+  namespacePartyIds.diff(namespacePartyIds.distinct).headOption.foreach(party =>
+    throw new IllegalArgumentException(s"SAFETY STOP: more than one PartyToParticipant of ${partyName(party)}"))
+  require(namespacePartyIds.toSet == rotationPartyIds.toSet,
+    s"SAFETY STOP: PartyToParticipant parties in the namespace ${namespacePartyIds.map(partyName).sorted.mkString(",")} " +
+      s"differ from GG_ROTATION_PARTY_IDS ${rotationPartyIds.map(partyName).mkString(",")}")
+  require(namespaceOwnerFingerprints == oldFingerprints || namespaceOwnerFingerprints == newFingerprints,
+    s"SAFETY STOP: namespace owners ${sortedFingerprintText(namespaceOwnerFingerprints)} are neither the old set nor the new set")
+  namespacePartyMappings.sortBy(mapping => partyName(mapping.partyId)).foreach { mapping =>
+    val signingFingerprints = signingFingerprintsOf(mapping)
+    val signingFingerprintText = if (signingFingerprints.isEmpty) "none" else sortedFingerprintText(signingFingerprints)
+    require(signingFingerprints == oldFingerprints || signingFingerprints == newFingerprints,
+      s"SAFETY STOP: ${partyName(mapping.partyId)} signing keys $signingFingerprintText are neither the old set nor the new set")
+  }
+}
+
+// The guardian-namespace topology as one participant shows it.
+final case class NamespaceTopologyView(participantName: String,
+    namespaceDefinition: EffectiveTopologyMapping[DecentralizedNamespaceDefinition],
+    partyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]], partyToKeyMappingParties: Seq[PartyId])
+
+// checkParticipantTopologyViewsAgree: runs before any change. Each guardian host shows the same namespace definition
+// and the same PartyToParticipant mappings, each with the same serial. No party of the namespace has a
+// PartyToKeyMapping.
+def checkParticipantTopologyViewsAgree(views: Seq[NamespaceTopologyView]): Unit = {
+  require(views.size == expectedGuardianHostCount, s"SAFETY STOP: ${views.size} participant views, expected $expectedGuardianHostCount")
+  val participantNames = views.map(_.participantName)
+  participantNames.diff(participantNames.distinct).headOption.foreach(participantName =>
+    throw new IllegalArgumentException(s"SAFETY STOP: participant $participantName read twice"))
+  views.foreach(view => view.partyToKeyMappingParties.headOption.foreach(party =>
+    throw new IllegalArgumentException(s"SAFETY STOP: participant ${view.participantName} has a PartyToKeyMapping of ${partyName(party)}")))
+  val referenceView = views.head
+  def sortedPartyMappings(view: NamespaceTopologyView) = view.partyMappings.sortBy(_.mapping.partyId.toProtoPrimitive)
+  views.tail.foreach { view =>
+    require(view.namespaceDefinition == referenceView.namespaceDefinition,
+      s"SAFETY STOP: participant ${view.participantName} namespace definition differs from participant ${referenceView.participantName}")
+    require(sortedPartyMappings(view) == sortedPartyMappings(referenceView),
+      s"SAFETY STOP: participant ${view.participantName} PartyToParticipant mappings differ from participant ${referenceView.participantName}")
+  }
+}
+
+// The guardian-namespace topology that each participant of this console shows. Each party of the namespace has
+// exactly the console participants as hosts.
+final case class AgreedNamespaceTopology(namespaceDefinition: EffectiveTopologyMapping[DecentralizedNamespaceDefinition],
+    partyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]]) {
+  def partyMapping(party: PartyId): EffectiveTopologyMapping[PartyToParticipant] =
+    partyMappings.filter(_.mapping.partyId == party) match {
+      case Seq(partyToParticipant) => partyToParticipant
+      case other => throw new IllegalArgumentException(
+        s"expected one PartyToParticipant of ${partyName(party)} in the agreed topology, found ${other.size}")
+    }
+}
+
+// agreedNamespaceTopologyOf: runs in the safety stop. The views agree, and the host set of each party is the set of
+// console participants. Each rotation input comes from the result.
+def agreedNamespaceTopologyOf(views: Seq[NamespaceTopologyView], consoleParticipantIds: Seq[ParticipantId]): AgreedNamespaceTopology = {
+  require(consoleParticipantIds.size == expectedGuardianHostCount,
+    s"SAFETY STOP: ${consoleParticipantIds.size} console participants, expected $expectedGuardianHostCount")
+  require(consoleParticipantIds.distinct.size == consoleParticipantIds.size, "SAFETY STOP: a console participant is bound twice")
+  checkParticipantTopologyViewsAgree(views)
+  val referenceView = views.head
+  def hostNames(hostIds: Iterable[ParticipantId]): String = hostIds.map(_.uid.identifier.unwrap).toSeq.sorted.mkString(",")
+  referenceView.partyMappings.foreach { partyToParticipant =>
+    val hostIds = partyToParticipant.mapping.participants.map(_.participantId)
+    require(hostIds.toSet == consoleParticipantIds.toSet,
+      s"SAFETY STOP: ${partyName(partyToParticipant.mapping.partyId)} hosts ${hostNames(hostIds)} differ from the console participants " +
+        hostNames(consoleParticipantIds))
+  }
+  AgreedNamespaceTopology(referenceView.namespaceDefinition, referenceView.partyMappings)
+}
+
+// The change of each rotation party, in rotation order, and of the namespace definition.
+final case class IntendedRotationChanges(partyChanges: Seq[(PartyId, IntendedTopologyChange)], namespaceChange: IntendedTopologyChange)
+
+// intendedRotationChangesOf: each intended change of the agreed topology. Each intended mapping has the guardian
+// policy before any signer call.
+def intendedRotationChangesOf(agreedTopology: AgreedNamespaceTopology, rotationPartyIds: Seq[PartyId],
+    newSigningKeys: NonEmpty[Set[SigningPublicKey]], newOwnerNamespaces: Set[Namespace]): IntendedRotationChanges = {
+  require(agreedTopology.partyMappings.map(_.mapping.partyId).sortBy(_.toProtoPrimitive) == rotationPartyIds.sortBy(_.toProtoPrimitive),
+    "agreed PartyToParticipant parties differ from the rotation parties")
+  val partyChanges = rotationPartyIds.map { party =>
+    val intendedChange = intendedPartyRotationChange(agreedTopology.partyMapping(party), newSigningKeys)
+    intendedChange.mapping match {
+      case partyToParticipant: PartyToParticipant => checkHostingIsGuardianPolicy(partyToParticipant)
+      case other => throw new IllegalStateException(s"intended change of ${partyName(party)} is a ${other.code}")
+    }
+    party -> intendedChange
+  }
+  val namespaceChange = intendedNamespaceRotationChange(agreedTopology.namespaceDefinition, newOwnerNamespaces)
+  namespaceChange.mapping match {
+    case namespaceDefinition: DecentralizedNamespaceDefinition => checkNamespaceIsGuardianPolicy(namespaceDefinition)
+    case other => throw new IllegalStateException(s"intended namespace change is a ${other.code}")
+  }
+  IntendedRotationChanges(partyChanges, namespaceChange)
+}
+
+// checkRemovedOwnerKeyIsInNoKeySet: the namespace owners are exactly the new owner set, and no PartyToParticipant
+// of the namespace has the removed key as a signing key. Thus the removed key signs for no namespace mapping and no
+// party.
+def checkRemovedOwnerKeyIsInNoKeySet(agreedTopology: AgreedNamespaceTopology, removedOwnerKey: SigningPublicKey,
+    newOwnerNamespaces: Set[Namespace]): Unit = {
+  val ownerNamespaces = agreedTopology.namespaceDefinition.mapping.owners.forgetNE
+  require(ownerNamespaces == newOwnerNamespaces,
+    s"namespace owners ${sortedFingerprintText(ownerNamespaces.map(_.fingerprint))} are not the new owner set " +
+      sortedFingerprintText(newOwnerNamespaces.map(_.fingerprint)))
+  require(!ownerNamespaces.contains(Namespace(removedOwnerKey.fingerprint)), "the removed owner is a namespace owner")
+  require(agreedTopology.partyMappings.nonEmpty, "agreed topology has no PartyToParticipant")
+  agreedTopology.partyMappings.foreach { partyToParticipant =>
+    require(!signingFingerprintsOf(partyToParticipant.mapping).contains(removedOwnerKey.fingerprint),
+      s"${partyName(partyToParticipant.mapping.partyId)} signing keys hold the removed owner key")
+  }
+}
