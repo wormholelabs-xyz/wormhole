@@ -11,11 +11,13 @@
 module Test.MockToken where
 
 import Daml.Script
+import DA.Action (void)
 import DA.Optional (fromSome)
 import Splice.Api.Token.MetadataV1
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.AllocationV1
 import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.State (CoreState, Emitter, PublishMessage(..))
 
 template MockHolding
   with
@@ -101,6 +103,63 @@ template FakeAllocation
       allocation_withdrawImpl _self _arg =
         pure Allocation_WithdrawResult with senderHoldingCids = [], meta = emptyMetadata
 
+-- | Probe: a contract whose only signatory is the party under test.
+template RegistryAuthorityProbe
+  with
+    probedParty : Party
+  where
+    signatory probedParty
+
+-- | What a hostile fee registry tries inside 'Allocation_ExecuteTransfer'.
+data FeeRegistryAttack
+  = CreateProbeSignedBy Party
+  | PublishOnEmitter with
+      targetEmitterCid : ContractId Emitter
+      coreStateCid     : ContractId CoreState
+      forgedPayload    : Text
+  deriving (Eq, Show)
+
+-- | An admin-signed allocation that passes every 'chargeFee' check. Its execute
+-- body runs @attack@ with the authority it receives, then settles like
+-- 'MockAllocation'.
+template HostileFeeAllocation
+  with
+    admin      : Party
+    allocation : AllocationSpecification
+    attack     : FeeRegistryAttack
+  where
+    signatory admin, allocation.transferLeg.sender
+    observer allocation.settlement.executor, allocation.transferLeg.receiver
+
+    interface instance Allocation for HostileFeeAllocation where
+      view = AllocationView with
+        allocation
+        holdingCids = []
+        meta = emptyMetadata
+      allocation_executeTransferImpl _self _arg = do
+        case attack of
+          CreateProbeSignedBy probedParty -> void (create RegistryAuthorityProbe with probedParty)
+          PublishOnEmitter{..} -> void (exercise targetEmitterCid PublishMessage with
+            nonce = 0
+            payload = forgedPayload
+            consistencyLevel = 0
+            coreStateCid
+            payer = admin
+            feeAllocation = None)
+        cid <- toInterfaceContractId @Holding <$> create MockHolding with
+          admin
+          owner = allocation.transferLeg.receiver
+          instrument = allocation.transferLeg.instrumentId
+          amount = allocation.transferLeg.amount
+        pure Allocation_ExecuteTransferResult with
+          senderHoldingCids = []
+          receiverHoldingCids = [cid]
+          meta = emptyMetadata
+      allocation_cancelImpl _self _arg =
+        pure Allocation_CancelResult with senderHoldingCids = [], meta = emptyMetadata
+      allocation_withdrawImpl _self _arg =
+        pure Allocation_WithdrawResult with senderHoldingCids = [], meta = emptyMetadata
+
 -- | The bridge's allocation convention: @executor = sender = payer@,
 -- @receiver@ = the fee recipient. Timestamps are placeholders — the mock does
 -- not enforce deadlines.
@@ -139,3 +198,14 @@ mockBalance : Party -> Party -> InstrumentId -> Script Decimal
 mockBalance reader owner instrument = do
   holdings <- query @MockHolding reader
   pure $ sum [ h.amount | (_, h) <- holdings, h.owner == owner, h.instrument == instrument ]
+
+-- | 'mintAndAllocate' for a 'HostileFeeAllocation' that runs @attack@.
+allocateWithFeeRegistryAttack : Party -> Party -> Party -> InstrumentId -> Decimal -> FeeRegistryAttack -> Script (ContractId Allocation, ExtraArgs)
+allocateWithFeeRegistryAttack admin payer recipient instrument amount attack = do
+  now <- getTime
+  cid <- submit (actAs payer <> actAs admin) do
+    createCmd HostileFeeAllocation with
+      admin
+      allocation = mkAllocationSpec payer recipient instrument amount now
+      attack
+  pure (toInterfaceContractId @Allocation cid, emptyExtraArgs)
