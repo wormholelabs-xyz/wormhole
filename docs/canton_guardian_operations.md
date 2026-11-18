@@ -1,7 +1,7 @@
 # Canton Guardian Operations
 
 This document gives the operation responsibilities of a Wormhole guardian on the Canton Network.
-It is a draft. Items with the label **Open item**, or with an ID U1 to U3, need a decision before MainNet.
+It is a draft. Items with the label **Open item**, or with an ID U1 to U5, need a decision before MainNet.
 
 For the design of the Canton core bridge and watcher, refer to [`canton/README.md`](../canton/README.md).
 For the LocalNet rehearsal of each ceremony, refer to [`canton/localnet/README.md`](../canton/localnet/README.md).
@@ -14,8 +14,9 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 | Operate a Canton participant node on the Global Synchronizer | 3 | Continuous |
 | Keep the participant on the minimum Splice version | 3.2 | Weekly releases |
 | Host the `guardianGovernance` party | 4 | Once, then on changes |
+| Host the `feeCustody` party | 4.2 | Once, then on changes |
 | Keep the Canton participant without public ports | 3.5 | Continuous |
-| Follow the snapshot rules when a host joins | 4.2, 4.3 | On each new host |
+| Follow the snapshot rules when a host joins | 4.3, 4.4 | On each new host |
 | Hold one `guardianGovernance` owner key | 5 | Continuous |
 | Sign `guardianGovernance` ceremonies | 5.2, 7 | On request |
 | Apply the package vetting policy | 6 | On each new package version |
@@ -29,10 +30,10 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 
 ## 2. Parties
 
-Each guardian participant hosts one Wormhole party: `guardianGovernance` (`gg`).
-No other guardian party exists.
+Two guardian parties exist from genesis: `guardianGovernance` (`gg`) and `feeCustody`.
+Each guardian participant hosts the two parties. `feeCustody` is in the `gg` namespace.
 The proposed NTT custody deployment (decision U1) adds the party `nttCustody` in the `gg` namespace.
-`nttCustody` has the hosts, the confirmation threshold and the owner keys of `gg` (Section 7.4).
+Each custody party copies the hosts, the confirmation threshold and the owner keys of `gg` (Section 7.4).
 
 | Property | Value |
 | - | - |
@@ -41,11 +42,24 @@ The proposed NTT custody deployment (decision U1) adds the party `nttCustody` in
 | Owner keys | One Ed25519 key for each guardian. A threshold of owner keys controls the `gg` namespace. |
 | Signatory of | `CoreState`, `EmitterRegistry`, every `Emitter` and every NTT manager. |
 | Messages | Each `PublishMessage` runs on an `Emitter` that `gg` signs. Thus guardians see each message. |
-| Other roles | Fee recipient. Mint authority for Wormhole-administered tokens. |
+| Other roles | Mint authority for Wormhole-administered tokens. |
 | Watcher | `guardiand` reads the update stream as `gg` (`--cantonReadAsParty`). |
 
+| `feeCustody` property | Value |
+| - | - |
+| Hosting and confirmation threshold | The same as `gg`. |
+| Owner keys and signing key threshold | The same as `gg` (decision U5). |
+| Signatory of | `CoreState` only. |
+| Role | Fee recipient of `CoreState`. It owns the collected fees. |
+| Holdings | Only holdings of the fee instrument. |
+
+The fee registry code runs with the authority of `feeCustody` on each paid charge.
+`CoreState` rejects `gg` and the `operator` as the fee recipient.
+A charge with a fee above 0 rejects `gg` and the `operator` as the payer.
+Thus fee registry code never runs with the authority of `gg` or the `operator`.
+
 The `operator` party is not a guardian party. Wormhole Labs operates it.
-Each deployment of `wormhole-core` 0.8.0 starts with a new operator party (Section 7.2).
+Each deployment of `wormhole-core` 0.8.3 starts with a new operator party (Section 7.2).
 
 `gg` owns the transceiver `Emitter` of each NTT deployment.
 This includes a lock/unlock deployment that its admin registered alone.
@@ -80,7 +94,8 @@ Thus, the vetting decision of each guardian operator is a part of the `gg` trust
 LocalNet hosts `gg` on three participants at `Confirmation` with a confirmation threshold of 2.
 [`gg_confirmation_quorum.sh`](../canton/localnet/gg_confirmation_quorum.sh) disconnects two of the three hosts.
 With fewer hosts online than the threshold, each `gg` transaction fails.
-The error is `MEDIATOR_SAYS_TX_TIMED_OUT`, and it names `gg` as the only unresponsive party.
+The error is `MEDIATOR_SAYS_TX_TIMED_OUT`. On 0.6.0 it named `gg` as the only unresponsive party.
+On 0.8.3 it names `gg` and `feeCustody`, the `CoreState` co-signers.
 This failure affects governance VAAs, VAA checks and message publication.
 With the threshold number of hosts online again, the governance VAA succeeds.
 This rehearsal passed live on 2026-11-17 with `wormhole-core` 0.6.0 (Section 7.5).
@@ -176,7 +191,7 @@ For the gateway, refer to `canton/disclosure/README.md` in the native-token-tran
 
 Host the party on your participant before the genesis of the core bridge.
 A participant that starts to host the party later does not receive prior contracts.
-For a late start, Canton party replication is necessary (Section 4.2).
+For a late start, Canton party replication is necessary (Section 4.3).
 
 ### 4.1 Host `guardianGovernance`
 
@@ -193,6 +208,14 @@ For a late start, Canton party replication is necessary (Section 4.2).
 A change to the `gg` hosting mapping needs the `gg` threshold.
 Your participant can remove its own hosting at any time.
 
+### 4.2 Host `feeCustody`
+
+Do steps 2 to 4 and 8 to 9 of Section 4.1 for the `feeCustody` party before genesis.
+The `feeCustody` mapping must have the hosts, the confirmation threshold and the signing keys of `gg`.
+Do not grant the watcher user rights for `feeCustody`.
+
+LocalNet rehearsal: `CUSTODY_PARTY_NAME=feeCustody` [`custody_host.sh`](../canton/localnet/custody_host.sh).
+
 LocalNet rehearsal: [`gg_host.sh`](../canton/localnet/gg_host.sh) hosts `gg` on three participants.
 [`gg_show_topology.sh`](../canton/localnet/gg_show_topology.sh) shows `threshold=2` for the namespace.
 For the hosting, it shows `confirmationThreshold=2`, three hosts at `Confirmation` and `signingKeys=2-of-3`.
@@ -208,7 +231,7 @@ With one host, the threshold is 1.
 A high threshold stops `gg` transactions when few hosts are offline.
 A low threshold lets fewer compromised participants confirm for `gg`.
 
-### 4.2 Add a host after genesis
+### 4.3 Add a host after genesis
 
 A new guardian participant must host `gg` and `nttCustody` after these parties have contracts.
 Thus the new host needs Canton offline party replication.
@@ -223,7 +246,7 @@ The replication has 13 steps in a fixed order. In summary:
 4. The new participant disconnects from all synchronizers.
 5. The new participant sets `manualConnect = true`, so that a restart does not connect it before the import.
 6. A threshold of owner keys signs the `PartyToParticipant` change with the onboarding flag.
-   The change adds the new host at `Observation` (Section 4.3, rule 3).
+   The change adds the new host at `Observation` (Section 4.4, rule 3).
 7. The source host exports the active contract set (ACS) with `export_party_acs`.
 8. The new participant makes a backup of its database.
 9. The new participant imports the ACS with
@@ -236,7 +259,7 @@ Do these steps for `gg` and `nttCustody` together.
 The export contains the ACS at the offset where the new hosting becomes active.
 Each honest existing host exports the same contract set for one new host.
 
-### 4.3 Trust in the ACS snapshot
+### 4.4 Trust in the ACS snapshot
 
 The new host trusts the host that gives it the snapshot.
 The import checks that the contents of each contract agree with its contract ID.
@@ -397,9 +420,10 @@ To unvet a package is to remove the vetting of that package from your participan
 | Splice token-standard interfaces | `splice-api-token-*` | Interface packages only. Vet the IDs that the Wormhole packages depend on. |
 | Third-party token registry | The registry of a lock/unlock deployment that `gg` takes custody for | Blocked by decision U1 (Section 10). |
 
-Splice Amulet code runs with the authority of `gg`.
-The core bridge charges message fees in Amulet, and `gg` receives the fees.
-Thus, when your participant vets an Amulet version, you trust that version with the authority of `gg`.
+Splice Amulet code runs with the authority of `feeCustody`.
+The core bridge charges message fees in Amulet, and `feeCustody` receives the fees.
+Thus, when your participant vets an Amulet version, you trust that version with the collected fees.
+A vetted Amulet version cannot move `gg` holdings and cannot publish a message.
 
 **Open item:** whether the Splice validator automation vets new Amulet versions automatically on guardian participants.
 If it does, record this as an accepted trust in DSO governance.
@@ -423,13 +447,16 @@ This rehearsal passed live on 2026-11-17, with the two-of-three case (Section 7.
 ### 6.4 New `wormhole-core` versions
 
 Each new version of `wormhole-core` has a new package ID.
-Example: the change from version 0.8.0 to 0.8.1 gives a new package ID.
+Example: the change from version 0.8.3 to 0.8.4 gives a new package ID.
 The build makes sure that each new version is a valid Daml upgrade of the previous release.
 
 The procedure of Section 6.7 applies only to an upgrade that keeps the signatories and observers of each template.
 Version 0.8.0 adds `gg` as a signatory of `EmitterRegistry` and `Emitter`.
-Thus a 0.7.0 `EmitterRegistry` or `Emitter` cannot run under 0.8.0.
-Version 0.8.0 starts from a fresh genesis (Section 7.2).
+Version 0.8.3 adds `feeCustody` as a signatory of `CoreState`.
+Thus a 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3.
+Version 0.8.3 starts from a fresh genesis (Section 7.2).
+Versions 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `gg`.
+The approved list of `guardiand` does not contain 0.8.0, 0.8.1 or 0.8.2.
 
 The watcher accepts a `PublishMessage` only from the package ID in `--cantonPackageID`.
 An `ExercisedEvent` carries the package ID of the package that executes the choice.
@@ -445,7 +472,7 @@ Each informee participant must vet the package that executes the choice.
 Thus a package that no guardian participant vets cannot execute `PublishMessage`.
 
 A dependent package calls `wormhole-core` by package ID.
-Example: `ntt` 0.3.2 calls `wormhole-core` 0.8.0.
+Example: `ntt` 0.3.2 calls `wormhole-core` 0.8.0. Thus `ntt` needs a new build on 0.8.3.
 Thus each dependent package needs a new build on the new core version.
 The new build must be a valid upgrade of the old build.
 
@@ -705,21 +732,24 @@ Use this procedure for each `gg` signing ceremony.
 
 ### 7.2 Genesis co-signature
 
-Each deployment of `wormhole-core` 0.8.0 starts from a fresh genesis with a new operator party.
-Contracts of an earlier version do not move to 0.8.0.
+Each deployment of `wormhole-core` 0.8.3 starts from a fresh genesis with a new operator party.
+Contracts of an earlier version do not move to 0.8.3.
 For the reason, refer to [`A14_EMITTER_ID_UNIQUENESS.md`](../canton/A14_EMITTER_ID_UNIQUENESS.md).
 
 The genesis ceremony has two prepared transactions.
 The first transaction creates the `CoreState`. The second transaction creates the `EmitterRegistry`.
-The `operator` and the `gg` owner key threshold sign each of the two transactions.
+The `operator`, the `gg` owner key threshold and the `feeCustody` owner key threshold sign the `CoreState` transaction.
+The `operator` and the `gg` owner key threshold sign the `EmitterRegistry` transaction.
 The prepare endpoint accepts one command in each transaction.
 The operator creates the `ReplayRootRegistry` alone.
 
 Before the ceremony:
 
 1. Make sure that each guardian participant hosts `gg` (Section 4.1).
-2. Make sure that each guardian participant vetted the agreed `wormhole-core` package ID.
-3. Make sure that your participant vets no other `wormhole-core` package.
+2. Make sure that `feeCustody` exists in the `gg` namespace.
+3. Make sure that `feeCustody` has the hosts, the confirmation threshold and the signing keys of `gg`.
+4. Make sure that each guardian participant vetted the agreed `wormhole-core` 0.8.3 package ID.
+5. Make sure that your participant vets no other `wormhole-core` package.
 
 Check the `CoreState` transaction:
 
@@ -727,14 +757,15 @@ Check the `CoreState` transaction:
 2. Make sure that the arguments contain the agreed guardian set.
 3. Make sure that the arguments contain the agreed governance chain and governance contract.
 4. Make sure that the arguments set `chainId` to exactly 75.
-5. Make sure that the arguments set `feeRecipient` to the `guardianGovernance` party.
+5. Make sure that the arguments set `feeRecipient` to the `feeCustody` party, not to `gg`.
 6. Make sure that `feeInstrument` is the agreed instrument admin and instrument ID.
 7. Make sure that `operator` is the agreed new operator party.
 8. Make sure that `guardianSetIndex` is 0.
 9. Make sure that `messageFee` is the agreed value.
 10. Make sure that `consumedGovernance` is empty.
 11. Make sure that the template package ID is the agreed `wormhole-core` package ID.
-12. Sign the prepared hash (Section 7.1).
+12. Make sure that the prepared transaction has exactly three signer sets: `operator`, `gg` and `feeCustody`.
+13. Sign the prepared hash for `gg` and for `feeCustody` (Section 7.1).
 
 Check the `EmitterRegistry` transaction:
 
@@ -764,8 +795,15 @@ Do the `EmitterRegistry` ceremony again. Do not create a second `CoreState`.
 An emitter ID is an integer from 0 to 2^53 - 1 (`maxEmitterId`).
 
 LocalNet rehearsal: [`gg_genesis.sh`](../canton/localnet/gg_genesis.sh).
-The `operator` and two of three owner keys sign each of the two transactions.
-A `CoreState` with one of three owner keys fails with `FAILED_TO_EXECUTE_TRANSACTION`.
+Run `CUSTODY_PARTY_NAME=feeCustody custody_host.sh` before `gg_genesis.sh`.
+The `operator` and two of three owner keys for each namespace party sign each of the two transactions.
+These `CoreState` transactions fail:
+
+- `gg` with one of three owner keys: `FAILED_TO_EXECUTE_TRANSACTION`.
+- No `feeCustody` signature. The error names `feeCustody`.
+- `feeCustody` with one of three owner keys: `FAILED_TO_EXECUTE_TRANSACTION`.
+- `feeRecipient` set to `gg`. The `CoreState` precondition fails.
+
 After a failure, the script creates only the missing contracts.
 
 ### 7.3 Guardian set upgrade on Canton
@@ -809,7 +847,8 @@ The namespace threshold and the signing key threshold of each party do not chang
 
 The owner keys are the namespace owners and the signing keys of each party in the namespace.
 Thus the rotation changes the decentralized namespace and the `PartyToParticipant` mapping of each party.
-If the namespace also has the `nttCustody` party of an NTT custody deployment, the rotation has three topology changes.
+The namespace has `gg` and `feeCustody`. Thus the rotation has three topology changes.
+If the namespace also has the `nttCustody` party of an NTT custody deployment, the rotation has four topology changes.
 
 The rotation has three phases:
 
@@ -824,7 +863,8 @@ The rotation has three phases:
    The coordinator calculates each change from the views of the safety stop, which all hosts agree on.
    Each calculated mapping must have the guardian policy before the first signature.
    The coordinator keeps the signed changes in a file that only the coordinator can read.
-3. Load phase: one load call submits all the changes. The `nttCustody` change is first, and the namespace change is last.
+3. Load phase: one load call submits all the changes.
+   The load order is `nttCustody`, `feeCustody`, `gg`, then the namespace.
 
 If the new owner has no root namespace delegation, the load phase loads it first.
 This delegation alone gives no authority over the `gg` namespace.
@@ -836,6 +876,7 @@ Procedure:
 1. Make sure that the time is not in an LSU freeze window.
 2. Get the public key of the new owner in DER SubjectPublicKeyInfo format.
 3. Get the list of the parties in the namespace from the coordinator.
+   Make sure that the list has `feeCustody`.
    Make sure that the list has `nttCustody` if an NTT custody deployment exists.
 4. Before the signature, decode each topology change of the rotation.
    Read the current mappings and serials from the participant that you operate, or from all hosts.
@@ -857,12 +898,12 @@ Procedure:
 8. For each party in the namespace, make sure that the signing keys contain the new owner key.
 9. For each party in the namespace, make sure that the signing keys do not contain the removed owner key.
 10. Make sure that the namespace threshold and the signing key threshold of each party did not change.
-11. Make sure that the effective times of the changes are in the load order: `nttCustody`, then `gg`, then the namespace.
+11. Make sure that the effective times of the changes are in the load order: `nttCustody`, `feeCustody`, `gg`, then the namespace.
 12. Make sure that the time from the first effective time to the last effective time is 30 seconds or less.
 
 Canton gives each change of one load call its own effective time.
 On LocalNet with Canton 3.7.3, the spread was about 1 s.
-In that window, `gg` and the namespace accept the removed key after the `nttCustody` change.
+In that window, `gg` and the namespace accept the removed key after the custody party changes.
 This window is an input to decision U4 (Section 10.1).
 
 After the rotation, a signature from the removed key is not valid.
@@ -878,6 +919,7 @@ Thus a load can apply only a part of the changes. The rotation is then half-appl
 In that state, the signing keys of a party can still contain the removed owner key.
 The removed key then still counts for the signing threshold of that party.
 If that party is `nttCustody`, the removed key and one kept key can move the NTT reserves.
+If that party is `feeCustody`, the removed key and one kept key can move the collected fees.
 If the `ROTATION HALF-APPLIED` line names `namespace`, the removed key and one kept key can change the mapping of each party in the namespace.
 Complete the rotation with `--resume` immediately.
 Do not start a different ceremony before the rotation is complete.
@@ -895,6 +937,7 @@ After a complete rotation, the coordinator removes the file.
 Measured behavior on LocalNet with Canton 3.7.3:
 
 - A load without the `nttCustody` change applies the other changes. The rotation is then half-applied.
+- `gg_rotation_fault_check.sh` case R7 does the same test without the `feeCustody` change.
 - A load in which one change has a missing owner signature fails completely. No mapping changes.
 
 #### Recovery from a half-applied rotation
@@ -935,7 +978,7 @@ These rehearsals passed live on 2026-11-17 with `wormhole-core` 0.6.0:
 | Guardian set rotation to three guardians, with the below-quorum rejection (Section 7.3) | Passed | `3b7f20ca4` | `gg_guardian_set_rotation-20261117T031504Z.log` |
 | Owner key rotation with recovery (Section 7.4) | Passed after `--resume` | `dd01beeb0` | `gg_rotate_owner_key-20261117T031708Z.log`, `gg_rotate_owner_key-20261117T031721Z.log` |
 
-**Open item:** run these rehearsals again with `wormhole-core` 0.8.0.
+**Open item:** run these rehearsals again with `wormhole-core` 0.8.3.
 Include `gg_rotation_fault_check.sh` and `gg_rotation_safety_stop_check.sh` (Section 7.4).
 
 Limits of the rehearsal:
@@ -949,13 +992,25 @@ Limits of the rehearsal:
 A `TransferFees` governance VAA creates a `FeeWithdrawalAuthorization`.
 `gg` is its only signatory, and the `operator` is an observer.
 The contract has no choice. Thus only a transaction that `gg` signs can archive it.
-The fees are holdings of `gg`. Thus the transfer of the fees is a `gg` signing ceremony.
+The fees are holdings of `feeCustody`.
+The withdrawal is one prepared transaction with two root commands:
+
+- A `TransferFactory_Transfer` with `sender` set to `feeCustody`. The `feeCustody` owner keys sign it.
+- The archive of the `FeeWithdrawalAuthorization`. The `gg` owner keys sign it.
+
+The registry code of the transfer gets only the authority of `feeCustody`.
 The `amount` field is in units of 10^-10 of the fee instrument.
 
 1. Make sure that an active `FeeWithdrawalAuthorization` exists with the same amount.
 2. Make sure that the Canton receiver is the agreed party for the 32-byte `recipient` of the VAA.
-3. Make sure that the transaction archives the `FeeWithdrawalAuthorization`.
-4. Sign the prepared hash (Section 7.1).
+3. Make sure that the transfer has `sender` set to `feeCustody` and the fee instrument.
+4. Make sure that the transaction archives the `FeeWithdrawalAuthorization`.
+5. Make sure that the prepared transaction has exactly two signer sets: `feeCustody` and `gg`.
+6. Sign the prepared hash for `feeCustody` and for `gg` (Section 7.1).
+
+`feeCustody` must hold only holdings of the fee instrument.
+A third party can send other holdings to `feeCustody`. Do not accept them.
+Monitor the holdings of `feeCustody` for other instruments.
 
 **Open item:** the mapping from the 32-byte `recipient` to a Canton party.
 
@@ -982,7 +1037,7 @@ CAUTION: A participant that stops to host a party keeps its copy of the contract
 The copy does not change after the removal.
 If the participant hosts another stakeholder of these contracts, it rejects valid transactions with `LOCAL_VERDICT_INACTIVE_CONTRACTS`.
 LocalNet showed this on 2026-11-19: a removed host rejected an NTT `Release` because of an archived custody pot.
-Do not add a removed participant again without a new replication (Section 4.2).
+Do not add a removed participant again without a new replication (Section 4.3).
 
 **Open item:** the procedure to remove the stale contracts of a party from a participant that no longer hosts it.
 
@@ -1081,9 +1136,9 @@ Use the procedure in Section 8.4 after each restart.
 | `wormhole_canton_publish_without_read_party_stakeholder_total` | The value increases. |
 | Traffic balance of the participant | **Open item** |
 | Number of `gg` hosts online | **Open item** |
-| `ACS_COMMITMENT_MISMATCH` in the participant log | Each occurrence after the onboarding flag of a host is clear (Section 4.3). |
-| `SYNC_SERVICE_ALARM` "Mediator approved a request that has been locally rejected" | Each occurrence. Treat it as a security incident (Section 4.3). |
-| "with failed activeness check is approved" in the participant log | Each occurrence. Treat it as a security incident (Section 4.3). |
+| `ACS_COMMITMENT_MISMATCH` in the participant log | Each occurrence after the onboarding flag of a host is clear (Section 4.4). |
+| `SYNC_SERVICE_ALARM` "Mediator approved a request that has been locally rejected" | Each occurrence. Treat it as a security incident (Section 4.4). |
+| "with failed activeness check is approved" in the participant log | Each occurrence. Treat it as a security incident (Section 4.4). |
 
 `wormhole_canton_current_height` is the ledger end of your participant.
 The watcher reads it at the start and each 5 seconds.
@@ -1134,7 +1189,8 @@ NTT lets the guardian quorum accept custody of a lock/unlock deployment.
 After that, `gg` is the sender in transfers on the third-party registry.
 Thus the registry code runs with the authority of `gg`.
 The NTT red-team finding F1 shows that such a registry can mint other `gg` tokens.
-It can also move other holdings that `gg` owns, for example message fees.
+It can also move other holdings that `gg` owns.
+Message fees are not `gg` holdings: `feeCustody` holds them (decision U5).
 The proposed fixes are:
 
 - A dedicated custody party, separate from the `gg` mint authority.
@@ -1155,12 +1211,25 @@ The LocalNet rehearsal of the dedicated custody party:
 The custody party separates Daml authority. It does not separate key authority.
 Two owner keys and two confirming hosts can move each holding of `nttCustody` without a VAA.
 
-**U4: owner key threshold of `nttCustody`.**
-`nttCustody` uses the owner keys and the threshold of `gg`: 2 of 3 on LocalNet.
+**U4: owner key threshold of `nttCustody` and `feeCustody`.**
+Each custody party uses the owner keys and the threshold of `gg`: 2 of 3 on LocalNet.
 The guardian quorum for a VAA is 13 of 19.
-Decide the relation of the owner key threshold to the guardian quorum for `nttCustody` before MainNet.
+Decide the relation of the owner key threshold to the guardian quorum for each custody party before MainNet.
 In a complete owner key rotation, `gg` and the namespace accept the removed key for up to about 1 s
-after the `nttCustody` change (Section 7.4).
+after the custody party changes (Section 7.4).
+
+**U5: fee custody.**
+`wormhole-core` 0.8.3 adds `feeCustody` as the fee recipient and a `CoreState` signatory.
+The fee registry code runs on each paid charge with the authority of the allocation controllers.
+In 0.8.0 to 0.8.2, `gg` was the fee recipient. Thus the fee registry code ran with the authority of `gg`.
+With that authority, it can publish a message on each `gg`-owned `Emitter`, and the guardians sign it.
+In 0.8.3, the fee registry code runs only with the authority of the payer and `feeCustody`.
+`chargeFee` rejects `gg` and the `operator` as payer or receiver when a fee is due.
+Thus an NTT path where `gg` pays a fee fails when the fee is above 0.
+Such a path must have a separate fee payer before any fee goes above 0.
+The custody party separates Daml authority. It does not separate key authority.
+Two owner keys and two confirming hosts can move each holding of `feeCustody` without a VAA.
+Follow-up: a transfer with a receiver preapproval gives no custody authority at charge time (Token Standard V2).
 
 **U3: the two-id window for a core package upgrade.**
 The one-id procedure (Section 6.7) has a signing outage from step 5 to step 14 and a coordinated restart.
@@ -1181,9 +1250,9 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | KMS provider for guardian participants | 3.4 |
 | Production commands for party hosting | 4.1 |
 | Confirmation threshold of `gg` for MainNet | 4.1 |
-| Recovery of an honest host after a forged approval | 4.3 |
-| Signed comparison of snapshot digests before an import | 4.3 |
-| LocalNet rehearsal of `Observation`-first onboarding with the onboarding flag | 4.3 |
+| Recovery of an honest host after a forged approval | 4.4 |
+| Signed comparison of snapshot digests before an import | 4.4 |
+| LocalNet rehearsal of `Observation`-first onboarding with the onboarding flag | 4.4 |
 | Removal of stale party contracts from a former host | 7.7 |
 | Threshold k of n of the owner keys for MainNet | 5.1 |
 | Production tool to decode and hash prepared transactions | 5.3 |
@@ -1191,7 +1260,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | `ContractUpgrade` governance VAA before a core package upgrade | 6.0 |
 | Automatic vetting of Amulet on guardian participants | 6.2 |
 | LocalNet run of the core upgrade abort procedure | 6.7 |
-| Rehearsals with `wormhole-core` 0.8.0 | 7.5 |
+| Rehearsals with `wormhole-core` 0.8.3 | 7.5 |
 | Mapping from the 32-byte `recipient` to a Canton party | 7.6 |
 | Procedure for a participant key, OAuth2 client secret or `operator` party compromise | 7.7 |
 | Reobservation period and participant pruning | 8.1 |
@@ -1200,7 +1269,8 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Check of the inbound rate limits of each peer chain | 9.1 |
 | F4: expiry of idle Canton Coin custody pots | 9.2 |
 | U1: `gg` custody of third-party token registries | 10.1 |
-| U4: owner key threshold of `nttCustody` | 10.1 |
+| U4: owner key threshold of `nttCustody` and `feeCustody` | 10.1 |
+| U5: fee payer of NTT paths where `gg` pays, before any fee above 0 | 10.1 |
 | Owner key rotation of a party that holds reserves | 7.4 |
 | U3: a set of package IDs in the watcher for the upgrade period | 10.1 |
 
@@ -1208,7 +1278,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 
 | Item | Resolution |
 | - | - |
-| An `Observation` host and the confirmation threshold | An `Observation` host does not count. After the promotion to `Confirmation`, it counts. LocalNet, 2026-11-19 (Section 4.3). |
+| An `Observation` host and the confirmation threshold | An `Observation` host does not count. After the promotion to `Confirmation`, it counts. LocalNet, 2026-11-19 (Section 4.4). |
 | Multi-participant hosting of `gg` | Passed live on 2026-11-17 with `wormhole-core` 0.6.0 on three LocalNet participants at `Confirmation` with threshold 2 (Section 2.3). |
 | Vetting on a subset of hosts | Rejected at prepare. Each host must vet. Passed live on 2026-11-17 with `wormhole-core` 0.6.0 (Section 6.3). |
 | Mandatory `gg` party in the watcher | `--cantonReadAsParty` is mandatory outside unsafe dev mode (Section 8). |

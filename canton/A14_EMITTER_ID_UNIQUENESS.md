@@ -69,7 +69,7 @@ NTT: no code change.
 The `guardianGovernance` signatory gives the registry the same trust level as `NttGovernance`.
 
 Deployment: a registry created in the genesis ceremony.
-The section [Deployment of 0.8.0](#deployment-of-080) gives the procedure.
+The section [Deployment of 0.8.3](#deployment-of-083) gives the procedure.
 
 ### Option 2: Per-owner counter co-signed by the owner
 
@@ -330,25 +330,30 @@ Decisions:
 - `core/daml.yaml` keeps the SCU check: `upgrades:` names the vendored 0.7.0 DAR (`dars/wormhole-core-0.7.0.dar`, `7a22a1c4`).
   The check covers all other templates and choices.
 - 0.8.0 starts from a fresh genesis. There is no migration package for 0.7.0 contracts.
+- 0.8.0, 0.8.1 and 0.8.2 are withdrawn. `wormhole-core` 0.8.3 adds `feeCustody` as the fee recipient and a `CoreState` signatory
+  (`REDTEAM.md`, F1-core). 0.8.3 also starts from a fresh genesis. Deploy 0.8.3, not 0.8.0, 0.8.1 or 0.8.2.
 
-### Deployment of 0.8.0
+### Deployment of 0.8.3
 
 Every emitter address includes the registrar. A new operator party thus gives new addresses for all emitters.
-No message id of 0.8.0 can then be equal to a message id of an earlier deployment.
+No message id of 0.8.3 can then be equal to a message id of an earlier deployment.
 
-1. Build the dependents on 0.8.0 (NTT-first rule).
+1. Build the dependents on 0.8.3 (NTT-first rule).
 2. Allocate a new operator party. Do not reuse the operator party of an earlier deployment.
-3. Upload the 0.8.0 DAR and the rebuilt dependent DARs to each guardian participant and to the operator participant.
+3. Upload the 0.8.3 DAR and the rebuilt dependent DARs to each guardian participant and to the operator participant.
 4. Vet these DARs on each of these participants.
    Do not vet an earlier `wormhole-core` version on a guardian participant.
-5. Run the genesis ceremony (`canton/devnet/genesis_guardian_governance.sh`).
+5. Allocate `feeCustody` in the `guardianGovernance` namespace, with the hosts, the confirmation threshold and the
+   signing keys of `guardianGovernance`.
+6. Run the genesis ceremony (`canton/devnet/genesis_guardian_governance.sh`).
    It creates `CoreState`, then an `EmitterRegistry` with `nextId = 0`, as two co-signed prepared transactions.
+   `feeCustody` co-signs the `CoreState` and is its `feeRecipient`.
    If the `CoreState` create fails, the script stops. Run it again: it creates only the missing contracts.
-6. Run the scan (refer to [Scan](#scan)) on each guardian participant.
-   Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.8.0 package id.
+7. Run the scan (refer to [Scan](#scan)) on each guardian participant.
+   Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.8.3 package id.
    Each scan must pass with `firstId` 0. Stop if a scan fails.
-7. Set `--cantonPackageID` to the 0.8.0 package id and `--cantonPackageVersion=0.8.0` on each guardian.
-8. Announce the new operator party, the 0.8.0 package id, and the registry to integrators (refer to [Integrator cutover](#integrator-cutover)).
+8. Set `--cantonPackageID` to the 0.8.3 package id and `--cantonPackageVersion=0.8.3` on each guardian.
+9. Announce the new operator party, the 0.8.3 package id, and the registry to integrators (refer to [Integrator cutover](#integrator-cutover)).
 
 > **WARNING:** A guardian participant that vets an earlier `wormhole-core` version lets a submitter run choices under that version.
 > The scan fails on such a participant.
@@ -359,8 +364,8 @@ No message id of 0.8.0 can then be equal to a message id of an earlier deploymen
 
 ### Integrator cutover
 
-1. Integrators that depend on `wormhole-core` rebuild on 0.8.0. NTT is the first dependent (NTT-first rule).
-2. Each integrator registers a new `Emitter` through the 0.8.0 registry, with `expectedGuardianGovernance = Some gg`.
+1. Integrators that depend on `wormhole-core` rebuild on 0.8.3. NTT is the first dependent (NTT-first rule).
+2. Each integrator registers a new `Emitter` through the 0.8.3 registry, with `expectedGuardianGovernance = Some gg`.
    The new emitter has a new address, because the registrar is new.
 3. Integrators register the new emitter address with their peers on other chains.
 4. Integrators get the disclosure of the registry and `CoreState` from the disclosure service (README §4.7).
@@ -395,7 +400,7 @@ The script fails if one of these conditions occurs:
 
 ### NTT
 
-NTT must be rebuilt on `wormhole-core` 0.8.0 (NTT-first rule).
+Rebuild NTT on `wormhole-core` 0.8.3 (NTT-first rule).
 `RegisterManager` and `RegisterManagerByVaa` need no code change.
 `RegisterManager` must pass `expectedGuardianGovernance = Some guardianGovernance` to `RegisterEmitter`.
 The NTT test package needs changes: tests that create or archive a registry or an `Emitter` without `guardianGovernance` now fail.
@@ -416,7 +421,7 @@ Results of that run that still apply:
 
 ### Open items
 
-These items need a Daml change, thus a new `wormhole-core` package id. They are not in 0.8.0.
+These items need a Daml change, thus a new `wormhole-core` package id. They are not in 0.8.3.
 
 - Make `expectedGuardianGovernance` of `RegisterEmitter` a mandatory `Party`. With `Optional`, a client can skip the pin.
 - `TestRedTeamCore.daml` "A9 signature count zero" expects `ArithmeticError`, not the `no quorum` check of `verifyVAA`.
