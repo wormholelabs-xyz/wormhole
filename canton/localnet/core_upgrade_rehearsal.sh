@@ -300,29 +300,27 @@ check_publish_package_on_each_host() {
   echo "  each host reports PublishMessage package ${2:0:12} for $1"
 }
 
-# scan_publishes <validator> <begin-exclusive-offset> <end-inclusive-offset> [<required-update-id>]:
+# scan_publishes <validator> <begin-exclusive-offset> <end-inclusive-offset> <required-update-id>:
 # publish_message_scan.sh as the watcher user on that participant. One JSON line per PublishMessage of any package.
-# The scan fails when its output does not contain the required update.
+# The scan fails unless its output contains the required update at the end offset.
 scan_publishes() {
   local scan_token_file="$gg_work_dir/watcher-scan.jwt"
-  local scan_arguments=("$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3")
-  if [[ -n "${4:-}" ]]; then scan_arguments+=("$4"); fi
   ensure_watcher_user "$1" >&2
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$WATCHER_USER_ID" > "$scan_token_file")
-  "$REPO_ROOT/canton/tools/publish_message_scan.sh" "${scan_arguments[@]}"
+  "$REPO_ROOT/canton/tools/publish_message_scan.sh" "$(json_api_url "$1")" "$scan_token_file" "$GG_PARTY" "$2" "$3" "$4"
 }
 
-# scan_publish_update_ids <validator> <begin-exclusive> <end-inclusive> <executing-package-id> [<required-update-id>]:
+# scan_publish_update_ids <validator> <begin-exclusive> <end-inclusive> <executing-package-id> <required-update-id>:
 # sorted update ids with a PublishMessage event of that package.
 scan_publish_update_ids() {
-  scan_publishes "$1" "$2" "$3" "${5:-}" | jq -r --arg package "$4" 'select(.executingPackageId == $package) | .updateId' | sort -u
+  scan_publishes "$1" "$2" "$3" "$5" | jq -r --arg package "$4" 'select(.executingPackageId == $package) | .updateId' | sort -u
 }
 
-# scan_publish_update_ids_not_under <validator> <begin-exclusive> <end-inclusive> <package-id> [<required-update-id>]:
+# scan_publish_update_ids_not_under <validator> <begin-exclusive> <end-inclusive> <package-id> <required-update-id>:
 # sorted update ids with a PublishMessage event of any other package. This is the scan equivalent of the counter sum
 # over all labels.
 scan_publish_update_ids_not_under() {
-  scan_publishes "$1" "$2" "$3" "${5:-}" | jq -r --arg package "$4" 'select(.executingPackageId != $package) | .updateId' | sort -u
+  scan_publishes "$1" "$2" "$3" "$5" | jq -r --arg package "$4" 'select(.executingPackageId != $package) | .updateId' | sort -u
 }
 
 # observed_update_ids <harness-name>: sorted update ids of the live observations of the harness.
@@ -810,11 +808,12 @@ check_drain_gate() {
 }
 
 step_switch_v7() {
-  echo "### 7. Coordinated restart: stop v6-<host>, start v7-<host>, enumerate the dropped updates to the post-start ledger end, reobserve them"
+  echo "### 7. Coordinated restart: stop v6-<host>, start v7-<host>, enumerate the dropped updates to a restart control that each v7-<host> observes, reobserve them"
   v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   stop_watcher_on_each_host v6
   local validator_name restart_offset warn_update_ids scan_update_ids expected_update_ids reference_update_ids=""
   local live_summary update_id warn_count gap_summary gap_update_id late_old_update_ids reobserved_update_ids
+  local restart_control_summary restart_control_update_id dropped_update_ids
 
   echo "  restart gap: a 0.7.0 publish while no guardian watcher runs"
   gap_summary="$(publish_and_check v7-restart-gap "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
@@ -822,16 +821,26 @@ step_switch_v7() {
   record_state restartGapUpdateId "$gap_update_id"
   start_watcher_on_each_host v7 "$CORE_V7_PACKAGE_ID" "" 900
 
+  echo "  restart control: a 0.7.0 publish that each v7-<host> observes. Its offset on each participant is the restart offset"
+  restart_control_summary="$(publish_and_check v7-restart-control "$CORE_V7_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V7_PACKAGE_ID")"
+  restart_control_update_id="$(jq -r .updateId <<<"$restart_control_summary")"
+  record_state restartControlUpdateId "$restart_control_update_id"
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    restart_offset="$(ledger_end_of "$validator_name")"
+    await_observation "v7-$validator_name" "$(jq -r .sequence <<<"$restart_control_summary")" "$(jq -r .payload <<<"$restart_control_summary")" false
+  done
+
+  for validator_name in "${GUARDIAN_HOSTS[@]}"; do
+    restart_offset="$(update_offset_on "$validator_name" "$restart_control_update_id")"
     record_host_offset restartOffset "$validator_name" "$restart_offset"
     warn_update_ids="$(harness_dropped_update_ids "v6-$validator_name" "$CORE_V7_PACKAGE_ID")"
-    scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$restart_offset" "$CORE_V7_PACKAGE_ID" "$gap_update_id")"
+    scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset startOffset "$validator_name")" "$restart_offset" "$CORE_V7_PACKAGE_ID" "$restart_control_update_id")"
+    grep -qxF "$restart_control_update_id" <<<"$scan_update_ids" || fail "$validator_name: the scan does not list the restart control $restart_control_update_id"
+    dropped_update_ids="$(grep -vxF "$restart_control_update_id" <<<"$scan_update_ids")"
     expected_update_ids="$(printf '%s\n%s\n' "$warn_update_ids" "$gap_update_id" | grep . | sort -u)"
-    [[ "$scan_update_ids" == "$expected_update_ids" ]] \
-      || fail "$validator_name: the scan differs from the WARN logs plus the restart gap publish: $(diff <(echo "$expected_update_ids") <(echo "$scan_update_ids") | tr '\n' ' ')"
+    [[ "$dropped_update_ids" == "$expected_update_ids" ]] \
+      || fail "$validator_name: the scan differs from the WARN logs plus the restart gap publish: $(diff <(echo "$expected_update_ids") <(echo "$dropped_update_ids") | tr '\n' ' ')"
     for update_id in $(jq -r '.v7DroppedUpdateIds[]' "$UPGRADE_STATE"); do
-      grep -qxF "$update_id" <<<"$scan_update_ids" || fail "$validator_name: the scan does not list $update_id"
+      grep -qxF "$update_id" <<<"$dropped_update_ids" || fail "$validator_name: the scan does not list $update_id"
     done
     # A stream resume can count one drop two times, thus the counter is at least the WARN log count.
     warn_count="$(grep -c . <<<"$warn_update_ids")"
@@ -839,13 +848,13 @@ step_switch_v7() {
       || fail "v6-$validator_name unpinned-publish labels $(jq -c 'keys' "$WATCHER_DIR/v6-$validator_name.metrics.json"), expected exactly [${CORE_V7_PACKAGE_ID:0:12}]"
     [[ "$(jq --arg v7 "$CORE_V7_PACKAGE_ID" '.[$v7]' "$WATCHER_DIR/v6-$validator_name.metrics.json")" -ge "$warn_count" ]] \
       || fail "v6-$validator_name counts $(cat "$WATCHER_DIR/v6-$validator_name.metrics.json") for 0.7.0, expected at least $warn_count"
-    late_old_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset gateOffset "$validator_name")" "$restart_offset" "$CORE_V7_PACKAGE_ID" "$gap_update_id")"
+    late_old_update_ids="$(scan_publish_update_ids_not_under "$validator_name" "$(read_host_offset gateOffset "$validator_name")" "$restart_offset" "$CORE_V7_PACKAGE_ID" "$restart_control_update_id")"
     [[ -z "$late_old_update_ids" ]] || fail "$validator_name: publishes not under 0.7.0 after the gate offset: $(tr '\n' ' ' <<<"$late_old_update_ids")"
-    echo "  PASS: $validator_name ($(read_host_offset startOffset "$validator_name"), $restart_offset]: the scan equals the $warn_count WARN log updates of v6-$validator_name plus the restart gap publish; counter labels exactly 0.7.0; no publish under another package after the gate offset"
+    echo "  PASS: $validator_name ($(read_host_offset startOffset "$validator_name"), $restart_offset]: the scan equals the $warn_count WARN log updates of v6-$validator_name plus the restart gap publish and the restart control; counter labels exactly 0.7.0; no publish under another package after the gate offset"
     if [[ -z "$reference_update_ids" ]]; then
-      reference_update_ids="$scan_update_ids"
+      reference_update_ids="$dropped_update_ids"
     else
-      [[ "$scan_update_ids" == "$reference_update_ids" ]] || fail "$validator_name: the dropped update ids differ from those of ${GUARDIAN_HOSTS[0]}"
+      [[ "$dropped_update_ids" == "$reference_update_ids" ]] || fail "$validator_name: the dropped update ids differ from those of ${GUARDIAN_HOSTS[0]}"
     fi
   done
   echo "  PASS: the three participants give the same $(grep -c . <<<"$reference_update_ids") update ids to reobserve"
@@ -1020,8 +1029,8 @@ step_abort_v7() {
   [[ "$(read_state canaryGateResult)" == timed-out ]] || fail "the canary gate result is $(read_state canaryGateResult), expected timed-out; run gate first"
   v6_watchers_run || fail "a guardian watcher v6-<host> does not run; run observe-v6 first"
   local validator_name manager control_summary control_update_id abort_offset scan_update_ids warn_update_ids
-  local reference_update_ids="" drain_seconds gap_summary gap_update_id restart_offset gap_scan_update_ids
-  local reference_gap_update_ids=""
+  local reference_update_ids="" drain_seconds gap_summary gap_update_id gap_scan_update_ids
+  local reference_gap_update_ids="" end_control_summary end_control_update_id abort_end_offset gap_reobserve_update_ids
   if harness_is_running canary; then
     stop_harness canary
     check_harness_reobservation_errors canary
@@ -1082,11 +1091,10 @@ step_abort_v7() {
 
   echo "### A6. A quorum pins 0.7.0, reobserves each 0.7.0 update, then pins 0.6.0 again"
   stop_watcher_on_each_host v6
-  record_ledger_end_of_each_host abortRestartOffset
-  start_watcher_on_each_host v7-recovery "$CORE_V7_PACKAGE_ID" "$(paste -sd, - <<<"$reference_update_ids")" 900
-  echo "  restart gap: a 0.6.0 publish while no watcher pinned to 0.6.0 runs"
+  echo "  restart gap: a 0.6.0 publish after the stop of each v6-<host>"
   gap_summary="$(publish_and_check v6-abort-restart-gap "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
   gap_update_id="$(jq -r .updateId <<<"$gap_summary")"
+  start_watcher_on_each_host v7-recovery "$CORE_V7_PACKAGE_ID" "$(paste -sd, - <<<"$reference_update_ids")" 900
   stop_watcher_on_each_host v7-recovery
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v7-recovery-$validator_name.jsonl")" == "$reference_update_ids" ]] \
@@ -1095,23 +1103,30 @@ step_abort_v7() {
   check_watchers_agree v7-recovery
   start_watcher_on_each_host v6-after-abort "$CORE_V6_PACKAGE_ID" "" 900
 
-  echo "### A7. Scan each participant from the A6 restart to its ledger end for 0.6.0 publishes, and reobserve each"
+  echo "### A7. A second 0.6.0 control publish that each v6-after-abort-<host> observes. Scan from the abort offset to it, and reobserve each 0.6.0 publish"
+  end_control_summary="$(publish_and_check v6-abort-end-control "$CORE_V6_PACKAGE_ID:Wormhole.Core.State:Emitter" "$CORE_V6_PACKAGE_ID")"
+  end_control_update_id="$(jq -r .updateId <<<"$end_control_summary")"
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    restart_offset="$(ledger_end_of "$validator_name")"
-    gap_scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset abortRestartOffset "$validator_name")" "$restart_offset" "$CORE_V6_PACKAGE_ID" "$gap_update_id")"
+    await_observation "v6-after-abort-$validator_name" "$(jq -r .sequence <<<"$end_control_summary")" "$(jq -r .payload <<<"$end_control_summary")" false
+    abort_end_offset="$(update_offset_on "$validator_name" "$end_control_update_id")"
+    record_host_offset abortEndOffset "$validator_name" "$abort_end_offset"
+    gap_scan_update_ids="$(scan_publish_update_ids "$validator_name" "$(read_host_offset abortOffset "$validator_name")" "$abort_end_offset" "$CORE_V6_PACKAGE_ID" "$end_control_update_id")"
+    grep -qxF "$gap_update_id" <<<"$gap_scan_update_ids" || fail "$validator_name: the scan does not list the restart gap publish $gap_update_id"
+    grep -qxF "$end_control_update_id" <<<"$gap_scan_update_ids" || fail "$validator_name: the scan does not list the second control $end_control_update_id"
     if [[ -z "$reference_gap_update_ids" ]]; then
       reference_gap_update_ids="$gap_scan_update_ids"
     else
       [[ "$gap_scan_update_ids" == "$reference_gap_update_ids" ]] || fail "$validator_name: the restart gap update ids differ from those of ${GUARDIAN_HOSTS[0]}"
     fi
   done
-  start_watcher_on_each_host v6-gap-reobserve "$CORE_V6_PACKAGE_ID" "$(paste -sd, - <<<"$reference_gap_update_ids")" 300
+  gap_reobserve_update_ids="$(grep -vxF "$end_control_update_id" <<<"$reference_gap_update_ids")"
+  start_watcher_on_each_host v6-gap-reobserve "$CORE_V6_PACKAGE_ID" "$(paste -sd, - <<<"$gap_reobserve_update_ids")" 300
   stop_watcher_on_each_host v6-gap-reobserve
   for validator_name in "${GUARDIAN_HOSTS[@]}"; do
-    [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v6-gap-reobserve-$validator_name.jsonl")" == "$reference_gap_update_ids" ]] \
+    [[ "$(jq -sr '[.[] | select(.isReobservation) | .updateId] | unique | .[]' "$WATCHER_DIR/v6-gap-reobserve-$validator_name.jsonl")" == "$gap_reobserve_update_ids" ]] \
       || fail "v6-gap-reobserve-$validator_name did not reobserve each 0.6.0 update of the restart gap"
   done
-  echo "  PASS: each host reobserved the $(grep -c . <<<"$reference_gap_update_ids") 0.6.0 publishes of the restart gap, the gap publish $gap_update_id included"
+  echo "  PASS: each host reobserved the $(grep -c . <<<"$gap_reobserve_update_ids") 0.6.0 publishes from the abort offset to the second control, the gap publish $gap_update_id included"
   stop_watcher_on_each_host v6-after-abort
 
   echo "### A8. Tell the integrators that the upgrade stopped. 0.7.0 submissions fail at prepare (A2)."
