@@ -1373,9 +1373,12 @@ matches its effect.
   The package name must be `wormhole-core`. The package version must be equal
   to the version flag.
 - A different name or version stops the watcher with an error. The supervisor
-  restarts it, and the check runs again. Only this result stops the watcher.
-  If the stream delivers a publish of that id, the next start reads again
-  from before the offset of that publish.
+  restarts it, and the check runs again. If the stream delivers a publish of
+  that id, the next start reads again from before the offset of that publish.
+- A failure of the metadata RPC at startup also stops the watcher. In unsafe
+  dev mode, before the first match of a role, a failure of the metadata RPC
+  for a publish of that role also stops it. A failure at the 60-second check
+  does not stop the watcher. The watcher keeps the last result.
 - If the participant has no metadata for an id, the gauge
   `wormhole_canton_package_metadata_verified` for that role is 0. The watcher
   writes a WARN log. This occurs before the vetting and after the unvet of
@@ -1386,8 +1389,10 @@ matches its effect.
 - In unsafe dev mode, guardiand has no approved list. Thus each role needs one
   match while the watcher runs. Before that match, the watcher drops each
   publish of that role and increments the error count. The stream continues.
-  After a match, reobservation recovers the dropped messages. A match stays
-  valid after the unvet, because a package id is a hash of the package.
+  After a match, reobservation recovers the dropped messages. The watcher
+  keeps a match in memory, so a match stays valid after the unvet. A
+  guardiand start after the unvet has no match. It drops the publishes of
+  that role, and reobservation cannot recover them.
 - The reply of `ListVettedPackages` has one entry for each participant and
   synchronizer that vets the id. The watcher reads a maximum of 16 pages. More
   pages is an error. At startup, this error stops the watcher.
