@@ -77,6 +77,8 @@ Set `DB_PORT` to use a different port.
 | `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
 | `ntt_burn_mint.sh` | Runs a burn/mint deployment of a `guardianGovernance` token. |
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
+| `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. ntt 0.4.0 only. |
+| `gateway_t1.sh` | Runs the disclosure service on a separate gateway network behind a mutual-TLS proxy, and checks it. |
 | `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
 | `ntt_lib.sh` | Shared functions for the `ntt_*.sh` scripts. |
 | `ntt_offline_lib.sh` | NTT functions that `test/ntt_lib_test.sh` tests without LocalNet. |
@@ -652,6 +654,12 @@ The default is `../ntt`, next to this repository.
 `ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.0, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
 
+Set `NTT_PIN_VERSION=0.4.0` to use `ntt` 0.4.0. Build it from NTT branch `canton/overnight-ntt-custody`, commit `7561a9b`.
+`ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each version.
+From 0.4.0, `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
+`ntt_lib.sh` then reads the `nttCustody` party from `custody-artifacts.json`.
+The `guardianGovernance` owner keys of `NTT_GG_SIGNING_OWNERS` also sign for `nttCustody`.
+
 ### Prerequisites
 
 - The `guardianGovernance` rehearsal of the previous section ran.
@@ -755,6 +763,72 @@ The update id is the same on each participant.
   Thus the custody pot can be from round 0, and then the option has no effect.
 - The message fee is 0. The `Transfer` commands do not include a fee allocation.
 - Each run makes new deployments. The `NttGovernance` root and the `CoinFactory` stay the same.
+
+## Disclosure service on a separate gateway (T1)
+
+`gateway_t1.sh` runs the NTT disclosure service in its own container.
+The service reads the JSON Ledger API of `app-provider` through a mutual-TLS proxy.
+A relayer on `app-user` uses only the sets of the service.
+The relayer is not a stakeholder of `NttManager`, `CoreState` or `LockedLedger`.
+
+| Container | Networks | Function |
+| --- | --- | --- |
+| `t1-disclosure-gateway` | `gateway-net` | Disclosure service. Reads as `guardianGovernance` and `nttCustody`. |
+| `t1-ledger-proxy` | `localnet`, `gateway-net` | nginx. Requires a client certificate of the T1 CA. Forwards to `canton:3975`. |
+| `t1-gateway-edge` | `gateway-edge-net`, `gateway-net` | nginx. Publishes the service on `127.0.0.1:7599`. |
+
+`gateway-net` is an internal network.
+On Docker Desktop, a container on a normal bridge network can connect to `host.docker.internal`.
+It then reaches the LocalNet ports that bind to 127.0.0.1.
+
+The ledger user `disclosure-gateway` has only `CanReadAs` for `guardianGovernance` and `nttCustody`.
+The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
+
+### Prerequisites
+
+- `NTT_PIN_VERSION=0.4.0`. `ntt_governance.sh`, `ntt_burn_mint.sh` and `ntt_lock_unlock_gg.sh` ran.
+- A disclosure service image from `canton/disclosure/service/Dockerfile` of the NTT repository.
+
+### Procedure
+
+1. Start the gateway:
+
+   ```bash
+   DISCLOSURE_SERVICE_IMAGE=<image> canton/localnet/gateway_t1.sh up
+   ```
+
+2. Run the checks:
+
+   ```bash
+   canton/localnet/gateway_t1.sh check
+   ```
+
+3. Make sure that the last line of the output is `gateway_t1.sh check: PASS`.
+
+4. Remove the containers and the networks:
+
+   ```bash
+   canton/localnet/gateway_t1.sh down
+   ```
+
+### Checks
+
+| Check | Result |
+| --- | --- |
+| C1 | The proxy accepts the gateway client certificate. It refuses a request with no client certificate, and a certificate of a different CA, with HTTP 400. |
+| C2 | From `gateway-net`, a direct connection to the participant ports fails. A connection to the proxy succeeds. |
+| C3 | A template outside the allow-list gets HTTP 403. The `register` flow fails: it needs the operator as a disclosing party. |
+| C4 | The relayer sees no `NttManager`, `CoreState` or `LockedLedger`. |
+| C5 | The relayer submits `Mint` on the burn/mint deployment. |
+| C6 | A user on `app-user` locks Canton Coin with `Transfer` on the deployment of `ntt_lock_unlock_gg.sh`. |
+| C7 | The relayer submits `Release`. The recipient receives Canton Coin from the `nttCustody` reserve. |
+| C8 | A `Release` with the set from before C7 fails with `LOCAL_VERDICT_INACTIVE_CONTRACTS`. A new set succeeds. |
+
+For Canton Coin, the service names the committed `TransferFactory` and the `TransferPreapproval` as `missing`.
+The relayer gets these contracts and the choice context from the Amulet registry API of Scan.
+
+NOTE: The service keeps ledger reads for `--cache-ttl` (default 5 seconds).
+After a rejection for an inactive contract, get the set again after this time.
 
 ## Core package upgrade rehearsal
 
