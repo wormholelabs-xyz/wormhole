@@ -281,6 +281,9 @@ Keep the logs as the evidence of each run.
    ```
 
    `Operator` and two owner keys sign the `CoreState`.
+   Then the script creates the Ledger API user `wormhole-watcher` on each participant.
+   This user has only the right `CanReadAs(guardianGovernance)`.
+   `canton/tools/emitter_id_scan.sh` needs a token of this user on each participant that it reads.
 
 4. Publish one message and apply one governance VAA:
 
