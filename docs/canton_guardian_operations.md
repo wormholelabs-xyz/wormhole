@@ -352,9 +352,18 @@ For the Canton Console commands, refer to <https://docs.canton.network/global-sy
 
 Use this procedure for each new `wormhole-core` version that keeps the signatories and observers of each template.
 The sequence prevents a submitter from using the old version to bypass the checks of the new version.
+This is the one-id procedure. It is the default.
+The watcher accepts one core package ID during the procedure.
 
-NOTE: Section 7.5 of `canton/README.md` gives the same sequence for the upgrade from 0.6.0 to 0.7.0.
+NOTE: Section 7.5 of `canton/README.md` gives the same one-id procedure for the upgrade from 0.6.0 to 0.7.0.
 That section also gives the reasons for each gate and the results of the LocalNet rehearsal.
+It also gives the two-id window, an alternative that needs decision U3 (Section 10.1).
+
+Before step 1, install a `guardiand` release whose approved list contains the old and the new core package ID.
+The approved list is `node/pkg/cantonclient/approved_core_packages.json`. It gives the version of each package ID.
+Outside unsafe dev mode, the watcher does not start with a package ID outside this list.
+Each step that sets `--cantonPackageID` also sets `--cantonPackageVersion` to the version of that package ID.
+Do not set the retiring flags (Section 8) in this procedure.
 
 The coordinator announces the time of step 10 and the maximum canary time.
 The maximum canary time starts at step 5.
@@ -375,7 +384,7 @@ Do these steps on your guardian:
 10. At the agreed time, unvet the old core package ID and each old dependent package ID in one topology transaction.
 11. Make sure that your participant vets the new core package ID and does not vet the old core package ID.
 12. Do the drain gate (Section 6.7.3). Keep `--cantonPackageID` set to the old core package ID until the gate passes.
-13. Set `--cantonPackageID` to the new core package ID.
+13. Set `--cantonPackageID` to the new core package ID and `--cantonPackageVersion` to the new version.
 14. Restart `guardiand`.
 15. Get the dropped update IDs (Section 6.7.1).
 16. Send a reobservation request for each dropped update ID (Section 8.1).
@@ -395,7 +404,7 @@ Thus no value moves without a message that the guardians can sign.
 WARNING: From step 5 to step 14, your guardian does not sign messages under the new core package ID.
 This includes the messages of each dependent package on the new core version.
 These messages get VAAs only after step 16.
-Make decision U3 (Section 10.1) before a MainNet upgrade uses this procedure.
+The two-id window removes this outage. It needs decision U3 (Section 10.1).
 
 Step 16 reads each update from your participant.
 Participant pruning removes old updates, and then the reobservation request fails.
@@ -797,12 +806,18 @@ The Canton watcher in `guardiand` reads the Ledger API of your participant.
 | - | - |
 | `--cantonRPC` | gRPC endpoint of the Ledger API v2 of your participant. |
 | `--cantonPackageID` | Package ID of `wormhole-core`. Mandatory outside unsafe dev mode. Change it on each new core version (Section 6.7). |
+| `--cantonPackageVersion` | Version of `--cantonPackageID` (`MAJOR.MINOR.PATCH`). Mandatory with it outside unsafe dev mode. |
+| `--cantonRetiringPackageID` | Retiring core package ID of the two-id window (Section 10.1, U3). Empty outside the window. |
+| `--cantonRetiringPackageVersion` | Version of `--cantonRetiringPackageID`. Mandatory with it outside unsafe dev mode. |
+| `--cantonRetiringPackageAcceptedUntil` | Exclusive record-time deadline of the retiring package ID (RFC 3339, UTC). Mandatory with it. |
 | `--cantonReadAsParty` | The `guardianGovernance` party ID. Mandatory outside unsafe dev mode. |
 | `--cantonAuthTokenURL` | OAuth2 token endpoint for the Ledger API. |
 | `--cantonAuthClientID` | OAuth2 client ID (client-credentials grant). |
 | `--cantonAuthClientSecret` | OAuth2 client secret. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
 
-Outside unsafe dev mode, the watcher does not start without `--cantonPackageID` and `--cantonReadAsParty`.
+Outside unsafe dev mode, the watcher does not start without `--cantonPackageID`, `--cantonPackageVersion` and `--cantonReadAsParty`.
+Each package ID has exactly 64 lowercase hexadecimal characters.
+Outside unsafe dev mode, each pair of package ID and version must be in the approved list of `guardiand`.
 Set the three OAuth2 flags together, or set none of them.
 OAuth2 needs TLS, thus unsafe dev mode cannot use it.
 
@@ -937,20 +952,16 @@ The proposed fixes are:
 
 Until a decision, do not vet a third-party registry package for `gg` custody.
 
-**U3: a set of package IDs in the watcher for the upgrade period.**
-The core package upgrade (Section 6.7) has a signing outage from step 5 to step 14.
-The proposal lets the watcher accept a set of package IDs.
-Each guardian adds the new package ID before step 5.
-Each guardian removes the old package ID after step 10.
-Then no coordinated restart is necessary, and messages under the new package ID get VAAs without reobservation.
-The proposal (pull request #74) is not merged.
-Until a decision, use the procedure in Section 6.7.
-
-NOTE: Pull request #74 adds an optional retiring package ID to the watcher.
+**U3: the two-id window for a core package upgrade.**
+The one-id procedure (Section 6.7) has a signing outage from step 5 to step 14 and a coordinated restart.
+The watcher accepts an optional retiring package ID with a record-time deadline.
 The flags are `--cantonRetiringPackageID`, `--cantonRetiringPackageVersion` and `--cantonRetiringPackageAcceptedUntil`.
-With these flags, the watcher accepts two package IDs for a limited period.
-Section 7.5 of `canton/README.md` gives the procedure with two package IDs.
-If you do not set the retiring flags, the procedure in Section 6.7 applies with no change.
+With these flags, the watcher accepts two package IDs until the deadline.
+Then each restart is a rolling restart, and messages under the new package ID get VAAs without reobservation.
+Section 7.5 of `canton/README.md` gives the two-id window procedure.
+The two-id window applies only to an upgrade that keeps the signatories and observers of each template.
+The decision is when the guardians can use the two-id window in place of the one-id procedure.
+Until a decision, use the one-id procedure in Section 6.7, and do not set the retiring flags.
 
 ### 10.2 Open items
 

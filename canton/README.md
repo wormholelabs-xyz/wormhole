@@ -1081,6 +1081,19 @@ Their contracts need migration.
 > have the version 0.2.0. Add `upgrades:` and change the version on each
 > release.
 
+**Choice of procedure.** The one-id procedure below is the default. The
+watcher accepts one core package id, `--cantonPackageID`. The two-id window
+after it is an alternative. Use the two-id window only when the guardians
+agree to it for that upgrade (decision U3).
+
+#### One-id procedure (default)
+
+**Approved list and version flag.** Before step 0, install a guardiand
+release on each guardian. Its `approved_core_packages.json` must contain the
+old and the new core package id, each with its version. A step that sets
+`--cantonPackageID` also sets `--cantonPackageVersion` to the version of that
+id. Do not set the retiring flags in this procedure.
+
 **Procedure: upgrade from 0.6.0 to 0.7.0.** In this order, the unvet of 0.6.0
 occurs immediately before the switch of the watcher pin. A drain gate between
 the unvet and the switch makes sure that the watchers pinned to 0.6.0 read each
@@ -1103,8 +1116,8 @@ the unvet and the switch makes sure that the watchers pinned to 0.6.0 read each
 7. Make sure that each guardian participant vets 0.7.0 and does not vet 0.6.0.
 8. Do the drain gate. Refer to "Drain gate" below. Keep each watcher pinned to
    0.6.0 until the gate passes.
-9. Set `--cantonPackageID` to the 0.7.0 package id on each guardian, and
-   restart each guardian.
+9. Set `--cantonPackageID` to the 0.7.0 package id and
+   `--cantonPackageVersion=0.7.0` on each guardian. Restart each guardian.
 10. Get the dropped update ids with a scan that ends at a restart control
     message. Refer to "Dropped update ids" below.
 11. Send a reobservation request for each dropped update id.
@@ -1123,8 +1136,8 @@ window. Step 1 starts the outage for each submission by package name, not only
 for dependent packages. A submission by package name selects 0.7.0 when each
 host vets 0.7.0. This includes each message of a dependent package on 0.7.0. The
 messages get VAAs only at step 11. Integrators see a delay, not a loss. Plan
-steps 1 to 11 as one short coordinated session. Decision U3 removes this
-outage. Refer to "Alternative" below.
+steps 1 to 11 as one short coordinated session. The two-id window removes
+this outage. Refer to "Two-id window (alternative)" below.
 
 Step 11 needs each update on the participant ledger. Participant pruning
 removes old updates, and then a reobservation request fails.
@@ -1417,15 +1430,11 @@ window. Results:
 > DAR that are not vetted. It stops if the NTT DAR calls a `wormhole-core`
 > version that is not the newest vetted version.
 
-**Alternative.** Decision U3 is a watcher that accepts two package ids in the
-migration window. The next section gives that procedure. Each guardian accepts
-both versions before step 1. Then the upgrade has no signing outage, no drain
-gate and no coordinated restart.
+#### Two-id window (alternative)
 
-#### Upgrade with a two-package window (proposal U3)
-
-> **NOTE:** This is a proposal for an owner decision. Compare it with the
-> single-pin procedure above.
+> **NOTE:** The one-id procedure is the default. Use the two-id window only
+> when the guardians agree to it for that upgrade (decision U3 in
+> `docs/canton_guardian_operations.md` Section 10.1).
 
 **Scope.** Use the window only for a core upgrade that keeps the signatories
 and observers of each template. `damlc` reports a signatory change only as a
@@ -1535,10 +1544,10 @@ matches its effect.
 
 **Rule for a security fix.** If the new core corrects a security defect, set
 the deadline to a maximum of 24 hours after step 13. Alternatively, use the
-single-pin procedure. Until the deadline or the unvet, the guardians sign
+one-id procedure. Until the deadline or the unvet, the guardians sign
 old-core messages under the old checks.
 
-**Procedure: upgrade from 0.8.0 to 0.8.1 with a two-package window.**
+**Procedure: upgrade from 0.8.0 to 0.8.1 with a two-id window.**
 
 Prepare the guardians:
 
@@ -1627,22 +1636,19 @@ Close the window:
 > increments the dropped-message counter. These increments do not show new
 > publishes.
 
-This procedure removes these blockers of the single-pin procedure:
+The two-id window removes these items of the one-id procedure:
 
-- **Late-message period.** The single-pin procedure loses each old-core
-  message between its steps 6 and 8. Here the deadline ends the retiring id,
-  and messages from before the deadline stay recoverable.
-- **Signing outage.** The single-pin procedure drops each new-core message
-  until the coordinated switch. Here each guardian signs both versions during
-  the window.
-- **Coordinated restart.** Each flag change here is a rolling restart.
-- **Open-ended window.** The deadline ends the window also if an operator
-  does not remove the flags.
+- **Signing outage.** The one-id procedure drops each new-core message from
+  its step 1 to its step 9. Reobservation at its step 11 gives the VAAs. Here
+  each guardian signs both versions during the window.
+- **Coordinated restart.** Step 9 of the one-id procedure is one coordinated
+  restart. Here each flag change is a rolling restart.
+- **Drain gate.** The one-id procedure keeps the old pin until its drain gate
+  passes. Here the deadline ends the retiring id, and messages from before
+  the deadline stay recoverable.
 
-These items stay:
-
-- The 0.8.0 checks apply to 0.8.0 messages until the deadline or the unvet.
-- The open item about contracts that an earlier version created stays open.
+The deadline ends the window also if an operator does not remove the flags.
+The 0.8.0 checks apply to 0.8.0 messages until the deadline or the unvet.
 
 Known limits:
 

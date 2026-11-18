@@ -497,8 +497,11 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 The harness is `node/pkg/watchers/canton/watcher_localnet_test.go`, with the build tag `localnet`.
 It makes the watcher with `WatcherConfig.buildWatcher` in the TestNet environment.
 `buildWatcher` runs the checks of `Create`.
-Thus the harness requires the pinned `wormhole-core` package id and the read-as party.
-The harness also checks that `Create` rejects a configuration without one of them.
+Thus the harness requires the pinned `wormhole-core` package id, its version and the read-as party.
+The harness also checks that `buildWatcher` rejects a configuration without one of them.
+The pinned id and version must be in the approved list.
+By default, this is `node/pkg/cantonclient/approved_core_packages.json`, and the harness also runs `Create`.
+`WATCHER_APPROVED_CORE_PACKAGES_FILE` replaces the approved list of the harness. The file has the same format.
 It reads the update stream of `guardianGovernance` on `app-provider`.
 `run_harness_on` starts a harness on the Ledger API of a different participant.
 
@@ -539,7 +542,7 @@ The update id is the same on each participant.
 ## Core package upgrade rehearsal
 
 `core_upgrade_rehearsal.sh` does the `wormhole-core` upgrade from 0.6.0 to 0.7.0 on LocalNet.
-It follows the procedure of section 7.5 of `canton/README.md`.
+It follows the one-id procedure of section 7.5 of `canton/README.md`.
 The unvet of the old versions occurs immediately before the switch of the watcher pin.
 The three `guardianGovernance` hosts are `app-provider`, `sv` and `app-user`.
 They are also the only informee participants.
@@ -551,14 +554,17 @@ They are also the only informee participants.
 | `ntt` 0.2.0 | `8b9c3ee1c93b7039b39421b790c283f507c2b6a01171aa839873f220dc5ff84a` | `ntt/canton/dars/ntt-0.2.0.dar`. NTT commit `1db4b3c`. |
 | `ntt` 0.3.0 | `291fcf920b971d50956845c2690723fb321f0a5b141a44caa5a16910f6ffa1a6` | `NTT_V3_DAR`. Build NTT commit `a1aa515`. |
 
-`core_upgrade_package_ids.sh` holds these package ids and DAR paths.
+`core_upgrade_package_ids.sh` holds these package ids, versions and DAR paths.
+guardiand does not approve 0.6.0 or 0.7.0.
+Thus the rehearsal writes an approved list with these two versions to `core-upgrade-watcher/approved_core_packages.json`.
+Each rehearsal harness uses this list.
 The script stops if a DAR has a different package id.
 `test/core_upgrade_package_ids_test.sh` checks the DARs without LocalNet.
 
 ### Scope with `wormhole-core` 0.8.0
 
 The rehearsal keeps the versions 0.6.0 and 0.7.0.
-The procedure of section 7.5 applies only to an upgrade that keeps the signatories of each template.
+The procedures of section 7.5 apply only to an upgrade that keeps the signatories of each template.
 0.6.0 and 0.7.0 are the only pair of released versions with this property.
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` and `Emitter`.
 
