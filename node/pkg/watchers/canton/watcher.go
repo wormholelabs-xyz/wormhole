@@ -173,6 +173,11 @@ var (
 			Name: "wormhole_canton_observations_confirmed_total",
 			Help: "Total number of verified Canton observations found",
 		})
+	cantonForeignRegistrarMessagesDropped = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "wormhole_canton_foreign_registrar_messages_dropped_total",
+			Help: "Canton messages dropped because their registrar is not the read-as party",
+		})
 	currentCantonHeight = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "wormhole_canton_current_height",
