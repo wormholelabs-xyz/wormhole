@@ -14,7 +14,7 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 | Operate a Canton participant node on the Global Synchronizer | 3 | Continuous |
 | Keep the participant on the minimum Splice version | 3.2 | Weekly releases |
 | Host the `guardianGovernance` party | 4 | Once, then on changes |
-| Keep the guardian node without public ports | 3.5 | Continuous |
+| Keep the Canton participant without public ports | 3.5 | Continuous |
 | Follow the snapshot rules when a host joins | 4.2, 4.3 | On each new host |
 | Hold one `guardianGovernance` owner key | 5 | Continuous |
 | Sign `guardianGovernance` ceremonies | 5.2, 7 | On request |
@@ -154,13 +154,16 @@ Without key download, the identity dump does not include private keys.
 
 ### 3.5 Network exposure
 
-A Canton participant connects out to the sequencers of the synchronizer.
-The synchronizer allowlists the egress IP of the participant.
-The participant needs no inbound port from the internet.
+The validator connects out on port 443 to the super validators.
+Each super validator allowlists the egress IP of the validator.
+The participant and the validator app need no inbound port from the internet.
 
-1. Do not expose a port of the guardian node to the internet.
-2. Bind the Ledger API and the JSON Ledger API to a private interface.
-3. Admit only the watcher and your gateway to the Ledger API ports.
+1. Do not expose a port of the Canton participant or the validator app to the internet.
+2. Bind the Ledger API, the JSON Ledger API and the Admin API to a private interface.
+3. Admit only the validator app, the watcher and your gateway to the Ledger API ports.
+4. Admit only operator hosts to the Admin API. It serves topology, repair and ACS import commands.
+
+`guardiand` still needs its P2P ports. Refer to [`operations.md`](operations.md).
 
 Users and relayers do not connect to guardian participants.
 They submit through their own validator, with disclosed contracts.
@@ -215,17 +218,23 @@ For the steps, refer to the Canton party management documentation at
 The replication has 13 steps in a fixed order. In summary:
 
 1. The new participant vets each package on the allowlist (Section 6).
-2. The new participant authorizes the hosting with the onboarding flag.
-3. The new participant disconnects from all synchronizers.
-4. A threshold of owner keys signs the `PartyToParticipant` change for `gg` with the onboarding flag.
-5. An existing host exports the active contract set (ACS) of `gg` with `export_party_acs`.
-6. The new participant makes a backup of its database.
-7. The new participant imports the ACS with `import_party_acs` and `ContractImportMode.Validation`.
-8. The new participant connects again. Canton clears the onboarding flag.
-9. Do steps 2 to 8 again for `nttCustody`.
+2. The source host stops automatic pruning until the export is complete.
+3. The new participant authorizes the hosting with the onboarding flag.
+4. The new participant disconnects from all synchronizers.
+5. The new participant sets `manualConnect = true`, so that a restart does not connect it before the import.
+6. A threshold of owner keys signs the `PartyToParticipant` change with the onboarding flag.
+   The change adds the new host at `Observation` (Section 4.3, rule 3).
+7. The source host exports the active contract set (ACS) with `export_party_acs`.
+8. The new participant makes a backup of its database.
+9. The new participant imports the ACS with
+   `import_party_acs(..., party = Some(<party>), contractImportMode = ContractImportMode.Validation)`.
+10. The new participant connects again.
+11. Poll `clear_party_onboarding_flag` until it returns `FlagNotSet`.
+
+Do these steps for `gg` and `nttCustody` together.
 
 The export contains the ACS at the offset where the new hosting becomes active.
-Each existing host exports the same contract set for one new host.
+Each honest existing host exports the same contract set for one new host.
 
 ### 4.3 Trust in the ACS snapshot
 
@@ -237,11 +246,16 @@ Thus the import cannot find an invented contract, a removed contract or an archi
 A bad snapshot has these effects:
 
 - A removed contract makes the new host reject valid transactions that use it.
+  When the mediator approves such a transaction, the new host stops with the fatal error below.
 - An invented contract makes the new host approve transactions that use it.
   The honest hosts reject them with `LOCAL_VERDICT_INACTIVE_CONTRACTS`.
 - If the bad hosts and the deceived hosts reach the confirmation threshold, the mediator approves the transaction.
-- Each honest host then stops with the error "Mediator approved a request that has been locally rejected".
-- ACS commitments between participants show `ACS_COMMITMENT_MISMATCH` at the next commitment interval.
+- Each honest host then logs the alarm "Mediator approved a request that has been locally rejected" (`SYNC_SERVICE_ALARM`).
+- Then it stops with "with failed activeness check is approved" and disconnects from the synchronizer.
+  The participant setting `crashAfterFailedValidation` causes this stop. It is `true` by default.
+- ACS commitments between participants show `ACS_COMMITMENT_MISMATCH` in a later commitment interval.
+
+Do not set `crashAfterFailedValidation = false`.
 
 LocalNet rehearsal on 2026-11-17 with three hosts and a confirmation threshold of 2:
 
@@ -249,26 +263,36 @@ LocalNet rehearsal on 2026-11-17 with three hosts and a confirmation threshold o
 - The import accepted the `Coin` with `ContractImportMode.Validation`.
 - The bad host and the new host approved an NTT `Transfer` of the `Coin`. The mediator approved it.
 - The honest host rejected the transaction. Then it stopped with the fatal error and restarted in a loop.
+  LocalNet runs all these nodes in one process.
 - An import of the invented `Coin` on the honest host stopped the loop.
-  This import also made the watcher of the honest host observe the forged message.
-- `ACS_COMMITMENT_MISMATCH` occurred on each host at the next interval.
-- With an honest snapshot, or with a threshold of 3, the mediator rejected the transaction.
+  After this import, a reobservation on the honest host returned the forged message.
+- `ACS_COMMITMENT_MISMATCH` occurred on each host in a later interval. The test did not attribute it to one contract.
+- Without the invented `Coin` on the new host, or with a threshold of 3, the mediator rejected the transaction.
 
 Rules for each new host:
 
 1. Get the snapshot of each new host from a different existing guardian.
-2. Keep the number of new hosts in one change well below the confirmation threshold.
-3. Do not count the new host in the threshold until its ACS commitments agree with each other `gg` host.
-4. If an ACS commitment mismatch stays after onboarding, remove the new host. Replicate again from a different guardian.
+2. Make sure that the possibly colluding `gg` hosts, plus the hosts that got a snapshot from them, stay below the `gg` confirmation threshold.
+   A guardian is the source for at most one host that is not checked yet (rule 3).
+3. Add the new host at `Observation`.
+   After its ACS commitments agree with each other `gg` host for one full commitment interval, change it to `Confirmation`.
+   This second change needs the threshold of owner keys.
+   It also sets the confirmation threshold to a majority of the new number of hosts.
+4. If an ACS commitment mismatch stays for one full interval after the onboarding flag is clear, remove the new host.
+   The new host agrees with its source host and disagrees with the other hosts. Report the source guardian.
 
-WARNING: If your participant stops with "Mediator approved a request that has been locally rejected",
-do not import a contract to stop the restart loop.
+WARNING: If your participant logs "Mediator approved a request that has been locally rejected",
+or stops with "with failed activeness check is approved", do not import a contract to stop the restart loop.
 Such an import makes your watcher observe the transaction.
 Stop the participant and report a security incident to the other guardians.
 
 **Open item:** the procedure to recover an honest host after this error.
 
 **Open item:** a signed comparison of the snapshot digests of several guardians before the import.
+
+**Open item:** a LocalNet test of the `Observation`-first onboarding (rule 3).
+An `Observation` host during onboarding is an exception to the `Confirmation` rule of Section 2.
+It is also an exception to the hosting checks of the owner key rotation (Section 7.4).
 
 ## 5. `guardianGovernance` owner keys
 
@@ -1035,8 +1059,9 @@ Use the procedure in Section 8.4 after each restart.
 | `wormhole_canton_publish_without_read_party_stakeholder_total` | The value increases. |
 | Traffic balance of the participant | **Open item** |
 | Number of `gg` hosts online | **Open item** |
-| `ACS_COMMITMENT_MISMATCH` in the participant log | Each occurrence after the onboarding of a host (Section 4.3). |
-| "Mediator approved a request that has been locally rejected" in the participant log | Each occurrence. Treat it as a security incident (Section 4.3). |
+| `ACS_COMMITMENT_MISMATCH` in the participant log | Each occurrence after the onboarding flag of a host is clear (Section 4.3). |
+| `SYNC_SERVICE_ALARM` "Mediator approved a request that has been locally rejected" | Each occurrence. Treat it as a security incident (Section 4.3). |
+| "with failed activeness check is approved" in the participant log | Each occurrence. Treat it as a security incident (Section 4.3). |
 
 `wormhole_canton_current_height` is the ledger end of your participant.
 The watcher reads it at the start and each 5 seconds.
@@ -1136,6 +1161,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Confirmation threshold of `gg` for MainNet | 4.1 |
 | Recovery of an honest host after a forged approval | 4.3 |
 | Signed comparison of snapshot digests before an import | 4.3 |
+| LocalNet test of `Observation`-first onboarding | 4.3 |
 | Threshold k of n of the owner keys for MainNet | 5.1 |
 | Production tool to decode and hash prepared transactions | 5.3 |
 | Location, writer and authentication of each trust source | 6.0 |
