@@ -739,7 +739,7 @@ inversion of the key-based design's failure mode: replay attempts by arbitrary
 submitters fail on activeness (stale node) or membership (fresh node) — never
 succeed.
 `testIntegratorCoreStatePin` pins the `CoreState` check: a shadow `CoreState`
-under the real operator key and a throwaway `guardianGovernance` fails `Redeem`.
+under a throwaway `guardianGovernance` fails `Redeem`.
 
 ### 4.7 Addressing without keys: the disclosure service
 
