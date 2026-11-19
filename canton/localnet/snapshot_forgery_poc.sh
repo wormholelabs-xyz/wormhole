@@ -43,6 +43,30 @@ json_api_url_of() {
 ledger_end_of() {
   curl_bounded -sSf "$(json_api_url_of "$1")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset
 }
+# gg_update_offset_at <participant> <update-id>: the local offset of a guardianGovernance update on that participant,
+# or "ABSENT" when it has no such update. publish_message_scan.sh takes this offset as its end offset.
+gg_update_offset_at() {
+  local event_format request_body
+  event_format="$(jq -n --arg party "$GG_PARTY" \
+    '{filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false}')"
+  request_body="$(jq -n --arg id "$2" --argjson eventFormat "$event_format" \
+    '{updateId: $id, updateFormat: {includeTransactions: {eventFormat: $eventFormat, transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')"
+  curl_bounded -sS -X POST "$(json_api_url_of "$1")/v2/updates/update-by-id" -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' -d "$request_body" \
+    | jq -r '.update.Transaction.value.offset // "ABSENT"'
+}
+# forged_message_report <participant> <begin-exclusive> <update-id>: where the forged PublishMessage sits on that
+# participant, confirmed with publish_message_scan.sh at its offset, or "absent".
+forged_message_report() {
+  local participant_name="$1" begin="$2" update_id="$3" end
+  [[ -n "$update_id" ]] || { echo "no forged update id"; return 0; }
+  end="$(gg_update_offset_at "$participant_name" "$update_id" 2>/dev/null)" || { echo "unreachable"; return 0; }
+  [[ "$end" =~ ^[0-9]+$ ]] || { echo "absent"; return 0; }
+  if "$PUBLISH_MESSAGE_SCAN" "$(json_api_url_of "$participant_name")" "$gg_work_dir/script.jwt" "$GG_PARTY" "$begin" "$end" "$update_id" >/dev/null 2>&1; then
+    echo "present at offset $end as a PublishMessage"
+  else
+    echo "present at offset $end (publish_message_scan did not confirm it)"
+  fi
+}
 
 # gg_contract_with_blob <template-suffix> <jq-filter>: one gg contract on app-provider as a disclosed contract.
 gg_contract_with_blob() {
@@ -62,7 +86,7 @@ repair_on() {
 attack_with_coin() {
   local coin_cid="$1" attack_label="$2" expected_outcome="$3" attacker_party="${4:-}" submitting_participant="${5:-app-provider}"
   local raw_amount="${6:-$FORGED_RAW_AMOUNT}" manager_cid emitter_cid
-  local core_state_cid coin_factory_cid started_at response http_status participant_name scan_output manager_disclosure
+  local core_state_cid coin_factory_cid started_at response http_status participant_name scan_output manager_disclosure forged_update_id
   local -A begin_offsets
   [[ -n "$attacker_party" ]] || attacker_party="$(jq -er .attackerParty "$FORGERY_STATE")"
   manager_cid="$(jq -er .burnMint.managerCid "$NTT_CONTRACTS")"
@@ -96,10 +120,10 @@ attack_with_coin() {
     else {code: .code, cause: (.cause // .message // . | tostring | .[0:600])} end' 2>/dev/null || sed '$d' <<<"$response" | head -c 1500
   echo
   sleep 5
+  forged_update_id="$(sed '$d' <<<"$response" | jq -r '.transaction.updateId // empty' 2>/dev/null || true)"
   for participant_name in sv app-provider guardian4; do
-    scan_output="$("$PUBLISH_MESSAGE_SCAN" "$(json_api_url_of "$participant_name")" "$gg_work_dir/script.jwt" "$GG_PARTY" \
-      "${begin_offsets[$participant_name]}" 2>&1)" || true
-    echo "ATTACK $attack_label PublishMessage scan as guardianGovernance on $participant_name: ${scan_output:-none}"
+    scan_output="$(forged_message_report "$participant_name" "${begin_offsets[$participant_name]}" "$forged_update_id")"
+    echo "ATTACK $attack_label PublishMessage scan as guardianGovernance on $participant_name: $scan_output"
   done
   echo "ATTACK $attack_label verdict log lines (canton container: sv, app-provider, app-user, mediator):"
   docker logs canton --since "$started_at" 2>&1 | grep -E "$VERDICT_LOG_PATTERN" \
