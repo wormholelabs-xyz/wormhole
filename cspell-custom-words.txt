@@ -98,6 +98,7 @@ Hacken
 hashdump
 healthcheck
 Healthcheck
+healthz
 hexdump
 holesky
 Holesky
