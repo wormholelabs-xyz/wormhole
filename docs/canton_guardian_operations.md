@@ -976,6 +976,15 @@ The `amount` field is in units of 10^-10 of the fee instrument.
    That participant can remove its own hosting. Other changes to the hosting need the `gg` threshold.
 3. Make sure that the confirmation threshold is a majority of the hosts that stay.
 4. Remove the Ledger API user of the watcher of the guardian.
+5. Remove the `nttCustody` hosting from that participant in the same way.
+
+CAUTION: A participant that stops to host a party keeps its copy of the contracts of that party.
+The copy does not change after the removal.
+If the participant hosts another stakeholder of these contracts, it rejects valid transactions with `LOCAL_VERDICT_INACTIVE_CONTRACTS`.
+LocalNet showed this on 2026-11-19: a removed host rejected an NTT `Release` because of an archived custody pot.
+Do not add a removed participant again without a new replication (Section 4.2).
+
+**Open item:** the procedure to remove the stale contracts of a party from a participant that no longer hosts it.
 
 ## 8. Watcher configuration
 
@@ -1175,6 +1184,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Recovery of an honest host after a forged approval | 4.3 |
 | Signed comparison of snapshot digests before an import | 4.3 |
 | LocalNet rehearsal of `Observation`-first onboarding with the onboarding flag | 4.3 |
+| Removal of stale party contracts from a former host | 7.7 |
 | Threshold k of n of the owner keys for MainNet | 5.1 |
 | Production tool to decode and hash prepared transactions | 5.3 |
 | Location, writer and authentication of each trust source | 6.0 |
