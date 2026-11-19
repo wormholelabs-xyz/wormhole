@@ -1,0 +1,190 @@
+// Party replication table: agreedReplicationTopologyOf, intendedHostingChangeOf, intendedChangeInProposedHostOrder and
+// checkIntendedChangeIsOnlyHostingChange on in-memory mappings.
+// Run after owner_signing_prelude.canton, owner_key_rotation_lib.canton, party_replication_lib.canton,
+// table_test_prelude.canton and topology_fixtures.canton.
+import ParticipantPermission.{Confirmation, Observation}
+val replicationOwnerKeys = testOwnerKeys.take(3)
+val replicationSigningKeys = Some(testSigningKeys(2, replicationOwnerKeys))
+val replicationNamespace = EffectiveTopologyMapping(testNamespaceDefinition(2, testOwnerNamespaces.take(3)), PositiveInt.tryCreate(3))
+val serialFive = PositiveInt.tryCreate(5)
+val serialSix = PositiveInt.tryCreate(6)
+def replicationBaseline(hosts: Seq[HostingParticipant], confirmationThreshold: Int = 2) =
+  EffectiveTopologyMapping(testPartyToParticipant(testGuardianGovernancePartyId, confirmationThreshold, hosts, replicationSigningKeys), serialFive)
+val threeHostBaseline = replicationBaseline(threeConfirmingHosts)
+val custodyBaseline = EffectiveTopologyMapping(testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, replicationSigningKeys), serialFive)
+def replicationView(participantName: String, partyMappings: Seq[EffectiveTopologyMapping[PartyToParticipant]] = Seq(threeHostBaseline, custodyBaseline)) =
+  NamespaceTopologyView(participantName, replicationNamespace, partyMappings, Seq.empty)
+val fourAgreeingViews = Seq("app-provider", "sv", "app-user", "guardian4").map(name => replicationView(name))
+val replicationParties = Seq(testGuardianGovernancePartyId, testCustodyPartyId)
+val ownerFingerprintsOfTwo = replicationOwnerKeys.take(2).map(_.fingerprint)
+val addedHostId = testHostIds(3)
+val onboardingAddedHost = HostingParticipant(addedHostId, Confirmation, onboarding = true)
+def mappingChange(baseline: EffectiveTopologyMapping[PartyToParticipant], hosts: Seq[HostingParticipant], confirmationThreshold: Int = 2,
+    serial: PositiveInt = serialSix, signingKeys: Option[SigningKeysWithThreshold] = replicationSigningKeys) =
+  IntendedTopologyChange(testPartyToParticipant(baseline.mapping.partyId, confirmationThreshold, hosts, signingKeys), serial)
+
+checkTableCase("R1-four-views-agree", None) {
+  val agreed = agreedReplicationTopologyOf(fourAgreeingViews, 4, replicationParties, ownerFingerprintsOfTwo)
+  require(agreed.partyMapping(testGuardianGovernancePartyId) == threeHostBaseline, "agreed baseline")
+}
+checkTableCase("R2-three-views-agree", None) {
+  agreedReplicationTopologyOf(fourAgreeingViews.take(3), 3, replicationParties, ownerFingerprintsOfTwo)
+}
+checkTableCase("R3-view-count-differs", Some("SAFETY STOP: 3 participant views, expected 4")) {
+  agreedReplicationTopologyOf(fourAgreeingViews.take(3), 4, replicationParties, ownerFingerprintsOfTwo)
+}
+checkTableCase("R4-extra-host-on-one-view", Some("SAFETY STOP: participant guardian4 PartyToParticipant mappings differ")) {
+  val extraHostMapping = replicationBaseline(threeConfirmingHosts :+ HostingParticipant(addedHostId, Confirmation))
+  agreedReplicationTopologyOf(fourAgreeingViews.init :+ replicationView("guardian4", Seq(extraHostMapping, custodyBaseline)), 4,
+    replicationParties, ownerFingerprintsOfTwo)
+}
+checkTableCase("R5-serial-differs-on-one-view", Some("SAFETY STOP: participant sv PartyToParticipant mappings differ")) {
+  agreedReplicationTopologyOf(fourAgreeingViews.updated(1, replicationView("sv", Seq(threeHostBaseline.copy(serial = serialSix), custodyBaseline))), 4,
+    replicationParties, ownerFingerprintsOfTwo)
+}
+checkTableCase("R6-signing-keys-differ-on-one-view", Some("SAFETY STOP: participant app-user PartyToParticipant mappings differ")) {
+  val otherKeysMapping = EffectiveTopologyMapping(testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts,
+    Some(testSigningKeys(2, testOwnerKeys.slice(1, 4)))), serialFive)
+  agreedReplicationTopologyOf(fourAgreeingViews.updated(2, replicationView("app-user", Seq(otherKeysMapping, custodyBaseline))), 4,
+    replicationParties, ownerFingerprintsOfTwo)
+}
+checkTableCase("R7-owner-is-not-namespace-owner", Some("is not a namespace owner")) {
+  agreedReplicationTopologyOf(fourAgreeingViews, 4, replicationParties, Seq(replicationOwnerKeys.head.fingerprint, testOwnerKeys(4).fingerprint))
+}
+checkTableCase("R8-replication-party-missing", Some("expected one PartyToParticipant of nttCustody in the agreed topology, found 0")) {
+  agreedReplicationTopologyOf(fourAgreeingViews.map(view => view.copy(partyMappings = Seq(threeHostBaseline))), 4, replicationParties,
+    ownerFingerprintsOfTwo)
+}
+checkTableCase("R9-signing-keys-not-policy", Some("guardianGovernance has 4 signing keys, expected 3")) {
+  val fourKeysMapping = EffectiveTopologyMapping(testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts,
+    Some(testSigningKeys(2, testOwnerKeys.take(4)))), serialFive)
+  agreedReplicationTopologyOf(fourAgreeingViews.map(view => view.copy(partyMappings = Seq(fourKeysMapping, custodyBaseline))), 4,
+    replicationParties, ownerFingerprintsOfTwo)
+}
+checkTableCase("R10-namespace-not-policy", Some("namespace has 4 owners, expected 3")) {
+  val fourOwnerNamespace = EffectiveTopologyMapping(testNamespaceDefinition(2, testOwnerNamespaces.take(4)), PositiveInt.tryCreate(3))
+  agreedReplicationTopologyOf(fourAgreeingViews.map(_.copy(namespaceDefinition = fourOwnerNamespace)), 4, replicationParties, ownerFingerprintsOfTwo)
+}
+
+checkTableCase("P1-observation-to-confirmation-is-increase", None) {
+  require(isPermissionIncrease(Observation, Confirmation), "Observation to Confirmation")
+}
+checkTableCase("P2-confirmation-to-observation-is-not-increase", None) {
+  require(!isPermissionIncrease(Confirmation, Observation), "Confirmation to Observation")
+}
+checkTableCase("P3-same-permission-is-not-increase", None) {
+  require(!isPermissionIncrease(Confirmation, Confirmation), "Confirmation to Confirmation")
+}
+
+val addOnboardingHost = HostingChange.HostAdded(onboardingAddedHost)
+checkTableCase("C1-add-host", None) {
+  val intended = intendedHostingChangeOf(threeHostBaseline, addOnboardingHost)
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, intended, addOnboardingHost)
+  require(intended == mappingChange(threeHostBaseline, threeConfirmingHosts :+ onboardingAddedHost), "intended add")
+}
+checkTableCase("C2-add-host-in-proposed-order", None) {
+  val proposedHosts = onboardingAddedHost +: threeConfirmingHosts
+  val intended = intendedChangeInProposedHostOrder(intendedHostingChangeOf(threeHostBaseline, addOnboardingHost), proposedHosts)
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, intended, addOnboardingHost)
+  require(intended.mapping.asInstanceOf[PartyToParticipant].participants == proposedHosts, "proposed order")
+}
+checkTableCase("C3-proposal-with-other-hosts-keeps-intended", None) {
+  val intended = intendedHostingChangeOf(threeHostBaseline, addOnboardingHost)
+  require(intendedChangeInProposedHostOrder(intended, threeConfirmingHosts :+ HostingParticipant(addedHostId, Confirmation)) == intended,
+    "other hosts")
+}
+checkTableCase("C4-add-host-with-extra-host", Some("has 5 hosts, expected 4")) {
+  val extraHost = HostingParticipant(ParticipantId(UniqueIdentifier.tryCreate("intruder", Namespace(newTestSigningKey().fingerprint))), Confirmation)
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline,
+    mappingChange(threeHostBaseline, threeConfirmingHosts :+ onboardingAddedHost :+ extraHost), addOnboardingHost)
+}
+checkTableCase("C5-add-host-without-onboarding-flag", Some("has hosts")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline,
+    mappingChange(threeHostBaseline, threeConfirmingHosts :+ HostingParticipant(addedHostId, Confirmation)), addOnboardingHost)
+}
+checkTableCase("C6-add-host-changes-threshold", Some("sets confirmation threshold 3, expected 2")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline,
+    mappingChange(threeHostBaseline, threeConfirmingHosts :+ onboardingAddedHost, confirmationThreshold = 3), addOnboardingHost)
+}
+checkTableCase("C7-add-host-changes-signing-keys", Some("changes the signing keys")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, mappingChange(threeHostBaseline, threeConfirmingHosts :+ onboardingAddedHost,
+    signingKeys = Some(testSigningKeys(2, testOwnerKeys.slice(1, 4)))), addOnboardingHost)
+}
+checkTableCase("C8-add-host-at-same-serial", Some("intended serial 5 of guardianGovernance, expected 6")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline,
+    mappingChange(threeHostBaseline, threeConfirmingHosts :+ onboardingAddedHost, serial = serialFive), addOnboardingHost)
+}
+checkTableCase("C9-add-host-that-hosts", Some("already hosts guardianGovernance")) {
+  val existingHost = HostingParticipant(testHostIds(0), Confirmation)
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, mappingChange(threeHostBaseline, threeConfirmingHosts), HostingChange.HostAdded(existingHost))
+}
+checkTableCase("C10-add-host-for-other-party", Some("names party")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, mappingChange(custodyBaseline, threeConfirmingHosts :+ onboardingAddedHost),
+    addOnboardingHost)
+}
+
+val fourHostBaseline = replicationBaseline(threeConfirmingHosts :+ HostingParticipant(addedHostId, Confirmation))
+val removeAppUser = HostingChange.HostRemoved(testHostIds(2))
+checkTableCase("C11-remove-host", None) {
+  val intended = intendedHostingChangeOf(fourHostBaseline, removeAppUser)
+  checkIntendedChangeIsOnlyHostingChange(fourHostBaseline, intended, removeAppUser)
+  require(intended.mapping.asInstanceOf[PartyToParticipant].participants.map(_.participantId) == Seq(testHostIds(0), testHostIds(1), addedHostId),
+    "remaining hosts")
+}
+checkTableCase("C12-remove-two-hosts", Some("has 2 hosts, expected 3")) {
+  checkIntendedChangeIsOnlyHostingChange(fourHostBaseline, mappingChange(fourHostBaseline, threeConfirmingHosts.take(2)), removeAppUser)
+}
+checkTableCase("C13-remove-absent-host", Some("lists 0 entries of host")) {
+  intendedHostingChangeOf(threeHostBaseline, HostingChange.HostRemoved(addedHostId))
+}
+
+val observationBaseline = replicationBaseline(threeConfirmingHosts :+ HostingParticipant(addedHostId, Observation))
+val promoteAddedHost = HostingChange.HostPermissionChanged(addedHostId, Confirmation)
+checkTableCase("C14-promote-host", None) {
+  val intended = intendedHostingChangeOf(observationBaseline, promoteAddedHost)
+  checkIntendedChangeIsOnlyHostingChange(observationBaseline, intended, promoteAddedHost)
+  require(intended == mappingChange(observationBaseline, fourHostBaseline.mapping.participants), "promoted mapping")
+}
+checkTableCase("C15-promote-keeps-onboarding-flag", None) {
+  val onboardingObservationBaseline = replicationBaseline(threeConfirmingHosts :+ HostingParticipant(addedHostId, Observation, onboarding = true))
+  val intended = intendedHostingChangeOf(onboardingObservationBaseline, promoteAddedHost)
+  checkIntendedChangeIsOnlyHostingChange(onboardingObservationBaseline, intended, promoteAddedHost)
+  require(hostOf(intended.mapping.asInstanceOf[PartyToParticipant], addedHostId).onboarding, "onboarding flag kept")
+}
+checkTableCase("C16-promote-resets-onboarding-flag", Some("sets the onboarding flag of")) {
+  val onboardingObservationBaseline = replicationBaseline(threeConfirmingHosts :+ HostingParticipant(addedHostId, Observation, onboarding = true))
+  checkIntendedChangeIsOnlyHostingChange(onboardingObservationBaseline,
+    mappingChange(onboardingObservationBaseline, fourHostBaseline.mapping.participants), promoteAddedHost)
+}
+checkTableCase("C17-promote-also-demotes-other-host", Some("has hosts")) {
+  val demotedOther = fourHostBaseline.mapping.participants.updated(0, HostingParticipant(testHostIds(0), Observation))
+  checkIntendedChangeIsOnlyHostingChange(observationBaseline, mappingChange(observationBaseline, demotedOther), promoteAddedHost)
+}
+checkTableCase("C18-promote-to-current-permission", Some("already has Confirmation")) {
+  checkIntendedChangeIsOnlyHostingChange(fourHostBaseline, mappingChange(fourHostBaseline, fourHostBaseline.mapping.participants), promoteAddedHost)
+}
+checkTableCase("C19-promote-changes-threshold", Some("sets confirmation threshold 3, expected 2")) {
+  checkIntendedChangeIsOnlyHostingChange(observationBaseline,
+    mappingChange(observationBaseline, fourHostBaseline.mapping.participants, confirmationThreshold = 3), promoteAddedHost)
+}
+
+val thresholdToOne = HostingChange.ConfirmationThresholdChanged(PositiveInt.one)
+checkTableCase("C20-set-threshold", None) {
+  val intended = intendedHostingChangeOf(threeHostBaseline, thresholdToOne)
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, intended, thresholdToOne)
+  require(intended == mappingChange(threeHostBaseline, threeConfirmingHosts, confirmationThreshold = 1), "threshold 1")
+}
+checkTableCase("C21-set-threshold-also-adds-host", Some("has 4 hosts, expected 3")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline,
+    mappingChange(threeHostBaseline, threeConfirmingHosts :+ HostingParticipant(addedHostId, Confirmation), confirmationThreshold = 1), thresholdToOne)
+}
+checkTableCase("C22-set-threshold-to-current", Some("already has confirmation threshold 2")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, mappingChange(threeHostBaseline, threeConfirmingHosts),
+    HostingChange.ConfirmationThresholdChanged(PositiveInt.tryCreate(2)))
+}
+checkTableCase("C23-set-threshold-wrong-value", Some("sets confirmation threshold 3, expected 1")) {
+  checkIntendedChangeIsOnlyHostingChange(threeHostBaseline, mappingChange(threeHostBaseline, threeConfirmingHosts, confirmationThreshold = 3),
+    thresholdToOne)
+}
+
+finishTable("party-replication")

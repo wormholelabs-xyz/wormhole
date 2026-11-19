@@ -1,0 +1,117 @@
+// Decisions of the party replication (console/party_replication.canton) as functions of topology values.
+// Run after owner_signing_prelude.canton and owner_key_rotation_lib.canton.
+import com.digitalasset.canton.topology.transaction.HostingParticipant
+
+// agreedReplicationTopologyOf: the views of exactly expectedViewCount participants agree. The namespace and the
+// signing keys of each replication party have the guardian policy, and each owner key is a namespace owner.
+def agreedReplicationTopologyOf(views: Seq[NamespaceTopologyView], expectedViewCount: Int, replicationPartyIds: Seq[PartyId],
+    ownerFingerprints: Seq[Fingerprint]): AgreedNamespaceTopology = {
+  require(replicationPartyIds.nonEmpty, "no replication parties")
+  require(ownerFingerprints.nonEmpty, "no owner keys")
+  checkParticipantTopologyViewsAgree(views, expectedViewCount)
+  val agreedTopology = AgreedNamespaceTopology(views.head.namespaceDefinition, views.head.partyMappings)
+  checkNamespaceIsGuardianPolicy(agreedTopology.namespaceDefinition.mapping)
+  val ownerNamespaceFingerprints = agreedTopology.namespaceDefinition.mapping.owners.forgetNE.map(_.fingerprint)
+  ownerFingerprints.foreach(ownerFingerprint => require(ownerNamespaceFingerprints.contains(ownerFingerprint),
+    s"owner key ${ownerFingerprint.toProtoPrimitive} is not a namespace owner: ${sortedFingerprintText(ownerNamespaceFingerprints)}"))
+  replicationPartyIds.foreach(party => checkPartySigningKeysAreGuardianPolicy(agreedTopology.partyMapping(party).mapping))
+  agreedTopology
+}
+
+// The one change that an owner-signed PartyToParticipant replacement makes.
+sealed trait HostingChange
+object HostingChange {
+  final case class HostAdded(addedHost: HostingParticipant) extends HostingChange
+  final case class HostRemoved(removedHostId: ParticipantId) extends HostingChange
+  // The host keeps its onboarding flag.
+  final case class HostPermissionChanged(hostId: ParticipantId, newPermission: ParticipantPermission) extends HostingChange
+  final case class ConfirmationThresholdChanged(newThreshold: PositiveInt) extends HostingChange
+}
+
+def isPermissionIncrease(currentPermission: ParticipantPermission, newPermission: ParticipantPermission): Boolean =
+  ParticipantPermission.orderingParticipantPermission.lt(currentPermission, newPermission)
+
+def hostOf(mapping: PartyToParticipant, hostId: ParticipantId): HostingParticipant =
+  mapping.participants.filter(_.participantId == hostId) match {
+    case Seq(host) => host
+    case otherHosts => throw new IllegalArgumentException(
+      s"${partyName(mapping.partyId)} lists ${otherHosts.size} entries of host $hostId, expected 1")
+  }
+
+// intendedHostingChangeOf: the baseline with one change, the same signing keys, at the next serial.
+def intendedHostingChangeOf(baseline: EffectiveTopologyMapping[PartyToParticipant], change: HostingChange): IntendedTopologyChange = {
+  val current = baseline.mapping
+  val (hosts, confirmationThreshold) = change match {
+    case HostingChange.HostAdded(addedHost) => (current.participants :+ addedHost, current.threshold)
+    case HostingChange.HostRemoved(removedHostId) =>
+      hostOf(current, removedHostId)
+      (current.participants.filterNot(_.participantId == removedHostId), current.threshold)
+    case HostingChange.HostPermissionChanged(hostId, newPermission) =>
+      hostOf(current, hostId)
+      (current.participants.map(host => if (host.participantId == hostId) host.copy(permission = newPermission) else host), current.threshold)
+    case HostingChange.ConfirmationThresholdChanged(newThreshold) => (current.participants, newThreshold)
+  }
+  val replacement = PartyToParticipant.create(current.partyId, confirmationThreshold, hosts, current.partySigningKeysWithThreshold)
+    .fold(error => throw new IllegalArgumentException(s"PartyToParticipant of ${partyName(current.partyId)}: $error"), identity)
+  IntendedTopologyChange(replacement, baseline.serial.tryAdd(1))
+}
+
+// intendedChangeInProposedHostOrder: the transaction hash covers the host order. A proposal with the same hosts in
+// another order gives that order; any other proposal leaves the intended change as it is.
+def intendedChangeInProposedHostOrder(intended: IntendedTopologyChange, proposedHosts: Seq[HostingParticipant]): IntendedTopologyChange =
+  intended.mapping match {
+    case mapping: PartyToParticipant if proposedHosts.size == mapping.participants.size && proposedHosts.toSet == mapping.participants.toSet =>
+      IntendedTopologyChange(PartyToParticipant.create(mapping.partyId, mapping.threshold, proposedHosts, mapping.partySigningKeysWithThreshold)
+        .fold(error => throw new IllegalArgumentException(s"PartyToParticipant of ${partyName(mapping.partyId)}: $error"), identity),
+        intended.serial)
+    case _: PartyToParticipant => intended
+    case other => throw new IllegalArgumentException(s"intended change is a ${other.code}, expected PartyToParticipant")
+  }
+
+// checkIntendedChangeIsOnlyHostingChange: the intended mapping differs from the baseline by exactly the one change, at
+// the next serial, with the same party and signing keys.
+def checkIntendedChangeIsOnlyHostingChange(baseline: EffectiveTopologyMapping[PartyToParticipant], intended: IntendedTopologyChange,
+    change: HostingChange): Unit = {
+  val current = baseline.mapping
+  val name = partyName(current.partyId)
+  val replacement = intended.mapping match {
+    case mapping: PartyToParticipant => mapping
+    case other => throw new IllegalArgumentException(s"intended change of $name is a ${other.code}, expected PartyToParticipant")
+  }
+  require(intended.serial == baseline.serial.tryAdd(1), s"intended serial ${intended.serial.value} of $name, expected ${baseline.serial.value + 1}")
+  require(replacement.partyId == current.partyId, s"intended change names party ${replacement.partyId.toProtoPrimitive}, expected $name")
+  require(replacement.partySigningKeysWithThreshold == current.partySigningKeysWithThreshold, s"intended change of $name changes the signing keys")
+  require(replacement.participants.map(_.participantId).distinct.size == replacement.participants.size, s"intended change of $name names a host twice")
+  def checkThresholdIsUnchanged(): Unit = require(replacement.threshold == current.threshold,
+    s"intended change of $name sets confirmation threshold ${replacement.threshold.value}, expected ${current.threshold.value}")
+  def checkHostsAre(expectedHosts: Seq[HostingParticipant]): Unit = {
+    require(replacement.participants.size == expectedHosts.size,
+      s"intended change of $name has ${replacement.participants.size} hosts, expected ${expectedHosts.size}")
+    require(replacement.participants.toSet == expectedHosts.toSet,
+      s"intended change of $name has hosts ${replacement.participants}, expected $expectedHosts")
+  }
+  change match {
+    case HostingChange.HostAdded(addedHost) =>
+      require(!current.participants.exists(_.participantId == addedHost.participantId), s"${addedHost.participantId} already hosts $name")
+      checkThresholdIsUnchanged()
+      checkHostsAre(current.participants :+ addedHost)
+    case HostingChange.HostRemoved(removedHostId) =>
+      hostOf(current, removedHostId)
+      checkThresholdIsUnchanged()
+      checkHostsAre(current.participants.filterNot(_.participantId == removedHostId))
+    case HostingChange.HostPermissionChanged(hostId, newPermission) =>
+      val currentHost = hostOf(current, hostId)
+      require(currentHost.permission != newPermission, s"$hostId already has $newPermission on $name")
+      checkThresholdIsUnchanged()
+      val changedHost = hostOf(replacement, hostId)
+      require(changedHost.permission == newPermission, s"intended change of $name gives $hostId ${changedHost.permission}, expected $newPermission")
+      require(changedHost.onboarding == currentHost.onboarding,
+        s"intended change of $name sets the onboarding flag of $hostId to ${changedHost.onboarding}, expected ${currentHost.onboarding}")
+      checkHostsAre(current.participants.filterNot(_.participantId == hostId) :+ currentHost.copy(permission = newPermission))
+    case HostingChange.ConfirmationThresholdChanged(newThreshold) =>
+      require(newThreshold != current.threshold, s"$name already has confirmation threshold ${newThreshold.value}")
+      require(replacement.threshold == newThreshold,
+        s"intended change of $name sets confirmation threshold ${replacement.threshold.value}, expected ${newThreshold.value}")
+      checkHostsAre(current.participants)
+  }
+}

@@ -126,6 +126,10 @@ def checkHostingIsGuardianPolicy(mapping: PartyToParticipant): Unit = {
   }
   require(mapping.threshold.value == expectedConfirmationThreshold,
     s"$name confirmation threshold ${mapping.threshold.value}, expected $expectedConfirmationThreshold")
+  checkPartySigningKeysAreGuardianPolicy(mapping)
+}
+def checkPartySigningKeysAreGuardianPolicy(mapping: PartyToParticipant): Unit = {
+  val name = partyName(mapping.partyId)
   val signingKeys = mapping.partySigningKeysWithThreshold.getOrElse(throw new IllegalArgumentException(s"$name has no party signing keys"))
   require(signingKeys.threshold.value == expectedSigningKeyThreshold,
     s"$name signing key threshold ${signingKeys.threshold.value}, expected $expectedSigningKeyThreshold")

@@ -16,7 +16,7 @@ compile_cases=(
   "rotation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/owner_key_rotation_lib.canton $CONSOLE_DIR/gg_rotate_owner_key.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
   "allocation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/custody_allocate_party.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
   "show-topology${CASE_SEPARATOR}$CONSOLE_DIR/gg_show_topology.canton${CASE_SEPARATOR}failed with an exception (GG_PARTY_ID)"
-  "party-replication${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/party_replication.canton${CASE_SEPARATOR}missing required environment variable: REPLICATION_PHASE"
+  "party-replication${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/owner_key_rotation_lib.canton $CONSOLE_DIR/party_replication_lib.canton $CONSOLE_DIR/party_replication.canton${CASE_SEPARATOR}missing required environment variable: REPLICATION_PHASE"
   "forge-coin-contract${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/forge_coin_contract.canton${CASE_SEPARATOR}failed with an exception (app-provider not bound)"
   "guardian4-connect${CASE_SEPARATOR}$CONSOLE_DIR/guardian4_connect.canton${CASE_SEPARATOR}failed with an exception (guardian4 not bound)"
   "hosting-topology${CASE_SEPARATOR}$CONSOLE_DIR/hosting_topology.canton${CASE_SEPARATOR}failed with an exception (HOSTING_PARTY_IDS)"
