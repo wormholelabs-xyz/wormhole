@@ -64,7 +64,15 @@ readonly SECOND_RELEASE_AMOUNT="1.0"
 readonly SECOND_RELEASE_TRIMMED_AMOUNT=100000000
 readonly TAP_AMOUNT_USD="10.0"
 readonly OUTBOUND_NONCE=9
-readonly OUTSIDE_ALLOW_LIST_TEMPLATE="Splice.AmuletRules:AmuletRules"
+# Paths of the removed generic template route and a ledger path. Only /v1, /v1/healthz, /v1/readyz, /v1/managers
+# and /v1/flows/{flow} answer (NTT disclosure service, canton/ntt-disclosure-sets ab36968).
+readonly REMOVED_SERVICE_PATHS=(
+  "/v1/disclosures"
+  "/v1/disclosures?template=Splice.AmuletRules:AmuletRules"
+  "/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager"
+  "/v2/state/active-contracts"
+)
+readonly SERVICE_ROUTES_JSON='["/v1","/v1/flows/{flow}","/v1/healthz","/v1/managers","/v1/readyz"]'
 
 mkdir -p "$GATEWAY_STATE_DIR"
 chmod 700 "$GATEWAY_STATE_DIR"
@@ -213,7 +221,9 @@ gateway_up() {
     --json-api-client-cert-file /etc/disclosure/gateway-client.crt \
     --json-api-client-key-file /etc/disclosure/gateway-client.key \
     --access-token-file /etc/disclosure/gateway.jwt \
-    --disclosing-party "$GG_PARTY,$NTT_CUSTODY_PARTY" \
+    --guardian-governance-party "$GG_PARTY" \
+    --ntt-custody-party "$NTT_CUSTODY_PARTY" \
+    --behind-edge-proxy \
     --listen "0.0.0.0:$SERVICE_PORT" > /dev/null
 
   # nginx resolves its upstream at start: attach both networks before the start.
@@ -320,36 +330,30 @@ service_get() {
   curl_bounded -sS -w '\n%{http_code}' "$SERVICE_URL$1"
 }
 
+# check_service_answers <check-name> <path> <expected-status> <jq-filter of the JSON body, or - for any body>
+check_service_answers() {
+  local check_name="$1" path="$2" expected_status="$3" body_filter="$4" response
+  response="$(service_get "$path")"
+  if [[ "$(tail -n 1 <<<"$response")" == "$expected_status" ]] \
+      && { [[ "$body_filter" == "-" ]] || sed '$d' <<<"$response" | jq -e "$body_filter" > /dev/null 2>&1; }; then
+    pass "C3 $check_name: GET $path HTTP $expected_status $(sed '$d' <<<"$response" | head -c 120)"
+  else
+    fail_check "C3 $check_name: GET $path HTTP $(tail -n 1 <<<"$response"), expected $expected_status: $(sed '$d' <<<"$response" | head -c 200)"
+  fi
+}
+
 check_service_endpoints() {
-  local response
-  echo "== C3. Service health, allow-list and the register flow"
-  response="$(service_get /v1/healthz)"
-  if [[ "$(tail -n 1 <<<"$response")" == "200" ]] && sed '$d' <<<"$response" | jq -e --arg gg "$GG_PARTY" --arg custody "$NTT_CUSTODY_PARTY" \
-      '(.disclosingParties | sort) == ([$gg, $custody] | sort) and .ledgerEnd > 0' > /dev/null; then
-    pass "C3 healthz through the proxy: $(sed '$d' <<<"$response" | jq -c '{templates, ledgerEnd}')"
-  else
-    fail_check "C3 healthz: $response"
-  fi
-  response="$(service_get "/v1/disclosures?template=$OUTSIDE_ALLOW_LIST_TEMPLATE")"
-  if [[ "$(tail -n 1 <<<"$response")" == "403" ]]; then
-    pass "C3 template $OUTSIDE_ALLOW_LIST_TEMPLATE outside the allow-list: HTTP 403"
-  else
-    fail_check "C3 template outside the allow-list: $(tail -n 1 <<<"$response")"
-  fi
-  local manager_count
-  response="$(service_get "/v1/disclosures?template=Wormhole.Ntt.Manager:NttManager")"
-  manager_count="$(sed '$d' <<<"$response" | jq '[.. | .contractId? // empty] | length' 2> /dev/null || echo 0)"
-  if [[ "$(tail -n 1 <<<"$response")" == "200" ]] && (( manager_count >= 1 )); then
-    pass "C3 control NttManager template: HTTP 200, $manager_count contracts"
-  else
-    fail_check "C3 control NttManager template: HTTP $(tail -n 1 <<<"$response"), $manager_count contracts"
-  fi
-  response="$(service_get "/v1/flows/register")"
-  if [[ "$(tail -n 1 <<<"$response")" == "500" ]] && grep -qF "ReplayRootRegistry" <<<"$response"; then
-    pass "C3 register flow without operator readAs: HTTP $(tail -n 1 <<<"$response") $(sed '$d' <<<"$response" | head -c 200)"
-  else
-    fail_check "C3 register flow: $(tail -n 1 <<<"$response") $(sed '$d' <<<"$response" | head -c 200)"
-  fi
+  local removed_path
+  echo "== C3. Service health, the route set and the register flow"
+  check_service_answers "healthz through the proxy" /v1/healthz 200 '. == {status: "ok"}'
+  check_service_answers "readyz through the proxy" /v1/readyz 200 '. == {status: "ready"}'
+  check_service_answers "the index lists only the flow routes" /v1 200 "([.endpoints[].path] | sort) == $SERVICE_ROUTES_JSON"
+  for removed_path in "${REMOVED_SERVICE_PATHS[@]}"; do
+    check_service_answers "no route" "$removed_path" 404 -
+  done
+  check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
+  check_service_answers "register flow without --operator-party" /v1/flows/register 404 \
+    '.error == "flow register not enabled: the service has no operator party"'
 }
 
 # flow_set <flow> <query>: the flow response JSON. Fails unless HTTP 200.
