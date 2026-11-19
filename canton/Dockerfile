@@ -6,7 +6,7 @@
 # not the legacy `daml` assistant. Stage 1 installs dpm + the SDK pinned in
 # daml.yaml and builds the `wormhole-core` DAR; stage 2 runs a Canton sandbox
 # (Ledger API v2 on :6865) with the DAR preloaded, and a companion bootstrap step
-# (see devnet/canton-devnet.yaml) allocates the Operator party and creates the
+# (see devnet/canton-devnet.yaml) allocates the guardianGovernance party and creates the
 # CoreState via Test.TestCore:setup.
 #
 # dpm manages the SDK from daml.yaml's `sdk-version` (Daml 3.5.1 → Canton 3.5.x
