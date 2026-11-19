@@ -99,8 +99,9 @@ func buildCurrentCoreVersion(t *testing.T, dpm, cantonDir string) (retiringCoreV
 
 	currentCoreDir := filepath.Join(t.TempDir(), "core")
 	copyDamlProject(t, filepath.Join(cantonDir, "core"), currentCoreDir, func(damlYAML string) string {
-		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^version: \S+$`), "version: "+currentCoreVersion)
-		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^upgrades: \S+$`), "upgrades: "+coreDar)
+		damlYAML = regexp.MustCompile(`(?m)^upgrades: \S+\n`).ReplaceAllString(damlYAML, "")
+		damlYAML = replaceExactlyOnce(t, damlYAML, regexp.MustCompile(`(?m)^version: \S+$`),
+			"version: "+currentCoreVersion+"\nupgrades: "+coreDar)
 		return strings.ReplaceAll(damlYAML, "../dars/", vendoredDarsDir)
 	})
 	runCmd(t, currentCoreDir, dpm, "build")
@@ -248,7 +249,6 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 
 	lookalikeInputPath := filepath.Join(t.TempDir(), "lookalike-target.json")
 	lookalikeJSON, err := json.Marshal(lookalikeTarget{
-		Operator:           bridge.Operator,
 		GuardianGovernance: bridge.GuardianGovernance,
 		VictimOwner:        retiringCorePublish.Owner,
 		VictimEmitterID:    retiringCorePublish.EmitterID,
@@ -262,7 +262,7 @@ func TestCantonWatcherUpgradeWindow(t *testing.T) {
 	toExpectedPublish := func(published upgradeWindowPublish) observedPublish {
 		return observedPublish{
 			EmitterChain:   vaa.ChainIDCanton,
-			EmitterAddress: DeriveEmitterAddress(bridge.Operator, published.Owner, parseDamlUint64(t, published.EmitterID)),
+			EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, published.Owner, parseDamlUint64(t, published.EmitterID)),
 			Sequence:       parseDamlUint64(t, published.Sequence),
 			Nonce:          upgradeWindowNonce,
 			Payload:        decodeHexPayload(t, upgradeWindowPayloadHex),

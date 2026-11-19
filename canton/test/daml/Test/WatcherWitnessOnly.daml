@@ -4,7 +4,7 @@
 --
 -- The real guardianGovernance observes 'WitnessedPublisher', so it witnesses
 -- the nested 'PublishMessage' on an 'Emitter' of a rogue-governance registry,
--- whose stakeholders are operator, owner, and the rogue party. The watcher
+-- whose stakeholders are the owner and the rogue party. The watcher
 -- must drop that publish. The forged message has the trusted emitter's
 -- identity and sequence.
 module Test.WatcherWitnessOnly where
@@ -64,33 +64,33 @@ forgedWitnessOnlyPayload = "f2f2"
 
 -- | In ledger order:
 --   1. The trusted owner publishes through the real registry and 'CoreState'.
---   2. The same owner, with operator and a rogue governance party, publishes
+--   2. The same owner, with a rogue governance party, publishes
 --      through a rogue registry and a shadow 'CoreState', inside a
 --      'WitnessedPublisher' exercise that the real guardianGovernance observes.
 integrationWitnessOnlyPublish : RealBridge -> Script WitnessOnlyPublishes
 integrationWitnessOnlyPublish bridge = do
-  let operator = bridge.operator
+  let guardianGovernance = bridge.guardianGovernance
   trustedOwner <- allocateParty "WitnessOnlyTrustedOwner"
-  trustedEmitterCid <- registerEmitter operator trustedOwner
-  (_, trustedMessage) <- publishVia operator bridge.coreStateCid trustedOwner trustedEmitterCid
+  trustedEmitterCid <- registerEmitter guardianGovernance trustedOwner
+  (_, trustedMessage) <- publishVia guardianGovernance bridge.coreStateCid trustedOwner trustedEmitterCid
                            trustedWitnessOnlyNonce trustedWitnessOnlyPayload 0
 
   rogueGovernance <- allocateParty "WitnessOnlyRogueGovernance"
-  rogueRegistryCid <- submit (actAs operator <> actAs rogueGovernance) do
-    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
-  rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
+  rogueRegistryCid <- submit rogueGovernance do
+    createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
   (_, forgedEmitterCid) <- submit (actAs trustedOwner <> disclose rogueRegistryDisclosure) do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = trustedOwner, payer = trustedOwner, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = None
+      expectedGuardianGovernance = rogueGovernance
   rogueFeeCustody <- allocateParty "WitnessOnlyRogueFeeCustody"
   rogueFeeInstrumentAdmin <- allocateParty "WitnessOnlyRogueFeeInstrumentAdmin"
   let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
-  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance <> actAs rogueFeeCustody) do
-    createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
+  shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
                  shadowFeeInstrument rogueFeeCustody)
-  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure operator shadowCoreStateCid
+  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
   publisherCid <- submit trustedOwner do
     createCmd WitnessedPublisher with owner = trustedOwner, witness = bridge.guardianGovernance
   forgedMessage <- submit (actAs trustedOwner <> disclose shadowCoreStateDisclosure) do

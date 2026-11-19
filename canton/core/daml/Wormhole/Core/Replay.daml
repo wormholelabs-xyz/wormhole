@@ -31,13 +31,14 @@
 -- (fail-closed) — the opposite of the key model.
 --
 -- The replay vector is therefore node RE-CREATION. Against THIRD PARTIES the
--- signatory design closes it: the @operator@ co-signs every node (inherited from
--- the 'ReplayRootRegistry' anchor at the root, from the archived parent at splits
--- — never per consume), and claiming a root requires the consumer's authority,
+-- signatory design closes it: @guardianGovernance@ co-signs every node (inherited
+-- from the 'ReplayRootRegistry' anchor at the root, from the archived parent at
+-- splits — never per consume), and claiming a root requires the consumer's authority,
 -- so nobody can archive, re-create, or fork someone ELSE'S scope. Against the
 -- consumer ITSELF there is deliberately no defense: minting parallel roots is
 -- self-harm (see 'ReplayRootRegistry'), the same class as any signatory being
--- able to unmake its own state.
+-- able to unmake its own state. When @consumer == guardianGovernance@ (NTT),
+-- guardianGovernance alone signs.
 --
 -- OFF-LEDGER: consumers locate the covering node via a disclosure service — an
 -- ACS index over (consumer, namespace, prefix), untrusted for safety (a wrong or
@@ -76,14 +77,14 @@ replayNamespaceMaxLength = 128
 -- attestation surface — guardians never re-check target-chain consumption.
 template ReplayNode
   with
-    consumer       : Party    -- integrator scope party; bears the replay risk
-    operator       : Party    -- co-signs: no unilateral archive or re-create
+    consumer           : Party  -- integrator scope party; bears the replay risk
+    guardianGovernance : Party  -- co-signs: the consumer alone cannot archive or re-create
     namespace      : Text     -- opaque sub-scope: one consumer, many tries; 1..128 chars
     prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- copied to children; see 'defaultSplitThreshold'
     consumed       : Set Bytes  -- suffixes, each exactly (64 − |prefix|) nibbles
   where
-    signatory consumer, operator
+    signatory consumer, guardianGovernance
     -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
     -- (signatories can always sign a well-formed shadow node). Depth-64 nodes are
     -- unrepresentable; suffix lengths pin the membership arithmetic; the

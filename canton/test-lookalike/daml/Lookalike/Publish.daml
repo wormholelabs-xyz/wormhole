@@ -6,7 +6,6 @@ import Daml.Script
 import Wormhole.Core.State
 
 data LookalikeTarget = LookalikeTarget with
-    operator           : Party
     guardianGovernance : Party
     victimOwner        : Party
     victimEmitterId    : Int
@@ -26,7 +25,7 @@ integrationLookalikePublish target = do
     createCmd Emitter with
       forger
       guardianGovernance = target.guardianGovernance
-      registrar = target.operator
+      registrar = target.guardianGovernance
       owner = target.victimOwner
       emitterId = target.victimEmitterId
       sequence = target.victimSequence

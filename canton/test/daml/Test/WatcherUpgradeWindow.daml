@@ -37,10 +37,10 @@ upgradeWindowPayload = "55667788"
 -- | Registers a fresh emitter for a new owner on the real bridge and publishes once.
 integrationUpgradeWindowPublish : UpgradeWindowPublishInput -> Script UpgradeWindowPublish
 integrationUpgradeWindowPublish input = do
-  let operator = input.bridge.operator
+  let guardianGovernance = input.bridge.guardianGovernance
   owner <- allocateParty input.ownerHint
-  emitterCid <- registerEmitter operator owner
-  (_, message) <- publishVia operator input.bridge.coreStateCid owner emitterCid
+  emitterCid <- registerEmitter guardianGovernance owner
+  (_, message) <- publishVia guardianGovernance input.bridge.coreStateCid owner emitterCid
                     upgradeWindowNonce upgradeWindowPayload 0
   message.owner === owner
   pure UpgradeWindowPublish with
@@ -58,10 +58,10 @@ data ExistingEmitterPublishInput = ExistingEmitterPublishInput with
 
 -- | 'publishVia' with an optional package-id preference for the submission.
 publishPreferring : Optional Text -> Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script (ContractId Emitter, WormholeMessage)
-publishPreferring None operator csId owner emCid nonce payload consistencyLevel =
-  publishVia operator csId owner emCid nonce payload consistencyLevel
-publishPreferring (Some corePackageId) operator csId owner emCid nonce payload consistencyLevel = do
-  csDisc <- fromSome <$> queryDisclosure operator csId
+publishPreferring None guardianGovernance csId owner emCid nonce payload consistencyLevel =
+  publishVia guardianGovernance csId owner emCid nonce payload consistencyLevel
+publishPreferring (Some corePackageId) guardianGovernance csId owner emCid nonce payload consistencyLevel = do
+  csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
   submit (actAs owner <> disclose csDisc <> packagePreference [PackageId corePackageId]) do
     exerciseCmd emCid PublishMessage with
       nonce, payload, consistencyLevel
@@ -72,12 +72,12 @@ publishPreferring (Some corePackageId) operator csId owner emCid nonce payload c
 -- | Publishes once on the owner's only emitter on the real bridge, whichever core version created it.
 integrationPublishOnExistingEmitter : ExistingEmitterPublishInput -> Script UpgradeWindowPublish
 integrationPublishOnExistingEmitter input = do
-  let operator = input.bridge.operator
+  let guardianGovernance = input.bridge.guardianGovernance
   let owner = input.owner
-  ownerEmitters <- filter (\(_, emitter) -> emitter.operator == operator && emitter.owner == owner)
+  ownerEmitters <- filter (\(_, emitter) -> emitter.guardianGovernance == guardianGovernance && emitter.owner == owner)
                      <$> query @Emitter owner
   [(emitterCid, existingEmitter)] <- pure ownerEmitters
-  (_, message) <- publishPreferring input.preferredCorePackageId operator input.bridge.coreStateCid owner emitterCid
+  (_, message) <- publishPreferring input.preferredCorePackageId guardianGovernance input.bridge.coreStateCid owner emitterCid
                     upgradeWindowNonce upgradeWindowPayload 0
   message.owner === owner
   message.emitterId === existingEmitter.emitterId
