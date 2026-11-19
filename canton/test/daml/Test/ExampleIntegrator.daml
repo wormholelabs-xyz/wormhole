@@ -11,6 +11,8 @@
 --
 -- Guardian signatures prove the VAA is real, NOT that it is addressed to this
 -- app: 'Redeem' checks the emitter against the registered peer before acting.
+-- 'Redeem' pins the CoreState by @guardianGovernance@; copy that pin, not the
+-- operator pin alone.
 --
 -- Test package only; a template for integrator packages, not part of the core
 -- DAR.
@@ -18,14 +20,20 @@ module Test.ExampleIntegrator where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Map qualified as Map
 import DA.Optional (fromSome)
+import DA.Text (isInfixOf)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet (GuardianSet(..))
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (parseVAA)
-import Test.TestCore (setup, govSetFeeVAA, devnetGuardian, devnetGuardianPubKey)
+import Test.TestCore
+  ( setup, govSetFeeVAA, devnetGuardian, devnetGuardianPubKey
+  , set1MessageVAA, devnetGuardianSet1Key, devnetGuardianSet1PubKey )
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 
 -- | Stand-in for the integrator's real effect (a mint / unlock). Co-signed:
@@ -42,12 +50,13 @@ template RedeemReceipt
 
 template ExampleIntegrator
   with
-    manager     : Party    -- app party: signatory, and the replay-scope party
-    operator    : Party    -- the wormhole core operator this app trusts
-    namespace   : Text     -- replay-trie namespace; the scope is (manager, namespace)
-    users       : [Party]  -- redeemers; observers so they can exercise Redeem
-    peerChain   : Int      -- registered source-chain peer of this app
-    peerAddress : Bytes32
+    manager            : Party    -- app party: signatory, and the replay-scope party
+    operator           : Party    -- the wormhole core operator this app trusts
+    guardianGovernance : Party    -- CoreState authenticity anchor, from the deployment config
+    namespace          : Text     -- replay-trie namespace; the scope is (manager, namespace)
+    users              : [Party]  -- redeemers; observers so they can exercise Redeem
+    peerChain          : Int      -- registered source-chain peer of this app
+    peerAddress        : Bytes32
   where
     signatory manager
     observer users
@@ -67,11 +76,12 @@ template ExampleIntegrator
         pubKeys       : [(Int, Bytes)]
       controller redeemer
       do
-        -- Cids arrive from an untrusted submitter, so authenticate the PAYLOAD:
-        -- a redeemer must not point at a fabricated CoreState with an attacker
-        -- guardian set. A direct fetch is not authorized here (no CoreState
-        -- stakeholder among the authorizers), so the pin goes through the
-        -- 'GetOperator' read choice, which needs only its controller.
+        -- SECURITY: pin guardianGovernance first; the operator pin is redundant.
+        -- One operator key can co-sign a shadow CoreState under a throwaway gg;
+        -- it cannot sign as the real gg. Read choices, because no CoreState
+        -- stakeholder authorizes a fetch here.
+        csGuardianGovernance <- exercise coreStateCid GetGuardianGovernance with reader = redeemer
+        assertMsg "unexpected core guardianGovernance" (csGuardianGovernance == guardianGovernance)
         csOperator <- exercise coreStateCid GetOperator with reader = redeemer
         assertMsg "unexpected core operator" (csOperator == operator)
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
@@ -89,12 +99,13 @@ template ExampleIntegrator
 -- | Shared fixture: a bootstrapped bridge, one integrator app with its replay
 -- trie root, and the CoreState disclosure users attach to redemptions.
 data IntegratorFixture = IntegratorFixture with
-  operator : Party
-  csId     : ContractId CoreState
-  manager  : Party
-  users    : [Party]
-  intCid   : ContractId ExampleIntegrator
-  csDisc   : Disclosure
+  operator           : Party
+  guardianGovernance : Party
+  csId               : ContractId CoreState
+  manager            : Party
+  users              : [Party]
+  intCid             : ContractId ExampleIntegrator
+  csDisc             : Disclosure
 
 -- | The example app's replay-trie namespace. Opaque to the core; a real
 -- integrator derives it from its own stable identity (NTT: a hash of the
@@ -104,7 +115,7 @@ exampleNamespace = "example"
 
 setupIntegrator : Script IntegratorFixture
 setupIntegrator = do
-  (operator, _, csId) <- setup
+  (operator, guardianGovernance, csId) <- setup
   manager <- allocateParty "ExampleManager"
   alice <- allocateParty "RedeemAlice"
   bob <- allocateParty "RedeemBob"
@@ -112,6 +123,7 @@ setupIntegrator = do
     createCmd ExampleIntegrator with
       manager
       operator
+      guardianGovernance
       namespace = exampleNamespace
       users = [alice, bob]
       -- govSetFeeVAA is emitted by (chain 1, 0x..04); register that as the peer.
@@ -122,7 +134,7 @@ setupIntegrator = do
   -- The app's disclosure service exports the CoreState disclosure (the
   -- operator is a stakeholder) and, per redemption, the covering node's.
   csDisc <- fromSome <$> queryDisclosure operator csId
-  pure IntegratorFixture with operator, csId, manager, users = [alice, bob], intCid, csDisc
+  pure IntegratorFixture with operator, guardianGovernance, csId, manager, users = [alice, bob], intCid, csDisc
 
 devnetPubKeys : [(Int, Bytes)]
 devnetPubKeys = [(0, devnetGuardianPubKey)]
@@ -134,7 +146,7 @@ devnetPubKeys = [(0, devnetGuardianPubKey)]
 -- the consumer's read view could double-consume.
 testIntegratorRedeem : Script ()
 testIntegratorRedeem = do
-  IntegratorFixture{operator, csId, manager, users = [alice, bob], intCid, csDisc} <- setupIntegrator
+  IntegratorFixture{operator, guardianGovernance, csId, manager, users = [alice, bob], intCid, csDisc} <- setupIntegrator
   -- The disclosure service resolves the covering node for the VAA's digest;
   -- 'parseVAA' is pure, so the script computes the digest as the service would.
   let digest = (parseVAA govSetFeeVAA).hash
@@ -180,6 +192,7 @@ testIntegratorRedeem = do
     createCmd ExampleIntegrator with
       manager = manager2
       operator
+      guardianGovernance
       namespace = exampleNamespace
       users = [alice]
       peerChain = solanaGovernanceChainId
@@ -197,7 +210,7 @@ testIntegratorRedeem = do
   receipt2.manager === manager2
 
   -- A fabricated CoreState — attacker-signed, so its operator field cannot
-  -- name the real one — dies on the GetOperator pin before verification or
+  -- name the real one — dies on the guardianGovernance pin before verification or
   -- consumption run.
   fakeOperator <- allocateParty "FakeOperator"
   fakeGovernance <- allocateParty "FakeGovernance"
@@ -213,3 +226,119 @@ testIntegratorRedeem = do
       replayNodeCid = freshCid
       encodedVAA = govSetFeeVAA
       pubKeys = devnetPubKeys
+
+data CoreStatePinCase = CoreStatePinCase with
+    caseName                   : Text
+    coreStateCid               : ContractId CoreState
+    coreStateDisclosure        : Disclosure
+    encodedVAA                 : Bytes
+    pubKeys                    : [(Int, Bytes)]
+    peerChain                  : Int
+    peerAddress                : Bytes32
+    expectedGuardianGovernance : Party
+    expectedRejection          : Optional Text  -- None: Redeem must succeed
+
+shadowCoreState : Party -> Party -> [Bytes20] -> CoreState
+shadowCoreState signingOperator signingGovernance guardianKeys =
+  mkInitialCoreState signingOperator signingGovernance solanaGovernanceChainId
+    defaultGovernanceContract guardianKeys
+    (InstrumentId with admin = signingGovernance, id = "UNUSED") signingGovernance
+
+shadowCoreStateWithSet1 : Party -> Party -> CoreState
+shadowCoreStateWithSet1 signingOperator signingGovernance =
+  (shadowCoreState signingOperator signingGovernance [devnetGuardian]) with
+    guardianSetIndex = 1
+    guardianSets = Map.fromList
+      [(1, GuardianSet with keys = [devnetGuardianSet1Key], expirationTime = None)]
+
+-- | 'Redeem' accepts only a CoreState signed by the configured gg. Rows 3-4
+-- are shadows a compromised operator key co-signs under a throwaway gg.
+testIntegratorCoreStatePin : Script ()
+testIntegratorCoreStatePin = do
+  (operator, guardianGovernance, realCsId) <- setup
+  realCsDisc <- fromSome <$> queryDisclosure operator realCsId
+  throwawayGovernance <- allocateParty "ThrowawayGovernance"
+  fakeOperator <- allocateParty "FakeOperator"
+  fakeGovernance <- allocateParty "FakeGovernance"
+
+  shadowRealGuardiansCid <- submit (actAs operator <> actAs throwawayGovernance) do
+    createCmd (shadowCoreState operator throwawayGovernance [devnetGuardian])
+  shadowFakeGuardiansCid <- submit (actAs operator <> actAs throwawayGovernance) do
+    createCmd (shadowCoreStateWithSet1 operator throwawayGovernance)
+  shadowNoOperatorKeyCid <- submit (actAs fakeOperator <> actAs fakeGovernance) do
+    createCmd (shadowCoreState fakeOperator fakeGovernance [devnetGuardian])
+  shadowRealGuardiansDisc <- fromSome <$> queryDisclosure operator shadowRealGuardiansCid
+  shadowFakeGuardiansDisc <- fromSome <$> queryDisclosure operator shadowFakeGuardiansCid
+  shadowNoOperatorKeyDisc <- fromSome <$> queryDisclosure fakeOperator shadowNoOperatorKeyCid
+
+  let set0Keys = [(0, devnetGuardianPubKey)]
+      set1Keys = [(0, devnetGuardianSet1PubKey)]
+      set1PeerAddress = "000000000000000000000000000000000000000000000000000000000000002a"
+      pinCases =
+        [ CoreStatePinCase "real CoreState accepted" realCsId realCsDisc
+            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            guardianGovernance None
+        , CoreStatePinCase "real CoreState rejects a set-1 VAA" realCsId realCsDisc
+            set1MessageVAA set1Keys 2 set1PeerAddress
+            guardianGovernance (Some "unknown guardian set index")
+        , CoreStatePinCase "shadow with real operator and real guardians" shadowRealGuardiansCid shadowRealGuardiansDisc
+            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            guardianGovernance (Some "unexpected core guardianGovernance")
+        , CoreStatePinCase "shadow with real operator and fake guardians" shadowFakeGuardiansCid shadowFakeGuardiansDisc
+            set1MessageVAA set1Keys 2 set1PeerAddress
+            guardianGovernance (Some "unexpected core guardianGovernance")
+        , CoreStatePinCase "shadow without the operator key" shadowNoOperatorKeyCid shadowNoOperatorKeyDisc
+            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            guardianGovernance (Some "unexpected core guardianGovernance")
+        , CoreStatePinCase "integrator configured with a wrong gg" realCsId realCsDisc
+            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            throwawayGovernance (Some "unexpected core guardianGovernance")
+        ]
+
+  forA_ (zip [1 .. length pinCases] pinCases) \(caseIndex, pinCase) -> do
+    manager <- allocateParty ("PinManager" <> show caseIndex)
+    redeemer <- allocateParty ("PinRedeemer" <> show caseIndex)
+    integratorCid <- submit manager do
+      createCmd ExampleIntegrator with
+        manager
+        operator
+        guardianGovernance = pinCase.expectedGuardianGovernance
+        namespace = exampleNamespace
+        users = [redeemer]
+        peerChain = pinCase.peerChain
+        peerAddress = pinCase.peerAddress
+    _ <- registerReplayRoot operator manager exampleNamespace defaultSplitThreshold
+    let digest = (parseVAA pinCase.encodedVAA).hash
+    (nodeCid, nodeDisc) <- coveringDisclosure manager manager exampleNamespace digest
+    redeemResult <- trySubmit (actAs redeemer <> disclose pinCase.coreStateDisclosure <> disclose nodeDisc) do
+      exerciseCmd integratorCid Redeem with
+        redeemer
+        coreStateCid = pinCase.coreStateCid
+        replayNodeCid = nodeCid
+        encodedVAA = pinCase.encodedVAA
+        pubKeys = pinCase.pubKeys
+    case (pinCase.expectedRejection, redeemResult) of
+      (None, Right _) -> pure ()
+      (None, Left redeemError) -> abort (pinCase.caseName <> ": rejected: " <> show redeemError)
+      (Some _, Right _) -> abort (pinCase.caseName <> ": accepted")
+      (Some expectedMessage, Left (FailureStatusError failureStatus)) ->
+        assertMsg (pinCase.caseName <> ": unexpected error: " <> failureStatus.message)
+          (expectedMessage `isInfixOf` failureStatus.message)
+      (Some _, Left otherError) -> abort (pinCase.caseName <> ": unexpected error: " <> show otherError)
+
+-- | Premise of the gg pin: one operator key cannot create a CoreState that
+-- names the real gg.
+testCompromisedOperatorCannotForgeCoreState : Script ()
+testCompromisedOperatorCannotForgeCoreState = do
+  (operator, guardianGovernance, _) <- setup
+  outsider <- allocateParty "ForgeOutsider"
+  let forgedSubmitters =
+        [ ("operator alone", actAs operator)
+        , ("operator and an outsider", actAs operator <> actAs outsider)
+        ]
+  forA_ forgedSubmitters \(submitterName, submitter) -> do
+    forgeResult <- trySubmit submitter do
+      createCmd (shadowCoreStateWithSet1 operator guardianGovernance)
+    case forgeResult of
+      Left _ -> pure ()
+      Right _ -> abort ("CoreState naming the real gg created by " <> submitterName)
