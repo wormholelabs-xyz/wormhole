@@ -460,6 +460,9 @@ with Canton Coin or any standard token, chosen at genesis
 - **The fee registry never runs as `guardianGovernance` or the `operator`.**
   The registry's `Allocation_ExecuteTransfer` body runs with the authority of
   the allocation controllers: the payer (sender, executor) plus the receiver.
+  It also runs with the authority of the allocation signatories, which include
+  the fee instrument admin. The `CoreState` precondition and `chargeFee` reject
+  `guardianGovernance` and `operator` as the fee instrument admin.
   From `wormhole-core` 0.8.3 the receiver is `feeCustody`, a quorum party in the
   guardian namespace and a `CoreState` co-signer (the source of the receiver
   authority). The `CoreState` precondition rejects `feeRecipient` equal to
@@ -478,11 +481,13 @@ with Canton Coin or any standard token, chosen at genesis
   `TransferFees` VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
   guardianGovernance) recording the amount, the VAA's 32-byte recipient, and the
   VAA hash — the artifact the guardians' custody policy matches when
-  threshold-signing the outbound transfer: one prepared transaction that
-  transfers as `feeCustody` and archives the authorization as
-  `guardianGovernance` (`docs/canton_guardian_operations.md` §7.6). Key custody
-  enforces "only per authorization", the same trust plane as the guardian
-  keys.
+  threshold-signing the outbound transfer. The prepare endpoint accepts one
+  command, so the withdrawal is two prepared transactions. First,
+  `guardianGovernance` alone archives the authorization. Then `feeCustody`
+  alone submits the transfer. The ledger accepts one archive of a contract, so
+  each authorization backs at most one transfer
+  (`docs/canton_guardian_operations.md` §7.6). Key custody enforces "only per
+  authorization", the same trust plane as the guardian keys.
 - Token Standard **V2** (CIP-0112) is approved but not yet on mainnet; it
   arrives as a parallel `-v2` interface family, and
   `Wormhole.Core.Fees.chargeFee` is the single seam where support would be
@@ -1030,6 +1035,7 @@ For 0.8.3, the baseline is `dars/wormhole-core-0.8.2.dar`.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState` (§4.2).
+0.8.3 also adds `ensure` rules to `CoreState`: the fee instrument admin is not `guardianGovernance` and not the `operator`.
 `damlc` reports these changes only as warnings.
 A 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3.
 No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2 or 0.8.3. Thus 0.8.3 starts from a fresh genesis with a new operator party, with no migration of earlier contracts.
@@ -2004,9 +2010,8 @@ signed at setup. If the operator is stood up as a k-of-n external threshold
 party (the §9 machinery, `GG_THRESHOLD=k`), the interactive-submission signing
 ceremony is needed for genesis only. Fee custody is a separate quorum party,
 `feeCustody` (§4.2): accrued fees sit in its token holdings, and withdrawing
-them is a threshold ceremony that signs as `feeCustody` for the transfer and as
-`guardianGovernance` for the archive of the on-ledger
-`FeeWithdrawalAuthorization`. Because every publish reads the fee off the
+them is a threshold ceremony of two transactions: `guardianGovernance` archives
+the on-ledger `FeeWithdrawalAuthorization` first, then `feeCustody` transfers. Because every publish reads the fee off the
 `CoreState`, the participants of `guardianGovernance` and `feeCustody` are
 informees of every publish, a deliberate throughput/liveness trade recorded in
 Open Questions.

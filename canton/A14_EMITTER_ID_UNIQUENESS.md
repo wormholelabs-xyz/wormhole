@@ -340,7 +340,7 @@ No message id of 0.8.3 can then be equal to a message id of an earlier deploymen
 
 1. Build the dependents on 0.8.3 (NTT-first rule).
 2. Allocate a new operator party. Do not reuse the operator party of an earlier deployment.
-3. Upload the 0.8.3 DAR and the rebuilt dependent DARs to each guardian participant and to the operator participant.
+3. Upload the 0.8.3 DAR and the rebuilt dependent DARs to each guardian participant. Upload them to the operator participant too.
 4. Vet these DARs on each of these participants.
    Do not vet an earlier `wormhole-core` version on a guardian participant.
 5. Allocate `feeCustody` in the `guardianGovernance` namespace, with the hosts, the confirmation threshold and the

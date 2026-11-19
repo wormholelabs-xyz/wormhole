@@ -53,10 +53,25 @@ Each custody party copies the hosts, the confirmation threshold and the owner ke
 | Role | Fee recipient of `CoreState`. It owns the collected fees. |
 | Holdings | Only holdings of the fee instrument. |
 
-The fee registry code runs with the authority of `feeCustody` on each paid charge.
+The fee registry code runs on each paid charge with the authority of the payer and `feeCustody`.
+It also has the authority of the fee instrument admin, which signs each fee allocation.
 `CoreState` rejects `gg` and the `operator` as the fee recipient.
+`CoreState` also rejects `gg` and the `operator` as the fee instrument admin.
 A charge with a fee above 0 rejects `gg` and the `operator` as the payer.
 Thus fee registry code never runs with the authority of `gg` or the `operator`.
+
+Two residuals stay. A red-team test on `wormhole-core` 0.8.3 confirmed each of them:
+
+- Fee registry code can publish on an `Emitter` that the payer owns. The guardians sign that message.
+- Fee registry code can register an `Emitter` that `feeCustody` owns. It can then publish on that `Emitter`.
+
+Rules for these residuals:
+
+- Use a fee payer that owns no `Emitter`. Tell each integrator to obey this rule.
+- No contract and no peer chain gives a meaning to a signature of `feeCustody`.
+- No contract and no peer chain gives a meaning to a message from an `Emitter` that `feeCustody` owns.
+- `feeCustody` owns no `Emitter`. `feeCustody` is not the admin of an NTT deployment.
+- `feeCustody` is not `nttCustody`. If it is, Amulet code runs as the owner of all NTT reserves.
 
 The `operator` party is not a guardian party. Wormhole Labs operates it.
 Each deployment of `wormhole-core` 0.8.3 starts with a new operator party (Section 7.2).
@@ -208,14 +223,6 @@ For a late start, Canton party replication is necessary (Section 4.3).
 A change to the `gg` hosting mapping needs the `gg` threshold.
 Your participant can remove its own hosting at any time.
 
-### 4.2 Host `feeCustody`
-
-Do steps 2 to 4 and 8 to 9 of Section 4.1 for the `feeCustody` party before genesis.
-The `feeCustody` mapping must have the hosts, the confirmation threshold and the signing keys of `gg`.
-Do not grant the watcher user rights for `feeCustody`.
-
-LocalNet rehearsal: `CUSTODY_PARTY_NAME=feeCustody` [`custody_host.sh`](../canton/localnet/custody_host.sh).
-
 LocalNet rehearsal: [`gg_host.sh`](../canton/localnet/gg_host.sh) hosts `gg` on three participants.
 [`gg_show_topology.sh`](../canton/localnet/gg_show_topology.sh) shows `threshold=2` for the namespace.
 For the hosting, it shows `confirmationThreshold=2`, three hosts at `Confirmation` and `signingKeys=2-of-3`.
@@ -230,6 +237,14 @@ With one host, the threshold is 1.
 **Open item:** the confirmation threshold of `gg` for MainNet.
 A high threshold stops `gg` transactions when few hosts are offline.
 A low threshold lets fewer compromised participants confirm for `gg`.
+
+### 4.2 Host `feeCustody`
+
+Do steps 2 to 4 and 8 to 9 of Section 4.1 for the `feeCustody` party before genesis.
+The `feeCustody` mapping must have the hosts, the confirmation threshold and the signing keys of `gg`.
+Do not grant the watcher user rights for `feeCustody`.
+
+LocalNet rehearsal: `CUSTODY_PARTY_NAME=feeCustody` [`custody_host.sh`](../canton/localnet/custody_host.sh).
 
 ### 4.3 Add a host after genesis
 
@@ -423,7 +438,8 @@ To unvet a package is to remove the vetting of that package from your participan
 Splice Amulet code runs with the authority of `feeCustody`.
 The core bridge charges message fees in Amulet, and `feeCustody` receives the fees.
 Thus, when your participant vets an Amulet version, you trust that version with the collected fees.
-A vetted Amulet version cannot move `gg` holdings and cannot publish a message.
+A vetted Amulet version cannot move `gg` holdings. It cannot publish on an `Emitter` that `gg` owns.
+It can publish on an `Emitter` that the fee payer or `feeCustody` owns (Section 2).
 
 **Open item:** whether the Splice validator automation vets new Amulet versions automatically on guardian participants.
 If it does, record this as an accepted trust in DSO governance.
@@ -758,21 +774,26 @@ Check the `CoreState` transaction:
 3. Make sure that the arguments contain the agreed governance chain and governance contract.
 4. Make sure that the arguments set `chainId` to exactly 75.
 5. Make sure that the arguments set `feeRecipient` to the `feeCustody` party, not to `gg`.
-6. Make sure that `feeInstrument` is the agreed instrument admin and instrument ID.
-7. Make sure that `operator` is the agreed new operator party.
-8. Make sure that `guardianSetIndex` is 0.
-9. Make sure that `messageFee` is the agreed value.
-10. Make sure that `consumedGovernance` is empty.
-11. Make sure that the template package ID is the agreed `wormhole-core` package ID.
-12. Make sure that the prepared transaction has exactly three signer sets: `operator`, `gg` and `feeCustody`.
-13. Sign the prepared hash for `gg` and for `feeCustody` (Section 7.1).
+6. Make sure that `feeRecipient` is not `nttCustody`.
+7. Make sure that `feeInstrument` is the agreed instrument admin and instrument ID.
+8. Make sure that the `feeInstrument` admin is not `gg`.
+9. Make sure that the `feeInstrument` admin is not the `operator`.
+10. Make sure that `operator` is the agreed new operator party.
+11. Make sure that `guardianSetIndex` is 0.
+12. Make sure that `messageFee` is 0 (Section 7.8).
+13. Make sure that `consumedGovernance` is empty.
+14. Make sure that the template package ID is the agreed `wormhole-core` package ID.
+15. Make sure that the prepared transaction has exactly three signer sets: `operator`, `gg` and `feeCustody`.
+16. Sign the prepared hash for `gg` and for `feeCustody` (Section 7.1).
+
+The `CoreState` precondition also rejects these values. It does not replace the checks.
 
 Check the `EmitterRegistry` transaction:
 
 1. Make sure that your participant shows exactly one `CoreState` before you sign this transaction.
 2. Make sure that `operator` and `guardianGovernance` are the parties of the `CoreState`.
 3. Make sure that `nextId` is 0.
-4. Make sure that `registrationFee` is the agreed value.
+4. Make sure that `registrationFee` is 0 (Section 7.8).
 5. Make sure that the template package ID is the agreed `wormhole-core` package ID.
 6. Sign the prepared hash (Section 7.1).
 
@@ -796,6 +817,8 @@ An emitter ID is an integer from 0 to 2^53 - 1 (`maxEmitterId`).
 
 LocalNet rehearsal: [`gg_genesis.sh`](../canton/localnet/gg_genesis.sh).
 Run `CUSTODY_PARTY_NAME=feeCustody custody_host.sh` before `gg_genesis.sh`.
+Before the first prepare, the script makes sure that `feeCustody` is in the `gg` namespace.
+It also makes sure that `feeCustody` is not `nttCustody`.
 The `operator` and two of three owner keys for each namespace party sign each of the two transactions.
 These `CoreState` transactions fail:
 
@@ -803,8 +826,10 @@ These `CoreState` transactions fail:
 - No `feeCustody` signature. The error names `feeCustody`.
 - `feeCustody` with one of three owner keys: `FAILED_TO_EXECUTE_TRANSACTION`.
 - `feeRecipient` set to `gg`. The `CoreState` precondition fails.
+- The `feeInstrument` admin set to `gg`. The `CoreState` precondition fails.
 
 After a failure, the script creates only the missing contracts.
+On a rerun, it checks the `feeRecipient` and the signatories of the active `CoreState`.
 
 ### 7.3 Guardian set upgrade on Canton
 
@@ -993,20 +1018,60 @@ A `TransferFees` governance VAA creates a `FeeWithdrawalAuthorization`.
 `gg` is its only signatory, and the `operator` is an observer.
 The contract has no choice. Thus only a transaction that `gg` signs can archive it.
 The fees are holdings of `feeCustody`.
-The withdrawal is one prepared transaction with two root commands:
-
-- A `TransferFactory_Transfer` with `sender` set to `feeCustody`. The `feeCustody` owner keys sign it.
-- The archive of the `FeeWithdrawalAuthorization`. The `gg` owner keys sign it.
-
-The registry code of the transfer gets only the authority of `feeCustody`.
 The `amount` field is in units of 10^-10 of the fee instrument.
 
-1. Make sure that an active `FeeWithdrawalAuthorization` exists with the same amount.
-2. Make sure that the Canton receiver is the agreed party for the 32-byte `recipient` of the VAA.
-3. Make sure that the transfer has `sender` set to `feeCustody` and the fee instrument.
-4. Make sure that the transaction archives the `FeeWithdrawalAuthorization`.
-5. Make sure that the prepared transaction has exactly two signer sets: `feeCustody` and `gg`.
-6. Sign the prepared hash for `feeCustody` and for `gg` (Section 7.1).
+The prepare endpoint accepts one command in each transaction (Section 7.2).
+Thus the withdrawal is two prepared transactions:
+
+| Order | Transaction | `actAs` | Signer sets |
+| - | - | - | - |
+| 1 | Archive of the `FeeWithdrawalAuthorization` | `gg` only | `gg` |
+| 2 | `TransferFactory_Transfer` with `sender` set to `feeCustody` | `feeCustody` only | `feeCustody` |
+
+Do the archive first. The reasons are:
+
+- No Daml rule connects the transfer to the authorization. The transfer does not read the authorization.
+- The ledger accepts one archive of a contract. It rejects each other archive of that contract.
+- Thus, with the archive first, each authorization gives a maximum of one transfer.
+- With the transfer first, the authorization stays active after the transfer. A second transfer is then possible.
+- If the archive commits and the transfer fails, the fees stay with `feeCustody`. This is safe.
+
+`gg` is not a submitter of the transfer. Thus the registry code of the transfer gets only the authority of `feeCustody`.
+The coordinator keeps a withdrawal record. The record has one row for each authorization.
+Each row has the update ID of the archive and the update ID of the transfer.
+
+Transaction 1, the archive:
+
+1. Make sure that exactly one active `FeeWithdrawalAuthorization` has the `vaaHash` of the VAA.
+2. Make sure that its `amount` is equal to the amount of the VAA.
+3. Make sure that its `recipient` is equal to the recipient of the VAA.
+4. Make sure that the transaction archives only this contract.
+5. Make sure that `actAs` is `gg` only.
+6. Make sure that the prepared transaction has exactly one signer set: `gg`.
+7. Sign the prepared hash for `gg` (Section 7.1).
+8. Record the update ID of the archive in the withdrawal record.
+
+Transaction 2, the transfer:
+
+1. Make sure that the archive of transaction 1 committed.
+2. Make sure that the withdrawal record has no transfer for this update ID.
+3. Make sure that the transfer amount is equal to the `amount` of the archived authorization.
+4. Make sure that the Canton receiver is the agreed party for the 32-byte `recipient`.
+5. Make sure that `sender` is `feeCustody`.
+6. Make sure that the instrument is the fee instrument.
+7. Make sure that `actAs` is `feeCustody` only.
+8. Make sure that the prepared transaction has exactly one signer set: `feeCustody`.
+9. Sign the prepared hash for `feeCustody` (Section 7.1).
+10. Record the update ID of the transfer in the withdrawal record.
+
+If transaction 2 fails:
+
+1. Read the transactions of `feeCustody` after the archive.
+2. Make sure that no transfer of transaction 2 committed.
+3. Prepare transaction 2 again with the same command ID.
+
+Canton rejects a second command with the same command ID in the deduplication period.
+If no attempt commits, the guardians make a new `TransferFees` VAA. The archived authorization gives no other transfer.
 
 `feeCustody` must hold only holdings of the fee instrument.
 A third party can send other holdings to `feeCustody`. Do not accept them.
@@ -1040,6 +1105,16 @@ LocalNet showed this on 2026-11-19: a removed host rejected an NTT `Release` bec
 Do not add a removed participant again without a new replication (Section 4.3).
 
 **Open item:** the procedure to remove the stale contracts of a party from a participant that no longer hosts it.
+
+### 7.8 Fee increase gate
+
+NTT paths where `gg` pays a fee fail when the fee is above 0 (decision U5).
+Keep each fee at 0 until each NTT path has a fee payer that is not `gg`.
+
+1. Do not sign a `SetMessageFee` VAA for chain 75 with a fee above 0.
+2. Do not co-sign an `EmitterRegistry` with a `registrationFee` above 0.
+3. Make sure that the `operator` creates no `ReplayRootRegistry` with a `claimFee` above 0.
+4. Make sure that the fee payer of each NTT path is not `gg`. Record the result before a fee goes above 0.
 
 ## 8. Watcher configuration
 
@@ -1224,9 +1299,9 @@ The fee registry code runs on each paid charge with the authority of the allocat
 In 0.8.0 to 0.8.2, `gg` was the fee recipient. Thus the fee registry code ran with the authority of `gg`.
 With that authority, it can publish a message on each `gg`-owned `Emitter`, and the guardians sign it.
 In 0.8.3, the fee registry code runs only with the authority of the payer and `feeCustody`.
-`chargeFee` rejects `gg` and the `operator` as payer or receiver when a fee is due.
+`chargeFee` rejects `gg` and the `operator` as payer, receiver or fee instrument admin when a fee is due.
 Thus an NTT path where `gg` pays a fee fails when the fee is above 0.
-Such a path must have a separate fee payer before any fee goes above 0.
+Such a path must have a separate fee payer before any fee goes above 0 (Section 7.8).
 The custody party separates Daml authority. It does not separate key authority.
 Two owner keys and two confirming hosts can move each holding of `feeCustody` without a VAA.
 Follow-up: a transfer with a receiver preapproval gives no custody authority at charge time (Token Standard V2).
@@ -1270,7 +1345,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | F4: expiry of idle Canton Coin custody pots | 9.2 |
 | U1: `gg` custody of third-party token registries | 10.1 |
 | U4: owner key threshold of `nttCustody` and `feeCustody` | 10.1 |
-| U5: fee payer of NTT paths where `gg` pays, before any fee above 0 | 10.1 |
+| U5: fee payer of NTT paths where `gg` pays, before any fee above 0 | 7.8, 10.1 |
 | Owner key rotation of a party that holds reserves | 7.4 |
 | U3: a set of package IDs in the watcher for the upgrade period | 10.1 |
 

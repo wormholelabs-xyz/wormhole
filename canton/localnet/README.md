@@ -68,8 +68,8 @@ Set `DB_PORT` to use a different port.
 | `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
 | `gg_rotate_owner_key.sh` | Replaces one owner key of the guardian namespace, for each party in the namespace. |
-| `gg_rotation_fault_check.sh` | Rehearses the rotation faults R1 to R6. |
-| `gg_rotation_safety_stop_check.sh` | Rehearses the rotation safety stop SS1 to SS4. |
+| `gg_rotation_fault_check.sh` | Rehearses the rotation faults R1 to R7. |
+| `gg_rotation_safety_stop_check.sh` | Rehearses the rotation safety stop SS1 to SS5. |
 | `custody_host.sh` | Allocates `feeCustody` or `nttCustody` (`CUSTODY_PARTY_NAME`) under the `guardianGovernance` namespace. |
 | `custody_authority_check.sh` | Checks that `guardianGovernance` and one custody party (`--party`) have different authority. |
 | `ntt_e2e.sh` | Runs the NTT steps below in sequence. |

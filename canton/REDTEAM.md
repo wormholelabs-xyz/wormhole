@@ -44,7 +44,7 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A14-4 | Publish on a rogue-`guardianGovernance` `Emitter` inside a transaction that the real `guardianGovernance` witnesses. | Fixed on `canton/overnight-u2-fixes`: the watcher drops a publish where its read-as party is not a stakeholder. | `TestMessagesFromTxRequiresReadPartyStakeholder`; `TestCantonWatcherDropsWitnessOnlyPublish`. | Medium. | None. |
 | R1 | Publish inside `try` and roll back. | Held. | `testRedTeamR1RollbackOfPublishRejected`. | None. | None. |
 | R2 | Run attacker code in the fee charge with an allocation that the instrument admin did not sign. | Held. The admin-signed registry code is F1-core. | `TestFees.testFeeValidationMatrix`. | None. | None. |
-| F1-core | Fee registry code acts as `guardianGovernance` or the `operator`. | Fixed in `wormhole-core` 0.8.3 (`feeCustody`). | `testRedTeamF1FeeRegistryCannotActAsGuardianGovernance`; `testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter`; `testRedTeamF1PrivilegedPartyCannotPayAFee`; `testCoreStateFeeRecipientIsADistinctCustodyParty`; `testFeeRegistryActsOnlyAsFeeCustody`; `testFeeCustodyReceivesFeesOnEveryChargePoint`. | High (0.8.0 to 0.8.2). | Withdraw 0.8.0, 0.8.1 and 0.8.2. |
+| F1-core | Fee registry code acts as `guardianGovernance` or the `operator`. | Fixed in `wormhole-core` 0.8.3 (`feeCustody`). | `testRedTeamF1FeeRegistryCannotActAsGuardianGovernance`; `testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter`; `testRedTeamF1PrivilegedPartyCannotPayAFee`; `testCoreStateFeeRecipientIsADistinctCustodyParty`; `testFeeRegistryActsOnlyAsFeeCustody`; `testFeeCustodyReceivesFeesOnEveryChargePoint`; `testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter`; `testChargeFeeRejectsEachPrivilegedParty`; `testCoreStateEnsureRejectsInconsistentGenesis`. | High (0.8.0 to 0.8.2). | Withdraw 0.8.0, 0.8.1 and 0.8.2. |
 | R3 | Vet a malicious upgrade of `wormhole-core`. | Not tested. | None. | High if it occurs. | Control package vetting. |
 
 ## Details
@@ -166,20 +166,43 @@ That implementation runs with the authority of the allocation controllers. Refer
 `Allocation_ExecuteTransfer` has three controllers: the executor, the sender and the receiver.
 The executor and the sender are the payer. The receiver is `feeRecipient`.
 The fee registry body runs with the authority of these controllers.
+It also runs with the authority of the allocation signatories. `chargeFee` requires the instrument admin among them.
 In 0.8.0 to 0.8.2, `feeRecipient` was `guardianGovernance`.
 Thus the registry body ran as `guardianGovernance` on each paid publish, registration and replay-root claim.
 With that authority, it can publish on each `guardianGovernance`-owned `Emitter`. The guardians sign the message.
 A payer equal to `guardianGovernance` or the `operator` gives the same result.
+A fee instrument admin equal to `guardianGovernance` or the `operator` gives the same result.
+The first 0.8.3 build (`b5613c61`) accepted such an admin. The devnet genesis and the default test setup used it.
 
 In 0.8.3:
 
 - `feeRecipient` is `feeCustody`, a quorum party in the guardian namespace. It co-signs `CoreState`.
 - The `CoreState` precondition rejects `feeRecipient` equal to `guardianGovernance` or the `operator`.
+- The `CoreState` precondition rejects a fee instrument admin equal to `guardianGovernance` or the `operator`.
 - When a fee is due, `chargeFee` rejects `guardianGovernance` and the `operator` as payer or receiver.
+- When a fee is due, `chargeFee` also rejects them as the fee instrument admin.
 - `chargeFee` requires the allocation executor to be the payer.
 
-Residual: the registry code runs as `feeCustody`. That registry is the instrument admin of the only holdings of
+Tests:
+
+- `testRedTeamF1FeeRegistryCannotActAsGuardianGovernance`
+- `testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter`
+- `testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter`
+- `testRedTeamF1PrivilegedPartyCannotPayAFee`
+- `testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer`
+- `testChargeFeeRejectsEachPrivilegedParty`
+- `testCoreStateFeeRecipientIsADistinctCustodyParty`
+- `testFeeRegistryActsOnlyAsFeeCustody`
+- `testFeeCustodyReceivesFeesOnEveryChargePoint`
+
+Residual 1: the registry code runs as `feeCustody`. That registry is the instrument admin of the only holdings of
 `feeCustody`. `testFeeRegistryActsOnlyAsFeeCustody` shows this residual.
+With the authority of `feeCustody`, the registry code can register an `Emitter` that `feeCustody` owns.
+It can then publish on that `Emitter`. No contract and no peer chain gives a meaning to such a message.
+
+Residual 2: the registry code runs as the payer. It can publish on an `Emitter` that the payer owns.
+The guardians sign that message. Use a fee payer that owns no `Emitter`.
+The NTT payers do not own the transceiver `Emitter`: `gg` owns it.
 
 ### R3: Upgrade package
 
