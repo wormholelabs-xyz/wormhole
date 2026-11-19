@@ -87,6 +87,64 @@ rotation_party_ids_in_load_order() {
   (IFS=,; echo "${party_ids[*]}")
 }
 
+# check_fee_custody_is_in_the_guardian_namespace <fee-custody-id> <guardian-governance-id> <ntt-custody-id-or-empty>:
+# feeCustody has the name feeCustody, the namespace of guardianGovernance, and is not nttCustody.
+# Daml cannot read a party namespace, so the genesis ceremony checks it.
+check_fee_custody_is_in_the_guardian_namespace() {
+  if [[ $# -ne 3 ]]; then
+    echo "usage: check_fee_custody_is_in_the_guardian_namespace <fee-custody-id> <guardian-governance-id> <ntt-custody-id-or-empty>" >&2
+    return 2
+  fi
+  local fee_custody_id="$1" guardian_governance_id="$2" ntt_custody_id="$3"
+  if [[ -z "$fee_custody_id" ]]; then
+    echo "feeCustody party id is empty" >&2
+    return 1
+  fi
+  if [[ "${fee_custody_id%%::*}" != "feeCustody" ]]; then
+    echo "fee custody party $fee_custody_id is not named feeCustody" >&2
+    return 1
+  fi
+  if [[ "${fee_custody_id#*::}" != "${guardian_governance_id#*::}" ]]; then
+    echo "feeCustody $fee_custody_id is outside the namespace of $guardian_governance_id" >&2
+    return 1
+  fi
+  if [[ "$fee_custody_id" == "$ntt_custody_id" ]]; then
+    echo "feeCustody and nttCustody are the same party: $fee_custody_id" >&2
+    return 1
+  fi
+}
+
+# check_core_state_pays_fees_to_fee_custody <core-state-created-event-json> <operator-id> <guardian-governance-id>
+# <fee-custody-id>: feeRecipient is feeCustody, the signatories are exactly operator, guardianGovernance and
+# feeCustody, and the fee instrument admin is neither guardianGovernance nor operator.
+check_core_state_pays_fees_to_fee_custody() {
+  if [[ $# -ne 4 ]]; then
+    echo "usage: check_core_state_pays_fees_to_fee_custody <core-state-created-event-json> <operator-id> <guardian-governance-id> <fee-custody-id>" >&2
+    return 2
+  fi
+  local core_state_event="$1" operator_id="$2" guardian_governance_id="$3" fee_custody_id="$4"
+  local fee_recipient fee_instrument_admin signatories expected_signatories
+  if ! fee_recipient="$(jq -er '.createArgument.feeRecipient | strings' <<<"$core_state_event" 2>/dev/null)" \
+      || ! fee_instrument_admin="$(jq -er '.createArgument.feeInstrument.admin | strings' <<<"$core_state_event" 2>/dev/null)" \
+      || ! signatories="$(jq -ce '.signatories | sort' <<<"$core_state_event" 2>/dev/null)"; then
+    echo "CoreState created event is not readable" >&2
+    return 1
+  fi
+  if [[ "$fee_recipient" != "$fee_custody_id" ]]; then
+    echo "CoreState feeRecipient is $fee_recipient, expected $fee_custody_id" >&2
+    return 1
+  fi
+  expected_signatories="$(jq -cn '$ARGS.positional | sort' --args "$operator_id" "$guardian_governance_id" "$fee_custody_id")"
+  if [[ "$signatories" != "$expected_signatories" ]]; then
+    echo "CoreState signatories $signatories, expected $expected_signatories" >&2
+    return 1
+  fi
+  if [[ "$fee_instrument_admin" == "$guardian_governance_id" || "$fee_instrument_admin" == "$operator_id" ]]; then
+    echo "CoreState fee instrument admin is $fee_instrument_admin" >&2
+    return 1
+  fi
+}
+
 # print_active_rotation_faults: one line for each rotation fault variable with a non-empty value.
 print_active_rotation_faults() {
   local fault_variable

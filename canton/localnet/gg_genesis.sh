@@ -3,10 +3,12 @@
 # signatures each), then the EmitterRegistry, co-signed by Operator and guardianGovernance, then the
 # ReplayRootRegistry (Operator only). feeRecipient is feeCustody.
 # The prepare endpoint takes one command, so each create is its own transaction.
+# Before the first prepare: feeCustody is in the guardianGovernance namespace and is not nttCustody.
 # Negative checks before the CoreState commit, each must fail:
 #   guardianGovernance with 1 of 3 owner signatures; no feeCustody signatures; feeCustody with 1 of 3 owner
-#   signatures; feeRecipient = guardianGovernance (CoreState ensure).
-# Rerun after a failure: the script creates only the missing contracts.
+#   signatures; feeRecipient = guardianGovernance and fee instrument admin = guardianGovernance (CoreState ensure).
+# Rerun after a failure: the script creates only the missing contracts. It checks the feeRecipient and the
+# signatories of an active CoreState.
 # Usage: [GENESIS_GUARDIAN_SET_INDEX=<index>] gg_genesis.sh (default index 0)
 # Then create the user wormhole-watcher with only CanReadAs(guardianGovernance) on each guardian host, for the
 # emitter id scan.
@@ -43,6 +45,7 @@ create_command() {
 if [[ -z "$FEE_CUSTODY_PARTY" ]]; then
   fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh first."
 fi
+check_fee_custody_is_in_the_guardian_namespace "$FEE_CUSTODY_PARTY" "$GG_PARTY" "$CUSTODY_PARTY" || exit 1
 
 # expect_genesis_rejected <check-name> <create-command-json> <signers-json> <expected-text>...: the CoreState create
 # fails with each expected text.
@@ -85,18 +88,18 @@ case "$active_core_state_count" in
     fi
     dso_party="$(curl -sSf "$(json_api_url sv)/v2/parties?pageSize=1000" -H "@$ADMIN_AUTH_HEADER" \
       | jq -er '[.partyDetails[].party | select(startswith("DSO::"))] | if length == 1 then .[0] else error("expected one DSO party") end')"
-    # core_state_arguments_with_fee_recipient <fee-recipient-party-id>
-    core_state_arguments_with_fee_recipient() {
-      jq -n --arg operator "$OPERATOR_PARTY" --arg gg "$GG_PARTY" --arg dso "$dso_party" --arg feeRecipient "$1" \
+    # core_state_arguments <fee-recipient-party-id> <fee-instrument-admin-party-id>
+    core_state_arguments() {
+      jq -n --arg operator "$OPERATOR_PARTY" --arg gg "$GG_PARTY" --arg feeInstrumentAdmin "$2" --arg feeRecipient "$1" \
         --arg guardian "$DEVNET_GUARDIAN_ADDRESS" --arg governanceContract "$GOVERNANCE_CONTRACT" \
         --arg guardianSetIndex "$GENESIS_GUARDIAN_SET_INDEX" '{
           operator: $operator, guardianGovernance: $gg, chainId: "75", governanceChainId: "1",
           governanceContract: $governanceContract, guardianSetIndex: $guardianSetIndex,
           guardianSets: [[$guardianSetIndex, {keys: [$guardian], expirationTime: null}]],
-          messageFee: "0", feeInstrument: {admin: $dso, id: "Amulet"}, feeRecipient: $feeRecipient,
+          messageFee: "0", feeInstrument: {admin: $feeInstrumentAdmin, id: "Amulet"}, feeRecipient: $feeRecipient,
           consumedGovernance: {map: []}}'
     }
-    create_core_state="$(create_command "$CORE_STATE_TEMPLATE" "$(core_state_arguments_with_fee_recipient "$FEE_CUSTODY_PARTY")")"
+    create_core_state="$(create_command "$CORE_STATE_TEMPLATE" "$(core_state_arguments "$FEE_CUSTODY_PARTY" "$dso_party")")"
 
     expect_genesis_rejected gg-one-owner "$create_core_state" \
       "$(jq -s 'add' <(operator_signers_json) <(gg_signers_json owner1) <(namespace_party_signers_json "$FEE_CUSTODY_PARTY" owner1 owner2))" \
@@ -109,22 +112,28 @@ case "$active_core_state_count" in
       FAILED_TO_EXECUTE_TRANSACTION \
       "Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for feeCustody::"
     expect_genesis_rejected fee-recipient-is-guardian-governance \
-      "$(create_command "$CORE_STATE_TEMPLATE" "$(core_state_arguments_with_fee_recipient "$GG_PARTY")")" "$core_state_signers" \
+      "$(create_command "$CORE_STATE_TEMPLATE" "$(core_state_arguments "$GG_PARTY" "$dso_party")")" "$core_state_signers" \
+      PreconditionFailed
+    expect_genesis_rejected fee-instrument-admin-is-guardian-governance \
+      "$(create_command "$CORE_STATE_TEMPLATE" "$(core_state_arguments "$FEE_CUSTODY_PARTY" "$GG_PARTY")")" "$core_state_signers" \
       PreconditionFailed
 
     echo "Genesis: CoreState with Operator, guardianGovernance owner1, owner2 and feeCustody owner1, owner2 (2-of-3 each)"
     core_state_transaction="$(submit_interactive "genesis-core-state-$(date +%s)" "$operator_gg_and_fee_custody" \
       "$create_core_state" "$core_state_signers")"
-    created_core_state_signatories="$(jq -c '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith(":Wormhole.Core.State:CoreState")) | .signatories | sort] | add' \
-      <<<"$core_state_transaction")"
-    expected_core_state_signatories="$(jq -c 'sort' <<<"$operator_gg_and_fee_custody")"
-    if [[ "$created_core_state_signatories" != "$expected_core_state_signatories" ]]; then
-      fail "CoreState signatories $created_core_state_signatories, expected $expected_core_state_signatories"
-    fi
+    created_core_state_event="$(jq -ce '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith(":Wormhole.Core.State:CoreState"))]
+      | if length == 1 then .[0] else error("expected one created CoreState, found \(length)") end' <<<"$core_state_transaction")"
+    check_core_state_pays_fees_to_fee_custody "$created_core_state_event" "$OPERATOR_PARTY" "$GG_PARTY" "$FEE_CUSTODY_PARTY" \
+      || exit 1
     echo "CoreState $(created_contract_id "$core_state_transaction" ":Wormhole.Core.State:CoreState") (update $(jq -r .updateId <<<"$core_state_transaction"))"
     ;;
   1)
     echo "CoreState exists; skip"
+    active_core_state_event="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" :Wormhole.Core.State:CoreState \
+      | jq -ce --arg operator "$OPERATOR_PARTY" '[.[] | select(.createArgument.operator == $operator)]
+        | if length == 1 then .[0] else error("expected one active CoreState, found \(length)") end')"
+    check_core_state_pays_fees_to_fee_custody "$active_core_state_event" "$OPERATOR_PARTY" "$GG_PARTY" "$FEE_CUSTODY_PARTY" \
+      || exit 1
     ;;
   *)
     echo "expected 0 or 1 CoreState, found $active_core_state_count" >&2
