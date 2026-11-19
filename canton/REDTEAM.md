@@ -9,7 +9,7 @@ The Results table gives the fix commit for each fixed finding.
 
 ## Test Locations
 
-- Daml Script tests: `canton/test/daml/Test/TestRedTeamCore.daml`.
+- Daml Script tests: `canton/test/daml/Test/TestRedTeamCore.daml` and `canton/test/daml/Test/TestOperatorIndependence.daml`.
 - Signed VAA fixtures: `node/pkg/cantonclient/redteam_vectorgen_test.go`.
 - Watcher integration tests: `node/pkg/watchers/canton/watcher_redteam_integration_test.go` and `watcher_witness_only_integration_test.go`.
 - Look-alike package: `canton/test-lookalike`.
@@ -27,8 +27,8 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 
 | ID | Attack | Result | Evidence | Severity | Proposed fix |
 | - | - | - | - | - | - |
-| A1 | Skip or redirect a fee. Use a shadow `CoreState` or omit the fee input. | Held. | `testRedTeamA1FeeCannotBeSkipped`; `TestFees.test*PinsGuardianGovernance`; `TestCantonWatcherGovernanceReaderIntegration`. | None. | None. |
-| A1-2 | Redeem a forged VAA on an integrator through a shadow `CoreState`. A compromised operator key co-signs the shadow under a throwaway `guardianGovernance`. | Fixed on `canton/integrator-gg-pin`: `ExampleIntegrator.Redeem` pins `guardianGovernance`. | `Test.ExampleIntegrator.testIntegratorCoreStatePin`; `testCompromisedOperatorCannotForgeCoreState`. | Medium. | Integrators pin `guardianGovernance`, not the operator alone. |
+| A1 | Skip or redirect a fee. Use a shadow `CoreState` or omit the fee input. | Held. | `testRedTeamA1FeeCannotBeSkipped`; `TestFees.test*PinsGuardianGovernance`; `testShadowAnchorsAreRejected`; `TestCantonWatcherGovernanceReaderIntegration`. | None. | None. |
+| A1-2 | Redeem a forged VAA on an integrator through a shadow `CoreState` under a throwaway `guardianGovernance`. | Fixed on `canton/integrator-gg-pin`: `ExampleIntegrator.Redeem` pins `guardianGovernance`. 0.9.0 has no operator pin. | `Test.ExampleIntegrator.testIntegratorCoreStatePin`; `testOutsiderCannotForgeCoreStateOfRealGuardianGovernance`. | Medium. | Integrators pin `guardianGovernance`. |
 | A2 | Forge a message from a look-alike package. | Held. | `TestCantonWatcherIgnoresLookalikePackage`. | None. | Keep the package-id pin. |
 | A6-1 | Send a bad guardian set upgrade. | Held. | `testRedTeamA6GuardianSetUpgradeRules`. | None. | None. |
 | A6-2 | Sign a VAA with bad signatures or the superseded set. | Held. | `testRedTeamA6QuorumAndSignerOrder`. | None. | None. |
@@ -38,13 +38,14 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A9-3 | Publish fields that the watcher drops. | Fixed in 4143b6c74. | `testRedTeamA9PublishRejectsFieldsTheWatcherDrops`; `testRedTeamA9PublishFieldBoundaries`. | Low. | None. |
 | A9-4 | Publish a payload above 750 bytes. | Accepted by design: no core bridge caps the payload size (EVM parity). | `testRedTeamA9PublishAcceptsAnyPayloadSize`; `TestSubscribeUpdatesUpdateSizeLimit`. | None. | The watcher receive limit `maxLedgerUpdateBytes` bounds one update. |
 | A9-5 | Replay a VAA in uppercase hex. | Held. | `testRedTeamA9HexCaseReplay`. | None. | None. |
-| A14-1 | The operator creates an emitter for a third party. | Held. | `testRedTeamA14OperatorCannotForgeThirdPartyEmitter`. | None. | None. |
-| A14-2 | The operator and the owner rewind the owner sequence. | Fixed on `canton/overnight-u2-fixes`: `guardianGovernance` co-signs `Emitter`. | `testRedTeamA14ColludingOwnerCannotDuplicateEmitter`; `testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance`; `testGovernanceSignsEveryEmitter`. | Low. | Fresh genesis of 0.8.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
-| A14-3 | The operator resets the registry counter. | Fixed in #75. | `testRedTeamA14OperatorCannotResetEmitterRegistry`; `testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry`; `testSetRegistrationFee`; scan test. | Medium. | Fresh genesis of 0.8.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
+| A14-1 | A non-owner (in 0.8.x, the operator) creates an emitter for a third party. | Held. 0.9.0 removes the operator. | `testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter`; `testFormerOperatorHasNoCorePower`. | None. | None. |
+| A14-2 | The owner (in 0.8.x, with the operator) rewinds the owner sequence. | Fixed on `canton/overnight-u2-fixes`: `guardianGovernance` co-signs `Emitter`. In 0.9.0, the owner and `guardianGovernance` sign it. | `testRedTeamA14ColludingOwnerCannotDuplicateEmitter`; `testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance`; `testGovernanceSignsEveryEmitter`; `testCoreTemplateSignatoriesAndObservers`. | Low. | Fresh genesis of 0.9.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
+| A14-3 | A party resets the registry counter (in 0.8.x, the operator). | Fixed in #75. In 0.9.0, a reset needs `guardianGovernance` alone (k-of-n ceremony). | `testRedTeamA14FormerOperatorCannotResetEmitterRegistry`; `testRedTeamA14RegistryNeedsGuardianGovernance`; `testSetRegistrationFee`; `testOnboardingFeeAdminChangesOnlyOnboardingFees`; scan test. | Medium. | Fresh genesis of 0.9.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
 | A14-4 | Publish on a rogue-`guardianGovernance` `Emitter` inside a transaction that the real `guardianGovernance` witnesses. | Fixed on `canton/overnight-u2-fixes`: the watcher drops a publish where its read-as party is not a stakeholder. | `TestMessagesFromTxRequiresReadPartyStakeholder`; `TestCantonWatcherDropsWitnessOnlyPublish`. | Medium. | None. |
 | R1 | Publish inside `try` and roll back. | Held. | `testRedTeamR1RollbackOfPublishRejected`. | None. | None. |
 | R2 | Run attacker code in the fee charge with an allocation that the instrument admin did not sign. | Held. The admin-signed registry code is F1-core. | `TestFees.testFeeValidationMatrix`. | None. | None. |
-| F1-core | Fee registry code acts as `guardianGovernance` or the `operator`. | Fixed in `wormhole-core` 0.8.3 (`feeCustody`). | `testRedTeamF1FeeRegistryCannotActAsGuardianGovernance`; `testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter`; `testRedTeamF1PrivilegedPartyCannotPayAFee`; `testCoreStateFeeRecipientIsADistinctCustodyParty`; `testFeeRegistryActsOnlyAsFeeCustody`; `testFeeCustodyReceivesFeesOnEveryChargePoint`; `testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter`; `testChargeFeeRejectsEachPrivilegedParty`; `testCoreStateEnsureRejectsInconsistentGenesis`. | High (0.8.0 to 0.8.2). | Withdraw 0.8.0, 0.8.1 and 0.8.2. |
+| F1-core | Fee registry code acts as `guardianGovernance` or the `operator`. | Fixed in `wormhole-core` 0.8.3 (`feeCustody`). 0.9.0 removes the operator and rejects `feeCustody` as the fee instrument admin. | `testRedTeamF1FeeRegistryCannotActAsGuardianGovernance`; `testRedTeamF1FeeRegistryCannotPublishOnGuardianGovernanceEmitter`; `testRedTeamF1PrivilegedPartyCannotPayAFee`; `testCoreStateFeeRecipientIsADistinctCustodyParty`; `testFeeRegistryActsOnlyAsFeeCustody`; `testFeeCustodyReceivesFeesOnEveryChargePoint`; `testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter`; `testChargeFeeRejectsEachPrivilegedParty`; `testCoreStateEnsureRejectsInconsistentGenesis`; `testGuardianGovernanceIsNeverAFeeAllocationController`. | High (0.8.0 to 0.8.2, first 0.8.3 and 0.9.0 builds). | Withdraw 0.8.0, 0.8.1, 0.8.2 and 0.8.3. |
+| OI-1 | A former operator, or a relayed governance VAA, changes core state. | Held in 0.9.0. Each core function needs only caller authority. Governance keeps the genesis fields. | `testEachCoreFunctionNeedsOnlyCallerAuthority`; `testFormerOperatorHasNoCorePower`; `testRelayedGovernanceRejectsInvalidVAA`; `testGovernanceConsumedDigestCheck`; `testGovernanceGenesisFieldChecksRejectEachChange`; `testEmitterAddressUsesGuardianGovernanceAsRegistrar`. | None. | None. |
 | R3 | Vet a malicious upgrade of `wormhole-core`. | Not tested. | None. | High if it occurs. | Control package vetting. |
 
 ## Details
@@ -113,7 +114,7 @@ Fix: `PublishMessage` (`State.daml`) checks these conditions before the fee char
 ### A14: Blast radius
 
 The `Emitter` address is `keccak256(tag, registrar, owner, emitterId)`.
-The owner is a signatory, so the operator cannot make a third-party address alone.
+The owner is a signatory, so no other party makes the address of that owner alone.
 
 In 0.7.0, the operator and the owner could create a second `Emitter` of the owner with a repeated sequence.
 The processor (`node/pkg/processor/message.go:36`) signs each digest independently.
@@ -137,6 +138,8 @@ A registry under a rogue `guardianGovernance` cannot publish against the real `C
 It can publish against a shadow `CoreState` of the same rogue party.
 The fix changes signatories, so a 0.7.0 registry or `Emitter` cannot continue under 0.8.0.
 0.8.0 starts from a fresh genesis with a new operator party.
+0.9.0 removes the operator. `guardianGovernance` is the sole signatory of `EmitterRegistry` and the registrar of each emitter address.
+A registry reset then needs `guardianGovernance` alone, that is the k-of-n guardian ceremony.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the options, the change, the deployment, and the scan.
 
 A14-4: `guardianGovernance` witnesses each node below a node where it is an informee.
@@ -183,6 +186,14 @@ In 0.8.3:
 - When a fee is due, `chargeFee` also rejects them as the fee instrument admin.
 - `chargeFee` requires the allocation executor to be the payer.
 
+In 0.9.0 (no operator):
+
+- The `CoreState` precondition rejects `feeRecipient` equal to `guardianGovernance`.
+- The `CoreState` precondition rejects a fee instrument admin equal to `guardianGovernance` or `feeCustody`.
+- When a fee is due, `chargeFee` rejects `guardianGovernance` as payer or receiver.
+- When a fee is due, `chargeFee` also rejects `guardianGovernance` and `feeCustody` as the fee instrument admin.
+- The first 0.9.0 build (`dd75f777`) accepted `guardianGovernance` as the fee instrument admin.
+
 Tests:
 
 - `testRedTeamF1FeeRegistryCannotActAsGuardianGovernance`
@@ -192,8 +203,10 @@ Tests:
 - `testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer`
 - `testChargeFeeRejectsEachPrivilegedParty`
 - `testCoreStateFeeRecipientIsADistinctCustodyParty`
+- `testCoreStateEnsureRejectsInconsistentGenesis`
 - `testFeeRegistryActsOnlyAsFeeCustody`
 - `testFeeCustodyReceivesFeesOnEveryChargePoint`
+- `testGuardianGovernanceIsNeverAFeeAllocationController`
 
 Residual 1: the registry code runs as `feeCustody`. That registry is the instrument admin of the only holdings of
 `feeCustody`. `testFeeRegistryActsOnlyAsFeeCustody` shows this residual.
