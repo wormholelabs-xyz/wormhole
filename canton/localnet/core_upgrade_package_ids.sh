@@ -13,7 +13,7 @@ readonly NTT_V3_PACKAGE_ID="291fcf920b971d50956845c2690723fb321f0a5b141a44caa5a1
 readonly CORE_V6_DAR="$REPO_ROOT/canton/dars/wormhole-core-0.6.0.dar"
 readonly CORE_V7_DAR="$REPO_ROOT/canton/dars/wormhole-core-0.7.0.dar"
 readonly NTT_V2_DAR="${NTT_REPO_DIR:-$(cd "$REPO_ROOT/.." && pwd)/ntt}/canton/dars/ntt-0.2.0.dar"
-# The NTT branch builds ntt 0.3.2 on core 0.8.0. Set NTT_V3_DAR to an ntt 0.3.0 build on core 0.7.0.
+# The NTT branch builds ntt 0.3.4 on core 0.8.3. Set NTT_V3_DAR to an ntt 0.3.0 build on core 0.7.0.
 readonly NTT_V3_DAR="${NTT_V3_DAR:-}"
 
 # check_rehearsal_dar <dar> <expected "name version"> <expected-package-id>
