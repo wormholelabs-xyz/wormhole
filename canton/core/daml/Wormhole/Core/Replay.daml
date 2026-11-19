@@ -62,6 +62,14 @@ import Wormhole.Core.Bytes
 defaultSplitThreshold : Int
 defaultSplitThreshold = 128
 
+-- | Namespace length bounds. An empty namespace would let two apps of one
+-- consumer share one trie.
+replayNamespaceMinLength : Int
+replayNamespaceMinLength = 1
+
+replayNamespaceMaxLength : Int
+replayNamespaceMaxLength = 128
+
 -- | One trie node: the consumed digest suffixes under @prefix@ (see the module
 -- header for the partition invariant and trust model). NOT observed by the
 -- guardian observer: replay state is integrator-private safety state, not
@@ -70,7 +78,7 @@ template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
     operator       : Party    -- co-signs: no unilateral archive or re-create
-    namespace      : Text     -- opaque sub-scope: one consumer, many tries
+    namespace      : Text     -- opaque sub-scope: one consumer, many tries; 1..128 chars
     prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- copied to children; see 'defaultSplitThreshold'
     consumed       : Set Bytes  -- suffixes, each exactly (64 − |prefix|) nibbles
@@ -79,13 +87,15 @@ template ReplayNode
     -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
     -- (signatories can always sign a well-formed shadow node). Depth-64 nodes are
     -- unrepresentable; suffix lengths pin the membership arithmetic; the
-    -- namespace bound keeps the per-node overhead out of the size budgets above
-    -- (it is copied into all 16 children on a split). Deliberately NO
+    -- namespace upper bound keeps the per-node overhead out of the size budgets
+    -- above (it is copied into all 16 children on a split), and the lower bound
+    -- keeps two apps of one consumer off one trie. Deliberately NO
     -- @size consumed <= splitThreshold@: a split can legitimately create an
     -- over-full child (all parent entries in one bucket), split further next
     -- consume.
     ensure splitThreshold >= 1 && splitThreshold <= 4096
-        && T.length namespace <= 128
+        && T.length namespace >= replayNamespaceMinLength
+        && T.length namespace <= replayNamespaceMaxLength
         && T.length prefix <= 63 && isLowerHex prefix
         && all (\s -> T.length s == 64 - T.length prefix && isLowerHex s)
                (Set.toList consumed)
