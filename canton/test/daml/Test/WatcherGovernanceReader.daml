@@ -78,11 +78,13 @@ integrationGovernanceReaderPublish bridge = do
       nonce = rogueShadowNonce, payload = rogueShadowPayload, consistencyLevel = 0
       coreStateCid = bridge.coreStateCid, payer = rogueOwner, feeAllocation = None
 
-  let shadowFeeInstrument = InstrumentId with admin = rogueGovernance, id = "UNUSED"
-  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance) do
+  rogueFeeCustody <- allocateParty "RogueFeeCustody"
+  rogueFeeInstrumentAdmin <- allocateParty "RogueFeeInstrumentAdmin"
+  let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
+  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
-                 shadowFeeInstrument rogueGovernance)
+                 shadowFeeInstrument rogueFeeCustody)
   (_, rogueShadowMessage) <- publishVia operator shadowCoreStateCid rogueOwner rogueEmitterCid
                                rogueShadowNonce rogueShadowPayload 0
   rogueShadowMessage.owner === rogueOwner

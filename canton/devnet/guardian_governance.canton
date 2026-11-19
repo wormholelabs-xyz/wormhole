@@ -54,6 +54,11 @@
 //   GG_THRESHOLD            Signing/authorization threshold, k of 3. Default 2.
 //   GG_PARTY_NAME           Party name allocated under the decentralized
 //                           namespace. Default "guardianGovernance".
+//   GG_FEE_CUSTODY_PARTY_NAME
+//                           Name of a second party under the same namespace,
+//                           with the same hosts, confirmation threshold and
+//                           signing keys: the CoreState fee recipient. Empty
+//                           or unset: no second party.
 //   GG_SYNCHRONIZER_ALIAS   Alias of the synchronizer to submit topology to.
 //                           Default: the participant's sole connected
 //                           synchronizer (fails if there is more than one and
@@ -147,6 +152,8 @@ val ownerPubkeyFiles = Seq(requiredEnvironmentVariable("GG_OWNER_PUBKEY_1"), req
 val ownerSignerArgvs = Seq(parseSignerArgv("GG_OWNER_SIGN_ARGV_1"), parseSignerArgv("GG_OWNER_SIGN_ARGV_2"), parseSignerArgv("GG_OWNER_SIGN_ARGV_3"))
 val threshold = PositiveInt.tryCreate(environmentVariableOrDefault("GG_THRESHOLD", "2").toInt)
 val partyName = environmentVariableOrDefault("GG_PARTY_NAME", "guardianGovernance")
+val feeCustodyPartyName: Option[String] = sys.env.get("GG_FEE_CUSTODY_PARTY_NAME").map(_.trim).filter(_.nonEmpty)
+require(!feeCustodyPartyName.contains(partyName), "GG_FEE_CUSTODY_PARTY_NAME must differ from GG_PARTY_NAME")
 val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
 val artifactsFile = environmentVariableOrDefault("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
 
@@ -296,43 +303,50 @@ println(s"[guardian-governance] decentralized namespace created: $decentralizedN
 // Confirmation, and register the same owner keys as its threshold signing
 // keys (PartyToParticipant.partySigningKeys -- the modern replacement for the
 // deprecated standalone PartyToKeyMapping). ---
-val partyId = PartyId.tryCreate(partyName, decentralizedNamespace)
 val signingKeys = SigningKeysWithThreshold(NonEmpty.mk(Set, ownerPubkeys.head, ownerPubkeys.tail: _*), threshold)
-val partyToParticipant = PartyToParticipant
-  .create(
-    partyId,
-    confirmationThreshold,
-    hostingParticipants.map(p => HostingParticipant(p.id, ParticipantPermission.Confirmation)),
-    Some(signingKeys),
-  )
-  .getOrElse(sys.error("failed to build PartyToParticipant"))
-val unsignedPartyToParticipant = generateUnsigned(partyToParticipant)
-val partyToParticipantOwnerSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
-  externalSign(signerArgv, unsignedPartyToParticipant.hash.hash, ns.fingerprint)
+// allocateNamespaceParty: one party under the decentralized namespace, hosted at Confirmation by each hosting
+// participant, with the owner keys as its threshold signing keys.
+def allocateNamespaceParty(name: String): PartyId = {
+  val allocatedPartyId = PartyId.tryCreate(name, decentralizedNamespace)
+  val partyToParticipant = PartyToParticipant
+    .create(
+      allocatedPartyId,
+      confirmationThreshold,
+      hostingParticipants.map(p => HostingParticipant(p.id, ParticipantPermission.Confirmation)),
+      Some(signingKeys),
+    )
+    .getOrElse(sys.error(s"failed to build PartyToParticipant of $name"))
+  val unsignedPartyToParticipant = generateUnsigned(partyToParticipant)
+  val partyToParticipantOwnerSignatures = (ownerNamespaces, ownerSignerArgvs).zipped.map { (ns, signerArgv) =>
+    externalSign(signerArgv, unsignedPartyToParticipant.hash.hash, ns.fingerprint)
+  }
+  val signedPartyToParticipantOwnersOnly = partyToParticipantOwnerSignatures.tail.foldLeft(
+    SignedTopologyTransaction.withSignature(unsignedPartyToParticipant, partyToParticipantOwnerSignatures.head, isProposal = false, protocolVersion)
+  )(_.addSingleSignature(_))
+  // Each hosting participant must also consent to host the party; that is a
+  // LOCAL signature (that participant's own identity key), added via its
+  // vault-backed `transactions.sign`, not an external one.
+  val signedPartyToParticipant = hostingParticipants.foldLeft(signedPartyToParticipantOwnersOnly: GenericSignedTopologyTransaction) { (signedSoFar, host) =>
+    host.topology.transactions
+      .sign(Seq(signedSoFar), synchronizerTopologyStore, signedBy = Seq(host.id.uid.namespace.fingerprint))
+      .head
+  }
+  participant.topology.transactions.load(Seq(signedPartyToParticipant), synchronizerTopologyStore)
+  awaitTopology(s"party to participant mapping of $name") {
+    hostingParticipants.forall(host =>
+      host.topology.party_to_participant_mappings.is_known(
+        synchronizerId.logical,
+        allocatedPartyId,
+        hostingParticipants.map(_.id),
+        Some(ParticipantPermission.Confirmation),
+        Some(confirmationThreshold),
+      ))
+  }
+  println(s"[guardian-governance] party allocated and hosted: $allocatedPartyId")
+  allocatedPartyId
 }
-val signedPartyToParticipantOwnersOnly = partyToParticipantOwnerSignatures.tail.foldLeft(
-  SignedTopologyTransaction.withSignature(unsignedPartyToParticipant, partyToParticipantOwnerSignatures.head, isProposal = false, protocolVersion)
-)(_.addSingleSignature(_))
-// Each hosting participant must also consent to host the party; that is a
-// LOCAL signature (that participant's own identity key), added via its
-// vault-backed `transactions.sign`, not an external one.
-val signedPartyToParticipant = hostingParticipants.foldLeft(signedPartyToParticipantOwnersOnly: GenericSignedTopologyTransaction) { (signedSoFar, host) =>
-  host.topology.transactions
-    .sign(Seq(signedSoFar), synchronizerTopologyStore, signedBy = Seq(host.id.uid.namespace.fingerprint))
-    .head
-}
-participant.topology.transactions.load(Seq(signedPartyToParticipant), synchronizerTopologyStore)
-awaitTopology("party to participant mapping") {
-  hostingParticipants.forall(host =>
-    host.topology.party_to_participant_mappings.is_known(
-      synchronizerId.logical,
-      partyId,
-      hostingParticipants.map(_.id),
-      Some(ParticipantPermission.Confirmation),
-      Some(confirmationThreshold),
-    ))
-}
-println(s"[guardian-governance] party allocated and hosted: $partyId")
+val partyId = allocateNamespaceParty(partyName)
+val feeCustodyPartyId: Option[PartyId] = feeCustodyPartyName.map(allocateNamespaceParty)
 
 // --- Artifacts: the handoff to (a) the local test harness's assertions and
 // (b) the eventual CN-synchronizer submission. Deliberately plain hand-built
@@ -344,6 +358,7 @@ val ownersJson = (ownerNamespaces, ownerPubkeyFiles).zipped.map { (ns, pubFile) 
 val artifactsJson =
   s"""{
      |  "partyId": ${jsonString(partyId.toProtoPrimitive)},
+     |  "feeCustodyPartyId": ${feeCustodyPartyId.map(id => jsonString(id.toProtoPrimitive)).getOrElse("null")},
      |  "decentralizedNamespace": ${jsonString(decentralizedNamespace.fingerprint.toProtoPrimitive)},
      |  "threshold": ${threshold.value},
      |  "owners": [

@@ -1,5 +1,5 @@
 // Print the guardianGovernance decentralized namespace and the PartyToParticipant mapping of each party in it
-// (guardianGovernance, nttCustody) as each LocalNet participant sees them.
+// (guardianGovernance, feeCustody, nttCustody) as each LocalNet participant sees them.
 import com.digitalasset.canton.topology._
 import com.digitalasset.canton.topology.transaction._
 import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId

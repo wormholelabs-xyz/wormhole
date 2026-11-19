@@ -61,17 +61,17 @@ Set `DB_PORT` to use a different port.
 | `gg_lib.sh` | Shared functions for the `gg_*.sh` scripts. |
 | `gg_host.sh` | Hosts `guardianGovernance` and `Operator`. Vets the core DARs on all participants. |
 | `gg_show_topology.sh` | Shows the namespace and the hosting on each participant. |
-| `gg_genesis.sh` | Creates the co-signed `CoreState` and `EmitterRegistry`, then the `ReplayRootRegistry`. |
+| `gg_genesis.sh` | Creates the co-signed `CoreState` (fee recipient `feeCustody`) and `EmitterRegistry`, then the `ReplayRootRegistry`. |
 | `gg_publish_and_govern.sh` | Publishes one message. Applies one governance VAA. |
 | `gg_confirmation_quorum.sh` | Checks the confirmation threshold with two hosts offline. |
 | `gg_package_vetting.sh` | Checks the package vetting gate. |
 | `vetting_probe/` | Versions 1.0.0 and 2.0.0 of the probe package for the vetting check. |
 | `gg_guardian_set_rotation.sh` | Rotates the Wormhole guardian set. |
 | `gg_rotate_owner_key.sh` | Replaces one owner key of the guardian namespace, for each party in the namespace. |
-| `gg_rotation_fault_check.sh` | Rehearses the rotation faults R1 to R6. |
-| `gg_rotation_safety_stop_check.sh` | Rehearses the rotation safety stop SS1 to SS4. |
-| `custody_host.sh` | Allocates `nttCustody` under the `guardianGovernance` namespace. |
-| `custody_authority_check.sh` | Checks that `guardianGovernance` and `nttCustody` have different authority. |
+| `gg_rotation_fault_check.sh` | Rehearses the rotation faults R1 to R7. |
+| `gg_rotation_safety_stop_check.sh` | Rehearses the rotation safety stop SS1 to SS5. |
+| `custody_host.sh` | Allocates `feeCustody` or `nttCustody` (`CUSTODY_PARTY_NAME`) under the `guardianGovernance` namespace. |
+| `custody_authority_check.sh` | Checks that `guardianGovernance` and one custody party (`--party`) have different authority. |
 | `ntt_e2e.sh` | Runs the NTT steps below in sequence. |
 | `ntt_upload_dars.sh` | Uploads the NTT DAR to all participants and vets its unvetted packages. |
 | `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
@@ -278,7 +278,16 @@ Keep the logs as the evidence of each run.
    It hosts `guardianGovernance` on the three participants.
    It hosts `Operator` on `app-provider` only.
 
-2. Show the topology on each participant:
+2. Allocate `feeCustody`, the `CoreState` fee recipient, before genesis:
+
+   ```bash
+   CUSTODY_PARTY_NAME=feeCustody canton/localnet/custody_host.sh owner1 owner2 owner3
+   ```
+
+   The script writes `../localnet-state/fee-custody-artifacts.json`.
+   `feeCustody` has the hosts, the confirmation threshold and the signing keys of `guardianGovernance`.
+
+3. Show the topology on each participant:
 
    ```bash
    canton/localnet/gg_show_topology.sh
@@ -286,20 +295,28 @@ Keep the logs as the evidence of each run.
 
    Each participant shows `threshold=2`, three hosts at `Confirmation` and `signingKeys=2-of-3`.
 
-3. Create the `CoreState`:
+4. Create the `CoreState`:
 
    ```bash
    canton/localnet/gg_genesis.sh
    ```
 
-   `Operator` and two owner keys sign the `CoreState`.
+   The `CoreState` transaction has three signer sets: `Operator`, and two owner keys for each of `guardianGovernance`
+   and `feeCustody`. `feeRecipient` is `feeCustody`.
    The genesis guardian set index is `GENESIS_GUARDIAN_SET_INDEX` (default `0`).
    Keep the default: the other LocalNet scripts expect set 0 at genesis.
+   Before the commit, these `CoreState` transactions must fail:
+   - `guardianGovernance` with one owner key.
+   - No `feeCustody` signature.
+   - `feeCustody` with one owner key.
+   - `feeRecipient` set to `guardianGovernance`. The `CoreState` precondition fails.
+
+   `Operator` and two `guardianGovernance` owner keys sign the `EmitterRegistry`.
    Then the script creates the Ledger API user `wormhole-watcher` on each participant.
    This user has only the right `CanReadAs(guardianGovernance)`.
    `canton/tools/emitter_id_scan.sh` needs a token of this user on each participant that it reads.
 
-4. Publish one message and apply one governance VAA:
+5. Publish one message and apply one governance VAA:
 
    ```bash
    canton/localnet/gg_publish_and_govern.sh
@@ -344,7 +361,7 @@ The script requests time proofs from `app-provider` to move the time.
 CAUTION: Without the time proofs, a transaction can wait for many minutes.
 A host that connects again in that period can still confirm it.
 
-4. After `custody_host.sh`, do the check for `nttCustody`:
+4. After `custody_host.sh`, do the check for `nttCustody`, or for `feeCustody` with `fee-custody-artifacts.json`:
 
    ```bash
    canton/localnet/gg_confirmation_quorum.sh --party "$(jq -r .partyId ../localnet-state/custody-artifacts.json)"
@@ -414,7 +431,7 @@ The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` moves the time
 ### Replace an owner key of the guardian namespace
 
 The owner keys are the namespace owners and the signing keys of each party in the namespace.
-The parties are `guardianGovernance` and, after `custody_host.sh`, `nttCustody`.
+The parties are `guardianGovernance`, `feeCustody` and, after `custody_host.sh` for it, `nttCustody`.
 Thus a rotation changes the namespace and the `PartyToParticipant` mapping of each party in the namespace.
 
 The rotation has these phases:
@@ -445,7 +462,7 @@ The rotation has these phases:
    - The namespace change has the new owners and the current threshold.
 3. Load phase. If the new owner has no root namespace delegation, load 1 adds it.
    This delegation alone gives no authority over the guardian namespace.
-   Load 2 is one load call with all other changes: `nttCustody` first, then `guardianGovernance`, then the namespace.
+   Load 2 is one load call with all other changes: `nttCustody`, `feeCustody`, `guardianGovernance`, then the namespace.
    The script tries load 2 a maximum of 3 times. Each try loads only the changes that a participant does not show.
 4. Checks. The script reads all participants again. The views must agree. The script then finds one of these results:
    - All changes are effective. The script shows `ROTATION applied`.
@@ -469,9 +486,9 @@ The signature must be exactly 64 bytes as 128 lowercase hex characters.
    The thresholds stay at 2 of 3.
 
 2. Make sure that the output shows these results:
-   - `ROTATION parties: nttCustody,guardianGovernance`, or `guardianGovernance` alone before `custody_host.sh`.
+   - `ROTATION parties: nttCustody,feeCustody,guardianGovernance`, or `feeCustody,guardianGovernance` without `nttCustody`.
    - `ROTATION protocol version: 37`.
-   - `ROTATION effective times (one load call): nttCustody=<time> guardianGovernance=<time> namespace=<time>`.
+   - `ROTATION effective times (one load call): nttCustody=<time> feeCustody=<time> guardianGovernance=<time> namespace=<time>`.
    - `ROTATION effective times in load order, spread <seconds> s (bound 30 s)`.
      Canton gives each change of one load call its own effective time, in the load order.
      The script stops if a time is not after the time before it.
@@ -552,10 +569,11 @@ It has the same hosts, the same confirmation threshold and the same 2-of-3 signi
    - A confirmation threshold of exactly 2.
    - Exactly 3 signing keys with a threshold of exactly 2.
 
-4. Check the authority of the two parties. Use two current owner names:
+4. Check the authority of each custody party. Use two current owner names:
 
    ```bash
-   canton/localnet/custody_authority_check.sh owner1 owner2
+   canton/localnet/custody_authority_check.sh --party nttCustody owner1 owner2
+   canton/localnet/custody_authority_check.sh --party feeCustody owner1 owner2
    ```
 
 5. Make sure that the output shows these results:
@@ -567,6 +585,8 @@ It has the same hosts, the same confirmation threshold and the same 2-of-3 signi
    - A submission for the two parties with one pair of owner signatures succeeds.
    - A submission for each party with one owner signature fails with `FAILED_TO_EXECUTE_TRANSACTION`.
      The error shows 1 valid signature and 0 invalid signatures.
+   - A submission of one custody party cannot create a contract that the other custody party signs.
+     The error is `DAML_AUTHORIZATION_ERROR`.
 
 ### Rehearse the rotation faults and the safety stop
 
@@ -589,6 +609,7 @@ The last line of each rehearsal shows the current owner names.
    | R3 | The load omits the `nttCustody` change. | `ROTATION HALF-APPLIED` names `nttCustody`. |
    | R6 | None. Ceremony probes in the R3 state. | `nttCustody` accepts the removed key. `guardianGovernance` accepts the new key. |
    | R3b | `--resume` of R3. The signer of the new owner fails. | `ROTATION done`. `ROTATION signatures in this run: 0`. |
+   | R7 | The load omits the `feeCustody` change. Then `--resume`. | `ROTATION HALF-APPLIED` names `feeCustody`. Then `ROTATION done`. |
    | R4 | The `nttCustody` change has no signature of the new owner. | Measurement. |
    | R5 | The root delegation is in load 2. | Measurement. |
 
@@ -605,13 +626,14 @@ The last line of each rehearsal shows the current owner names.
    | Case | State | Expected result |
    | - | - | - |
    | SS1 | The rotation list has only `guardianGovernance`. | Stop: the parties differ. |
+   | SS5 | The rotation list has no `feeCustody`. | Stop: the parties differ. |
    | SS3 | The rotation list has an unknown party. | Stop: the parties differ. |
    | SS2 | A half-applied rotation A. Rotation B starts without `--resume`. | Stop: the `nttCustody` keys are not the old or the new set. |
    | SS4 | `--resume` of rotation A. | `ROTATION safety stop passed`, then `ROTATION done`. |
 
 #### Results of the rotation measurements
 
-Canton 3.7.3 on LocalNet, 2026-11-18, four runs:
+Canton 3.7.3 on LocalNet, 2026-11-18, four runs, before `feeCustody` existed:
 
 - R3: on each participant, the namespace and `guardianGovernance` changed. `nttCustody` did not change.
 - R4: the participant rejects the complete load call. No mapping changes.
@@ -660,10 +682,10 @@ These scripts run the Wormhole NTT layer on LocalNet.
 The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `79d739b16`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.2, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.3, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
 The `ntt` 0.3.2 DAR of commit `79d739b16` calls `wormhole-core` 0.8.0.
-Thus `ntt_upload_dars.sh` stops until an `ntt` DAR on `wormhole-core` 0.8.2 replaces it.
+Thus `ntt_upload_dars.sh` stops until an `ntt` DAR on `wormhole-core` 0.8.3 replaces it.
 
 Set `NTT_PIN_VERSION=0.4.0` to use `ntt` 0.4.0. Build it from NTT branch `canton/overnight-ntt-custody`, commit `7561a9b`.
 The `ntt` 0.4.0 DAR of commit `7561a9b` also calls `wormhole-core` 0.8.0.
@@ -695,7 +717,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 
 | Step | Script | Result |
 | --- | --- | --- |
-| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.8.2. |
+| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.8.3. |
 | 2 | `ntt_governance.sh` | One `NttGovernance` root and one `CoinFactory` exist. |
 | 3 | `ntt_watcher.sh start` | The watcher harness reads `app-provider`. |
 | 4 | `ntt_burn_mint.sh` | A relayer mints 2.5 tokens to a user. The user burns 1.0 token. |
@@ -898,21 +920,22 @@ Each rehearsal harness uses this list.
 The script stops if a DAR has a different package id.
 `test/core_upgrade_package_ids_test.sh` checks the DARs without LocalNet.
 
-### Scope with `wormhole-core` 0.8.0
+### Scope with `wormhole-core` 0.8.3
 
 The rehearsal keeps the versions 0.6.0 and 0.7.0.
 The procedures of section 7.5 apply only to an upgrade that keeps the signatories of each template.
 0.6.0 and 0.7.0 are the only pair of released versions with this property.
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` and `Emitter`.
+0.8.3 adds `feeCustody` as a signatory of `CoreState`. 0.8.0, 0.8.1 and 0.8.2 are withdrawn.
 
-The rehearsal cannot run on a LocalNet with the 0.8.0 genesis:
+The rehearsal cannot run on a LocalNet with the 0.8.3 genesis:
 
-- The 0.8.0 `CoreState`, `EmitterRegistry` and `Emitter` cannot run under 0.6.0 or 0.7.0.
-- `ntt_e2e.sh` follows the `ntt` 0.3.2 and `wormhole-core` 0.8.2 pins of `ntt_lib.sh`.
+- The 0.8.3 `CoreState`, `EmitterRegistry` and `Emitter` cannot run under 0.6.0 or 0.7.0.
+- `ntt_e2e.sh` follows the `ntt` 0.3.2 and `wormhole-core` 0.8.3 pins of `ntt_lib.sh`.
   Thus the steps `ntt` and `post-unvet` fail with `ntt` 0.3.0.
 
 The `prepare` step stops before it changes the vetting state if the Operator `CoreState` is not a 0.6.0 contract.
-Use the rehearsal again for the first upgrade from 0.8.0.
+Use the rehearsal again for the first upgrade from 0.8.3.
 Then change the package ids and DARs in `core_upgrade_package_ids.sh`.
 
 ### Prerequisites

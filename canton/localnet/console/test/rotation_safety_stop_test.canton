@@ -63,4 +63,22 @@ checkTableCase("SS-j-ghost-party-in-namespace",
     Some("SAFETY STOP: PartyToParticipant parties in the namespace ghost,guardianGovernance,nttCustody differ")) {
   checkRotationA(keysBeforeRotationA, mappingsBeforeRotationA :+ partyMapping(ghostPartyId, Some(keysAfterRotationB)), rotationParties)
 }
+
+// Three parties in the namespace: nttCustody, feeCustody, guardianGovernance.
+val threeRotationParties = Seq(testCustodyPartyId, testFeeCustodyPartyId, testGuardianGovernancePartyId)
+val threePartyMappingsBeforeRotationA = threeRotationParties.map(partyMapping(_, Some(keysBeforeRotationA)))
+checkTableCase("SS-k-three-parties-old-keys", None) {
+  checkRotationA(keysBeforeRotationA, threePartyMappingsBeforeRotationA, threeRotationParties)
+}
+checkTableCase("SS-l-fee-custody-omitted-from-list",
+    Some("SAFETY STOP: PartyToParticipant parties in the namespace feeCustody,guardianGovernance,nttCustody differ from GG_ROTATION_PARTY_IDS nttCustody,guardianGovernance")) {
+  checkRotationA(keysBeforeRotationA, threePartyMappingsBeforeRotationA, rotationParties)
+}
+// Rotation A left feeCustody with the keys from before A (half-applied); rotation B starts without --resume.
+checkTableCase("SS-m-fee-custody-half-applied-key-state", Some("SAFETY STOP: feeCustody signing keys")) {
+  checkRotationB(keysAfterRotationA,
+    Seq(partyMapping(testCustodyPartyId, Some(keysAfterRotationA)), partyMapping(testFeeCustodyPartyId, Some(keysBeforeRotationA)),
+      partyMapping(testGuardianGovernancePartyId, Some(keysAfterRotationA))),
+    threeRotationParties)
+}
 finishTable("rotation-safety-stop")
