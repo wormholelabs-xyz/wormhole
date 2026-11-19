@@ -30,6 +30,7 @@ expect_no_effect() {
   if [[ -n "$trace_id" ]]; then
     rejection="$(docker logs canton --since "$started_at" 2>&1 | grep -F "$trace_id" \
       | grep -m1 -oE 'TOPOLOGY_UNAUTHORIZED_TRANSACTION[^"]{0,160}' || true)"
+    rejection="${rejection%%$'\n'*}"
   fi
   if grep -q "^REPLICATION $phase done" <<<"$phase_output"; then
     echo "FAIL: $description took effect"

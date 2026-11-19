@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Live checks of the guardian replacement rehearsal (L1): a PublishMessage commits with guardian4 as a confirmer,
 # including with sv disconnected. Each current host shows the message; the rehearsal removed app-user as a host, so the
-# check requires its update offset to be absent.
+# check requires that app-user shows no Emitter event of it.
 # Usage: gg_hosting_change_live_check.sh
 set -euo pipefail
 # shellcheck source=gg_lib.sh
@@ -13,10 +13,10 @@ readonly GUARDIAN4_JSON_API_URL="http://localhost:5975"
 ledger_end_at() {
   curl_bounded -sSf "$1/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset
 }
-# gg_update_offset_at <json-api-url> <update-id>: the local offset of a guardianGovernance update on one participant,
-# or "ABSENT" on HTTP 404 with UPDATE_NOT_FOUND. Any other response fails. publish_message_scan.sh takes this offset as
-# its end offset, where the required update must sit.
-gg_update_offset_at() {
+readonly UPDATE_VISIBLE_MAX_ATTEMPTS=20
+# gg_update_at <json-api-url> <update-id>: the update as the participant shows it with a guardianGovernance filter, or
+# "ABSENT" on HTTP 404 with UPDATE_NOT_FOUND. Any other response fails.
+gg_update_at() {
   local event_format request_body response_file http_status
   event_format="$(jq -n --arg party "$GG_PARTY" \
     '{filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false}')"
@@ -27,13 +27,29 @@ gg_update_offset_at() {
     -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' -d "$request_body")" \
     || fail "update-by-id $2 at $1: request failed"
   case "$http_status" in
-    200) jq -er '.update.Transaction.value.offset' "$response_file" || fail "update-by-id $2 at $1: HTTP 200 without a transaction offset" ;;
+    200) jq -ec '.update.Transaction.value | select(.offset != null)' "$response_file" \
+      || fail "update-by-id $2 at $1: HTTP 200 without a transaction offset" ;;
     404)
       jq -e '.code == "UPDATE_NOT_FOUND"' "$response_file" >/dev/null \
         || fail "update-by-id $2 at $1: HTTP 404 without UPDATE_NOT_FOUND: $(head -c 400 "$response_file")"
       echo ABSENT ;;
     *) fail "update-by-id $2 at $1: HTTP $http_status: $(head -c 400 "$response_file")" ;;
   esac
+}
+# gg_update_offset_at <json-api-url> <update-id>: the local offset of the update, waiting at most
+# UPDATE_VISIBLE_MAX_ATTEMPTS seconds for the participant to show it. publish_message_scan.sh takes this offset as its
+# end offset, where the required update must sit.
+gg_update_offset_at() {
+  local attempt update_json
+  for ((attempt = 1; attempt <= UPDATE_VISIBLE_MAX_ATTEMPTS; attempt++)); do
+    update_json="$(gg_update_at "$1" "$2")" || return 1
+    if [[ "$update_json" != ABSENT ]]; then
+      jq -er .offset <<<"$update_json" || return 1
+      return 0
+    fi
+    sleep 1
+  done
+  echo ABSENT
 }
 # scan_confirms_publish <label> <participant-name> <json-api-url> <begin-exclusive> <update-id>: the participant shows the
 # update as a guardianGovernance PublishMessage, and publish_message_scan.sh confirms it at its own offset on that participant.
@@ -45,13 +61,29 @@ scan_confirms_publish() {
     || fail "$label: publish_message_scan on $participant_name did not confirm update $update_id at offset $end"
   echo "PASS: $label: $participant_name shows the PublishMessage as guardianGovernance"
 }
-# publish_and_check <label> <require-guardian4-vote>: publish one message and check it on each host; app-user's update
-# offset must be absent. With require-guardian4-vote true, also require that the mediator counted a guardian4 approval
+# check_app_user_has_no_emitter_event <label> <update-id>: app-user shows no Emitter event of the update. app-user hosts
+# feeCustody, a CoreState stakeholder, so it can show the CoreState events of the update.
+check_app_user_has_no_emitter_event() {
+  local update_json event_templates
+  update_json="$(gg_update_at "$(json_api_url app-user)" "$2")"
+  if [[ "$update_json" == ABSENT ]]; then
+    echo "PASS: $1: app-user has no offset for the PublishMessage"
+    return 0
+  fi
+  event_templates="$(jq -r '[.events[] | to_entries[0] | "\(.value.templateId | split(":") | .[1:] | join(":")).\(.value.choice // "create")"] | join(",")' \
+    <<<"$update_json")"
+  if grep -qE '(^|,)Wormhole\.Core\.State:Emitter\.' <<<"$event_templates"; then
+    fail "$1: app-user shows the Emitter events of the PublishMessage: $event_templates"
+  fi
+  echo "PASS: $1: app-user shows no Emitter event of the PublishMessage (CoreState events through feeCustody: $event_templates)"
+}
+# publish_and_check <label> <require-guardian4-vote>: publish one message and check it on each host; app-user must show
+# no Emitter event of it. With require-guardian4-vote true, also require that the mediator counted a guardian4 approval
 # for guardianGovernance. guardian4 is the third of three confirmers at threshold 2, so with every host connected the
 # mediator can finalize on the other two before guardian4's vote counts; the vote is required only when sv is
 # disconnected and guardian4 is one of the two reachable confirmers.
 publish_and_check() {
-  local label="$1" require_guardian4_vote="$2" guardian4_begin provider_begin started_at transaction update_id user_offset approval_lines
+  local label="$1" require_guardian4_vote="$2" guardian4_begin provider_begin started_at transaction update_id approval_lines
   guardian4_begin="$(ledger_end_at "$GUARDIAN4_JSON_API_URL")"
   provider_begin="$(ledger_end_at "$(json_api_url app-provider)")"
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -61,9 +93,7 @@ publish_and_check() {
   echo "PASS: $label: PublishMessage committed, update $update_id"
   scan_confirms_publish "$label" guardian4 "$GUARDIAN4_JSON_API_URL" "$guardian4_begin" "$update_id"
   scan_confirms_publish "$label" app-provider "$(json_api_url app-provider)" "$provider_begin" "$update_id"
-  user_offset="$(gg_update_offset_at "$(json_api_url app-user)" "$update_id")"
-  [[ "$user_offset" == ABSENT ]] || fail "$label: app-user still receives guardianGovernance transactions (offset $user_offset)"
-  echo "PASS: $label: app-user has no offset for the PublishMessage"
+  check_app_user_has_no_emitter_event "$label" "$update_id"
   if [[ "$require_guardian4_vote" == true ]]; then
     approval_lines="$(docker logs canton --since "$started_at" 2>&1 \
       | jq -rR 'fromjson? | select(.message | test("Received verdict LocalApprove\\(\\) for pending parties .*guardianGovernance")) | .message | .[0:260]')"
