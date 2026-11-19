@@ -55,10 +55,10 @@ Each custody party copies the hosts, the confirmation threshold and the owner ke
 
 The fee registry code runs on each paid charge with the authority of the payer and `feeCustody`.
 It also has the authority of the fee instrument admin, which signs each fee allocation.
-`CoreState` rejects `gg` and the `operator` as the fee recipient.
-`CoreState` also rejects `gg` and the `operator` as the fee instrument admin.
-A charge with a fee above 0 rejects `gg` and the `operator` as the payer.
-Thus fee registry code never runs with the authority of `gg` or the `operator`.
+`CoreState` rejects `gg` as the fee recipient.
+`CoreState` also rejects `gg` and `feeCustody` as the fee instrument admin.
+A charge with a fee above 0 rejects `gg` as the payer.
+Thus fee registry code never runs with the authority of `gg`.
 
 Two residuals stay. A red-team test on `wormhole-core` 0.8.3 confirmed each of them:
 
@@ -752,6 +752,9 @@ Each deployment of `wormhole-core` 0.8.3 starts from a fresh genesis with a new 
 Contracts of an earlier version do not move to 0.8.3.
 For the reason, refer to [`A14_EMITTER_ID_UNIQUENESS.md`](../canton/A14_EMITTER_ID_UNIQUENESS.md).
 
+> **NOTE:** `wormhole-core` 0.9.0 has no `operator`. The `CoreState` checks below apply to 0.9.0.
+> The ceremony text and the genesis scripts still use the 0.8.x `operator`. A later change updates them.
+
 The genesis ceremony has two prepared transactions.
 The first transaction creates the `CoreState`. The second transaction creates the `EmitterRegistry`.
 The `operator`, the `gg` owner key threshold and the `feeCustody` owner key threshold sign the `CoreState` transaction.
@@ -777,13 +780,13 @@ Check the `CoreState` transaction:
 6. Make sure that `feeRecipient` is not `nttCustody`.
 7. Make sure that `feeInstrument` is the agreed instrument admin and instrument ID.
 8. Make sure that the `feeInstrument` admin is not `gg`.
-9. Make sure that the `feeInstrument` admin is not the `operator`.
-10. Make sure that `operator` is the agreed new operator party.
-11. Make sure that `guardianSetIndex` is 0.
+9. Make sure that the `feeInstrument` admin is not `feeCustody`.
+10. Make sure that `guardianSetIndex` is the agreed genesis guardian set index (`GenesisGuardianSet`).
+11. Make sure that `guardianSets` has exactly one entry, at that index, with the agreed guardian set.
 12. Make sure that `messageFee` is 0 (Section 7.8).
 13. Make sure that `consumedGovernance` is empty.
 14. Make sure that the template package ID is the agreed `wormhole-core` package ID.
-15. Make sure that the prepared transaction has exactly three signer sets: `operator`, `gg` and `feeCustody`.
+15. Make sure that the prepared transaction has exactly two signer sets: `gg` and `feeCustody`.
 16. Sign the prepared hash for `gg` and for `feeCustody` (Section 7.1).
 
 The `CoreState` precondition also rejects these values. It does not replace the checks.
@@ -1299,7 +1302,7 @@ The fee registry code runs on each paid charge with the authority of the allocat
 In 0.8.0 to 0.8.2, `gg` was the fee recipient. Thus the fee registry code ran with the authority of `gg`.
 With that authority, it can publish a message on each `gg`-owned `Emitter`, and the guardians sign it.
 In 0.8.3, the fee registry code runs only with the authority of the payer and `feeCustody`.
-`chargeFee` rejects `gg` and the `operator` as payer, receiver or fee instrument admin when a fee is due.
+When a fee is due, `chargeFee` rejects `gg` as payer or receiver, and `gg` or `feeCustody` as fee instrument admin.
 Thus an NTT path where `gg` pays a fee fails when the fee is above 0.
 Such a path must have a separate fee payer before any fee goes above 0 (Section 7.8).
 The custody party separates Daml authority. It does not separate key authority.
