@@ -347,13 +347,15 @@ check_service_endpoints() {
   echo "== C3. Service health, the route set and the register flow"
   check_service_answers "healthz through the proxy" /v1/healthz 200 '. == {status: "ok"}'
   check_service_answers "readyz through the proxy" /v1/readyz 200 '. == {status: "ready"}'
-  check_service_answers "the index lists only the flow routes" /v1 200 "([.endpoints[].path] | sort) == $SERVICE_ROUTES_JSON"
+  # The index also lists the CIP-0056 registry routes, outside /v1.
+  check_service_answers "the /v1 routes of the index are the flow routes" /v1 200 \
+    "([.endpoints[].path | select(. == \"/v1\" or startswith(\"/v1/\"))] | sort) == $SERVICE_ROUTES_JSON"
   for removed_path in "${REMOVED_SERVICE_PATHS[@]}"; do
     check_service_answers "no route" "$removed_path" 404 -
   done
   check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
   check_service_answers "register flow without --operator-party" /v1/flows/register 404 \
-    '.error == "flow register not enabled: the service has no operator party"'
+    '.error == "disclosure-service: flow register not enabled: the service has no operator party"'
 }
 
 # flow_set <flow> <query>: the flow response JSON. Fails unless HTTP 200.
