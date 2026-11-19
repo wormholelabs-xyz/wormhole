@@ -194,6 +194,26 @@ func TestParseVAARequest(t *testing.T) {
 			expectedRequest: vaaRequest{kind: vaaKindMessage, signingSetIndex: math.MaxUint32, signingKeyIndices: []uint64{0},
 				signerPositions: []uint8{0}},
 		},
+		{
+			name:        "transfer-fees",
+			commandLine: "-kind transfer-fees -transfer-amount 9 -transfer-recipient " + strings.Repeat("d4", 32) + " -sequence 4",
+			expectedRequest: vaaRequest{kind: vaaKindTransferFees, signingSetIndex: 0, signingKeyIndices: []uint64{0},
+				signerPositions: []uint8{0}, sequence: 4, transferFeesAmount: 9, transferFeesRecipient: vaa.Address(bytes.Repeat([]byte{0xd4}, 32))},
+		},
+		{name: "transfer-fees without recipient", commandLine: "-kind transfer-fees -transfer-amount 9",
+			expectedErrorMessage: "-kind transfer-fees requires -transfer-recipient"},
+		{name: "transfer-fees with a 31-byte recipient", commandLine: "-kind transfer-fees -transfer-amount 9 -transfer-recipient " + strings.Repeat("d4", 31),
+			expectedErrorMessage: "32 bytes"},
+		{name: "transfer amount on set-message-fee", commandLine: "-kind set-message-fee -fee 1 -transfer-amount 9",
+			expectedErrorMessage: "flag -transfer-amount applies only to -kind transfer-fees"},
+		{
+			name:        "contract-upgrade",
+			commandLine: "-kind contract-upgrade -new-contract " + strings.Repeat("c1", 32) + " -sequence 5",
+			expectedRequest: vaaRequest{kind: vaaKindContractUpgrade, signingSetIndex: 0, signingKeyIndices: []uint64{0},
+				signerPositions: []uint8{0}, sequence: 5, upgradeNewContract: vaa.Address(bytes.Repeat([]byte{0xc1}, 32))},
+		},
+		{name: "contract-upgrade without new contract", commandLine: "-kind contract-upgrade",
+			expectedErrorMessage: "-kind contract-upgrade requires -new-contract"},
 		{name: "fee on message", commandLine: "-kind message -fee 5", expectedErrorMessage: "flag -fee applies only to -kind set-message-fee"},
 		{name: "new keys on set-message-fee", commandLine: "-kind set-message-fee -fee 1 -new-key-indices 1",
 			expectedErrorMessage: "flag -new-key-indices applies only to -kind guardian-set-upgrade"},
@@ -245,6 +265,17 @@ func TestBuildPayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serialize the expected fee payload: %v", err)
 	}
+	transferFeesRecipient := vaa.Address(bytes.Repeat([]byte{0xd4}, 32))
+	expectedTransferFeesPayload, err := vaa.BodyCoreBridgeTransferFees{
+		ChainID: vaa.ChainIDCanton, Amount: uint256.NewInt(9), Recipient: transferFeesRecipient}.Serialize()
+	if err != nil {
+		t.Fatalf("serialize the expected transfer-fees payload: %v", err)
+	}
+	upgradeNewContract := vaa.Address(bytes.Repeat([]byte{0xc1}, 32))
+	expectedContractUpgradePayload, err := vaa.BodyContractUpgrade{ChainID: vaa.ChainIDCanton, NewContract: upgradeNewContract}.Serialize()
+	if err != nil {
+		t.Fatalf("serialize the expected contract-upgrade payload: %v", err)
+	}
 	testCases := []struct {
 		name                   string
 		request                vaaRequest
@@ -292,6 +323,36 @@ func TestBuildPayload(t *testing.T) {
 					if !bytes.Equal(payload[addressStart:addressStart+addressLength], expectedAddress.Bytes()) {
 						t.Fatalf("address %d is %x, expected %x", position, payload[addressStart:addressStart+addressLength], expectedAddress.Bytes())
 					}
+				}
+			},
+		},
+		{
+			name:                   "transfer-fees names Canton",
+			request:                vaaRequest{kind: vaaKindTransferFees, transferFeesAmount: 9, transferFeesRecipient: transferFeesRecipient},
+			expectedEmitterChain:   vaa.GovernanceChain,
+			expectedEmitterAddress: vaa.GovernanceEmitter,
+			checkPayload: func(t *testing.T, payload []byte) {
+				const transferFeesPayloadLength = 99
+				if len(payload) != transferFeesPayloadLength {
+					t.Fatalf("payload length %d, expected %d", len(payload), transferFeesPayloadLength)
+				}
+				if !bytes.Equal(payload, expectedTransferFeesPayload) {
+					t.Fatalf("payload %x, expected %x", payload, expectedTransferFeesPayload)
+				}
+			},
+		},
+		{
+			name:                   "contract-upgrade names Canton",
+			request:                vaaRequest{kind: vaaKindContractUpgrade, upgradeNewContract: upgradeNewContract},
+			expectedEmitterChain:   vaa.GovernanceChain,
+			expectedEmitterAddress: vaa.GovernanceEmitter,
+			checkPayload: func(t *testing.T, payload []byte) {
+				const contractUpgradePayloadLength = 67
+				if len(payload) != contractUpgradePayloadLength {
+					t.Fatalf("payload length %d, expected %d", len(payload), contractUpgradePayloadLength)
+				}
+				if !bytes.Equal(payload, expectedContractUpgradePayload) {
+					t.Fatalf("payload %x, expected %x", payload, expectedContractUpgradePayload)
 				}
 			},
 		},
