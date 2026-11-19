@@ -84,9 +84,9 @@ The most consequential differences:
   this package uses none: contracts are addressed **by contract-id**, resolved
   from a stakeholder's own ACS or via the disclosure service (§4.7), and
   authenticated by their **payloads** (signatories cannot be forged). The
-  `CoreState` is **co-signed by the `operator` and a `guardianGovernance`
-  party** (a k-of-n threshold party), so the operator cannot forge the guardian
-  set (§4.1); per-emitter uniqueness is a **registry** that allocates ids plus
+  **`guardianGovernance`** (a k-of-n threshold party) and `feeCustody` sign the
+  `CoreState`. Only the guardian threshold can create a guardian set
+  (§4.1). Per-emitter uniqueness is a **registry** that allocates ids plus
   an owner-bound, cryptographic address (§4.2).
 
 ---
@@ -98,7 +98,7 @@ flowchart TD
     subgraph canton["Canton participant node — Daml: Wormhole.Core package"]
         direction TB
         integrator(["integrator party"])
-        core["CoreState<br/>(operator-issued singleton)<br/>archives &amp; recreates on each transition"]
+        core["CoreState<br/>(guardianGovernance-signed singleton)<br/>archives &amp; recreates on each transition"]
         gov["governance choices:<br/>GuardianSetUpgrade · SetMessageFee<br/>TransferFees · ContractUpgrade"]
         evt(["ExercisedEvent(PublishMessage)<br/>result = (emitterCid, WormholeMessage{seq, nonce, payload, …})"])
         integrator -- "exercise PublishMessage" --> core
@@ -169,18 +169,20 @@ Daml package name: `wormhole-core` (the `core` package). Module layout under
 ```haskell
 template CoreState
   with
-    operator           : Party          -- advances the singleton; the "deployer"
     guardianGovernance : Party          -- guardians' governance anchor (threshold party)
     chainId            : Int            -- 75
     governanceChainId  : Int            -- 1 (Solana)
     governanceContract : Bytes32        -- 0x..0004 (the governance emitter)
     guardianSetIndex   : Int            -- current set index
     guardianSets       : Map Int GuardianSet   -- index -> set (with expiry)
-    messageFee         : Int            -- fee required to publish (native units)
+    messageFee         : Int            -- fee required to publish, 10^-10 feeInstrument units
+    feeInstrument      : InstrumentId   -- CIP-0056 instrument; genesis-fixed
+    feeRecipient       : Party          -- feeCustody; genesis-fixed
     consumedGovernance : Set Bytes32    -- governance-only replay protection (§4.6)
   where
-    signatory operator, guardianGovernance
-    ensure checkGuardianSetsAreConsistent guardianSetIndex guardianSets
+    signatory guardianGovernance, feeRecipient
+    ensure feeRecipient /= guardianGovernance
+      && checkGuardianSetsAreConsistent guardianSetIndex guardianSets
 ```
 
 **Genesis guardian set index.** Genesis installs the guardian set at the live
@@ -204,100 +206,89 @@ nonconsuming `ParseAndVerifyVAA` (§4.3) is a pure read. Its `Emitter` signature
 gives `guardianGovernance` no publish or archive authority alone: each also
 needs the owner (`TestGuardianVisibility`).
 
-Every state-mutating choice is `controller`-checked (controller `operator`),
-archives the current `CoreState`, and `create`s the next one with updated fields.
-This is the Daml idiom for mutable state and gives us deterministic,
-replay-protected transitions.
+The only state-changing choice is `SubmitGovernanceVAA`. Any party is its
+controller (`submitter`), and the guardian signatures on the VAA are the
+authority (§4.4). The choice archives the current `CoreState` and creates the
+successor with the updated fields. This is the Daml idiom for mutable state.
 
-**Singleton co-signed by a governance party; authenticity is in the payload.**
-The `CoreState` is co-signed by the `operator` and a **`guardianGovernance`**
-party — in production a **decentralized-namespace external party** under a k-of-n
-threshold of guardian keys (the Canton Network DSO construction), rotated at the
-topology layer without touching this template (the party id, and thus every
-consumer's trust anchor, is stable across rotation). Two things follow:
+**Singleton signed by the governance party; authenticity is in the payload.**
+`guardianGovernance` and `feeCustody` (the `feeRecipient` field) sign the
+`CoreState`. In production, `guardianGovernance` is a **decentralized-namespace
+external party** under a k-of-n threshold of guardian keys (the Canton Network
+DSO construction). Guardians rotate its keys at the topology layer. The party
+id, and thus the trust anchor of each consumer, stays the same. Two things
+follow:
 
-- **The operator cannot forge the guardian set.** Because `guardianGovernance`
-  is a signatory, a compromised operator cannot `create` a `CoreState` bearing
-  the real governance party, so any `CoreState` whose `guardianGovernance` field
-  is the known anchor is **authentic by construction**, however its cid was
-  obtained — consumers authenticate the payload, never the resolution path
-  (§4.7). **Pinning `operator` is weaker than pinning `guardianGovernance`:** a
-  compromised operator (a single hot key) can co-sign a `CoreState` whose
-  `operator` is genuine but whose `guardianGovernance`/`feeRecipient` it
-  controls, so an `operator`-only pin accepts a shadow `CoreState`. For the fee
-  path — where `guardianGovernance` pins the `CoreState`, which pins
-  `feeRecipient` — only the `guardianGovernance` pin suffices (see below).
-- **Governance stays low-friction.** `guardianGovernance` actively signs only at
-  **genesis**; each `SubmitGovernanceVAA` inherits its authority from the
-  archived contract (as the `Emitter` owner does through `PublishMessage`), so
-  the operator submits governance alone. "Exactly one live `CoreState`" is still
-  behavioral, but the set's _contents_ are now anchored.
+- **Only the guardian threshold creates a guardian set.** A `CoreState` whose
+  `guardianGovernance` field is the known anchor is **authentic by
+  construction**, independent of how the caller got its cid. Consumers
+  authenticate the payload, not the resolution path (§4.7). `GetGuardianGovernance`
+  is the read pin. The fee path pins `guardianGovernance`, and the `CoreState`
+  pins `feeRecipient` (§4.2).
+- **Governance stays low-friction.** `guardianGovernance` signs only at
+  **genesis**. Each `SubmitGovernanceVAA` inherits its authority from the
+  archived contract, as the `Emitter` owner does through `PublishMessage`.
+  Thus any submitter applies a governance VAA. "Exactly one live `CoreState`"
+  is behavioral, but the guardian signature anchors the set _contents_.
 
-Per-emitter **sequence numbers live in each `Emitter`** (§4.2), not `CoreState`:
-a choice can only be exercised by a stakeholder, and the emitter owner is not a
-stakeholder of the operator-owned `CoreState`. Keeping the sequence in the
-`Emitter` lets the owner publish — and advance its own sequence — **without the
-operator's authority**, preserving EVM's permissionless `publishMessage`.
-`CoreState` holds only shared config and governance state.
+Per-emitter **sequence numbers live in each `Emitter`** (§4.2), not in
+`CoreState`. The owner signs its `Emitter`, so the owner publishes and advances
+its own sequence. This keeps EVM's permissionless `publishMessage`.
+`CoreState` holds only shared configuration and governance state.
 
-> **Why an `operator` party?** Canton requires every contract to have a
-> signatory. The `operator` is a designated, well-known party (configured at
-> deploy time) that owns the singleton. It has **no special authority** over
-> message contents or governance outcomes — governance is gated entirely by VAA
-> verification (§4.4). Its role is mechanical: it is the party that the daml
-> transaction is submitted as in order to advance the singleton. This mirrors
-> how non-EVM chains (e.g. Near) have an account that "owns" the bridge object
-> without being able to forge messages.
+> **Why a `guardianGovernance` signatory?** Canton requires a signatory on each
+> contract. `guardianGovernance` is the k-of-n guardian party. It signs every
+> core contract at genesis or through inherited authority. Its signature gives
+> it no power over message contents: VAA verification gates governance (§4.4),
+> and each `Emitter` also needs its owner. Genesis needs only
+> `guardianGovernance`, plus `feeCustody` for the `CoreState`.
 
 ### 4.2 Message publishing
 
 Mirrors `publishMessage(nonce, payload, consistencyLevel)` from
 `Implementation.sol:15` and whitepaper 0004.
 
-An integrator first registers an emitter — **directly, with no operator
-involvement**. The operator and `guardianGovernance` co-sign an
-`EmitterRegistry`, created with the `CoreState` in the genesis ceremony; the
-requester exercises `RegisterEmitter` on it, holding only the registry's
-disclosure (§4.7). The flexible controller brings the requester's signature;
-the operator's co-signature on the created `Emitter` is _inherited_ from the
-registry's signatories — the same authority-inheritance that powers
-`VerifyAndConsumeVAA`. Registration is permissionless (EVM/Sui parity: anyone
-may emit); the choice is consuming, so racing registrations contend on the
-registry and the loser retries with the fresh cid:
+An integrator first registers an emitter **directly**. `guardianGovernance`
+signs the `EmitterRegistry`, which the genesis ceremony creates with the
+`CoreState`. The requester exercises `RegisterEmitter` on it with the registry
+disclosure (§4.7). The flexible controller brings the requester signature. The
+created `Emitter` _inherits_ the `guardianGovernance` signature from the
+registry, as in `VerifyAndConsumeVAA`. Registration is permissionless (EVM/Sui
+parity). The choice is consuming, so racing registrations contend on the
+registry, and the loser retries with the fresh cid:
 
 ```haskell
--- One per (operator, guardianGovernance); allocates monotonically increasing
--- emitter ids.
+-- One per guardianGovernance; allocates monotonically increasing emitter ids.
 template EmitterRegistry with
-    operator           : Party
-    guardianGovernance : Party    -- carried into each new Emitter
+    guardianGovernance : Party    -- sole signatory; carried into each new Emitter
+    onboardingFeeAdmin : Party    -- sets registrationFee only; not a signatory
     registrationFee    : Int      -- 10^-10 feeInstrument units; 0 for free
     nextId             : Int
   where
-    signatory operator, guardianGovernance
-                                  -- gg co-signs: the operator alone cannot reset
-                                  -- nextId (A14-3)
+    signatory guardianGovernance  -- only the guardian threshold resets nextId (A14-3)
     ensure nextId >= 0 && nextId <= maxEmitterId + 1      -- maxEmitterId = 2^53 - 1
-      && registrationFee >= 0 && registrationFee <= maxRegistrationFee
+      && registrationFee >= 0 && registrationFee <= maxOnboardingFee
     -- choice RegisterEmitter : (ContractId EmitterRegistry, ContractId Emitter)
     --   with requester, payer : Party; coreStateCid, feeAllocation : Optional ...
-    --        expectedGuardianGovernance : Optional Party -- Some gg pins the registry
-    --   controller requester, payer -- operator + gg authority inherited; no crank
+    --        expectedGuardianGovernance : Party -- pins the registry
+    --   controller requester, payer -- gg authority inherited; no crank
     --   returns (successorRegistryCid, emitterCid)
     -- choice SetRegistrationFee : ContractId EmitterRegistry
     --   with newRegistrationFee : Int
-    --   controller operator, guardianGovernance -- keeps nextId
+    --   controller onboardingFeeAdmin -- keeps nextId and the admin
+    -- choice ReplaceEmitterRegistryFeeAdmin : ContractId EmitterRegistry
+    --   with newOnboardingFeeAdmin : Party
+    --   controller guardianGovernance -- emergency ceremony
 
 template Emitter
   with
-    operator           : Party
-    guardianGovernance : Party    -- authenticity anchor; co-signer
+    guardianGovernance : Party    -- registrar and authenticity anchor; co-signer
     owner              : Party
     emitterId          : Int      -- registry-allocated
-    emitterAddress     : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
+    emitterAddress     : Bytes32  -- keccak256(tag ‖ guardianGovernance ‖ owner ‖ emitterId), set at creation
     sequence           : Int      -- next sequence to assign (per-emitter)
   where
-    signatory operator, owner, guardianGovernance
+    signatory owner, guardianGovernance
                                 -- owner co-signs: the msg.sender analog
                                 -- gg co-signs: no second Emitter of an issued
                                 -- identity outside RegisterEmitter (A14-2)
@@ -326,11 +317,15 @@ increments `wormhole_canton_publish_without_read_party_stakeholder_total` and
 writes a WARN log with the update id. The watcher also rejects an `emitterId`
 above `maxEmitterId` (2^53 - 1), so every off-ledger tool reads ids exactly.
 
-`guardianGovernance` is a signatory of the registry. Thus its hosting
+`guardianGovernance` is the sole signatory of the registry. Thus its hosting
 participants confirm each `RegisterEmitter`, and a registration needs the
-confirmation threshold of `guardianGovernance`. A change of `registrationFee`
-needs a guardian ceremony that runs `SetRegistrationFee`. The choice keeps
-`nextId`. See [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md).
+confirmation threshold of `guardianGovernance`. The onboarding fee admin
+(`onboardingFeeAdmin`) changes `registrationFee` with `SetRegistrationFee`. The
+choice keeps `nextId` and the admin. The template precondition bounds the fee by
+`maxOnboardingFee`. The core governance VAA set has no fee-admin action. Thus a
+`guardianGovernance` ceremony replaces the admin with
+`ReplaceEmitterRegistryFeeAdmin`. See
+[A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md).
 
 **Emitter address derivation.** The 32-byte Wormhole emitter address is
 
@@ -341,7 +336,8 @@ keccak256( utf8("wormhole:emitter:v1")
          ‖ uint64be(emitterId) )
 ```
 
-where `registrar` is the operator. The 4-byte length prefixes make the preimage
+where `registrar` is `guardianGovernance`. One `guardianGovernance` is one
+deployment. The 4-byte length prefixes make the preimage
 injective across the two variable-length party ids. It is computed **on-ledger**
 at allocation (Daml `DA.Crypto.Text` is stable in 3.5) and stored in
 `emitterAddress` for integrators to read, but the guardian watcher **re-derives**
@@ -351,20 +347,20 @@ on-ledger value cannot spoof it.
 **Impersonation is cryptographically prevented (the `msg.sender` guarantee).**
 Because the `owner` is both a **signatory** of the `Emitter` and part of the
 address preimage, only a transaction carrying the owner's authority can create a
-contract whose address is the owner's. A compromised `operator` therefore cannot
-emit under an existing emitter's address: an operator-alone forge is rejected in
-guardian replay (missing the owner's signature), and a colluding duplicate under
-a different owner derives a **different**, untrusted address. This is the
+contract whose address is the owner's. A party without the owner signature
+cannot emit under an existing emitter address: guardian replay rejects the
+forge. A duplicate under a different owner derives a **different**, untrusted
+address. This is the
 invariant guardians verify — "the transaction is Daml-valid under the vetted
 package" — with no bespoke watcher logic (see [§10](#10-trust-model--deployment-topology)).
 Registry-allocated ids give per-owner uniqueness and let one party hold **many**
-emitters, matching Sui's multiple `EmitterCap`s. `guardianGovernance` co-signs
-the registry, so the operator alone cannot reset the id sequence (A14-3). It
-also co-signs each `Emitter`, so the operator and an owner together cannot
-rewind an emitter of that owner (A14-2).
+emitters, matching Sui's multiple `EmitterCap`s. `guardianGovernance` signs
+the registry, so only the guardian threshold resets the id sequence (A14-3). It
+also co-signs each `Emitter`, so an owner alone cannot rewind its emitter
+(A14-2).
 
-Publishing — a choice on the **`Emitter`** (controller = `owner`), so it needs
-no operator authority:
+Publishing is a choice on the **`Emitter`** (controller `owner`, `payer`). The
+owner authority is enough:
 
 ```haskell
 -- on Emitter
@@ -400,7 +396,7 @@ the `ExercisedEvent.exercise_result` on the Ledger-API stream (see §7). The
 
 ```haskell
 data WormholeMessage = WormholeMessage with
-    registrar        : Party     -- the operator; address input
+    registrar        : Party     -- guardianGovernance; address input
     owner            : Party     -- the emitting party; address input (anti-impersonation)
     emitterId        : Int       -- registry-allocated; address input
     sequence         : Int       -- uint64
@@ -454,10 +450,12 @@ with Canton Coin or any standard token, chosen at genesis
   Registries charge their `registrationFee`/`claimFee` the same way, skipping the
   `CoreState` entirely at fee 0. Before charging, every call site pins the
   `CoreState` by exercising `GetGuardianGovernance` against the
-  `guardianGovernance` committed on the emitter/registry — **the authenticity
-  anchor, not merely the `operator`** — so a forged `CoreState` cannot redirect
-  the fee (see the custody bullet).
-- **The fee registry never runs as `guardianGovernance` or the `operator`.**
+  `guardianGovernance` committed on the emitter or registry, the authenticity
+  anchor. `ChargeMessageFee` and `ChargeFee` return `guardianGovernance`. The
+  caller checks it a second time after the charge ("core state
+  guardianGovernance mismatch after charge"). Thus a forged `CoreState` cannot
+  redirect the fee (see the custody bullet).
+- **The fee registry runs only as the payer and `feeCustody`.**
   The registry's `Allocation_ExecuteTransfer` body runs with the authority of
   the allocation controllers: the payer (sender, executor) plus the receiver.
   It also runs with the authority of the allocation signatories, which include
@@ -466,18 +464,16 @@ with Canton Coin or any standard token, chosen at genesis
   From `wormhole-core` 0.8.3 the receiver is `feeCustody`, a quorum party in the
   guardian namespace and a `CoreState` co-signer (the source of the receiver
   authority). The `CoreState` precondition rejects `feeRecipient` equal to
-  `guardianGovernance` or `operator`, and `chargeFee` rejects either as payer
-  or receiver when a fee is due (at fee 0 no registry code runs). In 0.8.0 to 0.8.2
-  (withdrawn) `feeRecipient` was `guardianGovernance`, so a fee registry could
-  publish on any gg-owned `Emitter` (`canton/REDTEAM.md`, F1-core).
+  `guardianGovernance`. When a fee is due, `chargeFee` rejects
+  `guardianGovernance` as payer or receiver. At fee 0, no registry code runs.
+  In 0.8.0 to 0.8.2 (withdrawn) `feeRecipient` was `guardianGovernance`, so a fee
+  registry could publish on any gg-owned `Emitter` (`canton/REDTEAM.md`, F1-core).
 - **Custody is governance-controlled**: `feeRecipient` is the `feeCustody`
   quorum party (same hosts, confirmation threshold and owner keys as
-  `guardianGovernance`), so accrued fees move only via the k-of-n guardian
-  ceremony — the operator never touches them (the Canton analog of "fees sit in
-  the bridge contract"). This holds **even against a compromised operator hot
-  key**: each charge pins `guardianGovernance` (unforgeable by a single operator
-  key) rather than `operator`, so an operator co-signing a shadow `CoreState`
-  under a throwaway `feeRecipient` fails before any funds move. A
+  `guardianGovernance`). Accrued fees move only through the k-of-n guardian
+  ceremony (the Canton analog of "fees sit in the bridge contract"). Each charge
+  pins `guardianGovernance`. A shadow `CoreState` under a throwaway
+  `feeRecipient` thus fails before funds move. A
   `TransferFees` VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
   guardianGovernance) recording the amount, the VAA's 32-byte recipient, and the
   VAA hash — the artifact the guardians' custody policy matches when
@@ -513,12 +509,11 @@ nonconsuming choice ParseAndVerifyVAA : VerifiedVAA
 not by recovery (§5). They are _untrusted hints_; verification fails unless each
 provided key hashes to the guardian address stored in the set.
 
-**This is genuinely permissionless, not merely operator-delegated.** `verifier`
-is the sole controller — `operator` never needs to be an active party. The
-choice is `nonconsuming` and does no create/archive at all, so nothing in its
-body needs `operator`'s authority for any structural reason (contrast
-`SubmitGovernanceVAA` below, which _is_ consuming and creates a successor
-`CoreState` genuinely needing `guardianGovernance`'s co-signature). Any external
+**This is permissionless.** `verifier` is the sole controller. The choice is
+`nonconsuming`. Its body creates no contract, so it needs only the `verifier`
+authority. `SubmitGovernanceVAA` below is consuming: its successor
+`CoreState` inherits the `guardianGovernance` and `feeCustody` signatures from
+the archived contract. Any external
 protocol — the token bridge, NTT, anything else — can verify a VAA as itself.
 The one real requirement is visibility, not authorization: a non-stakeholder
 needs `CoreState` explicitly disclosed to reference it at all, via Daml's
@@ -530,8 +525,8 @@ in-memory
 (`test/daml/Test/TestCore.daml:testParseAndVerifyVAAByExternalVerifier`) and
 against a live sandbox/participant
 ([`node/pkg/watchers/canton/core_verify_vaa_integration_test.go`](../node/pkg/watchers/canton/core_verify_vaa_integration_test.go)):
-a party with no relationship to `CoreState` at all — not `operator`, not
-`guardianGovernance` — verifies a real guardian-signed VAA as itself.
+a party that is not a `CoreState` stakeholder verifies a real guardian-signed
+VAA as itself.
 
 Integrators that must consume a VAA (redeem exactly once) use
 `VerifyAndConsumeVAA` instead, which verifies **and** records consumption
@@ -540,8 +535,11 @@ atomically (§4.6).
 ### 4.4 Governance
 
 Governance follows [0002](../whitepapers/0002_governance_messaging.md). A single
-`SubmitGovernanceVAA` choice on `CoreState` (controller `operator`) verifies the
-VAA and dispatches on the parsed action. Module identifier is **`"Core"`**
+`SubmitGovernanceVAA` choice on `CoreState` verifies the VAA and dispatches on
+the parsed action. Its controller is `submitter`, an argument: any party submits
+a governance VAA (EVM `Governance.sol` parity). The guardian signatures are the
+authority. A submitter that is not a stakeholder needs the `CoreState`
+disclosure (§4.7). Module identifier is **`"Core"`**
 (`0x00..00436f7265`, 32 bytes). A governance VAA is accepted only if (matching
 `Governance.sol:190`):
 
@@ -550,6 +548,16 @@ VAA and dispatches on the parsed action. Module identifier is **`"Core"`**
 3. `module == "Core"` and `action` matches the choice;
 4. `chain == chainId` (or `0` for chain-independent actions);
 5. `digest ∉ consumedGovernance` — then it is inserted (replay protection).
+
+The top-level functions `governanceOutcomeFor` (pure) and
+`createGovernanceOutcome` hold the choice body. Two postcondition checks run on
+each successor:
+
+- `checkGovernanceKeepsGenesisFields`: `guardianGovernance`, `chainId`,
+  `governanceChainId`, `governanceContract`, `feeInstrument` and `feeRecipient`
+  stay the same.
+- `checkGovernanceConsumesOneDigest`: `consumedGovernance` grows by exactly one
+  entry, the VAA digest.
 
 Supported actions (parity with `GovernanceStructs.sol`). Each packet must have
 the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
@@ -567,12 +575,11 @@ for TransferFees.
 after a fork) and has no analog on Canton; it is intentionally omitted.
 
 **ContractUpgrade note:** EVM upgrades swap a proxy implementation. Daml has no
-in-place code mutation; upgrading the bridge logic means deploying a new package
-version and having the `operator` migrate the `CoreState` to the new package via
-Daml's smart-contract upgrade (data-preserving). The governance VAA records the
-authorized target package-id on-ledger; the operator's migration is then
-gated by that recorded value. This is the faithful Canton analog and is the one
-governance action whose mechanism differs most from EVM — see Open Questions.
+in-place code mutation. To upgrade the bridge logic, each guardian participant
+vets the new package version out of band. Daml smart-contract upgrade (SCU)
+keeps the contract data. The `ContractUpgrade` VAA records the consumed digest
+in `consumedGovernance` and leaves the other `CoreState` fields unchanged. This
+governance action differs most from EVM; see Open Questions.
 
 ### 4.5 Guardian-set expiry
 
@@ -620,13 +627,13 @@ digest _suffixes_ consumed under it:
 template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
-    operator       : Party    -- co-signs: no unilateral archive or re-create
+    guardianGovernance : Party  -- co-signs: no unilateral archive or re-create
     namespace      : Text     -- opaque sub-scope: one consumer, many tries; 1..128 chars
     prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- node capacity; children inherit it
     consumed       : Set Bytes  -- suffixes, each (64 − |prefix|) nibbles
   where
-    signatory consumer, operator
+    signatory consumer, guardianGovernance  -- gg alone when consumer == gg (NTT)
 ```
 
 A trie starts as one root (empty prefix, empty set). `ConsumeDigest`
@@ -651,20 +658,27 @@ _closed_ (an archived subspace has no covering node — nothing verifies).
 
 `VerifyAndConsumeVAA` (nonconsuming, on `CoreState`, flexible controller
 `consumer`) takes the covering node's cid, verifies the VAA (§5), binds the
-node to the (consumer, namespace, operator) scope, and exercises
+node to the (consumer, namespace, guardianGovernance) scope, and exercises
 `ConsumeDigest` with the digest — verify + consume + act in one transaction.
+A node of another `guardianGovernance` fails with "replay node
+guardianGovernance mismatch".
 
 Properties:
 
 - **Nobody can touch someone else's scope; your own scope is your own
   problem.** Archival alone only bricks (fail-closed); the replay vector is
   node _re-creation_. Nodes are co-signed, so no third party can archive or
-  re-create them (splits inherit both signatures from the archived parent —
-  the operator is not involved per consume), and roots come only from the
-  operator's `ReplayRootRegistry` — a stateless, never-churning anchor whose
-  nonconsuming `ClaimReplayRoot` lends the operator's _inherited_ signature
-  to a consumer-submitted claim (the `RegisterEmitter` pattern: no crank; the
-  operator multisig signs nothing after genesis). Claiming a root for a
+  re-create them. Splits inherit both signatures from the archived parent, so
+  `guardianGovernance` takes no action per consume. Roots come only from the
+  `ReplayRootRegistry`, a stateless anchor that `guardianGovernance` alone
+  signs. Its nonconsuming `ClaimReplayRoot` lends the _inherited_
+  `guardianGovernance` signature to a consumer-submitted claim (the
+  `RegisterEmitter` pattern: no crank). `guardianGovernance` signs only at
+  genesis. `ClaimReplayRoot` takes a mandatory `expectedGuardianGovernance :
+  Party` ("replay root registry guardianGovernance mismatch"). The onboarding
+  fee admin changes `claimFee` with `SetClaimFee`, bounded by
+  `maxOnboardingFee`. A `guardianGovernance` ceremony replaces the admin with
+  `ReplaceReplayRootRegistryFeeAdmin`. Claiming a root for a
   consumer requires **that consumer's authority**, so nobody can fork another
   app's replay scope (the namespace is a free-form sub-scope _under_ that
   authority, not a claim anyone else can contest). There is deliberately _no_
@@ -679,7 +693,7 @@ Properties:
   hardening is trie-identity pinning: thread the original root's cid through
   successors via `self` and pin it in the app contract — documented, not
   built.) Spam claims cost the spammer synchronizer traffic per transaction
-  and the operator ~300 B of storage per worthless root; no shared contract
+  and the guardian participants ~300 B of storage per worthless root; no shared contract
   grows, nothing bricks.
 - **Scoping and contention.** Tries are per (consumer, namespace): different
   apps — or one consumer party under different namespaces — consume the same
@@ -734,7 +748,7 @@ different answers:
 
 - **Cid resolution** — _what is the current cid of X?_ Stakeholders get this
   for free: a consuming exercise delivers the successor's `CreatedEvent` to
-  every stakeholder's ACS, so the operator tracks its registries and the
+  every stakeholder's ACS, so each guardian participant tracks the registries and the
   `CoreState`, an emitter owner tracks its `Emitter`, a consumer tracks its
   trie — all without any off-ledger help.
 - **Disclosure attachment** — a **non-stakeholder** submitter must additionally
@@ -750,9 +764,9 @@ disclosure blob) for X". The complete inventory it must serve:
 | ---------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `CoreState`                              | the one true instance              | §4.3 verify, §4.6 consume, and EVERY publish / fee'd onboarding (§4.2) | yes — every non-stakeholder submitter (incl. all publishers)                      | per governance action (rare)                               |
 | `ReplayNode`                             | (consumer, namespace, prefix covering digest) | every `VerifyAndConsumeVAA` / integrator redeem             | yes for non-stakeholders (e.g. end users); the consumer itself only needs the cid | every consume under that node                              |
-| `EmitterRegistry`                        | (operator, guardianGovernance)     | `RegisterEmitter`                                                      | yes — the requester submits                                                       | per emitter registration; recreated by a guardian ceremony on fee change |
-| `ReplayRootRegistry`                     | operator                           | `ClaimReplayRoot`                                                      | yes — the consumer submits (cacheable blob)                                       | only on operator fee change                                |
-| `Emitter`                                | (operator, owner, emitterId)       | `PublishMessage`                                                       | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
+| `EmitterRegistry`                        | guardianGovernance                 | `RegisterEmitter`, `SetRegistrationFee`                                | yes — the requester or the onboarding fee admin submits                           | per emitter registration and per fee or admin change       |
+| `ReplayRootRegistry`                     | guardianGovernance                 | `ClaimReplayRoot`, `SetClaimFee`                                       | yes — the consumer or the onboarding fee admin submits (cacheable blob)           | only on fee or admin change                                |
+| `Emitter`                                | (guardianGovernance, owner, emitterId) | `PublishMessage`                                                   | no — owner submits, own ACS (but see `CoreState` row)                             | per publish                                                |
 | token-registry context                   | the fee instrument's registry      | any fee'd choice (§4.2): `ExtraArgs` + registry disclosures            | yes — from the REGISTRY'S own CIP-0056 OpenAPI, not this service                  | registry-defined                                           |
 | app contracts (e.g. `ExampleIntegrator`) | app-defined                        | the app's own choices                                                  | app's concern (its users are observers)                                           | app-defined                                                |
 
@@ -762,22 +776,23 @@ Two properties make this safe to outsource:
   transaction fail — the trie fails closed on staleness (§4.6), and consumers
   authenticate every resolved contract by its **payload**, never by how the
   cid was found: `CoreState` by its signatory anchor fields (§4.1),
-  `ReplayNode` by the (consumer, namespace, operator) binding inside
-  `VerifyAndConsumeVAA`. The app pins the `CoreState` by `guardianGovernance`
-  through `GetGuardianGovernance`, with the expected value from its own
-  configuration (see `ExampleIntegrator.Redeem`). An operator-only pin accepts
-  a shadow `CoreState` that a compromised operator key co-signs. Consumers
-  trust the service for _liveness_ only, like any RPC endpoint.
-- **Registry pin.** A client passes `expectedGuardianGovernance = Some gg` to
-  `RegisterEmitter`, with `gg` from its own configuration. A registry from the
-  service under another `guardianGovernance` then fails with "registry
-  guardianGovernance mismatch" before any fee charge. NTT `RegisterManager`
-  must pass `Some` too.
-- **One reader suffices.** A service reading as the operator (a stakeholder of
-  `CoreState`, both registries, and — as co-signatory — every consumer's trie)
-  can serve the whole table; integrators can equally run their own for their
-  trie and app contracts. Reading as a party requires only that party's
-  `CanReadAs` on the serving participant.
+  `ReplayNode` by the (consumer, namespace, guardianGovernance) binding inside
+  `VerifyAndConsumeVAA` plus the app-side `guardianGovernance` pin (see
+  `ExampleIntegrator.Redeem`). The service is trusted for _liveness_ only, like
+  any RPC endpoint.
+- **Registry pin.** A client passes `expectedGuardianGovernance = gg` (a
+  mandatory `Party`) to `RegisterEmitter` and `ClaimReplayRoot`, with `gg` from
+  its own configuration. A registry from the service under another
+  `guardianGovernance` then fails with "registry guardianGovernance mismatch" or
+  "replay root registry guardianGovernance mismatch" before any fee charge. NTT
+  `RegisterManager` must pass the same pin.
+- **One reader suffices.** `guardianGovernance` signs every core contract:
+  `CoreState`, both registries, every `Emitter` and every `ReplayNode`. Thus any
+  guardian participant, reading as `guardianGovernance`, serves the whole
+  table. Integrators can also run their own service for their trie and app
+  contracts. Reading as a party requires only that party's `CanReadAs` on the
+  serving participant. The onboarding fee admin is not an observer: it gets the
+  registry disclosure from a guardian participant.
 
 Concrete implementation (interface: `(template, index) → (cid,
 created_event_blob)` over the state-service ACS plus the update stream) is
@@ -825,7 +840,7 @@ We use **`secp256k1WithEcdsaOnly`** because Ethereum signs the 32-byte
 ### Making verification hint-free for integrators (recommended)
 
 Supplying `pubKeys` on every call is acceptable for governance (rare,
-operator-submitted) but is real friction for integrators (e.g. a token bridge),
+any party submits) but is real friction for integrators (e.g. a token bridge),
 whose relayers would otherwise have to look up the signing guardians' keys on
 every inbound message. The recommended evolution: **persist the guardian public
 keys in the guardian set** — i.e. `GuardianSet` stores `pubKeys` alongside `keys`,
@@ -1029,18 +1044,22 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 
 ### 7.5 Core package upgrades
 
-`core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
+In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
-For 0.8.3, the baseline is `dars/wormhole-core-0.8.2.dar`.
+0.9.0 has no `upgrades:` line and no baseline. It removes template fields, so it is not an SCU upgrade of 0.8.x.
+0.9.0 starts a new `wormhole-core` line. Its main package id is `dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState` (§4.2).
 0.8.3 also adds `ensure` rules to `CoreState`: the fee instrument admin is not `guardianGovernance` and not the `operator`.
 `damlc` reports these changes only as warnings.
-A 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3.
-No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2 or 0.8.3. Thus 0.8.3 starts from a fresh genesis with a new operator party, with no migration of earlier contracts.
+0.9.0 removes the `operator` party from each core template and choice (§4.1, §10).
+A 0.7.0 or 0.8.x `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.9.0.
+No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.0. Thus 0.9.0 starts from a fresh genesis, with no migration of earlier contracts.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.8.3, and a test rejects the 0.8.0, 0.8.1 and 0.8.2 package ids.
+0.8.3 (`b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.9.0.
+A test rejects the 0.8.0, 0.8.1, 0.8.2 and 0.8.3 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
@@ -1419,9 +1438,9 @@ after the unvet of 0.6.0 and `ntt` 0.2.0. Results:
 
 **Point of no return.** The 0.6.0 and 0.7.0 templates have the same fields,
 and `ntt` 0.2.0 reads each `ntt` 0.3.0 contract. Thus the upgrade from 0.6.0
-to 0.7.0 has no technical point of no return. 0.8.3 is different: it starts
-from a fresh genesis, and a 0.8.3 `CoreState`, `EmitterRegistry` or `Emitter`
-cannot run under 0.7.0. Thus no rollback from 0.8.3 to 0.7.0 exists. These limits apply
+to 0.7.0 has no technical point of no return. 0.9.0 is different: it starts
+from a fresh genesis, and a 0.9.0 `CoreState`, `EmitterRegistry` or `Emitter`
+cannot run under 0.8.x or 0.7.0. Thus no rollback from 0.9.0 to an earlier version exists. These limits apply
 to an upgrade that keeps the signatories:
 
 - A later version can add an optional field. When a contract gets a value in
@@ -1482,9 +1501,9 @@ window. Results:
 
 **Scope.** Use the window only for a core upgrade that keeps the signatories
 and observers of each template. `damlc` reports a signatory change only as a
-warning, so read the SCU warnings of each build. An example is 0.8.3 to 0.8.4.
-The window cannot apply to 0.7.0 to 0.8.3, because 0.7.0 contracts do not run
-under 0.8.3.
+warning, so read the SCU warnings of each build. An example is 0.9.0 to 0.9.1.
+The window cannot apply to 0.8.x to 0.9.0, because 0.8.x contracts do not run
+under 0.9.0.
 
 **Roles.** The watcher accepts a maximum of two core package ids:
 
@@ -1591,51 +1610,52 @@ the deadline to a maximum of 24 hours after step 13. Alternatively, use the
 one-id procedure. Until the deadline or the unvet, the guardians sign
 old-core messages under the old checks.
 
-**Procedure: upgrade from 0.8.3 to 0.8.4 with a two-id window.**
+**Procedure: upgrade from 0.9.0 to 0.9.1 with a two-id window.**
 
 Prepare the guardians:
 
-1. Add the 0.8.4 package id and version to `approved_core_packages.json`.
+1. Add the 0.9.1 package id and version to `approved_core_packages.json`.
 2. Release guardiand with this change. Install it on each guardian.
 3. Record the ledger end offset and the participant id of one guardian
    participant. Write both values in the upgrade record.
 4. Select the deadline. Use a maximum of 7 days after step 6. For a security
    fix, use the rule above.
 5. On each guardian, set these flags:
-   - `--cantonPackageID` to the 0.8.4 package id.
-   - `--cantonPackageVersion=0.8.4`.
-   - `--cantonRetiringPackageID` to the 0.8.3 package id.
-   - `--cantonRetiringPackageVersion=0.8.3`.
+   - `--cantonPackageID` to the 0.9.1 package id.
+   - `--cantonPackageVersion=0.9.1`.
+   - `--cantonRetiringPackageID` to the 0.9.0 package id.
+   - `--cantonRetiringPackageVersion=0.9.0`.
    - `--cantonRetiringPackageAcceptedUntil` to the deadline.
 6. Restart the guardians one at a time. Coordination is not necessary.
 7. Make sure that each guardian exports
-   `wormhole_canton_accepted_package_ids` with the 0.8.4 id as `current` and
-   the 0.8.3 id as `retiring`.
+   `wormhole_canton_accepted_package_ids` with the 0.9.1 id as `current` and
+   the 0.9.0 id as `retiring`.
 8. Make sure that each guardian exports the deadline in
    `wormhole_canton_retiring_package_accepted_until_seconds`.
 9. Continue only when all guardians confirm steps 7 and 8.
 
 Upgrade the ledger:
 
-10. Upload the 0.8.4 core DAR and its dependent DARs to all guardian
+10. Upload the 0.9.1 core DAR and its dependent DARs to all guardian
     participants.
 11. Vet these DARs on all guardian participants.
-12. Upload and vet the same DARs on the operator participant.
-13. Tell integrators to submit with the 0.8.4 package id. Tell them to use
+12. Upload and vet the same DARs on each other informee participant: the
+    integrators and the users.
+13. Tell integrators to submit with the 0.9.1 package id. Tell them to use
     one core version in each transaction.
-14. On each guardian participant, set the vetting of the 0.8.3 core DAR to
+14. On each guardian participant, set the vetting of the 0.9.0 core DAR to
     end at the deadline. Use `PackageManagementService.UpdateVettedPackages`
     with `new_valid_until_exclusive`.
 15. Monitor `wormhole_canton_accepted_publish_messages_total{role="retiring"}`.
 16. Continue when the counter shows no new publishes.
-17. Before the deadline, unvet the 0.8.3 core DAR and its dependent DARs on
+17. Before the deadline, unvet the 0.9.0 core DAR and its dependent DARs on
     all participants.
 
 Recover the old-core messages:
 
 18. On the participant of step 3, run `guardiand admin canton-list-publishes`.
     Set `--fromOffset` to the offset of step 3. Set `--executingPackageID` to
-    the 0.8.3 package id.
+    the 0.9.0 package id.
 19. For each output line, find the VAA by emitter chain, emitter address, and
     sequence.
 20. For each line without a VAA, run
@@ -1647,16 +1667,16 @@ Close the window:
 22. At a later restart, remove the three retiring flags from each guardian.
 
 > **WARNING:** Do not do step 10 before all guardians confirm step 9. A
-> guardian without the 0.8.4 id drops each 0.8.4 message.
+> guardian without the 0.9.1 id drops each 0.9.1 message.
 
 > **WARNING:** Do not remove the retiring flags before step 21 is complete.
-> After the removal, reobservation cannot recover a 0.8.3 message.
+> After the removal, reobservation cannot recover a 0.9.0 message.
 
-> **CAUTION:** Until the deadline or the unvet, the guardians sign 0.8.3
-> messages. The 0.8.3 checks apply to these messages.
+> **CAUTION:** Until the deadline or the unvet, the guardians sign 0.9.0
+> messages. The 0.9.0 checks apply to these messages.
 
 > **NOTE:** Step 5 comes before step 10. An id that no participant vets cannot
-> execute a choice. Thus no guardian drops a 0.8.4 message.
+> execute a choice. Thus no guardian drops a 0.9.1 message.
 
 > **NOTE:** Step 14 makes the ledger enforce the deadline too. The watcher
 > enforces it also without step 14.
@@ -1667,7 +1687,7 @@ Close the window:
 > runs steps 18 to 21 on its own participant.
 
 > **NOTE:** `canton-list-publishes` accepts `--executingPackageID` with no
-> deadline. Thus it also lists 0.8.3 publishes with a record time at or after
+> deadline. Thus it also lists 0.9.0 publishes with a record time at or after
 > the deadline. The watcher drops the reobservation of these publishes. In
 > step 20, skip each line with a `recordTime` at or after the deadline.
 
@@ -1692,14 +1712,14 @@ The two-id window removes these items of the one-id procedure:
   the deadline stay recoverable.
 
 The deadline ends the window also if an operator does not remove the flags.
-The 0.8.3 checks apply to 0.8.3 messages until the deadline or the unvet.
+The 0.9.0 checks apply to 0.9.0 messages until the deadline or the unvet.
 
 Known limits:
 
 - Two publishes on one emitter in one transaction make the second publish
   transient. The watcher accepts the transient publish only if its emitter
   create and its exercise have the same package id. Thus a transaction that
-  publishes under 0.8.3 and 0.8.4 on one emitter loses the second message.
+  publishes under 0.9.0 and 0.9.1 on one emitter loses the second message.
   The ledger keeps its sequence number. Reobservation applies the same rule.
   The watcher increments
   `wormhole_canton_publish_without_read_party_stakeholder_total`. Step 13
@@ -1713,22 +1733,22 @@ Known limits:
 
 **Rollback.**
 
-1. On each guardian, set `--cantonPackageID` to the 0.8.3 id and
-   `--cantonPackageVersion=0.8.3`.
-2. On each guardian, set `--cantonRetiringPackageID` to the 0.8.4 id and
-   `--cantonRetiringPackageVersion=0.8.4`.
+1. On each guardian, set `--cantonPackageID` to the 0.9.0 id and
+   `--cantonPackageVersion=0.9.0`.
+2. On each guardian, set `--cantonRetiringPackageID` to the 0.9.1 id and
+   `--cantonRetiringPackageVersion=0.9.1`.
 3. Set `--cantonRetiringPackageAcceptedUntil` to a new deadline.
 4. Restart the guardians one at a time.
-5. Make sure that each guardian exports the 0.8.3 id as `current` and the
-   0.8.4 id as `retiring`.
+5. Make sure that each guardian exports the 0.9.0 id as `current` and the
+   0.9.1 id as `retiring`.
 6. Continue only when all guardians confirm step 5.
-7. If step 17 is complete, vet 0.8.3 again on all participants.
-8. Tell integrators to submit with the 0.8.3 package id.
-9. Before the new deadline, unvet 0.8.4 on all participants.
-10. Recover the 0.8.4 messages with steps 18 to 21. Use the 0.8.4 package id.
+7. If step 17 is complete, vet 0.9.0 again on all participants.
+8. Tell integrators to submit with the 0.9.0 package id.
+9. Before the new deadline, unvet 0.9.1 on all participants.
+10. Recover the 0.9.1 messages with steps 18 to 21. Use the 0.9.1 package id.
 
-> **WARNING:** Do not vet 0.8.3 again before 0.8.3 is the current id on each
-> guardian. A guardian without the id drops each 0.8.3 message.
+> **WARNING:** Do not vet 0.9.0 again before 0.9.0 is the current id on each
+> guardian. A guardian without the id drops each 0.9.0 message.
 
 > **CAUTION:** The sandbox test `TestCantonWatcherUpgradeWindow` shows that
 > the retiring core can publish on an emitter that the current core wrote
@@ -1765,7 +1785,7 @@ canton/
     daml/Test/ExampleIntegrator.daml ← reference integrator + disclosure/replay e2e (§4.6)
   devnet/
     start_sandbox.sh             ← starts the Ledger API v2 sandbox
-    bootstrap.sh                 ← allocates Operator + creates CoreState
+    bootstrap.sh                 ← allocates guardianGovernance + creates CoreState
     wait_for_ledger.sh
 
 node/pkg/cantonclient/           ← Ledger API v2 gRPC client
@@ -1846,7 +1866,7 @@ This brings up:
 - a **`canton`** pod running a Canton **sandbox** (Ledger API v2 on `:6865`)
   ([`devnet/start_sandbox.sh`](devnet/start_sandbox.sh));
 - a **`canton-contracts`** bootstrap step that uploads+vets the `wormhole-core`
-  DAR (`dpm script --upload-dar`), allocates the **Operator** party, and creates
+  DAR (`dpm script --upload-dar`), allocates the **`guardianGovernance`** party, and creates
   the `CoreState` with the standard devnet guardian via `Test.TestCore:setup`
   ([`devnet/bootstrap.sh`](devnet/bootstrap.sh)); and
 - the **guardian** configured with `--cantonRPC canton:6865` (no
@@ -1886,14 +1906,16 @@ splits a key path (see the script's header for the full environment-variable con
 [`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
 exercises the resulting party: it prepares a `create CoreState` and a
 `create EmitterRegistry` command, one prepared transaction each (the prepare
-endpoint takes one command), co-signed by an external `operator` party and `guardianGovernance` (the
-interactive-submission equivalent of `Test.TestCore:setup`'s
-`submit (actAs operator <> actAs guardianGovernance)`), has owners sign the
-prepared
-transaction hash, and executes. It supports three modes — `happy` (2-of-3,
-succeeds), `threshold` (1-of-3, rejected), and `forge` (no guardianGovernance
-signature at all, rejected — the anti-forgery property from §10: a compromised
-operator cannot fabricate a `CoreState` bearing the real governance party).
+endpoint takes one command), has owners sign the prepared transaction hash,
+and executes. It supports three modes — `happy` (2-of-3, succeeds),
+`threshold` (1-of-3, rejected), and `forge` (no guardianGovernance signature,
+rejected — the anti-forgery property from §10).
+
+> **NOTE:** This script still co-signs with an external `operator` party, the
+> 0.8.x genesis shape. The LocalNet genesis and governance scripts do the same.
+> Thus they do not work with 0.9.0 yet. The 0.9.0 genesis needs only
+> `guardianGovernance` (and `feeCustody` for the `CoreState`). A later change
+> updates these scripts and adds a propose-and-accept genesis package.
 
 [`devnet/test_guardian_governance.sh`](devnet/test_guardian_governance.sh) runs
 all of the above against a fresh `dpm sandbox` and asserts the full table:
@@ -1938,8 +1960,8 @@ Limits of the LocalNet rehearsal:
 ### Status: opt-in while the k8s devnet path is validated
 
 Unlike Sui, the `canton` component is **not** enabled by `--ci`. The guardian
-builds the real client by default (no build tag) and the watcher needs no
-operator party id (wildcard filter), so there are no functional gates left — the
+builds the real client by default (no build tag) and the devnet watcher needs no
+read-as party id (wildcard filter), so there are no functional gates left — the
 main item to finish is:
 
 1. **Full k8s path validation.** Validated locally: the Go integration test (§9)
@@ -2003,12 +2025,12 @@ Consequences of hosting a signatory party on guardian participants:
   participant hosting an informee, so each guardian operator's vetting decision
   gates which code runs with `guardianGovernance` authority.
 
-Note the operator party's ACTIVE signing surface after genesis is empty: every
-day-to-day flow (`RegisterEmitter`, `ClaimReplayRoot`, fee charging, splits,
-governance transitions) reaches its signature by inheritance from contracts it
-signed at setup. If the operator is stood up as a k-of-n external threshold
-party (the §9 machinery, `GG_THRESHOLD=k`), the interactive-submission signing
-ceremony is needed for genesis only. Fee custody is a separate quorum party,
+**Signing surface.** `guardianGovernance` signs at genesis only. Each daily
+flow (`RegisterEmitter`, `ClaimReplayRoot`, fee charging, splits, governance
+transitions) inherits its signature from contracts it signed at genesis. Thus
+the interactive-submission ceremony of the k-of-n party (§9) is necessary at
+genesis. The emergency choices `ReplaceEmitterRegistryFeeAdmin` and
+`ReplaceReplayRootRegistryFeeAdmin` also need it. Fee custody is a separate quorum party,
 `feeCustody` (§4.2): accrued fees sit in its token holdings, and withdrawing
 them is a threshold ceremony of two transactions: `guardianGovernance` archives
 the on-ledger `FeeWithdrawalAuthorization` first, then `feeCustody` transfers. Because every publish reads the fee off the
@@ -2016,23 +2038,37 @@ the on-ledger `FeeWithdrawalAuthorization` first, then `feeCustody` transfers. B
 informees of every publish, a deliberate throughput/liveness trade recorded in
 Open Questions.
 
-**What a compromised operator can and cannot do.** It can degrade **liveness**
-(stop serving disclosures — fail-safe: transactions stop constructing,
-guardians simply stop seeing and stop signing). Guardian hosting is governed by
-the `guardianGovernance` threshold, not the operator. It **cannot** produce
-anything guardians would wrongly attest: emitting under an existing address
-requires that owner's signature (§4.2), so an outbound forge is either an invalid
+**Onboarding fee admin.** `onboardingFeeAdmin` is a plain field on
+`EmitterRegistry` and `ReplayRootRegistry`. It is not a signatory and not an
+observer. Its only power is `SetRegistrationFee` and `SetClaimFee`, each
+bounded by `maxOnboardingFee`. It gets each registry disclosure from a guardian
+participant. If the admin is offline or compromised, a `guardianGovernance`
+ceremony replaces it with `ReplaceEmitterRegistryFeeAdmin` and
+`ReplaceReplayRootRegistryFeeAdmin`.
+
+**Liveness.** Each core function needs only the authority of its caller and the
+inherited `guardianGovernance` signature. Publish, the watcher, verify,
+verify-and-consume, registration, claim, fee charging and governance continue
+when one party is offline. If the onboarding fee admin is offline, only
+`SetRegistrationFee` and `SetClaimFee` stop. The current fees stay. Any
+guardian participant serves every core disclosure. If all guardian participants
+stop serving disclosures, the failure is fail-safe. Transactions stop
+constructing. Guardians then see nothing new and sign nothing new.
+
+**Former operator.** 0.8.x had an `operator` signatory. 0.9.0 removes it from
+each core template and choice. A compromised former operator key thus has no
+core signature and no core power (`testFormerOperatorHasNoCorePower`).
+
+**Outbound integrity.** Emitting under an existing address requires the
+signature of that owner (§4.2). Thus an outbound forge is either an invalid
 transaction (rejected in replay, never observed) or a valid contract with a
 different, untrusted address.
 
-Crucially, it also **cannot forge the guardian set** used for inbound
-verification: `CoreState` is co-signed by the `guardianGovernance` threshold party
-(§4.1), so the operator can neither mutate the real `CoreState` nor fabricate
-one whose payload names the governance anchor consumers trust. This closes
-the one gap that observation-only hosting does _not_ cover — inbound state
-integrity — by moving it from "trust the single operator" to "trust the k-of-n
-governance party." Compromising _that_ is a threshold compromise, i.e. genuinely
-takeover-class, rather than a single-key bar. Residual inbound corruption (bugs in
+**Inbound integrity.** Only the `guardianGovernance` threshold party creates a
+`CoreState` whose payload names the governance anchor that consumers trust
+(§4.1). This closes the one gap that observation-only hosting does _not_ cover:
+inbound state integrity. To compromise it is a threshold compromise, which is
+takeover-class. Residual inbound corruption (bugs in
 a verification path, not forged state) can still only damage Canton-local state —
 the same position Wormhole holds on every chain, where a compromised chain wrecks
 its own state but cannot forge messages other chains accept. The guardians'
@@ -2052,9 +2088,9 @@ makes it a `guardianGovernance` host.
    shift slightly across Canton releases (e.g. `begin_exclusive`/`end_inclusive`,
    `Update` one-of members). The vendored proto subset targets a specific release
    — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
-2. **`guardianGovernance` threshold party.** `CoreState` is co-signed by a
-   `guardianGovernance` party (§4.1), so guardian-set integrity is anchored to
-   it rather than the operator. §9's `guardianGovernance` external-party bootstrap
+2. **`guardianGovernance` threshold party.** `guardianGovernance` signs
+   `CoreState` (§4.1), so it anchors guardian-set integrity.
+   §9's `guardianGovernance` external-party bootstrap
    stands it up as a decentralized-namespace external party governed by a 2-of-3
    threshold of guardian keys (DSO-style), and its genesis co-sign ceremony is
    confirmed locally (2-of-3 succeeds, 1-of-3 and no-signature are rejected).
@@ -2084,14 +2120,14 @@ makes it a `guardianGovernance` host.
 5. **Native fees.** _Mechanism resolved:_ CIP-0056 (Token Standard V1)
    allocations, consumed atomically inside `PublishMessage` / `RegisterEmitter`
    / `ClaimReplayRoot`, with fee custody under the `feeCustody` quorum party
-   (0.8.3; no fee registry code runs as `guardianGovernance` or `operator`)
+   (0.8.3; 0.9.0 has no operator; the fee registry runs only as the payer and `feeCustody`)
    and `TransferFees` minting on-ledger withdrawal authorizations (§4.2). **Residual:** validate against real amulet on
    DevNet (the test suite uses a mock token implementing the interfaces; the
    real registry adds choice contexts, deadlines, locking, and featured-app
    rewards — the executor earns them as the amulet "provider"); the fee
    instrument and recipient are genesis-fixed (no governance action — decide
    whether that needs one before mainnet); the `CoreState` reference on every
-   publish adds operator, guardianGovernance and feeCustody participants to
+   publish adds guardianGovernance and feeCustody participants to
    the publish informee set (throughput/liveness trade to size); NTT paths
    where `guardianGovernance` pays a fee abort once a fee is above 0, so they
    need a separate fee payer first; a receiver-preapproval transfer
@@ -2100,8 +2136,9 @@ makes it a `guardianGovernance` host.
    test vector (vectorgen) for the withdrawal-authorization path; Token
    Standard V2 (CIP-0112) migration when it reaches mainnet
    (`Wormhole.Core.Fees.chargeFee` is the seam).
-6. **ContractUpgrade mechanism.** Confirm the operator-driven Daml package
-   upgrade flow and how strictly the recorded target package-id should gate it.
+6. **ContractUpgrade mechanism.** Each guardian participant vets the new Daml
+   package out of band. Confirm this flow, and decide how strictly the recorded
+   target package-id gates it.
    (The package uses no contract keys, so the upgrade constraint that keys
    cannot be added to a deployed template does not apply.)
 7. **Governance emitter.** Uses the standard governance emitter (Solana, chain 1,
