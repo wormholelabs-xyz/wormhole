@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Observation-first onboarding check (L1 runbook rule 3): a guardianGovernance host at Observation stays below the
 # confirmation threshold; after promotion to Confirmation it counts.
-#   1. Set guardian4 to Observation. Disconnect sv. A gg PublishMessage with only app-provider confirming must time out,
-#      with guardianGovernance as the one unresponsive party.
+#   1. Set guardian4 to Observation. Disconnect sv. guardian4 must be connected. A gg PublishMessage with only
+#      app-provider confirming must time out, with guardianGovernance as the one unresponsive party, and the mediator
+#      log must show no guardian4 verdict in that time.
 #   2. Promote guardian4 to Confirmation. Disconnect sv. The same PublishMessage must commit, because app-provider and
 #      guardian4 reach the threshold of 2.
 # Precondition: guardian4 hosts guardianGovernance at Confirmation (gg_hosting_change_check.sh passes) and an
@@ -15,6 +16,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 
 readonly OBSERVATION_TICKER_SECONDS=600
+readonly GUARDIAN4_JSON_API_URL="http://localhost:5975"
 first_owner="${1:-owner1}"
 second_owner="${2:-owner2}"
 check_owner_names_are_safe "$first_owner" "$second_owner"
@@ -23,7 +25,7 @@ check_owner_names_differ "$first_owner" "$second_owner"
 set_guardian4_permission() {
   REPLICATION_PERMISSION_HOST=guardian4 REPLICATION_HOST_PERMISSION="$1" \
     "$LOCALNET_SCRIPT_DIR/party_replication.sh" set-permission "$first_owner" "$second_owner" > "$gg_work_dir/set-permission.log" 2>&1 \
-    || { cat "$gg_work_dir/set-permission.log" >&2; fail "cannot set guardian4 to $1"; }
+    || { cat "$gg_work_dir/set-permission.log" >&2; echo "FAIL: cannot set guardian4 to $1" >&2; return 1; }
   echo "guardian4 permission set to $1"
 }
 
@@ -52,18 +54,42 @@ require_timeout_rejection() {
   echo "PASS: Observation host does not count; the PublishMessage timed out. $summary"
 }
 
+# require_no_guardian4_verdict <since>: the mediator log has no verdict of guardian4 since <since>. guardian4 hosts only
+# the guardian-namespace parties, so this covers the timed-out request.
+require_no_guardian4_verdict() {
+  local verdict_lines guardian4_receipt
+  verdict_lines="$(docker logs canton --since "$1" 2>&1 \
+    | jq -rR 'fromjson? | select(.message | test("Received verdict .* by participant PAR::guardian4::")) | .message | .[0:260]')"
+  if [[ -n "$verdict_lines" ]]; then
+    echo "FAIL: the mediator received a guardian4 verdict at Observation:" >&2
+    head -n 5 <<<"$verdict_lines" >&2
+    exit 1
+  fi
+  echo "PASS: the mediator log has no guardian4 verdict since $1"
+  guardian4_receipt="$(docker logs guardian4 --since "$1" 2>&1 | grep -m1 -oE 'verdict=RequestId\([^)]*\)[^(]{0,80}' || true)"
+  if [[ -n "$guardian4_receipt" ]]; then
+    echo "PASS: guardian4 received the request and the mediator result: $guardian4_receipt"
+  else
+    echo "INFO: the guardian4 log shows no mediator result line since $1"
+  fi
+}
+
 echo "Step 1: guardian4 at Observation, sv disconnected. A gg PublishMessage with one confirming host must time out."
-set_guardian4_permission Observation
+set_guardian4_permission Observation || fail "cannot set guardian4 to Observation"
 set_participant_connection disconnect sv || fail "cannot disconnect sv"
+check_connected_to_gg_synchronizer "$GUARDIAN4_JSON_API_URL" guardian4 || fail "guardian4 must be connected for the Observation step"
+echo "PASS: guardian4 is connected to $LOGICAL_SYNCHRONIZER_ID"
 start_clock_ticker "$OBSERVATION_TICKER_SECONDS"
+observation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUBMIT_AWAIT_COMPLETION=true publish_message "observation-one-host-$(date +%s)" "6f627365727665" \
   > "$gg_work_dir/observe.out" 2> "$gg_work_dir/observe.err" || true
 require_timeout_rejection "$gg_work_dir/observe"
+require_no_guardian4_verdict "$observation_started_at"
 stop_clock_ticker
 set_participant_connection reconnect sv || fail "cannot reconnect sv after step 1"
 
 echo "Step 2: promote guardian4 to Confirmation, sv disconnected. The same PublishMessage must commit."
-set_guardian4_permission Confirmation
+set_guardian4_permission Confirmation || fail "cannot promote guardian4 to Confirmation"
 set_participant_connection disconnect sv || fail "cannot disconnect sv"
 promote_transaction="$(publish_message "observation-promoted-$(date +%s)" "70726f6d6f7465")" \
   || fail "the PublishMessage did not commit after promotion to Confirmation"

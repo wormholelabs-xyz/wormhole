@@ -14,16 +14,26 @@ ledger_end_at() {
   curl_bounded -sSf "$1/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset
 }
 # gg_update_offset_at <json-api-url> <update-id>: the local offset of a guardianGovernance update on one participant,
-# or "ABSENT" when that participant has no such update. publish_message_scan.sh takes this offset as its end offset,
-# where the required update must sit.
+# or "ABSENT" on HTTP 404 with UPDATE_NOT_FOUND. Any other response fails. publish_message_scan.sh takes this offset as
+# its end offset, where the required update must sit.
 gg_update_offset_at() {
-  local event_format request_body
+  local event_format request_body response_file http_status
   event_format="$(jq -n --arg party "$GG_PARTY" \
     '{filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}, verbose: false}')"
   request_body="$(jq -n --arg id "$2" --argjson eventFormat "$event_format" \
     '{updateId: $id, updateFormat: {includeTransactions: {eventFormat: $eventFormat, transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')"
-  curl_bounded -sS -X POST "$1/v2/updates/update-by-id" -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' -d "$request_body" \
-    | jq -r '.update.Transaction.value.offset // "ABSENT"'
+  response_file="$(mktemp "$gg_work_dir/update-by-id-XXXXXX")"
+  http_status="$(curl_bounded -sS -o "$response_file" -w '%{http_code}' -X POST "$1/v2/updates/update-by-id" \
+    -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' -d "$request_body")" \
+    || fail "update-by-id $2 at $1: request failed"
+  case "$http_status" in
+    200) jq -er '.update.Transaction.value.offset' "$response_file" || fail "update-by-id $2 at $1: HTTP 200 without a transaction offset" ;;
+    404)
+      jq -e '.code == "UPDATE_NOT_FOUND"' "$response_file" >/dev/null \
+        || fail "update-by-id $2 at $1: HTTP 404 without UPDATE_NOT_FOUND: $(head -c 400 "$response_file")"
+      echo ABSENT ;;
+    *) fail "update-by-id $2 at $1: HTTP $http_status: $(head -c 400 "$response_file")" ;;
+  esac
 }
 # scan_confirms_publish <label> <participant-name> <json-api-url> <begin-exclusive> <update-id>: the participant shows the
 # update as a guardianGovernance PublishMessage, and publish_message_scan.sh confirms it at its own offset on that participant.
@@ -41,7 +51,7 @@ scan_confirms_publish() {
 # mediator can finalize on the other two before guardian4's vote counts; the vote is required only when sv is
 # disconnected and guardian4 is one of the two reachable confirmers.
 publish_and_check() {
-  local label="$1" require_guardian4_vote="$2" guardian4_begin provider_begin started_at transaction update_id user_offset
+  local label="$1" require_guardian4_vote="$2" guardian4_begin provider_begin started_at transaction update_id user_offset approval_lines
   guardian4_begin="$(ledger_end_at "$GUARDIAN4_JSON_API_URL")"
   provider_begin="$(ledger_end_at "$(json_api_url app-provider)")"
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -55,9 +65,9 @@ publish_and_check() {
   [[ "$user_offset" == ABSENT ]] || fail "$label: app-user still receives guardianGovernance transactions (offset $user_offset)"
   echo "PASS: $label: app-user has no offset for the PublishMessage"
   if [[ "$require_guardian4_vote" == true ]]; then
-    docker logs canton --since "$started_at" 2>&1 \
-      | jq -rR 'fromjson? | select(.message | test("Received verdict LocalApprove\\(\\) for pending parties .*guardianGovernance")) | .message | .[0:260]' \
-      | grep "by participant PAR::guardian4::" | head -n 1 | grep . \
+    approval_lines="$(docker logs canton --since "$started_at" 2>&1 \
+      | jq -rR 'fromjson? | select(.message | test("Received verdict LocalApprove\\(\\) for pending parties .*guardianGovernance")) | .message | .[0:260]')"
+    grep -m1 "by participant PAR::guardian4::" <<<"$approval_lines" \
       || fail "$label: the mediator log has no guardian4 approval for guardianGovernance"
     echo "PASS: $label: guardian4 approved for guardianGovernance"
   fi
