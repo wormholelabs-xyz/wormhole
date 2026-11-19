@@ -4,6 +4,8 @@
 //
 //	go run ./hack/canton_localnet_vaa -kind guardian-set-upgrade -signing-set-index 0 -signing-key-indices 0 -new-set-index 1 -new-key-indices 1 -sequence 100
 //	go run ./hack/canton_localnet_vaa -kind set-message-fee -fee 0 -sequence 101
+//	go run ./hack/canton_localnet_vaa -kind transfer-fees -transfer-amount 9 -transfer-recipient <32-byte hex> -sequence 4
+//	go run ./hack/canton_localnet_vaa -kind contract-upgrade -new-contract <32-byte hex> -sequence 5
 //	go run ./hack/canton_localnet_vaa -kind message -signing-set-index 1 -signing-key-indices 1 -sequence 1
 //	go run ./hack/canton_localnet_vaa -kind guardian-set-upgrade -signing-key-indices 1 -new-set-index 2 -new-key-indices 2,3,4 -sequence 102
 //	go run ./hack/canton_localnet_vaa -kind message -signing-set-index 2 -signing-key-indices 2,3,4 -signer-positions 0,1 -sequence 2
@@ -39,6 +41,8 @@ type vaaKind string
 const (
 	vaaKindGuardianSetUpgrade vaaKind = "guardian-set-upgrade"
 	vaaKindSetMessageFee      vaaKind = "set-message-fee"
+	vaaKindTransferFees       vaaKind = "transfer-fees"
+	vaaKindContractUpgrade    vaaKind = "contract-upgrade"
 	vaaKindMessage            vaaKind = "message"
 	vaaKindNttTransfer        vaaKind = "ntt-transfer"
 	vaaKindNttInstrumentID    vaaKind = "ntt-instrument-id"
@@ -54,22 +58,25 @@ type kindSpecificFlag struct {
 
 // Flags that only one kind reads.
 var kindSpecificFlags = map[string]kindSpecificFlag{
-	"fee":               {ownerKind: vaaKindSetMessageFee, required: true},
-	"new-set-index":     {ownerKind: vaaKindGuardianSetUpgrade, required: true},
-	"new-key-indices":   {ownerKind: vaaKindGuardianSetUpgrade, required: true},
-	"emitter-chain":     {ownerKind: vaaKindNttTransfer},
-	"emitter-address":   {ownerKind: vaaKindNttTransfer, required: true},
-	"source-manager":    {ownerKind: vaaKindNttTransfer, required: true},
-	"recipient-manager": {ownerKind: vaaKindNttTransfer, required: true},
-	"ntt-sender":        {ownerKind: vaaKindNttTransfer},
-	"ntt-message-id":    {ownerKind: vaaKindNttTransfer},
-	"trimmed-decimals":  {ownerKind: vaaKindNttTransfer},
-	"trimmed-amount":    {ownerKind: vaaKindNttTransfer, required: true},
-	"source-token":      {ownerKind: vaaKindNttTransfer, required: true},
-	"recipient-party":   {ownerKind: vaaKindNttTransfer, required: true},
-	"recipient-chain":   {ownerKind: vaaKindNttTransfer},
-	"admin-party":       {ownerKind: vaaKindNttInstrumentID, required: true},
-	"instrument-nonce":  {ownerKind: vaaKindNttInstrumentID, required: true},
+	"fee":                {ownerKind: vaaKindSetMessageFee, required: true},
+	"new-set-index":      {ownerKind: vaaKindGuardianSetUpgrade, required: true},
+	"new-key-indices":    {ownerKind: vaaKindGuardianSetUpgrade, required: true},
+	"transfer-amount":    {ownerKind: vaaKindTransferFees, required: true},
+	"transfer-recipient": {ownerKind: vaaKindTransferFees, required: true},
+	"new-contract":       {ownerKind: vaaKindContractUpgrade, required: true},
+	"emitter-chain":      {ownerKind: vaaKindNttTransfer},
+	"emitter-address":    {ownerKind: vaaKindNttTransfer, required: true},
+	"source-manager":     {ownerKind: vaaKindNttTransfer, required: true},
+	"recipient-manager":  {ownerKind: vaaKindNttTransfer, required: true},
+	"ntt-sender":         {ownerKind: vaaKindNttTransfer},
+	"ntt-message-id":     {ownerKind: vaaKindNttTransfer},
+	"trimmed-decimals":   {ownerKind: vaaKindNttTransfer},
+	"trimmed-amount":     {ownerKind: vaaKindNttTransfer, required: true},
+	"source-token":       {ownerKind: vaaKindNttTransfer, required: true},
+	"recipient-party":    {ownerKind: vaaKindNttTransfer, required: true},
+	"recipient-chain":    {ownerKind: vaaKindNttTransfer},
+	"admin-party":        {ownerKind: vaaKindNttInstrumentID, required: true},
+	"instrument-nonce":   {ownerKind: vaaKindNttInstrumentID, required: true},
 }
 
 type vaaRequest struct {
@@ -81,6 +88,11 @@ type vaaRequest struct {
 	newSetIndex       uint32
 	newKeyIndices     []uint64
 	sequence          uint64
+	// transfer-fees only.
+	transferFeesAmount    uint64
+	transferFeesRecipient vaa.Address
+	// contract-upgrade only.
+	upgradeNewContract vaa.Address
 	// ntt-transfer only.
 	nttEmitterChain   vaa.ChainID
 	nttEmitterAddress vaa.Address
@@ -103,10 +115,12 @@ type signedVAAOutput struct {
 
 func parseVAAKind(kindText string) (vaaKind, error) {
 	switch kind := vaaKind(kindText); kind {
-	case vaaKindGuardianSetUpgrade, vaaKindSetMessageFee, vaaKindMessage, vaaKindNttTransfer, vaaKindNttInstrumentID:
+	case vaaKindGuardianSetUpgrade, vaaKindSetMessageFee, vaaKindTransferFees, vaaKindContractUpgrade,
+		vaaKindMessage, vaaKindNttTransfer, vaaKindNttInstrumentID:
 		return kind, nil
 	default:
-		return "", fmt.Errorf("unknown kind %q (use guardian-set-upgrade, set-message-fee, message, ntt-transfer or ntt-instrument-id)", kindText)
+		return "", fmt.Errorf("unknown kind %q (use guardian-set-upgrade, set-message-fee, transfer-fees, contract-upgrade, "+
+			"message, ntt-transfer or ntt-instrument-id)", kindText)
 	}
 }
 
@@ -254,7 +268,7 @@ func parseSignerPositions(flagValue string, setSize int) ([]uint8, error) {
 func parseVAARequest(commandLine []string) (vaaRequest, error) {
 	flagSet := flag.NewFlagSet("canton_localnet_vaa", flag.ContinueOnError)
 	flagSet.SetOutput(io.Discard)
-	kindText := flagSet.String("kind", "", "guardian-set-upgrade, set-message-fee, message, ntt-transfer or ntt-instrument-id")
+	kindText := flagSet.String("kind", "", "guardian-set-upgrade, set-message-fee, transfer-fees, contract-upgrade, message, ntt-transfer or ntt-instrument-id")
 	messageFee := flagSet.Uint64("fee", 0, "set-message-fee only, required: the new fee in 10^-10 fee-instrument units")
 	signingSetIndexText := flagSet.String("signing-set-index", "0", "guardian set index the VAA names")
 	signingKeyIndicesText := flagSet.String("signing-key-indices", "0", "deterministic key indices of the signing set, in guardian order")
@@ -262,6 +276,9 @@ func parseVAARequest(commandLine []string) (vaaRequest, error) {
 	newSetIndexText := flagSet.String("new-set-index", "", "guardian-set-upgrade only, required: the new set index")
 	newKeyIndicesText := flagSet.String("new-key-indices", "", "guardian-set-upgrade only, required: deterministic key indices of the new set")
 	sequence := flagSet.Uint64("sequence", 0, "VAA sequence; governance replay protection is keyed by digest")
+	transferFeesAmount := flagSet.Uint64("transfer-amount", 0, "transfer-fees only, required: amount in 10^-10 fee-instrument units")
+	transferFeesRecipientText := flagSet.String("transfer-recipient", "", "transfer-fees only, required: recipient (32 bytes, lowercase hex)")
+	upgradeNewContractText := flagSet.String("new-contract", "", "contract-upgrade only, required: new contract (32 bytes, lowercase hex)")
 	transferFlags := registerNttTransferFlags(flagSet)
 	adminParty := flagSet.String("admin-party", "", "ntt-instrument-id only, required: registering admin party id")
 	instrumentNonce := flagSet.Uint64("instrument-nonce", 0, "ntt-instrument-id only, required: instrument nonce")
@@ -306,6 +323,21 @@ func parseVAARequest(commandLine []string) (vaaRequest, error) {
 			return vaaRequest{}, err
 		}
 	}
+	if kind == vaaKindTransferFees {
+		request.transferFeesAmount = *transferFeesAmount
+		recipient, err := parseBytes32Hex(*transferFeesRecipientText)
+		if err != nil {
+			return vaaRequest{}, fmt.Errorf("transfer-recipient: %w", err)
+		}
+		request.transferFeesRecipient = vaa.Address(recipient)
+	}
+	if kind == vaaKindContractUpgrade {
+		newContract, err := parseBytes32Hex(*upgradeNewContractText)
+		if err != nil {
+			return vaaRequest{}, fmt.Errorf("new-contract: %w", err)
+		}
+		request.upgradeNewContract = vaa.Address(newContract)
+	}
 	if kind == vaaKindNttTransfer {
 		if request.nttEmitterChain, request.nttEmitterAddress, request.nttTransfer, err = nttTransferFromFlags(transferFlags); err != nil {
 			return vaaRequest{}, err
@@ -334,6 +366,15 @@ func buildPayload(request vaaRequest) (vaa.ChainID, vaa.Address, []byte, error) 
 	case vaaKindSetMessageFee:
 		feeUpdate := vaa.BodyCoreBridgeSetMessageFee{ChainID: vaa.ChainIDCanton, MessageFee: uint256.NewInt(request.messageFee)}
 		payload, err := feeUpdate.Serialize()
+		return vaa.GovernanceChain, vaa.GovernanceEmitter, payload, err
+	case vaaKindTransferFees:
+		transfer := vaa.BodyCoreBridgeTransferFees{
+			ChainID: vaa.ChainIDCanton, Amount: uint256.NewInt(request.transferFeesAmount), Recipient: request.transferFeesRecipient}
+		payload, err := transfer.Serialize()
+		return vaa.GovernanceChain, vaa.GovernanceEmitter, payload, err
+	case vaaKindContractUpgrade:
+		upgrade := vaa.BodyContractUpgrade{ChainID: vaa.ChainIDCanton, NewContract: request.upgradeNewContract}
+		payload, err := upgrade.Serialize()
 		return vaa.GovernanceChain, vaa.GovernanceEmitter, payload, err
 	case vaaKindGuardianSetUpgrade:
 		if len(request.newKeyIndices) == 0 {
