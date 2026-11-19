@@ -173,13 +173,13 @@ template CoreState
         now <- getTime
         either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
 
-    -- | Read the operator off an authentic 'CoreState' — the caller-side
-    -- authenticity pin for anyone addressing this contract by cid. A plain
-    -- @fetch@ needs a stakeholder among the authorizers and disclosure grants
-    -- only visibility, so third-party reads must go through a choice; this is
-    -- it — nonconsuming, flexible controller. The result is bound to the
-    -- exercised contract, so a fabricated "CoreState" returns its forged
-    -- operator and fails the caller's pin (see Test.ExampleIntegrator.Redeem).
+    -- | Read the operator off this 'CoreState'. Third-party reads go through a
+    -- choice: a plain @fetch@ needs a stakeholder among the authorizers, and
+    -- disclosure grants only visibility. Nonconsuming, flexible controller.
+    -- Do not use this as the only authenticity pin: a compromised operator key
+    -- can co-sign a shadow 'CoreState' under a throwaway @guardianGovernance@.
+    -- Pin 'GetGuardianGovernance' first; this check is a redundant second pin
+    -- (see Test.ExampleIntegrator.Redeem).
     nonconsuming choice GetOperator : Party
       with
         reader : Party
