@@ -31,6 +31,10 @@ type grpcClient struct {
 	logger      *zap.Logger
 }
 
+// maxLedgerUpdateBytes bounds one received Ledger API message. A Canton
+// update above it stops the watcher at that offset.
+const maxLedgerUpdateBytes = 64 << 20
+
 // NewCantonGrpcClient dials the Ledger API at rpc. readAsParty narrows the
 // update stream and GetUpdateById to a single party (the guardianGovernance
 // party in production); empty observes every party hosted on the participant
@@ -46,7 +50,10 @@ func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, tra
 	if transportCreds == nil {
 		transportCreds = credentials.NewTLS(nil)
 	}
-	opts = append(opts, grpc.WithTransportCredentials(transportCreds))
+	opts = append(opts,
+		grpc.WithTransportCredentials(transportCreds),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(maxLedgerUpdateBytes)),
+	)
 	conn, err := grpc.NewClient(rpc, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("cantonclient: failed to dial %s: %w", rpc, err)

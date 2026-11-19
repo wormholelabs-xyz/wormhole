@@ -361,14 +361,14 @@ no operator authority:
 choice PublishMessage : (ContractId Emitter, WormholeMessage)
   with
     nonce            : Int            -- 0 .. 2^32-1
-    payload          : Bytes          -- even-length lowercase hex, <= 750 bytes (whitepaper 0004)
+    payload          : Bytes          -- even-length lowercase hex; no size cap (EVM parity)
     consistencyLevel : Int            -- 0 .. 255; see §6
     coreStateCid     : ContractId CoreState                       -- fee read (§ Fees)
     payer            : Party          -- funds messageFee; = owner for a direct publish
     feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
   controller owner, payer
   do
-    -- 1. assert the field ranges and the payload encoding and length
+    -- 1. assert the field ranges and the payload encoding
     -- 2. charge the current messageFee to payer through CoreState (§ Fees)
     -- 3. archive self; create the successor Emitter with sequence = sequence + 1
     -- 4. return WormholeMessage{registrar, owner, emitterId, sequence, nonce,
@@ -590,7 +590,7 @@ template ReplayNode
   with
     consumer       : Party    -- integrator scope party; bears the replay risk
     operator       : Party    -- co-signs: no unilateral archive or re-create
-    namespace      : Text     -- opaque sub-scope: one consumer, many tries
+    namespace      : Text     -- opaque sub-scope: one consumer, many tries; 1..128 chars
     prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- node capacity; children inherit it
     consumed       : Set Bytes  -- suffixes, each (64 − |prefix|) nibbles
@@ -1000,7 +1000,7 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 
 `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
-For 0.8.0, the baseline is `dars/wormhole-core-0.7.0.dar`.
+For 0.8.1, the baseline is `dars/wormhole-core-0.8.0.dar`.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 `damlc` reports these changes only as warnings.

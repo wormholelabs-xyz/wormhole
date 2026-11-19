@@ -36,7 +36,7 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | A9-1 | Send a malformed VAA encoding. | Held. | `testRedTeamA9MalformedEncodings`; `testRedTeamA9MalformedGovernancePayloads`. | None. | None. |
 | A9-2 | Send a governance payload with a trailing byte. | Fixed in 15684243d. | `testRedTeamA9GovernancePayloadExactLength`; `testParseGovernanceRequiresExactPacketLength`. | Low. | None. |
 | A9-3 | Publish fields that the watcher drops. | Fixed in 4143b6c74. | `testRedTeamA9PublishRejectsFieldsTheWatcherDrops`; `testRedTeamA9PublishFieldBoundaries`. | Low. | None. |
-| A9-4 | Publish at the payload size limit. | Held. | `testRedTeamA9PublishPayloadBoundary`. | None. | None. |
+| A9-4 | Publish a payload above 750 bytes. | Accepted by design: no core bridge caps the payload size (EVM parity). | `testRedTeamA9PublishAcceptsAnyPayloadSize`; `TestSubscribeUpdatesUpdateSizeLimit`. | None. | The watcher receive limit `maxLedgerUpdateBytes` bounds one update. |
 | A9-5 | Replay a VAA in uppercase hex. | Held. | `testRedTeamA9HexCaseReplay`. | None. | None. |
 | A14-1 | The operator creates an emitter for a third party. | Held. | `testRedTeamA14OperatorCannotForgeThirdPartyEmitter`. | None. | None. |
 | A14-2 | The operator and the owner rewind the owner sequence. | Fixed on `canton/overnight-u2-fixes`: `guardianGovernance` co-signs `Emitter`. | `testRedTeamA14ColludingOwnerCannotDuplicateEmitter`; `testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance`; `testGovernanceSignsEveryEmitter`. | Low. | Fresh genesis of 0.8.0 ([A14](A14_EMITTER_ID_UNIQUENESS.md)). |
@@ -76,7 +76,7 @@ Before a66170ea7, Canton failed at second 86400.
 The tests use a truncated header, a truncated signature, a short body, and a trailing byte.
 They change the signature count and the version.
 They also use odd-length, non-hex, and empty input.
-The payload tests publish 0, 749, 750, and 751 bytes.
+The payload tests publish 0, 750, 751, and 65536 bytes.
 An uppercase replay fails with `action already consumed` or `digest already consumed`.
 
 ### A9: Governance payload length
@@ -106,7 +106,6 @@ An integrator that passed user input to these fields could lose user funds.
 Fix: `PublishMessage` (`State.daml`) checks these conditions before the fee charge:
 
 - The payload is lowercase hex with an even length.
-- The payload is 750 bytes or less.
 - The nonce is in the range 0 to 4294967295.
 - The consistency level is in the range 0 to 255.
 

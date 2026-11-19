@@ -432,22 +432,21 @@ testRedTeamA9EmptyApplicationPayloadVerifies = do
   verified.payload === ""
   verified.sequence === 2
 
-testRedTeamA9PublishPayloadBoundary : Script ()
-testRedTeamA9PublishPayloadBoundary = do
+-- | No core bridge caps the payload size. Each size publishes and takes the
+-- next sequence.
+testRedTeamA9PublishAcceptsAnyPayloadSize : Script ()
+testRedTeamA9PublishAcceptsAnyPayloadSize = do
   (operator, _, coreStateCid) <- setup
-  owner <- allocateParty "RedTeamBoundaryOwner"
+  owner <- allocateParty "RedTeamPayloadSizeOwner"
   emitterCid <- registerEmitter operator owner
-  (emitterAfterEmpty, emptyMessage) <- publishVia operator coreStateCid owner emitterCid 0 "" 0
-  emptyMessage.payload === ""
-  (emitterAfter749, _) <- publishVia operator coreStateCid owner emitterAfterEmpty 0 (hexPayloadOfBytes 749) 0
-  (emitterAfter750, maxMessage) <- publishVia operator coreStateCid owner emitterAfter749 0 (hexPayloadOfBytes 750) 0
-  byteLength maxMessage.payload === 750
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
-  oversizeResult <- trySubmit (actAs owner <> disclose coreStateDisclosure) do
-    exerciseCmd emitterAfter750 PublishMessage with
-      nonce = 0, payload = hexPayloadOfBytes 751, consistencyLevel = 0
-      coreStateCid, payer = owner, feeAllocation = None
-  checkAttackFailedWith "A9 751-byte payload" "payload exceeds 750 bytes" oversizeResult
+  let payloadByteCounts = [0, 750, 751, 65536]
+      publishPayloadOfBytes (currentEmitterCid, expectedSequence) payloadByteCount = do
+        (successorCid, message) <- publishVia operator coreStateCid owner currentEmitterCid 0 (hexPayloadOfBytes payloadByteCount) 0
+        message.payload === hexPayloadOfBytes payloadByteCount
+        message.sequence === expectedSequence
+        pure (successorCid, expectedSequence + 1)
+  (_, nextSequence) <- foldlA publishPayloadOfBytes (emitterCid, 0) payloadByteCounts
+  nextSequence === length payloadByteCounts
 
 -- | The watcher drops a message whose payload is not even-length hex
 -- or whose nonce / consistency level is outside uint32 / uint8
@@ -491,7 +490,9 @@ testRedTeamA9PublishFieldBoundaries = do
         , ("uppercase payload", "payload is not lowercase hex", 0, "AB", 0)
         , ("0x-prefixed payload", "payload is not lowercase hex", 0, "0x00", 0)
         , ("non-hex payload", "payload is not lowercase hex", 0, "zz", 0)
-        , ("751-byte non-hex payload", "payload exceeds 750 bytes", 0, mconcat (replicate 751 "zz"), 0)
+        , ("751-byte non-hex payload", "payload is not lowercase hex", 0, mconcat (replicate 751 "zz"), 0)
+        , ("1501-char odd-length payload", "payload has an odd hex length", 0, mconcat (replicate 1501 "a"), 0)
+        , ("65537-char odd-length payload", "payload has an odd hex length", 0, mconcat (replicate 65537 "a"), 0)
         , ("nonce 2^32", "nonce exceeds uint32", 4294967296, "00", 0)
         , ("nonce -1", "nonce is negative", -1, "00", 0)
         , ("consistency level 256", "consistency level exceeds uint8", 0, "00", 256)
