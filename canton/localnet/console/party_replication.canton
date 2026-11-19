@@ -1,33 +1,27 @@
 // Offline party replication of external parties to a target participant at Confirmation (Canton 3.7 procedure, 13 steps).
+// Runs after owner_signing_prelude.canton.
 // REPLICATION_PHASE=prepare: steps 2 to 7. The target consents with the onboarding flag and disconnects; two namespace
 //   owner keys sign the same PartyToParticipant; each source exports the party ACS at the activation offset.
 // REPLICATION_PHASE=complete: steps 10 to 13. The target imports each ACS (ContractImportMode.Validation), reconnects
-//   and clears the onboarding flag. Step 9 (backup) is not rehearsed: guardian4 is temporary.
-// REPLICATION_PHASE=remove-host or set-threshold: a PartyToParticipant replacement that two owner keys sign.
+//   and clears the onboarding flag. Step 9 (backup) applies to a permanent host; guardian4 is temporary.
+// REPLICATION_PHASE=remove-host, add-host-without-consent or set-threshold: a PartyToParticipant replacement that the
+//   owner keys sign.
+// Before any owner signs, the console compares the PartyToParticipant with its IntendedTopologyChange. The rehearsal
+// mappings have 4 hosts, an onboarding host or another confirmation threshold, which checkHostingIsGuardianPolicy rejects.
 // Environment:
 //   REPLICATION_PARTIES        Comma-separated <party-id>=<source participant name>.
 //   REPLICATION_TARGET         Target participant name.
 //   REPLICATION_DIR            Directory of the ACS files (<party identifier>.acs.gz) and the offsets file.
 //   OWNER_PUBKEY_1/2, OWNER_SIGN_ARGV_1/2   Two namespace owner keys and their signer commands.
-import com.digitalasset.canton.topology._
-import com.digitalasset.canton.topology.transaction._
-import com.digitalasset.canton.crypto._
-import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+//   REPLICATION_AWAIT_MAX_ATTEMPTS          Topology wait bound (default and maximum topologyEffectiveMaxAttempts).
 import com.digitalasset.canton.participant.admin.data.ContractImportMode
 import com.digitalasset.canton.admin.api.client.data.{FlagNotSet, FlagSet}
-import com.google.protobuf.ByteString
-import scala.sys.process._
-import java.nio.file.{Files, Paths}
 
-def requiredEnvironmentVariable(name: String): String =
-  sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
-def bytesToHex(bytes: Array[Byte]): String = bytes.map("%02x".format(_)).mkString
-def hexToBytes(hex: String): Array[Byte] = hex.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 def participantNamed(name: String) = participants.remote.find(_.name == name).getOrElse(throw new RuntimeException(s"unknown participant $name"))
 
 val synchronizerAlias = "global"
-val phase = requiredEnvironmentVariable("REPLICATION_PHASE")
-val target = participantNamed(requiredEnvironmentVariable("REPLICATION_TARGET"))
+val replicationPhase = requiredEnvironmentVariable("REPLICATION_PHASE")
+val targetParticipant = participantNamed(requiredEnvironmentVariable("REPLICATION_TARGET"))
 val replicationDirectory = Paths.get(requiredEnvironmentVariable("REPLICATION_DIR"))
 val partiesWithSource: Seq[(PartyId, String)] = requiredEnvironmentVariable("REPLICATION_PARTIES").split(",").toSeq.map { entry =>
   entry.split("=") match {
@@ -39,6 +33,7 @@ require(partiesWithSource.nonEmpty, "REPLICATION_PARTIES is empty")
 require(partiesWithSource.map(_._1).distinct.size == partiesWithSource.size, "REPLICATION_PARTIES names a party twice")
 def acsFileOf(partyId: PartyId): String = replicationDirectory.resolve(s"${partyId.uid.identifier}.acs.gz").toString
 val targetLedgerEndFile = replicationDirectory.resolve("target-ledger-end.txt")
+val replicationAwaitMaxAttempts = sys.env.get("REPLICATION_AWAIT_MAX_ATTEMPTS").map(_.toInt).getOrElse(topologyEffectiveMaxAttempts)
 
 val referenceParticipant = participantNamed(partiesWithSource.head._2)
 val physicalSynchronizerId = referenceParticipant.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == synchronizerAlias)
@@ -47,155 +42,151 @@ val synchronizerId = physicalSynchronizerId.logical
 val synchronizerStore = TopologyStoreId.Synchronizer(physicalSynchronizerId)
 val protocolVersion = physicalSynchronizerId.protocolVersion
 
-def hostingOf(partyId: PartyId): Option[HostingParticipant] =
+def effectiveMappingOf(partyId: PartyId): EffectiveTopologyMapping[PartyToParticipant] = {
+  val mappings = referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).filter(_.item.partyId == partyId)
+  require(mappings.size == 1, s"${referenceParticipant.name} shows ${mappings.size} PartyToParticipant mappings of $partyId, expected 1")
+  EffectiveTopologyMapping(mappings.head.item, mappings.head.context.serial)
+}
+def targetHostingOf(partyId: PartyId): Option[HostingParticipant] =
   referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).find(_.item.partyId == partyId)
-    .flatMap(_.item.participants.find(_.participantId == target.id))
-val awaitMaxAttempts = sys.env.getOrElse("REPLICATION_AWAIT_MAX_ATTEMPTS", "120").toInt
-def awaitCondition(description: String, maxAttempts: Int = awaitMaxAttempts)(condition: => Boolean): Unit = {
-  var attempt = 0
-  while (!condition) {
-    attempt += 1
-    if (attempt >= maxAttempts) throw new RuntimeException(s"timed out: $description")
-    Thread.sleep(500)
-  }
-}
+    .flatMap(_.item.participants.find(_.participantId == targetParticipant.id))
 
-// BEGIN owner signer block (same text in devnet/guardian_governance.canton and localnet/console/gg_rotate_owner_key.canton)
-val ed25519SignatureLengthBytes = 64
-val ed25519SignatureHexPattern = s"^[0-9a-f]{${ed25519SignatureLengthBytes * 2}}$$".r
-def parseEd25519SignatureHex(signatureHex: String, signerDescription: String): ByteString = {
-  require(ed25519SignatureHexPattern.matches(signatureHex),
-    s"signer of $signerDescription printed ${signatureHex.length} hex characters, expected ${ed25519SignatureLengthBytes * 2} lowercase hex")
-  val signatureBytes = ByteString.copyFrom(hexToBytes(signatureHex))
-  require(signatureBytes.size == ed25519SignatureLengthBytes, s"signature of $signerDescription has ${signatureBytes.size} bytes")
-  signatureBytes
+lazy val ownerKeys: Seq[OwnerKey] = {
+  val loadedOwnerKeys = Seq(loadOwnerKey("OWNER_PUBKEY_1", "OWNER_SIGN_ARGV_1"), loadOwnerKey("OWNER_PUBKEY_2", "OWNER_SIGN_ARGV_2"))
+  require(loadedOwnerKeys.map(_.publicKey.fingerprint).distinct.size == 2, "the two owner keys must differ")
+  loadedOwnerKeys
 }
-def parseSignerArgv(variableName: String): Seq[String] = {
-  val signerArgv = io.circe.parser.decode[Vector[String]](requiredEnvironmentVariable(variableName)).fold(
-    decodeError => throw new RuntimeException(s"$variableName must be a JSON array of strings: ${decodeError.getMessage}"),
-    identity)
-  require(signerArgv.nonEmpty, s"$variableName is an empty array")
-  require(signerArgv.forall(_.nonEmpty), s"$variableName holds an empty argument")
-  signerArgv
-}
-def runOwnerSigner(signerArgv: Seq[String], hashHex: String, signerDescription: String): ByteString =
-  parseEd25519SignatureHex((signerArgv :+ hashHex).!!.trim, signerDescription)
-// END owner signer block
-case class OwnerKey(publicKey: SigningPublicKey, signerArgv: Seq[String])
-def loadOwner(publicKeyVariable: String, signerArgvVariable: String): OwnerKey = {
-  val publicKeyDer = ByteString.copyFrom(Files.readAllBytes(Paths.get(requiredEnvironmentVariable(publicKeyVariable))))
-  val publicKey = SigningPublicKey.create(CryptoKeyFormat.DerX509Spki, publicKeyDer, SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
-    .getOrElse(sys.error(s"invalid owner public key in $publicKeyVariable"))
-  OwnerKey(publicKey, parseSignerArgv(signerArgvVariable))
-}
-lazy val ownerSigners = {
-  val loadedOwners = Seq(loadOwner("OWNER_PUBKEY_1", "OWNER_SIGN_ARGV_1"), loadOwner("OWNER_PUBKEY_2", "OWNER_SIGN_ARGV_2"))
-  require(loadedOwners.map(_.publicKey.fingerprint).distinct.size == 2, "the two owner keys must differ")
-  loadedOwners
-}
-def externalSign(owner: OwnerKey, hash: Hash): Signature = Signature.fromExternalSigning(
-  SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
-  runOwnerSigner(owner.signerArgv, bytesToHex(hash.getCryptographicEvidence.toByteArray), owner.publicKey.fingerprint.toProtoPrimitive),
-  owner.publicKey.fingerprint, SigningAlgorithmSpec.Ed25519)
-
-def currentMappingOf(partyId: PartyId) =
-  referenceParticipant.topology.party_to_participant_mappings.list(synchronizerStore).find(_.item.partyId == partyId)
-    .getOrElse(throw new RuntimeException(s"no PartyToParticipant for $partyId"))
 // REPLICATION_SIGNER_COUNT (default 2): the number of owner keys that sign a replacement. 1 is the negative check.
 val replacementSignerCount = sys.env.getOrElse("REPLICATION_SIGNER_COUNT", "2").toInt
 require(replacementSignerCount == 1 || replacementSignerCount == 2, "REPLICATION_SIGNER_COUNT must be 1 or 2")
-// Replace the PartyToParticipant of a party; the owner keys sign it.
-def replaceMapping(partyId: PartyId, hosts: Seq[HostingParticipant], confirmationThreshold: Int): Unit = {
-  val current = currentMappingOf(partyId)
-  val replacement = PartyToParticipant.create(partyId, com.digitalasset.canton.config.RequireTypes.PositiveInt.tryCreate(confirmationThreshold), hosts,
-    current.item.partySigningKeysWithThreshold).fold(error => sys.error(s"PartyToParticipant: $error"), identity)
-  val unsigned = referenceParticipant.topology.transactions.generate(
-    Seq(com.digitalasset.canton.admin.api.client.commands.TopologyAdminCommands.Write.GenerateTransactions.Proposal(replacement, synchronizerStore))).head
-  val ownerSignatures = ownerSigners.take(replacementSignerCount).map(externalSign(_, unsigned.hash.hash))
-  val signed = ownerSignatures.tail.foldLeft(
-    SignedTopologyTransaction.withSignature(unsigned, ownerSignatures.head, isProposal = false, protocolVersion))(_.addSingleSignature(_))
-  referenceParticipant.topology.transactions.load(Seq(signed), synchronizerStore)
-  awaitCondition(s"PartyToParticipant of $partyId replaced") {
-    val effective = currentMappingOf(partyId).item
-    effective.threshold.value == confirmationThreshold && effective.participants.map(_.participantId).toSet == hosts.map(_.participantId).toSet
+
+// The next PartyToParticipant of a party: new hosts and confirmation threshold, the same signing keys, the next serial.
+def intendedPartyToParticipantChange(current: EffectiveTopologyMapping[PartyToParticipant], hosts: Seq[HostingParticipant],
+    confirmationThreshold: PositiveInt): IntendedTopologyChange = {
+  val replacement = PartyToParticipant.create(current.mapping.partyId, confirmationThreshold, hosts, current.mapping.partySigningKeysWithThreshold)
+    .fold(error => throw new IllegalArgumentException(s"PartyToParticipant of ${partyName(current.mapping.partyId)}: $error"), identity)
+  IntendedTopologyChange(replacement, current.serial.tryAdd(1))
+}
+def signedByOwners(unsigned: TopologyTransaction[TopologyChangeOp, TopologyMapping], signers: Seq[OwnerKey],
+    isProposal: Boolean): GenericSignedTopologyTransaction = {
+  require(signers.nonEmpty, "no owner signers")
+  val ownerSignatures = signers.map(signWithOwnerKey(_, unsigned.hash.hash))
+  ownerSignatures.tail.foldLeft(SignedTopologyTransaction.withSignature(unsigned, ownerSignatures.head, isProposal, protocolVersion))(
+    _.addSingleSignature(_))
+}
+// Replace the PartyToParticipant of a party. replacementSignerCount owner keys sign it.
+def replacePartyToParticipant(partyId: PartyId, hosts: Seq[HostingParticipant], confirmationThreshold: PositiveInt): Unit = {
+  val intended = intendedPartyToParticipantChange(effectiveMappingOf(partyId), hosts, confirmationThreshold)
+  val description = s"PartyToParticipant of $partyId"
+  val generatedTransactions = referenceParticipant.topology.transactions.generate(
+    Seq(Proposal(intended.mapping, synchronizerStore, TopologyChangeOp.Replace, Some(intended.serial))))
+  require(generatedTransactions.size == 1, s"$description: ${referenceParticipant.name} generated ${generatedTransactions.size} transactions, expected 1")
+  val unsigned = checkGeneratedTransactionIsIntended(generatedTransactions.head, intended, protocolVersion, s"generated $description")
+  referenceParticipant.topology.transactions.load(
+    Seq(signedByOwners(unsigned, ownerKeys.take(replacementSignerCount), isProposal = false)), synchronizerStore)
+  awaitTopology(s"$description replaced", replicationAwaitMaxAttempts) {
+    val effective = effectiveMappingOf(partyId)
+    effective.serial == intended.serial && effective.mapping == intended.mapping
   }
 }
 def describeMapping(partyId: PartyId): String = {
-  val mapping = currentMappingOf(partyId)
-  s"serial=${mapping.context.serial} threshold=${mapping.item.threshold} hosts=${mapping.item.participants.map(hosting => s"${hosting.participantId.uid.identifier}::${hosting.participantId.fingerprint.toProtoPrimitive.take(8)}/${hosting.permission}${if (hosting.onboarding) "/onboarding" else ""}").mkString(",")}"
+  val effective = effectiveMappingOf(partyId)
+  val hostsText = effective.mapping.participants.map(hosting =>
+    s"${hosting.participantId.uid.identifier}::${hosting.participantId.fingerprint.toProtoPrimitive.take(8)}/${hosting.permission}" +
+      (if (hosting.onboarding) "/onboarding" else "")).mkString(",")
+  s"serial=${effective.serial} threshold=${effective.mapping.threshold} hosts=$hostsText"
 }
 
-phase match {
+replicationPhase match {
   case "prepare" =>
     Files.createDirectories(replicationDirectory)
-    partiesWithSource.foreach { case (partyId, _) => require(hostingOf(partyId).isEmpty, s"${target.name} already hosts $partyId") }
+    partiesWithSource.foreach { case (partyId, _) => require(targetHostingOf(partyId).isEmpty, s"${targetParticipant.name} already hosts $partyId") }
+    val mappingsBeforeOnboarding = partiesWithSource.map { case (partyId, _) => partyId -> effectiveMappingOf(partyId) }.toMap
     // Step 2: data retention on each source.
     partiesWithSource.map(_._2).distinct.foreach { sourceName =>
       println(s"REPLICATION step2 $sourceName pruningSchedule=${participantNamed(sourceName).pruning.get_schedule()}")
     }
     // Step 3: the target consents with the onboarding flag.
     partiesWithSource.foreach { case (partyId, _) =>
-      target.topology.party_to_participant_mappings.propose_delta(party = partyId, adds = Seq((target.id, ParticipantPermission.Confirmation)),
-        store = synchronizerStore, requiresPartyToBeOnboarded = true)
+      targetParticipant.topology.party_to_participant_mappings.propose_delta(party = partyId,
+        adds = Seq((targetParticipant.id, ParticipantPermission.Confirmation)), store = synchronizerStore, requiresPartyToBeOnboarded = true)
     }
-    def targetProposalOf(partyId: PartyId) =
-      referenceParticipant.topology.transactions.list(synchronizerStore, proposals = true, filterAuthorizedKey = Some(target.id.fingerprint))
+    def targetProposalOf(partyId: PartyId): Option[GenericSignedTopologyTransaction] =
+      referenceParticipant.topology.transactions.list(synchronizerStore, proposals = true, filterAuthorizedKey = Some(targetParticipant.id.fingerprint))
         .result.map(_.transaction).find(signed => signed.mapping match {
-          case mapping: PartyToParticipant => mapping.partyId == partyId && mapping.participants.exists(hosting => hosting.participantId == target.id && hosting.onboarding)
+          case mapping: PartyToParticipant =>
+            mapping.partyId == partyId && mapping.participants.exists(hosting => hosting.participantId == targetParticipant.id && hosting.onboarding)
           case _ => false
         })
-    partiesWithSource.foreach { case (partyId, _) => awaitCondition(s"target proposal for $partyId")(targetProposalOf(partyId).nonEmpty) }
+    partiesWithSource.foreach { case (partyId, _) =>
+      awaitTopology(s"target proposal for $partyId", replicationAwaitMaxAttempts)(targetProposalOf(partyId).nonEmpty)
+    }
     println("REPLICATION step3 target proposals are on the synchronizer")
     // Steps 4 and 5: the target disconnects and stays disconnected on restart.
-    target.synchronizers.disconnect_all()
-    target.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = true))
-    require(target.synchronizers.list_connected().isEmpty, s"${target.name} is still connected")
-    println(s"REPLICATION step4-5 ${target.name} disconnected, manualConnect=true")
+    targetParticipant.synchronizers.disconnect_all()
+    targetParticipant.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = true))
+    require(targetParticipant.synchronizers.list_connected().isEmpty, s"${targetParticipant.name} is still connected")
+    println(s"REPLICATION step4-5 ${targetParticipant.name} disconnected, manualConnect=true")
     // Step 6: two owner keys sign the PartyToParticipant that the target proposed.
     val beforeActivationOffsets = partiesWithSource.map { case (partyId, sourceName) => partyId -> participantNamed(sourceName).ledger_api.state.end() }.toMap
     partiesWithSource.foreach { case (partyId, _) =>
       val proposal = targetProposalOf(partyId).getOrElse(sys.error(s"target proposal for $partyId disappeared"))
-      val ownerSignatures = ownerSigners.map(externalSign(_, proposal.transaction.hash.hash))
-      val partySigned = ownerSignatures.tail.foldLeft(
-        SignedTopologyTransaction.withSignature(proposal.transaction, ownerSignatures.head, isProposal = true, protocolVersion))(_.addSingleSignature(_))
-      referenceParticipant.topology.transactions.load(Seq(partySigned), synchronizerStore)
+      val mappingBeforeOnboarding = mappingsBeforeOnboarding(partyId)
+      val intendedHosts =
+        mappingBeforeOnboarding.mapping.participants :+ HostingParticipant(targetParticipant.id, ParticipantPermission.Confirmation, true)
+      // propose_delta chooses the host order, and the hash covers it: the intended hosts take that order when they are
+      // the same hosts.
+      val proposedHosts = proposal.mapping match {
+        case proposedMapping: PartyToParticipant => proposedMapping.participants
+        case otherMapping => throw new IllegalStateException(s"target proposal for $partyId has mapping ${otherMapping.code}")
+      }
+      val intendedHostsInProposedOrder =
+        if (proposedHosts.size == intendedHosts.size && proposedHosts.toSet == intendedHosts.toSet) proposedHosts else intendedHosts
+      val intended = intendedPartyToParticipantChange(mappingBeforeOnboarding, intendedHostsInProposedOrder,
+        mappingBeforeOnboarding.mapping.threshold)
+      val unsigned = checkGeneratedTransactionIsIntended(proposal.transaction, intended, protocolVersion, s"target proposal for $partyId")
+      referenceParticipant.topology.transactions.load(Seq(signedByOwners(unsigned, ownerKeys, isProposal = true)), synchronizerStore)
     }
-    partiesWithSource.foreach { case (partyId, _) => awaitCondition(s"onboarding hosting of $partyId")(hostingOf(partyId).exists(_.onboarding)) }
-    partiesWithSource.foreach { case (partyId, _) => println(s"REPLICATION step6 ${partyId.uid.identifier} hosting=${hostingOf(partyId)}") }
+    partiesWithSource.foreach { case (partyId, _) =>
+      awaitTopology(s"onboarding hosting of $partyId", replicationAwaitMaxAttempts)(targetHostingOf(partyId).exists(_.onboarding))
+    }
+    partiesWithSource.foreach { case (partyId, _) => println(s"REPLICATION step6 ${partyId.uid.identifier} hosting=${targetHostingOf(partyId)}") }
     // Step 7: each source exports the party ACS at the offset where the party becomes active on the target.
     partiesWithSource.foreach { case (partyId, sourceName) =>
-      participantNamed(sourceName).parties.export_party_acs(party = partyId, synchronizerId = synchronizerId, targetParticipantId = target.id,
+      participantNamed(sourceName).parties.export_party_acs(party = partyId, synchronizerId = synchronizerId, targetParticipantId = targetParticipant.id,
         beginOffsetExclusive = beforeActivationOffsets(partyId), exportFilePath = acsFileOf(partyId))
       println(s"REPLICATION step7 ${partyId.uid.identifier} exported from $sourceName to ${acsFileOf(partyId)} bytes=${Files.size(Paths.get(acsFileOf(partyId)))}")
     }
     println("REPLICATION prepare done")
 
   case "complete" =>
-    partiesWithSource.foreach { case (partyId, _) => require(hostingOf(partyId).exists(_.onboarding), s"$partyId is not onboarding on ${target.name}") }
-    require(target.synchronizers.list_connected().isEmpty, s"${target.name} must be disconnected before the import")
+    partiesWithSource.foreach { case (partyId, _) =>
+      require(targetHostingOf(partyId).exists(_.onboarding), s"$partyId is not onboarding on ${targetParticipant.name}")
+    }
+    require(targetParticipant.synchronizers.list_connected().isEmpty, s"${targetParticipant.name} must be disconnected before the import")
     // Step 10: the target imports each ACS with contract validation.
     partiesWithSource.foreach { case (partyId, _) =>
-      val importResult = scala.util.Try(target.parties.import_party_acs(synchronizerId, party = Some(partyId), importFilePath = acsFileOf(partyId),
-        contractImportMode = ContractImportMode.Validation))
+      val importResult = scala.util.Try(targetParticipant.parties.import_party_acs(synchronizerId, party = Some(partyId),
+        importFilePath = acsFileOf(partyId), contractImportMode = ContractImportMode.Validation))
       println(s"REPLICATION step10 ${partyId.uid.identifier} import=${importResult.fold(error => "rejected: " + error.getMessage.linesIterator.take(6).mkString(" "), _ => "accepted")}")
       importResult.get
     }
     // Steps 11 and 12: reconnect and restore automatic reconnection.
-    val targetLedgerEnd = target.ledger_api.state.end()
+    val targetLedgerEnd = targetParticipant.ledger_api.state.end()
     Files.writeString(targetLedgerEndFile, targetLedgerEnd.toString)
-    target.synchronizers.reconnect(synchronizerAlias)
-    target.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = false))
-    println(s"REPLICATION step11-12 ${target.name} reconnected=${target.synchronizers.active(synchronizerAlias)} ledgerEnd=$targetLedgerEnd")
+    targetParticipant.synchronizers.reconnect(synchronizerAlias)
+    targetParticipant.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = false))
+    println(s"REPLICATION step11-12 ${targetParticipant.name} reconnected=${targetParticipant.synchronizers.active(synchronizerAlias)} ledgerEnd=$targetLedgerEnd")
     // Step 13: clear the onboarding flag once it is safe.
     partiesWithSource.foreach { case (partyId, _) =>
       utils.retry_until_true(timeout = 5.minutes, maxWaitPeriod = 10.seconds) {
-        target.parties.clear_party_onboarding_flag(partyId, synchronizerId, targetLedgerEnd) match {
+        targetParticipant.parties.clear_party_onboarding_flag(partyId, synchronizerId, targetLedgerEnd) match {
           case FlagNotSet => true
           case FlagSet(_) => false
         }
       }
-      awaitCondition(s"onboarding flag of $partyId cleared")(hostingOf(partyId).exists(!_.onboarding))
-      println(s"REPLICATION step13 ${partyId.uid.identifier} hosting=${hostingOf(partyId)}")
+      awaitTopology(s"onboarding flag of $partyId cleared", replicationAwaitMaxAttempts)(targetHostingOf(partyId).exists(!_.onboarding))
+      println(s"REPLICATION step13 ${partyId.uid.identifier} hosting=${targetHostingOf(partyId)}")
     }
     println("REPLICATION complete done")
 
@@ -204,32 +195,32 @@ phase match {
     val removedHostText = requiredEnvironmentVariable("REPLICATION_REMOVED_HOST")
     val removedHostId = participants.remote.find(_.name == removedHostText).map(_.id).getOrElse(ParticipantId.tryFromProtoPrimitive(removedHostText))
     partiesWithSource.foreach { case (partyId, _) =>
-      val current = currentMappingOf(partyId).item
+      val current = effectiveMappingOf(partyId).mapping
       require(current.participants.exists(_.participantId == removedHostId), s"$removedHostId does not host $partyId")
-      replaceMapping(partyId, current.participants.filterNot(_.participantId == removedHostId), current.threshold.value)
+      replacePartyToParticipant(partyId, current.participants.filterNot(_.participantId == removedHostId), current.threshold)
       println(s"REPLICATION remove-host ${partyId.uid.identifier} ${describeMapping(partyId)}")
     }
     println("REPLICATION remove-host done")
 
-  // REPLICATION_ADDED_HOST: a console participant name. The party signs; the participant does not consent.
+  // REPLICATION_ADDED_HOST: a console participant name. Only the owner keys sign: the host-consent negative check.
   case "add-host-without-consent" =>
     val addedHost = participantNamed(requiredEnvironmentVariable("REPLICATION_ADDED_HOST"))
     partiesWithSource.foreach { case (partyId, _) =>
-      val current = currentMappingOf(partyId).item
+      val current = effectiveMappingOf(partyId).mapping
       require(!current.participants.exists(_.participantId == addedHost.id), s"${addedHost.name} already hosts $partyId")
-      replaceMapping(partyId, current.participants :+ HostingParticipant(addedHost.id, ParticipantPermission.Confirmation), current.threshold.value)
+      replacePartyToParticipant(partyId, current.participants :+ HostingParticipant(addedHost.id, ParticipantPermission.Confirmation), current.threshold)
       println(s"REPLICATION add-host-without-consent ${partyId.uid.identifier} ${describeMapping(partyId)}")
     }
     println("REPLICATION add-host-without-consent done")
 
   // REPLICATION_CONFIRMATION_THRESHOLD: the new confirmation threshold. Keeps the hosts.
   case "set-threshold" =>
-    val confirmationThreshold = requiredEnvironmentVariable("REPLICATION_CONFIRMATION_THRESHOLD").toInt
+    val confirmationThreshold = PositiveInt.tryCreate(requiredEnvironmentVariable("REPLICATION_CONFIRMATION_THRESHOLD").toInt)
     partiesWithSource.foreach { case (partyId, _) =>
-      replaceMapping(partyId, currentMappingOf(partyId).item.participants, confirmationThreshold)
+      replacePartyToParticipant(partyId, effectiveMappingOf(partyId).mapping.participants, confirmationThreshold)
       println(s"REPLICATION set-threshold ${partyId.uid.identifier} ${describeMapping(partyId)}")
     }
     println("REPLICATION set-threshold done")
 
-  case other => throw new RuntimeException(s"unknown REPLICATION_PHASE $other")
+  case otherPhase => throw new RuntimeException(s"unknown REPLICATION_PHASE $otherPhase")
 }

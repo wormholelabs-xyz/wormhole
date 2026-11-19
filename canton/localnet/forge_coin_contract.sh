@@ -18,5 +18,6 @@ NTT_MANAGER_CID="${NTT_MANAGER_CID:-$(jq -er .burnMint.managerCid "$LOCALNET_STA
 FORGE_DAR_DIR="${FORGE_DAR_DIR:-$LOCALNET_STATE_DIR/guardian4/dars}" \
 FORGE_OUTPUT_FILE="${FORGE_OUTPUT_FILE:-$LOCALNET_STATE_DIR/forge/forged-coins.acs.gz}" \
 CANTON_CONSOLE_CONFIG="$forge_work_dir/console.conf" \
-  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/forge_coin_contract.canton" 2>&1 \
+  "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$LOCALNET_SCRIPT_DIR/console/owner_signing_prelude.canton" \
+  "$LOCALNET_SCRIPT_DIR/console/forge_coin_contract.canton" 2>&1 \
   | grep -E '^FORGE|ERROR'

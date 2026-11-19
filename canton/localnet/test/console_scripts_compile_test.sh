@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Each guardian-namespace console script compiles with the Canton console of CANTON_RELEASE.
+# Each listed console script compiles with the Canton console of CANTON_RELEASE.
 # Offline, each script stops at its first runtime check. The expected stop text proves that compilation passed.
 # Needs the console jar (console_test_lib.sh). Needs no LocalNet.
 # Usage: canton/localnet/test/console_scripts_compile_test.sh
@@ -16,6 +16,14 @@ compile_cases=(
   "rotation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/owner_key_rotation_lib.canton $CONSOLE_DIR/gg_rotate_owner_key.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
   "allocation${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/custody_allocate_party.canton${CASE_SEPARATOR}missing required environment variable: GG_PARTY_ID"
   "show-topology${CASE_SEPARATOR}$CONSOLE_DIR/gg_show_topology.canton${CASE_SEPARATOR}failed with an exception (GG_PARTY_ID)"
+  "party-replication${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/party_replication.canton${CASE_SEPARATOR}missing required environment variable: REPLICATION_PHASE"
+  "forge-coin-contract${CASE_SEPARATOR}$PRELUDE $CONSOLE_DIR/forge_coin_contract.canton${CASE_SEPARATOR}failed with an exception (app-provider not bound)"
+  "guardian4-connect${CASE_SEPARATOR}$CONSOLE_DIR/guardian4_connect.canton${CASE_SEPARATOR}failed with an exception (guardian4 not bound)"
+  "hosting-topology${CASE_SEPARATOR}$CONSOLE_DIR/hosting_topology.canton${CASE_SEPARATOR}failed with an exception (HOSTING_PARTY_IDS)"
+  "acs-commitments${CASE_SEPARATOR}$CONSOLE_DIR/acs_commitments.canton${CASE_SEPARATOR}failed with an exception (COMMITMENT_PARTICIPANTS)"
+  "package-vetting-toggle${CASE_SEPARATOR}$CONSOLE_DIR/package_vetting_toggle.canton${CASE_SEPARATOR}failed with an exception (VETTING_PACKAGE_IDS)"
+  "participant-hold-disconnected${CASE_SEPARATOR}$CONSOLE_DIR/participant_hold_disconnected.canton${CASE_SEPARATOR}failed with an exception (HOLD_PARTICIPANT)"
+  "repair-contracts${CASE_SEPARATOR}$CONSOLE_DIR/repair_contracts.canton${CASE_SEPARATOR}failed with an exception (REPAIR_PARTICIPANT)"
 )
 
 work_dir="$(mktemp -d)"

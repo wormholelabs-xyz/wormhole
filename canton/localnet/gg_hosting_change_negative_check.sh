@@ -28,7 +28,7 @@ expect_no_effect() {
     check_failures=$((check_failures + 1))
   elif [[ -n "$rejection" ]]; then
     echo "PASS: $description rejected: $rejection"
-  elif grep -q "timed out: PartyToParticipant of" <<<"$phase_output"; then
+  elif grep -q "topology not effective: PartyToParticipant of" <<<"$phase_output"; then
     echo "PASS: $description did not take effect"
   else
     echo "FAIL: $description stopped for another reason:"

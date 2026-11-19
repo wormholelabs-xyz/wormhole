@@ -1,4 +1,5 @@
 // L5 snapshot forgery: build invented Token.CIP0056.Coin contracts with valid contract ids, in ACS import file format.
+// Runs after owner_signing_prelude.canton.
 // LocalNet security test only. Reads app-provider through its Ledger API (console config must carry a token that can
 // read as guardianGovernance) and allocates the attacker party there.
 // Environment:
@@ -37,8 +38,6 @@ import java.util.zip.GZIPOutputStream
 import scala.concurrent.{Await, ExecutionContext}
 import scala.concurrent.duration._
 
-def requiredEnvironmentVariable(name: String): String =
-  sys.env.getOrElse(name, throw new RuntimeException(s"missing required environment variable: $name"))
 implicit val forgeExecutionContext: ExecutionContext = ExecutionContext.global
 implicit val forgeTraceContext: TraceContext = TraceContext.empty
 val maxImportFileBytes = 1000000000L
