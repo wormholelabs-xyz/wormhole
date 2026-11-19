@@ -32,15 +32,16 @@ const MaxEmitterID = 1<<53 - 1
 // hex Text becomes []byte here, Daml Int becomes the appropriately-sized Go int.
 type CantonMessage struct {
 	// Registrar, Owner, and EmitterID are the emitter's contract-key components
-	// (Daml Parties + registry-allocated id). Together they determine the 32-byte
+	// (Daml Parties + registry-allocated id). Registrar is the guardianGovernance
+	// party that signs the emitter registry. Together they determine the 32-byte
 	// Wormhole emitter address:
 	//
 	//	keccak256("wormhole:emitter:v1" ‖ lp(Registrar) ‖ lp(Owner) ‖ uint64be(EmitterID))
 	//
-	// where lp is a uint32 big-endian byte-length prefix. The address is derived
-	// by the watcher (never stored on-ledger); Owner is in the preimage so a
-	// compromised operator cannot impersonate an existing emitter's address. See
-	// node/pkg/watchers/canton and Wormhole.Core.State.WormholeMessage.
+	// where lp is a uint32 big-endian byte-length prefix. The watcher derives the
+	// address; the ledger does not store it. Owner is in the preimage so
+	// guardianGovernance alone cannot impersonate an existing emitter's address.
+	// See node/pkg/watchers/canton and Wormhole.Core.State.WormholeMessage.
 	Registrar string
 	Owner     string
 	EmitterID uint64
