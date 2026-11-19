@@ -4,7 +4,18 @@
 
 Option 1 merged in #75 (`wormhole-core` 0.8.0).
 Option 5 is on the branch `canton/overnight-u2-fixes`, also in 0.8.0.
+`wormhole-core` 0.9.0 removes the `operator` party from each core template.
+`guardianGovernance` is now the registrar and the sole signatory of `EmitterRegistry`.
 The section [Implementation of options 1 and 5](#implementation-of-options-1-and-5) gives the change, the version decision, the deployment, and the scan.
+
+Status of each finding in 0.9.0:
+
+- A14-1 holds: the owner signs each `Emitter`, so no other party creates an `Emitter` of that owner.
+- A14-2 holds: the owner and `guardianGovernance` sign each `Emitter`, so the owner alone cannot rewind it.
+- A14-3 holds: a registry reset needs `guardianGovernance` alone, that is the k-of-n guardian ceremony.
+
+The sections [Problem](#problem) to [Recommendation](#recommendation) are the analysis before 0.8.0.
+There, "the operator" is the 0.8.x `operator` signatory.
 
 ## Problem
 
@@ -69,7 +80,7 @@ NTT: no code change.
 The `guardianGovernance` signatory gives the registry the same trust level as `NttGovernance`.
 
 Deployment: a registry created in the genesis ceremony.
-The section [Deployment of 0.8.3](#deployment-of-083) gives the procedure.
+The section [Deployment of 0.9.0](#deployment-of-090) gives the procedure.
 
 ### Option 2: Per-owner counter co-signed by the owner
 
@@ -206,24 +217,28 @@ Use option 3 only if a guardian ceremony for the registry is not possible.
 
 ### Change
 
-- `EmitterRegistry` signatories are `operator, guardianGovernance` (`State.daml:407`).
-- `Emitter` signatories are `operator, owner, guardianGovernance` (`State.daml:579`).
+- `EmitterRegistry` has the fields `guardianGovernance`, `onboardingFeeAdmin`, `registrationFee` and `nextId`.
+  `guardianGovernance` is its sole signatory.
+- `Emitter` signatories are `owner, guardianGovernance`.
   `guardianGovernance` is no longer an observer, because it is a signatory.
+- The registrar of each emitter address is `guardianGovernance`: `emitterAddressFor guardianGovernance requester nextId`.
+  The preimage encoding and the tag `wormhole:emitter:v1` do not change.
 - `RegisterEmitter` keeps the controllers `requester, payer`.
-  The choice body inherits the operator and `guardianGovernance` signatures from the registry.
-  The address formula does not change.
-- `RegisterEmitter` takes `expectedGuardianGovernance : Optional Party` as its last argument.
-  `Some gg` makes the registration fail with "registry guardianGovernance mismatch" unless the registry names `gg`.
-  The check runs before the fee charge. Clients and NTT `RegisterManager` pass `Some`.
+  The choice body inherits the `guardianGovernance` signature from the registry.
+- `RegisterEmitter` takes `expectedGuardianGovernance : Party` as its last argument.
+  The registration fails with "registry guardianGovernance mismatch" unless the registry names that party.
+  The check runs before the fee charge. Clients and NTT `RegisterManager` pass `gg`.
 - `SetRegistrationFee` is a consuming choice on `EmitterRegistry`.
-  Its controllers are the operator and `guardianGovernance`.
-  It creates the successor with the new fee and the same `nextId`.
-  It rejects a negative fee and a fee above `maxRegistrationFee`.
+  Its controller is `onboardingFeeAdmin`, a plain field and not a signatory.
+  It creates the successor with the new fee, the same `nextId` and the same admin.
+  The template precondition rejects a negative fee and a fee above `maxOnboardingFee`.
+- `ReplaceEmitterRegistryFeeAdmin` is a consuming choice with the controller `guardianGovernance`.
+  It is the emergency ceremony that replaces the admin.
 - `ensure` clauses bound the counters:
-  - `EmitterRegistry`: `0 <= nextId <= maxEmitterId + 1` and `0 <= registrationFee <= maxRegistrationFee`.
+  - `EmitterRegistry`: `0 <= nextId <= maxEmitterId + 1` and `0 <= registrationFee <= maxOnboardingFee`.
   - `Emitter`: `0 <= emitterId <= maxEmitterId` and `0 <= sequence <= maxEmitterSequence`.
   - `maxEmitterId` is 2^53 - 1, so every tool reads an id exactly. `maxEmitterSequence` is one below the `Int` maximum.
-  - `maxRegistrationFee` is 10^16 units of 10^-10, that is 10^6 fee-instrument units.
+  - `maxOnboardingFee` is 10^16 units of 10^-10, that is 10^6 fee-instrument units. It bounds the registration fee and the claim fee.
   - A registry at `maxEmitterId + 1` issues no more ids: the next registration fails on the `Emitter` `ensure` clause.
 - The watcher drops each `PublishMessage` event that is not consuming.
   It accepts a consuming event with `acs_delta` true. The participant sets `acs_delta` only when the read-as party is a stakeholder of a contract that existed before the transaction.
@@ -236,47 +251,56 @@ Use option 3 only if a guardian ceremony for the registry is not possible.
 - The watcher rejects an `emitterId` above `cantonclient.MaxEmitterID` (2^53 - 1).
   `TestMaxEmitterIDMatchesDaml` pins it to `maxEmitterId`.
 - `Test.TestCore:setup` creates `CoreState` and `EmitterRegistry` in one transaction.
-  The operator and `guardianGovernance` sign that transaction.
+  `guardianGovernance` and `feeCustody` sign that transaction.
 - `canton/devnet/genesis_guardian_governance.sh` prepares each create command as its own transaction, `CoreState` first.
+  It still co-signs with a 0.8.x `operator` party. A later change updates it to the 0.9.0 shape.
   The guardian owners sign each one with the threshold.
   The script stops before the `EmitterRegistry` create when `CoreState` is not committed.
   It skips a create whose contract is already active for the pair, so a rerun creates only the missing contract.
 - The NTT package code does not change.
   The NTT tests change (refer to [NTT](#ntt)).
 
-`SetRegistrationFee` uses the signatories as controllers, not a governance VAA.
+`SetRegistrationFee` uses a delegated admin, not a governance VAA.
 The core governance actions in `sdk/vaa/payloads.go` have no registration fee action.
-`guardianGovernance` is the guardian threshold party, so a fee change needs the guardian threshold.
+The admin changes only the fee. `guardianGovernance`, the guardian threshold party, replaces the admin.
 
 ### Tests
 
-- `testRedTeamA14OperatorCannotResetEmitterRegistry` (`Test/TestRedTeamCore.daml`).
-  The operator alone tries to create a registry that names the real `guardianGovernance`.
+- `testRedTeamA14FormerOperatorCannotResetEmitterRegistry` (`Test/TestRedTeamCore.daml`).
+  A former operator tries to create a registry that names the real `guardianGovernance`.
   The ledger rejects it with an authorization failure.
-  The operator alone also cannot archive the real registry or run `SetRegistrationFee` on it.
-  After these attempts, the real registry is the same contract with the same `nextId`.
+  After the attempts, the real registry is the same contract with the same `nextId`.
   A second registration of the same owner gets emitter id 1 and a different address.
-- `testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry` (`Test/TestRedTeamCore.daml`).
-  `guardianGovernance` alone cannot create, archive, or re-price a registry.
+- `testRedTeamA14RegistryNeedsGuardianGovernance` (`Test/TestRedTeamCore.daml`).
+  `guardianGovernance` alone creates and archives a registry. A stranger cannot.
+- `testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter` (`Test/TestRedTeamCore.daml`).
+  A former operator, alone or with an accomplice or `guardianGovernance`, cannot create the `Emitter` of a victim owner.
 - `testRedTeamA14ColludingOwnerCannotDuplicateEmitter` (`Test/TestRedTeamCore.daml`).
-  The operator and the owner, the operator as its own owner, and the operator and `guardianGovernance` cannot create a rewound `Emitter`.
+  These parties try to create a rewound `Emitter`:
+  - the owner alone;
+  - a former operator with the owner;
+  - a former operator as its own owner;
+  - a former operator with `guardianGovernance`.
+
   Each attempt fails with an authorization failure.
-- `testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance` and `testGovernanceSignsEveryEmitter`.
-  The signatories of an `Emitter` are exactly the operator, the owner, and `guardianGovernance`.
+- `testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance` and `testGovernanceSignsEveryEmitter`.
+  The signatories of an `Emitter` are exactly the owner and `guardianGovernance`.
+- `testEmitterAddressUsesGuardianGovernanceAsRegistrar` and `testFormerOperatorHasNoCorePower` (`Test/TestOperatorIndependence.daml`).
 - `testEmitterIdBounds` (`Test/TestCore.daml`). A table over each `ensure` bound, including the exhausted registry.
 - `testRegisterEmitterChecksExpectedGuardianGovernance` (`Test/TestFees.daml`).
 - `testSetRegistrationFee` (`Test/TestFees.daml`).
-  The operator alone, `guardianGovernance` alone, and an outsider cannot change the fee.
-  A negative fee fails. A fee above `maxRegistrationFee` fails.
-  The operator and `guardianGovernance` together change the fee.
+  `guardianGovernance` alone and an outsider cannot change the fee.
+  A negative fee fails. A fee above `maxOnboardingFee` fails.
+  The onboarding fee admin changes the fee.
   `nextId` stays 2.
   The next registration pays the new fee and gets emitter id 2.
+- `testOnboardingFeeAdminChangesOnlyOnboardingFees` (`Test/TestOperatorIndependence.daml`).
 - `testRogueGovernanceEmitterCannotPublishOnRealCoreState` (`Test/TestGuardianVisibility.daml`).
-  The operator and a rogue `guardianGovernance` can create a registry together.
+  A rogue `guardianGovernance` creates a registry.
   An emitter from that registry cannot publish against the real `CoreState`.
 - `testGovernanceSeesRegistry` (`Test/TestGuardianVisibility.daml`).
   `guardianGovernance` is a stakeholder of the registry. An outsider is not.
-- `testArchives` (`Test/TestCore.daml`). The operator alone cannot archive the registry.
+- `testArchives` (`Test/TestCore.daml`). A stranger cannot archive the registry. `guardianGovernance` alone can.
 - `TestMessagesFromTxRequiresReadPartyStakeholder` and `TestGetTransactionByUpdateIDRequiresReadPartyStakeholder` (`node/pkg/cantonclient`).
 - `TestReadPartySignsExercisedEmitter`, `TestGetTransactionByUpdateIDOnTransientEmitters`, and `TestSubscribeUpdatesOnTransientEmitters` (`node/pkg/cantonclient`).
   A `CreatedEvent` of another package, of another template, of another contract id, or without the read-as party as a signatory does not unlock a publish.
@@ -309,8 +333,9 @@ Effect on liveness:
 - Publishes already depend on the same threshold, because `PublishMessage` exercises choices on `CoreState`.
 - Before option 1, a registration with a zero fee did not need a guardian participant.
 - Option 5 adds no new confirmation: each `PublishMessage` already needs the threshold through `CoreState`.
-- A change of `registrationFee` needs a guardian ceremony that runs `SetRegistrationFee`.
-  The choice keeps `nextId`, so the ceremony does not enter `nextId` by hand.
+- The onboarding fee admin changes `registrationFee` with `SetRegistrationFee`.
+  The choice keeps `nextId`, so the admin does not enter `nextId` by hand.
+- If the admin is offline, only fee changes stop. A `guardianGovernance` ceremony replaces the admin.
 
 ### Version decision
 
@@ -324,36 +349,43 @@ A 0.7.0 registry or `Emitter` cannot continue under 0.8.0.
 
 Decisions:
 
-- Options 1 and 5 are both in `wormhole-core` 0.8.0. There is no 0.9.0.
+- Options 1 and 5 are both in `wormhole-core` 0.8.0.
   No participant outside LocalNet vetted 0.7.0 or 0.8.0, and no guardian signed a chain-75 VAA from them.
 - The package name does not change. Thus 0.8.0 stays on the `wormhole-core` upgrade line.
-- `core/daml.yaml` keeps the SCU check: `upgrades:` names the vendored 0.7.0 DAR (`dars/wormhole-core-0.7.0.dar`, `7a22a1c4`).
+- In 0.8.0, `core/daml.yaml` keeps the SCU check: `upgrades:` names the vendored 0.7.0 DAR (`dars/wormhole-core-0.7.0.dar`, `7a22a1c4`).
   The check covers all other templates and choices.
 - 0.8.0 starts from a fresh genesis. There is no migration package for 0.7.0 contracts.
 - 0.8.0, 0.8.1 and 0.8.2 are withdrawn. `wormhole-core` 0.8.3 adds `feeCustody` as the fee recipient and a `CoreState` signatory
-  (`REDTEAM.md`, F1-core). 0.8.3 also starts from a fresh genesis. Deploy 0.8.3, not 0.8.0, 0.8.1 or 0.8.2.
+  (`REDTEAM.md`, F1-core).
+- 0.8.3 is withdrawn: the operator signs its core contracts.
+- 0.9.0 removes the operator. It is not an SCU upgrade of 0.8.x, so `core/daml.yaml` has no `upgrades:` line.
+  0.9.0 starts a new `wormhole-core` line and a fresh genesis. Deploy 0.9.0.
 
-### Deployment of 0.8.3
+### Deployment of 0.9.0
 
-Every emitter address includes the registrar. A new operator party thus gives new addresses for all emitters.
-No message id of 0.8.3 can then be equal to a message id of an earlier deployment.
+Every emitter address includes the registrar, and the registrar is `guardianGovernance`.
+One `guardianGovernance` is one deployment.
+0.9.0 changes the registrar from the operator to `guardianGovernance`, so every emitter address changes.
+No message id of 0.9.0 can then be equal to a message id of an earlier deployment.
 
-1. Build the dependents on 0.8.3 (NTT-first rule).
-2. Allocate a new operator party. Do not reuse the operator party of an earlier deployment.
-3. Upload the 0.8.3 DAR and the rebuilt dependent DARs to each guardian participant. Upload them to the operator participant too.
-4. Vet these DARs on each of these participants.
+1. Build the dependents on 0.9.0 (NTT-first rule).
+2. Upload the 0.9.0 DAR and the rebuilt dependent DARs to each guardian participant.
+3. Vet these DARs on each guardian participant.
    Do not vet an earlier `wormhole-core` version on a guardian participant.
-5. Allocate `feeCustody` in the `guardianGovernance` namespace, with the hosts, the confirmation threshold and the
+4. Allocate `feeCustody` in the `guardianGovernance` namespace, with the hosts, the confirmation threshold and the
    signing keys of `guardianGovernance`.
-6. Run the genesis ceremony (`canton/devnet/genesis_guardian_governance.sh`).
-   It creates `CoreState`, then an `EmitterRegistry` with `nextId = 0`, as two co-signed prepared transactions.
-   `feeCustody` co-signs the `CoreState` and is its `feeRecipient`.
-   If the `CoreState` create fails, the script stops. Run it again: it creates only the missing contracts.
+5. Select the onboarding fee admin party.
+6. Run the genesis ceremony.
+   It creates `CoreState`, `EmitterRegistry` with `nextId = 0`, and `ReplayRootRegistry`.
+   `guardianGovernance` signs each contract. `feeCustody` also signs the `CoreState` and is its `feeRecipient`.
 7. Run the scan (refer to [Scan](#scan)) on each guardian participant.
-   Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.8.3 package id.
+   Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.9.0 package id.
    Each scan must pass with `firstId` 0. Stop if a scan fails.
-8. Set `--cantonPackageID` to the 0.8.3 package id and `--cantonPackageVersion=0.8.3` on each guardian.
-9. Announce the new operator party, the 0.8.3 package id, and the registry to integrators (refer to [Integrator cutover](#integrator-cutover)).
+8. Set `--cantonPackageID` to the 0.9.0 package id and `--cantonPackageVersion=0.9.0` on each guardian.
+9. Announce `guardianGovernance`, the 0.9.0 package id, and the registry to integrators (refer to [Integrator cutover](#integrator-cutover)).
+
+> **NOTE:** `canton/devnet/genesis_guardian_governance.sh` still uses the 0.8.x genesis shape with an `operator` party.
+> A later change updates it and adds a propose-and-accept genesis package.
 
 > **WARNING:** A guardian participant that vets an earlier `wormhole-core` version lets a submitter run choices under that version.
 > The scan fails on such a participant.
@@ -364,9 +396,9 @@ No message id of 0.8.3 can then be equal to a message id of an earlier deploymen
 
 ### Integrator cutover
 
-1. Integrators that depend on `wormhole-core` rebuild on 0.8.3. NTT is the first dependent (NTT-first rule).
-2. Each integrator registers a new `Emitter` through the 0.8.3 registry, with `expectedGuardianGovernance = Some gg`.
-   The new emitter has a new address, because the registrar is new.
+1. Integrators that depend on `wormhole-core` rebuild on 0.9.0. NTT is the first dependent (NTT-first rule).
+2. Each integrator registers a new `Emitter` through the 0.9.0 registry, with `expectedGuardianGovernance = gg` (a `Party`).
+   The new emitter has a new address, because the registrar is now `guardianGovernance`.
 3. Integrators register the new emitter address with their peers on other chains.
 4. Integrators get the disclosure of the registry and `CoreState` from the disclosure service (README §4.7).
 
@@ -381,6 +413,9 @@ The script reads the vetted packages of its participant with the name prefix `wo
 It reads each update from a begin offset to the ledger end, with the ledger effects shape.
 It records each `Emitter` and `EmitterRegistry` create of the (operator, `guardianGovernance`) pair, archived or active, whose package name is exactly `wormhole-core`.
 It also reads the active contracts at the same ledger end, with the same filter.
+
+> **NOTE:** The script still takes an `<operator-party>` argument and filters on the 0.8.x `operator` field.
+> A 0.9.0 contract has no `operator` field. Update the script before a 0.9.0 scan.
 
 Use begin offset 0 to read from genesis.
 A pruned participant needs a begin offset and the `historyMaxEmitterId` of an earlier scan that ended at that offset.
@@ -400,9 +435,8 @@ The script fails if one of these conditions occurs:
 
 ### NTT
 
-Rebuild NTT on `wormhole-core` 0.8.3 (NTT-first rule).
-`RegisterManager` and `RegisterManagerByVaa` need no code change.
-`RegisterManager` must pass `expectedGuardianGovernance = Some guardianGovernance` to `RegisterEmitter`.
+Rebuild NTT on `wormhole-core` 0.9.0 (NTT-first rule).
+`RegisterManager` must pass `expectedGuardianGovernance = guardianGovernance` (a `Party`) to `RegisterEmitter`.
 The NTT test package needs changes: tests that create or archive a registry or an `Emitter` without `guardianGovernance` now fail.
 
 ### LocalNet rehearsal
@@ -421,9 +455,9 @@ Results of that run that still apply:
 
 ### Open items
 
-These items need a Daml change, thus a new `wormhole-core` package id. They are not in 0.8.3.
+These items need a Daml change, thus a new `wormhole-core` package id.
 
-- Make `expectedGuardianGovernance` of `RegisterEmitter` a mandatory `Party`. With `Optional`, a client can skip the pin.
+- 0.9.0 makes `expectedGuardianGovernance` of `RegisterEmitter` a mandatory `Party`. 0.9.0 closes this item.
 - `TestRedTeamCore.daml` "A9 signature count zero" expects `ArithmeticError`, not the `no quorum` check of `verifyVAA`.
   Add a case that also removes the signature bytes, and expect `no quorum`.
 
@@ -432,15 +466,15 @@ These items need no Daml change:
 - `canton/devnet/genesis_guardian_governance.sh` skips a create when a contract already exists. It does not compare the arguments of that contract. Before the ceremony, compare each argument of an existing `CoreState` and `EmitterRegistry` with the expected value. Do not run two genesis runs at the same time.
 - The Tilt devnet watcher has no read-as party and no package pin. It drops each publish on an `Emitter` that the same transaction creates. Production requires both values.
 
-## Related operator-only contracts
+## Related contracts
 
-| Contract | Signatories | Same class as A14-3 | Severity | Action |
+| Contract | Signatories (0.9.0) | Same class as A14-3 | Severity | Action |
 | - | - | - | - | - |
-| `CoreState` | operator, `guardianGovernance` | No. | None. | None. |
-| `ReplayRootRegistry` | operator | No. It has no counter. Each claim needs the consumer signature. A rogue registry at fee 0 gives the same result as the real one. | None. The operator alone can archive it and stop new claims (liveness). | None. |
-| `ReplayNode` | consumer, operator | No. The operator alone cannot create a root for a consumer. | None. | None. |
-| `Emitter` | operator, owner, `guardianGovernance` | No. A rewind needs the guardian threshold (A14-2, option 5). | None. | None. |
-| NTT `NttGovernance` | `guardianGovernance`, operator | No. The `nextId` counter needs the `guardianGovernance` signature. | None. | None. |
+| `CoreState` | `guardianGovernance`, `feeCustody` | No. | None. | None. |
+| `ReplayRootRegistry` | `guardianGovernance` | No. It has no counter. Each claim needs the consumer signature and the `expectedGuardianGovernance` pin. | None. | None. |
+| `ReplayNode` | consumer, `guardianGovernance` | No. Only the consumer claims a root for itself. | None. | None. |
+| `Emitter` | owner, `guardianGovernance` | No. A rewind needs the guardian threshold (A14-2, option 5). | None. | None. |
+| NTT `NttGovernance` | `guardianGovernance`, operator (NTT repository) | No. The `nextId` counter needs the `guardianGovernance` signature. | None. | None. |
 | NTT `NttManager`, `LockedLedger` | include `guardianGovernance` | No. Only `RegisterManager` creates them. | None. | None. |
 
-No other core contract has an operator-only counter.
+Each core counter needs the `guardianGovernance` signature.
