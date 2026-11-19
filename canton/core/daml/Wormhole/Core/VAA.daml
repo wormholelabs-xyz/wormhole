@@ -153,17 +153,17 @@ strictlyAscending _ = True
 -- guardian's uncompressed public key, so we DER-encode here.
 ----------------------------------------------------------------------
 
--- | DER encoding of one ASN.1 INTEGER from a big-endian hex value: minimal
--- (no leading zero bytes), 0x00-padded when the high bit is set so it stays
--- positive. @r@/@s@ are <= 33 bytes, so single-byte length suffices.
+-- | DER encoding of one ASN.1 INTEGER from a 32-byte big-endian @r@ or @s@.
+-- Content is minimal (leading zero bytes removed), plus a 0x00 pad when the
+-- high bit is set: 1 to 33 bytes, which fits the single-byte DER length.
 derInteger : Bytes -> Bytes
 derInteger raw =
   let stripped = stripLeadingZeroBytes (normalizeHex raw)
       body = if highBitSet stripped then "00" <> stripped else stripped
   in "02" <> intToHexByte (byteLength body) <> body
 
--- | DER encoding of @SEQUENCE { INTEGER r; INTEGER s }@. Total content is
--- <= ~70 bytes, so single-byte length suffices.
+-- | DER encoding of @SEQUENCE { INTEGER r; INTEGER s }@. Content is 6 to 70
+-- bytes (two INTEGERs of 3 to 35 bytes), which fits the single-byte DER length.
 derSignature : Bytes -> Bytes -> Bytes
 derSignature r s =
   let content = derInteger r <> derInteger s
