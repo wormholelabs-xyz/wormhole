@@ -225,8 +225,8 @@ consumer's trust anchor, is stable across rotation). Two things follow:
   compromised operator (a single hot key) can co-sign a `CoreState` whose
   `operator` is genuine but whose `guardianGovernance`/`feeRecipient` it
   controls, so an `operator`-only pin accepts a shadow `CoreState`. For the fee
-  path — where `guardianGovernance` _is_ the fee-custody anchor — only the
-  `guardianGovernance` pin suffices (see below).
+  path — where `guardianGovernance` pins the `CoreState`, which pins
+  `feeRecipient` — only the `guardianGovernance` pin suffices (see below).
 - **Governance stays low-friction.** `guardianGovernance` actively signs only at
   **genesis**; each `SubmitGovernanceVAA` inherits its authority from the
   archived contract (as the `Emitter` owner does through `PublishMessage`), so
@@ -291,7 +291,7 @@ template EmitterRegistry with
 template Emitter
   with
     operator           : Party
-    guardianGovernance : Party    -- fee-custody anchor; co-signer
+    guardianGovernance : Party    -- authenticity anchor; co-signer
     owner              : Party
     emitterId          : Int      -- registry-allocated
     emitterAddress     : Bytes32  -- keccak256(tag ‖ operator ‖ owner ‖ emitterId), set at creation
@@ -436,8 +436,8 @@ with Canton Coin or any standard token, chosen at genesis
   `receiver = feeRecipient`.
 - The charging choice validates the allocation — receiver, instrument, amount
   (`≥` fee: the **entire leg amount transfers**, allocations are all-or-nothing,
-  so overpayment is deliberate padding against fee-raise races), sender, and the
-  **instrument admin's signature** (views are forgeable, a signature is not) —
+  so overpayment is deliberate padding against fee-raise races), sender,
+  executor (`== payer`), and the **instrument admin's signature** (views are forgeable, a signature is not) —
   then exercises `Allocation_ExecuteTransfer` **in the same transaction** as the
   publish/registration/claim. Executing consumes the allocation: one-shot by
   activeness, no replay bookkeeping. Fees are `Int`s in **10^-10 token units**
@@ -454,21 +454,40 @@ with Canton Coin or any standard token, chosen at genesis
   Registries charge their `registrationFee`/`claimFee` the same way, skipping the
   `CoreState` entirely at fee 0. Before charging, every call site pins the
   `CoreState` by exercising `GetGuardianGovernance` against the
-  `guardianGovernance` committed on the emitter/registry — **the fee-custody
+  `guardianGovernance` committed on the emitter/registry — **the authenticity
   anchor, not merely the `operator`** — so a forged `CoreState` cannot redirect
   the fee (see the custody bullet).
-- **Custody is governance-controlled**: `feeRecipient` is the
-  `guardianGovernance` threshold party, so accrued fees move only via the k-of-n
-  guardian ceremony — the operator never touches them (the Canton analog of "fees
-  sit in the bridge contract"). This holds **even against a compromised operator
-  hot key**: each charge pins `guardianGovernance` (unforgeable by a single
-  operator key) rather than `operator`, so an operator co-signing a shadow
-  `CoreState` under a throwaway `feeRecipient` is rejected before any funds move.
-  A `TransferFees` VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
+- **The fee registry never runs as `guardianGovernance` or the `operator`.**
+  The registry's `Allocation_ExecuteTransfer` body runs with the authority of
+  the allocation controllers: the payer (sender, executor) plus the receiver.
+  It also runs with the authority of the allocation signatories, which include
+  the fee instrument admin. The `CoreState` precondition and `chargeFee` reject
+  `guardianGovernance` and `operator` as the fee instrument admin.
+  From `wormhole-core` 0.8.3 the receiver is `feeCustody`, a quorum party in the
+  guardian namespace and a `CoreState` co-signer (the source of the receiver
+  authority). The `CoreState` precondition rejects `feeRecipient` equal to
+  `guardianGovernance` or `operator`, and `chargeFee` rejects either as payer
+  or receiver when a fee is due (at fee 0 no registry code runs). In 0.8.0 to 0.8.2
+  (withdrawn) `feeRecipient` was `guardianGovernance`, so a fee registry could
+  publish on any gg-owned `Emitter` (`canton/REDTEAM.md`, F1-core).
+- **Custody is governance-controlled**: `feeRecipient` is the `feeCustody`
+  quorum party (same hosts, confirmation threshold and owner keys as
+  `guardianGovernance`), so accrued fees move only via the k-of-n guardian
+  ceremony — the operator never touches them (the Canton analog of "fees sit in
+  the bridge contract"). This holds **even against a compromised operator hot
+  key**: each charge pins `guardianGovernance` (unforgeable by a single operator
+  key) rather than `operator`, so an operator co-signing a shadow `CoreState`
+  under a throwaway `feeRecipient` fails before any funds move. A
+  `TransferFees` VAA mints an on-ledger `FeeWithdrawalAuthorization` (signed by
   guardianGovernance) recording the amount, the VAA's 32-byte recipient, and the
   VAA hash — the artifact the guardians' custody policy matches when
-  threshold-signing the outbound transfer. "Only per authorization" is enforced
-  in gg key custody, the same trust plane as the guardian keys.
+  threshold-signing the outbound transfer. The prepare endpoint accepts one
+  command, so the withdrawal is two prepared transactions. First,
+  `guardianGovernance` alone archives the authorization. Then `feeCustody`
+  alone submits the transfer. The ledger accepts one archive of a contract, so
+  each authorization backs at most one transfer
+  (`docs/canton_guardian_operations.md` §7.6). Key custody enforces "only per
+  authorization", the same trust plane as the guardian keys.
 - Token Standard **V2** (CIP-0112) is approved but not yet on mainnet; it
   arrives as a parallel `-v2` interface family, and
   `Wormhole.Core.Fees.chargeFee` is the single seam where support would be
@@ -1012,12 +1031,16 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 
 `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
-For 0.8.2, the baseline is `dars/wormhole-core-0.8.1.dar`.
+For 0.8.3, the baseline is `dars/wormhole-core-0.8.2.dar`.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
+0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState` (§4.2).
+0.8.3 also adds `ensure` rules to `CoreState`: the fee instrument admin is not `guardianGovernance` and not the `operator`.
 `damlc` reports these changes only as warnings.
-A 0.7.0 `EmitterRegistry` or `Emitter` cannot run under 0.8.0.
-No participant outside LocalNet vetted 0.7.0 or 0.8.0. Thus 0.8.0 starts from a fresh genesis with a new operator party, with no migration of 0.7.0 contracts.
+A 0.7.0 `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.8.3.
+No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2 or 0.8.3. Thus 0.8.3 starts from a fresh genesis with a new operator party, with no migration of earlier contracts.
+0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.8.3, and a test rejects the 0.8.0, 0.8.1 and 0.8.2 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
@@ -1396,9 +1419,9 @@ after the unvet of 0.6.0 and `ntt` 0.2.0. Results:
 
 **Point of no return.** The 0.6.0 and 0.7.0 templates have the same fields,
 and `ntt` 0.2.0 reads each `ntt` 0.3.0 contract. Thus the upgrade from 0.6.0
-to 0.7.0 has no technical point of no return. 0.8.0 is different: it starts
-from a fresh genesis, and a 0.8.0 `EmitterRegistry` or `Emitter` cannot run
-under 0.7.0. Thus no rollback from 0.8.0 to 0.7.0 exists. These limits apply
+to 0.7.0 has no technical point of no return. 0.8.3 is different: it starts
+from a fresh genesis, and a 0.8.3 `CoreState`, `EmitterRegistry` or `Emitter`
+cannot run under 0.7.0. Thus no rollback from 0.8.3 to 0.7.0 exists. These limits apply
 to an upgrade that keeps the signatories:
 
 - A later version can add an optional field. When a contract gets a value in
@@ -1412,8 +1435,8 @@ to an upgrade that keeps the signatories:
 procedure on three `guardianGovernance` hosts (`localnet/README.md`). Each
 LocalNet participant hosts `guardianGovernance`, so each participant is a
 guardian participant and an informee participant. The sequence `abort-all`
-runs the abort procedure. The rehearsal needs a LocalNet from before the 0.8.0
-genesis (`localnet/README.md`, "Scope with `wormhole-core` 0.8.0"). The results
+runs the abort procedure. The rehearsal needs a LocalNet from before the 0.8.x
+genesis (`localnet/README.md`, "Scope with `wormhole-core` 0.8.3"). The results
 below are from the run at commit `395103f5e`. That run had no maximum canary
 time, no abort procedure, no required update ID and no publish in the restart
 window. Results:
@@ -1459,9 +1482,9 @@ window. Results:
 
 **Scope.** Use the window only for a core upgrade that keeps the signatories
 and observers of each template. `damlc` reports a signatory change only as a
-warning, so read the SCU warnings of each build. An example is 0.8.0 to 0.8.1.
-The window cannot apply to 0.7.0 to 0.8.0, because 0.7.0 contracts do not run
-under 0.8.0.
+warning, so read the SCU warnings of each build. An example is 0.8.3 to 0.8.4.
+The window cannot apply to 0.7.0 to 0.8.3, because 0.7.0 contracts do not run
+under 0.8.3.
 
 **Roles.** The watcher accepts a maximum of two core package ids:
 
@@ -1568,51 +1591,51 @@ the deadline to a maximum of 24 hours after step 13. Alternatively, use the
 one-id procedure. Until the deadline or the unvet, the guardians sign
 old-core messages under the old checks.
 
-**Procedure: upgrade from 0.8.0 to 0.8.1 with a two-id window.**
+**Procedure: upgrade from 0.8.3 to 0.8.4 with a two-id window.**
 
 Prepare the guardians:
 
-1. Add the 0.8.1 package id and version to `approved_core_packages.json`.
+1. Add the 0.8.4 package id and version to `approved_core_packages.json`.
 2. Release guardiand with this change. Install it on each guardian.
 3. Record the ledger end offset and the participant id of one guardian
    participant. Write both values in the upgrade record.
 4. Select the deadline. Use a maximum of 7 days after step 6. For a security
    fix, use the rule above.
 5. On each guardian, set these flags:
-   - `--cantonPackageID` to the 0.8.1 package id.
-   - `--cantonPackageVersion=0.8.1`.
-   - `--cantonRetiringPackageID` to the 0.8.0 package id.
-   - `--cantonRetiringPackageVersion=0.8.0`.
+   - `--cantonPackageID` to the 0.8.4 package id.
+   - `--cantonPackageVersion=0.8.4`.
+   - `--cantonRetiringPackageID` to the 0.8.3 package id.
+   - `--cantonRetiringPackageVersion=0.8.3`.
    - `--cantonRetiringPackageAcceptedUntil` to the deadline.
 6. Restart the guardians one at a time. Coordination is not necessary.
 7. Make sure that each guardian exports
-   `wormhole_canton_accepted_package_ids` with the 0.8.1 id as `current` and
-   the 0.8.0 id as `retiring`.
+   `wormhole_canton_accepted_package_ids` with the 0.8.4 id as `current` and
+   the 0.8.3 id as `retiring`.
 8. Make sure that each guardian exports the deadline in
    `wormhole_canton_retiring_package_accepted_until_seconds`.
 9. Continue only when all guardians confirm steps 7 and 8.
 
 Upgrade the ledger:
 
-10. Upload the 0.8.1 core DAR and its dependent DARs to all guardian
+10. Upload the 0.8.4 core DAR and its dependent DARs to all guardian
     participants.
 11. Vet these DARs on all guardian participants.
 12. Upload and vet the same DARs on the operator participant.
-13. Tell integrators to submit with the 0.8.1 package id. Tell them to use
+13. Tell integrators to submit with the 0.8.4 package id. Tell them to use
     one core version in each transaction.
-14. On each guardian participant, set the vetting of the 0.8.0 core DAR to
+14. On each guardian participant, set the vetting of the 0.8.3 core DAR to
     end at the deadline. Use `PackageManagementService.UpdateVettedPackages`
     with `new_valid_until_exclusive`.
 15. Monitor `wormhole_canton_accepted_publish_messages_total{role="retiring"}`.
 16. Continue when the counter shows no new publishes.
-17. Before the deadline, unvet the 0.8.0 core DAR and its dependent DARs on
+17. Before the deadline, unvet the 0.8.3 core DAR and its dependent DARs on
     all participants.
 
 Recover the old-core messages:
 
 18. On the participant of step 3, run `guardiand admin canton-list-publishes`.
     Set `--fromOffset` to the offset of step 3. Set `--executingPackageID` to
-    the 0.8.0 package id.
+    the 0.8.3 package id.
 19. For each output line, find the VAA by emitter chain, emitter address, and
     sequence.
 20. For each line without a VAA, run
@@ -1624,16 +1647,16 @@ Close the window:
 22. At a later restart, remove the three retiring flags from each guardian.
 
 > **WARNING:** Do not do step 10 before all guardians confirm step 9. A
-> guardian without the 0.8.1 id drops each 0.8.1 message.
+> guardian without the 0.8.4 id drops each 0.8.4 message.
 
 > **WARNING:** Do not remove the retiring flags before step 21 is complete.
-> After the removal, reobservation cannot recover a 0.8.0 message.
+> After the removal, reobservation cannot recover a 0.8.3 message.
 
-> **CAUTION:** Until the deadline or the unvet, the guardians sign 0.8.0
-> messages. The 0.8.0 checks apply to these messages.
+> **CAUTION:** Until the deadline or the unvet, the guardians sign 0.8.3
+> messages. The 0.8.3 checks apply to these messages.
 
 > **NOTE:** Step 5 comes before step 10. An id that no participant vets cannot
-> execute a choice. Thus no guardian drops a 0.8.1 message.
+> execute a choice. Thus no guardian drops a 0.8.4 message.
 
 > **NOTE:** Step 14 makes the ledger enforce the deadline too. The watcher
 > enforces it also without step 14.
@@ -1644,7 +1667,7 @@ Close the window:
 > runs steps 18 to 21 on its own participant.
 
 > **NOTE:** `canton-list-publishes` accepts `--executingPackageID` with no
-> deadline. Thus it also lists 0.8.0 publishes with a record time at or after
+> deadline. Thus it also lists 0.8.3 publishes with a record time at or after
 > the deadline. The watcher drops the reobservation of these publishes. In
 > step 20, skip each line with a `recordTime` at or after the deadline.
 
@@ -1669,14 +1692,14 @@ The two-id window removes these items of the one-id procedure:
   the deadline stay recoverable.
 
 The deadline ends the window also if an operator does not remove the flags.
-The 0.8.0 checks apply to 0.8.0 messages until the deadline or the unvet.
+The 0.8.3 checks apply to 0.8.3 messages until the deadline or the unvet.
 
 Known limits:
 
 - Two publishes on one emitter in one transaction make the second publish
   transient. The watcher accepts the transient publish only if its emitter
   create and its exercise have the same package id. Thus a transaction that
-  publishes under 0.8.0 and 0.8.1 on one emitter loses the second message.
+  publishes under 0.8.3 and 0.8.4 on one emitter loses the second message.
   The ledger keeps its sequence number. Reobservation applies the same rule.
   The watcher increments
   `wormhole_canton_publish_without_read_party_stakeholder_total`. Step 13
@@ -1690,22 +1713,22 @@ Known limits:
 
 **Rollback.**
 
-1. On each guardian, set `--cantonPackageID` to the 0.8.0 id and
-   `--cantonPackageVersion=0.8.0`.
-2. On each guardian, set `--cantonRetiringPackageID` to the 0.8.1 id and
-   `--cantonRetiringPackageVersion=0.8.1`.
+1. On each guardian, set `--cantonPackageID` to the 0.8.3 id and
+   `--cantonPackageVersion=0.8.3`.
+2. On each guardian, set `--cantonRetiringPackageID` to the 0.8.4 id and
+   `--cantonRetiringPackageVersion=0.8.4`.
 3. Set `--cantonRetiringPackageAcceptedUntil` to a new deadline.
 4. Restart the guardians one at a time.
-5. Make sure that each guardian exports the 0.8.0 id as `current` and the
-   0.8.1 id as `retiring`.
+5. Make sure that each guardian exports the 0.8.3 id as `current` and the
+   0.8.4 id as `retiring`.
 6. Continue only when all guardians confirm step 5.
-7. If step 17 is complete, vet 0.8.0 again on all participants.
-8. Tell integrators to submit with the 0.8.0 package id.
-9. Before the new deadline, unvet 0.8.1 on all participants.
-10. Recover the 0.8.1 messages with steps 18 to 21. Use the 0.8.1 package id.
+7. If step 17 is complete, vet 0.8.3 again on all participants.
+8. Tell integrators to submit with the 0.8.3 package id.
+9. Before the new deadline, unvet 0.8.4 on all participants.
+10. Recover the 0.8.4 messages with steps 18 to 21. Use the 0.8.4 package id.
 
-> **WARNING:** Do not vet 0.8.0 again before 0.8.0 is the current id on each
-> guardian. A guardian without the id drops each 0.8.0 message.
+> **WARNING:** Do not vet 0.8.3 again before 0.8.3 is the current id on each
+> guardian. A guardian without the id drops each 0.8.3 message.
 
 > **CAUTION:** The sandbox test `TestCantonWatcherUpgradeWindow` shows that
 > the retiring core can publish on an emitter that the current core wrote
@@ -1985,13 +2008,13 @@ day-to-day flow (`RegisterEmitter`, `ClaimReplayRoot`, fee charging, splits,
 governance transitions) reaches its signature by inheritance from contracts it
 signed at setup. If the operator is stood up as a k-of-n external threshold
 party (the §9 machinery, `GG_THRESHOLD=k`), the interactive-submission signing
-ceremony is needed for genesis only. The `guardianGovernance` party's
-post-genesis surface grew with fees (§4.2): it holds **fee custody** (accrued
-fees sit in its token holdings; withdrawing them is a threshold ceremony
-matched against on-ledger `FeeWithdrawalAuthorization`s), and — because every
-publish reads the fee off the `CoreState` — its participant is an informee of
-every publish, a deliberate throughput/liveness trade recorded in Open
-Questions.
+ceremony is needed for genesis only. Fee custody is a separate quorum party,
+`feeCustody` (§4.2): accrued fees sit in its token holdings, and withdrawing
+them is a threshold ceremony of two transactions: `guardianGovernance` archives
+the on-ledger `FeeWithdrawalAuthorization` first, then `feeCustody` transfers. Because every publish reads the fee off the
+`CoreState`, the participants of `guardianGovernance` and `feeCustody` are
+informees of every publish, a deliberate throughput/liveness trade recorded in
+Open Questions.
 
 **What a compromised operator can and cannot do.** It can degrade **liveness**
 (stop serving disclosures — fail-safe: transactions stop constructing,
@@ -2060,16 +2083,20 @@ makes it a `guardianGovernance` host.
    integrators (explicit disclosure vs public-observer snapshot).
 5. **Native fees.** _Mechanism resolved:_ CIP-0056 (Token Standard V1)
    allocations, consumed atomically inside `PublishMessage` / `RegisterEmitter`
-   / `ClaimReplayRoot`, with fee custody under the `guardianGovernance`
-   threshold party and `TransferFees` minting on-ledger withdrawal
-   authorizations (§4.2). **Residual:** validate against real amulet on
+   / `ClaimReplayRoot`, with fee custody under the `feeCustody` quorum party
+   (0.8.3; no fee registry code runs as `guardianGovernance` or `operator`)
+   and `TransferFees` minting on-ledger withdrawal authorizations (§4.2). **Residual:** validate against real amulet on
    DevNet (the test suite uses a mock token implementing the interfaces; the
    real registry adds choice contexts, deadlines, locking, and featured-app
    rewards — the executor earns them as the amulet "provider"); the fee
    instrument and recipient are genesis-fixed (no governance action — decide
    whether that needs one before mainnet); the `CoreState` reference on every
-   publish adds operator + guardianGovernance participants to the publish
-   informee set (throughput/liveness trade to size); a `TransferFees` VAA
+   publish adds operator, guardianGovernance and feeCustody participants to
+   the publish informee set (throughput/liveness trade to size); NTT paths
+   where `guardianGovernance` pays a fee abort once a fee is above 0, so they
+   need a separate fee payer first; a receiver-preapproval transfer
+   (`TransferPreapproval`) would remove custody authority at charge time
+   (Token Standard V2 follow-up); a `TransferFees` VAA
    test vector (vectorgen) for the withdrawal-authorization path; Token
    Standard V2 (CIP-0112) migration when it reaches mainnet
    (`Wormhole.Core.Fees.chargeFee` is the seam).

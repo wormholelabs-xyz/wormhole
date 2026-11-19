@@ -52,9 +52,10 @@ govGuardianSetUpgrade7To8VAA : Bytes
 govGuardianSetUpgrade7To8VAA = "0100000007010073e0fabada5de87d335f6efa820ed0c279391cf2702b3a0438cdfe101f06a50134d3ac0ede472a33a8da90a3e5b784b2dbbd2eafb7016b0c3cd3c6fcf676712e016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000080000000000000000000000000000000000000000000000000000000000436f7265020000000000080188d7d8b32a9105d228100e72dffe2fae0705d31c"
 
 -- | Bootstrap a devnet 'CoreState', 'EmitterRegistry', and 'ReplayRootRegistry'.
--- The 'CoreState' and 'EmitterRegistry' are co-signed by @operator@ and
--- @guardianGovernance@ (a single party here; a k-of-n threshold party in
--- production), so genesis creates both in one transaction with both parties.
+-- The 'CoreState' is co-signed by @operator@, @guardianGovernance@ and the fee
+-- custody party, the 'EmitterRegistry' by the first two (single parties here;
+-- k-of-n threshold parties in production), so genesis creates both in one
+-- transaction with all three parties.
 -- Returns @(operator, guardianGovernance, coreState)@; @operator@ stays FIRST
 -- for bootstrap.sh's party extraction, and @guardianGovernance@ second is the
 -- watcher's --cantonReadAsParty.
@@ -63,8 +64,10 @@ setup = setupWithInstrument None
 
 -- | 'setup' with a caller-supplied fee instrument (Test.TestFees provides a
 -- mock-token instrument; plain 'setup' uses a placeholder that is never
--- validated because all fees default to 0). The fee recipient is
--- @guardianGovernance@, matching production custody.
+-- validated because all fees default to 0). The fee recipient is a separate
+-- fee custody party, matching production custody. The placeholder admin is a
+-- party that signs nothing: the 'CoreState' ensure rejects
+-- guardianGovernance and the operator as the fee instrument admin.
 setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
 setupWithInstrument = setupWithPartyLabel ""
 
@@ -81,12 +84,14 @@ setupWithGenesisGuardianSetIndex : Text -> Int -> Optional InstrumentId -> Scrip
 setupWithGenesisGuardianSetIndex partyLabel genesisIndex mInstrument = do
   operator <- allocateParty ("Operator" <> partyLabel)
   guardianGovernance <- allocateParty ("GuardianGovernance" <> partyLabel)
-  let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
-  (csId, _) <- submit (actAs operator <> actAs guardianGovernance) do
+  feeCustody <- allocateParty ("FeeCustody" <> partyLabel)
+  placeholderFeeInstrumentAdmin <- allocateParty ("UnusedFeeInstrumentAdmin" <> partyLabel)
+  let feeInstrument = fromOptional (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") mInstrument
+  (csId, _) <- submit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
     (,) <$> createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                          defaultGovernanceContract
                          GenesisGuardianSet with guardianSetIndex = genesisIndex, guardianAddresses = [devnetGuardian]
-                         feeInstrument guardianGovernance)
+                         feeInstrument feeCustody)
         <*> createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
   _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
   pure (operator, guardianGovernance, csId)
@@ -313,19 +318,22 @@ testEmitterIdBounds = do
       expectedGuardianGovernance = None
   checkCreateOutcome "registration after maxEmitterId" False exhaustedResult
 
--- | Genesis needs both the operator and guardianGovernance signatures.
+-- | Genesis needs the operator, guardianGovernance and fee custody signatures.
 testGenesisRequiresOperatorAndGovernance : Script ()
 testGenesisRequiresOperatorAndGovernance = do
   operator <- allocateParty "GenesisOperator"
   guardianGovernance <- allocateParty "GenesisGovernance"
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  feeCustody <- allocateParty "GenesisFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "GenesisUnusedFeeInstrumentAdmin"
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
-                       feeInstrument guardianGovernance
+                       feeInstrument feeCustody
   submitMustFail operator do createCmd genesisState
   submitMustFail guardianGovernance do createCmd genesisState
-  _ <- submit (actAs operator <> actAs guardianGovernance) do createCmd genesisState
+  submitMustFail (actAs operator <> actAs guardianGovernance) do createCmd genesisState
+  _ <- submit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do createCmd genesisState
   pure ()
 
 -- | Pairs each case with its position, for a unique party hint per case.
@@ -406,14 +414,16 @@ testGuardianSetUpgradeIndexFromNonZeroGenesis : Script ()
 testGuardianSetUpgradeIndexFromNonZeroGenesis = do
   operator <- allocateParty "UpgradeIndexOperator"
   guardianGovernance <- allocateParty "UpgradeIndexGovernance"
+  feeCustody <- allocateParty "UpgradeIndexFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "UpgradeIndexUnusedFeeInstrumentAdmin"
   now <- getTime
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with
                          guardianSetIndex = nonZeroGenesisGuardianSetIndex
                          guardianAddresses = [devnetGuardian]
-                       feeInstrument guardianGovernance
+                       feeInstrument feeCustody
       upgradeTo newIndex = applyGovernance genesisState now
         (GuardianSetUpgrade with chain = 0, newIndex, newKeys = [devnetGuardianSet1Key])
   forA_ [(0, False), (6, False), (7, False), (8, True), (9, False), (maxGuardianSetIndex, False)]
@@ -443,12 +453,14 @@ tryCreateCoreStateWithGuardianSets : Text -> Int -> Map.Map Int GuardianSet -> S
 tryCreateCoreStateWithGuardianSets partyLabel currentIndex storedSets = do
   operator <- allocateParty ("PreconditionOperator" <> partyLabel)
   guardianGovernance <- allocateParty ("PreconditionGovernance" <> partyLabel)
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  feeCustody <- allocateParty ("PreconditionFeeCustody" <> partyLabel)
+  placeholderFeeInstrumentAdmin <- allocateParty ("PreconditionUnusedFeeInstrumentAdmin" <> partyLabel)
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
-                       feeInstrument guardianGovernance
-  trySubmit (actAs operator <> actAs guardianGovernance) do
+                       feeInstrument feeCustody
+  trySubmit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
     createCmd genesisState with guardianSetIndex = currentIndex, guardianSets = storedSets
 
 -- | The 'CoreState' template precondition rejects each malformed guardian set map.
@@ -522,12 +534,14 @@ testGuardianSetUpgradeRejectsMalformedAddresses : Script ()
 testGuardianSetUpgradeRejectsMalformedAddresses = do
   operator <- allocateParty "UpgradeAddressOperator"
   guardianGovernance <- allocateParty "UpgradeAddressGovernance"
+  feeCustody <- allocateParty "UpgradeAddressFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "UpgradeAddressUnusedFeeInstrumentAdmin"
   now <- getTime
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
-                       feeInstrument guardianGovernance
+                       feeInstrument feeCustody
       upgradeTo newKeys = applyGovernance genesisState now (GuardianSetUpgrade with chain = 0, newIndex = 1, newKeys)
   forA_
     [ ([zeroGuardianAddress], "zero address at position 0")
@@ -727,8 +741,9 @@ testArchives : Script ()
 testArchives = do
   (operator, _, csId) <- setup
   Some cs <- queryContractId operator csId
-  -- CoreState is co-signed, so archiving needs operator + guardianGovernance.
-  submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
+  -- CoreState is co-signed, so archiving needs operator, guardianGovernance and feeRecipient.
+  submitMustFail (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
+  submit (actAs operator <> actAs cs.guardianGovernance <> actAs cs.feeRecipient) do archiveCmd csId
   bob <- allocateParty "ArchBob"
   emId <- registerEmitter operator bob
   -- Emitter is signed by operator, owner, and guardianGovernance; all three must authorize.

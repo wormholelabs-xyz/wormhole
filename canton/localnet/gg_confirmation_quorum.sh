@@ -5,7 +5,8 @@
 #      b. ParseAndVerifyVAA (nonconsuming; gg signs the used CoreState). Expect MEDIATOR_SAYS_TX_TIMED_OUT.
 #   2. Reconnect app-user. Repeat 1a. Expect commit with two confirming hosts.
 #   3. Disconnect app-user again. PublishMessage at fee 0. Expect MEDIATOR_SAYS_TX_TIMED_OUT.
-# Each timeout rejection must name guardianGovernance, and only it, as the unresponsive party.
+# Each timeout rejection must name exactly guardianGovernance and feeCustody (CoreState co-signers) as the
+# unresponsive parties.
 # The mediator timeout runs on sequencer time. With two hosts offline, LocalNet traffic is too low to
 # move it, so a background ticker requests time proofs.
 # Usage: gg_confirmation_quorum.sh [<current-set-key-indices>]
@@ -63,20 +64,23 @@ reconnect_all() {
 }
 trap reconnect_all EXIT
 
-# check_timeout_rejection <output-prefix> [<party-id>]: <prefix>.out must hold a completion rejected with
-# MEDIATOR_SAYS_TX_TIMED_OUT whose unresponsive parties are exactly that party (default guardianGovernance).
+# check_timeout_rejection <output-prefix> <party-id>...: <prefix>.out must hold a completion rejected with
+# MEDIATOR_SAYS_TX_TIMED_OUT whose unresponsive parties are exactly those parties, in any order.
 check_timeout_rejection() {
-  local expected_party="${2:-$GG_PARTY}" summary
-  summary="$(completion_summary "$1.out" 2>/dev/null || echo '{}')"
+  local output_prefix="$1" expected_parties summary
+  shift
+  expected_parties="$(jq -cn '$ARGS.positional | sort' --args "$@")"
+  summary="$(completion_summary "$output_prefix.out" 2>/dev/null || echo '{}')"
   if ! jq -e '.message | test("^MEDIATOR_SAYS_TX_TIMED_OUT")' <<<"$summary" >/dev/null 2>&1; then
     echo "FAIL: expected MEDIATOR_SAYS_TX_TIMED_OUT" >&2
-    cat "$1.out" "$1.err" >&2
+    cat "$output_prefix.out" "$output_prefix.err" >&2
     exit 1
   fi
-  if ! jq -e --arg party "$expected_party" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$party]' \
+  if ! jq -e --argjson parties "$expected_parties" \
+      '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) | sort == $parties' \
       <<<"$summary" >/dev/null 2>&1; then
-    echo "FAIL: expected unresponsiveParties to be exactly $expected_party" >&2
-    cat "$1.out" "$1.err" >&2
+    echo "FAIL: expected unresponsiveParties to be exactly $expected_parties" >&2
+    cat "$output_prefix.out" "$output_prefix.err" >&2
     exit 1
   fi
   echo "PASS: rejected. $summary"
@@ -111,6 +115,9 @@ if [[ "$quorum_party" != "$GG_PARTY" ]]; then
   echo "PASS: confirmation threshold 2 of 3 for ${quorum_party%%::*}"
   exit 0
 fi
+if [[ -z "$FEE_CUSTODY_PARTY" ]]; then
+  fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh before gg_genesis.sh."
+fi
 
 current_set_index="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" :Wormhole.Core.State:CoreState \
   | jq -er 'if length == 1 then .[0].createArgument.guardianSetIndex else error("expected one CoreState") end')"
@@ -133,12 +140,12 @@ if SUBMIT_AWAIT_COMPLETION=true submit_governance_vaa "quorum-governance-one-hos
   echo "FAIL: the governance transaction committed with one confirming host" >&2
   exit 1
 fi
-check_timeout_rejection "$gg_work_dir/1a"
+check_timeout_rejection "$gg_work_dir/1a" "$GG_PARTY" "$FEE_CUSTODY_PARTY"
 
 echo "Step 1b: ParseAndVerifyVAA with one confirming host"
 SUBMIT_AWAIT_COMPLETION=true verify_vaa_as_operator "quorum-read-one-host-$(date +%s)" \
   "$(jq -er .vaaHex <<<"$read_only_vaa")" "$(vaa_pub_keys_json "$read_only_vaa")" > "$gg_work_dir/1b.out" 2> "$gg_work_dir/1b.err" || true
-check_timeout_rejection "$gg_work_dir/1b"
+check_timeout_rejection "$gg_work_dir/1b" "$GG_PARTY" "$FEE_CUSTODY_PARTY"
 
 echo "Step 2: reconnect app-user (two confirming hosts)"
 set_participant_connection reconnect app-user
@@ -150,4 +157,4 @@ echo "Step 3: disconnect app-user. PublishMessage with one confirming host"
 set_participant_connection disconnect app-user
 SUBMIT_AWAIT_COMPLETION=true publish_message "quorum-publish-one-host-$(date +%s)" "6f6e6520686f7374" \
   > "$gg_work_dir/3.out" 2> "$gg_work_dir/3.err" || true
-check_timeout_rejection "$gg_work_dir/3"
+check_timeout_rejection "$gg_work_dir/3" "$GG_PARTY" "$FEE_CUSTODY_PARTY"

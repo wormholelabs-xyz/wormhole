@@ -33,6 +33,12 @@ checkTableCase("O6-party-outside-namespace", Some("outside the guardian namespac
 checkTableCase("O7-no-parties", Some("no rotation parties")) {
   checkRotationPartyOrder(Seq.empty, testGuardianGovernancePartyId)
 }
+checkTableCase("O8-custody-parties-then-guardian-governance", None) {
+  checkRotationPartyOrder(Seq(testCustodyPartyId, testFeeCustodyPartyId, testGuardianGovernancePartyId), testGuardianGovernancePartyId)
+}
+checkTableCase("O9-guardian-governance-before-fee-custody", Some("guardianGovernance must be the last rotation party")) {
+  checkRotationPartyOrder(Seq(testCustodyPartyId, testGuardianGovernancePartyId, testFeeCustodyPartyId), testGuardianGovernancePartyId)
+}
 
 checkTableCase("K1-old-key-set", None) {
   require(classifyRotationKeySet(oldFingerprints, oldFingerprints, newFingerprints) == RotationKeySet.OldKeySet)
@@ -71,6 +77,12 @@ checkTableCase("C5-unknown-key-set", Some("nttCustody has a key set that is neit
 }
 checkTableCase("C6-no-targets", Some("no rotation targets")) {
   classifyRotationOutcome(Seq.empty)
+}
+checkTableCase("C7-fee-custody-omitted", None) {
+  val outcome = classifyRotationOutcome(Seq(RotationTarget("nttCustody", RotationKeySet.NewKeySet),
+    RotationTarget("feeCustody", RotationKeySet.OldKeySet), RotationTarget("guardianGovernance", RotationKeySet.NewKeySet),
+    RotationTarget(namespaceRotationTargetName, RotationKeySet.NewKeySet)))
+  require(outcome == RotationOutcome.HalfApplied(Seq("feeCustody")), s"outcome $outcome")
 }
 
 val currentCustodyMapping = testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, oldKeys)))

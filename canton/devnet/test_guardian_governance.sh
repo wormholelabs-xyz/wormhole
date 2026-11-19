@@ -8,10 +8,12 @@
 #     signature shape) fail before the first topology load.
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
-#     2-of-3 party signing keys.
+#     2-of-3 party signing keys. feeCustody::<dn> allocated in the same
+#     namespace.
 #   - 1-of-3 co-signs: `CoreState` rejected (threshold enforced), and the
 #     script stops before the `EmitterRegistry` create.
 #   - 0-of-3 (operator alone): the same (anti-forgery -- the crux property).
+#   - No feeCustody signature, or 1-of-3 feeCustody: `CoreState` rejected.
 #   - 2-of-3 co-signs `CoreState` alone (GENESIS_LAST_CREATE=CoreState): commits.
 #   - A rerun skips the active `CoreState` and commits `EmitterRegistry`.
 #   - A second rerun skips both.
@@ -257,6 +259,8 @@ OWNER_COUNT="$(jq '.owners | length' "${GG_ARTIFACTS_FILE}")"
 THRESHOLD_VALUE="$(jq -r '.threshold' "${GG_ARTIFACTS_FILE}")"
 HOSTING_PERMISSION="$(jq -r '.hostingPermission' "${GG_ARTIFACTS_FILE}")"
 PARTY_ID="$(jq -r '.partyId' "${GG_ARTIFACTS_FILE}")"
+FEE_CUSTODY_PARTY_ID="$(jq -r '.feeCustodyPartyId' "${GG_ARTIFACTS_FILE}")"
+OPERATOR_FEE_CUSTODY_PARTY_ID="$(jq -r '.feeCustodyPartyId' "${OP_ARTIFACTS_FILE}")"
 DN_ID="$(jq -r '.decentralizedNamespace' "${GG_ARTIFACTS_FILE}")"
 
 if [ "${OWNER_COUNT}" = "3" ]; then pass "decentralized namespace has 3 owners"; else fail "expected 3 owners, got ${OWNER_COUNT}"; fi
@@ -271,16 +275,29 @@ if [ "${PARTY_ID}" = "guardianGovernance::${DN_ID}" ]; then
 else
   fail "party id '${PARTY_ID}' does not equal guardianGovernance::${DN_ID}"
 fi
+if [ "${FEE_CUSTODY_PARTY_ID}" = "feeCustody::${DN_ID}" ]; then
+  pass "fee custody party id is feeCustody::<dn namespace>"
+else
+  fail "fee custody party id '${FEE_CUSTODY_PARTY_ID}' does not equal feeCustody::${DN_ID}"
+fi
+if [ "${OPERATOR_FEE_CUSTODY_PARTY_ID}" = "null" ]; then
+  pass "the Operator setup allocates no fee custody party"
+else
+  fail "the Operator setup allocated '${OPERATOR_FEE_CUSTODY_PARTY_ID}'"
+fi
 
 # --- Assertions: genesis interactive submission. ---
 export GG_ARTIFACTS_FILE
 export GG_OPERATOR_ARTIFACTS_FILE="${OP_ARTIFACTS_FILE}"
 
 # Columns: mode | GENESIS_LAST_CREATE | expected exit status | CoreState result | EmitterRegistry result
-# ("-": no RESULT line) | rejection reason ("-" for none) | description. The rows run in order on one ledger.
+# ("-": no RESULT line) | rejection reason ("-" for none; ";" separates required fragments) | description.
+# The rows run in order on one ledger. Canton lists the parties without a signature in sorted order.
 GENESIS_CASES=(
   "threshold|EmitterRegistry|1|rejected|-|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for guardianGovernance::|1-of-3 co-signed genesis (threshold)"
-  "forge|EmitterRegistry|1|rejected|-|The following actAs parties did not provide an external signature: guardianGovernance::|operator-only genesis (anti-forgery)"
+  "forge|EmitterRegistry|1|rejected|-|The following actAs parties did not provide an external signature: feeCustody::;, guardianGovernance::|operator-only genesis (anti-forgery)"
+  "fee-custody-missing|EmitterRegistry|1|rejected|-|The following actAs parties did not provide an external signature: feeCustody::|genesis without feeCustody signatures"
+  "fee-custody-threshold|EmitterRegistry|1|rejected|-|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for feeCustody::|1-of-3 feeCustody genesis"
   "happy|CoreState|0|committed|-|-|2-of-3 co-signed CoreState alone"
   "happy|EmitterRegistry|0|exists|committed|-|2-of-3 rerun creates only the missing EmitterRegistry"
   "happy|EmitterRegistry|0|exists|exists|-|2-of-3 rerun creates nothing"
@@ -312,12 +329,15 @@ for genesis_case_index in "${!GENESIS_CASES[@]}"; do
     fi
   done
   if [ "${rejection_reason}" != "-" ]; then
-    rejection_reason_count="$(grep -cF -- "${rejection_reason}" "${genesis_log}")"
-    if [ "${rejection_reason_count}" = "1" ]; then
-      pass "${description}: the rejection gives: ${rejection_reason}"
-    else
-      fail "${description}: ${rejection_reason_count} of 1 rejection gives: ${rejection_reason}"
-    fi
+    IFS=';' read -r -a rejection_reason_fragments <<<"${rejection_reason}"
+    for rejection_reason_fragment in "${rejection_reason_fragments[@]}"; do
+      rejection_reason_count="$(grep -cF -- "${rejection_reason_fragment}" "${genesis_log}")"
+      if [ "${rejection_reason_count}" = "1" ]; then
+        pass "${description}: the rejection gives: ${rejection_reason_fragment}"
+      else
+        fail "${description}: ${rejection_reason_count} of 1 rejection gives: ${rejection_reason_fragment}"
+      fi
+    done
   fi
 done
 echo

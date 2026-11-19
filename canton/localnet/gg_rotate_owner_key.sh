@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # G3 rehearsal: rotate one owner key of the guardian namespace. The thresholds stay 2 of 3.
-# The rotation covers guardianGovernance and, after custody_host.sh, nttCustody (same namespace, same keys).
+# The rotation covers guardianGovernance and, after custody_host.sh, nttCustody and feeCustody (same namespace, same
+# keys).
 #   1. Generate a new owner key. console/gg_rotate_owner_key.canton computes each intended change from the topology
 #      that all console participants agree on. It compares each generated change with the intended change, then signs
 #      each change (sign phase). It stores the signed changes (mode 0600), then loads the PartyToParticipant of each
-#      party (nttCustody first) and the namespace in one call.
+#      party (custody parties first) and the namespace in one call.
 #   2. The console reads all participants again. The namespace owners are the new set, and the removed key is in no
 #      key set of the namespace. ROTATION done removes the stored file.
 #   3. Signing ceremony, for each party: create GovernanceCeremonyProbe with that party as signatory.
@@ -98,15 +99,12 @@ fingerprints_temporary_file="$(mktemp "$EXTRA_FINGERPRINTS.XXXXXX")"
 printf '%s\n' "$updated_fingerprints" > "$fingerprints_temporary_file"
 mv -f "$fingerprints_temporary_file" "$EXTRA_FINGERPRINTS"
 
-# Load order: nttCustody (holds the reserves) first, guardianGovernance last.
+# Load order: the custody parties (hold the reserves and the fees) first, guardianGovernance last.
 rotation_party_ids=()
 if [[ -n "${GG_ROTATION_FAULT_PARTY_IDS:-}" ]]; then
   IFS=, read -r -a rotation_party_ids <<<"$GG_ROTATION_FAULT_PARTY_IDS"
 else
-  if [[ -n "$CUSTODY_PARTY" ]]; then
-    rotation_party_ids+=("$CUSTODY_PARTY")
-  fi
-  rotation_party_ids+=("$GG_PARTY")
+  IFS=, read -r -a rotation_party_ids <<<"$(rotation_party_ids_in_load_order "$CUSTODY_PARTY" "$FEE_CUSTODY_PARTY" "$GG_PARTY")"
 fi
 expected_party_order="$(for party_id in "${rotation_party_ids[@]}"; do echo "${party_id%%::*}"; done | paste -sd, -)"
 echo "Parties to rotate, in load order: $expected_party_order"

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Allocate nttCustody under the guardianGovernance decentralized namespace (console/custody_allocate_party.canton).
-# nttCustody gets the hosts, the confirmation threshold and the 2-of-3 signing keys of guardianGovernance.
-# Then show both parties' topology on each participant.
+# Allocate a custody party under the guardianGovernance decentralized namespace (console/custody_allocate_party.canton).
+# The party gets the hosts, the confirmation threshold and the 2-of-3 signing keys of guardianGovernance.
+# Then show the topology of each party in the namespace on each participant.
 # Usage: custody_host.sh <owner> <owner> <owner>
 #   The three current owner names: key file prefixes under $LOCALNET_STATE_DIR/gg-keys, for example: owner1 owner2 owner3
-#   CUSTODY_PARTY_NAME overrides the party name (default nttCustody).
-# Output: $LOCALNET_STATE_DIR/custody-artifacts.json
-# Precondition: gg_host.sh ran.
+#   CUSTODY_PARTY_NAME is the party name: nttCustody (default) or feeCustody.
+# Output: $LOCALNET_STATE_DIR/custody-artifacts.json (nttCustody) or fee-custody-artifacts.json (feeCustody).
+# Precondition: gg_host.sh ran. Allocate feeCustody before gg_genesis.sh: CoreState needs its signature.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
@@ -21,10 +21,7 @@ if [[ $# -ne 3 ]]; then
 fi
 check_owner_names_are_safe "$@"
 check_owner_names_differ "$@"
-if [[ ! "$CUSTODY_PARTY_NAME" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
-  echo "invalid party name: $CUSTODY_PARTY_NAME" >&2
-  exit 2
-fi
+custody_artifacts_file="$LOCALNET_STATE_DIR/$(custody_artifacts_file_name "$CUSTODY_PARTY_NAME")" || exit 2
 owner_slot=0
 for owner_name in "$@"; do
   owner_slot=$((owner_slot + 1))
@@ -39,7 +36,7 @@ for owner_name in "$@"; do
 done
 
 allocation_status=0
-GG_PARTY_ID="$GG_PARTY" CUSTODY_ARTIFACTS_FILE="$CUSTODY_ARTIFACTS" \
+GG_PARTY_ID="$GG_PARTY" CUSTODY_ARTIFACTS_FILE="$custody_artifacts_file" \
   "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$OWNER_SIGNING_PRELUDE" "$LOCALNET_SCRIPT_DIR/console/custody_allocate_party.canton" \
   > "$gg_work_dir/allocation.log" 2>&1 || allocation_status=$?
 grep -E '^CUSTODY' "$gg_work_dir/allocation.log" || true
@@ -52,7 +49,11 @@ if ! grep -qxF 'CUSTODY protocol version: 37' "$gg_work_dir/allocation.log"; the
   echo "FAIL: the allocation did not report protocol version 37" >&2
   exit 1
 fi
-custody_party_id="$(read_custody_party_id "$CUSTODY_ARTIFACTS")"
+custody_party_id="$(read_custody_party_id "$custody_artifacts_file")"
+if [[ "${custody_party_id%%::*}" != "$CUSTODY_PARTY_NAME" ]]; then
+  echo "FAIL: $custody_artifacts_file names $custody_party_id, expected $CUSTODY_PARTY_NAME" >&2
+  exit 1
+fi
 if [[ "${custody_party_id#*::}" != "${GG_PARTY#*::}" ]]; then
   echo "FAIL: $custody_party_id is outside the namespace of $GG_PARTY" >&2
   exit 1

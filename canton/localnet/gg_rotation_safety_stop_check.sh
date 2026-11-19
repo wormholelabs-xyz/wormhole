@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Safety stop rehearsal of gg_rotate_owner_key.sh. Each stop case asserts a non-zero exit, the SAFETY STOP text and
 # an unchanged topology (namespace and PartyToParticipant serials of each participant).
-#   SS1 GG_ROTATION_FAULT_PARTY_IDS names guardianGovernance only, while nttCustody exists. Stop: parties differ.
+#   SS1 GG_ROTATION_FAULT_PARTY_IDS names guardianGovernance only, while nttCustody and feeCustody exist. Stop: parties
+#       differ.
+#   SS5 GG_ROTATION_FAULT_PARTY_IDS names nttCustody and guardianGovernance, without feeCustody. Stop: parties differ.
 #   SS3 GG_ROTATION_FAULT_PARTY_IDS adds ghost::<namespace>. Stop: parties differ.
 #   SS2 Half-applied key state: rotation A omits nttCustody from the load (ROTATION HALF-APPLIED). Rotation B then
 #       starts from the owners after A, without --resume. Stop: nttCustody keys are neither the old nor the new set.
 #   SS4 --resume of rotation A passes the safety stop and finishes A.
 # Usage: gg_rotation_safety_stop_check.sh <removed-owner> <kept-owner> <kept-owner>
 #   The current owner names, for example: owner3 owner1 owner2. New owner names are stop-<case>-<time>.
-# Precondition: custody_host.sh and gg_package_vetting.sh ran.
+# Precondition: custody_host.sh for nttCustody and feeCustody, and gg_package_vetting.sh ran.
 # Output: the last line names the current owners after the run.
 set -euo pipefail
 # shellcheck source=gg_lib.sh
@@ -22,6 +24,9 @@ check_owner_names_are_safe "$@"
 check_owner_names_differ "$@"
 if [[ -z "$CUSTODY_PARTY" ]]; then
   fail "missing $CUSTODY_ARTIFACTS. Run custody_host.sh first."
+fi
+if [[ -z "$FEE_CUSTODY_PARTY" ]]; then
+  fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh first."
 fi
 owner_to_remove="$1" kept_owner_1="$2" kept_owner_2="$3"
 RUN_SUFFIX="$(date +%s)"
@@ -57,15 +62,20 @@ expect_safety_stop() {
   echo "PASS $case_name: safety stop, topology unchanged"
 }
 
-echo "== SS1: rotation party list without nttCustody"
+echo "== SS1: rotation party list without the custody parties"
 expect_safety_stop SS1 \
-  "SAFETY STOP: PartyToParticipant parties in the namespace guardianGovernance,nttCustody differ from GG_ROTATION_PARTY_IDS guardianGovernance" \
+  "SAFETY STOP: PartyToParticipant parties in the namespace feeCustody,guardianGovernance,nttCustody differ from GG_ROTATION_PARTY_IDS guardianGovernance" \
   GG_ROTATION_FAULT_PARTY_IDS="$GG_PARTY" -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "stop-ss1-$RUN_SUFFIX"
+
+echo "== SS5: rotation party list without feeCustody"
+expect_safety_stop SS5 \
+  "SAFETY STOP: PartyToParticipant parties in the namespace feeCustody,guardianGovernance,nttCustody differ from GG_ROTATION_PARTY_IDS nttCustody,guardianGovernance" \
+  GG_ROTATION_FAULT_PARTY_IDS="$CUSTODY_PARTY,$GG_PARTY" -- "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "stop-ss5-$RUN_SUFFIX"
 
 echo "== SS3: rotation party list with an unknown party"
 expect_safety_stop SS3 \
-  "differ from GG_ROTATION_PARTY_IDS nttCustody,ghost,guardianGovernance" \
-  GG_ROTATION_FAULT_PARTY_IDS="$CUSTODY_PARTY,ghost::${GG_PARTY#*::},$GG_PARTY" -- \
+  "differ from GG_ROTATION_PARTY_IDS nttCustody,ghost,feeCustody,guardianGovernance" \
+  GG_ROTATION_FAULT_PARTY_IDS="$CUSTODY_PARTY,ghost::${GG_PARTY#*::},$FEE_CUSTODY_PARTY,$GG_PARTY" -- \
   "$owner_to_remove" "$kept_owner_1" "$kept_owner_2" "stop-ss3-$RUN_SUFFIX"
 
 echo "== SS2: rotation B on the half-applied key state of rotation A"
@@ -91,5 +101,5 @@ grep -qxF 'ROTATION safety stop passed' "$gg_work_dir/SS4.log" || fail "SS4: no 
 grep -qxF 'ROTATION done' "$gg_work_dir/SS4.log" || fail "SS4: no 'ROTATION done'"
 echo "PASS SS4: resume passed the safety stop and finished rotation A"
 
-echo "PASS: safety stop cases SS1, SS2, SS3, SS4"
+echo "PASS: safety stop cases SS1, SS2, SS3, SS4, SS5"
 echo "Current owners: $kept_owner_1 $kept_owner_2 $rotation_a_new_owner"

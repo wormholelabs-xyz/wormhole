@@ -40,11 +40,12 @@ Go watcher's configured packageID changes with the new build.
 | `wormhole-core-0.7.0.dar` | 0.8.0 | `cfff39977`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
 | `wormhole-core-0.8.0.dar` | 0.8.1 | `b1ed0c5f6`, SDK 3.5.1 | `03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6` |
 | `wormhole-core-0.8.1.dar` | 0.8.2 | `3e9747594`, SDK 3.5.1 | `4a214c8015945441a74dcc2a702f0652b3136e8f7488ab13d8196313c4d47d89` |
+| `wormhole-core-0.8.2.dar` | 0.8.3 | `250021718`, SDK 3.5.1 | `132d32bfdba695df16b78b1c2250579d9369b13fe030d951973293f4e23b70c1` |
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 `damlc` reports these changes as the warning `upgraded-template-expression-changed`.
 A 0.7.0 registry or `Emitter` cannot run under 0.8.0.
-Thus 0.8.0 starts from a fresh genesis (`../A14_EMITTER_ID_UNIQUENESS.md`, "Deployment of 0.8.0").
+Thus 0.8.0 starts from a fresh genesis (`../A14_EMITTER_ID_UNIQUENESS.md`).
 
 0.8.1 changes the `ReplayNode` precondition: the namespace must not be empty.
 `damlc` reports this change as the warning `upgraded-template-expression-changed`.
@@ -56,6 +57,16 @@ No participant outside LocalNet vetted 0.8.0.
 It reports the same warning for the `EmitterRegistry` precondition: only a compiler-generated name changed.
 Each 0.8.1 `CoreState` of a LocalNet genesis or rotation satisfies the new precondition.
 No participant outside LocalNet vetted 0.8.1.
+
+0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState`.
+0.8.3 also adds `ensure` rules to `CoreState`: the fee instrument admin is not `guardianGovernance` and not the `operator`.
+`damlc` reports these changes as the warning `upgraded-template-expression-changed`.
+A 0.8.2 `CoreState` cannot run under 0.8.3.
+Thus 0.8.3 starts from a fresh genesis (`../A14_EMITTER_ID_UNIQUENESS.md`, "Deployment of 0.8.3").
+0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs as `guardianGovernance`.
+The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`.
+The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
+It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
 To check the package id, run
 `dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.
