@@ -38,6 +38,11 @@ const (
 	fixtureGuardianSetIndex     = uint32(0)
 	fixtureSetMessageFeeAmount  = uint64(1000)
 
+	// Ethereum mainnet core getCurrentGuardianSetIndex() on 2026-11-18.
+	nonZeroGenesisGuardianSetIndex = uint32(7)
+	set7SetMessageFeeSequence      = uint64(7)
+	set7GuardianSetUpgradeSequence = uint64(8)
+
 	addressVectorRegistrar = "vector-operator::1220deadbeef"
 	addressVectorOwner     = "vector-owner::1220cafebabe"
 	addressVectorEmitterID = uint64(7)
@@ -86,6 +91,16 @@ func damlHexFixtures() []damlHexFixture {
 			generateHex:        generateGovSetMessageFeeVAAHex,
 		},
 		{
+			name:               "govSetFeeVAASignedBySet7",
+			damlLiteralPattern: damlTopLevelHexPattern("govSetFeeVAASignedBySet7"),
+			generateHex:        generateGovSetMessageFeeVAASignedBySet7Hex,
+		},
+		{
+			name:               "govGuardianSetUpgrade7To8VAA",
+			damlLiteralPattern: damlTopLevelHexPattern("govGuardianSetUpgrade7To8VAA"),
+			generateHex:        generateGuardianSetUpgrade7To8VAAHex,
+		},
+		{
 			name:               "testAddressVector",
 			damlLiteralPattern: damlIndentedBodyHexPattern("testAddressVector"),
 			generateHex:        generateAddressVectorHex,
@@ -95,22 +110,46 @@ func damlHexFixtures() []damlHexFixture {
 
 // SetMessageFee(chain = Canton, fee = 1000) from the governance emitter, signed by devnet guardian 0.
 func generateGovSetMessageFeeVAAHex(t *testing.T) string {
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, fixtureGuardianSetIndex, fixtureSequence, setMessageFeeFixturePayload(t))
+}
+
+// generateGovSetMessageFeeVAAHex under guardian set index 7.
+func generateGovSetMessageFeeVAASignedBySet7Hex(t *testing.T) string {
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, nonZeroGenesisGuardianSetIndex, set7SetMessageFeeSequence, setMessageFeeFixturePayload(t))
+}
+
+// GuardianSetUpgrade(chain = 0, new index 8, keys = [devnet key 1]), signed by devnet key 0 under set 7.
+func generateGuardianSetUpgrade7To8VAAHex(t *testing.T) string {
+	newGuardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(1)
+	guardianSetUpgradePayload, err := vaa.BodyGuardianSetUpdate{
+		Keys:     []common.Address{crypto.PubkeyToAddress(newGuardianKey.PublicKey)},
+		NewIndex: nonZeroGenesisGuardianSetIndex + 1,
+	}.Serialize()
+	require.NoError(t, err)
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, nonZeroGenesisGuardianSetIndex, set7GuardianSetUpgradeSequence, guardianSetUpgradePayload)
+}
+
+func setMessageFeeFixturePayload(t *testing.T) []byte {
 	setMessageFeePayload, err := vaa.BodyCoreBridgeSetMessageFee{
 		ChainID:    vaa.ChainIDCanton,
 		MessageFee: uint256.NewInt(fixtureSetMessageFeeAmount),
 	}.Serialize()
 	require.NoError(t, err)
+	return setMessageFeePayload
+}
 
+// A governance VAA from the governance emitter with one signature by devnet key 0 at guardian position 0.
+func encodeGovernanceVAASignedByDevnetKey0Hex(t *testing.T, guardianSetIndex uint32, sequence uint64, payload []byte) string {
 	governanceVAA := &vaa.VAA{
 		Version:          vaa.SupportedVAAVersion,
-		GuardianSetIndex: fixtureGuardianSetIndex,
+		GuardianSetIndex: guardianSetIndex,
 		Timestamp:        time.Unix(fixtureTimestampUnixSeconds, 0),
 		Nonce:            fixtureNonce,
-		Sequence:         fixtureSequence,
+		Sequence:         sequence,
 		ConsistencyLevel: fixtureConsistencyLevel,
 		EmitterChain:     vaa.GovernanceChain,
 		EmitterAddress:   vaa.GovernanceEmitter,
-		Payload:          setMessageFeePayload,
+		Payload:          payload,
 	}
 	guardianKey := devnet.InsecureDeterministicEcdsaKeyByIndex(0)
 	governanceVAA.AddSignature(guardianKey, 0)
@@ -121,6 +160,7 @@ func generateGovSetMessageFeeVAAHex(t *testing.T) string {
 
 	encodedVAA, err := governanceVAA.Marshal()
 	require.NoError(t, err)
+	require.Equal(t, guardianSetIndex, binary.BigEndian.Uint32(encodedVAA[1:5]))
 	return hex.EncodeToString(encodedVAA)
 }
 
