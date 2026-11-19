@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Offline replication of guardianGovernance (source app-provider) and nttCustody (source sv) to guardian4 at Confirmation.
-# Usage: party_replication.sh <connect|prepare|complete|remove-host|add-host-without-consent|set-threshold> [owner-name owner-name]
+# Usage: party_replication.sh <connect|prepare|complete|remove-host|add-host-without-consent|set-threshold|set-permission> [owner-name owner-name]
 #   connect        Connect guardian4 to the global synchronizer and vet every DAR that app-provider has.
 #   prepare        Steps 2 to 7: consent, disconnect guardian4, owner signatures, ACS export to $LOCALNET_STATE_DIR/guardian4/replication.
 #   complete       Steps 10 to 13: ACS import with contract validation, reconnect, clear the onboarding flag.
 #   remove-host    Remove REPLICATION_REMOVED_HOST (participant id or name) from both parties.
 #   add-host-without-consent  Add REPLICATION_ADDED_HOST with the owner signatures only (negative check).
 #   set-threshold  Set the confirmation threshold of both parties to REPLICATION_CONFIRMATION_THRESHOLD.
+#   set-permission Set REPLICATION_PERMISSION_HOST to REPLICATION_HOST_PERMISSION (Observation or Confirmation) on both parties.
 # Each PartyToParticipant change is compared with the intended change before any owner signs it.
 # The owner names (default owner1 owner2) are two current guardianGovernance namespace owners under gg-keys/.
 set -euo pipefail
@@ -16,7 +17,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 readonly KEY_TOOL="$REPO_ROOT/canton/devnet/guardian_key_tool.js"
 readonly GG_KEY_DIR="$LOCALNET_STATE_DIR/gg-keys"
 replication_dir="${REPLICATION_DIR:-$LOCALNET_STATE_DIR/guardian4/replication}"
-replication_phase="${1:?usage: party_replication.sh <connect|prepare|complete|remove-host|add-host-without-consent|set-threshold> [owner-name owner-name]}"
+replication_phase="${1:?usage: party_replication.sh <connect|prepare|complete|remove-host|add-host-without-consent|set-threshold|set-permission> [owner-name owner-name]}"
 first_owner="${2:-owner1}"
 second_owner="${3:-owner2}"
 custody_party="$(jq -er .partyId "$LOCALNET_STATE_DIR/custody-artifacts.json")"

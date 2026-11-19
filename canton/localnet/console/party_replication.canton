@@ -222,5 +222,61 @@ replicationPhase match {
     }
     println("REPLICATION set-threshold done")
 
+  // REPLICATION_PERMISSION_HOST (participant id or console name) and REPLICATION_HOST_PERMISSION (Observation or
+  // Confirmation): set that host's permission, keeping the hosts, threshold and signing keys. Observation then
+  // Confirmation is the observation-first onboarding promotion. Strengthening the target host to Confirmation needs that
+  // host's own authorization, so the host proposes and the owner keys co-sign; weakening to Observation needs only the
+  // owner keys.
+  case "set-permission" =>
+    val permissionHostText = requiredEnvironmentVariable("REPLICATION_PERMISSION_HOST")
+    val permissionHostId = participants.remote.find(_.name == permissionHostText).map(_.id).getOrElse(ParticipantId.tryFromProtoPrimitive(permissionHostText))
+    val targetPermission = requiredEnvironmentVariable("REPLICATION_HOST_PERMISSION") match {
+      case "Observation" => ParticipantPermission.Observation
+      case "Confirmation" => ParticipantPermission.Confirmation
+      case other => throw new RuntimeException(s"REPLICATION_HOST_PERMISSION must be Observation or Confirmation, not $other")
+    }
+    val needsHostConsent = targetPermission == ParticipantPermission.Confirmation && permissionHostId == targetParticipant.id
+    def promotionProposalOf(partyId: PartyId): Option[GenericSignedTopologyTransaction] =
+      referenceParticipant.topology.transactions.list(synchronizerStore, proposals = true, filterAuthorizedKey = Some(targetParticipant.id.fingerprint))
+        .result.map(_.transaction).find(signed => signed.mapping match {
+          case mapping: PartyToParticipant =>
+            mapping.partyId == partyId && mapping.participants.exists(hosting =>
+              hosting.participantId == targetParticipant.id && hosting.permission == targetPermission && !hosting.onboarding)
+          case _ => false
+        })
+    partiesWithSource.foreach { case (partyId, _) =>
+      val current = effectiveMappingOf(partyId)
+      val currentHost = current.mapping.participants.find(_.participantId == permissionHostId)
+        .getOrElse(throw new IllegalArgumentException(s"$permissionHostId does not host $partyId"))
+      val updatedHosts = current.mapping.participants.map(hosting =>
+        if (hosting.participantId == permissionHostId) HostingParticipant(permissionHostId, targetPermission) else hosting)
+      if (currentHost.permission == targetPermission) {
+        println(s"REPLICATION set-permission ${partyId.uid.identifier} already $targetPermission ${describeMapping(partyId)}")
+      } else if (needsHostConsent) {
+        targetParticipant.topology.party_to_participant_mappings.propose_delta(party = partyId,
+          adds = Seq((targetParticipant.id, targetPermission)), store = synchronizerStore)
+        awaitTopology(s"promotion proposal for $partyId", replicationAwaitMaxAttempts)(promotionProposalOf(partyId).nonEmpty)
+        val proposal = promotionProposalOf(partyId).getOrElse(sys.error(s"promotion proposal for $partyId disappeared"))
+        val proposedHosts = proposal.mapping match {
+          case proposedMapping: PartyToParticipant => proposedMapping.participants
+          case otherMapping => throw new IllegalStateException(s"promotion proposal for $partyId has mapping ${otherMapping.code}")
+        }
+        val intendedHostsInProposedOrder =
+          if (proposedHosts.size == updatedHosts.size && proposedHosts.toSet == updatedHosts.toSet) proposedHosts else updatedHosts
+        val intended = intendedPartyToParticipantChange(current, intendedHostsInProposedOrder, current.mapping.threshold)
+        val unsigned = checkGeneratedTransactionIsIntended(proposal.transaction, intended, protocolVersion, s"promotion proposal for $partyId")
+        referenceParticipant.topology.transactions.load(Seq(signedByOwners(unsigned, ownerKeys, isProposal = true)), synchronizerStore)
+        awaitTopology(s"promotion of $partyId", replicationAwaitMaxAttempts) {
+          val effective = effectiveMappingOf(partyId)
+          effective.serial == intended.serial && effective.mapping == intended.mapping
+        }
+        println(s"REPLICATION set-permission ${partyId.uid.identifier} ${describeMapping(partyId)}")
+      } else {
+        replacePartyToParticipant(partyId, updatedHosts, current.mapping.threshold)
+        println(s"REPLICATION set-permission ${partyId.uid.identifier} ${describeMapping(partyId)}")
+      }
+    }
+    println("REPLICATION set-permission done")
+
   case otherPhase => throw new RuntimeException(s"unknown REPLICATION_PHASE $otherPhase")
 }
