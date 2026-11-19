@@ -1,8 +1,8 @@
 -- | Daml Script tests and devnet bootstrap for the Wormhole core bridge.
 --
 -- @setup@ is referenced by @daml.yaml@'s @init-script@ and seeds a devnet
--- operator + 'CoreState' with the standard Tilt/devnet guardian (address
--- 0xbeFA429d57cD18b7F8A4d91A2da9AB4AF05d0FBe).
+-- guardianGovernance + 'CoreState' with the standard Tilt/devnet guardian
+-- (address 0xbeFA429d57cD18b7F8A4d91A2da9AB4AF05d0FBe).
 module Test.TestCore where
 
 import Daml.Script
@@ -52,14 +52,12 @@ govGuardianSetUpgrade7To8VAA : Bytes
 govGuardianSetUpgrade7To8VAA = "0100000007010073e0fabada5de87d335f6efa820ed0c279391cf2702b3a0438cdfe101f06a50134d3ac0ede472a33a8da90a3e5b784b2dbbd2eafb7016b0c3cd3c6fcf676712e016553f100000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000080000000000000000000000000000000000000000000000000000000000436f7265020000000000080188d7d8b32a9105d228100e72dffe2fae0705d31c"
 
 -- | Bootstrap a devnet 'CoreState', 'EmitterRegistry', and 'ReplayRootRegistry'.
--- The 'CoreState' is co-signed by @operator@, @guardianGovernance@ and the fee
--- custody party, the 'EmitterRegistry' by the first two (single parties here;
--- k-of-n threshold parties in production), so genesis creates both in one
--- transaction with all three parties.
--- Returns @(operator, guardianGovernance, coreState)@; @operator@ stays FIRST
--- for bootstrap.sh's party extraction, and @guardianGovernance@ second is the
--- watcher's --cantonReadAsParty.
-setup : Script (Party, Party, ContractId CoreState)
+-- guardianGovernance and the fee custody party sign the 'CoreState';
+-- guardianGovernance alone signs both registries (single parties here; k-of-n
+-- threshold parties in production).
+-- Returns @(guardianGovernance, coreState)@; @guardianGovernance@ is the
+-- watcher's --cantonReadAsParty and the first party for bootstrap.sh.
+setup : Script (Party, ContractId CoreState)
 setup = setupWithInstrument None
 
 -- | 'setup' with a caller-supplied fee instrument (Test.TestFees provides a
@@ -67,67 +65,76 @@ setup = setupWithInstrument None
 -- validated because all fees default to 0). The fee recipient is a separate
 -- fee custody party, matching production custody. The placeholder admin is a
 -- party that signs nothing: the 'CoreState' ensure rejects
--- guardianGovernance and the operator as the fee instrument admin.
-setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
+-- guardianGovernance and feeCustody as the fee instrument admin.
+setupWithInstrument : Optional InstrumentId -> Script (Party, ContractId CoreState)
 setupWithInstrument = setupWithPartyLabel ""
 
 -- | 'setupWithInstrument' with @partyLabel@ appended to each party hint, so a
 -- script can run again on one participant.
-setupWithPartyLabel : Text -> Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
+setupWithPartyLabel : Text -> Optional InstrumentId -> Script (Party, ContractId CoreState)
 setupWithPartyLabel partyLabel = setupWithGenesisGuardianSetIndex partyLabel 0
 
 -- | 'setupWithPartyLabel' with the genesis guardian set (the devnet guardian) at @genesisIndex@.
-setupAtGuardianSetIndex : Text -> Int -> Script (Party, Party, ContractId CoreState)
+setupAtGuardianSetIndex : Text -> Int -> Script (Party, ContractId CoreState)
 setupAtGuardianSetIndex partyLabel genesisIndex = setupWithGenesisGuardianSetIndex partyLabel genesisIndex None
 
-setupWithGenesisGuardianSetIndex : Text -> Int -> Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
+setupWithGenesisGuardianSetIndex : Text -> Int -> Optional InstrumentId -> Script (Party, ContractId CoreState)
 setupWithGenesisGuardianSetIndex partyLabel genesisIndex mInstrument = do
-  operator <- allocateParty ("Operator" <> partyLabel)
   guardianGovernance <- allocateParty ("GuardianGovernance" <> partyLabel)
   feeCustody <- allocateParty ("FeeCustody" <> partyLabel)
+  onboardingFeeAdmin <- allocateParty ("OnboardingFeeAdmin" <> partyLabel)
   placeholderFeeInstrumentAdmin <- allocateParty ("UnusedFeeInstrumentAdmin" <> partyLabel)
   let feeInstrument = fromOptional (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") mInstrument
-  (csId, _) <- submit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
-    (,) <$> createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
-                         defaultGovernanceContract
-                         GenesisGuardianSet with guardianSetIndex = genesisIndex, guardianAddresses = [devnetGuardian]
-                         feeInstrument feeCustody)
-        <*> createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
-  _ <- submit operator do createCmd (mkInitialReplayRootRegistry operator guardianGovernance 0)
-  pure (operator, guardianGovernance, csId)
+      registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin
+  csId <- submit (actAs guardianGovernance <> actAs feeCustody) do
+    createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId
+                 defaultGovernanceContract
+                 GenesisGuardianSet with guardianSetIndex = genesisIndex, guardianAddresses = [devnetGuardian]
+                 feeInstrument feeCustody)
+  _ <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
+  _ <- submit guardianGovernance do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  pure (guardianGovernance, csId)
 
 -- | Register an emitter for @owner@, the production way: the requester submits
 -- alone against the disclosed 'EmitterRegistry' (served off-ledger by the
--- disclosure service — simulated here by querying as the operator); the
--- operator's co-signature on the 'Emitter' is inherited from the registry.
--- Zero-fee registries need no CoreState reference.
+-- disclosure service — simulated here by querying as guardianGovernance);
+-- guardianGovernance's co-signature on the 'Emitter' is inherited from the
+-- registry. Zero-fee registries need no CoreState reference.
 registerEmitter : Party -> Party -> Script (ContractId Emitter)
-registerEmitter operator owner = do
-  [(regCid, _)] <- query @EmitterRegistry operator
-  regDisc <- fromSome <$> queryDisclosure operator regCid
+registerEmitter guardianGovernance owner = do
+  [(regCid, _)] <- query @EmitterRegistry guardianGovernance
+  regDisc <- fromSome <$> queryDisclosure guardianGovernance regCid
   (_, emCid) <- submit (actAs owner <> disclose regDisc) do
     exerciseCmd regCid RegisterEmitter with
       requester = owner
       payer = owner    -- direct registration: own payer, controller set collapses
       coreStateCid = None
       feeAllocation = None
-      expectedGuardianGovernance = None
+      expectedGuardianGovernance = guardianGovernance
   pure emCid
 
 -- | Publish with the referenced 'CoreState' disclosed (the fee read is on
 -- every publish; at fee 0 no allocation is attached). The disclosure is
--- fetched as the operator — the disclosure-service simulation. Returns the
--- successor 'Emitter' cid and 'WormholeMessage'; the caller threads the cid
+-- fetched as guardianGovernance — the disclosure-service simulation. Returns
+-- the successor 'Emitter' cid and 'WormholeMessage'; the caller threads the cid
 -- into the next publish with no ACS re-resolution.
 publishVia : Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script (ContractId Emitter, WormholeMessage)
-publishVia operator csId owner emCid nonce payload consistencyLevel = do
-  csDisc <- fromSome <$> queryDisclosure operator csId
+publishVia guardianGovernance csId owner emCid nonce payload consistencyLevel = do
+  csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
   submit (actAs owner <> disclose csDisc) do
     exerciseCmd emCid PublishMessage with
       nonce, payload, consistencyLevel
       coreStateCid = csId
       payer = owner
       feeAllocation = None
+
+-- | Apply a governance VAA with @submitter@ as the submitter; the 'CoreState'
+-- disclosure comes from guardianGovernance.
+submitGovernanceAs : Party -> Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script (ContractId CoreState)
+submitGovernanceAs guardianGovernance submitter csId encodedVAA pubKeys = do
+  csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
+  submit (actAs submitter <> disclose csDisc) do
+    exerciseCmd csId SubmitGovernanceVAA with submitter, encodedVAA, pubKeys
 
 -- | Publishing increments the per-emitter sequence and yields the expected
 -- 'WormholeMessage'. The message carries the emitter's identity components
@@ -136,15 +143,15 @@ publishVia operator csId owner emCid nonce payload consistencyLevel = do
 -- 'PublishMessage' returns — no ACS re-resolution needed.
 testPublishMessage : Script ()
 testPublishMessage = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   alice <- allocateParty "Alice"
-  emitterId <- registerEmitter operator alice
+  emitterId <- registerEmitter guardianGovernance alice
   Some em <- queryContractId alice emitterId
   em.emitterId === 0
-  em.emitterAddress === emitterAddressFor operator alice 0
+  em.emitterAddress === emitterAddressFor guardianGovernance alice 0
 
-  (em0Cid, msg0) <- publishVia operator csId alice emitterId 7 "deadbeef" 0
-  msg0.registrar === operator
+  (em0Cid, msg0) <- publishVia guardianGovernance csId alice emitterId 7 "deadbeef" 0
+  msg0.registrar === guardianGovernance
   msg0.owner === alice
   msg0.emitterId === 0
   msg0.sequence === 0
@@ -152,9 +159,9 @@ testPublishMessage = do
   msg0.payload === "deadbeef"
 
   -- Thread the returned successor cid directly; no ACS re-resolution.
-  (_, msg1) <- publishVia operator csId alice em0Cid 8 "cafe" 0
+  (_, msg1) <- publishVia guardianGovernance csId alice em0Cid 8 "cafe" 0
   msg1.sequence === 1
-  msg1.registrar === operator
+  msg1.registrar === guardianGovernance
   msg1.owner === alice
   msg1.emitterId === 0
   pure ()
@@ -164,12 +171,12 @@ testPublishMessage = do
 -- the defect this template regresses against was the cid being discarded.
 testPublishReturnsLiveEmitter : Script ()
 testPublishReturnsLiveEmitter = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   alice <- allocateParty "LiveEmitterAlice"
-  emitterId <- registerEmitter operator alice
+  emitterId <- registerEmitter guardianGovernance alice
 
-  (em0Cid, msg0) <- publishVia operator csId alice emitterId 7 "deadbeef" 0
-  msg0.registrar === operator
+  (em0Cid, msg0) <- publishVia guardianGovernance csId alice emitterId 7 "deadbeef" 0
+  msg0.registrar === guardianGovernance
   msg0.owner === alice
   msg0.emitterId === 0
   msg0.sequence === 0
@@ -179,24 +186,24 @@ testPublishReturnsLiveEmitter = do
 
   -- No re-resolution: publish again directly off the cid PublishMessage
   -- returned above.
-  (_, msg1) <- publishVia operator csId alice em0Cid 8 "cafe" 0
+  (_, msg1) <- publishVia guardianGovernance csId alice em0Cid 8 "cafe" 0
   msg1.sequence === msg0.sequence + 1
 
 -- | Emitter ids are allocated sequentially and yield distinct, owner-bound
 -- addresses; the registry's counter advances.
 testRegistryAllocation : Script ()
 testRegistryAllocation = do
-  (operator, _, _) <- setup
+  (guardianGovernance, _) <- setup
   alice <- allocateParty "AllocAlice"
   bob <- allocateParty "AllocBob"
-  aliceEm <- registerEmitter operator alice
-  bobEm <- registerEmitter operator bob
+  aliceEm <- registerEmitter guardianGovernance alice
+  bobEm <- registerEmitter guardianGovernance bob
   Some a <- queryContractId alice aliceEm
   Some b <- queryContractId bob bobEm
   a.emitterId === 0
   b.emitterId === 1
   assert (a.emitterAddress /= b.emitterAddress)
-  [(_, reg)] <- query @EmitterRegistry operator
+  [(_, reg)] <- query @EmitterRegistry guardianGovernance
   reg.nextId === 2
 
 -- | Pins the canonical emitter-address encoding against the cross-language test
@@ -212,42 +219,41 @@ testAddressVector =
       (RegistryId 7)
     === "45ae8886d1c165b071d3b1202fe81ebedc39f61a6a91a1d13140eb64857f3f2b"
 
--- | A compromised operator cannot forge an existing emitter's address. The
--- address includes the @owner@, and the 'Emitter' is owner-co-signed, so:
---   (a) the operator alone cannot create a contract carrying the owner's address
---       (missing the owner's signature); and
---   (b) even colluding with another party, the best it can do is a contract with
---       a DIFFERENT owner, which derives a different (untrusted) address.
--- This is the invariant guardians verify by replay. Registry-id discipline is
--- behavioral — but address integrity is not.
+-- | A party cannot forge an existing emitter's address. The address includes
+-- the @owner@, and the 'Emitter' is owner-co-signed, so:
+--   (a) a forger alone cannot create a contract carrying the owner's address
+--       (missing the owner's and guardianGovernance's signatures); and
+--   (b) even with guardianGovernance, the best a forger can do is a contract
+--       with a DIFFERENT owner, which derives a different (untrusted) address.
+-- This is the invariant guardians verify by replay.
 testImpersonationBlocked : Script ()
 testImpersonationBlocked = do
-  (operator, guardianGovernance, _) <- setup
+  (guardianGovernance, _) <- setup
   alice <- allocateParty "VictimAlice"
   mallory <- allocateParty "Mallory"
-  aliceEm <- registerEmitter operator alice
+  aliceEm <- registerEmitter guardianGovernance alice
   Some a <- queryContractId alice aliceEm
 
-  -- (a) Operator-alone forgery of Alice's address is impossible.
-  submitMustFail operator do
+  -- (a) Mallory alone cannot forge Alice's address.
+  submitMustFail mallory do
     createCmd Emitter with
-      operator, guardianGovernance = a.guardianGovernance, owner = alice
+      guardianGovernance = a.guardianGovernance, owner = alice
       emitterId = 0
       emitterAddress = a.emitterAddress, sequence = 0
 
-  -- (b) Operator + Mallory without guardianGovernance cannot create an emitter.
-  submitMustFail (actAs operator <> actAs mallory) do
+  -- (b) Mallory without guardianGovernance cannot create an emitter.
+  submitMustFail mallory do
     createCmd Emitter with
-      operator, guardianGovernance = a.guardianGovernance, owner = mallory
+      guardianGovernance = a.guardianGovernance, owner = mallory
       emitterId = 0
-      emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
+      emitterAddress = emitterAddressFor guardianGovernance mallory 0, sequence = 0
 
   -- (c) With guardianGovernance, a same-id emitter for Mallory has a different address.
-  malloryEm <- submit (actAs operator <> actAs mallory <> actAs guardianGovernance) do
+  malloryEm <- submit (actAs mallory <> actAs guardianGovernance) do
     createCmd Emitter with
-      operator, guardianGovernance = a.guardianGovernance, owner = mallory
+      guardianGovernance = a.guardianGovernance, owner = mallory
       emitterId = 0
-      emitterAddress = emitterAddressFor operator mallory 0, sequence = 0
+      emitterAddress = emitterAddressFor guardianGovernance mallory 0, sequence = 0
   Some m <- queryContractId mallory malloryEm
   assert (m.emitterAddress /= a.emitterAddress)
 
@@ -255,17 +261,18 @@ testImpersonationBlocked = do
 -- every tool reads them exactly; the sequence successor fits Int.
 testEmitterIdBounds : Script ()
 testEmitterIdBounds = do
-  (operator, guardianGovernance, _) <- setup
+  (guardianGovernance, _) <- setup
   owner <- allocateParty "BoundsOwner"
+  [(_, genesisRegistry)] <- query @EmitterRegistry guardianGovernance
   let maxEmitterIdLiteral = 9007199254740991
       maxEmitterSequenceLiteral = 9223372036854775806
-      maxRegistrationFeeLiteral = 10000000000000000
-      allSignatories = actAs operator <> actAs owner <> actAs guardianGovernance
-      registryWith registrationFee nextId = EmitterRegistry with operator, guardianGovernance, registrationFee, nextId
+      maxOnboardingFeeLiteral = 10000000000000000
+      allSignatories = actAs owner <> actAs guardianGovernance
+      registryWith registrationFee nextId = genesisRegistry with registrationFee, nextId
       emitterWith emitterId sequence = Emitter with
-        operator, guardianGovernance, owner, emitterId
+        guardianGovernance, owner, emitterId
         -- emitterAddressFor rejects a negative id; the ensure clause is under test.
-        emitterAddress = emitterAddressFor operator owner (max 0 emitterId)
+        emitterAddress = emitterAddressFor guardianGovernance owner (max 0 emitterId)
         sequence
       registryCases =
         [ ("registry nextId -1", registryWith 0 (-1), False)
@@ -274,8 +281,8 @@ testEmitterIdBounds = do
         , ("registry nextId maxEmitterId + 2", registryWith 0 (maxEmitterIdLiteral + 2), False)
         , ("registration fee -1", registryWith (-1) 0, False)
         , ("registration fee 0", registryWith 0 0, True)
-        , ("registration fee maxRegistrationFee", registryWith maxRegistrationFeeLiteral 0, True)
-        , ("registration fee maxRegistrationFee + 1", registryWith (maxRegistrationFeeLiteral + 1) 0, False)
+        , ("registration fee maxOnboardingFee", registryWith maxOnboardingFeeLiteral 0, True)
+        , ("registration fee maxOnboardingFee + 1", registryWith (maxOnboardingFeeLiteral + 1) 0, False)
         ]
       emitterCases =
         [ ("emitter id -1", emitterWith (-1) 0, False)
@@ -302,38 +309,38 @@ testEmitterIdBounds = do
     checkCreateOutcome caseName expectAccepted createResult
 
   -- The last id is issued; the registry then holds maxEmitterId + 1 and issues no more.
-  lastIdRegistryCid <- submit (actAs operator <> actAs guardianGovernance) do
+  lastIdRegistryCid <- submit guardianGovernance do
     createCmd (registryWith 0 maxEmitterIdLiteral)
-  lastIdRegistryDisclosure <- fromSome <$> queryDisclosure operator lastIdRegistryCid
+  lastIdRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance lastIdRegistryCid
   (exhaustedRegistryCid, lastEmitterCid) <- submit (actAs owner <> disclose lastIdRegistryDisclosure) do
     exerciseCmd lastIdRegistryCid RegisterEmitter with
       requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = None
+      expectedGuardianGovernance = guardianGovernance
   Some lastEmitter <- queryContractId owner lastEmitterCid
   lastEmitter.emitterId === maxEmitterIdLiteral
-  exhaustedRegistryDisclosure <- fromSome <$> queryDisclosure operator exhaustedRegistryCid
+  exhaustedRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance exhaustedRegistryCid
   exhaustedResult <- trySubmit (actAs owner <> disclose exhaustedRegistryDisclosure) do
     exerciseCmd exhaustedRegistryCid RegisterEmitter with
       requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = None
+      expectedGuardianGovernance = guardianGovernance
   checkCreateOutcome "registration after maxEmitterId" False exhaustedResult
 
--- | Genesis needs the operator, guardianGovernance and fee custody signatures.
-testGenesisRequiresOperatorAndGovernance : Script ()
-testGenesisRequiresOperatorAndGovernance = do
-  operator <- allocateParty "GenesisOperator"
+-- | Genesis needs the guardianGovernance and fee custody signatures.
+testGenesisRequiresGuardianGovernance : Script ()
+testGenesisRequiresGuardianGovernance = do
   guardianGovernance <- allocateParty "GenesisGovernance"
   feeCustody <- allocateParty "GenesisFeeCustody"
   placeholderFeeInstrumentAdmin <- allocateParty "GenesisUnusedFeeInstrumentAdmin"
+  stranger <- allocateParty "GenesisStranger"
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
-      genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+      genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
                        feeInstrument feeCustody
-  submitMustFail operator do createCmd genesisState
+  submitMustFail stranger do createCmd genesisState
   submitMustFail guardianGovernance do createCmd genesisState
-  submitMustFail (actAs operator <> actAs guardianGovernance) do createCmd genesisState
-  _ <- submit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do createCmd genesisState
+  submitMustFail feeCustody do createCmd genesisState
+  _ <- submit (actAs guardianGovernance <> actAs feeCustody) do createCmd genesisState
   pure ()
 
 -- | Pairs each case with its position, for a unique party hint per case.
@@ -344,8 +351,8 @@ numberCases cases = zip [0 .. length cases - 1] cases
 testGenesisInstallsGuardianSetAtInitialIndex : Script ()
 testGenesisInstallsGuardianSetAtInitialIndex =
   forA_ (numberCases [0, 1, nonZeroGenesisGuardianSetIndex, maxGuardianSetIndex]) \(caseNumber, genesisIndex) -> do
-    (operator, _, csId) <- setupAtGuardianSetIndex ("GenesisIndexCase" <> show caseNumber) genesisIndex
-    Some coreState <- queryContractId operator csId
+    (guardianGovernance, csId) <- setupAtGuardianSetIndex ("GenesisIndexCase" <> show caseNumber) genesisIndex
+    Some coreState <- queryContractId guardianGovernance csId
     coreState.guardianSetIndex === genesisIndex
     Map.keys coreState.guardianSets === [genesisIndex]
     let genesisSet = fromSome (Map.lookup genesisIndex coreState.guardianSets)
@@ -368,10 +375,10 @@ testVerifyVAAResolvesSigningSetByGlobalIndex = do
         , VAAVerificationCase "set 0 VAA, genesis 0" 0 govSetFeeVAA (Some 0)
         ]
   forA_ (numberCases cases) \(caseNumber, verificationCase) -> do
-    (operator, _, csId) <- setupAtGuardianSetIndex ("VerifyCase" <> show caseNumber) verificationCase.genesisIndex
-    result <- trySubmit operator do
+    (guardianGovernance, csId) <- setupAtGuardianSetIndex ("VerifyCase" <> show caseNumber) verificationCase.genesisIndex
+    result <- trySubmit guardianGovernance do
       exerciseCmd csId ParseAndVerifyVAA with
-        verifier = operator
+        verifier = guardianGovernance
         encodedVAA = verificationCase.encodedVAA
         pubKeys = [(0, devnetGuardianPubKey)]
     case (verificationCase.expectedSigningSetIndex, result) of
@@ -385,23 +392,26 @@ testVerifyVAAResolvesSigningSetByGlobalIndex = do
 -- upgrade applies, and an upgrade signed by set 0 fails.
 testGovernanceFromNonZeroGenesis : Script ()
 testGovernanceFromNonZeroGenesis = do
-  (operator, _, csId) <- setupAtGuardianSetIndex "GovernanceAt7" nonZeroGenesisGuardianSetIndex
-  submitMustFail operator do
+  (guardianGovernance, csId) <- setupAtGuardianSetIndex "GovernanceAt7" nonZeroGenesisGuardianSetIndex
+  submitMustFail guardianGovernance do
     exerciseCmd csId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = govGuardianSetUpgradeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
-  feeCsId <- submit operator do
+  feeCsId <- submit guardianGovernance do
     exerciseCmd csId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = govSetFeeVAASignedBySet7
       pubKeys = [(0, devnetGuardianPubKey)]
-  Some feeState <- queryContractId operator feeCsId
+  Some feeState <- queryContractId guardianGovernance feeCsId
   feeState.messageFee === 1000
   upgradedAt <- getTime
-  upgradedCsId <- submit operator do
+  upgradedCsId <- submit guardianGovernance do
     exerciseCmd feeCsId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = govGuardianSetUpgrade7To8VAA
       pubKeys = [(0, devnetGuardianPubKey)]
-  Some upgradedState <- queryContractId operator upgradedCsId
+  Some upgradedState <- queryContractId guardianGovernance upgradedCsId
   upgradedState.guardianSetIndex === 8
   Map.keys upgradedState.guardianSets === [7, 8]
   (fromSome (Map.lookup 8 upgradedState.guardianSets)).keys === [devnetGuardianSet1Key]
@@ -412,13 +422,12 @@ testGovernanceFromNonZeroGenesis = do
 -- | From a genesis at index 7, only new index 8 upgrades.
 testGuardianSetUpgradeIndexFromNonZeroGenesis : Script ()
 testGuardianSetUpgradeIndexFromNonZeroGenesis = do
-  operator <- allocateParty "UpgradeIndexOperator"
   guardianGovernance <- allocateParty "UpgradeIndexGovernance"
   feeCustody <- allocateParty "UpgradeIndexFeeCustody"
   placeholderFeeInstrumentAdmin <- allocateParty "UpgradeIndexUnusedFeeInstrumentAdmin"
   now <- getTime
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
-      genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+      genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with
                          guardianSetIndex = nonZeroGenesisGuardianSetIndex
@@ -451,16 +460,15 @@ expiredGuardianSetFixture = currentGuardianSetFixture with expirationTime = Some
 -- | A raw 'CoreState' create with @storedSets@; the other fields come from 'mkInitialCoreState'.
 tryCreateCoreStateWithGuardianSets : Text -> Int -> Map.Map Int GuardianSet -> Script (Either SubmitError (ContractId CoreState))
 tryCreateCoreStateWithGuardianSets partyLabel currentIndex storedSets = do
-  operator <- allocateParty ("PreconditionOperator" <> partyLabel)
   guardianGovernance <- allocateParty ("PreconditionGovernance" <> partyLabel)
   feeCustody <- allocateParty ("PreconditionFeeCustody" <> partyLabel)
   placeholderFeeInstrumentAdmin <- allocateParty ("PreconditionUnusedFeeInstrumentAdmin" <> partyLabel)
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
-      genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+      genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
                        feeInstrument feeCustody
-  trySubmit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
+  trySubmit (actAs guardianGovernance <> actAs feeCustody) do
     createCmd genesisState with guardianSetIndex = currentIndex, guardianSets = storedSets
 
 -- | The 'CoreState' template precondition rejects each malformed guardian set map.
@@ -532,13 +540,12 @@ testCheckGuardianAddressesAreWellFormed = do
 -- | 'applyGovernance' rejects an upgrade to a malformed guardian set.
 testGuardianSetUpgradeRejectsMalformedAddresses : Script ()
 testGuardianSetUpgradeRejectsMalformedAddresses = do
-  operator <- allocateParty "UpgradeAddressOperator"
   guardianGovernance <- allocateParty "UpgradeAddressGovernance"
   feeCustody <- allocateParty "UpgradeAddressFeeCustody"
   placeholderFeeInstrumentAdmin <- allocateParty "UpgradeAddressUnusedFeeInstrumentAdmin"
   now <- getTime
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
-      genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+      genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
                        feeInstrument feeCustody
@@ -556,12 +563,12 @@ testGuardianSetUpgradeRejectsMalformedAddresses = do
 -- | A payload above the 750 bytes of whitepaper 0004 publishes (EVM parity).
 testPublishAcceptsPayloadAbove750Bytes : Script ()
 testPublishAcceptsPayloadAbove750Bytes = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   bob <- allocateParty "Bob"
-  emitterId <- registerEmitter operator bob
+  emitterId <- registerEmitter guardianGovernance bob
   -- 751 bytes = 1502 hex chars.
   let payloadOf751Bytes = mconcat (replicate 1502 "f")
-  (_, message) <- publishVia operator csId bob emitterId 0 payloadOf751Bytes 0
+  (_, message) <- publishVia guardianGovernance csId bob emitterId 0 payloadOf751Bytes 0
   message.payload === payloadOf751Bytes
   message.sequence === 0
 
@@ -577,8 +584,8 @@ testQuorum = do
 -- | The current guardian set is installed at index 0 and never expires.
 testInitialGuardianSet : Script ()
 testInitialGuardianSet = do
-  (operator, _, csId) <- setup
-  Some cs <- queryContractId operator csId
+  (guardianGovernance, csId) <- setup
+  Some cs <- queryContractId guardianGovernance csId
   cs.guardianSetIndex === 0
   let gs = fromSome (Map.lookup 0 cs.guardianSets)
   gs.keys === [devnetGuardian]
@@ -589,10 +596,10 @@ testInitialGuardianSet = do
 -- exercises the full keccak256 + DER + secp256k1WithEcdsaOnly path.
 testParseAndVerifyVAA : Script ()
 testParseAndVerifyVAA = do
-  (operator, _, csId) <- setup
-  vaa <- submit operator do
+  (guardianGovernance, csId) <- setup
+  vaa <- submit guardianGovernance do
     exerciseCmd csId ParseAndVerifyVAA with
-      verifier = operator
+      verifier = guardianGovernance
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   vaa.guardianSetIndex === 0
@@ -600,14 +607,14 @@ testParseAndVerifyVAA = do
   vaa.sequence === 1
 
 -- | ParseAndVerifyVAA is genuinely permissionless: an external party with no
--- relationship to CoreState (not operator or guardianGovernance, its only two
--- stakeholders) verifies a VAA as itself, given only CoreState disclosed to it
+-- relationship to CoreState (not guardianGovernance or the fee custody party, its
+-- only two stakeholders) verifies a VAA as itself, given only CoreState disclosed to it
 -- -- a data attachment, not an approval.
 testParseAndVerifyVAAByExternalVerifier : Script ()
 testParseAndVerifyVAAByExternalVerifier = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   tokenBridge <- allocateParty "ExternalTokenBridge"
-  Some dCs <- queryDisclosure operator csId
+  Some dCs <- queryDisclosure guardianGovernance csId
   vaa <- submitWithDisclosures tokenBridge [dCs] do
     exerciseCmd csId ParseAndVerifyVAA with
       verifier = tokenBridge
@@ -623,9 +630,9 @@ testParseAndVerifyVAAByExternalVerifier = do
 -- party id so the Go test can sanity-check it (a real, hosted party).
 integrationParseAndVerifyVAAByExternalVerifier : Script Party
 integrationParseAndVerifyVAAByExternalVerifier = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   tokenBridge <- allocateParty "IntegrationExternalVerifier"
-  Some dCs <- queryDisclosure operator csId
+  Some dCs <- queryDisclosure guardianGovernance csId
   vaa <- submitWithDisclosures tokenBridge [dCs] do
     exerciseCmd csId ParseAndVerifyVAA with
       verifier = tokenBridge
@@ -636,30 +643,30 @@ integrationParseAndVerifyVAAByExternalVerifier = do
   vaa.sequence === 1
   pure tokenBridge
 
--- | A SetMessageFee governance VAA verifies and updates the message fee. The
--- operator addresses the 'CoreState' by cid from its own ACS and submits alone
--- (guardianGovernance's authority is inherited from the archived contract).
+-- | A SetMessageFee governance VAA verifies and updates the message fee. A
+-- relayer submits alone with the 'CoreState' disclosed (guardianGovernance's
+-- authority is inherited from the archived contract).
 testGovernanceSetMessageFee : Script ()
 testGovernanceSetMessageFee = do
-  (operator, _, csId) <- setup
-  newCsId <- submit operator do
-    exerciseCmd csId SubmitGovernanceVAA with
-      encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
-  Some cs <- queryContractId operator newCsId
+  (guardianGovernance, csId) <- setup
+  relayer <- allocateParty "SetFeeRelayer"
+  newCsId <- submitGovernanceAs guardianGovernance relayer csId govSetFeeVAA [(0, devnetGuardianPubKey)]
+  Some cs <- queryContractId guardianGovernance newCsId
   cs.messageFee === 1000
 
 -- | Governance replay protection (the 'consumedGovernance' set) still rejects
 -- a resubmitted governance VAA.
 testGovernanceReplayRejected : Script ()
 testGovernanceReplayRejected = do
-  (operator, _, csId) <- setup
-  newCsId <- submit operator do
+  (guardianGovernance, csId) <- setup
+  newCsId <- submit guardianGovernance do
     exerciseCmd csId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
-  submitMustFail operator do
+  submitMustFail guardianGovernance do
     exerciseCmd newCsId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = govSetFeeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
 
@@ -697,70 +704,74 @@ set0SetFeeZeroVAA = "010000000001007af2138f9e169fcf986330367909cdc8c69dae3160122
 -- governance signed by set 0 is rejected at once (current set only).
 testGuardianSetUpgradeExpiry : Script ()
 testGuardianSetUpgradeExpiry = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   upgradedAt <- getTime
-  newCsId <- submit operator do
+  newCsId <- submit guardianGovernance do
     exerciseCmd csId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = govGuardianSetUpgradeVAA
       pubKeys = [(0, devnetGuardianPubKey)]
-  Some cs <- queryContractId operator newCsId
+  Some cs <- queryContractId guardianGovernance newCsId
   cs.guardianSetIndex === 1
   (fromSome (Map.lookup 1 cs.guardianSets)).keys === [devnetGuardianSet1Key]
   (fromSome (Map.lookup 1 cs.guardianSets)).expirationTime === None
   (fromSome (Map.lookup 0 cs.guardianSets)).expirationTime
     === Some (addRelTime upgradedAt (seconds guardianSetExpirySeconds))
   let verifyWith encodedVAA pubKeys = exerciseCmd newCsId ParseAndVerifyVAA with
-        verifier = operator
+        verifier = guardianGovernance
         encodedVAA
         pubKeys
-  set1Vaa <- submit operator do verifyWith set1MessageVAA [(0, devnetGuardianSet1PubKey)]
+  set1Vaa <- submit guardianGovernance do verifyWith set1MessageVAA [(0, devnetGuardianSet1PubKey)]
   set1Vaa.guardianSetIndex === 1
-  set0Vaa <- submit operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
+  set0Vaa <- submit guardianGovernance do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
   set0Vaa.guardianSetIndex === 0
-  submitMustFail operator do
+  submitMustFail guardianGovernance do
     exerciseCmd newCsId SubmitGovernanceVAA with
+      submitter = guardianGovernance
       encodedVAA = set0SetFeeZeroVAA
       pubKeys = [(0, devnetGuardianPubKey)]
   -- EVM boundary in whole seconds: accepted through the last microsecond of the expiry second.
   passTime (seconds guardianSetExpirySeconds)
   getTime >>= (=== addRelTime upgradedAt (seconds guardianSetExpirySeconds))
-  _ <- submit operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
+  _ <- submit guardianGovernance do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
   passTime (microseconds 999999)
-  _ <- submit operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
+  _ <- submit guardianGovernance do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
   passTime (microseconds 1)
-  submitMustFail operator do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
-  set1VaaAfterExpiry <- submit operator do verifyWith set1MessageVAA [(0, devnetGuardianSet1PubKey)]
+  submitMustFail guardianGovernance do verifyWith govSetFeeVAA [(0, devnetGuardianPubKey)]
+  set1VaaAfterExpiry <- submit guardianGovernance do verifyWith set1MessageVAA [(0, devnetGuardianSet1PubKey)]
   set1VaaAfterExpiry.guardianSetIndex === 1
 
 -- | Integration entrypoint, invoked by the Go integration test via
 -- `dpm script` (NOT by `dpm test`): set up the bridge, register an emitter,
 -- publish one message (nonce 42, payload 0x11223344) by cid, and return the
--- Operator party so the watcher can read the ledger as it. The emitter address
+-- guardianGovernance party so the watcher can read the ledger as it. The emitter address
 -- is not chosen here: the watcher derives it from the message's identity
 -- components, which the Go test recomputes.
 integrationPublish : Script Party
 integrationPublish = do
-  (operator, _, csId) <- setup
+  (guardianGovernance, csId) <- setup
   owner <- allocateParty "IntegrationEmitter"
-  emId <- registerEmitter operator owner
-  _ <- publishVia operator csId owner emId 42 "11223344" 0
-  pure operator
+  emId <- registerEmitter guardianGovernance owner
+  _ <- publishVia guardianGovernance csId owner emId 42 "11223344" 0
+  pure guardianGovernance
 
 -- | Exercise the auto-generated Archive choice on each template (for coverage).
+-- guardianGovernance archives the registry; no other party can.
 testArchives : Script ()
 testArchives = do
-  (operator, _, csId) <- setup
-  Some cs <- queryContractId operator csId
-  -- CoreState is co-signed, so archiving needs operator, guardianGovernance and feeRecipient.
-  submitMustFail (actAs operator <> actAs cs.guardianGovernance) do archiveCmd csId
-  submit (actAs operator <> actAs cs.guardianGovernance <> actAs cs.feeRecipient) do archiveCmd csId
+  (guardianGovernance, csId) <- setup
+  stranger <- allocateParty "ArchStranger"
+  Some cs <- queryContractId guardianGovernance csId
+  -- CoreState is co-signed, so archiving needs guardianGovernance and feeRecipient.
+  submitMustFail guardianGovernance do archiveCmd csId
+  submit (actAs guardianGovernance <> actAs cs.feeRecipient) do archiveCmd csId
   bob <- allocateParty "ArchBob"
-  emId <- registerEmitter operator bob
-  -- Emitter is signed by operator, owner, and guardianGovernance; all three must authorize.
-  submitMustFail (actAs operator <> actAs bob) do archiveCmd emId
-  submit (actAs operator <> actAs bob <> actAs cs.guardianGovernance) do archiveCmd emId
-  [(regId, _)] <- query @EmitterRegistry operator
-  -- EmitterRegistry is co-signed, so archiving needs operator + guardianGovernance.
-  submitMustFail operator do archiveCmd regId
-  submit (actAs operator <> actAs cs.guardianGovernance) do archiveCmd regId
+  emId <- registerEmitter guardianGovernance bob
+  -- Emitter is signed by the owner and guardianGovernance; both must authorize.
+  submitMustFail bob do archiveCmd emId
+  submit (actAs bob <> actAs guardianGovernance) do archiveCmd emId
+  [(regId, _)] <- query @EmitterRegistry guardianGovernance
+  regDisclosure <- fromSome <$> queryDisclosure guardianGovernance regId
+  submitMustFail (actAs stranger <> disclose regDisclosure) do archiveCmd regId
+  submit guardianGovernance do archiveCmd regId
   pure ()

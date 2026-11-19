@@ -43,15 +43,16 @@ template TransientEmitterPublisher
     -- | The publish consumes the 'Emitter' that 'RegisterEmitter' creates.
     choice RegisterEmitterAndPublish : WormholeMessage
       with
-        registryCid  : ContractId EmitterRegistry
-        coreStateCid : ContractId CoreState
-        nonce        : Int
-        payload      : Bytes
+        registryCid                : ContractId EmitterRegistry
+        registryGuardianGovernance : Party
+        coreStateCid               : ContractId CoreState
+        nonce                      : Int
+        payload                    : Bytes
       controller owner
       do
         (_, registeredEmitterCid) <- exercise registryCid RegisterEmitter with
           requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
-          expectedGuardianGovernance = None
+          expectedGuardianGovernance = registryGuardianGovernance
         (_, message) <- exercise registeredEmitterCid PublishMessage with
           nonce, payload, consistencyLevel = 0
           coreStateCid, payer = owner, feeAllocation = None
@@ -97,7 +98,7 @@ data TransientEmitterPublishes = TransientEmitterPublishes with
 -- | The real 'EmitterRegistry' of the bridge.
 realRegistryOf : RealBridge -> Script (ContractId EmitterRegistry)
 realRegistryOf bridge = do
-  registries <- query @EmitterRegistry bridge.operator
+  registries <- query @EmitterRegistry bridge.guardianGovernance
   case filter (\(_, registry) -> registry.guardianGovernance == bridge.guardianGovernance) registries of
     [(registryCid, _)] -> pure registryCid
     _ -> abort "expected exactly one real EmitterRegistry"
@@ -111,10 +112,10 @@ realRegistryOf bridge = do
 --      is not a signatory of that 'Emitter'.
 integrationTransientEmitterPublish : RealBridge -> Script TransientEmitterPublishes
 integrationTransientEmitterPublish bridge = do
-  let operator = bridge.operator
+  let guardianGovernance = bridge.guardianGovernance
   owner <- allocateParty "TransientEmitterOwner"
-  emitterCid <- registerEmitter operator owner
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator bridge.coreStateCid
+  emitterCid <- registerEmitter guardianGovernance owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance bridge.coreStateCid
 
   doublePublisherCid <- submit owner do
     createCmd TransientEmitterPublisher with owner, witness = bridge.guardianGovernance
@@ -123,32 +124,32 @@ integrationTransientEmitterPublish bridge = do
       emitterCid, coreStateCid = bridge.coreStateCid
 
   realRegistryCid <- realRegistryOf bridge
-  realRegistryDisclosure <- fromSome <$> queryDisclosure operator realRegistryCid
+  realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
   registeringPublisherCid <- submit owner do
     createCmd TransientEmitterPublisher with owner, witness = bridge.guardianGovernance
   registeredMessage <- submit (actAs owner <> disclose coreStateDisclosure <> disclose realRegistryDisclosure) do
     exerciseCmd registeringPublisherCid RegisterEmitterAndPublish with
-      registryCid = realRegistryCid, coreStateCid = bridge.coreStateCid
+      registryCid = realRegistryCid, registryGuardianGovernance = bridge.guardianGovernance, coreStateCid = bridge.coreStateCid
       nonce = registerAndPublishNonce, payload = registerAndPublishPayload
 
   rogueGovernance <- allocateParty "TransientEmitterRogueGovernance"
   rogueOwner <- allocateParty "TransientEmitterRogueOwner"
-  rogueRegistryCid <- submit (actAs operator <> actAs rogueGovernance) do
-    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
-  rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
+  rogueRegistryCid <- submit rogueGovernance do
+    createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
   rogueFeeCustody <- allocateParty "TransientEmitterRogueFeeCustody"
   rogueFeeInstrumentAdmin <- allocateParty "TransientEmitterRogueFeeInstrumentAdmin"
   let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
-  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance <> actAs rogueFeeCustody) do
-    createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
+  shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
                  shadowFeeInstrument rogueFeeCustody)
-  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure operator shadowCoreStateCid
+  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
   roguePublisherCid <- submit rogueOwner do
     createCmd TransientEmitterPublisher with owner = rogueOwner, witness = bridge.guardianGovernance
   rogueMessage <- submit (actAs rogueOwner <> disclose shadowCoreStateDisclosure <> disclose rogueRegistryDisclosure) do
     exerciseCmd roguePublisherCid RegisterEmitterAndPublish with
-      registryCid = rogueRegistryCid, coreStateCid = shadowCoreStateCid
+      registryCid = rogueRegistryCid, registryGuardianGovernance = rogueGovernance, coreStateCid = shadowCoreStateCid
       nonce = rogueRegisterAndPublishNonce, payload = rogueRegisterAndPublishPayload
 
   pure TransientEmitterPublishes with

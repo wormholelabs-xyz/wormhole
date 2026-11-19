@@ -103,7 +103,7 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	require.Equal(t, parseDamlUint64(t, publishes.DoublePublishEmitterID)+1, parseDamlUint64(t, publishes.RegisteredEmitterID))
 	require.NotEqual(t, bridge.GuardianGovernance, publishes.RogueGovernance)
 
-	doublePublishAddress := DeriveEmitterAddress(bridge.Operator, publishes.Owner, parseDamlUint64(t, publishes.DoublePublishEmitterID))
+	doublePublishAddress := DeriveEmitterAddress(bridge.GuardianGovernance, publishes.Owner, parseDamlUint64(t, publishes.DoublePublishEmitterID))
 	wantDoublePublish := []observedPublish{
 		{
 			EmitterChain:   vaa.ChainIDCanton,
@@ -122,7 +122,7 @@ func TestCantonWatcherPublishesOnTransientEmitters(t *testing.T) {
 	}
 	wantRegisterAndPublish := []observedPublish{{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.Owner, parseDamlUint64(t, publishes.RegisteredEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, publishes.Owner, parseDamlUint64(t, publishes.RegisteredEmitterID)),
 		Sequence:       0,
 		Nonce:          registerAndPublishNonce,
 		Payload:        decodeHexPayload(t, registerAndPublishPayloadHex),

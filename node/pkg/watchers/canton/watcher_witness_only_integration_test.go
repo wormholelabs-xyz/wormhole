@@ -146,7 +146,7 @@ func TestCantonWatcherDropsWitnessOnlyPublish(t *testing.T) {
 
 	trustedPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.TrustedSequence),
 		Nonce:          trustedWitnessOnlyNonce,
 		Payload:        decodeHexPayload(t, trustedWitnessOnlyPayloadHex),
