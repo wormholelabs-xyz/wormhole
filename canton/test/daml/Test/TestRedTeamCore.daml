@@ -157,29 +157,29 @@ checkNoAttackAccepted finding acceptedAttacks =
   assertMsg (finding <> ": attacks accepted: " <> show acceptedAttacks) (null acceptedAttacks)
 
 submitGovernance : Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script (ContractId CoreState)
-submitGovernance operator coreStateCid encodedVAA pubKeys = submit operator do
-  exerciseCmd coreStateCid SubmitGovernanceVAA with encodedVAA, pubKeys
+submitGovernance submitter coreStateCid encodedVAA pubKeys = submit submitter do
+  exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA, pubKeys
 
 checkGovernanceRejectedWith : Text -> Text -> Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script ()
-checkGovernanceRejectedWith attack expectedSubstring operator coreStateCid encodedVAA pubKeys = do
-  submitResult <- trySubmit operator do
-    exerciseCmd coreStateCid SubmitGovernanceVAA with encodedVAA, pubKeys
+checkGovernanceRejectedWith attack expectedSubstring submitter coreStateCid encodedVAA pubKeys = do
+  submitResult <- trySubmit submitter do
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA, pubKeys
   checkAttackFailedWith attack expectedSubstring submitResult
 
 verifyVAA : Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script VAA
-verifyVAA operator coreStateCid encodedVAA pubKeys = submit operator do
-  exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = operator, encodedVAA, pubKeys
+verifyVAA verifier coreStateCid encodedVAA pubKeys = submit verifier do
+  exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA, pubKeys
 
 checkVerifyRejectedWith : Text -> Text -> Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script ()
-checkVerifyRejectedWith attack expectedSubstring operator coreStateCid encodedVAA pubKeys = do
-  submitResult <- trySubmit operator do
-    exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = operator, encodedVAA, pubKeys
+checkVerifyRejectedWith attack expectedSubstring verifier coreStateCid encodedVAA pubKeys = do
+  submitResult <- trySubmit verifier do
+    exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA, pubKeys
   checkAttackFailedWith attack expectedSubstring submitResult
 
 upgradeToSet1 : Party -> ContractId CoreState -> Script (ContractId CoreState)
-upgradeToSet1 operator coreStateCid = do
-  set1CoreStateCid <- submitGovernance operator coreStateCid rtGuardianSetUpgradeToSet1 set0PubKeys
-  Some set1CoreState <- queryContractId operator set1CoreStateCid
+upgradeToSet1 guardianGovernance coreStateCid = do
+  set1CoreStateCid <- submitGovernance guardianGovernance coreStateCid rtGuardianSetUpgradeToSet1 set0PubKeys
+  Some set1CoreState <- queryContractId guardianGovernance set1CoreStateCid
   set1CoreState.guardianSetIndex === 1
   pure set1CoreStateCid
 
@@ -200,29 +200,31 @@ replaceByteAt byteOffset replacementByte encoded =
 -- three paths: Test.TestFees.test*PinsGuardianGovernance.
 testRedTeamA1FeeCannotBeSkipped : Script ()
 testRedTeamA1FeeCannotBeSkipped = do
-  (operator, guardianGovernance, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   registrant <- allocateParty "RedTeamFeeRegistrant"
-  emitterCid <- registerEmitter operator registrant
-  feeRegistryCid <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialEmitterRegistry operator guardianGovernance 500)
-  feeRegistryDisclosure <- fromSome <$> queryDisclosure operator feeRegistryCid
+  emitterCid <- registerEmitter guardianGovernance registrant
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
+  feeRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialEmitterRegistry registryParties 500)
+  feeRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeRegistryCid
   registerResult <- trySubmit (actAs registrant <> disclose feeRegistryDisclosure) do
     exerciseCmd feeRegistryCid RegisterEmitter with
       requester = registrant, payer = registrant, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = None
+      expectedGuardianGovernance = guardianGovernance
   checkAttackFailedWith "A1 RegisterEmitter without CoreState" "registration fee due" registerResult
 
-  feeRootRegistryCid <- submit operator do
-    createCmd (mkInitialReplayRootRegistry operator guardianGovernance 300)
-  feeRootRegistryDisclosure <- fromSome <$> queryDisclosure operator feeRootRegistryCid
+  feeRootRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialReplayRootRegistry registryParties 300)
+  feeRootRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeRootRegistryCid
   claimResult <- trySubmit (actAs registrant <> disclose feeRootRegistryDisclosure) do
     exerciseCmd feeRootRegistryCid ClaimReplayRoot with
       consumer = registrant, namespace = "redteam", splitThreshold = 4
       payer = registrant, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance
   checkAttackFailedWith "A1 ClaimReplayRoot without CoreState" "claim fee due" claimResult
 
-  feeCoreStateCid <- submitGovernance operator coreStateCid govSetFeeVAA set0PubKeys
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator feeCoreStateCid
+  feeCoreStateCid <- submitGovernance guardianGovernance coreStateCid govSetFeeVAA set0PubKeys
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeCoreStateCid
   publishResult <- trySubmit (actAs registrant <> disclose coreStateDisclosure) do
     exerciseCmd emitterCid PublishMessage with
       nonce = 0, payload = "00", consistencyLevel = 0
@@ -235,57 +237,57 @@ testRedTeamA1FeeCannotBeSkipped = do
 
 testRedTeamA6GuardianSetUpgradeRules : Script ()
 testRedTeamA6GuardianSetUpgradeRules = do
-  (operator, _, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   checkGovernanceRejectedWith "A6 upgrade skips an index" "index must be current + 1"
-    operator coreStateCid rtGuardianSetUpgradeSkipsIndex set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeSkipsIndex set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade to the same index" "index must be current + 1"
-    operator coreStateCid rtGuardianSetUpgradeSameIndex set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeSameIndex set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade from a wrong emitter chain" "wrong emitter chain"
-    operator coreStateCid rtGuardianSetUpgradeWrongEmitterChain set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterChain set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade from a wrong emitter address" "wrong emitter address"
-    operator coreStateCid rtGuardianSetUpgradeWrongEmitterAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterAddress set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade for another chain" "wrong target chain"
-    operator coreStateCid rtGuardianSetUpgradeWrongTargetChain set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongTargetChain set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade to an empty set" "empty set"
-    operator coreStateCid rtGuardianSetUpgradeEmptySet set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeEmptySet set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade with a zero address" "zero address at position 1"
-    operator coreStateCid rtGuardianSetUpgradeZeroAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeZeroAddress set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade to only a zero address" "zero address at position 0"
-    operator coreStateCid rtGuardianSetUpgradeOnlyZeroAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeOnlyZeroAddress set0PubKeys
   checkGovernanceRejectedWith "A6 upgrade with a duplicate address" "duplicate address"
-    operator coreStateCid rtGuardianSetUpgradeDuplicateAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeDuplicateAddress set0PubKeys
 
-  set1CoreStateCid <- upgradeToSet1 operator coreStateCid
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
   checkGovernanceRejectedWith "A6 upgrade to a lower index" "index must be current + 1"
-    operator set1CoreStateCid rtGuardianSetUpgradeLowerIndexBySet1 set1PubKeys
+    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeLowerIndexBySet1 set1PubKeys
   checkGovernanceRejectedWith "A6 replay of the applied upgrade" "not signed by current guardian set"
-    operator set1CoreStateCid rtGuardianSetUpgradeToSet1 set0PubKeys
+    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeToSet1 set0PubKeys
 
 testRedTeamA6QuorumAndSignerOrder : Script ()
 testRedTeamA6QuorumAndSignerOrder = do
-  (operator, _, coreStateCid) <- setup
-  set1CoreStateCid <- upgradeToSet1 operator coreStateCid
+  (guardianGovernance, coreStateCid) <- setup
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
   checkGovernanceRejectedWith "A6 two of four signatures" "no quorum"
-    operator set1CoreStateCid rtSetMessageFeeBySet1BelowQuorum set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1BelowQuorum set1PubKeys
   checkGovernanceRejectedWith "A6 duplicate signer index" "strictly ascending"
-    operator set1CoreStateCid rtSetMessageFeeBySet1DuplicateSigner set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1DuplicateSigner set1PubKeys
   checkGovernanceRejectedWith "A6 signatures out of order" "strictly ascending"
-    operator set1CoreStateCid rtSetMessageFeeBySet1SignersOutOfOrder set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1SignersOutOfOrder set1PubKeys
   checkGovernanceRejectedWith "A6 key 3 signs as guardian 0" "invalid signature for guardian index 0"
-    operator set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex set1PubKeys
   checkGovernanceRejectedWith "A6 key 3 signs as guardian 0 with its own public key"
     "public key does not match guardian address at index 0"
-    operator set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex
     [(0, redTeamGuardianPubKey3), (1, redTeamGuardianPubKey1), (2, redTeamGuardianPubKey2)]
   checkGovernanceRejectedWith "A6 signer index out of range" "guardian index out of range"
-    operator set1CoreStateCid rtSetMessageFeeBySet1IndexOutOfRange (set1PubKeys <> [(7, redTeamGuardianPubKey3)])
-  supersededSetVAA <- verifyVAA operator set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1IndexOutOfRange (set1PubKeys <> [(7, redTeamGuardianPubKey3)])
+  supersededSetVAA <- verifyVAA guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
   supersededSetVAA.guardianSetIndex === 0
   checkGovernanceRejectedWith "A6 governance by the superseded set" "not signed by current guardian set"
-    operator set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
 
-  feeCoreStateCid <- submitGovernance operator set1CoreStateCid rtSetMessageFeeBySet1Quorum set1PubKeys
-  Some feeCoreState <- queryContractId operator feeCoreStateCid
+  feeCoreStateCid <- submitGovernance guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1Quorum set1PubKeys
+  Some feeCoreState <- queryContractId guardianGovernance feeCoreStateCid
   feeCoreState.messageFee === 7
 
 -- | The superseded set verifies application VAAs through the whole expiry second
@@ -293,19 +295,19 @@ testRedTeamA6QuorumAndSignerOrder = do
 -- with @block.timestamp@ in whole seconds).
 testRedTeamA6ExpiredGuardianSet : Script ()
 testRedTeamA6ExpiredGuardianSet = do
-  (operator, _, coreStateCid) <- setup
-  set1CoreStateCid <- upgradeToSet1 operator coreStateCid
-  verifiedAtUpgrade <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  (guardianGovernance, coreStateCid) <- setup
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
+  verifiedAtUpgrade <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
   verifiedAtUpgrade.guardianSetIndex === 0
   passTime (seconds guardianSetExpirySeconds)
-  verifiedAtExpiry <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtExpiry <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
   verifiedAtExpiry.guardianSetIndex === 0
   passTime (microseconds 999999)
-  verifiedAtLastMicrosecond <- verifyVAA operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtLastMicrosecond <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
   verifiedAtLastMicrosecond.guardianSetIndex === 0
   passTime (microseconds 1)
   checkVerifyRejectedWith "A6 VAA signed by an expired set" "guardian set has expired"
-    operator set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+    guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
 
 ----------------------------------------------------------------------
 -- A9: malformed VAAs
@@ -313,8 +315,8 @@ testRedTeamA6ExpiredGuardianSet = do
 
 testRedTeamA9MalformedEncodings : Script ()
 testRedTeamA9MalformedEncodings = do
-  (operator, _, coreStateCid) <- setup
-  _ <- verifyVAA operator coreStateCid govSetFeeVAA set0PubKeys
+  (guardianGovernance, coreStateCid) <- setup
+  _ <- verifyVAA guardianGovernance coreStateCid govSetFeeVAA set0PubKeys
   let malformedCases =
         [ ("A9 truncated header", "sliceBytes", T.take 10 govSetFeeVAA)
         , ("A9 truncated signature", "sliceBytes: out of range", T.take ((6 + 30) * 2) govSetFeeVAA)
@@ -330,36 +332,36 @@ testRedTeamA9MalformedEncodings = do
         , ("A9 empty input", "sliceBytes: out of range", "")
         ]
   forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
-    checkVerifyRejectedWith attack expectedSubstring operator coreStateCid encodedVAA set0PubKeys
+    checkVerifyRejectedWith attack expectedSubstring guardianGovernance coreStateCid encodedVAA set0PubKeys
   forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
-    checkGovernanceRejectedWith (attack <> " (governance)") expectedSubstring operator coreStateCid encodedVAA set0PubKeys
+    checkGovernanceRejectedWith (attack <> " (governance)") expectedSubstring guardianGovernance coreStateCid encodedVAA set0PubKeys
 
 testRedTeamA9MalformedGovernancePayloads : Script ()
 testRedTeamA9MalformedGovernancePayloads = do
-  (operator, _, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   checkGovernanceRejectedWith "A9 TokenBridge module" "not the Core module"
-    operator coreStateCid rtSetMessageFeeWrongModule set0PubKeys
+    guardianGovernance coreStateCid rtSetMessageFeeWrongModule set0PubKeys
   checkGovernanceRejectedWith "A9 RecoverChainId action" "unsupported action 5"
-    operator coreStateCid rtRecoverChainIDUnsupported set0PubKeys
+    guardianGovernance coreStateCid rtRecoverChainIDUnsupported set0PubKeys
   checkGovernanceRejectedWith "A9 empty governance payload" "packet must be at least 35 bytes"
-    operator coreStateCid rtGovernanceEmptyPayload set0PubKeys
+    guardianGovernance coreStateCid rtGovernanceEmptyPayload set0PubKeys
   checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "ContractUpgrade packet must be 67 bytes"
-    operator coreStateCid rtContractUpgradeTruncated set0PubKeys
+    guardianGovernance coreStateCid rtContractUpgradeTruncated set0PubKeys
   checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" "ArithmeticError"
-    operator coreStateCid rtSetMessageFeeOverflowsInt64 set0PubKeys
+    guardianGovernance coreStateCid rtSetMessageFeeOverflowsInt64 set0PubKeys
 
 -- | EVM GovernanceStructs.sol requires @encoded.length == index@ for every
 -- action; a guardian-signed packet with trailing bytes must not apply.
 testRedTeamA9GovernancePayloadExactLength : Script ()
 testRedTeamA9GovernancePayloadExactLength = do
-  (setFeeOperator, _, setFeeCoreStateCid) <- setup
-  setFeeResult <- trySubmit setFeeOperator do
+  (setFeeGovernance, setFeeCoreStateCid) <- setup
+  setFeeResult <- trySubmit setFeeGovernance do
     exerciseCmd setFeeCoreStateCid SubmitGovernanceVAA with
-      encodedVAA = rtSetMessageFeeTrailingByte, pubKeys = set0PubKeys
-  (upgradeOperator, _, upgradeCoreStateCid) <- setup
-  upgradeResult <- trySubmit upgradeOperator do
+      submitter = setFeeGovernance, encodedVAA = rtSetMessageFeeTrailingByte, pubKeys = set0PubKeys
+  (upgradeGovernance, upgradeCoreStateCid) <- setup
+  upgradeResult <- trySubmit upgradeGovernance do
     exerciseCmd upgradeCoreStateCid SubmitGovernanceVAA with
-      encodedVAA = rtGuardianSetUpgradeTrailingByte, pubKeys = set0PubKeys
+      submitter = upgradeGovernance, encodedVAA = rtGuardianSetUpgradeTrailingByte, pubKeys = set0PubKeys
   checkNoAttackAccepted "A9 governance payload with a trailing byte"
     ([ "SetMessageFee" | isAttackAccepted setFeeResult ] <> [ "GuardianSetUpgrade" | isAttackAccepted upgradeResult ])
 
@@ -427,14 +429,14 @@ testParseGovernanceRequiresExactPacketLength = do
 -- on both the governance and the integrator path.
 testRedTeamA9HexCaseReplay : Script ()
 testRedTeamA9HexCaseReplay = do
-  (operator, _, coreStateCid) <- setup
-  feeCoreStateCid <- submitGovernance operator coreStateCid govSetFeeVAA set0PubKeys
+  (guardianGovernance, coreStateCid) <- setup
+  feeCoreStateCid <- submitGovernance guardianGovernance coreStateCid govSetFeeVAA set0PubKeys
   checkGovernanceRejectedWith "A9 uppercase governance replay" "action already consumed"
-    operator feeCoreStateCid (T.asciiToUpper govSetFeeVAA) set0PubKeys
+    guardianGovernance feeCoreStateCid (T.asciiToUpper govSetFeeVAA) set0PubKeys
 
   consumer <- allocateParty "RedTeamCaseConsumer"
-  rootCid <- registerReplayRoot operator consumer "case" 128
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator feeCoreStateCid
+  rootCid <- registerReplayRoot guardianGovernance consumer "case" 128
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeCoreStateCid
   (_, consumedNodeCid) <- submit (actAs consumer <> disclose coreStateDisclosure) do
     exerciseCmd feeCoreStateCid VerifyAndConsumeVAA with
       encodedVAA = rtAppMessageBySet0, pubKeys = set0PubKeys
@@ -447,8 +449,8 @@ testRedTeamA9HexCaseReplay = do
 
 testRedTeamA9EmptyApplicationPayloadVerifies : Script ()
 testRedTeamA9EmptyApplicationPayloadVerifies = do
-  (operator, _, coreStateCid) <- setup
-  verified <- verifyVAA operator coreStateCid rtAppMessageEmptyPayloadBySet0 set0PubKeys
+  (guardianGovernance, coreStateCid) <- setup
+  verified <- verifyVAA guardianGovernance coreStateCid rtAppMessageEmptyPayloadBySet0 set0PubKeys
   verified.payload === ""
   verified.sequence === 2
 
@@ -456,12 +458,12 @@ testRedTeamA9EmptyApplicationPayloadVerifies = do
 -- next sequence.
 testRedTeamA9PublishAcceptsAnyPayloadSize : Script ()
 testRedTeamA9PublishAcceptsAnyPayloadSize = do
-  (operator, _, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   owner <- allocateParty "RedTeamPayloadSizeOwner"
-  emitterCid <- registerEmitter operator owner
+  emitterCid <- registerEmitter guardianGovernance owner
   let payloadByteCounts = [0, 750, 751, 65536]
       publishPayloadOfBytes (currentEmitterCid, expectedSequence) payloadByteCount = do
-        (successorCid, message) <- publishVia operator coreStateCid owner currentEmitterCid 0 (hexPayloadOfBytes payloadByteCount) 0
+        (successorCid, message) <- publishVia guardianGovernance coreStateCid owner currentEmitterCid 0 (hexPayloadOfBytes payloadByteCount) 0
         message.payload === hexPayloadOfBytes payloadByteCount
         message.sequence === expectedSequence
         pure (successorCid, expectedSequence + 1)
@@ -474,10 +476,10 @@ testRedTeamA9PublishAcceptsAnyPayloadSize = do
 -- an accepted one consumes a sequence number the guardians never sign.
 testRedTeamA9PublishRejectsFieldsTheWatcherDrops : Script ()
 testRedTeamA9PublishRejectsFieldsTheWatcherDrops = do
-  (operator, _, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   owner <- allocateParty "RedTeamUndecodableOwner"
-  emitterCid <- registerEmitter operator owner
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+  emitterCid <- registerEmitter guardianGovernance owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   let undecodableCases =
         [ ("odd-length payload (1501 hex chars)", 0, mconcat (replicate 1501 "a"), 0)
         , ("non-hex payload", 0, "zz", 0)
@@ -501,10 +503,10 @@ testRedTeamA9PublishRejectsFieldsTheWatcherDrops = do
 -- named reason, and a rejected publish does not advance the sequence.
 testRedTeamA9PublishFieldBoundaries : Script ()
 testRedTeamA9PublishFieldBoundaries = do
-  (operator, _, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   owner <- allocateParty "RedTeamFieldBoundaryOwner"
-  emitterCid <- registerEmitter operator owner
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+  emitterCid <- registerEmitter guardianGovernance owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   let rejectedCases =
         [ ("odd-length payload", "payload has an odd hex length", 0, "abc", 0)
         , ("uppercase payload", "payload is not lowercase hex", 0, "AB", 0)
@@ -524,50 +526,53 @@ testRedTeamA9PublishFieldBoundaries = do
         nonce, payload, consistencyLevel
         coreStateCid, payer = owner, feeAllocation = None
     checkAttackFailedWith ("A9 " <> attack) expectedSubstring publishResult
-  (emitterAfterMaxima, maximaMessage) <- publishVia operator coreStateCid owner emitterCid 4294967295 "00" 255
+  (emitterAfterMaxima, maximaMessage) <- publishVia guardianGovernance coreStateCid owner emitterCid 4294967295 "00" 255
   (maximaMessage.sequence, maximaMessage.nonce, maximaMessage.consistencyLevel) === (0, 4294967295, 255)
-  (_, minimaMessage) <- publishVia operator coreStateCid owner emitterAfterMaxima 0 "" 0
+  (_, minimaMessage) <- publishVia guardianGovernance coreStateCid owner emitterAfterMaxima 0 "" 0
   (minimaMessage.sequence, minimaMessage.nonce, minimaMessage.consistencyLevel) === (1, 0, 0)
 
 ----------------------------------------------------------------------
 -- A14: Emitter created outside RegisterEmitter
 ----------------------------------------------------------------------
 
-testRedTeamA14OperatorCannotForgeThirdPartyEmitter : Script ()
-testRedTeamA14OperatorCannotForgeThirdPartyEmitter = do
-  (operator, guardianGovernance, _) <- setup
+testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter : Script ()
+testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter = do
+  (guardianGovernance, _) <- setup
+  formerOperator <- allocateParty "RedTeamFormerOperator"
   victim <- allocateParty "RedTeamVictimOwner"
   accomplice <- allocateParty "RedTeamAccomplice"
-  victimEmitterCid <- registerEmitter operator victim
+  victimEmitterCid <- registerEmitter guardianGovernance victim
   Some victimEmitter <- queryContractId victim victimEmitterCid
   let forgedVictimEmitter = victimEmitter with sequence = 0
-  forA_ [ ("operator alone", actAs operator)
-        , ("operator and accomplice", actAs operator <> actAs accomplice)
-        , ("operator and guardianGovernance", actAs operator <> actAs guardianGovernance) ]
+  forA_ [ ("former operator alone", actAs formerOperator)
+        , ("former operator and accomplice", actAs formerOperator <> actAs accomplice)
+        , ("former operator and guardianGovernance", actAs formerOperator <> actAs guardianGovernance) ]
     \(forgers, forgerAuthority) -> do
       forgeResult <- trySubmit forgerAuthority do createCmd forgedVictimEmitter
       checkAttackFailedWith ("A14 " <> forgers <> " creates the victim's emitter") "Authorization failure" forgeResult
 
--- | guardianGovernance co-signs every 'Emitter' (A14-2), so no subset of
--- operator, owner, and guardianGovernance can create one outside
--- 'RegisterEmitter': a rewound duplicate of an issued identity is refused.
+-- | guardianGovernance co-signs every 'Emitter' (A14-2), so an owner without
+-- guardianGovernance cannot create one outside 'RegisterEmitter': a rewound
+-- duplicate of an issued identity is refused.
 testRedTeamA14ColludingOwnerCannotDuplicateEmitter : Script ()
 testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
-  (operator, guardianGovernance, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
+  formerOperator <- allocateParty "RedTeamFormerOperator"
   colludingOwner <- allocateParty "RedTeamColludingOwner"
-  colludingEmitterCid <- registerEmitter operator colludingOwner
-  operatorEmitterCid <- registerEmitter operator operator
-  (_, firstMessage) <- publishVia operator coreStateCid colludingOwner colludingEmitterCid 1 "aa" 0
-  (_, operatorMessage) <- publishVia operator coreStateCid operator operatorEmitterCid 2 "bb" 0
+  colludingEmitterCid <- registerEmitter guardianGovernance colludingOwner
+  formerOperatorEmitterCid <- registerEmitter guardianGovernance formerOperator
+  (_, firstMessage) <- publishVia guardianGovernance coreStateCid colludingOwner colludingEmitterCid 1 "aa" 0
+  (_, formerOperatorMessage) <- publishVia guardianGovernance coreStateCid formerOperator formerOperatorEmitterCid 2 "bb" 0
   let rewoundEmitterOf owner message = Emitter with
-        operator, guardianGovernance, owner
+        guardianGovernance, owner
         emitterId = message.emitterId
-        emitterAddress = emitterAddressFor operator owner message.emitterId
+        emitterAddress = emitterAddressFor guardianGovernance owner message.emitterId
         sequence = message.sequence
       duplicateAttempts =
-        [ ("operator and owner", actAs operator <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
-        , ("operator as its own owner", actAs operator, rewoundEmitterOf operator operatorMessage)
-        , ("operator and guardianGovernance", actAs operator <> actAs guardianGovernance,
+        [ ("owner alone", actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("former operator and owner", actAs formerOperator <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("former operator as its own owner", actAs formerOperator, rewoundEmitterOf formerOperator formerOperatorMessage)
+        , ("former operator and guardianGovernance", actAs formerOperator <> actAs guardianGovernance,
             rewoundEmitterOf colludingOwner firstMessage)
         ]
   forA_ duplicateAttempts \(colluders, colluderAuthority, rewoundEmitter) -> do
@@ -575,80 +580,90 @@ testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
     checkAttackFailedWith ("A14 " <> colluders <> " duplicates an issued emitter") "Authorization failure" duplicateResult
   guardianVisibleEmitters <- query @Emitter guardianGovernance
   length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 1
-  length (filter (\(_, emitter) -> emitter.owner == operator) guardianVisibleEmitters) === 1
+  length (filter (\(_, emitter) -> emitter.owner == formerOperator) guardianVisibleEmitters) === 1
 
--- | Exactly operator, owner, and guardianGovernance sign an 'Emitter': all
--- three together can create one directly.
-testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance : Script ()
-testRedTeamA14EmitterSignatoriesAreOperatorOwnerAndGovernance = do
-  (operator, guardianGovernance, _) <- setup
+-- | Exactly the owner and guardianGovernance sign an 'Emitter': both together
+-- can create one directly.
+testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance : Script ()
+testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance = do
+  (guardianGovernance, _) <- setup
   owner <- allocateParty "RedTeamSignatoryOwner"
-  emitterCid <- submit (actAs operator <> actAs owner <> actAs guardianGovernance) do
+  emitterCid <- submit (actAs owner <> actAs guardianGovernance) do
     createCmd Emitter with
-      operator, guardianGovernance, owner
+      guardianGovernance, owner
       emitterId = 0
-      emitterAddress = emitterAddressFor operator owner 0
+      emitterAddress = emitterAddressFor guardianGovernance owner 0
       sequence = 0
   Some emitter <- queryContractId guardianGovernance emitterCid
-  sort (signatory emitter) === sort [operator, owner, guardianGovernance]
+  sort (signatory emitter) === sort [owner, guardianGovernance]
 
 -- | A registry reset with a reused id would give an honest owner's second
--- emitter the address and sequence 0 of its first. 'EmitterRegistry' is
--- co-signed by guardianGovernance, so the operator alone cannot create one that
--- names the real guardianGovernance. A registry under a rogue guardianGovernance
--- needs the rogue party's signature, and its emitters abort on the real
--- 'CoreState' pin: Test.TestGuardianVisibility.testRogueGovernanceEmitterCannotPublishOnRealCoreState.
-testRedTeamA14OperatorCannotResetEmitterRegistry : Script ()
-testRedTeamA14OperatorCannotResetEmitterRegistry = do
-  (operator, guardianGovernance, coreStateCid) <- setup
+-- emitter the address and sequence 0 of its first. guardianGovernance is the
+-- only signatory of 'EmitterRegistry', so a former operator cannot create one
+-- that names the real guardianGovernance. A registry under a rogue
+-- guardianGovernance needs the rogue party's signature, and its emitters abort
+-- on the real 'CoreState' pin:
+-- Test.TestGuardianVisibility.testRogueGovernanceEmitterCannotPublishOnRealCoreState.
+testRedTeamA14FormerOperatorCannotResetEmitterRegistry : Script ()
+testRedTeamA14FormerOperatorCannotResetEmitterRegistry = do
+  (guardianGovernance, coreStateCid) <- setup
+  formerOperator <- allocateParty "RedTeamFormerOperator"
   honestOwner <- allocateParty "RedTeamHonestOwner"
-  firstEmitterCid <- registerEmitter operator honestOwner
-  resetResult <- trySubmit (actAs operator) do
-    createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
-  checkAttackFailedWith "A14 operator alone resets the EmitterRegistry" "Authorization failure" resetResult
+  firstEmitterCid <- registerEmitter guardianGovernance honestOwner
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = formerOperator
+  resetResult <- trySubmit (actAs formerOperator) do
+    createCmd (mkInitialEmitterRegistry registryParties 0)
+  checkAttackFailedWith "A14 former operator resets the EmitterRegistry" "Authorization failure" resetResult
 
-  [(realRegistryCid, realRegistry)] <- query @EmitterRegistry operator
+  [(realRegistryCid, realRegistry)] <- query @EmitterRegistry guardianGovernance
   realRegistry.nextId === 1
-  let operatorAloneAttacks =
-        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs operator) do archiveCmd realRegistryCid)
-        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs operator) do
+  realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
+  let formerOperatorAttacks =
+        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs formerOperator <> disclose realRegistryDisclosure) do
+            archiveCmd realRegistryCid)
+        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs formerOperator <> disclose realRegistryDisclosure) do
             exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
         ]
-  forA_ operatorAloneAttacks \(attack, runAttack) -> do
+  forA_ formerOperatorAttacks \(attack, runAttack) -> do
     attackResult <- runAttack
-    checkAttackFailedWith ("A14 operator alone " <> attack) "Authorization failure" attackResult
+    checkAttackFailedWith ("A14 former operator " <> attack) "Authorization failure" attackResult
   [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
   survivingRegistryCid === realRegistryCid
   survivingRegistry.nextId === 1
 
-  secondEmitterCid <- registerEmitter operator honestOwner
-  (_, firstMessage) <- publishVia operator coreStateCid honestOwner firstEmitterCid 1 "aa" 0
-  (_, secondMessage) <- publishVia operator coreStateCid honestOwner secondEmitterCid 2 "bb" 0
+  secondEmitterCid <- registerEmitter guardianGovernance honestOwner
+  (_, firstMessage) <- publishVia guardianGovernance coreStateCid honestOwner firstEmitterCid 1 "aa" 0
+  (_, secondMessage) <- publishVia guardianGovernance coreStateCid honestOwner secondEmitterCid 2 "bb" 0
   firstMessage.emitterId === 0
   secondMessage.emitterId === 1
-  assert (emitterAddressFor operator honestOwner secondMessage.emitterId
-            /= emitterAddressFor operator honestOwner firstMessage.emitterId)
+  assert (emitterAddressFor guardianGovernance honestOwner secondMessage.emitterId
+            /= emitterAddressFor guardianGovernance honestOwner firstMessage.emitterId)
 
--- | guardianGovernance alone cannot create, archive, or re-price a registry:
--- each needs the operator's signature too.
-testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry : Script ()
-testRedTeamA14GovernanceAloneCannotCreateOrArchiveRegistry = do
-  (operator, guardianGovernance, _) <- setup
-  [(realRegistryCid, _)] <- query @EmitterRegistry operator
-  let governanceAloneAttacks =
-        [ ("creates an EmitterRegistry", void <$> trySubmit (actAs guardianGovernance) do
-            createCmd (mkInitialEmitterRegistry operator guardianGovernance 0))
-        , ("archives the real EmitterRegistry", void <$> trySubmit (actAs guardianGovernance) do
+-- | A registry create or archive needs guardianGovernance: guardianGovernance
+-- alone succeeds, a stranger fails.
+testRedTeamA14RegistryNeedsGuardianGovernance : Script ()
+testRedTeamA14RegistryNeedsGuardianGovernance = do
+  (guardianGovernance, _) <- setup
+  stranger <- allocateParty "RedTeamRegistryStranger"
+  [(realRegistryCid, _)] <- query @EmitterRegistry guardianGovernance
+  realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = stranger
+      strangerAttacks =
+        [ ("creates an EmitterRegistry", void <$> trySubmit (actAs stranger) do
+            createCmd (mkInitialEmitterRegistry registryParties 0))
+        , ("archives the real EmitterRegistry", void <$> trySubmit (actAs stranger <> disclose realRegistryDisclosure) do
             archiveCmd realRegistryCid)
-        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs guardianGovernance) do
-            exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
         ]
-  forA_ governanceAloneAttacks \(attack, runAttack) -> do
+  forA_ strangerAttacks \(attack, runAttack) -> do
     attackResult <- runAttack
-    checkAttackFailedWith ("A14 guardianGovernance alone " <> attack) "Authorization failure" attackResult
-  [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
+    checkAttackFailedWith ("A14 stranger " <> attack) "Authorization failure" attackResult
+  [(survivingRegistryCid, _)] <- query @EmitterRegistry guardianGovernance
   survivingRegistryCid === realRegistryCid
-  survivingRegistry.nextId === 0
+  secondRegistryCid <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
+  submit guardianGovernance do archiveCmd secondRegistryCid
+  submit guardianGovernance do archiveCmd realRegistryCid
+  remainingRegistries <- query @EmitterRegistry guardianGovernance
+  remainingRegistries === []
 
 ----------------------------------------------------------------------
 -- R1: rolled-back publish
@@ -680,15 +695,15 @@ template RollbackPublisher
 -- PublishMessage, and the emitter keeps sequence 0.
 testRedTeamR1RollbackOfPublishRejected : Script ()
 testRedTeamR1RollbackOfPublishRejected = do
-  (operator, _, coreStateCid) <- setup
+  (guardianGovernance, coreStateCid) <- setup
   owner <- allocateParty "RedTeamRollbackOwner"
-  emitterCid <- registerEmitter operator owner
+  emitterCid <- registerEmitter guardianGovernance owner
   publisherCid <- submit owner do createCmd RollbackPublisher with owner
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   rollbackResult <- trySubmit (actAs owner <> disclose coreStateDisclosure) do
     exerciseCmd publisherCid PublishThenRollBack with emitterCid, coreStateCid
   checkAttackFailedWith "R1 rolled-back publish" "rollback" rollbackResult
-  (_, committedMessage) <- publishVia operator coreStateCid owner emitterCid 92 "600d" 0
+  (_, committedMessage) <- publishVia guardianGovernance coreStateCid owner emitterCid 92 "600d" 0
   committedMessage.sequence === 0
 
 ----------------------------------------------------------------------
@@ -713,7 +728,6 @@ data MessageFeeAtSetup = MessageFeeZero | MessageFeeRaised
 
 -- | A bridge whose registries charge a fee, with a mock fee registry.
 data PaidChargeBridge = PaidChargeBridge with
-    operator                    : Party
     guardianGovernance          : Party
     feeRecipient                : Party
     feeRegistryAdmin            : Party
@@ -729,22 +743,23 @@ setupPaidChargeBridge : MessageFeeAtSetup -> Script PaidChargeBridge
 setupPaidChargeBridge messageFeeAtSetup = do
   feeRegistryAdmin <- allocateParty "F1HostileFeeRegistryAdmin"
   let feeInstrument = InstrumentId with admin = feeRegistryAdmin, id = "MOCK"
-  (operator, guardianGovernance, genesisCoreStateCid) <- setupWithInstrument (Some feeInstrument)
-  Some genesisCoreState <- queryContractId operator genesisCoreStateCid
+  (guardianGovernance, genesisCoreStateCid) <- setupWithInstrument (Some feeInstrument)
+  Some genesisCoreState <- queryContractId guardianGovernance genesisCoreStateCid
   publisher <- allocateParty "F1Publisher"
-  publisherEmitterCid <- registerEmitter operator publisher
-  guardianGovernanceEmitterCid <- registerEmitter operator guardianGovernance
-  feeEmitterRegistryCid <- submit (actAs operator <> actAs guardianGovernance) do
-    createCmd (mkInitialEmitterRegistry operator guardianGovernance (feeDueAtChargePoint ChargeOnRegisterEmitter))
-  feeReplayRootRegistryCid <- submit operator do
-    createCmd (mkInitialReplayRootRegistry operator guardianGovernance (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+  publisherEmitterCid <- registerEmitter guardianGovernance publisher
+  guardianGovernanceEmitterCid <- registerEmitter guardianGovernance guardianGovernance
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
+  feeEmitterRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialEmitterRegistry registryParties (feeDueAtChargePoint ChargeOnRegisterEmitter))
+  feeReplayRootRegistryCid <- submit guardianGovernance do
+    createCmd (mkInitialReplayRootRegistry registryParties (feeDueAtChargePoint ChargeOnClaimReplayRoot))
   coreStateCid <- case messageFeeAtSetup of
     MessageFeeZero -> pure genesisCoreStateCid
-    MessageFeeRaised -> submitGovernance operator genesisCoreStateCid govSetFeeVAA set0PubKeys
-  Some coreState <- queryContractId operator coreStateCid
+    MessageFeeRaised -> submitGovernance guardianGovernance genesisCoreStateCid govSetFeeVAA set0PubKeys
+  Some coreState <- queryContractId guardianGovernance coreStateCid
   coreState.messageFee === (if messageFeeAtSetup == MessageFeeRaised then feeDueAtChargePoint ChargeOnPublish else 0)
   pure PaidChargeBridge with
-    operator, guardianGovernance, feeRecipient = genesisCoreState.feeRecipient
+    guardianGovernance, feeRecipient = genesisCoreState.feeRecipient
     feeRegistryAdmin, feeInstrument, coreStateCid, feeEmitterRegistryCid
     feeReplayRootRegistryCid, publisher, publisherEmitterCid, guardianGovernanceEmitterCid
 
@@ -753,7 +768,7 @@ setupPaidChargeBridge messageFeeAtSetup = do
 -- contract-not-found failure.
 submitPaidCharge : PaidChargeBridge -> FeeChargePoint -> Party -> (ContractId Allocation, ExtraArgs) -> [Disclosure] -> Script (Either SubmitError ())
 submitPaidCharge bridge chargePoint payer feeAllocation extraDisclosures = do
-  coreStateDisclosure <- fromSome <$> queryDisclosure bridge.operator bridge.coreStateCid
+  coreStateDisclosure <- fromSome <$> queryDisclosure bridge.guardianGovernance bridge.coreStateCid
   let submitOptions disclosures = actAs bridge.publisher <> actAs payer <> discloseMany (disclosures <> extraDisclosures)
   case chargePoint of
     ChargeOnPublish -> void <$> trySubmit (submitOptions [coreStateDisclosure]) do
@@ -761,18 +776,19 @@ submitPaidCharge bridge chargePoint payer feeAllocation extraDisclosures = do
         nonce = 0, payload = "00", consistencyLevel = 0
         coreStateCid = bridge.coreStateCid, payer, feeAllocation = Some feeAllocation
     ChargeOnRegisterEmitter -> do
-      registryDisclosure <- queryDisclosure bridge.operator bridge.feeEmitterRegistryCid
+      registryDisclosure <- queryDisclosure bridge.guardianGovernance bridge.feeEmitterRegistryCid
       void <$> trySubmit (submitOptions (coreStateDisclosure :: optionalToList registryDisclosure)) do
         exerciseCmd bridge.feeEmitterRegistryCid RegisterEmitter with
           requester = bridge.publisher, payer
           coreStateCid = Some bridge.coreStateCid, feeAllocation = Some feeAllocation
-          expectedGuardianGovernance = Some bridge.guardianGovernance
+          expectedGuardianGovernance = bridge.guardianGovernance
     ChargeOnClaimReplayRoot -> do
-      registryDisclosure <- queryDisclosure bridge.operator bridge.feeReplayRootRegistryCid
+      registryDisclosure <- queryDisclosure bridge.guardianGovernance bridge.feeReplayRootRegistryCid
       void <$> trySubmit (submitOptions (coreStateDisclosure :: optionalToList registryDisclosure)) do
         exerciseCmd bridge.feeReplayRootRegistryCid ClaimReplayRoot with
           consumer = bridge.publisher, namespace = "f1-core", splitThreshold = 4
           payer, coreStateCid = Some bridge.coreStateCid, feeAllocation = Some feeAllocation
+          expectedGuardianGovernance = bridge.guardianGovernance
 
 -- | 'checkAttackFailedWith' as a value: 'Some' description when the outcome is
 -- not a failure that contains @expectedSubstring@.
@@ -789,14 +805,13 @@ describeUnexpectedOutcome attack expectedSubstring submitResult = case submitRes
 checkFeeRecipientIsADistinctCustodyParty : PaidChargeBridge -> Script ()
 checkFeeRecipientIsADistinctCustodyParty bridge = do
   assertMsg "feeRecipient is guardianGovernance" (bridge.feeRecipient /= bridge.guardianGovernance)
-  assertMsg "feeRecipient is the operator" (bridge.feeRecipient /= bridge.operator)
 
 -- | Fee registry code runs with the authority of the allocation controllers. It
--- must not get guardianGovernance or operator authority on any paid charge.
+-- must not get guardianGovernance authority on any paid charge.
 testRedTeamF1FeeRegistryCannotActAsGuardianGovernance : Script ()
 testRedTeamF1FeeRegistryCannotActAsGuardianGovernance = do
   bridge <- setupPaidChargeBridge MessageFeeRaised
-  let probedParties = [("guardianGovernance", bridge.guardianGovernance), ("operator", bridge.operator)]
+  let probedParties = [("guardianGovernance", bridge.guardianGovernance)]
   unexpectedOutcomes <- forA [ (chargePoint, probed) | chargePoint <- allFeeChargePoints, probed <- probedParties ]
     \(chargePoint, (probedPartyName, probedParty)) -> do
       hostileAllocation <- allocateWithFeeRegistryAttack bridge.feeRegistryAdmin bridge.publisher bridge.feeRecipient
@@ -807,11 +822,9 @@ testRedTeamF1FeeRegistryCannotActAsGuardianGovernance = do
   checkNoAttackAccepted "F1-core" (catOptionals unexpectedOutcomes)
   guardianGovernanceProbes <- query @RegistryAuthorityProbe bridge.guardianGovernance
   guardianGovernanceProbes === []
-  operatorProbes <- query @RegistryAuthorityProbe bridge.operator
-  operatorProbes === []
   Some publisherEmitter <- queryContractId bridge.publisher bridge.publisherEmitterCid
   publisherEmitter.sequence === 0
-  Some feeEmitterRegistry <- queryContractId bridge.operator bridge.feeEmitterRegistryCid
+  Some feeEmitterRegistry <- queryContractId bridge.guardianGovernance bridge.feeEmitterRegistryCid
   feeEmitterRegistry.nextId === 0
   collectedFees <- mockBalance bridge.feeRegistryAdmin bridge.feeRecipient bridge.feeInstrument
   collectedFees === 0.0
@@ -859,7 +872,6 @@ testRedTeamF1PrivilegedPartyCannotPayAFee = do
   bridge <- setupPaidChargeBridge MessageFeeRaised
   let privilegedPayers =
         [ (bridge.guardianGovernance, "fee payer must not be guardianGovernance")
-        , (bridge.operator, "fee payer must not be the operator")
         ]
   unexpectedOutcomes <- forA [ (chargePoint, payer) | chargePoint <- allFeeChargePoints, payer <- privilegedPayers ]
     \(chargePoint, (payer, expectedFailure)) -> do
@@ -870,13 +882,11 @@ testRedTeamF1PrivilegedPartyCannotPayAFee = do
   checkNoAttackAccepted "F1-core privileged payer" (catOptionals unexpectedOutcomes)
   guardianGovernanceProbes <- query @RegistryAuthorityProbe bridge.guardianGovernance
   guardianGovernanceProbes === []
-  operatorProbes <- query @RegistryAuthorityProbe bridge.operator
-  operatorProbes === []
 
-  (operator, guardianGovernance, freeCoreStateCid) <- setup
+  (guardianGovernance, freeCoreStateCid) <- setup
   freePublisher <- allocateParty "F1FreePublisher"
-  freeEmitterCid <- registerEmitter operator freePublisher
-  freeCoreStateDisclosure <- fromSome <$> queryDisclosure operator freeCoreStateCid
+  freeEmitterCid <- registerEmitter guardianGovernance freePublisher
+  freeCoreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance freeCoreStateCid
   (_, freeMessage) <- submit (actAs freePublisher <> actAs guardianGovernance <> disclose freeCoreStateDisclosure) do
     exerciseCmd freeEmitterCid PublishMessage with
       nonce = 0, payload = "00", consistencyLevel = 0
@@ -889,41 +899,37 @@ data ExpectedCoreStateCreate
   | CoreStateCreateRejectedForMissingAuthority
   deriving (Eq, Show)
 
--- | The fee recipient co-signs 'CoreState'. Neither the fee recipient nor the
--- fee instrument admin is guardianGovernance or the operator.
+-- | The fee recipient co-signs 'CoreState'. The fee recipient is not
+-- guardianGovernance. The fee instrument admin is neither guardianGovernance
+-- nor the fee recipient.
 testCoreStateFeeRecipientIsADistinctCustodyParty : Script ()
 testCoreStateFeeRecipientIsADistinctCustodyParty = do
-  operator <- allocateParty "F1GenesisOperator"
   guardianGovernance <- allocateParty "F1GenesisGovernance"
   feeCustody <- allocateParty "F1GenesisFeeCustody"
   feeInstrumentAdmin <- allocateParty "F1GenesisFeeInstrumentAdmin"
-  let genesisState feeRecipient admin = mkInitialCoreState operator guardianGovernance
+  let genesisState feeRecipient admin = mkInitialCoreState guardianGovernance
         solanaGovernanceChainId defaultGovernanceContract
         (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
         (InstrumentId with admin, id = "UNUSED") feeRecipient
-      allThreeSigners = actAs operator <> actAs guardianGovernance <> actAs feeCustody
+      bothSigners = actAs guardianGovernance <> actAs feeCustody
       -- Columns: case name | submitters | feeRecipient | fee instrument admin | expected outcome
       genesisCases =
-        [ ("feeRecipient is guardianGovernance", allThreeSigners, guardianGovernance, feeInstrumentAdmin,
+        [ ("feeRecipient is guardianGovernance", bothSigners, guardianGovernance, feeInstrumentAdmin,
             CoreStateCreateRejectedByEnsure)
-        , ("feeRecipient is the operator", allThreeSigners, operator, feeInstrumentAdmin, CoreStateCreateRejectedByEnsure)
-        , ("fee instrument admin is guardianGovernance", allThreeSigners, feeCustody, guardianGovernance,
+        , ("fee instrument admin is guardianGovernance", bothSigners, feeCustody, guardianGovernance,
             CoreStateCreateRejectedByEnsure)
-        , ("fee instrument admin is the operator", allThreeSigners, feeCustody, operator, CoreStateCreateRejectedByEnsure)
-        , ("operator and guardianGovernance without feeCustody", actAs operator <> actAs guardianGovernance, feeCustody,
-            feeInstrumentAdmin, CoreStateCreateRejectedForMissingAuthority)
+        , ("fee instrument admin is feeCustody", bothSigners, feeCustody, feeCustody, CoreStateCreateRejectedByEnsure)
         , ("guardianGovernance alone", actAs guardianGovernance, feeCustody, feeInstrumentAdmin,
             CoreStateCreateRejectedForMissingAuthority)
         , ("feeCustody alone", actAs feeCustody, feeCustody, feeInstrumentAdmin, CoreStateCreateRejectedForMissingAuthority)
-        , ("operator, guardianGovernance and feeCustody", allThreeSigners, feeCustody, feeInstrumentAdmin,
-            CoreStateCreateCommits)
+        , ("guardianGovernance and feeCustody", bothSigners, feeCustody, feeInstrumentAdmin, CoreStateCreateCommits)
         ]
   unexpectedOutcomes <- forA genesisCases \(caseName, submitters, feeRecipient, admin, expectedOutcome) -> do
     createResult <- trySubmit submitters do createCmd (genesisState feeRecipient admin)
     pure (describeUnexpectedCoreStateCreate caseName expectedOutcome createResult)
   checkNoAttackAccepted "F1-core CoreState genesis" (catOptionals unexpectedOutcomes)
-  [(_, committedGenesisState)] <- query @CoreState operator
-  sort (signatory committedGenesisState) === sort [operator, guardianGovernance, feeCustody]
+  [(_, committedGenesisState)] <- query @CoreState guardianGovernance
+  sort (signatory committedGenesisState) === sort [guardianGovernance, feeCustody]
 
 -- | 'Some' description when @createResult@ does not match @expectedOutcome@.
 describeUnexpectedCoreStateCreate : Text -> ExpectedCoreStateCreate -> Either SubmitError a -> Optional Text
@@ -940,26 +946,20 @@ describeUnexpectedCoreStateCreate caseName expectedOutcome createResult = case (
 -- otherwise check by hand. Each row breaks exactly one invariant.
 testCoreStateEnsureRejectsInconsistentGenesis : Script ()
 testCoreStateEnsureRejectsInconsistentGenesis = do
-  operator <- allocateParty "EnsureOperator"
   guardianGovernance <- allocateParty "EnsureGovernance"
   feeCustody <- allocateParty "EnsureFeeCustody"
   feeInstrumentAdmin <- allocateParty "EnsureFeeInstrumentAdmin"
-  let consistentGenesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+  let consistentGenesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
         defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
         (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody
-      allThreeSigners = actAs operator <> actAs guardianGovernance <> actAs feeCustody
+      bothSigners = actAs guardianGovernance <> actAs feeCustody
       -- Columns: case name | submitters | CoreState | expected outcome
       genesisCases =
-        [ ("operator is guardianGovernance", actAs operator <> actAs feeCustody,
-            mkInitialCoreState operator operator solanaGovernanceChainId defaultGovernanceContract
-              (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
-              (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody,
+        [ ("negative message fee", bothSigners, (consistentGenesisState with messageFee = -1),
             CoreStateCreateRejectedByEnsure)
-        , ("negative message fee", allThreeSigners, (consistentGenesisState with messageFee = -1),
+        , ("no guardian set at guardianSetIndex", bothSigners, (consistentGenesisState with guardianSetIndex = 1),
             CoreStateCreateRejectedByEnsure)
-        , ("no guardian set at guardianSetIndex", allThreeSigners, (consistentGenesisState with guardianSetIndex = 1),
-            CoreStateCreateRejectedByEnsure)
-        , ("zero message fee and guardian set 0", allThreeSigners, consistentGenesisState, CoreStateCreateCommits)
+        , ("zero message fee and guardian set 0", bothSigners, consistentGenesisState, CoreStateCreateCommits)
         ]
   unexpectedOutcomes <- forA genesisCases \(caseName, submitters, candidateState, expectedOutcome) -> do
     createResult <- trySubmit submitters do createCmd candidateState
@@ -973,37 +973,37 @@ testCoreStateEnsureRejectsInconsistentGenesis = do
 -- still fail.
 testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter : Script ()
 testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
-  operator <- allocateParty "B1Operator"
   guardianGovernance <- allocateParty "B1Governance"
   feeCustody <- allocateParty "B1FeeCustody"
   unrelatedPayer <- allocateParty "B1UnrelatedPayer"
   let guardianGovernanceInstrument = InstrumentId with admin = guardianGovernance, id = "GG-ADMINISTERED"
-  genesisResult <- trySubmit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
-    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+      registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
+  genesisResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do
+    createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
       (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) guardianGovernanceInstrument feeCustody)
   case genesisResult of
     Left _ -> checkNoAttackAccepted "B1 genesis"
       (optionalToList (describeUnexpectedCoreStateCreate "fee instrument admin is guardianGovernance"
         CoreStateCreateRejectedByEnsure genesisResult))
     Right coreStateCid -> do
-      _ <- submit (actAs operator <> actAs guardianGovernance) do
-        createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
-      guardianGovernanceEmitterCid <- registerEmitter operator guardianGovernance
-      replayRootRegistryCid <- submit operator do
-        createCmd (mkInitialReplayRootRegistry operator guardianGovernance (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+      _ <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
+      guardianGovernanceEmitterCid <- registerEmitter guardianGovernance guardianGovernance
+      replayRootRegistryCid <- submit guardianGovernance do
+        createCmd (mkInitialReplayRootRegistry registryParties (feeDueAtChargePoint ChargeOnClaimReplayRoot))
       forgedPublishAllocation <- allocateWithFeeRegistryAttack guardianGovernance unrelatedPayer feeCustody
         guardianGovernanceInstrument (feeToDecimal (feeDueAtChargePoint ChargeOnClaimReplayRoot))
         PublishOnEmitter with
           targetEmitterCid = guardianGovernanceEmitterCid
           coreStateCid
           forgedPayload = "f0"
-      coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
-      registryDisclosure <- fromSome <$> queryDisclosure operator replayRootRegistryCid
+      coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+      registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance replayRootRegistryCid
       emitterDisclosure <- fromSome <$> queryDisclosure guardianGovernance guardianGovernanceEmitterCid
       attackResult <- trySubmit (actAs unrelatedPayer <> discloseMany [coreStateDisclosure, registryDisclosure, emitterDisclosure]) do
         exerciseCmd replayRootRegistryCid ClaimReplayRoot with
           consumer = unrelatedPayer, namespace = "b1", splitThreshold = 4
           payer = unrelatedPayer, coreStateCid = Some coreStateCid, feeAllocation = Some forgedPublishAllocation
+          expectedGuardianGovernance = guardianGovernance
       checkNoAttackAccepted "B1 forged publish on the guardianGovernance emitter"
         (optionalToList (describeUnexpectedOutcome "paid ClaimReplayRoot"
           "fee instrument admin must not be guardianGovernance" attackResult))
@@ -1016,34 +1016,31 @@ testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
 -- exactly one rule.
 testChargeFeeRejectsEachPrivilegedParty : Script ()
 testChargeFeeRejectsEachPrivilegedParty = do
-  operator <- allocateParty "DirectChargeOperator"
+  harnessOwner <- allocateParty "DirectChargeHarnessOwner"
   guardianGovernance <- allocateParty "DirectChargeGovernance"
   feeCustody <- allocateParty "DirectChargeFeeCustody"
   feeInstrumentAdmin <- allocateParty "DirectChargeFeeInstrumentAdmin"
   payer <- allocateParty "DirectChargePayer"
-  harnessCid <- submit operator do createCmd DirectFeeChargeHarness with harnessOwner = operator
+  harnessCid <- submit harnessOwner do createCmd DirectFeeChargeHarness with harnessOwner
   let feeDue = 1000
       instrumentAdministeredBy admin = InstrumentId with admin, id = "MOCK"
       validInstrument = instrumentAdministeredBy feeInstrumentAdmin
-      validParties = FeeChargeParties with operator, guardianGovernance, feeRecipient = feeCustody, payer
+      validParties = FeeChargeParties with guardianGovernance, feeRecipient = feeCustody, payer
       -- Columns: case name | parties | instrument | expected failure ("" = commits)
       chargeCases =
         [ ("payer is guardianGovernance", (validParties with payer = guardianGovernance), validInstrument,
             "fee payer must not be guardianGovernance")
-        , ("payer is the operator", (validParties with payer = operator), validInstrument, "fee payer must not be the operator")
         , ("fee recipient is guardianGovernance", (validParties with feeRecipient = guardianGovernance), validInstrument,
             "fee recipient must not be guardianGovernance")
-        , ("fee recipient is the operator", (validParties with feeRecipient = operator), validInstrument,
-            "fee recipient must not be the operator")
         , ("fee instrument admin is guardianGovernance", validParties, instrumentAdministeredBy guardianGovernance,
             "fee instrument admin must not be guardianGovernance")
-        , ("fee instrument admin is the operator", validParties, instrumentAdministeredBy operator,
-            "fee instrument admin must not be the operator")
+        , ("fee instrument admin is feeCustody", validParties, instrumentAdministeredBy feeCustody,
+            "fee instrument admin must not be feeCustody")
         , ("no privileged party", validParties, validInstrument, "")
         ]
   unexpectedOutcomes <- forA chargeCases \(caseName, parties, instrument, expectedFailure) -> do
     feeAllocation <- mintAndAllocate feeInstrumentAdmin payer feeCustody validInstrument (feeToDecimal feeDue)
-    chargeResult <- trySubmit (actAs operator <> actAs parties.payer <> actAs parties.feeRecipient) do
+    chargeResult <- trySubmit (actAs harnessOwner <> actAs parties.payer <> actAs parties.feeRecipient) do
       exerciseCmd harnessCid ChargeFeeDirectly with
         feeChargeParties = parties, feeInstrument = instrument, feeDue, feeAllocation = Some feeAllocation
     pure $ case (expectedFailure, chargeResult) of
@@ -1054,25 +1051,22 @@ testChargeFeeRejectsEachPrivilegedParty = do
   collectedFees <- mockBalance feeInstrumentAdmin feeCustody validInstrument
   collectedFees === feeToDecimal feeDue
 
--- | The 'CoreState' charge choices reject a privileged payer when a fee is due.
+-- | The 'CoreState' charge choices reject a guardianGovernance payer when a fee is due.
 testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer : Script ()
 testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer = do
   bridge <- setupPaidChargeBridge MessageFeeRaised
-  let privilegedPayers =
-        [ (bridge.guardianGovernance, "fee payer must not be guardianGovernance")
-        , (bridge.operator, "fee payer must not be the operator")
-        ]
-  unexpectedOutcomes <- forA [ (chargeChoice, payer) | chargeChoice <- ["ChargeMessageFee", "ChargeFee"], payer <- privilegedPayers ]
-    \(chargeChoice, (payer, expectedFailure)) -> do
-      feeAllocation <- mintAndAllocate bridge.feeRegistryAdmin payer bridge.feeRecipient bridge.feeInstrument
-        (feeToDecimal (feeDueAtChargePoint ChargeOnPublish))
-      coreStateDisclosure <- fromSome <$> queryDisclosure bridge.operator bridge.coreStateCid
-      chargeResult <- trySubmit (actAs payer <> disclose coreStateDisclosure) $
-        if chargeChoice == "ChargeMessageFee"
-          then void (exerciseCmd bridge.coreStateCid ChargeMessageFee with payer, feeAllocation = Some feeAllocation)
-          else void (exerciseCmd bridge.coreStateCid ChargeFee with
-            payer, fee = feeDueAtChargePoint ChargeOnPublish, feeAllocation = Some feeAllocation)
-      pure (describeUnexpectedOutcome (chargeChoice <> ": " <> expectedFailure) expectedFailure chargeResult)
+  let payer = bridge.guardianGovernance
+      expectedFailure = "fee payer must not be guardianGovernance"
+  unexpectedOutcomes <- forA ["ChargeMessageFee", "ChargeFee"] \chargeChoice -> do
+    feeAllocation <- mintAndAllocate bridge.feeRegistryAdmin payer bridge.feeRecipient bridge.feeInstrument
+      (feeToDecimal (feeDueAtChargePoint ChargeOnPublish))
+    coreStateDisclosure <- fromSome <$> queryDisclosure bridge.guardianGovernance bridge.coreStateCid
+    chargeResult <- trySubmit (actAs payer <> disclose coreStateDisclosure) $
+      if chargeChoice == "ChargeMessageFee"
+        then void (exerciseCmd bridge.coreStateCid ChargeMessageFee with payer, feeAllocation = Some feeAllocation)
+        else void (exerciseCmd bridge.coreStateCid ChargeFee with
+          payer, fee = feeDueAtChargePoint ChargeOnPublish, feeAllocation = Some feeAllocation)
+    pure (describeUnexpectedOutcome (chargeChoice <> ": " <> expectedFailure) expectedFailure chargeResult)
   checkNoAttackAccepted "F1-core CoreState charge choices" (catOptionals unexpectedOutcomes)
   collectedFees <- mockBalance bridge.feeRegistryAdmin bridge.feeRecipient bridge.feeInstrument
   collectedFees === 0.0

@@ -35,7 +35,6 @@ const (
 
 // lookalikeTarget is the input of Lookalike.Publish:integrationLookalikePublish.
 type lookalikeTarget struct {
-	Operator           string          `json:"operator"`
 	GuardianGovernance string          `json:"guardianGovernance"`
 	VictimOwner        string          `json:"victimOwner"`
 	VictimEmitterID    json.RawMessage `json:"victimEmitterId"`
@@ -110,7 +109,6 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 
 	targetInputPath := filepath.Join(t.TempDir(), "lookalike-target.json")
 	targetJSON, err := json.Marshal(lookalikeTarget{
-		Operator:           bridge.Operator,
 		GuardianGovernance: bridge.GuardianGovernance,
 		VictimOwner:        publishes.TrustedOwner,
 		VictimEmitterID:    publishes.TrustedEmitterID,
@@ -122,7 +120,7 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 	runDamlScript(t, dpm, lookalikeDar, port, "Lookalike.Publish:integrationLookalikePublish", targetInputPath, &forger)
 	require.NotEqual(t, publishes.TrustedOwner, forger)
 
-	victimAddress := DeriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID))
+	victimAddress := DeriveEmitterAddress(bridge.GuardianGovernance, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID))
 	trustedPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
 		EmitterAddress: victimAddress,

@@ -9,7 +9,6 @@ import Wormhole.Core.VAA ()
 import Test.TestCore (devnetGuardianPubKey, govSetFeeVAA, publishVia, registerEmitter, setupWithPartyLabel)
 
 data SmokePublishResult = SmokePublishResult with
-    operator : Party
     guardianGovernance : Party
     emitterOwner : Party
     coreStateCid : ContractId CoreState
@@ -22,18 +21,18 @@ data SmokePublishResult = SmokePublishResult with
 bootstrapPublishAndVerify : Text -> Script SmokePublishResult
 bootstrapPublishAndVerify runLabel = do
   assertMsg "runLabel must be non-empty" (runLabel /= "")
-  (operator, guardianGovernance, coreStateCid) <- setupWithPartyLabel ("-" <> runLabel) None
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("-" <> runLabel) None
   emitterOwner <- allocateParty ("SmokeEmitter-" <> runLabel)
-  emitterCid <- registerEmitter operator emitterOwner
-  (successorEmitterCid, firstMessage) <- publishVia operator coreStateCid emitterOwner emitterCid 42 "11223344" 0
-  (_, secondMessage) <- publishVia operator coreStateCid emitterOwner successorEmitterCid 43 "55667788" 0
+  emitterCid <- registerEmitter guardianGovernance emitterOwner
+  (successorEmitterCid, firstMessage) <- publishVia guardianGovernance coreStateCid emitterOwner emitterCid 42 "11223344" 0
+  (_, secondMessage) <- publishVia guardianGovernance coreStateCid emitterOwner successorEmitterCid 43 "55667788" 0
   firstMessage.sequence === 0
   secondMessage.sequence === 1
   firstMessage.owner === emitterOwner
-  firstMessage.registrar === operator
+  firstMessage.registrar === guardianGovernance
   secondMessage.payload === "55667788"
   externalVerifier <- allocateParty ("SmokeVerifier-" <> runLabel)
-  coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   verifiedVaa <- submit (actAs externalVerifier <> disclose coreStateDisclosure) do
     exerciseCmd coreStateCid ParseAndVerifyVAA with
       verifier = externalVerifier
@@ -43,6 +42,6 @@ bootstrapPublishAndVerify runLabel = do
   verifiedVaa.emitterChain === 1
   verifiedVaa.sequence === 1
   pure SmokePublishResult with
-    operator, guardianGovernance, emitterOwner, coreStateCid
+    guardianGovernance, emitterOwner, coreStateCid
     publishedSequences = [firstMessage.sequence, secondMessage.sequence]
     verifiedVaaSequence = verifiedVaa.sequence

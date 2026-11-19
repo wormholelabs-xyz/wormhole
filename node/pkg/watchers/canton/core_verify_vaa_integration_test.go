@@ -2,15 +2,15 @@
 
 // Integration test proving ParseAndVerifyVAA is callable by an external
 // "verifier" party that is NOT a stakeholder of CoreState (CoreState's only
-// stakeholders are operator and guardianGovernance), against a live Canton
+// stakeholders are guardianGovernance and the fee custody party), against a live Canton
 // sandbox/participant -- not just the Script interpreter.
 //
 // It runs Test.TestCore:integrationParseAndVerifyVAAByExternalVerifier, which
 // allocates a fresh external party, has CoreState explicitly disclosed to it
 // (a data attachment, not a signature), and verifies a real guardian-signed
-// VAA as that party alone -- operator is never an active party in that
-// submission. The script's own assertions (guardianSetIndex/emitterChain/
-// sequence checks) make `dpm script` exit non-zero if verification failed;
+// VAA as that party alone -- the only active party in that submission. The
+// script's own assertions (guardianSetIndex/emitterChain/sequence checks) make
+// `dpm script` exit non-zero if verification failed;
 // this test additionally confirms the returned party is a real, live-hosted
 // party id, not something forged.
 //

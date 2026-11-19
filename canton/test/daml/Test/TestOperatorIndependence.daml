@@ -18,7 +18,7 @@ import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
-import Wormhole.Core.VAA ()
+import Wormhole.Core.VAA (parseVAA)
 import Test.MockToken
 import Test.TestCore
 import Test.TestRedTeamCore (checkAttackFailedWith, rtAppMessageBySet0, rtGuardianSetUpgradeWrongEmitterAddress,
@@ -51,7 +51,7 @@ setupCoreBridge partyLabel feeInstrument = do
     emitterRegistryCid
     replayRegistryCid
 
-discloseAsGuardianGovernance : CoreBridge -> ContractId t -> Script Disclosure
+discloseAsGuardianGovernance : Template t => CoreBridge -> ContractId t -> Script Disclosure
 discloseAsGuardianGovernance bridge contractId = fromSome <$> queryDisclosure bridge.guardianGovernance contractId
 
 checkFailsOnMissingAuthorization : Text -> Either SubmitError a -> Script ()
@@ -228,9 +228,8 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   feeWithdrawal.recipient === transferFeesRecipient
   upgradeCoreStateCid <- relayGovernance bridge relayer transferCoreStateCid govContractUpgradeVAA devnetPubKeys
   Some upgradeCoreState <- queryContractId gg upgradeCoreStateCid
-  contractUpgradeVAA <- submit (actAs verifier <> disclose coreStateDisclosure) do
-    exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with verifier, encodedVAA = govContractUpgradeVAA, pubKeys = devnetPubKeys
-  assertMsg "ContractUpgrade digest not consumed" (Set.member contractUpgradeVAA.hash upgradeCoreState.consumedGovernance)
+  assertMsg "ContractUpgrade digest not consumed"
+    (Set.member (parseVAA govContractUpgradeVAA).hash upgradeCoreState.consumedGovernance)
   upgradedAt <- getTime
   setUpgradeCoreStateCid <- relayGovernance bridge relayer upgradeCoreStateCid govGuardianSetUpgradeVAA devnetPubKeys
   Some setUpgradeCoreState <- queryContractId gg setUpgradeCoreStateCid
@@ -312,10 +311,10 @@ testFormerOperatorHasNoCorePower = do
               exerciseCmd bridge.emitterRegistryCid SetRegistrationFee with newRegistrationFee = 1)
         , ("SetClaimFee", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
               exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 1)
-        , ("ReplaceOnboardingFeeAdmin on EmitterRegistry", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
-              exerciseCmd bridge.emitterRegistryCid ReplaceOnboardingFeeAdmin with newOnboardingFeeAdmin = labsOperator)
-        , ("ReplaceOnboardingFeeAdmin on ReplayRootRegistry", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
-              exerciseCmd bridge.replayRegistryCid ReplaceOnboardingFeeAdmin with newOnboardingFeeAdmin = labsOperator)
+        , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
+              exerciseCmd bridge.emitterRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = labsOperator)
+        , ("ReplaceReplayRootRegistryFeeAdmin", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
+              exerciseCmd bridge.replayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = labsOperator)
         , ("SubmitGovernanceVAA with submitter Alice", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
               exerciseCmd bridge.coreStateCid SubmitGovernanceVAA with
                 submitter = alice, encodedVAA = govSetFeeVAA, pubKeys = [(0, devnetGuardianPubKey)])
@@ -461,9 +460,10 @@ testShadowAnchorsAreRejected = do
   emitterCid <- registerEmitterAs bridge owner
 
   -- Paid onboarding on the real registries.
-  registryDisclosure <- discloseAsGuardianGovernance bridge bridge.emitterRegistryCid
+  [(registryCid, _)] <- query @EmitterRegistry gg
+  registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
   paidRegistryCid <- submit (actAs bridge.onboardingFeeAdmin <> disclose registryDisclosure) do
-    exerciseCmd bridge.emitterRegistryCid SetRegistrationFee with newRegistrationFee = 500
+    exerciseCmd registryCid SetRegistrationFee with newRegistrationFee = 500
   paidRegistryDisclosure <- discloseAsGuardianGovernance bridge paidRegistryCid
   replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
   paidReplayRegistryCid <- submit (actAs bridge.onboardingFeeAdmin <> disclose replayRegistryDisclosure) do
@@ -586,7 +586,7 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
     exerciseCmd bridge.emitterRegistryCid SetRegistrationFee with newRegistrationFee = 5
   Some repricedRegistry <- queryContractId gg repricedRegistryCid
   repricedRegistry === registry with registrationFee = 5
-  repricedReplayRegistryCid <- submit (actAs feeAdmin <> withRegistries) do
+  repricedReplayRegistryCid <- submit (actAs feeAdmin <> disclose replayRegistryDisclosure) do
     exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 7
   Some repricedReplayRegistry <- queryContractId gg repricedReplayRegistryCid
   repricedReplayRegistry === replayRegistry with claimFee = 7
@@ -614,8 +614,8 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
               archiveCmd repricedRegistryCid)
         , ("archive ReplayRootRegistry", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
               archiveCmd repricedReplayRegistryCid)
-        , ("ReplaceOnboardingFeeAdmin", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
-              exerciseCmd repricedRegistryCid ReplaceOnboardingFeeAdmin with newOnboardingFeeAdmin = feeAdmin)
+        , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+              exerciseCmd repricedRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = feeAdmin)
         , ("stranger sets the registration fee", discardResult $ trySubmit (actAs stranger <> withRepricedRegistries) do
               exerciseCmd repricedRegistryCid SetRegistrationFee with newRegistrationFee = 6)
         ]
@@ -623,11 +623,11 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
 
   -- Row 10: gg replaces the admin on both registries; only the admin field changes.
   replacedRegistryCid <- submit gg do
-    exerciseCmd repricedRegistryCid ReplaceOnboardingFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
+    exerciseCmd repricedRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
   Some replacedRegistry <- queryContractId gg replacedRegistryCid
   replacedRegistry === repricedRegistry with onboardingFeeAdmin = newFeeAdmin
   replacedReplayRegistryCid <- submit gg do
-    exerciseCmd repricedReplayRegistryCid ReplaceOnboardingFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
+    exerciseCmd repricedReplayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
   Some replacedReplayRegistry <- queryContractId gg replacedReplayRegistryCid
   replacedReplayRegistry === repricedReplayRegistry with onboardingFeeAdmin = newFeeAdmin
 
