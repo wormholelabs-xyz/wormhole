@@ -14,6 +14,8 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 | Operate a Canton participant node on the Global Synchronizer | 3 | Continuous |
 | Keep the participant on the minimum Splice version | 3.2 | Weekly releases |
 | Host the `guardianGovernance` party | 4 | Once, then on changes |
+| Keep the guardian node without public ports | 3.5 | Continuous |
+| Follow the snapshot rules when a host joins | 4.2, 4.3 | On each new host |
 | Hold one `guardianGovernance` owner key | 5 | Continuous |
 | Sign `guardianGovernance` ceremonies | 5.2, 7 | On request |
 | Apply the package vetting policy | 6 | On each new package version |
@@ -150,11 +152,28 @@ Without key download, the identity dump does not include private keys.
 
 **Open item:** the KMS provider for guardian participants.
 
+### 3.5 Network exposure
+
+A Canton participant connects out to the sequencers of the synchronizer.
+The synchronizer allowlists the egress IP of the participant.
+The participant needs no inbound port from the internet.
+
+1. Do not expose a port of the guardian node to the internet.
+2. Bind the Ledger API and the JSON Ledger API to a private interface.
+3. Admit only the watcher and your gateway to the Ledger API ports.
+
+Users and relayers do not connect to guardian participants.
+They submit through their own validator, with disclosed contracts.
+A guardian that serves contract disclosure or the CIP-0056 registry API does so from a separate gateway.
+The gateway has its own public IP and reaches the JSON Ledger API through a private link or mutual TLS.
+Its Ledger API user has only `CanReadAs`.
+For the gateway, refer to `canton/disclosure/README.md` in the native-token-transfers repository.
+
 ## 4. Party hosting
 
 Host the party on your participant before the genesis of the core bridge.
 A participant that starts to host the party later does not receive prior contracts.
-For a late start, Canton party replication or an ACS import is necessary.
+For a late start, Canton party replication is necessary (Section 4.2).
 
 ### 4.1 Host `guardianGovernance`
 
@@ -185,6 +204,71 @@ With one host, the threshold is 1.
 **Open item:** the confirmation threshold of `gg` for MainNet.
 A high threshold stops `gg` transactions when few hosts are offline.
 A low threshold lets fewer compromised participants confirm for `gg`.
+
+### 4.2 Add a host after genesis
+
+A new guardian participant must host `gg` and `nttCustody` after these parties have contracts.
+Thus the new host needs Canton offline party replication.
+For the steps, refer to the Canton party management documentation at
+<https://docs.canton.network/global-synchronizer/production-operations/party-management.md>.
+
+The replication has 13 steps in a fixed order. In summary:
+
+1. The new participant vets each package on the allowlist (Section 6).
+2. The new participant authorizes the hosting with the onboarding flag.
+3. The new participant disconnects from all synchronizers.
+4. A threshold of owner keys signs the `PartyToParticipant` change for `gg` with the onboarding flag.
+5. An existing host exports the active contract set (ACS) of `gg` with `export_party_acs`.
+6. The new participant makes a backup of its database.
+7. The new participant imports the ACS with `import_party_acs` and `ContractImportMode.Validation`.
+8. The new participant connects again. Canton clears the onboarding flag.
+9. Do steps 2 to 8 again for `nttCustody`.
+
+The export contains the ACS at the offset where the new hosting becomes active.
+Each existing host exports the same contract set for one new host.
+
+### 4.3 Trust in the ACS snapshot
+
+The new host trusts the host that gives it the snapshot.
+The import checks that the contents of each contract agree with its contract ID.
+The contract ID is a hash, not a signature.
+Thus the import cannot find an invented contract, a removed contract or an archived contract.
+
+A bad snapshot has these effects:
+
+- A removed contract makes the new host reject valid transactions that use it.
+- An invented contract makes the new host approve transactions that use it.
+  The honest hosts reject them with `LOCAL_VERDICT_INACTIVE_CONTRACTS`.
+- If the bad hosts and the deceived hosts reach the confirmation threshold, the mediator approves the transaction.
+- Each honest host then stops with the error "Mediator approved a request that has been locally rejected".
+- ACS commitments between participants show `ACS_COMMITMENT_MISMATCH` at the next commitment interval.
+
+LocalNet rehearsal on 2026-11-17 with three hosts and a confirmation threshold of 2:
+
+- An existing host gave a new host a snapshot with an invented `Coin` of 1,000,000 tokens.
+- The import accepted the `Coin` with `ContractImportMode.Validation`.
+- The bad host and the new host approved an NTT `Transfer` of the `Coin`. The mediator approved it.
+- The honest host rejected the transaction. Then it stopped with the fatal error and restarted in a loop.
+- An import of the invented `Coin` on the honest host stopped the loop.
+  This import also made the watcher of the honest host observe the forged message.
+- `ACS_COMMITMENT_MISMATCH` occurred on each host at the next interval.
+- With an honest snapshot, or with a threshold of 3, the mediator rejected the transaction.
+
+Rules for each new host:
+
+1. Get the snapshot of each new host from a different existing guardian.
+2. Keep the number of new hosts in one change well below the confirmation threshold.
+3. Do not count the new host in the threshold until its ACS commitments agree with each other `gg` host.
+4. If an ACS commitment mismatch stays after onboarding, remove the new host. Replicate again from a different guardian.
+
+WARNING: If your participant stops with "Mediator approved a request that has been locally rejected",
+do not import a contract to stop the restart loop.
+Such an import makes your watcher observe the transaction.
+Stop the participant and report a security incident to the other guardians.
+
+**Open item:** the procedure to recover an honest host after this error.
+
+**Open item:** a signed comparison of the snapshot digests of several guardians before the import.
 
 ## 5. `guardianGovernance` owner keys
 
@@ -951,6 +1035,8 @@ Use the procedure in Section 8.4 after each restart.
 | `wormhole_canton_publish_without_read_party_stakeholder_total` | The value increases. |
 | Traffic balance of the participant | **Open item** |
 | Number of `gg` hosts online | **Open item** |
+| `ACS_COMMITMENT_MISMATCH` in the participant log | Each occurrence after the onboarding of a host (Section 4.3). |
+| "Mediator approved a request that has been locally rejected" in the participant log | Each occurrence. Treat it as a security incident (Section 4.3). |
 
 `wormhole_canton_current_height` is the ledger end of your participant.
 The watcher reads it at the start and each 5 seconds.
@@ -1048,6 +1134,8 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | KMS provider for guardian participants | 3.4 |
 | Production commands for party hosting | 4.1 |
 | Confirmation threshold of `gg` for MainNet | 4.1 |
+| Recovery of an honest host after a forged approval | 4.3 |
+| Signed comparison of snapshot digests before an import | 4.3 |
 | Threshold k of n of the owner keys for MainNet | 5.1 |
 | Production tool to decode and hash prepared transactions | 5.3 |
 | Location, writer and authentication of each trust source | 6.0 |
