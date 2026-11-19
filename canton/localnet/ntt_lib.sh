@@ -8,7 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/ntt_offline_lib.sh"
 # Package pins of the NTT run. ntt_upload_dars.sh checks each DAR against them with ==.
 # wormhole-core 0.8.3: the LocalNet core DAR, the core DALF of the NTT DAR and the watcher filter.
 readonly WORMHOLE_CORE_VERSION="0.8.3"
-readonly WORMHOLE_CORE_PACKAGE_ID="b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69"
+readonly WORMHOLE_CORE_PACKAGE_ID="9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d"
 # NTT_PIN_VERSION selects one entry of ntt_pinned_package_id. Default 0.3.2. The pinned ntt DARs are built on
 # core 0.8.0, so ntt_upload_dars.sh rejects them until the NTT DAR is rebuilt on core 0.8.3 and pinned.
 readonly NTT_VERSION="${NTT_PIN_VERSION:-0.3.2}"

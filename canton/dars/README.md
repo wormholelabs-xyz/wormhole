@@ -59,11 +59,14 @@ Each 0.8.1 `CoreState` of a LocalNet genesis or rotation satisfies the new preco
 No participant outside LocalNet vetted 0.8.1.
 
 0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState`.
-`damlc` reports this change as the warning `upgraded-template-expression-changed`.
+0.8.3 also adds `ensure` rules to `CoreState`: the fee instrument admin is not `guardianGovernance` and not the `operator`.
+`damlc` reports these changes as the warning `upgraded-template-expression-changed`.
 A 0.8.2 `CoreState` cannot run under 0.8.3.
 Thus 0.8.3 starts from a fresh genesis (`../A14_EMITTER_ID_UNIQUENESS.md`, "Deployment of 0.8.3").
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs as `guardianGovernance`.
-The 0.8.3 main package id is `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`.
+The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`.
+The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
+It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
 To check the package id, run
 `dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.
