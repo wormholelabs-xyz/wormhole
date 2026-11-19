@@ -1,0 +1,31 @@
+// Print the PartyToParticipant mapping of each party in HOSTING_PARTY_IDS (comma-separated) as each participant sees it,
+// and the active contract IDs of the party on each participant that hosts it.
+// Environment: HOSTING_PARTY_IDS, HOSTING_ACS_DIGEST ("true" prints a SHA-256 digest of the sorted contract IDs).
+import com.digitalasset.canton.topology._
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+
+val partyIds = sys.env("HOSTING_PARTY_IDS").split(",").toSeq.map(_.trim).filter(_.nonEmpty).map(PartyId.tryFromProtoPrimitive)
+require(partyIds.nonEmpty, "HOSTING_PARTY_IDS is empty")
+val printAcsDigest = sys.env.get("HOSTING_ACS_DIGEST").contains("true")
+def sha256Hex(text: String): String =
+  java.security.MessageDigest.getInstance("SHA-256").digest(text.getBytes("UTF-8")).map("%02x".format(_)).mkString
+val participantNameById = participants.remote.map(host => host.id -> host.name).toMap
+participants.remote.foreach { host =>
+  host.synchronizers.list_connected().find(_.synchronizerAlias.unwrap == "global") match {
+    case None => println(s"HOSTING ${host.name} connected=false")
+    case Some(synchronizer) =>
+      val store = TopologyStoreId.Synchronizer(synchronizer.physicalSynchronizerId)
+      partyIds.foreach { partyId =>
+        host.topology.party_to_participant_mappings.list(store).filter(_.item.partyId == partyId).foreach { mapping =>
+          val hosts = mapping.item.participants.map(hosting =>
+            s"${participantNameById.getOrElse(hosting.participantId, hosting.participantId.toProtoPrimitive)}/${hosting.permission}${if (hosting.onboarding) "/onboarding" else ""}").sorted.mkString(",")
+          println(s"HOSTING ${host.name} party=${partyId.uid.identifier} serial=${mapping.context.serial} threshold=${mapping.item.threshold} hosts=$hosts")
+        }
+        if (printAcsDigest && host.topology.party_to_participant_mappings.is_known(synchronizer.physicalSynchronizerId.logical, partyId, Seq(host.id))) {
+          val contractIds = host.ledger_api.state.acs.of_party(partyId, limit = PositiveInt.tryCreate(100000)).map(_.contractId).sorted
+          println(s"ACS ${host.name} party=${partyId.uid.identifier} contracts=${contractIds.size} digest=${sha256Hex(contractIds.mkString("\n"))}")
+          contractIds.foreach(contractId => println(s"ACSID ${host.name} party=${partyId.uid.identifier} $contractId"))
+        }
+      }
+  }
+}

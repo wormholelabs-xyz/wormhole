@@ -44,7 +44,9 @@ validator_port_prefix() {
     app-user) echo 2 ;;
     app-provider) echo 3 ;;
     sv) echo 4 ;;
-    *) echo "unknown validator: $1 (use app-user, app-provider or sv)" >&2; return 1 ;;
+    # Temporary participant of the hosting-change rehearsals (guardian4.sh).
+    guardian4) echo 5 ;;
+    *) echo "unknown validator: $1 (use app-user, app-provider, sv or guardian4)" >&2; return 1 ;;
   esac
 }
 
