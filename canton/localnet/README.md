@@ -88,7 +88,7 @@ Set `DB_PORT` to use a different port.
 | `core_upgrade_rehearsal.sh` | Rehearses the `wormhole-core` upgrade from 0.6.0 to 0.7.0, and the rollback. |
 | `core_upgrade_package_ids.sh` | Package ids and DARs of the core upgrade rehearsal. |
 | `guardian4.sh` | Starts or removes the temporary participant `guardian4` and its PostgreSQL container. |
-| `party_replication.sh` | Replicates `guardianGovernance` and `nttCustody` to `guardian4` offline. Removes a host. Sets the confirmation threshold. |
+| `party_replication.sh` | Replicates `guardianGovernance` and `nttCustody` to `guardian4` offline. Removes a host. Sets the confirmation threshold. Compares each hosting change with the intended change before the owner keys sign it. |
 | `gg_hosting_change_check.sh` | Checks the hosts, the threshold and the ACS of `guardian4` after a hosting change. |
 | `gg_hosting_change_live_check.sh` | Checks that a `PublishMessage` commits with `guardian4` as a confirmer, also with `sv` disconnected. |
 | `gg_hosting_change_negative_check.sh` | Checks that the synchronizer rejects a hosting change with one owner key or without host consent. |
@@ -97,17 +97,15 @@ Set `DB_PORT` to use a different port.
 
 ## Script tests
 
-The script tests do not need Docker or LocalNet. Run each test from the repository root:
+The script tests do not need Docker or LocalNet.
+Run the tests from the repository root.
+The loop runs each test in `canton/localnet/test` except the two console tests:
 
 ```bash
-canton/localnet/test/bounded_run_test.sh
-canton/localnet/test/image_lock_test.sh
-canton/localnet/test/owner_signer_block_test.sh
-canton/localnet/test/ntt_lib_test.sh
-canton/localnet/test/core_upgrade_package_ids_test.sh
-canton/localnet/test/curl_calls_are_bounded_test.sh
-canton/localnet/test/canary_gate_decision_test.sh
-canton/localnet/test/owner_key_input_checks_test.sh
+for script_test in canton/localnet/test/*_test.sh; do
+  case "$script_test" in */console_*) continue ;; esac
+  "$script_test"
+done
 canton/tools/publish_message_scan_test.sh
 ```
 
