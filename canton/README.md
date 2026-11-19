@@ -952,6 +952,13 @@ mode an empty `--cantonReadAsParty` selects **`filters_for_any_party`**. The
 `TRANSACTION_SHAPE_LEDGER_EFFECTS` is required so `ExercisedEvent`s — which carry
 the choice result — are included.
 
+**Registrar pin.** When `--cantonReadAsParty` has a value, the watcher drops
+each message whose `registrar` is not equal to the read-as party. The comparison
+is exact. This check is redundant with the read-party signatory check. One
+`guardianGovernance` is one deployment, so a message from a registry of another
+`guardianGovernance` is not a message of this deployment. Each drop increments
+`wormhole_canton_foreign_registrar_messages_dropped_total`.
+
 ### 7.2 `TxID` and offsets
 
 The `MessagePublication.TxID` is the transaction's **update id**. The
@@ -1613,6 +1620,9 @@ matches its effect.
 - `wormhole_canton_accepted_publish_messages_total` counts the stream
   publishes that the watcher emits. The `role` label is `current` or
   `retiring`. Reobservations are not in this counter.
+- `wormhole_canton_foreign_registrar_messages_dropped_total` counts the
+  messages that the watcher drops because their `registrar` is not the
+  read-as party.
 - The heartbeat contract address is `current` or `current,retiring`. A
   dashboard that reads this field must split it at the comma.
 
