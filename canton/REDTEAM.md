@@ -28,6 +28,7 @@ To regenerate the fixtures, run step 3 with `CANTON_VECTORGEN=write`.
 | ID | Attack | Result | Evidence | Severity | Proposed fix |
 | - | - | - | - | - | - |
 | A1 | Skip or redirect a fee. Use a shadow `CoreState` or omit the fee input. | Held. | `testRedTeamA1FeeCannotBeSkipped`; `TestFees.test*PinsGuardianGovernance`; `TestCantonWatcherGovernanceReaderIntegration`. | None. | None. |
+| A1-2 | Redeem a forged VAA on an integrator through a shadow `CoreState`. A compromised operator key co-signs the shadow under a throwaway `guardianGovernance`. | Fixed on `canton/integrator-gg-pin`: `ExampleIntegrator.Redeem` pins `guardianGovernance`. | `Test.ExampleIntegrator.testIntegratorCoreStatePin`; `testCompromisedOperatorCannotForgeCoreState`. | Medium. | Integrators pin `guardianGovernance`, not the operator alone. |
 | A2 | Forge a message from a look-alike package. | Held. | `TestCantonWatcherIgnoresLookalikePackage`. | None. | Keep the package-id pin. |
 | A6-1 | Send a bad guardian set upgrade. | Held. | `testRedTeamA6GuardianSetUpgradeRules`. | None. | None. |
 | A6-2 | Sign a VAA with bad signatures or the superseded set. | Held. | `testRedTeamA6QuorumAndSignerOrder`. | None. | None. |

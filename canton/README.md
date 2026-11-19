@@ -692,6 +692,8 @@ its _visibility_ is simply not needed. `testIntegratorRedeem` pins the
 inversion of the key-based design's failure mode: replay attempts by arbitrary
 submitters fail on activeness (stale node) or membership (fresh node) — never
 succeed.
+`testIntegratorCoreStatePin` pins the `CoreState` check: a shadow `CoreState`
+under the real operator key and a throwaway `guardianGovernance` fails `Redeem`.
 
 ### 4.7 Addressing without keys: the disclosure service
 
@@ -730,9 +732,11 @@ Two properties make this safe to outsource:
   authenticate every resolved contract by its **payload**, never by how the
   cid was found: `CoreState` by its signatory anchor fields (§4.1),
   `ReplayNode` by the (consumer, namespace, operator) binding inside
-  `VerifyAndConsumeVAA` plus the app-side operator pin (see
-  `ExampleIntegrator.Redeem`). The service is trusted for _liveness_ only, like
-  any RPC endpoint.
+  `VerifyAndConsumeVAA`. The app pins the `CoreState` by `guardianGovernance`
+  through `GetGuardianGovernance`, with the expected value from its own
+  configuration (see `ExampleIntegrator.Redeem`). An operator-only pin accepts
+  a shadow `CoreState` that a compromised operator key co-signs. Consumers
+  trust the service for _liveness_ only, like any RPC endpoint.
 - **Registry pin.** A client passes `expectedGuardianGovernance = Some gg` to
   `RegisterEmitter`, with `gg` from its own configuration. A registry from the
   service under another `guardianGovernance` then fails with "registry
