@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -225,9 +226,15 @@ func (f *fakeClient) subscribeArgs() (int64, cantonclient.TemplateID, string) {
 	return f.subBegin, f.subTmpl, f.subChoice
 }
 
+// testWatcher reads as sampleRegistrar, the registrar of the sample messages.
 func testWatcher(t *testing.T, msgC chan<- *common.MessagePublication) *Watcher {
 	t.Helper()
-	w, err := NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), "Operator::ns", AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+	return testWatcherReadingAs(t, msgC, sampleRegistrar)
+}
+
+func testWatcherReadingAs(t *testing.T, msgC chan<- *common.MessagePublication, readAsParty string) *Watcher {
+	t.Helper()
+	w, err := NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), readAsParty, AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
 	require.NoError(t, err)
 	return w
 }
@@ -286,6 +293,40 @@ func TestProcessMessageDropsMissingKeyParty(t *testing.T) {
 				t.Fatal("expected no observation for a message missing an emitter key party")
 			default:
 			}
+		})
+	}
+}
+
+func TestProcessMessageRequiresRegistrarToBeReadAsParty(t *testing.T) {
+	const otherParty = "other::1220aa"
+	cases := []struct {
+		name                         string
+		readAsParty                  string
+		registrar                    string
+		wantEmitted                  bool
+		wantForeignRegistrarIncrease float64
+	}{
+		{name: "registrar is the read-as party", readAsParty: sampleRegistrar, registrar: sampleRegistrar, wantEmitted: true},
+		{name: "registrar is another party", readAsParty: sampleRegistrar, registrar: otherParty, wantForeignRegistrarIncrease: 1},
+		{name: "registrar is empty", readAsParty: sampleRegistrar, registrar: ""},
+		{name: "unsafe dev mode reads as no party", readAsParty: "", registrar: otherParty, wantEmitted: true},
+		{name: "registrar differs only in case", readAsParty: sampleRegistrar, registrar: strings.ToUpper(sampleRegistrar), wantForeignRegistrarIncrease: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msgC := make(chan *common.MessagePublication, 1)
+			w := testWatcherReadingAs(t, msgC, tc.readAsParty)
+			foreignRegistrarBefore := testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)
+
+			w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
+				ParticipantOffset: 1,
+				UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
+				EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
+				Message:           cantonclient.CantonMessage{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: tc.registrar, Owner: sampleOwner, EmitterID: sampleEmitterID},
+			}, false)
+
+			assert.Equal(t, tc.wantEmitted, len(msgC) == 1)
+			assert.Equal(t, tc.wantForeignRegistrarIncrease, testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)-foreignRegistrarBefore)
 		})
 	}
 }
