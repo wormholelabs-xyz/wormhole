@@ -63,9 +63,10 @@ const emitterAddressTag = "wormhole:emitter:v1"
 //	keccak256( utf8(tag) ‖ lp(registrar) ‖ lp(owner) ‖ uint64be(emitterId) )
 //
 // where lp is a uint32 big-endian byte-length prefix. The two length prefixes
-// make the preimage injective across the two variable-length party ids; owner is
-// part of the preimage so a compromised operator cannot forge an existing
-// emitter's address (see Wormhole.Core.State).
+// make the preimage injective across the two variable-length party ids. The
+// registrar is the guardianGovernance party that signs the emitter registry;
+// owner is part of the preimage so guardianGovernance alone cannot forge an
+// existing emitter's address (see Wormhole.Core.State).
 func DeriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.Address {
 	buf := make([]byte, 0, len(emitterAddressTag)+8+len(registrar)+len(owner)+8)
 	buf = append(buf, emitterAddressTag...)
@@ -369,6 +370,17 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 			zap.String("registrar", ev.Message.Registrar),
 			zap.String("owner", ev.Message.Owner),
 			zap.Stringer("updateId", ev.UpdateID))
+		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
+		return
+	}
+
+	// SECURITY: a registry of another guardianGovernance derives foreign emitter addresses. Exact party id equality.
+	if e.readAsParty != "" && ev.Message.Registrar != e.readAsParty {
+		logger.Error("dropping Canton message whose registrar is not the read-as party",
+			zap.String("registrar", ev.Message.Registrar),
+			zap.String("readAsParty", e.readAsParty),
+			zap.Stringer("updateId", ev.UpdateID))
+		cantonForeignRegistrarMessagesDropped.Inc()
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
 	}
