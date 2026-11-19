@@ -276,9 +276,13 @@ Rules for each new host:
    A guardian is the source for at most one host that is not checked yet (rule 3).
 3. Add the new host at `Observation`.
    After its ACS commitments agree with each other `gg` host for one full commitment interval, change it to `Confirmation`.
-   This second change needs the threshold of owner keys.
-   It also sets the confirmation threshold to a majority of the new number of hosts.
-4. If an ACS commitment mismatch stays for one full interval after the onboarding flag is clear, remove the new host.
+   This second change needs the threshold of owner keys and the consent of the new host.
+   The new host proposes the promotion, and the owners sign it.
+   Canton requires the authorization of the party and of the participant for a permission increase.
+   A promotion that only the owner keys sign does not take effect.
+4. Make sure that the confirmation threshold is a majority of the hosts at `Confirmation`.
+   Change the threshold in a separate change if necessary.
+5. If an ACS commitment mismatch stays for one full interval after the onboarding flag is clear, remove the new host.
    The new host agrees with its source host and disagrees with the other hosts. Report the source guardian.
 
 WARNING: If your participant logs "Mediator approved a request that has been locally rejected",
@@ -290,9 +294,18 @@ Stop the participant and report a security incident to the other guardians.
 
 **Open item:** a signed comparison of the snapshot digests of several guardians before the import.
 
-**Open item:** a LocalNet test of the `Observation`-first onboarding (rule 3).
 An `Observation` host during onboarding is an exception to the `Confirmation` rule of Section 2.
 It is also an exception to the hosting checks of the owner key rotation (Section 7.4).
+Do not rotate owner keys while a host is at `Observation`.
+
+LocalNet rehearsal on 2026-11-19 ([`gg_observation_onboarding_check.sh`](../canton/localnet/gg_observation_onboarding_check.sh)):
+
+- The rehearsal onboarded `guardian4` at `Confirmation`, changed it to `Observation`, then promoted it again.
+  It did not onboard a host at `Observation` with the onboarding flag. It did not wait for a commitment interval.
+- With `guardian4` at `Observation` and `sv` disconnected, a `PublishMessage` failed with `MEDIATOR_SAYS_TX_TIMED_OUT`.
+- After the promotion of `guardian4` to `Confirmation`, the same `PublishMessage` committed.
+
+**Open item:** a LocalNet rehearsal of rule 3 as written: onboard at `Observation` with the onboarding flag, wait for one commitment interval, then promote.
 
 ## 5. `guardianGovernance` owner keys
 
@@ -963,6 +976,15 @@ The `amount` field is in units of 10^-10 of the fee instrument.
    That participant can remove its own hosting. Other changes to the hosting need the `gg` threshold.
 3. Make sure that the confirmation threshold is a majority of the hosts that stay.
 4. Remove the Ledger API user of the watcher of the guardian.
+5. Remove the `nttCustody` hosting from that participant in the same way.
+
+CAUTION: A participant that stops to host a party keeps its copy of the contracts of that party.
+The copy does not change after the removal.
+If the participant hosts another stakeholder of these contracts, it rejects valid transactions with `LOCAL_VERDICT_INACTIVE_CONTRACTS`.
+LocalNet showed this on 2026-11-19: a removed host rejected an NTT `Release` because of an archived custody pot.
+Do not add a removed participant again without a new replication (Section 4.2).
+
+**Open item:** the procedure to remove the stale contracts of a party from a participant that no longer hosts it.
 
 ## 8. Watcher configuration
 
@@ -1161,7 +1183,8 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Confirmation threshold of `gg` for MainNet | 4.1 |
 | Recovery of an honest host after a forged approval | 4.3 |
 | Signed comparison of snapshot digests before an import | 4.3 |
-| LocalNet test of `Observation`-first onboarding | 4.3 |
+| LocalNet rehearsal of `Observation`-first onboarding with the onboarding flag | 4.3 |
+| Removal of stale party contracts from a former host | 7.7 |
 | Threshold k of n of the owner keys for MainNet | 5.1 |
 | Production tool to decode and hash prepared transactions | 5.3 |
 | Location, writer and authentication of each trust source | 6.0 |
@@ -1185,6 +1208,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 
 | Item | Resolution |
 | - | - |
+| An `Observation` host and the confirmation threshold | An `Observation` host does not count. After the promotion to `Confirmation`, it counts. LocalNet, 2026-11-19 (Section 4.3). |
 | Multi-participant hosting of `gg` | Passed live on 2026-11-17 with `wormhole-core` 0.6.0 on three LocalNet participants at `Confirmation` with threshold 2 (Section 2.3). |
 | Vetting on a subset of hosts | Rejected at prepare. Each host must vet. Passed live on 2026-11-17 with `wormhole-core` 0.6.0 (Section 6.3). |
 | Mandatory `gg` party in the watcher | `--cantonReadAsParty` is mandatory outside unsafe dev mode (Section 8). |

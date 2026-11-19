@@ -236,9 +236,9 @@ final case class NamespaceTopologyView(participantName: String,
 
 // checkParticipantTopologyViewsAgree: runs before any change. Each guardian host shows the same namespace definition
 // and the same PartyToParticipant mappings, each with the same serial. No party of the namespace has a
-// PartyToKeyMapping.
-def checkParticipantTopologyViewsAgree(views: Seq[NamespaceTopologyView]): Unit = {
-  require(views.size == expectedGuardianHostCount, s"SAFETY STOP: ${views.size} participant views, expected $expectedGuardianHostCount")
+// PartyToKeyMapping. There are exactly expectedViewCount views.
+def checkParticipantTopologyViewsAgree(views: Seq[NamespaceTopologyView], expectedViewCount: Int = expectedGuardianHostCount): Unit = {
+  require(views.size == expectedViewCount, s"SAFETY STOP: ${views.size} participant views, expected $expectedViewCount")
   val participantNames = views.map(_.participantName)
   participantNames.diff(participantNames.distinct).headOption.foreach(participantName =>
     throw new IllegalArgumentException(s"SAFETY STOP: participant $participantName read twice"))
