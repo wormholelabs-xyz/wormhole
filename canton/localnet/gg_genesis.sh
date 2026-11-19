@@ -4,7 +4,7 @@
 # The prepare endpoint takes one command, so each create is its own transaction.
 # A CoreState create with 1 of 3 owner signatures must fail first.
 # Rerun after a failure: the script creates only the missing contracts.
-# Usage: gg_genesis.sh
+# Usage: [GENESIS_GUARDIAN_SET_INDEX=<index>] gg_genesis.sh (default index 0)
 # Then create the user wormhole-watcher with only CanReadAs(guardianGovernance) on each guardian host, for the
 # emitter id scan.
 # Precondition: gg_host.sh ran. Output: $LOCALNET_STATE_DIR/core-contracts.json.
@@ -16,6 +16,12 @@ source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 
 readonly DEVNET_GUARDIAN_ADDRESS="befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
 readonly GOVERNANCE_CONTRACT="0000000000000000000000000000000000000000000000000000000000000004"
+# The global guardian set index of the genesis set; the CoreState precondition requires 0 to 4294967295.
+readonly GENESIS_GUARDIAN_SET_INDEX="${GENESIS_GUARDIAN_SET_INDEX:-0}"
+if [[ ! "$GENESIS_GUARDIAN_SET_INDEX" =~ ^(0|[1-9][0-9]{0,9})$ ]] || (( GENESIS_GUARDIAN_SET_INDEX > 4294967295 )); then
+  echo "GENESIS_GUARDIAN_SET_INDEX must be a decimal integer from 0 to 4294967295, got: $GENESIS_GUARDIAN_SET_INDEX" >&2
+  exit 1
+fi
 
 # active_operator_contract_ids <qualified-template-suffix>: JSON array of the active contract ids of that
 # template with operator = Operator, from the app-provider ACS.
@@ -48,10 +54,11 @@ case "$active_core_state_count" in
     dso_party="$(curl -sSf "$(json_api_url sv)/v2/parties?pageSize=1000" -H "@$ADMIN_AUTH_HEADER" \
       | jq -er '[.partyDetails[].party | select(startswith("DSO::"))] | if length == 1 then .[0] else error("expected one DSO party") end')"
     core_state_arguments="$(jq -n --arg operator "$OPERATOR_PARTY" --arg gg "$GG_PARTY" --arg dso "$dso_party" \
-      --arg guardian "$DEVNET_GUARDIAN_ADDRESS" --arg governanceContract "$GOVERNANCE_CONTRACT" '{
+      --arg guardian "$DEVNET_GUARDIAN_ADDRESS" --arg governanceContract "$GOVERNANCE_CONTRACT" \
+      --arg guardianSetIndex "$GENESIS_GUARDIAN_SET_INDEX" '{
         operator: $operator, guardianGovernance: $gg, chainId: "75", governanceChainId: "1",
-        governanceContract: $governanceContract, guardianSetIndex: "0",
-        guardianSets: [["0", {keys: [$guardian], expirationTime: null}]],
+        governanceContract: $governanceContract, guardianSetIndex: $guardianSetIndex,
+        guardianSets: [[$guardianSetIndex, {keys: [$guardian], expirationTime: null}]],
         messageFee: "0", feeInstrument: {admin: $dso, id: "Amulet"}, feeRecipient: $gg,
         consumedGovernance: {map: []}}')"
     create_core_state="$(create_command "$CORE_STATE_TEMPLATE" "$core_state_arguments")"

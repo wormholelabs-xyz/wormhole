@@ -4,7 +4,10 @@
 module Wormhole.Core.GuardianSet where
 
 import DA.Date (Month(Jan), date)
+import DA.Foldable (forA_)
 import DA.List.Total ((!!))
+import DA.Set qualified as Set
+import DA.Text qualified as T
 import DA.Time (convertMicrosecondsToRelTime, convertRelTimeToMicroseconds, subTime, time, addRelTime)
 import Wormhole.Core.Bytes
 
@@ -13,6 +16,41 @@ import Wormhole.Core.Bytes
 -- VAAs signed by it still verify.
 guardianSetExpirySeconds : Int
 guardianSetExpirySeconds = 86400
+
+-- | sdk/vaa encodes the index as uint32 (@structs.go@ GuardianSetIndex, @payloads.go@ NewIndex).
+maxGuardianSetIndex : Int
+maxGuardianSetIndex = 4294967295
+
+-- | One-byte key count and signature guardian index; EVM @Messages.sol@ requires fewer than 256.
+maxGuardiansPerSet : Int
+maxGuardiansPerSet = 255
+
+-- | 20 bytes as lowercase hex.
+guardianAddressHexLength : Int
+guardianAddressHexLength = 40
+
+-- | No private key exists for it. EVM @Setters.storeGuardianSet@ rejects it.
+zeroGuardianAddress : Bytes20
+zeroGuardianAddress = "0000000000000000000000000000000000000000"
+
+checkGuardianSetIndexFitsUint32 : Int -> Bool
+checkGuardianSetIndexFitsUint32 index = index >= 0 && index <= maxGuardianSetIndex
+
+-- | Applies to each stored set (CoreState precondition) and to each
+-- GuardianSetUpgrade. Addresses must be distinct: 'verifyVAA' requires
+-- ascending signature positions only, so a repeated address counts one key twice.
+checkGuardianAddressesAreWellFormed : [Bytes20] -> Either Text ()
+checkGuardianAddressesAreWellFormed addresses = do
+  let guardianCount = length addresses
+  assertMsg "guardian set: empty set" (guardianCount >= 1)
+  assertMsg "guardian set: more than 255 guardians" (guardianCount <= maxGuardiansPerSet)
+  forA_ (zip [0 .. guardianCount - 1] addresses) \(position, address) -> do
+    assertMsg ("guardian set: address at position " <> show position <> " is not 20 bytes of lowercase hex")
+      (T.length address == guardianAddressHexLength && isLowerHex address)
+    assertMsg ("guardian set: zero address at position " <> show position)
+      (address /= zeroGuardianAddress)
+  assertMsg "guardian set: duplicate address"
+    (Set.size (Set.fromList addresses) == guardianCount)
 
 -- | A guardian set: the ordered list of guardian addresses (20-byte,
 -- Ethereum-style, exactly as carried by a GuardianSetUpgrade VAA) and an

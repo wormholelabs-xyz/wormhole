@@ -1,6 +1,7 @@
--- | Initialization helpers for the core bridge, mirroring
--- @ethereum/contracts/Setup.sol@ (the @setup@ entrypoint that installs guardian
--- set 0 and the governance configuration).
+-- | Initialization helpers for the core bridge, after
+-- @ethereum/contracts/Setup.sol@ (the @setup@ entrypoint that installs the
+-- genesis guardian set and the governance configuration). @Setup.sol@ fixes the
+-- genesis index at 0; here genesis takes the index, as Sui @setup.move@ does.
 module Wormhole.Core.Setup where
 
 import DA.Map qualified as Map
@@ -22,11 +23,20 @@ solanaGovernanceChainId = 1
 defaultGovernanceContract : Bytes32
 defaultGovernanceContract = "0000000000000000000000000000000000000000000000000000000000000004"
 
--- | Build the initial 'CoreState' value with guardian set 0 (never-expiring)
--- and the supplied governance configuration. Genesis needs both the @operator@
--- and @guardianGovernance@ signatures (the CoreState is co-signed); later
--- transitions inherit guardianGovernance's authority, so the operator submits
--- alone.
+-- | The guardian set that genesis installs: the live global index and its
+-- addresses (Ethereum core @getCurrentGuardianSetIndex@ and @getGuardianSet@).
+-- Guardians sign each VAA with the global index, so a different index here
+-- fails each VAA lookup and the next upgrade.
+data GenesisGuardianSet = GenesisGuardianSet with
+    guardianSetIndex  : Int
+    guardianAddresses : [Bytes20]
+  deriving (Eq, Show)
+
+-- | Build the initial 'CoreState' value with the genesis guardian set
+-- (never-expiring) and the supplied governance configuration. Genesis needs
+-- both the @operator@ and @guardianGovernance@ signatures (the CoreState is
+-- co-signed); later transitions inherit guardianGovernance's authority, so the
+-- operator submits alone.
 --
 -- @feeInstrument@ and @feeRecipient@ are genesis-fixed (no governance action
 -- covers them). In production the recipient is @guardianGovernance@, putting fee
@@ -37,19 +47,20 @@ mkInitialCoreState :
   -> Party        -- ^ guardianGovernance (threshold party; anchors the guardian set)
   -> Int          -- ^ governance chain id
   -> Bytes32      -- ^ governance contract
-  -> [Bytes20]    -- ^ initial guardian addresses (set 0)
+  -> GenesisGuardianSet
   -> InstrumentId -- ^ fee instrument (CC on mainnet)
   -> Party        -- ^ fee recipient (guardianGovernance in production)
   -> CoreState
-mkInitialCoreState operator guardianGovernance govChain govContract initialGuardians feeInstrument feeRecipient =
+mkInitialCoreState operator guardianGovernance govChain govContract genesisSet feeInstrument feeRecipient =
   CoreState with
     operator
     guardianGovernance
     chainId = cantonChainId
     governanceChainId = govChain
     governanceContract = normalizeHex govContract
-    guardianSetIndex = 0
-    guardianSets = Map.fromList [(0, GuardianSet with keys = map normalizeHex initialGuardians, expirationTime = None)]
+    guardianSetIndex = genesisSet.guardianSetIndex
+    guardianSets = Map.fromList
+      [(genesisSet.guardianSetIndex, GuardianSet with keys = map normalizeHex genesisSet.guardianAddresses, expirationTime = None)]
     messageFee = 0
     feeInstrument
     feeRecipient

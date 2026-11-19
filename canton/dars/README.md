@@ -39,6 +39,7 @@ Go watcher's configured packageID changes with the new build.
 | `wormhole-core-0.6.0.dar` | 0.7.0 | `926e55310`, SDK 3.5.1 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` |
 | `wormhole-core-0.7.0.dar` | 0.8.0 | `cfff39977`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
 | `wormhole-core-0.8.0.dar` | 0.8.1 | `b1ed0c5f6`, SDK 3.5.1 | `03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6` |
+| `wormhole-core-0.8.1.dar` | 0.8.2 | `3e9747594`, SDK 3.5.1 | `4a214c8015945441a74dcc2a702f0652b3136e8f7488ab13d8196313c4d47d89` |
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 `damlc` reports these changes as the warning `upgraded-template-expression-changed`.
@@ -49,6 +50,12 @@ Thus 0.8.0 starts from a fresh genesis (`../A14_EMITTER_ID_UNIQUENESS.md`, "Depl
 `damlc` reports this change as the warning `upgraded-template-expression-changed`.
 A 0.8.0 `ReplayNode` with an empty namespace cannot run under 0.8.1.
 No participant outside LocalNet vetted 0.8.0.
+
+0.8.2 adds the `CoreState` precondition on the guardian sets, and genesis takes the guardian set index.
+`damlc` reports the precondition change as the warning `upgraded-template-expression-changed`.
+It reports the same warning for the `EmitterRegistry` precondition: only a compiler-generated name changed.
+Each 0.8.1 `CoreState` of a LocalNet genesis or rotation satisfies the new precondition.
+No participant outside LocalNet vetted 0.8.1.
 
 To check the package id, run
 `dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.

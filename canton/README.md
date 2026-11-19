@@ -180,7 +180,19 @@ template CoreState
     consumedGovernance : Set Bytes32    -- governance-only replay protection (§4.6)
   where
     signatory operator, guardianGovernance
+    ensure checkGuardianSetsAreConsistent guardianSetIndex guardianSets
 ```
+
+**Genesis guardian set index.** Genesis installs the guardian set at the live
+global index (mainnet: the Ethereum core `getCurrentGuardianSetIndex()`), not at 0.
+Guardians sign each VAA with the global index in the VAA header.
+`mkInitialCoreState` takes a `GenesisGuardianSet` (index and addresses), as Sui
+`setup.move` does. EVM `Setup.sol` fixes index 0 and relays each upgrade VAA.
+The template precondition applies to each create, including raw creates from the
+genesis scripts: each index is 0 to 4294967295, the current set exists and does
+not expire, each other set has a lower index and an expiry, and each set has 1 to
+255 distinct, non-zero, 20-byte lowercase addresses.
+`GuardianSetUpgrade` applies the same address check (`checkGuardianAddressesAreWellFormed`).
 
 **Guardian visibility.** Every guardian participant hosts `guardianGovernance`
 (§10), so guardians see what that party sees: `CoreState` and every `Emitter`
@@ -1000,7 +1012,7 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 
 `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
-For 0.8.1, the baseline is `dars/wormhole-core-0.8.0.dar`.
+For 0.8.2, the baseline is `dars/wormhole-core-0.8.1.dar`.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 `damlc` reports these changes only as warnings.

@@ -81,6 +81,20 @@ func guardianSetUpgradePayload(targetChain vaa.ChainID, newGuardianSetIndex uint
 	return payload
 }
 
+// guardianSetUpgradePayload with raw 20-byte addresses, for an address without a private key.
+func guardianSetUpgradePayloadWithAddresses(targetChain vaa.ChainID, newGuardianSetIndex uint32, guardianAddresses [][]byte) []byte {
+	payload := coreGovernanceHeader(coreGovernanceModuleID(), coreGovernanceActionGuardianSetUpgrade, targetChain)
+	payload = binary.BigEndian.AppendUint32(payload, newGuardianSetIndex)
+	payload = append(payload, byte(len(guardianAddresses)))
+	for _, guardianAddress := range guardianAddresses {
+		if len(guardianAddress) != 20 {
+			panic(fmt.Sprintf("guardian address of %d bytes, expected 20", len(guardianAddress)))
+		}
+		payload = append(payload, guardianAddress...)
+	}
+	return payload
+}
+
 func set1GuardianKeyIndices() []uint64 {
 	keyIndices := make([]uint64, 0, redTeamSet1GuardianCount)
 	for keyIndex := uint64(0); keyIndex < redTeamSet1GuardianCount; keyIndex++ {
@@ -183,6 +197,7 @@ func redTeamDamlHexFixtures() []damlHexFixture {
 	appEmitter[31] = 0xaa
 	overflowingFeeWord := [32]byte{}
 	overflowingFeeWord[23] = 0x01 // 2^64
+	zeroGuardianAddress := make([]byte, 20)
 
 	fixtures := redTeamGuardianFixtures()
 	fixtures = append(fixtures,
@@ -234,6 +249,14 @@ func redTeamDamlHexFixtures() []damlHexFixture {
 			governanceVAASpec(1, []redTeamSigner{{keyIndex: 0, guardianIndex: 0}, {keyIndex: 1, guardianIndex: 1}, {keyIndex: 3, guardianIndex: 7}}, 125, setMessageFeePayload(vaa.ChainIDCanton, redTeamSetMessageFeeAmount))),
 		redTeamVAAFixture("rtSetMessageFeeBySet0AfterUpgrade",
 			governanceVAASpec(0, set0Signer, 126, setMessageFeePayload(vaa.ChainIDCanton, redTeamSetMessageFeeAmount))),
+		redTeamVAAFixture("rtGuardianSetUpgradeZeroAddress",
+			governanceVAASpec(0, set0Signer, 127, guardianSetUpgradePayloadWithAddresses(vaa.ChainIDCanton, 1,
+				[][]byte{redTeamGuardianAddress(0), zeroGuardianAddress}))),
+		redTeamVAAFixture("rtGuardianSetUpgradeOnlyZeroAddress",
+			governanceVAASpec(0, set0Signer, 128, guardianSetUpgradePayloadWithAddresses(vaa.ChainIDCanton, 1,
+				[][]byte{zeroGuardianAddress}))),
+		redTeamVAAFixture("rtGuardianSetUpgradeDuplicateAddress",
+			governanceVAASpec(0, set0Signer, 129, guardianSetUpgradePayload(vaa.ChainIDCanton, 1, []uint64{1, 2, 1}))),
 		redTeamVAAFixture("rtAppMessageBySet0", redTeamVAASpec{
 			guardianSetIndex: 0, signers: set0Signer, emitterChain: redTeamAppEmitterChain, emitterAddress: appEmitter,
 			sequence: 1, payload: []byte("hello"),
