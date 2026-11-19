@@ -17,7 +17,7 @@
 # gateway-net is an internal network: on Docker Desktop, a container on a normal bridge network reaches the
 # loopback-published LocalNet ports through host.docker.internal.
 #
-# Precondition: NTT_PIN_VERSION=0.4.0, ntt_burn_mint.sh and ntt_lock_unlock_gg.sh ran.
+# Precondition: NTT_PIN_VERSION=0.4.2, ntt_burn_mint.sh and ntt_lock_unlock_gg.sh ran.
 # DISCLOSURE_SERVICE_IMAGE names the local image built from canton/disclosure/service/Dockerfile of the NTT repo.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
