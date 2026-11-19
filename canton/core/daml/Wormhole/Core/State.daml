@@ -117,8 +117,8 @@ maxRegistrationFee = 10000000000000000
 -- it (a non-current-but-unexpired set is accepted; 'verifyVAA' checks it is
 -- still active). @pubKeys@ are untrusted hints bound to guardian addresses in
 -- 'verifyVAA'. NOT used by 'SubmitGovernanceVAA', which accepts the CURRENT set
--- only (EVM Governance.sol parity). Pure — takes @now@ rather than calling
--- 'getTime', leaving the caller the one monadic step.
+-- only (EVM Governance.sol parity). Pure: the caller reads the ledger time with
+-- 'getTime' and passes it as @now@.
 verifyEncoded : CoreState -> Bytes -> [(Int, Bytes)] -> Time -> Either Text VAA
 verifyEncoded st encodedVAA pubKeys now =
   let vaa = parseVAA encodedVAA
