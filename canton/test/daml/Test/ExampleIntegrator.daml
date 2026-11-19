@@ -241,7 +241,7 @@ data CoreStatePinCase = CoreStatePinCase with
 shadowCoreState : Party -> Party -> [Bytes20] -> CoreState
 shadowCoreState signingOperator signingGovernance guardianKeys =
   mkInitialCoreState signingOperator signingGovernance solanaGovernanceChainId
-    defaultGovernanceContract guardianKeys
+    defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = guardianKeys)
     (InstrumentId with admin = signingGovernance, id = "UNUSED") signingGovernance
 
 shadowCoreStateWithSet1 : Party -> Party -> CoreState
