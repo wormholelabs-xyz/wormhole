@@ -130,6 +130,10 @@ sig_json() {
     '{format: "SIGNATURE_FORMAT_CONCAT", signature: $sig, signedBy: $fp, signingAlgorithmSpec: "SIGNING_ALGORITHM_SPEC_ED25519"}'
 }
 
+# Fees stay 0 on devnet, so the fee instrument is a placeholder. Its admin signs
+# each fee allocation; the CoreState ensure rejects gg and the operator as the admin.
+PLACEHOLDER_FEE_INSTRUMENT_ADMIN="UnusedFeeInstrumentAdmin::${OP_PARTY#*::}"
+
 # --- Build the genesis create commands, matching mkInitialCoreState's and
 # mkInitialEmitterRegistry's devnet values (Test.TestCore.setup). ---
 # The global guardian set index of the genesis set; the CoreState precondition requires 0 to 4294967295.
@@ -143,6 +147,7 @@ CORE_STATE_ARGS="$(jq -n \
   --arg gg "${GG_PARTY}" \
   --arg guardianSetIndex "${GENESIS_GUARDIAN_SET_INDEX}" \
   --arg feeCustody "${FEE_CUSTODY_PARTY}" \
+  --arg feeInstrumentAdmin "${PLACEHOLDER_FEE_INSTRUMENT_ADMIN}" \
   '{
     operator: $operator,
     guardianGovernance: $gg,
@@ -152,7 +157,7 @@ CORE_STATE_ARGS="$(jq -n \
     guardianSetIndex: $guardianSetIndex,
     guardianSets: [[$guardianSetIndex, {"keys": ["befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"], "expirationTime": null}]],
     messageFee: "0",
-    feeInstrument: {admin: $gg, id: "UNUSED"},
+    feeInstrument: {admin: $feeInstrumentAdmin, id: "UNUSED"},
     feeRecipient: $feeCustody,
     consumedGovernance: {"map": []}
   }')"
