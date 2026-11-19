@@ -19,7 +19,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Splice.Api.Token.MetadataV1 (ExtraArgs)
 import Splice.Api.Token.AllocationV1 (Allocation)
 import Wormhole.Core.Bytes
-import Wormhole.Core.Fees (feeToDecimal)
+import Wormhole.Core.Fees (FeeChargeParties(..), feeToDecimal)
 import Wormhole.Core.Governance
 import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
 import Wormhole.Core.Setup
@@ -889,41 +889,193 @@ data ExpectedCoreStateCreate
   | CoreStateCreateRejectedForMissingAuthority
   deriving (Eq, Show)
 
--- | The fee recipient co-signs 'CoreState' and is neither guardianGovernance
--- nor the operator.
+-- | The fee recipient co-signs 'CoreState'. Neither the fee recipient nor the
+-- fee instrument admin is guardianGovernance or the operator.
 testCoreStateFeeRecipientIsADistinctCustodyParty : Script ()
 testCoreStateFeeRecipientIsADistinctCustodyParty = do
   operator <- allocateParty "F1GenesisOperator"
   guardianGovernance <- allocateParty "F1GenesisGovernance"
   feeCustody <- allocateParty "F1GenesisFeeCustody"
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
-      genesisStateWithFeeRecipient feeRecipient = mkInitialCoreState operator guardianGovernance
+  feeInstrumentAdmin <- allocateParty "F1GenesisFeeInstrumentAdmin"
+  let genesisState feeRecipient admin = mkInitialCoreState operator guardianGovernance
         solanaGovernanceChainId defaultGovernanceContract
-        (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) feeInstrument feeRecipient
+        (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+        (InstrumentId with admin, id = "UNUSED") feeRecipient
       allThreeSigners = actAs operator <> actAs guardianGovernance <> actAs feeCustody
-      -- Columns: case name | submitters | feeRecipient | expected outcome
+      -- Columns: case name | submitters | feeRecipient | fee instrument admin | expected outcome
       genesisCases =
-        [ ("feeRecipient is guardianGovernance", allThreeSigners, guardianGovernance, CoreStateCreateRejectedByEnsure)
-        , ("feeRecipient is the operator", allThreeSigners, operator, CoreStateCreateRejectedByEnsure)
+        [ ("feeRecipient is guardianGovernance", allThreeSigners, guardianGovernance, feeInstrumentAdmin,
+            CoreStateCreateRejectedByEnsure)
+        , ("feeRecipient is the operator", allThreeSigners, operator, feeInstrumentAdmin, CoreStateCreateRejectedByEnsure)
+        , ("fee instrument admin is guardianGovernance", allThreeSigners, feeCustody, guardianGovernance,
+            CoreStateCreateRejectedByEnsure)
+        , ("fee instrument admin is the operator", allThreeSigners, feeCustody, operator, CoreStateCreateRejectedByEnsure)
         , ("operator and guardianGovernance without feeCustody", actAs operator <> actAs guardianGovernance, feeCustody,
+            feeInstrumentAdmin, CoreStateCreateRejectedForMissingAuthority)
+        , ("guardianGovernance alone", actAs guardianGovernance, feeCustody, feeInstrumentAdmin,
             CoreStateCreateRejectedForMissingAuthority)
-        , ("guardianGovernance alone", actAs guardianGovernance, feeCustody, CoreStateCreateRejectedForMissingAuthority)
-        , ("feeCustody alone", actAs feeCustody, feeCustody, CoreStateCreateRejectedForMissingAuthority)
-        , ("operator, guardianGovernance and feeCustody", allThreeSigners, feeCustody, CoreStateCreateCommits)
+        , ("feeCustody alone", actAs feeCustody, feeCustody, feeInstrumentAdmin, CoreStateCreateRejectedForMissingAuthority)
+        , ("operator, guardianGovernance and feeCustody", allThreeSigners, feeCustody, feeInstrumentAdmin,
+            CoreStateCreateCommits)
         ]
-  unexpectedOutcomes <- forA genesisCases \(caseName, submitters, feeRecipient, expectedOutcome) -> do
-    createResult <- trySubmit submitters do createCmd (genesisStateWithFeeRecipient feeRecipient)
-    pure $ case (expectedOutcome, createResult) of
-      (CoreStateCreateCommits, Right _) -> None
-      (CoreStateCreateCommits, Left createError) -> Some (caseName <> ": rejected: " <> show createError)
-      (CoreStateCreateRejectedByEnsure, Left (FailureStatusError failureStatus))
-        | "PreconditionFailed" `T.isInfixOf` failureStatus.errorId -> None
-      (CoreStateCreateRejectedForMissingAuthority, Left (AuthorizationError _)) -> None
-      (_, Right _) -> Some (caseName <> ": accepted")
-      (_, Left createError) -> Some (caseName <> ": expected " <> show expectedOutcome <> ", got: " <> show createError)
+  unexpectedOutcomes <- forA genesisCases \(caseName, submitters, feeRecipient, admin, expectedOutcome) -> do
+    createResult <- trySubmit submitters do createCmd (genesisState feeRecipient admin)
+    pure (describeUnexpectedCoreStateCreate caseName expectedOutcome createResult)
   checkNoAttackAccepted "F1-core CoreState genesis" (catOptionals unexpectedOutcomes)
-  [(_, genesisState)] <- query @CoreState operator
-  sort (signatory genesisState) === sort [operator, guardianGovernance, feeCustody]
+  [(_, committedGenesisState)] <- query @CoreState operator
+  sort (signatory committedGenesisState) === sort [operator, guardianGovernance, feeCustody]
+
+-- | 'Some' description when @createResult@ does not match @expectedOutcome@.
+describeUnexpectedCoreStateCreate : Text -> ExpectedCoreStateCreate -> Either SubmitError a -> Optional Text
+describeUnexpectedCoreStateCreate caseName expectedOutcome createResult = case (expectedOutcome, createResult) of
+  (CoreStateCreateCommits, Right _) -> None
+  (CoreStateCreateCommits, Left createError) -> Some (caseName <> ": rejected: " <> show createError)
+  (CoreStateCreateRejectedByEnsure, Left (FailureStatusError failureStatus))
+    | "PreconditionFailed" `T.isInfixOf` failureStatus.errorId -> None
+  (CoreStateCreateRejectedForMissingAuthority, Left (AuthorizationError _)) -> None
+  (_, Right _) -> Some (caseName <> ": accepted")
+  (_, Left createError) -> Some (caseName <> ": expected " <> show expectedOutcome <> ", got: " <> show createError)
+
+-- | The 'CoreState' ensure holds the invariants that the genesis signers
+-- otherwise check by hand. Each row breaks exactly one invariant.
+testCoreStateEnsureRejectsInconsistentGenesis : Script ()
+testCoreStateEnsureRejectsInconsistentGenesis = do
+  operator <- allocateParty "EnsureOperator"
+  guardianGovernance <- allocateParty "EnsureGovernance"
+  feeCustody <- allocateParty "EnsureFeeCustody"
+  feeInstrumentAdmin <- allocateParty "EnsureFeeInstrumentAdmin"
+  let consistentGenesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
+        defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+        (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody
+      allThreeSigners = actAs operator <> actAs guardianGovernance <> actAs feeCustody
+      -- Columns: case name | submitters | CoreState | expected outcome
+      genesisCases =
+        [ ("operator is guardianGovernance", actAs operator <> actAs feeCustody,
+            mkInitialCoreState operator operator solanaGovernanceChainId defaultGovernanceContract
+              (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+              (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody,
+            CoreStateCreateRejectedByEnsure)
+        , ("negative message fee", allThreeSigners, (consistentGenesisState with messageFee = -1),
+            CoreStateCreateRejectedByEnsure)
+        , ("no guardian set at guardianSetIndex", allThreeSigners, (consistentGenesisState with guardianSetIndex = 1),
+            CoreStateCreateRejectedByEnsure)
+        , ("zero message fee and guardian set 0", allThreeSigners, consistentGenesisState, CoreStateCreateCommits)
+        ]
+  unexpectedOutcomes <- forA genesisCases \(caseName, submitters, candidateState, expectedOutcome) -> do
+    createResult <- trySubmit submitters do createCmd candidateState
+    pure (describeUnexpectedCoreStateCreate caseName expectedOutcome createResult)
+  checkNoAttackAccepted "CoreState ensure" (catOptionals unexpectedOutcomes)
+
+-- | B1: the fee instrument admin signs every fee allocation, so the fee
+-- registry body runs with its authority. With guardianGovernance as the admin,
+-- an unrelated payer's paid claim publishes on a guardianGovernance emitter.
+-- Genesis must reject that admin. If genesis commits, the forged publish must
+-- still fail.
+testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter : Script ()
+testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
+  operator <- allocateParty "B1Operator"
+  guardianGovernance <- allocateParty "B1Governance"
+  feeCustody <- allocateParty "B1FeeCustody"
+  unrelatedPayer <- allocateParty "B1UnrelatedPayer"
+  let guardianGovernanceInstrument = InstrumentId with admin = guardianGovernance, id = "GG-ADMINISTERED"
+  genesisResult <- trySubmit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
+    createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+      (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) guardianGovernanceInstrument feeCustody)
+  case genesisResult of
+    Left _ -> checkNoAttackAccepted "B1 genesis"
+      (optionalToList (describeUnexpectedCoreStateCreate "fee instrument admin is guardianGovernance"
+        CoreStateCreateRejectedByEnsure genesisResult))
+    Right coreStateCid -> do
+      _ <- submit (actAs operator <> actAs guardianGovernance) do
+        createCmd (mkInitialEmitterRegistry operator guardianGovernance 0)
+      guardianGovernanceEmitterCid <- registerEmitter operator guardianGovernance
+      replayRootRegistryCid <- submit operator do
+        createCmd (mkInitialReplayRootRegistry operator guardianGovernance (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+      forgedPublishAllocation <- allocateWithFeeRegistryAttack guardianGovernance unrelatedPayer feeCustody
+        guardianGovernanceInstrument (feeToDecimal (feeDueAtChargePoint ChargeOnClaimReplayRoot))
+        PublishOnEmitter with
+          targetEmitterCid = guardianGovernanceEmitterCid
+          coreStateCid
+          forgedPayload = "f0"
+      coreStateDisclosure <- fromSome <$> queryDisclosure operator coreStateCid
+      registryDisclosure <- fromSome <$> queryDisclosure operator replayRootRegistryCid
+      emitterDisclosure <- fromSome <$> queryDisclosure guardianGovernance guardianGovernanceEmitterCid
+      attackResult <- trySubmit (actAs unrelatedPayer <> discloseMany [coreStateDisclosure, registryDisclosure, emitterDisclosure]) do
+        exerciseCmd replayRootRegistryCid ClaimReplayRoot with
+          consumer = unrelatedPayer, namespace = "b1", splitThreshold = 4
+          payer = unrelatedPayer, coreStateCid = Some coreStateCid, feeAllocation = Some forgedPublishAllocation
+      checkNoAttackAccepted "B1 forged publish on the guardianGovernance emitter"
+        (optionalToList (describeUnexpectedOutcome "paid ClaimReplayRoot"
+          "fee instrument admin must not be guardianGovernance" attackResult))
+      Some guardianGovernanceEmitter <- queryContractId guardianGovernance guardianGovernanceEmitterCid
+      guardianGovernanceEmitter.sequence === 0
+      abort "B1: genesis accepted guardianGovernance as the fee instrument admin"
+
+-- | 'chargeFee' rejects each privileged party before it fetches the
+-- allocation, independent of the 'CoreState' ensure. Each rejected row breaks
+-- exactly one rule.
+testChargeFeeRejectsEachPrivilegedParty : Script ()
+testChargeFeeRejectsEachPrivilegedParty = do
+  operator <- allocateParty "DirectChargeOperator"
+  guardianGovernance <- allocateParty "DirectChargeGovernance"
+  feeCustody <- allocateParty "DirectChargeFeeCustody"
+  feeInstrumentAdmin <- allocateParty "DirectChargeFeeInstrumentAdmin"
+  payer <- allocateParty "DirectChargePayer"
+  harnessCid <- submit operator do createCmd DirectFeeChargeHarness with harnessOwner = operator
+  let feeDue = 1000
+      instrumentAdministeredBy admin = InstrumentId with admin, id = "MOCK"
+      validInstrument = instrumentAdministeredBy feeInstrumentAdmin
+      validParties = FeeChargeParties with operator, guardianGovernance, feeRecipient = feeCustody, payer
+      -- Columns: case name | parties | instrument | expected failure ("" = commits)
+      chargeCases =
+        [ ("payer is guardianGovernance", (validParties with payer = guardianGovernance), validInstrument,
+            "fee payer must not be guardianGovernance")
+        , ("payer is the operator", (validParties with payer = operator), validInstrument, "fee payer must not be the operator")
+        , ("fee recipient is guardianGovernance", (validParties with feeRecipient = guardianGovernance), validInstrument,
+            "fee recipient must not be guardianGovernance")
+        , ("fee recipient is the operator", (validParties with feeRecipient = operator), validInstrument,
+            "fee recipient must not be the operator")
+        , ("fee instrument admin is guardianGovernance", validParties, instrumentAdministeredBy guardianGovernance,
+            "fee instrument admin must not be guardianGovernance")
+        , ("fee instrument admin is the operator", validParties, instrumentAdministeredBy operator,
+            "fee instrument admin must not be the operator")
+        , ("no privileged party", validParties, validInstrument, "")
+        ]
+  unexpectedOutcomes <- forA chargeCases \(caseName, parties, instrument, expectedFailure) -> do
+    feeAllocation <- mintAndAllocate feeInstrumentAdmin payer feeCustody validInstrument (feeToDecimal feeDue)
+    chargeResult <- trySubmit (actAs operator <> actAs parties.payer <> actAs parties.feeRecipient) do
+      exerciseCmd harnessCid ChargeFeeDirectly with
+        feeChargeParties = parties, feeInstrument = instrument, feeDue, feeAllocation = Some feeAllocation
+    pure $ case (expectedFailure, chargeResult) of
+      ("", Right _) -> None
+      ("", Left chargeError) -> Some (caseName <> ": rejected: " <> show chargeError)
+      _ -> describeUnexpectedOutcome caseName expectedFailure chargeResult
+  checkNoAttackAccepted "chargeFee privileged parties" (catOptionals unexpectedOutcomes)
+  collectedFees <- mockBalance feeInstrumentAdmin feeCustody validInstrument
+  collectedFees === feeToDecimal feeDue
+
+-- | The 'CoreState' charge choices reject a privileged payer when a fee is due.
+testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer : Script ()
+testRedTeamF1CoreStateChargeChoicesRejectPrivilegedPayer = do
+  bridge <- setupPaidChargeBridge MessageFeeRaised
+  let privilegedPayers =
+        [ (bridge.guardianGovernance, "fee payer must not be guardianGovernance")
+        , (bridge.operator, "fee payer must not be the operator")
+        ]
+  unexpectedOutcomes <- forA [ (chargeChoice, payer) | chargeChoice <- ["ChargeMessageFee", "ChargeFee"], payer <- privilegedPayers ]
+    \(chargeChoice, (payer, expectedFailure)) -> do
+      feeAllocation <- mintAndAllocate bridge.feeRegistryAdmin payer bridge.feeRecipient bridge.feeInstrument
+        (feeToDecimal (feeDueAtChargePoint ChargeOnPublish))
+      coreStateDisclosure <- fromSome <$> queryDisclosure bridge.operator bridge.coreStateCid
+      chargeResult <- trySubmit (actAs payer <> disclose coreStateDisclosure) $
+        if chargeChoice == "ChargeMessageFee"
+          then void (exerciseCmd bridge.coreStateCid ChargeMessageFee with payer, feeAllocation = Some feeAllocation)
+          else void (exerciseCmd bridge.coreStateCid ChargeFee with
+            payer, fee = feeDueAtChargePoint ChargeOnPublish, feeAllocation = Some feeAllocation)
+      pure (describeUnexpectedOutcome (chargeChoice <> ": " <> expectedFailure) expectedFailure chargeResult)
+  checkNoAttackAccepted "F1-core CoreState charge choices" (catOptionals unexpectedOutcomes)
+  collectedFees <- mockBalance bridge.feeRegistryAdmin bridge.feeRecipient bridge.feeInstrument
+  collectedFees === 0.0
 
 -- | Every charge point pays the fee recipient, and guardianGovernance holds no fees.
 testFeeCustodyReceivesFeesOnEveryChargePoint : Script ()

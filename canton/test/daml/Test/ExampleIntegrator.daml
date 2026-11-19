@@ -215,10 +215,11 @@ testIntegratorRedeem = do
   fakeOperator <- allocateParty "FakeOperator"
   fakeGovernance <- allocateParty "FakeGovernance"
   fakeFeeCustody <- allocateParty "FakeFeeCustody"
+  fakeFeeInstrumentAdmin <- allocateParty "FakeFeeInstrumentAdmin"
   fakeCsId <- submit (actAs fakeOperator <> actAs fakeGovernance <> actAs fakeFeeCustody) do
     createCmd (mkInitialCoreState fakeOperator fakeGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
-                 (InstrumentId with admin = fakeGovernance, id = "UNUSED") fakeFeeCustody)
+                 (InstrumentId with admin = fakeFeeInstrumentAdmin, id = "UNUSED") fakeFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure fakeOperator fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
     exerciseCmd intCid Redeem with

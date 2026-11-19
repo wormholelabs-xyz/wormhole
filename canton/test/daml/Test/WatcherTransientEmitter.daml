@@ -137,7 +137,8 @@ integrationTransientEmitterPublish bridge = do
     createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
   rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
   rogueFeeCustody <- allocateParty "TransientEmitterRogueFeeCustody"
-  let shadowFeeInstrument = InstrumentId with admin = rogueGovernance, id = "UNUSED"
+  rogueFeeInstrumentAdmin <- allocateParty "TransientEmitterRogueFeeInstrumentAdmin"
+  let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])

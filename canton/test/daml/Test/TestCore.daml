@@ -65,7 +65,9 @@ setup = setupWithInstrument None
 -- | 'setup' with a caller-supplied fee instrument (Test.TestFees provides a
 -- mock-token instrument; plain 'setup' uses a placeholder that is never
 -- validated because all fees default to 0). The fee recipient is a separate
--- fee custody party, matching production custody.
+-- fee custody party, matching production custody. The placeholder admin is a
+-- party that signs nothing: the 'CoreState' ensure rejects
+-- guardianGovernance and the operator as the fee instrument admin.
 setupWithInstrument : Optional InstrumentId -> Script (Party, Party, ContractId CoreState)
 setupWithInstrument = setupWithPartyLabel ""
 
@@ -83,7 +85,8 @@ setupWithGenesisGuardianSetIndex partyLabel genesisIndex mInstrument = do
   operator <- allocateParty ("Operator" <> partyLabel)
   guardianGovernance <- allocateParty ("GuardianGovernance" <> partyLabel)
   feeCustody <- allocateParty ("FeeCustody" <> partyLabel)
-  let feeInstrument = fromOptional (InstrumentId with admin = guardianGovernance, id = "UNUSED") mInstrument
+  placeholderFeeInstrumentAdmin <- allocateParty ("UnusedFeeInstrumentAdmin" <> partyLabel)
+  let feeInstrument = fromOptional (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") mInstrument
   (csId, _) <- submit (actAs operator <> actAs guardianGovernance <> actAs feeCustody) do
     (,) <$> createCmd (mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                          defaultGovernanceContract
@@ -321,7 +324,8 @@ testGenesisRequiresOperatorAndGovernance = do
   operator <- allocateParty "GenesisOperator"
   guardianGovernance <- allocateParty "GenesisGovernance"
   feeCustody <- allocateParty "GenesisFeeCustody"
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  placeholderFeeInstrumentAdmin <- allocateParty "GenesisUnusedFeeInstrumentAdmin"
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
@@ -411,8 +415,9 @@ testGuardianSetUpgradeIndexFromNonZeroGenesis = do
   operator <- allocateParty "UpgradeIndexOperator"
   guardianGovernance <- allocateParty "UpgradeIndexGovernance"
   feeCustody <- allocateParty "UpgradeIndexFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "UpgradeIndexUnusedFeeInstrumentAdmin"
   now <- getTime
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with
@@ -449,7 +454,8 @@ tryCreateCoreStateWithGuardianSets partyLabel currentIndex storedSets = do
   operator <- allocateParty ("PreconditionOperator" <> partyLabel)
   guardianGovernance <- allocateParty ("PreconditionGovernance" <> partyLabel)
   feeCustody <- allocateParty ("PreconditionFeeCustody" <> partyLabel)
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  placeholderFeeInstrumentAdmin <- allocateParty ("PreconditionUnusedFeeInstrumentAdmin" <> partyLabel)
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]
@@ -529,8 +535,9 @@ testGuardianSetUpgradeRejectsMalformedAddresses = do
   operator <- allocateParty "UpgradeAddressOperator"
   guardianGovernance <- allocateParty "UpgradeAddressGovernance"
   feeCustody <- allocateParty "UpgradeAddressFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "UpgradeAddressUnusedFeeInstrumentAdmin"
   now <- getTime
-  let feeInstrument = InstrumentId with admin = guardianGovernance, id = "UNUSED"
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState operator guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
                        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]

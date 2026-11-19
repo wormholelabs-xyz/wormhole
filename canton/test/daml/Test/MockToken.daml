@@ -12,11 +12,10 @@ module Test.MockToken where
 
 import Daml.Script
 import DA.Action (void)
-import DA.Optional (fromSome)
 import Splice.Api.Token.MetadataV1
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.AllocationV1
-import Wormhole.Core.Fees (emptyExtraArgs)
+import Wormhole.Core.Fees (FeeChargeParties, chargeFee, emptyExtraArgs)
 import Wormhole.Core.State (CoreState, Emitter, PublishMessage(..))
 
 template MockHolding
@@ -159,6 +158,23 @@ template HostileFeeAllocation
         pure Allocation_CancelResult with senderHoldingCids = [], meta = emptyMetadata
       allocation_withdrawImpl _self _arg =
         pure Allocation_WithdrawResult with senderHoldingCids = [], meta = emptyMetadata
+
+-- | Calls 'chargeFee' directly, so a test reaches each 'chargeFee' check with
+-- parties that the 'CoreState' ensure rejects.
+template DirectFeeChargeHarness
+  with
+    harnessOwner : Party
+  where
+    signatory harnessOwner
+
+    nonconsuming choice ChargeFeeDirectly : ()
+      with
+        feeChargeParties : FeeChargeParties
+        feeInstrument    : InstrumentId
+        feeDue           : Int
+        feeAllocation    : Optional (ContractId Allocation, ExtraArgs)
+      controller harnessOwner, feeChargeParties.payer, feeChargeParties.feeRecipient
+      do chargeFee feeChargeParties feeInstrument feeDue feeAllocation
 
 -- | The bridge's allocation convention: @executor = sender = payer@,
 -- @receiver@ = the fee recipient. Timestamps are placeholders — the mock does
