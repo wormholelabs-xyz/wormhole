@@ -46,7 +46,8 @@ module Wormhole.Core.State where
 
 import DA.Map (Map)
 import DA.Map qualified as Map
-import DA.Optional (fromSomeNote)
+import DA.Either (isRight)
+import DA.Optional (fromSomeNote, isSome)
 import DA.Set (Set)
 import DA.Set qualified as Set
 import DA.Text qualified as T
@@ -145,6 +146,9 @@ template CoreState
     -- forging the guardian set (module header). Transitions inherit its
     -- authority from the archived contract, so it signs only at genesis.
     signatory operator, guardianGovernance
+
+    -- Applies to genesis (raw creates from the LocalNet and devnet scripts) and to each governance re-create.
+    ensure checkGuardianSetsAreConsistent guardianSetIndex guardianSets
 
     -- | Read-only VAA verification against the CURRENT guardian set, for the
     -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
@@ -313,7 +317,7 @@ applyGovernance st now action = case action of
   GuardianSetUpgrade chain newIndex newKeys -> do
     assertMsg "guardianSetUpgrade: wrong target chain" (chain == st.chainId || chain == 0)
     assertMsg "guardianSetUpgrade: index must be current + 1" (newIndex == st.guardianSetIndex + 1)
-    assertMsg "guardianSetUpgrade: empty set" (not (null newKeys))
+    checkGuardianAddressesAreWellFormed newKeys
     -- Expire the current set (now + 1 day) in place, then install the new one.
     -- The None case is an invariant violation — a live CoreState always has its
     -- current set.
@@ -343,6 +347,24 @@ applyGovernance st now action = case action of
     -- the recorded target package-id, performed out of band. The caller records
     -- the action consumed.
     pure st
+
+-- | The 'CoreState' guardian set invariant: the current set exists and never
+-- expires, each other set has a lower index and an expiry, and each set passes
+-- 'checkGuardianAddressesAreWellFormed'. Each index fits uint32.
+checkGuardianSetsAreConsistent : Int -> Map Int GuardianSet -> Bool
+checkGuardianSetsAreConsistent currentIndex storedSets =
+  checkGuardianSetIndexFitsUint32 currentIndex
+    && checkCurrentSetNeverExpires
+    && all checkStoredSet (Map.toList storedSets)
+  where
+    checkCurrentSetNeverExpires = case Map.lookup currentIndex storedSets of
+      Some currentSet -> currentSet.expirationTime == None
+      None -> False
+    checkStoredSet (storedIndex, storedSet) =
+      checkGuardianSetIndexFitsUint32 storedIndex
+        && storedIndex <= currentIndex
+        && (storedIndex == currentIndex || isSome storedSet.expirationTime)
+        && isRight (checkGuardianAddressesAreWellFormed storedSet.keys)
 
 -- | Helper to read the current set off a 'CoreState' value (not a contract).
 currentSetForUpgrade : CoreState -> GuardianSet

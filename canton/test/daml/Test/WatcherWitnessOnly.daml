@@ -86,7 +86,7 @@ integrationWitnessOnlyPublish bridge = do
   let shadowFeeInstrument = InstrumentId with admin = rogueGovernance, id = "UNUSED"
   shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance) do
     createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian]
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
                  shadowFeeInstrument rogueGovernance)
   shadowCoreStateDisclosure <- fromSome <$> queryDisclosure operator shadowCoreStateCid
   publisherCid <- submit trustedOwner do

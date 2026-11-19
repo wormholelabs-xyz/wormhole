@@ -131,7 +131,7 @@ testFeeValidationMatrix = do
   fakeGov <- allocateParty "MatrixFakeGov"
   fakeCsId <- submit (actAs fakeOp <> actAs fakeGov) do
     createCmd (mkInitialCoreState fakeOp fakeGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] inst fakeGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst fakeGov)
   fakeDisc <- fromSome <$> queryDisclosure fakeOp fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
@@ -378,7 +378,7 @@ testPublishPinsGuardianGovernance = do
   -- controls, with rogueGov as both guardianGovernance and feeRecipient.
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] inst rogueGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueGov)
   fakeCsId' <- submit operator do
     exerciseCmd fakeCsId SubmitGovernanceVAA with
       encodedVAA = govSetFeeVAA
@@ -412,7 +412,7 @@ testRegisterEmitterPinsGuardianGovernance = do
   regDisc <- fromSome <$> queryDisclosure operator regCid
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] inst rogueGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueGov)
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
   feePay <- mintAndAllocate mockAdmin bob rogueGov inst (feeToDecimal 500)
   res <- trySubmit (actAs bob <> disclose regDisc <> disclose fakeDisc) do
@@ -481,7 +481,7 @@ testClaimReplayRootPinsGuardianGovernance = do
   regDisc <- fromSome <$> queryDisclosure operator regCid
   fakeCsId <- submit (actAs operator <> actAs rogueGov) do
     createCmd (mkInitialCoreState operator rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract [devnetGuardian] inst rogueGov)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) inst rogueGov)
   fakeDisc <- fromSome <$> queryDisclosure operator fakeCsId
   feePay <- mintAndAllocate mockAdmin carol rogueGov inst (feeToDecimal 300)
   res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do
