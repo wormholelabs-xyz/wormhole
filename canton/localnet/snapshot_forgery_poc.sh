@@ -13,7 +13,9 @@
 #       The owner (default: the attacker on app-provider) burns the Coin with NTT Transfer. <expected-outcome> is committed,
 #       rejected or any. The baseline burns a real Coin with the same command.
 #       Prints the completion, the PublishMessage scan of sv, app-provider and guardian4, and the verdict log lines.
-# The attacker party and the forged Coins come from console/forge_coin_contract.canton ($LOCALNET_STATE_DIR/guardian4).
+# forge_coin_contract.sh makes the forged Coins and writes the attacker party to $LOCALNET_STATE_DIR/guardian4/forgery.json.
+# seed-source, purge and import-on change contracts. They run only when the canton container exists and app-provider is
+# connected to the synchronizer of gg-artifacts.json.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
@@ -83,6 +85,15 @@ repair_on() {
   grep -qE "^REPAIR $1 $2=accepted reconnected=true" <<<"$repair_output"
 }
 
+# check_target_is_localnet: the canton container exists, and app-provider is connected to the synchronizer of
+# gg-artifacts.json.
+check_target_is_localnet() {
+  docker container inspect canton >/dev/null 2>&1 || fail "no canton container: this script runs only against LocalNet"
+  check_connected_to_gg_synchronizer "$(json_api_url app-provider)" app-provider \
+    || fail "app-provider is not on the LocalNet synchronizer of $GG_ARTIFACTS"
+  echo "LocalNet target: canton container, synchronizer $LOGICAL_SYNCHRONIZER_ID"
+}
+
 attack_with_coin() {
   local coin_cid="$1" attack_label="$2" expected_outcome="$3" attacker_party="${4:-}" submitting_participant="${5:-app-provider}"
   local raw_amount="${6:-$FORGED_RAW_AMOUNT}" manager_cid emitter_cid
@@ -140,7 +151,9 @@ attack_with_coin() {
 }
 
 case "${1:-}" in
-  seed-source) repair_on app-provider party-import "${2:?forged ACS file}" || fail "repair import on app-provider failed" ;;
+  seed-source)
+    check_target_is_localnet
+    repair_on app-provider party-import "${2:?forged ACS file}" || fail "repair import on app-provider failed" ;;
   watch)
     [[ -x "$(harness_binary)" ]] || build_harness
     trap 'stop_started_harnesses; rm -rf "$gg_work_dir"' EXIT
@@ -149,8 +162,12 @@ case "${1:-}" in
     echo "watcher observations on $2:"
     jq -c '{updateId: (.updateId // null), emitterAddress, sequence, isReobservation, payloadPrefix: .payloadHex[0:80]}' "$WATCHER_DIR/forgery-$2.jsonl"
     ;;
-  import-on) repair_on "${2:?participant}" party-import "${3:?ACS file}" || fail "import on $2 failed" ;;
-  purge) repair_on "${2:?participant}" purge "" "${3:?contract ids}" || fail "repair purge on $2 failed" ;;
+  import-on)
+    check_target_is_localnet
+    repair_on "${2:?participant}" party-import "${3:?ACS file}" || fail "import on $2 failed" ;;
+  purge)
+    check_target_is_localnet
+    repair_on "${2:?participant}" purge "" "${3:?contract ids}" || fail "repair purge on $2 failed" ;;
   attack) attack_with_coin "${2:?coin contract id}" "${3:?label}" "${4:?expected outcome}" "${5:-}" "${6:-app-provider}" "${7:-$FORGED_RAW_AMOUNT}" ;;
-  *) echo "usage: snapshot_forgery_poc.sh <seed-source|purge|attack> ..." >&2; exit 2 ;;
+  *) echo "usage: snapshot_forgery_poc.sh <seed-source|purge|watch|import-on|attack> ..." >&2; exit 2 ;;
 esac

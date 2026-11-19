@@ -27,7 +27,7 @@ locked_image_reference() {
 }
 
 start_guardian4() {
-  local attempt
+  local attempt database_ready=false
   if docker container inspect "$GUARDIAN4_CONTAINER" >/dev/null 2>&1 || docker container inspect "$GUARDIAN4_DATABASE_CONTAINER" >/dev/null 2>&1; then
     echo "a guardian4 container exists; run guardian4.sh remove first" >&2
     return 1
@@ -37,10 +37,15 @@ start_guardian4() {
     "$(locked_image_reference "$POSTGRES_IMAGE_NAME" "$POSTGRES_IMAGE_TAG")" >/dev/null
   for ((attempt = 1; attempt <= READY_MAX_ATTEMPTS; attempt++)); do
     if docker exec "$GUARDIAN4_DATABASE_CONTAINER" pg_isready -U guardian4 -d guardian4 >/dev/null 2>&1; then
+      database_ready=true
       break
     fi
     sleep 1
   done
+  if [[ "$database_ready" != true ]]; then
+    echo "$GUARDIAN4_DATABASE_CONTAINER is not ready after $READY_MAX_ATTEMPTS attempts; see docker logs $GUARDIAN4_DATABASE_CONTAINER" >&2
+    return 1
+  fi
   docker run -d --name "$GUARDIAN4_CONTAINER" --network "$LOCALNET_NETWORK" \
     -e "_JAVA_OPTIONS=-Xms512m -Xmx2g" \
     -p "$HOST_BIND_IP:5901:5901" -p "$HOST_BIND_IP:5902:5902" -p "$HOST_BIND_IP:5975:5975" \

@@ -57,8 +57,7 @@ def awaitEither[T](result: cats.data.EitherT[FutureUnlessShutdown, String, T], d
     .fold(error => throw new RuntimeException(s"$description: $error"), identity)
 
 val forgeMode = sys.env.getOrElse("FORGE_MODE", "generate")
-val forgedFile = sys.env.getOrElse("FORGE_OUTPUT_FILE",
-  "/Users/smurf/WormholeLabs/CoreTeam/CantonIntegration/wt/localnet-state/guardian4/forged-coins.acs.gz")
+val forgedFile = requiredEnvironmentVariable("FORGE_OUTPUT_FILE")
 
 if (forgeMode == "merge") {
   val baseContracts = readAcsFile(requiredEnvironmentVariable("FORGE_MERGE_BASE")).map(_.contract)
@@ -242,5 +241,9 @@ if (forgeMode == "merge") {
   val tamperedValidation = passesImportValidation(
     FatContractInstance.fromCreateNode(tamperedCreate, createdAtOf(tamperedCoin), tamperedCoin.authenticationData), realCoinRepresentative)
   println(s"FORGE negative tampered-amount rejected=${tamperedValidation.isLeft} detail=${tamperedValidation.left.toOption.getOrElse("").take(200)}")
-  println(s"FORGE self-check ok=${reread.size == coinCount && selfCheckResults.forall(identity) && tamperedValidation.isLeft} file=$forgedFile")
+  val selfCheckPassed = reread.size == coinCount && selfCheckResults.forall(identity) && tamperedValidation.isLeft
+  println(s"FORGE self-check ok=$selfCheckPassed file=$forgedFile")
+  require(reread.size == coinCount, s"$forgedFile holds ${reread.size} coins, expected $coinCount")
+  require(selfCheckResults.forall(identity), s"a forged coin in $forgedFile fails import validation")
+  require(tamperedValidation.isLeft, "the tampered coin passes import validation")
 }
