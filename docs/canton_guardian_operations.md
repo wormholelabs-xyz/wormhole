@@ -276,8 +276,10 @@ Rules for each new host:
    A guardian is the source for at most one host that is not checked yet (rule 3).
 3. Add the new host at `Observation`.
    After its ACS commitments agree with each other `gg` host for one full commitment interval, change it to `Confirmation`.
-   This second change needs the threshold of owner keys.
-   It also sets the confirmation threshold to a majority of the new number of hosts.
+   This second change needs the threshold of owner keys and the consent of the new host.
+   The new host proposes the promotion, and the owners sign it.
+   A promotion that only the owner keys sign fails with `TOPOLOGY_UNAUTHORIZED_TRANSACTION`.
+   The change also sets the confirmation threshold to a majority of the new number of hosts.
 4. If an ACS commitment mismatch stays for one full interval after the onboarding flag is clear, remove the new host.
    The new host agrees with its source host and disagrees with the other hosts. Report the source guardian.
 
@@ -290,9 +292,15 @@ Stop the participant and report a security incident to the other guardians.
 
 **Open item:** a signed comparison of the snapshot digests of several guardians before the import.
 
-**Open item:** a LocalNet test of the `Observation`-first onboarding (rule 3).
 An `Observation` host during onboarding is an exception to the `Confirmation` rule of Section 2.
 It is also an exception to the hosting checks of the owner key rotation (Section 7.4).
+Do not rotate owner keys while a host is at `Observation`.
+
+LocalNet rehearsal on 2026-11-19 of rule 3 ([`gg_observation_onboarding_check.sh`](../canton/localnet/gg_observation_onboarding_check.sh)):
+
+- With `guardian4` at `Observation` and `sv` disconnected, a `PublishMessage` failed with `MEDIATOR_SAYS_TX_TIMED_OUT`.
+  The `Observation` host does not count toward the threshold.
+- After the promotion of `guardian4` to `Confirmation`, the same `PublishMessage` committed.
 
 ## 5. `guardianGovernance` owner keys
 
@@ -1161,7 +1169,6 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Confirmation threshold of `gg` for MainNet | 4.1 |
 | Recovery of an honest host after a forged approval | 4.3 |
 | Signed comparison of snapshot digests before an import | 4.3 |
-| LocalNet test of `Observation`-first onboarding | 4.3 |
 | Threshold k of n of the owner keys for MainNet | 5.1 |
 | Production tool to decode and hash prepared transactions | 5.3 |
 | Location, writer and authentication of each trust source | 6.0 |
@@ -1185,6 +1192,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 
 | Item | Resolution |
 | - | - |
+| `Observation`-first onboarding of a new host | Passed on LocalNet on 2026-11-19. The promotion to `Confirmation` needs the consent of the new host (Section 4.3). |
 | Multi-participant hosting of `gg` | Passed live on 2026-11-17 with `wormhole-core` 0.6.0 on three LocalNet participants at `Confirmation` with threshold 2 (Section 2.3). |
 | Vetting on a subset of hosts | Rejected at prepare. Each host must vet. Passed live on 2026-11-17 with `wormhole-core` 0.6.0 (Section 6.3). |
 | Mandatory `gg` party in the watcher | `--cantonReadAsParty` is mandatory outside unsafe dev mode (Section 8). |
