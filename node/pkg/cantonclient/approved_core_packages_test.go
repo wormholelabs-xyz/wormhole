@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.8.3 (feeCustody receives fees).
-const deployedCorePackageIDHex = "b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69"
+// deployedCorePackageIDHex is wormhole-core 0.8.3 (feeCustody receives fees; the fee instrument admin is not gg).
+const deployedCorePackageIDHex = "9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d"
+
+// replacedCore083PackageIDHex is the first 0.8.3 build: it accepts guardianGovernance as the fee instrument admin.
+const replacedCore083PackageIDHex = "b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69"
 
 // Withdrawn wormhole-core builds: their fee registry code runs as guardianGovernance.
 const (
@@ -32,6 +35,7 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		{name: "withdrawn 0.8.1", packageIDHex: withdrawnCore081PackageIDHex, version: "0.8.1", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.2", packageIDHex: withdrawnCore082PackageIDHex, version: "0.8.2", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.2 id as 0.8.3", packageIDHex: withdrawnCore082PackageIDHex, version: "0.8.3", wantErr: "not in the approved"},
+		{name: "replaced first 0.8.3 build", packageIDHex: replacedCore083PackageIDHex, version: "0.8.3", wantErr: "not in the approved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
