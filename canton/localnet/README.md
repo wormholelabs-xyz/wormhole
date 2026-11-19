@@ -361,7 +361,7 @@ The script requests time proofs from `app-provider` to move the time.
 CAUTION: Without the time proofs, a transaction can wait for many minutes.
 A host that connects again in that period can still confirm it.
 
-4. After `custody_host.sh`, do the check for `nttCustody`, or for `feeCustody` with `fee-custody-artifacts.json`:
+4. After `custody_host.sh` and `gg_package_vetting.sh`, do the check for `nttCustody`, or for `feeCustody` with `fee-custody-artifacts.json`:
 
    ```bash
    canton/localnet/gg_confirmation_quorum.sh --party "$(jq -r .partyId ../localnet-state/custody-artifacts.json)"
@@ -371,6 +371,7 @@ A host that connects again in that period can still confirm it.
    With `sv` and `app-user` disconnected, it fails with `MEDIATOR_SAYS_TX_TIMED_OUT`.
    The failure must name `nttCustody` as the only unresponsive party.
    Give `--signing-owners <owner>,<owner>` after a rotation that removes `owner1` or `owner2`.
+   The `--party` check uses the probe package that `gg_package_vetting.sh` uploads.
 
 ### Check the package vetting gate
 
