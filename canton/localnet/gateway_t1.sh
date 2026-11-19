@@ -17,7 +17,7 @@
 # gateway-net is an internal network: on Docker Desktop, a container on a normal bridge network reaches the
 # loopback-published LocalNet ports through host.docker.internal.
 #
-# Precondition: NTT_PIN_VERSION=0.4.0, ntt_burn_mint.sh and ntt_lock_unlock_gg.sh ran.
+# Precondition: NTT_PIN_VERSION=0.4.2, ntt_burn_mint.sh and ntt_lock_unlock_gg.sh ran.
 # DISCLOSURE_SERVICE_IMAGE names the local image built from canton/disclosure/service/Dockerfile of the NTT repo.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
@@ -79,16 +79,6 @@ chmod 700 "$GATEWAY_STATE_DIR"
 
 container_exists() { docker container inspect "$1" > /dev/null 2>&1; }
 
-readonly SERVICE_CONTAINER_UID=65532
-# restrict_secret_to_service_user <file>: mode 0600. The service refuses a secret that other users can read. Docker
-# Desktop maps a bind mount to the container user; on Linux the file must belong to the distroless nonroot user.
-restrict_secret_to_service_user() {
-  chmod 600 "$1"
-  if [[ "$(uname -s)" == Linux ]]; then
-    chown "$SERVICE_CONTAINER_UID:$SERVICE_CONTAINER_UID" "$1" \
-      || fail "cannot give $1 to uid $SERVICE_CONTAINER_UID; run gateway_t1.sh up as root"
-  fi
-}
 network_exists() { docker network inspect "$1" > /dev/null 2>&1; }
 
 # --- up ---
