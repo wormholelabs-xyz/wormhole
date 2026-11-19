@@ -96,11 +96,13 @@ def partyName(party: PartyId): String = party.uid.identifier.unwrap
 
 val topologyEffectiveMaxAttempts = 120
 val topologyEffectivePollMillis = 500
-def awaitTopology(description: String)(isEffective: => Boolean): Unit = {
+def awaitTopology(description: String, maxAttempts: Int = topologyEffectiveMaxAttempts)(isEffective: => Boolean): Unit = {
+  require(maxAttempts > 0 && maxAttempts <= topologyEffectiveMaxAttempts,
+    s"topology wait of $maxAttempts attempts is outside 1..$topologyEffectiveMaxAttempts")
   var attempt = 0
   while (!isEffective) {
     attempt += 1
-    if (attempt >= topologyEffectiveMaxAttempts) throw new RuntimeException(s"topology not effective: $description")
+    if (attempt >= maxAttempts) throw new RuntimeException(s"topology not effective: $description")
     Thread.sleep(topologyEffectivePollMillis)
   }
 }
@@ -124,6 +126,10 @@ def checkHostingIsGuardianPolicy(mapping: PartyToParticipant): Unit = {
   }
   require(mapping.threshold.value == expectedConfirmationThreshold,
     s"$name confirmation threshold ${mapping.threshold.value}, expected $expectedConfirmationThreshold")
+  checkPartySigningKeysAreGuardianPolicy(mapping)
+}
+def checkPartySigningKeysAreGuardianPolicy(mapping: PartyToParticipant): Unit = {
+  val name = partyName(mapping.partyId)
   val signingKeys = mapping.partySigningKeysWithThreshold.getOrElse(throw new IllegalArgumentException(s"$name has no party signing keys"))
   require(signingKeys.threshold.value == expectedSigningKeyThreshold,
     s"$name signing key threshold ${signingKeys.threshold.value}, expected $expectedSigningKeyThreshold")

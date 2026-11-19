@@ -11,7 +11,7 @@ readonly EVIDENCE_DIR="$LOCALNET_STATE_DIR/evidence"
 mkdir -p "$EVIDENCE_DIR"
 EVIDENCE_LOG="$EVIDENCE_DIR/$(basename "$0" .sh)-$(date -u +%Y%m%dT%H%M%SZ).log"
 exec > >(tee -a "$EVIDENCE_LOG") 2> >(tee -a "$EVIDENCE_LOG" >&2)
-echo "Run $(basename "$0") $* at $(date -u +%Y-%m-%dT%H:%M:%SZ), commit $(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+echo "Run $(basename "$0") $* at $(date -u +%Y-%m-%dT%H:%M:%SZ), commit $(git -C "$REPO_ROOT" describe --always --dirty 2>/dev/null || echo unknown)"
 echo "Evidence log: $EVIDENCE_LOG"
 
 GG_ARTIFACTS="$LOCALNET_STATE_DIR/gg-artifacts.json"
@@ -252,6 +252,21 @@ set_participant_connection() {
       return 1
     fi
   done
+}
+
+# check_connected_to_gg_synchronizer <json-api-url> <participant-label>: the participant reports a connection to the
+# synchronizer of gg-artifacts.json.
+check_connected_to_gg_synchronizer() {
+  local connected_synchronizer_ids
+  connected_synchronizer_ids="$(curl_bounded -sSf "$1/v2/state/connected-synchronizers?party=$GG_PARTY" -H "@$SCRIPT_AUTH_HEADER" \
+    | jq -er '.connectedSynchronizers | map(.synchronizerId) | .[]')" || {
+    echo "FAIL: $2 reports no connected synchronizer" >&2
+    return 1
+  }
+  if ! grep -qxF -e "$LOGICAL_SYNCHRONIZER_ID" -e "$SYNCHRONIZER_ID" <<<"$connected_synchronizer_ids"; then
+    echo "FAIL: $2 is connected to $(tr '\n' ' ' <<<"$connected_synchronizer_ids"), expected $LOGICAL_SYNCHRONIZER_ID" >&2
+    return 1
+  fi
 }
 
 # verify_vaa_as_operator <command-id> <vaa-hex> <pub-keys-json>: ParseAndVerifyVAA on the current CoreState.

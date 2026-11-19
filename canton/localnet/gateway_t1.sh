@@ -78,6 +78,17 @@ mkdir -p "$GATEWAY_STATE_DIR"
 chmod 700 "$GATEWAY_STATE_DIR"
 
 container_exists() { docker container inspect "$1" > /dev/null 2>&1; }
+
+readonly SERVICE_CONTAINER_UID=65532
+# restrict_secret_to_service_user <file>: mode 0600. The service refuses a secret that other users can read. Docker
+# Desktop maps a bind mount to the container user; on Linux the file must belong to the distroless nonroot user.
+restrict_secret_to_service_user() {
+  chmod 600 "$1"
+  if [[ "$(uname -s)" == Linux ]]; then
+    chown "$SERVICE_CONTAINER_UID:$SERVICE_CONTAINER_UID" "$1" \
+      || fail "cannot give $1 to uid $SERVICE_CONTAINER_UID; run gateway_t1.sh up as root"
+  fi
+}
 network_exists() { docker network inspect "$1" > /dev/null 2>&1; }
 
 # --- up ---
@@ -104,8 +115,9 @@ extendedKeyUsage=serverAuth"
     issue_certificate gateway-client ca "extendedKeyUsage=clientAuth"
     issue_certificate rogue-client rogue-ca "extendedKeyUsage=clientAuth"
   )
-  # Readable by the container users (nginx 101, distroless nonroot 65532).
-  chmod 644 "$cert_dir"/*.crt "$cert_dir/$PROXY_CONTAINER.key" "$cert_dir/gateway-client.key"
+  # Readable by the nginx container user 101.
+  chmod 644 "$cert_dir"/*.crt "$cert_dir/$PROXY_CONTAINER.key"
+  restrict_secret_to_service_user "$cert_dir/gateway-client.key"
   openssl verify -CAfile "$cert_dir/ca.crt" "$cert_dir/$PROXY_CONTAINER.crt" "$cert_dir/gateway-client.crt"
   if openssl verify -CAfile "$cert_dir/ca.crt" "$cert_dir/rogue-client.crt" > /dev/null 2>&1; then
     fail "the rogue client certificate verifies against the T1 CA"
@@ -131,7 +143,7 @@ ensure_gateway_ledger_user() {
     || fail "$GATEWAY_LEDGER_USER rights are $actual_rights, expected $expected_rights"
   echo "ledger user $GATEWAY_LEDGER_USER rights $actual_rights"
   (umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$GATEWAY_LEDGER_USER" > "$GATEWAY_STATE_DIR/gateway.jwt")
-  chmod 644 "$GATEWAY_STATE_DIR/gateway.jwt"
+  restrict_secret_to_service_user "$GATEWAY_STATE_DIR/gateway.jwt"
 }
 
 write_nginx_configs() {
@@ -335,13 +347,15 @@ check_service_endpoints() {
   echo "== C3. Service health, the route set and the register flow"
   check_service_answers "healthz through the proxy" /v1/healthz 200 '. == {status: "ok"}'
   check_service_answers "readyz through the proxy" /v1/readyz 200 '. == {status: "ready"}'
-  check_service_answers "the index lists only the flow routes" /v1 200 "([.endpoints[].path] | sort) == $SERVICE_ROUTES_JSON"
+  # The index also lists the CIP-0056 registry routes, outside /v1.
+  check_service_answers "the /v1 routes of the index are the flow routes" /v1 200 \
+    "([.endpoints[].path | select(. == \"/v1\" or startswith(\"/v1/\"))] | sort) == $SERVICE_ROUTES_JSON"
   for removed_path in "${REMOVED_SERVICE_PATHS[@]}"; do
     check_service_answers "no route" "$removed_path" 404 -
   done
   check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
   check_service_answers "register flow without --operator-party" /v1/flows/register 404 \
-    '.error == "flow register not enabled: the service has no operator party"'
+    '.error == "disclosure-service: flow register not enabled: the service has no operator party"'
 }
 
 # flow_set <flow> <query>: the flow response JSON. Fails unless HTTP 200.

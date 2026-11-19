@@ -1,0 +1,15 @@
+// Hold one participant disconnected from the global synchronizer with manualConnect=true, retrying while its node restarts.
+// Environment: HOLD_PARTICIPANT, HOLD_MAX_SECONDS.
+val synchronizerAlias = "global"
+val heldParticipant = participants.remote.find(_.name == sys.env("HOLD_PARTICIPANT")).getOrElse(throw new RuntimeException("unknown participant"))
+val deadline = System.currentTimeMillis() + sys.env("HOLD_MAX_SECONDS").toLong * 1000
+var held = false
+while (!held && System.currentTimeMillis() < deadline) {
+  held = scala.util.Try {
+    heldParticipant.synchronizers.disconnect(synchronizerAlias)
+    heldParticipant.synchronizers.modify(synchronizerAlias, _.copy(manualConnect = true))
+    heldParticipant.synchronizers.config(synchronizerAlias).exists(_.manualConnect) && heldParticipant.synchronizers.list_connected().isEmpty
+  }.getOrElse(false)
+  if (!held) Thread.sleep(200)
+}
+println(s"HOLD ${heldParticipant.name} held=$held")
