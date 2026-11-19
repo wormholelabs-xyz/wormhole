@@ -13,7 +13,7 @@ source: daml
 # Compile-time SCU check against the previous release (package id and
 # provenance in ../dars/README.md). Same package name, so 0.8.3 stays on the
 # wormhole-core upgrade line. The CoreState signatory change (feeRecipient
-# co-signs) passes this check with the warning
+# co-signs) and its new ensure rules pass this check with the warning
 # upgraded-template-expression-changed. 0.8.2 contracts cannot run under
 # 0.8.3, so 0.8.3 starts from a fresh genesis. 0.8.0, 0.8.1 and 0.8.2 are
 # withdrawn: their fee registry code runs as guardianGovernance.

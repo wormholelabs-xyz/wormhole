@@ -26,7 +26,7 @@
 --
 --   * 'CoreState' singleton co-signed by @operator@, @guardianGovernance@ and
 --     @feeRecipient@ (feeCustody).
---     The latter is the guardians' governance anchor — in production a
+--     @guardianGovernance@ is the guardians' governance anchor — in production a
 --     decentralized-namespace external party under a k-of-n threshold of guardian
 --     keys (the Canton Network DSO pattern), rotated at the topology layer without
 --     touching this template. It signs only at genesis; transitions
@@ -137,7 +137,8 @@ template CoreState
                                             -- units; governance-set via SetMessageFee
     feeInstrument      : InstrumentId       -- CIP-0056 instrument fees are paid in (CC on
                                             -- mainnet). Genesis-fixed: no governance action
-                                            -- covers it.
+                                            -- covers it. Its admin is never
+                                            -- guardianGovernance or operator.
     feeRecipient       : Party              -- feeCustody: quorum party in the guardian namespace,
                                             -- never guardianGovernance or operator. Genesis-fixed.
     consumedGovernance : Set Bytes32        -- governance-only replay protection, keyed by
@@ -151,8 +152,18 @@ template CoreState
     signatory operator, guardianGovernance, feeRecipient
 
     -- Applies to genesis (raw creates from the LocalNet and devnet scripts) and to each governance re-create.
-    ensure feeRecipient /= guardianGovernance && feeRecipient /= operator
-      && checkGuardianSetsAreConsistent guardianSetIndex guardianSets
+    -- SECURITY: the fee registry body runs with the authority of the receiver
+    -- and of the instrument admin, which signs each fee allocation. Neither may
+    -- be guardianGovernance or operator. 'chargeFee' repeats each rule.
+    ensure and
+      [ operator /= guardianGovernance
+      , feeRecipient /= guardianGovernance
+      , feeRecipient /= operator
+      , feeInstrument.admin /= guardianGovernance
+      , feeInstrument.admin /= operator
+      , messageFee >= 0
+      , checkGuardianSetsAreConsistent guardianSetIndex guardianSets
+      ]
 
     -- | Read-only VAA verification against the CURRENT guardian set, for the
     -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
@@ -378,15 +389,15 @@ currentSetForUpgrade st =
   fromSomeNote "no current guardian set" (Map.lookup st.guardianSetIndex st.guardianSets)
 
 -- | On-ledger record of a TransferFees action: the guardians' authorization to
--- move @amount@ of accrued fees to @recipient@. Fees live in feeCustody's
--- holdings, and Canton tokens move only by their owner's signature, so the
--- outbound transfer is a k-of-n guardian ceremony that signs as feeCustody for
--- the transfer and as guardianGovernance for the archive of this contract
--- (signed by guardianGovernance, authority inherited from the consumed
--- 'CoreState'), the artifact that ceremony's custody policy matches against.
+-- move @amount@ of accrued fees to @recipient@. Signed by guardianGovernance,
+-- authority inherited from the consumed 'CoreState'. Fees live in
+-- feeCustody's holdings, and Canton tokens move only by their owner's
+-- signature, so the outbound transfer is a k-of-n guardian ceremony of two
+-- prepared transactions: first the archive of this contract (actAs
+-- guardianGovernance), then the transfer (actAs feeCustody). The ledger allows
+-- one archive, so each authorization backs at most one transfer.
 -- @recipient@ is the VAA's 32-byte Wormhole address; mapping it to a Canton
--- receiver is the custody layer's job. Archived by guardianGovernance when
--- fulfilled.
+-- receiver is the custody layer's job.
 template FeeWithdrawalAuthorization
   with
     guardianGovernance : Party

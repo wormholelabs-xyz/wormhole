@@ -14,8 +14,9 @@
 -- authentic.
 --
 -- SECURITY: the fee registry's execute body runs with the authority of these
--- controllers. When a fee is due, neither the payer nor the receiver may be
--- guardianGovernance or the operator. Callers pin 'GetGuardianGovernance'
+-- controllers and of the allocation signatories, which include the instrument
+-- admin. When a fee is due, none of the payer, the receiver and the instrument
+-- admin may be guardianGovernance or the operator. Callers pin 'GetGuardianGovernance'
 -- against their own committed anchor before charging, so a compromised
 -- operator can't redirect fees via a shadow CoreState under a gg it controls.
 --
@@ -61,14 +62,17 @@ data FeeChargeParties = FeeChargeParties with
   deriving (Eq, Show)
 
 -- | SECURITY: the fee registry body runs with the authority of the allocation
--- controllers (executor = sender = payer, receiver = feeRecipient). Neither may
--- be guardianGovernance or the operator.
-checkFeeRegistryGetsNoPrivilegedAuthority : FeeChargeParties -> Update ()
-checkFeeRegistryGetsNoPrivilegedAuthority parties = do
+-- controllers (executor = sender = payer, receiver = feeRecipient) and of the
+-- allocation signatories (the instrument admin). None may be
+-- guardianGovernance or the operator.
+checkFeeRegistryGetsNoPrivilegedAuthority : FeeChargeParties -> InstrumentId -> Update ()
+checkFeeRegistryGetsNoPrivilegedAuthority parties instrument = do
   assertMsg "fee payer must not be guardianGovernance" (parties.payer /= parties.guardianGovernance)
   assertMsg "fee payer must not be the operator" (parties.payer /= parties.operator)
   assertMsg "fee recipient must not be guardianGovernance" (parties.feeRecipient /= parties.guardianGovernance)
   assertMsg "fee recipient must not be the operator" (parties.feeRecipient /= parties.operator)
+  assertMsg "fee instrument admin must not be guardianGovernance" (instrument.admin /= parties.guardianGovernance)
+  assertMsg "fee instrument admin must not be the operator" (instrument.admin /= parties.operator)
 
 -- | Validate and execute a fee allocation. Only called from 'CoreState'
 -- choices (see the module header for why the receiver's authority lives
@@ -77,7 +81,7 @@ checkFeeRegistryGetsNoPrivilegedAuthority parties = do
 --   * @fee <= 0@: require 'None' — never consume funds that are not owed. A
 --     stranded allocation (e.g. a fee-lowering race) stays recoverable by the
 --     payer via @Allocation_Withdraw@.
---   * @fee > 0@: reject a privileged payer or receiver
+--   * @fee > 0@: reject a privileged payer, receiver or instrument admin
 --     ('checkFeeRegistryGetsNoPrivilegedAuthority'), then require an
 --     allocation whose leg pays at least the fee, in the configured
 --     instrument, to the fee recipient, from the payer, executed by the payer,
@@ -103,7 +107,7 @@ chargeFee parties instrument fee mAlloc
   | otherwise = case mAlloc of
       None -> abort "fee required: attach a fee allocation"
       Some (allocCid, extraArgs) -> do
-        checkFeeRegistryGetsNoPrivilegedAuthority parties
+        checkFeeRegistryGetsNoPrivilegedAuthority parties instrument
         -- Interface fetch: the payer (== leg sender) is a stakeholder of its
         -- own allocation, so the fetch is authorized and the contract is on
         -- the payer's ACS (no disclosure needed for it).
