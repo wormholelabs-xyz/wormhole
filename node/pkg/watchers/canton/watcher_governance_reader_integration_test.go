@@ -50,7 +50,6 @@ var getUpdatesFullMethod = "/" + apiv2.UpdateService_ServiceDesc.ServiceName + "
 
 // realBridge is the JSON output of Test.WatcherGovernanceReader:integrationGovernanceReaderSetup.
 type realBridge struct {
-	Operator           string `json:"operator"`
 	GuardianGovernance string `json:"guardianGovernance"`
 	CoreStateCid       string `json:"coreStateCid"`
 }
@@ -282,7 +281,6 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	var bridge realBridge
 	runDamlScript(t, dpm, testDar, port, "Test.WatcherGovernanceReader:integrationGovernanceReaderSetup", "", &bridge)
 	require.Contains(t, bridge.GuardianGovernance, "::", "guardianGovernance must be a full party id")
-	require.NotEqual(t, bridge.Operator, bridge.GuardianGovernance)
 
 	type watcherCase struct {
 		name               string
@@ -354,14 +352,14 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 
 	trustedPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, publishes.TrustedOwner, parseDamlUint64(t, publishes.TrustedEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.TrustedSequence),
 		Nonce:          trustedPublishNonce,
 		Payload:        decodeHexPayload(t, trustedPublishPayloadHex),
 	}
 	rogueShadowPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: DeriveEmitterAddress(bridge.Operator, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.RogueShadowSequence),
 		Nonce:          rogueShadowNonce,
 		Payload:        decodeHexPayload(t, rogueShadowPayloadHex),

@@ -134,7 +134,7 @@ func TestCantonWatcherUpgradeWindowAfterUnvet(t *testing.T) {
 	toExpectedPublish := func(published upgradeWindowPublish) observedPublish {
 		return observedPublish{
 			EmitterChain:   vaa.ChainIDCanton,
-			EmitterAddress: DeriveEmitterAddress(bridge.Operator, published.Owner, parseDamlUint64(t, published.EmitterID)),
+			EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, published.Owner, parseDamlUint64(t, published.EmitterID)),
 			Sequence:       parseDamlUint64(t, published.Sequence),
 			Nonce:          upgradeWindowNonce,
 			Payload:        decodeHexPayload(t, upgradeWindowPayloadHex),

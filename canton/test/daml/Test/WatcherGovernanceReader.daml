@@ -16,9 +16,8 @@ import Wormhole.Core.State
 import Wormhole.Core.Setup
 import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian)
 
--- | The real bridge: 'CoreState' co-signed by @operator@ and @guardianGovernance@.
+-- | The real bridge: 'CoreState' signed by @guardianGovernance@ and the fee custody party.
 data RealBridge = RealBridge with
-    operator : Party
     guardianGovernance : Party
     coreStateCid : ContractId CoreState
   deriving (Eq, Show)
@@ -48,31 +47,31 @@ rogueShadowPayload = "deadbeef"
 
 integrationGovernanceReaderSetup : Script RealBridge
 integrationGovernanceReaderSetup = do
-  (operator, guardianGovernance, coreStateCid) <- setup
-  pure RealBridge with operator, guardianGovernance, coreStateCid
+  (guardianGovernance, coreStateCid) <- setup
+  pure RealBridge with guardianGovernance, coreStateCid
 
 -- | In ledger order:
 --   1. A rogue-governance emitter fails to publish against the real 'CoreState'.
---   2. It publishes against a shadow 'CoreState' co-signed by operator + rogue.
+--   2. It publishes against a shadow 'CoreState' that the rogue party signs.
 --   3. A non-governance owner publishes through the real registry and 'CoreState'.
 integrationGovernanceReaderPublish : RealBridge -> Script GovernanceReaderPublishes
 integrationGovernanceReaderPublish bridge = do
-  let operator = bridge.operator
+  let guardianGovernance = bridge.guardianGovernance
   -- Registered before the rogue registry exists: 'registerEmitter' expects one.
   trustedOwner <- allocateParty "TrustedEmitterOwner"
-  trustedEmitterCid <- registerEmitter operator trustedOwner
+  trustedEmitterCid <- registerEmitter guardianGovernance trustedOwner
 
   rogueGovernance <- allocateParty "RogueGovernance"
   rogueOwner <- allocateParty "RogueEmitterOwner"
-  rogueRegistryCid <- submit (actAs operator <> actAs rogueGovernance) do
-    createCmd (mkInitialEmitterRegistry operator rogueGovernance 0)
-  rogueRegistryDisclosure <- fromSome <$> queryDisclosure operator rogueRegistryCid
+  rogueRegistryCid <- submit rogueGovernance do
+    createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
   (_, rogueEmitterCid) <- submit (actAs rogueOwner <> disclose rogueRegistryDisclosure) do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = rogueOwner, payer = rogueOwner, coreStateCid = None, feeAllocation = None
-      expectedGuardianGovernance = None
+      expectedGuardianGovernance = rogueGovernance
 
-  realCoreStateDisclosure <- fromSome <$> queryDisclosure operator bridge.coreStateCid
+  realCoreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance bridge.coreStateCid
   submitMustFail (actAs rogueOwner <> disclose realCoreStateDisclosure) do
     exerciseCmd rogueEmitterCid PublishMessage with
       nonce = rogueShadowNonce, payload = rogueShadowPayload, consistencyLevel = 0
@@ -81,15 +80,15 @@ integrationGovernanceReaderPublish bridge = do
   rogueFeeCustody <- allocateParty "RogueFeeCustody"
   rogueFeeInstrumentAdmin <- allocateParty "RogueFeeInstrumentAdmin"
   let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
-  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance <> actAs rogueFeeCustody) do
-    createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
+  shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
                  shadowFeeInstrument rogueFeeCustody)
-  (_, rogueShadowMessage) <- publishVia operator shadowCoreStateCid rogueOwner rogueEmitterCid
+  (_, rogueShadowMessage) <- publishVia rogueGovernance shadowCoreStateCid rogueOwner rogueEmitterCid
                                rogueShadowNonce rogueShadowPayload 0
   rogueShadowMessage.owner === rogueOwner
 
-  (_, trustedMessage) <- publishVia operator bridge.coreStateCid trustedOwner trustedEmitterCid
+  (_, trustedMessage) <- publishVia guardianGovernance bridge.coreStateCid trustedOwner trustedEmitterCid
                            trustedNonce trustedPayload 0
   trustedMessage.owner === trustedOwner
   assertMsg "trusted owner must differ from guardianGovernance"

@@ -8,16 +8,9 @@
 # Canton keys are non-unique (see State.daml and README §4).
 sdk-version: 3.5.1
 name: wormhole-core
-version: 0.8.3
+version: 0.9.0
 source: daml
-# Compile-time SCU check against the previous release (package id and
-# provenance in ../dars/README.md). Same package name, so 0.8.3 stays on the
-# wormhole-core upgrade line. The CoreState signatory change (feeRecipient
-# co-signs) and its new ensure rules pass this check with the warning
-# upgraded-template-expression-changed. 0.8.2 contracts cannot run under
-# 0.8.3, so 0.8.3 starts from a fresh genesis. 0.8.0, 0.8.1 and 0.8.2 are
-# withdrawn: their fee registry code runs as guardianGovernance.
-upgrades: ../dars/wormhole-core-0.8.2.dar
+# 0.9.0 is not SCU-compatible with 0.8.x (template fields removed); participants need a fresh wormhole-core line.
 dependencies:
   - daml-prim
   - daml-stdlib

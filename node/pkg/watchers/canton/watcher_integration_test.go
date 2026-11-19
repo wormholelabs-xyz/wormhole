@@ -127,10 +127,10 @@ func publishWormholeMessage(t *testing.T, dpm, dar, port string) {
 
 	raw, err := os.ReadFile(partyFile)
 	require.NoError(t, err)
-	var operator string
-	require.NoError(t, json.Unmarshal(raw, &operator))
-	require.NotEmpty(t, operator)
-	t.Logf("published as operator party: %s", operator)
+	var guardianGovernance string
+	require.NoError(t, json.Unmarshal(raw, &guardianGovernance))
+	require.NotEmpty(t, guardianGovernance)
+	t.Logf("published; registrar and read-as party: %s", guardianGovernance)
 }
 
 func TestCantonWatcherIntegration(t *testing.T) {
