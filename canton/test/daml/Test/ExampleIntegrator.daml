@@ -240,15 +240,15 @@ data CoreStatePinCase = CoreStatePinCase with
     expectedGuardianGovernance : Party
     expectedRejection          : Optional Text  -- None: Redeem must succeed
 
-shadowCoreState : Party -> Party -> [Bytes20] -> CoreState
-shadowCoreState signingOperator signingGovernance guardianKeys =
+shadowCoreState : Party -> Party -> Party -> Party -> [Bytes20] -> CoreState
+shadowCoreState signingOperator signingGovernance signingFeeCustody feeInstrumentAdmin guardianKeys =
   mkInitialCoreState signingOperator signingGovernance solanaGovernanceChainId
     defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = guardianKeys)
-    (InstrumentId with admin = signingGovernance, id = "UNUSED") signingGovernance
+    (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") signingFeeCustody
 
-shadowCoreStateWithSet1 : Party -> Party -> CoreState
-shadowCoreStateWithSet1 signingOperator signingGovernance =
-  (shadowCoreState signingOperator signingGovernance [devnetGuardian]) with
+shadowCoreStateWithSet1 : Party -> Party -> Party -> Party -> CoreState
+shadowCoreStateWithSet1 signingOperator signingGovernance signingFeeCustody feeInstrumentAdmin =
+  (shadowCoreState signingOperator signingGovernance signingFeeCustody feeInstrumentAdmin [devnetGuardian]) with
     guardianSetIndex = 1
     guardianSets = Map.fromList
       [(1, GuardianSet with keys = [devnetGuardianSet1Key], expirationTime = None)]
@@ -262,13 +262,15 @@ testIntegratorCoreStatePin = do
   throwawayGovernance <- allocateParty "ThrowawayGovernance"
   fakeOperator <- allocateParty "FakeOperator"
   fakeGovernance <- allocateParty "FakeGovernance"
+  shadowFeeCustody <- allocateParty "ShadowFeeCustody"
+  shadowFeeInstrumentAdmin <- allocateParty "ShadowFeeInstrumentAdmin"
 
-  shadowRealGuardiansCid <- submit (actAs operator <> actAs throwawayGovernance) do
-    createCmd (shadowCoreState operator throwawayGovernance [devnetGuardian])
-  shadowFakeGuardiansCid <- submit (actAs operator <> actAs throwawayGovernance) do
-    createCmd (shadowCoreStateWithSet1 operator throwawayGovernance)
-  shadowNoOperatorKeyCid <- submit (actAs fakeOperator <> actAs fakeGovernance) do
-    createCmd (shadowCoreState fakeOperator fakeGovernance [devnetGuardian])
+  shadowRealGuardiansCid <- submit (actAs operator <> actAs throwawayGovernance <> actAs shadowFeeCustody) do
+    createCmd (shadowCoreState operator throwawayGovernance shadowFeeCustody shadowFeeInstrumentAdmin [devnetGuardian])
+  shadowFakeGuardiansCid <- submit (actAs operator <> actAs throwawayGovernance <> actAs shadowFeeCustody) do
+    createCmd (shadowCoreStateWithSet1 operator throwawayGovernance shadowFeeCustody shadowFeeInstrumentAdmin)
+  shadowNoOperatorKeyCid <- submit (actAs fakeOperator <> actAs fakeGovernance <> actAs shadowFeeCustody) do
+    createCmd (shadowCoreState fakeOperator fakeGovernance shadowFeeCustody shadowFeeInstrumentAdmin [devnetGuardian])
   shadowRealGuardiansDisc <- fromSome <$> queryDisclosure operator shadowRealGuardiansCid
   shadowFakeGuardiansDisc <- fromSome <$> queryDisclosure operator shadowFakeGuardiansCid
   shadowNoOperatorKeyDisc <- fromSome <$> queryDisclosure fakeOperator shadowNoOperatorKeyCid
@@ -334,13 +336,15 @@ testCompromisedOperatorCannotForgeCoreState : Script ()
 testCompromisedOperatorCannotForgeCoreState = do
   (operator, guardianGovernance, _) <- setup
   outsider <- allocateParty "ForgeOutsider"
+  forgeFeeCustody <- allocateParty "ForgeFeeCustody"
+  forgeFeeInstrumentAdmin <- allocateParty "ForgeFeeInstrumentAdmin"
   let forgedSubmitters =
-        [ ("operator alone", actAs operator)
-        , ("operator and an outsider", actAs operator <> actAs outsider)
+        [ ("operator and feeCustody", actAs operator <> actAs forgeFeeCustody)
+        , ("operator, feeCustody and an outsider", actAs operator <> actAs forgeFeeCustody <> actAs outsider)
         ]
   forA_ forgedSubmitters \(submitterName, submitter) -> do
     forgeResult <- trySubmit submitter do
-      createCmd (shadowCoreStateWithSet1 operator guardianGovernance)
+      createCmd (shadowCoreStateWithSet1 operator guardianGovernance forgeFeeCustody forgeFeeInstrumentAdmin)
     case forgeResult of
       Left _ -> pure ()
       Right _ -> abort ("CoreState naming the real gg created by " <> submitterName)
