@@ -873,7 +873,8 @@ The script removes the container when it stops.
 Prerequisites:
 
 - `NTT_PIN_VERSION=0.4.2`. `ntt_burn_mint.sh` ran.
-- The ledger user `disclosure-gateway` exists. Run `gateway_t1.sh ledger-user`.
+- `gateway_t1.sh up` ran. The service reads the participant through the `t1-ledger-proxy` container with mutual TLS.
+  The service sends a token only over HTTPS or to a loopback address.
 - `DISCLOSURE_SERVICE_IMAGE` names an image of the disclosure service with the registry API.
 - `NTT_GUARDIAN_SET_INDEX` and `NTT_GUARDIAN_KEY_INDICES` give the current guardian set of `CoreState`.
 

@@ -79,16 +79,6 @@ chmod 700 "$GATEWAY_STATE_DIR"
 
 container_exists() { docker container inspect "$1" > /dev/null 2>&1; }
 
-readonly SERVICE_CONTAINER_UID=65532
-# restrict_secret_to_service_user <file>: mode 0600. The service refuses a secret that other users can read. Docker
-# Desktop maps a bind mount to the container user; on Linux the file must belong to the distroless nonroot user.
-restrict_secret_to_service_user() {
-  chmod 600 "$1"
-  if [[ "$(uname -s)" == Linux ]]; then
-    chown "$SERVICE_CONTAINER_UID:$SERVICE_CONTAINER_UID" "$1" \
-      || fail "cannot give $1 to uid $SERVICE_CONTAINER_UID; run gateway_t1.sh up as root"
-  fi
-}
 network_exists() { docker network inspect "$1" > /dev/null 2>&1; }
 
 # --- up ---

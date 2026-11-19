@@ -241,3 +241,14 @@ operator_disclosure() {
   disclosed_contract "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" "$1" "$2"
 }
 
+
+readonly DISCLOSURE_SERVICE_CONTAINER_UID=65532
+# restrict_secret_to_service_user <file>: mode 0600. The disclosure service refuses a secret that other users can read.
+# Docker Desktop maps a bind mount to the container user; on Linux the file must belong to the distroless nonroot user.
+restrict_secret_to_service_user() {
+  chmod 600 "$1"
+  if [[ "$(uname -s)" == Linux ]]; then
+    chown "$DISCLOSURE_SERVICE_CONTAINER_UID:$DISCLOSURE_SERVICE_CONTAINER_UID" "$1" \
+      || fail "cannot give $1 to uid $DISCLOSURE_SERVICE_CONTAINER_UID; run the script as root"
+  fi
+}
