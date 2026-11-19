@@ -5,8 +5,9 @@
 # after the mint, and after the transfers.
 #
 # Usage: registry_api_check.sh
-# Precondition: NTT_PIN_VERSION=0.4.0, ntt_burn_mint.sh ran, and the ledger user disclosure-gateway exists
-# (gateway_t1.sh ledger-user). DISCLOSURE_SERVICE_IMAGE names an image of canton/disclosure/service with the registry API.
+# Precondition: NTT_PIN_VERSION=0.4.2, ntt_burn_mint.sh ran, and gateway_t1.sh up ran: the service reads the
+# participant through the T1 mutual-TLS ledger proxy, because it sends a token only over https or to loopback.
+# DISCLOSURE_SERVICE_IMAGE names an image of canton/disclosure/service with the registry API.
 # Set NTT_GUARDIAN_SET_INDEX and NTT_GUARDIAN_KEY_INDICES to the current guardian set of CoreState (ntt_lib.sh).
 # The script starts one container on the localnet network and removes it at exit.
 set -euo pipefail
@@ -18,7 +19,9 @@ readonly SERVICE_HOST_PORT="${REGISTRY_API_CHECK_PORT:-7601}"
 readonly SERVICE_CONTAINER_PORT=7599
 readonly SERVICE_URL="http://127.0.0.1:$SERVICE_HOST_PORT"
 readonly PARTICIPANT_NETWORK="localnet"
-readonly PARTICIPANT_JSON_API="http://canton:3975"
+readonly LEDGER_PROXY_CONTAINER="t1-ledger-proxy"
+readonly PARTICIPANT_JSON_API="https://$LEDGER_PROXY_CONTAINER:7443"
+readonly GATEWAY_CERT_DIR="$LOCALNET_STATE_DIR/gateway-t1/certs"
 readonly GATEWAY_LEDGER_USER="disclosure-gateway"
 readonly HEALTHZ_MAX_POLLS=30
 # The service keeps ledger reads for --cache-ttl. The script sets 1 s and waits longer before a read that must see a write.
@@ -39,10 +42,12 @@ readonly TRANSFER_INSTRUCTION_INTERFACE="#splice-api-token-transfer-instruction-
 readonly TRANSFER_PREAPPROVAL_TEMPLATE="#token-cip0056:Token.CIP0056.CoinTransfer:TransferPreapproval"
 readonly PREAPPROVAL_CONTEXT_KEY="token-cip0056.transferPreapprovalCid"
 
-[[ "$NTT_VERSION" == "0.4.0" ]] || fail "set NTT_PIN_VERSION=0.4.0"
+[[ "$NTT_VERSION" == "0.4.2" ]] || fail "set NTT_PIN_VERSION=0.4.2"
 [[ -n "${DISCLOSURE_SERVICE_IMAGE:-}" ]] || fail "set DISCLOSURE_SERVICE_IMAGE to the local disclosure service image"
 docker image inspect "$DISCLOSURE_SERVICE_IMAGE" > /dev/null || fail "image $DISCLOSURE_SERVICE_IMAGE does not exist"
 ! docker container inspect "$SERVICE_CONTAINER" > /dev/null 2>&1 || fail "container $SERVICE_CONTAINER exists; remove it first"
+[[ "$(docker container inspect -f '{{.State.Running}}' "$LEDGER_PROXY_CONTAINER" 2> /dev/null)" == "true" ]] \
+  || fail "container $LEDGER_PROXY_CONTAINER is not running; run gateway_t1.sh up"
 
 run_label="$(date +%s)"
 check_passes=0
@@ -144,7 +149,11 @@ expected_rights="$(jq -cn --arg gg "$GG_PARTY" --arg custody "$NTT_CUSTODY_PARTY
 pass "ledger user $GATEWAY_LEDGER_USER has only $gateway_rights"
 service_dir="$gg_work_dir/service"
 mkdir -p "$service_dir"
-"$LOCALNET_SCRIPT_DIR/token.sh" "$GATEWAY_LEDGER_USER" > "$service_dir/gateway.jwt"
+(umask 077 && "$LOCALNET_SCRIPT_DIR/token.sh" "$GATEWAY_LEDGER_USER" > "$service_dir/gateway.jwt")
+restrict_secret_to_service_user "$service_dir/gateway.jwt"
+for gateway_cert_file in ca.crt gateway-client.crt gateway-client.key; do
+  [[ -f "$GATEWAY_CERT_DIR/$gateway_cert_file" ]] || fail "$GATEWAY_CERT_DIR/$gateway_cert_file is absent; run gateway_t1.sh up"
+done
 
 manager_address="$(ntt_contract burnMint | jq -er .managerAddress)"
 burn_mint_managers="$(active_contracts app-provider "$GG_PARTY" ":Wormhole.Ntt.Manager:NttManager" \
@@ -155,19 +164,25 @@ echo "burn/mint deployment $manager_address instrument $instrument_id; gg burn/m
 jq -n --argjson managers "$burn_mint_managers" --arg id "$instrument_id" \
   '[$managers[] | .instrumentId.id] | unique | map({key: ., value: (if . == $id then {name: "Wormhole Bridged Test", symbol: "WBT"}
     else {name: ("Bridged " + .[0:12]), symbol: "BRG"} end)}) | from_entries' > "$service_dir/instruments.json"
-chmod 644 "$service_dir"/*
+chmod 644 "$service_dir/instruments.json"
 chmod 755 "$service_dir"
 
 echo "== 2. Start the service with the registry API on $SERVICE_URL"
+# --behind-edge-proxy: the container binds 0.0.0.0, and Docker publishes the port on 127.0.0.1 only.
 docker run -d --name "$SERVICE_CONTAINER" --network "$PARTICIPANT_NETWORK" \
   -p "127.0.0.1:$SERVICE_HOST_PORT:$SERVICE_CONTAINER_PORT" \
   -v "$service_dir/gateway.jwt:/etc/disclosure/gateway.jwt:ro" \
   -v "$service_dir/instruments.json:/etc/disclosure/instruments.json:ro" \
+  -v "$GATEWAY_CERT_DIR/ca.crt:/etc/disclosure/ca.crt:ro" \
+  -v "$GATEWAY_CERT_DIR/gateway-client.crt:/etc/disclosure/gateway-client.crt:ro" \
+  -v "$GATEWAY_CERT_DIR/gateway-client.key:/etc/disclosure/gateway-client.key:ro" \
   "$DISCLOSURE_SERVICE_IMAGE" \
   --json-api "$PARTICIPANT_JSON_API" --access-token-file /etc/disclosure/gateway.jwt \
-  --disclosing-party "$GG_PARTY,$NTT_CUSTODY_PARTY" \
-  --registry-admin-party "$GG_PARTY" --registry-instruments-file /etc/disclosure/instruments.json \
-  --cache-ttl "$SERVICE_CACHE_TTL" --listen "0.0.0.0:$SERVICE_CONTAINER_PORT" > /dev/null
+  --json-api-ca-file /etc/disclosure/ca.crt --json-api-client-cert-file /etc/disclosure/gateway-client.crt \
+  --json-api-client-key-file /etc/disclosure/gateway-client.key \
+  --guardian-governance-party "$GG_PARTY" --ntt-custody-party "$NTT_CUSTODY_PARTY" \
+  --registry-instruments-file /etc/disclosure/instruments.json \
+  --cache-ttl "$SERVICE_CACHE_TTL" --listen "0.0.0.0:$SERVICE_CONTAINER_PORT" --behind-edge-proxy > /dev/null
 for (( poll = 1; poll <= HEALTHZ_MAX_POLLS; poll++ )); do
   curl_bounded -sSf "$SERVICE_URL/v1/healthz" > /dev/null 2>&1 && break
   (( poll < HEALTHZ_MAX_POLLS )) || { docker logs --tail 30 "$SERVICE_CONTAINER" >&2; fail "service not healthy"; }

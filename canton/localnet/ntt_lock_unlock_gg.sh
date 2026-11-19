@@ -2,7 +2,7 @@
 # Register an NTT lock/unlock deployment of Canton Coin (Amulet) with guardianGovernance as the admin.
 # The reserve custodian is then nttCustody. nttCustody gets an Amulet TransferPreapproval first.
 # Usage: ntt_lock_unlock_gg.sh
-# Precondition: NTT_PIN_VERSION=0.4.0, ntt_governance.sh ran, custody-artifacts.json names nttCustody.
+# Precondition: NTT_PIN_VERSION=0.4.2, ntt_governance.sh ran, custody-artifacts.json names nttCustody.
 # Output: the "lockUnlockGg" entry of $LOCALNET_STATE_DIR/ntt-contracts.json.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
@@ -19,7 +19,7 @@ readonly TRANSFER_PREAPPROVAL_PROPOSAL_TEMPLATE="#splice-wallet:Splice.Wallet.Tr
 readonly PREAPPROVAL_WAIT_MAX_POLLS=60
 readonly PREAPPROVAL_WAIT_POLL_SECONDS=2
 
-[[ -n "$NTT_CUSTODY_PARTY" ]] || fail "set NTT_PIN_VERSION=0.4.0: ntt $NTT_VERSION has no nttCustody"
+[[ -n "$NTT_CUSTODY_PARTY" ]] || fail "set NTT_PIN_VERSION=0.4.2: ntt $NTT_VERSION has no nttCustody"
 run_label="$(date +%s)"
 gg_only="$(jq -n --arg gg "$GG_PARTY" '[$gg]')"
 dso="$(dso_party)"

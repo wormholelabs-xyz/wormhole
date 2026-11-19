@@ -77,7 +77,7 @@ Set `DB_PORT` to use a different port.
 | `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
 | `ntt_burn_mint.sh` | Runs a burn/mint deployment of a `guardianGovernance` token. |
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
-| `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. ntt 0.4.0 only. |
+| `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. ntt 0.4.2 only. |
 | `gateway_t1.sh` | Runs the disclosure service on a separate gateway network behind a mutual-TLS proxy, and checks it. |
 | `registry_api_check.sh` | Checks the CIP-0056 registry API of the disclosure service with an offer transfer and a direct transfer. |
 | `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
@@ -361,7 +361,7 @@ The script requests time proofs from `app-provider` to move the time.
 CAUTION: Without the time proofs, a transaction can wait for many minutes.
 A host that connects again in that period can still confirm it.
 
-4. After `custody_host.sh`, do the check for `nttCustody`, or for `feeCustody` with `fee-custody-artifacts.json`:
+4. After `custody_host.sh` and `gg_package_vetting.sh`, do the check for `nttCustody`, or for `feeCustody` with `fee-custody-artifacts.json`:
 
    ```bash
    canton/localnet/gg_confirmation_quorum.sh --party "$(jq -r .partyId ../localnet-state/custody-artifacts.json)"
@@ -371,6 +371,7 @@ A host that connects again in that period can still confirm it.
    With `sv` and `app-user` disconnected, it fails with `MEDIATOR_SAYS_TX_TIMED_OUT`.
    The failure must name `nttCustody` as the only unresponsive party.
    Give `--signing-owners <owner>,<owner>` after a rotation that removes `owner1` or `owner2`.
+   The `--party` check uses the probe package that `gg_package_vetting.sh` uploads.
 
 ### Check the package vetting gate
 
@@ -679,18 +680,16 @@ after the `nttCustody` change.
 ## NTT end-to-end run
 
 These scripts run the Wormhole NTT layer on LocalNet.
-The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `79d739b16`.
+The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `8976e29`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.3, `ntt` 0.3.2 and `token-cip0056` 0.2.0.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.8.3, `ntt` 0.3.4 and `token-cip0056` 0.2.0.
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
-The `ntt` 0.3.2 DAR of commit `79d739b16` calls `wormhole-core` 0.8.0.
-Thus `ntt_upload_dars.sh` stops until an `ntt` DAR on `wormhole-core` 0.8.3 replaces it.
+Both pinned `ntt` versions call `wormhole-core` 0.8.3.
 
-Set `NTT_PIN_VERSION=0.4.0` to use `ntt` 0.4.0. Build it from NTT branch `canton/overnight-ntt-custody`, commit `7561a9b`.
-The `ntt` 0.4.0 DAR of commit `7561a9b` also calls `wormhole-core` 0.8.0.
+Set `NTT_PIN_VERSION=0.4.2` to use `ntt` 0.4.2. Build it from NTT branch `canton/migrate-ntt-layer`, commit `eb42001`.
 `ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each version.
-From 0.4.0, `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
+From 0.4.2, `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
 `ntt_lib.sh` then reads the `nttCustody` party from `custody-artifacts.json`.
 The `guardianGovernance` owner keys of `NTT_GG_SIGNING_OWNERS` also sign for `nttCustody`.
 
@@ -820,7 +819,7 @@ The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
 
 ### Prerequisites
 
-- `NTT_PIN_VERSION=0.4.0`. `ntt_governance.sh`, `ntt_burn_mint.sh` and `ntt_lock_unlock_gg.sh` ran.
+- `NTT_PIN_VERSION=0.4.2`. `ntt_governance.sh`, `ntt_burn_mint.sh` and `ntt_lock_unlock_gg.sh` ran.
 - A disclosure service image from `canton/disclosure/service/Dockerfile` of the NTT repository.
   The image must have the role flags (`--guardian-governance-party`, `--ntt-custody-party`) and `--behind-edge-proxy`.
   The image must not serve `/v1/disclosures` (NTT branch `canton/ntt-disclosure-sets`, commit `ab36968` or later).
@@ -874,8 +873,9 @@ The script removes the container when it stops.
 
 Prerequisites:
 
-- `NTT_PIN_VERSION=0.4.0`. `ntt_burn_mint.sh` ran.
-- The ledger user `disclosure-gateway` exists. Run `gateway_t1.sh ledger-user`.
+- `NTT_PIN_VERSION=0.4.2`. `ntt_burn_mint.sh` ran.
+- `gateway_t1.sh up` ran. The service reads the participant through the `t1-ledger-proxy` container with mutual TLS.
+  The service sends a token only over HTTPS or to a loopback address.
 - `DISCLOSURE_SERVICE_IMAGE` names an image of the disclosure service with the registry API.
 - `NTT_GUARDIAN_SET_INDEX` and `NTT_GUARDIAN_KEY_INDICES` give the current guardian set of `CoreState`.
 
@@ -884,7 +884,7 @@ Procedure:
 1. Run the check:
 
    ```bash
-   DISCLOSURE_SERVICE_IMAGE=<image> NTT_PIN_VERSION=0.4.0 canton/localnet/registry_api_check.sh
+   DISCLOSURE_SERVICE_IMAGE=<image> NTT_PIN_VERSION=0.4.2 canton/localnet/registry_api_check.sh
    ```
 
 2. Make sure that the last line of the output starts with `registry_api_check.sh: PASS`.
@@ -931,7 +931,7 @@ The procedures of section 7.5 apply only to an upgrade that keeps the signatorie
 The rehearsal cannot run on a LocalNet with the 0.8.3 genesis:
 
 - The 0.8.3 `CoreState`, `EmitterRegistry` and `Emitter` cannot run under 0.6.0 or 0.7.0.
-- `ntt_e2e.sh` follows the `ntt` 0.3.2 and `wormhole-core` 0.8.3 pins of `ntt_lib.sh`.
+- `ntt_e2e.sh` follows the `ntt` 0.3.4 and `wormhole-core` 0.8.3 pins of `ntt_lib.sh`.
   Thus the steps `ntt` and `post-unvet` fail with `ntt` 0.3.0.
 
 The `prepare` step stops before it changes the vetting state if the Operator `CoreState` is not a 0.6.0 contract.
