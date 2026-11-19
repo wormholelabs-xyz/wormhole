@@ -359,7 +359,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	}
 	rogueShadowPublish := observedPublish{
 		EmitterChain:   vaa.ChainIDCanton,
-		EmitterAddress: DeriveEmitterAddress(bridge.GuardianGovernance, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
+		EmitterAddress: DeriveEmitterAddress(publishes.RogueGovernance, publishes.RogueOwner, parseDamlUint64(t, publishes.RogueEmitterID)),
 		Sequence:       parseDamlUint64(t, publishes.RogueShadowSequence),
 		Nonce:          rogueShadowNonce,
 		Payload:        decodeHexPayload(t, rogueShadowPayloadHex),
