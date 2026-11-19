@@ -29,6 +29,12 @@ KEY_DIR="${GG_KEY_DIR:-/tmp/guardian-governance-keys}"
 export GG_ARTIFACTS_FILE="${GG_ARTIFACTS_FILE:-/tmp/guardian-governance-artifacts.json}"
 export GG_THRESHOLD="${GG_THRESHOLD:-2}"
 export GG_PARTY_NAME="${GG_PARTY_NAME:-guardianGovernance}"
+# guardianGovernance gets feeCustody, the CoreState fee recipient, in the same namespace. Set it empty for no second party.
+if [ "${GG_PARTY_NAME}" = "guardianGovernance" ]; then
+  export GG_FEE_CUSTODY_PARTY_NAME="${GG_FEE_CUSTODY_PARTY_NAME-feeCustody}"
+else
+  export GG_FEE_CUSTODY_PARTY_NAME="${GG_FEE_CUSTODY_PARTY_NAME:-}"
+fi
 
 "${SCRIPT_DIR}/wait_for_ledger.sh" "${HOST}" "${PORT}"
 

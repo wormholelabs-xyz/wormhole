@@ -191,6 +191,7 @@ readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b
 readonly CORE_0_7_0_PACKAGE_ID="7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb"
 readonly CORE_0_8_0_PACKAGE_ID="03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
 readonly CORE_0_8_1_PACKAGE_ID="4a214c8015945441a74dcc2a702f0652b3136e8f7488ab13d8196313c4d47d89"
+readonly CORE_0_8_2_PACKAGE_ID="132d32bfdba695df16b78b1c2250579d9369b13fe030d951973293f4e23b70c1"
 
 # pinned_value_in_ntt_lib <readonly-name>: the value of that pin in ntt_lib.sh, which must define it exactly once.
 pinned_value_in_ntt_lib() {
@@ -206,14 +207,23 @@ pinned_core_package_id="$(pinned_value_in_ntt_lib WORMHOLE_CORE_PACKAGE_ID)" || 
 pinned_core_version="$(pinned_value_in_ntt_lib WORMHOLE_CORE_VERSION)" || failure_count=$((failure_count + 1))
 pinned_ntt_version="$(sed -nE 's/^readonly NTT_VERSION="\$\{NTT_PIN_VERSION:-([0-9.]+)\}"$/\1/p' "$LOCALNET_TEST_DIR/../ntt_lib.sh")"
 pinned_ntt_package_id="$(ntt_pinned_package_id "$pinned_ntt_version")" || failure_count=$((failure_count + 1))
-check_case "pinned core id is 0.8.2 132d32bf" 0 - - \
-  test "$pinned_core_package_id" == "132d32bfdba695df16b78b1c2250579d9369b13fe030d951973293f4e23b70c1"
-check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.8.2"
+check_case "pinned core id is 0.8.3 9d546b11" 0 - - \
+  test "$pinned_core_package_id" == "9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d"
+check_case "pinned core id is not the replaced first 0.8.3 build b5613c61" 0 - - \
+  test "$pinned_core_package_id" != "b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69"
+check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.8.3"
+check_case "pinned core id is not the withdrawn 0.8.0 03a65dc3" 0 - - \
+  test "$pinned_core_package_id" != "$CORE_0_8_0_PACKAGE_ID"
+check_case "pinned core id is not the withdrawn 0.8.1 4a214c80" 0 - - \
+  test "$pinned_core_package_id" != "$CORE_0_8_1_PACKAGE_ID"
+check_case "pinned core id is not the withdrawn 0.8.2 132d32bf" 0 - - \
+  test "$pinned_core_package_id" != "$CORE_0_8_2_PACKAGE_ID"
 check_case "pinned ntt id is 0.3.2 f77fe8a8" 0 - - \
   test "$pinned_ntt_package_id" == "f77fe8a8710039087e5d0184e7f6fb65bfdbaf23875196bf202087d855643e71"
 check_case "default ntt pin version" 0 - - test "$pinned_ntt_version" == "0.3.2"
 
 echo "not a zip archive" > "$work_dir/not-a-dar.dar"
+check_case "core 0.8.2 main id" 0 "$CORE_0_8_2_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.2.dar"
 check_case "core 0.8.1 main id" 0 "$CORE_0_8_1_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.1.dar"
 check_case "core 0.8.0 main id" 0 "$CORE_0_8_0_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.0.dar"
 check_case "core 0.7.0 main id" 0 "$CORE_0_7_0_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar"

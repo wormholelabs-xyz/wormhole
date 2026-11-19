@@ -7,13 +7,18 @@
 --
 -- 'Allocation_ExecuteTransfer' needs the sender/receiver/executor's joint
 -- authority: @executor = sender = payer@, @receiver = feeRecipient@
--- (guardianGovernance). The receiver's authority is inherited from
--- 'CoreState' (a signatory), so every charge routes through
+-- (feeCustody, a 'CoreState' co-signer). The receiver's authority is inherited
+-- from 'CoreState' (a signatory), so every charge routes through
 -- 'ChargeMessageFee'/'ChargeFee' there, and a foreign sender can never be a
 -- controller — blocking theft structurally, PROVIDED 'CoreState' is
--- authentic. Callers pin 'GetGuardianGovernance' against their own committed
--- anchor before charging, so a compromised operator can't redirect fees via
--- a shadow CoreState under a gg it controls.
+-- authentic.
+--
+-- SECURITY: the fee registry's execute body runs with the authority of these
+-- controllers and of the allocation signatories, which include the instrument
+-- admin. When a fee is due, none of the payer, the receiver and the instrument
+-- admin may be guardianGovernance or the operator. Callers pin 'GetGuardianGovernance'
+-- against their own committed anchor before charging, so a compromised
+-- operator can't redirect fees via a shadow CoreState under a gg it controls.
 --
 -- Allocation views are forgeable; authenticity is the instrument admin's
 -- signature on the allocation, checked in 'chargeFee'.
@@ -48,6 +53,27 @@ feeToDecimal fee = intToDecimal fee / 10000000000.0
 emptyExtraArgs : ExtraArgs
 emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetadata
 
+-- | The parties of one fee charge. A record, so two 'Party' arguments cannot be swapped.
+data FeeChargeParties = FeeChargeParties with
+    operator           : Party
+    guardianGovernance : Party
+    feeRecipient       : Party
+    payer              : Party
+  deriving (Eq, Show)
+
+-- | SECURITY: the fee registry body runs with the authority of the allocation
+-- controllers (executor = sender = payer, receiver = feeRecipient) and of the
+-- allocation signatories (the instrument admin). None may be
+-- guardianGovernance or the operator.
+checkFeeRegistryGetsNoPrivilegedAuthority : FeeChargeParties -> InstrumentId -> Update ()
+checkFeeRegistryGetsNoPrivilegedAuthority parties instrument = do
+  assertMsg "fee payer must not be guardianGovernance" (parties.payer /= parties.guardianGovernance)
+  assertMsg "fee payer must not be the operator" (parties.payer /= parties.operator)
+  assertMsg "fee recipient must not be guardianGovernance" (parties.feeRecipient /= parties.guardianGovernance)
+  assertMsg "fee recipient must not be the operator" (parties.feeRecipient /= parties.operator)
+  assertMsg "fee instrument admin must not be guardianGovernance" (instrument.admin /= parties.guardianGovernance)
+  assertMsg "fee instrument admin must not be the operator" (instrument.admin /= parties.operator)
+
 -- | Validate and execute a fee allocation. Only called from 'CoreState'
 -- choices (see the module header for why the receiver's authority lives
 -- there).
@@ -55,9 +81,12 @@ emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetada
 --   * @fee <= 0@: require 'None' — never consume funds that are not owed. A
 --     stranded allocation (e.g. a fee-lowering race) stays recoverable by the
 --     payer via @Allocation_Withdraw@.
---   * @fee > 0@: require an allocation whose leg pays at least the fee, in
---     the configured instrument, to the fee recipient, from the payer, signed
---     by the instrument admin. NOTE: the ENTIRE leg amount transfers —
+--   * @fee > 0@: reject a privileged payer, receiver or instrument admin
+--     ('checkFeeRegistryGetsNoPrivilegedAuthority'), then require an
+--     allocation whose leg pays at least the fee, in the configured
+--     instrument, to the fee recipient, from the payer, executed by the payer,
+--     signed by the instrument admin. At fee 0 no registry code runs, so a
+--     privileged payer stays valid. NOTE: the ENTIRE leg amount transfers —
 --     allocations are all-or-nothing, so overpayment is a deliberate
 --     tip/padding against fee-raise races, not refunded change.
 --   * Executing is one-shot: the interface choice is consuming, so a spent
@@ -68,29 +97,31 @@ emptyExtraArgs = ExtraArgs with context = emptyChoiceContext, meta = emptyMetada
 --     the execute result (receiver holdings) is not inspected — the admin
 --     signature already authenticates the implementation.
 chargeFee
-  :  Party                                        -- ^ payer (the charging choice's controller)
-  -> Party                                        -- ^ fee recipient
+  :  FeeChargeParties
   -> InstrumentId                                 -- ^ configured fee instrument
   -> Int                                          -- ^ fee due, 10^-10 units
   -> Optional (ContractId Allocation, ExtraArgs)  -- ^ the payer's fee allocation
   -> Update ()
-chargeFee payer feeRecipient instrument fee mAlloc
+chargeFee parties instrument fee mAlloc
   | fee <= 0 = assertMsg "no fee due: do not attach a fee allocation" (isNone mAlloc)
   | otherwise = case mAlloc of
       None -> abort "fee required: attach a fee allocation"
       Some (allocCid, extraArgs) -> do
+        checkFeeRegistryGetsNoPrivilegedAuthority parties instrument
         -- Interface fetch: the payer (== leg sender) is a stakeholder of its
         -- own allocation, so the fetch is authorized and the contract is on
         -- the payer's ACS (no disclosure needed for it).
         alloc <- fetch allocCid
-        let leg = (view alloc).allocation.transferLeg
-        assertMsg "fee allocation pays the wrong receiver" (leg.receiver == feeRecipient)
+        let allocationSpec = (view alloc).allocation
+            leg = allocationSpec.transferLeg
+        assertMsg "fee allocation pays the wrong receiver" (leg.receiver == parties.feeRecipient)
         assertMsg "fee allocation uses the wrong instrument" (leg.instrumentId == instrument)
         assertMsg "fee allocation amount below the fee" (leg.amount >= feeToDecimal fee)
         -- Defense-in-depth: Daml authorization already requires the sender as
         -- a controller; this keeps the guarantee independent of the interface
         -- controller expression and gives a readable error.
-        assertMsg "fee allocation not sent by the payer" (leg.sender == payer)
+        assertMsg "fee allocation not sent by the payer" (leg.sender == parties.payer)
+        assertMsg "fee allocation executor is not the payer" (allocationSpec.settlement.executor == parties.payer)
         -- The authenticity pin: views are template-computed and forgeable, the
         -- instrument admin's signature is not.
         assertMsg "fee allocation not signed by the instrument admin"

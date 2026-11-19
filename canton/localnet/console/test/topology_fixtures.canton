@@ -13,6 +13,7 @@ val testOwnerNamespaces: Seq[Namespace] = testOwnerKeys.map(key => Namespace(key
 val testGuardianNamespace: Namespace = DecentralizedNamespaceDefinition.computeNamespace(testOwnerNamespaces.take(3).toSet)
 val testGuardianGovernancePartyId = PartyId.tryCreate("guardianGovernance", testGuardianNamespace)
 val testCustodyPartyId = PartyId.tryCreate("nttCustody", testGuardianNamespace)
+val testFeeCustodyPartyId = PartyId.tryCreate("feeCustody", testGuardianNamespace)
 val testHostIds: Seq[ParticipantId] = Seq("app-provider", "sv", "app-user", "extra-host").map(hostName =>
   ParticipantId(UniqueIdentifier.tryCreate(hostName, Namespace(newTestSigningKey().fingerprint))))
 

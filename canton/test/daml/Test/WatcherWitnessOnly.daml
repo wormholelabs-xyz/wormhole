@@ -83,11 +83,13 @@ integrationWitnessOnlyPublish bridge = do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = trustedOwner, payer = trustedOwner, coreStateCid = None, feeAllocation = None
       expectedGuardianGovernance = None
-  let shadowFeeInstrument = InstrumentId with admin = rogueGovernance, id = "UNUSED"
-  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance) do
+  rogueFeeCustody <- allocateParty "WitnessOnlyRogueFeeCustody"
+  rogueFeeInstrumentAdmin <- allocateParty "WitnessOnlyRogueFeeInstrumentAdmin"
+  let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
+  shadowCoreStateCid <- submit (actAs operator <> actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState operator rogueGovernance solanaGovernanceChainId
                  defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
-                 shadowFeeInstrument rogueGovernance)
+                 shadowFeeInstrument rogueFeeCustody)
   shadowCoreStateDisclosure <- fromSome <$> queryDisclosure operator shadowCoreStateCid
   publisherCid <- submit trustedOwner do
     createCmd WitnessedPublisher with owner = trustedOwner, witness = bridge.guardianGovernance
