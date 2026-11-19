@@ -460,7 +460,8 @@ with Canton Coin or any standard token, chosen at genesis
   the allocation controllers: the payer (sender, executor) plus the receiver.
   It also runs with the authority of the allocation signatories, which include
   the fee instrument admin. The `CoreState` precondition and `chargeFee` reject
-  `guardianGovernance` and `operator` as the fee instrument admin.
+  `guardianGovernance` and `feeCustody` as the fee instrument admin (0.9.0).
+  0.8.3 rejects `guardianGovernance` and the 0.8.x `operator`.
   From `wormhole-core` 0.8.3 the receiver is `feeCustody`, a quorum party in the
   guardian namespace and a `CoreState` co-signer (the source of the receiver
   authority). The `CoreState` precondition rejects `feeRecipient` equal to
@@ -1047,17 +1048,22 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
 0.9.0 has no `upgrades:` line and no baseline. It removes template fields, so it is not an SCU upgrade of 0.8.x.
-0.9.0 starts a new `wormhole-core` line. Its main package id is `dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`.
+0.9.0 starts a new `wormhole-core` line. Its main package id is `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`.
+The first 0.9.0 build (`dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`) is replaced.
+It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState` (§4.2).
 0.8.3 also adds `ensure` rules to `CoreState`: the fee instrument admin is not `guardianGovernance` and not the `operator`.
 `damlc` reports these changes only as warnings.
 0.9.0 removes the `operator` party from each core template and choice (§4.1, §10).
+0.9.0 `ensure` rules on `CoreState`: `feeRecipient` is not `guardianGovernance`; the fee instrument admin is neither
+`guardianGovernance` nor `feeCustody`; `messageFee` is not negative; the guardian sets are consistent.
 A 0.7.0 or 0.8.x `CoreState`, `EmitterRegistry` or `Emitter` cannot run under 0.9.0.
 No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.0. Thus 0.9.0 starts from a fresh genesis, with no migration of earlier contracts.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
-0.8.3 (`b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
+0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
+`b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
 `node/pkg/cantonclient/approved_core_packages.json` approves only 0.9.0.
 A test rejects the 0.8.0, 0.8.1, 0.8.2 and 0.8.3 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
