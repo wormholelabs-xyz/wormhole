@@ -1,6 +1,6 @@
 # LocalNet smoke script: bootstrap the core bridge, publish two messages, verify one VAA.
 # Party hints carry a run label, so the script can run again on the same participant.
-sdk-version: 3.5.1
+sdk-version: 3.7.3
 name: wormhole-localnet-smoke
 version: 0.1.0
 source: daml

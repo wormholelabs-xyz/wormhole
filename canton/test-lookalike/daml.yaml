@@ -1,7 +1,7 @@
 # Red-team fixture (canton/REDTEAM.md, A2): a package that copies the module,
 # template, and choice names of wormhole-core. Built and uploaded only by
 # node/pkg/watchers/canton/watcher_redteam_integration_test.go. Never deploy.
-sdk-version: 3.5.1
+sdk-version: 3.7.3
 name: wormhole-core-lookalike
 version: 0.1.0
 source: daml

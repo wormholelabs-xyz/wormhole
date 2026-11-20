@@ -72,7 +72,9 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 It removes template fields, so it is not an SCU upgrade of 0.8.x.
 Thus `core/daml.yaml` has no `upgrades:` line, and 0.9.0 starts a new `wormhole-core` line.
 0.9.0 `ensure` rules on `CoreState`: the fee instrument admin is neither `guardianGovernance` nor `feeCustody`.
-The 0.9.0 main package id is `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`.
+The 0.9.0 main package id is `6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180` (Daml SDK 3.7.3).
+The 0.9.0 build with Daml SDK 3.5.1, `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`, is replaced.
+Canton 3.7 supports only Protocol Versions 36 and 37. Do not deploy it.
 The first 0.9.0 build, `dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 0.8.3 is withdrawn: the operator signs its core contracts.
