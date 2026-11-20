@@ -272,6 +272,41 @@ func TestCreateAuthConfigValidation(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsafe dev mode")
 }
 
+func TestCreateOAuthAudienceValidation(t *testing.T) {
+	const spliceAudience = "https://canton.network.global"
+	fullAuth := AuthConfig{TokenURL: "https://idp.example/token", ClientID: "cid", ClientSecret: "sec"}
+	withAudience := func(auth AuthConfig, audience string) AuthConfig {
+		auth.Audience = audience
+		return auth
+	}
+	testCases := []struct {
+		name                 string
+		auth                 AuthConfig
+		environment          common.Environment
+		expectedErrorMessage string
+	}{
+		{name: "no OAuth and no audience", auth: AuthConfig{}, environment: common.MainNet},
+		{name: "full OAuth without audience", auth: fullAuth, environment: common.MainNet},
+		{name: "full OAuth with audience", auth: withAudience(fullAuth, spliceAudience), environment: common.MainNet},
+		{name: "audience without OAuth", auth: AuthConfig{Audience: spliceAudience}, environment: common.MainNet, expectedErrorMessage: "audience requires"},
+		{name: "audience without OAuth in unsafe dev mode", auth: AuthConfig{Audience: spliceAudience}, environment: common.UnsafeDevNet, expectedErrorMessage: "audience requires"},
+		{name: "audience with partial OAuth", auth: AuthConfig{TokenURL: fullAuth.TokenURL, Audience: spliceAudience}, environment: common.MainNet, expectedErrorMessage: "all be set together"},
+		{name: "whitespace-only audience", auth: withAudience(fullAuth, "  "), environment: common.MainNet, expectedErrorMessage: "whitespace"},
+		{name: "audience with a leading space", auth: withAudience(fullAuth, " "+spliceAudience), environment: common.MainNet, expectedErrorMessage: "whitespace"},
+		{name: "full OAuth with audience in unsafe dev mode", auth: withAudience(fullAuth, spliceAudience), environment: common.UnsafeDevNet, expectedErrorMessage: "unsafe dev mode"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := createWithAuth(t, testCase.auth, testCase.environment)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 // TestWatcherConfigFieldsAreExactlyTheFlagFields: each WatcherConfig field comes from a guardiand flag. A package
 // test cannot set a transport through the production config.
 func TestWatcherConfigFieldsAreExactlyTheFlagFields(t *testing.T) {
@@ -344,6 +379,7 @@ func TestBuildWatcherSelectsTransportByEnvironment(t *testing.T) {
 		{name: "UnsafeDevNet uses plaintext", environment: common.UnsafeDevNet, expectedPlaintext: true},
 		{name: "MainNet with OAuth adds one dial option", environment: common.MainNet, auth: completeAuth, expectedDialOptionCount: 1},
 		{name: "UnsafeDevNet with OAuth fails", environment: common.UnsafeDevNet, auth: completeAuth, expectedErrorMessage: "unsafe dev mode"},
+		{name: "MainNet with OAuth and audience adds one dial option", environment: common.MainNet, auth: AuthConfig{TokenURL: completeAuth.TokenURL, ClientID: completeAuth.ClientID, ClientSecret: completeAuth.ClientSecret, Audience: "https://canton.network.global"}, expectedDialOptionCount: 1},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

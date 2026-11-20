@@ -17,6 +17,7 @@ func cantonFlagNamesThatNeedRPC() []string {
 		"cantonAuthTokenURL",
 		"cantonAuthClientID",
 		"cantonAuthClientSecret",
+		"cantonAuthAudience",
 	}
 }
 
@@ -32,6 +33,7 @@ func cantonFlagValuesThatNeedRPC() map[string]string {
 		"cantonAuthTokenURL":                 *cantonAuthTokenURL,
 		"cantonAuthClientID":                 *cantonAuthClientID,
 		"cantonAuthClientSecret":             *cantonAuthClientSecret,
+		"cantonAuthAudience":                 *cantonAuthAudience,
 	}
 }
 
