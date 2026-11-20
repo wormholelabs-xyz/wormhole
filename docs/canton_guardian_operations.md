@@ -1135,7 +1135,7 @@ The Canton watcher in `guardiand` reads the Ledger API of your participant.
 | `--cantonRetiringPackageID` | Retiring core package ID of the two-id window (Section 10.1, U3). Empty outside the window. |
 | `--cantonRetiringPackageVersion` | Version of `--cantonRetiringPackageID`. Mandatory with it outside unsafe dev mode. |
 | `--cantonRetiringPackageAcceptedUntil` | Exclusive record-time deadline of the retiring package ID (RFC 3339, UTC). Mandatory with it. |
-| `--cantonReadAsParty` | The `guardianGovernance` party ID. Mandatory outside unsafe dev mode. |
+| `--cantonReadAsParty` | The `guardianGovernance` party ID, `<hint>::1220` and 64 lowercase hexadecimal characters. Mandatory outside unsafe dev mode. |
 | `--cantonAuthTokenURL` | OAuth2 token endpoint for the Ledger API. |
 | `--cantonAuthClientID` | OAuth2 client ID (client-credentials grant). |
 | `--cantonAuthClientSecret` | OAuth2 client secret. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
