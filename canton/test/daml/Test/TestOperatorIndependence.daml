@@ -230,7 +230,7 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   upgradeCoreStateCid <- relayGovernance bridge relayer transferCoreStateCid govContractUpgradeVAA devnetPubKeys
   Some upgradeCoreState <- queryContractId gg upgradeCoreStateCid
   assertMsg "ContractUpgrade digest not consumed"
-    (Set.member (parseVAA govContractUpgradeVAA).hash upgradeCoreState.consumedGovernance)
+    (Map.member (parseVAA govContractUpgradeVAA).hash upgradeCoreState.consumedGovernance)
   upgradedAt <- getTime
   setUpgradeCoreStateCid <- relayGovernance bridge relayer upgradeCoreStateCid govGuardianSetUpgradeVAA devnetPubKeys
   Some setUpgradeCoreState <- queryContractId gg setUpgradeCoreStateCid
@@ -292,7 +292,7 @@ testPartyWithNoRoleHasNoCorePower = do
       allDisclosures = disclose coreStateDisclosure <> disclose registryDisclosure <> disclose replayRegistryDisclosure
       authorizationAttacks =
         [ ("create CoreState naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
-              createCmd coreState with consumedGovernance = Set.empty)
+              createCmd coreState with consumedGovernance = Map.empty)
         , ("create EmitterRegistry with nextId 0 naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
               createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = partyWithNoRole) 0))
         , ("create ReplayRootRegistry naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
@@ -392,26 +392,6 @@ testRelayedGovernanceRejectsInvalidVAA = do
         checkFailsOnUnknownContract invalidCase.caseName result
     Some after <- queryContractId bridge.guardianGovernance preparedCid
     after === before
-
--- | The consumed-digest postcondition of a governance transition.
-testGovernanceConsumedDigestCheck : Script ()
-testGovernanceConsumedDigestCheck = do
-  bridge <- setupCoreBridge "ConsumedDigest" None
-  Some before <- queryContractId bridge.guardianGovernance bridge.coreStateCid
-  let digest = parseHexTextOrAbort (mconcat (replicate 32 "ab"))
-      otherDigest = parseHexTextOrAbort (mconcat (replicate 32 "cd"))
-      withConsumed digests = before with consumedGovernance = Set.fromList digests
-      cases =
-        [ ("one new digest", withConsumed [digest], None)
-        , ("no new digest", withConsumed [], Some "governance: consumed digest set must grow by exactly one")
-        , ("two new digests", withConsumed [digest, otherDigest], Some "governance: consumed digest set must grow by exactly one")
-        , ("wrong digest", withConsumed [otherDigest], Some "governance: VAA digest not recorded")
-        ]
-  forA_ cases \(caseName, successor, expectedError) ->
-    case (expectedError, checkGovernanceConsumesOneDigest before successor digest) of
-      (None, Right ()) -> pure ()
-      (Some expectedText, Left message) | message == expectedText -> pure ()
-      (_, outcome) -> abort (caseName <> ": unexpected outcome " <> show outcome)
 
 ----------------------------------------------------------------------
 -- Test 5: governance keeps each genesis field
