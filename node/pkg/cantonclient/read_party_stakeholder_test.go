@@ -21,51 +21,51 @@ func TestReadPartySignsExercisedEmitter(t *testing.T) {
 		contractID    string
 		createdEvents map[string]*apiv2.CreatedEvent
 		tmpl          TemplateID
-		readAsParty   string
+		readScope     ReadScope
 		wantAccepted  bool
 	}{
 		{name: "consuming exercise with acs_delta is accepted", consuming: true, acsDelta: true, contractID: "emitter-active",
-			tmpl: pinnedTmpl, readAsParty: governanceParty, wantAccepted: true},
+			tmpl: pinnedTmpl, readScope: governanceReadScope, wantAccepted: true},
 		{name: "non-consuming exercise with acs_delta is rejected", consuming: false, acsDelta: true, contractID: "emitter-active",
-			tmpl: pinnedTmpl, readAsParty: governanceParty},
+			tmpl: pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient real emitter is accepted", consuming: true, contractID: "emitter-transient",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-transient": realTransientEmitter},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty, wantAccepted: true},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope, wantAccepted: true},
 		{name: "non-consuming exercise on a transient real emitter is rejected", consuming: false, contractID: "emitter-transient",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-transient": realTransientEmitter},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient real emitter without a read-as party is rejected", consuming: true, contractID: "emitter-transient",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-transient": realTransientEmitter},
-			tmpl:          pinnedTmpl, readAsParty: ""},
+			tmpl:          pinnedTmpl, readScope: anyPartyReadScope},
 		{name: "transient real emitter without a package pin is rejected", consuming: true, contractID: "emitter-transient",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-transient": realTransientEmitter},
-			tmpl:          unpinnedTmpl, readAsParty: governanceParty},
+			tmpl:          unpinnedTmpl, readScope: governanceReadScope},
 		{name: "witness-only exercise without a create is rejected", consuming: true, contractID: "emitter-witnessed",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-transient": realTransientEmitter},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "ambiguous contract id is rejected", consuming: true, contractID: "emitter-transient",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-transient": nil},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient rogue emitter is rejected", consuming: true, contractID: "emitter-rogue",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-rogue": emitterCreatedEvent("emitter-rogue", pinnedPackageID, "Emitter", rogueEmitterSignatories, nil).GetCreated()},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient rogue emitter observed by the read-as party is rejected", consuming: true, contractID: "emitter-rogue",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-rogue": emitterCreatedEvent("emitter-rogue", pinnedPackageID, "Emitter", rogueEmitterSignatories, []string{governanceParty}).GetCreated()},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient emitter of another package is rejected", consuming: true, contractID: "emitter-lookalike",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-lookalike": emitterCreatedEvent("emitter-lookalike", lookalikePackageID, "Emitter", realEmitterSignatories, nil).GetCreated()},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient contract of another template is rejected", consuming: true, contractID: "registry-0",
 			createdEvents: map[string]*apiv2.CreatedEvent{"registry-0": emitterCreatedEvent("registry-0", pinnedPackageID, "EmitterRegistry", realEmitterSignatories, nil).GetCreated()},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 		{name: "transient emitter with no template id is rejected", consuming: true, contractID: "emitter-untyped",
 			createdEvents: map[string]*apiv2.CreatedEvent{"emitter-untyped": {ContractId: "emitter-untyped", Signatories: realEmitterSignatories}},
-			tmpl:          pinnedTmpl, readAsParty: governanceParty},
+			tmpl:          pinnedTmpl, readScope: governanceReadScope},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			exercised := &apiv2.ExercisedEvent{ContractId: tc.contractID, TemplateId: emitterTemplateIDUnder(pinnedPackageID), Consuming: tc.consuming, AcsDelta: tc.acsDelta}
-			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, tc.createdEvents, tc.tmpl, sampleRecordTime, tc.readAsParty))
+			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, tc.createdEvents, tc.tmpl, sampleRecordTime, tc.readScope))
 		})
 	}
 }
@@ -111,7 +111,7 @@ func TestReadPartySignsExercisedEmitterInUpgradeWindow(t *testing.T) {
 			created := emitterCreatedEvent("emitter-transient", tc.createdPackageID, "Emitter", realEmitterSignatories, nil).GetCreated()
 			exercised := &apiv2.ExercisedEvent{ContractId: "emitter-transient", TemplateId: emitterTemplateIDUnder(tc.exercisedPackageID), Consuming: true}
 			createdEvents := map[string]*apiv2.CreatedEvent{"emitter-transient": created}
-			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, createdEvents, upgradeWindowTmpl, tc.recordTime, governanceParty))
+			assert.Equal(t, tc.wantAccepted, readPartySignsExercisedEmitter(exercised, createdEvents, upgradeWindowTmpl, tc.recordTime, governanceReadScope))
 		})
 	}
 }
@@ -130,8 +130,8 @@ func TestCreatedEventsByContractIDMarksDuplicateContractIDs(t *testing.T) {
 }
 
 func TestUpdateFormatRequestsLedgerEffectsShape(t *testing.T) {
-	for _, readAsParty := range []string{governanceParty, ""} {
-		client := &grpcClient{readAsParty: readAsParty}
+	for _, readScope := range []ReadScope{governanceReadScope, anyPartyReadScope} {
+		client := &grpcClient{readScope: readScope}
 		assert.Equal(t, apiv2.TransactionShape_TRANSACTION_SHAPE_LEDGER_EFFECTS,
 			client.updateFormat().GetIncludeTransactions().GetTransactionShape(),
 			"transient Emitter creates are only in the ledger effects shape")

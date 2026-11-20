@@ -114,7 +114,7 @@ func TestCantonWatcherUpgradeWindowAfterUnvet(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 1)
 	streamRecorder := newUpdateStreamRecorder()
-	w, err := NewWatcher(ledgerAddr, acceptedPackageIDs, bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+	w, err := NewWatcher(ledgerAddr, acceptedPackageIDs, readScopeOfParty(t, bridge.GuardianGovernance), AuthConfig{}, true, msgC, obsvReqC)
 	require.NoError(t, err)
 	w.packageMetadataRecheckInterval = recheckIntervalForUnvetTest
 	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}

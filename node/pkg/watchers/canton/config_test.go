@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	testGovernanceParty   = "guardianGovernance::1220abcd"
+	testGovernanceParty   = readAsGovernanceParty
 	testCurrentPackageID  = "1111111111111111111111111111111111111111111111111111111111111111"
 	testRetiringPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
 	testOtherPackageID    = "3333333333333333333333333333333333333333333333333333333333333333"
@@ -190,18 +190,35 @@ func TestCreateValidatesCorePackageIDs(t *testing.T) {
 	}
 }
 
-// TestCreateRequiresReadAsPartyOutsideDevMode: the wildcard stream is dev-only.
-func TestCreateRequiresReadAsPartyOutsideDevMode(t *testing.T) {
-	for _, env := range []common.Environment{common.MainNet, common.TestNet} {
-		err := createWithReadAs(t, testCurrentPackageID, "", env)
-		require.Error(t, err, "empty readAsParty must be rejected in %s", env)
-		assert.Contains(t, err.Error(), "ReadAsParty")
+// TestCreateParsesReadAsParty: the wildcard stream is dev-only; a malformed party is refused in every mode.
+func TestCreateParsesReadAsParty(t *testing.T) {
+	cases := []struct {
+		name        string
+		readAsParty string
+		env         common.Environment
+		wantErr     string
+	}{
+		{name: "party on MainNet", readAsParty: testGovernanceParty, env: common.MainNet},
+		{name: "party on TestNet", readAsParty: testGovernanceParty, env: common.TestNet},
+		{name: "party in dev mode", readAsParty: testGovernanceParty, env: common.UnsafeDevNet},
+		{name: "empty in dev mode", readAsParty: "", env: common.UnsafeDevNet},
+		{name: "empty on MainNet", readAsParty: "", env: common.MainNet, wantErr: "ReadAsParty: cantonclient: reading as any party requires unsafe dev mode"},
+		{name: "empty on TestNet", readAsParty: "", env: common.TestNet, wantErr: "ReadAsParty: cantonclient: reading as any party requires unsafe dev mode"},
+		{name: "truncated fingerprint on MainNet", readAsParty: "guardianGovernance::1220abcd", env: common.MainNet, wantErr: "fingerprint length 8"},
+		{name: "truncated fingerprint in dev mode", readAsParty: "guardianGovernance::1220abcd", env: common.UnsafeDevNet, wantErr: "fingerprint length 8"},
+		{name: "trailing newline on MainNet", readAsParty: testGovernanceParty + "\n", env: common.MainNet, wantErr: "fingerprint length 69"},
+		{name: "hint only on MainNet", readAsParty: "guardianGovernance", env: common.MainNet, wantErr: "no '::'"},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := createWithReadAs(t, testCurrentPackageID, tc.readAsParty, tc.env)
 
-	require.NoError(t, createWithReadAs(t, testCurrentPackageID, "", common.UnsafeDevNet))
-
-	for _, env := range []common.Environment{common.MainNet, common.TestNet, common.UnsafeDevNet} {
-		require.NoError(t, createWithReadAs(t, testCurrentPackageID, testGovernanceParty, env), "readAsParty must be accepted in %s", env)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
 	}
 }
 

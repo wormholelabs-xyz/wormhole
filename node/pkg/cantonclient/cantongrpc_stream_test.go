@@ -36,8 +36,9 @@ func (s *fakeStream) Recv() (*apiv2.GetUpdatesResponse, error) { return s.recv()
 
 func newTestGrpcClient(stream apiv2.UpdateService_GetUpdatesClient) *grpcClient {
 	return &grpcClient{
-		update: &fakeUpdateService{stream: stream},
-		logger: zap.NewNop(),
+		update:    &fakeUpdateService{stream: stream},
+		readScope: anyPartyReadScope,
+		logger:    zap.NewNop(),
 	}
 }
 

@@ -45,7 +45,7 @@ var AdminClientCantonListPublishesCmd = &cobra.Command{
 func init() {
 	flags := AdminClientCantonListPublishesCmd.Flags()
 	cantonListPublishesRPC = flags.String("cantonRPC", "", "Canton Ledger API v2 gRPC endpoint (host:port)")
-	cantonListPublishesReadAsParty = flags.String("cantonReadAsParty", "", "guardianGovernance party to read as")
+	cantonListPublishesReadAsParty = flags.String("cantonReadAsParty", "", "guardianGovernance party id to read as (<hint>::1220<64 lowercase hex>)")
 	cantonListPublishesFromOffset = flags.Int64("fromOffset", -1, "Exclusive participant offset to start after (the offset recorded at step 1 of the upgrade)")
 	cantonListPublishesExecutingPackageID = flags.String("executingPackageID", "", "wormhole-core package id (64 lowercase hex) whose publishes to list")
 	cantonListPublishesAuthTokenURL = flags.String("cantonAuthTokenURL", "", "OAuth2 token endpoint; the client secret is read from GUARDIAND_CANTONAUTHCLIENTSECRET")
@@ -70,31 +70,50 @@ type cantonPublishRecord struct {
 	TxID              string `json:"txId"`
 }
 
+// cantonPublishListing is the publishes the watcher accepts, and the count of skipped foreign-registrar publishes.
+type cantonPublishListing struct {
+	Records                      []cantonPublishRecord
+	SkippedForeignRegistrarCount int
+}
+
+// parseListPublishesReadScope requires a guardianGovernance party: the command has no unsafe dev mode.
+func parseListPublishesReadScope(readAsParty string) (cantonclient.ReadScope, error) {
+	return cantonclient.ParseReadScope(readAsParty, false)
+}
+
 // listCantonPublishes reads (fromOffset, ledger end] with the watcher's
 // message filter pinned to executingPackageIDHex only.
-func listCantonPublishes(ctx context.Context, client cantonclient.CantonClient, fromOffset int64, executingPackageIDHex string) ([]cantonPublishRecord, error) {
+// SECURITY: canton.CheckRegistrarIsReadAsParty is the watcher's registrar check; a skipped record has no reobservation.
+func listCantonPublishes(ctx context.Context, client cantonclient.CantonClient, readScope cantonclient.ReadScope, fromOffset int64, executingPackageIDHex string) (cantonPublishListing, error) {
+	if err := readScope.CheckWasConstructed(); err != nil {
+		return cantonPublishListing{}, err
+	}
 	if fromOffset < 0 {
-		return nil, fmt.Errorf("--fromOffset %d is negative", fromOffset)
+		return cantonPublishListing{}, fmt.Errorf("--fromOffset %d is negative", fromOffset)
 	}
 	executingPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: executingPackageIDHex}, cantonclient.RetiringPackageConfig{}, time.Now())
 	if err != nil {
-		return nil, err
+		return cantonPublishListing{}, err
 	}
 	ledgerEnd, err := client.GetLedgerEnd(ctx)
 	if err != nil {
-		return nil, err
+		return cantonPublishListing{}, err
 	}
 	if fromOffset > ledgerEnd {
-		return nil, fmt.Errorf("--fromOffset %d is after the ledger end %d", fromOffset, ledgerEnd)
+		return cantonPublishListing{}, fmt.Errorf("--fromOffset %d is after the ledger end %d", fromOffset, ledgerEnd)
 	}
 	events, err := client.ReadPublishesInRange(ctx, fromOffset, ledgerEnd, canton.PublishMessageTemplateID(executingPackageIDs), canton.PublishMessageChoice)
 	if err != nil {
-		return nil, err
+		return cantonPublishListing{}, err
 	}
-	records := make([]cantonPublishRecord, 0, len(events))
+	listing := cantonPublishListing{Records: make([]cantonPublishRecord, 0, len(events))}
 	for _, event := range events {
+		if canton.CheckRegistrarIsReadAsParty(event.Message.Registrar, readScope) != nil {
+			listing.SkippedForeignRegistrarCount++
+			continue
+		}
 		emitterAddress := canton.DeriveEmitterAddress(event.Message.Registrar, event.Message.Owner, event.Message.EmitterID)
-		records = append(records, cantonPublishRecord{
+		listing.Records = append(listing.Records, cantonPublishRecord{
 			ParticipantOffset: event.ParticipantOffset,
 			UpdateID:          event.UpdateID.String(),
 			RecordTime:        event.RecordTime.UTC().Format(time.RFC3339Nano),
@@ -104,10 +123,17 @@ func listCantonPublishes(ctx context.Context, client cantonclient.CantonClient, 
 			TxID:              hex.EncodeToString(event.UpdateID.TxID()),
 		})
 	}
-	return records, nil
+	if len(listing.Records)+listing.SkippedForeignRegistrarCount != len(events) {
+		panic("canton-list-publishes: listed and skipped records do not add up to the read publishes")
+	}
+	return listing, nil
 }
 
 func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
+	readScope, err := parseListPublishesReadScope(*cantonListPublishesReadAsParty)
+	if err != nil {
+		return fmt.Errorf("--cantonReadAsParty: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(cmd.Context(), cantonListPublishesTimeout)
 	defer cancel()
 
@@ -126,21 +152,24 @@ func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 		}
 		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, *cantonListPublishesAuthTokenURL, *cantonListPublishesAuthClientID, clientSecret))
 	}
-	client, err := cantonclient.NewCantonGrpcClient(*cantonListPublishesRPC, *cantonListPublishesReadAsParty, zap.NewNop(), transportCreds, dialOpts...)
+	client, err := cantonclient.NewCantonGrpcClient(*cantonListPublishesRPC, readScope, zap.NewNop(), transportCreds, dialOpts...)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
 
-	records, err := listCantonPublishes(ctx, client, *cantonListPublishesFromOffset, *cantonListPublishesExecutingPackageID)
+	listing, err := listCantonPublishes(ctx, client, readScope, *cantonListPublishesFromOffset, *cantonListPublishesExecutingPackageID)
 	if err != nil {
 		return err
 	}
 	encoder := json.NewEncoder(cmd.OutOrStdout())
-	for _, record := range records {
+	for _, record := range listing.Records {
 		if err := encoder.Encode(record); err != nil {
 			return err
 		}
+	}
+	if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "skipped %d publishes whose registrar is not the read-as party\n", listing.SkippedForeignRegistrarCount); err != nil {
+		return err
 	}
 	return nil
 }

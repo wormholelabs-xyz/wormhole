@@ -59,7 +59,7 @@ func TestMessageEventsCarryRecordTime(t *testing.T) {
 			require.NoError(t, err)
 			response := transactionResponse(sampleUpdateIDHex, 590, publishMessageEvent(pinnedPackageID, 5))
 			withLedgerTimes(response.GetTransaction(), sampleEffectiveAt, tc.recordTime)
-			client := &grpcClient{update: &fakeUpdateByIDService{response: response}, readAsParty: governanceParty, logger: zap.NewNop()}
+			client := &grpcClient{update: &fakeUpdateByIDService{response: response}, readScope: governanceReadScope, logger: zap.NewNop()}
 
 			transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, testTmpl, "PublishMessage")
 			require.NoError(t, err)
