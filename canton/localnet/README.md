@@ -59,7 +59,9 @@ Set `DB_PORT` to use a different port.
 | `owner_key_input_checks.sh` | Checks owner names and the custody artifacts file. Lists active rotation faults. |
 | `interactive_submit.js` | Prepares, signs and executes one external-party submission. LocalNet only. |
 | `gg_lib.sh` | Shared functions for the `gg_*.sh` scripts. |
-| `gg_host.sh` | Hosts `guardianGovernance` and `Operator`. Vets the core DARs on all participants. |
+| `gg_host.sh` | Hosts `guardianGovernance`. Allocates `LabsOperator` on `app-provider`. Allocates three local core parties on `sv`. Vets the core DARs on all participants. |
+| `gg_offline_lib.sh` | Builds the genesis offer, the `AcceptGenesis` argument and the governance relay command. `test/gg_offline_lib_test.sh` tests it. |
+| `gg_operator_independence.sh` | Runs the operator independence rehearsal: genesis by offer and one acceptance, then each Wormhole function with `app-provider` disconnected. |
 | `gg_show_topology.sh` | Shows the namespace and the hosting on each participant. |
 | `gg_genesis.sh` | Creates the co-signed `CoreState` (fee recipient `feeCustody`) and `EmitterRegistry`, then the `ReplayRootRegistry`. |
 | `gg_publish_and_govern.sh` | Publishes one message. Applies one governance VAA. |
@@ -74,10 +76,10 @@ Set `DB_PORT` to use a different port.
 | `custody_authority_check.sh` | Checks that `guardianGovernance` and one custody party (`--party`) have different authority. |
 | `ntt_e2e.sh` | Runs the NTT steps below in sequence. |
 | `ntt_upload_dars.sh` | Uploads the NTT DAR to all participants and vets its unvetted packages. |
-| `ntt_governance.sh` | Creates the `NttGovernance` root and the canonical `CoinFactory`. |
+| `ntt_governance.sh` | Records the `NttGovernance` root and the canonical `CoinFactory` that `AcceptGenesis` created. |
 | `ntt_burn_mint.sh` | Runs a burn/mint deployment of a `guardianGovernance` token. |
 | `ntt_lock_unlock.sh` | Runs a lock/unlock deployment of Canton Coin. |
-| `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. ntt 0.4.2 only. |
+| `ntt_lock_unlock_gg.sh` | Registers a lock/unlock deployment of Canton Coin with `guardianGovernance` as the admin. |
 | `gateway_t1.sh` | Runs the disclosure service on a separate gateway network behind a mutual-TLS proxy, and checks it. |
 | `registry_api_check.sh` | Checks the CIP-0056 registry API of the disclosure service with an offer transfer and a direct transfer. |
 | `ntt_watcher.sh` | Runs the guardian watcher harness and checks its observations. |
@@ -90,7 +92,7 @@ Set `DB_PORT` to use a different port.
 | `guardian4.sh` | Starts or removes the temporary participant `guardian4` and its PostgreSQL container. |
 | `party_replication.sh` | Connects `guardian4`. Replicates `guardianGovernance` and `nttCustody` to `guardian4` offline. Removes a host. Sets the confirmation threshold. Sets a host permission. Compares each hosting change with the intended change before the owner keys sign it. |
 | `gg_hosting_change_check.sh` | Checks the hosts, the threshold and the ACS of `guardian4` after a hosting change. |
-| `gg_hosting_change_live_check.sh` | Checks that a `PublishMessage` commits with `guardian4` as a confirmer, also with `sv` disconnected. |
+| `gg_hosting_change_live_check.sh` | Checks that a `PublishMessage` commits with `guardian4` as a confirmer, also with `app-provider` disconnected. |
 | `gg_hosting_change_negative_check.sh` | Checks that the synchronizer rejects a hosting change with one owner key or without host consent. |
 | `gg_observation_onboarding_check.sh` | Checks that an Observation host stays below the threshold, and counts after a consented promotion to Confirmation. |
 | `forge_coin_contract.sh` | Makes invented `Coin` contracts with valid contract IDs for the snapshot forgery test. LocalNet only. |
@@ -267,7 +269,7 @@ Keep the logs as the evidence of each run.
 
 ### Host the parties and run genesis
 
-1. Host `guardianGovernance` and `Operator`:
+1. Host `guardianGovernance` and allocate the local parties:
 
    ```bash
    canton/localnet/gg_host.sh
@@ -276,16 +278,20 @@ Keep the logs as the evidence of each run.
    The script uploads the core DARs to `app-provider`, `sv` and `app-user`.
    Each participant vets the DARs.
    It hosts `guardianGovernance` on the three participants.
-   It hosts `Operator` on `app-provider` only.
+   It allocates the local party `LabsOperator` on `app-provider`. `LabsOperator` is the operator: it offers genesis
+   and it is the onboarding fee admin. It has no signing key.
+   It allocates the local parties `CorePublisher`, `CoreVerifier` and `GovernanceRelayer` on `sv`.
+   The script writes `../localnet-state/local-parties.json`.
 
-2. Allocate `feeCustody`, the `CoreState` fee recipient, before genesis:
+2. Allocate `feeCustody` (the `CoreState` fee recipient) and `nttCustody` (the NTT reserve custodian) before genesis:
 
    ```bash
    CUSTODY_PARTY_NAME=feeCustody canton/localnet/custody_host.sh owner1 owner2 owner3
+   CUSTODY_PARTY_NAME=nttCustody canton/localnet/custody_host.sh owner1 owner2 owner3
    ```
 
-   The script writes `../localnet-state/fee-custody-artifacts.json`.
-   `feeCustody` has the hosts, the confirmation threshold and the signing keys of `guardianGovernance`.
+   The script writes `../localnet-state/fee-custody-artifacts.json` and `../localnet-state/custody-artifacts.json`.
+   Each party has the hosts, the confirmation threshold and the signing keys of `guardianGovernance`.
 
 3. Show the topology on each participant:
 
@@ -295,35 +301,78 @@ Keep the logs as the evidence of each run.
 
    Each participant shows `threshold=2`, three hosts at `Confirmation` and `signingKeys=2-of-3`.
 
-4. Create the `CoreState`:
+4. Upload the `ntt` DAR and the `wormhole-genesis` DAR to each participant. The script vets their packages:
+
+   ```bash
+   NTT_REPO_DIR=<NTT checkout> canton/localnet/ntt_upload_dars.sh
+   ```
+
+5. Run genesis:
 
    ```bash
    canton/localnet/gg_genesis.sh
    ```
 
-   The `CoreState` transaction has three signer sets: `Operator`, and two owner keys for each of `guardianGovernance`
-   and `feeCustody`. `feeRecipient` is `feeCustody`.
+   `LabsOperator` creates one `WormholeGenesisOffer` on `app-provider`.
+   The script builds the agreed parameters itself and compares them with the offer that `sv` shows.
    The genesis guardian set index is `GENESIS_GUARDIAN_SET_INDEX` (default `0`).
-   Keep the default: the other LocalNet scripts expect set 0 at genesis.
-   Before the commit, these `CoreState` transactions must fail:
+   Before the commit, these `AcceptGenesis` transactions must fail:
    - `guardianGovernance` with one owner key.
-   - No `feeCustody` signature.
-   - `feeCustody` with one owner key.
-   - `feeRecipient` set to `guardianGovernance`. The `CoreState` precondition fails.
+   - No `nttCustody` signature.
+   - `agreedParameters` with another guardian set index (`genesis: agreed parameters differ from the offer`).
 
-   `Operator` and two `guardianGovernance` owner keys sign the `EmitterRegistry`.
-   Then the script creates the Ledger API user `wormhole-watcher` on each participant.
+   Then two owner keys for each of `guardianGovernance`, `feeCustody` and `nttCustody` sign one `AcceptGenesis`.
+   It creates `CoreState`, `EmitterRegistry`, `ReplayRootRegistry`, `NttGovernance` and the `guardianGovernance`
+   `CoinFactory`, and archives the offer. `feeRecipient` is `feeCustody`.
+   The script writes the root contract IDs to `../localnet-state/core-contracts.json`.
+   Then it creates the Ledger API user `wormhole-watcher` on each participant.
    This user has only the right `CanReadAs(guardianGovernance)`.
    `canton/tools/emitter_id_scan.sh` needs a token of this user on each participant that it reads.
 
-5. Publish one message and apply one governance VAA:
+   Each committed submission that guardian namespace parties sign adds one line to
+   `../localnet-state/gg-ceremonies.jsonl`.
+
+6. Publish one message and apply one governance VAA:
 
    ```bash
    canton/localnet/gg_publish_and_govern.sh
    ```
 
+   The argument is the key indices of the current guardian set. The default is 0.
+   `CorePublisher` registers an `Emitter` and publishes. `GovernanceRelayer` relays the governance VAA.
+   Each submits on `sv` as a local party, with the disclosures that `sv` reads as `guardianGovernance`.
    The governance VAA sets the message fee to 1000.
    All three participants show the new `CoreState`.
+
+### Operator independence rehearsal
+
+Run it on a reset LocalNet after steps 1 and 2 above. The script runs steps 4 and 5 itself.
+
+```bash
+NTT_REPO_DIR=<NTT checkout> canton/localnet/gg_operator_independence.sh 0 1
+```
+
+The arguments are the key indices of the current guardian set and of the next set.
+The script prints `PASS step <n>` for each of 21 steps:
+
+| Step | Action | Expected |
+| - | - | - |
+| 1, 2 | `LabsOperator` is local to `app-provider` only. Each participant vets `wormhole-core`, `ntt`, `wormhole-genesis` and `token-cip0056`. | No `gg` ceremony. |
+| 3, 4 | `gg_genesis.sh`. | One `gg` ceremony. `AcceptGenesis` archives the offer. No root names `LabsOperator`. |
+| 5 | Disconnect `app-provider`. | Disconnected. |
+| 6, 7 | `CorePublisher` registers an `Emitter`. Then it publishes at fee 0. | Signatories `CorePublisher` and `gg`. |
+| 8 | The watcher harness on `sv` reads as `gg`. | One observation with the `Emitter` address. |
+| 9 to 11 | `CoreIntegrator` claims a replay root and consumes a VAA, then the same VAA again. | Commit, commit, `digest already consumed`. |
+| 12, 13 | `GovernanceRelayer` relays `SetMessageFee` 0 and `TransferFees`. | `actingParties` is `GovernanceRelayer`. One `FeeWithdrawalAuthorization` with no observer. |
+| 14 to 17 | NTT on `app-user`: `RegisterManager` (lock/unlock of Canton Coin), `SetPeer`, `Transfer`, then `Release` by a relayer on `sv`. | Commit. The watcher observes the `Transfer` message. |
+| 18 | `GovernanceRelayer` relays `GuardianSetUpgrade`. | The next guardian set index. |
+| 19 | `LabsOperator` submits `SetRegistrationFee`. | No commit: its participant is offline. The fee stays. |
+| 20 | Reconnect `app-provider`. Disconnect `sv` and `app-user`. Publish from `app-provider`. | `MEDIATOR_SAYS_TX_TIMED_OUT`. The unresponsive parties are exactly `guardianGovernance` and `feeCustody`. |
+| 21 | Count the `gg` submissions since step 1 in two ways. (a) The ceremony log. (b) The transactions on `sv` that show a command ID to `gg`. | (a) 1, (b) 1: the `AcceptGenesis` transaction. |
+
+The EXIT trap stops the watcher harness and connects each participant again.
+After the script, the guardian set is the next set and the message fee is 0.
+Give the key indices of the next set to the scripts that sign VAAs, for example `gg_publish_and_govern.sh 1`.
 
 ### Check the confirmation threshold
 
@@ -335,10 +384,10 @@ Keep the logs as the evidence of each run.
 
    The argument is the key indices of the current guardian set. The default is 0.
    After a rotation to a new set, give the key indices of that set, for example `1`.
-   The script disconnects `sv` and `app-user` from the synchronizer.
-   Only `app-provider` can then confirm for `guardianGovernance`.
+   The script disconnects `app-provider` and `app-user` from the synchronizer.
+   Only `sv` can then confirm for `guardianGovernance`. The local submitters are on `sv`.
    A governance VAA, a VAA check and a publish each fail with `MEDIATOR_SAYS_TX_TIMED_OUT`.
-   Each failure must name `guardianGovernance` as the only unresponsive party.
+   Each failure must name exactly `guardianGovernance` and `feeCustody` as the unresponsive parties.
    With `app-user` connected again, the governance VAA succeeds.
    It sets the message fee to 0 again.
    At the end, the script connects all participants again.
@@ -350,13 +399,13 @@ Keep the logs as the evidence of each run.
 3. If the script shows the recovery command, run it:
 
    ```bash
-   PARTICIPANT_ACTION=reconnect PARTICIPANT_NAMES=sv,app-user \
+   PARTICIPANT_ACTION=reconnect PARTICIPANT_NAMES=app-provider,app-user \
      canton/localnet/canton_console.sh canton/localnet/console/participant_connection.canton
    ```
 
 NOTE: The mediator timeout uses sequencer time.
 With two participants offline, sequencer time can stop.
-The script requests time proofs from `app-provider` to move the time.
+The script requests time proofs from `sv` to move the time.
 
 CAUTION: Without the time proofs, a transaction can wait for many minutes.
 A host that connects again in that period can still confirm it.
@@ -368,7 +417,7 @@ A host that connects again in that period can still confirm it.
    ```
 
    With `app-user` disconnected, an `nttCustody` transaction succeeds with two confirming hosts.
-   With `sv` and `app-user` disconnected, it fails with `MEDIATOR_SAYS_TX_TIMED_OUT`.
+   With `app-provider` and `app-user` disconnected, it fails with `MEDIATOR_SAYS_TX_TIMED_OUT`.
    The failure must name `nttCustody` as the only unresponsive party.
    Give `--signing-owners <owner>,<owner>` after a rotation that removes `owner1` or `owner2`.
    The `--party` check uses the probe package that `gg_package_vetting.sh` uploads.
@@ -680,19 +729,16 @@ after the `nttCustody` change.
 ## NTT end-to-end run
 
 These scripts run the Wormhole NTT layer on LocalNet.
-The NTT packages come from the NTT repository, branch `canton/overnight-ntt`, commit `8976e29`.
+The NTT packages come from the NTT repository, branch `canton/migrate-ntt-layer`, commit `b2c355d`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.9.0, `ntt` 0.3.4 and `token-cip0056` 0.2.0.
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.9.0, `ntt` 0.5.0, `wormhole-genesis` 0.1.0 and `token-cip0056` 0.2.0.
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
-Both pinned `ntt` versions call `wormhole-core` 0.8.3.
-Thus `ntt_upload_dars.sh` rejects them until the NTT DAR is rebuilt on 0.9.0 and pinned.
-
-Set `NTT_PIN_VERSION=0.4.2` to use `ntt` 0.4.2. Build it from NTT branch `canton/migrate-ntt-layer`, commit `eb42001`.
-`ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each version.
-From 0.4.2, `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
-`ntt_lib.sh` then reads the `nttCustody` party from `custody-artifacts.json`.
+`ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each `ntt` version.
+`nttCustody` is a signatory of `NttGovernance` and `NttManager`.
+`ntt_lib.sh` reads the `nttCustody` party from `custody-artifacts.json`.
 The `guardianGovernance` owner keys of `NTT_GG_SIGNING_OWNERS` also sign for `nttCustody`.
+`AcceptGenesis` creates the `NttGovernance` root and the `CoinFactory` (`gg_genesis.sh`). `ntt_governance.sh` records them.
 
 ### Prerequisites
 
@@ -820,7 +866,7 @@ The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
 
 ### Prerequisites
 
-- `NTT_PIN_VERSION=0.4.2`. `ntt_governance.sh`, `ntt_burn_mint.sh` and `ntt_lock_unlock_gg.sh` ran.
+- `ntt_governance.sh`, `ntt_burn_mint.sh` and `ntt_lock_unlock_gg.sh` ran.
 - A disclosure service image from `canton/disclosure/service/Dockerfile` of the NTT repository.
   The image must have the role flags (`--guardian-governance-party`, `--ntt-custody-party`) and `--behind-edge-proxy`.
   The image must not serve `/v1/disclosures` (NTT branch `canton/ntt-disclosure-sets`, commit `ab36968` or later).
@@ -874,7 +920,7 @@ The script removes the container when it stops.
 
 Prerequisites:
 
-- `NTT_PIN_VERSION=0.4.2`. `ntt_burn_mint.sh` ran.
+- `ntt_burn_mint.sh` ran.
 - `gateway_t1.sh up` ran. The service reads the participant through the `t1-ledger-proxy` container with mutual TLS.
   The service sends a token only over HTTPS or to a loopback address.
 - `DISCLOSURE_SERVICE_IMAGE` names an image of the disclosure service with the registry API.
@@ -885,7 +931,7 @@ Procedure:
 1. Run the check:
 
    ```bash
-   DISCLOSURE_SERVICE_IMAGE=<image> NTT_PIN_VERSION=0.4.2 canton/localnet/registry_api_check.sh
+   DISCLOSURE_SERVICE_IMAGE=<image> canton/localnet/registry_api_check.sh
    ```
 
 2. Make sure that the last line of the output starts with `registry_api_check.sh: PASS`.
@@ -932,10 +978,14 @@ The procedures of section 7.5 apply only to an upgrade that keeps the signatorie
 The rehearsal cannot run on a LocalNet with the 0.8.3 genesis:
 
 - The 0.8.3 `CoreState`, `EmitterRegistry` and `Emitter` cannot run under 0.6.0 or 0.7.0.
-- `ntt_e2e.sh` follows the `ntt` 0.3.4 and `wormhole-core` 0.9.0 pins of `ntt_lib.sh`.
+- `ntt_e2e.sh` follows the `ntt` 0.5.0 and `wormhole-core` 0.9.0 pins of `ntt_lib.sh`.
   Thus the steps `ntt` and `post-unvet` fail with `ntt` 0.3.0.
 
 The `prepare` step stops before it changes the vetting state if the Operator `CoreState` is not a 0.6.0 contract.
+
+CAUTION: The 0.6.0 and 0.7.0 templates have the external `Operator` as a signatory.
+The current `gg_host.sh` hosts no external `Operator`, and the current `gg_lib.sh` has no `Operator` signer.
+Thus `core_upgrade_rehearsal.sh` runs only with the scripts of commit `395103f5e`, on a LocalNet of that commit.
 Use the rehearsal again for the first upgrade from 0.8.3.
 Then change the package ids and DARs in `core_upgrade_package_ids.sh`.
 
