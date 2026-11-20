@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Table-driven test of ntt_offline_lib.sh. Needs bash, jq and unzip.
+# Table-driven test of ntt_offline_lib.sh. Needs bash, jq, zip and unzip.
 # Usage: canton/localnet/test/ntt_lib_test.sh
 set -uo pipefail
 LOCALNET_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,11 +34,6 @@ check_case() {
     return
   fi
   echo "ok: $case_name"
-}
-
-# check_text_has_line <text> <line>
-check_text_has_line() {
-  grep -qxF -- "$2" <<<"$1"
 }
 
 readonly CREATED_COIN_TRANSACTION='{"events": [
@@ -190,8 +185,6 @@ check_case "classify_submit_response with an empty expected text" 1 - "expected 
 
 readonly REPOSITORY_ROOT="$LOCALNET_TEST_DIR/../../.."
 readonly VENDORED_DAR_DIR="$REPOSITORY_ROOT/canton/dars"
-readonly CORE_0_6_0_PACKAGE_ID="701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15"
-readonly CORE_0_7_0_PACKAGE_ID="7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb"
 readonly CORE_0_8_0_PACKAGE_ID="03a65dc33bc2e08ad04318e300227e3f4dc6b983be09b650b59f2676f43a22b6"
 readonly CORE_0_8_1_PACKAGE_ID="4a214c8015945441a74dcc2a702f0652b3136e8f7488ab13d8196313c4d47d89"
 readonly CORE_0_8_2_PACKAGE_ID="132d32bfdba695df16b78b1c2250579d9369b13fe030d951973293f4e23b70c1"
@@ -250,25 +243,37 @@ check_case "pinned wormhole-genesis id is not the replaced build a64efec9" 0 - -
 check_case "pinned wormhole-genesis id is not the replaced build cbb432d7" 0 - - \
   test "$pinned_genesis_package_id" != "cbb432d75935af10179d1916f315034e68fa61ad4d53d6f3389b581f30e27221"
 
+readonly FIXTURE_CORE_PACKAGE_ID="1111111111111111111111111111111111111111111111111111111111111111"
+readonly FIXTURE_PRIM_PACKAGE_ID="2222222222222222222222222222222222222222222222222222222222222222"
+readonly FIXTURE_CORE_DIRECTORY="wormhole-core-0.7.0-$FIXTURE_CORE_PACKAGE_ID"
+# DAR layout with empty DALFs: the functions under test read only the entry names.
+mkdir -p "$work_dir/fixture-core-dar/META-INF" "$work_dir/fixture-core-dar/$FIXTURE_CORE_DIRECTORY"
+touch "$work_dir/fixture-core-dar/META-INF/MANIFEST.MF" \
+  "$work_dir/fixture-core-dar/$FIXTURE_CORE_DIRECTORY/$FIXTURE_CORE_DIRECTORY.dalf" \
+  "$work_dir/fixture-core-dar/$FIXTURE_CORE_DIRECTORY/daml-prim-$FIXTURE_PRIM_PACKAGE_ID.dalf"
+(cd "$work_dir/fixture-core-dar" && zip -qr "$work_dir/fixture-core.dar" .) || failure_count=$((failure_count + 1))
+readonly FIXTURE_CORE_DAR="$work_dir/fixture-core.dar"
+
 echo "not a zip archive" > "$work_dir/not-a-dar.dar"
-check_case "core 0.8.2 main id" 0 "$CORE_0_8_2_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.2.dar"
-check_case "core 0.8.1 main id" 0 "$CORE_0_8_1_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.1.dar"
-check_case "core 0.8.0 main id" 0 "$CORE_0_8_0_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.0.dar"
-check_case "core 0.7.0 main id" 0 "$CORE_0_7_0_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar"
-check_case "core 0.6.0 main id" 0 "$CORE_0_6_0_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.6.0.dar"
-check_case "core 0.7.0 main name and version" 0 "wormhole-core 0.7.0" - \
-  dar_main_package_name_and_version "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar"
-check_case "core id of the core 0.7.0 DAR" 0 - - \
-  check_core_package_id_of_dar "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar" "$CORE_0_7_0_PACKAGE_ID"
-check_case "wrong expected core id" 1 - "$CORE_0_7_0_PACKAGE_ID, expected $pinned_core_package_id" \
-  check_core_package_id_of_dar "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar" "$pinned_core_package_id"
+check_case "fixture core main id" 0 "$FIXTURE_CORE_PACKAGE_ID" - dar_main_package_id "$FIXTURE_CORE_DAR"
+check_case "fixture core main name and version" 0 "wormhole-core 0.7.0" - \
+  dar_main_package_name_and_version "$FIXTURE_CORE_DAR"
+check_case "core id of the fixture core DAR" 0 - - \
+  check_core_package_id_of_dar "$FIXTURE_CORE_DAR" "$FIXTURE_CORE_PACKAGE_ID"
+check_case "wrong expected core id" 1 - "$FIXTURE_CORE_PACKAGE_ID, expected $pinned_core_package_id" \
+  check_core_package_id_of_dar "$FIXTURE_CORE_DAR" "$pinned_core_package_id"
+readonly SPLICE_HOLDING_PACKAGE_ID="718a0f77e505a8de22f188bd4c87fe74101274e9d4cb1bfac7d09aec7158d35b"
+check_case "main id of the vendored damlc DAR splice-api-token-holding-v1" 0 "$SPLICE_HOLDING_PACKAGE_ID" - \
+  dar_main_package_id "$VENDORED_DAR_DIR/splice-api-token-holding-v1-1.0.0.dar"
+check_case "main name and version of the vendored damlc DAR splice-api-token-holding-v1" 0 "splice-api-token-holding-v1 1.0.0" - \
+  dar_main_package_name_and_version "$VENDORED_DAR_DIR/splice-api-token-holding-v1-1.0.0.dar"
 check_case "no core DALF" 1 - "found 0" \
   check_core_package_id_of_dar "$VENDORED_DAR_DIR/splice-api-token-holding-v1-1.0.0.dar" "$pinned_core_package_id"
 check_case "main id of a file that is not a DAR" 1 - "cannot list" dar_main_package_id "$work_dir/not-a-dar.dar"
 check_case "core id of a file that is not a DAR" 1 - "cannot list" \
   check_core_package_id_of_dar "$work_dir/not-a-dar.dar" "$pinned_core_package_id"
-check_case "package ids of the core 0.7.0 DAR include its main id" 0 - - \
-  check_text_has_line "$(dar_package_ids "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar")" "$CORE_0_7_0_PACKAGE_ID"
+check_case "package ids of the fixture core DAR" 0 "$FIXTURE_CORE_PACKAGE_ID"$'\n'"$FIXTURE_PRIM_PACKAGE_ID" - \
+  dar_package_ids "$FIXTURE_CORE_DAR"
 
 ntt_canton_dir="${NTT_REPO_DIR:-$REPOSITORY_ROOT/../ntt}/canton"
 ntt_dar="$ntt_canton_dir/ntt/.daml/dist/ntt-$pinned_ntt_version.dar"
