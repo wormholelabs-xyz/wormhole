@@ -1,0 +1,10 @@
+// SECURITY: CVE-2026-114938 stopgap check. Stops the console run unless the JVM runs with -XX:-UseBASE64Intrinsics.
+{
+  val base64IntrinsicsOption = java.lang.management.ManagementFactory
+    .getPlatformMXBean(classOf[com.sun.management.HotSpotDiagnosticMXBean])
+    .getVMOption("UseBASE64Intrinsics")
+  require(base64IntrinsicsOption.getValue == "false",
+    s"UseBASE64Intrinsics is ${base64IntrinsicsOption.getValue} (origin ${base64IntrinsicsOption.getOrigin}), expected false")
+  require(base64IntrinsicsOption.getOrigin.toString != "DEFAULT",
+    s"UseBASE64Intrinsics has origin DEFAULT, expected an explicit -XX:-UseBASE64Intrinsics")
+}

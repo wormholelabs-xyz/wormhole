@@ -41,5 +41,6 @@ trap 'rm -rf "$bootstrap_dir"' EXIT
 bootstrap_script="$bootstrap_dir/bootstrap.canton"
 cat "$@" > "$bootstrap_script"
 cd "$LOCALNET_STATE_DIR/console-work"
-run_with_timeout_seconds "$CONSOLE_TIMEOUT_SECONDS" java "-Xmx$CONSOLE_HEAP" -jar "$CANTON_CONSOLE_JAR" --no-tty \
+# SECURITY: -XX:-UseBASE64Intrinsics is the CVE-2026-114938 stopgap. Remove it when every console JDK is 21.0.13.1 or later.
+run_with_timeout_seconds "$CONSOLE_TIMEOUT_SECONDS" java -XX:-UseBASE64Intrinsics "-Xmx$CONSOLE_HEAP" -jar "$CANTON_CONSOLE_JAR" --no-tty \
   -c "$CANTON_CONSOLE_CONFIG" --bootstrap "$bootstrap_script" < /dev/null

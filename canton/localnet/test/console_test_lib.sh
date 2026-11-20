@@ -6,6 +6,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 
 readonly OFFLINE_CONSOLE_CONFIG="$LOCALNET_SCRIPT_DIR/console/test/offline-participant.conf"
 readonly OFFLINE_CONSOLE_TIMEOUT_SECONDS=300
+# Runs before every offline console script set; fails the run when the console JVM has the Base64 intrinsics on.
+readonly BASE64_INTRINSICS_DISABLED_CHECK="$LOCALNET_SCRIPT_DIR/console/test/base64_intrinsics_disabled_check.canton"
 
 # require_console_jar: fails unless the console jar of CANTON_RELEASE is in the vendor directory.
 require_console_jar() {
@@ -37,7 +39,7 @@ run_offline_console() {
   env -i PATH="$PATH" HOME="$HOME" LOCALNET_STATE_DIR="$console_state_dir" CANTON_CONSOLE_CONFIG="$OFFLINE_CONSOLE_CONFIG" \
     CANTON_VENDOR_DIR="$VENDOR_DIR" CANTON_CONSOLE_OFFLINE=true \
     CANTON_CONSOLE_TIMEOUT_SECONDS="$OFFLINE_CONSOLE_TIMEOUT_SECONDS" ${environment_assignments[@]+"${environment_assignments[@]}"} \
-    "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$@" > "$output_file" 2>&1 || console_status=$?
+    "$LOCALNET_SCRIPT_DIR/canton_console.sh" "$BASE64_INTRINSICS_DISABLED_CHECK" "$@" > "$output_file" 2>&1 || console_status=$?
   rm -rf "$console_state_dir"
   return "$console_status"
 }
