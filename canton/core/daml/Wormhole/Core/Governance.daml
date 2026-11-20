@@ -70,7 +70,7 @@ maxGovernanceAmount = maxBound
 -- | A 32-byte big-endian uint256 word as an 'Int'. Aborts with
 -- "governance: <fieldName> exceeds the Int range" at 2^63 or more: the word
 -- fits only if its leading 24 bytes are zero and byte 24 has its top bit clear.
--- Daml evaluates bindings strictly, so each check runs before 'bytesToInt'.
+-- The if-chain runs each check before 'bytesToInt'; 'intWordOf' slices only on demand.
 parseGovernanceAmountWord : Text -> HexBytes -> Int
 parseGovernanceAmountWord fieldName amountWord =
   if byteLength amountWord /= uint256WordBytes
@@ -81,6 +81,7 @@ parseGovernanceAmountWord fieldName amountWord =
     then error exceedsIntRangeMessage
   else
     let amount = bytesToInt (intWordOf ())
+    -- Postcondition; unreachable after the top-bit check.
     in if amount < 0
          then error ("governance: " <> fieldName <> " parsed below zero")
          else amount
