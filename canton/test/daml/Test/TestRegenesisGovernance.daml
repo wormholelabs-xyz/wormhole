@@ -38,10 +38,9 @@ data RegenesisReplayCase = RegenesisReplayCase with
     earlierRecords : [(Map VaaDigest Int, Optional Int)]
     expectedRecord : Either Text (Map VaaDigest Int, Optional Int)  -- Left: error fragment
 
--- | Each rule of 'tryGovernanceReplayRecordForRegenesis'.
-testGovernanceReplayRecordForRegenesis : Script ()
-testGovernanceReplayRecordForRegenesis = do
-  root <- genesisStateWithLabel "RegenesisReplay" 0
+-- | Rows shared by both variants: each earlier record is (consumed digests, floor).
+regenesisReplayCases : [RegenesisReplayCase]
+regenesisReplayCases =
   let rootDigests = syntheticDigestsFrom 0 3 1000
       floorOnlyDigests = syntheticDigestsFrom 10 2 120
       unionFirst = syntheticDigestsFrom 100 20 1000
@@ -50,39 +49,76 @@ testGovernanceReplayRecordForRegenesis = do
       evictedUnionCount = Map.size unionAll - maxRetainedGovernanceDigests
       unionRetained = Map.fromList (drop evictedUnionCount (Map.toList (syntheticDigestsFrom 100 20 1000)) <> Map.toList unionSecond)
       tiedDigests = Map.fromList [(syntheticDigest (300 + position), 500) | position <- [0 .. maxRetainedGovernanceDigests]]
-      cases =
-        [ RegenesisReplayCase "single root copy" [(rootDigests, Some 999)] (Right (rootDigests, Some 999))
-        , RegenesisReplayCase "single root without floor" [(rootDigests, None)] (Right (rootDigests, None))
-        , RegenesisReplayCase "two roots, the higher floor wins and covers lower digests"
-            [(Map.fromList [(syntheticDigest 20, 200)], Some 100), (floorOnlyDigests <> Map.fromList [(syntheticDigest 21, 160)], Some 150)]
-            (Right (Map.fromList [(syntheticDigest 20, 200), (syntheticDigest 21, 160)], Some 150))
-        , RegenesisReplayCase "two roots, one floor and one None" [(rootDigests, None), (Map.empty, Some 1000)]
-            (Right (Map.filter (> 1000) rootDigests, Some 1000))
-        , RegenesisReplayCase "union over capacity evicts the oldest and raises the floor"
-            [(unionFirst, None), (unionSecond, None)]
-            (Right (unionRetained, Some (1000 + evictedUnionCount - 1)))
-        , RegenesisReplayCase "union with ties at capacity + 1 evicts each tie" [(tiedDigests, None)]
-            (Right (Map.empty, Some 500))
-        , RegenesisReplayCase "same digest, same timestamp in two roots" [(rootDigests, None), (rootDigests, None)]
-            (Right (rootDigests, None))
-        , RegenesisReplayCase "same digest, two timestamps"
-            [(Map.fromList [(syntheticDigest 0, 1000)], None), (Map.fromList [(syntheticDigest 0, 1001)], None)]
-            (Left "regenesis: a digest carries two timestamps")
-        , RegenesisReplayCase "no earlier root" [] (Left "regenesis: no earlier CoreState")
-        ]
-  forA_ cases \replayCase -> do
+  in
+    [ RegenesisReplayCase "single root copy" [(rootDigests, Some 999)] (Right (rootDigests, Some 999))
+    , RegenesisReplayCase "single root without floor" [(rootDigests, None)] (Right (rootDigests, None))
+    , RegenesisReplayCase "two roots, the higher floor wins and covers lower digests"
+        [(Map.fromList [(syntheticDigest 20, 200)], Some 100), (floorOnlyDigests <> Map.fromList [(syntheticDigest 21, 160)], Some 150)]
+        (Right (Map.fromList [(syntheticDigest 20, 200), (syntheticDigest 21, 160)], Some 150))
+    , RegenesisReplayCase "two roots, one floor and one None" [(rootDigests, None), (Map.empty, Some 1000)]
+        (Right (Map.filter (> 1000) rootDigests, Some 1000))
+    , RegenesisReplayCase "union over capacity evicts the oldest and raises the floor"
+        [(unionFirst, None), (unionSecond, None)]
+        (Right (unionRetained, Some (1000 + evictedUnionCount - 1)))
+    , RegenesisReplayCase "union with ties at capacity + 1 evicts each tie" [(tiedDigests, None)]
+        (Right (Map.empty, Some 500))
+    , RegenesisReplayCase "same digest, same timestamp in two roots" [(rootDigests, None), (rootDigests, None)]
+        (Right (rootDigests, None))
+    , RegenesisReplayCase "same digest, two timestamps"
+        [(Map.fromList [(syntheticDigest 0, 1000)], None), (Map.fromList [(syntheticDigest 0, 1001)], None)]
+        (Left "regenesis: a digest carries two timestamps")
+    , RegenesisReplayCase "no earlier root" [] (Left "regenesis: no earlier")
+    ]
+
+replayRecordOf : (Map VaaDigest Int, Optional Int) -> GovernanceReplayRecord
+replayRecordOf (consumed, floorSeconds) = GovernanceReplayRecord with
+  consumedGovernance = consumed
+  evictedGovernanceMaxTimestampSeconds = floorSeconds
+
+checkRegenesisReplayOutcome : RegenesisReplayCase -> Either Text GovernanceReplayRecord -> Script ()
+checkRegenesisReplayOutcome replayCase outcome =
+  case (replayCase.expectedRecord, outcome) of
+    (Right (expectedConsumed, expectedFloor), Right record) -> do
+      assertMsg (replayCase.caseName <> ": consumed " <> show record.consumedGovernance)
+        (record.consumedGovernance == expectedConsumed)
+      assertMsg (replayCase.caseName <> ": floor " <> show record.evictedGovernanceMaxTimestampSeconds)
+        (record.evictedGovernanceMaxTimestampSeconds == expectedFloor)
+      assertMsg (replayCase.caseName <> ": result is not bounded")
+        (checkConsumedGovernanceIsBounded record.evictedGovernanceMaxTimestampSeconds record.consumedGovernance)
+    (Left expectedText, Left message) ->
+      assertMsg (replayCase.caseName <> ": error " <> message) (expectedText `T.isInfixOf` message)
+    (_, unexpected) -> abort (replayCase.caseName <> ": unexpected outcome " <> show unexpected)
+
+-- | Each rule of 'tryGovernanceReplayRecordForRegenesis' (earlier 'CoreState' roots).
+testGovernanceReplayRecordForRegenesis : Script ()
+testGovernanceReplayRecordForRegenesis = do
+  root <- genesisStateWithLabel "RegenesisReplay" 0
+  forA_ regenesisReplayCases \replayCase -> do
     let earlierRoots = map (\(consumed, floorSeconds) -> withReplayState consumed floorSeconds root) replayCase.earlierRecords
-    case (replayCase.expectedRecord, tryGovernanceReplayRecordForRegenesis earlierRoots) of
-      (Right (expectedConsumed, expectedFloor), Right record) -> do
-        assertMsg (replayCase.caseName <> ": consumed " <> show record.consumedGovernance)
-          (record.consumedGovernance == expectedConsumed)
-        assertMsg (replayCase.caseName <> ": floor " <> show record.evictedGovernanceMaxTimestampSeconds)
-          (record.evictedGovernanceMaxTimestampSeconds == expectedFloor)
-        assertMsg (replayCase.caseName <> ": result is not bounded")
-          (checkConsumedGovernanceIsBounded record.evictedGovernanceMaxTimestampSeconds record.consumedGovernance)
-      (Left expectedText, Left message) ->
-        assertMsg (replayCase.caseName <> ": error " <> message) (expectedText `T.isInfixOf` message)
-      (_, outcome) -> abort (replayCase.caseName <> ": unexpected outcome " <> show outcome)
+    checkRegenesisReplayOutcome replayCase (tryGovernanceReplayRecordForRegenesis earlierRoots)
+
+-- | Each rule of 'tryGovernanceReplayRecordForRegenesisFromRecords' (earlier replay records).
+testGovernanceReplayRecordForRegenesisFromRecords : Script ()
+testGovernanceReplayRecordForRegenesisFromRecords =
+  forA_ regenesisReplayCases \replayCase ->
+    checkRegenesisReplayOutcome replayCase
+      (tryGovernanceReplayRecordForRegenesisFromRecords (map replayRecordOf replayCase.earlierRecords))
+
+-- | Both variants give the same record, and fail on the same rows.
+testRegenesisReplayRecordVariantsAgree : Script ()
+testRegenesisReplayRecordVariantsAgree = do
+  root <- genesisStateWithLabel "RegenesisVariants" 0
+  forA_ regenesisReplayCases \replayCase -> do
+    let earlierRoots = map (\(consumed, floorSeconds) -> withReplayState consumed floorSeconds root) replayCase.earlierRecords
+        fromRoots = tryGovernanceReplayRecordForRegenesis earlierRoots
+        fromRecords = tryGovernanceReplayRecordForRegenesisFromRecords (map replayRecordOf replayCase.earlierRecords)
+    case (fromRoots, fromRecords) of
+      (Right rootsRecord, Right recordsRecord) ->
+        assertMsg (replayCase.caseName <> ": variants differ") (rootsRecord == recordsRecord)
+      (Left _, Left _) -> pure ()
+      _ -> abort (replayCase.caseName <> ": one variant failed: " <> show (fromRoots, fromRecords))
+  governanceReplayRecordForRegenesisFromRecords [replayRecordOf (syntheticDigestsFrom 0 3 1000, Some 999)]
+    === governanceReplayRecordForRegenesis [withReplayState (syntheticDigestsFrom 0 3 1000) (Some 999) root]
 
 -- | Each rule of 'tryGuardianSetsForRegenesis'.
 testGuardianSetsForRegenesis : Script ()
