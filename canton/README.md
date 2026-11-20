@@ -1584,12 +1584,12 @@ to an upgrade that keeps the signatories:
   the nonce above `uint32`.
 - A rollback causes the signing outage again, for the 0.7.0 messages.
 
-**LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` runs this
-procedure on three `guardianGovernance` hosts (`localnet/README.md`). Each
-LocalNet participant hosts `guardianGovernance`, so each participant is a
-guardian participant and an informee participant. The sequence `abort-all`
-runs the abort procedure. The rehearsal needs a LocalNet from before the 0.8.x
-genesis (`localnet/README.md`, "Scope with `wormhole-core` 0.8.3"). The results
+**LocalNet rehearsal.** `localnet/core_upgrade_rehearsal.sh` ran this
+procedure for the upgrade from 0.6.0 to 0.7.0 on three `guardianGovernance`
+hosts. Each LocalNet participant hosts `guardianGovernance`, so each
+participant is a guardian participant and an informee participant. The script
+needs a LocalNet with a 0.6.0 genesis, so this repository no longer has it.
+Commit `1e5bf52f07` has the script and its procedure in `localnet/README.md`. The results
 below are from the run at commit `395103f5e`. That run had no maximum canary
 time, no abort procedure, no required update ID and no publish in the restart
 window. Results:

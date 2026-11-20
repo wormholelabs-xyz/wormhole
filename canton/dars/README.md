@@ -29,12 +29,14 @@ NOTE: adding these dependencies (plus the new fee fields/args) makes
 0.1.0 will reject the upload. Fine pre-mainnet: devnet re-bootstraps, and the
 Go watcher's configured packageID changes with the new build.
 
-## Previous `wormhole-core` releases (upgrade baseline)
+## Previous `wormhole-core` releases
 
-`core/daml.yaml` sets `upgrades:` to the DAR of the previous release.
-`damlc` then checks that the new version is a valid smart contract upgrade (SCU).
+This directory holds no `wormhole-core` DAR.
+No participant vetted a version of the current `wormhole-core` line, so `core/daml.yaml` has no `upgrades:` line.
+No participant outside LocalNet vetted the DARs of 0.6.0 to 0.8.2, so this directory no longer has them.
+Commit `1e5bf52f07` has these DARs.
 
-| DAR | Baseline for | Source commit of `canton/core` | Main package id |
+| Removed DAR | Was the baseline for | Source commit of `canton/core` | Main package id |
 | --- | --- | --- | --- |
 | `wormhole-core-0.6.0.dar` | 0.7.0 | `926e55310`, SDK 3.5.1 | `701a57c867e02d962f231bd9f0ff5186e16462a77289aa1b7aaba7fe95074c15` |
 | `wormhole-core-0.7.0.dar` | 0.8.0 | `cfff39977`, SDK 3.5.1 | `7a22a1c4026b2a037b021063c4ff2bd5506be2e748aa9de8b7a6057c90c356eb` |
@@ -102,4 +104,5 @@ Its `TransferFees` accepts chain 0, and its fee choices have no explicit bound a
 To check the package id, run
 `dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.
 The DAR file hash is not reproducible across builds; the package id is reproducible.
-When a new `wormhole-core` version ships, vendor its DAR here and move the `upgrades:` field to it.
+Before a release that is an SCU upgrade of a deployed `wormhole-core` version, vendor the DAR of the deployed version here.
+Then set `upgrades:` in `core/daml.yaml` to that DAR. `damlc` then checks that the new version is a valid smart contract upgrade (SCU).
