@@ -132,11 +132,12 @@ testRegenesisCoreStateRejectsEarlierGovernance = do
   let feeTimestamp = timestampOf govSetFeeVAA
       feeRoot = firstRoot with consumedGovernance = Map.fromList [(digestOfVAA govSetFeeVAA, feeTimestamp)]
       newerRoot = firstRoot with
-        consumedGovernance = syntheticConsumedGovernance maxRetainedGovernanceDigests (feeTimestamp + 1) 1
+        consumedGovernance = syntheticConsumedGovernance (maxRetainedGovernanceDigests - 1) (feeTimestamp + 1) 1
       earlierRoots = [feeRoot, newerRoot, upgradedRoot]
       replayRecord = governanceReplayRecordForRegenesis earlierRoots
       regenesisSets = guardianSetsForRegenesis earlierRoots
   replayRecord.evictedGovernanceMaxTimestampSeconds === Some feeTimestamp
+  Map.member (digestOfVAA govGuardianSetUpgradeVAA) replayRecord.consumedGovernance === True
   regenesisSets.guardianSetIndex === 1
   secondRoot <- genesisStateWithLabel "RegenesisLedgerSecond" 0
   regenesisCid <- createCoreState secondRoot with

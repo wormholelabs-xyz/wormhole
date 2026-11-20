@@ -43,11 +43,12 @@
 -- state.
 module Wormhole.Core.State where
 
-import DA.Action (when)
+import DA.Action (foldlA, when)
 import DA.Map (Map)
 import DA.Map qualified as Map
 import DA.Either (isRight)
-import DA.Foldable (forA_, minimum)
+import DA.Foldable (forA_, minimum, maximum)
+import DA.List (sortOn)
 import DA.Optional (fromSomeNote, isSome, optionalToList)
 import DA.Set qualified as Set
 import DA.Text qualified as T
@@ -532,6 +533,67 @@ recordGovernanceDigest evictedMaxTimestampSeconds consumed digest timestampSecon
          in GovernanceReplayRecord with
               consumedGovernance = Map.filter (> oldestTimestampSeconds) inserted
               evictedGovernanceMaxTimestampSeconds = Some oldestTimestampSeconds
+
+-- | Governance replay state of a re-genesis 'CoreState' that replaces
+-- @earlierRoots@: the highest earlier floor, then each earlier digest above it,
+-- inserted in timestamp order through 'recordGovernanceDigest'. A digest at or
+-- below the running floor is covered by the floor. Fails on an empty list and on
+-- a digest with two timestamps. The result passes 'checkConsumedGovernanceIsBounded'.
+tryGovernanceReplayRecordForRegenesis : [CoreState] -> Either Text GovernanceReplayRecord
+tryGovernanceReplayRecordForRegenesis earlierRoots = do
+  assertMsg "regenesis: no earlier CoreState" (not (null earlierRoots))
+  let earlierFloorSeconds = maximum (map (.evictedGovernanceMaxTimestampSeconds) earlierRoots)
+      earlierEntries = concatMap (\root -> Map.toList root.consumedGovernance) earlierRoots
+      mergeEntry merged (digest, timestampSeconds) = case Map.lookup digest merged of
+        Some recordedTimestampSeconds | recordedTimestampSeconds /= timestampSeconds ->
+          Left "regenesis: a digest carries two timestamps"
+        _ -> Right (Map.insert digest timestampSeconds merged)
+  mergedEntries <- foldlA mergeEntry Map.empty earlierEntries
+  let entriesByTimestamp = sortOn (\(digest, timestampSeconds) -> (timestampSeconds, digest)) (Map.toList mergedEntries)
+      recordEntry record (digest, timestampSeconds) =
+        if checkTimestampIsAboveEvictedGovernanceFloor record.evictedGovernanceMaxTimestampSeconds timestampSeconds
+          then recordGovernanceDigest record.evictedGovernanceMaxTimestampSeconds record.consumedGovernance digest timestampSeconds
+          else record
+      replayRecord = foldl recordEntry
+        (GovernanceReplayRecord with consumedGovernance = Map.empty, evictedGovernanceMaxTimestampSeconds = earlierFloorSeconds)
+        entriesByTimestamp
+  assertMsg "regenesis: replay record is not bounded"
+    (checkConsumedGovernanceIsBounded replayRecord.evictedGovernanceMaxTimestampSeconds replayRecord.consumedGovernance)
+  pure replayRecord
+
+governanceReplayRecordForRegenesis : [CoreState] -> GovernanceReplayRecord
+governanceReplayRecordForRegenesis earlierRoots =
+  either error identity (tryGovernanceReplayRecordForRegenesis earlierRoots)
+
+-- | Guardian set state of a re-genesis 'CoreState'.
+data RegenesisGuardianSets = RegenesisGuardianSets with
+    guardianSetIndex : Int
+    guardianSets     : Map Int GuardianSet
+  deriving (Eq, Show)
+
+-- | The guardian set index and the stored sets of the earlier root with the
+-- highest index, unchanged. Fails on an empty list and when two roots store
+-- different keys at one index.
+tryGuardianSetsForRegenesis : [CoreState] -> Either Text RegenesisGuardianSets
+tryGuardianSetsForRegenesis earlierRoots = do
+  assertMsg "regenesis: no earlier CoreState" (not (null earlierRoots))
+  let storedEntries = concatMap (\root -> Map.toList root.guardianSets) earlierRoots
+      mergeKeys merged (storedIndex, storedSet) = case Map.lookup storedIndex merged of
+        Some recordedKeys | recordedKeys /= storedSet.keys ->
+          Left ("regenesis: earlier roots disagree on the guardian set keys at index " <> show storedIndex)
+        _ -> Right (Map.insert storedIndex storedSet.keys merged)
+  _ <- foldlA mergeKeys Map.empty storedEntries
+  highestRoot <- case earlierRoots of
+    firstRoot :: laterRoots -> Right (foldl
+      (\highest root -> if root.guardianSetIndex > highest.guardianSetIndex then root else highest)
+      firstRoot laterRoots)
+    [] -> Left "regenesis: no earlier CoreState"
+  pure RegenesisGuardianSets with
+    guardianSetIndex = highestRoot.guardianSetIndex
+    guardianSets = highestRoot.guardianSets
+
+guardianSetsForRegenesis : [CoreState] -> RegenesisGuardianSets
+guardianSetsForRegenesis earlierRoots = either error identity (tryGuardianSetsForRegenesis earlierRoots)
 
 -- | Drops each set not active at @now@, then the lowest indices above 'maxStoredGuardianSets'.
 --
