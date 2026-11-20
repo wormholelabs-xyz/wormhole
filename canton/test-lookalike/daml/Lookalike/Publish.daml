@@ -15,8 +15,8 @@ data LookalikeTarget = LookalikeTarget with
 lookalikeNonce : Int
 lookalikeNonce = 77
 
-lookalikePayload : Text
-lookalikePayload = "f0f0"
+lookalikePayload : MessagePayload
+lookalikePayload = MessagePayload "f0f0"
 
 integrationLookalikePublish : LookalikeTarget -> Script Party
 integrationLookalikePublish target = do
