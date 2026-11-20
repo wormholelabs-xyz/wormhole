@@ -39,8 +39,8 @@ type WatcherConfig struct {
 	RetiringPackageVersion string
 	// ReadAsParty narrows the update stream and reobservation lookups to the
 	// guardianGovernance party (signatory of CoreState, observer of every
-	// Emitter). Create REQUIRES it outside unsafe dev mode; empty observes every
-	// party on the participant.
+	// Emitter). Create parses it as a cantonclient.PartyID. Empty observes every
+	// party on the participant and is unsafe dev mode only.
 	ReadAsParty string
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
 	// All three fields set enables per-RPC bearer tokens; all empty disables
@@ -116,8 +116,9 @@ func (wc *WatcherConfig) buildWatcher(
 	// of which that party is the owner or the registrar; the registrar pin drops
 	// the owner-only case. A wildcard stream would also carry publishes
 	// witnessed by any other party hosted on the participant.
-	if !devMode && wc.ReadAsParty == "" {
-		return nil, fmt.Errorf("canton: ReadAsParty must be set to the guardianGovernance party outside unsafe dev mode")
+	readScope, err := cantonclient.ParseReadScope(wc.ReadAsParty, devMode)
+	if err != nil {
+		return nil, fmt.Errorf("canton: ReadAsParty: %w", err)
 	}
 
 	// OAuth is all-or-nothing: a partial config would silently dial without
@@ -134,7 +135,7 @@ func (wc *WatcherConfig) buildWatcher(
 		approvedCorePackages,
 		wc.Rpc,
 		acceptedPackageIDs,
-		wc.ReadAsParty,
+		readScope,
 		wc.Auth,
 		devMode,
 		msgC,

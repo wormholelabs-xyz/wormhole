@@ -13,12 +13,17 @@ import (
 // Read-as party fixtures in the Canton party id form.
 const (
 	readAsGovernanceParty = "guardianGovernance::1220a4d7463bd34b2ba3704401b48ab41d8f88cdcbe512fc1ef071aad97fef106161"
-	foreignRegistrarParty = "rogueGovernance::122080c014fb0f3f4e1e1bd7bbd6e5a8c3a1a7c7d3f0e0a3e9a0c2b1d4e5f60718"
+	foreignRegistrarParty = "rogueGovernance::1220c27103c953779ec7a88ef5e7c556ad079a78421c836975e4b1064cf28cf0544f"
 )
 
 func guardianGovernanceReadScope(t *testing.T) cantonclient.ReadScope {
 	t.Helper()
-	readScope, err := cantonclient.ParseReadScope(readAsGovernanceParty, false)
+	return readScopeOfParty(t, readAsGovernanceParty)
+}
+
+func readScopeOfParty(t *testing.T, party string) cantonclient.ReadScope {
+	t.Helper()
+	readScope, err := cantonclient.ParseReadScope(party, false)
 	require.NoError(t, err)
 	return readScope
 }

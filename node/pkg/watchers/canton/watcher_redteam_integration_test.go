@@ -82,7 +82,7 @@ func TestCantonWatcherIgnoresLookalikePackage(t *testing.T) {
 		streamRecorder := newUpdateStreamRecorder()
 		streamRecorders[caseIndex] = streamRecorder
 
-		w, err := NewWatcher(ledgerAddr, acceptedPackageIDsOrAny(t, tc.packageID), bridge.GuardianGovernance, AuthConfig{}, true, msgC, obsvReqC)
+		w, err := NewWatcher(ledgerAddr, acceptedPackageIDsOrAny(t, tc.packageID), readScopeOfParty(t, bridge.GuardianGovernance), AuthConfig{}, true, msgC, obsvReqC)
 		require.NoError(t, err)
 		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {

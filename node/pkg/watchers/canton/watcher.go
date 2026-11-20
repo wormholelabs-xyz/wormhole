@@ -131,7 +131,7 @@ func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
 type Watcher struct {
 	cantonRPC          string
 	acceptedPackageIDs cantonclient.AcceptedPackageIDs
-	readAsParty        string
+	readScope          cantonclient.ReadScope
 	auth               AuthConfig
 
 	unsafeDevMode bool
@@ -280,13 +280,16 @@ func (e *Watcher) heartbeatContractAddress() string {
 	return contractAddress
 }
 
-// errEmptyReadAsPartyOutsideDevMode: an empty read-as party reads every party and turns the registrar pin off.
-var errEmptyReadAsPartyOutsideDevMode = errors.New("canton: readAsParty must be the guardianGovernance party outside unsafe dev mode")
+// errAnyPartyReadScopeOutsideDevMode: the any-party scope turns the registrar pin off.
+var errAnyPartyReadScopeOutsideDevMode = errors.New("canton: the any-party read scope is unsafe dev mode only")
 
 // SECURITY: checked in the constructor and again in Run, which also covers a Watcher literal.
-func checkReadAsPartySetOutsideDevMode(readAsParty string, unsafeDevMode bool) error {
-	if readAsParty == "" && !unsafeDevMode {
-		return errEmptyReadAsPartyOutsideDevMode
+func checkReadScopeAllowed(readScope cantonclient.ReadScope, unsafeDevMode bool) error {
+	if err := readScope.CheckWasConstructed(); err != nil {
+		return err
+	}
+	if readScope.IsAnyPartyUnsafeDevMode() && !unsafeDevMode {
+		return errAnyPartyReadScopeOutsideDevMode
 	}
 	return nil
 }
@@ -299,20 +302,20 @@ const defaultPackageMetadataRecheckInterval = 60 * time.Second
 func NewWatcher(
 	cantonRPC string,
 	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
-	readAsParty string,
+	readScope cantonclient.ReadScope,
 	auth AuthConfig,
 	unsafeDevMode bool,
 	msgC chan<- *common.MessagePublication,
 	obsvReqC <-chan *gossipv1.ObservationRequest,
 ) (*Watcher, error) {
-	return newWatcherWithApprovedList(cantonclient.DefaultApprovedCorePackages(), cantonRPC, acceptedPackageIDs, readAsParty, auth, unsafeDevMode, msgC, obsvReqC)
+	return newWatcherWithApprovedList(cantonclient.DefaultApprovedCorePackages(), cantonRPC, acceptedPackageIDs, readScope, auth, unsafeDevMode, msgC, obsvReqC)
 }
 
 func newWatcherWithApprovedList(
 	approvedCorePackages cantonclient.ApprovedCorePackages,
 	cantonRPC string,
 	acceptedPackageIDs cantonclient.AcceptedPackageIDs,
-	readAsParty string,
+	readScope cantonclient.ReadScope,
 	auth AuthConfig,
 	unsafeDevMode bool,
 	msgC chan<- *common.MessagePublication,
@@ -321,13 +324,13 @@ func newWatcherWithApprovedList(
 	if err := checkAcceptedPackageIDsAllowed(acceptedPackageIDs, unsafeDevMode, approvedCorePackages); err != nil {
 		return nil, err
 	}
-	if err := checkReadAsPartySetOutsideDevMode(readAsParty, unsafeDevMode); err != nil {
+	if err := checkReadScopeAllowed(readScope, unsafeDevMode); err != nil {
 		return nil, err
 	}
 	return &Watcher{
 		cantonRPC:                      cantonRPC,
 		acceptedPackageIDs:             acceptedPackageIDs,
-		readAsParty:                    readAsParty,
+		readScope:                      readScope,
 		auth:                           auth,
 		unsafeDevMode:                  unsafeDevMode,
 		msgChan:                        msgC,
@@ -388,12 +391,12 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		return
 	}
 
-	// SECURITY: the signatory check admits gg as the owner of an Emitter with another registrar. Exact party id equality.
-	if e.readAsParty != "" && ev.Message.Registrar != e.readAsParty {
+	if err := CheckRegistrarIsReadAsParty(ev.Message.Registrar, e.readScope); err != nil {
 		logger.Error("dropping Canton message whose registrar is not the read-as party",
 			zap.String("registrar", ev.Message.Registrar),
-			zap.String("readAsParty", e.readAsParty),
-			zap.Stringer("updateId", ev.UpdateID))
+			zap.Stringer("readScope", e.readScope),
+			zap.Stringer("updateId", ev.UpdateID),
+			zap.Error(err))
 		cantonForeignRegistrarMessagesDropped.Inc()
 		p2p.DefaultRegistry.AddErrorCount(vaa.ChainIDCanton, 1)
 		return
@@ -510,7 +513,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode, e.approvedCorePackages); err != nil {
 		return err
 	}
-	if err := checkReadAsPartySetOutsideDevMode(e.readAsParty, e.unsafeDevMode); err != nil {
+	if err := checkReadScopeAllowed(e.readScope, e.unsafeDevMode); err != nil {
 		return err
 	}
 	if e.packageMetadataRecheckInterval <= 0 {
@@ -527,7 +530,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 		zap.String("watcher_name", "canton"),
 		zap.String("cantonRPC", e.cantonRPC),
 		zap.Stringer("acceptedPackageIDs", e.acceptedPackageIDs),
-		zap.String("readAsParty", e.readAsParty),
+		zap.Stringer("readScope", e.readScope),
 		zap.Bool("unsafeDevMode", e.unsafeDevMode),
 	)
 	reportAcceptedPackageIDs(logger, e.acceptedPackageIDs, time.Now())
@@ -538,7 +541,7 @@ func (e *Watcher) Run(ctx context.Context) error {
 	// and the goroutines below cannot observe a closed/nil client at shutdown.
 	client := e.cantonClient
 	if client == nil {
-		grpcClient, err := cantonclient.NewCantonGrpcClient(e.cantonRPC, e.readAsParty, logger, e.cantonTransportCreds(), e.cantonDialOpts(ctx)...)
+		grpcClient, err := cantonclient.NewCantonGrpcClient(e.cantonRPC, e.readScope, logger, e.cantonTransportCreds(), e.cantonDialOpts(ctx)...)
 		if err != nil {
 			return fmt.Errorf("failed to create Canton gRPC client: %w", err)
 		}

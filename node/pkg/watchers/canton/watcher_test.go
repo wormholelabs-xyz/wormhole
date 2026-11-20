@@ -227,15 +227,15 @@ func (f *fakeClient) subscribeArgs() (int64, cantonclient.TemplateID, string) {
 	return f.subBegin, f.subTmpl, f.subChoice
 }
 
-// testWatcher reads as sampleRegistrar, the registrar of the sample messages.
+// testWatcher reads as any party, so the sample address vector messages pass the registrar check.
 func testWatcher(t *testing.T, msgC chan<- *common.MessagePublication) *Watcher {
 	t.Helper()
-	return testWatcherReadingAs(t, msgC, sampleRegistrar)
+	return testWatcherReadingAs(t, msgC, anyPartyReadScope(t))
 }
 
-func testWatcherReadingAs(t *testing.T, msgC chan<- *common.MessagePublication, readAsParty string) *Watcher {
+func testWatcherReadingAs(t *testing.T, msgC chan<- *common.MessagePublication, readScope cantonclient.ReadScope) *Watcher {
 	t.Helper()
-	w, err := NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), readAsParty, AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
+	w, err := NewWatcher("canton:5011", cantonclient.AcceptAnyPackageID(), readScope, AuthConfig{}, true, msgC, make(chan *gossipv1.ObservationRequest))
 	require.NoError(t, err)
 	return w
 }
@@ -299,11 +299,10 @@ func TestProcessMessageDropsMissingKeyParty(t *testing.T) {
 }
 
 func TestProcessMessageRequiresRegistrarToBeReadAsParty(t *testing.T) {
-	const otherParty = "other::1220aa"
 	const participantOffset = 7
 	cases := []struct {
 		name                         string
-		readAsParty                  string
+		readScope                    cantonclient.ReadScope
 		registrar                    string
 		owner                        string
 		isReobservation              bool
@@ -311,20 +310,20 @@ func TestProcessMessageRequiresRegistrarToBeReadAsParty(t *testing.T) {
 		wantForeignRegistrarIncrease float64
 		wantErrorCountIncrease       uint64
 	}{
-		{name: "registrar is the read-as party", readAsParty: sampleRegistrar, registrar: sampleRegistrar, owner: sampleOwner, wantEmitted: true},
-		{name: "registrar is the read-as party on reobservation", readAsParty: sampleRegistrar, registrar: sampleRegistrar, owner: sampleOwner, isReobservation: true, wantEmitted: true},
-		{name: "registrar is another party", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleOwner, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
-		{name: "registrar is another party on reobservation", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleOwner, isReobservation: true, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
-		{name: "owner is the read-as party, registrar is another party", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleRegistrar, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
-		{name: "owner is the read-as party, registrar is another party, on reobservation", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleRegistrar, isReobservation: true, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
-		{name: "registrar is empty", readAsParty: sampleRegistrar, registrar: "", owner: sampleOwner, wantErrorCountIncrease: 1},
-		{name: "empty read-as party admits any registrar", readAsParty: "", registrar: otherParty, owner: sampleOwner, wantEmitted: true},
-		{name: "registrar differs only in case", readAsParty: sampleRegistrar, registrar: strings.ToUpper(sampleRegistrar), owner: sampleOwner, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "registrar is the read-as party", readScope: guardianGovernanceReadScope(t), registrar: readAsGovernanceParty, owner: sampleOwner, wantEmitted: true},
+		{name: "registrar is the read-as party on reobservation", readScope: guardianGovernanceReadScope(t), registrar: readAsGovernanceParty, owner: sampleOwner, isReobservation: true, wantEmitted: true},
+		{name: "registrar is another party", readScope: guardianGovernanceReadScope(t), registrar: foreignRegistrarParty, owner: sampleOwner, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "registrar is another party on reobservation", readScope: guardianGovernanceReadScope(t), registrar: foreignRegistrarParty, owner: sampleOwner, isReobservation: true, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "owner is the read-as party, registrar is another party", readScope: guardianGovernanceReadScope(t), registrar: foreignRegistrarParty, owner: readAsGovernanceParty, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "owner is the read-as party, registrar is another party, on reobservation", readScope: guardianGovernanceReadScope(t), registrar: foreignRegistrarParty, owner: readAsGovernanceParty, isReobservation: true, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "registrar is empty", readScope: guardianGovernanceReadScope(t), registrar: "", owner: sampleOwner, wantErrorCountIncrease: 1},
+		{name: "any-party read scope admits any registrar", readScope: anyPartyReadScope(t), registrar: foreignRegistrarParty, owner: sampleOwner, wantEmitted: true},
+		{name: "registrar differs only in case", readScope: guardianGovernanceReadScope(t), registrar: strings.ToUpper(readAsGovernanceParty), owner: sampleOwner, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 1)
-			w := testWatcherReadingAs(t, msgC, tc.readAsParty)
+			w := testWatcherReadingAs(t, msgC, tc.readScope)
 			foreignRegistrarBefore := testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)
 			errorCountBefore := p2p.DefaultRegistry.GetErrorCount(vaa.ChainIDCanton)
 
@@ -511,7 +510,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "localhost:0", testVersionedWindowPackageIDs(t), sampleRegistrar, tc.auth, tc.unsafeDevMode, nil, nil)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "localhost:0", testVersionedWindowPackageIDs(t), guardianGovernanceReadScope(t), tc.auth, tc.unsafeDevMode, nil, nil)
 			require.NoError(t, err)
 			w.extraLedgerDialOpts = tc.extraDialOpts
 			dialOpts := w.cantonDialOpts(context.Background())
@@ -560,7 +559,7 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 			if tc.approvedCorePackages != nil {
 				approvedCorePackages = tc.approvedCorePackages
 			}
-			w, err := newWatcherWithApprovedList(*approvedCorePackages, "canton:0", tc.acceptedPackageIDs, sampleRegistrar, AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			w, err := newWatcherWithApprovedList(*approvedCorePackages, "canton:0", tc.acceptedPackageIDs, guardianGovernanceReadScope(t), AuthConfig{}, tc.unsafeDevMode, nil, nil)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Nil(t, w)
@@ -572,22 +571,24 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 	}
 }
 
-// SECURITY: an empty read-as party turns the registrar pin off and reads every party.
-func TestNewWatcherRefusesEmptyReadAsPartyOutsideDevMode(t *testing.T) {
+// SECURITY: the any-party read scope turns the registrar pin off and reads every party.
+func TestNewWatcherRefusesAnyPartyReadScopeOutsideDevMode(t *testing.T) {
 	cases := []struct {
 		name          string
-		readAsParty   string
+		readScope     cantonclient.ReadScope
 		unsafeDevMode bool
 		wantErr       string
 	}{
-		{name: "empty read-as party outside dev mode", readAsParty: "", wantErr: errEmptyReadAsPartyOutsideDevMode.Error()},
-		{name: "empty read-as party in dev mode", readAsParty: "", unsafeDevMode: true},
-		{name: "guardianGovernance read-as party outside dev mode", readAsParty: sampleRegistrar},
-		{name: "guardianGovernance read-as party in dev mode", readAsParty: sampleRegistrar, unsafeDevMode: true},
+		{name: "any-party read scope outside dev mode", readScope: anyPartyReadScope(t), wantErr: errAnyPartyReadScopeOutsideDevMode.Error()},
+		{name: "any-party read scope in dev mode", readScope: anyPartyReadScope(t), unsafeDevMode: true},
+		{name: "guardianGovernance read scope outside dev mode", readScope: guardianGovernanceReadScope(t)},
+		{name: "guardianGovernance read scope in dev mode", readScope: guardianGovernanceReadScope(t), unsafeDevMode: true},
+		{name: "zero read scope outside dev mode", readScope: cantonclient.ReadScope{}, wantErr: "cantonclient: read scope not constructed"},
+		{name: "zero read scope in dev mode", readScope: cantonclient.ReadScope{}, unsafeDevMode: true, wantErr: "cantonclient: read scope not constructed"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), tc.readAsParty, AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), tc.readScope, AuthConfig{}, tc.unsafeDevMode, nil, nil)
 			if tc.wantErr != "" {
 				require.EqualError(t, err, tc.wantErr)
 				assert.Nil(t, w)
@@ -595,7 +596,7 @@ func TestNewWatcherRefusesEmptyReadAsPartyOutsideDevMode(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, w)
-			assert.Equal(t, tc.readAsParty, w.readAsParty)
+			assert.Equal(t, tc.readScope, w.readScope)
 		})
 	}
 }
@@ -625,7 +626,7 @@ func TestNewWatcherChecksCompiledApprovedList(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := NewWatcher("canton:0", tc.acceptedPackageIDs, sampleRegistrar, AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			w, err := NewWatcher("canton:0", tc.acceptedPackageIDs, guardianGovernanceReadScope(t), AuthConfig{}, tc.unsafeDevMode, nil, nil)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Nil(t, w)
@@ -643,6 +644,7 @@ func TestRunRefusesDisallowedPackageSets(t *testing.T) {
 	cases := []struct {
 		name               string
 		acceptedPackageIDs cantonclient.AcceptedPackageIDs
+		readScope          cantonclient.ReadScope
 		unsafeDevMode      bool
 		wantErr            string
 	}{
@@ -651,12 +653,14 @@ func TestRunRefusesDisallowedPackageSets(t *testing.T) {
 		{name: "zero value in dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, unsafeDevMode: true, wantErr: "no accepted"},
 		{name: "pinned without version outside dev mode", acceptedPackageIDs: currentOnlyWithoutVersion, wantErr: "needs an expected version"},
 		{name: "window without versions outside dev mode", acceptedPackageIDs: testUpgradeWindowPackageIDs(t), wantErr: "needs an expected version"},
-		{name: "approved window with an empty read-as party outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), wantErr: errEmptyReadAsPartyOutsideDevMode.Error()},
+		{name: "approved window with a zero read scope outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), wantErr: "read scope not constructed"},
+		{name: "approved window with a zero read scope in dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), unsafeDevMode: true, wantErr: "read scope not constructed"},
+		{name: "approved window with the any-party read scope outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), readScope: anyPartyReadScope(t), wantErr: errAnyPartyReadScopeOutsideDevMode.Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeClient()
-			w := &Watcher{acceptedPackageIDs: tc.acceptedPackageIDs, unsafeDevMode: tc.unsafeDevMode, cantonClient: fake, approvedCorePackages: *testApprovedCorePackages(t)}
+			w := &Watcher{acceptedPackageIDs: tc.acceptedPackageIDs, readScope: tc.readScope, unsafeDevMode: tc.unsafeDevMode, cantonClient: fake, approvedCorePackages: *testApprovedCorePackages(t)}
 
 			err := w.Run(context.Background())
 

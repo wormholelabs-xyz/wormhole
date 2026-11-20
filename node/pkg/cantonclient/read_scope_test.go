@@ -11,7 +11,7 @@ import (
 // Namespace fingerprints in the Canton form: 1220 multihash prefix, SHA-256 digest.
 const (
 	testGovernanceFingerprint = "1220a4d7463bd34b2ba3704401b48ab41d8f88cdcbe512fc1ef071aad97fef106161"
-	testLocalNetFingerprint   = "122080c014fb0f3f4e1e1bd7bbd6e5a8c3a1a7c7d3f0e0a3e9a0c2b1d4e5f60718"
+	testLocalNetFingerprint   = "1220c27103c953779ec7a88ef5e7c556ad079a78421c836975e4b1064cf28cf0544f"
 )
 
 const (

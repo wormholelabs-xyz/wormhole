@@ -129,7 +129,7 @@ func TestGetTransactionByUpdateIDOnTransientEmitters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			countBefore := publishWithoutReadPartyStakeholderCount(t)
 			service := &fakeUpdateByIDService{response: transactionResponse(sampleUpdateIDHex, 590, tc.events...)}
-			client := &grpcClient{update: service, readAsParty: governanceParty, logger: zap.NewNop()}
+			client := &grpcClient{update: service, readScope: governanceReadScope, logger: zap.NewNop()}
 
 			transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, pinnedTmpl, "PublishMessage")
 			require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestSubscribeUpdatesOnTransientEmitters(t *testing.T) {
 				<-streamDone
 				return nil, context.Canceled
 			}}
-			client := &grpcClient{update: &fakeUpdateService{stream: stream}, readAsParty: governanceParty, logger: zap.NewNop()}
+			client := &grpcClient{update: &fakeUpdateService{stream: stream}, readScope: governanceReadScope, logger: zap.NewNop()}
 			out := make(chan CantonMessageEvent, len(tc.events))
 			subscription, err := client.SubscribeUpdates(context.Background(), 0, pinnedTmpl, "PublishMessage", out)
 			require.NoError(t, err)
@@ -250,7 +250,7 @@ func TestMessagesFromTxOnTransientEmittersInUpgradeWindow(t *testing.T) {
 			afterDeadlineBefore := retiringPackagePublishAfterDeadlineCount()
 			transaction := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: tc.events}, sampleEffectiveAt, tc.recordTime)
 
-			messages := messagesFromTx(transaction, upgradeWindowTmpl, "PublishMessage", governanceParty, zap.NewNop())
+			messages := messagesFromTx(transaction, upgradeWindowTmpl, "PublishMessage", governanceReadScope, zap.NewNop())
 
 			var roles []AcceptedPackageRole
 			for _, message := range messages {
