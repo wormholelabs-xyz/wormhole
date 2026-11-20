@@ -946,9 +946,12 @@ against the Daml side by a shared cross-language test vector.
 `UpdateFormat` with a wildcard template filter. Outside unsafe dev mode,
 `--cantonReadAsParty` is required. Set it to the **`guardianGovernance`** party
 (§4.1). This party is a stakeholder of every `Emitter` and of `CoreState`, so the
-narrowed `filters_by_party` stream carries every `PublishMessage`. In unsafe dev
-mode an empty `--cantonReadAsParty` selects **`filters_for_any_party`**. The
-**devnet** sandbox uses this wildcard.
+narrowed `filters_by_party` stream carries every `PublishMessage`. The watcher
+parses the value at startup. The value must have the form `<hint>::<fingerprint>`.
+The hint has 1 to 185 characters from `[A-Za-z0-9_-]`. The fingerprint is `1220`
+and 64 lowercase hexadecimal characters. The watcher does not start with a
+different value. In unsafe dev mode an empty `--cantonReadAsParty` selects
+**`filters_for_any_party`**. The **devnet** sandbox uses this wildcard.
 `TRANSACTION_SHAPE_LEDGER_EFFECTS` is required so `ExercisedEvent`s — which carry
 the choice result — are included.
 
@@ -1709,6 +1712,12 @@ Close the window:
 > watcher filter, from `--fromOffset` (exclusive) to the ledger end at its
 > start. It stops with an error after 100000 publishes. Each guardian operator
 > runs steps 18 to 21 on its own participant.
+
+> **NOTE:** `canton-list-publishes` uses the registrar pin of the watcher. It
+> does not write a publish whose `registrar` is not the read-as party, because
+> no guardian signs that publish. It writes the number of these publishes to
+> standard error. `--cantonReadAsParty` must be a `guardianGovernance` party ID
+> in the watcher form. The command has no unsafe dev mode.
 
 > **NOTE:** `canton-list-publishes` accepts `--executingPackageID` with no
 > deadline. Thus it also lists 0.9.0 publishes with a record time at or after
