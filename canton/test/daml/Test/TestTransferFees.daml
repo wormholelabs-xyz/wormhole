@@ -113,6 +113,7 @@ testTransferFeesCreatesOneWithdrawalAuthorization : Script ()
 testTransferFeesCreatesOneWithdrawalAuthorization = do
   let cases =
         [ AcceptedTransferFeesCase "chain 75" govTransferFeesVAA govTransferFeesAmount govTransferFeesRecipient
+        , AcceptedTransferFeesCase "chain 0" tfTransferFeesToAllChains vectorAmount vectorRecipient
         , AcceptedTransferFeesCase "amount 0" tfTransferFeesAmountZero 0 vectorRecipient
         , AcceptedTransferFeesCase "amount 2^63 - 1" tfTransferFeesAmountMaxInt64 maxInt64 vectorRecipient
         , AcceptedTransferFeesCase "zero recipient (EVM parity; the SDK serializer refuses it)" tfTransferFeesToZeroRecipient vectorAmount zeroRecipient
@@ -132,13 +133,12 @@ testTransferFeesCreatesOneWithdrawalAuthorization = do
 -- 2. Rejected actions
 ----------------------------------------------------------------------
 
--- | Chain 0, a foreign chain or an amount above Int max aborts; 'CoreState' stays
+-- | A foreign chain or an amount above Int max aborts; 'CoreState' stays
 -- active and unchanged, and the authorization list stays empty.
 testTransferFeesRejectedLeavesNoWithdrawalAuthorization : Script ()
 testTransferFeesRejectedLeavesNoWithdrawalAuthorization = do
   let cases =
-        [ ("chain 0", transferFeesErrorWrongTargetChain, tfTransferFeesToAllChains)
-        , ("chain 2", transferFeesErrorWrongTargetChain, tfTransferFeesToEthereum)
+        [ ("chain 2", transferFeesErrorWrongTargetChain, tfTransferFeesToEthereum)
         , ("amount 2^63", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountTwoPow63)
         , ("amount 2^256 - 1", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountMaxUint256)
         ]
@@ -178,6 +178,20 @@ testTransferFeesReplayRejected = do
       submitter = guardianGovernance, encodedVAA = tfTransferFeesResignedBySet1
   checkAttackFailedWith "re-signed by set 1" governanceErrorActionAlreadyConsumed resignedResult
   checkHasExactlyOneWithdrawalAuthorization "re-signed by set 1" guardianGovernance expectedAuthorization
+
+-- | A chain 0 VAA applies once; its copy fails and the single authorization stays.
+testTransferFeesChainZeroReplayRejected : Script ()
+testTransferFeesChainZeroReplayRejected = do
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel "TransferFeesChainZeroReplay" None
+  transferredCid <- submitGovernance guardianGovernance coreStateCid tfTransferFeesToAllChains
+  let expectedAuthorization =
+        expectedAuthorizationFor guardianGovernance vectorAmount vectorRecipient tfTransferFeesToAllChains
+  checkHasExactlyOneWithdrawalAuthorization "chain 0" guardianGovernance expectedAuthorization
+  replayResult <- trySubmit guardianGovernance do
+    exerciseCmd transferredCid SubmitGovernanceVAA with
+      submitter = guardianGovernance, encodedVAA = tfTransferFeesToAllChains
+  checkAttackFailedWith "chain 0 same VAA" governanceErrorActionAlreadyConsumed replayResult
+  checkHasExactlyOneWithdrawalAuthorization "chain 0 same VAA" guardianGovernance expectedAuthorization
 
 -- | Control for the re-signed case: without the earlier submission, set 1's
 -- copy applies and carries the original digest.
