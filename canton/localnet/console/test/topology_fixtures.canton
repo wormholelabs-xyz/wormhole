@@ -1,0 +1,31 @@
+// In-memory topology values of the offline console tests. Run after owner_signing_prelude.canton.
+import com.digitalasset.canton.topology.transaction.HostingParticipant
+
+// newTestSigningKey: a fresh Ed25519 public key in the DER SPKI format of the owner key files.
+def newTestSigningKey(): SigningPublicKey = {
+  val keyPair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+  SigningPublicKey
+    .create(CryptoKeyFormat.DerX509Spki, ByteString.copyFrom(keyPair.getPublic.getEncoded), SigningKeySpec.EcCurve25519, SigningKeyUsage.All)
+    .getOrElse(sys.error("test signing key"))
+}
+val testOwnerKeys: Seq[SigningPublicKey] = Seq.fill(6)(newTestSigningKey())
+val testOwnerNamespaces: Seq[Namespace] = testOwnerKeys.map(key => Namespace(key.fingerprint))
+val testGuardianNamespace: Namespace = DecentralizedNamespaceDefinition.computeNamespace(testOwnerNamespaces.take(3).toSet)
+val testGuardianGovernancePartyId = PartyId.tryCreate("guardianGovernance", testGuardianNamespace)
+val testCustodyPartyId = PartyId.tryCreate("nttCustody", testGuardianNamespace)
+val testFeeCustodyPartyId = PartyId.tryCreate("feeCustody", testGuardianNamespace)
+val testHostIds: Seq[ParticipantId] = Seq("app-provider", "sv", "app-user", "extra-host").map(hostName =>
+  ParticipantId(UniqueIdentifier.tryCreate(hostName, Namespace(newTestSigningKey().fingerprint))))
+
+def testHosts(permissions: ParticipantPermission*): Seq[HostingParticipant] =
+  permissions.zip(testHostIds).map { case (permission, hostId) => HostingParticipant(hostId, permission) }
+val threeConfirmingHosts = testHosts(ParticipantPermission.Confirmation, ParticipantPermission.Confirmation, ParticipantPermission.Confirmation)
+def testSigningKeys(threshold: Int, keys: Seq[SigningPublicKey]): SigningKeysWithThreshold =
+  SigningKeysWithThreshold(NonEmpty.from(keys.toSet).getOrElse(sys.error("no test keys")), PositiveInt.tryCreate(threshold))
+def testPartyToParticipant(party: PartyId, confirmationThreshold: Int, hosts: Seq[HostingParticipant],
+    signingKeys: Option[SigningKeysWithThreshold]): PartyToParticipant =
+  PartyToParticipant.create(party, PositiveInt.tryCreate(confirmationThreshold), hosts, signingKeys)
+    .fold(error => sys.error(s"test PartyToParticipant: $error"), identity)
+def testNamespaceDefinition(threshold: Int, owners: Seq[Namespace]): DecentralizedNamespaceDefinition =
+  DecentralizedNamespaceDefinition.tryCreate(testGuardianNamespace, PositiveInt.tryCreate(threshold),
+    NonEmpty.from(owners.toSet).getOrElse(sys.error("no test owners")))

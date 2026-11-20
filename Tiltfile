@@ -57,6 +57,7 @@ config.define_string("guardiand_loglevel", False, "Log level for guardiand (debu
 # Components
 config.define_bool("near", False, "Enable Near component")
 config.define_bool("sui", False, "Enable Sui component")
+config.define_bool("canton", False, "Enable Canton component")
 config.define_bool("btc", False, "Enable BTC component")
 config.define_bool("aptos", False, "Enable Aptos component")
 config.define_bool("algorand", False, "Enable Algorand component")
@@ -84,6 +85,10 @@ algorand = cfg.get("algorand", ci)
 near = cfg.get("near", ci)
 aptos = cfg.get("aptos", ci)
 sui = cfg.get("sui", ci)
+# Canton is opt-in (not enabled by --ci) while the full k8s devnet path is being
+# validated — the watcher uses a wildcard party filter so no operator party id is
+# needed. See canton/README.md "Local development with Tilt".
+canton = cfg.get("canton", False)
 evm2 = cfg.get("evm2", ci)
 solana = cfg.get("solana", ci)
 pythnet = cfg.get("pythnet", False)
@@ -285,7 +290,15 @@ def build_node_yaml():
                     "--suiMoveEventType",
                     "0xf82ef05c95ebafcbeb1cce2b636448b8cd1c6daad201f7d04ecddcda15c19d52::publish_message::WormholeMessage",
                 ]
-            
+
+            if canton:
+                # No --cantonReadAsParty: the watcher observes all parties on the
+                # participant (wildcard filter), so it needs no operator party id.
+                container["command"] += [
+                    "--cantonRPC",
+                    "canton:6865",
+                ]
+
             # Handle evm2 configuration based on guardian count and evm2 flag
             if require_per_guardian_config:
                 # Use a shell wrapper to conditionally set the values based on pod ordinal
@@ -476,6 +489,8 @@ if wormchain:
     guardian_resource_deps = guardian_resource_deps + ["wormchain", "wormchain-deploy"]
 if sui:
     guardian_resource_deps = guardian_resource_deps + ["sui"]
+if canton:
+    guardian_resource_deps = guardian_resource_deps + ["canton"]
 
 k8s_resource(
     "guardian",
@@ -874,6 +889,24 @@ if sui:
             port_forward(9184, name = "Prometheus [:9184]", host = webHost),
         ],
         labels = ["sui"],
+        trigger_mode = trigger_mode,
+    )
+
+if canton:
+    k8s_yaml_with_ns("devnet/canton-devnet.yaml")
+
+    docker_build(
+        ref = "canton-node",
+        context = "./canton",
+        dockerfile = "canton/Dockerfile",
+    )
+
+    k8s_resource(
+        "canton",
+        port_forwards = [
+            port_forward(6865, 6865, name = "Ledger API [:6865]", host = webHost),
+        ],
+        labels = ["canton"],
         trigger_mode = trigger_mode,
     )
 

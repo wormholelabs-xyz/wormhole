@@ -1,0 +1,108 @@
+-- | Initialization helpers for the core bridge, after
+-- @ethereum/contracts/Setup.sol@ (the @setup@ entrypoint that installs the
+-- genesis guardian set and the governance configuration). @Setup.sol@ fixes the
+-- genesis index at 0; here genesis takes the index, as Sui @setup.move@ does.
+module Wormhole.Core.Setup where
+
+import DA.Map qualified as Map
+import Splice.Api.Token.HoldingV1 (InstrumentId)
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet
+import Wormhole.Core.State
+
+-- | Wormhole ChainID assigned to Canton.
+cantonChainId : Int
+cantonChainId = 75
+
+-- | The standard Wormhole governance emitter lives on Solana (chain 1) at
+-- address 0x00..04.
+solanaGovernanceChainId : Int
+solanaGovernanceChainId = 1
+
+defaultGovernanceContract : EmitterAddress
+defaultGovernanceContract = parseHexTextOrAbort "0000000000000000000000000000000000000000000000000000000000000004"
+
+-- | The guardian set that genesis installs: the live global index and its
+-- members (Ethereum core @getCurrentGuardianSetIndex@ and @getGuardianSet@,
+-- with each public key). Guardians sign each VAA with the global index, so a
+-- different index here fails each VAA lookup and the next upgrade.
+data GenesisGuardianSet = GenesisGuardianSet with
+    guardianSetIndex : Int
+    guardians        : [GenesisGuardian]
+  deriving (Eq, Show)
+
+-- | A genesis guardian: its address and its public key, both required. The
+-- 'CoreState' ensure checks that the key derives the address.
+data GenesisGuardian = GenesisGuardian with
+    address   : GuardianAddress
+    publicKey : GuardianPublicKey
+  deriving (Eq, Show)
+
+guardianSetMemberOfGenesisGuardian : GenesisGuardian -> GuardianSetMember
+guardianSetMemberOfGenesisGuardian genesisGuardian =
+  GuardianSetMember with address = genesisGuardian.address, publicKey = Some genesisGuardian.publicKey
+
+-- | Build the initial 'CoreState' value with the genesis guardian set
+-- (never-expiring) and the supplied governance configuration. Genesis needs the
+-- @guardianGovernance@ and @feeRecipient@ signatures; later transitions inherit
+-- their authority, so any party submits governance.
+--
+-- @feeInstrument@ and @feeRecipient@ are genesis-fixed (no governance action
+-- covers them). The recipient is feeCustody, a quorum party in the guardian
+-- namespace; the 'CoreState' ensure rejects guardianGovernance. The instrument
+-- is Canton Coin (@InstrumentId dsoParty "Amulet"@).
+mkInitialCoreState :
+  Party           -- ^ guardianGovernance (threshold party; anchors the guardian set)
+  -> Int          -- ^ governance chain id
+  -> EmitterAddress -- ^ governance contract
+  -> GenesisGuardianSet
+  -> InstrumentId -- ^ fee instrument (CC on mainnet)
+  -> Party        -- ^ fee recipient (feeCustody)
+  -> CoreState
+mkInitialCoreState guardianGovernance govChain govContract genesisSet feeInstrument feeRecipient =
+  CoreState with
+    guardianGovernance
+    chainId = cantonChainId
+    governanceChainId = govChain
+    governanceContract = govContract
+    guardianSetIndex = genesisSet.guardianSetIndex
+    guardianSets = Map.fromList
+      [ ( genesisSet.guardianSetIndex
+        , GuardianSet with
+            members = map guardianSetMemberOfGenesisGuardian genesisSet.guardians
+            expirationTime = None ) ]
+    messageFee = 0
+    feeInstrument
+    feeRecipient
+    consumedGovernance = Map.empty
+    evictedGovernanceMaxTimestampSeconds = None
+
+-- | The parties of a genesis registry. A record, so the two 'Party' values cannot be swapped.
+data RegistryParties = RegistryParties with
+    guardianGovernance : Party
+    onboardingFeeAdmin : Party
+  deriving (Eq, Show)
+
+-- | The emitter-id registry created alongside the 'CoreState' in the genesis
+-- ceremony (sequential ids from 0). Creation needs the @guardianGovernance@
+-- signature. @guardianGovernance@ is also the authenticity anchor pinned by
+-- 'RegisterEmitter' and a signatory of each 'Emitter'. Pass the same
+-- @guardianGovernance@ the 'CoreState' was created with.
+mkInitialEmitterRegistry : RegistryParties -> Int -> EmitterRegistry
+mkInitialEmitterRegistry parties registrationFee =
+  EmitterRegistry with
+    guardianGovernance = parties.guardianGovernance
+    onboardingFeeAdmin = parties.onboardingFeeAdmin
+    registrationFee
+    nextId = 0
+
+-- | The replay-root registry (the stateless claim anchor) created alongside the
+-- 'CoreState' at genesis; hands a 'ReplayNode' trie root to any consumer that
+-- claims one (see 'Wormhole.Core.Replay'). Creation needs the
+-- @guardianGovernance@ signature; pass the same one the 'CoreState' was created with.
+mkInitialReplayRootRegistry : RegistryParties -> Int -> ReplayRootRegistry
+mkInitialReplayRootRegistry parties claimFee =
+  ReplayRootRegistry with
+    guardianGovernance = parties.guardianGovernance
+    onboardingFeeAdmin = parties.onboardingFeeAdmin
+    claimFee

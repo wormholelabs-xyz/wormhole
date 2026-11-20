@@ -1,0 +1,58 @@
+// Table test of parseEd25519SignatureHex and runOwnerSigner (owner signer block). Run after
+// owner_signing_prelude.canton and table_test_prelude.canton.
+// Environment: OWNER_SIGNER_STUB_IN_DIRECTORY_WITH_SPACE: path of an executable that prints 128 hex characters.
+val validSignatureHex = "ab" * 64
+val hashHex = "00" * 34
+val signerTestMaxSeconds = 2
+
+checkTableCase("parse-128-lowercase-hex", None) {
+  require(parseEd25519SignatureHex(validSignatureHex, "test").size == 64)
+}
+checkTableCase("parse-127-characters", Some("printed 127 hex characters")) { parseEd25519SignatureHex("a" * 127, "test") }
+checkTableCase("parse-129-characters", Some("printed 129 hex characters")) { parseEd25519SignatureHex("a" * 129, "test") }
+checkTableCase("parse-126-characters", Some("printed 126 hex characters")) { parseEd25519SignatureHex("a" * 126, "test") }
+checkTableCase("parse-uppercase", Some("expected 128 lowercase hex")) { parseEd25519SignatureHex("AB" * 64, "test") }
+checkTableCase("parse-non-hex-character", Some("expected 128 lowercase hex")) { parseEd25519SignatureHex("z" + "a" * 127, "test") }
+checkTableCase("parse-empty", Some("printed 0 hex characters")) { parseEd25519SignatureHex("", "test") }
+
+checkTableCase("run-signer-prints-signature", None) {
+  val signature = runOwnerSigner(Seq("sh", "-c", s"printf %s $validSignatureHex", "sh"), hashHex, "test", signerTestMaxSeconds)
+  require(signature.size == 64)
+}
+checkTableCase("run-signer-gets-hash-as-last-argument", None) {
+  // The stub prints its last argument (the hash) padded to a signature.
+  val signature = runOwnerSigner(Seq("sh", "-c", "printf %s%s \"$1\" " + "cd" * 30, "sh"), hashHex, "test", signerTestMaxSeconds)
+  require(bytesToHex(signature.toByteArray) == hashHex + "cd" * 30)
+}
+val sleepMarker = s"owner-signer-test-sleep-${System.nanoTime}"
+checkTableCase("run-signer-timeout", Some(s"did not finish in $signerTestMaxSeconds s")) {
+  val startNanos = System.nanoTime
+  try runOwnerSigner(Seq("sh", "-c", s"exec sleep 61 # $sleepMarker", "sh"), hashHex, "test", signerTestMaxSeconds)
+  finally {
+    val elapsedSeconds = (System.nanoTime - startNanos) / 1e9
+    require(elapsedSeconds < signerTestMaxSeconds + 2, s"signer stop took $elapsedSeconds s")
+  }
+}
+checkTableCase("run-signer-timeout-stops-the-process", None) {
+  Thread.sleep(500)
+  val stillRunning = ProcessHandle.allProcesses().anyMatch(handle => handle.info().commandLine().orElse("").contains(sleepMarker))
+  require(!stillRunning, "the signer process still runs after the timeout")
+}
+checkTableCase("run-signer-exit-1", Some("exited with 1")) {
+  runOwnerSigner(Seq("sh", "-c", "exit 1", "sh"), hashHex, "test", signerTestMaxSeconds)
+}
+checkTableCase("run-signer-short-signature", Some("printed 127 hex characters")) {
+  runOwnerSigner(Seq("sh", "-c", "printf %s " + "a" * 127, "sh"), hashHex, "test", signerTestMaxSeconds)
+}
+checkTableCase("run-signer-output-too-long", Some(s"printed more than $ownerSignerMaxOutputCharacters characters")) {
+  runOwnerSigner(Seq("sh", "-c", "head -c 100000 /dev/zero | tr '\\\\0' a", "sh"), hashHex, "test", signerTestMaxSeconds)
+}
+checkTableCase("run-signer-missing-program", Some("could not start")) {
+  runOwnerSigner(Seq("/nonexistent/owner-signer"), hashHex, "test", signerTestMaxSeconds)
+}
+checkTableCase("run-signer-path-with-space", None) {
+  val stubPath = requiredEnvironmentVariable("OWNER_SIGNER_STUB_IN_DIRECTORY_WITH_SPACE")
+  require(stubPath.contains(" "), "stub path has no space")
+  require(runOwnerSigner(Seq(stubPath), hashHex, "test", signerTestMaxSeconds).size == 64)
+}
+finishTable("owner-signer")

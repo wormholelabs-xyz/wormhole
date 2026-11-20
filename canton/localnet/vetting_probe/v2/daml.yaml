@@ -1,0 +1,10 @@
+# Rehearsal package for package vetting and owner-key ceremonies on LocalNet. Not for production.
+sdk-version: 3.7.3
+name: wormhole-localnet-vetting-probe
+version: 2.0.0
+source: daml
+dependencies:
+  - daml-prim
+  - daml-stdlib
+build-options:
+  - --target=2.3

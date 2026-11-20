@@ -1,0 +1,109 @@
+-- | Ledger fixture for the Go watcher upgrade-window integration test
+-- (node/pkg/watchers/canton/watcher_upgrade_window_integration_test.go). The
+-- test runs 'integrationUpgradeWindowPublish' once from this DAR (retiring
+-- core) and once from a copy built against the current core version, so each
+-- publish executes under a different wormhole-core package id. It then runs
+-- 'integrationPublishOnExistingEmitter' from the current-core copy on the
+-- emitter the retiring core created, and again from this DAR on the same
+-- emitter, which the current core wrote last, with a package preference for
+-- the retiring core.
+module Test.WatcherUpgradeWindow where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Wormhole.Core.Bytes
+import Test.TestCore (registerEmitter, publishVia)
+import Wormhole.Core.State (Emitter(..), CoreState, PublishMessage(..), WormholeMessage)
+import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
+
+data UpgradeWindowPublishInput = UpgradeWindowPublishInput with
+    bridge : RealBridge
+    ownerHint : Text
+  deriving (Eq, Show)
+
+data UpgradeWindowPublish = UpgradeWindowPublish with
+    owner : Party
+    emitterId : Int
+    sequence : Int
+  deriving (Eq, Show)
+
+upgradeWindowNonce : Int
+upgradeWindowNonce = 43
+
+upgradeWindowPayload : MessagePayload
+upgradeWindowPayload = parseHexTextOrAbort "55667788"
+
+-- | Registers a fresh emitter for a new owner on the real bridge and publishes once.
+integrationUpgradeWindowPublish : UpgradeWindowPublishInput -> Script UpgradeWindowPublish
+integrationUpgradeWindowPublish input = do
+  let guardianGovernance = input.bridge.guardianGovernance
+  owner <- allocateParty input.ownerHint
+  emitterCid <- registerEmitter guardianGovernance owner
+  (_, message) <- publishVia guardianGovernance input.bridge.coreStateCid owner emitterCid
+                    upgradeWindowNonce upgradeWindowPayload 0
+  message.owner === owner
+  pure UpgradeWindowPublish with
+    owner
+    emitterId = message.emitterId
+    sequence = message.sequence
+
+-- | 'preferredCorePackageId' pins the executing core package. Without it,
+-- Daml Script resolves wormhole-core to the newest vetted version.
+data ExistingEmitterPublishInput = ExistingEmitterPublishInput with
+    bridge : RealBridge
+    owner : Party
+    preferredCorePackageId : Optional Text
+  deriving (Eq, Show)
+
+-- | 'publishVia' with an optional package-id preference for the submission.
+publishPreferring : Optional Text -> Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> MessagePayload -> Int -> Script (ContractId Emitter, WormholeMessage)
+publishPreferring None guardianGovernance csId owner emCid nonce payload consistencyLevel =
+  publishVia guardianGovernance csId owner emCid nonce payload consistencyLevel
+publishPreferring (Some corePackageId) guardianGovernance csId owner emCid nonce payload consistencyLevel = do
+  csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
+  submit (actAs owner <> disclose csDisc <> packagePreference [PackageId corePackageId]) do
+    exerciseCmd emCid PublishMessage with
+      nonce, payload, consistencyLevel
+      coreStateCid = csId
+      payer = owner
+      feeAllocation = None
+
+-- | Publishes once on the owner's only emitter on the real bridge, whichever core version created it.
+integrationPublishOnExistingEmitter : ExistingEmitterPublishInput -> Script UpgradeWindowPublish
+integrationPublishOnExistingEmitter input = do
+  let guardianGovernance = input.bridge.guardianGovernance
+  let owner = input.owner
+  ownerEmitters <- filter (\(_, emitter) -> emitter.guardianGovernance == guardianGovernance && emitter.owner == owner)
+                     <$> query @Emitter owner
+  [(emitterCid, existingEmitter)] <- pure ownerEmitters
+  (_, message) <- publishPreferring input.preferredCorePackageId guardianGovernance input.bridge.coreStateCid owner emitterCid
+                    upgradeWindowNonce upgradeWindowPayload 0
+  message.owner === owner
+  message.emitterId === existingEmitter.emitterId
+  message.sequence === existingEmitter.sequence
+  pure UpgradeWindowPublish with
+    owner
+    emitterId = message.emitterId
+    sequence = message.sequence
+
+-- | Runs every fixture on one bridge so `dpm test` covers it.
+testUpgradeWindowFixture : Script ()
+testUpgradeWindowFixture = do
+  bridge <- integrationGovernanceReaderSetup
+  retiringCorePublish <- integrationUpgradeWindowPublish UpgradeWindowPublishInput with
+    bridge, ownerHint = "RetiringCoreOwner"
+  currentCorePublish <- integrationUpgradeWindowPublish UpgradeWindowPublishInput with
+    bridge, ownerHint = "CurrentCoreOwner"
+  retiringCorePublish.emitterId === 0
+  currentCorePublish.emitterId === 1
+  retiringCorePublish.sequence === 0
+  currentCorePublish.sequence === 0
+  existingEmitterPublish <- integrationPublishOnExistingEmitter ExistingEmitterPublishInput with
+    bridge, owner = retiringCorePublish.owner, preferredCorePackageId = None
+  existingEmitterPublish.emitterId === retiringCorePublish.emitterId
+  existingEmitterPublish.sequence === 1
+  existingEmitterPublishAgain <- integrationPublishOnExistingEmitter ExistingEmitterPublishInput with
+    bridge, owner = retiringCorePublish.owner, preferredCorePackageId = None
+  existingEmitterPublishAgain.emitterId === retiringCorePublish.emitterId
+  existingEmitterPublishAgain.sequence === 2

@@ -25,6 +25,7 @@ import (
 	managerxrpl "github.com/certusone/wormhole/node/pkg/manager/xrpl"
 	"github.com/certusone/wormhole/node/pkg/watchers/algorand"
 	"github.com/certusone/wormhole/node/pkg/watchers/aptos"
+	"github.com/certusone/wormhole/node/pkg/watchers/canton"
 	"github.com/certusone/wormhole/node/pkg/watchers/evm"
 	"github.com/certusone/wormhole/node/pkg/watchers/near"
 	"github.com/certusone/wormhole/node/pkg/watchers/solana"
@@ -149,6 +150,18 @@ var (
 
 	suiRPC           *string
 	suiMoveEventType *string
+
+	cantonRPC                          *string
+	cantonPackageID                    *string
+	cantonPackageVersion               *string
+	cantonRetiringPackageID            *string
+	cantonRetiringPackageVersion       *string
+	cantonRetiringPackageAcceptedUntil *string
+	cantonReadAsParty                  *string
+	cantonAuthTokenURL                 *string
+	cantonAuthClientID                 *string
+	cantonAuthClientSecret             *string
+	cantonAuthAudience                 *string
 
 	solanaRPC          *string
 	solanaContract     *string
@@ -419,6 +432,18 @@ func init() {
 
 	suiRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "suiRPC", "Sui gRPC endpoint", "sui:443", []string{""})
 	suiMoveEventType = NodeCmd.Flags().String("suiMoveEventType", "", "Sui move event type for publish_message")
+
+	cantonRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "cantonRPC", "Canton Ledger API v2 gRPC endpoint", "canton:5011", []string{""})
+	cantonPackageID = NodeCmd.Flags().String("cantonPackageID", "", "Canton wormhole-core Daml package id (64 lowercase hex). Required outside --unsafeDevMode; empty (dev mode only) matches any package")
+	cantonPackageVersion = NodeCmd.Flags().String("cantonPackageVersion", "", "wormhole-core version (MAJOR.MINOR.PATCH) that the participant's vetting metadata must show for --cantonPackageID. Required with it outside --unsafeDevMode")
+	cantonRetiringPackageVersion = NodeCmd.Flags().String("cantonRetiringPackageVersion", "", "wormhole-core version (MAJOR.MINOR.PATCH) that the participant's vetting metadata must show for --cantonRetiringPackageID. Required with it outside --unsafeDevMode")
+	cantonRetiringPackageID = NodeCmd.Flags().String("cantonRetiringPackageID", "", "Retiring wormhole-core package id (64 lowercase hex). Needs --cantonRetiringPackageAcceptedUntil. Guardian-approved ids only")
+	cantonRetiringPackageAcceptedUntil = NodeCmd.Flags().String("cantonRetiringPackageAcceptedUntil", "", "Exclusive record-time deadline for --cantonRetiringPackageID (RFC 3339 UTC, whole seconds, for example 2026-12-01T00:00:00Z). At most 7 days after this startup; the bound applies at each startup, so keep the same deadline at every restart")
+	cantonReadAsParty = NodeCmd.Flags().String("cantonReadAsParty", "", "Canton guardianGovernance party the watcher reads as. Required outside --unsafeDevMode; empty (dev mode only) observes all parties on the participant")
+	cantonAuthTokenURL = NodeCmd.Flags().String("cantonAuthTokenURL", "", "OAuth2 token endpoint for a Keycloak-fronted Canton Ledger API (.../realms/<realm>/protocol/openid-connect/token). Set together with cantonAuthClientID and cantonAuthClientSecret, or not at all")
+	cantonAuthClientID = NodeCmd.Flags().String("cantonAuthClientID", "", "OAuth2 client id for the Canton Ledger API (client-credentials grant)")
+	cantonAuthClientSecret = NodeCmd.Flags().String("cantonAuthClientSecret", "", "OAuth2 client secret for the Canton Ledger API. Prefer the GUARDIAND_CANTONAUTHCLIENTSECRET environment variable over the flag so the secret never appears in process arguments")
+	cantonAuthAudience = NodeCmd.Flags().String("cantonAuthAudience", "", "Optional audience parameter of the OAuth2 token request: the Ledger API target audience of the participant (for example https://canton.network.global or https://daml.com/jwt/aud/participant/<participantId>). Requires cantonAuthTokenURL, cantonAuthClientID and cantonAuthClientSecret")
 
 	solanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaRPC", "Solana RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
 	fogoRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoRPC", "Fogo RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
@@ -994,6 +1019,12 @@ func runNode(cmd *cobra.Command, args []string) {
 		logger.Fatal("Either --suiRPC and --suiMoveEventType must all be set or all unset")
 	}
 
+	// --cantonRPC enables the Canton watcher. canton.WatcherConfig.Create
+	// validates the canton flags themselves.
+	if err := checkCantonFlagsNeedRPC(*cantonRPC, cantonFlagValuesThatNeedRPC()); err != nil {
+		logger.Fatal(err.Error())
+	}
+
 	if !argsConsistent([]string{*xrplRPC, *xrplContract}) {
 		logger.Fatal("Either --xrplRPC and --xrplContract must all be set or all unset")
 	}
@@ -1078,6 +1109,7 @@ func runNode(cmd *cobra.Command, args []string) {
 	rpcMap["injectiveWS"] = *injectiveWS
 	// ChainIDOsmosis is not supported in the guardian.
 	rpcMap["suiRPC"] = *suiRPC
+	rpcMap["cantonRPC"] = *cantonRPC
 	rpcMap["aptosRPC"] = *aptosRPC
 	rpcMap["arbitrumRPC"] = *arbitrumRPC
 	rpcMap["optimismRPC"] = *optimismRPC
@@ -1777,6 +1809,27 @@ func runNode(cmd *cobra.Command, args []string) {
 			Rpc:               *suiRPC,
 			SuiMoveEventType:  *suiMoveEventType,
 			TxVerifierEnabled: slices.Contains(txVerifierChains, vaa.ChainIDSui),
+		}
+		watcherConfigs = append(watcherConfigs, wc)
+	}
+
+	if shouldStart(cantonRPC) {
+		wc := &canton.WatcherConfig{
+			NetworkID:                    "canton",
+			ChainID:                      vaa.ChainIDCanton,
+			Rpc:                          *cantonRPC,
+			PackageID:                    *cantonPackageID,
+			PackageVersion:               *cantonPackageVersion,
+			RetiringPackageID:            *cantonRetiringPackageID,
+			RetiringPackageVersion:       *cantonRetiringPackageVersion,
+			RetiringPackageAcceptedUntil: *cantonRetiringPackageAcceptedUntil,
+			ReadAsParty:                  *cantonReadAsParty,
+			Auth: canton.AuthConfig{
+				TokenURL:     *cantonAuthTokenURL,
+				ClientID:     *cantonAuthClientID,
+				ClientSecret: *cantonAuthClientSecret,
+				Audience:     *cantonAuthAudience,
+			},
 		}
 		watcherConfigs = append(watcherConfigs, wc)
 	}

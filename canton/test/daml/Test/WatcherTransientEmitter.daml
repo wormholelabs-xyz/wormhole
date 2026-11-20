@@ -1,0 +1,177 @@
+-- | Ledger fixtures for the Go watcher integration test of publishes on an
+-- 'Emitter' that the same transaction creates
+-- (node/pkg/watchers/canton/watcher_transient_emitter_integration_test.go).
+--
+-- The participant sets acs_delta false on such a publish, because the
+-- exercised contract is transient.
+module Test.WatcherTransientEmitter where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.State
+import Wormhole.Core.Setup
+import Test.TestCore (registerEmitter, devnetGenesisGuardian)
+import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
+
+-- | @witness@ observes the publisher, thus witnesses each consuming choice and its subtree.
+template TransientEmitterPublisher
+  with
+    owner   : Party
+    witness : Party
+  where
+    signatory owner
+    observer witness
+
+    -- | The second publish consumes the successor that the first publish creates.
+    choice PublishTwiceOnOneEmitter : (WormholeMessage, WormholeMessage)
+      with
+        emitterCid   : ContractId Emitter
+        coreStateCid : ContractId CoreState
+      controller owner
+      do
+        (successorCid, firstMessage) <- exercise emitterCid PublishMessage with
+          nonce = firstDoublePublishNonce, payload = firstDoublePublishPayload, consistencyLevel = 0
+          coreStateCid, payer = owner, feeAllocation = None
+        (_, secondMessage) <- exercise successorCid PublishMessage with
+          nonce = secondDoublePublishNonce, payload = secondDoublePublishPayload, consistencyLevel = 0
+          coreStateCid, payer = owner, feeAllocation = None
+        pure (firstMessage, secondMessage)
+
+    -- | The publish consumes the 'Emitter' that 'RegisterEmitter' creates.
+    choice RegisterEmitterAndPublish : WormholeMessage
+      with
+        registryCid                : ContractId EmitterRegistry
+        registryGuardianGovernance : Party
+        coreStateCid               : ContractId CoreState
+        nonce                      : Int
+        payload                    : MessagePayload
+      controller owner
+      do
+        (_, registeredEmitterCid) <- exercise registryCid RegisterEmitter with
+          requester = owner, payer = owner, coreStateCid = None, feeAllocation = None
+          expectedGuardianGovernance = registryGuardianGovernance
+        (_, message) <- exercise registeredEmitterCid PublishMessage with
+          nonce, payload, consistencyLevel = 0
+          coreStateCid, payer = owner, feeAllocation = None
+        pure message
+
+firstDoublePublishNonce : Int
+firstDoublePublishNonce = 61
+
+firstDoublePublishPayload : MessagePayload
+firstDoublePublishPayload = parseHexTextOrAbort "6161"
+
+secondDoublePublishNonce : Int
+secondDoublePublishNonce = 62
+
+secondDoublePublishPayload : MessagePayload
+secondDoublePublishPayload = parseHexTextOrAbort "6262"
+
+registerAndPublishNonce : Int
+registerAndPublishNonce = 63
+
+registerAndPublishPayload : MessagePayload
+registerAndPublishPayload = parseHexTextOrAbort "6363"
+
+rogueRegisterAndPublishNonce : Int
+rogueRegisterAndPublishNonce = 64
+
+rogueRegisterAndPublishPayload : MessagePayload
+rogueRegisterAndPublishPayload = parseHexTextOrAbort "6464"
+
+data TransientEmitterPublishes = TransientEmitterPublishes with
+    owner : Party
+    doublePublishEmitterId : Int
+    firstDoublePublishSequence : Int
+    secondDoublePublishSequence : Int
+    registeredEmitterId : Int
+    registeredEmitterSequence : Int
+    rogueOwner : Party
+    rogueGovernance : Party
+    rogueEmitterId : Int
+    rogueEmitterSequence : Int
+  deriving (Eq, Show)
+
+-- | The real 'EmitterRegistry' of the bridge.
+realRegistryOf : RealBridge -> Script (ContractId EmitterRegistry)
+realRegistryOf bridge = do
+  registries <- query @EmitterRegistry bridge.guardianGovernance
+  case filter (\(_, registry) -> registry.guardianGovernance == bridge.guardianGovernance) registries of
+    [(registryCid, _)] -> pure registryCid
+    _ -> abort "expected exactly one real EmitterRegistry"
+
+-- | Three transactions, in ledger order, each under a 'TransientEmitterPublisher'
+-- that the real guardianGovernance observes:
+--   1. Two publishes on one real 'Emitter'.
+--   2. A real 'RegisterEmitter', then a publish on the new 'Emitter'.
+--   3. The same choice on a rogue-governance registry and a shadow 'CoreState'.
+--      The real guardianGovernance witnesses the rogue 'Emitter' create, but it
+--      is not a signatory of that 'Emitter'.
+integrationTransientEmitterPublish : RealBridge -> Script TransientEmitterPublishes
+integrationTransientEmitterPublish bridge = do
+  let guardianGovernance = bridge.guardianGovernance
+  owner <- allocateParty "TransientEmitterOwner"
+  emitterCid <- registerEmitter guardianGovernance owner
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance bridge.coreStateCid
+
+  doublePublisherCid <- submit owner do
+    createCmd TransientEmitterPublisher with owner, witness = bridge.guardianGovernance
+  (firstMessage, secondMessage) <- submit (actAs owner <> disclose coreStateDisclosure) do
+    exerciseCmd doublePublisherCid PublishTwiceOnOneEmitter with
+      emitterCid, coreStateCid = bridge.coreStateCid
+
+  realRegistryCid <- realRegistryOf bridge
+  realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
+  registeringPublisherCid <- submit owner do
+    createCmd TransientEmitterPublisher with owner, witness = bridge.guardianGovernance
+  registeredMessage <- submit (actAs owner <> disclose coreStateDisclosure <> disclose realRegistryDisclosure) do
+    exerciseCmd registeringPublisherCid RegisterEmitterAndPublish with
+      registryCid = realRegistryCid, registryGuardianGovernance = bridge.guardianGovernance, coreStateCid = bridge.coreStateCid
+      nonce = registerAndPublishNonce, payload = registerAndPublishPayload
+
+  rogueGovernance <- allocateParty "TransientEmitterRogueGovernance"
+  rogueOwner <- allocateParty "TransientEmitterRogueOwner"
+  rogueRegistryCid <- submit rogueGovernance do
+    createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
+  rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
+  rogueFeeCustody <- allocateParty "TransientEmitterRogueFeeCustody"
+  rogueFeeInstrumentAdmin <- allocateParty "TransientEmitterRogueFeeInstrumentAdmin"
+  let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
+  shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
+    createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+                 shadowFeeInstrument rogueFeeCustody)
+  shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
+  roguePublisherCid <- submit rogueOwner do
+    createCmd TransientEmitterPublisher with owner = rogueOwner, witness = bridge.guardianGovernance
+  rogueMessage <- submit (actAs rogueOwner <> disclose shadowCoreStateDisclosure <> disclose rogueRegistryDisclosure) do
+    exerciseCmd roguePublisherCid RegisterEmitterAndPublish with
+      registryCid = rogueRegistryCid, registryGuardianGovernance = rogueGovernance, coreStateCid = shadowCoreStateCid
+      nonce = rogueRegisterAndPublishNonce, payload = rogueRegisterAndPublishPayload
+
+  pure TransientEmitterPublishes with
+    owner
+    doublePublishEmitterId = firstMessage.emitterId
+    firstDoublePublishSequence = firstMessage.sequence
+    secondDoublePublishSequence = secondMessage.sequence
+    registeredEmitterId = registeredMessage.emitterId
+    registeredEmitterSequence = registeredMessage.sequence
+    rogueOwner
+    rogueGovernance
+    rogueEmitterId = rogueMessage.emitterId
+    rogueEmitterSequence = rogueMessage.sequence
+
+-- | Runs the fixture in one script so `dpm test` covers it.
+testTransientEmitterFixtures : Script ()
+testTransientEmitterFixtures = do
+  bridge <- integrationGovernanceReaderSetup
+  publishes <- integrationTransientEmitterPublish bridge
+  publishes.registeredEmitterId === publishes.doublePublishEmitterId + 1
+  (publishes.firstDoublePublishSequence, publishes.secondDoublePublishSequence) === (0, 1)
+  publishes.registeredEmitterSequence === 0
+  (publishes.rogueEmitterId, publishes.rogueEmitterSequence) === (0, 0)
+  governanceEmitters <- query @Emitter bridge.guardianGovernance
+  map (\(_, emitter) -> emitter.guardianGovernance) governanceEmitters === [bridge.guardianGovernance, bridge.guardianGovernance]

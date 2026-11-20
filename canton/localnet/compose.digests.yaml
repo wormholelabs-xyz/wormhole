@@ -1,0 +1,31 @@
+# Pins every LocalNet image to the digest recorded in images.lock. start.sh checks the resolved images
+# against images.lock, so a POSTGRES_VERSION or NGINX_VERSION in the shell cannot select another image.
+# SECURITY: JAVA_TOOL_OPTIONS is the CVE-2026-114938 stopgap for the Temurin 21.0.13 JVMs of the canton and splice
+# images. Remove it when images.lock pins images with Java 21.0.13.1 or later.
+services:
+  postgres:
+    image: "postgres:18.6-trixie@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6"
+  nginx:
+    image: "nginx/nginx-unprivileged:1.30.6-alpine-slim@sha256:984a21e29bb10d4c0e122374b97b89a2101823a9331e0f3c6c04bc285ccf447f"
+  canton:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/canton:0.10.2@sha256:cfffb5da55ee34e18a6c9683d792d61e3f666292101fde68cb6a2596fe53e429"
+    environment:
+      JAVA_TOOL_OPTIONS: "-XX:-UseBASE64Intrinsics"
+  splice:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/splice-app:0.10.2@sha256:31851f5a6ef976f5d11067be8ad3141f9579e7cf0233f0530c1b63270ad6a555"
+    environment:
+      JAVA_TOOL_OPTIONS: "-XX:-UseBASE64Intrinsics"
+  wallet-web-ui-app-user:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/wallet-web-ui:0.10.2@sha256:2659b2518c8a98547f45a76ad41e2b55011887f9fd18454cc00acbb53879bb58"
+  wallet-web-ui-app-provider:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/wallet-web-ui:0.10.2@sha256:2659b2518c8a98547f45a76ad41e2b55011887f9fd18454cc00acbb53879bb58"
+  wallet-web-ui-sv:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/wallet-web-ui:0.10.2@sha256:2659b2518c8a98547f45a76ad41e2b55011887f9fd18454cc00acbb53879bb58"
+  ans-web-ui-app-user:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/ans-web-ui:0.10.2@sha256:b30c29c665d0bb4b8fdb6b2c15ff7e776ab8c03e3576ef6e1b7a9923c477e3fa"
+  ans-web-ui-app-provider:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/ans-web-ui:0.10.2@sha256:b30c29c665d0bb4b8fdb6b2c15ff7e776ab8c03e3576ef6e1b7a9923c477e3fa"
+  sv-web-ui:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/sv-web-ui:0.10.2@sha256:430d5b55fc4f5ea5975d970047d715611627d0f547f4877f5167fb19663f7669"
+  scan-web-ui:
+    image: "ghcr.io/digital-asset/decentralized-canton-sync/docker/scan-web-ui:0.10.2@sha256:e201c9f939e16b40c07f561bfbd56bd9d737145d801306327f8c88aa0ce84324"

@@ -1,0 +1,319 @@
+-- | A reference integrator (a mock NTT-manager shape) showing how an app
+-- consumes a VAA atomically via 'VerifyAndConsumeVAA' (README §4.6).
+--
+-- The flow is DIRECT AND USER-SUBMITTED: the end user exercises 'Redeem' herself
+-- with two explicit disclosures — the 'CoreState' and the covering 'ReplayNode'
+-- of the manager's trie. Sound for ANY submitter: the replay check is a positive
+-- fetch-and-consume of the named node, so a wrong or stale node only fails the
+-- transaction, never replays. No read grants, no @readAs@; the manager's
+-- authority for the consume is inherited from this contract's signatory, and its
+-- visibility is not needed.
+--
+-- Guardian signatures prove the VAA is real, NOT that it is addressed to this
+-- app: 'Redeem' checks the emitter against the registered peer before acting.
+-- 'Redeem' pins the CoreState by @guardianGovernance@; copy that pin.
+--
+-- Test package only; a template for integrator packages, not part of the core
+-- DAR.
+module Test.ExampleIntegrator where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Map qualified as Map
+import DA.Optional (fromSome)
+import DA.Text (isInfixOf)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet (GuardianSet(..), GuardianSetMember(..))
+import Wormhole.Core.Replay
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Wormhole.Core.VAA (parseVAA)
+import Test.TestCore
+  ( setup, govSetFeeVAA, devnetGenesisGuardian
+  , set1MessageVAA, devnetGuardianSet1Key, devnetGuardianSet1PubKey )
+import Test.TestReplay (registerReplayRoot, coveringDisclosure)
+
+-- | Stand-in for the integrator's real effect (a mint / unlock). Co-signed:
+-- the manager's authority is inherited from the app contract, the redeemer's
+-- from being the choice controller.
+template RedeemReceipt
+  with
+    manager  : Party
+    redeemer : Party
+    sequence : Int
+    payload  : MessagePayload
+  where
+    signatory manager, redeemer
+
+template ExampleIntegrator
+  with
+    manager            : Party    -- app party: signatory, and the replay-scope party
+    guardianGovernance : Party    -- CoreState authenticity anchor, from the deployment config
+    namespace          : Text     -- replay-trie namespace; the scope is (manager, namespace)
+    users              : [Party]  -- redeemers; observers so they can exercise Redeem
+    peerChain          : Int      -- registered source-chain peer of this app
+    peerAddress        : EmitterAddress
+  where
+    signatory manager
+    observer users
+
+    -- | Redeem a VAA: verify + consume + peer-check + mint in one atomic
+    -- transaction, submitted by the redeemer. @consumer = manager@ is authorized
+    -- by inheritance from this contract's signatory; the submitter brings the
+    -- 'CoreState' and covering 'ReplayNode' disclosures. All-or-nothing: an
+    -- already-consumed digest, stale node, bad signature, or wrong peer aborts
+    -- everything.
+    nonconsuming choice Redeem : ContractId RedeemReceipt
+      with
+        redeemer      : Party
+        coreStateCid  : ContractId CoreState
+        replayNodeCid : ContractId ReplayNode
+        encodedVAA    : EncodedVaa
+      controller redeemer
+      do
+        -- SECURITY: cids arrive from an untrusted submitter, so authenticate the
+        -- PAYLOAD: a shadow CoreState under another gg carries an attacker
+        -- guardian set. Read choice, because no CoreState stakeholder
+        -- authorizes a fetch here.
+        csGuardianGovernance <- exercise coreStateCid GetGuardianGovernance with reader = redeemer
+        assertMsg "unexpected core guardianGovernance" (csGuardianGovernance == guardianGovernance)
+        (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
+          encodedVAA
+          consumer = manager
+          namespace
+          replayNodeCid
+        -- The integrator's own acceptance check — never skip this.
+        assertMsg "not from the registered peer"
+          (vaa.emitterChain == peerChain
+            && vaa.emitterAddress == peerAddress)
+        create RedeemReceipt with manager, redeemer, sequence = vaa.sequence, payload = vaa.payload
+
+-- | Shared fixture: a bootstrapped bridge, one integrator app with its replay
+-- trie root, and the CoreState disclosure users attach to redemptions.
+data IntegratorFixture = IntegratorFixture with
+  guardianGovernance : Party
+  csId               : ContractId CoreState
+  manager            : Party
+  users              : [Party]
+  intCid             : ContractId ExampleIntegrator
+  csDisc             : Disclosure
+
+-- | The example app's replay-trie namespace. Opaque to the core; a real
+-- integrator derives it from its own stable identity (NTT: a hash of the
+-- instrument id and the initial admin party).
+exampleNamespace : Text
+exampleNamespace = "example"
+
+setupIntegrator : Script IntegratorFixture
+setupIntegrator = do
+  (guardianGovernance, csId) <- setup
+  manager <- allocateParty "ExampleManager"
+  alice <- allocateParty "RedeemAlice"
+  bob <- allocateParty "RedeemBob"
+  intCid <- submit manager do
+    createCmd ExampleIntegrator with
+      manager
+      guardianGovernance
+      namespace = exampleNamespace
+      users = [alice, bob]
+      -- govSetFeeVAA is emitted by (chain 1, 0x..04); register that as the peer.
+      peerChain = solanaGovernanceChainId
+      peerAddress = defaultGovernanceContract
+  -- One-time ceremony: the manager's replay trie root.
+  _ <- registerReplayRoot guardianGovernance manager exampleNamespace defaultSplitThreshold
+  -- The app's disclosure service exports the CoreState disclosure (from a
+  -- guardian participant) and, per redemption, the covering node's.
+  csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
+  pure IntegratorFixture with guardianGovernance, csId, manager, users = [alice, bob], intCid, csDisc
+
+-- | End-to-end user-submitted redemption: alice redeems with her own authority
+-- and two disclosures — nothing else. Replay attempts then fail for every
+-- submitter regardless of node freshness (stale node dies on activeness, fresh
+-- on membership), inverting the old key-based footgun where a submitter without
+-- the consumer's read view could double-consume.
+testIntegratorRedeem : Script ()
+testIntegratorRedeem = do
+  IntegratorFixture{guardianGovernance, csId, manager, users = [alice, bob], intCid, csDisc} <- setupIntegrator
+  -- The disclosure service resolves the covering node for the VAA's digest;
+  -- 'parseVAA' is pure, so the script computes the digest as the service would.
+  let digest = (parseVAA govSetFeeVAA).hash
+  (nodeCid, nodeDisc) <- coveringDisclosure manager manager exampleNamespace digest
+
+  -- Alice redeems: her own authority plus the two disclosures — nothing else.
+  receiptCid <- submit (actAs alice <> disclose csDisc <> disclose nodeDisc) do
+    exerciseCmd intCid Redeem with
+      redeemer = alice
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      encodedVAA = govSetFeeVAA
+  Some receipt <- queryContractId alice receiptCid
+  receipt.sequence === 1
+  receipt.redeemer === alice
+
+  -- Replay with the STALE node disclosure: rejected on activeness — the
+  -- consume archived that node.
+  submitMustFail (actAs bob <> disclose csDisc <> disclose nodeDisc) do
+    exerciseCmd intCid Redeem with
+      redeemer = bob
+      coreStateCid = csId
+      replayNodeCid = nodeCid
+      encodedVAA = govSetFeeVAA
+
+  -- Replay with the FRESH covering node: rejected on membership.
+  (freshCid, freshDisc) <- coveringDisclosure manager manager exampleNamespace digest
+  submitMustFail (actAs bob <> disclose csDisc <> disclose freshDisc) do
+    exerciseCmd intCid Redeem with
+      redeemer = bob
+      coreStateCid = csId
+      replayNodeCid = freshCid
+      encodedVAA = govSetFeeVAA
+
+  -- A second app is its own replay scope: the SAME VAA redeems there too.
+  -- Its namespace string is identical — the scope is (consumer, namespace),
+  -- so a distinct manager party alone separates the tries.
+  manager2 <- allocateParty "ExampleManager2"
+  intCid2 <- submit manager2 do
+    createCmd ExampleIntegrator with
+      manager = manager2
+      guardianGovernance
+      namespace = exampleNamespace
+      users = [alice]
+      peerChain = solanaGovernanceChainId
+      peerAddress = defaultGovernanceContract
+  _ <- registerReplayRoot guardianGovernance manager2 exampleNamespace defaultSplitThreshold
+  (node2Cid, node2Disc) <- coveringDisclosure manager2 manager2 exampleNamespace digest
+  receipt2Cid <- submit (actAs alice <> disclose csDisc <> disclose node2Disc) do
+    exerciseCmd intCid2 Redeem with
+      redeemer = alice
+      coreStateCid = csId
+      replayNodeCid = node2Cid
+      encodedVAA = govSetFeeVAA
+  Some receipt2 <- queryContractId alice receipt2Cid
+  receipt2.manager === manager2
+
+  -- A fabricated CoreState — attacker-signed, so its guardianGovernance field
+  -- cannot name the real one — dies on the guardianGovernance pin before
+  -- verification or consumption run.
+  fakeGovernance <- allocateParty "FakeGovernance"
+  fakeFeeCustody <- allocateParty "FakeFeeCustody"
+  fakeFeeInstrumentAdmin <- allocateParty "FakeFeeInstrumentAdmin"
+  fakeCsId <- submit (actAs fakeGovernance <> actAs fakeFeeCustody) do
+    createCmd (mkInitialCoreState fakeGovernance solanaGovernanceChainId
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+                 (InstrumentId with admin = fakeFeeInstrumentAdmin, id = "UNUSED") fakeFeeCustody)
+  fakeDisc <- fromSome <$> queryDisclosure fakeGovernance fakeCsId
+  submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
+    exerciseCmd intCid Redeem with
+      redeemer = alice
+      coreStateCid = fakeCsId
+      replayNodeCid = freshCid
+      encodedVAA = govSetFeeVAA
+
+data CoreStatePinCase = CoreStatePinCase with
+    caseName                   : Text
+    coreStateCid               : ContractId CoreState
+    coreStateDisclosure        : Disclosure
+    encodedVAA                 : EncodedVaa
+    peerChain                  : Int
+    peerAddress                : EmitterAddress
+    expectedGuardianGovernance : Party
+    expectedRejection          : Optional Text  -- None: Redeem must succeed
+
+shadowCoreState : Party -> Party -> Party -> CoreState
+shadowCoreState signingGovernance signingFeeCustody shadowFeeInstrumentAdmin =
+  mkInitialCoreState signingGovernance solanaGovernanceChainId defaultGovernanceContract
+    (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
+    (InstrumentId with admin = shadowFeeInstrumentAdmin, id = "UNUSED") signingFeeCustody
+
+shadowCoreStateWithSet1 : Party -> Party -> Party -> CoreState
+shadowCoreStateWithSet1 signingGovernance signingFeeCustody shadowFeeInstrumentAdmin =
+  (shadowCoreState signingGovernance signingFeeCustody shadowFeeInstrumentAdmin) with
+    guardianSetIndex = 1
+    guardianSets = Map.fromList
+      [(1, GuardianSet with members = [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey], expirationTime = None)]
+
+-- | 'Redeem' accepts only a CoreState signed by the configured gg. Rows 3-4
+-- are shadows that a throwaway gg signs.
+testIntegratorCoreStatePin : Script ()
+testIntegratorCoreStatePin = do
+  (guardianGovernance, realCsId) <- setup
+  realCsDisc <- fromSome <$> queryDisclosure guardianGovernance realCsId
+  throwawayGovernance <- allocateParty "ThrowawayGovernance"
+  throwawayFeeCustody <- allocateParty "ThrowawayFeeCustody"
+  throwawayFeeInstrumentAdmin <- allocateParty "ThrowawayFeeInstrumentAdmin"
+
+  shadowRealGuardiansCid <- submit (actAs throwawayGovernance <> actAs throwawayFeeCustody) do
+    createCmd (shadowCoreState throwawayGovernance throwawayFeeCustody throwawayFeeInstrumentAdmin)
+  shadowFakeGuardiansCid <- submit (actAs throwawayGovernance <> actAs throwawayFeeCustody) do
+    createCmd (shadowCoreStateWithSet1 throwawayGovernance throwawayFeeCustody throwawayFeeInstrumentAdmin)
+  shadowRealGuardiansDisc <- fromSome <$> queryDisclosure throwawayGovernance shadowRealGuardiansCid
+  shadowFakeGuardiansDisc <- fromSome <$> queryDisclosure throwawayGovernance shadowFakeGuardiansCid
+
+  let set1PeerAddress = parseHexTextOrAbort "000000000000000000000000000000000000000000000000000000000000002a"
+      pinCases =
+        [ CoreStatePinCase "real CoreState accepted" realCsId realCsDisc
+            govSetFeeVAA solanaGovernanceChainId defaultGovernanceContract
+            guardianGovernance None
+        , CoreStatePinCase "real CoreState rejects a set-1 VAA" realCsId realCsDisc
+            set1MessageVAA 2 set1PeerAddress
+            guardianGovernance (Some "unknown guardian set index")
+        , CoreStatePinCase "shadow with real guardians" shadowRealGuardiansCid shadowRealGuardiansDisc
+            govSetFeeVAA solanaGovernanceChainId defaultGovernanceContract
+            guardianGovernance (Some "unexpected core guardianGovernance")
+        , CoreStatePinCase "shadow with fake guardians" shadowFakeGuardiansCid shadowFakeGuardiansDisc
+            set1MessageVAA 2 set1PeerAddress
+            guardianGovernance (Some "unexpected core guardianGovernance")
+        , CoreStatePinCase "integrator configured with a wrong gg" realCsId realCsDisc
+            govSetFeeVAA solanaGovernanceChainId defaultGovernanceContract
+            throwawayGovernance (Some "unexpected core guardianGovernance")
+        ]
+
+  forA_ (zip [1 .. length pinCases] pinCases) \(caseIndex, pinCase) -> do
+    manager <- allocateParty ("PinManager" <> show caseIndex)
+    redeemer <- allocateParty ("PinRedeemer" <> show caseIndex)
+    integratorCid <- submit manager do
+      createCmd ExampleIntegrator with
+        manager
+        guardianGovernance = pinCase.expectedGuardianGovernance
+        namespace = exampleNamespace
+        users = [redeemer]
+        peerChain = pinCase.peerChain
+        peerAddress = pinCase.peerAddress
+    _ <- registerReplayRoot guardianGovernance manager exampleNamespace defaultSplitThreshold
+    let digest = (parseVAA pinCase.encodedVAA).hash
+    (nodeCid, nodeDisc) <- coveringDisclosure manager manager exampleNamespace digest
+    redeemResult <- trySubmit (actAs redeemer <> disclose pinCase.coreStateDisclosure <> disclose nodeDisc) do
+      exerciseCmd integratorCid Redeem with
+        redeemer
+        coreStateCid = pinCase.coreStateCid
+        replayNodeCid = nodeCid
+        encodedVAA = pinCase.encodedVAA
+    case (pinCase.expectedRejection, redeemResult) of
+      (None, Right _) -> pure ()
+      (None, Left redeemError) -> abort (pinCase.caseName <> ": rejected: " <> show redeemError)
+      (Some _, Right _) -> abort (pinCase.caseName <> ": accepted")
+      (Some expectedMessage, Left (FailureStatusError failureStatus)) ->
+        assertMsg (pinCase.caseName <> ": unexpected error: " <> failureStatus.message)
+          (expectedMessage `isInfixOf` failureStatus.message)
+      (Some _, Left otherError) -> abort (pinCase.caseName <> ": unexpected error: " <> show otherError)
+
+-- | Premise of the gg pin: a CoreState that names the real gg needs the real
+-- gg's signature.
+testOutsiderCannotForgeCoreStateOfRealGuardianGovernance : Script ()
+testOutsiderCannotForgeCoreStateOfRealGuardianGovernance = do
+  (guardianGovernance, _) <- setup
+  outsider <- allocateParty "ForgeOutsider"
+  outsiderFeeCustody <- allocateParty "ForgeOutsiderFeeCustody"
+  let forgedSubmitters =
+        [ ("outsider alone", actAs outsider)
+        , ("outsider and its fee custody party", actAs outsider <> actAs outsiderFeeCustody)
+        ]
+  forA_ forgedSubmitters \(submitterName, submitter) -> do
+    forgeResult <- trySubmit submitter do
+      createCmd (shadowCoreStateWithSet1 guardianGovernance outsiderFeeCustody outsider)
+    case forgeResult of
+      Left (AuthorizationError _) -> pure ()
+      Left otherError -> abort ("unexpected error for " <> submitterName <> ": " <> show otherError)
+      Right _ -> abort ("CoreState naming the real gg created by " <> submitterName)

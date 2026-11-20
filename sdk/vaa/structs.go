@@ -375,6 +375,8 @@ const (
 	ChainIDTron ChainID = 70
 	// ChainIDArc is the ChainID of Arc
 	ChainIDArc ChainID = 71
+	// ChainIDCanton is the ChainID of Canton
+	ChainIDCanton ChainID = 75
 
 	// ChainIDWormchain is the ChainID of Wormchain and is in its own range.
 	ChainIDWormchain ChainID = 3104

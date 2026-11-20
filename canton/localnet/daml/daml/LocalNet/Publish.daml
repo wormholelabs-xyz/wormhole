@@ -1,0 +1,47 @@
+-- | LocalNet smoke test for the Wormhole core bridge.
+module LocalNet.Publish where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Optional (fromSome)
+import Wormhole.Core.State
+import Wormhole.Core.VAA ()
+import Test.TestCore (devnetGuardianPubKey, govSetFeeVAA, publishVia, registerEmitter, setupWithPartyLabel)
+import Wormhole.Core.Bytes
+
+data SmokePublishResult = SmokePublishResult with
+    guardianGovernance : Party
+    emitterOwner : Party
+    coreStateCid : ContractId CoreState
+    publishedSequences : [Int]
+    verifiedVaaSequence : Int
+  deriving (Eq, Show)
+
+-- | Bootstrap, register one emitter, publish sequences 0 and 1 by threaded cid,
+-- then verify a guardian-signed VAA as an external party (keccak256 and secp256k1 builtins).
+bootstrapPublishAndVerify : Text -> Script SmokePublishResult
+bootstrapPublishAndVerify runLabel = do
+  assertMsg "runLabel must be non-empty" (runLabel /= "")
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("-" <> runLabel) None
+  emitterOwner <- allocateParty ("SmokeEmitter-" <> runLabel)
+  emitterCid <- registerEmitter guardianGovernance emitterOwner
+  (successorEmitterCid, firstMessage) <- publishVia guardianGovernance coreStateCid emitterOwner emitterCid 42 (parseHexTextOrAbort "11223344") 0
+  (_, secondMessage) <- publishVia guardianGovernance coreStateCid emitterOwner successorEmitterCid 43 (parseHexTextOrAbort "55667788") 0
+  firstMessage.sequence === 0
+  secondMessage.sequence === 1
+  firstMessage.owner === emitterOwner
+  firstMessage.registrar === guardianGovernance
+  secondMessage.payload === parseHexTextOrAbort "55667788"
+  externalVerifier <- allocateParty ("SmokeVerifier-" <> runLabel)
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  verifiedVaa <- submit (actAs externalVerifier <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid ParseAndVerifyVAA with
+      verifier = externalVerifier
+      encodedVAA = govSetFeeVAA
+  verifiedVaa.guardianSetIndex === 0
+  verifiedVaa.emitterChain === 1
+  verifiedVaa.sequence === 1
+  pure SmokePublishResult with
+    guardianGovernance, emitterOwner, coreStateCid
+    publishedSequences = [firstMessage.sequence, secondMessage.sequence]
+    verifiedVaaSequence = verifiedVaa.sequence

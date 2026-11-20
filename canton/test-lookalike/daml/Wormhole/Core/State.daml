@@ -1,0 +1,37 @@
+-- | Look-alike of the core bridge's Wormhole.Core.State: same module, template,
+-- choice, and result shape, signed by the forger alone.
+module Wormhole.Core.State where
+
+import Wormhole.Core.Bytes (MessagePayload)
+
+data WormholeMessage = WormholeMessage with
+    registrar        : Party
+    owner            : Party
+    emitterId        : Int
+    sequence         : Int
+    nonce            : Int
+    consistencyLevel : Int
+    payload          : MessagePayload
+  deriving (Eq, Show)
+
+template Emitter
+  with
+    forger             : Party
+    guardianGovernance : Party
+    registrar          : Party
+    owner              : Party
+    emitterId          : Int
+    sequence           : Int
+  where
+    signatory forger
+    observer guardianGovernance
+
+    choice PublishMessage : (ContractId Emitter, WormholeMessage)
+      with
+        nonce   : Int
+        payload : MessagePayload
+      controller forger
+      do
+        successorCid <- create this
+        pure (successorCid, WormholeMessage with
+          registrar, owner, emitterId, sequence, nonce, consistencyLevel = 0, payload)

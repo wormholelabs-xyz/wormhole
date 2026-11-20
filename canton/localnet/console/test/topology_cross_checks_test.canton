@@ -1,0 +1,202 @@
+// Table test of checkGeneratedTransactionIsIntended (each change that app-provider generates, before the first owner
+// signature), checkParticipantTopologyViewsAgree (rotation safety stop), the rotation inputs from the agreed views and
+// the removed-owner check. Run after owner_signing_prelude.canton, owner_key_rotation_lib.canton,
+// table_test_prelude.canton and topology_fixtures.canton.
+import com.digitalasset.canton.version.ProtocolVersion
+import ParticipantPermission.{Confirmation, Submission}
+val testProtocolVersion = ProtocolVersion.v37
+val ownerKeys = testOwnerKeys.take(3)
+val ownerNamespaces = ownerKeys.map(key => Namespace(key.fingerprint))
+val custodyDescription = "generated PartyToParticipant of nttCustody"
+val intendedCustodyMapping = testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys)))
+val intendedCustodyChange = IntendedTopologyChange(intendedCustodyMapping, PositiveInt.tryCreate(2))
+def generatedTransaction(operation: TopologyChangeOp, serial: Int, mapping: TopologyMapping): TopologyTransaction[TopologyChangeOp, TopologyMapping] =
+  TopologyTransaction.create(operation, PositiveInt.tryCreate(serial), mapping, testProtocolVersion).fold(error => sys.error(error), identity)
+def generatedCustody(confirmationThreshold: Int, hosts: Seq[HostingParticipant], signingKeys: SigningKeysWithThreshold, serial: Int) =
+  generatedTransaction(TopologyChangeOp.Replace, serial, testPartyToParticipant(testCustodyPartyId, confirmationThreshold, hosts, Some(signingKeys)))
+def checkGeneratedCustody(generated: TopologyTransaction[TopologyChangeOp, TopologyMapping]): Unit =
+  checkGeneratedTransactionIsIntended(generated, intendedCustodyChange, testProtocolVersion, custodyDescription)
+
+checkTableCase("T1-intended-custody-change", None) {
+  val generated = generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys), 2)
+  val checked = checkGeneratedTransactionIsIntended(generated, intendedCustodyChange, testProtocolVersion, custodyDescription)
+  require(checked.hash == generated.hash, "checked transaction has another hash")
+}
+checkTableCase("T2-custody-key-threshold-1", Some(s"$custodyDescription has signing key threshold 1, expected 2")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(1, ownerKeys), 2))
+}
+checkTableCase("T3-custody-one-submission-host", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedCustody(generatedCustody(1, testHosts(Submission), testSigningKeys(2, ownerKeys), 2))
+}
+checkTableCase("T4-custody-submission-host-confirmation-threshold-1", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedCustody(generatedCustody(1, testHosts(Submission, Confirmation, Confirmation), testSigningKeys(2, ownerKeys), 2))
+}
+checkTableCase("T5-namespace-threshold-1", Some("generated namespace definition has namespace threshold 1, expected 2")) {
+  checkGeneratedTransactionIsIntended(generatedTransaction(TopologyChangeOp.Replace, 4, testNamespaceDefinition(1, ownerNamespaces)),
+    IntendedTopologyChange(testNamespaceDefinition(2, ownerNamespaces), PositiveInt.tryCreate(4)), testProtocolVersion,
+    "generated namespace definition")
+}
+checkTableCase("T6-custody-serial-999", Some(s"$custodyDescription has serial 999, expected 2")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys), 999))
+}
+checkTableCase("T7-wrong-party", Some(s"$custodyDescription names party guardianGovernance::")) {
+  checkGeneratedCustody(generatedTransaction(TopologyChangeOp.Replace, 2,
+    testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys)))))
+}
+checkTableCase("T8-remove-operation", Some(s"$custodyDescription is Remove, expected Replace")) {
+  checkGeneratedCustody(generatedTransaction(TopologyChangeOp.Remove, 2, intendedCustodyMapping))
+}
+checkTableCase("T9-other-mapping-type", Some(s"$custodyDescription has mapping")) {
+  checkGeneratedCustody(generatedTransaction(TopologyChangeOp.Replace, 2, testNamespaceDefinition(2, ownerNamespaces)))
+}
+def rootDelegation(namespaceKey: SigningPublicKey, targetKey: SigningPublicKey, restriction: DelegationRestriction) =
+  NamespaceDelegation.create(Namespace(namespaceKey.fingerprint), targetKey, restriction).fold(error => sys.error(error), identity)
+val intendedRootDelegationChange =
+  IntendedTopologyChange(rootDelegation(ownerKeys.head, ownerKeys.head, DelegationRestriction.CanSignAllMappings), PositiveInt.one)
+def checkGeneratedRootDelegation(generatedMapping: NamespaceDelegation): Unit =
+  checkGeneratedTransactionIsIntended(generatedTransaction(TopologyChangeOp.Replace, 1, generatedMapping), intendedRootDelegationChange,
+    testProtocolVersion, "generated root delegation")
+checkTableCase("T10-root-delegation-intended", None) {
+  checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys.head, DelegationRestriction.CanSignAllMappings))
+}
+checkTableCase("T11-root-delegation-other-target", Some("generated root delegation has target")) {
+  checkGeneratedRootDelegation(rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllMappings))
+}
+// A root delegation must keep CanSignAllMappings; a delegation to another key shows the restriction comparison.
+checkTableCase("T12-delegation-other-restriction", Some("generated delegation has restriction")) {
+  checkGeneratedTransactionIsIntended(
+    generatedTransaction(TopologyChangeOp.Replace, 1,
+      rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllButNamespaceDelegations)),
+    IntendedTopologyChange(rootDelegation(ownerKeys.head, ownerKeys(1), DelegationRestriction.CanSignAllMappings), PositiveInt.one),
+    testProtocolVersion, "generated delegation")
+}
+checkTableCase("T13-custody-other-signing-keys", Some(s"$custodyDescription has signing keys")) {
+  checkGeneratedCustody(generatedCustody(2, threeConfirmingHosts, testSigningKeys(2, ownerKeys.take(2) :+ testOwnerKeys(4)), 2))
+}
+checkTableCase("T14-custody-onboarding-host", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedCustody(generatedCustody(2, HostingParticipant(testHostIds.head, Confirmation, true) +: threeConfirmingHosts.tail,
+    testSigningKeys(2, ownerKeys), 2))
+}
+
+val namespaceAtSerial3 = EffectiveTopologyMapping(testNamespaceDefinition(2, ownerNamespaces), PositiveInt.tryCreate(3))
+val partyMappingsOfNamespace = Seq(
+  EffectiveTopologyMapping(intendedCustodyMapping, PositiveInt.tryCreate(1)),
+  EffectiveTopologyMapping(testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys))),
+    PositiveInt.tryCreate(2)))
+def agreeingView(participantName: String) = NamespaceTopologyView(participantName, namespaceAtSerial3, partyMappingsOfNamespace, Seq.empty)
+val agreeingViews = Seq("app-provider", "sv", "app-user").map(agreeingView)
+checkTableCase("V1-views-agree", None) {
+  checkParticipantTopologyViewsAgree(agreeingViews)
+}
+checkTableCase("V2-namespace-serial-differs", Some("SAFETY STOP: participant sv namespace definition differs from participant app-provider")) {
+  checkParticipantTopologyViewsAgree(agreeingViews.updated(1, agreeingView("sv").copy(namespaceDefinition = namespaceAtSerial3.copy(serial = PositiveInt.tryCreate(4)))))
+}
+checkTableCase("V3-party-mapping-differs", Some("SAFETY STOP: participant app-user PartyToParticipant mappings differ from participant app-provider")) {
+  val custodyWithSubmissionHost = EffectiveTopologyMapping(testPartyToParticipant(testCustodyPartyId, 1, testHosts(Submission, Confirmation, Confirmation),
+    Some(testSigningKeys(2, ownerKeys))), PositiveInt.tryCreate(1))
+  checkParticipantTopologyViewsAgree(agreeingViews.updated(2, agreeingView("app-user").copy(partyMappings = custodyWithSubmissionHost +: partyMappingsOfNamespace.tail)))
+}
+checkTableCase("V4-party-to-key-mapping", Some("SAFETY STOP: participant sv has a PartyToKeyMapping of nttCustody")) {
+  checkParticipantTopologyViewsAgree(agreeingViews.updated(1, agreeingView("sv").copy(partyToKeyMappingParties = Seq(testCustodyPartyId))))
+}
+checkTableCase("V5-two-views", Some("SAFETY STOP: 2 participant views, expected 3")) {
+  checkParticipantTopologyViewsAgree(agreeingViews.take(2))
+}
+checkTableCase("V6-participant-read-twice", Some("SAFETY STOP: participant app-provider read twice")) {
+  checkParticipantTopologyViewsAgree(Seq(agreeingView("app-provider"), agreeingView("sv"), agreeingView("app-provider")))
+}
+// Rotation inputs come from the agreed views of the console participants, not from a later read of one participant
+// (B1-R). Rotation: owner keys 0 and 1 stay, key 2 goes, key 3 comes.
+val consoleParticipantIds = testHostIds.take(3)
+val rotationParties = Seq(testCustodyPartyId, testGuardianGovernancePartyId)
+val newRotationKeys = ownerKeys.take(2) :+ testOwnerKeys(3)
+val newRotationSigningKeys = NonEmpty.from(newRotationKeys.toSet).getOrElse(sys.error("no new rotation keys"))
+val newRotationOwnerNamespaces = newRotationKeys.map(key => Namespace(key.fingerprint)).toSet
+val attackerHostIds = Seq("attacker-one", "attacker-two").map(hostName =>
+  ParticipantId(UniqueIdentifier.tryCreate(hostName, Namespace(newTestSigningKey().fingerprint))))
+val substitutedHosts = (testHostIds.head +: attackerHostIds).map(HostingParticipant(_, Confirmation))
+def viewsThatAgreeOn(custody: PartyToParticipant, namespaceDefinition: DecentralizedNamespaceDefinition): Seq[NamespaceTopologyView] =
+  Seq("app-provider", "sv", "app-user").map(participantName => NamespaceTopologyView(participantName,
+    EffectiveTopologyMapping(namespaceDefinition, PositiveInt.tryCreate(3)),
+    EffectiveTopologyMapping(custody, PositiveInt.one) +: partyMappingsOfNamespace.tail, Seq.empty))
+def intendedChangesOfViews(views: Seq[NamespaceTopologyView]): IntendedRotationChanges =
+  intendedRotationChangesOf(agreedNamespaceTopologyOf(views, consoleParticipantIds), rotationParties, newRotationSigningKeys,
+    newRotationOwnerNamespaces)
+def intendedCustodyRotation(changes: IntendedRotationChanges): IntendedTopologyChange =
+  changes.partyChanges.collectFirst { case (party, change) if party == testCustodyPartyId => change }.getOrElse(sys.error("no nttCustody change"))
+def rotatedCustody(hosts: Seq[HostingParticipant], serial: Int) = generatedCustody(2, hosts, testSigningKeys(2, newRotationKeys), serial)
+def testSigned(transaction: TopologyTransaction[TopologyChangeOp, TopologyMapping]): GenericSignedTopologyTransaction =
+  SignedTopologyTransaction.withSignature(transaction, Signature.fromExternalSigning(SignatureFormat.fromSigningAlgoSpec(SigningAlgorithmSpec.Ed25519),
+    ByteString.copyFrom(new Array[Byte](64)), ownerKeys.head.fingerprint, SigningAlgorithmSpec.Ed25519), isProposal = false, testProtocolVersion)
+def intendedTransaction(intended: IntendedTopologyChange) = generatedTransaction(TopologyChangeOp.Replace, intended.serial.value, intended.mapping)
+// checkStoredCustodyAgainstAgreedViews: the stored bundle holds this nttCustody change and the intended other changes.
+def checkStoredCustodyAgainstAgreedViews(storedCustody: TopologyTransaction[TopologyChangeOp, TopologyMapping]): Unit = {
+  val agreedTopology = agreedNamespaceTopologyOf(agreeingViews, consoleParticipantIds)
+  val intendedChanges = intendedRotationChangesOf(agreedTopology, rotationParties, newRotationSigningKeys, newRotationOwnerNamespaces)
+  val otherStored = intendedChanges.partyChanges.filterNot(_._1 == testCustodyPartyId).map(change => intendedTransaction(change._2)) :+
+    intendedTransaction(intendedChanges.namespaceChange)
+  checkStoredRotationTransactions((storedCustody +: otherStored).map(testSigned), rotationParties, testGuardianNamespace,
+    rotationParties.map(agreedTopology.partyMapping), agreedTopology.namespaceDefinition, newRotationOwnerNamespaces, newRotationSigningKeys,
+    testOwnerKeys(3))
+}
+checkTableCase("H0-intended-changes-of-agreed-views", None) {
+  val intendedChanges = intendedChangesOfViews(agreeingViews)
+  require(intendedChanges.partyChanges.map(_._1) == rotationParties, "intended party changes are not in rotation order")
+  val custodyRotation = intendedCustodyRotation(intendedChanges)
+  require(custodyRotation.serial == PositiveInt.tryCreate(2), s"nttCustody intended serial ${custodyRotation.serial.value}, expected 2")
+  require(intendedChanges.namespaceChange.serial == PositiveInt.tryCreate(4),
+    s"namespace intended serial ${intendedChanges.namespaceChange.serial.value}, expected 4")
+  checkGeneratedTransactionIsIntended(rotatedCustody(threeConfirmingHosts, 2), custodyRotation, testProtocolVersion, custodyDescription)
+  checkStoredCustodyAgainstAgreedViews(rotatedCustody(threeConfirmingHosts, 2))
+}
+checkTableCase("H1-generated-hosts-substituted-after-safety-stop", Some(s"$custodyDescription has hosts")) {
+  checkGeneratedTransactionIsIntended(rotatedCustody(substitutedHosts, 2), intendedCustodyRotation(intendedChangesOfViews(agreeingViews)),
+    testProtocolVersion, custodyDescription)
+}
+checkTableCase("H1b-stored-hosts-substituted-after-safety-stop", Some("stored PartyToParticipant of nttCustody has hosts")) {
+  checkStoredCustodyAgainstAgreedViews(rotatedCustody(substitutedHosts, 2))
+}
+checkTableCase("H2-generated-serial-above-agreed-serial", Some(s"$custodyDescription has serial 41, expected 2")) {
+  checkGeneratedTransactionIsIntended(rotatedCustody(threeConfirmingHosts, 41), intendedCustodyRotation(intendedChangesOfViews(agreeingViews)),
+    testProtocolVersion, custodyDescription)
+}
+checkTableCase("H2b-stored-serial-above-agreed-serial", Some("stored PartyToParticipant of nttCustody has serial 41, expected 2")) {
+  checkStoredCustodyAgainstAgreedViews(rotatedCustody(threeConfirmingHosts, 41))
+}
+checkTableCase("H3-agreed-hosts-outside-console-participants", Some("SAFETY STOP: nttCustody hosts app-provider,attacker-one,attacker-two differ")) {
+  intendedChangesOfViews(viewsThatAgreeOn(testPartyToParticipant(testCustodyPartyId, 2, substitutedHosts, Some(testSigningKeys(2, ownerKeys))),
+    testNamespaceDefinition(2, ownerNamespaces)))
+}
+checkTableCase("H4-agreed-confirmation-threshold-1-before-signature", Some("nttCustody confirmation threshold 1, expected 2")) {
+  intendedChangesOfViews(viewsThatAgreeOn(testPartyToParticipant(testCustodyPartyId, 1, threeConfirmingHosts, Some(testSigningKeys(2, ownerKeys))),
+    testNamespaceDefinition(2, ownerNamespaces)))
+}
+checkTableCase("H5-agreed-namespace-threshold-1-before-signature", Some("namespace threshold 1, expected 2")) {
+  intendedChangesOfViews(viewsThatAgreeOn(intendedCustodyMapping, testNamespaceDefinition(1, ownerNamespaces)))
+}
+checkTableCase("H6-two-console-participants", Some("SAFETY STOP: 2 console participants, expected 3")) {
+  agreedNamespaceTopologyOf(agreeingViews, consoleParticipantIds.take(2))
+}
+
+// Removal of the old owner key, from the agreed views after the rotation.
+val removedRotationKey = ownerKeys(2)
+def topologyAfterRotation(custodyKeys: Seq[SigningPublicKey], namespaceOwnerKeys: Seq[SigningPublicKey]): AgreedNamespaceTopology =
+  AgreedNamespaceTopology(
+    EffectiveTopologyMapping(testNamespaceDefinition(2, namespaceOwnerKeys.map(key => Namespace(key.fingerprint))), PositiveInt.tryCreate(4)),
+    Seq(EffectiveTopologyMapping(testPartyToParticipant(testCustodyPartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, custodyKeys))), PositiveInt.tryCreate(2)),
+      EffectiveTopologyMapping(testPartyToParticipant(testGuardianGovernancePartyId, 2, threeConfirmingHosts, Some(testSigningKeys(2, newRotationKeys))),
+        PositiveInt.tryCreate(3))))
+checkTableCase("RK1-removed-key-in-no-key-set", None) {
+  checkRemovedOwnerKeyIsInNoKeySet(topologyAfterRotation(newRotationKeys, newRotationKeys), removedRotationKey, newRotationOwnerNamespaces)
+}
+checkTableCase("RK2-removed-key-still-signs-for-a-party", Some("nttCustody signing keys hold the removed owner key")) {
+  checkRemovedOwnerKeyIsInNoKeySet(topologyAfterRotation(ownerKeys, newRotationKeys), removedRotationKey, newRotationOwnerNamespaces)
+}
+checkTableCase("RK3-namespace-owners-not-the-new-set", Some("are not the new owner set")) {
+  checkRemovedOwnerKeyIsInNoKeySet(topologyAfterRotation(newRotationKeys, ownerKeys), removedRotationKey, newRotationOwnerNamespaces)
+}
+checkTableCase("RK4-namespace-without-parties", Some("agreed topology has no PartyToParticipant")) {
+  checkRemovedOwnerKeyIsInNoKeySet(topologyAfterRotation(newRotationKeys, newRotationKeys).copy(partyMappings = Seq.empty), removedRotationKey,
+    newRotationOwnerNamespaces)
+}
+finishTable("topology-cross-checks")

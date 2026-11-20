@@ -6,7 +6,9 @@ FROM --platform=linux/amd64 node:22.16-bullseye-slim@sha256:550b434f7edc3a187586
 # npm wants to clone random Git repositories - lovely.
 # RUN apk add git python make build-base
 # RUN apk update && apk add bash
-RUN apt-get update && apt-get -y install \
+# Debian 11 (bullseye) is EOL; its packages moved from deb.debian.org to archive.debian.org.
+RUN sed -i 's|deb.debian.org|archive.debian.org|g' /etc/apt/sources.list && \
+  apt-get update && apt-get -y install \
   git python make curl netcat vim
 
 # keep in sync with sdk/js/package.json

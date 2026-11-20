@@ -27,6 +27,7 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 )
 
 type mockEVMConnector struct {
@@ -521,7 +522,7 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 
 	t.Run("Solana spec layout", func(t *testing.T) {
 		req := &nodev1.CoreBridgeTransferFees{
-			ChainId:   uint32(vaa.ChainIDSolana),
+			ChainId:   proto.Uint32(uint32(vaa.ChainIDSolana)),
 			Amount:    "10000",
 			Recipient: recipientHex,
 		}
@@ -534,7 +535,7 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 
 	t.Run("Injective cosmwasm reversed layout", func(t *testing.T) {
 		req := &nodev1.CoreBridgeTransferFees{
-			ChainId:   uint32(vaa.ChainIDInjective),
+			ChainId:   proto.Uint32(uint32(vaa.ChainIDInjective)),
 			Amount:    "10000",
 			Recipient: recipientHex,
 		}
@@ -544,13 +545,34 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 		expected := moduleAndAction + "0013" + recipientHex + expectedAmount
 		assert.Equal(t, expected, common.Bytes2Hex(v.Payload))
 	})
+
+	const zeroAmount = "0000000000000000000000000000000000000000000000000000000000000000"
+	acceptedCases := []struct {
+		name            string
+		targetChain     uint32
+		amount          string
+		expectedPayload string
+	}{
+		{"chain 0 spec layout", 0, "10000", moduleAndAction + "0000" + expectedAmount + recipientHex},
+		{"amount 0 Solana", uint32(vaa.ChainIDSolana), "0", moduleAndAction + "0001" + zeroAmount + recipientHex},
+		{"amount 0 Canton", uint32(vaa.ChainIDCanton), "0", moduleAndAction + "004b" + zeroAmount + recipientHex},
+		{"chain 0 and amount 0", 0, "0", moduleAndAction + "0000" + zeroAmount + recipientHex},
+	}
+	for _, testCase := range acceptedCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := &nodev1.CoreBridgeTransferFees{ChainId: proto.Uint32(testCase.targetChain), Amount: testCase.amount, Recipient: recipientHex}
+			v, err := coreBridgeTransferFeesToVaa(req, time.Now(), 4, 7, 7)
+			require.NoError(t, err)
+			assert.Equal(t, testCase.expectedPayload, common.Bytes2Hex(v.Payload))
+		})
+	}
 }
 
 func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 	const recipientHex = "00000000000000000000000000000000000000000000000000000000deadbeef"
 	base := func() *nodev1.CoreBridgeTransferFees {
 		return &nodev1.CoreBridgeTransferFees{
-			ChainId:   uint32(vaa.ChainIDSolana),
+			ChainId:   proto.Uint32(uint32(vaa.ChainIDSolana)),
 			Amount:    "1",
 			Recipient: recipientHex,
 		}
@@ -560,13 +582,14 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 		mutate  func(r *nodev1.CoreBridgeTransferFees)
 		errText string
 	}{
-		{"UnknownChain", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = 0xffff }, "convert chain id"},
+		{"UnknownChain", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = proto.Uint32(0xffff) }, "convert chain id"},
+		{"AbsentChainId", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = nil }, "chain_id is required"},
 		{"InvalidAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "not-a-number" }, "invalid amount"},
 		{"NegativeAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "-1" }, "amount cannot be negative"},
 		{"AmountOverflow", func(r *nodev1.CoreBridgeTransferFees) {
 			r.Amount = "115792089237316195423570985008687907853269984665640564039457584007913129639936" // 2^256
 		}, "amount overflow"},
-		{"ZeroAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "0" }, "amount must be non-zero"},
+		{"EmptyAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "" }, "invalid amount"},
 		{"BadRecipientHex", func(r *nodev1.CoreBridgeTransferFees) { r.Recipient = "zz" }, "invalid recipient"},
 		{"ShortRecipient", func(r *nodev1.CoreBridgeTransferFees) { r.Recipient = "01" }, "invalid recipient"},
 		{"LongRecipient", func(r *nodev1.CoreBridgeTransferFees) {
@@ -575,6 +598,14 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 		{"ZeroRecipient", func(r *nodev1.CoreBridgeTransferFees) {
 			r.Recipient = "0000000000000000000000000000000000000000000000000000000000000000"
 		}, "recipient must be non-zero"},
+		{"ZeroRecipientOnChainZero", func(r *nodev1.CoreBridgeTransferFees) {
+			r.ChainId = proto.Uint32(0)
+			r.Recipient = "0000000000000000000000000000000000000000000000000000000000000000"
+		}, "recipient must be non-zero"},
+		{"NegativeAmountOnChainZero", func(r *nodev1.CoreBridgeTransferFees) {
+			r.ChainId = proto.Uint32(0)
+			r.Amount = "-1"
+		}, "amount cannot be negative"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -685,13 +716,39 @@ func TestGovMsgToVaa_DispatchesBridgeSetPauserAddresses(t *testing.T) {
 	assert.Equal(t, uint32(44), v.Nonce)
 }
 
+func TestGovMsgToVaa_CoreBridgeTransferFeesChainIdPresence(t *testing.T) {
+	const recipientLine = `recipient: "00000000000000000000000000000000000000000000000000000000deadbeef"`
+	cases := []struct {
+		name          string
+		chainIdLine   string
+		expectedError string
+	}{
+		{"absent chain_id", "", "chain_id is required"},
+		{"explicit chain_id 0", "chain_id: 0", ""},
+		{"explicit chain_id 1", "chain_id: 1", ""},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestText := "sequence: 1 nonce: 2 core_bridge_transfer_fees: { " + testCase.chainIdLine + ` amount: "0" ` + recipientLine + " }"
+			var message nodev1.GovernanceMessage
+			require.NoError(t, prototext.Unmarshal([]byte(requestText), &message))
+			_, err := GovMsgToVaa(&message, 4, time.Now())
+			if testCase.expectedError != "" {
+				require.ErrorContains(t, err, testCase.expectedError)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestGovMsgToVaa_DispatchesCoreBridgeTransferFees(t *testing.T) {
 	msg := &nodev1.GovernanceMessage{
 		Sequence: 11,
 		Nonce:    22,
 		Payload: &nodev1.GovernanceMessage_CoreBridgeTransferFees{
 			CoreBridgeTransferFees: &nodev1.CoreBridgeTransferFees{
-				ChainId:   uint32(vaa.ChainIDSolana),
+				ChainId:   proto.Uint32(uint32(vaa.ChainIDSolana)),
 				Amount:    "1",
 				Recipient: "00000000000000000000000000000000000000000000000000000000deadbeef",
 			},
