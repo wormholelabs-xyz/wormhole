@@ -44,7 +44,7 @@ emitter_registry_cid="$(current_emitter_registry)"
 replay_root_registry_cid="$(core_contract_id replayRootRegistry)"
 core_state_cid="$(core_contract_id coreState)"
 coin_factory_cid="$(ntt_contract coinFactory)"
-register_transaction="$(submit_interactive "ntt-register-burn-mint-$run_label" \
+register_transaction="$(submit_guardian_ceremony "ntt-register-burn-mint-$run_label" \
   "$(jq -n --arg admin "$admin_party" --arg gg "$GG_PARTY" '[$admin, $gg]')" \
   "$(exercise_command "$NTT_GOVERNANCE_TEMPLATE" "$governance_cid" RegisterManager "$(jq -n \
     --arg admin "$admin_party" --arg emitterRegistry "$emitter_registry_cid" --arg replayRootRegistry "$replay_root_registry_cid" \
@@ -56,9 +56,9 @@ register_transaction="$(submit_interactive "ntt-register-burn-mint-$run_label" \
       emitterFeeAllocation: null, claimFeeAllocation: null, feeAllocation: null}')")" \
   "$(jq -s 'add' <(admin_only_signers) <(gg_ceremony_signers_json))" \
   "$(json_array \
-    "$(operator_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
+    "$(gg_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -r ._2 <<<"$register_result")"
 init_message="$(jq -c ._5 <<<"$register_result")"
@@ -83,8 +83,8 @@ set_peer_transaction="$(submit_interactive "ntt-burn-mint-set-peer-$run_label" "
       chainId: $chain, peer: {managerAddress: $manager, transceiverAddress: $transceiver, decimals: "8"},
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $admin, feeAllocation: null}')")" \
   "$(admin_only_signers)" \
-  "$(json_array "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
+  "$(json_array "$(gg_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 set_peer_result="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer)"
 manager_cid="$(jq -r ._1 <<<"$set_peer_result")"
 echo "TransceiverRegistration message $(message_summary "$(jq -c ._2 <<<"$set_peer_result")")"
@@ -103,9 +103,9 @@ relayer_party="$(allocate_local_party sv "NttRelayer-$run_label")"
 # mint_disclosures <replay-node-cid>
 mint_disclosures() {
   json_array \
-    "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
-    "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$1")" \
+    "$(gg_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
+    "$(gg_disclosure :Wormhole.Core.Replay:ReplayNode "$1")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Ntt.Deposit:DepositPreapproval "$preapproval_cid")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")"
 }
@@ -178,9 +178,9 @@ burn_transaction="$(submit_local app-user "ntt-burn-$run_label" "$user_only" \
       recipientChain: $chain, recipientAddress: $recipient, rawAmount: $rawAmount, nonce: $nonce, consistencyLevel: "0",
       inputHoldingCids: $inputs, feeAllocation: null, extraArgs: $extraArgs}')")" \
   "$(json_array \
-    "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
+    "$(gg_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
     "$(disclosed_contract "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Token.CIP0056.CoinFactory:CoinFactory "$coin_factory_cid")")")"
 burn_message="$(exercise_result "$burn_transaction" :Wormhole.Ntt.Manager:NttManager Transfer)"
 echo "outbound NTT message $(message_summary "$burn_message") update $(jq -r .updateId <<<"$burn_transaction")"

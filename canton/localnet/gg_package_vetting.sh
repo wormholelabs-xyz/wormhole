@@ -79,12 +79,10 @@ await_vetting_state() {
   exit 1
 }
 
+# create_vetting_probe <command-id> <template-id> <create-arguments-json>: LabsOperator, a local party of app-provider,
+# creates the probe there. Prints the transaction JSON.
 create_vetting_probe() {
-  local command_id="$1" template_id="$2" create_arguments="$3"
-  submit_interactive "$command_id" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
-    "$(jq -n --arg templateId "$template_id" --argjson createArguments "$create_arguments" \
-      '{CreateCommand: {templateId: $templateId, createArguments: $createArguments}}')" \
-    "$(operator_signers_json)"
+  submit_local app-provider "$1" "$(jq -cn --arg party "$LABS_OPERATOR_PARTY" '[$party]')" "$(create_command "$2" "$3")"
 }
 
 # created_template_id <transaction-json>: template id of the one created contract of the transaction.
@@ -125,8 +123,9 @@ readonly PROBE_TEMPLATE_SUFFIX=":VettingProbe:VettingProbe"
 echo "  1.0.0 package id $v1_package_id"
 echo "  2.0.0 package id $v2_package_id"
 
-v2_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7", revision: "2"}')"
-v1_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7"}')"
+# The probe field `operator` is its signatory: LabsOperator.
+v2_arguments="$(jq -n --arg op "$LABS_OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7", revision: "2"}')"
+v1_arguments="$(jq -n --arg op "$LABS_OPERATOR_PARTY" --arg gg "$GG_PARTY" '{operator: $op, guardianGovernance: $gg, label: "a7"}')"
 
 # Canton abbreviates ids in the error text: "Participant PAR::<name>::<first 12 fingerprint chars>... has not vetted <first 12 package id chars>...".
 # read_participant_id returns "<name>::<fingerprint>" without the PAR:: type prefix.
