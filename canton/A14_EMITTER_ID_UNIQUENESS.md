@@ -411,11 +411,8 @@ Each Ledger API call has a time limit (`CURL_MAX_TIME_SECONDS`, default 60).
 
 The script reads the vetted packages of its participant with the name prefix `wormhole-core`.
 It reads each update from a begin offset to the ledger end, with the ledger effects shape.
-It records each `Emitter` and `EmitterRegistry` create of the (operator, `guardianGovernance`) pair, archived or active, whose package name is exactly `wormhole-core`.
+It records each `Emitter` and `EmitterRegistry` create of `guardianGovernance`, archived or active, whose package name is exactly `wormhole-core`.
 It also reads the active contracts at the same ledger end, with the same filter.
-
-> **NOTE:** The script still takes an `<operator-party>` argument and filters on the 0.8.x `operator` field.
-> A 0.9.0 contract has no `operator` field. Update the script before a 0.9.0 scan.
 
 Use begin offset 0 to read from genesis.
 A pruned participant needs a begin offset and the `historyMaxEmitterId` of an earlier scan that ended at that offset.
@@ -426,11 +423,11 @@ The `nextId` of a history registry has no effect on `firstId`. The summary repor
 The script fails if one of these conditions occurs:
 
 - The participant vets a `wormhole-core` package other than `EXPECTED_CORE_PACKAGE_ID`, or does not vet `EXPECTED_CORE_PACKAGE_ID`.
-- Two active `Emitter` contracts have the same (operator, owner, emitterId).
+- Two active `Emitter` contracts have the same (`guardianGovernance`, owner, emitterId).
 - An `emitterId` is not a canonical decimal integer in 0 to 2^53 - 1, or a registry `nextId` is not one in 0 to 2^53.
 - An active `Emitter` is not in the update history from genesis.
 - An active `Emitter` has an id at or above `firstId`.
-- The number of active registries is not `EXPECT_ACTIVE_REGISTRIES` (default 0).
+- The number of active registries is not `EXPECT_ACTIVE_REGISTRIES` (default 1, minimum 1). Thus the scan fails when it finds no registry.
 - An active registry has `nextId` other than `firstId`.
 
 ### NTT
