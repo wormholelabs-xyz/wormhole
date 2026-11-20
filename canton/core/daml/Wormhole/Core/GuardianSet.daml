@@ -117,8 +117,8 @@ attachGuardianPublicKeysToSet guardianSetIndex publicKeys gs = do
   let keyCount = length publicKeys
       addresses = guardianAddressesOf gs
   assertMsg "attach: no public keys" (keyCount >= 1)
-  assertMsg "attach: duplicate public key" (Set.size (Set.fromList publicKeys) == keyCount)
   assertMsg "attach: more public keys than guardians" (keyCount <= numGuardians gs)
+  assertMsg "attach: duplicate public key" (Set.size (Set.fromList publicKeys) == keyCount)
   positionedKeys <- forA publicKeys \publicKey ->
     case elemIndex (guardianAddressFromPublicKey publicKey) addresses of
       None -> Left ("attach: public key " <> hexTextOf publicKey <> " derives no guardian address of set " <> show guardianSetIndex)

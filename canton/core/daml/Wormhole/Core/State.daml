@@ -297,6 +297,8 @@ template CoreState
         guardianPublicKeys     : [GuardianPublicKey]
       controller submitter
       do
+        -- Bound the list before any per-key work.
+        assertMsg "attach: more than 255 public keys" (length guardianPublicKeys <= maxGuardiansPerSet)
         assertMsg "guardianPublicKeys holds a malformed GuardianPublicKey"
           (all checkHexValueIsWellFormed guardianPublicKeys)
         now <- getTime
