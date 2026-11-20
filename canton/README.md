@@ -1115,10 +1115,10 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
 0.10.0 has no `upgrades:` line and no baseline. It changes the types of template fields, so it is not an SCU upgrade of 0.9.0.
-0.10.0 starts a new `wormhole-core` line. Its main package id is `aaea56b9c479057d5976b706716ec35f0cc328061ca40402e2041e8a7dd57eb8` (Daml SDK 3.7.3).
+0.10.0 starts a new `wormhole-core` line. Its main package id is `bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb` (Daml SDK 3.7.3).
 0.10.0 replaces the `Text` byte aliases with the constrained types of §4.8. A 0.9.0 contract cannot run under 0.10.0.
 No participant outside LocalNet vetted 0.9.0. Thus 0.10.0 starts from a fresh genesis.
-The SDK 3.7.3 0.9.0 build (`6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180`) is replaced. Do not deploy it.
+The SDK 3.7.3 0.9.0 build (`a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034`) is replaced. Do not deploy it.
 
 0.9.0 has no `upgrades:` line and no baseline. It removes template fields, so it is not an SCU upgrade of 0.8.x.
 0.9.0 starts a new `wormhole-core` line. Its main package id is `a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034` (Daml SDK 3.7.3).
