@@ -26,18 +26,18 @@ import Test.TestRedTeamCore (checkAttackFailedWith)
 -- Fixtures
 ----------------------------------------------------------------------
 
-timestampOf : Bytes -> Int
+timestampOf : EncodedVaa -> Int
 timestampOf encodedVAA = (parseVAA encodedVAA).timestamp
 
-digestOfVAA : Bytes -> Bytes32
+digestOfVAA : EncodedVaa -> VaaDigest
 digestOfVAA encodedVAA = (parseVAA encodedVAA).hash
 
 -- | @position + 1@ as 32 big-endian bytes; distinct from each fixture VAA digest.
-syntheticDigest : Int -> Bytes32
-syntheticDigest position = intToBytesN (position + 1) 32
+syntheticDigest : Int -> VaaDigest
+syntheticDigest position = parseHexBytesAsOrAbort (intToBytesN (position + 1) 32)
 
 -- | @digestCount@ synthetic digests; entry @position@ has timestamp @firstTimestampSeconds + position * timestampStepSeconds@.
-syntheticConsumedGovernance : Int -> Int -> Int -> Map Bytes32 Int
+syntheticConsumedGovernance : Int -> Int -> Int -> Map VaaDigest Int
 syntheticConsumedGovernance digestCount firstTimestampSeconds timestampStepSeconds =
   Map.fromList
     [ (syntheticDigest position, firstTimestampSeconds + position * timestampStepSeconds)
@@ -62,7 +62,7 @@ createCoreState coreState =
   submit (actAs coreState.guardianGovernance <> actAs coreState.feeRecipient) do createCmd coreState
 
 -- | Submits as guardianGovernance with the devnet key hint; each fixture is signed by devnet key 0.
-trySubmitGovernanceVAA : Party -> ContractId CoreState -> Bytes -> Script (Either SubmitError (ContractId CoreState))
+trySubmitGovernanceVAA : Party -> ContractId CoreState -> EncodedVaa -> Script (Either SubmitError (ContractId CoreState))
 trySubmitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
   trySubmit guardianGovernance do
     exerciseCmd coreStateCid SubmitGovernanceVAA with
@@ -70,7 +70,7 @@ trySubmitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
       encodedVAA
       pubKeys = [(0, devnetGuardianPubKey)]
 
-submitGovernanceVAA : Party -> ContractId CoreState -> Bytes -> Script (ContractId CoreState)
+submitGovernanceVAA : Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
 submitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
   submit guardianGovernance do
     exerciseCmd coreStateCid SubmitGovernanceVAA with
@@ -115,7 +115,7 @@ testCoreStatePreconditionBoundsGovernanceCollections = do
   now <- getTime
   let withDigests digestCount state =
         state with consumedGovernance = syntheticConsumedGovernance digestCount syntheticBaseTimestampSeconds 1
-      withFloor floor state = state with evictedGovernanceMaxTimestampSeconds = floor
+      withFloor floorSeconds state = state with evictedGovernanceMaxTimestampSeconds = floorSeconds
       withOneDigestAt timestampSeconds state =
         state with consumedGovernance = Map.fromList [(syntheticDigest 0, timestampSeconds)]
       withPreviousSets previousCount state =
@@ -238,15 +238,15 @@ testGovernanceTimestampFloorBoundary = do
         , ("floor at timestamp", Some transferTimestamp, False)
         , ("floor at timestamp + 1", Some (transferTimestamp + 1), False)
         ]
-  forA_ (numberCases cases) \(caseNumber, (caseName, floor, isAccepted)) -> do
+  forA_ (numberCases cases) \(caseNumber, (caseName, floorSeconds, isAccepted)) -> do
     genesisState <- genesisStateWithLabel ("Floor" <> show caseNumber) 0
     let gg = genesisState.guardianGovernance
-    coreStateCid <- createCoreState genesisState with evictedGovernanceMaxTimestampSeconds = floor
+    coreStateCid <- createCoreState genesisState with evictedGovernanceMaxTimestampSeconds = floorSeconds
     result <- trySubmitGovernanceVAA gg coreStateCid govTransferFeesVAA
     case (isAccepted, result) of
       (True, Right successorCid) -> do
         successor <- readCoreState gg successorCid
-        successor.evictedGovernanceMaxTimestampSeconds === floor
+        successor.evictedGovernanceMaxTimestampSeconds === floorSeconds
         Map.keys successor.consumedGovernance === [digestOfVAA govTransferFeesVAA]
       (True, Left submitError) -> abort (caseName <> ": rejected: " <> show submitError)
       (False, _) -> checkAttackFailedWith caseName evictedFloorErrorText result
@@ -282,7 +282,7 @@ testGuardianSetUpgradeReplayRejectedByCurrentIndex = do
 data GuardianSetPruneCase = GuardianSetPruneCase with
     caseName             : Text
     previousSets         : [(Int, RelTime)]  -- (index, expiry offset from now)
-    encodedVAA           : Bytes
+    encodedVAA           : EncodedVaa
     expectedStoredIndices : [Int]
 
 -- | From genesis 7: each governance transition drops expired sets; an upgrade beyond capacity drops the lowest index.
@@ -346,10 +346,13 @@ testCheckGovernanceRecordsDigest = do
   let digest = syntheticDigest 100
       otherDigest = syntheticDigest 101
       timestampSeconds = syntheticBaseTimestampSeconds + 50
-      withRecord consumed floor = before with
+      withRecord consumed floorSeconds = before with
         consumedGovernance = Map.fromList consumed
-        evictedGovernanceMaxTimestampSeconds = floor
+        evictedGovernanceMaxTimestampSeconds = floorSeconds
       beforeWithFloor = withRecord [] (Some 10)
+      overCapacity = withRecord
+        ((digest, timestampSeconds) :: Map.toList (syntheticConsumedGovernance maxRetainedGovernanceDigests syntheticBaseTimestampSeconds 1))
+        None
       cases =
         [ ("one new digest", before, withRecord [(digest, timestampSeconds)] None, None)
         , ("no new digest", before, withRecord [] None,
@@ -367,10 +370,7 @@ testCheckGovernanceRecordsDigest = do
             Some "governance: evicted governance timestamp floor decreased")
         , ("floor removed", beforeWithFloor, withRecord [(digest, timestampSeconds)] None,
             Some "governance: evicted governance timestamp floor decreased")
-        , ("over capacity", before,
-            before with consumedGovernance = Map.insert digest timestampSeconds
-              (syntheticConsumedGovernance maxRetainedGovernanceDigests syntheticBaseTimestampSeconds 1),
-            Some "governance: consumed digest map exceeds its capacity")
+        , ("over capacity", before, overCapacity, Some "governance: consumed digest map exceeds its capacity")
         ]
   forA_ cases \(caseName, beforeState, afterState, expectedError) ->
     checkPostconditionOutcome caseName expectedError
