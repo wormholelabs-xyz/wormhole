@@ -60,6 +60,9 @@ ENV PATH="/root/.dpm/bin:${PATH}"
 
 FROM dpm-sdk AS build
 ARG DAML_SDK_VERSION
+# jq: canton/test/forged_byte_values_test.sh builds its JSON input with it.
+RUN apt-get update && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /canton-build
 COPY multi-package.yaml ./
 # Vendored CIP-0056 token-standard interface DARs (core fees data-depend on
