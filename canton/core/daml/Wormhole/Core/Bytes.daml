@@ -315,11 +315,13 @@ highBitSet (HexBytes hexText) = case T.toCodePoints (T.take 1 hexText) of
   [] -> False
 
 -- | Wraps the @keccak256@ builtin and asserts its 32-byte lowercase result.
+-- The builtin rejects empty input, so this asserts at least one byte.
 keccak256Bytes : HexBytes -> HexBytes
-keccak256Bytes (HexBytes hexText) =
-  case parseExactByteWidthHex "keccak256 result" 32 (keccak256 hexText) of
-    Right digestHex -> HexBytes digestHex
-    Left parseError -> error parseError
+keccak256Bytes (HexBytes hexText)
+  | T.length hexText == 0 = error "keccak256Bytes: empty input"
+  | otherwise = case parseExactByteWidthHex "keccak256 result" 32 (keccak256 hexText) of
+      Right digestHex -> HexBytes digestHex
+      Left parseError -> error parseError
 
 -- | The UTF-8 encoding of @text@ (@toHex@ builtin).
 utf8Bytes : Text -> HexBytes

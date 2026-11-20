@@ -43,7 +43,7 @@ template RedeemReceipt
     manager  : Party
     redeemer : Party
     sequence : Int
-    payload  : Bytes
+    payload  : MessagePayload
   where
     signatory manager, redeemer
 
@@ -54,7 +54,7 @@ template ExampleIntegrator
     namespace          : Text     -- replay-trie namespace; the scope is (manager, namespace)
     users              : [Party]  -- redeemers; observers so they can exercise Redeem
     peerChain          : Int      -- registered source-chain peer of this app
-    peerAddress        : Bytes32
+    peerAddress        : EmitterAddress
   where
     signatory manager
     observer users
@@ -70,8 +70,8 @@ template ExampleIntegrator
         redeemer      : Party
         coreStateCid  : ContractId CoreState
         replayNodeCid : ContractId ReplayNode
-        encodedVAA    : Bytes
-        pubKeys       : [(Int, Bytes)]
+        encodedVAA    : EncodedVaa
+        pubKeys       : [(Int, GuardianPublicKey)]
       controller redeemer
       do
         -- SECURITY: cids arrive from an untrusted submitter, so authenticate the
@@ -89,7 +89,7 @@ template ExampleIntegrator
         -- The integrator's own acceptance check — never skip this.
         assertMsg "not from the registered peer"
           (vaa.emitterChain == peerChain
-            && normalizeHex vaa.emitterAddress == normalizeHex peerAddress)
+            && vaa.emitterAddress == peerAddress)
         create RedeemReceipt with manager, redeemer, sequence = vaa.sequence, payload = vaa.payload
 
 -- | Shared fixture: a bootstrapped bridge, one integrator app with its replay
@@ -130,7 +130,7 @@ setupIntegrator = do
   csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
   pure IntegratorFixture with guardianGovernance, csId, manager, users = [alice, bob], intCid, csDisc
 
-devnetPubKeys : [(Int, Bytes)]
+devnetPubKeys : [(Int, GuardianPublicKey)]
 devnetPubKeys = [(0, devnetGuardianPubKey)]
 
 -- | End-to-end user-submitted redemption: alice redeems with her own authority
@@ -225,10 +225,10 @@ data CoreStatePinCase = CoreStatePinCase with
     caseName                   : Text
     coreStateCid               : ContractId CoreState
     coreStateDisclosure        : Disclosure
-    encodedVAA                 : Bytes
-    pubKeys                    : [(Int, Bytes)]
+    encodedVAA                 : EncodedVaa
+    pubKeys                    : [(Int, GuardianPublicKey)]
     peerChain                  : Int
-    peerAddress                : Bytes32
+    peerAddress                : EmitterAddress
     expectedGuardianGovernance : Party
     expectedRejection          : Optional Text  -- None: Redeem must succeed
 
@@ -264,7 +264,7 @@ testIntegratorCoreStatePin = do
 
   let set0Keys = [(0, devnetGuardianPubKey)]
       set1Keys = [(0, devnetGuardianSet1PubKey)]
-      set1PeerAddress = "000000000000000000000000000000000000000000000000000000000000002a"
+      set1PeerAddress = parseHexTextOrAbort "000000000000000000000000000000000000000000000000000000000000002a"
       pinCases =
         [ CoreStatePinCase "real CoreState accepted" realCsId realCsDisc
             govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract

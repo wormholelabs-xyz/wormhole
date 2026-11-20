@@ -15,6 +15,7 @@ import DA.Action (void)
 import Splice.Api.Token.MetadataV1
 import Splice.Api.Token.HoldingV1
 import Splice.Api.Token.AllocationV1
+import Wormhole.Core.Bytes (MessagePayload)
 import Wormhole.Core.Fees (FeeChargeParties, chargeFee, emptyExtraArgs)
 import Wormhole.Core.State (CoreState, Emitter, PublishMessage(..))
 
@@ -115,7 +116,7 @@ data FeeRegistryAttack
   | PublishOnEmitter with
       targetEmitterCid : ContractId Emitter
       coreStateCid     : ContractId CoreState
-      forgedPayload    : Text
+      forgedPayload    : MessagePayload
   deriving (Eq, Show)
 
 -- | An admin-signed allocation that passes every 'chargeFee' check. Its execute

@@ -47,7 +47,7 @@ template TransientEmitterPublisher
         registryGuardianGovernance : Party
         coreStateCid               : ContractId CoreState
         nonce                      : Int
-        payload                    : Bytes
+        payload                    : MessagePayload
       controller owner
       do
         (_, registeredEmitterCid) <- exercise registryCid RegisterEmitter with
@@ -61,26 +61,26 @@ template TransientEmitterPublisher
 firstDoublePublishNonce : Int
 firstDoublePublishNonce = 61
 
-firstDoublePublishPayload : Bytes
-firstDoublePublishPayload = "6161"
+firstDoublePublishPayload : MessagePayload
+firstDoublePublishPayload = parseHexTextOrAbort "6161"
 
 secondDoublePublishNonce : Int
 secondDoublePublishNonce = 62
 
-secondDoublePublishPayload : Bytes
-secondDoublePublishPayload = "6262"
+secondDoublePublishPayload : MessagePayload
+secondDoublePublishPayload = parseHexTextOrAbort "6262"
 
 registerAndPublishNonce : Int
 registerAndPublishNonce = 63
 
-registerAndPublishPayload : Bytes
-registerAndPublishPayload = "6363"
+registerAndPublishPayload : MessagePayload
+registerAndPublishPayload = parseHexTextOrAbort "6363"
 
 rogueRegisterAndPublishNonce : Int
 rogueRegisterAndPublishNonce = 64
 
-rogueRegisterAndPublishPayload : Bytes
-rogueRegisterAndPublishPayload = "6464"
+rogueRegisterAndPublishPayload : MessagePayload
+rogueRegisterAndPublishPayload = parseHexTextOrAbort "6464"
 
 data TransientEmitterPublishes = TransientEmitterPublishes with
     owner : Party

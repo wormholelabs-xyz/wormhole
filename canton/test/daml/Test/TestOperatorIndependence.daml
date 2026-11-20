@@ -76,13 +76,13 @@ checkFailsOnPrecondition caseName submitResult = case submitResult of
 discardResult : Script (Either SubmitError a) -> Script (Either SubmitError ())
 discardResult = fmap (fmap (const ()))
 
-relayGovernance : CoreBridge -> Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script (ContractId CoreState)
+relayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script (ContractId CoreState)
 relayGovernance bridge relayer coreStateCid encodedVAA pubKeys = do
   coreStateDisclosure <- discloseAsGuardianGovernance bridge coreStateCid
   submit (actAs relayer <> disclose coreStateDisclosure) do
     exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA, pubKeys
 
-tryRelayGovernance : CoreBridge -> Party -> ContractId CoreState -> Bytes -> [(Int, Bytes)] -> Script (Either SubmitError ())
+tryRelayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script (Either SubmitError ())
 tryRelayGovernance bridge relayer coreStateCid encodedVAA pubKeys = do
   coreStateDisclosure <- discloseAsGuardianGovernance bridge coreStateCid
   discardResult $ trySubmit (actAs relayer <> disclose coreStateDisclosure) do
@@ -108,8 +108,8 @@ claimReplayRootAs bridge consumer namespace splitThreshold = do
       expectedGuardianGovernance = bridge.guardianGovernance
 
 -- | Amount and recipient of 'govTransferFeesVAA'.
-transferFeesRecipient : Bytes32
-transferFeesRecipient = mconcat (replicate 32 "d4")
+transferFeesRecipient : UniversalAddress
+transferFeesRecipient = parseHexTextOrAbort (mconcat (replicate 32 "d4"))
 
 transferFeesAmount : Int
 transferFeesAmount = 9
@@ -140,10 +140,10 @@ testCoreTemplateSignatoriesAndObservers = do
   Some emitter <- queryContractId owner emitterCid
   rootCid <- claimReplayRootAs bridge consumer "stakeholders" 1
   Some root <- queryContractId consumer rootCid
-  firstNodeCid <- submit consumer do exerciseCmd rootCid ConsumeDigest with digest = mconcat (replicate 64 "1")
-  childCid <- submit consumer do exerciseCmd firstNodeCid ConsumeDigest with digest = mconcat (replicate 64 "2")
+  firstNodeCid <- submit consumer do exerciseCmd rootCid ConsumeDigest with digest = parseHexTextOrAbort (mconcat (replicate 64 "1"))
+  childCid <- submit consumer do exerciseCmd firstNodeCid ConsumeDigest with digest = parseHexTextOrAbort (mconcat (replicate 64 "2"))
   Some child <- queryContractId consumer childCid
-  T.length child.prefix === 1
+  nibbleCountOfPrefix child.prefix === 1
   _ <- relayGovernance bridge relayer bridge.coreStateCid govTransferFeesVAA [(0, devnetGuardianPubKey)]
   [(_, feeWithdrawal)] <- query @FeeWithdrawalAuthorization gg
   let cases =
@@ -193,7 +193,7 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
   (emitterAfterFirstPublishCid, firstMessage) <- submit (actAs requester <> disclose coreStateDisclosure) do
     exerciseCmd emitterCid PublishMessage with
-      nonce = 1, payload = "aa", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = bridge.coreStateCid, payer = requester, feeAllocation = None
   firstMessage.registrar === gg
   firstMessage.sequence === 0
@@ -212,7 +212,7 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
     exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys, consumer, namespace = "caller-only", replayNodeCid = rootCid
   Some consumedNode <- queryContractId consumer consumedNodeCid
-  assertMsg "digest not recorded" (Set.member consumedVAA.hash consumedNode.consumed)
+  assertMsg "digest not recorded" (Set.member (parseHexTextOrAbort (hexTextOf consumedVAA.hash)) consumedNode.consumed)
 
   -- ParseAndVerifyVAA: verifier only.
   verifiedVAA <- submit (actAs verifier <> disclose coreStateDisclosure) do
@@ -243,7 +243,7 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   setUpgradeCoreStateDisclosure <- discloseAsGuardianGovernance bridge setUpgradeCoreStateCid
   (_, paidMessage) <- submit (actAs requester <> disclose setUpgradeCoreStateDisclosure) do
     exerciseCmd emitterAfterFirstPublishCid PublishMessage with
-      nonce = 2, payload = "bb", consistencyLevel = 0
+      nonce = 2, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
       coreStateCid = setUpgradeCoreStateCid, payer = requester, feeAllocation = Some feePayment
   paidMessage.sequence === 1
   feeCustodyBalance <- mockBalance mockAdmin bridge.feeCustody feeInstrument
@@ -303,7 +303,7 @@ testPartyWithNoRoleHasNoCorePower = do
                 emitterAddress = emitterAddressFor gg partyWithNoRole 0, sequence = 0)
         , ("create ReplayNode for Alice", discardResult $ trySubmit asPartyWithNoRole do
               createCmd ReplayNode with
-                consumer = alice, guardianGovernance = gg, namespace = "stolen", prefix = ""
+                consumer = alice, guardianGovernance = gg, namespace = "stolen", prefix = parseHexTextOrAbort ""
                 splitThreshold = defaultSplitThreshold, consumed = Set.empty)
         , ("archive CoreState", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.coreStateCid)
         , ("archive EmitterRegistry", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.emitterRegistryCid)
@@ -333,8 +333,8 @@ testPartyWithNoRoleHasNoCorePower = do
 data InvalidGovernanceCase = InvalidGovernanceCase with
     caseName      : Text
     prepare       : CoreBridge -> Party -> Script (ContractId CoreState)
-    encodedVAA    : Bytes
-    pubKeys       : [(Int, Bytes)]
+    encodedVAA    : EncodedVaa
+    pubKeys       : [(Int, GuardianPublicKey)]
     submission    : SubmissionShape
     expectedText  : Text
 
@@ -398,8 +398,8 @@ testGovernanceConsumedDigestCheck : Script ()
 testGovernanceConsumedDigestCheck = do
   bridge <- setupCoreBridge "ConsumedDigest" None
   Some before <- queryContractId bridge.guardianGovernance bridge.coreStateCid
-  let digest = mconcat (replicate 32 "ab")
-      otherDigest = mconcat (replicate 32 "cd")
+  let digest = parseHexTextOrAbort (mconcat (replicate 32 "ab"))
+      otherDigest = parseHexTextOrAbort (mconcat (replicate 32 "cd"))
       withConsumed digests = before with consumedGovernance = Set.fromList digests
       cases =
         [ ("one new digest", withConsumed [digest], None)
@@ -426,7 +426,7 @@ testGovernanceGenesisFieldChecksRejectEachChange = do
         [ ("guardianGovernance", (before with guardianGovernance = stranger), Some "governance: guardianGovernance changed")
         , ("chainId", (before with chainId = 2), Some "governance: chainId changed")
         , ("governanceChainId", (before with governanceChainId = 2), Some "governance: governanceChainId changed")
-        , ("governanceContract", (before with governanceContract = mconcat (replicate 32 "05")), Some "governance: governanceContract changed")
+        , ("governanceContract", (before with governanceContract = parseHexTextOrAbort (mconcat (replicate 32 "05"))), Some "governance: governanceContract changed")
         , ("feeInstrument", (before with feeInstrument = (InstrumentId with admin = stranger, id = "OTHER")), Some "governance: feeInstrument changed")
         , ("feeRecipient", (before with feeRecipient = stranger), Some "governance: feeRecipient changed")
         , ("no change", (before with messageFee = 5), None)
@@ -480,13 +480,13 @@ testShadowAnchorsAreRejected = do
   rogueReplayRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueReplayRegistryCid
   rogueNodeCid <- submit (actAs consumer <> actAs rogueGovernance) do
     createCmd ReplayNode with
-      consumer, guardianGovernance = rogueGovernance, namespace = "shadow", prefix = ""
+      consumer, guardianGovernance = rogueGovernance, namespace = "shadow", prefix = parseHexTextOrAbort ""
       splitThreshold = defaultSplitThreshold, consumed = Set.empty
   coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
 
   publishResult <- discardResult $ trySubmit (actAs owner <> disclose shadowCoreStateDisclosure) do
     exerciseCmd emitterCid PublishMessage with
-      nonce = 0, payload = "aa", consistencyLevel = 0
+      nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = shadowCoreStateCid, payer = owner, feeAllocation = None
   checkAttackFailedWith "PublishMessage on a shadow CoreState" "core state guardianGovernance mismatch" publishResult
   registrationResult <- discardResult $ trySubmit (actAs owner <> disclose paidRegistryDisclosure <> disclose shadowCoreStateDisclosure) do
@@ -529,7 +529,7 @@ testGuardianGovernanceIsNeverAFeeAllocationController = do
   freeCoreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
   (ggEmitterAfterFreePublishCid, freeMessage) <- submit (actAs gg <> disclose freeCoreStateDisclosure) do
     exerciseCmd ggEmitterCid PublishMessage with
-      nonce = 0, payload = "aa", consistencyLevel = 0
+      nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = bridge.coreStateCid, payer = gg, feeAllocation = None
   freeMessage.sequence === 0
   paidCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA [(0, devnetGuardianPubKey)]
@@ -537,7 +537,7 @@ testGuardianGovernanceIsNeverAFeeAllocationController = do
   ggPayment <- mintAndAllocate mockAdmin gg bridge.feeCustody feeInstrument (feeToDecimal 1000)
   paidResult <- discardResult $ trySubmit (actAs gg <> disclose paidCoreStateDisclosure) do
     exerciseCmd ggEmitterAfterFreePublishCid PublishMessage with
-      nonce = 1, payload = "bb", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
       coreStateCid = paidCoreStateCid, payer = gg, feeAllocation = Some ggPayment
   checkAttackFailedWith "gg pays a fee" "fee payer must not be guardianGovernance" paidResult
   Some coreState <- queryContractId gg paidCoreStateCid
@@ -558,7 +558,7 @@ testEmitterAddressUsesGuardianGovernanceAsRegistrar = do
     Some emitter <- queryContractId owner emitterCid
     emitter.emitterId === expectedEmitterId
     emitter.emitterAddress === emitterAddressFor gg owner expectedEmitterId
-    (_, message) <- publishVia gg bridge.coreStateCid owner emitterCid 0 "aa" 0
+    (_, message) <- publishVia gg bridge.coreStateCid owner emitterCid 0 (parseHexTextOrAbort "aa") 0
     message.registrar === gg
     message.owner === owner
     message.emitterId === expectedEmitterId
