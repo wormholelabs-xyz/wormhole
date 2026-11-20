@@ -41,6 +41,10 @@ tfTransferFeesAmountTwoPow63 = parseHexTextOrAbort "01000000000100f347f40a4938d5
 tfTransferFeesAmountMaxUint256 : EncodedVaa
 tfTransferFeesAmountMaxUint256 = parseHexTextOrAbort "010000000001007462692d473f815782e114758b1e54e1410ea9b3b93dc9bcf0985ee18b43f52c439165d1f2b3c6eb1f614f265b435b66eb3bd815fc7d1d55b265c869d5e128e8006afef8b2000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000ce0000000000000000000000000000000000000000000000000000000000436f726504004bffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
 
+-- | TransferFees(chain 75, amount 11, recipient 00 x 32), set 0, sequence 207.
+tfTransferFeesToZeroRecipient : EncodedVaa
+tfTransferFeesToZeroRecipient = parseHexTextOrAbort "010000000001001da96cea0975e77e51ba533221214ed809887bcc6e9ba652b8af059f21373e04275c0315026c3dba251aca748d4f43597b3c7c08e94d758b0c58f7e814196a9e016afef8b3000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000cf0000000000000000000000000000000000000000000000000000000000436f726504004b000000000000000000000000000000000000000000000000000000000000000b0000000000000000000000000000000000000000000000000000000000000000"
+
 -- | Body of 'govTransferFeesVAA', signed by devnet keys 0, 1 and 2 under set 1.
 tfTransferFeesResignedBySet1 : EncodedVaa
 tfTransferFeesResignedBySet1 = parseHexTextOrAbort "010000000103008ca16eeb9aded0174237096e3af6ddff01a6713ab459457c7e697478b8b8187a676c88afb69951e6fb4c7781792dfcf53e457dfe77dc11fdd4917a65249f892400019f710851857c18d6b578e13d92d60f62623d979fb24e73c0f8e6a191d6ad0d8254680c867aeeaacb769afa48e82716839eb7670b0b8524f4051d970800ac03c901025a5b1202aea12c161c4b22217336d669174236fb1f42290343f8dd0535d9d434631c79202fa1183354ca5ee6d8f9f39ec8f93e4e07f71cdf9afe9d85a931b87b016afef873000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000436f726504004b0000000000000000000000000000000000000000000000000000000000000009d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
@@ -57,6 +61,9 @@ govTransferFeesAmount = 9
 
 vectorRecipient : UniversalAddress
 vectorRecipient = parseHexTextOrAbort (mconcat (replicate 32 "d5"))
+
+zeroRecipient : UniversalAddress
+zeroRecipient = parseHexTextOrAbort (mconcat (replicate 32 "00"))
 
 vectorAmount : Int
 vectorAmount = 11
@@ -109,6 +116,7 @@ testTransferFeesCreatesOneWithdrawalAuthorization = do
         , AcceptedTransferFeesCase "chain 0" tfTransferFeesToAllChains vectorAmount vectorRecipient
         , AcceptedTransferFeesCase "amount 0" tfTransferFeesAmountZero 0 vectorRecipient
         , AcceptedTransferFeesCase "amount 2^63 - 1" tfTransferFeesAmountMaxInt64 maxInt64 vectorRecipient
+        , AcceptedTransferFeesCase "zero recipient (EVM parity; the SDK serializer refuses it)" tfTransferFeesToZeroRecipient vectorAmount zeroRecipient
         ]
   forA_ (numberCases cases) \(caseNumber, acceptedCase) -> do
     (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("TransferFeesAccepted" <> show caseNumber) None

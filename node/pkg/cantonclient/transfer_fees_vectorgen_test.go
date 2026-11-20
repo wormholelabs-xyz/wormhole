@@ -143,6 +143,9 @@ func transferFeesDamlHexFixtures() []damlHexFixture {
 		transferFeesVAAFixture("tfTransferFeesAmountMaxInt64", transferFeesVectorSpec(4, sdkPayload(vaa.ChainIDCanton, maxInt64Amount))),
 		transferFeesVAAFixture("tfTransferFeesAmountTwoPow63", transferFeesVectorSpec(5, sdkPayload(vaa.ChainIDCanton, twoPow63Amount))),
 		transferFeesVAAFixture("tfTransferFeesAmountMaxUint256", transferFeesVectorSpec(6, sdkPayload(vaa.ChainIDCanton, maxUint256Amount))),
+		transferFeesVAAFixture("tfTransferFeesToZeroRecipient", transferFeesVectorSpec(7, func(t *testing.T) []byte {
+			return transferFeesPayloadWithAmountWord(vaa.ChainIDCanton, amountWordOf(vectorAmount), vaa.Address{})
+		})),
 		transferFeesVAAFixture("tfTransferFeesResignedBySet1", govTransferFeesResignedBySet1Spec()),
 	}
 }
