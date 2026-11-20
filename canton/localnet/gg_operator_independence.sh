@@ -96,6 +96,26 @@ created_event() {
     | if length == 1 then .[0] else error("expected one created \($suffix), found \(length)") end' <<<"$1"
 }
 
+# last_created_event <transaction-json> <qualified-template-suffix>: the last created event of that template. A
+# transaction that registers and then publishes creates an Emitter and its successor.
+last_created_event() {
+  jq -ec --arg suffix "$2" '[.events[] | .CreatedEvent? // empty | select(.templateId | endswith($suffix))]
+    | if length > 0 then .[-1] else error("expected a created \($suffix), found none") end' <<<"$1"
+}
+
+# await_core_state_on <validator>: wait until that participant shows the CoreState that sv shows.
+await_core_state_on() {
+  local waited_seconds expected_cid
+  expected_cid="$(core_contract_id coreState)"
+  for ((waited_seconds = 0; waited_seconds < OBSERVATION_WAIT_SECONDS; waited_seconds++)); do
+    if [[ "$(core_contract_id coreState "$1" 2>/dev/null || true)" == "$expected_cid" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  fail "$1 does not show the CoreState ${expected_cid:0:16} after ${OBSERVATION_WAIT_SECONDS}s"
+}
+
 # gg_root <qualified-template-suffix>: the one active contract of that template that gg sees on sv, as created event.
 gg_root() {
   active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" "$1" \
@@ -343,7 +363,7 @@ register_manager_transaction="$(submit_local "$NTT_WALLET_VALIDATOR" "oi-ntt-reg
     "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 manager_event="$(created_event "$register_manager_transaction" :Wormhole.Ntt.Manager:NttManager)"
 ledger_event="$(created_event "$register_manager_transaction" :Wormhole.Ntt.Ledger:LockedLedger)"
-transceiver_emitter_event="$(created_event "$register_manager_transaction" :Wormhole.Core.State:Emitter)"
+transceiver_emitter_event="$(last_created_event "$register_manager_transaction" :Wormhole.Core.State:Emitter)"
 created_event "$register_manager_transaction" :Wormhole.Core.Replay:ReplayNode > /dev/null
 check_sorted_parties_equal "transceiver Emitter signatories" "$(jq -c .signatories <<<"$transceiver_emitter_event")" "$GG_PARTY"
 manager_cid="$(jq -r .contractId <<<"$manager_event")"
@@ -443,6 +463,8 @@ set_fee_response="$(submit_local_response "$LABS_OPERATOR_VALIDATOR" "oi-set-reg
   "$(exercise_command "$EMITTER_REGISTRY_TEMPLATE" "$registry_cid" SetRegistrationFee '{"newRegistrationFee": "1"}')" "[]" || true)"
 set_fee_status="$(tail -n 1 <<<"$set_fee_response")"
 [[ "$set_fee_status" != "200" ]] || fail "step 19: SetRegistrationFee committed with app-provider disconnected"
+[[ "$(sed '$d' <<<"$set_fee_response" | jq -r '.code // empty' 2>/dev/null)" == "NOT_CONNECTED_TO_ANY_SYNCHRONIZER" ]] \
+  || fail "step 19: expected NOT_CONNECTED_TO_ANY_SYNCHRONIZER from app-provider, got HTTP $set_fee_status $(sed '$d' <<<"$set_fee_response" | head -c 300)"
 [[ "$(gg_root :Wormhole.Core.State:EmitterRegistry | jq -r .createArgument.registrationFee)" == "$registration_fee_before" ]] \
   || fail "step 19: the registration fee changed"
 echo "  app-provider answered HTTP $set_fee_status: $(sed '$d' <<<"$set_fee_response" | jq -c '{code, cause: ((.cause // "")[0:160])}' 2>/dev/null || sed '$d' <<<"$set_fee_response" | head -c 300)"
@@ -450,6 +472,7 @@ pass 19 "the admin cannot submit; registration fee stays $registration_fee_befor
 
 step 20 "control: reconnect app-provider, disconnect sv and app-user, publish"
 set_participant_connection reconnect "$LABS_OPERATOR_VALIDATOR"
+await_core_state_on "$LABS_OPERATOR_VALIDATOR"
 control_publisher="$(allocate_local_party "$LABS_OPERATOR_VALIDATOR" "ControlPublisher-$run_label")"
 control_registry_cid="$(core_contract_id emitterRegistry "$LABS_OPERATOR_VALIDATOR")"
 control_register_transaction="$(submit_local "$LABS_OPERATOR_VALIDATOR" "oi-control-register-$run_label" "$(json_array "\"$control_publisher\"")" \
