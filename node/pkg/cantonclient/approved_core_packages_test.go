@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.12.1 built with Daml SDK 3.7.3 (TransferFees accepts chain 0).
-const deployedCorePackageIDHex = "2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4"
+// deployedCorePackageIDHex is wormhole-core 0.12.2 built with Daml SDK 3.7.3 (re-genesis replay record over earlier replay records).
+const deployedCorePackageIDHex = "e162e0c0d15b9e884378ee346a2d57f07e0680ac58f9c2c4bf82a86a25fb5ccd"
+
+// replacedCore0121PackageIDHex is wormhole-core 0.12.1 built with Daml SDK 3.7.3: its re-genesis replay merge takes only CoreState roots.
+const replacedCore0121PackageIDHex = "2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4"
 
 // replacedCore0120PackageIDHex is wormhole-core 0.12.0 built with Daml SDK 3.7.3: TransferFees refuses chain 0.
 const replacedCore0120PackageIDHex = "aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b"
@@ -53,8 +56,10 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		version      string
 		wantErr      string
 	}{
-		{name: "deployed 0.12.1", packageIDHex: deployedCorePackageIDHex, version: "0.12.1"},
-		{name: "deployed 0.12.1 id as 0.12.0", packageIDHex: deployedCorePackageIDHex, version: "0.12.0", wantErr: "is approved as 0.12.1, not 0.12.0"},
+		{name: "deployed 0.12.2", packageIDHex: deployedCorePackageIDHex, version: "0.12.2"},
+		{name: "deployed 0.12.2 id as 0.12.1", packageIDHex: deployedCorePackageIDHex, version: "0.12.1", wantErr: "is approved as 0.12.2, not 0.12.1"},
+		{name: "replaced 0.12.1", packageIDHex: replacedCore0121PackageIDHex, version: "0.12.1", wantErr: "not in the approved"},
+		{name: "replaced 0.12.1 id as 0.12.2", packageIDHex: replacedCore0121PackageIDHex, version: "0.12.2", wantErr: "not in the approved"},
 		{name: "replaced 0.12.0", packageIDHex: replacedCore0120PackageIDHex, version: "0.12.0", wantErr: "not in the approved"},
 		{name: "replaced 0.12.0 id as 0.12.1", packageIDHex: replacedCore0120PackageIDHex, version: "0.12.1", wantErr: "not in the approved"},
 		{name: "replaced 0.11.1", packageIDHex: replacedCore0111PackageIDHex, version: "0.11.1", wantErr: "not in the approved"},
