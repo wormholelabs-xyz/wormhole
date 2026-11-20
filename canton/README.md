@@ -1051,9 +1051,11 @@ in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
 0.9.0 has no `upgrades:` line and no baseline. It removes template fields, so it is not an SCU upgrade of 0.8.x.
-0.9.0 starts a new `wormhole-core` line. Its main package id is `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`.
+0.9.0 starts a new `wormhole-core` line. Its main package id is `bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`.
 The first 0.9.0 build (`dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`) is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
+The second 0.9.0 build (`ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`) is replaced.
+Its `TransferFees` accepts chain 0, and its fee choices have no explicit bound asserts. Do not deploy it.
 
 0.8.0 adds `guardianGovernance` as a signatory of `EmitterRegistry` (A14-3) and of `Emitter` (A14-2).
 0.8.3 adds `feeRecipient` (`feeCustody`) as a signatory of `CoreState` (§4.2).
