@@ -138,8 +138,8 @@ await_observation() {
   fail "the watcher harness $1 has no observation of update $2 after ${OBSERVATION_WAIT_SECONDS}s"
 }
 
-# gg_command_id_transaction_count <begin-exclusive-offset>: transactions on sv after that offset that show a command
-# id to a reader as gg. The participant shows the command id only to a submitting party.
+# gg_command_id_transactions <begin-exclusive-offset>: transactions on sv after that offset that show a command id to a
+# reader as gg. The participant shows the command id only to a submitting party.
 gg_command_id_transactions() {
   local end_offset
   end_offset="$(curl_bounded -sSf "$(json_api_url "$SUBMITTING_VALIDATOR")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
@@ -170,7 +170,7 @@ for validator_name in "${GUARDIAN_HOSTS[@]}"; do
     "$TOKEN_CIP0056_PACKAGE_ID"
 done
 [[ "$(gg_ceremony_count)" == "$ceremonies_before_step_1" ]] || fail "step 2: a gg ceremony ran during the DAR upload"
-pass 2 "core, ntt, wormhole-genesis and token-cip0056 vetted on ${GUARDIAN_HOSTS[*]}; no gg signature"
+pass 2 "core, ntt, wormhole-genesis and token-cip0056 vetted on ${GUARDIAN_HOSTS[*]}; gg ceremony count unchanged"
 
 step "3-4" "LabsOperator offers genesis; gg accepts once (gg_genesis.sh)"
 "$LOCALNET_SCRIPT_DIR/gg_genesis.sh"
