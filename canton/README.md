@@ -192,12 +192,14 @@ template CoreState
 global index (mainnet: the Ethereum core `getCurrentGuardianSetIndex()`), not at 0.
 Guardians sign each VAA with the global index in the VAA header.
 `mkInitialCoreState` takes a `GenesisGuardianSet` (the index and the members), as Sui
-`setup.move` does. Each member is a guardian address and, optionally, its public key (§5). EVM `Setup.sol` fixes index 0 and relays each upgrade VAA.
+`setup.move` does. Each `GenesisGuardian` must have a guardian address and its public key (§5). EVM `Setup.sol` fixes index 0 and relays each upgrade VAA.
 The template precondition applies to each create, including raw creates from the
 genesis scripts: each index is 0 to 4294967295, the current set exists and does
 not expire, each other set has a lower index and an expiry, and each set has 1 to
 255 distinct, non-zero, 20-byte lowercase addresses.
 Each public key in a set must derive the address of its member (`checkGuardianSetMembersAreWellFormed`).
+A `CoreState` without governance history must have a public key for each guardian (`checkGenesisStateHasEveryGuardianKey`).
+This rule applies to genesis and to raw creates from the genesis scripts.
 `GuardianSetUpgrade` applies the same address check (`checkGuardianAddressesAreWellFormed`).
 
 **Guardian visibility.** Every guardian participant hosts `guardianGovernance`
@@ -919,7 +921,10 @@ We use **`secp256k1WithEcdsaOnly`** because Ethereum signs the 32-byte
 A `GuardianSetUpgrade` VAA carries 20-byte addresses only.
 Thus the public keys come into the ledger on two paths:
 
-1. **Genesis.** Each `GenesisGuardianSet` member gives the address and the public key.
+1. **Genesis.** Each `GenesisGuardian` gives the address and the public key. Both fields are required.
+   The `CoreState` precondition rejects a state without governance history if a guardian has no key.
+   Each governance VAA records its digest, and an attach only adds keys.
+   Thus the rule applies only to genesis, and a new guardian after an upgrade can wait for its key.
 2. **`AttachGuardianPublicKeys`.** Any party submits the keys of a stored set that is active.
 
 At an upgrade, each new member gets the key of the same address from a stored set.
@@ -944,6 +949,11 @@ Thus a stored key is the key of its guardian, and the result of `verifyVAA` is e
 An attacker can only attach correct keys. An attacker cannot remove or replace a key.
 Each attach adds at least one key, so a set gets at most one attach for each guardian.
 Each attach archives the `CoreState`. A transaction on the archived contract id fails, and the submitter tries again with the new contract id.
+
+**Distribution to integrators.** Integrators get the guardian set through the `CoreState` disclosure.
+The disclosure service already serves this disclosure (§4.7).
+The disclosed `CoreState` contains the addresses and the public keys of each stored set.
+Thus an integrator needs no other source for guardian keys (Linear CORE-4098).
 
 **Size.** A 19-guardian set with all keys is about 4.4 KB, and about 1.2 KB without keys.
 `CoreState` keeps at most four sets.
@@ -2301,10 +2311,9 @@ makes it a `guardianGovernance` host.
    late-joining participant receives prior contracts), and the confirmation
    threshold across guardian participants.
 4. **Integrator VAA verification.** _Resolved in 0.12.0:_ `CoreState` keeps the guardian
-   public keys, and integrators give the VAA bytes only (§5).
-   **Residual:** confirm how integrators get the `CoreState` disclosure
-   (disclosure service or public-observer snapshot). Decide if a `GuardianSetUpgrade`
-   submission also takes the keys of new guardians, so a rotation needs one transaction.
+   public keys, and integrators give the VAA bytes only (§5). Genesis requires each key.
+   A `GuardianSetUpgrade` carries addresses only, as on EVM. `AttachGuardianPublicKeys` adds the keys of new guardians.
+   Integrators get the guardian set through the `CoreState` disclosure of the disclosure service (§4.7, Linear CORE-4098).
 5. **Native fees.** _Mechanism resolved:_ CIP-0056 (Token Standard V1)
    allocations, consumed atomically inside `PublishMessage` / `RegisterEmitter`
    / `ClaimReplayRoot`, with fee custody under the `feeCustody` quorum party
