@@ -1216,6 +1216,7 @@ Use the procedure in Section 8.4 after each restart.
 | `wormhole_canton_observations_confirmed_total` | The value does not increase while the ledger has new `PublishMessage` updates. |
 | `wormhole_canton_unpinned_publish_messages_total` | The value increases. |
 | `wormhole_canton_publish_without_read_party_stakeholder_total` | The value increases. |
+| `wormhole_canton_foreign_registrar_messages_dropped_total` | The value increases. Treat it as a security incident: `gg` authority signed an `Emitter` with another registrar. |
 | Traffic balance of the participant | **Open item** |
 | Number of `gg` hosts online | **Open item** |
 | `ACS_COMMITMENT_MISMATCH` in the participant log | Each occurrence after the onboarding flag of a host is clear (Section 4.4). |
