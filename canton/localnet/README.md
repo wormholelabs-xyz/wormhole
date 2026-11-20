@@ -899,7 +899,7 @@ The CA, the certificates and the token go to `$LOCALNET_STATE_DIR/gateway-t1`.
 | --- | --- |
 | C1 | The proxy accepts the gateway client certificate. It refuses a request with no client certificate, and a certificate of a different CA, with HTTP 400. |
 | C2 | From `gateway-net`, a direct connection to the participant ports fails. A connection to the proxy succeeds. |
-| C3 | `/v1/healthz` and `/v1/readyz` give only a status. The index lists five routes: `/v1`, `/v1/healthz`, `/v1/readyz`, `/v1/managers`, `/v1/flows/{flow}`. Other paths get HTTP 404, for example `/v1/disclosures`. `/v1/managers` lists the deployments. The `register` flow gets HTTP 404: the service has no `--operator-party`. |
+| C3 | `/v1/healthz` and `/v1/readyz` give only a status. The index lists five routes: `/v1`, `/v1/healthz`, `/v1/readyz`, `/v1/managers`, `/v1/flows/{flow}`. Other paths get HTTP 404, for example `/v1/disclosures`. `/v1/managers` lists the deployments. The `register` flow returns the four genesis roots of `guardianGovernance`: `NttGovernance`, `EmitterRegistry`, `ReplayRootRegistry` and `CoreState`, of the pinned packages. |
 | C4 | The relayer sees no `NttManager`, `CoreState` or `LockedLedger`. |
 | C5 | The relayer submits `Mint` on the burn/mint deployment. |
 | C6 | A user on `app-user` locks Canton Coin with `Transfer` on the deployment of `ntt_lock_unlock_gg.sh`. |
