@@ -1202,6 +1202,11 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+The 0.12.2 main package id is `e162e0c0d15b9e884378ee346a2d57f07e0680ac58f9c2c4bf82a86a25fb5ccd` (Daml SDK 3.7.3).
+0.12.2 has no `upgrades:` line. It adds `tryGovernanceReplayRecordForRegenesisFromRecords`, the re-genesis replay merge over earlier replay records.
+The `CoreState` variants of the merge call it. Templates and choices do not change.
+0.12.2 replaces the 0.12.1 build (`2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4`). No participant vetted 0.12.1.
+
 The 0.12.1 main package id is `2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4` (Daml SDK 3.7.3).
 0.12.1 has no `upgrades:` line. Its `TransferFees` accepts chain 0 as well as chain 75.
 0.12.1 replaces the 0.12.0 build (`aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b`). No participant vetted 0.12.0. In 0.12.0, `TransferFees` accepts chain 75 only.
@@ -1248,8 +1253,8 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
 0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
 `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.12.1.
-A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0, 0.11.0, 0.11.1 and 0.12.0 package ids.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.12.2.
+A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0, 0.11.0, 0.11.1, 0.12.0 and 0.12.1 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
