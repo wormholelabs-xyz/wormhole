@@ -754,8 +754,16 @@ func coreBridgeSetMessageFeeToVaa(req *nodev1.CoreBridgeSetMessageFee, timestamp
 	return v, nil
 }
 
+// Target chain 0 addresses every chain that accepts it.
+func transferFeesTargetChainFromNumber(targetChain uint32) (vaa.ChainID, error) {
+	if targetChain == uint32(vaa.ChainIDUnset) {
+		return vaa.ChainIDUnset, nil
+	}
+	return vaa.KnownChainIDFromNumber[uint32](targetChain)
+}
+
 func coreBridgeTransferFeesToVaa(req *nodev1.CoreBridgeTransferFees, timestamp time.Time, guardianSetIndex uint32, nonce uint32, sequence uint64) (*vaa.VAA, error) {
-	chainId, err := vaa.KnownChainIDFromNumber[uint32](req.ChainId)
+	chainId, err := transferFeesTargetChainFromNumber(req.ChainId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert chain id: %w", err)
 	}
@@ -766,9 +774,6 @@ func coreBridgeTransferFeesToVaa(req *nodev1.CoreBridgeTransferFees, timestamp t
 	}
 	if amountBig.Sign() < 0 {
 		return nil, errors.New("amount cannot be negative")
-	}
-	if amountBig.Sign() == 0 {
-		return nil, errors.New("amount must be non-zero")
 	}
 	amount, overflow := uint256.FromBig(amountBig)
 	if overflow {

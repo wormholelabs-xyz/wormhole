@@ -544,6 +544,27 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 		expected := moduleAndAction + "0013" + recipientHex + expectedAmount
 		assert.Equal(t, expected, common.Bytes2Hex(v.Payload))
 	})
+
+	const zeroAmount = "0000000000000000000000000000000000000000000000000000000000000000"
+	acceptedCases := []struct {
+		name            string
+		targetChain     uint32
+		amount          string
+		expectedPayload string
+	}{
+		{"chain 0 spec layout", 0, "10000", moduleAndAction + "0000" + expectedAmount + recipientHex},
+		{"amount 0 Solana", uint32(vaa.ChainIDSolana), "0", moduleAndAction + "0001" + zeroAmount + recipientHex},
+		{"amount 0 Canton", uint32(vaa.ChainIDCanton), "0", moduleAndAction + "004b" + zeroAmount + recipientHex},
+		{"chain 0 and amount 0", 0, "0", moduleAndAction + "0000" + zeroAmount + recipientHex},
+	}
+	for _, testCase := range acceptedCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			req := &nodev1.CoreBridgeTransferFees{ChainId: testCase.targetChain, Amount: testCase.amount, Recipient: recipientHex}
+			v, err := coreBridgeTransferFeesToVaa(req, time.Now(), 4, 7, 7)
+			require.NoError(t, err)
+			assert.Equal(t, testCase.expectedPayload, common.Bytes2Hex(v.Payload))
+		})
+	}
 }
 
 func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
@@ -566,7 +587,7 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 		{"AmountOverflow", func(r *nodev1.CoreBridgeTransferFees) {
 			r.Amount = "115792089237316195423570985008687907853269984665640564039457584007913129639936" // 2^256
 		}, "amount overflow"},
-		{"ZeroAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "0" }, "amount must be non-zero"},
+		{"EmptyAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "" }, "invalid amount"},
 		{"BadRecipientHex", func(r *nodev1.CoreBridgeTransferFees) { r.Recipient = "zz" }, "invalid recipient"},
 		{"ShortRecipient", func(r *nodev1.CoreBridgeTransferFees) { r.Recipient = "01" }, "invalid recipient"},
 		{"LongRecipient", func(r *nodev1.CoreBridgeTransferFees) {
@@ -575,6 +596,14 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 		{"ZeroRecipient", func(r *nodev1.CoreBridgeTransferFees) {
 			r.Recipient = "0000000000000000000000000000000000000000000000000000000000000000"
 		}, "recipient must be non-zero"},
+		{"ZeroRecipientOnChainZero", func(r *nodev1.CoreBridgeTransferFees) {
+			r.ChainId = 0
+			r.Recipient = "0000000000000000000000000000000000000000000000000000000000000000"
+		}, "recipient must be non-zero"},
+		{"NegativeAmountOnChainZero", func(r *nodev1.CoreBridgeTransferFees) {
+			r.ChainId = 0
+			r.Amount = "-1"
+		}, "amount cannot be negative"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
