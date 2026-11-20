@@ -72,8 +72,8 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
 0.12.0 keeps the guardian public keys in `CoreState`. The verification choices take the VAA bytes only.
 It changes the `GuardianSet` type and the choice arguments, so it is not an SCU upgrade of 0.11.1.
-The 0.12.0 main package id is `7cebf950c34deacdfcfa0492632a9ff158b744add562d3fc070741bb3c267a35` (Daml SDK 3.7.3).
-0.12.0 replaces 0.11.1 (`a2605f0ad870bd4099b7ac8b183b2d73154fc7c7277ff13a0a1f71da338b3044`). No participant vetted 0.11.1.
+The 0.12.0 main package id is `aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b` (Daml SDK 3.7.3).
+0.12.0 replaces 0.11.1 (`019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5`). No participant vetted 0.11.1.
 
 0.11.1 parses the SetMessageFee fee and the TransferFees amount only below 2^63.
 A larger value aborts with a range error, not with `ArithmeticError`.

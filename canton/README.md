@@ -1202,7 +1202,7 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
-The 0.12.0 main package id is `NEW_CORE_PACKAGE_ID` (Daml SDK 3.7.3).
+The 0.12.0 main package id is `aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b` (Daml SDK 3.7.3).
 0.12.0 has no `upgrades:` line. It changes the `GuardianSet` type and the choice arguments, so it is not an SCU upgrade of 0.11.1.
 0.12.0 keeps the guardian public keys in `CoreState`. `ParseAndVerifyVAA`, `VerifyAndConsumeVAA` and `SubmitGovernanceVAA` take no `pubKeys` (§5).
 0.12.0 replaces the 0.11.1 build (`019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5`). No participant vetted 0.11.1.
