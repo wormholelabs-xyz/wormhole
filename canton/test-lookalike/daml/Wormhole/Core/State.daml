@@ -2,6 +2,10 @@
 -- choice, and result shape, signed by the forger alone.
 module Wormhole.Core.State where
 
+-- | Same Ledger API shape as the core 'MessagePayload' variant.
+data MessagePayload = MessagePayload Text
+  deriving (Eq, Show)
+
 data WormholeMessage = WormholeMessage with
     registrar        : Party
     owner            : Party
@@ -9,7 +13,7 @@ data WormholeMessage = WormholeMessage with
     sequence         : Int
     nonce            : Int
     consistencyLevel : Int
-    payload          : Text
+    payload          : MessagePayload
   deriving (Eq, Show)
 
 template Emitter
@@ -27,7 +31,7 @@ template Emitter
     choice PublishMessage : (ContractId Emitter, WormholeMessage)
       with
         nonce   : Int
-        payload : Text
+        payload : MessagePayload
       controller forger
       do
         successorCid <- create this
