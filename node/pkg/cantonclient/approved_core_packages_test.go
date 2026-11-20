@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.9.0 (guardianGovernance is the only core anchor).
-const deployedCorePackageIDHex = "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
+// deployedCorePackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.7.3 (guardianGovernance is the only core anchor).
+const deployedCorePackageIDHex = "a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034"
+
+// replacedSDK351Core090PackageIDHex is the third 0.9.0 build, with Daml SDK 3.5.1; the SDK 3.7.3 build replaces it.
+const replacedSDK351Core090PackageIDHex = "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
 
 // replacedCore090PackageIDHex is the first 0.9.0 build: it accepts guardianGovernance as the fee instrument admin.
 const replacedCore090PackageIDHex = "dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d"
@@ -44,6 +47,7 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		{name: "withdrawn 0.8.3 id as 0.9.0", packageIDHex: withdrawnCore083PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 		{name: "replaced first 0.9.0 build", packageIDHex: replacedCore090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 		{name: "replaced second 0.9.0 build", packageIDHex: replacedSecondCore090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
+		{name: "replaced SDK 3.5.1 0.9.0 build", packageIDHex: replacedSDK351Core090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
