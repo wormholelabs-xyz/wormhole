@@ -113,7 +113,6 @@ testTransferFeesCreatesOneWithdrawalAuthorization : Script ()
 testTransferFeesCreatesOneWithdrawalAuthorization = do
   let cases =
         [ AcceptedTransferFeesCase "chain 75" govTransferFeesVAA govTransferFeesAmount govTransferFeesRecipient
-        , AcceptedTransferFeesCase "chain 0" tfTransferFeesToAllChains vectorAmount vectorRecipient
         , AcceptedTransferFeesCase "amount 0" tfTransferFeesAmountZero 0 vectorRecipient
         , AcceptedTransferFeesCase "amount 2^63 - 1" tfTransferFeesAmountMaxInt64 maxInt64 vectorRecipient
         , AcceptedTransferFeesCase "zero recipient (EVM parity; the SDK serializer refuses it)" tfTransferFeesToZeroRecipient vectorAmount zeroRecipient
@@ -133,12 +132,13 @@ testTransferFeesCreatesOneWithdrawalAuthorization = do
 -- 2. Rejected actions
 ----------------------------------------------------------------------
 
--- | A wrong target chain or an amount above Int max aborts; 'CoreState' stays
+-- | Chain 0, a foreign chain or an amount above Int max aborts; 'CoreState' stays
 -- active and unchanged, and the authorization list stays empty.
 testTransferFeesRejectedLeavesNoWithdrawalAuthorization : Script ()
 testTransferFeesRejectedLeavesNoWithdrawalAuthorization = do
   let cases =
-        [ ("chain 2", transferFeesErrorWrongTargetChain, tfTransferFeesToEthereum)
+        [ ("chain 0", transferFeesErrorWrongTargetChain, tfTransferFeesToAllChains)
+        , ("chain 2", transferFeesErrorWrongTargetChain, tfTransferFeesToEthereum)
         , ("amount 2^63", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountTwoPow63)
         , ("amount 2^256 - 1", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountMaxUint256)
         ]
