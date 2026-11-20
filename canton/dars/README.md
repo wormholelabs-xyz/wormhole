@@ -68,6 +68,13 @@ The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360
 The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
+0.11.0 sets a capacity on the `CoreState` governance collections.
+`consumedGovernance` holds at most 32 digests, with a timestamp floor for evicted digests.
+`guardianSets` holds at most 4 sets, and each governance transition removes expired sets.
+It changes `CoreState` field types, so it is not an SCU upgrade of 0.10.0, and it starts a new `wormhole-core` line.
+The 0.11.0 main package id is `2cf9e5e777861421d63d98984174ae3296a7bc781ba761da96fc30f406b1e002` (Daml SDK 3.7.3).
+0.10.0 (`9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df`) is replaced: its governance collections grow without a bound.
+
 0.10.0 replaces the `Text` byte aliases with constrained byte types (`../README.md` §4.8).
 It changes template field types, so it is not an SCU upgrade of 0.9.0, and it starts a new `wormhole-core` line.
 The 0.10.0 main package id is `bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb` (Daml SDK 3.7.3).
@@ -84,6 +91,7 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 The second 0.9.0 build, `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`, is replaced.
 Its `TransferFees` accepts chain 0, and its fee choices have no explicit bound asserts. Do not deploy it.
 0.8.3 is withdrawn: the operator signs its core contracts.
+
 
 To check the package id, run
 `dpm damlc inspect-dar --json dars/<dar>` and read `main_package_id`.

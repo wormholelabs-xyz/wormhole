@@ -178,11 +178,14 @@ template CoreState
     messageFee         : Int            -- fee required to publish, 10^-10 feeInstrument units
     feeInstrument      : InstrumentId   -- CIP-0056 instrument; genesis-fixed
     feeRecipient       : Party          -- feeCustody; genesis-fixed
-    consumedGovernance : Set VaaDigest  -- governance-only replay protection (§4.6)
+    consumedGovernance : Map VaaDigest Int  -- digest -> VAA timestamp, seconds; at most 32 (§4.4)
+    evictedGovernanceMaxTimestampSeconds : Optional Int  -- floor of evicted digests (§4.4)
   where
     signatory guardianGovernance, feeRecipient
     ensure feeRecipient /= guardianGovernance
       && checkGuardianSetsAreConsistent guardianSetIndex guardianSets
+      && Map.size guardianSets <= maxStoredGuardianSets
+      && checkConsumedGovernanceIsBounded evictedGovernanceMaxTimestampSeconds consumedGovernance
 ```
 
 **Genesis guardian set index.** Genesis installs the guardian set at the live
@@ -548,17 +551,36 @@ disclosure (§4.7). Module identifier is **`"Core"`**
 2. `emitterChain == governanceChainId` and `emitterAddress == governanceContract`;
 3. `module == "Core"` and `action` matches the choice;
 4. `chain == chainId` (or `0` for chain-independent actions);
-5. `digest ∉ consumedGovernance` — then it is inserted (replay protection).
+5. `digest ∉ consumedGovernance`, then the digest and the VAA timestamp go into the map (replay protection);
+6. the VAA timestamp is above `evictedGovernanceMaxTimestampSeconds`, if that floor has a value.
 
 The top-level functions `governanceOutcomeFor` (pure) and
-`createGovernanceOutcome` hold the choice body. Two postcondition checks run on
+`createGovernanceOutcome` hold the choice body. Three postcondition checks run on
 each successor:
 
 - `checkGovernanceKeepsGenesisFields`: `guardianGovernance`, `chainId`,
   `governanceChainId`, `governanceContract`, `feeInstrument` and `feeRecipient`
   stay the same.
-- `checkGovernanceConsumesOneDigest`: `consumedGovernance` grows by exactly one
-  entry, the VAA digest.
+- `checkGovernanceRecordsDigest`: the map has at most 32 entries, the floor does not decrease,
+  and the VAA digest is in the map or its timestamp is at or below the floor.
+  Without an eviction, the map grows by exactly one entry.
+- `checkGovernanceBoundsGuardianSets`: at most 4 stored sets, each set is active at the ledger time,
+  and each stored set other than the current set was in the earlier state.
+
+**Capacity of `consumedGovernance`.** The map holds at most `maxRetainedGovernanceDigests` (32) entries.
+Each publish discloses the `CoreState`, so the map size costs each transaction.
+When an insert makes 33 entries, the map removes each entry at the lowest timestamp.
+`evictedGovernanceMaxTimestampSeconds` then becomes that timestamp.
+A governance VAA with a timestamp at or below this floor fails.
+
+The VAA digest includes the body timestamp but not the guardian set index.
+A later guardian set can sign an old governance body again, and the digest stays the same.
+Guardians do this for wildcard (chain 0) actions.
+A removed digest has a timestamp at or below the floor, so a copy signed again also fails.
+Thus replay protection holds for each consumed digest, as on EVM, Sui and Solana.
+These runtimes keep each record permanently; Canton keeps 32 records and the floor.
+The floor also rejects a new VAA with an old timestamp.
+Guardians then make a new proposal with a new timestamp.
 
 Supported actions (parity with `GovernanceStructs.sol`). Each packet must have
 the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
@@ -585,7 +607,7 @@ keeps the contract data. The `ContractUpgrade` VAA records the consumed digest
 in `consumedGovernance` and leaves the other `CoreState` fields unchanged. This
 governance action differs most from EVM; see Open Questions.
 
-### 4.5 Guardian-set expiry
+### 4.5 Guardian-set expiry and capacity
 
 This logic matches EVM `Setters.sol`. A `GuardianSetUpgrade` sets the
 `expirationTime` of the previous set to `effectiveTime + 86400` (1 day).
@@ -595,9 +617,17 @@ EVM `Messages.sol:80` rejects only when `expirationTime < block.timestamp`.
 Thus `verifyVAA` accepts the set until the end of its expiry second. The
 current set never expires.
 
+Each governance transition removes each stored set that is not active at its ledger time.
+`verifyVAA` rejects such a set at that time and at each later ledger time,
+because a transaction that uses the successor `CoreState` has a ledger time at or after its creation.
+`CoreState` stores at most `maxStoredGuardianSets` (4) sets.
+If more than three upgrades occur in one day, the upgrade removes the previous set with the lowest index.
+EVM keeps that set valid until its expiry. Canton then rejects its VAAs; guardians can sign them again under the current set.
+A rejected upgrade would keep an old guardian set active, so the upgrade removes the old set and does not fail.
+
 ### 4.6 Replay protection for integrators: a trie of consumed digests
 
-Governance replay protection is the `consumedGovernance` set inside `CoreState`
+Governance replay protection is the bounded `consumedGovernance` map inside `CoreState`
 (§4.4) — fine there, because governance actions are rare and already churn the
 singleton. App VAAs (token bridge / NTT) must **not** be recorded that way: Daml
 values have no structural sharing across contract updates, so an ever-growing
@@ -1114,6 +1144,11 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+0.11.0 has no `upgrades:` line and no baseline. It changes `CoreState` field types, so it is not an SCU upgrade of 0.10.0.
+0.11.0 starts a new `wormhole-core` line. Its main package id is `2cf9e5e777861421d63d98984174ae3296a7bc781ba761da96fc30f406b1e002` (Daml SDK 3.7.3).
+0.11.0 sets a capacity on `consumedGovernance` and `guardianSets` (§4.4, §4.5).
+The 0.10.0 build (`9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df`) is replaced. Its governance collections grow without a bound.
+
 0.10.0 has no `upgrades:` line and no baseline. It changes the types of template fields, so it is not an SCU upgrade of 0.9.0.
 0.10.0 starts a new `wormhole-core` line. Its main package id is `bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb` (Daml SDK 3.7.3).
 0.10.0 replaces the `Text` byte aliases with the constrained types of §4.8. A 0.9.0 contract cannot run under 0.10.0.
@@ -1140,8 +1175,8 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
 0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
 `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.10.0.
-A test rejects the 0.8.0, 0.8.1, 0.8.2 and 0.8.3 package ids.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.11.0.
+A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0 and 0.10.0 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
