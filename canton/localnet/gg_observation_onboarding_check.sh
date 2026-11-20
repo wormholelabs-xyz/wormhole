@@ -43,15 +43,14 @@ restore_state() {
 trap restore_state EXIT
 
 # require_timeout_rejection <output-prefix>: the completion in <prefix>.out must be MEDIATOR_SAYS_TX_TIMED_OUT with
-# guardianGovernance and feeCustody (CoreState signatories) as the unresponsive parties.
+# guardianGovernance as the only unresponsive party. feeCustody keeps two connected hosts: sv and app-user.
 require_timeout_rejection() {
   local summary
   summary="$(completion_summary "$1.out" 2>/dev/null || echo '{}')"
   jq -e '.message | test("^MEDIATOR_SAYS_TX_TIMED_OUT")' <<<"$summary" >/dev/null 2>&1 \
     || { echo "FAIL: expected MEDIATOR_SAYS_TX_TIMED_OUT" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
-  jq -e --arg gg "$GG_PARTY" --arg fee "$FEE_CUSTODY_PARTY" \
-    '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) | sort == ([$gg, $fee] | sort)' <<<"$summary" >/dev/null 2>&1 \
-    || { echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY and $FEE_CUSTODY_PARTY" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
+  jq -e --arg party "$GG_PARTY" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$party]' <<<"$summary" >/dev/null 2>&1 \
+    || { echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
   echo "PASS: Observation host does not count; the PublishMessage timed out. $summary"
 }
 
