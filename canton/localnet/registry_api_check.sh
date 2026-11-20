@@ -5,7 +5,7 @@
 # after the mint, and after the transfers.
 #
 # Usage: registry_api_check.sh
-# Precondition: NTT_PIN_VERSION=0.4.2, ntt_burn_mint.sh ran, and gateway_t1.sh up ran: the service reads the
+# Precondition: ntt_burn_mint.sh ran, and gateway_t1.sh up ran: the service reads the
 # participant through the T1 mutual-TLS ledger proxy, because it sends a token only over https or to loopback.
 # DISCLOSURE_SERVICE_IMAGE names an image of canton/disclosure/service with the registry API.
 # Set NTT_GUARDIAN_SET_INDEX and NTT_GUARDIAN_KEY_INDICES to the current guardian set of CoreState (ntt_lib.sh).
@@ -42,7 +42,7 @@ readonly TRANSFER_INSTRUCTION_INTERFACE="#splice-api-token-transfer-instruction-
 readonly TRANSFER_PREAPPROVAL_TEMPLATE="#token-cip0056:Token.CIP0056.CoinTransfer:TransferPreapproval"
 readonly PREAPPROVAL_CONTEXT_KEY="token-cip0056.transferPreapprovalCid"
 
-[[ "$NTT_VERSION" == "0.4.2" ]] || fail "set NTT_PIN_VERSION=0.4.2"
+ntt_requires_custody_party "$NTT_VERSION" || fail "ntt $NTT_VERSION has no nttCustody; the registry API reads as guardianGovernance and nttCustody"
 [[ -n "${DISCLOSURE_SERVICE_IMAGE:-}" ]] || fail "set DISCLOSURE_SERVICE_IMAGE to the local disclosure service image"
 docker image inspect "$DISCLOSURE_SERVICE_IMAGE" > /dev/null || fail "image $DISCLOSURE_SERVICE_IMAGE does not exist"
 ! docker container inspect "$SERVICE_CONTAINER" > /dev/null 2>&1 || fail "container $SERVICE_CONTAINER exists; remove it first"
