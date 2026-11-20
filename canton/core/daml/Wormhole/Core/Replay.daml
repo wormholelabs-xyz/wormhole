@@ -55,7 +55,7 @@ import DA.Set qualified as Set
 import DA.Text qualified as T
 import Wormhole.Core.Bytes
 
--- | Default node capacity. Suffixes are ≤64 hex chars (~66 B serialized) and
+-- | Default node capacity. Suffixes are ≤64 nibbles (~66 B serialized) and
 -- every consume rewrites the full node, bounding the node payload (~8.5 KB), the
 -- per-consume write (~4 KB), and the split's 16 creates (~15 KB) — all below
 -- Canton's request caps. Larger values thin the ACS but amplify every write;
@@ -80,25 +80,26 @@ template ReplayNode
     consumer           : Party  -- integrator scope party; bears the replay risk
     guardianGovernance : Party  -- co-signs: the consumer alone cannot archive or re-create
     namespace      : Text     -- opaque sub-scope: one consumer, many tries; 1..128 chars
-    prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
+    prefix         : DigestNibblePrefix         -- "" at the root
     splitThreshold : Int      -- copied to children; see 'defaultSplitThreshold'
-    consumed       : Set Bytes  -- suffixes, each exactly (64 − |prefix|) nibbles
+    consumed       : Set DigestNibbleSuffix     -- each exactly (64 − |prefix|) nibbles
   where
     signatory consumer, guardianGovernance
     -- Shape invariants only — 'ensure' is a bug-catcher, not a trust boundary
-    -- (signatories can always sign a well-formed shadow node). Depth-64 nodes are
-    -- unrepresentable; suffix lengths pin the membership arithmetic; the
-    -- namespace upper bound keeps the per-node overhead out of the size budgets
-    -- above (it is copied into all 16 children on a split), and the lower bound
-    -- keeps two apps of one consumer off one trie. Deliberately NO
-    -- @size consumed <= splitThreshold@: a split can legitimately create an
+    -- (signatories can always sign a well-formed shadow node). The nibble checks
+    -- re-run the type rules on values from the Ledger API; suffix lengths pin the
+    -- membership arithmetic; the namespace upper bound keeps the per-node overhead
+    -- out of the size budgets above (it is copied into all 16 children on a
+    -- split), and the lower bound keeps two apps of one consumer off one trie.
+    -- @size consumed@ may exceed @splitThreshold@: a split can create an
     -- over-full child (all parent entries in one bucket), split further next
     -- consume.
     ensure splitThreshold >= 1 && splitThreshold <= 4096
         && T.length namespace >= replayNamespaceMinLength
         && T.length namespace <= replayNamespaceMaxLength
-        && T.length prefix <= 63 && isLowerHex prefix
-        && all (\s -> T.length s == 64 - T.length prefix && isLowerHex s)
+        && checkHexValueIsWellFormed prefix
+        && all (\suffix -> checkHexValueIsWellFormed suffix
+                  && nibbleCountOfSuffix suffix == digestNibbleCount - nibbleCountOfPrefix prefix)
                (Set.toList consumed)
 
     -- | Record @digest@ as consumed, or fail if it already was. Returns the node
@@ -109,42 +110,51 @@ template ReplayNode
     -- second exercise on the returned cid.
     choice ConsumeDigest : ContractId ReplayNode
       with
-        digest : Bytes32
+        digest : VaaDigest
       controller consumer
       do
-        -- Normalize before anything: membership is exact-text, so an
-        -- uppercase twin of a consumed digest must not slip past the set.
-        -- Validate independently of the caller — this choice is exercisable
-        -- outside 'VerifyAndConsumeVAA'.
-        let d = normalizeHex digest
-        assertMsg "digest must be 32 bytes of lowercase hex"
-          (T.length d == 64 && isLowerHex d)
+        -- Re-check the argument: this choice is exercisable outside
+        -- 'VerifyAndConsumeVAA', and membership is exact-text.
+        assertMsg "digest is not a well-formed VaaDigest" (checkHexValueIsWellFormed digest)
+        let digestHex = hexTextOf digest
+            prefixHex = hexTextOf prefix
         -- Distinct message from the replay failure: callers re-resolve the
         -- covering node on this one, drop the VAA on the other.
-        assertMsg "replay node does not cover digest" (prefix `T.isPrefixOf` d)
-        let suffix = T.drop (T.length prefix) d
+        assertMsg "replay node does not cover digest" (prefixHex `T.isPrefixOf` digestHex)
+        let suffix = parseHexTextOrAbort @DigestNibbleSuffix (T.drop (T.length prefixHex) digestHex)
         -- The replay check MUST precede the split branch: a split inserting a
         -- duplicate would be a silent Set.insert no-op — a replay that
         -- "succeeds".
         assertMsg "digest already consumed" (not (Set.member suffix consumed))
-        if Set.size consumed < splitThreshold || T.length prefix == 63
+        if Set.size consumed < splitThreshold || nibbleCountOfPrefix prefix == maximumPrefixNibbles
           -- Depth-63 nodes never split: suffixes are single nibbles (≤16
           -- distinct, so the set is bounded), and children would be degenerate
-          -- depth-64 nodes (unrepresentable, see 'ensure').
+          -- depth-64 nodes (unrepresentable, see 'DigestNibblePrefix').
           then create this with consumed = Set.insert suffix consumed
           else do
             -- Split: bucket every suffix (plus the new one) by first nibble,
             -- dropping it, in one pass; then create ALL 16 children — empty
             -- ones included, or their subspaces would have no covering node.
-            let bucket m s = Map.insertWith Set.union (T.take 1 s) (Set.singleton (T.drop 1 s)) m
-                buckets = bucket (foldl bucket Map.empty (Set.toList consumed)) suffix
-                child nib = create this with
-                  prefix = prefix <> nib
-                  consumed = fromOptional Set.empty (Map.lookup nib buckets)
-            cids <- forA (T.explode "0123456789abcdef") (\nib -> (,) nib <$> child nib)
-            case lookup (T.take 1 suffix) cids of
-              Some cid -> pure cid
+            let bucket buckets suffixValue =
+                  let suffixHex = hexTextOf suffixValue
+                  in Map.insertWith Set.union (T.take 1 suffixHex)
+                       (Set.singleton (parseHexTextOrAbort @DigestNibbleSuffix (T.drop 1 suffixHex))) buckets
+                bucketsByNibble = bucket (foldl bucket Map.empty (Set.toList consumed)) suffix
+                createChild nibble = create this with
+                  prefix = parseHexTextOrAbort (prefixHex <> nibble)
+                  consumed = fromOptional Set.empty (Map.lookup nibble bucketsByNibble)
+            childCids <- forA (T.explode "0123456789abcdef") (\nibble -> (,) nibble <$> createChild nibble)
+            case lookup (T.take 1 (hexTextOf suffix)) childCids of
+              Some childCid -> pure childCid
               None -> abort "unreachable: split lost the covering child"
+
+-- | Nibbles in a 'VaaDigest'.
+digestNibbleCount : Int
+digestNibbleCount = 64
+
+-- | Deepest node prefix; a child would be a 64-nibble prefix with empty suffixes.
+maximumPrefixNibbles : Int
+maximumPrefixNibbles = 63
 
 -- NOTE: 'ReplayRootRegistry' (the root-claim anchor) lives in
 -- 'Wormhole.Core.State' beside 'EmitterRegistry' — its claim fee is charged

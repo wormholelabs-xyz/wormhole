@@ -80,13 +80,12 @@ data WormholeMessage = WormholeMessage with
     sequence         : Int       -- uint64
     nonce            : Int       -- uint32
     consistencyLevel : Int       -- uint8
-    payload          : Bytes
+    payload          : MessagePayload
   deriving (Eq, Show)
 
 -- | Wire ranges of 'WormholeMessage' fields; the watcher drops a message
--- outside them (@cantongrpc.go@ @decodeWormholeMessage@). The on-ledger payload
--- check is stricter than the watcher's: the watcher also decodes uppercase and
--- @0x@-prefixed hex (@hexField@); 'PublishMessage' accepts only lowercase hex.
+-- outside them (@cantongrpc.go@ @decodeWormholeMessage@). The watcher applies
+-- the 'MessagePayload' rule to the payload (@messagePayloadField@).
 maxNonceUint32 : Int
 maxNonceUint32 = 4294967295
 
@@ -116,7 +115,7 @@ maxOnboardingFee = 10000000000000000
 -- 'verifyVAA'. 'governanceOutcomeFor' uses the CURRENT set
 -- only (EVM Governance.sol parity). Pure: the caller reads the ledger time with
 -- 'getTime' and passes it as @now@.
-verifyEncoded : CoreState -> Bytes -> [(Int, Bytes)] -> Time -> Either Text VAA
+verifyEncoded : CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Time -> Either Text VAA
 verifyEncoded st encodedVAA pubKeys now =
   let vaa = parseVAA encodedVAA
       signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex st.guardianSets)
@@ -127,7 +126,7 @@ template CoreState
     guardianGovernance : Party              -- guardians' governance anchor (threshold party)
     chainId            : Int                -- 75 (Canton)
     governanceChainId  : Int                -- 1 (Solana)
-    governanceContract : Bytes32            -- governance emitter address
+    governanceContract : EmitterAddress     -- governance emitter address
     guardianSetIndex   : Int                -- index of the current set
     guardianSets       : Map Int GuardianSet
     messageFee         : Int                -- per-publish fee, 10^-10 feeInstrument
@@ -138,7 +137,7 @@ template CoreState
                                             -- guardianGovernance nor feeCustody.
     feeRecipient       : Party              -- feeCustody: quorum party in the guardian namespace,
                                             -- distinct from guardianGovernance. Genesis-fixed.
-    consumedGovernance : Set Bytes32        -- governance-only replay protection, keyed by
+    consumedGovernance : Set VaaDigest      -- governance-only replay protection, keyed by
                                             -- digest. App VAAs use the 'ReplayNode' trie.
   where
     -- guardianGovernance's signature anchors the guardian set (module header).
@@ -152,13 +151,16 @@ template CoreState
     -- SECURITY: the fee registry body runs with the authority of the receiver
     -- and of the instrument admin, which signs each fee allocation. Neither may
     -- be guardianGovernance, and the instrument admin may not be the receiver.
-    -- 'chargeFee' repeats each rule.
+    -- 'chargeFee' repeats each rule. The byte checks re-run the type rules on
+    -- values from the Ledger API.
     ensure and
       [ feeRecipient /= guardianGovernance
       , feeInstrument.admin /= guardianGovernance
       , feeInstrument.admin /= feeRecipient
       , messageFee >= 0
       , checkGuardianSetsAreConsistent guardianSetIndex guardianSets
+      , checkHexValueIsWellFormed governanceContract
+      , all checkHexValueIsWellFormed (Set.toList consumedGovernance)
       ]
 
     -- | Read-only VAA verification against the CURRENT guardian set, for the
@@ -175,10 +177,11 @@ template CoreState
     nonconsuming choice ParseAndVerifyVAA : VAA
       with
         verifier   : Party
-        encodedVAA : Bytes
-        pubKeys    : [(Int, Bytes)]
+        encodedVAA : EncodedVaa
+        pubKeys    : [(Int, GuardianPublicKey)]
       controller verifier
       do
+        checkVaaSubmissionIsWellFormed encodedVAA pubKeys
         now <- getTime
         either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
 
@@ -241,13 +244,14 @@ template CoreState
     -- contract and the covering node gets a correct check.
     nonconsuming choice VerifyAndConsumeVAA : (VAA, ContractId ReplayNode)
       with
-        encodedVAA    : Bytes
-        pubKeys       : [(Int, Bytes)]
+        encodedVAA    : EncodedVaa
+        pubKeys       : [(Int, GuardianPublicKey)]
         consumer      : Party
         namespace     : Text
         replayNodeCid : ContractId ReplayNode
       controller consumer
       do
+        checkVaaSubmissionIsWellFormed encodedVAA pubKeys
         now <- getTime
         vaa <- either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
         node <- fetch replayNodeCid
@@ -268,10 +272,18 @@ template CoreState
     choice SubmitGovernanceVAA : ContractId CoreState
       with
         submitter  : Party
-        encodedVAA : Bytes
-        pubKeys    : [(Int, Bytes)]
+        encodedVAA : EncodedVaa
+        pubKeys    : [(Int, GuardianPublicKey)]
       controller submitter
-      do createGovernanceOutcome this encodedVAA pubKeys
+      do
+        checkVaaSubmissionIsWellFormed encodedVAA pubKeys
+        createGovernanceOutcome this encodedVAA pubKeys
+
+-- | Choice-entry re-check of VAA arguments from the Ledger API, before any parse.
+checkVaaSubmissionIsWellFormed : EncodedVaa -> [(Int, GuardianPublicKey)] -> Update ()
+checkVaaSubmissionIsWellFormed encodedVAA pubKeys = do
+  assertMsg "encodedVAA is not a well-formed EncodedVaa" (checkHexValueIsWellFormed encodedVAA)
+  assertMsg "pubKeys holds a malformed GuardianPublicKey" (all (checkHexValueIsWellFormed . snd) pubKeys)
 
 ----------------------------------------------------------------------
 -- Governance application (pure helpers in the Either Text monad)
@@ -340,7 +352,7 @@ data GovernanceOutcome = GovernanceOutcome with
 
 -- | Check a governance VAA against the CURRENT set (EVM Governance.sol), the
 -- governance emitter and replay protection, then compute its effects.
-governanceOutcomeFor : CoreState -> Time -> Bytes -> [(Int, Bytes)] -> Either Text GovernanceOutcome
+governanceOutcomeFor : CoreState -> Time -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Either Text GovernanceOutcome
 governanceOutcomeFor before now encodedVAA pubKeys = do
   let vaa = parseVAA encodedVAA
   assertMsg "governance: not signed by current guardian set"
@@ -348,7 +360,7 @@ governanceOutcomeFor before now encodedVAA pubKeys = do
   verifyVAA (currentSetForUpgrade before) vaa pubKeys now
   assertMsg "governance: wrong emitter chain" (vaa.emitterChain == before.governanceChainId)
   assertMsg "governance: wrong emitter address"
-    (normalizeHex vaa.emitterAddress == normalizeHex before.governanceContract)
+    (vaa.emitterAddress == before.governanceContract)
   assertMsg "governance: action already consumed"
     (not (Set.member vaa.hash before.consumedGovernance))
   let action = parseGovernance vaa.payload
@@ -364,13 +376,13 @@ governanceOutcomeFor before now encodedVAA pubKeys = do
       TransferFees _ amount recipient -> Some FeeWithdrawalAuthorization with
         guardianGovernance = before.guardianGovernance
         amount
-        recipient = normalizeHex recipient
+        recipient
         vaaHash = vaa.hash
       _ -> None
 
 -- | Runs inside the consuming 'SubmitGovernanceVAA': the archived contract's
 -- signatories authorize both creates.
-createGovernanceOutcome : CoreState -> Bytes -> [(Int, Bytes)] -> Update (ContractId CoreState)
+createGovernanceOutcome : CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Update (ContractId CoreState)
 createGovernanceOutcome before encodedVAA pubKeys = do
   now <- getTime
   outcome <- either assertFail pure (governanceOutcomeFor before now encodedVAA pubKeys)
@@ -386,7 +398,7 @@ checkGovernanceKeepsGenesisFields before after = do
   assertMsg "governance: feeInstrument changed" (after.feeInstrument == before.feeInstrument)
   assertMsg "governance: feeRecipient changed" (after.feeRecipient == before.feeRecipient)
 
-checkGovernanceConsumesOneDigest : CoreState -> CoreState -> Bytes32 -> Either Text ()
+checkGovernanceConsumesOneDigest : CoreState -> CoreState -> VaaDigest -> Either Text ()
 checkGovernanceConsumesOneDigest before after digest = do
   assertMsg "governance: consumed digest set must grow by exactly one"
     (Set.size after.consumedGovernance == Set.size before.consumedGovernance + 1)
@@ -410,11 +422,12 @@ currentSetForUpgrade st =
 template FeeWithdrawalAuthorization
   with
     guardianGovernance : Party
-    amount             : Int      -- 10^-10 feeInstrument units
-    recipient          : Bytes32  -- Wormhole-format recipient from the VAA
-    vaaHash            : Bytes32  -- provenance: the authorizing VAA's digest
+    amount             : Int               -- 10^-10 feeInstrument units
+    recipient          : UniversalAddress  -- Wormhole-format recipient from the VAA
+    vaaHash            : VaaDigest         -- provenance: the authorizing VAA's digest
   where
     signatory guardianGovernance
+    ensure checkHexValueIsWellFormed recipient && checkHexValueIsWellFormed vaaHash
 
 ----------------------------------------------------------------------
 -- Emitter registration & message publishing
@@ -428,9 +441,9 @@ emitterAddressTag = "wormhole:emitter:v1"
 
 -- | The 32-byte Wormhole emitter address of the 'Emitter' identified by
 -- @(registrar, owner, emitterId)@.
-emitterAddressFor : Party -> Party -> Int -> Bytes32
+emitterAddressFor : Party -> Party -> Int -> EmitterAddress
 emitterAddressFor registrar owner emitterId =
-  derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId)
+  parseHexBytesAsOrAbort (derivedAddress (DomainTag emitterAddressTag) registrar owner (RegistryId emitterId))
 
 -- | Allocates monotonically increasing emitter ids, one registry per
 -- guardianGovernance. Created with 'CoreState' in the genesis ceremony.
@@ -611,7 +624,7 @@ template ReplayRootRegistry
           consumer
           guardianGovernance
           namespace
-          prefix = ""
+          prefix = parseHexTextOrAbort ""
           splitThreshold
           consumed = Set.empty
 
@@ -625,7 +638,7 @@ template Emitter
                                 -- authenticity anchor, pinned in PublishMessage
     owner              : Party
     emitterId          : Int      -- registry-allocated
-    emitterAddress     : Bytes32  -- emitterAddressFor guardianGovernance owner emitterId, set at creation
+    emitterAddress     : EmitterAddress  -- emitterAddressFor guardianGovernance owner emitterId, set at creation
     sequence           : Int      -- next sequence to assign
   where
     -- Owner co-signs: only a transaction with the owner's authority can create a
@@ -639,6 +652,7 @@ template Emitter
     signatory owner, guardianGovernance
     ensure emitterId >= 0 && emitterId <= maxEmitterId
       && sequence >= 0 && sequence <= maxEmitterSequence
+      && checkHexValueIsWellFormed emitterAddress
 
     -- | Publish a Wormhole message. Returns the sequence-bumped successor
     -- 'Emitter' cid alongside the 'WormholeMessage' the watcher observes
@@ -665,7 +679,7 @@ template Emitter
     choice PublishMessage : (ContractId Emitter, WormholeMessage)
       with
         nonce            : Int
-        payload          : Bytes
+        payload          : MessagePayload
         consistencyLevel : Int
         coreStateCid     : ContractId CoreState
         payer            : Party   -- funds 'messageFee'; = owner for a direct publish
@@ -673,9 +687,8 @@ template Emitter
       controller owner, payer
       do
         -- Before the fee charge: a message the watcher drops must not consume
-        -- a sequence or a fee. The hex check is stricter than the watcher's.
-        assertMsg "payload is not lowercase hex" (isLowerHex payload)
-        assertMsg "payload has an odd hex length" (T.length payload % 2 == 0)
+        -- a sequence or a fee.
+        assertMsg "payload is not a well-formed MessagePayload" (checkHexValueIsWellFormed payload)
         assertMsg "nonce is negative" (nonce >= 0)
         assertMsg "nonce exceeds uint32" (nonce <= maxNonceUint32)
         assertMsg "consistency level is negative" (consistencyLevel >= 0)
