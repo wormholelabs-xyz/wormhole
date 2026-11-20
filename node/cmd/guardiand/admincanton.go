@@ -29,6 +29,7 @@ var (
 	cantonListPublishesExecutingPackageID *string
 	cantonListPublishesAuthTokenURL       *string
 	cantonListPublishesAuthClientID       *string
+	cantonListPublishesOAuthAudience      *string
 	cantonListPublishesPlaintext          *bool
 )
 
@@ -50,6 +51,7 @@ func init() {
 	cantonListPublishesExecutingPackageID = flags.String("executingPackageID", "", "wormhole-core package id (64 lowercase hex) whose publishes to list")
 	cantonListPublishesAuthTokenURL = flags.String("cantonAuthTokenURL", "", "OAuth2 token endpoint; the client secret is read from GUARDIAND_CANTONAUTHCLIENTSECRET")
 	cantonListPublishesAuthClientID = flags.String("cantonAuthClientID", "", "OAuth2 client id")
+	cantonListPublishesOAuthAudience = flags.String("cantonOAuthAudience", "", "Optional OAuth2 audience: the Ledger API target audience of the participant")
 	cantonListPublishesPlaintext = flags.Bool("unsafePlaintext", false, "Dial without TLS (local sandbox only)")
 	for _, requiredFlag := range []string{"cantonRPC", "cantonReadAsParty", "fromOffset", "executingPackageID"} {
 		if err := AdminClientCantonListPublishesCmd.MarkFlagRequired(requiredFlag); err != nil {
@@ -129,6 +131,41 @@ func listCantonPublishes(ctx context.Context, client cantonclient.CantonClient, 
 	return listing, nil
 }
 
+// cantonListPublishesOAuthFlags are the raw OAuth inputs of canton-list-publishes.
+type cantonListPublishesOAuthFlags struct {
+	tokenURL     string
+	clientID     string
+	clientSecret string
+	audience     string
+}
+
+// cantonListPublishesDialOptions returns the OAuth dial option, or none when every OAuth input is empty.
+func cantonListPublishesDialOptions(ctx context.Context, oauthFlags cantonListPublishesOAuthFlags, unsafePlaintext bool) ([]grpc.DialOption, error) {
+	audience, err := cantonclient.ParseOAuthAudience(oauthFlags.audience)
+	if err != nil {
+		return nil, fmt.Errorf("--cantonOAuthAudience: %w", err)
+	}
+	oauthEnabled := oauthFlags.tokenURL != "" || oauthFlags.clientID != ""
+	if !oauthEnabled {
+		if audience.IsSet() {
+			return nil, fmt.Errorf("--cantonOAuthAudience requires --cantonAuthTokenURL, --cantonAuthClientID, and GUARDIAND_CANTONAUTHCLIENTSECRET")
+		}
+		return nil, nil
+	}
+	if oauthFlags.tokenURL == "" || oauthFlags.clientID == "" || oauthFlags.clientSecret == "" {
+		return nil, fmt.Errorf("--cantonAuthTokenURL, --cantonAuthClientID, and GUARDIAND_CANTONAUTHCLIENTSECRET must all be set together")
+	}
+	if unsafePlaintext {
+		return nil, fmt.Errorf("OAuth requires TLS; remove --unsafePlaintext")
+	}
+	return []grpc.DialOption{cantonclient.NewOAuthDialOption(ctx, cantonclient.OAuthClientCredentials{
+		TokenURL:     oauthFlags.tokenURL,
+		ClientID:     oauthFlags.clientID,
+		ClientSecret: oauthFlags.clientSecret,
+		Audience:     audience,
+	})}, nil
+}
+
 func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 	readScope, err := parseListPublishesReadScope(*cantonListPublishesReadAsParty)
 	if err != nil {
@@ -141,16 +178,14 @@ func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 	if *cantonListPublishesPlaintext {
 		transportCreds = insecure.NewCredentials()
 	}
-	var dialOpts []grpc.DialOption
-	if *cantonListPublishesAuthTokenURL != "" || *cantonListPublishesAuthClientID != "" {
-		clientSecret := os.Getenv("GUARDIAND_CANTONAUTHCLIENTSECRET")
-		if *cantonListPublishesAuthTokenURL == "" || *cantonListPublishesAuthClientID == "" || clientSecret == "" {
-			return fmt.Errorf("--cantonAuthTokenURL, --cantonAuthClientID, and GUARDIAND_CANTONAUTHCLIENTSECRET must all be set together")
-		}
-		if *cantonListPublishesPlaintext {
-			return fmt.Errorf("OAuth requires TLS; remove --unsafePlaintext")
-		}
-		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, cantonclient.OAuthClientCredentials{TokenURL: *cantonListPublishesAuthTokenURL, ClientID: *cantonListPublishesAuthClientID, ClientSecret: clientSecret}))
+	dialOpts, err := cantonListPublishesDialOptions(ctx, cantonListPublishesOAuthFlags{
+		tokenURL:     *cantonListPublishesAuthTokenURL,
+		clientID:     *cantonListPublishesAuthClientID,
+		clientSecret: os.Getenv("GUARDIAND_CANTONAUTHCLIENTSECRET"),
+		audience:     *cantonListPublishesOAuthAudience,
+	}, *cantonListPublishesPlaintext)
+	if err != nil {
+		return err
 	}
 	client, err := cantonclient.NewCantonGrpcClient(*cantonListPublishesRPC, readScope, zap.NewNop(), transportCreds, dialOpts...)
 	if err != nil {

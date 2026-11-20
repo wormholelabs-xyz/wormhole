@@ -18,6 +18,7 @@ func TestCheckCantonFlagsNeedRPC(t *testing.T) {
 		"cantonAuthTokenURL",
 		"cantonAuthClientID",
 		"cantonAuthClientSecret",
+		"cantonOAuthAudience",
 	}
 	allEmpty := func() map[string]string {
 		dependentFlags := make(map[string]string, len(dependentFlagNames))

@@ -210,3 +210,40 @@ func TestParseListPublishesReadScope(t *testing.T) {
 		})
 	}
 }
+
+func TestCantonListPublishesDialOptions(t *testing.T) {
+	fullOAuth := cantonListPublishesOAuthFlags{tokenURL: "https://idp.example/token", clientID: "cid", clientSecret: "sec"}
+	withAudience := func(audience string) cantonListPublishesOAuthFlags {
+		oauthFlags := fullOAuth
+		oauthFlags.audience = audience
+		return oauthFlags
+	}
+	testCases := []struct {
+		name                    string
+		oauthFlags              cantonListPublishesOAuthFlags
+		unsafePlaintext         bool
+		expectedDialOptionCount int
+		expectedErrorMessage    string
+	}{
+		{name: "no OAuth", expectedDialOptionCount: 0},
+		{name: "no OAuth over plaintext", unsafePlaintext: true, expectedDialOptionCount: 0},
+		{name: "full OAuth", oauthFlags: fullOAuth, expectedDialOptionCount: 1},
+		{name: "full OAuth with audience", oauthFlags: withAudience("https://canton.network.global"), expectedDialOptionCount: 1},
+		{name: "audience without OAuth", oauthFlags: cantonListPublishesOAuthFlags{audience: "https://canton.network.global"}, expectedErrorMessage: "--cantonOAuthAudience requires"},
+		{name: "whitespace-only audience", oauthFlags: withAudience(" "), expectedErrorMessage: "whitespace"},
+		{name: "token URL without secret", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: fullOAuth.tokenURL, clientID: fullOAuth.clientID}, expectedErrorMessage: "must all be set together"},
+		{name: "full OAuth over plaintext", oauthFlags: fullOAuth, unsafePlaintext: true, expectedErrorMessage: "OAuth requires TLS"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dialOptions, err := cantonListPublishesDialOptions(context.Background(), testCase.oauthFlags, testCase.unsafePlaintext)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, dialOptions)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, dialOptions, testCase.expectedDialOptionCount)
+		})
+	}
+}
