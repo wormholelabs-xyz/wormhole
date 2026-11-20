@@ -1196,12 +1196,36 @@ The Canton watcher in `guardiand` reads the Ledger API of your participant.
 | `--cantonAuthTokenURL` | OAuth2 token endpoint for the Ledger API. |
 | `--cantonAuthClientID` | OAuth2 client ID (client-credentials grant). |
 | `--cantonAuthClientSecret` | OAuth2 client secret. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
+| `--cantonAuthAudience` | Optional. The `audience` parameter of the OAuth2 token request. Set it to the Ledger API target audience of your participant. |
 
 Outside unsafe dev mode, the watcher does not start without `--cantonPackageID`, `--cantonPackageVersion` and `--cantonReadAsParty`.
 Each package ID has exactly 64 lowercase hexadecimal characters.
 Outside unsafe dev mode, each pair of package ID and version must be in the approved list of `guardiand`.
 Set the three OAuth2 flags together, or set none of them.
+`--cantonAuthAudience` needs the three OAuth2 flags.
 OAuth2 needs TLS, thus unsafe dev mode cannot use it.
+
+Canton 3.7 requires an `aud` claim in each Ledger API token.
+The participant compares the `aud` claim with its target audience.
+Some identity providers (for example Auth0) add `aud` only when the token request has an `audience` parameter.
+For these providers, set `--cantonAuthAudience`.
+If your identity provider adds `aud` itself (for example a Keycloak audience mapper), you can leave the flag empty.
+
+Use the target audience of your participant as the value:
+
+| Participant configuration | Value |
+| - | - |
+| Splice validator | The value of `auth.targetAudience` (Helm) or `LEDGER_API_AUTH_AUDIENCE` (Docker Compose), for example `https://canton.network.global`. |
+| Canton participant with `target-audience` in its Ledger API `auth-services` | That `target-audience` value. |
+| Canton participant without `target-audience` | `https://daml.com/jwt/aud/participant/<participantId>`. |
+
+The value must not contain whitespace or control characters.
+A wrong value causes the error `Audience doesn't match the target value` on the participant.
+References:
+
+- Audience-based tokens: <https://docs.canton.network/appdev/deep-dives/authorization.md>
+- Target audience of a participant: <https://docs.canton.network/global-synchronizer/reference/security-configuration.md>
+- Target audience of a Splice validator: <https://docs.canton.network/global-synchronizer/deployment/validator-kubernetes.md>
 
 An empty package ID matches each package that declares the `Emitter` template.
 Thus a look-alike package can make forged messages.
