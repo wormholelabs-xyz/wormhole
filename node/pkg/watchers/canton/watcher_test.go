@@ -523,7 +523,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 }
 
-func TestNewWatcherParsesOAuthAudience(t *testing.T) {
+func TestNewWatcherBuildsOAuthClientCredentials(t *testing.T) {
 	completeAuth := AuthConfig{TokenURL: "https://idp.example/token", ClientID: "watcher", ClientSecret: "secret"}
 	withAudience := func(audience string) AuthConfig {
 		auth := completeAuth
@@ -533,14 +533,19 @@ func TestNewWatcherParsesOAuthAudience(t *testing.T) {
 	testCases := []struct {
 		name                 string
 		auth                 AuthConfig
+		expectedOAuth        bool
 		expectedAudience     string
 		expectedErrorMessage string
 	}{
-		{name: "OAuth without audience", auth: completeAuth},
-		{name: "OAuth with audience", auth: withAudience("https://canton.network.global"), expectedAudience: "https://canton.network.global"},
+		{name: "no OAuth", auth: AuthConfig{}},
+		{name: "OAuth without audience", auth: completeAuth, expectedOAuth: true},
+		{name: "OAuth with audience", auth: withAudience("https://canton.network.global"), expectedOAuth: true, expectedAudience: "https://canton.network.global"},
 		{name: "audience without OAuth", auth: AuthConfig{Audience: "https://canton.network.global"}, expectedErrorMessage: "audience requires"},
+		{name: "partial OAuth", auth: AuthConfig{TokenURL: completeAuth.TokenURL, ClientID: completeAuth.ClientID}, expectedErrorMessage: "all be set together"},
+		{name: "lone client secret", auth: AuthConfig{ClientSecret: completeAuth.ClientSecret}, expectedErrorMessage: "all be set together"},
 		{name: "whitespace-only audience", auth: withAudience("\t"), expectedErrorMessage: "whitespace"},
 		{name: "audience with a trailing space", auth: withAudience("https://canton.network.global "), expectedErrorMessage: "whitespace"},
+		{name: "audience with a control character", auth: withAudience("https://canton.network\x00.global"), expectedErrorMessage: "control character"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -551,7 +556,19 @@ func TestNewWatcherParsesOAuthAudience(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, testCase.expectedAudience, w.oauthAudience.String())
+			if !testCase.expectedOAuth {
+				require.Nil(t, w.oauthClientCredentials)
+				require.Empty(t, w.cantonDialOpts(context.Background()))
+				return
+			}
+			expectedAudience, err := cantonclient.ParseOAuthAudience(testCase.expectedAudience)
+			require.NoError(t, err)
+			require.Equal(t, &cantonclient.OAuthClientCredentials{
+				TokenURL:     completeAuth.TokenURL,
+				ClientID:     completeAuth.ClientID,
+				ClientSecret: completeAuth.ClientSecret,
+				Audience:     expectedAudience,
+			}, w.oauthClientCredentials)
 			require.Len(t, w.cantonDialOpts(context.Background()), 1)
 		})
 	}

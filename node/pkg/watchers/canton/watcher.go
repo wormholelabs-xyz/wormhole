@@ -108,25 +108,28 @@ func (a AuthConfig) complete() bool {
 	return a.TokenURL != "" && a.ClientID != "" && a.ClientSecret != ""
 }
 
-// parseOAuthAudience rejects an audience with surrounding whitespace and an audience without OAuth credentials.
-func (a AuthConfig) parseOAuthAudience() (cantonclient.OAuthAudience, error) {
+// parseOAuthClientCredentials returns nil when every auth field is empty. It rejects partial credentials, an
+// audience without credentials, and an audience that ParseOAuthAudience rejects.
+func (a AuthConfig) parseOAuthClientCredentials() (*cantonclient.OAuthClientCredentials, error) {
 	audience, err := cantonclient.ParseOAuthAudience(a.Audience)
 	if err != nil {
-		return cantonclient.OAuthAudience{}, fmt.Errorf("canton: %w", err)
+		return nil, fmt.Errorf("canton: %w", err)
 	}
-	if audience.IsSet() && !a.enabled() {
-		return cantonclient.OAuthAudience{}, fmt.Errorf("canton: OAuth audience requires the auth token URL, client id, and client secret")
+	if !a.enabled() {
+		if audience.IsSet() {
+			return nil, fmt.Errorf("canton: OAuth audience requires the auth token URL, client id, and client secret")
+		}
+		return nil, nil
 	}
-	return audience, nil
-}
-
-func (a AuthConfig) oauthClientCredentials(audience cantonclient.OAuthAudience) cantonclient.OAuthClientCredentials {
-	return cantonclient.OAuthClientCredentials{
+	if !a.complete() {
+		return nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
+	}
+	return &cantonclient.OAuthClientCredentials{
 		TokenURL:     a.TokenURL,
 		ClientID:     a.ClientID,
 		ClientSecret: a.ClientSecret,
 		Audience:     audience,
-	}
+	}, nil
 }
 
 // cantonTransportCreds selects the gRPC transport. The unsafe dev-mode
@@ -146,8 +149,8 @@ func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
 // connection (Run's ctx).
 func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
 	dialOpts := slices.Clone(e.extraLedgerDialOpts)
-	if !e.unsafeDevMode && e.auth.complete() {
-		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, e.auth.oauthClientCredentials(e.oauthAudience)))
+	if !e.unsafeDevMode && e.oauthClientCredentials != nil {
+		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, *e.oauthClientCredentials))
 	}
 	return dialOpts
 }
@@ -156,8 +159,8 @@ type Watcher struct {
 	cantonRPC          string
 	acceptedPackageIDs cantonclient.AcceptedPackageIDs
 	readScope          cantonclient.ReadScope
-	auth               AuthConfig
-	oauthAudience      cantonclient.OAuthAudience
+	// oauthClientCredentials is nil without OAuth.
+	oauthClientCredentials *cantonclient.OAuthClientCredentials
 
 	unsafeDevMode bool
 
@@ -352,7 +355,7 @@ func newWatcherWithApprovedList(
 	if err := checkReadScopeAllowed(readScope, unsafeDevMode); err != nil {
 		return nil, err
 	}
-	oauthAudience, err := auth.parseOAuthAudience()
+	oauthClientCredentials, err := auth.parseOAuthClientCredentials()
 	if err != nil {
 		return nil, err
 	}
@@ -360,8 +363,7 @@ func newWatcherWithApprovedList(
 		cantonRPC:                      cantonRPC,
 		acceptedPackageIDs:             acceptedPackageIDs,
 		readScope:                      readScope,
-		auth:                           auth,
-		oauthAudience:                  oauthAudience,
+		oauthClientCredentials:         oauthClientCredentials,
 		unsafeDevMode:                  unsafeDevMode,
 		msgChan:                        msgC,
 		obsvReqC:                       obsvReqC,

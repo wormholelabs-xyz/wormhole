@@ -124,10 +124,7 @@ func (wc *WatcherConfig) buildWatcher(
 
 	// OAuth is all-or-nothing: a partial config would silently dial without
 	// credentials (or with an unusable token source) and fail at runtime.
-	if wc.Auth.enabled() && !wc.Auth.complete() {
-		return nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
-	}
-	if _, err := wc.Auth.parseOAuthAudience(); err != nil {
+	if _, err := wc.Auth.parseOAuthClientCredentials(); err != nil {
 		return nil, err
 	}
 	// Bearer credentials require transport security; dev mode is plaintext.
