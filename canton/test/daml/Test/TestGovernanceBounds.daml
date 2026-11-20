@@ -330,6 +330,43 @@ testGovernancePrunesStoredGuardianSets = do
     assertMsg (pruneCase.caseName <> ": over capacity") (Map.size successor.guardianSets <= maxStoredGuardianSets)
 
 ----------------------------------------------------------------------
+-- 6b. GuardianSetUpgrade below the floor
+----------------------------------------------------------------------
+
+data UpgradeBelowFloorCase = UpgradeBelowFloorCase with
+    caseName           : Text
+    floorOffsetSeconds : Int  -- floor = VAA timestamp + offset
+    retainedDigests    : Map VaaDigest Int
+
+-- | A GuardianSetUpgrade at or below the floor applies and adds no digest; its replay fails on the
+-- current-index check. A fee VAA of the same set at the same floor still fails on the floor.
+testGuardianSetUpgradeBelowFloorApplies : Script ()
+testGuardianSetUpgradeBelowFloorApplies = do
+  let upgradeTimestamp = timestampOf govGuardianSetUpgrade7To8VAA
+      retainedAboveFloor = syntheticConsumedGovernance 2 (upgradeTimestamp + 1001) 1
+      cases =
+        [ UpgradeBelowFloorCase "floor at the VAA timestamp, empty map" 0 Map.empty
+        , UpgradeBelowFloorCase "floor above the VAA timestamp, retained digests" 1000 retainedAboveFloor
+        ]
+  forA_ (numberCases cases) \(caseNumber, upgradeCase) -> do
+    genesisState <- genesisStateWithLabel ("UpgradeBelowFloor" <> show caseNumber) nonZeroGenesisGuardianSetIndex
+    let gg = genesisState.guardianGovernance
+        floorSeconds = Some (upgradeTimestamp + upgradeCase.floorOffsetSeconds)
+    coreStateCid <- createCoreState genesisState with
+      evictedGovernanceMaxTimestampSeconds = floorSeconds
+      consumedGovernance = upgradeCase.retainedDigests
+    feeResult <- trySubmitGovernanceVAA gg coreStateCid govSetFeeVAASignedBySet7
+    checkAttackFailedWith (upgradeCase.caseName <> ": fee VAA") evictedFloorErrorText feeResult
+    upgradedCid <- submitGovernanceVAA gg coreStateCid govGuardianSetUpgrade7To8VAA
+    upgraded <- readCoreState gg upgradedCid
+    upgraded.guardianSetIndex === nonZeroGenesisGuardianSetIndex + 1
+    upgraded.consumedGovernance === upgradeCase.retainedDigests
+    upgraded.evictedGovernanceMaxTimestampSeconds === floorSeconds
+    replayResult <- trySubmitGovernanceVAA gg upgradedCid govGuardianSetUpgrade7To8VAA
+    checkAttackFailedWith (upgradeCase.caseName <> ": replay") "governance: not signed by current guardian set" replayResult
+    readCoreState gg upgradedCid >>= (=== upgraded)
+
+----------------------------------------------------------------------
 -- 7. Postcondition checks
 ----------------------------------------------------------------------
 
