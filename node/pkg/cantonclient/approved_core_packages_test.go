@@ -10,7 +10,7 @@ import (
 // deployedCorePackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.7.3 (guardianGovernance is the only core anchor).
 const deployedCorePackageIDHex = "6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180"
 
-// replacedSDK351Core090PackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.5.1, which Canton 3.7 does not target.
+// replacedSDK351Core090PackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.5.1; the SDK 3.7.3 build replaces it.
 const replacedSDK351Core090PackageIDHex = "ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a"
 
 // replacedCore090PackageIDHex is the first 0.9.0 build: it accepts guardianGovernance as the fee instrument admin.
