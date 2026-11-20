@@ -150,7 +150,7 @@ func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 		if *cantonListPublishesPlaintext {
 			return fmt.Errorf("OAuth requires TLS; remove --unsafePlaintext")
 		}
-		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, *cantonListPublishesAuthTokenURL, *cantonListPublishesAuthClientID, clientSecret))
+		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, cantonclient.OAuthClientCredentials{TokenURL: *cantonListPublishesAuthTokenURL, ClientID: *cantonListPublishesAuthClientID, ClientSecret: clientSecret}))
 	}
 	client, err := cantonclient.NewCantonGrpcClient(*cantonListPublishesRPC, readScope, zap.NewNop(), transportCreds, dialOpts...)
 	if err != nil {

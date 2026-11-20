@@ -123,7 +123,7 @@ func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
 func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
 	dialOpts := slices.Clone(e.extraLedgerDialOpts)
 	if !e.unsafeDevMode && e.auth.complete() {
-		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, e.auth.TokenURL, e.auth.ClientID, e.auth.ClientSecret))
+		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, cantonclient.OAuthClientCredentials{TokenURL: e.auth.TokenURL, ClientID: e.auth.ClientID, ClientSecret: e.auth.ClientSecret}))
 	}
 	return dialOpts
 }
