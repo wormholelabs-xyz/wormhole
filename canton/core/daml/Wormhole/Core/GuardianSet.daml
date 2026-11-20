@@ -16,6 +16,12 @@ import Wormhole.Core.Bytes
 guardianSetExpirySeconds : Int
 guardianSetExpirySeconds = 86400
 
+-- | Capacity of 'CoreState.guardianSets': the current set and up to three
+-- unexpired previous sets. A fourth upgrade within 'guardianSetExpirySeconds'
+-- evicts the oldest previous set ('pruneStoredGuardianSets').
+maxStoredGuardianSets : Int
+maxStoredGuardianSets = 4
+
 -- | sdk/vaa encodes the index as uint32 (@structs.go@ GuardianSetIndex, @payloads.go@ NewIndex).
 maxGuardianSetIndex : Int
 maxGuardianSetIndex = 4294967295

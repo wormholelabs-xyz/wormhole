@@ -877,6 +877,46 @@ All five results above passed in that run.
 LocalNet uses the clock time, thus it does not reach the expiry time.
 The Daml Script test `Test.TestCore:testGuardianSetUpgradeExpiry` checks the expiry boundary.
 
+#### 7.3.1 Timestamp of a governance VAA
+
+This rule applies to each governance VAA for Canton except `GuardianSetUpgrade`.
+`CoreState` keeps the digests of at most 32 governance VAAs.
+When it removes a digest, it sets `evictedGovernanceMaxTimestampSeconds` to the timestamp of that digest.
+A `SetMessageFee`, `TransferFees` or `ContractUpgrade` VAA with a timestamp at or below this value fails.
+A `GuardianSetUpgrade` VAA at or below this value applies, and `CoreState` does not record its digest.
+The current-set signature and the rule `newIndex == current + 1` prevent its replay.
+Thus a `GuardianSetUpgrade` with an old timestamp, for example 0, does not stop Canton on the old set.
+The error is `governance: VAA timestamp at or below the evicted governance timestamp floor`.
+
+Before you sign a governance VAA for Canton, do these steps:
+
+1. Read the active `CoreState` from a `gg` host through the Ledger API endpoint `/v2/state/active-contracts`.
+2. Read `evictedGovernanceMaxTimestampSeconds` in the `createArgument` of the `CoreState`.
+3. Set the proposal timestamp to the current time in Unix seconds.
+4. Make sure that the proposal timestamp is more than the value of step 2.
+   The value `null` means that no floor applies.
+
+On LocalNet, this command shows the value:
+
+```bash
+active_contracts "$VALIDATOR_NAME" "$GG_PARTY" :Wormhole.Core.State:CoreState \
+  | jq -e 'if length == 1 then .[0].createArgument.evictedGovernanceMaxTimestampSeconds else error("expected one CoreState") end'
+```
+
+All messages in one `InjectGovernanceVAA` request share one timestamp.
+An eviction can raise the floor to that timestamp before you submit each message of the request.
+Then the remaining messages fail, and you must issue them again.
+
+If a governance VAA fails with the floor error, do these steps:
+
+1. Make a new proposal with a new timestamp above the floor.
+2. Sign the new VAA through the usual guardian procedure.
+3. Submit the new VAA.
+
+> **NOTE:** EVM, Sui and Solana do not have this floor.
+> A wildcard (chain 0) VAA with an old timestamp can pass on those chains and fail on Canton.
+> For Canton, issue a new VAA with a new timestamp.
+
 ### 7.4 Owner key rotation
 
 An owner key rotation removes one owner key and adds a new owner key.

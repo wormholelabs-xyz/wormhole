@@ -91,7 +91,7 @@ runForgedValueCase partyLabel forgedCase = do
           [ (0, GuardianSet with keys = [forgedAddress], expirationTime = Some (time (date 2026 Jan 1) 0 0 0))
           , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None) ])
     CoreStateConsumedGovernanceDigest forgedDigest -> describeSubmitOutcome <$>
-      createCoreStateWith (coreState with consumedGovernance = Set.singleton forgedDigest)
+      createCoreStateWith (coreState with consumedGovernance = Map.singleton forgedDigest 0)
     ParseAndVerifyEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       parseAndVerifyWith forgedVaa devnetPublicKeys
     ParseAndVerifyGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
