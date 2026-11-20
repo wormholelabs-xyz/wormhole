@@ -13,6 +13,7 @@ import (
 
 	"github.com/certusone/wormhole/node/pkg/cantonclient"
 	"github.com/certusone/wormhole/node/pkg/common"
+	"github.com/certusone/wormhole/node/pkg/p2p"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -299,34 +300,56 @@ func TestProcessMessageDropsMissingKeyParty(t *testing.T) {
 
 func TestProcessMessageRequiresRegistrarToBeReadAsParty(t *testing.T) {
 	const otherParty = "other::1220aa"
+	const participantOffset = 7
 	cases := []struct {
 		name                         string
 		readAsParty                  string
 		registrar                    string
+		owner                        string
+		isReobservation              bool
 		wantEmitted                  bool
 		wantForeignRegistrarIncrease float64
+		wantErrorCountIncrease       uint64
 	}{
-		{name: "registrar is the read-as party", readAsParty: sampleRegistrar, registrar: sampleRegistrar, wantEmitted: true},
-		{name: "registrar is another party", readAsParty: sampleRegistrar, registrar: otherParty, wantForeignRegistrarIncrease: 1},
-		{name: "registrar is empty", readAsParty: sampleRegistrar, registrar: ""},
-		{name: "unsafe dev mode reads as no party", readAsParty: "", registrar: otherParty, wantEmitted: true},
-		{name: "registrar differs only in case", readAsParty: sampleRegistrar, registrar: strings.ToUpper(sampleRegistrar), wantForeignRegistrarIncrease: 1},
+		{name: "registrar is the read-as party", readAsParty: sampleRegistrar, registrar: sampleRegistrar, owner: sampleOwner, wantEmitted: true},
+		{name: "registrar is the read-as party on reobservation", readAsParty: sampleRegistrar, registrar: sampleRegistrar, owner: sampleOwner, isReobservation: true, wantEmitted: true},
+		{name: "registrar is another party", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleOwner, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "registrar is another party on reobservation", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleOwner, isReobservation: true, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "owner is the read-as party, registrar is another party", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleRegistrar, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "owner is the read-as party, registrar is another party, on reobservation", readAsParty: sampleRegistrar, registrar: otherParty, owner: sampleRegistrar, isReobservation: true, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
+		{name: "registrar is empty", readAsParty: sampleRegistrar, registrar: "", owner: sampleOwner, wantErrorCountIncrease: 1},
+		{name: "empty read-as party admits any registrar", readAsParty: "", registrar: otherParty, owner: sampleOwner, wantEmitted: true},
+		{name: "registrar differs only in case", readAsParty: sampleRegistrar, registrar: strings.ToUpper(sampleRegistrar), owner: sampleOwner, wantForeignRegistrarIncrease: 1, wantErrorCountIncrease: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 1)
 			w := testWatcherReadingAs(t, msgC, tc.readAsParty)
 			foreignRegistrarBefore := testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)
+			errorCountBefore := p2p.DefaultRegistry.GetErrorCount(vaa.ChainIDCanton)
 
 			w.processMessage(zap.NewNop(), cantonclient.CantonMessageEvent{
-				ParticipantOffset: 1,
+				ParticipantOffset: participantOffset,
 				UpdateID:          mustParseUpdateID(sampleUpdateIDHex),
 				EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
-				Message:           cantonclient.CantonMessage{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: tc.registrar, Owner: sampleOwner, EmitterID: sampleEmitterID},
-			}, false)
+				Message:           cantonclient.CantonMessage{AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent, Registrar: tc.registrar, Owner: tc.owner, EmitterID: sampleEmitterID},
+			}, tc.isReobservation)
 
-			assert.Equal(t, tc.wantEmitted, len(msgC) == 1)
+			require.Equal(t, tc.wantEmitted, len(msgC) == 1)
+			if tc.wantEmitted {
+				observation := <-msgC
+				assert.Equal(t, tc.isReobservation, observation.IsReobservation)
+				assert.Equal(t, DeriveEmitterAddress(tc.registrar, tc.owner, sampleEmitterID), observation.EmitterAddress)
+			}
 			assert.Equal(t, tc.wantForeignRegistrarIncrease, testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)-foreignRegistrarBefore)
+			assert.Equal(t, tc.wantErrorCountIncrease, p2p.DefaultRegistry.GetErrorCount(vaa.ChainIDCanton)-errorCountBefore)
+			wantResumeOffset := tc.wantEmitted && !tc.isReobservation
+			assert.Equal(t, wantResumeOffset, w.hasResumeOffset.Load())
+			if wantResumeOffset {
+				assert.Equal(t, int64(participantOffset), w.lastOffset.Load())
+			} else {
+				assert.Zero(t, w.lastOffset.Load())
+			}
 		})
 	}
 }
