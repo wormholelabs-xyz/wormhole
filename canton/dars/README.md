@@ -72,8 +72,8 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 `consumedGovernance` holds at most 32 digests, with a timestamp floor for evicted digests.
 `guardianSets` holds at most 4 sets, and each governance transition removes expired sets.
 It changes `CoreState` field types, so it is not an SCU upgrade of 0.10.0, and it starts a new `wormhole-core` line.
-The 0.11.0 main package id is `2cf9e5e777861421d63d98984174ae3296a7bc781ba761da96fc30f406b1e002` (Daml SDK 3.7.3).
-0.10.0 (`9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df`) is replaced.
+The 0.11.0 main package id is `3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc` (Daml SDK 3.7.3).
+0.10.0 (`bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb`) is replaced.
 Its governance collections grow without a bound.
 
 0.10.0 replaces the `Text` byte aliases with constrained byte types (`../README.md` §4.8).
