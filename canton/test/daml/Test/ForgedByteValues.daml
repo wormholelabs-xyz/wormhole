@@ -6,6 +6,7 @@
 module Test.ForgedByteValues where
 
 import Daml.Script
+import DA.Map qualified as Map
 import DA.Optional (fromSome)
 import DA.Set qualified as Set
 import Wormhole.Core.Bytes
@@ -75,7 +76,7 @@ runForgedValueCase partyLabel forgedCase = do
         GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [forgedAddress]
         coreState.feeInstrument coreState.feeRecipient)
     CoreStateConsumedGovernanceDigest forgedDigest -> describeSubmitOutcome <$>
-      createCoreStateWith (coreState with consumedGovernance = Set.singleton forgedDigest)
+      createCoreStateWith (coreState with consumedGovernance = Map.singleton forgedDigest 0)
     ParseAndVerifyEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       parseAndVerifyWith forgedVaa devnetPublicKeys
     ParseAndVerifyGuardianPublicKey forgedKey -> describeSubmitOutcome <$>

@@ -5,7 +5,6 @@
 module Wormhole.Core.Setup where
 
 import DA.Map qualified as Map
-import DA.Set qualified as Set
 import Splice.Api.Token.HoldingV1 (InstrumentId)
 import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
@@ -61,7 +60,8 @@ mkInitialCoreState guardianGovernance govChain govContract genesisSet feeInstrum
     messageFee = 0
     feeInstrument
     feeRecipient
-    consumedGovernance = Set.empty
+    consumedGovernance = Map.empty
+    evictedGovernanceMaxTimestampSeconds = None
 
 -- | The parties of a genesis registry. A record, so the two 'Party' values cannot be swapped.
 data RegistryParties = RegistryParties with
