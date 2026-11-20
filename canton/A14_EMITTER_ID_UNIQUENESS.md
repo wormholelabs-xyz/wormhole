@@ -266,26 +266,26 @@ The admin changes only the fee. `guardianGovernance`, the guardian threshold par
 
 ### Tests
 
-- `testRedTeamA14FormerOperatorCannotResetEmitterRegistry` (`Test/TestRedTeamCore.daml`).
-  A former operator tries to create a registry that names the real `guardianGovernance`.
+- `testRedTeamA14PartyWithNoRoleCannotResetEmitterRegistry` (`Test/TestRedTeamCore.daml`).
+  A party with no role tries to create a registry that names the real `guardianGovernance`.
   The ledger rejects it with an authorization failure.
   After the attempts, the real registry is the same contract with the same `nextId`.
   A second registration of the same owner gets emitter id 1 and a different address.
 - `testRedTeamA14RegistryNeedsGuardianGovernance` (`Test/TestRedTeamCore.daml`).
   `guardianGovernance` alone creates and archives a registry. A stranger cannot.
-- `testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter` (`Test/TestRedTeamCore.daml`).
-  A former operator, alone or with an accomplice or `guardianGovernance`, cannot create the `Emitter` of a victim owner.
+- `testRedTeamA14PartyWithNoRoleCannotForgeThirdPartyEmitter` (`Test/TestRedTeamCore.daml`).
+  A party with no role, alone or with an accomplice or `guardianGovernance`, cannot create the `Emitter` of a victim owner.
 - `testRedTeamA14ColludingOwnerCannotDuplicateEmitter` (`Test/TestRedTeamCore.daml`).
   These parties try to create a rewound `Emitter`:
   - the owner alone;
-  - a former operator with the owner;
-  - a former operator as its own owner;
-  - a former operator with `guardianGovernance`.
+  - a party with no role with the owner;
+  - a party with no role as its own owner;
+  - a party with no role with `guardianGovernance`.
 
   Each attempt fails with an authorization failure.
 - `testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance` and `testGovernanceSignsEveryEmitter`.
   The signatories of an `Emitter` are exactly the owner and `guardianGovernance`.
-- `testEmitterAddressUsesGuardianGovernanceAsRegistrar` and `testFormerOperatorHasNoCorePower` (`Test/TestOperatorIndependence.daml`).
+- `testEmitterAddressUsesGuardianGovernanceAsRegistrar` and `testPartyWithNoRoleHasNoCorePower` (`Test/TestOperatorIndependence.daml`).
 - `testEmitterIdBounds` (`Test/TestCore.daml`). A table over each `ensure` bound, including the exhausted registry.
 - `testRegisterEmitterChecksExpectedGuardianGovernance` (`Test/TestFees.daml`).
 - `testSetRegistrationFee` (`Test/TestFees.daml`).

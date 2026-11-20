@@ -535,18 +535,18 @@ testRedTeamA9PublishFieldBoundaries = do
 -- A14: Emitter created outside RegisterEmitter
 ----------------------------------------------------------------------
 
-testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter : Script ()
-testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter = do
+testRedTeamA14PartyWithNoRoleCannotForgeThirdPartyEmitter : Script ()
+testRedTeamA14PartyWithNoRoleCannotForgeThirdPartyEmitter = do
   (guardianGovernance, _) <- setup
-  formerOperator <- allocateParty "RedTeamFormerOperator"
+  partyWithNoRole <- allocateParty "RedTeamPartyWithNoRole"
   victim <- allocateParty "RedTeamVictimOwner"
   accomplice <- allocateParty "RedTeamAccomplice"
   victimEmitterCid <- registerEmitter guardianGovernance victim
   Some victimEmitter <- queryContractId victim victimEmitterCid
   let forgedVictimEmitter = victimEmitter with sequence = 0
-  forA_ [ ("former operator alone", actAs formerOperator)
-        , ("former operator and accomplice", actAs formerOperator <> actAs accomplice)
-        , ("former operator and guardianGovernance", actAs formerOperator <> actAs guardianGovernance) ]
+  forA_ [ ("party with no role alone", actAs partyWithNoRole)
+        , ("party with no role and accomplice", actAs partyWithNoRole <> actAs accomplice)
+        , ("party with no role and guardianGovernance", actAs partyWithNoRole <> actAs guardianGovernance) ]
     \(forgers, forgerAuthority) -> do
       forgeResult <- trySubmit forgerAuthority do createCmd forgedVictimEmitter
       checkAttackFailedWith ("A14 " <> forgers <> " creates the victim's emitter") "Authorization failure" forgeResult
@@ -557,12 +557,12 @@ testRedTeamA14FormerOperatorCannotForgeThirdPartyEmitter = do
 testRedTeamA14ColludingOwnerCannotDuplicateEmitter : Script ()
 testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
   (guardianGovernance, coreStateCid) <- setup
-  formerOperator <- allocateParty "RedTeamFormerOperator"
+  partyWithNoRole <- allocateParty "RedTeamPartyWithNoRole"
   colludingOwner <- allocateParty "RedTeamColludingOwner"
   colludingEmitterCid <- registerEmitter guardianGovernance colludingOwner
-  formerOperatorEmitterCid <- registerEmitter guardianGovernance formerOperator
+  partyWithNoRoleEmitterCid <- registerEmitter guardianGovernance partyWithNoRole
   (_, firstMessage) <- publishVia guardianGovernance coreStateCid colludingOwner colludingEmitterCid 1 "aa" 0
-  (_, formerOperatorMessage) <- publishVia guardianGovernance coreStateCid formerOperator formerOperatorEmitterCid 2 "bb" 0
+  (_, partyWithNoRoleMessage) <- publishVia guardianGovernance coreStateCid partyWithNoRole partyWithNoRoleEmitterCid 2 "bb" 0
   let rewoundEmitterOf owner message = Emitter with
         guardianGovernance, owner
         emitterId = message.emitterId
@@ -570,9 +570,9 @@ testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
         sequence = message.sequence
       duplicateAttempts =
         [ ("owner alone", actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
-        , ("former operator and owner", actAs formerOperator <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
-        , ("former operator as its own owner", actAs formerOperator, rewoundEmitterOf formerOperator formerOperatorMessage)
-        , ("former operator and guardianGovernance", actAs formerOperator <> actAs guardianGovernance,
+        , ("party with no role and owner", actAs partyWithNoRole <> actAs colludingOwner, rewoundEmitterOf colludingOwner firstMessage)
+        , ("party with no role as its own owner", actAs partyWithNoRole, rewoundEmitterOf partyWithNoRole partyWithNoRoleMessage)
+        , ("party with no role and guardianGovernance", actAs partyWithNoRole <> actAs guardianGovernance,
             rewoundEmitterOf colludingOwner firstMessage)
         ]
   forA_ duplicateAttempts \(colluders, colluderAuthority, rewoundEmitter) -> do
@@ -580,7 +580,7 @@ testRedTeamA14ColludingOwnerCannotDuplicateEmitter = do
     checkAttackFailedWith ("A14 " <> colluders <> " duplicates an issued emitter") "Authorization failure" duplicateResult
   guardianVisibleEmitters <- query @Emitter guardianGovernance
   length (filter (\(_, emitter) -> emitter.owner == colludingOwner) guardianVisibleEmitters) === 1
-  length (filter (\(_, emitter) -> emitter.owner == formerOperator) guardianVisibleEmitters) === 1
+  length (filter (\(_, emitter) -> emitter.owner == partyWithNoRole) guardianVisibleEmitters) === 1
 
 -- | Exactly the owner and guardianGovernance sign an 'Emitter': both together
 -- can create one directly.
@@ -599,34 +599,34 @@ testRedTeamA14EmitterSignatoriesAreOwnerAndGovernance = do
 
 -- | A registry reset with a reused id would give an honest owner's second
 -- emitter the address and sequence 0 of its first. guardianGovernance is the
--- only signatory of 'EmitterRegistry', so a former operator cannot create one
+-- only signatory of 'EmitterRegistry', so a party with no role cannot create one
 -- that names the real guardianGovernance. A registry under a rogue
 -- guardianGovernance needs the rogue party's signature, and its emitters abort
 -- on the real 'CoreState' pin:
 -- Test.TestGuardianVisibility.testRogueGovernanceEmitterCannotPublishOnRealCoreState.
-testRedTeamA14FormerOperatorCannotResetEmitterRegistry : Script ()
-testRedTeamA14FormerOperatorCannotResetEmitterRegistry = do
+testRedTeamA14PartyWithNoRoleCannotResetEmitterRegistry : Script ()
+testRedTeamA14PartyWithNoRoleCannotResetEmitterRegistry = do
   (guardianGovernance, coreStateCid) <- setup
-  formerOperator <- allocateParty "RedTeamFormerOperator"
+  partyWithNoRole <- allocateParty "RedTeamPartyWithNoRole"
   honestOwner <- allocateParty "RedTeamHonestOwner"
   firstEmitterCid <- registerEmitter guardianGovernance honestOwner
-  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = formerOperator
-  resetResult <- trySubmit (actAs formerOperator) do
+  let registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = partyWithNoRole
+  resetResult <- trySubmit (actAs partyWithNoRole) do
     createCmd (mkInitialEmitterRegistry registryParties 0)
-  checkAttackFailedWith "A14 former operator resets the EmitterRegistry" "Authorization failure" resetResult
+  checkAttackFailedWith "A14 party with no role resets the EmitterRegistry" "Authorization failure" resetResult
 
   [(realRegistryCid, realRegistry)] <- query @EmitterRegistry guardianGovernance
   realRegistry.nextId === 1
   realRegistryDisclosure <- fromSome <$> queryDisclosure guardianGovernance realRegistryCid
-  let formerOperatorAttacks =
-        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs formerOperator <> disclose realRegistryDisclosure) do
+  let partyWithNoRoleAttacks =
+        [ ("archives the real EmitterRegistry", void <$> trySubmit (actAs partyWithNoRole <> disclose realRegistryDisclosure) do
             archiveCmd realRegistryCid)
-        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs formerOperator <> disclose realRegistryDisclosure) do
+        , ("sets the registration fee on the real EmitterRegistry", void <$> trySubmit (actAs partyWithNoRole <> disclose realRegistryDisclosure) do
             exerciseCmd realRegistryCid SetRegistrationFee with newRegistrationFee = 0)
         ]
-  forA_ formerOperatorAttacks \(attack, runAttack) -> do
+  forA_ partyWithNoRoleAttacks \(attack, runAttack) -> do
     attackResult <- runAttack
-    checkAttackFailedWith ("A14 former operator " <> attack) "Authorization failure" attackResult
+    checkAttackFailedWith ("A14 party with no role " <> attack) "Authorization failure" attackResult
   [(survivingRegistryCid, survivingRegistry)] <- query @EmitterRegistry guardianGovernance
   survivingRegistryCid === realRegistryCid
   survivingRegistry.nextId === 1

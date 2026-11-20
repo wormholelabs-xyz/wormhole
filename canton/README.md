@@ -2088,8 +2088,9 @@ stop serving disclosures, the failure is fail-safe. Transactions stop
 constructing. Guardians then see nothing new and sign nothing new.
 
 **Former operator.** 0.8.x had an `operator` signatory. 0.9.0 removes it from
-each core template and choice. A compromised former operator key thus has no
-core signature and no core power (`testFormerOperatorHasNoCorePower`).
+each core template and choice. The former operator is thus a party with no
+role. Its compromised key has no core signature and no core power
+(`testPartyWithNoRoleHasNoCorePower`).
 
 **Outbound integrity.** Emitting under an existing address requires the
 signature of that owner (§4.2). Thus an outbound forge is either an invalid
