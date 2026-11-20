@@ -9,6 +9,8 @@ module Test.WatcherGovernanceReader where
 
 import Daml.Script
 import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.List (sort)
 import DA.Optional (fromSome)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
@@ -31,6 +33,8 @@ data GovernanceReaderPublishes = GovernanceReaderPublishes with
     rogueGovernance : Party
     rogueEmitterId : Int
     rogueShadowSequence : Int
+    ggOwnedForeignRegistrarEmitterId : Int
+    ggOwnedForeignRegistrarSequence : Int
   deriving (Eq, Show)
 
 trustedNonce : Int
@@ -45,6 +49,12 @@ rogueShadowNonce = 66
 rogueShadowPayload : Bytes
 rogueShadowPayload = "deadbeef"
 
+ggOwnedForeignRegistrarNonce : Int
+ggOwnedForeignRegistrarNonce = 77
+
+ggOwnedForeignRegistrarPayload : Bytes
+ggOwnedForeignRegistrarPayload = "cafe0077"
+
 integrationGovernanceReaderSetup : Script RealBridge
 integrationGovernanceReaderSetup = do
   (guardianGovernance, coreStateCid) <- setup
@@ -53,7 +63,10 @@ integrationGovernanceReaderSetup = do
 -- | In ledger order:
 --   1. A rogue-governance emitter fails to publish against the real 'CoreState'.
 --   2. It publishes against a shadow 'CoreState' that the rogue party signs.
---   3. A non-governance owner publishes through the real registry and 'CoreState'.
+--   3. An 'Emitter' of the rogue registry with the real @guardianGovernance@ as
+--      owner publishes against the shadow 'CoreState'. Its registrar is the
+--      rogue party; the real @guardianGovernance@ signs it as owner.
+--   4. A non-governance owner publishes through the real registry and 'CoreState'.
 integrationGovernanceReaderPublish : RealBridge -> Script GovernanceReaderPublishes
 integrationGovernanceReaderPublish bridge = do
   let guardianGovernance = bridge.guardianGovernance
@@ -66,7 +79,7 @@ integrationGovernanceReaderPublish bridge = do
   rogueRegistryCid <- submit rogueGovernance do
     createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance) 0)
   rogueRegistryDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryCid
-  (_, rogueEmitterCid) <- submit (actAs rogueOwner <> disclose rogueRegistryDisclosure) do
+  (rogueRegistryAfterFirstCid, rogueEmitterCid) <- submit (actAs rogueOwner <> disclose rogueRegistryDisclosure) do
     exerciseCmd rogueRegistryCid RegisterEmitter with
       requester = rogueOwner, payer = rogueOwner, coreStateCid = None, feeAllocation = None
       expectedGuardianGovernance = rogueGovernance
@@ -88,6 +101,16 @@ integrationGovernanceReaderPublish bridge = do
                                rogueShadowNonce rogueShadowPayload 0
   rogueShadowMessage.owner === rogueOwner
 
+  rogueRegistryAfterFirstDisclosure <- fromSome <$> queryDisclosure rogueGovernance rogueRegistryAfterFirstCid
+  (_, ggOwnedEmitterCid) <- submit (actAs guardianGovernance <> disclose rogueRegistryAfterFirstDisclosure) do
+    exerciseCmd rogueRegistryAfterFirstCid RegisterEmitter with
+      requester = guardianGovernance, payer = guardianGovernance, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = rogueGovernance
+  (_, ggOwnedMessage) <- publishVia rogueGovernance shadowCoreStateCid guardianGovernance ggOwnedEmitterCid
+                           ggOwnedForeignRegistrarNonce ggOwnedForeignRegistrarPayload 0
+  ggOwnedMessage.owner === guardianGovernance
+  ggOwnedMessage.registrar === rogueGovernance
+
   (_, trustedMessage) <- publishVia guardianGovernance bridge.coreStateCid trustedOwner trustedEmitterCid
                            trustedNonce trustedPayload 0
   trustedMessage.owner === trustedOwner
@@ -102,6 +125,8 @@ integrationGovernanceReaderPublish bridge = do
     rogueGovernance
     rogueEmitterId = rogueShadowMessage.emitterId
     rogueShadowSequence = rogueShadowMessage.sequence
+    ggOwnedForeignRegistrarEmitterId = ggOwnedMessage.emitterId
+    ggOwnedForeignRegistrarSequence = ggOwnedMessage.sequence
 
 -- | Runs both fixtures in one script so `dpm test` covers them.
 testGovernanceReaderFixtures : Script ()
@@ -112,8 +137,11 @@ testGovernanceReaderFixtures = do
   publishes.trustedSequence === 0
   publishes.rogueEmitterId === 0
   publishes.rogueShadowSequence === 0
+  publishes.ggOwnedForeignRegistrarEmitterId === 1
+  publishes.ggOwnedForeignRegistrarSequence === 0
 
-  [(_, trustedEmitter)] <- query @Emitter bridge.guardianGovernance
-  trustedEmitter.owner === publishes.trustedOwner
-  [(_, rogueEmitter)] <- query @Emitter publishes.rogueGovernance
-  rogueEmitter.owner === publishes.rogueOwner
+  [(_, trustedEmitter)] <- query @Emitter publishes.trustedOwner
+  trustedEmitter.guardianGovernance === bridge.guardianGovernance
+  rogueEmitters <- query @Emitter publishes.rogueGovernance
+  sort (map (\(_, emitter) -> emitter.owner) rogueEmitters) === sort [publishes.rogueOwner, bridge.guardianGovernance]
+  forA_ rogueEmitters \(_, emitter) -> emitter.guardianGovernance === publishes.rogueGovernance
