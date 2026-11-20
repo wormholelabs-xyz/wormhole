@@ -31,8 +31,8 @@ data UpgradeWindowPublish = UpgradeWindowPublish with
 upgradeWindowNonce : Int
 upgradeWindowNonce = 43
 
-upgradeWindowPayload : Bytes
-upgradeWindowPayload = "55667788"
+upgradeWindowPayload : MessagePayload
+upgradeWindowPayload = parseHexTextOrAbort "55667788"
 
 -- | Registers a fresh emitter for a new owner on the real bridge and publishes once.
 integrationUpgradeWindowPublish : UpgradeWindowPublishInput -> Script UpgradeWindowPublish
@@ -57,7 +57,7 @@ data ExistingEmitterPublishInput = ExistingEmitterPublishInput with
   deriving (Eq, Show)
 
 -- | 'publishVia' with an optional package-id preference for the submission.
-publishPreferring : Optional Text -> Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> Bytes -> Int -> Script (ContractId Emitter, WormholeMessage)
+publishPreferring : Optional Text -> Party -> ContractId CoreState -> Party -> ContractId Emitter -> Int -> MessagePayload -> Int -> Script (ContractId Emitter, WormholeMessage)
 publishPreferring None guardianGovernance csId owner emCid nonce payload consistencyLevel =
   publishVia guardianGovernance csId owner emCid nonce payload consistencyLevel
 publishPreferring (Some corePackageId) guardianGovernance csId owner emCid nonce payload consistencyLevel = do

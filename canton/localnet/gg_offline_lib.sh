@@ -156,13 +156,14 @@ relay_governance_vaa_command() {
   if ! jq -e 'type == "array" and length > 0
       and all(.[]; type == "object" and keys == ["_1", "_2"]
         and (._1 | type == "string" and test("^(0|[1-9][0-9]*)$"))
-        and (._2 | type == "string" and test("^([0-9a-f]{2})+$")))' <<<"$pub_keys" > /dev/null 2>&1; then
-    echo "public key hints are not a non-empty array of {_1: <guardian index>, _2: <hex>}: $pub_keys" >&2
+        and (._2 | type == "object" and keys == ["tag", "value"] and .tag == "GuardianPublicKey"
+          and (.value | type == "string" and test("^04[0-9a-f]{128}$"))))' <<<"$pub_keys" > /dev/null 2>&1; then
+    echo "public key hints are not a non-empty array of {_1: <guardian index>, _2: {tag: GuardianPublicKey, value: <65-byte hex>}}: $pub_keys" >&2
     return 1
   fi
   exercise_command "$CORE_STATE_TEMPLATE" "$core_state_cid" SubmitGovernanceVAA \
     "$(jq -cn --arg submitter "$submitter" --arg vaa "$vaa_hex" --argjson keys "$pub_keys" \
-      '{submitter: $submitter, encodedVAA: $vaa, pubKeys: $keys}')"
+      '{submitter: $submitter, encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}')"
 }
 
 # core_state_disclosures <disclosure-json> <core-state-cid>: a one-element disclosed contracts array for that CoreState.

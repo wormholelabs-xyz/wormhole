@@ -63,11 +63,14 @@ func (f *fakeUpdateByIDService) GetUpdateById(_ context.Context, request *apiv2.
 
 func publishMessageEvent(packageID string, sequence int64) *apiv2.Event {
 	return &apiv2.Event{Event: &apiv2.Event_Exercised{Exercised: &apiv2.ExercisedEvent{
-		TemplateId:     &apiv2.Identifier{PackageId: packageID, ModuleName: "Wormhole.Core.State", EntityName: "Emitter"},
-		Choice:         "PublishMessage",
-		ExerciseResult: tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{"sequence": int64Val(sequence)})),
-		Consuming:      true,
-		AcsDelta:       true,
+		TemplateId: &apiv2.Identifier{PackageId: packageID, ModuleName: "Wormhole.Core.State", EntityName: "Emitter"},
+		Choice:     "PublishMessage",
+		ExerciseResult: tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{
+			"sequence": int64Val(sequence),
+			"payload":  variantVal(messagePayloadVariantID(packageID), messagePayloadConstructor, textVal("deadbeef")),
+		})),
+		Consuming: true,
+		AcsDelta:  true,
 	}}}
 }
 

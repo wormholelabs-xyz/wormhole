@@ -56,8 +56,9 @@ type damlHexFixture struct {
 	generateHex        func(t *testing.T) string
 }
 
+// Matches `binding = parseHexTextOrAbort "<hex>"`, the typed fixture form of Wormhole.Core.Bytes.
 func damlTopLevelHexPattern(binding string) *regexp.Regexp {
-	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(binding) + ` = "([0-9a-f]+)"$`)
+	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(binding) + ` = parseHexTextOrAbort "([0-9a-f]+)"$`)
 }
 
 // Matches the "=== \"<hex>\"" assertion within the indented body of binding.

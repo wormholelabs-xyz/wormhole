@@ -1,0 +1,191 @@
+-- | Constructor tests for the constrained byte and nibble types of
+-- 'Wormhole.Core.Bytes'. Each table row is one input and the expected outcome:
+-- 'None' for a valid input, or a fragment of the parse error.
+module Test.TestByteTypes where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Either (isLeft)
+import DA.Foldable (forA_)
+import DA.Text qualified as T
+import Wormhole.Core.Bytes
+
+data ParseCase = ParseCase with
+    caseName              : Text
+    inputText             : Text
+    expectedErrorFragment : Optional Text
+  deriving (Eq, Show)
+
+acceptedCase : Text -> Text -> ParseCase
+acceptedCase caseName inputText = ParseCase with caseName, inputText, expectedErrorFragment = None
+
+rejectedCase : Text -> Text -> Text -> ParseCase
+rejectedCase caseName inputText fragment = ParseCase with caseName, inputText, expectedErrorFragment = Some fragment
+
+-- | Runs each case through @parseValue@. A valid input must also round-trip
+-- through 'hexTextOf' and pass 'checkHexValueIsWellFormed'.
+checkParseCases : (HexEncodedValue a, Eq a, Show a) => Text -> (Text -> Either Text a) -> [ParseCase] -> Script ()
+checkParseCases typeName parseValue parseCases = do
+  assertMsg (typeName <> ": no parse cases") (not (null parseCases))
+  forA_ parseCases \parseCase -> do
+    let label = typeName <> " " <> parseCase.caseName
+    case (parseValue parseCase.inputText, parseCase.expectedErrorFragment) of
+      (Right parsedValue, None) -> do
+        assertMsg (label <> ": round trip changed the hex text") (hexTextOf parsedValue == parseCase.inputText)
+        assertMsg (label <> ": parsed value fails the well-formed check") (checkHexValueIsWellFormed parsedValue)
+      (Right parsedValue, Some fragment) ->
+        abort (label <> ": expected an error containing '" <> fragment <> "', parsed " <> show parsedValue)
+      (Left parseError, None) ->
+        abort (label <> ": expected a valid value, got: " <> parseError)
+      (Left parseError, Some fragment) ->
+        assertMsg (label <> ": expected an error containing '" <> fragment <> "', got: " <> parseError)
+          (fragment `T.isInfixOf` parseError)
+
+repeatHex : Int -> Text -> Text
+repeatHex count hexText = mconcat (replicate count hexText)
+
+-- | The cases every fixed-width byte type shares: valid, one byte short, one
+-- byte long, uppercase, odd length, a non-hex character, empty and a 0x prefix.
+fixedWidthCases : Text -> [ParseCase]
+fixedWidthCases validHex =
+  [ acceptedCase "valid" validHex
+  , rejectedCase "one byte short" (T.drop 2 validHex) "bytes"
+  , rejectedCase "one byte long" (validHex <> "00") "bytes"
+  , rejectedCase "uppercase" (T.asciiToUpper validHex) "not lowercase hex"
+  , rejectedCase "odd length" (T.drop 1 validHex) "odd hex length"
+  , rejectedCase "non-hex character" ("g" <> T.drop 1 validHex) "not lowercase hex"
+  , rejectedCase "empty" "" "bytes"
+  , rejectedCase "0x prefix" ("0x" <> T.drop 2 validHex) "not lowercase hex"
+  ]
+
+sampleDigestHex : Text
+sampleDigestHex = "a3c1e7f05b2d4e6890ab12cd34ef5678a3c1e7f05b2d4e6890ab12cd34ef5678"
+
+sampleGuardianAddressHex : Text
+sampleGuardianAddressHex = "befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
+
+sampleGuardianPublicKeyHex : Text
+sampleGuardianPublicKeyHex = "04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e967023e34e495a8ebf5101036d0fd66e3b0a8c7c61b65fceeaf487ab3cd1b5b7b50beb7970"
+
+testVaaDigestParse : Script ()
+testVaaDigestParse =
+  checkParseCases "VaaDigest" (parseHexText @VaaDigest) (fixedWidthCases sampleDigestHex)
+
+testEmitterAddressParse : Script ()
+testEmitterAddressParse =
+  checkParseCases "EmitterAddress" (parseHexText @EmitterAddress) (fixedWidthCases sampleDigestHex)
+
+testUniversalAddressParse : Script ()
+testUniversalAddressParse =
+  checkParseCases "UniversalAddress" (parseHexText @UniversalAddress) (fixedWidthCases sampleDigestHex)
+
+testEcdsaSignatureRParse : Script ()
+testEcdsaSignatureRParse =
+  checkParseCases "EcdsaSignatureR" (parseHexText @EcdsaSignatureR) (fixedWidthCases sampleDigestHex)
+
+testEcdsaSignatureSParse : Script ()
+testEcdsaSignatureSParse =
+  checkParseCases "EcdsaSignatureS" (parseHexText @EcdsaSignatureS) (fixedWidthCases sampleDigestHex)
+
+testGuardianAddressParse : Script ()
+testGuardianAddressParse =
+  checkParseCases "GuardianAddress" (parseHexText @GuardianAddress)
+    (fixedWidthCases sampleGuardianAddressHex
+      <> [ rejectedCase "32-byte value" sampleDigestHex "bytes" ])
+
+-- | Exactly 65 bytes with the uncompressed-point tag 04. The 64-byte raw point
+-- and a 65-byte value with another tag are rejected.
+testGuardianPublicKeyParse : Script ()
+testGuardianPublicKeyParse =
+  checkParseCases "GuardianPublicKey" (parseHexText @GuardianPublicKey)
+    [ acceptedCase "valid" sampleGuardianPublicKeyHex
+    , rejectedCase "one byte short (raw 64-byte point)" (T.drop 2 sampleGuardianPublicKeyHex) "65 bytes"
+    , rejectedCase "one byte long" (sampleGuardianPublicKeyHex <> "00") "65 bytes"
+    , rejectedCase "uppercase" (T.asciiToUpper sampleGuardianPublicKeyHex) "not lowercase hex"
+    , rejectedCase "odd length" (T.drop 1 sampleGuardianPublicKeyHex) "odd hex length"
+    , rejectedCase "non-hex character" (T.take 128 sampleGuardianPublicKeyHex <> "zz") "not lowercase hex"
+    , rejectedCase "empty" "" "65 bytes"
+    , rejectedCase "0x prefix" ("0x" <> T.drop 2 sampleGuardianPublicKeyHex) "not lowercase hex"
+    , rejectedCase "compressed tag 02" ("02" <> T.drop 2 sampleGuardianPublicKeyHex) "first byte must be 04"
+    , rejectedCase "tag 00" ("00" <> T.drop 2 sampleGuardianPublicKeyHex) "first byte must be 04"
+    ]
+
+testHexBytesParse : Script ()
+testHexBytesParse =
+  checkParseCases "HexBytes" (parseHexText @HexBytes)
+    [ acceptedCase "empty" ""
+    , acceptedCase "one byte" "00"
+    , acceptedCase "many bytes" sampleGuardianPublicKeyHex
+    , rejectedCase "uppercase" "AB" "not lowercase hex"
+    , rejectedCase "odd length" "abc" "odd hex length"
+    , rejectedCase "non-hex character" "zz" "not lowercase hex"
+    , rejectedCase "0x prefix" "0x00" "not lowercase hex"
+    ]
+
+testMessagePayloadParse : Script ()
+testMessagePayloadParse =
+  checkParseCases "MessagePayload" (parseHexText @MessagePayload)
+    [ acceptedCase "empty" ""
+    , acceptedCase "one byte" "00"
+    , acceptedCase "751 bytes" (repeatHex 751 "ab")
+    , rejectedCase "uppercase" "AB" "not lowercase hex"
+    , rejectedCase "odd length" "abc" "odd hex length"
+    , rejectedCase "1501-char odd length" (repeatHex 1501 "a") "odd hex length"
+    , rejectedCase "non-hex character" "zz" "not lowercase hex"
+    , rejectedCase "0x prefix" "0x00" "not lowercase hex"
+    ]
+
+-- | 57 bytes: the 6-byte header with zero signatures plus the 51-byte body header.
+testEncodedVaaParse : Script ()
+testEncodedVaaParse =
+  checkParseCases "EncodedVaa" (parseHexText @EncodedVaa)
+    [ acceptedCase "57 bytes" (repeatHex 57 "01")
+    , acceptedCase "58 bytes" (repeatHex 58 "01")
+    , rejectedCase "56 bytes" (repeatHex 56 "01") "at least 57 bytes"
+    , rejectedCase "uppercase" (repeatHex 57 "AB") "not lowercase hex"
+    , rejectedCase "odd length" (repeatHex 57 "01" <> "0") "odd hex length"
+    , rejectedCase "non-hex character" (repeatHex 57 "zz") "not lowercase hex"
+    , rejectedCase "empty" "" "at least 57 bytes"
+    , rejectedCase "0x prefix" ("0x" <> repeatHex 57 "01") "not lowercase hex"
+    ]
+
+-- | Nibble strings: any length in range, odd lengths included.
+testDigestNibblePrefixParse : Script ()
+testDigestNibblePrefixParse =
+  checkParseCases "DigestNibblePrefix" (parseHexText @DigestNibblePrefix)
+    [ acceptedCase "empty (trie root)" ""
+    , acceptedCase "one nibble" "a"
+    , acceptedCase "63 nibbles" (T.take 63 sampleDigestHex)
+    , rejectedCase "64 nibbles" sampleDigestHex "0 to 63 nibbles"
+    , rejectedCase "uppercase" "A" "not lowercase hex"
+    , rejectedCase "non-hex character" "g" "not lowercase hex"
+    , rejectedCase "0x prefix" "0x" "not lowercase hex"
+    ]
+
+testDigestNibbleSuffixParse : Script ()
+testDigestNibbleSuffixParse =
+  checkParseCases "DigestNibbleSuffix" (parseHexText @DigestNibbleSuffix)
+    [ acceptedCase "one nibble" "a"
+    , acceptedCase "64 nibbles" sampleDigestHex
+    , rejectedCase "empty" "" "1 to 64 nibbles"
+    , rejectedCase "65 nibbles" (sampleDigestHex <> "0") "1 to 64 nibbles"
+    , rejectedCase "uppercase" "A" "not lowercase hex"
+    , rejectedCase "non-hex character" "g" "not lowercase hex"
+    , rejectedCase "0x prefix" "0x" "not lowercase hex"
+    ]
+
+-- | The byte helpers keep the 'HexBytes' invariant and fail loudly out of range.
+testHexBytesHelpers : Script ()
+testHexBytesHelpers = do
+  let sampleBytes = parseHexTextOrAbort @HexBytes "00ff10"
+  byteLength sampleBytes === 3
+  hexTextOf (sliceBytes 1 2 sampleBytes) === "ff10"
+  hexTextOf (sliceFrom 2 sampleBytes) === "10"
+  bytesToInt sampleBytes === 65296
+  hexTextOf (intToBytesN 65296 3) === "00ff10"
+  hexTextOf (leftPadTo 5 sampleBytes) === "000000ff10"
+  hexTextOf (sampleBytes <> sampleBytes) === "00ff1000ff10"
+  hexTextOf (utf8Bytes "Core") === "436f7265"
+  hexTextOf (keccak256Bytes (parseHexTextOrAbort "00")) === "bc36789e7a1e281436464229828f817d6612f7b477d66591ff96a9e064bcc98a"
+  hexTextOf (hexBytesOf (parseHexTextOrAbort @GuardianAddress sampleGuardianAddressHex)) === sampleGuardianAddressHex
+  isLeft (parseHexBytesAs @VaaDigest (parseHexTextOrAbort "00")) === True

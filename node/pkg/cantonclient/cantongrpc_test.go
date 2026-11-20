@@ -20,6 +20,20 @@ func partyVal(p string) *apiv2.Value { return &apiv2.Value{Sum: &apiv2.Value_Par
 func int64Val(i int64) *apiv2.Value  { return &apiv2.Value{Sum: &apiv2.Value_Int64{Int64: i}} }
 func textVal(s string) *apiv2.Value  { return &apiv2.Value{Sum: &apiv2.Value_Text{Text: s}} }
 
+// variantVal builds a single-constructor Daml value as the verbose Ledger API returns it.
+func variantVal(variantID *apiv2.Identifier, constructor string, value *apiv2.Value) *apiv2.Value {
+	return &apiv2.Value{Sum: &apiv2.Value_Variant{Variant: &apiv2.Variant{VariantId: variantID, Constructor: constructor, Value: value}}}
+}
+
+func messagePayloadVariantID(packageID string) *apiv2.Identifier {
+	return &apiv2.Identifier{PackageId: packageID, ModuleName: messagePayloadModule, EntityName: messagePayloadEntity}
+}
+
+// messagePayloadVal builds a Wormhole.Core.Bytes.MessagePayload value of the pinned package.
+func messagePayloadVal(payloadHex string) *apiv2.Value {
+	return variantVal(messagePayloadVariantID(pinnedPackageID), messagePayloadConstructor, textVal(payloadHex))
+}
+
 // wormholeRecord builds a WormholeMessage record Value from field overrides,
 // starting from a valid baseline.
 func wormholeRecord(overrides map[string]*apiv2.Value) *apiv2.Value {
@@ -30,7 +44,7 @@ func wormholeRecord(overrides map[string]*apiv2.Value) *apiv2.Value {
 		"sequence":         int64Val(5),
 		"nonce":            int64Val(42),
 		"consistencyLevel": int64Val(0),
-		"payload":          textVal("deadbeef"),
+		"payload":          messagePayloadVal("deadbeef"),
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -47,7 +61,7 @@ func wormholeRecord(overrides map[string]*apiv2.Value) *apiv2.Value {
 }
 
 func TestDecodeWormholeMessageHappyPath(t *testing.T) {
-	msg, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(nil)))
+	msg, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(nil)), pinnedPackageID)
 	require.NoError(t, err)
 	assert.Equal(t, "Operator::1220abcd", msg.Registrar)
 	assert.Equal(t, "Alice::1220ef01", msg.Owner)
@@ -70,8 +84,47 @@ func TestDecodeWormholeMessageErrors(t *testing.T) {
 	}
 	for name, overrides := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(overrides)))
+			_, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(overrides)), pinnedPackageID)
 			assert.Error(t, err)
+		})
+	}
+}
+
+// lookalikePackageIDHex is a package other than the executing one that declares a MessagePayload lookalike.
+const lookalikePackageIDHex = "2222222222222222222222222222222222222222222222222222222222222222"
+
+// The payload decoder checks the variant identity and applies the MessagePayload rule of Wormhole.Core.Bytes.
+func TestDecodeWormholeMessagePayloadShape(t *testing.T) {
+	cases := []struct {
+		name        string
+		payload     *apiv2.Value
+		wantPayload []byte
+		wantErr     string
+	}{
+		{name: "valid", payload: messagePayloadVal("deadbeef"), wantPayload: []byte{0xde, 0xad, 0xbe, 0xef}},
+		{name: "empty", payload: messagePayloadVal(""), wantPayload: []byte{}},
+		{name: "plain text of the 0.9.0 shape", payload: textVal("deadbeef"), wantErr: "is not a variant"},
+		{name: "wrong constructor", payload: variantVal(messagePayloadVariantID(pinnedPackageID), "HexBytes", textVal("deadbeef")), wantErr: "has constructor"},
+		{name: "variant holding an int", payload: variantVal(messagePayloadVariantID(pinnedPackageID), messagePayloadConstructor, int64Val(1)), wantErr: "does not hold text"},
+		{name: "no variant id", payload: variantVal(nil, messagePayloadConstructor, textVal("deadbeef")), wantErr: "has no variant id"},
+		{name: "lookalike package variant id", payload: variantVal(messagePayloadVariantID(lookalikePackageIDHex), messagePayloadConstructor, textVal("deadbeef")), wantErr: "expected the executing package"},
+		{name: "lookalike module", payload: variantVal(&apiv2.Identifier{PackageId: pinnedPackageID, ModuleName: "Lookalike.Bytes", EntityName: messagePayloadEntity}, messagePayloadConstructor, textVal("deadbeef")), wantErr: "expected Wormhole.Core.Bytes:MessagePayload"},
+		{name: "other entity", payload: variantVal(&apiv2.Identifier{PackageId: pinnedPackageID, ModuleName: messagePayloadModule, EntityName: "HexBytes"}, messagePayloadConstructor, textVal("deadbeef")), wantErr: "expected Wormhole.Core.Bytes:MessagePayload"},
+		{name: "uppercase", payload: messagePayloadVal("DEADBEEF"), wantErr: "not lowercase hex"},
+		{name: "0x prefix", payload: messagePayloadVal("0xdeadbeef"), wantErr: "not lowercase hex"},
+		{name: "odd length", payload: messagePayloadVal("deadbee"), wantErr: "odd hex length"},
+		{name: "non-hex", payload: messagePayloadVal("zz"), wantErr: "not lowercase hex"},
+		{name: "missing", payload: nil, wantErr: "missing field"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			msg, err := decodeWormholeMessage(tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{"payload": tc.payload})), pinnedPackageID)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPayload, msg.Payload)
 		})
 	}
 }
@@ -91,7 +144,7 @@ func TestDecodeWormholeMessageBounds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			msg, err := decodeWormholeMessage(tupleResult("00deadbeef",
-				wormholeRecord(map[string]*apiv2.Value{"emitterId": int64Val(tc.emitterID)})))
+				wormholeRecord(map[string]*apiv2.Value{"emitterId": int64Val(tc.emitterID)})), pinnedPackageID)
 			if tc.wantErr {
 				require.ErrorContains(t, err, "emitterId exceeds MaxEmitterID")
 				return
@@ -103,7 +156,7 @@ func TestDecodeWormholeMessageBounds(t *testing.T) {
 }
 
 func TestDecodeWormholeMessageNotARecord(t *testing.T) {
-	_, err := decodeWormholeMessage(partyVal("Operator::1220abcd"))
+	_, err := decodeWormholeMessage(partyVal("Operator::1220abcd"), pinnedPackageID)
 	assert.Error(t, err)
 }
 
@@ -129,7 +182,7 @@ func tupleResult(emitterCid string, message *apiv2.Value) *apiv2.Value {
 // A result without the `_2` element — e.g. a bare WormholeMessage from a
 // pre-tuple core — must error rather than panic or decode to zero values.
 func TestDecodeWormholeMessageRequiresTupleSecondElement(t *testing.T) {
-	_, err := decodeWormholeMessage(wormholeRecord(nil))
+	_, err := decodeWormholeMessage(wormholeRecord(nil), pinnedPackageID)
 	assert.Error(t, err)
 }
 
@@ -139,7 +192,7 @@ func TestDecodeWormholeMessageNeitherShape(t *testing.T) {
 			{Label: "somethingElse", Value: textVal("nope")},
 		},
 	}
-	_, err := decodeWormholeMessage(&apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}})
+	_, err := decodeWormholeMessage(&apiv2.Value{Sum: &apiv2.Value_Record{Record: rec}}, pinnedPackageID)
 	assert.Error(t, err)
 }
 

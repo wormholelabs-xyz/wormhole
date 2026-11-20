@@ -7,9 +7,9 @@
 # is registry-enforced (see State.daml and README §4).
 sdk-version: 3.7.3
 name: wormhole-core
-version: 0.9.0
+version: 0.10.0
 source: daml
-# 0.9.0 is not SCU-compatible with 0.8.x (template fields removed); participants need a fresh wormhole-core line.
+# 0.10.0 is not SCU-compatible with 0.9.0 (byte field types changed); participants need a fresh wormhole-core line.
 dependencies:
   - daml-prim
   - daml-stdlib

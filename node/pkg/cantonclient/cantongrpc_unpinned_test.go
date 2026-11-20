@@ -17,9 +17,11 @@ import (
 
 func unrelatedTemplateEvent(packageID string) *apiv2.Event {
 	return &apiv2.Event{Event: &apiv2.Event_Exercised{Exercised: &apiv2.ExercisedEvent{
-		TemplateId:     &apiv2.Identifier{PackageId: packageID, ModuleName: "Wormhole.Core.State", EntityName: "EmitterRegistry"},
-		Choice:         "PublishMessage",
-		ExerciseResult: tupleResult("00deadbeef", wormholeRecord(nil)),
+		TemplateId: &apiv2.Identifier{PackageId: packageID, ModuleName: "Wormhole.Core.State", EntityName: "EmitterRegistry"},
+		Choice:     "PublishMessage",
+		ExerciseResult: tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{
+			"payload": variantVal(messagePayloadVariantID(packageID), messagePayloadConstructor, textVal("deadbeef")),
+		})),
 	}}}
 }
 

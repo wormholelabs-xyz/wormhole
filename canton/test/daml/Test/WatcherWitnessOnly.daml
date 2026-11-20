@@ -34,7 +34,7 @@ template WitnessedPublisher
         emitterCid   : ContractId Emitter
         coreStateCid : ContractId CoreState
         nonce        : Int
-        payload      : Bytes
+        payload      : MessagePayload
       controller owner
       do
         (_, message) <- exercise emitterCid PublishMessage with
@@ -53,14 +53,14 @@ data WitnessOnlyPublishes = WitnessOnlyPublishes with
 trustedWitnessOnlyNonce : Int
 trustedWitnessOnlyNonce = 31
 
-trustedWitnessOnlyPayload : Bytes
-trustedWitnessOnlyPayload = "a1a1"
+trustedWitnessOnlyPayload : MessagePayload
+trustedWitnessOnlyPayload = parseHexTextOrAbort "a1a1"
 
 forgedWitnessOnlyNonce : Int
 forgedWitnessOnlyNonce = 32
 
-forgedWitnessOnlyPayload : Bytes
-forgedWitnessOnlyPayload = "f2f2"
+forgedWitnessOnlyPayload : MessagePayload
+forgedWitnessOnlyPayload = parseHexTextOrAbort "f2f2"
 
 -- | In ledger order:
 --   1. The trusted owner publishes through the real registry and 'CoreState'.
