@@ -1,63 +1,28 @@
 #!/usr/bin/env bash
-# Create the NttGovernance root and the canonical guardianGovernance CoinFactory, or keep the existing ones.
+# Record the NttGovernance root and the canonical guardianGovernance CoinFactory that AcceptGenesis created
+# (gg_genesis.sh). Stops unless guardianGovernance sees exactly one of each, with the expected signatories.
 # Usage: ntt_governance.sh
 # Precondition: gg_genesis.sh and ntt_upload_dars.sh ran. Output: $LOCALNET_STATE_DIR/ntt-contracts.json.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/ntt_lib.sh"
 
-operator_and_gg="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" '[$op, $gg]')"
-
-existing_roots="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Ntt.Governance:NttGovernance" \
-  | jq --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]')"
-case "$(jq length <<<"$existing_roots")" in
-  0)
-    root_signatories="$operator_and_gg"
-    root_arguments="$(jq -n --arg op "$OPERATOR_PARTY" --arg gg "$GG_PARTY" \
-      '{operator: $op, guardianGovernance: $gg, nextId: "0", consumedGovernance: {map: []}}')"
-    root_signers="$(jq -s 'add' <(operator_signers_json) <(gg_ceremony_signers_json))"
-    if [[ -n "$NTT_CUSTODY_PARTY" ]]; then
-      root_signatories="$(jq -c --arg custody "$NTT_CUSTODY_PARTY" '. + [$custody]' <<<"$root_signatories")"
-      root_arguments="$(jq -c --arg custody "$NTT_CUSTODY_PARTY" '. + {nttCustody: $custody}' <<<"$root_arguments")"
-      root_signers="$(jq -s 'add' <(echo "$root_signers") <(ntt_custody_signers_json))"
-    fi
-    echo "Create NttGovernance (ntt $NTT_VERSION): $(jq -r 'map(split("::")[0]) | join(" + ")' <<<"$root_signatories"), owner keys ${NTT_GG_SIGNING_OWNERS[*]}"
-    root_transaction="$(submit_interactive "ntt-governance-root-$(date +%s)" "$root_signatories" \
-      "$(create_command "$NTT_GOVERNANCE_TEMPLATE" "$root_arguments")" "$root_signers")"
-    root_cid="$(created_contract_id "$root_transaction" ":Wormhole.Ntt.Governance:NttGovernance")"
-    echo "NttGovernance $root_cid (update $(jq -r .updateId <<<"$root_transaction"))"
-    ;;
-  1)
-    root_cid="$(jq -r '.[0].contractId' <<<"$existing_roots")"
-    echo "NttGovernance exists: $root_cid (nextId $(jq -r '.[0].createArgument.nextId' <<<"$existing_roots"))"
-    ;;
-  *)
-    echo "Found $(jq length <<<"$existing_roots") NttGovernance roots for guardianGovernance; expected at most one" >&2
-    exit 1
-    ;;
-esac
+root_event="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Ntt.Governance:NttGovernance" \
+  | jq -ec --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]
+    | if length == 1 then .[0] else error("expected one NttGovernance of guardianGovernance, found \(length); run gg_genesis.sh") end')"
+[[ "$(jq -c '.signatories | sort' <<<"$root_event")" == "$(jq -cn --arg gg "$GG_PARTY" --arg custody "$NTT_CUSTODY_PARTY" '[$gg, $custody] | sort')" ]] \
+  || fail "NttGovernance signatories $(jq -c .signatories <<<"$root_event"), expected guardianGovernance and nttCustody"
+root_cid="$(jq -r .contractId <<<"$root_event")"
+echo "NttGovernance $root_cid (nextId $(jq -r .createArgument.nextId <<<"$root_event"))"
 record_ntt_contract nttGovernance "$root_cid"
 
-existing_factories="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Token.CIP0056.CoinFactory:CoinFactory" \
-  | jq --arg gg "$GG_PARTY" '[.[] | select(.createArgument.admin == $gg)]')"
-case "$(jq length <<<"$existing_factories")" in
-  0)
-    echo "Create CoinFactory: guardianGovernance ${NTT_GG_SIGNING_OWNERS[*]}"
-    factory_transaction="$(submit_interactive "ntt-coin-factory-$(date +%s)" "$(jq -n --arg gg "$GG_PARTY" '[$gg]')" \
-      "$(create_command "$COIN_FACTORY_TEMPLATE" "$(jq -n --arg gg "$GG_PARTY" '{admin: $gg}')")" \
-      "$(gg_ceremony_signers_json)")"
-    factory_cid="$(created_contract_id "$factory_transaction" ":Token.CIP0056.CoinFactory:CoinFactory")"
-    echo "CoinFactory $factory_cid (update $(jq -er .updateId <<<"$factory_transaction"))"
-    ;;
-  1)
-    factory_cid="$(jq -er '.[0].contractId' <<<"$existing_factories")"
-    echo "CoinFactory exists: $factory_cid"
-    ;;
-  *)
-    echo "Found $(jq length <<<"$existing_factories") CoinFactory contracts with admin guardianGovernance; expected at most one" >&2
-    exit 1
-    ;;
-esac
+factory_event="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Token.CIP0056.CoinFactory:CoinFactory" \
+  | jq -ec --arg gg "$GG_PARTY" '[.[] | select(.createArgument.admin == $gg)]
+    | if length == 1 then .[0] else error("expected one CoinFactory with admin guardianGovernance, found \(length); run gg_genesis.sh") end')"
+[[ "$(jq -c .signatories <<<"$factory_event")" == "$(jq -cn --arg gg "$GG_PARTY" '[$gg]')" ]] \
+  || fail "CoinFactory signatories $(jq -c .signatories <<<"$factory_event"), expected guardianGovernance"
+factory_cid="$(jq -r .contractId <<<"$factory_event")"
+echo "CoinFactory $factory_cid"
 record_ntt_contract coinFactory "$factory_cid"
 
 for validator_name in app-provider sv app-user; do
