@@ -6,9 +6,13 @@
 module Test.ForgedByteValues where
 
 import Daml.Script
+import DA.Date (Month(Jan), date)
+import DA.Map qualified as Map
 import DA.Optional (fromSome)
+import DA.Time (time)
 import DA.Set qualified as Set
 import Wormhole.Core.Bytes
+import Wormhole.Core.GuardianSet (GuardianSet(..))
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
@@ -18,10 +22,13 @@ import Test.TestCore (devnetGuardian, devnetGuardianPubKey, govSetFeeVAA, regist
 data ForgedValueCase
   = CoreStateGovernanceContract EmitterAddress
   | CoreStateGuardianAddress GuardianAddress
+  | CoreStateExpiredSetGuardianAddress GuardianAddress
   | CoreStateConsumedGovernanceDigest VaaDigest
   | ParseAndVerifyEncodedVaa EncodedVaa
   | ParseAndVerifyGuardianPublicKey GuardianPublicKey
+  | ParseAndVerifySecondGuardianPublicKey GuardianPublicKey
   | SubmitGovernanceEncodedVaa EncodedVaa
+  | SubmitGovernanceGuardianPublicKey GuardianPublicKey
   | VerifyAndConsumeEncodedVaa EncodedVaa
   | VerifyAndConsumeGuardianPublicKey GuardianPublicKey
   | PublishMessagePayload MessagePayload
@@ -67,6 +74,9 @@ runForgedValueCase partyLabel forgedCase = do
       parseAndVerifyWith encodedVAA pubKeys =
         trySubmit (actAs relayer <> disclose coreStateDisclosure) do
           exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = relayer, encodedVAA, pubKeys
+      submitGovernanceWith encodedVAA pubKeys =
+        trySubmit (actAs relayer <> disclose coreStateDisclosure) do
+          exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA, pubKeys
   case forgedCase of
     CoreStateGovernanceContract forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with governanceContract = forgedAddress)
@@ -74,16 +84,24 @@ runForgedValueCase partyLabel forgedCase = do
       createCoreStateWith (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
         GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [forgedAddress]
         coreState.feeInstrument coreState.feeRecipient)
+    CoreStateExpiredSetGuardianAddress forgedAddress -> describeSubmitOutcome <$>
+      createCoreStateWith (coreState with
+        guardianSetIndex = 1
+        guardianSets = Map.fromList
+          [ (0, GuardianSet with keys = [forgedAddress], expirationTime = Some (time (date 2026 Jan 1) 0 0 0))
+          , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None) ])
     CoreStateConsumedGovernanceDigest forgedDigest -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with consumedGovernance = Set.singleton forgedDigest)
     ParseAndVerifyEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       parseAndVerifyWith forgedVaa devnetPublicKeys
     ParseAndVerifyGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
       parseAndVerifyWith govSetFeeVAA [(0, forgedKey)]
+    ParseAndVerifySecondGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
+      parseAndVerifyWith govSetFeeVAA [(0, devnetGuardianPubKey), (1, forgedKey)]
     SubmitGovernanceEncodedVaa forgedVaa -> describeSubmitOutcome <$>
-      trySubmit (actAs relayer <> disclose coreStateDisclosure) do
-        exerciseCmd coreStateCid SubmitGovernanceVAA with
-          submitter = relayer, encodedVAA = forgedVaa, pubKeys = devnetPublicKeys
+      submitGovernanceWith forgedVaa devnetPublicKeys
+    SubmitGovernanceGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
+      submitGovernanceWith govSetFeeVAA [(0, forgedKey)]
     VerifyAndConsumeEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       verifyAndConsumeWith forgedVaa devnetPublicKeys
     VerifyAndConsumeGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
