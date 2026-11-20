@@ -26,7 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 # Install the dpm CLI, then the SDK version pinned in daml.yaml.
 RUN curl -fsSL https://get.digitalasset.com/install/install.sh | sh
-ENV PATH="/root/.dpm/bin:${PATH}"
+# The installer activates the latest SDK; pin dpm runs outside a daml.yaml project (sandbox, script).
+ENV PATH="/root/.dpm/bin:${PATH}" DPM_SDK_VERSION="${DAML_SDK_VERSION}"
 WORKDIR /canton-build
 COPY multi-package.yaml ./
 # Vendored CIP-0056 token-standard interface DARs (core fees data-depend on
@@ -62,7 +63,7 @@ ARG DAML_SDK_VERSION
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -fsSL https://get.digitalasset.com/install/install.sh | sh
-ENV PATH="/root/.dpm/bin:${PATH}"
+ENV PATH="/root/.dpm/bin:${PATH}" DPM_SDK_VERSION="${DAML_SDK_VERSION}"
 WORKDIR /canton
 # The production (clean) core DAR, for reference, plus the test DAR — which packs
 # core's DALFs and the setup/integration scripts. The bootstrap uploads the test
