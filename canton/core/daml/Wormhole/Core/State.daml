@@ -161,7 +161,7 @@ template CoreState
       , checkGuardianSetsAreConsistent guardianSetIndex guardianSets
       ]
 
-    -- | Read-only VAA verification against the CURRENT guardian set, for the
+    -- | Read-only VAA verification against the named, unexpired guardian set, for the
     -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
     -- guardian addresses in 'verifyVAA'.
     --
@@ -442,7 +442,7 @@ template EmitterRegistry
   with
     guardianGovernance : Party  -- signatory; also pinned in RegisterEmitter's
                                 -- fee charge
-    onboardingFeeAdmin : Party  -- sets registrationFee only; not a signatory
+    onboardingFeeAdmin : Party  -- controller of SetRegistrationFee
     registrationFee    : Int    -- onboarding fee, 10^-10 feeInstrument units;
                                 -- 0 for free; changed by SetRegistrationFee
     nextId             : Int
@@ -455,16 +455,20 @@ template EmitterRegistry
 
     -- | Re-prices registration and keeps @nextId@ and the admin. The core
     -- governance VAA set (sdk/vaa/payloads.go) has no registration-fee action,
-    -- so a delegated admin sets it; the template precondition bounds it.
+    -- so a delegated admin sets it in 0 .. maxOnboardingFee.
     choice SetRegistrationFee : ContractId EmitterRegistry
       with
         newRegistrationFee : Int
       controller onboardingFeeAdmin
       do
+        assertMsg "registration fee must not be negative" (newRegistrationFee >= 0)
+        assertMsg "registration fee exceeds maxOnboardingFee" (newRegistrationFee <= maxOnboardingFee)
         successor <- create this with registrationFee = newRegistrationFee
         successorRegistry <- fetch successor
+        assertMsg "SetRegistrationFee did not set the fee" (successorRegistry.registrationFee == newRegistrationFee)
         assertMsg "SetRegistrationFee changed nextId" (successorRegistry.nextId == nextId)
         assertMsg "SetRegistrationFee changed the admin" (successorRegistry.onboardingFeeAdmin == onboardingFeeAdmin)
+        assertMsg "SetRegistrationFee changed guardianGovernance" (successorRegistry.guardianGovernance == guardianGovernance)
         pure successor
 
     -- | Emergency ceremony: the core VAA set has no admin action.
@@ -472,7 +476,17 @@ template EmitterRegistry
       with
         newOnboardingFeeAdmin : Party
       controller guardianGovernance
-      do create this with onboardingFeeAdmin = newOnboardingFeeAdmin
+      do
+        successor <- create this with onboardingFeeAdmin = newOnboardingFeeAdmin
+        successorRegistry <- fetch successor
+        assertMsg "ReplaceEmitterRegistryFeeAdmin did not set the admin"
+          (successorRegistry.onboardingFeeAdmin == newOnboardingFeeAdmin)
+        assertMsg "ReplaceEmitterRegistryFeeAdmin changed nextId" (successorRegistry.nextId == nextId)
+        assertMsg "ReplaceEmitterRegistryFeeAdmin changed the registration fee"
+          (successorRegistry.registrationFee == registrationFee)
+        assertMsg "ReplaceEmitterRegistryFeeAdmin changed guardianGovernance"
+          (successorRegistry.guardianGovernance == guardianGovernance)
+        pure successor
 
     -- | Direct, requester-submitted registration: allocates the next id and
     -- creates the co-signed 'Emitter' in one transaction — the flexible
@@ -550,7 +564,7 @@ template ReplayRootRegistry
   with
     guardianGovernance : Party  -- signatory; CoreState authenticity anchor,
                                 -- pinned in ClaimReplayRoot's fee charge
-    onboardingFeeAdmin : Party  -- sets claimFee only; not a signatory
+    onboardingFeeAdmin : Party  -- controller of SetClaimFee
     claimFee           : Int    -- onboarding fee, 10^-10 feeInstrument units; 0 for free
   where
     signatory guardianGovernance
@@ -560,14 +574,30 @@ template ReplayRootRegistry
       with
         newClaimFee : Int
       controller onboardingFeeAdmin
-      do create this with claimFee = newClaimFee
+      do
+        assertMsg "claim fee must not be negative" (newClaimFee >= 0)
+        assertMsg "claim fee exceeds maxOnboardingFee" (newClaimFee <= maxOnboardingFee)
+        successor <- create this with claimFee = newClaimFee
+        successorRegistry <- fetch successor
+        assertMsg "SetClaimFee did not set the fee" (successorRegistry.claimFee == newClaimFee)
+        assertMsg "SetClaimFee changed the admin" (successorRegistry.onboardingFeeAdmin == onboardingFeeAdmin)
+        assertMsg "SetClaimFee changed guardianGovernance" (successorRegistry.guardianGovernance == guardianGovernance)
+        pure successor
 
     -- | Emergency ceremony: the core VAA set has no admin action.
     choice ReplaceReplayRootRegistryFeeAdmin : ContractId ReplayRootRegistry
       with
         newOnboardingFeeAdmin : Party
       controller guardianGovernance
-      do create this with onboardingFeeAdmin = newOnboardingFeeAdmin
+      do
+        successor <- create this with onboardingFeeAdmin = newOnboardingFeeAdmin
+        successorRegistry <- fetch successor
+        assertMsg "ReplaceReplayRootRegistryFeeAdmin did not set the admin"
+          (successorRegistry.onboardingFeeAdmin == newOnboardingFeeAdmin)
+        assertMsg "ReplaceReplayRootRegistryFeeAdmin changed the claim fee" (successorRegistry.claimFee == claimFee)
+        assertMsg "ReplaceReplayRootRegistryFeeAdmin changed guardianGovernance"
+          (successorRegistry.guardianGovernance == guardianGovernance)
+        pure successor
 
     -- @payer@ funds the claim fee and co-controls, mirroring
     -- 'PublishMessage'/'RegisterEmitter': a direct claimant is its own payer
