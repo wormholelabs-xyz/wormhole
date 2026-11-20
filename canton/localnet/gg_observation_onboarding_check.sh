@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Observation-first onboarding check (L1 runbook rule 3): a guardianGovernance host at Observation stays below the
 # confirmation threshold; after promotion to Confirmation it counts.
-#   1. Set guardian4 to Observation. Disconnect sv. guardian4 must be connected. A gg PublishMessage with only
-#      app-provider confirming must time out, with guardianGovernance as the one unresponsive party, and the mediator
+#   1. Set guardian4 to Observation. Disconnect app-provider. guardian4 must be connected. A gg PublishMessage with only
+#      sv confirming must time out, with guardianGovernance as the one unresponsive party, and the mediator
 #      log must show no guardian4 verdict in that time.
-#   2. Promote guardian4 to Confirmation. Disconnect sv. The same PublishMessage must commit, because app-provider and
-#      guardian4 reach the threshold of 2.
+#   2. Promote guardian4 to Confirmation. Disconnect app-provider. The same PublishMessage must commit, because sv and
+#      guardian4 reach the threshold of 2. CorePublisher submits on sv, so sv stays connected.
 # Precondition: guardian4 hosts guardianGovernance at Confirmation (gg_hosting_change_check.sh passes) and an
-# Operator-owned Emitter exists (gg_publish_and_govern.sh ran). The mediator timeout runs on sequencer time, so a
-# background ticker requests time proofs while sv is offline. The EXIT trap reconnects sv and restores guardian4 to
-# Confirmation.
+# CorePublisher Emitter exists (gg_publish_and_govern.sh ran). The mediator timeout runs on sequencer time, so a
+# background ticker requests time proofs from sv while app-provider is offline. The EXIT trap reconnects app-provider
+# and restores guardian4 to Confirmation.
 # Usage: gg_observation_onboarding_check.sh [owner-name owner-name]
 set -euo pipefail
 # shellcheck source=gg_lib.sh
@@ -32,8 +32,8 @@ set_guardian4_permission() {
 restore_state() {
   local exit_status=$?
   stop_clock_ticker
-  if ! set_participant_connection reconnect sv; then
-    echo "ERROR: sv stays disconnected; reconnect with participant_connection.canton" >&2
+  if ! set_participant_connection reconnect app-provider; then
+    echo "ERROR: app-provider stays disconnected; reconnect with participant_connection.canton" >&2
     exit_status=1
   fi
   set_guardian4_permission Confirmation || exit_status=1
@@ -43,14 +43,15 @@ restore_state() {
 trap restore_state EXIT
 
 # require_timeout_rejection <output-prefix>: the completion in <prefix>.out must be MEDIATOR_SAYS_TX_TIMED_OUT with
-# guardianGovernance as the only unresponsive party.
+# guardianGovernance and feeCustody (CoreState signatories) as the unresponsive parties.
 require_timeout_rejection() {
   local summary
   summary="$(completion_summary "$1.out" 2>/dev/null || echo '{}')"
   jq -e '.message | test("^MEDIATOR_SAYS_TX_TIMED_OUT")' <<<"$summary" >/dev/null 2>&1 \
     || { echo "FAIL: expected MEDIATOR_SAYS_TX_TIMED_OUT" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
-  jq -e --arg party "$GG_PARTY" '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) == [$party]' <<<"$summary" >/dev/null 2>&1 \
-    || { echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
+  jq -e --arg gg "$GG_PARTY" --arg fee "$FEE_CUSTODY_PARTY" \
+    '(.unresponsiveParties // "") | split(",") | map(select(length > 0)) | sort == ([$gg, $fee] | sort)' <<<"$summary" >/dev/null 2>&1 \
+    || { echo "FAIL: expected unresponsiveParties to be exactly $GG_PARTY and $FEE_CUSTODY_PARTY" >&2; cat "$1.out" "$1.err" >&2; exit 1; }
   echo "PASS: Observation host does not count; the PublishMessage timed out. $summary"
 }
 
@@ -74,25 +75,25 @@ require_no_guardian4_verdict() {
   fi
 }
 
-echo "Step 1: guardian4 at Observation, sv disconnected. A gg PublishMessage with one confirming host must time out."
+echo "Step 1: guardian4 at Observation, app-provider disconnected. A gg PublishMessage with one confirming host must time out."
 set_guardian4_permission Observation || fail "cannot set guardian4 to Observation"
-set_participant_connection disconnect sv || fail "cannot disconnect sv"
+set_participant_connection disconnect app-provider || fail "cannot disconnect app-provider"
 check_connected_to_gg_synchronizer "$GUARDIAN4_JSON_API_URL" guardian4 || fail "guardian4 must be connected for the Observation step"
 echo "PASS: guardian4 is connected to $LOGICAL_SYNCHRONIZER_ID"
-start_clock_ticker "$OBSERVATION_TICKER_SECONDS"
+start_clock_ticker "$OBSERVATION_TICKER_SECONDS" sv
 observation_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SUBMIT_AWAIT_COMPLETION=true publish_message "observation-one-host-$(date +%s)" "6f627365727665" \
   > "$gg_work_dir/observe.out" 2> "$gg_work_dir/observe.err" || true
 require_timeout_rejection "$gg_work_dir/observe"
 require_no_guardian4_verdict "$observation_started_at"
 stop_clock_ticker
-set_participant_connection reconnect sv || fail "cannot reconnect sv after step 1"
+set_participant_connection reconnect app-provider || fail "cannot reconnect app-provider after step 1"
 
-echo "Step 2: promote guardian4 to Confirmation, sv disconnected. The same PublishMessage must commit."
+echo "Step 2: promote guardian4 to Confirmation, app-provider disconnected. The same PublishMessage must commit."
 set_guardian4_permission Confirmation || fail "cannot promote guardian4 to Confirmation"
-set_participant_connection disconnect sv || fail "cannot disconnect sv"
+set_participant_connection disconnect app-provider || fail "cannot disconnect app-provider"
 promote_transaction="$(publish_message "observation-promoted-$(date +%s)" "70726f6d6f7465")" \
   || fail "the PublishMessage did not commit after promotion to Confirmation"
-set_participant_connection reconnect sv || fail "cannot reconnect sv after step 2"
+set_participant_connection reconnect app-provider || fail "cannot reconnect app-provider after step 2"
 echo "PASS: Confirmation host counts; the PublishMessage committed, update $(jq -er .updateId <<<"$promote_transaction")"
 echo "PASS: gg_observation_onboarding_check"

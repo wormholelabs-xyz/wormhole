@@ -91,10 +91,10 @@ register_transaction="$(submit_local app-provider "ntt-register-lock-unlock-$run
       factory: {tag: "TransferFactoryCid", value: $factory}, coreStateCid: $coreState, consistencyLevel: "0",
       emitterFeeAllocation: null, claimFeeAllocation: null, feeAllocation: null}')")" \
   "$(json_array \
-    "$(operator_disclosure :Wormhole.Ntt.Governance:NttGovernance "$governance_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
+    "$(gg_disclosure :Wormhole.Ntt.Governance:NttGovernance "$governance_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:EmitterRegistry "$emitter_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:ReplayRootRegistry "$replay_root_registry_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 register_result="$(exercise_result "$register_transaction" :Wormhole.Ntt.Governance:NttGovernance RegisterManager)"
 manager_cid="$(jq -r ._2 <<<"$register_result")"
 ledger_cid="$(jq -r ._4 <<<"$register_result")"
@@ -115,8 +115,8 @@ set_peer_transaction="$(submit_local app-provider "ntt-lock-unlock-set-peer-$run
     --arg coreState "$core_state_cid" --arg admin "$custodian_party" '{
       chainId: $chain, peer: {managerAddress: $manager, transceiverAddress: $transceiver, decimals: "8"},
       transceiverEmitterCid: $emitter, coreStateCid: $coreState, consistencyLevel: "0", payer: $admin, feeAllocation: null}')")" \
-  "$(json_array "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
+  "$(json_array "$(gg_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")")")"
 manager_cid="$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -r ._1)"
 echo "TransceiverRegistration message $(message_summary "$(exercise_result "$set_peer_transaction" :Wormhole.Ntt.Manager:NttManager SetPeer | jq -c ._2)")"
 
@@ -137,10 +137,10 @@ lock_transaction="$(submit_local app-user "ntt-lock-$run_label" "$(jq -n --arg p
       recipientChain: $chain, recipientAddress: $recipient, rawAmount: $rawAmount, nonce: $nonce, consistencyLevel: "0",
       inputHoldingCids: $inputs, feeAllocation: null, extraArgs: $extraArgs}')")" \
   "$(jq -c '. + $registry' --argjson registry "$(registry_disclosures "$lock_registry")" <<<"$(json_array \
-    "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
-    "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$ledger_cid")")")")"
+    "$(gg_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:Emitter "$emitter_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
+    "$(gg_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$ledger_cid")")")")"
 lock_message="$(exercise_result "$lock_transaction" :Wormhole.Ntt.Manager:NttManager Transfer)"
 echo "outbound NTT message $(message_summary "$lock_message") update $(jq -r .updateId <<<"$lock_transaction")"
 ledger_after_lock="$(created_contract_argument "$lock_transaction" ":Wormhole.Ntt.Ledger:LockedLedger")"
@@ -196,10 +196,10 @@ release_command() {
 # release_disclosures <replay-node-cid> <ledger-cid> <custody-pot-cid> <registry-json>
 release_disclosures() {
   jq -c '. + $registry' --argjson registry "$(registry_disclosures "$4")" <<<"$(json_array \
-    "$(operator_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
-    "$(operator_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
-    "$(operator_disclosure :Wormhole.Core.Replay:ReplayNode "$1")" \
-    "$(operator_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$2")" \
+    "$(gg_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \
+    "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" \
+    "$(gg_disclosure :Wormhole.Core.Replay:ReplayNode "$1")" \
+    "$(gg_disclosure :Wormhole.Ntt.Ledger:LockedLedger "$2")" \
     "$(disclosed_contract app-provider "$custodian_party" :Splice.Amulet:Amulet "$3")")"
 }
 relayer_only="$(jq -n --arg relayer "$relayer_party" '[$relayer]')"

@@ -88,7 +88,7 @@ for authority_case in "${authority_cases[@]}"; do
   signer_party_names="$(jq -r 'keys | map(split("::")[0]) | join("+")' <<<"$signers")"
   echo "Case $case_name: actAs $act_as_names, signatory ${signatory%%::*}, signatures for $signer_party_names"
   submission_status=0
-  submit_interactive "custody-$case_name-$(date +%s)" "$act_as" "$(ceremony_probe_create_command "$signatory" "$case_name")" \
+  submit_guardian_ceremony "custody-$case_name-$(date +%s)" "$act_as" "$(ceremony_probe_create_command "$signatory" "$case_name")" \
     "$signers" > "$gg_work_dir/case.out" 2> "$gg_work_dir/case.err" || submission_status=$?
   if [[ "$expected" == commit ]]; then
     if [[ "$submission_status" -ne 0 ]]; then
