@@ -1219,7 +1219,7 @@ Use the target audience of your participant as the value:
 | Canton participant with `target-audience` in its Ledger API `auth-services` | That `target-audience` value. |
 | Canton participant without `target-audience` | `https://daml.com/jwt/aud/participant/<participantId>`. |
 
-The value must not start or end with a space.
+The value must not contain whitespace or control characters.
 A wrong value causes the error `Audience doesn't match the target value` on the participant.
 References:
 

@@ -1074,7 +1074,7 @@ The OAuth2 flags populate `Auth`:
 | `--cantonAuthTokenURL` | `TokenURL` | Set with the client ID and the client secret, or not at all. |
 | `--cantonAuthClientID` | `ClientID` | Same rule. |
 | `--cantonAuthClientSecret` | `ClientSecret` | Same rule. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
-| `--cantonAuthAudience` | `Audience` | Optional. Needs the three flags above. No leading or trailing whitespace. |
+| `--cantonAuthAudience` | `Audience` | Optional. Needs the three flags above. No whitespace or control characters. |
 
 `WatcherConfig.Create` rejects OAuth2 in unsafe dev mode, because OAuth2 needs TLS.
 With `Audience` set, the token request sends it as the `audience` parameter.
