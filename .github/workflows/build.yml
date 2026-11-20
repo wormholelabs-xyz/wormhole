@@ -278,7 +278,7 @@ jobs:
       - name: Run the NTT LocalNet library table test
         run: bash canton/localnet/test/ntt_lib_test.sh
 
-      - name: Run the curl maximum time table test of the core upgrade scripts
+      - name: Run the curl maximum time table test of gg_lib.sh, the watcher harness and the publish scan
         run: bash canton/localnet/test/curl_calls_are_bounded_test.sh
 
       - name: Run the canary gate decision table test

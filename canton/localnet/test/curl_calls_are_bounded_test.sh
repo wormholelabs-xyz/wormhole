@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Table-driven test: each curl call of the core upgrade scripts has a maximum time.
+# Table-driven test: each curl call of gg_lib.sh, watcher_harness_lib.sh and publish_message_scan.sh has a maximum time.
 # A "helper" file calls curl through curl_bounded of gg_lib.sh. Each curl call of a "standalone" file sets its own
 # --connect-timeout and --max-time.
 # Usage: canton/localnet/test/curl_calls_are_bounded_test.sh
