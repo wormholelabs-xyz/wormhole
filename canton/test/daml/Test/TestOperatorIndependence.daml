@@ -433,7 +433,7 @@ testShadowAnchorsAreRejected = do
       rogueParties = RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance
   shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId defaultGovernanceContract
-                 (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
                  feeInstrument rogueFeeCustody)
   shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
   emitterCid <- registerEmitterAs bridge owner

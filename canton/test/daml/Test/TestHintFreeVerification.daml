@@ -18,7 +18,7 @@ import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA ()
 import Test.TestCore
-  ( devnetGuardian, devnetGuardianMember, devnetGuardianPubKey, devnetGuardianSet1Key, devnetGuardianSet1PubKey
+  ( devnetGenesisGuardian, devnetGuardian, devnetGuardianMember, devnetGuardianPubKey, devnetGuardianSet1Key, devnetGuardianSet1PubKey
   , govGuardianSetUpgradeVAA, govSetFeeVAA, numberCases, set1MessageVAA, setup )
 
 -- | Set 1 member of 'govGuardianSetUpgradeVAA' with its key attached.
@@ -138,7 +138,7 @@ testAttachRejectsExpiredSet = do
   now <- getTime
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-        GenesisGuardianSet with guardianSetIndex = 7, guardians = [devnetGuardianMember]
+        GenesisGuardianSet with guardianSetIndex = 7, guardians = [devnetGenesisGuardian]
         feeInstrument feeCustody
       expiringSet6 = GuardianSet with
         members = [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = None]
@@ -146,6 +146,7 @@ testAttachRejectsExpiredSet = do
   coreStateCid <- submit (actAs guardianGovernance <> actAs feeCustody) do
     createCmd genesisState with
       guardianSets = Map.insert 6 expiringSet6 genesisState.guardianSets
+      consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
   passTime (seconds 1)
   attachAs guardianGovernance relayer coreStateCid 6 [devnetGuardianSet1PubKey]
     >>= checkSubmitOutcome "expired set 6" (Some "attach: guardian set 6 has expired")
@@ -171,10 +172,14 @@ testCoreStatePreconditionChecksPublicKeyBinding = do
     feeCustody <- allocateParty ("BindingFeeCustody" <> show caseNumber)
     placeholderFeeInstrumentAdmin <- allocateParty ("BindingUnusedFeeInstrumentAdmin" <> show caseNumber)
     let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
+        genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+          GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
+          feeInstrument feeCustody
+    -- A governance digest lifts the genesis rule, so each row tests the binding alone.
     createResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do
-      createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-        GenesisGuardianSet with guardianSetIndex = 0, guardians = members
-        feeInstrument feeCustody)
+      createCmd genesisState with
+        guardianSets = Map.fromList [(0, GuardianSet with members, expirationTime = None)]
+        consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
     checkSubmitOutcome caseName (if expectAccepted then None else Some "precondition") createResult
 
 -- | Each property of the member validator, with its error text.
@@ -212,9 +217,9 @@ testGuardianSetUpgradeCarriesKnownKeys = do
   placeholderFeeInstrumentAdmin <- allocateParty "CarryUnusedFeeInstrumentAdmin"
   now <- getTime
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
-      genesisWith members = mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-        GenesisGuardianSet with guardianSetIndex = 0, guardians = members
-        feeInstrument feeCustody
+      genesisWith members = (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+        GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
+        feeInstrument feeCustody) with guardianSets = Map.fromList [(0, GuardianSet with members, expirationTime = None)]
       upgradedSet1 genesisState newKeys = do
         upgraded <- applyGovernance genesisState now (GuardianSetUpgrade with chain = 0, newIndex = 1, newKeys)
         pure ((fromSome (Map.lookup 1 upgraded.guardianSets)).members)

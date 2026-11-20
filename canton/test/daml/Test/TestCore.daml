@@ -34,6 +34,9 @@ devnetGuardianPubKey = parseHexTextOrAbort "04d4a4629979f0c9fa0f0bb54edf33f87c8c
 devnetGuardianMember : GuardianSetMember
 devnetGuardianMember = GuardianSetMember with address = devnetGuardian, publicKey = Some devnetGuardianPubKey
 
+devnetGenesisGuardian : GenesisGuardian
+devnetGenesisGuardian = GenesisGuardian with address = devnetGuardian, publicKey = devnetGuardianPubKey
+
 unkeyedMembersOf : [GuardianAddress] -> [GuardianSetMember]
 unkeyedMembersOf = map (\address -> GuardianSetMember with address, publicKey = None)
 
@@ -96,7 +99,7 @@ setupWithGenesisGuardianSetIndex partyLabel genesisIndex mInstrument = do
   csId <- submit (actAs guardianGovernance <> actAs feeCustody) do
     createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId
                  defaultGovernanceContract
-                 GenesisGuardianSet with guardianSetIndex = genesisIndex, guardians = [devnetGuardianMember]
+                 GenesisGuardianSet with guardianSetIndex = genesisIndex, guardians = [devnetGenesisGuardian]
                  feeInstrument feeCustody)
   _ <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
   _ <- submit guardianGovernance do createCmd (mkInitialReplayRootRegistry registryParties 0)
@@ -342,7 +345,7 @@ testGenesisRequiresGuardianGovernance = do
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
-                       GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]
+                       GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
                        feeInstrument feeCustody
   submitMustFail stranger do createCmd genesisState
   submitMustFail guardianGovernance do createCmd genesisState
@@ -434,7 +437,7 @@ testGuardianSetUpgradeIndexFromNonZeroGenesis = do
                        defaultGovernanceContract
                        GenesisGuardianSet with
                          guardianSetIndex = nonZeroGenesisGuardianSetIndex
-                         guardians = [devnetGuardianMember]
+                         guardians = [devnetGenesisGuardian]
                        feeInstrument feeCustody
       upgradeTo newIndex = applyGovernance genesisState now
         (GuardianSetUpgrade with chain = 0, newIndex, newKeys = [devnetGuardianSet1Key])
@@ -469,10 +472,13 @@ tryCreateCoreStateWithGuardianSets partyLabel currentIndex storedSets = do
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
-                       GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]
+                       GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
                        feeInstrument feeCustody
   trySubmit (actAs guardianGovernance <> actAs feeCustody) do
-    createCmd genesisState with guardianSetIndex = currentIndex, guardianSets = storedSets
+    -- A governance digest lifts the genesis key rule, so each row tests the set rules alone.
+    createCmd genesisState with
+      guardianSetIndex = currentIndex, guardianSets = storedSets
+      consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
 
 -- | The 'CoreState' template precondition rejects each malformed guardian set map.
 testCoreStatePreconditionRejectsMalformedGuardianSets : Script ()
@@ -542,7 +548,7 @@ testGuardianSetUpgradeRejectsMalformedAddresses = do
   let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
       genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
                        defaultGovernanceContract
-                       GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]
+                       GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
                        feeInstrument feeCustody
       upgradeTo newKeys = applyGovernance genesisState now (GuardianSetUpgrade with chain = 0, newIndex = 1, newKeys)
   forA_

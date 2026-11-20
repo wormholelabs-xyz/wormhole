@@ -16,10 +16,10 @@ import Wormhole.Core.State
 import Wormhole.Core.Setup
 import Wormhole.Core.VAA (parseVAA)
 import Test.TestCore
-  ( checkCoreStateCreateOutcome, devnetGuardianMember, devnetGuardianSet1Key
+  ( checkCoreStateCreateOutcome, devnetGenesisGuardian, devnetGuardianMember, devnetGuardianSet1Key
   , govContractUpgradeVAA, govGuardianSetUpgrade7To8VAA, govGuardianSetUpgradeVAA, govSetFeeVAA
   , govSetFeeVAASignedBySet7, govTransferFeesVAA, nonZeroGenesisGuardianSetIndex, numberCases
-  , set0SetFeeZeroVAA, unkeyedMembersOf )
+  , devnetGuardianSet1PubKey, set0SetFeeZeroVAA )
 import Test.TestRedTeamCore (checkAttackFailedWith)
 
 ----------------------------------------------------------------------
@@ -50,7 +50,7 @@ genesisStateWithLabel partyLabel genesisIndex = do
   feeCustody <- allocateParty ("BoundsFeeCustody" <> partyLabel)
   placeholderFeeInstrumentAdmin <- allocateParty ("BoundsUnusedFeeInstrumentAdmin" <> partyLabel)
   pure (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-          GenesisGuardianSet with guardianSetIndex = genesisIndex, guardians = [devnetGuardianMember]
+          GenesisGuardianSet with guardianSetIndex = genesisIndex, guardians = [devnetGenesisGuardian]
           (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") feeCustody)
 
 tryCreateCoreState : CoreState -> Script (Either SubmitError (ContractId CoreState))
@@ -94,7 +94,9 @@ data CoreStateShapeCase = CoreStateShapeCase with
     isAccepted    : Bool
 
 previousGuardianSetExpiringAt : Time -> GuardianSet
-previousGuardianSetExpiringAt expiry = GuardianSet with members = unkeyedMembersOf [devnetGuardianSet1Key], expirationTime = Some expiry
+previousGuardianSetExpiringAt expiry = GuardianSet with
+  members = [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey]
+  expirationTime = Some expiry
 
 -- | @previousCount@ previous sets directly below @currentIndex@, all expiring at @expiry@, plus the current set.
 guardianSetsWithPrevious : Int -> Int -> Time -> Map Int GuardianSet

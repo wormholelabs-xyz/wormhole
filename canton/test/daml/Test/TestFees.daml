@@ -16,7 +16,7 @@ import Wormhole.Core.Fees (feeToDecimal, emptyExtraArgs)
 import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Test.MockToken
-import Test.TestCore (setupWithInstrument, registerEmitter, govSetFeeVAA, devnetGuardianMember)
+import Test.TestCore (setupWithInstrument, registerEmitter, govSetFeeVAA, devnetGenesisGuardian)
 import Wormhole.Core.Bytes
 
 -- | Bridge bootstrapped with a mock fee instrument; returns the pieces every
@@ -147,7 +147,7 @@ testFeeValidationMatrix = do
   fakeFeeCustody <- allocateParty "MatrixFakeFeeCustody"
   fakeCsId <- submit (actAs fakeGov <> actAs fakeFeeCustody) do
     createCmd (mkInitialCoreState fakeGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]) inst fakeFeeCustody)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) inst fakeFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure fakeGov fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
@@ -379,7 +379,7 @@ testPublishPinsGuardianGovernance = do
   rogueFeeCustody <- allocateParty "RoguePublishFeeCustody"
   fakeCsId <- submit (actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]) inst rogueFeeCustody)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) inst rogueFeeCustody)
   fakeCsId' <- submit rogueGov do
     exerciseCmd fakeCsId SubmitGovernanceVAA with
       submitter = rogueGov
@@ -414,7 +414,7 @@ testRegisterEmitterPinsGuardianGovernance = do
   rogueFeeCustody <- allocateParty "RogueRegFeeCustody"
   fakeCsId <- submit (actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]) inst rogueFeeCustody)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) inst rogueFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure rogueGov fakeCsId
   feePay <- mintAndAllocate mockAdmin bob rogueFeeCustody inst (feeToDecimal 500)
   res <- trySubmit (actAs bob <> disclose regDisc <> disclose fakeDisc) do
@@ -482,7 +482,7 @@ testClaimReplayRootPinsGuardianGovernance = do
   rogueFeeCustody <- allocateParty "RogueClaimFeeCustody"
   fakeCsId <- submit (actAs rogueGov <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGov solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]) inst rogueFeeCustody)
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) inst rogueFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure rogueGov fakeCsId
   feePay <- mintAndAllocate mockAdmin carol rogueFeeCustody inst (feeToDecimal 300)
   res <- trySubmit (actAs carol <> disclose regDisc <> disclose fakeDisc) do

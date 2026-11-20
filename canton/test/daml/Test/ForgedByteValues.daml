@@ -61,9 +61,11 @@ runForgedValueCase partyLabel forgedCase = do
   Some coreState <- queryContractId guardianGovernance coreStateCid
   coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   relayer <- allocateParty ("Relayer" <> partyLabel)
-  let genesisWithDevnetMember devnetMember = mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-        GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetMember]
-        coreState.feeInstrument coreState.feeRecipient
+  -- A governance digest lifts the genesis rule that each guardian holds a key.
+  let coreStateWithSet0Member hasGovernanceHistory set0Member = coreState with
+        guardianSets = Map.fromList [(0, GuardianSet with members = [set0Member], expirationTime = None)]
+        consumedGovernance =
+          if hasGovernanceHistory then Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0 else Map.empty
       createCoreStateWith forgedCoreState =
         trySubmit (actAs guardianGovernance <> actAs coreState.feeRecipient) do createCmd forgedCoreState
       verifyAndConsumeWith encodedVAA = do
@@ -78,11 +80,12 @@ runForgedValueCase partyLabel forgedCase = do
     CoreStateGovernanceContract forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with governanceContract = forgedAddress)
     CoreStateGuardianAddress forgedAddress -> describeSubmitOutcome <$>
-      createCoreStateWith (genesisWithDevnetMember (GuardianSetMember with address = forgedAddress, publicKey = None))
+      createCoreStateWith (coreStateWithSet0Member True (GuardianSetMember with address = forgedAddress, publicKey = None))
     CoreStateGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
-      createCoreStateWith (genesisWithDevnetMember (GuardianSetMember with address = devnetGuardian, publicKey = Some forgedKey))
+      createCoreStateWith (coreStateWithSet0Member False (GuardianSetMember with address = devnetGuardian, publicKey = Some forgedKey))
     CoreStateExpiredSetGuardianAddress forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with
+        consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
         guardianSetIndex = 1
         guardianSets = Map.fromList
           [ (0, GuardianSet with
@@ -101,7 +104,7 @@ runForgedValueCase partyLabel forgedCase = do
       verifyAndConsumeWith forgedVaa
     AttachGuardianPublicKey forgedKey -> do
       unkeyedCoreStateCid <- submit (actAs guardianGovernance <> actAs coreState.feeRecipient) do
-        createCmd (genesisWithDevnetMember (GuardianSetMember with address = devnetGuardian, publicKey = None))
+        createCmd (coreStateWithSet0Member True (GuardianSetMember with address = devnetGuardian, publicKey = None))
       unkeyedDisclosure <- fromSome <$> queryDisclosure guardianGovernance unkeyedCoreStateCid
       describeSubmitOutcome <$> trySubmit (actAs relayer <> disclose unkeyedDisclosure) do
         exerciseCmd unkeyedCoreStateCid AttachGuardianPublicKeys with

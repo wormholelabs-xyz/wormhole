@@ -31,7 +31,7 @@ import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (parseVAA)
 import Test.TestCore
-  ( setup, govSetFeeVAA, devnetGuardianMember
+  ( setup, govSetFeeVAA, devnetGenesisGuardian
   , set1MessageVAA, devnetGuardianSet1Key, devnetGuardianSet1PubKey )
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 
@@ -201,7 +201,7 @@ testIntegratorRedeem = do
   fakeFeeInstrumentAdmin <- allocateParty "FakeFeeInstrumentAdmin"
   fakeCsId <- submit (actAs fakeGovernance <> actAs fakeFeeCustody) do
     createCmd (mkInitialCoreState fakeGovernance solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
                  (InstrumentId with admin = fakeFeeInstrumentAdmin, id = "UNUSED") fakeFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure fakeGovernance fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
@@ -224,7 +224,7 @@ data CoreStatePinCase = CoreStatePinCase with
 shadowCoreState : Party -> Party -> Party -> CoreState
 shadowCoreState signingGovernance signingFeeCustody shadowFeeInstrumentAdmin =
   mkInitialCoreState signingGovernance solanaGovernanceChainId defaultGovernanceContract
-    (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
+    (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
     (InstrumentId with admin = shadowFeeInstrumentAdmin, id = "UNUSED") signingFeeCustody
 
 shadowCoreStateWithSet1 : Party -> Party -> Party -> CoreState

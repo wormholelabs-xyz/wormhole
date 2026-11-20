@@ -168,6 +168,7 @@ template CoreState
       , all checkHexValueIsWellFormed (Map.keys consumedGovernance)
       , Map.size guardianSets <= maxStoredGuardianSets
       , checkConsumedGovernanceIsBounded evictedGovernanceMaxTimestampSeconds consumedGovernance
+      , checkGenesisStateHasEveryGuardianKey evictedGovernanceMaxTimestampSeconds consumedGovernance guardianSets
       ]
 
     -- | Read-only VAA verification against the named, unexpired guardian set, for
@@ -552,6 +553,16 @@ checkConsumedGovernanceIsBounded evictedMaxTimestampSeconds consumed =
     checkRetainedTimestamp timestampSeconds =
       checkTimestampFitsUint32 timestampSeconds
         && checkTimestampIsAboveEvictedGovernanceFloor evictedMaxTimestampSeconds timestampSeconds
+
+-- | Genesis requires each guardian public key. A state without governance
+-- history is genesis or genesis plus attaches: each governance VAA records its
+-- digest or raises the eviction floor, and attach only adds keys. After a
+-- GuardianSetUpgrade, a new guardian waits for 'AttachGuardianPublicKeys'.
+checkGenesisStateHasEveryGuardianKey : Optional Int -> Map VaaDigest Int -> Map Int GuardianSet -> Bool
+checkGenesisStateHasEveryGuardianKey evictedMaxTimestampSeconds consumed storedSets =
+  let hasGovernanceHistory = isSome evictedMaxTimestampSeconds || not (Map.null consumed)
+      checkEveryMemberIsKeyed storedSet = attachedPublicKeyCount storedSet == numGuardians storedSet
+  in hasGovernanceHistory || all checkEveryMemberIsKeyed (Map.values storedSets)
 
 -- | Governance replay state after one consumed VAA.
 data GovernanceReplayRecord = GovernanceReplayRecord with

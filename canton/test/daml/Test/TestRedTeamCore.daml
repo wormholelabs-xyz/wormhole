@@ -27,7 +27,7 @@ import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (VAA)
 import Test.MockToken
-import Test.TestCore (setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGuardianMember)
+import Test.TestCore (setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGenesisGuardian)
 
 ----------------------------------------------------------------------
 -- Generated fixtures (CANTON_VECTORGEN=write rewrites these)
@@ -947,7 +947,7 @@ testCoreStateFeeRecipientIsADistinctCustodyParty = do
   feeInstrumentAdmin <- allocateParty "F1GenesisFeeInstrumentAdmin"
   let genesisState feeRecipient admin = mkInitialCoreState guardianGovernance
         solanaGovernanceChainId defaultGovernanceContract
-        (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
+        (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
         (InstrumentId with admin, id = "UNUSED") feeRecipient
       bothSigners = actAs guardianGovernance <> actAs feeCustody
       -- Columns: case name | submitters | feeRecipient | fee instrument admin | expected outcome
@@ -988,7 +988,7 @@ testCoreStateEnsureRejectsInconsistentGenesis = do
   feeCustody <- allocateParty "EnsureFeeCustody"
   feeInstrumentAdmin <- allocateParty "EnsureFeeInstrumentAdmin"
   let consistentGenesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
-        defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
+        defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
         (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody
       bothSigners = actAs guardianGovernance <> actAs feeCustody
       -- Columns: case name | submitters | CoreState | expected outcome
@@ -1018,7 +1018,7 @@ testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
       registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
   genesisResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do
     createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-      (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember]) guardianGovernanceInstrument feeCustody)
+      (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) guardianGovernanceInstrument feeCustody)
   case genesisResult of
     Left _ -> checkNoAttackAccepted "B1 genesis"
       (optionalToList (describeUnexpectedCoreStateCreate "fee instrument admin is guardianGovernance"
