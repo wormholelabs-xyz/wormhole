@@ -352,7 +352,7 @@ Decisions:
 - Options 1 and 5 are both in `wormhole-core` 0.8.0.
   No participant outside LocalNet vetted 0.7.0 or 0.8.0, and no guardian signed a chain-75 VAA from them.
 - The package name does not change. Thus 0.8.0 stays on the `wormhole-core` upgrade line.
-- In 0.8.0, `core/daml.yaml` keeps the SCU check: `upgrades:` names the vendored 0.7.0 DAR (`dars/wormhole-core-0.7.0.dar`, `7a22a1c4`).
+- In 0.8.0, `core/daml.yaml` keeps the SCU check: `upgrades:` names the vendored 0.7.0 DAR (`dars/wormhole-core-0.7.0.dar`, `7a22a1c4`, now removed).
   The check covers all other templates and choices.
 - 0.8.0 starts from a fresh genesis. There is no migration package for 0.7.0 contracts.
 - 0.8.0, 0.8.1 and 0.8.2 are withdrawn. `wormhole-core` 0.8.3 adds `feeCustody` as the fee recipient and a `CoreState` signatory
