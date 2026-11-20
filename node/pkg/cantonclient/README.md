@@ -16,6 +16,7 @@ See [`canton/README.md`](../../../canton/README.md) for the full design.
 | `updateid.go` | `UpdateID`: Ledger API update id ⇄ 34-byte `TxID` codec (canton/README.md §7.2) |
 | `updateid_test.go` | unit tests for the update id codec |
 | `vectorgen_test.go` | asserts the Daml hex fixtures match the generator; `CANTON_VECTORGEN=write` rewrites them |
+| `transfer_fees_vectorgen_test.go` | generates the signed TransferFees fixtures of `Test.TestTransferFees` |
 | `cantongrpc.go` | the gRPC client against the generated stubs |
 | `cantongrpc_updateid_test.go` | unit tests for update ids on the stream and `GetUpdateById` |
 | `proto/com/daml/ledger/api/v2/*.proto` | vendored Ledger API v2 protos (the State+Update closure) from **Canton 3.7.3** |

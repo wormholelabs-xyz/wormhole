@@ -346,12 +346,8 @@ testClaimFee = do
   bal2 <- mockBalance mockAdmin feeRecipient inst
   bal2 === feeToDecimal 600
 
--- | TransferFees mints the on-ledger withdrawal authorization, signed by
--- guardianGovernance — the artifact its custody ceremony matches against.
--- (Requires a TransferFees VAA vector; asserted structurally here by checking
--- none exists after unrelated governance, and covered end-to-end once a
--- vector is generated — see vectorgen. The SetMessageFee action must NOT mint
--- one.)
+-- | SetMessageFee leaves the withdrawal authorization list empty.
+-- Test.TestTransferFees covers the TransferFees path.
 testNoSpuriousWithdrawalAuthorization : Script ()
 testNoSpuriousWithdrawalAuthorization = do
   (guardianGovernance, _, csId, _, _) <- setupFees

@@ -212,15 +212,17 @@ pinned_ntt_version="$(sed -nE 's/^readonly NTT_VERSION="\$\{NTT_PIN_VERSION:-([0
 pinned_ntt_package_id="$(ntt_pinned_package_id "$pinned_ntt_version")" || failure_count=$((failure_count + 1))
 pinned_genesis_package_id="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_PACKAGE_ID)" || failure_count=$((failure_count + 1))
 pinned_genesis_version="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_VERSION)" || failure_count=$((failure_count + 1))
-check_case "pinned core id is the SDK 3.7.3 0.11.0 build 3e555cc2" 0 - - \
-  test "$pinned_core_package_id" == "3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc"
+check_case "pinned core id is the SDK 3.7.3 0.11.1 build 019609a3" 0 - - \
+  test "$pinned_core_package_id" == "019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5"
+check_case "pinned core id is not the replaced SDK 3.7.3 0.11.0 build 3e555cc2" 0 - - \
+  test "$pinned_core_package_id" != "3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc"
 check_case "pinned core id is not the replaced SDK 3.7.3 0.10.0 build bf75fd51" 0 - - \
   test "$pinned_core_package_id" != "bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb"
 check_case "pinned core id is not the replaced SDK 3.7.3 0.9.0 build a562ac78" 0 - - \
   test "$pinned_core_package_id" != "a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034"
 check_case "pinned core id is not the replaced SDK 3.5.1 0.9.0 build bba94798" 0 - - \
   test "$pinned_core_package_id" != "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
-check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.11.0"
+check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.11.1"
 check_case "pinned core id is not the replaced first 0.9.0 build dd75f777" 0 - - \
   test "$pinned_core_package_id" != "dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d"
 check_case "pinned core id is not the replaced second 0.9.0 build ec382591" 0 - - \
