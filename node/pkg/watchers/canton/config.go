@@ -112,9 +112,9 @@ func (wc *WatcherConfig) buildWatcher(
 	}
 
 	// SECURITY: outside unsafe dev mode the stream MUST be narrowed to the
-	// guardianGovernance party. Every Emitter it observes pins that same party
-	// in PublishMessage's CoreState check, so only publishes against the real
-	// CoreState reach the watcher. A wildcard stream would also carry publishes
+	// guardianGovernance party. The read-party signatory check admits an Emitter
+	// of which that party is the owner or the registrar; the registrar pin drops
+	// the owner-only case. A wildcard stream would also carry publishes
 	// witnessed by any other party hosted on the participant.
 	if !devMode && wc.ReadAsParty == "" {
 		return nil, fmt.Errorf("canton: ReadAsParty must be set to the guardianGovernance party outside unsafe dev mode")

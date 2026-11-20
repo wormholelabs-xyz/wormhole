@@ -361,7 +361,7 @@ func (e *Watcher) templateID() cantonclient.TemplateID {
 // The 32-byte emitter address is derived from the emitter's contract-key
 // components (registrar, owner, emitterId) via DeriveEmitterAddress: the guardian
 // is the sole source of truth for the address (it is not stored on-ledger), and
-// because the owner is part of the preimage a compromised operator cannot forge
+// because the owner is part of the preimage guardianGovernance alone cannot forge
 // an existing emitter's address. See canton/README.md §4.2.
 //
 // The VAA timestamp is taken from the transaction's ledger effective time
@@ -388,7 +388,7 @@ func (e *Watcher) processMessage(logger *zap.Logger, ev cantonclient.CantonMessa
 		return
 	}
 
-	// SECURITY: a registry of another guardianGovernance derives foreign emitter addresses. Exact party id equality.
+	// SECURITY: the signatory check admits gg as the owner of an Emitter with another registrar. Exact party id equality.
 	if e.readAsParty != "" && ev.Message.Registrar != e.readAsParty {
 		logger.Error("dropping Canton message whose registrar is not the read-as party",
 			zap.String("registrar", ev.Message.Registrar),
