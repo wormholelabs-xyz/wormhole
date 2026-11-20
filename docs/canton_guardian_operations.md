@@ -785,7 +785,7 @@ Check the offer:
 
 1. Make sure that your participant shows exactly one `WormholeGenesisOffer` of the operator.
 2. Compare the `parameters` of the offer with the agreed parameter file. Each field must be equal.
-3. Make sure that `genesisGuardianSet` has the agreed guardian set index and the agreed guardian addresses.
+3. Make sure that `genesisGuardianSet` has the agreed guardian set index, the agreed guardian addresses and the public key of each guardian.
 4. Make sure that `governanceChainId` is 1 and `governanceContract` is the agreed governance contract.
 5. Make sure that `feeCustody` is the `feeCustody` party and `nttCustody` is the `nttCustody` party.
 6. Make sure that `onboardingFeeAdmin` is the agreed admin.
@@ -861,6 +861,9 @@ A governance VAA must have the signatures of the current set.
 2. Keep your participant online until `CoreState` shows the result of the VAA.
 3. Make sure that `CoreState` shows the new guardian set index.
 4. Make sure that `CoreState` shows the expiry time of the old set.
+5. Make sure that each member of the new set has a public key.
+   A new guardian has no key after the upgrade. Any party adds it with `AttachGuardianPublicKeys`.
+   A VAA with a signature of a guardian without a key fails.
 
 LocalNet rehearsal: [`gg_guardian_set_rotation.sh`](../canton/localnet/gg_guardian_set_rotation.sh).
 The rehearsal checks these results:
@@ -868,7 +871,7 @@ The rehearsal checks these results:
 - A VAA of the new set passes `ParseAndVerifyVAA`.
 - A VAA of the old set passes until the expiry time.
 - A governance VAA of the old set fails with `governance: not signed by current guardian set`.
-- A VAA of the new set with an old key fails with `public key does not match guardian address`.
+- A VAA of the new set with an old key fails with `invalid signature for guardian index 0`.
 - With a set of three guardians, a VAA with two signatures fails with `no quorum: have 2, need 3`.
 
 The rotation from a one-guardian set to a three-guardian set passed live on 2026-11-17.

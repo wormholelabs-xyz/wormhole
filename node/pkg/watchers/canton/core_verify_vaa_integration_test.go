@@ -9,6 +9,7 @@
 // allocates a fresh external party, has CoreState explicitly disclosed to it
 // (a data attachment, not a signature), and verifies a real guardian-signed
 // VAA as that party alone -- the only active party in that submission. The
+// call passes the VAA bytes only; CoreState holds the guardian public key. The
 // script's own assertions (guardianSetIndex/emitterChain/sequence checks) make
 // `dpm script` exit non-zero if verification failed;
 // this test additionally confirms the returned party is a real, live-hosted

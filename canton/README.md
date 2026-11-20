@@ -191,12 +191,13 @@ template CoreState
 **Genesis guardian set index.** Genesis installs the guardian set at the live
 global index (mainnet: the Ethereum core `getCurrentGuardianSetIndex()`), not at 0.
 Guardians sign each VAA with the global index in the VAA header.
-`mkInitialCoreState` takes a `GenesisGuardianSet` (index and addresses), as Sui
-`setup.move` does. EVM `Setup.sol` fixes index 0 and relays each upgrade VAA.
+`mkInitialCoreState` takes a `GenesisGuardianSet` (the index and the members), as Sui
+`setup.move` does. Each member is a guardian address and, optionally, its public key (§5). EVM `Setup.sol` fixes index 0 and relays each upgrade VAA.
 The template precondition applies to each create, including raw creates from the
 genesis scripts: each index is 0 to 4294967295, the current set exists and does
 not expire, each other set has a lower index and an expiry, and each set has 1 to
 255 distinct, non-zero, 20-byte lowercase addresses.
+Each public key in a set must derive the address of its member (`checkGuardianSetMembersAreWellFormed`).
 `GuardianSetUpgrade` applies the same address check (`checkGuardianAddressesAreWellFormed`).
 
 **Guardian visibility.** Every guardian participant hosts `guardianGovernance`
@@ -209,10 +210,12 @@ nonconsuming `ParseAndVerifyVAA` (§4.3) is a pure read. Its `Emitter` signature
 gives `guardianGovernance` no publish or archive authority alone: each also
 needs the owner (`TestGuardianVisibility`).
 
-The only state-changing choice is `SubmitGovernanceVAA`. Any party is its
-controller (`submitter`), and the guardian signatures on the VAA are the
-authority (§4.4). The choice archives the current `CoreState` and creates the
-successor with the updated fields. This is the Daml idiom for mutable state.
+Two choices change the state: `SubmitGovernanceVAA` and `AttachGuardianPublicKeys`.
+Any party is their controller (`submitter`). For `SubmitGovernanceVAA`, the guardian
+signatures on the VAA are the authority (§4.4). For `AttachGuardianPublicKeys`, each
+key must derive a guardian address of the set (§5). Each choice archives the current
+`CoreState` and creates the successor with the updated fields. This is the Daml idiom
+for mutable state.
 
 **Singleton signed by the governance party; authenticity is in the payload.**
 `guardianGovernance` and `feeCustody` (the `feeRecipient` field) sign the
@@ -497,21 +500,22 @@ with Canton Coin or any standard token, chosen at genesis
 
 ```haskell
 -- on CoreState; pure verification, does not mutate state
-nonconsuming choice ParseAndVerifyVAA : VerifiedVAA
+nonconsuming choice ParseAndVerifyVAA : VAA
   with
-    verifier   : Party            -- any party; the sole controller
-    encodedVAA : Bytes
-    pubKeys    : [(Int, Bytes)]   -- guardianIndex -> 65-byte uncompressed pubkey
+    verifier   : Party       -- any party; the sole controller
+    encodedVAA : EncodedVaa
   controller verifier
   do
-    vaa <- parseVAA encodedVAA
-    verifyVAA self vaa pubKeys     -- §5
-    pure (toVerified vaa)
+    checkVaaSubmissionIsWellFormed encodedVAA
+    now <- getTime
+    either assertFail pure (verifyEncoded this encodedVAA now)   -- §5
 ```
 
-`pubKeys` are supplied by the caller because Daml verifies against a public key,
-not by recovery (§5). They are _untrusted hints_; verification fails unless each
-provided key hashes to the guardian address stored in the set.
+**Integrator call.** The integrator gives the VAA bytes only. This is equal to EVM
+`parseAndVerifyVM(bytes)`. `CoreState` keeps the public key of each guardian (§5).
+`VerifyAndConsumeVAA` takes `encodedVAA`, `consumer`, `namespace` and `replayNodeCid`.
+A signature by a guardian without an attached key fails with
+`no public key attached for guardian index <i>`.
 
 **This is permissionless.** `verifier` is the sole controller. The choice is
 `nonconsuming`. Its body creates no contract, so it needs only the `verifier`
@@ -604,7 +608,7 @@ actions accept chain 75 only. `sdk/vaa` serializes no TransferFees for chain 0.
 | Action                 | ID  | Payload (after 32-byte module + 1-byte action)   | Behavior                                                                                                                                                                                   |
 | ---------------------- | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **ContractUpgrade**    | 1   | `chain(2) ‖ newContract(32)`                     | Records intent + emits an event. On Canton, "upgrade" = a [Daml package upgrade](https://docs.daml.com/upgrade/); `newContract` is interpreted as the new package-id (32 bytes). See note. |
-| **GuardianSetUpgrade** | 2   | `chain(2) ‖ newIndex(4) ‖ len(1) ‖ keys(20·len)` | Validates `newIndex == current+1`; sets old set's `expirationTime = effectiveTime + 86400`; stores new set. Requires `pubKeys` hints to bind addresses (§5).                               |
+| **GuardianSetUpgrade** | 2   | `chain(2) ‖ newIndex(4) ‖ len(1) ‖ keys(20·len)` | Validates `newIndex == current+1`; sets old set's `expirationTime = effectiveTime + 86400`; stores new set. Each new member keeps a known key of its address (§5).                         |
 | **SetMessageFee**      | 3   | `chain(2) ‖ fee(32)`                             | Updates `messageFee`. A fee of 2^63 or more aborts.                                                                                                                                        |
 | **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Creates one `FeeWithdrawalAuthorization` (amount, recipient, VAA digest). Chain 75 only. An amount of 2^63 or more aborts.                                                                 |
 
@@ -858,8 +862,8 @@ The widths come from `sdk/vaa/structs.go` and `sdk/vaa/payloads.go`.
 | `VaaDigest` | 32 bytes | `VAA.hash`, `consumedGovernance`, `ConsumeDigest.digest`, `FeeWithdrawalAuthorization.vaaHash` |
 | `EmitterAddress` | 32 bytes | `VAA.emitterAddress`, `governanceContract`, `Emitter.emitterAddress` |
 | `UniversalAddress` | 32 bytes | `ContractUpgrade.newContract`, `TransferFees.recipient` |
-| `GuardianAddress` | 20 bytes | guardian set keys |
-| `GuardianPublicKey` | 65 bytes, first byte `04` | `pubKeys` hints |
+| `GuardianAddress` | 20 bytes | `GuardianSetMember.address` |
+| `GuardianPublicKey` | 65 bytes, first byte `04` | `GuardianSetMember.publicKey`, `AttachGuardianPublicKeys.guardianPublicKeys` |
 | `EcdsaSignatureR`, `EcdsaSignatureS` | 32 bytes each | `VAA` signatures |
 | `DigestNibblePrefix` | 0 to 63 nibbles | `ReplayNode.prefix` |
 | `DigestNibbleSuffix` | 1 to 64 nibbles | `ReplayNode.consumed` |
@@ -891,11 +895,11 @@ We use **`secp256k1WithEcdsaOnly`** because Ethereum signs the 32-byte
 `keccak256(keccak256(body))` digest _directly_ (no further hashing); plain
 `secp256k1` would SHA-256 the digest first and never match. The design:
 
-1. **Bind a caller-supplied pubkey → guardian address.** There is no recovery,
-   so the verifier is given `pubKeys : [(Int, Bytes)]` (the signing guardians'
-   uncompressed keys) and asserts `keccak256(pubKey)[12..32] == keys[index]`.
-   Because the address is the keccak of the key, a wrong key can't pass — this
-   re-introduces the EVM guarantee without recovery.
+1. **Bind a stored public key to the guardian address.** There is no recovery.
+   Each `GuardianSetMember` holds the uncompressed key of its guardian.
+   `verifyVAA` asserts `keccak256(publicKey[1..65])[12..32] == address` for each signer.
+   The address is the keccak of the key, so a wrong key cannot pass.
+   This gives the EVM guarantee without recovery.
 
 2. **DER-encode for the builtin.** `secp256k1WithEcdsaOnly` wants a **DER**
    signature and a **DER (SubjectPublicKeyInfo)** public key, both hex.
@@ -909,19 +913,42 @@ We use **`secp256k1WithEcdsaOnly`** because Ethereum signs the 32-byte
    `required = floor(numGuardians * 2 / 3) + 1`. Signatures must be in
    **strictly ascending** guardian-index order (prevents double-counting).
 
-### Making verification hint-free for integrators (recommended)
+### Making verification hint-free for integrators
 
-Supplying `pubKeys` on every call is acceptable for governance (rare,
-any party submits) but is real friction for integrators (e.g. a token bridge),
-whose relayers would otherwise have to look up the signing guardians' keys on
-every inbound message. The recommended evolution: **persist the guardian public
-keys in the guardian set** — i.e. `GuardianSet` stores `pubKeys` alongside `keys`,
-bound to the canonical addresses _once_ at install time (the
-GuardianSetUpgrade / setup choices already receive pubkey hints and verify
-`keccak256(pubKey)[12..32] == addr`, so the binding is free). After that,
-`verifyVAA` reads the keys from the set and callers pass **only the VAA bytes**,
-making the integrator API equivalent to EVM's `parseAndVerifyVM(bytes)`. This is
-a planned change to the current code, which still takes per-call hints.
+`CoreState` keeps the public key of each guardian next to its address.
+A `GuardianSetUpgrade` VAA carries 20-byte addresses only.
+Thus the public keys come into the ledger on two paths:
+
+1. **Genesis.** Each `GenesisGuardianSet` member gives the address and the public key.
+2. **`AttachGuardianPublicKeys`.** Any party submits the keys of a stored set that is active.
+
+At an upgrade, each new member gets the key of the same address from a stored set.
+A usual upgrade changes one guardian, so the other keys stay and a quorum verifies at once.
+A relayer then attaches the key of each new guardian. It gets the key from a signature of that guardian.
+
+`AttachGuardianPublicKeys` has these rules:
+
+- Each key derives the address of a member of the target set.
+- That member has no key.
+- The list has at least one key and no duplicate key.
+- The target set is active.
+
+The successor `CoreState` changes only the keys of the target set.
+A postcondition checks that each other field and each other set stay the same.
+It also checks that the target set keeps its addresses and its expiry.
+The number of attached keys grows by exactly the number of submitted keys.
+
+**Trust argument.** A second key with the same 20-byte address needs a 160-bit second preimage of keccak256.
+EVM `ecrecover` and the address compare use the same assumption.
+Thus a stored key is the key of its guardian, and the result of `verifyVAA` is equal to the EVM result.
+An attacker can only attach correct keys. An attacker cannot remove or replace a key.
+Each attach adds at least one key, so a set gets at most one attach for each guardian.
+Each attach archives the `CoreState`. A transaction on the archived contract id fails, and the submitter tries again with the new contract id.
+
+**Size.** A 19-guardian set with all keys is about 4.4 KB, and about 1.2 KB without keys.
+`CoreState` keeps at most four sets.
+Each verify and each publish discloses `CoreState`, so a steady-state transaction carries about 3 KB more.
+A verify command no longer carries about 2 KB of key hints.
 
 ### Validation status
 
@@ -1155,6 +1182,11 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+The 0.12.0 main package id is `NEW_CORE_PACKAGE_ID` (Daml SDK 3.7.3).
+0.12.0 has no `upgrades:` line. It changes the `GuardianSet` type and the choice arguments, so it is not an SCU upgrade of 0.11.1.
+0.12.0 keeps the guardian public keys in `CoreState`. `ParseAndVerifyVAA`, `VerifyAndConsumeVAA` and `SubmitGovernanceVAA` take no `pubKeys` (§5).
+0.12.0 replaces the 0.11.1 build (`019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5`). No participant vetted 0.11.1.
+
 The 0.11.1 main package id is `019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5` (Daml SDK 3.7.3).
 0.11.1 has no `upgrades:` line. No participant vetted 0.11.0, so 0.11.1 starts from a fresh genesis.
 0.11.1 parses the SetMessageFee fee and the TransferFees amount only below 2^63 (Daml `Int` max + 1).
@@ -1192,8 +1224,8 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
 0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
 `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.11.1.
-A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0 and 0.11.0 package ids.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.12.0.
+A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0, 0.11.0 and 0.11.1 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
@@ -2268,9 +2300,11 @@ makes it a `guardianGovernance` host.
    _before_ genesis, or run Canton party replication / ACS import so a
    late-joining participant receives prior contracts), and the confirmation
    threshold across guardian participants.
-4. **Integrator VAA verification.** Implement the hint-free guardian set (persist
-   pubkeys, §5) and confirm the guardian-set distribution mechanism for
-   integrators (explicit disclosure vs public-observer snapshot).
+4. **Integrator VAA verification.** _Resolved in 0.12.0:_ `CoreState` keeps the guardian
+   public keys, and integrators give the VAA bytes only (§5).
+   **Residual:** confirm how integrators get the `CoreState` disclosure
+   (disclosure service or public-observer snapshot). Decide if a `GuardianSetUpgrade`
+   submission also takes the keys of new guardians, so a rotation needs one transaction.
 5. **Native fees.** _Mechanism resolved:_ CIP-0056 (Token Standard V1)
    allocations, consumed atomically inside `PublishMessage` / `RegisterEmitter`
    / `ClaimReplayRoot`, with fee custody under the `feeCustody` quorum party
