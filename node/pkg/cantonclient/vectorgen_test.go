@@ -43,6 +43,11 @@ const (
 	set7SetMessageFeeSequence      = uint64(7)
 	set7GuardianSetUpgradeSequence = uint64(8)
 
+	govTransferFeesTimestampUnixSeconds = 1795094643
+	govTransferFeesSequence             = uint64(4)
+	govTransferFeesAmount               = uint64(9)
+	govTransferFeesRecipientByte        = byte(0xd4)
+
 	addressVectorRegistrar = "vector-registrar::1220deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	addressVectorOwner     = "vector-owner::1220cafebabe"
 	addressVectorEmitterID = uint64(7)
@@ -102,6 +107,11 @@ func damlHexFixtures() []damlHexFixture {
 			generateHex:        generateGuardianSetUpgrade7To8VAAHex,
 		},
 		{
+			name:               "govTransferFeesVAA",
+			damlLiteralPattern: damlTopLevelHexPattern("govTransferFeesVAA"),
+			generateHex:        generateGovTransferFeesVAAHex,
+		},
+		{
 			name:               "testAddressVector",
 			damlLiteralPattern: damlIndentedBodyHexPattern("testAddressVector"),
 			generateHex:        generateAddressVectorHex,
@@ -111,12 +121,12 @@ func damlHexFixtures() []damlHexFixture {
 
 // SetMessageFee(chain = Canton, fee = 1000) from the governance emitter, signed by devnet guardian 0.
 func generateGovSetMessageFeeVAAHex(t *testing.T) string {
-	return encodeGovernanceVAASignedByDevnetKey0Hex(t, fixtureGuardianSetIndex, fixtureSequence, setMessageFeeFixturePayload(t))
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, fixtureGuardianSetIndex, fixtureTimestampUnixSeconds, fixtureSequence, setMessageFeeFixturePayload(t))
 }
 
 // generateGovSetMessageFeeVAAHex under guardian set index 7.
 func generateGovSetMessageFeeVAASignedBySet7Hex(t *testing.T) string {
-	return encodeGovernanceVAASignedByDevnetKey0Hex(t, nonZeroGenesisGuardianSetIndex, set7SetMessageFeeSequence, setMessageFeeFixturePayload(t))
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, nonZeroGenesisGuardianSetIndex, fixtureTimestampUnixSeconds, set7SetMessageFeeSequence, setMessageFeeFixturePayload(t))
 }
 
 // GuardianSetUpgrade(chain = 0, new index 8, keys = [devnet key 1]), signed by devnet key 0 under set 7.
@@ -127,7 +137,22 @@ func generateGuardianSetUpgrade7To8VAAHex(t *testing.T) string {
 		NewIndex: nonZeroGenesisGuardianSetIndex + 1,
 	}.Serialize()
 	require.NoError(t, err)
-	return encodeGovernanceVAASignedByDevnetKey0Hex(t, nonZeroGenesisGuardianSetIndex, set7GuardianSetUpgradeSequence, guardianSetUpgradePayload)
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, nonZeroGenesisGuardianSetIndex, fixtureTimestampUnixSeconds, set7GuardianSetUpgradeSequence, guardianSetUpgradePayload)
+}
+
+// TransferFees(chain = Canton, amount 9, recipient 0xd4 x 32), signed by devnet key 0 under set 0.
+func generateGovTransferFeesVAAHex(t *testing.T) string {
+	return encodeGovernanceVAASignedByDevnetKey0Hex(t, fixtureGuardianSetIndex, govTransferFeesTimestampUnixSeconds, govTransferFeesSequence, govTransferFeesPayload(t))
+}
+
+func govTransferFeesPayload(t *testing.T) []byte {
+	var recipient vaa.Address
+	for position := range recipient {
+		recipient[position] = govTransferFeesRecipientByte
+	}
+	payload, err := vaa.BodyCoreBridgeTransferFees{ChainID: vaa.ChainIDCanton, Amount: uint256.NewInt(govTransferFeesAmount), Recipient: recipient}.Serialize()
+	require.NoError(t, err)
+	return payload
 }
 
 func setMessageFeeFixturePayload(t *testing.T) []byte {
@@ -140,11 +165,11 @@ func setMessageFeeFixturePayload(t *testing.T) []byte {
 }
 
 // A governance VAA from the governance emitter with one signature by devnet key 0 at guardian position 0.
-func encodeGovernanceVAASignedByDevnetKey0Hex(t *testing.T, guardianSetIndex uint32, sequence uint64, payload []byte) string {
+func encodeGovernanceVAASignedByDevnetKey0Hex(t *testing.T, guardianSetIndex uint32, timestampUnixSeconds int64, sequence uint64, payload []byte) string {
 	governanceVAA := &vaa.VAA{
 		Version:          vaa.SupportedVAAVersion,
 		GuardianSetIndex: guardianSetIndex,
-		Timestamp:        time.Unix(fixtureTimestampUnixSeconds, 0),
+		Timestamp:        time.Unix(timestampUnixSeconds, 0),
 		Nonce:            fixtureNonce,
 		Sequence:         sequence,
 		ConsistencyLevel: fixtureConsistencyLevel,
