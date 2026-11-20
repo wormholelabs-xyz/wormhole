@@ -7,8 +7,8 @@ observes it (implemented in Go under
 [`node/pkg/watchers/canton`](../node/pkg/watchers/canton) with a Ledger-API
 client under [`node/pkg/cantonclient`](../node/pkg/cantonclient)).
 
-**Target deployment:** the **public Canton Network mainnet** — Canton **3.5.x**
-protocol, **Daml SDK 3.5.1** (Daml-LF **2.3**, Protocol Version **35**). Two
+**Target deployment:** the **public Canton Network mainnet** — Splice **0.10.2**
+on Canton **3.7.3**, **Daml SDK 3.7.3** (Daml-LF **2.3**, Protocol Version **37**). Two
 consequences shape the design: Ledger API **v2**, and **contract keys too weak
 to build on** (non-unique, resolved against the submitter's read view, negative
 lookups fail open) — the package uses **no contract keys**: contracts are
@@ -27,7 +27,7 @@ the Wormhole whitepapers:
 - [node watcher README](../node/pkg/watchers/README.md)
 
 > **Status:** initial implementation. The Daml packages **compile and tests pass
-> on Daml SDK 3.5.1**, including on-chain VAA verification validated against a
+> on Daml SDK 3.7.3**, including on-chain VAA verification validated against a
 > real guardian-signed VAA and the cross-language address derivation pinned by a
 > shared test vector. The remaining mainnet-gating item — the exact Ledger-API
 > protobuf surface — plus the guardian hosting topology are tracked in
@@ -77,7 +77,7 @@ The most consequential differences:
 - **No global mutable singletons; no contract keys.** The "core bridge
   contract" is modeled as a single long-lived **`CoreState`** contract, archived
   and recreated on every governance transition. Contract keys exist on Canton
-  3.5 (Daml-LF 2.3) but are **not unique** — multiple active contracts may share
+  3.7 (Daml-LF 2.3) but are **not unique** — multiple active contracts may share
   a key ([docs](https://docs.canton.network/appdev/modules/m3-contract-keys#contract-keys))
   — and lookups resolve against the submission's readers, with negative results
   failing open (§4.6). They can carry neither uniqueness nor authenticity, so
@@ -339,7 +339,7 @@ keccak256( utf8("wormhole:emitter:v1")
 where `registrar` is `guardianGovernance`. One `guardianGovernance` is one
 deployment. The 4-byte length prefixes make the preimage
 injective across the two variable-length party ids. It is computed **on-ledger**
-at allocation (Daml `DA.Crypto.Text` is stable in 3.5) and stored in
+at allocation (Daml `DA.Crypto.Text` is stable since 3.5) and stored in
 `emitterAddress` for integrators to read, but the guardian watcher **re-derives**
 it from the `WormholeMessage` fields and is the sole source of truth — a corrupt
 on-ledger value cannot spoof it.
@@ -858,7 +858,7 @@ a planned change to the current code, which still takes per-call hints.
 ### Validation status
 
 The whole verification path is **empirically validated** against a real
-Ethereum-style guardian signature on Daml SDK 3.5.1. `testParseAndVerifyVAA` and
+Ethereum-style guardian signature on Daml SDK 3.7.3. `testParseAndVerifyVAA` and
 `testGovernanceSetMessageFee` (in [`TestCore.daml`](test/daml/Test/TestCore.daml))
 feed a genuine VAA — signed by the well-known devnet guardian and produced by
 [`node/pkg/cantonclient/vectorgen_test.go`](../node/pkg/cantonclient/vectorgen_test.go)
@@ -870,7 +870,7 @@ feed a genuine VAA — signed by the well-known devnet guardian and produced by
 - ✅ `secp256k1WithEcdsaOnly` verifies the 32-byte digest **directly** (no
   pre-hash), and the pubkey→address keccak binding holds.
 
-As of Daml SDK 3.5 the `DA.Crypto.Text` builtins are **stable** (the earlier
+Since Daml SDK 3.5 the `DA.Crypto.Text` builtins are **stable** (the earlier
 Alpha `-Wno-crypto-text-is-alpha` suppression is no longer needed), so the
 previous mainnet-readiness concern about depending on an Alpha builtin is
 resolved. All Daml crypto remains encapsulated in `Wormhole.Core.VAA`, and the
@@ -903,7 +903,7 @@ package.
 
 There is no official Go binding for the Daml Ledger API, so the
 `com.daml.ledger.api.v2` protobuf (the State + Update service closure, from
-**Canton 3.5.5**) are vendored under
+**Canton 3.7.3**) are vendored under
 [`node/pkg/cantonclient/proto`](../node/pkg/cantonclient/proto) and compiled with
 the repo's `buf` toolchain; the generated stubs are committed and CI-verified
 (see [`node/pkg/cantonclient/README.md`](../node/pkg/cantonclient/README.md)).
@@ -1823,7 +1823,7 @@ canton/
     wait_for_ledger.sh
 
 node/pkg/cantonclient/           ← Ledger API v2 gRPC client
-  proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.5.5)
+  proto/com/daml/ledger/api/v2/  ← real vendored protos (Canton 3.7.3)
   proto/gen/                     ← generated Go stubs (buf generate)
   vectorgen_test.go              ← Daml fixture drift guard (CANTON_VECTORGEN=write rewrites)
 node/pkg/watchers/canton/        ← the watcher (config.go, watcher.go)
@@ -1851,7 +1851,7 @@ the Daml Scripts, with a data-dependency on core's DAR). Splitting keeps
 curl https://get.digitalasset.com/install/install.sh | sh
 
 cd canton
-dpm install 3.5.1                # fetch the pinned SDK (Daml-LF 2.3)
+dpm install 3.7.3                # fetch the pinned SDK (Daml-LF 2.3)
 dpm build --all                  # builds core, then test → *.daml/dist/*.dar
 cd test && dpm test --all --show-coverage   # run the Scripts + coverage
 ```
@@ -2131,7 +2131,7 @@ makes it a `guardianGovernance` host.
    `UpdateService.GetUpdates` / `GetUpdateById` / `StateService.GetLedgerEnd`
    shift slightly across Canton releases (e.g. `begin_exclusive`/`end_inclusive`,
    `Update` one-of members). The vendored proto subset targets a specific release
-   — confirm and pin against Daml SDK 3.5.1 / Canton 3.5.x.
+   — pinned to Daml SDK 3.7.3 / Canton 3.7.3 (Splice 0.10.2).
 2. **`guardianGovernance` threshold party.** `guardianGovernance` signs
    `CoreState` (§4.1), so it anchors guardian-set integrity.
    §9's `guardianGovernance` external-party bootstrap
