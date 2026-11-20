@@ -311,7 +311,7 @@ jobs:
           CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor
         run: bash canton/localnet/console_jar_from_image.sh
 
-      # Java 21 of the runner image; the console jar needs Java 17 or later.
+      # Java 21 of the runner image. Digital Asset tests Canton 3.7.3 on Java 21.
       - name: Run the console script compile test
         env:
           CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor

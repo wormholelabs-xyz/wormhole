@@ -1903,8 +1903,8 @@ go test -tags integration -run TestCantonWatcherIntegration ./pkg/watchers/canto
 It builds the DAR, boots a `dpm sandbox`, publishes a message via
 `dpm script --upload-dar`, then connects the **real** `cantonclient` gRPC client
 (real Ledger API v2 protos) and asserts the published `WormholeMessage` is
-observed and mapped to a `common.MessagePublication`. It is skipped unless `dpm`
-(+ a JDK) is present and is excluded from the default build. Notes learned the
+observed and mapped to a `common.MessagePublication`. The test runs only when `dpm`
+and a Java 21 JDK are present. The default build excludes it. Notes learned the
 hard way and baked into the test/devnet scripts: Canton's `sandbox` binds the
 Ledger API on **6865** and does not take `--dar`/`--port`; and `dpm script` needs
 **`--upload-dar`** so package vetting is synchronous (a bare upload races vetting

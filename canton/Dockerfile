@@ -13,14 +13,25 @@
 # 3.7.3, Protocol Versions 36 and 37, Daml-LF 2.3), checked by SHA-256. `dpm
 # bootstrap` installs it from the tarball and makes it the active SDK, so dpm
 # commands outside a daml.yaml project (sandbox, script) run it too. Canton is
-# JVM-based, so the base image ships a JDK (17+).
+# JVM-based, so the base image ships a JDK. Java 21: the Canton 3.7.3 release
+# notes list Java 21 as the tested runtime. eclipse-temurin:21-jdk is
+# 21.0.13_9-jdk-resolute (ubuntu:26.04) from adoptium/containers
+# a240a79c19afb3da535529e29ab3156d5c08a6e0. The digest is the multi-arch index.
 #
 # Every daml.yaml under canton/ must pin DAML_SDK_VERSION
 # (node/pkg/watchers/canton/daml_sdk_version_test.go).
 ARG DAML_SDK_VERSION=3.7.3
+# The Temurin build that the Base64 stopgap below was decided for. A base bump fails the build until this changes.
+ARG BASE64_STOPGAP_JAVA_VERSION=jdk-21.0.13+9
 
-FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS dpm-sdk
+FROM eclipse-temurin:21-jdk@sha256:db5cc6341a1d7bc40cdb51e1f0d9824f3bb2cc8107d29da421dc4df7d11f05f1 AS dpm-sdk
 ARG DAML_SDK_VERSION
+# SECURITY: CVE-2026-114938 mitigation; Temurin 21.0.13+9 is affected. Remove when the
+# base is 21.0.13.1 or later. The build, watcher-integration and canton stages inherit it.
+ENV JAVA_TOOL_OPTIONS="-XX:-UseBASE64Intrinsics"
+ARG BASE64_STOPGAP_JAVA_VERSION
+RUN test "$JAVA_VERSION" = "$BASE64_STOPGAP_JAVA_VERSION" \
+    || { echo "Base JAVA_VERSION $JAVA_VERSION is not $BASE64_STOPGAP_JAVA_VERSION; decide about the Base64 stopgap" >&2; exit 1; }
 # SHA-256 of dpm-<DAML_SDK_VERSION>-linux-<arch>.tar.gz from the Digital Asset public-generic repository.
 ARG DPM_SDK_TARBALL_SHA256_AMD64=73bd3d5e1ad656a2cd89b7c4e122495fd68acd5b84db4a91c5aefb9a2ddeb2e2
 ARG DPM_SDK_TARBALL_SHA256_ARM64=2b2ad6c9acdd30fc79dc57622109c49562f485cfc269ad969e1081229fa003ab
