@@ -385,6 +385,7 @@ A ceremony is a request to sign a prepared hash with the `gg` owner key.
 
 A guardian set upgrade on Canton is not a `gg` signing ceremony.
 The operator submits the governance VAA, and the `gg` hosts confirm it (Section 7.3).
+In 0.9.0, any party submits the governance VAA. The `gg` and `feeCustody` hosts confirm it.
 
 ### 5.3 Signer requirements
 
@@ -732,6 +733,12 @@ The coordinator tells each integrator about this risk before step 10.
 
 ## 7. Ceremony procedures
 
+> **NOTE:** `wormhole-core` 0.9.0 has no `operator`.
+> Sections 7.2, 7.3, 7.6 and 7.8 still use the 0.8.x `operator` in some steps. A later change updates them.
+> In 0.9.0, any party submits a governance VAA. The `gg` and `feeCustody` hosts confirm it.
+> In 0.9.0, `gg` creates each core contract, and `FeeWithdrawalAuthorization` has no observer.
+> The `CoreState` checks in Section 7.2 apply to 0.9.0.
+
 ### 7.1 Sign a `gg` transaction
 
 Use this procedure for each `gg` signing ceremony.
@@ -751,9 +758,6 @@ Use this procedure for each `gg` signing ceremony.
 Each deployment of `wormhole-core` 0.8.3 starts from a fresh genesis with a new operator party.
 Contracts of an earlier version do not move to 0.8.3.
 For the reason, refer to [`A14_EMITTER_ID_UNIQUENESS.md`](../canton/A14_EMITTER_ID_UNIQUENESS.md).
-
-> **NOTE:** `wormhole-core` 0.9.0 has no `operator`. The `CoreState` checks below apply to 0.9.0.
-> The ceremony text and the genesis scripts still use the 0.8.x `operator`. A later change updates them.
 
 The genesis ceremony has two prepared transactions.
 The first transaction creates the `CoreState`. The second transaction creates the `EmitterRegistry`.
