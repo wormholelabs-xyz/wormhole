@@ -55,6 +55,40 @@ governanceHeaderBytes = 35
 guardianSetUpgradeFixedBytes : Int
 guardianSetUpgradeFixedBytes = 40
 
+-- | Width of a uint256 governance word: the SetMessageFee fee and the TransferFees amount.
+uint256WordBytes : Int
+uint256WordBytes = 32
+
+-- | Width of 'maxGovernanceAmount' (0x7fffffffffffffff): 8 bytes, top bit clear.
+intWordBytes : Int
+intWordBytes = 8
+
+-- | Largest uint256 governance amount that parses: Daml Int max, 2^63 - 1.
+maxGovernanceAmount : Int
+maxGovernanceAmount = maxBound
+
+-- | A 32-byte big-endian uint256 word as an 'Int'. Aborts with
+-- "governance: <fieldName> exceeds the Int range" at 2^63 or more: the word
+-- fits only if its leading 24 bytes are zero and byte 24 has its top bit clear.
+-- Daml evaluates bindings strictly, so each check runs before 'bytesToInt'.
+parseGovernanceAmountWord : Text -> HexBytes -> Int
+parseGovernanceAmountWord fieldName amountWord =
+  if byteLength amountWord /= uint256WordBytes
+    then error ("governance: " <> fieldName <> " must be " <> show uint256WordBytes <> " bytes")
+  else if sliceBytes 0 leadingByteCount amountWord /= intToBytesN 0 leadingByteCount
+    then error exceedsIntRangeMessage
+  else if highBitSet (intWordOf ())
+    then error exceedsIntRangeMessage
+  else
+    let amount = bytesToInt (intWordOf ())
+    in if amount < 0
+         then error ("governance: " <> fieldName <> " parsed below zero")
+         else amount
+  where
+    leadingByteCount = uint256WordBytes - intWordBytes
+    intWordOf () = sliceBytes leadingByteCount intWordBytes amountWord
+    exceedsIntRangeMessage = "governance: " <> fieldName <> " exceeds the Int range (2^63 or more)"
+
 -- | Runs @parseAction@ only if @packet@ is exactly @expectedBytes@ bytes, so
 -- a wrong-length packet aborts with this error before any slice.
 requirePacketByteLength : Text -> Int -> HexBytes -> (() -> GovernanceAction) -> GovernanceAction
@@ -102,11 +136,11 @@ parseGovernance payload =
           3 -> requirePacketByteLength "SetMessageFee" setMessageFeePacketBytes packet \_ ->
                  SetMessageFee with
                    chain
-                   fee = bytesToInt (sliceBytes 35 32 packet)
+                   fee = parseGovernanceAmountWord "SetMessageFee fee" (sliceBytes 35 uint256WordBytes packet)
           4 -> requirePacketByteLength "TransferFees" transferFeesPacketBytes packet \_ ->
                  TransferFees with
                    chain
-                   amount = bytesToInt (sliceBytes 35 32 packet)
+                   amount = parseGovernanceAmountWord "TransferFees amount" (sliceBytes 35 uint256WordBytes packet)
                    recipient = parseHexBytesAsOrAbort (sliceBytes 67 32 packet)
           _ -> error ("governance: unsupported action " <> show action)
 

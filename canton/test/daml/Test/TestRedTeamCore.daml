@@ -432,7 +432,9 @@ testParseGovernanceBoundsUint256AmountsToInt = do
         | (wordName, amountWord) <- oversizedWords ] ++
         [ ("TransferFees " <> wordName, "governance: TransferFees amount exceeds the Int range", transferFeesPacket amountWord)
         | (wordName, amountWord) <- oversizedWords ]
-  byteLength maxIntWord === 32
+  byteLength maxIntWord === uint256WordBytes
+  maxGovernanceAmount === maxIntAmount
+  intToBytesN maxGovernanceAmount intWordBytes === parseHexTextOrAbort "7fffffffffffffff"
   forA_ acceptedCases \(caseName, packetBytes, expectedAction) -> do
     parseResult <- parsePacket packetBytes
     case parseResult of
