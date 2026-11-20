@@ -54,6 +54,7 @@ CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-60}"
 CURL_CONNECT_TIMEOUT_SECONDS="${CURL_CONNECT_TIMEOUT_SECONDS:-10}"
 readonly USER_ID="participant_admin"
 readonly DEVNET_GUARDIAN_ADDRESS="befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
+readonly DEVNET_GUARDIAN_PUBLIC_KEY="04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e967023e34e495a8ebf5101036d0fd66e3b0a8c7c61b65fceeaf487ab3cd1b5b7b50beb7970"
 readonly GENESIS_GUARDIAN_SET_INDEX="${GENESIS_GUARDIAN_SET_INDEX:-0}"
 
 : "${GG_ARTIFACTS_FILE:?GG_ARTIFACTS_FILE is required}"
@@ -140,7 +141,7 @@ fi
 # Fees stay 0 on devnet, so the fee instrument is a placeholder. The CoreState ensure rejects gg and feeCustody as its admin.
 PLACEHOLDER_FEE_INSTRUMENT_ADMIN="UnusedFeeInstrumentAdmin::${OPERATOR_PARTY#*::}"
 AGREED_PARAMETERS="$(first_genesis_parameters "${GG_PARTY}" "${FEE_CUSTODY_PARTY}" "${NTT_CUSTODY_PARTY}" "${OPERATOR_PARTY}" \
-  "${PLACEHOLDER_FEE_INSTRUMENT_ADMIN}" UNUSED "${GENESIS_GUARDIAN_SET_INDEX}" "${DEVNET_GUARDIAN_ADDRESS}")"
+  "${PLACEHOLDER_FEE_INSTRUMENT_ADMIN}" UNUSED "${GENESIS_GUARDIAN_SET_INDEX}" "${DEVNET_GUARDIAN_ADDRESS}:${DEVNET_GUARDIAN_PUBLIC_KEY}")"
 
 offers="$(active_created_events "${OPERATOR_PARTY}" "${GENESIS_OFFER_TEMPLATE}" \
   | jq -c --arg operator "${OPERATOR_PARTY}" '[.[] | select(.createArgument.operator == $operator)]')"

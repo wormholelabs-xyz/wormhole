@@ -113,9 +113,9 @@ mint_disclosures() {
 mint_command() {
   exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Mint "$(jq -n --arg relayer "$relayer_party" \
     --arg coreState "$core_state_cid" --arg replayNode "$2" --arg vaa "$(jq -r .vaaHex <<<"$1")" \
-    --argjson keys "$(vaa_pub_keys_json "$1")" --arg user "$user_party" --arg preapproval "$preapproval_cid" \
+    --arg user "$user_party" --arg preapproval "$preapproval_cid" \
     --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
       recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')"
 }
 relayer_only="$(jq -n --arg relayer "$relayer_party" '[$relayer]')"
@@ -165,7 +165,7 @@ wrong_key_vaa="$(generate_vaa -kind ntt-transfer -signing-set-index "$NTT_GUARDI
 replay_node_cid="$(covering_replay_node "$manager_namespace" "$(jq -r .digestHex <<<"$wrong_key_vaa")")"
 submit_local_expect_rejection sv "ntt-mint-wrong-key-$run_label" "$relayer_only" \
   "$(mint_command "$wrong_key_vaa" "$replay_node_cid")" "$(mint_disclosures "$replay_node_cid")" \
-  "public key does not match guardian address at index 0"
+  "invalid signature for guardian index 0"
 
 echo "== 6. User burns with Transfer to chain $PEER_CHAIN_ID"
 emitter_cid="$(current_emitter "$emitter_id" | jq -r .contractId)"

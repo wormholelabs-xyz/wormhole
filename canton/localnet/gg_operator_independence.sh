@@ -281,8 +281,8 @@ app_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" -s
 # verify_and_consume_command <replay-node-cid>
 verify_and_consume_command() {
   exercise_command "$CORE_STATE_TEMPLATE" "$core_state_cid" VerifyAndConsumeVAA "$(jq -n --arg vaa "$(jq -er .vaaHex <<<"$app_vaa")" \
-    --argjson keys "$(vaa_pub_keys_json "$app_vaa")" --arg consumer "$core_integrator" --arg namespace "$replay_namespace" --arg node "$1" \
-    '{encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys, consumer: $consumer, namespace: $namespace, replayNodeCid: $node}')"
+    --arg consumer "$core_integrator" --arg namespace "$replay_namespace" --arg node "$1" \
+    '{encodedVAA: {tag: "EncodedVaa", value: $vaa}, consumer: $consumer, namespace: $namespace, replayNodeCid: $node}')"
 }
 # verify_and_consume_disclosures <replay-node-cid>: CoreState only; CoreIntegrator signs its ReplayNode.
 verify_and_consume_disclosures() {
@@ -303,7 +303,7 @@ relay() {
   local relay_core_state_cid
   relay_core_state_cid="$(core_contract_id coreState)"
   submit_local sv "oi-relay-$2-$run_label" "$(json_array "\"$governance_relayer\"")" \
-    "$(relay_governance_vaa_command "$relay_core_state_cid" "$governance_relayer" "$(jq -er .vaaHex <<<"$3")" "$(vaa_pub_keys_json "$3")")" \
+    "$(relay_governance_vaa_command "$relay_core_state_cid" "$governance_relayer" "$(jq -er .vaaHex <<<"$3")")" \
     "$(core_state_disclosures "$(gg_disclosure :Wormhole.Core.State:CoreState "$relay_core_state_cid")" "$relay_core_state_cid")"
 }
 # check_relay_acting_parties <step> <transaction-json>: the SubmitGovernanceVAA exercise has exactly GovernanceRelayer as actor.
@@ -429,9 +429,9 @@ release_registry="$(amulet_transfer_factory "$ntt_admin" "$ntt_recipient" "$RELE
 release_transaction="$(submit_local sv "oi-ntt-release-$run_label" "$(json_array "\"$ntt_relayer\"")" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Release "$(jq -n --arg relayer "$ntt_relayer" \
     --arg coreState "$core_state_cid" --arg replayNode "$release_replay_node_cid" --arg vaa "$(jq -r .vaaHex <<<"$release_vaa")" \
-    --argjson keys "$(vaa_pub_keys_json "$release_vaa")" --arg recipient "$ntt_recipient" --arg ledger "$ledger_cid" \
+    --arg recipient "$ntt_recipient" --arg ledger "$ledger_cid" \
     --argjson extraArgs "$(registry_extra_args "$release_registry")" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
       recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')")" \
   "$(jq -c '. + $registry' --argjson registry "$(registry_disclosures "$release_registry")" <<<"$(json_array \
     "$(gg_disclosure :Wormhole.Ntt.Manager:NttManager "$manager_cid")" \

@@ -403,9 +403,9 @@ check_mint_through_service() {
   if mint_transaction="$(submit_local app-user "t1-mint-$run_label" "$relayer_only" \
       "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Mint "$(jq -n --arg relayer "$relayer_party" \
         --arg coreState "$(flow_role_cid "$flow" CoreState)" --arg replayNode "$(flow_role_cid "$flow" "covering ReplayNode")" \
-        --arg vaa "$(jq -r .vaaHex <<<"$vaa")" --argjson keys "$(vaa_pub_keys_json "$vaa")" --arg user "$user_party" \
+        --arg vaa "$(jq -r .vaaHex <<<"$vaa")" --arg user "$user_party" \
         --arg preapproval "$(flow_role_cid "$flow" DepositPreapproval)" --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-          executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+          executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
           recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')")" \
       "$(flow_disclosed_contracts "$flow")")"; then
     coins_after="$(active_contracts app-user "$user_party" ":Token.CIP0056.Coin:Coin" | jq -c '[.[].createArgument.amount]')"
@@ -492,9 +492,9 @@ submit_release_response() {
     "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$(flow_role_cid "$flow" NttManager)" Release "$(jq -n \
       --arg relayer "$relayer_party" --arg coreState "$(flow_role_cid "$flow" CoreState)" \
       --arg replayNode "$(flow_role_cid "$flow" "covering ReplayNode")" --arg vaa "$(jq -r .vaaHex <<<"$vaa")" \
-      --argjson keys "$(vaa_pub_keys_json "$vaa")" --arg recipient "$recipient_party" \
+      --arg recipient "$recipient_party" \
       --arg ledger "$(flow_role_cid "$flow" LockedLedger)" --argjson extraArgs "$(registry_extra_args "$registry")" '{
-        executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+        executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
         recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')")" \
     "$(jq -c '. + $registry' --argjson registry "$(registry_disclosures "$registry")" <<<"$(flow_disclosed_contracts "$flow")")"
 }

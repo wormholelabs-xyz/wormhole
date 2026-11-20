@@ -188,9 +188,9 @@ echo "custodian-to-recipient kind $(jq -r .transferKind <<<"$release_registry")"
 release_command() {
   exercise_command "$NTT_MANAGER_TEMPLATE" "$manager_cid" Release "$(jq -n --arg relayer "$relayer_party" \
     --arg coreState "$core_state_cid" --arg replayNode "$2" --arg vaa "$(jq -r .vaaHex <<<"$1")" \
-    --argjson keys "$(vaa_pub_keys_json "$1")" --arg recipient "$recipient_party" --arg ledger "$3" \
+    --arg recipient "$recipient_party" --arg ledger "$3" \
     --argjson extraArgs "$(registry_extra_args "$4")" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
       recipient: $recipient, ledgerCid: $ledger, inputHoldingCids: [], extraArgs: $extraArgs}')"
 }
 # release_disclosures <replay-node-cid> <ledger-cid> <custody-pot-cid> <registry-json>

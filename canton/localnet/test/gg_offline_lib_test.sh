@@ -76,7 +76,7 @@ readonly FIRST_GENESIS_PARAMETER_CASES=(
   "guardian address of 19 bytes|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|${GUARDIAN_ADDRESS:2}:$GUARDIAN_PUBLIC_KEY|1|not 40 lowercase hex"
   "uppercase guardian address|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|BEFA429D57CD18B7F8A4D91A2DA9AB4AF05D0FBE:$GUARDIAN_PUBLIC_KEY|1|not 40 lowercase hex"
   "zero guardian address|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|0000000000000000000000000000000000000000:$GUARDIAN_PUBLIC_KEY|1|zero address"
-  "duplicate guardian address|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|$GUARDIAN,$GUARDIAN|1|duplicate guardian address"
+  "duplicate guardian address|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|$GUARDIAN,$GUARDIAN_ADDRESS:$SECOND_GUARDIAN_PUBLIC_KEY|1|duplicate guardian address"
   "guardian without a public key|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|$GUARDIAN_ADDRESS|1|has no public key"
   "second guardian without a public key|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|$GUARDIAN,$SECOND_GUARDIAN_ADDRESS|1|has no public key"
   "guardian with an empty public key|$GG|$FEE_CUSTODY|$NTT_CUSTODY|$OPERATOR|$DSO|Amulet|0|$GUARDIAN_ADDRESS:|1|public key is not"
