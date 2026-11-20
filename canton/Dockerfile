@@ -24,6 +24,9 @@ ARG DAML_SDK_VERSION=3.7.3
 
 FROM eclipse-temurin:21-jdk@sha256:db5cc6341a1d7bc40cdb51e1f0d9824f3bb2cc8107d29da421dc4df7d11f05f1 AS dpm-sdk
 ARG DAML_SDK_VERSION
+# SECURITY: CVE-2026-114938 mitigation; Temurin 21.0.13+9 is affected. Remove when the
+# base is 21.0.13.1 or later. The build, watcher-integration and canton stages inherit it.
+ENV JAVA_TOOL_OPTIONS="-XX:-UseBASE64Intrinsics"
 # SHA-256 of dpm-<DAML_SDK_VERSION>-linux-<arch>.tar.gz from the Digital Asset public-generic repository.
 ARG DPM_SDK_TARBALL_SHA256_AMD64=73bd3d5e1ad656a2cd89b7c4e122495fd68acd5b84db4a91c5aefb9a2ddeb2e2
 ARG DPM_SDK_TARBALL_SHA256_ARM64=2b2ad6c9acdd30fc79dc57622109c49562f485cfc269ad969e1081229fa003ab

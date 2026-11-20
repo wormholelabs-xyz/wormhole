@@ -303,6 +303,8 @@ jobs:
       - name: Run the console script compile test
         env:
           CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor
+          # SECURITY: CVE-2026-114938 mitigation. Remove when the runner JDK is 21.0.13.1 or later.
+          JAVA_TOOL_OPTIONS: -XX:-UseBASE64Intrinsics
         run: |
           test -x "$JAVA_HOME_21_X64/bin/java"
           PATH="$JAVA_HOME_21_X64/bin:$PATH" bash canton/localnet/test/console_scripts_compile_test.sh
@@ -310,6 +312,8 @@ jobs:
       - name: Run the console table tests
         env:
           CANTON_VENDOR_DIR: ${{ runner.temp }}/canton-vendor
+          # SECURITY: CVE-2026-114938 mitigation. Remove when the runner JDK is 21.0.13.1 or later.
+          JAVA_TOOL_OPTIONS: -XX:-UseBASE64Intrinsics
         run: |
           test -x "$JAVA_HOME_21_X64/bin/java"
           PATH="$JAVA_HOME_21_X64/bin:$PATH" bash canton/localnet/test/console_table_test.sh
