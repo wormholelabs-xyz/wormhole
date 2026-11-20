@@ -122,6 +122,14 @@ func TestParseOAuthAudience(t *testing.T) {
 		{name: "only a tab", rawAudience: "\t", expectedErrorMessage: "whitespace"},
 		{name: "leading space", rawAudience: " https://canton.network.global", expectedErrorMessage: "whitespace"},
 		{name: "trailing newline", rawAudience: "https://canton.network.global\n", expectedErrorMessage: "whitespace"},
+		{name: "inner space", rawAudience: "https://canton.network .global", expectedErrorMessage: "whitespace"},
+		{name: "inner tab", rawAudience: "https://canton.network\t.global", expectedErrorMessage: "whitespace"},
+		{name: "inner carriage return", rawAudience: "https://canton.network\r.global", expectedErrorMessage: "whitespace"},
+		{name: "inner no-break space", rawAudience: "https://canton.network\u00a0.global", expectedErrorMessage: "whitespace"},
+		{name: "NUL character", rawAudience: "https://canton.network\x00.global", expectedErrorMessage: "control character"},
+		{name: "DEL character", rawAudience: "https://canton.network\x7f.global", expectedErrorMessage: "control character"},
+		{name: "escape character", rawAudience: "https://canton.network\x1b.global", expectedErrorMessage: "control character"},
+		{name: "invalid UTF-8", rawAudience: "https://canton.network\xff.global", expectedErrorMessage: "UTF-8"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

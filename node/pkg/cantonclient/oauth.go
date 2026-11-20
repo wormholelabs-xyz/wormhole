@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/clientcredentials"
@@ -20,14 +21,22 @@ type OAuthAudience struct {
 	value string
 }
 
-// ParseOAuthAudience returns the zero OAuthAudience for an empty string. It rejects a value with leading or
-// trailing whitespace, which includes a whitespace-only value.
+// ParseOAuthAudience returns the zero OAuthAudience for an empty string. It rejects invalid UTF-8, whitespace and
+// control characters at any position.
 func ParseOAuthAudience(rawAudience string) (OAuthAudience, error) {
 	if rawAudience == "" {
 		return OAuthAudience{}, nil
 	}
-	if strings.TrimSpace(rawAudience) != rawAudience {
-		return OAuthAudience{}, fmt.Errorf("OAuth audience %q has leading or trailing whitespace", rawAudience)
+	if !utf8.ValidString(rawAudience) {
+		return OAuthAudience{}, fmt.Errorf("OAuth audience %q is not valid UTF-8", rawAudience)
+	}
+	for _, audienceRune := range rawAudience {
+		if unicode.IsSpace(audienceRune) {
+			return OAuthAudience{}, fmt.Errorf("OAuth audience %q contains whitespace", rawAudience)
+		}
+		if unicode.IsControl(audienceRune) {
+			return OAuthAudience{}, fmt.Errorf("OAuth audience %q contains a control character", rawAudience)
+		}
 	}
 	return OAuthAudience{value: rawAudience}, nil
 }
