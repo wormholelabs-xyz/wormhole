@@ -15,6 +15,7 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 | Keep the participant on the minimum Splice version | 3.2 | Weekly releases |
 | Host the `guardianGovernance` party | 4 | Once, then on changes |
 | Host the `feeCustody` party | 4.2 | Once, then on changes |
+| Accept the genesis offer once | 7.2 | Once for each deployment |
 | Keep the Canton participant without public ports | 3.5 | Continuous |
 | Follow the snapshot rules when a host joins | 4.3, 4.4 | On each new host |
 | Hold one `guardianGovernance` owner key | 5 | Continuous |
@@ -23,6 +24,8 @@ For general guardian operation, refer to [`operations.md`](operations.md).
 | Do the core package upgrade procedure | 6.7 | On each new `wormhole-core` version |
 | Check fee withdrawals | 7.6 | On request |
 | Respond to a key compromise or a guardian removal | 7.7 | On event |
+| Replace the onboarding fee admin | 7.9 | Emergency only |
+| Serve disclosures of `gg` contracts to submitters | 7.10 | On request |
 | Configure and monitor the Canton watcher in `guardiand` | 8 | Continuous |
 | Send reobservation requests after each restart of `guardiand` | 8.4 | On each restart |
 | Upgrade all guardians that observe Canton together | 8.1 | On each `TxID` format change |
@@ -40,7 +43,7 @@ Each custody party copies the hosts, the confirmation threshold and the owner ke
 | Hosting permission | `Confirmation` on every guardian participant. Never `Submission`. |
 | Confirmation threshold | Greater than 1, and a majority of the hosts. One participant cannot confirm for `gg` alone. |
 | Owner keys | One Ed25519 key for each guardian. A threshold of owner keys controls the `gg` namespace. |
-| Signatory of | `CoreState`, `EmitterRegistry`, every `Emitter` and every NTT manager. |
+| Signatory of | `CoreState`, `EmitterRegistry`, `ReplayRootRegistry`, every `Emitter`, every `ReplayNode`, `NttGovernance`, every NTT manager and each `FeeWithdrawalAuthorization`. |
 | Messages | Each `PublishMessage` runs on an `Emitter` that `gg` signs. Thus guardians see each message. |
 | Other roles | Mint authority for Wormhole-administered tokens. |
 | Watcher | `guardiand` reads the update stream as `gg` (`--cantonReadAsParty`). |
@@ -73,8 +76,13 @@ Rules for these residuals:
 - `feeCustody` owns no `Emitter`. `feeCustody` is not the admin of an NTT deployment.
 - `feeCustody` is not `nttCustody`. If it is, Amulet code runs as the owner of all NTT reserves.
 
-The `operator` party is not a guardian party. Wormhole Labs operates it.
-Each deployment of `wormhole-core` 0.8.3 starts with a new operator party (Section 7.2).
+The operator is not a guardian party. Wormhole Labs operates it.
+The operator does the deployment work: it uploads the DARs, allocates its party and offers genesis (Section 7.2).
+After genesis, the operator is a signatory of no contract and an observer of no contract.
+The operator is the onboarding fee admin of `EmitterRegistry` and `ReplayRootRegistry`.
+This is a plain field, not a signatory. It controls only `SetRegistrationFee` and `SetClaimFee`.
+If the operator participant is offline or its key is lost, only these two fee changes stop.
+Publish, observation, verification, replay protection, registration, claims, governance and NTT continue.
 
 `gg` owns the transceiver `Emitter` of each NTT deployment.
 This includes a lock/unlock deployment that its admin registered alone.
@@ -377,15 +385,14 @@ A ceremony is a request to sign a prepared hash with the `gg` owner key.
 
 | Ceremony | When | Procedure |
 | - | - | - |
-| Genesis co-signature of `CoreState` and `EmitterRegistry` | Once for each deployment | 7.2 |
-| `NttGovernance` root creation | Once | 7.1 |
+| Genesis acceptance (`AcceptGenesis`): the core roots and the NTT roots | Once for each deployment | 7.2 |
+| Onboarding fee admin replacement | Emergency only | 7.9 |
 | Owner key rotation (add or remove a guardian) | On guardian set change | 7.4 |
 | Fee withdrawal | On request | 7.6 |
 | Live-signed NTT registration or factory change | On request | 7.1 |
 
-A guardian set upgrade on Canton is not a `gg` signing ceremony.
-The operator submits the governance VAA, and the `gg` hosts confirm it (Section 7.3).
-In 0.9.0, any party submits the governance VAA. The `gg` and `feeCustody` hosts confirm it.
+A governance VAA on Canton is not a `gg` signing ceremony.
+Any party submits the governance VAA. The `gg` and `feeCustody` hosts confirm it (Section 7.3).
 
 ### 5.3 Signer requirements
 
@@ -733,12 +740,6 @@ The coordinator tells each integrator about this risk before step 10.
 
 ## 7. Ceremony procedures
 
-> **NOTE:** `wormhole-core` 0.9.0 has no `operator`.
-> Sections 7.2, 7.3, 7.6 and 7.8 still use the 0.8.x `operator` in some steps. A later change updates them.
-> In 0.9.0, any party submits a governance VAA. The `gg` and `feeCustody` hosts confirm it.
-> In 0.9.0, `gg` creates each core contract, and `FeeWithdrawalAuthorization` has no observer.
-> The `CoreState` checks in Section 7.2 apply to 0.9.0.
-
 ### 7.1 Sign a `gg` transaction
 
 Use this procedure for each `gg` signing ceremony.
@@ -753,95 +754,99 @@ Use this procedure for each `gg` signing ceremony.
 8. Sign the hash only if the two hashes are equal.
 9. Send the signature to the coordinator.
 
-### 7.2 Genesis co-signature
+### 7.2 Genesis acceptance
 
-Each deployment of `wormhole-core` 0.8.3 starts from a fresh genesis with a new operator party.
-Contracts of an earlier version do not move to 0.8.3.
+Each deployment of `wormhole-core` 0.9.0 starts from a fresh genesis.
+Contracts of an earlier version do not move to 0.9.0.
 For the reason, refer to [`A14_EMITTER_ID_UNIQUENESS.md`](../canton/A14_EMITTER_ID_UNIQUENESS.md).
 
-The genesis ceremony has two prepared transactions.
-The first transaction creates the `CoreState`. The second transaction creates the `EmitterRegistry`.
-The `operator`, the `gg` owner key threshold and the `feeCustody` owner key threshold sign the `CoreState` transaction.
-The `operator` and the `gg` owner key threshold sign the `EmitterRegistry` transaction.
-The prepare endpoint accepts one command in each transaction.
-The operator creates the `ReplayRootRegistry` alone.
+The operator does the deployment work.
+It uploads the DARs to its participant and allocates its party.
+Then it creates one `WormholeGenesisOffer` of the package `wormhole-genesis`. The offer holds each genesis parameter.
+
+The guardians sign one prepared transaction: `AcceptGenesis` on the offer.
+Its actors are `gg`, `feeCustody` and `nttCustody`. Each actor needs its owner key threshold.
+The transaction creates `CoreState`, `EmitterRegistry`, `ReplayRootRegistry`, `NttGovernance` and the `gg` `CoinFactory`.
+It archives the offer.
+The operator signs the offer, so the operator participant confirms the acceptance. This is the last operator confirmation.
 
 Before the ceremony:
 
 1. Make sure that each guardian participant hosts `gg` (Section 4.1).
-2. Make sure that `feeCustody` exists in the `gg` namespace.
-3. Make sure that `feeCustody` has the hosts, the confirmation threshold and the signing keys of `gg`.
-4. Make sure that each guardian participant vetted the agreed `wormhole-core` 0.8.3 package ID.
-5. Make sure that your participant vets no other `wormhole-core` package.
+2. Make sure that `feeCustody` and `nttCustody` exist in the `gg` namespace.
+3. Make sure that each of the two parties has the hosts, the confirmation threshold and the signing keys of `gg`.
+4. Make sure that `feeCustody` is not `nttCustody`.
+5. Make sure that each guardian participant vets the agreed package IDs of `wormhole-core`, `ntt`, `wormhole-genesis` and `token-cip0056`.
+6. Make sure that your participant vets no other `wormhole-core` package.
+7. Get the agreed parameter file from the genesis coordinator. Compare each value with your own record.
+8. Make sure that your participant shows no active `CoreState` of your `gg`. The ledger cannot detect a second first genesis.
 
-Check the `CoreState` transaction:
+Check the offer:
 
-1. Get the `CoreState` arguments from the genesis coordinator.
-2. Make sure that the arguments contain the agreed guardian set.
-3. Make sure that the arguments contain the agreed governance chain and governance contract.
-4. Make sure that the arguments set `chainId` to exactly 75.
-5. Make sure that the arguments set `feeRecipient` to the `feeCustody` party, not to `gg`.
-6. Make sure that `feeRecipient` is not `nttCustody`.
-7. Make sure that `feeInstrument` is the agreed instrument admin and instrument ID.
-8. Make sure that the `feeInstrument` admin is not `gg`.
-9. Make sure that the `feeInstrument` admin is not `feeCustody`.
-10. Make sure that `guardianSetIndex` is the agreed genesis guardian set index (`GenesisGuardianSet`).
-11. Make sure that `guardianSets` has exactly one entry, at that index, with the agreed guardian set.
-12. Make sure that `messageFee` is 0 (Section 7.8).
-13. Make sure that `consumedGovernance` is empty.
-14. Make sure that the template package ID is the agreed `wormhole-core` package ID.
-15. Make sure that the prepared transaction has exactly two signer sets: `gg` and `feeCustody`.
-16. Sign the prepared hash for `gg` and for `feeCustody` (Section 7.1).
+1. Make sure that your participant shows exactly one `WormholeGenesisOffer` of the operator.
+2. Compare the `parameters` of the offer with the agreed parameter file. Each field must be equal.
+3. Make sure that `genesisGuardianSet` has the agreed guardian set index and the agreed guardian addresses.
+4. Make sure that `governanceChainId` is 1 and `governanceContract` is the agreed governance contract.
+5. Make sure that `feeCustody` is the `feeCustody` party and `nttCustody` is the `nttCustody` party.
+6. Make sure that `onboardingFeeAdmin` is the agreed admin.
+7. Make sure that `feeInstrument` is the agreed instrument. Its admin is not `gg` and not `feeCustody`.
+8. Make sure that `initialMessageFee`, `registrationFee` and `replayRootClaimFee` are 0 (Section 7.8).
+9. For a first genesis, make sure that `genesisKind` is `FirstGenesis`.
+10. For a first genesis, make sure that `firstEmitterId` and `firstNttManagerId` are 0.
+11. For a first genesis, make sure that both lists of consumed governance digests are empty.
 
-The `CoreState` precondition also rejects these values. It does not replace the checks.
+Check the prepared transaction:
 
-Check the `EmitterRegistry` transaction:
+1. Make sure that the transaction has exactly one command: `AcceptGenesis` on the offer.
+2. Make sure that `agreedParameters` is equal to your agreed parameter file. Do not copy the parameters from the offer.
+3. Make sure that each template package ID is an agreed package ID.
+4. Make sure that the prepared transaction has exactly three signer sets: `gg`, `feeCustody` and `nttCustody`.
+5. Sign the prepared hash for each of the three parties (Section 7.1).
 
-1. Make sure that your participant shows exactly one `CoreState` before you sign this transaction.
-2. Make sure that `operator` and `guardianGovernance` are the parties of the `CoreState`.
-3. Make sure that `nextId` is 0.
-4. Make sure that `registrationFee` is 0 (Section 7.8).
-5. Make sure that the template package ID is the agreed `wormhole-core` package ID.
-6. Sign the prepared hash (Section 7.1).
+`AcceptGenesis` compares `agreedParameters` with the offer again. The template preconditions also reject bad values.
+These checks do not replace your checks.
 
 After genesis:
 
-1. Make sure that your participant shows exactly one `CoreState`.
-2. Make sure that your participant shows exactly one `EmitterRegistry` with `nextId` 0 and your `gg` party.
-3. Make sure that your participant shows exactly one `ReplayRootRegistry`.
-4. Run [`emitter_id_scan.sh`](../canton/tools/emitter_id_scan.sh) with begin offset 0 and `EXPECT_ACTIVE_REGISTRIES=1`.
+1. Make sure that your participant shows exactly one `CoreState`. Its signatories are `gg` and `feeCustody`.
+2. Make sure that your participant shows exactly one `EmitterRegistry` with `nextId` 0. Its only signatory is `gg`.
+3. Make sure that your participant shows exactly one `ReplayRootRegistry`. Its only signatory is `gg`.
+4. Make sure that your participant shows exactly one `NttGovernance`. Its signatories are `gg` and `nttCustody`.
+5. Make sure that your participant shows exactly one `CoinFactory` with the admin `gg`.
+6. Make sure that the operator is a signatory or an observer of none of these contracts.
+7. Run [`emitter_id_scan.sh`](../canton/tools/emitter_id_scan.sh) with begin offset 0 and `EXPECT_ACTIVE_REGISTRIES=1`.
    Set `EXPECTED_CORE_PACKAGE_ID` to the agreed `wormhole-core` package ID.
    Use a Ledger API user that has only the right `CanReadAs` for `guardianGovernance`.
-5. Make sure that the scan passes with `firstId` 0.
+8. Make sure that the scan passes with `firstId` 0.
+9. Unvet `wormhole-genesis` on your participant. No contract of that package stays active.
 
-If the `CoreState` transaction fails, stop. Do not sign the `EmitterRegistry` transaction.
-Do the `CoreState` ceremony again.
+If `AcceptGenesis` fails, no root exists and the offer stays active. Do the ceremony again on the same offer.
+If the parameters are incorrect, ask the operator to withdraw the offer (`WithdrawGenesisOffer`) and to make a new offer.
 
-If the `EmitterRegistry` transaction fails, the `CoreState` exists without a registry.
-Do the `EmitterRegistry` ceremony again. Do not create a second `CoreState`.
+A re-genesis replaces the roots of an earlier genesis (`genesisKind` `ReGenesisReplacing`).
+Its parameters carry the earlier consumed governance digests and the earlier next IDs.
+Use the genesis procedure of the NTT repository (`canton/README.md`) for a re-genesis.
 
 An emitter ID is an integer from 0 to 2^53 - 1 (`maxEmitterId`).
 
 LocalNet rehearsal: [`gg_genesis.sh`](../canton/localnet/gg_genesis.sh).
-Run `CUSTODY_PARTY_NAME=feeCustody custody_host.sh` before `gg_genesis.sh`.
-Before the first prepare, the script makes sure that `feeCustody` is in the `gg` namespace.
-It also makes sure that `feeCustody` is not `nttCustody`.
-The `operator` and two of three owner keys for each namespace party sign each of the two transactions.
-These `CoreState` transactions fail:
+Before `gg_genesis.sh`, run `custody_host.sh` for each custody party.
+Then run `ntt_upload_dars.sh`.
+The local party `LabsOperator` on `app-provider` creates the offer. It has no signing key.
+The script compares the offer on `sv` with the agreed parameters that it builds itself.
+These acceptances fail:
 
 - `gg` with one of three owner keys: `FAILED_TO_EXECUTE_TRANSACTION`.
-- No `feeCustody` signature. The error names `feeCustody`.
-- `feeCustody` with one of three owner keys: `FAILED_TO_EXECUTE_TRANSACTION`.
-- `feeRecipient` set to `gg`. The `CoreState` precondition fails.
-- The `feeInstrument` admin set to `gg`. The `CoreState` precondition fails.
+- No `nttCustody` signature. The error names `nttCustody`.
+- `agreedParameters` with another guardian set index: `genesis: agreed parameters differ from the offer`.
 
-After a failure, the script creates only the missing contracts.
-On a rerun, it checks the `feeRecipient` and the signatories of the active `CoreState`.
+Then two owner keys for each of the three parties sign `AcceptGenesis`. The rehearsal counts one `gg` ceremony.
+On a rerun, the script checks the `feeRecipient` and the signatories of the active `CoreState`.
 
 ### 7.3 Guardian set upgrade on Canton
 
 The `GuardianSetUpgrade` governance VAA changes the guardian set in `CoreState`.
-The operator submits it with `SubmitGovernanceVAA`.
+Any party submits it with `SubmitGovernanceVAA`, for example a relayer. The submitter needs a disclosure of `CoreState` (Section 7.10).
 The current guardian set must sign the VAA.
 The `gg` hosts confirm the transaction. The owner keys do not sign it.
 
@@ -853,7 +858,7 @@ The old set is not valid one second after the expiry second.
 A governance VAA must have the signatures of the current set.
 
 1. Sign the `GuardianSetUpgrade` VAA through the usual guardian procedure.
-2. Keep your participant online until the operator submits the VAA.
+2. Keep your participant online until `CoreState` shows the result of the VAA.
 3. Make sure that `CoreState` shows the new guardian set index.
 4. Make sure that `CoreState` shows the expiry time of the old set.
 
@@ -1022,7 +1027,7 @@ Limits of the rehearsal:
 ### 7.6 Fee withdrawal
 
 A `TransferFees` governance VAA creates a `FeeWithdrawalAuthorization`.
-`gg` is its only signatory, and the `operator` is an observer.
+`gg` is its only signatory. It has no observer.
 The contract has no choice. Thus only a transaction that `gg` signs can archive it.
 The fees are holdings of `feeCustody`.
 The `amount` field is in units of 10^-10 of the fee instrument.
@@ -1093,8 +1098,14 @@ Monitor the holdings of `feeCustody` for other instruments.
 **Owner key loss.** If fewer than the threshold number of owner keys stay, no `gg` transaction or topology change is possible.
 [`gg_show_topology.sh`](../canton/localnet/gg_show_topology.sh) shows the namespace threshold.
 
-**Participant key, OAuth2 client secret or `operator` party compromise.**
+**Participant key or OAuth2 client secret compromise.**
 **Open item:** the procedure for each of these cases.
+
+**Operator compromise.** The operator is a signatory of no contract after genesis.
+A compromised onboarding fee admin can set the registration fee and the replay root claim fee.
+Each fee stays in the range 0 to `maxOnboardingFee`.
+It cannot change the message fee, a guardian set, an `Emitter`, a replay node or a governance result.
+Replace the admin with the emergency ceremony (Section 7.9).
 
 **Guardian removal:**
 
@@ -1119,9 +1130,55 @@ NTT paths where `gg` pays a fee fail when the fee is above 0 (decision U5).
 Keep each fee at 0 until each NTT path has a fee payer that is not `gg`.
 
 1. Do not sign a `SetMessageFee` VAA for chain 75 with a fee above 0.
-2. Do not co-sign an `EmitterRegistry` with a `registrationFee` above 0.
-3. Make sure that the `operator` creates no `ReplayRootRegistry` with a `claimFee` above 0.
+2. Do not accept a genesis offer with a `registrationFee` or a `replayRootClaimFee` above 0.
+3. Make sure that the onboarding fee admin sets no registration fee and no claim fee above 0.
 4. Make sure that the fee payer of each NTT path is not `gg`. Record the result before a fee goes above 0.
+
+### 7.9 Onboarding fee admin replacement
+
+Use this ceremony only in an emergency, for example a compromised or lost onboarding fee admin.
+The core governance VAA set has no admin action. Thus `gg` replaces the admin directly.
+The ceremony is two prepared transactions, one for each registry:
+
+| Order | Command | `actAs` | Signer sets |
+| - | - | - | - |
+| 1 | `ReplaceEmitterRegistryFeeAdmin` on the active `EmitterRegistry` | `gg` only | `gg` |
+| 2 | `ReplaceReplayRootRegistryFeeAdmin` on the active `ReplayRootRegistry` | `gg` only | `gg` |
+
+For each transaction:
+
+1. Make sure that the registry is the one active registry of your `gg`.
+2. Make sure that `newOnboardingFeeAdmin` is the agreed new admin.
+3. Make sure that the new admin is not `gg`, `feeCustody` or `nttCustody`.
+4. Make sure that the prepared transaction has exactly one signer set: `gg`.
+5. Sign the prepared hash for `gg` (Section 7.1).
+
+After the ceremony:
+
+1. Make sure that each registry shows the new admin.
+2. Make sure that the fee of each registry did not change.
+3. Make sure that the `nextId` of the `EmitterRegistry` did not change.
+
+### 7.10 Disclosures for submitters
+
+`gg` is a signatory of each core contract and of each NTT root.
+Thus each guardian participant can read the created event blob of each of these contracts as `gg`.
+A submitter that is not a stakeholder needs these disclosures. For example: `CoreState` for a publish, a VAA check or a governance VAA.
+The operator participant is not necessary for a disclosure.
+
+To serve disclosures from a guardian participant:
+
+1. Use a Ledger API user that has only the right `CanReadAs` for `guardianGovernance`.
+2. Read the active contracts as `gg` with `includeCreatedEventBlob` set to true.
+3. Give the `templateId`, `contractId`, `createdEventBlob` and `synchronizerId` of each contract to the submitter.
+4. Do not give a submitter a token of this user.
+
+A disclosure gives visibility only. It gives no authority.
+A stale disclosure fails the transaction. It cannot make a wrong transaction commit.
+
+LocalNet rehearsal: [`gg_operator_independence.sh`](../canton/localnet/gg_operator_independence.sh).
+With `app-provider` (the operator participant) disconnected, local parties on `sv` and `app-user` submit each Wormhole function.
+They use disclosures that `sv` reads as `gg`.
 
 ## 8. Watcher configuration
 
@@ -1277,7 +1334,7 @@ Message fees are not `gg` holdings: `feeCustody` holds them (decision U5).
 The proposed fixes are:
 
 - A dedicated custody party, separate from the `gg` mint authority.
-- A separate mint authority party, or a `CoinFactory` that the operator also signs.
+- A separate mint authority party, or a `CoinFactory` that a second party also signs.
 - An allowlist of registry templates for quorum custody.
 
 Until a decision, do not vet a third-party registry package for `gg` custody.
@@ -1345,7 +1402,7 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | LocalNet run of the core upgrade abort procedure | 6.7 |
 | Rehearsals with `wormhole-core` 0.8.3 | 7.5 |
 | Mapping from the 32-byte `recipient` to a Canton party | 7.6 |
-| Procedure for a participant key, OAuth2 client secret or `operator` party compromise | 7.7 |
+| Procedure for a participant key or OAuth2 client secret compromise | 7.7 |
 | Reobservation period and participant pruning | 8.1 |
 | Alert values for the traffic balance and the number of `gg` hosts | 8.3 |
 | Persistent offset for the watcher | 8.4 |
@@ -1369,7 +1426,8 @@ Until a decision, use the one-id procedure in Section 6.7, and do not set the re
 | Guardian set rotation to three guardians | Passed live on 2026-11-17 with `wormhole-core` 0.6.0, with the below-quorum rejection (Section 7.3). |
 | Guardian set expiry boundary | The check compares whole seconds, `now <= expiry`, as on EVM (Section 7.3). |
 | `TxID` on different participants | The `TxID` is the update ID, the same on each participant (Section 8.1). |
-| U2: emitter address uniqueness against a compromised operator | `gg` co-signs `EmitterRegistry` and `Emitter` from `wormhole-core` 0.8.0 (Section 7.2). |
+| U2: emitter address uniqueness against a compromised operator | `gg` co-signs `EmitterRegistry` and `Emitter` from `wormhole-core` 0.8.0. From 0.9.0, `gg` is the only signatory of `EmitterRegistry` (Section 7.2). |
+| Operator dependency | From `wormhole-core` 0.9.0, each Wormhole function runs with the operator participant disconnected. LocalNet, `gg_operator_independence.sh` (Section 7.10). |
 | Confirmation threshold of a multi-host `gg` | The devnet setup script requires a majority of the hosts (Section 4.1). |
 | Contracts of the old core version after the unvet | They work under the new version. LocalNet rehearsal of 0.6.0 to 0.7.0 at commit `395103f5e` (Section 6.7). |
 | LocalNet rehearsal of the core package upgrade | Passed for 0.6.0 to 0.7.0 at commit `395103f5e`, before the maximum canary time and the abort procedure (Section 6.7). |
