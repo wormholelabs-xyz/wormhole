@@ -592,16 +592,16 @@ recordGovernanceDigest evictedMaxTimestampSeconds consumed digest timestampSecon
               consumedGovernance = Map.filter (> oldestTimestampSeconds) inserted
               evictedGovernanceMaxTimestampSeconds = Some oldestTimestampSeconds
 
--- | Governance replay state of a re-genesis 'CoreState' that replaces
--- @earlierRoots@: the highest earlier floor, then each earlier digest above it,
+-- | Governance replay state of a re-genesis that replaces the earlier replay
+-- records: the highest earlier floor, then each earlier digest above it,
 -- inserted in timestamp order through 'recordGovernanceDigest'. A digest at or
 -- below the running floor is covered by the floor. Fails on an empty list and on
 -- a digest with two timestamps. The result passes 'checkConsumedGovernanceIsBounded'.
-tryGovernanceReplayRecordForRegenesis : [CoreState] -> Either Text GovernanceReplayRecord
-tryGovernanceReplayRecordForRegenesis earlierRoots = do
-  assertMsg "regenesis: no earlier CoreState" (not (null earlierRoots))
-  let earlierFloorSeconds = maximum (map (.evictedGovernanceMaxTimestampSeconds) earlierRoots)
-      earlierEntries = concatMap (\root -> Map.toList root.consumedGovernance) earlierRoots
+tryGovernanceReplayRecordForRegenesisFromRecords : [GovernanceReplayRecord] -> Either Text GovernanceReplayRecord
+tryGovernanceReplayRecordForRegenesisFromRecords earlierRecords = do
+  assertMsg "regenesis: no earlier governance replay record" (not (null earlierRecords))
+  let earlierFloorSeconds = maximum (map (.evictedGovernanceMaxTimestampSeconds) earlierRecords)
+      earlierEntries = concatMap (\earlierRecord -> Map.toList earlierRecord.consumedGovernance) earlierRecords
       mergeEntry merged (digest, timestampSeconds) = case Map.lookup digest merged of
         Some recordedTimestampSeconds | recordedTimestampSeconds /= timestampSeconds ->
           Left "regenesis: a digest carries two timestamps"
@@ -618,6 +618,21 @@ tryGovernanceReplayRecordForRegenesis earlierRoots = do
   assertMsg "regenesis: replay record is not bounded"
     (checkConsumedGovernanceIsBounded replayRecord.evictedGovernanceMaxTimestampSeconds replayRecord.consumedGovernance)
   pure replayRecord
+
+governanceReplayRecordForRegenesisFromRecords : [GovernanceReplayRecord] -> GovernanceReplayRecord
+governanceReplayRecordForRegenesisFromRecords earlierRecords =
+  either error identity (tryGovernanceReplayRecordForRegenesisFromRecords earlierRecords)
+
+-- | 'tryGovernanceReplayRecordForRegenesisFromRecords' over the replay state of earlier 'CoreState' roots.
+tryGovernanceReplayRecordForRegenesis : [CoreState] -> Either Text GovernanceReplayRecord
+tryGovernanceReplayRecordForRegenesis earlierRoots = do
+  assertMsg "regenesis: no earlier CoreState" (not (null earlierRoots))
+  tryGovernanceReplayRecordForRegenesisFromRecords (map governanceReplayRecordOf earlierRoots)
+
+governanceReplayRecordOf : CoreState -> GovernanceReplayRecord
+governanceReplayRecordOf root = GovernanceReplayRecord with
+  consumedGovernance = root.consumedGovernance
+  evictedGovernanceMaxTimestampSeconds = root.evictedGovernanceMaxTimestampSeconds
 
 governanceReplayRecordForRegenesis : [CoreState] -> GovernanceReplayRecord
 governanceReplayRecordForRegenesis earlierRoots =
