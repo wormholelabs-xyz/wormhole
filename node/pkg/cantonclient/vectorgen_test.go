@@ -43,7 +43,7 @@ const (
 	set7SetMessageFeeSequence      = uint64(7)
 	set7GuardianSetUpgradeSequence = uint64(8)
 
-	addressVectorRegistrar = "vector-operator::1220deadbeef"
+	addressVectorRegistrar = "vector-registrar::1220deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	addressVectorOwner     = "vector-owner::1220cafebabe"
 	addressVectorEmitterID = uint64(7)
 	emitterAddressTag      = "wormhole:emitter:v1"
