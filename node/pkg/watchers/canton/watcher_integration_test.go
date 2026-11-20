@@ -6,7 +6,7 @@
 //
 //	go test -tags integration -run TestCantonWatcherIntegration ./pkg/watchers/canton -v
 //
-// Requires `dpm` (PATH or ~/.dpm/bin) + a JDK; skipped otherwise. Slow (boots a
+// Requires `dpm` (PATH or ~/.dpm/bin) + a Java 21 JDK; skipped otherwise. Slow (boots a
 // JVM sandbox), so it is excluded from the default build.
 package canton
 
