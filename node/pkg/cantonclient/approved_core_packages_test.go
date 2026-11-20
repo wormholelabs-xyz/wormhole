@@ -8,10 +8,13 @@ import (
 )
 
 // deployedCorePackageIDHex is wormhole-core 0.9.0 (guardianGovernance is the only core anchor).
-const deployedCorePackageIDHex = "ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a"
+const deployedCorePackageIDHex = "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
 
 // replacedCore090PackageIDHex is the first 0.9.0 build: it accepts guardianGovernance as the fee instrument admin.
 const replacedCore090PackageIDHex = "dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d"
+
+// replacedSecondCore090PackageIDHex is the second 0.9.0 build: TransferFees accepts chain 0.
+const replacedSecondCore090PackageIDHex = "ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a"
 
 // Withdrawn wormhole-core builds: the operator signs core contracts.
 const (
@@ -40,6 +43,7 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		{name: "withdrawn first 0.8.3 build", packageIDHex: withdrawnFirstCore083PackageIDHex, version: "0.8.3", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.3 id as 0.9.0", packageIDHex: withdrawnCore083PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 		{name: "replaced first 0.9.0 build", packageIDHex: replacedCore090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
+		{name: "replaced second 0.9.0 build", packageIDHex: replacedSecondCore090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

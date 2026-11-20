@@ -72,9 +72,11 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 It removes template fields, so it is not an SCU upgrade of 0.8.x.
 Thus `core/daml.yaml` has no `upgrades:` line, and 0.9.0 starts a new `wormhole-core` line.
 0.9.0 `ensure` rules on `CoreState`: the fee instrument admin is neither `guardianGovernance` nor `feeCustody`.
-The 0.9.0 main package id is `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`.
+The 0.9.0 main package id is `bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`.
 The first 0.9.0 build, `dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
+The second 0.9.0 build, `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`, is replaced.
+Its `TransferFees` accepts chain 0, and its fee choices have no explicit bound asserts. Do not deploy it.
 0.8.3 is withdrawn: the operator signs its core contracts.
 
 To check the package id, run
