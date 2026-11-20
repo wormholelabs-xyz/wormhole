@@ -252,11 +252,11 @@ Use option 3 only if a guardian ceremony for the registry is not possible.
   `TestMaxEmitterIDMatchesDaml` pins it to `maxEmitterId`.
 - `Test.TestCore:setup` creates `CoreState` and `EmitterRegistry` in one transaction.
   `guardianGovernance` and `feeCustody` sign that transaction.
-- `canton/devnet/genesis_guardian_governance.sh` prepares each create command as its own transaction, `CoreState` first.
-  It still co-signs with a 0.8.x `operator` party. A later change updates it to the 0.9.0 shape.
-  The guardian owners sign each one with the threshold.
-  The script stops before the `EmitterRegistry` create when `CoreState` is not committed.
-  It skips a create whose contract is already active for the pair, so a rerun creates only the missing contract.
+- `canton/devnet/genesis_guardian_governance.sh` and `canton/localnet/gg_genesis.sh` use the `wormhole-genesis` package.
+  A local operator party creates one `WormholeGenesisOffer`.
+  `guardianGovernance`, `feeCustody` and `nttCustody` accept it in one prepared transaction, each with the owner threshold.
+  `AcceptGenesis` creates `CoreState`, `EmitterRegistry` with `nextId = 0`, `ReplayRootRegistry`, `NttGovernance` and the
+  `guardianGovernance` `CoinFactory`. When a `CoreState` of `guardianGovernance` is active, the scripts stop.
 - The NTT package code does not change.
   The NTT tests change (refer to [NTT](#ntt)).
 
@@ -375,8 +375,9 @@ No message id of 0.9.0 can then be equal to a message id of an earlier deploymen
 4. Allocate `feeCustody` in the `guardianGovernance` namespace, with the hosts, the confirmation threshold and the
    signing keys of `guardianGovernance`.
 5. Select the onboarding fee admin party.
-6. Run the genesis ceremony.
-   It creates `CoreState`, `EmitterRegistry` with `nextId = 0`, and `ReplayRootRegistry`.
+6. Run the genesis ceremony: the operator offers genesis, and the guardians accept the offer once (`AcceptGenesis`).
+   It creates `CoreState`, `EmitterRegistry` with `nextId = 0`, `ReplayRootRegistry`, `NttGovernance` and the
+   `guardianGovernance` `CoinFactory`.
    `guardianGovernance` signs each contract. `feeCustody` also signs the `CoreState` and is its `feeRecipient`.
 7. Run the scan (refer to [Scan](#scan)) on each guardian participant.
    Use begin offset 0, `EXPECT_ACTIVE_REGISTRIES=1`, and `EXPECTED_CORE_PACKAGE_ID` set to the 0.9.0 package id.
@@ -384,8 +385,8 @@ No message id of 0.9.0 can then be equal to a message id of an earlier deploymen
 8. Set `--cantonPackageID` to the 0.9.0 package id and `--cantonPackageVersion=0.9.0` on each guardian.
 9. Announce `guardianGovernance`, the 0.9.0 package id, and the registry to integrators (refer to [Integrator cutover](#integrator-cutover)).
 
-> **NOTE:** `canton/devnet/genesis_guardian_governance.sh` still uses the 0.8.x genesis shape with an `operator` party.
-> A later change updates it and adds a propose-and-accept genesis package.
+A re-genesis (`ReGenesisReplacing`) sets `firstEmitterId` to the `nextId` of the earlier registry.
+Thus a re-genesis issues no emitter ID a second time.
 
 > **WARNING:** A guardian participant that vets an earlier `wormhole-core` version lets a submitter run choices under that version.
 > The scan fails on such a participant.
@@ -471,7 +472,7 @@ These items need no Daml change:
 | `ReplayRootRegistry` | `guardianGovernance` | No. It has no counter. Each claim needs the consumer signature and the `expectedGuardianGovernance` pin. | None. | None. |
 | `ReplayNode` | consumer, `guardianGovernance` | No. Only the consumer claims a root for itself. | None. | None. |
 | `Emitter` | owner, `guardianGovernance` | No. A rewind needs the guardian threshold (A14-2, option 5). | None. | None. |
-| NTT `NttGovernance` | `guardianGovernance`, operator (NTT repository) | No. The `nextId` counter needs the `guardianGovernance` signature. | None. | None. |
+| NTT `NttGovernance` | `guardianGovernance`, `nttCustody` (NTT repository) | No. The `nextId` counter needs the `guardianGovernance` signature. `AcceptGenesis` creates it. | None. | None. |
 | NTT `NttManager`, `LockedLedger` | include `guardianGovernance` | No. Only `RegisterManager` creates them. | None. | None. |
 
 Each core counter needs the `guardianGovernance` signature.
