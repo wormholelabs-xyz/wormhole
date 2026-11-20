@@ -262,6 +262,11 @@ check_case "core id of the fixture core DAR" 0 - - \
   check_core_package_id_of_dar "$FIXTURE_CORE_DAR" "$FIXTURE_CORE_PACKAGE_ID"
 check_case "wrong expected core id" 1 - "$FIXTURE_CORE_PACKAGE_ID, expected $pinned_core_package_id" \
   check_core_package_id_of_dar "$FIXTURE_CORE_DAR" "$pinned_core_package_id"
+readonly SPLICE_HOLDING_PACKAGE_ID="718a0f77e505a8de22f188bd4c87fe74101274e9d4cb1bfac7d09aec7158d35b"
+check_case "main id of the vendored damlc DAR splice-api-token-holding-v1" 0 "$SPLICE_HOLDING_PACKAGE_ID" - \
+  dar_main_package_id "$VENDORED_DAR_DIR/splice-api-token-holding-v1-1.0.0.dar"
+check_case "main name and version of the vendored damlc DAR splice-api-token-holding-v1" 0 "splice-api-token-holding-v1 1.0.0" - \
+  dar_main_package_name_and_version "$VENDORED_DAR_DIR/splice-api-token-holding-v1-1.0.0.dar"
 check_case "no core DALF" 1 - "found 0" \
   check_core_package_id_of_dar "$VENDORED_DAR_DIR/splice-api-token-holding-v1-1.0.0.dar" "$pinned_core_package_id"
 check_case "main id of a file that is not a DAR" 1 - "cannot list" dar_main_package_id "$work_dir/not-a-dar.dar"
