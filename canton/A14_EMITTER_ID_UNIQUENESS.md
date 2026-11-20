@@ -114,7 +114,7 @@ Migration: new template, new tag, a watcher release, and a guardian ceremony for
 
 Mechanism:
 
-1. Add a field `registrationSalt : Bytes32` to `RegisterEmitter` and to `Emitter`.
+1. Add a field `registrationSalt : RegistrationSalt` to `RegisterEmitter` and to `Emitter`. `RegistrationSalt` is a new 32-byte type in `Wormhole.Core.Bytes`.
 2. The owner client generates a random salt for each registration.
 3. The address becomes `keccak256(tag_v2, registrar, owner, emitterId, registrationSalt)`.
 4. `PublishMessage` puts the salt in `WormholeMessage`.

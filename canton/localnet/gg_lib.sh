@@ -290,7 +290,7 @@ generate_vaa() {
 
 # Daml [(Int, Bytes)] public-key hints from generate_vaa output.
 vaa_pub_keys_json() {
-  jq -c '[.pubKeys[] | {_1: (.guardianIndex | tostring), _2: .publicKeyHex}]' <<<"$1"
+  jq -c '[.pubKeys[] | {_1: (.guardianIndex | tostring), _2: {tag: "GuardianPublicKey", value: .publicKeyHex}}]' <<<"$1"
 }
 
 # active_contracts_with_blobs <validator> <party> <qualified-template-suffix>: like active_contracts, with created event blobs.
@@ -411,7 +411,7 @@ core_state_disclosures_on() {
 verify_vaa() {
   submit_local "$CORE_ROLE_VALIDATOR" "$1" "$(jq -cn --arg party "$CORE_VERIFIER_PARTY" '[$party]')" \
     "$(exercise_command "$CORE_STATE_TEMPLATE" "$(core_contract_id coreState "$CORE_ROLE_VALIDATOR")" ParseAndVerifyVAA \
-      "$(jq -n --arg party "$CORE_VERIFIER_PARTY" --arg vaa "$2" --argjson keys "$3" '{verifier: $party, encodedVAA: $vaa, pubKeys: $keys}')")" \
+      "$(jq -n --arg party "$CORE_VERIFIER_PARTY" --arg vaa "$2" --argjson keys "$3" '{verifier: $party, encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}')")" \
     "$(core_state_disclosures_on "$CORE_ROLE_VALIDATOR")"
 }
 
@@ -428,7 +428,7 @@ publish_message() {
   submit_local "$CORE_ROLE_VALIDATOR" "$1" "$(jq -cn --arg party "$CORE_PUBLISHER_PARTY" '[$party]')" \
     "$(exercise_command "$EMITTER_TEMPLATE" "$(core_contract_id emitter "$CORE_ROLE_VALIDATOR")" PublishMessage \
       "$(jq -n --arg party "$CORE_PUBLISHER_PARTY" --arg cs "$(core_contract_id coreState "$CORE_ROLE_VALIDATOR")" --arg payload "$2" \
-        '{nonce: "2", payload: $payload, consistencyLevel: "0", coreStateCid: $cs, payer: $party, feeAllocation: null}')")" \
+        '{nonce: "2", payload: {tag: "MessagePayload", value: $payload}, consistencyLevel: "0", coreStateCid: $cs, payer: $party, feeAllocation: null}')")" \
     "$(core_state_disclosures_on "$CORE_ROLE_VALIDATOR")"
 }
 

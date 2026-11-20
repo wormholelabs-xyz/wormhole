@@ -238,6 +238,9 @@ jobs:
       - name: Run the Daml tests (dpm test)
         run: docker run --rm --workdir /canton-build/test canton-daml-build dpm test
 
+      - name: Run the forged byte value boundary test
+        run: docker run --rm --workdir /canton-build canton-daml-build bash test/forged_byte_values_test.sh
+
   # Canton watcher sandbox tests (go test -tags integration) in the canton build image with Go added
   canton-watcher-integration:
     name: Canton watcher integration

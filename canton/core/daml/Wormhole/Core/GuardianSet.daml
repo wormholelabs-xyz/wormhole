@@ -7,7 +7,6 @@ import DA.Date (Month(Jan), date)
 import DA.Foldable (forA_)
 import DA.List.Total ((!!))
 import DA.Set qualified as Set
-import DA.Text qualified as T
 import DA.Time (convertMicrosecondsToRelTime, convertRelTimeToMicroseconds, subTime, time, addRelTime)
 import Wormhole.Core.Bytes
 
@@ -25,13 +24,9 @@ maxGuardianSetIndex = 4294967295
 maxGuardiansPerSet : Int
 maxGuardiansPerSet = 255
 
--- | 20 bytes as lowercase hex.
-guardianAddressHexLength : Int
-guardianAddressHexLength = 40
-
 -- | No private key exists for it. EVM @Setters.storeGuardianSet@ rejects it.
-zeroGuardianAddress : Bytes20
-zeroGuardianAddress = "0000000000000000000000000000000000000000"
+zeroGuardianAddress : GuardianAddress
+zeroGuardianAddress = parseHexTextOrAbort "0000000000000000000000000000000000000000"
 
 checkGuardianSetIndexFitsUint32 : Int -> Bool
 checkGuardianSetIndexFitsUint32 index = index >= 0 && index <= maxGuardianSetIndex
@@ -39,14 +34,14 @@ checkGuardianSetIndexFitsUint32 index = index >= 0 && index <= maxGuardianSetInd
 -- | Applies to each stored set (CoreState precondition) and to each
 -- GuardianSetUpgrade. Addresses must be distinct: 'verifyVAA' requires
 -- ascending signature positions only, so a repeated address counts one key twice.
-checkGuardianAddressesAreWellFormed : [Bytes20] -> Either Text ()
+checkGuardianAddressesAreWellFormed : [GuardianAddress] -> Either Text ()
 checkGuardianAddressesAreWellFormed addresses = do
   let guardianCount = length addresses
   assertMsg "guardian set: empty set" (guardianCount >= 1)
   assertMsg "guardian set: more than 255 guardians" (guardianCount <= maxGuardiansPerSet)
   forA_ (zip [0 .. guardianCount - 1] addresses) \(position, address) -> do
     assertMsg ("guardian set: address at position " <> show position <> " is not 20 bytes of lowercase hex")
-      (T.length address == guardianAddressHexLength && isLowerHex address)
+      (checkHexValueIsWellFormed address)
     assertMsg ("guardian set: zero address at position " <> show position)
       (address /= zeroGuardianAddress)
   assertMsg "guardian set: duplicate address"
@@ -56,7 +51,7 @@ checkGuardianAddressesAreWellFormed addresses = do
 -- Ethereum-style, exactly as carried by a GuardianSetUpgrade VAA) and an
 -- optional expiration time. @None@ means "never expires" (the current set).
 data GuardianSet = GuardianSet with
-    keys           : [Bytes20]
+    keys           : [GuardianAddress]
     expirationTime : Optional Time
   deriving (Eq, Show)
 
@@ -71,7 +66,7 @@ quorum n = (n * 2) / 3 + 1
 
 -- | Look up the 20-byte address of the guardian at @index@ (0-based). Total:
 -- returns None out of range.
-keyAt : GuardianSet -> Int -> Optional Bytes20
+keyAt : GuardianSet -> Int -> Optional GuardianAddress
 keyAt gs index = gs.keys !! index
 
 -- | A set is usable at @now@ if it is the current set (no expiry) or @now@ is
