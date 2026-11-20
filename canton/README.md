@@ -565,6 +565,9 @@ the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
 ContractUpgrade and SetMessageFee, `40 + 20·len` for GuardianSetUpgrade, and 99
 for TransferFees.
 
+Target chain: GuardianSetUpgrade accepts chain 75 or chain 0. The other three
+actions accept chain 75 only. `sdk/vaa` serializes no TransferFees for chain 0.
+
 | Action                 | ID  | Payload (after 32-byte module + 1-byte action)   | Behavior                                                                                                                                                                                   |
 | ---------------------- | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **ContractUpgrade**    | 1   | `chain(2) ‖ newContract(32)`                     | Records intent + emits an event. On Canton, "upgrade" = a [Daml package upgrade](https://docs.daml.com/upgrade/); `newContract` is interpreted as the new package-id (32 bytes). See note. |

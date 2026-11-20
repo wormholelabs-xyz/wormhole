@@ -796,7 +796,7 @@ testGovernanceTargetChainRules = do
         , ("SetMessageFee chain 0", setMessageFeeTo 0, Some "setMessageFee: wrong target chain")
         , ("SetMessageFee chain 2", setMessageFeeTo 2, Some "setMessageFee: wrong target chain")
         , ("TransferFees chain 75", transferFeesTo 75, None)
-        , ("TransferFees chain 0", transferFeesTo 0, None)
+        , ("TransferFees chain 0", transferFeesTo 0, Some "transferFees: wrong target chain")
         , ("TransferFees chain 2", transferFeesTo 2, Some "transferFees: wrong target chain")
         , ("ContractUpgrade chain 75", contractUpgradeTo 75, None)
         , ("ContractUpgrade chain 0", contractUpgradeTo 0, Some "contractUpgrade: wrong target chain")
