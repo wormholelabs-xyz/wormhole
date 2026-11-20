@@ -1937,23 +1937,22 @@ instead. Each is a JSON array of strings (program, then arguments), so no shell
 splits a key path (see the script's header for the full environment-variable contract).
 
 [`devnet/genesis_guardian_governance.sh`](devnet/genesis_guardian_governance.sh)
-exercises the resulting party: it prepares a `create CoreState` and a
-`create EmitterRegistry` command, one prepared transaction each (the prepare
-endpoint takes one command), has owners sign the prepared transaction hash,
-and executes. It supports three modes — `happy` (2-of-3, succeeds),
-`threshold` (1-of-3, rejected), and `forge` (no guardianGovernance signature,
-rejected — the anti-forgery property from §10).
-
-> **NOTE:** This script still co-signs with an external `operator` party, the
-> 0.8.x genesis shape. The LocalNet genesis and governance scripts do the same.
-> Thus they do not work with 0.9.0 yet. The 0.9.0 genesis needs only
-> `guardianGovernance` (and `feeCustody` for the `CoreState`). A later change
-> updates these scripts and adds a propose-and-accept genesis package.
+runs the genesis of `wormhole-genesis` 0.1.0. A local operator party creates one
+`WormholeGenesisOffer`. `guardianGovernance`, `feeCustody` and `nttCustody`
+accept it in one prepared `AcceptGenesis` transaction; the owners sign its
+hash. `AcceptGenesis` creates `CoreState`, `EmitterRegistry`,
+`ReplayRootRegistry`, `NttGovernance` and the `guardianGovernance`
+`CoinFactory`. Modes: `happy` (2-of-3 for each party, commits), `threshold`
+(1-of-3 `guardianGovernance`, rejected), `forge` (no namespace signature, the
+operator alone, rejected: the anti-forgery property from §10),
+`fee-custody-missing`, `fee-custody-threshold` and `ntt-custody-missing`
+(rejected). The guardian side compares the offer with its own agreed parameters
+before it signs (`canton/localnet/gg_offline_lib.sh`).
 
 [`devnet/test_guardian_governance.sh`](devnet/test_guardian_governance.sh) runs
 all of the above against a fresh `dpm sandbox` and asserts the full table:
-namespace/threshold/hosting shape, and all three genesis modes' expected
-outcome.
+namespace/threshold/hosting shape, and each genesis mode's expected outcome.
+It needs the `wormhole-genesis` DAR of the NTT repository (`NTT_REPO_DIR`).
 
 ```bash
 canton/devnet/test_guardian_governance.sh
@@ -2090,7 +2089,9 @@ destination. The admin gets no funds (`testCompromisedFeeAdminStopsOnlyOnboardin
 **Liveness.** Each core function needs only the authority of its caller and the
 inherited `guardianGovernance` signature. Publish, the watcher, verify,
 verify-and-consume, registration, claim, fee charging and governance continue
-when the former operator or the onboarding fee admin is offline. If the onboarding fee admin is offline, only
+when the former operator or the onboarding fee admin is offline. LocalNet
+rehearses this with the operator participant disconnected
+(`localnet/gg_operator_independence.sh`). If the onboarding fee admin is offline, only
 `SetRegistrationFee` and `SetClaimFee` stop. The current fees stay. Any
 guardian participant serves every core disclosure. If all guardian participants
 stop serving disclosures, the failure is fail-safe. Transactions stop
