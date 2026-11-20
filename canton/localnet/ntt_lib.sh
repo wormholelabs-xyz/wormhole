@@ -9,15 +9,18 @@ source "$(dirname "${BASH_SOURCE[0]}")/ntt_offline_lib.sh"
 # wormhole-core 0.9.0: the LocalNet core DAR, the core DALF of the NTT DAR and the watcher filter.
 readonly WORMHOLE_CORE_VERSION="0.9.0"
 readonly WORMHOLE_CORE_PACKAGE_ID="bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
-# NTT_PIN_VERSION selects one entry of ntt_pinned_package_id. Default 0.3.4. The pinned ntt DARs are built on
-# core 0.8.3, so ntt_upload_dars.sh rejects them until the NTT DAR is rebuilt on core 0.9.0 and pinned.
-readonly NTT_VERSION="${NTT_PIN_VERSION:-0.3.4}"
+# NTT_PIN_VERSION selects one entry of ntt_pinned_package_id.
+readonly NTT_VERSION="${NTT_PIN_VERSION:-0.5.0}"
 NTT_PACKAGE_ID="$(ntt_pinned_package_id "$NTT_VERSION")" || exit 1
 readonly NTT_PACKAGE_ID
 # token-cip0056 0.2.0: its CoinFactory template is the canonical burn/mint factory.
 readonly TOKEN_CIP0056_PACKAGE_ID="0a624d6a07264860159e881ca7ff6b349f58e95f393c8861529089f9cd8ba474"
 readonly NTT_CANTON_DIR="${NTT_REPO_DIR:-$(cd "$REPO_ROOT/.." && pwd)/ntt}/canton"
 readonly NTT_DAR="$NTT_CANTON_DIR/ntt/.daml/dist/ntt-$NTT_VERSION.dar"
+# wormhole-genesis 0.1.0 on ntt 0.5.0 and core 0.9.0: NTT branch canton/migrate-ntt-layer, commit b2c355d.
+readonly WORMHOLE_GENESIS_VERSION="0.1.0"
+readonly WORMHOLE_GENESIS_PACKAGE_ID="7e9ca47aadda9bb3828d37a2844b1ee57ae77fa3151f3aecb84d66267e6c44d4"
+readonly WORMHOLE_GENESIS_DAR="$NTT_CANTON_DIR/genesis/.daml/dist/wormhole-genesis-$WORMHOLE_GENESIS_VERSION.dar"
 
 NTT_CUSTODY_ARTIFACTS="$LOCALNET_STATE_DIR/custody-artifacts.json"
 NTT_CUSTODY_PARTY=""
@@ -54,56 +57,6 @@ ntt_custody_signers_json() {
   [[ -n "$NTT_CUSTODY_PARTY" ]] || fail "ntt_custody_signers_json: ntt $NTT_VERSION has no nttCustody party"
   gg_ceremony_signers_json | jq -e --arg party "$NTT_CUSTODY_PARTY" \
     'if length == 1 then {($party): (to_entries[0].value)} else error("expected one guardianGovernance signer entry, found \(length)") end'
-}
-
-# active_contracts_with_blobs <validator> <party> <qualified-template-suffix>: like active_contracts, with created event blobs.
-active_contracts_with_blobs() {
-  local validator_name="$1" party="$2" template_suffix="$3" ledger_end
-  ledger_end="$(curl --max-time 120 -sSf "$(json_api_url "$validator_name")/v2/state/ledger-end" -H "@$SCRIPT_AUTH_HEADER" | jq -er .offset)"
-  curl --max-time 120 -sSf -X POST "$(json_api_url "$validator_name")/v2/state/active-contracts" \
-    -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
-    -d "$(jq -n --arg party "$party" --argjson offset "$ledger_end" '{
-      eventFormat: {filtersByParty: {($party): {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: true}}}}]}}, verbose: false},
-      activeAtOffset: $offset}')" \
-    | jq -c --arg suffix "$template_suffix" \
-      '[.[] | .contractEntry.JsActiveContract? // empty | select(.createdEvent.templateId | endswith($suffix))
-        | .createdEvent + {synchronizerId}]'
-}
-
-# disclosed_contract <validator> <party> <qualified-template-suffix> <contract-id>: one DisclosedContract JSON.
-disclosed_contract() {
-  active_contracts_with_blobs "$1" "$2" "$3" \
-    | jq -ec --arg cid "$4" '[.[] | select(.contractId == $cid)]
-        | if length == 1 then .[0] | {templateId, contractId, createdEventBlob, synchronizerId}
-          else error("contract \($cid) is not active for the party") end'
-}
-
-# submit_local_response <validator> <command-id> <act-as-json-array> <command-json> [disclosed-json]
-# Submits as local parties of that participant. Prints the response body, then the HTTP status on the last line.
-submit_local_response() {
-  local validator_name="$1" command_id="$2" act_as="$3" command="$4" disclosed="${5:-[]}"
-  curl --max-time 120 -sS -X POST "$(json_api_url "$validator_name")/v2/commands/submit-and-wait-for-transaction" \
-    -H "@$SCRIPT_AUTH_HEADER" -H 'Content-Type: application/json' \
-    -w '\n%{http_code}' \
-    -d "$(jq -n --arg commandId "$command_id" --argjson actAs "$act_as" --argjson command "$command" \
-      --argjson disclosed "$disclosed" --arg userId "$SCRIPT_USER_ID" --arg synchronizerId "$LOGICAL_SYNCHRONIZER_ID" '{
-      commands: {commands: [$command], commandId: $commandId, actAs: $actAs, readAs: [], userId: $userId,
-                 disclosedContracts: $disclosed, synchronizerId: $synchronizerId},
-      transactionFormat: {
-        eventFormat: {filtersByParty: ($actAs | map({key: ., value: {cumulative: [{identifierFilter: {WildcardFilter: {value: {includeCreatedEventBlob: false}}}}]}}) | from_entries), verbose: true},
-        transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}')"
-}
-
-# submit_local <validator> <command-id> <act-as-json-array> <command-json> [disclosed-json]
-# Submits as local parties of that participant. Prints the transaction JSON.
-submit_local() {
-  local validator_name="$1" command_id="$2" response
-  response="$(submit_local_response "$@")" || return 1
-  if [[ "$(tail -n 1 <<<"$response")" != "200" ]]; then
-    echo "submit $command_id on $validator_name failed: $(sed '$d' <<<"$response")" >&2
-    return 1
-  fi
-  sed '$d' <<<"$response" | jq -c .transaction
 }
 
 # submit_local_expect_rejection <validator> <command-id> <act-as-json-array> <command-json> <disclosed-json> <expected-error-text>
@@ -193,7 +146,7 @@ latest_open_round() {
 
 # covering_replay_node <namespace> <digest-hex>: the active ReplayNode of guardianGovernance that covers the digest.
 covering_replay_node() {
-  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.Replay:ReplayNode" \
+  active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Core.Replay:ReplayNode" \
     | jq -er --arg gg "$GG_PARTY" --arg ns "$1" --arg digest "$2" \
       '[.[] | select(.createArgument.consumer == $gg and .createArgument.namespace == $ns)
              | select(.createArgument.prefix as $prefix | $digest | startswith($prefix))]
@@ -206,13 +159,6 @@ ntt_transfer_vaa() {
     -signing-key-indices "$NTT_GUARDIAN_KEY_INDICES" "$@"
 }
 
-# allocate_local_party <validator> <party-hint>: allocate a party on that participant and print its id.
-allocate_local_party() {
-  curl --max-time 120 -sSf -X POST "$(json_api_url "$1")/v2/parties" -H "@$ADMIN_AUTH_HEADER" \
-    -H 'Content-Type: application/json' -d "$(jq -n --arg hint "$2" '{partyIdHint: $hint, identityProviderId: ""}')" \
-    | jq -er .partyDetails.party
-}
-
 # allocate_external_party <validator> <party-hint> <key-file-prefix>: print {partyId, fingerprint, keyFile}.
 allocate_external_party() {
   node "$LOCALNET_SCRIPT_DIR/allocate_external_party.js" "$(json_api_url "$1")" "$gg_work_dir/script.jwt" \
@@ -221,25 +167,19 @@ allocate_external_party() {
 
 # current_emitter <emitter-id>: the active Emitter of guardianGovernance with that id, as created event JSON.
 current_emitter() {
-  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.State:Emitter" \
+  active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Core.State:Emitter" \
     | jq -ec --arg gg "$GG_PARTY" --arg id "$1" '[.[] | select(.createArgument.owner == $gg and .createArgument.emitterId == $id)]
         | if length == 1 then .[0] else error("expected one active emitter \($id), found \(length)") end'
 }
 
 current_ntt_governance() {
-  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Ntt.Governance:NttGovernance" \
+  active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" ":Wormhole.Ntt.Governance:NttGovernance" \
     | jq -er --arg gg "$GG_PARTY" '[.[] | select(.createArgument.guardianGovernance == $gg)]
         | if length == 1 then .[0].contractId else error("expected one NttGovernance, found \(length)") end'
 }
 
 current_emitter_registry() {
-  active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" ":Wormhole.Core.State:EmitterRegistry" \
-    | jq -er 'if length == 1 then .[0].contractId else error("expected one EmitterRegistry, found \(length)") end'
-}
-
-# operator_disclosure <qualified-template-suffix> <contract-id>: disclosure of a contract that Operator sees.
-operator_disclosure() {
-  disclosed_contract "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" "$1" "$2"
+  core_contract_id emitterRegistry
 }
 
 
