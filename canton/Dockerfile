@@ -9,24 +9,46 @@
 # (see devnet/canton-devnet.yaml) allocates the guardianGovernance party and creates the
 # CoreState via Test.TestCore:setup.
 #
-# dpm manages the SDK from daml.yaml's `sdk-version` (Daml SDK 3.7.3 → Canton
-# 3.7.3, Protocol Versions 36 and 37, Daml-LF 2.3; Ledger API v2 + DA.Crypto.Text
-# builtins). Canton is JVM-based, so the base image ships a JDK
-# (17+).
+# The SDK is the dpm SDK tarball of DAML_SDK_VERSION (Daml SDK 3.7.3, Canton
+# 3.7.3, Protocol Versions 36 and 37, Daml-LF 2.3), checked by SHA-256. `dpm
+# bootstrap` installs it from the tarball and makes it the active SDK, so dpm
+# commands outside a daml.yaml project (sandbox, script) run it too. Canton is
+# JVM-based, so the base image ships a JDK (17+).
 #
-# NOTE: building this image needs network access to get.digitalasset.com (dpm
-# installer) so it is not built in this repo's CI. The dpm commands here
-# (`dpm install <version>`, `dpm build`) and the sandbox/script flags used by the
-# devnet scripts have been validated against dpm for the pinned SDK.
+# Every daml.yaml under canton/ must pin DAML_SDK_VERSION
+# (node/pkg/watchers/canton/daml_sdk_version_test.go).
 ARG DAML_SDK_VERSION=3.7.3
 
-FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS build
+FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS dpm-sdk
 ARG DAML_SDK_VERSION
+# SHA-256 of dpm-<DAML_SDK_VERSION>-linux-<arch>.tar.gz from the Digital Asset public-generic repository.
+ARG DPM_SDK_TARBALL_SHA256_AMD64=73bd3d5e1ad656a2cd89b7c4e122495fd68acd5b84db4a91c5aefb9a2ddeb2e2
+ARG DPM_SDK_TARBALL_SHA256_ARM64=2b2ad6c9acdd30fc79dc57622109c49562f485cfc269ad969e1081229fa003ab
+# SHA-256 of canton-open-source-3.7.3.jar (node/pkg/cantonclient/README.md).
+ARG CANTON_OPEN_SOURCE_JAR_SHA256=3824a19207b7be4aed3120006e0d48bbd5452196ef1d8b77b2d5ec2f086a9528
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-# Install the dpm CLI, then the SDK version pinned in daml.yaml.
-RUN curl -fsSL https://get.digitalasset.com/install/install.sh | sh
+RUN set -eu; \
+    architecture="$(dpkg --print-architecture)"; \
+    case "$architecture" in \
+      amd64) tarball_sha256="$DPM_SDK_TARBALL_SHA256_AMD64" ;; \
+      arm64) tarball_sha256="$DPM_SDK_TARBALL_SHA256_ARM64" ;; \
+      *) echo "unsupported architecture $architecture" >&2; exit 1 ;; \
+    esac; \
+    tarball="dpm-${DAML_SDK_VERSION}-linux-${architecture}.tar.gz"; \
+    curl -fsSL --max-time 1800 -o "/tmp/$tarball" \
+      "https://artifactregistry.googleapis.com/download/v1/projects/da-images/locations/europe/repositories/public-generic/files/dpm-sdk:${DAML_SDK_VERSION}:${tarball}:download?alt=media"; \
+    echo "$tarball_sha256  /tmp/$tarball" | sha256sum -c -; \
+    mkdir /tmp/dpm-sdk; \
+    tar xzf "/tmp/$tarball" -C /tmp/dpm-sdk --strip-components 1; \
+    /tmp/dpm-sdk/bin/dpm bootstrap /tmp/dpm-sdk; \
+    rm -rf "/tmp/$tarball" /tmp/dpm-sdk; \
+    echo "$CANTON_OPEN_SOURCE_JAR_SHA256  /root/.dpm/cache/components/canton-open-source/${DAML_SDK_VERSION}/lib/canton-open-source-${DAML_SDK_VERSION}.jar" | sha256sum -c -; \
+    test "$(/root/.dpm/bin/dpm version --active)" = "$DAML_SDK_VERSION"
 ENV PATH="/root/.dpm/bin:${PATH}"
+
+FROM dpm-sdk AS build
+ARG DAML_SDK_VERSION
 WORKDIR /canton-build
 COPY multi-package.yaml ./
 # Vendored CIP-0056 token-standard interface DARs (core fees data-depend on
@@ -37,10 +59,12 @@ COPY test ./test
 COPY test-lookalike ./test-lookalike
 # LocalNet smoke package (localnet/README.md); never uploaded outside LocalNet.
 COPY localnet/daml ./localnet/daml
+RUN test "$(sed -n 's/^sdk-version: //p' core/daml.yaml)" = "$DAML_SDK_VERSION" \
+    || { echo "core/daml.yaml sdk-version differs from DAML_SDK_VERSION $DAML_SDK_VERSION" >&2; exit 1; }
 # Multi-package build: core (templates) then test (scripts, data-dep on core
 # + the interface DARs). Produces core/.daml/dist/wormhole-core-<version>.dar and
 # test/.daml/dist/wormhole-core-test-0.1.0.dar (which packs core's DALFs).
-RUN dpm install "${DAML_SDK_VERSION}" && dpm build --all
+RUN dpm build --all
 # LocalNet vetting probes: one package name in two versions, which multi-package.yaml cannot hold.
 # Build each outside /canton-build, so dpm does not resolve them against multi-package.yaml.
 COPY localnet/vetting_probe /vetting-probe-build
@@ -57,12 +81,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev \
 COPY --from=go-toolchain /usr/local/go /usr/local/go
 ENV PATH="/usr/local/go/bin:${PATH}" GOFLAGS=-mod=readonly GOTOOLCHAIN=local
 
-FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS canton
-ARG DAML_SDK_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://get.digitalasset.com/install/install.sh | sh
-ENV PATH="/root/.dpm/bin:${PATH}"
+FROM dpm-sdk AS canton
 WORKDIR /canton
 # The production (clean) core DAR, for reference, plus the test DAR — which packs
 # core's DALFs and the setup/integration scripts. The bootstrap uploads the test
@@ -71,9 +90,7 @@ WORKDIR /canton
 COPY --from=build /canton-build/core/.daml/dist/wormhole-core-*.dar /canton/wormhole-core.dar
 COPY --from=build /canton-build/test/.daml/dist/wormhole-core-test-0.1.0.dar /canton/wormhole-core-test.dar
 COPY devnet/ /canton/devnet/
-# Pre-install the SDK so `dpm sandbox` / `dpm script` start without a fetch.
-# `dpm install` requires an explicit version argument.
-RUN dpm install "${DAML_SDK_VERSION}" && chmod +x /canton/devnet/*.sh
+RUN chmod +x /canton/devnet/*.sh
 # Ledger API v2 (gRPC).
 EXPOSE 6865
 CMD ["/canton/devnet/start_sandbox.sh"]
