@@ -488,7 +488,7 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "localhost:0", testVersionedWindowPackageIDs(t), "", tc.auth, tc.unsafeDevMode, nil, nil)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "localhost:0", testVersionedWindowPackageIDs(t), sampleRegistrar, tc.auth, tc.unsafeDevMode, nil, nil)
 			require.NoError(t, err)
 			w.extraLedgerDialOpts = tc.extraDialOpts
 			dialOpts := w.cantonDialOpts(context.Background())
@@ -537,7 +537,7 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 			if tc.approvedCorePackages != nil {
 				approvedCorePackages = tc.approvedCorePackages
 			}
-			w, err := newWatcherWithApprovedList(*approvedCorePackages, "canton:0", tc.acceptedPackageIDs, "", AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			w, err := newWatcherWithApprovedList(*approvedCorePackages, "canton:0", tc.acceptedPackageIDs, sampleRegistrar, AuthConfig{}, tc.unsafeDevMode, nil, nil)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Nil(t, w)
@@ -545,6 +545,34 @@ func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, w)
+		})
+	}
+}
+
+// SECURITY: an empty read-as party turns the registrar pin off and reads every party.
+func TestNewWatcherRefusesEmptyReadAsPartyOutsideDevMode(t *testing.T) {
+	cases := []struct {
+		name          string
+		readAsParty   string
+		unsafeDevMode bool
+		wantErr       string
+	}{
+		{name: "empty read-as party outside dev mode", readAsParty: "", wantErr: errEmptyReadAsPartyOutsideDevMode.Error()},
+		{name: "empty read-as party in dev mode", readAsParty: "", unsafeDevMode: true},
+		{name: "guardianGovernance read-as party outside dev mode", readAsParty: sampleRegistrar},
+		{name: "guardianGovernance read-as party in dev mode", readAsParty: sampleRegistrar, unsafeDevMode: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), tc.readAsParty, AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				assert.Nil(t, w)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, w)
+			assert.Equal(t, tc.readAsParty, w.readAsParty)
 		})
 	}
 }
@@ -574,7 +602,7 @@ func TestNewWatcherChecksCompiledApprovedList(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			w, err := NewWatcher("canton:0", tc.acceptedPackageIDs, "", AuthConfig{}, tc.unsafeDevMode, nil, nil)
+			w, err := NewWatcher("canton:0", tc.acceptedPackageIDs, sampleRegistrar, AuthConfig{}, tc.unsafeDevMode, nil, nil)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 				assert.Nil(t, w)
@@ -600,11 +628,12 @@ func TestRunRefusesDisallowedPackageSets(t *testing.T) {
 		{name: "zero value in dev mode", acceptedPackageIDs: cantonclient.AcceptedPackageIDs{}, unsafeDevMode: true, wantErr: "no accepted"},
 		{name: "pinned without version outside dev mode", acceptedPackageIDs: currentOnlyWithoutVersion, wantErr: "needs an expected version"},
 		{name: "window without versions outside dev mode", acceptedPackageIDs: testUpgradeWindowPackageIDs(t), wantErr: "needs an expected version"},
+		{name: "approved window with an empty read-as party outside dev mode", acceptedPackageIDs: testVersionedWindowPackageIDs(t), wantErr: errEmptyReadAsPartyOutsideDevMode.Error()},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newFakeClient()
-			w := &Watcher{acceptedPackageIDs: tc.acceptedPackageIDs, unsafeDevMode: tc.unsafeDevMode, cantonClient: fake}
+			w := &Watcher{acceptedPackageIDs: tc.acceptedPackageIDs, unsafeDevMode: tc.unsafeDevMode, cantonClient: fake, approvedCorePackages: *testApprovedCorePackages(t)}
 
 			err := w.Run(context.Background())
 
