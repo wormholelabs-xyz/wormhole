@@ -108,7 +108,7 @@ An integrator that passed user input to these fields could lose user funds.
 
 Fix: `PublishMessage` (`State.daml`) checks these conditions before the fee charge:
 
-- The payload is lowercase hex with an even length.
+- The payload is a well-formed `MessagePayload`: lowercase hex with an even length (`README.md` §4.8).
 - The nonce is in the range 0 to 4294967295.
 - The consistency level is in the range 0 to 255.
 

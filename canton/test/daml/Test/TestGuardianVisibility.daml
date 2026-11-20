@@ -15,6 +15,7 @@ import DA.Optional (fromSome)
 import Wormhole.Core.State
 import Wormhole.Core.Setup (RegistryParties(..), mkInitialEmitterRegistry)
 import Test.TestCore (setup, registerEmitter, publishVia, submitGovernanceAs, devnetGuardian, govSetFeeVAA, devnetGuardianPubKey)
+import Wormhole.Core.Bytes
 
 -- | Alice owns the emitter; guardianGovernance sees it after a publish.
 testGovernanceSeesThirdPartyPublishedMessage : Script ()
@@ -22,7 +23,7 @@ testGovernanceSeesThirdPartyPublishedMessage = do
   (guardianGovernance, csId) <- setup
   alice <- allocateParty "Alice"
   emitterId <- registerEmitter guardianGovernance alice
-  _ <- publishVia guardianGovernance csId alice emitterId 7 "deadbeef" 0
+  _ <- publishVia guardianGovernance csId alice emitterId 7 (parseHexTextOrAbort "deadbeef") 0
 
   [(_, em)] <- query @Emitter guardianGovernance
   em.owner === alice
@@ -48,7 +49,7 @@ testOutsiderSeesNoMessage = do
   alice <- allocateParty "Alice"
   outsider <- allocateParty "Outsider"
   emitterId <- registerEmitter guardianGovernance alice
-  _ <- publishVia guardianGovernance csId alice emitterId 7 "deadbeef" 0
+  _ <- publishVia guardianGovernance csId alice emitterId 7 (parseHexTextOrAbort "deadbeef") 0
 
   emitters <- query @Emitter outsider
   assertMsg "outsider must not see the emitter" (null emitters)
@@ -88,16 +89,16 @@ testGovernanceHasNoEmitterAuthority = do
 
   submitMustFail guardianGovernance do
     exerciseCmd emitterId PublishMessage with
-      nonce = 1, payload = "00", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "00", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = None
   -- guardianGovernance as payer: only the owner's authority is missing.
   submitMustFail guardianGovernance do
     exerciseCmd emitterId PublishMessage with
-      nonce = 1, payload = "00", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "00", consistencyLevel = 0
       coreStateCid = csId, payer = guardianGovernance, feeAllocation = None
   submitMustFail guardianGovernance do archiveCmd emitterId
 
-  (_, msg) <- publishVia guardianGovernance csId alice emitterId 7 "dead" 0
+  (_, msg) <- publishVia guardianGovernance csId alice emitterId 7 (parseHexTextOrAbort "dead") 0
   msg.sequence === 0
 
 -- | An Emitter from a registry under a rogue guardianGovernance is visible to
@@ -124,5 +125,5 @@ testRogueGovernanceEmitterCannotPublishOnRealCoreState = do
   csDisclosure <- fromSome <$> queryDisclosure guardianGovernance csId
   submitMustFail (actAs alice <> disclose csDisclosure) do
     exerciseCmd rogueEmitterCid PublishMessage with
-      nonce = 1, payload = "00", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "00", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = None

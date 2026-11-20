@@ -172,13 +172,13 @@ template CoreState
     guardianGovernance : Party          -- guardians' governance anchor (threshold party)
     chainId            : Int            -- 75
     governanceChainId  : Int            -- 1 (Solana)
-    governanceContract : Bytes32        -- 0x..0004 (the governance emitter)
+    governanceContract : EmitterAddress -- 0x..0004 (the governance emitter)
     guardianSetIndex   : Int            -- current set index
     guardianSets       : Map Int GuardianSet   -- index -> set (with expiry)
     messageFee         : Int            -- fee required to publish, 10^-10 feeInstrument units
     feeInstrument      : InstrumentId   -- CIP-0056 instrument; genesis-fixed
     feeRecipient       : Party          -- feeCustody; genesis-fixed
-    consumedGovernance : Set Bytes32    -- governance-only replay protection (§4.6)
+    consumedGovernance : Set VaaDigest  -- governance-only replay protection (§4.6)
   where
     signatory guardianGovernance, feeRecipient
     ensure feeRecipient /= guardianGovernance
@@ -285,7 +285,7 @@ template Emitter
     guardianGovernance : Party    -- registrar and authenticity anchor; co-signer
     owner              : Party
     emitterId          : Int      -- registry-allocated
-    emitterAddress     : Bytes32  -- keccak256(tag ‖ guardianGovernance ‖ owner ‖ emitterId), set at creation
+    emitterAddress     : EmitterAddress  -- keccak256(tag ‖ guardianGovernance ‖ owner ‖ emitterId), set at creation
     sequence           : Int      -- next sequence to assign (per-emitter)
   where
     signatory owner, guardianGovernance
@@ -369,7 +369,7 @@ owner authority is enough:
 choice PublishMessage : (ContractId Emitter, WormholeMessage)
   with
     nonce            : Int            -- 0 .. 2^32-1
-    payload          : Bytes          -- even-length lowercase hex; no size cap (EVM parity)
+    payload          : MessagePayload -- even-length lowercase hex; no size cap (EVM parity)
     consistencyLevel : Int            -- 0 .. 255; see §6
     coreStateCid     : ContractId CoreState                       -- fee read (§ Fees)
     payer            : Party          -- funds messageFee; = owner for a direct publish
@@ -633,9 +633,9 @@ template ReplayNode
     consumer       : Party    -- integrator scope party; bears the replay risk
     guardianGovernance : Party  -- co-signs: no unilateral archive or re-create
     namespace      : Text     -- opaque sub-scope: one consumer, many tries; 1..128 chars
-    prefix         : Bytes    -- lowercase hex, 0..63 nibbles; "" at the root
+    prefix         : DigestNibblePrefix  -- lowercase hex, 0..63 nibbles; "" at the root
     splitThreshold : Int      -- node capacity; children inherit it
-    consumed       : Set Bytes  -- suffixes, each (64 − |prefix|) nibbles
+    consumed       : Set DigestNibbleSuffix  -- suffixes, each (64 − |prefix|) nibbles
   where
     signatory consumer, guardianGovernance  -- gg alone when consumer == gg (NTT)
 ```
@@ -804,6 +804,33 @@ future work; the Daml tests simulate it with `Test.TestReplay.coveringNode` /
 `queryDisclosure`.
 
 ---
+
+### 4.8 Constrained byte types
+
+`Wormhole.Core.Bytes` gives each byte value a type with one valid form: lowercase hex, no `0x` prefix, exact width.
+The widths come from `sdk/vaa/structs.go` and `sdk/vaa/payloads.go`.
+
+| Type | Constraint | Fields |
+| - | - | - |
+| `EncodedVaa` | even length, at least 57 bytes | `encodedVAA` choice arguments |
+| `MessagePayload` | even length, 0 or more bytes | `PublishMessage.payload`, `WormholeMessage.payload`, `VAA.payload` |
+| `VaaDigest` | 32 bytes | `VAA.hash`, `consumedGovernance`, `ConsumeDigest.digest`, `FeeWithdrawalAuthorization.vaaHash` |
+| `EmitterAddress` | 32 bytes | `VAA.emitterAddress`, `governanceContract`, `Emitter.emitterAddress` |
+| `UniversalAddress` | 32 bytes | `ContractUpgrade.newContract`, `TransferFees.recipient` |
+| `GuardianAddress` | 20 bytes | guardian set keys |
+| `GuardianPublicKey` | 65 bytes, first byte `04` | `pubKeys` hints |
+| `EcdsaSignatureR`, `EcdsaSignatureS` | 32 bytes each | `VAA` signatures |
+| `DigestNibblePrefix` | 0 to 63 nibbles | `ReplayNode.prefix` |
+| `DigestNibbleSuffix` | 1 to 64 nibbles | `ReplayNode.consumed` |
+| `HexBytes` | even length, 0 or more bytes | parse and encode helpers |
+
+Each type is a positional single-constructor `data`, and the module export list keeps the constructor private.
+Daml code in another package builds a value only through `parseHexText`.
+The Ledger API can send any value. Thus each template `ensure` and each choice checks its byte fields again with `checkHexValueIsWellFormed`.
+`canton/test/forged_byte_values_test.sh` sends forged values to each boundary and checks the rejection.
+
+On the Ledger API, a value is a variant: JSON `{"tag": "MessagePayload", "value": "<hex>"}`.
+The watcher reads `WormholeMessage.payload` as this variant and applies the same rule (`messagePayloadField` in `cantongrpc.go`).
 
 ## 5. On-chain signature verification (the crux)
 
@@ -1087,6 +1114,12 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+0.10.0 has no `upgrades:` line and no baseline. It changes the types of template fields, so it is not an SCU upgrade of 0.9.0.
+0.10.0 starts a new `wormhole-core` line. Its main package id is `bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb` (Daml SDK 3.7.3).
+0.10.0 replaces the `Text` byte aliases with the constrained types of §4.8. A 0.9.0 contract cannot run under 0.10.0.
+No participant outside LocalNet vetted 0.9.0. Thus 0.10.0 starts from a fresh genesis.
+The SDK 3.7.3 0.9.0 build (`a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034`) is replaced. Do not deploy it.
+
 0.9.0 has no `upgrades:` line and no baseline. It removes template fields, so it is not an SCU upgrade of 0.8.x.
 0.9.0 starts a new `wormhole-core` line. Its main package id is `a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034` (Daml SDK 3.7.3).
 The 0.9.0 build with Daml SDK 3.5.1 (`bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`) is replaced. Do not deploy it.
@@ -1107,7 +1140,7 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
 0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
 `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.9.0.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.10.0.
 A test rejects the 0.8.0, 0.8.1, 0.8.2 and 0.8.3 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.

@@ -251,7 +251,7 @@ core_state_cid="$(core_contract_id coreState)"
 publish_transaction="$(submit_local sv "oi-publish-$run_label" "$(json_array "\"$core_publisher\"")" \
   "$(exercise_command "$EMITTER_TEMPLATE" "$(jq -r .contractId <<<"$publisher_emitter_event")" PublishMessage \
     "$(jq -n --arg party "$core_publisher" --arg cs "$core_state_cid" --arg payload "$MESSAGE_PAYLOAD_HEX" \
-      '{nonce: "1", payload: $payload, consistencyLevel: "0", coreStateCid: $cs, payer: $party, feeAllocation: null}')")" \
+      '{nonce: "1", payload: {tag: "MessagePayload", value: $payload}, consistencyLevel: "0", coreStateCid: $cs, payer: $party, feeAllocation: null}')")" \
   "$(core_state_disclosures "$(gg_disclosure :Wormhole.Core.State:CoreState "$core_state_cid")" "$core_state_cid")")"
 publish_update_id="$(jq -er .updateId <<<"$publish_transaction")"
 pass 7 "update $publish_update_id"
@@ -282,7 +282,7 @@ app_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" -s
 verify_and_consume_command() {
   exercise_command "$CORE_STATE_TEMPLATE" "$core_state_cid" VerifyAndConsumeVAA "$(jq -n --arg vaa "$(jq -er .vaaHex <<<"$app_vaa")" \
     --argjson keys "$(vaa_pub_keys_json "$app_vaa")" --arg consumer "$core_integrator" --arg namespace "$replay_namespace" --arg node "$1" \
-    '{encodedVAA: $vaa, pubKeys: $keys, consumer: $consumer, namespace: $namespace, replayNodeCid: $node}')"
+    '{encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys, consumer: $consumer, namespace: $namespace, replayNodeCid: $node}')"
 }
 # verify_and_consume_disclosures <replay-node-cid>: CoreState only; CoreIntegrator signs its ReplayNode.
 verify_and_consume_disclosures() {
@@ -486,7 +486,7 @@ set_participant_connection disconnect sv,app-user
 start_clock_ticker "$CONTROL_TICKER_SECONDS" "$LABS_OPERATOR_VALIDATOR"
 SUBMIT_AWAIT_COMPLETION=true submit_local "$LABS_OPERATOR_VALIDATOR" "oi-control-publish-$run_label" "$(json_array "\"$control_publisher\"")" \
   "$(exercise_command "$EMITTER_TEMPLATE" "$control_emitter_cid" PublishMessage "$(jq -n --arg party "$control_publisher" \
-    --arg cs "$control_core_state_cid" '{nonce: "1", payload: "636f6e74726f6c", consistencyLevel: "0", coreStateCid: $cs, payer: $party, feeAllocation: null}')")" \
+    --arg cs "$control_core_state_cid" '{nonce: "1", payload: {tag: "MessagePayload", value: "636f6e74726f6c"}, consistencyLevel: "0", coreStateCid: $cs, payer: $party, feeAllocation: null}')")" \
   "$(core_state_disclosures "$control_core_state_disclosure" "$control_core_state_cid")" > "$gg_work_dir/20.out" 2> "$gg_work_dir/20.err" || true
 stop_clock_ticker
 control_summary="$(completion_summary "$gg_work_dir/20.out" 2>/dev/null || echo '{}')"

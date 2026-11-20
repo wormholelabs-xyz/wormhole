@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.7.3 (guardianGovernance is the only core anchor).
-const deployedCorePackageIDHex = "a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034"
+// deployedCorePackageIDHex is wormhole-core 0.10.0 built with Daml SDK 3.7.3 (strict constrained byte types).
+const deployedCorePackageIDHex = "bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb"
+
+// replacedSDK373Core090PackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.7.3: its byte fields are unconstrained Text.
+const replacedSDK373Core090PackageIDHex = "a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034"
 
 // replacedSDK351Core090PackageIDHex is the third 0.9.0 build, with Daml SDK 3.5.1; the SDK 3.7.3 build replaces it.
 const replacedSDK351Core090PackageIDHex = "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
@@ -38,7 +41,9 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		version      string
 		wantErr      string
 	}{
-		{name: "deployed 0.9.0", packageIDHex: deployedCorePackageIDHex, version: "0.9.0"},
+		{name: "deployed 0.10.0", packageIDHex: deployedCorePackageIDHex, version: "0.10.0"},
+		{name: "deployed 0.10.0 id as 0.9.0", packageIDHex: deployedCorePackageIDHex, version: "0.9.0", wantErr: "is approved as 0.10.0, not 0.9.0"},
+		{name: "replaced SDK 3.7.3 0.9.0 build", packageIDHex: replacedSDK373Core090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.0", packageIDHex: withdrawnCore080PackageIDHex, version: "0.8.0", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.1", packageIDHex: withdrawnCore081PackageIDHex, version: "0.8.1", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.2", packageIDHex: withdrawnCore082PackageIDHex, version: "0.8.2", wantErr: "not in the approved"},

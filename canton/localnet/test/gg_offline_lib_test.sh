@@ -140,11 +140,16 @@ done
 
 readonly CORE_STATE_CID="00c0ffee"
 readonly VAA_HEX="010000000001"
-readonly PUB_KEYS='[{"_1":"0","_2":"04abcd"}]'
+readonly PUBLIC_KEY_HEX="04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e967023e34e495a8ebf5101036d0fd66e3b0a8c7c61b65fceeaf487ab3cd1b5b7b50beb7970"
+readonly PUB_KEYS="[{\"_1\":\"0\",\"_2\":{\"tag\":\"GuardianPublicKey\",\"value\":\"$PUBLIC_KEY_HEX\"}}]"
 # Columns: case | CoreState cid | submitter | VAA hex | public key hints JSON | expected status | stderr fragment
 readonly RELAY_GOVERNANCE_CASES=(
   "valid relay|$CORE_STATE_CID|$RELAYER|$VAA_HEX|$PUB_KEYS|0|-"
-  "two public key hints|$CORE_STATE_CID|$RELAYER|$VAA_HEX|[{\"_1\":\"0\",\"_2\":\"04ab\"},{\"_1\":\"12\",\"_2\":\"04cd\"}]|0|-"
+  "two public key hints|$CORE_STATE_CID|$RELAYER|$VAA_HEX|[{\"_1\":\"0\",\"_2\":{\"tag\":\"GuardianPublicKey\",\"value\":\"$PUBLIC_KEY_HEX\"}},{\"_1\":\"12\",\"_2\":{\"tag\":\"GuardianPublicKey\",\"value\":\"$PUBLIC_KEY_HEX\"}}]|0|-"
+  "public key hint as plain hex (0.9.0 shape)|$CORE_STATE_CID|$RELAYER|$VAA_HEX|[{\"_1\":\"0\",\"_2\":\"$PUBLIC_KEY_HEX\"}]|1|public key hints are not"
+  "public key hint with another tag|$CORE_STATE_CID|$RELAYER|$VAA_HEX|[{\"_1\":\"0\",\"_2\":{\"tag\":\"HexBytes\",\"value\":\"$PUBLIC_KEY_HEX\"}}]|1|public key hints are not"
+  "public key hint of 64 bytes|$CORE_STATE_CID|$RELAYER|$VAA_HEX|[{\"_1\":\"0\",\"_2\":{\"tag\":\"GuardianPublicKey\",\"value\":\"${PUBLIC_KEY_HEX:2}\"}}]|1|public key hints are not"
+  "public key hint in uppercase|$CORE_STATE_CID|$RELAYER|$VAA_HEX|[{\"_1\":\"0\",\"_2\":{\"tag\":\"GuardianPublicKey\",\"value\":\"${PUBLIC_KEY_HEX^^}\"}}]|1|public key hints are not"
   "empty VAA|$CORE_STATE_CID|$RELAYER||$PUB_KEYS|1|governance VAA is empty"
   "VAA with an odd hex length|$CORE_STATE_CID|$RELAYER|01000|$PUB_KEYS|1|governance VAA is not lowercase hex"
   "uppercase VAA|$CORE_STATE_CID|$RELAYER|01AB|$PUB_KEYS|1|governance VAA is not lowercase hex"
@@ -164,7 +169,7 @@ for relay_case in "${RELAY_GOVERNANCE_CASES[@]}"; do
   if [[ "$expected_status" == 0 ]]; then
     expected_stdout="$(jq -cn --arg cid "$core_state_cid" --arg submitter "$submitter" --arg vaa "$vaa_hex" --argjson keys "$pub_keys" \
       '{ExerciseCommand: {templateId: "#wormhole-core:Wormhole.Core.State:CoreState", contractId: $cid, choice: "SubmitGovernanceVAA",
-        choiceArgument: {submitter: $submitter, encodedVAA: $vaa, pubKeys: $keys}}}')"
+        choiceArgument: {submitter: $submitter, encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}}}')"
   fi
   check_case "relay_governance_vaa_command: $case_name" "$expected_status" "$expected_stdout" "$stderr_fragment" \
     relay_governance_vaa_command "$core_state_cid" "$submitter" "$vaa_hex" "$pub_keys"

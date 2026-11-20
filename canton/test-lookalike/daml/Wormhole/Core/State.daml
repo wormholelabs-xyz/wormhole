@@ -2,6 +2,8 @@
 -- choice, and result shape, signed by the forger alone.
 module Wormhole.Core.State where
 
+import Wormhole.Core.Bytes (MessagePayload)
+
 data WormholeMessage = WormholeMessage with
     registrar        : Party
     owner            : Party
@@ -9,7 +11,7 @@ data WormholeMessage = WormholeMessage with
     sequence         : Int
     nonce            : Int
     consistencyLevel : Int
-    payload          : Text
+    payload          : MessagePayload
   deriving (Eq, Show)
 
 template Emitter
@@ -27,7 +29,7 @@ template Emitter
     choice PublishMessage : (ContractId Emitter, WormholeMessage)
       with
         nonce   : Int
-        payload : Text
+        payload : MessagePayload
       controller forger
       do
         successorCid <- create this

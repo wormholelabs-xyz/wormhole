@@ -20,8 +20,8 @@ cantonChainId = 75
 solanaGovernanceChainId : Int
 solanaGovernanceChainId = 1
 
-defaultGovernanceContract : Bytes32
-defaultGovernanceContract = "0000000000000000000000000000000000000000000000000000000000000004"
+defaultGovernanceContract : EmitterAddress
+defaultGovernanceContract = parseHexTextOrAbort "0000000000000000000000000000000000000000000000000000000000000004"
 
 -- | The guardian set that genesis installs: the live global index and its
 -- addresses (Ethereum core @getCurrentGuardianSetIndex@ and @getGuardianSet@).
@@ -29,7 +29,7 @@ defaultGovernanceContract = "000000000000000000000000000000000000000000000000000
 -- fails each VAA lookup and the next upgrade.
 data GenesisGuardianSet = GenesisGuardianSet with
     guardianSetIndex  : Int
-    guardianAddresses : [Bytes20]
+    guardianAddresses : [GuardianAddress]
   deriving (Eq, Show)
 
 -- | Build the initial 'CoreState' value with the genesis guardian set
@@ -44,7 +44,7 @@ data GenesisGuardianSet = GenesisGuardianSet with
 mkInitialCoreState :
   Party           -- ^ guardianGovernance (threshold party; anchors the guardian set)
   -> Int          -- ^ governance chain id
-  -> Bytes32      -- ^ governance contract
+  -> EmitterAddress -- ^ governance contract
   -> GenesisGuardianSet
   -> InstrumentId -- ^ fee instrument (CC on mainnet)
   -> Party        -- ^ fee recipient (feeCustody)
@@ -54,10 +54,10 @@ mkInitialCoreState guardianGovernance govChain govContract genesisSet feeInstrum
     guardianGovernance
     chainId = cantonChainId
     governanceChainId = govChain
-    governanceContract = normalizeHex govContract
+    governanceContract = govContract
     guardianSetIndex = genesisSet.guardianSetIndex
     guardianSets = Map.fromList
-      [(genesisSet.guardianSetIndex, GuardianSet with keys = map normalizeHex genesisSet.guardianAddresses, expirationTime = None)]
+      [(genesisSet.guardianSetIndex, GuardianSet with keys = genesisSet.guardianAddresses, expirationTime = None)]
     messageFee = 0
     feeInstrument
     feeRecipient
