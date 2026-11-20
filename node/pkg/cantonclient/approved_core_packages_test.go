@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.10.0 built with Daml SDK 3.7.3 (strict constrained byte types).
-const deployedCorePackageIDHex = "9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df"
+// deployedCorePackageIDHex is wormhole-core 0.11.0 built with Daml SDK 3.7.3 (bounded CoreState governance collections).
+const deployedCorePackageIDHex = "2cf9e5e777861421d63d98984174ae3296a7bc781ba761da96fc30f406b1e002"
+
+// replacedCore0100PackageIDHex is wormhole-core 0.10.0 built with Daml SDK 3.7.3: its CoreState governance collections grow without a bound.
+const replacedCore0100PackageIDHex = "9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df"
 
 // replacedSDK373Core090PackageIDHex is wormhole-core 0.9.0 built with Daml SDK 3.7.3: its byte fields are unconstrained Text.
 const replacedSDK373Core090PackageIDHex = "6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180"
@@ -38,8 +41,10 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		version      string
 		wantErr      string
 	}{
-		{name: "deployed 0.10.0", packageIDHex: deployedCorePackageIDHex, version: "0.10.0"},
-		{name: "deployed 0.10.0 id as 0.9.0", packageIDHex: deployedCorePackageIDHex, version: "0.9.0", wantErr: "is approved as 0.10.0, not 0.9.0"},
+		{name: "deployed 0.11.0", packageIDHex: deployedCorePackageIDHex, version: "0.11.0"},
+		{name: "deployed 0.11.0 id as 0.10.0", packageIDHex: deployedCorePackageIDHex, version: "0.10.0", wantErr: "is approved as 0.11.0, not 0.10.0"},
+		{name: "replaced 0.10.0", packageIDHex: replacedCore0100PackageIDHex, version: "0.10.0", wantErr: "not in the approved"},
+		{name: "replaced 0.10.0 id as 0.11.0", packageIDHex: replacedCore0100PackageIDHex, version: "0.11.0", wantErr: "not in the approved"},
 		{name: "replaced SDK 3.7.3 0.9.0 build", packageIDHex: replacedSDK373Core090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.0", packageIDHex: withdrawnCore080PackageIDHex, version: "0.8.0", wantErr: "not in the approved"},
 		{name: "withdrawn 0.8.1", packageIDHex: withdrawnCore081PackageIDHex, version: "0.8.1", wantErr: "not in the approved"},
