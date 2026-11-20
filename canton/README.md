@@ -605,8 +605,8 @@ actions accept chain 75 only. `sdk/vaa` serializes no TransferFees for chain 0.
 | ---------------------- | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **ContractUpgrade**    | 1   | `chain(2) ‖ newContract(32)`                     | Records intent + emits an event. On Canton, "upgrade" = a [Daml package upgrade](https://docs.daml.com/upgrade/); `newContract` is interpreted as the new package-id (32 bytes). See note. |
 | **GuardianSetUpgrade** | 2   | `chain(2) ‖ newIndex(4) ‖ len(1) ‖ keys(20·len)` | Validates `newIndex == current+1`; sets old set's `expirationTime = effectiveTime + 86400`; stores new set. Requires `pubKeys` hints to bind addresses (§5).                               |
-| **SetMessageFee**      | 3   | `chain(2) ‖ fee(32)`                             | Updates `messageFee`.                                                                                                                                                                      |
-| **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Creates one `FeeWithdrawalAuthorization` (amount, recipient, VAA digest). Chain 75 only. An amount above 2^63 - 1 aborts.                                                                  |
+| **SetMessageFee**      | 3   | `chain(2) ‖ fee(32)`                             | Updates `messageFee`. A fee of 2^63 or more aborts.                                                                                                                                        |
+| **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Creates one `FeeWithdrawalAuthorization` (amount, recipient, VAA digest). Chain 75 only. An amount of 2^63 or more aborts.                                                                 |
 
 `RecoverChainId` (EVM action 5) is **EVM-specific** (it repairs `block.chainid`
 after a fork) and has no analog on Canton; it is intentionally omitted.
@@ -1155,6 +1155,12 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+The 0.11.1 main package id is `019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5` (Daml SDK 3.7.3).
+0.11.1 has no `upgrades:` line. No participant vetted 0.11.0, so 0.11.1 starts from a fresh genesis.
+0.11.1 parses the SetMessageFee fee and the TransferFees amount only below 2^63 (Daml `Int` max + 1).
+A larger value aborts with `governance: <field> exceeds the Int range`.
+0.11.1 replaces the 0.11.0 build (`3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc`). In 0.11.0, an oversized governance amount aborts with `ArithmeticError`.
+
 0.11.0 has no `upgrades:` line and no baseline. It changes `CoreState` field types, so it is not an SCU upgrade of 0.10.0.
 0.11.0 starts a new `wormhole-core` line. Its main package id is `3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc` (Daml SDK 3.7.3).
 0.11.0 sets a capacity on `consumedGovernance` and `guardianSets` (§4.4, §4.5).
@@ -1186,8 +1192,8 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
 0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
 `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.11.0.
-A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0 and 0.10.0 package ids.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.11.1.
+A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0 and 0.11.0 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 

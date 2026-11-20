@@ -68,6 +68,11 @@ The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360
 The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
+0.11.1 parses the SetMessageFee fee and the TransferFees amount only below 2^63.
+A larger value aborts with a range error, not with `ArithmeticError`.
+The 0.11.1 main package id is `019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5` (Daml SDK 3.7.3).
+0.11.1 replaces 0.11.0 (`3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc`). No participant vetted 0.11.0.
+
 0.11.0 sets a capacity on the `CoreState` governance collections.
 `consumedGovernance` holds at most 32 digests, with a timestamp floor for evicted digests.
 `guardianSets` holds at most 4 sets, and each governance transition removes expired sets.
