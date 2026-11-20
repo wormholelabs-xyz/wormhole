@@ -80,10 +80,11 @@ func startSandbox(t *testing.T, ctx context.Context) (dpm, dar, port string) {
 	// (data-dependency), so --upload-dar uploads+vets core too.
 	dar = filepath.Join(cantonDir, "test", ".daml", "dist", "wormhole-core-test-0.1.0.dar")
 	port = sandboxLedgerAPIPort()
-	// dpm commands outside a daml.yaml project (sandbox, script, damlc) otherwise run the active SDK.
-	t.Setenv("DPM_SDK_VERSION", pinnedDamlSDKVersion(t, cantonDir))
 
 	runCmd(t, cantonDir, dpm, "build", "--all")
+	// Set after the build, so the build uses the daml.yaml pins. Later dpm runs (sandbox, script, damlc)
+	// are outside a daml.yaml project and otherwise use the active SDK.
+	t.Setenv("DPM_SDK_VERSION", pinnedDamlSDKVersion(t, cantonDir))
 
 	// Own process group so the JVM child is killed with dpm. Clean working
 	// directory: `dpm sandbox` auto-loads a `*.canton` bootstrap or daml.yaml
