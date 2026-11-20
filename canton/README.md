@@ -604,15 +604,15 @@ the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
 ContractUpgrade and SetMessageFee, `40 + 20·len` for GuardianSetUpgrade, and 99
 for TransferFees.
 
-Target chain: GuardianSetUpgrade accepts chain 75 or chain 0. The other three
-actions accept chain 75 only. `sdk/vaa` serializes no TransferFees for chain 0.
+Target chain: GuardianSetUpgrade and TransferFees accept chain 75 or chain 0.
+ContractUpgrade and SetMessageFee accept chain 75 only.
 
 | Action                 | ID  | Payload (after 32-byte module + 1-byte action)   | Behavior                                                                                                                                                                                   |
 | ---------------------- | --- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **ContractUpgrade**    | 1   | `chain(2) ‖ newContract(32)`                     | Records intent + emits an event. On Canton, "upgrade" = a [Daml package upgrade](https://docs.daml.com/upgrade/); `newContract` is interpreted as the new package-id (32 bytes). See note. |
 | **GuardianSetUpgrade** | 2   | `chain(2) ‖ newIndex(4) ‖ len(1) ‖ keys(20·len)` | Validates `newIndex == current+1`; sets old set's `expirationTime = effectiveTime + 86400`; stores new set. Each new member keeps a known key of its address (§5).                         |
 | **SetMessageFee**      | 3   | `chain(2) ‖ fee(32)`                             | Updates `messageFee`. A fee of 2^63 or more aborts.                                                                                                                                        |
-| **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Creates one `FeeWithdrawalAuthorization` (amount, recipient, VAA digest). Chain 75 only. An amount of 2^63 or more aborts. A chain 0 VAA is valid on the EVM, Solana and CosmWasm cores, which use different units and recipient formats. |
+| **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Creates one `FeeWithdrawalAuthorization` (amount, recipient, VAA digest). Chain 75 or 0. An amount of 2^63 or more aborts. A chain 0 VAA is also valid on the EVM, Solana and CosmWasm cores, which use different units and recipient formats. |
 
 `RecoverChainId` (EVM action 5) is **EVM-specific** (it repairs `block.chainid`
 after a fork) and has no analog on Canton; it is intentionally omitted.
@@ -1202,6 +1202,10 @@ The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience
 
 In one package line, `core/daml.yaml` sets `upgrades:` to the vendored DAR of the previous release.
 `damlc` then rejects a build that is not a valid smart contract upgrade (SCU) of it.
+The 0.12.1 main package id is `2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4` (Daml SDK 3.7.3).
+0.12.1 has no `upgrades:` line. Its `TransferFees` accepts chain 0 as well as chain 75.
+0.12.1 replaces the 0.12.0 build (`aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b`). No participant vetted 0.12.0. In 0.12.0, `TransferFees` accepts chain 75 only.
+
 The 0.12.0 main package id is `aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b` (Daml SDK 3.7.3).
 0.12.0 has no `upgrades:` line. It changes the `GuardianSet` type and the choice arguments, so it is not an SCU upgrade of 0.11.1.
 0.12.0 keeps the guardian public keys in `CoreState`. `ParseAndVerifyVAA`, `VerifyAndConsumeVAA` and `SubmitGovernanceVAA` take no `pubKeys` (§5).
@@ -1244,8 +1248,8 @@ No participant outside LocalNet vetted 0.7.0, 0.8.0, 0.8.1, 0.8.2, 0.8.3 or 0.9.
 0.8.0, 0.8.1 and 0.8.2 are withdrawn: their fee registry code runs with the authority of `guardianGovernance` (`REDTEAM.md`, F1-core).
 0.8.3 (`9d546b11014d1272be6b09a0ff9f6204a3401333829531d360e20fabd1b4163d`, and the first build
 `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`) is withdrawn: the operator signs its core contracts.
-`node/pkg/cantonclient/approved_core_packages.json` approves only 0.12.0.
-A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0, 0.11.0 and 0.11.1 package ids.
+`node/pkg/cantonclient/approved_core_packages.json` approves only 0.12.1.
+A test rejects the 0.8.0, 0.8.1, 0.8.2, 0.8.3, 0.9.0, 0.10.0, 0.11.0, 0.11.1 and 0.12.0 package ids.
 [A14_EMITTER_ID_UNIQUENESS.md](A14_EMITTER_ID_UNIQUENESS.md) gives the deployment, the scan, and the integrator cutover.
 The procedure below applies only to an upgrade that keeps the signatories and observers of every template.
 
