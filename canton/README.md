@@ -580,7 +580,14 @@ A removed digest has a timestamp at or below the floor, so a copy signed again a
 Thus replay protection holds for each consumed digest, as on EVM, Sui and Solana.
 These runtimes keep each record permanently; Canton keeps 32 records and the floor.
 The floor also rejects a new VAA with an old timestamp.
-Guardians then make a new proposal with a new timestamp.
+
+**Timestamp rule for governance proposals.** Each governance VAA for Canton must have a new timestamp.
+The timestamp must be more than the current `evictedGovernanceMaxTimestampSeconds`.
+To read the floor, read `evictedGovernanceMaxTimestampSeconds` in the `createArgument` of the active `CoreState`.
+Use the Ledger API endpoint `/v2/state/active-contracts`. The value `null` means that no floor applies.
+A VAA at or below the floor fails with `governance: VAA timestamp at or below the evicted governance timestamp floor`.
+Then make a new proposal with a new timestamp, sign it again, and submit the new VAA.
+The procedure is in `docs/canton_guardian_operations.md` §7.3.1.
 
 Supported actions (parity with `GovernanceStructs.sol`). Each packet must have
 the exact length that `sdk/vaa/payloads.go` serializes: 67 bytes for
