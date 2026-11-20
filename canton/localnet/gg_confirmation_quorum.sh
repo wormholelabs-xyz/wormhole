@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # A8 rehearsal: guardianGovernance is hosted on 3 participants with confirmation threshold 2.
-#   1. Disconnect sv and app-user, so only app-provider can confirm for guardianGovernance.
+# The local submitters (GovernanceRelayer, CoreVerifier, CorePublisher) and the guardian ceremonies use sv, so sv stays
+# connected.
+#   1. Disconnect app-provider and app-user, so only sv can confirm for guardianGovernance.
 #      a. SubmitGovernanceVAA (consumes the gg-signed CoreState). Expect MEDIATOR_SAYS_TX_TIMED_OUT.
 #      b. ParseAndVerifyVAA (nonconsuming; gg signs the used CoreState). Expect MEDIATOR_SAYS_TX_TIMED_OUT.
 #   2. Reconnect app-user. Repeat 1a. Expect commit with two confirming hosts.
@@ -16,7 +18,7 @@
 #   Another party of the guardian namespace, for example nttCustody. Each case creates GovernanceCeremonyProbe as
 #   that party, signed by the two owners (default owner1,owner2):
 #     party-one-host-offline   app-user disconnected. Expect commit with two confirming hosts.
-#     party-two-hosts-offline  sv and app-user disconnected. Expect MEDIATOR_SAYS_TX_TIMED_OUT, and the party is
+#     party-two-hosts-offline  app-provider and app-user disconnected. Expect MEDIATOR_SAYS_TX_TIMED_OUT, and the party is
 #                              the only unresponsive party.
 # Precondition: gg_publish_and_govern.sh ran (--party: custody_host.sh and gg_package_vetting.sh ran).
 # The EXIT trap reconnects all participants.
@@ -53,10 +55,10 @@ fi
 reconnect_all() {
   local exit_status=$?
   stop_clock_ticker
-  echo "Reconnect sv and app-user"
-  if ! set_participant_connection reconnect sv,app-user; then
+  echo "Reconnect app-provider and app-user"
+  if ! set_participant_connection reconnect app-provider,app-user; then
     echo "ERROR: a participant stays disconnected from the global synchronizer. LocalNet is degraded." >&2
-    echo "ERROR: recover with: PARTICIPANT_ACTION=reconnect PARTICIPANT_NAMES=sv,app-user $LOCALNET_SCRIPT_DIR/canton_console.sh $LOCALNET_SCRIPT_DIR/console/participant_connection.canton" >&2
+    echo "ERROR: recover with: PARTICIPANT_ACTION=reconnect PARTICIPANT_NAMES=app-provider,app-user $LOCALNET_SCRIPT_DIR/canton_console.sh $LOCALNET_SCRIPT_DIR/console/participant_connection.canton" >&2
     exit_status=1
   fi
   rm -rf "$gg_work_dir"
@@ -109,9 +111,9 @@ run_party_quorum_case() {
 }
 
 if [[ "$quorum_party" != "$GG_PARTY" ]]; then
-  start_clock_ticker "$QUORUM_TICKER_SECONDS"
+  start_clock_ticker "$QUORUM_TICKER_SECONDS" "$SUBMITTING_VALIDATOR"
   run_party_quorum_case party-one-host-offline app-user commit
-  run_party_quorum_case party-two-hosts-offline sv,app-user timeout
+  run_party_quorum_case party-two-hosts-offline app-provider,app-user timeout
   echo "PASS: confirmation threshold 2 of 3 for ${quorum_party%%::*}"
   exit 0
 fi
@@ -119,7 +121,7 @@ if [[ -z "$FEE_CUSTODY_PARTY" ]]; then
   fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh before gg_genesis.sh."
 fi
 
-current_set_index="$(active_contracts "$SUBMITTING_VALIDATOR" "$OPERATOR_PARTY" :Wormhole.Core.State:CoreState \
+current_set_index="$(active_contracts "$SUBMITTING_VALIDATOR" "$GG_PARTY" :Wormhole.Core.State:CoreState \
   | jq -er 'if length == 1 then .[0].createArgument.guardianSetIndex else error("expected one CoreState") end')"
 echo "Current guardian set $current_set_index, signing keys $current_set_key_indices"
 # Governance replay protection is keyed by digest, so each run uses a new sequence.
@@ -130,12 +132,12 @@ set_zero_keys="$(vaa_pub_keys_json "$fee_zero_vaa")"
 read_only_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" \
   -signing-key-indices "$current_set_key_indices" -sequence 1)"
 
-echo "Step 1: disconnect sv and app-user"
-set_participant_connection disconnect sv,app-user
-start_clock_ticker "$QUORUM_TICKER_SECONDS"
+echo "Step 1: disconnect app-provider and app-user"
+set_participant_connection disconnect app-provider,app-user
+start_clock_ticker "$QUORUM_TICKER_SECONDS" "$SUBMITTING_VALIDATOR"
 
 echo "Step 1a: SubmitGovernanceVAA with one confirming host"
-if SUBMIT_AWAIT_COMPLETION=true submit_governance_vaa "quorum-governance-one-host-$(date +%s)" \
+if SUBMIT_AWAIT_COMPLETION=true relay_governance_vaa "quorum-governance-one-host-$(date +%s)" \
     "$fee_zero_vaa_hex" "$set_zero_keys" > "$gg_work_dir/1a.out" 2> "$gg_work_dir/1a.err"; then
   echo "FAIL: the governance transaction committed with one confirming host" >&2
   exit 1
@@ -143,13 +145,13 @@ fi
 check_timeout_rejection "$gg_work_dir/1a" "$GG_PARTY" "$FEE_CUSTODY_PARTY"
 
 echo "Step 1b: ParseAndVerifyVAA with one confirming host"
-SUBMIT_AWAIT_COMPLETION=true verify_vaa_as_operator "quorum-read-one-host-$(date +%s)" \
+SUBMIT_AWAIT_COMPLETION=true verify_vaa "quorum-read-one-host-$(date +%s)" \
   "$(jq -er .vaaHex <<<"$read_only_vaa")" "$(vaa_pub_keys_json "$read_only_vaa")" > "$gg_work_dir/1b.out" 2> "$gg_work_dir/1b.err" || true
 check_timeout_rejection "$gg_work_dir/1b" "$GG_PARTY" "$FEE_CUSTODY_PARTY"
 
 echo "Step 2: reconnect app-user (two confirming hosts)"
 set_participant_connection reconnect app-user
-governance_transaction="$(submit_governance_vaa "quorum-governance-two-hosts-$(date +%s)" "$fee_zero_vaa_hex" "$set_zero_keys")"
+governance_transaction="$(relay_governance_vaa "quorum-governance-two-hosts-$(date +%s)" "$fee_zero_vaa_hex" "$set_zero_keys")"
 created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 echo "PASS: committed with two confirming hosts, update $(jq -r .updateId <<<"$governance_transaction"). messageFee is 0 again."
 
