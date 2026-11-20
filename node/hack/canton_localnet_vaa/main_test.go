@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"math"
 	"reflect"
 	"strconv"
@@ -381,6 +382,92 @@ func TestBuildPayload(t *testing.T) {
 				t.Fatalf("emitter address %x, expected %x", emitterAddress, testCase.expectedEmitterAddress)
 			}
 			testCase.checkPayload(t, payload)
+		})
+	}
+}
+
+const (
+	goldenSetMessageFeePayloadHex = "00000000000000000000000000000000000000000000000000000000436f726503004b" +
+		"00000000000000000000000000000000000000000000000000000000000003e8"
+	goldenTransferFeesPayloadHex = "00000000000000000000000000000000000000000000000000000000436f726504004b" +
+		"0000000000000000000000000000000000000000000000000000000000000009" +
+		"d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+	goldenContractUpgradePayloadHex = "00000000000000000000000000000000000000000000000000000000436f726501004b" +
+		"c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+	// Same bytes as the payload of the devnet guardian-set-upgrade VAA in clients/eth/.vscode/launch.json.
+	goldenGuardianSetUpgradeToSet1PayloadHex = "00000000000000000000000000000000000000000000000000000000436f7265020000" +
+		"0000000102befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe88d7d8b32a9105d228100e72dffe2fae0705d31c"
+	goldenGuardianSetUpgradeToSet2PayloadHex = "00000000000000000000000000000000000000000000000000000000436f7265020000" +
+		"0000000203" + "58076f561cc62a47087b567c86f986426dfcd000" + "bd6e9833490f8fa87c733a183cd076a6cbd29074" +
+		"b853fcf0a5c78c1b56d15fce7a154e6ebe9ed7a2"
+	goldenMessagePayloadHex = "63616e746f6e206c6f63616c6e65742072656865617273616c206d657373616765"
+)
+
+func TestBuildPayloadMatchesGoldenVectors(t *testing.T) {
+	testCases := []struct {
+		name               string
+		request            vaaRequest
+		expectedPayloadHex string
+	}{
+		{"set-message-fee 1000", vaaRequest{kind: vaaKindSetMessageFee, messageFee: 1000}, goldenSetMessageFeePayloadHex},
+		{"transfer-fees 9", vaaRequest{kind: vaaKindTransferFees, transferFeesAmount: 9,
+			transferFeesRecipient: vaa.Address(bytes.Repeat([]byte{0xd4}, 32))}, goldenTransferFeesPayloadHex},
+		{"contract-upgrade", vaaRequest{kind: vaaKindContractUpgrade,
+			upgradeNewContract: vaa.Address(bytes.Repeat([]byte{0xc1}, 32))}, goldenContractUpgradePayloadHex},
+		{"guardian-set-upgrade to set 1 with keys 0,1", vaaRequest{kind: vaaKindGuardianSetUpgrade, newSetIndex: 1,
+			newKeyIndices: []uint64{0, 1}}, goldenGuardianSetUpgradeToSet1PayloadHex},
+		{"guardian-set-upgrade to set 2 with keys 2,3,4", vaaRequest{kind: vaaKindGuardianSetUpgrade, newSetIndex: 2,
+			newKeyIndices: []uint64{2, 3, 4}}, goldenGuardianSetUpgradeToSet2PayloadHex},
+		{"message", vaaRequest{kind: vaaKindMessage}, goldenMessagePayloadHex},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, _, payload, err := buildPayload(testCase.request)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if hex.EncodeToString(payload) != testCase.expectedPayloadHex {
+				t.Fatalf("payload %x, expected %s", payload, testCase.expectedPayloadHex)
+			}
+		})
+	}
+}
+
+// Builds each governance payload from the byte layout, without sdk/vaa, so the golden vectors are not circular.
+func TestGoldenVectorsMatchHandBuiltGovernanceLayout(t *testing.T) {
+	coreModule := append(make([]byte, 28), []byte("Core")...)
+	cantonChain := []byte{0x00, 0x4b}
+	allChains := []byte{0x00, 0x00}
+	uint256BigEndian := func(amount byte) []byte { return append(make([]byte, 31), amount) }
+	concatenate := func(fields ...[]byte) []byte { return bytes.Join(fields, nil) }
+	mustDecodeHex := func(hexText string) []byte {
+		decoded, err := hex.DecodeString(hexText)
+		if err != nil {
+			t.Fatalf("decode %q: %v", hexText, err)
+		}
+		return decoded
+	}
+	testCases := []struct {
+		name             string
+		handBuiltPayload []byte
+		goldenPayloadHex string
+	}{
+		{"set-message-fee: module, action 3, chain 75, fee 1000",
+			concatenate(coreModule, []byte{3}, cantonChain, append(make([]byte, 30), 0x03, 0xe8)), goldenSetMessageFeePayloadHex},
+		{"transfer-fees: module, action 4, chain 75, amount 9, recipient",
+			concatenate(coreModule, []byte{4}, cantonChain, uint256BigEndian(9), bytes.Repeat([]byte{0xd4}, 32)), goldenTransferFeesPayloadHex},
+		{"contract-upgrade: module, action 1, chain 75, new contract",
+			concatenate(coreModule, []byte{1}, cantonChain, bytes.Repeat([]byte{0xc1}, 32)), goldenContractUpgradePayloadHex},
+		{"guardian-set-upgrade: module, action 2, chain 0, index 1, two devnet guardian addresses",
+			concatenate(coreModule, []byte{2}, allChains, []byte{0, 0, 0, 1}, []byte{2},
+				mustDecodeHex("befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"), mustDecodeHex("88d7d8b32a9105d228100e72dffe2fae0705d31c")),
+			goldenGuardianSetUpgradeToSet1PayloadHex},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if hex.EncodeToString(testCase.handBuiltPayload) != testCase.goldenPayloadHex {
+				t.Fatalf("hand-built payload %x, golden %s", testCase.handBuiltPayload, testCase.goldenPayloadHex)
+			}
 		})
 	}
 }
