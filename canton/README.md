@@ -954,10 +954,13 @@ the choice result — are included.
 
 **Registrar pin.** When `--cantonReadAsParty` has a value, the watcher drops
 each message whose `registrar` is not equal to the read-as party. The comparison
-is exact. This check is redundant with the read-party signatory check. One
+is exact. The read-party signatory check admits an `Emitter` of which the
+read-as party is the owner. The registrar pin is the only check that drops such
+a message when its registrar is another party. Do not remove it. One
 `guardianGovernance` is one deployment, so a message from a registry of another
 `guardianGovernance` is not a message of this deployment. Each drop increments
-`wormhole_canton_foreign_registrar_messages_dropped_total`.
+`wormhole_canton_foreign_registrar_messages_dropped_total`. A stream restart reads
+a dropped message again, so the counter counts drops, not distinct messages.
 
 ### 7.2 `TxID` and offsets
 
