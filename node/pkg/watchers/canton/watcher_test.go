@@ -32,10 +32,10 @@ import (
 // asserted on the Daml side by Test.TestCore:testAddressVector — DO NOT edit one
 // side without regenerating and updating both.
 const (
-	sampleRegistrar   = "vector-operator::1220deadbeef"
+	sampleRegistrar   = "vector-registrar::1220deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	sampleOwner       = "vector-owner::1220cafebabe"
 	sampleEmitterID   = uint64(7)
-	sampleWantAddrHex = "45ae8886d1c165b071d3b1202fe81ebedc39f61a6a91a1d13140eb64857f3f2b"
+	sampleWantAddrHex = "37311031ac421fbccc74c1df19ad5635cbefd1a82db60d613eb62a158f504d35"
 )
 
 // Update ids reported by LocalNet participants.
