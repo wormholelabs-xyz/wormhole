@@ -9,8 +9,8 @@
 # (see devnet/canton-devnet.yaml) allocates the guardianGovernance party and creates the
 # CoreState via Test.TestCore:setup.
 #
-# dpm manages the SDK from daml.yaml's `sdk-version` (Daml 3.5.1 → Canton 3.5.x
-# protocol, Daml-LF 2.3 / Protocol Version 35; Ledger API v2 + DA.Crypto.Text
+# dpm manages the SDK from daml.yaml's `sdk-version` (Daml SDK 3.7.3 → Canton
+# 3.7.3, Protocol Versions 36 and 37, Daml-LF 2.3; Ledger API v2 + DA.Crypto.Text
 # builtins). Canton is JVM-based, so the base image ships a JDK
 # (17+).
 #
@@ -18,7 +18,7 @@
 # installer) so it is not built in this repo's CI. The dpm commands here
 # (`dpm install <version>`, `dpm build`) and the sandbox/script flags used by the
 # devnet scripts have been validated against dpm for the pinned SDK.
-ARG DAML_SDK_VERSION=3.5.1
+ARG DAML_SDK_VERSION=3.7.3
 
 FROM eclipse-temurin:17-jdk@sha256:91b6210cce02091f6f0798a83ec51aa223828242c5a21a85793bb8c28dc891c4 AS build
 ARG DAML_SDK_VERSION

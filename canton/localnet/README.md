@@ -124,7 +124,7 @@ canton/localnet/test/console_table_test.sh
 
 - Docker with the Compose plugin.
 - 12 GB of memory for Docker.
-- `dpm` with Daml SDK 3.5.1 in `$HOME/.dpm/bin`.
+- `dpm` with Daml SDK 3.7.3 in `$HOME/.dpm/bin`.
 - `curl`, `git` and `openssl`.
 
 ## Procedure

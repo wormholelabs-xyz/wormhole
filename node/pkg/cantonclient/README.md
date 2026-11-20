@@ -18,7 +18,7 @@ See [`canton/README.md`](../../../canton/README.md) for the full design.
 | `vectorgen_test.go` | asserts the Daml hex fixtures match the generator; `CANTON_VECTORGEN=write` rewrites them |
 | `cantongrpc.go` | the gRPC client against the generated stubs |
 | `cantongrpc_updateid_test.go` | unit tests for update ids on the stream and `GetUpdateById` |
-| `proto/com/daml/ledger/api/v2/*.proto` | vendored Ledger API v2 protos (the State+Update closure) from **Canton 3.5.5** |
+| `proto/com/daml/ledger/api/v2/*.proto` | vendored Ledger API v2 protos (the State+Update closure) from **Canton 3.7.3** |
 | `proto/gen/...` | generated Go stubs (committed; see below) |
 
 The gRPC client builds by default — there is **no build tag**. (It depends only
@@ -28,13 +28,23 @@ the `CantonClient` interface, and the Canton watcher only starts when
 
 ## Vendored protos & regeneration
 
-`proto/com/daml/ledger/api/v2/` contains the **real** Ledger API v2 protos
-(extracted from the `canton-open-source-3.5.5` jar): the State + Update service
-closure (`state_service`, `update_service`, `transaction`, `transaction_filter`,
-`event`, `value`, `reassignment`, `topology_transaction`, `offset_checkpoint`,
-`trace_context`). `package_service` and `package_reference` (for
-`ListVettedPackages`) come from the `canton-open-source-3.5.6` jar. The ten
-files above are byte-identical in 3.5.5 and 3.5.6. `google/protobuf/*` come from the buf well-known types and
+`proto/com/daml/ledger/api/v2/` contains the **real** Ledger API v2 protos: the
+State + Update service closure (`state_service`, `update_service`, `transaction`,
+`transaction_filter`, `event`, `value`, `reassignment`, `topology_transaction`,
+`offset_checkpoint`, `trace_context`), plus `package_service` and
+`package_reference` for `ListVettedPackages`.
+
+Provenance of the twelve files:
+
+| Item | Value |
+| --- | --- |
+| Source | `lib/canton-open-source-3.7.3.jar` of the Daml SDK 3.7.3 `canton-open-source` component |
+| Fetch | `dpm install 3.7.3` from `europe-docker.pkg.dev/da-images/public` |
+| Component manifest digest | `sha256:c9b2511b45c55f411d602140e616f276497f407335a5657a08d5c616ead8ca8a` |
+| Jar SHA-256 | `3824a19207b7be4aed3120006e0d48bbd5452196ef1d8b77b2d5ec2f086a9528` |
+
+Extract each file with `unzip -p <jar> com/daml/ledger/api/v2/<file>.proto`.
+The 3.7.3 changes against 3.5.6 add fields and RPCs only. `google/protobuf/*` come from the buf well-known types and
 `google/rpc/status` is mapped to `genproto` (see `buf.gen.yaml`) to avoid a
 duplicate proto-registration panic.
 
@@ -53,7 +63,10 @@ vendored protos, run from the repo root:
 make generate-canton-proto      # builds tools/bin/buf, then `buf generate --path com/daml/ledger/api/v2`
 ```
 
-(or directly: `cd proto && buf generate --path com/daml/ledger/api/v2`). It is
+(or directly: `cd proto && buf generate --path com/daml/ledger/api/v2`).
+Use the Go version of the CI `node-lint` job (1.25.10, for example
+`GOTOOLCHAIN=go1.25.10`). `protoc-gen-go` formats its output with the `go/format`
+package of the Go version that builds it, so another Go version changes the comments. It is
 also part of `make generate`. CI (`.github/workflows/build.yml`, the `node-lint`
 job) re-runs `make generate-canton-proto` and fails on `git diff` — exactly like
 the existing "Generated proto matches committed proto" check — so the committed
