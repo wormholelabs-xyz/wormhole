@@ -39,7 +39,7 @@ func amountWordOf(amount *uint256.Int) [32]byte {
 	return amount.Bytes32()
 }
 
-// Independent spec-layout encoding to check the SDK serializer against.
+// Independent spec-layout encoding: checks the SDK serializer and builds the zero-recipient fixture the serializer refuses.
 func transferFeesPayloadWithAmountWord(targetChain vaa.ChainID, amountWord [32]byte, recipient vaa.Address) []byte {
 	payload := coreGovernanceHeader(coreGovernanceModuleID(), coreGovernanceActionTransferFees, targetChain)
 	payload = append(payload, amountWord[:]...)
