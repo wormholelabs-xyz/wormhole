@@ -47,7 +47,7 @@ start_guardian4() {
     return 1
   fi
   docker run -d --name "$GUARDIAN4_CONTAINER" --network "$LOCALNET_NETWORK" \
-    -e "_JAVA_OPTIONS=-Xms512m -Xmx2g" \
+    -e "_JAVA_OPTIONS=-Xms512m -Xmx2g -XX:-UseBASE64Intrinsics" \
     -p "$HOST_BIND_IP:5901:5901" -p "$HOST_BIND_IP:5902:5902" -p "$HOST_BIND_IP:5975:5975" \
     -v "$LOCALNET_SCRIPT_DIR/guardian4/guardian4.conf:/app/guardian4.conf:ro" \
     --entrypoint /app/bin/canton "$(locked_image_reference "$CANTON_IMAGE_NAME" "$SPLICE_VERSION")" \
