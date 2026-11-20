@@ -387,6 +387,10 @@ testCheckGovernanceRecordsDigest = do
         consumedGovernance = Map.fromList consumed
         evictedGovernanceMaxTimestampSeconds = floorSeconds
       beforeWithFloor = withRecord [] (Some 10)
+      retainedDigest = syntheticDigest 102
+      retainedTimestampSeconds = timestampSeconds - 10
+      beforeWithRetained = withRecord [(retainedDigest, retainedTimestampSeconds)] None
+      beforeWithRetainedAndFloor = withRecord [(retainedDigest, retainedTimestampSeconds)] (Some timestampSeconds)
       overCapacity = withRecord
         ((digest, timestampSeconds) :: Map.toList (syntheticConsumedGovernance maxRetainedGovernanceDigests syntheticBaseTimestampSeconds 1))
         None
@@ -408,6 +412,23 @@ testCheckGovernanceRecordsDigest = do
         , ("floor removed", beforeWithFloor, withRecord [(digest, timestampSeconds)] None,
             Some "governance: evicted governance timestamp floor decreased")
         , ("over capacity", before, overCapacity, Some "governance: consumed digest map exceeds its capacity")
+        , ("retained entry kept", beforeWithRetained,
+            withRecord [(retainedDigest, retainedTimestampSeconds), (digest, timestampSeconds)] None, None)
+        , ("retained entry evicted at or below the new floor", beforeWithRetained,
+            withRecord [(digest, timestampSeconds)] (Some retainedTimestampSeconds), None)
+        , ("faulty recorder drops a retained entry above the floor", beforeWithRetained,
+            withRecord [(digest, timestampSeconds)] (Some (retainedTimestampSeconds - 1)),
+            Some "governance: retained digest dropped above the evicted governance timestamp floor")
+        , ("faulty recorder changes a retained timestamp", beforeWithRetained,
+            withRecord [(retainedDigest, retainedTimestampSeconds + 1), (digest, timestampSeconds)] None,
+            Some "governance: retained digest dropped above the evicted governance timestamp floor")
+        , ("faulty recorder adds an entry other than the VAA digest", beforeWithRetainedAndFloor,
+            withRecord [(retainedDigest, retainedTimestampSeconds), (otherDigest, timestampSeconds + 1)] (Some timestampSeconds),
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
+        , ("upgrade at the floor leaves the map unchanged", beforeWithRetainedAndFloor, beforeWithRetainedAndFloor, None)
+        , ("upgrade at the floor inserts its digest", beforeWithRetainedAndFloor,
+            withRecord [(retainedDigest, retainedTimestampSeconds), (digest, timestampSeconds)] (Some timestampSeconds),
+            Some "governance: a VAA at or below the floor must leave the consumed digest map unchanged")
         ]
   forA_ cases \(caseName, beforeState, afterState, expectedError) ->
     checkPostconditionOutcome caseName expectedError
@@ -423,18 +444,33 @@ testCheckGovernanceBoundsGuardianSets = do
       expiredSet = previousGuardianSetExpiringAt (addRelTime now (seconds (-1)))
       before = genesisState with guardianSets = Map.insert (current - 1) unexpiredSet genesisState.guardianSets
       withSets sets = before with guardianSets = sets
+      appliedWithExpired = withSets (Map.insert (current - 2) expiredSet before.guardianSets)
+      appliedOverCapacity = withSets (guardianSetsWithPrevious current maxStoredGuardianSets (addRelTime now (hours 1)))
+      keptCases =
+        [ ("expired set dropped", appliedWithExpired, before, None)
+        , ("lowest index dropped above capacity", appliedOverCapacity,
+            withSets (guardianSetsWithPrevious current (maxStoredGuardianSets - 1) (addRelTime now (hours 1))), None)
+        , ("active set within capacity dropped", before, withSets (Map.delete (current - 1) before.guardianSets),
+            Some "governance: stored guardian set dropped while active and within capacity")
+        , ("second-lowest index dropped above capacity", appliedOverCapacity,
+            withSets (Map.delete (current - maxStoredGuardianSets + 1) appliedOverCapacity.guardianSets),
+            Some "governance: stored guardian set dropped while active and within capacity")
+        , ("set changed", before, withSets (Map.insert (current - 1) (previousGuardianSetExpiringAt (addRelTime now (hours 2))) before.guardianSets),
+            Some "governance: stored guardian set not in the applied state")
+        ]
       cases =
         [ ("unchanged", before, None)
-        , ("previous set removed", withSets (Map.delete (current - 1) before.guardianSets), None)
         , ("expired set kept", withSets (Map.insert (current - 1) expiredSet before.guardianSets),
             Some "governance: stored guardian set expired")
         , ("previous set added", withSets (Map.insert (current - 2) unexpiredSet before.guardianSets),
-            Some "governance: stored guardian set not in the earlier state")
+            Some "governance: stored guardian set not in the applied state")
         , ("over capacity", withSets (guardianSetsWithPrevious current maxStoredGuardianSets (addRelTime now (hours 1)))
           , Some "governance: stored guardian sets exceed their capacity")
         ]
   forA_ cases \(caseName, afterState, expectedError) ->
     checkPostconditionOutcome caseName expectedError (checkGovernanceBoundsGuardianSets before afterState now)
+  forA_ keptCases \(caseName, appliedState, afterState, expectedError) ->
+    checkPostconditionOutcome caseName expectedError (checkGovernanceBoundsGuardianSets appliedState afterState now)
 
 ----------------------------------------------------------------------
 -- 8. Capacity constants
