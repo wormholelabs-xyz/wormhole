@@ -172,7 +172,7 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   mockAdmin <- allocateParty "CallerOnlyMockAdmin"
   let feeInstrument = InstrumentId with admin = mockAdmin, id = "MOCK"
   bridge <- setupCoreBridge "CallerOnly" (Some feeInstrument)
-  labsOperator <- allocateParty "CallerOnlyLabsOperator"
+  partyWithNoRole <- allocateParty "CallerOnlyPartyWithNoRole"
   requester <- allocateParty "CallerOnlyRequester"
   consumer <- allocateParty "CallerOnlyConsumer"
   verifier <- allocateParty "CallerOnlyVerifier"
@@ -262,66 +262,66 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   Some repricedReplayRegistry <- queryContractId gg repricedReplayRegistryCid
   repricedReplayRegistry.claimFee === 7
 
-  labsOperatorCoreStates <- query @CoreState labsOperator
-  labsOperatorEmitters <- query @Emitter labsOperator
-  labsOperatorRegistries <- query @EmitterRegistry labsOperator
-  labsOperatorReplayRegistries <- query @ReplayRootRegistry labsOperator
-  labsOperatorReplayNodes <- query @ReplayNode labsOperator
-  length labsOperatorCoreStates === 0
-  length labsOperatorEmitters === 0
-  length labsOperatorRegistries === 0
-  length labsOperatorReplayRegistries === 0
-  length labsOperatorReplayNodes === 0
+  partyWithNoRoleCoreStates <- query @CoreState partyWithNoRole
+  partyWithNoRoleEmitters <- query @Emitter partyWithNoRole
+  partyWithNoRoleRegistries <- query @EmitterRegistry partyWithNoRole
+  partyWithNoRoleReplayRegistries <- query @ReplayRootRegistry partyWithNoRole
+  partyWithNoRoleReplayNodes <- query @ReplayNode partyWithNoRole
+  length partyWithNoRoleCoreStates === 0
+  length partyWithNoRoleEmitters === 0
+  length partyWithNoRoleRegistries === 0
+  length partyWithNoRoleReplayRegistries === 0
+  length partyWithNoRoleReplayNodes === 0
 
 ----------------------------------------------------------------------
--- Test 3: attacks by a former operator party fail
+-- Test 3: attacks by a party with no role fail
 ----------------------------------------------------------------------
 
--- | Each create, archive or change of a core contract by a former operator party fails.
-testFormerOperatorHasNoCorePower : Script ()
-testFormerOperatorHasNoCorePower = do
-  bridge <- setupCoreBridge "FormerOperator" None
-  labsOperator <- allocateParty "FormerOperatorLabs"
-  alice <- allocateParty "FormerOperatorAlice"
+-- | Each create, archive or change of a core contract by a party with no role fails.
+testPartyWithNoRoleHasNoCorePower : Script ()
+testPartyWithNoRoleHasNoCorePower = do
+  bridge <- setupCoreBridge "NoRole" None
+  partyWithNoRole <- allocateParty "NoRoleParty"
+  alice <- allocateParty "NoRoleAlice"
   let gg = bridge.guardianGovernance
   Some coreState <- queryContractId gg bridge.coreStateCid
   coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
   registryDisclosure <- discloseAsGuardianGovernance bridge bridge.emitterRegistryCid
   replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
-  let asLabsOperator = actAs labsOperator
+  let asPartyWithNoRole = actAs partyWithNoRole
       allDisclosures = disclose coreStateDisclosure <> disclose registryDisclosure <> disclose replayRegistryDisclosure
       authorizationAttacks =
-        [ ("create CoreState naming the real gg", discardResult $ trySubmit asLabsOperator do
+        [ ("create CoreState naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
               createCmd coreState with consumedGovernance = Set.empty)
-        , ("create EmitterRegistry with nextId 0 naming the real gg", discardResult $ trySubmit asLabsOperator do
-              createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = labsOperator) 0))
-        , ("create ReplayRootRegistry naming the real gg", discardResult $ trySubmit asLabsOperator do
-              createCmd (mkInitialReplayRootRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = labsOperator) 0))
-        , ("create Emitter for itself under the real gg", discardResult $ trySubmit asLabsOperator do
+        , ("create EmitterRegistry with nextId 0 naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd (mkInitialEmitterRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = partyWithNoRole) 0))
+        , ("create ReplayRootRegistry naming the real gg", discardResult $ trySubmit asPartyWithNoRole do
+              createCmd (mkInitialReplayRootRegistry (RegistryParties with guardianGovernance = gg, onboardingFeeAdmin = partyWithNoRole) 0))
+        , ("create Emitter for itself under the real gg", discardResult $ trySubmit asPartyWithNoRole do
               createCmd Emitter with
-                guardianGovernance = gg, owner = labsOperator, emitterId = 0
-                emitterAddress = emitterAddressFor gg labsOperator 0, sequence = 0)
-        , ("create ReplayNode for Alice", discardResult $ trySubmit asLabsOperator do
+                guardianGovernance = gg, owner = partyWithNoRole, emitterId = 0
+                emitterAddress = emitterAddressFor gg partyWithNoRole 0, sequence = 0)
+        , ("create ReplayNode for Alice", discardResult $ trySubmit asPartyWithNoRole do
               createCmd ReplayNode with
                 consumer = alice, guardianGovernance = gg, namespace = "stolen", prefix = ""
                 splitThreshold = defaultSplitThreshold, consumed = Set.empty)
-        , ("archive CoreState", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do archiveCmd bridge.coreStateCid)
-        , ("archive EmitterRegistry", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do archiveCmd bridge.emitterRegistryCid)
-        , ("archive ReplayRootRegistry", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do archiveCmd bridge.replayRegistryCid)
-        , ("SetRegistrationFee", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
+        , ("archive CoreState", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.coreStateCid)
+        , ("archive EmitterRegistry", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.emitterRegistryCid)
+        , ("archive ReplayRootRegistry", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do archiveCmd bridge.replayRegistryCid)
+        , ("SetRegistrationFee", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
               exerciseCmd bridge.emitterRegistryCid SetRegistrationFee with newRegistrationFee = 1)
-        , ("SetClaimFee", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
+        , ("SetClaimFee", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
               exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = 1)
-        , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
-              exerciseCmd bridge.emitterRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = labsOperator)
-        , ("ReplaceReplayRootRegistryFeeAdmin", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
-              exerciseCmd bridge.replayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = labsOperator)
-        , ("SubmitGovernanceVAA with submitter Alice", discardResult $ trySubmit (asLabsOperator <> allDisclosures) do
+        , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.emitterRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = partyWithNoRole)
+        , ("ReplaceReplayRootRegistryFeeAdmin", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
+              exerciseCmd bridge.replayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = partyWithNoRole)
+        , ("SubmitGovernanceVAA with submitter Alice", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
               exerciseCmd bridge.coreStateCid SubmitGovernanceVAA with
                 submitter = alice, encodedVAA = govSetFeeVAA, pubKeys = [(0, devnetGuardianPubKey)])
         ]
   forA_ authorizationAttacks \(attackName, attack) -> attack >>= checkFailsOnMissingAuthorization attackName
-  applicationVAAResult <- tryRelayGovernance bridge labsOperator bridge.coreStateCid rtAppMessageBySet0 [(0, devnetGuardianPubKey)]
+  applicationVAAResult <- tryRelayGovernance bridge partyWithNoRole bridge.coreStateCid rtAppMessageBySet0 [(0, devnetGuardianPubKey)]
   checkAttackFailedWith "SubmitGovernanceVAA with an application VAA" "governance: wrong emitter" applicationVAAResult
   Some coreStateAfterAttacks <- queryContractId gg bridge.coreStateCid
   coreStateAfterAttacks === coreState

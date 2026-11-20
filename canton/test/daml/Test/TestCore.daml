@@ -214,10 +214,10 @@ testAddressVector : Script ()
 testAddressVector =
   derivedAddressFromText
       (DomainTag emitterAddressTag)
-      (RegistrarText "vector-operator::1220deadbeef")
+      (RegistrarText "vector-registrar::1220deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
       (OwnerText "vector-owner::1220cafebabe")
       (RegistryId 7)
-    === "45ae8886d1c165b071d3b1202fe81ebedc39f61a6a91a1d13140eb64857f3f2b"
+    === "37311031ac421fbccc74c1df19ad5635cbefd1a82db60d613eb62a158f504d35"
 
 -- | A party cannot forge an existing emitter's address. The address includes
 -- the @owner@, and the 'Emitter' is owner-co-signed, so:
