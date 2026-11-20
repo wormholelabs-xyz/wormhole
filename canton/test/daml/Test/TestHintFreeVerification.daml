@@ -244,3 +244,37 @@ testGenesisStoresPublicKeys = do
   genesisSet.members === [devnetGuardianMember]
   genesisSet.expirationTime === None
   map (.address) genesisSet.members === [devnetGuardian]
+
+data GenesisKeyCase = GenesisKeyCase with
+    caseName                : Text
+    members                 : [GuardianSetMember]
+    hasGovernanceHistory    : Bool
+    expectedErrorFragment   : Optional Text
+
+-- | A 'CoreState' without governance history is a genesis state (attach only
+-- adds keys), so each of its guardians must hold a public key. After a
+-- governance VAA, a new guardian may lack its key until attached.
+testGenesisRequiresEveryGuardianKey : Script ()
+testGenesisRequiresEveryGuardianKey = do
+  let unkeyedSet1Member = devnetGuardianSet1Member with publicKey = None
+      governanceDigest = parseHexTextOrAbort (mconcat (replicate 64 "a"))
+      cases =
+        [ GenesisKeyCase "genesis with every key" [devnetGuardianMember, devnetGuardianSet1Member] False None
+        , GenesisKeyCase "genesis with one key missing" [devnetGuardianMember, unkeyedSet1Member] False (Some "precondition")
+        , GenesisKeyCase "genesis with no key" [devnetGuardianMember with publicKey = None] False (Some "precondition")
+        , GenesisKeyCase "after governance, one key missing" [devnetGuardianMember, unkeyedSet1Member] True None
+        ]
+  forA_ (numberCases cases) \(caseNumber, genesisCase) -> do
+    guardianGovernance <- allocateParty ("GenesisKeyGovernance" <> show caseNumber)
+    feeCustody <- allocateParty ("GenesisKeyFeeCustody" <> show caseNumber)
+    placeholderFeeInstrumentAdmin <- allocateParty ("GenesisKeyUnusedFeeInstrumentAdmin" <> show caseNumber)
+    (setupGovernance, fullGenesisCid) <- setup
+    Some fullGenesis <- queryContractId setupGovernance fullGenesisCid
+    let coreState = fullGenesis with
+          guardianGovernance
+          feeRecipient = feeCustody
+          feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
+          guardianSets = Map.fromList [(0, GuardianSet with members = genesisCase.members, expirationTime = None)]
+          consumedGovernance = if genesisCase.hasGovernanceHistory then Map.singleton governanceDigest 0 else Map.empty
+    createResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do createCmd coreState
+    checkSubmitOutcome genesisCase.caseName genesisCase.expectedErrorFragment createResult
