@@ -280,6 +280,17 @@ func (e *Watcher) heartbeatContractAddress() string {
 	return contractAddress
 }
 
+// errEmptyReadAsPartyOutsideDevMode: an empty read-as party reads every party and turns the registrar pin off.
+var errEmptyReadAsPartyOutsideDevMode = errors.New("canton: readAsParty must be the guardianGovernance party outside unsafe dev mode")
+
+// SECURITY: checked in the constructor and again in Run, which also covers a Watcher literal.
+func checkReadAsPartySetOutsideDevMode(readAsParty string, unsafeDevMode bool) error {
+	if readAsParty == "" && !unsafeDevMode {
+		return errEmptyReadAsPartyOutsideDevMode
+	}
+	return nil
+}
+
 // defaultPackageMetadataRecheckInterval is the vetting metadata recheck period in production.
 const defaultPackageMetadataRecheckInterval = 60 * time.Second
 
@@ -308,6 +319,9 @@ func newWatcherWithApprovedList(
 	obsvReqC <-chan *gossipv1.ObservationRequest,
 ) (*Watcher, error) {
 	if err := checkAcceptedPackageIDsAllowed(acceptedPackageIDs, unsafeDevMode, approvedCorePackages); err != nil {
+		return nil, err
+	}
+	if err := checkReadAsPartySetOutsideDevMode(readAsParty, unsafeDevMode); err != nil {
 		return nil, err
 	}
 	return &Watcher{
@@ -494,6 +508,9 @@ func (e *Watcher) handleReobservation(ctx context.Context, logger *zap.Logger, c
 func (e *Watcher) Run(ctx context.Context) error {
 	// Redundant with NewWatcher; covers a Watcher literal.
 	if err := checkAcceptedPackageIDsAllowed(e.acceptedPackageIDs, e.unsafeDevMode, e.approvedCorePackages); err != nil {
+		return err
+	}
+	if err := checkReadAsPartySetOutsideDevMode(e.readAsParty, e.unsafeDevMode); err != nil {
 		return err
 	}
 	if e.packageMetadataRecheckInterval <= 0 {

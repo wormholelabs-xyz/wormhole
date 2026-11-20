@@ -35,7 +35,7 @@ func startWatcherWithMode(t *testing.T, fake *fakeClient, acceptedPackageIDs can
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", acceptedPackageIDs, "", AuthConfig{}, unsafeDevMode, msgC, obsvReqC)
+	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", acceptedPackageIDs, sampleRegistrar, AuthConfig{}, unsafeDevMode, msgC, obsvReqC)
 	require.NoError(t, err)
 	w.packageMetadataRecheckInterval = packageMetadataRecheckInterval
 	runWatcherUnderSupervisor(t, w, fake)
@@ -480,7 +480,7 @@ func TestHandleReobservationDropsMismatchedRole(t *testing.T) {
 	for _, unsafeDevMode := range []bool{false, true} {
 		t.Run(map[bool]string{false: "production mode", true: "unsafe dev mode"}[unsafeDevMode], func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 4)
-			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), "", AuthConfig{}, unsafeDevMode, msgC, nil)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), sampleRegistrar, AuthConfig{}, unsafeDevMode, msgC, nil)
 			require.NoError(t, err)
 			client := newFakeClient()
 			client.vettedPackageMetadataResponses = [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata, testRetiringMismatchedMetadata}}
