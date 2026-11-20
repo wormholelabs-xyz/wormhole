@@ -13,23 +13,73 @@ import (
 	"google.golang.org/protobuf/encoding/prototext"
 )
 
-func captureCoreBridgeTransferFeesTemplate(t *testing.T, targetChain string, amount string, recipient string) []byte {
+type coreBridgeTransferFeesTemplateOutput struct {
+	stdout []byte
+	stderr []byte
+}
+
+func setCoreBridgeTransferFeesFlags(t *testing.T, targetChain string, amount string, recipient string) {
+	originalTargetChain := *coreBridgeTransferFeesChainId
+	originalAmount := *coreBridgeTransferFeesAmount
+	originalRecipient := *coreBridgeTransferFeesRecipient
+	t.Cleanup(func() {
+		*coreBridgeTransferFeesChainId = originalTargetChain
+		*coreBridgeTransferFeesAmount = originalAmount
+		*coreBridgeTransferFeesRecipient = originalRecipient
+	})
 	*coreBridgeTransferFeesChainId = targetChain
 	*coreBridgeTransferFeesAmount = amount
 	*coreBridgeTransferFeesRecipient = recipient
+}
 
-	originalStdout := os.Stdout
-	reader, writer, err := os.Pipe()
+func captureCoreBridgeTransferFeesTemplate(t *testing.T, targetChain string, amount string, recipient string) coreBridgeTransferFeesTemplateOutput {
+	setCoreBridgeTransferFeesFlags(t, targetChain, amount, recipient)
+
+	originalStdout, originalStderr := os.Stdout, os.Stderr
+	stdoutReader, stdoutWriter, err := os.Pipe()
 	require.NoError(t, err)
-	os.Stdout = writer
+	stderrReader, stderrWriter, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout, os.Stderr = stdoutWriter, stderrWriter
+	t.Cleanup(func() { os.Stdout, os.Stderr = originalStdout, originalStderr })
 	runCoreBridgeTransferFeesTemplate(nil, nil)
-	os.Stdout = originalStdout
-	require.NoError(t, writer.Close())
+	os.Stdout, os.Stderr = originalStdout, originalStderr
+	require.NoError(t, stdoutWriter.Close())
+	require.NoError(t, stderrWriter.Close())
 
-	templateOutput, err := io.ReadAll(reader)
+	stdout, err := io.ReadAll(stdoutReader)
 	require.NoError(t, err)
-	require.NotEmpty(t, templateOutput)
-	return templateOutput
+	require.NotEmpty(t, stdout)
+	stderr, err := io.ReadAll(stderrReader)
+	require.NoError(t, err)
+	return coreBridgeTransferFeesTemplateOutput{stdout: stdout, stderr: stderr}
+}
+
+func TestCoreBridgeTransferFeesTemplateChainZeroIsExplicitAndWarns(t *testing.T) {
+	const recipient = "0x00000000000000000000000000000000000000000000000000000000deadbeef"
+	cases := []struct {
+		name                     string
+		targetChain              string
+		expectedChainLinePattern string
+		expectChainWarning       bool
+	}{
+		{"chain 0", "0", `chain_id:\s+0\n`, true},
+		{"solana", "solana", `chain_id:\s+1\n`, false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			output := captureCoreBridgeTransferFeesTemplate(t, testCase.targetChain, "1", recipient)
+			require.Regexp(t, testCase.expectedChainLinePattern, string(output.stdout))
+			stderrText := string(output.stderr)
+			if !testCase.expectChainWarning {
+				require.Empty(t, stderrText)
+				return
+			}
+			for _, expectedWarningPart := range []string{"every chain", "base unit", "20 bytes", "Terra2", "Injective", "Sei"} {
+				require.Contains(t, stderrText, expectedWarningPart)
+			}
+		})
+	}
 }
 
 func TestCoreBridgeTransferFeesTemplateToVaa(t *testing.T) {
@@ -51,7 +101,7 @@ func TestCoreBridgeTransferFeesTemplateToVaa(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			templateOutput := captureCoreBridgeTransferFeesTemplate(t, testCase.targetChain, testCase.amount, "0x"+recipientHex)
+			templateOutput := captureCoreBridgeTransferFeesTemplate(t, testCase.targetChain, testCase.amount, "0x"+recipientHex).stdout
 
 			var request nodev1.InjectGovernanceVAARequest
 			require.NoError(t, prototext.Unmarshal(templateOutput, &request))
@@ -65,7 +115,7 @@ func TestCoreBridgeTransferFeesTemplateToVaa(t *testing.T) {
 }
 
 func TestCoreBridgeTransferFeesTemplateToVaaRefusesZeroRecipient(t *testing.T) {
-	templateOutput := captureCoreBridgeTransferFeesTemplate(t, "0", "0", "0x00")
+	templateOutput := captureCoreBridgeTransferFeesTemplate(t, "0", "0", "0x00").stdout
 
 	var request nodev1.InjectGovernanceVAARequest
 	require.NoError(t, prototext.Unmarshal(templateOutput, &request))
