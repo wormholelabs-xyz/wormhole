@@ -1,0 +1,190 @@
+-- | TransferFees governance: each accepted VAA creates exactly one
+-- 'FeeWithdrawalAuthorization'. Signed VAA literals are generated and
+-- drift-guarded by node/pkg/cantonclient/transfer_fees_vectorgen_test.go.
+module Test.TestTransferFees where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Map qualified as Map
+import Wormhole.Core.Bytes
+import Wormhole.Core.State
+import Test.TestCore (govTransferFeesVAA, numberCases, setupWithPartyLabel)
+import Test.TestGovernanceBounds (digestOfVAA, readCoreState, timestampOf)
+import Test.TestRedTeamCore (checkAttackFailedWith, set0PubKeys, set1PubKeys, submitGovernance, upgradeToSet1)
+
+----------------------------------------------------------------------
+-- Generated fixtures (CANTON_VECTORGEN=write rewrites these)
+----------------------------------------------------------------------
+
+-- | TransferFees(chain 0, amount 11, recipient d5 x 32), set 0, sequence 201.
+tfTransferFeesToAllChains : EncodedVaa
+tfTransferFeesToAllChains = parseHexTextOrAbort "010000000001001a6401ca0f7fc31f77c74f59ace28ffd7960166c067089495ea424146afd5bf20cc584f466686f0cddb0e357492c44f7579e2ecdeffb7ddfa9647fe9cf341d96016afef8ad000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000c90000000000000000000000000000000000000000000000000000000000436f7265040000000000000000000000000000000000000000000000000000000000000000000bd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+
+-- | TransferFees(chain 2, amount 11, recipient d5 x 32), set 0, sequence 202.
+tfTransferFeesToEthereum : EncodedVaa
+tfTransferFeesToEthereum = parseHexTextOrAbort "01000000000100979e9666c0109a69d1cda446aaa20abae31261a4b939f3550802e0ec46a96b723bf355fed1da69738ce10aa0921f03769b8d4dc0d61c0075572cf935d25787f5006afef8ae000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000ca0000000000000000000000000000000000000000000000000000000000436f7265040002000000000000000000000000000000000000000000000000000000000000000bd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+
+-- | TransferFees(chain 75, amount 0, recipient d5 x 32), set 0, sequence 203.
+tfTransferFeesAmountZero : EncodedVaa
+tfTransferFeesAmountZero = parseHexTextOrAbort "010000000001002f08916991d5df52ef69245671466f36bb878c6970bcc183df57a99c0ca9096e008d3447cc3fe77ceb27d925f6adc1b42c7dd8ea522d25e371e5b8a1045a50fa016afef8af000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000cb0000000000000000000000000000000000000000000000000000000000436f726504004b0000000000000000000000000000000000000000000000000000000000000000d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+
+-- | TransferFees(chain 75, amount 2^63 - 1, recipient d5 x 32), set 0, sequence 204.
+tfTransferFeesAmountMaxInt64 : EncodedVaa
+tfTransferFeesAmountMaxInt64 = parseHexTextOrAbort "010000000001004e378fa134bdf4baa3c41ab2b22df6c22b8b1f8c6154179228f00c5b68fec9a137ab70a168824cbef04b47c1d62e20bc480344260ccd2db3d7153aaf8280915d006afef8b0000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000cc0000000000000000000000000000000000000000000000000000000000436f726504004b0000000000000000000000000000000000000000000000007fffffffffffffffd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+
+-- | TransferFees(chain 75, amount 2^63, recipient d5 x 32), set 0, sequence 205.
+tfTransferFeesAmountTwoPow63 : EncodedVaa
+tfTransferFeesAmountTwoPow63 = parseHexTextOrAbort "01000000000100f347f40a4938d5beb38b038345687d1ad7bcd1ee3a29ddb324d564eea44b75704ad395e440ca62d6c2314fbe26b4fd904ba3d91953c297a14897bd823565be83006afef8b1000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000cd0000000000000000000000000000000000000000000000000000000000436f726504004b0000000000000000000000000000000000000000000000008000000000000000d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+
+-- | TransferFees(chain 75, amount 2^256 - 1, recipient d5 x 32), set 0, sequence 206.
+tfTransferFeesAmountMaxUint256 : EncodedVaa
+tfTransferFeesAmountMaxUint256 = parseHexTextOrAbort "010000000001007462692d473f815782e114758b1e54e1410ea9b3b93dc9bcf0985ee18b43f52c439165d1f2b3c6eb1f614f265b435b66eb3bd815fc7d1d55b265c869d5e128e8006afef8b2000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000ce0000000000000000000000000000000000000000000000000000000000436f726504004bffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffd5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5"
+
+-- | TransferFees(chain 75, amount 11, recipient 00 x 32), set 0, sequence 207.
+tfTransferFeesToZeroRecipient : EncodedVaa
+tfTransferFeesToZeroRecipient = parseHexTextOrAbort "010000000001001da96cea0975e77e51ba533221214ed809887bcc6e9ba652b8af059f21373e04275c0315026c3dba251aca748d4f43597b3c7c08e94d758b0c58f7e814196a9e016afef8b3000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000cf0000000000000000000000000000000000000000000000000000000000436f726504004b000000000000000000000000000000000000000000000000000000000000000b0000000000000000000000000000000000000000000000000000000000000000"
+
+-- | Body of 'govTransferFeesVAA', signed by devnet keys 0, 1 and 2 under set 1.
+tfTransferFeesResignedBySet1 : EncodedVaa
+tfTransferFeesResignedBySet1 = parseHexTextOrAbort "010000000103008ca16eeb9aded0174237096e3af6ddff01a6713ab459457c7e697478b8b8187a676c88afb69951e6fb4c7781792dfcf53e457dfe77dc11fdd4917a65249f892400019f710851857c18d6b578e13d92d60f62623d979fb24e73c0f8e6a191d6ad0d8254680c867aeeaacb769afa48e82716839eb7670b0b8524f4051d970800ac03c901025a5b1202aea12c161c4b22217336d669174236fb1f42290343f8dd0535d9d434631c79202fa1183354ca5ee6d8f9f39ec8f93e4e07f71cdf9afe9d85a931b87b016afef873000000000001000000000000000000000000000000000000000000000000000000000000000400000000000000040000000000000000000000000000000000000000000000000000000000436f726504004b0000000000000000000000000000000000000000000000000000000000000009d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+
+----------------------------------------------------------------------
+-- Helpers
+----------------------------------------------------------------------
+
+govTransferFeesRecipient : UniversalAddress
+govTransferFeesRecipient = parseHexTextOrAbort (mconcat (replicate 32 "d4"))
+
+govTransferFeesAmount : Int
+govTransferFeesAmount = 9
+
+vectorRecipient : UniversalAddress
+vectorRecipient = parseHexTextOrAbort (mconcat (replicate 32 "d5"))
+
+zeroRecipient : UniversalAddress
+zeroRecipient = parseHexTextOrAbort (mconcat (replicate 32 "00"))
+
+vectorAmount : Int
+vectorAmount = 11
+
+maxInt64 : Int
+maxInt64 = 9223372036854775807
+
+transferFeesErrorWrongTargetChain : Text
+transferFeesErrorWrongTargetChain = "transferFees: wrong target chain"
+
+governanceErrorActionAlreadyConsumed : Text
+governanceErrorActionAlreadyConsumed = "action already consumed"
+
+transferFeesErrorAmountExceedsIntRange : Text
+transferFeesErrorAmountExceedsIntRange = "governance: TransferFees amount exceeds the Int range"
+
+readWithdrawalAuthorizations : Party -> Script [FeeWithdrawalAuthorization]
+readWithdrawalAuthorizations guardianGovernance =
+  map snd <$> query @FeeWithdrawalAuthorization guardianGovernance
+
+checkHasExactlyOneWithdrawalAuthorization : Text -> Party -> FeeWithdrawalAuthorization -> Script ()
+checkHasExactlyOneWithdrawalAuthorization caseName guardianGovernance expectedAuthorization = do
+  authorizations <- readWithdrawalAuthorizations guardianGovernance
+  assertMsg (caseName <> ": expected one authorization, got " <> show authorizations)
+    (authorizations == [expectedAuthorization])
+
+expectedAuthorizationFor : Party -> Int -> UniversalAddress -> EncodedVaa -> FeeWithdrawalAuthorization
+expectedAuthorizationFor guardianGovernance amount recipient encodedVAA =
+  FeeWithdrawalAuthorization with
+    guardianGovernance
+    amount
+    recipient
+    vaaHash = digestOfVAA encodedVAA
+
+----------------------------------------------------------------------
+-- 1. Accepted actions
+----------------------------------------------------------------------
+
+data AcceptedTransferFeesCase = AcceptedTransferFeesCase with
+    caseName          : Text
+    encodedVAA        : EncodedVaa
+    expectedAmount    : Int
+    expectedRecipient : UniversalAddress
+
+-- | One authorization with the VAA amount, recipient and digest. 'CoreState' changes only by the recorded digest.
+testTransferFeesCreatesOneWithdrawalAuthorization : Script ()
+testTransferFeesCreatesOneWithdrawalAuthorization = do
+  let cases =
+        [ AcceptedTransferFeesCase "chain 75" govTransferFeesVAA govTransferFeesAmount govTransferFeesRecipient
+        , AcceptedTransferFeesCase "amount 0" tfTransferFeesAmountZero 0 vectorRecipient
+        , AcceptedTransferFeesCase "amount 2^63 - 1" tfTransferFeesAmountMaxInt64 maxInt64 vectorRecipient
+        , AcceptedTransferFeesCase "zero recipient (EVM parity; the SDK serializer refuses it)" tfTransferFeesToZeroRecipient vectorAmount zeroRecipient
+        ]
+  forA_ (numberCases cases) \(caseNumber, acceptedCase) -> do
+    (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("TransferFeesAccepted" <> show caseNumber) None
+    before <- readCoreState guardianGovernance coreStateCid
+    readWithdrawalAuthorizations guardianGovernance >>= (=== [])
+    successorCid <- submitGovernance guardianGovernance coreStateCid acceptedCase.encodedVAA set0PubKeys
+    successor <- readCoreState guardianGovernance successorCid
+    successor === before with
+      consumedGovernance = Map.fromList [(digestOfVAA acceptedCase.encodedVAA, timestampOf acceptedCase.encodedVAA)]
+    checkHasExactlyOneWithdrawalAuthorization acceptedCase.caseName guardianGovernance
+      (expectedAuthorizationFor guardianGovernance acceptedCase.expectedAmount acceptedCase.expectedRecipient acceptedCase.encodedVAA)
+
+----------------------------------------------------------------------
+-- 2. Rejected actions
+----------------------------------------------------------------------
+
+-- | Chain 0, a foreign chain or an amount above Int max aborts; 'CoreState' stays
+-- active and unchanged, and the authorization list stays empty.
+testTransferFeesRejectedLeavesNoWithdrawalAuthorization : Script ()
+testTransferFeesRejectedLeavesNoWithdrawalAuthorization = do
+  let cases =
+        [ ("chain 0", transferFeesErrorWrongTargetChain, tfTransferFeesToAllChains)
+        , ("chain 2", transferFeesErrorWrongTargetChain, tfTransferFeesToEthereum)
+        , ("amount 2^63", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountTwoPow63)
+        , ("amount 2^256 - 1", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountMaxUint256)
+        ]
+  forA_ (numberCases cases) \(caseNumber, (caseName, expectedErrorText, encodedVAA)) -> do
+    (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("TransferFeesRejected" <> show caseNumber) None
+    before <- readCoreState guardianGovernance coreStateCid
+    submitResult <- trySubmit guardianGovernance do
+      exerciseCmd coreStateCid SubmitGovernanceVAA with
+        submitter = guardianGovernance, encodedVAA, pubKeys = set0PubKeys
+    checkAttackFailedWith caseName expectedErrorText submitResult
+    after <- readCoreState guardianGovernance coreStateCid
+    after === before
+    readWithdrawalAuthorizations guardianGovernance >>= (=== [])
+
+----------------------------------------------------------------------
+-- 3. Replay
+----------------------------------------------------------------------
+
+-- | After 'govTransferFeesVAA' applies, each copy with its digest fails and
+-- the single authorization stays.
+testTransferFeesReplayRejected : Script ()
+testTransferFeesReplayRejected = do
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel "TransferFeesReplay" None
+  transferredCid <- submitGovernance guardianGovernance coreStateCid govTransferFeesVAA set0PubKeys
+  let expectedAuthorization =
+        expectedAuthorizationFor guardianGovernance govTransferFeesAmount govTransferFeesRecipient govTransferFeesVAA
+  replayResult <- trySubmit guardianGovernance do
+    exerciseCmd transferredCid SubmitGovernanceVAA with
+      submitter = guardianGovernance, encodedVAA = govTransferFeesVAA, pubKeys = set0PubKeys
+  checkAttackFailedWith "same VAA" governanceErrorActionAlreadyConsumed replayResult
+  checkHasExactlyOneWithdrawalAuthorization "same VAA" guardianGovernance expectedAuthorization
+
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance transferredCid
+  digestOfVAA tfTransferFeesResignedBySet1 === digestOfVAA govTransferFeesVAA
+  resignedResult <- trySubmit guardianGovernance do
+    exerciseCmd set1CoreStateCid SubmitGovernanceVAA with
+      submitter = guardianGovernance, encodedVAA = tfTransferFeesResignedBySet1, pubKeys = set1PubKeys
+  checkAttackFailedWith "re-signed by set 1" governanceErrorActionAlreadyConsumed resignedResult
+  checkHasExactlyOneWithdrawalAuthorization "re-signed by set 1" guardianGovernance expectedAuthorization
+
+-- | Control for the re-signed case: without the earlier submission, set 1's
+-- copy applies and carries the original digest.
+testTransferFeesResignedBySet1AppliesOnFreshState : Script ()
+testTransferFeesResignedBySet1AppliesOnFreshState = do
+  (guardianGovernance, coreStateCid) <- setupWithPartyLabel "TransferFeesResigned" None
+  set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
+  _ <- submitGovernance guardianGovernance set1CoreStateCid tfTransferFeesResignedBySet1 set1PubKeys
+  checkHasExactlyOneWithdrawalAuthorization "re-signed by set 1 on a fresh state" guardianGovernance
+    (expectedAuthorizationFor guardianGovernance govTransferFeesAmount govTransferFeesRecipient govTransferFeesVAA)
