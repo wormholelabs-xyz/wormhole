@@ -68,6 +68,11 @@ The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360
 The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
+0.10.0 replaces the `Text` byte aliases with constrained byte types (`../README.md` §4.8).
+It changes template field types, so it is not an SCU upgrade of 0.9.0, and it starts a new `wormhole-core` line.
+The 0.10.0 main package id is `0b076ecd1c4a236221f6d7bb42541dfaf28bb628f6ecb2fdd8c691b719084383`.
+The last 0.9.0 build, `bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`, is replaced. Do not deploy it.
+
 0.9.0 removes the `operator` party from each core template and choice.
 It removes template fields, so it is not an SCU upgrade of 0.8.x.
 Thus `core/daml.yaml` has no `upgrades:` line, and 0.9.0 starts a new `wormhole-core` line.
