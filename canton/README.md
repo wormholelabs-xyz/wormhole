@@ -1589,7 +1589,8 @@ procedure for the upgrade from 0.6.0 to 0.7.0 on three `guardianGovernance`
 hosts. Each LocalNet participant hosts `guardianGovernance`, so each
 participant is a guardian participant and an informee participant. The script
 needs a LocalNet with a 0.6.0 genesis, so this repository no longer has it.
-Commit `1e5bf52f07` has the script and its procedure in `localnet/README.md`. The results
+The tag `canton/core-0.6-0.8.2-dars` (commit `1e5bf52f07`) has the script and
+its procedure in `localnet/README.md`. The results
 below are from the run at commit `395103f5e`. That run had no maximum canary
 time, no abort procedure, no required update ID and no publish in the restart
 window. Results:

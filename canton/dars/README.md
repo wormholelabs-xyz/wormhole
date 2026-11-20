@@ -34,7 +34,7 @@ Go watcher's configured packageID changes with the new build.
 This directory holds no `wormhole-core` DAR.
 No participant vetted a version of the current `wormhole-core` line, so `core/daml.yaml` has no `upgrades:` line.
 No participant outside LocalNet vetted the DARs of 0.6.0 to 0.8.2, so this directory no longer has them.
-Commit `1e5bf52f07` has these DARs.
+The tag `canton/core-0.6-0.8.2-dars` (commit `1e5bf52f07`) has these DARs.
 
 | Removed DAR | Was the baseline for | Source commit of `canton/core` | Main package id |
 | --- | --- | --- | --- |

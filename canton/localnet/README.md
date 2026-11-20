@@ -949,5 +949,5 @@ The script does these steps:
 This directory no longer has the rehearsal of the `wormhole-core` upgrade from 0.6.0 to 0.7.0.
 It needs a LocalNet with a 0.6.0 genesis, and no current LocalNet has one.
 Section 7.5 of `canton/README.md` gives the results of that rehearsal.
-Commit `1e5bf52f07` has the script `core_upgrade_rehearsal.sh` and this section.
+The tag `canton/core-0.6-0.8.2-dars` (commit `1e5bf52f07`) has the script `core_upgrade_rehearsal.sh` and this section.
 `watcher_harness_lib.sh` keeps the canary gate of the rehearsal.
