@@ -39,7 +39,7 @@ func amountWordOf(amount *uint256.Int) [32]byte {
 	return amount.Bytes32()
 }
 
-// Encodes any target chain and amount, including the chain 0 and amount 0 that the SDK serializer refuses.
+// Independent spec-layout encoding to check the SDK serializer against.
 func transferFeesPayloadWithAmountWord(targetChain vaa.ChainID, amountWord [32]byte, recipient vaa.Address) []byte {
 	payload := coreGovernanceHeader(coreGovernanceModuleID(), coreGovernanceActionTransferFees, targetChain)
 	payload = append(payload, amountWord[:]...)
@@ -127,19 +127,14 @@ func transferFeesDamlHexFixtures() []damlHexFixture {
 	sdkPayload := func(targetChain vaa.ChainID, amount *uint256.Int) func(t *testing.T) []byte {
 		return func(t *testing.T) []byte { return transferFeesPayloadBySDK(t, targetChain, amount, vectorRecipient) }
 	}
-	rawPayload := func(targetChain vaa.ChainID, amount *uint256.Int) func(t *testing.T) []byte {
-		return func(t *testing.T) []byte {
-			return transferFeesPayloadWithAmountWord(targetChain, amountWordOf(amount), vectorRecipient)
-		}
-	}
 	maxInt64Amount := uint256.NewInt(math.MaxInt64)
 	twoPow63Amount := new(uint256.Int).Lsh(uint256.NewInt(1), 63)
 	maxUint256Amount := new(uint256.Int).SetAllOne()
 
 	return []damlHexFixture{
-		transferFeesVAAFixture("tfTransferFeesToAllChains", transferFeesVectorSpec(1, rawPayload(vaa.ChainIDUnset, vectorAmount))),
+		transferFeesVAAFixture("tfTransferFeesToAllChains", transferFeesVectorSpec(1, sdkPayload(vaa.ChainIDUnset, vectorAmount))),
 		transferFeesVAAFixture("tfTransferFeesToEthereum", transferFeesVectorSpec(2, sdkPayload(vaa.ChainIDEthereum, vectorAmount))),
-		transferFeesVAAFixture("tfTransferFeesAmountZero", transferFeesVectorSpec(3, rawPayload(vaa.ChainIDCanton, uint256.NewInt(0)))),
+		transferFeesVAAFixture("tfTransferFeesAmountZero", transferFeesVectorSpec(3, sdkPayload(vaa.ChainIDCanton, uint256.NewInt(0)))),
 		transferFeesVAAFixture("tfTransferFeesAmountMaxInt64", transferFeesVectorSpec(4, sdkPayload(vaa.ChainIDCanton, maxInt64Amount))),
 		transferFeesVAAFixture("tfTransferFeesAmountTwoPow63", transferFeesVectorSpec(5, sdkPayload(vaa.ChainIDCanton, twoPow63Amount))),
 		transferFeesVAAFixture("tfTransferFeesAmountMaxUint256", transferFeesVectorSpec(6, sdkPayload(vaa.ChainIDCanton, maxUint256Amount))),
@@ -150,22 +145,31 @@ func transferFeesDamlHexFixtures() []damlHexFixture {
 	}
 }
 
-func TestTransferFeesSDKSerializerRefusesChainZeroAndAmountZero(t *testing.T) {
+func TestTransferFeesSDKSerializerAcceptsChainZeroAndAmountZero(t *testing.T) {
 	recipient := recipientOfRepeatedByte(transferFeesVectorRecipientByte)
 	cases := []struct {
-		name        string
-		targetChain vaa.ChainID
-		amount      *uint256.Int
-		recipient   vaa.Address
+		name          string
+		targetChain   vaa.ChainID
+		amount        *uint256.Int
+		recipient     vaa.Address
+		expectedError string
 	}{
 		{name: "chain 0", targetChain: vaa.ChainIDUnset, amount: uint256.NewInt(1), recipient: recipient},
 		{name: "amount 0", targetChain: vaa.ChainIDCanton, amount: uint256.NewInt(0), recipient: recipient},
-		{name: "zero recipient", targetChain: vaa.ChainIDCanton, amount: uint256.NewInt(1), recipient: vaa.Address{}},
+		{name: "chain 0 and amount 0", targetChain: vaa.ChainIDUnset, amount: uint256.NewInt(0), recipient: recipient},
+		{name: "zero recipient", targetChain: vaa.ChainIDCanton, amount: uint256.NewInt(1), recipient: vaa.Address{}, expectedError: "recipient must be non-zero"},
+		{name: "zero recipient on chain 0", targetChain: vaa.ChainIDUnset, amount: uint256.NewInt(1), recipient: vaa.Address{}, expectedError: "recipient must be non-zero"},
+		{name: "nil amount", targetChain: vaa.ChainIDCanton, amount: nil, recipient: recipient, expectedError: "amount is required"},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := vaa.BodyCoreBridgeTransferFees{ChainID: testCase.targetChain, Amount: testCase.amount, Recipient: testCase.recipient}.Serialize()
-			require.Error(t, err)
+			payload, err := vaa.BodyCoreBridgeTransferFees{ChainID: testCase.targetChain, Amount: testCase.amount, Recipient: testCase.recipient}.Serialize()
+			if testCase.expectedError != "" {
+				require.ErrorContains(t, err, testCase.expectedError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, transferFeesPayloadWithAmountWord(testCase.targetChain, amountWordOf(testCase.amount), testCase.recipient), payload)
 		})
 	}
 }
