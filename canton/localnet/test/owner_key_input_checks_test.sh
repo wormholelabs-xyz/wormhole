@@ -95,7 +95,7 @@ check_case fee-custody-same-as-ntt-custody-id 1 "feeCustody and nttCustody are t
 check_case fee-custody-two-arguments 2 "usage: check_fee_custody_is_in_the_guardian_namespace" \
   check_fee_custody_is_in_the_guardian_namespace "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID"
 
-OPERATOR_PARTY_ID="Operator::1220$(printf 'ef%.0s' $(seq 1 32))"
+FORMER_OPERATOR_PARTY_ID="Operator::1220$(printf 'ef%.0s' $(seq 1 32))"
 DSO_PARTY_ID="DSO::1220$(printf '01%.0s' $(seq 1 32))"
 # core_state_event <fee-recipient> <fee-instrument-admin> <signatory>...: a CoreState created event.
 core_state_event() {
@@ -106,25 +106,33 @@ core_state_event() {
     signatories: $ARGS.positional}' --args "$@"
 }
 check_case core-state-pays-fee-custody 0 "" check_core_state_pays_fees_to_fee_custody \
-  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID" "$OPERATOR_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
-  "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+check_case core-state-signatories-in-other-order 0 "" check_core_state_pays_fees_to_fee_custody \
+  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$DSO_PARTY_ID" "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
 check_case core-state-pays-guardian-governance 1 "CoreState feeRecipient is $GG_PARTY_ID, expected $FEE_CUSTODY_PARTY_ID" \
   check_core_state_pays_fees_to_fee_custody \
-  "$(core_state_event "$GG_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID" "$OPERATOR_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
-  "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+  "$(core_state_event "$GG_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
 check_case core-state-without-fee-custody-signatory 1 "CoreState signatories" check_core_state_pays_fees_to_fee_custody \
-  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID" "$OPERATOR_PARTY_ID")" \
-  "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+check_case core-state-with-former-operator-signatory 1 "CoreState signatories" check_core_state_pays_fees_to_fee_custody \
+  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$DSO_PARTY_ID" "$GG_PARTY_ID" "$FORMER_OPERATOR_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
 check_case core-state-gg-fee-instrument-admin 1 "CoreState fee instrument admin is $GG_PARTY_ID" \
   check_core_state_pays_fees_to_fee_custody \
-  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID" "$GG_PARTY_ID" "$OPERATOR_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
-  "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
-check_case core-state-operator-fee-instrument-admin 1 "CoreState fee instrument admin is $OPERATOR_PARTY_ID" \
+  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+check_case core-state-fee-custody-fee-instrument-admin 1 "CoreState fee instrument admin is $FEE_CUSTODY_PARTY_ID" \
   check_core_state_pays_fees_to_fee_custody \
-  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$OPERATOR_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
-  "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+  "$(core_state_event "$FEE_CUSTODY_PARTY_ID" "$FEE_CUSTODY_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID")" \
+  "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
 check_case core-state-not-json 1 "CoreState created event is not readable" \
-  check_core_state_pays_fees_to_fee_custody "not json" "$OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+  check_core_state_pays_fees_to_fee_custody "not json" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
+check_case core-state-four-arguments 2 "usage: check_core_state_pays_fees_to_fee_custody" \
+  check_core_state_pays_fees_to_fee_custody "{}" "$FORMER_OPERATOR_PARTY_ID" "$GG_PARTY_ID" "$FEE_CUSTODY_PARTY_ID"
 
 check_case fault-banner-none 0 "" env -u GG_ROTATION_FAULT_SIGNER_OF -u GG_ROTATION_FAULT_OMIT_PARTY_OF \
   -u GG_ROTATION_FAULT_UNSIGNED_BY_ADDED_OF -u GG_ROTATION_MEASURE_SINGLE_LOAD bash -c \
