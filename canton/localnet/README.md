@@ -731,8 +731,8 @@ These scripts run the Wormhole NTT layer on LocalNet.
 The NTT packages come from the NTT repository, branch `canton/migrate-ntt-layer`, commit `b2c355d`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.12.0, `ntt` 0.5.0, `wormhole-genesis` 0.1.0 and `token-cip0056` 0.2.0.
-The pinned `ntt` and `wormhole-genesis` DARs call `wormhole-core` 0.9.0. Thus `ntt_upload_dars.sh` rejects them until they are rebuilt on 0.12.0 and pinned (CORE-4095).
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.12.1, `ntt` 0.5.0, `wormhole-genesis` 0.1.0 and `token-cip0056` 0.2.0.
+The pinned `ntt` and `wormhole-genesis` DARs call `wormhole-core` 0.9.0. Thus `ntt_upload_dars.sh` rejects them until they are rebuilt on 0.12.1 and pinned (CORE-4095).
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
 `ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each `ntt` version.
 `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
@@ -763,7 +763,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 
 | Step | Script | Result |
 | --- | --- | --- |
-| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.12.0. |
+| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.12.1. |
 | 2 | `ntt_governance.sh` | One `NttGovernance` root and one `CoinFactory` exist. |
 | 3 | `ntt_watcher.sh start` | The watcher harness reads `app-provider`. |
 | 4 | `ntt_burn_mint.sh` | A relayer mints 2.5 tokens to a user. The user burns 1.0 token. |

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"os"
 	"strconv"
 	"strings"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/certusone/wormhole/node/pkg/devnet"
 	nodev1 "github.com/certusone/wormhole/node/pkg/proto/node/v1"
@@ -1318,6 +1320,11 @@ func runCoreBridgeSetMessageFeeTemplate(cmd *cobra.Command, args []string) {
 	fmt.Print(string(b))
 }
 
+const coreBridgeTransferFeesChainZeroWarning = `WARNING: chain_id 0 makes a TransferFees VAA that anyone can submit on every chain that accepts it (EVM, Solana, CosmWasm, Canton).
+- The amount is in the native base unit of each chain (wei, lamports, 10^-10 units on Canton).
+- EVM cores keep only the low 20 bytes of the recipient.
+- The Terra2, Injective and Sei CosmWasm cores read recipient and amount in reversed order.`
+
 func runCoreBridgeTransferFeesTemplate(cmd *cobra.Command, args []string) {
 	chainID, err := parseChainID(*coreBridgeTransferFeesChainId)
 	if err != nil {
@@ -1333,6 +1340,9 @@ func runCoreBridgeTransferFeesTemplate(cmd *cobra.Command, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if chainID == vaa.ChainIDUnset {
+		fmt.Fprintln(os.Stderr, coreBridgeTransferFeesChainZeroWarning)
+	}
 
 	seq, nonce := randSeqNonce()
 
@@ -1344,7 +1354,7 @@ func runCoreBridgeTransferFeesTemplate(cmd *cobra.Command, args []string) {
 				Nonce:    nonce,
 				Payload: &nodev1.GovernanceMessage_CoreBridgeTransferFees{
 					CoreBridgeTransferFees: &nodev1.CoreBridgeTransferFees{
-						ChainId:   uint32(chainID),
+						ChainId:   proto.Uint32(uint32(chainID)),
 						Amount:    *coreBridgeTransferFeesAmount,
 						Recipient: recipient,
 					},

@@ -569,6 +569,7 @@ func TestBodyCoreBridgeTransferFeesSerialize(t *testing.T) {
 	const header = "00000000000000000000000000000000000000000000000000000000436f726504"
 	const amountHex = "0000000000000000000000000000000000000000000000000000000000000123"
 	const recipientHex = "00000000000000000000000000000000000000000000000000000000deadbeef"
+	const zeroAmountHex = "0000000000000000000000000000000000000000000000000000000000000000"
 
 	var recipient Address
 	recipient[28] = 0xde
@@ -602,44 +603,44 @@ func TestBodyCoreBridgeTransferFeesSerialize(t *testing.T) {
 		assert.Equal(t, expected, hex.EncodeToString(buf))
 	})
 
-	t.Run("rejects nil amount", func(t *testing.T) {
-		body := BodyCoreBridgeTransferFees{
-			ChainID:   ChainIDSolana,
-			Recipient: recipient,
-		}
-		_, err := body.Serialize()
-		require.ErrorContains(t, err, "amount must be non-zero")
-	})
+	acceptedCases := []struct {
+		name            string
+		targetChain     ChainID
+		amount          *uint256.Int
+		expectedPayload string
+	}{
+		{"chain 0 uses spec layout", ChainIDUnset, uint256.NewInt(0x123), header + "0000" + amountHex + recipientHex},
+		{"amount 0 spec layout (Solana)", ChainIDSolana, uint256.NewInt(0), header + "0001" + zeroAmountHex + recipientHex},
+		{"amount 0 cosmwasm layout (Injective)", ChainIDInjective, uint256.NewInt(0), header + "0013" + recipientHex + zeroAmountHex},
+		{"chain 0 and amount 0", ChainIDUnset, uint256.NewInt(0), header + "0000" + zeroAmountHex + recipientHex},
+	}
+	for _, testCase := range acceptedCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			buf, err := BodyCoreBridgeTransferFees{ChainID: testCase.targetChain, Amount: testCase.amount, Recipient: recipient}.Serialize()
+			require.NoError(t, err)
+			assert.Equal(t, testCase.expectedPayload, hex.EncodeToString(buf))
+		})
+	}
 
-	t.Run("rejects zero amount", func(t *testing.T) {
-		body := BodyCoreBridgeTransferFees{
-			ChainID:   ChainIDSolana,
-			Amount:    uint256.NewInt(0),
-			Recipient: recipient,
-		}
-		_, err := body.Serialize()
-		require.ErrorContains(t, err, "amount must be non-zero")
-	})
-
-	t.Run("rejects unset chain id", func(t *testing.T) {
-		body := BodyCoreBridgeTransferFees{
-			ChainID:   ChainIDUnset,
-			Amount:    uint256.NewInt(0x123),
-			Recipient: recipient,
-		}
-		_, err := body.Serialize()
-		require.ErrorContains(t, err, "chain id is required")
-	})
-
-	t.Run("rejects all-zero recipient", func(t *testing.T) {
-		body := BodyCoreBridgeTransferFees{
-			ChainID: ChainIDSolana,
-			Amount:  uint256.NewInt(0x123),
-			// Recipient left as zero-value Address{}
-		}
-		_, err := body.Serialize()
-		require.ErrorContains(t, err, "recipient must be non-zero")
-	})
+	refusedCases := []struct {
+		name          string
+		targetChain   ChainID
+		amount        *uint256.Int
+		recipient     Address
+		expectedError string
+	}{
+		{"nil amount", ChainIDSolana, nil, recipient, "amount is required"},
+		{"nil amount on chain 0", ChainIDUnset, nil, recipient, "amount is required"},
+		{"zero recipient", ChainIDSolana, uint256.NewInt(0x123), Address{}, "recipient must be non-zero"},
+		{"zero recipient on chain 0", ChainIDUnset, uint256.NewInt(0x123), Address{}, "recipient must be non-zero"},
+		{"zero recipient with amount 0", ChainIDSolana, uint256.NewInt(0), Address{}, "recipient must be non-zero"},
+	}
+	for _, testCase := range refusedCases {
+		t.Run("rejects "+testCase.name, func(t *testing.T) {
+			_, err := BodyCoreBridgeTransferFees{ChainID: testCase.targetChain, Amount: testCase.amount, Recipient: testCase.recipient}.Serialize()
+			require.ErrorContains(t, err, testCase.expectedError)
+		})
+	}
 }
 
 func TestCoreBridgeTransferFeesUsesCosmWasmLayout(t *testing.T) {
