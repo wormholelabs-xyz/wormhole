@@ -45,7 +45,8 @@ module Wormhole.Core.Bytes
   , utf8Bytes
   , nibbleCountOfPrefix
   , nibbleCountOfSuffix
-  , LenPrefixed (..)
+  , LenPrefixed
+  , unLenPrefixed
   , lenPrefixed
   , DomainTag (..)
   , RegistrarText (..)
@@ -334,8 +335,11 @@ utf8Bytes text = parseHexTextOrAbort (toHex text)
 -- | A 4-byte big-endian length followed by the bytes. A distinct type so it
 -- cannot be concatenated as unprefixed bytes: the prefix makes the address
 -- preimage injective ("ab"‖"c" vs "a"‖"bc").
-data LenPrefixed = LenPrefixed { unLenPrefixed : HexBytes }
+data LenPrefixed = LenPrefixed HexBytes
   deriving (Eq, Show)
+
+unLenPrefixed : LenPrefixed -> HexBytes
+unLenPrefixed (LenPrefixed prefixedBytes) = prefixedBytes
 
 lenPrefixed : HexBytes -> LenPrefixed
 lenPrefixed hexBytes = LenPrefixed (intToBytesN (byteLength hexBytes) 4 <> hexBytes)
