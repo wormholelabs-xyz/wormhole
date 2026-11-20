@@ -209,11 +209,13 @@ pinned_core_package_id="$(pinned_value_in_ntt_lib WORMHOLE_CORE_PACKAGE_ID)" || 
 pinned_core_version="$(pinned_value_in_ntt_lib WORMHOLE_CORE_VERSION)" || failure_count=$((failure_count + 1))
 pinned_ntt_version="$(sed -nE 's/^readonly NTT_VERSION="\$\{NTT_PIN_VERSION:-([0-9.]+)\}"$/\1/p' "$LOCALNET_TEST_DIR/../ntt_lib.sh")"
 pinned_ntt_package_id="$(ntt_pinned_package_id "$pinned_ntt_version")" || failure_count=$((failure_count + 1))
-check_case "pinned core id is the SDK 3.7.3 0.9.0 build 6017f76e" 0 - - \
-  test "$pinned_core_package_id" == "6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180"
+check_case "pinned core id is the SDK 3.7.3 0.10.0 build 9b4829c1" 0 - - \
+  test "$pinned_core_package_id" == "9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df"
+check_case "pinned core id is not the replaced SDK 3.7.3 0.9.0 build 6017f76e" 0 - - \
+  test "$pinned_core_package_id" != "6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180"
 check_case "pinned core id is not the replaced SDK 3.5.1 0.9.0 build ec382591" 0 - - \
   test "$pinned_core_package_id" != "ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a"
-check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.9.0"
+check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.10.0"
 check_case "pinned core id is not the replaced first 0.9.0 build dd75f777" 0 - - \
   test "$pinned_core_package_id" != "dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d"
 check_case "pinned core id is not the withdrawn 0.8.3 9d546b11" 0 - - \
