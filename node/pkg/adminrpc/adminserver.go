@@ -763,7 +763,7 @@ func transferFeesTargetChainFromNumber(targetChain uint32) (vaa.ChainID, error) 
 }
 
 func coreBridgeTransferFeesToVaa(req *nodev1.CoreBridgeTransferFees, timestamp time.Time, guardianSetIndex uint32, nonce uint32, sequence uint64) (*vaa.VAA, error) {
-	chainId, err := transferFeesTargetChainFromNumber(req.ChainId)
+	chainId, err := transferFeesTargetChainFromNumber(req.GetChainId())
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert chain id: %w", err)
 	}

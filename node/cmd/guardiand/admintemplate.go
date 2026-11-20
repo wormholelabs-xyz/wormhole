@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/certusone/wormhole/node/pkg/devnet"
 	nodev1 "github.com/certusone/wormhole/node/pkg/proto/node/v1"
@@ -1344,7 +1345,7 @@ func runCoreBridgeTransferFeesTemplate(cmd *cobra.Command, args []string) {
 				Nonce:    nonce,
 				Payload: &nodev1.GovernanceMessage_CoreBridgeTransferFees{
 					CoreBridgeTransferFees: &nodev1.CoreBridgeTransferFees{
-						ChainId:   uint32(chainID),
+						ChainId:   proto.Uint32(uint32(chainID)),
 						Amount:    *coreBridgeTransferFeesAmount,
 						Recipient: recipient,
 					},

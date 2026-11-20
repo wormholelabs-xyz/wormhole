@@ -27,6 +27,7 @@ import (
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/encoding/prototext"
+	"google.golang.org/protobuf/proto"
 )
 
 type mockEVMConnector struct {
@@ -521,7 +522,7 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 
 	t.Run("Solana spec layout", func(t *testing.T) {
 		req := &nodev1.CoreBridgeTransferFees{
-			ChainId:   uint32(vaa.ChainIDSolana),
+			ChainId:   proto.Uint32(uint32(vaa.ChainIDSolana)),
 			Amount:    "10000",
 			Recipient: recipientHex,
 		}
@@ -534,7 +535,7 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 
 	t.Run("Injective cosmwasm reversed layout", func(t *testing.T) {
 		req := &nodev1.CoreBridgeTransferFees{
-			ChainId:   uint32(vaa.ChainIDInjective),
+			ChainId:   proto.Uint32(uint32(vaa.ChainIDInjective)),
 			Amount:    "10000",
 			Recipient: recipientHex,
 		}
@@ -559,7 +560,7 @@ func TestCoreBridgeTransferFeesToVaa(t *testing.T) {
 	}
 	for _, testCase := range acceptedCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			req := &nodev1.CoreBridgeTransferFees{ChainId: testCase.targetChain, Amount: testCase.amount, Recipient: recipientHex}
+			req := &nodev1.CoreBridgeTransferFees{ChainId: proto.Uint32(testCase.targetChain), Amount: testCase.amount, Recipient: recipientHex}
 			v, err := coreBridgeTransferFeesToVaa(req, time.Now(), 4, 7, 7)
 			require.NoError(t, err)
 			assert.Equal(t, testCase.expectedPayload, common.Bytes2Hex(v.Payload))
@@ -571,7 +572,7 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 	const recipientHex = "00000000000000000000000000000000000000000000000000000000deadbeef"
 	base := func() *nodev1.CoreBridgeTransferFees {
 		return &nodev1.CoreBridgeTransferFees{
-			ChainId:   uint32(vaa.ChainIDSolana),
+			ChainId:   proto.Uint32(uint32(vaa.ChainIDSolana)),
 			Amount:    "1",
 			Recipient: recipientHex,
 		}
@@ -581,7 +582,7 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 		mutate  func(r *nodev1.CoreBridgeTransferFees)
 		errText string
 	}{
-		{"UnknownChain", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = 0xffff }, "convert chain id"},
+		{"UnknownChain", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = proto.Uint32(0xffff) }, "convert chain id"},
 		{"InvalidAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "not-a-number" }, "invalid amount"},
 		{"NegativeAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "-1" }, "amount cannot be negative"},
 		{"AmountOverflow", func(r *nodev1.CoreBridgeTransferFees) {
@@ -597,11 +598,11 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 			r.Recipient = "0000000000000000000000000000000000000000000000000000000000000000"
 		}, "recipient must be non-zero"},
 		{"ZeroRecipientOnChainZero", func(r *nodev1.CoreBridgeTransferFees) {
-			r.ChainId = 0
+			r.ChainId = proto.Uint32(0)
 			r.Recipient = "0000000000000000000000000000000000000000000000000000000000000000"
 		}, "recipient must be non-zero"},
 		{"NegativeAmountOnChainZero", func(r *nodev1.CoreBridgeTransferFees) {
-			r.ChainId = 0
+			r.ChainId = proto.Uint32(0)
 			r.Amount = "-1"
 		}, "amount cannot be negative"},
 	}
@@ -720,7 +721,7 @@ func TestGovMsgToVaa_DispatchesCoreBridgeTransferFees(t *testing.T) {
 		Nonce:    22,
 		Payload: &nodev1.GovernanceMessage_CoreBridgeTransferFees{
 			CoreBridgeTransferFees: &nodev1.CoreBridgeTransferFees{
-				ChainId:   uint32(vaa.ChainIDSolana),
+				ChainId:   proto.Uint32(uint32(vaa.ChainIDSolana)),
 				Amount:    "1",
 				Recipient: "00000000000000000000000000000000000000000000000000000000deadbeef",
 			},
