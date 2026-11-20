@@ -27,6 +27,7 @@ type grpcClient struct {
 	state     apiv2.StateServiceClient
 	update    apiv2.UpdateServiceClient
 	packages  apiv2.PackageServiceClient
+	version   apiv2.VersionServiceClient
 	readScope ReadScope
 	logger    *zap.Logger
 }
@@ -64,6 +65,7 @@ func NewCantonGrpcClient(rpc string, readScope ReadScope, logger *zap.Logger, tr
 		state:     apiv2.NewStateServiceClient(conn),
 		update:    apiv2.NewUpdateServiceClient(conn),
 		packages:  apiv2.NewPackageServiceClient(conn),
+		version:   apiv2.NewVersionServiceClient(conn),
 		readScope: readScope,
 		logger:    logger,
 	}, nil

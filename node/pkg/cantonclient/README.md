@@ -32,9 +32,10 @@ the `CantonClient` interface, and the Canton watcher only starts when
 State + Update service closure (`state_service`, `update_service`, `transaction`,
 `transaction_filter`, `event`, `value`, `reassignment`, `topology_transaction`,
 `offset_checkpoint`, `trace_context`), plus `package_service` and
-`package_reference` for `ListVettedPackages`.
+`package_reference` for `ListVettedPackages`, and `version_service` and
+`experimental_features` for the server maximum of the `ListVettedPackages` page size.
 
-Provenance of the twelve files:
+Provenance of the fourteen files:
 
 | Item | Value |
 | --- | --- |
@@ -44,7 +45,11 @@ Provenance of the twelve files:
 | Jar SHA-256 | `3824a19207b7be4aed3120006e0d48bbd5452196ef1d8b77b2d5ec2f086a9528` |
 
 Extract each file with `unzip -p <jar> com/daml/ledger/api/v2/<file>.proto`.
-The 3.7.3 changes against 3.5.6 add fields and RPCs only. `google/protobuf/*` come from the buf well-known types and
+The 3.7.3 protos add fields and RPCs to the 3.5.6 protos. Two server behaviors changed with them.
+`GetActiveContracts` excludes incomplete reassignments by default; the watcher does not call it.
+A `ListVettedPackages` page can be empty and still carry a next-page token, because the server applies
+the package filter after it selects the page. `ListVettedPackageMetadata` follows the token.
+`google/protobuf/*` come from the buf well-known types and
 `google/rpc/status` is mapped to `genproto` (see `buf.gen.yaml`) to avoid a
 duplicate proto-registration panic.
 
