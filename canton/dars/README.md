@@ -70,6 +70,10 @@ The 0.8.3 main package id is `9d546b11014d1272be6b09a0ff9f6204a3401333829531d360
 The first 0.8.3 build, `b5613c61c1aac18db84a87e2eb13cde6d544dd953d10c40de0440747e92a7e69`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
+0.12.1 `TransferFees` accepts chain 0 as well as chain 75.
+The 0.12.1 main package id is `2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4` (Daml SDK 3.7.3).
+0.12.1 replaces 0.12.0 (`aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b`). No participant vetted 0.12.0.
+
 0.12.0 keeps the guardian public keys in `CoreState`. The verification choices take the VAA bytes only.
 It changes the `GuardianSet` type and the choice arguments, so it is not an SCU upgrade of 0.11.1.
 The 0.12.0 main package id is `aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b` (Daml SDK 3.7.3).

@@ -369,8 +369,8 @@ applyGovernance st now action = case action of
     pure st with messageFee = fee
 
   TransferFees chain _amount _recipient -> do
-    -- Chain id only: sdk/vaa BodyCoreBridgeTransferFees.Serialize rejects chain 0.
-    assertMsg "transferFees: wrong target chain" (chain == st.chainId)
+    -- Chain 0 as on EVM, Solana and CosmWasm cores; sdk/vaa serializes it in the spec layout.
+    assertMsg "transferFees: wrong target chain" (chain == st.chainId || chain == 0)
     -- CoreState stays the same: fees settle into feeRecipient's holdings at
     -- charge time. The caller mints the 'FeeWithdrawalAuthorization' and records
     -- the action consumed.
