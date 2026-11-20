@@ -70,8 +70,8 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 
 0.10.0 replaces the `Text` byte aliases with constrained byte types (`../README.md` §4.8).
 It changes template field types, so it is not an SCU upgrade of 0.9.0, and it starts a new `wormhole-core` line.
-The 0.10.0 main package id is `0b076ecd1c4a236221f6d7bb42541dfaf28bb628f6ecb2fdd8c691b719084383`.
-The last 0.9.0 build, `bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`, is replaced. Do not deploy it.
+The 0.10.0 main package id is `9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df` (Daml SDK 3.7.3).
+The SDK 3.7.3 0.9.0 build, `6017f76e0ca51d33e815f1439441c0267ce2f49821972905a1b0ab88ee62b180`, is replaced. Do not deploy it.
 
 0.9.0 removes the `operator` party from each core template and choice.
 It removes template fields, so it is not an SCU upgrade of 0.8.x.
