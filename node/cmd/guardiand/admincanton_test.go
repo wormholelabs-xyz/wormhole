@@ -19,9 +19,17 @@ const (
 	listedPackageIDHex = "1111111111111111111111111111111111111111111111111111111111111111"
 	otherPackageIDHex  = "2222222222222222222222222222222222222222222222222222222222222222"
 	listedUpdateIDHex  = "1220ac5126912ade361264f7d40c4711a72dc9b3d12e9ec044a07d5df586b2fe397b"
-	listedRegistrar    = "vector-operator::1220deadbeef"
+	listedRegistrar    = "guardianGovernance::1220a4d7463bd34b2ba3704401b48ab41d8f88cdcbe512fc1ef071aad97fef106161"
+	foreignRegistrar   = "rogueGovernance::122080c014fb0f3f4e1e1bd7bbd6e5a8c3a1a7c7d3f0e0a3e9a0c2b1d4e5f60718"
 	listedOwner        = "vector-owner::1220cafebabe"
 )
+
+func listedReadScope(t *testing.T) cantonclient.ReadScope {
+	t.Helper()
+	readScope, err := cantonclient.ParseReadScope(listedRegistrar, false)
+	require.NoError(t, err)
+	return readScope
+}
 
 // rangePublish is a publish of the fake ledger with the package id that executed it.
 type rangePublish struct {
@@ -114,15 +122,17 @@ func TestListPublishesFiltersByExecutingPackage(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &fakeRangeClient{ledgerEnd: tc.ledgerEnd, ledgerEndErr: tc.ledgerEndErr, rangePublishes: ledger}
 
-			records, err := listCantonPublishes(context.Background(), client, tc.fromOffset, tc.executingPackageID)
+			listing, err := listCantonPublishes(context.Background(), client, listedReadScope(t), tc.fromOffset, tc.executingPackageID)
 
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
-				assert.Nil(t, records)
+				assert.Equal(t, cantonPublishListing{}, listing)
 				assert.Empty(t, client.rangeRequests)
 				return
 			}
 			require.NoError(t, err)
+			assert.Zero(t, listing.SkippedForeignRegistrarCount)
+			records := listing.Records
 			assert.Equal(t, [][2]int64{tc.wantRange}, client.rangeRequests)
 			sequences := make([]uint64, 0, len(records))
 			for _, record := range records {
@@ -134,6 +144,69 @@ func TestListPublishesFiltersByExecutingPackage(t *testing.T) {
 				assert.Equal(t, "2026-11-17T09:00:01Z", record.RecordTime)
 			}
 			assert.Equal(t, tc.wantSequences, sequences)
+		})
+	}
+}
+
+func TestListPublishesSkipsForeignRegistrar(t *testing.T) {
+	foreignPublish := listedPublish(listedPackageIDHex, 6, 2)
+	foreignPublish.event.Message.Registrar = foreignRegistrar
+	ledger := []rangePublish{listedPublish(listedPackageIDHex, 5, 1), foreignPublish}
+	cases := []struct {
+		name                             string
+		readScope                        cantonclient.ReadScope
+		wantSequences                    []uint64
+		wantSkippedForeignRegistrarCount int
+		wantErr                          string
+	}{
+		{name: "guardianGovernance read scope", readScope: listedReadScope(t), wantSequences: []uint64{1}, wantSkippedForeignRegistrarCount: 1},
+		{name: "zero read scope", readScope: cantonclient.ReadScope{}, wantErr: "not constructed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &fakeRangeClient{ledgerEnd: 20, rangePublishes: ledger}
+
+			listing, err := listCantonPublishes(context.Background(), client, tc.readScope, 0, listedPackageIDHex)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				assert.Equal(t, cantonPublishListing{}, listing)
+				assert.Empty(t, client.rangeRequests)
+				return
+			}
+			require.NoError(t, err)
+			sequences := make([]uint64, 0, len(listing.Records))
+			for _, record := range listing.Records {
+				sequences = append(sequences, record.Sequence)
+			}
+			assert.Equal(t, tc.wantSequences, sequences)
+			assert.Equal(t, tc.wantSkippedForeignRegistrarCount, listing.SkippedForeignRegistrarCount)
+		})
+	}
+}
+
+func TestParseListPublishesReadScope(t *testing.T) {
+	cases := []struct {
+		name        string
+		readAsParty string
+		wantErr     string
+	}{
+		{name: "guardianGovernance party", readAsParty: listedRegistrar},
+		{name: "empty party", readAsParty: "", wantErr: "unsafe dev mode"},
+		{name: "truncated party", readAsParty: "guardianGovernance::1220abcd", wantErr: "fingerprint length 8"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			readScope, err := parseListPublishesReadScope(tc.readAsParty)
+
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			party, isGuardianGovernance := readScope.GuardianGovernanceParty()
+			assert.True(t, isGuardianGovernance)
+			assert.Equal(t, tc.readAsParty, party.String())
 		})
 	}
 }
