@@ -523,6 +523,40 @@ func TestCantonDialOptsAppendsExtraLedgerDialOpts(t *testing.T) {
 	}
 }
 
+func TestNewWatcherParsesOAuthAudience(t *testing.T) {
+	completeAuth := AuthConfig{TokenURL: "https://idp.example/token", ClientID: "watcher", ClientSecret: "secret"}
+	withAudience := func(audience string) AuthConfig {
+		auth := completeAuth
+		auth.Audience = audience
+		return auth
+	}
+	testCases := []struct {
+		name                 string
+		auth                 AuthConfig
+		expectedAudience     string
+		expectedErrorMessage string
+	}{
+		{name: "OAuth without audience", auth: completeAuth},
+		{name: "OAuth with audience", auth: withAudience("https://canton.network.global"), expectedAudience: "https://canton.network.global"},
+		{name: "audience without OAuth", auth: AuthConfig{Audience: "https://canton.network.global"}, expectedErrorMessage: "audience requires"},
+		{name: "whitespace-only audience", auth: withAudience("\t"), expectedErrorMessage: "whitespace"},
+		{name: "audience with a trailing space", auth: withAudience("https://canton.network.global "), expectedErrorMessage: "whitespace"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "localhost:0", testVersionedWindowPackageIDs(t), guardianGovernanceReadScope(t), testCase.auth, false, nil, nil)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, w)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, testCase.expectedAudience, w.oauthAudience.String())
+			require.Len(t, w.cantonDialOpts(context.Background()), 1)
+		})
+	}
+}
+
 func TestNewWatcherRefusesWildcardOutsideDevMode(t *testing.T) {
 	currentOnlyPackageIDs, err := cantonclient.ParseAcceptedPackageIDs(cantonclient.CurrentPackageConfig{PackageIDHex: testCurrentPackageID, Version: testCurrentPackageVersion}, cantonclient.RetiringPackageConfig{}, time.Now())
 	require.NoError(t, err)

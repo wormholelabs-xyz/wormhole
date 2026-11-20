@@ -86,8 +86,8 @@ func DeriveEmitterAddress(registrar string, owner string, emitterID uint64) vaa.
 }
 
 // AuthConfig carries OAuth2 client-credentials parameters for a
-// Keycloak-fronted Ledger API. All fields set enables per-RPC bearer tokens;
-// all empty disables authentication. Partial configs are rejected by
+// Keycloak-fronted Ledger API. All credential fields set enables per-RPC bearer
+// tokens; all empty disables authentication. Partial configs are rejected by
 // WatcherConfig.Create.
 type AuthConfig struct {
 	// TokenURL is the full OAuth2 token endpoint
@@ -95,6 +95,9 @@ type AuthConfig struct {
 	TokenURL     string
 	ClientID     string
 	ClientSecret string
+	// Audience is the optional `audience` token request parameter: the
+	// participant's Ledger API target audience. Requires the credential fields.
+	Audience string
 }
 
 func (a AuthConfig) enabled() bool {
@@ -103,6 +106,27 @@ func (a AuthConfig) enabled() bool {
 
 func (a AuthConfig) complete() bool {
 	return a.TokenURL != "" && a.ClientID != "" && a.ClientSecret != ""
+}
+
+// parseOAuthAudience rejects an audience with surrounding whitespace and an audience without OAuth credentials.
+func (a AuthConfig) parseOAuthAudience() (cantonclient.OAuthAudience, error) {
+	audience, err := cantonclient.ParseOAuthAudience(a.Audience)
+	if err != nil {
+		return cantonclient.OAuthAudience{}, fmt.Errorf("canton: %w", err)
+	}
+	if audience.IsSet() && !a.enabled() {
+		return cantonclient.OAuthAudience{}, fmt.Errorf("canton: OAuth audience requires the auth token URL, client id, and client secret")
+	}
+	return audience, nil
+}
+
+func (a AuthConfig) oauthClientCredentials(audience cantonclient.OAuthAudience) cantonclient.OAuthClientCredentials {
+	return cantonclient.OAuthClientCredentials{
+		TokenURL:     a.TokenURL,
+		ClientID:     a.ClientID,
+		ClientSecret: a.ClientSecret,
+		Audience:     audience,
+	}
 }
 
 // cantonTransportCreds selects the gRPC transport. The unsafe dev-mode
@@ -123,7 +147,7 @@ func (e *Watcher) cantonTransportCreds() credentials.TransportCredentials {
 func (e *Watcher) cantonDialOpts(ctx context.Context) []grpc.DialOption {
 	dialOpts := slices.Clone(e.extraLedgerDialOpts)
 	if !e.unsafeDevMode && e.auth.complete() {
-		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, cantonclient.OAuthClientCredentials{TokenURL: e.auth.TokenURL, ClientID: e.auth.ClientID, ClientSecret: e.auth.ClientSecret}))
+		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, e.auth.oauthClientCredentials(e.oauthAudience)))
 	}
 	return dialOpts
 }
@@ -133,6 +157,7 @@ type Watcher struct {
 	acceptedPackageIDs cantonclient.AcceptedPackageIDs
 	readScope          cantonclient.ReadScope
 	auth               AuthConfig
+	oauthAudience      cantonclient.OAuthAudience
 
 	unsafeDevMode bool
 
@@ -327,11 +352,16 @@ func newWatcherWithApprovedList(
 	if err := checkReadScopeAllowed(readScope, unsafeDevMode); err != nil {
 		return nil, err
 	}
+	oauthAudience, err := auth.parseOAuthAudience()
+	if err != nil {
+		return nil, err
+	}
 	return &Watcher{
 		cantonRPC:                      cantonRPC,
 		acceptedPackageIDs:             acceptedPackageIDs,
 		readScope:                      readScope,
 		auth:                           auth,
+		oauthAudience:                  oauthAudience,
 		unsafeDevMode:                  unsafeDevMode,
 		msgChan:                        msgC,
 		obsvReqC:                       obsvReqC,

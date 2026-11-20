@@ -43,9 +43,10 @@ type WatcherConfig struct {
 	// party on the participant and is unsafe dev mode only.
 	ReadAsParty string
 	// Auth carries OAuth2 client-credentials for a Keycloak-fronted Ledger API.
-	// All three fields set enables per-RPC bearer tokens; all empty disables
-	// authentication; anything else is a configuration error. Requires TLS,
-	// so it is incompatible with unsafe dev mode (plaintext).
+	// All three credential fields set enables per-RPC bearer tokens; all empty
+	// disables authentication; anything else is a configuration error. The
+	// optional Audience requires the credential fields. Requires TLS, so it is
+	// incompatible with unsafe dev mode (plaintext).
 	Auth AuthConfig
 }
 
@@ -125,6 +126,9 @@ func (wc *WatcherConfig) buildWatcher(
 	// credentials (or with an unusable token source) and fail at runtime.
 	if wc.Auth.enabled() && !wc.Auth.complete() {
 		return nil, fmt.Errorf("canton: auth token URL, client id, and client secret must all be set together (or all empty)")
+	}
+	if _, err := wc.Auth.parseOAuthAudience(); err != nil {
+		return nil, err
 	}
 	// Bearer credentials require transport security; dev mode is plaintext.
 	if wc.Auth.enabled() && devMode {
