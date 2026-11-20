@@ -371,19 +371,30 @@ governanceOutcomeFor before now encodedVAA pubKeys = do
     (vaa.emitterAddress == before.governanceContract)
   assertMsg "governance: action already consumed"
     (not (Map.member vaa.hash before.consumedGovernance))
-  assertMsg "governance: VAA timestamp at or below the evicted governance timestamp floor"
-    (checkTimestampIsAboveEvictedGovernanceFloor before.evictedGovernanceMaxTimestampSeconds vaa.timestamp)
   let action = parseGovernance vaa.payload
+      isAboveFloor = checkTimestampIsAboveEvictedGovernanceFloor before.evictedGovernanceMaxTimestampSeconds vaa.timestamp
+  -- SECURITY: a GuardianSetUpgrade passes at or below the floor. Its replay
+  -- protection is structural: it needs the current-set signature and
+  -- newIndex == current + 1, and the index only rises. Otherwise a set N
+  -- upgrade below the floor could never apply, and no set N quorum remains to
+  -- re-issue it once other chains run set N + 1.
+  assertMsg "governance: VAA timestamp at or below the evicted governance timestamp floor"
+    (isAboveFloor || isGuardianSetUpgrade action)
   applied <- applyGovernance before now action
-  let replayRecord = recordGovernanceDigest
-        before.evictedGovernanceMaxTimestampSeconds before.consumedGovernance vaa.hash vaa.timestamp
+  let replayRecord =
+        if isAboveFloor
+          then recordGovernanceDigest
+            before.evictedGovernanceMaxTimestampSeconds before.consumedGovernance vaa.hash vaa.timestamp
+          else GovernanceReplayRecord with
+            consumedGovernance = before.consumedGovernance
+            evictedGovernanceMaxTimestampSeconds = before.evictedGovernanceMaxTimestampSeconds
       successor = applied with
         consumedGovernance = replayRecord.consumedGovernance
         evictedGovernanceMaxTimestampSeconds = replayRecord.evictedGovernanceMaxTimestampSeconds
         guardianSets = pruneStoredGuardianSets now applied.guardianSets
   checkGovernanceKeepsGenesisFields before successor
   checkGovernanceRecordsDigest before successor vaa.hash vaa.timestamp
-  checkGovernanceBoundsGuardianSets before successor now
+  checkGovernanceBoundsGuardianSets applied successor now
   pure GovernanceOutcome with
     successor
     -- The artifact the guardians' custody policy honors when it signs the
@@ -414,30 +425,54 @@ checkGovernanceKeepsGenesisFields before after = do
   assertMsg "governance: feeInstrument changed" (after.feeInstrument == before.feeInstrument)
   assertMsg "governance: feeRecipient changed" (after.feeRecipient == before.feeRecipient)
 
--- | The digest map stays within capacity, the floor only rises, and the
--- consumed VAA is retained or at or below the floor.
+-- | The digest map stays within capacity, the floor only rises, each earlier
+-- entry stays or falls to the floor, and the consumed VAA is retained or at or
+-- below the floor. A VAA at or below the earlier floor (a GuardianSetUpgrade)
+-- leaves the map unchanged.
 checkGovernanceRecordsDigest : CoreState -> CoreState -> VaaDigest -> Int -> Either Text ()
 checkGovernanceRecordsDigest before after digest timestampSeconds = do
+  let afterFloor = after.evictedGovernanceMaxTimestampSeconds
+      isAboveEarlierFloor =
+        checkTimestampIsAboveEvictedGovernanceFloor before.evictedGovernanceMaxTimestampSeconds timestampSeconds
   assertMsg "governance: consumed digest map exceeds its capacity"
     (Map.size after.consumedGovernance <= maxRetainedGovernanceDigests)
   assertMsg "governance: evicted governance timestamp floor decreased"
-    (after.evictedGovernanceMaxTimestampSeconds >= before.evictedGovernanceMaxTimestampSeconds)
-  when (after.evictedGovernanceMaxTimestampSeconds == before.evictedGovernanceMaxTimestampSeconds) do
-    assertMsg "governance: consumed digest map must grow by exactly one without an eviction"
-      (Map.size after.consumedGovernance == Map.size before.consumedGovernance + 1)
+    (afterFloor >= before.evictedGovernanceMaxTimestampSeconds)
+  forA_ (Map.toList before.consumedGovernance) \(retainedDigest, retainedTimestampSeconds) ->
+    assertMsg "governance: retained digest dropped above the evicted governance timestamp floor"
+      (Map.lookup retainedDigest after.consumedGovernance == Some retainedTimestampSeconds
+        || not (checkTimestampIsAboveEvictedGovernanceFloor afterFloor retainedTimestampSeconds))
+  forA_ (Map.toList after.consumedGovernance) \(recordedDigest, recordedTimestampSeconds) ->
+    assertMsg "governance: consumed digest map gained an entry other than the VAA digest"
+      (Map.lookup recordedDigest before.consumedGovernance == Some recordedTimestampSeconds
+        || (recordedDigest == digest && recordedTimestampSeconds == timestampSeconds))
+  if not isAboveEarlierFloor
+    then assertMsg "governance: a VAA at or below the floor must leave the consumed digest map unchanged"
+      (after.consumedGovernance == before.consumedGovernance && afterFloor == before.evictedGovernanceMaxTimestampSeconds)
+    else when (afterFloor == before.evictedGovernanceMaxTimestampSeconds) do
+      assertMsg "governance: consumed digest map must grow by exactly one without an eviction"
+        (Map.size after.consumedGovernance == Map.size before.consumedGovernance + 1)
   assertMsg "governance: VAA digest not recorded"
     (Map.lookup digest after.consumedGovernance == Some timestampSeconds
       || not (checkTimestampIsAboveEvictedGovernanceFloor after.evictedGovernanceMaxTimestampSeconds timestampSeconds))
 
--- | Each stored set is within capacity, active at @now@, and the current set or a set of @before@.
+-- | @applied@ is the state before pruning. Each stored set is within
+-- capacity, active at @now@ and unchanged from @applied@; each set of
+-- @applied@ active at @now@ and among the 'maxStoredGuardianSets' highest
+-- indices stays.
 checkGovernanceBoundsGuardianSets : CoreState -> CoreState -> Time -> Either Text ()
-checkGovernanceBoundsGuardianSets before after now = do
+checkGovernanceBoundsGuardianSets applied after now = do
   assertMsg "governance: stored guardian sets exceed their capacity"
     (Map.size after.guardianSets <= maxStoredGuardianSets)
   forA_ (Map.toList after.guardianSets) \(storedIndex, storedSet) -> do
     assertMsg "governance: stored guardian set expired" (isActiveAt storedSet now)
-    assertMsg "governance: stored guardian set not in the earlier state"
-      (storedIndex == after.guardianSetIndex || Map.member storedIndex before.guardianSets)
+    assertMsg "governance: stored guardian set not in the applied state"
+      (Map.lookup storedIndex applied.guardianSets == Some storedSet)
+  let activeAppliedSets = filter (\(_, appliedSet) -> isActiveAt appliedSet now) (Map.toList applied.guardianSets)
+      highestActiveAppliedSets = drop (max 0 (length activeAppliedSets - maxStoredGuardianSets)) activeAppliedSets
+  forA_ highestActiveAppliedSets \(appliedIndex, appliedSet) ->
+    assertMsg "governance: stored guardian set dropped while active and within capacity"
+      (Map.lookup appliedIndex after.guardianSets == Some appliedSet)
 
 ----------------------------------------------------------------------
 -- Collection bounds

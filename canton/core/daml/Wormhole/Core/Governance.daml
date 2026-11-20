@@ -26,6 +26,11 @@ data GovernanceAction
       with chain : Int; amount : Int; recipient : UniversalAddress
   deriving (Eq, Show)
 
+isGuardianSetUpgrade : GovernanceAction -> Bool
+isGuardianSetUpgrade action = case action of
+  GuardianSetUpgrade {} -> True
+  _ -> False
+
 -- | Exact packet lengths in bytes, per the guardian serializers in
 -- @sdk/vaa/payloads.go@: @BodyContractUpgrade@ (386-399),
 -- @BodyGuardianSetUpdate@ (402-418), @BodyCoreBridgeSetMessageFee@ (621-631),

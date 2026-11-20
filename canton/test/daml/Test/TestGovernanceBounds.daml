@@ -399,11 +399,11 @@ testCheckGovernanceRecordsDigest = do
         , ("no new digest", before, withRecord [] None,
             Some "governance: consumed digest map must grow by exactly one without an eviction")
         , ("two new digests", before, withRecord [(digest, timestampSeconds), (otherDigest, timestampSeconds)] None,
-            Some "governance: consumed digest map must grow by exactly one without an eviction")
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
         , ("wrong digest", before, withRecord [(otherDigest, timestampSeconds)] None,
-            Some "governance: VAA digest not recorded")
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
         , ("wrong timestamp", before, withRecord [(digest, timestampSeconds + 1)] None,
-            Some "governance: VAA digest not recorded")
+            Some "governance: consumed digest map gained an entry other than the VAA digest")
         , ("evicted at once, covered by the floor", before, withRecord [] (Some timestampSeconds), None)
         , ("evicted, floor below the timestamp", before, withRecord [] (Some (timestampSeconds - 1)),
             Some "governance: VAA digest not recorded")
