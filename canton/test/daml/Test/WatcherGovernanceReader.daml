@@ -52,8 +52,8 @@ rogueShadowPayload = parseHexTextOrAbort "deadbeef"
 ggOwnedForeignRegistrarNonce : Int
 ggOwnedForeignRegistrarNonce = 77
 
-ggOwnedForeignRegistrarPayload : Bytes
-ggOwnedForeignRegistrarPayload = "cafe0077"
+ggOwnedForeignRegistrarPayload : MessagePayload
+ggOwnedForeignRegistrarPayload = parseHexTextOrAbort "cafe0077"
 
 integrationGovernanceReaderSetup : Script RealBridge
 integrationGovernanceReaderSetup = do

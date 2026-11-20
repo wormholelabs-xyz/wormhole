@@ -728,7 +728,7 @@ testCompromisedFeeAdminStopsOnlyOnboarding = do
         , CompromisedFeeAdminCase "existing emitter publishes"
             (discardResult $ trySubmit (actAs owner <> disclose coreStateDisclosure) do
               exerciseCmd emitterCid PublishMessage with
-                nonce = 0, payload = "aa", consistencyLevel = 0
+                nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
                 coreStateCid = bridge.coreStateCid, payer = owner, feeAllocation = None)
             StepCommits
         , CompromisedFeeAdminCase "verifier parses and verifies a VAA"
@@ -787,7 +787,7 @@ testGovernanceTargetChainRules = do
   let guardianSetUpgradeTo chain = GuardianSetUpgrade with chain, newIndex = 1, newKeys = [devnetGuardianSet1Key]
       setMessageFeeTo chain = SetMessageFee with chain, fee = 1000
       transferFeesTo chain = TransferFees with chain, amount = transferFeesAmount, recipient = transferFeesRecipient
-      contractUpgradeTo chain = ContractUpgrade with chain, newContract = mconcat (replicate 32 "c1")
+      contractUpgradeTo chain = ContractUpgrade with chain, newContract = parseHexTextOrAbort (mconcat (replicate 32 "c1"))
       cases =
         [ ("GuardianSetUpgrade chain 75", guardianSetUpgradeTo 75, None)
         , ("GuardianSetUpgrade chain 0", guardianSetUpgradeTo 0, None)
