@@ -49,11 +49,6 @@ external_party_signers_json() {
   jq -n --arg party "$1" --arg keyFile "$2" --arg fingerprint "$3" '{($party): [{keyFile: $keyFile, fingerprint: $fingerprint}]}'
 }
 
-create_command() {
-  jq -n --arg templateId "$1" --argjson createArguments "$2" \
-    '{CreateCommand: {templateId: $templateId, createArguments: $createArguments}}'
-}
-
 # exercise_result <transaction-json> <qualified-template-suffix> <choice>: the result of the one exercise of
 # that choice on that template.
 exercise_result() {
@@ -242,19 +237,18 @@ classify_submit_response() {
 }
 
 # ntt_pinned_package_id <ntt-version>: the package id that ntt_upload_dars.sh requires for that version.
-# Both on wormhole-core 0.8.3. 0.3.4: NTT branch canton/overnight-ntt, commit 8976e29. 0.4.2: branch canton/migrate-ntt-layer, commit eb42001.
+# 0.5.0 on wormhole-core 0.9.0: NTT branch canton/migrate-ntt-layer, commit b2c355d.
 ntt_pinned_package_id() {
   case "$1" in
-    0.3.4) echo "1c555ab22b096aa7bc780213eafbf95231bfe03bc4d669d9fe152a8eeff8293f" ;;
-    0.4.2) echo "1a3e3b0e78f9f08adac111bc44110469dc271f61a9c0e5ed2f7b0b20a569feb8" ;;
+    0.5.0) echo "449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e" ;;
     *)
-      echo "no ntt package pin for version '$1'; pinned versions: 0.3.4, 0.4.2" >&2
+      echo "no ntt package pin for version '$1'; pinned versions: 0.5.0" >&2
       return 1
       ;;
   esac
 }
 
-# ntt_requires_custody_party <ntt-version>: from 0.4.2, NttGovernance and NttManager have the signatory nttCustody.
+# ntt_requires_custody_party <ntt-version>: NttGovernance and NttManager have the signatory nttCustody.
 ntt_requires_custody_party() {
-  [[ "$1" == "0.4.2" ]]
+  [[ "$1" == "0.5.0" ]]
 }

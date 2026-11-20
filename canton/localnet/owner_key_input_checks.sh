@@ -114,15 +114,15 @@ check_fee_custody_is_in_the_guardian_namespace() {
   fi
 }
 
-# check_core_state_pays_fees_to_fee_custody <core-state-created-event-json> <operator-id> <guardian-governance-id>
-# <fee-custody-id>: feeRecipient is feeCustody, the signatories are exactly operator, guardianGovernance and
-# feeCustody, and the fee instrument admin is neither guardianGovernance nor operator.
+# check_core_state_pays_fees_to_fee_custody <core-state-created-event-json> <guardian-governance-id> <fee-custody-id>:
+# feeRecipient is feeCustody, the signatories are exactly guardianGovernance and feeCustody, and the fee instrument admin
+# is neither of them.
 check_core_state_pays_fees_to_fee_custody() {
-  if [[ $# -ne 4 ]]; then
-    echo "usage: check_core_state_pays_fees_to_fee_custody <core-state-created-event-json> <operator-id> <guardian-governance-id> <fee-custody-id>" >&2
+  if [[ $# -ne 3 ]]; then
+    echo "usage: check_core_state_pays_fees_to_fee_custody <core-state-created-event-json> <guardian-governance-id> <fee-custody-id>" >&2
     return 2
   fi
-  local core_state_event="$1" operator_id="$2" guardian_governance_id="$3" fee_custody_id="$4"
+  local core_state_event="$1" guardian_governance_id="$2" fee_custody_id="$3"
   local fee_recipient fee_instrument_admin signatories expected_signatories
   if ! fee_recipient="$(jq -er '.createArgument.feeRecipient | strings' <<<"$core_state_event" 2>/dev/null)" \
       || ! fee_instrument_admin="$(jq -er '.createArgument.feeInstrument.admin | strings' <<<"$core_state_event" 2>/dev/null)" \
@@ -134,12 +134,12 @@ check_core_state_pays_fees_to_fee_custody() {
     echo "CoreState feeRecipient is $fee_recipient, expected $fee_custody_id" >&2
     return 1
   fi
-  expected_signatories="$(jq -cn '$ARGS.positional | sort' --args "$operator_id" "$guardian_governance_id" "$fee_custody_id")"
+  expected_signatories="$(jq -cn '$ARGS.positional | sort' --args "$guardian_governance_id" "$fee_custody_id")"
   if [[ "$signatories" != "$expected_signatories" ]]; then
     echo "CoreState signatories $signatories, expected $expected_signatories" >&2
     return 1
   fi
-  if [[ "$fee_instrument_admin" == "$guardian_governance_id" || "$fee_instrument_admin" == "$operator_id" ]]; then
+  if [[ "$fee_instrument_admin" == "$guardian_governance_id" || "$fee_instrument_admin" == "$fee_custody_id" ]]; then
     echo "CoreState fee instrument admin is $fee_instrument_admin" >&2
     return 1
   fi
