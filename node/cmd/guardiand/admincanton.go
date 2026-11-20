@@ -139,13 +139,13 @@ type cantonListPublishesOAuthFlags struct {
 	audience     string
 }
 
-// cantonListPublishesDialOptions returns the OAuth dial option, or none when every OAuth input is empty.
-func cantonListPublishesDialOptions(ctx context.Context, oauthFlags cantonListPublishesOAuthFlags, unsafePlaintext bool) ([]grpc.DialOption, error) {
+// cantonListPublishesOAuthCredentials returns nil when every OAuth input is empty.
+func cantonListPublishesOAuthCredentials(oauthFlags cantonListPublishesOAuthFlags, unsafePlaintext bool) (*cantonclient.OAuthClientCredentials, error) {
 	audience, err := cantonclient.ParseOAuthAudience(oauthFlags.audience)
 	if err != nil {
 		return nil, fmt.Errorf("--cantonAuthAudience: %w", err)
 	}
-	oauthEnabled := oauthFlags.tokenURL != "" || oauthFlags.clientID != ""
+	oauthEnabled := oauthFlags.tokenURL != "" || oauthFlags.clientID != "" || oauthFlags.clientSecret != ""
 	if !oauthEnabled {
 		if audience.IsSet() {
 			return nil, fmt.Errorf("--cantonAuthAudience requires --cantonAuthTokenURL, --cantonAuthClientID, and GUARDIAND_CANTONAUTHCLIENTSECRET")
@@ -158,12 +158,12 @@ func cantonListPublishesDialOptions(ctx context.Context, oauthFlags cantonListPu
 	if unsafePlaintext {
 		return nil, fmt.Errorf("OAuth requires TLS; remove --unsafePlaintext")
 	}
-	return []grpc.DialOption{cantonclient.NewOAuthDialOption(ctx, cantonclient.OAuthClientCredentials{
+	return &cantonclient.OAuthClientCredentials{
 		TokenURL:     oauthFlags.tokenURL,
 		ClientID:     oauthFlags.clientID,
 		ClientSecret: oauthFlags.clientSecret,
 		Audience:     audience,
-	})}, nil
+	}, nil
 }
 
 func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
@@ -178,7 +178,7 @@ func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 	if *cantonListPublishesPlaintext {
 		transportCreds = insecure.NewCredentials()
 	}
-	dialOpts, err := cantonListPublishesDialOptions(ctx, cantonListPublishesOAuthFlags{
+	oauthClientCredentials, err := cantonListPublishesOAuthCredentials(cantonListPublishesOAuthFlags{
 		tokenURL:     *cantonListPublishesAuthTokenURL,
 		clientID:     *cantonListPublishesAuthClientID,
 		clientSecret: os.Getenv("GUARDIAND_CANTONAUTHCLIENTSECRET"),
@@ -186,6 +186,10 @@ func runCantonListPublishes(cmd *cobra.Command, _ []string) error {
 	}, *cantonListPublishesPlaintext)
 	if err != nil {
 		return err
+	}
+	var dialOpts []grpc.DialOption
+	if oauthClientCredentials != nil {
+		dialOpts = append(dialOpts, cantonclient.NewOAuthDialOption(ctx, *oauthClientCredentials))
 	}
 	client, err := cantonclient.NewCantonGrpcClient(*cantonListPublishesRPC, readScope, zap.NewNop(), transportCreds, dialOpts...)
 	if err != nil {
