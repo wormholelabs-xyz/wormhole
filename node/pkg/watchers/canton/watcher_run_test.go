@@ -35,7 +35,7 @@ func startWatcherWithMode(t *testing.T, fake *fakeClient, acceptedPackageIDs can
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", acceptedPackageIDs, sampleRegistrar, AuthConfig{}, unsafeDevMode, msgC, obsvReqC)
+	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", acceptedPackageIDs, guardianGovernanceReadScope(t), AuthConfig{}, unsafeDevMode, msgC, obsvReqC)
 	require.NoError(t, err)
 	w.packageMetadataRecheckInterval = packageMetadataRecheckInterval
 	runWatcherUnderSupervisor(t, w, fake)
@@ -72,7 +72,7 @@ func sampleEvent(participantOffset int64) cantonclient.CantonMessageEvent {
 		EffectiveAt:       time.Unix(1_700_000_000, 0).UTC(),
 		Message: cantonclient.CantonMessage{
 			AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent,
-			Registrar:           sampleRegistrar,
+			Registrar:           readAsGovernanceParty,
 			Owner:               sampleOwner,
 			EmitterID:           sampleEmitterID,
 			Sequence:            5,
@@ -106,7 +106,7 @@ func TestRunEmitsObservation(t *testing.T) {
 		assert.Equal(t, uint64(5), mp.Sequence)
 		assert.Equal(t, uint32(42), mp.Nonce)
 		assert.Equal(t, []byte{0x11, 0x22}, mp.Payload)
-		assert.Equal(t, wantAddr(t), mp.EmitterAddress)
+		assert.Equal(t, DeriveEmitterAddress(readAsGovernanceParty, sampleOwner, sampleEmitterID), mp.EmitterAddress)
 		assert.Equal(t, mustParseUpdateID(sampleUpdateIDHex).TxID(), mp.TxID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("no observation emitted")
@@ -124,7 +124,7 @@ func TestRunReobservation(t *testing.T) {
 		EffectiveAt:       time.Unix(1_700_000_001, 0).UTC(),
 		Messages: []cantonclient.CantonMessage{{
 			AcceptedPackageRole: cantonclient.AcceptedPackageRoleCurrent,
-			Registrar:           sampleRegistrar,
+			Registrar:           readAsGovernanceParty,
 			Owner:               sampleOwner,
 			EmitterID:           sampleEmitterID,
 			Sequence:            9,
@@ -408,7 +408,7 @@ func TestRunStopsOnMismatchAtRecheck(t *testing.T) {
 func TestRunResumesBeforeOffsetOne(t *testing.T) {
 	fake := newFakeClient()
 	fake.ledgerEnd = 77
-	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testUpgradeWindowPackageIDs(t), "", AuthConfig{}, true, make(chan *common.MessagePublication, 1), nil)
+	w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testUpgradeWindowPackageIDs(t), anyPartyReadScope(t), AuthConfig{}, true, make(chan *common.MessagePublication, 1), nil)
 	require.NoError(t, err)
 	w.rewindResumeOffsetBefore(1)
 	runWatcherUnderSupervisor(t, w, fake)
@@ -480,7 +480,7 @@ func TestHandleReobservationDropsMismatchedRole(t *testing.T) {
 	for _, unsafeDevMode := range []bool{false, true} {
 		t.Run(map[bool]string{false: "production mode", true: "unsafe dev mode"}[unsafeDevMode], func(t *testing.T) {
 			msgC := make(chan *common.MessagePublication, 4)
-			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), sampleRegistrar, AuthConfig{}, unsafeDevMode, msgC, nil)
+			w, err := newWatcherWithApprovedList(*testApprovedCorePackages(t), "canton:0", testVersionedWindowPackageIDs(t), guardianGovernanceReadScope(t), AuthConfig{}, unsafeDevMode, msgC, nil)
 			require.NoError(t, err)
 			client := newFakeClient()
 			client.vettedPackageMetadataResponses = [][]cantonclient.VettedPackageMetadata{{testCurrentVerifiedMetadata, testRetiringMismatchedMetadata}}

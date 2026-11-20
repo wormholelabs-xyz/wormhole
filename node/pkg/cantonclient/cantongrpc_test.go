@@ -158,7 +158,7 @@ func TestNonTransportOptionsDoNotDisableTLS(t *testing.T) {
 	defer srv.Stop()
 
 	// nil transport creds => TLS, plus a non-transport dial option alongside.
-	c, err := NewCantonGrpcClient(lis.Addr().String(), "", zap.NewNop(), nil,
+	c, err := NewCantonGrpcClient(lis.Addr().String(), anyPartyReadScope, zap.NewNop(), nil,
 		grpc.WithUserAgent("regression-test"))
 	require.NoError(t, err)
 	defer c.Close() //nolint:errcheck

@@ -18,9 +18,21 @@ const (
 	pinnedPackageID         = "1111111111111111111111111111111111111111111111111111111111111111"
 	retiringPinnedPackageID = "2222222222222222222222222222222222222222222222222222222222222222"
 	lookalikePackageID      = "9999999999999999999999999999999999999999999999999999999999999999"
-	governanceParty         = "guardianGovernance::1220abcd"
+	governanceParty         = testGovernancePartyID
 	otherUpdateIDHex        = "122053276773593cd4d44463b8a459f24fa089e5abd4a4b0b0103153e5898d59f072"
 )
+
+var governanceReadScope = mustReadScope(governanceParty, false)
+
+var anyPartyReadScope = mustReadScope("", true)
+
+func mustReadScope(readAsParty string, unsafeDevMode bool) ReadScope {
+	readScope, err := ParseReadScope(readAsParty, unsafeDevMode)
+	if err != nil {
+		panic(err)
+	}
+	return readScope
+}
 
 var pinnedTmpl = TemplateID{AcceptedPackageIDs: mustParseAcceptedPackageIDs(pinnedPackageID, ""), ModuleName: "Wormhole.Core.State", EntityName: "Emitter"}
 
@@ -77,7 +89,7 @@ func TestGetTransactionByUpdateIDAcceptsBothWindowPackages(t *testing.T) {
 	)
 	withLedgerTimes(response.GetTransaction(), sampleEffectiveAt, testRetiringDeadline.Add(-time.Second))
 	service := &fakeUpdateByIDService{response: response}
-	client := &grpcClient{update: service, readAsParty: governanceParty, logger: zap.NewNop()}
+	client := &grpcClient{update: service, readScope: governanceReadScope, logger: zap.NewNop()}
 	countBefore := unpinnedPublishCount(lookalikePackageID)
 
 	transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, upgradeWindowTmpl, "PublishMessage")
@@ -96,7 +108,7 @@ func TestGetTransactionByUpdateIDAppliesPartyFilterAndPackagePin(t *testing.T) {
 		publishMessageEvent(pinnedPackageID, 5),
 		publishMessageEvent(lookalikePackageID, 6),
 	)}
-	client := &grpcClient{update: service, readAsParty: governanceParty, logger: zap.NewNop()}
+	client := &grpcClient{update: service, readScope: governanceReadScope, logger: zap.NewNop()}
 
 	transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, pinnedTmpl, "PublishMessage")
 	require.NoError(t, err)
@@ -137,7 +149,7 @@ func TestGetTransactionByUpdateIDAppliesRetiringDeadline(t *testing.T) {
 				publishMessageEvent(retiringPinnedPackageID, 6),
 			)
 			withLedgerTimes(response.GetTransaction(), sampleEffectiveAt, tc.recordTime)
-			client := &grpcClient{update: &fakeUpdateByIDService{response: response}, readAsParty: governanceParty, logger: zap.NewNop()}
+			client := &grpcClient{update: &fakeUpdateByIDService{response: response}, readScope: governanceReadScope, logger: zap.NewNop()}
 			afterDeadlineBefore := retiringPackagePublishAfterDeadlineCount()
 			missingRecordTimeBefore := publishWithoutRecordTimeCount()
 
@@ -168,7 +180,7 @@ func TestGetTransactionByUpdateIDRejectsBadResponse(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &grpcClient{update: &fakeUpdateByIDService{response: tc.response}, logger: zap.NewNop()}
+			client := &grpcClient{update: &fakeUpdateByIDService{response: tc.response}, readScope: anyPartyReadScope, logger: zap.NewNop()}
 			_, err := client.GetTransactionByUpdateID(context.Background(), updateID, pinnedTmpl, "PublishMessage")
 			assert.Error(t, err)
 		})

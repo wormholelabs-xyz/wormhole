@@ -69,7 +69,7 @@ func TestMessagesFromTxCountsUnpinnedPublishes(t *testing.T) {
 			countBefore := unpinnedPublishCount(tc.executingPackageID)
 			tx := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{tc.event}}, sampleEffectiveAt, testRetiringDeadline.Add(-time.Second))
 
-			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", governanceParty, zap.New(core))
+			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", governanceReadScope, zap.New(core))
 
 			assert.Len(t, messages, tc.wantMessages)
 			assert.Equal(t, tc.wantUnpinnedIncrement, unpinnedPublishCount(tc.executingPackageID)-countBefore)
@@ -111,7 +111,7 @@ func TestMessagesFromTxAppliesRetiringDeadline(t *testing.T) {
 			unpinnedBefore := unpinnedPublishCount(tc.executingPackageID)
 			tx := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(tc.executingPackageID, 3)}}, sampleEffectiveAt, tc.recordTime)
 
-			messages := messagesFromTx(tx, upgradeWindowTmpl, "PublishMessage", governanceParty, zap.New(core))
+			messages := messagesFromTx(tx, upgradeWindowTmpl, "PublishMessage", governanceReadScope, zap.New(core))
 
 			assert.Len(t, messages, tc.wantMessages)
 			assert.Equal(t, tc.wantAfterDeadlineIncrement, retiringPackagePublishAfterDeadlineCount()-afterDeadlineBefore)
@@ -133,7 +133,7 @@ func TestMessagesFromTxWithoutPinCountsNothing(t *testing.T) {
 	countBefore := unpinnedPublishCount(lookalikePackageID)
 	tx := &apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(lookalikePackageID, 7)}}
 
-	messages := messagesFromTx(tx, unpinnedTmpl, "PublishMessage", governanceParty, zap.New(core))
+	messages := messagesFromTx(tx, unpinnedTmpl, "PublishMessage", governanceReadScope, zap.New(core))
 
 	assert.Len(t, messages, 1)
 	assert.Zero(t, unpinnedPublishCount(lookalikePackageID)-countBefore)
@@ -167,7 +167,7 @@ func TestMessagesFromTxSetsAcceptedPackageRole(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tx := withLedgerTimes(&apiv2.Transaction{UpdateId: sampleUpdateIDHex, Events: []*apiv2.Event{publishMessageEvent(tc.executingPackageID, 4)}}, sampleEffectiveAt, testRetiringDeadline.Add(-time.Second))
 
-			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", governanceParty, zap.NewNop())
+			messages := messagesFromTx(tx, tc.tmpl, "PublishMessage", governanceReadScope, zap.NewNop())
 
 			require.Len(t, messages, 1)
 			assert.Equal(t, tc.wantRole, messages[0].AcceptedPackageRole)

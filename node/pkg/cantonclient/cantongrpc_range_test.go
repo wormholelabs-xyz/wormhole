@@ -70,7 +70,7 @@ func TestReadPublishesInRange(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &grpcClient{update: tc.service, readAsParty: governanceParty, logger: zap.NewNop()}
+			client := &grpcClient{update: tc.service, readScope: governanceReadScope, logger: zap.NewNop()}
 
 			events, err := client.ReadPublishesInRange(context.Background(), tc.beginExclusive, tc.endInclusive, pinnedTmpl, "PublishMessage")
 

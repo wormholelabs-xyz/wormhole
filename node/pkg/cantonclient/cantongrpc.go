@@ -23,22 +23,20 @@ import (
 )
 
 type grpcClient struct {
-	conn        *grpc.ClientConn
-	state       apiv2.StateServiceClient
-	update      apiv2.UpdateServiceClient
-	packages    apiv2.PackageServiceClient
-	readAsParty string
-	logger      *zap.Logger
+	conn      *grpc.ClientConn
+	state     apiv2.StateServiceClient
+	update    apiv2.UpdateServiceClient
+	packages  apiv2.PackageServiceClient
+	readScope ReadScope
+	logger    *zap.Logger
 }
 
 // maxLedgerUpdateBytes bounds one received Ledger API message. A Canton
 // update above it stops the watcher at that offset.
 const maxLedgerUpdateBytes = 64 << 20
 
-// NewCantonGrpcClient dials the Ledger API at rpc. readAsParty narrows the
-// update stream and GetUpdateById to a single party (the guardianGovernance
-// party in production); empty observes every party hosted on the participant
-// (filters_for_any_party, unsafe dev mode only).
+// NewCantonGrpcClient dials the Ledger API at rpc. readScope selects the
+// party filter of the update stream and GetUpdateById.
 //
 // transportCreds selects the transport: pass nil for TLS (the production
 // default), or insecure credentials for a plaintext dev-mode participant. It is
@@ -46,7 +44,10 @@ const maxLedgerUpdateBytes = 64 << 20
 // dial options cannot be introspected — opts carries non-transport options such
 // as per-RPC OAuth credentials, and guessing from their presence would silently
 // dial without transport security.
-func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, transportCreds credentials.TransportCredentials, opts ...grpc.DialOption) (CantonClient, error) {
+func NewCantonGrpcClient(rpc string, readScope ReadScope, logger *zap.Logger, transportCreds credentials.TransportCredentials, opts ...grpc.DialOption) (CantonClient, error) {
+	if err := readScope.CheckWasConstructed(); err != nil {
+		return nil, err
+	}
 	if transportCreds == nil {
 		transportCreds = credentials.NewTLS(nil)
 	}
@@ -59,12 +60,12 @@ func NewCantonGrpcClient(rpc string, readAsParty string, logger *zap.Logger, tra
 		return nil, fmt.Errorf("cantonclient: failed to dial %s: %w", rpc, err)
 	}
 	return &grpcClient{
-		conn:        conn,
-		state:       apiv2.NewStateServiceClient(conn),
-		update:      apiv2.NewUpdateServiceClient(conn),
-		packages:    apiv2.NewPackageServiceClient(conn),
-		readAsParty: readAsParty,
-		logger:      logger,
+		conn:      conn,
+		state:     apiv2.NewStateServiceClient(conn),
+		update:    apiv2.NewUpdateServiceClient(conn),
+		packages:  apiv2.NewPackageServiceClient(conn),
+		readScope: readScope,
+		logger:    logger,
 	}, nil
 }
 
@@ -148,9 +149,8 @@ func (c *grpcClient) listVettedPackagesPage(ctx context.Context, packageIDHexes 
 // SECURITY: LEDGER_EFFECTS also carries the CreatedEvent of a contract that the
 // same transaction archives; readPartySignsExercisedEmitter relies on it.
 // A wildcard template filter matches every template; the watcher narrows to
-// the core-bridge template/choice in Go. When readAsParty is empty
-// the events of every party hosted on the participant are streamed
-// (filters_for_any_party); otherwise the stream is narrowed to that one party.
+// the core-bridge template/choice in Go. The any-party scope streams the events
+// of every party hosted on the participant (filters_for_any_party).
 // GetUpdates and GetUpdateById share it, so reobservation sees what the stream sees.
 func (c *grpcClient) updateFormat() *apiv2.UpdateFormat {
 	wildcard := &apiv2.Filters{
@@ -161,10 +161,12 @@ func (c *grpcClient) updateFormat() *apiv2.UpdateFormat {
 		}},
 	}
 	eventFormat := &apiv2.EventFormat{Verbose: true}
-	if c.readAsParty == "" {
+	if party, isGuardianGovernance := c.readScope.GuardianGovernanceParty(); isGuardianGovernance {
+		eventFormat.FiltersByParty = map[string]*apiv2.Filters{party.String(): wildcard}
+	} else if c.readScope.IsAnyPartyUnsafeDevMode() {
 		eventFormat.FiltersForAnyParty = wildcard
 	} else {
-		eventFormat.FiltersByParty = map[string]*apiv2.Filters{c.readAsParty: wildcard}
+		panic("cantonclient: update format with a read scope that was not constructed")
 	}
 	return &apiv2.UpdateFormat{
 		IncludeTransactions: &apiv2.TransactionFormat{
@@ -204,7 +206,7 @@ func (c *grpcClient) SubscribeUpdates(ctx context.Context, beginExclusive int64,
 			if tx == nil {
 				continue // reassignment / checkpoint / topology — ignore
 			}
-			messages := messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger)
+			messages := messagesFromTx(tx, tmpl, choiceName, c.readScope, c.logger)
 			if len(messages) == 0 {
 				continue
 			}
@@ -271,7 +273,7 @@ func (c *grpcClient) ReadPublishesInRange(ctx context.Context, beginExclusive in
 		if tx.GetOffset() <= beginExclusive || tx.GetOffset() > endInclusive {
 			return nil, fmt.Errorf("GetUpdates(%d, %d]: transaction at offset %d is beyond the requested range", beginExclusive, endInclusive, tx.GetOffset())
 		}
-		messages := messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger)
+		messages := messagesFromTx(tx, tmpl, choiceName, c.readScope, c.logger)
 		if len(messages) == 0 {
 			continue
 		}
@@ -320,7 +322,7 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 		UpdateID:          returnedUpdateID,
 		EffectiveAt:       protoTime(tx.GetEffectiveAt()),
 		RecordTime:        protoTime(tx.GetRecordTime()),
-		Messages:          messagesFromTx(tx, tmpl, choiceName, c.readAsParty, c.logger),
+		Messages:          messagesFromTx(tx, tmpl, choiceName, c.readScope, c.logger),
 	}, nil
 }
 
@@ -330,7 +332,7 @@ func (c *grpcClient) GetTransactionByUpdateID(ctx context.Context, updateID Upda
 // readPartySignsExercisedEmitter accepts, whose exercise_result decodes to a
 // WormholeMessage record. The event's package id is the package that executed
 // the choice, which a Daml upgrade changes.
-func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, readAsParty string, logger *zap.Logger) []CantonMessage {
+func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, readScope ReadScope, logger *zap.Logger) []CantonMessage {
 	createdEvents := createdEventsByContractID(tx)
 	var out []CantonMessage
 	for _, ev := range tx.GetEvents() {
@@ -360,7 +362,7 @@ func messagesFromTx(tx *apiv2.Transaction, tmpl TemplateID, choiceName string, r
 		}
 		// SECURITY: guardianGovernance signs every real Emitter, so a publish
 		// on an Emitter it does not sign is on an Emitter of another registry.
-		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, protoTime(tx.GetRecordTime()), readAsParty) {
+		if !readPartySignsExercisedEmitter(ex, createdEvents, tmpl, protoTime(tx.GetRecordTime()), readScope) {
 			recordPublishWithoutReadPartyStakeholder(tx.GetUpdateId(), logger)
 			continue
 		}

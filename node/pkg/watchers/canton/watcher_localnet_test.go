@@ -136,7 +136,7 @@ func TestCantonWatcherLocalNet(t *testing.T) {
 	checkBuildWatcherRejectsAnUnpinnedConfig(t, watcherConfig, approvedCorePackages, msgC, obsvReqC)
 	watcher, err := watcherConfig.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
 	require.NoError(t, err)
-	localNetClient, err := cantonclient.NewCantonGrpcClient(rpcAddress, readAsParty, logger, insecure.NewCredentials(),
+	localNetClient, err := cantonclient.NewCantonGrpcClient(rpcAddress, readScopeOfParty(t, readAsParty), logger, insecure.NewCredentials(),
 		grpc.WithPerRPCCredentials(localNetBearerToken{jwt: strings.TrimSpace(string(jwtBytes))}))
 	require.NoError(t, err)
 	defer localNetClient.Close()
@@ -248,7 +248,7 @@ func checkBuildWatcherRejectsAnUnpinnedConfig(t *testing.T, watcherConfig Watche
 	withoutReadAsParty := watcherConfig
 	withoutReadAsParty.ReadAsParty = ""
 	_, err = withoutReadAsParty.buildWatcher(approvedCorePackages, msgC, obsvReqC, common.TestNet)
-	require.ErrorContains(t, err, "ReadAsParty must be set")
+	require.ErrorContains(t, err, "ReadAsParty: cantonclient: reading as any party requires unsafe dev mode")
 }
 
 // writeUnpinnedPublishCounts replaces the metrics file with {executing package id: count} of the
