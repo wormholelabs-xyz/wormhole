@@ -601,8 +601,11 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
   negativeClaimFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
     exerciseCmd repricedReplayRegistryCid SetClaimFee with newClaimFee = -1
   checkFailsOnPrecondition "negative claim fee" negativeClaimFeeResult
+  oversizedClaimFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+    exerciseCmd repricedReplayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee + 1
+  checkFailsOnPrecondition "claim fee above maxOnboardingFee" oversizedClaimFeeResult
 
-  -- Rows 5 to 9 and 12: each attack fails on authorization.
+  -- Rows 5 to 10 and 13: each attack fails on authorization.
   let feeAdminAttacks =
         [ ("archive CoreState", discardResult $ trySubmit (actAs feeAdmin <> disclose coreStateDisclosure) do
               archiveCmd bridge.coreStateCid)
@@ -616,12 +619,14 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
               archiveCmd repricedReplayRegistryCid)
         , ("ReplaceEmitterRegistryFeeAdmin", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
               exerciseCmd repricedRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = feeAdmin)
+        , ("ReplaceReplayRootRegistryFeeAdmin", discardResult $ trySubmit (actAs feeAdmin <> withRepricedRegistries) do
+              exerciseCmd repricedReplayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = feeAdmin)
         , ("stranger sets the registration fee", discardResult $ trySubmit (actAs stranger <> withRepricedRegistries) do
               exerciseCmd repricedRegistryCid SetRegistrationFee with newRegistrationFee = 6)
         ]
   forA_ feeAdminAttacks \(attackName, attack) -> attack >>= checkFailsOnMissingAuthorization attackName
 
-  -- Row 10: gg replaces the admin on both registries; only the admin field changes.
+  -- Row 11: gg replaces the admin on both registries; only the admin field changes.
   replacedRegistryCid <- submit gg do
     exerciseCmd repricedRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = newFeeAdmin
   Some replacedRegistry <- queryContractId gg replacedRegistryCid
@@ -631,12 +636,137 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
   Some replacedReplayRegistry <- queryContractId gg replacedReplayRegistryCid
   replacedReplayRegistry === repricedReplayRegistry with onboardingFeeAdmin = newFeeAdmin
 
-  -- Row 11: only the new admin sets the registration fee.
+  -- Row 12: only the new admin sets each fee; maxOnboardingFee is accepted.
   replacedRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedRegistryCid
+  replacedReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedReplayRegistryCid
   formerAdminResult <- trySubmit (actAs feeAdmin <> disclose replacedRegistryDisclosure) do
     exerciseCmd replacedRegistryCid SetRegistrationFee with newRegistrationFee = 6
   checkFailsOnMissingAuthorization "former admin sets the registration fee" formerAdminResult
+  formerAdminClaimFeeResult <- trySubmit (actAs feeAdmin <> disclose replacedReplayRegistryDisclosure) do
+    exerciseCmd replacedReplayRegistryCid SetClaimFee with newClaimFee = 6
+  checkFailsOnMissingAuthorization "former admin sets the claim fee" formerAdminClaimFeeResult
   newAdminRegistryCid <- submit (actAs newFeeAdmin <> disclose replacedRegistryDisclosure) do
     exerciseCmd replacedRegistryCid SetRegistrationFee with newRegistrationFee = 6
   Some newAdminRegistry <- queryContractId gg newAdminRegistryCid
-  newAdminRegistry.registrationFee === 6
+  newAdminRegistry === replacedRegistry with registrationFee = 6
+  maxClaimFeeReplayRegistryCid <- submit (actAs newFeeAdmin <> disclose replacedReplayRegistryDisclosure) do
+    exerciseCmd replacedReplayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee
+  Some maxClaimFeeReplayRegistry <- queryContractId gg maxClaimFeeReplayRegistryCid
+  maxClaimFeeReplayRegistry === replacedReplayRegistry with claimFee = maxOnboardingFee
+
+----------------------------------------------------------------------
+-- Test 10: a compromised onboarding fee admin stops only onboarding
+----------------------------------------------------------------------
+
+data ExpectedStepOutcome
+  = StepCommits
+  | StepFailsWithText Text
+  | StepFailsOnMissingAuthorization
+  deriving (Eq, Show)
+
+-- | One step after the admin sets both onboarding fees to maxOnboardingFee.
+data CompromisedFeeAdminCase = CompromisedFeeAdminCase with
+    caseName        : Text
+    step            : Script (Either SubmitError ())
+    expectedOutcome : ExpectedStepOutcome
+
+checkStepOutcome : Text -> ExpectedStepOutcome -> Either SubmitError () -> Script ()
+checkStepOutcome caseName expectedOutcome submitResult = case expectedOutcome of
+  StepCommits -> case submitResult of
+    Right () -> pure ()
+    Left submitError -> abort (caseName <> ": expected a commit, got: " <> show submitError)
+  StepFailsWithText expectedText -> checkAttackFailedWith caseName expectedText submitResult
+  StepFailsOnMissingAuthorization -> checkFailsOnMissingAuthorization caseName submitResult
+
+-- | The admin prices out new registrations and claims. Existing emitters,
+-- verification, replay roots and governance continue, and the fee
+-- destination stays feeCustody. A gg ceremony restores onboarding.
+testCompromisedFeeAdminStopsOnlyOnboarding : Script ()
+testCompromisedFeeAdminStopsOnlyOnboarding = do
+  bridge <- setupCoreBridge "CompromisedFeeAdmin" None
+  owner <- allocateParty "CompromisedFeeAdminOwner"
+  consumer <- allocateParty "CompromisedFeeAdminConsumer"
+  newcomer <- allocateParty "CompromisedFeeAdminNewcomer"
+  relayer <- allocateParty "CompromisedFeeAdminRelayer"
+  successorFeeAdmin <- allocateParty "CompromisedFeeAdminSuccessor"
+  let gg = bridge.guardianGovernance
+      feeAdmin = bridge.onboardingFeeAdmin
+      devnetPubKeys = [(0, devnetGuardianPubKey)]
+  emitterCid <- registerEmitterAs bridge owner
+  rootCid <- claimReplayRootAs bridge consumer "compromised-fee-admin" defaultSplitThreshold
+  Some coreState <- queryContractId gg bridge.coreStateCid
+  [(registryCid, _)] <- query @EmitterRegistry gg
+
+  registryDisclosure <- discloseAsGuardianGovernance bridge registryCid
+  pricedOutRegistryCid <- submit (actAs feeAdmin <> disclose registryDisclosure) do
+    exerciseCmd registryCid SetRegistrationFee with newRegistrationFee = maxOnboardingFee
+  replayRegistryDisclosure <- discloseAsGuardianGovernance bridge bridge.replayRegistryCid
+  pricedOutReplayRegistryCid <- submit (actAs feeAdmin <> disclose replayRegistryDisclosure) do
+    exerciseCmd bridge.replayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee
+  pricedOutRegistryDisclosure <- discloseAsGuardianGovernance bridge pricedOutRegistryCid
+  pricedOutReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge pricedOutReplayRegistryCid
+  coreStateDisclosure <- discloseAsGuardianGovernance bridge bridge.coreStateCid
+  emitterDisclosure <- discloseAsGuardianGovernance bridge emitterCid
+
+  let cases =
+        [ CompromisedFeeAdminCase "new registration without a fee"
+            (discardResult $ trySubmit (actAs newcomer <> disclose pricedOutRegistryDisclosure) do
+              exerciseCmd pricedOutRegistryCid RegisterEmitter with
+                requester = newcomer, payer = newcomer, coreStateCid = None, feeAllocation = None
+                expectedGuardianGovernance = gg)
+            (StepFailsWithText "registration fee due")
+        , CompromisedFeeAdminCase "new replay root claim without a fee"
+            (discardResult $ trySubmit (actAs newcomer <> disclose pricedOutReplayRegistryDisclosure) do
+              exerciseCmd pricedOutReplayRegistryCid ClaimReplayRoot with
+                consumer = newcomer, namespace = "newcomer", splitThreshold = defaultSplitThreshold, payer = newcomer
+                coreStateCid = None, feeAllocation = None, expectedGuardianGovernance = gg)
+            (StepFailsWithText "claim fee due")
+        , CompromisedFeeAdminCase "admin archives an existing emitter"
+            (discardResult $ trySubmit (actAs feeAdmin <> disclose emitterDisclosure) do archiveCmd emitterCid)
+            StepFailsOnMissingAuthorization
+        , CompromisedFeeAdminCase "existing emitter publishes"
+            (discardResult $ trySubmit (actAs owner <> disclose coreStateDisclosure) do
+              exerciseCmd emitterCid PublishMessage with
+                nonce = 0, payload = "aa", consistencyLevel = 0
+                coreStateCid = bridge.coreStateCid, payer = owner, feeAllocation = None)
+            StepCommits
+        , CompromisedFeeAdminCase "verifier parses and verifies a VAA"
+            (discardResult $ trySubmit (actAs newcomer <> disclose coreStateDisclosure) do
+              exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with
+                verifier = newcomer, encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys)
+            StepCommits
+        , CompromisedFeeAdminCase "existing replay root consumes a VAA"
+            (discardResult $ trySubmit (actAs consumer <> disclose coreStateDisclosure) do
+              exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
+                encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys, consumer
+                namespace = "compromised-fee-admin", replayNodeCid = rootCid)
+            StepCommits
+        , CompromisedFeeAdminCase "admin creates a CoreState that pays the admin"
+            (discardResult $ trySubmit (actAs feeAdmin) do createCmd coreState with feeRecipient = feeAdmin)
+            StepFailsOnMissingAuthorization
+        , CompromisedFeeAdminCase "relayer applies governance"
+            (tryRelayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA devnetPubKeys)
+            StepCommits
+        ]
+  forA_ cases \compromisedCase ->
+    compromisedCase.step >>= checkStepOutcome compromisedCase.caseName compromisedCase.expectedOutcome
+  [(_, coreStateAfterGovernance)] <- query @CoreState gg
+  coreStateAfterGovernance.feeRecipient === bridge.feeCustody
+
+  -- The gg ceremony replaces the admin; the successor restores free onboarding.
+  replacedRegistryCid <- submit gg do
+    exerciseCmd pricedOutRegistryCid ReplaceEmitterRegistryFeeAdmin with newOnboardingFeeAdmin = successorFeeAdmin
+  replacedReplayRegistryCid <- submit gg do
+    exerciseCmd pricedOutReplayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = successorFeeAdmin
+  replacedRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedRegistryCid
+  replacedReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge replacedReplayRegistryCid
+  _ <- submit (actAs successorFeeAdmin <> disclose replacedRegistryDisclosure) do
+    exerciseCmd replacedRegistryCid SetRegistrationFee with newRegistrationFee = 0
+  _ <- submit (actAs successorFeeAdmin <> disclose replacedReplayRegistryDisclosure) do
+    exerciseCmd replacedReplayRegistryCid SetClaimFee with newClaimFee = 0
+  newcomerEmitterCid <- registerEmitterAs bridge newcomer
+  Some newcomerEmitter <- queryContractId newcomer newcomerEmitterCid
+  newcomerEmitter.emitterId === 1
+  newcomerRootCid <- claimReplayRootAs bridge newcomer "newcomer" defaultSplitThreshold
+  Some newcomerRoot <- queryContractId newcomer newcomerRootCid
+  sort (signatory newcomerRoot) === sort [newcomer, gg]
