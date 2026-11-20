@@ -161,7 +161,7 @@ var (
 	cantonAuthTokenURL                 *string
 	cantonAuthClientID                 *string
 	cantonAuthClientSecret             *string
-	cantonOAuthAudience                *string
+	cantonAuthAudience                 *string
 
 	solanaRPC          *string
 	solanaContract     *string
@@ -443,7 +443,7 @@ func init() {
 	cantonAuthTokenURL = NodeCmd.Flags().String("cantonAuthTokenURL", "", "OAuth2 token endpoint for a Keycloak-fronted Canton Ledger API (.../realms/<realm>/protocol/openid-connect/token). Set together with cantonAuthClientID and cantonAuthClientSecret, or not at all")
 	cantonAuthClientID = NodeCmd.Flags().String("cantonAuthClientID", "", "OAuth2 client id for the Canton Ledger API (client-credentials grant)")
 	cantonAuthClientSecret = NodeCmd.Flags().String("cantonAuthClientSecret", "", "OAuth2 client secret for the Canton Ledger API. Prefer the GUARDIAND_CANTONAUTHCLIENTSECRET environment variable over the flag so the secret never appears in process arguments")
-	cantonOAuthAudience = NodeCmd.Flags().String("cantonOAuthAudience", "", "Optional audience parameter of the OAuth2 token request: the Ledger API target audience of the participant (for example https://canton.network.global or https://daml.com/jwt/aud/participant/<participantId>). Requires cantonAuthTokenURL, cantonAuthClientID and cantonAuthClientSecret")
+	cantonAuthAudience = NodeCmd.Flags().String("cantonAuthAudience", "", "Optional audience parameter of the OAuth2 token request: the Ledger API target audience of the participant (for example https://canton.network.global or https://daml.com/jwt/aud/participant/<participantId>). Requires cantonAuthTokenURL, cantonAuthClientID and cantonAuthClientSecret")
 
 	solanaRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "solanaRPC", "Solana RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
 	fogoRPC = node.RegisterFlagWithValidationOrFail(NodeCmd, "fogoRPC", "Fogo RPC URL (required)", "http://solana-devnet:8899", []string{"http", "https"})
@@ -1824,7 +1824,7 @@ func runNode(cmd *cobra.Command, args []string) {
 				TokenURL:     *cantonAuthTokenURL,
 				ClientID:     *cantonAuthClientID,
 				ClientSecret: *cantonAuthClientSecret,
-				Audience:     *cantonOAuthAudience,
+				Audience:     *cantonAuthAudience,
 			},
 		}
 		watcherConfigs = append(watcherConfigs, wc)

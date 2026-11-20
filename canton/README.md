@@ -1074,14 +1074,14 @@ The OAuth2 flags populate `Auth`:
 | `--cantonAuthTokenURL` | `TokenURL` | Set with the client ID and the client secret, or not at all. |
 | `--cantonAuthClientID` | `ClientID` | Same rule. |
 | `--cantonAuthClientSecret` | `ClientSecret` | Same rule. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
-| `--cantonOAuthAudience` | `Audience` | Optional. Needs the three flags above. No leading or trailing whitespace. |
+| `--cantonAuthAudience` | `Audience` | Optional. Needs the three flags above. No leading or trailing whitespace. |
 
 `WatcherConfig.Create` rejects OAuth2 in unsafe dev mode, because OAuth2 needs TLS.
 With `Audience` set, the token request sends it as the `audience` parameter.
 Canton 3.7 requires an `aud` claim in each Ledger API token.
 Set `Audience` to the Ledger API target audience of the participant when the identity provider adds `aud` only on request.
 `docs/canton_guardian_operations.md` section 8 gives the value for each participant configuration.
-The `canton-list-publishes` admin command accepts the same `--cantonOAuthAudience` flag.
+The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience` flag.
 
 ### 7.5 Core package upgrades
 

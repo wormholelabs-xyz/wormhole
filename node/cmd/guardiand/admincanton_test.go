@@ -229,7 +229,7 @@ func TestCantonListPublishesDialOptions(t *testing.T) {
 		{name: "no OAuth over plaintext", unsafePlaintext: true, expectedDialOptionCount: 0},
 		{name: "full OAuth", oauthFlags: fullOAuth, expectedDialOptionCount: 1},
 		{name: "full OAuth with audience", oauthFlags: withAudience("https://canton.network.global"), expectedDialOptionCount: 1},
-		{name: "audience without OAuth", oauthFlags: cantonListPublishesOAuthFlags{audience: "https://canton.network.global"}, expectedErrorMessage: "--cantonOAuthAudience requires"},
+		{name: "audience without OAuth", oauthFlags: cantonListPublishesOAuthFlags{audience: "https://canton.network.global"}, expectedErrorMessage: "--cantonAuthAudience requires"},
 		{name: "whitespace-only audience", oauthFlags: withAudience(" "), expectedErrorMessage: "whitespace"},
 		{name: "token URL without secret", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: fullOAuth.tokenURL, clientID: fullOAuth.clientID}, expectedErrorMessage: "must all be set together"},
 		{name: "full OAuth over plaintext", oauthFlags: fullOAuth, unsafePlaintext: true, expectedErrorMessage: "OAuth requires TLS"},
