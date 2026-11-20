@@ -32,7 +32,7 @@ echo "PublishMessage (fee 0)"
 publish_transaction="$(submit_interactive "publish-message-$(date +%s)" "$operator_only" \
   "$(exercise_command "$EMITTER_TEMPLATE" "$emitter_cid" PublishMessage \
     "$(jq -n --arg op "$OPERATOR_PARTY" --arg cs "$core_state_cid" --arg payload "$MESSAGE_PAYLOAD_HEX" \
-      '{nonce: "1", payload: $payload, consistencyLevel: "0", coreStateCid: $cs, payer: $op, feeAllocation: null}')")" \
+      '{nonce: "1", payload: {tag: "MessagePayload", value: $payload}, consistencyLevel: "0", coreStateCid: $cs, payer: $op, feeAllocation: null}')")" \
   "$(operator_signers_json)")"
 created_contract_id "$publish_transaction" ":Wormhole.Core.State:Emitter" >/dev/null
 echo "WormholeMessage: $(jq -c '[.events[] | .ExercisedEvent? // empty | select(.choice == "PublishMessage") | .exerciseResult._2][0]' <<<"$publish_transaction")"

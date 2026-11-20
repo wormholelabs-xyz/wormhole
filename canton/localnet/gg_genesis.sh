@@ -94,8 +94,8 @@ case "$active_core_state_count" in
         --arg guardian "$DEVNET_GUARDIAN_ADDRESS" --arg governanceContract "$GOVERNANCE_CONTRACT" \
         --arg guardianSetIndex "$GENESIS_GUARDIAN_SET_INDEX" '{
           operator: $operator, guardianGovernance: $gg, chainId: "75", governanceChainId: "1",
-          governanceContract: $governanceContract, guardianSetIndex: $guardianSetIndex,
-          guardianSets: [[$guardianSetIndex, {keys: [$guardian], expirationTime: null}]],
+          governanceContract: {tag: "EmitterAddress", value: $governanceContract}, guardianSetIndex: $guardianSetIndex,
+          guardianSets: [[$guardianSetIndex, {keys: [{tag: "GuardianAddress", value: $guardian}], expirationTime: null}]],
           messageFee: "0", feeInstrument: {admin: $feeInstrumentAdmin, id: "Amulet"}, feeRecipient: $feeRecipient,
           consumedGovernance: {map: []}}'
     }

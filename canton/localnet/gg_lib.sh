@@ -291,7 +291,7 @@ check_connected_to_gg_synchronizer() {
 verify_vaa_as_operator() {
   submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
     "$(exercise_command "$CORE_STATE_TEMPLATE" "$(core_contract_id coreState)" ParseAndVerifyVAA \
-      "$(jq -n --arg op "$OPERATOR_PARTY" --arg vaa "$2" --argjson keys "$3" '{verifier: $op, encodedVAA: $vaa, pubKeys: $keys}')")" \
+      "$(jq -n --arg op "$OPERATOR_PARTY" --arg vaa "$2" --argjson keys "$3" '{verifier: $op, encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}')")" \
     "$(operator_signers_json)"
 }
 
@@ -300,16 +300,16 @@ generate_vaa() {
   (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go run ./hack/canton_localnet_vaa "$@")
 }
 
-# Daml [(Int, Bytes)] public-key hints from generate_vaa output.
+# Daml [(Int, GuardianPublicKey)] public-key hints from generate_vaa output.
 vaa_pub_keys_json() {
-  jq -c '[.pubKeys[] | {_1: (.guardianIndex | tostring), _2: .publicKeyHex}]' <<<"$1"
+  jq -c '[.pubKeys[] | {_1: (.guardianIndex | tostring), _2: {tag: "GuardianPublicKey", value: .publicKeyHex}}]' <<<"$1"
 }
 
 # submit_governance_vaa <command-id> <vaa-hex> <pub-keys-json>: SubmitGovernanceVAA on the current CoreState.
 submit_governance_vaa() {
   submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
     "$(exercise_command "$CORE_STATE_TEMPLATE" "$(core_contract_id coreState)" SubmitGovernanceVAA \
-      "$(jq -n --arg vaa "$2" --argjson keys "$3" '{encodedVAA: $vaa, pubKeys: $keys}')")" \
+      "$(jq -n --arg vaa "$2" --argjson keys "$3" '{encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}')")" \
     "$(operator_signers_json)"
 }
 
@@ -318,7 +318,7 @@ publish_message() {
   submit_interactive "$1" "$(jq -n --arg op "$OPERATOR_PARTY" '[$op]')" \
     "$(exercise_command "$EMITTER_TEMPLATE" "$(core_contract_id emitter)" PublishMessage \
       "$(jq -n --arg op "$OPERATOR_PARTY" --arg cs "$(core_contract_id coreState)" --arg payload "$2" \
-        '{nonce: "2", payload: $payload, consistencyLevel: "0", coreStateCid: $cs, payer: $op, feeAllocation: null}')")" \
+        '{nonce: "2", payload: {tag: "MessagePayload", value: $payload}, consistencyLevel: "0", coreStateCid: $cs, payer: $op, feeAllocation: null}')")" \
     "$(operator_signers_json)"
 }
 
