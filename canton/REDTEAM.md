@@ -148,7 +148,7 @@ Thus a `PublishMessage` on a rogue-`guardianGovernance` `Emitter` below such a n
 `messagesFromTx` (`node/pkg/cantonclient/cantongrpc.go`) accepts a consuming `PublishMessage` event only when the read-as party is a stakeholder of the `Emitter`.
 `acs_delta` true shows this for an `Emitter` that existed before the transaction.
 For an `Emitter` that the same transaction creates, `acs_delta` is false. Then the `CreatedEvent` of that contract id must be of the package id that executed the publish, and must list the read-as party as a signatory.
-`TestCantonWatcherDropsWitnessOnlyPublish` and `TestCantonWatcherPublishesOnTransientEmitters` confirm this on SDK 3.5.1 (fixtures `Test/WatcherWitnessOnly.daml` and `Test/WatcherTransientEmitter.daml`).
+`TestCantonWatcherDropsWitnessOnlyPublish` and `TestCantonWatcherPublishesOnTransientEmitters` confirm this on SDK 3.7.3 (fixtures `Test/WatcherWitnessOnly.daml` and `Test/WatcherTransientEmitter.daml`).
 
 ### R1: Rolled-back publish
 

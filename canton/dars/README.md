@@ -72,7 +72,8 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 It removes template fields, so it is not an SCU upgrade of 0.8.x.
 Thus `core/daml.yaml` has no `upgrades:` line, and 0.9.0 starts a new `wormhole-core` line.
 0.9.0 `ensure` rules on `CoreState`: the fee instrument admin is neither `guardianGovernance` nor `feeCustody`.
-The 0.9.0 main package id is `bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`.
+The 0.9.0 main package id is `a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034` (Daml SDK 3.7.3).
+The third 0.9.0 build, `bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a`, is built with Daml SDK 3.5.1. The SDK 3.7.3 build replaces it. Do not deploy it.
 The first 0.9.0 build, `dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d`, is replaced.
 It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 The second 0.9.0 build, `ec382591e253d8e5c9e8cd4f1de5fd3c40cb655c9f78da2d9de15af74958d66a`, is replaced.

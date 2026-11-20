@@ -82,6 +82,9 @@ func startSandbox(t *testing.T, ctx context.Context) (dpm, dar, port string) {
 	port = sandboxLedgerAPIPort()
 
 	runCmd(t, cantonDir, dpm, "build", "--all")
+	// Set after the build, so the build uses the daml.yaml pins. Later dpm runs (sandbox, script, damlc)
+	// are outside a daml.yaml project and otherwise use the active SDK.
+	t.Setenv("DPM_SDK_VERSION", pinnedDamlSDKVersion(t, cantonDir))
 
 	// Own process group so the JVM child is killed with dpm. Clean working
 	// directory: `dpm sandbox` auto-loads a `*.canton` bootstrap or daml.yaml
@@ -110,6 +113,7 @@ func startSandbox(t *testing.T, ctx context.Context) (dpm, dar, port string) {
 	conn, err := net.DialTimeout("tcp", "localhost:"+port, 5*time.Second)
 	require.NoErrorf(t, err, "sandbox Ledger API not listening on port %s", port)
 	_ = conn.Close()
+	checkSandboxRunsPinnedSDKVersion(t, cantonDir, port)
 	return dpm, dar, port
 }
 

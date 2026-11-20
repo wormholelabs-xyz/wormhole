@@ -23,6 +23,10 @@ type StateServiceClient interface {
 	// the client SHOULD begin streaming updates from the update service,
 	// starting at the GetActiveContractsRequest.active_at_offset specified in this request.
 	// Clients SHOULD NOT assume that the set of active contracts they receive reflects the state at the ledger end.
+	// If the given offset is different than the ledger end, and there are (un)assignments in-flight at the given offset,
+	// the snapshot may fail with "FAILED_PRECONDITION/PARTICIPANT_PRUNED_DATA_ACCESSED".
+	// Note that it is ok to request acs snapshots for party migration with offsets other than ledger end, because party
+	// migration is not concerned with incomplete (un)assignments.
 	GetActiveContracts(ctx context.Context, in *GetActiveContractsRequest, opts ...grpc.CallOption) (StateService_GetActiveContractsClient, error)
 	// Returns a page of the snapshot of the active contracts and incomplete (un)assignments at a ledger offset.
 	// Once all pages are fetched by repeated calls to “GetActiveContractsPage“,
@@ -37,6 +41,14 @@ type StateServiceClient interface {
 	GetLedgerEnd(ctx context.Context, in *GetLedgerEndRequest, opts ...grpc.CallOption) (*GetLedgerEndResponse, error)
 	// Get the latest successfully pruned ledger offsets
 	GetLatestPrunedOffsets(ctx context.Context, in *GetLatestPrunedOffsetsRequest, opts ...grpc.CallOption) (*GetLatestPrunedOffsetsResponse, error)
+	// Translate syncrhonizer record time to an offset
+	// If the requested record time is earlier that the earliest record time known for the given synchronizer
+	// (either because is is before the connection to the synchronizer was established or because it was already pruned),
+	// the request fails with RECORD_TIME_NOT_FOUND error.
+	// If the requested record time is after the latest record time observed for this synchronizer, the request fails with
+	// RECORD_TIME_NOT_OBSERVED_YET error code. This may be transitional condition until participant node catches up with most recent synchronizer updates.
+	// In such case the caller may retry this request.
+	ConvertRecordTimeToOffset(ctx context.Context, in *ConvertRecordTimeToOffsetRequest, opts ...grpc.CallOption) (*ConvertRecordTimeToOffsetResponse, error)
 }
 
 type stateServiceClient struct {
@@ -115,6 +127,15 @@ func (c *stateServiceClient) GetLatestPrunedOffsets(ctx context.Context, in *Get
 	return out, nil
 }
 
+func (c *stateServiceClient) ConvertRecordTimeToOffset(ctx context.Context, in *ConvertRecordTimeToOffsetRequest, opts ...grpc.CallOption) (*ConvertRecordTimeToOffsetResponse, error) {
+	out := new(ConvertRecordTimeToOffsetResponse)
+	err := c.cc.Invoke(ctx, "/com.daml.ledger.api.v2.StateService/ConvertRecordTimeToOffset", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StateServiceServer is the server API for StateService service.
 // All implementations must embed UnimplementedStateServiceServer
 // for forward compatibility
@@ -124,6 +145,10 @@ type StateServiceServer interface {
 	// the client SHOULD begin streaming updates from the update service,
 	// starting at the GetActiveContractsRequest.active_at_offset specified in this request.
 	// Clients SHOULD NOT assume that the set of active contracts they receive reflects the state at the ledger end.
+	// If the given offset is different than the ledger end, and there are (un)assignments in-flight at the given offset,
+	// the snapshot may fail with "FAILED_PRECONDITION/PARTICIPANT_PRUNED_DATA_ACCESSED".
+	// Note that it is ok to request acs snapshots for party migration with offsets other than ledger end, because party
+	// migration is not concerned with incomplete (un)assignments.
 	GetActiveContracts(*GetActiveContractsRequest, StateService_GetActiveContractsServer) error
 	// Returns a page of the snapshot of the active contracts and incomplete (un)assignments at a ledger offset.
 	// Once all pages are fetched by repeated calls to “GetActiveContractsPage“,
@@ -138,6 +163,14 @@ type StateServiceServer interface {
 	GetLedgerEnd(context.Context, *GetLedgerEndRequest) (*GetLedgerEndResponse, error)
 	// Get the latest successfully pruned ledger offsets
 	GetLatestPrunedOffsets(context.Context, *GetLatestPrunedOffsetsRequest) (*GetLatestPrunedOffsetsResponse, error)
+	// Translate syncrhonizer record time to an offset
+	// If the requested record time is earlier that the earliest record time known for the given synchronizer
+	// (either because is is before the connection to the synchronizer was established or because it was already pruned),
+	// the request fails with RECORD_TIME_NOT_FOUND error.
+	// If the requested record time is after the latest record time observed for this synchronizer, the request fails with
+	// RECORD_TIME_NOT_OBSERVED_YET error code. This may be transitional condition until participant node catches up with most recent synchronizer updates.
+	// In such case the caller may retry this request.
+	ConvertRecordTimeToOffset(context.Context, *ConvertRecordTimeToOffsetRequest) (*ConvertRecordTimeToOffsetResponse, error)
 	mustEmbedUnimplementedStateServiceServer()
 }
 
@@ -159,6 +192,9 @@ func (UnimplementedStateServiceServer) GetLedgerEnd(context.Context, *GetLedgerE
 }
 func (UnimplementedStateServiceServer) GetLatestPrunedOffsets(context.Context, *GetLatestPrunedOffsetsRequest) (*GetLatestPrunedOffsetsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetLatestPrunedOffsets not implemented")
+}
+func (UnimplementedStateServiceServer) ConvertRecordTimeToOffset(context.Context, *ConvertRecordTimeToOffsetRequest) (*ConvertRecordTimeToOffsetResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ConvertRecordTimeToOffset not implemented")
 }
 func (UnimplementedStateServiceServer) mustEmbedUnimplementedStateServiceServer() {}
 
@@ -266,6 +302,24 @@ func _StateService_GetLatestPrunedOffsets_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StateService_ConvertRecordTimeToOffset_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConvertRecordTimeToOffsetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StateServiceServer).ConvertRecordTimeToOffset(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/com.daml.ledger.api.v2.StateService/ConvertRecordTimeToOffset",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StateServiceServer).ConvertRecordTimeToOffset(ctx, req.(*ConvertRecordTimeToOffsetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StateService_ServiceDesc is the grpc.ServiceDesc for StateService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -288,6 +342,10 @@ var StateService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetLatestPrunedOffsets",
 			Handler:    _StateService_GetLatestPrunedOffsets_Handler,
+		},
+		{
+			MethodName: "ConvertRecordTimeToOffset",
+			Handler:    _StateService_ConvertRecordTimeToOffset_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

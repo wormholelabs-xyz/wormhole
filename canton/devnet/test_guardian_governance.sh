@@ -28,6 +28,13 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# dpm runs outside a daml.yaml project (sandbox, canton-console) use the core/daml.yaml SDK, not the active one.
+DPM_SDK_VERSION="$(sed -n 's/^sdk-version: //p' "${REPO_ROOT}/canton/core/daml.yaml")"
+if [[ ! "${DPM_SDK_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "canton/core/daml.yaml sdk-version '${DPM_SDK_VERSION}' is not MAJOR.MINOR.PATCH" >&2
+  exit 1
+fi
+export DPM_SDK_VERSION
 WORK_DIR="$(mktemp -d /tmp/guardian-governance-test.XXXXXX)"
 SANDBOX_PID=""
 FAILURES=0
@@ -87,7 +94,7 @@ fi
 # NTT repository (NTT_REPO_DIR, default ../ntt) carries ntt and
 # token-cip0056. ---
 log "building wormhole-core DAR"
-(cd "${REPO_ROOT}/canton" && dpm build --all >/dev/null)
+(cd "${REPO_ROOT}/canton" && env -u DPM_SDK_VERSION dpm build --all >/dev/null)
 CORE_VERSION="$(awk '/^version:/ {print $2}' "${REPO_ROOT}/canton/core/daml.yaml")"
 CORE_DAR="${REPO_ROOT}/canton/core/.daml/dist/wormhole-core-${CORE_VERSION}.dar"
 GENESIS_DAR="${NTT_REPO_DIR:-${REPO_ROOT}/../ntt}/canton/genesis/.daml/dist/wormhole-genesis-0.1.0.dar"

@@ -30,16 +30,7 @@ for owner_index in 1 2 3; do
   node "$KEY_TOOL" generate "$LOCALNET_STATE_DIR/gg-keys/owner$owner_index" >/dev/null
 done
 
-# guardian_governance.canton targets the Canton 3.5 console of dpm. Canton 3.7 moved NonEmpty.
-readonly CONSOLE_SCRIPT="$LOCALNET_STATE_DIR/guardian_governance.canton"
-sed 's/^import com\.daml\.nonempty\.NonEmpty$/import com.digitalasset.nonempty.NonEmpty/' \
-  "$DEVNET_DIR/guardian_governance.canton" > "$CONSOLE_SCRIPT"
-grep -qx 'import com.digitalasset.nonempty.NonEmpty' "$CONSOLE_SCRIPT" \
-  || { echo "the NonEmpty import patch did not apply to $CONSOLE_SCRIPT" >&2; exit 1; }
-if grep -q 'com\.daml\.nonempty' "$CONSOLE_SCRIPT"; then
-  echo "$CONSOLE_SCRIPT still imports com.daml.nonempty" >&2
-  exit 1
-fi
+readonly CONSOLE_SCRIPT="$DEVNET_DIR/guardian_governance.canton"
 
 run_party_setup() {
   local party_name="$1" key_dir="$2" key_prefixes=("$3" "$4" "$5") threshold="$6" hosts="$7"
