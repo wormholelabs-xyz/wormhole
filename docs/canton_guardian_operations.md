@@ -794,6 +794,7 @@ Check the offer:
 9. For a first genesis, make sure that `genesisKind` is `FirstGenesis`.
 10. For a first genesis, make sure that `firstEmitterId` and `firstNttManagerId` are 0.
 11. For a first genesis, make sure that both lists of consumed governance digests are empty.
+    The `CoreState` precondition requires a key for each guardian only without governance history.
 
 Check the prepared transaction:
 
@@ -861,9 +862,12 @@ A governance VAA must have the signatures of the current set.
 2. Keep your participant online until `CoreState` shows the result of the VAA.
 3. Make sure that `CoreState` shows the new guardian set index.
 4. Make sure that `CoreState` shows the expiry time of the old set.
-5. Make sure that each member of the new set has a public key.
-   A new guardian has no key after the upgrade. Any party adds it with `AttachGuardianPublicKeys`.
-   A VAA with a signature of a guardian without a key fails.
+5. Immediately after the upgrade, submit `AttachGuardianPublicKeys` with the key of each new guardian.
+   This step is mandatory. The upgrade keeps only the keys of guardians that were in a stored set.
+   Any party can submit the attach.
+6. Make sure that each member of the new set has a public key.
+   A signature of a guardian without a key fails the VAA, also when the keyed signers reach the quorum.
+   Until the attach, a relayer can remove those signatures. The digest stays the same.
 
 LocalNet rehearsal: [`gg_guardian_set_rotation.sh`](../canton/localnet/gg_guardian_set_rotation.sh).
 The rehearsal checks these results:

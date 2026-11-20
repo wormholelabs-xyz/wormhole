@@ -925,11 +925,20 @@ Thus the public keys come into the ledger on two paths:
    The `CoreState` precondition rejects a state without governance history if a guardian has no key.
    Each governance VAA records its digest, and an attach only adds keys.
    Thus the rule applies only to genesis, and a new guardian after an upgrade can wait for its key.
+   The rule depends on an empty governance history at genesis.
+   The `wormhole-genesis` package (NTT repository) creates the genesis `CoreState`.
+   It must pass each guardian key and an empty governance history.
+   `first_genesis_parameters` in `localnet/gg_offline_lib.sh` requires a public key for each guardian.
 2. **`AttachGuardianPublicKeys`.** Any party submits the keys of a stored set that is active.
 
 At an upgrade, each new member gets the key of the same address from a stored set.
-A usual upgrade changes one guardian, so the other keys stay and a quorum verifies at once.
-A relayer then attaches the key of each new guardian. It gets the key from a signature of that guardian.
+`verifyVAA` checks each signature in the VAA. A signature of a guardian without a key fails the VAA,
+also when the keyed signers reach the quorum.
+Thus attach the key of each new guardian with `AttachGuardianPublicKeys` immediately after each `GuardianSetUpgrade`.
+Get each key from a signature of that guardian.
+Until the attach, a relayer can remove the signatures of guardians without a key.
+The signatures are not part of the signed body, so the digest stays the same.
+The VAA verifies if the remaining signatures reach the quorum.
 
 `AttachGuardianPublicKeys` has these rules:
 
@@ -956,8 +965,9 @@ The disclosed `CoreState` contains the addresses and the public keys of each sto
 Thus an integrator needs no other source for guardian keys (Linear CORE-4098).
 
 **Size.** A 19-guardian set with all keys is about 4.4 KB, and about 1.2 KB without keys.
+Thus the keys add about 3 KB for each stored set, and `CoreState` stores at most four sets.
 `CoreState` keeps at most four sets.
-Each verify and each publish discloses `CoreState`, so a steady-state transaction carries about 3 KB more.
+Each verify and each publish discloses `CoreState`. A transaction carries about 3 KB more for each stored set.
 A verify command no longer carries about 2 KB of key hints.
 
 ### Validation status
