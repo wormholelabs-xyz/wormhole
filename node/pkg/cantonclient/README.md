@@ -87,5 +87,5 @@ published message through this client end-to-end:
 go test -tags integration -run TestCantonWatcherIntegration ./pkg/watchers/canton -v
 ```
 
-It is skipped unless `dpm` (+ a JDK) is available, and is excluded from the
-default build.
+The test runs only when `dpm` and a Java 21 JDK are available. The default build
+excludes it.
