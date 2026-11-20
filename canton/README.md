@@ -581,8 +581,12 @@ Thus replay protection holds for each consumed digest, as on EVM, Sui and Solana
 These runtimes keep each record permanently; Canton keeps 32 records and the floor.
 The floor also rejects a new VAA with an old timestamp.
 
-**Timestamp rule for governance proposals.** Each governance VAA for Canton must have a new timestamp.
+**Timestamp rule for governance proposals.** Each governance VAA for Canton except `GuardianSetUpgrade` must have a new timestamp.
 The timestamp must be more than the current `evictedGovernanceMaxTimestampSeconds`.
+A `GuardianSetUpgrade` at or below the floor applies, and `CoreState` does not record its digest.
+Its replay fails, because it needs the current-set signature and `newIndex == current + 1`.
+The index only increases.
+If the floor rejected it, no quorum of the old set could sign it again after the other chains move to the new set.
 To read the floor, read `evictedGovernanceMaxTimestampSeconds` in the `createArgument` of the active `CoreState`.
 Use the Ledger API endpoint `/v2/state/active-contracts`. The value `null` means that no floor applies.
 A VAA at or below the floor fails with `governance: VAA timestamp at or below the evicted governance timestamp floor`.
