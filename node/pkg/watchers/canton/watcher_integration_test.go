@@ -110,6 +110,7 @@ func startSandbox(t *testing.T, ctx context.Context) (dpm, dar, port string) {
 	conn, err := net.DialTimeout("tcp", "localhost:"+port, 5*time.Second)
 	require.NoErrorf(t, err, "sandbox Ledger API not listening on port %s", port)
 	_ = conn.Close()
+	checkSandboxRunsPinnedSDKVersion(t, cantonDir, port)
 	return dpm, dar, port
 }
 
