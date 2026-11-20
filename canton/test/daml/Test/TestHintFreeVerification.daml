@@ -6,7 +6,7 @@ import Daml.Script
 import DA.Assert ((===))
 import DA.Foldable (forA_)
 import DA.Map qualified as Map
-import DA.Optional (fromSome)
+import DA.Optional (fromSome, isSome)
 import DA.Text qualified as T
 import DA.Time (seconds)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
@@ -16,7 +16,10 @@ import Wormhole.Core.GuardianSet
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
-import Wormhole.Core.VAA ()
+import Wormhole.Core.VAA (parseVAA)
+import Test.TestRedTeamCore
+  ( redTeamGuardianPubKey1, redTeamGuardianPubKey2, redTeamGuardianPubKey3, rtAppMessageBySet1AllSigners
+  , rtGuardianSetUpgradeToSet1 )
 import Test.TestCore
   ( devnetGenesisGuardian, devnetGuardian, devnetGuardianMember, devnetGuardianPubKey, devnetGuardianSet1Key, devnetGuardianSet1PubKey
   , govGuardianSetUpgradeVAA, govSetFeeVAA, numberCases, set1MessageVAA, setup )
@@ -109,7 +112,12 @@ testAttachGuardianPublicKeys = do
         , AttachCase "key of another guardian" 1 [devnetGuardianPubKey] (Some "derives no guardian address of set 1")
         , AttachCase "key of set 1 to set 0" 0 [devnetGuardianSet1PubKey] (Some "derives no guardian address of set 0")
         , AttachCase "empty key list" 1 [] (Some "attach: no public keys")
-        , AttachCase "duplicate key" 1 [devnetGuardianSet1PubKey, devnetGuardianSet1PubKey] (Some "attach: duplicate public key")
+        , AttachCase "two keys for a one-guardian set" 1 [devnetGuardianSet1PubKey, devnetGuardianPubKey]
+            (Some "attach: more public keys than guardians")
+        , AttachCase "duplicate key above the set size" 1 [devnetGuardianSet1PubKey, devnetGuardianSet1PubKey]
+            (Some "attach: more public keys than guardians")
+        , AttachCase "256 keys" 1 (replicate 256 devnetGuardianSet1PubKey)
+            (Some "attach: more than 255 public keys")
         , AttachCase "key already attached" 0 [devnetGuardianPubKey] (Some "attach: public key already attached at position 0")
         , AttachCase "unknown set index" 5 [devnetGuardianSet1PubKey] (Some "attach: unknown guardian set index 5")
         ]
@@ -283,3 +291,60 @@ testGenesisRequiresEveryGuardianKey = do
           consumedGovernance = if genesisCase.hasGovernanceHistory then Map.singleton governanceDigest 0 else Map.empty
     createResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do createCmd coreState
     checkSubmitOutcome genesisCase.caseName genesisCase.expectedErrorFragment createResult
+
+-- | The VAA without its last signature. Signatures sit outside the signed body,
+-- so the digest stays the same.
+dropLastSignature : EncodedVaa -> EncodedVaa
+dropLastSignature encodedVaa =
+  let encoded = hexBytesOf encodedVaa
+      signatureCount = bytesToInt (sliceBytes 5 1 encoded)
+      keptSignaturesEnd = 6 + (signatureCount - 1) * 66
+  in parseHexBytesAsOrAbort
+       (sliceBytes 0 5 encoded <> intToHexByte (signatureCount - 1)
+         <> sliceBytes 6 (keptSignaturesEnd - 6) encoded <> sliceFrom (keptSignaturesEnd + 66) encoded)
+
+-- | Set 1 has four guardians (quorum 3); the upgrade carries the key of guardian 0.
+-- A partial attach keys guardians 1 and 2. A VAA with a keyed quorum and one
+-- unkeyed signer fails; without that signature it verifies; after the last
+-- attach, the full VAA verifies.
+testUnkeyedSignerFailsKeyedQuorum : Script ()
+testUnkeyedSignerFailsKeyedQuorum = do
+  (guardianGovernance, genesisCid) <- setup
+  relayer <- allocateParty "UnkeyedSignerRelayer"
+  upgradedCid <- submit guardianGovernance do
+    exerciseCmd genesisCid SubmitGovernanceVAA with submitter = guardianGovernance, encodedVAA = rtGuardianSetUpgradeToSet1
+  attachAs guardianGovernance relayer upgradedCid 1 [redTeamGuardianPubKey1, redTeamGuardianPubKey1]
+    >>= checkSubmitOutcome "duplicate key on a four-guardian set" (Some "attach: duplicate public key")
+  Right partiallyKeyedCid <- attachAs guardianGovernance relayer upgradedCid 1 [redTeamGuardianPubKey1, redTeamGuardianPubKey2]
+  Some partiallyKeyed <- queryContractId guardianGovernance partiallyKeyedCid
+  let set1 = fromSome (Map.lookup 1 partiallyKeyed.guardianSets)
+  map (isSome . (.publicKey)) set1.members === [True, True, True, False]
+  let withoutUnkeyedSigner = dropLastSignature rtAppMessageBySet1AllSigners
+  (parseVAA withoutUnkeyedSigner).hash === (parseVAA rtAppMessageBySet1AllSigners).hash
+  length (parseVAA withoutUnkeyedSigner).signatures === 3
+  verifyAs guardianGovernance relayer partiallyKeyedCid rtAppMessageBySet1AllSigners
+    >>= checkSubmitOutcome "keyed quorum plus one unkeyed signer" (Some "no public key attached for guardian index 3")
+  verifyAs guardianGovernance relayer partiallyKeyedCid withoutUnkeyedSigner
+    >>= checkVerifiedBySet "unkeyed signature dropped" 1
+  Right fullyKeyedCid <- attachAs guardianGovernance relayer partiallyKeyedCid 1 [redTeamGuardianPubKey3]
+  verifyAs guardianGovernance relayer fullyKeyedCid rtAppMessageBySet1AllSigners
+    >>= checkVerifiedBySet "all four keyed" 1
+
+-- | Carry-over reads only the stored sets: a guardian re-added after its keyed
+-- set was pruned gets no key and needs a new attach.
+testGuardianReaddedAfterPruneHasNoKey : Script ()
+testGuardianReaddedAfterPruneHasNoKey = do
+  guardianGovernance <- allocateParty "ReaddedGovernance"
+  feeCustody <- allocateParty "ReaddedFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "ReaddedUnusedFeeInstrumentAdmin"
+  now <- getTime
+  let set1AfterSet0Pruned = GuardianSet with members = [devnetGuardianSet1Member], expirationTime = None
+      stateAtSet1 = (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+        GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
+        (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") feeCustody) with
+          guardianSetIndex = 1
+          guardianSets = Map.fromList [(1, set1AfterSet0Pruned)]
+  case applyGovernance stateAtSet1 now (GuardianSetUpgrade with chain = 0, newIndex = 2, newKeys = [devnetGuardian, devnetGuardianSet1Key]) of
+    Left message -> abort ("upgrade rejected: " <> message)
+    Right upgraded -> (fromSome (Map.lookup 2 upgraded.guardianSets)).members
+      === [(devnetGuardianMember with publicKey = None), devnetGuardianSet1Member]

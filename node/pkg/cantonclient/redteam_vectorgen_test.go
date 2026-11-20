@@ -261,6 +261,10 @@ func redTeamDamlHexFixtures() []damlHexFixture {
 			guardianSetIndex: 0, signers: set0Signer, emitterChain: redTeamAppEmitterChain, emitterAddress: appEmitter,
 			sequence: 1, payload: []byte("hello"),
 		}),
+		redTeamVAAFixture("rtAppMessageBySet1AllSigners", redTeamVAASpec{
+			guardianSetIndex: 1, signers: redTeamSignersInOrder(0, 1, 2, 3), emitterChain: redTeamAppEmitterChain, emitterAddress: appEmitter,
+			sequence: 3, payload: []byte("hello"),
+		}),
 		redTeamVAAFixture("rtAppMessageEmptyPayloadBySet0", redTeamVAASpec{
 			guardianSetIndex: 0, signers: set0Signer, emitterChain: redTeamAppEmitterChain, emitterAddress: appEmitter,
 			sequence: 2, payload: []byte{},
