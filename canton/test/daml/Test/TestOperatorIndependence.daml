@@ -595,16 +595,16 @@ testOnboardingFeeAdminChangesOnlyOnboardingFees = do
   repricedReplayRegistryDisclosure <- discloseAsGuardianGovernance bridge repricedReplayRegistryCid
   let withRepricedRegistries = disclose repricedRegistryDisclosure <> disclose repricedReplayRegistryDisclosure
 
-  -- Rows 3 and 4: the template precondition bounds each fee.
+  -- Rows 3 and 4: each fee setter asserts the bounds of its fee.
   oversizedFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
     exerciseCmd repricedRegistryCid SetRegistrationFee with newRegistrationFee = maxOnboardingFee + 1
-  checkFailsOnPrecondition "registration fee above maxOnboardingFee" oversizedFeeResult
+  checkAttackFailedWith "registration fee above maxOnboardingFee" "registration fee exceeds maxOnboardingFee" oversizedFeeResult
   negativeClaimFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
     exerciseCmd repricedReplayRegistryCid SetClaimFee with newClaimFee = -1
-  checkFailsOnPrecondition "negative claim fee" negativeClaimFeeResult
+  checkAttackFailedWith "negative claim fee" "claim fee must not be negative" negativeClaimFeeResult
   oversizedClaimFeeResult <- trySubmit (actAs feeAdmin <> withRepricedRegistries) do
     exerciseCmd repricedReplayRegistryCid SetClaimFee with newClaimFee = maxOnboardingFee + 1
-  checkFailsOnPrecondition "claim fee above maxOnboardingFee" oversizedClaimFeeResult
+  checkAttackFailedWith "claim fee above maxOnboardingFee" "claim fee exceeds maxOnboardingFee" oversizedClaimFeeResult
 
   -- Rows 5 to 10 and 13: each attack fails on authorization.
   let feeAdminAttacks =

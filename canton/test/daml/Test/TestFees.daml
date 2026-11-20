@@ -245,7 +245,7 @@ testRegistrationFee = do
   bal2 === feeToDecimal 1000
 
 -- | Only the onboarding fee admin sets the registration fee. The fee change
--- keeps @nextId@, the template precondition rejects a negative fee or one above
+-- keeps @nextId@, the choice rejects a negative fee or one above
 -- maxOnboardingFee, and the next registration pays the new fee.
 testSetRegistrationFee : Script ()
 testSetRegistrationFee = do
@@ -270,11 +270,14 @@ testSetRegistrationFee = do
       Left otherError -> abort ("SetRegistrationFee from " <> submitterName <> ": " <> show otherError)
       Right _ -> abort ("SetRegistrationFee accepted from " <> submitterName)
 
-  forA_ [("a negative fee", -1), ("a fee above maxOnboardingFee", maxOnboardingFee + 1)] \(caseName, newRegistrationFee) -> do
+  forA_
+    [ ("a negative fee", -1, "registration fee must not be negative")
+    , ("a fee above maxOnboardingFee", maxOnboardingFee + 1, "registration fee exceeds maxOnboardingFee")
+    ] \(caseName, newRegistrationFee, expectedText) -> do
     setFeeResult <- trySubmit (actAs feeAdmin <> disclose registryDisclosure) do
       exerciseCmd regCid SetRegistrationFee with newRegistrationFee
     case setFeeResult of
-      Left setFeeError | "precondition" `isInfixOf` show setFeeError -> pure ()
+      Left setFeeError | expectedText `isInfixOf` show setFeeError -> pure ()
       Left otherError -> abort ("SetRegistrationFee with " <> caseName <> ": " <> show otherError)
       Right _ -> abort ("SetRegistrationFee accepted " <> caseName)
 
