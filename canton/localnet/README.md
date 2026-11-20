@@ -452,10 +452,11 @@ A host that connects again in that period can still confirm it.
    `node/hack/canton_localnet_vaa` makes and signs the VAAs.
 
 2. Make sure that the output shows these results:
+   - Each member of the new set has a public key after `AttachGuardianPublicKeys`.
    - A VAA of the new set passes `ParseAndVerifyVAA`.
    - A VAA of the old set passes until the expiry time.
    - A governance VAA of the old set fails with `governance: not signed by current guardian set`.
-   - A VAA of the new set with an old key at index 0 fails with `public key does not match guardian address at index 0`.
+   - A VAA of the new set with an old key at index 0 fails with `invalid signature for guardian index 0`.
 
 NOTE: The rotation from set 0 to set 1 uses sets of one guardian.
 The quorum of a one-guardian set is 1.
@@ -730,8 +731,8 @@ These scripts run the Wormhole NTT layer on LocalNet.
 The NTT packages come from the NTT repository, branch `canton/migrate-ntt-layer`, commit `b2c355d`.
 Set `NTT_REPO_DIR` to the root of that checkout.
 The default is `../ntt`, next to this repository.
-`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.11.1, `ntt` 0.5.0, `wormhole-genesis` 0.1.0 and `token-cip0056` 0.2.0.
-The pinned `ntt` and `wormhole-genesis` DARs call `wormhole-core` 0.9.0. Thus `ntt_upload_dars.sh` rejects them until they are rebuilt on 0.11.1 and pinned (CORE-4095).
+`ntt_lib.sh` pins the package IDs of `wormhole-core` 0.12.0, `ntt` 0.5.0, `wormhole-genesis` 0.1.0 and `token-cip0056` 0.2.0.
+The pinned `ntt` and `wormhole-genesis` DARs call `wormhole-core` 0.9.0. Thus `ntt_upload_dars.sh` rejects them until they are rebuilt on 0.12.0 and pinned (CORE-4095).
 `ntt_upload_dars.sh` stops if a DAR has a different package ID.
 `ntt_pinned_package_id` in `ntt_offline_lib.sh` holds the package ID of each `ntt` version.
 `nttCustody` is a signatory of `NttGovernance` and `NttManager`.
@@ -762,7 +763,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 
 | Step | Script | Result |
 | --- | --- | --- |
-| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.11.1. |
+| 1 | `ntt_upload_dars.sh` | Each participant vets each package of the `ntt` DAR, and no `wormhole-core` newer than 0.12.0. |
 | 2 | `ntt_governance.sh` | One `NttGovernance` root and one `CoinFactory` exist. |
 | 3 | `ntt_watcher.sh start` | The watcher harness reads `app-provider`. |
 | 4 | `ntt_burn_mint.sh` | A relayer mints 2.5 tokens to a user. The user burns 1.0 token. |
@@ -780,7 +781,7 @@ To run one step only, use the step script. Run the steps in the sequence of the 
 - The script makes sure that `guardianGovernance` is the instrument admin of each minted `Coin`.
 - The relayer submits the same `Mint` VAA again. The ledger rejects it with `digest already consumed`.
 - The relayer submits a `Mint` VAA that devnet key 9 signs for guardian 0.
-  The ledger rejects it with `public key does not match guardian address at index 0`.
+  The ledger rejects it with `invalid signature for guardian index 0`.
 - The user submits `Transfer`. The canonical `CoinFactory` burns the token.
 
 ### Lock/unlock deployment of Canton Coin

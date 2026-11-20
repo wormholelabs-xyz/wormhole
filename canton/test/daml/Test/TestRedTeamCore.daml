@@ -12,6 +12,7 @@ import DA.Assert ((===))
 import DA.Exception (GeneralError(..), throw)
 import DA.Foldable (forA_)
 import DA.List (sort)
+import DA.Map qualified as Map
 import DA.Optional (catOptionals, fromSome, optionalToList)
 import DA.Text qualified as T
 import DA.Time (microseconds, seconds)
@@ -21,12 +22,12 @@ import Splice.Api.Token.AllocationV1 (Allocation)
 import Wormhole.Core.Bytes
 import Wormhole.Core.Fees (FeeChargeParties(..), feeToDecimal)
 import Wormhole.Core.Governance
-import Wormhole.Core.GuardianSet (guardianSetExpirySeconds)
+import Wormhole.Core.GuardianSet (attachedPublicKeyCount, guardianSetExpirySeconds)
 import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (VAA)
 import Test.MockToken
-import Test.TestCore (setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGuardianPubKey, devnetGuardian)
+import Test.TestCore (setup, setupWithInstrument, registerEmitter, publishVia, govSetFeeVAA, devnetGenesisGuardian)
 
 ----------------------------------------------------------------------
 -- Generated fixtures (CANTON_VECTORGEN=write rewrites these)
@@ -119,6 +120,9 @@ rtGuardianSetUpgradeDuplicateAddress = parseHexTextOrAbort "01000000000100f9073c
 rtAppMessageBySet0 : EncodedVaa
 rtAppMessageBySet0 = parseHexTextOrAbort "01000000000100b7548e756f828db7766338fe68d638879110c3ef200d3489668da6c0e0d23ddc264b61be4b4032da30b7a5e26fe45cde18139600c7322ad57c1090861e47a33f006553f10000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000010068656c6c6f"
 
+rtAppMessageBySet1AllSigners : EncodedVaa
+rtAppMessageBySet1AllSigners = parseHexTextOrAbort "01000000010400a0d18db2827151f8e8b497be10f45c27d459f75ee9a685a84ff7dac2ba239d8f4dd45e15677ef227d0b0274077152bb77c1615e3f83328d5f307eea94565076f0001f2a11eacadc48dd34a74faadcd5f2e9985716100e615fa5b0c36c0df90d6e6171e7a8a1d4f9cd5fac23f15cdc0d4c836b15b23c7eeabeeaadb76e7bec533adf7010217d0da63523ad92d8e9fb57f7df9b46ee2fd61d7a10cca6ba84fd8ef3d43d36c47f86ea6054a541ab924fcdc8ba226f14cf489f1524ec42fa276a87ee1a023c60103f4b68b83c5fbf81927aa5450f38354a4984e953a8dd90e454168a5414c8a91101ff320ff15898eb8a63a412a1c4595ee5a745d9a0e71fc6fbd72edc71c8b2782006553f10000000000000200000000000000000000000000000000000000000000000000000000000000aa00000000000000030068656c6c6f"
+
 rtAppMessageEmptyPayloadBySet0 : EncodedVaa
 rtAppMessageEmptyPayloadBySet0 = parseHexTextOrAbort "01000000000100f1c92fe71d26b52b6d00ac8f41125d78fc241a10ec98adb5d09033d96601728f3acd881088e4bf15766be28b6a29e241790da92583cbe347301a9733e319cde6016553f10000000000000200000000000000000000000000000000000000000000000000000000000000aa000000000000000200"
 
@@ -126,12 +130,9 @@ rtAppMessageEmptyPayloadBySet0 = parseHexTextOrAbort "01000000000100f1c92fe71d26
 -- Helpers
 ----------------------------------------------------------------------
 
-set0PubKeys : [(Int, GuardianPublicKey)]
-set0PubKeys = [(0, devnetGuardianPubKey)]
-
-set1PubKeys : [(Int, GuardianPublicKey)]
-set1PubKeys =
-  [(0, devnetGuardianPubKey), (1, redTeamGuardianPubKey1), (2, redTeamGuardianPubKey2), (3, redTeamGuardianPubKey3)]
+-- | Keys of set 1 that the upgrade does not carry over: devnet key 0 is a set 0 member.
+set1NewGuardianPublicKeys : [GuardianPublicKey]
+set1NewGuardianPublicKeys = [redTeamGuardianPubKey1, redTeamGuardianPubKey2, redTeamGuardianPubKey3]
 
 checkAttackFailedWith : Text -> Text -> Either SubmitError a -> Script ()
 checkAttackFailedWith attack expectedSubstring submitResult = do
@@ -155,31 +156,38 @@ checkNoAttackAccepted : Text -> [Text] -> Script ()
 checkNoAttackAccepted finding acceptedAttacks =
   assertMsg (finding <> ": attacks accepted: " <> show acceptedAttacks) (null acceptedAttacks)
 
-submitGovernance : Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script (ContractId CoreState)
-submitGovernance submitter coreStateCid encodedVAA pubKeys = submit submitter do
-  exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA, pubKeys
+submitGovernance : Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
+submitGovernance submitter coreStateCid encodedVAA = submit submitter do
+  exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA
 
-checkGovernanceRejectedWith : Text -> Text -> Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script ()
-checkGovernanceRejectedWith attack expectedSubstring submitter coreStateCid encodedVAA pubKeys = do
+checkGovernanceRejectedWith : Text -> Text -> Party -> ContractId CoreState -> EncodedVaa -> Script ()
+checkGovernanceRejectedWith attack expectedSubstring submitter coreStateCid encodedVAA = do
   submitResult <- trySubmit submitter do
-    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA, pubKeys
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter, encodedVAA
   checkAttackFailedWith attack expectedSubstring submitResult
 
-verifyVAA : Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script VAA
-verifyVAA verifier coreStateCid encodedVAA pubKeys = submit verifier do
-  exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA, pubKeys
+verifyVAA : Party -> ContractId CoreState -> EncodedVaa -> Script VAA
+verifyVAA verifier coreStateCid encodedVAA = submit verifier do
+  exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA
 
-checkVerifyRejectedWith : Text -> Text -> Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script ()
-checkVerifyRejectedWith attack expectedSubstring verifier coreStateCid encodedVAA pubKeys = do
+checkVerifyRejectedWith : Text -> Text -> Party -> ContractId CoreState -> EncodedVaa -> Script ()
+checkVerifyRejectedWith attack expectedSubstring verifier coreStateCid encodedVAA = do
   submitResult <- trySubmit verifier do
-    exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA, pubKeys
+    exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA
   checkAttackFailedWith attack expectedSubstring submitResult
 
+-- | Applies 'rtGuardianSetUpgradeToSet1', then attaches the keys of its new guardians.
 upgradeToSet1 : Party -> ContractId CoreState -> Script (ContractId CoreState)
 upgradeToSet1 guardianGovernance coreStateCid = do
-  set1CoreStateCid <- submitGovernance guardianGovernance coreStateCid rtGuardianSetUpgradeToSet1 set0PubKeys
+  upgradedCid <- submitGovernance guardianGovernance coreStateCid rtGuardianSetUpgradeToSet1
+  Some upgradedState <- queryContractId guardianGovernance upgradedCid
+  upgradedState.guardianSetIndex === 1
+  attachedPublicKeyCount (fromSome (Map.lookup 1 upgradedState.guardianSets)) === 1
+  set1CoreStateCid <- submit guardianGovernance do
+    exerciseCmd upgradedCid AttachGuardianPublicKeys with
+      submitter = guardianGovernance, targetGuardianSetIndex = 1, guardianPublicKeys = set1NewGuardianPublicKeys
   Some set1CoreState <- queryContractId guardianGovernance set1CoreStateCid
-  set1CoreState.guardianSetIndex === 1
+  attachedPublicKeyCount (fromSome (Map.lookup 1 set1CoreState.guardianSets)) === 4
   pure set1CoreStateCid
 
 -- | @byteCount@ bytes of 0xab.
@@ -235,7 +243,7 @@ testRedTeamA1FeeCannotBeSkipped = do
       expectedGuardianGovernance = guardianGovernance
   checkAttackFailedWith "A1 ClaimReplayRoot without CoreState" "claim fee due" claimResult
 
-  feeCoreStateCid <- submitGovernance guardianGovernance coreStateCid govSetFeeVAA set0PubKeys
+  feeCoreStateCid <- submitGovernance guardianGovernance coreStateCid govSetFeeVAA
   coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance feeCoreStateCid
   publishResult <- trySubmit (actAs registrant <> disclose coreStateDisclosure) do
     exerciseCmd emitterCid PublishMessage with
@@ -251,54 +259,55 @@ testRedTeamA6GuardianSetUpgradeRules : Script ()
 testRedTeamA6GuardianSetUpgradeRules = do
   (guardianGovernance, coreStateCid) <- setup
   checkGovernanceRejectedWith "A6 upgrade skips an index" "index must be current + 1"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeSkipsIndex set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeSkipsIndex
   checkGovernanceRejectedWith "A6 upgrade to the same index" "index must be current + 1"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeSameIndex set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeSameIndex
   checkGovernanceRejectedWith "A6 upgrade from a wrong emitter chain" "wrong emitter chain"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterChain set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterChain
   checkGovernanceRejectedWith "A6 upgrade from a wrong emitter address" "wrong emitter address"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongEmitterAddress
   checkGovernanceRejectedWith "A6 upgrade for another chain" "wrong target chain"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongTargetChain set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeWrongTargetChain
   checkGovernanceRejectedWith "A6 upgrade to an empty set" "empty set"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeEmptySet set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeEmptySet
   checkGovernanceRejectedWith "A6 upgrade with a zero address" "zero address at position 1"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeZeroAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeZeroAddress
   checkGovernanceRejectedWith "A6 upgrade to only a zero address" "zero address at position 0"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeOnlyZeroAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeOnlyZeroAddress
   checkGovernanceRejectedWith "A6 upgrade with a duplicate address" "duplicate address"
-    guardianGovernance coreStateCid rtGuardianSetUpgradeDuplicateAddress set0PubKeys
+    guardianGovernance coreStateCid rtGuardianSetUpgradeDuplicateAddress
 
   set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
   checkGovernanceRejectedWith "A6 upgrade to a lower index" "index must be current + 1"
-    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeLowerIndexBySet1 set1PubKeys
+    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeLowerIndexBySet1
   checkGovernanceRejectedWith "A6 replay of the applied upgrade" "not signed by current guardian set"
-    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeToSet1 set0PubKeys
+    guardianGovernance set1CoreStateCid rtGuardianSetUpgradeToSet1
 
 testRedTeamA6QuorumAndSignerOrder : Script ()
 testRedTeamA6QuorumAndSignerOrder = do
   (guardianGovernance, coreStateCid) <- setup
   set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
   checkGovernanceRejectedWith "A6 two of four signatures" "no quorum"
-    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1BelowQuorum set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1BelowQuorum
   checkGovernanceRejectedWith "A6 duplicate signer index" "strictly ascending"
-    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1DuplicateSigner set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1DuplicateSigner
   checkGovernanceRejectedWith "A6 signatures out of order" "strictly ascending"
-    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1SignersOutOfOrder set1PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1SignersOutOfOrder
   checkGovernanceRejectedWith "A6 key 3 signs as guardian 0" "invalid signature for guardian index 0"
-    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex set1PubKeys
-  checkGovernanceRejectedWith "A6 key 3 signs as guardian 0 with its own public key"
-    "public key does not match guardian address at index 0"
     guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1WrongKeyAtIndex
-    [(0, redTeamGuardianPubKey3), (1, redTeamGuardianPubKey1), (2, redTeamGuardianPubKey2)]
+  attachKey3AgainResult <- trySubmit guardianGovernance do
+    exerciseCmd set1CoreStateCid AttachGuardianPublicKeys with
+      submitter = guardianGovernance, targetGuardianSetIndex = 1, guardianPublicKeys = [redTeamGuardianPubKey3]
+  checkAttackFailedWith "A6 key 3 attached a second time" "attach: public key already attached at position 3"
+    attachKey3AgainResult
   checkGovernanceRejectedWith "A6 signer index out of range" "guardian index out of range"
-    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1IndexOutOfRange (set1PubKeys <> [(7, redTeamGuardianPubKey3)])
-  supersededSetVAA <- verifyVAA guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1IndexOutOfRange
+  supersededSetVAA <- verifyVAA guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade
   supersededSetVAA.guardianSetIndex === 0
   checkGovernanceRejectedWith "A6 governance by the superseded set" "not signed by current guardian set"
-    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade set0PubKeys
+    guardianGovernance set1CoreStateCid rtSetMessageFeeBySet0AfterUpgrade
 
-  feeCoreStateCid <- submitGovernance guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1Quorum set1PubKeys
+  feeCoreStateCid <- submitGovernance guardianGovernance set1CoreStateCid rtSetMessageFeeBySet1Quorum
   Some feeCoreState <- queryContractId guardianGovernance feeCoreStateCid
   feeCoreState.messageFee === 7
 
@@ -309,17 +318,17 @@ testRedTeamA6ExpiredGuardianSet : Script ()
 testRedTeamA6ExpiredGuardianSet = do
   (guardianGovernance, coreStateCid) <- setup
   set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
-  verifiedAtUpgrade <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtUpgrade <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0
   verifiedAtUpgrade.guardianSetIndex === 0
   passTime (seconds guardianSetExpirySeconds)
-  verifiedAtExpiry <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtExpiry <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0
   verifiedAtExpiry.guardianSetIndex === 0
   passTime (microseconds 999999)
-  verifiedAtLastMicrosecond <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+  verifiedAtLastMicrosecond <- verifyVAA guardianGovernance set1CoreStateCid rtAppMessageBySet0
   verifiedAtLastMicrosecond.guardianSetIndex === 0
   passTime (microseconds 1)
   checkVerifyRejectedWith "A6 VAA signed by an expired set" "guardian set has expired"
-    guardianGovernance set1CoreStateCid rtAppMessageBySet0 set0PubKeys
+    guardianGovernance set1CoreStateCid rtAppMessageBySet0
 
 ----------------------------------------------------------------------
 -- A9: malformed VAAs
@@ -328,7 +337,7 @@ testRedTeamA6ExpiredGuardianSet = do
 testRedTeamA9MalformedEncodings : Script ()
 testRedTeamA9MalformedEncodings = do
   (guardianGovernance, coreStateCid) <- setup
-  _ <- verifyVAA guardianGovernance coreStateCid govSetFeeVAA set0PubKeys
+  _ <- verifyVAA guardianGovernance coreStateCid govSetFeeVAA
   let malformedCases =
         -- Odd length, 0x prefix, non-hex and inputs under 57 bytes are
         -- unrepresentable in 'EncodedVaa': Test.TestByteTypes and
@@ -342,23 +351,23 @@ testRedTeamA9MalformedEncodings = do
         , ("A9 version zero", "unsupported VAA version", replaceVaaByteAt 0 0 govSetFeeVAA)
         ]
   forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
-    checkVerifyRejectedWith attack expectedSubstring guardianGovernance coreStateCid encodedVAA set0PubKeys
+    checkVerifyRejectedWith attack expectedSubstring guardianGovernance coreStateCid encodedVAA
   forA_ malformedCases \(attack, expectedSubstring, encodedVAA) ->
-    checkGovernanceRejectedWith (attack <> " (governance)") expectedSubstring guardianGovernance coreStateCid encodedVAA set0PubKeys
+    checkGovernanceRejectedWith (attack <> " (governance)") expectedSubstring guardianGovernance coreStateCid encodedVAA
 
 testRedTeamA9MalformedGovernancePayloads : Script ()
 testRedTeamA9MalformedGovernancePayloads = do
   (guardianGovernance, coreStateCid) <- setup
   checkGovernanceRejectedWith "A9 TokenBridge module" "not the Core module"
-    guardianGovernance coreStateCid rtSetMessageFeeWrongModule set0PubKeys
+    guardianGovernance coreStateCid rtSetMessageFeeWrongModule
   checkGovernanceRejectedWith "A9 RecoverChainId action" "unsupported action 5"
-    guardianGovernance coreStateCid rtRecoverChainIDUnsupported set0PubKeys
+    guardianGovernance coreStateCid rtRecoverChainIDUnsupported
   checkGovernanceRejectedWith "A9 empty governance payload" "packet must be at least 35 bytes"
-    guardianGovernance coreStateCid rtGovernanceEmptyPayload set0PubKeys
+    guardianGovernance coreStateCid rtGovernanceEmptyPayload
   checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "ContractUpgrade packet must be 67 bytes"
-    guardianGovernance coreStateCid rtContractUpgradeTruncated set0PubKeys
+    guardianGovernance coreStateCid rtContractUpgradeTruncated
   checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" "governance: SetMessageFee fee exceeds the Int range"
-    guardianGovernance coreStateCid rtSetMessageFeeOverflowsInt64 set0PubKeys
+    guardianGovernance coreStateCid rtSetMessageFeeOverflowsInt64
 
 -- | EVM GovernanceStructs.sol requires @encoded.length == index@ for every
 -- action; a guardian-signed packet with trailing bytes must not apply.
@@ -367,11 +376,11 @@ testRedTeamA9GovernancePayloadExactLength = do
   (setFeeGovernance, setFeeCoreStateCid) <- setup
   setFeeResult <- trySubmit setFeeGovernance do
     exerciseCmd setFeeCoreStateCid SubmitGovernanceVAA with
-      submitter = setFeeGovernance, encodedVAA = rtSetMessageFeeTrailingByte, pubKeys = set0PubKeys
+      submitter = setFeeGovernance, encodedVAA = rtSetMessageFeeTrailingByte
   (upgradeGovernance, upgradeCoreStateCid) <- setup
   upgradeResult <- trySubmit upgradeGovernance do
     exerciseCmd upgradeCoreStateCid SubmitGovernanceVAA with
-      submitter = upgradeGovernance, encodedVAA = rtGuardianSetUpgradeTrailingByte, pubKeys = set0PubKeys
+      submitter = upgradeGovernance, encodedVAA = rtGuardianSetUpgradeTrailingByte
   checkNoAttackAccepted "A9 governance payload with a trailing byte"
     ([ "SetMessageFee" | isAttackAccepted setFeeResult ] <> [ "GuardianSetUpgrade" | isAttackAccepted upgradeResult ])
 
@@ -491,7 +500,7 @@ testParseGovernanceRequiresExactPacketLength = do
 testRedTeamA9EmptyApplicationPayloadVerifies : Script ()
 testRedTeamA9EmptyApplicationPayloadVerifies = do
   (guardianGovernance, coreStateCid) <- setup
-  verified <- verifyVAA guardianGovernance coreStateCid rtAppMessageEmptyPayloadBySet0 set0PubKeys
+  verified <- verifyVAA guardianGovernance coreStateCid rtAppMessageEmptyPayloadBySet0
   verified.payload === parseHexTextOrAbort ""
   verified.sequence === 2
 
@@ -787,7 +796,7 @@ setupPaidChargeBridge messageFeeAtSetup = do
     createCmd (mkInitialReplayRootRegistry registryParties (feeDueAtChargePoint ChargeOnClaimReplayRoot))
   coreStateCid <- case messageFeeAtSetup of
     MessageFeeZero -> pure genesisCoreStateCid
-    MessageFeeRaised -> submitGovernance guardianGovernance genesisCoreStateCid govSetFeeVAA set0PubKeys
+    MessageFeeRaised -> submitGovernance guardianGovernance genesisCoreStateCid govSetFeeVAA
   Some coreState <- queryContractId guardianGovernance coreStateCid
   coreState.messageFee === (if messageFeeAtSetup == MessageFeeRaised then feeDueAtChargePoint ChargeOnPublish else 0)
   pure PaidChargeBridge with
@@ -941,7 +950,7 @@ testCoreStateFeeRecipientIsADistinctCustodyParty = do
   feeInstrumentAdmin <- allocateParty "F1GenesisFeeInstrumentAdmin"
   let genesisState feeRecipient admin = mkInitialCoreState guardianGovernance
         solanaGovernanceChainId defaultGovernanceContract
-        (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+        (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
         (InstrumentId with admin, id = "UNUSED") feeRecipient
       bothSigners = actAs guardianGovernance <> actAs feeCustody
       -- Columns: case name | submitters | feeRecipient | fee instrument admin | expected outcome
@@ -982,7 +991,7 @@ testCoreStateEnsureRejectsInconsistentGenesis = do
   feeCustody <- allocateParty "EnsureFeeCustody"
   feeInstrumentAdmin <- allocateParty "EnsureFeeInstrumentAdmin"
   let consistentGenesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId
-        defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+        defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
         (InstrumentId with admin = feeInstrumentAdmin, id = "UNUSED") feeCustody
       bothSigners = actAs guardianGovernance <> actAs feeCustody
       -- Columns: case name | submitters | CoreState | expected outcome
@@ -1012,7 +1021,7 @@ testRedTeamF1FeeInstrumentAdminCannotPublishOnGuardianGovernanceEmitter = do
       registryParties = RegistryParties with guardianGovernance, onboardingFeeAdmin = guardianGovernance
   genesisResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do
     createCmd (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-      (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian]) guardianGovernanceInstrument feeCustody)
+      (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]) guardianGovernanceInstrument feeCustody)
   case genesisResult of
     Left _ -> checkNoAttackAccepted "B1 genesis"
       (optionalToList (describeUnexpectedCoreStateCreate "fee instrument admin is guardianGovernance"

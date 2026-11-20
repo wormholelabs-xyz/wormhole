@@ -25,13 +25,13 @@ import DA.Optional (fromSome)
 import DA.Text (isInfixOf)
 import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
-import Wormhole.Core.GuardianSet (GuardianSet(..))
+import Wormhole.Core.GuardianSet (GuardianSet(..), GuardianSetMember(..))
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Wormhole.Core.VAA (parseVAA)
 import Test.TestCore
-  ( setup, govSetFeeVAA, devnetGuardian, devnetGuardianPubKey
+  ( setup, govSetFeeVAA, devnetGenesisGuardian
   , set1MessageVAA, devnetGuardianSet1Key, devnetGuardianSet1PubKey )
 import Test.TestReplay (registerReplayRoot, coveringDisclosure)
 
@@ -71,7 +71,6 @@ template ExampleIntegrator
         coreStateCid  : ContractId CoreState
         replayNodeCid : ContractId ReplayNode
         encodedVAA    : EncodedVaa
-        pubKeys       : [(Int, GuardianPublicKey)]
       controller redeemer
       do
         -- SECURITY: cids arrive from an untrusted submitter, so authenticate the
@@ -82,7 +81,6 @@ template ExampleIntegrator
         assertMsg "unexpected core guardianGovernance" (csGuardianGovernance == guardianGovernance)
         (vaa, _node) <- exercise coreStateCid VerifyAndConsumeVAA with
           encodedVAA
-          pubKeys
           consumer = manager
           namespace
           replayNodeCid
@@ -130,9 +128,6 @@ setupIntegrator = do
   csDisc <- fromSome <$> queryDisclosure guardianGovernance csId
   pure IntegratorFixture with guardianGovernance, csId, manager, users = [alice, bob], intCid, csDisc
 
-devnetPubKeys : [(Int, GuardianPublicKey)]
-devnetPubKeys = [(0, devnetGuardianPubKey)]
-
 -- | End-to-end user-submitted redemption: alice redeems with her own authority
 -- and two disclosures — nothing else. Replay attempts then fail for every
 -- submitter regardless of node freshness (stale node dies on activeness, fresh
@@ -153,7 +148,6 @@ testIntegratorRedeem = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       encodedVAA = govSetFeeVAA
-      pubKeys = devnetPubKeys
   Some receipt <- queryContractId alice receiptCid
   receipt.sequence === 1
   receipt.redeemer === alice
@@ -166,7 +160,6 @@ testIntegratorRedeem = do
       coreStateCid = csId
       replayNodeCid = nodeCid
       encodedVAA = govSetFeeVAA
-      pubKeys = devnetPubKeys
 
   -- Replay with the FRESH covering node: rejected on membership.
   (freshCid, freshDisc) <- coveringDisclosure manager manager exampleNamespace digest
@@ -176,7 +169,6 @@ testIntegratorRedeem = do
       coreStateCid = csId
       replayNodeCid = freshCid
       encodedVAA = govSetFeeVAA
-      pubKeys = devnetPubKeys
 
   -- A second app is its own replay scope: the SAME VAA redeems there too.
   -- Its namespace string is identical — the scope is (consumer, namespace),
@@ -198,7 +190,6 @@ testIntegratorRedeem = do
       coreStateCid = csId
       replayNodeCid = node2Cid
       encodedVAA = govSetFeeVAA
-      pubKeys = devnetPubKeys
   Some receipt2 <- queryContractId alice receipt2Cid
   receipt2.manager === manager2
 
@@ -210,7 +201,7 @@ testIntegratorRedeem = do
   fakeFeeInstrumentAdmin <- allocateParty "FakeFeeInstrumentAdmin"
   fakeCsId <- submit (actAs fakeGovernance <> actAs fakeFeeCustody) do
     createCmd (mkInitialCoreState fakeGovernance solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
                  (InstrumentId with admin = fakeFeeInstrumentAdmin, id = "UNUSED") fakeFeeCustody)
   fakeDisc <- fromSome <$> queryDisclosure fakeGovernance fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc <> disclose freshDisc) do
@@ -219,14 +210,12 @@ testIntegratorRedeem = do
       coreStateCid = fakeCsId
       replayNodeCid = freshCid
       encodedVAA = govSetFeeVAA
-      pubKeys = devnetPubKeys
 
 data CoreStatePinCase = CoreStatePinCase with
     caseName                   : Text
     coreStateCid               : ContractId CoreState
     coreStateDisclosure        : Disclosure
     encodedVAA                 : EncodedVaa
-    pubKeys                    : [(Int, GuardianPublicKey)]
     peerChain                  : Int
     peerAddress                : EmitterAddress
     expectedGuardianGovernance : Party
@@ -235,7 +224,7 @@ data CoreStatePinCase = CoreStatePinCase with
 shadowCoreState : Party -> Party -> Party -> CoreState
 shadowCoreState signingGovernance signingFeeCustody shadowFeeInstrumentAdmin =
   mkInitialCoreState signingGovernance solanaGovernanceChainId defaultGovernanceContract
-    (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+    (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
     (InstrumentId with admin = shadowFeeInstrumentAdmin, id = "UNUSED") signingFeeCustody
 
 shadowCoreStateWithSet1 : Party -> Party -> Party -> CoreState
@@ -243,7 +232,7 @@ shadowCoreStateWithSet1 signingGovernance signingFeeCustody shadowFeeInstrumentA
   (shadowCoreState signingGovernance signingFeeCustody shadowFeeInstrumentAdmin) with
     guardianSetIndex = 1
     guardianSets = Map.fromList
-      [(1, GuardianSet with keys = [devnetGuardianSet1Key], expirationTime = None)]
+      [(1, GuardianSet with members = [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey], expirationTime = None)]
 
 -- | 'Redeem' accepts only a CoreState signed by the configured gg. Rows 3-4
 -- are shadows that a throwaway gg signs.
@@ -262,24 +251,22 @@ testIntegratorCoreStatePin = do
   shadowRealGuardiansDisc <- fromSome <$> queryDisclosure throwawayGovernance shadowRealGuardiansCid
   shadowFakeGuardiansDisc <- fromSome <$> queryDisclosure throwawayGovernance shadowFakeGuardiansCid
 
-  let set0Keys = [(0, devnetGuardianPubKey)]
-      set1Keys = [(0, devnetGuardianSet1PubKey)]
-      set1PeerAddress = parseHexTextOrAbort "000000000000000000000000000000000000000000000000000000000000002a"
+  let set1PeerAddress = parseHexTextOrAbort "000000000000000000000000000000000000000000000000000000000000002a"
       pinCases =
         [ CoreStatePinCase "real CoreState accepted" realCsId realCsDisc
-            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            govSetFeeVAA solanaGovernanceChainId defaultGovernanceContract
             guardianGovernance None
         , CoreStatePinCase "real CoreState rejects a set-1 VAA" realCsId realCsDisc
-            set1MessageVAA set1Keys 2 set1PeerAddress
+            set1MessageVAA 2 set1PeerAddress
             guardianGovernance (Some "unknown guardian set index")
         , CoreStatePinCase "shadow with real guardians" shadowRealGuardiansCid shadowRealGuardiansDisc
-            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            govSetFeeVAA solanaGovernanceChainId defaultGovernanceContract
             guardianGovernance (Some "unexpected core guardianGovernance")
         , CoreStatePinCase "shadow with fake guardians" shadowFakeGuardiansCid shadowFakeGuardiansDisc
-            set1MessageVAA set1Keys 2 set1PeerAddress
+            set1MessageVAA 2 set1PeerAddress
             guardianGovernance (Some "unexpected core guardianGovernance")
         , CoreStatePinCase "integrator configured with a wrong gg" realCsId realCsDisc
-            govSetFeeVAA set0Keys solanaGovernanceChainId defaultGovernanceContract
+            govSetFeeVAA solanaGovernanceChainId defaultGovernanceContract
             throwawayGovernance (Some "unexpected core guardianGovernance")
         ]
 
@@ -303,7 +290,6 @@ testIntegratorCoreStatePin = do
         coreStateCid = pinCase.coreStateCid
         replayNodeCid = nodeCid
         encodedVAA = pinCase.encodedVAA
-        pubKeys = pinCase.pubKeys
     case (pinCase.expectedRejection, redeemResult) of
       (None, Right _) -> pure ()
       (None, Left redeemError) -> abort (pinCase.caseName <> ": rejected: " <> show redeemError)

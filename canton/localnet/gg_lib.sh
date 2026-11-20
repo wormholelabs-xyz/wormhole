@@ -283,14 +283,9 @@ check_connected_to_gg_synchronizer() {
   fi
 }
 
-# generate_vaa <canton_localnet_vaa flags...>: prints the JSON {vaaHex, digestHex, pubKeys} of a devnet-key VAA.
+# generate_vaa <canton_localnet_vaa flags...>: prints the JSON {vaaHex, digestHex, newGuardianPublicKeys} of a devnet-key VAA.
 generate_vaa() {
   (cd "$REPO_ROOT/node" && GOFLAGS=-mod=readonly GOPROXY=off go run ./hack/canton_localnet_vaa "$@")
-}
-
-# Daml [(Int, Bytes)] public-key hints from generate_vaa output.
-vaa_pub_keys_json() {
-  jq -c '[.pubKeys[] | {_1: (.guardianIndex | tostring), _2: {tag: "GuardianPublicKey", value: .publicKeyHex}}]' <<<"$1"
 }
 
 # active_contracts_with_blobs <validator> <party> <qualified-template-suffix>: like active_contracts, with created event blobs.
@@ -406,20 +401,28 @@ core_state_disclosures_on() {
   core_state_disclosures "$(disclosed_contract "$1" "$GG_PARTY" :Wormhole.Core.State:CoreState "$core_state_cid")" "$core_state_cid"
 }
 
-# verify_vaa <command-id> <vaa-hex> <pub-keys-json>: ParseAndVerifyVAA on the current CoreState by CoreVerifier.
+# verify_vaa <command-id> <vaa-hex>: ParseAndVerifyVAA on the current CoreState by CoreVerifier.
 # guardianGovernance is a CoreState signatory, so its hosts confirm this transaction.
 verify_vaa() {
   submit_local "$CORE_ROLE_VALIDATOR" "$1" "$(jq -cn --arg party "$CORE_VERIFIER_PARTY" '[$party]')" \
     "$(exercise_command "$CORE_STATE_TEMPLATE" "$(core_contract_id coreState "$CORE_ROLE_VALIDATOR")" ParseAndVerifyVAA \
-      "$(jq -n --arg party "$CORE_VERIFIER_PARTY" --arg vaa "$2" --argjson keys "$3" '{verifier: $party, encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}')")" \
+      "$(jq -n --arg party "$CORE_VERIFIER_PARTY" --arg vaa "$2" '{verifier: $party, encodedVAA: {tag: "EncodedVaa", value: $vaa}}')")" \
     "$(core_state_disclosures_on "$CORE_ROLE_VALIDATOR")"
 }
 
-# relay_governance_vaa <command-id> <vaa-hex> <pub-keys-json>: SubmitGovernanceVAA on the current CoreState by
+# relay_governance_vaa <command-id> <vaa-hex>: SubmitGovernanceVAA on the current CoreState by
 # GovernanceRelayer.
 relay_governance_vaa() {
   submit_local "$CORE_ROLE_VALIDATOR" "$1" "$(jq -cn --arg party "$GOVERNANCE_RELAYER_PARTY" '[$party]')" \
-    "$(relay_governance_vaa_command "$(core_contract_id coreState "$CORE_ROLE_VALIDATOR")" "$GOVERNANCE_RELAYER_PARTY" "$2" "$3")" \
+    "$(relay_governance_vaa_command "$(core_contract_id coreState "$CORE_ROLE_VALIDATOR")" "$GOVERNANCE_RELAYER_PARTY" "$2")" \
+    "$(core_state_disclosures_on "$CORE_ROLE_VALIDATOR")"
+}
+
+# attach_guardian_public_keys <command-id> <guardian-set-index> <public-keys-hex-json-array>: AttachGuardianPublicKeys
+# on the current CoreState by GovernanceRelayer.
+attach_guardian_public_keys() {
+  submit_local "$CORE_ROLE_VALIDATOR" "$1" "$(jq -cn --arg party "$GOVERNANCE_RELAYER_PARTY" '[$party]')" \
+    "$(attach_guardian_public_keys_command "$(core_contract_id coreState "$CORE_ROLE_VALIDATOR")" "$GOVERNANCE_RELAYER_PARTY" "$2" "$3")" \
     "$(core_state_disclosures_on "$CORE_ROLE_VALIDATOR")"
 }
 

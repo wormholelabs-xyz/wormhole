@@ -19,7 +19,7 @@ import DA.Text qualified as T
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
 import Wormhole.Core.State
-import Test.TestCore (setup, govSetFeeVAA, devnetGuardianPubKey)
+import Test.TestCore (setup, govSetFeeVAA)
 
 -- | Right-pad a hex fragment with zeros to a full 64-nibble digest.
 pad64 : Text -> VaaDigest
@@ -396,7 +396,6 @@ testVerifyAndConsumeVAA = do
   (vaa, nodeCid) <- submit (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = rootCid
@@ -408,7 +407,6 @@ testVerifyAndConsumeVAA = do
   submitMustFail (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = freshCid
@@ -418,7 +416,6 @@ testVerifyAndConsumeVAA = do
   _ <- submit (actAs other <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = other
       namespace = ns
       replayNodeCid = otherRoot
@@ -429,7 +426,6 @@ testVerifyAndConsumeVAA = do
   _ <- submit (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns2
       replayNodeCid = root2
@@ -441,14 +437,12 @@ testVerifyAndConsumeVAA = do
   submitMustFail (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = root3
   _ <- submit (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = "third"
       replayNodeCid = root3
@@ -458,7 +452,6 @@ testVerifyAndConsumeVAA = do
   submitMustFail (actAs ntt <> disclose csDisc <> disclose otherDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = otherFresh
@@ -472,7 +465,6 @@ testVerifyAndConsumeVAA = do
   submitMustFail (actAs ntt <> disclose csDisc) do
     exerciseCmd csId VerifyAndConsumeVAA with
       encodedVAA = govSetFeeVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
       consumer = ntt
       namespace = ns
       replayNodeCid = shadowCid

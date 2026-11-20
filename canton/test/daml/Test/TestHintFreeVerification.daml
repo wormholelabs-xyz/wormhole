@@ -1,0 +1,350 @@
+-- | Hint-free VAA verification: 'CoreState' stores each guardian public key,
+-- bound to its address. Verification choices take the VAA bytes only.
+module Test.TestHintFreeVerification where
+
+import Daml.Script
+import DA.Assert ((===))
+import DA.Foldable (forA_)
+import DA.Map qualified as Map
+import DA.Optional (fromSome, isSome)
+import DA.Text qualified as T
+import DA.Time (seconds)
+import Splice.Api.Token.HoldingV1 (InstrumentId(..))
+import Wormhole.Core.Bytes
+import Wormhole.Core.Governance (GovernanceAction(..))
+import Wormhole.Core.GuardianSet
+import Wormhole.Core.Replay
+import Wormhole.Core.Setup
+import Wormhole.Core.State
+import Wormhole.Core.VAA (parseVAA)
+import Test.TestRedTeamCore
+  ( redTeamGuardianPubKey1, redTeamGuardianPubKey2, redTeamGuardianPubKey3, rtAppMessageBySet1AllSigners
+  , rtGuardianSetUpgradeToSet1 )
+import Test.TestCore
+  ( devnetGenesisGuardian, devnetGuardian, devnetGuardianMember, devnetGuardianPubKey, devnetGuardianSet1Key, devnetGuardianSet1PubKey
+  , govGuardianSetUpgradeVAA, govSetFeeVAA, numberCases, set1MessageVAA, setup )
+
+-- | Set 1 member of 'govGuardianSetUpgradeVAA' with its key attached.
+devnetGuardianSet1Member : GuardianSetMember
+devnetGuardianSet1Member = GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey
+
+checkSubmitOutcome : Text -> Optional Text -> Either SubmitError a -> Script ()
+checkSubmitOutcome caseName expectedErrorFragment submitResult = case (expectedErrorFragment, submitResult) of
+  (None, Right _) -> pure ()
+  (None, Left submitError) -> abort (caseName <> ": rejected: " <> show submitError)
+  (Some _, Right _) -> abort (caseName <> ": accepted")
+  (Some fragment, Left submitError) ->
+    assertMsg (caseName <> ": expected '" <> fragment <> "', got: " <> show submitError)
+      (fragment `T.isInfixOf` show submitError)
+
+checkVerifiedBySet : Text -> Int -> Either SubmitError Int -> Script ()
+checkVerifiedBySet caseName expectedGuardianSetIndex verifyResult = case verifyResult of
+  Right verifiedGuardianSetIndex -> verifiedGuardianSetIndex === expectedGuardianSetIndex
+  Left verifyError -> abort (caseName <> ": rejected: " <> show verifyError)
+
+attachAs : Party -> Party -> ContractId CoreState -> Int -> [GuardianPublicKey] -> Script (Either SubmitError (ContractId CoreState))
+attachAs guardianGovernance submitter coreStateCid targetGuardianSetIndex guardianPublicKeys = do
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  trySubmit (actAs submitter <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid AttachGuardianPublicKeys with submitter, targetGuardianSetIndex, guardianPublicKeys
+
+verifyAs : Party -> Party -> ContractId CoreState -> EncodedVaa -> Script (Either SubmitError Int)
+verifyAs guardianGovernance verifier coreStateCid encodedVAA = do
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  fmap (.guardianSetIndex) <$> trySubmit (actAs verifier <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid ParseAndVerifyVAA with verifier, encodedVAA
+
+-- | Genesis at set 0 (devnet key attached), then 'govGuardianSetUpgradeVAA':
+-- set 1 holds the devnet key 1 address, unkeyed.
+setupWithUnkeyedSet1 : Script (Party, ContractId CoreState)
+setupWithUnkeyedSet1 = do
+  (guardianGovernance, genesisCid) <- setup
+  upgradedCid <- submit guardianGovernance do
+    exerciseCmd genesisCid SubmitGovernanceVAA with submitter = guardianGovernance, encodedVAA = govGuardianSetUpgradeVAA
+  Some upgradedState <- queryContractId guardianGovernance upgradedCid
+  (fromSome (Map.lookup 1 upgradedState.guardianSets)).members
+    === [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = None]
+  pure (guardianGovernance, upgradedCid)
+
+-- | 'ParseAndVerifyVAA' and 'VerifyAndConsumeVAA' take the VAA bytes only; an
+-- external party verifies with the 'CoreState' disclosed.
+testVerifyWithoutHintsByExternalParty : Script ()
+testVerifyWithoutHintsByExternalParty = do
+  (guardianGovernance, coreStateCid) <- setup
+  integrator <- allocateParty "HintFreeIntegrator"
+  verifyAs guardianGovernance integrator coreStateCid govSetFeeVAA >>= checkVerifiedBySet "govSetFeeVAA" 0
+  [(registryCid, _)] <- query @ReplayRootRegistry guardianGovernance
+  registryDisclosure <- fromSome <$> queryDisclosure guardianGovernance registryCid
+  rootCid <- submit (actAs integrator <> disclose registryDisclosure) do
+    exerciseCmd registryCid ClaimReplayRoot with
+      consumer = integrator, namespace = "hint-free", splitThreshold = defaultSplitThreshold
+      payer = integrator, coreStateCid = None, feeAllocation = None
+      expectedGuardianGovernance = guardianGovernance
+  coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
+  (vaa, _) <- submit (actAs integrator <> disclose coreStateDisclosure) do
+    exerciseCmd coreStateCid VerifyAndConsumeVAA with
+      encodedVAA = govSetFeeVAA, consumer = integrator, namespace = "hint-free", replayNodeCid = rootCid
+  vaa.guardianSetIndex === 0
+
+-- | A set without keys rejects each VAA it signs; after an attach by any party, the VAA verifies.
+testUnkeyedSetVerifiesAfterAttach : Script ()
+testUnkeyedSetVerifiesAfterAttach = do
+  (guardianGovernance, upgradedCid) <- setupWithUnkeyedSet1
+  relayer <- allocateParty "AttachRelayer"
+  verifyAs guardianGovernance relayer upgradedCid set1MessageVAA
+    >>= checkSubmitOutcome "unkeyed set 1" (Some "no public key attached for guardian index 0")
+  verifyAs guardianGovernance relayer upgradedCid govSetFeeVAA >>= checkVerifiedBySet "govSetFeeVAA" 0
+  Right attachedCid <- attachAs guardianGovernance relayer upgradedCid 1 [devnetGuardianSet1PubKey]
+  verifyAs guardianGovernance relayer attachedCid set1MessageVAA >>= checkVerifiedBySet "set1MessageVAA" 1
+
+data AttachCase = AttachCase with
+    caseName               : Text
+    targetGuardianSetIndex : Int
+    guardianPublicKeys     : [GuardianPublicKey]
+    expectedErrorFragment  : Optional Text
+
+-- | Each attach row runs on a fresh state with set 0 keyed and set 1 unkeyed.
+-- An accepted row changes only the target member key.
+testAttachGuardianPublicKeys : Script ()
+testAttachGuardianPublicKeys = do
+  let cases =
+        [ AttachCase "devnet key 1 to set 1" 1 [devnetGuardianSet1PubKey] None
+        , AttachCase "key of another guardian" 1 [devnetGuardianPubKey] (Some "derives no guardian address of set 1")
+        , AttachCase "key of set 1 to set 0" 0 [devnetGuardianSet1PubKey] (Some "derives no guardian address of set 0")
+        , AttachCase "empty key list" 1 [] (Some "attach: no public keys")
+        , AttachCase "two keys for a one-guardian set" 1 [devnetGuardianSet1PubKey, devnetGuardianPubKey]
+            (Some "attach: more public keys than guardians")
+        , AttachCase "duplicate key above the set size" 1 [devnetGuardianSet1PubKey, devnetGuardianSet1PubKey]
+            (Some "attach: more public keys than guardians")
+        , AttachCase "256 keys" 1 (replicate 256 devnetGuardianSet1PubKey)
+            (Some "attach: more than 255 public keys")
+        , AttachCase "key already attached" 0 [devnetGuardianPubKey] (Some "attach: public key already attached at position 0")
+        , AttachCase "unknown set index" 5 [devnetGuardianSet1PubKey] (Some "attach: unknown guardian set index 5")
+        ]
+  forA_ (numberCases cases) \(caseNumber, attachCase) -> do
+    (guardianGovernance, upgradedCid) <- setupWithUnkeyedSet1
+    relayer <- allocateParty ("AttachCaseRelayer" <> show caseNumber)
+    Some before <- queryContractId guardianGovernance upgradedCid
+    attachResult <- attachAs guardianGovernance relayer upgradedCid attachCase.targetGuardianSetIndex attachCase.guardianPublicKeys
+    checkSubmitOutcome attachCase.caseName attachCase.expectedErrorFragment attachResult
+    case attachResult of
+      Left _ -> pure ()
+      Right attachedCid -> do
+        Some after <- queryContractId guardianGovernance attachedCid
+        (after with guardianSets = before.guardianSets) === before
+        Map.lookup 0 after.guardianSets === Map.lookup 0 before.guardianSets
+        let set1Before = fromSome (Map.lookup 1 before.guardianSets)
+        Map.lookup 1 after.guardianSets === Some (set1Before with members = [devnetGuardianSet1Member])
+
+-- | Attach rejects a stored set that has expired.
+testAttachRejectsExpiredSet : Script ()
+testAttachRejectsExpiredSet = do
+  guardianGovernance <- allocateParty "ExpiredAttachGovernance"
+  feeCustody <- allocateParty "ExpiredAttachFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "ExpiredAttachUnusedFeeInstrumentAdmin"
+  relayer <- allocateParty "ExpiredAttachRelayer"
+  now <- getTime
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
+      genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+        GenesisGuardianSet with guardianSetIndex = 7, guardians = [devnetGenesisGuardian]
+        feeInstrument feeCustody
+      expiringSet6 = GuardianSet with
+        members = [GuardianSetMember with address = devnetGuardianSet1Key, publicKey = None]
+        expirationTime = Some now
+  coreStateCid <- submit (actAs guardianGovernance <> actAs feeCustody) do
+    createCmd genesisState with
+      guardianSets = Map.insert 6 expiringSet6 genesisState.guardianSets
+      consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
+  passTime (seconds 1)
+  attachAs guardianGovernance relayer coreStateCid 6 [devnetGuardianSet1PubKey]
+    >>= checkSubmitOutcome "expired set 6" (Some "attach: guardian set 6 has expired")
+
+-- | The 'CoreState' precondition rejects each stored key that does not derive its member address.
+testCoreStatePreconditionChecksPublicKeyBinding : Script ()
+testCoreStatePreconditionChecksPublicKeyBinding = do
+  let keyedDevnet = devnetGuardianMember
+      unkeyedDevnet = devnetGuardianMember with publicKey = None
+      cases =
+        [ ("keyed member", [keyedDevnet], True)
+        , ("unkeyed member", [unkeyedDevnet], True)
+        , ("keyed and unkeyed members", [keyedDevnet, GuardianSetMember with address = devnetGuardianSet1Key, publicKey = None], True)
+        , ("both members keyed", [keyedDevnet, devnetGuardianSet1Member], True)
+        , ("key of another guardian", [keyedDevnet with publicKey = Some devnetGuardianSet1PubKey], False)
+        , ("keys on swapped members",
+            [ keyedDevnet with publicKey = Some devnetGuardianSet1PubKey
+            , devnetGuardianSet1Member with publicKey = Some devnetGuardianPubKey ], False)
+        , ("second member key mismatched", [keyedDevnet, devnetGuardianSet1Member with publicKey = Some devnetGuardianPubKey], False)
+        ]
+  forA_ (numberCases cases) \(caseNumber, (caseName, members, expectAccepted)) -> do
+    guardianGovernance <- allocateParty ("BindingGovernance" <> show caseNumber)
+    feeCustody <- allocateParty ("BindingFeeCustody" <> show caseNumber)
+    placeholderFeeInstrumentAdmin <- allocateParty ("BindingUnusedFeeInstrumentAdmin" <> show caseNumber)
+    let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
+        genesisState = mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+          GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
+          feeInstrument feeCustody
+    -- A governance digest lifts the genesis rule, so each row tests the binding alone.
+    createResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do
+      createCmd genesisState with
+        guardianSets = Map.fromList [(0, GuardianSet with members, expirationTime = None)]
+        consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
+    checkSubmitOutcome caseName (if expectAccepted then None else Some "precondition") createResult
+
+-- | Each property of the member validator, with its error text.
+testCheckGuardianSetMembersAreWellFormed : Script ()
+testCheckGuardianSetMembersAreWellFormed = do
+  let cases =
+        [ ("keyed member", [devnetGuardianMember], None)
+        , ("unkeyed member", [devnetGuardianMember with publicKey = None], None)
+        , ("key of another guardian", [devnetGuardianMember with publicKey = Some devnetGuardianSet1PubKey],
+            Some "public key at position 0 does not derive its address")
+        , ("mismatch at position 1", [devnetGuardianMember, devnetGuardianSet1Member with publicKey = Some devnetGuardianPubKey],
+            Some "public key at position 1 does not derive its address")
+        , ("duplicate address", [devnetGuardianMember, devnetGuardianMember], Some "duplicate address")
+        , ("empty", [], Some "empty set")
+        ]
+  forA_ cases \(caseName, members, expectedErrorFragment) ->
+    case (expectedErrorFragment, checkGuardianSetMembersAreWellFormed members) of
+      (None, Right ()) -> pure ()
+      (Some fragment, Left message) | fragment `T.isInfixOf` message -> pure ()
+      (_, outcome) -> abort (caseName <> ": unexpected outcome " <> show outcome)
+
+-- | 'guardianAddressFromPublicKey' derives the devnet addresses from their keys.
+testGuardianAddressFromPublicKey : Script ()
+testGuardianAddressFromPublicKey = do
+  guardianAddressFromPublicKey devnetGuardianPubKey === devnetGuardian
+  guardianAddressFromPublicKey devnetGuardianSet1PubKey === devnetGuardianSet1Key
+  assertMsg "distinct keys derive distinct addresses"
+    (guardianAddressFromPublicKey devnetGuardianPubKey /= guardianAddressFromPublicKey devnetGuardianSet1PubKey)
+
+-- | A GuardianSetUpgrade carries the key of each address that a stored set already keys.
+testGuardianSetUpgradeCarriesKnownKeys : Script ()
+testGuardianSetUpgradeCarriesKnownKeys = do
+  guardianGovernance <- allocateParty "CarryGovernance"
+  feeCustody <- allocateParty "CarryFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "CarryUnusedFeeInstrumentAdmin"
+  now <- getTime
+  let feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
+      genesisWith members = (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+        GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
+        feeInstrument feeCustody) with guardianSets = Map.fromList [(0, GuardianSet with members, expirationTime = None)]
+      upgradedSet1 genesisState newKeys = do
+        upgraded <- applyGovernance genesisState now (GuardianSetUpgrade with chain = 0, newIndex = 1, newKeys)
+        pure ((fromSome (Map.lookup 1 upgraded.guardianSets)).members)
+      unkeyedSet1Member = GuardianSetMember with address = devnetGuardianSet1Key, publicKey = None
+      cases =
+        [ ("kept guardian keeps its key", [devnetGuardianMember], [devnetGuardian, devnetGuardianSet1Key],
+            [devnetGuardianMember, unkeyedSet1Member])
+        , ("kept guardian at a new position", [devnetGuardianMember], [devnetGuardianSet1Key, devnetGuardian],
+            [unkeyedSet1Member, devnetGuardianMember])
+        , ("new guardian has no key", [devnetGuardianMember], [devnetGuardianSet1Key], [unkeyedSet1Member])
+        , ("unkeyed guardian stays unkeyed", [devnetGuardianMember with publicKey = None], [devnetGuardian],
+            [devnetGuardianMember with publicKey = None])
+        , ("both keys known", [devnetGuardianMember, devnetGuardianSet1Member], [devnetGuardianSet1Key, devnetGuardian],
+            [devnetGuardianSet1Member, devnetGuardianMember])
+        ]
+  forA_ cases \(caseName, genesisMembers, newKeys, expectedMembers) ->
+    case upgradedSet1 (genesisWith genesisMembers) newKeys of
+      Right members | members == expectedMembers -> pure ()
+      outcome -> abort (caseName <> ": unexpected outcome " <> show outcome)
+
+-- | Genesis stores the devnet member with its public key.
+testGenesisStoresPublicKeys : Script ()
+testGenesisStoresPublicKeys = do
+  (guardianGovernance, coreStateCid) <- setup
+  Some coreState <- queryContractId guardianGovernance coreStateCid
+  let genesisSet = fromSome (Map.lookup 0 coreState.guardianSets)
+  genesisSet.members === [devnetGuardianMember]
+  genesisSet.expirationTime === None
+  map (.address) genesisSet.members === [devnetGuardian]
+
+data GenesisKeyCase = GenesisKeyCase with
+    caseName                : Text
+    members                 : [GuardianSetMember]
+    hasGovernanceHistory    : Bool
+    expectedErrorFragment   : Optional Text
+
+-- | A 'CoreState' without governance history is a genesis state (attach only
+-- adds keys), so each of its guardians must hold a public key. After a
+-- governance VAA, a new guardian may lack its key until attached.
+testGenesisRequiresEveryGuardianKey : Script ()
+testGenesisRequiresEveryGuardianKey = do
+  let unkeyedSet1Member = devnetGuardianSet1Member with publicKey = None
+      governanceDigest = parseHexTextOrAbort (mconcat (replicate 64 "a"))
+      cases =
+        [ GenesisKeyCase "genesis with every key" [devnetGuardianMember, devnetGuardianSet1Member] False None
+        , GenesisKeyCase "genesis with one key missing" [devnetGuardianMember, unkeyedSet1Member] False (Some "precondition")
+        , GenesisKeyCase "genesis with no key" [devnetGuardianMember with publicKey = None] False (Some "precondition")
+        , GenesisKeyCase "after governance, one key missing" [devnetGuardianMember, unkeyedSet1Member] True None
+        ]
+  forA_ (numberCases cases) \(caseNumber, genesisCase) -> do
+    guardianGovernance <- allocateParty ("GenesisKeyGovernance" <> show caseNumber)
+    feeCustody <- allocateParty ("GenesisKeyFeeCustody" <> show caseNumber)
+    placeholderFeeInstrumentAdmin <- allocateParty ("GenesisKeyUnusedFeeInstrumentAdmin" <> show caseNumber)
+    (setupGovernance, fullGenesisCid) <- setup
+    Some fullGenesis <- queryContractId setupGovernance fullGenesisCid
+    let coreState = fullGenesis with
+          guardianGovernance
+          feeRecipient = feeCustody
+          feeInstrument = InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED"
+          guardianSets = Map.fromList [(0, GuardianSet with members = genesisCase.members, expirationTime = None)]
+          consumedGovernance = if genesisCase.hasGovernanceHistory then Map.singleton governanceDigest 0 else Map.empty
+    createResult <- trySubmit (actAs guardianGovernance <> actAs feeCustody) do createCmd coreState
+    checkSubmitOutcome genesisCase.caseName genesisCase.expectedErrorFragment createResult
+
+-- | The VAA without its last signature. Signatures sit outside the signed body,
+-- so the digest stays the same.
+dropLastSignature : EncodedVaa -> EncodedVaa
+dropLastSignature encodedVaa =
+  let encoded = hexBytesOf encodedVaa
+      signatureCount = bytesToInt (sliceBytes 5 1 encoded)
+      keptSignaturesEnd = 6 + (signatureCount - 1) * 66
+  in parseHexBytesAsOrAbort
+       (sliceBytes 0 5 encoded <> intToHexByte (signatureCount - 1)
+         <> sliceBytes 6 (keptSignaturesEnd - 6) encoded <> sliceFrom (keptSignaturesEnd + 66) encoded)
+
+-- | Set 1 has four guardians (quorum 3); the upgrade carries the key of guardian 0.
+-- A partial attach keys guardians 1 and 2. A VAA with a keyed quorum and one
+-- unkeyed signer fails; without that signature it verifies; after the last
+-- attach, the full VAA verifies.
+testUnkeyedSignerFailsKeyedQuorum : Script ()
+testUnkeyedSignerFailsKeyedQuorum = do
+  (guardianGovernance, genesisCid) <- setup
+  relayer <- allocateParty "UnkeyedSignerRelayer"
+  upgradedCid <- submit guardianGovernance do
+    exerciseCmd genesisCid SubmitGovernanceVAA with submitter = guardianGovernance, encodedVAA = rtGuardianSetUpgradeToSet1
+  attachAs guardianGovernance relayer upgradedCid 1 [redTeamGuardianPubKey1, redTeamGuardianPubKey1]
+    >>= checkSubmitOutcome "duplicate key on a four-guardian set" (Some "attach: duplicate public key")
+  Right partiallyKeyedCid <- attachAs guardianGovernance relayer upgradedCid 1 [redTeamGuardianPubKey1, redTeamGuardianPubKey2]
+  Some partiallyKeyed <- queryContractId guardianGovernance partiallyKeyedCid
+  let set1 = fromSome (Map.lookup 1 partiallyKeyed.guardianSets)
+  map (isSome . (.publicKey)) set1.members === [True, True, True, False]
+  let withoutUnkeyedSigner = dropLastSignature rtAppMessageBySet1AllSigners
+  (parseVAA withoutUnkeyedSigner).hash === (parseVAA rtAppMessageBySet1AllSigners).hash
+  length (parseVAA withoutUnkeyedSigner).signatures === 3
+  verifyAs guardianGovernance relayer partiallyKeyedCid rtAppMessageBySet1AllSigners
+    >>= checkSubmitOutcome "keyed quorum plus one unkeyed signer" (Some "no public key attached for guardian index 3")
+  verifyAs guardianGovernance relayer partiallyKeyedCid withoutUnkeyedSigner
+    >>= checkVerifiedBySet "unkeyed signature dropped" 1
+  Right fullyKeyedCid <- attachAs guardianGovernance relayer partiallyKeyedCid 1 [redTeamGuardianPubKey3]
+  verifyAs guardianGovernance relayer fullyKeyedCid rtAppMessageBySet1AllSigners
+    >>= checkVerifiedBySet "all four keyed" 1
+
+-- | Carry-over reads only the stored sets: a guardian re-added after its keyed
+-- set was pruned gets no key and needs a new attach.
+testGuardianReaddedAfterPruneHasNoKey : Script ()
+testGuardianReaddedAfterPruneHasNoKey = do
+  guardianGovernance <- allocateParty "ReaddedGovernance"
+  feeCustody <- allocateParty "ReaddedFeeCustody"
+  placeholderFeeInstrumentAdmin <- allocateParty "ReaddedUnusedFeeInstrumentAdmin"
+  now <- getTime
+  let set1AfterSet0Pruned = GuardianSet with members = [devnetGuardianSet1Member], expirationTime = None
+      stateAtSet1 = (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
+        GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian]
+        (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") feeCustody) with
+          guardianSetIndex = 1
+          guardianSets = Map.fromList [(1, set1AfterSet0Pruned)]
+  case applyGovernance stateAtSet1 now (GuardianSetUpgrade with chain = 0, newIndex = 2, newKeys = [devnetGuardian, devnetGuardianSet1Key]) of
+    Left message -> abort ("upgrade rejected: " <> message)
+    Right upgraded -> (fromSome (Map.lookup 2 upgraded.guardianSets)).members
+      === [(devnetGuardianMember with publicKey = None), devnetGuardianSet1Member]

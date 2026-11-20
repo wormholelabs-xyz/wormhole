@@ -226,9 +226,9 @@ flow_cid() { jq -er --arg role "$1" '[.disclosures[] | select(.role == $role) | 
 submit_local app-user "registry-mint-$run_label" "$(jq -cn --arg relayer "$relayer_party" '[$relayer]')" \
   "$(exercise_command "$NTT_MANAGER_TEMPLATE" "$(flow_cid NttManager)" Mint "$(jq -n --arg relayer "$relayer_party" \
     --arg coreState "$(flow_cid CoreState)" --arg replayNode "$(flow_cid "covering ReplayNode")" \
-    --arg vaa "$(jq -r .vaaHex <<<"$vaa")" --argjson keys "$(vaa_pub_keys_json "$vaa")" --arg user "$party_a" \
+    --arg vaa "$(jq -r .vaaHex <<<"$vaa")" --arg user "$party_a" \
     --arg preapproval "$(flow_cid DepositPreapproval)" --argjson extraArgs "$EMPTY_EXTRA_ARGS" '{
-      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa, pubKeys: $keys,
+      executor: $relayer, coreStateCid: $coreState, replayNodeCid: $replayNode, vaaBytes: $vaa,
       recipient: $user, depositPreapprovalCid: $preapproval, extraArgs: $extraArgs}')")" \
   "$(jq -c '[.disclosures[] | {templateId, contractId, createdEventBlob, synchronizerId}]' <<<"$mint_flow")" > /dev/null
 [[ "$(party_coin_units "$party_a")" == "$(decimal_text_to_units "$MINT_AMOUNT")" ]] || fail "A holds $(party_coin_units "$party_a") units after the mint"

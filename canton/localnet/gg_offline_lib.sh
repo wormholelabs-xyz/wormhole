@@ -44,16 +44,17 @@ exercise_command() {
 }
 
 # first_genesis_parameters <guardian-governance> <fee-custody> <ntt-custody> <onboarding-fee-admin>
-# <fee-instrument-admin> <fee-instrument-id> <guardian-set-index> <guardian-addresses-comma-separated>
+# <fee-instrument-admin> <fee-instrument-id> <guardian-set-index> <guardians: address:public-key, comma-separated>
+# Genesis requires each guardian public key. The core checks that each key derives its address.
 # The GenesisParameters JSON of a first genesis: zero fees, id floors 0, empty consumed governance digest lists.
 first_genesis_parameters() {
   if [[ $# -ne 8 ]]; then
-    echo "usage: first_genesis_parameters <gg> <fee-custody> <ntt-custody> <onboarding-fee-admin> <fee-instrument-admin> <fee-instrument-id> <guardian-set-index> <guardian-addresses>" >&2
+    echo "usage: first_genesis_parameters <gg> <fee-custody> <ntt-custody> <onboarding-fee-admin> <fee-instrument-admin> <fee-instrument-id> <guardian-set-index> <guardians>" >&2
     return 2
   fi
   local gg="$1" fee_custody="$2" ntt_custody="$3" fee_admin="$4" instrument_admin="$5" instrument_id="$6"
-  local guardian_set_index="$7" guardian_addresses_text="$8" guardian_address
-  local -a guardian_addresses
+  local guardian_set_index="$7" guardians_text="$8" guardian guardian_address guardian_public_key
+  local -a guardians guardian_addresses guardian_public_keys
   check_party_id guardianGovernance "$gg" || return 1
   check_party_id feeCustody "$fee_custody" || return 1
   check_party_id nttCustody "$ntt_custody" || return 1
@@ -72,9 +73,27 @@ first_genesis_parameters() {
     echo "guardian set index is not 0 to $MAX_GUARDIAN_SET_INDEX: '$guardian_set_index'" >&2
     return 1
   fi
-  IFS=, read -r -a guardian_addresses <<<"$guardian_addresses_text"
-  if [[ ${#guardian_addresses[@]} -eq 0 ]]; then
-    echo "no guardian address" >&2
+  IFS=, read -r -a guardians <<<"$guardians_text"
+  if [[ ${#guardians[@]} -eq 0 ]]; then
+    echo "no guardian" >&2
+    return 1
+  fi
+  for guardian in "${guardians[@]}"; do
+    if [[ "$guardian" != *:* ]]; then
+      echo "guardian $guardian has no public key" >&2
+      return 1
+    fi
+    guardian_addresses+=("${guardian%%:*}")
+    guardian_public_keys+=("${guardian#*:}")
+  done
+  for guardian_public_key in "${guardian_public_keys[@]}"; do
+    if [[ ! "$guardian_public_key" =~ ^04[0-9a-f]{128}$ ]]; then
+      echo "guardian public key is not 04 and 64 bytes of lowercase hex: '$guardian_public_key'" >&2
+      return 1
+    fi
+  done
+  if [[ "$(printf '%s\n' "${guardian_public_keys[@]}" | sort -u | wc -l | tr -d ' ')" != "${#guardian_public_keys[@]}" ]]; then
+    echo "duplicate guardian public key" >&2
     return 1
   fi
   for guardian_address in "${guardian_addresses[@]}"; do
@@ -94,9 +113,10 @@ first_genesis_parameters() {
   jq -cn --arg gg "$gg" --arg feeCustody "$fee_custody" --arg nttCustody "$ntt_custody" --arg feeAdmin "$fee_admin" \
     --arg instrumentAdmin "$instrument_admin" --arg instrumentId "$instrument_id" --arg index "$guardian_set_index" \
     --arg chain "$GOVERNANCE_CHAIN_ID" --arg contract "$GOVERNANCE_CONTRACT" \
-    --argjson addresses "$(printf '%s\n' "${guardian_addresses[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" '{
+    --argjson guardians "$(paste -d: <(printf '%s\n' "${guardian_addresses[@]}") <(printf '%s\n' "${guardian_public_keys[@]}") \
+      | jq -Rsc 'split("\n") | map(select(length > 0) | split(":") | {address: .[0], publicKey: .[1]})')" '{
       guardianGovernance: $gg, feeCustody: $feeCustody, nttCustody: $nttCustody, onboardingFeeAdmin: $feeAdmin,
-      genesisGuardianSet: {guardianSetIndex: $index, guardianAddresses: $addresses},
+      genesisGuardianSet: {guardianSetIndex: $index, guardians: $guardians},
       governanceChainId: $chain, governanceContract: $contract, initialMessageFee: "0",
       feeInstrument: {admin: $instrumentAdmin, id: $instrumentId}, registrationFee: "0", replayRootClaimFee: "0",
       firstEmitterId: "0", firstNttManagerId: "0", consumedCoreGovernanceDigests: [], consumedNttGovernanceDigests: [],
@@ -137,9 +157,9 @@ accept_genesis_arguments() {
   jq -cn --argjson agreed "$agreed_parameters" '{agreedParameters: $agreed}'
 }
 
-# relay_governance_vaa_command <core-state-cid> <submitter> <vaa-hex> <pub-keys-json>: the SubmitGovernanceVAA command.
+# relay_governance_vaa_command <core-state-cid> <submitter> <vaa-hex>: the SubmitGovernanceVAA command.
 relay_governance_vaa_command() {
-  local core_state_cid="$1" submitter="$2" vaa_hex="$3" pub_keys="$4"
+  local core_state_cid="$1" submitter="$2" vaa_hex="$3"
   if [[ ! "$core_state_cid" =~ ^00[0-9a-f]+$ ]]; then
     echo "CoreState contract id is not 00<hex>: '$core_state_cid'" >&2
     return 1
@@ -153,17 +173,37 @@ relay_governance_vaa_command() {
     echo "governance VAA is not lowercase hex of whole bytes" >&2
     return 1
   fi
-  if ! jq -e 'type == "array" and length > 0
-      and all(.[]; type == "object" and keys == ["_1", "_2"]
-        and (._1 | type == "string" and test("^(0|[1-9][0-9]*)$"))
-        and (._2 | type == "object" and keys == ["tag", "value"] and .tag == "GuardianPublicKey"
-          and (.value | type == "string" and test("^04[0-9a-f]{128}$"))))' <<<"$pub_keys" > /dev/null 2>&1; then
-    echo "public key hints are not a non-empty array of {_1: <guardian index>, _2: {tag: GuardianPublicKey, value: <65-byte hex>}}: $pub_keys" >&2
+  exercise_command "$CORE_STATE_TEMPLATE" "$core_state_cid" SubmitGovernanceVAA \
+    "$(jq -cn --arg submitter "$submitter" --arg vaa "$vaa_hex" \
+      '{submitter: $submitter, encodedVAA: {tag: "EncodedVaa", value: $vaa}}')"
+}
+
+# attach_guardian_public_keys_command <core-state-cid> <submitter> <guardian-set-index> <public-keys-hex-json-array>:
+# the AttachGuardianPublicKeys command. The core checks that each key derives an address of the set.
+attach_guardian_public_keys_command() {
+  local core_state_cid="$1" submitter="$2" guardian_set_index="$3" public_keys="$4"
+  if [[ ! "$core_state_cid" =~ ^00[0-9a-f]+$ ]]; then
+    echo "CoreState contract id is not 00<hex>: '$core_state_cid'" >&2
     return 1
   fi
-  exercise_command "$CORE_STATE_TEMPLATE" "$core_state_cid" SubmitGovernanceVAA \
-    "$(jq -cn --arg submitter "$submitter" --arg vaa "$vaa_hex" --argjson keys "$pub_keys" \
-      '{submitter: $submitter, encodedVAA: {tag: "EncodedVaa", value: $vaa}, pubKeys: $keys}')"
+  check_party_id submitter "$submitter" || return 1
+  if [[ ! "$guardian_set_index" =~ ^(0|[1-9][0-9]{0,9})$ ]] || (( guardian_set_index > MAX_GUARDIAN_SET_INDEX )); then
+    echo "guardian set index is not 0 to $MAX_GUARDIAN_SET_INDEX: '$guardian_set_index'" >&2
+    return 1
+  fi
+  if ! jq -e 'type == "array" and length > 0 and length <= 255
+      and all(.[]; type == "string" and test("^04[0-9a-f]{128}$"))' <<<"$public_keys" > /dev/null 2>&1; then
+    echo "public keys are not an array of 1 to 255 keys of 04 and 64 bytes of lowercase hex: $public_keys" >&2
+    return 1
+  fi
+  if ! jq -e 'length == (unique | length)' <<<"$public_keys" > /dev/null; then
+    echo "duplicate public key: $public_keys" >&2
+    return 1
+  fi
+  exercise_command "$CORE_STATE_TEMPLATE" "$core_state_cid" AttachGuardianPublicKeys \
+    "$(jq -c --arg submitter "$submitter" --arg index "$guardian_set_index" \
+      '{submitter: $submitter, targetGuardianSetIndex: $index, guardianPublicKeys: [.[] | {tag: "GuardianPublicKey", value: .}]}' \
+      <<<"$public_keys")"
 }
 
 # core_state_disclosures <disclosure-json> <core-state-cid>: a one-element disclosed contracts array for that CoreState.

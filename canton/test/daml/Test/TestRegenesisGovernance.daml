@@ -14,7 +14,8 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.GuardianSet
 import Wormhole.Core.State
 import Test.TestCore
-  ( devnetGuardian, devnetGuardianSet1Key, govGuardianSetUpgradeVAA, govSetFeeVAA, numberCases )
+  ( devnetGuardianMember, devnetGuardianSet1Key, devnetGuardianSet1PubKey, govGuardianSetUpgradeVAA, govSetFeeVAA
+  , unkeyedMembersOf )
 import Test.TestGovernanceBounds
   ( createCoreState, digestOfVAA, evictedFloorErrorText, genesisStateWithLabel, readCoreState
   , submitGovernanceVAA, syntheticConsumedGovernance, syntheticDigest, timestampOf, trySubmitGovernanceVAA )
@@ -88,17 +89,24 @@ testGuardianSetsForRegenesis : Script ()
 testGuardianSetsForRegenesis = do
   now <- getTime
   root <- genesisStateWithLabel "RegenesisSets" 7
-  let set7 = GuardianSet with keys = [devnetGuardian], expirationTime = None
+  let keyedSet1Member = GuardianSetMember with address = devnetGuardianSet1Key, publicKey = Some devnetGuardianSet1PubKey
+      set7 = GuardianSet with members = [devnetGuardianMember], expirationTime = None
       set7Expiring = set7 with expirationTime = Some (addRelTime now (hours 24))
-      set8 = GuardianSet with keys = [devnetGuardianSet1Key], expirationTime = None
+      set8 = GuardianSet with members = [keyedSet1Member], expirationTime = None
+      unkeyedSet8 = set8 with members = [keyedSet1Member with publicKey = None]
       atSeven = root
       atEight = root with guardianSetIndex = 8, guardianSets = Map.fromList [(7, set7Expiring), (8, set8)]
-      conflictingAtEight = atEight with guardianSets = Map.fromList [(7, set7Expiring with keys = [devnetGuardianSet1Key]), (8, set8)]
+      atEightUnkeyed = root with guardianSetIndex = 8, guardianSets = Map.fromList [(7, set7Expiring), (8, unkeyedSet8)]
+      atEightOnlyKeyed = root with guardianSetIndex = 8, guardianSets = Map.fromList [(8, set8)]
+      conflictingAtEight = atEight with
+        guardianSets = Map.fromList [(7, set7Expiring with members = unkeyedMembersOf [devnetGuardianSet1Key]), (8, set8)]
       cases =
         [ ("single root copy", [atEight], Right (8, atEight.guardianSets))
         , ("highest index wins", [atSeven, atEight], Right (8, atEight.guardianSets))
         , ("highest index wins in any order", [atEight, atSeven], Right (8, atEight.guardianSets))
-        , ("different keys at one index", [conflictingAtEight, atSeven], Left "regenesis: earlier roots disagree on the guardian set keys at index 7")
+        , ("unkeyed root takes the key another root attached", [atEightUnkeyed, atEightOnlyKeyed], Right (8, atEight.guardianSets))
+        , ("unkeyed root alone stays unkeyed", [atEightUnkeyed], Right (8, atEightUnkeyed.guardianSets))
+        , ("different addresses at one index", [conflictingAtEight, atSeven], Left "regenesis: earlier roots disagree on the guardian set addresses at index 7")
         , ("no earlier root", [], Left "regenesis: no earlier CoreState")
         ]
   forA_ cases \(caseName, earlierRoots, expected) ->

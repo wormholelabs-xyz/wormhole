@@ -23,7 +23,7 @@ import Wormhole.Core.VAA (parseVAA)
 import Test.MockToken
 import Test.TestCore
 import Test.TestRedTeamCore (checkAttackFailedWith, rtAppMessageBySet0, rtGuardianSetUpgradeWrongEmitterAddress,
-  rtGuardianSetUpgradeWrongEmitterChain, rtSetMessageFeeBySet1BelowQuorum, set1PubKeys, upgradeToSet1)
+  rtGuardianSetUpgradeWrongEmitterChain, rtSetMessageFeeBySet1BelowQuorum, upgradeToSet1)
 
 ----------------------------------------------------------------------
 -- Helpers
@@ -76,17 +76,17 @@ checkFailsOnPrecondition caseName submitResult = case submitResult of
 discardResult : Script (Either SubmitError a) -> Script (Either SubmitError ())
 discardResult = fmap (fmap (const ()))
 
-relayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script (ContractId CoreState)
-relayGovernance bridge relayer coreStateCid encodedVAA pubKeys = do
+relayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
+relayGovernance bridge relayer coreStateCid encodedVAA = do
   coreStateDisclosure <- discloseAsGuardianGovernance bridge coreStateCid
   submit (actAs relayer <> disclose coreStateDisclosure) do
-    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA, pubKeys
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA
 
-tryRelayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Script (Either SubmitError ())
-tryRelayGovernance bridge relayer coreStateCid encodedVAA pubKeys = do
+tryRelayGovernance : CoreBridge -> Party -> ContractId CoreState -> EncodedVaa -> Script (Either SubmitError ())
+tryRelayGovernance bridge relayer coreStateCid encodedVAA = do
   coreStateDisclosure <- discloseAsGuardianGovernance bridge coreStateCid
   discardResult $ trySubmit (actAs relayer <> disclose coreStateDisclosure) do
-    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA, pubKeys
+    exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA
 
 registerEmitterAs : CoreBridge -> Party -> Script (ContractId Emitter)
 registerEmitterAs bridge requester = do
@@ -144,7 +144,7 @@ testCoreTemplateSignatoriesAndObservers = do
   childCid <- submit consumer do exerciseCmd firstNodeCid ConsumeDigest with digest = parseHexTextOrAbort (mconcat (replicate 64 "2"))
   Some child <- queryContractId consumer childCid
   nibbleCountOfPrefix child.prefix === 1
-  _ <- relayGovernance bridge relayer bridge.coreStateCid govTransferFeesVAA [(0, devnetGuardianPubKey)]
+  _ <- relayGovernance bridge relayer bridge.coreStateCid govTransferFeesVAA
   [(_, feeWithdrawal)] <- query @FeeWithdrawalAuthorization gg
   let cases =
         [ StakeholderCase "CoreState" (signatory coreState) (observer coreState) [gg, bridge.feeCustody]
@@ -178,7 +178,6 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   verifier <- allocateParty "CallerOnlyVerifier"
   relayer <- allocateParty "CallerOnlyRelayer"
   let gg = bridge.guardianGovernance
-      devnetPubKeys = [(0, devnetGuardianPubKey)]
 
   -- RegisterEmitter: requester only.
   registryDisclosure <- discloseAsGuardianGovernance bridge bridge.emitterRegistryCid
@@ -210,29 +209,29 @@ testEachCoreFunctionNeedsOnlyCallerAuthority = do
   -- VerifyAndConsumeVAA: consumer only.
   (consumedVAA, consumedNodeCid) <- submit (actAs consumer <> disclose coreStateDisclosure) do
     exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
-      encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys, consumer, namespace = "caller-only", replayNodeCid = rootCid
+      encodedVAA = govSetFeeVAA, consumer, namespace = "caller-only", replayNodeCid = rootCid
   Some consumedNode <- queryContractId consumer consumedNodeCid
   assertMsg "digest not recorded" (Set.member (parseHexTextOrAbort (hexTextOf consumedVAA.hash)) consumedNode.consumed)
 
   -- ParseAndVerifyVAA: verifier only.
   verifiedVAA <- submit (actAs verifier <> disclose coreStateDisclosure) do
-    exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with verifier, encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys
+    exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with verifier, encodedVAA = govSetFeeVAA
   verifiedVAA.sequence === 1
 
   -- SubmitGovernanceVAA: relayer only, for each core governance action.
-  feeCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA devnetPubKeys
+  feeCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA
   Some feeCoreState <- queryContractId gg feeCoreStateCid
   feeCoreState.messageFee === 1000
-  transferCoreStateCid <- relayGovernance bridge relayer feeCoreStateCid govTransferFeesVAA devnetPubKeys
+  transferCoreStateCid <- relayGovernance bridge relayer feeCoreStateCid govTransferFeesVAA
   [(_, feeWithdrawal)] <- query @FeeWithdrawalAuthorization gg
   feeWithdrawal.amount === transferFeesAmount
   feeWithdrawal.recipient === transferFeesRecipient
-  upgradeCoreStateCid <- relayGovernance bridge relayer transferCoreStateCid govContractUpgradeVAA devnetPubKeys
+  upgradeCoreStateCid <- relayGovernance bridge relayer transferCoreStateCid govContractUpgradeVAA
   Some upgradeCoreState <- queryContractId gg upgradeCoreStateCid
   assertMsg "ContractUpgrade digest not consumed"
     (Map.member (parseVAA govContractUpgradeVAA).hash upgradeCoreState.consumedGovernance)
   upgradedAt <- getTime
-  setUpgradeCoreStateCid <- relayGovernance bridge relayer upgradeCoreStateCid govGuardianSetUpgradeVAA devnetPubKeys
+  setUpgradeCoreStateCid <- relayGovernance bridge relayer upgradeCoreStateCid govGuardianSetUpgradeVAA
   Some setUpgradeCoreState <- queryContractId gg setUpgradeCoreStateCid
   setUpgradeCoreState.guardianSetIndex === 1
   (fromSome (Map.lookup 0 setUpgradeCoreState.guardianSets)).expirationTime
@@ -318,10 +317,10 @@ testPartyWithNoRoleHasNoCorePower = do
               exerciseCmd bridge.replayRegistryCid ReplaceReplayRootRegistryFeeAdmin with newOnboardingFeeAdmin = partyWithNoRole)
         , ("SubmitGovernanceVAA with submitter Alice", discardResult $ trySubmit (asPartyWithNoRole <> allDisclosures) do
               exerciseCmd bridge.coreStateCid SubmitGovernanceVAA with
-                submitter = alice, encodedVAA = govSetFeeVAA, pubKeys = [(0, devnetGuardianPubKey)])
+                submitter = alice, encodedVAA = govSetFeeVAA)
         ]
   forA_ authorizationAttacks \(attackName, attack) -> attack >>= checkFailsOnMissingAuthorization attackName
-  applicationVAAResult <- tryRelayGovernance bridge partyWithNoRole bridge.coreStateCid rtAppMessageBySet0 [(0, devnetGuardianPubKey)]
+  applicationVAAResult <- tryRelayGovernance bridge partyWithNoRole bridge.coreStateCid rtAppMessageBySet0
   checkAttackFailedWith "SubmitGovernanceVAA with an application VAA" "governance: wrong emitter" applicationVAAResult
   Some coreStateAfterAttacks <- queryContractId gg bridge.coreStateCid
   coreStateAfterAttacks === coreState
@@ -334,7 +333,6 @@ data InvalidGovernanceCase = InvalidGovernanceCase with
     caseName      : Text
     prepare       : CoreBridge -> Party -> Script (ContractId CoreState)
     encodedVAA    : EncodedVaa
-    pubKeys       : [(Int, GuardianPublicKey)]
     submission    : SubmissionShape
     expectedText  : Text
 
@@ -348,27 +346,27 @@ data SubmissionShape
 -- 'CoreState' stays active and unchanged.
 testRelayedGovernanceRejectsInvalidVAA : Script ()
 testRelayedGovernanceRejectsInvalidVAA = do
-  let devnetPubKeys = [(0, devnetGuardianPubKey)]
-      unchanged bridge _ = pure bridge.coreStateCid
-      afterSetFee bridge relayer = relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA devnetPubKeys
+  let unchanged bridge _ = pure bridge.coreStateCid
+      afterSetFee bridge relayer = relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA
       afterUpgradeToSet1 bridge _ = upgradeToSet1 bridge.guardianGovernance bridge.coreStateCid
+      afterUnkeyedUpgradeToSet1 bridge relayer = relayGovernance bridge relayer bridge.coreStateCid govGuardianSetUpgradeVAA
       cases =
-        [ InvalidGovernanceCase "replay" afterSetFee govSetFeeVAA devnetPubKeys SubmittedByRelayerWithDisclosure
+        [ InvalidGovernanceCase "replay" afterSetFee govSetFeeVAA SubmittedByRelayerWithDisclosure
             "governance: action already consumed"
-        , InvalidGovernanceCase "old guardian set" afterUpgradeToSet1 set0SetFeeZeroVAA devnetPubKeys SubmittedByRelayerWithDisclosure
+        , InvalidGovernanceCase "old guardian set" afterUpgradeToSet1 set0SetFeeZeroVAA SubmittedByRelayerWithDisclosure
             "governance: not signed by current guardian set"
-        , InvalidGovernanceCase "wrong emitter chain" unchanged rtGuardianSetUpgradeWrongEmitterChain devnetPubKeys
+        , InvalidGovernanceCase "wrong emitter chain" unchanged rtGuardianSetUpgradeWrongEmitterChain
             SubmittedByRelayerWithDisclosure "governance: wrong emitter chain"
-        , InvalidGovernanceCase "wrong emitter address" unchanged rtGuardianSetUpgradeWrongEmitterAddress devnetPubKeys
+        , InvalidGovernanceCase "wrong emitter address" unchanged rtGuardianSetUpgradeWrongEmitterAddress
             SubmittedByRelayerWithDisclosure "governance: wrong emitter address"
-        , InvalidGovernanceCase "application VAA" unchanged rtAppMessageBySet0 devnetPubKeys SubmittedByRelayerWithDisclosure
+        , InvalidGovernanceCase "application VAA" unchanged rtAppMessageBySet0 SubmittedByRelayerWithDisclosure
             "governance: wrong emitter"
-        , InvalidGovernanceCase "wrong key hint" unchanged govSetFeeVAA [(0, devnetGuardianSet1PubKey)]
-            SubmittedByRelayerWithDisclosure "public key does not match guardian address"
-        , InvalidGovernanceCase "below quorum" afterUpgradeToSet1 rtSetMessageFeeBySet1BelowQuorum set1PubKeys
+        , InvalidGovernanceCase "signer without an attached key" afterUnkeyedUpgradeToSet1 set1MessageVAA
+            SubmittedByRelayerWithDisclosure "no public key attached for guardian index 0"
+        , InvalidGovernanceCase "below quorum" afterUpgradeToSet1 rtSetMessageFeeBySet1BelowQuorum
             SubmittedByRelayerWithDisclosure "no quorum"
-        , InvalidGovernanceCase "submitter names another party" unchanged govSetFeeVAA devnetPubKeys SubmittedForAnotherParty ""
-        , InvalidGovernanceCase "no disclosure" unchanged govSetFeeVAA devnetPubKeys SubmittedWithoutDisclosure ""
+        , InvalidGovernanceCase "submitter names another party" unchanged govSetFeeVAA SubmittedForAnotherParty ""
+        , InvalidGovernanceCase "no disclosure" unchanged govSetFeeVAA SubmittedWithoutDisclosure ""
         ]
   forA_ (numberCases cases) \(caseNumber, invalidCase) -> do
     bridge <- setupCoreBridge ("InvalidGovernance" <> show caseNumber) None
@@ -379,7 +377,7 @@ testRelayedGovernanceRejectsInvalidVAA = do
     preparedDisclosure <- discloseAsGuardianGovernance bridge preparedCid
     let submitGovernanceAs submitter = discardResult $ trySubmit (actAs relayer <> disclose preparedDisclosure) do
           exerciseCmd preparedCid SubmitGovernanceVAA with
-            submitter, encodedVAA = invalidCase.encodedVAA, pubKeys = invalidCase.pubKeys
+            submitter, encodedVAA = invalidCase.encodedVAA
     case invalidCase.submission of
       SubmittedByRelayerWithDisclosure ->
         submitGovernanceAs relayer >>= checkAttackFailedWith invalidCase.caseName invalidCase.expectedText
@@ -388,7 +386,7 @@ testRelayedGovernanceRejectsInvalidVAA = do
       SubmittedWithoutDisclosure -> do
         result <- discardResult $ trySubmit relayer do
           exerciseCmd preparedCid SubmitGovernanceVAA with
-            submitter = relayer, encodedVAA = invalidCase.encodedVAA, pubKeys = invalidCase.pubKeys
+            submitter = relayer, encodedVAA = invalidCase.encodedVAA
         checkFailsOnUnknownContract invalidCase.caseName result
     Some after <- queryContractId bridge.guardianGovernance preparedCid
     after === before
@@ -435,7 +433,7 @@ testShadowAnchorsAreRejected = do
       rogueParties = RegistryParties with guardianGovernance = rogueGovernance, onboardingFeeAdmin = rogueGovernance
   shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId defaultGovernanceContract
-                 (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
                  feeInstrument rogueFeeCustody)
   shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
   emitterCid <- registerEmitterAs bridge owner
@@ -481,7 +479,7 @@ testShadowAnchorsAreRejected = do
   checkAttackFailedWith "ClaimReplayRoot on a shadow CoreState" "core state guardianGovernance mismatch" claimResult
   consumeResult <- discardResult $ trySubmit (actAs consumer <> disclose coreStateDisclosure) do
     exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
-      encodedVAA = govSetFeeVAA, pubKeys = [(0, devnetGuardianPubKey)], consumer, namespace = "shadow"
+      encodedVAA = govSetFeeVAA, consumer, namespace = "shadow"
       replayNodeCid = rogueNodeCid
   checkAttackFailedWith "VerifyAndConsumeVAA on a shadow ReplayNode" "replay node guardianGovernance mismatch" consumeResult
   rogueRegistrationResult <- discardResult $ trySubmit (actAs owner <> disclose rogueRegistryDisclosure) do
@@ -512,7 +510,7 @@ testGuardianGovernanceIsNeverAFeeAllocationController = do
       nonce = 0, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = bridge.coreStateCid, payer = gg, feeAllocation = None
   freeMessage.sequence === 0
-  paidCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA [(0, devnetGuardianPubKey)]
+  paidCoreStateCid <- relayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA
   paidCoreStateDisclosure <- discloseAsGuardianGovernance bridge paidCoreStateCid
   ggPayment <- mintAndAllocate mockAdmin gg bridge.feeCustody feeInstrument (feeToDecimal 1000)
   paidResult <- discardResult $ trySubmit (actAs gg <> disclose paidCoreStateDisclosure) do
@@ -672,7 +670,6 @@ testCompromisedFeeAdminStopsOnlyOnboarding = do
   successorFeeAdmin <- allocateParty "CompromisedFeeAdminSuccessor"
   let gg = bridge.guardianGovernance
       feeAdmin = bridge.onboardingFeeAdmin
-      devnetPubKeys = [(0, devnetGuardianPubKey)]
   emitterCid <- registerEmitterAs bridge owner
   rootCid <- claimReplayRootAs bridge consumer "compromised-fee-admin" defaultSplitThreshold
   Some coreState <- queryContractId gg bridge.coreStateCid
@@ -714,19 +711,19 @@ testCompromisedFeeAdminStopsOnlyOnboarding = do
         , CompromisedFeeAdminCase "verifier parses and verifies a VAA"
             (discardResult $ trySubmit (actAs newcomer <> disclose coreStateDisclosure) do
               exerciseCmd bridge.coreStateCid ParseAndVerifyVAA with
-                verifier = newcomer, encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys)
+                verifier = newcomer, encodedVAA = govSetFeeVAA)
             StepCommits
         , CompromisedFeeAdminCase "existing replay root consumes a VAA"
             (discardResult $ trySubmit (actAs consumer <> disclose coreStateDisclosure) do
               exerciseCmd bridge.coreStateCid VerifyAndConsumeVAA with
-                encodedVAA = govSetFeeVAA, pubKeys = devnetPubKeys, consumer
+                encodedVAA = govSetFeeVAA, consumer
                 namespace = "compromised-fee-admin", replayNodeCid = rootCid)
             StepCommits
         , CompromisedFeeAdminCase "admin creates a CoreState that pays the admin"
             (discardResult $ trySubmit (actAs feeAdmin) do createCmd coreState with feeRecipient = feeAdmin)
             StepFailsOnMissingAuthorization
         , CompromisedFeeAdminCase "relayer applies governance"
-            (tryRelayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA devnetPubKeys)
+            (tryRelayGovernance bridge relayer bridge.coreStateCid govSetFeeVAA)
             StepCommits
         ]
   forA_ cases \compromisedCase ->
