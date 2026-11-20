@@ -210,3 +210,55 @@ func TestParseListPublishesReadScope(t *testing.T) {
 		})
 	}
 }
+
+func TestCantonListPublishesOAuthCredentials(t *testing.T) {
+	const spliceAudience = "https://canton.network.global"
+	fullOAuth := cantonListPublishesOAuthFlags{tokenURL: "https://idp.example/token", clientID: "cid", clientSecret: "sec"}
+	withAudience := func(audience string) cantonListPublishesOAuthFlags {
+		oauthFlags := fullOAuth
+		oauthFlags.audience = audience
+		return oauthFlags
+	}
+	testCases := []struct {
+		name                 string
+		oauthFlags           cantonListPublishesOAuthFlags
+		unsafePlaintext      bool
+		expectedOAuth        bool
+		expectedAudience     string
+		expectedErrorMessage string
+	}{
+		{name: "no OAuth"},
+		{name: "no OAuth over plaintext", unsafePlaintext: true},
+		{name: "full OAuth", oauthFlags: fullOAuth, expectedOAuth: true},
+		{name: "full OAuth with audience", oauthFlags: withAudience(spliceAudience), expectedOAuth: true, expectedAudience: spliceAudience},
+		{name: "audience without OAuth", oauthFlags: cantonListPublishesOAuthFlags{audience: spliceAudience}, expectedErrorMessage: "--cantonAuthAudience requires"},
+		{name: "whitespace-only audience", oauthFlags: withAudience(" "), expectedErrorMessage: "whitespace"},
+		{name: "audience with a control character", oauthFlags: withAudience("https://canton.network\x00.global"), expectedErrorMessage: "control character"},
+		{name: "token URL without secret", oauthFlags: cantonListPublishesOAuthFlags{tokenURL: fullOAuth.tokenURL, clientID: fullOAuth.clientID}, expectedErrorMessage: "must all be set together"},
+		{name: "lone client secret", oauthFlags: cantonListPublishesOAuthFlags{clientSecret: fullOAuth.clientSecret}, expectedErrorMessage: "must all be set together"},
+		{name: "full OAuth over plaintext", oauthFlags: fullOAuth, unsafePlaintext: true, expectedErrorMessage: "OAuth requires TLS"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			oauthClientCredentials, err := cantonListPublishesOAuthCredentials(testCase.oauthFlags, testCase.unsafePlaintext)
+			if testCase.expectedErrorMessage != "" {
+				require.ErrorContains(t, err, testCase.expectedErrorMessage)
+				require.Nil(t, oauthClientCredentials)
+				return
+			}
+			require.NoError(t, err)
+			if !testCase.expectedOAuth {
+				require.Nil(t, oauthClientCredentials)
+				return
+			}
+			expectedAudience, err := cantonclient.ParseOAuthAudience(testCase.expectedAudience)
+			require.NoError(t, err)
+			require.Equal(t, &cantonclient.OAuthClientCredentials{
+				TokenURL:     fullOAuth.tokenURL,
+				ClientID:     fullOAuth.clientID,
+				ClientSecret: fullOAuth.clientSecret,
+				Audience:     expectedAudience,
+			}, oauthClientCredentials)
+		})
+	}
+}

@@ -1046,6 +1046,14 @@ type WatcherConfig struct {
     RetiringPackageAcceptedUntil string // exclusive record-time deadline of RetiringPackageID (RFC 3339 UTC)
     RetiringPackageVersion       string // its version; required with it outside unsafe dev mode
     ReadAsParty                  string // guardianGovernance party; required outside unsafe dev mode
+    Auth                         AuthConfig // OAuth2 client credentials for the Ledger API; all empty disables OAuth
+}
+
+type AuthConfig struct {
+    TokenURL     string
+    ClientID     string
+    ClientSecret string
+    Audience     string // optional `audience` token request parameter; requires the three fields above
 }
 ```
 
@@ -1058,6 +1066,22 @@ Wired into the guardian via
 in unsafe dev mode and leaves both empty (wildcard). `--cantonPackageVersion`,
 `--cantonRetiringPackageID`, `--cantonRetiringPackageAcceptedUntil`, and
 `--cantonRetiringPackageVersion` populate the other fields (§7.5).
+
+The OAuth2 flags populate `Auth`:
+
+| Flag | Field | Rule |
+| - | - | - |
+| `--cantonAuthTokenURL` | `TokenURL` | Set with the client ID and the client secret, or not at all. |
+| `--cantonAuthClientID` | `ClientID` | Same rule. |
+| `--cantonAuthClientSecret` | `ClientSecret` | Same rule. Use the `GUARDIAND_CANTONAUTHCLIENTSECRET` environment variable. |
+| `--cantonAuthAudience` | `Audience` | Optional. Needs the three flags above. No whitespace or control characters. |
+
+`WatcherConfig.Create` rejects OAuth2 in unsafe dev mode, because OAuth2 needs TLS.
+With `Audience` set, the token request sends it as the `audience` parameter.
+Canton 3.7 requires an `aud` claim in each Ledger API token.
+Set `Audience` to the Ledger API target audience of the participant when the identity provider adds `aud` only on request.
+`docs/canton_guardian_operations.md` section 8 gives the value for each participant configuration.
+The `canton-list-publishes` admin command accepts the same `--cantonAuthAudience` flag.
 
 ### 7.5 Core package upgrades
 
