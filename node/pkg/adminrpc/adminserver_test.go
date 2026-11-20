@@ -583,6 +583,7 @@ func TestCoreBridgeTransferFeesToVaa_Errors(t *testing.T) {
 		errText string
 	}{
 		{"UnknownChain", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = proto.Uint32(0xffff) }, "convert chain id"},
+		{"AbsentChainId", func(r *nodev1.CoreBridgeTransferFees) { r.ChainId = nil }, "chain_id is required"},
 		{"InvalidAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "not-a-number" }, "invalid amount"},
 		{"NegativeAmount", func(r *nodev1.CoreBridgeTransferFees) { r.Amount = "-1" }, "amount cannot be negative"},
 		{"AmountOverflow", func(r *nodev1.CoreBridgeTransferFees) {
@@ -713,6 +714,32 @@ func TestGovMsgToVaa_DispatchesBridgeSetPauserAddresses(t *testing.T) {
 	require.NotNil(t, v)
 	assert.Equal(t, uint64(33), v.Sequence)
 	assert.Equal(t, uint32(44), v.Nonce)
+}
+
+func TestGovMsgToVaa_CoreBridgeTransferFeesChainIdPresence(t *testing.T) {
+	const recipientLine = `recipient: "00000000000000000000000000000000000000000000000000000000deadbeef"`
+	cases := []struct {
+		name          string
+		chainIdLine   string
+		expectedError string
+	}{
+		{"absent chain_id", "", "chain_id is required"},
+		{"explicit chain_id 0", "chain_id: 0", ""},
+		{"explicit chain_id 1", "chain_id: 1", ""},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			requestText := "sequence: 1 nonce: 2 core_bridge_transfer_fees: { " + testCase.chainIdLine + ` amount: "0" ` + recipientLine + " }"
+			var message nodev1.GovernanceMessage
+			require.NoError(t, prototext.Unmarshal([]byte(requestText), &message))
+			_, err := GovMsgToVaa(&message, 4, time.Now())
+			if testCase.expectedError != "" {
+				require.ErrorContains(t, err, testCase.expectedError)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestGovMsgToVaa_DispatchesCoreBridgeTransferFees(t *testing.T) {
