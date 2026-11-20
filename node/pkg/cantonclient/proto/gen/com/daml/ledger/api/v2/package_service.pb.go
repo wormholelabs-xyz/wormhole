@@ -687,7 +687,11 @@ type ListVettedPackagesResponse struct {
 	// Optional: can be empty
 	VettedPackages []*VettedPackages `protobuf:"bytes,1,rep,name=vetted_packages,json=vettedPackages,proto3" json:"vetted_packages,omitempty"`
 	// Pagination token to retrieve the next page.
-	// Empty string if there are no further results.
+	// Empty string once there are no further results.
+	//
+	// “PackageMetadataFilter“ is applied after “TopologyStateFilter“ has already produced a page,
+	// so that page can end up empty even when it has a next token. Keep following the token until
+	// there's no token left.
 	//
 	// Optional
 	NextPageToken string `protobuf:"bytes,2,opt,name=next_page_token,json=nextPageToken,proto3" json:"next_page_token,omitempty"`

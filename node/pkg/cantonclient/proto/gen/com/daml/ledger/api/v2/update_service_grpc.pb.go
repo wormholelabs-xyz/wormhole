@@ -31,6 +31,11 @@ type UpdateServiceClient interface {
 	// Lookup an update by its ID.
 	// If there is no update with this ID, or all the events are filtered, an UPDATE_NOT_FOUND error will be raised.
 	GetUpdateById(ctx context.Context, in *GetUpdateByIdRequest, opts ...grpc.CallOption) (*GetUpdateResponse, error)
+	// Look up an update by its transaction hash.
+	// This is only available for updates received after upgrading to Canton version 3.6.
+	// If there is no update with this transaction hash, or all the events are filtered,
+	// or the update was populated before upgrading to Canton version 3.6, an UPDATE_NOT_FOUND error will be raised.
+	GetUpdateByHash(ctx context.Context, in *GetUpdateByHashRequest, opts ...grpc.CallOption) (*GetUpdateResponse, error)
 	// Read a page of ledger's filtered updates. It returns the event types in accordance with
 	// the specified contents and filters.
 	// Additionally, the selection criteria for individual events depends on the transaction shape chosen.
@@ -98,6 +103,15 @@ func (c *updateServiceClient) GetUpdateById(ctx context.Context, in *GetUpdateBy
 	return out, nil
 }
 
+func (c *updateServiceClient) GetUpdateByHash(ctx context.Context, in *GetUpdateByHashRequest, opts ...grpc.CallOption) (*GetUpdateResponse, error) {
+	out := new(GetUpdateResponse)
+	err := c.cc.Invoke(ctx, "/com.daml.ledger.api.v2.UpdateService/GetUpdateByHash", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *updateServiceClient) GetUpdatesPage(ctx context.Context, in *GetUpdatesPageRequest, opts ...grpc.CallOption) (*GetUpdatesPageResponse, error) {
 	out := new(GetUpdatesPageResponse)
 	err := c.cc.Invoke(ctx, "/com.daml.ledger.api.v2.UpdateService/GetUpdatesPage", in, out, opts...)
@@ -124,6 +138,11 @@ type UpdateServiceServer interface {
 	// Lookup an update by its ID.
 	// If there is no update with this ID, or all the events are filtered, an UPDATE_NOT_FOUND error will be raised.
 	GetUpdateById(context.Context, *GetUpdateByIdRequest) (*GetUpdateResponse, error)
+	// Look up an update by its transaction hash.
+	// This is only available for updates received after upgrading to Canton version 3.6.
+	// If there is no update with this transaction hash, or all the events are filtered,
+	// or the update was populated before upgrading to Canton version 3.6, an UPDATE_NOT_FOUND error will be raised.
+	GetUpdateByHash(context.Context, *GetUpdateByHashRequest) (*GetUpdateResponse, error)
 	// Read a page of ledger's filtered updates. It returns the event types in accordance with
 	// the specified contents and filters.
 	// Additionally, the selection criteria for individual events depends on the transaction shape chosen.
@@ -146,6 +165,9 @@ func (UnimplementedUpdateServiceServer) GetUpdateByOffset(context.Context, *GetU
 }
 func (UnimplementedUpdateServiceServer) GetUpdateById(context.Context, *GetUpdateByIdRequest) (*GetUpdateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetUpdateById not implemented")
+}
+func (UnimplementedUpdateServiceServer) GetUpdateByHash(context.Context, *GetUpdateByHashRequest) (*GetUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetUpdateByHash not implemented")
 }
 func (UnimplementedUpdateServiceServer) GetUpdatesPage(context.Context, *GetUpdatesPageRequest) (*GetUpdatesPageResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetUpdatesPage not implemented")
@@ -220,6 +242,24 @@ func _UpdateService_GetUpdateById_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _UpdateService_GetUpdateByHash_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetUpdateByHashRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(UpdateServiceServer).GetUpdateByHash(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/com.daml.ledger.api.v2.UpdateService/GetUpdateByHash",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(UpdateServiceServer).GetUpdateByHash(ctx, req.(*GetUpdateByHashRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _UpdateService_GetUpdatesPage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(GetUpdatesPageRequest)
 	if err := dec(in); err != nil {
@@ -252,6 +292,10 @@ var UpdateService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetUpdateById",
 			Handler:    _UpdateService_GetUpdateById_Handler,
+		},
+		{
+			MethodName: "GetUpdateByHash",
+			Handler:    _UpdateService_GetUpdateByHash_Handler,
 		},
 		{
 			MethodName: "GetUpdatesPage",

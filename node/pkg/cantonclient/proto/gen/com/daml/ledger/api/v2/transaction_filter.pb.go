@@ -314,8 +314,8 @@ type InterfaceFilter struct {
 	// The interface that a matching contract must implement.
 	// The “interface_id“ needs to be valid: corresponding interface should be defined in
 	// one of the available packages at the time of the query.
-	// Both package-name and package-id reference formats for the identifier are supported.
-	// Note: The package-id reference identifier format is deprecated. We plan to end support for this format in version 3.4.
+	// Only package-name reference format for the identifier is supported.
+	// Note: The package-id reference identifier format was removed in version 3.5.
 	//
 	// Required
 	InterfaceId *Identifier `protobuf:"bytes,1,opt,name=interface_id,json=interfaceId,proto3" json:"interface_id,omitempty"`
@@ -394,8 +394,8 @@ type TemplateFilter struct {
 	// A template for which the payload should be included in the response.
 	// The “template_id“ needs to be valid: corresponding template should be defined in
 	// one of the available packages at the time of the query.
-	// Both package-name and package-id reference formats for the identifier are supported.
-	// Note: The package-id reference identifier format is deprecated. We plan to end support for this format in version 3.4.
+	// Only package-name reference format for the identifier is supported.
+	// Note: The package-id reference identifier format was removed in version 3.5.
 	//
 	// Required
 	TemplateId *Identifier `protobuf:"bytes,1,opt,name=template_id,json=templateId,proto3" json:"template_id,omitempty"`
