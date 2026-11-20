@@ -144,21 +144,22 @@ done
 
 # name|version|expected status|expected package id
 readonly NTT_PIN_CASES=(
-  "ntt 0.3.4|0.3.4|0|1c555ab22b096aa7bc780213eafbf95231bfe03bc4d669d9fe152a8eeff8293f"
-  "ntt 0.4.2|0.4.2|0|1a3e3b0e78f9f08adac111bc44110469dc271f61a9c0e5ed2f7b0b20a569feb8"
+  "ntt 0.5.0|0.5.0|0|449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e"
+  "retired 0.3.4 on core 0.8.3|0.3.4|1|-"
+  "retired 0.4.2 on core 0.8.3|0.4.2|1|-"
   "retired 0.3.2 on core 0.8.0|0.3.2|1|-"
   "retired 0.4.0 on core 0.8.0|0.4.0|1|-"
   "unknown version|0.4.1|1|-"
   "empty version||1|-"
-  "version with suffix|0.4.2-rc1|1|-"
+  "version with suffix|0.5.0-rc1|1|-"
 )
 for pin_case in "${NTT_PIN_CASES[@]}"; do
   IFS='|' read -r case_name pin_version expected_status expected_package_id <<<"$pin_case"
   check_case "ntt_pinned_package_id $case_name" "$expected_status" "$expected_package_id" - ntt_pinned_package_id "$pin_version"
 done
-check_case "ntt_pinned_package_id names the pinned versions" 1 - "0.3.4, 0.4.2" ntt_pinned_package_id 9.9.9
+check_case "ntt_pinned_package_id names the pinned versions" 1 - "pinned versions: 0.5.0" ntt_pinned_package_id 9.9.9
+check_case "ntt_requires_custody_party 0.5.0" 0 - - ntt_requires_custody_party 0.5.0
 check_case "ntt_requires_custody_party 0.3.4" 1 - - ntt_requires_custody_party 0.3.4
-check_case "ntt_requires_custody_party 0.4.2" 0 - - ntt_requires_custody_party 0.4.2
 
 NTT_CONTRACTS="$work_dir/contracts/ntt-contracts.json"
 mkdir -p "$work_dir/contracts"
@@ -209,6 +210,8 @@ pinned_core_package_id="$(pinned_value_in_ntt_lib WORMHOLE_CORE_PACKAGE_ID)" || 
 pinned_core_version="$(pinned_value_in_ntt_lib WORMHOLE_CORE_VERSION)" || failure_count=$((failure_count + 1))
 pinned_ntt_version="$(sed -nE 's/^readonly NTT_VERSION="\$\{NTT_PIN_VERSION:-([0-9.]+)\}"$/\1/p' "$LOCALNET_TEST_DIR/../ntt_lib.sh")"
 pinned_ntt_package_id="$(ntt_pinned_package_id "$pinned_ntt_version")" || failure_count=$((failure_count + 1))
+pinned_genesis_package_id="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_PACKAGE_ID)" || failure_count=$((failure_count + 1))
+pinned_genesis_version="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_VERSION)" || failure_count=$((failure_count + 1))
 check_case "pinned core id is 0.9.0 bba94798" 0 - - \
   test "$pinned_core_package_id" == "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
 check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.9.0"
@@ -226,9 +229,18 @@ check_case "pinned core id is not the withdrawn 0.8.1 4a214c80" 0 - - \
   test "$pinned_core_package_id" != "$CORE_0_8_1_PACKAGE_ID"
 check_case "pinned core id is not the withdrawn 0.8.2 132d32bf" 0 - - \
   test "$pinned_core_package_id" != "$CORE_0_8_2_PACKAGE_ID"
-check_case "pinned ntt id is 0.3.4 1c555ab2" 0 - - \
-  test "$pinned_ntt_package_id" == "1c555ab22b096aa7bc780213eafbf95231bfe03bc4d669d9fe152a8eeff8293f"
-check_case "default ntt pin version" 0 - - test "$pinned_ntt_version" == "0.3.4"
+check_case "pinned ntt id is 0.5.0 449925fb" 0 - - \
+  test "$pinned_ntt_package_id" == "449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e"
+check_case "pinned ntt id is not the replaced 0.5.0 build 9e08a8e6" 0 - - \
+  test "${pinned_ntt_package_id:0:8}" != "9e08a8e6"
+check_case "default ntt pin version" 0 - - test "$pinned_ntt_version" == "0.5.0"
+check_case "pinned wormhole-genesis id is 0.1.0 7e9ca47a" 0 - - \
+  test "$pinned_genesis_package_id" == "7e9ca47aadda9bb3828d37a2844b1ee57ae77fa3151f3aecb84d66267e6c44d4"
+check_case "pinned wormhole-genesis version" 0 - - test "$pinned_genesis_version" == "0.1.0"
+check_case "pinned wormhole-genesis id is not the replaced build a64efec9" 0 - - \
+  test "$pinned_genesis_package_id" != "a64efec90ef24be6b6533a62d4aaf6863e0aa8fa05ffe3ed6735c0bab295bd81"
+check_case "pinned wormhole-genesis id is not the replaced build cbb432d7" 0 - - \
+  test "$pinned_genesis_package_id" != "cbb432d75935af10179d1916f315034e68fa61ad4d53d6f3389b581f30e27221"
 
 echo "not a zip archive" > "$work_dir/not-a-dar.dar"
 check_case "core 0.8.2 main id" 0 "$CORE_0_8_2_PACKAGE_ID" - dar_main_package_id "$VENDORED_DAR_DIR/wormhole-core-0.8.2.dar"
@@ -250,20 +262,29 @@ check_case "core id of a file that is not a DAR" 1 - "cannot list" \
 check_case "package ids of the core 0.7.0 DAR include its main id" 0 - - \
   check_text_has_line "$(dar_package_ids "$VENDORED_DAR_DIR/wormhole-core-0.7.0.dar")" "$CORE_0_7_0_PACKAGE_ID"
 
-readonly NTT_PINNED_VERSIONS=("0.3.4" "0.4.2")
-for ntt_version in "${NTT_PINNED_VERSIONS[@]}"; do
-  ntt_dar="${NTT_REPO_DIR:-$REPOSITORY_ROOT/../ntt}/canton/ntt/.daml/dist/ntt-$ntt_version.dar"
-  if [[ ! -f "$ntt_dar" ]]; then
-    echo "skip: $ntt_dar is absent; set NTT_REPO_DIR to an NTT checkout with built DARs"
-    continue
-  fi
-  ntt_package_id="$(ntt_pinned_package_id "$ntt_version")"
-  check_case "NTT $ntt_version DAR main id equals the pin" 0 "$ntt_package_id" - dar_main_package_id "$ntt_dar"
-  check_case "NTT $ntt_version DAR main name and version" 0 "ntt $ntt_version" - \
+ntt_canton_dir="${NTT_REPO_DIR:-$REPOSITORY_ROOT/../ntt}/canton"
+ntt_dar="$ntt_canton_dir/ntt/.daml/dist/ntt-$pinned_ntt_version.dar"
+if [[ -f "$ntt_dar" ]]; then
+  check_case "NTT $pinned_ntt_version DAR main id equals the pin" 0 "$pinned_ntt_package_id" - dar_main_package_id "$ntt_dar"
+  check_case "NTT $pinned_ntt_version DAR main name and version" 0 "ntt $pinned_ntt_version" - \
     dar_main_package_name_and_version "$ntt_dar"
-  check_case "NTT $ntt_version DAR carries exactly the pinned core" 0 - - \
+  check_case "NTT $pinned_ntt_version DAR carries exactly the pinned core" 0 - - \
     check_core_package_id_of_dar "$ntt_dar" "$pinned_core_package_id"
-done
+else
+  echo "skip: $ntt_dar is absent; set NTT_REPO_DIR to an NTT checkout with built DARs"
+fi
+genesis_dar="$ntt_canton_dir/genesis/.daml/dist/wormhole-genesis-$pinned_genesis_version.dar"
+if [[ -f "$genesis_dar" ]]; then
+  check_case "wormhole-genesis DAR main id equals the pin" 0 "$pinned_genesis_package_id" - dar_main_package_id "$genesis_dar"
+  check_case "wormhole-genesis DAR main name and version" 0 "wormhole-genesis $pinned_genesis_version" - \
+    dar_main_package_name_and_version "$genesis_dar"
+  check_case "wormhole-genesis DAR carries exactly the pinned core" 0 - - \
+    check_core_package_id_of_dar "$genesis_dar" "$pinned_core_package_id"
+  check_case "wormhole-genesis DAR carries exactly the pinned ntt" 0 "$pinned_ntt_package_id" - \
+    dar_dependency_package_ids "$genesis_dar" ntt
+else
+  echo "skip: $genesis_dar is absent; set NTT_REPO_DIR to an NTT checkout with built DARs"
+fi
 localnet_core_dar="$REPOSITORY_ROOT/canton/core/.daml/dist/wormhole-core-$pinned_core_version.dar"
 if [[ -f "$localnet_core_dar" ]]; then
   check_case "LocalNet core DAR main id equals the pin" 0 "$pinned_core_package_id" - dar_main_package_id "$localnet_core_dar"
