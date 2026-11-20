@@ -2,9 +2,7 @@
 -- choice, and result shape, signed by the forger alone.
 module Wormhole.Core.State where
 
--- | Same Ledger API shape as the core 'MessagePayload' variant.
-data MessagePayload = MessagePayload Text
-  deriving (Eq, Show)
+import Wormhole.Core.Bytes (MessagePayload)
 
 data WormholeMessage = WormholeMessage with
     registrar        : Party

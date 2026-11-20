@@ -1,0 +1,6 @@
+-- | Look-alike of the core bridge's Wormhole.Core.Bytes: the same module and
+-- variant name, so only the package id tells it apart.
+module Wormhole.Core.Bytes where
+
+data MessagePayload = MessagePayload Text
+  deriving (Eq, Show)

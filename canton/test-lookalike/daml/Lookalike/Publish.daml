@@ -3,6 +3,7 @@
 module Lookalike.Publish where
 
 import Daml.Script
+import Wormhole.Core.Bytes
 import Wormhole.Core.State
 
 data LookalikeTarget = LookalikeTarget with
