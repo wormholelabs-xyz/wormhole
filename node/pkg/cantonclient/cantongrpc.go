@@ -90,11 +90,40 @@ func (c *grpcClient) GetLedgerEnd(ctx context.Context) (int64, error) {
 	return resp.GetOffset(), nil
 }
 
-// maxVettedPackagePages bounds one ListVettedPackageMetadata call. The reply
-// has one entry for each participant and synchronizer that vets a requested
-// id: a participant filter needs GetParticipantId, which requires
-// ParticipantAdmin.
-const maxVettedPackagePages = 16
+// maxScannedVettedPackagesEntries bounds the (participant, synchronizer) entries that one
+// ListVettedPackageMetadata call pages through. The server applies the package filter after it
+// selects a page, so a page can be empty and still carry a next-page token. A participant filter
+// needs GetParticipantId, which requires ParticipantAdmin.
+const maxScannedVettedPackagesEntries = 1 << 16
+
+// maxVettedPackagesPageSizeUpperBound rejects a server maximum page size that is not plausible.
+const maxVettedPackagesPageSizeUpperBound = 1 << 20
+
+// maxVettedPackagePagesForPageSize is the page cap of one call: every scanned entry, plus one final page.
+func maxVettedPackagePagesForPageSize(pageSize int) int {
+	if pageSize <= 0 {
+		panic(fmt.Sprintf("maxVettedPackagePagesForPageSize: page size %d", pageSize))
+	}
+	return (maxScannedVettedPackagesEntries+pageSize-1)/pageSize + 1
+}
+
+// serverMaxVettedPackagesPageSize reads PackageFeature.max_vetted_packages_page_size from the VersionService.
+func (c *grpcClient) serverMaxVettedPackagesPageSize(ctx context.Context) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
+	defer cancel()
+	response, err := c.version.GetLedgerApiVersion(ctx, &apiv2.GetLedgerApiVersionRequest{})
+	if err != nil {
+		return 0, fmt.Errorf("GetLedgerApiVersion: %w", err)
+	}
+	pageSize := response.GetFeatures().GetPackageFeature().GetMaxVettedPackagesPageSize()
+	if pageSize <= 0 {
+		return 0, fmt.Errorf("GetLedgerApiVersion: ListVettedPackages maximum page size %d, expected a positive value", pageSize)
+	}
+	if pageSize > maxVettedPackagesPageSizeUpperBound {
+		return 0, fmt.Errorf("GetLedgerApiVersion: ListVettedPackages maximum page size %d, expected at most %d", pageSize, maxVettedPackagesPageSizeUpperBound)
+	}
+	return int(pageSize), nil
+}
 
 func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs []PackageID) ([]VettedPackageMetadata, error) {
 	// An empty filter matches every vetted package.
@@ -108,10 +137,15 @@ func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs [
 		}
 		packageIDHexes = append(packageIDHexes, packageID.hexID)
 	}
+	pageSize, err := c.serverMaxVettedPackagesPageSize(ctx)
+	if err != nil {
+		return nil, err
+	}
+	maxPages := maxVettedPackagePagesForPageSize(pageSize)
 	var entries []VettedPackageMetadata
 	pageToken := ""
-	for pageIndex := 0; pageIndex < maxVettedPackagePages; pageIndex++ {
-		response, err := c.listVettedPackagesPage(ctx, packageIDHexes, pageToken)
+	for pageIndex := 0; pageIndex < maxPages; pageIndex++ {
+		response, err := c.listVettedPackagesPage(ctx, packageIDHexes, pageToken, pageSize)
 		if err != nil {
 			return nil, err
 		}
@@ -129,15 +163,16 @@ func (c *grpcClient) ListVettedPackageMetadata(ctx context.Context, packageIDs [
 			return entries, nil
 		}
 	}
-	return nil, fmt.Errorf("ListVettedPackages: more than %d pages (%d entries read); the reply lists every participant and synchronizer that vets the requested ids", maxVettedPackagePages, len(entries))
+	return nil, fmt.Errorf("ListVettedPackages: more than %d pages of %d entries (%d packages read); the reply lists every participant and synchronizer that vets the requested ids", maxPages, pageSize, len(entries))
 }
 
-func (c *grpcClient) listVettedPackagesPage(ctx context.Context, packageIDHexes []string, pageToken string) (*apiv2.ListVettedPackagesResponse, error) {
+func (c *grpcClient) listVettedPackagesPage(ctx context.Context, packageIDHexes []string, pageToken string, pageSize int) (*apiv2.ListVettedPackagesResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, unaryRPCTimeout)
 	defer cancel()
 	response, err := c.packages.ListVettedPackages(ctx, &apiv2.ListVettedPackagesRequest{
 		PackageMetadataFilter: &apiv2.PackageMetadataFilter{PackageIds: packageIDHexes},
 		PageToken:             pageToken,
+		PageSize:              uint32(pageSize), //nolint:gosec // serverMaxVettedPackagesPageSize bounds it to (0, 1<<20]
 	})
 	if err != nil {
 		return nil, fmt.Errorf("ListVettedPackages: %w", err)
