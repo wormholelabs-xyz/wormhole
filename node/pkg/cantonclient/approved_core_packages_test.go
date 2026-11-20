@@ -7,8 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// deployedCorePackageIDHex is wormhole-core 0.11.0 built with Daml SDK 3.7.3 (bounded CoreState governance collections).
-const deployedCorePackageIDHex = "3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc"
+// deployedCorePackageIDHex is wormhole-core 0.11.1 built with Daml SDK 3.7.3 (governance amounts bound-checked to the Int range).
+const deployedCorePackageIDHex = "019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5"
+
+// replacedCore0110PackageIDHex is wormhole-core 0.11.0 built with Daml SDK 3.7.3: an oversized governance amount aborts with ArithmeticError.
+const replacedCore0110PackageIDHex = "3e555cc2975764a29323906d74ab513025a3ba96376210b69daa542b294352bc"
 
 // replacedCore0100PackageIDHex is wormhole-core 0.10.0 built with Daml SDK 3.7.3: its CoreState governance collections grow without a bound.
 const replacedCore0100PackageIDHex = "bf75fd518ed8f524832ac25c65a353215bb472a531d7ef745bf050848936eddb"
@@ -44,8 +47,10 @@ func TestDefaultApprovedCorePackagesFile(t *testing.T) {
 		version      string
 		wantErr      string
 	}{
-		{name: "deployed 0.11.0", packageIDHex: deployedCorePackageIDHex, version: "0.11.0"},
-		{name: "deployed 0.11.0 id as 0.10.0", packageIDHex: deployedCorePackageIDHex, version: "0.10.0", wantErr: "is approved as 0.11.0, not 0.10.0"},
+		{name: "deployed 0.11.1", packageIDHex: deployedCorePackageIDHex, version: "0.11.1"},
+		{name: "deployed 0.11.1 id as 0.11.0", packageIDHex: deployedCorePackageIDHex, version: "0.11.0", wantErr: "is approved as 0.11.1, not 0.11.0"},
+		{name: "replaced 0.11.0", packageIDHex: replacedCore0110PackageIDHex, version: "0.11.0", wantErr: "not in the approved"},
+		{name: "replaced 0.11.0 id as 0.11.1", packageIDHex: replacedCore0110PackageIDHex, version: "0.11.1", wantErr: "not in the approved"},
 		{name: "replaced 0.10.0", packageIDHex: replacedCore0100PackageIDHex, version: "0.10.0", wantErr: "not in the approved"},
 		{name: "replaced 0.10.0 id as 0.11.0", packageIDHex: replacedCore0100PackageIDHex, version: "0.11.0", wantErr: "not in the approved"},
 		{name: "replaced SDK 3.7.3 0.9.0 build", packageIDHex: replacedSDK373Core090PackageIDHex, version: "0.9.0", wantErr: "not in the approved"},

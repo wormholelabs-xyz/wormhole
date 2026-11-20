@@ -357,7 +357,7 @@ testRedTeamA9MalformedGovernancePayloads = do
     guardianGovernance coreStateCid rtGovernanceEmptyPayload set0PubKeys
   checkGovernanceRejectedWith "A9 truncated ContractUpgrade" "ContractUpgrade packet must be 67 bytes"
     guardianGovernance coreStateCid rtContractUpgradeTruncated set0PubKeys
-  checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" "ArithmeticError"
+  checkGovernanceRejectedWith "A9 SetMessageFee of 2^64" "governance: SetMessageFee fee exceeds the Int range"
     guardianGovernance coreStateCid rtSetMessageFeeOverflowsInt64 set0PubKeys
 
 -- | EVM GovernanceStructs.sol requires @encoded.length == index@ for every
@@ -394,6 +394,55 @@ coreGovernanceHeader action = coreModule <> intToBytesN action 1 <> intToBytesN 
 guardianSetUpgradePacket : Int -> [HexBytes] -> HexBytes
 guardianSetUpgradePacket declaredKeyCount guardianKeys =
   coreGovernanceHeader 2 <> intToBytesN 1 4 <> intToBytesN declaredKeyCount 1 <> mconcat guardianKeys
+
+-- | The uint256 SetMessageFee fee and TransferFees amount parse only below 2^63
+-- (Daml Int max + 1); each larger word aborts with the field's range error.
+testParseGovernanceBoundsUint256AmountsToInt : Script ()
+testParseGovernanceBoundsUint256AmountsToInt = do
+  parser <- allocateParty "GovernanceAmountParser"
+  parserCid <- submit parser do createCmd GovernancePacketParser with parser
+  let repeatedBytes count byteHex = parseHexTextOrAbort @HexBytes (mconcat (replicate count byteHex))
+      maxIntAmount = 9223372036854775807
+      maxIntWord = intToBytesN maxIntAmount 32
+      twoPow63Word = repeatedBytes 24 "00" <> intToHexByte 128 <> repeatedBytes 7 "00"
+      twoPow64Word = repeatedBytes 23 "00" <> intToHexByte 1 <> repeatedBytes 8 "00"
+      twoPow255Word = intToHexByte 128 <> repeatedBytes 31 "00"
+      maxUint256Word = repeatedBytes 32 "ff"
+      recipient = repeatedBytes 32 "d4"
+      setMessageFeePacket feeWord = coreGovernanceHeader 3 <> feeWord
+      transferFeesPacket amountWord = coreGovernanceHeader 4 <> amountWord <> recipient
+      parsePacket packetBytes = trySubmit parser do
+        exerciseCmd parserCid ParseGovernancePacket with packet = parseHexBytesAsOrAbort packetBytes
+      acceptedCases =
+        [ ("SetMessageFee 0", setMessageFeePacket (intToBytesN 0 32), SetMessageFee with chain = 75, fee = 0)
+        , ("SetMessageFee 2^63 - 1", setMessageFeePacket maxIntWord, SetMessageFee with chain = 75, fee = maxIntAmount)
+        , ("TransferFees 0", transferFeesPacket (intToBytesN 0 32)
+          , TransferFees with chain = 75, amount = 0, recipient = parseHexBytesAsOrAbort recipient)
+        , ("TransferFees 2^63 - 1", transferFeesPacket maxIntWord
+          , TransferFees with chain = 75, amount = maxIntAmount, recipient = parseHexBytesAsOrAbort recipient)
+        ]
+      oversizedWords =
+        [ ("2^63", twoPow63Word)
+        , ("2^64", twoPow64Word)
+        , ("2^255", twoPow255Word)
+        , ("2^256 - 1", maxUint256Word)
+        ]
+      rejectedCases =
+        [ ("SetMessageFee " <> wordName, "governance: SetMessageFee fee exceeds the Int range", setMessageFeePacket amountWord)
+        | (wordName, amountWord) <- oversizedWords ] ++
+        [ ("TransferFees " <> wordName, "governance: TransferFees amount exceeds the Int range", transferFeesPacket amountWord)
+        | (wordName, amountWord) <- oversizedWords ]
+  byteLength maxIntWord === uint256WordBytes
+  maxGovernanceAmount === maxIntAmount
+  intToBytesN maxGovernanceAmount intWordBytes === parseHexTextOrAbort "7fffffffffffffff"
+  forA_ acceptedCases \(caseName, packetBytes, expectedAction) -> do
+    parseResult <- parsePacket packetBytes
+    case parseResult of
+      Right parsedAction -> parsedAction === expectedAction
+      Left parseError -> abort (caseName <> ": rejected: " <> show parseError)
+  forA_ rejectedCases \(caseName, expectedSubstring, packetBytes) -> do
+    parseResult <- parsePacket packetBytes
+    checkAttackFailedWith caseName expectedSubstring parseResult
 
 -- | Exact packet lengths of sdk/vaa/payloads.go: ContractUpgrade 67,
 -- GuardianSetUpgrade 40 + 20 * keys, SetMessageFee 67, TransferFees 99.
