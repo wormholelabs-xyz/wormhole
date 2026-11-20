@@ -73,7 +73,8 @@ It accepts `guardianGovernance` as the fee instrument admin. Do not deploy it.
 `guardianSets` holds at most 4 sets, and each governance transition removes expired sets.
 It changes `CoreState` field types, so it is not an SCU upgrade of 0.10.0, and it starts a new `wormhole-core` line.
 The 0.11.0 main package id is `2cf9e5e777861421d63d98984174ae3296a7bc781ba761da96fc30f406b1e002` (Daml SDK 3.7.3).
-0.10.0 (`9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df`) is replaced: its governance collections grow without a bound.
+0.10.0 (`9b4829c1c99e2682432ef1a09f6db16f54ebf3293e06c6c112efc984b00a08df`) is replaced.
+Its governance collections grow without a bound.
 
 0.10.0 replaces the `Text` byte aliases with constrained byte types (`../README.md` §4.8).
 It changes template field types, so it is not an SCU upgrade of 0.9.0, and it starts a new `wormhole-core` line.
