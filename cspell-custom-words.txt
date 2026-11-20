@@ -181,6 +181,7 @@ promauto
 proto
 Proto
 protobuf
+protoc
 protos
 prototxt
 pubkey
