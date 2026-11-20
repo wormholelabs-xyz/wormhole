@@ -83,6 +83,7 @@ frontends
 funder
 gogoproto
 goimports
+GOTOOLCHAIN
 golangci
 gossipv
 guardiand
@@ -180,6 +181,7 @@ promauto
 proto
 Proto
 protobuf
+protoc
 protos
 prototxt
 pubkey

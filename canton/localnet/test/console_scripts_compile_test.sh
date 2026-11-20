@@ -24,6 +24,7 @@ compile_cases=(
   "package-vetting-toggle${CASE_SEPARATOR}$CONSOLE_DIR/package_vetting_toggle.canton${CASE_SEPARATOR}failed with an exception (VETTING_PACKAGE_IDS)"
   "participant-hold-disconnected${CASE_SEPARATOR}$CONSOLE_DIR/participant_hold_disconnected.canton${CASE_SEPARATOR}failed with an exception (HOLD_PARTICIPANT)"
   "repair-contracts${CASE_SEPARATOR}$CONSOLE_DIR/repair_contracts.canton${CASE_SEPARATOR}failed with an exception (REPAIR_PARTICIPANT)"
+  "devnet-guardian-governance${CASE_SEPARATOR}$LOCALNET_SCRIPT_DIR/../devnet/guardian_governance.canton${CASE_SEPARATOR}missing required environment variable: GG_OWNER_PUBKEY_1"
 )
 
 work_dir="$(mktemp -d)"

@@ -1,12 +1,11 @@
 # Production Wormhole core-bridge package: templates only, NO daml-script.
 # This is the DAR uploaded to a participant / shipped to integrators.
 #
-# Targets the Daml 3.x line for the PUBLIC Canton Network mainnet (Canton 3.5.x
-# protocol; Daml SDK 3.5.1) — Ledger API v2 and the DA.Crypto.Text builtins used
-# by Wormhole.Core.VAA. `--target=2.3` selects Daml-LF 2.3 (Protocol Version 35),
-# which enables contract keys; identity uniqueness is registry-enforced because
-# Canton keys are non-unique (see State.daml and README §4).
-sdk-version: 3.5.1
+# SDK and protocol target: Daml SDK 3.7.3, Canton 3.7.3, Protocol Version 37 —
+# Ledger API v2 and the DA.Crypto.Text builtins used by Wormhole.Core.VAA.
+# `--target=2.3` selects Daml-LF 2.3, which Protocol Versions 36 and 37 accept. Contract keys are non-unique on LF 2.3, so identity uniqueness
+# is registry-enforced (see State.daml and README §4).
+sdk-version: 3.7.3
 name: wormhole-core
 version: 0.9.0
 source: daml
@@ -23,7 +22,6 @@ data-dependencies:
   - ../dars/splice-api-token-holding-v1-1.0.0.dar
   - ../dars/splice-api-token-allocation-v1-1.0.0.dar
 build-options:
-  # Daml-LF 2.3 (Protocol Version 35). As of SDK 3.5 the DA.Crypto.Text
-  # builtins (keccak256 / secp256k1WithEcdsaOnly) are stable, so no
-  # alpha-warning suppression is needed.
+  # Daml-LF 2.3: the SDK 3.7.3 default target. The DA.Crypto.Text builtins
+  # (keccak256 / secp256k1WithEcdsaOnly) are stable on it.
   - --target=2.3
