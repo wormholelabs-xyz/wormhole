@@ -650,7 +650,8 @@ message CoreBridgeSetMessageFee {
 // account on a chain to a recipient. See whitepapers/0004_message_publishing.md.
 message CoreBridgeTransferFees {
   // ID of the chain of the core bridge contract where the fees should be transferred from (uint16).
-  uint32 chain_id = 1;
+  // Required. Set 0 explicitly to target every chain that accepts it.
+  optional uint32 chain_id = 1;
   // Amount to transfer (decimal-formatted string).
   string amount = 2;
   // Hex-encoded 32-byte recipient address (without leading 0x). Left-zero-padded if shorter.
