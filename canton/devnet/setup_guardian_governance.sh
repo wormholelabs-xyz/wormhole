@@ -29,11 +29,14 @@ KEY_DIR="${GG_KEY_DIR:-/tmp/guardian-governance-keys}"
 export GG_ARTIFACTS_FILE="${GG_ARTIFACTS_FILE:-/tmp/guardian-governance-artifacts.json}"
 export GG_THRESHOLD="${GG_THRESHOLD:-2}"
 export GG_PARTY_NAME="${GG_PARTY_NAME:-guardianGovernance}"
-# guardianGovernance gets feeCustody, the CoreState fee recipient, in the same namespace. Set it empty for no second party.
+# guardianGovernance gets feeCustody (the CoreState fee recipient) and nttCustody (the NTT reserve custodian) in the
+# same namespace; AcceptGenesis needs both. Set a name empty to skip that party.
 if [ "${GG_PARTY_NAME}" = "guardianGovernance" ]; then
   export GG_FEE_CUSTODY_PARTY_NAME="${GG_FEE_CUSTODY_PARTY_NAME-feeCustody}"
+  export GG_NTT_CUSTODY_PARTY_NAME="${GG_NTT_CUSTODY_PARTY_NAME-nttCustody}"
 else
   export GG_FEE_CUSTODY_PARTY_NAME="${GG_FEE_CUSTODY_PARTY_NAME:-}"
+  export GG_NTT_CUSTODY_PARTY_NAME="${GG_NTT_CUSTODY_PARTY_NAME:-}"
 fi
 
 "${SCRIPT_DIR}/wait_for_ledger.sh" "${HOST}" "${PORT}"

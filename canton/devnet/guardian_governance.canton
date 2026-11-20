@@ -59,6 +59,11 @@
 //                           with the same hosts, confirmation threshold and
 //                           signing keys: the CoreState fee recipient. Empty
 //                           or unset: no second party.
+//   GG_NTT_CUSTODY_PARTY_NAME
+//                           Name of a third party under the same namespace,
+//                           with the same hosts, confirmation threshold and
+//                           signing keys: the NTT reserve custodian. Empty
+//                           or unset: no third party.
 //   GG_SYNCHRONIZER_ALIAS   Alias of the synchronizer to submit topology to.
 //                           Default: the participant's sole connected
 //                           synchronizer (fails if there is more than one and
@@ -154,6 +159,10 @@ val threshold = PositiveInt.tryCreate(environmentVariableOrDefault("GG_THRESHOLD
 val partyName = environmentVariableOrDefault("GG_PARTY_NAME", "guardianGovernance")
 val feeCustodyPartyName: Option[String] = sys.env.get("GG_FEE_CUSTODY_PARTY_NAME").map(_.trim).filter(_.nonEmpty)
 require(!feeCustodyPartyName.contains(partyName), "GG_FEE_CUSTODY_PARTY_NAME must differ from GG_PARTY_NAME")
+val nttCustodyPartyName: Option[String] = sys.env.get("GG_NTT_CUSTODY_PARTY_NAME").map(_.trim).filter(_.nonEmpty)
+require(!nttCustodyPartyName.contains(partyName), "GG_NTT_CUSTODY_PARTY_NAME must differ from GG_PARTY_NAME")
+require(nttCustodyPartyName.isEmpty || nttCustodyPartyName != feeCustodyPartyName,
+  "GG_NTT_CUSTODY_PARTY_NAME must differ from GG_FEE_CUSTODY_PARTY_NAME")
 val synchronizerAliasOpt = sys.env.get("GG_SYNCHRONIZER_ALIAS")
 val artifactsFile = environmentVariableOrDefault("GG_ARTIFACTS_FILE", "guardian-governance-artifacts.json")
 
@@ -347,6 +356,7 @@ def allocateNamespaceParty(name: String): PartyId = {
 }
 val partyId = allocateNamespaceParty(partyName)
 val feeCustodyPartyId: Option[PartyId] = feeCustodyPartyName.map(allocateNamespaceParty)
+val nttCustodyPartyId: Option[PartyId] = nttCustodyPartyName.map(allocateNamespaceParty)
 
 // --- Artifacts: the handoff to (a) the local test harness's assertions and
 // (b) the eventual CN-synchronizer submission. Deliberately plain hand-built
@@ -359,6 +369,7 @@ val artifactsJson =
   s"""{
      |  "partyId": ${jsonString(partyId.toProtoPrimitive)},
      |  "feeCustodyPartyId": ${feeCustodyPartyId.map(id => jsonString(id.toProtoPrimitive)).getOrElse("null")},
+     |  "nttCustodyPartyId": ${nttCustodyPartyId.map(id => jsonString(id.toProtoPrimitive)).getOrElse("null")},
      |  "decentralizedNamespace": ${jsonString(decentralizedNamespace.fingerprint.toProtoPrimitive)},
      |  "threshold": ${threshold.value},
      |  "owners": [

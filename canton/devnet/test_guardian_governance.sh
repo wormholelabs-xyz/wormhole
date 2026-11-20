@@ -8,15 +8,16 @@
 #     signature shape) fail before the first topology load.
 #   - DN created: 3 owners, threshold 2.
 #   - Party allocated: guardianGovernance::<dn>, hosted at Confirmation,
-#     2-of-3 party signing keys. feeCustody::<dn> allocated in the same
-#     namespace.
-#   - 1-of-3 co-signs: `CoreState` rejected (threshold enforced), and the
-#     script stops before the `EmitterRegistry` create.
-#   - 0-of-3 (operator alone): the same (anti-forgery -- the crux property).
-#   - No feeCustody signature, or 1-of-3 feeCustody: `CoreState` rejected.
-#   - 2-of-3 co-signs `CoreState` alone (GENESIS_LAST_CREATE=CoreState): commits.
-#   - A rerun skips the active `CoreState` and commits `EmitterRegistry`.
-#   - A second rerun skips both.
+#     2-of-3 party signing keys. feeCustody::<dn> and nttCustody::<dn>
+#     allocated in the same namespace.
+#   - The local party LabsOperator creates one WormholeGenesisOffer.
+#   - AcceptGenesis with 1-of-3 guardianGovernance signatures: rejected.
+#   - AcceptGenesis with no namespace signature (the operator alone): rejected
+#     (anti-forgery -- the crux property).
+#   - No feeCustody signature, 1-of-3 feeCustody, or no nttCustody signature:
+#     rejected.
+#   - 2-of-3 for each of the three parties: AcceptGenesis commits.
+#   - A rerun finds the CoreState and stops.
 #
 # Usage: test_guardian_governance.sh
 #   Assumes `dpm sandbox` is NOT already running on :6865/:6864 -- this script
@@ -82,16 +83,24 @@ fi
 
 "${SCRIPT_DIR}/wait_for_ledger.sh" localhost 6865
 
-# --- Build and upload the production DAR (CoreState lives there). ---
+# --- Build and upload the production DARs. The wormhole-genesis DAR of the
+# NTT repository (NTT_REPO_DIR, default ../ntt) carries ntt and
+# token-cip0056. ---
 log "building wormhole-core DAR"
 (cd "${REPO_ROOT}/canton" && dpm build --all >/dev/null)
 CORE_VERSION="$(awk '/^version:/ {print $2}' "${REPO_ROOT}/canton/core/daml.yaml")"
 CORE_DAR="${REPO_ROOT}/canton/core/.daml/dist/wormhole-core-${CORE_VERSION}.dar"
+GENESIS_DAR="${NTT_REPO_DIR:-${REPO_ROOT}/../ntt}/canton/genesis/.daml/dist/wormhole-genesis-0.1.0.dar"
+if [ ! -f "${GENESIS_DAR}" ]; then
+  fail "${GENESIS_DAR} is absent; set NTT_REPO_DIR to an NTT checkout with built DARs"
+  exit 1
+fi
 
 UPLOAD_SCRIPT="${WORK_DIR}/upload_dar.canton"
 cat > "${UPLOAD_SCRIPT}" <<EOF
 val p = sandbox
 println("PACKAGE_ID=" + p.dars.upload("${CORE_DAR}"))
+println("GENESIS_PACKAGE_ID=" + p.dars.upload("${GENESIS_DAR}"))
 EOF
 # The Ledger API port accepts connections slightly before the participant has
 # finished auto-connecting to its built-in synchronizer; DAR upload needs a
@@ -99,8 +108,9 @@ EOF
 GG_CORE_PACKAGE_ID=""
 for _ in $(seq 1 15); do
   UPLOAD_OUT="$(dpm canton-console --no-tty --bootstrap "${UPLOAD_SCRIPT}" < /dev/null 2>&1)"
-  GG_CORE_PACKAGE_ID="$(echo "${UPLOAD_OUT}" | grep -oE 'PACKAGE_ID=[a-f0-9]+' | cut -d= -f2)"
-  [ -n "${GG_CORE_PACKAGE_ID}" ] && break
+  GG_CORE_PACKAGE_ID="$(echo "${UPLOAD_OUT}" | grep -oE '^PACKAGE_ID=[a-f0-9]+' | cut -d= -f2)"
+  GG_GENESIS_PACKAGE_ID="$(echo "${UPLOAD_OUT}" | grep -oE 'GENESIS_PACKAGE_ID=[a-f0-9]+' | cut -d= -f2)"
+  [ -n "${GG_CORE_PACKAGE_ID}" ] && [ -n "${GG_GENESIS_PACKAGE_ID}" ] && break
   sleep 2
 done
 if [ -z "${GG_CORE_PACKAGE_ID}" ]; then
@@ -108,8 +118,7 @@ if [ -z "${GG_CORE_PACKAGE_ID}" ]; then
   echo "${UPLOAD_OUT}"
   exit 1
 fi
-log "uploaded wormhole-core DAR, package id ${GG_CORE_PACKAGE_ID}"
-export GG_CORE_PACKAGE_ID
+log "uploaded wormhole-core ${GG_CORE_PACKAGE_ID} and wormhole-genesis ${GG_GENESIS_PACKAGE_ID}"
 
 # --- Rejected setups: each case must fail before the first topology load. ---
 # expect_setup_rejected <case> <expected-message> <NAME=value>...: runs setup_guardian_governance.sh with
@@ -226,33 +235,7 @@ if ! "${SCRIPT_DIR}/setup_guardian_governance.sh" > "${WORK_DIR}/setup_gg.log" 2
   exit 1
 fi
 
-# --- Set up a single-key (1-of-1) external Operator party, reusing the same
-# topology script (see genesis_guardian_governance.sh's header for why a
-# second external party is needed: interactive submission requires every
-# actAs party, not just guardianGovernance, to sign externally). ---
-export GG_KEY_DIR="${WORK_DIR}/operator-keys"
-export GG_ARTIFACTS_FILE="${WORK_DIR}/operator-artifacts.json"
-export GG_THRESHOLD=1
-export GG_PARTY_NAME=Operator
-mkdir -p "${GG_KEY_DIR}"
-node "${SCRIPT_DIR}/guardian_key_tool.js" generate "${GG_KEY_DIR}/owner1" >/dev/null
-export GG_GENERATE_TEST_KEYS=0
-export GG_OWNER_PUBKEY_1="${GG_KEY_DIR}/owner1.pub"
-export GG_OWNER_PUBKEY_2="${GG_KEY_DIR}/owner1.pub"
-export GG_OWNER_PUBKEY_3="${GG_KEY_DIR}/owner1.pub"
-GG_OWNER_SIGN_ARGV_1="$(key_tool_signer_argv "${GG_KEY_DIR}/owner1.key")"
-export GG_OWNER_SIGN_ARGV_1
-export GG_OWNER_SIGN_ARGV_2="${GG_OWNER_SIGN_ARGV_1}"
-export GG_OWNER_SIGN_ARGV_3="${GG_OWNER_SIGN_ARGV_1}"
-log "running setup_guardian_governance.sh (Operator, 1-of-1)"
-if ! "${SCRIPT_DIR}/setup_guardian_governance.sh" > "${WORK_DIR}/setup_op.log" 2>&1; then
-  fail "setup_guardian_governance.sh (Operator) exited non-zero"
-  cat "${WORK_DIR}/setup_op.log"
-  exit 1
-fi
-
 GG_ARTIFACTS_FILE="${WORK_DIR}/guardian-artifacts.json"
-OP_ARTIFACTS_FILE="${WORK_DIR}/operator-artifacts.json"
 
 # --- Assertions: topology shape. ---
 OWNER_COUNT="$(jq '.owners | length' "${GG_ARTIFACTS_FILE}")"
@@ -260,7 +243,7 @@ THRESHOLD_VALUE="$(jq -r '.threshold' "${GG_ARTIFACTS_FILE}")"
 HOSTING_PERMISSION="$(jq -r '.hostingPermission' "${GG_ARTIFACTS_FILE}")"
 PARTY_ID="$(jq -r '.partyId' "${GG_ARTIFACTS_FILE}")"
 FEE_CUSTODY_PARTY_ID="$(jq -r '.feeCustodyPartyId' "${GG_ARTIFACTS_FILE}")"
-OPERATOR_FEE_CUSTODY_PARTY_ID="$(jq -r '.feeCustodyPartyId' "${OP_ARTIFACTS_FILE}")"
+NTT_CUSTODY_PARTY_ID="$(jq -r '.nttCustodyPartyId' "${GG_ARTIFACTS_FILE}")"
 DN_ID="$(jq -r '.decentralizedNamespace' "${GG_ARTIFACTS_FILE}")"
 
 if [ "${OWNER_COUNT}" = "3" ]; then pass "decentralized namespace has 3 owners"; else fail "expected 3 owners, got ${OWNER_COUNT}"; fi
@@ -280,34 +263,33 @@ if [ "${FEE_CUSTODY_PARTY_ID}" = "feeCustody::${DN_ID}" ]; then
 else
   fail "fee custody party id '${FEE_CUSTODY_PARTY_ID}' does not equal feeCustody::${DN_ID}"
 fi
-if [ "${OPERATOR_FEE_CUSTODY_PARTY_ID}" = "null" ]; then
-  pass "the Operator setup allocates no fee custody party"
+if [ "${NTT_CUSTODY_PARTY_ID}" = "nttCustody::${DN_ID}" ]; then
+  pass "NTT custody party id is nttCustody::<dn namespace>"
 else
-  fail "the Operator setup allocated '${OPERATOR_FEE_CUSTODY_PARTY_ID}'"
+  fail "NTT custody party id '${NTT_CUSTODY_PARTY_ID}' does not equal nttCustody::${DN_ID}"
 fi
 
-# --- Assertions: genesis interactive submission. ---
+# --- Assertions: genesis offer and acceptance. ---
 export GG_ARTIFACTS_FILE
-export GG_OPERATOR_ARTIFACTS_FILE="${OP_ARTIFACTS_FILE}"
 
-# Columns: mode | GENESIS_LAST_CREATE | expected exit status | CoreState result | EmitterRegistry result
-# ("-": no RESULT line) | rejection reason ("-" for none; ";" separates required fragments) | description.
+# Columns: mode | expected exit status | WormholeGenesisOffer result | AcceptGenesis result ("-": no RESULT line) |
+# rejection reason ("-" for none; ";" separates required fragments) | description.
 # The rows run in order on one ledger. Canton lists the parties without a signature in sorted order.
 GENESIS_CASES=(
-  "threshold|EmitterRegistry|1|rejected|-|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for guardianGovernance::|1-of-3 co-signed genesis (threshold)"
-  "forge|EmitterRegistry|1|rejected|-|The following actAs parties did not provide an external signature: feeCustody::;, guardianGovernance::|operator-only genesis (anti-forgery)"
-  "fee-custody-missing|EmitterRegistry|1|rejected|-|The following actAs parties did not provide an external signature: feeCustody::|genesis without feeCustody signatures"
-  "fee-custody-threshold|EmitterRegistry|1|rejected|-|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for feeCustody::|1-of-3 feeCustody genesis"
-  "happy|CoreState|0|committed|-|-|2-of-3 co-signed CoreState alone"
-  "happy|EmitterRegistry|0|exists|committed|-|2-of-3 rerun creates only the missing EmitterRegistry"
-  "happy|EmitterRegistry|0|exists|exists|-|2-of-3 rerun creates nothing"
+  "threshold|1|created|rejected|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for guardianGovernance::|1-of-3 guardianGovernance acceptance"
+  "forge|1|exists|rejected|The following actAs parties did not provide an external signature: feeCustody::;, guardianGovernance::;, nttCustody::|operator-only acceptance (anti-forgery)"
+  "fee-custody-missing|1|exists|rejected|The following actAs parties did not provide an external signature: feeCustody::|acceptance without feeCustody signatures"
+  "fee-custody-threshold|1|exists|rejected|Received 1 valid signatures from distinct keys (0 invalid), but expected at least 2 valid for feeCustody::|1-of-3 feeCustody acceptance"
+  "ntt-custody-missing|1|exists|rejected|The following actAs parties did not provide an external signature: nttCustody::|acceptance without nttCustody signatures"
+  "happy|0|exists|committed|-|2-of-3 acceptance by each party"
+  "happy|0|-|exists|-|a rerun finds the CoreState"
 )
 for genesis_case_index in "${!GENESIS_CASES[@]}"; do
-  IFS='|' read -r genesis_mode last_create expected_status core_state_result registry_result rejection_reason description \
+  IFS='|' read -r genesis_mode expected_status offer_result accept_result rejection_reason description \
     <<<"${GENESIS_CASES[${genesis_case_index}]}"
   genesis_log="${WORK_DIR}/genesis_${genesis_case_index}_${genesis_mode}.log"
   log "genesis: ${description}, expect exit ${expected_status}"
-  GENESIS_LAST_CREATE="${last_create}" "${SCRIPT_DIR}/genesis_guardian_governance.sh" "${genesis_mode}" > "${genesis_log}" 2>&1
+  "${SCRIPT_DIR}/genesis_guardian_governance.sh" "${genesis_mode}" > "${genesis_log}" 2>&1
   genesis_status=$?
   if [ "${genesis_status}" -eq "${expected_status}" ]; then
     pass "${description}: exit ${genesis_status}"
@@ -315,7 +297,7 @@ for genesis_case_index in "${!GENESIS_CASES[@]}"; do
     fail "${description}: exit ${genesis_status}, expected ${expected_status}"
     cat "${genesis_log}"
   fi
-  for genesis_template_result in "CoreState|${core_state_result}" "EmitterRegistry|${registry_result}"; do
+  for genesis_template_result in "WormholeGenesisOffer|${offer_result}" "AcceptGenesis|${accept_result}"; do
     IFS='|' read -r genesis_template expected_result <<<"${genesis_template_result}"
     actual_results="$(grep -E "^RESULT ${genesis_template} " "${genesis_log}" | xargs)"
     expected_results="-"
