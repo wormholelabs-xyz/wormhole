@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Live checks of the guardian replacement rehearsal (L1): a PublishMessage commits with guardian4 as a confirmer,
-# including with sv disconnected. Each current host shows the message; the rehearsal removed app-user as a host, so the
+# including with app-provider disconnected. CorePublisher submits on sv, so sv stays connected. Each current host shows the message; the rehearsal removed app-user as a host, so the
 # check requires that app-user shows no Emitter event of it.
 # Usage: gg_hosting_change_live_check.sh
 set -euo pipefail
@@ -80,19 +80,19 @@ check_app_user_has_no_emitter_event() {
 # publish_and_check <label> <require-guardian4-vote>: publish one message and check it on each host; app-user must show
 # no Emitter event of it. With require-guardian4-vote true, also require that the mediator counted a guardian4 approval
 # for guardianGovernance. guardian4 is the third of three confirmers at threshold 2, so with every host connected the
-# mediator can finalize on the other two before guardian4's vote counts; the vote is required only when sv is
+# mediator can finalize on the other two before guardian4's vote counts; the vote is required only when app-provider is
 # disconnected and guardian4 is one of the two reachable confirmers.
 publish_and_check() {
-  local label="$1" require_guardian4_vote="$2" guardian4_begin provider_begin started_at transaction update_id approval_lines
+  local label="$1" require_guardian4_vote="$2" guardian4_begin sv_begin started_at transaction update_id approval_lines
   guardian4_begin="$(ledger_end_at "$GUARDIAN4_JSON_API_URL")"
-  provider_begin="$(ledger_end_at "$(json_api_url app-provider)")"
+  sv_begin="$(ledger_end_at "$(json_api_url sv)")"
   started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   transaction="$(publish_message "hosting-change-$label-$(date +%s)" "c0ffee$(printf '%02x' "${#label}")")" \
     || fail "$label: PublishMessage did not commit"
   update_id="$(jq -er .updateId <<<"$transaction")"
   echo "PASS: $label: PublishMessage committed, update $update_id"
   scan_confirms_publish "$label" guardian4 "$GUARDIAN4_JSON_API_URL" "$guardian4_begin" "$update_id"
-  scan_confirms_publish "$label" app-provider "$(json_api_url app-provider)" "$provider_begin" "$update_id"
+  scan_confirms_publish "$label" sv "$(json_api_url sv)" "$sv_begin" "$update_id"
   check_app_user_has_no_emitter_event "$label" "$update_id"
   if [[ "$require_guardian4_vote" == true ]]; then
     approval_lines="$(docker logs canton --since "$started_at" 2>&1 \
@@ -104,7 +104,7 @@ publish_and_check() {
 }
 
 publish_and_check all-hosts-connected false
-set_participant_connection disconnect sv || fail "cannot disconnect sv"
-trap 'set_participant_connection reconnect sv || echo "ERROR: sv stays disconnected; reconnect it with participant_connection.canton"; rm -rf "$gg_work_dir"' EXIT
-publish_and_check sv-disconnected true
+set_participant_connection disconnect app-provider || fail "cannot disconnect app-provider"
+trap 'set_participant_connection reconnect app-provider || echo "ERROR: app-provider stays disconnected; reconnect it with participant_connection.canton"; rm -rf "$gg_work_dir"' EXIT
+publish_and_check app-provider-disconnected true
 echo "PASS: gg_hosting_change_live_check"
