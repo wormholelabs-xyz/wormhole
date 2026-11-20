@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Scan of the Emitter and EmitterRegistry history of one (operator, guardianGovernance) pair
-# (A14_EMITTER_ID_UNIQUENESS.md, "Scan"; "Deployment of 0.8.0", step 6).
-# Usage: emitter_id_scan.sh <json-api-url> <token-file> <guardian-governance-party> <operator-party>
+# Scan of the Emitter and EmitterRegistry history of one guardianGovernance party
+# (A14_EMITTER_ID_UNIQUENESS.md, "Scan").
+# Usage: emitter_id_scan.sh <json-api-url> <token-file> <guardian-governance-party>
 #                           <begin-exclusive-offset> [<baseline-max-emitter-id>]
 # The token file holds a Ledger API JWT of a user with exactly one right: CanReadAs(<guardian-governance-party>).
 # The script reads each update of guardianGovernance in (<begin>, <ledger end>], and the active contracts at <ledger end>.
@@ -9,15 +9,16 @@
 # Use -1 as the baseline when no Emitter existed at <begin>.
 # Output: one JSON summary line on stdout, with firstId = historyMaxEmitterId + 1, the nextId of the new EmitterRegistry.
 # Each active EmitterRegistry must have nextId == firstId; historyMaxRegistryNextId is reported only.
-# Exit 0: no duplicate. Exit 1: a duplicate (operator, owner, emitterId) among active Emitters, or a check failed.
-# EXPECT_ACTIVE_REGISTRIES (default 0) is the number of active EmitterRegistry contracts of the pair that the scan requires.
+# Exit 0: no duplicate. Exit 1: a duplicate (guardianGovernance, owner, emitterId) among active Emitters, or a check failed.
+# EXPECT_ACTIVE_REGISTRIES (default 1, at least 1) is the number of active EmitterRegistry contracts of guardianGovernance
+# that the scan requires. The genesis creates one, thus a scan that finds none fails.
 # EXPECTED_CORE_PACKAGE_ID (required) is the only wormhole-core package id that this participant may vet.
 # CURL_MAX_TIME_SECONDS (default 60) bounds each Ledger API call.
 # The script uses only curl and jq, thus a guardian can run it against a production participant.
 set -euo pipefail
 
 readonly SCAN_PAGE_SIZE="${SCAN_PAGE_SIZE:-200}"
-readonly EXPECT_ACTIVE_REGISTRIES="${EXPECT_ACTIVE_REGISTRIES:-0}"
+readonly EXPECT_ACTIVE_REGISTRIES="${EXPECT_ACTIVE_REGISTRIES:-1}"
 readonly CURL_MAX_TIME_SECONDS="${CURL_MAX_TIME_SECONDS:-60}"
 readonly CURL_CONNECT_TIMEOUT_SECONDS=10
 readonly CORE_PACKAGE_NAME="wormhole-core"
@@ -37,24 +38,23 @@ readonly JQ_EXACT_INTEGER='def exact_integer($maxText):
      and (length < ($maxText | length) or (length == ($maxText | length) and . <= $maxText))
   then tonumber else null end;'
 
-if [[ $# -lt 5 || $# -gt 6 ]]; then
-  echo "usage: emitter_id_scan.sh <json-api-url> <token-file> <guardian-governance-party> <operator-party> <begin-exclusive-offset> [<baseline-max-emitter-id>]" >&2
+if [[ $# -lt 4 || $# -gt 5 ]]; then
+  echo "usage: emitter_id_scan.sh <json-api-url> <token-file> <guardian-governance-party> <begin-exclusive-offset> [<baseline-max-emitter-id>]" >&2
   exit 2
 fi
 json_api_url="$1"
 token_file="$2"
 guardian_governance_party="$3"
-operator_party="$4"
-begin_exclusive="$5"
+begin_exclusive="$4"
 [[ -r "$token_file" ]] || { echo "cannot read token file $token_file" >&2; exit 2; }
 [[ "$begin_exclusive" =~ ^[0-9]+$ ]] || { echo "begin offset is not a non-negative integer: $begin_exclusive" >&2; exit 2; }
 [[ "$SCAN_PAGE_SIZE" =~ ^[1-9][0-9]*$ ]] || { echo "SCAN_PAGE_SIZE is not a positive integer: $SCAN_PAGE_SIZE" >&2; exit 2; }
-[[ "$EXPECT_ACTIVE_REGISTRIES" =~ ^[0-9]+$ ]] || { echo "EXPECT_ACTIVE_REGISTRIES is not a non-negative integer" >&2; exit 2; }
+[[ "$EXPECT_ACTIVE_REGISTRIES" =~ ^[1-9][0-9]*$ ]] || { echo "EXPECT_ACTIVE_REGISTRIES is not a positive integer" >&2; exit 2; }
 [[ "$CURL_MAX_TIME_SECONDS" =~ ^[1-9][0-9]*$ ]] || { echo "CURL_MAX_TIME_SECONDS is not a positive integer" >&2; exit 2; }
 [[ "${EXPECTED_CORE_PACKAGE_ID:-}" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "EXPECTED_CORE_PACKAGE_ID is not set to a 64-character lowercase hex package id" >&2; exit 2; }
-if [[ $# -eq 6 ]]; then
-  baseline_max_emitter_id="$6"
+if [[ $# -eq 5 ]]; then
+  baseline_max_emitter_id="$5"
   # At most 16 digits, thus the comparison is exact in bash 64-bit arithmetic.
   if [[ ! "$baseline_max_emitter_id" =~ ^(-1|0|[1-9][0-9]{0,15})$ ]] || (( baseline_max_emitter_id > MAX_EMITTER_ID )); then
     echo "baseline is not -1 or a canonical integer in 0..$MAX_EMITTER_ID: $baseline_max_emitter_id" >&2
@@ -127,7 +127,7 @@ read_update_page() {
         transactionShape: "TRANSACTION_SHAPE_LEDGER_EFFECTS"}}}')"
 }
 
-# Each create of an Emitter or EmitterRegistry of the pair, archived or active, of any package: one JSON line.
+# Each create of an Emitter or EmitterRegistry of guardianGovernance, archived or active, of any package: one JSON line.
 : > "$work_dir/history.jsonl"
 page_begin="$begin_exclusive"
 # Each page advances the begin offset by at least one, thus the loop ends after at most end - begin pages.
@@ -138,12 +138,12 @@ while [[ "$page_begin" -lt "$end_inclusive" ]]; do
     exit 1
   fi
   jq -c --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" --arg registrySuffix "$REGISTRY_TEMPLATE_SUFFIX" \
-    --arg operator "$operator_party" --arg gg "$guardian_governance_party" --arg corePackageName "$CORE_PACKAGE_NAME" \
+    --arg gg "$guardian_governance_party" --arg corePackageName "$CORE_PACKAGE_NAME" \
     --arg maxEmitterId "$MAX_EMITTER_ID" --arg maxRegistryNextId "$MAX_REGISTRY_NEXT_ID" "$JQ_EXACT_INTEGER"'
     .[] | .update.Transaction?.value // empty
     | . as $transaction | .events[] | .CreatedEvent? // empty
     | select(.packageName == $corePackageName)
-    | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)
+    | select(.createArgument.guardianGovernance == $gg)
     | if (.templateId | endswith($emitterSuffix)) then
         {kind: "Emitter", offset: $transaction.offset, contractId, owner: .createArgument.owner,
          emitterIdText: .createArgument.emitterId, emitterId: (.createArgument.emitterId | exact_integer($maxEmitterId))}
@@ -176,12 +176,12 @@ if ! jq -e 'type == "array"' "$work_dir/acs.json" > /dev/null; then
   echo "active contract read at offset $end_inclusive failed: $(jq -c '{code, cause}' "$work_dir/acs.json" 2>/dev/null || cat "$work_dir/acs.json")" >&2
   exit 1
 fi
-jq -c --arg operator "$operator_party" --arg gg "$guardian_governance_party" --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" \
+jq -c --arg gg "$guardian_governance_party" --arg emitterSuffix "$EMITTER_TEMPLATE_SUFFIX" \
   --arg corePackageName "$CORE_PACKAGE_NAME" \
   --arg maxEmitterId "$MAX_EMITTER_ID" --arg maxRegistryNextId "$MAX_REGISTRY_NEXT_ID" "$JQ_EXACT_INTEGER"'
   .[] | .contractEntry.JsActiveContract?.createdEvent // empty
   | select(.packageName == $corePackageName)
-  | select(.createArgument.operator == $operator and .createArgument.guardianGovernance == $gg)
+  | select(.createArgument.guardianGovernance == $gg)
   | if (.templateId | endswith($emitterSuffix)) then
       {kind: "Emitter", contractId, owner: .createArgument.owner,
        emitterIdText: .createArgument.emitterId, emitterId: (.createArgument.emitterId | exact_integer($maxEmitterId))}
@@ -192,7 +192,7 @@ jq -c --arg operator "$operator_party" --arg gg "$guardian_governance_party" --a
 
 jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
   --argjson baseline "$baseline_max_emitter_id" --argjson begin "$begin_exclusive" --argjson end "$end_inclusive" \
-  --argjson expectedRegistries "$EXPECT_ACTIVE_REGISTRIES" --arg operator "$operator_party" --arg gg "$guardian_governance_party" \
+  --argjson expectedRegistries "$EXPECT_ACTIVE_REGISTRIES" --arg gg "$guardian_governance_party" \
   --arg expectedCorePackageId "$EXPECTED_CORE_PACKAGE_ID" --argjson vettedCorePackageIds "$vetted_core_package_ids" '
   . as $history | $active[0] as $active
   | ($history | map(select(.kind == "Emitter"))) as $historyEmitters
@@ -202,7 +202,7 @@ jq -sc --slurpfile active <(jq -sc . "$work_dir/active.jsonl") \
   | ([0] + ($history | map(select(.kind == "EmitterRegistry") | .nextId | values)) | max) as $historyMaxRegistryNextId
   | ($historyEmitters | map(.contractId)) as $historyEmitterIds
   | {
-      operator: $operator, guardianGovernance: $gg, beginExclusiveOffset: $begin, endInclusiveOffset: $end,
+      guardianGovernance: $gg, beginExclusiveOffset: $begin, endInclusiveOffset: $end,
       baselineMaxEmitterId: $baseline,
       historyEmitterCreates: ($historyEmitters | length),
       historyMaxEmitterId: $historyMaxEmitterId,
@@ -231,7 +231,7 @@ cat "$work_dir/summary.json"
 
 failures=()
 [[ "$(jq '.activeDuplicates | length' "$work_dir/summary.json")" -eq 0 ]] \
-  || failures+=("duplicate (operator, owner, emitterId) among active Emitters")
+  || failures+=("duplicate (guardianGovernance, owner, emitterId) among active Emitters")
 [[ "$(jq '.invalidEmitterIds | length' "$work_dir/summary.json")" -eq 0 ]] \
   || failures+=("an emitterId is outside 0..maxEmitterId ($MAX_EMITTER_ID) or not canonical: $(jq -c .invalidEmitterIds "$work_dir/summary.json")")
 [[ "$(jq '.invalidRegistryNextIds | length' "$work_dir/summary.json")" -eq 0 ]] \
