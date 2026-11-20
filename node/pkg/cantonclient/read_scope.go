@@ -139,6 +139,8 @@ func (s ReadScope) CheckWasConstructed() error {
 			return errReadScopeNotConstructed
 		}
 		return nil
+	case readScopeKindNotConstructed:
+		return errReadScopeNotConstructed
 	default:
 		return errReadScopeNotConstructed
 	}
@@ -164,6 +166,8 @@ func (s ReadScope) String() string {
 		return s.guardianGovernanceParty.String()
 	case readScopeKindAnyPartyUnsafeDevMode:
 		return "any party (unsafe dev mode)"
+	case readScopeKindNotConstructed:
+		return "not constructed"
 	default:
 		return "not constructed"
 	}

@@ -106,8 +106,8 @@ func (wc *WatcherConfig) buildWatcher(
 	}
 	// SECURITY: outside unsafe dev mode only reviewed core releases can be pinned.
 	if !devMode {
-		if err := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); err != nil {
-			return nil, fmt.Errorf("canton: %w", err)
+		if approvalErr := approvedCorePackages.CheckAcceptedPackageIDsApproved(acceptedPackageIDs); approvalErr != nil {
+			return nil, fmt.Errorf("canton: %w", approvalErr)
 		}
 	}
 
