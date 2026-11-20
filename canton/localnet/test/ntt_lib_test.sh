@@ -205,8 +205,10 @@ pinned_ntt_version="$(sed -nE 's/^readonly NTT_VERSION="\$\{NTT_PIN_VERSION:-([0
 pinned_ntt_package_id="$(ntt_pinned_package_id "$pinned_ntt_version")" || failure_count=$((failure_count + 1))
 pinned_genesis_package_id="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_PACKAGE_ID)" || failure_count=$((failure_count + 1))
 pinned_genesis_version="$(pinned_value_in_ntt_lib WORMHOLE_GENESIS_VERSION)" || failure_count=$((failure_count + 1))
-check_case "pinned core id is the SDK 3.7.3 0.12.0 build aec76d21" 0 - - \
-  test "$pinned_core_package_id" == "aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b"
+check_case "pinned core id is the SDK 3.7.3 0.12.1 build 2ebee1d9" 0 - - \
+  test "$pinned_core_package_id" == "2ebee1d99f4bb435c025fd1d63d4c0646a081498b403a6a83f8b17646bc92ef4"
+check_case "pinned core id is not the replaced SDK 3.7.3 0.12.0 build aec76d21" 0 - - \
+  test "$pinned_core_package_id" != "aec76d21ac140c49f91754db4667e0572d24d3b1cacd85b69dc76c92ae38087b"
 check_case "pinned core id is not the replaced SDK 3.7.3 0.11.1 build 019609a3" 0 - - \
   test "$pinned_core_package_id" != "019609a33c112e13fa98642f1d5b4dd75e8ab7bfa00a14fcf57caa510ed1b9d5"
 check_case "pinned core id is not the replaced SDK 3.7.3 0.11.0 build 3e555cc2" 0 - - \
@@ -217,7 +219,7 @@ check_case "pinned core id is not the replaced SDK 3.7.3 0.9.0 build a562ac78" 0
   test "$pinned_core_package_id" != "a562ac78ce2617dda9dc1ccd8c7500b4e523ff7ae1d216e28f8836b1fb264034"
 check_case "pinned core id is not the replaced SDK 3.5.1 0.9.0 build bba94798" 0 - - \
   test "$pinned_core_package_id" != "bba94798a73c0fafadd836ec6754cab75205cb09556d13263813151bd748006a"
-check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.12.0"
+check_case "pinned core version" 0 - - test "$pinned_core_version" == "0.12.1"
 check_case "pinned core id is not the replaced first 0.9.0 build dd75f777" 0 - - \
   test "$pinned_core_package_id" != "dd75f77780f2b93e5a30f12a04f54f9e4577c12ebcaf1720a413f09cc229af1d"
 check_case "pinned core id is not the replaced second 0.9.0 build ec382591" 0 - - \
