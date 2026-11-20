@@ -606,7 +606,7 @@ actions accept chain 75 only. `sdk/vaa` serializes no TransferFees for chain 0.
 | **ContractUpgrade**    | 1   | `chain(2) ‖ newContract(32)`                     | Records intent + emits an event. On Canton, "upgrade" = a [Daml package upgrade](https://docs.daml.com/upgrade/); `newContract` is interpreted as the new package-id (32 bytes). See note. |
 | **GuardianSetUpgrade** | 2   | `chain(2) ‖ newIndex(4) ‖ len(1) ‖ keys(20·len)` | Validates `newIndex == current+1`; sets old set's `expirationTime = effectiveTime + 86400`; stores new set. Requires `pubKeys` hints to bind addresses (§5).                               |
 | **SetMessageFee**      | 3   | `chain(2) ‖ fee(32)`                             | Updates `messageFee`.                                                                                                                                                                      |
-| **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Moves collected fees to `recipient`. (No-op accounting until CC payments are wired.)                                                                                                       |
+| **TransferFees**       | 4   | `chain(2) ‖ amount(32) ‖ recipient(32)`          | Creates one `FeeWithdrawalAuthorization` (amount, recipient, VAA digest). Chain 0 or 75. An amount above 2^63 - 1 aborts.                                                                  |
 
 `RecoverChainId` (EVM action 5) is **EVM-specific** (it repairs `block.chainid`
 after a fork) and has no analog on Canton; it is intentionally omitted.
@@ -2279,8 +2279,7 @@ makes it a `guardianGovernance` host.
    where `guardianGovernance` pays a fee abort once a fee is above 0, so they
    need a separate fee payer first; a receiver-preapproval transfer
    (`TransferPreapproval`) would remove custody authority at charge time
-   (Token Standard V2 follow-up); a `TransferFees` VAA
-   test vector (vectorgen) for the withdrawal-authorization path; Token
+   (Token Standard V2 follow-up); Token
    Standard V2 (CIP-0112) migration when it reaches mainnet
    (`Wormhole.Core.Fees.chargeFee` is the seam).
 6. **ContractUpgrade mechanism.** Each guardian participant vets the new Daml
