@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -443,8 +442,8 @@ const tupleMessageField = "_2"
 // See Wormhole.Core.State.WormholeMessage for the field set: registrar and
 // owner are Daml Parties -> Value.party (the emitter's key components, from
 // which the watcher derives the emitter address); emitterId, sequence, nonce,
-// consistencyLevel are Daml Int -> Value.int64; payload is Daml Text (hex) ->
-// Value.text.
+// consistencyLevel are Daml Int -> Value.int64; payload is the Daml
+// MessagePayload single-constructor type -> Value.variant (messagePayloadField).
 func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	rec := v.GetRecord()
 	if rec == nil {
@@ -474,7 +473,7 @@ func decodeWormholeMessage(v *apiv2.Value) (CantonMessage, error) {
 	if err != nil {
 		return CantonMessage{}, err
 	}
-	payload, err := hexField(fields, "payload")
+	payload, err := messagePayloadField(fields, "payload")
 	if err != nil {
 		return CantonMessage{}, err
 	}
@@ -521,16 +520,49 @@ func partyField(fields map[string]*apiv2.Value, label string) (string, error) {
 	return p, nil
 }
 
-func hexField(fields map[string]*apiv2.Value, label string) ([]byte, error) {
+// messagePayloadConstructor is the constructor of Wormhole.Core.Bytes.MessagePayload.
+const messagePayloadConstructor = "MessagePayload"
+
+// messagePayloadField reads a Daml MessagePayload: a Value.variant with
+// constructor messagePayloadConstructor whose value is lowercase even-length
+// hex without a 0x prefix. This is the ledger's own constructor rule.
+func messagePayloadField(fields map[string]*apiv2.Value, label string) ([]byte, error) {
 	v, ok := fields[label]
 	if !ok {
 		return nil, fmt.Errorf("missing field %q", label)
 	}
-	b, err := hex.DecodeString(strings.TrimPrefix(v.GetText(), "0x"))
+	variant := v.GetVariant()
+	if variant == nil {
+		return nil, fmt.Errorf("field %q is not a variant", label)
+	}
+	if variant.GetConstructor() != messagePayloadConstructor {
+		return nil, fmt.Errorf("field %q has constructor %q, expected %q", label, variant.GetConstructor(), messagePayloadConstructor)
+	}
+	textValue, ok := variant.GetValue().GetSum().(*apiv2.Value_Text)
+	if !ok {
+		return nil, fmt.Errorf("field %q does not hold text", label)
+	}
+	payloadHex := textValue.Text
+	if !isLowercaseHex(payloadHex) {
+		return nil, fmt.Errorf("field %q is not lowercase hex", label)
+	}
+	if len(payloadHex)%2 != 0 {
+		return nil, fmt.Errorf("field %q has an odd hex length %d", label, len(payloadHex))
+	}
+	payload, err := hex.DecodeString(payloadHex)
 	if err != nil {
 		return nil, fmt.Errorf("field %q is not valid hex: %w", label, err)
 	}
-	return b, nil
+	return payload, nil
+}
+
+func isLowercaseHex(text string) bool {
+	for _, character := range text {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func intField(fields map[string]*apiv2.Value, label string) (int64, error) {

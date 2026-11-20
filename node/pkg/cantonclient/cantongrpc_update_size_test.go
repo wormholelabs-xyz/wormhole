@@ -35,7 +35,7 @@ func (s *largeUpdateServer) publishTransaction() *apiv2.Transaction {
 		Events: []*apiv2.Event{{Event: &apiv2.Event_Exercised{Exercised: &apiv2.ExercisedEvent{
 			TemplateId:     &apiv2.Identifier{PackageId: pinnedPackageID, ModuleName: "Wormhole.Core.State", EntityName: "Emitter"},
 			Choice:         "PublishMessage",
-			ExerciseResult: tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{"payload": textVal(s.payloadHex)})),
+			ExerciseResult: tupleResult("00deadbeef", wormholeRecord(map[string]*apiv2.Value{"payload": messagePayloadVal(s.payloadHex)})),
 			Consuming:      true,
 			AcsDelta:       true,
 		}}}},
