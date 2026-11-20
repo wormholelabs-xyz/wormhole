@@ -16,10 +16,10 @@ import Wormhole.Core.State
 import Wormhole.Core.Setup
 import Wormhole.Core.VAA (parseVAA)
 import Test.TestCore
-  ( checkCoreStateCreateOutcome, devnetGuardian, devnetGuardianPubKey, devnetGuardianSet1Key
+  ( checkCoreStateCreateOutcome, devnetGuardianMember, devnetGuardianSet1Key
   , govContractUpgradeVAA, govGuardianSetUpgrade7To8VAA, govGuardianSetUpgradeVAA, govSetFeeVAA
   , govSetFeeVAASignedBySet7, govTransferFeesVAA, nonZeroGenesisGuardianSetIndex, numberCases
-  , set0SetFeeZeroVAA )
+  , set0SetFeeZeroVAA, unkeyedMembersOf )
 import Test.TestRedTeamCore (checkAttackFailedWith)
 
 ----------------------------------------------------------------------
@@ -50,7 +50,7 @@ genesisStateWithLabel partyLabel genesisIndex = do
   feeCustody <- allocateParty ("BoundsFeeCustody" <> partyLabel)
   placeholderFeeInstrumentAdmin <- allocateParty ("BoundsUnusedFeeInstrumentAdmin" <> partyLabel)
   pure (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-          GenesisGuardianSet with guardianSetIndex = genesisIndex, guardianAddresses = [devnetGuardian]
+          GenesisGuardianSet with guardianSetIndex = genesisIndex, guardians = [devnetGuardianMember]
           (InstrumentId with admin = placeholderFeeInstrumentAdmin, id = "UNUSED") feeCustody)
 
 tryCreateCoreState : CoreState -> Script (Either SubmitError (ContractId CoreState))
@@ -68,7 +68,6 @@ trySubmitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
     exerciseCmd coreStateCid SubmitGovernanceVAA with
       submitter = guardianGovernance
       encodedVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
 
 submitGovernanceVAA : Party -> ContractId CoreState -> EncodedVaa -> Script (ContractId CoreState)
 submitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
@@ -76,7 +75,6 @@ submitGovernanceVAA guardianGovernance coreStateCid encodedVAA =
     exerciseCmd coreStateCid SubmitGovernanceVAA with
       submitter = guardianGovernance
       encodedVAA
-      pubKeys = [(0, devnetGuardianPubKey)]
 
 readCoreState : Party -> ContractId CoreState -> Script CoreState
 readCoreState guardianGovernance coreStateCid =
@@ -96,13 +94,13 @@ data CoreStateShapeCase = CoreStateShapeCase with
     isAccepted    : Bool
 
 previousGuardianSetExpiringAt : Time -> GuardianSet
-previousGuardianSetExpiringAt expiry = GuardianSet with keys = [devnetGuardianSet1Key], expirationTime = Some expiry
+previousGuardianSetExpiringAt expiry = GuardianSet with members = unkeyedMembersOf [devnetGuardianSet1Key], expirationTime = Some expiry
 
 -- | @previousCount@ previous sets directly below @currentIndex@, all expiring at @expiry@, plus the current set.
 guardianSetsWithPrevious : Int -> Int -> Time -> Map Int GuardianSet
 guardianSetsWithPrevious currentIndex previousCount expiry =
   Map.fromList
-    ( (currentIndex, GuardianSet with keys = [devnetGuardian], expirationTime = None)
+    ( (currentIndex, GuardianSet with members = [devnetGuardianMember], expirationTime = None)
     :: [ (currentIndex - previousCount + position, previousGuardianSetExpiringAt expiry)
        | position <- [0 .. previousCount - 1] ] )
 

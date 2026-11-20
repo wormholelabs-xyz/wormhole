@@ -16,7 +16,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.State
 import Wormhole.Core.Setup
-import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardian)
+import Test.TestCore (setup, registerEmitter, publishVia, devnetGuardianMember)
 
 -- | The real bridge: 'CoreState' signed by @guardianGovernance@ and the fee custody party.
 data RealBridge = RealBridge with
@@ -95,7 +95,7 @@ integrationGovernanceReaderPublish bridge = do
   let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
                  shadowFeeInstrument rogueFeeCustody)
   (_, rogueShadowMessage) <- publishVia rogueGovernance shadowCoreStateCid rogueOwner rogueEmitterCid
                                rogueShadowNonce rogueShadowPayload 0

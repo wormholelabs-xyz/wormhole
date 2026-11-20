@@ -23,12 +23,13 @@ defaultGovernanceContract : EmitterAddress
 defaultGovernanceContract = parseHexTextOrAbort "0000000000000000000000000000000000000000000000000000000000000004"
 
 -- | The guardian set that genesis installs: the live global index and its
--- addresses (Ethereum core @getCurrentGuardianSetIndex@ and @getGuardianSet@).
--- Guardians sign each VAA with the global index, so a different index here
--- fails each VAA lookup and the next upgrade.
+-- members (Ethereum core @getCurrentGuardianSetIndex@ and @getGuardianSet@,
+-- with each public key). Guardians sign each VAA with the global index, so a
+-- different index here fails each VAA lookup and the next upgrade. A member
+-- without a key gets one through 'AttachGuardianPublicKeys'.
 data GenesisGuardianSet = GenesisGuardianSet with
-    guardianSetIndex  : Int
-    guardianAddresses : [GuardianAddress]
+    guardianSetIndex : Int
+    guardians        : [GuardianSetMember]
   deriving (Eq, Show)
 
 -- | Build the initial 'CoreState' value with the genesis guardian set
@@ -56,7 +57,7 @@ mkInitialCoreState guardianGovernance govChain govContract genesisSet feeInstrum
     governanceContract = govContract
     guardianSetIndex = genesisSet.guardianSetIndex
     guardianSets = Map.fromList
-      [(genesisSet.guardianSetIndex, GuardianSet with keys = genesisSet.guardianAddresses, expirationTime = None)]
+      [(genesisSet.guardianSetIndex, GuardianSet with members = genesisSet.guardians, expirationTime = None)]
     messageFee = 0
     feeInstrument
     feeRecipient

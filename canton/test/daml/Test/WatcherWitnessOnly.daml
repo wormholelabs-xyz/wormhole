@@ -16,7 +16,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.State
 import Wormhole.Core.Setup
-import Test.TestCore (registerEmitter, publishVia, devnetGuardian)
+import Test.TestCore (registerEmitter, publishVia, devnetGuardianMember)
 import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
 
 -- | Makes @witness@ an informee of the consuming 'PublishWitnessed' exercise,
@@ -88,7 +88,7 @@ integrationWitnessOnlyPublish bridge = do
   let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGuardianMember])
                  shadowFeeInstrument rogueFeeCustody)
   shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
   publisherCid <- submit trustedOwner do

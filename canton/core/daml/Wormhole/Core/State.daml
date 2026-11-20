@@ -46,7 +46,7 @@ module Wormhole.Core.State where
 import DA.Action (foldlA, when)
 import DA.Map (Map)
 import DA.Map qualified as Map
-import DA.Either (isRight)
+import DA.Either (isRight, optionalToEither)
 import DA.Foldable (forA_, minimum, maximum)
 import DA.List (sortOn)
 import DA.Optional (fromSomeNote, isSome, optionalToList)
@@ -112,15 +112,14 @@ maxOnboardingFee = 10000000000000000
 -- | Shared verification core of 'ParseAndVerifyVAA' and 'VerifyAndConsumeVAA':
 -- parse, resolve the guardian set the VAA names, and verify signatures against
 -- it (a non-current-but-unexpired set is accepted; 'verifyVAA' checks it is
--- still active). @pubKeys@ are untrusted hints bound to guardian addresses in
--- 'verifyVAA'. 'governanceOutcomeFor' uses the CURRENT set
--- only (EVM Governance.sol parity). Pure: the caller reads the ledger time with
--- 'getTime' and passes it as @now@.
-verifyEncoded : CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Time -> Either Text VAA
-verifyEncoded st encodedVAA pubKeys now =
+-- still active) with the public keys stored in it. 'governanceOutcomeFor' uses
+-- the CURRENT set only (EVM Governance.sol parity). Pure: the caller reads the
+-- ledger time with 'getTime' and passes it as @now@.
+verifyEncoded : CoreState -> EncodedVaa -> Time -> Either Text VAA
+verifyEncoded st encodedVAA now =
   let vaa = parseVAA encodedVAA
       signingSet = fromSomeNote "unknown guardian set index" (Map.lookup vaa.guardianSetIndex st.guardianSets)
-  in verifyVAA signingSet vaa pubKeys now >> pure vaa
+  in verifyVAA signingSet vaa now >> pure vaa
 
 template CoreState
   with
@@ -171,9 +170,9 @@ template CoreState
       , checkConsumedGovernanceIsBounded evictedGovernanceMaxTimestampSeconds consumedGovernance
       ]
 
-    -- | Read-only VAA verification against the named, unexpired guardian set, for the
-    -- token bridge / external verifiers. @pubKeys@ are untrusted hints bound to
-    -- guardian addresses in 'verifyVAA'.
+    -- | Read-only VAA verification against the named, unexpired guardian set, for
+    -- the token bridge / external verifiers. The caller passes the VAA bytes
+    -- only, as EVM @parseAndVerifyVM@.
     --
     -- @verifier@ (any party) is the sole controller: this choice is
     -- @nonconsuming@ and creates/archives nothing. The one requirement is visibility: a
@@ -186,12 +185,11 @@ template CoreState
       with
         verifier   : Party
         encodedVAA : EncodedVaa
-        pubKeys    : [(Int, GuardianPublicKey)]
       controller verifier
       do
-        checkVaaSubmissionIsWellFormed encodedVAA pubKeys
+        checkVaaSubmissionIsWellFormed encodedVAA
         now <- getTime
-        either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
+        either assertFail pure (verifyEncoded this encodedVAA now)
 
     -- | Read the @guardianGovernance@ anchor off an authentic 'CoreState' — the
     -- caller-side authenticity pin for anyone addressing this contract by cid. A
@@ -253,15 +251,14 @@ template CoreState
     nonconsuming choice VerifyAndConsumeVAA : (VAA, ContractId ReplayNode)
       with
         encodedVAA    : EncodedVaa
-        pubKeys       : [(Int, GuardianPublicKey)]
         consumer      : Party
         namespace     : Text
         replayNodeCid : ContractId ReplayNode
       controller consumer
       do
-        checkVaaSubmissionIsWellFormed encodedVAA pubKeys
+        checkVaaSubmissionIsWellFormed encodedVAA
         now <- getTime
-        vaa <- either assertFail pure (verifyEncoded this encodedVAA pubKeys now)
+        vaa <- either assertFail pure (verifyEncoded this encodedVAA now)
         node <- fetch replayNodeCid
         -- Exercising ConsumeDigest on a foreign node would fail authorization
         -- anyway; the explicit check gives a clean error. The namespace binding
@@ -281,17 +278,60 @@ template CoreState
       with
         submitter  : Party
         encodedVAA : EncodedVaa
-        pubKeys    : [(Int, GuardianPublicKey)]
       controller submitter
       do
-        checkVaaSubmissionIsWellFormed encodedVAA pubKeys
-        createGovernanceOutcome this encodedVAA pubKeys
+        checkVaaSubmissionIsWellFormed encodedVAA
+        createGovernanceOutcome this encodedVAA
 
--- | Choice-entry re-check of VAA arguments from the Ledger API, before any parse.
-checkVaaSubmissionIsWellFormed : EncodedVaa -> [(Int, GuardianPublicKey)] -> Update ()
-checkVaaSubmissionIsWellFormed encodedVAA pubKeys = do
+    -- | Attach guardian public keys to a stored, active set. Permissionless:
+    -- each key must derive the address of a member that holds no key, so the
+    -- successor is a pure function of this contract and public data. A
+    -- GuardianSetUpgrade carries known keys; this choice adds the keys of new
+    -- guardians. Each call adds at least one key, so a set takes at most
+    -- 'numGuardians' attach rewrites.
+    choice AttachGuardianPublicKeys : ContractId CoreState
+      with
+        submitter              : Party
+        targetGuardianSetIndex : Int
+        guardianPublicKeys     : [GuardianPublicKey]
+      controller submitter
+      do
+        assertMsg "guardianPublicKeys holds a malformed GuardianPublicKey"
+          (all checkHexValueIsWellFormed guardianPublicKeys)
+        now <- getTime
+        successor <- either assertFail pure
+          (coreStateWithAttachedGuardianPublicKeys this now targetGuardianSetIndex guardianPublicKeys)
+        create successor
+
+-- | Choice-entry re-check of the VAA argument from the Ledger API, before any parse.
+checkVaaSubmissionIsWellFormed : EncodedVaa -> Update ()
+checkVaaSubmissionIsWellFormed encodedVAA =
   assertMsg "encodedVAA is not a well-formed EncodedVaa" (checkHexValueIsWellFormed encodedVAA)
-  assertMsg "pubKeys holds a malformed GuardianPublicKey" (all (checkHexValueIsWellFormed . snd) pubKeys)
+
+-- | The successor of 'AttachGuardianPublicKeys': only the target set gains keys.
+coreStateWithAttachedGuardianPublicKeys : CoreState -> Time -> Int -> [GuardianPublicKey] -> Either Text CoreState
+coreStateWithAttachedGuardianPublicKeys before now targetGuardianSetIndex publicKeys = do
+  targetSet <- optionalToEither ("attach: unknown guardian set index " <> show targetGuardianSetIndex)
+    (Map.lookup targetGuardianSetIndex before.guardianSets)
+  assertMsg ("attach: guardian set " <> show targetGuardianSetIndex <> " has expired") (isActiveAt targetSet now)
+  attachedSet <- attachGuardianPublicKeysToSet targetGuardianSetIndex publicKeys targetSet
+  let after = before with guardianSets = Map.insert targetGuardianSetIndex attachedSet before.guardianSets
+  checkAttachChangesOnlyTargetSetKeys before after targetGuardianSetIndex (length publicKeys)
+  pure after
+
+checkAttachChangesOnlyTargetSetKeys : CoreState -> CoreState -> Int -> Int -> Either Text ()
+checkAttachChangesOnlyTargetSetKeys before after targetGuardianSetIndex keyCount = do
+  assertMsg "attach: a field other than guardianSets changed" ((after with guardianSets = before.guardianSets) == before)
+  assertMsg "attach: stored set indices changed" (Map.keys after.guardianSets == Map.keys before.guardianSets)
+  assertMsg "attach: a set other than the target changed"
+    (Map.delete targetGuardianSetIndex after.guardianSets == Map.delete targetGuardianSetIndex before.guardianSets)
+  case (Map.lookup targetGuardianSetIndex before.guardianSets, Map.lookup targetGuardianSetIndex after.guardianSets) of
+    (Some targetBefore, Some targetAfter) -> do
+      assertMsg "attach: target set addresses changed" (guardianAddressesOf targetAfter == guardianAddressesOf targetBefore)
+      assertMsg "attach: target set expiry changed" (targetAfter.expirationTime == targetBefore.expirationTime)
+      assertMsg "attach: attached key count must grow by exactly the submitted count"
+        (attachedPublicKeyCount targetAfter == attachedPublicKeyCount targetBefore + keyCount)
+    _ -> Left "attach: target set missing"
 
 ----------------------------------------------------------------------
 -- Governance application (pure helpers in the Either Text monad)
@@ -305,13 +345,18 @@ applyGovernance st now action = case action of
     assertMsg "guardianSetUpgrade: index must be current + 1" (newIndex == st.guardianSetIndex + 1)
     checkGuardianAddressesAreWellFormed newKeys
     -- Expire the current set (now + 1 day) in place, then install the new one.
+    -- Each new member takes the key that a stored set holds for its address.
     -- The None case is an invariant violation — a live CoreState always has its
     -- current set.
     let expiry = Some (addRelTime now (seconds guardianSetExpirySeconds))
         expireCurrent mOld = case mOld of
           Some gs -> Some gs with expirationTime = expiry
           None    -> error "no current guardian set"
-        newSet = GuardianSet with keys = newKeys, expirationTime = None
+        newSet = GuardianSet with
+          members = guardianSetMembersWithKnownKeys (Map.values st.guardianSets) newKeys
+          expirationTime = None
+    assertMsg "guardianSetUpgrade: new set addresses differ from the VAA" (guardianAddressesOf newSet == newKeys)
+    checkGuardianSetMembersAreWellFormed newSet.members
     pure st with
       guardianSetIndex = newIndex
       guardianSets = Map.insert newIndex newSet (Map.alter expireCurrent st.guardianSetIndex st.guardianSets)
@@ -337,7 +382,7 @@ applyGovernance st now action = case action of
 
 -- | The 'CoreState' guardian set invariant: the current set exists and never
 -- expires, each other set has a lower index and an expiry, and each set passes
--- 'checkGuardianAddressesAreWellFormed'. Each index fits uint32.
+-- 'checkGuardianSetMembersAreWellFormed'. Each index fits uint32.
 checkGuardianSetsAreConsistent : Int -> Map Int GuardianSet -> Bool
 checkGuardianSetsAreConsistent currentIndex storedSets =
   checkGuardianSetIndexFitsUint32 currentIndex
@@ -351,7 +396,7 @@ checkGuardianSetsAreConsistent currentIndex storedSets =
       checkGuardianSetIndexFitsUint32 storedIndex
         && storedIndex <= currentIndex
         && (storedIndex == currentIndex || isSome storedSet.expirationTime)
-        && isRight (checkGuardianAddressesAreWellFormed storedSet.keys)
+        && isRight (checkGuardianSetMembersAreWellFormed storedSet.members)
 
 -- | Ledger effects of one governance VAA.
 data GovernanceOutcome = GovernanceOutcome with
@@ -361,12 +406,12 @@ data GovernanceOutcome = GovernanceOutcome with
 
 -- | Check a governance VAA against the CURRENT set (EVM Governance.sol), the
 -- governance emitter and replay protection, then compute its effects.
-governanceOutcomeFor : CoreState -> Time -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Either Text GovernanceOutcome
-governanceOutcomeFor before now encodedVAA pubKeys = do
+governanceOutcomeFor : CoreState -> Time -> EncodedVaa -> Either Text GovernanceOutcome
+governanceOutcomeFor before now encodedVAA = do
   let vaa = parseVAA encodedVAA
   assertMsg "governance: not signed by current guardian set"
     (vaa.guardianSetIndex == before.guardianSetIndex)
-  verifyVAA (currentSetForUpgrade before) vaa pubKeys now
+  verifyVAA (currentSetForUpgrade before) vaa now
   assertMsg "governance: wrong emitter chain" (vaa.emitterChain == before.governanceChainId)
   assertMsg "governance: wrong emitter address"
     (vaa.emitterAddress == before.governanceContract)
@@ -410,10 +455,10 @@ governanceOutcomeFor before now encodedVAA pubKeys = do
 
 -- | Runs inside the consuming 'SubmitGovernanceVAA': the archived contract's
 -- signatories authorize both creates.
-createGovernanceOutcome : CoreState -> EncodedVaa -> [(Int, GuardianPublicKey)] -> Update (ContractId CoreState)
-createGovernanceOutcome before encodedVAA pubKeys = do
+createGovernanceOutcome : CoreState -> EncodedVaa -> Update (ContractId CoreState)
+createGovernanceOutcome before encodedVAA = do
   now <- getTime
-  outcome <- either assertFail pure (governanceOutcomeFor before now encodedVAA pubKeys)
+  outcome <- either assertFail pure (governanceOutcomeFor before now encodedVAA)
   forA_ outcome.feeWithdrawal create
   create outcome.successor
 
@@ -572,25 +617,32 @@ data RegenesisGuardianSets = RegenesisGuardianSets with
   deriving (Eq, Show)
 
 -- | The guardian set index and the stored sets of the earlier root with the
--- highest index, unchanged. Fails on an empty list and when two roots store
--- different keys at one index.
+-- highest index. Each member takes the public key that any earlier root holds
+-- for its address (a stored key derives its address). Fails on an empty list
+-- and when two roots store different addresses at one index.
 tryGuardianSetsForRegenesis : [CoreState] -> Either Text RegenesisGuardianSets
 tryGuardianSetsForRegenesis earlierRoots = do
   assertMsg "regenesis: no earlier CoreState" (not (null earlierRoots))
   let storedEntries = concatMap (\root -> Map.toList root.guardianSets) earlierRoots
-      mergeKeys merged (storedIndex, storedSet) = case Map.lookup storedIndex merged of
-        Some recordedKeys | recordedKeys /= storedSet.keys ->
-          Left ("regenesis: earlier roots disagree on the guardian set keys at index " <> show storedIndex)
-        _ -> Right (Map.insert storedIndex storedSet.keys merged)
-  _ <- foldlA mergeKeys Map.empty storedEntries
+      mergeAddresses merged (storedIndex, storedSet) = case Map.lookup storedIndex merged of
+        Some recordedAddresses | recordedAddresses /= guardianAddressesOf storedSet ->
+          Left ("regenesis: earlier roots disagree on the guardian set addresses at index " <> show storedIndex)
+        _ -> Right (Map.insert storedIndex (guardianAddressesOf storedSet) merged)
+  _ <- foldlA mergeAddresses Map.empty storedEntries
   highestRoot <- case earlierRoots of
     firstRoot :: laterRoots -> Right (foldl
       (\highest root -> if root.guardianSetIndex > highest.guardianSetIndex then root else highest)
       firstRoot laterRoots)
     [] -> Left "regenesis: no earlier CoreState"
+  let earlierSets = map snd storedEntries
+      withKnownKeys storedSet =
+        storedSet with members = guardianSetMembersWithKnownKeys earlierSets (guardianAddressesOf storedSet)
+      regenesisSets = fmap withKnownKeys highestRoot.guardianSets
+  assertMsg "regenesis: guardian set indices changed" (Map.keys regenesisSets == Map.keys highestRoot.guardianSets)
+  forA_ (Map.values regenesisSets) \regenesisSet -> checkGuardianSetMembersAreWellFormed regenesisSet.members
   pure RegenesisGuardianSets with
     guardianSetIndex = highestRoot.guardianSetIndex
-    guardianSets = highestRoot.guardianSets
+    guardianSets = regenesisSets
 
 guardianSetsForRegenesis : [CoreState] -> RegenesisGuardianSets
 guardianSetsForRegenesis earlierRoots = either error identity (tryGuardianSetsForRegenesis earlierRoots)
