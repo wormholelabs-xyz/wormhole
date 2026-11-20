@@ -45,23 +45,24 @@ func createdEventsByContractID(tx *apiv2.Transaction) map[string]*apiv2.CreatedE
 	return createdEvents
 }
 
-// readPartySignsExercisedEmitter reports whether readAsParty is a stakeholder
+// readPartySignsExercisedEmitter reports whether the read-as party is a stakeholder
 // of the contract that a consuming exercise on the pinned template consumes.
 //
 // SECURITY: acs_delta on a consuming exercise is true only when the contract
 // existed before the transaction and a read-as party is its stakeholder. For a
 // contract that the same transaction creates, acs_delta is false, and the
-// CreatedEvent in createdEvents must show readAsParty as a signatory of the
+// CreatedEvent in createdEvents must show the read-as party as a signatory of the
 // pinned template. Emitter has no observers, so a stakeholder is a signatory.
 // SECURITY: the CreatedEvent must name the exercise's package id, accepted at recordTime.
-func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEvents map[string]*apiv2.CreatedEvent, tmpl TemplateID, recordTime time.Time, readAsParty string) bool {
+func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEvents map[string]*apiv2.CreatedEvent, tmpl TemplateID, recordTime time.Time, readScope ReadScope) bool {
 	if !exercised.GetConsuming() {
 		return false
 	}
 	if exercised.GetAcsDelta() {
 		return true
 	}
-	if readAsParty == "" || tmpl.AcceptedPackageIDs.MatchesAnyPackage() {
+	readAsParty, isGuardianGovernance := readScope.GuardianGovernanceParty()
+	if !isGuardianGovernance || tmpl.AcceptedPackageIDs.MatchesAnyPackage() {
 		return false
 	}
 	created := createdEvents[exercised.GetContractId()]
@@ -81,5 +82,5 @@ func readPartySignsExercisedEmitter(exercised *apiv2.ExercisedEvent, createdEven
 	if _, isAccepted := tmpl.AcceptedPackageIDs.VerdictForPublish(createdPackageID, recordTime).AcceptedRole(); !isAccepted {
 		return false
 	}
-	return slices.Contains(created.GetSignatories(), readAsParty)
+	return slices.Contains(created.GetSignatories(), readAsParty.String())
 }

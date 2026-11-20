@@ -144,9 +144,9 @@ func TestCantonWatcherIntegration(t *testing.T) {
 	msgC := make(chan *common.MessagePublication, 16)
 	obsvReqC := make(chan *gossipv1.ObservationRequest, 4)
 
-	// Any package version; readAsParty "" ⇒ observe all parties (wildcard);
+	// Any package version; any-party read scope (wildcard);
 	// unsafeDevMode true ⇒ insecure gRPC to the local sandbox.
-	w, err := NewWatcher(addr, cantonclient.AcceptAnyPackageID(), "", AuthConfig{}, true, msgC, obsvReqC)
+	w, err := NewWatcher(addr, cantonclient.AcceptAnyPackageID(), anyPartyReadScope(t), AuthConfig{}, true, msgC, obsvReqC)
 	require.NoError(t, err)
 	streamRecorder := newUpdateStreamRecorder()
 	w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}

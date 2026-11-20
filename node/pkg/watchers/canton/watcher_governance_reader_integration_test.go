@@ -291,7 +291,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 
 	type watcherCase struct {
 		name                        string
-		readAsParty                 string
+		readScope                   cantonclient.ReadScope
 		packageID                   string
 		wantRogueShadow             bool
 		wantGgOwnedForeignRegistrar bool
@@ -301,19 +301,19 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		{
 			// The gg-owned foreign-registrar publish passes the signatory check; the registrar pin drops it.
 			name:               "governance reader with core package emits only the trusted publish",
-			readAsParty:        bridge.GuardianGovernance,
+			readScope:          readScopeOfParty(t, bridge.GuardianGovernance),
 			packageID:          corePackageID,
 			wantTrustedPublish: true,
 		},
 		{
-			name:        "governance reader with wrong package emits nothing",
-			readAsParty: bridge.GuardianGovernance,
-			packageID:   testPackageID,
+			name:      "governance reader with wrong package emits nothing",
+			readScope: readScopeOfParty(t, bridge.GuardianGovernance),
+			packageID: testPackageID,
 		},
 		{
 			// Control: proves the rogue shadow and gg-owned foreign-registrar publishes are on the ledger stream.
 			name:                        "wildcard reader with core package also emits the rogue shadow and gg-owned foreign-registrar publishes",
-			readAsParty:                 "",
+			readScope:                   anyPartyReadScope(t),
 			packageID:                   corePackageID,
 			wantRogueShadow:             true,
 			wantGgOwnedForeignRegistrar: true,
@@ -333,8 +333,8 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		streamRecorder := newUpdateStreamRecorder()
 		streamRecorders[caseIndex] = streamRecorder
 
-		// Run builds the gRPC client from NewWatcher's readAsParty.
-		w, err := NewWatcher(ledgerAddr, acceptedPackageIDsOrAny(t, tc.packageID), tc.readAsParty, AuthConfig{}, true, msgC, obsvReqC)
+		// Run builds the gRPC client from NewWatcher's readScope.
+		w, err := NewWatcher(ledgerAddr, acceptedPackageIDsOrAny(t, tc.packageID), tc.readScope, AuthConfig{}, true, msgC, obsvReqC)
 		require.NoError(t, err)
 		w.extraLedgerDialOpts = []grpc.DialOption{grpc.WithStreamInterceptor(streamRecorder.interceptGetUpdates)}
 		supervisor.New(rootCtx, zap.NewNop(), func(ctx context.Context) error {

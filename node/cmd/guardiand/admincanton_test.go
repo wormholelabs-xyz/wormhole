@@ -20,7 +20,7 @@ const (
 	otherPackageIDHex  = "2222222222222222222222222222222222222222222222222222222222222222"
 	listedUpdateIDHex  = "1220ac5126912ade361264f7d40c4711a72dc9b3d12e9ec044a07d5df586b2fe397b"
 	listedRegistrar    = "guardianGovernance::1220a4d7463bd34b2ba3704401b48ab41d8f88cdcbe512fc1ef071aad97fef106161"
-	foreignRegistrar   = "rogueGovernance::122080c014fb0f3f4e1e1bd7bbd6e5a8c3a1a7c7d3f0e0a3e9a0c2b1d4e5f60718"
+	foreignRegistrar   = "rogueGovernance::1220c27103c953779ec7a88ef5e7c556ad079a78421c836975e4b1064cf28cf0544f"
 	listedOwner        = "vector-owner::1220cafebabe"
 )
 

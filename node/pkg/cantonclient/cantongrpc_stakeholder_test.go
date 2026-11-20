@@ -75,7 +75,7 @@ func TestMessagesFromTxRequiresReadPartyStakeholder(t *testing.T) {
 				publishMessageEventWithStakeholderFlags(tc.consuming, tc.acsDelta, 5),
 			}}
 
-			messages := messagesFromTx(tx, pinnedTmpl, "PublishMessage", governanceParty, zap.New(core))
+			messages := messagesFromTx(tx, pinnedTmpl, "PublishMessage", governanceReadScope, zap.New(core))
 
 			checkReadPartyStakeholderOutcome(t, tc, messages, publishWithoutReadPartyStakeholderCount(t)-countBefore, logs)
 		})
@@ -91,7 +91,7 @@ func TestGetTransactionByUpdateIDRequiresReadPartyStakeholder(t *testing.T) {
 			countBefore := publishWithoutReadPartyStakeholderCount(t)
 			service := &fakeUpdateByIDService{response: transactionResponse(sampleUpdateIDHex, 590,
 				publishMessageEventWithStakeholderFlags(tc.consuming, tc.acsDelta, 5))}
-			client := &grpcClient{update: service, readAsParty: governanceParty, logger: zap.New(core)}
+			client := &grpcClient{update: service, readScope: governanceReadScope, logger: zap.New(core)}
 
 			transaction, err := client.GetTransactionByUpdateID(context.Background(), updateID, pinnedTmpl, "PublishMessage")
 			require.NoError(t, err)

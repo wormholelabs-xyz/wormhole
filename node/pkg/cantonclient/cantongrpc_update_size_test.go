@@ -65,7 +65,7 @@ func dialLargeUpdateServer(t *testing.T, payloadHex string) CantonClient {
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(server.Stop)
 
-	client, err := NewCantonGrpcClient("passthrough:///bufconn", "", zap.NewNop(), insecure.NewCredentials(),
+	client, err := NewCantonGrpcClient("passthrough:///bufconn", anyPartyReadScope, zap.NewNop(), insecure.NewCredentials(),
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return listener.DialContext(ctx) }))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
