@@ -17,7 +17,7 @@
 # gateway-net is an internal network: on Docker Desktop, a container on a normal bridge network reaches the
 # loopback-published LocalNet ports through host.docker.internal.
 #
-# Precondition: NTT_PIN_VERSION=0.4.2, ntt_burn_mint.sh and ntt_lock_unlock_gg.sh ran.
+# Precondition: ntt_burn_mint.sh and ntt_lock_unlock_gg.sh ran.
 # DISCLOSURE_SERVICE_IMAGE names the local image built from canton/disclosure/service/Dockerfile of the NTT repo.
 set -euo pipefail
 # shellcheck source=ntt_lib.sh
@@ -344,8 +344,11 @@ check_service_endpoints() {
     check_service_answers "no route" "$removed_path" 404 -
   done
   check_service_answers "control managers" /v1/managers 200 '(.managers | length) >= 1'
-  check_service_answers "register flow without --operator-party" /v1/flows/register 404 \
-    '.error == "disclosure-service: flow register not enabled: the service has no operator party"'
+  # ntt 0.5.0: the register flow reads only gg contracts, the genesis roots of the pinned packages.
+  check_service_answers "register flow from the gg reader" /v1/flows/register 200 \
+    "([.disclosures[].role] == [\"NttGovernance\", \"EmitterRegistry\", \"ReplayRootRegistry\", \"CoreState\"])
+     and (.missing == [])
+     and ([.disclosures[].templateId | split(\":\")[0]] == [\"$NTT_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\", \"$WORMHOLE_CORE_PACKAGE_ID\"])"
 }
 
 # flow_set <flow> <query>: the flow response JSON. Fails unless HTTP 200.
