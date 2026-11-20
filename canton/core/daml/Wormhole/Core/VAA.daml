@@ -90,23 +90,17 @@ parseSignatures encoded offset count = map parseAt [0 .. count - 1]
 digestOf : HexBytes -> VaaDigest
 digestOf body = parseHexBytesAsOrAbort (keccak256Bytes (keccak256Bytes body))
 
--- | Derive the 20-byte Ethereum-style address from a secp256k1 public key:
--- @keccak256(X ‖ Y)[12..32]@, after the 0x04 tag is dropped.
-addressFromPubKey : GuardianPublicKey -> GuardianAddress
-addressFromPubKey pubKey =
-  parseHexBytesAsOrAbort (sliceBytes 12 20 (keccak256Bytes (sliceFrom 1 (hexBytesOf pubKey))))
-
--- | Verify a VAA against @gs@ at time @now@, using caller-supplied public keys
--- (index -> 65-byte uncompressed key). Pure — returns the failure as a 'Left'
--- and the caller decides how to abort. Mirrors @Messages.verifyVMInternal@:
+-- | Verify a VAA against @gs@ at time @now@, using the public keys stored in
+-- the set. Pure — returns the failure as a 'Left' and the caller decides how
+-- to abort. Mirrors @Messages.verifyVMInternal@:
 --
 --   * the guardian set must be active (not expired);
 --   * at least @quorum(n)@ signatures present;
 --   * guardian indices strictly ascending (no double counting);
---   * each supplied pubkey must hash to the stored guardian address; and
---   * each signature must verify against that pubkey over the digest.
-verifyVAA : GuardianSet -> VAA -> [(Int, GuardianPublicKey)] -> Time -> Either Text ()
-verifyVAA gs vaa pubKeys now = do
+--   * each signer has an attached public key that derives its address; and
+--   * each signature must verify against that key over the digest.
+verifyVAA : GuardianSet -> VAA -> Time -> Either Text ()
+verifyVAA gs vaa now = do
   let n = numGuardians gs
       required = quorum n
       sigs = vaa.signatures
@@ -116,25 +110,25 @@ verifyVAA gs vaa pubKeys now = do
     (length sigs >= required)
   assertMsg "signature indices not strictly ascending"
     (strictlyAscending (map (.guardianIndex) sigs))
-  forA_ sigs (verifyOne gs vaa.hash pubKeys)
+  forA_ sigs (verifyOne gs vaa.hash)
 
 -- | Verify a single signature.
 --
 -- Daml's @secp256k1WithEcdsaOnly@ verifies a DER-encoded ECDSA signature over
 -- the message bytes WITHOUT pre-hashing (Ethereum signs the digest directly), so
 -- we pass the Wormhole @digest@ as the message. It takes a public key, not a
--- recovery, so we bind the caller-supplied key to the canonical guardian address
--- via @keccak256(pubkey)[12..]@ — a wrong key cannot pass.
-verifyOne : GuardianSet -> VaaDigest -> [(Int, GuardianPublicKey)] -> Signature -> Either Text ()
-verifyOne gs digest pubKeys sig = do
-  storedAddr <- optionalToEither ("guardian index out of range: " <> show sig.guardianIndex)
-    (keyAt gs sig.guardianIndex)
-  pubKey <- optionalToEither ("missing public key for guardian index: " <> show sig.guardianIndex)
-    (lookup sig.guardianIndex pubKeys)
-  assertMsg ("public key does not match guardian address at index " <> show sig.guardianIndex)
-    (addressFromPubKey pubKey == storedAddr)
+-- recovery: the stored key was bound to the guardian address at attach, and the
+-- binding is checked again here.
+verifyOne : GuardianSet -> VaaDigest -> Signature -> Either Text ()
+verifyOne gs digest sig = do
+  member <- optionalToEither ("guardian index out of range: " <> show sig.guardianIndex)
+    (memberAt gs sig.guardianIndex)
+  publicKey <- optionalToEither ("no public key attached for guardian index " <> show sig.guardianIndex)
+    member.publicKey
+  assertMsg ("attached public key does not derive the guardian address at index " <> show sig.guardianIndex)
+    (guardianAddressFromPublicKey publicKey == member.address)
   assertMsg ("invalid signature for guardian index " <> show sig.guardianIndex)
-    (verifySecp256k1Signature (derSignature sig.r sig.s) digest (derPublicKey pubKey))
+    (verifySecp256k1Signature (derSignature sig.r sig.s) digest (derPublicKey publicKey))
 
 -- | Wraps the @secp256k1WithEcdsaOnly@ builtin, which verifies over the message
 -- bytes as given: Ethereum signs the 32-byte digest directly.

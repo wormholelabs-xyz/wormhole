@@ -13,7 +13,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.State
 import Wormhole.Core.Setup
-import Test.TestCore (registerEmitter, devnetGuardian)
+import Test.TestCore (registerEmitter, devnetGenesisGuardian)
 import Test.WatcherGovernanceReader (RealBridge(..), integrationGovernanceReaderSetup)
 
 -- | @witness@ observes the publisher, thus witnesses each consuming choice and its subtree.
@@ -142,7 +142,7 @@ integrationTransientEmitterPublish bridge = do
   let shadowFeeInstrument = InstrumentId with admin = rogueFeeInstrumentAdmin, id = "UNUSED"
   shadowCoreStateCid <- submit (actAs rogueGovernance <> actAs rogueFeeCustody) do
     createCmd (mkInitialCoreState rogueGovernance solanaGovernanceChainId
-                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [devnetGuardian])
+                 defaultGovernanceContract (GenesisGuardianSet with guardianSetIndex = 0, guardians = [devnetGenesisGuardian])
                  shadowFeeInstrument rogueFeeCustody)
   shadowCoreStateDisclosure <- fromSome <$> queryDisclosure rogueGovernance shadowCoreStateCid
   roguePublisherCid <- submit rogueOwner do

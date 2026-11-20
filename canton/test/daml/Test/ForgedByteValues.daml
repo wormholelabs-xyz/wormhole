@@ -12,7 +12,7 @@ import DA.Optional (fromSome)
 import DA.Time (time)
 import DA.Set qualified as Set
 import Wormhole.Core.Bytes
-import Wormhole.Core.GuardianSet (GuardianSet(..))
+import Wormhole.Core.GuardianSet (GuardianSet(..), GuardianSetMember(..))
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
 import Wormhole.Core.State
@@ -24,13 +24,11 @@ data ForgedValueCase
   | CoreStateGuardianAddress GuardianAddress
   | CoreStateExpiredSetGuardianAddress GuardianAddress
   | CoreStateConsumedGovernanceDigest VaaDigest
+  | CoreStateGuardianPublicKey GuardianPublicKey
   | ParseAndVerifyEncodedVaa EncodedVaa
-  | ParseAndVerifyGuardianPublicKey GuardianPublicKey
-  | ParseAndVerifySecondGuardianPublicKey GuardianPublicKey
   | SubmitGovernanceEncodedVaa EncodedVaa
-  | SubmitGovernanceGuardianPublicKey GuardianPublicKey
   | VerifyAndConsumeEncodedVaa EncodedVaa
-  | VerifyAndConsumeGuardianPublicKey GuardianPublicKey
+  | AttachGuardianPublicKey GuardianPublicKey
   | PublishMessagePayload MessagePayload
   | ConsumeDigestArgument VaaDigest
   | ReplayNodePrefix DigestNibblePrefix
@@ -63,49 +61,54 @@ runForgedValueCase partyLabel forgedCase = do
   Some coreState <- queryContractId guardianGovernance coreStateCid
   coreStateDisclosure <- fromSome <$> queryDisclosure guardianGovernance coreStateCid
   relayer <- allocateParty ("Relayer" <> partyLabel)
-  let devnetPublicKeys = [(0, devnetGuardianPubKey)]
+  -- A governance digest lifts the genesis rule that each guardian holds a key.
+  let coreStateWithSet0Member hasGovernanceHistory set0Member = coreState with
+        guardianSets = Map.fromList [(0, GuardianSet with members = [set0Member], expirationTime = None)]
+        consumedGovernance =
+          if hasGovernanceHistory then Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0 else Map.empty
       createCoreStateWith forgedCoreState =
         trySubmit (actAs guardianGovernance <> actAs coreState.feeRecipient) do createCmd forgedCoreState
-      verifyAndConsumeWith encodedVAA pubKeys = do
+      verifyAndConsumeWith encodedVAA = do
         rootCid <- claimReplayRoot guardianGovernance relayer
         trySubmit (actAs relayer <> disclose coreStateDisclosure) do
           exerciseCmd coreStateCid VerifyAndConsumeVAA with
-            encodedVAA, pubKeys, consumer = relayer, namespace = "forged", replayNodeCid = rootCid
-      parseAndVerifyWith encodedVAA pubKeys =
+            encodedVAA, consumer = relayer, namespace = "forged", replayNodeCid = rootCid
+      parseAndVerifyWith encodedVAA =
         trySubmit (actAs relayer <> disclose coreStateDisclosure) do
-          exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = relayer, encodedVAA, pubKeys
-      submitGovernanceWith encodedVAA pubKeys =
-        trySubmit (actAs relayer <> disclose coreStateDisclosure) do
-          exerciseCmd coreStateCid SubmitGovernanceVAA with submitter = relayer, encodedVAA, pubKeys
+          exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = relayer, encodedVAA
   case forgedCase of
     CoreStateGovernanceContract forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with governanceContract = forgedAddress)
     CoreStateGuardianAddress forgedAddress -> describeSubmitOutcome <$>
-      createCoreStateWith (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
-        GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [forgedAddress]
-        coreState.feeInstrument coreState.feeRecipient)
+      createCoreStateWith (coreStateWithSet0Member True (GuardianSetMember with address = forgedAddress, publicKey = None))
+    CoreStateGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
+      createCoreStateWith (coreStateWithSet0Member False (GuardianSetMember with address = devnetGuardian, publicKey = Some forgedKey))
     CoreStateExpiredSetGuardianAddress forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with
+        consumedGovernance = Map.singleton (parseHexTextOrAbort (mconcat (replicate 64 "a"))) 0
         guardianSetIndex = 1
         guardianSets = Map.fromList
-          [ (0, GuardianSet with keys = [forgedAddress], expirationTime = Some (time (date 2026 Jan 1) 0 0 0))
-          , (1, GuardianSet with keys = [devnetGuardian], expirationTime = None) ])
+          [ (0, GuardianSet with
+              members = [GuardianSetMember with address = forgedAddress, publicKey = None]
+              expirationTime = Some (time (date 2026 Jan 1) 0 0 0))
+          , (1, GuardianSet with members = [GuardianSetMember with address = devnetGuardian, publicKey = Some devnetGuardianPubKey], expirationTime = None) ])
     CoreStateConsumedGovernanceDigest forgedDigest -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with consumedGovernance = Map.singleton forgedDigest 0)
     ParseAndVerifyEncodedVaa forgedVaa -> describeSubmitOutcome <$>
-      parseAndVerifyWith forgedVaa devnetPublicKeys
-    ParseAndVerifyGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
-      parseAndVerifyWith govSetFeeVAA [(0, forgedKey)]
-    ParseAndVerifySecondGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
-      parseAndVerifyWith govSetFeeVAA [(0, devnetGuardianPubKey), (1, forgedKey)]
+      parseAndVerifyWith forgedVaa
     SubmitGovernanceEncodedVaa forgedVaa -> describeSubmitOutcome <$>
-      submitGovernanceWith forgedVaa devnetPublicKeys
-    SubmitGovernanceGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
-      submitGovernanceWith govSetFeeVAA [(0, forgedKey)]
+      trySubmit (actAs relayer <> disclose coreStateDisclosure) do
+        exerciseCmd coreStateCid SubmitGovernanceVAA with
+          submitter = relayer, encodedVAA = forgedVaa
     VerifyAndConsumeEncodedVaa forgedVaa -> describeSubmitOutcome <$>
-      verifyAndConsumeWith forgedVaa devnetPublicKeys
-    VerifyAndConsumeGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
-      verifyAndConsumeWith govSetFeeVAA [(0, forgedKey)]
+      verifyAndConsumeWith forgedVaa
+    AttachGuardianPublicKey forgedKey -> do
+      unkeyedCoreStateCid <- submit (actAs guardianGovernance <> actAs coreState.feeRecipient) do
+        createCmd (coreStateWithSet0Member True (GuardianSetMember with address = devnetGuardian, publicKey = None))
+      unkeyedDisclosure <- fromSome <$> queryDisclosure guardianGovernance unkeyedCoreStateCid
+      describeSubmitOutcome <$> trySubmit (actAs relayer <> disclose unkeyedDisclosure) do
+        exerciseCmd unkeyedCoreStateCid AttachGuardianPublicKeys with
+          submitter = relayer, targetGuardianSetIndex = 0, guardianPublicKeys = [forgedKey]
     PublishMessagePayload forgedPayload -> do
       emitterOwner <- allocateParty ("EmitterOwner" <> partyLabel)
       emitterCid <- registerEmitter guardianGovernance emitterOwner
@@ -159,6 +162,8 @@ testForgedValueControlsAreAccepted = do
   outcomes <- runForgedValueCases
     [ CoreStateGovernanceContract defaultGovernanceContract
     , CoreStateGuardianAddress devnetGuardian
+    , CoreStateGuardianPublicKey devnetGuardianPubKey
+    , AttachGuardianPublicKey devnetGuardianPubKey
     , ParseAndVerifyEncodedVaa govSetFeeVAA
     , PublishMessagePayload (parseHexTextOrAbort "00")
     , ConsumeDigestArgument (parseHexTextOrAbort (mconcat (replicate 64 "a")))

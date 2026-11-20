@@ -41,7 +41,7 @@ echo "SubmitGovernanceVAA (SetMessageFee 1000) relayed by GovernanceRelayer"
 set_fee_vaa="$(generate_vaa -kind set-message-fee -fee 1000 -signing-set-index "$current_set_index" \
   -signing-key-indices "$current_set_key_indices" -sequence "$(date +%s)")"
 governance_transaction="$(relay_governance_vaa "governance-set-fee-$(date +%s)" \
-  "$(jq -er .vaaHex <<<"$set_fee_vaa")" "$(vaa_pub_keys_json "$set_fee_vaa")")"
+  "$(jq -er .vaaHex <<<"$set_fee_vaa")")"
 created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 
 for validator_name in app-provider sv app-user; do
