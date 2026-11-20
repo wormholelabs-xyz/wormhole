@@ -70,9 +70,8 @@ transferFeesErrorWrongTargetChain = "transferFees: wrong target chain"
 governanceErrorActionAlreadyConsumed : Text
 governanceErrorActionAlreadyConsumed = "action already consumed"
 
--- | Daml Int arithmetic overflow in 'bytesToInt'.
-arithmeticOverflowErrorText : Text
-arithmeticOverflowErrorText = "ArithmeticError"
+transferFeesErrorAmountExceedsIntRange : Text
+transferFeesErrorAmountExceedsIntRange = "governance: TransferFees amount exceeds the Int range"
 
 readWithdrawalAuthorizations : Party -> Script [FeeWithdrawalAuthorization]
 readWithdrawalAuthorizations guardianGovernance =
@@ -132,8 +131,8 @@ testTransferFeesRejectedLeavesNoWithdrawalAuthorization : Script ()
 testTransferFeesRejectedLeavesNoWithdrawalAuthorization = do
   let cases =
         [ ("chain 2", transferFeesErrorWrongTargetChain, tfTransferFeesToEthereum)
-        , ("amount 2^63", arithmeticOverflowErrorText, tfTransferFeesAmountTwoPow63)
-        , ("amount 2^256 - 1", arithmeticOverflowErrorText, tfTransferFeesAmountMaxUint256)
+        , ("amount 2^63", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountTwoPow63)
+        , ("amount 2^256 - 1", transferFeesErrorAmountExceedsIntRange, tfTransferFeesAmountMaxUint256)
         ]
   forA_ (numberCases cases) \(caseNumber, (caseName, expectedErrorText, encodedVAA)) -> do
     (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("TransferFeesRejected" <> show caseNumber) None
