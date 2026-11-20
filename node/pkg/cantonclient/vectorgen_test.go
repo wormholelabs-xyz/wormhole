@@ -1,7 +1,7 @@
 package cantonclient
 
 // Generates the hex fixtures in canton/test/daml and asserts the Daml literals
-// match (TestCore.daml and TestRedTeamCore.daml). Rewrite them after a deliberate change with:
+// match (TestCore.daml, TestRedTeamCore.daml and TestTransferFees.daml). Rewrite them after a deliberate change with:
 //
 //	CANTON_VECTORGEN=write go test -count=1 ./pkg/cantonclient/ -run TestCantonDamlFixtures
 //
@@ -146,13 +146,7 @@ func generateGovTransferFeesVAAHex(t *testing.T) string {
 }
 
 func govTransferFeesPayload(t *testing.T) []byte {
-	var recipient vaa.Address
-	for position := range recipient {
-		recipient[position] = govTransferFeesRecipientByte
-	}
-	payload, err := vaa.BodyCoreBridgeTransferFees{ChainID: vaa.ChainIDCanton, Amount: uint256.NewInt(govTransferFeesAmount), Recipient: recipient}.Serialize()
-	require.NoError(t, err)
-	return payload
+	return transferFeesPayloadBySDK(t, vaa.ChainIDCanton, uint256.NewInt(govTransferFeesAmount), recipientOfRepeatedByte(govTransferFeesRecipientByte))
 }
 
 func setMessageFeeFixturePayload(t *testing.T) []byte {
@@ -229,6 +223,7 @@ func TestCantonDamlFixtures(t *testing.T) {
 	}{
 		{damlPath: damlTestCorePath, fixtures: damlHexFixtures()},
 		{damlPath: damlRedTeamCorePath, fixtures: redTeamDamlHexFixtures()},
+		{damlPath: damlTransferFeesPath, fixtures: transferFeesDamlHexFixtures()},
 	}
 	for _, fixtureFile := range fixtureFiles {
 		t.Run(filepath.Base(fixtureFile.damlPath), func(t *testing.T) {
