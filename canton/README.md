@@ -2045,17 +2045,25 @@ informees of every publish, a deliberate throughput/liveness trade recorded in
 Open Questions.
 
 **Onboarding fee admin.** `onboardingFeeAdmin` is a plain field on
-`EmitterRegistry` and `ReplayRootRegistry`. It is not a signatory and not an
-observer. Its only power is `SetRegistrationFee` and `SetClaimFee`, each
-bounded by `maxOnboardingFee`. It gets each registry disclosure from a guardian
-participant. If the admin is offline or compromised, a `guardianGovernance`
-ceremony replaces it with `ReplaceEmitterRegistryFeeAdmin` and
+`EmitterRegistry` and `ReplayRootRegistry`. It is the only controller of
+`SetRegistrationFee` and `SetClaimFee`, each bounded by `maxOnboardingFee`.
+Get each registry disclosure for the admin from a guardian participant.
+If the admin is offline or compromised, a `guardianGovernance` ceremony
+replaces it with `ReplaceEmitterRegistryFeeAdmin` and
 `ReplaceReplayRootRegistryFeeAdmin`.
+
+A compromised admin can stop onboarding until that ceremony. It can set each
+fee to `maxOnboardingFee`, which stops new `RegisterEmitter` and new
+`ClaimReplayRoot` calls in practice. A fee above 0 also stops each path where
+`guardianGovernance` pays. Each fee change archives the registry, thus each
+cached registry disclosure becomes stale. The admin cannot change an existing
+`Emitter`, publish, verify, consume, apply governance, or change the fee
+destination. The admin gets no funds (`testCompromisedFeeAdminStopsOnlyOnboarding`).
 
 **Liveness.** Each core function needs only the authority of its caller and the
 inherited `guardianGovernance` signature. Publish, the watcher, verify,
 verify-and-consume, registration, claim, fee charging and governance continue
-when one party is offline. If the onboarding fee admin is offline, only
+when the former operator or the onboarding fee admin is offline. If the onboarding fee admin is offline, only
 `SetRegistrationFee` and `SetClaimFee` stop. The current fees stay. Any
 guardian participant serves every core disclosure. If all guardian participants
 stop serving disclosures, the failure is fail-safe. Transactions stop
