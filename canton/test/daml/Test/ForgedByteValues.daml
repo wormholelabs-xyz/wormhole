@@ -8,7 +8,6 @@ module Test.ForgedByteValues where
 import Daml.Script
 import DA.Optional (fromSome)
 import DA.Set qualified as Set
-import DA.Text qualified as T
 import Wormhole.Core.Bytes
 import Wormhole.Core.Replay
 import Wormhole.Core.Setup
@@ -68,61 +67,61 @@ runForgedValueCase partyLabel forgedCase = do
       parseAndVerifyWith encodedVAA pubKeys =
         trySubmit (actAs relayer <> disclose coreStateDisclosure) do
           exerciseCmd coreStateCid ParseAndVerifyVAA with verifier = relayer, encodedVAA, pubKeys
-  describeSubmitOutcome <$> case forgedCase of
-    CoreStateGovernanceContract forgedAddress ->
+  case forgedCase of
+    CoreStateGovernanceContract forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with governanceContract = forgedAddress)
-    CoreStateGuardianAddress forgedAddress ->
+    CoreStateGuardianAddress forgedAddress -> describeSubmitOutcome <$>
       createCoreStateWith (mkInitialCoreState guardianGovernance solanaGovernanceChainId defaultGovernanceContract
         GenesisGuardianSet with guardianSetIndex = 0, guardianAddresses = [forgedAddress]
         coreState.feeInstrument coreState.feeRecipient)
-    CoreStateConsumedGovernanceDigest forgedDigest ->
+    CoreStateConsumedGovernanceDigest forgedDigest -> describeSubmitOutcome <$>
       createCoreStateWith (coreState with consumedGovernance = Set.singleton forgedDigest)
-    ParseAndVerifyEncodedVaa forgedVaa ->
+    ParseAndVerifyEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       parseAndVerifyWith forgedVaa devnetPublicKeys
-    ParseAndVerifyGuardianPublicKey forgedKey ->
+    ParseAndVerifyGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
       parseAndVerifyWith govSetFeeVAA [(0, forgedKey)]
-    SubmitGovernanceEncodedVaa forgedVaa ->
+    SubmitGovernanceEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       trySubmit (actAs relayer <> disclose coreStateDisclosure) do
         exerciseCmd coreStateCid SubmitGovernanceVAA with
           submitter = relayer, encodedVAA = forgedVaa, pubKeys = devnetPublicKeys
-    VerifyAndConsumeEncodedVaa forgedVaa ->
+    VerifyAndConsumeEncodedVaa forgedVaa -> describeSubmitOutcome <$>
       verifyAndConsumeWith forgedVaa devnetPublicKeys
-    VerifyAndConsumeGuardianPublicKey forgedKey ->
+    VerifyAndConsumeGuardianPublicKey forgedKey -> describeSubmitOutcome <$>
       verifyAndConsumeWith govSetFeeVAA [(0, forgedKey)]
     PublishMessagePayload forgedPayload -> do
       emitterOwner <- allocateParty ("EmitterOwner" <> partyLabel)
       emitterCid <- registerEmitter guardianGovernance emitterOwner
-      trySubmit (actAs emitterOwner <> disclose coreStateDisclosure) do
+      describeSubmitOutcome <$> trySubmit (actAs emitterOwner <> disclose coreStateDisclosure) do
         exerciseCmd emitterCid PublishMessage with
           nonce = 0, payload = forgedPayload, consistencyLevel = 0
           coreStateCid, payer = emitterOwner, feeAllocation = None
     ConsumeDigestArgument forgedDigest -> do
       rootCid <- claimReplayRoot guardianGovernance relayer
-      trySubmit relayer do exerciseCmd rootCid ConsumeDigest with digest = forgedDigest
-    ReplayNodePrefix forgedPrefix ->
+      describeSubmitOutcome <$> trySubmit relayer do exerciseCmd rootCid ConsumeDigest with digest = forgedDigest
+    ReplayNodePrefix forgedPrefix -> describeSubmitOutcome <$>
       trySubmit (actAs relayer <> actAs guardianGovernance) do
         createCmd ReplayNode with
           consumer = relayer, guardianGovernance, namespace = "forged"
           prefix = forgedPrefix, splitThreshold = defaultSplitThreshold, consumed = Set.empty
-    ReplayNodeConsumedSuffix forgedSuffix ->
+    ReplayNodeConsumedSuffix forgedSuffix -> describeSubmitOutcome <$>
       trySubmit (actAs relayer <> actAs guardianGovernance) do
         createCmd ReplayNode with
           consumer = relayer, guardianGovernance, namespace = "forged"
           prefix = parseHexTextOrAbort "", splitThreshold = defaultSplitThreshold
           consumed = Set.singleton forgedSuffix
-    EmitterEmitterAddress forgedAddress ->
+    EmitterEmitterAddress forgedAddress -> describeSubmitOutcome <$>
       trySubmit (actAs relayer <> actAs guardianGovernance) do
         createCmd Emitter with
           guardianGovernance, owner = relayer, emitterId = 0, emitterAddress = forgedAddress, sequence = 0
-    FeeWithdrawalRecipient forgedRecipient ->
+    FeeWithdrawalRecipient forgedRecipient -> describeSubmitOutcome <$>
       trySubmit guardianGovernance do
         createCmd FeeWithdrawalAuthorization with
           guardianGovernance, amount = 1, recipient = forgedRecipient
-          vaaHash = parseHexTextOrAbort (T.replicate 64 "a")
-    FeeWithdrawalVaaDigest forgedDigest ->
+          vaaHash = parseHexTextOrAbort (mconcat (replicate 64 "a"))
+    FeeWithdrawalVaaDigest forgedDigest -> describeSubmitOutcome <$>
       trySubmit guardianGovernance do
         createCmd FeeWithdrawalAuthorization with
-          guardianGovernance, amount = 1, recipient = parseHexTextOrAbort (T.replicate 64 "a")
+          guardianGovernance, amount = 1, recipient = parseHexTextOrAbort (mconcat (replicate 64 "a"))
           vaaHash = forgedDigest
 
 claimReplayRoot : Party -> Party -> Script (ContractId ReplayNode)
@@ -144,6 +143,6 @@ testForgedValueControlsAreAccepted = do
     , CoreStateGuardianAddress devnetGuardian
     , ParseAndVerifyEncodedVaa govSetFeeVAA
     , PublishMessagePayload (parseHexTextOrAbort "00")
-    , ConsumeDigestArgument (parseHexTextOrAbort (T.replicate 64 "a"))
+    , ConsumeDigestArgument (parseHexTextOrAbort (mconcat (replicate 64 "a")))
     ]
   assertMsg ("each control must be accepted, got " <> show outcomes) (all (== acceptedOutcome) outcomes)

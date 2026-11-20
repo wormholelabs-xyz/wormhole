@@ -17,6 +17,7 @@ import Wormhole.Core.Setup
 import Wormhole.Core.State
 import Test.MockToken
 import Test.TestCore (setupWithInstrument, registerEmitter, govSetFeeVAA, devnetGuardianPubKey, devnetGuardian)
+import Wormhole.Core.Bytes
 
 -- | Bridge bootstrapped with a mock fee instrument; returns the pieces every
 -- fee test needs. The govSetFeeVAA fixture sets messageFee = 1000 (= 1e-7
@@ -46,7 +47,7 @@ testMessageFeeLifecycle = do
   -- Fee 0: publishes are free (no allocation).
   (em0Cid, msg0) <- submit (actAs alice <> disclose csDisc0) do
     exerciseCmd emId PublishMessage with
-      nonce = 1, payload = "aa", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = None
   msg0.sequence === 0
 
@@ -62,12 +63,12 @@ testMessageFeeLifecycle = do
   -- The stale CoreState cid fails on activeness (retry protocol: re-resolve).
   submitMustFail (actAs alice <> disclose csDisc0) do
     exerciseCmd emId1 PublishMessage with
-      nonce = 2, payload = "bb", consistencyLevel = 0
+      nonce = 2, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = None
   -- Fee due, no allocation: rejected.
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId1 PublishMessage with
-      nonce = 2, payload = "bb", consistencyLevel = 0
+      nonce = 2, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
       coreStateCid = csId', payer = alice, feeAllocation = None
 
   -- Exact allocation: publish succeeds, WormholeMessage unchanged, the fee
@@ -75,10 +76,10 @@ testMessageFeeLifecycle = do
   feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal mockFee)
   (em1Cid, msg1) <- submit (actAs alice <> disclose csDisc) do
     exerciseCmd emId1 PublishMessage with
-      nonce = 2, payload = "bb", consistencyLevel = 0
+      nonce = 2, payload = parseHexTextOrAbort "bb", consistencyLevel = 0
       coreStateCid = csId', payer = alice, feeAllocation = Some feePay
   msg1.sequence === 1
-  msg1.payload === "bb"
+  msg1.payload === parseHexTextOrAbort "bb"
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal mockFee
 
@@ -86,7 +87,7 @@ testMessageFeeLifecycle = do
   let emId2 = em1Cid
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId2 PublishMessage with
-      nonce = 3, payload = "cc", consistencyLevel = 0
+      nonce = 3, payload = parseHexTextOrAbort "cc", consistencyLevel = 0
       coreStateCid = csId', payer = alice, feeAllocation = Some feePay
 
 -- | Every way an allocation can be wrong, each dying on its own check.
@@ -104,7 +105,7 @@ testFeeValidationMatrix = do
   csDisc <- fromSome <$> queryDisclosure guardianGovernance csId'
   now <- getTime
   let publishWith feePay = exerciseCmd emId PublishMessage with
-        nonce = 1, payload = "aa", consistencyLevel = 0
+        nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
         coreStateCid = csId', payer = alice, feeAllocation = Some feePay
 
   -- Wrong receiver: pays mallory, not the fee recipient.
@@ -152,7 +153,7 @@ testFeeValidationMatrix = do
   fakeDisc <- fromSome <$> queryDisclosure fakeGov fakeCsId
   submitMustFail (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
-      nonce = 1, payload = "aa", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = fakeCsId, payer = alice, feeAllocation = None
 
 -- | At fee 0 an attached allocation is rejected outright — funds that are not
@@ -167,7 +168,7 @@ testNoFeeDueAndRecovery = do
   feePay@(allocCid, extraArgs) <- mintAndAllocate mockAdmin alice feeRecipient inst 1.0
   submitMustFail (actAs alice <> disclose csDisc) do
     exerciseCmd emId PublishMessage with
-      nonce = 1, payload = "aa", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = csId, payer = alice, feeAllocation = Some feePay
   -- Recovery: the payer withdraws alone; the funds come back to her.
   _ <- submit alice do exerciseCmd allocCid Allocation_Withdraw with extraArgs
@@ -190,7 +191,7 @@ testOverpayTransfersWholeAmount = do
   feePay <- mintAndAllocate mockAdmin alice feeRecipient inst (feeToDecimal (2 * mockFee))
   _ <- submit (actAs alice <> disclose csDisc) do
     exerciseCmd emId PublishMessage with
-      nonce = 1, payload = "aa", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = csId', payer = alice, feeAllocation = Some feePay
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal (2 * mockFee)
@@ -322,7 +323,7 @@ testClaimFee = do
       payer = carol, coreStateCid = Some csId, feeAllocation = Some feePay
       expectedGuardianGovernance = guardianGovernance
   Some root <- queryContractId carol rootCid
-  root.prefix === ""
+  hexTextOf root.prefix === ""
   bal <- mockBalance mockAdmin feeRecipient inst
   bal === feeToDecimal 300
 
@@ -338,7 +339,7 @@ testClaimFee = do
       payer = claimPayer, coreStateCid = Some csId, feeAllocation = Some payerFeePay
       expectedGuardianGovernance = guardianGovernance
   Some root2 <- queryContractId dave rootCid2
-  root2.prefix === ""
+  hexTextOf root2.prefix === ""
   bal2 <- mockBalance mockAdmin feeRecipient inst
   bal2 === feeToDecimal 600
 
@@ -393,7 +394,7 @@ testPublishPinsGuardianGovernance = do
   feePay <- mintAndAllocate mockAdmin alice rogueFeeCustody inst (feeToDecimal mockFee)
   res <- trySubmit (actAs alice <> disclose fakeDisc) do
     exerciseCmd emId PublishMessage with
-      nonce = 1, payload = "aa", consistencyLevel = 0
+      nonce = 1, payload = parseHexTextOrAbort "aa", consistencyLevel = 0
       coreStateCid = fakeCsId', payer = alice, feeAllocation = Some feePay
   case res of
     Left (FailureStatusError fs) ->

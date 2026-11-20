@@ -36,14 +36,14 @@ data GovernanceReaderPublishes = GovernanceReaderPublishes with
 trustedNonce : Int
 trustedNonce = 42
 
-trustedPayload : Bytes
-trustedPayload = "11223344"
+trustedPayload : MessagePayload
+trustedPayload = parseHexTextOrAbort "11223344"
 
 rogueShadowNonce : Int
 rogueShadowNonce = 66
 
-rogueShadowPayload : Bytes
-rogueShadowPayload = "deadbeef"
+rogueShadowPayload : MessagePayload
+rogueShadowPayload = parseHexTextOrAbort "deadbeef"
 
 integrationGovernanceReaderSetup : Script RealBridge
 integrationGovernanceReaderSetup = do
