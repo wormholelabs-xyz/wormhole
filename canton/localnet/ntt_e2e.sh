@@ -23,7 +23,7 @@ if [[ "${NTT_UPLOAD_DARS:-true}" == true ]]; then
 else
   echo "NTT_UPLOAD_DARS=false: the participants keep their vetted NTT packages"
 fi
-echo "### 2. NttGovernance root and CoinFactory"
+echo "### 2. NttGovernance root and CoinFactory of the genesis"
 "$SCRIPT_DIR/ntt_governance.sh"
 echo "### 3. Guardian watcher"
 "$SCRIPT_DIR/ntt_watcher.sh" start
