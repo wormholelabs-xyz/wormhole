@@ -7,8 +7,8 @@ observes it (implemented in Go under
 [`node/pkg/watchers/canton`](../node/pkg/watchers/canton) with a Ledger-API
 client under [`node/pkg/cantonclient`](../node/pkg/cantonclient)).
 
-**Target deployment:** the **public Canton Network mainnet** — Splice **0.10.2**
-on Canton **3.7.3**, **Daml SDK 3.7.3** (Daml-LF **2.3**, Protocol Version **37**). Two
+**Target deployment:** the **public Canton Network mainnet**. **SDK and protocol
+target:** Daml SDK **3.7.3**, Canton **3.7.3**, Daml-LF **2.3**, Protocol Version **37**. Two
 consequences shape the design: Ledger API **v2**, and **contract keys too weak
 to build on** (non-unique, resolved against the submitter's read view, negative
 lookups fail open) — the package uses **no contract keys**: contracts are
