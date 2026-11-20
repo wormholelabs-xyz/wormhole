@@ -752,7 +752,7 @@ Each deployment of `wormhole-core` 0.8.3 starts from a fresh genesis with a new 
 Contracts of an earlier version do not move to 0.8.3.
 For the reason, refer to [`A14_EMITTER_ID_UNIQUENESS.md`](../canton/A14_EMITTER_ID_UNIQUENESS.md).
 
-> **NOTE:** `wormhole-core` 0.9.0 has no `operator`. The `CoreState` checks below apply to 0.9.0.
+> **NOTE:** `wormhole-core` 0.9.0 and later have no `operator`. The `CoreState` checks below apply to 0.11.0.
 > The ceremony text and the genesis scripts still use the 0.8.x `operator`. A later change updates them.
 
 The genesis ceremony has two prepared transactions.
@@ -784,7 +784,7 @@ Check the `CoreState` transaction:
 10. Make sure that `guardianSetIndex` is the agreed genesis guardian set index (`GenesisGuardianSet`).
 11. Make sure that `guardianSets` has exactly one entry, at that index, with the agreed guardian set.
 12. Make sure that `messageFee` is 0 (Section 7.8).
-13. Make sure that `consumedGovernance` is empty.
+13. Make sure that `consumedGovernance` is empty and `evictedGovernanceMaxTimestampSeconds` is `null`.
 14. Make sure that the template package ID is the agreed `wormhole-core` package ID.
 15. Make sure that the prepared transaction has exactly two signer sets: `gg` and `feeCustody`.
 16. Sign the prepared hash for `gg` and for `feeCustody` (Section 7.1).

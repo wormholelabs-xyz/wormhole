@@ -159,7 +159,8 @@ CORE_STATE_ARGS="$(jq -n \
     messageFee: "0",
     feeInstrument: {admin: $feeInstrumentAdmin, id: "UNUSED"},
     feeRecipient: $feeCustody,
-    consumedGovernance: {"map": []}
+    consumedGovernance: [],
+    evictedGovernanceMaxTimestampSeconds: null
   }')"
 EMITTER_REGISTRY_ARGS="$(jq -n \
   --arg operator "${OP_PARTY}" \

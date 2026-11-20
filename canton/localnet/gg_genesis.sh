@@ -97,7 +97,7 @@ case "$active_core_state_count" in
           governanceContract: {tag: "EmitterAddress", value: $governanceContract}, guardianSetIndex: $guardianSetIndex,
           guardianSets: [[$guardianSetIndex, {keys: [{tag: "GuardianAddress", value: $guardian}], expirationTime: null}]],
           messageFee: "0", feeInstrument: {admin: $feeInstrumentAdmin, id: "Amulet"}, feeRecipient: $feeRecipient,
-          consumedGovernance: {map: []}}'
+          consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null}'
     }
     create_core_state="$(create_command "$CORE_STATE_TEMPLATE" "$(core_state_arguments "$FEE_CUSTODY_PARTY" "$dso_party")")"
 
