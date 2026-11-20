@@ -12,6 +12,7 @@ import (
 
 	"github.com/certusone/wormhole/node/pkg/common"
 	"github.com/certusone/wormhole/node/pkg/devnet"
+	ethcommon "github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -467,6 +468,58 @@ func TestGoldenVectorsMatchHandBuiltGovernanceLayout(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			if hex.EncodeToString(testCase.handBuiltPayload) != testCase.goldenPayloadHex {
 				t.Fatalf("hand-built payload %x, golden %s", testCase.handBuiltPayload, testCase.goldenPayloadHex)
+			}
+		})
+	}
+}
+
+func TestNewGuardianPublicKeysHex(t *testing.T) {
+	tests := []struct {
+		name                 string
+		request              vaaRequest
+		expectedKeyIndices   []uint64
+		expectNoPublicKeyHex bool
+	}{
+		{name: "guardian-set-upgrade lists each new key in set order",
+			request:            vaaRequest{kind: vaaKindGuardianSetUpgrade, newSetIndex: 2, newKeyIndices: []uint64{2, 3, 4}},
+			expectedKeyIndices: []uint64{2, 3, 4}},
+		{name: "guardian-set-upgrade to one key",
+			request:            vaaRequest{kind: vaaKindGuardianSetUpgrade, newSetIndex: 1, newKeyIndices: []uint64{1}},
+			expectedKeyIndices: []uint64{1}},
+		{name: "message has no new keys", request: vaaRequest{kind: vaaKindMessage}, expectNoPublicKeyHex: true},
+		{name: "set-message-fee has no new keys", request: vaaRequest{kind: vaaKindSetMessageFee}, expectNoPublicKeyHex: true},
+		{name: "message ignores new key indices",
+			request:              vaaRequest{kind: vaaKindMessage, newKeyIndices: []uint64{1}},
+			expectNoPublicKeyHex: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			publicKeysHex := newGuardianPublicKeysHex(tc.request)
+			if tc.expectNoPublicKeyHex {
+				if publicKeysHex != nil {
+					t.Fatalf("got %v, expected nil", publicKeysHex)
+				}
+				return
+			}
+			if len(publicKeysHex) != len(tc.expectedKeyIndices) {
+				t.Fatalf("got %d keys, expected %d", len(publicKeysHex), len(tc.expectedKeyIndices))
+			}
+			for position, keyIndex := range tc.expectedKeyIndices {
+				publicKey, err := hex.DecodeString(publicKeysHex[position])
+				if err != nil {
+					t.Fatalf("key %d is not hex: %v", position, err)
+				}
+				if len(publicKey) != 65 {
+					t.Fatalf("key %d has %d bytes, expected 65", position, len(publicKey))
+				}
+				if publicKey[0] != 0x04 {
+					t.Fatalf("key %d starts with %#x, expected 0x04", position, publicKey[0])
+				}
+				expectedAddress := ethcrypto.PubkeyToAddress(devnet.InsecureDeterministicEcdsaKeyByIndex(keyIndex).PublicKey)
+				derivedAddress := ethcommon.BytesToAddress(ethcrypto.Keccak256(publicKey[1:])[12:])
+				if derivedAddress != expectedAddress {
+					t.Fatalf("key %d derives %s, expected %s", position, derivedAddress.Hex(), expectedAddress.Hex())
+				}
 			}
 		})
 	}

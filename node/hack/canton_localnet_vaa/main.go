@@ -1,5 +1,5 @@
-// canton_localnet_vaa prints a VAA signed by deterministic devnet guardian keys, plus the
-// guardian public-key hints that the Canton core's ParseAndVerifyVAA and SubmitGovernanceVAA take.
+// canton_localnet_vaa prints a VAA signed by deterministic devnet guardian keys. For a
+// guardian-set-upgrade it also prints the new set's public keys for the Canton core's AttachGuardianPublicKeys.
 // For LocalNet rehearsals only: the keys are public.
 //
 //	go run ./hack/canton_localnet_vaa -kind guardian-set-upgrade -signing-set-index 0 -signing-key-indices 0 -new-set-index 1 -new-key-indices 1 -sequence 100
@@ -102,15 +102,11 @@ type vaaRequest struct {
 	nttInstrumentNonce uint64
 }
 
-type publicKeyHint struct {
-	GuardianIndex int    `json:"guardianIndex"`
-	PublicKeyHex  string `json:"publicKeyHex"`
-}
-
 type signedVAAOutput struct {
-	VAAHex    string          `json:"vaaHex"`
-	DigestHex string          `json:"digestHex"`
-	PubKeys   []publicKeyHint `json:"pubKeys"`
+	VAAHex    string `json:"vaaHex"`
+	DigestHex string `json:"digestHex"`
+	// guardian-set-upgrade only: 65-byte uncompressed keys of the new set, in set order.
+	NewGuardianPublicKeys []string `json:"newGuardianPublicKeys,omitempty"`
 }
 
 func parseVAAKind(kindText string) (vaaKind, error) {
@@ -353,6 +349,18 @@ func parseVAARequest(commandLine []string) (vaaRequest, error) {
 	return request, nil
 }
 
+// newGuardianPublicKeysHex returns the hex public keys of a guardian-set-upgrade's new set, else nil.
+func newGuardianPublicKeysHex(request vaaRequest) []string {
+	if request.kind != vaaKindGuardianSetUpgrade {
+		return nil
+	}
+	publicKeysHex := make([]string, 0, len(request.newKeyIndices))
+	for _, key := range deterministicKeys(request.newKeyIndices) {
+		publicKeysHex = append(publicKeysHex, hex.EncodeToString(ethcrypto.FromECDSAPub(&key.PublicKey)))
+	}
+	return publicKeysHex
+}
+
 func deterministicKeys(keyIndices []uint64) []*ecdsa.PrivateKey {
 	keys := make([]*ecdsa.PrivateKey, len(keyIndices))
 	for position, keyIndex := range keyIndices {
@@ -419,15 +427,10 @@ func run() error {
 		EmitterAddress:   emitterAddress,
 		Payload:          payload,
 	}
-	output := signedVAAOutput{}
+	output := signedVAAOutput{NewGuardianPublicKeys: newGuardianPublicKeysHex(request)}
 	signingSetKeys := deterministicKeys(request.signingKeyIndices)
 	for _, guardianIndex := range request.signerPositions {
-		key := signingSetKeys[guardianIndex]
-		signedVAA.AddSignature(key, guardianIndex)
-		output.PubKeys = append(output.PubKeys, publicKeyHint{
-			GuardianIndex: int(guardianIndex),
-			PublicKeyHex:  hex.EncodeToString(ethcrypto.FromECDSAPub(&key.PublicKey)),
-		})
+		signedVAA.AddSignature(signingSetKeys[guardianIndex], guardianIndex)
 	}
 	encodedVAA, err := signedVAA.Marshal()
 	if err != nil {

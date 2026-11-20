@@ -128,7 +128,6 @@ echo "Current guardian set $current_set_index, signing keys $current_set_key_ind
 fee_zero_vaa="$(generate_vaa -kind set-message-fee -fee 0 -signing-set-index "$current_set_index" \
   -signing-key-indices "$current_set_key_indices" -sequence "$(date +%s)")"
 fee_zero_vaa_hex="$(jq -er .vaaHex <<<"$fee_zero_vaa")"
-set_zero_keys="$(vaa_pub_keys_json "$fee_zero_vaa")"
 read_only_vaa="$(generate_vaa -kind message -signing-set-index "$current_set_index" \
   -signing-key-indices "$current_set_key_indices" -sequence 1)"
 
@@ -138,7 +137,7 @@ start_clock_ticker "$QUORUM_TICKER_SECONDS" "$SUBMITTING_VALIDATOR"
 
 echo "Step 1a: SubmitGovernanceVAA with one confirming host"
 if SUBMIT_AWAIT_COMPLETION=true relay_governance_vaa "quorum-governance-one-host-$(date +%s)" \
-    "$fee_zero_vaa_hex" "$set_zero_keys" > "$gg_work_dir/1a.out" 2> "$gg_work_dir/1a.err"; then
+    "$fee_zero_vaa_hex" > "$gg_work_dir/1a.out" 2> "$gg_work_dir/1a.err"; then
   echo "FAIL: the governance transaction committed with one confirming host" >&2
   exit 1
 fi
@@ -146,12 +145,12 @@ check_timeout_rejection "$gg_work_dir/1a" "$GG_PARTY" "$FEE_CUSTODY_PARTY"
 
 echo "Step 1b: ParseAndVerifyVAA with one confirming host"
 SUBMIT_AWAIT_COMPLETION=true verify_vaa "quorum-read-one-host-$(date +%s)" \
-  "$(jq -er .vaaHex <<<"$read_only_vaa")" "$(vaa_pub_keys_json "$read_only_vaa")" > "$gg_work_dir/1b.out" 2> "$gg_work_dir/1b.err" || true
+  "$(jq -er .vaaHex <<<"$read_only_vaa")" > "$gg_work_dir/1b.out" 2> "$gg_work_dir/1b.err" || true
 check_timeout_rejection "$gg_work_dir/1b" "$GG_PARTY" "$FEE_CUSTODY_PARTY"
 
 echo "Step 2: reconnect app-user (two confirming hosts)"
 set_participant_connection reconnect app-user
-governance_transaction="$(relay_governance_vaa "quorum-governance-two-hosts-$(date +%s)" "$fee_zero_vaa_hex" "$set_zero_keys")"
+governance_transaction="$(relay_governance_vaa "quorum-governance-two-hosts-$(date +%s)" "$fee_zero_vaa_hex")"
 created_contract_id "$governance_transaction" ":Wormhole.Core.State:CoreState" >/dev/null
 echo "PASS: committed with two confirming hosts, update $(jq -r .updateId <<<"$governance_transaction"). messageFee is 0 again."
 

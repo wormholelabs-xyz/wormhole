@@ -21,6 +21,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/gg_lib.sh"
 source "$LOCALNET_SCRIPT_DIR/watcher_harness_lib.sh"
 
 readonly DEVNET_GUARDIAN_ADDRESS="befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
+readonly DEVNET_GUARDIAN_PUBLIC_KEY="04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e967023e34e495a8ebf5101036d0fd66e3b0a8c7c61b65fceeaf487ab3cd1b5b7b50beb7970"
 readonly GENESIS_GUARDIAN_SET_INDEX="${GENESIS_GUARDIAN_SET_INDEX:-0}"
 readonly LABS_OPERATOR_VALIDATOR="app-provider"
 
@@ -34,7 +35,7 @@ dso_party="$(curl_bounded -sSf "$(json_api_url sv)/v2/parties?pageSize=1000" -H 
   | jq -er '[.partyDetails[].party | select(startswith("DSO::"))] | if length == 1 then .[0] else error("expected one DSO party") end')"
 # The guardian side builds its agreed parameters from its own inputs.
 agreed_parameters="$(first_genesis_parameters "$GG_PARTY" "$FEE_CUSTODY_PARTY" "$CUSTODY_PARTY" "$LABS_OPERATOR_PARTY" \
-  "$dso_party" Amulet "$GENESIS_GUARDIAN_SET_INDEX" "$DEVNET_GUARDIAN_ADDRESS")"
+  "$dso_party" Amulet "$GENESIS_GUARDIAN_SET_INDEX" "$DEVNET_GUARDIAN_ADDRESS:$DEVNET_GUARDIAN_PUBLIC_KEY")"
 genesis_parties="$(jq -cn --arg gg "$GG_PARTY" --arg fee "$FEE_CUSTODY_PARTY" --arg ntt "$CUSTODY_PARTY" '[$gg, $fee, $ntt]')"
 
 # genesis_signers_json <gg owner names> <feeCustody owner names> <nttCustody owner names>: comma-separated owner names.

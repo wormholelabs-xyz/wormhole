@@ -11,7 +11,7 @@ import Wormhole.Core.Bytes
 import Wormhole.Core.State
 import Test.TestCore (govTransferFeesVAA, numberCases, setupWithPartyLabel)
 import Test.TestGovernanceBounds (digestOfVAA, readCoreState, timestampOf)
-import Test.TestRedTeamCore (checkAttackFailedWith, set0PubKeys, set1PubKeys, submitGovernance, upgradeToSet1)
+import Test.TestRedTeamCore (checkAttackFailedWith, submitGovernance, upgradeToSet1)
 
 ----------------------------------------------------------------------
 -- Generated fixtures (CANTON_VECTORGEN=write rewrites these)
@@ -121,7 +121,7 @@ testTransferFeesCreatesOneWithdrawalAuthorization = do
     (guardianGovernance, coreStateCid) <- setupWithPartyLabel ("TransferFeesAccepted" <> show caseNumber) None
     before <- readCoreState guardianGovernance coreStateCid
     readWithdrawalAuthorizations guardianGovernance >>= (=== [])
-    successorCid <- submitGovernance guardianGovernance coreStateCid acceptedCase.encodedVAA set0PubKeys
+    successorCid <- submitGovernance guardianGovernance coreStateCid acceptedCase.encodedVAA
     successor <- readCoreState guardianGovernance successorCid
     successor === before with
       consumedGovernance = Map.fromList [(digestOfVAA acceptedCase.encodedVAA, timestampOf acceptedCase.encodedVAA)]
@@ -147,7 +147,7 @@ testTransferFeesRejectedLeavesNoWithdrawalAuthorization = do
     before <- readCoreState guardianGovernance coreStateCid
     submitResult <- trySubmit guardianGovernance do
       exerciseCmd coreStateCid SubmitGovernanceVAA with
-        submitter = guardianGovernance, encodedVAA, pubKeys = set0PubKeys
+        submitter = guardianGovernance, encodedVAA
     checkAttackFailedWith caseName expectedErrorText submitResult
     after <- readCoreState guardianGovernance coreStateCid
     after === before
@@ -162,12 +162,12 @@ testTransferFeesRejectedLeavesNoWithdrawalAuthorization = do
 testTransferFeesReplayRejected : Script ()
 testTransferFeesReplayRejected = do
   (guardianGovernance, coreStateCid) <- setupWithPartyLabel "TransferFeesReplay" None
-  transferredCid <- submitGovernance guardianGovernance coreStateCid govTransferFeesVAA set0PubKeys
+  transferredCid <- submitGovernance guardianGovernance coreStateCid govTransferFeesVAA
   let expectedAuthorization =
         expectedAuthorizationFor guardianGovernance govTransferFeesAmount govTransferFeesRecipient govTransferFeesVAA
   replayResult <- trySubmit guardianGovernance do
     exerciseCmd transferredCid SubmitGovernanceVAA with
-      submitter = guardianGovernance, encodedVAA = govTransferFeesVAA, pubKeys = set0PubKeys
+      submitter = guardianGovernance, encodedVAA = govTransferFeesVAA
   checkAttackFailedWith "same VAA" governanceErrorActionAlreadyConsumed replayResult
   checkHasExactlyOneWithdrawalAuthorization "same VAA" guardianGovernance expectedAuthorization
 
@@ -175,7 +175,7 @@ testTransferFeesReplayRejected = do
   digestOfVAA tfTransferFeesResignedBySet1 === digestOfVAA govTransferFeesVAA
   resignedResult <- trySubmit guardianGovernance do
     exerciseCmd set1CoreStateCid SubmitGovernanceVAA with
-      submitter = guardianGovernance, encodedVAA = tfTransferFeesResignedBySet1, pubKeys = set1PubKeys
+      submitter = guardianGovernance, encodedVAA = tfTransferFeesResignedBySet1
   checkAttackFailedWith "re-signed by set 1" governanceErrorActionAlreadyConsumed resignedResult
   checkHasExactlyOneWithdrawalAuthorization "re-signed by set 1" guardianGovernance expectedAuthorization
 
@@ -185,6 +185,6 @@ testTransferFeesResignedBySet1AppliesOnFreshState : Script ()
 testTransferFeesResignedBySet1AppliesOnFreshState = do
   (guardianGovernance, coreStateCid) <- setupWithPartyLabel "TransferFeesResigned" None
   set1CoreStateCid <- upgradeToSet1 guardianGovernance coreStateCid
-  _ <- submitGovernance guardianGovernance set1CoreStateCid tfTransferFeesResignedBySet1 set1PubKeys
+  _ <- submitGovernance guardianGovernance set1CoreStateCid tfTransferFeesResignedBySet1
   checkHasExactlyOneWithdrawalAuthorization "re-signed by set 1 on a fresh state" guardianGovernance
     (expectedAuthorizationFor guardianGovernance govTransferFeesAmount govTransferFeesRecipient govTransferFeesVAA)
