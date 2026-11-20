@@ -19,6 +19,7 @@ echo "Evidence log: $EVIDENCE_LOG"
 GG_ARTIFACTS="$LOCALNET_STATE_DIR/gg-artifacts.json"
 # Local parties of gg_host.sh: LabsOperator on app-provider; CorePublisher, CoreVerifier and GovernanceRelayer on sv.
 LOCAL_PARTIES="$LOCALNET_STATE_DIR/local-parties.json"
+# shellcheck disable=SC2034 # used by the scripts that source this file
 CORE_CONTRACTS="$LOCALNET_STATE_DIR/core-contracts.json"
 # One JSON line for each committed submission that guardian namespace parties sign (submit_guardian_ceremony).
 GG_CEREMONY_LOG="$LOCALNET_STATE_DIR/gg-ceremonies.jsonl"
@@ -51,11 +52,11 @@ for required_file in "$GG_ARTIFACTS" "$LOCAL_PARTIES"; do
 done
 
 GG_PARTY="$(jq -er .partyId "$GG_ARTIFACTS")"
-# shellcheck disable=SC2034 # used by the scripts that source this file
 LABS_OPERATOR_PARTY="$(jq -er .labsOperator "$LOCAL_PARTIES")"
 CORE_PUBLISHER_PARTY="$(jq -er .corePublisher "$LOCAL_PARTIES")"
 CORE_VERIFIER_PARTY="$(jq -er .coreVerifier "$LOCAL_PARTIES")"
 GOVERNANCE_RELAYER_PARTY="$(jq -er .governanceRelayer "$LOCAL_PARTIES")"
+# shellcheck disable=SC2034 # used by the scripts that source this file
 readonly LABS_OPERATOR_PARTY CORE_PUBLISHER_PARTY CORE_VERIFIER_PARTY GOVERNANCE_RELAYER_PARTY
 SYNCHRONIZER_ID="$(jq -er .synchronizerId "$GG_ARTIFACTS")"
 # Physical synchronizer id: <name>::<namespace>::<protocol>-<serial>.

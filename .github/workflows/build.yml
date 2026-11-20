@@ -302,6 +302,9 @@ jobs:
       - name: Run the owner key input check table test
         run: bash canton/localnet/test/owner_key_input_checks_test.sh
 
+      - name: Run the genesis and governance relay argument table test
+        run: bash canton/localnet/test/gg_offline_lib_test.sh
+
       # The canton image is pinned by digest in images.lock; the script checks the SHA-256 of the copied jar.
       - name: Copy the Canton console jar from the pinned canton image
         env:
