@@ -26,6 +26,7 @@ import (
 	"github.com/certusone/wormhole/node/pkg/common"
 	gossipv1 "github.com/certusone/wormhole/node/pkg/proto/gossip/v1"
 	"github.com/certusone/wormhole/node/pkg/supervisor"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/wormhole-foundation/wormhole/sdk/vaa"
@@ -39,6 +40,9 @@ const (
 	trustedPublishPayloadHex = "11223344"
 	rogueShadowNonce         = uint32(66)
 	rogueShadowPayloadHex    = "deadbeef"
+	// An Emitter of the rogue registry with the real guardianGovernance as owner.
+	ggOwnedForeignRegistrarNonce      = uint32(77)
+	ggOwnedForeignRegistrarPayloadHex = "cafe0077"
 
 	// Bounds the in-process hop from a recorded stream update id to msgC.
 	unexpectedEmissionWindow = 2 * time.Second
@@ -64,6 +68,9 @@ type governanceReaderPublishes struct {
 	RogueGovernance     string          `json:"rogueGovernance"`
 	RogueEmitterID      json.RawMessage `json:"rogueEmitterId"`
 	RogueShadowSequence json.RawMessage `json:"rogueShadowSequence"`
+
+	GgOwnedForeignRegistrarEmitterID json.RawMessage `json:"ggOwnedForeignRegistrarEmitterId"`
+	GgOwnedForeignRegistrarSequence  json.RawMessage `json:"ggOwnedForeignRegistrarSequence"`
 }
 
 // observedPublish is the subset of a MessagePublication the cases compare.
@@ -283,14 +290,16 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	require.Contains(t, bridge.GuardianGovernance, "::", "guardianGovernance must be a full party id")
 
 	type watcherCase struct {
-		name               string
-		readAsParty        string
-		packageID          string
-		wantRogueShadow    bool
-		wantTrustedPublish bool
+		name                        string
+		readAsParty                 string
+		packageID                   string
+		wantRogueShadow             bool
+		wantGgOwnedForeignRegistrar bool
+		wantTrustedPublish          bool
 	}
 	cases := []watcherCase{
 		{
+			// The gg-owned foreign-registrar publish passes the signatory check; the registrar pin drops it.
 			name:               "governance reader with core package emits only the trusted publish",
 			readAsParty:        bridge.GuardianGovernance,
 			packageID:          corePackageID,
@@ -302,14 +311,16 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 			packageID:   testPackageID,
 		},
 		{
-			// Control: proves the rogue shadow publish is on the ledger stream.
-			name:               "wildcard reader with core package also emits the rogue shadow publish",
-			readAsParty:        "",
-			packageID:          corePackageID,
-			wantRogueShadow:    true,
-			wantTrustedPublish: true,
+			// Control: proves the rogue shadow and gg-owned foreign-registrar publishes are on the ledger stream.
+			name:                        "wildcard reader with core package also emits the rogue shadow and gg-owned foreign-registrar publishes",
+			readAsParty:                 "",
+			packageID:                   corePackageID,
+			wantRogueShadow:             true,
+			wantGgOwnedForeignRegistrar: true,
+			wantTrustedPublish:          true,
 		},
 	}
+	const governanceReaderCoreCaseIndex = 0
 
 	msgChannels := make([]chan *common.MessagePublication, len(cases))
 	obsvReqChannels := make([]chan *gossipv1.ObservationRequest, len(cases))
@@ -345,6 +356,7 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	bridgeJSON, err := json.Marshal(bridge)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(bridgeInputPath, bridgeJSON, 0o600))
+	foreignRegistrarDropsBeforePublish := testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)
 	var publishes governanceReaderPublishes
 	runDamlScript(t, dpm, testDar, port, "Test.WatcherGovernanceReader:integrationGovernanceReaderPublish", bridgeInputPath, &publishes)
 	require.NotEqual(t, bridge.GuardianGovernance, publishes.TrustedOwner)
@@ -364,14 +376,26 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 		Nonce:          rogueShadowNonce,
 		Payload:        decodeHexPayload(t, rogueShadowPayloadHex),
 	}
+	ggOwnedForeignRegistrarPublish := observedPublish{
+		EmitterChain:   vaa.ChainIDCanton,
+		EmitterAddress: DeriveEmitterAddress(publishes.RogueGovernance, bridge.GuardianGovernance, parseDamlUint64(t, publishes.GgOwnedForeignRegistrarEmitterID)),
+		Sequence:       parseDamlUint64(t, publishes.GgOwnedForeignRegistrarSequence),
+		Nonce:          ggOwnedForeignRegistrarNonce,
+		Payload:        decodeHexPayload(t, ggOwnedForeignRegistrarPayloadHex),
+	}
 	require.NotEqual(t, trustedPublish.EmitterAddress, rogueShadowPublish.EmitterAddress)
+	require.NotEqual(t, trustedPublish.EmitterAddress, ggOwnedForeignRegistrarPublish.EmitterAddress)
+	require.NotEqual(t, rogueShadowPublish.EmitterAddress, ggOwnedForeignRegistrarPublish.EmitterAddress)
 
 	deadline := time.After(90 * time.Second)
-	var trustedPublishUpdateID, rogueShadowUpdateID cantonclient.UpdateID
+	var trustedPublishUpdateID, rogueShadowUpdateID, ggOwnedForeignRegistrarUpdateID cantonclient.UpdateID
 	for caseIndex, tc := range cases {
 		var wantPublishes []observedPublish
 		if tc.wantRogueShadow {
 			wantPublishes = append(wantPublishes, rogueShadowPublish)
+		}
+		if tc.wantGgOwnedForeignRegistrar {
+			wantPublishes = append(wantPublishes, ggOwnedForeignRegistrarPublish)
 		}
 		if tc.wantTrustedPublish {
 			wantPublishes = append(wantPublishes, trustedPublish)
@@ -387,13 +411,21 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 				trustedPublishUpdateID = updateID
 			case rogueShadowNonce:
 				rogueShadowUpdateID = updateID
+			case ggOwnedForeignRegistrarNonce:
+				ggOwnedForeignRegistrarUpdateID = updateID
 			}
 		}
 		assert.ElementsMatchf(t, wantPublishes, observed, "%s", tc.name)
 	}
 	require.False(t, trustedPublishUpdateID.IsZero(), "no case emitted the trusted publish")
 	require.False(t, rogueShadowUpdateID.IsZero(), "the wildcard control never emitted the rogue shadow publish")
+	require.False(t, ggOwnedForeignRegistrarUpdateID.IsZero(), "the wildcard control never emitted the gg-owned foreign-registrar publish")
 	require.NotEqual(t, trustedPublishUpdateID, rogueShadowUpdateID)
+	require.NotEqual(t, trustedPublishUpdateID, ggOwnedForeignRegistrarUpdateID)
+	// The governance reader stream carried the gg-owned publish, so only the registrar pin dropped it.
+	require.True(t, streamRecorders[governanceReaderCoreCaseIndex].hasDeliveredUpdateID(ggOwnedForeignRegistrarUpdateID))
+	assert.Equal(t, 1.0, testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)-foreignRegistrarDropsBeforePublish,
+		"only the governance reader with the core package reaches the registrar pin")
 
 	// Every stream, including the wrong-package one, received the trusted publish.
 	for caseIndex, tc := range cases {
@@ -422,16 +454,28 @@ func TestCantonWatcherGovernanceReaderIntegration(t *testing.T) {
 	for caseIndex, tc := range cases {
 		reobservedTrusted := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], trustedPublishUpdateID.TxID(), reobservationWindow)
 		reobservedRogue := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], rogueShadowUpdateID.TxID(), reobservationWindow)
-		var wantTrusted, wantRogue []observedPublish
+		foreignRegistrarDropsBeforeReobservation := testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)
+		reobservedGgOwned := reobserveAndCollect(t, obsvReqChannels[caseIndex], msgChannels[caseIndex], ggOwnedForeignRegistrarUpdateID.TxID(), reobservationWindow)
+		var wantTrusted, wantRogue, wantGgOwned []observedPublish
 		if tc.wantTrustedPublish {
 			wantTrusted = []observedPublish{trustedPublish}
 		}
 		if tc.wantRogueShadow {
 			wantRogue = []observedPublish{rogueShadowPublish}
 		}
+		if tc.wantGgOwnedForeignRegistrar {
+			wantGgOwned = []observedPublish{ggOwnedForeignRegistrarPublish}
+		}
+		wantReobservationDrops := 0.0
+		if caseIndex == governanceReaderCoreCaseIndex {
+			wantReobservationDrops = 1
+		}
 		assert.Equalf(t, wantTrusted, toObservedPublishes(reobservedTrusted), "%s: trusted publish reobservation", tc.name)
 		assert.Equalf(t, wantRogue, toObservedPublishes(reobservedRogue), "%s: rogue shadow reobservation", tc.name)
-		for _, msg := range append(reobservedTrusted, reobservedRogue...) {
+		assert.Equalf(t, wantGgOwned, toObservedPublishes(reobservedGgOwned), "%s: gg-owned foreign-registrar reobservation", tc.name)
+		assert.Equalf(t, wantReobservationDrops, testutil.ToFloat64(cantonForeignRegistrarMessagesDropped)-foreignRegistrarDropsBeforeReobservation,
+			"%s: registrar pin drops on reobservation", tc.name)
+		for _, msg := range append(append(reobservedTrusted, reobservedRogue...), reobservedGgOwned...) {
 			assert.Len(t, msg.TxID, cantonclient.UpdateIDTxIDLen)
 		}
 		if len(reobservedTrusted) == 1 {
