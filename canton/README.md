@@ -921,7 +921,7 @@ We use **`secp256k1WithEcdsaOnly`** because Ethereum signs the 32-byte
 A `GuardianSetUpgrade` VAA carries 20-byte addresses only.
 Thus the public keys come into the ledger on two paths:
 
-1. **Genesis.** Each `GenesisGuardian` gives the address and the public key. Both fields are required.
+1. **Genesis.** Each `GenesisGuardian` must give the address and the public key.
    The `CoreState` precondition rejects a state without governance history if a guardian has no key.
    Each governance VAA records its digest, and an attach only adds keys.
    Thus the rule applies only to genesis, and a new guardian after an upgrade can wait for its key.
