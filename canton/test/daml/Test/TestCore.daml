@@ -18,6 +18,7 @@ import Splice.Api.Token.HoldingV1 (InstrumentId(..))
 import Wormhole.Core.Bytes
 import Wormhole.Core.Governance (GovernanceAction(..))
 import Wormhole.Core.GuardianSet
+import Wormhole.Core.Replay
 import Wormhole.Core.State
 import Wormhole.Core.Setup
 import Wormhole.Core.VAA ()   -- HasField instances for VAA record-dot access
@@ -103,7 +104,25 @@ setupWithGenesisGuardianSetIndex partyLabel genesisIndex mInstrument = do
                  feeInstrument feeCustody)
   _ <- submit guardianGovernance do createCmd (mkInitialEmitterRegistry registryParties 0)
   _ <- submit guardianGovernance do createCmd (mkInitialReplayRootRegistry registryParties 0)
+  _ <- submit guardianGovernance do createCmd (mkInitialClaimedRootsNode guardianGovernance)
   pure (guardianGovernance, csId)
+
+-- | Disclosure-service simulation: the unique claimed-roots node of
+-- @guardianGovernance@ that covers 'claimedRootDigest' of @(consumer, namespace)@.
+claimedRootsNodeCovering : Party -> Party -> Text -> Script (ContractId ReplayNode, Disclosure)
+claimedRootsNodeCovering guardianGovernance consumer namespace = do
+  nodes <- query @ReplayNode guardianGovernance
+  let digestHex = hexTextOf (claimedRootDigest consumer namespace)
+      isCoveringClaimedRootsNode node =
+        node.consumer == guardianGovernance
+          && node.guardianGovernance == guardianGovernance
+          && node.namespace == claimedRootsNamespace
+          && hexTextOf node.prefix `T.isPrefixOf` digestHex
+  case filter (isCoveringClaimedRootsNode . snd) nodes of
+    [(nodeCid, _)] -> do
+      nodeDisclosure <- fromSome <$> queryDisclosure guardianGovernance nodeCid
+      pure (nodeCid, nodeDisclosure)
+    coveringNodes -> abort ("expected one covering claimed-roots node, found " <> show (length coveringNodes))
 
 -- | Register an emitter for @owner@, the production way: the requester submits
 -- alone against the disclosed 'EmitterRegistry' (served off-ledger by the
