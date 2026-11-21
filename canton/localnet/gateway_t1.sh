@@ -530,15 +530,20 @@ check_release() {
 }
 
 check_release_through_service() {
-  local recipient_user vaa flow
+  local recipient_user vaa flow poll
   echo "== C7. (b) Release on the Canton Coin deployment (reserve custodian nttCustody) with the service set"
   recipient_user="t1-recipient-$run_label"
   recipient_party="$(wallet_onboard app-user "$recipient_user")"
   wallet_tap app-user "$recipient_user" "$TAP_AMOUNT_USD"
   wallet_create_transfer_preapproval app-user "$recipient_user" > /dev/null
   vaa="$(release_vaa "$run_label" "$RELEASE_TRIMMED_AMOUNT")"
-  flow="$(flow_set release "manager=$lock_unlock_manager_address&digest=$(jq -er .digestHex <<<"$vaa")&recipient=$recipient_party")" \
-    || { fail_check "C7 release flow"; return; }
+  # The service caches ledger reads for --cache-ttl: fetch again until the set has the custody pot of the C6 lock.
+  for (( poll = 1; poll <= FRESH_SET_MAX_POLLS; poll++ )); do
+    flow="$(flow_set release "manager=$lock_unlock_manager_address&digest=$(jq -er .digestHex <<<"$vaa")&recipient=$recipient_party")" \
+      || { fail_check "C7 release flow"; return; }
+    jq -e '[.disclosures[].role] | index("custody pot Holding")' <<<"$flow" > /dev/null && break
+    sleep 1
+  done
   echo "release set roles $(jq -c '[.disclosures[].role]' <<<"$flow") missing $(jq -c '[.missing[].role]' <<<"$flow")"
   check_flow_missing_roles "$flow" '["committed TransferFactory", "recipient TransferPreapproval"]' \
     || fail_check "C7 release set missing roles $(jq -c '[.missing[].role]' <<<"$flow")"
