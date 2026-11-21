@@ -24,6 +24,8 @@ readonly DEVNET_GUARDIAN_ADDRESS="befa429d57cd18b7f8a4d91a2da9ab4af05d0fbe"
 readonly DEVNET_GUARDIAN_PUBLIC_KEY="04d4a4629979f0c9fa0f0bb54edf33f87c8c5a1f42c0350a30d68f7e967023e34e495a8ebf5101036d0fd66e3b0a8c7c61b65fceeaf487ab3cd1b5b7b50beb7970"
 readonly GENESIS_GUARDIAN_SET_INDEX="${GENESIS_GUARDIAN_SET_INDEX:-0}"
 readonly LABS_OPERATOR_VALIDATOR="app-provider"
+# sv sees the offer some time after app-provider commits it.
+readonly OFFER_VISIBLE_MAX_POLLS=30
 
 [[ -n "$FEE_CUSTODY_PARTY" ]] || fail "missing $FEE_CUSTODY_ARTIFACTS. Run CUSTODY_PARTY_NAME=feeCustody custody_host.sh first."
 [[ -n "$CUSTODY_PARTY" ]] || fail "missing $CUSTODY_ARTIFACTS. Run custody_host.sh for nttCustody first."
@@ -76,6 +78,10 @@ if [[ "$(active_offers | jq length)" == 0 ]]; then
     "$(create_command "$GENESIS_OFFER_TEMPLATE" "$(genesis_offer_arguments "$LABS_OPERATOR_PARTY" "$agreed_parameters")")")"
   echo "WormholeGenesisOffer $(created_contract_id "$offer_transaction" ":Wormhole.Genesis:WormholeGenesisOffer") (update $(jq -r .updateId <<<"$offer_transaction"))"
 fi
+for (( poll = 1; poll <= OFFER_VISIBLE_MAX_POLLS; poll++ )); do
+  [[ "$(active_offers | jq length)" == 0 ]] || break
+  sleep 1
+done
 offer_event="$(active_offers | jq -ec 'if length == 1 then .[0] else error("expected one active WormholeGenesisOffer of LabsOperator, found \(length)") end')"
 offer_cid="$(jq -r .contractId <<<"$offer_event")"
 echo "Guardian side: compare the offer ${offer_cid:0:16} on $SUBMITTING_VALIDATOR with the agreed parameters"
