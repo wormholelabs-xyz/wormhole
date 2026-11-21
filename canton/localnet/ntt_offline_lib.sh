@@ -59,8 +59,33 @@ exercise_result() {
 
 # message_summary <wormhole-message-json>: the WormholeMessage fields the watcher reads.
 message_summary() {
-  jq -c '{registrar: .registrar[0:24], owner: .owner[0:24], emitterId, sequence, nonce, consistencyLevel,
-          payloadPrefix: .payload[0:8], payloadBytes: ((.payload | length) / 2)}' <<<"$1"
+  jq -ec '(.payload | if type == "object" and .tag == "MessagePayload" then .value
+           else error("payload is not the variant {tag: MessagePayload, value: <hex>}") end) as $payload
+    | {registrar: .registrar[0:24], owner: .owner[0:24], emitterId, sequence, nonce, consistencyLevel,
+       payloadPrefix: $payload[0:8], payloadBytes: (($payload | length) / 2)}' <<<"$1"
+}
+
+# byte_variant_json <daml-type-name> <hex>: the Ledger API form of a Daml byte value, {tag: <type>, value: <hex>}.
+byte_variant_json() {
+  if [[ ! "$1" =~ ^[A-Z][A-Za-z0-9]*$ ]]; then
+    echo "byte_variant_json: type name is not a Daml type name: '$1'" >&2
+    return 1
+  fi
+  if [[ ! "$2" =~ ^([0-9a-f]{2})+$ ]]; then
+    echo "byte_variant_json: $1 value is not lowercase hex of whole bytes: '$2'" >&2
+    return 1
+  fi
+  jq -cn --arg tag "$1" --arg value "$2" '{tag: $tag, value: $value}'
+}
+
+# byte_variant_hex <daml-type-name> <variant-json>: the hex of a Ledger API byte value of that type.
+byte_variant_hex() {
+  if ! jq -e --arg tag "$1" 'type == "object" and keys == ["tag", "value"] and .tag == $tag
+      and (.value | type == "string" and test("^([0-9a-f]{2})+$"))' <<<"$2" > /dev/null 2>&1; then
+    echo "byte_variant_hex: '$2' is not the variant {tag: $1, value: <lowercase hex of whole bytes>}" >&2
+    return 1
+  fi
+  jq -r .value <<<"$2"
 }
 
 # json_array <json>...: one JSON array of the arguments.
@@ -237,12 +262,12 @@ classify_submit_response() {
 }
 
 # ntt_pinned_package_id <ntt-version>: the package id that ntt_upload_dars.sh requires for that version.
-# 0.5.0 on wormhole-core 0.9.0: NTT branch canton/migrate-ntt-layer, commit b2c355d.
+# 0.6.1 on wormhole-core 0.12.2: NTT branch canton/migrate-ntt-layer, commit 16ce38d.
 ntt_pinned_package_id() {
   case "$1" in
-    0.5.0) echo "449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e" ;;
+    0.6.1) echo "37753fce5b8069ada4dd56523e36fe5e0abe86be784d49854e014ec248f0c3fc" ;;
     *)
-      echo "no ntt package pin for version '$1'; pinned versions: 0.5.0" >&2
+      echo "no ntt package pin for version '$1'; pinned versions: 0.6.1" >&2
       return 1
       ;;
   esac
@@ -250,5 +275,5 @@ ntt_pinned_package_id() {
 
 # ntt_requires_custody_party <ntt-version>: NttGovernance and NttManager have the signatory nttCustody.
 ntt_requires_custody_party() {
-  [[ "$1" == "0.5.0" ]]
+  [[ "$1" == "0.6.1" ]]
 }

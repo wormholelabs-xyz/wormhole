@@ -159,6 +159,47 @@ check_case "ntt_requires_custody_party 0.6.1" 0 - - ntt_requires_custody_party 0
 check_case "ntt_requires_custody_party 0.5.0" 1 - - ntt_requires_custody_party 0.5.0
 check_case "ntt_requires_custody_party 0.3.4" 1 - - ntt_requires_custody_party 0.3.4
 
+readonly HEX_32_BYTES="000000000000000000000000e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+# Columns: case | type name | hex | expected status | expected stdout ("-" for an error) | stderr fragment
+readonly BYTE_VARIANT_JSON_CASES=(
+  "NttManagerAddress|NttManagerAddress|$HEX_32_BYTES|0|{\"tag\":\"NttManagerAddress\",\"value\":\"$HEX_32_BYTES\"}|-"
+  "one byte|EncodedVaa|01|0|{\"tag\":\"EncodedVaa\",\"value\":\"01\"}|-"
+  "empty hex|EncodedVaa||1|-|not lowercase hex of whole bytes"
+  "odd hex length|EncodedVaa|010|1|-|not lowercase hex of whole bytes"
+  "uppercase hex|UniversalAddress|${HEX_32_BYTES^^}|1|-|not lowercase hex of whole bytes"
+  "0x prefix|UniversalAddress|0x$HEX_32_BYTES|1|-|not lowercase hex of whole bytes"
+  "type name with a space|Ntt Manager|01|1|-|type name"
+  "empty type name||01|1|-|type name"
+)
+for byte_variant_case in "${BYTE_VARIANT_JSON_CASES[@]}"; do
+  IFS='|' read -r case_name type_name hex_text expected_status expected_stdout stderr_fragment <<<"$byte_variant_case"
+  check_case "byte_variant_json $case_name" "$expected_status" "$expected_stdout" "$stderr_fragment" \
+    byte_variant_json "$type_name" "$hex_text"
+done
+# Columns: case | type name | variant JSON | expected status | expected stdout ("-" for an error) | stderr fragment
+readonly BYTE_VARIANT_HEX_CASES=(
+  "EmitterAddress|EmitterAddress|{\"tag\":\"EmitterAddress\",\"value\":\"$HEX_32_BYTES\"}|0|$HEX_32_BYTES|-"
+  "keys in another order|MessagePayload|{\"value\":\"9c23\",\"tag\":\"MessagePayload\"}|0|9c23|-"
+  "another tag|NttManagerAddress|{\"tag\":\"EmitterAddress\",\"value\":\"$HEX_32_BYTES\"}|1|-|is not the variant {tag: NttManagerAddress"
+  "plain hex text|EmitterAddress|\"$HEX_32_BYTES\"|1|-|is not the variant {tag: EmitterAddress"
+  "extra key|EmitterAddress|{\"tag\":\"EmitterAddress\",\"value\":\"01\",\"x\":1}|1|-|is not the variant {tag: EmitterAddress"
+  "uppercase value|EmitterAddress|{\"tag\":\"EmitterAddress\",\"value\":\"AB\"}|1|-|is not the variant {tag: EmitterAddress"
+  "empty value|EmitterAddress|{\"tag\":\"EmitterAddress\",\"value\":\"\"}|1|-|is not the variant {tag: EmitterAddress"
+  "null|EmitterAddress|null|1|-|is not the variant {tag: EmitterAddress"
+  "not JSON|EmitterAddress|not json|1|-|is not the variant {tag: EmitterAddress"
+)
+for byte_variant_case in "${BYTE_VARIANT_HEX_CASES[@]}"; do
+  IFS='|' read -r case_name type_name variant_json expected_status expected_stdout stderr_fragment <<<"$byte_variant_case"
+  check_case "byte_variant_hex $case_name" "$expected_status" "$expected_stdout" "$stderr_fragment" \
+    byte_variant_hex "$type_name" "$variant_json"
+done
+readonly WORMHOLE_MESSAGE_0_12='{"registrar": "guardianGovernance::1220aa", "owner": "guardianGovernance::1220aa", "emitterId": "3", "sequence": "0", "nonce": "0", "consistencyLevel": "0", "payload": {"tag": "MessagePayload", "value": "9c23bd3b0102"}}'
+check_case "message_summary reads the MessagePayload variant" 0 \
+  '{"registrar":"guardianGovernance::1220","owner":"guardianGovernance::1220","emitterId":"3","sequence":"0","nonce":"0","consistencyLevel":"0","payloadPrefix":"9c23bd3b","payloadBytes":6}' - \
+  message_summary "$WORMHOLE_MESSAGE_0_12"
+check_case "message_summary of a plain hex payload" 5 - - \
+  message_summary '{"registrar": "r", "owner": "o", "emitterId": "3", "sequence": "0", "nonce": "0", "consistencyLevel": "0", "payload": "9c23"}'
+
 NTT_CONTRACTS="$work_dir/contracts/ntt-contracts.json"
 mkdir -p "$work_dir/contracts"
 check_case "record_ntt_json without a contracts file" 1 - "does not exist" record_ntt_json burnMint '{"user": "u"}'
