@@ -34,11 +34,12 @@
 -- signatory design closes it: @guardianGovernance@ co-signs every node (inherited
 -- from the 'ReplayRootRegistry' anchor at the root, from the archived parent at
 -- splits — never per consume), and claiming a root requires the consumer's authority,
--- so nobody can archive, re-create, or fork someone ELSE'S scope. Against the
--- consumer ITSELF there is deliberately no defense: minting parallel roots is
--- self-harm (see 'ReplayRootRegistry'), the same class as any signatory being
--- able to unmake its own state. When @consumer == guardianGovernance@ (NTT),
--- guardianGovernance alone signs.
+-- so nobody can archive, re-create, or fork someone ELSE'S scope. A second root
+-- for one (consumer, namespace) fails: 'ClaimReplayRoot' consumes
+-- 'claimedRootDigest' in the claimed-roots tree of guardianGovernance (namespace
+-- 'claimedRootsNamespace', consumer guardianGovernance). This also binds code
+-- that runs with inherited guardianGovernance authority (NTT). When
+-- @consumer == guardianGovernance@ (NTT), guardianGovernance alone signs.
 --
 -- OFF-LEDGER: consumers locate the covering node via a disclosure service — an
 -- ACS index over (consumer, namespace, prefix), untrusted for safety (a wrong or
@@ -147,6 +148,38 @@ template ReplayNode
             case lookup (T.take 1 (hexTextOf suffix)) childCids of
               Some childCid -> pure childCid
               None -> abort "unreachable: split lost the covering child"
+
+-- | Namespace of the claimed-roots tree. One tree per guardianGovernance, with
+-- @consumer == guardianGovernance@. Claims of this namespace fail.
+claimedRootsNamespace : Text
+claimedRootsNamespace = "wormhole-core:replay-roots"
+
+claimedRootDomainTag : Text
+claimedRootDomainTag = "wormhole-core:replay-root-claim"
+
+-- | Key of @(consumer, namespace)@ in the claimed-roots tree:
+--
+-- > keccak256( utf8(tag) ‖ lp(utf8(consumer)) ‖ lp(utf8(namespace)) )
+--
+-- @lp@ is the 4-byte big-endian length prefix ('lenPrefixed'); it makes the
+-- preimage injective over pairs.
+claimedRootDigest : Party -> Text -> VaaDigest
+claimedRootDigest consumer namespace
+  | T.length namespace < replayNamespaceMinLength = error "claimedRootDigest: empty namespace"
+  | otherwise =
+      let digest = parseHexBytesAsOrAbort @VaaDigest (keccak256Bytes
+            (utf8Bytes claimedRootDomainTag
+              <> unLenPrefixed (lenPrefixed (utf8Bytes (partyToText consumer)))
+              <> unLenPrefixed (lenPrefixed (utf8Bytes namespace))))
+      in if checkHexValueIsWellFormed digest then digest else error "claimedRootDigest: malformed digest"
+
+-- | True if @node@ covers @digest@ and holds its suffix.
+checkReplayNodeRecordsDigest : ReplayNode -> VaaDigest -> Bool
+checkReplayNodeRecordsDigest node digest =
+  let digestHex = hexTextOf digest
+      prefixHex = hexTextOf node.prefix
+  in prefixHex `T.isPrefixOf` digestHex
+       && Set.member (parseHexTextOrAbort @DigestNibbleSuffix (T.drop (T.length prefixHex) digestHex)) node.consumed
 
 -- | Nibbles in a 'VaaDigest'.
 digestNibbleCount : Int

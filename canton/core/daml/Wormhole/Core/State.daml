@@ -839,23 +839,20 @@ template EmitterRegistry
 
 -- | Hands out replay-trie roots to any consumer that asks — a stateless anchor
 -- whose nonconsuming claim lends guardianGovernance's INHERITED co-signature to
--- consumer-submitted claims (the 'RegisterEmitter' pattern): no contention, and
--- a disclosure blob cacheable until 'SetClaimFee' or 'ReplaceReplayRootRegistryFeeAdmin'
--- replaces it. One per guardianGovernance, created at genesis
+-- consumer-submitted claims (the 'RegisterEmitter' pattern), and a disclosure
+-- blob cacheable until 'SetClaimFee' or 'ReplaceReplayRootRegistryFeeAdmin'
+-- replaces it. Concurrent claims contend on the covering claimed-roots node
+-- (the 'Wormhole.Core.Replay' retry protocol). One per guardianGovernance, created at genesis
 -- ('mkInitialReplayRootRegistry'). Lives here rather than in
 -- 'Wormhole.Core.Replay' because its claim fee is charged through the 'CoreState'
 -- (which references 'ReplayNode' — an import cycle otherwise).
 --
--- There is deliberately NO one-root-per-(consumer, namespace) enforcement:
--- maintaining a single trie per scope is the CONSUMER'S responsibility. The
--- controller keeps that sound against everyone else — claiming a root for
--- @consumer@ needs @consumer@'s authority, so nobody can fork another's replay
--- scope (the @namespace@ is a free-form sub-scope UNDER that authority, not a
--- claim anyone else can contest). Parallel roots under one scope can only be
--- minted by the consumer itself, which is self-harm (see
--- 'Wormhole.Core.Replay'). Spam claims cost the spammer per-transaction traffic,
--- the 'claimFee', and the guardian participants ~300 B per worthless root; no
--- shared contract grows.
+-- One root per (consumer, namespace): each claim consumes 'claimedRootDigest' in
+-- the claimed-roots tree of guardianGovernance, so a repeated pair fails with
+-- @digest already consumed@. Claiming a root for @consumer@ needs @consumer@'s
+-- authority, so nobody can claim another party's scope. Spam claims cost the
+-- spammer per-transaction traffic, the 'claimFee', ~300 B per root and one
+-- suffix in the claimed-roots tree, which splits like every replay tree.
 template ReplayRootRegistry
   with
     guardianGovernance : Party  -- signatory; CoreState authenticity anchor,
@@ -912,6 +909,8 @@ template ReplayRootRegistry
         feeAllocation  : Optional (ContractId Allocation, ExtraArgs)
         -- The claim aborts unless this registry's guardianGovernance is this party.
         expectedGuardianGovernance : Party
+        -- Node of the claimed-roots tree that covers 'claimedRootDigest' of the pair.
+        claimedRootsNodeCid : ContractId ReplayNode
       controller consumer, payer
       do
         assertMsg "replay root registry guardianGovernance mismatch"
@@ -920,6 +919,18 @@ template ReplayRootRegistry
           (T.length namespace >= replayNamespaceMinLength)
         assertMsg "replay namespace exceeds 128 chars"
           (T.length namespace <= replayNamespaceMaxLength)
+        assertMsg "replay namespace is reserved for the core" (namespace /= claimedRootsNamespace)
+        claimedRootsNode <- fetch claimedRootsNodeCid
+        assertMsg "claimed roots node guardianGovernance mismatch"
+          (claimedRootsNode.guardianGovernance == guardianGovernance)
+        assertMsg "claimed roots node consumer mismatch" (claimedRootsNode.consumer == guardianGovernance)
+        assertMsg "claimed roots node namespace mismatch" (claimedRootsNode.namespace == claimedRootsNamespace)
+        -- Runs with the registry's guardianGovernance authority, the ConsumeDigest controller.
+        let pairDigest = claimedRootDigest consumer namespace
+        recordingNodeCid <- exercise claimedRootsNodeCid ConsumeDigest with digest = pairDigest
+        recordingNode <- fetch recordingNodeCid
+        assertMsg "claimed roots tree did not record the pair" (checkReplayNodeRecordsDigest recordingNode pairDigest)
+        assertMsg "claimed roots tree changed namespace" (recordingNode.namespace == claimedRootsNamespace)
         -- Zero-fee claims skip the CoreState; fee'd ones charge through it. The
         -- gg pin runs BEFORE the charge and rejects a shadow CoreState under a
         -- rogue gg, so the claim fee cannot be redirected (see README §4.2).
