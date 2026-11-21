@@ -41,8 +41,8 @@ func TestParseVAARequestClaimedRootDigest(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := parseVAARequest(strings.Fields(testCase.commandLine))
-			require.ErrorContains(t, err, testCase.expectedErrorMessage)
+			_, parseErr := parseVAARequest(strings.Fields(testCase.commandLine))
+			require.ErrorContains(t, parseErr, testCase.expectedErrorMessage)
 		})
 	}
 
@@ -90,8 +90,8 @@ func TestParseVAARequestNttNamespace(t *testing.T) {
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, err := parseVAARequest(strings.Fields(testCase.commandLine))
-			require.ErrorContains(t, err, testCase.expectedErrorMessage)
+			_, parseErr := parseVAARequest(strings.Fields(testCase.commandLine))
+			require.ErrorContains(t, parseErr, testCase.expectedErrorMessage)
 		})
 	}
 }
