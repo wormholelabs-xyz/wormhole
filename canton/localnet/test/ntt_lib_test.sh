@@ -139,21 +139,24 @@ done
 
 # name|version|expected status|expected package id
 readonly NTT_PIN_CASES=(
-  "ntt 0.5.0|0.5.0|0|449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e"
+  "ntt 0.6.1|0.6.1|0|37753fce5b8069ada4dd56523e36fe5e0abe86be784d49854e014ec248f0c3fc"
+  "replaced 0.6.0 on core 0.12.0|0.6.0|1|-"
+  "replaced 0.5.0 on core 0.9.0|0.5.0|1|-"
   "retired 0.3.4 on core 0.8.3|0.3.4|1|-"
   "retired 0.4.2 on core 0.8.3|0.4.2|1|-"
   "retired 0.3.2 on core 0.8.0|0.3.2|1|-"
   "retired 0.4.0 on core 0.8.0|0.4.0|1|-"
   "unknown version|0.4.1|1|-"
   "empty version||1|-"
-  "version with suffix|0.5.0-rc1|1|-"
+  "version with suffix|0.6.1-rc1|1|-"
 )
 for pin_case in "${NTT_PIN_CASES[@]}"; do
   IFS='|' read -r case_name pin_version expected_status expected_package_id <<<"$pin_case"
   check_case "ntt_pinned_package_id $case_name" "$expected_status" "$expected_package_id" - ntt_pinned_package_id "$pin_version"
 done
-check_case "ntt_pinned_package_id names the pinned versions" 1 - "pinned versions: 0.5.0" ntt_pinned_package_id 9.9.9
-check_case "ntt_requires_custody_party 0.5.0" 0 - - ntt_requires_custody_party 0.5.0
+check_case "ntt_pinned_package_id names the pinned versions" 1 - "pinned versions: 0.6.1" ntt_pinned_package_id 9.9.9
+check_case "ntt_requires_custody_party 0.6.1" 0 - - ntt_requires_custody_party 0.6.1
+check_case "ntt_requires_custody_party 0.5.0" 1 - - ntt_requires_custody_party 0.5.0
 check_case "ntt_requires_custody_party 0.3.4" 1 - - ntt_requires_custody_party 0.3.4
 
 NTT_CONTRACTS="$work_dir/contracts/ntt-contracts.json"
@@ -238,14 +241,20 @@ check_case "pinned core id is not the withdrawn 0.8.1 4a214c80" 0 - - \
   test "$pinned_core_package_id" != "$CORE_0_8_1_PACKAGE_ID"
 check_case "pinned core id is not the withdrawn 0.8.2 132d32bf" 0 - - \
   test "$pinned_core_package_id" != "$CORE_0_8_2_PACKAGE_ID"
-check_case "pinned ntt id is 0.5.0 449925fb" 0 - - \
-  test "$pinned_ntt_package_id" == "449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e"
+check_case "pinned ntt id is 0.6.1 37753fce" 0 - - \
+  test "$pinned_ntt_package_id" == "37753fce5b8069ada4dd56523e36fe5e0abe86be784d49854e014ec248f0c3fc"
+check_case "pinned ntt id is not the replaced 0.6.0 79a1cc2c" 0 - - \
+  test "$pinned_ntt_package_id" != "79a1cc2c865653eafc03a39a2d81ed0f8bdafb86aa2cc7e9d3f17464faeb9536"
+check_case "pinned ntt id is not the replaced 0.5.0 449925fb" 0 - - \
+  test "$pinned_ntt_package_id" != "449925fb667ed1169fac61165fa236a03cc798a6b873bbc0c605ea062961d62e"
 check_case "pinned ntt id is not the replaced 0.5.0 build 9e08a8e6" 0 - - \
   test "${pinned_ntt_package_id:0:8}" != "9e08a8e6"
-check_case "default ntt pin version" 0 - - test "$pinned_ntt_version" == "0.5.0"
-check_case "pinned wormhole-genesis id is 0.1.0 7e9ca47a" 0 - - \
-  test "$pinned_genesis_package_id" == "7e9ca47aadda9bb3828d37a2844b1ee57ae77fa3151f3aecb84d66267e6c44d4"
-check_case "pinned wormhole-genesis version" 0 - - test "$pinned_genesis_version" == "0.1.0"
+check_case "default ntt pin version" 0 - - test "$pinned_ntt_version" == "0.6.1"
+check_case "pinned wormhole-genesis id is 0.2.1 8af94ec5" 0 - - \
+  test "$pinned_genesis_package_id" == "8af94ec56cd660812074f23437bbd798e1c13c6be18f512437a413bd9775096c"
+check_case "pinned wormhole-genesis version" 0 - - test "$pinned_genesis_version" == "0.2.1"
+check_case "pinned wormhole-genesis id is not the replaced 0.1.0 7e9ca47a" 0 - - \
+  test "$pinned_genesis_package_id" != "7e9ca47aadda9bb3828d37a2844b1ee57ae77fa3151f3aecb84d66267e6c44d4"
 check_case "pinned wormhole-genesis id is not the replaced build a64efec9" 0 - - \
   test "$pinned_genesis_package_id" != "a64efec90ef24be6b6533a62d4aaf6863e0aa8fa05ffe3ed6735c0bab295bd81"
 check_case "pinned wormhole-genesis id is not the replaced build cbb432d7" 0 - - \

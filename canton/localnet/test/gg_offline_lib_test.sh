@@ -100,11 +100,16 @@ readonly PARAMETERS
 check_case "first genesis: exact parameters JSON" 0 "$(jq -cn --arg gg "$GG" --arg fee "$FEE_CUSTODY" --arg ntt "$NTT_CUSTODY" \
   --arg admin "$OPERATOR" --arg dso "$DSO" --arg address "$GUARDIAN_ADDRESS" --arg publicKey "$GUARDIAN_PUBLIC_KEY" '{
     guardianGovernance: $gg, feeCustody: $fee, nttCustody: $ntt, onboardingFeeAdmin: $admin,
-    genesisGuardianSet: {guardianSetIndex: "0", guardians: [{address: $address, publicKey: $publicKey}]}, governanceChainId: "1",
-    governanceContract: "0000000000000000000000000000000000000000000000000000000000000004", initialMessageFee: "0",
-    feeInstrument: {admin: $dso, id: "Amulet"}, registrationFee: "0", replayRootClaimFee: "0", firstEmitterId: "0",
-    firstNttManagerId: "0", consumedCoreGovernanceDigests: [], consumedNttGovernanceDigests: [],
+    genesisGuardianSet: {guardianSetIndex: "0", guardians: [{address: {tag: "GuardianAddress", value: $address},
+      publicKey: {tag: "GuardianPublicKey", value: $publicKey}}]}, governanceChainId: "1",
+    governanceContract: {tag: "EmitterAddress", value: "0000000000000000000000000000000000000000000000000000000000000004"},
+    initialMessageFee: "0", feeInstrument: {admin: $dso, id: "Amulet"}, registrationFee: "0", replayRootClaimFee: "0",
+    firstEmitterId: "0", firstNttManagerId: "0",
+    coreGovernanceReplayRecord: {consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null},
+    nttGovernanceReplayRecord: {consumedGovernance: [], evictedGovernanceMaxTimestampSeconds: null},
     genesisKind: {tag: "FirstGenesis", value: {}}}')" - echo "$PARAMETERS"
+check_case "first genesis: no 0.1.0 consumed digest list" 0 false - \
+  jq -c 'has("consumedCoreGovernanceDigests") or has("consumedNttGovernanceDigests")' <<<"$PARAMETERS"
 
 OFFER="$(genesis_offer_arguments "$OPERATOR" "$PARAMETERS")"
 readonly OFFER
@@ -126,11 +131,13 @@ check_case "genesis_offer_arguments: parameters not JSON" 1 - "genesis parameter
 readonly ACCEPT_GENESIS_CASES=(
   "offer equals the agreed parameters|$OFFER|$PARAMETERS|0|-"
   "offer keys in another order|$(jq -c '{parameters, operator}' <<<"$OFFER")|$(jq -cS . <<<"$PARAMETERS")|0|-"
-  "mismatched guardian address|$OFFER|$(jq -c --arg address "$SECOND_GUARDIAN_ADDRESS" '.genesisGuardianSet.guardianAddresses = [$address]' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
+  "mismatched guardian address|$OFFER|$(jq -c --arg address "$SECOND_GUARDIAN_ADDRESS" '.genesisGuardianSet.guardians[0].address.value = $address' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
+  "guardian address as plain text|$OFFER|$(jq -c '.genesisGuardianSet.guardians[0].address |= .value' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched guardian set index|$OFFER|$(jq -c '.genesisGuardianSet.guardianSetIndex = "1"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched onboarding fee admin|$OFFER|$(jq -c --arg admin "$RELAYER" '.onboardingFeeAdmin = $admin' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched first emitter id|$OFFER|$(jq -c '.firstEmitterId = "7"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
-  "mismatched consumed core digests|$OFFER|$(jq -c '.consumedCoreGovernanceDigests = ["'"$(printf 'ab%.0s' $(seq 1 32))"'"]' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
+  "mismatched core replay record digests|$OFFER|$(jq -c '.coreGovernanceReplayRecord.consumedGovernance = [[{tag: "VaaDigest", value: "'"$(printf 'ab%.0s' $(seq 1 32))"'"}, "1"]]' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
+  "mismatched NTT replay record floor|$OFFER|$(jq -c '.nttGovernanceReplayRecord.evictedGovernanceMaxTimestampSeconds = "1"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "mismatched genesis kind|$OFFER|$(jq -c '.genesisKind.tag = "ReGenesisReplacing"' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "agreed parameters with an extra key|$OFFER|$(jq -c '. + {operator: "x"}' <<<"$PARAMETERS")|1|genesis offer parameters differ from the agreed parameters"
   "offer with an extra key|$(jq -c '. + {observers: []}' <<<"$OFFER")|$PARAMETERS|1|genesis offer keys are not exactly operator and parameters"
