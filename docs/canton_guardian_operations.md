@@ -433,6 +433,11 @@ To unvet a package is to remove the vetting of that package from your participan
 2. Do not use automatic vetting for packages that are not Splice packages.
 3. Record each vetting change with the package ID, the date and the reason.
 4. Do not vet or unvet a package in an LSU freeze window.
+5. Vet no package whose code runs with `gg` authority and can create a `ReplayNode` or exercise `ClaimReplayRoot` with `consumer = gg`.
+   The `gg` claimed-roots tree binds only `ClaimReplayRoot`.
+   Such code can create a `ReplayNode` with `consumer = gg` in the namespace of a live deployment.
+   That opens a second trie, so one inbound VAA can mint or release two times.
+   Such code can also claim the pair of a future deployment first. Then that registration fails.
 
 ### 6.2 Package classes
 
@@ -779,7 +784,9 @@ Before the ceremony:
 5. Make sure that each guardian participant vets the agreed package IDs of `wormhole-core`, `ntt`, `wormhole-genesis` and `token-cip0056`.
 6. Make sure that your participant vets no other `wormhole-core` package.
 7. Get the agreed parameter file from the genesis coordinator. Compare each value with your own record.
-8. Make sure that your participant shows no active `CoreState` of your `gg`. The ledger cannot detect a second first genesis.
+8. For a first genesis, make sure that your participant shows no active `CoreState`, `EmitterRegistry`, `NttGovernance` or claimed-roots `ReplayNode` of your `gg`.
+   The ledger cannot detect a second first genesis. One `gg` has one `FirstGenesis`: this is a guardian rule.
+   Each first genesis creates a claimed-roots tree. Two first geneses of one `gg` make two trees, and a registration then registers one time in each tree.
 
 Check the offer:
 
@@ -815,6 +822,8 @@ After genesis:
 3. Make sure that your participant shows exactly one `ReplayRootRegistry`. Its only signatory is `gg`.
 4. Make sure that your participant shows exactly one `NttGovernance`. Its signatories are `gg` and `nttCustody`.
 5. Make sure that your participant shows exactly one `CoinFactory` with the admin `gg`.
+   Make sure that your participant shows exactly one `ReplayNode` with the consumer `gg` and the namespace `wormhole-core:replay-roots`.
+   This node is the root of the `gg` claimed-roots tree. `AcceptGenesis` returns it as `claimedRootsNodeCid`.
    Record the `rootIdentity` of the `NttGovernance`. Compare it with the value that each other guardian records.
 6. Make sure that the operator is a signatory or an observer of none of these contracts.
 7. Run [`emitter_id_scan.sh`](../canton/tools/emitter_id_scan.sh) with begin offset 0 and `EXPECT_ACTIVE_REGISTRIES=1`.
